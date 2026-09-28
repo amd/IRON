@@ -5,6 +5,7 @@ import dataclasses
 from dataclasses import field
 from typing import Any
 
+import aie.utils as aie_utils
 import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern, TensorTiler2D
@@ -27,7 +28,6 @@ from iron.common import (
     param,
     select,
 )
-from iron.common.kernels import target_arch
 from iron.common.testing import Case, Testing
 from iron.common.tiling import legalize, limits
 
@@ -75,7 +75,8 @@ _EXTENSIVE = [
 def _cases(cls):
     # aie2's mm kernels block m by 4 r (mm_aie2.h), not aie2p's 2 r: an
     # 8-row tile does not compile there.
-    min_tile_m = 16 if target_arch() == "aie2" else 1
+    dev = aie_utils.ensure_current_device(required=True)
+    min_tile_m = 16 if dev.arch is AIEArch.AIE2 else 1
     out = []
     for rows, extensive in ((_REGULAR, False), (_EXTENSIVE, True)):
         for M, K, N, cols, b_col_maj, c_col_maj, m, k, n in rows:
@@ -199,7 +200,7 @@ class GEMM(Operator):
         return kernels.mm.mac_dims(
             self.dtype_in,
             self.dtype_out,
-            arch=target_arch(dev),
+            device=dev,
             emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
         )
 
@@ -369,10 +370,11 @@ class GEMM(Operator):
         # Runtime parameters: [K_div_k, n_tiles_per_core] per core
         rtps = [
             [
-                target.rtp(
+                Buffer(
                     np.ndarray[(2,), np.dtype[np.int32]],
                     name=f"rtp{row}_{col}",
                     initial_value=np.zeros(2, dtype=np.int32),
+                    use_write_rtp=True,
                 )
                 for col in range(n_aie_cols)
             ]
@@ -750,7 +752,7 @@ class GEMM(Operator):
 
     # -- host-side helpers ---------------------------------------------------
 
-    def ops(self, target) -> int:
+    def ops(self) -> int:
         return 2 * self.M * self.K * self.N
 
     def reference(self, A, B):
@@ -766,7 +768,7 @@ class GEMM(Operator):
         C = np.matmul(A.astype(np.float32), b.astype(np.float32)).astype(A.dtype)
         return C.T if self.c_col_maj else C
 
-    def tolerance(self, target) -> Tolerance:
+    def tolerance(self) -> Tolerance:
         """Each element of C within the roundings the design makes, in
         units of 2^-8 of what each rounds. A conversion to bf16 is off by
         less than 2 units even truncating: 2 of ``|A| @ |B|`` for C's own,

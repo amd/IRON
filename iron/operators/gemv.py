@@ -7,8 +7,8 @@ from typing import Any, ClassVar
 
 import aie.dialects.index as index
 import numpy as np
-from aie.dialects.aie import T
-from aie.iron import ObjectFifo, Worker
+from aie.dialects.aie import AIEArch, T
+from aie.iron import Buffer, ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, linalg
 from aie.utils.verify import Tolerance
@@ -26,7 +26,6 @@ from iron.common import (
     optional,
     param,
 )
-from iron.common.kernels import target_arch
 from iron.common.testing import Case, Testing
 from iron.common.tiling import Access, bank_elements, granule_elements, limits
 
@@ -204,11 +203,9 @@ class GEMV(Operator):
         leave each column a whole number of tiles of M; the tiles follow
         from K, not from the device.
         """
-        if self.epilogue == "gelu" and dev is not None and target_arch(dev) != "aie2p":
+        if self.epilogue == "gelu" and dev.arch is not AIEArch.AIE2p:
             # gelu_tile_bf16 is exported by gelu_aie2p.h alone.
-            raise Unresolvable(
-                f"GEMV's gelu epilogue is aie2p-only; got {target_arch(dev)}"
-            )
+            raise Unresolvable(f"GEMV's gelu epilogue is aie2p-only; got {dev.arch}")
         rows = self.tile_size_input or (2 if self.K <= bank_elements(bfloat16) else 1)
         tile = self.tile_size_output or max(rows, 2)
         unit = math.lcm(tile, rows)
@@ -304,7 +301,11 @@ class GEMV(Operator):
             [self.tiles.param] * cols
             if dynamic
             else [
-                target.rtp(np.ndarray[(1,), np.dtype[np.int32]], name=f"tiles_{i}")
+                Buffer(
+                    np.ndarray[(1,), np.dtype[np.int32]],
+                    name=f"tiles_{i}",
+                    use_write_rtp=True,
+                )
                 for i in range(cols)
             ]
         )
@@ -483,7 +484,7 @@ class GEMV(Operator):
                         c_tap = C_coalesced[col] if coalesce else C_taps[col][w]
                         rt.drain(self.C.lane(col), c_tap, group=tg_ac, wait=True)
 
-    def ops(self, target) -> int:
+    def ops(self) -> int:
         return 2 * self.M * self.K * self.num_batches
 
     def reference(self, A, B):
@@ -503,7 +504,7 @@ class GEMV(Operator):
             C = (a @ b.reshape(A.shape[-1])).astype(A.dtype)
         return activation.gelu_ref(C) if self.epilogue == "gelu" else C
 
-    def tolerance(self, target) -> Tolerance:
+    def tolerance(self) -> Tolerance:
         """The gate GEMV's sweeps hold: C accumulates in f32 and rounds
         once, and the GELU epilogue's tanh approximation adds its own.
         Tighter than linalg.mv's contract, the C++ matmul harness's 0.05

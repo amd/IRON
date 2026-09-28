@@ -100,5 +100,5 @@ def test_swiglu_prefill_stream(k, npu_runtime):
     )
     record_metric("Latency", elapsed_us)
     record_metric("Bandwidth", total_bytes / (elapsed_us * 1e-6) / 1e9)
-    ops = sum(op.op_count() for op, *_ in operator.runlist)
+    ops = sum(op.resolved().ops() for op, *_ in operator.runlist)
     record_metric("Throughput", ops / (elapsed_us * 1e-6) / 1e9)

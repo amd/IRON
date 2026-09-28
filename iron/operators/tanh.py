@@ -9,5 +9,5 @@ from iron.common import UnaryElementwise
 class Tanh(UnaryElementwise):
     """AIE-accelerated Tanh activation function."""
 
-    def kernel(self, target):
+    def kernel(self):
         return activation.tanh(self.tile_size)

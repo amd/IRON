@@ -17,7 +17,7 @@ import dataclasses
 
 import aie.utils as aie_utils
 import numpy as np
-from aie.iron import ObjectFifo, Worker, kernels
+from aie.iron import Buffer, ObjectFifo, Worker, kernels
 from aie.iron.controlflow import range_
 from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
@@ -166,7 +166,9 @@ class RoPE(Operator):
             nm for nm, d in (("lut_rows", dyn_lut), ("rows_per_lut", dyn_rows)) if not d
         ]
         rtp_ty = np.ndarray[(max(1, len(static)),), np.dtype[np.int32]]
-        counts = [target.rtp(rtp_ty, name=f"counts_{i}") for i in range(n)]
+        counts = [
+            Buffer(rtp_ty, name=f"counts_{i}", use_write_rtp=True) for i in range(n)
+        ]
         params = [
             p
             for p, d in (
@@ -223,7 +225,7 @@ class RoPE(Operator):
             self.rows_per_lut.bind(counts, static.index("rows_per_lut"))
         return workers
 
-    def ops(self, target) -> int:
+    def ops(self) -> int:
         kernel = kernels.datamovement.rope(self.cols, two_halves=self.method_type == 0)
         return kernel.contract.ops_per_call * self.rows
 

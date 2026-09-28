@@ -18,6 +18,7 @@ per-choice breakdown against the shipped FastFlowLM overlay
 """
 
 import dataclasses
+from pathlib import Path
 from typing import Any, ClassVar, NamedTuple
 
 import aie.utils as aie_utils
@@ -33,6 +34,7 @@ from aie.iron import (
     Bd,
     Buffer,
     DmaChannel,
+    ExternalFunction,
     Flow,
     Lock,
     ObjectFifo,
@@ -44,6 +46,7 @@ from aie.iron import (
 from aie.iron.controlflow import range_
 from aie.iron.dataflow.objectfifo import StreamDims
 from aie.iron.device import Tile
+from aie.utils.config import aie_kernels_dir
 from ml_dtypes import bfloat16
 
 from iron.common import (
@@ -402,14 +405,7 @@ class GEMM(Operator):
             f"_em{self.epilogue_mask:x}.o"
         )
 
-    def kernel_source(self, target):
-        # fused_mm_tile.cc, since mm_fused.h is a header. The whole-tile entry
-        # point it adds is never called, so the link drops it, but it also
-        # compiles out the per-step event0/event1 markers. On aie2 it includes
-        # lut_based_ops.cpp itself, for tanh's tables.
-        return target.kernels_dir / "fused" / "fused_mm_tile.cc"
-
-    def kernel_flags(self, target) -> list[str]:
+    def kernel_flags(self) -> list[str]:
         """The -D set fused_mm_tile.cc is compiled with."""
         flags = [
             f"-DMM_FUSED_TILE_M={M_TILE}",
@@ -476,13 +472,20 @@ class GEMM(Operator):
         # Declared by hand rather than from aie.iron.kernels.fused_mm: that
         # factory compiles in one epilogue mode (this overlay selects among
         # several at runtime) and always rounds to nearest-even.
+        # fused_mm_tile.cc, since mm_fused.h is a header. The whole-tile entry
+        # point it adds is never called, so the link drops it, but it also
+        # compiles out the per-step event0/event1 markers. On aie2 it includes
+        # lut_based_ops.cpp itself, for tanh's tables.
+        source = Path(aie_kernels_dir()) / "fused" / "fused_mm_tile.cc"
+
         def fused_kernel(name, arg_types):
-            return target.kernel(
+            return ExternalFunction(
                 name,
-                arg_types,
-                source=self.kernel_source(target),
-                compile_flags=self.kernel_flags(target),
+                source_file=str(source),
+                arg_types=arg_types,
+                compile_flags=self.kernel_flags(),
                 object_file_name=self.kernel_object,
+                digest_prefix=True,
             )
 
         acc_init = fused_kernel("mm_fused_acc_init", [ct_acc_ty])
@@ -691,10 +694,11 @@ class GEMM(Operator):
         ]
         rtps = [
             [
-                target.rtp(
+                Buffer(
                     np.ndarray[(rtp_words,), np.dtype[np.int32]],
                     name=f"rtp_{r}_{c}",
                     initial_value=np.zeros(rtp_words, dtype=np.int32),
+                    use_write_rtp=True,
                 )
                 for c in range(COLS)
             ]
@@ -1214,7 +1218,7 @@ class GEMM(Operator):
         """Elements (bf16) or bytes (bfp16ebs8) that ``pack_B`` returns."""
         return packed_b_size(K, N, bool(self._tuned.bfp16_b))
 
-    def ops(self, target) -> int:
+    def ops(self) -> int:
         return 2 * self.M * self.K * self.N
 
     def reference(self, A, B):

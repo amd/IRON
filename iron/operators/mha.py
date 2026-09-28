@@ -610,9 +610,10 @@ class MHA(Operator):
         # every buffer and sets every barrier.
         mha_rtps_list = [
             [
-                target.rtp(
+                Buffer(
                     np.ndarray[(4,), np.dtype[np.int32]],
                     name=f"mha_rtpss_{i}_stage{j}",
+                    use_write_rtp=True,
                 )
                 for i in range(num_pipelines)
             ]
@@ -730,7 +731,7 @@ class MHA(Operator):
 
         return matmul_workers + softmax_workers + matmul_pv_workers
 
-    def ops(self, target) -> int:
+    def ops(self) -> int:
         """Q K^T and its product with V, causal: half of each, per head."""
         return 2 * self.num_heads * self.seq_len**2 * self.d
 

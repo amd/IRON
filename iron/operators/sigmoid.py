@@ -9,5 +9,5 @@ from iron.common import UnaryElementwise
 class Sigmoid(UnaryElementwise):
     """AIE-accelerated Sigmoid activation function."""
 
-    def kernel(self, target):
+    def kernel(self):
         return activation.sigmoid(self.tile_size)

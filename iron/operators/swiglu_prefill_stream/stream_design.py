@@ -27,6 +27,7 @@ from pathlib import Path
 import stream
 import torch
 from aie import ir
+from aie.utils.config import aie_kernels_dir
 from stream.api import optimize_allocation_co
 
 from iron.operators.swiglu_prefill_stream import reference
@@ -392,7 +393,6 @@ def load_group(
     embedding_dim,
     hidden_dim,
     npu,
-    kernels_dir,
 ):
     """Generate the ``k``-group design once and return one group's aie module.
 
@@ -407,7 +407,7 @@ def load_group(
     clears when it begins generating; one built earlier is discarded and its
     object never compiled.
     """
-    renames = declare_group_kernels(group_index, k=k, kernels_dir=kernels_dir)
+    renames = declare_group_kernels(group_index, k=k)
     text = _group_text(
         group_index,
         k=k,
@@ -419,13 +419,12 @@ def load_group(
     return region_module(text, renames=renames)
 
 
-def declare_group_kernels(group_index, *, k, kernels_dir) -> dict:
+def declare_group_kernels(group_index, *, k) -> dict:
     """Compile every kernel this group runs; return the symbol renames forced.
 
     The registry is the single place a kernel's source, compile flags and
     symbol names are declared, so the object and the generated design agree.
     """
-    from iron.common.kernels import target_arch
     from iron.operators.swiglu_prefill_stream.stream.ops import ELTWISE_MUL, GEMM, SILU
 
     tiles = gemm_tiles(k)
@@ -436,15 +435,13 @@ def declare_group_kernels(group_index, *, k, kernels_dir) -> dict:
         SILU: (SILU, None),
         MUL: (ELTWISE_MUL, None),
     }
-    kernels_dir = Path(kernels_dir)
-    kernel_dir = target_arch()
+    kernels_dir = Path(aie_kernels_dir())
     renames = {}
     layers = GROUP_LAYERS[k][group_index]
     for kernel, shape in dict.fromkeys(per_layer[layer] for layer in layers):
         renames.update(
             kernel.declare_kernels(
                 kernels_dir,
-                kernel_dir,
                 **(dict(zip("mkn", shape)) if shape else {}),
             )
         )

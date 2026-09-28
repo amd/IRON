@@ -23,11 +23,11 @@ from dataclasses import dataclass
 from typing import Callable
 
 import torch
+from aie.iron import ExternalFunction
 from onnx import defs
 from onnxscript import opset18
 from onnxscript.values import Op, Opset
 
-from iron.common.kernels import declare_kernel
 from iron.operators.swiglu_prefill_stream.layout import TiledStridedLayout, tiled_2d
 
 # Intrinsic MAC tile dimensions of the aie2p kernels stream-dse targets. The
@@ -80,7 +80,7 @@ def elementwise_layouts(
     return (tiled_2d(*ELEMENTWISE_TILE, mac_rows(bfp16_mmul), T),) * nb_operands
 
 
-def _gemm_declare(kernels_dir, kernel_dir, m: int, k: int, n: int):
+def _gemm_declare(kernels_dir, m: int, k: int, n: int):
     """Compile ``mm.cc`` for one tile shape, and say what its symbols became.
 
     stream-dse emits dimension-suffixed symbols so GEMMs of different tile
@@ -99,19 +99,18 @@ def _gemm_declare(kernels_dir, kernel_dir, m: int, k: int, n: int):
     suffix = f"{m}_{k}_{n}"
     prefix = f"mm{suffix}"
     zero_source = kernels_dir / "zero" / "zero.cc"
-    declare_kernel(
+    ExternalFunction(
         # Unused as a declaration: stream-dse emits the func.func this design
         # links against, so ExternalFunction is here only to compile the source
-        # with these flags into this object.
+        # with these flags into this object. The generated MLIR names the
+        # object and, through the map returned below, the symbols: both must
+        # be exactly as given, so no digest prefix.
         "matmul_bf16_bf16",
-        [],
-        source=kernels_dir / "linalg" / "mm.cc",
+        source_file=str(kernels_dir / "linalg" / "mm.cc"),
+        arg_types=[],
         object_file_name=f"mm_{suffix}.o",
         symbol_prefix=prefix,
-        # The generated MLIR names the object and, through the map returned
-        # below, the symbols: both must be exactly as given.
-        digest_prefix=False,
-        bundled_sources=(zero_source,),
+        bundled_sources=[str(zero_source)],
         compile_flags=[
             f"-DDIM_M={m}",
             f"-DDIM_K={k}",
@@ -148,7 +147,7 @@ class StreamKernel:
     subdir: str | None = None
     declare: Callable | None = None  # overrides source/subdir when tile-specialized
 
-    def declare_kernels(self, kernels_dir, kernel_dir, **kwargs) -> dict:
+    def declare_kernels(self, kernels_dir, **kwargs) -> dict:
         """Compile this kernel, and return any symbol renames it forces.
 
         Called from inside the design, not the operator: an ExternalFunction
@@ -157,15 +156,15 @@ class StreamKernel:
         never compiled.
         """
         if self.declare is not None:
-            return self.declare(kernels_dir, kernel_dir, **kwargs)
+            return self.declare(kernels_dir, **kwargs)
+        assert self.source is not None and self.subdir is not None, self.key
         # No prefix: stream-dse's generated MLIR already calls these by the
         # names the source defines, so renaming them would break the link.
-        declare_kernel(
+        ExternalFunction(
             self.source,
-            [],
-            source=kernels_dir / self.subdir / f"{self.source}.cc",
+            source_file=str(kernels_dir / self.subdir / f"{self.source}.cc"),
+            arg_types=[],
             object_file_name=f"{self.source}.o",
-            digest_prefix=False,
         )
         return {}
 

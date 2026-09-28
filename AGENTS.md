@@ -187,7 +187,7 @@ reuse lint
 
 2. **AIE Kernels** ([mlir-aie `aie_kernels/`](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels))
    - C++ compute kernels, sourced from the installed mlir-aie package
-     (`iron.common.kernels.kernels_dir()`), not from this repo. Operators get
+     (`aie.utils.config.aie_kernels_dir()`), not from this repo. Operators get
      them from mlir-aie's kernel factories (`aie.iron.kernels`), each of which
      returns an `ExternalFunction` carrying its source, flags, symbol and
      argument types, and in `.contract` the reference it computes, the
@@ -202,7 +202,8 @@ reuse lint
    - `declare/`: the declaration layer (`Operator`, `param`/`auto`,
      operands, `Value`, `Scratchpad`/`DispatchTime`, `Xclbin`, inference)
    - `design/`, `tiling.py`, `external.py`: the library-owned build: the
-     `Target` a design declares kernels against, the derived runtime
+     `Target` an array is built against (its device, image, barriers and
+     registered objects), the derived runtime
      sequence, legal DMA descriptors, the shipped-image path
    - `graph/`: graphs (`iron.Graph`, `iron.state`) and
      `compile(dev, boundaries=, image=)`
@@ -210,8 +211,6 @@ reuse lint
      allocator, fusion, the seam onto mlir-aie's `CompilableDesign`, the
      runtime callables and the record of what a compiled image consists of
    - `elementwise.py`: the shared elementwise array and its operand shapes (flat, binary, rowwise)
-   - `kernels.py`: `kernels_dir()` and `declare_kernel`, for a kernel the
-     factories do not cover
    - `harness.py`: the device test harness (`vectors`; `run_test`, timed with
      `aie.utils.benchmark.run_iters`; `verify_buffer`, a wrapper over
      mlir-aie's `aie.utils.verify.compare`; `record_metric`)
@@ -268,7 +267,7 @@ xclbin (NPU binary) + insts.bin (instruction sequence)
 ```
 
 **No build context.** An operator takes the device that is current and
-nothing else. Everything else is a fixed path (`iron.common.kernels.kernels_dir()`), an
+nothing else. Everything else is a fixed path (`aie.utils.config.aie_kernels_dir()`), an
 environment choice (`MLIR_AIE_KERNEL_SOURCES`), or a keyword on the build
 itself (`compile(record="disk")`). On a host without an NPU, bind one to
 resolve and compile against: `aie_utils.set_current_device(from_name("npu2",
@@ -338,8 +337,9 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    - a `Value(derive=...)` for every trip count the core reads, so the
      array never depends on the extent; what else the array bakes is
      `param(..., array=True)`
-   - `array(target)`: build ObjectFIFOs and Workers (`target.kernel(...)`,
-     `target.rtp(...)`, `target.barrier()`), `range_()` for loops, and
+   - `array(target)`: build ObjectFIFOs and Workers (`self.kernel()` or a
+     factory's `ExternalFunction`, `Buffer(..., use_write_rtp=True)` for a
+     runtime parameter, `target.barrier()`), `range_()` for loops, and
      `self.x.lane(i).bind(fifo.prod())` / `self.count.bind(rtps)` for every
      member. It sees the array tier alone: reading an extent raises
    - `compatible()` for divisibility against the resolved tunables
@@ -361,16 +361,20 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    its elements alone and the operator declares no `kernel_call` or
    `reference` of its own; a field it passes is `param(..., array=True)`.
    Bind a further symbol of the same object with
-   `fn.object_file.bind(symbol, arg_types)`. `target.kernel(...)` declares
-   a kernel the factories do not cover (one whose compile flags are the
-   operator's own, like flm's `fused_mm_tile.cc`) and, with `source_text=`, one
-   written in the operator's own file (the hello-world in
+   `fn.object_file.bind(symbol, arg_types)`. A kernel the factories do not
+   cover is an `ExternalFunction(..., digest_prefix=True)` of mlir-aie's
+   (one whose compile flags are the operator's own, like flm's
+   `fused_mm_tile.cc`, from `aie_kernels_dir()`): the digest of its source
+   and flags prefixes its symbols and object, so two configurations of it
+   link into one image. With `source_string=` it is one written in the
+   operator's own file (the hello-world in
    `iron/tests/toolchain/inline_kernel.py`: a `vadd` in C++ text, the
    argument types the operands' tiles). Give such a kernel its
    `contract=KernelContract(roles=, parameter_bindings=, reference=)` and
    it is used like a factory's. An operator running one kernel
-   reports its contract from `tolerance(target)` (`Elementwise` does this
-   from `kernel(target)`). If a new C++ compute kernel is needed, add it
+   reports its contract from `tolerance()` (`Elementwise` does this
+   from `kernel()`); both, like `ops()`, are asked of the resolved
+   operator, `op.resolved().tolerance()`. If a new C++ compute kernel is needed, add it
    to the
    [mlir-aie kernel library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels)
    with a factory in `aie.iron.kernels`; IRON hosts no kernels
@@ -381,13 +385,13 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 5. Give the operator a `reference(*inputs)` only where its kernel's contract
    is not already it (numpy, on the declared shapes: upcast to float32,
    compute, round once; from the contract references of the kernels it
-   runs where it can), and an `ops(target)` where one operation per output
+   runs where it can), and an `ops()` where one operation per output
    element is not its count (`2 * M * K * N` for GEMM, 0 for a data mover):
    `run_test` records throughput from it
 6. Declare how it is tested: `test = Testing(cases, tolerance=)` on the
    operator class, from `iron.common.testing`
    - leave `tolerance` out to be judged by the contract of the kernel the
-     operator runs (`Operator.reference_tolerance()`); give an
+     operator runs (`Operator.tolerance()`); give an
      `aie.utils.verify.Tolerance` where that is not the right gate
    - the cases are `Case(kwargs, extensive=...)` or plain kwarg dicts, or a
      callable returning them when they follow the device's width;
@@ -602,7 +606,7 @@ op = Tanh(size=2048, num_aie_columns=1, num_channels=1, tile_size=2048)
 
 # Dispatch, and compare every output with op.reference() on the drawn inputs
 # under the tolerance contract of the kernel the operator runs ...
-run = run_test(op, vectors(op), tolerance=op.reference_tolerance())
+run = run_test(op, vectors(op), tolerance=op.resolved().tolerance())
 assert not run.errors, run.errors
 
 # ... or under an explicit one.
@@ -686,11 +690,11 @@ logging.basicConfig(level=logging.DEBUG)
 **"Kernel not found" or "Symbol not defined"**
 
 - Verify the kernel `.cc` exists under the installed mlir-aie package's
-  `include/aie_kernels/<family>/` (`iron.common.kernels.kernels_dir()`,
+  `include/aie_kernels/<family>/` (`aie.utils.config.aie_kernels_dir()`,
   overridden by `MLIR_AIE_KERNEL_SOURCES`)
 - Ensure the kernel's C++ signature matches the factory from
   `aie.iron.kernels` (or `bind()`'s argument types), or the
-  `target.kernel(...)` declaration, that the operator's `array()` names
+  `ExternalFunction` declaration, that the operator's `array()` names
 
 **Compilation hangs or fails**
 
@@ -704,7 +708,7 @@ logging.basicConfig(level=logging.DEBUG)
 - Verify reference implementation matches NPU kernel exactly
 - Look for memory alignment issues in C++ kernel
 - Check which tolerance the test judges by: the kernel's contract
-  (`op.reference_tolerance()`) unless the test passes `tolerance=`
+  (`op.resolved().tolerance()`) unless the test passes `tolerance=`
 
 **Dimension mismatch errors**
 

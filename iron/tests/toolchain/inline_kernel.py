@@ -12,6 +12,7 @@ any other, the kernel compiled from the text.
 """
 
 import numpy as np
+from aie.iron import ExternalFunction
 from aie.iron.kernels import KernelContract, Param
 from aie.utils.compile.jit.markers import In, Out
 from ml_dtypes import bfloat16
@@ -35,14 +36,20 @@ extern "C" void vadd(bfloat16 *a, bfloat16 *b, bfloat16 *y, int n) {
 class VectorAdd(BinaryElementwise):
     """y = a + b."""
 
-    def kernel(self, target):
+    def kernel(self):
         tiles = [self.a.tile, self.b.tile, self.y.tile, np.int32]
         contract = KernelContract(
             roles=(In, In, Out, Param),
             parameter_bindings=((3, self.tile_size),),
             reference=lambda a, b: a + b,
         )
-        return target.kernel("vadd", tiles, source_text=VADD, contract=contract)
+        return ExternalFunction(
+            "vadd",
+            source_string=VADD,
+            arg_types=tiles,
+            contract=contract,
+            digest_prefix=True,
+        )
 
 
 def test_an_inline_kernel_lowers(device, tmp_path):

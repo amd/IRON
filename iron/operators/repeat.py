@@ -130,7 +130,7 @@ class Repeat(Operator):
                 size_by={dim: self.value(f"{word}_y")} if bound else None,
             )
 
-    def ops(self, target) -> int:
+    def ops(self) -> int:
         return 0  # a data mover: its figure is bandwidth
 
     def reference(self, x):

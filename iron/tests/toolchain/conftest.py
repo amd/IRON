@@ -36,8 +36,9 @@ def device(request):
 @pytest.fixture
 def npu2():
     previous = aie_utils.get_current_device()
-    aie_utils.set_current_device(DEVICES["npu2"]())
-    yield
+    dev = DEVICES["npu2"]()
+    aie_utils.set_current_device(dev)
+    yield dev
     aie_utils.set_current_device(previous)
 
 

@@ -9,6 +9,7 @@ from aie.iron.device import from_name
 
 import iron
 from iron.common import Incompatible, UnaryElementwise, Unresolvable
+from iron.common.design.build import build_design
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.relu import ReLU
 
@@ -28,7 +29,7 @@ def test_the_refusals_name_what_to_change():
     with pytest.raises(Incompatible, match="give a tile_size= or num_aie_columns="):
         ReLU(size=1000).resolved(NPU2)
     with pytest.raises(Unresolvable, match="none is bound and none was given"):
-        ReLU(size=1024).resolved(None)
+        ReLU(size=1024).resolve(None)  # what resolved() asks on a host with no device
 
 
 def test_the_trip_count_is_a_resident_the_build_writes():
@@ -38,11 +39,16 @@ def test_the_trip_count_is_a_resident_the_build_writes():
     lines = op.explain().splitlines()
     assert lines[0].endswith("(resolved)") and "tile_size=512" in lines[1]
     assert lines[-1] == "  count: written once per build, 1 here"
+    # The preamble writes it into each core's runtime-parameter buffer.
+    one_core = ReLU(size=2560, num_aie_columns=1, tile_size=256)
+    assert "aiex.npu.rtp_write(@count_0, 0, %c10_i32)" in str(
+        build_design(NPU2, one_core)
+    )
 
 
 def test_an_operator_written_by_inheritance_inherits_the_sweep():
     class Neg(UnaryElementwise):
-        def kernel(self, target):
+        def kernel(self):
             raise NotImplementedError
 
         def reference(self, x):

@@ -9,5 +9,5 @@ from iron.common import BinaryElementwise
 class ElementwiseMul(BinaryElementwise):
     """AIE-accelerated element-wise multiplication."""
 
-    def kernel(self, target):
+    def kernel(self):
         return eltwise.mul_sized(self.tile_size)

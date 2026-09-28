@@ -64,7 +64,7 @@ def test_operator(cls: type[Operator], declaration: Testing, case: Case, npu_run
         pytest.skip(str(e))
     draw = declaration.draw
     extra = draw(op) if callable(draw) else (draw or {})
-    tolerance = declaration.tolerance or op.reference_tolerance()
+    tolerance = declaration.tolerance or op.tolerance()
     if tolerance is None:
         raise ValueError(
             f"{cls.__name__} runs no kernel with a tolerance contract; "

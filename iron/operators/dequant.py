@@ -67,5 +67,5 @@ class Dequant(UnaryElementwise):
         packed = (op.tile_size // 2) + (op.tile_size // self.group_size) * 2
         return dataclasses.replace(op, in_tile=packed)
 
-    def kernel(self, target):
+    def kernel(self):
         return datamovement.expand(self.tile_size, self.group_size)

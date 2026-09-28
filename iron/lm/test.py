@@ -42,7 +42,7 @@ def _errors(net, step):
     """
     inputs = [_read(net, h) for h in step.inputs]
     (output,) = [_read(net, h) for h in step.outputs]
-    tolerance = step.op.reference_tolerance()
+    tolerance = step.op.resolved().tolerance()
     bound = tolerance.bound(*inputs) if tolerance.kind == "bound" else None
     name = type(step.op).__name__
     expected = step.op.reference(*inputs)
@@ -64,7 +64,7 @@ def test_swiglu(rows, embedding_dim, hidden_dim, npu_runtime):
     net(x)
     record_metric("Latency", elapsed_us)
     record_metric("Bandwidth", 2 * x.nbytes / (elapsed_us * 1e-6) / 1e9)
-    ops = sum(s.op.op_count() for s in net.traced.steps)
+    ops = sum(s.op.resolved().ops() for s in net.traced.steps)
     record_metric("Throughput", ops / (elapsed_us * 1e-6) / 1e9)
 
     # The gate's buffer is dead once SiLU has read it, so the planner may

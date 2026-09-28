@@ -29,7 +29,7 @@ A concrete operator is one small subclass, naming the kernel each core
 calls::
 
     class ReLU(UnaryElementwise):
-        def kernel(self, target):
+        def kernel(self):
             return eltwise.relu_sized(self.tile_size)
 
 Kernels come from :mod:`aie.iron.kernels`: its factories return the
@@ -48,7 +48,7 @@ import dataclasses
 from typing import ClassVar, Self
 
 import numpy as np
-from aie.iron import ObjectFifo, Worker
+from aie.iron import Buffer, ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernel import ExternalFunction
 from aie.utils.verify import Tolerance
@@ -64,8 +64,6 @@ from .declare import (
     auto,
     param,
 )
-from .design.target import Target
-from .kernels import kernels_dir
 from .testing import (
     Testing,
     binary_elementwise_cases,
@@ -156,34 +154,35 @@ class Elementwise(Operator):
 
     # -- the kernel --------------------------------------------------------
 
-    def kernel(self, target: Target) -> ExternalFunction:
+    def kernel(self) -> ExternalFunction:
         """The ``ExternalFunction`` each core calls, over one line.
 
         Usually a factory from :mod:`aie.iron.kernels` at ``self.tile_size``;
-        ``target.kernel(...)`` declares one upstream does not offer. Either
-        way the kernel takes the elements alone: its contract binds the rest.
+        an ``ExternalFunction(..., digest_prefix=True)`` declares one upstream
+        does not offer. Either way the kernel takes the elements alone: its
+        contract binds the rest.
         """
         raise NotImplementedError(f"{type(self).__name__} declares no kernel()")
 
-    def tolerance(self, target: Target) -> Tolerance | None:
+    def tolerance(self) -> Tolerance | None:
         """The contract of the one kernel every core runs; ``None`` for a
         kernel declared without one.
         """
-        contract = self.kernel(target).contract
+        contract = self.kernel().contract
         return None if contract is None else contract.tolerance
 
-    def ops(self, target: Target) -> int:
+    def ops(self) -> int:
         """The contract's count per call, one per output element unless it
         states one, over every line.
         """
-        contract = self.kernel(target).contract
+        contract = self.kernel().contract
         per_call = None if contract is None else contract.ops_per_call
-        return super().ops(target) if per_call is None else per_call * self.lines
+        return super().ops() if per_call is None else per_call * self.lines
 
     def reference(self, *inputs):
         """The kernel contract's reference, line by line: what the cores compute."""
-        op = self.resolved(self.dev)
-        contract = op.kernel(Target(op.dev, kernels_dir())).contract
+        op = self.resolved()
+        contract = op.kernel().contract
         if contract is None or contract.reference is None:
             raise NotImplementedError(
                 f"{type(self).__name__}: its kernel declares no reference; "
@@ -204,7 +203,7 @@ class Elementwise(Operator):
         outs = [s for s in streams if s.direction == "out"]
         n_in = len(ins)
         cores = self.cores
-        kernel = self.kernel(target)
+        kernel = self.kernel()
 
         def slot(k: int) -> str:
             col, chan = divmod(k, self.num_channels)
@@ -229,7 +228,10 @@ class Elementwise(Operator):
         counts = (
             [self.count.param] * cores
             if dynamic
-            else [target.rtp(_I32, name=f"count_{slot(k)}") for k in range(cores)]
+            else [
+                Buffer(_I32, name=f"count_{slot(k)}", use_write_rtp=True)
+                for k in range(cores)
+            ]
         )
         barriers = [target.barrier() for _ in range(cores)]
 

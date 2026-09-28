@@ -7,7 +7,6 @@ import aie.utils as aie_utils
 
 from iron.common import DesignGenerator, from_spec
 from iron.common.image import OperatorSequence
-from iron.common.kernels import kernels_dir
 
 
 def _stream_group(seq_len, embedding_dim, hidden_dim, k, group_index, context):
@@ -40,7 +39,6 @@ def _stream_group(seq_len, embedding_dim, hidden_dim, k, group_index, context):
                 "embedding_dim": embedding_dim,
                 "hidden_dim": hidden_dim,
                 "npu": npu,
-                "kernels_dir": kernels_dir(),
             },
         )
 

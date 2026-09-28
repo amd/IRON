@@ -9,5 +9,5 @@ from iron.common import BinaryElementwise
 class ElementwiseAdd(BinaryElementwise):
     """AIE-accelerated element-wise addition."""
 
-    def kernel(self, target):
+    def kernel(self):
         return eltwise.add_sized(self.tile_size)

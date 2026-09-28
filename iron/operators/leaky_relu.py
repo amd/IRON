@@ -36,7 +36,7 @@ class LeakyReLU(UnaryElementwise):
 
     alpha: float = param(default=0.01, array=True)
 
-    def kernel(self, target):
+    def kernel(self):
         # The factory holds what the line length must satisfy: a whole
         # number of the architecture's vectors (16 on aie2, 32 on aie2p).
         return activation.leaky_relu(self.tile_size, alpha=self.alpha)

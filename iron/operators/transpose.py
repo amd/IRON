@@ -6,7 +6,7 @@ import dataclasses
 
 import aie.utils as aie_utils
 import numpy as np
-from aie.iron import ObjectFifo, Worker
+from aie.iron import Buffer, ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.iron.dataflow.objectfifo import StreamDims
 from aie.iron.kernels import datamovement
@@ -210,7 +210,10 @@ class Transpose(Operator):
             for j in range(chans)
         ]
         i32x3 = np.ndarray[(3,), np.dtype[np.int32]]
-        counts = [target.rtp(i32x3, name=f"counts_{k}") for k in range(n_cores)]
+        counts = [
+            Buffer(i32x3, name=f"counts_{k}", use_write_rtp=True)
+            for k in range(n_cores)
+        ]
         barriers = [target.barrier() for _ in range(n_cores)]
 
         def core_body(of_in, of_out, transpose, counts, barrier):
@@ -275,7 +278,7 @@ class Transpose(Operator):
                         )
                         rt.drain(self.y.lane(k), tap_out, group=tg, wait=True)
 
-    def ops(self, target) -> int:
+    def ops(self) -> int:
         return 0  # a data mover: its figure is bandwidth
 
     def reference(self, x):

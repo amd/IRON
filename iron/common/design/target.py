@@ -1,49 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Target: the device and the kernel tree, as one handle."""
+"""Target: what an operator's array is built against besides itself."""
 
 from __future__ import annotations
 
-from functools import partial
-from pathlib import Path
 from typing import Any
 
-from aie.iron import Buffer, WorkerRuntimeBarrier
-
-from ..kernels import declare_kernel, target_arch
+from aie.iron import WorkerRuntimeBarrier
 
 
 class Target:
     """What an operator's ``array()`` is given besides the operator itself.
 
-    Carries the device and the kernel tree. ``kernel`` is
-    :func:`~iron.common.kernels.declare_kernel`, whose digest prefix keeps
-    kernels apart when designs are fused, whatever else is fused with them;
-    ``rtp`` is a runtime-parameter :class:`~aie.iron.Buffer`; ``register``
-    hands the build what the Runtime must be told of explicitly.
+    The device, the image the array is built for, and what the build must
+    be told of: the barriers the preamble releases and the objects
+    ``register`` hands the Runtime.
     """
 
-    def __init__(
-        self,
-        dev,
-        kernels_dir,
-        trace_size: int = 0,
-        image: str = "elf",
-    ):
+    def __init__(self, dev, image: str = "elf"):
         self.dev = dev
-        self.kernels_dir = Path(kernels_dir)
-        self.arch = target_arch(dev)  # "aie2" | "aie2p"
-        self.trace_size = trace_size
         # "elf": per-call values reach the array through the parameter
         # scratchpad. "xclbin": an xclbin run has none; they are dispatch-
         # time scalars of the sequence, and a core-read value is a resident
         # the sequence writes (bind it to the runtime-parameter buffer).
         self.image = image
-        # The function itself rather than a method: a method would restate
-        # every declare_kernel parameter, and would have to track them.
-        self.kernel = declare_kernel
-        self.rtp = partial(Buffer, use_write_rtp=True)
         self.barriers: list[Any] = []
         self.registered: list[Any] = []
 

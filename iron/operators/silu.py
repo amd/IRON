@@ -15,5 +15,5 @@ class SiLU(UnaryElementwise):
     # One channel per column: the LUT-based kernel is sized for it.
     num_channels: int = auto(1, repr=False, init=False)
 
-    def kernel(self, target):
+    def kernel(self):
         return activation.silu_sized(self.tile_size)

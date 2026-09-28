@@ -501,7 +501,7 @@ class SequenceCompareCallable(SequenceXclbinCallable):
         """The tolerance ``op``'s step is judged by."""
         if self.tolerance is not None:
             return self.tolerance
-        tol = op.reference_tolerance()
+        tol = op.resolved().tolerance()
         if tol is None or tol.range_frac is not None:
             return self.FALLBACK_TOLERANCE
         return tol

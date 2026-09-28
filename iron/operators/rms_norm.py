@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import numpy as np
-from aie.iron import ObjectFifo, Worker
+from aie.iron import Buffer, ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise, norm
 from aie.utils.verify import Tolerance
@@ -66,7 +66,7 @@ class RMSNorm(Rowwise):
                 f"the weight row beside each line"
             )
 
-    def kernel(self, target):
+    def kernel(self):
         return norm.rms_norm_eps(self.tile_size, epsilon=self.epsilon)
 
     def reference(self, x, weight=None):
@@ -79,9 +79,9 @@ class RMSNorm(Rowwise):
         y = eltwise.mul_sized(self.tile_size).contract.reference(normed, weight)
         return y.astype(normed.dtype)
 
-    def tolerance(self, target) -> Tolerance | None:
+    def tolerance(self) -> Tolerance | None:
         if not self.weighted:
-            return super().tolerance(target)
+            return super().tolerance()
         # Each kernel is within one ulp of its reference; the product of a
         # row one ulp off is itself up to one ulp off before its own rounding.
         return Tolerance.bf16_ulps(
@@ -98,7 +98,7 @@ class RMSNorm(Rowwise):
         weights_ty = self.weight.tile
         cols, chans = self.num_aie_columns, self.num_channels
         depth = fifo_depth(self.tile_size, self.x.dtype)
-        rms_norm = self.kernel(target)
+        rms_norm = self.kernel()
         eltwise_mul = eltwise.mul_sized(self.tile_size)
         of_ins = [
             ObjectFifo(tile_ty, name=f"in1_{i}_{j}", depth=depth)
@@ -125,7 +125,11 @@ class RMSNorm(Rowwise):
             [self.count.param] * (2 * n_cores)
             if dynamic
             else [
-                target.rtp(np.ndarray[(1,), np.dtype[np.int32]], name=f"count_{k}")
+                Buffer(
+                    np.ndarray[(1,), np.dtype[np.int32]],
+                    name=f"count_{k}",
+                    use_write_rtp=True,
+                )
                 for k in range(2 * n_cores)
             ]
         )

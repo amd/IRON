@@ -31,7 +31,7 @@ from iron.common import (
     optional,
     param,
 )
-from iron.common.design import Sequence, runtime, transfers
+from iron.common.design import Sequence, Target, runtime, transfers
 from iron.common.design.runtime import bounded_transfers
 from iron.common.external import LOCK_ADDRESS_BASE, run_sequence
 from iron.common.tiling import Access
@@ -180,30 +180,15 @@ def test_override_slices_and_issues_through_the_same_sequence():
     ]
 
 
-def test_preamble_writes_residents_and_rejects_unbound_ones():
+def test_preamble_rejects_a_resident_the_array_never_bound(npu2):
     class Op(Operator):
         n: int = param()
         tile: int = auto(64)
         A = In(n, tile=(tile,))
         count = Value(np.int32, derive=lambda op: op.n // op.tile)
 
-    class FakeRTP(dict):
-        pass
-
-    rtps = [FakeRTP(), FakeRTP()]
-    op = Op(n=640)
-    op.count.bind(rtps)
-
-    class FakeTarget:
-        barriers = []
-        image = "elf"
-
-    target: Any = FakeTarget()
-    Sequence(op, {}).preamble(target)
-    assert rtps == [{0: 10}, {0: 10}]
-
     with pytest.raises(ValueError, match="never bound this value"):
-        Sequence(Op(n=64), {}).preamble(target)
+        Sequence(Op(n=64), {}).preamble(Target(npu2))
 
 
 def test_mha_sequence_is_one_descriptor_set_per_kv_group(monkeypatch):

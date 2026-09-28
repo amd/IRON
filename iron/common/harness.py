@@ -289,7 +289,7 @@ def run_test(
     bandwidth_gbps = total_bytes / (latency_us * 1e-6) / 1e9
     record_metric("Latency", latency_us)
     record_metric("Bandwidth", bandwidth_gbps)
-    ops = operator.op_count()
+    ops = operator.resolved().ops()
     if ops:
         record_metric("Throughput", ops / (latency_us * 1e-6) / 1e9)
     print(

@@ -66,7 +66,7 @@ class Testing:
     preconditions: a packed quantization, an angle table).
 
     ``tolerance`` is the gate. Left out, it is the contract of the kernel
-    the operator runs (:meth:`~iron.common.declare.Operator.reference_tolerance`),
+    the operator runs (:meth:`~iron.common.declare.Operator.tolerance`),
     and an operator whose kernel declares none must state one here. An
     operator that only moves data states :meth:`Tolerance.exact`, since any
     other tolerance there also accepts a wrong permutation.

@@ -6,7 +6,7 @@ import dataclasses
 
 import ml_dtypes
 import numpy as np
-from aie.iron import ObjectFifo, Worker
+from aie.iron import Buffer, ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import activation
 from aie.utils.verify import Tolerance
@@ -104,7 +104,9 @@ class Softmax(Operator):
             n for n, d in (("count", dyn_count), ("vector_size", dyn_vs)) if not d
         ]
         rtp_ty = np.ndarray[(max(1, len(static)),), np.dtype[np.int32]]
-        rtps = [target.rtp(rtp_ty, name=f"rtp_{k}") for k in range(n_cores)]
+        rtps = [
+            Buffer(rtp_ty, name=f"rtp_{k}", use_write_rtp=True) for k in range(n_cores)
+        ]
         barriers = [target.barrier() for _ in range(n_cores)]
         per_tile = self.cols
         params = [
@@ -157,7 +159,7 @@ class Softmax(Operator):
             self.vector_size.bind(rtps, static.index("vector_size"))
         return workers
 
-    def tolerance(self, target) -> Tolerance | None:
+    def tolerance(self) -> Tolerance | None:
         return activation.softmax(self.cols).contract.tolerance
 
     def reference(self, x, vector_size=None):

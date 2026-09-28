@@ -13,7 +13,6 @@ from aie.utils.verify import Tolerance
 
 from iron.common.design.build import build_design
 from iron.common.harness import run_test, vectors
-from iron.common.kernels import kernels_dir
 from iron.operators import GEMM as GenericGEMM
 from iron.operators.flm.gemm.design import (
     BFP16_GROUP,
@@ -262,7 +261,7 @@ def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N):
     column.
     """
     npu2 = from_name("npu2", n_cols=8)
-    mlir = str(build_design(npu2, kernels_dir(), GEMM(M=M, K=K, N=N)))
+    mlir = str(build_design(npu2, GEMM(M=M, K=K, N=N)))
     assert "aie.objectfifo @B" not in mlir
     assert "bd_id" not in mlir
     assert "aiex.set_lock" in mlir

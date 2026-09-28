@@ -12,5 +12,5 @@ class ReLU(UnaryElementwise):
 
     test = Testing(channeled_unary_cases(), draw=dict(centered=("x",)))  # both signs
 
-    def kernel(self, target):
+    def kernel(self):
         return eltwise.relu_sized(self.tile_size)

@@ -22,7 +22,6 @@ from aie.iron import (
 
 from ..declare import Operator
 from ..declare.bound import BoundValue
-from ..kernels import kernels_dir
 from ..tracing import maybe_enable_trace
 from .generator import DesignGenerator
 from .runtime import Sequence
@@ -47,7 +46,6 @@ def device_symbol(op: Operator, value: BoundValue) -> str:
 
 def build_design(
     dev,
-    kernels_dir,
     op: Operator,
     trace_size: int = 0,
     code: str = "",
@@ -68,7 +66,7 @@ def build_design(
         from ..external import build_external
 
         return build_external(dev, op)
-    target = Target(dev, kernels_dir, trace_size, image)
+    target = Target(dev, image)
 
     # Per-call values get their device parameters before the array is built,
     # so a core-read value can be handed to a worker by array().
@@ -182,11 +180,7 @@ def generator_for(op: Operator, image: str = "elf") -> DesignGenerator:
             "image": image,
             "dispatch": dispatch_parameters(op) if image != "elf" else [],
             "code": _design_code(op),
-            # Passed explicitly rather than read from the operator: the
-            # device reaches the cache key by identity, the kernel tree
-            # by path (pointing IRON at another tree changes the key).
             "dev": op.dev,
-            "kernels_dir": kernels_dir(),
             # The operator's own trace request inserts the trace flows; a
             # sequence's trace_size only keeps the lowered module to read.
             "trace_size": op.trace_size,

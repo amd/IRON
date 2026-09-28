@@ -33,7 +33,6 @@ import numpy as np
 from aie.utils.npukernel import NPUKernel
 from aie.utils.verify import Tolerance
 
-from ..kernels import kernels_dir
 from ..testing import Testing
 from .bound import BoundBuffer, BoundStream, BoundValue
 from .creation import declare
@@ -301,7 +300,7 @@ class Operator(metaclass=_OperatorMeta):
         """Build the array for ``target`` and return its workers.
 
         ``target`` (:class:`iron.common.design.Target`) carries the device,
-        the kernel tree, and ``kernel()``/``rtp()``/``barrier()``. Bind the
+        the image being built, ``barrier()`` and ``register()``. Bind the
         shim end of a fifo to every operand's lane (``self.A.lane(i).bind(
         fifo.prod())``) and every ``Value`` to the buffer a core reads it
         from. Only the array tier is visible here: reading a field no tile
@@ -313,16 +312,19 @@ class Operator(metaclass=_OperatorMeta):
         """Run :meth:`array` for the build, through the array-tier view."""
         return type(self).array(_ArrayView(self), target)  # type: ignore[arg-type]
 
-    def tolerance(self, target) -> Tolerance | None:
-        """The contract of the kernel this array runs; ``None`` when the
-        operator states its own (see :attr:`test`).
+    def tolerance(self) -> Tolerance | None:
+        """How close the NPU output must come to :meth:`reference`: the
+        contract of the kernel this array runs; ``None`` when the operator
+        states its own (see :attr:`test`). Asked of the resolved operator
+        (``op.resolved().tolerance()``), whose tunables it may read.
         """
         return None
 
-    def ops(self, target) -> int:
+    def ops(self) -> int:
         """The arithmetic operations one call performs, for its throughput:
         one per output element unless the operator counts its own, and 0
-        for one that only moves data.
+        for one that only moves data. Asked of the resolved operator, like
+        :meth:`tolerance`.
         """
         return sum(b.elements for b in self.outputs)
 
@@ -440,14 +442,15 @@ class Operator(metaclass=_OperatorMeta):
             (name, getattr(self, name)) for name in self._array_fields
         )
 
-    def resolved(self, dev) -> Self:
-        """This operator resolved for ``dev``: itself if it already is, else
-        :meth:`resolve`'s copy, every tunable filled and :meth:`validate` and
-        :meth:`compatible` checked. Nothing else calls :meth:`resolve`.
+    def resolved(self, dev=None) -> Self:
+        """This operator resolved for ``dev``, the bound device unless given:
+        itself if it already is, else :meth:`resolve`'s copy, every tunable
+        filled and :meth:`validate` and :meth:`compatible` checked. Nothing
+        else calls :meth:`resolve`.
         """
         if self._resolved:
             return self
-        new = self.resolve(dev)
+        new = self.resolve(dev if dev is not None else self.dev)
         if new is self:
             raise TypeError(
                 f"{type(self).__name__}.resolve() must return a copy, "
@@ -710,23 +713,6 @@ class Operator(metaclass=_OperatorMeta):
             **{**infer_kwargs(cls, overrides), **operand_flags(cls, inputs, overrides)},
         )
         return cls(**{**overrides, **values})
-
-    def reference_tolerance(self) -> Tolerance | None:
-        """How close the NPU output must come to :meth:`reference`: the
-        resolved operator's :meth:`tolerance` for this device, ``None`` when
-        it states none.
-        """
-        from ..design.target import (
-            Target,
-        )  # imports this package: a cycle at module scope
-
-        return self.resolved(self.dev).tolerance(Target(self.dev, kernels_dir()))
-
-    def op_count(self) -> int:
-        """The resolved operator's :meth:`ops` for this device."""
-        from ..design.target import Target  # imports this package: see above
-
-        return self.resolved(self.dev).ops(Target(self.dev, kernels_dir()))
 
     # -- the image of one operator on its own -------------------------------
 
