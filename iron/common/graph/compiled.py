@@ -386,29 +386,38 @@ class CompiledGraph:
 
     # -- buffers ---------------------------------------------------------------
 
+    def _buffer_name(self, x) -> str:
+        if isinstance(x, State):
+            return self.traced.states[id(x)][1].name
+        if isinstance(x, Handle):
+            return x.buffer_name
+        if id(x) in self.traced.weights:
+            return self.traced.weights[id(x)][1].name
+        raise KeyError(f"{x!r} is not a state, weight or handle of this graph")
+
     def buffer(self, x):
         """The device buffer of a state, a weight tensor, or a handle."""
-        if isinstance(x, State):
-            name = self.traced.states[id(x)][1].name
-        elif isinstance(x, Handle):
-            name = x.buffer_name
-        elif id(x) in self.traced.weights:
-            name = self.traced.weights[id(x)][1].name
-        else:
-            raise KeyError(f"{x!r} is not a state, weight or handle of this graph")
-        return self.callable.get_buffer(name)
+        return self.callable.get_buffer(self._buffer_name(x))
+
+    def _storage(self, x):
+        """A host-synchronizable flat view that starts with ``x``'s buffer
+        (a slice's own, which is aligned, else the whole of its lines)."""
+        name = self._buffer_name(x)
+        if isinstance(x, Handle) and x.parent is not None:
+            return self.callable.get_buffer(name)
+        return self.callable.get_storage(name)
 
     def write(self, x, tensor) -> None:
         """Copy ``tensor`` into a state's or weight's buffer and push it to the device."""
-        buf = self.buffer(x)
-        _store(buf.numpy_view(), tensor)
+        buf = self._storage(x)
+        _store(buf.numpy_view()[: int(np.prod(x.shape))], tensor)
         buf.to("npu")
 
     def read(self, x):
         """A state's or weight's current contents, as a host tensor of its shape."""
-        buf = self.buffer(x)
+        buf = self._storage(x)
         buf.to("cpu")
-        return buf.numpy().reshape(tuple(x.shape))
+        return buf.numpy()[: int(np.prod(x.shape))].reshape(tuple(x.shape))
 
     def _copy_in(
         self,

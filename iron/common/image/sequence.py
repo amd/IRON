@@ -10,10 +10,9 @@ import aie.utils as aie_utils
 import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.utils import bfp
-from aie.utils.hostruntime.tensor_class import COHERENCE_GRANULE
 
 from ..declare import Operator
-from .allocator import Allocation, ArenaPlan, LiveRange, Pool
+from .allocator import ALIGNMENT, Allocation, ArenaPlan, LiveRange, Pool
 from .artifacts import Artifacts, Design, Step
 from .callable import (
     BF16,
@@ -26,13 +25,6 @@ from .callable import (
 from .fused import FusedImage, XclbinChain
 
 logger = logging.getLogger(__name__)
-
-# Where every buffer in an arena starts. The host reconciles a buffer with the
-# device a coherence granule (a cache line) at a time, so two buffers sharing
-# one cannot be synced independently -- XRTTensor.subview refuses such a view.
-# 64 bytes is also the DDR burst the shim DMA issues, so no transfer starts
-# mid-burst.
-ALIGNMENT = max(64, COHERENCE_GRANULE)
 
 
 def _base_name(buf: str) -> str:

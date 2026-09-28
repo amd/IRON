@@ -19,7 +19,7 @@ from aie.utils.trace import get_trace_buffer
 from aie.utils.verify import Tolerance, compare
 
 from ..declare import Operator
-from .allocator import ArenaPlan
+from .allocator import ALIGNMENT, ArenaPlan, Pool
 
 if TYPE_CHECKING:
     from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
@@ -143,6 +143,11 @@ class SequenceCallable:
             self._buffer_cache[buffer_name] = self._resolve_buffer(buffer_name)
         return self._buffer_cache[buffer_name]
 
+    def get_storage(self, buffer_name):
+        """A flat view the host can synchronize that starts with the buffer:
+        here each buffer is a tensor of its own, so the buffer itself."""
+        return self.get_buffer(buffer_name)
+
     def _iter_steps(self):
         """Yield ``(op, in_names, in_buffers, out_name, out_buffer)`` per runlist step."""
         for step_op, *buf_names in self.op.runlist:
@@ -220,6 +225,7 @@ class SequenceFullELFCallable(SequenceCallable):
         )
         self._handle = None
         self._params = None
+        self._storage_cache = {}
         super().__init__(seq)
 
     @property
@@ -319,6 +325,31 @@ class SequenceFullELFCallable(SequenceCallable):
         self._buffer_cache[buffer_name] = sub
         return sub
 
+    def get_storage(self, buffer_name):
+        """The buffer, and the rest of its last coherence line, as a flat view.
+
+        An exact view of a buffer that does not end on a line cannot be
+        synchronized (:meth:`XRTTensor.subview`). Every buffer starts at a
+        multiple of ``ALIGNMENT``, though, so the rest of its last line is
+        padding no other buffer holds, and a view may take it along.
+        """
+        self._follow_arena()
+        if buffer_name in self.op.slice_info:
+            raise ValueError(f"{buffer_name} is a slice; its parent has the storage")
+        if buffer_name not in self._storage_cache:
+            buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
+            dtype = self.op.buffer_dtype(buffer_name)
+            parent = {
+                "input": self.input_buffer,
+                "output": self.output_buffer,
+                "scratch": self.scratch_buffer,
+            }[buf_type]
+            stop = min(Pool(ALIGNMENT).align(offset + length), parent.nbytes)
+            self._storage_cache[buffer_name] = parent.subview(
+                offset, ((stop - offset) // dtype.itemsize,), dtype
+            )
+        return self._storage_cache[buffer_name]
+
     def _follow_arena(self) -> None:
         """Run against the arena's current buffer, if it grew since the last call."""
         if self.arena is None or self.arena.generation == self._arena_generation:
@@ -326,6 +357,7 @@ class SequenceFullELFCallable(SequenceCallable):
         self.scratch_buffer = self.arena.tensor
         self._arena_generation = self.arena.generation
         self._buffer_cache.clear()
+        self._storage_cache.clear()
 
     def get_buffer(self, buffer_name):
         self._follow_arena()
