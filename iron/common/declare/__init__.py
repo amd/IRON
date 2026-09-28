@@ -57,7 +57,17 @@ from .field import (
     param,
     select,
 )
-from .member import DispatchTime, Extent, In, Out, Scratchpad, Shim, Value, Xclbin
+from .member import (
+    DispatchTime,
+    Extent,
+    In,
+    InOut,
+    Out,
+    Scratchpad,
+    Shim,
+    Value,
+    Xclbin,
+)
 from .operator import Operator
 from .profile import Profile
 
@@ -66,6 +76,7 @@ __all__ = [
     "DispatchTime",
     "Extent",
     "In",
+    "InOut",
     "Incompatible",
     "Operator",
     "Out",

@@ -190,7 +190,12 @@ def run_test(
     # this function uses, and the operator dispatches through DefaultNPURuntime, which
     # is the matching runtime.
     tensor_class = aie_utils.DEFAULT_TENSOR_CLASS
-    ins, outs = iter(inputs.items()), iter(outputs.items())
+    # An inout buffer's expected value is among the outputs, under its name,
+    # but its tensor is the input given: the outputs a buffer is made for
+    # are the others.
+    inout = {b.name for b in operator.buffers if b.direction == "inout"}
+    ins = iter(inputs.items())
+    outs = iter([(n, v) for n, v in outputs.items() if n not in inout])
     args, produced, total_bytes = [], {}, 0
     for b in operator.buffers:
         try:

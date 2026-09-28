@@ -32,6 +32,7 @@ _OPERATOR_MODULES = {
     "RMSNorm": "rms_norm",
     "Repeat": "repeat",
     "RoPE": "rope",
+    "Sample": "sample",
     "Sigmoid": "sigmoid",
     "SiLU": "silu",
     "Softmax": "softmax",

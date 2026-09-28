@@ -219,6 +219,16 @@ class Out(_Buffer):
     direction = "out"
 
 
+class InOut(_Buffer):
+    """A buffer the host fills and the array writes in place: its stream,
+    with ``tile=``, leaves the array, and the sequence writes back only what
+    it drains (a record of the tokens so far, say), leaving the rest as the
+    host gave it. A call takes it as an input and returns it.
+    """
+
+    direction = "inout"
+
+
 class _Stream(_Member["BoundStream"]):
     """An operand's stream into or out of the array, in tile units.
 
