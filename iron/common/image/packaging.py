@@ -15,7 +15,9 @@ kernels); otherwise ``elf``. Asking for ``elf`` where a rule forbids it is
 an error naming the member, the boundaries or the device.
 
 What the lowering builds today: ``elf`` is the fused ELF, ``xclbin``
-with ``each_step`` is the chained per-operator xclbin. A fused sequence
+with ``each_step`` is the chained per-operator xclbin, and an xclbin a rule
+forces (NPU1, a ``DispatchTime`` value) takes ``each_step`` when no
+boundaries are given. A fused sequence
 in an xclbin (and dispatches of several steps on it) has no proven
 construction and is refused rather than built wrong; a draft is shelved on
 the branch ``claude/iron-pr215-step5-extras``. An xclbin run has no
@@ -69,6 +71,13 @@ def plan(dev, traced, boundaries=None, image: str | None = None) -> Plan:
         forced.append(
             f"{names}: a DispatchTime value; the sequence is generated per call"
         )
+    # NPU1's lack of full-ELF dispatch is inferred from source, not tested on
+    # hardware. IRON's ELF carries .pdi sections, and XRT sends any such ELF
+    # as ERT_START_NPU_PREEMPT_ELF (XRT 2.25 xrt_elf.cpp:1031-1041); the
+    # amdxdna driver refuses that opcode unless the firmware has AIE2_PREEMPT
+    # (2.25 aie2_message.c:1006-1009), which npu1's feature table never lists
+    # (npu1_regs.c:68-72; npu4_regs.c:96 does). To verify: let AIE2 through
+    # here and run a full-ELF test on an npu1 machine.
     if dev.arch is not AIEArch.AIE2p:
         forced.append(f"{dev.name} ({dev.arch}) has no full-ELF dispatch")
     if boundaries is not None:
@@ -82,6 +91,12 @@ def plan(dev, traced, boundaries=None, image: str | None = None) -> Plan:
     if image is not None:
         chosen = image
     reasons = forced or ["one sequence, one configuration set: a full ELF"]
+
+    # A forced xclbin with no boundary choice takes the one xclbin form that
+    # is built; asking for an xclbin outright still names what is missing.
+    if chosen == XCLBIN and boundaries is None and forced:
+        boundaries = each_step
+        reasons = forced + [f"boundaries={each_step}: the xclbin form that is built"]
 
     if chosen == ELF:
         dispatch = "fused"

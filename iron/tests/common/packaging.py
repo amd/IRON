@@ -53,11 +53,21 @@ def test_the_architecture_decides_not_the_name():
         plan(NPU1Col1(), _traced(), image=ELF)
 
 
+def test_a_forced_xclbin_defaults_to_each_step():
+    p = plan(NPU1(), _traced())
+    assert (p.image, p.dispatch) == (XCLBIN, "separate")
+    assert p.reasons == [
+        "npu1 (AIE2) has no full-ELF dispatch",
+        "boundaries=each_step: the xclbin form that is built",
+    ]
+    p = plan(NPU2(), _traced(Value("n", "dispatch", np.int32)))
+    assert (p.image, p.dispatch) == (XCLBIN, "separate")
+    assert plan(NPU1(), _traced(), image=XCLBIN).dispatch == "separate"
+
+
 def test_boundaries_force_xclbin_and_the_unbuilt_forms_are_named():
     with pytest.raises(NotImplementedError, match="no proven construction"):
         plan(NPU2(), _traced(), image=XCLBIN)  # one fused sequence in an xclbin
-    with pytest.raises(NotImplementedError, match="no proven construction"):
-        plan(NPU1(), _traced())  # the NPU1 default needs a boundary choice today
     p = plan(NPU2(), _traced(), boundaries=each_step)
     assert (p.image, p.dispatch) == (XCLBIN, "separate")
     assert p.reasons == ["boundaries=each_step: more than one dispatch"]

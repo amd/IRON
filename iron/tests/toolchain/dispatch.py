@@ -15,13 +15,14 @@ both devices; running them on a device is the other half.
 
 from pathlib import Path
 
+import aie.utils as aie_utils
 import numpy as np
 
 import iron
 from iron.common import Scratchpad
 from iron.operators.copy import Copy
 from iron.operators.softmax import Softmax
-from iron.tests.toolchain.tools import requires
+from iron.tests.toolchain.tools import DEVICES, requires
 
 pytestmark = requires("xclbinutil", "peano")
 
@@ -73,3 +74,19 @@ def test_values_become_dispatch_time_kernels_at_each_step(device):
     assert symbols == {d.dispatch_params[0] for d in designs.values()}
     assert net.image is not None and Path(net.image).stat().st_size > 0
     assert net._callable is None
+
+
+def test_npu1_compiles_each_step_unasked():
+    """NPU1 has no full-ELF dispatch, so a plain ``compile()`` there takes
+    the xclbin form that is built, one dispatch per step."""
+    g, shape = _graph()
+    previous = aie_utils.get_current_device()
+    dev = DEVICES["npu1"]()
+    aie_utils.set_current_device(dev)
+    try:
+        net = g.compile(dev, x=shape)
+    finally:
+        aie_utils.set_current_device(previous)
+    assert net.plan.image == "xclbin" and net.plan.dispatch == "separate"
+    assert net.plan.reasons[-1] == "boundaries=each_step: the xclbin form that is built"
+    assert net.image is not None and Path(net.image).stat().st_size > 0
