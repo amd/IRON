@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+import iron
 from iron.common.graph.narrowing import CostTable, JointNarrowing
 
 from .checkpoint import Checkpoint, Layout, load_weights
@@ -59,13 +60,16 @@ class Runner:
         )
         self.tokenizer = self.open_tokenizer(tokenizer_path)
 
-    def npu(self, cost_table: Path | None = None) -> CausalLM:
+    def npu(
+        self, cost_table: Path | None = None, boundaries: str | None = None
+    ) -> CausalLM:
         """The model compiled and loaded, weights uploaded. With a
         ``cost_table`` (:mod:`.tune`) its decode step's designs are narrowed
-        and packed by it."""
+        and packed by it; ``boundaries`` are its decode step's
+        (:meth:`~.decoder.CausalLM.load`)."""
         model = self.model(self.config, self.weights)
         tuner = None if cost_table is None else JointNarrowing(CostTable(cost_table))
-        return model.load(self.checkpoint.release, tuner)
+        return model.load(self.checkpoint.release, tuner, boundaries)
 
     def cpu(self) -> Oracle:
         """The model's oracle, its weights widened (float32 is twice bf16)."""
@@ -136,9 +140,17 @@ def main(runner: type[Runner], description: str):
         help="narrow and pack the decode step's designs by this measured cost "
         "table (iron.lm.tune); default: as the profile gives them",
     )
+    parser.add_argument(
+        "--each-step",
+        action="store_true",
+        help="dispatch every step of a decode step on its own from one xclbin, "
+        "as NPU1 does; the prompt then runs a token at a time",
+    )
     args = parser.parse_args()
     if args.compare_host and not args.device_loop:
         parser.error("--compare-host compares the --device-loop run")
+    if args.device_loop and args.each_step:
+        parser.error("--device-loop needs a full-ELF decode step, not --each-step")
 
     try:
         config = dataclasses.replace(runner.config, max_seq_len=args.max_seq_len)
@@ -151,7 +163,12 @@ def main(runner: type[Runner], description: str):
             f"a {len(tokens)}-token prompt and {args.num_tokens} more exceed "
             f"{run.config.max_seq_len} rows"
         )
-    model = run.npu(args.cost_table)
+    model = run.npu(args.cost_table, iron.each_step if args.each_step else None)
+    if args.device_loop and not model.full_elf:
+        parser.error(
+            "--device-loop needs a full-ELF decode step, which this device "
+            "(NPU1) has not"
+        )
     if model.tuning is not None:
         print("[Tuning] decode:\n" + model.tuning.report(), flush=True)
 

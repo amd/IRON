@@ -9,8 +9,10 @@ compiled and loaded once for the module and every test calls it
 in-process.
 """
 
+import aie.utils as aie_utils
 import pytest
 
+import iron
 from iron.lm.llama3.model import Runner
 from iron.lm.testing import (
     check_accuracy,
@@ -34,6 +36,30 @@ def runner():
     return Runner(WEIGHTS, TOKENIZER)
 
 
+# KL(fp32 CPU || NPU), teacher-forced over 40 steps. The graphs measure a
+# mean of 0.0083 and a p90 of 0.018; over 140 positions of prompt.txt the
+# p90 is 0.017. The largest step is prefill at 0.091, one of two positions
+# of the 140 above 0.05. Decode attention over unmasked KV-cache slots
+# measured 9.2.
+MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.2}
+
+
+# The form NPU1 runs: the decode step alone, each of its steps its own
+# dispatch of one xclbin, and the prompt fed through it a token at a time. A
+# shorter run than the full ELF's, since every step is a host round trip.
+# Its own model, built and dropped here, first: after any other test it
+# would be held beside the module's full-ELF one.
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_llama_3_2_1b_each_step_accuracy(runner, record_property):
+    model = runner.npu(boundaries=iron.each_step)
+    assert not model.full_elf
+    try:
+        check_accuracy(runner, model, MAX_KL, 20, 256, record=record_property)
+    finally:
+        if aie_utils.DefaultNPURuntime is not None:
+            aie_utils.DefaultNPURuntime.cleanup()
+
+
 @pytest.mark.parametrize(
     "prompt_len,num_tokens",
     [(p, n) for p in (1024, 13) for n in (40, 1)],
@@ -47,14 +73,6 @@ def test_llama_3_2_1b(runner, model, prompt_len, num_tokens, record_property):
 # same seed its text is the host loop's. The figures are the device loop's.
 def test_llama_3_2_1b_device_loop(runner, model, record_property):
     check_device_loop(runner, model, 1024, 100, record=record_property)
-
-
-# KL(fp32 CPU || NPU), teacher-forced over 40 steps. The graphs measure a
-# mean of 0.0083 and a p90 of 0.018; over 140 positions of prompt.txt the
-# p90 is 0.017. The largest step is prefill at 0.091, one of two positions
-# of the 140 above 0.05. Decode attention over unmasked KV-cache slots
-# measured 9.2.
-MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.2}
 
 
 def test_llama_3_2_1b_accuracy(runner, model, record_property):

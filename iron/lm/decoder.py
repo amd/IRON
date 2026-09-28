@@ -34,6 +34,12 @@ one scratch arena (:mod:`iron.common.graph.compiled`): the weights and the
 caches are uploaded once, and the caches a prompt writes are the ones the
 next decode step reads.
 
+Where the decode step is not a full ELF -- NPU1, which has no full-ELF
+dispatch, or ``boundaries=each_step`` -- it is the only version: every step
+of it is its own dispatch of one xclbin, and only a full ELF addresses the
+arena, so no prompt version could share its caches. A prompt then runs
+through it a token at a time, and there is no device loop.
+
 :class:`Oracle` is the same model's float32 forward pass on the host, the
 reference it is judged by; a model subclasses it too, with a numpy
 ``layer`` and ``head``, and names it as its ``oracle``.
@@ -267,16 +273,29 @@ class CausalLM(iron.Graph):
         """
         return dict(x=(rows, self.config.emb_dim)) if rows > 1 else {}
 
-    def load(self, release=None, tuner: JointNarrowing | None = None) -> "CausalLM":
+    def load(
+        self,
+        release=None,
+        tuner: JointNarrowing | None = None,
+        boundaries: str | None = None,
+    ) -> "CausalLM":
         """Compile and load the decode and prompt versions, weights uploaded.
 
         Both before the first call, so the arena is made once at its final
         size. ``release`` is given each piece of each weight once it is on
         the device, to drop the host's pages of it. A ``tuner`` narrows the
         decode step's designs and packs them into shared device
-        configurations by what each costs (:attr:`tuning`).
+        configurations by what each costs (:attr:`tuning`). ``boundaries``
+        is the decode step's (:mod:`iron.common.image.packaging`); where
+        its decode step is not a full ELF, the model has no prompt version
+        (:attr:`full_elf`).
         """
-        decode = self.compile(coresident=tuner, **self.shapes(1))
+        decode = self.compile(coresident=tuner, boundaries=boundaries, **self.shapes(1))
+        if decode.plan.image != iron.ELF:
+            print(decode.plan.report("decode"), flush=True)
+            decode.load(release=release)
+            self._prompt, self._decode = None, decode
+            return self
         # A prompt's carried values start a decode step (generate()), where
         # the image has an Emit to write them with.
         feeds = decode if decode.emit is not None else None
@@ -285,6 +304,14 @@ class CausalLM(iron.Graph):
             version.load(release=release)
         self._prompt, self._decode = prompt, decode
         return self
+
+    @property
+    def full_elf(self) -> bool:
+        """Whether the model runs as full ELFs: a prompt version beside the
+        decode step, and the device loop (:meth:`generate`)."""
+        if self._decode is None:
+            raise RuntimeError(f"{type(self).__name__}: load() first")
+        return self._prompt is not None
 
     @property
     def tuning(self) -> Tuning | None:
@@ -299,7 +326,8 @@ class CausalLM(iron.Graph):
 
         ``tokens`` is the whole history. One more token than the last call's
         is a decode step on the caches; anything else is a prompt, run in
-        chunks from the one holding the first token the caches do not.
+        chunks from the one holding the first token the caches do not, or,
+        without a prompt version, decode steps from that token on.
         """
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
         n, L = tokens.size, self.config.max_seq_len
@@ -311,6 +339,10 @@ class CausalLM(iron.Graph):
         # draw again.
         if held == n - 1 == self._seen.size:
             out, _ = self(token=int(tokens[-1]), position=n - 1, chunk=0, rows=1)
+        elif self._prompt is None:
+            for position in range(held, n):
+                token = int(tokens[position])
+                out, _ = self(token=token, position=position, chunk=0, rows=1)
         else:
             for x, values in self._chunks(tokens, held):
                 out, _ = self(x, **values)
@@ -343,8 +375,14 @@ class CausalLM(iron.Graph):
             raise ValueError(
                 f"{n} tokens and {num_tokens} more to draw do not fit {L} rows"
             )
-        if self._prompt is None or self._decode is None:
-            raise RuntimeError(f"{type(self).__name__}: load() before generate()")
+        if not self.full_elf:
+            assert self._decode is not None
+            raise RuntimeError(
+                f"{type(self).__name__}: the device loop needs a full-ELF "
+                f"decode step, and this one is an {self._decode.plan.image}; "
+                f"draw on the host (generation.generate)"
+            )
+        assert self._prompt is not None and self._decode is not None
         if self._loop is None:
             self._loop = CarriedLoop(self._prompt, self._decode, depth=2)
         start = time.perf_counter()

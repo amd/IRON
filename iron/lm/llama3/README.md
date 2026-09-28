@@ -87,6 +87,17 @@ python -m iron.lm.llama3.model \
   token for token)
 - `--cost-table TABLE`: narrow the decode step's designs and pack them
   into shared device configurations by a measured cost table (below)
+- `--each-step`: dispatch every step of a decode step on its own from one
+  xclbin, the form NPU1 runs (below)
+
+## NPU1, and `--each-step`
+
+NPU1 has no full-ELF dispatch, so there its decode step is an xclbin whose
+steps are dispatched one at a time, and it is the model's only version:
+only a full ELF addresses the scratch arena a prompt version would share its
+caches through. The prompt runs through the decode step a token at a time,
+and there is no `--device-loop`. `--each-step` builds the same form on NPU2,
+which is how `test_llama_3_2_1b_each_step_accuracy` checks it there.
 
 ## Tuning the decode step
 
