@@ -53,6 +53,7 @@ import iron
 from iron.common import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.handle import Weight
+from iron.common.graph.narrowing import JointNarrowing, Tuning
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.sample import Sample
@@ -266,14 +267,16 @@ class CausalLM(iron.Graph):
         """
         return dict(x=(rows, self.config.emb_dim)) if rows > 1 else {}
 
-    def load(self, release=None) -> "CausalLM":
+    def load(self, release=None, tuner: JointNarrowing | None = None) -> "CausalLM":
         """Compile and load the decode and prompt versions, weights uploaded.
 
         Both before the first call, so the arena is made once at its final
         size. ``release`` is given each piece of each weight once it is on
-        the device, to drop the host's pages of it.
+        the device, to drop the host's pages of it. A ``tuner`` narrows the
+        decode step's designs and packs them into shared device
+        configurations by what each costs (:attr:`tuning`).
         """
-        decode = self.compile(**self.shapes(1))
+        decode = self.compile(coresident=tuner, **self.shapes(1))
         # A prompt's carried values start a decode step (generate()), where
         # the image has an Emit to write them with.
         feeds = decode if decode.emit is not None else None
@@ -282,6 +285,14 @@ class CausalLM(iron.Graph):
             version.load(release=release)
         self._prompt, self._decode = prompt, decode
         return self
+
+    @property
+    def tuning(self) -> Tuning | None:
+        """What the ``tuner`` given to :meth:`load` chose for the decode
+        step; None without one."""
+        if self._decode is None:
+            raise RuntimeError(f"{type(self).__name__}: load() first")
+        return self._decode.tuning
 
     def logits(self, tokens) -> np.ndarray:
         """The logits after the last of ``tokens``, ``(vocab_size,)``.

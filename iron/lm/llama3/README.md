@@ -85,6 +85,31 @@ python -m iron.lm.llama3.model \
 - `--compare-host`: with `--device-loop`, then generate again on the host
   from the same seed and count the tokens that differ (the text is the same,
   token for token)
+- `--cost-table TABLE`: narrow the decode step's designs and pack them
+  into shared device configurations by a measured cost table (below)
+
+## Tuning the decode step
+
+`--cost-table TABLE` narrows the decode step's designs (fewer columns where
+a design gains little from more) and packs them into shared device
+configurations, choosing by what each design costs on the device
+(`iron.common.graph.narrowing`). A narrower width is only a candidate if it
+was measured bit-identical to the profile's. The costs come from a table
+that `tune.py` measures:
+
+```bash
+python -m iron.lm.llama3.tune /path/to/model.safetensors /path/to/tokenizer.model
+python -m iron.lm.llama3.model /path/to/model.safetensors /path/to/tokenizer.model \
+    --cost-table iron/lm/llama3/decode_costs_npu2.json
+```
+
+`decode_costs_npu2.json` is such a table, measured on a Strix Halo NPU (8
+columns). Its entries are keyed by each design's identity -- its fields --
+so a design changed since the table was measured is not in it, and the
+tuner leaves that design as the profile gives it (the `[Tuning]` report
+counts it as unmeasured). Run `tune.py` again after changing a design, or
+to measure for another NPU; it keeps the entries still current and measures
+only the rest.
 
 `pytest iron/lm/llama3/` loads the model once and runs
 all of these in-process through `model.Runner`, recording the throughput and

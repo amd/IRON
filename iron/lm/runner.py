@@ -11,6 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
+from iron.common.graph.narrowing import CostTable, JointNarrowing
+
 from .checkpoint import Checkpoint, Layout, load_weights
 from .decoder import CausalLM, Config, Oracle
 from .generation import (
@@ -57,10 +59,13 @@ class Runner:
         )
         self.tokenizer = self.open_tokenizer(tokenizer_path)
 
-    def npu(self) -> CausalLM:
-        """The model compiled and loaded, weights uploaded."""
+    def npu(self, cost_table: Path | None = None) -> CausalLM:
+        """The model compiled and loaded, weights uploaded. With a
+        ``cost_table`` (:mod:`.tune`) its decode step's designs are narrowed
+        and packed by it."""
         model = self.model(self.config, self.weights)
-        return model.load(self.checkpoint.release)
+        tuner = None if cost_table is None else JointNarrowing(CostTable(cost_table))
+        return model.load(self.checkpoint.release, tuner)
 
     def cpu(self) -> Oracle:
         """The model's oracle, its weights widened (float32 is twice bf16)."""
@@ -125,6 +130,12 @@ def main(runner: type[Runner], description: str):
         help="with --device-loop, then generate again on the host from the "
         "same seed and count the tokens that differ",
     )
+    parser.add_argument(
+        "--cost-table",
+        type=Path,
+        help="narrow and pack the decode step's designs by this measured cost "
+        "table (iron.lm.tune); default: as the profile gives them",
+    )
     args = parser.parse_args()
     if args.compare_host and not args.device_loop:
         parser.error("--compare-host compares the --device-loop run")
@@ -140,7 +151,9 @@ def main(runner: type[Runner], description: str):
             f"a {len(tokens)}-token prompt and {args.num_tokens} more exceed "
             f"{run.config.max_seq_len} rows"
         )
-    model = run.npu()
+    model = run.npu(args.cost_table)
+    if model.tuning is not None:
+        print("[Tuning] decode:\n" + model.tuning.report(), flush=True)
 
     if args.check_accuracy:
         results = accuracy(model, run.cpu(), tokens, args.num_tokens)

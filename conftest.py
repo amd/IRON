@@ -69,6 +69,13 @@ def pytest_addoption(parser):
         default=5,
         help="Number of iterations to run each test for statistics",
     )
+    parser.addoption(
+        "--cost-table",
+        type=Path,
+        default=None,
+        help="Narrow and pack a language model's decode step by this measured "
+        "cost table (iron.lm.tune)",
+    )
 
 
 def get_git_commit():
