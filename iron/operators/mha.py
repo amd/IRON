@@ -16,6 +16,11 @@ The host ABI is Q and O as ``(num_heads, seq_pad, d)``, K and V as
 prompt's chunk attends over the cache it extends. The sequence is an
 override: one task group per KV group that fills Q for every shim, fills
 that group's K and V, and drains O.
+
+One query (``seq_len`` 1, a decode step) is not padded: its heads are
+packed. A block's rows are one KV group's query heads, repeated to fill
+it, and each pipeline takes its own KV groups, so K and V have a lane per
+pipeline rather than one every pipeline reads.
 """
 
 import dataclasses
@@ -78,6 +83,23 @@ class MHA(Operator):
                     num_pipelines=8,
                 )
             ),
+            # One query over a cache, its heads packed: Llama 3.2 1B's decode.
+            Case(
+                dict(
+                    num_heads=32,
+                    num_KV_heads=8,
+                    seq_len=1,
+                    kv_len=2048,
+                    num_pipelines=4,
+                    heads_interleaved=True,
+                )
+            ),
+            Case(
+                dict(
+                    num_heads=8, num_KV_heads=2, seq_len=1, kv_len=512, num_pipelines=2
+                ),
+                extensive=True,
+            ),
         ],
         tolerance=Tolerance(rtol=0.04, atol=0.15, max_mismatch_frac=0.005),
     )
@@ -105,9 +127,11 @@ class MHA(Operator):
     B_kv: int = auto(64)
     num_pipelines: int = auto(1, array=True)
     emulate_bf16_mmul_with_bfp16: bool = param(default=True, repr=False)
-    # Filled by resolve: how the pipelines are split across shims.
+    # Filled by resolve: how the pipelines are split across shims, and K
+    # and V's lanes, one every pipeline reads or, one query packed, one each.
     q_shims: int = auto(repr=False)
     join_rows: int = auto(repr=False)
+    kv_lanes: int = auto(array=True, repr=False)
 
     Q = In(
         select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
@@ -118,11 +142,13 @@ class MHA(Operator):
     K = In(
         select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
         tile=(d, B_kv),
+        per=(kv_lanes,),
         via=Shim(5),
     )
     V = In(
         select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
         tile=(d, B_kv),
+        per=(kv_lanes,),
         via=Shim(6),
     )
     O = Out(  # noqa: E741  (the operand's name)
@@ -142,19 +168,39 @@ class MHA(Operator):
     # the heads, the Q blocks per pipeline of each streamed and computed,
     # the KV blocks per Q block, the unpadded lengths for masking (positions,
     # so the queries' end is the keys'), and the block index of the first
-    # query.
-    heads = Value(np.int32, derive=lambda op: op.num_heads)
+    # query. One query packed, a pipeline's heads are its KV groups, its one
+    # block past every key block (no causal skip, no diagonal) and every row
+    # of it valid.
+    heads = Value(
+        np.int32,
+        derive=lambda op: (
+            op.num_KV_heads // op.num_pipelines if op.packed else op.num_heads
+        ),
+    )
     q_blocks_per_pipeline = Value(
-        np.int32, derive=lambda op: op.seq_pad // (op.B_q * op.num_pipelines)
+        np.int32, derive=lambda op: ceildiv(op.seq_pad, op.B_q * op.num_pipelines)
     )
     q_blocks_valid = Value(
-        np.int32,
-        derive=lambda op: op.seq_padding(op.q_tokens) // (op.B_q * op.num_pipelines),
+        np.int32, derive=lambda op: ceildiv(op.q_tokens, op.B_q * op.num_pipelines)
     )
     kv_blocks = Value(np.int32, derive=lambda op: ceildiv(op.kv_tokens, op.B_kv))
-    s_q = Value(np.int32, derive=lambda op: op.kv_tokens)
+    s_q = Value(
+        np.int32,
+        derive=lambda op: (
+            (op.first_query_block + op.num_pipelines) * op.B_q
+            if op.packed
+            else op.kv_tokens
+        ),
+    )
     s_kv = Value(np.int32, derive=lambda op: op.kv_tokens)
     q_start = Value(np.int32, derive=lambda op: op.first_query_block)
+
+    @property
+    def packed(self) -> bool:
+        """One query, its heads packed as a block's rows: a KV group's heads,
+        repeated to fill the block, a block per group.
+        """
+        return self.seq_len == 1
 
     @property
     def q_tokens(self) -> int:
@@ -176,7 +222,10 @@ class MHA(Operator):
     def first_query_block(self) -> int:
         """The position of Q's first row, in blocks: the queries are the
         keys' last rows, and a block's position is what mha.cc masks by.
+        One query packed is past every key block: it attends over them all.
         """
+        if self.packed:
+            return ceildiv(self.kv_tokens, self.B_kv)
         start = self.kv_tokens - self.q_tokens
         if start < 0 or start % self.B_q:
             raise ValueError(
@@ -241,6 +290,25 @@ class MHA(Operator):
                 f"kv_len ({self.kv_len}) must be whole {self.B_kv}-row blocks and "
                 f"at least seq_pad ({self.seq_pad}): the queries are its last rows"
             )
+        if self.kv_lanes != (self.num_pipelines if self.packed else 1):
+            raise Incompatible(
+                f"kv_lanes ({self.kv_lanes}) is one per pipeline for one query, "
+                f"else one; resolve() sets it"
+            )
+        if self.packed:
+            group = self.num_heads // self.num_KV_heads
+            if self.B_q % group:
+                raise Incompatible(
+                    f"one query packs a KV group's {group} heads into a block's "
+                    f"B_q ({self.B_q}) rows, which they must divide"
+                )
+            # K and V take both input channels of shims 0 to P-1, and Q shim 4's.
+            if self.num_pipelines > 4 or self.num_KV_heads % self.num_pipelines:
+                raise Incompatible(
+                    f"one query takes num_pipelines ({self.num_pipelines}) at most "
+                    f"4 dividing num_KV_heads ({self.num_KV_heads}): each pipeline "
+                    f"has its own K and V lanes, on its own column's shim"
+                )
 
     def resolve(self, dev):
         if dev is not None and (dev.arch is not AIEArch.AIE2p or dev.cols < 8):
@@ -253,12 +321,17 @@ class MHA(Operator):
             self,
             q_shims=q_shims,
             join_rows=self.B_q * (self.num_pipelines // q_shims),
+            kv_lanes=self.num_pipelines if self.packed else 1,
         )
 
     # -- derived geometry ------------------------------------------------------
 
     def seq_padding(self, seq_len: int) -> int:
-        """``seq_len`` rounded up to a multiple of ``B_q * num_pipelines``."""
+        """``seq_len`` rounded up to a multiple of ``B_q * num_pipelines``;
+        one query, packed, is not padded.
+        """
+        if seq_len == 1:
+            return 1
         unit = self.B_q * self.num_pipelines
         return ceildiv(seq_len, unit) * unit
 
@@ -371,15 +444,36 @@ class MHA(Operator):
                 tile=Tile(col=6 + shim, row=1),
             )
 
-        # K is stored in column-major order
-        inK = ObjectFifo(k_ty, name="inK", depth=of_depth)
-        memK = inK.cons().forward(
-            name="memK", dims_to_stream=k_dims, tile=Tile(col=3, row=1), depth=of_depth
-        )
-        inV = ObjectFifo(k_ty, name="inV", depth=of_depth)
-        memV = inV.cons().forward(
-            name="memV", dims_to_stream=v_dims, tile=Tile(col=4, row=1), depth=of_depth
-        )
+        # K (stored column-major) and V are forwarded through a memtile: one
+        # stream each that every pipeline reads, through memtiles (3, 1) and
+        # (4, 1), or a lane per pipeline through its own column's.
+        kv_lanes = self.kv_lanes
+        inK, inV, memK, memV = [], [], [], []
+        for lane in range(kv_lanes):
+            suffix = "" if lane == 0 else str(lane)
+            shared = kv_lanes == 1
+            inK.append(ObjectFifo(k_ty, name=f"inK{suffix}", depth=of_depth))
+            memK.append(
+                inK[lane]
+                .cons()
+                .forward(
+                    name=f"memK{suffix}",
+                    dims_to_stream=k_dims,
+                    tile=Tile(col=3 if shared else lane, row=1),
+                    depth=of_depth,
+                )
+            )
+            inV.append(ObjectFifo(k_ty, name=f"inV{suffix}", depth=of_depth))
+            memV.append(
+                inV[lane]
+                .cons()
+                .forward(
+                    name=f"memV{suffix}",
+                    dims_to_stream=v_dims,
+                    tile=Tile(col=4 if shared else lane, row=1),
+                    depth=of_depth,
+                )
+            )
 
         # Per-pipeline fifos between the three stages.
         memA, outA, memP, outP, scaleOF = [], [], [], [], []
@@ -669,7 +763,7 @@ class MHA(Operator):
                     batched_matmul_qk,
                     fn_args=[
                         memQ[i].cons(),
-                        memK.cons(),
+                        memK[i % kv_lanes].cons(),
                         memA[i].prod(),
                         zero_kernel,
                         matmul_QK,
@@ -721,7 +815,7 @@ class MHA(Operator):
                     batched_matmul_pv,
                     fn_args=[
                         outP[i].cons(),
-                        memV.cons(),
+                        memV[i % kv_lanes].cons(),
                         scaleOF[i].cons(),
                         outO[i].prod(),
                         zero_kernel,
@@ -742,17 +836,19 @@ class MHA(Operator):
         # Every coordinate in this design is load-bearing: relaxed to
         # AnyShimTile/AnyMemTile/AnyComputeTile the router reports "Unable
         # to find a legal routing", so the map here is not a performance
-        # preference. Q's slots share column 4's two channels, O's column 7's.
-        def shim_of(operand) -> Tile:
+        # preference. Q's slots share column 4's two channels, O's column 7's;
+        # K and V's lanes, one per pipeline, its column's two.
+        def shim_of(operand, lane=0) -> Tile:
             lanes = operand.lanes
             assert lanes is not None and isinstance(lanes.via, Shim)
-            return Tile(col=lanes.via.col, row=0)
+            return Tile(col=lanes.via.col if lanes.count == 1 else lane, row=0)
 
         for s in range(self.q_shims):
             self.Q.lane(s).bind(inQ[s].prod(tile=shim_of(self.Q)))
             self.O.lane(s).bind(memO[s].cons(tile=shim_of(self.O)))
-        self.K.bind(inK.prod(tile=shim_of(self.K)))
-        self.V.bind(inV.prod(tile=shim_of(self.V)))
+        for lane in range(kv_lanes):
+            self.K.lane(lane).bind(inK[lane].prod(tile=shim_of(self.K, lane)))
+            self.V.lane(lane).bind(inV[lane].prod(tile=shim_of(self.V, lane)))
 
         flat_rtps = [b for stage in mha_rtps_list for b in stage]
         for i, name in enumerate(counts):
@@ -824,11 +920,16 @@ class MHA(Operator):
         every block, and K and V are one pattern each, the head's rows
         re-read once per (head, block) from the descriptor's iteration
         slot: the same bytes in the same order, six descriptors a group.
+
+        One query packed is a task group per step, each pipeline's block
+        that step one of its KV groups: the group's heads repeated from the
+        iteration slot at stride 0 into Q, and drained from O the same way,
+        the same rows written over themselves.
         """
         kv_heads = self.num_KV_heads
         group = self.num_heads // kv_heads
         rows = self.join_rows  # Q rows each shim carries per block
-        blocks = self.seq_pad // (rows * self.q_shims)  # per pipeline
+        blocks = ceildiv(self.seq_pad, rows * self.q_shims)  # per pipeline
         B_kv, d = self.B_kv, self.d
         # K and V stream the blocks the keys cover, a call's by its bound.
         kv_blocks = ceildiv(self.kv_tokens, B_kv)
@@ -851,23 +952,47 @@ class MHA(Operator):
                 [head_s, self.q_shims * rows * row_s, row_s, 1],
             )
 
-        def kv_rows(buffer, kv_head):
-            # The head's blocks, re-read once per (head, block) of the group;
-            # a call patches their count.
+        def kv_rows(buffer, kv_head, reads):
+            # The head's blocks, read `reads` times; a call patches their count.
             head_s, row_s = strides_of(buffer, self.kv_interleaved)
             return TensorAccessPattern(
                 buffer.shape,
                 kv_head * head_s,
-                [group * blocks, kv_blocks, B_kv, d],
+                [reads, kv_blocks, B_kv, d],
                 [0, B_kv * row_s, row_s, 1],
             )
+
+        if self.packed:
+            steps = kv_heads // self.num_pipelines
+
+            def packed_rows(buffer, kv_head):
+                # The group's heads, contiguous in (1, heads, d) as in
+                # (heads, 1, d), repeated to fill a block.
+                return TensorAccessPattern(
+                    buffer.shape,
+                    kv_head * group * d,
+                    [self.B_q // group, group * d],
+                    [0, 1],
+                )
+
+            for step in range(steps):
+                owned = [p * steps + step for p in range(self.num_pipelines)]
+                with rt.group():
+                    for kv_head in owned:
+                        rt.fill(self.Q.lane(0), packed_rows(self.Q, kv_head))
+                    for p, kv_head in enumerate(owned):
+                        for x in (self.K, self.V):
+                            rt.fill(x.lane(p), kv_rows(x, kv_head, 1), size_by=kv_by)
+                    for kv_head in owned:
+                        rt.drain(self.O.lane(0), packed_rows(self.O, kv_head))
+            return
 
         for kv_head in range(kv_heads):
             head0 = kv_head * group
             with rt.group():
                 for shim in range(self.q_shims):
                     rt.fill(self.Q.lane(shim), q_rows(self.Q, head0, shim))
-                rt.fill(self.K, kv_rows(self.K, kv_head), size_by=kv_by)
-                rt.fill(self.V, kv_rows(self.V, kv_head), size_by=kv_by)
+                for x in (self.K, self.V):
+                    rt.fill(x, kv_rows(x, kv_head, group * blocks), size_by=kv_by)
                 for shim in range(self.q_shims):
                     rt.drain(self.O.lane(shim), q_rows(self.O, head0, shim))

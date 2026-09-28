@@ -35,7 +35,6 @@ from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
-from iron.operators.transpose import Transpose
 from iron.tests.common.declare import Rows
 from iron.tests.common.llama_model import llama_1b, small
 
@@ -409,13 +408,7 @@ def test_llama_decode_traces_and_tunes():
         "RoPE",
         "Copy",
         "Copy",
-        "Repeat",
-        "Repeat",
-        "GEMV",
-        "ElementwiseMul",
-        "Softmax",
-        "Transpose",
-        "GEMV",
+        "MHA",
         "GEMV",
         "ElementwiseAdd",
         "RMSNorm",
@@ -435,8 +428,8 @@ def test_llama_decode_traces_and_tunes():
     # The weights are named from the model; the caches are pinned state.
     assert "layers.1.q" in t.pinned and "keys.0" in t.pinned
     assert t.pinned["keys.0"] == cfg.n_kv_groups * L * cfg.head_dim * 2
-    # The table's row and each cache's row are the position's; every softmax
-    # runs over the keys up to it.
+    # The table's row and each cache's row are the position's; every MHA
+    # attends over the keys up to it, its one query packed by its heads.
     offsets = sorted(
         (b.member.name, str(b.expression)) for b in t.bindings if type(b.op) is Copy
     )
@@ -444,10 +437,10 @@ def test_llama_decode_traces_and_tunes():
     assert offsets == [("in_offset", f"position * {D}")] + [
         ("out_offset", f"position * {D}")
     ] * (2 * cfg.n_layers)
-    softmaxes = [b for b in t.bindings if b.member.name == "vector_size"]
-    assert len(softmaxes) == cfg.n_layers
-    assert all(str(b.expression) == "position + 1" for b in softmaxes)
-    assert all(b.op.uses_value("vector_size") for b in softmaxes)
+    mhas = [s.op for s in t.steps if type(s.op) is MHA]
+    assert len(mhas) == cfg.n_layers
+    assert all(op.bound_values == {"kv_valid": "position_p1"} for op in mhas)
+    assert all(op.packed and op.kv_len == L for op in mhas)
     # The same array serves every layer's like projections.
     q_arrays = {
         s.op.array_key()
@@ -462,18 +455,17 @@ def test_llama_decode_traces_and_tunes():
         op.resolved(aie_utils.get_current_device())
     # The profile gave the tiles decode was tuned with: half a head per
     # projection tile, a column's share of the row for the output
-    # projection, two columns for the transpose, one core for the norm.
+    # projection, a pipeline per KV head, one core for the norm.
     E, D = cfg.emb_dim, cfg.head_dim
     gemvs = [s.op for s in t.steps if type(s.op) is GEMV]
-    q, k, v, scores, ctx, o, gate, up, down = gemvs[:9]
+    q, k, v, o, gate, up, down = gemvs[:7]
     assert (q.tile_size_output, k.tile_size_output, o.tile_size_output) == (
         D // 2,
         D // 2,
         E // 8,
     )
     assert (down.tile_size_input, gate.tile_size_output) == (1, cfg.hidden_dim // 8)
-    transpose = next(s.op for s in t.steps if type(s.op) is Transpose)
-    assert (transpose.num_aie_columns, transpose.m, transpose.n) == (2, 256, 32)
+    assert mhas[0].num_pipelines == cfg.n_kv_groups
     assert (
         next(
             s.op for s in t.steps if type(s.op) is RMSNorm and s.op.weighted
@@ -527,7 +519,7 @@ def test_llama_prompt_traces_over_the_same_caches():
     token = g.trace(**g.shapes(1))
     assert set(t.states) == set(token.states)
     assert t.residents["keys.0"] == token.residents["keys.0"]
-    assert set(t.weights) == set(token.weights) - {id(g.scale)}
+    assert set(t.weights) == set(token.weights)
     # Every projection reads the (out, in) checkpoint layout through the
     # column-major flag, which the trace carries into shape inference.
     gemms = [op for op, *_ in t.runlist if type(op).__name__ == "GEMM"]
@@ -551,17 +543,19 @@ def test_llama_prompt_traces_over_the_same_caches():
         op.resolved(aie_utils.get_current_device())
 
 
-def test_a_prompt_chunk_does_not_grow_with_the_context():
+@pytest.mark.parametrize("step", ["decode", "prompt"])
+def test_llama_does_not_grow_with_the_context(step):
     """``max_seq_len`` sizes the caches and the RoPE table and nothing else a
-    prompt chunk runs: its one input is the chunk's embedded tokens, every
-    activation and every array is the same at a four times longer context,
-    and attention is the caches' two writes and MHA, the reshapes and
-    transposes between them views the DMA walks.
+    decode step or a prompt chunk runs: its one input is its embedded
+    tokens, every activation and every array is the same at a four times
+    longer context, and attention is the caches' two writes and MHA, the
+    reshapes and transposes between them views the DMA walks.
     """
 
     def trace(max_seq_len):
         g = small(max_seq_len=max_seq_len)
-        return g.trace(**g.shapes(g.config.prefill_chunk))
+        rows = 1 if step == "decode" else g.config.prefill_chunk
+        return g.trace(**g.shapes(rows))
 
     short, long = trace(64), trace(256)
     assert short.input_args == long.input_args == ["x"]
@@ -581,8 +575,11 @@ def test_a_prompt_chunk_does_not_grow_with_the_context():
         op.array_key() for op in long.operators
     ]
     kinds = [type(op).__name__ for op, *_ in long.runlist]
-    rope = kinds.index("RoPE", kinds.index("RoPE") + 1)
-    assert kinds[rope + 1 : kinds.index("MHA") + 1] == ["Copy", "Copy", "MHA"]
+    rotations = [i for i, kind in enumerate(kinds) if kind == "RoPE"][1::2]
+    mhas = [i for i, kind in enumerate(kinds) if kind == "MHA"]
+    assert len(rotations) == len(mhas) == 2
+    for rope, mha in zip(rotations, mhas):
+        assert kinds[rope + 1 : mha + 1] == ["Copy", "Copy", "MHA"]
 
 
 def _resolved_fields(settings):
@@ -644,16 +641,15 @@ def _every_keyword_is_load_bearing(monkeypatch, settings):
 def test_llama_names_only_the_tunables_that_matter(monkeypatch):
     """Every keyword the llama graph passes is a choice resolution would not
     have made in some setting the graph is written for: the model's real
-    shape at the graph's own defaults, on either NPU generation for a decode
-    step and on NPU2 (MHA's) for a prompt; and the scaled-down shape the
-    host tests trace, with the parameters that shape needs.
+    shape at the graph's own defaults, on NPU2 (MHA's) for a decode step and
+    a prompt; and the scaled-down shape the host tests trace, with the
+    parameters that shape needs.
     """
-    npu2, npu1 = from_name("npu2", n_cols=8), from_name("npu1", n_cols=4)
+    npu2 = from_name("npu2", n_cols=8)
     real, scaled = llama_1b(n_layers=1), small()
     L, S = real.config.max_seq_len, scaled.config.max_seq_len
     settings = [
         (npu2, lambda: real.trace(**real.shapes(1))),
-        (npu1, lambda: real.trace(**real.shapes(1))),
         (npu2, lambda: real.trace(**real.shapes(L))),
         (npu2, lambda: scaled.trace(**scaled.shapes(S))),
     ]

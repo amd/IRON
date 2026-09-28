@@ -333,6 +333,46 @@ def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way():
     assert tasks[6].offset == 2 * 64 and tasks[8].offset == 64
 
 
+def test_mha_of_one_query_packs_a_group_per_pipeline_over_its_own_kv():
+    # Decode's shape, over a cache bounded per call: each of 4 pipelines
+    # takes KV groups p*2 and p*2+1 in turn. Per step, Q is the group's 4
+    # heads (256 elements) re-read 16 times to fill a 64-row block, K and V
+    # the group's bounded blocks on the pipeline's own lanes, and O drains
+    # the block back over the same 256 elements. The counts the bound moves
+    # are per call; the rest are written once, and the array reads each
+    # from where the sequence puts it.
+    op = MHA(
+        num_heads=32,
+        num_KV_heads=8,
+        seq_len=1,
+        kv_len=2048,
+        num_pipelines=4,
+        heads_interleaved=True,
+    )
+    op.use_value("kv_valid", "n")
+    op = op.resolved(from_name("npu2", n_cols=8))
+    assert op.residents == {"heads": 2, "q_blocks_per_pipeline": 1, "q_blocks_valid": 1}
+    _, tasks = generated_sequence(op)
+    group, cache = 4 * 64, 2048 * 64
+    q = ("16, 1, 1, 256", "0, 0, 0, 1")
+    kv = ("1, 32, 64, 64", "0, 4096, 64, 1")
+    for step in range(2):
+        heads = [(p * 2 + step) for p in range(4)]
+        fills = tasks[step * 16 : (step + 1) * 16]
+        assert [(t.lane, t.offset, (t.sizes, t.strides)) for t in fills] == [
+            *[("inQ", h * group, q) for h in heads],
+            *[
+                (f"{x}{p or ''}", h * cache, kv)
+                for p, h in enumerate(heads)
+                for x in ("inK", "inV")
+            ],
+            *[("memO", h * group, q) for h in heads],
+        ]
+        assert all("repeat_count = 15" in t.attributes for t in fills[:4])
+        assert all(t.size_parameter.endswith("kv_blocks") for t in fills[4:12])
+        assert all(t.waited for t in fills[12:])
+
+
 def test_mha_infers_the_padded_length_and_the_kv_head_count():
 
     op = MHA.from_operands((8, 128, 64), (2, 128, 64), (2, 128, 64))

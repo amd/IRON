@@ -609,6 +609,10 @@ class Operator(metaclass=_OperatorMeta):
         """The derived values whose derivation reads a bound extent."""
         if not self.bound_extents:
             return frozenset()
+        # Asked from array(), the derivations still run on the operator: the
+        # extents one reads say how its value reaches the device, which the
+        # array may depend on; that is not the array reading an extent.
+        op = object.__getattribute__(self, "_op") if type(self) is _ArrayView else self
         out = set()
         for m in self._value_members:
             if not (isinstance(m, Value) and m.derive is not None):
@@ -616,7 +620,7 @@ class Operator(metaclass=_OperatorMeta):
             reads: set[str] = set()
             token = _extent_reads.set(reads)
             try:
-                m.derive(self)
+                m.derive(op)
             except Exception:
                 pass  # unresolved: what it read before failing still counts
             finally:

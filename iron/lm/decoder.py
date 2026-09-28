@@ -10,14 +10,15 @@ attention over the caches (:meth:`CausalLM.attend`); and
 ``logits(tokens)``. A model subclasses it with its ``layer`` and its
 ``head``.
 
-One row is a decode step at ``position``: attention against the caches,
-the row written into them there, the softmax masked to the ``position +
-1`` keys before it. ``prefill_chunk`` rows are a chunk of a prompt, of
-which a call runs the first ``rows``: the chunk's rows written into the
-caches at chunk ``chunk``, causal MHA of them over the caches up to
-``position``, its last token, and the head for that token alone. A prompt
-is its chunks in turn, so what a call costs follows the tokens it runs,
-not ``max_seq_len``, which sizes the caches and the RoPE table alone.
+One row is a decode step at ``position``: the row written into the caches
+there, and MHA of its one query over the ``position + 1`` keys up to it.
+``prefill_chunk`` rows are a chunk of a prompt, of which a call runs the
+first ``rows``: the chunk's rows written into the caches at chunk
+``chunk``, causal MHA of them over the caches up to ``position``, its last
+token, and the head for that token alone. A prompt is its chunks in turn,
+so what a call costs follows the tokens it runs, and a step the context
+it attends over, not ``max_seq_len``, which sizes the caches and the RoPE
+table alone.
 
 Each shape compiles its own version, and every version runs in the graph's
 one scratch arena (:mod:`iron.common.graph.compiled`): the weights and the
@@ -30,7 +31,6 @@ reference it is judged by; a model subclasses it too, with a numpy
 """
 
 import dataclasses
-import math
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
@@ -42,12 +42,7 @@ import iron
 from iron.common import Scratchpad
 from iron.common.graph import Handle
 from iron.operators.copy import Copy
-from iron.operators.elementwise_mul import ElementwiseMul
-from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
-from iron.operators.repeat import Repeat
-from iron.operators.softmax import Softmax
-from iron.operators.transpose import Transpose
 
 #: A RoPE frequency scaling: the frequencies (radians per position, float64)
 #: in, scaled out (Llama 3's is :class:`~iron.lm.llama3.model.Llama3RopeScaling`).
@@ -151,8 +146,6 @@ class CausalLM(iron.Graph):
         G, L, D = config.n_kv_groups, config.max_seq_len, config.head_dim
         self.keys = [iron.state((G, L, D)) for _ in self.layers]
         self.values = [iron.state((G, L, D)) for _ in self.layers]
-        # 1/sqrt(head_dim) over every score, as the elementwise multiply takes it.
-        self.scale = np.full((config.n_heads, L), 1 / math.sqrt(D), dtype=bfloat16)
         self.rope = iron.weight(config.angles().astype(bfloat16))
         self._seen = np.empty(0, dtype=np.int64)  # the tokens in the caches
 
@@ -206,30 +199,21 @@ class CausalLM(iron.Graph):
         )
         keys, values = self.keys[i], self.values[i]
         n = q.shape[0] // H
-        if step.prompt:
-            # The heads interleaved per token as the projection wrote them,
-            # into the chunk's rows of the cache's (G, L, D).
-            for x, cache in ((k, keys), (v, values)):
+        # The heads interleaved per token as the projection wrote them, into
+        # the call's rows of the cache's (G, L, D): a chunk's, or a step's one.
+        for x, cache in ((k, keys), (v, values)):
+            if step.prompt:
                 Copy(
                     x.reshape(n, G, D).transpose(1, 0, 2),
                     cache.reshape(G, L // C, C, D)[:, step.chunk, : step.rows],
                 )
-            # The chunk's queries are the last rows of the keys so far.
-            span = np.s_[:, : step.position + 1]
-            o = MHA(
-                q.reshape(n, H, D), keys[span], values[span], heads_interleaved=True
-            )
-            return o.reshape(n, H * D)
-        Copy(k, keys[:, step.position])
-        Copy(v.reshape(G, D), values[:, step.position])
-        # Every head sees its group's keys and values.
-        k_all = Repeat(keys, repeat=H // G)
-        v_all = Repeat(values, repeat=H // G)
-        scores = ElementwiseMul(GEMV(k_all, q), self.scale)
-        # Masked from the context length on: the cache's unwritten tail
-        # contributes nothing.
-        weights = Softmax(scores, vector_size=step.position + 1)
-        return GEMV(Transpose(v_all), weights).reshape(1, H * D)
+            else:
+                Copy(x.reshape(G, D), cache[:, step.position])
+        # The queries are the last rows of the keys so far; one query, a
+        # step's, MHA packs by its heads.
+        span = np.s_[:, : step.position + 1]
+        o = MHA(q.reshape(n, H, D), keys[span], values[span], heads_interleaved=True)
+        return o.reshape(n, H * D)
 
     # -- on the host -----------------------------------------------------------
 

@@ -157,3 +157,20 @@ def test_mha_whose_blocks_do_not_line_up_is_refused(kwargs, why):
         MHA(num_heads=2, seq_len=1024, num_pipelines=8, **kwargs).resolved(
             from_name("npu2", n_cols=8)
         )
+
+
+@pytest.mark.parametrize(
+    "kwargs,why",
+    [
+        (dict(num_heads=24, num_KV_heads=8, num_pipelines=4), "packs"),
+        (dict(num_heads=32, num_KV_heads=8, num_pipelines=8), "at most 4"),
+        (dict(num_heads=24, num_KV_heads=6, num_pipelines=4), "dividing"),
+    ],
+    ids=["group_not_dividing_a_block", "more_pipelines_than_shims", "uneven_groups"],
+)
+def test_mha_of_one_query_that_does_not_pack_is_refused(kwargs, why):
+    """One query packs each KV group's heads into a block's rows, and each
+    pipeline reads its own groups' K and V over its own column's shim.
+    """
+    with pytest.raises(Incompatible, match=why):
+        MHA(seq_len=1, kv_len=512, **kwargs).resolved(from_name("npu2", n_cols=8))
