@@ -3,6 +3,7 @@
 
 import dataclasses
 
+import aie.utils as aie_utils
 import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.util import v8bfp16ebs8
@@ -18,7 +19,6 @@ from iron.common import (
     auto,
     param,
 )
-from iron.common.device import bound_device, device_name
 from iron.common.image.artifacts import Artifacts, Design, Step
 from iron.common.image.jit_compile import cache_entry, insts_design, xclbin_design
 from iron.common.tiling import Access
@@ -205,9 +205,9 @@ class DequantBFP(Operator):
     @property
     def config_name(self) -> str:
         """Stem of the artifacts that do not depend on the shape: the xclbin's."""
-        t = self if self._resolved else self.resolved(bound_device())
-        dev_name = device_name()
-        return f"FLM_DequantBFP_tn{t.tile_n}_c{t.cols}_{dev_name}"
+        dev = aie_utils.ensure_current_device(required=True)
+        t = self if self._resolved else self.resolved(dev)
+        return f"FLM_DequantBFP_tn{t.tile_n}_c{t.cols}_{dev.name}"
 
     @property
     def name(self) -> str:
@@ -361,7 +361,7 @@ class DequantBFP(Operator):
         xclbin is emitted at a reference shape so every shape sharing the
         configuration reuses it, and only the instruction stream is per shape.
         """
-        tuned = self.resolved(bound_device())
+        tuned = self.resolved(aie_utils.ensure_current_device(required=True))
         K, N = tuned._reference_shape
         reference = dataclasses.replace(
             tuned,

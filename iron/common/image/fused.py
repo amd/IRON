@@ -6,7 +6,7 @@
 import hashlib
 
 import aie.utils as aie_utils
-from aie.iron.device import NPU2
+from aie.dialects.aie import AIEArch
 
 from . import fusion
 from .jit_compile import (
@@ -104,9 +104,11 @@ class FusedImage:
         :func:`fused_identity`, locks across processes and validates the
         kernels' depfiles, and the ELF lands in its entry.
         """
-        if not isinstance(aie_utils.get_current_device(), NPU2):
+        dev = aie_utils.ensure_current_device(required=True)
+        if dev.arch is not AIEArch.AIE2p:
             raise RuntimeError(
-                "dispatch='fused' requires NPU2; NPU1 has no full-ELF dispatch"
+                f"dispatch='fused' needs a full ELF, which {dev.name} "
+                f"({dev.arch}) does not dispatch"
             )
         if self.design is None:
             plan = fused_plan(seq)

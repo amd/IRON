@@ -18,7 +18,7 @@ pytest.importorskip(
 import aie.utils as aie_utils  # noqa: E402
 from aie.iron.device import NPU2  # noqa: E402
 
-aie_utils.set_current_device(NPU2())  # pyright: ignore[reportCallIssue]
+aie_utils.set_current_device(NPU2())
 
 from iron.operators.swiglu_prefill_stream import stream_design  # noqa: E402
 from iron.operators.swiglu_prefill_stream.stream.hardware import (  # noqa: E402
@@ -134,6 +134,6 @@ def test_layer_by_layer_gives_every_layer_the_whole_array(tmp_path):
 def test_devices_other_than_the_default_resolve():
     from aie.iron.device import NPU1
 
-    array = ComputeArray.from_device(NPU1())  # pyright: ignore[reportCallIssue]
+    array = ComputeArray.from_device(NPU1())
     assert array.num_columns and array.num_rows
     assert array.cores(array.all_columns)

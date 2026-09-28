@@ -8,7 +8,7 @@ from collections.abc import Hashable, Mapping
 
 import aie.utils as aie_utils
 import numpy as np
-from aie.iron.device import NPU2
+from aie.dialects.aie import AIEArch
 from aie.utils import bfp
 from aie.utils.hostruntime.tensor_class import COHERENCE_GRANULE
 
@@ -374,12 +374,13 @@ class OperatorSequence:
 
     def prepare(self):
         """Settle the mode and lay the buffers out, before anything is built."""
+        dev = aie_utils.get_current_device()
         if self.mode is None:
             # The platform default for a hand-written sequence; a graph goes
             # through packaging.plan, which also weighs its values and boundaries.
-            npu2 = isinstance(aie_utils.get_current_device(), NPU2)
-            self.mode = "fused" if npu2 else "separate"
-            if self.arena is not None and not npu2:
+            elf = dev is not None and dev.arch is AIEArch.AIE2p
+            self.mode = "fused" if elf else "separate"
+            if self.arena is not None and not elf:
                 raise ValueError(
                     f"{self.name}: a shared arena needs the full ELF, which this "
                     f"device does not dispatch"
@@ -387,7 +388,6 @@ class OperatorSequence:
         # Every operator resolved for the device, once, before anything takes
         # its identity: unique_designs() then sees the tunables as they will be
         # built, so two operators that describe one array are one design.
-        dev = aie_utils.get_current_device()
         resolved: dict[int, Operator] = {}
         for op, *_ in self.runlist:
             if id(op) not in resolved:

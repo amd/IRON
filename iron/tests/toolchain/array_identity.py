@@ -82,7 +82,7 @@ def test_the_array_is_the_same_at_two_extents(
         try:
             op = cls(**tunables, **{name: size}).resolved(device)
         except (ValueError, Unresolvable, Incompatible) as e:
-            pytest.skip(f"not for {device.resolve().name}: {e}")
+            pytest.skip(f"not for {device.name}: {e}")
         elfs.append(_core_elfs(op))
     small, large = elfs
     assert small.keys() == large.keys(), "the same cores"

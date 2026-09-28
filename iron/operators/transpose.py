@@ -4,6 +4,7 @@
 
 import dataclasses
 
+import aie.utils as aie_utils
 import numpy as np
 from aie.iron import ObjectFifo, Worker
 from aie.iron.controlflow import range_
@@ -22,7 +23,7 @@ from iron.common import (
     optional,
     param,
 )
-from iron.common.testing import Case, Testing, device_columns
+from iron.common.testing import Case, Testing
 from iron.common.tiling import Access, fifo_depth
 
 
@@ -31,7 +32,9 @@ def _cases(cls):
     out = []
     for M in (64, 2048):
         for N in (64, 128, 256, 512):
-            for cols in range(1, device_columns() + 1):
+            for cols in range(
+                1, aie_utils.ensure_current_device(required=True).cols + 1
+            ):
                 for channels in (1, 2):
                     if (M // channels) % m or (N // cols) % n:
                         continue

@@ -42,13 +42,14 @@ captured stdout, so disabling capture yields a CSV with no metric columns.
 import statistics
 from pathlib import Path
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
 import torch
+from aie.dialects.aie import AIEArch
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from ml_dtypes import bfloat16
 
-from iron.common.device import bound_device, device_name
 from iron.common.harness import record_metric
 from iron.operators import GEMM as IronGEMM
 from iron.operators.flm import GEMM as FLMGEMM
@@ -58,11 +59,11 @@ from iron.operators.flm import Shipped
 # run. See the note in the module docstring.
 pytestmark = pytest.mark.extensive
 
-_dev = bound_device()
+_dev = aie_utils.ensure_current_device(required=True)
 # The shipped overlay is a fixed 8-column NPU2 binary. Where that does not
 # match the device, drop that one candidate rather than skipping the module,
 # since flm vs iron.operators.GEMM is measurable on every supported device.
-HAVE_PREBUILT = _dev is not None and device_name(_dev) == "npu2" and _dev.cols >= 8
+HAVE_PREBUILT = _dev.arch is AIEArch.AIE2p and _dev.cols >= 8
 
 # Every projection of both Gemma4 variants FastFlowLM ships, at three prefill
 # lengths. E2B is dim 1536 / ffn 6144; E4B is dim 2560 / ffn 10240. Both ship

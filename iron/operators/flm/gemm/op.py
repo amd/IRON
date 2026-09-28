@@ -20,6 +20,7 @@ per-choice breakdown against the shipped FastFlowLM overlay
 import dataclasses
 from typing import Any, ClassVar, NamedTuple
 
+import aie.utils as aie_utils
 import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch, AIETileType, DMAChannelDir
 from aie.dialects.aie import (
@@ -56,7 +57,6 @@ from iron.common import (
     param,
     select,
 )
-from iron.common.device import bound_device, device_name
 from iron.common.tiling import split_run
 from iron.operators.flm.gemm.design import (
     _VERIFIED_CT_K,
@@ -94,10 +94,6 @@ from iron.operators.flm.gemm.design import (
     rtp_layout,
 )
 from iron.operators.flm.packing import pack_b, packed_b_size
-
-
-def _device_name() -> str:
-    return device_name()
 
 
 class _BPool(NamedTuple):
@@ -339,7 +335,7 @@ class GEMM(Operator):
         """
         if self._resolved:
             return self
-        return self.resolved(bound_device())
+        return self.resolved(aie_utils.ensure_current_device(required=True))
 
     @property
     def ct_max_k(self) -> int:
@@ -369,10 +365,11 @@ class GEMM(Operator):
         xclbin built at one ck could serve a request for another.
         """
         t = self._tuned
+        dev = aie_utils.ensure_current_device(required=True)
         return (
             f"FLM_GEMM_tn{t.tile_n}_ck{t.ct_max_k}"
             f"_ma{t.tile_ma}_mc{t.m_chunk}"
-            f"_em{t.epilogue_mask:x}_{t.rounding}_{_device_name()}"
+            f"_em{t.epilogue_mask:x}_{t.rounding}_{dev.name}"
         )
 
     @property
@@ -1156,7 +1153,7 @@ class GEMM(Operator):
 
         if self.external is not None:
             return super()._build()  # the downloaded image, instructions only
-        tuned = self.resolved(bound_device())
+        tuned = self.resolved(aie_utils.ensure_current_device(required=True))
         M, K, N = tuned._reference_shape
         reference = dataclasses.replace(
             tuned, M=M, K=K, N=N, epilogue=Epilogue.NONE, clamp=None, packed_blocks=None

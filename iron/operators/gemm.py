@@ -6,6 +6,7 @@ from dataclasses import field
 from typing import Any
 
 import numpy as np
+from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern, TensorTiler2D
 from aie.iron import Buffer, ObjectFifo, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
@@ -291,11 +292,9 @@ class GEMM(Operator):
             )
 
     def device(self, target):
-        if target.dev.resolve().name == "npu1":
-            return {1: NPU1Col1, 2: NPU1Col2, 4: NPU1}[
-                self.num_aie_columns
-            ]()  # pyright: ignore[reportCallIssue]
-        return NPU2()  # pyright: ignore[reportCallIssue]
+        if target.dev.arch is AIEArch.AIE2:
+            return {1: NPU1Col1, 2: NPU1Col2, 4: NPU1}[self.num_aie_columns]()
+        return NPU2()
 
     # -- the array ----------------------------------------------------------
 

@@ -86,7 +86,7 @@ def test_operator_lowers_to_instructions(device, module, cls_name, kwargs, tmp_p
         op = cls(**kwargs)
         op.resolved(device)
     except (ValueError, Unresolvable, Incompatible) as e:
-        pytest.skip(f"not for {device.resolve().name}: {e}")
+        pytest.skip(f"not for {device.name}: {e}")
     lower(op, tmp_path)
 
 
@@ -121,6 +121,6 @@ def test_a_bounded_operator_lowers_or_waits_for_the_size_kind(
     try:
         op = cls(**kwargs).resolved(device)
     except (ValueError, Unresolvable, Incompatible) as e:
-        pytest.skip(f"not for {device.resolve().name}: {e}")
+        pytest.skip(f"not for {device.name}: {e}")
     op.use_value(bound, "n")  # what x[:n] in a graph does
     lower(op, tmp_path)  # or the conftest's skip, naming the missing kind

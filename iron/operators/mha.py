@@ -21,6 +21,7 @@ import dataclasses
 import sys
 
 import numpy as np
+from aie.dialects.aie import AIEArch
 from aie.helpers.dialects.scf import else_, if_
 from aie.iron import Buffer, ObjectFifo, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
@@ -195,10 +196,10 @@ class MHA(Operator):
         self.check_derived("seq_pad")
 
     def resolve(self, dev):
-        if dev is not None and dev.resolve().name != "npu2":
+        if dev is not None and (dev.arch is not AIEArch.AIE2p or dev.cols < 8):
             raise Unresolvable(
-                f"MHA is pinned to the NPU2 array (memtiles at columns 3-7); "
-                f"got {dev.resolve().name}"
+                f"MHA is pinned to the 8-column NPU2 array (memtiles at columns "
+                f"3-7); got {dev.name} ({dev.arch}) with {dev.cols} columns"
             )
         q_shims = 2 if self.num_pipelines > 6 else 1
         return dataclasses.replace(

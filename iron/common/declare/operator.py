@@ -33,7 +33,6 @@ import numpy as np
 from aie.utils.npukernel import NPUKernel
 from aie.utils.verify import Tolerance
 
-from ..device import device_name
 from ..kernels import kernels_dir
 from ..testing import Testing
 from .bound import BoundBuffer, BoundStream, BoundValue
@@ -734,7 +733,7 @@ class Operator(metaclass=_OperatorMeta):
     @property
     def dev(self):
         """The device a design is generated for, bound as the current one
-        (:func:`~iron.common.device.bound_device`); ``None`` on a host
+        (``aie.utils.ensure_current_device``); ``None`` on a host
         without one, where an operator can still be checked and lowered.
         """
         return aie_utils.ensure_current_device()
@@ -748,13 +747,9 @@ class Operator(metaclass=_OperatorMeta):
         content. The label describes what is built, so it comes from the
         resolved operator.
         """
-        dev = aie_utils.get_current_device()
-        if dev is None:
-            raise RuntimeError(f"{type(self).__name__}.name needs a bound device")
+        dev = aie_utils.ensure_current_device(required=True)
         own = label_parts(self.resolved(dev))
-        base = type(self).__name__ + "_" + "_".join(own)
-        # Upstream annotates Device.resolve() -> None; it returns the AIEDevice.
-        return f"{base}_{device_name(dev)}"
+        return "_".join([type(self).__name__, *own, dev.name])
 
     def generator(self, image: str = "elf"):
         """The design generator :class:`CompilableDesign` runs for this operator.

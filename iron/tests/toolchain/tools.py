@@ -40,7 +40,7 @@ def requires(*tools):
 
 
 DEVICES = {
-    "npu2": lambda: NPU2(),  # pyright: ignore[reportCallIssue]
+    "npu2": lambda: NPU2(),
     "npu1": lambda: from_name("npu1", n_cols=4),
 }
 

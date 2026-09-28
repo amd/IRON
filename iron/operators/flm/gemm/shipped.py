@@ -32,13 +32,15 @@ reproduces this overlay bit for bit without an activation.
 import dataclasses
 from typing import ClassVar
 
+import aie.utils as aie_utils
 import numpy as np
+from aie.dialects.aie import AIEArch
 from ml_dtypes import bfloat16
 
 from iron.common import In, Out, Shim, Unresolvable, Value, Xclbin, auto, select
 from iron.common.tiling import Access
 from iron.operators.flm.gemm.design import K_TILE, M_TILE, Epilogue
-from iron.operators.flm.gemm.op import GEMM, _device_name
+from iron.operators.flm.gemm.op import GEMM
 
 # The FastFlowLM revision the overlay is taken from. A commit SHA rather than
 # a branch, so the digest below stays valid.
@@ -150,10 +152,10 @@ class Shipped(
     )
 
     def resolve(self, dev):
-        if dev is not None and (dev.resolve().name != "npu2" or dev.cols < 8):
+        if dev is not None and (dev.arch is not AIEArch.AIE2p or dev.cols < 8):
             raise Unresolvable(
                 "flm.gemm.Shipped is a prebuilt NPU2 overlay and needs the 8 "
-                f"columns of NPU2 (aie2p); got {dev.resolve().name!r} with "
+                f"columns of NPU2 (aie2p); got {dev.name!r} ({dev.arch}) with "
                 f"{dev.cols} columns"
             )
         return dataclasses.replace(self)
@@ -166,7 +168,7 @@ class Shipped(
 
     @property
     def config_name(self) -> str:
-        return f"FLM_MM_{FASTFLOWLM_COMMIT[:8]}_{_device_name()}"
+        return f"FLM_MM_{FASTFLOWLM_COMMIT[:8]}_{aie_utils.ensure_current_device(required=True).name}"
 
     def sequence(self, rt) -> None:
         """One transfer per (column-block, row-block, leg), in the order the

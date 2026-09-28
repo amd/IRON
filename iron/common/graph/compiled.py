@@ -33,7 +33,6 @@ from ..declare.member import Extent, ValueSpec, _Value
 from ..declare.operator import _ExtentWord
 from ..declare.profile import Profile
 from ..design import device_symbol
-from ..device import device_name
 from ..image.allocator import ArenaPlan
 from ..image.callable import ScratchArena
 from ..image.packaging import Plan, plan
@@ -266,10 +265,9 @@ class Graph:
         if dev is not None:
             aie_utils.set_current_device(dev)
         traced = self.trace(**shapes)
-        bound = aie_utils.get_current_device()
-        assert bound is not None, "compile() needs a bound device"
-        npu = device_name(bound)
-        chosen = plan(npu, traced, boundaries, image)
+        chosen = plan(
+            aie_utils.ensure_current_device(required=True), traced, boundaries, image
+        )
         if verbose:
             print(chosen.report(self.name))
         signature = self._signature(traced.inputs)
@@ -320,7 +318,8 @@ class Graph:
         """The profile applied while :meth:`body` runs, if there is one."""
         profile = self.profile
         if isinstance(profile, (str, Path)):
-            path = Path(profile) / f"{device_name()}.json"
+            dev = aie_utils.ensure_current_device(required=True)
+            path = Path(profile) / f"{dev.name}.json"
             if not path.exists():
                 raise ValueError(f"{self.name}: no profile {path}")
             profile = Profile.load(path)

@@ -10,15 +10,37 @@ recorded calls are what upstream's ObjectFifoHandle.fill/drain accept; that
 is the toolchain's job and the operator tests' job.
 """
 
+import dataclasses
 from typing import Any, cast
 
 import numpy as np
 import pytest
 from aie.helpers.util import v8bfp16ebs8
+from aie.iron.device import from_name
 
-from iron.common import In, Operator, Out, Shim, Value, auto, optional, param
-from iron.common.design import Sequence, transfers
+import iron.operators.flm.gemm.op as flm_gemm
+from iron.common import (
+    DeclarationError,
+    In,
+    Operator,
+    Out,
+    Shim,
+    Value,
+    Xclbin,
+    auto,
+    optional,
+    param,
+)
+from iron.common.design import Sequence, runtime, transfers
+from iron.common.design.runtime import bounded_transfers
+from iron.common.external import LOCK_ADDRESS_BASE, run_sequence
 from iron.common.tiling import Access
+from iron.operators.flm.gemm.shipped import Shipped
+from iron.operators.gemv import GEMV
+from iron.operators.mha import MHA
+from iron.operators.repeat import Repeat
+from iron.operators.rope import RoPE
+from iron.tests.common.declare import Rows
 
 # A descriptor's fields are the current device's.
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -35,8 +57,6 @@ class FakeGroup:
 def fake_task_group(monkeypatch):
     # Patched where it is looked up, not where it is defined: runtime.py
     # imports the name, so rebinding aie.iron's attribute would not reach it.
-    from iron.common.design import runtime
-
     monkeypatch.setattr(runtime, "TaskGroup", FakeGroup)
 
 
@@ -51,9 +71,7 @@ class FakeHandle:
         self.log.append(("drain", self.name, data, wait))
 
 
-class FakeDev:
-    def columns(self):
-        return 4
+NPU2_4COL = from_name("npu2", n_cols=4)
 
 
 class Unary(Operator):
@@ -65,9 +83,8 @@ class Unary(Operator):
     B = Out(size, tile=(tile,), per=(cols, chans))
 
     def resolve(self, dev):
-        import dataclasses
 
-        return dataclasses.replace(self, cols=self.cols or dev.columns())
+        return dataclasses.replace(self, cols=self.cols or dev.cols)
 
 
 class MV(Operator):
@@ -88,7 +105,7 @@ def _bind_all(op, log):
 
 
 def test_plan_reproduces_the_channeled_unary_split():
-    op = Unary(size=8192).resolved(FakeDev())
+    op = Unary(size=8192).resolved(NPU2_4COL)
     p = transfers(op.A, op.streams["A"])
     assert len(p) == 8  # 4 columns x 2 channels
     chunk = 8192 // 8
@@ -195,16 +212,8 @@ def test_mha_sequence_is_one_descriptor_set_per_kv_group(monkeypatch):
     # is one pattern over the group's heads and every block, K and V are the
     # head's slab re-read once per (head, block) from the iteration slot, and
     # the O drains mirror the Q fills and wait.
-    from iron.operators.mha import MHA
 
     monkeypatch.setattr(Access, "tap", lambda self: self)
-
-    class Dev:
-        def resolve(self):
-            class R:
-                name = "npu2"
-
-            return R()
 
     class Handle:
         def __init__(self, name, log):
@@ -217,7 +226,7 @@ def test_mha_sequence_is_one_descriptor_set_per_kv_group(monkeypatch):
             self.log.append(("drain", self.name, data, tap, wait))
 
     op = MHA(num_heads=2, seq_len=1000, d=64, num_KV_heads=1, num_pipelines=8)
-    op = op.resolved(Dev())
+    op = op.resolved(from_name("npu2", n_cols=8))
     assert op.seq_pad == 1024 and op.q_shims == 2 and op.join_rows == 256
     assert op.resident_values() == {
         "q_blocks_per_pipeline": 2,
@@ -255,16 +264,8 @@ def test_mha_sequence_is_one_descriptor_set_per_kv_group(monkeypatch):
 def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way(monkeypatch):
     # The (seq, heads, d) layout: a head's rows are strided by every head's
     # d, and the group's heads are d apart; the descriptor count is the same.
-    from iron.operators.mha import MHA
 
     monkeypatch.setattr(Access, "tap", lambda self: self)
-
-    class Dev:
-        def resolve(self):
-            class R:
-                name = "npu2"
-
-            return R()
 
     class Handle:
         def __init__(self, name, log):
@@ -283,7 +284,7 @@ def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way(monkeypatch
         num_KV_heads=2,
         num_pipelines=8,
         heads_interleaved=True,
-    ).resolved(Dev())
+    ).resolved(from_name("npu2", n_cols=8))
     log = []
     for s in op.streams.values():
         for i in range(s.count):
@@ -301,7 +302,6 @@ def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way(monkeypatch
 
 
 def test_mha_infers_the_padded_length_and_the_kv_head_count():
-    from iron.operators.mha import MHA
 
     op = MHA.from_operands((8, 128, 64), (2, 128, 64), (2, 128, 64))
     assert (op.num_heads, op.num_KV_heads, op.seq_len, op.seq_pad) == (8, 2, 128, 128)
@@ -314,59 +314,19 @@ def test_mha_infers_the_padded_length_and_the_kv_head_count():
 # --------------------------------------------------------------------------
 
 
-class _Arch:
-    AIE2p = "aie2p"
-    AIE2 = "aie2"
-
-
-class _NPU2:
-    cols = 8
-    arch = _Arch.AIE2p
-
-    def resolve(self):
-        class R:
-            name = "npu2"
-
-        return R()
-
-
-class _TargetModel:
-    def rows(self):
-        return 6
-
-    def get_num_mem_tile_rows(self):
-        return 1
-
-    def get_local_memory_size(self):
-        return 65536
-
-
-@pytest.fixture
-def flm(monkeypatch):
-    import iron.operators.flm.gemm.op as flm
-
-    monkeypatch.setattr(flm, "AIEArch", _Arch)
-    monkeypatch.setattr(flm, "get_target_model", lambda dev: _TargetModel())
-    import iron.common.device as device
-
-    monkeypatch.setattr(device.aie_utils, "ensure_current_device", lambda: _NPU2())
-    import iron.operators.flm.gemm.design as design
-
-    monkeypatch.setattr(design, "get_target_model", lambda dev: _TargetModel())
-    monkeypatch.setattr(Access, "tap", lambda self: self)
-    return flm
-
-
-def test_flm_gemm_keyword_construction_tunes_from_the_device(flm):
+def test_flm_gemm_keyword_construction_tunes_from_the_device():
     # Keyword construction leaves every tunable to resolution, which reads the
     # device alone; the operator's extent is checked against the resolved
     # tunables by compatible(), not folded into its defaults.
-    assert flm.GEMM(M=512, K=1024, N=1024).tile_n is None
-    op = flm.GEMM(M=512, K=1024, N=1024).resolved(_NPU2())
+    assert flm_gemm.GEMM(M=512, K=1024, N=1024).tile_n is None
+    op = flm_gemm.GEMM(M=512, K=1024, N=1024).resolved(from_name("npu2", n_cols=8))
     assert (op.tile_n, op.m_chunk, op.rows, op.cols, op.bfp16_b) == (64, 1, 4, 8, True)
-    assert op.tile_ma == flm._default_l1(64, 128, 9 / 8, 65536, 1)[0]
+    assert op.tile_ma == flm_gemm._default_l1(64, 128, 9 / 8, 65536, 1)[0]
     # tile_n is resolution, not a function of K: the same on every shape.
-    assert flm.GEMM(M=256, K=512, N=1024).resolved(_NPU2()).tile_n == 64
+    assert (
+        flm_gemm.GEMM(M=256, K=512, N=1024).resolved(from_name("npu2", n_cols=8)).tile_n
+        == 64
+    )
     assert (
         op.config_name == f"FLM_GEMM_tn64_ck128_ma{op.tile_ma}_mc1_emf_conv_even_npu2"
     )
@@ -375,7 +335,7 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device(flm):
     assert a.shape == (512, 1024) and c.shape == (512, 1024)
     # B is declared in bfp16ebs8 blocks; the host holds the same bytes as uint8.
     assert b.shape == (1024 * 1024 // 8,) and b.dtype is v8bfp16ebs8
-    assert b.host_shape == (flm.packed_b_size(1024, 1024, True),)
+    assert b.host_shape == (flm_gemm.packed_b_size(1024, 1024, True),)
     assert b.host_dtype is np.uint8
     assert op.resident_values() == {
         "n_val": 1024,
@@ -388,16 +348,18 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device(flm):
         "n_units": 2,
     }
     with pytest.raises(ValueError, match="multiple of 256"):
-        flm.GEMM(M=100, K=1024, N=1024).resolved(_NPU2())  # M tiles to the array's rows
+        flm_gemm.GEMM(M=100, K=1024, N=1024).resolved(
+            from_name("npu2", n_cols=8)
+        )  # M tiles to the array's rows
     with pytest.raises(ValueError, match="not in epilogue_modes"):
-        flm.GEMM(M=256, K=1024, N=1024, epilogue="gelu", epilogue_modes=("none",))
+        flm_gemm.GEMM(M=256, K=1024, N=1024, epilogue="gelu", epilogue_modes=("none",))
 
 
-def test_flm_gemm_layout_of_b_follows_the_device(flm):
-    untuned = flm.GEMM(M=256, K=512, N=512)
-    with pytest.raises(flm.Incompatible):
+def test_flm_gemm_layout_of_b_follows_the_device():
+    untuned = flm_gemm.GEMM(M=256, K=512, N=512)
+    with pytest.raises(flm_gemm.Incompatible):
         [b.shape for b in untuned.buffers]  # B's layout follows the device
-    assert untuned.resolved(_NPU2()).B.shape == (512 * 512 // 8,)
+    assert untuned.resolved(from_name("npu2", n_cols=8)).B.shape == (512 * 512 // 8,)
 
 
 # --------------------------------------------------------------------------
@@ -422,8 +384,6 @@ class _ForeignRecorder:
 
 
 def test_a_shipped_image_declares_its_pins_and_parameter_block():
-    from iron.common import DeclarationError, Value, Xclbin
-    from iron.operators.flm.gemm.shipped import Shipped
 
     op = Shipped(M=256, K=1024, N=1152)
     assert op.external.filename == "flm_mm_f81eba71.xclbin"
@@ -464,8 +424,6 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
 
 
 def test_shipped_sequence_writes_every_core_then_streams_in_consume_order():
-    from iron.common.external import LOCK_ADDRESS_BASE, run_sequence
-    from iron.operators.flm.gemm.shipped import Shipped
 
     op = Shipped(M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0))
     # The port's values are hidden; the image's block is laid out from the
@@ -542,9 +500,8 @@ class _DynamicHandle:
 
 
 def _bounded_unary():
-    from iron.tests.common.declare import Rows
 
-    op = Rows(rows=64, cols=8).resolved(FakeDev())
+    op = Rows(rows=64, cols=8).resolved(NPU2_4COL)
     op.use_value("valid", "n")  # what a graph does for x[:n]
     for name in ("valid", "count"):
         op.value(name).param = f"<{name}>"
@@ -587,17 +544,14 @@ def test_a_bounded_operand_goes_round_robin_over_the_lanes():
     offset, so one patched count serves every lane; the descriptor is built
     for the full extent.
     """
-    from iron.common.design.runtime import bounded_transfers
-    from iron.tests.common.declare import Rows
-
-    op = Rows(rows=64, cols=8).resolved(FakeDev())
+    op = Rows(rows=64, cols=8).resolved(NPU2_4COL)
     plan = bounded_transfers(op.x, op.streams["x"], 0)
     assert [(slot.index, acc, dim) for slot, acc, dim in plan] == [
         (0, Access(512, 0, (1, 32, 1, 8), (0, 16, 0, 1)), 1),
         (1, Access(512, 8, (1, 32, 1, 8), (0, 16, 0, 1)), 1),
     ]
     # A leading batch axis is the outer repeat; the tile count keeps its slot.
-    batched = MV(M=256, K=128, num_batches=3).resolved(FakeDev())
+    batched = MV(M=256, K=128, num_batches=3).resolved(NPU2_4COL)
     (slot, acc, dim), *_ = bounded_transfers(batched.A, batched.streams["A"], 1)
     # The 64 x 128 tile is a run past one wrap, so it takes the two inner
     # slots as 8 x 1024; the tile count sits above them.
@@ -618,11 +572,6 @@ def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles(npu2):
     rows one angle row serves), so the lane that rotates a position's heads
     is the one that reads its angle row, and in the same order.
     """
-    from aie.iron.device import from_name
-
-    from iron.common.design.runtime import bounded_transfers
-    from iron.operators.rope import RoPE
-
     heads, positions, cols = 4, 16, 64
     op = RoPE(
         rows=heads * positions, cols=cols, angle_rows=positions, num_aie_columns=4
@@ -663,10 +612,6 @@ def test_a_bounded_gemv_moves_a_and_c_in_output_tiles_round_robin(npu2):
     output tiles (two input tiles each here) and C in the same tiles, both
     patched by the tile count the core also reads.
     """
-    from aie.iron.device import from_name
-
-    from iron.operators.gemv import GEMV
-
     op = GEMV(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=4)
     op.use_value("valid", "n")
     op = op.resolved(from_name("npu2", n_cols=8))
@@ -691,9 +636,8 @@ def test_a_bounded_gemv_moves_a_and_c_in_output_tiles_round_robin(npu2):
 
 
 def test_a_bounded_repeat_patches_the_stack_axis():
-    from iron.operators.repeat import Repeat
 
-    op = Repeat(rows=4, cols=8, seq=32, repeat=2).resolved(FakeDev())
+    op = Repeat(rows=4, cols=8, seq=32, repeat=2).resolved(NPU2_4COL)
     op.use_value("valid_seq", "c")
     log = []
     for name in ("valid_seq_x", "valid_seq_y"):

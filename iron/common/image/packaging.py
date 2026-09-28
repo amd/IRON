@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import dataclasses
 
+from aie.dialects.aie import AIEArch
+
 ELF = "elf"
 XCLBIN = "xclbin"
 
@@ -53,7 +55,7 @@ class Plan:
         return "\n".join(lines)
 
 
-def plan(device_name: str, traced, boundaries=None, image: str | None = None) -> Plan:
+def plan(dev, traced, boundaries=None, image: str | None = None) -> Plan:
     """Derive the image and the dispatch policy for ``traced`` on the device."""
     if image not in (None, ELF, XCLBIN):
         raise ValueError(f"image must be {ELF!r} or {XCLBIN!r}, got {image!r}")
@@ -67,8 +69,8 @@ def plan(device_name: str, traced, boundaries=None, image: str | None = None) ->
         forced.append(
             f"{names}: a DispatchTime value; the sequence is generated per call"
         )
-    if device_name == "npu1":
-        forced.append("npu1 has no full-ELF dispatch")
+    if dev.arch is not AIEArch.AIE2p:
+        forced.append(f"{dev.name} ({dev.arch}) has no full-ELF dispatch")
     if boundaries is not None:
         forced.append(f"boundaries={boundaries}: more than one dispatch")
 

@@ -24,23 +24,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
+import aie.utils as aie_utils
 from aie.utils.verify import Tolerance
-
-from .device import bound_device
 
 __all__ = [
     "Case",
     "Testing",
     "binary_elementwise_cases",
     "channeled_unary_cases",
-    "device_columns",
     "row_cases",
 ]
-
-
-def device_columns() -> int:
-    """The bound device's width, for a declaration that sweeps it."""
-    return bound_device().cols
 
 
 @dataclass(frozen=True)
@@ -115,7 +108,7 @@ def channeled_unary_cases(
     """
 
     def cases(cls):
-        dev = bound_device()
+        dev = aie_utils.ensure_current_device(required=True)
         cap = cls.tile_cap if tile_cap is None else tile_cap
         out = []
         for length in input_lengths:
@@ -141,7 +134,7 @@ def binary_elementwise_cases(
     """Cases for a binary elementwise operator, as :func:`channeled_unary_cases`."""
 
     def cases(cls):
-        dev = bound_device()
+        dev = aie_utils.ensure_current_device(required=True)
         cap = cls.tile_cap if tile_cap is None else tile_cap
         out = []
         for length in input_lengths:

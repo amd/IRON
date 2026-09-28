@@ -12,7 +12,6 @@ from aie.iron.device import from_name
 from aie.utils.verify import Tolerance
 
 from iron.common.design.build import build_design
-from iron.common.device import device_name
 from iron.common.harness import run_test, vectors
 from iron.common.kernels import kernels_dir
 from iron.operators import GEMM as GenericGEMM
@@ -48,8 +47,7 @@ def get_params():
     dev = aie_utils.get_current_device()
     if dev is None:
         return []
-    dev_name = device_name(dev)
-    if dev_name not in ("npu1", "npu2"):
+    if dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
         return []
 
     # One full sweep is N_TILE * COLS wide, so both it and the N values that
@@ -58,7 +56,7 @@ def get_params():
     # rest only drain the A broadcast, and real o/down projections always land
     # there. At K = 512 tile_n defaults to 128, halving at K >= 1024.
     # fmt: off
-    if dev_name == "npu2":
+    if dev.arch is AIEArch.AIE2p:
         #      M,    K,     N, epilogue,    clamp,     rounding
         regular_params = [
             (  256,  512,  1024, NONE,     None,       CONV_EVEN),  # smallest full sweep
@@ -159,7 +157,7 @@ def check_on_device(operator, data, rounding=CONV_EVEN):
     """
     A, B = data["A"], data["B"]
     mass = accumulated_mass(operator.K, A, B)
-    if device_name() == "npu1":
+    if aie_utils.ensure_current_device(required=True).arch is AIEArch.AIE2:
         budget = 0.002 if rounding is FLOOR else 0.0002
     else:
         budget = 0.05 if rounding is FLOOR else 0.004
@@ -219,7 +217,7 @@ def tile_option_params():
     own kernel object and xclbin.
     """
     dev = aie_utils.get_current_device()
-    if dev is None or device_name(dev) not in ("npu1", "npu2"):
+    if dev is None or dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
         return []
     l1 = l1_budget(dev)
     b_elem = BFP16_GROUP_BYTES / BFP16_GROUP if dev.arch == AIEArch.AIE2p else 2
@@ -380,7 +378,7 @@ def _shipped_marks():
     NPU2 with eight columns, which the binary was built for.
     """
     dev = aie_utils.get_current_device()
-    unfit = dev is None or device_name(dev) != "npu2" or dev.cols < 8
+    unfit = dev is None or dev.arch is not AIEArch.AIE2p or dev.cols < 8
     return [
         pytest.mark.extensive,
         pytest.mark.skipif(

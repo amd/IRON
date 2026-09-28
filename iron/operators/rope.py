@@ -15,6 +15,7 @@ for the halves, so with those weights it must be the halves
 
 import dataclasses
 
+import aie.utils as aie_utils
 import numpy as np
 from aie.iron import ObjectFifo, Worker, kernels
 from aie.iron.controlflow import range_
@@ -32,12 +33,16 @@ from iron.common import (
     auto,
     param,
 )
-from iron.common.testing import Case, Testing, device_columns
+from iron.common.testing import Case, Testing
 
 
 def _cases(cls):
     out = []
-    for cols in [c for c in (1, 2, 4, 8) if c <= device_columns()]:
+    for cols in [
+        c
+        for c in (1, 2, 4, 8)
+        if c <= aie_utils.ensure_current_device(required=True).cols
+    ]:
         for rows in (32, 64):
             for angle_rows in (8, 16, 32):
                 for width in (128, 512):

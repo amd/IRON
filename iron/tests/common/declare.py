@@ -15,6 +15,7 @@ import dataclasses
 
 import numpy as np
 import pytest
+from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
@@ -39,13 +40,7 @@ from iron.common import (
 from iron.common.declare.field import DimRef
 from iron.common.declare.infer import infer
 
-
-class FakeDev:
-    def __init__(self, cols=8):
-        self.cols = cols
-
-    def columns(self):
-        return self.cols
+NPU2 = from_name("npu2", n_cols=8)
 
 
 # --------------------------------------------------------------------------
@@ -69,7 +64,7 @@ class MV(Operator):
     start = Value(np.int32)  # per-call when a graph binds it, else unused
 
     def resolve(self, dev):
-        cols = self.columns or dev.columns()
+        cols = self.columns or dev.cols
         vec = self.vec or next((w for w in (64, 32, 16) if self.K % w == 0), None)
         if vec is None:
             raise Unresolvable(f"K={self.K}: no vector width divides it")
@@ -277,10 +272,10 @@ def test_a_stack_and_its_flat_spelling_move_the_same_descriptors(npu2):
     taps = []
     for op in (flat, stack):
         rt = _RecordingRuntime()
-        op.resolved(FakeDev(cols=8)).sequence(rt)
+        op.resolved(NPU2).sequence(rt)
         taps.append(rt.calls)
     assert taps[0] == taps[1]
-    assert stack.resolved(FakeDev(cols=8)).tile_size == 64  # the row's last axis
+    assert stack.resolved(NPU2).tile_size == 64  # the row's last axis
 
 
 def test_explain_says_what_a_build_compiles_in_and_what_it_takes_per_call():
@@ -294,7 +289,7 @@ def test_explain_says_what_a_build_compiles_in_and_what_it_takes_per_call():
     assert lines[2] == "  sequence, the host's alone: M=1024, num_batches=1, vec=None"
     assert lines[3] == "  count: written once per build"
     assert lines[4] == "  start: unused here"  # MV binds it only when a graph does
-    resolved = op.resolved(FakeDev(cols=8)).explain().splitlines()
+    resolved = op.resolved(NPU2).explain().splitlines()
     assert resolved[0].endswith("(resolved)") and "vec=64" in resolved[2]
     assert resolved[3] == "  count: written once per build, 8 here"
     op.use_value("count")  # a graph binds them: per call from here on
@@ -415,7 +410,7 @@ def test_from_spec_builds_an_operator_from_literal_shapes():
 
 
 def test_an_operand_with_a_tile_is_its_own_stream():
-    op = MV(M=1024, K=128).resolved(FakeDev(cols=8))
+    op = MV(M=1024, K=128).resolved(NPU2)
     assert {k: (s.count, s.shape) for k, s in op.streams.items()} == {
         "A": (8, (64, 128)),
         "B": (1, (128,)),
@@ -491,7 +486,7 @@ def test_when_names_a_param():
 
 
 def test_a_derived_value_is_written_once_per_build():
-    op = MV(M=1024, K=128).resolved(FakeDev(cols=8))
+    op = MV(M=1024, K=128).resolved(NPU2)
     assert list(op.residents) == ["count"] and op.values == []
     assert op.resident_values() == {"count": 2}
 
@@ -518,8 +513,8 @@ def test_a_value_a_graph_binds_is_per_call_and_no_longer_a_resident():
 
 
 def test_identity_is_the_array_tier_for_sharing_and_every_field_for_a_build():
-    a = MV(M=1024, K=128).resolved(FakeDev(cols=8))
-    b = MV(M=2048, K=128).resolved(FakeDev(cols=8))
+    a = MV(M=1024, K=128).resolved(NPU2)
+    b = MV(M=2048, K=128).resolved(NPU2)
     assert a.array_key() == b.array_key()
     assert a.design_key() != b.design_key()
     assert a.array_key() == (
@@ -536,21 +531,21 @@ def test_array_sees_the_array_tier_alone():
         def array(self, target):
             return self.M
 
-    op = MV(M=1024, K=128).resolved(FakeDev(cols=8))
+    op = MV(M=1024, K=128).resolved(NPU2)
     assert op.build_array(None) == [128, 8, 64, "none"]
     with pytest.raises(TypeError, match="reads M, which no tile names"):
-        Leaky(M=1024, K=128).resolved(FakeDev(cols=8)).build_array(None)
+        Leaky(M=1024, K=128).resolved(NPU2).build_array(None)
 
 
 def test_resolution_fills_every_tunable_or_says_which_it_left():
     with pytest.raises(Unresolvable, match="no vector width"):
-        MV(M=1024, K=24).resolved(FakeDev())
+        MV(M=1024, K=24).resolved(NPU2)
     with pytest.raises(Incompatible, match="not a multiple"):
-        MV(M=1000, K=128).resolved(FakeDev(cols=8))
+        MV(M=1000, K=128).resolved(NPU2)
     ok = MV(M=1024, K=128, columns=2)
     assert not ok._resolved
-    r = ok.resolved(FakeDev(cols=8))
-    assert r._resolved and r.resolved(FakeDev()) is r and (r.columns, r.vec) == (2, 64)
+    r = ok.resolved(NPU2)
+    assert r._resolved and r.resolved(NPU2) is r and (r.columns, r.vec) == (2, 64)
     assert ok.columns == 2 and ok.vec is None  # the original is untouched
 
 
@@ -562,7 +557,7 @@ def test_a_profile_fills_the_tunables_a_call_leaves_open():
         assert (MV(M=1024, K=128).columns, MV(M=1024, K=128).tile_out) == (4, 32)
         assert MV(M=1024, K=256).tile_out == 16 and MV(M=1024, K=256).columns == 4
         assert MV(M=1024, K=256, tile_out=8).tile_out == 8  # what the call gives wins
-        r = MV(M=1024, K=128).resolved(FakeDev(cols=8))
+        r = MV(M=1024, K=128).resolved(NPU2)
         assert (r.columns, r.tile_out, r.vec) == (4, 32, 64)  # resolve fills the rest
     assert MV(M=1024, K=128).columns is None and MV(M=1024, K=128).tile_out == 64
     assert p.lookup(MV(M=1024, K=256)) == {"columns": 4, "tile_out": 16}
@@ -626,7 +621,7 @@ def test_resolve_must_return_a_copy():
 
     op = InPlace(M=1024, K=128)
     with pytest.raises(TypeError, match="must return a copy"):
-        op.resolved(FakeDev())
+        op.resolved(NPU2)
     assert not op._resolved
 
 
