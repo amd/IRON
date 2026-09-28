@@ -46,8 +46,9 @@ def test_prefill_graph_operators_lower_with_their_value(tmp_path):
     traced = model.trace(**model.shapes(model.config.max_seq_len))
     # Every block is bound by the rows the call runs and MHA's masks by the
     # true length; the last row once.
-    assert {b.value.name for b in traced.bindings} == {"rows", "vector_size", "last"}
-    assert [b.value.name for b in traced.bindings].count("last") == 1
+    named = [b.expression.value.name for b in traced.bindings]
+    assert set(named) == {"rows", "vector_size", "last"}
+    assert named.count("last") == 1
     _lower_all(traced, tmp_path)
 
 

@@ -306,6 +306,16 @@ class _Value(_Member["BoundValue"]):
     def __class_getitem__(cls, dtype) -> ValueSpec:
         return ValueSpec(cls.kind, dtype)
 
+    if TYPE_CHECKING:
+        # A graph body's parameter annotated ``Scratchpad[T]`` is the graph's
+        # per-call value (a number in its reference), on which integer
+        # arithmetic is an expression the graph computes per call.
+        def __add__(self, k: int) -> Any: ...
+        def __sub__(self, k: int) -> Any: ...
+        def __mul__(self, k: int) -> Any: ...
+        def __radd__(self, k: int) -> Any: ...
+        def __rmul__(self, k: int) -> Any: ...
+
     def __repr__(self) -> str:
         return f"{type(self).__name__}({np.dtype(self.dtype).name})"
 

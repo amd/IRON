@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Mapping
 from math import prod
 
 import numpy as np
@@ -60,10 +62,11 @@ class Handle:
         self.start = start  # element offset into the parent, for a slice
         # over the parent's buffer, for a view
         self.tap: TensorAccessPattern | None = tap
-        self.index_by: tuple[Value, int] | None = index_by  # (value, axis stride)
-        # axis -> (value, scale): the first value * scale entries of that axis
-        # are the valid ones this call (``x[:n]``); the rest are padding.
-        self.bounds: dict[int, tuple[Value, int]] = dict(bounds or {})
+        # A per-call index, as the element offset it moves the view by.
+        self.index_by: Affine | None = index_by
+        # axis -> the count of that axis's leading entries valid this call
+        # (``x[:n]``); the rest are padding.
+        self.bounds: dict[int, Affine] = dict(bounds or {})
 
     @property
     def elements(self) -> int:
@@ -149,29 +152,30 @@ class Handle:
         index_by = None
         static, shape, bounds = [], [], {}
         for axis, (entry, n) in enumerate(zip(entries, self.shape)):
-            if isinstance(entry, slice) and isinstance(entry.stop, Value):
+            if isinstance(entry, slice) and isinstance(entry.stop, (Value, Affine)):
                 # x[:n]: the first n along this axis are the valid ones.
+                stop = entry.stop.affine()
                 if entry.start not in (None, 0) or entry.step not in (None, 1):
+                    raise ValueError(f"{stop} bounds an axis from its start: [:{stop}]")
+                if stop.value.kind != "scratchpad":
                     raise ValueError(
-                        f"{entry.stop.name} bounds an axis from its start: [:{entry.stop.name}]"
+                        f"{stop} is {stop.value.kind}; only a Scratchpad value can "
+                        f"bound an axis, since it patches a transfer's size"
                     )
-                if entry.stop.kind != "scratchpad":
-                    raise ValueError(
-                        f"{entry.stop.name} is {entry.stop.kind}; only a Scratchpad "
-                        f"value can bound an axis, since it patches a transfer's size"
-                    )
-                bounds[axis] = (entry.stop, 1)
+                # Keyed by the axis of the result: an index before it drops one.
+                bounds[len(shape)] = stop
                 static.append(slice(None))
                 shape.append(n)
-            elif isinstance(entry, Value):
+            elif isinstance(entry, (Value, Affine)):
+                entry = entry.affine()
                 if index_by is not None:
                     raise ValueError("one axis at most is indexed by a per-call value")
-                if entry.kind != "scratchpad":
+                if entry.value.kind != "scratchpad":
                     raise ValueError(
-                        f"{entry.name} is {entry.kind}; only a Scratchpad value can "
+                        f"{entry} is {entry.value.kind}; only a Scratchpad value can "
                         f"index a view, since it moves a transfer's base address"
                     )
-                index_by = (entry, prod(self.shape[axis + 1 :]))
+                index_by = entry * prod(self.shape[axis + 1 :])
                 static.append(0)
             elif isinstance(entry, slice):
                 if entry.step not in (None, 1):
@@ -250,44 +254,118 @@ def state(shape, dtype=bfloat16, name=None) -> State:
     return State(shape, dtype, name)
 
 
-def _rescale_bounds(h: Handle, shape) -> dict[int, tuple["Value", int]]:
+def _rescale_bounds(h: Handle, shape) -> dict[int, Affine]:
     """The bounds of ``h`` on its reshape to ``shape``: a bound on the leading
     axis survives when that axis is merged with the axes after it or split
     into leading ones, the count rescaled by the factor.
     """
     if not h.bounds:
         return {}
-    (axis, (value, scale)), *more = h.bounds.items()
+    (axis, count), *more = h.bounds.items()
     if more or axis != 0:
         raise ValueError(
             f"cannot reshape {h!r}: a bound is carried through a reshape on the "
             f"leading axis only"
         )
     old, new = h.shape[0], int(shape[0])
-    if new == old:
-        return {0: (value, scale)}
     if new % old == 0:
         # Each row becomes new // old rows: as many more of them are valid.
-        return {0: (value, scale * (new // old))}
-    if old % new == 0 and scale % (old // new) == 0:
+        return {0: count * (new // old)}
+    group = old // new
+    if old % new == 0 and count.scale % group == 0 and count.bias % group == 0:
         # Rows are grouped old // new to a row: as many fewer are valid.
-        return {0: (value, scale // (old // new))}
+        return {0: Affine(count.value, count.scale // group, count.bias // group)}
     raise ValueError(
         f"cannot reshape {h!r} to {list(shape)}: the bound on its leading axis "
-        f"({value.name} x {scale}) does not divide into the new leading axis"
+        f"({count}) does not divide into the new leading axis"
     )
 
 
 class Value:
-    """A per-call scalar parameter of a graph's body."""
+    """A per-call scalar parameter of a graph's body.
+
+    Integer arithmetic on one makes an :class:`Affine`: ``position + 1`` or
+    ``chunk * 32`` is what an operator is bound to, and the graph computes
+    it from ``position`` on every call.
+    """
 
     __slots__ = ("name", "kind", "dtype")
 
     def __init__(self, name, kind, dtype):
         self.name, self.kind, self.dtype = name, kind, dtype
 
+    def affine(self) -> Affine:
+        """This value as an expression: itself, once."""
+        return Affine(self)
+
+    def __add__(self, k: int) -> Affine:
+        return self.affine() + k
+
+    def __sub__(self, k: int) -> Affine:
+        return self.affine() - k
+
+    def __mul__(self, k: int) -> Affine:
+        return self.affine() * k
+
+    __radd__, __rmul__ = __add__, __mul__
+
     def __repr__(self) -> str:
         return f"Value({self.name!r}, {self.kind}[{np.dtype(self.dtype).name}])"
+
+
+@dataclasses.dataclass(frozen=True)
+class Affine:
+    """``scale * value + bias`` over the integers: what a binding writes.
+
+    Closed under adding and multiplying by integers, so ``(p + 1) * 64`` is
+    ``Affine(p, 64, 64)``. Evaluated per call from the graph's values.
+    """
+
+    value: Value
+    scale: int = 1
+    bias: int = 0
+
+    def affine(self) -> Affine:
+        return self
+
+    def __add__(self, k: int) -> Affine:
+        if not isinstance(k, (int, np.integer)):
+            return NotImplemented
+        return Affine(self.value, self.scale, self.bias + int(k))
+
+    def __sub__(self, k: int) -> Affine:
+        return self + (-k)
+
+    def __mul__(self, k: int) -> Affine:
+        if not isinstance(k, (int, np.integer)):
+            return NotImplemented
+        return Affine(self.value, self.scale * int(k), self.bias * int(k))
+
+    __radd__, __rmul__ = __add__, __mul__
+
+    @property
+    def dtype(self):
+        return self.value.dtype
+
+    @property
+    def name(self) -> str:
+        """An identifier for the expression: ``p``, ``p_x64``, ``p_x64_p64``,
+        ``p_m1`` (a device symbol carries it, so it names the word).
+        """
+        text = self.value.name + (f"_x{self.scale}" if self.scale != 1 else "")
+        if self.bias:
+            text += f"_{'p' if self.bias > 0 else 'm'}{abs(self.bias)}"
+        return text
+
+    def evaluate(self, values: Mapping[str, int]) -> int:
+        """The number this expression is for the graph's ``values``, by name."""
+        return self.scale * int(values[self.value.name]) + self.bias
+
+    def __str__(self) -> str:
+        text = self.value.name + (f" * {self.scale}" if self.scale != 1 else "")
+        if self.bias:
+            text += f" {'+' if self.bias > 0 else '-'} {abs(self.bias)}"
+        return text
 
 
 def is_operand(x) -> bool:

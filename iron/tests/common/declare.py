@@ -760,7 +760,7 @@ def test_a_bounded_operand_binds_the_extent_and_what_derives_from_it(npu2):
         # for each operand it sizes.
         assert [v.name for v in op.values] == ["valid", "count", "valid_x", "valid_y"]
         assert op.derived_at("valid_x", valid=16) == 8  # 16 rows over 2 lanes
-    assert [(bd.member.name, bd.value.name) for bd in t.bindings] == [
+    assert [(bd.member.name, bd.expression.name) for bd in t.bindings] == [
         ("valid", "n"),
         ("valid", "n"),
     ]

@@ -92,7 +92,7 @@ def _assert_values_in_table(version):
         word = version.shared.get(b.symbol, b.symbol)
         assert (
             word in table
-        ), f"{b.symbol} ({b.value.name}) missing from {sorted(table)}"
+        ), f"{b.symbol} ({b.expression}) missing from {sorted(table)}"
 
 
 def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():

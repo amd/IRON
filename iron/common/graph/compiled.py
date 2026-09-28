@@ -508,19 +508,19 @@ def _words(
     from a bounded extent, computed from the call's bound. The full ELF has
     32 words for its whole image, and a bounded prompt binds its row count
     to every operator's extents, so symbols that always hold one number
-    share a word: those that are one graph value times one ratio (a bound
-    value's scale, or a bounded extent's over the lanes and rows it is
-    divided into), rounded down, in one dtype. Any other derivation keeps
-    its own word.
+    share a word: those that are one graph value times one ratio plus one
+    offset (a bound expression's, or a bounded extent's over the lanes and
+    rows it is divided into), rounded up, in one dtype. Any other
+    derivation keeps its own word.
     """
     dev = aie_utils.get_current_device()
-    # (symbol, dtype, word, (graph value, ratio, dtype) or None)
+    # (symbol, dtype, word, (graph value, ratio, offset, dtype) or None)
     words: list[tuple[str, Any, Callable[[Mapping], Any], Any]] = []
     for b in traced.bindings:
-        key = (b.value.name, Fraction(b.scale), np.dtype(b.member.dtype).name)
-        words.append(
-            (b.symbol, b.value.dtype, lambda v, b=b: v[b.value.name] * b.scale, key)
-        )
+        e = b.expression
+        key = (e.value.name, Fraction(e.scale), Fraction(e.bias))
+        key += (np.dtype(b.member.dtype).name,)
+        words.append((b.symbol, e.dtype, lambda v, e=e: e.evaluate(v), key))
     seen: set[int] = set()
     derived: set[str] = set()
     for b in traced.bindings:
@@ -529,13 +529,13 @@ def _words(
         seen.add(id(b.op))
         op = b.op.resolved(dev)
         extents = {
-            e.member.name: (e.value.name, e.scale)
+            e.member.name: e.expression
             for e in traced.bindings
             if e.op is b.op and isinstance(e.member.member, Extent)
         }
 
         def at(v, extents=extents):
-            return {name: v[graph] * scale for name, (graph, scale) in extents.items()}
+            return {name: count.evaluate(v) for name, count in extents.items()}
 
         for name in sorted(op._per_call_derived() - op.bound_values.keys()):
             word = op.value(name)  # a value the graph binds itself is above
@@ -546,9 +546,13 @@ def _words(
             key = None
             spec = word.member
             if isinstance(spec, _ExtentWord) and spec.extent.name in extents:
-                graph, scale = extents[spec.extent.name]
-                ratio = Fraction(scale, spec.divisor(op))
-                key = (graph, ratio, np.dtype(word.dtype).name)
+                count, divisor = extents[spec.extent.name], spec.divisor(op)
+                key = (
+                    count.value.name,
+                    Fraction(count.scale, divisor),
+                    Fraction(count.bias, divisor),
+                    np.dtype(word.dtype).name,
+                )
             words.append(
                 (
                     symbol,
@@ -567,12 +571,18 @@ def _words(
         for symbol, found in keys.items():
             if len(found) == 1 and None not in found:
                 groups.setdefault(next(iter(found)), []).append(symbol)
-        for (graph, ratio, dtype), symbols in groups.items():
+
+        def spell(r: Fraction) -> str:
+            # An identifier's: m for minus, d for over.
+            den = f"d{r.denominator}" if r.denominator > 1 else ""
+            return f"{'m' if r < 0 else ''}{abs(r.numerator)}{den}"
+
+        for (graph, ratio, offset, dtype), symbols in groups.items():
             if len(symbols) > 1:
-                times = f"{ratio.numerator}" + (
-                    f"d{ratio.denominator}" if ratio.denominator > 1 else ""
-                )
-                shared.update(dict.fromkeys(symbols, f"graph_{graph}_x{times}_{dtype}"))
+                name = f"graph_{graph}_x{spell(ratio)}"
+                if offset:
+                    name += f"{'p' if offset > 0 else 'm'}{spell(abs(offset))}"
+                shared.update(dict.fromkeys(symbols, f"{name}_{dtype}"))
     out, written = [], set()
     for symbol, dtype, word, _ in words:
         symbol = shared.get(symbol, symbol)

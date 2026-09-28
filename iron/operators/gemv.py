@@ -8,7 +8,7 @@ from typing import Any, ClassVar
 import aie.dialects.index as index
 import numpy as np
 from aie.dialects.aie import AIEArch, T
-from aie.iron import Buffer, ObjectFifo, Worker
+from aie.iron import Buffer, ObjectFifo, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, linalg
 from aie.utils.verify import Tolerance
@@ -128,7 +128,7 @@ class GEMV(Operator):
     # under a bound, read by each core.
     tiles = Value(
         np.int32,
-        derive=lambda op: op.valid // (op.num_aie_columns * op.tile_size_output),
+        derive=lambda op: ceildiv(op.valid, op.num_aie_columns * op.tile_size_output),
     )
 
     def extent_unit(self, buffer: str) -> int | None:

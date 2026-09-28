@@ -33,6 +33,7 @@ from typing import (
 import aie.utils as aie_utils
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
+from aie.iron import ceildiv
 from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance
 
@@ -171,6 +172,8 @@ class _ArrayView:
 class _ExtentWord(Value):
     """The tiles per lane of one operand under a bound: the word its
     transfers are patched with, derived from the extent as a ``Value`` is.
+    A bound that ends inside a tile takes the whole tile (the buffer holds
+    whole tiles), so a bound of ``position + 1`` rows covers its last row.
     """
 
     def __init__(self, owner: type, extent: Extent, buffer: str, axis: int) -> None:
@@ -181,7 +184,7 @@ class _ExtentWord(Value):
 
     def _tiles(self, op) -> int:
         extent = getattr(op, self.extent.name)  # read first: it makes this per call
-        return extent // self.divisor(op)
+        return ceildiv(extent, self.divisor(op))
 
     def divisor(self, op) -> int:
         """What the extent is divided by on ``op``, resolved: its lanes

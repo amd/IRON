@@ -23,6 +23,7 @@ from ..declare.operator import graph_tracer
 from ..design import device_symbol
 from ..image.sequence import OperatorSequence
 from .handle import (
+    Affine,
     Handle,
     State,
     Value,
@@ -51,13 +52,14 @@ class TracedStep:
 class Binding:
     """A per-call value of the graph, bound to one operator's value member.
 
-    ``member`` is the value member the site binds.
+    ``member`` is the value member the site binds, and ``expression`` what
+    it is written per call: a graph value, scaled and offset (a per-call
+    index on a view is scaled by the axis stride, to elements).
     """
 
     op: Operator
     member: BoundValue
-    value: Value
-    scale: int = 1  # a per-call index on a view: the axis stride, in elements
+    expression: Affine
 
     @property
     def symbol(self) -> str:
@@ -74,7 +76,7 @@ def _unbounded(h: Handle) -> Handle:
     )
 
 
-def _take_views(cls, operands, kwargs, values, scales):
+def _take_views(cls, operands, kwargs, values):
     """Hand each view operand's pattern to the operator and stand its parent in.
 
     A class that takes views names, in operand order, the param that holds
@@ -93,16 +95,13 @@ def _take_views(cls, operands, kwargs, values, scales):
             if h.bounds:
                 # A bound on one axis of the view: the pattern keeps that
                 # axis and the copy patches its size from the value.
-                (axis, (value, scale)), *more = h.bounds.items()
+                (axis, count), *more = h.bounds.items()
                 if more:
                     raise ValueError(f"{h!r}: a copy takes one bounded axis")
                 kwargs.setdefault(f"{param}_bound", axis)
-                values[f"{param}_valid"] = value
-                scales[f"{param}_valid"] = scale
+                values[f"{param}_valid"] = count
             if h.index_by is not None:
-                value, stride = h.index_by
-                values[offset_member] = value
-                scales[offset_member] = stride
+                values[offset_member] = h.index_by
             # The bound is the pattern's now: the buffer stands in, plain.
             out.append(_unbounded(h.parent if h.tap is not None else h))
         elif h.tap is not None:
@@ -196,7 +195,7 @@ class Tracer:
         self.weights: dict[int, tuple[object, Handle]] = {}
         self.states: dict[int, tuple[State, Handle]] = {}
         self.bindings: list[Binding] = []
-        self._bound: dict[int, dict] = {}  # id(op) -> {member: Value}
+        self._bound: dict[int, dict] = {}  # id(op) -> {member: Affine}
         self._counter = itertools.count()
         # A name per tensor and state the graph holds, by identity.
         self._names = names or {}
@@ -253,14 +252,16 @@ class Tracer:
         inputs, outputs, kwargs = call_operands(cls, args, kwargs)
         names = list(inputs)
         operands = [self.operand(a) for a in [*inputs.values(), *outputs]]
-        # A keyword whose value is a per-call handle binds a value member.
+        # A keyword whose value is a per-call handle (or an expression of
+        # one) binds a value member.
         values = {
-            k: kwargs.pop(k) for k in list(kwargs) if isinstance(kwargs[k], Value)
+            k: kwargs.pop(k)
+            for k in list(kwargs)
+            if isinstance(kwargs[k], (Value, Affine))
         }
         if isinstance(target, type):
             own = self._split_values(cls, values)
-            scales: dict[str, int] = {}
-            operands = _take_views(cls, operands, kwargs, own, scales)
+            operands = _take_views(cls, operands, kwargs, own)
             op = self._construct(
                 cls,
                 dict(zip(names, operands)),
@@ -270,8 +271,7 @@ class Tracer:
         else:
             op = target
             own = self._split_values(type(op), values)
-            scales = {}
-            operands = _take_views(type(op), operands, {}, own, scales)
+            operands = _take_views(type(op), operands, {}, own)
             if kwargs or values:
                 raise TypeError(
                     f"{type(op).__name__} instance called with unexpected keyword "
@@ -282,7 +282,7 @@ class Tracer:
                 f"{type(op).__name__} has no per-call value {sorted(values)}"
             )
         for name, value in own.items():
-            self._bind(op, name, value, scales.get(name, 1))
+            self._bind(op, name, value)
         return self._record(op, operands)
 
     @staticmethod
@@ -311,27 +311,28 @@ class Tracer:
                 continue
             axis = buffer.extent_axis(binding.member.member)
             if axis is not None:
-                bounds[axis] = (binding.value, binding.scale)
+                bounds[axis] = binding.expression
         return bounds
 
-    def _bind(self, op, name, value, scale: int = 1) -> None:
-        if not isinstance(value, Value):
+    def _bind(self, op, name, value) -> None:
+        if not isinstance(value, (Value, Affine)):
             raise TypeError(
                 f"{type(op).__name__}.{name} takes a per-call value handle (a "
                 f"keyword-only parameter of the graph's body), got {value!r}"
             )
+        value = value.affine()
         bound = self._bound.setdefault(id(op), {})
-        if name in bound and bound[name] is not value:
+        if name in bound and bound[name] != value:
             raise ValueError(
-                f"{type(op).__name__}.{name} is bound to {bound[name]!r} at an "
-                f"earlier call site and to {value!r} here; one instance has one "
-                f"value, bind one handle at every site or use two instances"
+                f"{type(op).__name__}.{name} is bound to {bound[name]} at an "
+                f"earlier call site and to {value} here; one instance has one "
+                f"value, bind one expression at every site or use two instances"
             )
         if name not in bound:
             op.use_value(name, value.name)
             bound[name] = value
             member = next(v for v in op.values if v.name == name)
-            self.bindings.append(Binding(op, member, value, scale))
+            self.bindings.append(Binding(op, member, value))
 
     def _record(self, op, operands):
         buffers = op.buffers
@@ -372,7 +373,7 @@ class Tracer:
             bounds = (
                 h.bounds if len(h.shape) == len(shape) else _rescale_bounds(h, shape)
             )
-            for axis, (value, scale) in bounds.items():
+            for axis, count in bounds.items():
                 extent = next(
                     (
                         m
@@ -384,10 +385,10 @@ class Tracer:
                 if extent is None:
                     raise TypeError(
                         f"{type(op).__name__}.{b.name} cannot be bounded per call on "
-                        f"axis {axis} ({value.name}): it declares no Extent for the "
+                        f"axis {axis} ({count}): it declares no Extent for the "
                         f"field sizing it"
                     )
-                self._bind(op, extent.name, value, scale)
+                self._bind(op, extent.name, count)
         slots, outputs, it, given = [], [], iter(operands[: len(ins)]), iter(given_outs)
         for b in buffers:
             if b.direction == "in":
@@ -498,11 +499,11 @@ class _ReferenceTracer(Tracer):
             values = self._split_values(cls, kwargs)
             shapes = [Handle(t.shape, _tensor_dtype(t), "", "input") for t in tensors]
             shapes = [h if k is None else h[k] for h, k in zip(shapes, keys)]
-            shapes = _take_views(cls, shapes, kwargs, {}, {})
+            shapes = _take_views(cls, shapes, kwargs, {})
             op = self._construct(cls, dict(zip(inputs, shapes)), shapes[n_in:], kwargs)
         else:
             op = target
-            values = {}
+            values = self._split_values(cls, kwargs)
         values = {k: v for k, v in values.items() if v is not None}
         result = op.reference(*tensors, **values)
         # A flat-declared output the call did not give keeps the shape of the

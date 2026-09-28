@@ -17,7 +17,7 @@ import dataclasses
 
 import aie.utils as aie_utils
 import numpy as np
-from aie.iron import Buffer, ObjectFifo, Worker, kernels
+from aie.iron import Buffer, ObjectFifo, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
@@ -112,7 +112,9 @@ class RoPE(Operator):
     valid_angles = Extent(angle_rows)
     # Angle rows each core consumes, and input rows per angle row: the
     # core's trip counts, written once per build, or per call under a bound.
-    lut_rows = Value(np.int32, derive=lambda op: op.valid_angles // op.num_aie_columns)
+    lut_rows = Value(
+        np.int32, derive=lambda op: ceildiv(op.valid_angles, op.num_aie_columns)
+    )
     rows_per_lut = Value(np.int32, derive=lambda op: op.valid // op.valid_angles)
 
     def validate(self) -> None:

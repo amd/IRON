@@ -48,7 +48,7 @@ import dataclasses
 from typing import ClassVar, Self
 
 import numpy as np
-from aie.iron import Buffer, ObjectFifo, Worker
+from aie.iron import Buffer, ObjectFifo, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.kernel import ExternalFunction
 from aie.utils.verify import Tolerance
@@ -94,7 +94,8 @@ class Elementwise(Operator):
     # first transfer, so the array does not depend on the extent; per call
     # when a graph bounds the extent (``x[:n]``), read by each core.
     count = Value(
-        np.int32, derive=lambda op: op.valid_elements // (op.cores * op.tile_size)
+        np.int32,
+        derive=lambda op: ceildiv(op.valid_elements, op.cores * op.tile_size),
     )
 
     default_tile: ClassVar[int] = DEFAULT_TILE

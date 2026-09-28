@@ -23,7 +23,7 @@ from iron.common import DispatchTime, Profile, Scratchpad
 from iron.common.design.build import device_symbol
 from iron.common.graph import Handle, TracedGraph, Tracer
 from iron.common.graph.compiled import _words
-from iron.common.graph.handle import Value
+from iron.common.graph.handle import Affine, Value
 from iron.common.image import OperatorSequence
 from iron.lm.layers import SwiGLU
 from iron.operators.copy import Copy
@@ -124,7 +124,7 @@ def test_per_call_values_bind_to_the_operator_and_enable_it():
     ffn, _ = _ffn()
     t = ffn.trace(x=(1, E))
     (binding,) = t.bindings
-    op, value = binding.op, binding.value
+    op, value = binding.op, binding.expression.value
     assert type(op) is Copy and binding.member.name == "out_offset"
     assert value.name == "pos" and value.kind == "scratchpad"
     assert op.uses_value("out_offset") and not op.uses_value("in_offset")
@@ -187,15 +187,17 @@ def test_alike_instances_bound_to_different_values_are_different_designs():
     f = F()
 
     t = f.trace(x=(4, 16))
-    by_value = {b.value.name: b for b in t.bindings}
+    by_value = {b.expression.value.name: b for b in t.bindings}
     assert len(t.bindings) == 3 and set(by_value) == {"a", "b"}
     first, second, third = t.bindings
-    assert first.op.bound_values == {"out_offset": "a"}
+    assert first.expression == t.values[0] * 16  # an element offset: a rows of 16
+    assert first.op.bound_values == {"out_offset": "a_x16"}
     assert first.op.design_key() != second.op.design_key()
     assert first.op.design_key() == third.op.design_key()
     symbols = [device_symbol(b.op, b.member) for b in t.bindings]
     assert symbols[0] != symbols[1] and symbols[0] == symbols[2]
-    assert symbols[0].endswith("_out_offset_a") and symbols[1].endswith("_out_offset_b")
+    assert symbols[0].endswith("_out_offset_a_x16")
+    assert symbols[1].endswith("_out_offset_b_x16")
 
 
 def test_an_explicit_instance_checks_its_operands_shapes():
@@ -222,7 +224,7 @@ def test_binding_two_handles_to_one_instance_is_an_error():
 
     two = Two()
 
-    with pytest.raises(ValueError, match="bound to Value\\('a'"):
+    with pytest.raises(ValueError, match="bound to a at an earlier call site"):
         two.trace(x=(64,))
 
 
@@ -428,17 +430,22 @@ def test_llama_decode_traces_and_tunes():
     assert t.input_args == ["x", "angles"] and t.output_args == ["out"]
     # One function, so every version takes every value; one token binds two.
     assert [v.name for v in t.values] == ["rows", "cache_offset", "vector_size", "last"]
-    assert {b.value.name for b in t.bindings} == {"cache_offset", "vector_size"}
+    assert {b.expression.value.name for b in t.bindings} == {
+        "cache_offset",
+        "vector_size",
+    }
     # The weights are named from the model; the caches are pinned state.
     assert "layers.1.q" in t.pinned and "keys.0" in t.pinned
     assert t.pinned["keys.0"] == cfg.n_kv_groups * L * cfg.head_dim * 2
     # One strided copy instance per layer is bound to cache_offset on both of
     # its call sites; every softmax binds vector_size.
     copies = [
-        (b.op, b.member.name) for b in t.bindings if b.value.name == "cache_offset"
+        (b.op, b.member.name)
+        for b in t.bindings
+        if b.expression.value.name == "cache_offset"
     ]
     assert len(copies) == cfg.n_layers * 2 and all(n == "out_offset" for _, n in copies)
-    softmaxes = [b.op for b in t.bindings if b.value.name == "vector_size"]
+    softmaxes = [b.op for b in t.bindings if b.expression.value.name == "vector_size"]
     assert len(softmaxes) == cfg.n_layers
     assert all(s.uses_value("vector_size") for s in softmaxes)
     # The same array serves every layer's like projections.
@@ -509,7 +516,8 @@ def test_llama_prompt_traces_over_the_same_caches():
     # One slice at the top bounds every operator of every block by the rows
     # the call runs; the tail (the last row's copy, the norm and the head)
     # runs one row and is not.
-    by_rows = [op for op, *_ in t.runlist if "rows" in op.bound_values.values()]
+    rows = {id(b.op) for b in t.bindings if b.expression.value.name == "rows"}
+    by_rows = [op for op, *_ in t.runlist if id(op) in rows]
     assert len(by_rows) == len(per_block) * cfg.n_layers
     mha = next(op for op, *_ in t.runlist if type(op).__name__ == "MHA")
     assert mha.bound_values == {
@@ -640,11 +648,11 @@ def test_a_bound_travels_through_reshape_and_transpose():
     n = Value("n", "scratchpad", np.int32)
     x = Handle((64, 8, 4), bfloat16, "x", "input")
     b = x[:n]
-    assert b.shape == x.shape and b.bounds == {0: (n, 1)} and b.tap is None
-    assert b.reshape(512, 4).bounds == {0: (n, 8)}  # merged with the axis after it
-    assert b.reshape(64 * 8 * 4).bounds == {0: (n, 32)}
-    assert b.reshape(512, 4).reshape(64, 8, 4).bounds == {0: (n, 1)}  # split back
-    assert b.transpose(1, 0, 2).bounds == {1: (n, 1)}
+    assert b.shape == x.shape and b.bounds == {0: n.affine()} and b.tap is None
+    assert b.reshape(512, 4).bounds == {0: n * 8}  # merged with the axis after it
+    assert b.reshape(64 * 8 * 4).bounds == {0: n * 32}
+    assert b.reshape(512, 4).reshape(64, 8, 4).bounds == {0: n.affine()}  # split back
+    assert b.transpose(1, 0, 2).bounds == {1: n.affine()}
     with pytest.raises(ValueError, match="does not divide"):
         b.reshape(32, 16, 4)  # a leading axis no run of the others makes
     assert b[0].bounds == {} and b[0].shape == (8, 4)  # one row: no bound
@@ -652,6 +660,120 @@ def test_a_bound_travels_through_reshape_and_transpose():
         b[0:2]
     with pytest.raises(ValueError, match="from its start"):
         x[2:n]
+
+
+def test_per_call_values_are_integer_expressions():
+    """Integer arithmetic on a per-call value is an :class:`Affine` of it,
+    which a binding writes and names its word by.
+    """
+    p = Value("p", "scratchpad", np.int32)
+    assert (p + 1) * 64 == Affine(p, 64, 64) == 64 * (1 + p)
+    assert (p - 1).evaluate({"p": 5}) == 4 and (p * 3 + 2).evaluate({"p": 5}) == 17
+    assert [e.name for e in (p.affine(), p * 64, (p + 1) * 64, p - 1)] == [
+        "p",
+        "p_x64",
+        "p_x64_p64",
+        "p_m1",
+    ]
+    assert str((p + 1) * 64) == "p * 64 + 64"
+    with pytest.raises(TypeError):
+        _ = p * 0.5  # pyright: ignore[reportOperatorIssue] (a word is an integer)
+
+
+def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
+    """``cache.reshape(G, L // C, C, D)[:, chunk, :rows]`` drops the chunk
+    axis: the bound is on axis 1 of the view, and the index an offset of
+    whole chunks.
+    """
+    chunk = Value("chunk", "scratchpad", np.int32)
+    rows = Value("rows", "scratchpad", np.int32)
+    G, L, C, D = 2, 64, 16, 8
+    cache = Handle((G, L // C, C, D), bfloat16, "cache", "state")
+    v = cache[:, chunk, : rows + 1]
+    assert v.shape == (G, C, D) and v.bounds == {1: rows + 1}
+    assert v.index_by == chunk * (C * D)
+
+    keys = iron.state((G, L, D), name="keys")
+
+    class Chunked(iron.Graph):
+        def body(self, x, *, chunk: Scratchpad[np.int32], rows: Scratchpad[np.int32]):
+            k = x[:rows].reshape(C, G, D).transpose(1, 0, 2)
+            Copy(k, keys.reshape(G, L // C, C, D)[:, chunk, :rows])
+
+    t = Chunked().trace(x=(C, G * D))
+    (copy,) = t.operators
+    assert copy.dst_bound == 1 and copy.bound_values == {
+        "src_valid": "rows",
+        "out_offset": f"chunk_x{C * D}",
+        "dst_valid": "rows",
+    }
+
+
+def test_a_bound_rounds_up_to_the_tiles_it_ends_in(npu2):
+    """A bound ending inside a tile takes the tile: the words of tiles per
+    lane and the trip counts derived from it round up, so ``p + 1`` rows
+    reach their last row; at a whole number of tiles nothing changes.
+    """
+
+    class G(iron.Graph):
+        def body(self, x, y, *, p: Scratchpad[np.int32]):
+            return ElementwiseAdd(x[: p + 1], y[: p + 1])
+
+    t = G().trace(x=(64, 512), y=(64, 512))
+    (op,) = t.operators
+    op = op.resolved(aie_utils.get_current_device())
+    per_word = op.cores * op.tile_size  # elements one word of tiles covers
+    words = {symbol: word for symbol, _, word in _words(t)[0]}
+    for p in range(64):
+        elements = (p + 1) * 512
+        tiles = -(-elements // per_word)
+        assert words[f"{op.name}_valid_p_x512_p512"]({"p": p}) == elements
+        assert words[f"{op.name}_count"]({"p": p}) == tiles
+        assert words[f"{op.name}_valid_a"]({"p": p}) == tiles
+        assert tiles * per_word >= elements and tiles * per_word <= 64 * 512
+
+
+def test_words_with_an_offset_share_by_ratio_and_offset(npu2):
+    """Symbols share a word when they are one ratio and one offset of a
+    graph value; the word, rounded up, is each one's own number.
+    """
+
+    class G(iron.Graph):
+        def body(self, x, y, *, p: Scratchpad[np.int32]):
+            return ElementwiseMul(ElementwiseAdd(x[: p + 1], y[: p + 1]), y[: p + 1])
+
+    t = G().trace(x=(64, 512), y=(64, 512))
+    alone, _ = _words(t)
+    words, shared = _words(t, share=True)
+    assert len(words) == 4
+    assert sorted(set(shared.values())) == [
+        "graph_p_x1d4p1d4_int32",
+        "graph_p_x512p512_int32",
+    ]
+    for p in range(64):
+        mine = {symbol: word({"p": p}) for symbol, _, word in words}
+        for symbol, _, word in alone:
+            assert mine[shared.get(symbol, symbol)] == word({"p": p})
+
+
+def test_the_reference_computes_the_expressions(npu2):
+    """The reference runs the body on numbers: ``p + 1`` is the row the
+    copy writes, as the device's offset word is.
+    """
+    keys = iron.state((2, 8, 4), name="keys")
+
+    class Write(iron.Graph):
+        def body(self, x, *, p: Scratchpad[np.int32]):
+            Copy(x, keys[:, p + 1])
+
+    g = Write()
+    t = g.trace(x=(2, 4))
+    (b,) = t.bindings
+    assert b.expression == (t.values[0] + 1) * 4  # a row of the cache is 4 long
+    x = np.arange(8, dtype=np.float32).astype(bfloat16).reshape(2, 4)
+    g.reference(x, p=2)
+    assert keys.host is not None
+    assert (keys.host[:, 3] == x).all() and not keys.host[:, :3].any()
 
 
 def test_the_words_a_call_writes_come_from_the_bound(npu2):
@@ -669,10 +791,10 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
     (op,) = t.operators
     words = {symbol: word for symbol, _, word in _words(t)[0]}
     assert set(words) == {
-        f"{op.name}_{w}" for w in ("valid_n", "count", "valid_x", "valid_y")
+        f"{op.name}_{w}" for w in ("valid_n_x8", "count", "valid_x", "valid_y")
     }
     call = {"n": 16}
-    assert words[f"{op.name}_valid_n"](call) == 16 * 8  # the reshape's scale
+    assert words[f"{op.name}_valid_n_x8"](call) == 16 * 8  # the reshape's scale
     assert words[f"{op.name}_count"](call) == 16 * 8 // 2  # derived: valid // lanes
     assert words[f"{op.name}_valid_x"](call) == 16 * 8 // 2  # tiles per lane
 
@@ -688,8 +810,9 @@ def test_a_bound_on_rows_reaches_a_flat_buffer_in_elements(npu2):
 
     g = G()
 
-    (b,) = g.trace(x=(64, 512), y=(64, 512)).bindings
-    assert (b.member.name, b.value.name, b.scale) == ("valid", "n", 512)
+    t = g.trace(x=(64, 512), y=(64, 512))
+    (b,) = t.bindings
+    assert (b.member.name, b.expression) == ("valid", t.values[0] * 512)
 
 
 def test_words_that_always_hold_one_number_share_it(npu2):
@@ -738,13 +861,14 @@ def test_a_bound_reaches_a_copy_and_a_repeat_through_their_views(npu2):
     assert copy.src_bound == 1 and copy.dst_bound == 1
     assert copy.bound_values == {"src_valid": "n", "dst_valid": "n"}
     assert rep.bound_extents == {"valid_seq": "c"}
-    assert [(b.member.name, b.value.name, b.scale) for b in t.bindings] == [
-        ("src_valid", "n", 1),
-        ("dst_valid", "n", 1),
-        ("valid_seq", "c", 1),
+    n, c = t.values
+    assert [(b.member.name, b.expression) for b in t.bindings] == [
+        ("src_valid", n.affine()),
+        ("dst_valid", n.affine()),
+        ("valid_seq", c.affine()),
     ]
     (out,) = t.outputs
-    assert out.shape == (2 * G, L, D) and out.bounds == {1: (t.values[1], 1)}
+    assert out.shape == (2 * G, L, D) and out.bounds == {1: t.values[1].affine()}
     rep = rep.resolved(aie_utils.get_current_device())
     assert rep.derived_at("valid_seq_x", valid_seq=12) == 12  # the stack axis itself
 
@@ -785,4 +909,4 @@ def test_gemm_and_mha_bound_their_compute_not_their_traffic(npu2):
     assert mha.derived_at("q_blocks_valid", valid=100) == 1  # 128 padded / (64 x 2)
     assert mha.derived_at("kv_blocks_valid", valid=100) == 2  # ceil(100 / 64)
     (out,) = t.outputs
-    assert out.bounds == {0: (t.values[0], 1)}  # O is bounded like Q
+    assert out.bounds == {0: t.values[0].affine()}  # O is bounded like Q
