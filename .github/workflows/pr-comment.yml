@@ -210,9 +210,9 @@ jobs:
                   body: text,
                 });
 
-            // GitHub rejects an oversized body with 422. The 65536 characters
-            // its message names is not the enforced ceiling: bodies of 140k
-            // post. Halving until it fits avoids guessing that ceiling.
+            // GitHub rejects an oversized body with 422, but the 65536 characters its
+            // message names is not the enforced ceiling (140k bodies post), so
+            // there is no constant here worth comparing against.
             let text = body;
             while (true) {
               try {
