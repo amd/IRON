@@ -21,6 +21,7 @@ _OPERATOR_MODULES = {
     "Dequant": "dequant",
     "ElementwiseAdd": "elementwise_add",
     "ElementwiseMul": "elementwise_mul",
+    "Emit": "emit",
     "GELU": "gelu",
     "GEMM": "gemm",
     "GEMV": "gemv",
