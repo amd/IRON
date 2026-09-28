@@ -38,7 +38,7 @@ from iron.common import (
 )
 from iron.common.declare.field import DimRef
 from iron.common.declare.infer import infer
-from iron.common.design import DesignGenerator, generator_for
+from iron.common.design import OperatorDesign
 
 NPU2 = from_name("npu2", n_cols=8)
 
@@ -392,11 +392,11 @@ def test_an_exported_design_replaces_the_derived_one():
         y = Out(n)
 
         def exported_design(self, image):
-            return DesignGenerator(fn=lambda: "module {}")
+            return lambda: "module {}"
 
     op = Exported(n=64)
     assert [b.shape for b in op.buffers] == [(64,), (64,)]
-    assert generator_for(op)() == "module {}"
+    assert OperatorDesign(op).generator() == "module {}"
     assert op.configuration() is op
 
 

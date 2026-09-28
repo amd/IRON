@@ -16,15 +16,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from iron.common.image import OperatorSequence
 from iron.common.image.allocator import (
     Allocation,
     ArenaPlan,
     LiveRange,
-    live_ranges,
-    peak_live_bytes,
-    place,
-    touch_ranges,
+    Pool,
 )
+from iron.common.image.sequence import ALIGNMENT
+from iron.operators import ElementwiseAdd
 
 
 def _buf(direction):
@@ -84,12 +84,12 @@ def test_sequential_chain_double_buffers():
     """
     op = Op(1)
     runlist = [(op, "x", "a"), (op, "a", "b"), (op, "b", "c"), (op, "c", "out")]
-    ranges = live_ranges(steps_of(runlist))
+    ranges = LiveRange.scan(steps_of(runlist))
     sizes = dict.fromkeys(ranges, 1024)
-    allocations, pool = place(ranges, sizes)
+    allocations, pool = Pool().place(ranges, sizes)
     assert pool == 2048, f"a chain should ping-pong between two slots, got {pool}"
     assert allocations["a"].offset == allocations["c"].offset, "a and c should alias"
-    assert pool == peak_live_bytes(ranges, sizes)
+    assert pool == LiveRange.peak(ranges, sizes)
     assert_no_overlap(allocations, ranges)
 
 
@@ -101,9 +101,9 @@ def test_simultaneously_live_buffers_do_not_share():
         (unary, "x", "right"),
         (binary, "left", "right", "out"),
     ]
-    ranges = live_ranges(steps_of(runlist))
+    ranges = LiveRange.scan(steps_of(runlist))
     sizes = dict.fromkeys(ranges, 4096)
-    allocations, pool = place(ranges, sizes)
+    allocations, pool = Pool().place(ranges, sizes)
     assert pool == 8192, f"two co-live buffers need both slots, got {pool}"
     assert_no_overlap(allocations, ranges)
 
@@ -111,7 +111,7 @@ def test_simultaneously_live_buffers_do_not_share():
 def test_pinned_buffers_are_not_pooled():
     op = Op(1)
     runlist = [(op, "x", "scratch"), (op, "scratch", "keep"), (op, "keep", "out")]
-    ranges = live_ranges(steps_of(runlist), pinned={"keep"})
+    ranges = LiveRange.scan(steps_of(runlist), pinned={"keep"})
     assert "keep" not in ranges
     assert "scratch" in ranges
 
@@ -120,7 +120,7 @@ def test_graph_inputs_and_outputs_are_left_alone():
     """Values the host supplies or reads back outlive the sequence."""
     op = Op(1)
     runlist = [(op, "x", "mid"), (op, "mid", "logits")]
-    ranges = live_ranges(steps_of(runlist))
+    ranges = LiveRange.scan(steps_of(runlist))
     assert "x" not in ranges, "an input is never written; not ours to pool"
     assert "logits" not in ranges, "an output is never read again; host reads it"
     assert "mid" in ranges
@@ -141,12 +141,12 @@ def test_repeated_block_packs_to_one_block_worth():
         prev = f"t_{layer}"
     runlist.append((unary, prev, "logits"))
 
-    ranges = live_ranges(steps_of(runlist))
+    ranges = LiveRange.scan(steps_of(runlist))
     sizes = {n: 1 << 20 for n in ranges}
-    allocations, pool = place(ranges, sizes)
+    allocations, pool = Pool().place(ranges, sizes)
 
     naive = sum(sizes.values())
-    assert pool == peak_live_bytes(ranges, sizes), "should hit the lower bound"
+    assert pool == LiveRange.peak(ranges, sizes), "should hit the lower bound"
     assert pool <= 2 << 20, f"16 layers should fold to two slots, got {pool}"
     assert pool < naive // 10, f"expected a big win over {naive}, got {pool}"
     assert_no_overlap(allocations, ranges)
@@ -160,25 +160,25 @@ def test_mixed_sizes_reach_the_lower_bound():
         runlist.append((unary, prev, f"b{i}"))
         prev = f"b{i}"
     runlist.append((unary, prev, "out"))
-    ranges = live_ranges(steps_of(runlist))
+    ranges = LiveRange.scan(steps_of(runlist))
     sizes = {n: (1 + (i * 7) % 5) * 4096 for i, n in enumerate(sorted(ranges))}
-    allocations, pool = place(ranges, sizes)
-    assert pool == peak_live_bytes(ranges, sizes)
+    allocations, pool = Pool().place(ranges, sizes)
+    assert pool == LiveRange.peak(ranges, sizes)
     assert_no_overlap(allocations, ranges)
 
 
 def test_offsets_are_aligned():
     unary, binary = Op(1), Op(2)
     runlist = [(unary, "x", "a"), (unary, "x", "b"), (binary, "a", "b", "out")]
-    ranges = live_ranges(steps_of(runlist))
+    ranges = LiveRange.scan(steps_of(runlist))
     sizes = {n: 100 for n in ranges}  # deliberately not a multiple of 64
-    allocations, _ = place(ranges, sizes, alignment=64)
+    allocations, _ = Pool(64).place(ranges, sizes)
     for a in allocations.values():
         assert a.offset % 64 == 0, f"{a.name} at unaligned offset {a.offset}"
 
 
 def test_empty_graph():
-    allocations, pool = place({}, {})
+    allocations, pool = Pool().place({}, {})
     assert allocations == {} and pool == 0
 
 
@@ -190,9 +190,6 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 def _two_step_sequence(buffer_offsets):
     """A tiny real sequence: one weight-like buffer plus one intermediate."""
-    from iron.common.image import OperatorSequence
-    from iron.operators import ElementwiseAdd
-
     add = ElementwiseAdd(size=1024, tile_size=128)
     runlist = [(add, "w", "x", "t0"), (add, "w", "t0", "out")]
     seq = OperatorSequence(
@@ -242,9 +239,6 @@ def test_layout_is_unchanged_without_offsets():
 
 def _chain(n_intermediates, plan_scratch):
     """A chain where each intermediate dies as the next is produced."""
-    from iron.common.image import OperatorSequence
-    from iron.operators import ElementwiseAdd
-
     add = ElementwiseAdd(size=1024, tile_size=128)
     names = [f"t{i}" for i in range(n_intermediates)]
     runlist = [(add, "x", "w", names[0])]
@@ -276,8 +270,6 @@ def test_planned_buffers_never_share_bytes_while_both_live():
     This is the one failure mode in planning that does not announce itself:
     two buffers aliased while both are live produce wrong numbers, not a crash.
     """
-    from iron.common.image.allocator import LiveRange
-
     layout, _ = _chain(4, plan_scratch=True)
     scratch = {k: v for k, v in layout.items() if v[0] == "scratch"}
     # t_i is live from step i to step i+1, so consecutive ones overlap.
@@ -301,9 +293,6 @@ def test_slices_are_never_pooled():
     raises -- the slice simply reads the wrong memory. Found by probing the
     written-slice case, which the whole-buffer tests above cannot reach.
     """
-    from iron.common.image import OperatorSequence
-    from iron.operators import ElementwiseAdd
-
     add = ElementwiseAdd(size=1024, tile_size=128)
     seq = OperatorSequence(
         "slice_pooling_probe",
@@ -323,14 +312,14 @@ def test_slices_are_never_pooled():
 # --- touch ranges: the rule for arenas whose host-visible buffers live elsewhere
 
 
-def test_touch_ranges_span_first_to_last_use_whatever_the_direction():
+def test_touching_ranges_span_first_to_last_use_whatever_the_direction():
     steps = [
         ([], ["a"]),  # 0: a written
         (["a"], ["dead"]),  # 1: dead written, never read
         (["early"], ["b"]),  # 2: early read before any write
         (["b", "a"], ["early"]),  # 3
     ]
-    ranges = touch_ranges(steps, ["a", "b", "dead", "early", "unused"])
+    ranges = LiveRange.touching(steps, ["a", "b", "dead", "early", "unused"])
     assert ranges["a"] == LiveRange(0, 3)
     assert ranges["b"] == LiveRange(2, 3)
     assert ranges["dead"] == LiveRange(1, 1), "a dead write still needs its step"
@@ -338,8 +327,8 @@ def test_touch_ranges_span_first_to_last_use_whatever_the_direction():
     assert ranges["unused"] == LiveRange(0, 3), "an untouched buffer is always live"
 
 
-def test_touch_ranges_ignore_names_not_asked_for():
-    ranges = touch_ranges([(["x"], ["y"])], ["y"])
+def test_touching_ranges_ignore_names_not_asked_for():
+    ranges = LiveRange.touching([(["x"], ["y"])], ["y"])
     assert set(ranges) == {"y"}
 
 
@@ -349,7 +338,7 @@ def test_touch_ranges_ignore_names_not_asked_for():
 def test_fixed_allocations_are_obstacles_at_every_step():
     fixed = [Allocation("w", 0, 1000)]
     ranges = {"t": LiveRange(0, 0), "u": LiveRange(5, 5)}
-    allocations, _ = place(ranges, {"t": 64, "u": 64}, 64, fixed=fixed)
+    allocations, _ = Pool(64).place(ranges, {"t": 64, "u": 64}, fixed=fixed)
     for a in allocations.values():
         assert not a.overlaps(fixed[0]), f"{a} placed over a fixed allocation"
         assert a.offset == 1024, "the first aligned byte past the fixed one"
@@ -357,7 +346,7 @@ def test_fixed_allocations_are_obstacles_at_every_step():
 
 def test_a_gap_between_fixed_allocations_is_used_when_it_fits():
     fixed = [Allocation("lo", 0, 64), Allocation("hi", 1024, 64)]
-    allocations, top = place({"t": LiveRange(0, 0)}, {"t": 900}, 64, fixed=fixed)
+    allocations, top = Pool(64).place({"t": LiveRange(0, 0)}, {"t": 900}, fixed=fixed)
     assert allocations["t"].offset == 64
     assert top == 964
 
@@ -367,7 +356,7 @@ def test_odd_sizes_never_leave_an_offset_unaligned():
     ranges = {f"b{i}": LiveRange(0, 0) for i in range(6)}
     sizes = {n: 9 * (i + 1) for i, n in enumerate(ranges)}
     fixed = [Allocation("w", 0, 27)]
-    allocations, _ = place(ranges, sizes, 128, fixed=fixed)
+    allocations, _ = Pool(128).place(ranges, sizes, fixed=fixed)
     for a in allocations.values():
         assert a.offset % 128 == 0, f"{a.name} at {a.offset}"
 
@@ -453,8 +442,8 @@ def test_one_image_reaches_the_lower_bound_above_its_residents():
     sizes["w"] = 8192 + 9
     steps = _chain_steps(names)
     layout = arena.place_image(steps, sizes, {"w": "W"})
-    transient = touch_ranges(steps, names)
-    bound = peak_live_bytes(transient, sizes)
+    transient = LiveRange.touching(steps, names)
+    bound = LiveRange.peak(transient, sizes)
     top = max(a.end for n, a in layout.items() if n != "w")
     assert top - (layout["w"].end + 64 - 9) == bound
 
@@ -508,7 +497,7 @@ def test_random_images_keep_every_invariant(seed):
 
     for steps, used, layout in images:
         transients = {n: a for n, a in layout.items() if n not in used}
-        ranges = touch_ranges(steps, transients)
+        ranges = LiveRange.touching(steps, transients)
         for a in transients.values():
             assert a.offset % alignment == 0, f"{a} unaligned"
             assert a.end <= arena.size
@@ -521,13 +510,11 @@ def test_random_images_keep_every_invariant(seed):
 
 
 def _add():
-    from iron.operators import ElementwiseAdd
 
     return ElementwiseAdd(size=1024, tile_size=128)
 
 
 def _arena_sequence(name, runlist, arena, residents, buffer_sizes=None, **kwargs):
-    from iron.common.image import OperatorSequence
 
     return OperatorSequence(
         name,
@@ -617,7 +604,6 @@ def test_residents_must_be_scratch_buffers():
 
 
 def test_an_arena_needs_an_image_that_addresses_scratch_by_offset():
-    from iron.common.image import OperatorSequence
 
     with pytest.raises(ValueError, match="full ELF"):
         OperatorSequence(
@@ -642,9 +628,6 @@ def test_back_to_back_buffers_start_aligned_whatever_their_sizes():
     """Without a plan, pinned buffers pack in order -- each still on a
     boundary a host view and a DMA burst can start at.
     """
-    from iron.common.image import OperatorSequence
-    from iron.common.image.sequence import ALIGNMENT
-
     add = _add()
     seq = OperatorSequence(
         "odd_pinned",

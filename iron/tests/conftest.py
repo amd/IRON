@@ -11,9 +11,7 @@ collect any module here (e.g. ``sequence.py``) regardless of its name.
 
 import fnmatch
 
-import aie.utils as aie_utils
 import pytest
-from aie.iron.device import from_name
 
 _EXCLUDED_NAMES = {"conftest.py", "__init__.py"}
 
@@ -30,15 +28,3 @@ def pytest_collect_file(parent, file_path):
     if any(fnmatch.fnmatch(file_path.name, pat) for pat in patterns):
         return None
     return pytest.Module.from_parent(parent, path=file_path)
-
-
-@pytest.fixture
-def npu2():
-    """An eight-column NPU2 bound as the current device, the previous one
-    restored after: what a test that resolves or compiles device-free needs.
-    """
-    previous = aie_utils.get_current_device()
-    device = from_name("npu2", n_cols=8)
-    aie_utils.set_current_device(device)
-    yield device
-    aie_utils.set_current_device(previous)

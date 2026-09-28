@@ -25,7 +25,7 @@ import subprocess
 import pytest
 
 from iron.common import Incompatible, Unresolvable
-from iron.common.design import generator_for
+from iron.common.design import OperatorDesign
 from iron.tests.common.cases import CASES
 from iron.tests.toolchain.tools import AIECC, requires
 
@@ -46,7 +46,7 @@ def lower(op, tmp_path, name=None):
     # compile() does: what stays registered is the next test's collision.
     ExternalFunction._instances.clear()
     try:
-        src.write_text(str(generator_for(op)()))
+        src.write_text(str(OperatorDesign(op).generator()))
         # aiecc merges these into the core IR it probes, reading them beside
         # the MLIR; the object-linked kernels it never reads here.
         merged = [f for f in ExternalFunction._instances if f.link_with_mode == "merge"]

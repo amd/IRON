@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
+
 import aie.utils as aie_utils
 from ml_dtypes import bfloat16
 
-from iron.common import DesignGenerator, In, Operator, Out, param
+from iron.common import In, Operator, Out, param
 from iron.common.image import OperatorSequence
 
 # stream-dse is optional: importing the operator does not need it, building does.
@@ -57,7 +59,7 @@ class SwiGLUStreamGroup(Operator):
         return _stream_design().group_digest(**self._dims())
 
     def exported_design(self, image: str):
-        return DesignGenerator(fn=_stream_design().load_group, kwargs=self._dims())
+        return functools.partial(_stream_design().load_group, **self._dims())
 
     @classmethod
     def for_ports(cls, inputs, outputs) -> type["SwiGLUStreamGroup"]:

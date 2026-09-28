@@ -41,9 +41,7 @@ def test_the_trip_count_is_a_resident_the_build_writes():
     assert lines[-1] == "  count: written once per build, 1 here"
     # The preamble writes it into each core's runtime-parameter buffer.
     one_core = ReLU(size=2560, num_aie_columns=1, tile_size=256)
-    assert "aiex.npu.rtp_write(@count_0, 0, %c10_i32)" in str(
-        build_design(NPU2, one_core)
-    )
+    assert "aiex.npu.rtp_write(@count_0, 0, %c10_i32)" in str(build_design(one_core))
 
 
 def test_an_operator_written_by_inheritance_inherits_the_sweep():

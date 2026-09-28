@@ -13,7 +13,7 @@ from aie.utils import bfp
 from aie.utils.hostruntime.tensor_class import COHERENCE_GRANULE
 
 from ..declare import Operator
-from .allocator import Allocation, ArenaPlan, align_up, live_ranges, place
+from .allocator import Allocation, ArenaPlan, LiveRange, Pool
 from .artifacts import Artifacts, Design, Step
 from .callable import (
     ScratchArena,
@@ -23,7 +23,6 @@ from .callable import (
     SequenceXclbinCallable,
 )
 from .fused import FusedImage, XclbinChain
-from .jit_compile import cache_entry
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +86,6 @@ class OperatorSequence:
         arena: ArenaPlan | None = None,
         residents: Mapping[str, Hashable] | None = None,
         shared_words: Mapping[str, str] | None = None,
-        *args,
-        **kwargs,
     ):
         mode = self._coerce_dispatch(dispatch)
         if arena is not None and mode not in (None, "fused", "reference"):
@@ -106,12 +103,6 @@ class OperatorSequence:
                 "runlist entries must be (Operator, *str) tuples; "
                 "each operator must be an Operator and each buffer name must be a str"
             )
-        if args:
-            raise TypeError(
-                f"OperatorSequence takes no positional extras, got {args!r}"
-            )
-        if kwargs:
-            raise TypeError(f"unexpected keyword arguments {sorted(kwargs)}")
         self.runlist = runlist
         # Sharing changes which designs are built, so it belongs in the label
         # the chain's kernel instances are named from.
@@ -209,8 +200,8 @@ class OperatorSequence:
         # Pooling one would hand it an address unrelated to its parent, which
         # is silent -- the slice simply reads the wrong memory.
         pinned |= {name for name in sizes if "[" in name}
-        ranges = live_ranges(steps, pinned=pinned)
-        allocations, _ = place(ranges, sizes, ALIGNMENT)
+        ranges = LiveRange.scan(steps, pinned=pinned)
+        allocations, _ = Pool(ALIGNMENT).place(ranges, sizes)
         return {name: a.offset for name, a in allocations.items()}
 
     def _place_in_arena(self, sizes: Mapping[str, int]) -> dict[str, Allocation]:
@@ -335,7 +326,7 @@ class OperatorSequence:
                     continue
                 subbuffer_layout[arg] = (buffer_type, cursor, length)
                 end = cursor + length
-                cursor = align_up(end, ALIGNMENT)
+                cursor = Pool(ALIGNMENT).align(end)
 
             # Then the planned ones, rebased past everything unplanned. A plan
             # is relative to its own pool and starts at zero, so applying it
@@ -452,33 +443,32 @@ class OperatorSequence:
         ]
         if isinstance(self._image, FusedImage):
             assert self._image.design is not None, "link() built the image"
-            entry = cache_entry(self._image.design)
+            entry = self._image.design.get_cache_entry()
             records = tuple(
                 Design(name=labels[i], operators=sharing[i])
                 for i in range(len(designs))
             )
-            kind, image, insts = "elf", entry.elf, None
+            kind, image = "elf", self.image
             by_design = {id(op): labels[design_of[id(op)]] for op in operators}
         else:
             chain = self._image
             entry = None
             records = []
             for i, op in enumerate(designs):
-                design = chain.op_design_map[id(op)]
-                own = cache_entry(design)
+                own = chain.designs[id(op)].get_cache_entry()
                 entry = entry or own
                 records.append(
                     Design(
-                        name=chain.op_kernel_name_map[id(op)],
+                        name=chain.labels[id(op)],
                         operators=sharing[i],
                         entry=own,
                         image=own.xclbin,
-                        insts=chain.op_insts_path_map[id(op)],
+                        insts=own.insts,
                     )
                 )
             records = tuple(records)
-            kind, image, insts = "xclbin", chain.combined_xclbin_path, None
-            by_design = {id(op): chain.op_kernel_name_map[id(op)] for op in operators}
+            kind, image = "xclbin", chain.image
+            by_design = {id(op): chain.labels[id(op)] for op in operators}
         assert image is not None, "the image has been built"
         steps = tuple(
             Step(i, op.name, by_design[id(op)], tuple(names))
@@ -487,7 +477,7 @@ class OperatorSequence:
         return Artifacts(
             kind=kind,
             image=image,
-            insts=insts,
+            insts=None,
             entry=entry,
             designs=records,
             steps=steps,

@@ -11,6 +11,7 @@ import statistics
 
 from iron.common import harness
 import aie.utils as aie_utils
+from aie.iron.device import from_name
 from aie.utils.benchmark import preflight, provenance
 from aie.utils.probe import npu_unavailable_reason
 
@@ -26,6 +27,18 @@ def npu_runtime():
     yield
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
+
+
+@pytest.fixture
+def npu2():
+    """An eight-column NPU2 bound as the current device, the previous one
+    restored after: what a test that resolves or compiles device-free needs.
+    """
+    previous = aie_utils.get_current_device()
+    device = from_name("npu2", n_cols=8)
+    aie_utils.set_current_device(device)
+    yield device
+    aie_utils.set_current_device(previous)
 
 
 def pytest_addoption(parser):

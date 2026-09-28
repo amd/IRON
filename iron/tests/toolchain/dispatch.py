@@ -19,7 +19,8 @@ import numpy as np
 
 import iron
 from iron.common import Scratchpad
-from iron.common.image.jit_compile import DispatchStream
+from iron.operators.copy import Copy
+from iron.operators.softmax import Softmax
 from iron.tests.toolchain.tools import requires
 
 pytestmark = requires("xclbinutil", "peano")
@@ -29,9 +30,6 @@ def _graph():
     """A softmax with a per-call row length, then a copy into a cache at a
     per-call offset: one core-read value and one offset value.
     """
-    from iron.operators.copy import Copy
-    from iron.operators.softmax import Softmax
-
     R, C, L = 16, 256, 4
     cache = iron.state((R, L, C), name="cache")
 
@@ -61,17 +59,17 @@ def test_values_become_dispatch_time_kernels_at_each_step(device):
     )
     chain = net.sequence._image
     assert chain is not None
-    streams = {
-        type(op).__name__: chain.op_insts_path_map[id(op)]
+    designs = {
+        type(op).__name__: chain.designs[id(op)]
         for op in net.sequence.unique_operators()
     }
-    assert set(streams) == {"Softmax", "Copy"}
-    for name, stream in streams.items():
-        assert isinstance(stream, DispatchStream), f"{name} has a static stream"
-        assert Path(stream.lib_path).exists(), f"{name}: no dispatch library"
-        assert len(stream.params) == 1, (name, stream.params)
+    assert set(designs) == {"Softmax", "Copy"}
+    for name, design in designs.items():
+        lib = design.get_dispatch_lib_path()
+        assert lib is not None and Path(lib).exists(), f"{name}: no dispatch library"
+        assert len(design.dispatch_params) == 1, (name, design.dispatch_params)
     # The graph's symbols are the kernels' parameter names.
     symbols = {symbol for symbol, _, _ in net.words}
-    assert symbols == {s.params[0] for s in streams.values()}
+    assert symbols == {d.dispatch_params[0] for d in designs.values()}
     assert net.image is not None and Path(net.image).stat().st_size > 0
     assert net._callable is None

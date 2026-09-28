@@ -24,18 +24,9 @@ from aie.iron.device import from_name
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 import iron
-from iron.common import tiling
-from iron.common.design import generator_for
+from iron.common import In, Operator, Out, param, tiling
+from iron.common.design import OperatorDesign
 from iron.common.image import OperatorImage
-from iron.common.image.jit_compile import (
-    _GENERATOR_TREES,
-    _bind_device,
-    _params_key,
-    design_identity,
-    design_sources,
-    keyed_design,
-    source_digest,
-)
 from iron.operators import GEMM, MHA, ElementwiseAdd
 
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
@@ -133,9 +124,8 @@ def test_a_traced_build_carries_the_lowered_module():
 
 
 def _add_key():
-    add = ElementwiseAdd(size=1024, tile_size=128)
-    generate, key = keyed_design(generator_for(add))
-    return CompilableDesign(generate, compile_kwargs=key)
+    design = OperatorDesign(ElementwiseAdd(size=1024, tile_size=128))
+    return CompilableDesign(design.generator, key=design.key)
 
 
 def test_the_compile_key_covers_the_library_a_design_calls():
@@ -146,14 +136,15 @@ def test_the_compile_key_covers_the_library_a_design_calls():
     ``tiling.py`` once left an xclbin build on the image of the code before
     it, and the device ran the old descriptors with nothing reporting it.
     """
-    op = MHA(num_heads=8, num_KV_heads=2, seq_len=16384, num_pipelines=8)
-    generator = generator_for(op)
-    _, key = keyed_design(generator)
-    assert key["source"] == source_digest(design_sources(generator))
-    trees = {p.resolve() for p in _GENERATOR_TREES[0].rglob("*.py")}
+    design = OperatorDesign(
+        MHA(num_heads=8, num_KV_heads=2, seq_len=16384, num_pipelines=8)
+    )
+    digest = OperatorDesign.source_digest(tuple(design.sources))
+    assert design.key == f"{design.identity}:{digest}"
+    trees = {p.resolve() for p in OperatorDesign.TREES[0].rglob("*.py")}
     assert Path(tiling.__file__).resolve() in trees
     assert Path(inspect.getfile(MHA)).resolve() in {
-        Path(f).resolve() for f in design_sources(generator)
+        Path(f).resolve() for f in design.sources
     }
 
 
@@ -174,8 +165,8 @@ def test_the_compile_key_does_not_depend_on_a_device_being_bound_yet():
     which is None until something binds one, and CompilableDesign.compile()
     binds it from inside. A key computed before that records a "no device"
     identity the next build can never match, so every process would rebuild
-    once -- silently, since nothing fails. _bind_device() binds first for
-    this reason.
+    once -- silently, since nothing fails. OperatorDesign.compile() binds
+    first for this reason.
     """
     design = _add_key()
     bound_hash = design._compute_cache_hash()
@@ -184,8 +175,21 @@ def test_the_compile_key_does_not_depend_on_a_device_being_bound_yet():
         "this test is pointless if the hash stopped depending on the device; "
         "it exists because it does"
     )
-    _bind_device()
+    aie_utils.ensure_current_device()
     assert design._compute_cache_hash() == bound_hash
+
+
+def test_the_device_keys_the_build_by_identity_not_address():
+    """A device's str() carries its address, which would re-key every process;
+    two binds of one device share a key, another device has its own.
+    """
+    design = _add_key()
+    aie_utils.set_current_device(from_name("npu2", n_cols=8))
+    first = design._compute_cache_hash()
+    aie_utils.set_current_device(from_name("npu2", n_cols=8))
+    assert design._compute_cache_hash() == first
+    aie_utils.set_current_device(from_name("npu1", n_cols=4))
+    assert design._compute_cache_hash() != first
 
 
 def test_a_field_the_repr_leaves_out_still_keys_the_build():
@@ -198,36 +202,23 @@ def test_a_field_the_repr_leaves_out_still_keys_the_build():
     plain = GEMM(M=256, K=256, N=256)
     other = GEMM(M=256, K=256, N=256, prio_accuracy=True)
     assert repr(plain) == repr(other), "the case no longer exercises a hidden field"
-    assert _params_key({"op": plain}) != _params_key({"op": other})
-    assert design_identity(generator_for(plain)) != design_identity(
-        generator_for(other)
-    )
+    assert OperatorDesign(plain).identity != OperatorDesign(other).identity
 
 
-def test_a_device_parameter_is_keyed_by_identity_not_address():
-    """A device's str() carries its address, which would re-key every process."""
-    dev = from_name("npu2", n_cols=8)
-    assert _params_key({"dev": dev}) == _params_key(
-        {"dev": from_name("npu2", n_cols=8)}
-    )
-    assert _params_key({"dev": dev}) != _params_key(
-        {"dev": from_name("npu1", n_cols=4)}
-    )
+class _Opaque:
+    pass
 
 
-def test_a_device_is_recognised_by_shape_not_by_parameter_name():
-    """The name a design gives the parameter is not what makes it a device."""
-    dev = from_name("npu2", n_cols=8)
-    assert _params_key({"target": dev}) == _params_key({"target": dev})
+class _Holding(Operator):
+    n: int = param()
+    thing: object = param()
+    x = In(n)
+    y = Out(n)
 
 
 def test_an_opaque_design_parameter_is_rejected():
-    """A value whose str() embeds an address is an operator bug, not a
+    """A field whose repr embeds an address is an operator bug, not a
     silently-degraded cache.
     """
-
-    class Opaque:
-        pass
-
     with pytest.raises(ValueError, match="object address"):
-        _params_key({"thing": Opaque()})
+        _ = OperatorDesign(_Holding(n=64, thing=_Opaque())).identity

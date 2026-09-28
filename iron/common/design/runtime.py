@@ -5,7 +5,7 @@
 
 :class:`Transfers` decides what goes through a sequence; :class:`Sequence`
 lowers each transfer to MLIR tasks. The same base serves
-:class:`~iron.common.external.ExternalSequence`, which emits words instead.
+:class:`~iron.common.design.external.ExternalSequence`, which emits words instead.
 """
 
 from __future__ import annotations
@@ -47,8 +47,8 @@ class Transfers:
     surface; this decides what goes through it: the operator's
     ``sequence(rt)`` override, or the one derived from the declarations.
     :class:`Sequence` lowers a transfer to MLIR tasks;
-    :class:`~iron.common.external.ExternalSequence` emits it as words for a
-    downloaded image.
+    :class:`~.external.ExternalSequence` as shim DMA tasks on a downloaded
+    image's pinned channels.
     """
 
     op: Operator
@@ -95,7 +95,7 @@ class Transfers:
         if bounded is None:
             return [
                 (slot, acc, None)
-                for slot, accesses in transfers(buf, stream)
+                for slot, accesses in self.split(buf, stream)
                 for acc in accesses
             ]
         extent, axis, word = bounded
@@ -107,8 +107,96 @@ class Transfers:
             )
         return [
             (slot, acc, {dim: word})
-            for slot, acc, dim in bounded_transfers(buf, stream, axis)
+            for slot, acc, dim in self.round_robin(buf, stream, axis)
         ]
+
+    @staticmethod
+    def split(
+        buffer: BoundBuffer, stream: BoundStream
+    ) -> list[tuple[Any, list[Access]]]:
+        """How ``buffer`` moves through ``stream``: ``[(slot, [Access, ...]), ...]``.
+
+        A single-slot or broadcast stream takes the whole buffer in one linear
+        transfer. A ``per=`` stream splits the buffer's first non-batch axis
+        across its slots; leading batch axes become repeats, coalesced into one
+        iterated descriptor when the slot rules allow and unrolled otherwise.
+        """
+        if stream.count == 1:
+            return [
+                (stream, encode(whole(buffer.shape), buffer.elements, buffer.dtype))
+            ]
+        if stream.replicate:
+            everything = encode(whole(buffer.shape), buffer.elements, buffer.dtype)
+            return [(stream[i], everything) for i in range(stream.count)]
+        axis = buffer.batch_axes
+        if axis >= len(buffer.shape):
+            raise ValueError(
+                f"{buffer.name} {buffer.shape} has no axis to split across the "
+                f"{stream.count} slots of stream {stream.name!r}"
+            )
+        try:
+            blocks = split(buffer.shape, stream.count, axis)
+        except ValueError as e:
+            raise ValueError(
+                f"{buffer.name} {buffer.shape} does not divide across stream "
+                f"{stream.name!r}: {e}. Check {type(buffer._op).__name__}.compatible()"
+            ) from None
+        return [
+            (stream[b.slot], encode(b, buffer.elements, buffer.dtype)) for b in blocks
+        ]
+
+    @staticmethod
+    def round_robin(
+        buffer: BoundBuffer, stream: BoundStream, axis: int
+    ) -> list[tuple[Any, Access, int]]:
+        """How ``buffer`` moves through ``stream`` when ``axis`` is bounded per
+        call: ``[(slot, access, dim), ...]``, ``dim`` the descriptor dimension a
+        call patches with the tiles per lane.
+
+        The tiles along ``axis`` go round-robin over the lanes: lane ``k`` takes
+        tiles ``k, k + lanes, k + 2*lanes, ...``, so every lane has one fixed
+        offset, one fixed stride and the one patched count. Axes before it are
+        repeats. The descriptor is built for the full extent; a call shortens it.
+        """
+        shape, dtype = buffer.shape, buffer.dtype
+        lanes = 1 if stream.replicate else stream.count
+        inner = prod(shape[axis + 1 :]) if axis + 1 < len(shape) else 1
+        tile_rows = buffer.extent_unit(axis)
+        if shape[axis] % (lanes * tile_rows):
+            raise ValueError(
+                f"{buffer.name} {shape}: axis {axis} does not divide into {tile_rows}-row "
+                f"tiles over {lanes} lanes"
+            )
+        tiles = shape[axis] // (lanes * tile_rows)
+        run = tile_rows * inner
+        leading = [(shape[i], prod(shape[i + 1 :])) for i in range(axis)]
+        gran = granule_elements(dtype)
+        halves = split_run(run, gran)
+        if halves is None:
+            raise ValueError(
+                f"{buffer.name}: a {run}-element tile does not fit one descriptor"
+            )
+        hi, lo = halves
+        run_dims = ([(hi, lo)] if hi != 1 else [(1, 0)]) + [(lo, 1)]
+        dims = leading + [(tiles, lanes * run)] + run_dims
+        if len(dims) > 4:
+            raise ValueError(
+                f"{buffer.name} {shape}: bounding axis {axis} needs {len(dims)} "
+                f"descriptor dimensions; a descriptor has four"
+            )
+        dim = 4 - len(run_dims) - 1  # where the tile count lands once padded to four
+        out = []
+        for lane in range(lanes):
+            acc = place(buffer.elements, lane * run, dims, gran)
+            if acc is None:
+                raise ValueError(
+                    f"{buffer.name} {shape}: the round-robin split over {lanes} lanes "
+                    f"does not fit one descriptor per lane"
+                )
+            slots = range(stream.count) if stream.replicate else [lane]
+            for s in slots:
+                out.append((stream[s] if stream.count > 1 else stream, acc, dim))
+        return out
 
     def _stream_of(self, buf: BoundBuffer) -> BoundStream:
         if buf.lanes is None:
@@ -228,11 +316,13 @@ class Sequence(Transfers):
                 sizes: list[Any] = list(acc.sizes)
                 for dim, value in sizes_by.items():
                     sizes[dim] = value.ssa
-                offset = (
-                    _plus(offset_by.ssa, acc.offset)
-                    if offset_by is not None and offset_by.ssa is not None
-                    else acc.offset
-                )
+                offset = acc.offset
+                if offset_by is not None and offset_by.ssa is not None:
+                    offset = offset_by.ssa
+                    if acc.offset:
+                        offset = offset + arith.constant(
+                            int(acc.offset), IntegerType.get_signless(32)
+                        )
                 tasks.append(
                     fn(
                         data,
@@ -310,8 +400,10 @@ class Sequence(Transfers):
     ) -> tuple[BoundBuffer, list[Access], BoundValue | None]:
         if not isinstance(what, (BoundBuffer, BufferView, tuple)):
             # A descriptor alone: the buffer is the one the stream belongs to.
-            buffer = stream if isinstance(stream, BoundBuffer) else _buffer_of(stream)
-            if buffer is None:
+            buffer = stream.stream if isinstance(stream, _StreamSlot) else stream
+            if isinstance(buffer, BoundStream):
+                buffer = buffer.buffer
+            if not isinstance(buffer, BoundBuffer):
                 raise TypeError(
                     f"{what!r} alone names no buffer; {stream!r} is not an "
                     f"operand's own stream, so give (buffer, descriptor)"
@@ -418,101 +510,3 @@ class Sequence(Transfers):
             b.set(1)
         if target.image == "elf" and op.values:
             sync_parameters()
-
-
-def transfers(
-    buffer: BoundBuffer, stream: BoundStream
-) -> list[tuple[Any, list[Access]]]:
-    """How ``buffer`` moves through ``stream``: ``[(slot, [Access, ...]), ...]``.
-
-    A single-slot or broadcast stream takes the whole buffer in one linear
-    transfer. A ``per=`` stream splits the buffer's first non-batch axis
-    across its slots; leading batch axes become repeats, coalesced into one
-    iterated descriptor when the slot rules allow and unrolled otherwise.
-    """
-    if stream.count == 1:
-        return [(stream, encode(whole(buffer.shape), buffer.elements, buffer.dtype))]
-    if stream.replicate:
-        everything = encode(whole(buffer.shape), buffer.elements, buffer.dtype)
-        return [(stream[i], everything) for i in range(stream.count)]
-    axis = buffer.batch_axes
-    if axis >= len(buffer.shape):
-        raise ValueError(
-            f"{buffer.name} {buffer.shape} has no axis to split across the "
-            f"{stream.count} slots of stream {stream.name!r}"
-        )
-    try:
-        blocks = split(buffer.shape, stream.count, axis)
-    except ValueError as e:
-        raise ValueError(
-            f"{buffer.name} {buffer.shape} does not divide across stream "
-            f"{stream.name!r}: {e}. Check {type(buffer._op).__name__}.compatible()"
-        ) from None
-    return [(stream[b.slot], encode(b, buffer.elements, buffer.dtype)) for b in blocks]
-
-
-def bounded_transfers(
-    buffer: BoundBuffer, stream: BoundStream, axis: int
-) -> list[tuple[Any, Access, int]]:
-    """How ``buffer`` moves through ``stream`` when ``axis`` is bounded per
-    call: ``[(slot, access, dim), ...]``, ``dim`` the descriptor dimension a
-    call patches with the tiles per lane.
-
-    The tiles along ``axis`` go round-robin over the lanes: lane ``k`` takes
-    tiles ``k, k + lanes, k + 2*lanes, ...``, so every lane has one fixed
-    offset, one fixed stride and the one patched count. Axes before it are
-    repeats. The descriptor is built for the full extent; a call shortens it.
-    """
-    shape, dtype = buffer.shape, buffer.dtype
-    lanes = 1 if stream.replicate else stream.count
-    inner = prod(shape[axis + 1 :]) if axis + 1 < len(shape) else 1
-    tile_rows = buffer.extent_unit(axis)
-    if shape[axis] % (lanes * tile_rows):
-        raise ValueError(
-            f"{buffer.name} {shape}: axis {axis} does not divide into {tile_rows}-row "
-            f"tiles over {lanes} lanes"
-        )
-    tiles = shape[axis] // (lanes * tile_rows)
-    run = tile_rows * inner
-    leading = [(shape[i], prod(shape[i + 1 :])) for i in range(axis)]
-    gran = granule_elements(dtype)
-    halves = split_run(run, gran)
-    if halves is None:
-        raise ValueError(
-            f"{buffer.name}: a {run}-element tile does not fit one descriptor"
-        )
-    hi, lo = halves
-    run_dims = ([(hi, lo)] if hi != 1 else [(1, 0)]) + [(lo, 1)]
-    dims = leading + [(tiles, lanes * run)] + run_dims
-    if len(dims) > 4:
-        raise ValueError(
-            f"{buffer.name} {shape}: bounding axis {axis} needs {len(dims)} "
-            f"descriptor dimensions; a descriptor has four"
-        )
-    dim = 4 - len(run_dims) - 1  # where the tile count lands once padded to four
-    out = []
-    for lane in range(lanes):
-        acc = place(buffer.elements, lane * run, dims, gran)
-        if acc is None:
-            raise ValueError(
-                f"{buffer.name} {shape}: the round-robin split over {lanes} lanes "
-                f"does not fit one descriptor per lane"
-            )
-        slots = range(stream.count) if stream.replicate else [lane]
-        for s in slots:
-            out.append((stream[s] if stream.count > 1 else stream, acc, dim))
-    return out
-
-
-def _buffer_of(stream) -> BoundBuffer | None:
-    """The operand a stream or one of its lanes is the own stream of."""
-    if isinstance(stream, _StreamSlot):
-        stream = stream.stream
-    return stream.buffer if isinstance(stream, BoundStream) else None
-
-
-def _plus(ssa, constant: int):
-    """``ssa + constant`` as a sequence value; the scalar alone when constant is 0."""
-    if not constant:
-        return ssa
-    return ssa + arith.constant(int(constant), IntegerType.get_signless(32))

@@ -6,8 +6,7 @@
 The declaration vocabulary (:mod:`.declare`): :class:`Operator` and the
 fields, operands and values a class body declares. The elementwise templates
 (:mod:`.elementwise`), which own the array and the sequence of an operator
-that names only its kernel. :class:`DesignGenerator`, for an operator whose
-design another tool exports (:meth:`Operator.exported_design`).
+that names only its kernel.
 """
 
 from .declare import (
@@ -29,13 +28,11 @@ from .declare import (
     param,
     select,
 )
-from .design import DesignGenerator
 from .elementwise import BinaryElementwise, Elementwise, Rowwise, UnaryElementwise
 
 __all__ = [
     "BinaryElementwise",
     "DeclarationError",
-    "DesignGenerator",
     "DispatchTime",
     "Elementwise",
     "Extent",

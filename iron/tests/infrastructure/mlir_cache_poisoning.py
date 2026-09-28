@@ -32,8 +32,8 @@ import re
 import pytest
 
 import iron
-from iron.common.design import generator_for
-from iron.common.image import build_fused_mlir
+from iron.common.design import OperatorDesign
+from iron.common.image import Fusion
 from iron.operators import ElementwiseAdd
 
 SIZE = 1024
@@ -54,7 +54,7 @@ def _linked_objects(operator):
     back: a standalone build no longer writes its MLIR to disk either (see
     the module docstring), so there is nothing to read.
     """
-    mlir = str(generator_for(operator)())
+    mlir = str(OperatorDesign(operator).generator())
     return sorted(set(re.findall(r'link_with\s*=\s*"([^"]+)"', mlir)))
 
 
@@ -77,7 +77,7 @@ def test_fused_build_does_not_poison_the_standalone_mlir():
         "poisoning_probe", dispatch="fused"
     )
     seq.compile()
-    fused = set(re.findall(r'link_with\s*=\s*"([^"]+)"', build_fused_mlir(seq)))
+    fused = set(re.findall(r'link_with\s*=\s*"([^"]+)"', Fusion(seq).text()))
 
     linked = _linked_objects(_operator())
     assert linked and set(linked) <= fused, (

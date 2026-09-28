@@ -173,8 +173,9 @@ reuse lint
        with `via=`. Two hooks change what is built: `configuration()`, the
        operator whose xclbin this one runs (itself by default; flm's GEMM
        returns its shape-free half, so one xclbin serves every shape), and
-       `exported_design(image)`, a `DesignGenerator` for a design another
-       tool exports (stream-dse's SwiGLU groups) in place of the derived one.
+       `exported_design(image)`, a callable returning the module (an
+       `ir.Module` or its text) for a design another tool exports
+       (stream-dse's SwiGLU groups) in place of the derived one.
      - The operator's `reference(*inputs)` is the CPU reference the tests
        and the graph reference run; `vectors(op)` in `iron/common/harness`
        draws random inputs for its declared buffers and takes the outputs
@@ -209,17 +210,23 @@ reuse lint
      `fetch()`, inference). An operator's shim budget, `shim_columns`, is
      the bound device's `shim_dma_channels_in`/`out`; its `residents` the
      derived values the preamble writes once per build
-   - `design/`, `tiling.py`, `external.py`: the library-owned build: the
-     `Target` an array is built against (its device, image, barriers and
-     registered objects), the derived runtime
-     sequence, legal DMA descriptors, the shipped-image path
+   - `design/`, `tiling.py`: the library-owned build: the `Target` an
+     array is built against (its device, image, barriers and registered
+     objects), `build_design(op, image)` (the module for one operator),
+     `OperatorDesign` (that module as mlir-aie's `CompilableDesign`
+     compiles and caches it), the derived runtime sequence (`Sequence`,
+     over `Transfers.split`/`round_robin`), `ExternalSequence` (the
+     sequence against a shipped image: `aie.lock`/`aiex.set_lock` releases
+     its parameter block), legal DMA descriptors
    - `graph/`: graphs (`iron.Graph`, `iron.state`) and
      `compile(dev, boundaries=, image=)`
    - `image/`: what a graph lowers onto: `OperatorSequence`, the buffer
-     allocator, fusion, `OperatorImage` (one operator built and called on
-     its own, outside a graph: `OperatorImage(op).compile()`, then
-     `image(*tensors)`, `image.artifacts`), the seam onto mlir-aie's `CompilableDesign`, the
-     runtime callables and the record of what a compiled image consists of
+     allocator (`LiveRange`, `Pool`, `ArenaPlan`), `Fusion` (the designs of
+     a sequence as one module), `FusedImage`/`XclbinChain` (the full ELF
+     or the chain of xclbins it links), `OperatorImage` (one operator built
+     and called on its own, outside a graph: `OperatorImage(op).compile()`,
+     then `image(*tensors)`, `image.artifacts`), the runtime callables and
+     the record of what a compiled image consists of
    - `elementwise.py`: the shared elementwise array and its operand shapes (flat, binary, rowwise)
    - `harness.py`: the device test harness (`vectors`; `run_test`, timed with
      `aie.utils.benchmark.run_iters`; `verify_buffer`, a wrapper over

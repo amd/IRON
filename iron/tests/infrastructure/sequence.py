@@ -31,7 +31,7 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common.harness import verify_buffer
-from iron.common.image import OperatorSequence, build_fused_mlir
+from iron.common.image import Fusion, OperatorSequence
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.relu import ReLU
 from iron.operators.tanh import Tanh
@@ -150,7 +150,7 @@ def test_fused_mlir_contains_reconfiguration(sequence, npu_runtime):
     seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
         seq.calculate_buffer_layout()
     )
-    text = build_fused_mlir(seq)
+    text = Fusion(seq).text()
 
     # Reconfiguration + dispatch ops between temporal steps.
     assert "aiex.configure" in text, "missing aiex.configure in fused MLIR"

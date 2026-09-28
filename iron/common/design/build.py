@@ -1,17 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generating the MLIR module for one declared operator."""
+"""Generating and compiling the MLIR module for one declared operator."""
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import inspect
 import os
+import re
+from pathlib import Path
 from typing import Any
 
+import aie
+import aie.utils as aie_utils
 from aie.iron import (
     Buffer,
+    DispatchTime,
     Flow,
     Lock,
     PacketFlow,
@@ -20,11 +26,12 @@ from aie.iron import (
     ScratchpadParameter,
     TileDma,
 )
+from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from aie.utils.trace import events as trace_events
 
 from ..declare import Operator
 from ..declare.bound import BoundValue
-from .generator import DesignGenerator
+from .external import ExternalSequence
 from .runtime import Sequence
 from .target import Target
 
@@ -64,37 +71,25 @@ def device_symbol(op: Operator, value: BoundValue) -> str:
     return f"{op.name}_{value.name}" + (f"_{bound}" if bound else "")
 
 
-def build_design(
-    dev,
-    op: Operator,
-    trace_size: int = 0,
-    code: str = "",
-    image: str = "elf",
-    **dispatch,
-):
-    """Generate the MLIR module for one declared operator.
+def build_design(op: Operator, image: str = "elf", **dispatch):
+    """Generate the MLIR module for one declared operator, for the bound device.
 
-    Called by :mod:`iron.common.image.jit_compile`'s compile functions and by
-    ``fuse_mlir`` through the
-    operator's ``DesignGenerator``; ``code`` exists only to reach the cache
-    key (see :func:`mlir_artifact_for`).
+    ``image`` is what the module is built for: on ``"elf"`` a per-call value
+    is a scratchpad parameter; on ``"xclbin"``, which has no scratchpad (XRT
+    gives one to a module run only), it is a dispatch-time scalar of the
+    sequence, handed in by name in ``dispatch`` (:class:`OperatorDesign`
+    declares them as the generator's parameters).
     """
+    dev = op.dev
     op = op.resolved(dev).copy()  # a build binds streams; each gets its own
     if op.external is not None:
         # A downloaded image: no array to build, only the sequence against
-        # its pins. external imports this package, so the name is local.
-        from ..external import build_external
-
-        return build_external(dev, op)
+        # its pins.
+        return ExternalSequence.module(dev, op)
     target = Target(dev, image)
 
     # Per-call values get their device parameters before the array is built,
     # so a core-read value can be handed to a worker by array().
-    # On a full ELF they are scratchpad parameters; on an xclbin, which has
-    # no scratchpad (XRT gives one to a module run only), every one is a
-    # dispatch-time scalar of the
-    # sequence, handed in by the generator's keyword parameters (see
-    # ``mlir_artifact_for``), and DispatchTime members are always that.
     values = op.values
     for value in values:
         value.symbol = device_symbol(op, value)
@@ -157,61 +152,126 @@ def build_design(
                 f"Buffer, got {obj!r}"
             )
     prog = Program(op.device(target), rt, workers=workers)
-    if trace_size:
+    if op.trace_size:
         # IRON_TRACE_NTILES (default 1) caps how many workers are traced; a
         # count, so 0 traces none.
         ntiles = max(0, int(os.environ.get("IRON_TRACE_NTILES", "1")))
         prog.enable_trace(
-            trace_size, workers=list(workers)[:ntiles], coretile_events=CORE_EVENTS
+            op.trace_size, workers=list(workers)[:ntiles], coretile_events=CORE_EVENTS
         )
     return prog.resolve_program()
 
 
-def _design_code(op: Operator) -> str:
-    """A digest of the operator's class source, its declared bases included,
-    for the cache key.
+class OperatorDesign:
+    """One operator's design as ``CompilableDesign`` compiles it.
 
-    ``CompilableDesign`` hashes the design function by its code, and that
-    function is :func:`build_design` for every declared operator. The code
-    that varies is the classes', so it is hashed here.
+    The generator is :func:`build_design` bound to the operator, or the
+    design another tool exports for it (:meth:`Operator.exported_design`).
+    It runs inside ``compile()``, so the kernels it declares are the ones
+    built; on an xclbin its per-call values are its ``DispatchTime``
+    parameters, so the two images are two modules and two cache keys.
+
+    The cache key is what the module is a function of, which the generator's
+    code alone does not spell: the operator's design key, the image, and the
+    source that generates the text (the operator's modules, IRON's common
+    tree, mlir-aie's Python frontend and bindings).
     """
-    h = hashlib.sha256()
-    for cls in reversed(type(op).__mro__):
-        if not issubclass(cls, Operator) or cls is Operator:
-            continue
-        try:
-            h.update(inspect.getsource(cls).encode())
-        except (OSError, TypeError):
-            h.update(cls.__qualname__.encode())
-    return h.hexdigest()[:24]
 
+    _AIE = Path(inspect.getfile(aie)).resolve().parent
+    TREES = (Path(__file__).resolve().parents[1], _AIE / "iron", _AIE / "dialects")
+    # Compiled, and large: by size and time rather than by content.
+    BINDINGS = _AIE / "_mlir_libs"
+    # An object address in the key would re-key the cache every process.
+    _ADDRESS = re.compile(r"0x[0-9a-f]{6,}")
 
-def dispatch_parameters(op: Operator) -> list[tuple[str, Any]]:
-    """The (symbol, dtype) of every per-call value, as dispatch-time scalars."""
-    return [(device_symbol(op, v), v.dtype) for v in op.values]
+    def __init__(self, op: Operator, image: str = "elf"):
+        self.op = op
+        self.image = image
+        generator = op.exported_design(image)
+        if generator is None:
+            generator = functools.partial(build_design, op=op, image=image)
+            P = inspect.Parameter
+            dispatch = [
+                P(
+                    device_symbol(op, v),
+                    P.KEYWORD_ONLY,
+                    annotation=DispatchTime[v.dtype],
+                )
+                for v in op.values
+                if image != "elf"
+            ]
+            setattr(generator, "__signature__", inspect.Signature(dispatch))
+        self.generator = generator
 
+    @functools.cached_property
+    def identity(self) -> str:
+        """What the module is built from, sources aside."""
+        text = repr((self.op.design_key(), self.image))
+        if self._ADDRESS.search(text):
+            raise ValueError(
+                f"{type(self.op).__name__}'s design key {text!r} embeds an object "
+                f"address, which would give it a new compile-cache key in every "
+                f"process; give the field a stable repr"
+            )
+        return hashlib.sha256(text.encode()).hexdigest()[:24]
 
-def generator_for(op: Operator, image: str = "elf") -> DesignGenerator:
-    """The generator ``CompilableDesign`` runs for ``op``: ``build_design`` over it.
+    @property
+    def name(self) -> str:
+        """The design's device symbol in a fused image: stable across source
+        edits, so aiecc's device cache keeps it.
+        """
+        return f"{type(self.op).__name__}_{self.identity[:8]}"
 
-    ``image`` is the image the module is built for: on ``"xclbin"`` its
-    per-call values are the generator's dispatch-time parameters, so the two
-    images are two modules and two cache keys. An operator whose design
-    another tool exports gives its own (:meth:`Operator.exported_design`).
-    """
-    exported = op.exported_design(image)
-    if exported is not None:
-        return exported
-    return DesignGenerator(
-        fn=build_design,
-        kwargs={
-            "op": op,
-            "image": image,
-            "dispatch": dispatch_parameters(op) if image != "elf" else [],
-            "code": _design_code(op),
-            "dev": op.dev,
-            # The operator's own trace request inserts the trace flows; a
-            # sequence's trace_size only keeps the lowered module to read.
-            "trace_size": op.trace_size,
-        },
-    )
+    @property
+    def sources(self) -> list[str]:
+        """The modules the design is defined in: the generator's and every
+        class the operator's is built from.
+        """
+        generator = self.generator
+        function = getattr(generator, "func", generator)
+        files = set()
+        for obj in (function, *type(self.op).__mro__):
+            try:
+                files.add(inspect.getsourcefile(obj))
+            except TypeError:
+                pass  # a builtin
+        return sorted(f for f in files if f)
+
+    @property
+    def key(self) -> str:
+        return f"{self.identity}:{self.source_digest(tuple(self.sources))}"
+
+    def compile(self, **options) -> CompilableDesign:
+        """Compile (or find in the cache) the design; ``options`` are
+        ``CompilableDesign``'s (``aiecc_flags``, ``insts_only``, ...).
+        """
+        # The key reads the current device, which compile() binds from inside;
+        # binding first makes a key computed before and after agree.
+        aie_utils.ensure_current_device()
+        design = CompilableDesign(self.generator, key=self.key, **options)
+        design.compile()
+        return design
+
+    @classmethod
+    @functools.cache
+    def source_digest(cls, files: tuple = ()) -> str:
+        """A digest of the source that generates MLIR: the trees every
+        design shares, and ``files`` besides.
+
+        Read once per process: a process runs the code it imported, so an
+        edit made while it runs is the next process's to see, in its key and
+        its text alike.
+        """
+        h = hashlib.sha256()
+        if files:
+            h.update(cls.source_digest().encode())
+            for path in files:
+                h.update(Path(path).read_bytes())
+            return h.hexdigest()
+        for root in cls.TREES:
+            for path in sorted(root.rglob("*.py")):
+                h.update(path.read_bytes())
+        for path in sorted(cls.BINDINGS.glob("*.so")):
+            stat = path.stat()
+            h.update(f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}".encode())
+        return h.hexdigest()

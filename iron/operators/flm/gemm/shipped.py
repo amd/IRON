@@ -18,7 +18,7 @@ visible nowhere in it: the shim channel map (A on MM2S channel 0 of columns
 0, 2, 4 and 6; B on MM2S channel 1 of every column; C out of S2MM channel
 0 of every column), the address and lock of the eight parameter words every
 core reads, and the order the memtiles consume transfers in. The library
-emits the sequence against those pins (:mod:`iron.common.external`).
+emits the sequence against those pins (:mod:`iron.common.design.external`).
 
 What differs from the port, and why the port is the default: the port
 selects its epilogue at build time (a branch-free inner loop, one build per

@@ -11,6 +11,7 @@ is the toolchain's job and the operator tests' job.
 """
 
 import dataclasses
+import re
 from typing import Any, cast
 
 import numpy as np
@@ -31,9 +32,7 @@ from iron.common import (
     optional,
     param,
 )
-from iron.common.design import Sequence, Target, runtime, transfers
-from iron.common.design.runtime import bounded_transfers
-from iron.common.external import LOCK_ADDRESS_BASE, run_sequence
+from iron.common.design import Sequence, Target, Transfers, build_design, runtime
 from iron.common.tiling import Access
 from iron.operators.flm.gemm.shipped import Shipped
 from iron.operators.gemv import GEMV
@@ -106,7 +105,7 @@ def _bind_all(op, log):
 
 def test_plan_reproduces_the_channeled_unary_split():
     op = Unary(size=8192).resolved(NPU2_4COL)
-    p = transfers(op.A, op.streams["A"])
+    p = Transfers.split(op.A, op.streams["A"])
     assert len(p) == 8  # 4 columns x 2 channels
     chunk = 8192 // 8
     for i, (slot, accesses) in enumerate(p):
@@ -116,12 +115,12 @@ def test_plan_reproduces_the_channeled_unary_split():
 
 def test_plan_batched_gemv_coalesces_and_broadcasts():
     op = MV(M=256, K=128, num_batches=100)
-    a_transfers = transfers(op.A, op.streams["A"])
+    a_transfers = Transfers.split(op.A, op.streams["A"])
     assert [slot.index for slot, _ in a_transfers] == [0, 1]
     (acc,) = a_transfers[1][1]
     run = (256 // 2) * 128
     assert acc.offset == run and acc.sizes[1] == 100 and acc.strides[1] == 256 * 128
-    b_slot, b_accesses = transfers(op.B, op.streams["B"])[0]
+    b_slot, b_accesses = Transfers.split(op.B, op.streams["B"])[0]
     assert b_slot is op.streams["B"] and b_accesses == [
         Access(100 * 128, 0, (1, 1, 1, 100 * 128), (0, 0, 0, 1))
     ]
@@ -352,22 +351,6 @@ def test_flm_gemm_layout_of_b_follows_the_device():
 # --------------------------------------------------------------------------
 
 
-class _ForeignRecorder:
-    def __init__(self):
-        self.log, self.n = [], 0
-
-    def write32(self, address, value, col, row):
-        self.log.append(("w", address, value, col, row))
-
-    def start(self, key, buffer, offset, sizes, strides):
-        self.n += 1
-        self.log.append(("start", key, buffer, offset, tuple(sizes), tuple(strides)))
-        return (key, self.n)
-
-    def await_(self, task):
-        self.log.append(("await", task))
-
-
 def test_a_shipped_image_declares_its_pins_and_parameter_block():
 
     op = Shipped(M=256, K=1024, N=1152)
@@ -408,49 +391,58 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
                 return []
 
 
-def test_shipped_sequence_writes_every_core_then_streams_in_consume_order():
+_WRITE = re.compile(
+    r"npu\.write32\(%c(-?\d+)_i32\S*, %c(-?\d+)_i32\S*\) "
+    r"\{column = (\d+) : i32, row = (\d+) : i32\}"
+)
+_TASK = re.compile(
+    r"%(\d+) = aiex\.dma_configure_task_for @(\w+) \{\s*"
+    r"aie\.dma_bd\(%arg(\d) : \S+ offset = (\d+) len = \d+ "
+    r"sizes = \[([^\]]*)\] strides = \[([^\]]*)\]\)"
+)
+
+
+def test_shipped_sequence_writes_every_core_then_streams_in_consume_order(npu2):
 
     op = Shipped(M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0))
     # The port's values are hidden; the image's block is laid out from the
     # operator's fields.
     assert op.residents == {"rtp": [2, 256, 1152, 0, 1, 1, -1073741824, 1073741824]}
-    rec = _ForeignRecorder()
-    cores = [(c, r) for r in range(2, 6) for c in range(8)]
-    run_sequence(op, {"A": "dA", "B": "dB", "C": "dC"}, cores, rec)
-    writes = [e for e in rec.log if e[0] == "w"]
+    text = str(build_design(op))
+    sequence = text[text.index("aie.runtime_sequence") :]
+
+    writes = [tuple(map(int, w)) for w in _WRITE.findall(sequence)]
     # 8 words on 32 cores, then one lock release per core, before any DMA.
-    assert len(writes) == 32 * 8 + 32
-    assert writes[0] == ("w", 4096, 2, 0, 2) and writes[7] == (
-        "w",
-        4124,
-        1073741824,
-        0,
-        2,
-    )
-    assert writes[-1] == ("w", LOCK_ADDRESS_BASE + 16 * 10, 1, 7, 5)
-    assert rec.log.index(writes[-1]) < rec.log.index(
-        next(e for e in rec.log if e[0] == "start")
-    )
-    starts = [e for e in rec.log if e[0] == "start"]
+    assert len(writes) == 32 * 8
+    assert writes[0] == (4096, 2, 0, 2) and writes[7] == (4124, 1073741824, 0, 2)
+    assert writes[-1] == (4124, 1073741824, 7, 5)
+    releases = re.findall(r"aiex\.set_lock\(%lock_(\d+)_(\d+), 1\)", sequence)
+    assert len(releases) == 32 and releases[-1] == ("7", "5")
+    assert text.count("aie.lock(") == 32 and "aie.lock(%tile_0_2, 10)" in text
+    assert sequence.rindex("aiex.set_lock") < sequence.index("aiex.dma_start_task")
+
+    tasks = [
+        (int(ssa), lane, int(arg), int(offset), sizes, strides)
+        for ssa, lane, arg, offset, sizes, strides in _TASK.findall(sequence)
+    ]
     # N = 9 column-blocks: one full sweep (4 A + 8 B + 8 C) and a trailing
     # block on column 0 alone, which still receives A on every row.
-    assert len(starts) == 20 + 6
-    assert starts[:3] == [
-        ("start", ("A", 0), "dA", 0, (1, 2, 64, 512), (0, 512, 1024, 1)),
-        ("start", ("B", 0), "dB", 0, (1, 1, 1, 131072), (0, 0, 0, 1)),
-        ("start", ("C", 0), "dC", 0, (1, 1, 256, 128), (0, 0, 1152, 1)),
+    assert len(tasks) == 20 + 6
+    assert [t[1:] for t in tasks[:3]] == [
+        ("A_0", 0, 0, "1, 2, 64, 512", "0, 512, 1024, 1"),
+        ("B_0", 1, 0, "1, 1, 1, 131072", "0, 0, 0, 1"),
+        ("C_0", 2, 0, "1, 1, 256, 128", "0, 0, 1152, 1"),
     ]
-    assert starts[5] == (
-        "start",
-        ("A", 1),
-        "dA",
-        64 * 1024,
-        (1, 2, 64, 512),
-        (0, 512, 1024, 1),
+    assert tasks[5][1:] == ("A_1", 0, 64 * 1024, "1, 2, 64, 512", "0, 512, 1024, 1")
+    # Every task is started and awaited exactly once, the last ones by the
+    # trailing finish.
+    started = re.findall(r"aiex\.dma_start_task\(%(\d+)\)", sequence)
+    awaited = re.findall(r"aiex\.dma_await_task\(%(\d+)\)", sequence)
+    assert (
+        sorted(map(int, started))
+        == sorted(map(int, awaited))
+        == sorted(t[0] for t in tasks)
     )
-    # Every task is awaited exactly once, the last ones by the trailing finish.
-    awaited = [e[1] for e in rec.log if e[0] == "await"]
-    assert sorted(awaited) == sorted((k, n) for n, (_, k, *_) in enumerate(starts, 1))
 
 
 # --------------------------------------------------------------------------
@@ -527,14 +519,14 @@ def test_a_bounded_operand_goes_round_robin_over_the_lanes():
     for the full extent.
     """
     op = Rows(rows=64, cols=8).resolved(NPU2_4COL)
-    plan = bounded_transfers(op.x, op.streams["x"], 0)
+    plan = Transfers.round_robin(op.x, op.streams["x"], 0)
     assert [(slot.index, acc, dim) for slot, acc, dim in plan] == [
         (0, Access(512, 0, (1, 32, 1, 8), (0, 16, 0, 1)), 1),
         (1, Access(512, 8, (1, 32, 1, 8), (0, 16, 0, 1)), 1),
     ]
     # A leading batch axis is the outer repeat; the tile count keeps its slot.
     batched = MV(M=256, K=128, num_batches=3).resolved(NPU2_4COL)
-    (slot, acc, dim), *_ = bounded_transfers(batched.A, batched.streams["A"], 1)
+    (slot, acc, dim), *_ = Transfers.round_robin(batched.A, batched.streams["A"], 1)
     # The 64 x 128 tile is a run past one wrap, so it takes the two inner
     # slots as 8 x 1024; the tile count sits above them.
     assert acc == Access(
@@ -560,8 +552,8 @@ def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles(npu2):
     )
     op = op.resolved(from_name("npu2", n_cols=8))
     lanes = op.num_aie_columns
-    x = bounded_transfers(op.x, op.streams["x"], 0)
-    angles = bounded_transfers(op.angles, op.streams["angles"], 0)
+    x = Transfers.round_robin(op.x, op.streams["x"], 0)
+    angles = Transfers.round_robin(op.angles, op.streams["angles"], 0)
     for (xs, xa, _), (as_, aa, _) in zip(x, angles, strict=True):
         assert xs.index == as_.index
         rows = _elements(xa)[::cols] // cols

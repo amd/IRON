@@ -1,109 +1,44 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The image an operator sequence builds: one fused ELF, or a chain of xclbins."""
+"""The image an operator sequence builds: one fused ELF, or a chain of xclbins.
+
+Both compile through mlir-aie's ``CompilableDesign``, which owns the cache:
+it keys on what the text is a function of, locks across processes and
+validates the kernels' depfiles, and the image lands in its entry.
+"""
 
 import hashlib
+from pathlib import Path
 
 import aie.utils as aie_utils
 from aie.dialects.aie import AIEArch
+from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
-from ..design import generator_for
-from . import fusion
-from .jit_compile import (
-    cache_entry,
-    design_identity,
-    design_sources,
-    dispatch_stream,
-    fused_design,
-    source_digest,
-    xclbin_design,
-)
-
-
-def fused_plan(seq):
-    """Each design's device, by name, and the runlist over those names.
-
-    A device is named for what it is -- its class and its design's identity
-    -- not for where it sits in this sequence, so one design is one device
-    text whichever graph it is fused into and at whatever step. aiecc's
-    device cache keys on that text, and a positional name kept decode and
-    prefill from sharing any device, and a graph that gained a step from
-    reusing its own. Designs whose identities agree generate the same
-    device, so they are fused as one.
-    """
-    designs, design_of = seq.unique_designs()
-    names = []
-    generators = {}
-    for op in designs:
-        generator = generator_for(op)
-        name = f"{type(op).__name__}_{design_identity(generator)[:8]}"
-        names.append(name)
-        generators.setdefault(name, generator)
-    runlist = [(names[design_of[id(op)]], *bufs) for op, *bufs in seq.runlist]
-    return generators, runlist
-
-
-def build_fused_mlir(seq, plan=None) -> str:
-    """The fused MLIR text: every design inlined into one module.
-
-    ``seq``'s buffer layout (``subbuffer_layout``, ``buffer_sizes``,
-    ``slice_info``) must already be set.
-    """
-    generators, runlist = plan or fused_plan(seq)
-    return fusion.fuse_mlir(
-        generators,
-        runlist,
-        seq.subbuffer_layout,
-        seq.buffer_sizes,
-        seq.slice_info,
-        seq.shared_words,
-    )
-
-
-def fused_identity(seq, plan) -> str:
-    """What the fused text is a function of, without generating it.
-
-    The designs, each by its identity (:func:`design_identity`: the code
-    that generates it and the parameters it is called with); the runlist over
-    them; the buffer layout; the scratchpad words symbols share; and the
-    source of what turns those into text -- IRON's common tree, where the
-    fusion and the declaration layer live, the operators' own modules, and
-    mlir-aie's Python frontend (:func:`source_digest`). A hit then costs a hash rather than a fusion.
-    """
-    generators, runlist = plan
-    h = hashlib.sha256()
-    files = set()
-    for name, generator in generators.items():
-        h.update(f"{name}={design_identity(generator)};".encode())
-        files.update(design_sources(generator))
-    h.update(source_digest(tuple(sorted(files))).encode())
-    h.update(
-        repr(
-            (
-                runlist,
-                seq.subbuffer_layout,
-                seq.buffer_sizes,
-                seq.slice_info,
-                sorted(seq.shared_words.items()),
-            )
-        ).encode()
-    )
-    return h.hexdigest()[:24]
+from ..design import OperatorDesign
+from .fusion import Fusion
 
 
 class FusedImage:
     """The full ELF: every design fused into one module (NPU2 only)."""
 
-    def __init__(self):
-        self.design = None
+    # --expand-load-pdis is what makes a multi-device runlist switch PDIs
+    # between steps; --get-scratchpad-parameters emits the parameter table the
+    # host writes through. Without them the ELF is not the same program.
+    FLAGS = ("--expand-load-pdis", "--get-scratchpad-parameters")
+    # Only when tracing: the trace parser reads the lowered module for the
+    # buffer layout and each design's traced tiles and events.
+    TRACE_FLAG = "--get-input-with-addresses"
 
-    def link(self, seq):
+    def __init__(self):
+        self.fusion: Fusion | None = None
+        self.design: CompilableDesign | None = None
+
+    def link(self, seq) -> Path:
         """Build the ELF once (idempotent); returns its path.
 
-        Through CompilableDesign, which owns the cache: it keys on
-        :func:`fused_identity`, locks across processes and validates the
-        kernels' depfiles, and the ELF lands in its entry.
+        Keyed on :attr:`Fusion.identity`, so a hit generates nothing: the
+        designs are fused, inside ``compile()``, only on a miss.
         """
         dev = aie_utils.ensure_current_device(required=True)
         if dev.arch is not AIEArch.AIE2p:
@@ -112,66 +47,63 @@ class FusedImage:
                 f"({dev.arch}) does not dispatch"
             )
         if self.design is None:
-            plan = fused_plan(seq)
-            self.design = fused_design(
-                lambda: build_fused_mlir(seq, plan),
-                fused_identity(seq, plan),
-                extra_flags=seq.extra_flags,
-                trace_size=seq.trace_size,
+            self.fusion = Fusion(seq)
+            flags = [*self.FLAGS, *([self.TRACE_FLAG] if seq.trace_size else [])]
+            self.design = CompilableDesign(
+                self.fusion.text,
+                key=self.fusion.identity,
+                full_elf=True,
+                aiecc_flags=[*flags, *seq.extra_flags],
             )
-        return cache_entry(self.design).elf
+            self.design.compile()
+        entry = self.design.get_cache_entry()
+        assert entry is not None and entry.elf is not None, "compile() built it"
+        return Path(entry.elf)
 
 
 class XclbinChain:
     """One xclbin and instruction stream per design, each linked onto the
-    previous (``--xclbin-input``); the last link carries every kernel. Holds
-    the per-operator designs the xclbin callable dispatches with.
+    previous (``--xclbin-input``); the last link carries every kernel.
+
+    ``designs`` and ``labels`` are by ``id(op)`` over the sequence's
+    operators: the compiled design and the kernel name each dispatches with.
     """
 
     def __init__(self):
-        self.combined_xclbin_path = None
-        self.op_design_map = {}  # id(op) -> CompilableDesign
-        self.op_xclbin_path_map = {}  # id(op) -> xclbin path
-        self.op_insts_path_map = {}  # id(op) -> insts path, or a DispatchStream
-        self.op_kernel_name_map = {}  # id(op) -> kernel name
+        self.image: Path | None = None
+        self.designs: dict[int, CompilableDesign] = {}
+        self.labels: dict[int, str] = {}
 
-    def link(self, seq):
+    def link(self, seq) -> Path:
         """Build the chain once (idempotent); returns the last link."""
-        if self.combined_xclbin_path is not None:
-            return self.combined_xclbin_path
+        if self.image is not None:
+            return self.image
         # Short hash keeps kernel names under xclbinutil's 64-char "name:name" limit.
         name_hash = hashlib.sha1(seq.name.encode()).hexdigest()[:6]
 
-        # One kernel instance per design, not per operator: with
-        # share_designs, operators reporting one design_key generate one
-        # module, so they link one xclbin and run one instruction stream.
+        # One kernel instance per design, not per operator: operators
+        # reporting one design_key generate one module, so they link one
+        # xclbin and run one instruction stream.
         designs, design_of = seq.unique_designs()
-        prev_xclbin_path = None
         built = []
         for idx, op in enumerate(designs):
-            op_label = f"f{name_hash}_op{idx}"
-            kernel_id = f"0x{0x901 + idx:x}"
-            design = xclbin_design(
-                generator_for(op, "xclbin"),
-                kernel_name=op_label,
-                xclbin_input=prev_xclbin_path,
-                extra_flags=[
-                    f"--xclbin-instance-name={op_label}",
-                    f"--xclbin-kernel-id={kernel_id}",
-                ],
-            )
-            entry = cache_entry(design)
-            stream = dispatch_stream(design) or entry.insts
-            built.append((design, entry.xclbin, stream, op_label))
-            prev_xclbin_path = entry.xclbin
+            label = f"f{name_hash}_op{idx}"
+            flags = [
+                f"--xclbin-kernel-name={label}",
+                f"--xclbin-instance-name={label}",
+                f"--xclbin-kernel-id=0x{0x901 + idx:x}",
+            ]
+            if self.image is not None:
+                # The predecessor is part of what this image is, and reaches
+                # the key through the flags.
+                flags.append(f"--xclbin-input={self.image.resolve()}")
+            design = OperatorDesign(op, "xclbin").compile(aiecc_flags=flags)
+            built.append((design, label))
+            entry = design.get_cache_entry()
+            assert entry is not None and entry.xclbin is not None
+            self.image = Path(entry.xclbin)
 
         for op in seq.unique_operators():
-            design, xclbin_path, stream, op_label = built[design_of[id(op)]]
-            self.op_design_map[id(op)] = design
-            self.op_xclbin_path_map[id(op)] = xclbin_path
-            self.op_insts_path_map[id(op)] = stream
-            self.op_kernel_name_map[id(op)] = op_label
-
-        # The last xclbin in the chain carries all the linked instances.
-        self.combined_xclbin_path = prev_xclbin_path
-        return self.combined_xclbin_path
+            self.designs[id(op)], self.labels[id(op)] = built[design_of[id(op)]]
+        assert self.image is not None, "a sequence has at least one design"
+        return self.image

@@ -10,29 +10,27 @@ declaration: it resolves the operator for the device, calls its
 the runtime sequence from the operator's buffers in declaration order, runs
 the preamble (values, barriers, parameter sync), then either derives the
 fill/drain sequence from the operands' tiles or hands a :class:`Sequence`
-to the operator's ``sequence(rt)`` override.
-
-Every declared operator compiles through ``build_design``, so the compile
-and fusion paths (``xclbin_design``, ``fuse_mlir``) call it with the
-operator bound by name.
+to the operator's ``sequence(rt)`` override. :class:`OperatorDesign` is
+that generator as mlir-aie's ``CompilableDesign`` compiles it, keyed on
+what the module is built from.
 
 One module per participant: :mod:`.target` is what an operator's ``array()``
 receives, :mod:`.runtime` what an operator's ``sequence(rt)`` receives,
-:mod:`.generator` the callable a compile runs, and :mod:`.build` the
-function that puts the three together.
+:mod:`.external` what it receives against a shipped image, and
+:mod:`.build` puts them together.
 """
 
-from .build import device_symbol, generator_for
-from .generator import DesignGenerator
-from .runtime import Sequence, Transfers, transfers
+from .build import OperatorDesign, build_design, device_symbol
+from .external import ExternalSequence
+from .runtime import Sequence, Transfers
 from .target import Target
 
 __all__ = [
-    "DesignGenerator",
+    "ExternalSequence",
+    "OperatorDesign",
     "Sequence",
     "Target",
     "Transfers",
+    "build_design",
     "device_symbol",
-    "generator_for",
-    "transfers",
 ]

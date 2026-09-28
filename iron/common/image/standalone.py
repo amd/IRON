@@ -11,9 +11,8 @@ import aie.utils as aie_utils
 from aie.utils.npukernel import NPUKernel
 
 from ..declare import Operator
-from ..design import generator_for
+from ..design import OperatorDesign
 from .artifacts import Artifacts, Design, Step
-from .jit_compile import cache_entry, insts_design, xclbin_design
 
 
 class OperatorImage:
@@ -30,6 +29,7 @@ class OperatorImage:
     def __init__(self, op: Operator) -> None:
         self.op = op
         self._artifacts: Artifacts | None = None
+        self._kernel: NPUKernel | None = None
         self._handle = None
 
     def compile(self, record: str = "memory") -> Self:
@@ -50,52 +50,52 @@ class OperatorImage:
         return self._artifacts
 
     def __call__(self, *args):
-        """Run the image on ``args``, loading it on the first call."""
-        if self._handle is None:
-            artifacts = self.compile().artifacts
-            external = self.op.external
-            self._handle = aie_utils.DefaultNPURuntime.load(
-                NPUKernel(
-                    xclbin_path=str(artifacts.image),
-                    kernel_name=(
-                        "MLIR_AIE" if external is None else external.kernel_name
-                    ),
-                    insts_path=str(artifacts.insts),
-                )
-            )
+        """Run the image on ``args``, loading it on the first call (and again
+        should the shared runtime have evicted it).
+        """
+        self.compile()
+        if self._handle is None or not self._handle.is_loaded:
+            self._handle = aie_utils.DefaultNPURuntime.load(self._kernel)
         return aie_utils.DefaultNPURuntime.run(self._handle, list(args))
 
     def _build(self) -> Artifacts:
         op = self.op.resolved()
         if op.external is not None:
+            # A shipped image: only the stream is built, against the download.
             config = op
-            entry = own = cache_entry(insts_design(generator_for(op, "xclbin")))
             image = op.external.fetch()
+            own = OperatorDesign(op, "xclbin").compile(insts_only=True)
+            entry = own.get_cache_entry()
+            self._kernel = own.npu_kernel(
+                xclbin_path=image, kernel_name=op.external.kernel_name
+            )
         else:
             config = op.configuration()
-            entry = cache_entry(
-                xclbin_design(generator_for(config, "xclbin"), kernel_name="MLIR_AIE")
-            )
-            own = (
-                entry
-                if config is op
-                else cache_entry(insts_design(generator_for(op, "xclbin")))
-            )
+            built = OperatorDesign(config, "xclbin").compile()
+            entry = built.get_cache_entry()
+            assert entry is not None and entry.xclbin is not None
             image = entry.xclbin
-        assert image is not None and own.insts is not None
+            own = (
+                built
+                if config is op
+                else OperatorDesign(op, "xclbin").compile(insts_only=True)
+            )
+            self._kernel = own.npu_kernel(xclbin_path=image)
+        stream = own.get_cache_entry()
+        assert stream is not None and stream.insts is not None
         buffers = op.buffers
         return Artifacts(
             kind="xclbin",
             image=image,
-            insts=own.insts,
-            entry=own,
+            insts=stream.insts,
+            entry=stream,
             designs=(
                 Design(
                     name=config.name,
                     operators=(op.name,),
                     entry=entry,
                     image=image,
-                    insts=own.insts,
+                    insts=stream.insts,
                 ),
             ),
             steps=(Step(0, op.name, config.name, tuple(b.name for b in buffers)),),

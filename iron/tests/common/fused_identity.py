@@ -22,8 +22,7 @@ import aie.utils as aie_utils
 import pytest
 from aie.iron.device import from_name
 
-from iron.common.image import OperatorSequence, build_fused_mlir
-from iron.common.image.fused import fused_identity, fused_plan
+from iron.common.image import Fusion, OperatorSequence
 from iron.operators.gemv import GEMV
 
 
@@ -53,8 +52,7 @@ def _sequence(shapes):
 
 
 def _identity(shapes):
-    seq = _sequence(shapes)
-    return fused_identity(seq, fused_plan(seq))
+    return Fusion(_sequence(shapes)).identity
 
 
 SHAPES = [(512, 1024), (256, 1024), (512, 2048)]
@@ -62,16 +60,14 @@ SHAPES = [(512, 1024), (256, 1024), (512, 2048)]
 
 def _objects_by_step(shapes):
     """Each step's device name and the kernel objects that device links."""
-    seq = _sequence(shapes)
-    plan = fused_plan(seq)
-    text = build_fused_mlir(seq, plan)
-    devices = re.split(r"(?=aie\.device\()", text)
+    fusion = Fusion(_sequence(shapes))
+    devices = re.split(r"(?=aie\.device\()", fusion.text())
     linked = {}
     for body in devices:
         name = re.match(r"aie\.device\(\w+\) @(\w+)", body)
         if name:
             linked[name.group(1)] = set(re.findall(r'link_with\s*=\s*"([^"]+)"', body))
-    return [(name, linked[name]) for name, *_ in plan[1]]
+    return [(name, linked[name]) for name, *_ in fusion.runlist]
 
 
 def test_equal_kernel_recipes_share_one_object_across_designs():

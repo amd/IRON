@@ -8,7 +8,6 @@ import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.dialects._aie_enum_gen import AIEArch
-from aie.iron.device import from_name
 from aie.utils.verify import Tolerance
 
 from iron.common.design.build import build_design
@@ -255,14 +254,13 @@ def tile_option_params():
 @pytest.mark.parametrize(
     "M,K,N", [(512, 1024, 1024), (512, 6144, 1024), (512, 1024, 10240)]
 )
-def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N):
+def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N, npu2):
     """Device-free: B is resident (K=1024), streamed (K=6144) or behind a leg
     the compiler cuts (N=10240); in each, B has no fifo, nothing is pinned,
     the memtile locks are armed per dispatch, and one slab awaits one C per
     column.
     """
-    npu2 = from_name("npu2", n_cols=8)
-    mlir = str(build_design(npu2, GEMM(M=M, K=K, N=N)))
+    mlir = str(build_design(GEMM(M=M, K=K, N=N)))
     assert "aie.objectfifo @B" not in mlir
     assert "bd_id" not in mlir
     assert "aiex.set_lock" in mlir

@@ -53,19 +53,21 @@ def test_a_graph_compiles_to_one_xclbin_per_operator_chained(device):
     assert len(ops) == 5 and len(seq.runlist) == 5
     # Five operators, four designs: the gate and up projections share one,
     # so they link one kernel instance and run one instruction stream.
-    kernels = {dispatch.op_kernel_name_map[id(op)] for op in ops}
+    kernels = {dispatch.labels[id(op)] for op in ops}
     assert len(kernels) == 4, kernels
+    entries = {id(op): dispatch.designs[id(op)].get_cache_entry() for op in ops}
     gate, up = ops[0], ops[1]
     assert type(gate).__name__ == type(up).__name__ == "GEMV"
-    assert dispatch.op_insts_path_map[id(gate)] == dispatch.op_insts_path_map[id(up)]
-    for op in ops:
-        assert Path(dispatch.op_xclbin_path_map[id(op)]).stat().st_size > 0
-        assert Path(dispatch.op_insts_path_map[id(op)]).stat().st_size > 0
+    assert entries[id(gate)].insts == entries[id(up)].insts
+    for entry in entries.values():
+        assert Path(entry.xclbin).stat().st_size > 0
+        assert Path(entry.insts).stat().st_size > 0
     # The last link carries every instance: it is the largest of the chain,
     # and it is the image compile() handed back.
-    sizes = [Path(dispatch.op_xclbin_path_map[id(op)]).stat().st_size for op in ops]
-    assert Path(dispatch.combined_xclbin_path).stat().st_size == max(sizes)
-    assert Path(net.image) == Path(dispatch.combined_xclbin_path)
+    sizes = [Path(entry.xclbin).stat().st_size for entry in entries.values()]
+    assert dispatch.image is not None
+    assert dispatch.image.stat().st_size == max(sizes)
+    assert Path(net.image) == dispatch.image
 
 
 def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(npu2):

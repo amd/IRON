@@ -20,29 +20,17 @@ from aie.utils.verify import Tolerance, compare
 
 from ..declare import Operator
 from .allocator import ArenaPlan
-from .jit_compile import DispatchStream
 
 if TYPE_CHECKING:
-    import pyxrt
-    from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
-        ParameterScratchpad,
-    )
     from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 else:
     try:
-        import pyxrt
-        from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
-            ParameterScratchpad,
-        )
         from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
     except ImportError:
-        # Host stacks without XRT (e.g. the HRX/amdxdna runtime) have no pyxrt.
-        # The on-device callables here are XRT-native (pyxrt.elf / hw_context /
-        # run, plus XRTTensor views), so they cannot run there; _require_xrt()
-        # makes that explicit at construction. The reference mode and the whole
-        # compile path do not care, and must keep importing.
-        pyxrt = None
-        ParameterScratchpad = None
+        # Host stacks without XRT (e.g. the HRX/amdxdna runtime). The on-device
+        # callables here take XRTTensor views, so they cannot run there;
+        # _require_xrt() makes that explicit at construction. The reference
+        # mode and the whole compile path do not care, and must keep importing.
         XRTTensor = None
 
 logger = logging.getLogger(__name__)
@@ -55,8 +43,8 @@ def _n_elements(nbytes):
 
 
 def _require_xrt() -> None:
-    """Fail with the reason, rather than an AttributeError on ``None.elf``."""
-    if pyxrt is None:
+    """Fail with the reason, rather than a TypeError on calling ``None``."""
+    if XRTTensor is None:
         raise RuntimeError(
             "this OperatorSequence mode needs the XRT host runtime (pyxrt), which is "
             "not installed. Use the reference mode, or run a single operator, which "
@@ -223,30 +211,26 @@ class SequenceFullELFCallable(SequenceCallable):
         self.arena = arena
         self.device_name = device_name
         self.sequence_name = sequence_name
-
-        xrt_elf = pyxrt.elf(str(seq.image))
-        xrt_context = pyxrt.hw_context(aie_utils.DefaultNPURuntime._device, xrt_elf)
-        self.xrt_kernel = pyxrt.ext.kernel(
-            xrt_context, f"{self.device_name}:{self.sequence_name}"
+        self.kernel = NPUKernel(
+            elf_path=str(seq.image), kernel_name=f"{device_name}:{sequence_name}"
         )
-
+        self._handle = None
+        self._params = None
         super().__init__(seq)
 
-        # Persistent run handle: reused across dispatches so that the
-        # ctrl-scratchpad backing buffer (and any ParameterScratchpad state
-        # built on top of it) stays valid across calls.
-        self.run_handle = pyxrt.run(self.xrt_kernel)
-        self.run_handle.set_arg(0, self.input_buffer.buffer_object())
-        self.run_handle.set_arg(1, self.output_buffer.buffer_object())
-        self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
-        if self.trace_buffer is not None and self._trace_arg is not None:
-            self.run_handle.set_arg(self._trace_arg, self.trace_buffer.buffer_object())
-
-        self._params = None
+    @property
+    def handle(self):
+        """The ELF loaded in the shared runtime; loaded again if the runtime
+        has evicted it since, which drops the parameter scratchpad with it.
+        """
+        if self._handle is None or not self._handle.is_loaded:
+            self._handle = aie_utils.DefaultNPURuntime.load(self.kernel)
+            self._params = None
+        return self._handle
 
     @property
     def params(self):
-        """Lazy ParameterScratchpad bound to this ELF's ctrl scratchpad BO.
+        """The ELF's parameter scratchpad, bound to the handle's one run.
 
         The ``params.txt`` describing the runtime parameters is requested
         from aiecc via ``--get-scratchpad-parameters`` and lands in the
@@ -255,6 +239,7 @@ class SequenceFullELFCallable(SequenceCallable):
         still exists, but holds a count of zero and there is no ctrl
         scratchpad buffer object to bind to.
         """
+        handle = self.handle
         if self._params is not None:
             return self._params
         params_path = self.op.artifacts.params
@@ -262,7 +247,7 @@ class SequenceFullELFCallable(SequenceCallable):
             return None
         if params_path.read_text().split("\n", 1)[0].strip() == "0":
             return None
-        self._params = ParameterScratchpad(self.run_handle, str(params_path))
+        self._params = handle.parameter_scratchpad(params_path)
         return self._params
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
@@ -335,7 +320,6 @@ class SequenceFullELFCallable(SequenceCallable):
             return
         self.scratch_buffer = self.arena.tensor
         self._arena_generation = self.arena.generation
-        self.run_handle.set_arg(2, self.scratch_buffer.buffer_object())
         self._buffer_cache.clear()
 
     def get_buffer(self, buffer_name):
@@ -343,17 +327,10 @@ class SequenceFullELFCallable(SequenceCallable):
         return self._get_buffer(buffer_name)
 
     def _sync_inputs(self):
+        # The runtime syncs each arena to the device as it runs: sub-views
+        # handed out by get_buffer() share their parent's coherence map, so a
+        # write through one (weights, KV caches) is flushed with it.
         self._follow_arena()
-        # Sub-views handed out by get_buffer() share the parent's coherence map, so
-        # a write through one (e.g. numpy_view()) marks its byte range host-dirty
-        # there too, and `to("npu")` here syncs every dirty range in one pass.
-        # Scratch is flushed as well: get_buffer() hands out writable views into it
-        # (weights, KV caches), and this dispatch bypasses the host runtime's own
-        # per-argument flush. With nothing dirty, `to("npu")` transfers nothing. It
-        # also leaves all of scratch marked device-resident, so a read of a scratch
-        # view after the run pulls what the NPU wrote.
-        self.input_buffer.to("npu")
-        self.scratch_buffer.to("npu")
 
     def _sync_outputs(self):
         # _run just rewrote the output arena on the device, so the device holds the
@@ -367,10 +344,12 @@ class SequenceFullELFCallable(SequenceCallable):
             self.trace_buffer.to("cpu")
 
     def _run(self):
-        self.run_handle.start()
-        ret_code = self.run_handle.wait()
-        if ret_code != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
-            raise RuntimeError(f"Kernel execution failed with return code {ret_code}")
+        args = [self.input_buffer, self.output_buffer, self.scratch_buffer]
+        if self.trace_buffer is not None:
+            # Trace lowering appends its buffer after the consolidated three.
+            assert self._trace_arg == len(args), self._trace_arg
+            args.append(self.trace_buffer)
+        aie_utils.DefaultNPURuntime.run(self.handle, args)
 
 
 class SequenceXclbinCallable(SequenceCallable):
@@ -386,25 +365,15 @@ class SequenceXclbinCallable(SequenceCallable):
     def _allocate_buffers(self):
         super()._allocate_buffers()
         chain = self.op._image
-        self._op_callable_map = {}  # id(op) -> NPUKernel
+        self._op_callable_map = {  # id(op) -> NPUKernel
+            op_id: design.npu_kernel(
+                xclbin_path=chain.image, kernel_name=chain.labels[op_id]
+            )
+            for op_id, design in chain.designs.items()
+        }
         # Per-call scalars of dispatch-time kernels, by symbol; a graph sets
         # them before each run (CompiledGraph._write_values).
         self.dispatch_values = {}
-        for op_id, xclbin_path in chain.op_xclbin_path_map.items():
-            stream = chain.op_insts_path_map[op_id]
-            if isinstance(stream, DispatchStream):
-                self._op_callable_map[op_id] = NPUKernel(
-                    xclbin_path=str(chain.combined_xclbin_path),
-                    kernel_name=chain.op_kernel_name_map[op_id],
-                    dispatch_params=list(stream.params),
-                    dispatch_lib_path=str(stream.lib_path),
-                )
-            else:
-                self._op_callable_map[op_id] = NPUKernel(
-                    xclbin_path=str(chain.combined_xclbin_path),
-                    kernel_name=chain.op_kernel_name_map[op_id],
-                    insts_path=str(stream),
-                )
         self._execution_plan = [
             (
                 self._op_callable_map[id(step_op)],
