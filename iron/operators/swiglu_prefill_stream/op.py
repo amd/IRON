@@ -4,6 +4,7 @@
 import functools
 
 import aie.utils as aie_utils
+from aie.utils.trace import TraceConfig
 from ml_dtypes import bfloat16
 
 from iron.common import In, Operator, Out, param
@@ -53,6 +54,7 @@ class SwiGLUStreamGroup(Operator):
             embedding_dim=self.embedding_dim,
             hidden_dim=self.hidden_dim,
             npu=aie_utils.ensure_current_device(required=True).name,
+            trace_size=0 if self.trace is None else self.trace.trace_size,
         )
 
     def design_key(self):
@@ -145,7 +147,8 @@ class SwiGLUPrefillStream(OperatorSequence):
     on the array at once, 2 splits after the elementwise multiply, and 5 runs layer
     by layer, each layer taking the whole array in turn as
     :class:`iron.operators.SwiGLU` does. The split is decided by the mapping's
-    fused groups, and the external buffers are the same either way.
+    fused groups, and the external buffers are the same either way. With
+    ``trace``, stream-dse generates every group traced.
 
     Runtime buffers (``get_callable().get_buffer(name)``) are named by the reference
     module: ``input``, ``w_gate``, ``w_up``, ``w_down``, ``output``. Building
@@ -153,7 +156,15 @@ class SwiGLUPrefillStream(OperatorSequence):
     importing this module does not.
     """
 
-    def __init__(self, seq_len, embedding_dim, hidden_dim, k=1, share_designs=True):
+    def __init__(
+        self,
+        seq_len,
+        embedding_dim,
+        hidden_dim,
+        k=1,
+        share_designs=True,
+        trace: TraceConfig | None = None,
+    ):
         design = _stream_design()
         # Each group's ports, in the order the exported graph uses them. The
         # block's own arguments are what no group produces and what none
@@ -169,6 +180,7 @@ class SwiGLUPrefillStream(OperatorSequence):
                     hidden_dim=hidden_dim,
                     k=k,
                     group_index=index,
+                    trace=trace,
                 ),
                 *inputs,
                 *outputs,
@@ -188,6 +200,5 @@ class SwiGLUPrefillStream(OperatorSequence):
                     n for _, outputs in boundaries for n in outputs if n not in consumed
                 )
             ),
-            trace_size=design.trace_size(),
             share_designs=share_designs,
         )

@@ -278,7 +278,7 @@ class SequenceFullELFCallable(SequenceCallable):
         # and sub-designs claim a share, so read them from the lowered module.
         self.trace_buffer = None
         self._trace_arg = None
-        if self.op.trace_size:
+        if self.op.traced:
             layout = get_trace_buffer(
                 self.lowered_mlir_path.read_text(),
                 f"{self.device_name}:{self.sequence_name}",

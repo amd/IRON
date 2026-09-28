@@ -20,17 +20,16 @@ from iron.common.tracing import dump_traces
 from iron.operators import LayerNorm
 
 SIZE = 2048
-TRACE_SIZE = 8192
 
 
-def _layer_norm_run(name, trace_size):
+def _layer_norm_run(name, trace):
     """A dispatched one-step fused sequence, and its output."""
     layer_norm = LayerNorm(
         rows=1,
         num_aie_columns=1,
         num_channels=1,
         tile_size=SIZE,
-        trace_size=trace_size,
+        trace=trace,
     )
 
     class F(iron.Graph):
@@ -40,7 +39,7 @@ def _layer_norm_run(name, trace_size):
     f = F()
 
     traced = f.trace(x=(1, SIZE))
-    seq = traced.sequence(name, dispatch="fused", trace_size=trace_size).compile()
+    seq = traced.sequence(name, dispatch="fused").compile()
     run = seq.get_callable()
     x = run.get_buffer("x")
     x.numpy_view()[:] = np.random.default_rng(0).standard_normal(SIZE).astype(bfloat16)
@@ -50,13 +49,13 @@ def _layer_norm_run(name, trace_size):
 
 @pytest.mark.supported_devices("npu2")
 def test_dump_writes_raw_words_and_perfetto_json(npu_runtime, tmp_path):
-    run, traced = _layer_norm_run("infra_trace_layer_norm", TRACE_SIZE)
-    _, untraced = _layer_norm_run("infra_trace_layer_norm_off", 0)
+    run, traced = _layer_norm_run("infra_trace_layer_norm", TraceConfig(8192))
+    _, untraced = _layer_norm_run("infra_trace_layer_norm_off", None)
     assert np.array_equal(
         traced.view(np.uint16), untraced.view(np.uint16)
     ), "tracing changed the result"
 
-    written = dump_traces(run, "layer_norm", out_dir=tmp_path, summary=False)
+    written = dump_traces(run, tmp_path / "layer_norm.txt", summary=False)
 
     assert run.trace_buffer is not None
     words = run.trace_buffer.numpy().view(np.uint32).reshape(-1)

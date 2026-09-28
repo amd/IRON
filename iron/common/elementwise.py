@@ -64,12 +64,7 @@ from .declare import (
     auto,
     param,
 )
-from .testing import (
-    Testing,
-    binary_elementwise_cases,
-    channeled_unary_cases,
-    row_cases,
-)
+from .testing import Sweep, Testing
 from .tiling import fifo_depth
 
 # The line an elementwise core streams when nothing else is asked for: small
@@ -274,7 +269,7 @@ class Elementwise(Operator):
 class UnaryElementwise(Elementwise):
     """A flat buffer in, a flat buffer of the same size out."""
 
-    test = Testing(channeled_unary_cases())
+    test = Testing(Sweep())
     size: int = param()
     valid = Extent(size)  # size, or fewer per call: x[:n] in a graph
 
@@ -300,7 +295,7 @@ class BinaryElementwise(Elementwise):
     stays at one.
     """
 
-    test = Testing(binary_elementwise_cases())
+    test = Testing(Sweep(channels=None))
     size: int = param()
     valid = Extent(size)
 
@@ -335,7 +330,7 @@ class Rowwise(Elementwise):
     something else.
     """
 
-    test = Testing(row_cases())
+    test = Testing(Sweep(rows=True))
 
     rows: int = param()
     valid = Extent(rows)  # rows, or fewer per call

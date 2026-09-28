@@ -7,7 +7,7 @@ from aie.iron.kernels import eltwise, norm
 from aie.utils.verify import Tolerance
 
 from iron.common import In, Out, Rowwise, param
-from iron.common.testing import Testing, row_cases
+from iron.common.testing import Sweep, Testing
 from iron.common.tiling import fifo_depth
 
 # The longest weighted row: the multiplying core holds the weight row beside
@@ -28,8 +28,7 @@ class RMSNorm(Rowwise):
     """
 
     test = Testing(
-        lambda cls: row_cases()(cls)
-        + row_cases(tile_cap=WEIGHTED_TILE_CAP, weighted=True)(cls)
+        [Sweep(rows=True), Sweep(rows=True, tile_cap=WEIGHTED_TILE_CAP, weighted=True)]
     )
 
     # The epsilon under the root: 1e-5 by default; a model states its own.

@@ -12,12 +12,12 @@ back. How an operator declares the shapes it is tested at is in
 from __future__ import annotations
 
 import dataclasses
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import aie.utils as aie_utils
 import numpy as np
 from aie.utils.benchmark import run_iters
-from aie.utils.verify import Tolerance, compare, nearly_equal
+from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
 from .declare import Operator
@@ -82,9 +82,6 @@ def vectors(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Vecto
     return Vectors(inputs, dict(zip(names, outs)))
 
 
-# TODO: Consider upstreaming generic buffer utilities to mlir-aie once operator abstractions stabilize.
-
-
 def verify_buffer(
     output: np.ndarray,
     buf_name: str,
@@ -95,18 +92,12 @@ def verify_buffer(
     """The indices where ``output`` is outside ``tolerance`` of ``reference``.
 
     The judge is mlir-aie's ``aie.utils.verify.compare``, under the contract
-    of the kernel the operator runs or a ``Tolerance.relative``, say, and a NaN or infinity must meet the same value in the reference whatever
-    ``max_mismatch_frac`` allows. A shorter output than reference counts the
-    missing elements as errors. The tolerance must be judgeable element by
-    element, so it has no ``range_frac``; a bound tolerance's limit is
-    ``bound``, evaluated on the inputs as ``compare`` takes it, of the
-    output's size or broadcast to its shape.
+    of the kernel the operator runs or a ``Tolerance.relative``, say; the
+    indices are its verdict's ``mismatches``, and none when the verdict
+    passes. A shorter output than reference counts the missing elements as
+    errors. A bound tolerance's limit is ``bound``, evaluated on the inputs
+    as ``compare`` takes it, of the output's size or broadcast to its shape.
     """
-    if tolerance.range_frac is not None:
-        raise ValueError(
-            f"{buf_name}: a tolerance with range_frac={tolerance.range_frac} "
-            f"depends on more than the element it judges"
-        )
     expected = np.asarray(reference).reshape(-1)
     got = np.asarray(output).reshape(-1)
     if len(got) < len(expected):
@@ -134,58 +125,13 @@ def verify_buffer(
         )
     if verdict:
         return []
-
     print(f"{buf_name}: {verdict.detail}")
-    # compare() judges; it does not list the elements.
-    both_nan = np.isnan(got.astype(np.float32)) & np.isnan(expected.astype(np.float32))
-    if tolerance.kind == "relative":
-        # nearly_equal is the same per-element test, except that it also
-        # rejects a NaN that meets a NaN.
-        bad = ~nearly_equal(
-            got, expected, rtol=tolerance.rtol or 0.0, atol=tolerance.atol
-        )
-    elif tolerance.kind == "exact":
-        bad = got != expected.astype(got.dtype)
-    else:
-        each = dataclasses.replace(tolerance, max_mismatch_frac=0.0)
-        bad = np.array(
-            [
-                not compare(
-                    got[i : i + 1],
-                    expected[i : i + 1],
-                    each,
-                    bound=None if bound is None else bound[i : i + 1],
-                )
-                for i in range(len(got))
-            ],
-            dtype=bool,
-        )
-    errors = np.flatnonzero(bad & ~both_nan).tolist()
+    errors = verdict.mismatches.tolist()
     for i in errors[:10]:
         print(
             f"Mismatch in {buf_name}[{i}]: expected {float(expected[i]):.6f}, got {float(got[i]):.6f}"
         )
     return errors
-
-
-# -- metrics ------------------------------------------------------------------
-# A test reports its figures here; the root conftest takes them after each
-# test and writes one CSV row per test (mean, median, min, max, stddev over
-# the iterations).
-
-_METRICS: list[tuple[str, float]] = []
-
-
-def record_metric(name: str, value: float) -> None:
-    """Report a figure ("Latency", "Bandwidth", "Throughput", ...) for the CSV."""
-    _METRICS.append((name, float(value)))
-
-
-def take_metrics() -> list[tuple[str, float]]:
-    """The figures recorded since the last call, cleared."""
-    out = list(_METRICS)
-    _METRICS.clear()
-    return out
 
 
 def _nbytes(buf) -> int:
@@ -215,6 +161,7 @@ def run_test(
     tolerance: Tolerance,
     warmup_iters: int = 1,
     timed_iters: int = 1,
+    record: Callable[[str, float], object] | None = None,
 ) -> Run:
     """Compile ``operator``, run it on the device, time it, check its outputs.
 
@@ -226,8 +173,10 @@ def run_test(
     ``tolerance``; a bound tolerance's limit is its bound on the
     inputs, which holds for an elementwise kernel's contract whatever shape
     the operator gives its operands. Latency (the NPU's own time) and effective
-    bandwidth are recorded for the CSV and returned, and throughput from
-    :meth:`~iron.common.declare.Operator.ops` for an operator that computes.
+    bandwidth are returned, and handed to ``record`` (a test's pytest
+    ``record_property``, which the root conftest writes to the CSV) with
+    throughput from :meth:`~iron.common.declare.Operator.ops` for an
+    operator that computes.
     """
     if isinstance(inputs, Vectors):
         inputs, outputs = inputs.inputs, inputs.outputs
@@ -287,11 +236,12 @@ def run_test(
 
     # NPU-side bandwidth (excludes host DMA transfer time)
     bandwidth_gbps = total_bytes / (latency_us * 1e-6) / 1e9
-    record_metric("Latency", latency_us)
-    record_metric("Bandwidth", bandwidth_gbps)
-    ops = operator.resolved().ops()
-    if ops:
-        record_metric("Throughput", ops / (latency_us * 1e-6) / 1e9)
+    if record is not None:
+        record("Latency", latency_us)
+        record("Bandwidth", bandwidth_gbps)
+        ops = operator.resolved().ops()
+        if ops:
+            record("Throughput", ops / (latency_us * 1e-6) / 1e9)
     print(
         f"\nLatency (us): {latency_us:.1f}  Effective Bandwidth: {bandwidth_gbps:.6e} GB/s"
     )

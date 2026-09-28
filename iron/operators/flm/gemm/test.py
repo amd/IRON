@@ -142,7 +142,7 @@ def accumulated_mass(K, A, B):
     )
 
 
-def check_on_device(operator, data, rounding=CONV_EVEN):
+def check_on_device(operator, data, rounding=CONV_EVEN, record=None):
     """Run ``operator`` against its drawn vectors and return run_test's result.
 
     Bounds the error absolutely, as a fraction of the accumulated mass
@@ -153,6 +153,7 @@ def check_on_device(operator, data, rounding=CONV_EVEN):
     The fraction is per-architecture, since NPU2 emulates the mmul with bfp16
     while NPU1 accumulates four native bf16 macs in f32 (~20x tighter). floor
     truncates, so its bias accumulates and gets a looser bound on both.
+    ``record`` is run_test's.
     """
     A, B = data["A"], data["B"]
     mass = accumulated_mass(operator.K, A, B)
@@ -165,11 +166,12 @@ def check_on_device(operator, data, rounding=CONV_EVEN):
         {"A": A.flatten(), "B": operator.pack_B(B)},
         {"C": data["C"].flatten()},
         tolerance=Tolerance.relative(0.04, budget * mass),
+        record=record,
     )
 
 
 @pytest.mark.parametrize("M,K,N,epilogue,clamp,rounding", get_params())
-def test_gemm(M, K, N, epilogue, clamp, rounding, npu_runtime):
+def test_gemm(M, K, N, epilogue, clamp, rounding, npu_runtime, record_property):
     scale = INPUT_SCALE if epilogue is NONE else ACTIVATION_INPUT_SCALE
     operator = GEMM(
         M=M,
@@ -180,7 +182,9 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, npu_runtime):
         rounding=rounding,
     )
 
-    errors, _, _ = check_on_device(operator, flm_vectors(operator, scale), rounding)
+    errors, _, _ = check_on_device(
+        operator, flm_vectors(operator, scale), rounding, record=record_property
+    )
 
     assert not errors, "Test failed"
 
@@ -411,7 +415,7 @@ BUDGET_FLOOR = 2e-2
         pytest.param(256, 512, 1024, GELU, None, marks=SHIPPED),
     ],
 )
-def test_shipped_overlay(M, K, N, epilogue, clamp, npu_runtime):
+def test_shipped_overlay(M, K, N, epilogue, clamp, npu_runtime, record_property):
     """The shipped binary through the same operator: the second reference."""
     operator = Shipped(M=M, K=K, N=N, epilogue=epilogue, clamp=clamp)
     # B drawn row-major (K, N); the operator consumes it packed (pack_B).
@@ -438,6 +442,7 @@ def test_shipped_overlay(M, K, N, epilogue, clamp, npu_runtime):
         input_buffers,
         output_buffers,
         tolerance=Tolerance.relative(0.04, abs_tol),
+        record=record_property,
     )
     assert not errors, "Test failed"
 

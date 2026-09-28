@@ -15,7 +15,7 @@ import pytest
 from aie.utils.benchmark import run_iters
 from ml_dtypes import bfloat16
 
-from iron.common.harness import record_metric, verify_buffer
+from iron.common.harness import verify_buffer
 from iron.lm.layers import SwiGLU
 from iron.operators.elementwise_mul import ElementwiseMul
 
@@ -50,7 +50,7 @@ def _errors(net, step):
 
 
 @pytest.mark.parametrize("rows,embedding_dim,hidden_dim", SHAPES, ids=lambda v: str(v))
-def test_swiglu(rows, embedding_dim, hidden_dim, npu_runtime):
+def test_swiglu(rows, embedding_dim, hidden_dim, npu_runtime, record_property):
     rng = np.random.default_rng(0)
     ffn = SwiGLU(
         _weight(rng, hidden_dim, embedding_dim),
@@ -62,10 +62,10 @@ def test_swiglu(rows, embedding_dim, hidden_dim, npu_runtime):
 
     elapsed_us = run_iters(lambda: net(x), warmup=1, iters=1).e2e.avg_us
     net(x)
-    record_metric("Latency", elapsed_us)
-    record_metric("Bandwidth", 2 * x.nbytes / (elapsed_us * 1e-6) / 1e9)
+    record_property("Latency", elapsed_us)
+    record_property("Bandwidth", 2 * x.nbytes / (elapsed_us * 1e-6) / 1e9)
     ops = sum(s.op.resolved().ops() for s in net.traced.steps)
-    record_metric("Throughput", ops / (elapsed_us * 1e-6) / 1e9)
+    record_property("Throughput", ops / (elapsed_us * 1e-6) / 1e9)
 
     # The gate's buffer is dead once SiLU has read it, so the planner may
     # reuse it; the product's inputs and the down projection's are intact.

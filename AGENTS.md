@@ -230,9 +230,16 @@ reuse lint
    - `elementwise.py`: the shared elementwise array and its operand shapes (flat, binary, rowwise)
    - `harness.py`: the device test harness (`vectors`; `run_test`, timed with
      `aie.utils.benchmark.run_iters`; `verify_buffer`, a wrapper over
-     mlir-aie's `aie.utils.verify.compare`; `record_metric`)
-   - `testing.py`: how an operator declares the shapes it is tested at (`Testing`, `Case`)
-   - `tracing.py`: `dump_traces`, for a sequence compiled with `trace_size=`
+     mlir-aie's `aie.utils.verify.compare` listing its verdict's
+     `mismatches`); a test's figures go to pytest's `record_property`,
+     which the root conftest writes to the CSV
+   - `testing.py`: how an operator declares the shapes it is tested at
+     (`Testing`, `Case`, and `Sweep`, the elementwise sweep)
+   - `tracing.py`: `dump_traces(run, trace_file)`, for a sequence holding an
+     operator built with `trace=` (mlir-aie's `TraceConfig`); the workers
+     traced are those its `array()` gives `Worker(trace=)`, else its first.
+     The root conftest's `trace` fixture is the one reader of
+     `IRON_TRACE_SIZE`/`IRON_TRACE_DIR`
 
 ### Key Concepts
 
@@ -404,24 +411,26 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    compute, round once; from the contract references of the kernels it
    runs where it can), and an `ops()` where one operation per output
    element is not its count (`2 * M * K * N` for GEMM, 0 for a data mover):
-   `run_test` records throughput from it
+   `run_test(..., record=record_property)` records throughput from it
 6. Declare how it is tested: `test = Testing(cases, tolerance=)` on the
    operator class, from `iron.common.testing`
    - leave `tolerance` out to be judged by the contract of the kernel the
      operator runs (`Operator.tolerance()`); give an
      `aie.utils.verify.Tolerance` where that is not the right gate
-   - the cases are `Case(kwargs, extensive=...)` or plain kwarg dicts, or a
-     callable returning them when they follow the device's width;
-     `channeled_unary_cases`/`binary_elementwise_cases` build the
-     elementwise sweeps
+   - the cases are `Case(kwargs, extensive=...)`, plain kwarg dicts, and
+     callables of the class returning them when they follow the device's
+     width: `Sweep(...)` is the elementwise one (every column and channel
+     count the shim budget allows at each length; `channels=None` for a
+     binary operator, `rows=True` for a rowwise one, further keywords given
+     to every case)
    - `extensive=True` keeps a case out of the default suite
    - `draw=` passes `vectors()` its arguments (`normal=`, `centered=`, a given
      tensor or shape per input), or a callable of the operator for an input
      with preconditions (a packed quantization, an angle table)
    - `iron/tests/operators/catalog.py` runs it; a test with a body of its own goes
-     beside the operator and calls `run_test(op, vectors(op), ...)`, with
-     `record_metric()` for any figure beyond latency, bandwidth and
-     throughput
+     beside the operator and calls `run_test(op, vectors(op), ...,
+     record=record_property)`, and gives pytest's `record_property` any
+     figure beyond latency, bandwidth and throughput
    - a shape the operator must *refuse* goes in
      `iron/tests/operators/rejected_shapes.py`, which needs no device
 7. Register operator in `iron/operators/__init__.py` (`_OPERATOR_MODULES`:
@@ -622,7 +631,8 @@ from iron.operators import Tanh
 op = Tanh(size=2048, num_aie_columns=1, num_channels=1, tile_size=2048)
 
 # Dispatch, and compare every output with op.reference() on the drawn inputs
-# under the tolerance contract of the kernel the operator runs ...
+# under the tolerance contract of the kernel the operator runs; in a test,
+# record=record_property puts its latency and bandwidth in the CSV ...
 run = run_test(op, vectors(op), tolerance=op.resolved().tolerance())
 assert not run.errors, run.errors
 

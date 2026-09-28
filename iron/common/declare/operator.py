@@ -32,6 +32,7 @@ from typing import (
 
 import aie.utils as aie_utils
 import numpy as np
+from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance
 
 from ..testing import Testing
@@ -221,8 +222,12 @@ class Operator(metaclass=_OperatorMeta):
     # slab of a dispatch.
     own_preamble: ClassVar[bool] = False
 
-    # Bytes of trace buffer this operator's build emits; 0 disables tracing.
-    trace_size: int = dataclasses.field(default=0, repr=False, kw_only=True)
+    # Hardware tracing of this operator's build (the workers array() gives
+    # Worker(trace=), else its first), in a buffer of trace.trace_size bytes;
+    # None leaves it untraced.
+    trace: TraceConfig | None = dataclasses.field(
+        default=None, repr=False, kw_only=True
+    )
 
     def __init_subclass__(cls, image=None, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
@@ -848,6 +853,6 @@ class Operator(metaclass=_OperatorMeta):
             else:
                 how = "unused here"
             lines.append(f"  {m.name}: {how}")
-        if self.trace_size:
-            lines.append(f"  traced: {self.trace_size} bytes of trace buffer")
+        if self.trace is not None:
+            lines.append(f"  traced: {self.trace.trace_size} bytes of trace buffer")
         return "\n".join(lines)

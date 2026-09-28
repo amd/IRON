@@ -4,7 +4,7 @@
 from aie.iron.kernels import datamovement
 
 from iron.common import BinaryElementwise, param
-from iron.common.testing import Testing, binary_elementwise_cases
+from iron.common.testing import Sweep, Testing
 
 
 class AXPY(BinaryElementwise):
@@ -16,9 +16,11 @@ class AXPY(BinaryElementwise):
     # rounds (the 2048 shape in the default suite), then every split at a
     # third scalar, all extensive.
     test = Testing(
-        lambda cls: binary_elementwise_cases(scalar_factor=3.0)(cls)
-        + binary_elementwise_cases(scalar_factor=1.003)(cls)
-        + binary_elementwise_cases(scalar_factor=10.0, regular=None)(cls)
+        [
+            Sweep(channels=None, scalar_factor=3.0),
+            Sweep(channels=None, scalar_factor=1.003),
+            Sweep(channels=None, scalar_factor=10.0, regular=None),
+        ]
     )
 
     scalar_factor: float = param(default=3.0, array=True)

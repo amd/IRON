@@ -50,7 +50,6 @@ from aie.dialects.aie import AIEArch
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from ml_dtypes import bfloat16
 
-from iron.common.harness import record_metric
 from iron.common.image import OperatorImage
 from iron.operators import GEMM as IronGEMM
 from iron.operators.flm import GEMM as FLMGEMM
@@ -174,7 +173,7 @@ class Candidate:
 
 
 @pytest.mark.parametrize("model,proj,M,K,N", get_params())
-def test_gemm_vs_prebuilt(model, proj, M, K, N, npu_runtime):
+def test_gemm_vs_prebuilt(model, proj, M, K, N, npu_runtime, record_property):
     A, B, expected, mass = make_inputs(M, K, N)
 
     # Build everything before timing anything. Comparing frozen binaries is the
@@ -244,17 +243,17 @@ def test_gemm_vs_prebuilt(model, proj, M, K, N, npu_runtime):
         print(f"{c.name} latency (us): {c.us:.1f}")
         print(f"{c.name} err/mass: {c.err:.3e}")
         print(f"{c.name} xclbin (KB): {kb:.1f}")
-        record_metric(f"{label[c.name]}Latency", c.us)
-        record_metric(f"{label[c.name]}Err", c.err)
-        record_metric(f"{label[c.name]}XclbinKB", kb)
+        record_property(f"{label[c.name]}Latency", c.us)
+        record_property(f"{label[c.name]}Err", c.err)
+        record_property(f"{label[c.name]}XclbinKB", kb)
     if "prebuilt" in by_name:
         print(f"speedup vs prebuilt: {by_name['prebuilt'].us / flm.us:.3f}")
-        record_metric("SpeedupVsPrebuilt", by_name["prebuilt"].us / flm.us)
+        record_property("SpeedupVsPrebuilt", by_name["prebuilt"].us / flm.us)
     print(f"speedup vs gemm: {by_name['gemm'].us / flm.us:.3f}")
-    record_metric("SpeedupVsGEMM", by_name["gemm"].us / flm.us)
+    record_property("SpeedupVsGEMM", by_name["gemm"].us / flm.us)
     throughput = 2.0 * M * K * N / (flm.us * 1e-6) / 1e9
     print(f"flm throughput: {throughput:.6e} GFLOP/s")
     print(f"flm jitter (%): {flm.jitter_pct:.2f}")
-    record_metric("FLMThroughput", throughput)
-    record_metric("FLMJitterPct", flm.jitter_pct)
+    record_property("FLMThroughput", throughput)
+    record_property("FLMJitterPct", flm.jitter_pct)
     print()

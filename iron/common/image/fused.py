@@ -48,7 +48,7 @@ class FusedImage:
             )
         if self.design is None:
             self.fusion = Fusion(seq)
-            flags = [*self.FLAGS, *([self.TRACE_FLAG] if seq.trace_size else [])]
+            flags = [*self.FLAGS, *([self.TRACE_FLAG] if seq.traced else [])]
             self.design = CompilableDesign(
                 self.fusion.text,
                 key=self.fusion.identity,

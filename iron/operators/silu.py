@@ -4,13 +4,13 @@
 from aie.iron.kernels import activation
 
 from iron.common import UnaryElementwise, auto
-from iron.common.testing import Testing, channeled_unary_cases
+from iron.common.testing import Sweep, Testing
 
 
 class SiLU(UnaryElementwise):
     """AIE-accelerated SiLU activation function."""
 
-    test = Testing(channeled_unary_cases(channels=None))
+    test = Testing(Sweep(channels=None))
 
     # One channel per column: the LUT-based kernel is sized for it.
     num_channels: int = auto(1, repr=False, init=False)

@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import csv
+import numbers
+import os
 import re
 import subprocess
 from datetime import datetime
@@ -9,11 +11,11 @@ from pathlib import Path
 import pytest
 import statistics
 
-from iron.common import harness
 import aie.utils as aie_utils
 from aie.iron.device import from_name
 from aie.utils.benchmark import preflight, provenance
 from aie.utils.probe import npu_unavailable_reason
+from aie.utils.trace import TraceConfig
 
 
 @pytest.fixture
@@ -39,6 +41,20 @@ def npu2():
     aie_utils.set_current_device(device)
     yield device
     aie_utils.set_current_device(previous)
+
+
+@pytest.fixture
+def trace(request, tmp_path):
+    """The trace a run asks for, or None: ``IRON_TRACE_SIZE`` bytes of trace
+    buffer, written to a file named after the test in ``IRON_TRACE_DIR``
+    (the test's ``tmp_path`` unless set).
+    """
+    size = int(os.environ.get("IRON_TRACE_SIZE", "0"))
+    if not size:
+        return None
+    directory = Path(os.environ.get("IRON_TRACE_DIR", tmp_path))
+    name = re.sub(r"[^\w.-]", "_", request.node.name)
+    return TraceConfig(size, trace_file=str(directory / f"{name}.txt"))
 
 
 def pytest_addoption(parser):
@@ -168,11 +184,14 @@ def pytest_runtest_makereport(item, call):
                 test_name = item.nodeid.rsplit("::", 1)[-1]
 
             passed = report.outcome == "passed"
-            # What the test reported through harness.record_metric (run_test
-            # records latency and bandwidth; a test adds its own, e.g. throughput).
-            csv_reporter.add_result(
-                test_path, test_name, passed, harness.take_metrics()
-            )
+            # The figures the test gave record_property (run_test's latency,
+            # bandwidth and throughput; a test's own, e.g. TTFT).
+            metrics = [
+                (name, float(value))
+                for name, value in item.user_properties
+                if isinstance(value, numbers.Real)
+            ]
+            csv_reporter.add_result(test_path, test_name, passed, metrics)
 
 
 def pytest_configure(config):

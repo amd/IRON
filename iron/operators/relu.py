@@ -4,13 +4,13 @@
 from aie.iron.kernels import eltwise
 
 from iron.common import UnaryElementwise
-from iron.common.testing import Testing, channeled_unary_cases
+from iron.common.testing import Sweep, Testing
 
 
 class ReLU(UnaryElementwise):
     """AIE-accelerated ReLU activation function."""
 
-    test = Testing(channeled_unary_cases(), draw=dict(centered=("x",)))  # both signs
+    test = Testing(Sweep(), draw=dict(centered=("x",)))  # both signs
 
     def kernel(self):
         return eltwise.relu_sized(self.tile_size)

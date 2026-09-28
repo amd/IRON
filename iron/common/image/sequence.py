@@ -81,7 +81,6 @@ class OperatorSequence:
         plan_scratch=True,
         dispatch="auto",
         extra_flags=None,
-        trace_size=0,
         share_designs=False,
         arena: ArenaPlan | None = None,
         residents: Mapping[str, Hashable] | None = None,
@@ -121,8 +120,6 @@ class OperatorSequence:
         )  # Optional dict: buffer_name -> size_in_bytes
         # Extra aiecc flags forwarded to the full-ELF build.
         self.extra_flags = extra_flags or []
-        # Bytes of hardware trace buffer per runlist step; 0 leaves the design untraced.
-        self.trace_size = trace_size
         self.share_designs = share_designs
         self.arena = arena
         self.residents = dict(residents or {})
@@ -140,6 +137,13 @@ class OperatorSequence:
         raise TypeError(
             f"dispatch {dispatch!r} is not one of {sorted(_MODES)} or 'auto'"
         )
+
+    @property
+    def traced(self) -> bool:
+        """Whether any step's operator is built with a ``trace``: the image
+        then carries one trace buffer, shared by every traced design.
+        """
+        return any(op.trace is not None for op, *_ in self.runlist)
 
     def unique_operators(self):
         """Operators in runlist order, de-duplicated by identity."""

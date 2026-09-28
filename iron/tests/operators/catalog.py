@@ -57,7 +57,9 @@ def _declared():
 
 
 @pytest.mark.parametrize("cls,declaration,case", _declared())
-def test_operator(cls: type[Operator], declaration: Testing, case: Case, npu_runtime):
+def test_operator(
+    cls: type[Operator], declaration: Testing, case: Case, npu_runtime, record_property
+):
     try:
         op = cls(**case.kwargs).resolved(aie_utils.ensure_current_device(required=True))
     except Unresolvable as e:  # more columns than this device has, say
@@ -70,5 +72,7 @@ def test_operator(cls: type[Operator], declaration: Testing, case: Case, npu_run
             f"{cls.__name__} runs no kernel with a tolerance contract; "
             "declare Testing(tolerance=...)"
         )
-    run = run_test(op, vectors(op, **extra), tolerance=tolerance)
+    run = run_test(
+        op, vectors(op, **extra), tolerance=tolerance, record=record_property
+    )
     assert not run.errors, f"{cls.__name__}({case.label}) failed: {run.errors}"

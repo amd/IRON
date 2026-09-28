@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from typing import Any
 
 import aie.utils as aie_utils
 import numpy as np
@@ -79,25 +80,26 @@ requires_aie2p = pytest.mark.skipif(
 )
 
 
-def _check(op, blob, expected, label):
+def _check(op, blob, expected, label, record=None):
     errors, _, _ = run_test(
         op,
         {"in": blob},
         {"out": expected},
         tolerance=Tolerance.exact(),
+        record=record,
     )
     assert not errors, f"{label}: {errors}"
 
 
 @requires_aie2p
 @pytest.mark.parametrize("K, N", SHAPES)
-def test_matches_reference(K, N, npu_runtime):
+def test_matches_reference(K, N, npu_runtime, record_property):
     """Byte-exact. Every rounding on the device is reproducible on the host, so
     a tolerance would hide a value landing in the wrong block.
     """
     qw = random_q4nx(K, N, seed=0)
     op = DequantBFP(K=K, N=N)
-    _check(op, qw, op.reference(qw), f"K={K} N={N}")
+    _check(op, qw, op.reference(qw), f"K={K} N={N}", record_property)
 
 
 @requires_aie2p
@@ -197,7 +199,7 @@ def test_one_xclbin_serves_every_shape(npu_runtime):
     a fresh context, so the array is reconfigured between cases anyway. One
     case leaves three of the eight columns without work.
     """
-    cases = [
+    cases: list[dict[str, Any]] = [
         dict(K=1536, N=2048),
         dict(K=1024, N=320),
         dict(K=2048, N=1536),

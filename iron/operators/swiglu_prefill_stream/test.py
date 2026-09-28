@@ -25,7 +25,7 @@ pytest.skip(
     allow_module_level=True,
 )
 
-from iron.common.harness import record_metric, verify_buffer  # noqa: E402
+from iron.common.harness import verify_buffer  # noqa: E402
 from iron.operators.swiglu_prefill_stream.op import SwiGLUPrefillStream  # noqa: E402
 from iron.operators.swiglu_prefill_stream.reference import (  # noqa: E402
     INPUT,
@@ -61,13 +61,14 @@ def _staged(operator, golden_ref):
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("k", FUSION_GROUPS)
-def test_swiglu_prefill_stream(k, npu_runtime):
+def test_swiglu_prefill_stream(k, npu_runtime, trace, record_property):
     golden_ref = generate_golden_reference(M=SEQ_LEN, K=EMBEDDING_DIM, N=HIDDEN_DIM)
     operator = SwiGLUPrefillStream(
         seq_len=SEQ_LEN,
         embedding_dim=EMBEDDING_DIM,
         hidden_dim=HIDDEN_DIM,
         k=k,
+        trace=trace,
     )
     operator.compile()
 
@@ -77,7 +78,8 @@ def test_swiglu_prefill_stream(k, npu_runtime):
     # up to 25%. Tolerances are local to this test.
     run = _staged(operator, golden_ref)
     run()
-    dump_traces(run, f"swiglu_k{k}")
+    if trace is not None:
+        dump_traces(run, trace.trace_file)
     output = run.get_buffer(OUTPUT).to_torch().reshape((SEQ_LEN, EMBEDDING_DIM))
     errors = verify_buffer(
         output,
@@ -98,7 +100,7 @@ def test_swiglu_prefill_stream(k, npu_runtime):
         f"Latency min/mean/max (us): {elapsed_us:.2f} / "
         f"{latency.avg_us:.2f} / {latency.max_us:.2f}"
     )
-    record_metric("Latency", elapsed_us)
-    record_metric("Bandwidth", total_bytes / (elapsed_us * 1e-6) / 1e9)
+    record_property("Latency", elapsed_us)
+    record_property("Bandwidth", total_bytes / (elapsed_us * 1e-6) / 1e9)
     ops = sum(op.resolved().ops() for op, *_ in operator.runlist)
-    record_metric("Throughput", ops / (elapsed_us * 1e-6) / 1e9)
+    record_property("Throughput", ops / (elapsed_us * 1e-6) / 1e9)

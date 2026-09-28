@@ -34,8 +34,8 @@ def runner():
     [(p, n) for p in (1024, 13) for n in (40, 1)],
     ids=[f"llama_3.2_1b_prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
 )
-def test_llama_3_2_1b(runner, model, prompt_len, num_tokens):
-    check_generation(runner, model, prompt_len, num_tokens)
+def test_llama_3_2_1b(runner, model, prompt_len, num_tokens, record_property):
+    check_generation(runner, model, prompt_len, num_tokens, record=record_property)
 
 
 # KL(fp32 CPU || NPU), teacher-forced over 40 steps. The graphs measure a
@@ -46,9 +46,9 @@ def test_llama_3_2_1b(runner, model, prompt_len, num_tokens):
 MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.2}
 
 
-def test_llama_3_2_1b_accuracy(runner, model):
-    check_accuracy(runner, model, MAX_KL)
+def test_llama_3_2_1b_accuracy(runner, model, record_property):
+    check_accuracy(runner, model, MAX_KL, record=record_property)
 
 
-def test_llama_3_2_1b_determinism(runner, model):
-    check_determinism(runner, model)
+def test_llama_3_2_1b_determinism(runner, model, record_property):
+    check_determinism(runner, model, record=record_property)

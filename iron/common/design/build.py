@@ -8,7 +8,6 @@ from __future__ import annotations
 import functools
 import hashlib
 import inspect
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -152,12 +151,16 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
                 f"Buffer, got {obj!r}"
             )
     prog = Program(op.device(target), rt, workers=workers)
-    if op.trace_size:
-        # IRON_TRACE_NTILES (default 1) caps how many workers are traced; a
-        # count, so 0 traces none.
-        ntiles = max(0, int(os.environ.get("IRON_TRACE_NTILES", "1")))
+    if op.trace is not None:
+        if op.trace.reuse_output_buffer:
+            raise ValueError(
+                f"{type(op).__name__}: a full ELF consolidates its outputs, so "
+                f"its trace takes a buffer of its own (reuse_output_buffer=False)"
+            )
+        # The workers array() marked with Worker(trace=), or the first.
+        traced = [w for w in workers if w.trace is not None] or list(workers)[:1]
         prog.enable_trace(
-            op.trace_size, workers=list(workers)[:ntiles], coretile_events=CORE_EVENTS
+            op.trace.trace_size, workers=traced, coretile_events=CORE_EVENTS
         )
     return prog.resolve_program()
 

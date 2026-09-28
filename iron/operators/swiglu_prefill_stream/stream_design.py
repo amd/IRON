@@ -275,11 +275,11 @@ def build_inputs(seq_len, embedding_dim, hidden_dim, output_dir, k=1):
     )
 
 
-def _experiment_id(seq_len, embedding_dim, hidden_dim, k):
+def _experiment_id(seq_len, embedding_dim, hidden_dim, k, trace_size):
     grid = array()
     hardware = os.path.splitext(os.path.basename(ACCELERATOR))[0]
     suffix = f"_k{k}" if k > 1 else ""
-    if trace_size():
+    if trace_size:
         suffix += "_traced"
     return (
         f"{hardware}-swiglu{suffix}_{seq_len}_{embedding_dim}_{hidden_dim}"
@@ -287,27 +287,19 @@ def _experiment_id(seq_len, embedding_dim, hidden_dim, k):
     )
 
 
-def trace_size():
-    """DDR trace buffer in bytes, 0 for an untraced build.
-
-    Opt-in: tracing adds a runtime-sequence argument, so it changes the ABI.
-    """
-    return int(os.environ.get("IRON_TRACE_SIZE", "0"))
+# How many tiles a traced design traces. Routing capacity sets the practical
+# limit.
+TRACE_TILES = 4
 
 
-def trace_tiles():
-    """How many tiles to trace. Routing capacity sets the practical limit."""
-    return int(os.environ.get("IRON_TRACE_NTILES", "4"))
-
-
-def _design_paths(seq_len, embedding_dim, hidden_dim, k):
+def _design_paths(seq_len, embedding_dim, hidden_dim, k, trace_size):
     """Where stream-dse writes each group's MLIR.
 
     A single fused group goes through stream-dse's single-design pipeline and lands
     in ``codegen/``; several groups each land in their own ``group_i/codegen/``.
     """
     output_dir = os.path.join(
-        OUTPUT_ROOT, _experiment_id(seq_len, embedding_dim, hidden_dim, k)
+        OUTPUT_ROOT, _experiment_id(seq_len, embedding_dim, hidden_dim, k, trace_size)
     )
     if k == 1:
         return [os.path.join(output_dir, "codegen", "final.mlir")]
@@ -317,10 +309,14 @@ def _design_paths(seq_len, embedding_dim, hidden_dim, k):
     ]
 
 
-def _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k):
-    """Run stream-dse's constraint optimization and code generation once."""
+def _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k, trace_size):
+    """Run stream-dse's constraint optimization and code generation once.
+
+    ``trace_size`` is the DDR trace buffer in bytes, 0 for an untraced design:
+    tracing adds a runtime-sequence argument, so it changes the ABI.
+    """
     grid = array()
-    experiment_id = _experiment_id(seq_len, embedding_dim, hidden_dim, k)
+    experiment_id = _experiment_id(seq_len, embedding_dim, hidden_dim, k, trace_size)
     workload_path, mapping_path = build_inputs(
         seq_len,
         embedding_dim,
@@ -336,8 +332,8 @@ def _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k):
         output_path=OUTPUT_ROOT,
         skip_if_exists=False,
         enable_codegen=True,
-        trace_size=trace_size(),
-        trace_max_tiles=trace_tiles(),
+        trace_size=trace_size,
+        trace_max_tiles=TRACE_TILES,
         nb_cols_to_use=grid.num_columns,
         npu=npu,
         backend=BACKEND,
@@ -372,11 +368,13 @@ def _renamed(mlir_text: str, renames: dict | None) -> str:
     return mlir_text
 
 
-def _group_text(group_index, *, k, seq_len, embedding_dim, hidden_dim, npu) -> str:
+def _group_text(
+    group_index, *, k, seq_len, embedding_dim, hidden_dim, npu, trace_size
+) -> str:
     """One group's generated MLIR, before any symbol renames."""
-    finals = _design_paths(seq_len, embedding_dim, hidden_dim, k)
+    finals = _design_paths(seq_len, embedding_dim, hidden_dim, k, trace_size)
     if not all(os.path.exists(final) for final in finals):
-        _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k)
+        _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k, trace_size)
     return Path(finals[group_index]).read_text()
 
 
@@ -393,6 +391,7 @@ def load_group(
     embedding_dim,
     hidden_dim,
     npu,
+    trace_size,
 ):
     """Generate the ``k``-group design once and return one group's aie module.
 
@@ -415,6 +414,7 @@ def load_group(
         embedding_dim=embedding_dim,
         hidden_dim=hidden_dim,
         npu=npu,
+        trace_size=trace_size,
     )
     return region_module(text, renames=renames)
 

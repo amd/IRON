@@ -8,7 +8,7 @@ import numpy as np
 from aie.iron.kernels import datamovement
 
 from iron.common import In, UnaryElementwise, Unresolvable, auto, param
-from iron.common.testing import Testing, channeled_unary_cases
+from iron.common.testing import Sweep, Testing
 
 
 class Dequant(UnaryElementwise):
@@ -24,7 +24,7 @@ class Dequant(UnaryElementwise):
     # The kernel's contract draws what it reads: packed int4 lines, each
     # followed by its scales.
     test = Testing(
-        channeled_unary_cases(group_size=32),
+        Sweep(group_size=32),
         draw=lambda op: dict(
             x=datamovement.expand(op.tile_size, op.group_size)
             .contract.sample(np.random.default_rng(42), op.size // op.tile_size)[0]

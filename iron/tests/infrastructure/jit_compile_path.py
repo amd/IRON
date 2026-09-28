@@ -22,6 +22,7 @@ import aie.utils as aie_utils
 import pytest
 from aie.iron.device import from_name
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
+from aie.utils.trace import TraceConfig
 
 import iron
 from iron.common import In, Operator, Out, param, tiling
@@ -32,9 +33,9 @@ from iron.operators import GEMM, MHA, ElementwiseAdd
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 
-def _captured(name, trace_size=0, adds=2):
+def _captured(name, adds=2, **declared):
     """X + w + w (or as many adds of w) as a graph function, fused and compiled."""
-    add = ElementwiseAdd(size=1024, tile_size=128)
+    add = ElementwiseAdd(size=1024, tile_size=128, **declared)
 
     class F(iron.Graph):
         def body(self, x, w):
@@ -44,9 +45,7 @@ def _captured(name, trace_size=0, adds=2):
 
     f = F()
 
-    sequence = f.trace(x=(1024,), w=(1024,)).sequence(
-        name, dispatch="fused", trace_size=trace_size
-    )
+    sequence = f.trace(x=(1024,), w=(1024,)).sequence(name, dispatch="fused")
     return sequence.compile()
 
 
@@ -118,9 +117,14 @@ def test_a_traced_build_carries_the_lowered_module():
     reaching aiecc is checked by that file being in the entry, not by the
     ELF differing (both builds come out the same size).
     """
-    traced = _captured("jitpath_trace_on", trace_size=8192).artifacts
+    # One column: wider, the placer gives shim column 0 two outputs, and the
+    # trace egresses there (aie-insert-trace-flows finds no free channel).
+    traced = _captured(
+        "jitpath_trace_on", num_aie_columns=1, trace=TraceConfig(8192)
+    ).artifacts
     assert traced.lowered_mlir is not None and traced.lowered_mlir.exists()
-    assert traced.image != _captured("jitpath_trace_off").artifacts.image
+    untraced = _captured("jitpath_trace_off", num_aie_columns=1).artifacts
+    assert traced.image != untraced.image
 
 
 def _add_key():
