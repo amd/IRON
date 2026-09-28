@@ -6,12 +6,12 @@ SPDX-License-Identifier: Apache-2.0
 # `iron.operators.flm.GEMM` — bf16 GEMM with a fused epilogue
 
 ```python
+from iron.common.image import OperatorImage
 from iron.operators.flm import GEMM
 from iron.operators.flm.gemm.design import Epilogue
 
-op = GEMM(M=1024, K=1536, N=6144, epilogue=Epilogue.SILU, context=ctx)
-op.compile()
-op.get_callable()(A, op.pack_B(B), C_out)
+op = GEMM(M=1024, K=1536, N=6144, epilogue=Epilogue.SILU)
+OperatorImage(op)(A, op.pack_B(B), C_out)
 ```
 
 `epilogue` and `rounding` are `StrEnum`s, so the bare strings `"silu"` /
@@ -174,9 +174,8 @@ multiple of the full stride.
 ## B must be pre-packed
 
 ```python
-op = GEMM(M=M, K=K, N=N, context=ctx)
-op.compile()
-op.get_callable()(A, op.pack_B(B), C_out)
+op = GEMM(M=M, K=K, N=N)
+OperatorImage(op)(A, op.pack_B(B), C_out)
 ```
 
 `pack_B` reorders a row-major `(K, N)` matrix into the order the compute tiles
@@ -203,8 +202,8 @@ core powers up in `rounding_mode::floor` and the original kernel never calls
 `set_rounding`, so that is the arithmetic it ships with.
 
 ```python
-GEMM(M=M, K=K, N=N, rounding=Rounding.FLOOR, context=ctx)  # matches shipped
-GEMM(M=M, K=K, N=N, context=ctx)                           # conv_even, default
+GEMM(M=M, K=K, N=N, rounding=Rounding.FLOOR)  # matches shipped
+GEMM(M=M, K=K, N=N)                           # conv_even, default
 ```
 
 Verified against the shipped overlay on identical inputs, driven through
@@ -485,11 +484,11 @@ fork the xclbin.
 ## The shipped overlay
 
 ```python
+from iron.common.image import OperatorImage
 from iron.operators.flm import GEMM, Shipped
 
-op = Shipped(M=1024, K=1536, N=6144, epilogue="silu", context=ctx)
-op.compile()
-op.get_callable()(A, op.pack_B(B), C_out)
+op = Shipped(M=1024, K=1536, N=6144, epilogue="silu")
+OperatorImage(op)(A, op.pack_B(B), C_out)
 ```
 
 `Shipped` (`shipped.py`) is FastFlowLM's `mm.xclbin` **unmodified**, as a

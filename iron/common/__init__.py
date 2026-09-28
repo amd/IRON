@@ -6,8 +6,8 @@
 The declaration vocabulary (:mod:`.declare`): :class:`Operator` and the
 fields, operands and values a class body declares. The elementwise templates
 (:mod:`.elementwise`), which own the array and the sequence of an operator
-that names only its kernel. :class:`DesignGenerator` and :func:`from_spec`,
-for an operator whose design is written by hand.
+that names only its kernel. :class:`DesignGenerator`, for an operator whose
+design another tool exports (:meth:`Operator.exported_design`).
 """
 
 from .declare import (
@@ -25,7 +25,6 @@ from .declare import (
     Value,
     Xclbin,
     auto,
-    from_spec,
     optional,
     param,
     select,
@@ -53,7 +52,6 @@ __all__ = [
     "Value",
     "Xclbin",
     "auto",
-    "from_spec",
     "optional",
     "param",
     "select",

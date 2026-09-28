@@ -33,12 +33,12 @@ from iron.common import (
     Unresolvable,
     Value,
     auto,
-    from_spec,
     optional,
     param,
 )
 from iron.common.declare.field import DimRef
 from iron.common.declare.infer import infer
+from iron.common.design import DesignGenerator, generator_for
 
 NPU2 = from_name("npu2", n_cols=8)
 
@@ -77,7 +77,9 @@ class MV(Operator):
             raise Incompatible(f"M={self.M} is not a multiple of {unit}")
 
     def uses_value(self, name):
-        return name in self.used_values if name == "start" else super().uses_value(name)
+        return (
+            name in self.bound_values if name == "start" else super().uses_value(name)
+        )
 
     def array(self, target):
         return [self.K, self.columns, self.tile_out, self.epilogue]
@@ -381,27 +383,39 @@ def test_infer_reports_conflicts_naming_both_operands():
         infer(MV, (1024, 512), (512,), K=256)
 
 
-def test_from_spec_builds_an_operator_from_literal_shapes():
-    # swiglu_prefill_stream's escape: shapes from an exported graph, a
-    # design that is not derived, an identity for sharing.
-    Group = from_spec(
-        "Group",
-        inputs={"input": (64, 128), "w_gate": (128, 256)},
-        outputs={"left": (64, 256)},
-        key="abc123",
-        params={"seq_len": 64, "k": 2},
-        generator=lambda self, image="elf": "generator",
+def test_an_exported_design_replaces_the_derived_one():
+    # swiglu_prefill_stream's escape: the design is another tool's text,
+    # the operands are declared as any operator's are.
+    class Exported(Operator):
+        n: int = param()
+        x = In(n)
+        y = Out(n)
+
+        def exported_design(self, image):
+            return DesignGenerator(fn=lambda: "module {}")
+
+    op = Exported(n=64)
+    assert [b.shape for b in op.buffers] == [(64,), (64,)]
+    assert generator_for(op)() == "module {}"
+    assert op.configuration() is op
+
+
+def test_swiglu_stream_groups_are_chosen_by_their_ports():
+    from iron.operators.swiglu_prefill_stream.op import (
+        Combine,
+        Down,
+        SwiGLUStreamGroup,
     )
-    op = Group()
-    assert [b.name for b in op.buffers] == ["input", "w_gate", "left"]
-    assert [b.shape for b in op.buffers] == [(64, 128), (128, 256), (64, 256)]
-    assert (op.seq_len, op.k) == (64, 2)
-    assert op.design_key() == "abc123"
-    assert op.generator() == "generator"
-    # Literal shapes bind no field; inference only checks them.
-    assert infer(Group, (64, 128), (128, 256)) == {}
-    with pytest.raises(ValueError):
-        infer(Group, (64, 128), (128, 512))
+
+    assert (
+        SwiGLUStreamGroup.for_ports(("left_swished", "right"), ("intermediate",))
+        is Combine
+    )
+    assert SwiGLUStreamGroup.for_ports(("intermediate", "w_down"), ("output",)) is Down
+    op = Down(seq_len=256, embedding_dim=512, hidden_dim=2048, k=2, group_index=1)
+    assert [b.shape for b in op.buffers] == [(256, 2048), (2048, 512), (256, 512)]
+    with pytest.raises(NotImplementedError, match="ports changed"):
+        SwiGLUStreamGroup.for_ports(("w_down", "intermediate"), ("output",))
 
 
 # --------------------------------------------------------------------------
@@ -487,8 +501,7 @@ def test_when_names_a_param():
 
 def test_a_derived_value_is_written_once_per_build():
     op = MV(M=1024, K=128).resolved(NPU2)
-    assert list(op.residents) == ["count"] and op.values == []
-    assert op.resident_values() == {"count": 2}
+    assert op.residents == {"count": 2} and op.values == []
 
 
 def test_a_value_a_graph_binds_is_per_call_and_no_longer_a_resident():
@@ -504,9 +517,9 @@ def test_a_value_a_graph_binds_is_per_call_and_no_longer_a_resident():
     t = g.trace(a=(1024, 128), b=(128,))
     (op,) = t.operators
     assert op.uses_value("start") and op.uses_value("count")
-    assert [v.name for v in op.values] == ["count", "start"] and op.residents == {}
+    assert [v.name for v in op.values] == ["count", "start"]
     assert [b.member.name for b in t.bindings] == ["start", "count"]  # call order
-    assert op.resident_values() == {}  # the preamble writes nothing for count
+    assert op.residents == {}  # the preamble writes nothing for count
     # What an instance binds per call is part of its identity: an array
     # reading the value from the scratchpad is not the one reading a resident.
     assert op.design_key() != MV(M=1024, K=128, columns=8).design_key()
@@ -751,7 +764,7 @@ def test_an_extent_reads_as_its_field_until_a_graph_bounds_it():
     op = Rows(rows=64, cols=8)
     assert op.valid == 64 and Rows.valid.field is Rows.rows
     assert not op.uses_value("valid") and not op.uses_value("count")
-    assert op.resident_values() == {"count": 32, "width": 8}
+    assert op.residents == {"count": 32, "width": 8}
     assert op.derived_at("count", valid=16) == 8 and op.valid == 64  # unchanged
     assert "valid: rows, unbounded" in op.explain()
     with pytest.raises(TypeError, match="no Extent \\['n'\\]"):

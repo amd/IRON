@@ -10,17 +10,20 @@ plan wants, :mod:`.fusion` merges several designs into one module,
 :mod:`.jit_compile` puts a module through mlir-aie's JIT, :mod:`.allocator`
 places the buffers it needs, and :mod:`.artifacts` records what came out.
 :mod:`.sequence` drives all of that for one run, and :mod:`.callable` is what
-a caller finally invokes.
+a caller finally invokes. :mod:`.standalone` is the one-operator case: an
+operator built and called on its own, outside a graph.
 """
 
 from .allocator import ArenaPlan
 from .fused import build_fused_mlir
 from .packaging import ELF, XCLBIN, each_step
 from .sequence import OperatorSequence
+from .standalone import OperatorImage
 
 __all__ = [
     "ArenaPlan",
     "ELF",
+    "OperatorImage",
     "OperatorSequence",
     "XCLBIN",
     "build_fused_mlir",

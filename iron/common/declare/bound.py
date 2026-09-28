@@ -270,6 +270,18 @@ class BoundBuffer:
         """The axis of this operand that ``extent``'s field sizes, or None."""
         return _axis_of(self.member.dims, extent.field.name, self._op)
 
+    def extent_unit(self, axis: int) -> int:
+        """The rows along ``axis`` one round-robin unit of this operand holds
+        under a bound: what the operator says (``Operator.extent_unit``),
+        else the stream tile's rows there.
+        """
+        unit = self._op.extent_unit(self.name)
+        if unit is not None:
+            return unit
+        tile_shape = self.lanes.shape if self.lanes is not None else ()
+        k = axis - (len(self.shape) - len(tile_shape))
+        return tile_shape[k] if k >= 0 else 1
+
     @property
     def bounded(self) -> tuple[Extent, int, "BoundValue"] | None:
         """``(extent, axis, word)`` when a bound extent sizes an axis of this

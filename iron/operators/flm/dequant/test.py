@@ -13,6 +13,7 @@ from aie.utils.verify import Tolerance
 
 from iron.common import Incompatible
 from iron.common.harness import run_test
+from iron.common.image import OperatorImage
 from iron.operators.flm.dequant.design import (
     GROUP,
     K_TILE,
@@ -220,7 +221,8 @@ def test_one_xclbin_serves_every_shape(npu_runtime):
             )
         _check(op, blob, op.reference(qw), str(case))
 
-        image = op.artifacts.image
+        # A cache hit: the image _check built and ran.
+        image = OperatorImage(op).compile().artifacts.image
         stamp = (str(image), os.path.getmtime(image))
         if xclbin is None:
             xclbin = stamp

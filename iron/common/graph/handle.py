@@ -12,6 +12,7 @@ from aie.utils import bfp
 from ml_dtypes import bfloat16
 
 from ..declare import Operator
+from ..declare.operator import graph_tracer
 from ..tiling import Walk
 
 
@@ -221,9 +222,7 @@ class State:
     # decides what stands for it (a handle when tracing, its host tensor
     # when the reference runs).
     def _as_operand(self):
-        from .trace import current  # imports this module
-
-        tracer = current()
+        tracer = graph_tracer.get()
         if tracer is None:
             raise TypeError(f"{self!r} is viewed inside a graph's body")
         return tracer.state_as(self)

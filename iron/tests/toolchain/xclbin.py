@@ -15,7 +15,7 @@ gate runs aiecc's xclbin pipeline (kernels with Peano, the PDI, then
   shape and this shape's instruction stream;
 * the shipped flm image's instruction stream against its pins (the xclbin
   itself is downloaded, not built, and is tried separately);
-* one plain declared operator's ``compile()`` on NPU1.
+* one plain declared operator's :class:`~iron.common.image.OperatorImage` on NPU1.
 
 Needs Peano and ``xclbinutil`` on the PATH (mlir-aie vendors a Boost-free
 one under ``tools/hrx-xclbinutil``); no device.
@@ -28,6 +28,7 @@ import aie.utils as aie_utils
 import pytest
 
 import iron
+from iron.common.image import OperatorImage
 from iron.tests.toolchain.tools import DEVICES, requires, swiglu
 
 pytestmark = requires("xclbinutil", "peano")
@@ -71,14 +72,13 @@ def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(npu2):
     import iron.operators.flm.gemm.op as flm
 
     op = flm.GEMM(M=256, K=512, N=512)
-    op.compile()
-    artifacts = op.artifacts
+    artifacts = OperatorImage(op).compile().artifacts
     assert artifacts.image.stat().st_size > 0
     assert artifacts.insts is not None and artifacts.insts.stat().st_size > 0
     # The configuration's image is its own entry, named for the configuration;
     # the stream is this shape's, in another.
     (design,) = artifacts.designs
-    assert design.name == op.config_name
+    assert design.name == op.resolved().configuration().name
     assert design.entry.directory != artifacts.entry.directory
     # The shape's own compile is instructions-only: its entry holds the
     # stream and nothing else: no second xclbin, no second kernel build.
@@ -108,18 +108,16 @@ def test_shipped_builds_its_instructions_for_the_external_image(npu2):
         epilogue="gelu",
         clamp=(-2.0, 2.0),
     )
-    op.compile()
-    insts = op.artifacts.insts
+    insts = OperatorImage(op).compile().artifacts.insts
     assert insts is not None and insts.stat().st_size > 0
 
 
 def test_shipped_fetches_its_image(npu2):
     op = _shipped(M=256, K=1024, N=1152)
     try:
-        op.compile()
+        image = Path(OperatorImage(op).compile().artifacts.image)
     except (urllib.error.URLError, OSError) as e:  # no network here
         pytest.skip(f"the prebuilt xclbin could not be fetched: {e}")
-    image = Path(op.artifacts.image)
     assert image.exists() and image.stat().st_size > 0
 
 
@@ -130,9 +128,9 @@ def test_a_declared_operator_compiles_to_an_xclbin_on_npu1():
     aie_utils.set_current_device(DEVICES["npu1"]())
     try:
         op = GEMV(M=512, K=1024)
-        op.compile()
-        assert op.artifacts.image.stat().st_size > 0
-        insts = op.artifacts.insts
+        artifacts = OperatorImage(op).compile().artifacts
+        assert artifacts.image.stat().st_size > 0
+        insts = artifacts.insts
         assert insts is not None and insts.stat().st_size > 0
     finally:
         aie_utils.set_current_device(previous)

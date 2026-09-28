@@ -13,6 +13,7 @@ from aie.utils.verify import Tolerance
 
 from iron.common.design.build import build_design
 from iron.common.harness import run_test, vectors
+from iron.common.image import OperatorImage
 from iron.operators import GEMM as GenericGEMM
 from iron.operators.flm.gemm.design import (
     BFP16_GROUP,
@@ -320,7 +321,8 @@ def test_one_xclbin_serves_every_shape(npu_runtime):
         )
         assert not errors, f"{M}x{K}x{N} {epilogue} failed"
 
-        image = operator.artifacts.image
+        # A cache hit: the image run_test built and ran.
+        image = OperatorImage(operator).compile().artifacts.image
         stamp = (str(image), os.path.getmtime(image))
         if xclbin is None:
             xclbin = stamp
@@ -342,7 +344,8 @@ def test_one_xclbin_serves_every_clamp_bound(npu_runtime):
         errors, _, _ = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
         assert not errors, f"clamp={clamp} produced wrong output"
 
-        image = operator.artifacts.image
+        # A cache hit: the image run_test built and ran.
+        image = OperatorImage(operator).compile().artifacts.image
         stamp = (str(image), os.path.getmtime(image))
         if xclbin is None:
             xclbin = stamp
@@ -477,10 +480,9 @@ def test_shipped_epilogue_matches_accumulator(epilogue, clamp, npu_runtime):
 
     def run(epi, clm):
         op = Shipped(M=M, K=K, N=N, epilogue=epi, clamp=clm)
-        op.compile()
         tensor = aie_utils.DEFAULT_TENSOR_CLASS
         out = tensor((M, N), dtype=np.dtype("bfloat16"))
-        op.get_callable()(tensor(A.flatten()), tensor(op.pack_B(B)), out)
+        OperatorImage(op)(tensor(A.flatten()), tensor(op.pack_B(B)), out)
         return out.numpy().reshape(M, N).astype(np.float32)
 
     acc = run(NONE, None)

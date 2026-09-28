@@ -51,8 +51,9 @@ wheel. Its kernel paths follow that branch's family layout of `aie_kernels/`.
 Compiled artifacts (`.xclbin`, `.bin`, `.o`, the full ELF) live in
 mlir-aie's JIT cache, keyed on the content that produced them:
 `~/.npu/cache/<hash>/`, or wherever `NPU_CACHE_HOME` points. Nothing is
-written to the working directory, and `compile(record="disk")` writes the
-`Artifacts` record of an image beside it in the cache.
+written to the working directory, and `compile(record="disk")` (on a graph
+or an `OperatorImage`) writes the `Artifacts` record of an image beside it
+in the cache.
 
 ### Environment Variables
 
@@ -169,7 +170,11 @@ reuse lint
        not the derived one. The array tier is what a tile names plus what
        says `array=True`; one array serves every extent. A shipped binary
        is a subclass declared with `image=Xclbin(...)`, its operands pinned
-       with `via=`.
+       with `via=`. Two hooks change what is built: `configuration()`, the
+       operator whose xclbin this one runs (itself by default; flm's GEMM
+       returns its shape-free half, so one xclbin serves every shape), and
+       `exported_design(image)`, a `DesignGenerator` for a design another
+       tool exports (stream-dse's SwiGLU groups) in place of the derived one.
      - The operator's `reference(*inputs)` is the CPU reference the tests
        and the graph reference run; `vectors(op)` in `iron/common/harness`
        draws random inputs for its declared buffers and takes the outputs
@@ -200,7 +205,10 @@ reuse lint
 
 3. **Common Infrastructure** (`iron/common/`)
    - `declare/`: the declaration layer (`Operator`, `param`/`auto`,
-     operands, `Value`, `Scratchpad`/`DispatchTime`, `Xclbin`, inference)
+     operands, `Value`, `Scratchpad`/`DispatchTime`, `Xclbin` and its
+     `fetch()`, inference). An operator's shim budget, `shim_columns`, is
+     the bound device's `shim_dma_channels_in`/`out`; its `residents` the
+     derived values the preamble writes once per build
    - `design/`, `tiling.py`, `external.py`: the library-owned build: the
      `Target` an array is built against (its device, image, barriers and
      registered objects), the derived runtime
@@ -208,7 +216,9 @@ reuse lint
    - `graph/`: graphs (`iron.Graph`, `iron.state`) and
      `compile(dev, boundaries=, image=)`
    - `image/`: what a graph lowers onto: `OperatorSequence`, the buffer
-     allocator, fusion, the seam onto mlir-aie's `CompilableDesign`, the
+     allocator, fusion, `OperatorImage` (one operator built and called on
+     its own, outside a graph: `OperatorImage(op).compile()`, then
+     `image(*tensors)`, `image.artifacts`), the seam onto mlir-aie's `CompilableDesign`, the
      runtime callables and the record of what a compiled image consists of
    - `elementwise.py`: the shared elementwise array and its operand shapes (flat, binary, rowwise)
    - `harness.py`: the device test harness (`vectors`; `run_test`, timed with

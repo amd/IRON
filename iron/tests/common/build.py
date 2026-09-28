@@ -213,7 +213,7 @@ def test_mha_sequence_is_one_descriptor_set_per_kv_group(monkeypatch):
     op = MHA(num_heads=2, seq_len=1000, d=64, num_KV_heads=1, num_pipelines=8)
     op = op.resolved(from_name("npu2", n_cols=8))
     assert op.seq_pad == 1024 and op.q_shims == 2 and op.join_rows == 256
-    assert op.resident_values() == {
+    assert op.residents == {
         "q_blocks_per_pipeline": 2,
         "kv_blocks": 16,
         "s_q": 1000,
@@ -322,7 +322,7 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
     assert b.shape == (1024 * 1024 // 8,) and b.dtype is v8bfp16ebs8
     assert b.host_shape == (flm_gemm.packed_b_size(1024, 1024, True),)
     assert b.host_dtype is np.uint8
-    assert op.resident_values() == {
+    assert op.residents == {
         "n_val": 1024,
         "m_row_blocks": 2,
         "k_iters": 2,
@@ -413,10 +413,7 @@ def test_shipped_sequence_writes_every_core_then_streams_in_consume_order():
     op = Shipped(M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0))
     # The port's values are hidden; the image's block is laid out from the
     # operator's fields.
-    assert list(op.residents) == ["rtp"]
-    assert op.resident_values() == {
-        "rtp": [2, 256, 1152, 0, 1, 1, -1073741824, 1073741824]
-    }
+    assert op.residents == {"rtp": [2, 256, 1152, 0, 1, 1, -1073741824, 1073741824]}
     rec = _ForeignRecorder()
     cores = [(c, r) for r in range(2, 6) for c in range(8)]
     run_sequence(op, {"A": "dA", "B": "dB", "C": "dC"}, cores, rec)

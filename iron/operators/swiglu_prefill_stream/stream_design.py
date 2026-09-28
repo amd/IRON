@@ -13,9 +13,9 @@ Both are written into the experiment's output directory at build time, never int
 the source tree, and the mapping's node names come from the exported workload, so
 the two cannot disagree. stream-dse then solves the allocation and emits the MLIR.
 
-This module is imported lazily (by ``DesignGenerator`` at compile time), so
-importing the operator does not require ``stream-dse`` to be installed, only
-building it does.
+The operator imports this module where ``stream-dse`` is installed and
+reports it missing only when built, so importing the operator does not
+require it.
 """
 
 import hashlib

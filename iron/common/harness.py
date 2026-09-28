@@ -21,6 +21,7 @@ from aie.utils.verify import Tolerance, compare, nearly_equal
 from ml_dtypes import bfloat16
 
 from .declare import Operator
+from .image import OperatorImage
 
 
 @dataclasses.dataclass
@@ -234,8 +235,7 @@ def run_test(
         outputs = {}
     if not isinstance(operator, Operator):
         raise TypeError(f"run_test runs one declared Operator, not {operator!r}")
-    operator.compile()
-    fn = operator.get_callable()
+    fn = OperatorImage(operator).compile()
     # The device tensor type of whichever host runtime is selected (IRON_RUNTIME):
     # XRTTensor under XRT, HRXTensor under HRX. Both implement the Tensor interface
     # this function uses, and the operator dispatches through DefaultNPURuntime, which

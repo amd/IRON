@@ -13,6 +13,9 @@ and a :class:`Scratchpad` or :class:`DispatchTime` written per call.
 from __future__ import annotations
 
 import contextvars
+import hashlib
+import urllib.request
+from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -25,6 +28,7 @@ from typing import (
 )
 
 import numpy as np
+from aie.utils.compile import NPU_CACHE_HOME
 from ml_dtypes import bfloat16
 
 from .field import DeclarationError, _describe, _DimSpec
@@ -72,6 +76,38 @@ class Xclbin:
 
     def __repr__(self) -> str:
         return f"Xclbin({self.filename})"
+
+    def fetch(self, directory=None) -> Path:
+        """The downloaded file, by digest: fetched unless a file of the pinned
+        content is already there.
+
+        Into the JIT cache's own root by default (``NPU_CACHE_HOME``'s
+        ``prebuilt/``), so an external image is found where every other built
+        artifact is and no caller has to name a directory for it.
+        """
+        if directory is None:
+            directory = Path(NPU_CACHE_HOME) / "prebuilt"
+        target = Path(directory) / self.filename
+
+        def digest(path):
+            with open(path, "rb") as f:
+                return hashlib.file_digest(f, "sha256").hexdigest()
+
+        if target.exists() and digest(target) == self.sha256:
+            return target
+        if not self.url.startswith("https://"):
+            raise ValueError(f"refusing to download over {self.url!r}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Beside the target and renamed, so an interrupted fetch cannot leave a
+        # truncated file that a later run reports as a digest mismatch.
+        partial = target.with_suffix(target.suffix + ".part")
+        with urllib.request.urlopen(self.url, timeout=60) as response:
+            partial.write_bytes(response.read())
+        if (got := digest(partial)) != self.sha256:
+            partial.unlink()
+            raise RuntimeError(f"{self.url} has SHA-256 {got}, expected {self.sha256}")
+        partial.replace(target)
+        return target
 
 
 class _Member(Generic[B]):

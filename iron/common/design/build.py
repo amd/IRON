@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import os
 from typing import Any
 
 from aie.iron import (
@@ -19,13 +20,32 @@ from aie.iron import (
     ScratchpadParameter,
     TileDma,
 )
+from aie.utils.trace import events as trace_events
 
 from ..declare import Operator
 from ..declare.bound import BoundValue
-from ..tracing import maybe_enable_trace
 from .generator import DesignGenerator
 from .runtime import Sequence
 from .target import Target
+
+# What a traced core records: its DMA ports running, the kernel's
+# event0()/event1() markers, and its stalls and vector instructions.
+CORE_EVENTS = [
+    trace_events.PortEvent(
+        trace_events.CoreEvent.PORT_RUNNING_0, trace_events.WireBundle.DMA, 0, True
+    ),
+    trace_events.PortEvent(
+        trace_events.CoreEvent.PORT_RUNNING_1, trace_events.WireBundle.DMA, 1, True
+    ),
+    trace_events.PortEvent(
+        trace_events.CoreEvent.PORT_RUNNING_2, trace_events.WireBundle.DMA, 0, False
+    ),
+    trace_events.CoreEvent.INSTR_EVENT_0,
+    trace_events.CoreEvent.INSTR_EVENT_1,
+    trace_events.CoreEvent.MEMORY_STALL,
+    trace_events.CoreEvent.LOCK_STALL,
+    trace_events.CoreEvent.INSTR_VECTOR,
+]
 
 
 def device_symbol(op: Operator, value: BoundValue) -> str:
@@ -138,7 +158,12 @@ def build_design(
             )
     prog = Program(op.device(target), rt, workers=workers)
     if trace_size:
-        maybe_enable_trace(prog, trace_size, workers)
+        # IRON_TRACE_NTILES (default 1) caps how many workers are traced; a
+        # count, so 0 traces none.
+        ntiles = max(0, int(os.environ.get("IRON_TRACE_NTILES", "1")))
+        prog.enable_trace(
+            trace_size, workers=list(workers)[:ntiles], coretile_events=CORE_EVENTS
+        )
     return prog.resolve_program()
 
 
@@ -171,8 +196,12 @@ def generator_for(op: Operator, image: str = "elf") -> DesignGenerator:
 
     ``image`` is the image the module is built for: on ``"xclbin"`` its
     per-call values are the generator's dispatch-time parameters, so the two
-    images are two modules and two cache keys.
+    images are two modules and two cache keys. An operator whose design
+    another tool exports gives its own (:meth:`Operator.exported_design`).
     """
+    exported = op.exported_design(image)
+    if exported is not None:
+        return exported
     return DesignGenerator(
         fn=build_design,
         kwargs={

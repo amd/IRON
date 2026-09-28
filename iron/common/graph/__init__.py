@@ -35,7 +35,7 @@ tensors compiles for their shapes, prints a note, and dispatches.
 
 from .compiled import CompiledGraph, Graph
 from .handle import Handle, Value, is_operand, state
-from .trace import TracedGraph, Tracer, current
+from .trace import TracedGraph, Tracer
 
 __all__ = [
     "CompiledGraph",
@@ -44,7 +44,6 @@ __all__ = [
     "TracedGraph",
     "Tracer",
     "Value",
-    "current",
     "is_operand",
     "state",
 ]

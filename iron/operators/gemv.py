@@ -100,8 +100,7 @@ class GEMV(Operator):
     kernel_vector_size: int = auto(repr=False, array=True)
     # Optional fused activation applied to each output tile in the producing core.
     # "none" (default) leaves the output unchanged; "gelu" applies GELU(tanh approx).
-    # repr=False keeps operator/artifact names stable for the default path.
-    epilogue: str = param(default="none", repr=False, array=True)
+    epilogue: str = param(default="none", array=True)
 
     # A single batch carries no batch dimension at all, rather than one of
     # extent 1, so an unbatched operator has 2-D shapes. One fifo per column
@@ -237,17 +236,6 @@ class GEMV(Operator):
                 raise Incompatible(
                     f"{name}={tile} does not evenly divide M/num_aie_columns={rows}"
                 )
-
-    @property
-    def name(self) -> str:
-        # epilogue is repr=False so the default path keeps a stable name, but the
-        # fused variant must not share an artifact name with the plain GEMV of the
-        # same shape: both would emit the same .mlir/.xclbin, and in a shared build
-        # dir a cached unfused build can then satisfy the fused op.
-        base = super().name
-        if self.epilogue == "none":
-            return base
-        return f"{base}_epi{self.epilogue}"
 
     def array(self, target):
         K, cols = self.K, self.num_aie_columns

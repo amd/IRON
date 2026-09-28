@@ -18,6 +18,7 @@ from ..declare import Operator
 from ..declare.bound import BoundValue
 from ..declare.infer import call_operands, infer, infer_kwargs, operand_flags
 from ..declare.member import Extent, _Value
+from ..declare.operator import graph_tracer
 from ..design import device_symbol
 from ..image.sequence import OperatorSequence
 from ..tiling import Walk
@@ -31,13 +32,6 @@ from .handle import (
     _tensor_dtype,
     is_operand,
 )
-
-_STACK: list = []
-
-
-def current():
-    """The tracer a graph is being traced under, or ``None``."""
-    return _STACK[-1] if _STACK else None
 
 
 @dataclasses.dataclass
@@ -206,11 +200,15 @@ class Tracer:
         self._names = names or {}
 
     def __enter__(self):
-        _STACK.append(self)
+        self._token = graph_tracer.set(self)
         return self
 
     def __exit__(self, *exc):
-        _STACK.pop()
+        graph_tracer.reset(self._token)
+
+    def accepts(self, args) -> bool:
+        """Whether a call on ``args`` is a step: every one an operand."""
+        return all(is_operand(a) for a in args)
 
     # -- operands ---------------------------------------------------------
 

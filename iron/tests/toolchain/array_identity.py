@@ -17,6 +17,7 @@ import importlib
 import pytest
 
 from iron.common import Incompatible, Unresolvable
+from iron.common.image import OperatorImage
 from iron.tests.toolchain.tools import requires
 
 pytestmark = requires("aiecc")
@@ -52,7 +53,7 @@ PAIRS = [
 
 def _core_elfs(op) -> dict[str, bytes]:
     """The per-core ELFs of an operator's build, by core."""
-    entry = op.compile().artifacts.entry
+    entry = OperatorImage(op).compile().artifacts.entry
     assert entry is not None
     elfs = {
         p.parent.name: p.read_bytes()

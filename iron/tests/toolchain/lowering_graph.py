@@ -13,6 +13,7 @@ import aie.utils as aie_utils
 import numpy as np
 import pytest
 
+from iron.common.image import OperatorImage
 from iron.tests.toolchain.lowering import lower
 from iron.tests.toolchain.tools import requires, swiglu
 
@@ -89,15 +90,14 @@ def test_instructions_compile_alone_against_an_external_image():
     second request is a cache hit.
     """
     op = _shipped(M=256, K=1024, N=1152)
-    op.compile()
-    insts = op.artifacts.insts
+    artifacts = OperatorImage(op).compile().artifacts
+    insts = artifacts.insts
     assert insts is not None and insts.stat().st_size > 0
     # The image is the download, so nothing was built beside the stream.
-    assert op.artifacts.entry.xclbin is None
-    assert op.artifacts.image.suffix == ".xclbin"
+    assert artifacts.entry.xclbin is None
+    assert artifacts.image.suffix == ".xclbin"
     first = insts.stat().st_mtime_ns
-    again = _shipped(M=256, K=1024, N=1152)
-    again.compile()
+    again = OperatorImage(_shipped(M=256, K=1024, N=1152)).compile()
     assert again.artifacts.insts == insts
     assert insts.stat().st_mtime_ns == first, "the same sequence recompiled"
 

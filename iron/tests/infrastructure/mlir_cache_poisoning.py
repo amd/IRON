@@ -32,6 +32,7 @@ import re
 import pytest
 
 import iron
+from iron.common.design import generator_for
 from iron.common.image import build_fused_mlir
 from iron.operators import ElementwiseAdd
 
@@ -53,7 +54,7 @@ def _linked_objects(operator):
     back: a standalone build no longer writes its MLIR to disk either (see
     the module docstring), so there is nothing to read.
     """
-    mlir = str(operator.generator()())
+    mlir = str(generator_for(operator)())
     return sorted(set(re.findall(r'link_with\s*=\s*"([^"]+)"', mlir)))
 
 

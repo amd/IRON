@@ -19,8 +19,6 @@ from iron.common import (
     auto,
     param,
 )
-from iron.common.image.artifacts import Artifacts, Design, Step
-from iron.common.image.jit_compile import cache_entry, insts_design, xclbin_design
 from iron.common.tiling import Access
 from iron.operators.flm.dequant.design import (
     BFP16_GROUP,
@@ -354,52 +352,20 @@ class DequantBFP(Operator):
         """
         return 2 * K_TILE_B, N_TILE * self.cols
 
-    def _build(self):
-        """The configuration's xclbin plus this shape's instruction stream.
-
-        Two compiles rather than one, for the same reason as flm.GEMM: the
-        xclbin is emitted at a reference shape so every shape sharing the
-        configuration reuses it, and only the instruction stream is per shape.
+    def configuration(self):
+        """This configuration at its reference shape: its xclbin serves every
+        shape sharing the configuration, and only the instruction stream is
+        per shape, as flm.GEMM's.
         """
-        tuned = self.resolved(aie_utils.ensure_current_device(required=True))
-        K, N = tuned._reference_shape
-        reference = dataclasses.replace(
-            tuned,
+        K, N = self._reference_shape
+        return dataclasses.replace(
+            self,
             K=K,
             N=N,
             run_out_features=None,
             run_period_out_features=None,
             quantized_bytes=None,
             packed_blocks=None,
-        )
-        image = xclbin_design(reference.generator(), kernel_name="MLIR_AIE")
-        stream = insts_design(self.generator())
-        config, own = cache_entry(image), cache_entry(stream)
-        assert config.xclbin is not None and own.insts is not None
-        self._design = stream
-        return Artifacts(
-            kind="xclbin",
-            image=config.xclbin,
-            insts=own.insts,
-            entry=own,
-            designs=(
-                Design(
-                    name=self.config_name,
-                    operators=(self.name,),
-                    entry=config,
-                    image=config.xclbin,
-                    insts=own.insts,
-                ),
-            ),
-            steps=(
-                Step(
-                    0,
-                    self.name,
-                    self.config_name,
-                    tuple(b.name for b in self._members_io()),
-                ),
-            ),
-            buffers=self.buffer_map(),
         )
 
     def reference(self, qw):

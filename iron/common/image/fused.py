@@ -8,6 +8,7 @@ import hashlib
 import aie.utils as aie_utils
 from aie.dialects.aie import AIEArch
 
+from ..design import generator_for
 from . import fusion
 from .jit_compile import (
     cache_entry,
@@ -35,7 +36,7 @@ def fused_plan(seq):
     names = []
     generators = {}
     for op in designs:
-        generator = op.generator()
+        generator = generator_for(op)
         name = f"{type(op).__name__}_{design_identity(generator)[:8]}"
         names.append(name)
         generators.setdefault(name, generator)
@@ -151,7 +152,7 @@ class XclbinChain:
             op_label = f"f{name_hash}_op{idx}"
             kernel_id = f"0x{0x901 + idx:x}"
             design = xclbin_design(
-                op.generator(image="xclbin"),
+                generator_for(op, "xclbin"),
                 kernel_name=op_label,
                 xclbin_input=prev_xclbin_path,
                 extra_flags=[

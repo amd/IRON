@@ -20,10 +20,7 @@ groups have no meaning here and are accepted as no-ops, so an operator's
 
 from __future__ import annotations
 
-import hashlib
-import urllib.request
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -42,7 +39,6 @@ from aie.ir import (
     MemRefType,
     Module,
 )
-from aie.utils.compile import NPU_CACHE_HOME
 from ml_dtypes import bfloat16
 
 from .declare import Operator
@@ -169,19 +165,8 @@ def write_residents(op: Operator, core_tiles, emit) -> None:
     addresses. All writes precede the first lock release, so no core reads
     a half-written buffer.
     """
-    values = op.resident_values()
-    residents = list(op.residents.values())
-    for res in residents:
-        if res.name not in values:
-            raise ValueError(
-                f"{type(op).__name__}.resident_values() does not supply {res.name}"
-            )
-    unknown = set(values) - {r.name for r in residents}
-    if unknown:
-        raise ValueError(
-            f"{type(op).__name__}.resident_values() names {sorted(unknown)}, which "
-            f"{type(op).__name__} does not declare"
-        )
+    values = op.residents
+    residents = [op.value(name) for name in values]
     for col, row in core_tiles:
         for res in residents:
             words = values[res.name]
@@ -241,39 +226,6 @@ class _MLIREmitter:
 
     def await_(self, task) -> None:
         aiex.dma_await_task(task)
-
-
-def fetch(image, directory=None) -> Path:
-    """The downloaded image, by digest: fetched unless a file of the pinned
-    content is already there.
-
-    Into the JIT cache's own root by default (``NPU_CACHE_HOME``'s
-    ``prebuilt/``), so an external image is found where every other built
-    artifact is and no caller has to name a directory for it.
-    """
-    if directory is None:
-        directory = Path(NPU_CACHE_HOME) / "prebuilt"
-    target = Path(directory) / image.filename
-
-    def digest(path):
-        with open(path, "rb") as f:
-            return hashlib.file_digest(f, "sha256").hexdigest()
-
-    if target.exists() and digest(target) == image.sha256:
-        return target
-    if not image.url.startswith("https://"):
-        raise ValueError(f"refusing to download over {image.url!r}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    # Beside the target and renamed, so an interrupted fetch cannot leave a
-    # truncated file that a later run reports as a digest mismatch.
-    partial = target.with_suffix(target.suffix + ".part")
-    with urllib.request.urlopen(image.url, timeout=60) as response:
-        partial.write_bytes(response.read())
-    if (got := digest(partial)) != image.sha256:
-        partial.unlink()
-        raise RuntimeError(f"{image.url} has SHA-256 {got}, expected {image.sha256}")
-    partial.replace(target)
-    return target
 
 
 def build_external(dev, op: Operator):

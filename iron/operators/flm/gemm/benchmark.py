@@ -51,6 +51,7 @@ from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from ml_dtypes import bfloat16
 
 from iron.common.harness import record_metric
+from iron.common.image import OperatorImage
 from iron.operators import GEMM as IronGEMM
 from iron.operators.flm import GEMM as FLMGEMM
 from iron.operators.flm import Shipped
@@ -135,10 +136,9 @@ class Candidate:
         self.budget = budget
         self.round_medians = []
 
-        op.compile()
-        self.xclbin = Path(op.artifacts.image)
+        image = OperatorImage(op).compile()
+        self.xclbin = Path(image.artifacts.image)
         self.c_bo = XRTTensor((M, N), dtype=np.dtype("bfloat16"))
-        run = op.get_callable()
         # Only the flm operators take B pre-packed. iron.operators.GEMM
         # reorders in the descriptor, so it wants plain row-major (K, N).
         # pack_B takes numpy; torch has no bfloat16 view to hand it.
@@ -148,7 +148,7 @@ class Candidate:
         else:
             b_bo = XRTTensor.from_torch(B.flatten())
         args = [XRTTensor.from_torch(A.flatten()), b_bo, self.c_bo]
-        self.run = lambda: run(*args)
+        self.run = lambda: image(*args)
 
     def verify(self, M, N, expected, mass):
         self.run()

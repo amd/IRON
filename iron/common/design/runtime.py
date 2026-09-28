@@ -380,15 +380,18 @@ class Sequence(Transfers):
         target = target or self.target
         if target is None:
             raise ValueError("preamble() needs the Target the array was built on")
-        values = {**op.resident_values(), **values}
+        residents = op.residents
+        unknown = set(values) - set(residents)
+        if unknown:
+            raise ValueError(
+                f"{type(op).__name__} has no resident {sorted(unknown)} to override"
+            )
+        values = {**residents, **values}
         writes: dict[int, tuple] = {}  # id(buffer) -> (buffer, {index: value})
-        for name, res in op.residents.items():
+        for name in residents:
+            res = op.value(name)
             if res.optional and not res.targets:
                 continue  # this configuration does not allocate it
-            if name not in values:
-                raise ValueError(
-                    f"{type(op).__name__}.resident_values() does not supply {name}"
-                )
             if not res.targets:
                 raise ValueError(
                     f"{type(op).__name__}.{name}: array() never bound this value"
@@ -411,12 +414,6 @@ class Sequence(Transfers):
                         f"without a scratchpad (target.image != 'elf')"
                     )
                 buf[index] = value.ssa
-        unknown = set(values) - set(op.residents)
-        if unknown:
-            raise ValueError(
-                f"{type(op).__name__}.resident_values() names {sorted(unknown)}, which "
-                f"{type(op).__name__} does not declare"
-            )
         for b in target.barriers:
             b.set(1)
         if target.image == "elf" and op.values:
@@ -454,18 +451,6 @@ def transfers(
     return [(stream[b.slot], encode(b, buffer.elements, buffer.dtype)) for b in blocks]
 
 
-def extent_unit(buffer: BoundBuffer, axis: int) -> int:
-    """The rows along ``axis`` one round-robin unit of ``buffer`` holds: what
-    the operator says (``extent_unit``), else the stream tile's rows there.
-    """
-    unit = buffer._op.extent_unit(buffer.name)
-    if unit is not None:
-        return unit
-    tile_shape = buffer.lanes.shape if buffer.lanes is not None else ()
-    k = axis - (len(buffer.shape) - len(tile_shape))
-    return tile_shape[k] if k >= 0 else 1
-
-
 def bounded_transfers(
     buffer: BoundBuffer, stream: BoundStream, axis: int
 ) -> list[tuple[Any, Access, int]]:
@@ -481,7 +466,7 @@ def bounded_transfers(
     shape, dtype = buffer.shape, buffer.dtype
     lanes = 1 if stream.replicate else stream.count
     inner = prod(shape[axis + 1 :]) if axis + 1 < len(shape) else 1
-    tile_rows = extent_unit(buffer, axis)
+    tile_rows = buffer.extent_unit(axis)
     if shape[axis] % (lanes * tile_rows):
         raise ValueError(
             f"{buffer.name} {shape}: axis {axis} does not divide into {tile_rows}-row "

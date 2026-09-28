@@ -16,6 +16,8 @@ from __future__ import annotations
 import copy
 import dataclasses
 import inspect
+from collections.abc import Mapping
+from contextvars import ContextVar
 from types import FunctionType
 from typing import (
     TYPE_CHECKING,
@@ -30,7 +32,6 @@ from typing import (
 
 import aie.utils as aie_utils
 import numpy as np
-from aie.utils.npukernel import NPUKernel
 from aie.utils.verify import Tolerance
 
 from ..testing import Testing
@@ -46,16 +47,19 @@ from .member import (
     _Member,
     _Stream,
     _Value,
+    present,
 )
-from .naming import label_parts
 from .profile import current as current_profile
-from .shim import check_shim_columns, shim_columns
 
 if TYPE_CHECKING:
     from ..graph.handle import Handle
-    from ..image.artifacts import Artifacts
 
 _T = TypeVar("_T")
+
+# The tracer a graph's body runs under (iron.common.graph sets it), or None.
+# Under one, a call whose arguments the tracer accepts records a step
+# rather than constructing.
+graph_tracer: ContextVar[Any] = ContextVar("graph_tracer", default=None)
 
 
 class _OperatorMeta(type):
@@ -77,10 +81,8 @@ class _OperatorMeta(type):
         def __call__(cls: type[_T], **kwargs: Any) -> _T: ...
 
     def __call__(cls, *args, **kwargs):
-        from .. import graph as _graph  # imports this package: a cycle at module scope
-
-        tracer = _graph.current()
-        if tracer is not None and args and all(_graph.is_operand(a) for a in args):
+        tracer = graph_tracer.get()
+        if tracer is not None and args and tracer.accepts(args):
             return tracer.call(cls, args, kwargs)
         if args:
             raise TypeError(
@@ -183,11 +185,9 @@ class _ExtentWord(Value):
         """What the extent is divided by on ``op``, resolved: its lanes
         times the rows one lane takes at a time.
         """
-        from ..design.runtime import extent_unit  # the one definition of the unit
-
         b = op.value_buffer(self.buffer)
         lanes = 1 if b.lanes.replicate else b.lanes.count
-        return lanes * extent_unit(b, self.axis)
+        return lanes * b.extent_unit(self.axis)
 
     def __repr__(self) -> str:
         return f"<tiles per lane of {self.buffer} under {self.extent.name}>"
@@ -337,21 +337,62 @@ class Operator(metaclass=_OperatorMeta):
         """The downloaded image this operator runs on, if IRON did not build it."""
         return type(self)._external
 
-    def prebuilt(self):
-        """The file the declared image names, fetched if it is not in the cache."""
-        from ..external import fetch  # imports this package: a cycle at module scope
+    def configuration(self) -> Self:
+        """The operator whose xclbin this one runs when it runs alone: itself,
+        unless one xclbin serves every shape of a configuration and only the
+        instruction stream is this shape's (flm's GEMM, built at a reference
+        shape). Asked of the resolved operator.
+        """
+        return self
 
-        return fetch(self.external)
+    def exported_design(self, image: str):
+        """The generator of this operator's design when another tool exports
+        it rather than the library deriving it from the declaration
+        (swiglu_prefill_stream's stream-dse groups); ``None``, the default,
+        derives it.
+        """
+        return None
 
     @classmethod
-    def shim_columns(cls, dev, num_channels: int = 1, flags=None) -> int:
-        """How many of ``dev``'s columns this operator's shim budget allows,
-        with the optional operands ``flags`` (field values) make present.
+    def shim_columns(
+        cls, dev, num_channels: int = 1, flags: Mapping[str, Any] | None = None
+    ) -> int:
+        """How many of ``dev``'s columns this operator's streams leave within
+        the shim DMA budget, with the optional operands ``flags`` (field
+        values) make present.
+
+        One core per (column, channel) fills one fifo per input stream from
+        the shim and drains one per output, so a column costs ``inputs *
+        num_channels`` of the device's shim channels in and ``outputs *
+        num_channels`` out. A ``replicate`` stream is shared by every column
+        of a channel, so it is paid once per channel rather than per column.
         """
-        return shim_columns(cls, dev, num_channels, flags or {})
+        streams = [
+            m
+            for m in cls._members
+            if isinstance(m, _Stream) and present(m, flags or {})
+        ]
+        cols = dev.cols
+        for direction, budget in (
+            ("in", dev.shim_dma_channels_in),
+            ("out", dev.shim_dma_channels_out),
+        ):
+            ours = [m for m in streams if m.direction == direction]
+            per_core = sum(not m.replicate for m in ours) * num_channels
+            shared = sum(m.replicate for m in ours) * num_channels
+            if per_core:
+                cols = min(cols, (budget - shared) // per_core)
+        return max(1, cols)
 
     def check_shim_columns(self, dev, cols: int, num_channels: int = 1) -> None:
-        check_shim_columns(self, dev, cols, num_channels)
+        """Raise :class:`Unresolvable` if ``cols`` exceeds the shim budget."""
+        allowed = self.shim_columns(dev, num_channels, vars(self))
+        if cols > allowed:
+            raise Unresolvable(
+                f"{type(self).__name__} with {cols} columns x {num_channels} "
+                f"channels exceeds this device's shim DMA budget; "
+                f"{allowed} columns fit"
+            )
 
     def resolve_columns(
         self,
@@ -397,18 +438,6 @@ class Operator(metaclass=_OperatorMeta):
         """
         raise NotImplementedError
 
-    def resident_values(self) -> dict[str, Any]:
-        """What the preamble writes once per build: every ``Value(derive=)``
-        no graph bound per call, derived from this instance.
-        """
-        return {
-            m.name: m.derive(self)
-            for m in self._members
-            if isinstance(m, Value)
-            and m.derive is not None
-            and not self.uses_value(m.name)  # bound per call: not a resident
-        }
-
     @classmethod
     def has_sequence_override(cls) -> bool:
         return cls.sequence is not Operator.sequence
@@ -432,7 +461,7 @@ class Operator(metaclass=_OperatorMeta):
         )
         # A per-call value a graph bound is built in (a device parameter, a
         # patched descriptor, a core that reads it), so it tells designs apart.
-        if self.used_values:
+        if self.bound_values:
             own += (("values", tuple(sorted(self.bound_values.items()))),)
         return (type(self).__qualname__, own)
 
@@ -469,8 +498,8 @@ class Operator(metaclass=_OperatorMeta):
         # Values a graph bound on this instance live outside its fields, so
         # replace() does not carry them. The build works on the copy, and
         # losing them would silently drop the per-call value from the sequence.
-        if self.used_values:
-            vars(new)["_used_values"] = dict(self.bound_values)
+        if self.bound_values:
+            vars(new)["_bound_values"] = self.bound_values
         new.compatible()
         new._resolved = True
         return new
@@ -481,8 +510,8 @@ class Operator(metaclass=_OperatorMeta):
         bound are kept.
         """
         new = dataclasses.replace(self)
-        if self.used_values:
-            vars(new)["_used_values"] = dict(self.bound_values)
+        if self.bound_values:
+            vars(new)["_bound_values"] = self.bound_values
         new._resolved = self._resolved
         if self._resolved:
             # What compatible() records is part of a resolved instance; a
@@ -523,16 +552,17 @@ class Operator(metaclass=_OperatorMeta):
         }
 
     @property
-    def residents(self) -> dict[str, BoundValue]:
+    def residents(self) -> dict[str, Any]:
         """What the preamble writes once per build: every ``Value(derive=)``
-        no graph bound per call.
+        no graph bound per call, derived from this instance, by name (its
+        device word is :meth:`value`).
         """
         return {
-            m.name: self._bound[m.name]
+            m.name: m.derive(self)
             for m in self._members
             if isinstance(m, Value)
             and m.derive is not None
-            and not self.uses_value(m.name)
+            and not self.uses_value(m.name)  # bound per call: not a resident
         }
 
     def uses_value(self, name: str) -> bool:
@@ -547,9 +577,9 @@ class Operator(metaclass=_OperatorMeta):
         """
         member = next((m for m in self._value_members if m.name == name), None)
         if isinstance(member, Extent):
-            return name in self.used_values
+            return name in self.bound_values
         if isinstance(member, Value) and member.derive is not None:
-            return name in self.used_values or name in self._per_call_derived()
+            return name in self.bound_values or name in self._per_call_derived()
         return True
 
     @property
@@ -641,29 +671,22 @@ class Operator(metaclass=_OperatorMeta):
             raise TypeError(
                 f"{type(self).__name__} declares no per-call value {name!r}"
             )
-        vars(self).setdefault("_used_values", {})[name] = bound_to
-
-    @property
-    def used_values(self) -> frozenset:
-        """The names of the per-call values a graph binds on this instance."""
-        return frozenset(self.bound_values)
+        vars(self).setdefault("_bound_values", {})[name] = bound_to
 
     @property
     def bound_values(self) -> dict[str, str | None]:
         """Per-call value name -> the graph value it is bound to."""
-        return dict(self.__dict__.get("_used_values", {}))
+        return dict(self.__dict__.get("_bound_values", {}))
 
     # -- graphs ---------------------------------------------------------
 
     def __call__(self, *args, **kwargs):
         """An explicit instance applied to graph handles records a step."""
-        from .. import graph as _graph  # as above
-
-        tracer = _graph.current()
+        tracer = graph_tracer.get()
         if tracer is None:
             raise TypeError(
                 f"{type(self).__name__} instances are called on graph handles inside "
-                f"a graph's body; outside one, compile() and get_callable()"
+                f"a graph's body; outside one, run it as an OperatorImage"
             )
         return tracer.call(self, args, kwargs)
 
@@ -714,7 +737,7 @@ class Operator(metaclass=_OperatorMeta):
         )
         return cls(**{**overrides, **values})
 
-    # -- the image of one operator on its own -------------------------------
+    # -- the device and the label ---------------------------------------------
 
     @property
     def dev(self):
@@ -734,44 +757,21 @@ class Operator(metaclass=_OperatorMeta):
         resolved operator.
         """
         dev = aie_utils.ensure_current_device(required=True)
-        own = label_parts(self.resolved(dev))
+        op = self.resolved(dev)
+        own = []
+        for f in dataclasses.fields(op):
+            v = getattr(op, f.name)
+            if not f.repr or v is None:
+                continue
+            if isinstance(v, bool):
+                v = int(v)
+            elif isinstance(v, float):
+                # repr() round-trips; a symbol takes neither '.' nor '-'.
+                v = repr(v).replace(".", "p").replace("-", "n").replace("+", "")
+            elif isinstance(v, (list, tuple)):
+                v = "x".join(str(x) for x in v)
+            own.append(f"{f.name}{v}")
         return "_".join([type(self).__name__, *own, dev.name])
-
-    def generator(self, image: str = "elf"):
-        """The design generator :class:`CompilableDesign` runs for this operator.
-
-        An operator whose design is exported text rather than derived from
-        the declaration overrides this (see :func:`from_spec`, and
-        swiglu_prefill_stream, which loads its group from the exported
-        module). The default is ``build_design`` over the declaration.
-        """
-        from ..design import (
-            generator_for,
-        )  # reads this package: a cycle at module scope
-
-        return generator_for(self, image=image)
-
-    def compile(self, record: str = "memory") -> "Operator":
-        """Build this operator's own image, once; sets :attr:`artifacts`.
-
-        ``record="disk"`` also writes the :class:`~iron.common.image.artifacts.Artifacts`
-        record beside the image; by default it is only kept in memory.
-        """
-        if getattr(self, "_artifacts", None) is None:
-            self._artifacts = self._build()
-            if record == "disk":
-                self._artifacts.dump()
-        return self
-
-    @property
-    def artifacts(self) -> "Artifacts":
-        """The record of what :meth:`compile` produced."""
-        artifacts = getattr(self, "_artifacts", None)
-        if artifacts is None:
-            raise RuntimeError(
-                f"{type(self).__name__} is not compiled; compile() first"
-            )
-        return artifacts
 
     def _members_io(self) -> list[_Buffer]:
         """The declared buffers this instance has, without resolving a shape."""
@@ -781,74 +781,6 @@ class Operator(metaclass=_OperatorMeta):
             for m in self._members
             if isinstance(m, _Buffer) and (m.when is None or getattr(self, m.when.name))
         ]
-
-    def buffer_map(self) -> dict[str, tuple[str, int, int]]:
-        """Each buffer as ``(arena, position, nbytes)``, for an image's record.
-
-        Taken from the resolved operator, since a shape may depend on a tunable
-        the device fills (flm/gemm's B layout) and the built image's buffers
-        are the resolved ones. A standalone operator has no arena plan; its
-        buffers are the kernel's positional arguments.
-        """
-        resolved = self.resolved(self.dev)
-        return {b.name: ("arg", i, b.nbytes) for i, b in enumerate(resolved.buffers)}
-
-    def _build(self):
-        """Compile to an xclbin and an instruction stream, or, on a shipped
-        image, to the stream alone against the download.
-        """
-        # image/ reads this package, so naming it at module scope would make
-        # the two import each other.
-        from ..image.artifacts import Artifacts, Design, Step
-        from ..image.jit_compile import cache_entry, insts_design, xclbin_design
-
-        image = self.external
-        if image is None:
-            picture = None
-            design = xclbin_design(self.generator("xclbin"), kernel_name="MLIR_AIE")
-        else:
-            picture = self.prebuilt()
-            design = insts_design(self.generator())
-        entry = cache_entry(design)
-        insts = entry.insts
-        assert insts is not None, "no instruction stream"
-        if picture is None:
-            picture = entry.xclbin
-            assert picture is not None, "no xclbin"
-        self._design = design
-        return Artifacts(
-            kind="xclbin",
-            image=picture,
-            insts=insts,
-            entry=entry,
-            designs=(
-                Design(
-                    name=self.name,
-                    operators=(self.name,),
-                    entry=entry,
-                    image=picture,
-                    insts=insts,
-                ),
-            ),
-            steps=(Step(0, self.name, self.name, tuple(b.name for b in self.buffers)),),
-            buffers={b.name: ("arg", i, b.nbytes) for i, b in enumerate(self.buffers)},
-        )
-
-    def get_callable(self):
-        """The loaded image, ready to call on device tensors."""
-        artifacts = self.compile()._artifacts
-        image = self.external
-        npu_kernel = NPUKernel(
-            xclbin_path=str(artifacts.image),
-            kernel_name="MLIR_AIE" if image is None else image.kernel_name,
-            insts_path=str(artifacts.insts),
-        )
-        handle = aie_utils.DefaultNPURuntime.load(npu_kernel)
-
-        def call(*args):
-            return aie_utils.DefaultNPURuntime.run(handle, list(args))
-
-        return call
 
     def __repr__(self) -> str:
         own = ", ".join(

@@ -25,6 +25,8 @@ from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 import iron
 from iron.common import tiling
+from iron.common.design import generator_for
+from iron.common.image import OperatorImage
 from iron.common.image.jit_compile import (
     _GENERATOR_TREES,
     _bind_device,
@@ -34,7 +36,7 @@ from iron.common.image.jit_compile import (
     keyed_design,
     source_digest,
 )
-from iron.operators import GEMM, GEMV, MHA, ElementwiseAdd
+from iron.operators import GEMM, MHA, ElementwiseAdd
 
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
@@ -111,7 +113,7 @@ def test_identical_operators_reuse_the_compiled_xclbin():
 
     def build():
         op = ElementwiseAdd(size=1024, tile_size=128)
-        return op.compile().artifacts
+        return OperatorImage(op).compile().artifacts
 
     first = build()
     mtime = first.image.stat().st_mtime_ns
@@ -132,7 +134,7 @@ def test_a_traced_build_carries_the_lowered_module():
 
 def _add_key():
     add = ElementwiseAdd(size=1024, tile_size=128)
-    generate, key = keyed_design(add.generator())
+    generate, key = keyed_design(generator_for(add))
     return CompilableDesign(generate, compile_kwargs=key)
 
 
@@ -145,7 +147,7 @@ def test_the_compile_key_covers_the_library_a_design_calls():
     it, and the device ran the old descriptors with nothing reporting it.
     """
     op = MHA(num_heads=8, num_KV_heads=2, seq_len=16384, num_pipelines=8)
-    generator = op.generator()
+    generator = generator_for(op)
     _, key = keyed_design(generator)
     assert key["source"] == source_digest(design_sources(generator))
     trees = {p.resolve() for p in _GENERATOR_TREES[0].rglob("*.py")}
@@ -186,24 +188,20 @@ def test_the_compile_key_does_not_depend_on_a_device_being_bound_yet():
     assert design._compute_cache_hash() == bound_hash
 
 
-@pytest.mark.parametrize(
-    "plain, other",
-    [
-        (GEMV(M=2048, K=8192), GEMV(M=2048, K=8192, epilogue="gelu")),
-        (GEMM(M=256, K=256, N=256), GEMM(M=256, K=256, N=256, prio_accuracy=True)),
-    ],
-    ids=["gemv_epilogue", "gemm_prio_accuracy"],
-)
-def test_a_field_the_repr_leaves_out_still_keys_the_build(plain, other):
+def test_a_field_the_repr_leaves_out_still_keys_the_build():
     """Two operators alike but for a repr=False field build different designs.
 
-    The repr leaves such a field out, so a key spelled from it handed the
-    GEMV+GELU of a Llama MLP shape the plain GEMV's cached binary, and the
-    output came back un-GELU'd with nothing reporting it.
+    The repr leaves such a field out, so a key spelled from it once handed
+    a fused GEMV+GELU the plain GEMV's cached binary, and the output came
+    back un-GELU'd with nothing reporting it.
     """
+    plain = GEMM(M=256, K=256, N=256)
+    other = GEMM(M=256, K=256, N=256, prio_accuracy=True)
     assert repr(plain) == repr(other), "the case no longer exercises a hidden field"
     assert _params_key({"op": plain}) != _params_key({"op": other})
-    assert design_identity(plain.generator()) != design_identity(other.generator())
+    assert design_identity(generator_for(plain)) != design_identity(
+        generator_for(other)
+    )
 
 
 def test_a_device_parameter_is_keyed_by_identity_not_address():

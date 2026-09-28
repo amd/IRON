@@ -9,11 +9,11 @@ Dequantizes q4nx weights into the bfp16ebs8 layout [`flm.GEMM`](../gemm) reads
 as B, on the device.
 
 ```python
+from iron.common.image import OperatorImage
 from iron.operators.flm import DequantBFP
 
-op = DequantBFP(K=2048, N=2048, context=ctx)
-op.compile()
-op.get_callable()(q4nx_blob, packed_b)
+op = DequantBFP(K=2048, N=2048)
+OperatorImage(op)(q4nx_blob, packed_b)
 ```
 
 `K` is the in-feature count and `N` the out-feature count, so the result is B

@@ -126,7 +126,7 @@ class Copy(Operator):
 
     def uses_value(self, name: str) -> bool:
         # An offset or a size is patched only when a graph binds a handle to it.
-        return name in self.used_values
+        return name in self.bound_values
 
     def array(self, target) -> list:
 

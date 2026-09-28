@@ -35,17 +35,17 @@ chooses the tile and inference never reads one. A :class:`Profile` applied
 in a scope fills the tunables a call site leaves open, by operator shape,
 before resolution runs.
 
-:mod:`iron.common.design` generates MLIR from these declarations; this
-package does not. The little of mlir-aie it touches (the device a name is
-keyed on, the shim's DMA budget in :mod:`.shim`) describes the target, not
-a design.
+:mod:`iron.common.design` generates MLIR from these declarations, and
+:mod:`iron.common.image` builds and runs it; this package does neither. The
+little of mlir-aie it touches (the device a name is keyed on, the shim DMA
+channels that bound :meth:`Operator.shim_columns`) describes the target,
+not a design.
 
 Module by module: :mod:`.field` is what a class body writes, :mod:`.member`
 what it declares alongside its fields, :mod:`.bound` what an instance's
 attribute returns, :mod:`.infer` how operand shapes fill a declaration's
-dimension fields, :mod:`.operator` the class itself, :mod:`.creation` the
-checks run as a class body finishes, and :mod:`.naming` how an instance
-builds its label.
+dimension fields, :mod:`.operator` the class itself, and :mod:`.creation`
+the checks run as a class body finishes.
 """
 
 from .field import (
@@ -60,7 +60,6 @@ from .field import (
 from .member import DispatchTime, Extent, In, Out, Scratchpad, Shim, Value, Xclbin
 from .operator import Operator
 from .profile import Profile
-from .spec import from_spec
 
 __all__ = [
     "DeclarationError",
@@ -77,7 +76,6 @@ __all__ = [
     "Value",
     "Xclbin",
     "auto",
-    "from_spec",
     "optional",
     "param",
     "select",

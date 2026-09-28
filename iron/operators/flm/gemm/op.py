@@ -9,8 +9,8 @@ rounding mode. Everything the xclbin depends on, and nothing else; its
 ``config_name`` is the xclbin's stem. M, K, N, the activation and the
 clamp bounds are values written to the cores and reach only the
 instruction stream, so every shape sharing a configuration shares one
-xclbin. That split is the point of this operator; :meth:`GEMM._build`
-compiles the two halves separately.
+xclbin. That split is the point of this operator; :meth:`GEMM.configuration`
+names the half an :class:`~iron.common.image.OperatorImage` compiles once.
 
 ``design.py`` keeps the fixed geometry and the L1 budget; README.md has the
 per-choice breakdown against the shipped FastFlowLM overlay
@@ -1138,58 +1138,17 @@ class GEMM(Operator):
         """
         return (M_TILE * self.rows * self.m_chunk, MIN_K, self.tile_n * self.cols)
 
-    def _build(self):
-        """The configuration's image plus this shape's instruction stream.
+    def configuration(self):
+        """This configuration at its reference shape and activation.
 
-        Two compiles rather than one. The image is emitted at a reference
-        shape and activation, so every shape sharing the configuration reuses
-        it: the cache keys on content, and the reference shape is what that
-        content is. Only the instruction stream is per shape, which is an
-        instructions-only compile with no kernel built twice. On the shipped
-        overlay there is no image to build at all.
+        Its xclbin is built once and serves every shape sharing the
+        configuration: the cache keys on content, and the reference shape is
+        what that content is. Only the instruction stream is per shape, an
+        instructions-only compile with no kernel built twice.
         """
-        from iron.common.image.artifacts import Artifacts, Design, Step
-        from iron.common.image.jit_compile import (
-            cache_entry,
-            insts_design,
-            xclbin_design,
-        )
-
-        if self.external is not None:
-            return super()._build()  # the downloaded image, instructions only
-        tuned = self.resolved(aie_utils.ensure_current_device(required=True))
-        M, K, N = tuned._reference_shape
-        reference = dataclasses.replace(
-            tuned, M=M, K=K, N=N, epilogue=Epilogue.NONE, clamp=None, packed_blocks=None
-        )
-        image = xclbin_design(reference.generator(), kernel_name="MLIR_AIE")
-        stream = insts_design(self.generator())
-        config, own = cache_entry(image), cache_entry(stream)
-        assert config.xclbin is not None and own.insts is not None
-        self._design = stream
-        return Artifacts(
-            kind="xclbin",
-            image=config.xclbin,
-            insts=own.insts,
-            entry=own,
-            designs=(
-                Design(
-                    name=self.config_name,
-                    operators=(self.name,),
-                    entry=config,
-                    image=config.xclbin,
-                    insts=own.insts,
-                ),
-            ),
-            steps=(
-                Step(
-                    0,
-                    self.name,
-                    self.config_name,
-                    tuple(b.name for b in self._members_io()),
-                ),
-            ),
-            buffers=self.buffer_map(),
+        M, K, N = self._reference_shape
+        return dataclasses.replace(
+            self, M=M, K=K, N=N, epilogue=Epilogue.NONE, clamp=None, packed_blocks=None
         )
 
     # -- host-side helpers -------------------------------------------------------
