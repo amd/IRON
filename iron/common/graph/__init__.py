@@ -11,7 +11,8 @@ annotated ``Scratchpad[T]`` or ``DispatchTime[T]``. An input defaulting to
 ``None`` may be left out; the version traced without it sees ``None``. A
 ``Carried[T]`` value is one the graph computes for its own next call: the
 body returns the next values last, ``return logits, iron.carry(pos=pos +
-1)``, and a call returns them as numbers. Operators are called on handles:
+1)``, and a call returns them as numbers; on a full ELF the device can
+compute them itself and loop (:class:`CarriedLoop`). Operators are called on handles:
 ``GEMV(w, h)`` infers its extents from its arguments (operators with one
 ``array_key`` share an array), and an explicit instance ``q(w, h)`` is
 applied the same way.
@@ -38,11 +39,13 @@ the image (a fused ELF on NPU2, per-step xclbins on NPU1) and returns a
 tensors compiles for their shapes, prints a note, and dispatches.
 """
 
+from .carried import CarriedLoop
 from .compiled import CompiledGraph, Graph
 from .handle import Carry, Handle, Value, carry, is_operand, state, weight
 from .trace import TracedGraph, Tracer
 
 __all__ = [
+    "CarriedLoop",
     "Carry",
     "CompiledGraph",
     "Graph",

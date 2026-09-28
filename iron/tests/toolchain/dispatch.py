@@ -69,7 +69,7 @@ def test_values_become_dispatch_time_kernels_at_each_step(device):
         assert lib is not None and Path(lib).exists(), f"{name}: no dispatch library"
         assert len(design.dispatch_params) == 1, (name, design.dispatch_params)
     # The graph's symbols are the kernels' parameter names.
-    symbols = {symbol for symbol, _, _ in net.words}
+    symbols = {w.symbol for w in net.words}
     assert symbols == {d.dispatch_params[0] for d in designs.values()}
     assert net.image is not None and Path(net.image).stat().st_size > 0
     assert net._callable is None

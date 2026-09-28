@@ -34,9 +34,11 @@ from ..declare.operator import _ExtentWord
 from ..declare.profile import Profile
 from ..design import device_symbol
 from ..image.allocator import ArenaPlan
-from ..image.callable import ScratchArena
-from ..image.packaging import Plan, plan
+from ..image.artifacts import Parameter
+from ..image.callable import FullELFRun, ScratchArena
+from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
+from .carried import CARRY, EmitSite, attach_emit, compose
 from .handle import Affine, Carry, Handle, State, Value, _tensor_dtype, is_operand
 from .trace import TracedGraph, Tracer, _ReferenceTracer
 
@@ -168,6 +170,14 @@ class Graph:
     @functools.cached_property
     def _arena(self) -> ScratchArena:
         return ScratchArena(ArenaPlan(ALIGNMENT))
+
+    @functools.cached_property
+    def _carry(self) -> State | None:
+        """The values a call started from and the elements it computed,
+        which every full-ELF version's Emit reads (see :mod:`.carried`)."""
+        if not self._carried:
+            return None
+        return State((2, len(self._carried)), np.int32, CARRY)
 
     @property
     def versions(self) -> dict[Signature, CompiledGraph]:
@@ -339,6 +349,7 @@ class Graph:
         image=None,
         verbose=False,
         record="memory",
+        feeds: CompiledGraph | None = None,
         **shapes,
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
@@ -352,6 +363,11 @@ class Graph:
         states of every other version. Compile every version before the
         first call where you can: a version placed after the arena's buffer
         exists grows it, which copies it once.
+
+        A full-ELF version with carried values ends in an Emit step, which
+        writes the scratchpad of the version it ``feeds`` -- by default
+        itself -- so that one can run without the host
+        (:class:`~iron.common.graph.carried.CarriedLoop`).
         """
         if dev is not None:
             aie_utils.set_current_device(dev)
@@ -374,9 +390,39 @@ class Graph:
                 f"scratch arena, which only a full ELF addresses; this version "
                 f"dispatches {chosen.dispatch!r}"
             )
+        emit = None
+        if chosen.image == ELF and traced.carry:
+            if feeds is None:
+                slots = len(_words(traced, share=shared)[0])
+            elif feeds.emit is None or not any(
+                feeds is v for v in self._versions.values()
+            ):
+                raise ValueError(
+                    f"{self.name}: feeds= takes a full-ELF version of this "
+                    f"graph, got {feeds!r}"
+                )
+            else:
+                slots = len(feeds.parameters)
+            assert self._carry is not None
+            emit = attach_emit(traced, self._carried, self._carry, slots)
+        elif feeds is not None:
+            raise ValueError(
+                f"{self.name}: only a full-ELF version with carried values "
+                f"feeds another"
+            )
         version = CompiledGraph(
-            traced, chosen, record=record, arena=self._arena if shared else None
+            traced,
+            chosen,
+            record=record,
+            arena=self._arena if shared else None,
+            emit=emit,
         )
+        if emit is not None and feeds is None and len(version.parameters) != slots:
+            raise NotImplementedError(
+                f"{self.name}: the image reads {len(version.parameters)} of the "
+                f"{slots} words its Emit was sized for; a word it reads only "
+                f"through a derivation cannot be fed yet"
+            )
         self._versions[signature] = version
         return version
 
@@ -451,12 +497,15 @@ class CompiledGraph:
         plan: Plan,
         record="memory",
         arena: ScratchArena | None = None,
+        emit: EmitSite | None = None,
     ):
         self.traced = traced
         self.plan = plan
         self.arena = arena
-        # (device symbol, dtype, word) per scratchpad word a call writes:
-        # each bound value (a per-call index on a view scaled to an element
+        # Where the Emit step ending a full ELF with carried values reads
+        # and writes; None without one.
+        self.emit = emit
+        # Each scratchpad word a call writes (:class:`Word`): each bound value (a per-call index on a view scaled to an element
         # offset), and each value derived from a bounded extent, computed by
         # the operator from the call's bound.
         # On a full ELF, symbols that always hold one number share a word:
@@ -478,7 +527,9 @@ class CompiledGraph:
         if self.artifacts.kind == "elf":
             # The image declares only the words its designs read: an extent
             # read only through its derivations has none.
-            self.words = [w for w in self.words if w[0] in self.artifacts.parameters]
+            self.words = [
+                w for w in self.words if w.symbol in self.artifacts.parameters
+            ]
         self._callable = None
         # Weights in this image's buffers, by storage key; an arena's own set
         # when there is one, since then every image's weights are the same.
@@ -490,6 +541,12 @@ class CompiledGraph:
         if self._callable is None:
             self._callable = self.sequence.get_callable(self.arena)
         return self._callable
+
+    @property
+    def parameters(self) -> list[Parameter]:
+        """The per-call values a full ELF's scratchpad holds, as its
+        parameter table lays them out; none on another image."""
+        return self.artifacts.parameter_table
 
     @property
     def is_loaded(self) -> bool:
@@ -579,6 +636,31 @@ class CompiledGraph:
     # -- calling ---------------------------------------------------------------
 
     def __call__(self, *tensors, **values) -> Any:
+        self._stage(tensors, values)
+        self.callable()
+        outputs = [self.callable.get_buffer(h.name) for h in self.traced.returned]
+        if not self.traced.carry:
+            return _results(outputs, None)
+        return _results(outputs, self._next_values(values))
+
+    def start(self, run: FullELFRun, /, *tensors, **values) -> None:
+        """Start a call of this full ELF on ``run`` (one of its callable's
+        ``new_run()``), without waiting for it."""
+        self._stage(tensors, values, run)
+        self.callable.start(run)
+
+    def emit_to(self, target: CompiledGraph) -> None:
+        """Program this version's Emit to start a call of ``target``: its
+        scratchpad words, and the carried values it starts from."""
+        if self.emit is None:
+            raise ValueError(f"{self.traced.name}: this version has no Emit step")
+        program = compose(self.emit, self.traced.carry, target.words, target.parameters)
+        self.write(self.emit.program, program)
+
+    def _stage(self, tensors, values, run: FullELFRun | None = None) -> None:
+        """Everything a call writes before it is dispatched: the weights not
+        yet uploaded, the inputs, and the per-call values, into ``run``'s
+        scratchpad (the callable's own by default)."""
         if len(tensors) != len(self.traced.inputs):
             raise TypeError(
                 f"{self.traced.name} takes {len(self.traced.inputs)} input(s), "
@@ -593,27 +675,27 @@ class CompiledGraph:
                     f"new compile"
                 )
             self._copy_in(handle.name, tensor)
-        self._write_values(values)
-        self.callable()
-        outputs = [self.callable.get_buffer(h.name) for h in self.traced.returned]
-        if not self.traced.carry:
-            return _results(outputs, None)
-        return _results(outputs, self._next_values(values))
+        self._write_values(values, run)
 
     def _next_values(self, values: Mapping[str, int]) -> Carry:
         """The carried values' next values, after a call with ``values``: an
         expression evaluated here, a computed element read back."""
         nxt: dict[str, int] = {}
+        planes = None if self.emit is None else self.read(self.emit.carry)
         for name, expression in self.traced.carry.items():
             if isinstance(expression, Affine):
                 nxt[name] = expression.evaluate(values)
+            elif planes is not None:
+                # Computed into the carry's second plane (see .carried).
+                assert self.emit is not None
+                nxt[name] = int(planes[1, self.emit.carried.index(name)])
             else:
                 buf = self.callable.get_buffer(expression.name)
                 buf.to("cpu")
                 nxt[name] = int(buf.numpy().reshape(-1)[0])
         return Carry(**nxt)
 
-    def _write_values(self, values) -> None:
+    def _write_values(self, values, run: FullELFRun | None = None) -> None:
         expected = {v.name for v in self.traced.values}
         missing, unknown = expected - set(values), set(values) - expected
         if missing or unknown:
@@ -621,14 +703,15 @@ class CompiledGraph:
                 f"{self.traced.name}: per-call values {sorted(missing)} missing"
                 + (f"; {sorted(unknown)} unknown" if unknown else "")
             )
+        if self.emit is not None:
+            # The values this call starts from, for its Emit.
+            n = len(self.emit.carried)
+            head = self._storage(self.emit.carry).numpy_view()
+            head[:n] = [values[name] for name in self.emit.carried]
         if not self.words:
             return
-        self.callable.write_values(
-            {
-                symbol: np.dtype(dtype).type(word(values))
-                for symbol, dtype, word in self.words
-            }
-        )
+        words = {w.symbol: np.dtype(w.dtype).type(w(values)) for w in self.words}
+        (self.callable if run is None else run).write_values(words)
 
 
 def _rename(tracer: Tracer, handle: Handle, name: str) -> None:
@@ -656,9 +739,39 @@ def _results(outputs: list, carry: Carry | None):
     return items[0] if len(items) == 1 else tuple(items)
 
 
+@dataclasses.dataclass(frozen=True)
+class Linear:
+    """A word as one graph value times a ratio plus an offset, rounded up."""
+
+    value: str
+    ratio: Fraction
+    offset: Fraction
+    dtype: str  # the word's, by name: two dtypes of one number are two words
+
+    @property
+    def is_integral(self) -> bool:
+        """Whether it rounds nothing: an integer scale and offset."""
+        return self.ratio.denominator == 1 and self.offset.denominator == 1
+
+
+@dataclasses.dataclass(frozen=True)
+class Word:
+    """A scratchpad word a call writes: its device symbol, its dtype, how it
+    follows from the call's values and, where it is one, the linear form it
+    has in one graph value."""
+
+    symbol: str
+    dtype: Any
+    compute: Callable[[Mapping[str, int]], Any]
+    linear: Linear | None
+
+    def __call__(self, values: Mapping[str, int]) -> Any:
+        return self.compute(values)
+
+
 def _words(
     traced: TracedGraph, *, share: bool = False
-) -> tuple[list[tuple[str, Any, Callable[[Mapping], Any]]], dict[str, str]]:
+) -> tuple[list[Word], dict[str, str]]:
     """The scratchpad words a call writes, each from the call's values, and
     with ``share`` the design symbols that share one word.
 
@@ -667,19 +780,21 @@ def _words(
     from a bounded extent, computed from the call's bound. The full ELF has
     32 words for its whole image, and a bounded prompt binds its row count
     to every operator's extents, so symbols that always hold one number
-    share a word: those that are one graph value times one ratio plus one
-    offset (a bound expression's, or a bounded extent's over the lanes and
-    rows it is divided into), rounded up, in one dtype. Any other
-    derivation keeps its own word.
+    share a word: those whose derivation is :class:`Linear` (a bound
+    expression, or a bounded extent over the lanes and rows it is divided
+    into), in one dtype. Any other derivation keeps its own word.
     """
     dev = aie_utils.get_current_device()
-    # (symbol, dtype, word, (graph value, ratio, offset, dtype) or None)
-    words: list[tuple[str, Any, Callable[[Mapping], Any], Any]] = []
+    words: list[Word] = []
     for b in traced.bindings:
         e = b.expression
-        key = (e.value.name, Fraction(e.scale), Fraction(e.bias))
-        key += (np.dtype(b.member.dtype).name,)
-        words.append((b.symbol, e.dtype, lambda v, e=e: e.evaluate(v), key))
+        linear = Linear(
+            e.value.name,
+            Fraction(e.scale),
+            Fraction(e.bias),
+            np.dtype(b.member.dtype).name,
+        )
+        words.append(Word(b.symbol, e.dtype, lambda v, e=e: e.evaluate(v), linear))
     seen: set[int] = set()
     derived: set[str] = set()
     for b in traced.bindings:
@@ -702,50 +817,53 @@ def _words(
             if symbol in derived:
                 continue  # another instance of the design, bound alike
             derived.add(symbol)
-            key = None
+            linear = None
             spec = word.member
             if isinstance(spec, _ExtentWord) and spec.extent.name in extents:
                 count, divisor = extents[spec.extent.name], spec.divisor(op)
-                key = (
+                linear = Linear(
                     count.value.name,
                     Fraction(count.scale, divisor),
                     Fraction(count.bias, divisor),
                     np.dtype(word.dtype).name,
                 )
             words.append(
-                (
+                Word(
                     symbol,
                     word.dtype,
                     lambda v, op=op, name=name, at=at: op.derived_at(name, **at(v)),
-                    key,
+                    linear,
                 )
             )
 
     shared: dict[str, str] = {}
     if share:
-        keys: dict[str, set] = {}
-        for symbol, _, _, key in words:
-            keys.setdefault(symbol, set()).add(key)
-        groups: dict[Any, list[str]] = {}
-        for symbol, found in keys.items():
+        forms: dict[str, set[Linear | None]] = {}
+        for w in words:
+            forms.setdefault(w.symbol, set()).add(w.linear)
+        groups: dict[Linear, list[str]] = {}
+        for symbol, found in forms.items():
             if len(found) == 1 and None not in found:
-                groups.setdefault(next(iter(found)), []).append(symbol)
+                groups.setdefault(next(iter(found)), []).append(symbol)  # type: ignore[arg-type]
 
         def spell(r: Fraction) -> str:
             # An identifier's: m for minus, d for over.
             den = f"d{r.denominator}" if r.denominator > 1 else ""
             return f"{'m' if r < 0 else ''}{abs(r.numerator)}{den}"
 
-        for (graph, ratio, offset, dtype), symbols in groups.items():
+        for form, symbols in groups.items():
             if len(symbols) > 1:
-                name = f"graph_{graph}_x{spell(ratio)}"
-                if offset:
-                    name += f"{'p' if offset > 0 else 'm'}{spell(abs(offset))}"
-                shared.update(dict.fromkeys(symbols, f"{name}_{dtype}"))
-    out, written = [], set()
-    for symbol, dtype, word, _ in words:
-        symbol = shared.get(symbol, symbol)
+                name = f"graph_{form.value}_x{spell(form.ratio)}"
+                if form.offset:
+                    name += (
+                        f"{'p' if form.offset > 0 else 'm'}{spell(abs(form.offset))}"
+                    )
+                shared.update(dict.fromkeys(symbols, f"{name}_{form.dtype}"))
+    out: list[Word] = []
+    written: set[str] = set()
+    for w in words:
+        symbol = shared.get(w.symbol, w.symbol)
         if symbol not in written:
             written.add(symbol)
-            out.append((symbol, dtype, word))
+            out.append(dataclasses.replace(w, symbol=symbol))
     return out, shared

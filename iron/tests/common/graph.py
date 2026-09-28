@@ -22,13 +22,16 @@ import iron
 from iron.common import Carried, DispatchTime, Profile, Scratchpad
 from iron.common.design.build import device_symbol
 from iron.common.graph import Handle, TracedGraph, Tracer
+from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import _words
 from iron.common.graph.handle import Affine, Value
 from iron.common.image import OperatorSequence
+from iron.common.image.artifacts import Parameter
 from iron.lm.layers import SwiGLU
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.emit import reference as emit_reference
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
@@ -757,7 +760,7 @@ def test_a_bound_rounds_up_to_the_tiles_it_ends_in(npu2):
     (op,) = t.operators
     op = op.resolved(aie_utils.get_current_device())
     per_word = op.cores * op.tile_size  # elements one word of tiles covers
-    words = {symbol: word for symbol, _, word in _words(t)[0]}
+    words = {w.symbol: w for w in _words(t)[0]}
     for p in range(64):
         elements = (p + 1) * 512
         tiles = -(-elements // per_word)
@@ -785,9 +788,9 @@ def test_words_with_an_offset_share_by_ratio_and_offset(npu2):
         "graph_p_x512p512_int32",
     ]
     for p in range(64):
-        mine = {symbol: word({"p": p}) for symbol, _, word in words}
-        for symbol, _, word in alone:
-            assert mine[shared.get(symbol, symbol)] == word({"p": p})
+        mine = {w.symbol: w({"p": p}) for w in words}
+        for w in alone:
+            assert mine[shared.get(w.symbol, w.symbol)] == w({"p": p})
 
 
 def test_the_reference_computes_the_expressions(npu2):
@@ -823,7 +826,7 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
 
     t = g.trace(x=(64, 8))
     (op,) = t.operators
-    words = {symbol: word for symbol, _, word in _words(t)[0]}
+    words = {w.symbol: w for w in _words(t)[0]}
     assert set(words) == {
         f"{op.name}_{w}" for w in ("valid_n_x8", "count", "valid_x", "valid_y")
     }
@@ -869,9 +872,9 @@ def test_words_that_always_hold_one_number_share_it(npu2):
     assert len(alone) == 10 and len(words) == 4
     assert sorted(set(shared.values())) == ["graph_n_x1d4_int32", "graph_n_x512_int32"]
     for n in (1, 16, 64):
-        mine = {symbol: word({"n": n}) for symbol, _, word in words}
-        for symbol, _, word in alone:
-            assert mine[shared.get(symbol, symbol)] == word({"n": n})
+        mine = {w.symbol: w({"n": n}) for w in words}
+        for w in alone:
+            assert mine[shared.get(w.symbol, w.symbol)] == w({"n": n})
 
 
 def test_a_bound_reaches_a_copy_and_a_repeat_through_their_views(npu2):
@@ -1090,3 +1093,75 @@ def test_every_carried_value_is_carried_and_nothing_else():
 
     with pytest.raises(TypeError, match="returned last"):
         CarriesTwice().trace()
+
+
+class _Trail(iron.Graph):
+    """Walks a linked list and records each node at the step count. The
+    version with ``jump`` starts from a table the host gives, at a plain
+    per-call value; the one without follows the list from ``node``."""
+
+    def __init__(self, successor, steps: int):
+        self.successor = iron.weight(successor)
+        self.trail = iron.state((steps + 1,), np.int32, name="trail")
+
+    def body(
+        self,
+        jump=None,
+        *,
+        node: Carried[np.int32],
+        steps: Carried[np.int32],
+        skip: Scratchpad[np.int32],
+    ):
+        if jump is None:
+            nxt = Copy(self.successor[node], dtype=np.int32)
+        else:
+            nxt = Copy(jump[skip], dtype=np.int32)
+        Copy(nxt, self.trail[steps], dtype=np.int32)
+        return iron.carry(node=nxt, steps=steps + 1)
+
+
+def test_the_emit_program_follows_the_target_parameters():
+    """Each word of the target's scratchpad comes from a carried value, in
+    the target's order and encoding; anything else is refused."""
+    walk = _Trail(np.arange(16, dtype=np.int32), steps=8)
+    traced = walk.trace()
+    assert traced.feedback == []  # tracing alone adds no Emit
+    assert walk._carry is not None
+    site = attach_emit(traced, walk._carried, walk._carry, slots=2)
+    # The gathered node is computed into the carry's second plane.
+    assert traced.runlist[0][-1] == "carry[8:12]"
+    assert traced.runlist[-1][1:] == (
+        "emit_program",
+        "carry",
+        "emit_image",
+        "carry[0:8]",
+    )
+    assert traced.feedback == ["emit_image"] and traced.output_args == []
+
+    words, _ = _words(traced)
+    # A target laying the two out the other way, one as a core read.
+    by_value = {w.linear.value: w.symbol for w in words if w.linear is not None}
+    parameters = [
+        Parameter(by_value["steps"], 0, "i32", "core"),
+        Parameter(by_value["node"], 1, "i32", "addr"),
+    ]
+    program = compose(site, traced.carry, words, parameters)
+    assert program.tolist() == [
+        [0, 1, 1, 1, 2],  # steps + 1, shifted for the core
+        [1, 0, 1, 0, 0],  # the node the device gathered
+        [1, 0, 1, 0, 0],  # the next node
+        [0, 1, 1, 1, 0],  # the next step count
+    ]
+    image, state = emit_reference(program, np.array([[5, 9], [33, 0]]), slots=2)
+    assert image.tolist() == [10 << 2, 33] and state.tolist() == [33, 10]
+
+    with pytest.raises(ValueError, match="takes 1"):
+        compose(site, traced.carry, words, parameters[:1])
+    jumped, _ = _words(walk.trace(jump=((16,), np.int32)))
+    with pytest.raises(ValueError, match="skip, which is not carried"):
+        compose(
+            site,
+            traced.carry,
+            jumped,
+            [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(jumped)],
+        )

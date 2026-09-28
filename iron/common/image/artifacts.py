@@ -44,6 +44,22 @@ class Step:
 
 
 @dataclass(frozen=True)
+class Parameter:
+    """One row of an image's parameter table: a word of its ctrl scratchpad."""
+
+    name: str
+    index: int
+    dtype: str
+    # "core": a core reads it, and the scratchpad holds it shifted left by
+    # 2; "addr": it patches a DMA address, and is held as it is.
+    kind: str
+
+    @property
+    def shift(self) -> int:
+        return 2 if self.kind == "core" else 0
+
+
+@dataclass(frozen=True)
 class Artifacts:
     """The record of one image.
 
@@ -67,14 +83,24 @@ class Artifacts:
         return getattr(self.entry, "params", None)
 
     @property
-    def parameters(self) -> frozenset[str]:
-        """The scratchpad words the image declares, by name: those its
-        designs read, which the parameter table lists after its count.
+    def parameter_table(self) -> list[Parameter]:
+        """The scratchpad words the image declares: those its designs read,
+        which the parameter table lists after its count, in its order.
         """
         if self.params is None:
-            return frozenset()
+            return []
         _, *rows = self.params.read_text().splitlines()
-        return frozenset(row.split()[0] for row in rows if row.strip())
+        table = []
+        for row in rows:
+            if row.strip():
+                name, index, dtype, kind = row.split()
+                table.append(Parameter(name, int(index), dtype, kind))
+        return table
+
+    @property
+    def parameters(self) -> frozenset[str]:
+        """The names of the scratchpad words the image declares."""
+        return frozenset(p.name for p in self.parameter_table)
 
     @property
     def lowered_mlir(self) -> Path | None:

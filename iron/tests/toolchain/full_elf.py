@@ -82,7 +82,7 @@ def test_swiglu_graph_compiles_to_a_full_elf():
 def _assert_values_in_table(version):
     table = _params(version.artifacts)
     # The host writes every parameter the image declares ...
-    assert {symbol for symbol, *_ in version.words} == set(table)
+    assert {w.symbol for w in version.words} == set(table)
     # ... and every per-call index the graph bound is one, in the word it
     # shares with the symbols that always hold its number. A bound extent
     # the designs read only through its derivations has none of its own.

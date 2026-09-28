@@ -527,6 +527,25 @@ class SequenceFullELFCallable(SequenceCallable):
                 buffer.device = "npu"
                 buffer.to("cpu")
 
+    def start(self, *runs: FullELFRun) -> None:
+        """Push what the host wrote, and start ``runs`` without waiting; the
+        caller waits on each (:meth:`wait`) and reads what it needs."""
+        self._sync_inputs()
+        for run in runs:
+            run.start()
+
+    def wait(self, *runs: FullELFRun) -> None:
+        """Wait on ``runs``, started with :meth:`start` or on their own.
+
+        The scratch and output arguments are marked device-resident after
+        them, so a read of a view of either pulls what they wrote: a run
+        restarted with ``FullELFRun.start()`` alone marks nothing.
+        """
+        for run in runs:
+            run.wait()
+        for buffer in (self.scratch_buffer, self.output_buffer):
+            buffer.device = "npu"
+
     def __call__(self, *runs: FullELFRun):
         """Dispatch :attr:`run`, or ``runs`` in order. Every run is started
         before any is waited on, so they queue back to back on the device."""
