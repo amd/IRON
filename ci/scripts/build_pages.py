@@ -31,7 +31,7 @@ ARCHS = ["krackan", "phoenix"]
 
 
 def read_all_csvs(results_root):
-    """Yield (arch, row) for every row of every results CSV under the root."""
+    """Yield (arch, suite, row) for every row of every results CSV under the root."""
     for arch in ARCHS:
         for suite in SUITES:
             path = os.path.join(results_root, arch, suite, "all.csv")
@@ -39,7 +39,7 @@ def read_all_csvs(results_root):
                 continue
             with open(path, newline="") as f:
                 for row in csv.DictReader(f):
-                    yield arch, row
+                    yield arch, suite, row
 
 
 def shorten_labels(series):
@@ -59,12 +59,17 @@ def shorten_labels(series):
 
 
 def build_data(results_root):
-    """Group the benched rows into {operator: {metrics, archs}}."""
-    rows = [(arch, row) for arch, row in read_all_csvs(results_root)]
-    benched = {row_key(row) for row in select_bench_rows(row for _, row in rows)}
+    """Group the benched rows into {operator: {metrics, groups}}.
+
+    The extensive suite runs the default suite's tests too, so one commit
+    carries two measurements of the same parametrization. Each suite therefore
+    gets its own chart, with its own runs along the x axis.
+    """
+    rows = [(arch, suite, row) for arch, suite, row in read_all_csvs(results_root)]
+    benched = {row_key(row) for row in select_bench_rows(row for _, _, row in rows)}
 
     operators = {}
-    for arch, row in rows:
+    for arch, suite, row in rows:
         key = row_key(row)
         if key not in benched:
             continue
@@ -73,9 +78,8 @@ def build_data(results_root):
         if not date:
             continue
 
-        by_arch = operators.setdefault(operator_name(test_path), {})
-        bucket = by_arch.setdefault(arch, {"commits": {}, "series": {}})
-        # A date identifies a run; a commit can carry two of them, one per suite.
+        groups = operators.setdefault(operator_name(test_path), {})
+        bucket = groups.setdefault((arch, suite), {"commits": {}, "series": {}})
         bucket["commits"][date] = (row.get("Commit") or "").strip()[:7] or "unknown"
 
         _, func = split_test_path(test_path)
@@ -90,37 +94,46 @@ def build_data(results_root):
             series["points"].setdefault(metric, {})[date] = value
 
     out = {}
-    for name, by_arch in sorted(operators.items()):
-        every_series = [s for b in by_arch.values() for s in b["series"].values()]
+    for name, groups in sorted(operators.items()):
+        every_series = [s for b in groups.values() for s in b["series"].values()]
         shorten_labels(every_series)
         metrics = sorted({m for s in every_series for m in s["points"]})
         if not metrics:
             continue
-        # One colour per parametrization, so the two charts agree.
+        # One colour per parametrization, so the charts agree.
         colours = sorted({s["label"] for s in every_series})
 
-        archs = {}
+        charts = []
         for arch in ARCHS:
-            bucket = by_arch.get(arch)
-            if not bucket:
-                continue
-            dates = sorted(bucket["commits"])
-            archs[arch] = {
-                "dates": dates,
-                "commits": [bucket["commits"][d] for d in dates],
-                "series": [
+            for suite in SUITES:
+                bucket = groups.get((arch, suite))
+                if not bucket:
+                    continue
+                dates = sorted(bucket["commits"])
+                charts.append(
                     {
-                        "label": s["label"],
-                        "colour": colours.index(s["label"]),
-                        "points": {
-                            metric: [s["points"].get(metric, {}).get(d) for d in dates]
-                            for metric in metrics
-                        },
+                        "name": f"{arch} \u2014 {suite}",
+                        "dates": dates,
+                        "commits": [bucket["commits"][d] for d in dates],
+                        "series": [
+                            {
+                                "label": s["label"],
+                                "colour": colours.index(s["label"]),
+                                "points": {
+                                    metric: [
+                                        s["points"].get(metric, {}).get(d)
+                                        for d in dates
+                                    ]
+                                    for metric in metrics
+                                },
+                            }
+                            for s in sorted(
+                                bucket["series"].values(), key=lambda s: s["label"]
+                            )
+                        ],
                     }
-                    for s in sorted(bucket["series"].values(), key=lambda s: s["label"])
-                ],
-            }
-        out[name] = {"metrics": metrics, "archs": archs}
+                )
+        out[name] = {"metrics": metrics, "charts": charts}
     return out
 
 
@@ -147,7 +160,7 @@ SPDX-License-Identifier: Apache-2.0
   main { flex: 1; padding: 1.5rem 2rem; min-width: 0; }
   header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
   h2 { margin: 0; }
-  h3 { margin: 1.25rem 0 0; font-size: 1rem; text-transform: capitalize; }
+  h3 { margin: 1.25rem 0 0; font-size: 1rem; }
   select { padding: .3rem; }
   .meta { color: #888; font-size: .85rem; margin-top: .5rem; }
   .chart { position: relative; height: 38vh; min-height: 17rem; }
@@ -171,16 +184,15 @@ const GENERATED = "__GENERATED__";
 // The CSV carries no units, so name them here.
 const UNITS = {Latency: 'us', Bandwidth: 'GB/s', Throughput: 'GFLOP/s',
                TTFT: 's', TPS: 'tokens/s'};
-const ARCHS = __ARCHS__;
 const names = Object.keys(DATA);
 let charts = [];
 
 function colour(i) { return `hsl(${(i * 137.508) % 360} 65% 50%)`; }
 
-function chartFor(arch, data, metric, host) {
-  const series = data.series.filter(s => s.points[metric].some(v => v !== null));
+function chartFor(spec, metric, host) {
+  const series = spec.series.filter(s => s.points[metric].some(v => v !== null));
   const heading = document.createElement('h3');
-  heading.textContent = arch;
+  heading.textContent = spec.name;
   host.appendChild(heading);
   if (!series.length) {
     const note = document.createElement('p');
@@ -199,7 +211,7 @@ function chartFor(arch, data, metric, host) {
   charts.push(new Chart(canvas, {
     type: 'line',
     data: {
-      labels: data.commits,
+      labels: spec.commits,
       datasets: series.map(s => ({
         label: s.label,
         data: s.points[metric],
@@ -221,7 +233,7 @@ function chartFor(arch, data, metric, host) {
       plugins: {
         legend: { position: 'bottom' },
         tooltip: { callbacks: { title: (items) =>
-          `${data.commits[items[0].dataIndex]} — ${data.dates[items[0].dataIndex]}` } },
+          `${spec.commits[items[0].dataIndex]} — ${spec.dates[items[0].dataIndex]}` } },
       },
     },
   }));
@@ -235,13 +247,9 @@ function draw(name, metric) {
   const host = document.getElementById('charts');
   host.textContent = '';
 
-  const counts = [];
-  for (const arch of ARCHS) {
-    const data = op.archs[arch];
-    if (!data) continue;
-    counts.push(`${arch}: ${chartFor(arch, data, metric, host)} parametrization(s),` +
-                ` ${data.commits.length} run(s)`);
-  }
+  const counts = op.charts.map(spec =>
+    `${spec.name}: ${chartFor(spec, metric, host)} parametrization(s),` +
+    ` ${spec.commits.length} run(s)`);
   document.getElementById('meta').textContent =
     `${counts.join('. ')}. Page built ${GENERATED}.`;
 }
@@ -308,11 +316,7 @@ def main():
     # Escaping '<' keeps a test name that happens to spell a closing tag from
     # ending the script element early.
     payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")
-    page = (
-        PAGE.replace("__GENERATED__", generated)
-        .replace("__ARCHS__", json.dumps(ARCHS))
-        .replace("__DATA__", payload)
-    )
+    page = PAGE.replace("__GENERATED__", generated).replace("__DATA__", payload)
 
     os.makedirs(args.output_dir, exist_ok=True)
     out_path = os.path.join(args.output_dir, "index.html")
