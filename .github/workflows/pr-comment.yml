@@ -177,8 +177,6 @@ jobs:
           RUN_DATE: ${{ steps.collect.outputs.date }}
           SERVER_URL: ${{ github.server_url }}
           REPOSITORY: ${{ github.repository }}
-          OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
         run: |
           python ci/scripts/pr_comment.py \
             --artifacts "$RESULTS_ROOT" \
@@ -187,7 +185,6 @@ jobs:
             --commit "$COMMIT_SHA" \
             --commit-url "$SERVER_URL/$REPOSITORY/commit/$COMMIT_SHA" \
             --date "$RUN_DATE" \
-            --pages-url "https://$OWNER.github.io/$REPO_NAME/" \
             -o "$RESULTS_ROOT/comment.md"
 
       - name: Comment on PR

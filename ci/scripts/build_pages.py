@@ -6,9 +6,9 @@
 """Build the benchmark history site from the CSVs on the results branch.
 
 Reads every ``{arch}/{suite}/all.csv`` under a results root and writes a single
-self-contained ``index.html``: one chart per operator, one line per
-parametrization, with a metric selector. Only parametrizations carrying the
-'bench' marker appear.
+self-contained ``index.html``. Each operator gets one chart per architecture
+and suite, one line per parametrization, with a metric selector. Only
+parametrizations carrying the 'bench' marker appear.
 """
 
 import argparse
@@ -18,23 +18,23 @@ import os
 from datetime import datetime, timezone
 
 from pretty_common import (
+    ARCHS,
+    SUITES,
     metric_label,
     operator_name,
+    results_dir,
     row_key,
     select_bench_rows,
     split_test_path,
     try_parse_float,
 )
 
-SUITES = ["small", "extensive", "examples"]
-ARCHS = ["krackan", "phoenix"]
-
 
 def read_all_csvs(results_root):
     """Yield (arch, suite, row) for every row of every results CSV under the root."""
     for arch in ARCHS:
         for suite in SUITES:
-            path = os.path.join(results_root, arch, suite, "all.csv")
+            path = os.path.join(results_root, results_dir(arch, suite), "all.csv")
             if not os.path.exists(path):
                 continue
             with open(path, newline="") as f:

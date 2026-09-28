@@ -18,6 +18,32 @@ MEAN_SUFFIX = " (mean)"
 # Rows written before the 'Test Path' column existed name no operator.
 UNKNOWN_OPERATOR = "(unknown)"
 
+# The results branch stores one directory per architecture and suite. The
+# workflow that benchmarks each one names its artifact after the pair.
+ARCHS = ["krackan", "phoenix"]
+SUITES = ["small", "extensive", "examples"]
+
+# What each suite holds, for a reader of the report.
+SUITE_LABELS = {
+    "small": "Operators",
+    "extensive": "Operators, extensive",
+    "examples": "Applications",
+}
+
+# A pull request runs the default and the example suites. The extensive suite
+# runs on a push to a trunk branch, so no pull request reports it.
+PR_SUITES = ["small", "examples"]
+
+
+def results_dir(arch: str, suite: str) -> str:
+    """Name the results branch directory holding one suite's CSVs."""
+    return f"{arch}/{suite}"
+
+
+def suite_label(arch: str, suite: str) -> str:
+    """Name a suite for a reader."""
+    return f"{arch.capitalize()} - {SUITE_LABELS.get(suite, suite)}"
+
 
 def split_test_path(test_path: str) -> Tuple[str, str]:
     """Split a 'Test Path' value of the form 'dir/.../test.py::funcname'

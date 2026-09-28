@@ -22,17 +22,11 @@ import os
 from typing import Dict, List, Tuple
 
 from merge_all import limit_rows_by_date
+from pretty_common import ARCHS, PR_SUITES, results_dir, suite_label
 from pretty_trends import build_report
 
 # The posting step matches this to update its own comment.
 MARKER = "<!-- iron-ci-aggregate -->"
-
-SUITES = [
-    ("krackan/small", "Krackan - Operators"),
-    ("krackan/examples", "Krackan - Applications"),
-    ("phoenix/small", "Phoenix - Operators"),
-    ("phoenix/examples", "Phoenix - Applications"),
-]
 
 # A run reports a few hundred rows. A fork could upload millions.
 MAX_ROWS = 20000
@@ -100,7 +94,6 @@ def main():
     parser.add_argument("--commit", default="")
     parser.add_argument("--date", default="")
     parser.add_argument("--commit-url", default="")
-    parser.add_argument("--pages-url", default="")
     parser.add_argument("--threshold", type=float, default=5.0)
     parser.add_argument("--sigma", type=float, default=2.0)
     parser.add_argument("--round", type=int, default=2, dest="ndigits")
@@ -119,25 +112,30 @@ def main():
     sections = []
     reported = []
     missing = []
-    for directory, label in SUITES:
-        body = strip_title(suite_report(args.artifacts, args.history, directory, args))
-        conclusion = status.get(directory, "missing")
-        if conclusion != "success" or not os.path.exists(
-            os.path.join(args.artifacts, directory, "latest.csv")
-        ):
-            missing.append(f"{label} ({conclusion})")
-            continue
-        reported.append(label)
-        if body:
-            sections += [
-                "<details open>",
-                f"<summary><b>{label}</b></summary>",
-                "",
-                body,
-                "",
-                "</details>",
-                "",
-            ]
+    for arch in ARCHS:
+        for suite in PR_SUITES:
+            directory = results_dir(arch, suite)
+            label = suite_label(arch, suite)
+            body = strip_title(
+                suite_report(args.artifacts, args.history, directory, args)
+            )
+            conclusion = status.get(directory, "missing")
+            if conclusion != "success" or not os.path.exists(
+                os.path.join(args.artifacts, directory, "latest.csv")
+            ):
+                missing.append(f"{label} ({conclusion})")
+                continue
+            reported.append(label)
+            if body:
+                sections += [
+                    "<details open>",
+                    f"<summary><b>{label}</b></summary>",
+                    "",
+                    body,
+                    "",
+                    "</details>",
+                    "",
+                ]
 
     if sections:
         lines += sections
@@ -150,9 +148,6 @@ def main():
             "This comment covers the remaining suites only.",
             "",
         ]
-
-    if args.pages_url:
-        lines += [f"[Full benchmark history]({args.pages_url})", ""]
 
     with open(args.output, "w") as f:
         f.write("\n".join(lines))
