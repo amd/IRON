@@ -53,15 +53,13 @@ def shorten_labels(series):
     funcs = {s["func"] for s in series}
     for s in series:
         kept = [c for c in s["params"].split("-") if c not in shared]
-        parts = [s["arch"]]
-        if len(funcs) > 1:
-            parts.append(s["func"])
+        parts = [s["func"]] if len(funcs) > 1 else []
         parts.append("-".join(kept) if kept else s["params"] or "default")
         s["label"] = " · ".join(parts)
 
 
 def build_data(results_root):
-    """Group the benched rows into {operator: {series, dates, metrics}}."""
+    """Group the benched rows into {operator: {metrics, archs}}."""
     rows = [(arch, row) for arch, row in read_all_csvs(results_root)]
     benched = {row_key(row) for row in select_bench_rows(row for _, row in rows)}
 
@@ -75,16 +73,14 @@ def build_data(results_root):
         if not date:
             continue
 
-        operator = operators.setdefault(
-            operator_name(test_path), {"series": {}, "dates": set()}
-        )
-        operator["dates"].add(date)
+        by_arch = operators.setdefault(operator_name(test_path), {})
+        bucket = by_arch.setdefault(arch, {"commits": {}, "series": {}})
+        # A date identifies a run; a commit can carry two of them, one per suite.
+        bucket["commits"][date] = (row.get("Commit") or "").strip()[:7] or "unknown"
 
         _, func = split_test_path(test_path)
-        series_key = f"{arch}\u0000{test_path}\u0000{params}"
-        series = operator["series"].setdefault(
-            series_key,
-            {"arch": arch, "func": func, "params": params, "points": {}},
+        series = bucket["series"].setdefault(
+            (test_path, params), {"func": func, "params": params, "points": {}}
         )
         for column, raw in row.items():
             metric = metric_label(column)
@@ -94,28 +90,37 @@ def build_data(results_root):
             series["points"].setdefault(metric, {})[date] = value
 
     out = {}
-    for name, operator in sorted(operators.items()):
-        dates = sorted(operator["dates"])
-        metrics = sorted({m for s in operator["series"].values() for m in s["points"]})
+    for name, by_arch in sorted(operators.items()):
+        every_series = [s for b in by_arch.values() for s in b["series"].values()]
+        shorten_labels(every_series)
+        metrics = sorted({m for s in every_series for m in s["points"]})
         if not metrics:
             continue
-        series = list(operator["series"].values())
-        shorten_labels(series)
-        series.sort(key=lambda s: s["label"])
-        out[name] = {
-            "dates": dates,
-            "metrics": metrics,
-            "series": [
-                {
-                    "label": s["label"],
-                    "points": {
-                        metric: [s["points"].get(metric, {}).get(d) for d in dates]
-                        for metric in metrics
-                    },
-                }
-                for s in series
-            ],
-        }
+        # One colour per parametrization, so the two charts agree.
+        colours = sorted({s["label"] for s in every_series})
+
+        archs = {}
+        for arch in ARCHS:
+            bucket = by_arch.get(arch)
+            if not bucket:
+                continue
+            dates = sorted(bucket["commits"])
+            archs[arch] = {
+                "dates": dates,
+                "commits": [bucket["commits"][d] for d in dates],
+                "series": [
+                    {
+                        "label": s["label"],
+                        "colour": colours.index(s["label"]),
+                        "points": {
+                            metric: [s["points"].get(metric, {}).get(d) for d in dates]
+                            for metric in metrics
+                        },
+                    }
+                    for s in sorted(bucket["series"].values(), key=lambda s: s["label"])
+                ],
+            }
+        out[name] = {"metrics": metrics, "archs": archs}
     return out
 
 
@@ -142,9 +147,11 @@ SPDX-License-Identifier: Apache-2.0
   main { flex: 1; padding: 1.5rem 2rem; min-width: 0; }
   header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
   h2 { margin: 0; }
+  h3 { margin: 1.25rem 0 0; font-size: 1rem; text-transform: capitalize; }
   select { padding: .3rem; }
   .meta { color: #888; font-size: .85rem; margin-top: .5rem; }
-  .chart { position: relative; height: 70vh; margin-top: 1rem; }
+  .chart { position: relative; height: 38vh; min-height: 17rem; }
+  .empty { color: #888; font-size: .9rem; margin: .5rem 0 0; }
 </style>
 </head>
 <body>
@@ -154,7 +161,7 @@ SPDX-License-Identifier: Apache-2.0
     <h2 id="title"></h2>
     <label>Metric <select id="metric"></select></label>
   </header>
-  <div class="chart"><canvas id="chart"></canvas></div>
+  <div id="charts"></div>
   <p class="meta" id="meta"></p>
 </main>
 <script id="data" type="application/json">__DATA__</script>
@@ -164,25 +171,40 @@ const GENERATED = "__GENERATED__";
 // The CSV carries no units, so name them here.
 const UNITS = {Latency: 'us', Bandwidth: 'GB/s', Throughput: 'GFLOP/s',
                TTFT: 's', TPS: 'tokens/s'};
+const ARCHS = __ARCHS__;
 const names = Object.keys(DATA);
-let chart = null;
+let charts = [];
 
 function colour(i) { return `hsl(${(i * 137.508) % 360} 65% 50%)`; }
 
-function draw(name, metric) {
-  const op = DATA[name];
-  const series = op.series.filter(s => s.points[metric]);
+function chartFor(arch, data, metric, host) {
+  const series = data.series.filter(s => s.points[metric].some(v => v !== null));
+  const heading = document.createElement('h3');
+  heading.textContent = arch;
+  host.appendChild(heading);
+  if (!series.length) {
+    const note = document.createElement('p');
+    note.className = 'empty';
+    note.textContent = `No ${metric} measurements.`;
+    host.appendChild(note);
+    return 0;
+  }
+  const box = document.createElement('div');
+  box.className = 'chart';
+  const canvas = document.createElement('canvas');
+  box.appendChild(canvas);
+  host.appendChild(box);
+
   const unit = UNITS[metric];
-  if (chart) chart.destroy();
-  chart = new Chart(document.getElementById('chart'), {
+  charts.push(new Chart(canvas, {
     type: 'line',
     data: {
-      labels: op.dates,
-      datasets: series.map((s, i) => ({
+      labels: data.commits,
+      datasets: series.map(s => ({
         label: s.label,
         data: s.points[metric],
-        borderColor: colour(i),
-        backgroundColor: colour(i),
+        borderColor: colour(s.colour),
+        backgroundColor: colour(s.colour),
         spanGaps: true,
         tension: 0.1,
         pointRadius: 2,
@@ -192,16 +214,36 @@ function draw(name, metric) {
       maintainAspectRatio: false,
       interaction: { mode: 'nearest', intersect: false },
       scales: {
-        x: { ticks: { maxRotation: 60, autoSkipPadding: 20,
-                      callback(i) { return op.dates[i].slice(0, 10); } } },
+        x: { ticks: { maxRotation: 60, autoSkipPadding: 20 } },
         y: { title: { display: true, text: unit ? `${metric} (${unit})` : metric },
-             beginAtZero: false },
+             beginAtZero: true },
       },
-      plugins: { legend: { position: 'bottom' } },
+      plugins: {
+        legend: { position: 'bottom' },
+        tooltip: { callbacks: { title: (items) =>
+          `${data.commits[items[0].dataIndex]} — ${data.dates[items[0].dataIndex]}` } },
+      },
     },
-  });
+  }));
+  return series.length;
+}
+
+function draw(name, metric) {
+  const op = DATA[name];
+  charts.forEach(c => c.destroy());
+  charts = [];
+  const host = document.getElementById('charts');
+  host.textContent = '';
+
+  const counts = [];
+  for (const arch of ARCHS) {
+    const data = op.archs[arch];
+    if (!data) continue;
+    counts.push(`${arch}: ${chartFor(arch, data, metric, host)} parametrization(s),` +
+                ` ${data.commits.length} run(s)`);
+  }
   document.getElementById('meta').textContent =
-    `${series.length} parametrization(s), ${op.dates.length} run(s). Page built ${GENERATED}.`;
+    `${counts.join('. ')}. Page built ${GENERATED}.`;
 }
 
 function select(name) {
@@ -266,7 +308,11 @@ def main():
     # Escaping '<' keeps a test name that happens to spell a closing tag from
     # ending the script element early.
     payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")
-    page = PAGE.replace("__GENERATED__", generated).replace("__DATA__", payload)
+    page = (
+        PAGE.replace("__GENERATED__", generated)
+        .replace("__ARCHS__", json.dumps(ARCHS))
+        .replace("__DATA__", payload)
+    )
 
     os.makedirs(args.output_dir, exist_ok=True)
     out_path = os.path.join(args.output_dir, "index.html")
