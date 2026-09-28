@@ -34,11 +34,12 @@ concurrency:
 
 jobs:
   publish:
-    # Only a push to a trunk branch reaches the `ci` branch.
+    # The `github-pages` environment admits `devel` alone. A run from any other
+    # branch reaches the deploy step and GitHub rejects it there.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.event == 'push' &&
-       contains(fromJSON('["main", "devel"]'), github.event.workflow_run.head_branch))
+       github.event.workflow_run.head_branch == 'devel')
     runs-on: ubuntu-latest
     environment:
       name: github-pages
