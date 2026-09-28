@@ -452,20 +452,21 @@ import iron
 from iron.common import Scratchpad
 
 class Decode(iron.Graph):
-    def __init__(self, weights):
+    def __init__(self, weights, angles):
         self.weights = weights                   # a namespace of arrays: weights
+        self.rope = iron.weight(angles)          # (max_len, head_dim)
         self.kv = iron.state((n_kv_groups, max_len, head_dim))
 
-    def body(self, x, angles, *, pos: Scratchpad[np.int32]):
+    def body(self, x, *, pos: Scratchpad[np.int32]):
         w = self.weights
         h = RMSNorm(x, weight=w.norm)            # class calls infer the extents
-        k = RoPE(GEMV(w.wk, h), angles)
+        k = RoPE(GEMV(w.wk, h), Copy(self.rope[pos]).reshape(1, head_dim))  # gathered on the NPU
         Copy(k, self.kv[:, pos])                 # a state passed as an output is written
         return GEMV(w.wo, h)
 
-graph = Decode(weights)
-graph.compile(x=(1, emb), angles=(1, head_dim))  # or on the first call
-logits = graph(x_tok, ang_tok, pos=n)
+graph = Decode(weights, angles)
+graph.compile(x=(1, emb))                        # or on the first call
+logits = graph(x_tok, pos=n)
 ```
 
 The versions of one graph share its weights and states: a full ELF
@@ -487,7 +488,8 @@ follows from it later. A profile is a JSON file, `Profile.load(path)` and
 ```json
 {"entries": [
   {"operator": "GEMV", "M": 2048, "K": 8192, "tile_size_input": 1},
-  {"operator": "MHA", "num_heads": 32, "seq_pad": 2048, "num_pipelines": 8}
+  {"operator": "MHA", "num_heads": 32, "seq_pad": 2048, "num_pipelines": 8},
+  {"operator": "MHA", "num_heads": 32, "seq_pad": 1, "num_pipelines": 4}
 ]}
 ```
 
@@ -537,10 +539,22 @@ code before relying on a line here; it is the authority.
   have DDR address folding off, so a sequence cannot move between images.
 - **Length-free extents.** `Extent(field)` and `x[:n]` bounds are carried
   through reshape and transpose; under a bound a buffer is split
-  round-robin by tile. GEMM and MHA bound their compute, not their DMA.
-  Decode reads the key and value caches in full (the context GEMV's K is
-  array-tier). A per-call size needs mlir-aie's size-kind scratchpad
-  parameter, `fill/drain(size_parameters=)`, on its iron-next branch.
+  round-robin by tile. GEMM bounds its compute, not its DMA; MHA's K and
+  V move only the blocks up to the bound, so attention over a cache costs
+  the context, not the cache. A per-call size needs mlir-aie's size-kind
+  scratchpad parameter, `fill/drain(size_parameters=)`, on its iron-next
+  branch.
+- **One compile, any context.** A decoder is two versions, a decode step
+  and a `prefill_chunk`-row prompt chunk, both compiled once; `max_seq_len`
+  sizes the caches and the RoPE table alone. A prompt runs chunk by chunk
+  against the caches, and decode is MHA of one query (a KV group's heads
+  packed into a block, a pipeline's own K and V lanes). The caches are
+  `(max_seq_len, n_kv_groups, head_dim)`, so a call's write is contiguous
+  and no descriptor steps by the context: a `(groups, positions)` cache
+  would step `max_seq_len * head_dim` between groups, past a descriptor's
+  2^20-granule stride from 32768 rows on.
+  `test_llama_does_not_grow_with_the_context` checks that no activation
+  or array follows `max_seq_len`.
 - **DMA descriptors** (mlir-aie's `verifyStridesWraps`, restated over a
   pattern by `BdLimits.fits`, `dev.bd_limits(col, row)`): the innermost
   dimension holds at most 1023 granules unless the transfer is linear, the
@@ -563,6 +577,13 @@ code before relying on a line here; it is the authority.
 - A fused sequence in an xclbin (several steps in one dispatch) is refused;
   so are modules. NPU1 therefore needs `boundaries=iron.each_step`.
 - MHA is NPU2-only, so prefill on NPU1 is not planned.
+- A prompt chunk is one dispatch, and its attention grows with the
+  context (about 1.2 s plus 0.12 s per 2048 rows before it; MHA streams
+  every K and V block for each Q block, valid or not). amdxdna's watchdog
+  (`tdr_timeout_ms`, 2000 by default; a stall is two ticks with no job
+  run or completed) stops a dispatch between 4 and 6 s, so past about
+  48k tokens a prompt needs `tdr_timeout_ms` raised. Decode steps run to
+  131072 (195 ms).
 - Tuning: `auto(choices=, legal=)` is recorded but nothing reads it, and
   there is no per-kernel L1 budget.
 - Open upstream asks in mlir-aie: a builder for `aiex.configure` /
@@ -768,8 +789,8 @@ package under it (`iron/lm/llama3/`). A model is five things over the
 shared layer, plus its tokenizer and profiles:
 
 - `Config` (`decoder.py`): the shape
-- `CausalLM` (`decoder.py`): a decoder as one graph, prefill and decode, the
-  key and value caches, attention over them (`attend`) and
+- `CausalLM` (`decoder.py`): a decoder as one graph, a prompt chunk and a
+  decode step, the key and value caches, attention over them (`attend`) and
   `logits(tokens)`. A model subclasses it with `layer(step, i, weights,
   x)` and `head(x)`, built from `layers.py`: `project(x, w)`, a weight's
   projection at either row count (GEMV for one row, GEMM for more), and
@@ -811,6 +832,10 @@ Llama 3.2 1B's shape, the layout, the tokenizer), `profiles/` (tunables):
 - **Additional deps**: `pip install -r requirements_examples.txt`
 - **Run**: `pytest iron/lm/llama3/`, or
   `python -m iron.lm.llama3.model model.safetensors tokenizer.model`
+  (`--max-seq-len`, a multiple of 2048, sizes the caches: 32768 by default,
+  1 GB of them; one compile serves every context up to it). XRT locks
+  every device buffer, so `ulimit -l` must cover the weights and the
+  caches: about 3.7 GB at 32768, 7 GB at 131072
 
 ### AIE Kernel Reference
 

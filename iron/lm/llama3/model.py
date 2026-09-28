@@ -10,9 +10,10 @@ checkpoint keeps each weight, its tokenizer, and Llama 3.2 1B's shape.
 Run it with ``python -m iron.lm.llama3.model``.
 
 The operators' tunables are the graph's profile, ``profiles/<device>.json``,
-keyed by operator shape at Llama 3.2 1B's shape and a ``max_seq_len`` of
-2048. A call site gives a tunable only where two operators of one shape want
-different ones.
+keyed by operator shape at Llama 3.2 1B's shape: a decode step's and a
+2048-row prompt chunk's, at any ``max_seq_len``, which sizes the caches and
+the RoPE table alone. A call site gives a tunable only where two operators of
+one shape want different ones.
 """
 
 import dataclasses
@@ -83,7 +84,7 @@ LLAMA_3_2_1B = Config(
     n_kv_groups=8,
     head_dim=64,
     hidden_dim=8192,
-    max_seq_len=2048,
+    max_seq_len=32768,
     rope_base=500000.0,
     rope_scaling=LLAMA_3_2,
 )

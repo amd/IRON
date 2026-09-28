@@ -15,7 +15,8 @@ and head on the NPU and in numpy, its shape, where its checkpoint keeps
 each weight and its tokenizer; its tunables are in `profiles/`. The rest is
 `iron.lm`, which a new model reuses the same way:
 
-- `CausalLM`: the body over prefill and decode, the key and value caches,
+- `CausalLM`: the body over a prompt chunk and a decode step, the key and
+  value caches,
   attention over them (`attend`) and `logits(tokens)`; a model subclasses
   it with `layer(step, i, weights, x)` and `head(x)`
 - `Oracle`: the same model's float32 forward pass on the host, attention
@@ -61,6 +62,14 @@ python -m iron.lm.llama3.model \
 
 - `--prompt-len`: characters of `iron/lm/prompt.txt` to use as the prompt (default 2048)
 - `--num-tokens`: tokens to generate (default 40)
+- `--max-seq-len`: the rows the key and value caches hold, prompt and
+  generated tokens together, a multiple of 2048 (default 32768, 1 GB of
+  caches); the compile is the same at any of them. XRT locks every device
+  buffer, so the locked-memory limit (`ulimit -l`) must hold the weights
+  and the caches: about 3.7 GB at 32768 and 7 GB at 131072 (a
+  `memlock unlimited` line in `/etc/security/limits.d/`). A prompt past
+  about 48k tokens runs chunks longer than the amdxdna driver's watchdog
+  allows (`tdr_timeout_ms`, 4 to 6 s a dispatch by default)
 - `--temperature`, `--top-k`: the sampler's (default 0.7 and 50)
 - `--check-accuracy`: instead of sampling, compare each step's logits with a
   float32 numpy forward pass (`LlamaOracle`) and print the KL divergence

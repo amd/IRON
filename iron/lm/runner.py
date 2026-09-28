@@ -6,6 +6,7 @@ the command line that runs them.
 """
 
 import argparse
+import dataclasses
 from pathlib import Path
 
 import numpy as np
@@ -88,6 +89,14 @@ def main(runner: type[Runner], description: str):
     parser.add_argument(
         "--num-tokens", type=int, default=40, help="tokens to generate (default: 40)"
     )
+    parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=runner.config.max_seq_len,
+        help="rows the caches hold, prompt and generated tokens together, a "
+        f"multiple of {runner.config.prefill_chunk} "
+        f"(default: {runner.config.max_seq_len})",
+    )
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-k", type=int, default=50)
     check = parser.add_mutually_exclusive_group()
@@ -106,7 +115,11 @@ def main(runner: type[Runner], description: str):
     )
     args = parser.parse_args()
 
-    run = runner(args.weights_path, args.tokenizer_path)
+    try:
+        config = dataclasses.replace(runner.config, max_seq_len=args.max_seq_len)
+    except ValueError as e:
+        parser.error(str(e))
+    run = runner(args.weights_path, args.tokenizer_path, config)
     tokens = run.prompt(args.prompt_len)
     if len(tokens) + args.num_tokens > run.config.max_seq_len:
         parser.error(

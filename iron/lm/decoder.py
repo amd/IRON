@@ -128,8 +128,9 @@ class CausalLM(iron.Graph):
     """A decoder on ``config``'s shape and ``weights``, whose top-level
     fields become the model's (named as they are: ``layers.3.q``). It needs
     ``embedding``, the rows the host looks tokens up in, and ``layers``;
-    ``keys[i]`` and ``values[i]`` are each layer's cache, ``(n_kv_groups,
-    max_seq_len, head_dim)``, and ``rope`` the RoPE table the device reads
+    ``keys[i]`` and ``values[i]`` are each layer's cache, ``(max_seq_len,
+    n_kv_groups, head_dim)``, a position's heads together as the projection
+    writes them, so no descriptor steps by ``max_seq_len``; and ``rope`` the RoPE table the device reads
     each call's rows of.
 
     A subclass gives :meth:`layer` and :meth:`head`, its ``profile``, and
@@ -144,8 +145,8 @@ class CausalLM(iron.Graph):
         self.config = config
         vars(self).update(vars(weights))
         G, L, D = config.n_kv_groups, config.max_seq_len, config.head_dim
-        self.keys = [iron.state((G, L, D)) for _ in self.layers]
-        self.values = [iron.state((G, L, D)) for _ in self.layers]
+        self.keys = [iron.state((L, G, D)) for _ in self.layers]
+        self.values = [iron.state((L, G, D)) for _ in self.layers]
         self.rope = iron.weight(config.angles().astype(bfloat16))
         self._seen = np.empty(0, dtype=np.int64)  # the tokens in the caches
 
@@ -199,20 +200,24 @@ class CausalLM(iron.Graph):
         )
         keys, values = self.keys[i], self.values[i]
         n = q.shape[0] // H
-        # The heads interleaved per token as the projection wrote them, into
-        # the call's rows of the cache's (G, L, D): a chunk's, or a step's one.
+        # The call's rows of the cache, a chunk's or a step's one, as the
+        # projection wrote them.
         for x, cache in ((k, keys), (v, values)):
             if step.prompt:
-                Copy(
-                    x.reshape(n, G, D).transpose(1, 0, 2),
-                    cache.reshape(G, L // C, C, D)[:, step.chunk, : step.rows],
-                )
+                rows = cache.reshape(L // C, C, G, D)[step.chunk, : step.rows]
+                Copy(x.reshape(n, G, D), rows)
             else:
-                Copy(x.reshape(G, D), cache[:, step.position])
+                Copy(x.reshape(G, D), cache[step.position])
         # The queries are the last rows of the keys so far; one query, a
         # step's, MHA packs by its heads.
-        span = np.s_[:, : step.position + 1]
-        o = MHA(q.reshape(n, H, D), keys[span], values[span], heads_interleaved=True)
+        span = np.s_[: step.position + 1]
+        o = MHA(
+            q.reshape(n, H, D),
+            keys[span],
+            values[span],
+            heads_interleaved=True,
+            kv_interleaved=True,
+        )
         return o.reshape(n, H * D)
 
     # -- on the host -----------------------------------------------------------

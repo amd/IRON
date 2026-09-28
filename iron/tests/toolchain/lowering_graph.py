@@ -51,6 +51,24 @@ def test_prefill_graph_operators_lower_with_their_value(tmp_path):
     _lower_all(traced, tmp_path)
 
 
+@pytest.mark.parametrize("rows", ["decode", "prompt"])
+def test_attention_over_a_128k_cache_lowers(rows, tmp_path):
+    """The caches are (max_seq_len, n_kv_groups, head_dim), a position's
+    heads together, so neither their per-call writes nor MHA's bounded
+    reads step by the context: at 131072 rows, where a (groups, positions)
+    cache's writes would step past a descriptor's reach, they still lower.
+    """
+    model = small(max_seq_len=131072)
+    step = 1 if rows == "decode" else model.config.prefill_chunk
+    traced = model.trace(**model.shapes(step))
+    attention = {
+        op.design_key(): op for op in traced.operators if type(op) in (Copy, MHA)
+    }
+    for i, op in enumerate(attention.values()):
+        (tmp_path / str(i)).mkdir()
+        lower(op, tmp_path / str(i), name=f"{i}_{type(op).__name__}")
+
+
 @pytest.mark.parametrize(
     "M,K,N",
     [(512, 1024, 1024), (512, 1024, 10240), (256, 512, 512)],

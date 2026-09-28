@@ -433,11 +433,12 @@ def test_llama_decode_traces_and_tunes():
     offsets = sorted(
         (b.member.name, str(b.expression)) for b in t.bindings if type(b.op) is Copy
     )
-    D = cfg.head_dim
+    D, G = cfg.head_dim, cfg.n_kv_groups
     assert offsets == [("in_offset", f"position * {D}")] + [
-        ("out_offset", f"position * {D}")
+        ("out_offset", f"position * {G * D}")
     ] * (2 * cfg.n_layers)
     mhas = [s.op for s in t.steps if type(s.op) is MHA]
+    assert all(op.kv_interleaved for op in mhas)
     assert len(mhas) == cfg.n_layers
     assert all(op.bound_values == {"kv_valid": "position_p1"} for op in mhas)
     assert all(op.packed and op.kv_len == L for op in mhas)
@@ -528,7 +529,7 @@ def test_llama_prompt_traces_over_the_same_caches():
     assert K == {cfg.emb_dim, cfg.hidden_dim, cfg.n_heads * cfg.head_dim}
     # The per-call offsets: the chunk's rows of the table and of each cache,
     # and the last row.
-    C, D = cfg.prefill_chunk, cfg.head_dim
+    C, G, D = cfg.prefill_chunk, cfg.n_kv_groups, cfg.head_dim
     offsets = [
         (b.member.name, str(b.expression))
         for b in t.bindings
@@ -536,7 +537,7 @@ def test_llama_prompt_traces_over_the_same_caches():
     ]
     assert offsets == [
         ("in_offset", f"chunk * {C * D}"),
-        *[("out_offset", f"chunk * {C * D}")] * (2 * cfg.n_layers),
+        *[("out_offset", f"chunk * {C * G * D}")] * (2 * cfg.n_layers),
         ("in_offset", f"rows * {cfg.emb_dim} - {cfg.emb_dim}"),
     ]
     for op in t.operators:
@@ -647,10 +648,10 @@ def test_llama_names_only_the_tunables_that_matter(monkeypatch):
     """
     npu2 = from_name("npu2", n_cols=8)
     real, scaled = llama_1b(n_layers=1), small()
-    L, S = real.config.max_seq_len, scaled.config.max_seq_len
+    C, S = real.config.prefill_chunk, scaled.config.prefill_chunk
     settings = [
         (npu2, lambda: real.trace(**real.shapes(1))),
-        (npu2, lambda: real.trace(**real.shapes(L))),
+        (npu2, lambda: real.trace(**real.shapes(C))),
         (npu2, lambda: scaled.trace(**scaled.shapes(S))),
     ]
     _every_keyword_is_load_bearing(monkeypatch, settings)
