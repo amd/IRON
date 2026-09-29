@@ -18,10 +18,12 @@ def get_params():
     #   - number_of_pipelines determines how many AIE tile columns are used (col=0..N-1)
     return [
         # Standard MHA configuration (default suite)
-        pytest.param(16384, 64, 1, 8, 0),
+        pytest.param(16384, 64, 1, 8, 0, marks=pytest.mark.bench),
         # GQA configuration: 8 query heads with 2 KV heads (group factor = 4)
         # num_heads=8, num_KV_heads=2 satisfies: 8 % 2 == 0 and 2 < 8
-        pytest.param(16384, 64, 8, 8, 2, marks=pytest.mark.extensive),
+        pytest.param(
+            16384, 64, 8, 8, 2, marks=[pytest.mark.extensive, pytest.mark.bench]
+        ),
         # Multi-pipeline variant with 4 pipelines instead of 8
         # Uses fewer AIE columns; seq_len=16384, standard MHA (num_kv_heads=0)
         pytest.param(16384, 64, 1, 4, 0, marks=pytest.mark.extensive),

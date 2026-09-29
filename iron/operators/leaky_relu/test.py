@@ -9,16 +9,15 @@ from iron.operators.leaky_relu.reference import generate_inputs
 from iron.common.test_utils import (
     assert_matches_reference,
     make_channeled_unary_params,
+    suite_marks,
 )
 
 
 def get_params():
     # Full shape sweep at the default alpha.
     params = [
-        pytest.param(
-            il, nac, nc, ts, 0.01, marks=[] if not ext else [pytest.mark.extensive]
-        )
-        for il, nac, nc, ts, ext in make_channeled_unary_params(
+        pytest.param(il, nac, nc, ts, 0.01, marks=suite_marks(ext, bench))
+        for il, nac, nc, ts, ext, bench in make_channeled_unary_params(
             [1024, 2048, 4096, 8192], 4096, [1, 2]
         )
     ]

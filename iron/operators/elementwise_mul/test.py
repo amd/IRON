@@ -9,13 +9,14 @@ from iron.operators.elementwise_mul.reference import generate_inputs
 from iron.common.test_utils import (
     assert_matches_reference,
     make_binary_elementwise_params,
+    suite_marks,
 )
 
 
 def get_params():
     return [
-        pytest.param(il, nac, ts, marks=[] if not ext else [pytest.mark.extensive])
-        for il, nac, ts, ext in make_binary_elementwise_params(
+        pytest.param(il, nac, ts, marks=suite_marks(ext, bench))
+        for il, nac, ts, ext, bench in make_binary_elementwise_params(
             [1024, 2048, 4096, 8192], 4096
         )
     ]

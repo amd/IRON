@@ -50,6 +50,10 @@ def get_params():
                                 marks=marks,
                             )
                         )
+
+    # 2M elements, which runs well past the dispatch cost. angle_rows divides
+    # rows and the column count divides both.
+    params.append(pytest.param(4096, 512, 8, max_cols, 0, marks=[pytest.mark.bench]))
     return params
 
 

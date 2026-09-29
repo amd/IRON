@@ -7,7 +7,7 @@ import aie.utils as aie_utils
 
 from iron.operators.axpy.op import AXPY
 from iron.operators.axpy.reference import generate_inputs
-from iron.common.test_utils import assert_matches_reference
+from iron.common.test_utils import assert_matches_reference, BENCH_ELEMENTS, BENCH_TILE
 
 
 def get_params():
@@ -35,6 +35,15 @@ def get_params():
                         marks=marks,
                     )
                 )
+    params.append(
+        pytest.param(
+            BENCH_ELEMENTS,
+            max_aie_columns,
+            BENCH_TILE,
+            3.0,
+            marks=[pytest.mark.bench],
+        )
+    )
     return params
 
 

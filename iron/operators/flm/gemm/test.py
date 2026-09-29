@@ -114,11 +114,26 @@ def get_params():
         ]
     # fmt: on
 
+    # Shapes that run for milliseconds. The default suite's shapes finish near
+    # the dispatch cost, where the measurement carries no trend.
+    bench_shapes = (
+        {(1024, 2560, 10240), (2048, 2560, 10240)}
+        if dev_name == "npu2"
+        else {(1024, 2560, 2560), (2048, 2048, 1024)}
+    )
+
+    def marks_for(p, extensive):
+        marks = [pytest.mark.extensive] if extensive else []
+        M, K, N, epilogue, clamp, rounding = p
+        if (M, K, N) in bench_shapes and epilogue is NONE and clamp is None:
+            marks.append(pytest.mark.bench)
+        return marks
+
     params = []
     for p in regular_params:
-        params.append(pytest.param(*p))
+        params.append(pytest.param(*p, marks=marks_for(p, extensive=False)))
     for p in extensive_params:
-        params.append(pytest.param(*p, marks=[pytest.mark.extensive]))
+        params.append(pytest.param(*p, marks=marks_for(p, extensive=True)))
     return params
 
 

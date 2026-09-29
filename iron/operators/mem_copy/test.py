@@ -8,7 +8,7 @@ import aie.utils as aie_utils
 
 from iron.operators.mem_copy.op import MemCopy
 from iron.operators.mem_copy.reference import generate_inputs
-from iron.common.test_utils import assert_matches_reference
+from iron.common.test_utils import assert_matches_reference, BENCH_ELEMENTS, BENCH_TILE
 
 
 def get_params():
@@ -49,6 +49,16 @@ def get_params():
                                 )
                             )
 
+    params.append(
+        pytest.param(
+            BENCH_ELEMENTS,
+            max_columns * 2,
+            2,
+            False,
+            BENCH_TILE,
+            marks=[pytest.mark.bench],
+        )
+    )
     return params
 
 

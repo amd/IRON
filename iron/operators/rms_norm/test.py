@@ -8,7 +8,7 @@ import aie.utils as aie_utils
 
 from iron.operators.rms_norm.op import RMSNorm
 from iron.operators.rms_norm.reference import generate_inputs
-from iron.common.test_utils import assert_matches_reference
+from iron.common.test_utils import assert_matches_reference, BENCH_ELEMENTS, BENCH_TILE
 from iron.common.utils import get_shim_dma_limit
 
 
@@ -18,7 +18,7 @@ def get_params():
     shim_dma_limit = get_shim_dma_limit(dev)
     input_lengths = [1024, 2048, 4096, 8192]
 
-    params = []
+    candidates = []
     for weighted in [False, True]:
         for input_length in input_lengths:
             for num_aie_columns in range(1, max_aie_columns + 1):
@@ -49,18 +49,39 @@ def get_params():
                         is_regular = input_length == 2048
                         marks = [] if is_regular else [pytest.mark.extensive]
 
-                        params.append(
-                            pytest.param(
-                                input_length,
-                                num_aie_columns,
-                                num_channels_rms,
-                                tile_size,
-                                weighted,
-                                marks=marks,
-                            )
+                        candidates.append(
+                            {
+                                "values": (
+                                    input_length,
+                                    num_aie_columns,
+                                    num_channels_rms,
+                                    tile_size,
+                                    weighted,
+                                ),
+                                "marks": marks,
+                                "total_cores": total_cores,
+                                "regular": is_regular,
+                                "weighted": weighted,
+                            }
                         )
 
-    return params
+    # A shape large enough that the measurement is not the dispatch overhead.
+    # The widest column and channel count the sweep accepted is legal here too.
+    sweep = list(candidates)
+    for weighted in [False, True]:
+        legal = [c for c in sweep if c["weighted"] == weighted]
+        if not legal:
+            continue
+        widest = max(legal, key=lambda c: c["total_cores"])
+        _, cols, channels, _, _ = widest["values"]
+        candidates.append(
+            {
+                "values": (BENCH_ELEMENTS, cols, channels, BENCH_TILE, weighted),
+                "marks": [pytest.mark.bench],
+            }
+        )
+
+    return [pytest.param(*c["values"], marks=c["marks"]) for c in candidates]
 
 
 @pytest.mark.metrics(

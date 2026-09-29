@@ -33,7 +33,6 @@ from iron.operators.flm.gemm.design import (
     CT_OUT_LEN,
     Epilogue,
     K_TILE,
-    MIN_K,
     M_TILE,
     R,
     Rounding,
@@ -93,6 +92,9 @@ class GEMM(MLIROperator):
     # halves A fetches instead. __post_init__ resolves None per device and
     # shape; see the comment there and README.md.
     tile_n: int | None = None
+    # k tile. K must be a multiple of it, and it of the compute tile's k slice.
+    # 256 is what Gemma 4's per-layer-input projection needs, its K being 256.
+    k_tile: int = K_TILE
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). __post_init__ resolves None to whatever L1 affords.
     tile_ma: int | None = None
@@ -107,6 +109,7 @@ class GEMM(MLIROperator):
         **MLIROperator._name_aliases,
         "epilogue": "epi",
         "tile_n": "tn",
+        "k_tile": "kt",
         "tile_ma": "ma",
         "m_chunk": "mc",
         "rounding": "rnd",
@@ -124,7 +127,7 @@ class GEMM(MLIROperator):
             # ~9% and n=64 by ~20% at K >= 1024. NPU1 has half the columns and
             # a quarter of the per-tile bf16 throughput, so it stays
             # compute-bound and n=64 wins at every K by 1.21-1.38x.
-            single_k_iter = self.K // K_TILE <= 1
+            single_k_iter = self.K // self.k_tile <= 1
             self.tile_n = 128 if (dev.arch == AIEArch.AIE2p and single_k_iter) else 64
         elif self.tile_n not in CT_MAX_K_FOR_N:
             raise ValueError(
@@ -154,9 +157,18 @@ class GEMM(MLIROperator):
         # N only needs to tile to N_TILE: a trailing group of fewer than
         # COLS column-blocks is handled by giving the columns different trip
         # counts. See design.py.
+        # B_ITERS = k_tile // ct_max_k counts the B chunks one k step
+        # consumes, so a k tile the compute tile's slice does not divide is
+        # inexpressible.
+        ct_max_k = CT_MAX_K_FOR_N[self.tile_n]
+        if self.k_tile % ct_max_k != 0:
+            raise ValueError(
+                f"k_tile ({self.k_tile}) must be a multiple of ct_max_k "
+                f"({ct_max_k}) for tile_n={self.tile_n}"
+            )
         for name, value, unit in (
             ("M", self.M, M_TILE * compute_rows(dev)),
-            ("K", self.K, MIN_K),
+            ("K", self.K, self.k_tile),
             ("N", self.N, self.tile_n),
         ):
             if value % unit != 0:
@@ -218,7 +230,7 @@ class GEMM(MLIROperator):
         """
         dev = aie_utils.get_current_device().resolve().name
         return (
-            f"FLM_GEMM_tn{self.tile_n}_ck{CT_MAX_K_FOR_N[self.tile_n]}"
+            f"FLM_GEMM_tn{self.tile_n}_kt{self.k_tile}_ck{CT_MAX_K_FOR_N[self.tile_n]}"
             f"_ma{self.tile_ma}_mc{self.m_chunk}"
             f"_em{self._epilogue_mask:x}_{self.rounding}_{dev}"
         )
@@ -274,7 +286,7 @@ class GEMM(MLIROperator):
         wiping the build dir.
         """
         return (
-            f"mm_fused_{M_TILE}x{K_TILE}x{self.tile_n}"
+            f"mm_fused_{M_TILE}x{self.k_tile}x{self.tile_n}"
             f"_ck{CT_MAX_K_FOR_N[self.tile_n]}"
             f"_r{R}t{T}_ma{self.tile_ma}_{self.rounding}"
             f"_em{self._epilogue_mask:x}.o"
@@ -312,7 +324,7 @@ class GEMM(MLIROperator):
         # inexpressible (see design.py), and this module must build.
         return (
             M_TILE * compute_rows(dev) * self.m_chunk,
-            MIN_K,
+            self.k_tile,
             self.tile_n * dev.cols,
         )
 
@@ -329,6 +341,7 @@ class GEMM(MLIROperator):
                     "K": K,
                     "N": N,
                     "tile_n": self.tile_n,
+                    "k_tile": self.k_tile,
                     "tile_ma": self.tile_ma,
                     "m_chunk": self.m_chunk,
                     "epilogue": epilogue,
@@ -391,7 +404,7 @@ class GEMM(MLIROperator):
         flags = [
             # Tile geometry and register tiling, for the mmul.
             f"-DMM_FUSED_TILE_M={M_TILE}",
-            f"-DMM_FUSED_TILE_K={K_TILE}",
+            f"-DMM_FUSED_TILE_K={self.k_tile}",
             f"-DMM_FUSED_TILE_N={self.tile_n}",
             f"-DMM_FUSED_TILE_MA={self.tile_ma}",
             f"-DMM_FUSED_R={R}",
@@ -450,7 +463,7 @@ class GEMM(MLIROperator):
         """
         return pack_b(
             B,
-            k_tile=K_TILE,
+            k_tile=self.k_tile,
             n_tile=self.tile_n,
             s=S,
             t=T,

@@ -67,6 +67,14 @@ def get_params():
         pytest.param(
             _kv_slot(2048, 1000), id="kv_llama_full", marks=[pytest.mark.extensive]
         ),
+        # 4M elements, which runs well past the dispatch cost. Every KV-cache
+        # shape moves a single token and cannot. transfer_size bounds the
+        # ObjectFifo element, which otherwise has to hold the whole chunk.
+        pytest.param(
+            _flat(1 << 22, num_aie_channels=4, transfer_size=4096),
+            id="bench_flat_4mi",
+            marks=[pytest.mark.bench],
+        ),
     ]
 
 

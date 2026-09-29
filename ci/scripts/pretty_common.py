@@ -6,7 +6,43 @@
 """Shared helpers for the pretty_* CI report scripts."""
 
 import os
-from typing import Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+# Columns that identify a row rather than measure it.
+NON_METRIC_COLUMNS = {"Commit", "Date", "Test Path", "Test", "Checks", "Bench"}
+
+# Every metric is written out as mean, median, min, max and stddev. Reports and
+# charts track the mean.
+MEAN_SUFFIX = " (mean)"
+
+# Rows written before the 'Test Path' column existed name no operator.
+UNKNOWN_OPERATOR = "(unknown)"
+
+# The results branch stores one directory per architecture and suite. The
+# workflow that benchmarks each one names its artifact after the pair.
+ARCHS = ["krackan", "phoenix"]
+SUITES = ["small", "extensive", "examples"]
+
+# What each suite holds, for a reader of the report.
+SUITE_LABELS = {
+    "small": "Operators",
+    "extensive": "Operators, extensive",
+    "examples": "Applications",
+}
+
+# A pull request runs the default and the example suites. The extensive suite
+# runs on a push to a trunk branch, so no pull request reports it.
+PR_SUITES = ["small", "examples"]
+
+
+def results_dir(arch: str, suite: str) -> str:
+    """Name the results branch directory holding one suite's CSVs."""
+    return f"{arch}/{suite}"
+
+
+def suite_label(arch: str, suite: str) -> str:
+    """Name a suite for a reader."""
+    return f"{arch.capitalize()} - {SUITE_LABELS.get(suite, suite)}"
 
 
 def split_test_path(test_path: str) -> Tuple[str, str]:
@@ -59,3 +95,70 @@ def status_emoji(passed: int, total: int, partial: bool = True) -> str:
     if passed == 0:
         return "❌"
     return "🟠" if partial else "❌"
+
+
+def operator_name(test_path: str) -> str:
+    """Name the operator a 'Test Path' belongs to.
+
+    'iron/operators/flm/gemm/test.py::test_gemm' names 'flm/gemm', and
+    'iron/applications/llama_3.2_1b/test.py::test_llama' names 'llama_3.2_1b'.
+    """
+    directory, _ = split_test_path(test_path)
+    for prefix in ("iron/operators/", "iron/applications/"):
+        if directory.startswith(prefix):
+            return directory[len(prefix) :] or UNKNOWN_OPERATOR
+    return UNKNOWN_OPERATOR
+
+
+def try_parse_float(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text == "" or text.lower() in {"n/a", "na", "none"}:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def row_key(row: Dict[str, str]) -> Tuple[str, str]:
+    """Identify the parametrization a row measures."""
+    return ((row.get("Test Path") or "").strip(), (row.get("Test") or "").strip())
+
+
+def select_bench_rows(rows: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Keep the rows of the parametrizations that carry the 'bench' marker.
+
+    A parametrization qualifies when any one of its rows says so, which gives a
+    benched parametrization the history it accumulated before the column
+    existed.
+    """
+    rows = list(rows)
+    benched = {
+        row_key(row)
+        for row in rows
+        if (row.get("Bench") or "").strip().lower() == "yes"
+    }
+    return [row for row in rows if row_key(row) in benched]
+
+
+def metric_label(column: str) -> Optional[str]:
+    """Name the metric a column tracks, or None if the column tracks none."""
+    if column in NON_METRIC_COLUMNS or not column.endswith(MEAN_SUFFIX):
+        return None
+    return column[: -len(MEAN_SUFFIX)]
+
+
+def tracked_metrics(
+    rows: Iterable[Dict[str, str]], field_order: Iterable[str]
+) -> List[Tuple[str, str]]:
+    """List the (column, metric) pairs holding a number for one of `rows`."""
+    rows = list(rows)
+    pairs = ((column, metric_label(column)) for column in field_order)
+    return [
+        (column, metric)
+        for column, metric in pairs
+        if metric is not None
+        and any(try_parse_float(row.get(column)) is not None for row in rows)
+    ]

@@ -28,7 +28,6 @@ runs:
       id: merge_results
       env:
         HOME: /workspace
-        PR_NUMBER: ${{ github.event.number }}
       shell: bash
       run: |
         export DATE=$(printf '%(%Y_%m_%d_%H_%M_%S)T')
@@ -52,9 +51,6 @@ runs:
         ./ci/scripts/pretty_trends.py ${RESULTS_DIR}/last_two.csv -o ${RESULTS_DIR}/trends.md
         rm ${RESULTS_DIR}/last_two.csv
 
-        echo ${PR_NUMBER} > ${RESULTS_DIR}/pr_number
-        echo ${COMMIT_SHA} > ${RESULTS_DIR}/commit_sha
-        echo ${DATE} > ${RESULTS_DIR}/date
         echo "commit_sha=${COMMIT_SHA}" >> $GITHUB_OUTPUT
         echo "date=${DATE}" >> $GITHUB_OUTPUT
         echo "results_dir=${RESULTS_DIR}" >> $GITHUB_OUTPUT
