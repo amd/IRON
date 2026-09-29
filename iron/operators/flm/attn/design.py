@@ -30,7 +30,6 @@ from aie.iron import (
     Bd,
     Buffer,
     DmaChannel,
-    Kernel,
     Lock,
     ObjectFifo,
     Program,
@@ -39,9 +38,12 @@ from aie.iron import (
     TileDma,
     Worker,
 )
+from aie.iron import kernels
 from aie.iron.controlflow import range_
 from aie.iron.dataflow import Flow
 from aie.iron.device import AnyComputeTile, Tile
+
+from iron.common.device_utils import call_factory
 
 DH = 512  # head dim
 LQ = 8  # query rows per core
@@ -51,8 +53,6 @@ LQ_MT = 32  # query rows per memtile fifo half
 LQ_CT = 16  # query rows per core's q object, two cores' worth
 NUM_CU = 2  # column groups
 DATA_PER_ROUND = LK * 16  # query rows per round
-
-KERNEL_OBJECT = "attn_prefill.o"
 
 # The buffer addresses of the FastFlowLM overlay this design reproduces. The
 # stack occupies [0, STACK_SIZE) and grows up, so in_1, the lowest buffer, caps
@@ -70,8 +70,19 @@ L1 = {
 }
 STACK_SIZE = 3 * 1024
 
-# Locks 2 and 3 of each core guard k and v. The kernel names them by number.
+# Locks 2 and 3 of each core guard k and v.
 IN_PROD_LOCK, IN_CONS_LOCK = 2, 3
+
+
+def attn_kernel(device=None):
+    """The attn_prefill build this design's cores link."""
+    return call_factory(
+        kernels.attn_prefill,
+        device=device,
+        in_prod_lock=IN_PROD_LOCK,
+        in_cons_lock=IN_CONS_LOCK,
+    )
+
 
 _NO_UNROLL = "#llvm.loop_annotation<unroll = <disable = true>>"
 
@@ -136,8 +147,10 @@ def attn(dev, max_context, num_heads, num_kv_heads, trace_size=0):
     odims = [(LQ // 8, 8 * DH), (DH // 8, 8), (8, DH), (8, 1)]
     kvdims = [(LK_MT // LK, LK * DH), (LK, 8), (64, 64), (8, 1)]
 
+    kernel_object = attn_kernel(dev).object_file
+
     def k(name, arg_types):
-        return Kernel(name, KERNEL_OBJECT, arg_types)
+        return kernel_object.bind(name, arg_types)
 
     k_rounds = k("attn_rounds", [L_ty, L_ty, L_ty])
     k_round_begin = k("attn_round_begin", [mv_ty, mv_ty, cv_ty, cv_ty, y_ty])

@@ -15,10 +15,9 @@ from iron.common import (
     KernelObjectArtifact,
     MLIROperator,
     PythonGeneratedMLIRArtifact,
-    SourceArtifact,
 )
 
-from iron.operators.flm.attn.design import DH, KERNEL_OBJECT, NUM_CU
+from iron.operators.flm.attn.design import DH, NUM_CU, attn_kernel
 
 
 @dataclass
@@ -85,17 +84,7 @@ class PrefillAttention(MLIROperator):
         )
 
     def get_kernel_artifacts(self):
-        return [
-            KernelObjectArtifact(
-                KERNEL_OBJECT,
-                dependencies=[
-                    SourceArtifact(
-                        self.context.kernels_dir / "transformer" / "attn_prefill.cc"
-                    )
-                ],
-                extra_flags=["-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16"],
-            )
-        ]
+        return [KernelObjectArtifact.from_extern(attn_kernel())]
 
     def get_arg_spec(self):
         # The order the design's runtime sequence takes: o, q, kv.
