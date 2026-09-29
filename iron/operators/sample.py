@@ -35,7 +35,7 @@ from aie.iron.kernels import sample as kernels
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import In, InOut, Operator, Out, Scratchpad, auto, param
+from iron.common import In, Incompatible, InOut, Operator, Out, Scratchpad, auto, param
 from iron.common.testing import Case, Testing
 
 # A select core's logits object: no more than this, and even (4-byte DMA).
@@ -138,9 +138,18 @@ class Sample(Operator):
         return dataclasses.replace(self, chunk=chunk)
 
     def compatible(self) -> None:
-        # The factories check the rest: chunk divides the slice, k_max fits.
-        self._select()
-        self._combine()
+        # The factories' own checks: chunk divides the slice, k_max fits.
+        # Not the factories: those declare their kernels, and a kernel
+        # declared outside a build stays registered past it.
+        try:
+            kernels.check_select(
+                slice_size=self.slice_size, chunk=self.chunk, k_max=self.k_max
+            )
+            kernels.check_combine(
+                columns=self.cores, slice_size=self.slice_size, k_max=self.k_max
+            )
+        except ValueError as e:
+            raise Incompatible(str(e)) from e
 
     def _select(self):
         return kernels.sample_select(
