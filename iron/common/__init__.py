@@ -8,6 +8,7 @@ from .base import (
     MLIROperator,
     CompositeOperator,
     AIERuntimeArgSpec,
+    DispatchCallable,
 )
 from .operator_bases import ChanneledUnaryOperator, BinaryElementwiseOperator
 from .context import AIEContext
@@ -18,6 +19,7 @@ from .compilation import (
     PythonGeneratedMLIRArtifact,
     RemoteFileArtifact,
     InstsBinArtifact,
+    DispatchLibArtifact,
     DesignGenerator,
 )
 from .layout import Stride, TiledStride, TiledStridedLayout, tiled_2d

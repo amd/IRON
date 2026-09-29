@@ -14,6 +14,7 @@ from .base import (
     FullElfArtifact,
     XclbinArtifact,
     InstsBinArtifact,
+    DispatchLibArtifact,
     KernelObjectArtifact,
     KernelArchiveArtifact,
     PythonGeneratedMLIRArtifact,
