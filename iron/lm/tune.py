@@ -98,7 +98,9 @@ def measure(
     # at the rows generation writes, not at random words.
     [k_max] = {s.op.k_max for s in traced.steps if isinstance(s.op, Sample)}
     _, draws = traced.states[id(model.draws)]
-    contents = {draws.name: sample.rows(model.config.max_seq_len, k_max)}
+    contents: dict[str, np.ndarray] = {
+        draws.name: sample.rows(model.config.max_seq_len, k_max)
+    }
     keys = [cost_key(s.op) for s in traced.steps]
     first: dict[str, Operator] = {}
     for key, step in zip(keys, traced.steps):

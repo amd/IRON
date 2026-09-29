@@ -386,12 +386,14 @@ class Graph:
             aie_utils.set_current_device(dev)
         traced = self.trace(**shapes)
         tuning = None
-        groups: AdjacentPacking | list[list[Operator]] | None = coresident
+        groups: AdjacentPacking | list[list[Operator]] | None
         if isinstance(coresident, JointNarrowing):
             tuning = coresident.tune(
                 traced, aie_utils.ensure_current_device(required=True)
             )
             traced, groups = tuning.apply(traced)
+        else:
+            groups = coresident
         chosen = plan(
             aie_utils.ensure_current_device(required=True), traced, boundaries, image
         )
@@ -411,6 +413,8 @@ class Graph:
                 f"dispatches {chosen.dispatch!r}"
             )
         emit = None
+        # The words an Emit feeding its own version was sized for.
+        sized: list[Word] | None = None
         loops = feeds is not None or not traced.inputs
         if chosen.image == ELF and traced.carry and loops:
             if feeds is None:
@@ -441,11 +445,11 @@ class Graph:
             coresident=groups,
             tuning=tuning,
         )
-        if emit is not None and feeds is None and len(version.parameters) != slots:
+        if sized is not None and len(version.parameters) != len(sized):
             read = {p.name for p in version.parameters}
             raise NotImplementedError(
                 f"{self.name}: the image reads {len(version.parameters)} of the "
-                f"{slots} words its Emit was sized for; a word it reads only "
+                f"{len(sized)} words its Emit was sized for; a word it reads only "
                 f"through a derivation cannot be fed yet (sized for but not "
                 f"read: {sorted(w.symbol for w in sized if w.symbol not in read)})"
             )
@@ -482,7 +486,7 @@ class Graph:
             version = self.compile(**shapes)  # pyright: ignore[reportArgumentType]
         return version(*given.values(), **values)
 
-    def reference(self, *tensors, **values):
+    def reference(self, *tensors, **values) -> Any:
         """:meth:`body` on host tensors, each operator run through its ``reference()``.
 
         An optional input left out, or passed as None, is None in ``body``.
@@ -546,7 +550,7 @@ class CompiledGraph:
         # Equal design keys are one build (two projections on one array).
         # compile() builds the image; the runtime that loads it is made on
         # first use, so a host without an NPU can still compile.
-        placement = (
+        placement: dict[str, Any] = (
             {} if arena is None else dict(arena=arena.plan, residents=traced.residents)
         )
         if coresident:

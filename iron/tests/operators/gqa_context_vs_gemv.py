@@ -52,9 +52,8 @@ def _weights(rng, valid: int) -> np.ndarray:
 
 @pytest.mark.supported_devices("npu2")
 def test_gqa_context_is_the_repeat_transpose_gemv_bit_for_bit(npu_runtime):
-    shapes = dict(values=(G, L, D), weights=(H, L))
-    before = Before().compile(**shapes)
-    after = After().compile(**shapes)
+    before = Before().compile(values=(G, L, D), weights=(H, L))
+    after = After().compile(values=(G, L, D), weights=(H, L))
     rng = np.random.default_rng(7)
     failures = []
     for valid in (1, 2, 37, 64, 65, 500, 1999, L):

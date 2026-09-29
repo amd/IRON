@@ -46,17 +46,19 @@ class FusedImage:
                 f"dispatch='fused' needs a full ELF, which {dev.name} "
                 f"({dev.arch}) does not dispatch"
             )
-        if self.design is None:
+        design = self.design
+        if design is None:
             self.fusion = Fusion(seq)
             flags = [*self.FLAGS, *([self.TRACE_FLAG] if seq.traced else [])]
-            self.design = CompilableDesign(
+            design = CompilableDesign(
                 self.fusion.text,
                 key=self.fusion.identity,
                 full_elf=True,
                 aiecc_flags=[*flags, *seq.extra_flags],
             )
-            self.design.compile()
-        entry = self.design.get_cache_entry()
+            design.compile()
+            self.design = design
+        entry = design.get_cache_entry()
         assert entry is not None and entry.elf is not None, "compile() built it"
         return Path(entry.elf)
 

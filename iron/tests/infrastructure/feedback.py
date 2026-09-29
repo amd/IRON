@@ -104,6 +104,11 @@ def _row(run):
     return run.get_buffer("row").numpy()[:ROW]
 
 
+def _fed(run):
+    assert run.feedback_buffer is not None
+    return run.feedback_buffer.numpy().view(np.int32)
+
+
 @pytest.mark.supported_devices("npu2")
 def test_feedback_into_plain_buffers(npu_runtime):
     """Unbound, the argument is the callable's own buffer; bound, the caller's."""
@@ -115,7 +120,7 @@ def test_feedback_into_plain_buffers(npu_runtime):
     run.write_values({offset: np.int32(3 * ROW)})
     run()
     assert np.array_equal(_row(run), table[3])
-    fed = run.feedback_buffer.numpy().view(np.int32)
+    fed = _fed(run)
     assert fed.tolist() == [successor[3] * ROW, 0], fed
 
     mine = XRTTensor((2,), dtype=np.int32)
@@ -128,7 +133,7 @@ def test_feedback_into_plain_buffers(npu_runtime):
     mine.device = "npu"
     assert mine.numpy().tolist() == [successor[6] * ROW, 0]
     # The callable's own buffer was not written by the second run.
-    assert run.feedback_buffer.numpy().view(np.int32)[0] == successor[3] * ROW
+    assert _fed(run)[0] == successor[3] * ROW
 
 
 @pytest.mark.supported_devices("npu2")
@@ -179,7 +184,7 @@ def test_feedback_chain_queued(npu_runtime):
     # The runs share the row buffer, so it holds the last one's; the last
     # drains into the callable's own feedback buffer.
     assert np.array_equal(_row(run), table[rows[-1]])
-    fed = run.feedback_buffer.numpy().view(np.int32)
+    fed = _fed(run)
     assert fed.tolist() == [successor[rows[-1]] * ROW, 0]
 
 
@@ -207,9 +212,8 @@ def test_feedback_with_trace(npu_runtime):
     first.write_values({offset: np.int32(1 * ROW)})
     run(first, second)
     assert np.array_equal(_row(run), table[successor[1]])
-    assert run.feedback_buffer.numpy().view(np.int32)[0] == (
-        successor[successor[1]] * ROW
-    )
+    assert _fed(run)[0] == (successor[successor[1]] * ROW)
+    assert run.trace_buffer is not None
     assert run.trace_buffer.numpy().view(np.uint32).any(), "no trace data"
 
 

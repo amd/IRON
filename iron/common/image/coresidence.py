@@ -202,8 +202,9 @@ def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceO
 
     for member, device in members.items():
         for op in _body(device):
-            symbol = _symbol(op)
             if _is_kernel_declaration(op):
+                symbol = _symbol(op)
+                assert symbol is not None, "a func.func has a symbol"
                 # Mid-merge the module need not verify, and a printer that
                 # verifies first falls back to the generic form.
                 text = op.operation.get_asm(assume_verified=True)

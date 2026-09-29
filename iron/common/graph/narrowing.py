@@ -96,10 +96,14 @@ class Variant:
     def of(cls, op: Operator, dev) -> Variant:
         resolved = op.resolved(dev)
         streams = resolved.streams.values()
+        widths: list[tuple[str, int]] = []
+        for name, width in resolved.widths.items():
+            assert width is not None, "a resolved operator sets its widths"
+            widths.append((name, width))
         return cls(
             op=op,
             resolved=resolved,
-            widths=tuple(resolved.widths.items()),
+            widths=tuple(widths),
             key=cost_key(resolved),
             mm2s=sum(s.count for s in streams if s.direction == "in"),
             s2mm=sum(s.count for s in streams if s.direction == "out"),
@@ -630,7 +634,7 @@ class JointNarrowing:
                 reach = {
                     u
                     for u in neighbours[w]
-                    if u > members[0] and measured[u] and u not in banned
+                    if u > min(members) and measured[u] and u not in banned
                 } - set(grown)
                 yield from grow(grown, frontier | reach, banned)
 

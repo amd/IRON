@@ -156,12 +156,13 @@ def test_policy_finds_the_manual_pack():
 def test_policy_declines_what_does_not_fit():
     fused = Fusion(_sequence(8, lambda add, silu: []))
     text = fused.text()
-    bodies = {
-        name: re.search(
+    bodies = {}
+    for name in fused.designs:
+        body = re.search(
             rf"^  aie\.device\(\w+\) @{name} \{{$.*?^  \}}$", text, re.M | re.S
-        ).group(0)
-        for name in fused.designs
-    }
+        )
+        assert body is not None, f"no device @{name}"
+        bodies[name] = body.group(0)
     for body in bodies.values():
         assert fits({"alone": body}) is None
     packing, stopped = AdjacentPacking().pack([n for n, *_ in fused.runlist], bodies)
@@ -217,6 +218,7 @@ def test_packing_is_in_the_fused_identity():
     # merged or chosen rebuilds what was packed; and the packing itself is
     # part of the identity.
     for module in (fusion, coresidence):
+        assert module.__file__ is not None
         path = Path(module.__file__).resolve()
         assert any(path.is_relative_to(root) for root in OperatorDesign.TREES)
     temporal = Fusion(_sequence(4, lambda add, silu: []))
@@ -253,6 +255,7 @@ def test_pack_compiles_to_a_full_elf():
     seq = _sequence(4, lambda add, silu: [[add, silu]])
     seq.compile()
     designs = list(Fusion(seq).designs)
+    assert seq.elf_path is not None
     config = json.loads((seq.elf_path.parent / "full_elf_config.json").read_text())
     instances = [
         instance["id"]
