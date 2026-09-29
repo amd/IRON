@@ -3,9 +3,7 @@
 
 """CPU reference for :class:`iron.operators.flm.LMHead`, in float64.
 
-The device normalizes the token in bfloat16, narrows each 32-column dot
-product to bfloat16 and applies the softcap in bfloat16, so the two agree to a
-tolerance, not bit for bit.
+README.md states the tolerance between the device and this reference.
 """
 
 import numpy as np
@@ -13,19 +11,19 @@ import numpy as np
 from iron.operators.flm.lm_head.design import BLOCK_BYTES, GROUP, K_TILE, M_TILE
 
 
-def _bf16_to_f64(words):
+def _bf16_to_f32(words):
     return (np.asarray(words, np.uint16).astype(np.uint32) << 16).view(np.float32)
 
 
 def dequantize_block(block):
     """One q4nx block to its (M_TILE, K_TILE) weights.
 
-    Bf16 scales, then bf16 minima, both indexed ``[k // GROUP, m]``, then 4-bit
-    codes, low nibble first, indexed ``[m // 16, k // 32, k % 32, m % 16]``.
-    A weight is ``min + scale * code``.
+    A block holds bf16 scales and then bf16 minima, both indexed
+    ``[k // GROUP, m]``. The 4-bit codes follow, low nibble first, indexed
+    ``[m // 16, k // 32, k % 32, m % 16]``. A weight is ``min + scale * code``.
     """
     groups = K_TILE // GROUP
-    params = _bf16_to_f64(np.frombuffer(block[: 4 * groups * M_TILE], "<u2"))
+    params = _bf16_to_f32(np.frombuffer(block[: 4 * groups * M_TILE], "<u2"))
     scales, mins = params.reshape(2, groups, M_TILE).astype(np.float64)
     packed = np.frombuffer(block[4 * groups * M_TILE :], np.uint8)
     codes = np.empty(M_TILE * K_TILE, np.float64)

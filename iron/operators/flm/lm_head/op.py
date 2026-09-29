@@ -7,7 +7,6 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
-from aie.dialects._aie_enum_gen import AIEArch
 
 from iron.common import (
     AIERuntimeArgSpec,
@@ -17,10 +16,9 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
 )
 from iron.operators.flm.lm_head.design import (
-    K_TILE,
+    check_shape,
     lm_head_kernel,
     packed_bytes,
-    vocab_per_round,
 )
 
 
@@ -29,8 +27,8 @@ class LMHead(MLIROperator):
     """Softcapped logits from a q4nx vocabulary, with the RMS norm folded in.
 
     ``dim`` in-features, ``vocab`` out-features, ``softcap`` the tanh bound.
-    X carries the token followed by its RMS weight; W is the packed q4nx
-    vocabulary; Y is the logits.
+    X holds the token followed by its RMS weight. W holds the q4nx vocabulary.
+    Y receives the logits.
     """
 
     dim: int
@@ -39,24 +37,14 @@ class LMHead(MLIROperator):
     context: object = field(default=None, repr=False)
 
     def __post_init__(self):
-        dev = aie_utils.get_current_device()
-        if dev.arch != AIEArch.AIE2p:
-            raise NotImplementedError("the q4nx_lm_head kernel is AIE2P only")
-        if self.dim % K_TILE:
-            raise ValueError(f"dim ({self.dim}) must be a multiple of {K_TILE}")
-        per_round = vocab_per_round(dev)
-        if self.vocab % per_round:
-            raise ValueError(
-                f"vocab ({self.vocab}) must be a multiple of {per_round}, "
-                "the out-features one round produces"
-            )
+        check_shape(aie_utils.get_current_device(), self.dim, self.vocab)
         MLIROperator.__init__(self, context=self.context)
 
     @property
     def name(self) -> str:
         dev = aie_utils.get_current_device().resolve().name
-        # The softcap reaches only the runtime sequence, but the sequence is
-        # part of this operator's instruction stream, so it keys the cache too.
+        # The name keys the build cache. The softcap changes the runtime
+        # sequence, so the name includes it.
         cap = f"{float(self.softcap):g}".replace(".", "p").replace("-", "n")
         return f"FLM_LMHead_d{self.dim}_v{self.vocab}_c{cap}_{dev}"
 
@@ -83,7 +71,7 @@ class LMHead(MLIROperator):
         return [KernelObjectArtifact.from_extern(lm_head_kernel(self.dim))]
 
     def get_arg_spec(self):
-        # The order the design's runtime sequence takes: y, w, x.
+        # The runtime sequence's argument order: y, w, x.
         return [
             AIERuntimeArgSpec("out", (self.vocab,), dtype=bfloat16),
             AIERuntimeArgSpec(
