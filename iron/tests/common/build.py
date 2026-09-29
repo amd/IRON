@@ -508,7 +508,8 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
         == 64
     )
     assert (
-        op.config_name == f"FLM_GEMM_tn64_ck128_ma{op.tile_ma}_mc1_emf_conv_even_npu2"
+        op.config_name
+        == f"FLM_GEMM_tn64_kt512_ck128_ma{op.tile_ma}_mc1_emf_conv_even_npu2"
     )
     assert op.name == op.config_name + "_M512_K1024_N1024"
     a, b, c = op.buffers
