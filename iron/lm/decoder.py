@@ -308,7 +308,8 @@ class CausalLM(iron.Graph):
     @property
     def full_elf(self) -> bool:
         """Whether the model runs as full ELFs: a prompt version beside the
-        decode step, and the device loop (:meth:`generate`)."""
+        decode step, and the device loop (:meth:`generate`).
+        """
         if self._decode is None:
             raise RuntimeError(f"{type(self).__name__}: load() first")
         return self._prompt is not None
@@ -316,7 +317,8 @@ class CausalLM(iron.Graph):
     @property
     def tuning(self) -> Tuning | None:
         """What the ``tuner`` given to :meth:`load` chose for the decode
-        step; None without one."""
+        step; None without one.
+        """
         if self._decode is None:
             raise RuntimeError(f"{type(self).__name__}: load() first")
         return self._decode.tuning

@@ -156,7 +156,8 @@ class SequenceCallable:
 
     def get_storage(self, buffer_name):
         """A flat view the host can synchronize that starts with the buffer:
-        here each buffer is a tensor of its own, so the buffer itself."""
+        here each buffer is a tensor of its own, so the buffer itself.
+        """
         return self.get_buffer(buffer_name)
 
     def _iter_steps(self):
@@ -233,7 +234,8 @@ class FullELFRun:
 
     def bind_feedback(self, bo: pyxrt.bo) -> None:
         """Run with ``bo`` as the feedback argument -- the callable's own
-        buffer until then. Typically another run's :meth:`scratchpad_alias`."""
+        buffer until then. Typically another run's :meth:`scratchpad_alias`.
+        """
         if self._feedback_arg is None:
             raise ValueError(f"{self.name} declares no feedback argument")
         self.bind(self._feedback_arg, bo)
@@ -272,7 +274,8 @@ class FullELFRun:
 
     def read_value(self, symbol: str) -> int:
         """The value ``symbol`` holds in the scratchpad now, as the device
-        left it (a feedback transfer into :meth:`scratchpad_alias`)."""
+        left it (a feedback transfer into :meth:`scratchpad_alias`).
+        """
         params = self.params
         if params is None:
             raise ValueError(f"{self.name} was built without per-call values")
@@ -371,7 +374,8 @@ class SequenceFullELFCallable(SequenceCallable):
     @property
     def run(self) -> FullELFRun:
         """The run a call dispatches: the handle's own, so what is written to
-        its scratchpad stays there from call to call."""
+        its scratchpad stays there from call to call.
+        """
         handle = self.handle
         if self._run is None:
             self._run = self._make_run(handle.run)
@@ -529,7 +533,8 @@ class SequenceFullELFCallable(SequenceCallable):
 
     def start(self, *runs: FullELFRun) -> None:
         """Push what the host wrote, and start ``runs`` without waiting; the
-        caller waits on each (:meth:`wait`) and reads what it needs."""
+        caller waits on each (:meth:`wait`) and reads what it needs.
+        """
         self._sync_inputs()
         for run in runs:
             run.start()
@@ -548,7 +553,8 @@ class SequenceFullELFCallable(SequenceCallable):
 
     def __call__(self, *runs: FullELFRun):
         """Dispatch :attr:`run`, or ``runs`` in order. Every run is started
-        before any is waited on, so they queue back to back on the device."""
+        before any is waited on, so they queue back to back on the device.
+        """
         runs = runs or (self.run,)
         self._sync_inputs()
         t0 = time.perf_counter()

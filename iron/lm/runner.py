@@ -66,7 +66,8 @@ class Runner:
         """The model compiled and loaded, weights uploaded. With a
         ``cost_table`` (:mod:`.tune`) its decode step's designs are narrowed
         and packed by it; ``boundaries`` are its decode step's
-        (:meth:`~.decoder.CausalLM.load`)."""
+        (:meth:`~.decoder.CausalLM.load`).
+        """
         model = self.model(self.config, self.weights)
         tuner = None if cost_table is None else JointNarrowing(CostTable(cost_table))
         return model.load(self.checkpoint.release, tuner, boundaries)

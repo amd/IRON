@@ -42,7 +42,8 @@ class ArgumentSizes(NamedTuple):
 
     def arguments(self) -> dict[str, int]:
         """The arguments the runtime sequence takes: size by kind, in order, so
-        a kind's argument index is its position."""
+        a kind's argument index is its position.
+        """
         sizes = self._asdict()
         if self.feedback is None:
             del sizes["feedback"]
@@ -51,7 +52,8 @@ class ArgumentSizes(NamedTuple):
 
 def _memref_bytes(memref_type: ir.MemRefType) -> int:
     """Bytes a runtime-sequence argument of ``memref_type`` spans (a block-float
-    element counts its packed block)."""
+    element counts its packed block).
+    """
     dtype = mlir_type_to_np_dtype(memref_type.element_type)
     if dtype is None:
         raise TypeError(f"no host dtype for the elements of {memref_type}")
@@ -61,7 +63,8 @@ def _memref_bytes(memref_type: ir.MemRefType) -> int:
 class GeneratedDesign(NamedTuple):
     """A design's module as a fusion takes it apart: its one device, and the
     scratchpad parameters it declares at module scope (symbol -> type). The
-    module is held so that the ops taken from it stay alive."""
+    module is held so that the ops taken from it stay alive.
+    """
 
     module: ir.Module
     device: Any  # aie.DeviceOp
@@ -107,7 +110,8 @@ def generate(design: OperatorDesign) -> GeneratedDesign:
 
 def parameters_preamble(parameters: Mapping[str, ir.Type]) -> str:
     """Module-scope declarations of ``parameters``, as text a device's text
-    is parsed after."""
+    is parsed after.
+    """
     return "\n".join(
         f"  aiex.scratchpad_parameter @{name} : {param_type}"
         for name, param_type in parameters.items()

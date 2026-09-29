@@ -52,7 +52,8 @@ def _symbols(op):
 
 def _check_gathers(run, gather, table):
     """Gather rows of ``table`` (what the device holds) into slots, one call
-    at a time, checking every slot each time."""
+    at a time, checking every slot each time.
+    """
     symbols = _symbols(gather)
     rows = run.get_buffer("rows")
     rows.numpy_view()[:] = -1
@@ -111,7 +112,8 @@ def test_int32_step_at_nonzero_offsets(npu_runtime):
 @pytest.mark.supported_devices("npu2")
 def test_int32_slice_at_word_offset(npu_runtime):
     """A slice starting 36 bytes into its parent: a whole number of int32
-    words, and not on the 64-byte granule an arena buffer is placed at."""
+    words, and not on the 64-byte granule an arena buffer is placed at.
+    """
     start = 36
     gather = _gather()
     seq = OperatorSequence(
@@ -134,7 +136,8 @@ def test_int32_slice_at_word_offset(npu_runtime):
 
 def test_misaligned_buffer_is_rejected():
     """A buffer the shim DMA cannot start on fails at fusion, not silently on
-    the device (whose descriptor would drop the low address bits)."""
+    the device (whose descriptor would drop the low address bits).
+    """
     gather = _gather()
     seq = OperatorSequence(
         name="infra_fused_int32_misaligned",

@@ -69,7 +69,8 @@ def pmode() -> str:
 
 def _sample(dtype, nbytes: int, rng: np.random.Generator) -> np.ndarray:
     """``nbytes`` of data in ``dtype``, as bytes: normal values for a float
-    dtype, small integers otherwise."""
+    dtype, small integers otherwise.
+    """
     dtype = np.dtype(dtype)
     if dtype.kind == "f" or dtype.name == "bfloat16":
         n = nbytes // dtype.itemsize
@@ -89,7 +90,8 @@ class Standalone:
     means, so a design that takes one is measured at what its caller gives.
     ``inputs`` does the same for input buffers, by buffer name: random bytes
     are no representative content for a buffer whose values steer the work,
-    such as a draw row's temperature and top-k."""
+    such as a draw row's temperature and top-k.
+    """
 
     def __init__(
         self,
@@ -183,7 +185,8 @@ class Standalone:
 
 def time_interleaved(runs: Sequence[SequenceCallable], timing: Timing) -> list[float]:
     """Each loaded image's median of per-round medians, microseconds, of the
-    run alone, interleaved."""
+    run alone, interleaved.
+    """
     for run in runs:
         run()  # warm: first-run setup lands on nobody's figure
     medians: list[list[float]] = [[] for _ in runs]
@@ -212,7 +215,8 @@ def measure_steps(
 ) -> dict[str, StepCost]:
     """Measure every width in ``found`` (a design's :func:`.variants`, the
     default first) and record each in ``table``. ``values`` and ``inputs``
-    are :class:`Standalone`'s."""
+    are :class:`Standalone`'s.
+    """
     mode = pmode()
     distinct = sum(b.nbytes for b in found[0].op.buffers) <= DISTINCT_BYTES
     short = [
@@ -259,7 +263,8 @@ def calibrate(
     values: Mapping[str, int] | None = None,
 ) -> Calibration:
     """Split a configure's cost for two measured designs ``a`` and ``b``
-    (see the module docstring), and record it in ``table``."""
+    (see the module docstring), and record it in ``table``.
+    """
     ka, kb = cost_key(a), cost_key(b)
     ta, tb = table.steps[ka].t_step_us, table.steps[kb].t_step_us
     tag = f"{ka}_{kb}"

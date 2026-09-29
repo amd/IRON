@@ -32,7 +32,8 @@ pytestmark = pytest.mark.usefixtures("npu2")
 
 class AddSilu(iron.Graph):
     """add, gelu, then silu and add alternating: add and silu are first used
-    apart but adjacent five times."""
+    apart but adjacent five times.
+    """
 
     def __init__(self):
         super().__init__()
@@ -82,7 +83,8 @@ def test_entries_count_arrivals_into_a_device():
 
 def _table(path, steps, dispatch=50.0, reset=30.0, base=30.0):
     """A table holding the given (t_step, load) per key, alone figures
-    composed as the probe measures them."""
+    composed as the probe measures them.
+    """
     table = CostTable(path)
     for key, (t_step, load) in steps.items():
         table.record_step(
@@ -98,7 +100,8 @@ def _table(path, steps, dispatch=50.0, reset=30.0, base=30.0):
 
 def _add_silu(tmp_path, dev):
     """The traced graph, its operators by class, and a table holding every
-    width of add and silu, and none of gelu."""
+    width of add and silu, and none of gelu.
+    """
     traced = AddSilu().trace(a=(SIZE,), b=(SIZE,))
     ops = {type(s.op).__name__: s.op for s in traced.steps}
     steps = {}

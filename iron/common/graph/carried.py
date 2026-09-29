@@ -44,7 +44,9 @@ CARRY, PROGRAM, IMAGE = "carry", "emit_program", "emit_image"
 
 @dataclasses.dataclass(frozen=True)
 class Form:
-    """A word in one graph value ``v`` as an Emit row computes it::
+    """A word in one graph value ``v``, as an Emit row computes it.
+
+    That is::
 
         ((v * scale + bias) >> down) * mul + add
 
@@ -184,7 +186,8 @@ def _resident(traced: TracedGraph, state: State) -> Handle:
 
 def _move(traced: TracedGraph, handle: Handle, parent: Handle, start: int) -> None:
     """Make a computed element a slice of ``parent`` at ``start``: the
-    handle, and every other view of its buffer the steps hold."""
+    handle, and every other view of its buffer the steps hold.
+    """
     old = handle.name
     views = [handle] + [h for s in traced.steps for h in s.slots + s.inputs + s.outputs]
     for view in views:

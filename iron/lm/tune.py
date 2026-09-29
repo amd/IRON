@@ -51,7 +51,8 @@ def per_call_values(
     traced: TracedGraph, op: Operator, graph_values: Mapping[str, int]
 ) -> dict[str, int]:
     """The per-call values ``op`` is written in a call with ``graph_values``,
-    by member name: what the probe measures it at."""
+    by member name: what the probe measures it at.
+    """
     return {
         b.member.name: b.expression.evaluate(graph_values)
         for b in traced.bindings
@@ -64,7 +65,8 @@ def per_call_inputs(
 ) -> dict[str, np.ndarray]:
     """What ``op``'s buffers hold in a call where the graph's buffers hold
     ``contents``, by graph buffer name; by ``op``'s buffer name: what the
-    probe fills them with."""
+    probe fills them with.
+    """
     return {
         buf.name: contents[name]
         for step in traced.steps
@@ -87,7 +89,8 @@ def measure(
 ) -> None:
     """Measure ``model``'s decode step into ``table``, saved as it goes: each
     design at ``position`` and ``token``, Sample on the draw rows ``sample``
-    gives, and the configure cost between :data:`CALIBRATION_PAIRS`."""
+    gives, and the configure cost between :data:`CALIBRATION_PAIRS`.
+    """
     dev = aie_utils.ensure_current_device(required=True)
     traced = model.trace(**model.shapes(1))
     graph_values = dict(position=position, token=token)

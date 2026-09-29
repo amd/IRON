@@ -127,7 +127,8 @@ def test_a_graph_matches_the_hand_written_runlist_numerically(precompile, dispat
 
 class NarrowChain(iron.Graph):
     """Five steps over three designs, each on two columns: small enough that
-    all three share the array."""
+    all three share the array.
+    """
 
     def __init__(self):
         super().__init__()
@@ -143,7 +144,8 @@ class NarrowChain(iron.Graph):
 
 def test_a_packed_graph_computes_what_the_temporal_one_does():
     """compile(coresident=...) changes which device each step runs in, and
-    nothing it computes."""
+    nothing it computes.
+    """
     rng = np.random.default_rng(0)
     a = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
     b = (rng.random(SIZE) * 4 - 2).astype(bfloat16)

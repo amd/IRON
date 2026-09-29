@@ -7,7 +7,7 @@ Temporal fusion (:mod:`.fusion`) gives every design its own ``aie.device`` and
 reconfigures the array between steps that run different designs. Packing
 merges designs into one ``aie.device`` instead: their tiles, fifos and cores
 side by side, each design's runtime sequence kept under its own name, so the
-main sequence configures the pack once and ``aiex.run``\\ s any member's
+main sequence configures the pack once and runs (``aiex.run``) any member's
 sequence against it, in any order, any number of times. Dataflow between the
 members still goes through DDR.
 
@@ -122,7 +122,8 @@ class Packing:
     @staticmethod
     def device_name(group: Sequence[str]) -> str:
         """A pack's symbol: a function of its members, not of their order in
-        a runlist, so one pack is one device text wherever it is used."""
+        a runlist, so one pack is one device text wherever it is used.
+        """
         digest = hashlib.sha256("|".join(sorted(group)).encode()).hexdigest()[:8]
         return f"pack{len(group)}_{digest}"
 
@@ -310,7 +311,8 @@ class AdjacentPacking:
         params_preamble: str = "",
     ) -> tuple[Packing, dict[tuple[str, ...], str]]:
         """The packing for runlist ``order``, and why each pack stopped growing
-        (the diagnostic of the union that did not fit, keyed by the pack)."""
+        (the diagnostic of the union that did not fit, keyed by the pack).
+        """
         groups: list[tuple[str, ...]] = []
         stopped: dict[tuple[str, ...], str] = {}
         current: list[str] = []

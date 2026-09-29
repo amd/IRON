@@ -22,12 +22,11 @@ uniforms), one position per row. Every token must be sample_ref's; every
 mismatch is collected, so a failure lists all of them.
 """
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
-from ml_dtypes import bfloat16
-
-import aie.utils as aie_utils
 from aie.iron.kernels.sample import draw_row
+from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Scratchpad

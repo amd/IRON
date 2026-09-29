@@ -15,9 +15,8 @@ equal). Every token must be sample_ref's, and every record in its slot.
 
 import numpy as np
 import pytest
-from ml_dtypes import bfloat16
-
 from aie.iron.kernels.sample import draw_row
+from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Scratchpad

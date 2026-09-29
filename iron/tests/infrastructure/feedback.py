@@ -37,7 +37,8 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 def _copy(n, buffer_in, buffer_out, per_call_input=False):
     """An int32 copy of ``n`` words; with ``per_call_input``, from a per-call
-    element offset into its ``buffer_in``-word input."""
+    element offset into its ``buffer_in``-word input.
+    """
     copy = Copy(
         input_buffer_size=buffer_in,
         src=TensorAccessPattern((buffer_in,), 0, [1, 1, 1, n], [0, 0, 0, 1]),
@@ -52,7 +53,8 @@ def _copy(n, buffer_in, buffer_out, per_call_input=False):
 
 def _chain_table(seed=0):
     """Row r holds distinct words, with the offset of successor[r] at NEXT;
-    successor is one cycle through every row."""
+    successor is one cycle through every row.
+    """
     order = np.random.default_rng(seed).permutation(ROWS)
     successor = np.empty(ROWS, dtype=np.int64)
     successor[order] = np.roll(order, -1)
@@ -63,7 +65,7 @@ def _chain_table(seed=0):
 
 
 def _feedback_sequence(name, layer_norm=None):
-    """row = table[offset:][:ROW]; next = row[NEXT:NEXT + 2], fed back.
+    """Row = table[offset:][:ROW]; next = row[NEXT:NEXT + 2], fed back.
 
     With ``layer_norm``, a traced step ahead of the two, so the image also
     takes the trace argument, after the feedback one.
@@ -132,7 +134,8 @@ def test_feedback_into_plain_buffers(npu_runtime):
 @pytest.mark.supported_devices("npu2")
 def test_feedback_ping_pong(npu_runtime):
     """Two runs feeding each other, dispatched one at a time: the host seeds
-    the first run once, and every later offset comes from the device."""
+    the first run once, and every later offset comes from the device.
+    """
     table, successor = _chain_table(seed=1)
     seq, gather = _feedback_sequence("infra_feedback_ping_pong")
     run = _setup(seq, table)
@@ -154,7 +157,8 @@ def test_feedback_ping_pong(npu_runtime):
 @pytest.mark.supported_devices("npu2")
 def test_feedback_chain_queued(npu_runtime):
     """Every run started before any is waited on: each reads the offset the
-    one before it drained, with no host step between them."""
+    one before it drained, with no host step between them.
+    """
     table, successor = _chain_table(seed=2)
     seq, gather = _feedback_sequence("infra_feedback_queued")
     run = _setup(seq, table)

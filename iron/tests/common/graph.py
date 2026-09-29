@@ -860,7 +860,8 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
 
 def test_a_form_is_what_integer_arithmetic_on_a_value_makes():
     """Sums, products and floor divisions by powers of two (so ``ceildiv``)
-    of a form are forms that compute the same; anything else is refused."""
+    of a form are forms that compute the same; anything else is refused.
+    """
     x = Form("x", 3, -5)
     cases = [
         (lambda v: v + 7, None),
@@ -892,7 +893,8 @@ def test_a_form_is_what_integer_arithmetic_on_a_value_makes():
 
 def test_the_packed_decode_words_of_mha_have_emit_forms(npu2):
     """One query attending over a span of the cache: every word the full
-    ELF's MHA reads, ``ceildiv``s of the span among them, is an Emit row."""
+    ELF's MHA reads, ``ceildiv``s of the span among them, is an Emit row.
+    """
 
     class G(iron.Graph):
         def __init__(self):
@@ -1085,7 +1087,8 @@ def test_only_none_may_default_an_input():
 class _Walk(iron.Graph):
     """Walks a linked list one node per call: the next node is gathered from
     the successor table on the device, the step count is an expression of
-    the current one. It takes no tensor."""
+    the current one. It takes no tensor.
+    """
 
     def __init__(self, successor):
         self.successor = iron.weight(successor)
@@ -1179,7 +1182,8 @@ def test_every_carried_value_is_carried_and_nothing_else():
 class _Trail(iron.Graph):
     """Walks a linked list and records each node at the step count. The
     version with ``jump`` starts from a table the host gives, at a plain
-    per-call value; the one without follows the list from ``node``."""
+    per-call value; the one without follows the list from ``node``.
+    """
 
     def __init__(self, successor, steps: int):
         self.successor = iron.weight(successor)
@@ -1203,7 +1207,8 @@ class _Trail(iron.Graph):
 
 def test_the_emit_program_follows_the_target_parameters():
     """Each word of the target's scratchpad comes from a carried value, in
-    the target's order and encoding; anything else is refused."""
+    the target's order and encoding; anything else is refused.
+    """
     walk = _Trail(np.arange(16, dtype=np.int32), steps=8)
     traced = walk.trace()
     assert traced.feedback == []  # tracing alone adds no Emit

@@ -472,7 +472,8 @@ class Tracer:
         carry: Mapping[str, Handle | Affine] | None = None,
     ) -> TracedGraph:
         """The traced graph; ``carry`` is the next value of each carried
-        value, whose handles are outputs too."""
+        value, whose handles are outputs too.
+        """
         next_values = dict(carry or {})
         returned = list(outputs)
         outputs = returned + [

@@ -78,7 +78,8 @@ def test_values_become_dispatch_time_kernels_at_each_step(device):
 
 def test_npu1_compiles_each_step_unasked():
     """NPU1 has no full-ELF dispatch, so a plain ``compile()`` there takes
-    the xclbin form that is built, one dispatch per step."""
+    the xclbin form that is built, one dispatch per step.
+    """
     g, shape = _graph()
     previous = aie_utils.get_current_device()
     dev = DEVICES["npu1"]()

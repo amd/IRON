@@ -69,7 +69,8 @@ def cost_key(op: Operator, dev=None) -> str:
     """What the cost table keys a design by: its class and its identity
     (every compared field, resolved for ``dev``, the bound device unless
     given), as the fused image names it. Sources aside: a table outlives
-    an edit to how a design is generated, so remeasure after one."""
+    an edit to how a design is generated, so remeasure after one.
+    """
     design = OperatorDesign(op.resolved(dev))
     return f"{type(op).__name__}_{design.identity}"
 
@@ -81,7 +82,8 @@ def cost_key(op: Operator, dev=None) -> str:
 class Variant:
     """One width of a design: the operator as a graph holds it (unresolved)
     and resolved, its width tunables, its cost key, and the shim channels
-    its streams take."""
+    its streams take.
+    """
 
     op: Operator
     resolved: Operator
@@ -116,7 +118,8 @@ def _narrower(width: int) -> list[int]:
 
 def variants(op: Operator, dev) -> list[Variant]:
     """``op`` at its default width, then at every narrower one it resolves
-    at. Each width tunable ranges over powers of two up to its default."""
+    at. Each width tunable ranges over powers of two up to its default.
+    """
     default = Variant.of(op, dev)
     defaults = dict(default.widths)
     out = [default]
@@ -160,7 +163,8 @@ class StepCost:
     """One design at one width, measured alone: its time per step while its
     device is configured; one run of one step less that (``D0 + base + load
     + R``); and whether its output is bit-identical to the default width's
-    on the same inputs."""
+    on the same inputs.
+    """
 
     t_step_us: float
     alone_us: float
@@ -176,7 +180,8 @@ class Calibration:
     """A configure's cost split, measured on one pair of designs: the
     dispatch ``D0``, the empty reset configure ``R``, the part of a
     configure no design accounts for (``base``), and the pair's mean
-    configure (``switch``)."""
+    configure (``switch``).
+    """
 
     dispatch_us: float
     reset_us: float
@@ -257,7 +262,8 @@ class CostTable:
 
     def load(self, key: str) -> float:
         """What configuring a measured design adds to a configure; zero for
-        one not measured."""
+        one not measured.
+        """
         cost = self.steps.get(key)
         if cost is None:
             return 0.0
@@ -313,7 +319,8 @@ def model_us(
 ) -> tuple[float, int]:
     """The model's time for a runlist of design keys, and its configures
     (the reset included): ``chosen`` maps a design to the key of the width
-    it runs at, ``groups`` lists the designs sharing a device."""
+    it runs at, ``groups`` lists the designs sharing a device.
+    """
     chosen = chosen or {}
     device = {k: i for i, group in enumerate(groups) for k in group}
     members: dict[object, list[str]] = {}
@@ -347,7 +354,8 @@ class Tuning:
     predicts for it and for the graph as traced (``baseline``: default
     widths, a device per design). ``unmeasured`` are the designs the table
     did not hold: they stay as traced, and the predictions leave out their
-    steps and loads."""
+    steps and loads.
+    """
 
     chosen: dict[str, Variant]  # default key -> the width it runs at
     groups: tuple[tuple[str, ...], ...]  # default keys sharing one device
@@ -361,7 +369,8 @@ class Tuning:
         self, traced: TracedGraph, dev=None
     ) -> tuple[TracedGraph, list[list[Operator]]]:
         """``traced`` with every narrowed design's operators rebuilt at their
-        width, and the packs as operator groups for ``coresident=``."""
+        width, and the packs as operator groups for ``coresident=``.
+        """
         replace: dict[int, Operator] = {}
         keys: dict[int, str] = {}
         for step in traced.steps:
@@ -383,7 +392,8 @@ class Tuning:
 
     def report(self, names: Mapping[str, str] | None = None) -> str:
         """What was chosen, one line per design that changed, and the
-        predictions. ``names`` labels a key (its class, say)."""
+        predictions. ``names`` labels a key (its class, say).
+        """
         names = names or {}
         lines = []
         for key, v in self.chosen.items():
@@ -405,7 +415,8 @@ class _Pack:
     """A candidate device: a connected set of designs (indices into the
     runlist's order), how often it is entered, and its cheapest widths
     within the shim budget, cheapest first; ``options[0]`` is the one the
-    search prices it at, and the placer's refusals drop options."""
+    search prices it at, and the placer's refusals drop options.
+    """
 
     members: tuple[int, ...]
     entries: int
@@ -433,7 +444,8 @@ def _cheapest(
     member's ranked cheapest first, whose shim channels are within
     ``budget``; cheapest first. Branch and bound: a partial pick is dropped
     once its cost plus the cheapest rest cannot beat the k-th found, or its
-    channels plus the fewest the rest can take overrun the budget."""
+    channels plus the fewest the rest can take overrun the budget.
+    """
     n = len(ranked)
     rest_cost = [0.0] * (n + 1)
     rest_mm2s = [0] * (n + 1)
@@ -569,7 +581,8 @@ class JointNarrowing:
 
     def _candidates(self, op: Operator, dev) -> list[Variant]:
         """The widths the table allows: the default, first, and every
-        narrower one measured exact."""
+        narrower one measured exact.
+        """
         found = variants(op, dev)
         default = found[0]
         if default.key not in self.table.steps:
@@ -596,7 +609,8 @@ class JointNarrowing:
     ) -> Iterator[tuple[int, ...]]:
         """Every connected set of two or more measured designs, up to
         ``max_members``, whose narrowest widths are within the shim budget
-        (a set that is not has no superset that is)."""
+        (a set that is not has no superset that is).
+        """
         neighbours = runlist.neighbours()
         narrowest = [min(c, key=lambda v: (v.mm2s + v.s2mm, v.key)) for c in candidates]
 
@@ -633,7 +647,8 @@ class JointNarrowing:
         packs: list[_Pack],
     ) -> list[_Pack]:
         """The cheapest partition into ``packs`` and single designs, exact,
-        with the reset charged when the entries are odd."""
+        with the reset charged when the entries are odd.
+        """
         n = len(runlist.order)
         reset = self.table.reset_us
         by_lowest: dict[int, list[_Pack]] = {}

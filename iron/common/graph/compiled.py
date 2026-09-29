@@ -177,7 +177,8 @@ class Graph:
     @functools.cached_property
     def _carry(self) -> State | None:
         """The values a call started from and the elements it computed,
-        which every full-ELF version's Emit reads (see :mod:`.carried`)."""
+        which every full-ELF version's Emit reads (see :mod:`.carried`).
+        """
         if not self._carried:
             return None
         return State((2, len(self._carried)), np.int32, CARRY)
@@ -296,7 +297,8 @@ class Graph:
         self, carry: Carry | None, values: list[Value], tracer: Tracer
     ) -> dict[str, Handle | Affine]:
         """Each traced next value, checked: an expression of the values, or
-        one integer element the graph computed, which becomes an output."""
+        one integer element the graph computed, which becomes an output.
+        """
         if carry is None:
             return {}
         dtypes = {v.name: v.dtype for v in values}
@@ -577,7 +579,8 @@ class CompiledGraph:
     @property
     def parameters(self) -> list[Parameter]:
         """The per-call values a full ELF's scratchpad holds, as its
-        parameter table lays them out; none on another image."""
+        parameter table lays them out; none on another image.
+        """
         return self.artifacts.parameter_table
 
     @property
@@ -602,7 +605,8 @@ class CompiledGraph:
 
     def _storage(self, x):
         """A host-synchronizable flat view that starts with ``x``'s buffer
-        (a slice's own, which is aligned, else the whole of its lines)."""
+        (a slice's own, which is aligned, else the whole of its lines).
+        """
         name = self._buffer_name(x)
         if isinstance(x, Handle) and x.parent is not None:
             return self.callable.get_buffer(name)
@@ -677,13 +681,15 @@ class CompiledGraph:
 
     def start(self, run: FullELFRun, /, *tensors, **values) -> None:
         """Start a call of this full ELF on ``run`` (one of its callable's
-        ``new_run()``), without waiting for it."""
+        ``new_run()``), without waiting for it.
+        """
         self._stage(tensors, values, run)
         self.callable.start(run)
 
     def emit_to(self, target: CompiledGraph) -> None:
         """Program this version's Emit to start a call of ``target``: its
-        scratchpad words, and the carried values it starts from."""
+        scratchpad words, and the carried values it starts from.
+        """
         if self.emit is None:
             raise ValueError(f"{self.traced.name}: this version has no Emit step")
         program = compose(self.emit, self.traced.carry, target.words, target.parameters)
@@ -692,7 +698,8 @@ class CompiledGraph:
     def _stage(self, tensors, values, run: FullELFRun | None = None) -> None:
         """Everything a call writes before it is dispatched: the weights not
         yet uploaded, the inputs, and the per-call values, into ``run``'s
-        scratchpad (the callable's own by default)."""
+        scratchpad (the callable's own by default).
+        """
         if len(tensors) != len(self.traced.inputs):
             raise TypeError(
                 f"{self.traced.name} takes {len(self.traced.inputs)} input(s), "
@@ -711,7 +718,8 @@ class CompiledGraph:
 
     def _next_values(self, values: Mapping[str, int]) -> Carry:
         """The carried values' next values, after a call with ``values``: an
-        expression evaluated here, a computed element read back."""
+        expression evaluated here, a computed element read back.
+        """
         nxt: dict[str, int] = {}
         planes = None if self.emit is None else self.read(self.emit.carry)
         for name, expression in self.traced.carry.items():
@@ -748,7 +756,8 @@ class CompiledGraph:
 
 def _rename(tracer: Tracer, handle: Handle, name: str) -> None:
     """Make an intermediate a graph output named ``name``: the handle, and
-    every view of its buffer the steps hold (a reshape is a new handle)."""
+    every view of its buffer the steps hold (a reshape is a new handle).
+    """
     old = handle.name
     for step in tracer.steps:
         for h in step.slots + step.inputs + step.outputs:
@@ -764,7 +773,8 @@ def _rename(tracer: Tracer, handle: Handle, name: str) -> None:
 
 def _results(outputs: list, carry: Carry | None):
     """A call's return, shaped as the body's: one output alone, several as
-    a tuple, and the carry last."""
+    a tuple, and the carry last.
+    """
     items = list(outputs) + ([] if carry is None else [carry])
     if not items:
         return None
@@ -791,7 +801,8 @@ class Word:
     """A scratchpad word a call writes: its device symbol, its dtype, how it
     follows from the call's values and, where it has them, the linear form it
     has in one graph value (by which words share) and the form an Emit row
-    computes it by."""
+    computes it by.
+    """
 
     symbol: str
     dtype: Any
@@ -806,7 +817,8 @@ class Word:
 def _derived_form(op, name: str, symbolic: Mapping[str, Form]) -> Form | None:
     """The Emit form of ``op``'s derived value ``name``: its derivation run
     on the forms of the bounds, or ``None`` where it does more than a form
-    can (it compares, or divides by other than a power of two)."""
+    can (it compares, or divides by other than a power of two).
+    """
     try:
         got = op.derived_at(name, **symbolic)
     except TypeError:

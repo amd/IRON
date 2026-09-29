@@ -70,7 +70,8 @@ aie.device(npu2) {
 
 def _shim_pinned(col: int, channel: int) -> str:
     """A pass-through design whose input enters on shim ``(col, 0)``, MM2S
-    ``channel``: the device text, as a generator would hand it to the merge."""
+    ``channel``: the device text, as a generator would hand it to the merge.
+    """
     vec = np.ndarray[(1024,), np.dtype[np.int32]]
     line = np.ndarray[(256,), np.dtype[np.int32]]
     of_in = ObjectFifo(line, name="in")

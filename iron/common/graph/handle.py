@@ -441,7 +441,8 @@ class Carry(Mapping[str, "Handle | Affine | int"]):
 
 def carry(**next_values: Handle | Affine | Value | int) -> Carry:
     """Return with a graph's outputs the next value of each carried value:
-    ``return logits, iron.carry(token=sampled, position=position + 1)``."""
+    ``return logits, iron.carry(token=sampled, position=position + 1)``.
+    """
     return Carry(**next_values)
 
 
