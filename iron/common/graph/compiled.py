@@ -40,7 +40,7 @@ from ..image.callable import FullELFRun, ScratchArena
 from ..image.coresidence import AdjacentPacking
 from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
-from .carried import CARRY, EmitSite, attach_emit, compose
+from .carried import CARRY, EmitSite, Form, attach_emit, compose
 from .handle import Affine, Carry, Handle, State, Value, _tensor_dtype, is_operand
 from .narrowing import JointNarrowing, Tuning
 from .trace import TracedGraph, Tracer, _ReferenceTracer
@@ -412,7 +412,8 @@ class Graph:
         loops = feeds is not None or not traced.inputs
         if chosen.image == ELF and traced.carry and loops:
             if feeds is None:
-                slots = len(_words(traced, share=shared)[0])
+                sized = _words(traced, share=shared, extents=False)[0]
+                slots = len(sized)
             elif feeds.emit is None or not any(
                 feeds is v for v in self._versions.values()
             ):
@@ -439,10 +440,12 @@ class Graph:
             tuning=tuning,
         )
         if emit is not None and feeds is None and len(version.parameters) != slots:
+            read = {p.name for p in version.parameters}
             raise NotImplementedError(
                 f"{self.name}: the image reads {len(version.parameters)} of the "
                 f"{slots} words its Emit was sized for; a word it reads only "
-                f"through a derivation cannot be fed yet"
+                f"through a derivation cannot be fed yet (sized for but not "
+                f"read: {sorted(w.symbol for w in sized if w.symbol not in read)})"
             )
         self._versions[signature] = version
         return version
@@ -535,7 +538,9 @@ class CompiledGraph:
         # the operator from the call's bound.
         # On a full ELF, symbols that always hold one number share a word:
         # ``shared`` maps each such design symbol to its word.
-        self.words, self.shared = _words(traced, share=plan.dispatch == "fused")
+        self.words, self.shared = _words(
+            traced, share=plan.dispatch == "fused", extents=plan.image != ELF
+        )
         # Equal design keys are one build (two projections on one array).
         # compile() builds the image; the runtime that loads it is made on
         # first use, so a host without an NPU can still compile.
@@ -784,27 +789,48 @@ class Linear:
 @dataclasses.dataclass(frozen=True)
 class Word:
     """A scratchpad word a call writes: its device symbol, its dtype, how it
-    follows from the call's values and, where it is one, the linear form it
-    has in one graph value."""
+    follows from the call's values and, where it has them, the linear form it
+    has in one graph value (by which words share) and the form an Emit row
+    computes it by."""
 
     symbol: str
     dtype: Any
     compute: Callable[[Mapping[str, int]], Any]
     linear: Linear | None
+    form: Form | None = None
 
     def __call__(self, values: Mapping[str, int]) -> Any:
         return self.compute(values)
 
 
+def _derived_form(op, name: str, symbolic: Mapping[str, Form]) -> Form | None:
+    """The Emit form of ``op``'s derived value ``name``: its derivation run
+    on the forms of the bounds, or ``None`` where it does more than a form
+    can (it compares, or divides by other than a power of two)."""
+    try:
+        got = op.derived_at(name, **symbolic)
+    except TypeError:
+        return None
+    if isinstance(got, Form):
+        return got
+    if isinstance(got, (int, np.integer)) and symbolic:  # the same every call
+        value = next(iter(symbolic.values())).value
+        return Form(value, 0, 0, add=int(got))
+    return None
+
+
 def _words(
-    traced: TracedGraph, *, share: bool = False
+    traced: TracedGraph, *, share: bool = False, extents: bool = True
 ) -> tuple[list[Word], dict[str, str]]:
     """The scratchpad words a call writes, each from the call's values, and
     with ``share`` the design symbols that share one word.
 
     A word is a bound value (a per-call index on a view, scaled to an
     element offset) or a value an operator, resolved for the device, derives
-    from a bounded extent, computed from the call's bound. The full ELF has
+    from a bounded extent, computed from the call's bound. With ``extents``
+    a bound extent is a word itself, as an xclbin's dispatch scalar is;
+    without, it is not, as on a full ELF, where no design reads one but
+    through what it derives from it. The full ELF has
     32 words for its whole image, and a bounded prompt binds its row count
     to every operator's extents, so symbols that always hold one number
     share a word: those whose derivation is :class:`Linear` (a bound
@@ -814,6 +840,8 @@ def _words(
     dev = aie_utils.get_current_device()
     words: list[Word] = []
     for b in traced.bindings:
+        if not extents and isinstance(b.member.member, Extent):
+            continue  # its derivations below
         e = b.expression
         linear = Linear(
             e.value.name,
@@ -821,7 +849,10 @@ def _words(
             Fraction(e.bias),
             np.dtype(b.member.dtype).name,
         )
-        words.append(Word(b.symbol, e.dtype, lambda v, e=e: e.evaluate(v), linear))
+        form = Form(e.value.name, int(e.scale), int(e.bias))
+        words.append(
+            Word(b.symbol, e.dtype, lambda v, e=e: e.evaluate(v), linear, form)
+        )
     seen: set[int] = set()
     derived: set[str] = set()
     for b in traced.bindings:
@@ -829,14 +860,18 @@ def _words(
             continue
         seen.add(id(b.op))
         op = b.op.resolved(dev)
-        extents = {
+        counts = {
             e.member.name: e.expression
             for e in traced.bindings
             if e.op is b.op and isinstance(e.member.member, Extent)
         }
+        symbolic = {
+            name: Form(count.value.name, int(count.scale), int(count.bias))
+            for name, count in counts.items()
+        }
 
-        def at(v, extents=extents):
-            return {name: count.evaluate(v) for name, count in extents.items()}
+        def at(v, counts=counts):
+            return {name: count.evaluate(v) for name, count in counts.items()}
 
         for name in sorted(op._per_call_derived() - op.bound_values.keys()):
             word = op.value(name)  # a value the graph binds itself is above
@@ -846,8 +881,8 @@ def _words(
             derived.add(symbol)
             linear = None
             spec = word.member
-            if isinstance(spec, _ExtentWord) and spec.extent.name in extents:
-                count, divisor = extents[spec.extent.name], spec.divisor(op)
+            if isinstance(spec, _ExtentWord) and spec.extent.name in counts:
+                count, divisor = counts[spec.extent.name], spec.divisor(op)
                 linear = Linear(
                     count.value.name,
                     Fraction(count.scale, divisor),
@@ -860,6 +895,7 @@ def _words(
                     word.dtype,
                     lambda v, op=op, name=name, at=at: op.derived_at(name, **at(v)),
                     linear,
+                    _derived_form(op, name, symbolic),
                 )
             )
 

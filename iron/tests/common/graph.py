@@ -15,6 +15,7 @@ from typing import Any
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.iron import ceildiv
 from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
@@ -22,7 +23,7 @@ import iron
 from iron.common import Carried, DispatchTime, Profile, Scratchpad
 from iron.common.design.build import device_symbol
 from iron.common.graph import Handle, TracedGraph, Tracer
-from iron.common.graph.carried import attach_emit, compose
+from iron.common.graph.carried import Form, attach_emit, compose
 from iron.common.graph.compiled import _words
 from iron.common.graph.handle import Affine, Value
 from iron.common.image import OperatorSequence
@@ -850,6 +851,70 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
     assert words[f"{op.name}_valid_n_x8"](call) == 16 * 8  # the reshape's scale
     assert words[f"{op.name}_count"](call) == 16 * 8 // 2  # derived: valid // lanes
     assert words[f"{op.name}_valid_x"](call) == 16 * 8 // 2  # tiles per lane
+    # A full ELF's designs read the bound only through what they derive.
+    elf = {w.symbol for w in _words(t, extents=False)[0]}
+    assert elf == set(words) - {f"{op.name}_valid_n_x8"}
+    for w in words.values():  # and each is what its Emit row computes
+        assert w.form is not None and w.form(call["n"]) == w(call)
+
+
+def test_a_form_is_what_integer_arithmetic_on_a_value_makes():
+    """Sums, products and floor divisions by powers of two (so ``ceildiv``)
+    of a form are forms that compute the same; anything else is refused."""
+    x = Form("x", 3, -5)
+    cases = [
+        (lambda v: v + 7, None),
+        (lambda v: 2 - v, None),
+        (lambda v: v * -4, None),
+        (lambda v: v // 8, None),
+        (lambda v: v // -4, None),
+        (lambda v: ceildiv(v, 64), None),
+        (lambda v: (ceildiv(v, 64) + 1) * 32, None),
+        (lambda v: (v // 4 + 3) // 16, None),  # nested floors fold into one
+        (lambda v: (v // 4) * 8 // 2 - 1, None),  # an exact division
+        (lambda v: v // 3, TypeError),
+        (lambda v: (v // 4) * 3 // 2, TypeError),
+        (lambda v: v // 1 if v else 0, TypeError),
+        (lambda v: v % 64, TypeError),
+        (lambda v: v < 0, TypeError),
+        (lambda v: v + x, TypeError),
+    ]
+    for f, error in cases:
+        if error is not None:
+            with pytest.raises(error):
+                f(x)
+            continue
+        form = f(x)
+        assert form.value == "x"
+        for v in range(-300, 300):
+            assert form(v) == f(3 * v - 5), v
+
+
+def test_the_packed_decode_words_of_mha_have_emit_forms(npu2):
+    """One query attending over a span of the cache: every word the full
+    ELF's MHA reads, ``ceildiv``s of the span among them, is an Emit row."""
+
+    class G(iron.Graph):
+        def __init__(self):
+            self.keys = iron.state((8, 2048, 64))
+            self.values = iron.state((8, 2048, 64))
+
+        def body(self, q, *, position: Scratchpad[np.int32]):
+            span = np.s_[:, : position + 1]
+            o = MHA(
+                q.reshape(1, 32, 64),
+                self.keys[span],
+                self.values[span],
+                heads_interleaved=True,
+            )
+            return o.reshape(1, 32 * 64)
+
+    words, _ = _words(G().trace(q=(32, 64)), extents=False)
+    assert words
+    for w in words:
+        assert w.form is not None and w.form.value == "position", w.symbol
+        for position in range(2048):
+            assert w.form(position) == w({"position": position}), w.symbol
 
 
 def test_a_bound_on_rows_reaches_a_flat_buffer_in_elements(npu2):
@@ -1163,10 +1228,10 @@ def test_the_emit_program_follows_the_target_parameters():
     ]
     program = compose(site, traced.carry, words, parameters)
     assert program.tolist() == [
-        [0, 1, 1, 1, 2],  # steps + 1, shifted for the core
-        [1, 0, 1, 0, 0],  # the node the device gathered
-        [1, 0, 1, 0, 0],  # the next node
-        [0, 1, 1, 1, 0],  # the next step count
+        [0, 1, 1, 1, 0, 1, 0, 2],  # steps + 1, shifted for the core
+        [1, 0, 1, 0, 0, 1, 0, 0],  # the node the device gathered
+        [1, 0, 1, 0, 0, 1, 0, 0],  # the next node
+        [0, 1, 1, 1, 0, 1, 0, 0],  # the next step count
     ]
     image, state = emit_reference(program, np.array([[5, 9], [33, 0]]), slots=2)
     assert image.tolist() == [10 << 2, 33] and state.tolist() == [33, 10]

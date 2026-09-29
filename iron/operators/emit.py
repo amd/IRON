@@ -10,13 +10,15 @@ carried values the call after it starts from.
 
 Every output word is one row of a program the host writes once::
 
-    out[r] = (planes[plane, index] * scale + bias) << shift
+    out[r] = (((planes[plane, index] * scale + bias) >> down) * mul + add) << shift
 
 ``planes`` is ``(2, carried)``: plane 0 the values this call started from,
 plane 1 the ones it computed. ``shift`` is 2 for a core-read parameter (the
 scratchpad holds those shifted, see ``ParameterScratchpad.writeBits``) and 0
-for an address or a carried value. An all-zero row emits 0. The first
-``slots`` rows are the image, the rest the next state.
+for an address or a carried value; ``>> down`` floors, so a row computes a
+trip count rounded up from a bound as well
+(:class:`~iron.common.graph.carried.Form`). An all-zero row emits 0. The
+first ``slots`` rows are the image, the rest the next state.
 """
 
 import numpy as np
@@ -28,16 +30,16 @@ from aie.utils.verify import Tolerance
 from iron.common import In, Operator, Out, param
 from iron.common.testing import Case, Testing
 
-# A program row: (plane, index, scale, bias, shift).
-ROW = 5
+# A program row: (plane, index, scale, bias, down, mul, add, shift).
+ROW = 8
 
 
 def reference(program, planes, slots: int):
     """``(image, state)``: every row evaluated in wrapping int32, split at ``slots``."""
     program = np.asarray(program, dtype=np.int32).reshape(-1, ROW)
     planes = np.asarray(planes, dtype=np.int32).reshape(2, -1)
-    plane, index, scale, bias, shift = program.T
-    out = (planes[plane, index] * scale + bias) << shift
+    plane, index, scale, bias, down, mul, add, shift = program.T
+    out = (((planes[plane, index] * scale + bias) >> down) * mul + add) << shift
     return out[:slots].astype(np.int32), out[slots:].astype(np.int32)
 
 
@@ -48,6 +50,9 @@ def _program(op: "Emit") -> dict:
         [
             rng.integers(0, 2, op.rows),
             rng.integers(0, op.carried, op.rows),
+            rng.integers(-3, 4, op.rows),
+            rng.integers(-1000, 1000, op.rows),
+            rng.integers(0, 7, op.rows),
             rng.integers(-3, 4, op.rows),
             rng.integers(-1000, 1000, op.rows),
             rng.choice([0, 2], op.rows),
@@ -109,11 +114,23 @@ class Emit(Operator):
             image = of_i.acquire(1)
             state = of_s.acquire(1)
 
+            def floor_shift(v, k):
+                # v >> k, floored. Not arith.shrsi: mlir-aie lowers a scalar
+                # one to a vector ups + srs, which rounds by the core's
+                # rounding mode. A logical shift of v, or of ~v where v is
+                # negative (~(~v >> k) is the floor then), rounds nothing.
+                i32 = v.type
+                sign = arith.subi(
+                    arith.constant(0, i32), arith.shrui(v, arith.constant(31, i32))
+                )
+                return arith.xori(arith.shrui(arith.xori(v, sign), k), sign)
+
             def row(r):
                 plane = arith.index_cast(program[r, 0])
                 index = arith.index_cast(program[r, 1])
                 v = planes[plane, index] * program[r, 2] + program[r, 3]
-                return arith.shli(v, program[r, 4])
+                v = floor_shift(v, program[r, 4]) * program[r, 5] + program[r, 6]
+                return arith.shli(v, program[r, 7])
 
             for r in range_(slots):
                 image[r] = row(r)

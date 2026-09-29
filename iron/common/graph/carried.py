@@ -43,6 +43,83 @@ CARRY, PROGRAM, IMAGE = "carry", "emit_program", "emit_image"
 
 
 @dataclasses.dataclass(frozen=True)
+class Form:
+    """A word in one graph value ``v`` as an Emit row computes it::
+
+        ((v * scale + bias) >> down) * mul + add
+
+    where ``>>`` floors. Arithmetic with integers on a form is the form of
+    the result -- a sum, a product, a floor division by a power of two
+    (and so ``ceildiv``) -- so an operator's derivation run on the form of
+    its bound gives the form of what it derives; anything else (a
+    comparison, two forms, another divisor) raises ``TypeError``.
+    """
+
+    value: str
+    scale: int = 1
+    bias: int = 0
+    down: int = 0
+    mul: int = 1
+    add: int = 0
+
+    def __call__(self, v: int) -> int:
+        return ((v * self.scale + self.bias) >> self.down) * self.mul + self.add
+
+    @staticmethod
+    def _int(n) -> int:
+        if isinstance(n, bool) or not isinstance(n, (int, np.integer)):
+            raise TypeError(f"no Emit form for arithmetic with {n!r}")
+        return int(n)
+
+    def __add__(self, n) -> Form:
+        return dataclasses.replace(self, add=self.add + self._int(n))
+
+    __radd__ = __add__
+
+    def __sub__(self, n) -> Form:
+        return self + -self._int(n)
+
+    def __rsub__(self, n) -> Form:
+        return -self + n
+
+    def __neg__(self) -> Form:
+        return dataclasses.replace(self, mul=-self.mul, add=-self.add)
+
+    def __mul__(self, n) -> Form:
+        n = self._int(n)
+        return dataclasses.replace(self, mul=self.mul * n, add=self.add * n)
+
+    __rmul__ = __mul__
+
+    def __floordiv__(self, d) -> Form:
+        d = self._int(d)
+        if d < 0:
+            return (-self) // -d
+        if d == 0 or d & (d - 1):
+            raise TypeError(f"no Emit form for a floor division by {d}")
+        k = d.bit_length() - 1
+        if self.down == 0:  # linear so far: floor it once
+            scale, bias = self.scale * self.mul, self.bias * self.mul + self.add
+            return Form(self.value, scale, bias, k)
+        if (
+            self.mul == 1
+        ):  # floor(floor(u / 2^a) + c) / 2^k) = floor((u + c 2^a) / 2^(a+k))
+            bias = self.bias + (self.add << self.down)
+            return Form(self.value, self.scale, bias, self.down + k)
+        if self.mul % d == 0:  # the floored term divides exactly
+            return dataclasses.replace(self, mul=self.mul // d, add=self.add // d)
+        raise TypeError(f"no Emit form for {self} // {d}")
+
+    def __bool__(self):
+        raise TypeError(f"{self} has no truth value: the device only computes it")
+
+    def __index__(self):
+        raise TypeError(f"{self} is not a number: the device only computes it")
+
+    __int__ = __index__
+
+
+@dataclasses.dataclass(frozen=True)
 class EmitSite:
     """What a version's Emit step reads and writes."""
 
@@ -164,11 +241,11 @@ def compose(
         word = by_symbol.get(p.name)
         if word is None:
             raise ValueError(f"{p.name} is not a word the graph writes")
-        form = word.linear
-        if form is None or not form.is_integral:
+        form = word.form
+        if form is None:
             raise ValueError(
-                f"{p.name} is not an integer multiple of one graph value plus "
-                f"an integer: the device cannot compute it"
+                f"{p.name} has no Emit form (a Form in one graph value): the "
+                f"device cannot compute it"
             )
         if form.value not in plane_of:
             raise ValueError(
@@ -176,10 +253,18 @@ def compose(
                 f"the device cannot know it"
             )
         plane, index, scale, bias = source(form.value)
-        ratio, offset = int(form.ratio), int(form.offset)
-        program[p.index] = (plane, index, ratio * scale, ratio * bias + offset, p.shift)
+        program[p.index] = (
+            plane,
+            index,
+            form.scale * scale,
+            form.scale * bias + form.bias,
+            form.down,
+            form.mul,
+            form.add,
+            p.shift,
+        )
     for name, j in plane_of.items():
-        program[site.slots + j] = (*source(name), 0)
+        program[site.slots + j] = (*source(name), 0, 1, 0, 0)
     info = np.iinfo(np.int32)
     if program.min() < info.min or program.max() > info.max:
         raise OverflowError(f"an emit program word is outside int32:\n{program}")
