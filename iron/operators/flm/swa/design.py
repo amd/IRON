@@ -78,9 +78,9 @@ _NO_UNROLL = "#llvm.loop_annotation<unroll = <disable = true>>"
 
 
 def swa_kernel(device=None):
-    """The swa_prefill build this design's cores link."""
+    """The flm_swa_prefill build this design's cores link."""
     return call_factory(
-        kernels.swa_prefill,
+        kernels.flm_swa_prefill,
         device=device,
         in_prod_lock=IN_PROD_LOCK,
         in_cons_lock=IN_CONS_LOCK,
