@@ -1,5 +1,5 @@
-Commit,Date,Test Path,Test,Checks,TTFT (mean),TTFT (median),TTFT (min),TTFT (max),TTFT (stddev),TPS (mean),TPS (median),TPS (min),TPS (max),TPS (stddev)
-d210f200c6a190aa43cad7fb7e108687b2cd7376,2026-09-29 01:09:29,iron/applications/llama_3.2_1b/test.py::test_llama_3_2_1b,llama_3.2_1b_prompt_1024_tokens_1,5/5,2.0956,2.096,2.075,2.11,0.0143979165159407,,,,,
-d210f200c6a190aa43cad7fb7e108687b2cd7376,2026-09-29 01:09:29,iron/applications/llama_3.2_1b/test.py::test_llama_3_2_1b,llama_3.2_1b_prompt_1024_tokens_40,5/5,2.123,2.096,2.075,2.251,0.07215608082483407,3.164,3.164,3.154,3.173,0.0071763500472037224
-d210f200c6a190aa43cad7fb7e108687b2cd7376,2026-09-29 01:09:29,iron/applications/llama_3.2_1b/test.py::test_llama_3_2_1b,llama_3.2_1b_prompt_13_tokens_1,5/5,2.0568,2.052,2.036,2.082,0.01962651268055534,,,,,
-d210f200c6a190aa43cad7fb7e108687b2cd7376,2026-09-29 01:09:29,iron/applications/llama_3.2_1b/test.py::test_llama_3_2_1b,llama_3.2_1b_prompt_13_tokens_40,5/5,2.0488,2.047,2.034,2.066,0.011649034294738774,3.1246,3.124,3.121,3.128,0.0026076809620810704
+Commit,Date,Test Path,Test,Checks,Bench,TTFT (mean),TTFT (median),TTFT (min),TTFT (max),TTFT (stddev),TPS (mean),TPS (median),TPS (min),TPS (max),TPS (stddev)
+ba923dbb1e2f2df0f611c999bbd05bffc045cb2e,2026-09-29 03:58:44,iron/applications/llama_3.2_1b/test.py::test_llama_3_2_1b,llama_3.2_1b_prompt_1024_tokens_1,5/5,yes,2.0909999999999997,2.089,2.066,2.122,0.021999999999999978,,,,,
+ba923dbb1e2f2df0f611c999bbd05bffc045cb2e,2026-09-29 03:58:44,iron/applications/llama_3.2_1b/test.py::test_llama_3_2_1b,llama_3.2_1b_prompt_1024_tokens_40,5/5,yes,2.1232,2.095,2.068,2.265,0.08011366924564123,3.1624,3.166,3.152,3.17,0.0087635609200826
+ba923dbb1e2f2df0f611c999bbd05bffc045cb2e,2026-09-29 03:58:44,iron/applications/llama_3.2_1b/test.py::test_llama_3_2_1b,llama_3.2_1b_prompt_13_tokens_1,5/5,yes,2.0494,2.055,2.037,2.059,0.010114346246792312,,,,,
+ba923dbb1e2f2df0f611c999bbd05bffc045cb2e,2026-09-29 03:58:44,iron/applications/llama_3.2_1b/test.py::test_llama_3_2_1b,llama_3.2_1b_prompt_13_tokens_40,5/5,yes,2.0544000000000002,2.051,2.042,2.067,0.010334408546211189,3.1226,3.124,3.11,3.131,0.007797435475847158
