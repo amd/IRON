@@ -34,9 +34,7 @@ GEOMETRIES = {
 class DecodeLayer(MLIROperator):
     """One Gemma 4 decode layer for one token, as FastFlowLM's engine drives it.
 
-    ``model`` is ``"GEMMA4_E2B"`` or ``"GEMMA4_E4B"``. ``layer_type`` is one
-    of ``LAYER_TYPES``: it sets the runtime sequence, and the device
-    configuration is the same for all four. See README.md.
+    See README.md for the parameters, the buffers and the dispatch parameters.
     """
 
     model: str
@@ -67,9 +65,6 @@ class DecodeLayer(MLIROperator):
         return f"FLM_DecodeLayer_{self.model}_{self.layer_type}_{dev}"
 
     def get_dispatch_params(self):
-        """``context_len`` is the number of tokens before this one, and
-        ``max_l`` the KV cache's row count, which sets where V starts in a
-        global layer's cache. The engine passes both to every layer."""
         return {"context_len": np.int32, "max_l": np.int32}
 
     def get_mlir_artifact(self):
@@ -94,8 +89,6 @@ class DecodeLayer(MLIROperator):
         ]
 
     def get_arg_spec(self):
-        # The order the design's runtime sequence takes: x, proj, rms,
-        # rope_rms, kv.
         sizes = arg_sizes(self.geometry)
         return [
             AIERuntimeArgSpec("inout", (sizes["x"],), dtype=bfloat16),

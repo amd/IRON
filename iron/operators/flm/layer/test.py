@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests that need no FastFlowLM host driver.
+"""Tests of the build, the RTP placement and dispatch completion.
 
-The layer's numerics need the engine's weights and caches, so no test here
-checks an output value.
+No test checks an output value. The layer's numerics need the engine's
+weights and caches.
 """
 
 import re
@@ -60,8 +60,7 @@ def _device_configuration(op):
 
 
 def _check_rtps(op):
-    """The sequence writes each RTP at its RTP_ADDRESSES address, so each
-    buffer has to sit there."""
+    """Assert that aiecc placed each RTP buffer at its RTP_ADDRESSES address."""
     placed = _placed_rtps(op)
     want = {RTP_SYMBOLS[k]: RTP_ADDRESSES[op.model][k] for k in RTP_SYMBOLS}
     got = {sym: placed.get(sym) for sym in want}
@@ -118,9 +117,13 @@ def _inputs(op, seed):
 @requires_aie2p
 @pytest.mark.parametrize("model", MODELS)
 def test_dispatches_complete(model, aie_context):
-    """Every layer type's sequence, back to back on one loaded xclbin, as the
-    engine runs them. The inputs are random, so only completion is checked:
-    a sequence that drives the dataflow differently from the cores hangs."""
+    """Run every layer type's sequence back to back on one xclbin, as the
+    engine does.
+
+    A sequence that drives the dataflow differently from the cores hangs. The
+    inputs are random. The test checks that each dispatch completes and
+    writes x.
+    """
     ops = {
         t: DecodeLayer(model=model, layer_type=t, context=aie_context)
         for t in LAYER_TYPES
