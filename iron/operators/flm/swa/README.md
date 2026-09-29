@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # `iron.operators.flm.PrefillSlidingAttention`
 
 Sliding-window causal prefill attention with a head dim of 256, from a KV
-cache. A port of FastFlowLM's sliding-window attention overlay for Gemma 4.
+cache. It reproduces FastFlowLM's sliding-window attention overlay for Gemma 4.
 
 ```python
 from iron.operators.flm import PrefillSlidingAttention
@@ -22,9 +22,9 @@ run(o, q, kv)
 
 ## Dispatch parameters
 
-One build serves every token range. The runtime sequence takes three scalars,
-and each call generates the instruction stream for the values that
-`set_parameters()` last set:
+One build serves every token range. The runtime sequence takes three scalars.
+Each call generates the instruction stream for the values of the last
+`set_parameters()`:
 
 | Parameter | Meaning |
 |---|---|
@@ -55,13 +55,5 @@ The scores carry no `1/sqrt(256)` scale. A caller that needs one scales `q`.
 
 The cores round the scores, the probabilities and the output to bfloat16 and
 accumulate in float32. Against the float32 reference in `reference.py`, with
-outputs of order 1, the mean absolute error is about 0.008 and the largest is
+outputs of order 1, the mean absolute error is about 0.008. The largest is
 about 0.1.
-
-## The round-count handshake
-
-Each core reads the token range from its RTPs at the start of each pass. After
-a dispatch ends, a core starts its next pass at once, before the next dispatch
-writes the RTPs. So each core also takes a count from a lock, `go`, before it
-reads them. The sequence sets `go` to the number of passes, 2, after it writes
-the RTPs.

@@ -3,7 +3,7 @@
 
 """Sliding-window causal prefill attention with a head dim of 256, on the whole array.
 
-Four column pairs each take one query head per pass. A round covers 128 query
+Four pairs of columns each take one query head per pass. A round covers 128 query
 rows: each of a pair's 8 cores takes 16 of them and streams past them every
 key inside the window up to the round's last row. k and v come from one shim
 tile and reach every core through one memtile. The runtime sequence takes the
@@ -52,17 +52,16 @@ LK_MT = 128  # key rows per memtile buffer
 LQ_MT = 64  # query rows per memtile fifo half
 LQ_CT = 32  # query rows per core's q object, two cores' worth
 NUM_CU = 4  # column pairs
-DATA_PER_ROUND = LK * 8  # query rows per round
+DATA_PER_ROUND = LQ * 8  # query rows per round
 
-# The buffer addresses of the FastFlowLM overlay this design reproduces. The
-# stack occupies [0, STACK_SIZE) and grows up, so in_1, the lowest buffer, caps
-# it.
+# The buffer addresses of the FastFlowLM overlay. The stack grows up from 0 to
+# in_1, the lowest buffer.
 L1 = {
     "L_begin": 61568,
     "L_end": 11904,
     "window_size": 61600,
     "in_0": 49152,
-    "in_1": 11904 - 8192,
+    "in_1": 3712,
     "s": 57344,
     "m": 61760,
     "y": 32768,
@@ -71,10 +70,8 @@ L1 = {
 }
 STACK_SIZE = L1["in_1"]
 
-# Locks 2 and 3 of each core guard k and v.
+# The k/v DMA and the kernel's steps synchronize on these locks of each core.
 IN_PROD_LOCK, IN_CONS_LOCK = 2, 3
-
-_NO_UNROLL = "#llvm.loop_annotation<unroll = <disable = true>>"
 
 
 def swa_kernel(device=None):
@@ -94,7 +91,9 @@ def _no_unroll(iv):
     every copy. MLIR drops a malformed annotation without an error: check the
     call count in the core's opted_*.ll.
     """
-    iv.owner.owner.attributes["loop_annotation"] = Attribute.parse(_NO_UNROLL)
+    iv.owner.owner.attributes["loop_annotation"] = Attribute.parse(
+        "#llvm.loop_annotation<unroll = <disable = true>>"
+    )
 
 
 def grid(dev):
@@ -123,10 +122,8 @@ def swa(dev, max_context, num_heads, num_kv_heads, window, trace_size=0):
     """Sliding-window prefill attention over a KV cache of up to max_context rows.
 
     O and Q hold one row of num_heads heads per query token, from token
-    L_begin on. KV holds all K rows, then all V rows, max_l rows each; a row
-    holds num_kv_heads heads. A query sees the window keys up to itself. The
-    sequence takes L_begin, L_end and max_l at dispatch. L_begin and L_end
-    must be multiples of 128.
+    L_begin on. KV holds all K rows, then all V rows, max_l rows each. A KV
+    row holds num_kv_heads heads. A query sees the window keys up to itself.
     """
     COLS, ROWS = grid(dev)
     HEADS = num_heads
@@ -153,6 +150,8 @@ def swa(dev, max_context, num_heads, num_kv_heads, window, trace_size=0):
     odims = [(LQ // 8, 8 * DH), (DH // 8, 8), (8, DH), (8, 1)]
     qdims = [(LQ_CT // 8, 8 * DH), (DH // 8, 8), (8, DH), (8, 1)]
 
+    # Shim row 0, memtile row 1, compute rows from 2. The memtiles need their
+    # type: an untyped tile lowers its DMA to a core tile's aie.mem.
     IT = [Tile(j, 0, tile_type=dev.get_tile_type(j, 0)) for j in range(COLS)]
     MT = [Tile(j, 1, tile_type=dev.get_tile_type(j, 1)) for j in range(COLS)]
     CT = [
@@ -181,8 +180,14 @@ def swa(dev, max_context, num_heads, num_kv_heads, window, trace_size=0):
     k_epilogue = k("attn_epilogue", [o_ty, l_bf16_ty, y_ty, np.int32])
     k_rounds = k("attn_rounds", [L_ty, L_ty, L_ty])
 
-    rtp = {}  # (row, col) of the tile -> its [L_begin, L_end, window_size]
-    go = {}  # (row, col) of the tile -> its handshake lock
+    # RTPs, one set per core, keyed by the tile's (row, col): the sequence
+    # writes the token range and the window into them.
+    rtp = {}
+    # go orders each core's RTP read after the sequence's RTP write. A core
+    # starts its next pass as soon as a dispatch ends, before the next dispatch
+    # writes the RTPs. The sequence sets go to the number of passes after it
+    # writes the RTPs. A core takes one count before each pass.
+    go = {}
 
     def sequence(o, q, kv, lb_arg, le_arg, max_l_arg, o_shim, q_shims):
         q_shim = dict(zip(q_keys, q_shims))
@@ -245,18 +250,20 @@ def swa(dev, max_context, num_heads, num_kv_heads, window, trace_size=0):
                             )
                         )
 
-                # An i32 transfer_len: derived from the i64 size product, it
-                # does not fit dma_bd's operand.
+                # dma_bd's length operand is an i32. The product of the i64
+                # sizes does not fit it, so transfer_len gives the length.
                 kv_rows = arith.extsi(T.i64(), arith.divsi(kv_length, _as_i32(128)))
                 kv_head = head // (GQA // NUM_CU)
                 const_off = (
                     max_l * ((kv_head // KV_D) * DH * KV_D) + (kv_head % KV_D) * DH
                 )
                 k_off = const_off + kv_begin * _as_i32(DH * KV_D)
-                v_off = k_off + kv_cache_half
 
                 kv_tasks = []
-                for symbol, offset in (("k_in", k_off), ("v_in", v_off)):
+                for symbol, offset in (
+                    ("k_in", k_off),
+                    ("v_in", k_off + kv_cache_half),
+                ):
                     kv_tasks.append(
                         shim_dma_single_bd_task(
                             symbol,
@@ -372,27 +379,23 @@ def swa(dev, max_context, num_heads, num_kv_heads, window, trace_size=0):
                 blocks_k(lb, ws, i, nb)
                 for b in range_(nb[0]):
                     block_begin_k(m, prev_m)
-                    for j in range_(8):
+                    for j in range_(LK_MT // LK):
                         _no_unroll(j)
                         qk_k(s, q, in0, in1, m, lb, ws, row, col, i, b, j)
                     block_mid_k(s, m, new_m, prev_m, cbuf, lbuf, y)
-                    for j in range_(8):
+                    for j in range_(LK_MT // LK):
                         _no_unroll(j)
                         fv_k(y, s, in0, in1, j)
                     block_end_k(prev_m, new_m)
                 finalize_k(lbuf, l_bf16)
                 q_h.release(1)
-                for c in range_(64):
+                for c in range_(LQ * DH // 64):
                     o = o_h.acquire(1)
                     epilogue_k(o, l_bf16, y, c)
                     o_h.release(1)
 
         return core_fn
 
-    # A core that has finished one dispatch loops back and reads the RTPs at
-    # once, before the next dispatch writes them. So the sequence sets go once
-    # it has written them, to the number of passes a dispatch makes, and a core
-    # takes one before each read.
     workers = []
     for j in range(COLS):
         for i in range(ROWS):
@@ -472,8 +475,8 @@ def swa(dev, max_context, num_heads, num_kv_heads, window, trace_size=0):
             )
 
     # Odd memtiles stage k and v in one buffer pair: k in the first half, v in
-    # the second. Each input channel releases one of two counts, and the
-    # output reads a whole pair once both halves hold data.
+    # the second. Each input channel releases one of two counts. The output
+    # acquires both, so it reads a buffer once both halves hold data.
     for j in range(1, COLS, 2):
         mt = MT[j]
         in_0 = Buffer(type=in_mem_ty, name=f"in_0_0_{mt.col}", tile=mt)

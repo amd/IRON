@@ -16,13 +16,12 @@ from iron.operators.flm.swa.reference import reference
 NUM_HEADS = 8
 MAX_CONTEXT = 2048
 WINDOW = 512
-# A value the operator cannot produce from the inputs below, in the rows past
-# L_end - L_begin, which it must leave alone.
+# The operator cannot produce this value from the inputs below. The rows past
+# L_end - L_begin must keep it.
 SENTINEL = 7.0
 
-# The device rounds scores, probabilities and output to bfloat16. Outputs are
-# O(1), so the gate is an absolute distance. A stale token range, the failure
-# these tests exist for, measures a mean of 0.03 or more.
+# Outputs are of order 1, so the gate is an absolute error. A stale token range
+# measures a mean error of 0.03 or more.
 MAX_ERROR = 0.25
 MEAN_ERROR = 0.02
 
@@ -78,7 +77,7 @@ RANGES = [
     (0, 128, MAX_CONTEXT),
     # Queries past token 512 lose their oldest keys to the window.
     (0, 1024, MAX_CONTEXT),
-    # A range that starts past the window: the k/v reads start past token 0.
+    # The window moves the k/v reads past token 0.
     (512, 1024, MAX_CONTEXT),
     (1024, 2048, MAX_CONTEXT),
     # A cache shorter than the build's bound moves V to row max_l.
@@ -103,10 +102,11 @@ def test_matches_reference(L_begin, L_end, max_l, num_kv_heads, aie_context):
 
 @requires_aie2p
 def test_one_callable_serves_every_range(aie_context):
-    """Ranges back to back on one loaded xclbin, growing, shrinking and
-    repeated. Each core reads the token range from its RTPs, so a core that
-    reads them before the sequence writes them runs the previous dispatch's
-    range. The first dispatch after a load cannot show that."""
+    """Check that each dispatch runs its own token range.
+
+    The ranges run back to back on one loaded xclbin: growing, shrinking and
+    repeated. A stale range shows only from the second dispatch after a load.
+    """
     op = PrefillSlidingAttention(
         max_context=MAX_CONTEXT,
         num_heads=NUM_HEADS,
@@ -125,7 +125,7 @@ def test_one_callable_serves_every_range(aie_context):
 @pytest.mark.extensive
 @pytest.mark.parametrize("num_kv_heads", [1, 2])
 def test_gemma4_cache_bound(num_kv_heads, aie_context):
-    """The bound Gemma 4's engine builds for: 32768 rows."""
+    """Check the cache bound of Gemma 4's engine: 32768 rows."""
     op = PrefillSlidingAttention(
         max_context=32768,
         num_heads=NUM_HEADS,
