@@ -154,6 +154,13 @@ class GQAContext(Operator):
         if self.seq_len % 64:
             raise ValueError(f"seq_len ({self.seq_len}) must be a multiple of 64")
 
+    @classmethod
+    def fits(cls, dev, groups: int) -> bool:
+        """Whether ``dev`` has a column for each of ``groups`` KV groups
+        within its shim DMA budget (8 on NPU2; not NPU1's 4).
+        """
+        return groups <= cls.shim_columns(dev)
+
     def resolve(self, dev):
         self.check_shim_columns(dev, self.groups)
         chunk = self.chunk or (128 if self.seq_len % 128 == 0 else 64)

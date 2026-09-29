@@ -141,6 +141,22 @@ def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
     _assert_close(got, cpu.expected)
 
 
+def test_gqa_decode_reads_the_caches_the_prompt_wrote(cpu):
+    """``decode_attention="gqa"``: the prompt writes the caches split by
+    group, and each decode step's GEMVs, softmax and ``GQAContext`` read
+    them there.
+    """
+
+    class GQA(OnHost):
+        decode_attention = "gqa"
+
+    model = GQA(cpu.config, cpu.weights)
+    first = model.logits(cpu.prompt)
+    _assert_close([first], [cpu.first])
+    got = _greedy(model, cpu.prompt, first, len(cpu.expected))
+    _assert_close(got, cpu.expected)
+
+
 def test_a_prompt_longer_than_a_chunk_runs_in_chunks(cpu):
     """A prompt of several chunks, each attending over the caches the ones
     before it wrote, then a decode step, then a turn of several tokens,

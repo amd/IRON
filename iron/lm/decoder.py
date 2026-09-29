@@ -46,11 +46,13 @@ reference it is judged by; a model subclasses it too, with a numpy
 """
 
 import dataclasses
+import math
 import time
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
+import aie.utils as aie_utils
 import numpy as np
 from aie.iron.kernels.sample import ROW_WORDS
 from ml_dtypes import bfloat16
@@ -61,8 +63,14 @@ from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.handle import Weight
 from iron.common.graph.narrowing import JointNarrowing, Tuning
 from iron.operators.copy import Copy
+from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemv import GEMV
+from iron.operators.gqa_context import GQAContext
 from iron.operators.mha import MHA
+from iron.operators.repeat import Repeat
 from iron.operators.sample import Sample
+from iron.operators.softmax import Softmax
+from iron.operators.transpose import Transpose
 
 from .generation import Sampler
 
@@ -159,11 +167,20 @@ class CausalLM(iron.Graph):
 
     A subclass gives ``layer`` and ``head``, its ``profile``, and
     its ``oracle``, the ``Oracle`` it is checked against.
+
+    ``decode_attention`` is how a decode step attends: ``"mha"``, MHA over
+    the caches' span, or ``"gqa"``, a GEMV of the scores, a softmax over
+    the span and ``GQAContext`` (a GEMV of the repeated values where the
+    device has too few columns for it). Those read a group's rows in place,
+    so under ``"gqa"`` the caches are ``(n_kv_groups, max_seq_len,
+    head_dim)``, which a descriptor steps by ``max_seq_len`` and so holds
+    below 32768 rows; and a step costs the whole cache, not its span.
     """
 
     embedding: Weight
     layers: list
     oracle: "type[Oracle]"
+    decode_attention: Literal["mha", "gqa"] = "mha"
 
     def __init__(self, config: Config, weights):
         self.config = config
@@ -171,12 +188,19 @@ class CausalLM(iron.Graph):
         # A decode step gathers its token's row on the device.
         self.embedding = iron.weight(weights.embedding)
         G, L, D = config.n_kv_groups, config.max_seq_len, config.head_dim
-        self.keys = [iron.state((L, G, D)) for _ in self.layers]
-        self.values = [iron.state((L, G, D)) for _ in self.layers]
+        cache = (L, G, D) if self.decode_attention == "mha" else (G, L, D)
+        self.keys = [iron.state(cache) for _ in self.layers]
+        self.values = [iron.state(cache) for _ in self.layers]
         self.rope = iron.weight(config.angles().astype(bfloat16))
         # Zero until the host writes draws: a row of zeros is greedy.
         self.draws = iron.state((L, ROW_WORDS), np.int32)
         self.drawn = iron.state((L,), np.int32)
+        if self.decode_attention == "gqa":
+            # 1/sqrt(head_dim) over every score, as the elementwise multiply
+            # takes it.
+            H = config.n_heads
+            scale = np.full((H, L), 1 / math.sqrt(D), dtype=bfloat16)
+            self.scale = iron.weight(scale)
         self._seen = np.empty(0, dtype=np.int64)  # the tokens in the caches
         # The two versions and the loop over them, once loaded.
         self._prompt: CompiledGraph | None = None
@@ -245,25 +269,58 @@ class CausalLM(iron.Graph):
         )
         keys, values = self.keys[i], self.values[i]
         n = q.shape[0] // H
+        interleaved = self.decode_attention == "mha"
         # The call's rows of the cache, a chunk's or a step's one, as the
-        # projection wrote them.
+        # projection wrote them, or, under "gqa", its heads split by group.
         for x, cache in ((k, keys), (v, values)):
-            if step.prompt:
+            if step.prompt and interleaved:
                 rows = cache.reshape(L // C, C, G, D)[step.chunk, : step.rows]
                 Copy(x.reshape(n, G, D), rows)
-            else:
+            elif step.prompt:
+                Copy(
+                    x.reshape(n, G, D).transpose(1, 0, 2),
+                    cache.reshape(G, L // C, C, D)[:, step.chunk, : step.rows],
+                )
+            elif interleaved:
                 Copy(x.reshape(G, D), cache[step.position])
+            else:
+                Copy(x.reshape(G, D), cache[:, step.position])
+        if not step.prompt and not interleaved:
+            return self._decode_gqa(step, keys, values, q)
         # The queries are the last rows of the keys so far; one query, a
         # step's, MHA packs by its heads.
-        span = np.s_[: step.position + 1]
+        span = (
+            np.s_[: step.position + 1] if interleaved else np.s_[:, : step.position + 1]
+        )
         o = MHA(
             q.reshape(n, H, D),
             keys[span],
             values[span],
             heads_interleaved=True,
-            kv_interleaved=True,
+            kv_interleaved=interleaved,
         )
         return o.reshape(n, H * D)
+
+    def _decode_gqa(self, step: Step, keys, values, q):
+        """A decode step's attention as GEMVs, a masked softmax and
+        ``GQAContext`` (``decode_attention="gqa"``).
+        """
+        c = self.config
+        H, G, D, L = c.n_heads, c.n_kv_groups, c.head_dim, c.max_seq_len
+        # The scores' GEMV reads each group's keys where they are, replayed
+        # for its H // G heads.
+        scores = ElementwiseMul(GEMV(keys, q, repeat=H // G), self.scale)
+        # Masked from the context length on: the cache's unwritten tail
+        # contributes nothing.
+        weights = Softmax(scores, vector_size=step.position + 1)
+        if GQAContext.fits(aie_utils.ensure_current_device(required=True), G):
+            # A column per group weighs its values for all of its heads.
+            ctx = GQAContext(values, weights.reshape(G, H // G, L))
+            return ctx.reshape(1, H * D)
+        # Too few columns for the groups: every head gets its group's
+        # values, transposed, for one GEMV. The same sums.
+        v_all = Repeat(values, repeat=H // G)
+        return GEMV(Transpose(v_all), weights).reshape(1, H * D)
 
     # -- on the host -----------------------------------------------------------
 
