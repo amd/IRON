@@ -21,6 +21,8 @@ _OPERATOR_MODULES = {
     "PrefillSlidingAttention": "prefill_attn",
     # Softcapped logits straight from the q4nx vocabulary.
     "LMHead": "lm_head",
+    # Gemma 4's fused decode layer, as FastFlowLM's engine drives it.
+    "DecodeLayer": "layer",
     # The shipped overlay itself, downloaded as a pinned binary. NPU2 only;
     # exists so the port can be measured against what it was ported from.
     "MMPrebuilt": "mm_prebuilt",
