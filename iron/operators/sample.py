@@ -89,7 +89,7 @@ class Sample(Operator):
         [
             Case(dict(vocab=4096, cores=4, steps=3), id="small"),
             Case(dict(vocab=4096, cores=2, chunk=256), id="two_cores"),
-            Case(dict(vocab=128256, cores=4), id="llama"),
+            Case(dict(vocab=128256, cores=4), id="llama", bench=True),
         ],
         tolerance=Tolerance.exact(),
         draw=_logits,

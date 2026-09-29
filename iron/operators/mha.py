@@ -66,11 +66,12 @@ class MHA(Operator):
     # 0.5% of the outputs allowed past it.
     test = Testing(
         [
-            Case(dict(num_heads=1, seq_len=16384, num_pipelines=8)),
+            Case(dict(num_heads=1, seq_len=16384, num_pipelines=8), bench=True),
             # Grouped-query: 8 query heads over 2 KV heads.
             Case(
                 dict(num_heads=8, num_KV_heads=2, seq_len=16384, num_pipelines=8),
                 extensive=True,
+                bench=True,
             ),
             Case(dict(num_heads=1, seq_len=16384, num_pipelines=4), extensive=True),
             # A chunk over a cache: 2048 queries, the last rows of 8192 keys.

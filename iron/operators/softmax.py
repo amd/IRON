@@ -13,7 +13,7 @@ from aie.iron.kernels import activation, zero
 from aie.utils.verify import Tolerance
 
 from iron.common import Extent, In, Incompatible, Operator, Out, Value, auto, param
-from iron.common.testing import Testing
+from iron.common.testing import Case, Testing
 
 # softmax_bf16's vector step on both targets (activation.softmax holds a row
 # to a multiple of it). Its loops cover only whole steps.
@@ -41,6 +41,11 @@ class Softmax(Operator):
             dict(rows=32, cols=1024, num_aie_columns=2, num_channels=2),
             dict(rows=64, cols=512, num_aie_columns=2, num_channels=2),
             dict(rows=16, cols=2048, num_aie_columns=2, num_channels=2),
+            # Benched: 2 Mi elements, well past the dispatch cost.
+            Case(
+                dict(rows=4096, cols=512, num_aie_columns=2, num_channels=2),
+                bench=True,
+            ),
         ]
     )
 

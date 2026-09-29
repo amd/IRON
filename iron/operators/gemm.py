@@ -87,8 +87,10 @@ def _cases(cls):
             out.append(Case(kwargs, extensive=extensive))
     # The defaults, which a graph's projections run: bfp16 inputs, and C
     # rounded to bf16 between K tiles.
+    # The default-suite one is benched: it runs well past the dispatch cost.
     for K, extensive in ((2048, False), (8192, True)):
-        out.append(Case(dict(M=2048, K=K, N=2048, b_col_maj=True), extensive))
+        kwargs = dict(M=2048, K=K, N=2048, b_col_maj=True)
+        out.append(Case(kwargs, extensive, bench=not extensive))
     return out
 
 

@@ -5,7 +5,7 @@
 
 import pytest
 
-from iron.common.testing import Case, Sweep, Testing
+from iron.common.testing import BENCH_ELEMENTS, Case, Sweep, Testing
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gelu import GELU
 from iron.operators.rms_norm import RMSNorm
@@ -22,14 +22,25 @@ def test_the_unary_sweep_reads_the_class_it_is_resolved_for():
         assert (
             k["size"] % (k["num_aie_columns"] * k["num_channels"] * k["tile_size"]) == 0
         )
-    assert {c.kwargs["size"] for c in cases if not c.extensive} == {2048}
+    default = {c.kwargs["size"] for c in cases if not c.extensive and not c.bench}
+    assert default == {2048}
+    # One benched case, in the default suite: the widest grid, most channels.
+    (bench,) = [c for c in cases if c.bench]
+    assert not bench.extensive
+    assert bench.kwargs == dict(
+        size=BENCH_ELEMENTS, num_aie_columns=8, num_channels=2, tile_size=4096
+    )
     assert "num_channels" not in Sweep(channels=None)(SiLU)[0].kwargs
 
 
 def test_the_binary_sweep_and_an_all_extensive_sweep():
     cases = Sweep(channels=None)(ElementwiseAdd)
     assert {c.kwargs["num_aie_columns"] for c in cases} == {1, 2, 4, 8}  # divide 2^n
-    extra = Sweep(channels=None, regular=None, scalar_factor=10.0)(ElementwiseAdd)
+    (bench,) = [c for c in cases if c.bench]
+    assert bench.kwargs == dict(size=BENCH_ELEMENTS, num_aie_columns=8, tile_size=4096)
+    extra = Sweep(channels=None, regular=None, bench=None, scalar_factor=10.0)(
+        ElementwiseAdd
+    )
     assert extra and all(
         c.extensive and c.kwargs["scalar_factor"] == 10.0 for c in extra
     )

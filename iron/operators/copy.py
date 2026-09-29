@@ -81,6 +81,12 @@ class Copy(Operator):
             Case(_into_slot(5, num_channels=2), id="slot5_two_channels"),
             Case(_into_slot(5, num_channels=4), id="slot5_four_channels"),
             Case(_into_slot(1000, seq=2048), id="slot1000_of_2048", extensive=True),
+            # Benched: 4 Mi elements, well past the dispatch cost.
+            Case(
+                dict(input_buffer_size=1 << 22, num_channels=4, tile_size=4096),
+                id="bench_flat_4mi",
+                bench=True,
+            ),
         ],
         tolerance=Tolerance.exact(),
     )

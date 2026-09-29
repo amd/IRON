@@ -73,6 +73,23 @@ def _cases(cls):
                 extensive=batches != 2,
             )
         )
+    # Benched: 4 Mi elements, well past the dispatch cost. Each column takes a
+    # 64-wide slice of N and each channel a 64-row-aligned slice of M.
+    out.append(
+        Case(
+            dict(
+                M=8192,
+                N=512,
+                num_aie_columns=aie_utils.ensure_current_device(required=True).cols,
+                num_channels=2,
+                m=m,
+                n=n,
+                s=8,
+                num_batches=1,
+            ),
+            bench=True,
+        )
+    )
     return out
 
 

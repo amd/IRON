@@ -32,7 +32,7 @@ from iron.common.design import Target
 from iron.common.testing import Case, Testing
 
 
-def _cases():
+def _cases(cls):
     # M, K, columns, tile_size_input, tile_size_output
     plain = [
         (128, 128, 1, 32, 128),
@@ -63,12 +63,19 @@ def _cases():
         (2048, 64, 8, 4, 256, 32, 4),  # Llama decode's scores: 32 heads, 8 groups
     ]
 
-    def case(M, K, cols, tsi, tso, **extra):
+    def case(M, K, cols, tsi, tso, *, bench=False, **extra):
         kwargs = dict(M=M, K=K, num_aie_columns=cols, tile_size_input=tsi)
-        return Case(dict(kwargs, tile_size_output=tso, **extra))
+        return Case(dict(kwargs, tile_size_output=tso, **extra), bench=bench)
+
+    # Benched: the large matrices across the whole device, which run well
+    # past the dispatch cost.
+    widest = aie_utils.ensure_current_device(required=True).cols
+
+    def bench(M, K, cols, *_):
+        return cols == widest and M * K >= 2048 * 8192
 
     return (
-        [case(*p) for p in plain]
+        [case(*p, bench=bench(*p)) for p in plain]
         + [case(*p, num_batches=batches) for *p, batches in batched]
         + [case(*p, num_batches=batches, repeat=r) for *p, batches, r in repeated]
         # The fused GELU epilogue, aie2p's alone.
@@ -90,7 +97,7 @@ class GEMV(Operator):
     - tile_size_output: rows of C stored on each core per acquire (chunk size of C)
     """
 
-    test = Testing(_cases(), draw=dict(normal=("A", "B")))
+    test = Testing(_cases, draw=dict(normal=("A", "B")))
 
     M: int = param()
     K: int = param()

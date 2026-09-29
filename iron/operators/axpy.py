@@ -18,8 +18,8 @@ class AXPY(BinaryElementwise):
     test = Testing(
         [
             Sweep(channels=None, scalar_factor=3.0),
-            Sweep(channels=None, scalar_factor=1.003),
-            Sweep(channels=None, scalar_factor=10.0, regular=None),
+            Sweep(channels=None, scalar_factor=1.003, bench=None),
+            Sweep(channels=None, scalar_factor=10.0, regular=None, bench=None),
         ]
     )
 

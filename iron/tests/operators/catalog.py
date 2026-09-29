@@ -50,7 +50,10 @@ def _declared():
                     declaration,
                     case,
                     id=f"{name}-{case.label}",
-                    marks=[pytest.mark.extensive] if case.extensive else [],
+                    marks=[
+                        *([pytest.mark.extensive] if case.extensive else []),
+                        *([pytest.mark.bench] if case.bench else []),
+                    ],
                 )
             )
     return params

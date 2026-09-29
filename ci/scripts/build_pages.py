@@ -78,7 +78,7 @@ def build_data(results_root):
         if not date:
             continue
 
-        groups = operators.setdefault(operator_name(test_path), {})
+        groups = operators.setdefault(operator_name(test_path, params), {})
         bucket = groups.setdefault((arch, suite), {"commits": {}, "series": {}})
         bucket["commits"][date] = (row.get("Commit") or "").strip()[:7] or "unknown"
 

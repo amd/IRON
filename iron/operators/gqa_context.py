@@ -108,7 +108,9 @@ class GQAContext(Operator):
             ),
             Case(dict(groups=1, heads_per_group=1, seq_len=128), id="single_call"),
             Case(dict(groups=4, heads_per_group=4, seq_len=64), id="shortest"),
-            Case(dict(groups=8, heads_per_group=4, seq_len=2048), id="llama"),
+            Case(
+                dict(groups=8, heads_per_group=4, seq_len=2048), id="llama", bench=True
+            ),
         ],
         tolerance=Tolerance.exact(),
     )

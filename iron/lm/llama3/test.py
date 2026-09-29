@@ -62,7 +62,7 @@ def test_llama_3_2_1b_each_step_accuracy(runner, record_property):
 
 @pytest.mark.parametrize(
     "prompt_len,num_tokens",
-    [(p, n) for p in (1024, 13) for n in (40, 1)],
+    [pytest.param(p, n, marks=pytest.mark.bench) for p in (1024, 13) for n in (40, 1)],
     ids=[f"llama_3.2_1b_prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
 )
 def test_llama_3_2_1b(runner, model, prompt_len, num_tokens, record_property):
@@ -71,6 +71,7 @@ def test_llama_3_2_1b(runner, model, prompt_len, num_tokens, record_property):
 
 # The device draws every token and starts every decode step itself; from the
 # same seed its text is the host loop's. The figures are the device loop's.
+@pytest.mark.bench
 def test_llama_3_2_1b_device_loop(runner, model, record_property):
     check_device_loop(runner, model, 1024, 100, record=record_property)
 

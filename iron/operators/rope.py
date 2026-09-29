@@ -67,6 +67,8 @@ def _cases(cls):
                                 extensive=not regular,
                             )
                         )
+    # Benched: 4096 rows over every column, well past the dispatch cost.
+    out.append(Case(dict(rows=4096, cols=512, angle_rows=8, method_type=0), bench=True))
     return out
 
 

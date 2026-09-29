@@ -426,10 +426,11 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      to every case)
    - `extensive=True` keeps a case out of the default suite
    - `bench=True` marks the cases CI tracks over time (`pytest.mark.bench`).
-     Every operator needs at least one. Pick an input large enough that
-     dispatch overhead (~160 us) does not dominate the measurement; a case
-     that finishes near that floor measures nothing. `Sweep` adds one at
-     `BENCH_ELEMENTS`
+     Every operator needs at least one, in the default suite. Pick an input
+     large enough that dispatch overhead (~160 us) does not dominate the
+     measurement; a case that finishes near that floor measures little, so
+     an operator no input takes past it gets its least noisy case. `Sweep`
+     adds one at `BENCH_ELEMENTS`
    - `draw=` passes `vectors()` its arguments (`normal=`, `centered=`, a given
      tensor or shape per input), or a callable of the operator for an input
      with preconditions (a packed quantization, an angle table)

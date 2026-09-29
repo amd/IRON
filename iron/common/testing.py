@@ -35,13 +35,16 @@ class Case:
     """One construction of an operator, and whether the default suite runs it.
 
     ``kwargs`` are the constructor's; ``extensive`` keeps a case out of the
-    default run (``-m "not extensive"``); ``id`` names it in test output,
-    defaulting to the arguments.
+    default run (``-m "not extensive"``); ``bench`` marks it as a case CI
+    tracks over time (``pytest.mark.bench``), which wants an input large
+    enough that the dispatch cost does not dominate; ``id`` names it in test
+    output, defaulting to the arguments.
     """
 
     kwargs: dict = field(default_factory=dict)
     extensive: bool = False
     id: str | None = None
+    bench: bool = False
 
     @property
     def label(self) -> str:
@@ -91,6 +94,12 @@ class Testing:
 
 LENGTHS = (1024, 2048, 4096, 8192)
 
+# The length of a sweep's bench case: 16 MiB of bf16 per operand, which takes
+# the widest grid most of a millisecond, several times the dispatch cost.
+BENCH_ELEMENTS = 1 << 23
+# The line a bench case's cores each take, if the operator's cap allows.
+BENCH_TILE = 4096
+
 
 class Sweep:
     """The cases of an elementwise operator: every column count its shim
@@ -106,6 +115,11 @@ class Sweep:
     channel fills). With ``rows``, a length is that many elements in rows
     of ``tile_size``, for a ``Rowwise``
     operator. ``extra`` is given to every case.
+
+    ``bench`` adds one default-suite case of that many elements, marked for CI
+    to track: the widest grid at the most channels, at a line of ``BENCH_TILE``
+    or the cap. ``None`` adds none, for a sweep that only varies an argument
+    another sweep of the same operator already benches.
     """
 
     def __init__(
@@ -116,14 +130,24 @@ class Sweep:
         tile_cap: int | None = None,
         regular: int | None = 2048,
         rows: bool = False,
+        bench: int | None = BENCH_ELEMENTS,
         **extra,
     ):
         self.lengths = tuple(lengths)
+        self.bench = bench
         self.channels = None if channels is None else tuple(channels)
         self.tile_cap = tile_cap
         self.regular = regular
         self.rows = rows
         self.extra = extra
+
+    def _kwargs(self, length: int, cols: int, chans: int, tile: int) -> dict:
+        kwargs = dict(rows=length // tile) if self.rows else dict(size=length)
+        kwargs["num_aie_columns"] = cols
+        if self.channels is not None:
+            kwargs["num_channels"] = chans
+        kwargs.update(tile_size=tile, **self.extra)
+        return kwargs
 
     def __call__(self, cls) -> list[Case]:
         dev = aie_utils.ensure_current_device(required=True)
@@ -136,12 +160,25 @@ class Sweep:
                     tile = min(length // cores, cap)
                     if tile * cores != length:
                         continue
-                    kwargs = (
-                        dict(rows=length // tile) if self.rows else dict(size=length)
+                    out.append(
+                        Case(
+                            self._kwargs(length, cols, chans, tile),
+                            extensive=length != self.regular,
+                        )
                     )
-                    kwargs["num_aie_columns"] = cols
-                    if self.channels is not None:
-                        kwargs["num_channels"] = chans
-                    kwargs.update(tile_size=tile, **self.extra)
-                    out.append(Case(kwargs, extensive=length != self.regular))
+        if self.bench is not None:
+            chans = max(self.channels or (1,))
+            tile = min(BENCH_TILE, cap)
+            # The widest grid whose cores split the length evenly.
+            cols = next(
+                c
+                for c in range(cls.shim_columns(dev, chans, self.extra), 0, -1)
+                if self.bench % (c * chans * tile) == 0
+            )
+            out.append(
+                Case(
+                    self._kwargs(self.bench, cols, chans, tile),
+                    bench=True,
+                )
+            )
         return out

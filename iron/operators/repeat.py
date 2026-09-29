@@ -53,6 +53,7 @@ class Repeat(Operator):
             Case(
                 dict(rows=8, cols=2048 * 64, repeat=4, tile_size=64),
                 extensive=True,
+                bench=True,
             ),
         ],
         tolerance=Tolerance.exact(),
