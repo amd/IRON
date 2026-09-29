@@ -10,15 +10,24 @@ attention over the caches (:meth:`CausalLM.attend`); and
 ``logits(tokens)``. A model subclasses it with its ``layer`` and its
 ``head``.
 
-One row is a decode step at ``position``: the row written into the caches
-there, and MHA of its one query over the ``position + 1`` keys up to it.
-``prefill_chunk`` rows are a chunk of a prompt, of which a call runs the
-first ``rows``: the chunk's rows written into the caches at chunk
-``chunk``, causal MHA of them over the caches up to ``position``, its last
-token, and the head for that token alone. A prompt is its chunks in turn,
-so what a call costs follows the tokens it runs, and a step the context
-it attends over, not ``max_seq_len``, which sizes the caches and the RoPE
-table alone.
+No ``x`` is a decode step at ``position``: the token's embedding row and
+the position's RoPE row gathered on the device, the row written into the
+caches there, and MHA of its one query over the ``position + 1`` keys up to
+it. ``prefill_chunk`` rows of ``x`` are a chunk of a prompt, of which a
+call runs the first ``rows``: the chunk's rows written into the caches at
+chunk ``chunk``, causal MHA of them over the caches up to ``position``, its
+last token, and the head for that token alone. A prompt is its chunks in
+turn, so what a call costs follows the tokens it runs, and a step the
+context it attends over, not ``max_seq_len``, which sizes the caches and the
+RoPE table alone.
+
+Both end in the head, and draw the next token from its logits on the device
+(:class:`~iron.operators.sample.Sample`, from a draw the host wrote ahead
+for the position). They return the logits and carry the token and
+``position + 1`` into the next call, so a prompt's last chunk can start a
+decode step and each step the next with nothing from the host
+(:meth:`CausalLM.generate`). ``logits(tokens)`` returns the logits instead,
+for the host to draw from.
 
 Each shape compiles its own version, and every version runs in the graph's
 one scratch arena (:mod:`iron.common.graph.compiled`): the weights and the
@@ -31,18 +40,24 @@ reference it is judged by; a model subclasses it too, with a numpy
 """
 
 import dataclasses
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
 from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+from aie.iron.kernels.sample import ROW_WORDS
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Scratchpad
-from iron.common.graph import Handle
+from iron.common import Carried, Scratchpad
+from iron.common.graph import CarriedLoop, CompiledGraph, Handle
+from iron.common.graph.handle import Weight
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
+from iron.operators.sample import Sample
+
+from .generation import Sampler
 
 #: A RoPE frequency scaling: the frequencies (radians per position, float64)
 #: in, scaled out (Llama 3's is :class:`~iron.lm.llama3.model.Llama3RopeScaling`).
@@ -127,28 +142,39 @@ class Step:
 class CausalLM(iron.Graph):
     """A decoder on ``config``'s shape and ``weights``, whose top-level
     fields become the model's (named as they are: ``layers.3.q``). It needs
-    ``embedding``, the rows the host looks tokens up in, and ``layers``;
+    ``embedding``, the rows tokens are looked up in, and ``layers``;
     ``keys[i]`` and ``values[i]`` are each layer's cache, ``(max_seq_len,
     n_kv_groups, head_dim)``, a position's heads together as the projection
-    writes them, so no descriptor steps by ``max_seq_len``; and ``rope`` the RoPE table the device reads
-    each call's rows of.
+    writes them, so no descriptor steps by ``max_seq_len``; ``rope`` the RoPE
+    table the device reads each call's rows of; ``draws`` holds the device's
+    draw at each position (``Sampler.rows``) and ``drawn`` the token it drew
+    there.
 
     A subclass gives :meth:`layer` and :meth:`head`, its ``profile``, and
     its ``oracle``, the :class:`Oracle` it is checked against.
     """
 
-    embedding: np.ndarray
+    embedding: Weight
     layers: list
     oracle: "type[Oracle]"
 
     def __init__(self, config: Config, weights):
         self.config = config
         vars(self).update(vars(weights))
+        # A decode step gathers its token's row on the device.
+        self.embedding = iron.weight(weights.embedding)
         G, L, D = config.n_kv_groups, config.max_seq_len, config.head_dim
         self.keys = [iron.state((L, G, D)) for _ in self.layers]
         self.values = [iron.state((L, G, D)) for _ in self.layers]
         self.rope = iron.weight(config.angles().astype(bfloat16))
+        # Zero until the host writes draws: a row of zeros is greedy.
+        self.draws = iron.state((L, ROW_WORDS), np.int32)
+        self.drawn = iron.state((L,), np.int32)
         self._seen = np.empty(0, dtype=np.int64)  # the tokens in the caches
+        # The two versions and the loop over them, once loaded.
+        self._prompt: CompiledGraph | None = None
+        self._decode: CompiledGraph | None = None
+        self._loop: CarriedLoop | None = None
 
     def layer(self, step: Step, i: int, weights, x):
         """Layer ``i`` over ``x``, ``(rows, emb_dim)``, with its ``weights``."""
@@ -160,28 +186,40 @@ class CausalLM(iron.Graph):
 
     def body(
         self,
-        x,
+        x=None,
         *,
+        token: Carried[np.int32],
+        position: Carried[np.int32],
         chunk: Scratchpad[np.int32],
         rows: Scratchpad[np.int32],
-        position: Scratchpad[np.int32],
     ):
         c = self.config
         L, C, D = c.max_seq_len, c.prefill_chunk, c.head_dim
-        prompt = x.shape[0] > 1
+        prompt = x is not None
         if prompt:
             # Every operator below runs the rows of this call alone.
             x = x[:rows]
             angles = Copy(self.rope.reshape(L // C, C, D)[chunk], tile_size=1024)
             angles = angles.reshape(C, D)[:rows]
         else:
+            # The token's embedding row and the position's RoPE row, gathered
+            # here: a decode step takes nothing from the host.
+            x = Copy(self.embedding[token]).reshape(1, c.emb_dim)
             angles = Copy(self.rope[position]).reshape(1, D)
         step = Step(prompt, angles, chunk, rows, position)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
         if prompt:
-            x = Copy(x[rows - 1]).reshape(1, c.emb_dim)  # all the host reads
-        return self.head(x)
+            x = Copy(x[rows - 1]).reshape(1, c.emb_dim)  # the last row's logits alone
+        logits = self.head(x)
+        _, drawn = Sample(
+            logits.reshape(c.vocab_size),
+            self.draws,
+            self.drawn,
+            row=position * ROW_WORDS,
+            at=position,
+        )
+        return logits, iron.carry(token=drawn, position=position + 1)
 
     def attend(self, step: Step, i: int, q, k, v):
         """Causal attention of the call's rows over layer ``i``'s caches,
@@ -223,8 +261,10 @@ class CausalLM(iron.Graph):
     # -- on the host -----------------------------------------------------------
 
     def shapes(self, rows: int) -> dict:
-        """The input shapes of the version that runs ``rows`` tokens."""
-        return dict(x=(rows, self.config.emb_dim))
+        """The input shapes of the version that runs ``rows`` tokens: none
+        for a decode step, which gathers its row on the device.
+        """
+        return dict(x=(rows, self.config.emb_dim)) if rows > 1 else {}
 
     def load(self, release=None) -> "CausalLM":
         """Compile and load the decode and prompt versions, weights uploaded.
@@ -233,10 +273,14 @@ class CausalLM(iron.Graph):
         size. ``release`` is given each piece of each weight once it is on
         the device, to drop the host's pages of it.
         """
-        for rows in (1, self.config.prefill_chunk):
-            self.compile(**self.shapes(rows))
-        for version in self.versions.values():
+        decode = self.compile(**self.shapes(1))
+        # A prompt's carried values start a decode step (generate()), where
+        # the image has an Emit to write them with.
+        feeds = decode if decode.emit is not None else None
+        prompt = self.compile(feeds=feeds, **self.shapes(self.config.prefill_chunk))
+        for version in (decode, prompt):
             version.load(release=release)
+        self._prompt, self._decode = prompt, decode
         return self
 
     def logits(self, tokens) -> np.ndarray:
@@ -247,26 +291,108 @@ class CausalLM(iron.Graph):
         chunks from the one holding the first token the caches do not.
         """
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
-        n, L, C = tokens.size, self.config.max_seq_len, self.config.prefill_chunk
+        n, L = tokens.size, self.config.max_seq_len
         if not 0 < n <= L:
             raise ValueError(f"{n} tokens do not fit {L} rows")
-        # The tokens the caches hold, of these; the last is always run.
-        held = min(n - 1, self._seen.size)
-        same = np.append(tokens[:held] == self._seen[:held], False)
-        held = int(np.argmin(same))
-        # A decode step is a chunk of one row. Every call passes every
-        # per-call value; a version reads the ones its operators bind.
-        rows = 1 if held == n - 1 == self._seen.size else C
-        x = np.zeros((rows, self.config.emb_dim), dtype=bfloat16)
-        for begin in range(held // rows * rows, n, rows):
-            end = min(begin + rows, n)
-            x[: end - begin] = self.embedding[tokens[begin:end]]
-            out = self(x, chunk=begin // C, rows=end - begin, position=end - 1)
+        held = self._held(tokens)
+        # Every call passes every per-call value; a version reads the ones
+        # its operators bind. The token the device draws is the host's to
+        # draw again.
+        if held == n - 1 == self._seen.size:
+            out, _ = self(token=int(tokens[-1]), position=n - 1, chunk=0, rows=1)
+        else:
+            for x, values in self._chunks(tokens, held):
+                out, _ = self(x, **values)
         self._seen = tokens
         # The range holds the last token, so it runs at least once; a copy,
         # since the image's output buffer is rewritten by the next call.
         logits = out.numpy()  # pyright: ignore[reportPossiblyUnboundVariable]
         return np.array(logits).reshape(-1)
+
+    def generate(
+        self, tokens, num_tokens: int, sample: Sampler
+    ) -> tuple[list[int], float, float]:
+        """Draw ``num_tokens`` after ``tokens`` with the host out of the loop.
+
+        The prompt runs from the host, a chunk at a time; its last chunk
+        draws the first token, and its carried values, that token and the
+        position after it, start the first decode step, and each step the
+        next (:class:`CarriedLoop`). Every draw is the device's, from a row
+        ``sample`` gives it before the prompt
+        (:meth:`~.generation.Sampler.rows`), so the tokens are the ones
+        :func:`~.generation.generate` draws on the host from the same logits
+        and the same seed.
+
+        Returns what that does: the tokens drawn, the seconds to the first
+        and the mean seconds per token after it (NaN for one token).
+        """
+        tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
+        n, L = tokens.size, self.config.max_seq_len
+        if not (0 < n and 0 < num_tokens and n + num_tokens - 1 <= L):
+            raise ValueError(
+                f"{n} tokens and {num_tokens} more to draw do not fit {L} rows"
+            )
+        if self._prompt is None or self._decode is None:
+            raise RuntimeError(f"{type(self).__name__}: load() before generate()")
+        if self._loop is None:
+            self._loop = CarriedLoop(self._prompt, self._decode, depth=2)
+        start = time.perf_counter()
+        # The prompt draws at its last position, n - 1; decode step k at n + k.
+        draws = np.zeros((L, ROW_WORDS), dtype=np.int32)
+        draws[n - 1 : n - 1 + num_tokens] = sample.rows(num_tokens, self._k_max())
+        self._decode.write(self.draws, draws)
+        # A prompt the caches partly hold runs from the chunk holding its
+        # first new token; the last chunk starts the loop.
+        for x, values in self._chunks(tokens, self._held(tokens)):
+            if values["position"] < n - 1:
+                self(x, **values)
+            else:
+                self._loop.start(x, **values)
+        first = time.perf_counter()
+        for _ in self._loop.steps(num_tokens - 1):
+            pass
+        later = (
+            (time.perf_counter() - first) / (num_tokens - 1)
+            if num_tokens > 1
+            else float("nan")
+        )
+        drawn = self._decode.read(self.drawn)[n - 1 : n - 1 + num_tokens]
+        # The caches hold every token but the last drawn, which no step read.
+        self._seen = np.concatenate([tokens, drawn[:-1]]).astype(np.int64)
+        return [int(t) for t in drawn], first - start, later
+
+    def _held(self, tokens: np.ndarray) -> int:
+        """How many of ``tokens`` the caches hold; never the last, which is
+        always run.
+        """
+        held = min(tokens.size - 1, self._seen.size)
+        same = np.append(tokens[:held] == self._seen[:held], False)
+        return int(np.argmin(same))
+
+    def _chunks(self, tokens: np.ndarray, held: int) -> Iterator[tuple]:
+        """A prompt's calls, ``(x, values)``, from the chunk holding token
+        ``held`` to the last. ``x`` is one buffer refilled per chunk: the
+        rows past a chunk's tokens are never read.
+        """
+        n, C = tokens.size, self.config.prefill_chunk
+        x = np.zeros((C, self.config.emb_dim), dtype=bfloat16)
+        for begin in range(held // C * C, n, C):
+            end = min(begin + C, n)
+            x[: end - begin] = self.embedding.array[tokens[begin:end]]
+            values = dict(
+                token=int(tokens[end - 1]),
+                position=end - 1,
+                chunk=begin // C,
+                rows=end - begin,
+            )
+            yield x, values
+
+    def _k_max(self) -> int:
+        """The largest top-k the device draws with: its Sample's."""
+        assert self._decode is not None
+        return next(
+            s.op.k_max for s in self._decode.traced.steps if isinstance(s.op, Sample)
+        )
 
 
 class Oracle:

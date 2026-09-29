@@ -203,7 +203,8 @@ class CarriedLoop:
             if version.emit is None:
                 raise ValueError(
                     f"{version.traced.name}: a full-ELF version with carried values "
-                    f"loops; this one has no Emit step"
+                    f"loops; this one has no Emit step (compile one that takes a "
+                    f"tensor with feeds= the version it starts)"
                 )
         if first.arena is None or first.arena is not body.arena:
             raise ValueError("first and body are versions of one graph")
@@ -229,10 +230,22 @@ class CarriedLoop:
 
         Closing the iterator early waits out the steps in flight.
         """
+        self.start(*tensors, **values)
+        yield from self.steps(steps)
+
+    def start(self, *tensors, **values) -> None:
+        """Run ``first`` on ``tensors`` and ``values``, and wait for it."""
         # Nothing stages the body's own call: its weights go up with first's.
         self.body.upload()
         self.first.start(self._first, *tensors, **values)
         self.first.callable.wait(self._first)
+
+    def steps(self, steps: int) -> Iterator[int]:
+        """Run ``steps`` steps of ``body`` from the carry ``start()`` left;
+        yield each step's index once it has completed.
+
+        Closing the iterator early waits out the steps in flight.
+        """
         in_flight: deque[int] = deque()
         for k in range(min(self.depth, steps)):
             self._runs[k].start()

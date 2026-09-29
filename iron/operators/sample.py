@@ -42,12 +42,18 @@ from iron.common.testing import Case, Testing
 _CHUNK_LIMIT = 8192
 
 
-def reference(logits, draw_row) -> int:
-    """The token the device draws from ``logits`` for one four-word draw row."""
-    row = np.asarray(draw_row, dtype=np.int32).view(np.uint32)
+def reference(logits, draw_row, k_max: int | None = None) -> int:
+    """The token the device draws from ``logits`` for one four-word draw row.
+
+    The kernels take a top-k below 1 as 1 and one above ``k_max`` as
+    ``k_max``: a row of zeros, a buffer the host never wrote, is greedy.
+    """
+    words = np.asarray(draw_row, dtype=np.int32)
+    row = words.view(np.uint32)
     temperature = row[0:1].view(np.float32)[0]
     n53 = int(row[2]) | int(row[3]) << 32
-    return kernels.sample_ref(logits, temperature, int(row[1]), n53)
+    top_k = max(int(words[1]), 1)
+    return kernels.sample_ref(logits, temperature, top_k, n53, k_max=k_max)
 
 
 def _logits(op: "Sample") -> dict:
@@ -285,7 +291,9 @@ class Sample(Operator):
     def reference(self, logits, draws, tokens, *, row=0, at=0):
         """``(tokens, token)``: the draw at ``draws`` row ``row // 4``, recorded at ``at``."""
         token = reference(
-            logits, np.asarray(draws).reshape(-1)[row : row + kernels.ROW_WORDS]
+            logits,
+            np.asarray(draws).reshape(-1)[row : row + kernels.ROW_WORDS],
+            self.k_max,
         )
         tokens = np.array(tokens, dtype=np.int32).reshape(-1)
         tokens[at] = token

@@ -11,20 +11,33 @@ A model is anything with ``logits(tokens)``: the logits after the last of
 import time
 
 import numpy as np
+from aie.iron.kernels.sample import (
+    ROW_WORDS,
+    check_order_preserving,
+    draw_row,
+    sample_ref,
+    sample_weights,
+)
 
 #: Seeds the sampler, so a run's text is reproducible.
 SEED = 1608560892
 
 
 class Sampler:
-    """Temperature, then top-k, then a draw from the softmax.
+    """Temperature, then top-k, then a draw from the softmax, exactly as
+    the device draws.
 
-    Logits are divided by the temperature, every logit below the
-    ``top_k``-th largest is dropped (ties with it are kept), and a token is
-    drawn from the softmax of what is left. The arithmetic is float32 over
-    the (bf16) logits and the draw float64; a temperature of 0 is greedy
-    (the argmax). The draw comes from ``rng``, so a seeded generator makes
-    it reproducible.
+    Every draw is ``aie.iron.kernels.sample.sample_ref``, the definition the
+    :class:`~iron.operators.sample.Sample` operator meets bit for bit, so
+    the host and the device pick the same token from the same logits and
+    the same uniform. Logits are rounded to bf16 first. Every logit below
+    the ``top_k``-th largest is dropped, ties with it kept; ``None`` keeps
+    the whole row (the host only: the device's top-k is bounded). A
+    temperature of 0 is greedy (the first largest).
+
+    Each draw takes one uniform from ``rng``, greedy or not, so a seeded
+    generator makes the draws reproducible, and :meth:`rows` hands the
+    device the same uniforms.
     """
 
     def __init__(
@@ -35,34 +48,57 @@ class Sampler:
     ):
         if temperature < 0:
             raise ValueError(f"temperature {temperature} is negative")
+        if temperature > 0:
+            # The draw thresholds bf16 keys, which is exact only when
+            # dividing by the temperature keeps every logit's order.
+            check_order_preserving(temperature)
         if top_k is not None and top_k < 1:
             raise ValueError(f"top_k {top_k} keeps no token")
-        self.temperature = temperature
+        self.temperature = np.float32(temperature)
         self.top_k = top_k
         self.rng = rng
 
+    def _top_k(self, size: int) -> int:
+        return size if self.top_k is None else self.top_k
+
+    def _n53(self) -> int:
+        # random() is n53 * 2^-53 for the generator's next 53 bits, exactly.
+        return int(self.rng.random() * 2.0**53)
+
     def probabilities(self, logits: np.ndarray) -> np.ndarray:
         """The distribution a token is drawn from, float64, over ``logits`` (1-D)."""
-        x = np.asarray(logits, dtype=np.float32).reshape(-1)
-        x = x / np.float32(self.temperature)
-        if self.top_k is not None and self.top_k < x.size:
-            kth = np.partition(x, -self.top_k)[-self.top_k]
-            x = np.where(x < kth, -np.inf, x)
-        e = np.exp((x - x.max()).astype(np.float64))
-        return e / e.sum()
+        size = np.asarray(logits).size
+        probs = np.zeros(size, dtype=np.float64)
+        if self.temperature == 0:
+            probs[sample_ref(logits, self.temperature, 1, 0)] = 1.0
+            return probs
+        candidates, weights = sample_weights(
+            logits, self.temperature, self._top_k(size)
+        )
+        probs[candidates] = weights / weights.sum()
+        return probs
 
     def __call__(self, logits: np.ndarray) -> int:
         """One token id drawn from a row of logits (any shape of one row)."""
-        if self.temperature == 0:
-            return greedy(logits)
-        probs = self.probabilities(logits)
-        cdf = np.cumsum(probs)
-        # The first token whose cumulative mass exceeds the draw; a zero-mass
-        # token never exceeds its predecessor, so it is never picked.
-        token = int(np.searchsorted(cdf, self.rng.random() * cdf[-1], side="right"))
-        # A draw just under 1 can round up to the total, past every token;
-        # it belongs to the last one with any mass.
-        return token if token < cdf.size else int(np.flatnonzero(probs)[-1])
+        top_k = self._top_k(np.asarray(logits).size)
+        return sample_ref(logits, self.temperature, top_k, self._n53())
+
+    def rows(self, count: int, k_max: int) -> np.ndarray:
+        """``count`` draws for the device, ``(count, ROW_WORDS)`` int32, one
+        per position, taking the uniforms ``count`` host draws would, in
+        order.
+
+        ``k_max`` is the device's largest top-k; a larger one, or ``None``,
+        would be clamped there, not honoured, so it is refused.
+        """
+        if self.top_k is None or self.top_k > k_max:
+            raise ValueError(
+                f"top_k {self.top_k} is not one the device draws (1..{k_max})"
+            )
+        rows = np.empty((count, ROW_WORDS), dtype=np.int32)
+        for i in range(count):
+            rows[i] = draw_row(self.temperature, self.top_k, self._n53())
+        return rows
 
 
 def greedy(logits: np.ndarray) -> int:

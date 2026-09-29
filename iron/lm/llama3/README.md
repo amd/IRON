@@ -79,7 +79,13 @@ python -m iron.lm.llama3.model \
   and top-1 agreement
 - `--check-determinism ROUNDS`: instead of sampling, run two prompts
   `ROUNDS` times each and count the runs whose logits differ bitwise
+- `--device-loop`: draw every token on the device, each decode step started
+  by the one before it, instead of on the host from each step's logits; the
+  top-k must be at most 64
+- `--compare-host`: with `--device-loop`, then generate again on the host
+  from the same seed and count the tokens that differ (the text is the same,
+  token for token)
 
 `pytest iron/lm/llama3/` loads the model once and runs
-all three in-process through `model.Runner`, recording the throughput and
+all of these in-process through `model.Runner`, recording the throughput and
 accuracy figures.

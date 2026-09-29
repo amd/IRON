@@ -17,6 +17,7 @@ from iron.lm.testing import (
     check_chat_turn,
     check_deep_decode,
     check_determinism,
+    check_device_loop,
     check_generation,
     requires,
     weights_dir,
@@ -40,6 +41,12 @@ def runner():
 )
 def test_llama_3_2_1b(runner, model, prompt_len, num_tokens, record_property):
     check_generation(runner, model, prompt_len, num_tokens, record=record_property)
+
+
+# The device draws every token and starts every decode step itself; from the
+# same seed its text is the host loop's. The figures are the device loop's.
+def test_llama_3_2_1b_device_loop(runner, model, record_property):
+    check_device_loop(runner, model, 1024, 100, record=record_property)
 
 
 # KL(fp32 CPU || NPU), teacher-forced over 40 steps. The graphs measure a

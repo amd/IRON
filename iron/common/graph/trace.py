@@ -13,7 +13,6 @@ from collections.abc import Hashable, Mapping
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.utils import bfp
-from ml_dtypes import bfloat16
 
 from ..declare import Operator
 from ..declare.bound import BoundValue
@@ -513,7 +512,7 @@ class _ReferenceTracer(Tracer):
         if isinstance(x, Weight):
             return x.array
         if x.host is None:
-            x.host = np.zeros(x.shape, dtype=bfloat16)
+            x.host = np.zeros(x.shape, dtype=x.dtype)
         return _HostView(x, x.shape)
 
     def call(self, target, args, kwargs):
@@ -531,7 +530,7 @@ class _ReferenceTracer(Tracer):
                     pattern, a = None, a.tensor()
             elif isinstance(a, State):
                 if a.host is None:
-                    a.host = np.zeros(a.shape, dtype=bfloat16)
+                    a.host = np.zeros(a.shape, dtype=a.dtype)
                 a = a.host
             elif isinstance(a, Weight):
                 a = a.array

@@ -113,7 +113,21 @@ def main(runner: type[Runner], description: str):
         help="instead of sampling, run two prompts ROUNDS times each, "
         "alternating, and count the runs whose logits differ bitwise",
     )
+    parser.add_argument(
+        "--device-loop",
+        action="store_true",
+        help="draw every token on the device, each decode step started by the "
+        "one before it, rather than on the host from each step's logits",
+    )
+    parser.add_argument(
+        "--compare-host",
+        action="store_true",
+        help="with --device-loop, then generate again on the host from the "
+        "same seed and count the tokens that differ",
+    )
     args = parser.parse_args()
+    if args.compare_host and not args.device_loop:
+        parser.error("--compare-host compares the --device-loop run")
 
     try:
         config = dataclasses.replace(runner.config, max_seq_len=args.max_seq_len)
@@ -142,13 +156,29 @@ def main(runner: type[Runner], description: str):
         n_differ = determinism(model, prompts, args.num_tokens, rounds)
         print(f"[Determinism] Differing runs: {n_differ}/{2 * (rounds - 1)}")
     else:
-        sample = Sampler(args.temperature, args.top_k, np.random.default_rng(SEED))
-        print(run.tokenizer.decode(tokens[1:]), end="", flush=True)
+
+        def sampler():
+            return Sampler(args.temperature, args.top_k, np.random.default_rng(SEED))
 
         def show(token):
             print(run.tokenizer.decode([token]), end="", flush=True)
 
-        _, first, later = generate(model, tokens, args.num_tokens, sample, show)
-        print(f"\n\n[Prefill] Time to first token: {first:7.3f} s")
-        if args.num_tokens > 1:
-            print(f"[Decode]  Tokens per second:   {1 / later:7.3f}")
+        def report(first, later):
+            print(f"\n\n[Prefill] Time to first token: {first:7.3f} s")
+            if args.num_tokens > 1:
+                print(f"[Decode]  Tokens per second:   {1 / later:7.3f}")
+
+        print(run.tokenizer.decode(tokens[1:]), end="", flush=True)
+        if not args.device_loop:
+            report(*generate(model, tokens, args.num_tokens, sampler(), show)[1:])
+            return
+        drawn, first, later = model.generate(tokens, args.num_tokens, sampler())
+        print(run.tokenizer.decode(drawn), end="", flush=True)
+        report(first, later)
+        if args.compare_host:
+            print("\n[Host loop]\n" + run.tokenizer.decode(tokens[1:]), end="")
+            host, _, _ = generate(model, tokens, args.num_tokens, sampler(), show)
+            differ = sum(a != b for a, b in zip(drawn, host))
+            print(
+                f"\n[DeviceLoop] Tokens differing from the host loop: {differ}/{len(host)}"
+            )

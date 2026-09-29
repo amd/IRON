@@ -9,7 +9,8 @@ computation as one graph, called at a prompt's shape and at one token's,
 and ``Graph.reference`` runs it operator by operator through each
 ``reference()`` on host tensors, with the per-call values modelled (the
 chunk and the position move the cache writes and bound the attention, the
-last prompt row selects the logits) and the caches as state. :class:`OnHost` is
+last prompt row selects the logits, a decode step gathers its token's row)
+and the caches as state. :class:`OnHost` is
 the model with its images stood in by that reference, so the two can be
 compared without a device, through the application's own ``logits``:
 that checks the graph's wiring (layouts, reshapes, the head grouping,
@@ -28,7 +29,15 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from iron.lm import Config, Oracle, accuracy, determinism, greedy
+from iron.lm import (
+    Config,
+    Oracle,
+    Sampler,
+    accuracy,
+    determinism,
+    generate,
+    greedy,
+)
 from iron.lm.llama3.model import Llama
 from iron.tests.common.llama_model import PROFILE, SMALL, random_weights
 
@@ -51,7 +60,8 @@ class OnHost(Llama):
     profile = PROFILE
 
     def __call__(self, *tensors, **values):
-        return _Output(self.reference(*tensors, **values))
+        logits, carry = self.reference(*tensors, **values)
+        return _Output(logits), carry
 
 
 @dataclasses.dataclass
@@ -183,3 +193,28 @@ def test_a_short_prompt_runs_at_its_own_rows():
     _assert_close([model.logits(prompt)], [first])
     tokens = np.append(prompt, first.argmax())
     _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
+
+
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+def test_the_carried_draws_are_the_host_loop_s_tokens(cpu, temperature):
+    """What ``generate`` loops on the device, each call started from the
+    last one's carry: from the same seed, the host loop's tokens. Every draw
+    is the graph's own, from the rows the sampler gives it.
+    """
+    config, n, count = cpu.config, len(cpu.prompt), 6
+    host = OnHost(config, cpu.weights)
+    expected, _, _ = generate(
+        host, cpu.prompt, count, Sampler(temperature, 40, np.random.default_rng(5))
+    )
+    model = OnHost(config, cpu.weights)
+    draws = np.zeros(model.draws.shape, dtype=np.int32)
+    sampler = Sampler(temperature, 40, np.random.default_rng(5))
+    draws[n - 1 : n - 1 + count] = sampler.rows(count, k_max=64)
+    model.draws.host = draws
+    ((x, values),) = model._chunks(np.asarray(cpu.prompt), 0)
+    _, carry = model(x, **values)
+    drawn = [carry["token"]]
+    for _ in range(count - 1):
+        _, carry = model(chunk=0, rows=1, **carry)
+        drawn.append(carry["token"])
+    assert drawn == expected

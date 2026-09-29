@@ -45,7 +45,7 @@ def test_prefill_graph_operators_lower_with_their_value(tmp_path):
     model = small()
     traced = model.trace(**model.shapes(model.config.prefill_chunk))
     # Every block is bound by the rows the call runs, the cache writes and the
-    # RoPE rows by the chunk, and MHA's keys by the position.
+    # RoPE rows by the chunk, and MHA's keys and the draw by the position.
     named = {b.expression.value.name for b in traced.bindings}
     assert named == {"chunk", "rows", "position"}
     _lower_all(traced, tmp_path)

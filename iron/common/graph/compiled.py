@@ -366,8 +366,11 @@ class Graph:
 
         A full-ELF version with carried values ends in an Emit step, which
         writes the scratchpad of the version it ``feeds`` -- by default
-        itself -- so that one can run without the host
-        (:class:`~iron.common.graph.carried.CarriedLoop`).
+        itself, where it takes no tensor (nothing would write one between
+        its calls) -- so that one can run without the host
+        (:class:`~iron.common.graph.carried.CarriedLoop`). A version that
+        takes a tensor and feeds nothing has no Emit; a call still returns
+        its carried values.
         """
         if dev is not None:
             aie_utils.set_current_device(dev)
@@ -391,7 +394,8 @@ class Graph:
                 f"dispatches {chosen.dispatch!r}"
             )
         emit = None
-        if chosen.image == ELF and traced.carry:
+        loops = feeds is not None or not traced.inputs
+        if chosen.image == ELF and traced.carry and loops:
             if feeds is None:
                 slots = len(_words(traced, share=shared)[0])
             elif feeds.emit is None or not any(

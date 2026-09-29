@@ -67,6 +67,28 @@ def check_generation(runner, model, prompt_len: int, num_tokens: int, *, record)
         record("TPS", 1 / later)
 
 
+def check_device_loop(runner, model, prompt_len: int, num_tokens: int, *, record):
+    """Sample ``num_tokens`` after a prompt of ``prompt_len`` characters with
+    the host out of the loop (``CausalLM.generate``); record its time to the
+    first token and tokens per second, then sample again on the host from
+    the same seed: the text is the same, token for token.
+    """
+    tokens = prompt(runner, prompt_len, num_tokens)
+
+    def sampler():
+        return Sampler(0.7, 50, np.random.default_rng(SEED))
+
+    drawn, first, later = model.generate(tokens, num_tokens, sampler())
+    print(runner.tokenizer.decode(drawn))
+    record("TTFT", first)
+    if num_tokens > 1:
+        record("TPS", 1 / later)
+    host, _, _ = generate(model, tokens, num_tokens, sampler())
+    differing = [i for i, (a, b) in enumerate(zip(drawn, host)) if a != b]
+    record("DifferingTokens", len(differing))
+    assert not differing, f"tokens {differing} of {num_tokens} differ from the host's"
+
+
 def check_accuracy(
     runner,
     model,

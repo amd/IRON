@@ -27,6 +27,7 @@ from iron import lm
 from iron.lm import Checkpoint, Sampler
 from iron.lm.llama3.model import LLAMA_3_2_1B, layout
 from iron.lm.testing import weights_dir
+from iron.operators import sample
 
 
 def bitwise_equal(a: np.ndarray, b: np.ndarray) -> bool:
@@ -300,6 +301,28 @@ def test_top_k_keeps_ties_with_the_kth():
     logits = np.array([5.0, 3.0, 3.0, 3.0, 1.0], dtype=np.float32)
     probs = Sampler(1.0, 2, np.random.default_rng(0)).probabilities(logits)
     assert np.all(probs[:4] > 0) and probs[4] == 0
+
+
+def test_device_rows_are_the_host_draws():
+    """rows() takes the uniforms the host draws would, greedy steps included,
+    so the device's tokens are the host's for the same seed.
+    """
+    logits = random_logits(4096, seed=6)
+    for temperature in (0.7, 0.0):
+        host = Sampler(temperature, 50, np.random.default_rng(9))
+        device = Sampler(temperature, 50, np.random.default_rng(9))
+        rows = device.rows(8, k_max=64)
+        want = [host(logits) for _ in range(8)]
+        assert [sample.reference(logits, r) for r in rows] == want
+        assert host.rng.random() == device.rng.random()
+
+
+def test_device_rows_refuse_an_unbounded_top_k():
+    rng = np.random.default_rng(0)
+    with pytest.raises(ValueError, match="device draws"):
+        Sampler(0.7, None, rng).rows(1, k_max=64)
+    with pytest.raises(ValueError, match="device draws"):
+        Sampler(0.7, 65, rng).rows(1, k_max=64)
 
 
 def test_draws_follow_the_distribution():

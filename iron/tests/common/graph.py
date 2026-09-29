@@ -422,24 +422,38 @@ def test_llama_decode_traces_and_tunes():
         "GEMV",
         "ElementwiseAdd",
     ]
-    # The position's RoPE row first, copied out of the table on the device.
-    assert kinds == ["Copy"] + per_block * cfg.n_layers + ["RMSNorm", "GEMV"]
-    assert t.input_args == ["x"] and t.output_args == ["out"]
-    # One function, so every version takes every value; a token binds one.
-    assert [v.name for v in t.values] == ["chunk", "rows", "position"]
-    assert {b.expression.value.name for b in t.bindings} == {"position"}
+    # The token's embedding row and the position's RoPE row are gathered
+    # first; the head's logits end in a draw.
+    gathers, head = ["Copy", "Copy"], ["RMSNorm", "GEMV", "Sample"]
+    assert kinds == gathers + per_block * cfg.n_layers + head
+    # A token takes no tensor. It returns the logits and carries the token
+    # it draws and the position after it.
+    assert t.input_args == [] and t.output_args == ["out", "carry_token"]
+    # One function, so every version takes every value; a token binds two.
+    assert [v.name for v in t.values] == ["token", "position", "chunk", "rows"]
+    token, position = t.values[0], t.values[1]
+    assert t.carry["position"] == Affine(position, 1, 1)
+    assert {b.expression.value.name for b in t.bindings} == {"token", "position"}
+    by_op = {id(b.op): b for b in t.bindings}
+    embedding, angles = t.steps[0].op, t.steps[1].op
+    assert by_op[id(embedding)].expression == Affine(token, cfg.emb_dim)
+    assert by_op[id(angles)].expression == Affine(position, cfg.head_dim)
+    draw = {b.member.name: b.expression for b in t.bindings if b.op is t.steps[-1].op}
+    assert draw == {"row": Affine(position, 4), "at": Affine(position)}
     # The weights are named from the model; the caches are pinned state.
     assert "layers.1.q" in t.pinned and "keys.0" in t.pinned
     assert t.pinned["keys.0"] == cfg.n_kv_groups * L * cfg.head_dim * 2
-    # The table's row and each cache's row are the position's; every MHA
-    # attends over the keys up to it, its one query packed by its heads.
+    # The embedding row is the token's, the table's row and each cache's
+    # row the position's; every MHA attends over the keys up to it, its one
+    # query packed by its heads.
     offsets = sorted(
         (b.member.name, str(b.expression)) for b in t.bindings if type(b.op) is Copy
     )
     D, G = cfg.head_dim, cfg.n_kv_groups
-    assert offsets == [("in_offset", f"position * {D}")] + [
-        ("out_offset", f"position * {G * D}")
-    ] * (2 * cfg.n_layers)
+    assert offsets == [
+        ("in_offset", f"position * {D}"),
+        ("in_offset", f"token * {cfg.emb_dim}"),
+    ] + [("out_offset", f"position * {G * D}")] * (2 * cfg.n_layers)
     mhas = [s.op for s in t.steps if type(s.op) is MHA]
     assert all(op.kv_interleaved for op in mhas)
     assert len(mhas) == cfg.n_layers
@@ -504,14 +518,14 @@ def test_llama_prompt_traces_over_the_same_caches():
         "GEMM",
         "ElementwiseAdd",
     ]
-    tail = ["Copy", "RMSNorm", "GEMV"]
+    tail = ["Copy", "RMSNorm", "GEMV", "Sample"]
     # The chunk's RoPE rows first, copied out of the table on the device.
     assert kinds == ["Copy"] + per_block * cfg.n_layers + tail
-    assert t.input_args == ["x"] and t.output_args == ["out"]
-    assert [v.name for v in t.values] == ["chunk", "rows", "position"]
+    assert t.input_args == ["x"] and t.output_args == ["out", "carry_token"]
+    assert [v.name for v in t.values] == ["token", "position", "chunk", "rows"]
     # One slice at the top bounds every operator of every block by the rows
     # the call runs, and the last row's copy reads the last of them; the
-    # table's copy, the norm and the head are not.
+    # table's copy, the norm, the head and the draw are not.
     rows = {id(b.op) for b in t.bindings if b.expression.value.name == "rows"}
     by_rows = [op for op, *_ in t.runlist if id(op) in rows]
     assert len(by_rows) == len(per_block) * cfg.n_layers + 1
@@ -549,11 +563,12 @@ def test_llama_prompt_traces_over_the_same_caches():
 
 @pytest.mark.parametrize("step", ["decode", "prompt"])
 def test_llama_does_not_grow_with_the_context(step):
-    """``max_seq_len`` sizes the caches and the RoPE table and nothing else a
-    decode step or a prompt chunk runs: its one input is its embedded
-    tokens, every activation and every array is the same at a four times
-    longer context, and attention is the caches' two writes and MHA, the
-    reshapes and transposes between them views the DMA walks.
+    """``max_seq_len`` sizes the caches, the RoPE table and the draws a
+    position each and nothing else a decode step or a prompt chunk runs: a
+    chunk's one input is its embedded tokens (a step's token is a value),
+    every activation and every array is the same at a four times longer
+    context, and attention is the caches' two writes and MHA, the reshapes
+    and transposes between them views the DMA walks.
     """
 
     def trace(max_seq_len):
@@ -562,9 +577,10 @@ def test_llama_does_not_grow_with_the_context(step):
         return g.trace(**g.shapes(rows))
 
     short, long = trace(64), trace(256)
-    assert short.input_args == long.input_args == ["x"]
+    assert short.input_args == long.input_args == ([] if step == "decode" else ["x"])
     grown = {name for name, n in long.pinned.items() if short.pinned[name] != n}
-    assert grown == {"rope", "keys.0", "keys.1", "values.0", "values.1"}
+    caches = {"keys.0", "keys.1", "values.0", "values.1"}
+    assert grown == {"rope", "draws", "drawn"} | caches
 
     def activations(t):
         return {
