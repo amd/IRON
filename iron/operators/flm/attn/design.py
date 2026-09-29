@@ -3,9 +3,9 @@
 
 """Causal prefill attention with a head dim of 512, on the whole array.
 
-Two column groups of four each take one query head per pass. A round covers
-128 query rows: each of a group's 16 cores takes 8 of them and streams every
-key up to the round's last row past them. k and v come from one shim tile and
+Two groups of four columns each take one query head per pass. A round covers
+128 query rows: each of a group's 16 cores takes 8 of them and streams past
+them every key up to the round's last row. k and v come from one shim tile and
 reach every core through one memtile. The runtime sequence takes the token
 range and the KV cache's row count at dispatch, so one build serves every
 prompt.
@@ -52,11 +52,10 @@ LK_MT = 128  # key rows per memtile buffer
 LQ_MT = 32  # query rows per memtile fifo half
 LQ_CT = 16  # query rows per core's q object, two cores' worth
 NUM_CU = 2  # column groups
-DATA_PER_ROUND = LK * 16  # query rows per round
+DATA_PER_ROUND = LQ * 16  # query rows per round
 
-# The buffer addresses of the FastFlowLM overlay this design reproduces. The
-# stack occupies [0, STACK_SIZE) and grows up, so in_1, the lowest buffer, caps
-# it.
+# The buffer addresses of the FastFlowLM overlay. The stack grows up from 0 to
+# in_1, the lowest buffer.
 L1 = {
     "in_0": 49152,
     "in_1": 3072,
@@ -68,9 +67,9 @@ L1 = {
     "window_size": 59552,
     "n_rounds": 11552,
 }
-STACK_SIZE = 3 * 1024
+STACK_SIZE = L1["in_1"]
 
-# Locks 2 and 3 of each core guard k and v.
+# The k/v DMA and the kernel's steps synchronize on these locks of each core.
 IN_PROD_LOCK, IN_CONS_LOCK = 2, 3
 
 
@@ -84,17 +83,16 @@ def attn_kernel(device=None):
     )
 
 
-_NO_UNROLL = "#llvm.loop_annotation<unroll = <disable = true>>"
-
-
 def _no_unroll(iv):
     """Keep the scf.for that yields iv rolled through Peano's opt.
 
-    Unrolled 16 times, the loop repeats the same buffer addresses as call
-    arguments in every copy. MLIR drops a malformed annotation without an
-    error: check the call count in the core's opted_*.ll.
+    Unrolled, the loop repeats the same buffer addresses as call arguments in
+    every copy. MLIR drops a malformed annotation without an error: check the
+    call count in the core's opted_*.ll.
     """
-    iv.owner.owner.attributes["loop_annotation"] = Attribute.parse(_NO_UNROLL)
+    iv.owner.owner.attributes["loop_annotation"] = Attribute.parse(
+        "#llvm.loop_annotation<unroll = <disable = true>>"
+    )
 
 
 def grid(dev):
@@ -117,9 +115,8 @@ def attn(dev, max_context, num_heads, num_kv_heads, trace_size=0):
     """Prefill attention over a KV cache of up to max_context rows.
 
     O and Q hold one row of num_heads heads per query token, from token
-    L_begin on. KV holds all K rows, then all V rows, max_l rows each; a row
-    holds num_kv_heads heads. The sequence takes L_begin, L_end and max_l at
-    dispatch. L_begin and L_end must be multiples of 128.
+    L_begin on. KV holds all K rows, then all V rows, max_l rows each. A KV
+    row holds num_kv_heads heads.
     """
     COLS, ROWS = grid(dev)
     HEADS = num_heads
@@ -228,8 +225,8 @@ def attn(dev, max_context, num_heads, num_kv_heads, trace_size=0):
                                 managed=False,
                             )
                         )
-                # An i32 transfer_len: derived from the i64 size product, it
-                # does not fit dma_bd's operand.
+                # dma_bd's length operand is an i32. The product of the i64
+                # sizes does not fit it, so transfer_len gives the length.
                 kv_rows = arith.extsi(T.i64(), arith.divsi(kv_length, _as_i32(128)))
                 kv_head = head // (GQA // NUM_CU)
                 k_base = max_l * ((kv_head // KV_D) * DH * KV_D) + (kv_head % KV_D) * DH
@@ -257,7 +254,8 @@ def attn(dev, max_context, num_heads, num_kv_heads, trace_size=0):
                     t.free()
                 dma_free_task(*kv_tasks)
 
-    # RTPs, one set per core: the sequence writes the token range into them.
+    # RTPs, one set per core, keyed by (i, j): the sequence writes the token
+    # range into them.
     rtp = {}
     for i in range(ROWS):
         for j in range(COLS):
@@ -273,10 +271,10 @@ def attn(dev, max_context, num_heads, num_kv_heads, trace_size=0):
                 for key in ("L_begin", "L_end", "window_size")
             ]
 
-    # A core that has finished one dispatch loops back and reads the RTPs at
-    # once, before the next dispatch writes them. So the sequence sets go once
-    # it has written them, to the number of passes a dispatch makes, and a core
-    # takes one before each read.
+    # go orders each core's RTP read after the sequence's RTP write. A core
+    # starts its next pass as soon as a dispatch ends, before the next dispatch
+    # writes the RTPs. The sequence sets go to the number of passes after it
+    # writes the RTPs. A core takes one count before each pass.
     go = {
         (i, j): Lock(tile=CT[i][j], init=0, name=f"go_{CT[i][j].row}_{CT[i][j].col}")
         for i in range(ROWS)
@@ -382,16 +380,16 @@ def attn(dev, max_context, num_heads, num_kv_heads, trace_size=0):
                 blocks_k(lb, i, nb)
                 for b in range_(nb[0]):
                     block_begin_k(m, prev_m)
-                    for j in range_(16):
+                    for j in range_(LK_MT // LK):
                         _no_unroll(j)
                         qk_k(s, q, in0, in1, m, lb, ws, row, col, i, b, j)
                     block_mid_k(s, m, new_m, prev_m, cbuf, lbuf, y)
-                    for j in range_(16):
+                    for j in range_(LK_MT // LK):
                         _no_unroll(j)
                         fv_k(y, s, in0, in1, j)
                     block_end_k(prev_m, new_m)
                 finalize_k(lbuf, l_bf16)
-                for c in range_(DH // 8):
+                for c in range_(LQ * DH // 64):
                     o = o_h.acquire(1)
                     epilogue_k(o, l_bf16, y, c)
                     o_h.release(1)
@@ -468,8 +466,8 @@ def attn(dev, max_context, num_heads, num_kv_heads, trace_size=0):
                 )
             )
 
-    # Memtile 4j+2 takes k and v on two channels and sends them out
-    # interleaved on one. Memtile 4j+1 holds half of the buffers.
+    # Memtile 4j+2 takes k and v on two channels and sends them interleaved on
+    # one. Memtile 4j+1 holds half of the buffers.
     for j in range(COLS // 4):
         mt, mt_left = MT[j * 4 + 2], MT[j * 4 + 1]
         bufs = {

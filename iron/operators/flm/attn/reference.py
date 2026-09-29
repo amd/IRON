@@ -1,25 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CPU reference for :class:`iron.operators.flm.PrefillAttention`, in float32.
-
-The device rounds the scores, the probabilities and the output to bfloat16, so
-the two agree to a tolerance, not bit for bit.
-"""
+"""CPU reference for :class:`iron.operators.flm.PrefillAttention`, in float32."""
 
 import numpy as np
 
 from iron.operators.flm.attn.design import DH
-
-
-def split_kv(kv, max_l, num_kv_heads):
-    """K and V of a KV cache buffer, each shaped (max_l, num_kv_heads, DH)."""
-    half = max_l * num_kv_heads * DH
-    kv = np.asarray(kv, dtype=np.float32)
-    return (
-        kv[:half].reshape(max_l, num_kv_heads, DH),
-        kv[half : 2 * half].reshape(max_l, num_kv_heads, DH),
-    )
 
 
 def reference(q, kv, L_begin, L_end, max_l, num_heads, num_kv_heads):
@@ -32,7 +18,10 @@ def reference(q, kv, L_begin, L_end, max_l, num_heads, num_kv_heads):
     rows = L_end - L_begin
     q = np.asarray(q, dtype=np.float32)[: rows * num_heads * DH]
     q = q.reshape(rows, num_heads, DH)
-    k, v = split_kv(kv, max_l, num_kv_heads)
+    half = max_l * num_kv_heads * DH
+    kv = np.asarray(kv, dtype=np.float32)
+    k = kv[:half].reshape(max_l, num_kv_heads, DH)
+    v = kv[half : 2 * half].reshape(max_l, num_kv_heads, DH)
     group = num_heads // num_kv_heads
 
     query_pos = L_begin + np.arange(rows)[:, None]
