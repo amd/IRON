@@ -60,6 +60,7 @@ def _staged(operator, golden_ref):
 
 
 @pytest.mark.supported_devices("npu2")
+@pytest.mark.bench
 @pytest.mark.parametrize("k", FUSION_GROUPS)
 def test_swiglu_prefill_stream(k, npu_runtime, trace, record_property):
     golden_ref = generate_golden_reference(M=SEQ_LEN, K=EMBEDDING_DIM, N=HIDDEN_DIM)

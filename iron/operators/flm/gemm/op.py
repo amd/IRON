@@ -73,7 +73,6 @@ from iron.operators.flm.gemm.design import (
     K_TILE,
     M_CHUNK_FOR_N,
     M_TILE,
-    MIN_K,
     N_TILE_DEFAULT,
     RTP_CLAMP_MAX,
     RTP_CLAMP_MIN,
@@ -135,8 +134,8 @@ def _clamp_bits(clamp) -> tuple[int, int]:
 class GEMM(Operator):
     """AIE-accelerated bf16 GEMM on a 4-row grid, with a fused epilogue.
 
-    Fixed 64/512/128 tiling and an activation plus optional clamp folded into
-    the output stage. M, K, N, the activation and the clamp bounds are
+    64-row tiles over a k tile of ``k_tile`` (512 unless the caller asks), and
+    an activation plus optional clamp folded into the output stage. M, K, N, the activation and the clamp bounds are
     values written to the cores: they change the instruction stream only, so
     every shape on one configuration shares an xclbin.
 
@@ -163,6 +162,9 @@ class GEMM(Operator):
     # n tile width. 64 halves the mmul's accumulator traffic per mac; 128
     # halves A fetches instead. See README.md.
     tile_n: int = auto(array=True)
+    # k tile. K must be a multiple of it, and it of the compute tile's k slice.
+    # 256 is what Gemma 4's per-layer-input projection needs, its K being 256.
+    k_tile: int = param(default=K_TILE, array=True)
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). None resolves to whatever L1 affords.
     tile_ma: int = auto(array=True)
@@ -251,8 +253,10 @@ class GEMM(Operator):
             dict.fromkeys(Epilogue(m) for m in self.epilogue_modes)
         )
         self.epilogue = Epilogue(self.epilogue)
-        if self.K % MIN_K:
-            raise ValueError(f"K ({self.K}) must be a multiple of {MIN_K}")
+        if self.K % self.k_tile:
+            raise ValueError(
+                f"K ({self.K}) must be a multiple of k_tile ({self.k_tile})"
+            )
         self.check_derived("packed_blocks")
         # A mode the mask leaves out reaches the kernel's default arm, which
         # is NONE: an unactivated result rather than an error. Refuse.
@@ -299,17 +303,25 @@ class GEMM(Operator):
             bfp16_b=bfp16_b,
             b_dtype=b_dtype,
             l1_b_depth=l1_b_depth,
-            a_l2=m_chunk * M_TILE * K_TILE,
-            b_l2=K_TILE * tile_n // b_group,
+            a_l2=m_chunk * M_TILE * self.k_tile,
+            b_l2=self.k_tile * tile_n // b_group,
             c_l2=M_TILE * tile_n * rows,
         )
 
     def _check_shape(self) -> None:
+        # B_ITERS = k_tile // ct_max_k counts the B chunks one k step
+        # consumes, so a k tile the compute tile's slice does not divide is
+        # inexpressible.
+        if self.k_tile % self.ct_max_k:
+            raise Incompatible(
+                f"k_tile ({self.k_tile}) must be a multiple of ct_max_k "
+                f"({self.ct_max_k}) for tile_n={self.tile_n}"
+            )
         # N only needs to tile to tile_n: a trailing group of fewer than
         # cols column-blocks is handled by per-column trip counts.
         for name, value, unit in (
             ("M", self.M, M_TILE * self.rows),
-            ("K", self.K, MIN_K),
+            ("K", self.K, self.k_tile),
             ("N", self.N, self.tile_n),
         ):
             if value % unit != 0:
@@ -362,14 +374,15 @@ class GEMM(Operator):
     def config_name(self) -> str:
         """Stem of the artifacts that do not depend on the shape: the xclbin's.
 
-        ``ck`` is named separately because retuning CT_MAX_K_FOR_N moves it
+        ``kt`` names the k tile, which the kernel is compiled for. ``ck`` is
+        named separately because retuning CT_MAX_K_FOR_N moves it
         while tn stays, and tile_ma is caller-overridable. Without it, an
         xclbin built at one ck could serve a request for another.
         """
         t = self._tuned
         dev = aie_utils.ensure_current_device(required=True)
         return (
-            f"FLM_GEMM_tn{t.tile_n}_ck{t.ct_max_k}"
+            f"FLM_GEMM_tn{t.tile_n}_kt{t.k_tile}_ck{t.ct_max_k}"
             f"_ma{t.tile_ma}_mc{t.m_chunk}"
             f"_em{t.epilogue_mask:x}_{t.rounding}_{dev.name}"
         )
@@ -398,7 +411,7 @@ class GEMM(Operator):
     def kernel_object(self) -> str:
         """Object name over every flag that changes the emitted code."""
         return (
-            f"mm_fused_{M_TILE}x{K_TILE}x{self.tile_n}"
+            f"mm_fused_{M_TILE}x{self.k_tile}x{self.tile_n}"
             f"_ck{self.ct_max_k}"
             f"_r{R}t{T}_ma{self.tile_ma}_{self.rounding}"
             f"_em{self.epilogue_mask:x}.o"
@@ -408,7 +421,7 @@ class GEMM(Operator):
         """The -D set fused_mm_tile.cc is compiled with."""
         flags = [
             f"-DMM_FUSED_TILE_M={M_TILE}",
-            f"-DMM_FUSED_TILE_K={K_TILE}",
+            f"-DMM_FUSED_TILE_K={self.k_tile}",
             f"-DMM_FUSED_TILE_N={self.tile_n}",
             f"-DMM_FUSED_TILE_MA={self.tile_ma}",
             f"-DMM_FUSED_R={R}",
@@ -444,7 +457,7 @@ class GEMM(Operator):
             self.m_chunk,
             self.tile_ma,
         )
-        B_GROUP, L1_B_DEPTH = self.b_group, self.l1_b_depth
+        B_GROUP, L1_B_DEPTH, K_TILE = self.b_group, self.l1_b_depth, self.k_tile
         RHO = M_TILE // T_MA
         K_DIV_CT_K_MAX = K_TILE // CT_MAX_K
         CT_A_LEN = 2 * R * CT_MAX_K  # one z slice
@@ -468,13 +481,13 @@ class GEMM(Operator):
         mt_out_ty = self.C.tile
 
         # All three are compiled from mm_fused.h, so they name one object.
-        # Declared by hand rather than from aie.iron.kernels.fused_mm: that
-        # factory compiles in one epilogue mode (this overlay selects among
-        # several at runtime) and always rounds to nearest-even.
-        # fused_mm_tile.cc, since mm_fused.h is a header. The whole-tile entry
-        # point it adds is never called, so the link drops it, but it also
-        # compiles out the per-step event0/event1 markers. On aie2 it includes
-        # lut_based_ops.cpp itself, for tanh's tables.
+        # Declared by hand rather than from aie.iron.kernels.fused.fused_mm:
+        # that factory compiles in one epilogue mode (this overlay selects
+        # among several at runtime) and always rounds to nearest-even. The
+        # source is fused_mm_tile.cc, since mm_fused.h is a header. The
+        # whole-tile entry point it adds is never called, so the link drops
+        # it, but it also compiles out the per-step event0/event1 markers. On
+        # aie2 it includes lut_based_ops.cpp itself, for tanh's tables.
         source = Path(aie_kernels_dir()) / "fused" / "fused_mm_tile.cc"
 
         def fused_kernel(name, arg_types):
@@ -854,7 +867,7 @@ class GEMM(Operator):
 
     @property
     def _k_iters(self) -> int:
-        return self.K // K_TILE
+        return self.K // self.k_tile
 
     @property
     def _n_units(self) -> int:
@@ -866,7 +879,7 @@ class GEMM(Operator):
     def sequence(self, rt):
         M, K, N = self.M, self.K, self.N
         COLS, ROWS = self.cols, self.rows
-        N_TILE, M_CHUNK = self.tile_n, self.m_chunk
+        N_TILE, M_CHUNK, K_TILE = self.tile_n, self.m_chunk, self.k_tile
         k_iters, n_units = self._k_iters, self._n_units
         pool = self._b_pool
         B_SLOTS, b_slot_elems = pool.slots, pool.slot_elems
@@ -1135,7 +1148,7 @@ class GEMM(Operator):
         """The shape the configuration-only module is emitted at: the smallest
         valid one, so the shape-independence is explicit.
         """
-        return (M_TILE * self.rows * self.m_chunk, MIN_K, self.tile_n * self.cols)
+        return (M_TILE * self.rows * self.m_chunk, self.k_tile, self.tile_n * self.cols)
 
     def configuration(self):
         """This configuration at its reference shape and activation.
@@ -1162,7 +1175,7 @@ class GEMM(Operator):
         t = self._tuned
         return pack_b(
             B,
-            k_tile=K_TILE,
+            k_tile=t.k_tile,
             n_tile=t.tile_n,
             s=S,
             t=T,

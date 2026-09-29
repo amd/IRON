@@ -114,11 +114,26 @@ def get_params():
         ]
     # fmt: on
 
+    # Shapes that run for milliseconds. The default suite's shapes finish near
+    # the dispatch cost, where the measurement carries no trend.
+    bench_shapes = (
+        {(1024, 2560, 10240), (2048, 2560, 10240)}
+        if dev.arch is AIEArch.AIE2p
+        else {(1024, 2560, 2560), (2048, 2048, 1024)}
+    )
+
+    def marks_for(p, extensive):
+        marks = [pytest.mark.extensive] if extensive else []
+        M, K, N, epilogue, clamp, rounding = p
+        if (M, K, N) in bench_shapes and epilogue is NONE and clamp is None:
+            marks.append(pytest.mark.bench)
+        return marks
+
     params = []
     for p in regular_params:
-        params.append(pytest.param(*p))
+        params.append(pytest.param(*p, marks=marks_for(p, extensive=False)))
     for p in extensive_params:
-        params.append(pytest.param(*p, marks=[pytest.mark.extensive]))
+        params.append(pytest.param(*p, marks=marks_for(p, extensive=True)))
     return params
 
 
@@ -276,6 +291,22 @@ def test_gemm_tile_options(M, K, N, tile_n, tile_ma, npu_runtime):
     """Each accepted (tile_n, tile_ma) computes the right answer on hardware."""
     operator = GEMM(M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma)
     assert (operator._tuned.tile_n, operator._tuned.tile_ma) == (tile_n, tile_ma)
+    errors, _latency_us, _bandwidth_gbps = check_on_device(
+        operator, flm_vectors(operator, INPUT_SCALE)
+    )
+    assert not errors, "Test failed"
+
+
+@pytest.mark.parametrize("K", [256, 768])
+def test_gemm_k_tile(K, npu_runtime):
+    """A k tile other than the default 512 computes the right answer.
+
+    Gemma 4's per-layer-input projection has K = 256, which the default does
+    not divide. K = 768 takes three k steps, so the accumulator carries
+    across tiles of the smaller size too.
+    """
+    dev = aie_utils.ensure_current_device(required=True)
+    operator = GEMM(M=256, K=K, N=64 * dev.cols, tile_n=64, k_tile=256)
     errors, _latency_us, _bandwidth_gbps = check_on_device(
         operator, flm_vectors(operator, INPUT_SCALE)
     )

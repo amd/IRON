@@ -32,7 +32,8 @@ from aie.dialects.aie import (
 )
 
 # --- Fixed geometry -------------------------------------------------------
-# GEMM tiling per compute tile, and the register tiling inside it.
+# GEMM tiling per compute tile, and the register tiling inside it. K_TILE is
+# the default for GEMM's k_tile field.
 M_TILE, K_TILE = 64, 512
 # Default n tile. 64 doubles A fetches but gives the mmul colA=8 instead of 4,
 # which wins when compute is the critical path. op.py picks per shape.
@@ -206,11 +207,6 @@ class Rounding(StrEnum):
 # The epilogue entry point, shared by the design and op.py (which needs it
 # to mark the symbol alwaysinline when building the inline .ll variant).
 EPILOGUE_SYMBOL = "mm_fused_epilogue_chunk"
-
-# Minimum problem size in K. The minimum in M is M_TILE * compute_rows(dev) and
-# in N is the chosen n tile, both of which depend on the device or the config.
-MIN_K = K_TILE  # 512
-
 
 # B values per element of the MLIR type, and the bytes they occupy: v8bfp16ebs8
 # packs 8 values into 8 mantissa bytes plus one shared exponent. mlir-aie

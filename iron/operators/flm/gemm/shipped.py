@@ -40,7 +40,7 @@ from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
-from iron.common import In, Out, Shim, Unresolvable, Value, Xclbin, auto, select
+from iron.common import In, Out, Shim, Unresolvable, Value, Xclbin, auto, param, select
 from iron.operators.flm.gemm.design import K_TILE, M_TILE, Epilogue
 from iron.operators.flm.gemm.op import GEMM
 
@@ -104,6 +104,7 @@ class Shipped(
     # The port's tunables, fixed by the binary. B is bf16 (no bfp16 on this
     # image), one row-block per B fetch, and the whole of K in one slice.
     tile_n: int = auto(N_TILE, repr=False, init=False)
+    k_tile: int = param(default=K_TILE, repr=False, init=False)
     tile_ma: int = auto(M_TILE, repr=False, init=False)
     m_chunk: int = auto(1, repr=False, init=False)
     rows: int = auto(ROWS, repr=False, init=False)

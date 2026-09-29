@@ -38,6 +38,12 @@ jobs:
         # vulnerability itself. The job only needs the trusted aggregation
         # script; artifacts and PR metadata come from the API, not the tree.
 
+      - name: Check out the results branch
+        uses: actions/checkout@v4
+        with:
+          ref: ci
+          path: history
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -51,13 +57,14 @@ jobs:
           script: |
             const fs = require('fs');
             const path = require('path');
-            const {execSync} = require('child_process');
+            const {execFileSync} = require('child_process');
 
             const headSha = context.payload.workflow_run.head_sha;
             const headBranch = context.payload.workflow_run.head_branch;
             core.info(`Head SHA: ${headSha}, branch: ${headBranch}`);
 
-            // Mapping: artifact name -> directory layout for pretty_aggregate.py
+            // Artifact name -> suite directory. A name outside this map is
+            // ignored, which keeps the fork from choosing a path.
             const ARTIFACT_MAP = {
               'results-phoenix-small':    'phoenix/small',
               'results-phoenix-examples': 'phoenix/examples',
@@ -65,33 +72,29 @@ jobs:
               'results-examples':         'krackan/examples',
             };
 
-            // The workflow names we care about
-            const WORKFLOWS = [
-              'Krackan - Small Benchmark/Test Suite',
-              'Krackan - Test Example Applications',
-              'Phoenix - Small Benchmark/Test Suite',
-              'Phoenix - Test Example Applications',
-            ];
+            // Workflow name -> the suite it reports.
+            const WORKFLOWS = {
+              'Krackan - Small Benchmark/Test Suite': 'krackan/small',
+              'Krackan - Test Example Applications': 'krackan/examples',
+              'Phoenix - Small Benchmark/Test Suite': 'phoenix/small',
+              'Phoenix - Test Example Applications': 'phoenix/examples',
+            };
 
             const root = path.join(process.env.RUNNER_TEMP, 'results');
             fs.mkdirSync(root, {recursive: true});
 
-            let prNumber = null;
-            let commitSha = null;
-            let date = null;
+            const status = {};
             let foundAny = false;
 
-            // For each workflow, find the latest completed run on this head SHA
-            for (const wf of WORKFLOWS) {
-              // List workflow runs filtered by head SHA and branch
-              const runs = await github.rest.actions.listWorkflowRunsForRepo({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                head_sha: headSha,
-                status: 'completed',
-                per_page: 10,
-              });
+            const runs = await github.rest.actions.listWorkflowRunsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head_sha: headSha,
+              status: 'completed',
+              per_page: 100,
+            });
 
+            for (const [wf, suite] of Object.entries(WORKFLOWS)) {
               const matching = runs.data.workflow_runs.filter(r => r.name === wf);
               if (matching.length === 0) {
                 core.info(`No completed run found for "${wf}" at ${headSha}`);
@@ -99,9 +102,9 @@ jobs:
               }
 
               const run = matching[0]; // most recent
+              status[suite] = run.conclusion || 'unknown';
               core.info(`Found run ${run.id} for "${wf}" (${run.conclusion})`);
 
-              // List artifacts for this run
               const artifacts = await github.rest.actions.listWorkflowRunArtifacts({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -110,7 +113,7 @@ jobs:
 
               for (const artifact of artifacts.data.artifacts) {
                 const dir = ARTIFACT_MAP[artifact.name];
-                if (!dir) continue;
+                if (dir !== suite) continue;
 
                 core.info(`Downloading artifact "${artifact.name}" -> ${dir}`);
 
@@ -121,29 +124,21 @@ jobs:
                   archive_format: 'zip',
                 });
 
-                const zipPath = path.join(process.env.RUNNER_TEMP, `${artifact.name}.zip`);
+                const zipPath = path.join(process.env.RUNNER_TEMP, `${dir.replace('/', '-')}.zip`);
                 fs.writeFileSync(zipPath, Buffer.from(zip.data));
 
                 const destDir = path.join(root, dir);
                 fs.mkdirSync(destDir, {recursive: true});
-                execSync(`unzip -o "${zipPath}" -d "${destDir}"`);
+                // The archive is fork-controlled, so take the one member that
+                // carries measurements and leave its markdown behind. execFile
+                // passes the arguments without a shell.
+                execFileSync('unzip', ['-o', '-j', zipPath, 'latest.csv', '-d', destDir],
+                             {stdio: 'inherit'});
                 foundAny = true;
-
-                // Read PR metadata from the first artifact that has it
-                const prPath = path.join(destDir, 'pr_number');
-                if (!prNumber && fs.existsSync(prPath)) {
-                  prNumber = fs.readFileSync(prPath, 'utf8').trim();
-                }
-                const shaPath = path.join(destDir, 'commit_sha');
-                if (!commitSha && fs.existsSync(shaPath)) {
-                  commitSha = fs.readFileSync(shaPath, 'utf8').trim();
-                }
-                const datePath = path.join(destDir, 'date');
-                if (!date && fs.existsSync(datePath)) {
-                  date = fs.readFileSync(datePath, 'utf8').trim();
-                }
               }
             }
+
+            fs.writeFileSync(path.join(root, 'status.json'), JSON.stringify(status));
 
             if (!foundAny) {
               core.info('No artifacts found. Skipping.');
@@ -151,142 +146,111 @@ jobs:
               return;
             }
 
+            // The pull request number and the commit come from the API, never
+            // from an artifact. workflow_run.pull_requests stays empty for a
+            // fork, so match the head SHA against the open pull requests.
+            let prNumber = '';
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const pull = pulls.find(p => p.head.sha === headSha);
+            if (pull) {
+              prNumber = String(pull.number);
+            } else {
+              core.info(`No open pull request has head ${headSha}`);
+            }
+
             core.setOutput('skip', 'false');
             core.setOutput('root', root);
-            core.setOutput('pr_number', prNumber || '');
-            core.setOutput('commit_sha', commitSha || '');
-            core.setOutput('date', date || '');
+            core.setOutput('pr_number', prNumber);
+            core.setOutput('commit_sha', headSha.slice(0, 7));
+            core.setOutput('date', context.payload.workflow_run.created_at);
 
-      - name: Generate aggregate summary
+      - name: Generate comment body
         if: steps.collect.outputs.skip != 'true'
+        env:
+          RESULTS_ROOT: ${{ steps.collect.outputs.root }}
+          COMMIT_SHA: ${{ steps.collect.outputs.commit_sha }}
+          RUN_DATE: ${{ steps.collect.outputs.date }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          python ci/scripts/pretty_aggregate.py \
-            --results-root "${{ steps.collect.outputs.root }}" \
-            -o "${{ steps.collect.outputs.root }}/summary.md"
+          python ci/scripts/pr_comment.py \
+            --artifacts "$RESULTS_ROOT" \
+            --history history \
+            --status "$RESULTS_ROOT/status.json" \
+            --commit "$COMMIT_SHA" \
+            --commit-url "$SERVER_URL/$REPOSITORY/commit/$COMMIT_SHA" \
+            --date "$RUN_DATE" \
+            -o "$RESULTS_ROOT/comment.md"
 
       - name: Comment on PR
         if: steps.collect.outputs.skip != 'true' && steps.collect.outputs.pr_number != ''
         uses: actions/github-script@v7
+        env:
+          RESULTS_ROOT: ${{ steps.collect.outputs.root }}
+          PR_NUMBER: ${{ steps.collect.outputs.pr_number }}
+          SERVER_URL: ${{ github.server_url }}
+          REPOSITORY: ${{ github.repository }}
         with:
           github-token: ${{ github.token }}
           script: |
             const fs = require('fs');
             const path = require('path');
 
-            const root = '${{ steps.collect.outputs.root }}';
-            const prNumber = Number('${{ steps.collect.outputs.pr_number }}');
-            const commitSha = '${{ steps.collect.outputs.commit_sha }}';
-            const date = '${{ steps.collect.outputs.date }}';
-            const server = '${{ github.server_url }}';
-            const repo = '${{ github.repository }}';
+            // Through env, never interpolated into this source.
+            const root = process.env.RESULTS_ROOT;
+            const prNumber = Number(process.env.PR_NUMBER);
+            const marker = '<!-- iron-ci-aggregate -->';
+            const runUrl = `${process.env.SERVER_URL}/${process.env.REPOSITORY}` +
+              `/actions/runs/${context.payload.workflow_run.id}`;
 
             if (!prNumber || isNaN(prNumber)) {
               console.log('Not triggered by a PR. Skipping comment.');
               return;
             }
 
-            let summaryContent = '';
-            try {
-              summaryContent = fs.readFileSync(path.join(root, 'summary.md'), 'utf8');
-            } catch (error) {
-              summaryContent = 'Aggregate summary not available.';
-            }
+            const body = fs.readFileSync(path.join(root, 'comment.md'), 'utf8');
 
-            // Read per-suite details
-            const suites = [
-              {dir: 'krackan/small',      label: 'Krackan - Small'},
-              {dir: 'krackan/examples',    label: 'Krackan - Examples'},
-              {dir: 'phoenix/small',       label: 'Phoenix - Small'},
-              {dir: 'phoenix/examples',    label: 'Phoenix - Examples'},
-            ];
-
-            let details = '';
-            let detailsNoTrends = '';
-            for (const suite of suites) {
-              const suiteDir = path.join(root, suite.dir);
-              let readme = '', trends = '';
-              try { readme = fs.readFileSync(path.join(suiteDir, 'readme.md'), 'utf8'); } catch {}
-              try { trends = fs.readFileSync(path.join(suiteDir, 'trends.md'), 'utf8'); } catch {}
-              if (!readme && !trends) continue;
-
-              const open = `<details>\n<summary>${suite.label}</summary>\n\n`;
-              details += open;
-              if (readme) details += readme + '\n\n';
-              if (trends) {
-                details += `**Trends:**\n\n${trends}\n\n`;
-              }
-              details += `</details>\n\n`;
-
-              if (readme) detailsNoTrends += open + readme + `\n\n</details>\n\n`;
-            }
-
-            const marker = '<!-- iron-ci-aggregate -->';
-            const header = `${marker}
-            ## CI Test Results
-
-            [${commitSha}](${server}/${repo}/commit/${commitSha}) (${date})
-
-            `;
-
-            const runUrl = `${server}/${repo}/actions/runs/${context.payload.workflow_run.id}`;
-            const note = (what) => `\n_${what} omitted, the comment hit GitHub's size limit. Full report in the [workflow run](${runUrl})._\n`;
-
-            // Bodies to try, largest first. GitHub decides which one fits: it
-            // rejects an oversized body with 422, but the 65536 characters its
-            // message names is not the enforced ceiling (140k bodies post), so
-            // there is no constant here worth comparing against. Trend tables
-            // are the bulk of an oversized body, so they are shed first.
-            function* candidates() {
-              yield header + summaryContent + '\n\n' + details;
-              yield header + summaryContent + '\n\n' + detailsNoTrends + note('Trend tables');
-              let summary = summaryContent;
-              yield header + summary + note('Per-suite details');
-              while (summary) {
-                summary = summary.slice(0, Math.floor(summary.length / 2));
-                yield header + summary + note('Per-suite details and most of the summary');
-              }
-            }
-
-            // Update existing comment if present, otherwise create new one
             const comments = await github.rest.issues.listComments({
               issue_number: prNumber,
               owner: context.repo.owner,
               repo: context.repo.repo,
               per_page: 100,
             });
-
             const existing = comments.data.find(c => c.body.includes(marker));
-            const post = (body) => existing
+            const post = (text) => existing
               ? github.rest.issues.updateComment({
                   comment_id: existing.id,
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  body: body,
+                  body: text,
                 })
               : github.rest.issues.createComment({
                   issue_number: prNumber,
                   owner: context.repo.owner,
                   repo: context.repo.repo,
-                  body: body,
+                  body: text,
                 });
 
-            let shed = 0;
-            let posted = false;
-            for (const body of candidates()) {
+            // GitHub rejects an oversized body with 422, but the 65536 characters its
+            // message names is not the enforced ceiling (140k bodies post), so
+            // there is no constant here worth comparing against.
+            let text = body;
+            while (true) {
               try {
-                await post(body);
-                posted = true;
+                await post(text);
+                break;
               } catch (error) {
                 if (!(error.status === 422 && /too long/i.test(error.message))) throw error;
-                shed++;
-                continue;
+                if (text.length <= marker.length) {
+                  throw new Error('Comment rejected as too long at every size.');
+                }
+                text = text.slice(0, Math.floor(text.length / 2)) +
+                  `\n\n_Truncated, the comment hit GitHub's size limit. Full report in the [workflow run](${runUrl})._\n`;
               }
-              if (shed) {
-                core.warning(`Comment shortened ${shed} time(s) to fit GitHub's size limit.`);
-              }
-              core.info(existing ? `Updated comment ${existing.id}` : 'Created new comment');
-              break;
             }
-            if (!posted) {
-              throw new Error('Comment rejected as too long at every size.');
-            }
+            core.info(existing ? `Updated comment ${existing.id}` : 'Created new comment');

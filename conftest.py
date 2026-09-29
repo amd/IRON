@@ -100,10 +100,15 @@ class CSVReporter:
         self.commit = get_git_commit()
         self.date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.test_metrics = {}  # test_name -> {metric_name -> [values]}
+        self.bench = {}  # test_name -> bool
+        self.unmeasured = set()  # (test_path, test_name) a pass recorded nothing
 
-    def add_result(self, test_path, test_name, passed, metrics):
+    def add_result(self, test_path, test_name, passed, metrics, bench):
         key = (test_path, test_name)
         self.test_metrics.setdefault(key, {}).setdefault("passed", []).append(passed)
+        self.bench[key] = bench
+        if passed and not metrics:
+            self.unmeasured.add(key)
         for metric_name, value in metrics:
             self.test_metrics[key].setdefault(metric_name, []).append(value)
 
@@ -127,6 +132,7 @@ class CSVReporter:
                 "Test Path": test_path,
                 "Test": test_name,
                 "Checks": f"{sum(data['passed'])}/{len(data['passed'])}",
+                "Bench": "yes" if self.bench.get((test_path, test_name)) else "no",
             }
             for metric_name, values in data.items():
                 if metric_name == "passed":
@@ -140,6 +146,18 @@ class CSVReporter:
                         statistics.stdev(values) if len(values) > 1 else 0.0
                     )
             self.results.append(row)
+
+    def report_unmeasured(self):
+        """Name the benched tests that passed without recording a metric.
+
+        A benched test that records nothing leaves its columns empty, and an
+        empty column drops out of the charts without any test failing.
+        """
+        return sorted(
+            f"{path}[{name}]"
+            for path, name in self.unmeasured
+            if self.bench[path, name]
+        )
 
     def write_csv(self):
         self.results.sort(key=lambda x: (x.get("Test Path", ""), x["Test"], x["Date"]))
@@ -198,7 +216,13 @@ def pytest_runtest_makereport(item, call):
                 for name, value in item.user_properties
                 if isinstance(value, numbers.Real)
             ]
-            csv_reporter.add_result(test_path, test_name, passed, metrics)
+            csv_reporter.add_result(
+                test_path,
+                test_name,
+                passed,
+                metrics,
+                item.get_closest_marker("bench") is not None,
+            )
 
 
 def pytest_configure(config):
@@ -237,8 +261,18 @@ def pytest_collection_modifyitems(config, items):
 
 def pytest_sessionfinish(session, exitstatus):
     if hasattr(session.config, "_csv_reporter"):
-        session.config._csv_reporter.finalize_results()
-        session.config._csv_reporter.write_csv()
+        reporter = session.config._csv_reporter
+        reporter.finalize_results()
+        reporter.write_csv()
+        unmeasured = reporter.report_unmeasured()
+        if unmeasured:
+            reporter.csv_path.with_suffix(".unmatched").write_text(
+                "\n".join(unmeasured) + "\n"
+            )
+            print(
+                "\nBenched tests passed without recording a metric:\n  "
+                + "\n  ".join(unmeasured)
+            )
 
 
 def pytest_generate_tests(metafunc):
