@@ -15,6 +15,8 @@ _OPERATOR_MODULES = {
     "GEMM": "gemm",
     # q4nx weights to the bfp16 B that GEMM reads, without a host-side pack.
     "DequantBFP": "dequant",
+    # Gemma 4's fused decode layer, as FastFlowLM's engine drives it.
+    "DecodeLayer": "layer",
     # Causal prefill attention, one build for every token range.
     "PrefillAttention": "prefill_attn",
     # Sliding-window causal prefill attention, one build for every token range.
