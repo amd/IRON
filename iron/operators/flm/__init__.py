@@ -17,6 +17,8 @@ _OPERATOR_MODULES = {
     "DequantBFP": "dequant",
     # Causal prefill attention, one build for every token range.
     "PrefillAttention": "attn",
+    # Sliding-window causal prefill attention, one build for every token range.
+    "PrefillSlidingAttention": "swa",
     # The shipped overlay itself, downloaded as a pinned binary. NPU2 only;
     # exists so the port can be measured against what it was ported from.
     "MMPrebuilt": "mm_prebuilt",
