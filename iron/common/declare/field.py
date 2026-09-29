@@ -3,9 +3,9 @@
 
 """Field specifiers and the dimension references a class body writes.
 
-A compile-time parameter is a dataclass field declared with :func:`param`, a
-tunable the library resolves one declared with :func:`auto`. Naming either in a
-shape expression yields a :class:`DimRef`, which class creation resolves
+A compile-time parameter is a dataclass field declared with ``param``, a
+tunable the library resolves one declared with ``auto``. Naming either in a
+shape expression yields a ``DimRef``, which class creation resolves
 against the class it lands on.
 """
 
@@ -19,7 +19,7 @@ from typing import Any, Callable
 class Unresolvable(ValueError):
     """No legal resolution exists for this operator on this device.
 
-    An expected outcome, not a bug: raised by :meth:`Operator.resolve` so the
+    An expected outcome, not a bug: raised by ``Operator.resolve`` so the
     caller learns at resolution rather than from a design that compiles and
     then hangs.
     """
@@ -49,7 +49,7 @@ def param(
     A callable ``default`` is computed from the operator at construction,
     for a parameter its other fields determine when neither the caller nor
     an operand's shape gives it (``default=lambda op: op.rows * op.repeat``);
-    :meth:`~.operator.Operator.check_derived` checks that a value given as
+    ``Operator.check_derived`` checks that a value given as
     well agrees.
 
     A ``param()`` may appear in a shape. Its tier follows from use: a field
@@ -77,7 +77,7 @@ def auto(
 ) -> Any:
     """Declare a tunable the library resolves for the device when the caller
     does not: a compile-time value that starts at ``default`` (``None``:
-    :meth:`~iron.common.declare.Operator.resolve` must fill it) and that
+    ``Operator.resolve`` must fill it) and that
     ``resolve`` may replace. Annotate it with the resolved type: the field
     is ``None`` only until resolution, and every hook after it sees the
     value.
@@ -186,7 +186,7 @@ class _Optional:
 
 
 def optional(ref) -> _Optional:
-    """Mark a dimension as omitted when it equals one. See :class:`_Optional`."""
+    """Mark a dimension as omitted when it equals one. See ``_Optional``."""
     return _Optional(ref)
 
 
@@ -210,7 +210,7 @@ class _Select:
 
 
 def select(flag, when_true, when_false) -> _Select:
-    """A conditional shape. See :class:`_Select`."""
+    """A conditional shape. See ``_Select``."""
     return _Select(flag, when_true, when_false)
 
 

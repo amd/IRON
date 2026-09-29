@@ -13,9 +13,9 @@ from iron.common import Profile
 from iron.lm import checkpoint_shapes, load_weights
 from iron.lm.llama3.model import LLAMA_3_2_1B, Llama, layout
 
-# The tunables the graph runs with at :data:`SMALL`'s shape on NPU2: decode
+# The tunables the graph runs with at ``SMALL``'s shape on NPU2: decode
 # at 256 and 64 rows of context, the prompt at 64. The application's own
-# profiles are for Llama 1B's shape, which :func:`llama_1b` runs under.
+# profiles are for Llama 1B's shape, which ``llama_1b`` runs under.
 PROFILE = Profile.load(Path(__file__).with_name("llama_small_profile.json"))
 
 #: Llama's shape, small, and its RoPE table unscaled.
@@ -52,8 +52,8 @@ def random_weights(config, seed=0):
 
 
 def small(seed=0, **config) -> Llama:
-    """The model at :data:`SMALL`'s shape, as changed by ``config``, under
-    :data:`PROFILE`.
+    """The model at ``SMALL``'s shape, as changed by ``config``, under
+    ``PROFILE``.
     """
     config = dataclasses.replace(SMALL, **config)
     model = Llama(config, random_weights(config, seed))

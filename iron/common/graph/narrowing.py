@@ -6,11 +6,11 @@ chosen together from measured costs.
 
 A design at its default width takes as much of the device as its resolution
 gives it -- an elementwise array every shim column -- and two such designs
-cannot share one configuration (:mod:`..image.coresidence`). Narrowing one
+cannot share one configuration (``image.coresidence``). Narrowing one
 leaves room for another; it also changes its own step time and what
-configuring it costs. :class:`JointNarrowing` picks, for a traced graph,
+configuring it costs. ``JointNarrowing`` picks, for a traced graph,
 each design's width among those its operator declares
-(:attr:`Operator.widths`) and a partition of the designs into devices, to
+(``Operator.widths``) and a partition of the designs into devices, to
 minimise the modelled time of the runlist:
 
     D0 + sum over steps of t_step
@@ -19,16 +19,16 @@ minimise the modelled time of the runlist:
 
 A device is *entered* at a step whose design is in it when the step before
 is not; entering configures it. ``R`` is the empty configure the parity
-rule adds (:meth:`..image.fusion.Fusion.needs_reset`). ``t_step`` and
+rule adds (``Fusion.needs_reset``). ``t_step`` and
 ``load`` are measured per design and width, ``D0``, ``base`` and ``R`` per
-device (:mod:`.probe`, into a :class:`CostTable`).
+device (``probe``, into a ``CostTable``).
 
 The model decomposes over devices, bar the parity: a device's cost is its
 entries times its configure plus its members' steps. Only a pack that is
 connected in the runlist's adjacency can save an entry, so the candidates
 are the connected sets of designs; an exact search over partitions into
 them, carrying the parity, finds the cheapest. Whether a pack's widths fit
-is for the placer (:func:`fits`), asked only for the packs a solution uses:
+is for the placer (``fits``), asked only for the packs a solution uses:
 a pack that does not fit tries its next-cheapest widths, then is dropped,
 and the search reruns.
 
@@ -200,7 +200,7 @@ class Calibration:
 class CostTable:
     """Measured step and configure costs for one device, as JSON on disk.
 
-    ``steps`` is keyed by :func:`cost_key`, ``calibrations`` by the pair of
+    ``steps`` is keyed by ``cost_key``, ``calibrations`` by the pair of
     keys they were measured on; the model uses the median of each
     calibrated figure. The key covers a design's fields, not the code that
     generates it or the kernels it links, so a table outlives a change to
@@ -354,7 +354,7 @@ def model_us(
 
 @dataclasses.dataclass
 class Tuning:
-    """What :class:`JointNarrowing` chose for a graph, and what the model
+    """What ``JointNarrowing`` chose for a graph, and what the model
     predicts for it and for the graph as traced (``baseline``: default
     widths, a device per design). ``unmeasured`` are the designs the table
     did not hold: they stay as traced, and the predictions leave out their
@@ -484,9 +484,9 @@ def _cheapest(
 
 @dataclasses.dataclass(frozen=True)
 class JointNarrowing:
-    """Choose widths and packs for a traced graph from a :class:`CostTable`.
+    """Choose widths and packs for a traced graph from a ``CostTable``.
 
-    Pass as ``coresident=`` to :meth:`Graph.compile`. ``max_members`` caps a
+    Pass as ``coresident=`` to ``Graph.compile``. ``max_members`` caps a
     pack; ``fit_attempts`` is how many of a pack's cheapest widths within
     the shim budget are put to the placer before it is given up.
     ``fit_cache`` is where the placer's verdicts are kept across processes.
@@ -708,7 +708,7 @@ class JointNarrowing:
         """The file holding the placer's verdict on a pack of ``designs``:
         ``fits``, or ``refused:`` and the diagnostic.
 
-        Keyed as a design's build is (:attr:`OperatorDesign.key`), on each
+        Keyed as a design's build is (``OperatorDesign.key``), on each
         design's identity and the source that generates and places it -- the
         placer's pipeline is in IRON's common tree, the placer in mlir-aie's
         bindings -- so a verdict is reused exactly when the build it

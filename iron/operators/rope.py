@@ -3,7 +3,7 @@
 
 """RoPE, rotary position embedding, over the mlir-aie ``datamovement.rope``
 kernel. The angle table is the caller's: ``(positions, cols)``, cos and sin
-of each rotation interleaved (a decoder's is :func:`iron.lm.rope_angles`).
+of each rotation interleaved (a decoder's is ``iron.lm.rope_angles``).
 
 The kernel rotates in one of two conventions, ``method_type``: the two
 halves of each row (0, the default) or interleaved pairs (1). Hugging

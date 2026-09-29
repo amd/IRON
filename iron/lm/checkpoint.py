@@ -3,16 +3,18 @@
 
 """A model's weights: the checkpoint file, and the tree a model reads.
 
-:class:`Checkpoint` maps a ``.safetensors`` file. :func:`load_weights`
+``Checkpoint`` maps a ``.safetensors`` file. ``load_weights``
 places its tensors in a tree by a model's *layout*: each weight's path in
 the tree, its name in the checkpoint and its shape, ``{i}`` standing for a
-layer's index in both::
+layer's index in both:
 
-    {
-        "embedding": ("model.embed_tokens.weight", (V, E)),
-        "layers.{i}.q": ("model.layers.{i}.self_attn.q_proj.weight", (Q, E)),
-        ...
-    }
+```python
+{
+    "embedding": ("model.embed_tokens.weight", (V, E)),
+    "layers.{i}.q": ("model.layers.{i}.self_attn.q_proj.weight", (Q, E)),
+    ...
+}
+```
 
 makes ``weights.embedding`` and ``weights.layers[3].q``.
 """

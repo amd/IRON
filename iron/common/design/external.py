@@ -3,7 +3,7 @@
 
 """The sequence for an image IRON did not build.
 
-An operator declared with ``image=`` (:class:`~iron.common.declare.Xclbin`)
+An operator declared with ``image=`` (``Xclbin``)
 has no array to build: every core program, memtile buffer and stream-switch
 route comes from the downloaded image. What the sequence must supply is the
 other half of a dispatch, and the declaration carries everything it needs:
@@ -46,9 +46,9 @@ class _NoGroup:
 class ExternalSequence(Transfers):
     """What an operator's ``sequence(rt)`` receives against a shipped image.
 
-    The same surface :class:`~iron.common.design.Sequence` offers, lowering a
+    The same surface ``Sequence`` offers, lowering a
     transfer to shim DMA tasks on the image's pinned channels instead of
-    ObjectFIFO fills. :meth:`module` is the whole module for one operator.
+    ObjectFIFO fills. ``module`` is the whole module for one operator.
     """
 
     def __init__(

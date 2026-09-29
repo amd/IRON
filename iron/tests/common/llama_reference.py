@@ -10,7 +10,7 @@ and ``Graph.reference`` runs it operator by operator through each
 ``reference()`` on host tensors, with the per-call values modelled (the
 chunk and the position move the cache writes and bound the attention, the
 last prompt row selects the logits, a decode step gathers its token's row)
-and the caches as state. :class:`OnHost` is
+and the caches as state. ``OnHost`` is
 the model with its images stood in by that reference, so the two can be
 compared without a device, through the application's own ``logits``:
 that checks the graph's wiring (layouts, reshapes, the head grouping,

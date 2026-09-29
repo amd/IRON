@@ -5,7 +5,7 @@
 
 An operator knows its own valid shapes: which column counts divide its
 size, how large a line its kernel holds, which layout flags change what is
-built. So it declares them beside itself, as :class:`Testing` on the class,
+built. So it declares them beside itself, as ``Testing`` on the class,
 and ``iron/tests/operators/catalog.py`` runs every declaration against the
 operator's ``reference()`` on a device.
 
@@ -56,18 +56,18 @@ _Cases = Callable[[type], Iterable[Case | dict]]
 class Testing:
     """How an operator is checked against its reference on a device.
 
-    ``cases`` lists what to construct: :class:`Case` objects, plain keyword
+    ``cases`` lists what to construct: ``Case`` objects, plain keyword
     dicts, and callables of the operator class returning them (a
-    :class:`Sweep`), for shapes that follow the device's width; or is one
+    ``Sweep``), for shapes that follow the device's width; or is one
     such callable. ``draw`` is extra
-    :func:`iron.common.harness.vectors` arguments, or a callable of the
+    ``iron.common.harness.vectors`` arguments, or a callable of the
     operator returning them (for an input that must satisfy the kernel's
     preconditions: a packed quantization, an angle table).
 
     ``tolerance`` is the gate. Left out, it is the contract of the kernel
-    the operator runs (:meth:`~iron.common.declare.Operator.tolerance`),
+    the operator runs (``Operator.tolerance``),
     and an operator whose kernel declares none must state one here. An
-    operator that only moves data states :meth:`Tolerance.exact`, since any
+    operator that only moves data states ``Tolerance.exact``, since any
     other tolerance there also accepts a wrong permutation.
     """
 
@@ -96,7 +96,7 @@ class Sweep:
     """The cases of an elementwise operator: every column count its shim
     budget allows by every channel count, at each length.
 
-    Called with the operator class, as :class:`Testing` calls it, it reads
+    Called with the operator class, as ``Testing`` calls it, it reads
     the class's ``tile_cap`` (unless given one) and shim budget, so a sweep
     a base declares serves its subclasses; the device is read then too,
     since none is bound when a class body runs. A case's tile is its length
@@ -104,7 +104,7 @@ class Sweep:
     default suite, every one when it is ``None``. ``channels=None`` leaves
     the channel count to the operator (a binary one, whose shim budget one
     channel fills). With ``rows``, a length is that many elements in rows
-    of ``tile_size``, for a :class:`~iron.common.elementwise.Rowwise`
+    of ``tile_size``, for a ``Rowwise``
     operator. ``extra`` is given to every case.
     """
 

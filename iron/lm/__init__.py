@@ -2,27 +2,27 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Language models on IRON's operators: what every decoder shares, and one
-package per model (:mod:`.llama3`).
+package per model (``llama3``).
 
 A model is five things over this package:
 
-* its :class:`Config`, the shape;
-* a :class:`CausalLM`, the decoder on the NPU as one graph (prefill and
+* its ``Config``, the shape;
+* a ``CausalLM``, the decoder on the NPU as one graph (prefill and
   decode, the caches, attention over them and ``logits(tokens)``), to
-  which it gives its ``layer`` and ``head``, built from :mod:`.layers`
-  (:func:`project`, a weight's projection at either row count, and
-  :func:`swiglu`, the SwiGLU feed-forward);
-* an :class:`Oracle`, the same decoder's float32 forward pass on the host
+  which it gives its ``layer`` and ``head``, built from ``layers``
+  (``project``, a weight's projection at either row count, and
+  ``swiglu``, the SwiGLU feed-forward);
+* an ``Oracle``, the same decoder's float32 forward pass on the host
   that it is judged by, to which it gives the same ``layer`` and ``head``
   in numpy;
-* its checkpoint :data:`Layout`, each weight's place in the model, its name
-  in the ``.safetensors`` file and its shape (:mod:`.checkpoint`);
-* a :class:`Runner`, which opens the checkpoint and the tokenizer and
-  builds the model and its oracle; :func:`main` is its command line.
+* its checkpoint ``Layout``, each weight's place in the model, its name
+  in the ``.safetensors`` file and its shape (``checkpoint``);
+* a ``Runner``, which opens the checkpoint and the tokenizer and
+  builds the model and its oracle; ``main`` is its command line.
 
 Sampling and the generation, accuracy and determinism loops
-(:mod:`.generation`), and what a model's device test checks
-(:mod:`.testing`), need nothing of a model but ``logits(tokens)``.
+(``generation``), and what a model's device test checks
+(``testing``), need nothing of a model but ``logits(tokens)``.
 
 A model's package holds what is its alone: those five, its tokenizer and
 its profiles. Nothing in the library imports a model, so one can be

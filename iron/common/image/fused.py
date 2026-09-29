@@ -37,7 +37,7 @@ class FusedImage:
     def link(self, seq) -> Path:
         """Build the ELF once (idempotent); returns its path.
 
-        Keyed on :attr:`Fusion.identity`, so a hit generates nothing: the
+        Keyed on ``Fusion.identity``, so a hit generates nothing: the
         designs are fused, inside ``compile()``, only on a miss.
         """
         dev = aie_utils.ensure_current_device(required=True)

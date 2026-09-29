@@ -30,12 +30,12 @@ class Runner:
     """A checkpoint, its tokenizer and ``config``, and the models on them.
 
     A subclass names the model: its ``config``; ``layout(config)``, where
-    each weight is in the checkpoint (:mod:`.checkpoint`); ``model``, the
-    :class:`~.decoder.CausalLM` on the NPU, whose ``oracle`` is the CPU model
+    each weight is in the checkpoint (``checkpoint``); ``model``, the
+    ``CausalLM`` on the NPU, whose ``oracle`` is the CPU model
     it is checked against; ``open_tokenizer(path)``, with ``encode`` and
     ``decode``; and ``bos``, the token every prompt starts with.
 
-    The checkpoint is mapped, not read: :meth:`npu` uploads it a piece at a
+    The checkpoint is mapped, not read: ``npu`` uploads it a piece at a
     time and drops each piece's host pages once it is on the device.
     """
 
@@ -64,9 +64,9 @@ class Runner:
         self, cost_table: Path | None = None, boundaries: str | None = None
     ) -> CausalLM:
         """The model compiled and loaded, weights uploaded. With a
-        ``cost_table`` (:mod:`.tune`) its decode step's designs are narrowed
+        ``cost_table`` (``tune``) its decode step's designs are narrowed
         and packed by it; ``boundaries`` are its decode step's
-        (:meth:`~.decoder.CausalLM.load`).
+        (``CausalLM.load``).
         """
         model = self.model(self.config, self.weights)
         tuner = None if cost_table is None else JointNarrowing(CostTable(cost_table))

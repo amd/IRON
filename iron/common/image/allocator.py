@@ -11,9 +11,9 @@ it by hand: reusing one pinned name per scratch slot, everywhere, forever.
 That is a register allocator written by hand, so write the allocator instead.
 Two passes over the runlist:
 
-1. :meth:`LiveRange.scan` -- one linear scan giving each buffer the step
+1. ``LiveRange.scan`` -- one linear scan giving each buffer the step
    interval ``[first_write, last_read]`` it must stay resident for.
-2. :meth:`Pool.place` -- assign each a byte offset in one pool, letting
+2. ``Pool.place`` -- assign each a byte offset in one pool, letting
    buffers whose lifetimes do not overlap share addresses.
 
 This is Dynamic Storage Allocation: rectangles of fixed width (lifetime) and
@@ -36,7 +36,7 @@ inputs and outputs -- are *pinned*: they need private, stable addresses, so
 they are never pooled. TorchInductor keeps the same exclusion list in
 ``can_reuse``: graph inputs, constants, and explicitly never-reused buffers.
 
-:class:`ArenaPlan` carries this across images. One graph compiled
+``ArenaPlan`` carries this across images. One graph compiled
 for several input shapes is several images, and one runs at a time, so they
 can share a single scratch arena: *residents* (weights, states) get one
 offset, the same in every image, and each image's *transients* are planned

@@ -3,13 +3,13 @@
 
 """What a declared class goes through once its body has run.
 
-:class:`Operator` calls :func:`declare` from ``__init_subclass__``, so every
+``Operator`` calls ``declare`` from ``__init_subclass__``, so every
 subclass is processed and none can forget to be. It applies ``dataclass``,
 resolves the field objects the class body captured in its shapes to names,
-re-attaches every field as a :class:`DimRef`, checks the shape rule, and
+re-attaches every field as a ``DimRef``, checks the shape rule, and
 records the members in declaration order. Checking an operator's extents
 against its resolved tunables needs an instance, so that is left to
-:meth:`Operator.compatible`.
+``Operator.compatible``.
 """
 
 from __future__ import annotations
@@ -130,7 +130,7 @@ def _check_dim_ref(
 
 
 def declare(cls: type) -> None:
-    """Process a freshly created :class:`Operator` subclass.
+    """Process a freshly created ``Operator`` subclass.
 
     Equality is identity; the base defines its own ``repr``.
     """

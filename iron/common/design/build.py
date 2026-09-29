@@ -76,7 +76,7 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
     ``image`` is what the module is built for: on ``"elf"`` a per-call value
     is a scratchpad parameter; on ``"xclbin"``, which has no scratchpad (XRT
     gives one to a module run only), it is a dispatch-time scalar of the
-    sequence, handed in by name in ``dispatch`` (:class:`OperatorDesign`
+    sequence, handed in by name in ``dispatch`` (``OperatorDesign``
     declares them as the generator's parameters).
     """
     dev = op.dev
@@ -168,8 +168,8 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
 class OperatorDesign:
     """One operator's design as ``CompilableDesign`` compiles it.
 
-    The generator is :func:`build_design` bound to the operator, or the
-    design another tool exports for it (:meth:`Operator.exported_design`).
+    The generator is ``build_design`` bound to the operator, or the
+    design another tool exports for it (``Operator.exported_design``).
     It runs inside ``compile()``, so the kernels it declares are the ones
     built; on an xclbin its per-call values are its ``DispatchTime``
     parameters, so the two images are two modules and two cache keys.

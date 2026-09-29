@@ -15,7 +15,7 @@ gate runs aiecc's xclbin pipeline (kernels with Peano, the PDI, then
   shape and this shape's instruction stream;
 * the shipped flm image's instruction stream against its pins (the xclbin
   itself is downloaded, not built, and is tried separately);
-* one plain declared operator's :class:`~iron.common.image.OperatorImage` on NPU1.
+* one plain declared operator's ``OperatorImage`` on NPU1.
 
 Needs Peano and ``xclbinutil`` on the PATH (mlir-aie vendors a Boost-free
 one under ``tools/hrx-xclbinutil``); no device.

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Infrastructure tests for :mod:`iron.common.image.allocator`, the memory planner.
+"""Infrastructure tests for ``iron.common.image.allocator``, the memory planner.
 
 Pure logic over synthetic runlists -- no operators, no toolchain, no hardware.
 The properties that matter are: a plan never lets two simultaneously-live

@@ -9,30 +9,32 @@ declares a flat buffer per stream with the line as its tile, and its
 runtime sequence is derived: the buffer is split evenly across the cores'
 fifos and drained back the same way.
 
-:class:`UnaryElementwise` and :class:`BinaryElementwise` are the two flat
-operand shapes, and :class:`Rowwise` a matrix whose rows are the lines, for
+``UnaryElementwise`` and ``BinaryElementwise`` are the two flat
+operand shapes, and ``Rowwise`` a matrix whose rows are the lines, for
 a kernel that reduces over its line (a norm). The array reads whatever
 operands are declared, so an operator with a third input needs no new code
 here.
 
-The core's trip count is a :class:`~iron.common.declare.Value` the sequence
+The core's trip count is a ``Value`` the sequence
 writes before the first transfer, so the array does not depend on the
 extent and one array serves every size. This is
 the one difference from upstream's
-:func:`aie.iron.algorithms.transform_parallel`, which is otherwise the same
+``aie.iron.algorithms.transform_parallel``, which is otherwise the same
 design: it takes the tensor at build time, folds the trip count into the
 core program, and owns the runtime sequence so it can issue the taps. An
 array here returns workers and leaves the sequence to the library, which
 lets several operators fuse into one image.
 
 A concrete operator is one small subclass, naming the kernel each core
-calls::
+calls:
 
-    class ReLU(UnaryElementwise):
-        def kernel(self):
-            return eltwise.relu_sized(self.tile_size)
+```python
+class ReLU(UnaryElementwise):
+    def kernel(self):
+        return eltwise.relu_sized(self.tile_size)
+```
 
-Kernels come from :mod:`aie.iron.kernels`: its factories return the
+Kernels come from ``aie.iron.kernels``: its factories return the
 ``ExternalFunction`` for a symbol, its source and its argument types, handle
 aie2's LUT tables, and carry the contract the operator is tested by: the
 reference and the tolerance. A core calls the kernel with its acquired
@@ -78,7 +80,7 @@ class Elementwise(Operator):
     """The array for an elementwise kernel over lines of ``tile_size`` elements.
 
     Subclasses declare the operands with the line as their tile, one lane
-    per (column, channel) (see the two below), and implement :meth:`kernel`.
+    per (column, channel) (see the two below), and implement ``kernel``.
     ``tile_cap`` is the largest line the kernel holds, so a larger tile is
     refused rather than split; a line spanning more than one local-memory
     bank drops the fifo depth to one.
@@ -152,7 +154,7 @@ class Elementwise(Operator):
     def kernel(self) -> ExternalFunction:
         """The ``ExternalFunction`` each core calls, over one line.
 
-        Usually a factory from :mod:`aie.iron.kernels` at ``self.tile_size``;
+        Usually a factory from ``aie.iron.kernels`` at ``self.tile_size``;
         an ``ExternalFunction(..., digest_prefix=True)`` declares one upstream
         does not offer. Either way the kernel takes the elements alone: its
         contract binds the rest.

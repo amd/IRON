@@ -6,8 +6,8 @@
 Buffers are the host ABI, and an operand declared with a tile is its own
 stream into the array, so direction, dtype and shim binding agree by
 construction. The other members are values no host buffer carries: a
-:class:`Value` written once per build, or per call when a graph binds it,
-and a :class:`Scratchpad` or :class:`DispatchTime` written per call.
+``Value`` written once per build, or per call when a graph binds it,
+and a ``Scratchpad`` or ``DispatchTime`` written per call.
 """
 
 from __future__ import annotations
@@ -115,8 +115,8 @@ class _Member(Generic[B]):
 
     ``__set_name__`` gives the member its name and the class body gives it
     its order. On an instance, ``__get__`` returns the bound form built as
-    the class is created (a :class:`BoundBuffer`, :class:`BoundStream` or
-    :class:`BoundValue`). ``B`` is that type, so a type checker sees
+    the class is created (a ``BoundBuffer``, ``BoundStream`` or
+    ``BoundValue``). ``B`` is that type, so a type checker sees
     ``op.A`` as it.
     """
 
@@ -158,12 +158,12 @@ class _Buffer(_Member["BoundBuffer"]):
     (its dimensions may be tunables), ``per=`` the field the stream is
     replicated over, ``depth`` the fifo depth, ``via=`` a pinned shim
     endpoint. Without it the buffer is an argument of a sequence written by
-    hand (:meth:`Operator.sequence`).
+    hand (``Operator.sequence``).
 
     ``when=`` a boolean ``param()`` makes the operand optional: it, and its
     stream, exist only on an instance where the field is true. A call gives
     it by keyword, its name (``RMSNorm(x, weight=w)``), which sets the field
-    (see :func:`.infer.call_operands`).
+    (see ``call_operands``).
     """
 
     direction: ClassVar[str] = ""
@@ -297,7 +297,7 @@ class ValueSpec:
     """``Scratchpad[np.int32]``: the annotation of a graph body's per-call parameter.
 
     ``carried`` marks a value the graph computes for its own next call
-    (:class:`Carried`).
+    (``Carried``).
     """
 
     __slots__ = ("kind", "dtype", "carried")
@@ -311,7 +311,7 @@ class ValueSpec:
 
 
 class _Value(_Member["BoundValue"]):
-    """A per-call scalar. See :class:`Scratchpad` and :class:`DispatchTime`."""
+    """A per-call scalar. See ``Scratchpad`` and ``DispatchTime``."""
 
     kind: ClassVar[str] = ""
     carried: ClassVar[bool] = False
@@ -390,7 +390,7 @@ class Extent(_Value):
 
     ``valid = Extent(size)`` reads as ``size`` on an instance until a graph
     bounds an operand the field sizes (``x[:n]``); from then on it is per
-    call, and so is every :class:`Value` whose ``derive`` reads it, which the
+    call, and so is every ``Value`` whose ``derive`` reads it, which the
     host evaluates with the call's bound and writes as a word. The image is
     built for the field's full value, so a bound is at most it. The field is
     a ``param()``.
@@ -427,7 +427,7 @@ class Value(_Value):
 
     ``derive`` gives the once-per-build value from the operator (a trip count
     from the extents); a graph binding a handle to it makes it per-call
-    instead, lowered as a :class:`Scratchpad` value is. ``address``/``lock``
+    instead, lowered as a ``Scratchpad`` value is. ``address``/``lock``
     place it for an image IRON did not build.
     """
 

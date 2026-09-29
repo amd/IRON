@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """What a model's device test checks: speed, accuracy against the
-CPU reference, and determinism, each over a :class:`~.runner.Runner` and
+CPU reference, and determinism, each over a ``Runner`` and
 the model it loaded.
 
 A test module defines a module-scoped ``runner`` fixture; the ``model``

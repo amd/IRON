@@ -23,7 +23,7 @@ class Handle:
 
     Carries no data. ``h[key]`` takes numpy's basic indexing (integers,
     unit-step slices, an ellipsis) and, on one axis, a per-call
-    :class:`Value`: ``keys[:, pos]``. A contiguous static region is a slice:
+    ``Value``: ``keys[:, pos]``. A contiguous static region is a slice:
     part of the parent's buffer, which any operator takes. Any other view
     (a strided region, a transpose, a per-call index) is an access pattern
     over the parent's buffer, which only a copy takes, since a DMA walks it.
@@ -237,9 +237,9 @@ class _Viewed:
 class State(_Viewed):
     """A tensor that persists on the device across calls (a KV cache).
 
-    Created with :func:`state` and held by the graph.
+    Created with ``state`` and held by the graph.
     Zero when the graph is first uploaded; read and written through
-    :meth:`CompiledGraph.buffer`.
+    ``CompiledGraph.buffer``.
     """
 
     __slots__ = ("shape", "dtype", "name", "host")
@@ -263,7 +263,7 @@ def state(shape, dtype=bfloat16, name=None) -> State:
 class Weight(_Viewed):
     """A weight the graph's body views, ``rope[position]``: uploaded once,
     as any tensor the graph holds is, and viewed as a state is. Created with
-    :func:`weight`.
+    ``weight``.
     """
 
     __slots__ = ("array",)
@@ -321,10 +321,10 @@ def _rescale_bounds(h: Handle, shape) -> dict[int, Affine]:
 class Value:
     """A per-call scalar parameter of a graph's body.
 
-    Integer arithmetic on one makes an :class:`Affine`: ``position + 1`` or
+    Integer arithmetic on one makes an ``Affine``: ``position + 1`` or
     ``chunk * 32`` is what an operator is bound to, and the graph computes
     it from ``position`` on every call. A ``carried`` one the graph computes
-    for its own next call (:class:`~iron.common.declare.Carried`).
+    for its own next call (``Carried``).
     """
 
     __slots__ = ("name", "kind", "dtype", "carried")
@@ -410,10 +410,10 @@ class Affine:
 
 class Carry(Mapping[str, "Handle | Affine | int"]):
     """The next values of a graph's carried values, by name: what
-    :func:`carry` makes.
+    ``carry`` makes.
 
-    Traced, each is an :class:`Affine` of the current values or a
-    one-element integer :class:`Handle` the graph computed. Returned from a
+    Traced, each is an ``Affine`` of the current values or a
+    one-element integer ``Handle`` the graph computed. Returned from a
     call, each is the number the next call takes.
     """
 
@@ -471,7 +471,7 @@ def _tensor_dtype(t):
 class _HostView:
     """A state as the reference views it: reshaped, then indexed, both kept,
     so an operator that takes views gets the whole host tensor and the
-    pattern (:meth:`pattern`) and writes it in place, as the device does. A
+    pattern (``pattern``) and writes it in place, as the device does. A
     transpose is numpy's own view of the host tensor.
     """
 

@@ -19,9 +19,11 @@ core, which draws the token.
 
 In a graph, the position is two per-call values: ``row`` is the element
 offset of its draw (``4 * position``) and ``at`` the element offset of its
-record (``position``)::
+record (``position``):
 
-    tokens, token = Sample(logits, draws, tokens, row=position * 4, at=position)
+```python
+tokens, token = Sample(logits, draws, tokens, row=position * 4, at=position)
+```
 """
 
 import dataclasses

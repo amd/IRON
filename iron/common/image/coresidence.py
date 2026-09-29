@@ -3,7 +3,7 @@
 
 """Co-residence: several designs' arrays packed into one device configuration.
 
-Temporal fusion (:mod:`.fusion`) gives every design its own ``aie.device`` and
+Temporal fusion (``fusion``) gives every design its own ``aie.device`` and
 reconfigures the array between steps that run different designs. Packing
 merges designs into one ``aie.device`` instead: their tiles, fifos and cores
 side by side, each design's runtime sequence kept under its own name, so the
@@ -30,8 +30,8 @@ What the merge has to settle:
 
 Whether the union *fits* -- cores, shim channels, routes -- is for the
 placer, the fifo lowering and the router to say, as they would in aiecc;
-:func:`fits` asks them, and
-:class:`AdjacentPacking` uses it to pack a runlist without being told what
+``fits`` asks them, and
+``AdjacentPacking`` uses it to pack a runlist without being told what
 goes with what.
 """
 
@@ -294,7 +294,7 @@ class AdjacentPacking:
     """Pack designs that run next to each other, as long as the union fits.
 
     Walks the runlist in order and grows the current pack with each new
-    design while :func:`fits` accepts the union; a design that does not fit
+    design while ``fits`` accepts the union; a design that does not fit
     starts the next pack. A design seen before stays where it was placed.
     It knows nothing about any operator: the placer is the only judge.
 

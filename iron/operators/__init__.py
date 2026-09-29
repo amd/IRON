@@ -8,7 +8,7 @@ Operators are re-exported lazily (PEP 562):
     from iron.operators import GEMM  # imports iron.operators.gemm, nothing else
 
 The FastFlowLM ports, and the binary they are measured against, are
-:mod:`.flm`'s, a catalog of their own: its GEMM is not this one.
+``flm``'s, a catalog of their own: its GEMM is not this one.
 """
 
 import importlib

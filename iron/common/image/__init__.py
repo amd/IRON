@@ -3,16 +3,16 @@
 
 """What a design becomes once it is built, and how it is called.
 
-A design (:mod:`iron.common.design`) is MLIR; an image is the xclbin or ELF
+A design (``iron.common.design``) is MLIR; an image is the xclbin or ELF
 that MLIR compiles to, together with everything needed to dispatch it. The
-modules read in build order: :mod:`.packaging` decides which kind of image a
-plan wants, :mod:`.allocator` places the buffers it needs, :mod:`.fusion`
-merges several designs into one module (:mod:`.coresidence` packs several
-into one device configuration), :mod:`.fused` puts that module (or
+modules read in build order: ``packaging`` decides which kind of image a
+plan wants, ``allocator`` places the buffers it needs, ``fusion``
+merges several designs into one module (``coresidence`` packs several
+into one device configuration), ``fused`` puts that module (or
 each design, chained into xclbins) through mlir-aie's ``CompilableDesign``,
-and :mod:`.artifacts` records what came out.
-:mod:`.sequence` drives all of that for one run, and :mod:`.callable` is what
-a caller finally invokes. :mod:`.standalone` is the one-operator case: an
+and ``artifacts`` records what came out.
+``sequence`` drives all of that for one run, and ``callable`` is what
+a caller finally invokes. ``standalone`` is the one-operator case: an
 operator built and called on its own, outside a graph.
 """
 

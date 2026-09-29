@@ -7,7 +7,7 @@
 entry keyed on the content it was built from. What it does not know is
 the structure IRON gave the build: which operators share which design,
 which step of a graph runs which design, and where each buffer lands in
-the image's plan. :class:`Artifacts` is that view, one shape for an
+the image's plan. ``Artifacts`` is that view, one shape for an
 operator compiled alone (one design, one step) and for a graph, with
 every path resolved through the entries. It is held in memory and, when
 the context asks for it, written beside the image as ``artifacts.json``.

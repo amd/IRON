@@ -48,6 +48,13 @@ jobs:
         if: success() || failure()
         run: ruff check
 
+      # Docstrings are Google style, as in mlir-aie: ``X`` code spans and
+      # fenced code blocks, not Sphinx roles, RST literal blocks or directives.
+      - name: Check docstrings for Sphinx/RST markup
+        if: success() || failure()
+        run: |
+          ! git grep -nE ':(py:)?(class|meth|func|attr|mod|obj|data|exc|ref):`|\S::$|^\s*\.\. [a-z-]+::' -- '*.py'
+
       - name: Type-check Python
         if: success() || failure()
         run: pyright

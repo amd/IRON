@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Infrastructure tests for :class:`OperatorSequence`.
+"""Infrastructure tests for ``OperatorSequence``.
 
 This is the first test module under ``iron/tests/`` and exercises the
 sequencing infrastructure itself (dispatch-mode selection, fused-MLIR

@@ -3,10 +3,10 @@
 
 """A decoder-only language model on the NPU, as one graph.
 
-:class:`CausalLM` is the part every such model shares: the body over
+``CausalLM`` is the part every such model shares: the body over
 ``x``, the embedded tokens, ``(rows, emb_dim)``, which branches on that
 static shape; the key and value caches and the RoPE table, on the device;
-attention over the caches (:meth:`CausalLM.attend`); and
+attention over the caches (``CausalLM.attend``); and
 ``logits(tokens)``. A model subclasses it with its ``layer`` and its
 ``head``.
 
@@ -22,15 +22,15 @@ context it attends over, not ``max_seq_len``, which sizes the caches and the
 RoPE table alone.
 
 Both end in the head, and draw the next token from its logits on the device
-(:class:`~iron.operators.sample.Sample`, from a draw the host wrote ahead
+(``Sample``, from a draw the host wrote ahead
 for the position). They return the logits and carry the token and
 ``position + 1`` into the next call, so a prompt's last chunk can start a
 decode step and each step the next with nothing from the host
-(:meth:`CausalLM.generate`). ``logits(tokens)`` returns the logits instead,
+(``CausalLM.generate``). ``logits(tokens)`` returns the logits instead,
 for the host to draw from.
 
 Each shape compiles its own version, and every version runs in the graph's
-one scratch arena (:mod:`iron.common.graph.compiled`): the weights and the
+one scratch arena (``iron.common.graph.compiled``): the weights and the
 caches are uploaded once, and the caches a prompt writes are the ones the
 next decode step reads.
 
@@ -40,7 +40,7 @@ of it is its own dispatch of one xclbin, and only a full ELF addresses the
 arena, so no prompt version could share its caches. A prompt then runs
 through it a token at a time, and there is no device loop.
 
-:class:`Oracle` is the same model's float32 forward pass on the host, the
+``Oracle`` is the same model's float32 forward pass on the host, the
 reference it is judged by; a model subclasses it too, with a numpy
 ``layer`` and ``head``, and names it as its ``oracle``.
 """
@@ -67,7 +67,7 @@ from iron.operators.sample import Sample
 from .generation import Sampler
 
 #: A RoPE frequency scaling: the frequencies (radians per position, float64)
-#: in, scaled out (Llama 3's is :class:`~iron.lm.llama3.model.Llama3RopeScaling`).
+#: in, scaled out (Llama 3's is ``Llama3RopeScaling``).
 RopeScaling = Callable[[np.ndarray], np.ndarray]
 
 
@@ -103,7 +103,7 @@ class Config:
     """A decoder's shape. ``max_seq_len`` is the rows the caches hold,
     prompt and generated tokens together, and ``prefill_chunk``, which
     divides it, the rows a prompt runs at once; ``rope_scaling`` rescales
-    the RoPE frequencies (:data:`RopeScaling`).
+    the RoPE frequencies (``RopeScaling``).
     """
 
     vocab_size: int
@@ -157,8 +157,8 @@ class CausalLM(iron.Graph):
     draw at each position (``Sampler.rows``) and ``drawn`` the token it drew
     there.
 
-    A subclass gives :meth:`layer` and :meth:`head`, its ``profile``, and
-    its ``oracle``, the :class:`Oracle` it is checked against.
+    A subclass gives ``layer`` and ``head``, its ``profile``, and
+    its ``oracle``, the ``Oracle`` it is checked against.
     """
 
     embedding: Weight
@@ -285,10 +285,10 @@ class CausalLM(iron.Graph):
         size. ``release`` is given each piece of each weight once it is on
         the device, to drop the host's pages of it. A ``tuner`` narrows the
         decode step's designs and packs them into shared device
-        configurations by what each costs (:attr:`tuning`). ``boundaries``
-        is the decode step's (:mod:`iron.common.image.packaging`); where
+        configurations by what each costs (``tuning``). ``boundaries``
+        is the decode step's (``iron.common.image.packaging``); where
         its decode step is not a full ELF, the model has no prompt version
-        (:attr:`full_elf`).
+        (``full_elf``).
         """
         decode = self.compile(coresident=tuner, boundaries=boundaries, **self.shapes(1))
         if decode.plan.image != iron.ELF:
@@ -308,7 +308,7 @@ class CausalLM(iron.Graph):
     @property
     def full_elf(self) -> bool:
         """Whether the model runs as full ELFs: a prompt version beside the
-        decode step, and the device loop (:meth:`generate`).
+        decode step, and the device loop (``generate``).
         """
         if self._decode is None:
             raise RuntimeError(f"{type(self).__name__}: load() first")
@@ -316,7 +316,7 @@ class CausalLM(iron.Graph):
 
     @property
     def tuning(self) -> Tuning | None:
-        """What the ``tuner`` given to :meth:`load` chose for the decode
+        """What the ``tuner`` given to ``load`` chose for the decode
         step; None without one.
         """
         if self._decode is None:
@@ -362,10 +362,10 @@ class CausalLM(iron.Graph):
         The prompt runs from the host, a chunk at a time; its last chunk
         draws the first token, and its carried values, that token and the
         position after it, start the first decode step, and each step the
-        next (:class:`CarriedLoop`). Every draw is the device's, from a row
+        next (``CarriedLoop``). Every draw is the device's, from a row
         ``sample`` gives it before the prompt
-        (:meth:`~.generation.Sampler.rows`), so the tokens are the ones
-        :func:`~.generation.generate` draws on the host from the same logits
+        (``Sampler.rows``), so the tokens are the ones
+        ``generate`` draws on the host from the same logits
         and the same seed.
 
         Returns what that does: the tokens drawn, the seconds to the first
@@ -448,7 +448,7 @@ class CausalLM(iron.Graph):
 
 class Oracle:
     """A decoder's forward pass in float32 on the host, on ``config``'s
-    shape and RoPE table and ``weights``, as its :class:`CausalLM` takes
+    shape and RoPE table and ``weights``, as its ``CausalLM`` takes
     them: the oracle the model is judged by.
 
     A plain causal pass over one token sequence, with no cache: the logits
@@ -459,9 +459,9 @@ class Oracle:
     independent forward can catch a wiring mistake, a transposed layout or
     a softmax over the wrong length.
 
-    A model subclasses it beside its :class:`CausalLM` with :meth:`layer`
-    and :meth:`head`; the pass, RoPE (:meth:`rotate`) and attention
-    (:meth:`attend`) are shared, as the graph's are. The weights are widened
+    A model subclasses it beside its ``CausalLM`` with ``layer``
+    and ``head``; the pass, RoPE (``rotate``) and attention
+    (``attend``) are shared, as the graph's are. The weights are widened
     to float32 once, here (exactly: every bf16 is a float32), which is
     twice the checkpoint (5 GB for a 1B model), so an oracle is built to
     check with and dropped. The NPU's bf16 RoPE table is rounded from the

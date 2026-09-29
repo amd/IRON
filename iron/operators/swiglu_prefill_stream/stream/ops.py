@@ -3,16 +3,16 @@
 
 """Registry binding torch operators to their ONNX form and their AIE kernel.
 
-One :class:`StreamOp` entry per supported torch operator is all a stream-dse-backed
+One ``StreamOp`` entry per supported torch operator is all a stream-dse-backed
 operator needs: how the op is emitted by the ONNX exporter, which stream-dse kernel
 implements it, which ``aie_kernels`` source that kernel is compiled from, and what
 operand layouts the generated DMAs must use.
 
 Ops stream-dse implements with a fused kernel but ONNX has no operator for are
-declared with :func:`custom_op`, which gives them a schema in a private domain so
+declared with ``custom_op``, which gives them a schema in a private domain so
 the exporter emits them as a single node.
 
-Supporting a new op is one :class:`StreamKernel` plus one :data:`TORCH_OPS` entry --
+Supporting a new op is one ``StreamKernel`` plus one ``TORCH_OPS`` entry --
 the kernel source is mlir-aie's ``aie_kernels/<family>/<name>.cc``, exactly as the
 hand-written operators use it.
 """
@@ -48,7 +48,7 @@ _ELEMENT_TYPES = ["tensor(bfloat16)", "tensor(float)"]
 
 
 def custom_op(name: str, arity: int = 1) -> Op:
-    """An operator in :data:`CUSTOM_DOMAIN`, emitted by the exporter as one node."""
+    """An operator in ``CUSTOM_DOMAIN``, emitted by the exporter as one node."""
     schema = defs.OpSchema(
         name,
         CUSTOM_DOMAIN.domain,
@@ -226,7 +226,7 @@ _BY_ONNX_TYPE = {op.onnx_type: op for op in TORCH_OPS.values()}
 
 
 def translation_table() -> dict[Callable, Callable]:
-    """The ``custom_translation_table`` for :func:`torch.onnx.export`."""
+    """The ``custom_translation_table`` for ``torch.onnx.export``."""
     return {
         target: op.translation
         for target, op in TORCH_OPS.items()
@@ -235,7 +235,7 @@ def translation_table() -> dict[Callable, Callable]:
 
 
 def op_for_onnx_type(onnx_type: str) -> StreamOp:
-    """The :class:`StreamOp` an exported node's operator type belongs to."""
+    """The ``StreamOp`` an exported node's operator type belongs to."""
     try:
         return _BY_ONNX_TYPE[onnx_type]
     except KeyError:

@@ -148,7 +148,7 @@ class TracedGraph:
     def residents(self) -> dict[str, Hashable]:
         """Buffer name -> storage key of every weight and state.
 
-        The key is the identity of the tensor or :class:`State` closed over:
+        The key is the identity of the tensor or ``State`` closed over:
         the same in every trace of the function, so each version compiled
         from it addresses one copy.
         """
@@ -167,7 +167,7 @@ class TracedGraph:
         return [h.name for h in self.outputs]
 
     def sequence(self, name=None, **kwargs):
-        """The :class:`OperatorSequence` this graph lowers to (the image builder)."""
+        """The ``OperatorSequence`` this graph lowers to (the image builder)."""
         kwargs.setdefault("buffer_sizes", dict(self.pinned))
         kwargs.setdefault("share_designs", True)
         kwargs.setdefault("feedback_args", list(self.feedback))
@@ -526,7 +526,7 @@ class _ReferenceTracer(Tracer):
 
     def viewed(self, x: State | Weight):
         """A state viewed in the reference: a view of its host tensor that
-        remembers its shape and key (:class:`_HostView`). A weight's is
+        remembers its shape and key (``_HostView``). A weight's is
         numpy's own view, since nothing writes it.
         """
         if isinstance(x, Weight):
@@ -574,7 +574,7 @@ class _ReferenceTracer(Tracer):
         result = op.reference(*tensors, **values)
         # A flat-declared output the call did not give keeps the shape of the
         # operand it is the size of, as the traced handle does
-        # (:meth:`Tracer._record`): a view, never a copy.
+        # (``Tracer._record``): a view, never a copy.
         outs = [b for b in op.buffers if b.direction == "out"]
         fresh = len(tensors) == n_in and len(outs) == 1
         if fresh and result is not None and len(outs[0].shape) == 1:

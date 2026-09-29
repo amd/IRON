@@ -4,15 +4,15 @@
 """Address the device's compute tiles the way the array is laid out.
 
 stream identifies a tile by an integer core id, which says nothing on its own.
-IRON already describes the device: mlir-aie's :class:`~aie.iron.device.Device`
+IRON already describes the device: mlir-aie's ``Device``
 knows the grid and the type of every tile in it. This turns that into columns of
 core ids, so a placement is written in columns and rows and no other IRON module
 has to know what a stream core id means.
 
 An operator that gives every layer the whole array (the layer-by-layer designs,
 and a single layer sent to stream for a performance estimate) asks for
-:attr:`ComputeArray.all_columns`. An operator that pipelines layers across the
-array asks :meth:`ComputeArray.allocate` for a column budget per layer.
+``ComputeArray.all_columns``. An operator that pipelines layers across the
+array asks ``ComputeArray.allocate`` for a column budget per layer.
 """
 
 from __future__ import annotations

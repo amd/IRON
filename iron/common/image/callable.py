@@ -64,14 +64,14 @@ def _require_xrt() -> None:
 
 
 class ScratchArena:
-    """The device buffer behind an :class:`ArenaPlan`: one scratch buffer every
+    """The device buffer behind an ``ArenaPlan``: one scratch buffer every
     full ELF placed in the plan runs against.
 
     Made on first use, at the plan's size then. A plan that has grown since
     -- an image placed after the first dispatch -- grows the buffer on the
     next use, keeping its contents, so resident weights and states survive.
     Views taken before a growth are views of the old buffer; each callable
-    rebinds on its next call (see :attr:`generation`).
+    rebinds on its next call (see ``generation``).
     """
 
     def __init__(self, plan: ArenaPlan):
@@ -83,7 +83,7 @@ class ScratchArena:
 
     @property
     def generation(self) -> int:
-        """Bumped whenever :attr:`tensor` is replaced by a larger buffer."""
+        """Bumped whenever ``tensor`` is replaced by a larger buffer."""
         return self._generation
 
     @property
@@ -204,7 +204,7 @@ class FullELFRun:
     Runs of one image are separate dispatches: each has its own scratchpad,
     so its own per-call values, and several can be started before any is
     waited on. Binding one run's feedback argument to another's scratchpad
-    (:meth:`bind_feedback`, :meth:`scratchpad_alias`) makes what the first
+    (``bind_feedback``, ``scratchpad_alias``) makes what the first
     drains there the second's per-call values, with no host step between.
     A run is valid while the image stays loaded; the runtime evicting it
     ends every run made on it.
@@ -234,7 +234,7 @@ class FullELFRun:
 
     def bind_feedback(self, bo: pyxrt.bo) -> None:
         """Run with ``bo`` as the feedback argument -- the callable's own
-        buffer until then. Typically another run's :meth:`scratchpad_alias`.
+        buffer until then. Typically another run's ``scratchpad_alias``.
         """
         if self._feedback_arg is None:
             raise ValueError(f"{self.name} declares no feedback argument")
@@ -246,7 +246,7 @@ class FullELFRun:
 
         The ``params.txt`` describing the runtime parameters is requested
         from aiecc via ``--get-scratchpad-parameters`` and lands in the
-        build's cache entry, which :attr:`Artifacts.params` names. Returns
+        build's cache entry, which ``Artifacts.params`` names. Returns
         ``None`` if the sequence declared no runtime parameters: the file
         still exists, but holds a count of zero and there is no ctrl
         scratchpad buffer object to bind to.
@@ -274,7 +274,7 @@ class FullELFRun:
 
     def read_value(self, symbol: str) -> int:
         """The value ``symbol`` holds in the scratchpad now, as the device
-        left it (a feedback transfer into :meth:`scratchpad_alias`).
+        left it (a feedback transfer into ``scratchpad_alias``).
         """
         params = self.params
         if params is None:
@@ -284,7 +284,7 @@ class FullELFRun:
 
     def scratchpad_alias(self) -> pyxrt.bo:
         """A buffer object over this run's ctrl scratchpad, for another run to
-        drain its feedback into (:meth:`ParameterScratchpad.alias`). The host
+        drain its feedback into (``ParameterScratchpad.alias``). The host
         must not write this run's values while a device writes them.
         """
         params = self.params
@@ -316,9 +316,9 @@ class SequenceFullELFCallable(SequenceCallable):
     its scratch in the ``arena`` buffer given here, which every other image
     placed in the same plan runs in too; otherwise it allocates its own.
 
-    A call dispatches :attr:`run`; :meth:`new_run` makes more, over the same
+    A call dispatches ``run``; ``new_run`` makes more, over the same
     buffers, for callers that queue several or chain them through feedback
-    (see :class:`FullELFRun`).
+    (see ``FullELFRun``).
     """
 
     # The buffer trace lowering appends, and the kernel argument it binds to;
@@ -406,11 +406,11 @@ class SequenceFullELFCallable(SequenceCallable):
 
     @property
     def params(self) -> ParameterScratchpad | None:
-        """:attr:`run`'s per-call values (:attr:`FullELFRun.params`)."""
+        """``run``'s per-call values (``FullELFRun.params``)."""
         return self.run.params
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
-        """Write each value into :attr:`run`'s ctrl scratchpad and sync it."""
+        """Write each value into ``run``'s ctrl scratchpad and sync it."""
         self.run.write_values(values)
 
     def _allocate_buffers(self):
@@ -477,7 +477,7 @@ class SequenceFullELFCallable(SequenceCallable):
         """The buffer, and the rest of its last coherence line, as a flat view.
 
         An exact view of a buffer that does not end on a line cannot be
-        synchronized (:meth:`XRTTensor.subview`). Every buffer starts at a
+        synchronized (``XRTTensor.subview``). Every buffer starts at a
         multiple of ``ALIGNMENT``, though, so the rest of its last line is
         padding no other buffer holds, and a view may take it along.
         """
@@ -533,14 +533,14 @@ class SequenceFullELFCallable(SequenceCallable):
 
     def start(self, *runs: FullELFRun) -> None:
         """Push what the host wrote, and start ``runs`` without waiting; the
-        caller waits on each (:meth:`wait`) and reads what it needs.
+        caller waits on each (``wait``) and reads what it needs.
         """
         self._sync_inputs()
         for run in runs:
             run.start()
 
     def wait(self, *runs: FullELFRun) -> None:
-        """Wait on ``runs``, started with :meth:`start` or on their own.
+        """Wait on ``runs``, started with ``start`` or on their own.
 
         The scratch and output arguments are marked device-resident after
         them, so a read of a view of either pulls what they wrote: a run
@@ -552,7 +552,7 @@ class SequenceFullELFCallable(SequenceCallable):
             buffer.device = "npu"
 
     def __call__(self, *runs: FullELFRun):
-        """Dispatch :attr:`run`, or ``runs`` in order. Every run is started
+        """Dispatch ``run``, or ``runs`` in order. Every run is started
         before any is waited on, so they queue back to back on the device.
         """
         runs = runs or (self.run,)
@@ -569,7 +569,7 @@ class SequenceFullELFCallable(SequenceCallable):
 class SequenceXclbinCallable(SequenceCallable):
     """Executes each runlist step as its own xclbin dispatch. Buffers shared by
     name give zero-copy handoff between consecutive operators. The chain's
-    per-operator paths are on ``seq._image`` (an :class:`XclbinChain`).
+    per-operator paths are on ``seq._image`` (an ``XclbinChain``).
     """
 
     def __init__(self, seq):
@@ -661,7 +661,7 @@ class SequenceCompareCallable(SequenceXclbinCallable):
     reference on the same NPU-produced inputs, logging per-step deviation. The
     NPU output propagates on both sides, so each comparison isolates a single
     operator (no error accumulation). ``compare`` judges each step by
-    ``tolerance`` if given, else by :meth:`step_tolerance`;
+    ``tolerance`` if given, else by ``step_tolerance``;
     ``raise_on_mismatch`` turns the first mismatch into an error.
     """
 

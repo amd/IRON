@@ -6,11 +6,11 @@
 An operator supplies a reference ``nn.Module`` and a placement; these modules turn
 that into everything stream-dse needs:
 
-* :mod:`.ops` -- the registry binding a torch ATen op to its ONNX
+* ``ops`` -- the registry binding a torch ATen op to its ONNX
   form, its stream-dse kernel and its ``aie_kernels`` source.
-* :mod:`.workload` -- ``torch.export`` of the module into the ONNX
+* ``workload`` -- ``torch.export`` of the module into the ONNX
   workload stream-dse optimizes.
-* :mod:`.mapping` -- the mapping YAML, named from that same graph.
+* ``mapping`` -- the mapping YAML, named from that same graph.
 
 The submodules are not re-exported here: they need ``onnx``/``pyyaml`` (installed
 with stream-dse, see ``requirements_stream.txt``), so importing an operator must not

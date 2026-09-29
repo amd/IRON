@@ -6,7 +6,7 @@
 A graph is compiled once per input signature (shapes and dtypes): each is a
 *version*, its own image. Every version reads the same weights and states,
 and on a full ELF they share one scratch arena
-(:class:`~iron.common.image.ArenaPlan`), so a weight is on the device once
+(``ArenaPlan``), so a weight is on the device once
 and a state one version writes is where the next reads it. This needs no
 setup: calling the graph with a new shape compiles a version into the arena
 its other versions already use.
@@ -92,19 +92,19 @@ def _store(
 
 
 class Graph:
-    """A graph: a subclass whose :meth:`body` is traced on handles.
+    """A graph: a subclass whose ``body`` is traced on handles.
 
     ``body``'s positional parameters are the inputs, its keyword-only ones
     (annotated ``Scratchpad[T]`` or ``DispatchTime[T]``) the per-call values,
     and what it returns the outputs. An input defaulting to None may be left
     out: the version without it is traced with None in its place, and
     ``body`` branches on that as it does on a shape. The weights and states are what the
-    instance holds: a tensor or an :func:`~.handle.state` in an attribute,
+    instance holds: a tensor or an ``state`` in an attribute,
     or in a list, tuple, dict, dataclass or namespace there, named by its
     path (``self.layers[3].q`` is ``layers.3.q``). A tensor ``body`` reaches
     any other way is a weight too, named ``w<n>``.
 
-    ``profile`` is the :class:`~iron.common.declare.Profile` applied
+    ``profile`` is the ``Profile`` applied
     whenever ``body`` runs -- traced, compiled or as a reference -- or a
     directory of them, ``<device>.json``, of which the bound device's is
     read. A subclass or an instance sets it.
@@ -177,7 +177,7 @@ class Graph:
     @functools.cached_property
     def _carry(self) -> State | None:
         """The values a call started from and the elements it computed,
-        which every full-ELF version's Emit reads (see :mod:`.carried`).
+        which every full-ELF version's Emit reads (see ``carried``).
         """
         if not self._carried:
             return None
@@ -230,7 +230,7 @@ class Graph:
         return names
 
     def trace(self, **shapes) -> TracedGraph:
-        """Run :meth:`body` on handles of the given shapes; return the graph.
+        """Run ``body`` on handles of the given shapes; return the graph.
 
         An input defaulting to None that is given no shape (or None) is
         absent: ``body`` sees None for it, and the version takes no such
@@ -268,7 +268,7 @@ class Graph:
         )
 
     def _split_carry(self, result) -> tuple[list, Carry | None]:
-        """The returned outputs, and the :class:`Carry` returned last, if any.
+        """The returned outputs, and the ``Carry`` returned last, if any.
 
         A graph with carried values must return their next values, and one
         without must not.
@@ -361,15 +361,15 @@ class Graph:
         """Compile the version for the given input shapes and return it.
 
         ``boundaries`` and ``image`` are the two packaging choices
-        (:mod:`iron.common.image.packaging`); everything else is derived and, under
+        (``iron.common.image.packaging``); everything else is derived and, under
         ``verbose``, printed. ``record="disk"`` writes the image's
-        :class:`~iron.common.image.artifacts.Artifacts` record beside it.
+        ``Artifacts`` record beside it.
         ``coresident`` packs designs into shared device configurations
-        (:mod:`iron.common.image.coresidence`); a full ELF only. A
-        :class:`~.narrowing.JointNarrowing` also narrows designs so that
-        they fit; what it chose is the version's :attr:`CompiledGraph.tuning`.
+        (``iron.common.image.coresidence``); a full ELF only. A
+        ``JointNarrowing`` also narrows designs so that
+        they fit; what it chose is the version's ``CompiledGraph.tuning``.
 
-        A full-ELF version is placed in :attr:`arena`, with the weights and
+        A full-ELF version is placed in ``arena``, with the weights and
         states of every other version. Compile every version before the
         first call where you can: a version placed after the arena's buffer
         exists grows it, which copies it once.
@@ -378,7 +378,7 @@ class Graph:
         writes the scratchpad of the version it ``feeds`` -- by default
         itself, where it takes no tensor (nothing would write one between
         its calls) -- so that one can run without the host
-        (:class:`~iron.common.graph.carried.CarriedLoop`). A version that
+        (``CarriedLoop``). A version that
         takes a tensor and feeds nothing has no Emit; a call still returns
         its carried values.
         """
@@ -487,7 +487,7 @@ class Graph:
         return version(*given.values(), **values)
 
     def reference(self, *tensors, **values) -> Any:
-        """:meth:`body` on host tensors, each operator run through its ``reference()``.
+        """``body`` on host tensors, each operator run through its ``reference()``.
 
         An optional input left out, or passed as None, is None in ``body``.
         Returns what a call returns: the outputs, then the next values of
@@ -503,7 +503,7 @@ class Graph:
         return _results(items, nxt)
 
     def _scope(self):
-        """The profile applied while :meth:`body` runs, if there is one."""
+        """The profile applied while ``body`` runs, if there is one."""
         profile = self.profile
         if isinstance(profile, (str, Path)):
             dev = aie_utils.ensure_current_device(required=True)
@@ -539,9 +539,10 @@ class CompiledGraph:
         # Where the Emit step ending a full ELF with carried values reads
         # and writes; None without one.
         self.emit = emit
-        # Each scratchpad word a call writes (:class:`Word`): each bound value (a per-call index on a view scaled to an element
-        # offset), and each value derived from a bounded extent, computed by
-        # the operator from the call's bound.
+        # Each scratchpad word a call writes (``Word``): each bound value (a
+        # per-call index on a view scaled to an element offset), and each
+        # value derived from a bounded extent, computed by the operator from
+        # the call's bound.
         # On a full ELF, symbols that always hold one number share a word:
         # ``shared`` maps each such design symbol to its word.
         self.words, self.shared = _words(
@@ -662,7 +663,7 @@ class CompiledGraph:
         piece_bytes: int = UPLOAD_PIECE,
     ) -> CompiledGraph:
         """Load the image and upload its weights now, rather than on first
-        call; ``release`` and ``piece_bytes`` as for :meth:`upload`.
+        call; ``release`` and ``piece_bytes`` as for ``upload``.
 
         The image is loaded even when there is nothing to upload: in an
         arena, another version may have put every weight there already, and
@@ -849,7 +850,7 @@ def _words(
     through what it derives from it. The full ELF has
     32 words for its whole image, and a bounded prompt binds its row count
     to every operator's extents, so symbols that always hold one number
-    share a word: those whose derivation is :class:`Linear` (a bound
+    share a word: those whose derivation is ``Linear`` (a bound
     expression, or a bounded extent over the lanes and rows it is divided
     into), in one dtype. Any other derivation keeps its own word.
     """

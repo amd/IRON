@@ -7,7 +7,7 @@ Running this module produces the golden output; exporting it produces the
 workload stream-dse generates the design from.
 
 The names below are the block's vocabulary, and they are the keys
-:func:`generate_golden_reference` gives the same tensors. Everything
+``generate_golden_reference`` gives the same tensors. Everything
 downstream is named from here: the ONNX tensors, the mapping's layers and runtime arguments, the runtime
 buffers, and the tensor handed between fusion groups.
 """
@@ -108,7 +108,7 @@ def generate_golden_reference(M=1, K=2048, N=8192, seed=42):
 
 
 def swiglu_module(embedding_dim, hidden_dim, golden_reference=None) -> SwiGLU:
-    """A :class:`SwiGLU`, optionally holding ``golden_reference``'s weights.
+    """A ``SwiGLU``, optionally holding ``golden_reference``'s weights.
 
     Weight *values* are irrelevant to the exported graph (only shapes and the
     topology are), so the operator builds its design from a zero-filled module.

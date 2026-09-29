@@ -3,8 +3,8 @@
 
 """Export a reference ``nn.Module`` into the ONNX workload stream-dse optimizes.
 
-:func:`torch.onnx.export` captures the module and lowers it through the
-translation table in :mod:`~iron.operators.swiglu_prefill_stream.stream.ops`, so every operator is emitted
+``torch.onnx.export`` captures the module and lowers it through the
+translation table in ``iron.operators.swiglu_prefill_stream.stream.ops``, so every operator is emitted
 in the form stream-dse's parsers expect. Because the operator's reference module is
 the only description of the computation, the generated design cannot drift from the
 reference the operator is tested against.
@@ -119,7 +119,7 @@ def export_workload(
     result_names=None,
     output_name: str = "output",
 ) -> StreamWorkload:
-    """Export ``module`` into a :class:`StreamWorkload`.
+    """Export ``module`` into a ``StreamWorkload``.
 
     ``example_inputs`` fixes the shapes: re-exporting with different ones is all
     that is needed for a different problem size, since the mapping carries tile

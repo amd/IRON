@@ -369,7 +369,7 @@ class GEMV(Operator):
         """The runtime sequence: B, the whole vector, once to every column,
         then A and C as derived: each column's rows of every batch, or,
         under a bound, output tiles round-robin over the columns. A repeated
-        GEMV walks the batches in :meth:`_batch_order` instead.
+        GEMV walks the batches in ``_batch_order`` instead.
         """
         if self.repeat > 1:
             self._repeated_sequence(rt)
@@ -399,7 +399,7 @@ class GEMV(Operator):
 
     def _walks(self, lane: int) -> dict[str, list[TensorAccessPattern]]:
         """Each of A, B and C's transfers to or from ``lane`` in
-        :meth:`_batch_order`: one descriptor that walks every matrix once per
+        ``_batch_order``: one descriptor that walks every matrix once per
         pass, or, where a run does not factor into one, one per batch.
         """
         M, K, rep, nm = self.M, self.K, self.repeat, self.num_matrices

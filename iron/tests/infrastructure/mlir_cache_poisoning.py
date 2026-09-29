@@ -4,9 +4,11 @@
 
 """A fused build must not leave its MLIR in the standalone operator's slot.
 
-A fused build once renamed each design's kernels by position::
+A fused build once renamed each design's kernels by position:
 
-    generator.kwargs["func_prefix"] = f"op{idx}_"
+```python
+generator.kwargs["func_prefix"] = f"op{idx}_"
+```
 
 on a generator that was also an artifact the fused build compiled to disk --
 to the exact path a standalone build of the same operator reads. The cache

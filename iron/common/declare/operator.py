@@ -7,7 +7,7 @@ Its fields fall into two tiers by what a change rebuilds: the fields a tile
 names, plus those marked ``array=True``, configure the array, and one array
 serves every extent; the rest size the host buffers and reach only the
 runtime sequence. Calling the class binds it:
-:func:`~iron.common.declare.infer` turns operand shapes into the extents,
+``infer`` turns operand shapes into the extents,
 and the instance's buffer attributes report shapes in elements.
 """
 
@@ -69,7 +69,7 @@ class _OperatorMeta(type):
     """``GEMV(w, h)`` inside a graph's body records a step; anything else constructs.
 
     A call with graph handles (or host tensors, which a graph closes over as
-    weights) records a step; see :mod:`iron.common.graph`. Any other call
+    weights) records a step; see ``iron.common.graph``. Any other call
     constructs. The two overloads below tell a type checker the same: a
     call with operands yields a handle, a call by keyword constructs.
     """
@@ -122,7 +122,7 @@ def _check_shipped(cls: type) -> None:
 
 
 class _ArrayView:
-    """The array tier of an operator, as :meth:`Operator.array` sees it.
+    """The array tier of an operator, as ``Operator.array`` sees it.
 
     Reading a field no tile names and that does not declare ``array=True``
     raises, so an array cannot come to depend on an extent by accident
@@ -205,11 +205,11 @@ class Operator(metaclass=_OperatorMeta):
 
     One class declares the whole thing: ``param()``/``auto()`` fields,
     ``In``/``Out`` operands (with ``tile=`` an operand is its own stream),
-    ``Value`` members, :meth:`array` for the dataflow, :meth:`sequence` when
-    the derived one is not wanted, :meth:`resolve`/:meth:`compatible` and
-    :meth:`reference`. A class declared with ``image=`` runs a shipped
+    ``Value`` members, ``array`` for the dataflow, ``sequence`` when
+    the derived one is not wanted, ``resolve``/``compatible`` and
+    ``reference``. A class declared with ``image=`` runs a shipped
     binary instead of building an array. Every subclass is a dataclass and
-    is checked as its body finishes (:mod:`.creation`).
+    is checked as its body finishes (``creation``).
     """
 
     _members: ClassVar[tuple[_Member, ...]] = ()
@@ -291,18 +291,20 @@ class Operator(metaclass=_OperatorMeta):
         """Check the sequence-tier fields on their own. Runs at construction."""
 
     def compatible(self) -> None:
-        """Check the extents against the resolved tunables; raise :class:`Incompatible`."""
+        """Check the extents against the resolved tunables; raise ``Incompatible``."""
 
     def resolve(self, dev) -> Self:
         """Return a copy resolved for ``dev``: every ``auto()`` filled, from
-        the device and from this operator's extents; raise :class:`Unresolvable`.
+        the device and from this operator's extents; raise ``Unresolvable``.
 
         This is the only hook that sees both. The default fills nothing. A
-        tunable left ``None`` is an error once this returns::
+        tunable left ``None`` is an error once this returns:
 
-            def resolve(self, dev):
-                cols = self.columns or self.shim_columns(dev)
-                return dataclasses.replace(self, columns=cols)
+        ```python
+        def resolve(self, dev):
+            cols = self.columns or self.shim_columns(dev)
+            return dataclasses.replace(self, columns=cols)
+        ```
 
         Identity for sharing a build is taken after this runs, so two
         operators that describe one array resolve to one design.
@@ -312,7 +314,7 @@ class Operator(metaclass=_OperatorMeta):
     def array(self, target) -> list:
         """Build the array for ``target`` and return its workers.
 
-        ``target`` (:class:`iron.common.design.Target`) carries the device,
+        ``target`` (``iron.common.design.Target``) carries the device,
         the image being built, ``barrier()`` and ``register()``. Bind the
         shim end of a fifo to every operand's lane (``self.A.lane(i).bind(
         fifo.prod())``) and every ``Value`` to the buffer a core reads it
@@ -322,13 +324,13 @@ class Operator(metaclass=_OperatorMeta):
         raise NotImplementedError(f"{type(self).__name__}.array() is not implemented")
 
     def build_array(self, target) -> list:
-        """Run :meth:`array` for the build, through the array-tier view."""
+        """Run ``array`` for the build, through the array-tier view."""
         return type(self).array(_ArrayView(self), target)  # type: ignore[arg-type]
 
     def tolerance(self) -> Tolerance | None:
-        """How close the NPU output must come to :meth:`reference`: the
+        """How close the NPU output must come to ``reference``: the
         contract of the kernel this array runs; ``None`` when the operator
-        states its own (see :attr:`test`). Asked of the resolved operator
+        states its own (see ``test``). Asked of the resolved operator
         (``op.resolved().tolerance()``), whose tunables it may read.
         """
         return None
@@ -337,7 +339,7 @@ class Operator(metaclass=_OperatorMeta):
         """The arithmetic operations one call performs, for its throughput:
         one per output element unless the operator counts its own, and 0
         for one that only moves data. Asked of the resolved operator, like
-        :meth:`tolerance`.
+        ``tolerance``.
         """
         return sum(b.elements for b in self.outputs)
 
@@ -398,7 +400,7 @@ class Operator(metaclass=_OperatorMeta):
         return max(1, cols)
 
     def check_shim_columns(self, dev, cols: int, num_channels: int = 1) -> None:
-        """Raise :class:`Unresolvable` if ``cols`` exceeds the shim budget."""
+        """Raise ``Unresolvable`` if ``cols`` exceeds the shim budget."""
         allowed = self.shim_columns(dev, num_channels, vars(self))
         if cols > allowed:
             raise Unresolvable(
@@ -420,8 +422,8 @@ class Operator(metaclass=_OperatorMeta):
 
         ``fits(c)`` is the operator's own rule for ``c`` columns leaving
         whole tiles; when no count within the budget does, one column is
-        returned and :meth:`compatible` names the rule. With no device
-        bound and no count given, :class:`Unresolvable`.
+        returned and ``compatible`` names the rule. With no device
+        bound and no count given, ``Unresolvable``.
         """
         if given is not None:
             if dev is not None:
@@ -443,7 +445,7 @@ class Operator(metaclass=_OperatorMeta):
     def sequence(self, rt) -> None:
         """Override to write the runtime sequence by hand; otherwise it is derived.
 
-        ``rt`` is an :class:`iron.common.design.Sequence`: ``rt.fill(stream,
+        ``rt`` is an ``iron.common.design.Sequence``: ``rt.fill(stream,
         view)``, ``rt.drain(stream, view)``, ``rt.group()``. The preamble
         (residents, barriers, parameter sync) has already run, unless the
         class sets ``own_preamble``, when calling ``rt.preamble()`` is up to
@@ -486,9 +488,9 @@ class Operator(metaclass=_OperatorMeta):
 
     def resolved(self, dev=None) -> Self:
         """This operator resolved for ``dev``, the bound device unless given:
-        itself if it already is, else :meth:`resolve`'s copy, every tunable
-        filled and :meth:`validate` and :meth:`compatible` checked. Nothing
-        else calls :meth:`resolve`.
+        itself if it already is, else ``resolve``'s copy, every tunable
+        filled and ``validate`` and ``compatible`` checked. Nothing
+        else calls ``resolve``.
         """
         if self._resolved:
             return self
@@ -583,7 +585,7 @@ class Operator(metaclass=_OperatorMeta):
 
     @property
     def values(self) -> list[BoundValue]:
-        """The per-call values this instance uses (see :meth:`uses_value`)."""
+        """The per-call values this instance uses (see ``uses_value``)."""
         return [
             self._bound[m.name] for m in self._value_members if self.uses_value(m.name)
         ]
@@ -601,7 +603,7 @@ class Operator(metaclass=_OperatorMeta):
     def residents(self) -> dict[str, Any]:
         """What the preamble writes once per build: every ``Value(derive=)``
         no graph bound per call, derived from this instance, by name (its
-        device word is :meth:`value`).
+        device word is ``value``).
         """
         return {
             m.name: m.derive(self)
@@ -617,7 +619,7 @@ class Operator(metaclass=_OperatorMeta):
         A value an instance does not use gets no device parameter and no
         sync. The default is every declared value, except an ``Extent``,
         per call only when a graph bounds it, and a ``Value`` with a
-        derivation, per call when a graph binds it (:meth:`use_value`) or
+        derivation, per call when a graph binds it (``use_value``) or
         its derivation reads a bound extent; an operator whose values are
         optional (a copy with or without a patched offset) overrides this.
         """

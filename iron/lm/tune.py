@@ -3,19 +3,19 @@
 
 """Measure the cost table a model's decode step is tuned by, on this NPU.
 
-``--cost-table TABLE`` on a model's command line (:func:`.runner.main`)
+``--cost-table TABLE`` on a model's command line (``main``)
 narrows the decode step's designs and packs them into shared device
 configurations by what each costs on the device
-(:class:`~iron.common.graph.narrowing.JointNarrowing`). A table holds every
+(``JointNarrowing``). A table holds every
 design's step time at each width it tunes to, and the configure cost
 measured between a few pairs of designs. It is keyed by each design's
 identity -- its fields -- so a design that has changed since is not in it,
-and the tuner leaves that design as the profile gives it. :func:`measure`
+and the tuner leaves that design as the profile gives it. ``measure``
 fills one for the decode step as the graph is now: every design, each
 width. Designs already in the table are kept unless ``remeasure``; entries
 for designs the graph no longer has are dropped.
 
-A model's ``tune`` module calls :func:`main` with its runner; run it with
+A model's ``tune`` module calls ``main`` with its runner; run it with
 XRT sourced and the NPU otherwise idle.
 """
 
@@ -89,7 +89,7 @@ def measure(
 ) -> None:
     """Measure ``model``'s decode step into ``table``, saved as it goes: each
     design at ``position`` and ``token``, Sample on the draw rows ``sample``
-    gives, and the configure cost between :data:`CALIBRATION_PAIRS`.
+    gives, and the configure cost between ``CALIBRATION_PAIRS``.
     """
     dev = aie_utils.ensure_current_device(required=True)
     traced = model.trace(**model.shapes(1))

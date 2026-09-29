@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Measure Llama 3's decode cost table on this NPU (:mod:`iron.lm.tune`).
+"""Measure Llama 3's decode cost table on this NPU (``iron.lm.tune``).
 
 ``decode_costs_npu2.json`` beside this file is such a table, measured on a
-Strix Halo NPU (8 columns)::
+Strix Halo NPU (8 columns):
 
-    python -m iron.lm.llama3.tune model.safetensors tokenizer.model
+```bash
+python -m iron.lm.llama3.tune model.safetensors tokenizer.model
+```
 """
 
 from pathlib import Path

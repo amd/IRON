@@ -32,7 +32,7 @@ class SwiGLUStreamGroup(Operator):
 
     ``k`` is how many fused groups the block is split into and
     ``group_index`` which of them this is, in the order
-    :data:`~iron.operators.swiglu_prefill_stream.stream_design.GROUP_LAYERS`
+    ``GROUP_LAYERS``
     lists them. A subclass per group declares its ports, named by the
     exported graph's tensors (S = ``seq_len``, E = ``embedding_dim``,
     H = ``hidden_dim``) in the order stream-dse gives the generated design
@@ -146,7 +146,7 @@ class SwiGLUPrefillStream(OperatorSequence):
     ``k`` is how many fused groups the block is split into: 1 keeps the whole block
     on the array at once, 2 splits after the elementwise multiply, and 5 runs layer
     by layer, each layer taking the whole array in turn as
-    :class:`iron.operators.SwiGLU` does. The split is decided by the mapping's
+    ``iron.operators.SwiGLU`` does. The split is decided by the mapping's
     fused groups, and the external buffers are the same either way. With
     ``trace``, stream-dse generates every group traced.
 

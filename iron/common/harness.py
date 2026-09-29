@@ -6,7 +6,7 @@
 Everything is numpy, like an operator's ``reference``: a draw becomes the
 device buffer it is handed to, and mlir-aie's ``compare`` judges what comes
 back. How an operator declares the shapes it is tested at is in
-:mod:`iron.common.testing`, which imports no pytest.
+``iron.common.testing``, which imports no pytest.
 """
 
 from __future__ import annotations
@@ -165,17 +165,17 @@ def run_test(
 ) -> Run:
     """Compile ``operator``, run it on the device, time it, check its outputs.
 
-    ``inputs`` is a :class:`Vectors`, or the inputs by name with ``outputs``
+    ``inputs`` is a ``Vectors``, or the inputs by name with ``outputs``
     the expected outputs by name (an expected value of ``None`` is not
     checked); both are consumed in the order of the operator's declared
     buffers. An ``inout`` buffer is given as an input and checked under that
-    name. The outputs are judged as :func:`verify_buffer` judges them, by
+    name. The outputs are judged as ``verify_buffer`` judges them, by
     ``tolerance``; a bound tolerance's limit is its bound on the
     inputs, which holds for an elementwise kernel's contract whatever shape
     the operator gives its operands. Latency (the NPU's own time) and effective
     bandwidth are returned, and handed to ``record`` (a test's pytest
     ``record_property``, which the root conftest writes to the CSV) with
-    throughput from :meth:`~iron.common.declare.Operator.ops` for an
+    throughput from ``Operator.ops`` for an
     operator that computes.
     """
     if isinstance(inputs, Vectors):

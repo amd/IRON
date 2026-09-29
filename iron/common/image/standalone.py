@@ -20,7 +20,7 @@ class OperatorImage:
 
     ``OperatorImage(op).compile()`` builds once; the image is then called
     with the operator's buffers as device tensors, in declaration order.
-    The xclbin is the operator's :meth:`~Operator.configuration`'s, so an
+    The xclbin is the operator's ``Operator.configuration``'s, so an
     operator whose array serves every shape (flm's GEMM) compiles only an
     instruction stream per shape; on a shipped image (``image=``) it is the
     download, and only the stream is built.
@@ -34,7 +34,7 @@ class OperatorImage:
 
     def compile(self, record: str = "memory") -> Self:
         """Build the image, once. ``record="disk"`` also writes its
-        :class:`Artifacts` record beside it; by default it is kept in memory.
+        ``Artifacts`` record beside it; by default it is kept in memory.
         """
         if self._artifacts is None:
             self._artifacts = self._build()
@@ -44,7 +44,7 @@ class OperatorImage:
 
     @property
     def artifacts(self) -> Artifacts:
-        """The record of what :meth:`compile` produced."""
+        """The record of what ``compile`` produced."""
         if self._artifacts is None:
             raise RuntimeError(f"{self.op!r} is not compiled; compile() first")
         return self._artifacts

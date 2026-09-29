@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""FastFlowLM's shipped ``mm`` binary, as a second form of :class:`flm.GEMM`.
+"""FastFlowLM's shipped ``mm`` binary, as a second form of ``flm.GEMM``.
 
-The port (:class:`iron.operators.flm.gemm.op.GEMM`) is built from source;
+The port (``iron.operators.flm.gemm.op.GEMM``) is built from source;
 this is the binary it was ported from, downloaded and pinned by digest, and
-driven by the same declaration::
+driven by the same declaration:
 
-    Shipped(M=1024, K=1536, N=6144, epilogue="silu")
+```python
+Shipped(M=1024, K=1536, N=6144, epilogue="silu")
+```
 
 It exists so the port can be measured against what it was ported from, on
 identical inputs and through the same host path. NPU2 only: the image is
@@ -18,7 +20,7 @@ visible nowhere in it: the shim channel map (A on MM2S channel 0 of columns
 0, 2, 4 and 6; B on MM2S channel 1 of every column; C out of S2MM channel
 0 of every column), the address and lock of the eight parameter words every
 core reads, and the order the memtiles consume transfers in. The library
-emits the sequence against those pins (:mod:`iron.common.design.external`).
+emits the sequence against those pins (``iron.common.design.external``).
 
 What differs from the port, and why the port is the default: the port
 selects its epilogue at build time (a branch-free inner loop, one build per

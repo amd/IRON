@@ -3,9 +3,9 @@
 
 """Transfers and Sequence: the runtime sequence of one operator.
 
-:class:`Transfers` decides what goes through a sequence; :class:`Sequence`
+``Transfers`` decides what goes through a sequence; ``Sequence``
 lowers each transfer to MLIR tasks. The same base serves
-:class:`~iron.common.design.external.ExternalSequence`, which emits words instead.
+``ExternalSequence``, which emits words instead.
 """
 
 from __future__ import annotations
@@ -37,8 +37,8 @@ class Transfers:
     A concrete sequence supplies ``op`` and the ``fill``/``drain``/``group``
     surface; this decides what goes through it: the operator's
     ``sequence(rt)`` override, or the one derived from the declarations.
-    :class:`Sequence` lowers a transfer to MLIR tasks;
-    :class:`~.external.ExternalSequence` as shim DMA tasks on a downloaded
+    ``Sequence`` lowers a transfer to MLIR tasks;
+    ``ExternalSequence`` as shim DMA tasks on a downloaded
     image's pinned channels.
 
     A transfer is a ``TensorAccessPattern`` over the flat buffer. A constant
@@ -260,7 +260,7 @@ class Sequence(Transfers):
         size_by=None,
         managed=True,
     ):
-        """Drain ``stream`` into ``dest``; see :meth:`fill` for the other forms."""
+        """Drain ``stream`` into ``dest``; see ``fill`` for the other forms."""
         return self._transfer(
             "drain", stream, dest, group, wait, offset_by, size_by, managed
         )

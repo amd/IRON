@@ -1,19 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Measuring what :mod:`.narrowing` trades, on the NPU.
+"""Measuring what ``narrowing`` trades, on the NPU.
 
 Every figure is the time of one full-ELF run: ``D0`` for the dispatch, a
 configure per device the runlist enters (``base`` plus each member's load),
 the empty reset configure ``R`` when the entries are odd, and each step's
 ``t_step``. Two kinds of measurement fill the model:
 
-- :func:`measure_steps`, per design and width: a sequence running it once
+- ``measure_steps``, per design and width: a sequence running it once
   and one running it ``repeats`` times. The difference over the extra steps
   is ``t_step``; the single run less ``t_step`` is ``alone`` = ``D0 + base
   + load + R``. Each narrower width is also run once on the inputs its
   default ran on, and is a candidate only if its output is bit-identical.
-- :func:`calibrate`, once per device on a pair A, B of measured designs:
+- ``calibrate``, once per device on a pair A, B of measured designs:
   ``A B A B ...`` against ``A A ... B B ...`` (the same steps, 2p configures
   against 2) gives the mean configure ``(E(A) + E(B)) / 2``; the grouped
   run less its steps gives ``D0 + E(A) + E(B)``, hence ``D0``; the two
@@ -24,7 +24,7 @@ the empty reset configure ``R`` when the entries are odd, and each step's
 A round runs every configuration ``calls`` times, and the figure is the
 median over ``rounds`` of each round's median, the configurations of one
 measurement interleaved. Only the run is timed
-(:attr:`~iron.common.image.callable.SequenceCallable.last_elapsed`), not
+(``SequenceCallable.last_elapsed``), not
 the host syncs around it. Hold the NPU: nothing else may dispatch meanwhile.
 """
 
@@ -213,9 +213,9 @@ def measure_steps(
     values: Mapping[str, int] | None = None,
     inputs: Mapping[str, np.ndarray] | None = None,
 ) -> dict[str, StepCost]:
-    """Measure every width in ``found`` (a design's :func:`.variants`, the
+    """Measure every width in ``found`` (a design's ``variants``, the
     default first) and record each in ``table``. ``values`` and ``inputs``
-    are :class:`Standalone`'s.
+    are ``Standalone``'s.
     """
     mode = pmode()
     distinct = sum(b.nbytes for b in found[0].op.buffers) <= DISTINCT_BYTES

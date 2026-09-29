@@ -3,9 +3,9 @@
 
 """The layers a decoder builds from operators, for a graph's body.
 
-:func:`project` is a weight's projection at either row count. :func:`swiglu`
+``project`` is a weight's projection at either row count. ``swiglu``
 is the SwiGLU feed-forward, ``W_down @ (SiLU(W_gate @ x) * (W_up @ x))``,
-for one token or a sequence, and :class:`SwiGLU` is it as a graph of its
+for one token or a sequence, and ``SwiGLU`` is it as a graph of its
 own, holding the weights, so they are uploaded once.
 
 The weights are a checkpoint's ``(out, in)``: SwiGLU's ``w_gate`` and

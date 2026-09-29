@@ -5,7 +5,7 @@
 """The names the design is built from must be the golden reference's names.
 
 Every tensor the operator exports, maps and wires is named once, in
-:mod:`iron.operators.swiglu_prefill_stream.reference`, using the vocabulary its
+``iron.operators.swiglu_prefill_stream.reference``, using the vocabulary its
 golden reference uses for the same tensors. These tests pin that
 correspondence, and pin that the mapping and the fused-group wiring take their
 names from the exported graph rather than restating them.

@@ -3,22 +3,24 @@
 
 """Profiles: tunable values for operator shapes, applied as an operator is made.
 
-A :class:`Profile` is data: entries that name a class, some of its
+A ``Profile`` is data: entries that name a class, some of its
 dimensions and values for its tunables. Applied in a ``with`` scope, it fills
 the tunables a call leaves open as the operator is constructed, before
-:meth:`~.operator.Operator.resolve` sees it, so the precedence is the
+``Operator.resolve`` sees it, so the precedence is the
 explicit call-site value, then the profile, then the tunable's declared
 default or the value resolution proposes. A tuner writes a profile and a
 graph applies it; operator classes know nothing about profiles.
 
-On disk a profile is JSON, one object per entry holding what :meth:`Profile.add`
-takes: ``"operator"``, the class's name in :mod:`iron.operators`, then its
-dimensions and tunables as keywords::
+On disk a profile is JSON, one object per entry holding what ``Profile.add``
+takes: ``"operator"``, the class's name in ``iron.operators``, then its
+dimensions and tunables as keywords:
 
-    {"entries": [
-      {"operator": "GEMV", "M": 2048, "K": 8192, "tile_size_input": 1},
-      {"operator": "MHA", "seq_pad": 2048, "num_pipelines": 8}
-    ]}
+```json
+{"entries": [
+  {"operator": "GEMV", "M": 2048, "K": 8192, "tile_size_input": 1},
+  {"operator": "MHA", "seq_pad": 2048, "num_pipelines": 8}
+]}
+```
 
 An entry matches on what the call constructs the operator with: its
 keywords and, in a graph, the extents inferred from its operands. A
@@ -84,7 +86,7 @@ def _dims_of(cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
 class Profile:
     """Tunable values for operators, keyed by their shape.
 
-    :meth:`add` takes a class and keyword fields: its ``param()`` fields
+    ``add`` takes a class and keyword fields: its ``param()`` fields
     select the operators the entry is for (one left out matches any value),
     its ``auto()`` fields are the values given. Within ``with profile:``, a
     call that constructs an operator and leaves a tunable open takes it from
@@ -145,8 +147,8 @@ class Profile:
 
     @classmethod
     def load(cls, path: str | Path) -> Profile:
-        """The profile :meth:`save` wrote to ``path``; each entry is checked
-        as :meth:`add` checks it.
+        """The profile ``save`` wrote to ``path``; each entry is checked
+        as ``add`` checks it.
         """
         with open(path) as f:
             data = json.load(f)

@@ -11,7 +11,7 @@ microkernel, for example, reads its ``MxK`` operand as ``mt x kt`` tiles of
 
 The types here mirror ``snaxc.ir.tsl`` (``Stride`` -> ``TiledStride`` ->
 ``TiledStridedLayout``) so an IRON-authored layout can be handed to stream-dse's
-code generation verbatim via :meth:`TiledStridedLayout.to_snaxc`. They carry no
+code generation verbatim via ``TiledStridedLayout.to_snaxc``. They carry no
 stream-dse / snaxc / xdsl dependency themselves -- the snaxc import is lazy and
 confined to ``to_snaxc`` -- so they are usable (and testable) in a plain IRON
 install with no AIE codegen toolchain present.
@@ -54,7 +54,7 @@ class TiledStride:
 
 @dataclass
 class TiledStridedLayout:
-    """A tiled-strided layout: one :class:`TiledStride` per tensor dimension."""
+    """A tiled-strided layout: one ``TiledStride`` per tensor dimension."""
 
     tstrides: tuple[TiledStride, ...]
     offset: int = 0

@@ -8,16 +8,18 @@ The next call reads its per-call parameters from a scratchpad; this step
 writes that scratchpad's image (through the run's feedback argument), and the
 carried values the call after it starts from.
 
-Every output word is one row of a program the host writes once::
+Every output word is one row of a program the host writes once:
 
-    out[r] = (((planes[plane, index] * scale + bias) >> down) * mul + add) << shift
+```text
+out[r] = (((planes[plane, index] * scale + bias) >> down) * mul + add) << shift
+```
 
 ``planes`` is ``(2, carried)``: plane 0 the values this call started from,
 plane 1 the ones it computed. ``shift`` is 2 for a core-read parameter (the
 scratchpad holds those shifted, see ``ParameterScratchpad.writeBits``) and 0
 for an address or a carried value; ``>> down`` floors, so a row computes a
 trip count rounded up from a bound as well
-(:class:`~iron.common.graph.carried.Form`). An all-zero row emits 0. The
+(``Form``). An all-zero row emits 0. The
 first ``slots`` rows are the image, the rest the next state.
 """
 

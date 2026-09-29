@@ -6,11 +6,11 @@
 
 Up to three implementations run per shape, on identical inputs:
 
-  flm      :class:`iron.operators.flm.GEMM`, the port
-  gemm     :class:`iron.operators.GEMM` at its defaults, which are the same
+  flm      ``iron.operators.flm.GEMM``, the port
+  gemm     ``iron.operators.GEMM`` at its defaults, which are the same
            emulated-bfp16 mmul and conv_even rounding, so the comparison is
            like-for-like rather than against a more accurate, slower build
-  prebuilt ``Shipped(...)`` (:mod:`iron.operators.flm.gemm.shipped`), FastFlowLM's shipped
+  prebuilt ``Shipped(...)`` (``iron.operators.flm.gemm.shipped``), FastFlowLM's shipped
            ``mm.xclbin``, pinned by digest. NPU2 only, since that binary is a
            fixed 8-column overlay; elsewhere it is dropped and the flm-vs-gemm
            comparison still runs.
@@ -30,10 +30,12 @@ Pass ``--iterations 1``. Each test already averages ``ITERS`` dispatches over
 ``ROUNDS`` interleaved rounds, so conftest's default of 5 repeats the whole
 matrix five times for nothing.
 
-Usage::
+Usage:
 
-    pytest iron/operators/flm/gemm/benchmark.py --iterations 1
-    pytest iron/operators/flm/gemm/benchmark.py --iterations 1 -k E2B --csv-output flm.csv
+```bash
+pytest iron/operators/flm/gemm/benchmark.py --iterations 1
+pytest iron/operators/flm/gemm/benchmark.py --iterations 1 -k E2B --csv-output flm.csv
+```
 
 Do not pass ``-s`` when you want the CSV: conftest's reporter parses the
 captured stdout, so disabling capture yields a CSV with no metric columns.

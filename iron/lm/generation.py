@@ -5,7 +5,7 @@
 
 A model is anything with ``logits(tokens)``: the logits after the last of
 ``tokens``, the whole history so far, as ``(vocab_size,)``. A
-:class:`~.decoder.CausalLM` on the NPU is one, and so is a CPU reference.
+``CausalLM`` on the NPU is one, and so is a CPU reference.
 """
 
 import time
@@ -28,7 +28,7 @@ class Sampler:
     the device draws.
 
     Every draw is ``aie.iron.kernels.sample.sample_ref``, the definition the
-    :class:`~iron.operators.sample.Sample` operator meets bit for bit, so
+    ``Sample`` operator meets bit for bit, so
     the host and the device pick the same token from the same logits and
     the same uniform. Logits are rounded to bf16 first. Every logit below
     the ``top_k``-th largest is dropped, ties with it kept; ``None`` keeps
@@ -36,7 +36,7 @@ class Sampler:
     temperature of 0 is greedy (the first largest).
 
     Each draw takes one uniform from ``rng``, greedy or not, so a seeded
-    generator makes the draws reproducible, and :meth:`rows` hands the
+    generator makes the draws reproducible, and ``rows`` hands the
     device the same uniforms.
     """
 
@@ -143,7 +143,7 @@ def accuracy(model, reference, tokens, num_tokens) -> list[tuple[float, bool]]:
 
     Teacher-forced: both are fed the reference's greedy token, so a
     divergence at a step is the model's own error there rather than the
-    consequence of an earlier different choice. One :func:`divergence` per
+    consequence of an earlier different choice. One ``divergence`` per
     step.
     """
     history, results = [int(t) for t in tokens], []
@@ -157,7 +157,7 @@ def accuracy(model, reference, tokens, num_tokens) -> list[tuple[float, bool]]:
 
 
 def kl_stats(results) -> dict[str, float]:
-    """The mean, p90 and max KL of :func:`accuracy`'s results.
+    """The mean, p90 and max KL of ``accuracy``'s results.
 
     Over every step, prefill and decode alike: one step's KL depends as much
     on how confident the reference is at that position as on the model.
@@ -178,7 +178,7 @@ def greedy_logits(model, tokens, num_tokens) -> np.ndarray:
 
 
 def differing_steps(run, first) -> list[int]:
-    """The steps at which two :func:`greedy_logits` runs differ bitwise,
+    """The steps at which two ``greedy_logits`` runs differ bitwise,
     NaNs and signed zeros included.
     """
     run, first = (np.ascontiguousarray(r).view(np.uint8) for r in (run, first))

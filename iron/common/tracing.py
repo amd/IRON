@@ -5,19 +5,21 @@
 """NPU hardware tracing, read back after a run.
 
 An operator is traced when it is built with a ``trace``
-(:class:`aie.utils.trace.TraceConfig`): ``build_design`` switches the trace
+(``aie.utils.trace.TraceConfig``): ``build_design`` switches the trace
 on for the workers its ``array()`` marks with ``Worker(trace=)``, or its
 first. A sequence holding a traced operator carries one trace buffer, and
-:func:`dump_traces` is called after ``run()`` to write what it holds::
+``dump_traces`` is called after ``run()`` to write what it holds:
 
-    from aie.utils.trace import TraceConfig
-    from iron.common.tracing import dump_traces
+```python
+from aie.utils.trace import TraceConfig
+from iron.common.tracing import dump_traces
 
-    norm = LayerNorm(..., trace=TraceConfig(8192))
-    ...
-    run = sequence.get_callable()
-    run()
-    dump_traces(run, "layer_norm.txt")
+norm = LayerNorm(..., trace=TraceConfig(8192))
+...
+run = sequence.get_callable()
+run()
+dump_traces(run, "layer_norm.txt")
+```
 
 On an untraced build the call returns an empty list, so a test can call it
 unconditionally.
@@ -25,7 +27,7 @@ unconditionally.
 The writing and decoding are mlir-aie's ``TraceConfig``: a dump is its raw trace
 text, which ``TraceConfig.read_trace`` reads back to reparse without a further
 dispatch, plus one JSON file per traced design for https://ui.perfetto.dev.
-:func:`dump_traces` also prints mlir-aie's per-tile cycles summary for each.
+``dump_traces`` also prints mlir-aie's per-tile cycles summary for each.
 """
 
 from __future__ import annotations

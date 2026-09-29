@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Temporal fusion: a sequence's designs as one module, one device per design
-(or per pack of designs, :mod:`.coresidence`) and a main runtime sequence
+(or per pack of designs, ``coresidence``) and a main runtime sequence
 that configures and runs them in turn.
 """
 
@@ -78,7 +78,7 @@ def generate(design: OperatorDesign) -> GeneratedDesign:
     because on that path no xclbin configures the device. Exactly one
     program in a fused build needs that, and it is not the children: the
     fusion inlines each child's device and drives PDI switching itself
-    (:meth:`Fusion.needs_reset`). Generated inside ``compile()`` without
+    (``Fusion.needs_reset``). Generated inside ``compile()`` without
     this, every child also emits a ``load_pdi`` and the two schemes fight:
     the build succeeds, the ELF links, and the device hangs at dispatch with
     ERT_CMD_STATE_TIMEOUT.
@@ -122,20 +122,20 @@ class Fusion:
     """An operator sequence's designs, fused into one module.
 
     Each design is one device, named for what it is
-    (:attr:`OperatorDesign.name`) rather than where it sits in the sequence,
+    (``OperatorDesign.name``) rather than where it sits in the sequence,
     so one design is one device text whichever graph it is fused into and at
     whatever step: aiecc's device cache keys on that text. Designs whose
     names agree generate the same device and are fused as one.
 
     ``seq.coresident`` packs designs into one device each
-    (:mod:`.coresidence`): consecutive steps in one pack then share its
+    (``coresidence``): consecutive steps in one pack then share its
     configure point. Groups of operators name the packs; an
-    :class:`AdjacentPacking` is resolved by :meth:`text`, against the
+    ``AdjacentPacking`` is resolved by ``text``, against the
     designs' text.
 
     ``seq``'s buffer layout (``subbuffer_layout``, ``buffer_sizes``,
-    ``slice_info``) must already be set. :meth:`text` is the generator
-    ``CompilableDesign`` runs, :attr:`identity` what it is keyed on.
+    ``slice_info``) must already be set. ``text`` is the generator
+    ``CompilableDesign`` runs, ``identity`` what it is keyed on.
     """
 
     RESET_DEVICE = "reset_device"

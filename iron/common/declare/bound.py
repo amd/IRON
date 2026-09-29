@@ -4,7 +4,7 @@
 """What an instance's member attribute returns, and the resolvers behind it.
 
 A declaration is class-level and symbolic. Binding it to an instance turns
-every :class:`~iron.common.declare.field.DimRef` into an integer; the
+every ``DimRef`` into an integer; the
 resolvers at the end of this module do that.
 """
 
@@ -29,7 +29,7 @@ class BoundStream:
     fifo handles.
 
     Resolved lazily, because a tile or a ``per=`` count may name a tunable that
-    is ``None`` until :meth:`Operator.resolved` fills it.
+    is ``None`` until ``Operator.resolved`` fills it.
     """
 
     def __init__(self, member: _Stream, op: Any) -> None:
@@ -305,7 +305,7 @@ class BoundBuffer:
     def __getitem__(self, index) -> "BufferView":
         """A basic slice of this buffer, for ``rt.fill``/``rt.drain`` in an override.
 
-        A slice start may be a :class:`Scratchpad` value, in which case the
+        A slice start may be a ``Scratchpad`` value, in which case the
         transfer's base address is patched per call.
         """
         return BufferView(self, index)

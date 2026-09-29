@@ -4,7 +4,7 @@
 """Carried values computed on the device, and a loop that never asks the host.
 
 A full-ELF version of a graph with ``Carried`` values ends in an
-:class:`~iron.operators.emit.Emit` step. Every version of the graph shares
+``Emit`` step. Every version of the graph shares
 one ``carry`` state, ``(2, carried)`` int32: plane 0 holds the values a call
 started from, plane 1 the elements it computed (the producers write there
 directly). Emit evaluates a program over the two planes into
@@ -16,7 +16,7 @@ directly). Emit evaluates a program over the two planes into
 The program depends on the image the words land in -- which slot is which
 value, and whether it is shifted for a core read -- so it is composed on the
 host once both images are built (``CompiledGraph.emit_to()``), and is data,
-not part of the design. :class:`CarriedLoop` binds runs so that each one's
+not part of the design. ``CarriedLoop`` binds runs so that each one's
 Emit writes the scratchpad of the next.
 """
 
@@ -46,9 +46,11 @@ CARRY, PROGRAM, IMAGE = "carry", "emit_program", "emit_image"
 class Form:
     """A word in one graph value ``v``, as an Emit row computes it.
 
-    That is::
+    That is:
 
-        ((v * scale + bias) >> down) * mul + add
+    ```text
+    ((v * scale + bias) >> down) * mul + add
+    ```
 
     where ``>>`` floors. Arithmetic with integers on a form is the form of
     the result -- a sum, a product, a floor division by a power of two

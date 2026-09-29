@@ -717,7 +717,7 @@ def test_a_bound_travels_through_reshape_and_transpose():
 
 
 def test_per_call_values_are_integer_expressions():
-    """Integer arithmetic on a per-call value is an :class:`Affine` of it,
+    """Integer arithmetic on a per-call value is an ``Affine`` of it,
     which a binding writes and names its word by.
     """
     p = Value("p", "scratchpad", np.int32)

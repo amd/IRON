@@ -41,7 +41,7 @@ def reference(values, weights, heads_per_group: int) -> np.ndarray:
 
     ``values`` is ``(groups, L, D)`` and ``weights`` ``(groups *
     heads_per_group, L)``, both bf16; the result is ``(heads, D)`` bf16. Summed
-    as the kernel sums, at the GEMV's ``lanes`` (:func:`_lanes`): lane ``j``
+    as the kernel sums, at the GEMV's ``lanes`` (``_lanes``): lane ``j``
     of each output takes positions ``lanes * i + j`` in order of ``i``,
     starting from the first product; the lanes are halved, lane ``j +
     lanes / 2`` onto lane ``j``, down to 1; the float left is rounded to
@@ -86,9 +86,11 @@ class GQAContext(Operator):
     column in a memtile.
 
     In a graph, over the ``(groups, seq_len, head_dim)`` cache and the
-    ``(heads, seq_len)`` softmax output::
+    ``(heads, seq_len)`` softmax output:
 
-        ctx = GQAContext(values, weights.reshape(G, H // G, L))
+    ```python
+    ctx = GQAContext(values, weights.reshape(G, H // G, L))
+    ```
     """
 
     # The reference is the kernel's order in IEEE float32, which the core

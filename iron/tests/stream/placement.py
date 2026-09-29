@@ -4,7 +4,7 @@
 
 """Placements are written in array columns and resolved to stream's core ids.
 
-:class:`~iron.operators.swiglu_prefill_stream.stream.hardware.ComputeArray` reads the grid from the
+``ComputeArray`` reads the grid from the
 mlir-aie device IRON is building for, and is the only place that knows what a
 stream core id means, so operators never spell one out.
 """

@@ -3,9 +3,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama 3 over the shared decoder (:mod:`iron.lm`): its
-layer and head on the NPU (:class:`Llama`) and on the CPU in float32
-(:class:`LlamaOracle`, the reference it is judged by), where its
+"""Llama 3 over the shared decoder (``iron.lm``): its
+layer and head on the NPU (``Llama``) and on the CPU in float32
+(``LlamaOracle``, the reference it is judged by), where its
 checkpoint keeps each weight, its tokenizer, and Llama 3.2 1B's shape.
 Run it with ``python -m iron.lm.llama3.model``.
 
@@ -150,7 +150,7 @@ class Llama(CausalLM):
 
 
 def layout(config: Config) -> Layout:
-    """Each weight's place in :class:`Llama`, its name in a Hugging Face
+    """Each weight's place in ``Llama``, its name in a Hugging Face
     checkpoint and its shape. The output head is the embedding, tied.
     """
     c = config

@@ -3,9 +3,9 @@
 
 """What an operator is written with.
 
-The declaration vocabulary (:mod:`.declare`): :class:`Operator` and the
+The declaration vocabulary (``declare``): ``Operator`` and the
 fields, operands and values a class body declares. The elementwise templates
-(:mod:`.elementwise`), which own the array and the sequence of an operator
+(``elementwise``), which own the array and the sequence of an operator
 that names only its kernel.
 """
 

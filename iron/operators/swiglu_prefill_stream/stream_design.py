@@ -5,7 +5,7 @@
 
 Both inputs stream-dse needs are produced here, from IRON:
 
-* the **workload**, exported from :mod:`~iron.operators.swiglu_prefill_stream.reference`,
+* the **workload**, exported from ``iron.operators.swiglu_prefill_stream.reference``,
   the same module the test checks the result against;
 * the **mapping**, from the placement below.
 
@@ -395,7 +395,7 @@ def load_group(
 ):
     """Generate the ``k``-group design once and return one group's aie module.
 
-    ``group_index`` selects the group, in the order :data:`GROUP_LAYERS` lists
+    ``group_index`` selects the group, in the order ``GROUP_LAYERS`` lists
     them, and is keyword-only like the rest: the compile cache keys on a
     design's parameters by name, so a positional one would not reach the key.
     Every group loader calls this; the first generates the design and the rest

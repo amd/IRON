@@ -3,7 +3,7 @@
 
 """Operand shapes to dimension fields: the lookup a declaration makes possible.
 
-A host buffer's dimension is a :func:`~iron.common.declare.param` field or an
+A host buffer's dimension is a ``param`` field or an
 integer literal (see the package docstring), so binding an operator to its
 operands is a lookup over the declared members, not a solver. The functions
 take the class because that is all they read: its members, its fields, and
@@ -178,7 +178,7 @@ def infer(cls, *operand_shapes, outputs=(), **given) -> dict[str, Any]:
 
 
 def infer_kwargs(cls, kwargs) -> dict[str, Any]:
-    """The part of ``kwargs`` that :func:`infer` takes: the dimension fields
+    """The part of ``kwargs`` that ``infer`` takes: the dimension fields
     and the flags that select a buffer's shape.
     """
     names = set(cls._param_fields)

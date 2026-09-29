@@ -9,12 +9,12 @@ rounding mode. Everything the xclbin depends on, and nothing else; its
 ``config_name`` is the xclbin's stem. M, K, N, the activation and the
 clamp bounds are values written to the cores and reach only the
 instruction stream, so every shape sharing a configuration shares one
-xclbin. That split is the point of this operator; :meth:`GEMM.configuration`
-names the half an :class:`~iron.common.image.OperatorImage` compiles once.
+xclbin. That split is the point of this operator; ``GEMM.configuration``
+names the half an ``OperatorImage`` compiles once.
 
 ``design.py`` keeps the fixed geometry and the L1 budget; README.md has the
 per-choice breakdown against the shipped FastFlowLM overlay
-(:mod:`.shipped`).
+(``shipped``).
 """
 
 import dataclasses
@@ -1157,7 +1157,7 @@ class GEMM(Operator):
 
         Flat uint8 bfp16ebs8 blocks on NPU2, flat bf16 on NPU1. Packing to
         consumption order is what makes both B hops linear descriptors. See
-        :mod:`iron.operators.flm.packing`.
+        ``iron.operators.flm.packing``.
         """
         t = self._tuned
         return pack_b(

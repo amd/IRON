@@ -52,7 +52,7 @@ class OperatorSequence:
             after each step re-runs the reference on the NPU-produced inputs
             (``SequenceCompareCallable`` judges each step by its
             operator's kernel contract).
-        arena: Place the scratch buffers in this shared :class:`ArenaPlan`
+        arena: Place the scratch buffers in this shared ``ArenaPlan``
             rather than a private arena. Only the full ELF addresses its
             scratch by offset in a buffer it is handed, so only it can share.
             The reference mode lays the arena out (a plan checkable without
@@ -65,14 +65,14 @@ class OperatorSequence:
             (``iron.common.graph.compiled._words``).
         feedback_args: Buffers the full ELF takes in one more argument, after
             scratch, which the caller may bind to memory of its own per run
-            (:meth:`FullELFRun.bind_feedback`) -- another run's ctrl
+            (``FullELFRun.bind_feedback``) -- another run's ctrl
             scratchpad, so a value the device computes becomes that run's
             per-call value. Laid out back to back from the argument's start,
             in order; a sequence without any takes no such argument.
         coresident: Groups of operators whose designs share one device
-            configuration in the full ELF (:mod:`.coresidence`), so steps
+            configuration in the full ELF (``coresidence``), so steps
             moving between them do not reconfigure the array; each must be
-            in the runlist. An :class:`AdjacentPacking` packs them itself,
+            in the runlist. An ``AdjacentPacking`` packs them itself,
             asking the placer.
     """
 
@@ -482,7 +482,7 @@ class OperatorSequence:
         ``link()`` is idempotent and ``get_callable()`` still goes through
         it, so this is the ahead-of-time path: a host with the toolchain and
         no runtime compiles and hands the image on. ``record="disk"`` also
-        writes the :class:`~iron.common.artifacts.Artifacts` record beside
+        writes the ``Artifacts`` record beside
         the image.
         """
         self.prepare()
@@ -493,7 +493,7 @@ class OperatorSequence:
 
     def link(self):
         """Build this sequence's image, once; sets ``self.image`` (``None`` for
-        the reference mode) and :attr:`artifacts`.
+        the reference mode) and ``artifacts``.
         """
         if not hasattr(self, "subbuffer_layout"):
             self.prepare()
@@ -508,7 +508,7 @@ class OperatorSequence:
 
     @property
     def artifacts(self) -> Artifacts:
-        """The record of what :meth:`link` produced."""
+        """The record of what ``link`` produced."""
         artifacts = getattr(self, "_artifacts", None)
         if artifacts is None:
             raise RuntimeError(f"{self.name} is not linked; compile() first")
