@@ -75,9 +75,9 @@ IN_PROD_LOCK, IN_CONS_LOCK = 2, 3
 
 
 def attn_kernel(device=None):
-    """The attn_prefill build this design's cores link."""
+    """The flm_attn_prefill build this design's cores link."""
     return call_factory(
-        kernels.attn_prefill,
+        kernels.flm_attn_prefill,
         device=device,
         in_prod_lock=IN_PROD_LOCK,
         in_cons_lock=IN_CONS_LOCK,
