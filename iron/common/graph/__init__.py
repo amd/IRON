@@ -7,7 +7,9 @@ Inputs are ``body``'s positional parameters, outputs its return values,
 weights and state (an :func:`state`) what the instance holds, named by
 attribute path (a weight the body indexes or reshapes is a
 :func:`weight`), and per-call scalars its keyword-only parameters
-annotated ``Scratchpad[T]`` or ``DispatchTime[T]``. Operators are called on handles:
+annotated ``Scratchpad[T]`` or ``DispatchTime[T]``. An input defaulting to
+``None`` may be left out; the version traced without it sees ``None``.
+Operators are called on handles:
 ``GEMV(w, h)`` infers its extents from its arguments (operators with one
 ``array_key`` share an array), and an explicit instance ``q(w, h)`` is
 applied the same way.

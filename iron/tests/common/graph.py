@@ -944,3 +944,50 @@ def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
     assert mha.derived_at("q_start", valid=64, kv_valid=192) == 2  # a later chunk
     (out,) = t.outputs
     assert out.bounds == {0: t.values[0].affine()}  # O is bounded like Q
+
+
+# --------------------------------------------------------------------------
+# Optional inputs
+# --------------------------------------------------------------------------
+
+
+class _Gather(iron.Graph):
+    """A row of a held table, gathered by a per-call index, plus ``x`` if given."""
+
+    def __init__(self, table):
+        self.table = iron.weight(table)
+
+    def body(self, x=None, *, r: Scratchpad[np.int32]):
+        y = Copy(self.table[r])
+        return y if x is None else ElementwiseAdd(x, y)
+
+
+def test_an_optional_input_gives_a_version_without_it():
+    table = np.arange(4 * 256, dtype=np.int32).astype(bfloat16).reshape(4, 256)
+    g = _Gather(table)
+    alone, added = g.trace(), g.trace(x=(256,))
+    assert alone.input_args == [] and added.input_args == ["x"]
+    assert g.trace(x=None).input_args == []
+    # The row is a view of the one table, indexed per call.
+    (copy,) = alone.operators
+    assert list(alone.weights) == [id(g.table)]
+    assert [(b.member.name, b.expression) for b in alone.bindings] == [
+        ("in_offset", alone.values[0] * 256)
+    ]
+    assert copy.bound_values == {"in_offset": "r_x256"}
+    x = np.full(256, 2, dtype=bfloat16)
+    np.testing.assert_array_equal(g.reference(r=1), table[1])
+    np.testing.assert_array_equal(g.reference(None, r=1), table[1])
+    np.testing.assert_array_equal(g.reference(x, r=3), table[3] + x)
+
+
+def test_only_none_may_default_an_input():
+    with pytest.raises(TypeError, match="may only default to None"):
+
+        class _Bad(iron.Graph):
+            def body(self, x=0):
+                return x
+
+    with pytest.raises(TypeError, match=r"inputs \['x'\] missing"):
+        _Ffn = _ffn()[0]
+        _Ffn(pos=0)

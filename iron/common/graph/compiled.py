@@ -91,7 +91,9 @@ class Graph:
 
     ``body``'s positional parameters are the inputs, its keyword-only ones
     (annotated ``Scratchpad[T]`` or ``DispatchTime[T]``) the per-call values,
-    and what it returns the outputs. The weights and states are what the
+    and what it returns the outputs. An input defaulting to None may be left
+    out: the version without it is traced with None in its place, and
+    ``body`` branches on that as it does on a shape. The weights and states are what the
     instance holds: a tensor or an :func:`~.handle.state` in an attribute,
     or in a list, tuple, dict, dataclass or namespace there, named by its
     path (``self.layers[3].q`` is ``layers.3.q``). A tensor ``body`` reaches
@@ -108,6 +110,8 @@ class Graph:
     # (name) per input, (name -> spec) per per-call value: body's signature.
     _inputs: list[str] = []
     _values: dict[str, ValueSpec] = {}
+    # The inputs defaulting to None, which a version may be traced without.
+    _optional: frozenset[str] = frozenset()
 
     def body(self, *inputs: Any, **values: Any) -> Any:
         raise NotImplementedError(f"{type(self).__name__} defines no body()")
@@ -123,8 +127,17 @@ class Graph:
             if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
         ]
         cls._values = {}
+        optional = set()
         for p in params:
-            if p.kind is p.KEYWORD_ONLY:
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
+                if p.default is None:
+                    optional.add(p.name)
+                elif p.default is not p.empty:
+                    raise TypeError(
+                        f"{cls.__name__}.body: input {p.name!r} defaults to "
+                        f"{p.default!r}; an input may only default to None"
+                    )
+            elif p.kind is p.KEYWORD_ONLY:
                 ann = p.annotation
                 if isinstance(ann, type) and issubclass(ann, _Value):
                     ann = ValueSpec(ann.kind, np.int32)
@@ -139,6 +152,7 @@ class Graph:
                 raise TypeError(
                     f"{cls.__name__}.body: *args/**kwargs are not traceable"
                 )
+        cls._optional = frozenset(optional)
 
     @property
     def name(self) -> str:
@@ -199,21 +213,34 @@ class Graph:
         return names
 
     def trace(self, **shapes) -> TracedGraph:
-        """Run :meth:`body` on handles of the given shapes; return the graph."""
-        missing = [p for p in self._inputs if p not in shapes]
+        """Run :meth:`body` on handles of the given shapes; return the graph.
+
+        An input defaulting to None that is given no shape (or None) is
+        absent: ``body`` sees None for it, and the version takes no such
+        input.
+        """
+        shapes = {k: v for k, v in shapes.items() if v is not None}
+        missing = [
+            p for p in self._inputs if p not in shapes and p not in self._optional
+        ]
         unknown = [k for k in shapes if k not in self._inputs]
         if missing or unknown:
             raise TypeError(
                 f"{self.name}: shapes for {missing} missing"
                 + (f"; {unknown} are not inputs" if unknown else "")
             )
-        inputs = []
+        inputs: list[Handle] = []
+        args: list[Handle | None] = []
         for name in self._inputs:
+            if name not in shapes:
+                args.append(None)
+                continue
             shape, dtype = _shape_and_dtype(shapes[name])
             inputs.append(Handle(shape, dtype, name, "input"))
+            args.append(inputs[-1])
         values = [Value(n, spec.kind, spec.dtype) for n, spec in self._values.items()]
         with self._scope(), Tracer(self.name, self.names()) as tracer:
-            result = self.body(*inputs, **{v.name: v for v in values})
+            result = self.body(*args, **{v.name: v for v in values})
         outputs = self._outputs(result, tracer)
         return tracer.finish(inputs, outputs, values)
 
@@ -289,30 +316,44 @@ class Graph:
         self._versions[signature] = version
         return version
 
-    def __call__(self, *tensors, **values) -> Any:
-        if len(tensors) != len(self._inputs):
+    def _given(self, tensors) -> dict[str, Any]:
+        """Input name -> tensor, for the inputs a call passes (in order)."""
+        if len(tensors) > len(self._inputs):
             raise TypeError(
                 f"{self.name} takes {len(self._inputs)} input(s), got {len(tensors)}"
             )
+        given = {n: t for n, t in zip(self._inputs, tensors) if t is not None}
+        missing = [
+            p for p in self._inputs if p not in given and p not in self._optional
+        ]
+        if missing:
+            raise TypeError(f"{self.name}: inputs {missing} missing")
+        return given
+
+    def __call__(self, *tensors, **values) -> Any:
+        given = self._given(tensors)
         signature = tuple(
             (name, tuple(int(n) for n in t.shape), bfp.dtype_name(_tensor_dtype(t)))
-            for name, t in zip(self._inputs, tensors)
+            for name, t in given.items()
         )
         version = self._versions.get(signature)
         if version is None:
             shapes = {
-                name: (tuple(t.shape), _tensor_dtype(t))
-                for name, t in zip(self._inputs, tensors)
+                name: (tuple(t.shape), _tensor_dtype(t)) for name, t in given.items()
             }
             print(f"{self.name}: compiling for {shapes}")
             # A checker matches **shapes against compile()'s named parameters.
             version = self.compile(**shapes)  # pyright: ignore[reportArgumentType]
-        return version(*tensors, **values)
+        return version(*given.values(), **values)
 
     def reference(self, *tensors, **values):
-        """:meth:`body` on host tensors, each operator run through its ``reference()``."""
+        """:meth:`body` on host tensors, each operator run through its ``reference()``.
+
+        An optional input left out, or passed as None, is None in ``body``.
+        """
+        args = list(tensors) + [None] * (len(self._inputs) - len(tensors))
         with self._scope(), _ReferenceTracer(self.name):
-            return self.body(*tensors, **{k: values.get(k) for k in self._values})
+            return self.body(*args, **{k: values.get(k) for k in self._values})
 
     def _scope(self):
         """The profile applied while :meth:`body` runs, if there is one."""
