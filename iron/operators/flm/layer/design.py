@@ -3,15 +3,14 @@
 
 """Gemma 4's fused decode layer on the whole array: one token through one layer.
 
-One core per stage: RMS norm and residual, RoPE for the global and the
+FastFlowLM's engine loads one xclbin and runs its own runtime sequence,
+gen_layer_seq, on it. The design reproduces that xclbin and that sequence.
+
+One core runs each stage: RMS norm and residual, RoPE for the global and the
 sliding-window layers, 16 q4nx projection cores, GLU, the per-layer-input
 path, and one attention pair (qk and kv) for each attention kind. One xclbin
 serves the four layer types. The runtime sequence writes the layer type into
-RTPs, then streams the weights, the KV cache and the hidden state. The
-layer's context length and the KV cache's row count are dispatch parameters.
-
-The runtime sequence is FastFlowLM's gen_layer_seq. It writes the RTPs at
-fixed addresses, ``RTP_ADDRESSES``.
+RTPs. It then streams the weights, the KV cache and the hidden state.
 """
 
 from enum import IntEnum
@@ -53,15 +52,17 @@ from iron.common.device_utils import call_factory
 
 LAYER_TYPES = ("global", "swa", "global_skip", "swa_skip")
 
-# Rows of the KV cache the runtime sequence's buffer types allow for. The
-# sequence takes the real row count, max_l, at dispatch.
+# The KV cache rows that the runtime sequence's buffer types allow. The
+# sequence takes the row count, max_l, at dispatch.
 MAX_CONTEXT = 32768
 SLIDING_WINDOW = 512
 
-# The L1 address of each RTP, per model: FastFlowLM's address book, which the
-# runtime sequence writes. The design pins every RTP buffer at its address:
-# the allocator places four of them elsewhere, and the sequence's writes to
-# those addresses then land in other buffers.
+# The L1 address of each RTP, per model, from FastFlowLM's address book. The
+# runtime sequence writes the RTPs at these addresses.
+#
+# The allocator places four RTP buffers at other addresses. The sequence's
+# writes then land in other buffers. The design pins every RTP buffer at its
+# address.
 RTP_ADDRESSES = {
     "GEMMA4_E2B": {
         "l_qk": 57344,
@@ -91,8 +92,8 @@ RTP_ADDRESSES = {
     },
 }
 
-# The symbol of each RTP buffer, by RTP_ADDRESSES key. Each projection core
-# has its own pair, so proj_swa and proj_skip have none here.
+# The symbol of each RTP buffer, by RTP_ADDRESSES key. proj_swa and proj_skip
+# have one symbol per projection core.
 RTP_SYMBOLS = {
     "rms_swa": "RTP_RMS_IS_SWA_BUFFER",
     "rms_skip": "RTP_RMS_SKIP_BUFFER",
@@ -112,7 +113,8 @@ Q4_BLOCK_BYTES = Q4_M * Q4_K * 5 // 8
 W_BLOCK = Q4_BLOCK_BYTES // 2
 # One bf16 weight block of the per-layer-input projections.
 BF16_W_BLOCK = 32 * 256
-# The projections' input slice. Every projection's input dim is a multiple.
+# The projections' input slice. Every projection's input dimension is a
+# multiple of it.
 X_SLICE = 256
 # Keys per attention round.
 LK = 16
@@ -120,9 +122,10 @@ LK = 16
 Q_HEADS_PADDING = 4
 # The padding in the engine's per-layer-input stream (gemma4e_npu_sequence.hpp).
 MIN_BF16_PAD = 32
+# The columns of the projection cores.
 PROJ_COLS = (0, 1, 6, 7)
 
-# Core locks, by the name of the factory argument that tells the kernel its id.
+# Core locks, by the name of the factory argument that gives the kernel the id.
 RMS_LOCKS = dict(
     w_prod_lock=0,
     w_cons_lock=1,
@@ -155,7 +158,7 @@ PLE_LOCKS = dict(
     y_prod_lock=6,
     y_cons_lock=7,
 )
-# The DMA's second norm_w leg, which no kernel takes.
+# The lock of the DMA's second norm_w BD. No kernel takes it.
 PLE_NORM_W_P2_LOCK = 8
 # final_x_* are locks of the RMS tile, to the left of the gate tile.
 GLE_LOCKS = dict(
@@ -199,9 +202,10 @@ ATTN_KV_LOCKS = dict(
 )
 ATTN_QK_LOCKS = dict(k_prod_lock=2, k_cons_lock=3)
 
-# The lock the RMS, GLU and projection cores acquire before they read their
-# RTPs. The sequence sets it once it has written them. A core tile's lock n
-# sits at 0x1F000 + 16 * n.
+# The RMS, GLU and projection cores acquire this lock before they read their
+# RTPs. The sequence sets it after it writes them. The RoPE and attention
+# cores read their RTPs after data from the projection cores arrives. A core
+# tile's lock n sits at 0x1F000 + 16 * n.
 RTP_SYNC_LOCK = PROJ_LOCKS["rtp_available_lock"]
 assert RTP_SYNC_LOCK == RMS_LOCKS["rtp_available_lock"] == GLU_LOCKS["rtp_lock"]
 RTP_SYNC_LOCK_ADDR = 0x1F000 + 16 * RTP_SYNC_LOCK
@@ -233,9 +237,9 @@ _KV_PKT_SWA = 13
 
 
 def layer_kernels(geometry, device=None):
-    """The flm_decode_* builds this design's cores link, by the kernel's symbol.
+    """The flm_decode_* kernels that this design's cores link, by kernel name.
 
-    The global attention kernels build for the geometry's KV head count.
+    The global attention kernels depend on the geometry's KV head count.
     """
     two_kv = geometry.num_kv_heads == 2
     qk_handshake = "l_prod_lock" if two_kv else "l_cons_lock"
@@ -302,65 +306,53 @@ def arg_sizes(geometry):
     }
 
 
-def _ping_pong(
-    b0,
-    b1,
-    acq,
-    rel,
-    *,
-    offset=0,
-    length=None,
-    dimensions=None,
-    acq_val=1,
-    rel_val=1,
-    packet=None,
-):
-    """Two BDs that alternate between b0 and b1 behind one lock pair.
-
-    ``dimensions`` is a list of (size, stride), outermost first.
-    """
-    sizes = [d[0] for d in dimensions] if dimensions else []
-    strides = [d[1] for d in dimensions] if dimensions else []
-    common = dict(
-        offset=offset, length=length, sizes=sizes, strides=strides, packet=packet
-    )
+def _ping_pong(b0, b1, acq, rel, **bd_args):
+    """Two BDs that alternate between b0 and b1 behind one lock pair."""
     return [
         Bd(
             b,
-            **common,
-            acquires=[Acquire(acq, value=acq_val)],
-            releases=[Release(rel, value=rel_val)],
+            acquires=[Acquire(acq)],
+            releases=[Release(rel)],
             next=nxt,
+            **bd_args,
         )
         for b, nxt in ((b0, 1), (b1, 0))
     ]
 
 
-def _connect(rt, src, src_ch, dst, dst_ch, pkt_id=-1, keep_pkt_header=False):
-    """A circuit-switched flow, or a packet flow when pkt_id >= 0."""
-    if pkt_id < 0:
-        rt.add_flow(Flow(src, dst, src_channel=src_ch, dst_channel=dst_ch))
+def _single_bd(direction, channel, buf, acq, rel, **bd_args):
+    """A DMA channel of one BD that repeats behind one lock pair."""
+    return DmaChannel(
+        direction,
+        channel,
+        [Bd(buf, acquires=[Acquire(acq)], releases=[Release(rel)], **bd_args)],
+    )
+
+
+def _call_kernel(*args):
+    """A core body that calls the kernel, its last argument, on the others."""
+    args[-1](*args[:-1])
+
+
+def _connect(
+    rt, src, src_ch, dst, dst_ch, pkt_id=None, keep_pkt_header=False, shim_symbol=None
+):
+    """A circuit-switched flow, or a packet flow when pkt_id is set."""
+    ends = dict(src_channel=src_ch, dst_channel=dst_ch, shim_symbol=shim_symbol)
+    if pkt_id is None:
+        rt.add_flow(Flow(src, dst, **ends))
     else:
         rt.add_flow(
-            PacketFlow(
-                pkt_id,
-                src,
-                dst,
-                src_channel=src_ch,
-                dst_channel=dst_ch,
-                keep_pkt_header=keep_pkt_header,
-            )
+            PacketFlow(pkt_id, src, dst, keep_pkt_header=keep_pkt_header, **ends)
         )
 
 
 def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
-    """The decode layer of ``layer_type`` for ``geometry``.
+    """The MLIR module of one decode layer of ``layer_type`` for ``geometry``.
 
-    ``rtp`` maps each RTP_ADDRESSES key to the address the engine writes.
-    ``layer_type`` sets what the sequence streams and writes into the RTPs;
-    the device configuration is the same for every type. The sequence takes
-    x, proj, rms, rope_rms and kv, then the context length and max_l, the
-    KV cache's row count.
+    ``rtp`` maps each RTP_ADDRESSES key to the address that the engine writes.
+    ``layer_type`` sets the runtime sequence only. The sequence takes x, proj,
+    rms, rope_rms and kv, then context_len and max_l.
     """
     if layer_type not in LAYER_TYPES:
         raise ValueError(f"layer_type must be one of {LAYER_TYPES}")
@@ -370,7 +362,6 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             "sequence takes the remainder by it with a mask"
         )
     g = geometry
-    total_cols = dev.cols
     IS_SWA = layer_type in ("swa", "swa_skip")
     IS_SKIP = layer_type in ("global_skip", "swa_skip")
     D = g.model_dim
@@ -387,38 +378,34 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         return kernel_fns[name].object_file.bind(symbol, arg_types)
 
     def sequence(x_arg, proj_arg, rms_arg, rope_rms_arg, kv_arg, len_arg, max_l_arg):
-        # The engine's gen_layer_seq: its RTP writes, then its shim DMA legs in
-        # its order, in bf16 elements. The engine passes context_len; the
-        # sequence works with the length after this token.
+        # The sequence mirrors the engine's gen_layer_seq: the RTP writes, then
+        # the shim DMA legs in the engine's order. Offsets and lengths count
+        # bf16 elements. L counts the tokens up to and including this one.
         L = _as_i32(len_arg) + 1
         MAX_L_v = _as_i32(max_l_arg)
+        SW = sliding_window
 
         def _ceil_mul(v, chunk):
-            # arith.divsi: `//` emits floordivsi, which the C++ generator
-            # cannot lower.
+            # The C++ generator cannot lower the floordivsi that `//` emits.
             return arith.divsi(v + (chunk - 1), _as_i32(chunk)) * chunk
 
         DH = g.swa_dh if IS_SWA else g.dh
         DQ = S_DQ if IS_SWA else G_DQ
         DK = S_DK if IS_SWA else G_DK
-        DV = DK
         INTERMEDIATE = (
             g.intermediate_size * 2
             if IS_SKIP and g.double_wide_mlp
             else g.intermediate_size
         )
-        L_CHUNK = 16
 
-        # The engine's weight blob, in bf16 elements. A skip layer shares
-        # another layer's KV cache and has no k or v projection.
+        # Offsets into the engine's weight blob. w counts bytes. A skip layer
+        # has no k or v weights.
         def q4b(dout, din):
             return dout * din * 5 // 8
 
-        w = 0
-        qkv_off = w // 2
-        w += q4b(DQ, D)
+        w = q4b(DQ, D)
         if not IS_SKIP:
-            w += q4b(DK, D) + q4b(DV, D)
+            w += 2 * q4b(DK, D)
         o_off = w // 2
         w += q4b(DQ, D)
         upgate_off = w // 2
@@ -438,7 +425,6 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                 npu_write32(rtp["proj_swa"], int(IS_SWA), column=c, row=r)
                 npu_write32(rtp["proj_skip"], int(IS_SKIP), column=c, row=r)
                 npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=c, row=r)
-        _SW = sliding_window
 
         # The C++ generator has no arith.minsi, so min and the masks are
         # branchless.
@@ -450,7 +436,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             d = v - _as_i32(bound)
             return _as_i32(bound) + arith.andi(d, arith.shrsi(d, _as_i32(31)))
 
-        L_local = _min_const(L, _SW) if IS_SWA else L
+        L_local = _min_const(L, SW) if IS_SWA else L
         npu_write32(rtp["l_qk"], L_local, column=2, row=2)
         npu_write32(rtp["l_kv"], L_local, column=2, row=3)
         npu_write32(rtp["swa_l_qk"], L_local, column=2, row=4)
@@ -460,39 +446,37 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         npu_write32(rtp["rope_skip_kv"], int(IS_SKIP), column=3, row=4)
         npu_write32(rtp["swa_rope_skip_kv"], int(IS_SKIP), column=3, row=5)
         npu_write32(
-            rtp["glu_skip"],
-            int(IS_SKIP and g.double_wide_mlp),
-            column=3,
-            row=3,
+            rtp["glu_skip"], int(IS_SKIP and g.double_wide_mlp), column=3, row=3
         )
         npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=3, row=2)
         npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=3, row=3)
 
-        # Two rounds of legs in flight, as the engine's bd_offset double
-        # buffer: at most 16 BDs a shim tile.
+        # The sequence keeps two rounds of legs in flight, as the engine's
+        # bd_offset double buffer does. A shim tile has 16 BDs.
         DEPTH_ROUNDS = 2
         window = []
 
         def flush(force=False):
             while len(window) > (0 if force else DEPTH_ROUNDS):
                 tasks = window.pop(0)
-                for t in tasks:
-                    if t[1]:
-                        dma_await_task(t[0])
-                dma_free_task(*[t[0] for t in tasks])
+                for task, token in tasks:
+                    if token:
+                        dma_await_task(task)
+                dma_free_task(*[task for task, _ in tasks])
 
-        def emit(round_tasks):
-            """Start one round of (task, has_token) legs."""
-            dma_start_task(*[t[0] for t in round_tasks])
-            window.append(round_tasks)
+        def emit(*legs):
+            """Start one round of legs."""
+            dma_start_task(*[task for task, _ in legs])
+            window.append(legs)
             flush()
 
-        def lin(symbol, mem, off, length, token, pkt=None):
+        def leg(symbol, mem, off, length, token=True, pkt=None):
+            """A (task, token) pair: one linear shim BD over mem."""
             # dma_bd takes i64 sizes and an i32 transfer_len.
             size_len = (
                 length if isinstance(length, int) else arith.extsi(T.i64(), length)
             )
-            return shim_dma_single_bd_task(
+            task = shim_dma_single_bd_task(
                 symbol,
                 mem,
                 offset=off,
@@ -500,189 +484,86 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                 strides=[0, 0, 0, 1],
                 transfer_len=length,
                 issue_token=token,
-                packet=pkt,
+                packet=None if pkt is None else (0, pkt),
             )
+            return task, token
 
-        emit([(lin("send_x", x_arg.op, 0, D, True, pkt=(0, _ShimPkt.to_rms)), True)])
-        emit(
-            [
-                (
-                    lin(
-                        "send_rms", rms_arg.op, 0, 4 * D, True, pkt=(0, _ShimPkt.to_rms)
-                    ),
-                    True,
-                )
-            ]
-        )
+        emit(leg("send_x", x_arg.op, 0, D, pkt=_ShimPkt.to_rms))
+        emit(leg("send_rms", rms_arg.op, 0, 4 * D, pkt=_ShimPkt.to_rms))
         # The RoPE weights go out on the channel whose flow reaches this
         # layer type's RoPE tile.
         rope_sym = "send_rms" if IS_SWA else "send_x"
-        emit(
-            [
-                (
-                    lin(
-                        rope_sym,
-                        rope_rms_arg.op,
-                        0,
-                        3 * DH,
-                        True,
-                        pkt=(0, _ShimPkt.to_rope),
-                    ),
-                    True,
-                )
-            ]
-        )
-        recv_y = lin("recv_y", x_arg.op, 0, D, True)
+        emit(leg(rope_sym, rope_rms_arg.op, 0, 3 * DH, pkt=_ShimPkt.to_rope))
+        recv_y, _ = leg("recv_y", x_arg.op, 0, D)
         dma_start_task(recv_y)
 
         def move_weights(Dout, Din, w_off):
             """The engine's _move_weights: a round is 2 legs to each proj column."""
-            cols = 4
             bpr = Din // Q4_K
-            cores = cols * 4
-            rounds = Dout // Q4_M // cores
-            for rnd in range(rounds):
-                rt_tasks = []
-                for ci in range(cols):
-                    col = PROJ_COLS[ci]
-                    off0 = (rnd * cores + ci * 4) * W_BLOCK * bpr + w_off
-                    rt_tasks.append(
-                        (
-                            lin(
-                                f"proj_w0_{col}",
+            cores = len(PROJ_COLS) * 4
+            for rnd in range(Dout // Q4_M // cores):
+                legs = []
+                for ci, col in enumerate(PROJ_COLS):
+                    for half in (0, 1):
+                        off = (rnd * cores + ci * 4 + 2 * half) * W_BLOCK * bpr + w_off
+                        legs.append(
+                            leg(
+                                f"proj_w{half}_{col}",
                                 proj_arg.op,
-                                off0,
+                                off,
                                 2 * bpr * W_BLOCK,
-                                True,
-                            ),
-                            True,
+                            )
                         )
-                    )
-                    off1 = (rnd * cores + ci * 4 + 2) * W_BLOCK * bpr + w_off
-                    rt_tasks.append(
-                        (
-                            lin(
-                                f"proj_w1_{col}",
-                                proj_arg.op,
-                                off1,
-                                2 * bpr * W_BLOCK,
-                                True,
-                            ),
-                            True,
-                        )
-                    )
-                emit(rt_tasks)
+                emit(*legs)
 
-        # The engine strides the sliding-window cache by the window and the
-        # global cache by its runtime max_l. DK + DV is even, so the halving
-        # folds into the constant.
-        assert (DK + DV) % 2 == 0
-        if IS_SWA:
-            v_cache_off = (DK + DV) * _SW // 2
-        else:
-            v_cache_off = MAX_L_v * ((DK + DV) // 2)
+        # V starts after the K rows: SW rows on a sliding-window layer, max_l
+        # rows on a global layer.
+        v_cache_off = DK * SW if IS_SWA else MAX_L_v * DK
         if IS_SKIP:
-            move_weights(DQ, D, qkv_off)
+            move_weights(DQ, D, 0)
         else:
-            move_weights(DQ + DK + DV, D, qkv_off)
+            move_weights(DQ + 2 * DK, D, 0)
             # This token's K and V into the cache, at row L - 1, modulo the
             # window on sliding-window layers. Both legs go on the layer
             # type's receive channel.
-            L_off = (arith.andi(L - 1, _as_i32(_SW - 1)) if IS_SWA else (L - 1)) * DK
+            L_off = (arith.andi(L - 1, _as_i32(SW - 1)) if IS_SWA else (L - 1)) * DK
             recv_sym = "recv_v" if IS_SWA else "recv_k"
-            emit([(lin(recv_sym, kv_arg.op, L_off, DK, True), True)])
-            emit([(lin(recv_sym, kv_arg.op, L_off + v_cache_off, DV, True), True)])
-        emit(
-            [
-                (
-                    lin(
-                        "pli_rope_rms",
-                        rope_rms_arg.op,
-                        3 * DH,
-                        PLI_D * 2 + D + MIN_BF16_PAD,
-                        True,
-                    ),
-                    True,
-                )
-            ]
-        )
+            emit(leg(recv_sym, kv_arg.op, L_off, DK))
+            emit(leg(recv_sym, kv_arg.op, L_off + v_cache_off, DK))
+        emit(leg("pli_rope_rms", rope_rms_arg.op, 3 * DH, PLI_D * 2 + D + MIN_BF16_PAD))
         # x reuses pli_rope_rms's channel as a second BD.
-        emit([(lin("pli_rope_rms", x_arg.op, 2 * D, D, False), False)])
-        emit([(lin("pli_down", proj_arg.op, pli_down_off, PLI_D * D, True), True)])
+        emit(leg("pli_rope_rms", x_arg.op, 2 * D, D, token=False))
+        emit(leg("pli_down", proj_arg.op, pli_down_off, PLI_D * D))
         # The KV cache into the attention memtile: one phase on global layers.
         # The sliding-window cache is a ring, so its window can wrap into two.
         mv_pkt = _KV_PKT_SWA if IS_SWA else _KV_PKT_GLOBAL
         if not IS_SWA:
-            d2m = _ceil_mul(L, L_CHUNK) * DK
-            emit([(lin("move_k", kv_arg.op, 0, d2m, True, pkt=(0, mv_pkt)), True)])
-            emit(
-                [
-                    (
-                        lin(
-                            "move_v", kv_arg.op, v_cache_off, d2m, True, pkt=(0, mv_pkt)
-                        ),
-                        True,
-                    )
-                ]
-            )
+            d2m = _ceil_mul(L, LK) * DK
+            emit(leg("move_k", kv_arg.op, 0, d2m, pkt=mv_pkt))
+            emit(leg("move_v", kv_arg.op, v_cache_off, d2m, pkt=mv_pkt))
         else:
-            # Two phases when L >= SW, one when L < SW: a mask picks the
+            # Two phases when L >= SW, one when L < SW. A mask picks the
             # lengths, so the leg count is fixed.
-            _m = _mask_ge(L, _SW)
+            _m = _mask_ge(L, SW)
             _nm = arith.xori(_m, _as_i32(-1))
-            _lb = arith.andi(L, _as_i32(_SW - 1))
-            _Lp = arith.andi(L + (L_CHUNK - 1), _as_i32(-L_CHUNK))
+            _lb = arith.andi(L, _as_i32(SW - 1))
+            _Lp = arith.andi(L + (LK - 1), _as_i32(-LK))
             p1_off = arith.andi(_m, _lb * DK)
             p1_len = arith.ori(
-                arith.andi(_m, (_as_i32(_SW) - _lb) * DK), arith.andi(_nm, _Lp * DK)
+                arith.andi(_m, (_as_i32(SW) - _lb) * DK), arith.andi(_nm, _Lp * DK)
             )
             p2_len = arith.andi(_m, _lb * DK)
-            emit(
-                [
-                    (
-                        lin("move_k", kv_arg.op, p1_off, p1_len, True, pkt=(0, mv_pkt)),
-                        True,
-                    )
-                ]
-            )
-            emit(
-                [
-                    (
-                        lin(
-                            "move_v",
-                            kv_arg.op,
-                            p1_off + v_cache_off,
-                            p1_len,
-                            True,
-                            pkt=(0, mv_pkt),
-                        ),
-                        True,
-                    )
-                ]
-            )
+            emit(leg("move_k", kv_arg.op, p1_off, p1_len, pkt=mv_pkt))
+            emit(leg("move_v", kv_arg.op, p1_off + v_cache_off, p1_len, pkt=mv_pkt))
             # A zero-length BD issues no token, so the second phase awaits
             # none.
-            emit([(lin("move_k", kv_arg.op, 0, p2_len, False, pkt=(0, mv_pkt)), False)])
-            emit(
-                [
-                    (
-                        lin(
-                            "move_v",
-                            kv_arg.op,
-                            v_cache_off,
-                            p2_len,
-                            False,
-                            pkt=(0, mv_pkt),
-                        ),
-                        False,
-                    )
-                ]
-            )
+            emit(leg("move_k", kv_arg.op, 0, p2_len, token=False, pkt=mv_pkt))
+            emit(leg("move_v", kv_arg.op, v_cache_off, p2_len, token=False, pkt=mv_pkt))
         move_weights(D, DQ, o_off)
         move_weights(2 * INTERMEDIATE, D, upgate_off)
         move_weights(D, INTERMEDIATE, down_off)
-        emit([(lin("pli_gate", proj_arg.op, pli_gate_off, PLI_D * D, True), True)])
-        emit([(lin("pli_up", proj_arg.op, pli_up_off, PLI_D * D, True), True)])
+        emit(leg("pli_gate", proj_arg.op, pli_gate_off, PLI_D * D))
+        emit(leg("pli_up", proj_arg.op, pli_up_off, PLI_D * D))
         flush(force=True)
         dma_await_task(recv_y)
         dma_free_task(recv_y)
@@ -704,25 +585,36 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     workers = []
 
     # Shim row 0, memtile row 1, compute rows 2 to 5. CT is [compute row][col].
-    IT = [Tile(c, 0, tile_type=dev.get_tile_type(c, 0)) for c in range(total_cols)]
-    MT = [Tile(c, 1, tile_type=dev.get_tile_type(c, 1)) for c in range(total_cols)]
+    IT = [Tile(c, 0, tile_type=dev.get_tile_type(c, 0)) for c in range(dev.cols)]
+    MT = [Tile(c, 1, tile_type=dev.get_tile_type(c, 1)) for c in range(dev.cols)]
     CT = [
-        [
-            Tile(c, r + 2, tile_type=dev.get_tile_type(c, r + 2))
-            for c in range(total_cols)
-        ]
+        [Tile(c, r + 2, tile_type=dev.get_tile_type(c, r + 2)) for c in range(dev.cols)]
         for r in range(4)
     ]
 
     RTP_ty = np.ndarray[(16,), np.dtype[np.int32]]
 
+    def rtp_buffer(tile, key, name=None):
+        """The RTP buffer of RTP_ADDRESSES key ``key``, pinned at its address."""
+        return Buffer(
+            type=RTP_ty,
+            name=name or RTP_SYMBOLS[key],
+            tile=tile,
+            use_write_rtp=True,
+            address=rtp[key],
+        )
+
+    def add_locks(tile, ids_inits):
+        """The tile's locks, one per (lock id, init) pair."""
+        out = [Lock(tile=tile, lock_id=i, init=init) for i, init in ids_inits]
+        for lock in out:
+            rt.add_lock(lock)
+        return out
+
     def locks(tile, table, inits):
         """The tile's locks named in ``table``, with ``inits`` by name."""
-        out = {}
-        for name, init in inits.items():
-            out[name] = Lock(tile=tile, lock_id=table[name], init=init)
-            rt.add_lock(out[name])
-        return out
+        ids_inits = [(table[name], init) for name, init in inits.items()]
+        return dict(zip(inits, add_locks(tile, ids_inits)))
 
     # --- RMS norm and residual. x in on S2MM 0, the norm weights on S2MM 1,
     # y out on MM2S 0 behind its packet header. y_out is the layer output the
@@ -739,20 +631,8 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     rms_w = Buffer(type=rms_w_ty, name=f"w_buffer_{rms_name}", tile=rms_tile)
     rms_y_out = Buffer(type=rms_x_ty, name=f"y_out_{rms_name}", tile=rms_tile)
     rms_y = Buffer(type=rms_y_pkt_ty, name=f"y_{rms_name}", tile=rms_tile)
-    rms_is_swa = Buffer(
-        type=RTP_ty,
-        name=RTP_SYMBOLS["rms_swa"],
-        tile=rms_tile,
-        use_write_rtp=True,
-        address=rtp["rms_swa"],
-    )
-    rms_skip = Buffer(
-        type=RTP_ty,
-        name=RTP_SYMBOLS["rms_skip"],
-        tile=rms_tile,
-        use_write_rtp=True,
-        address=rtp["rms_skip"],
-    )
+    rms_is_swa = rtp_buffer(rms_tile, "rms_swa")
+    rms_skip = rtp_buffer(rms_tile, "rms_skip")
     rl = locks(
         rms_tile,
         RMS_LOCKS,
@@ -785,12 +665,9 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         ],
     )
 
-    def rms_body(y, xp, xq, yo, w, xb, is_swa, skip, kern):
-        kern(y, xp, xq, yo, w, xb, is_swa, skip)
-
     workers.append(
         Worker(
-            rms_body,
+            _call_kernel,
             [
                 rms_y,
                 rms_x_ping,
@@ -803,7 +680,6 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                 rms_k,
             ],
             tile=rms_tile,
-            while_true=True,
             stack_size=1024 * 4,
         )
     )
@@ -819,35 +695,25 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                         rms_x_pong,
                         rl["x_prod_lock"],
                         rl["x_cons_lock"],
-                        offset=0,
                         length=D,
                     ),
                 ),
-                DmaChannel(
+                _single_bd(
                     DMAChannelDir.S2MM,
                     1,
-                    [
-                        Bd(
-                            rms_w,
-                            offset=0,
-                            length=4 * D,
-                            acquires=[Acquire(rl["w_prod_lock"])],
-                            releases=[Release(rl["w_cons_lock"])],
-                        ),
-                    ],
+                    rms_w,
+                    rl["w_prod_lock"],
+                    rl["w_cons_lock"],
+                    length=4 * D,
                 ),
-                DmaChannel(
+                _single_bd(
                     DMAChannelDir.MM2S,
                     0,
-                    [
-                        Bd(
-                            rms_y,
-                            offset=14,
-                            length=D + 2,
-                            acquires=[Acquire(rl["y_cons_lock"])],
-                            releases=[Release(rl["y_prod_lock"])],
-                        ),
-                    ],
+                    rms_y,
+                    rl["y_cons_lock"],
+                    rl["y_prod_lock"],
+                    offset=14,
+                    length=D + 2,
                 ),
             ],
         )
@@ -855,27 +721,20 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
 
     # --- RoPE, global and sliding-window: qkv in on S2MM 0, the RoPE weights
     # on S2MM 1, q out through a fifo to the qk core, k and v out on MM2S 1.
-    def build_rope(rope_tile, name, name_tag, dq, dk, dh, q_fifo, skip_addr):
+    def build_rope(rope_tile, name, rtp_key, dk, dh, q_fifo):
         dq_padded = NQ_PADDED * dh
         qkv_ty = np.ndarray[(dh,), bf]
         q_ty = np.ndarray[(dq_padded,), bf]
-        k_ty = np.ndarray[(dk,), bf]
-        v_ty = np.ndarray[(dk,), bf]
+        kv_ty = np.ndarray[(dk,), bf]
         rope_ty = np.ndarray[(dh * 3 if g.qk_norm else dh,), bf]
 
         r, c = rope_tile.row, rope_tile.col
         qkv_0 = Buffer(type=qkv_ty, name=f"qkv_buffer_0_{r}_{c}", tile=rope_tile)
         qkv_1 = Buffer(type=qkv_ty, name=f"qkv_buffer_1_{r}_{c}", tile=rope_tile)
-        k_buf = Buffer(type=k_ty, name=f"k_buffer_{r}_{c}", tile=rope_tile)
-        v_buf = Buffer(type=v_ty, name=f"v_buffer_{r}_{c}", tile=rope_tile)
+        k_buf = Buffer(type=kv_ty, name=f"k_buffer_{r}_{c}", tile=rope_tile)
+        v_buf = Buffer(type=kv_ty, name=f"v_buffer_{r}_{c}", tile=rope_tile)
         rope_buf = Buffer(type=rope_ty, name=f"rope_buffer_{r}_{c}", tile=rope_tile)
-        skip_kv = Buffer(
-            type=RTP_ty,
-            name=f"RTP_{name_tag}_SKIP_KV_{r}_{c}",
-            tile=rope_tile,
-            use_write_rtp=True,
-            address=skip_addr,
-        )
+        skip_kv = rtp_buffer(rope_tile, rtp_key)
         lk = locks(
             rope_tile,
             ROPE_LOCKS,
@@ -890,8 +749,8 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                 rope_cons_lock=0,
             ),
         )
-        rt.add_lock(Lock(tile=rope_tile, lock_id=ROPE_Q_PASS_LOCK, init=0))
-        kern = k(name, name, [q_ty, k_ty, v_ty, qkv_ty, qkv_ty, rope_ty, RTP_ty])
+        add_locks(rope_tile, [(ROPE_Q_PASS_LOCK, 0)])
+        kern = k(name, name, [q_ty, kv_ty, kv_ty, qkv_ty, qkv_ty, rope_ty, RTP_ty])
 
         def rope_body(q_h, kk, v, q0, q1, rope, skip, kern):
             q = q_h.acquire(1)
@@ -903,7 +762,6 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                 rope_body,
                 [q_fifo.prod(), k_buf, v_buf, qkv_0, qkv_1, rope_buf, skip_kv, kern],
                 tile=rope_tile,
-                while_true=True,
                 stack_size=1024 * 4,
             )
         )
@@ -936,38 +794,25 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                             ),
                         ],
                     ),
-                    DmaChannel(
+                    _single_bd(
                         DMAChannelDir.S2MM,
                         1,
-                        [
-                            Bd(
-                                rope_buf,
-                                acquires=[Acquire(lk["rope_prod_lock"])],
-                                releases=[Release(lk["rope_cons_lock"])],
-                            ),
-                        ],
+                        rope_buf,
+                        lk["rope_prod_lock"],
+                        lk["rope_cons_lock"],
                     ),
                 ],
             )
         )
 
-    # q from RoPE to the qk core. The consumer reorders it on the way in.
+    # q from RoPE to the qk core. The qk core's DMA reorders it.
     q_of_g = ObjectFifo(np.ndarray[(G_DQ,), bf], name="q_in", depth=2)
     q_of_swa = ObjectFifo(np.ndarray[(S_DQ,), bf], name="swa_q_in", depth=2)
 
     rope_tile = CT[2][3]
-    build_rope(rope_tile, "rope", "RoPE", G_DQ, G_DK, g.dh, q_of_g, rtp["rope_skip_kv"])
+    build_rope(rope_tile, "rope", "rope_skip_kv", G_DK, g.dh, q_of_g)
     swa_rope_tile = CT[3][3]
-    build_rope(
-        swa_rope_tile,
-        "swa_rope",
-        "SWA_RoPE",
-        S_DQ,
-        S_DK,
-        g.swa_dh,
-        q_of_swa,
-        rtp["swa_rope_skip_kv"],
-    )
+    build_rope(swa_rope_tile, "swa_rope", "swa_rope_skip_kv", S_DK, g.swa_dh, q_of_swa)
 
     w_blk_ty = np.ndarray[(BF16_W_BLOCK,), bf]
 
@@ -1002,8 +847,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             y_cons_lock=0,
         ),
     )
-    ple_norm_w_p2 = Lock(tile=ple_tile, lock_id=PLE_NORM_W_P2_LOCK, init=0)
-    rt.add_lock(ple_norm_w_p2)
+    (ple_norm_w_p2,) = add_locks(ple_tile, [(PLE_NORM_W_P2_LOCK, 0)])
     ple_k = k(
         "proj_layer_embedding",
         "proj_layer_embedding",
@@ -1018,15 +862,11 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         ],
     )
 
-    def ple_body(nw, x0pl, x0, xproj, y, w0, w1, kern):
-        kern(nw, x0pl, x0, xproj, y, w0, w1)
-
     workers.append(
         Worker(
-            ple_body,
+            _call_kernel,
             [ple_norm_w, ple_x0_pl, ple_x0, ple_x_proj, ple_y, ple_w0, ple_w1, ple_k],
             tile=ple_tile,
-            while_true=True,
             stack_size=1024 * 4,
         )
     )
@@ -1046,7 +886,6 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                         ),
                         Bd(
                             ple_norm_w,
-                            offset=0,
                             length=PLI_D,
                             acquires=[Acquire(pl["norm_w_prod_lock"])],
                             releases=[Release(ple_norm_w_p2)],
@@ -1078,16 +917,8 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                         pl["proj_w_cons_lock"],
                     ),
                 ),
-                DmaChannel(
-                    DMAChannelDir.MM2S,
-                    1,
-                    [
-                        Bd(
-                            ple_y,
-                            acquires=[Acquire(pl["y_cons_lock"])],
-                            releases=[Release(pl["y_prod_lock"])],
-                        ),
-                    ],
+                _single_bd(
+                    DMAChannelDir.MM2S, 1, ple_y, pl["y_cons_lock"], pl["y_prod_lock"]
                 ),
             ],
         )
@@ -1129,7 +960,6 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             gle_body,
             [rms_y_out, gle_w0, gle_w1, gle_y, gle_k, gle_x_residual],
             tile=gle_tile,
-            while_true=True,
             stack_size=1024 * 4,
         )
     )
@@ -1147,16 +977,8 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                         gl["proj_w_cons_lock"],
                     ),
                 ),
-                DmaChannel(
-                    DMAChannelDir.MM2S,
-                    1,
-                    [
-                        Bd(
-                            gle_y,
-                            acquires=[Acquire(gl["y_cons_lock"])],
-                            releases=[Release(gl["y_prod_lock"])],
-                        ),
-                    ],
+                _single_bd(
+                    DMAChannelDir.MM2S, 1, gle_y, gl["y_cons_lock"], gl["y_prod_lock"]
                 ),
             ],
         )
@@ -1169,53 +991,31 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     plm_y = Buffer(
         type=plm_dual_y_ty, name=f"y_{plm_tile.row}_{plm_tile.col}", tile=plm_tile
     )
-    plm_norm_i_prod = Lock(tile=plm_tile, lock_id=0, init=1)
-    rt.add_lock(plm_norm_i_prod)
-    plm_res_gate_prod = Lock(tile=plm_tile, lock_id=1, init=0)
-    rt.add_lock(plm_res_gate_prod)
-    plm_cons = Lock(tile=plm_tile, lock_id=2, init=0)
-    rt.add_lock(plm_cons)
+    plm_norm_i_prod, plm_res_gate_prod, plm_cons = add_locks(
+        plm_tile, [(0, 1), (1, 0), (2, 0)]
+    )
     rt.add_tile_dma(
         TileDma(
             plm_tile,
             [
-                DmaChannel(
+                _single_bd(
                     DMAChannelDir.S2MM,
                     0,
-                    [
-                        Bd(
-                            plm_y,
-                            offset=0,
-                            length=D + PLI_D + 32,
-                            acquires=[Acquire(plm_norm_i_prod)],
-                            releases=[Release(plm_res_gate_prod)],
-                        ),
-                    ],
+                    plm_y,
+                    plm_norm_i_prod,
+                    plm_res_gate_prod,
+                    length=D + PLI_D + 32,
                 ),
-                DmaChannel(
+                _single_bd(
                     DMAChannelDir.S2MM,
                     1,
-                    [
-                        Bd(
-                            plm_y,
-                            offset=D + PLI_D + 32,
-                            length=D + PLI_D,
-                            acquires=[Acquire(plm_res_gate_prod)],
-                            releases=[Release(plm_cons)],
-                        ),
-                    ],
+                    plm_y,
+                    plm_res_gate_prod,
+                    plm_cons,
+                    offset=D + PLI_D + 32,
+                    length=D + PLI_D,
                 ),
-                DmaChannel(
-                    DMAChannelDir.MM2S,
-                    0,
-                    [
-                        Bd(
-                            plm_y,
-                            acquires=[Acquire(plm_cons)],
-                            releases=[Release(plm_norm_i_prod)],
-                        ),
-                    ],
-                ),
+                _single_bd(DMAChannelDir.MM2S, 0, plm_y, plm_cons, plm_norm_i_prod),
             ],
         )
     )
@@ -1246,15 +1046,11 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         "per_layer_up", "per_layer_up", [plu_dual_x_ty, w_blk_ty, w_blk_ty, plu_y_ty]
     )
 
-    def plu_body(x, w0, w1, y, kern):
-        kern(x, w0, w1, y)
-
     workers.append(
         Worker(
-            plu_body,
+            _call_kernel,
             [plu_x, plu_w0, plu_w1, plu_y, plu_k],
             tile=plu_tile,
-            while_true=True,
             stack_size=1024 * 4,
         )
     )
@@ -1262,16 +1058,8 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         TileDma(
             plu_tile,
             [
-                DmaChannel(
-                    DMAChannelDir.S2MM,
-                    0,
-                    [
-                        Bd(
-                            plu_x,
-                            acquires=[Acquire(ul["x_prod_lock"])],
-                            releases=[Release(ul["x_cons_lock"])],
-                        ),
-                    ],
+                _single_bd(
+                    DMAChannelDir.S2MM, 0, plu_x, ul["x_prod_lock"], ul["x_cons_lock"]
                 ),
                 DmaChannel(
                     DMAChannelDir.S2MM,
@@ -1283,16 +1071,8 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                         ul["proj_w_cons_lock"],
                     ),
                 ),
-                DmaChannel(
-                    DMAChannelDir.MM2S,
-                    0,
-                    [
-                        Bd(
-                            plu_y,
-                            acquires=[Acquire(ul["y_cons_lock"])],
-                            releases=[Release(ul["y_prod_lock"])],
-                        ),
-                    ],
+                _single_bd(
+                    DMAChannelDir.MM2S, 0, plu_y, ul["y_cons_lock"], ul["y_prod_lock"]
                 ),
             ],
         )
@@ -1312,13 +1092,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     glu_y_0 = Buffer(type=glu_y_ty, name=f"y_0_{glu_name}", tile=glu_tile)
     glu_y_1 = Buffer(type=glu_y_ty, name=f"y_1_{glu_name}", tile=glu_tile)
     glu_hid = Buffer(type=glu_hid_ty, name=f"hid_0_{glu_name}", tile=glu_tile)
-    glu_is_skip = Buffer(
-        type=RTP_ty,
-        name=RTP_SYMBOLS["glu_skip"],
-        tile=glu_tile,
-        use_write_rtp=True,
-        address=rtp["glu_skip"],
-    )
+    glu_is_skip = rtp_buffer(glu_tile, "glu_skip")
     ll = locks(
         glu_tile,
         GLU_LOCKS,
@@ -1330,15 +1104,11 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         [glu_hid_ty, glu_up_gate_ty, glu_up_gate_ty, glu_y_ty, glu_y_ty, RTP_ty],
     )
 
-    def glu_body(hid, x0, x1, y0, y1, is_skip, kern):
-        kern(hid, x0, x1, y0, y1, is_skip)
-
     workers.append(
         Worker(
-            glu_body,
+            _call_kernel,
             [glu_hid, glu_x_0, glu_x_1, glu_y_0, glu_y_1, glu_is_skip, glu_k],
             tile=glu_tile,
-            while_true=True,
             stack_size=4 * 1024,
         )
     )
@@ -1366,9 +1136,9 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         )
     )
 
-    # --- The q4nx projection engine: 16 cores in columns 0, 1, 6 and 7. The
-    # core of an even row sends; the core below it fills the second slot of
-    # the sender's y buffers.
+    # --- The q4nx projection engine: 16 cores in PROJ_COLS. The cores in rows 2
+    # and 4 send y. The core in the next row fills the second slot of the
+    # sender's y buffers.
     x_slice_ty = np.ndarray[(X_SLICE,), bf]
     linear_w_ty = np.ndarray[(W_BLOCK,), bf]
     m_pkt_ty = np.ndarray[(2 * Q4_M + 16,), bf]
@@ -1389,22 +1159,10 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     )
 
     def build_proj_main(pt, send_x_out, main_y0=None, main_y1=None):
-        """Returns (y0, y1), which the paired core below borrows."""
+        """Returns (y0, y1), which the paired core in the next row borrows."""
         r, c = pt.row, pt.col
-        is_swa = Buffer(
-            type=RTP_ty,
-            name=f"RTP_PROJ_IS_SWA_BUFFER_{r}_{c}",
-            tile=pt,
-            use_write_rtp=True,
-            address=rtp["proj_swa"],
-        )
-        skip_kv = Buffer(
-            type=RTP_ty,
-            name=f"RTP_PROJ_SKIP_KV_BUFFER_{r}_{c}",
-            tile=pt,
-            use_write_rtp=True,
-            address=rtp["proj_skip"],
-        )
+        is_swa = rtp_buffer(pt, "proj_swa", f"RTP_PROJ_IS_SWA_BUFFER_{r}_{c}")
+        skip_kv = rtp_buffer(pt, "proj_skip", f"RTP_PROJ_SKIP_KV_BUFFER_{r}_{c}")
         x0 = Buffer(type=x_slice_ty, name=f"x_0_{r}_{c}", tile=pt)
         w0 = Buffer(type=linear_w_ty, name=f"w_0_{r}_{c}", tile=pt)
         x1 = Buffer(type=x_slice_ty, name=f"x_1_{r}_{c}", tile=pt)
@@ -1429,17 +1187,15 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                 y_cons_pong_lock=0,
             ),
         )
-        flag = 1 if send_x_out else 0
 
         def proj_body(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, kern):
-            kern(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, constant(flag))
+            kern(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, constant(int(send_x_out)))
 
         workers.append(
             Worker(
                 proj_body,
                 [y0, w0, x0, y1, w1, x1, is_swa, skip_kv, proj_k],
                 tile=pt,
-                while_true=True,
                 stack_size=10 * 1024,
             )
         )
@@ -1492,19 +1248,11 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         proj_send_tiles.append(group_send)
 
     # --- The projection memtiles. Each splits its column's weights over the
-    # column's four cores. MT[0] and MT[6] also gather y from their group,
-    # and MT[1] gathers both groups' y and broadcasts x.
+    # column's four cores. MT[0] and MT[6] also gather y from their group.
+    # MT[1] gathers both groups' y and broadcasts x.
     linear_4w_ty = np.ndarray[(4 * W_BLOCK,), bf]
     WB = W_BLOCK
     m = Q4_M
-
-    def mt_locks(mt, ids_inits):
-        out = []
-        for lock_id, init in ids_inits:
-            lock = Lock(tile=mt, lock_id=lock_id, init=init)
-            rt.add_lock(lock)
-            out.append(lock)
-        return out
 
     def weight_channels(w0, w1, wp0, wp0c0, wp0c1, wp1, wp1c0, wp1c1):
         return {
@@ -1556,8 +1304,8 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         y0 = Buffer(type=m_col_ty, name=f"y_buffer_0_{r}_{c}", tile=mt)
         y1 = Buffer(type=m_col_ty, name=f"y_buffer_1_{r}_{c}", tile=mt)
         w0, w1 = weight_buffers(mt)
-        yp0, yp1, yp2, yp3, yc = mt_locks(mt, [(0, 2), (1, 0), (2, 0), (3, 0), (4, 0)])
-        wc = weight_channels(w0, w1, *mt_locks(mt, WEIGHT_LOCKS))
+        yp0, yp1, yp2, yp3, yc = add_locks(mt, [(0, 2), (1, 0), (2, 0), (3, 0), (4, 0)])
+        wc = weight_channels(w0, w1, *add_locks(mt, WEIGHT_LOCKS))
         rt.add_tile_dma(
             TileDma(
                 mt,
@@ -1592,7 +1340,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
 
     def build_assemble_weight_only(mt):
         w0, w1 = weight_buffers(mt)
-        wc = weight_channels(w0, w1, *mt_locks(mt, WEIGHT_LOCKS))
+        wc = weight_channels(w0, w1, *add_locks(mt, WEIGHT_LOCKS))
         rt.add_tile_dma(TileDma(mt, [wc["in0"], *wc["out"], wc["in1"]]))
 
     def build_assemble_weight_x(mt):
@@ -1603,9 +1351,9 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         y1 = Buffer(type=m_full_ty, name=f"y_buffer_1_{r}_{c}", tile=mt)
         x0 = Buffer(type=x_chunk_ty, name=f"x_buffer_0_{r}_{c}", tile=mt)
         x1 = Buffer(type=x_chunk_ty, name=f"x_buffer_1_{r}_{c}", tile=mt)
-        mp0, mp1, mc, xp, xc = mt_locks(mt, [(0, 2), (1, 0), (2, 0), (3, 2), (4, 0)])
+        mp0, mp1, mc, xp, xc = add_locks(mt, [(0, 2), (1, 0), (2, 0), (3, 2), (4, 0)])
         w0, w1 = weight_buffers(mt)
-        wc = weight_channels(w0, w1, *mt_locks(mt, WEIGHT_LOCKS))
+        wc = weight_channels(w0, w1, *add_locks(mt, WEIGHT_LOCKS))
         rt.add_tile_dma(
             TileDma(
                 mt,
@@ -1636,83 +1384,22 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     build_assemble_weight_x(MT[1])
     proj_main_mt = MT[1]
 
-    def proj_route():
-        # The weights from the shim into each memtile, halves on S2MM 4 and 5.
-        for mtid in PROJ_COLS:
-            for ch in (0, 1):
-                rt.add_flow(
-                    Flow(
-                        IT[mtid],
-                        MT[mtid],
-                        src_channel=ch,
-                        dst_channel=4 + ch,
-                        shim_symbol=f"proj_w{ch}_{mtid}",
-                    )
-                )
-        # The memtile's MM2S j to S2MM 1 of its column's core in row j.
-        for col in PROJ_COLS:
-            for j in range(4):
-                _connect(rt, MT[col], j, CT[j][col], 1)
-        # x from MT[1]'s MM2S 4 to every projection core's S2MM 0.
-        for col in PROJ_COLS:
-            for j in range(4):
-                _connect(rt, proj_main_mt, 4, CT[j][col], 0)
-        # y from each group's sending cores to its memtile. The first keeps the
-        # packet header, which carries the consumer's id to MT[1].
-        pkts = [
-            _ProjPkt.to_swa_rope,
-            _ProjPkt.to_rope,
-            _ProjPkt.to_rms,
-            _ProjPkt.to_glu,
-        ]
-        gather_mts = [MT[0], MT[6]]
-        for grp in range(2):
-            for combo_j, send_t in enumerate(proj_send_tiles[grp]):
-                for pk in pkts:
-                    _connect(
-                        rt,
-                        send_t,
-                        0,
-                        gather_mts[grp],
-                        combo_j,
-                        pkt_id=pk,
-                        keep_pkt_header=combo_j == 0,
-                    )
-        for pk in pkts:
-            _connect(rt, MT[0], 4, proj_main_mt, 0, pkt_id=pk, keep_pkt_header=True)
-        for pk in pkts:
-            _connect(rt, MT[6], 4, proj_main_mt, 1, pkt_id=pk, keep_pkt_header=False)
-
     # --- Attention in column 2: the global pair in rows 2 and 3, the
     # sliding-window pair in rows 4 and 5. k and v come from MT[2], q from
     # RoPE, and the scores go from the qk core to the kv core through a fifo.
     attn_s_ty = np.ndarray[(NQ_PADDED * 16 + 32, 1), bf]
     f32 = np.dtype[np.float32]
 
-    def build_attn_kv(
-        kv_tile,
-        name,
-        rtp_name,
-        dh,
-        v_kv_head_style,
-        pkt_id,
-        of_s,
-        two_kv_heads,
-        rtp_addr,
-    ):
+    # A round of the two-KV-head kernels covers one KV head. A round of the
+    # other kernels covers every KV head.
+    def build_attn_kv(kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
         r, c = kv_tile.row, kv_tile.col
         NQ = g.num_attn_heads
         o_repeats = D // (Q4_M * 16)
-        v_ty = np.ndarray[(LK, NUM_KV * dh if v_kv_head_style else dh), bf]
+        v_ty = np.ndarray[(LK, dh if two_kv_heads else NUM_KV * dh), bf]
         o_ty = np.ndarray[(dh * NQ,), bf]
         y_ty = np.ndarray[(dh * NQ,), f32]
-        L = Buffer(
-            type=RTP_ty,
-            name=rtp_name,
-            tile=kv_tile,
-            use_write_rtp=True,
-            address=rtp_addr,
-        )
+        L = rtp_buffer(kv_tile, rtp_key)
         v0 = Buffer(type=v_ty, name=f"v_0_{r}_{c}", tile=kv_tile)
         v1 = Buffer(type=v_ty, name=f"v_1_{r}_{c}", tile=kv_tile)
         y = Buffer(type=y_ty, name=f"y_{r}_{c}", tile=kv_tile)
@@ -1726,16 +1413,15 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         lbuf = Buffer(type=l_ty, name=f"l_{r}_{c}", tile=kv_tile)
         k_begin = k(name, f"{name}_begin", [y_ty, l_ty])
         k_finish = k(name, f"{name}_finish", [y_ty, o_ty, l_ty])
-        # A round's loop count is the RTP's L rounded up to whole rounds. The
-        # begin kernel waits on the qk core, which reads the RTP after q
-        # arrives.
+        # The core runs one round per LK keys. The begin kernel waits on the qk
+        # core, which reads the RTP after q arrives.
         if two_kv_heads:
             k_sbeg = k(name, f"{name}_s_begin", [attn_s_ty, y_ty, l_ty])
             k_vhalf = k(name, f"{name}_v_half", [attn_s_ty, v_ty, v_ty, y_ty, np.int32])
 
             def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, ksb, kvh, kf):
                 kb(yy, ll)
-                for _ in range_((rtp_l[0] + 15) // 16):
+                for _ in range_((rtp_l[0] + (LK - 1)) // LK):
                     s = s_in.acquire(1)
                     ksb(s, yy, ll)
                     for j in range_(2):
@@ -1750,7 +1436,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
 
             def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, kr, kf):
                 kb(yy, ll)
-                for _ in range_((rtp_l[0] + 15) // 16):
+                for _ in range_((rtp_l[0] + (LK - 1)) // LK):
                     s = s_in.acquire(1)
                     kr(s, v_0, v_1, yy, ll)
                     s_in.release(1)
@@ -1758,9 +1444,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
 
             args = [of_s.cons(), v0, v1, y, lbuf, o, L, k_begin, k_round, k_finish]
 
-        workers.append(
-            Worker(kv_body, args, tile=kv_tile, while_true=True, stack_size=1024 * 6)
-        )
+        workers.append(Worker(kv_body, args, tile=kv_tile, stack_size=1024 * 6))
         rt.add_tile_dma(
             TileDma(
                 kv_tile,
@@ -1770,59 +1454,38 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                         1,
                         _ping_pong(v0, v1, kl["v_prod_lock"], kl["v_cons_lock"]),
                     ),
-                    DmaChannel(
+                    _single_bd(
                         DMAChannelDir.MM2S,
                         0,
-                        [
-                            Bd(
-                                o,
-                                packet=(0, pkt_id),
-                                offset=0,
-                                length=NQ * dh,
-                                sizes=[NQ, dh // 8, 8],
-                                strides=[8, NQ * 8, 1],
-                                acquires=[Acquire(kl["o_cons_lock"])],
-                                releases=[Release(kl["o_prod_lock"])],
-                            ),
-                        ],
+                        o,
+                        kl["o_cons_lock"],
+                        kl["o_prod_lock"],
+                        packet=(0, _X_FROM_ATTN),
+                        offset=0,
+                        length=NQ * dh,
+                        sizes=[NQ, dh // 8, 8],
+                        strides=[8, NQ * 8, 1],
                     ),
                 ],
             )
         )
 
-    def build_attn_qk(
-        qk_tile,
-        name,
-        rtp_name,
-        dh,
-        k_kv_head_style,
-        of_s,
-        q_fifo,
-        rtp_addr,
-        two_kv_heads,
-    ):
+    def build_attn_qk(qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
         r, c = qk_tile.row, qk_tile.col
-        k_ty = np.ndarray[(LK, NUM_KV * dh if k_kv_head_style else dh), bf]
+        k_ty = np.ndarray[(LK, dh if two_kv_heads else NUM_KV * dh), bf]
         q_ty = np.ndarray[(NQ_PADDED * dh,), bf]
         k0 = Buffer(type=k_ty, name=f"k_0_{r}_{c}", tile=qk_tile)
         k1 = Buffer(type=k_ty, name=f"k_1_{r}_{c}", tile=qk_tile)
         ql = locks(qk_tile, ATTN_QK_LOCKS, dict(k_prod_lock=2, k_cons_lock=0))
-        rt.add_lock(Lock(tile=qk_tile, lock_id=ATTN_HANDSHAKE_LOCK, init=0))
-        L = Buffer(
-            type=RTP_ty,
-            name=rtp_name,
-            tile=qk_tile,
-            use_write_rtp=True,
-            address=rtp_addr,
-        )
+        add_locks(qk_tile, [(ATTN_HANDSHAKE_LOCK, 0)])
+        L = rtp_buffer(qk_tile, rtp_key)
         q_in_order = [(NQ_PADDED, 8), (dh // 8, NQ_PADDED * 8), (8, 1)]
         m_ty = np.ndarray[(16,), bf]
         c_ty = np.ndarray[(8,), f32]
         m_buf = Buffer(type=m_ty, name=f"m_{r}_{c}", tile=qk_tile)
         c_local = Buffer(type=c_ty, name=f"c_local_{r}_{c}", tile=qk_tile)
         k_begin = k(name, f"{name}_begin", [m_ty])
-        # The q acquire orders the RTP read: q arrives only after the sequence
-        # has written the RTPs.
+        # The q acquire orders the RTP read after the sequence's RTP writes.
         if two_kv_heads:
             k_half = k(
                 name,
@@ -1834,7 +1497,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kh, ks):
                 q = q_h.acquire(1)
                 kb(mm)
-                for i in range_((rtp_l[0] + 15) // 16):
+                for i in range_((rtp_l[0] + (LK - 1)) // LK):
                     s = s_out.acquire(1)
                     for j in range_(2):
                         kh(q, k_0, k_1, s, mm, cc, j, i, rtp_l[0])
@@ -1853,7 +1516,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kr):
                 q = q_h.acquire(1)
                 kb(mm)
-                for i in range_((rtp_l[0] + 15) // 16):
+                for i in range_((rtp_l[0] + (LK - 1)) // LK):
                     s = s_out.acquire(1)
                     kr(q, k_0, k_1, s, mm, cc, i, rtp_l[0])
                     s_out.release(1)
@@ -1870,9 +1533,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             c_local,
             L,
         ] + kerns
-        workers.append(
-            Worker(qk_body, args, tile=qk_tile, while_true=True, stack_size=1024 * 4)
-        )
+        workers.append(Worker(qk_body, args, tile=qk_tile, stack_size=1024 * 4))
         rt.add_tile_dma(
             TileDma(
                 qk_tile,
@@ -1889,54 +1550,14 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     attn_qk_tile = CT[0][2]
     attn_kv_tile = CT[1][2]
     of_g_s = ObjectFifo(attn_s_ty, name="attn_s", delegate_tile=attn_kv_tile)
-    build_attn_kv(
-        attn_kv_tile,
-        "attn_kv",
-        f"RTP_L_attn_kv_core_{attn_kv_tile.row}_{attn_kv_tile.col}",
-        g.dh,
-        v_kv_head_style=not two_kv,
-        pkt_id=_X_FROM_ATTN,
-        of_s=of_g_s,
-        two_kv_heads=two_kv,
-        rtp_addr=rtp["l_kv"],
-    )
-    build_attn_qk(
-        attn_qk_tile,
-        "attn_qk",
-        f"RTP_L_attn_qk_core_{attn_qk_tile.row}_{attn_qk_tile.col}",
-        g.dh,
-        k_kv_head_style=not two_kv,
-        of_s=of_g_s,
-        q_fifo=q_of_g,
-        rtp_addr=rtp["l_qk"],
-        two_kv_heads=two_kv,
-    )
-    # A sliding-window round covers every KV head, so its k and v rows hold
-    # them all.
+    build_attn_kv(attn_kv_tile, "attn_kv", "l_kv", g.dh, of_g_s, two_kv)
+    build_attn_qk(attn_qk_tile, "attn_qk", "l_qk", g.dh, of_g_s, q_of_g, two_kv)
     swa_qk_tile = CT[2][2]
     swa_kv_tile = CT[3][2]
     of_swa_s = ObjectFifo(attn_s_ty, name="swa_attn_s", delegate_tile=swa_kv_tile)
-    build_attn_kv(
-        swa_kv_tile,
-        "swa_attn_kv",
-        f"RTP_L_swa_attn_kv_core_{swa_kv_tile.row}_{swa_kv_tile.col}",
-        g.swa_dh,
-        v_kv_head_style=True,
-        pkt_id=_X_FROM_ATTN,
-        of_s=of_swa_s,
-        two_kv_heads=False,
-        rtp_addr=rtp["swa_l_kv"],
-    )
+    build_attn_kv(swa_kv_tile, "swa_attn_kv", "swa_l_kv", g.swa_dh, of_swa_s, False)
     build_attn_qk(
-        swa_qk_tile,
-        "swa_attn_qk",
-        f"RTP_L_swa_attn_qk_core_{swa_qk_tile.row}_{swa_qk_tile.col}",
-        g.swa_dh,
-        k_kv_head_style=True,
-        of_s=of_swa_s,
-        q_fifo=q_of_swa,
-        rtp_addr=rtp["swa_l_qk"],
-        two_kv_heads=False,
+        swa_qk_tile, "swa_attn_qk", "swa_l_qk", g.swa_dh, of_swa_s, q_of_swa, False
     )
 
     # --- The attention memtile, MT[2]: k, v, swa_k and swa_v each in whole
@@ -1945,34 +1566,6 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     amt_name = f"{amt.row}_{amt.col}"
     k_row = NUM_KV * g.dh
     sk_row = NUM_KV * g.swa_dh
-    k_mem_ty = np.ndarray[(LK, k_row), bf]
-    sk_mem_ty = np.ndarray[(LK, sk_row), bf]
-    amt_bufs = {}
-    for key, ty in (
-        ("k", k_mem_ty),
-        ("v", k_mem_ty),
-        ("swa_k", sk_mem_ty),
-        ("swa_v", sk_mem_ty),
-    ):
-        for i in (0, 1):
-            amt_bufs[key, i] = Buffer(
-                type=ty, name=f"{key}_mem_buffer_{i}_{amt_name}", tile=amt
-            )
-    amt_locks = dict(
-        zip(
-            ("k", "v", "swa_k", "swa_v"),
-            (
-                mt_locks(amt, pairs)
-                for pairs in (
-                    [(0, 2), (1, 0)],
-                    [(3, 2), (4, 0)],
-                    [(5, 2), (6, 0)],
-                    [(7, 2), (8, 0)],
-                )
-            ),
-        )
-    )
-    # A kernel reads kv_head_per_round heads a round: all of them.
     k_order = [(k_row // 8, 8), (16, k_row), (8, 1)]
     if not two_kv:
         v_order = [(LK // 8, LK // 2 * k_row), (k_row // 8, 8), (8, k_row), (8, 1)]
@@ -1981,68 +1574,79 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     sk_order = [(sk_row // 8, 8), (16, sk_row), (8, 1)]
     sv_order = [(LK // 8, LK // 2 * sk_row), (sk_row // 8, 8), (8, sk_row), (8, 1)]
     amt_chans = []
-    for ch, (key, order, length) in enumerate(
+    for ch, (key, row, order, lock_ids) in enumerate(
         (
-            ("k", k_order, k_row * LK),
-            ("v", v_order, k_row * LK),
-            ("swa_k", sk_order, sk_row * LK),
-            ("swa_v", sv_order, sk_row * LK),
+            ("k", k_row, k_order, (0, 1)),
+            ("v", k_row, v_order, (3, 4)),
+            ("swa_k", sk_row, sk_order, (5, 6)),
+            ("swa_v", sk_row, sv_order, (7, 8)),
         )
     ):
-        b0, b1 = amt_bufs[key, 0], amt_bufs[key, 1]
-        prod, cons = amt_locks[key]
+        b0, b1 = (
+            Buffer(
+                type=np.ndarray[(LK, row), bf],
+                name=f"{key}_mem_buffer_{i}_{amt_name}",
+                tile=amt,
+            )
+            for i in (0, 1)
+        )
+        prod, cons = add_locks(amt, [(lock_ids[0], 2), (lock_ids[1], 0)])
         amt_chans += [
             DmaChannel(DMAChannelDir.S2MM, ch, _ping_pong(b0, b1, prod, cons)),
             DmaChannel(
                 DMAChannelDir.MM2S,
                 ch,
                 _ping_pong(
-                    b0, b1, cons, prod, offset=0, length=length, dimensions=order
+                    b0,
+                    b1,
+                    cons,
+                    prod,
+                    length=LK * row,
+                    sizes=[size for size, _ in order],
+                    strides=[stride for _, stride in order],
                 ),
             ),
         ]
     rt.add_tile_dma(TileDma(amt, amt_chans))
 
-    # Flows route in the order they are added, and long flows need to go
-    # first. A shim channel that carries two legs names its symbol on its
-    # first flow.
-    rt.add_flow(
-        PacketFlow(
-            _ShimPkt.to_rms,
-            IT[3],
-            rms_tile,
-            src_channel=0,
-            dst_channel=0,
-            keep_pkt_header=False,
-            shim_symbol="send_x",
-        )
-    )
-    rt.add_flow(
-        PacketFlow(
-            _ShimPkt.to_rms,
-            IT[3],
-            rms_tile,
-            src_channel=1,
-            dst_channel=1,
-            keep_pkt_header=False,
-            shim_symbol="send_rms",
-        )
-    )
-    rt.add_flow(
-        PacketFlow(
-            _ShimPkt.to_rope,
-            IT[3],
-            rope_tile,
-            src_channel=0,
-            dst_channel=1,
-            keep_pkt_header=False,
-            shim_symbol="send_rope_rms",
-        )
+    # The router places flows in the order the design adds them. Long flows
+    # go first. The sequence addresses a shim channel by the shim symbol of
+    # its first flow.
+    _connect(rt, IT[3], 0, rms_tile, 0, pkt_id=_ShimPkt.to_rms, shim_symbol="send_x")
+    _connect(rt, IT[3], 1, rms_tile, 1, pkt_id=_ShimPkt.to_rms, shim_symbol="send_rms")
+    _connect(
+        rt, IT[3], 0, rope_tile, 1, pkt_id=_ShimPkt.to_rope, shim_symbol="send_rope_rms"
     )
     _connect(rt, IT[3], 1, swa_rope_tile, 1, pkt_id=_ShimPkt.to_rope)
     _connect(rt, rms_tile, 0, proj_main_mt, 3, pkt_id=_X_FROM_RMS)
 
-    proj_route()
+    # The weights from the shim into each memtile, halves on S2MM 4 and 5.
+    for mtid in PROJ_COLS:
+        for ch in (0, 1):
+            _connect(
+                rt, IT[mtid], ch, MT[mtid], 4 + ch, shim_symbol=f"proj_w{ch}_{mtid}"
+            )
+    # The memtile's MM2S j to S2MM 1 of its column's core in row j.
+    for col in PROJ_COLS:
+        for j in range(4):
+            _connect(rt, MT[col], j, CT[j][col], 1)
+    # x from MT[1]'s MM2S 4 to every projection core's S2MM 0.
+    for col in PROJ_COLS:
+        for j in range(4):
+            _connect(rt, proj_main_mt, 4, CT[j][col], 0)
+    # y from each group's sending cores to its memtile. The first keeps the
+    # packet header, which carries the consumer's id to MT[1].
+    pkts = [_ProjPkt.to_swa_rope, _ProjPkt.to_rope, _ProjPkt.to_rms, _ProjPkt.to_glu]
+    gather_mts = [MT[0], MT[6]]
+    for gather_mt, send_tiles in zip(gather_mts, proj_send_tiles):
+        for j, send_t in enumerate(send_tiles):
+            for pk in pkts:
+                _connect(rt, send_t, 0, gather_mt, j, pkt_id=pk, keep_pkt_header=j == 0)
+    for ch, gather_mt in enumerate(gather_mts):
+        for pk in pkts:
+            _connect(
+                rt, gather_mt, 4, proj_main_mt, ch, pkt_id=pk, keep_pkt_header=ch == 0
+            )
 
     for dst, pk in (
         (glu_tile, _ProjPkt.to_glu),
@@ -2053,41 +1657,16 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         _connect(rt, proj_main_mt, 5, dst, 0, pkt_id=pk)
 
     # This token's k and v, out to the KV cache.
-    rt.add_flow(
-        Flow(rope_tile, IT[2], src_channel=1, dst_channel=0, shim_symbol="recv_k")
-    )
-    rt.add_flow(
-        Flow(swa_rope_tile, IT[2], src_channel=1, dst_channel=1, shim_symbol="recv_v")
-    )
+    _connect(rt, rope_tile, 1, IT[2], 0, shim_symbol="recv_k")
+    _connect(rt, swa_rope_tile, 1, IT[2], 1, shim_symbol="recv_v")
     _connect(rt, attn_kv_tile, 0, proj_main_mt, 3, pkt_id=_X_FROM_ATTN)
     _connect(rt, swa_kv_tile, 0, proj_main_mt, 3, pkt_id=_X_FROM_ATTN)
     _connect(rt, glu_tile, 0, proj_main_mt, 3, pkt_id=_X_FROM_GLU)
 
-    # The KV cache into MT[2]: packet 12 to the global buffers, 13 to the
-    # sliding-window ones.
-    rt.add_flow(
-        PacketFlow(
-            _KV_PKT_GLOBAL,
-            IT[2],
-            amt,
-            src_channel=0,
-            dst_channel=0,
-            keep_pkt_header=False,
-            shim_symbol="move_k",
-        )
-    )
+    # The KV cache into MT[2].
+    _connect(rt, IT[2], 0, amt, 0, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_k")
     _connect(rt, IT[2], 0, amt, 2, pkt_id=_KV_PKT_SWA)
-    rt.add_flow(
-        PacketFlow(
-            _KV_PKT_GLOBAL,
-            IT[2],
-            amt,
-            src_channel=1,
-            dst_channel=1,
-            keep_pkt_header=False,
-            shim_symbol="move_v",
-        )
-    )
+    _connect(rt, IT[2], 1, amt, 1, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_v")
     _connect(rt, IT[2], 1, amt, 3, pkt_id=_KV_PKT_SWA)
     _connect(rt, amt, 0, attn_qk_tile, 1)
     _connect(rt, amt, 1, attn_kv_tile, 1)
@@ -2095,24 +1674,14 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     _connect(rt, amt, 3, swa_kv_tile, 1)
 
     # The per-layer-input path.
-    rt.add_flow(
-        Flow(IT[4], ple_tile, src_channel=0, dst_channel=0, shim_symbol="pli_rope_rms")
-    )
-    rt.add_flow(
-        Flow(IT[4], ple_tile, src_channel=1, dst_channel=1, shim_symbol="pli_down")
-    )
+    _connect(rt, IT[4], 0, ple_tile, 0, shim_symbol="pli_rope_rms")
+    _connect(rt, IT[4], 1, ple_tile, 1, shim_symbol="pli_down")
     _connect(rt, ple_tile, 1, plm_tile, 0)
-    rt.add_flow(
-        Flow(IT[5], gle_tile, src_channel=0, dst_channel=1, shim_symbol="pli_gate")
-    )
+    _connect(rt, IT[5], 0, gle_tile, 1, shim_symbol="pli_gate")
     _connect(rt, gle_tile, 1, plm_tile, 1)
     _connect(rt, plm_tile, 0, plu_tile, 0)
-    rt.add_flow(
-        Flow(IT[5], plu_tile, src_channel=1, dst_channel=1, shim_symbol="pli_up")
-    )
+    _connect(rt, IT[5], 1, plu_tile, 1, shim_symbol="pli_up")
     # The layer output, out to x.
-    rt.add_flow(
-        Flow(plu_tile, IT[3], src_channel=0, dst_channel=0, shim_symbol="recv_y")
-    )
+    _connect(rt, plu_tile, 0, IT[3], 0, shim_symbol="recv_y")
 
     return Program(dev, rt, workers=workers).resolve_program()
