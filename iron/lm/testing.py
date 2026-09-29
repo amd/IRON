@@ -181,11 +181,12 @@ def check_deep_decode(runner, model, position: int, bound: float, *, record):
         rows[n:position] = np.resize(rows[:n], (position - n, *rows.shape[1:]))
         version.write(cache, rows)
         cache.host = rows  # the reference's, written in place as the device's
-    x = model.embedding[[token]]
-    values = dict(chunk=position // runner.config.prefill_chunk, rows=1)
+    # A decode step takes the token; the device gathers its embedding row.
+    values = dict(token=token, position=position, chunk=0, rows=1)
     try:
-        got = model(x, **values, position=position).numpy()
-        expected = model.reference(x, **values, position=position)
+        got, _ = model(**values)
+        got = got.numpy()
+        expected, _ = model.reference(**values)
     finally:
         for cache in caches:
             cache.host = None
