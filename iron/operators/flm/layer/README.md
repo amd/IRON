@@ -5,8 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # `iron.operators.flm.DecodeLayer`
 
-One Gemma 4 decode layer for one token, on the whole NPU2 array. A port of
-FastFlowLM's fused decode layer. The kernels come from mlir-aie's
+The operator runs one Gemma 4 decode layer for one token on the whole NPU2
+array. It reproduces FastFlowLM's fused decode layer and its runtime sequence,
+so FastFlowLM's engine can drive it. The kernels come from mlir-aie's
 `flm_decode_*` factories.
 
 ```python
@@ -50,23 +51,10 @@ argument spec gives upper bounds on their sizes.
 | `proj` | the q4nx weights of the q, k, v, o, gate and up, and down projections, then the bf16 weights of the three per-layer-input projections. A skip layer has no k or v weights. |
 | `rms` | the four RMS norm weights |
 | `rope_rms` | the RoPE weights (`3 * head_dim`), then the token's per-layer input, its norm weight and `model_dim + 32` values for the up projection |
-| `kv` | the K cache, then the V cache. A layer that is not a skip layer writes this token's k and v at row `context_len`, modulo 512 on a sliding-window layer. |
+| `kv` | the K cache, then the V cache. Every layer except a skip layer writes this token's k and v at row `context_len`, modulo 512 on a sliding-window layer. |
 
 ## RTPs
 
-The sequence writes the layer type into RTPs at fixed addresses,
-FastFlowLM's address book (`RTP_ADDRESSES` in `design.py`). The design pins
-every RTP buffer at its address. The allocator places four of them elsewhere
-when they are not pinned.
-
-The projection, RMS and GLU cores acquire a lock before they read their RTPs.
-The sequence sets that lock after it writes them, on every dispatch. The
-RoPE and attention cores read their RTPs only after data arrives that the
-projection cores send, so no core reads an RTP before the dispatch writes it.
-
-## Tests
-
-`test.py` builds every configuration and checks the placed RTP addresses.
-It checks that the four layer types of a model configure the device
-identically, and runs the four sequences back to back on one xclbin with
-random inputs. It checks no output value: that needs the engine's weights.
+The sequence writes the layer type into RTPs at FastFlowLM's fixed
+addresses, `RTP_ADDRESSES` in `design.py`. The design pins every RTP buffer
+at its address.
