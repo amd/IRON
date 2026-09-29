@@ -407,6 +407,7 @@ class InstsBinArtifact(_MLIRInputMixin, CompilationArtifact):
 class DispatchLibArtifact(_MLIRInputMixin, CompilationArtifact):
     """A host library that generates an operator's instruction stream per dispatch.
 
+    It serves a design whose runtime sequence takes scalars.
     aiecc translates the runtime sequence to C++. The library runs that C++
     with the scalars of each dispatch.
     """
