@@ -13,16 +13,13 @@ from iron.operators.flm.lm_head.design import GROUP, K_TILE, M_TILE, grid
 from iron.operators.flm.lm_head.op import LMHead
 from iron.operators.flm.lm_head.reference import dequantize, reference
 
-# A value the operator cannot produce with the caps below, so an output it
-# never writes shows up.
+# The initial value of y. No logit of the test inputs reaches it, so an
+# unwritten output fails the check.
 SENTINEL = 99.0
 
-# The projection narrows each 32-column dot product and the logits to bf16:
-# measured at most 1.4% of the largest logit.
+# Error bounds from README.md's Numerics section. PROJECTION_ERROR scales
+# with the largest logit. The softcap scales TANH_ERROR.
 PROJECTION_ERROR = 0.025
-
-# AIE2P's tanh approximation errs by up to 0.038 absolute (mlir-aie's
-# tanh contract). The softcap scales that error by the cap.
 TANH_ERROR = 0.04
 
 GEMMA4_SOFTCAP = 30.0

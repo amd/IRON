@@ -5,8 +5,8 @@ SPDX-License-Identifier: Apache-2.0
 
 # `iron.operators.flm.LMHead`
 
-Gemma 4's final-logits projection against a q4nx vocabulary, with a tanh
-softcap. A port of FastFlowLM's lm_head overlay.
+Gemma 4's softcapped logits from a q4nx vocabulary, with the RMS norm folded
+in.
 
 ```python
 from iron.operators.flm import LMHead
@@ -25,8 +25,9 @@ vocabulary as q4nx blocks of 32 out-features by 256 in-features, in the order
 
 Against the float64 reference in `reference.py`:
 
-- The projection narrows each 32-column dot product and the logits to bf16.
-  Its error measured at most 1.4% of the largest logit.
-- AIE2P's `tanh` approximation errs by up to 0.038 absolute, near 0.5. With
-  Gemma 4's cap of 30 that is up to about 1.1 on a logit. FastFlowLM's kernel
-  computes the softcap the same way.
+- The cores normalize the token in bf16. They narrow each 32-column dot
+  product and the logits to bf16. On the test inputs, the error reaches 1.4%
+  of the largest logit.
+- AIE2P's `tanh` approximation errs by up to 0.038 absolute, near 0.5. The
+  softcap multiplies that error by the cap: up to about 1.1 at Gemma 4's cap of
+  30. FastFlowLM's kernel computes the softcap the same way.

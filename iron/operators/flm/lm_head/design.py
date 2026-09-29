@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Final-logits projection against a q4nx vocabulary.
+"""Softcapped logits from a q4nx vocabulary.
 
-One core owns one 32-out-feature tile at a time and streams the vocabulary past
-it: the token is RMS-normalized once on arrival, then every weight block that
-lands accumulates into the tile, and a tanh softcap writes the logits out.
+Each core computes M_TILE out-features per round. The core RMS-normalizes the
+token once. Per round, it accumulates one weight block per K_TILE in-features
+and applies the tanh softcap to the sums.
 """
 
 import struct
@@ -21,7 +21,6 @@ from aie.iron import (
     Runtime,
     TaskGroup,
     Worker,
-    ceildiv,
 )
 from aie.iron.controlflow import range_
 from aie.iron.device import AnyComputeTile, Tile
@@ -32,20 +31,19 @@ from iron.common.device_utils import call_factory
 
 # q4nx block: 32 out-features x 256 in-features, 32 weights per scale and min.
 M_TILE, K_TILE, GROUP = 32, 256, 32
-BITS_PER_WEIGHT = 5  # a 4-bit code plus a shared 6-bit scale and min per group
+BITS_PER_WEIGHT = 5  # a 4-bit code, plus a bf16 scale and min per GROUP weights
 BLOCK_BYTES = M_TILE * K_TILE * BITS_PER_WEIGHT // 8
 
-# Words of the int32 RTP bank. One holds the softcap; the rest pad it to the
-# bank granularity the RTP write addresses.
+# Words of the int32 RTP buffer. Word 0 holds the softcap. The other words pad
+# the buffer to the granularity of the RTP write addresses.
 RTP_WORDS = 32
 
-# A shim tile allows 16 live BDs. Each round's transfers go in one TaskGroup
-# finished DEPTH rounds later, so the bd-id allocator rotates instead of
-# clobbering an in-flight BD.
+# A shim tile holds 16 BDs. The sequence finishes each round's TaskGroup DEPTH
+# rounds later to free its BDs for the bd-id allocator.
 DEPTH = 2
 
-# The core's stack: b_group_sums scales with dim, so the 1024-byte device
-# default is not enough at either Gemma 4 size.
+# Core stack bytes. The kernel's b_group_sums array grows with dim. At both
+# Gemma 4 sizes it overflows the 1024-byte default.
 STACK_SIZE = 10 * 1024
 
 
@@ -68,8 +66,21 @@ def vocab_per_round(dev) -> int:
     return cols * rows * M_TILE
 
 
+def check_shape(dev, dim, vocab):
+    """Reject a device or shape the design does not support."""
+    if dev.arch != AIEArch.AIE2p:
+        raise NotImplementedError("the q4nx_lm_head kernel is AIE2P only")
+    if dim % K_TILE:
+        raise ValueError(f"dim ({dim}) must be a multiple of {K_TILE}")
+    if vocab % vocab_per_round(dev):
+        raise ValueError(
+            f"vocab ({vocab}) must be a multiple of {vocab_per_round(dev)}, "
+            "the out-features one round produces"
+        )
+
+
 def lm_head_kernel(dim: int, device=None):
-    """The flm_q4nx_lm_head build this design's cores link."""
+    """The flm_q4nx_lm_head kernel build that the cores link."""
     return call_factory(
         kernels.flm_q4nx_lm_head,
         device=device,
@@ -81,33 +92,24 @@ def lm_head_kernel(dim: int, device=None):
 
 
 def lm_head(dev, dim, vocab, softcap, trace_size=0):
-    """dim in-features, vocab out-features, softcap the tanh bound.
+    """Program for :class:`~iron.operators.flm.LMHead`, which documents the arguments.
 
-    X carries the token followed by its RMS weight, so one transfer feeds the
-    norm. W is the q4nx vocabulary, Y the softcapped logits.
+    X holds the token and its RMS weight, so one transfer feeds the norm.
     """
-    if dev.arch != AIEArch.AIE2p:
-        raise NotImplementedError("the q4nx_lm_head kernel is AIE2P only")
-    if dim % K_TILE:
-        raise ValueError(f"dim ({dim}) must be a multiple of {K_TILE}")
-    if vocab % vocab_per_round(dev):
-        raise ValueError(
-            f"vocab ({vocab}) must be a multiple of {vocab_per_round(dev)}, "
-            "the out-features one round produces"
-        )
+    check_shape(dev, dim, vocab)
 
     COLS, ROWS = grid(dev)
-    K_BLKS = ceildiv(dim, K_TILE)
+    K_BLKS = dim // K_TILE
     ROUNDS = vocab // vocab_per_round(dev)
 
     bf16 = np.dtype[bfloat16]
 
-    # One packed q4nx block, counted in bf16 elements: that is the unit the w
-    # fifos move, and the kernel reinterprets it.
+    # The w fifos move q4nx blocks as bf16 elements. The kernel reinterprets
+    # the bytes.
     w_blk = BLOCK_BYTES // np.dtype(bfloat16).itemsize
 
-    # ObjectFifo element types. The w and y column objects carry one row per
-    # core and are split or joined a row at a time.
+    # ObjectFifo element types. A w or y column object holds one block per core
+    # row. The split and the join separate or combine the blocks.
     x_ty = np.ndarray[(dim, 2), bf16]  # token and its rms weight
     w_col_ty = np.ndarray[(ROWS, w_blk), bf16]
     w_blk_ty = np.ndarray[(w_blk,), bf16]
@@ -127,9 +129,8 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0):
     )
     k_epi = kernel_object.bind("q4nx_lm_head_epilogue", [y_blk_ty, y_acc_ty, rtp_ty])
 
-    # Only the shim tiles are pinned: the host addresses them by column for the
-    # DMAs and the RTP writes. The placer sites the rest, held to the matching
-    # column by the fifo routing.
+    # The host addresses the DMAs by column, so the design pins the shim tiles.
+    # The placer places the other tiles.
     IT = [Tile(j, 0) for j in range(COLS)]
 
     def core_fn(x_in, w_in, y_out, k_rms, k_zero, k_block, k_epi, y_acc, sums, rtp):
@@ -146,7 +147,6 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0):
             y_out.release(1)
         x_in.release(1)
 
-    # Host buffers. The order (y, w, x) is the operator's argument order.
     y_l3_ty = np.ndarray[(vocab,), bf16]
     w_l3_ty = np.ndarray[
         (packed_bytes(vocab * dim) // np.dtype(np.uint32).itemsize,),
@@ -157,8 +157,7 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0):
     of_x = ObjectFifo(x_ty, name="x")
     x_prod = of_x.prod(tile=IT[0])
 
-    workers = []
-    w_prods, y_conses, rtps = [], [], []
+    workers, w_prods, y_conses, rtps = [], [], [], []
     for j in range(COLS):
         of_w = ObjectFifo(w_col_ty, name=f"w{j}")
         w_prods.append(of_w.prod(tile=IT[j]))
@@ -205,16 +204,16 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0):
     W_PER_COL = packed_bytes(M_PER_COL * dim) // np.dtype(np.uint32).itemsize
     W_PER_ROUND = W_PER_COL * COLS
 
-    # npu_write_rtp writes i32, so the softcap travels as its float bit pattern
-    # and the kernel reads it back as a float.
+    # npu_write_rtp writes i32 words. The softcap travels as its f32 bit
+    # pattern.
     softcap_bits = struct.unpack("<i", struct.pack("<f", float(softcap)))[0]
 
     def sequence(Y, W, X, x_prod, w_prods, y_conses, rtps):
         for rtp in rtps:
             rtp[0] = softcap_bits
 
-        # One broadcast of the token to every core, with no completion token.
-        # Its BD is retired at the tail.
+        # The token goes to every core in one broadcast, without a completion
+        # token. x_task.free() at the end frees its BD.
         x_task = x_prod.fill(
             X,
             sizes=[1, 1, 1, 2 * dim],
@@ -238,8 +237,8 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0):
                     wait=True,
                     group=tg,
                 )
-                # A contiguous slice. A strided descriptor lands weight rows at
-                # the wrong on-chip positions.
+                # A strided descriptor lands weight rows at the wrong on-chip
+                # positions, so each column reads one contiguous slice.
                 w_prods[col].fill(
                     W,
                     sizes=[1, 1, 1, W_PER_COL],
