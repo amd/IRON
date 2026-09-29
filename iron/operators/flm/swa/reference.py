@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CPU reference for :class:`iron.operators.flm.PrefillSlidingAttention`, in float32.
-
-The device rounds the scores, the probabilities and the output to bfloat16, so
-the two agree to a tolerance, not bit for bit.
-"""
+"""CPU reference for :class:`iron.operators.flm.PrefillSlidingAttention`, in float32."""
 
 import numpy as np
 

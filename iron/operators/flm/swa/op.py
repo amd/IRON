@@ -66,10 +66,12 @@ class PrefillSlidingAttention(MLIROperator):
         )
 
     def get_dispatch_params(self):
-        """``L_begin`` and ``L_end`` bound the query tokens, and ``max_l`` is
-        the KV cache's row count, which sets where V starts. ``L_begin`` and
-        ``L_end`` must be multiples of 128, and ``max_l`` at most
-        ``max_context``."""
+        """The token range and the KV cache's row count, set per call.
+
+        ``L_begin`` and ``L_end`` bound the query tokens. Both are multiples
+        of 128. ``max_l`` is the KV cache's row count, at most
+        ``max_context``. It sets where V starts.
+        """
         return {"L_begin": np.int32, "L_end": np.int32, "max_l": np.int32}
 
     def get_mlir_artifact(self):
@@ -92,7 +94,7 @@ class PrefillSlidingAttention(MLIROperator):
         return [KernelObjectArtifact.from_extern(swa_kernel())]
 
     def get_arg_spec(self):
-        # The order the design's runtime sequence takes: o, q, kv.
+        # The runtime sequence's order: o, q, kv.
         rows = self.max_context * DH
         return [
             AIERuntimeArgSpec("out", (rows * self.num_heads,), dtype=bfloat16),
