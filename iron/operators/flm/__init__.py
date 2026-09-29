@@ -21,6 +21,8 @@ _OPERATOR_MODULES = {
     "PrefillAttention": "prefill_attn",
     # Sliding-window causal prefill attention, one build for every token range.
     "PrefillSlidingAttention": "prefill_attn",
+    # Softcapped logits straight from the q4nx vocabulary.
+    "LMHead": "lm_head",
     # The shipped overlay itself, downloaded as a pinned binary. NPU2 only;
     # exists so the port can be measured against what it was ported from.
     "MMPrebuilt": "mm_prebuilt",
