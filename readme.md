@@ -11,6 +11,16 @@
 | test_llama_3_2_1b[llama_3.2_1b_prompt_1024_tokens_40] | ✅ | - | - | - |
 | test_llama_3_2_1b[llama_3.2_1b_prompt_13_tokens_1] | ✅ | - | - | - |
 | test_llama_3_2_1b[llama_3.2_1b_prompt_13_tokens_40] | ✅ | - | - | - |
+| test_llama_3_2_1b_accuracy[iter0] | ✅ | - | - | - |
+| test_llama_3_2_1b_accuracy[iter1] | ✅ | - | - | - |
+| test_llama_3_2_1b_accuracy[iter2] | ✅ | - | - | - |
+| test_llama_3_2_1b_accuracy[iter3] | ✅ | - | - | - |
+| test_llama_3_2_1b_accuracy[iter4] | ✅ | - | - | - |
+| test_llama_3_2_1b_determinism[iter0] | ✅ | - | - | - |
+| test_llama_3_2_1b_determinism[iter1] | ✅ | - | - | - |
+| test_llama_3_2_1b_determinism[iter2] | ✅ | - | - | - |
+| test_llama_3_2_1b_determinism[iter3] | ✅ | - | - | - |
+| test_llama_3_2_1b_determinism[iter4] | ✅ | - | - | - |
 
 </details>
 
