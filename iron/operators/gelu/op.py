@@ -15,6 +15,7 @@ class GELU(ChanneledUnaryOperator):
 
     callback_fn: ClassVar[str] = "my_gelu"
     tile_cap: ClassVar[int] = 8192
+    stack_size: ClassVar[int] = 2048
 
     def _kernel(self):
         return activation.gelu_sized(self._line_size)

@@ -44,6 +44,7 @@ class ChanneledUnaryOperator(MLIROperator):
 
     callback_fn: ClassVar[str]
     tile_cap: ClassVar[int] = 4096
+    stack_size: ClassVar[int | None] = None
 
     def __post_init__(self) -> None:
         max_multiple = self.num_aie_columns * self.tile_size
@@ -93,7 +94,11 @@ class ChanneledUnaryOperator(MLIROperator):
         raise NotImplementedError
 
     def get_mlir_artifact(self) -> PythonGeneratedMLIRArtifact:
-        callback_args = self._mlir_callback_args() + [self._kernel(), self.tile_cap]
+        callback_args = self._mlir_callback_args() + [
+            self._kernel(),
+            self.tile_cap,
+            self.stack_size,
+        ]
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
             DesignGenerator(

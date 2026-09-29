@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+from aie.utils.verify import Tolerance
 
 from iron.operators.mha.op import MHA
 from iron.operators.mha.reference import generate_golden_reference
@@ -65,23 +66,15 @@ def test_mha(seq_len, dim, num_heads, num_pipelines, num_kv_heads, aie_context):
     output_buffers = {"O": golden_ref["O"].flatten()}
 
     errors, latency_us, bandwidth_gbps = run_test(
-        operator, input_buffers, output_buffers, rel_tol=4.0e-2, abs_tol=1.5e-1
+        operator,
+        input_buffers,
+        output_buffers,
+        tolerance=Tolerance.relative(4.0e-2, 1.5e-1, max_mismatch_frac=0.005),
     )
-
-    error_threshold = 0.005
-    max_acceptable_errors = int(seq_len * dim * num_heads * error_threshold)
 
     print(f"\nLatency (us): {latency_us:.1f}")
     print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
-    print(
-        "({} errors out of {} max allowable)".format(
-            len(errors["O"]), max_acceptable_errors
-        )
-    )
-
-    assert (
-        len(errors["O"]) <= max_acceptable_errors
-    ), f"Test failed with {len(errors['O'])} errors (max allowable: {max_acceptable_errors})"
+    assert not errors, f"Test failed with errors: {errors}"
 
 
 @pytest.mark.parametrize(

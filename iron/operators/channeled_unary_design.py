@@ -19,6 +19,7 @@ def channeled_unary_design(
     trace_size,
     kernel_fn,
     tile_cap=4096,
+    stack_size=None,
 ):
     xfr_dtype = bfloat16
     line_size = tile_cap if tile_size > tile_cap else tile_size
@@ -70,6 +71,7 @@ def channeled_unary_design(
                 of_outs[i * num_channels + j].prod(),
                 kernel_fn,
             ],
+            stack_size=stack_size,
         )
         for i in range(num_columns)
         for j in range(num_channels)

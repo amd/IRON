@@ -79,10 +79,9 @@ B_DEPTH = 2  # B fifo depth; also the core-body unroll
 A_DEPTH = 2
 # L1 bytes reserved for the core's stack, which the buffer budget below must
 # not hand out. The device default is 1024 and aiecc measures what a build
-# actually needs: 1088 on NPU1, which is the activation LUT path plus the
-# epilogue's clamp vectors, so the default fails the build outright. 2048
-# leaves headroom; aiecc names the exact requirement if a change outgrows it.
-STACK_SIZE = 2048
+# actually needs: up to 3296 on NPU1 with the fused tile kernel, so the
+# default fails the build outright. Keep the L1 budget below in sync.
+STACK_SIZE = 0xD00
 # L1 bytes the activation LUT tables occupy, which the buffer budget must not
 # hand out either. On AIE2 the activations come from lut_based_ops, whose
 # tables are bank-pinned in local memory; AIE2P computes its activations and
