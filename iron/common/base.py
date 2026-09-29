@@ -192,6 +192,12 @@ class MLIROperator(AIEOperatorBase):
                 f"{type(self).__name__} generates its instruction stream per "
                 "dispatch and has no .bin to sequence"
             )
+        return self._artifacts(prefix)
+
+    def _artifacts(
+        self, prefix: str = ""
+    ) -> tuple[XclbinArtifact, InstsBinArtifact | DispatchLibArtifact]:
+        """The xclbin, and the ``.bin`` or the library that generates the stream."""
         operator_name = prefix + self.name
         mlir_artifact = self.get_mlir_artifact()
         kernel_deps = self.get_kernel_artifacts()
@@ -200,36 +206,28 @@ class MLIROperator(AIEOperatorBase):
             mlir_input=mlir_artifact,
             dependencies=[mlir_artifact] + kernel_deps,
         )
-        insts_artifact = InstsBinArtifact(
-            f"{operator_name}.bin",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact],
-        )
-        return xclbin_artifact, insts_artifact
-
-    def set_up_artifacts(self) -> None:
         dispatch_params = self.get_dispatch_params()
         if not dispatch_params:
-            xclbin_artifact, insts_artifact = self.get_artifacts()
-            self.xclbin_artifact = xclbin_artifact
-            self.insts_artifact = insts_artifact
-            self.add_artifacts([xclbin_artifact, insts_artifact])
-            return
-        mlir_artifact = self.get_mlir_artifact()
-        kernel_deps = self.get_kernel_artifacts()
-        self.xclbin_artifact = XclbinArtifact(
-            f"{self.name}.xclbin",
-            mlir_input=mlir_artifact,
-            dependencies=[mlir_artifact] + kernel_deps,
-        )
-        self.dispatch_artifact = DispatchLibArtifact(
-            f"{self.name}{SHARED_LIB_SUFFIX}",
+            return xclbin_artifact, InstsBinArtifact(
+                f"{operator_name}.bin",
+                mlir_input=mlir_artifact,
+                dependencies=[mlir_artifact],
+            )
+        return xclbin_artifact, DispatchLibArtifact(
+            f"{operator_name}{SHARED_LIB_SUFFIX}",
             mlir_input=mlir_artifact,
             # aiecc compiles the cores on the way to the sequence.
             dependencies=[mlir_artifact] + kernel_deps,
             dispatch_params=dispatch_params,
         )
-        self.add_artifacts([self.xclbin_artifact, self.dispatch_artifact])
+
+    def set_up_artifacts(self) -> None:
+        self.xclbin_artifact, stream_artifact = self._artifacts()
+        if isinstance(stream_artifact, DispatchLibArtifact):
+            self.dispatch_artifact = stream_artifact
+        else:
+            self.insts_artifact = stream_artifact
+        self.add_artifacts([self.xclbin_artifact, stream_artifact])
 
     def get_callable(self) -> Callable[..., Any]:
         dispatch_params = self.get_dispatch_params()

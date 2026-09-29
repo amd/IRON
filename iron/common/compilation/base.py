@@ -60,7 +60,8 @@ from aie.utils.compile.utils import (
     prefix_symbols_in_object,
 )
 
-# A private module of mlir-aie: its JIT uses it for DispatchTime[T] designs.
+# compile_dispatch_bridge() is private to mlir-aie's JIT, and mlir-aie can
+# change it without notice.
 from aie.utils.compile.jit._dispatch_compile import compile_dispatch_bridge
 
 # Global Functions
@@ -404,12 +405,10 @@ class InstsBinArtifact(_MLIRInputMixin, CompilationArtifact):
 
 
 class DispatchLibArtifact(_MLIRInputMixin, CompilationArtifact):
-    """A host library that generates the instruction stream of one dispatch.
+    """A host library that generates an operator's instruction stream per dispatch.
 
-    It serves a design whose runtime sequence takes scalars: the scalars can
-    set loop bounds and DMA sizes, so no single stream fits every dispatch.
-    aiecc translates the sequence to C++, and the library runs that C++ with
-    the scalars of each dispatch.
+    aiecc translates the runtime sequence to C++. The library runs that C++
+    with the scalars of each dispatch.
     """
 
     def __init__(
