@@ -49,6 +49,7 @@ TOY = dataclasses.replace(
     head_dim=8,
     hidden_dim=128,
     max_seq_len=16,
+    prefill_chunk=8,
 )
 
 
