@@ -3,12 +3,12 @@
 
 """Causal prefill attention, optionally over a sliding window, on the whole array.
 
-Groups of columns each take one query head per pass. A round covers 128 query
-rows: the cores of a group split them and stream past them every key up to the
-round's last row, or every key inside the window. k and v come from one shim
-tile and reach every core through one memtile. The runtime sequence takes the
-token range and the KV cache's row count at dispatch, so one build serves
-every prompt.
+Groups of columns each take one query head per pass. A round covers ROUND
+query rows. The cores of a group split these rows. Each core receives every key
+up to the round's last row, or every key inside the window. k and v come from
+one shim tile and reach every core through one memtile. The runtime sequence
+takes the token range and the KV cache's row count as dispatch parameters. One
+build therefore serves every prompt.
 
 The two kernels differ in geometry and in their L1 layout. A ``Variant``
 holds what differs.
@@ -53,8 +53,8 @@ from iron.common.device_utils import call_factory
 from iron.operators.flm.dataflow import grid, ping_pong
 
 LK_MT = 128  # key rows per memtile buffer
-# Query rows per round. Each variant's cores per group times its query rows
-# per core make one round.
+# Query rows per round. For each variant, the cores per group times the query
+# rows per core equal ROUND.
 ROUND = 128
 
 # The k/v DMA and the kernel's steps synchronize on these locks of each core.
@@ -80,7 +80,7 @@ def _stage_kv_causal(rt, MT, v):
         for side, tile in (("own", mt), ("left", mt_left))
         for n in (0, 1)
     }
-    # The left pair's locks sit on mt too.
+    # The locks of the left pair sit on mt.
     left_prod = Lock(tile=mt, lock_id=0, init=2)
     left_cons = Lock(tile=mt, lock_id=1, init=0)
     own_prod = Lock(tile=mt, lock_id=7, init=2)
@@ -131,15 +131,16 @@ def _stage_kv_causal(rt, MT, v):
             ],
         )
     )
-    # An empty program, so the placer keeps mt_left and its buffers.
+    # The placer removes a memtile that has no DMA program. The empty program
+    # retains mt_left and its buffers.
     rt.add_tile_dma(TileDma(mt_left, []))
 
 
 def _stage_kv_sliding(rt, MT, v):
     """The k/v memtile stages k and v in one buffer pair: k in the first half, v in the second.
 
-    Each input channel releases one of two counts. The output acquires both,
-    so it reads a buffer once both halves hold data.
+    Each S2MM channel releases one count per buffer. The MM2S channel acquires
+    two counts. It therefore reads a buffer after both halves hold data.
     """
     in_mem_ty = np.ndarray[(LK_MT * 2, v.dh), bf16]
     indims = [(LK_MT // v.lk, v.lk * v.dh), (v.lk, 8), (32, 128), (8, 1)]
@@ -202,22 +203,22 @@ class Variant:
     lq: int  # query rows per core
     lk: int  # key rows per step
     num_cu: int  # column groups, one query head each per pass
-    # The buffer addresses of the FastFlowLM overlay. The stack grows up from
-    # 0 to in_1, the lowest buffer.
+    # The buffer addresses of the FastFlowLM overlay. The stack occupies the
+    # addresses from 0 to in_1, the lowest buffer.
     l1: dict
     # The memtile that splits the q fifos of column pair p.
     q_memtile: Callable[[int], int]
     # The memtile that stages k and v, and its DMA program.
     kv_memtile: int
     stage_kv: Callable
-    # The kernel's attn_blocks reads the window, and the sequence writes the
-    # window into the window_size RTP.
+    # True: the variant takes a window. attn_blocks then takes the window_size
+    # RTP as an argument.
     windowed: bool
     release_q_before_epilogue: bool
 
     @property
     def lq_ct(self):
-        """Query rows per core's q object, two cores' worth."""
+        """Query rows in a core's q object: the rows of both columns of a pair."""
         return 2 * self.lq
 
     @property
@@ -291,9 +292,9 @@ def kernel(variant, device=None):
 
 
 def _no_unroll(iv):
-    """Keep the scf.for that yields iv rolled through Peano's opt.
+    """Disable unrolling of the scf.for that yields iv in Peano's opt.
 
-    Unrolled, the loop repeats the same buffer addresses as call arguments in
+    An unrolled loop repeats the same buffer addresses as call arguments in
     every copy. MLIR drops a malformed annotation without an error: check the
     call count in the core's opted_*.ll.
     """
@@ -307,10 +308,7 @@ def prefill_attn(
 ):
     """Prefill attention over a KV cache of up to max_context rows.
 
-    O and Q hold one row of num_heads heads per query token, from token
-    L_begin on. KV holds all K rows, then all V rows, max_l rows each. A KV
-    row holds num_kv_heads heads. With a window, a query sees the window keys
-    up to itself.
+    The README gives the layout of O, Q and KV.
     """
     v = VARIANTS[variant]
     if v.windowed != (window is not None):
@@ -356,8 +354,8 @@ def prefill_attn(
     k_finalize = k("attn_finalize", [cv_ty, l_bf16_ty])
     k_epilogue = k("attn_epilogue", [o_ty, l_bf16_ty, y_ty, np.int32])
 
-    # Shim row 0, memtile row 1, compute rows from 2. The memtiles need their
-    # type: an untyped tile lowers its DMA to a core tile's aie.mem.
+    # Shim row 0, memtile row 1, compute rows from 2. Each tile needs its type.
+    # The DMA of an untyped tile lowers to a core tile's aie.mem.
     IT = [Tile(j, 0, tile_type=dev.get_tile_type(j, 0)) for j in range(COLS)]
     MT = [Tile(j, 1, tile_type=dev.get_tile_type(j, 1)) for j in range(COLS)]
     CT = [
@@ -377,7 +375,7 @@ def prefill_attn(
             lb, le, ws = rtp[key]
             lb[0] = L_begin
             le[0] = L_end
-            # Without a window, the window reaches back to token 0.
+            # A window of L_end covers every key from token 0.
             ws[0] = L_end if window is None else window
         for key in sorted(go):
             set_lock_value(go[key].op, HEADS // NUM_CU)
@@ -428,7 +426,7 @@ def prefill_attn(
                             )
                         )
                 # dma_bd's length operand is an i32. The product of the i64
-                # sizes does not fit it, so transfer_len gives the length.
+                # sizes does not fit in it. transfer_len sets the length.
                 kv_rows = arith.extsi(T.i64(), arith.divsi(kv_length, _as_i32(128)))
                 kv_head = head // (GQA // NUM_CU)
                 k_off = max_l * ((kv_head // KV_D) * DH * KV_D) + (kv_head % KV_D) * DH
@@ -462,14 +460,16 @@ def prefill_attn(
     # writes the token range and the window into them.
     rtp = {}
     # go orders each core's RTP read after the sequence's RTP write. A core
-    # starts its next pass as soon as a dispatch ends, before the next dispatch
-    # writes the RTPs. The sequence sets go to the number of passes after it
-    # writes the RTPs. A core takes one count before each pass.
+    # starts its next pass when a dispatch ends. The next dispatch writes the
+    # RTPs later.
+    #
+    # The sequence sets go to the number of passes after it writes the RTPs.
+    # A core acquires one count before each pass.
     go = {}
 
-    # o: one fifo per column, joined in memtile m from four cores. Memtile m
-    # takes rows 0 and 1 when m is even and rows 2 and 3 when m is odd, over
-    # columns 2*(m//2) and 2*(m//2)+1.
+    # o: one fifo per memtile m. Memtile m joins the output of four cores:
+    # rows 0 and 1 for an even m, rows 2 and 3 for an odd m, in columns
+    # 2*(m//2) and 2*(m//2)+1.
     o_shim, o_prod = [], {}
     for m in range(COLS):
         of_o = ObjectFifo(o_col_ty, name=f"o{m}", depth=2)
@@ -486,8 +486,9 @@ def prefill_attn(
             o_prod[(base_row + c // 2, 2 * (m // 2) + (c & 0x1))] = sub[c]
 
     # q: the mirror of o. The memtile of each column pair takes two halves on
-    # two channels. Each half splits into two cores' slices, each broadcast to
-    # both columns of the pair. Half 0 feeds rows 0 and 1.
+    # two channels. Each half splits into two slices, one per row. The memtile
+    # broadcasts each slice to both columns of the pair. Half 0 feeds rows 0
+    # and 1.
     q_shim, q_cons = {}, {}
     for p in range(COLS // 2):
         mt_idx = v.q_memtile(p)

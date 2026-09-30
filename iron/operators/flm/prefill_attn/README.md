@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 Causal prefill attention from a KV cache. The two operators reproduce
 FastFlowLM's prefill attention overlays for Gemma 4:
 
-| Operator | Overlay | Head dim | Keys a query at position `p` sees |
+| Operator | Overlay | Head dim | Keys of the query at position `p` |
 |---|---|---|---|
 | `PrefillAttention` | global attention | 512 | `0` to `p` |
 | `PrefillSlidingAttention` | sliding-window attention | 256 | `p - window + 1` to `p` |
@@ -31,9 +31,9 @@ run(o, q, kv)
 
 ## Dispatch parameters
 
-One build serves every token range. The runtime sequence takes three scalars.
-Each call generates the instruction stream for the values of the last
-`set_parameters()`:
+One build serves every token range and every cache length up to `max_context`.
+The runtime sequence takes three scalars. Each call generates the instruction
+stream for the values of the last `set_parameters()` call:
 
 | Parameter | Meaning |
 |---|---|
@@ -41,8 +41,8 @@ Each call generates the instruction stream for the values of the last
 | `L_end` | one past the last query token, a multiple of 128 |
 | `max_l` | rows of the KV cache, at most `max_context` |
 
-`max_context` sizes the buffers in the argument spec. `max_l` sets where V
-starts in the cache, so one build serves a cache of any length up to it.
+`max_context` sets the buffer sizes in the argument spec. `max_l` sets the
+first row of V in the cache.
 
 ## Layout
 
@@ -57,7 +57,7 @@ With `dh` the head dim:
 Query head `h` reads KV head `h // (num_heads // num_kv_heads)`. The operator
 writes `o` only for `L_end - L_begin` rows.
 
-The scores carry no `1/sqrt(dh)` scale. A caller that needs one scales `q`.
+The scores carry no `1/sqrt(dh)` scale. To apply the scale, multiply `q` by it.
 
 ## Numerics
 
