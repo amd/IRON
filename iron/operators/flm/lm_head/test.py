@@ -61,7 +61,11 @@ def _run(op, w, x):
     return y_buf.numpy().astype(np.float64)
 
 
-def _check(dim, vocab, softcap, aie_context, seed=0):
+def _check(dim, vocab, softcap, aie_context, seed=0, tanh_error=True):
+    """Compare the device's logits for seed's inputs with the reference.
+
+    tanh_error adds the tanh approximation's error to the bound.
+    """
     op = LMHead(dim=dim, vocab=vocab, softcap=softcap, context=aie_context)
     op.compile()
     w, x = _inputs(dim, vocab, seed)
@@ -73,7 +77,7 @@ def _check(dim, vocab, softcap, aie_context, seed=0):
     # The logits before the softcap set the projection's error scale.
     uncapped = reference(weights, x64, 1e30)
     bound = PROJECTION_ERROR * np.abs(uncapped).max()
-    if softcap < 1e3:
+    if tanh_error:
         bound += TANH_ERROR * softcap
     error = np.abs(got - expected)
     label = f"dim={dim} vocab={vocab} softcap={softcap}"
@@ -88,7 +92,7 @@ def test_projection_matches_reference(dim, aie_context):
 
     1536 and 2560 are Gemma 4 E2B's and E4B's hidden sizes.
     """
-    _check(dim, 4096, 1000.0, aie_context)
+    _check(dim, 4096, 1000.0, aie_context, tanh_error=False)
 
 
 @requires_aie2p
