@@ -49,6 +49,7 @@ from aie.iron.dataflow import Flow, PacketFlow
 from aie.iron.device import Tile
 
 from iron.common.device_utils import call_factory
+from iron.operators.flm import q4nx
 from iron.operators.flm.dataflow import ping_pong
 
 LAYER_TYPES = ("global", "swa", "global_skip", "swa_skip")
@@ -107,11 +108,8 @@ RTP_SYMBOLS = {
     "swa_l_kv": "RTP_L_swa_attn_kv_core_5_2",
 }
 
-# One q4nx weight block: 32 rows by 256 columns at 5 bits a weight.
-Q4_M, Q4_K = 32, 256
-Q4_BLOCK_BYTES = Q4_M * Q4_K * 5 // 8
-# The q4nx block in bf16 elements, the unit the weight buffers are typed in.
-W_BLOCK = Q4_BLOCK_BYTES // 2
+# One q4nx block in bf16 elements, the unit the weight buffers are typed in.
+W_BLOCK = q4nx.BLOCK_BYTES // 2
 # One bf16 weight block of the per-layer-input projections.
 BF16_W_BLOCK = 32 * 256
 # The projections' input slice. Every projection's input dimension is a
@@ -498,9 +496,9 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
 
         def move_weights(Dout, Din, w_off):
             """The engine's _move_weights: a round is 2 legs to each proj column."""
-            bpr = Din // Q4_K
+            bpr = Din // q4nx.K_TILE
             cores = len(PROJ_COLS) * 4
-            for rnd in range(Dout // Q4_M // cores):
+            for rnd in range(Dout // q4nx.M_TILE // cores):
                 legs = []
                 for ci, col in enumerate(PROJ_COLS):
                     for half in (0, 1):
@@ -1136,7 +1134,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     # sender's y buffers.
     x_slice_ty = np.ndarray[(X_SLICE,), bf]
     linear_w_ty = np.ndarray[(W_BLOCK,), bf]
-    m_pkt_ty = np.ndarray[(2 * Q4_M + 16,), bf]
+    m_pkt_ty = np.ndarray[(2 * q4nx.M_TILE + 16,), bf]
     proj_k = k(
         "proj_main",
         "proj_main",
@@ -1215,7 +1213,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                         Bd(
                             y,
                             offset=14,
-                            length=2 * Q4_M + 2,
+                            length=2 * q4nx.M_TILE + 2,
                             acquires=[Acquire(pk[f"y_cons_{half}_lock"], value=2)],
                             releases=[Release(pk[f"y_prod_{half}_lock"], value=2)],
                             next=nxt,
@@ -1247,7 +1245,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     # MT[1] gathers both groups' y and broadcasts x.
     linear_4w_ty = np.ndarray[(4 * W_BLOCK,), bf]
     WB = W_BLOCK
-    m = Q4_M
+    m = q4nx.M_TILE
 
     def weight_channels(w0, w1, wp0, wp0c0, wp0c1, wp1, wp1c0, wp1c1):
         return {
@@ -1390,7 +1388,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     def build_attn_kv(kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
         r, c = kv_tile.row, kv_tile.col
         NQ = g.num_attn_heads
-        o_repeats = D // (Q4_M * 16)
+        o_repeats = D // (q4nx.M_TILE * 16)
         v_ty = np.ndarray[(LK, dh if two_kv_heads else NUM_KV * dh), bf]
         o_ty = np.ndarray[(dh * NQ,), bf]
         y_ty = np.ndarray[(dh * NQ,), f32]
