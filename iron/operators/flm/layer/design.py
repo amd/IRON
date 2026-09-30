@@ -1613,9 +1613,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     # its first flow.
     _connect(rt, IT[3], 0, rms_tile, 0, pkt_id=_ShimPkt.to_rms, shim_symbol="send_x")
     _connect(rt, IT[3], 1, rms_tile, 1, pkt_id=_ShimPkt.to_rms, shim_symbol="send_rms")
-    _connect(
-        rt, IT[3], 0, rope_tile, 1, pkt_id=_ShimPkt.to_rope, shim_symbol="send_rope_rms"
-    )
+    _connect(rt, IT[3], 0, rope_tile, 1, pkt_id=_ShimPkt.to_rope)
     _connect(rt, IT[3], 1, swa_rope_tile, 1, pkt_id=_ShimPkt.to_rope)
     _connect(rt, rms_tile, 0, proj_main_mt, 3, pkt_id=_X_FROM_RMS)
 
