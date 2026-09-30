@@ -237,41 +237,53 @@ _KV_PKT_SWA = 13
 
 
 def layer_kernels(geometry, device=None):
-    """The flm_decode_* kernels that this design's cores link, by kernel name.
+    """The flm_gemma4_decode_* kernels that this design's cores link, by kernel name.
 
     The global attention kernels depend on the geometry's KV head count.
     """
     two_kv = geometry.num_kv_heads == 2
     qk_handshake = "l_prod_lock" if two_kv else "l_cons_lock"
 
-    def build(factory, locks):
-        return call_factory(factory, device=device, geometry=geometry, **locks)
+    def build(factory, locks, **kwargs):
+        return call_factory(
+            factory, device=device, geometry=geometry, **locks, **kwargs
+        )
 
     attn_qk_locks = {**ATTN_QK_LOCKS, qk_handshake: ATTN_HANDSHAKE_LOCK}
     swa_qk_locks = {**ATTN_QK_LOCKS, "l_cons_lock": ATTN_HANDSHAKE_LOCK}
     return {
-        "rms_residual": build(kernels.flm_decode_rms_residual, RMS_LOCKS),
-        "rope": build(kernels.flm_decode_rope, ROPE_LOCKS),
-        "swa_rope": build(kernels.flm_decode_swa_rope, ROPE_LOCKS),
+        "rms_residual": build(kernels.flm_gemma4_decode_rms_residual, RMS_LOCKS),
+        "rope": build(kernels.flm_gemma4_decode_rope, ROPE_LOCKS),
+        "swa_rope": build(
+            kernels.flm_gemma4_decode_rope, ROPE_LOCKS, sliding_window=True
+        ),
         "proj_layer_embedding": build(
-            kernels.flm_decode_proj_layer_embedding, PLE_LOCKS
+            kernels.flm_gemma4_decode_proj_layer_embedding, PLE_LOCKS
         ),
         "gate_layer_embedding": build(
-            kernels.flm_decode_gate_layer_embedding, GLE_LOCKS
+            kernels.flm_gemma4_decode_gate_layer_embedding, GLE_LOCKS
         ),
-        "per_layer_up": build(kernels.flm_decode_per_layer_up, PLU_LOCKS),
-        "glu": build(kernels.flm_decode_glu, GLU_LOCKS),
-        "proj_main": build(kernels.flm_decode_proj_main, PROJ_LOCKS),
+        "per_layer_up": build(kernels.flm_gemma4_decode_per_layer_up, PLU_LOCKS),
+        "glu": build(kernels.flm_gemma4_decode_glu, GLU_LOCKS),
+        "proj_main": build(kernels.flm_gemma4_decode_proj_main, PROJ_LOCKS),
         "attn_kv": build(
-            (kernels.flm_decode_attn_kv_kvh2 if two_kv else kernels.flm_decode_attn_kv),
+            (
+                kernels.flm_gemma4_decode_attn_kv_kvh2
+                if two_kv
+                else kernels.flm_gemma4_decode_attn_kv
+            ),
             ATTN_KV_LOCKS,
         ),
         "attn_qk": build(
-            (kernels.flm_decode_attn_qk_kvh2 if two_kv else kernels.flm_decode_attn_qk),
+            (
+                kernels.flm_gemma4_decode_attn_qk_kvh2
+                if two_kv
+                else kernels.flm_gemma4_decode_attn_qk
+            ),
             attn_qk_locks,
         ),
-        "swa_attn_kv": build(kernels.flm_decode_swa_attn_kv, ATTN_KV_LOCKS),
-        "swa_attn_qk": build(kernels.flm_decode_swa_attn_qk, swa_qk_locks),
+        "swa_attn_kv": build(kernels.flm_gemma4_decode_swa_attn_kv, ATTN_KV_LOCKS),
+        "swa_attn_qk": build(kernels.flm_gemma4_decode_swa_attn_qk, swa_qk_locks),
     }
 
 
@@ -375,7 +387,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     kernel_fns = layer_kernels(g, dev)
 
     def k(name, symbol, arg_types):
-        return kernel_fns[name].object_file.bind(symbol, arg_types)
+        return kernel_fns[name].entry(symbol, arg_types)
 
     def sequence(x_arg, proj_arg, rms_arg, rope_rms_arg, kv_arg, len_arg, max_l_arg):
         # The sequence mirrors the engine's gen_layer_seq: the RTP writes, then
@@ -750,7 +762,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             ),
         )
         add_locks(rope_tile, [(ROPE_Q_PASS_LOCK, 0)])
-        kern = k(name, name, [q_ty, kv_ty, kv_ty, qkv_ty, qkv_ty, rope_ty, RTP_ty])
+        kern = k(name, "rope", [q_ty, kv_ty, kv_ty, qkv_ty, qkv_ty, rope_ty, RTP_ty])
 
         def rope_body(q_h, kk, v, q0, q1, rope, skip, kern):
             q = q_h.acquire(1)
