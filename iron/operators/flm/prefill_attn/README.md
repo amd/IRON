@@ -3,14 +3,21 @@ SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# `iron.operators.flm.PrefillSlidingAttention`
+# `iron.operators.flm.PrefillAttention`, `iron.operators.flm.PrefillSlidingAttention`
 
-Sliding-window causal prefill attention with a head dim of 256, from a KV
-cache. It reproduces FastFlowLM's sliding-window attention overlay for Gemma 4.
+Causal prefill attention from a KV cache. The two operators reproduce
+FastFlowLM's prefill attention overlays for Gemma 4:
+
+| Operator | Overlay | Head dim | Keys a query at position `p` sees |
+|---|---|---|---|
+| `PrefillAttention` | global attention | 512 | `0` to `p` |
+| `PrefillSlidingAttention` | sliding-window attention | 256 | `p - window + 1` to `p` |
 
 ```python
-from iron.operators.flm import PrefillSlidingAttention
+from iron.operators.flm import PrefillAttention, PrefillSlidingAttention
 
+op = PrefillAttention(max_context=32768, num_heads=8, num_kv_heads=1, context=ctx)
+# or
 op = PrefillSlidingAttention(
     max_context=32768, num_heads=8, num_kv_heads=1, window=512, context=ctx
 )
@@ -19,6 +26,8 @@ run = op.get_callable()
 run.set_parameters(L_begin=0, L_end=2048, max_l=4096)
 run(o, q, kv)
 ```
+
+`max_context` and `window` must be multiples of 128.
 
 ## Dispatch parameters
 
@@ -37,23 +46,26 @@ starts in the cache, so one build serves a cache of any length up to it.
 
 ## Layout
 
+With `dh` the head dim:
+
 | Buffer | Shape | Rows |
 |---|---|---|
-| `o` | `(tokens, num_heads, 256)` | token `L_begin` first |
-| `q` | `(tokens, num_heads, 256)` | token `L_begin` first |
-| `kv` | K `(max_l, num_kv_heads, 256)`, then V of the same shape | token 0 first |
+| `o` | `(tokens, num_heads, dh)` | token `L_begin` first |
+| `q` | `(tokens, num_heads, dh)` | token `L_begin` first |
+| `kv` | K `(max_l, num_kv_heads, dh)`, then V of the same shape | token 0 first |
 
 Query head `h` reads KV head `h // (num_heads // num_kv_heads)`. The operator
 writes `o` only for `L_end - L_begin` rows.
 
-A query at position `p` sees the keys at positions `p - window + 1` to `p`.
-`window` must be a multiple of 128.
-
-The scores carry no `1/sqrt(256)` scale. A caller that needs one scales `q`.
+The scores carry no `1/sqrt(dh)` scale. A caller that needs one scales `q`.
 
 ## Numerics
 
 The cores round the scores, the probabilities and the output to bfloat16 and
 accumulate in float32. Against the float32 reference in `reference.py`, with
-outputs of order 1, the mean absolute error is about 0.008. The largest is
-about 0.1.
+outputs of order 1:
+
+| Operator | Mean absolute error | Largest |
+|---|---|---|
+| `PrefillAttention` | about 0.009 | about 0.15 |
+| `PrefillSlidingAttention` | about 0.008 | about 0.1 |

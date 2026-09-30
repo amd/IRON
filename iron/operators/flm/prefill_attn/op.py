@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -17,17 +18,22 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
 )
 
-from iron.operators.flm.attn.design import DH, NUM_CU, attn_kernel
+from iron.operators.flm.prefill_attn.design import CAUSAL, SLIDING, Variant, kernel
 
 
 @dataclass
-class PrefillAttention(MLIROperator):
-    """Causal prefill attention with a head dim of 512, from a KV cache.
+class _PrefillAttentionBase(MLIROperator):
+    """Causal prefill attention from a KV cache.
 
     ``max_context`` bounds the KV cache rows, ``num_heads`` and
     ``num_kv_heads`` the query and KV heads. The token range and the cache's
     row count are dispatch parameters; see :meth:`get_dispatch_params`.
     """
+
+    variant: ClassVar[Variant]
+    # The keys a query sees: those less than ``window`` tokens before it, and
+    # itself. None sees every key up to the query.
+    window = None
 
     max_context: int
     num_heads: int
@@ -37,28 +43,32 @@ class PrefillAttention(MLIROperator):
     def __post_init__(self):
         dev = aie_utils.get_current_device()
         if dev.arch != AIEArch.AIE2p:
-            raise NotImplementedError("the attn_prefill kernel is AIE2P only")
+            raise NotImplementedError(
+                f"the {self.variant.factory} kernel is AIE2P only"
+            )
         if self.num_heads % self.num_kv_heads:
             raise ValueError(
                 f"num_heads ({self.num_heads}) must be a multiple of "
                 f"num_kv_heads ({self.num_kv_heads})"
             )
-        if (self.num_heads // self.num_kv_heads) % NUM_CU:
+        num_cu = self.variant.num_cu
+        if (self.num_heads // self.num_kv_heads) % num_cu:
             raise ValueError(
-                f"each KV head must serve a multiple of {NUM_CU} query heads"
+                f"each KV head must serve a multiple of {num_cu} query heads"
             )
-        if self.max_context % 128:
-            raise ValueError(
-                f"max_context ({self.max_context}) must be a multiple of 128"
-            )
+        for name in ("max_context", "window"):
+            value = getattr(self, name)
+            if value is not None and value % 128:
+                raise ValueError(f"{name} ({value}) must be a multiple of 128")
         MLIROperator.__init__(self, context=self.context)
 
     @property
     def name(self) -> str:
         dev = aie_utils.get_current_device().resolve().name
+        window = "" if self.window is None else f"_w{self.window}"
         return (
-            f"FLM_PrefillAttention_ctx{self.max_context}_h{self.num_heads}"
-            f"_kv{self.num_kv_heads}_{dev}"
+            f"FLM_{type(self).__name__}_ctx{self.max_context}_h{self.num_heads}"
+            f"_kv{self.num_kv_heads}{window}_{dev}"
         )
 
     def get_dispatch_params(self):
@@ -75,24 +85,41 @@ class PrefillAttention(MLIROperator):
             f"{self.name}.mlir",
             DesignGenerator(
                 self.operator_dir / "design.py",
-                "attn",
+                "prefill_attn",
                 (
                     aie_utils.get_current_device(),
+                    self.variant.name,
                     self.max_context,
                     self.num_heads,
                     self.num_kv_heads,
+                    self.window,
                 ),
             ),
         )
 
     def get_kernel_artifacts(self):
-        return [KernelObjectArtifact.from_extern(attn_kernel())]
+        return [KernelObjectArtifact.from_extern(kernel(self.variant))]
 
     def get_arg_spec(self):
         # The runtime sequence's order: o, q, kv.
-        rows = self.max_context * DH
+        rows = self.max_context * self.variant.dh
         return [
             AIERuntimeArgSpec("out", (rows * self.num_heads,), dtype=bfloat16),
             AIERuntimeArgSpec("in", (rows * self.num_heads,), dtype=bfloat16),
             AIERuntimeArgSpec("in", (2 * rows * self.num_kv_heads,), dtype=bfloat16),
         ]
+
+
+@dataclass
+class PrefillAttention(_PrefillAttentionBase):
+    """Causal prefill attention with a head dim of 512, from a KV cache."""
+
+    variant = CAUSAL
+
+
+@dataclass
+class PrefillSlidingAttention(_PrefillAttentionBase):
+    """Sliding-window causal prefill attention with a head dim of 256, from a KV cache."""
+
+    variant = SLIDING
+    window: int = 512
