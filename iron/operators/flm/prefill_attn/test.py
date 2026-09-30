@@ -59,7 +59,7 @@ OPERATORS = {
 def _inputs(op, max_l, seed):
     """q and a KV cache whose scores stay in softmax's useful range."""
     rng = np.random.default_rng(seed)
-    dh = op.variant.dh
+    dh = op.head_dim
     q = (rng.standard_normal(op.max_context * NUM_HEADS * dh) * 0.2).astype(bfloat16)
     half = max_l * op.num_kv_heads * dh
     kv = np.zeros(2 * op.max_context * op.num_kv_heads * dh, dtype=bfloat16)
@@ -82,7 +82,7 @@ def _check(op, run, L_begin, L_end, max_l, seed):
     run(o_buf, q_buf, kv_buf)
 
     o = o_buf.numpy().astype(np.float32)
-    dh = op.variant.dh
+    dh = op.head_dim
     n = (L_end - L_begin) * NUM_HEADS * dh
     expected = reference(
         q, kv, L_begin, L_end, max_l, NUM_HEADS, op.num_kv_heads, dh, op.window

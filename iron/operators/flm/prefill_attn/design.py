@@ -10,8 +10,9 @@ one shim tile and reach every core through one memtile. The runtime sequence
 takes the token range and the KV cache's row count as dispatch parameters. One
 build therefore serves every prompt.
 
-The two kernels differ in geometry and in their L1 layout. A ``Variant``
-holds what differs.
+The two kernels differ in geometry and in their L1 layout. ``Geometry`` reads
+the geometry from the kernel build. A ``Variant`` holds the rest of what
+differs.
 """
 
 from dataclasses import dataclass
@@ -30,12 +31,14 @@ from aie.dialects.aiex import (
     shim_dma_single_bd_task,
 )
 from aie.extras import types as T
+from aie.helpers.npdtypes import np_ndarray_type_get_shape
 from aie.ir import Attribute
 from aie.iron import (
     Acquire,
     Bd,
     Buffer,
     DmaChannel,
+    ExternalFunction,
     Lock,
     ObjectFifo,
     Program,
@@ -44,12 +47,11 @@ from aie.iron import (
     TileDma,
     Worker,
 )
-from aie.iron import kernels
 from aie.iron.controlflow import range_
 from aie.iron.dataflow import Flow
 from aie.iron.device import Tile
+from aie.iron.kernels import flm_gemma4
 
-from iron.common.device_utils import call_factory
 from iron.operators.flm.dataflow import grid, ping_pong
 
 LK_MT = 128  # key rows per memtile buffer
@@ -67,14 +69,14 @@ def _dims(d):
     return dict(sizes=[x[0] for x in d], strides=[x[1] for x in d])
 
 
-def _stage_kv_causal(rt, MT, v):
+def _stage_kv_causal(rt, MT, v, g):
     """The k/v memtile takes k and v on two channels and sends them interleaved on one.
 
     The memtile to its left holds half of the buffers.
     """
     mt, mt_left = MT[v.kv_memtile], MT[v.kv_memtile - 1]
-    in_mem_ty = np.ndarray[(LK_MT, v.dh), bf16]
-    kvdims = [(LK_MT // v.lk, v.lk * v.dh), (v.lk, 8), (64, 64), (8, 1)]
+    in_mem_ty = np.ndarray[(LK_MT, g.dh), bf16]
+    kvdims = [(LK_MT // g.lk, g.lk * g.dh), (g.lk, 8), (64, 64), (8, 1)]
     bufs = {
         (side, n): Buffer(type=in_mem_ty, name=f"in_{n}_0_{tile.col}", tile=tile)
         for side, tile in (("own", mt), ("left", mt_left))
@@ -87,7 +89,7 @@ def _stage_kv_causal(rt, MT, v):
     own_cons = Lock(tile=mt, lock_id=8, init=0)
     for lock in (left_prod, left_cons, own_prod, own_cons):
         rt.add_lock(lock)
-    fill = dict(offset=0, length=LK_MT * v.dh, **_dims(kvdims))
+    fill = dict(offset=0, length=LK_MT * g.dh, **_dims(kvdims))
 
     def out(b, cons, prod, nxt):
         return Bd(b, acquires=[Acquire(cons)], releases=[Release(prod)], next=nxt)
@@ -136,16 +138,16 @@ def _stage_kv_causal(rt, MT, v):
     rt.add_tile_dma(TileDma(mt_left, []))
 
 
-def _stage_kv_sliding(rt, MT, v):
+def _stage_kv_sliding(rt, MT, v, g):
     """The k/v memtile stages k and v in one buffer pair: k in the first half, v in the second.
 
     Each S2MM channel releases one count per buffer. The MM2S channel acquires
     two counts. It therefore reads a buffer after both halves hold data.
     """
-    in_mem_ty = np.ndarray[(LK_MT * 2, v.dh), bf16]
-    indims = [(LK_MT // v.lk, v.lk * v.dh), (v.lk, 8), (32, 128), (8, 1)]
-    outdims = [(2 * LK_MT // v.lk, v.lk * v.dh), (v.lk, v.dh), (v.dh, 1)]
-    half = LK_MT * v.dh
+    in_mem_ty = np.ndarray[(LK_MT * 2, g.dh), bf16]
+    indims = [(LK_MT // g.lk, g.lk * g.dh), (g.lk, 8), (32, 128), (8, 1)]
+    outdims = [(2 * LK_MT // g.lk, g.lk * g.dh), (g.lk, g.dh), (g.dh, 1)]
+    half = LK_MT * g.dh
     mt = MT[v.kv_memtile]
     in_0 = Buffer(type=in_mem_ty, name=f"in_0_0_{mt.col}", tile=mt)
     in_1 = Buffer(type=in_mem_ty, name=f"in_1_0_{mt.col}", tile=mt)
@@ -194,14 +196,37 @@ def _stage_kv_sliding(rt, MT, v):
 
 
 @dataclass(frozen=True)
+class Geometry:
+    """The tile shapes that the kernel build fixes."""
+
+    dh: int  # head dim
+    lq: int  # query rows per core
+    lk: int  # key rows per step
+
+    @classmethod
+    def of(cls, kernel):
+        """Read the shapes from the argument types of the kernel's entry points."""
+        lq, dh = np_ndarray_type_get_shape(kernel.attn_round_begin.arg_types()[4])
+        lk, _ = np_ndarray_type_get_shape(kernel.attn_qk_step.arg_types()[2])
+        return cls(dh=dh, lq=lq, lk=lk)
+
+    @property
+    def lq_ct(self):
+        """Query rows in a core's q object: the rows of both columns of a pair."""
+        return 2 * self.lq
+
+    @property
+    def lq_mt(self):
+        """Query rows per memtile fifo half."""
+        return 4 * self.lq
+
+
+@dataclass(frozen=True)
 class Variant:
     """What differs between the causal and the sliding-window kernel's designs."""
 
     name: str
-    factory: str  # the aie.iron.kernels factory
-    dh: int  # head dim
-    lq: int  # query rows per core
-    lk: int  # key rows per step
+    factory: Callable[..., ExternalFunction]
     num_cu: int  # column groups, one query head each per pass
     # The buffer addresses of the FastFlowLM overlay. The stack occupies the
     # addresses from 0 to in_1, the lowest buffer.
@@ -216,23 +241,10 @@ class Variant:
     windowed: bool
     release_q_before_epilogue: bool
 
-    @property
-    def lq_ct(self):
-        """Query rows in a core's q object: the rows of both columns of a pair."""
-        return 2 * self.lq
-
-    @property
-    def lq_mt(self):
-        """Query rows per memtile fifo half."""
-        return 4 * self.lq
-
 
 CAUSAL = Variant(
     name="causal",
-    factory="flm_gemma4_attn_prefill",
-    dh=512,
-    lq=8,
-    lk=8,
+    factory=flm_gemma4.flm_gemma4_attn_prefill,
     num_cu=2,
     l1={
         "in_0": 49152,
@@ -254,10 +266,7 @@ CAUSAL = Variant(
 
 SLIDING = Variant(
     name="sliding",
-    factory="flm_gemma4_swa_prefill",
-    dh=256,
-    lq=16,
-    lk=16,
+    factory=flm_gemma4.flm_gemma4_swa_prefill,
     num_cu=4,
     l1={
         "L_begin": 61568,
@@ -281,14 +290,9 @@ SLIDING = Variant(
 VARIANTS = {v.name: v for v in (CAUSAL, SLIDING)}
 
 
-def kernel(variant, device=None):
-    """The kernel build that the variant's cores link."""
-    return call_factory(
-        getattr(kernels, variant.factory),
-        device=device,
-        in_prod_lock=IN_PROD_LOCK,
-        in_cons_lock=IN_CONS_LOCK,
-    )
+def make_kernel(variant):
+    """Build the kernel that the variant's cores link, for the current device."""
+    return variant.factory(in_prod_lock=IN_PROD_LOCK, in_cons_lock=IN_CONS_LOCK)
 
 
 def _no_unroll(iv):
@@ -304,55 +308,53 @@ def _no_unroll(iv):
 
 
 def prefill_attn(
-    dev, variant, max_context, num_heads, num_kv_heads, window=None, trace_size=0
+    dev,
+    variant,
+    max_context,
+    num_heads,
+    num_kv_heads,
+    window=None,
+    trace_size=0,
+    *,
+    kernel,
 ):
     """Prefill attention over a KV cache of up to max_context rows.
 
-    The README gives the layout of O, Q and KV.
+    The README gives the layout of O, Q and KV. ``kernel`` is the variant's
+    build from ``make_kernel``.
     """
     v = VARIANTS[variant]
     if v.windowed != (window is not None):
         need = "needs a" if v.windowed else "takes no"
         raise ValueError(f"the {v.name} variant {need} window")
     COLS, ROWS = grid(dev)
-    DH, LQ, LK, NUM_CU, L1 = v.dh, v.lq, v.lk, v.num_cu, v.l1
+    g = Geometry.of(kernel)
+    DH, LQ, LK, NUM_CU, L1 = g.dh, g.lq, g.lk, v.num_cu, v.l1
     GROUP_COLS = COLS // NUM_CU
     HEADS = num_heads
     KV_D = num_kv_heads
     GQA = HEADS // KV_D
 
-    f32 = np.dtype[np.float32]
+    k_rounds = kernel.attn_rounds
+    k_round_begin = kernel.attn_round_begin
+    k_blocks = kernel.attn_blocks
+    k_block_begin = kernel.attn_block_begin
+    k_qk = kernel.attn_qk_step
+    k_block_mid = kernel.attn_block_mid
+    k_fv = kernel.attn_fv_step
+    k_block_end = kernel.attn_block_end
+    k_finalize = kernel.attn_finalize
+    k_epilogue = kernel.attn_epilogue
 
-    q_ty = np.ndarray[(v.lq_ct, DH), bf16]
-    in_ty = np.ndarray[(LK, DH), bf16]
-    o_ty = np.ndarray[(64,), bf16]
-    q_half_ty = np.ndarray[(v.lq_mt, DH), bf16]
-    o_col_ty = np.ndarray[(v.lq_mt, DH), bf16]
-    s_ty = np.ndarray[(LQ, LK_MT), bf16]
-    m_ty = np.ndarray[(LQ, LK), bf16]
-    y_ty = np.ndarray[(LQ, DH), f32]
-    l_bf16_ty = np.ndarray[(LQ,), bf16]
-    mv_ty = np.ndarray[(LQ,), bf16]
-    cv_ty = np.ndarray[(LQ,), f32]
-    L_ty = np.ndarray[(8,), np.dtype[np.int32]]
+    # The core's buffers take the kernel's argument types.
+    s_ty, q_ty, in_ty, _, m_ty, L_ty = k_qk.arg_types()[:6]
+    mv_ty, _, cv_ty, _, y_ty = k_round_begin.arg_types()
+    o_ty, l_bf16_ty, _, _ = k_epilogue.arg_types()
+    q_half_ty = np.ndarray[(g.lq_mt, DH), bf16]
+    o_col_ty = np.ndarray[(g.lq_mt, DH), bf16]
 
-    qdims = [(v.lq_ct // 8, 8 * DH), (DH // 8, 8), (8, DH), (8, 1)]
+    qdims = [(g.lq_ct // 8, 8 * DH), (DH // 8, 8), (8, DH), (8, 1)]
     odims = [(LQ // 8, 8 * DH), (DH // 8, 8), (8, DH), (8, 1)]
-
-    k = kernel(v, dev).entry
-    k_rounds = k("attn_rounds", [L_ty, L_ty, L_ty])
-    k_round_begin = k("attn_round_begin", [mv_ty, mv_ty, cv_ty, cv_ty, y_ty])
-    k_blocks = k("attn_blocks", [L_ty] * (1 + v.windowed) + [np.int32, L_ty])
-    k_block_begin = k("attn_block_begin", [m_ty, mv_ty])
-    k_qk = k(
-        "attn_qk_step",
-        [s_ty, q_ty, in_ty, in_ty, m_ty, L_ty, L_ty] + [np.int32] * 5,
-    )
-    k_block_mid = k("attn_block_mid", [s_ty, m_ty, mv_ty, mv_ty, cv_ty, cv_ty, y_ty])
-    k_fv = k("attn_fv_step", [y_ty, s_ty, in_ty, in_ty, np.int32])
-    k_block_end = k("attn_block_end", [mv_ty, mv_ty])
-    k_finalize = k("attn_finalize", [cv_ty, l_bf16_ty])
-    k_epilogue = k("attn_epilogue", [o_ty, l_bf16_ty, y_ty, np.int32])
 
     # Shim row 0, memtile row 1, compute rows from 2. Each tile needs its type.
     # The DMA of an untyped tile lowers to a core tile's aie.mem.
@@ -400,11 +402,11 @@ def prefill_attn(
                         o_tasks.append(
                             o_shim[cu * GROUP_COLS + col].drain(
                                 o,
-                                sizes=[1, 1, v.lq_mt, DH],
+                                sizes=[1, 1, g.lq_mt, DH],
                                 strides=[0, 0, DH * HEADS, 1],
                                 offset=r * (ROUND * DH * HEADS)
-                                + (head_off * DH + col * v.lq_mt * DH * HEADS),
-                                transfer_len=v.lq_mt * DH,
+                                + (head_off * DH + col * g.lq_mt * DH * HEADS),
+                                transfer_len=g.lq_mt * DH,
                                 wait=True,
                                 managed=False,
                             )
@@ -415,12 +417,12 @@ def prefill_attn(
                         q_tasks.append(
                             q_shim[key].fill(
                                 q,
-                                sizes=[1, 1, v.lq_mt, DH],
+                                sizes=[1, 1, g.lq_mt, DH],
                                 strides=[0, 0, DH * HEADS, 1],
                                 offset=(
-                                    q_base + qi * v.lq_mt * DH * HEADS if qi else q_base
+                                    q_base + qi * g.lq_mt * DH * HEADS if qi else q_base
                                 ),
-                                transfer_len=v.lq_mt * DH,
+                                transfer_len=g.lq_mt * DH,
                                 wait=False,
                                 managed=False,
                             )
@@ -496,7 +498,7 @@ def prefill_attn(
             of_q = ObjectFifo(q_half_ty, name=f"q{mt_idx}_{half}", depth=2)
             q_shim[(p, half)] = of_q.prod(tile=IT[mt_idx], channel=half)
             slices = of_q.cons().split(
-                [v.lq_ct * DH * t for t in range(2)],
+                [g.lq_ct * DH * t for t in range(2)],
                 obj_types=[q_ty] * 2,
                 names=[f"q{mt_idx}_{half}_{t}" for t in range(2)],
                 dims_to_stream=[qdims] * 2,
@@ -658,7 +660,7 @@ def prefill_attn(
                 )
             )
 
-    v.stage_kv(rt, MT, v)
+    v.stage_kv(rt, MT, v, g)
 
     kv_mt = v.kv_memtile
     rt.add_flow(
