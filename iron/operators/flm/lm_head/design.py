@@ -80,9 +80,9 @@ def check_shape(dev, dim, vocab):
 
 
 def lm_head_kernel(dim: int, device=None):
-    """The flm_q4nx_lm_head kernel build that the cores link."""
+    """The flm_gemma4_q4nx_lm_head kernel build that the cores link."""
     return call_factory(
-        kernels.flm_q4nx_lm_head,
+        kernels.flm_gemma4_q4nx_lm_head,
         device=device,
         dim=dim,
         m_tile=M_TILE,
@@ -121,13 +121,13 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0):
     sums_ty = np.ndarray[(dim // GROUP,), bf16]
     rtp_ty = np.ndarray[(RTP_WORDS,), np.dtype[np.int32]]
 
-    kernel_object = lm_head_kernel(dim, dev).object_file
-    k_rms = kernel_object.bind("q4nx_lm_head_rms", [x_ty, sums_ty])
-    k_zero = kernel_object.bind("q4nx_lm_head_zero", [y_acc_ty])
-    k_block = kernel_object.bind(
+    kernel = lm_head_kernel(dim, dev)
+    k_rms = kernel.entry("q4nx_lm_head_rms", [x_ty, sums_ty])
+    k_zero = kernel.entry("q4nx_lm_head_zero", [y_acc_ty])
+    k_block = kernel.entry(
         "q4nx_lm_head_block", [w_blk_ty, x_ty, y_acc_ty, sums_ty, np.int32]
     )
-    k_epi = kernel_object.bind("q4nx_lm_head_epilogue", [y_blk_ty, y_acc_ty, rtp_ty])
+    k_epi = kernel.entry("q4nx_lm_head_epilogue", [y_blk_ty, y_acc_ty, rtp_ty])
 
     # The host addresses the DMAs by column, so the design pins the shim tiles.
     # The placer places the other tiles.

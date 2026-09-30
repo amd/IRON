@@ -31,7 +31,7 @@ def _on_aie2p():
 
 
 requires_aie2p = pytest.mark.skipif(
-    not _on_aie2p(), reason="the flm_q4nx_lm_head kernel is AIE2P only"
+    not _on_aie2p(), reason="the flm_gemma4_q4nx_lm_head kernel is AIE2P only"
 )
 
 
