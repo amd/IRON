@@ -60,8 +60,8 @@ from aie.utils.compile.utils import (
     prefix_symbols_in_object,
 )
 
-# compile_dispatch_bridge() is private to mlir-aie's JIT, and mlir-aie can
-# change it without notice.
+# compile_dispatch_bridge() is private to mlir-aie's JIT. mlir-aie can change
+# it without notice.
 from aie.utils.compile.jit._dispatch_compile import compile_dispatch_bridge
 
 # Global Functions
@@ -422,7 +422,6 @@ class DispatchLibArtifact(_MLIRInputMixin, CompilationArtifact):
         if mlir_input not in dependencies:
             dependencies = dependencies + [mlir_input]
         super().__init__(filename, dependencies)
-        # Name to NumPy scalar type, in the runtime sequence's argument order.
         self.dispatch_params = dict(dispatch_params)
 
     @property
@@ -784,14 +783,14 @@ def _build_dispatch_lib(work_dir: Path, artifact: DispatchLibArtifact) -> None:
         list(artifact.dispatch_params.values()),
     ).resolve()
     # The library's name carries a digest of its content. The dynamic loader
-    # returns the old mapping for a path it has already loaded, so a rebuilt
-    # library needs a new path.
+    # returns the old mapping for a path it has already loaded. A rebuilt
+    # library therefore needs a new path.
     link = Path(artifact.filename)
     link.unlink(missing_ok=True)
     link.symlink_to(library)
-    # compile_dispatch_bridge() keeps an existing library of the same content,
-    # whose mtime can predate the MLIR. The build would then never consider
-    # the link up to date.
+    # compile_dispatch_bridge() keeps an existing library of the same content.
+    # Its mtime can predate the MLIR. The build then marks the link out of date
+    # on every run.
     os.utime(library)
     shutil.copyfile(work_dir / _DISPATCH_CPP, artifact.cpp_filename)
 

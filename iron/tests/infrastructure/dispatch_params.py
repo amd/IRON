@@ -5,9 +5,9 @@
 """Infrastructure tests for operators whose runtime sequence takes scalars.
 
 The operator under test copies ``n`` chunks from one buffer to another through
-a memtile. ``n`` is a dispatch parameter: it bounds the runtime sequence's loop
-and sets the offset of each transfer, so no single instruction stream serves
-every ``n``. The design has no cores, so the test needs no kernel.
+a memtile. ``n`` is a dispatch parameter. It bounds the runtime sequence's loop
+and sets the offset of each transfer. The design has no cores, so the test
+needs no kernel.
 """
 
 from dataclasses import dataclass, field

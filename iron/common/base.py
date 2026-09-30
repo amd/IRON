@@ -179,8 +179,8 @@ class MLIROperator(AIEOperatorBase):
         Each value is the NumPy scalar type the sequence declares, e.g.
         ``np.int32``. Scalars can set loop bounds and DMA sizes, so an operator
         that declares them has no single instruction stream. It builds a
-        library that generates the stream in place of a ``.bin``, and its
-        callable is a :class:`DispatchCallable`.
+        library that generates the stream in place of a ``.bin``. Its callable
+        is a :class:`DispatchCallable`.
         """
         return {}
 
