@@ -10,6 +10,7 @@ and sets the offset of each transfer. The design has no cores, so the test
 needs no kernel.
 """
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,7 +23,9 @@ from aie.extras import types as T
 from aie.iron import ObjectFifo, Program, Runtime
 from aie.iron.controlflow import range_
 
+from iron.common.sequence import OperatorSequence
 from iron.common import (
+    AIEContext,
     AIERuntimeArgSpec,
     DesignGenerator,
     DispatchCallable,
@@ -51,8 +54,8 @@ def chunk_copy(dev, max_chunks):
                 transfer_len=CHUNK,
                 managed=False,
             )
-            out_task = out_cons.drain(dst, wait=True, **transfer)
             in_task = in_prod.fill(src, wait=False, **transfer)
+            out_task = out_cons.drain(dst, wait=True, **transfer)
             out_task.await_()
             out_task.free()
             in_task.free()
@@ -135,6 +138,31 @@ def test_one_callable_serves_every_parameter(chunk_copy_op):
         assert np.all(dst[n * CHUNK :] == SENTINEL), f"n={n} copied too much"
 
 
+def _fresh_build(tmp_path):
+    op = ChunkCopy(max_chunks=MAX_CHUNKS, context=AIEContext(build_dir=tmp_path))
+    op.compile()
+    return op
+
+
+def test_a_missing_cpp_rebuilds_the_generator(tmp_path):
+    """A native host compiles the published C++, so compile() restores it."""
+    op = _fresh_build(tmp_path)
+    Path(op.dispatch_artifact.cpp_filename).unlink()
+    op = _fresh_build(tmp_path)
+    assert Path(op.dispatch_artifact.cpp_filename).is_file()
+
+
+def test_a_missing_xclbin_rebuilds_the_generator_with_it(tmp_path):
+    """The generator writes to addresses the xclbin's aiecc run allocates."""
+    op = _fresh_build(tmp_path)
+    library = Path(op.dispatch_artifact.filename)
+    before = os.path.getmtime(library)
+    Path(op.xclbin_artifact.filename).unlink()
+    op = _fresh_build(tmp_path)
+    assert Path(op.xclbin_artifact.filename).is_file()
+    assert os.path.getmtime(library) > before
+
+
 def test_call_before_set_parameters_raises(chunk_copy_op):
     run = chunk_copy_op.get_callable()
     with pytest.raises(RuntimeError, match="set_parameters"):
@@ -148,7 +176,15 @@ def test_set_parameters_takes_exactly_the_declared_names(chunk_copy_op, params):
         run.set_parameters(**params)
 
 
-def test_sequences_reject_a_dispatch_operator(aie_context):
+@pytest.mark.parametrize("dispatch", ["auto", "fused", "separate", "reference"])
+def test_sequences_reject_a_dispatch_operator(aie_context, dispatch):
     op = ChunkCopy(max_chunks=MAX_CHUNKS, context=aie_context)
     with pytest.raises(NotImplementedError, match="per dispatch"):
-        op.get_artifacts()
+        OperatorSequence(
+            name="chunk_copy_sequence",
+            runlist=[(op, "src", "dst")],
+            input_args=["src"],
+            output_args=["dst"],
+            dispatch=dispatch,
+            context=aie_context,
+        )

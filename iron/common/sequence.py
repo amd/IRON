@@ -346,6 +346,12 @@ class OperatorSequence(AIEOperatorBase):
                 "runlist entries must be (MLIROperator, *str) tuples; "
                 "each operator must be an MLIROperator and each buffer name must be a str"
             )
+        dynamic = [type(op).__name__ for op, *_ in runlist if op.get_dispatch_params()]
+        if dynamic:
+            raise NotImplementedError(
+                f"{', '.join(dynamic)} generate their instruction stream per "
+                "dispatch. A sequence cannot supply their dispatch parameters."
+            )
         super().__init__(*args, **kwargs)
         self.runlist = runlist
         # Sharing changes which designs are built, so it belongs in the name that

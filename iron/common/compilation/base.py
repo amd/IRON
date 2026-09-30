@@ -429,6 +429,14 @@ class DispatchLibArtifact(_MLIRInputMixin, CompilationArtifact):
         """The generated C++, for a host that compiles the generator in."""
         return str(Path(self.filename).with_suffix(".cpp"))
 
+    def is_available_in_filesystem(self) -> bool:
+        cpp = Path(self.cpp_filename)
+        return (
+            super().is_available_in_filesystem()
+            and cpp.exists()
+            and os.path.getmtime(cpp) >= os.path.getmtime(self.filename)
+        )
+
 
 class KernelObjectArtifact(CompilationArtifact):
     def __init__(
@@ -782,9 +790,11 @@ def _build_dispatch_lib(work_dir: Path, artifact: DispatchLibArtifact) -> None:
         list(artifact.dispatch_params),
         list(artifact.dispatch_params.values()),
     ).resolve()
-    # The library's name carries a digest of its content. The dynamic loader
-    # returns the old mapping for a path it has already loaded. A rebuilt
-    # library therefore needs a new path.
+    # compile_dispatch_bridge() names each library by a digest of its content.
+    # The artifact is a link to that library. get_callable() loads the link's
+    # target. A rebuilt library therefore reaches a running process under a new
+    # path. Under one fixed path, the dynamic loader returns the library it
+    # loaded first.
     link = Path(artifact.filename)
     link.unlink(missing_ok=True)
     link.symlink_to(library)
@@ -821,6 +831,26 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
                 mlir_sources_to_dispatch_libs.setdefault(mlir_dependency, []).append(
                     artifact
                 )
+
+        # A generator writes to addresses that its xclbin's aiecc run
+        # allocates. The rule therefore builds both whenever either is out of
+        # date.
+        paired = mlir_sources & {
+            a.mlir_input for a in graph.bfs() if isinstance(a, DispatchLibArtifact)
+        }
+        for artifact in graph.bfs():
+            if (
+                isinstance(artifact, (XclbinArtifact, DispatchLibArtifact))
+                and artifact.mlir_input in paired
+                and artifact not in worklist
+            ):
+                sources_to = (
+                    mlir_sources_to_xclbins
+                    if isinstance(artifact, XclbinArtifact)
+                    else mlir_sources_to_dispatch_libs
+                )
+                sources_to.setdefault(artifact.mlir_input, []).append(artifact)
+                worklist.append(artifact)
 
         commands = []
         # Now we know for each mlir source if we need to generate an xclbin, an insts.bin or both for it
