@@ -125,8 +125,39 @@ LK = 16
 Q_HEADS_PADDING = 4
 # The padding in the engine's per-layer-input stream (gemma4e_npu_sequence.hpp).
 MIN_BF16_PAD = 32
-# The columns of the projection cores.
+# The columns of the projection cores. Each column holds four cores, in rows 2
+# to 5, and its shim tile and memtile feed them weights.
 PROJ_COLS = (0, 1, 6, 7)
+
+# The tile of each stage, as (column, row). Row 0 holds the shim tiles, row 1
+# the memtiles and rows 2 to 5 the cores.
+PLACEMENT = {
+    # Cores.
+    "attn_qk": (2, 2),
+    "attn_kv": (2, 3),
+    "swa_attn_qk": (2, 4),
+    "swa_attn_kv": (2, 5),
+    "rms": (3, 2),
+    "glu": (3, 3),
+    "rope": (3, 4),
+    "swa_rope": (3, 5),
+    "pl_gate": (4, 2),
+    "pl_embedding": (4, 3),
+    "pl_up": (5, 2),
+    "pl_merge": (5, 3),
+    # Memtiles. Each projection group of two columns gathers y in one
+    # memtile. proj_x gathers both groups' y and broadcasts x.
+    "proj_gather_0": (0, 1),
+    "proj_x": (1, 1),
+    "attn_mem": (2, 1),
+    "proj_gather_1": (6, 1),
+    "proj_weight": (7, 1),
+    # Shim tiles.
+    "kv_shim": (2, 0),
+    "x_shim": (3, 0),
+    "pl_shim_0": (4, 0),
+    "pl_shim_1": (5, 0),
+}
 
 _BF16 = np.dtype[bfloat16]
 _RTP_TY = np.ndarray[(16,), np.dtype[np.int32]]
@@ -491,18 +522,22 @@ def _sequence(
             npu_write32(rtp["proj_skip"], int(IS_SKIP), column=c, row=r)
             npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=c, row=r)
 
+    def write(stage, addr, value):
+        col, row = PLACEMENT[stage]
+        npu_write32(addr, value, column=col, row=row)
+
     L_local = _min_const(L, SW) if IS_SWA else L
-    npu_write32(rtp["l_qk"], L_local, column=2, row=2)
-    npu_write32(rtp["l_kv"], L_local, column=2, row=3)
-    npu_write32(rtp["swa_l_qk"], L_local, column=2, row=4)
-    npu_write32(rtp["swa_l_kv"], L_local, column=2, row=5)
-    npu_write32(rtp["rms_swa"], int(IS_SWA), column=3, row=2)
-    npu_write32(rtp["rms_skip"], int(IS_SKIP), column=3, row=2)
-    npu_write32(rtp["rope_skip_kv"], int(IS_SKIP), column=3, row=4)
-    npu_write32(rtp["swa_rope_skip_kv"], int(IS_SKIP), column=3, row=5)
-    npu_write32(rtp["glu_skip"], int(IS_SKIP and g.double_wide_mlp), column=3, row=3)
-    npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=3, row=2)
-    npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=3, row=3)
+    write("attn_qk", rtp["l_qk"], L_local)
+    write("attn_kv", rtp["l_kv"], L_local)
+    write("swa_attn_qk", rtp["swa_l_qk"], L_local)
+    write("swa_attn_kv", rtp["swa_l_kv"], L_local)
+    write("rms", rtp["rms_swa"], int(IS_SWA))
+    write("rms", rtp["rms_skip"], int(IS_SKIP))
+    write("rope", rtp["rope_skip_kv"], int(IS_SKIP))
+    write("swa_rope", rtp["swa_rope_skip_kv"], int(IS_SKIP))
+    write("glu", rtp["glu_skip"], int(IS_SKIP and g.double_wide_mlp))
+    write("rms", RTP_SYNC_LOCK_ADDR, 1)
+    write("glu", RTP_SYNC_LOCK_ADDR, 1)
 
     # The sequence keeps two rounds of legs in flight, as the engine's
     # bd_offset double buffer does. A shim tile has 16 BDs.
@@ -1243,7 +1278,7 @@ def _build_proj_core(ctx, pt, kern, send_x_out, main_y0=None, main_y1=None):
     return y0, y1
 
 
-def _build_proj_cores(ctx, CT):
+def _build_proj_cores(ctx, grid):
     """The q4nx projection engine: 16 cores in PROJ_COLS.
 
     The cores in rows 2 and 4 send y. Returns, per group of two columns, the
@@ -1271,8 +1306,8 @@ def _build_proj_cores(ctx, CT):
         for csub in (0, 1):
             col = PROJ_COLS[2 * grp + csub]
             for row_pair in range(2):
-                send_t = CT[row_pair * 2][col]
-                nosend_t = CT[row_pair * 2 + 1][col]
+                send_t = grid[col, 2 + row_pair * 2]
+                nosend_t = grid[col, 3 + row_pair * 2]
                 y0, y1 = _build_proj_core(ctx, send_t, proj_k, send_x_out=True)
                 _build_proj_core(
                     ctx, nosend_t, proj_k, send_x_out=False, main_y0=y0, main_y1=y1
@@ -1701,138 +1736,133 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     )
     workers = []
 
-    # Shim row 0, memtile row 1, compute rows 2 to 5. CT is [compute row][col].
-    IT = [Tile(c, 0, tile_type=dev.get_tile_type(c, 0)) for c in range(dev.cols)]
-    MT = [Tile(c, 1, tile_type=dev.get_tile_type(c, 1)) for c in range(dev.cols)]
-    CT = [
-        [Tile(c, r + 2, tile_type=dev.get_tile_type(c, r + 2)) for c in range(dev.cols)]
-        for r in range(4)
-    ]
+    grid = {
+        (c, r): Tile(c, r, tile_type=dev.get_tile_type(c, r))
+        for r in range(dev.rows)
+        for c in range(dev.cols)
+    }
+    t = {stage: grid[at] for stage, at in PLACEMENT.items()}
 
     ctx = _Ctx(rt, workers, g, rtp, kernel_fns)
 
-    rms_tile = CT[0][3]
-    rms_y_out = _build_rms(ctx, rms_tile)
+    rms_y_out = _build_rms(ctx, t["rms"])
     # q from RoPE to the qk core. The qk core's DMA reorders it.
     q_of_g = ObjectFifo(np.ndarray[(G_DQ,), _BF16], name="q_in", depth=2)
     q_of_swa = ObjectFifo(np.ndarray[(S_DQ,), _BF16], name="swa_q_in", depth=2)
-    rope_tile = CT[2][3]
-    _build_rope(ctx, rope_tile, "rope", "rope_skip_kv", g.dh, q_of_g)
-    swa_rope_tile = CT[3][3]
-    _build_rope(ctx, swa_rope_tile, "swa_rope", "swa_rope_skip_kv", g.swa_dh, q_of_swa)
-    ple_tile = CT[1][4]
-    _build_pl_embedding(ctx, ple_tile)
-    gle_tile = CT[0][4]
-    _build_pl_gate(ctx, gle_tile, rms_y_out)
-    plm_tile = CT[1][5]
-    _build_pl_merge(ctx, plm_tile)
-    plu_tile = CT[0][5]
-    _build_pl_up(ctx, plu_tile)
-    glu_tile = CT[1][3]
-    _build_glu(ctx, glu_tile)
+    _build_rope(ctx, t["rope"], "rope", "rope_skip_kv", g.dh, q_of_g)
+    _build_rope(ctx, t["swa_rope"], "swa_rope", "swa_rope_skip_kv", g.swa_dh, q_of_swa)
+    _build_pl_embedding(ctx, t["pl_embedding"])
+    _build_pl_gate(ctx, t["pl_gate"], rms_y_out)
+    _build_pl_merge(ctx, t["pl_merge"])
+    _build_pl_up(ctx, t["pl_up"])
+    _build_glu(ctx, t["glu"])
 
-    proj_send_tiles = _build_proj_cores(ctx, CT)
+    proj_send_tiles = _build_proj_cores(ctx, grid)
+    _build_proj_gather_mem(ctx, t["proj_gather_0"])
+    _build_proj_gather_mem(ctx, t["proj_gather_1"])
+    _build_proj_weight_mem(ctx, t["proj_weight"])
+    _build_proj_x_mem(ctx, t["proj_x"])
 
-    # Each projection memtile splits its column's weights over the column's
-    # four cores.
-    _build_proj_gather_mem(ctx, MT[0])
-    _build_proj_gather_mem(ctx, MT[6])
-    _build_proj_weight_mem(ctx, MT[7])
-    _build_proj_x_mem(ctx, MT[1])
-    proj_main_mt = MT[1]
-
-    # Attention in column 2: the global pair in rows 2 and 3, the
-    # sliding-window pair in rows 4 and 5. k and v come from MT[2], q from
-    # RoPE, and the scores go from the qk core to the kv core through a fifo.
-    attn_qk_tile = CT[0][2]
-    attn_kv_tile = CT[1][2]
-    of_g_s = ObjectFifo(_attn_s_ty(g), name="attn_s", delegate_tile=attn_kv_tile)
-    _build_attn_kv(ctx, attn_kv_tile, "attn_kv", "l_kv", g.dh, of_g_s, two_kv)
-    _build_attn_qk(ctx, attn_qk_tile, "attn_qk", "l_qk", g.dh, of_g_s, q_of_g, two_kv)
-    swa_qk_tile = CT[2][2]
-    swa_kv_tile = CT[3][2]
-    of_swa_s = ObjectFifo(_attn_s_ty(g), name="swa_attn_s", delegate_tile=swa_kv_tile)
+    # The scores go from each qk core to its kv core through a fifo.
+    of_g_s = ObjectFifo(_attn_s_ty(g), name="attn_s", delegate_tile=t["attn_kv"])
+    _build_attn_kv(ctx, t["attn_kv"], "attn_kv", "l_kv", g.dh, of_g_s, two_kv)
+    _build_attn_qk(ctx, t["attn_qk"], "attn_qk", "l_qk", g.dh, of_g_s, q_of_g, two_kv)
+    of_swa_s = ObjectFifo(
+        _attn_s_ty(g), name="swa_attn_s", delegate_tile=t["swa_attn_kv"]
+    )
     _build_attn_kv(
-        ctx, swa_kv_tile, "swa_attn_kv", "swa_l_kv", g.swa_dh, of_swa_s, False
+        ctx, t["swa_attn_kv"], "swa_attn_kv", "swa_l_kv", g.swa_dh, of_swa_s, False
     )
     _build_attn_qk(
-        ctx, swa_qk_tile, "swa_attn_qk", "swa_l_qk", g.swa_dh, of_swa_s, q_of_swa, False
+        ctx,
+        t["swa_attn_qk"],
+        "swa_attn_qk",
+        "swa_l_qk",
+        g.swa_dh,
+        of_swa_s,
+        q_of_swa,
+        False,
     )
-
-    amt = MT[2]
-    _build_attn_mem(ctx, amt)
+    _build_attn_mem(ctx, t["attn_mem"])
 
     # The router places flows in the order the design adds them. Long flows
     # go first. The sequence addresses a shim channel by the shim symbol of
     # its first flow.
-    _connect(rt, IT[3], 0, rms_tile, 0, pkt_id=_ShimPkt.to_rms, shim_symbol="send_x")
-    _connect(rt, IT[3], 1, rms_tile, 1, pkt_id=_ShimPkt.to_rms, shim_symbol="send_rms")
-    _connect(rt, IT[3], 0, rope_tile, 1, pkt_id=_ShimPkt.to_rope)
-    _connect(rt, IT[3], 1, swa_rope_tile, 1, pkt_id=_ShimPkt.to_rope)
-    _connect(rt, rms_tile, 0, proj_main_mt, 3, pkt_id=_X_FROM_RMS)
+    x_shim, kv_shim = t["x_shim"], t["kv_shim"]
+    proj_x = t["proj_x"]
+    _connect(rt, x_shim, 0, t["rms"], 0, pkt_id=_ShimPkt.to_rms, shim_symbol="send_x")
+    _connect(rt, x_shim, 1, t["rms"], 1, pkt_id=_ShimPkt.to_rms, shim_symbol="send_rms")
+    _connect(rt, x_shim, 0, t["rope"], 1, pkt_id=_ShimPkt.to_rope)
+    _connect(rt, x_shim, 1, t["swa_rope"], 1, pkt_id=_ShimPkt.to_rope)
+    _connect(rt, t["rms"], 0, proj_x, 3, pkt_id=_X_FROM_RMS)
 
     # The weights from the shim into each memtile, halves on S2MM 4 and 5.
-    for mtid in PROJ_COLS:
+    for col in PROJ_COLS:
         for ch in (0, 1):
             _connect(
-                rt, IT[mtid], ch, MT[mtid], 4 + ch, shim_symbol=f"proj_w{ch}_{mtid}"
+                rt,
+                grid[col, 0],
+                ch,
+                grid[col, 1],
+                4 + ch,
+                shim_symbol=f"proj_w{ch}_{col}",
             )
     # The memtile's MM2S j to S2MM 1 of its column's core in row j.
     for col in PROJ_COLS:
         for j in range(4):
-            _connect(rt, MT[col], j, CT[j][col], 1)
-    # x from MT[1]'s MM2S 4 to every projection core's S2MM 0.
+            _connect(rt, grid[col, 1], j, grid[col, 2 + j], 1)
+    # x from proj_x's MM2S 4 to every projection core's S2MM 0.
     for col in PROJ_COLS:
         for j in range(4):
-            _connect(rt, proj_main_mt, 4, CT[j][col], 0)
+            _connect(rt, proj_x, 4, grid[col, 2 + j], 0)
     # y from each group's sending cores to its memtile. The first keeps the
-    # packet header, which carries the consumer's id to MT[1].
+    # packet header, which carries the consumer's id to proj_x.
     pkts = [_ProjPkt.to_swa_rope, _ProjPkt.to_rope, _ProjPkt.to_rms, _ProjPkt.to_glu]
-    gather_mts = [MT[0], MT[6]]
+    gather_mts = [t["proj_gather_0"], t["proj_gather_1"]]
     for gather_mt, send_tiles in zip(gather_mts, proj_send_tiles):
         for j, send_t in enumerate(send_tiles):
             for pk in pkts:
                 _connect(rt, send_t, 0, gather_mt, j, pkt_id=pk, keep_pkt_header=j == 0)
     for ch, gather_mt in enumerate(gather_mts):
         for pk in pkts:
-            _connect(
-                rt, gather_mt, 4, proj_main_mt, ch, pkt_id=pk, keep_pkt_header=ch == 0
-            )
+            _connect(rt, gather_mt, 4, proj_x, ch, pkt_id=pk, keep_pkt_header=ch == 0)
 
     for dst, pk in (
-        (glu_tile, _ProjPkt.to_glu),
-        (rms_tile, _ProjPkt.to_rms),
-        (rope_tile, _ProjPkt.to_rope),
-        (swa_rope_tile, _ProjPkt.to_swa_rope),
+        ("glu", _ProjPkt.to_glu),
+        ("rms", _ProjPkt.to_rms),
+        ("rope", _ProjPkt.to_rope),
+        ("swa_rope", _ProjPkt.to_swa_rope),
     ):
-        _connect(rt, proj_main_mt, 5, dst, 0, pkt_id=pk)
+        _connect(rt, proj_x, 5, t[dst], 0, pkt_id=pk)
 
     # This token's k and v, out to the KV cache.
-    _connect(rt, rope_tile, 1, IT[2], 0, shim_symbol="recv_k")
-    _connect(rt, swa_rope_tile, 1, IT[2], 1, shim_symbol="recv_v")
-    _connect(rt, attn_kv_tile, 0, proj_main_mt, 3, pkt_id=_X_FROM_ATTN)
-    _connect(rt, swa_kv_tile, 0, proj_main_mt, 3, pkt_id=_X_FROM_ATTN)
-    _connect(rt, glu_tile, 0, proj_main_mt, 3, pkt_id=_X_FROM_GLU)
+    _connect(rt, t["rope"], 1, kv_shim, 0, shim_symbol="recv_k")
+    _connect(rt, t["swa_rope"], 1, kv_shim, 1, shim_symbol="recv_v")
+    _connect(rt, t["attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
+    _connect(rt, t["swa_attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
+    _connect(rt, t["glu"], 0, proj_x, 3, pkt_id=_X_FROM_GLU)
 
-    # The KV cache into MT[2].
-    _connect(rt, IT[2], 0, amt, 0, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_k")
-    _connect(rt, IT[2], 0, amt, 2, pkt_id=_KV_PKT_SWA)
-    _connect(rt, IT[2], 1, amt, 1, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_v")
-    _connect(rt, IT[2], 1, amt, 3, pkt_id=_KV_PKT_SWA)
-    _connect(rt, amt, 0, attn_qk_tile, 1)
-    _connect(rt, amt, 1, attn_kv_tile, 1)
-    _connect(rt, amt, 2, swa_qk_tile, 1)
-    _connect(rt, amt, 3, swa_kv_tile, 1)
+    # The KV cache into the attention memtile.
+    amt = t["attn_mem"]
+    _connect(rt, kv_shim, 0, amt, 0, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_k")
+    _connect(rt, kv_shim, 0, amt, 2, pkt_id=_KV_PKT_SWA)
+    _connect(rt, kv_shim, 1, amt, 1, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_v")
+    _connect(rt, kv_shim, 1, amt, 3, pkt_id=_KV_PKT_SWA)
+    _connect(rt, amt, 0, t["attn_qk"], 1)
+    _connect(rt, amt, 1, t["attn_kv"], 1)
+    _connect(rt, amt, 2, t["swa_attn_qk"], 1)
+    _connect(rt, amt, 3, t["swa_attn_kv"], 1)
 
     # The per-layer-input path.
-    _connect(rt, IT[4], 0, ple_tile, 0, shim_symbol="pli_rope_rms")
-    _connect(rt, IT[4], 1, ple_tile, 1, shim_symbol="pli_down")
-    _connect(rt, ple_tile, 1, plm_tile, 0)
-    _connect(rt, IT[5], 0, gle_tile, 1, shim_symbol="pli_gate")
-    _connect(rt, gle_tile, 1, plm_tile, 1)
-    _connect(rt, plm_tile, 0, plu_tile, 0)
-    _connect(rt, IT[5], 1, plu_tile, 1, shim_symbol="pli_up")
+    pl_shim_0, pl_shim_1 = t["pl_shim_0"], t["pl_shim_1"]
+    _connect(rt, pl_shim_0, 0, t["pl_embedding"], 0, shim_symbol="pli_rope_rms")
+    _connect(rt, pl_shim_0, 1, t["pl_embedding"], 1, shim_symbol="pli_down")
+    _connect(rt, t["pl_embedding"], 1, t["pl_merge"], 0)
+    _connect(rt, pl_shim_1, 0, t["pl_gate"], 1, shim_symbol="pli_gate")
+    _connect(rt, t["pl_gate"], 1, t["pl_merge"], 1)
+    _connect(rt, t["pl_merge"], 0, t["pl_up"], 0)
+    _connect(rt, pl_shim_1, 1, t["pl_up"], 1, shim_symbol="pli_up")
     # The layer output, out to x.
-    _connect(rt, plu_tile, 0, IT[3], 0, shim_symbol="recv_y")
+    _connect(rt, t["pl_up"], 0, x_shim, 0, shim_symbol="recv_y")
 
     return Program(dev, rt, workers=workers).resolve_program()
