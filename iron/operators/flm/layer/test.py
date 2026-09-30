@@ -146,7 +146,6 @@ def test_dispatches_complete(model, aie_context):
             run.set_parameters(context_len=context_len, max_l=4096)
             run(*bufs)
             after = x.numpy()
-            # The layer writes its output over the first model_dim values of x.
             d = op.geometry.model_dim
             assert not np.array_equal(
                 before[:d], after[:d]
