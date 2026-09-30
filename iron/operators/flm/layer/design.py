@@ -1159,6 +1159,512 @@ def _build_glu(ctx, glu_tile):
     )
 
 
+_X_SLICE_TY = np.ndarray[(X_SLICE,), _BF16]
+_LINEAR_W_TY = np.ndarray[(W_BLOCK,), _BF16]
+_M_PKT_TY = np.ndarray[(2 * q4nx.M_TILE + 16,), _BF16]
+
+
+def _build_proj_core(ctx, pt, kern, send_x_out, main_y0=None, main_y1=None):
+    """One q4nx projection core. Returns its y buffers (y0, y1).
+
+    A core that does not send y fills the second slot of main_y0 and main_y1,
+    the y buffers of the sending core in the previous row.
+    """
+    r, c = pt.row, pt.col
+    is_swa = ctx.rtp_buffer(pt, "proj_swa", f"RTP_PROJ_IS_SWA_BUFFER_{r}_{c}")
+    skip_kv = ctx.rtp_buffer(pt, "proj_skip", f"RTP_PROJ_SKIP_KV_BUFFER_{r}_{c}")
+    x0 = Buffer(type=_X_SLICE_TY, name=f"x_0_{r}_{c}", tile=pt)
+    w0 = Buffer(type=_LINEAR_W_TY, name=f"w_0_{r}_{c}", tile=pt)
+    x1 = Buffer(type=_X_SLICE_TY, name=f"x_1_{r}_{c}", tile=pt)
+    w1 = Buffer(type=_LINEAR_W_TY, name=f"w_1_{r}_{c}", tile=pt)
+    if send_x_out:
+        y0 = Buffer(type=_M_PKT_TY, name=f"y_0_{r}_{c}", tile=pt)
+        y1 = Buffer(type=_M_PKT_TY, name=f"y_1_{r}_{c}", tile=pt)
+    else:
+        y0, y1 = main_y0, main_y1
+    pk = ctx.locks(
+        pt,
+        PROJ_LOCKS,
+        dict(
+            x_prod_lock=2,
+            x_cons_lock=0,
+            w_prod_lock=2,
+            w_cons_lock=0,
+            y_prod_ping_lock=2,
+            y_prod_pong_lock=2,
+            rtp_available_lock=0,
+            y_cons_ping_lock=0,
+            y_cons_pong_lock=0,
+        ),
+    )
+
+    def proj_body(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, kern):
+        kern(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, constant(int(send_x_out)))
+
+    ctx.workers.append(
+        Worker(
+            proj_body,
+            [y0, w0, x0, y1, w1, x1, is_swa, skip_kv, kern],
+            tile=pt,
+            stack_size=10 * 1024,
+        )
+    )
+    chans = [
+        DmaChannel(
+            DMAChannelDir.S2MM,
+            0,
+            ping_pong(x0, x1, pk["x_prod_lock"], pk["x_cons_lock"]),
+        ),
+        DmaChannel(
+            DMAChannelDir.S2MM,
+            1,
+            ping_pong(w0, w1, pk["w_prod_lock"], pk["w_cons_lock"]),
+        ),
+    ]
+    if send_x_out:
+        chans.append(
+            DmaChannel(
+                DMAChannelDir.MM2S,
+                0,
+                [
+                    Bd(
+                        y,
+                        offset=14,
+                        length=2 * q4nx.M_TILE + 2,
+                        acquires=[Acquire(pk[f"y_cons_{half}_lock"], value=2)],
+                        releases=[Release(pk[f"y_prod_{half}_lock"], value=2)],
+                        next=nxt,
+                    )
+                    for y, half, nxt in ((y0, "ping", 1), (y1, "pong", 0))
+                ],
+            )
+        )
+    ctx.rt.add_tile_dma(TileDma(pt, chans))
+    return y0, y1
+
+
+def _build_proj_cores(ctx, CT):
+    """The q4nx projection engine: 16 cores in PROJ_COLS.
+
+    The cores in rows 2 and 4 send y. Returns, per group of two columns, the
+    sending cores, whose y gathers into that group's memtile.
+    """
+    proj_k = ctx.kernel(
+        "proj_main",
+        "proj_main",
+        [
+            _M_PKT_TY,
+            _LINEAR_W_TY,
+            _X_SLICE_TY,
+            _M_PKT_TY,
+            _LINEAR_W_TY,
+            _X_SLICE_TY,
+            _RTP_TY,
+            _RTP_TY,
+            np.int32,
+        ],
+    )
+
+    proj_send_tiles = []
+    for grp in range(2):
+        group_send = []
+        for csub in (0, 1):
+            col = PROJ_COLS[2 * grp + csub]
+            for row_pair in range(2):
+                send_t = CT[row_pair * 2][col]
+                nosend_t = CT[row_pair * 2 + 1][col]
+                y0, y1 = _build_proj_core(ctx, send_t, proj_k, send_x_out=True)
+                _build_proj_core(
+                    ctx, nosend_t, proj_k, send_x_out=False, main_y0=y0, main_y1=y1
+                )
+                group_send.append(send_t)
+        proj_send_tiles.append(group_send)
+    return proj_send_tiles
+
+
+_LINEAR_4W_TY = np.ndarray[(4 * W_BLOCK,), _BF16]
+# (lock id, init) of a projection memtile's weight locks.
+_PROJ_MEM_W_LOCKS = [(5, 2), (6, 0), (7, 0), (8, 2), (9, 0), (10, 0)]
+
+
+def _proj_weight_channels(w0, w1, wp0, wp0c0, wp0c1, wp1, wp1c0, wp1c1):
+    """A projection memtile's weight channels.
+
+    Each weight half arrives on S2MM 4 or 5 and leaves as two blocks, one to
+    each of two cores.
+    """
+    return {
+        "in0": DmaChannel(
+            DMAChannelDir.S2MM,
+            4,
+            ping_pong(w0, w1, wp0, wp0c0, offset=0, length=2 * W_BLOCK),
+        ),
+        "in1": DmaChannel(
+            DMAChannelDir.S2MM,
+            5,
+            ping_pong(w0, w1, wp1, wp1c0, offset=2 * W_BLOCK, length=2 * W_BLOCK),
+        ),
+        "out": [
+            DmaChannel(
+                DMAChannelDir.MM2S,
+                0,
+                ping_pong(w0, w1, wp0c0, wp0c1, offset=0, length=W_BLOCK),
+            ),
+            DmaChannel(
+                DMAChannelDir.MM2S,
+                1,
+                ping_pong(w0, w1, wp0c1, wp0, offset=W_BLOCK, length=W_BLOCK),
+            ),
+            DmaChannel(
+                DMAChannelDir.MM2S,
+                2,
+                ping_pong(w0, w1, wp1c0, wp1c1, offset=2 * W_BLOCK, length=W_BLOCK),
+            ),
+            DmaChannel(
+                DMAChannelDir.MM2S,
+                3,
+                ping_pong(w0, w1, wp1c1, wp1, offset=3 * W_BLOCK, length=W_BLOCK),
+            ),
+        ],
+    }
+
+
+def _proj_weight_buffers(mt):
+    """A projection memtile's weight ping and pong buffers."""
+    r, c = mt.row, mt.col
+    w0 = Buffer(type=_LINEAR_4W_TY, name=f"w_buffer_0_{r}_{c}", tile=mt)
+    w1 = Buffer(type=_LINEAR_4W_TY, name=f"w_buffer_1_{r}_{c}", tile=mt)
+    return w0, w1
+
+
+def _build_proj_gather_mem(ctx, mt):
+    """A projection memtile that also gathers y from its group's sending cores."""
+    m = q4nx.M_TILE
+    r, c = mt.row, mt.col
+    m_col_ty = np.ndarray[(8 * m + 2,), _BF16]
+    y0 = Buffer(type=m_col_ty, name=f"y_buffer_0_{r}_{c}", tile=mt)
+    y1 = Buffer(type=m_col_ty, name=f"y_buffer_1_{r}_{c}", tile=mt)
+    w0, w1 = _proj_weight_buffers(mt)
+    yp0, yp1, yp2, yp3, yc = ctx.add_locks(mt, [(0, 2), (1, 0), (2, 0), (3, 0), (4, 0)])
+    wc = _proj_weight_channels(w0, w1, *ctx.add_locks(mt, _PROJ_MEM_W_LOCKS))
+    ctx.rt.add_tile_dma(
+        TileDma(
+            mt,
+            [
+                DmaChannel(
+                    DMAChannelDir.S2MM,
+                    0,
+                    ping_pong(y0, y1, yp0, yp1, offset=0, length=2 * m + 2),
+                ),
+                DmaChannel(
+                    DMAChannelDir.S2MM,
+                    1,
+                    ping_pong(y0, y1, yp1, yp2, offset=2 * m + 2, length=2 * m),
+                ),
+                DmaChannel(
+                    DMAChannelDir.S2MM,
+                    2,
+                    ping_pong(y0, y1, yp2, yp3, offset=4 * m + 2, length=2 * m),
+                ),
+                DmaChannel(
+                    DMAChannelDir.S2MM,
+                    3,
+                    ping_pong(y0, y1, yp3, yc, offset=6 * m + 2, length=2 * m),
+                ),
+                wc["in0"],
+                *wc["out"],
+                DmaChannel(DMAChannelDir.MM2S, 4, ping_pong(y0, y1, yc, yp0)),
+                wc["in1"],
+            ],
+        )
+    )
+
+
+def _build_proj_weight_mem(ctx, mt):
+    """A projection memtile that carries weights only."""
+    w0, w1 = _proj_weight_buffers(mt)
+    wc = _proj_weight_channels(w0, w1, *ctx.add_locks(mt, _PROJ_MEM_W_LOCKS))
+    ctx.rt.add_tile_dma(TileDma(mt, [wc["in0"], *wc["out"], wc["in1"]]))
+
+
+def _build_proj_x_mem(ctx, mt):
+    """The projection memtile that gathers both groups' y and broadcasts x."""
+    m = q4nx.M_TILE
+    r, c = mt.row, mt.col
+    x_chunk_ty = np.ndarray[(X_SLICE * 2,), _BF16]
+    m_full_ty = np.ndarray[(16 * m + 2,), _BF16]
+    y0 = Buffer(type=m_full_ty, name=f"y_buffer_0_{r}_{c}", tile=mt)
+    y1 = Buffer(type=m_full_ty, name=f"y_buffer_1_{r}_{c}", tile=mt)
+    x0 = Buffer(type=x_chunk_ty, name=f"x_buffer_0_{r}_{c}", tile=mt)
+    x1 = Buffer(type=x_chunk_ty, name=f"x_buffer_1_{r}_{c}", tile=mt)
+    mp0, mp1, mc, xp, xc = ctx.add_locks(mt, [(0, 2), (1, 0), (2, 0), (3, 2), (4, 0)])
+    w0, w1 = _proj_weight_buffers(mt)
+    wc = _proj_weight_channels(w0, w1, *ctx.add_locks(mt, _PROJ_MEM_W_LOCKS))
+    ctx.rt.add_tile_dma(
+        TileDma(
+            mt,
+            [
+                DmaChannel(
+                    DMAChannelDir.S2MM,
+                    0,
+                    ping_pong(y0, y1, mp0, mp1, offset=0, length=8 * m + 2),
+                ),
+                DmaChannel(
+                    DMAChannelDir.S2MM,
+                    1,
+                    ping_pong(y0, y1, mp1, mc, offset=8 * m + 2, length=8 * m),
+                ),
+                DmaChannel(DMAChannelDir.S2MM, 3, ping_pong(x0, x1, xp, xc)),
+                wc["in0"],
+                wc["in1"],
+                DmaChannel(DMAChannelDir.MM2S, 5, ping_pong(y0, y1, mc, mp0)),
+                DmaChannel(DMAChannelDir.MM2S, 4, ping_pong(x0, x1, xc, xp)),
+                *wc["out"],
+            ],
+        )
+    )
+
+
+_F32 = np.dtype[np.float32]
+
+
+def _attn_s_ty(g):
+    """The type of the scores that the qk core sends the kv core."""
+    return np.ndarray[(q_heads_padded(g) * 16 + 32, 1), _BF16]
+
+
+def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
+    """An attention kv core.
+
+    The core takes the scores from of_s and v on S2MM 1. It sends o to the
+    projection engine on MM2S 0.
+
+    A round of the two-KV-head kernels covers one KV head. A round of the
+    other kernels covers every KV head.
+    """
+    g = ctx.g
+    D, NUM_KV = g.model_dim, g.num_kv_heads
+    attn_s_ty = _attn_s_ty(g)
+    r, c = kv_tile.row, kv_tile.col
+    NQ = g.num_attn_heads
+    o_repeats = D // (q4nx.M_TILE * 16)
+    v_ty = np.ndarray[(LK, dh if two_kv_heads else NUM_KV * dh), _BF16]
+    o_ty = np.ndarray[(dh * NQ,), _BF16]
+    y_ty = np.ndarray[(dh * NQ,), _F32]
+    L = ctx.rtp_buffer(kv_tile, rtp_key)
+    v0 = Buffer(type=v_ty, name=f"v_0_{r}_{c}", tile=kv_tile)
+    v1 = Buffer(type=v_ty, name=f"v_1_{r}_{c}", tile=kv_tile)
+    y = Buffer(type=y_ty, name=f"y_{r}_{c}", tile=kv_tile)
+    o = Buffer(type=o_ty, name=f"o_{r}_{c}", tile=kv_tile)
+    kl = ctx.locks(
+        kv_tile,
+        ATTN_KV_LOCKS,
+        dict(o_prod_lock=o_repeats, o_cons_lock=0, v_prod_lock=2, v_cons_lock=0),
+    )
+    l_ty = np.ndarray[(8,), _F32]
+    lbuf = Buffer(type=l_ty, name=f"l_{r}_{c}", tile=kv_tile)
+    k_begin = ctx.kernel(name, f"{name}_begin", [y_ty, l_ty])
+    k_finish = ctx.kernel(name, f"{name}_finish", [y_ty, o_ty, l_ty])
+    # The core runs one round per LK keys. The begin kernel waits on the qk
+    # core, which reads the RTP after q arrives.
+    if two_kv_heads:
+        k_sbeg = ctx.kernel(name, f"{name}_s_begin", [attn_s_ty, y_ty, l_ty])
+        k_vhalf = ctx.kernel(
+            name, f"{name}_v_half", [attn_s_ty, v_ty, v_ty, y_ty, np.int32]
+        )
+
+        def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, ksb, kvh, kf):
+            kb(yy, ll)
+            for _ in range_((rtp_l[0] + (LK - 1)) // LK):
+                s = s_in.acquire(1)
+                ksb(s, yy, ll)
+                for j in range_(2):
+                    kvh(s, v_0, v_1, yy, j)
+                s_in.release(1)
+            kf(yy, oo, ll)
+
+        args = [of_s.cons(), v0, v1, y, lbuf, o, L]
+        args += [k_begin, k_sbeg, k_vhalf, k_finish]
+    else:
+        k_round = ctx.kernel(name, f"{name}_round", [attn_s_ty, v_ty, v_ty, y_ty, l_ty])
+
+        def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, kr, kf):
+            kb(yy, ll)
+            for _ in range_((rtp_l[0] + (LK - 1)) // LK):
+                s = s_in.acquire(1)
+                kr(s, v_0, v_1, yy, ll)
+                s_in.release(1)
+            kf(yy, oo, ll)
+
+        args = [of_s.cons(), v0, v1, y, lbuf, o, L, k_begin, k_round, k_finish]
+
+    ctx.workers.append(Worker(kv_body, args, tile=kv_tile, stack_size=1024 * 6))
+    ctx.rt.add_tile_dma(
+        TileDma(
+            kv_tile,
+            [
+                DmaChannel(
+                    DMAChannelDir.S2MM,
+                    1,
+                    ping_pong(v0, v1, kl["v_prod_lock"], kl["v_cons_lock"]),
+                ),
+                _single_bd(
+                    DMAChannelDir.MM2S,
+                    0,
+                    o,
+                    kl["o_cons_lock"],
+                    kl["o_prod_lock"],
+                    packet=(0, _X_FROM_ATTN),
+                    offset=0,
+                    length=NQ * dh,
+                    sizes=[NQ, dh // 8, 8],
+                    strides=[8, NQ * 8, 1],
+                ),
+            ],
+        )
+    )
+
+
+def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
+    """An attention qk core.
+
+    The core takes q from q_fifo and k on S2MM 1. It sends the scores to of_s.
+    """
+    g = ctx.g
+    NUM_KV, NQ_PADDED = g.num_kv_heads, q_heads_padded(g)
+    attn_s_ty = _attn_s_ty(g)
+    r, c = qk_tile.row, qk_tile.col
+    k_ty = np.ndarray[(LK, dh if two_kv_heads else NUM_KV * dh), _BF16]
+    q_ty = np.ndarray[(NQ_PADDED * dh,), _BF16]
+    k0 = Buffer(type=k_ty, name=f"k_0_{r}_{c}", tile=qk_tile)
+    k1 = Buffer(type=k_ty, name=f"k_1_{r}_{c}", tile=qk_tile)
+    ql = ctx.locks(qk_tile, ATTN_QK_LOCKS, dict(k_prod_lock=2, k_cons_lock=0))
+    ctx.add_locks(qk_tile, [(ATTN_HANDSHAKE_LOCK, 0)])
+    L = ctx.rtp_buffer(qk_tile, rtp_key)
+    q_in_order = [(NQ_PADDED, 8), (dh // 8, NQ_PADDED * 8), (8, 1)]
+    m_ty = np.ndarray[(16,), _BF16]
+    c_ty = np.ndarray[(8,), _F32]
+    m_buf = Buffer(type=m_ty, name=f"m_{r}_{c}", tile=qk_tile)
+    c_local = Buffer(type=c_ty, name=f"c_local_{r}_{c}", tile=qk_tile)
+    k_begin = ctx.kernel(name, f"{name}_begin", [m_ty])
+    # The q acquire orders the RTP read after the sequence's RTP writes.
+    if two_kv_heads:
+        k_half = ctx.kernel(
+            name,
+            f"{name}_half",
+            [q_ty, k_ty, k_ty, attn_s_ty, m_ty, c_ty] + [np.int32] * 3,
+        )
+        k_storec = ctx.kernel(name, f"{name}_store_c", [attn_s_ty, c_ty])
+
+        def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kh, ks):
+            q = q_h.acquire(1)
+            kb(mm)
+            for i in range_((rtp_l[0] + (LK - 1)) // LK):
+                s = s_out.acquire(1)
+                for j in range_(2):
+                    kh(q, k_0, k_1, s, mm, cc, j, i, rtp_l[0])
+                ks(s, cc)
+                s_out.release(1)
+            q_h.release(1)
+
+        kerns = [k_begin, k_half, k_storec]
+    else:
+        k_round = ctx.kernel(
+            name,
+            f"{name}_round",
+            [q_ty, k_ty, k_ty, attn_s_ty, m_ty, c_ty, np.int32, np.int32],
+        )
+
+        def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kr):
+            q = q_h.acquire(1)
+            kb(mm)
+            for i in range_((rtp_l[0] + (LK - 1)) // LK):
+                s = s_out.acquire(1)
+                kr(q, k_0, k_1, s, mm, cc, i, rtp_l[0])
+                s_out.release(1)
+            q_h.release(1)
+
+        kerns = [k_begin, k_round]
+
+    args = [
+        of_s.prod(),
+        q_fifo.cons(dims_from_stream=q_in_order),
+        k0,
+        k1,
+        m_buf,
+        c_local,
+        L,
+    ] + kerns
+    ctx.workers.append(Worker(qk_body, args, tile=qk_tile, stack_size=1024 * 4))
+    ctx.rt.add_tile_dma(
+        TileDma(
+            qk_tile,
+            [
+                DmaChannel(
+                    DMAChannelDir.S2MM,
+                    1,
+                    ping_pong(k0, k1, ql["k_prod_lock"], ql["k_cons_lock"]),
+                ),
+            ],
+        )
+    )
+
+
+def _build_attn_mem(ctx, amt):
+    """The attention memtile.
+
+    It takes k, v, swa_k and swa_v in whole rows. It sends each to its core in
+    the order the core's kernel reads.
+    """
+    g = ctx.g
+    NUM_KV, two_kv = g.num_kv_heads, g.num_kv_heads == 2
+    amt_name = f"{amt.row}_{amt.col}"
+    k_row = NUM_KV * g.dh
+    sk_row = NUM_KV * g.swa_dh
+    k_order = [(k_row // 8, 8), (16, k_row), (8, 1)]
+    if not two_kv:
+        v_order = [(LK // 8, LK // 2 * k_row), (k_row // 8, 8), (8, k_row), (8, 1)]
+    else:
+        v_order = [(k_row // 8, 8), (LK, k_row), (8, 1)]
+    sk_order = [(sk_row // 8, 8), (16, sk_row), (8, 1)]
+    sv_order = [(LK // 8, LK // 2 * sk_row), (sk_row // 8, 8), (8, sk_row), (8, 1)]
+    amt_chans = []
+    for ch, (key, row, order, lock_ids) in enumerate(
+        (
+            ("k", k_row, k_order, (0, 1)),
+            ("v", k_row, v_order, (3, 4)),
+            ("swa_k", sk_row, sk_order, (5, 6)),
+            ("swa_v", sk_row, sv_order, (7, 8)),
+        )
+    ):
+        b0, b1 = (
+            Buffer(
+                type=np.ndarray[(LK, row), _BF16],
+                name=f"{key}_mem_buffer_{i}_{amt_name}",
+                tile=amt,
+            )
+            for i in (0, 1)
+        )
+        prod, cons = ctx.add_locks(amt, [(lock_ids[0], 2), (lock_ids[1], 0)])
+        amt_chans += [
+            DmaChannel(DMAChannelDir.S2MM, ch, ping_pong(b0, b1, prod, cons)),
+            DmaChannel(
+                DMAChannelDir.MM2S,
+                ch,
+                ping_pong(
+                    b0,
+                    b1,
+                    cons,
+                    prod,
+                    length=LK * row,
+                    sizes=[size for size, _ in order],
+                    strides=[stride for _, stride in order],
+                ),
+            ),
+        ]
+    ctx.rt.add_tile_dma(TileDma(amt, amt_chans))
+
+
 def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     """The MLIR module of one decode layer of ``layer_type`` for ``geometry``.
 
@@ -1174,12 +1680,9 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             "sequence takes the remainder by it with a mask"
         )
     g = geometry
-    D = g.model_dim
-    NUM_KV = g.num_kv_heads
     G_DQ = g.num_attn_heads * g.dh
     S_DQ = g.num_attn_heads * g.swa_dh
-    NQ_PADDED = q_heads_padded(g)
-    two_kv = NUM_KV == 2
+    two_kv = g.num_kv_heads == 2
 
     kernel_fns = layer_kernels(g, dev)
 
@@ -1228,486 +1731,36 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     glu_tile = CT[1][3]
     _build_glu(ctx, glu_tile)
 
-    # --- The q4nx projection engine: 16 cores in PROJ_COLS. The cores in rows 2
-    # and 4 send y. The core in the next row fills the second slot of the
-    # sender's y buffers.
-    x_slice_ty = np.ndarray[(X_SLICE,), _BF16]
-    linear_w_ty = np.ndarray[(W_BLOCK,), _BF16]
-    m_pkt_ty = np.ndarray[(2 * q4nx.M_TILE + 16,), _BF16]
-    proj_k = ctx.kernel(
-        "proj_main",
-        "proj_main",
-        [
-            m_pkt_ty,
-            linear_w_ty,
-            x_slice_ty,
-            m_pkt_ty,
-            linear_w_ty,
-            x_slice_ty,
-            _RTP_TY,
-            _RTP_TY,
-            np.int32,
-        ],
-    )
+    proj_send_tiles = _build_proj_cores(ctx, CT)
 
-    def build_proj_main(pt, send_x_out, main_y0=None, main_y1=None):
-        """Returns (y0, y1), which the paired core in the next row borrows."""
-        r, c = pt.row, pt.col
-        is_swa = ctx.rtp_buffer(pt, "proj_swa", f"RTP_PROJ_IS_SWA_BUFFER_{r}_{c}")
-        skip_kv = ctx.rtp_buffer(pt, "proj_skip", f"RTP_PROJ_SKIP_KV_BUFFER_{r}_{c}")
-        x0 = Buffer(type=x_slice_ty, name=f"x_0_{r}_{c}", tile=pt)
-        w0 = Buffer(type=linear_w_ty, name=f"w_0_{r}_{c}", tile=pt)
-        x1 = Buffer(type=x_slice_ty, name=f"x_1_{r}_{c}", tile=pt)
-        w1 = Buffer(type=linear_w_ty, name=f"w_1_{r}_{c}", tile=pt)
-        if send_x_out:
-            y0 = Buffer(type=m_pkt_ty, name=f"y_0_{r}_{c}", tile=pt)
-            y1 = Buffer(type=m_pkt_ty, name=f"y_1_{r}_{c}", tile=pt)
-        else:
-            y0, y1 = main_y0, main_y1
-        pk = ctx.locks(
-            pt,
-            PROJ_LOCKS,
-            dict(
-                x_prod_lock=2,
-                x_cons_lock=0,
-                w_prod_lock=2,
-                w_cons_lock=0,
-                y_prod_ping_lock=2,
-                y_prod_pong_lock=2,
-                rtp_available_lock=0,
-                y_cons_ping_lock=0,
-                y_cons_pong_lock=0,
-            ),
-        )
-
-        def proj_body(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, kern):
-            kern(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, constant(int(send_x_out)))
-
-        ctx.workers.append(
-            Worker(
-                proj_body,
-                [y0, w0, x0, y1, w1, x1, is_swa, skip_kv, proj_k],
-                tile=pt,
-                stack_size=10 * 1024,
-            )
-        )
-        chans = [
-            DmaChannel(
-                DMAChannelDir.S2MM,
-                0,
-                ping_pong(x0, x1, pk["x_prod_lock"], pk["x_cons_lock"]),
-            ),
-            DmaChannel(
-                DMAChannelDir.S2MM,
-                1,
-                ping_pong(w0, w1, pk["w_prod_lock"], pk["w_cons_lock"]),
-            ),
-        ]
-        if send_x_out:
-            chans.append(
-                DmaChannel(
-                    DMAChannelDir.MM2S,
-                    0,
-                    [
-                        Bd(
-                            y,
-                            offset=14,
-                            length=2 * q4nx.M_TILE + 2,
-                            acquires=[Acquire(pk[f"y_cons_{half}_lock"], value=2)],
-                            releases=[Release(pk[f"y_prod_{half}_lock"], value=2)],
-                            next=nxt,
-                        )
-                        for y, half, nxt in ((y0, "ping", 1), (y1, "pong", 0))
-                    ],
-                )
-            )
-        ctx.rt.add_tile_dma(TileDma(pt, chans))
-        return y0, y1
-
-    # proj_send_tiles[group]: the sending cores whose y gathers into that
-    # group's memtile.
-    proj_send_tiles = []
-    for grp in range(2):
-        group_send = []
-        for csub in (0, 1):
-            col = PROJ_COLS[2 * grp + csub]
-            for row_pair in range(2):
-                send_t = CT[row_pair * 2][col]
-                nosend_t = CT[row_pair * 2 + 1][col]
-                y0, y1 = build_proj_main(send_t, send_x_out=True)
-                build_proj_main(nosend_t, send_x_out=False, main_y0=y0, main_y1=y1)
-                group_send.append(send_t)
-        proj_send_tiles.append(group_send)
-
-    # --- The projection memtiles. Each splits its column's weights over the
-    # column's four cores. MT[0] and MT[6] also gather y from their group.
-    # MT[1] gathers both groups' y and broadcasts x.
-    linear_4w_ty = np.ndarray[(4 * W_BLOCK,), _BF16]
-    WB = W_BLOCK
-    m = q4nx.M_TILE
-
-    def weight_channels(w0, w1, wp0, wp0c0, wp0c1, wp1, wp1c0, wp1c1):
-        return {
-            "in0": DmaChannel(
-                DMAChannelDir.S2MM,
-                4,
-                ping_pong(w0, w1, wp0, wp0c0, offset=0, length=2 * WB),
-            ),
-            "in1": DmaChannel(
-                DMAChannelDir.S2MM,
-                5,
-                ping_pong(w0, w1, wp1, wp1c0, offset=2 * WB, length=2 * WB),
-            ),
-            "out": [
-                DmaChannel(
-                    DMAChannelDir.MM2S,
-                    0,
-                    ping_pong(w0, w1, wp0c0, wp0c1, offset=0, length=WB),
-                ),
-                DmaChannel(
-                    DMAChannelDir.MM2S,
-                    1,
-                    ping_pong(w0, w1, wp0c1, wp0, offset=WB, length=WB),
-                ),
-                DmaChannel(
-                    DMAChannelDir.MM2S,
-                    2,
-                    ping_pong(w0, w1, wp1c0, wp1c1, offset=2 * WB, length=WB),
-                ),
-                DmaChannel(
-                    DMAChannelDir.MM2S,
-                    3,
-                    ping_pong(w0, w1, wp1c1, wp1, offset=3 * WB, length=WB),
-                ),
-            ],
-        }
-
-    def weight_buffers(mt):
-        r, c = mt.row, mt.col
-        w0 = Buffer(type=linear_4w_ty, name=f"w_buffer_0_{r}_{c}", tile=mt)
-        w1 = Buffer(type=linear_4w_ty, name=f"w_buffer_1_{r}_{c}", tile=mt)
-        return w0, w1
-
-    WEIGHT_LOCKS = [(5, 2), (6, 0), (7, 0), (8, 2), (9, 0), (10, 0)]
-
-    def build_assemble_col(mt):
-        r, c = mt.row, mt.col
-        m_col_ty = np.ndarray[(8 * m + 2,), _BF16]
-        y0 = Buffer(type=m_col_ty, name=f"y_buffer_0_{r}_{c}", tile=mt)
-        y1 = Buffer(type=m_col_ty, name=f"y_buffer_1_{r}_{c}", tile=mt)
-        w0, w1 = weight_buffers(mt)
-        yp0, yp1, yp2, yp3, yc = ctx.add_locks(
-            mt, [(0, 2), (1, 0), (2, 0), (3, 0), (4, 0)]
-        )
-        wc = weight_channels(w0, w1, *ctx.add_locks(mt, WEIGHT_LOCKS))
-        ctx.rt.add_tile_dma(
-            TileDma(
-                mt,
-                [
-                    DmaChannel(
-                        DMAChannelDir.S2MM,
-                        0,
-                        ping_pong(y0, y1, yp0, yp1, offset=0, length=2 * m + 2),
-                    ),
-                    DmaChannel(
-                        DMAChannelDir.S2MM,
-                        1,
-                        ping_pong(y0, y1, yp1, yp2, offset=2 * m + 2, length=2 * m),
-                    ),
-                    DmaChannel(
-                        DMAChannelDir.S2MM,
-                        2,
-                        ping_pong(y0, y1, yp2, yp3, offset=4 * m + 2, length=2 * m),
-                    ),
-                    DmaChannel(
-                        DMAChannelDir.S2MM,
-                        3,
-                        ping_pong(y0, y1, yp3, yc, offset=6 * m + 2, length=2 * m),
-                    ),
-                    wc["in0"],
-                    *wc["out"],
-                    DmaChannel(DMAChannelDir.MM2S, 4, ping_pong(y0, y1, yc, yp0)),
-                    wc["in1"],
-                ],
-            )
-        )
-
-    def build_assemble_weight_only(mt):
-        w0, w1 = weight_buffers(mt)
-        wc = weight_channels(w0, w1, *ctx.add_locks(mt, WEIGHT_LOCKS))
-        ctx.rt.add_tile_dma(TileDma(mt, [wc["in0"], *wc["out"], wc["in1"]]))
-
-    def build_assemble_weight_x(mt):
-        r, c = mt.row, mt.col
-        x_chunk_ty = np.ndarray[(X_SLICE * 2,), _BF16]
-        m_full_ty = np.ndarray[(16 * m + 2,), _BF16]
-        y0 = Buffer(type=m_full_ty, name=f"y_buffer_0_{r}_{c}", tile=mt)
-        y1 = Buffer(type=m_full_ty, name=f"y_buffer_1_{r}_{c}", tile=mt)
-        x0 = Buffer(type=x_chunk_ty, name=f"x_buffer_0_{r}_{c}", tile=mt)
-        x1 = Buffer(type=x_chunk_ty, name=f"x_buffer_1_{r}_{c}", tile=mt)
-        mp0, mp1, mc, xp, xc = ctx.add_locks(
-            mt, [(0, 2), (1, 0), (2, 0), (3, 2), (4, 0)]
-        )
-        w0, w1 = weight_buffers(mt)
-        wc = weight_channels(w0, w1, *ctx.add_locks(mt, WEIGHT_LOCKS))
-        ctx.rt.add_tile_dma(
-            TileDma(
-                mt,
-                [
-                    DmaChannel(
-                        DMAChannelDir.S2MM,
-                        0,
-                        ping_pong(y0, y1, mp0, mp1, offset=0, length=8 * m + 2),
-                    ),
-                    DmaChannel(
-                        DMAChannelDir.S2MM,
-                        1,
-                        ping_pong(y0, y1, mp1, mc, offset=8 * m + 2, length=8 * m),
-                    ),
-                    DmaChannel(DMAChannelDir.S2MM, 3, ping_pong(x0, x1, xp, xc)),
-                    wc["in0"],
-                    wc["in1"],
-                    DmaChannel(DMAChannelDir.MM2S, 5, ping_pong(y0, y1, mc, mp0)),
-                    DmaChannel(DMAChannelDir.MM2S, 4, ping_pong(x0, x1, xc, xp)),
-                    *wc["out"],
-                ],
-            )
-        )
-
-    build_assemble_col(MT[0])
-    build_assemble_col(MT[6])
-    build_assemble_weight_only(MT[7])
-    build_assemble_weight_x(MT[1])
+    # Each projection memtile splits its column's weights over the column's
+    # four cores.
+    _build_proj_gather_mem(ctx, MT[0])
+    _build_proj_gather_mem(ctx, MT[6])
+    _build_proj_weight_mem(ctx, MT[7])
+    _build_proj_x_mem(ctx, MT[1])
     proj_main_mt = MT[1]
 
-    # --- Attention in column 2: the global pair in rows 2 and 3, the
+    # Attention in column 2: the global pair in rows 2 and 3, the
     # sliding-window pair in rows 4 and 5. k and v come from MT[2], q from
     # RoPE, and the scores go from the qk core to the kv core through a fifo.
-    attn_s_ty = np.ndarray[(NQ_PADDED * 16 + 32, 1), _BF16]
-    f32 = np.dtype[np.float32]
-
-    # A round of the two-KV-head kernels covers one KV head. A round of the
-    # other kernels covers every KV head.
-    def build_attn_kv(kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
-        r, c = kv_tile.row, kv_tile.col
-        NQ = g.num_attn_heads
-        o_repeats = D // (q4nx.M_TILE * 16)
-        v_ty = np.ndarray[(LK, dh if two_kv_heads else NUM_KV * dh), _BF16]
-        o_ty = np.ndarray[(dh * NQ,), _BF16]
-        y_ty = np.ndarray[(dh * NQ,), f32]
-        L = ctx.rtp_buffer(kv_tile, rtp_key)
-        v0 = Buffer(type=v_ty, name=f"v_0_{r}_{c}", tile=kv_tile)
-        v1 = Buffer(type=v_ty, name=f"v_1_{r}_{c}", tile=kv_tile)
-        y = Buffer(type=y_ty, name=f"y_{r}_{c}", tile=kv_tile)
-        o = Buffer(type=o_ty, name=f"o_{r}_{c}", tile=kv_tile)
-        kl = ctx.locks(
-            kv_tile,
-            ATTN_KV_LOCKS,
-            dict(o_prod_lock=o_repeats, o_cons_lock=0, v_prod_lock=2, v_cons_lock=0),
-        )
-        l_ty = np.ndarray[(8,), f32]
-        lbuf = Buffer(type=l_ty, name=f"l_{r}_{c}", tile=kv_tile)
-        k_begin = ctx.kernel(name, f"{name}_begin", [y_ty, l_ty])
-        k_finish = ctx.kernel(name, f"{name}_finish", [y_ty, o_ty, l_ty])
-        # The core runs one round per LK keys. The begin kernel waits on the qk
-        # core, which reads the RTP after q arrives.
-        if two_kv_heads:
-            k_sbeg = ctx.kernel(name, f"{name}_s_begin", [attn_s_ty, y_ty, l_ty])
-            k_vhalf = ctx.kernel(
-                name, f"{name}_v_half", [attn_s_ty, v_ty, v_ty, y_ty, np.int32]
-            )
-
-            def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, ksb, kvh, kf):
-                kb(yy, ll)
-                for _ in range_((rtp_l[0] + (LK - 1)) // LK):
-                    s = s_in.acquire(1)
-                    ksb(s, yy, ll)
-                    for j in range_(2):
-                        kvh(s, v_0, v_1, yy, j)
-                    s_in.release(1)
-                kf(yy, oo, ll)
-
-            args = [of_s.cons(), v0, v1, y, lbuf, o, L]
-            args += [k_begin, k_sbeg, k_vhalf, k_finish]
-        else:
-            k_round = ctx.kernel(
-                name, f"{name}_round", [attn_s_ty, v_ty, v_ty, y_ty, l_ty]
-            )
-
-            def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, kr, kf):
-                kb(yy, ll)
-                for _ in range_((rtp_l[0] + (LK - 1)) // LK):
-                    s = s_in.acquire(1)
-                    kr(s, v_0, v_1, yy, ll)
-                    s_in.release(1)
-                kf(yy, oo, ll)
-
-            args = [of_s.cons(), v0, v1, y, lbuf, o, L, k_begin, k_round, k_finish]
-
-        ctx.workers.append(Worker(kv_body, args, tile=kv_tile, stack_size=1024 * 6))
-        ctx.rt.add_tile_dma(
-            TileDma(
-                kv_tile,
-                [
-                    DmaChannel(
-                        DMAChannelDir.S2MM,
-                        1,
-                        ping_pong(v0, v1, kl["v_prod_lock"], kl["v_cons_lock"]),
-                    ),
-                    _single_bd(
-                        DMAChannelDir.MM2S,
-                        0,
-                        o,
-                        kl["o_cons_lock"],
-                        kl["o_prod_lock"],
-                        packet=(0, _X_FROM_ATTN),
-                        offset=0,
-                        length=NQ * dh,
-                        sizes=[NQ, dh // 8, 8],
-                        strides=[8, NQ * 8, 1],
-                    ),
-                ],
-            )
-        )
-
-    def build_attn_qk(qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
-        r, c = qk_tile.row, qk_tile.col
-        k_ty = np.ndarray[(LK, dh if two_kv_heads else NUM_KV * dh), _BF16]
-        q_ty = np.ndarray[(NQ_PADDED * dh,), _BF16]
-        k0 = Buffer(type=k_ty, name=f"k_0_{r}_{c}", tile=qk_tile)
-        k1 = Buffer(type=k_ty, name=f"k_1_{r}_{c}", tile=qk_tile)
-        ql = ctx.locks(qk_tile, ATTN_QK_LOCKS, dict(k_prod_lock=2, k_cons_lock=0))
-        ctx.add_locks(qk_tile, [(ATTN_HANDSHAKE_LOCK, 0)])
-        L = ctx.rtp_buffer(qk_tile, rtp_key)
-        q_in_order = [(NQ_PADDED, 8), (dh // 8, NQ_PADDED * 8), (8, 1)]
-        m_ty = np.ndarray[(16,), _BF16]
-        c_ty = np.ndarray[(8,), f32]
-        m_buf = Buffer(type=m_ty, name=f"m_{r}_{c}", tile=qk_tile)
-        c_local = Buffer(type=c_ty, name=f"c_local_{r}_{c}", tile=qk_tile)
-        k_begin = ctx.kernel(name, f"{name}_begin", [m_ty])
-        # The q acquire orders the RTP read after the sequence's RTP writes.
-        if two_kv_heads:
-            k_half = ctx.kernel(
-                name,
-                f"{name}_half",
-                [q_ty, k_ty, k_ty, attn_s_ty, m_ty, c_ty] + [np.int32] * 3,
-            )
-            k_storec = ctx.kernel(name, f"{name}_store_c", [attn_s_ty, c_ty])
-
-            def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kh, ks):
-                q = q_h.acquire(1)
-                kb(mm)
-                for i in range_((rtp_l[0] + (LK - 1)) // LK):
-                    s = s_out.acquire(1)
-                    for j in range_(2):
-                        kh(q, k_0, k_1, s, mm, cc, j, i, rtp_l[0])
-                    ks(s, cc)
-                    s_out.release(1)
-                q_h.release(1)
-
-            kerns = [k_begin, k_half, k_storec]
-        else:
-            k_round = ctx.kernel(
-                name,
-                f"{name}_round",
-                [q_ty, k_ty, k_ty, attn_s_ty, m_ty, c_ty, np.int32, np.int32],
-            )
-
-            def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kr):
-                q = q_h.acquire(1)
-                kb(mm)
-                for i in range_((rtp_l[0] + (LK - 1)) // LK):
-                    s = s_out.acquire(1)
-                    kr(q, k_0, k_1, s, mm, cc, i, rtp_l[0])
-                    s_out.release(1)
-                q_h.release(1)
-
-            kerns = [k_begin, k_round]
-
-        args = [
-            of_s.prod(),
-            q_fifo.cons(dims_from_stream=q_in_order),
-            k0,
-            k1,
-            m_buf,
-            c_local,
-            L,
-        ] + kerns
-        ctx.workers.append(Worker(qk_body, args, tile=qk_tile, stack_size=1024 * 4))
-        ctx.rt.add_tile_dma(
-            TileDma(
-                qk_tile,
-                [
-                    DmaChannel(
-                        DMAChannelDir.S2MM,
-                        1,
-                        ping_pong(k0, k1, ql["k_prod_lock"], ql["k_cons_lock"]),
-                    ),
-                ],
-            )
-        )
-
     attn_qk_tile = CT[0][2]
     attn_kv_tile = CT[1][2]
-    of_g_s = ObjectFifo(attn_s_ty, name="attn_s", delegate_tile=attn_kv_tile)
-    build_attn_kv(attn_kv_tile, "attn_kv", "l_kv", g.dh, of_g_s, two_kv)
-    build_attn_qk(attn_qk_tile, "attn_qk", "l_qk", g.dh, of_g_s, q_of_g, two_kv)
+    of_g_s = ObjectFifo(_attn_s_ty(g), name="attn_s", delegate_tile=attn_kv_tile)
+    _build_attn_kv(ctx, attn_kv_tile, "attn_kv", "l_kv", g.dh, of_g_s, two_kv)
+    _build_attn_qk(ctx, attn_qk_tile, "attn_qk", "l_qk", g.dh, of_g_s, q_of_g, two_kv)
     swa_qk_tile = CT[2][2]
     swa_kv_tile = CT[3][2]
-    of_swa_s = ObjectFifo(attn_s_ty, name="swa_attn_s", delegate_tile=swa_kv_tile)
-    build_attn_kv(swa_kv_tile, "swa_attn_kv", "swa_l_kv", g.swa_dh, of_swa_s, False)
-    build_attn_qk(
-        swa_qk_tile, "swa_attn_qk", "swa_l_qk", g.swa_dh, of_swa_s, q_of_swa, False
+    of_swa_s = ObjectFifo(_attn_s_ty(g), name="swa_attn_s", delegate_tile=swa_kv_tile)
+    _build_attn_kv(
+        ctx, swa_kv_tile, "swa_attn_kv", "swa_l_kv", g.swa_dh, of_swa_s, False
+    )
+    _build_attn_qk(
+        ctx, swa_qk_tile, "swa_attn_qk", "swa_l_qk", g.swa_dh, of_swa_s, q_of_swa, False
     )
 
-    # --- The attention memtile, MT[2]: k, v, swa_k and swa_v each in whole
-    # rows, and out to its core in the order its kernel reads.
     amt = MT[2]
-    amt_name = f"{amt.row}_{amt.col}"
-    k_row = NUM_KV * g.dh
-    sk_row = NUM_KV * g.swa_dh
-    k_order = [(k_row // 8, 8), (16, k_row), (8, 1)]
-    if not two_kv:
-        v_order = [(LK // 8, LK // 2 * k_row), (k_row // 8, 8), (8, k_row), (8, 1)]
-    else:
-        v_order = [(k_row // 8, 8), (LK, k_row), (8, 1)]
-    sk_order = [(sk_row // 8, 8), (16, sk_row), (8, 1)]
-    sv_order = [(LK // 8, LK // 2 * sk_row), (sk_row // 8, 8), (8, sk_row), (8, 1)]
-    amt_chans = []
-    for ch, (key, row, order, lock_ids) in enumerate(
-        (
-            ("k", k_row, k_order, (0, 1)),
-            ("v", k_row, v_order, (3, 4)),
-            ("swa_k", sk_row, sk_order, (5, 6)),
-            ("swa_v", sk_row, sv_order, (7, 8)),
-        )
-    ):
-        b0, b1 = (
-            Buffer(
-                type=np.ndarray[(LK, row), _BF16],
-                name=f"{key}_mem_buffer_{i}_{amt_name}",
-                tile=amt,
-            )
-            for i in (0, 1)
-        )
-        prod, cons = ctx.add_locks(amt, [(lock_ids[0], 2), (lock_ids[1], 0)])
-        amt_chans += [
-            DmaChannel(DMAChannelDir.S2MM, ch, ping_pong(b0, b1, prod, cons)),
-            DmaChannel(
-                DMAChannelDir.MM2S,
-                ch,
-                ping_pong(
-                    b0,
-                    b1,
-                    cons,
-                    prod,
-                    length=LK * row,
-                    sizes=[size for size, _ in order],
-                    strides=[stride for _, stride in order],
-                ),
-            ),
-        ]
-    ctx.rt.add_tile_dma(TileDma(amt, amt_chans))
+    _build_attn_mem(ctx, amt)
 
     # The router places flows in the order the design adds them. Long flows
     # go first. The sequence addresses a shim channel by the shim symbol of
