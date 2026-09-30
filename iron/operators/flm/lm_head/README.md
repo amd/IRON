@@ -26,8 +26,8 @@ vocabulary as q4nx blocks of 32 out-features by 256 in-features, in the order
 Against the float64 reference in `reference.py`:
 
 - The cores normalize the token in bf16. They narrow each 32-column dot
-  product and the logits to bf16. On the test inputs, the error reaches 1.4%
-  of the largest logit.
+  product and the logits to bf16. The error reaches 1.4% of the largest logit
+  on the test inputs.
 - AIE2P's `tanh` approximation errs by up to 0.038 absolute, near 0.5. The
-  softcap multiplies that error by the cap: up to about 1.1 at Gemma 4's cap of
-  30. FastFlowLM's kernel computes the softcap the same way.
+  kernel multiplies that error by the softcap: up to about 1.1 at Gemma 4's
+  softcap of 30. FastFlowLM's kernel computes the softcap the same way.

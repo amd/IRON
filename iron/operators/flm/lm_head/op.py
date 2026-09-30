@@ -40,8 +40,8 @@ class LMHead(MLIROperator):
     @property
     def name(self) -> str:
         dev = aie_utils.get_current_device().resolve().name
-        # The name keys the build cache. The softcap changes the runtime
-        # sequence, so the name includes it.
+        # The name keys the build cache. The softcap is part of the runtime
+        # sequence. The name therefore includes the softcap.
         cap = f"{float(self.softcap):g}".replace(".", "p").replace("-", "n")
         return f"FLM_LMHead_d{self.dim}_v{self.vocab}_c{cap}_{dev}"
 
