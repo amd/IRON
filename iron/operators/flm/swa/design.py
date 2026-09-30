@@ -75,9 +75,9 @@ IN_PROD_LOCK, IN_CONS_LOCK = 2, 3
 
 
 def swa_kernel(device=None):
-    """The flm_swa_prefill build this design's cores link."""
+    """The flm_gemma4_swa_prefill build this design's cores link."""
     return call_factory(
-        kernels.flm_swa_prefill,
+        kernels.flm_gemma4_swa_prefill,
         device=device,
         in_prod_lock=IN_PROD_LOCK,
         in_cons_lock=IN_CONS_LOCK,
@@ -159,10 +159,7 @@ def swa(dev, max_context, num_heads, num_kv_heads, window, trace_size=0):
         for i in range(ROWS)
     ]
 
-    kernel_object = swa_kernel(dev).object_file
-
-    def k(name, arg_types):
-        return kernel_object.bind(name, arg_types)
+    k = swa_kernel(dev).entry
 
     k_blocks = k("attn_blocks", [L_ty, L_ty, np.int32, L_ty])
     k_round_begin = k("attn_round_begin", [m_col_ty, m_col_ty, cl_ty, cl_ty, y_ty])

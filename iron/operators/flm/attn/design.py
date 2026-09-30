@@ -74,9 +74,9 @@ IN_PROD_LOCK, IN_CONS_LOCK = 2, 3
 
 
 def attn_kernel(device=None):
-    """The flm_attn_prefill build this design's cores link."""
+    """The flm_gemma4_attn_prefill build this design's cores link."""
     return call_factory(
-        kernels.flm_attn_prefill,
+        kernels.flm_gemma4_attn_prefill,
         device=device,
         in_prod_lock=IN_PROD_LOCK,
         in_cons_lock=IN_CONS_LOCK,
@@ -144,10 +144,7 @@ def attn(dev, max_context, num_heads, num_kv_heads, trace_size=0):
     odims = [(LQ // 8, 8 * DH), (DH // 8, 8), (8, DH), (8, 1)]
     kvdims = [(LK_MT // LK, LK * DH), (LK, 8), (64, 64), (8, 1)]
 
-    kernel_object = attn_kernel(dev).object_file
-
-    def k(name, arg_types):
-        return kernel_object.bind(name, arg_types)
+    k = attn_kernel(dev).entry
 
     k_rounds = k("attn_rounds", [L_ty, L_ty, L_ty])
     k_round_begin = k("attn_round_begin", [mv_ty, mv_ty, cv_ty, cv_ty, y_ty])
