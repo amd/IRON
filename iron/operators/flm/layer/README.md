@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 The operator runs one Gemma 4 decode layer for one token on the whole NPU2
 array. It reproduces FastFlowLM's fused decode layer and its runtime sequence,
 so FastFlowLM's engine can drive it. The kernels come from mlir-aie's
-`flm_decode_*` factories.
+`flm_gemma4_decode_*` factories.
 
 ```python
 from iron.operators.flm import DecodeLayer

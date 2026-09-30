@@ -32,7 +32,7 @@ def _on_aie2p():
 
 
 requires_aie2p = pytest.mark.skipif(
-    not _on_aie2p(), reason="the flm_decode kernels are AIE2P only"
+    not _on_aie2p(), reason="the flm_gemma4_decode kernels are AIE2P only"
 )
 
 
