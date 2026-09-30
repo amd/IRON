@@ -18,7 +18,13 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
 )
 
-from iron.operators.flm.prefill_attn.design import CAUSAL, SLIDING, Variant, kernel
+from iron.operators.flm.prefill_attn.design import (
+    CAUSAL,
+    SLIDING,
+    Geometry,
+    Variant,
+    make_kernel,
+)
 
 
 @dataclass
@@ -38,12 +44,13 @@ class _PrefillAttentionBase(MLIROperator):
     num_heads: int
     num_kv_heads: int
     context: object = field(default=None, repr=False)
+    _built_kernel: object = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         dev = aie_utils.get_current_device()
         if dev.arch != AIEArch.AIE2p:
             raise NotImplementedError(
-                f"the {self.variant.factory} kernel is AIE2P only"
+                f"the {self.variant.factory.__name__} kernel is AIE2P only"
             )
         if self.num_heads % self.num_kv_heads:
             raise ValueError(
@@ -60,6 +67,21 @@ class _PrefillAttentionBase(MLIROperator):
             if value is not None and value % 128:
                 raise ValueError(f"{name} ({value}) must be a multiple of 128")
         MLIROperator.__init__(self, context=self.context)
+
+    def _kernel(self):
+        """The variant's kernel, built once: the design and the artifacts share it."""
+        if self._built_kernel is None:
+            self._built_kernel = make_kernel(self.variant)
+        return self._built_kernel
+
+    def reference_tolerance(self):
+        # The factory's tolerance covers attn_epilogue alone, one of the ten
+        # entry points that the operator runs.
+        return None
+
+    @property
+    def head_dim(self) -> int:
+        return Geometry.of(self._kernel()).dh
 
     @property
     def name(self) -> str:
@@ -91,15 +113,16 @@ class _PrefillAttentionBase(MLIROperator):
                     self.num_kv_heads,
                     self.window,
                 ),
+                {"kernel": self._kernel()},
             ),
         )
 
     def get_kernel_artifacts(self):
-        return [KernelObjectArtifact.from_extern(kernel(self.variant))]
+        return [KernelObjectArtifact.from_extern(self._kernel())]
 
     def get_arg_spec(self):
         # The runtime sequence's order: o, q, kv.
-        rows = self.max_context * self.variant.dh
+        rows = self.max_context * self.head_dim
         return [
             AIERuntimeArgSpec("out", (rows * self.num_heads,), dtype=bfloat16),
             AIERuntimeArgSpec("in", (rows * self.num_heads,), dtype=bfloat16),
