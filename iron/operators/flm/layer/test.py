@@ -185,8 +185,10 @@ def test_weight_reads_fit_proj(model, layer_type):
     """
     g = GEOMETRIES[model]
     module = decode_layer(NPU2(), g, RTP_ADDRESSES[model], layer_type)
-    reads = _proj_reads(module)
-    end = max(offset + length for offset, length in reads)
+    end = 0
+    for offset, length in sorted(_proj_reads(module)):
+        assert offset == end, f"the reads skip or reread proj at {offset}"
+        end += length
     blob = weight_layout(g, layer_type)
     assert end == max(w.offset + w.size for w in blob.values())
     assert end <= arg_sizes(g)["proj"]
