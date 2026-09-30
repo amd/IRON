@@ -68,76 +68,75 @@ def _dims(d):
 
 
 def _stage_kv_causal(rt, MT, v):
-    """Memtile 4j+2 takes k and v on two channels and sends them interleaved on one.
+    """The k/v memtile takes k and v on two channels and sends them interleaved on one.
 
-    Memtile 4j+1 holds half of the buffers.
+    The memtile to its left holds half of the buffers.
     """
+    mt, mt_left = MT[v.kv_memtile], MT[v.kv_memtile - 1]
     in_mem_ty = np.ndarray[(LK_MT, v.dh), bf16]
     kvdims = [(LK_MT // v.lk, v.lk * v.dh), (v.lk, 8), (64, 64), (8, 1)]
-    for j in range(len(MT) // 4):
-        mt, mt_left = MT[j * 4 + 2], MT[j * 4 + 1]
-        bufs = {
-            (side, n): Buffer(type=in_mem_ty, name=f"in_{n}_0_{tile.col}", tile=tile)
-            for side, tile in (("own", mt), ("left", mt_left))
-            for n in (0, 1)
-        }
-        # The left pair's locks sit on mt too.
-        left_prod = Lock(tile=mt, lock_id=0, init=2)
-        left_cons = Lock(tile=mt, lock_id=1, init=0)
-        own_prod = Lock(tile=mt, lock_id=7, init=2)
-        own_cons = Lock(tile=mt, lock_id=8, init=0)
-        for lock in (left_prod, left_cons, own_prod, own_cons):
-            rt.add_lock(lock)
-        fill = dict(offset=0, length=LK_MT * v.dh, **_dims(kvdims))
+    bufs = {
+        (side, n): Buffer(type=in_mem_ty, name=f"in_{n}_0_{tile.col}", tile=tile)
+        for side, tile in (("own", mt), ("left", mt_left))
+        for n in (0, 1)
+    }
+    # The left pair's locks sit on mt too.
+    left_prod = Lock(tile=mt, lock_id=0, init=2)
+    left_cons = Lock(tile=mt, lock_id=1, init=0)
+    own_prod = Lock(tile=mt, lock_id=7, init=2)
+    own_cons = Lock(tile=mt, lock_id=8, init=0)
+    for lock in (left_prod, left_cons, own_prod, own_cons):
+        rt.add_lock(lock)
+    fill = dict(offset=0, length=LK_MT * v.dh, **_dims(kvdims))
 
-        def out(b, cons, prod, nxt):
-            return Bd(b, acquires=[Acquire(cons)], releases=[Release(prod)], next=nxt)
+    def out(b, cons, prod, nxt):
+        return Bd(b, acquires=[Acquire(cons)], releases=[Release(prod)], next=nxt)
 
-        rt.add_tile_dma(
-            TileDma(
-                mt,
-                [
-                    DmaChannel(
-                        DMAChannelDir.S2MM,
-                        0,
-                        ping_pong(
-                            bufs[("left", 0)],
-                            bufs[("left", 1)],
-                            left_prod,
-                            left_cons,
-                            **fill,
-                        ),
+    rt.add_tile_dma(
+        TileDma(
+            mt,
+            [
+                DmaChannel(
+                    DMAChannelDir.S2MM,
+                    0,
+                    ping_pong(
+                        bufs[("left", 0)],
+                        bufs[("left", 1)],
+                        left_prod,
+                        left_cons,
+                        **fill,
                     ),
-                    DmaChannel(
-                        DMAChannelDir.S2MM,
-                        1,
-                        ping_pong(
-                            bufs[("own", 0)],
-                            bufs[("own", 1)],
-                            own_prod,
-                            own_cons,
-                            **fill,
-                        ),
+                ),
+                DmaChannel(
+                    DMAChannelDir.S2MM,
+                    1,
+                    ping_pong(
+                        bufs[("own", 0)],
+                        bufs[("own", 1)],
+                        own_prod,
+                        own_cons,
+                        **fill,
                     ),
-                    DmaChannel(
-                        DMAChannelDir.MM2S,
-                        0,
-                        [
-                            out(bufs[("left", 0)], left_cons, left_prod, 1),
-                            out(bufs[("own", 0)], own_cons, own_prod, 2),
-                            out(bufs[("left", 1)], left_cons, left_prod, 3),
-                            out(bufs[("own", 1)], own_cons, own_prod, 0),
-                        ],
-                    ),
-                ],
-            )
+                ),
+                DmaChannel(
+                    DMAChannelDir.MM2S,
+                    0,
+                    [
+                        out(bufs[("left", 0)], left_cons, left_prod, 1),
+                        out(bufs[("own", 0)], own_cons, own_prod, 2),
+                        out(bufs[("left", 1)], left_cons, left_prod, 3),
+                        out(bufs[("own", 1)], own_cons, own_prod, 0),
+                    ],
+                ),
+            ],
         )
-        # An empty program, so the placer keeps mt_left and its buffers.
-        rt.add_tile_dma(TileDma(mt_left, []))
+    )
+    # An empty program, so the placer keeps mt_left and its buffers.
+    rt.add_tile_dma(TileDma(mt_left, []))
 
 
 def _stage_kv_sliding(rt, MT, v):
-    """Odd memtiles stage k and v in one buffer pair: k in the first half, v in the second.
+    """The k/v memtile stages k and v in one buffer pair: k in the first half, v in the second.
 
     Each input channel releases one of two counts. The output acquires both,
     so it reads a buffer once both halves hold data.
@@ -146,52 +145,51 @@ def _stage_kv_sliding(rt, MT, v):
     indims = [(LK_MT // v.lk, v.lk * v.dh), (v.lk, 8), (32, 128), (8, 1)]
     outdims = [(2 * LK_MT // v.lk, v.lk * v.dh), (v.lk, v.dh), (v.dh, 1)]
     half = LK_MT * v.dh
-    for j in range(1, len(MT), 2):
-        mt = MT[j]
-        in_0 = Buffer(type=in_mem_ty, name=f"in_0_0_{mt.col}", tile=mt)
-        in_1 = Buffer(type=in_mem_ty, name=f"in_1_0_{mt.col}", tile=mt)
-        prod = Lock(tile=mt, lock_id=0, init=4)
-        cons = Lock(tile=mt, lock_id=1, init=0)
-        rt.add_lock(prod)
-        rt.add_lock(cons)
-        rt.add_tile_dma(
-            TileDma(
-                mt,
-                [
-                    DmaChannel(
-                        DMAChannelDir.S2MM,
-                        ch,
-                        ping_pong(
-                            in_0,
-                            in_1,
-                            prod,
-                            cons,
-                            offset=offset,
-                            length=half,
-                            **_dims(indims),
-                        ),
-                    )
-                    for ch, offset in ((0, 0), (1, half))
-                ]
-                + [
-                    DmaChannel(
-                        DMAChannelDir.MM2S,
-                        0,
-                        ping_pong(
-                            in_0,
-                            in_1,
-                            cons,
-                            prod,
-                            acq_val=2,
-                            rel_val=2,
-                            offset=0,
-                            length=2 * half,
-                            **_dims(outdims),
-                        ),
+    mt = MT[v.kv_memtile]
+    in_0 = Buffer(type=in_mem_ty, name=f"in_0_0_{mt.col}", tile=mt)
+    in_1 = Buffer(type=in_mem_ty, name=f"in_1_0_{mt.col}", tile=mt)
+    prod = Lock(tile=mt, lock_id=0, init=4)
+    cons = Lock(tile=mt, lock_id=1, init=0)
+    rt.add_lock(prod)
+    rt.add_lock(cons)
+    rt.add_tile_dma(
+        TileDma(
+            mt,
+            [
+                DmaChannel(
+                    DMAChannelDir.S2MM,
+                    ch,
+                    ping_pong(
+                        in_0,
+                        in_1,
+                        prod,
+                        cons,
+                        offset=offset,
+                        length=half,
+                        **_dims(indims),
                     ),
-                ],
-            )
+                )
+                for ch, offset in ((0, 0), (1, half))
+            ]
+            + [
+                DmaChannel(
+                    DMAChannelDir.MM2S,
+                    0,
+                    ping_pong(
+                        in_0,
+                        in_1,
+                        cons,
+                        prod,
+                        acq_val=2,
+                        rel_val=2,
+                        offset=0,
+                        length=2 * half,
+                        **_dims(outdims),
+                    ),
+                ),
+            ],
         )
+    )
 
 
 @dataclass(frozen=True)
@@ -209,7 +207,7 @@ class Variant:
     l1: dict
     # The memtile that splits the q fifos of column pair p.
     q_memtile: Callable[[int], int]
-    # The memtile that stages k and v, and its DMA programs.
+    # The memtile that stages k and v, and its DMA program.
     kv_memtile: int
     stage_kv: Callable
     # The kernel's attn_blocks reads the window, and the sequence writes the
