@@ -12,7 +12,6 @@ import numpy as np
 
 M_TILE, K_TILE, GROUP = 32, 256, 32
 
-# A 4-bit code, plus a 16-bit scale and a 16-bit min per GROUP weights.
 BITS_PER_WEIGHT = 4 + 2 * 16 // GROUP
 BLOCK_BYTES = M_TILE * K_TILE * BITS_PER_WEIGHT // 8
 
