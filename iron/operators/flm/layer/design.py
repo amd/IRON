@@ -115,8 +115,6 @@ RTP_SYMBOLS = {
 
 # One q4nx block in bf16 elements, the unit the weight buffers are typed in.
 W_BLOCK = q4nx.BLOCK_BYTES // 2
-# One bf16 weight block of the per-layer-input projections.
-BF16_W_BLOCK = 32 * 256
 # The projections' input slice. Every projection's input dimension is a
 # multiple of it.
 X_SLICE = 256
@@ -161,7 +159,6 @@ PLACEMENT = {
 
 _BF16 = np.dtype[bfloat16]
 _RTP_TY = np.ndarray[(16,), np.dtype[np.int32]]
-_W_BLK_TY = np.ndarray[(BF16_W_BLOCK,), _BF16]
 
 # Core locks, by the name of the factory argument that gives the kernel the id.
 RMS_LOCKS = dict(
@@ -434,9 +431,9 @@ class _Ctx:
     rtp: dict
     kernels: dict
 
-    def kernel(self, name, symbol, arg_types):
-        """The entry point ``symbol`` of the kernel ``name``."""
-        return self.kernels[name].entry(symbol, arg_types)
+    def entry(self, name, symbol):
+        """The entry point ``symbol`` of the kernel ``name``, typed by its factory."""
+        return getattr(self.kernels[name], symbol)
 
     def rtp_buffer(self, tile, key, name=None):
         """The RTP buffer of RTP_ADDRESSES key ``key``, pinned at its address."""
@@ -647,10 +644,8 @@ def _build_rms(ctx, rms_tile):
     behind its packet header.
     """
     D = ctx.g.model_dim
-    rms_x_ty = np.ndarray[(D,), _BF16]
-    rms_x_buf_ty = np.ndarray[(D, 2), _BF16]
-    rms_w_ty = np.ndarray[(4, D), _BF16]
-    rms_y_pkt_ty = np.ndarray[(D + 16,), _BF16]
+    rms_k = ctx.entry("rms_residual", "rms_residual")
+    rms_y_pkt_ty, rms_x_ty, _, _, rms_w_ty, rms_x_buf_ty, _, _ = rms_k.arg_types()
     rms_name = f"{rms_tile.row}_{rms_tile.col}"
     rms_x_ping = Buffer(type=rms_x_ty, name=f"x_ping_{rms_name}", tile=rms_tile)
     rms_x_pong = Buffer(type=rms_x_ty, name=f"x_pong_{rms_name}", tile=rms_tile)
@@ -676,20 +671,6 @@ def _build_rms(ctx, rms_tile):
             lm_head_out_prod_lock=1,
             lm_head_out_cons_lock=0,
         ),
-    )
-    rms_k = ctx.kernel(
-        "rms_residual",
-        "rms_residual",
-        [
-            rms_y_pkt_ty,
-            rms_x_ty,
-            rms_x_ty,
-            rms_x_ty,
-            rms_w_ty,
-            rms_x_buf_ty,
-            _RTP_TY,
-            _RTP_TY,
-        ],
     )
 
     ctx.workers.append(
@@ -754,14 +735,8 @@ def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
     qkv arrives on S2MM 0, the RoPE weights on S2MM 1. q leaves through
     q_fifo to the qk core, k and v on MM2S 1.
     """
-    g = ctx.g
-    NQ_PADDED = q_heads_padded(g)
-    dk = g.num_kv_heads * dh
-    dq_padded = NQ_PADDED * dh
-    qkv_ty = np.ndarray[(dh,), _BF16]
-    q_ty = np.ndarray[(dq_padded,), _BF16]
-    kv_ty = np.ndarray[(dk,), _BF16]
-    rope_ty = np.ndarray[(dh * 3 if g.qk_norm else dh,), _BF16]
+    kern = ctx.entry(name, "rope")
+    q_ty, kv_ty, _, qkv_ty, _, rope_ty, _ = kern.arg_types()
 
     r, c = rope_tile.row, rope_tile.col
     qkv_0 = Buffer(type=qkv_ty, name=f"qkv_buffer_0_{r}_{c}", tile=rope_tile)
@@ -785,9 +760,6 @@ def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
         ),
     )
     ctx.add_locks(rope_tile, [(ROPE_Q_PASS_LOCK, 0)])
-    kern = ctx.kernel(
-        name, "rope", [q_ty, kv_ty, kv_ty, qkv_ty, qkv_ty, rope_ty, _RTP_TY]
-    )
 
     def rope_body(q_h, kk, v, q0, q1, rope, skip, kern):
         q = q_h.acquire(1)
@@ -849,10 +821,8 @@ def _build_pl_embedding(ctx, ple_tile):
     """
     D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     ple_name = f"{ple_tile.row}_{ple_tile.col}"
-    ple_norm_w_ty = np.ndarray[(PLI_D + D + 32,), _BF16]
-    ple_x0_pl_ty = np.ndarray[(PLI_D,), _BF16]
-    ple_x0_ty = np.ndarray[(D,), _BF16]
-    ple_y_ty = np.ndarray[(PLI_D + D + 32,), _BF16]
+    ple_k = ctx.entry("proj_layer_embedding", "proj_layer_embedding")
+    ple_norm_w_ty, ple_x0_pl_ty, ple_x0_ty, _, ple_y_ty, w_ty, _ = ple_k.arg_types()
     ple_norm_w = Buffer(type=ple_norm_w_ty, name=f"norm_w_{ple_name}", tile=ple_tile)
     ple_x0_pl = Buffer(
         type=ple_x0_pl_ty, name=f"x0_per_layer_{ple_name}", tile=ple_tile
@@ -860,8 +830,8 @@ def _build_pl_embedding(ctx, ple_tile):
     ple_x0 = Buffer(type=ple_x0_ty, name=f"x0_{ple_name}", tile=ple_tile)
     ple_x_proj = Buffer(type=ple_x0_pl_ty, name=f"x_proj_{ple_name}", tile=ple_tile)
     ple_y = Buffer(type=ple_y_ty, name=f"y_{ple_name}", tile=ple_tile)
-    ple_w0 = Buffer(type=_W_BLK_TY, name=f"proj_w_0_{ple_name}", tile=ple_tile)
-    ple_w1 = Buffer(type=_W_BLK_TY, name=f"proj_w_1_{ple_name}", tile=ple_tile)
+    ple_w0 = Buffer(type=w_ty, name=f"proj_w_0_{ple_name}", tile=ple_tile)
+    ple_w1 = Buffer(type=w_ty, name=f"proj_w_1_{ple_name}", tile=ple_tile)
     pl = ctx.locks(
         ple_tile,
         PLE_LOCKS,
@@ -877,19 +847,6 @@ def _build_pl_embedding(ctx, ple_tile):
         ),
     )
     (ple_norm_w_p2,) = ctx.add_locks(ple_tile, [(PLE_NORM_W_P2_LOCK, 0)])
-    ple_k = ctx.kernel(
-        "proj_layer_embedding",
-        "proj_layer_embedding",
-        [
-            ple_norm_w_ty,
-            ple_x0_pl_ty,
-            ple_x0_ty,
-            ple_x0_pl_ty,
-            ple_y_ty,
-            _W_BLK_TY,
-            _W_BLK_TY,
-        ],
-    )
 
     ctx.workers.append(
         Worker(
@@ -960,12 +917,11 @@ def _build_pl_gate(ctx, gle_tile, x):
     x is the RMS tile's y_out. The weights arrive on S2MM 1. y leaves on
     MM2S 1.
     """
-    D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     gle_name = f"{gle_tile.row}_{gle_tile.col}"
-    gle_x_ty = np.ndarray[(D,), _BF16]
-    gle_y_ty = np.ndarray[(D + PLI_D,), _BF16]
-    gle_w0 = Buffer(type=_W_BLK_TY, name=f"proj_w_0_{gle_name}", tile=gle_tile)
-    gle_w1 = Buffer(type=_W_BLK_TY, name=f"proj_w_1_{gle_name}", tile=gle_tile)
+    gle_k = ctx.entry("gate_layer_embedding", "gate_layer_embedding")
+    _, w_ty, _, gle_y_ty = gle_k.arg_types()
+    gle_w0 = Buffer(type=w_ty, name=f"proj_w_0_{gle_name}", tile=gle_tile)
+    gle_w1 = Buffer(type=w_ty, name=f"proj_w_1_{gle_name}", tile=gle_tile)
     gle_y = Buffer(type=gle_y_ty, name=f"y_{gle_name}", tile=gle_tile)
     gl = ctx.locks(
         gle_tile,
@@ -978,11 +934,6 @@ def _build_pl_gate(ctx, gle_tile, x):
             y_prod_lock=1,
             y_cons_lock=0,
         ),
-    )
-    gle_k = ctx.kernel(
-        "gate_layer_embedding",
-        "gate_layer_embedding",
-        [gle_x_ty, _W_BLK_TY, _W_BLK_TY, gle_y_ty],
     )
 
     ctx.workers.append(
@@ -1062,14 +1013,13 @@ def _build_pl_up(ctx, plu_tile):
     x arrives on S2MM 0, the weights on S2MM 1. The layer output leaves on
     MM2S 0.
     """
-    D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     plu_name = f"{plu_tile.row}_{plu_tile.col}"
-    plu_dual_x_ty = np.ndarray[(2 * (PLI_D + D) + 32,), _BF16]
-    plu_y_ty = np.ndarray[(D,), _BF16]
+    plu_k = ctx.entry("per_layer_up", "per_layer_up")
+    plu_dual_x_ty, w_ty, _, plu_y_ty = plu_k.arg_types()
     plu_x = Buffer(type=plu_dual_x_ty, name=f"x_{plu_name}", tile=plu_tile)
     plu_y = Buffer(type=plu_y_ty, name=f"y_{plu_name}", tile=plu_tile)
-    plu_w0 = Buffer(type=_W_BLK_TY, name=f"proj_w_0_{plu_name}", tile=plu_tile)
-    plu_w1 = Buffer(type=_W_BLK_TY, name=f"proj_w_1_{plu_name}", tile=plu_tile)
+    plu_w0 = Buffer(type=w_ty, name=f"proj_w_0_{plu_name}", tile=plu_tile)
+    plu_w1 = Buffer(type=w_ty, name=f"proj_w_1_{plu_name}", tile=plu_tile)
     ul = ctx.locks(
         plu_tile,
         PLU_LOCKS,
@@ -1081,9 +1031,6 @@ def _build_pl_up(ctx, plu_tile):
             y_prod_lock=1,
             y_cons_lock=0,
         ),
-    )
-    plu_k = ctx.kernel(
-        "per_layer_up", "per_layer_up", [plu_dual_x_ty, _W_BLK_TY, _W_BLK_TY, plu_y_ty]
     )
 
     ctx.workers.append(
@@ -1125,13 +1072,9 @@ def _build_glu(ctx, glu_tile):
     gate and up arrive on S2MM 0. The activations leave on MM2S 0 with a
     packet header to the projection engine.
     """
-    g = ctx.g
     glu_name = f"{glu_tile.row}_{glu_tile.col}"
-    glu_up_gate_ty = np.ndarray[(g.glu_slice,), _BF16]
-    glu_hid_ty = np.ndarray[
-        (g.intermediate_size * (2 if g.double_wide_mlp else 1),), _BF16
-    ]
-    glu_y_ty = np.ndarray[(g.glu_slice // 2,), _BF16]
+    glu_k = ctx.entry("glu", "glu")
+    glu_hid_ty, glu_up_gate_ty, _, glu_y_ty, _, _ = glu_k.arg_types()
     glu_x_0 = Buffer(type=glu_up_gate_ty, name=f"x_0_{glu_name}", tile=glu_tile)
     glu_x_1 = Buffer(type=glu_up_gate_ty, name=f"x_1_{glu_name}", tile=glu_tile)
     glu_y_0 = Buffer(type=glu_y_ty, name=f"y_0_{glu_name}", tile=glu_tile)
@@ -1142,11 +1085,6 @@ def _build_glu(ctx, glu_tile):
         glu_tile,
         GLU_LOCKS,
         dict(x_prod_lock=2, x_cons_lock=0, y_prod_lock=2, y_cons_lock=0, rtp_lock=0),
-    )
-    glu_k = ctx.kernel(
-        "glu",
-        "glu",
-        [glu_hid_ty, glu_up_gate_ty, glu_up_gate_ty, glu_y_ty, glu_y_ty, _RTP_TY],
     )
 
     ctx.workers.append(
@@ -1182,11 +1120,6 @@ def _build_glu(ctx, glu_tile):
     )
 
 
-_X_SLICE_TY = np.ndarray[(X_SLICE,), _BF16]
-_LINEAR_W_TY = np.ndarray[(W_BLOCK,), _BF16]
-_M_PKT_TY = np.ndarray[(2 * q4nx.M_TILE + 16,), _BF16]
-
-
 def _build_proj_core(ctx, pt, kern, send_x_out, main_y0=None, main_y1=None):
     """One q4nx projection core. Returns its y buffers (y0, y1).
 
@@ -1194,15 +1127,16 @@ def _build_proj_core(ctx, pt, kern, send_x_out, main_y0=None, main_y1=None):
     the y buffers of the sending core in the row below.
     """
     r, c = pt.row, pt.col
+    y_ty, w_ty, x_ty = kern.arg_types()[:3]
     is_swa = ctx.rtp_buffer(pt, "proj_swa", f"RTP_PROJ_IS_SWA_BUFFER_{r}_{c}")
     skip_kv = ctx.rtp_buffer(pt, "proj_skip", f"RTP_PROJ_SKIP_KV_BUFFER_{r}_{c}")
-    x0 = Buffer(type=_X_SLICE_TY, name=f"x_0_{r}_{c}", tile=pt)
-    w0 = Buffer(type=_LINEAR_W_TY, name=f"w_0_{r}_{c}", tile=pt)
-    x1 = Buffer(type=_X_SLICE_TY, name=f"x_1_{r}_{c}", tile=pt)
-    w1 = Buffer(type=_LINEAR_W_TY, name=f"w_1_{r}_{c}", tile=pt)
+    x0 = Buffer(type=x_ty, name=f"x_0_{r}_{c}", tile=pt)
+    w0 = Buffer(type=w_ty, name=f"w_0_{r}_{c}", tile=pt)
+    x1 = Buffer(type=x_ty, name=f"x_1_{r}_{c}", tile=pt)
+    w1 = Buffer(type=w_ty, name=f"w_1_{r}_{c}", tile=pt)
     if send_x_out:
-        y0 = Buffer(type=_M_PKT_TY, name=f"y_0_{r}_{c}", tile=pt)
-        y1 = Buffer(type=_M_PKT_TY, name=f"y_1_{r}_{c}", tile=pt)
+        y0 = Buffer(type=y_ty, name=f"y_0_{r}_{c}", tile=pt)
+        y1 = Buffer(type=y_ty, name=f"y_1_{r}_{c}", tile=pt)
     else:
         y0, y1 = main_y0, main_y1
     pk = ctx.locks(
@@ -1272,21 +1206,7 @@ def _build_proj_cores(ctx, grid):
     The cores in rows 2 and 4 send y. Returns the sending cores of each group
     of two columns.
     """
-    proj_k = ctx.kernel(
-        "proj_main",
-        "proj_main",
-        [
-            _M_PKT_TY,
-            _LINEAR_W_TY,
-            _X_SLICE_TY,
-            _M_PKT_TY,
-            _LINEAR_W_TY,
-            _X_SLICE_TY,
-            _RTP_TY,
-            _RTP_TY,
-            np.int32,
-        ],
-    )
+    proj_k = ctx.entry("proj_main", "proj_main")
 
     proj_send_tiles = []
     for grp in range(2):
@@ -1448,12 +1368,15 @@ def _build_proj_x_mem(ctx, mt):
     )
 
 
-_F32 = np.dtype[np.float32]
+def _scores_ty(ctx, name):
+    """The type of the scores that the qk core sends kv kernel ``name``.
 
-
-def _attn_s_ty(g):
-    """The type of the scores that the qk core sends the kv core."""
-    return np.ndarray[(q_heads_padded(g) * 16 + 32, 1), _BF16]
+    It is the first argument of the kernel's round, or of its s_begin for
+    two KV heads.
+    """
+    kv = ctx.kernels[name]
+    first = getattr(kv, f"{name}_round", None) or getattr(kv, f"{name}_s_begin")
+    return first.arg_types()[0]
 
 
 def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
@@ -1466,14 +1389,20 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
     other kernels covers every KV head.
     """
     g = ctx.g
-    D, NUM_KV = g.model_dim, g.num_kv_heads
-    attn_s_ty = _attn_s_ty(g)
+    D = g.model_dim
     r, c = kv_tile.row, kv_tile.col
     NQ = g.num_attn_heads
     o_repeats = D // (q4nx.M_TILE * 16)
-    v_ty = np.ndarray[(LK, dh if two_kv_heads else NUM_KV * dh), _BF16]
-    o_ty = np.ndarray[(dh * NQ,), _BF16]
-    y_ty = np.ndarray[(dh * NQ,), _F32]
+    k_begin = ctx.entry(name, f"{name}_begin")
+    k_finish = ctx.entry(name, f"{name}_finish")
+    if two_kv_heads:
+        k_sbeg = ctx.entry(name, f"{name}_s_begin")
+        k_vhalf = ctx.entry(name, f"{name}_v_half")
+        v_ty = k_vhalf.arg_types()[1]
+    else:
+        k_round = ctx.entry(name, f"{name}_round")
+        v_ty = k_round.arg_types()[1]
+    y_ty, o_ty, l_ty = k_finish.arg_types()
     L = ctx.rtp_buffer(kv_tile, rtp_key)
     v0 = Buffer(type=v_ty, name=f"v_0_{r}_{c}", tile=kv_tile)
     v1 = Buffer(type=v_ty, name=f"v_1_{r}_{c}", tile=kv_tile)
@@ -1484,15 +1413,8 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
         ATTN_KV_LOCKS,
         dict(o_prod_lock=o_repeats, o_cons_lock=0, v_prod_lock=2, v_cons_lock=0),
     )
-    l_ty = np.ndarray[(8,), _F32]
     lbuf = Buffer(type=l_ty, name=f"l_{r}_{c}", tile=kv_tile)
-    k_begin = ctx.kernel(name, f"{name}_begin", [y_ty, l_ty])
-    k_finish = ctx.kernel(name, f"{name}_finish", [y_ty, o_ty, l_ty])
     if two_kv_heads:
-        k_sbeg = ctx.kernel(name, f"{name}_s_begin", [attn_s_ty, y_ty, l_ty])
-        k_vhalf = ctx.kernel(
-            name, f"{name}_v_half", [attn_s_ty, v_ty, v_ty, y_ty, np.int32]
-        )
 
         def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, ksb, kvh, kf):
             kb(yy, ll)
@@ -1507,7 +1429,6 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
         args = [of_s.cons(), v0, v1, y, lbuf, o, L]
         args += [k_begin, k_sbeg, k_vhalf, k_finish]
     else:
-        k_round = ctx.kernel(name, f"{name}_round", [attn_s_ty, v_ty, v_ty, y_ty, l_ty])
 
         def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, kr, kf):
             kb(yy, ll)
@@ -1552,30 +1473,27 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
     The core takes q from q_fifo and k on S2MM 1. It sends the scores to of_s.
     """
     g = ctx.g
-    NUM_KV, NQ_PADDED = g.num_kv_heads, q_heads_padded(g)
-    attn_s_ty = _attn_s_ty(g)
+    NQ_PADDED = q_heads_padded(g)
     r, c = qk_tile.row, qk_tile.col
-    k_ty = np.ndarray[(LK, dh if two_kv_heads else NUM_KV * dh), _BF16]
-    q_ty = np.ndarray[(NQ_PADDED * dh,), _BF16]
+    k_begin = ctx.entry(name, f"{name}_begin")
+    if two_kv_heads:
+        k_half = ctx.entry(name, f"{name}_half")
+        k_storec = ctx.entry(name, f"{name}_store_c")
+        k_step = k_half
+    else:
+        k_round = ctx.entry(name, f"{name}_round")
+        k_step = k_round
+    _, k_ty, _, _, m_ty, c_ty = k_step.arg_types()[:6]
     k0 = Buffer(type=k_ty, name=f"k_0_{r}_{c}", tile=qk_tile)
     k1 = Buffer(type=k_ty, name=f"k_1_{r}_{c}", tile=qk_tile)
     ql = ctx.locks(qk_tile, ATTN_QK_LOCKS, dict(k_prod_lock=2, k_cons_lock=0))
     ctx.add_locks(qk_tile, [(ATTN_HANDSHAKE_LOCK, 0)])
     L = ctx.rtp_buffer(qk_tile, rtp_key)
     q_in_order = [(NQ_PADDED, 8), (dh // 8, NQ_PADDED * 8), (8, 1)]
-    m_ty = np.ndarray[(16,), _BF16]
-    c_ty = np.ndarray[(8,), _F32]
     m_buf = Buffer(type=m_ty, name=f"m_{r}_{c}", tile=qk_tile)
     c_local = Buffer(type=c_ty, name=f"c_local_{r}_{c}", tile=qk_tile)
-    k_begin = ctx.kernel(name, f"{name}_begin", [m_ty])
     # The q acquire orders the RTP read after the sequence's RTP writes.
     if two_kv_heads:
-        k_half = ctx.kernel(
-            name,
-            f"{name}_half",
-            [q_ty, k_ty, k_ty, attn_s_ty, m_ty, c_ty] + [np.int32] * 3,
-        )
-        k_storec = ctx.kernel(name, f"{name}_store_c", [attn_s_ty, c_ty])
 
         def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kh, ks):
             q = q_h.acquire(1)
@@ -1590,11 +1508,6 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
 
         kerns = [k_begin, k_half, k_storec]
     else:
-        k_round = ctx.kernel(
-            name,
-            f"{name}_round",
-            [q_ty, k_ty, k_ty, attn_s_ty, m_ty, c_ty, np.int32, np.int32],
-        )
 
         def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kr):
             q = q_h.acquire(1)
@@ -1834,11 +1747,15 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     _build_proj_weight_mem(ctx, t["proj_weight"])
     _build_proj_x_mem(ctx, t["proj_x"])
 
-    of_g_s = ObjectFifo(_attn_s_ty(g), name="attn_s", delegate_tile=t["attn_kv"])
+    of_g_s = ObjectFifo(
+        _scores_ty(ctx, "attn_kv"), name="attn_s", delegate_tile=t["attn_kv"]
+    )
     _build_attn_kv(ctx, t["attn_kv"], "attn_kv", "l_kv", g.dh, of_g_s, two_kv)
     _build_attn_qk(ctx, t["attn_qk"], "attn_qk", "l_qk", g.dh, of_g_s, q_of_g, two_kv)
     of_swa_s = ObjectFifo(
-        _attn_s_ty(g), name="swa_attn_s", delegate_tile=t["swa_attn_kv"]
+        _scores_ty(ctx, "swa_attn_kv"),
+        name="swa_attn_s",
+        delegate_tile=t["swa_attn_kv"],
     )
     _build_attn_kv(
         ctx, t["swa_attn_kv"], "swa_attn_kv", "swa_l_kv", g.swa_dh, of_swa_s, False
