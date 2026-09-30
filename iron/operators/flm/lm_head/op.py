@@ -15,11 +15,8 @@ from iron.common import (
     MLIROperator,
     PythonGeneratedMLIRArtifact,
 )
-from iron.operators.flm.lm_head.design import (
-    check_shape,
-    lm_head_kernel,
-    packed_bytes,
-)
+from iron.operators.flm.lm_head.design import check_shape, lm_head_kernel
+from iron.operators.flm.q4nx import packed_bytes
 
 
 @dataclass

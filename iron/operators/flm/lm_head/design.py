@@ -23,16 +23,13 @@ from aie.iron import (
     Worker,
 )
 from aie.iron.controlflow import range_
-from aie.iron.device import AnyComputeTile, Tile
+from aie.iron.device import Tile
 
 from aie.iron import kernels
 
 from iron.common.device_utils import call_factory
-
-# q4nx block: 32 out-features x 256 in-features, 32 weights per scale and min.
-M_TILE, K_TILE, GROUP = 32, 256, 32
-BITS_PER_WEIGHT = 5  # a 4-bit code, plus a bf16 scale and min per GROUP weights
-BLOCK_BYTES = M_TILE * K_TILE * BITS_PER_WEIGHT // 8
+from iron.operators.flm.dataflow import grid
+from iron.operators.flm.q4nx import BLOCK_BYTES, GROUP, K_TILE, M_TILE, packed_bytes
 
 # Words of the int32 RTP buffer. Word 0 holds the softcap. The other words pad
 # the buffer to the granularity of the RTP write addresses.
@@ -45,19 +42,6 @@ DEPTH = 2
 # Core stack bytes. The kernel's b_group_sums array grows with dim. At both
 # Gemma 4 sizes it overflows the 1024-byte default.
 STACK_SIZE = 10 * 1024
-
-
-def packed_bytes(n_weights: int) -> int:
-    """Bytes holding n_weights in q4nx packing."""
-    return n_weights * BITS_PER_WEIGHT // 8
-
-
-def grid(dev):
-    """Columns and compute rows the design spreads the vocabulary over."""
-    rows = sum(
-        dev.get_tile_type(0, r) == AnyComputeTile.tile_type for r in range(dev.rows)
-    )
-    return dev.cols, rows
 
 
 def vocab_per_round(dev) -> int:
