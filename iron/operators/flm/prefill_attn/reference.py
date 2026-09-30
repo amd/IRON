@@ -9,11 +9,8 @@ import numpy as np
 def reference(q, kv, L_begin, L_end, max_l, num_heads, num_kv_heads, dh, window=None):
     """Attention of query tokens L_begin to L_end - 1 over the keys up to each.
 
-    q holds one row of num_heads heads of dh elements per query token,
-    starting at L_begin. Returns the output in the same layout,
-    (L_end - L_begin, num_heads, dh). With a window, a query at position p
-    sees the keys at positions p - window + 1 to p. The scores carry no
-    1/sqrt(dh) scale.
+    Returns an array of shape (L_end - L_begin, num_heads, dh). The README
+    gives the layout of q and kv.
     """
     rows = L_end - L_begin
     q = np.asarray(q, dtype=np.float32)[: rows * num_heads * dh]

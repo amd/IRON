@@ -20,8 +20,8 @@ NUM_HEADS = 8
 # L_end - L_begin must keep it.
 SENTINEL = 7.0
 
-# Outputs are of order 1, so the gate is an absolute error. A stale token range
-# measures a mean error of 0.03 or more.
+# The outputs are of order 1. The gate therefore bounds the absolute error. A
+# stale token range gives a mean error of 0.03 or more.
 MAX_ERROR = 0.25
 MEAN_ERROR = 0.02
 
@@ -36,7 +36,7 @@ OPERATORS = {
             (0, 512, 1024),
             (128, 384, 1024),
             (256, 1024, 1024),
-            # A cache shorter than the build's bound moves V to row max_l.
+            # max_l below max_context.
             (0, 256, 512),
         ],
     ),
@@ -119,7 +119,7 @@ def test_one_callable_serves_every_range(kind, aie_context):
     """Check that each dispatch runs its own token range.
 
     The ranges run back to back on one loaded xclbin: growing, shrinking and
-    repeated. A stale range shows only from the second dispatch after a load.
+    repeated. A stale range appears only from the second dispatch after a load.
     """
     op = _build(kind, aie_context, num_kv_heads=1)
     run = op.get_callable()

@@ -25,14 +25,13 @@ from iron.operators.flm.prefill_attn.design import CAUSAL, SLIDING, Variant, ker
 class _PrefillAttentionBase(MLIROperator):
     """Causal prefill attention from a KV cache.
 
-    ``max_context`` bounds the KV cache rows, ``num_heads`` and
-    ``num_kv_heads`` the query and KV heads. The token range and the cache's
-    row count are dispatch parameters; see :meth:`get_dispatch_params`.
+    ``max_context`` bounds the rows of the KV cache. ``num_heads`` and
+    ``num_kv_heads`` count the query heads and the KV heads.
     """
 
     variant: ClassVar[Variant]
-    # The keys a query sees: those less than ``window`` tokens before it, and
-    # itself. None sees every key up to the query.
+    # Keys per query, including the query's own key. None: every key up to the
+    # query.
     window = None
 
     max_context: int
@@ -74,9 +73,7 @@ class _PrefillAttentionBase(MLIROperator):
     def get_dispatch_params(self):
         """The token range and the KV cache's row count, set per call.
 
-        ``L_begin`` and ``L_end`` bound the query tokens. Both are multiples
-        of 128. ``max_l`` is the KV cache's row count, at most
-        ``max_context``. It sets where V starts.
+        The README describes each parameter.
         """
         return {"L_begin": np.int32, "L_end": np.int32, "max_l": np.int32}
 
