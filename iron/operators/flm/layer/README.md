@@ -48,7 +48,7 @@ argument spec gives upper bounds on their sizes.
 | Buffer | Holds |
 |---|---|
 | `x` | the hidden state at 0, which the layer overwrites with its output. The per-layer-input path reads `model_dim` values at `2 * model_dim`. |
-| `proj` | the q4nx weights of the q, k, v, o, gate and up, and down projections, then the bf16 weights of the three per-layer-input projections. A skip layer has no k or v weights. |
+| `proj` | the q4nx weights of the q, k, v, o, gate and up, and down projections, then the bf16 weights of the three per-layer-input projections. A skip layer has no k or v weights. A `GEMMA4_E2B` skip layer has gate, up and down projections twice as wide. The argument spec gives the size of the largest blob of the four layer types. |
 | `rms` | the four RMS norm weights |
 | `rope_rms` | the RoPE weights (`3 * head_dim`), then the token's per-layer input, its norm weight and `model_dim + 32` values for the up projection |
 | `kv` | the K cache, then the V cache. Every layer except a skip layer writes this token's k and v at row `context_len`, modulo 512 on a sliding-window layer. |

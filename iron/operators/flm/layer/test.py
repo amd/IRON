@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests of the build, the RTP placement and dispatch completion.
+"""Tests of the build, the RTP placement, the weight reads and dispatch
+completion.
 
 No test checks an output value. The layer's numerics need the engine's
 weights and caches.
@@ -16,10 +17,18 @@ import pytest
 from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
+from aie.iron.device import NPU2
 from aie.utils.npukernel import NPUKernel
 
 from iron.common.base import DispatchCallable
-from iron.operators.flm.layer.design import LAYER_TYPES, RTP_ADDRESSES, RTP_SYMBOLS
+from iron.operators.flm.layer.design import (
+    LAYER_TYPES,
+    RTP_ADDRESSES,
+    RTP_SYMBOLS,
+    arg_sizes,
+    decode_layer,
+    weight_layout,
+)
 from iron.operators.flm.layer.op import GEOMETRIES, DecodeLayer
 from iron.operators.flm.testing import requires_aie2p
 
@@ -142,6 +151,45 @@ def test_dispatches_complete(model, aie_context):
             assert not np.array_equal(
                 before[:d], after[:d]
             ), f"{t} at context_len={context_len} left x as it was"
+
+
+def _ops(op):
+    """op and every operation nested in it."""
+    yield op
+    for region in op.regions:
+        for block in region.blocks:
+            for inner in block.operations:
+                yield from _ops(inner)
+
+
+def _proj_reads(module):
+    """(offset, length) of each BD of the runtime sequence over proj."""
+    (seq,) = [op for op in _ops(module.operation) if op.name == "aie.runtime_sequence"]
+    proj = seq.regions[0].blocks[0].arguments[1]
+    reads = []
+    for op in _ops(seq):
+        if op.name == "aie.dma_bd" and op.opview.buffer == proj:
+            bd = op.opview
+            assert bd.offset is None and bd.len is None, "a proj BD is dynamic"
+            reads.append((bd.static_offset.value, bd.static_len.value))
+    return reads
+
+
+@pytest.mark.parametrize("layer_type", LAYER_TYPES)
+@pytest.mark.parametrize("model", MODELS)
+def test_weight_reads_fit_proj(model, layer_type):
+    """Each layer type's sequence reads its whole blob and nothing past proj.
+
+    The test reads the BDs out of the generated runtime sequence. The build
+    needs no NPU.
+    """
+    g = GEOMETRIES[model]
+    module = decode_layer(NPU2(), g, RTP_ADDRESSES[model], layer_type)
+    reads = _proj_reads(module)
+    end = max(offset + length for offset, length in reads)
+    blob = weight_layout(g, layer_type)
+    assert end == max(w.offset + w.size for w in blob.values())
+    assert end <= arg_sizes(g)["proj"]
 
 
 @pytest.mark.parametrize(
