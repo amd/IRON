@@ -52,7 +52,7 @@ class DecodeLayer(MLIROperator):
             )
         dev = aie_utils.get_current_device()
         if dev.arch != AIEArch.AIE2p:
-            raise NotImplementedError("the flm_decode kernels are AIE2P only")
+            raise NotImplementedError("the flm_gemma4_decode kernels are AIE2P only")
         MLIROperator.__init__(self, context=self.context)
 
     @property
