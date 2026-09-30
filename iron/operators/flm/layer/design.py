@@ -317,7 +317,9 @@ def layer_kernels(geometry, device=None):
             attn_qk_locks,
         ),
         "swa_attn_kv": build(kernels.flm_gemma4_decode_swa_attn_kv, ATTN_KV_LOCKS),
-        "swa_attn_qk": build(kernels.flm_gemma4_decode_swa_attn_qk, swa_qk_locks),
+        "swa_attn_qk": build(
+            kernels.flm_gemma4_decode_attn_qk, swa_qk_locks, sliding_window=True
+        ),
     }
 
 
@@ -1475,13 +1477,14 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
     g = ctx.g
     NQ_PADDED = q_heads_padded(g)
     r, c = qk_tile.row, qk_tile.col
-    k_begin = ctx.entry(name, f"{name}_begin")
+    # Every qk kernel names its entry points attn_qk_*.
+    k_begin = ctx.entry(name, "attn_qk_begin")
     if two_kv_heads:
-        k_half = ctx.entry(name, f"{name}_half")
-        k_storec = ctx.entry(name, f"{name}_store_c")
+        k_half = ctx.entry(name, "attn_qk_half")
+        k_storec = ctx.entry(name, "attn_qk_store_c")
         k_step = k_half
     else:
-        k_round = ctx.entry(name, f"{name}_round")
+        k_round = ctx.entry(name, "attn_qk_round")
         k_step = k_round
     _, k_ty, _, _, m_ty, c_ty = k_step.arg_types()[:6]
     k0 = Buffer(type=k_ty, name=f"k_0_{r}_{c}", tile=qk_tile)
