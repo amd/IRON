@@ -7,6 +7,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
+from aie.iron.kernels import flm_gemma4
 
 from iron.common import (
     AIERuntimeArgSpec,
@@ -15,8 +16,8 @@ from iron.common import (
     MLIROperator,
     PythonGeneratedMLIRArtifact,
 )
-from iron.operators.flm.lm_head.design import check_shape, lm_head_kernel
-from iron.operators.flm.q4nx import packed_bytes
+from iron.operators.flm.lm_head.design import check_shape
+from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE, packed_bytes
 
 
 @dataclass
@@ -32,6 +33,7 @@ class LMHead(MLIROperator):
     vocab: int
     softcap: float
     context: object = field(default=None, repr=False)
+    _lm_head_kernel: object = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         check_shape(aie_utils.get_current_device(), self.dim, self.vocab)
@@ -49,6 +51,18 @@ class LMHead(MLIROperator):
         """Bytes of q4nx vocabulary the operator reads."""
         return packed_bytes(self.vocab * self.dim)
 
+    def _kernel(self):
+        """The flm_gemma4_q4nx_lm_head kernel for dim.
+
+        The design and the kernel artifact take this one object. The MLIR
+        artifact checks that its module links the object.
+        """
+        if self._lm_head_kernel is None:
+            self._lm_head_kernel = flm_gemma4.flm_gemma4_q4nx_lm_head(
+                dim=self.dim, m_tile=M_TILE, k_tile=K_TILE, group=GROUP
+            )
+        return self._lm_head_kernel
+
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
             f"{self.name}.mlir",
@@ -61,11 +75,12 @@ class LMHead(MLIROperator):
                     self.vocab,
                     self.softcap,
                 ),
+                {"lm_head_kernel": self._kernel()},
             ),
         )
 
     def get_kernel_artifacts(self):
-        return [KernelObjectArtifact.from_extern(lm_head_kernel(self.dim))]
+        return [KernelObjectArtifact.from_extern(self._kernel())]
 
     def get_arg_spec(self):
         # The runtime sequence's argument order: y, w, x.

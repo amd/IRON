@@ -14,6 +14,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from aie.dialects._aie_enum_gen import AIEArch
+from aie.helpers.npdtypes import np_ndarray_type_get_shape
 from aie.iron import (
     Buffer,
     ObjectFifo,
@@ -25,15 +26,8 @@ from aie.iron import (
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 
-from aie.iron import kernels
-
-from iron.common.device_utils import call_factory
 from iron.operators.flm.dataflow import grid
-from iron.operators.flm.q4nx import BLOCK_BYTES, GROUP, K_TILE, M_TILE, packed_bytes
-
-# Words of the int32 RTP buffer. Word 0 holds the softcap. The other words pad
-# the buffer to the granularity of the RTP write addresses.
-RTP_WORDS = 32
+from iron.operators.flm.q4nx import K_TILE, M_TILE, packed_bytes
 
 # The sequence finishes each round's TaskGroup DEPTH rounds later. The finish
 # frees the round's BDs for the bd-id allocator. A shim tile holds 16 BDs.
@@ -63,21 +57,10 @@ def check_shape(dev, dim, vocab):
         )
 
 
-def lm_head_kernel(dim: int, device=None):
-    """The flm_gemma4_q4nx_lm_head kernel build that the cores link."""
-    return call_factory(
-        kernels.flm_gemma4_q4nx_lm_head,
-        device=device,
-        dim=dim,
-        m_tile=M_TILE,
-        k_tile=K_TILE,
-        group=GROUP,
-    )
-
-
-def lm_head(dev, dim, vocab, softcap, trace_size=0):
+def lm_head(dev, dim, vocab, softcap, trace_size=0, *, lm_head_kernel):
     """Program for :class:`~iron.operators.flm.LMHead`, which documents the arguments.
 
+    ``lm_head_kernel`` is the ``flm_gemma4_q4nx_lm_head`` kernel for ``dim``.
     X holds the token and its RMS weight. One transfer therefore carries both norm inputs.
     """
     check_shape(dev, dim, vocab)
@@ -88,30 +71,22 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0):
 
     bf16 = np.dtype[bfloat16]
 
+    k_rms = lm_head_kernel.q4nx_lm_head_rms
+    k_zero = lm_head_kernel.q4nx_lm_head_zero
+    k_block = lm_head_kernel.q4nx_lm_head_block
+    k_epi = lm_head_kernel.q4nx_lm_head_epilogue
+
+    # The kernels' argument types are the x and w fifos' element types and the
+    # core-local scratch.
+    w_blk_ty, x_ty, y_acc_ty, sums_ty, _ = k_block.arg_types()
+    y_blk_ty, _, rtp_ty = k_epi.arg_types()
     # The w fifos move q4nx blocks as bf16 elements. The kernel reinterprets
     # the bytes.
-    w_blk = BLOCK_BYTES // np.dtype(bfloat16).itemsize
-
-    # ObjectFifo element types. A w or y column object holds one block per core
-    # row. The split and the join separate or combine the blocks.
-    x_ty = np.ndarray[(dim, 2), bf16]
+    (w_blk,) = np_ndarray_type_get_shape(w_blk_ty)
+    # A w or y column object holds one block per core row. The split and the
+    # join separate or combine the blocks.
     w_col_ty = np.ndarray[(ROWS, w_blk), bf16]
-    w_blk_ty = np.ndarray[(w_blk,), bf16]
     y_col_ty = np.ndarray[(ROWS, M_TILE), bf16]
-    y_blk_ty = np.ndarray[(M_TILE,), bf16]
-
-    # Core-local scratch.
-    y_acc_ty = np.ndarray[(M_TILE,), np.dtype[np.float32]]
-    sums_ty = np.ndarray[(dim // GROUP,), bf16]
-    rtp_ty = np.ndarray[(RTP_WORDS,), np.dtype[np.int32]]
-
-    kernel = lm_head_kernel(dim, dev)
-    k_rms = kernel.entry("q4nx_lm_head_rms", [x_ty, sums_ty])
-    k_zero = kernel.entry("q4nx_lm_head_zero", [y_acc_ty])
-    k_block = kernel.entry(
-        "q4nx_lm_head_block", [w_blk_ty, x_ty, y_acc_ty, sums_ty, np.int32]
-    )
-    k_epi = kernel.entry("q4nx_lm_head_epilogue", [y_blk_ty, y_acc_ty, rtp_ty])
 
     # The host addresses the DMAs by column. The design therefore pins the shim
     # tiles. The placer places the other tiles.
