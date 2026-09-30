@@ -6,8 +6,8 @@ SPDX-License-Identifier: Apache-2.0
 # `iron.operators.flm.DecodeLayer`
 
 The operator runs one Gemma 4 decode layer for one token on the whole NPU2
-array. It reproduces FastFlowLM's fused decode layer and its runtime sequence,
-so FastFlowLM's engine can drive it. The kernels come from mlir-aie's
+array. It reproduces FastFlowLM's fused decode layer and its runtime sequence.
+FastFlowLM's engine can therefore drive it. The kernels come from mlir-aie's
 `flm_gemma4_decode_*` factories.
 
 ```python
@@ -47,14 +47,8 @@ argument spec gives upper bounds on their sizes.
 
 | Buffer | Holds |
 |---|---|
-| `x` | the hidden state at 0, which the layer overwrites with its output. The per-layer-input path reads `model_dim` values at `2 * model_dim`. |
-| `proj` | the q4nx weights of the q, k, v, o, gate and up, and down projections, then the bf16 weights of the three per-layer-input projections. A skip layer has no k or v weights. A `GEMMA4_E2B` skip layer has gate, up and down projections twice as wide. The argument spec gives the size of the largest blob of the four layer types. |
+| `x` | the hidden state at offset 0. The layer writes its output over it. The per-layer-input path reads `model_dim` values at `2 * model_dim`. |
+| `proj` | the layer's weights, at the offsets that `weight_layout` in `design.py` gives |
 | `rms` | the four RMS norm weights |
 | `rope_rms` | the RoPE weights (`3 * head_dim`), then the token's per-layer input, its norm weight and `model_dim + 32` values for the up projection |
-| `kv` | the K cache, then the V cache. Every layer except a skip layer writes this token's k and v at row `context_len`, modulo 512 on a sliding-window layer. |
-
-## RTPs
-
-The sequence writes the layer type into RTPs at FastFlowLM's fixed
-addresses, `RTP_ADDRESSES` in `design.py`. The design pins every RTP buffer
-at its address.
+| `kv` | the K cache, then the V cache. Every layer except a skip layer writes this token's k and v at row `context_len`. |
