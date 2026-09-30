@@ -924,12 +924,11 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     )
 
     # --- Per-layer-input gate: x is the RMS tile's y_out, weights on S2MM 1,
-    # y out on MM2S 1. No core reads x_residual.
+    # y out on MM2S 1.
     gle_tile = CT[0][4]
     gle_name = f"{gle_tile.row}_{gle_tile.col}"
     gle_x_ty = np.ndarray[(D,), bf]
     gle_y_ty = np.ndarray[(D + PLI_D,), bf]
-    gle_x_residual = Buffer(type=gle_x_ty, name=f"x_residual_{gle_name}", tile=gle_tile)
     gle_w0 = Buffer(type=w_blk_ty, name=f"proj_w_0_{gle_name}", tile=gle_tile)
     gle_w1 = Buffer(type=w_blk_ty, name=f"proj_w_1_{gle_name}", tile=gle_tile)
     gle_y = Buffer(type=gle_y_ty, name=f"y_{gle_name}", tile=gle_tile)
@@ -951,13 +950,10 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         [gle_x_ty, w_blk_ty, w_blk_ty, gle_y_ty],
     )
 
-    def gle_body(x, w0, w1, y, kern, _x_residual):
-        kern(x, w0, w1, y)
-
     workers.append(
         Worker(
-            gle_body,
-            [rms_y_out, gle_w0, gle_w1, gle_y, gle_k, gle_x_residual],
+            _call_kernel,
+            [rms_y_out, gle_w0, gle_w1, gle_y, gle_k],
             tile=gle_tile,
             stack_size=1024 * 4,
         )
