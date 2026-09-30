@@ -14,6 +14,7 @@ RTPs. It then streams the weights, the KV cache and the hidden state.
 """
 
 from enum import IntEnum
+from functools import partial
 from typing import NamedTuple
 
 import numpy as np
@@ -388,6 +389,187 @@ def _connect(
         )
 
 
+def _ceil_mul(v, chunk):
+    """v rounded up to a multiple of chunk."""
+    # The C++ generator cannot lower the floordivsi that `//` emits.
+    return arith.divsi(v + (chunk - 1), _as_i32(chunk)) * chunk
+
+
+# The C++ generator has no arith.minsi, so min and the masks are branchless.
+def _mask_ge(v, bound):
+    """All ones if v >= bound, else 0."""
+    return arith.shrsi(_as_i32(bound - 1) - v, _as_i32(31))
+
+
+def _min_const(v, bound):
+    """min(v, bound)."""
+    d = v - _as_i32(bound)
+    return _as_i32(bound) + arith.andi(d, arith.shrsi(d, _as_i32(31)))
+
+
+def _sequence(
+    g,
+    rtp,
+    layer_type,
+    sliding_window,
+    x_arg,
+    proj_arg,
+    rms_arg,
+    rope_rms_arg,
+    kv_arg,
+    len_arg,
+    max_l_arg,
+):
+    """The runtime sequence of one ``layer_type`` dispatch.
+
+    The sequence mirrors the engine's gen_layer_seq: the RTP writes, then the
+    shim DMA legs in the engine's order. Offsets and lengths count bf16
+    elements. L counts the tokens up to and including this one.
+    """
+    IS_SWA = layer_type in ("swa", "swa_skip")
+    IS_SKIP = layer_type in ("global_skip", "swa_skip")
+    D = g.model_dim
+    L = _as_i32(len_arg) + 1
+    MAX_L_v = _as_i32(max_l_arg)
+    SW = sliding_window
+    DH = g.swa_dh if IS_SWA else g.dh
+    DK = g.num_kv_heads * DH
+    weights = weight_layout(g, layer_type)
+
+    # RTPs, then the sync lock that lets the proj, RMS and GLU cores read
+    # them.
+    for c in PROJ_COLS:
+        for r in (2, 3, 4, 5):
+            npu_write32(rtp["proj_swa"], int(IS_SWA), column=c, row=r)
+            npu_write32(rtp["proj_skip"], int(IS_SKIP), column=c, row=r)
+            npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=c, row=r)
+
+    L_local = _min_const(L, SW) if IS_SWA else L
+    npu_write32(rtp["l_qk"], L_local, column=2, row=2)
+    npu_write32(rtp["l_kv"], L_local, column=2, row=3)
+    npu_write32(rtp["swa_l_qk"], L_local, column=2, row=4)
+    npu_write32(rtp["swa_l_kv"], L_local, column=2, row=5)
+    npu_write32(rtp["rms_swa"], int(IS_SWA), column=3, row=2)
+    npu_write32(rtp["rms_skip"], int(IS_SKIP), column=3, row=2)
+    npu_write32(rtp["rope_skip_kv"], int(IS_SKIP), column=3, row=4)
+    npu_write32(rtp["swa_rope_skip_kv"], int(IS_SKIP), column=3, row=5)
+    npu_write32(rtp["glu_skip"], int(IS_SKIP and g.double_wide_mlp), column=3, row=3)
+    npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=3, row=2)
+    npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=3, row=3)
+
+    # The sequence keeps two rounds of legs in flight, as the engine's
+    # bd_offset double buffer does. A shim tile has 16 BDs.
+    DEPTH_ROUNDS = 2
+    window = []
+
+    def flush(force=False):
+        while len(window) > (0 if force else DEPTH_ROUNDS):
+            tasks = window.pop(0)
+            for task, token in tasks:
+                if token:
+                    dma_await_task(task)
+            dma_free_task(*[task for task, _ in tasks])
+
+    def emit(*legs):
+        """Start one round of legs."""
+        dma_start_task(*[task for task, _ in legs])
+        window.append(legs)
+        flush()
+
+    def leg(symbol, mem, off, length, token=True, pkt=None):
+        """A (task, token) pair: one linear shim BD over mem."""
+        # dma_bd takes i64 sizes and an i32 transfer_len.
+        size_len = length if isinstance(length, int) else arith.extsi(T.i64(), length)
+        task = shim_dma_single_bd_task(
+            symbol,
+            mem,
+            offset=off,
+            sizes=[1, 1, 1, size_len],
+            strides=[0, 0, 0, 1],
+            transfer_len=length,
+            issue_token=token,
+            packet=None if pkt is None else (0, pkt),
+        )
+        return task, token
+
+    emit(leg("send_x", x_arg.op, 0, D, pkt=_ShimPkt.to_rms))
+    emit(leg("send_rms", rms_arg.op, 0, 4 * D, pkt=_ShimPkt.to_rms))
+    # The RoPE weights go out on the channel whose flow reaches this layer
+    # type's RoPE tile.
+    rope_sym = "send_rms" if IS_SWA else "send_x"
+    emit(leg(rope_sym, rope_rms_arg.op, 0, 3 * DH, pkt=_ShimPkt.to_rope))
+    recv_y, _ = leg("recv_y", x_arg.op, 0, D)
+    dma_start_task(recv_y)
+
+    def move_weights(w):
+        """The engine's _move_weights: a round is 2 legs to each proj column."""
+        bpr = w.din // q4nx.K_TILE
+        # One core's M_TILE output rows, in bf16 elements.
+        stripe = bpr * W_BLOCK
+        cores = len(PROJ_COLS) * 4
+        for rnd in range(w.dout // q4nx.M_TILE // cores):
+            legs = []
+            for ci, col in enumerate(PROJ_COLS):
+                for half in (0, 1):
+                    off = w.offset + (rnd * cores + ci * 4 + 2 * half) * stripe
+                    legs.append(
+                        leg(f"proj_w{half}_{col}", proj_arg.op, off, 2 * stripe)
+                    )
+            emit(*legs)
+
+    def pli_leg(name):
+        """One leg over the bf16 weight ``name``, on the shim symbol ``name``."""
+        return leg(name, proj_arg.op, weights[name].offset, weights[name].size)
+
+    # V starts after the K rows: SW rows on a sliding-window layer, max_l rows
+    # on a global layer.
+    v_cache_off = DK * SW if IS_SWA else MAX_L_v * DK
+    move_weights(weights["qkv"])
+    if not IS_SKIP:
+        # This token's K and V into the cache, at row L - 1, modulo the window
+        # on sliding-window layers. Both legs go on the layer type's receive
+        # channel.
+        L_off = (arith.andi(L - 1, _as_i32(SW - 1)) if IS_SWA else (L - 1)) * DK
+        recv_sym = "recv_v" if IS_SWA else "recv_k"
+        emit(leg(recv_sym, kv_arg.op, L_off, DK))
+        emit(leg(recv_sym, kv_arg.op, L_off + v_cache_off, DK))
+    emit(leg("pli_rope_rms", rope_rms_arg.op, 3 * DH, g.pli_d * 2 + D + MIN_BF16_PAD))
+    # x reuses pli_rope_rms's channel as a second BD.
+    emit(leg("pli_rope_rms", x_arg.op, 2 * D, D, token=False))
+    emit(pli_leg("pli_down"))
+    # The KV cache into the attention memtile: one phase on global layers. The
+    # sliding-window cache is a ring, so its window can wrap into two.
+    mv_pkt = _KV_PKT_SWA if IS_SWA else _KV_PKT_GLOBAL
+    if not IS_SWA:
+        d2m = _ceil_mul(L, LK) * DK
+        emit(leg("move_k", kv_arg.op, 0, d2m, pkt=mv_pkt))
+        emit(leg("move_v", kv_arg.op, v_cache_off, d2m, pkt=mv_pkt))
+    else:
+        # Two phases when L >= SW, one when L < SW. A mask picks the lengths,
+        # so the leg count is fixed.
+        _m = _mask_ge(L, SW)
+        _nm = arith.xori(_m, _as_i32(-1))
+        _lb = arith.andi(L, _as_i32(SW - 1))
+        _Lp = arith.andi(L + (LK - 1), _as_i32(-LK))
+        p1_off = arith.andi(_m, _lb * DK)
+        p1_len = arith.ori(
+            arith.andi(_m, (_as_i32(SW) - _lb) * DK), arith.andi(_nm, _Lp * DK)
+        )
+        p2_len = arith.andi(_m, _lb * DK)
+        emit(leg("move_k", kv_arg.op, p1_off, p1_len, pkt=mv_pkt))
+        emit(leg("move_v", kv_arg.op, p1_off + v_cache_off, p1_len, pkt=mv_pkt))
+        # A zero-length BD issues no token, so the second phase awaits none.
+        emit(leg("move_k", kv_arg.op, 0, p2_len, token=False, pkt=mv_pkt))
+        emit(leg("move_v", kv_arg.op, v_cache_off, p2_len, token=False, pkt=mv_pkt))
+    for name in ("o", "up_gate", "down"):
+        move_weights(weights[name])
+    emit(pli_leg("pli_gate"))
+    emit(pli_leg("pli_up"))
+    flush(force=True)
+    dma_await_task(recv_y)
+    dma_free_task(recv_y)
+
+
 def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     """The MLIR module of one decode layer of ``layer_type`` for ``geometry``.
 
@@ -403,8 +585,6 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             "sequence takes the remainder by it with a mask"
         )
     g = geometry
-    IS_SWA = layer_type in ("swa", "swa_skip")
-    IS_SKIP = layer_type in ("global_skip", "swa_skip")
     D = g.model_dim
     NUM_KV = g.num_kv_heads
     G_DQ, G_DK = g.num_attn_heads * g.dh, NUM_KV * g.dh
@@ -418,179 +598,10 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     def k(name, symbol, arg_types):
         return kernel_fns[name].entry(symbol, arg_types)
 
-    def sequence(x_arg, proj_arg, rms_arg, rope_rms_arg, kv_arg, len_arg, max_l_arg):
-        # The sequence mirrors the engine's gen_layer_seq: the RTP writes, then
-        # the shim DMA legs in the engine's order. Offsets and lengths count
-        # bf16 elements. L counts the tokens up to and including this one.
-        L = _as_i32(len_arg) + 1
-        MAX_L_v = _as_i32(max_l_arg)
-        SW = sliding_window
-
-        def _ceil_mul(v, chunk):
-            # The C++ generator cannot lower the floordivsi that `//` emits.
-            return arith.divsi(v + (chunk - 1), _as_i32(chunk)) * chunk
-
-        DH = g.swa_dh if IS_SWA else g.dh
-        DK = S_DK if IS_SWA else G_DK
-        weights = weight_layout(g, layer_type)
-
-        # RTPs, then the sync lock that lets the proj, RMS and GLU cores read
-        # them.
-        for c in PROJ_COLS:
-            for r in (2, 3, 4, 5):
-                npu_write32(rtp["proj_swa"], int(IS_SWA), column=c, row=r)
-                npu_write32(rtp["proj_skip"], int(IS_SKIP), column=c, row=r)
-                npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=c, row=r)
-
-        # The C++ generator has no arith.minsi, so min and the masks are
-        # branchless.
-        def _mask_ge(v, bound):
-            """All ones if v >= bound, else 0."""
-            return arith.shrsi(_as_i32(bound - 1) - v, _as_i32(31))
-
-        def _min_const(v, bound):
-            d = v - _as_i32(bound)
-            return _as_i32(bound) + arith.andi(d, arith.shrsi(d, _as_i32(31)))
-
-        L_local = _min_const(L, SW) if IS_SWA else L
-        npu_write32(rtp["l_qk"], L_local, column=2, row=2)
-        npu_write32(rtp["l_kv"], L_local, column=2, row=3)
-        npu_write32(rtp["swa_l_qk"], L_local, column=2, row=4)
-        npu_write32(rtp["swa_l_kv"], L_local, column=2, row=5)
-        npu_write32(rtp["rms_swa"], int(IS_SWA), column=3, row=2)
-        npu_write32(rtp["rms_skip"], int(IS_SKIP), column=3, row=2)
-        npu_write32(rtp["rope_skip_kv"], int(IS_SKIP), column=3, row=4)
-        npu_write32(rtp["swa_rope_skip_kv"], int(IS_SKIP), column=3, row=5)
-        npu_write32(
-            rtp["glu_skip"], int(IS_SKIP and g.double_wide_mlp), column=3, row=3
-        )
-        npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=3, row=2)
-        npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=3, row=3)
-
-        # The sequence keeps two rounds of legs in flight, as the engine's
-        # bd_offset double buffer does. A shim tile has 16 BDs.
-        DEPTH_ROUNDS = 2
-        window = []
-
-        def flush(force=False):
-            while len(window) > (0 if force else DEPTH_ROUNDS):
-                tasks = window.pop(0)
-                for task, token in tasks:
-                    if token:
-                        dma_await_task(task)
-                dma_free_task(*[task for task, _ in tasks])
-
-        def emit(*legs):
-            """Start one round of legs."""
-            dma_start_task(*[task for task, _ in legs])
-            window.append(legs)
-            flush()
-
-        def leg(symbol, mem, off, length, token=True, pkt=None):
-            """A (task, token) pair: one linear shim BD over mem."""
-            # dma_bd takes i64 sizes and an i32 transfer_len.
-            size_len = (
-                length if isinstance(length, int) else arith.extsi(T.i64(), length)
-            )
-            task = shim_dma_single_bd_task(
-                symbol,
-                mem,
-                offset=off,
-                sizes=[1, 1, 1, size_len],
-                strides=[0, 0, 0, 1],
-                transfer_len=length,
-                issue_token=token,
-                packet=None if pkt is None else (0, pkt),
-            )
-            return task, token
-
-        emit(leg("send_x", x_arg.op, 0, D, pkt=_ShimPkt.to_rms))
-        emit(leg("send_rms", rms_arg.op, 0, 4 * D, pkt=_ShimPkt.to_rms))
-        # The RoPE weights go out on the channel whose flow reaches this
-        # layer type's RoPE tile.
-        rope_sym = "send_rms" if IS_SWA else "send_x"
-        emit(leg(rope_sym, rope_rms_arg.op, 0, 3 * DH, pkt=_ShimPkt.to_rope))
-        recv_y, _ = leg("recv_y", x_arg.op, 0, D)
-        dma_start_task(recv_y)
-
-        def move_weights(w):
-            """The engine's _move_weights: a round is 2 legs to each proj column."""
-            bpr = w.din // q4nx.K_TILE
-            # One core's M_TILE output rows, in bf16 elements.
-            stripe = bpr * W_BLOCK
-            cores = len(PROJ_COLS) * 4
-            for rnd in range(w.dout // q4nx.M_TILE // cores):
-                legs = []
-                for ci, col in enumerate(PROJ_COLS):
-                    for half in (0, 1):
-                        off = w.offset + (rnd * cores + ci * 4 + 2 * half) * stripe
-                        legs.append(
-                            leg(
-                                f"proj_w{half}_{col}",
-                                proj_arg.op,
-                                off,
-                                2 * stripe,
-                            )
-                        )
-                emit(*legs)
-
-        def pli_leg(name):
-            """One leg over the bf16 weight ``name``, on the shim symbol ``name``."""
-            return leg(name, proj_arg.op, weights[name].offset, weights[name].size)
-
-        # V starts after the K rows: SW rows on a sliding-window layer, max_l
-        # rows on a global layer.
-        v_cache_off = DK * SW if IS_SWA else MAX_L_v * DK
-        move_weights(weights["qkv"])
-        if not IS_SKIP:
-            # This token's K and V into the cache, at row L - 1, modulo the
-            # window on sliding-window layers. Both legs go on the layer
-            # type's receive channel.
-            L_off = (arith.andi(L - 1, _as_i32(SW - 1)) if IS_SWA else (L - 1)) * DK
-            recv_sym = "recv_v" if IS_SWA else "recv_k"
-            emit(leg(recv_sym, kv_arg.op, L_off, DK))
-            emit(leg(recv_sym, kv_arg.op, L_off + v_cache_off, DK))
-        emit(leg("pli_rope_rms", rope_rms_arg.op, 3 * DH, PLI_D * 2 + D + MIN_BF16_PAD))
-        # x reuses pli_rope_rms's channel as a second BD.
-        emit(leg("pli_rope_rms", x_arg.op, 2 * D, D, token=False))
-        emit(pli_leg("pli_down"))
-        # The KV cache into the attention memtile: one phase on global layers.
-        # The sliding-window cache is a ring, so its window can wrap into two.
-        mv_pkt = _KV_PKT_SWA if IS_SWA else _KV_PKT_GLOBAL
-        if not IS_SWA:
-            d2m = _ceil_mul(L, LK) * DK
-            emit(leg("move_k", kv_arg.op, 0, d2m, pkt=mv_pkt))
-            emit(leg("move_v", kv_arg.op, v_cache_off, d2m, pkt=mv_pkt))
-        else:
-            # Two phases when L >= SW, one when L < SW. A mask picks the
-            # lengths, so the leg count is fixed.
-            _m = _mask_ge(L, SW)
-            _nm = arith.xori(_m, _as_i32(-1))
-            _lb = arith.andi(L, _as_i32(SW - 1))
-            _Lp = arith.andi(L + (LK - 1), _as_i32(-LK))
-            p1_off = arith.andi(_m, _lb * DK)
-            p1_len = arith.ori(
-                arith.andi(_m, (_as_i32(SW) - _lb) * DK), arith.andi(_nm, _Lp * DK)
-            )
-            p2_len = arith.andi(_m, _lb * DK)
-            emit(leg("move_k", kv_arg.op, p1_off, p1_len, pkt=mv_pkt))
-            emit(leg("move_v", kv_arg.op, p1_off + v_cache_off, p1_len, pkt=mv_pkt))
-            # A zero-length BD issues no token, so the second phase awaits
-            # none.
-            emit(leg("move_k", kv_arg.op, 0, p2_len, token=False, pkt=mv_pkt))
-            emit(leg("move_v", kv_arg.op, v_cache_off, p2_len, token=False, pkt=mv_pkt))
-        for name in ("o", "up_gate", "down"):
-            move_weights(weights[name])
-        emit(pli_leg("pli_gate"))
-        emit(pli_leg("pli_up"))
-        flush(force=True)
-        dma_await_task(recv_y)
-        dma_free_task(recv_y)
-
     bf = np.dtype[bfloat16]
     sizes = arg_sizes(g)
     rt = Runtime(
-        sequence,
+        partial(_sequence, g, rtp, layer_type, sliding_window),
         [
             np.ndarray[(sizes["x"],), bf],
             np.ndarray[(sizes["proj"],), bf],
