@@ -294,9 +294,9 @@ def kernel(variant, device=None):
 def _no_unroll(iv):
     """Disable unrolling of the scf.for that yields iv in Peano's opt.
 
-    An unrolled loop repeats the same buffer addresses as call arguments in
-    every copy. MLIR drops a malformed annotation without an error: check the
-    call count in the core's opted_*.ll.
+    Each unrolled copy recomputes the same buffer addresses as call arguments.
+    The copies add instructions to every step. MLIR drops a malformed
+    annotation without an error: check the call count in the core's opted_*.ll.
     """
     iv.owner.owner.attributes["loop_annotation"] = Attribute.parse(
         "#llvm.loop_annotation<unroll = <disable = true>>"
