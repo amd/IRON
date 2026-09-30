@@ -1700,6 +1700,92 @@ def _build_attn_mem(ctx, amt):
     ctx.rt.add_tile_dma(TileDma(amt, amt_chans))
 
 
+def _route(rt, grid, t, proj_send_tiles):
+    """Add every flow between the stages.
+
+    ``grid`` holds every tile by (column, row), ``t`` the tile of each
+    PLACEMENT stage. The router places flows in the order the design adds
+    them. Long flows go first. The sequence addresses a shim channel by the
+    shim symbol of its first flow.
+    """
+    x_shim, kv_shim = t["x_shim"], t["kv_shim"]
+    proj_x = t["proj_x"]
+    _connect(rt, x_shim, 0, t["rms"], 0, pkt_id=_ShimPkt.to_rms, shim_symbol="send_x")
+    _connect(rt, x_shim, 1, t["rms"], 1, pkt_id=_ShimPkt.to_rms, shim_symbol="send_rms")
+    _connect(rt, x_shim, 0, t["rope"], 1, pkt_id=_ShimPkt.to_rope)
+    _connect(rt, x_shim, 1, t["swa_rope"], 1, pkt_id=_ShimPkt.to_rope)
+    _connect(rt, t["rms"], 0, proj_x, 3, pkt_id=_X_FROM_RMS)
+
+    # The weights from the shim into each memtile, halves on S2MM 4 and 5.
+    for col in PROJ_COLS:
+        for ch in (0, 1):
+            _connect(
+                rt,
+                grid[col, 0],
+                ch,
+                grid[col, 1],
+                4 + ch,
+                shim_symbol=f"proj_w{ch}_{col}",
+            )
+    # The memtile's MM2S j to S2MM 1 of its column's core in row j.
+    for col in PROJ_COLS:
+        for j in range(4):
+            _connect(rt, grid[col, 1], j, grid[col, 2 + j], 1)
+    # x from proj_x's MM2S 4 to every projection core's S2MM 0.
+    for col in PROJ_COLS:
+        for j in range(4):
+            _connect(rt, proj_x, 4, grid[col, 2 + j], 0)
+    # y from each group's sending cores to its memtile. The first keeps the
+    # packet header, which carries the consumer's id to proj_x.
+    pkts = [_ProjPkt.to_swa_rope, _ProjPkt.to_rope, _ProjPkt.to_rms, _ProjPkt.to_glu]
+    gather_mts = [t["proj_gather_0"], t["proj_gather_1"]]
+    for gather_mt, send_tiles in zip(gather_mts, proj_send_tiles):
+        for j, send_t in enumerate(send_tiles):
+            for pk in pkts:
+                _connect(rt, send_t, 0, gather_mt, j, pkt_id=pk, keep_pkt_header=j == 0)
+    for ch, gather_mt in enumerate(gather_mts):
+        for pk in pkts:
+            _connect(rt, gather_mt, 4, proj_x, ch, pkt_id=pk, keep_pkt_header=ch == 0)
+
+    for dst, pk in (
+        ("glu", _ProjPkt.to_glu),
+        ("rms", _ProjPkt.to_rms),
+        ("rope", _ProjPkt.to_rope),
+        ("swa_rope", _ProjPkt.to_swa_rope),
+    ):
+        _connect(rt, proj_x, 5, t[dst], 0, pkt_id=pk)
+
+    # This token's k and v, out to the KV cache.
+    _connect(rt, t["rope"], 1, kv_shim, 0, shim_symbol="recv_k")
+    _connect(rt, t["swa_rope"], 1, kv_shim, 1, shim_symbol="recv_v")
+    _connect(rt, t["attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
+    _connect(rt, t["swa_attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
+    _connect(rt, t["glu"], 0, proj_x, 3, pkt_id=_X_FROM_GLU)
+
+    # The KV cache into the attention memtile.
+    amt = t["attn_mem"]
+    _connect(rt, kv_shim, 0, amt, 0, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_k")
+    _connect(rt, kv_shim, 0, amt, 2, pkt_id=_KV_PKT_SWA)
+    _connect(rt, kv_shim, 1, amt, 1, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_v")
+    _connect(rt, kv_shim, 1, amt, 3, pkt_id=_KV_PKT_SWA)
+    _connect(rt, amt, 0, t["attn_qk"], 1)
+    _connect(rt, amt, 1, t["attn_kv"], 1)
+    _connect(rt, amt, 2, t["swa_attn_qk"], 1)
+    _connect(rt, amt, 3, t["swa_attn_kv"], 1)
+
+    # The per-layer-input path.
+    pl_shim_0, pl_shim_1 = t["pl_shim_0"], t["pl_shim_1"]
+    _connect(rt, pl_shim_0, 0, t["pl_embedding"], 0, shim_symbol="pli_rope_rms")
+    _connect(rt, pl_shim_0, 1, t["pl_embedding"], 1, shim_symbol="pli_down")
+    _connect(rt, t["pl_embedding"], 1, t["pl_merge"], 0)
+    _connect(rt, pl_shim_1, 0, t["pl_gate"], 1, shim_symbol="pli_gate")
+    _connect(rt, t["pl_gate"], 1, t["pl_merge"], 1)
+    _connect(rt, t["pl_merge"], 0, t["pl_up"], 0)
+    _connect(rt, pl_shim_1, 1, t["pl_up"], 1, shim_symbol="pli_up")
+    # The layer output, out to x.
+    _connect(rt, t["pl_up"], 0, x_shim, 0, shim_symbol="recv_y")
+
+
 def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     """The MLIR module of one decode layer of ``layer_type`` for ``geometry``.
 
@@ -1785,84 +1871,5 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     )
     _build_attn_mem(ctx, t["attn_mem"])
 
-    # The router places flows in the order the design adds them. Long flows
-    # go first. The sequence addresses a shim channel by the shim symbol of
-    # its first flow.
-    x_shim, kv_shim = t["x_shim"], t["kv_shim"]
-    proj_x = t["proj_x"]
-    _connect(rt, x_shim, 0, t["rms"], 0, pkt_id=_ShimPkt.to_rms, shim_symbol="send_x")
-    _connect(rt, x_shim, 1, t["rms"], 1, pkt_id=_ShimPkt.to_rms, shim_symbol="send_rms")
-    _connect(rt, x_shim, 0, t["rope"], 1, pkt_id=_ShimPkt.to_rope)
-    _connect(rt, x_shim, 1, t["swa_rope"], 1, pkt_id=_ShimPkt.to_rope)
-    _connect(rt, t["rms"], 0, proj_x, 3, pkt_id=_X_FROM_RMS)
-
-    # The weights from the shim into each memtile, halves on S2MM 4 and 5.
-    for col in PROJ_COLS:
-        for ch in (0, 1):
-            _connect(
-                rt,
-                grid[col, 0],
-                ch,
-                grid[col, 1],
-                4 + ch,
-                shim_symbol=f"proj_w{ch}_{col}",
-            )
-    # The memtile's MM2S j to S2MM 1 of its column's core in row j.
-    for col in PROJ_COLS:
-        for j in range(4):
-            _connect(rt, grid[col, 1], j, grid[col, 2 + j], 1)
-    # x from proj_x's MM2S 4 to every projection core's S2MM 0.
-    for col in PROJ_COLS:
-        for j in range(4):
-            _connect(rt, proj_x, 4, grid[col, 2 + j], 0)
-    # y from each group's sending cores to its memtile. The first keeps the
-    # packet header, which carries the consumer's id to proj_x.
-    pkts = [_ProjPkt.to_swa_rope, _ProjPkt.to_rope, _ProjPkt.to_rms, _ProjPkt.to_glu]
-    gather_mts = [t["proj_gather_0"], t["proj_gather_1"]]
-    for gather_mt, send_tiles in zip(gather_mts, proj_send_tiles):
-        for j, send_t in enumerate(send_tiles):
-            for pk in pkts:
-                _connect(rt, send_t, 0, gather_mt, j, pkt_id=pk, keep_pkt_header=j == 0)
-    for ch, gather_mt in enumerate(gather_mts):
-        for pk in pkts:
-            _connect(rt, gather_mt, 4, proj_x, ch, pkt_id=pk, keep_pkt_header=ch == 0)
-
-    for dst, pk in (
-        ("glu", _ProjPkt.to_glu),
-        ("rms", _ProjPkt.to_rms),
-        ("rope", _ProjPkt.to_rope),
-        ("swa_rope", _ProjPkt.to_swa_rope),
-    ):
-        _connect(rt, proj_x, 5, t[dst], 0, pkt_id=pk)
-
-    # This token's k and v, out to the KV cache.
-    _connect(rt, t["rope"], 1, kv_shim, 0, shim_symbol="recv_k")
-    _connect(rt, t["swa_rope"], 1, kv_shim, 1, shim_symbol="recv_v")
-    _connect(rt, t["attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
-    _connect(rt, t["swa_attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
-    _connect(rt, t["glu"], 0, proj_x, 3, pkt_id=_X_FROM_GLU)
-
-    # The KV cache into the attention memtile.
-    amt = t["attn_mem"]
-    _connect(rt, kv_shim, 0, amt, 0, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_k")
-    _connect(rt, kv_shim, 0, amt, 2, pkt_id=_KV_PKT_SWA)
-    _connect(rt, kv_shim, 1, amt, 1, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_v")
-    _connect(rt, kv_shim, 1, amt, 3, pkt_id=_KV_PKT_SWA)
-    _connect(rt, amt, 0, t["attn_qk"], 1)
-    _connect(rt, amt, 1, t["attn_kv"], 1)
-    _connect(rt, amt, 2, t["swa_attn_qk"], 1)
-    _connect(rt, amt, 3, t["swa_attn_kv"], 1)
-
-    # The per-layer-input path.
-    pl_shim_0, pl_shim_1 = t["pl_shim_0"], t["pl_shim_1"]
-    _connect(rt, pl_shim_0, 0, t["pl_embedding"], 0, shim_symbol="pli_rope_rms")
-    _connect(rt, pl_shim_0, 1, t["pl_embedding"], 1, shim_symbol="pli_down")
-    _connect(rt, t["pl_embedding"], 1, t["pl_merge"], 0)
-    _connect(rt, pl_shim_1, 0, t["pl_gate"], 1, shim_symbol="pli_gate")
-    _connect(rt, t["pl_gate"], 1, t["pl_merge"], 1)
-    _connect(rt, t["pl_merge"], 0, t["pl_up"], 0)
-    _connect(rt, pl_shim_1, 1, t["pl_up"], 1, shim_symbol="pli_up")
-    # The layer output, out to x.
-    _connect(rt, t["pl_up"], 0, x_shim, 0, shim_symbol="recv_y")
-
+    _route(rt, grid, t, proj_send_tiles)
     return Program(dev, rt, workers=workers).resolve_program()
