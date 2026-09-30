@@ -16,24 +16,14 @@ import pytest
 from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
-from aie.dialects._aie_enum_gen import AIEArch
 from aie.utils.npukernel import NPUKernel
 
 from iron.common.base import DispatchCallable
 from iron.operators.flm.layer.design import LAYER_TYPES, RTP_ADDRESSES, RTP_SYMBOLS
 from iron.operators.flm.layer.op import GEOMETRIES, DecodeLayer
+from iron.operators.flm.testing import requires_aie2p
 
 MODELS = sorted(GEOMETRIES)
-
-
-def _on_aie2p():
-    dev = aie_utils.get_current_device()
-    return dev is not None and dev.arch == AIEArch.AIE2p
-
-
-requires_aie2p = pytest.mark.skipif(
-    not _on_aie2p(), reason="the flm_gemma4_decode kernels are AIE2P only"
-)
 
 
 def _work_dir(op):
