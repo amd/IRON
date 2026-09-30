@@ -7,11 +7,12 @@ import pytest
 from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
-from aie.dialects._aie_enum_gen import AIEArch
 
-from iron.operators.flm.lm_head.design import GROUP, K_TILE, M_TILE, grid
+from iron.operators.flm.dataflow import grid
 from iron.operators.flm.lm_head.op import LMHead
 from iron.operators.flm.lm_head.reference import dequantize, reference
+from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE
+from iron.operators.flm.testing import requires_aie2p
 
 # The initial value of y. No logit of the test inputs reaches it, so an
 # unwritten output fails the check.
@@ -23,16 +24,6 @@ PROJECTION_ERROR = 0.025
 TANH_ERROR = 0.04
 
 GEMMA4_SOFTCAP = 30.0
-
-
-def _on_aie2p():
-    dev = aie_utils.get_current_device()
-    return dev is not None and dev.arch == AIEArch.AIE2p
-
-
-requires_aie2p = pytest.mark.skipif(
-    not _on_aie2p(), reason="the flm_gemma4_q4nx_lm_head kernel is AIE2P only"
-)
 
 
 def _inputs(dim, vocab, seed):
