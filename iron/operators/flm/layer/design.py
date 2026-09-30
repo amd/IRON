@@ -14,6 +14,7 @@ RTPs. It then streams the weights, the KV cache and the hidden state.
 """
 
 from enum import IntEnum
+from typing import NamedTuple
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -293,20 +294,63 @@ def q_heads_padded(geometry):
     return (groups + pad - 1) // pad * pad * geometry.num_kv_heads
 
 
+class BlobWeight(NamedTuple):
+    """One weight matrix in the engine's weight blob.
+
+    offset and size count bf16 elements. dout and din give the matrix shape.
+    """
+
+    offset: int
+    size: int
+    dout: int
+    din: int
+
+
+def weight_layout(geometry, layer_type):
+    """The weights in the blob that the sequence reads from proj, in blob order.
+
+    The engine packs one blob per layer: qkv, o, up_gate and down in q4nx,
+    then the per-layer-input down, gate and up projections in bf16. qkv is
+    q alone on a skip layer, which reuses another layer's KV cache. A skip
+    layer with double_wide_mlp has twice the intermediate size.
+    """
+    g = geometry
+    is_swa = layer_type in ("swa", "swa_skip")
+    is_skip = layer_type in ("global_skip", "swa_skip")
+    D = g.model_dim
+    dh = g.swa_dh if is_swa else g.dh
+    dq, dk = g.num_attn_heads * dh, g.num_kv_heads * dh
+    inter = g.intermediate_size * (2 if is_skip and g.double_wide_mlp else 1)
+    shapes = {
+        "qkv": (dq if is_skip else dq + 2 * dk, D, True),
+        "o": (D, dq, True),
+        "up_gate": (2 * inter, D, True),
+        "down": (D, inter, True),
+        "pli_down": (g.pli_d, D, False),
+        "pli_gate": (g.pli_d, D, False),
+        "pli_up": (g.pli_d, D, False),
+    }
+    layout, offset = {}, 0
+    for name, (dout, din, packed) in shapes.items():
+        size = q4nx.packed_bytes(dout * din) // 2 if packed else dout * din
+        layout[name] = BlobWeight(offset, size, dout, din)
+        offset += size
+    return layout
+
+
 def arg_sizes(geometry):
     """Elements of the sequence's buffers: x, proj, rms, rope_rms and kv.
 
     The engine binds its own buffers. These sizes bound what the sequence
-    reads and writes.
+    reads and writes. The four layer types share one xclbin, so proj is the
+    largest blob of the four.
     """
-    D, pli, inter = geometry.model_dim, geometry.pli_d, geometry.intermediate_size
-    dq = geometry.num_attn_heads * geometry.dh
+    D, pli = geometry.model_dim, geometry.pli_d
     dk = geometry.num_kv_heads * geometry.dh
-    proj = (
-        (dq + 2 * dk) * D * 5 // 8 // 2
-        + dq * D * 5 // 8 // 2
-        + 2 * inter * D * 5 // 8 // 2
-        + 3 * pli * D
+    proj = max(
+        w.offset + w.size
+        for t in LAYER_TYPES
+        for w in weight_layout(geometry, t).values()
     )
     return {
         "x": 3 * D,
@@ -387,33 +431,8 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             return arith.divsi(v + (chunk - 1), _as_i32(chunk)) * chunk
 
         DH = g.swa_dh if IS_SWA else g.dh
-        DQ = S_DQ if IS_SWA else G_DQ
         DK = S_DK if IS_SWA else G_DK
-        INTERMEDIATE = (
-            g.intermediate_size * 2
-            if IS_SKIP and g.double_wide_mlp
-            else g.intermediate_size
-        )
-
-        # Offsets into the engine's weight blob. w counts bytes. A skip layer
-        # has no k or v weights.
-        def q4b(dout, din):
-            return dout * din * 5 // 8
-
-        w = q4b(DQ, D)
-        if not IS_SKIP:
-            w += 2 * q4b(DK, D)
-        o_off = w // 2
-        w += q4b(DQ, D)
-        upgate_off = w // 2
-        w += q4b(2 * INTERMEDIATE, D)
-        down_off = w // 2
-        w += q4b(INTERMEDIATE, D)
-        pli_down_off = w // 2
-        w += PLI_D * D * 2
-        pli_gate_off = w // 2
-        w += PLI_D * D * 2
-        pli_up_off = w // 2
+        weights = weight_layout(g, layer_type)
 
         # RTPs, then the sync lock that lets the proj, RMS and GLU cores read
         # them.
@@ -494,32 +513,36 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         recv_y, _ = leg("recv_y", x_arg.op, 0, D)
         dma_start_task(recv_y)
 
-        def move_weights(Dout, Din, w_off):
+        def move_weights(w):
             """The engine's _move_weights: a round is 2 legs to each proj column."""
-            bpr = Din // q4nx.K_TILE
+            bpr = w.din // q4nx.K_TILE
+            # One core's M_TILE output rows, in bf16 elements.
+            stripe = bpr * W_BLOCK
             cores = len(PROJ_COLS) * 4
-            for rnd in range(Dout // q4nx.M_TILE // cores):
+            for rnd in range(w.dout // q4nx.M_TILE // cores):
                 legs = []
                 for ci, col in enumerate(PROJ_COLS):
                     for half in (0, 1):
-                        off = (rnd * cores + ci * 4 + 2 * half) * W_BLOCK * bpr + w_off
+                        off = w.offset + (rnd * cores + ci * 4 + 2 * half) * stripe
                         legs.append(
                             leg(
                                 f"proj_w{half}_{col}",
                                 proj_arg.op,
                                 off,
-                                2 * bpr * W_BLOCK,
+                                2 * stripe,
                             )
                         )
                 emit(*legs)
 
+        def pli_leg(name):
+            """One leg over the bf16 weight ``name``, on the shim symbol ``name``."""
+            return leg(name, proj_arg.op, weights[name].offset, weights[name].size)
+
         # V starts after the K rows: SW rows on a sliding-window layer, max_l
         # rows on a global layer.
         v_cache_off = DK * SW if IS_SWA else MAX_L_v * DK
-        if IS_SKIP:
-            move_weights(DQ, D, 0)
-        else:
-            move_weights(DQ + 2 * DK, D, 0)
+        move_weights(weights["qkv"])
+        if not IS_SKIP:
             # This token's K and V into the cache, at row L - 1, modulo the
             # window on sliding-window layers. Both legs go on the layer
             # type's receive channel.
@@ -530,7 +553,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         emit(leg("pli_rope_rms", rope_rms_arg.op, 3 * DH, PLI_D * 2 + D + MIN_BF16_PAD))
         # x reuses pli_rope_rms's channel as a second BD.
         emit(leg("pli_rope_rms", x_arg.op, 2 * D, D, token=False))
-        emit(leg("pli_down", proj_arg.op, pli_down_off, PLI_D * D))
+        emit(pli_leg("pli_down"))
         # The KV cache into the attention memtile: one phase on global layers.
         # The sliding-window cache is a ring, so its window can wrap into two.
         mv_pkt = _KV_PKT_SWA if IS_SWA else _KV_PKT_GLOBAL
@@ -556,11 +579,10 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             # none.
             emit(leg("move_k", kv_arg.op, 0, p2_len, token=False, pkt=mv_pkt))
             emit(leg("move_v", kv_arg.op, v_cache_off, p2_len, token=False, pkt=mv_pkt))
-        move_weights(D, DQ, o_off)
-        move_weights(2 * INTERMEDIATE, D, upgate_off)
-        move_weights(D, INTERMEDIATE, down_off)
-        emit(leg("pli_gate", proj_arg.op, pli_gate_off, PLI_D * D))
-        emit(leg("pli_up", proj_arg.op, pli_up_off, PLI_D * D))
+        for name in ("o", "up_gate", "down"):
+            move_weights(weights[name])
+        emit(pli_leg("pli_gate"))
+        emit(pli_leg("pli_up"))
         flush(force=True)
         dma_await_task(recv_y)
         dma_free_task(recv_y)
