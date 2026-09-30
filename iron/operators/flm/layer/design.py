@@ -13,6 +13,7 @@ serves the four layer types. The runtime sequence writes the layer type into
 RTPs. It then streams the weights, the KV cache and the hidden state.
 """
 
+from dataclasses import dataclass
 from enum import IntEnum
 from functools import partial
 from typing import NamedTuple
@@ -46,6 +47,7 @@ from aie.iron import (
     Worker,
 )
 from aie.iron import kernels
+from aie.iron.kernels import FlmGemma4DecodeGeometry
 from aie.iron.controlflow import range_
 from aie.iron.dataflow import Flow, PacketFlow
 from aie.iron.device import Tile
@@ -125,6 +127,10 @@ Q_HEADS_PADDING = 4
 MIN_BF16_PAD = 32
 # The columns of the projection cores.
 PROJ_COLS = (0, 1, 6, 7)
+
+_BF16 = np.dtype[bfloat16]
+_RTP_TY = np.ndarray[(16,), np.dtype[np.int32]]
+_W_BLK_TY = np.ndarray[(BF16_W_BLOCK,), _BF16]
 
 # Core locks, by the name of the factory argument that gives the kernel the id.
 RMS_LOCKS = dict(
@@ -389,6 +395,47 @@ def _connect(
         )
 
 
+@dataclass
+class _Ctx:
+    """The state that every stage builder adds to.
+
+    It holds the runtime, the workers, the geometry, the RTP addresses and the
+    kernels by name.
+    """
+
+    rt: Runtime
+    workers: list
+    g: FlmGemma4DecodeGeometry
+    rtp: dict
+    kernels: dict
+
+    def kernel(self, name, symbol, arg_types):
+        """The entry point ``symbol`` of the kernel ``name``."""
+        return self.kernels[name].entry(symbol, arg_types)
+
+    def rtp_buffer(self, tile, key, name=None):
+        """The RTP buffer of RTP_ADDRESSES key ``key``, pinned at its address."""
+        return Buffer(
+            type=_RTP_TY,
+            name=name or RTP_SYMBOLS[key],
+            tile=tile,
+            use_write_rtp=True,
+            address=self.rtp[key],
+        )
+
+    def add_locks(self, tile, ids_inits):
+        """The tile's locks, one per (lock id, init) pair."""
+        out = [Lock(tile=tile, lock_id=i, init=init) for i, init in ids_inits]
+        for lock in out:
+            self.rt.add_lock(lock)
+        return out
+
+    def locks(self, tile, table, inits):
+        """The tile's locks named in ``table``, with ``inits`` by name."""
+        ids_inits = [(table[name], init) for name, init in inits.items()]
+        return dict(zip(inits, self.add_locks(tile, ids_inits)))
+
+
 def _ceil_mul(v, chunk):
     """v rounded up to a multiple of chunk."""
     # The C++ generator cannot lower the floordivsi that `//` emits.
@@ -570,90 +617,17 @@ def _sequence(
     dma_free_task(recv_y)
 
 
-def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
-    """The MLIR module of one decode layer of ``layer_type`` for ``geometry``.
+def _build_rms(ctx, rms_tile):
+    """RMS norm and residual. Returns y_out, the layer output the gate tile reads.
 
-    ``rtp`` maps each RTP_ADDRESSES key to the address that the engine writes.
-    ``layer_type`` sets the runtime sequence only. The sequence takes x, proj,
-    rms, rope_rms and kv, then context_len and max_l.
+    x arrives on S2MM 0, the norm weights on S2MM 1. y leaves on MM2S 0
+    behind its packet header.
     """
-    if layer_type not in LAYER_TYPES:
-        raise ValueError(f"layer_type must be one of {LAYER_TYPES}")
-    if sliding_window & (sliding_window - 1):
-        raise ValueError(
-            f"sliding_window ({sliding_window}) must be a power of two: the "
-            "sequence takes the remainder by it with a mask"
-        )
-    g = geometry
-    D = g.model_dim
-    NUM_KV = g.num_kv_heads
-    G_DQ, G_DK = g.num_attn_heads * g.dh, NUM_KV * g.dh
-    S_DQ, S_DK = g.num_attn_heads * g.swa_dh, NUM_KV * g.swa_dh
-    PLI_D = g.pli_d
-    NQ_PADDED = q_heads_padded(g)
-    two_kv = NUM_KV == 2
-
-    kernel_fns = layer_kernels(g, dev)
-
-    def k(name, symbol, arg_types):
-        return kernel_fns[name].entry(symbol, arg_types)
-
-    bf = np.dtype[bfloat16]
-    sizes = arg_sizes(g)
-    rt = Runtime(
-        partial(_sequence, g, rtp, layer_type, sliding_window),
-        [
-            np.ndarray[(sizes["x"],), bf],
-            np.ndarray[(sizes["proj"],), bf],
-            np.ndarray[(sizes["rms"],), bf],
-            np.ndarray[(sizes["rope_rms"],), bf],
-            np.ndarray[(sizes["kv"],), bf],
-            np.int32,
-            np.int32,
-        ],
-    )
-    workers = []
-
-    # Shim row 0, memtile row 1, compute rows 2 to 5. CT is [compute row][col].
-    IT = [Tile(c, 0, tile_type=dev.get_tile_type(c, 0)) for c in range(dev.cols)]
-    MT = [Tile(c, 1, tile_type=dev.get_tile_type(c, 1)) for c in range(dev.cols)]
-    CT = [
-        [Tile(c, r + 2, tile_type=dev.get_tile_type(c, r + 2)) for c in range(dev.cols)]
-        for r in range(4)
-    ]
-
-    RTP_ty = np.ndarray[(16,), np.dtype[np.int32]]
-
-    def rtp_buffer(tile, key, name=None):
-        """The RTP buffer of RTP_ADDRESSES key ``key``, pinned at its address."""
-        return Buffer(
-            type=RTP_ty,
-            name=name or RTP_SYMBOLS[key],
-            tile=tile,
-            use_write_rtp=True,
-            address=rtp[key],
-        )
-
-    def add_locks(tile, ids_inits):
-        """The tile's locks, one per (lock id, init) pair."""
-        out = [Lock(tile=tile, lock_id=i, init=init) for i, init in ids_inits]
-        for lock in out:
-            rt.add_lock(lock)
-        return out
-
-    def locks(tile, table, inits):
-        """The tile's locks named in ``table``, with ``inits`` by name."""
-        ids_inits = [(table[name], init) for name, init in inits.items()]
-        return dict(zip(inits, add_locks(tile, ids_inits)))
-
-    # --- RMS norm and residual. x in on S2MM 0, the norm weights on S2MM 1,
-    # y out on MM2S 0 behind its packet header. y_out is the layer output the
-    # gate tile reads.
-    rms_tile = CT[0][3]
-    rms_x_ty = np.ndarray[(D,), bf]
-    rms_x_buf_ty = np.ndarray[(D, 2), bf]
-    rms_w_ty = np.ndarray[(4, D), bf]
-    rms_y_pkt_ty = np.ndarray[(D + 16,), bf]
+    D = ctx.g.model_dim
+    rms_x_ty = np.ndarray[(D,), _BF16]
+    rms_x_buf_ty = np.ndarray[(D, 2), _BF16]
+    rms_w_ty = np.ndarray[(4, D), _BF16]
+    rms_y_pkt_ty = np.ndarray[(D + 16,), _BF16]
     rms_name = f"{rms_tile.row}_{rms_tile.col}"
     rms_x_ping = Buffer(type=rms_x_ty, name=f"x_ping_{rms_name}", tile=rms_tile)
     rms_x_pong = Buffer(type=rms_x_ty, name=f"x_pong_{rms_name}", tile=rms_tile)
@@ -661,9 +635,9 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     rms_w = Buffer(type=rms_w_ty, name=f"w_buffer_{rms_name}", tile=rms_tile)
     rms_y_out = Buffer(type=rms_x_ty, name=f"y_out_{rms_name}", tile=rms_tile)
     rms_y = Buffer(type=rms_y_pkt_ty, name=f"y_{rms_name}", tile=rms_tile)
-    rms_is_swa = rtp_buffer(rms_tile, "rms_swa")
-    rms_skip = rtp_buffer(rms_tile, "rms_skip")
-    rl = locks(
+    rms_is_swa = ctx.rtp_buffer(rms_tile, "rms_swa")
+    rms_skip = ctx.rtp_buffer(rms_tile, "rms_skip")
+    rl = ctx.locks(
         rms_tile,
         RMS_LOCKS,
         dict(
@@ -680,7 +654,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             lm_head_out_cons_lock=0,
         ),
     )
-    rms_k = k(
+    rms_k = ctx.kernel(
         "rms_residual",
         "rms_residual",
         [
@@ -690,12 +664,12 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             rms_x_ty,
             rms_w_ty,
             rms_x_buf_ty,
-            RTP_ty,
-            RTP_ty,
+            _RTP_TY,
+            _RTP_TY,
         ],
     )
 
-    workers.append(
+    ctx.workers.append(
         Worker(
             _call_kernel,
             [
@@ -713,7 +687,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             stack_size=1024 * 4,
         )
     )
-    rt.add_tile_dma(
+    ctx.rt.add_tile_dma(
         TileDma(
             rms_tile,
             [
@@ -748,112 +722,114 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             ],
         )
     )
+    return rms_y_out
 
-    # --- RoPE, global and sliding-window: qkv in on S2MM 0, the RoPE weights
-    # on S2MM 1, q out through a fifo to the qk core, k and v out on MM2S 1.
-    def build_rope(rope_tile, name, rtp_key, dk, dh, q_fifo):
-        dq_padded = NQ_PADDED * dh
-        qkv_ty = np.ndarray[(dh,), bf]
-        q_ty = np.ndarray[(dq_padded,), bf]
-        kv_ty = np.ndarray[(dk,), bf]
-        rope_ty = np.ndarray[(dh * 3 if g.qk_norm else dh,), bf]
 
-        r, c = rope_tile.row, rope_tile.col
-        qkv_0 = Buffer(type=qkv_ty, name=f"qkv_buffer_0_{r}_{c}", tile=rope_tile)
-        qkv_1 = Buffer(type=qkv_ty, name=f"qkv_buffer_1_{r}_{c}", tile=rope_tile)
-        k_buf = Buffer(type=kv_ty, name=f"k_buffer_{r}_{c}", tile=rope_tile)
-        v_buf = Buffer(type=kv_ty, name=f"v_buffer_{r}_{c}", tile=rope_tile)
-        rope_buf = Buffer(type=rope_ty, name=f"rope_buffer_{r}_{c}", tile=rope_tile)
-        skip_kv = rtp_buffer(rope_tile, rtp_key)
-        lk = locks(
+def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
+    """RoPE, global or sliding-window.
+
+    qkv arrives on S2MM 0, the RoPE weights on S2MM 1. q leaves through
+    q_fifo to the qk core, k and v on MM2S 1.
+    """
+    g = ctx.g
+    NQ_PADDED = q_heads_padded(g)
+    dk = g.num_kv_heads * dh
+    dq_padded = NQ_PADDED * dh
+    qkv_ty = np.ndarray[(dh,), _BF16]
+    q_ty = np.ndarray[(dq_padded,), _BF16]
+    kv_ty = np.ndarray[(dk,), _BF16]
+    rope_ty = np.ndarray[(dh * 3 if g.qk_norm else dh,), _BF16]
+
+    r, c = rope_tile.row, rope_tile.col
+    qkv_0 = Buffer(type=qkv_ty, name=f"qkv_buffer_0_{r}_{c}", tile=rope_tile)
+    qkv_1 = Buffer(type=qkv_ty, name=f"qkv_buffer_1_{r}_{c}", tile=rope_tile)
+    k_buf = Buffer(type=kv_ty, name=f"k_buffer_{r}_{c}", tile=rope_tile)
+    v_buf = Buffer(type=kv_ty, name=f"v_buffer_{r}_{c}", tile=rope_tile)
+    rope_buf = Buffer(type=rope_ty, name=f"rope_buffer_{r}_{c}", tile=rope_tile)
+    skip_kv = ctx.rtp_buffer(rope_tile, rtp_key)
+    lk = ctx.locks(
+        rope_tile,
+        ROPE_LOCKS,
+        dict(
+            qkv_prod_lock=2,
+            qkv_cons_lock=0,
+            k_prod_lock=1,
+            k_cons_lock=0,
+            v_prod_lock=1,
+            v_cons_lock=0,
+            rope_prod_lock=1,
+            rope_cons_lock=0,
+        ),
+    )
+    ctx.add_locks(rope_tile, [(ROPE_Q_PASS_LOCK, 0)])
+    kern = ctx.kernel(
+        name, "rope", [q_ty, kv_ty, kv_ty, qkv_ty, qkv_ty, rope_ty, _RTP_TY]
+    )
+
+    def rope_body(q_h, kk, v, q0, q1, rope, skip, kern):
+        q = q_h.acquire(1)
+        kern(q, kk, v, q0, q1, rope, skip)
+        q_h.release(1)
+
+    ctx.workers.append(
+        Worker(
+            rope_body,
+            [q_fifo.prod(), k_buf, v_buf, qkv_0, qkv_1, rope_buf, skip_kv, kern],
+            tile=rope_tile,
+            stack_size=1024 * 4,
+        )
+    )
+    ctx.rt.add_tile_dma(
+        TileDma(
             rope_tile,
-            ROPE_LOCKS,
-            dict(
-                qkv_prod_lock=2,
-                qkv_cons_lock=0,
-                k_prod_lock=1,
-                k_cons_lock=0,
-                v_prod_lock=1,
-                v_cons_lock=0,
-                rope_prod_lock=1,
-                rope_cons_lock=0,
-            ),
-        )
-        add_locks(rope_tile, [(ROPE_Q_PASS_LOCK, 0)])
-        kern = k(name, "rope", [q_ty, kv_ty, kv_ty, qkv_ty, qkv_ty, rope_ty, RTP_ty])
-
-        def rope_body(q_h, kk, v, q0, q1, rope, skip, kern):
-            q = q_h.acquire(1)
-            kern(q, kk, v, q0, q1, rope, skip)
-            q_h.release(1)
-
-        workers.append(
-            Worker(
-                rope_body,
-                [q_fifo.prod(), k_buf, v_buf, qkv_0, qkv_1, rope_buf, skip_kv, kern],
-                tile=rope_tile,
-                stack_size=1024 * 4,
-            )
-        )
-        rt.add_tile_dma(
-            TileDma(
-                rope_tile,
-                [
-                    DmaChannel(
-                        DMAChannelDir.S2MM,
-                        0,
-                        ping_pong(
-                            qkv_0, qkv_1, lk["qkv_prod_lock"], lk["qkv_cons_lock"]
+            [
+                DmaChannel(
+                    DMAChannelDir.S2MM,
+                    0,
+                    ping_pong(qkv_0, qkv_1, lk["qkv_prod_lock"], lk["qkv_cons_lock"]),
+                ),
+                DmaChannel(
+                    DMAChannelDir.MM2S,
+                    1,
+                    [
+                        Bd(
+                            k_buf,
+                            acquires=[Acquire(lk["k_cons_lock"])],
+                            releases=[Release(lk["k_prod_lock"])],
+                            next=1,
                         ),
-                    ),
-                    DmaChannel(
-                        DMAChannelDir.MM2S,
-                        1,
-                        [
-                            Bd(
-                                k_buf,
-                                acquires=[Acquire(lk["k_cons_lock"])],
-                                releases=[Release(lk["k_prod_lock"])],
-                                next=1,
-                            ),
-                            Bd(
-                                v_buf,
-                                acquires=[Acquire(lk["v_cons_lock"])],
-                                releases=[Release(lk["v_prod_lock"])],
-                                next=0,
-                            ),
-                        ],
-                    ),
-                    _single_bd(
-                        DMAChannelDir.S2MM,
-                        1,
-                        rope_buf,
-                        lk["rope_prod_lock"],
-                        lk["rope_cons_lock"],
-                    ),
-                ],
-            )
+                        Bd(
+                            v_buf,
+                            acquires=[Acquire(lk["v_cons_lock"])],
+                            releases=[Release(lk["v_prod_lock"])],
+                            next=0,
+                        ),
+                    ],
+                ),
+                _single_bd(
+                    DMAChannelDir.S2MM,
+                    1,
+                    rope_buf,
+                    lk["rope_prod_lock"],
+                    lk["rope_cons_lock"],
+                ),
+            ],
         )
+    )
 
-    # q from RoPE to the qk core. The qk core's DMA reorders it.
-    q_of_g = ObjectFifo(np.ndarray[(G_DQ,), bf], name="q_in", depth=2)
-    q_of_swa = ObjectFifo(np.ndarray[(S_DQ,), bf], name="swa_q_in", depth=2)
 
-    rope_tile = CT[2][3]
-    build_rope(rope_tile, "rope", "rope_skip_kv", G_DK, g.dh, q_of_g)
-    swa_rope_tile = CT[3][3]
-    build_rope(swa_rope_tile, "swa_rope", "swa_rope_skip_kv", S_DK, g.swa_dh, q_of_swa)
+def _build_pl_embedding(ctx, ple_tile):
+    """Per-layer-input embedding.
 
-    w_blk_ty = np.ndarray[(BF16_W_BLOCK,), bf]
-
-    # --- Per-layer-input embedding: x0_per_layer, the norm weights and x0 in
-    # on S2MM 0 as a 4-BD cycle, weights on S2MM 1, y out on MM2S 1.
-    ple_tile = CT[1][4]
+    x0_per_layer, the norm weights and x0 arrive on S2MM 0 as a 4-BD cycle,
+    the weights on S2MM 1. y leaves on MM2S 1.
+    """
+    D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     ple_name = f"{ple_tile.row}_{ple_tile.col}"
-    ple_norm_w_ty = np.ndarray[(PLI_D + D + 32,), bf]
-    ple_x0_pl_ty = np.ndarray[(PLI_D,), bf]
-    ple_x0_ty = np.ndarray[(D,), bf]
-    ple_y_ty = np.ndarray[(PLI_D + D + 32,), bf]
+    ple_norm_w_ty = np.ndarray[(PLI_D + D + 32,), _BF16]
+    ple_x0_pl_ty = np.ndarray[(PLI_D,), _BF16]
+    ple_x0_ty = np.ndarray[(D,), _BF16]
+    ple_y_ty = np.ndarray[(PLI_D + D + 32,), _BF16]
     ple_norm_w = Buffer(type=ple_norm_w_ty, name=f"norm_w_{ple_name}", tile=ple_tile)
     ple_x0_pl = Buffer(
         type=ple_x0_pl_ty, name=f"x0_per_layer_{ple_name}", tile=ple_tile
@@ -861,9 +837,9 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     ple_x0 = Buffer(type=ple_x0_ty, name=f"x0_{ple_name}", tile=ple_tile)
     ple_x_proj = Buffer(type=ple_x0_pl_ty, name=f"x_proj_{ple_name}", tile=ple_tile)
     ple_y = Buffer(type=ple_y_ty, name=f"y_{ple_name}", tile=ple_tile)
-    ple_w0 = Buffer(type=w_blk_ty, name=f"proj_w_0_{ple_name}", tile=ple_tile)
-    ple_w1 = Buffer(type=w_blk_ty, name=f"proj_w_1_{ple_name}", tile=ple_tile)
-    pl = locks(
+    ple_w0 = Buffer(type=_W_BLK_TY, name=f"proj_w_0_{ple_name}", tile=ple_tile)
+    ple_w1 = Buffer(type=_W_BLK_TY, name=f"proj_w_1_{ple_name}", tile=ple_tile)
+    pl = ctx.locks(
         ple_tile,
         PLE_LOCKS,
         dict(
@@ -877,8 +853,8 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             y_cons_lock=0,
         ),
     )
-    (ple_norm_w_p2,) = add_locks(ple_tile, [(PLE_NORM_W_P2_LOCK, 0)])
-    ple_k = k(
+    (ple_norm_w_p2,) = ctx.add_locks(ple_tile, [(PLE_NORM_W_P2_LOCK, 0)])
+    ple_k = ctx.kernel(
         "proj_layer_embedding",
         "proj_layer_embedding",
         [
@@ -887,12 +863,12 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             ple_x0_ty,
             ple_x0_pl_ty,
             ple_y_ty,
-            w_blk_ty,
-            w_blk_ty,
+            _W_BLK_TY,
+            _W_BLK_TY,
         ],
     )
 
-    workers.append(
+    ctx.workers.append(
         Worker(
             _call_kernel,
             [ple_norm_w, ple_x0_pl, ple_x0, ple_x_proj, ple_y, ple_w0, ple_w1, ple_k],
@@ -900,7 +876,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             stack_size=1024 * 4,
         )
     )
-    rt.add_tile_dma(
+    ctx.rt.add_tile_dma(
         TileDma(
             ple_tile,
             [
@@ -954,16 +930,21 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         )
     )
 
-    # --- Per-layer-input gate: x is the RMS tile's y_out, weights on S2MM 1,
-    # y out on MM2S 1.
-    gle_tile = CT[0][4]
+
+def _build_pl_gate(ctx, gle_tile, x):
+    """Per-layer-input gate.
+
+    x is the RMS tile's y_out. The weights arrive on S2MM 1. y leaves on
+    MM2S 1.
+    """
+    D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     gle_name = f"{gle_tile.row}_{gle_tile.col}"
-    gle_x_ty = np.ndarray[(D,), bf]
-    gle_y_ty = np.ndarray[(D + PLI_D,), bf]
-    gle_w0 = Buffer(type=w_blk_ty, name=f"proj_w_0_{gle_name}", tile=gle_tile)
-    gle_w1 = Buffer(type=w_blk_ty, name=f"proj_w_1_{gle_name}", tile=gle_tile)
+    gle_x_ty = np.ndarray[(D,), _BF16]
+    gle_y_ty = np.ndarray[(D + PLI_D,), _BF16]
+    gle_w0 = Buffer(type=_W_BLK_TY, name=f"proj_w_0_{gle_name}", tile=gle_tile)
+    gle_w1 = Buffer(type=_W_BLK_TY, name=f"proj_w_1_{gle_name}", tile=gle_tile)
     gle_y = Buffer(type=gle_y_ty, name=f"y_{gle_name}", tile=gle_tile)
-    gl = locks(
+    gl = ctx.locks(
         gle_tile,
         GLE_LOCKS,
         dict(
@@ -975,21 +956,21 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             y_cons_lock=0,
         ),
     )
-    gle_k = k(
+    gle_k = ctx.kernel(
         "gate_layer_embedding",
         "gate_layer_embedding",
-        [gle_x_ty, w_blk_ty, w_blk_ty, gle_y_ty],
+        [gle_x_ty, _W_BLK_TY, _W_BLK_TY, gle_y_ty],
     )
 
-    workers.append(
+    ctx.workers.append(
         Worker(
             _call_kernel,
-            [rms_y_out, gle_w0, gle_w1, gle_y, gle_k],
+            [x, gle_w0, gle_w1, gle_y, gle_k],
             tile=gle_tile,
             stack_size=1024 * 4,
         )
     )
-    rt.add_tile_dma(
+    ctx.rt.add_tile_dma(
         TileDma(
             gle_tile,
             [
@@ -1010,17 +991,22 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         )
     )
 
-    # --- Per-layer-input merge, a tile without a core: the embedding and the
-    # gate outputs into one buffer, out to the up projection.
-    plm_tile = CT[1][5]
-    plm_dual_y_ty = np.ndarray[(2 * (PLI_D + D) + 32,), bf]
+
+def _build_pl_merge(ctx, plm_tile):
+    """Per-layer-input merge, a tile without a core.
+
+    The tile gathers the embedding and the gate outputs into one buffer and
+    sends it to the up projection.
+    """
+    D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
+    plm_dual_y_ty = np.ndarray[(2 * (PLI_D + D) + 32,), _BF16]
     plm_y = Buffer(
         type=plm_dual_y_ty, name=f"y_{plm_tile.row}_{plm_tile.col}", tile=plm_tile
     )
-    plm_norm_i_prod, plm_res_gate_prod, plm_cons = add_locks(
+    plm_norm_i_prod, plm_res_gate_prod, plm_cons = ctx.add_locks(
         plm_tile, [(0, 1), (1, 0), (2, 0)]
     )
-    rt.add_tile_dma(
+    ctx.rt.add_tile_dma(
         TileDma(
             plm_tile,
             [
@@ -1046,17 +1032,22 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         )
     )
 
-    # --- Per-layer-input up projection: x in on S2MM 0, weights on S2MM 1,
-    # the layer output on MM2S 0.
-    plu_tile = CT[0][5]
+
+def _build_pl_up(ctx, plu_tile):
+    """Per-layer-input up projection.
+
+    x arrives on S2MM 0, the weights on S2MM 1. The layer output leaves on
+    MM2S 0.
+    """
+    D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     plu_name = f"{plu_tile.row}_{plu_tile.col}"
-    plu_dual_x_ty = np.ndarray[(2 * (PLI_D + D) + 32,), bf]
-    plu_y_ty = np.ndarray[(D,), bf]
+    plu_dual_x_ty = np.ndarray[(2 * (PLI_D + D) + 32,), _BF16]
+    plu_y_ty = np.ndarray[(D,), _BF16]
     plu_x = Buffer(type=plu_dual_x_ty, name=f"x_{plu_name}", tile=plu_tile)
     plu_y = Buffer(type=plu_y_ty, name=f"y_{plu_name}", tile=plu_tile)
-    plu_w0 = Buffer(type=w_blk_ty, name=f"proj_w_0_{plu_name}", tile=plu_tile)
-    plu_w1 = Buffer(type=w_blk_ty, name=f"proj_w_1_{plu_name}", tile=plu_tile)
-    ul = locks(
+    plu_w0 = Buffer(type=_W_BLK_TY, name=f"proj_w_0_{plu_name}", tile=plu_tile)
+    plu_w1 = Buffer(type=_W_BLK_TY, name=f"proj_w_1_{plu_name}", tile=plu_tile)
+    ul = ctx.locks(
         plu_tile,
         PLU_LOCKS,
         dict(
@@ -1068,11 +1059,11 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             y_cons_lock=0,
         ),
     )
-    plu_k = k(
-        "per_layer_up", "per_layer_up", [plu_dual_x_ty, w_blk_ty, w_blk_ty, plu_y_ty]
+    plu_k = ctx.kernel(
+        "per_layer_up", "per_layer_up", [plu_dual_x_ty, _W_BLK_TY, _W_BLK_TY, plu_y_ty]
     )
 
-    workers.append(
+    ctx.workers.append(
         Worker(
             _call_kernel,
             [plu_x, plu_w0, plu_w1, plu_y, plu_k],
@@ -1080,7 +1071,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             stack_size=1024 * 4,
         )
     )
-    rt.add_tile_dma(
+    ctx.rt.add_tile_dma(
         TileDma(
             plu_tile,
             [
@@ -1104,33 +1095,38 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         )
     )
 
-    # --- GLU: gate and up in on S2MM 0, the activations out on MM2S 0 with a
-    # packet header to the projection engine.
-    glu_tile = CT[1][3]
+
+def _build_glu(ctx, glu_tile):
+    """GLU.
+
+    gate and up arrive on S2MM 0. The activations leave on MM2S 0 with a
+    packet header to the projection engine.
+    """
+    g = ctx.g
     glu_name = f"{glu_tile.row}_{glu_tile.col}"
-    glu_up_gate_ty = np.ndarray[(g.glu_slice,), bf]
+    glu_up_gate_ty = np.ndarray[(g.glu_slice,), _BF16]
     glu_hid_ty = np.ndarray[
-        (g.intermediate_size * (2 if g.double_wide_mlp else 1),), bf
+        (g.intermediate_size * (2 if g.double_wide_mlp else 1),), _BF16
     ]
-    glu_y_ty = np.ndarray[(g.glu_slice // 2,), bf]
+    glu_y_ty = np.ndarray[(g.glu_slice // 2,), _BF16]
     glu_x_0 = Buffer(type=glu_up_gate_ty, name=f"x_0_{glu_name}", tile=glu_tile)
     glu_x_1 = Buffer(type=glu_up_gate_ty, name=f"x_1_{glu_name}", tile=glu_tile)
     glu_y_0 = Buffer(type=glu_y_ty, name=f"y_0_{glu_name}", tile=glu_tile)
     glu_y_1 = Buffer(type=glu_y_ty, name=f"y_1_{glu_name}", tile=glu_tile)
     glu_hid = Buffer(type=glu_hid_ty, name=f"hid_0_{glu_name}", tile=glu_tile)
-    glu_is_skip = rtp_buffer(glu_tile, "glu_skip")
-    ll = locks(
+    glu_is_skip = ctx.rtp_buffer(glu_tile, "glu_skip")
+    ll = ctx.locks(
         glu_tile,
         GLU_LOCKS,
         dict(x_prod_lock=2, x_cons_lock=0, y_prod_lock=2, y_cons_lock=0, rtp_lock=0),
     )
-    glu_k = k(
+    glu_k = ctx.kernel(
         "glu",
         "glu",
-        [glu_hid_ty, glu_up_gate_ty, glu_up_gate_ty, glu_y_ty, glu_y_ty, RTP_ty],
+        [glu_hid_ty, glu_up_gate_ty, glu_up_gate_ty, glu_y_ty, glu_y_ty, _RTP_TY],
     )
 
-    workers.append(
+    ctx.workers.append(
         Worker(
             _call_kernel,
             [glu_hid, glu_x_0, glu_x_1, glu_y_0, glu_y_1, glu_is_skip, glu_k],
@@ -1138,7 +1134,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             stack_size=4 * 1024,
         )
     )
-    rt.add_tile_dma(
+    ctx.rt.add_tile_dma(
         TileDma(
             glu_tile,
             [
@@ -1162,13 +1158,83 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         )
     )
 
+
+def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
+    """The MLIR module of one decode layer of ``layer_type`` for ``geometry``.
+
+    ``rtp`` maps each RTP_ADDRESSES key to the address that the engine writes.
+    ``layer_type`` sets the runtime sequence only. The sequence takes x, proj,
+    rms, rope_rms and kv, then context_len and max_l.
+    """
+    if layer_type not in LAYER_TYPES:
+        raise ValueError(f"layer_type must be one of {LAYER_TYPES}")
+    if sliding_window & (sliding_window - 1):
+        raise ValueError(
+            f"sliding_window ({sliding_window}) must be a power of two: the "
+            "sequence takes the remainder by it with a mask"
+        )
+    g = geometry
+    D = g.model_dim
+    NUM_KV = g.num_kv_heads
+    G_DQ = g.num_attn_heads * g.dh
+    S_DQ = g.num_attn_heads * g.swa_dh
+    NQ_PADDED = q_heads_padded(g)
+    two_kv = NUM_KV == 2
+
+    kernel_fns = layer_kernels(g, dev)
+
+    sizes = arg_sizes(g)
+    rt = Runtime(
+        partial(_sequence, g, rtp, layer_type, sliding_window),
+        [
+            np.ndarray[(sizes["x"],), _BF16],
+            np.ndarray[(sizes["proj"],), _BF16],
+            np.ndarray[(sizes["rms"],), _BF16],
+            np.ndarray[(sizes["rope_rms"],), _BF16],
+            np.ndarray[(sizes["kv"],), _BF16],
+            np.int32,
+            np.int32,
+        ],
+    )
+    workers = []
+
+    # Shim row 0, memtile row 1, compute rows 2 to 5. CT is [compute row][col].
+    IT = [Tile(c, 0, tile_type=dev.get_tile_type(c, 0)) for c in range(dev.cols)]
+    MT = [Tile(c, 1, tile_type=dev.get_tile_type(c, 1)) for c in range(dev.cols)]
+    CT = [
+        [Tile(c, r + 2, tile_type=dev.get_tile_type(c, r + 2)) for c in range(dev.cols)]
+        for r in range(4)
+    ]
+
+    ctx = _Ctx(rt, workers, g, rtp, kernel_fns)
+
+    rms_tile = CT[0][3]
+    rms_y_out = _build_rms(ctx, rms_tile)
+    # q from RoPE to the qk core. The qk core's DMA reorders it.
+    q_of_g = ObjectFifo(np.ndarray[(G_DQ,), _BF16], name="q_in", depth=2)
+    q_of_swa = ObjectFifo(np.ndarray[(S_DQ,), _BF16], name="swa_q_in", depth=2)
+    rope_tile = CT[2][3]
+    _build_rope(ctx, rope_tile, "rope", "rope_skip_kv", g.dh, q_of_g)
+    swa_rope_tile = CT[3][3]
+    _build_rope(ctx, swa_rope_tile, "swa_rope", "swa_rope_skip_kv", g.swa_dh, q_of_swa)
+    ple_tile = CT[1][4]
+    _build_pl_embedding(ctx, ple_tile)
+    gle_tile = CT[0][4]
+    _build_pl_gate(ctx, gle_tile, rms_y_out)
+    plm_tile = CT[1][5]
+    _build_pl_merge(ctx, plm_tile)
+    plu_tile = CT[0][5]
+    _build_pl_up(ctx, plu_tile)
+    glu_tile = CT[1][3]
+    _build_glu(ctx, glu_tile)
+
     # --- The q4nx projection engine: 16 cores in PROJ_COLS. The cores in rows 2
     # and 4 send y. The core in the next row fills the second slot of the
     # sender's y buffers.
-    x_slice_ty = np.ndarray[(X_SLICE,), bf]
-    linear_w_ty = np.ndarray[(W_BLOCK,), bf]
-    m_pkt_ty = np.ndarray[(2 * q4nx.M_TILE + 16,), bf]
-    proj_k = k(
+    x_slice_ty = np.ndarray[(X_SLICE,), _BF16]
+    linear_w_ty = np.ndarray[(W_BLOCK,), _BF16]
+    m_pkt_ty = np.ndarray[(2 * q4nx.M_TILE + 16,), _BF16]
+    proj_k = ctx.kernel(
         "proj_main",
         "proj_main",
         [
@@ -1178,8 +1244,8 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             m_pkt_ty,
             linear_w_ty,
             x_slice_ty,
-            RTP_ty,
-            RTP_ty,
+            _RTP_TY,
+            _RTP_TY,
             np.int32,
         ],
     )
@@ -1187,8 +1253,8 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     def build_proj_main(pt, send_x_out, main_y0=None, main_y1=None):
         """Returns (y0, y1), which the paired core in the next row borrows."""
         r, c = pt.row, pt.col
-        is_swa = rtp_buffer(pt, "proj_swa", f"RTP_PROJ_IS_SWA_BUFFER_{r}_{c}")
-        skip_kv = rtp_buffer(pt, "proj_skip", f"RTP_PROJ_SKIP_KV_BUFFER_{r}_{c}")
+        is_swa = ctx.rtp_buffer(pt, "proj_swa", f"RTP_PROJ_IS_SWA_BUFFER_{r}_{c}")
+        skip_kv = ctx.rtp_buffer(pt, "proj_skip", f"RTP_PROJ_SKIP_KV_BUFFER_{r}_{c}")
         x0 = Buffer(type=x_slice_ty, name=f"x_0_{r}_{c}", tile=pt)
         w0 = Buffer(type=linear_w_ty, name=f"w_0_{r}_{c}", tile=pt)
         x1 = Buffer(type=x_slice_ty, name=f"x_1_{r}_{c}", tile=pt)
@@ -1198,7 +1264,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             y1 = Buffer(type=m_pkt_ty, name=f"y_1_{r}_{c}", tile=pt)
         else:
             y0, y1 = main_y0, main_y1
-        pk = locks(
+        pk = ctx.locks(
             pt,
             PROJ_LOCKS,
             dict(
@@ -1217,7 +1283,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         def proj_body(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, kern):
             kern(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, constant(int(send_x_out)))
 
-        workers.append(
+        ctx.workers.append(
             Worker(
                 proj_body,
                 [y0, w0, x0, y1, w1, x1, is_swa, skip_kv, proj_k],
@@ -1255,7 +1321,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                     ],
                 )
             )
-        rt.add_tile_dma(TileDma(pt, chans))
+        ctx.rt.add_tile_dma(TileDma(pt, chans))
         return y0, y1
 
     # proj_send_tiles[group]: the sending cores whose y gathers into that
@@ -1276,7 +1342,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     # --- The projection memtiles. Each splits its column's weights over the
     # column's four cores. MT[0] and MT[6] also gather y from their group.
     # MT[1] gathers both groups' y and broadcasts x.
-    linear_4w_ty = np.ndarray[(4 * W_BLOCK,), bf]
+    linear_4w_ty = np.ndarray[(4 * W_BLOCK,), _BF16]
     WB = W_BLOCK
     m = q4nx.M_TILE
 
@@ -1326,13 +1392,15 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
 
     def build_assemble_col(mt):
         r, c = mt.row, mt.col
-        m_col_ty = np.ndarray[(8 * m + 2,), bf]
+        m_col_ty = np.ndarray[(8 * m + 2,), _BF16]
         y0 = Buffer(type=m_col_ty, name=f"y_buffer_0_{r}_{c}", tile=mt)
         y1 = Buffer(type=m_col_ty, name=f"y_buffer_1_{r}_{c}", tile=mt)
         w0, w1 = weight_buffers(mt)
-        yp0, yp1, yp2, yp3, yc = add_locks(mt, [(0, 2), (1, 0), (2, 0), (3, 0), (4, 0)])
-        wc = weight_channels(w0, w1, *add_locks(mt, WEIGHT_LOCKS))
-        rt.add_tile_dma(
+        yp0, yp1, yp2, yp3, yc = ctx.add_locks(
+            mt, [(0, 2), (1, 0), (2, 0), (3, 0), (4, 0)]
+        )
+        wc = weight_channels(w0, w1, *ctx.add_locks(mt, WEIGHT_LOCKS))
+        ctx.rt.add_tile_dma(
             TileDma(
                 mt,
                 [
@@ -1366,21 +1434,23 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
 
     def build_assemble_weight_only(mt):
         w0, w1 = weight_buffers(mt)
-        wc = weight_channels(w0, w1, *add_locks(mt, WEIGHT_LOCKS))
-        rt.add_tile_dma(TileDma(mt, [wc["in0"], *wc["out"], wc["in1"]]))
+        wc = weight_channels(w0, w1, *ctx.add_locks(mt, WEIGHT_LOCKS))
+        ctx.rt.add_tile_dma(TileDma(mt, [wc["in0"], *wc["out"], wc["in1"]]))
 
     def build_assemble_weight_x(mt):
         r, c = mt.row, mt.col
-        x_chunk_ty = np.ndarray[(X_SLICE * 2,), bf]
-        m_full_ty = np.ndarray[(16 * m + 2,), bf]
+        x_chunk_ty = np.ndarray[(X_SLICE * 2,), _BF16]
+        m_full_ty = np.ndarray[(16 * m + 2,), _BF16]
         y0 = Buffer(type=m_full_ty, name=f"y_buffer_0_{r}_{c}", tile=mt)
         y1 = Buffer(type=m_full_ty, name=f"y_buffer_1_{r}_{c}", tile=mt)
         x0 = Buffer(type=x_chunk_ty, name=f"x_buffer_0_{r}_{c}", tile=mt)
         x1 = Buffer(type=x_chunk_ty, name=f"x_buffer_1_{r}_{c}", tile=mt)
-        mp0, mp1, mc, xp, xc = add_locks(mt, [(0, 2), (1, 0), (2, 0), (3, 2), (4, 0)])
+        mp0, mp1, mc, xp, xc = ctx.add_locks(
+            mt, [(0, 2), (1, 0), (2, 0), (3, 2), (4, 0)]
+        )
         w0, w1 = weight_buffers(mt)
-        wc = weight_channels(w0, w1, *add_locks(mt, WEIGHT_LOCKS))
-        rt.add_tile_dma(
+        wc = weight_channels(w0, w1, *ctx.add_locks(mt, WEIGHT_LOCKS))
+        ctx.rt.add_tile_dma(
             TileDma(
                 mt,
                 [
@@ -1413,7 +1483,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     # --- Attention in column 2: the global pair in rows 2 and 3, the
     # sliding-window pair in rows 4 and 5. k and v come from MT[2], q from
     # RoPE, and the scores go from the qk core to the kv core through a fifo.
-    attn_s_ty = np.ndarray[(NQ_PADDED * 16 + 32, 1), bf]
+    attn_s_ty = np.ndarray[(NQ_PADDED * 16 + 32, 1), _BF16]
     f32 = np.dtype[np.float32]
 
     # A round of the two-KV-head kernels covers one KV head. A round of the
@@ -1422,28 +1492,30 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         r, c = kv_tile.row, kv_tile.col
         NQ = g.num_attn_heads
         o_repeats = D // (q4nx.M_TILE * 16)
-        v_ty = np.ndarray[(LK, dh if two_kv_heads else NUM_KV * dh), bf]
-        o_ty = np.ndarray[(dh * NQ,), bf]
+        v_ty = np.ndarray[(LK, dh if two_kv_heads else NUM_KV * dh), _BF16]
+        o_ty = np.ndarray[(dh * NQ,), _BF16]
         y_ty = np.ndarray[(dh * NQ,), f32]
-        L = rtp_buffer(kv_tile, rtp_key)
+        L = ctx.rtp_buffer(kv_tile, rtp_key)
         v0 = Buffer(type=v_ty, name=f"v_0_{r}_{c}", tile=kv_tile)
         v1 = Buffer(type=v_ty, name=f"v_1_{r}_{c}", tile=kv_tile)
         y = Buffer(type=y_ty, name=f"y_{r}_{c}", tile=kv_tile)
         o = Buffer(type=o_ty, name=f"o_{r}_{c}", tile=kv_tile)
-        kl = locks(
+        kl = ctx.locks(
             kv_tile,
             ATTN_KV_LOCKS,
             dict(o_prod_lock=o_repeats, o_cons_lock=0, v_prod_lock=2, v_cons_lock=0),
         )
         l_ty = np.ndarray[(8,), f32]
         lbuf = Buffer(type=l_ty, name=f"l_{r}_{c}", tile=kv_tile)
-        k_begin = k(name, f"{name}_begin", [y_ty, l_ty])
-        k_finish = k(name, f"{name}_finish", [y_ty, o_ty, l_ty])
+        k_begin = ctx.kernel(name, f"{name}_begin", [y_ty, l_ty])
+        k_finish = ctx.kernel(name, f"{name}_finish", [y_ty, o_ty, l_ty])
         # The core runs one round per LK keys. The begin kernel waits on the qk
         # core, which reads the RTP after q arrives.
         if two_kv_heads:
-            k_sbeg = k(name, f"{name}_s_begin", [attn_s_ty, y_ty, l_ty])
-            k_vhalf = k(name, f"{name}_v_half", [attn_s_ty, v_ty, v_ty, y_ty, np.int32])
+            k_sbeg = ctx.kernel(name, f"{name}_s_begin", [attn_s_ty, y_ty, l_ty])
+            k_vhalf = ctx.kernel(
+                name, f"{name}_v_half", [attn_s_ty, v_ty, v_ty, y_ty, np.int32]
+            )
 
             def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, ksb, kvh, kf):
                 kb(yy, ll)
@@ -1458,7 +1530,9 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             args = [of_s.cons(), v0, v1, y, lbuf, o, L]
             args += [k_begin, k_sbeg, k_vhalf, k_finish]
         else:
-            k_round = k(name, f"{name}_round", [attn_s_ty, v_ty, v_ty, y_ty, l_ty])
+            k_round = ctx.kernel(
+                name, f"{name}_round", [attn_s_ty, v_ty, v_ty, y_ty, l_ty]
+            )
 
             def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, kr, kf):
                 kb(yy, ll)
@@ -1470,8 +1544,8 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
 
             args = [of_s.cons(), v0, v1, y, lbuf, o, L, k_begin, k_round, k_finish]
 
-        workers.append(Worker(kv_body, args, tile=kv_tile, stack_size=1024 * 6))
-        rt.add_tile_dma(
+        ctx.workers.append(Worker(kv_body, args, tile=kv_tile, stack_size=1024 * 6))
+        ctx.rt.add_tile_dma(
             TileDma(
                 kv_tile,
                 [
@@ -1498,27 +1572,27 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
 
     def build_attn_qk(qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
         r, c = qk_tile.row, qk_tile.col
-        k_ty = np.ndarray[(LK, dh if two_kv_heads else NUM_KV * dh), bf]
-        q_ty = np.ndarray[(NQ_PADDED * dh,), bf]
+        k_ty = np.ndarray[(LK, dh if two_kv_heads else NUM_KV * dh), _BF16]
+        q_ty = np.ndarray[(NQ_PADDED * dh,), _BF16]
         k0 = Buffer(type=k_ty, name=f"k_0_{r}_{c}", tile=qk_tile)
         k1 = Buffer(type=k_ty, name=f"k_1_{r}_{c}", tile=qk_tile)
-        ql = locks(qk_tile, ATTN_QK_LOCKS, dict(k_prod_lock=2, k_cons_lock=0))
-        add_locks(qk_tile, [(ATTN_HANDSHAKE_LOCK, 0)])
-        L = rtp_buffer(qk_tile, rtp_key)
+        ql = ctx.locks(qk_tile, ATTN_QK_LOCKS, dict(k_prod_lock=2, k_cons_lock=0))
+        ctx.add_locks(qk_tile, [(ATTN_HANDSHAKE_LOCK, 0)])
+        L = ctx.rtp_buffer(qk_tile, rtp_key)
         q_in_order = [(NQ_PADDED, 8), (dh // 8, NQ_PADDED * 8), (8, 1)]
-        m_ty = np.ndarray[(16,), bf]
+        m_ty = np.ndarray[(16,), _BF16]
         c_ty = np.ndarray[(8,), f32]
         m_buf = Buffer(type=m_ty, name=f"m_{r}_{c}", tile=qk_tile)
         c_local = Buffer(type=c_ty, name=f"c_local_{r}_{c}", tile=qk_tile)
-        k_begin = k(name, f"{name}_begin", [m_ty])
+        k_begin = ctx.kernel(name, f"{name}_begin", [m_ty])
         # The q acquire orders the RTP read after the sequence's RTP writes.
         if two_kv_heads:
-            k_half = k(
+            k_half = ctx.kernel(
                 name,
                 f"{name}_half",
                 [q_ty, k_ty, k_ty, attn_s_ty, m_ty, c_ty] + [np.int32] * 3,
             )
-            k_storec = k(name, f"{name}_store_c", [attn_s_ty, c_ty])
+            k_storec = ctx.kernel(name, f"{name}_store_c", [attn_s_ty, c_ty])
 
             def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kh, ks):
                 q = q_h.acquire(1)
@@ -1533,7 +1607,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
 
             kerns = [k_begin, k_half, k_storec]
         else:
-            k_round = k(
+            k_round = ctx.kernel(
                 name,
                 f"{name}_round",
                 [q_ty, k_ty, k_ty, attn_s_ty, m_ty, c_ty, np.int32, np.int32],
@@ -1559,8 +1633,8 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             c_local,
             L,
         ] + kerns
-        workers.append(Worker(qk_body, args, tile=qk_tile, stack_size=1024 * 4))
-        rt.add_tile_dma(
+        ctx.workers.append(Worker(qk_body, args, tile=qk_tile, stack_size=1024 * 4))
+        ctx.rt.add_tile_dma(
             TileDma(
                 qk_tile,
                 [
@@ -1610,13 +1684,13 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     ):
         b0, b1 = (
             Buffer(
-                type=np.ndarray[(LK, row), bf],
+                type=np.ndarray[(LK, row), _BF16],
                 name=f"{key}_mem_buffer_{i}_{amt_name}",
                 tile=amt,
             )
             for i in (0, 1)
         )
-        prod, cons = add_locks(amt, [(lock_ids[0], 2), (lock_ids[1], 0)])
+        prod, cons = ctx.add_locks(amt, [(lock_ids[0], 2), (lock_ids[1], 0)])
         amt_chans += [
             DmaChannel(DMAChannelDir.S2MM, ch, ping_pong(b0, b1, prod, cons)),
             DmaChannel(
@@ -1633,7 +1707,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                 ),
             ),
         ]
-    rt.add_tile_dma(TileDma(amt, amt_chans))
+    ctx.rt.add_tile_dma(TileDma(amt, amt_chans))
 
     # The router places flows in the order the design adds them. Long flows
     # go first. The sequence addresses a shim channel by the shim symbol of
