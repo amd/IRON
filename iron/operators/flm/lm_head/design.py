@@ -3,9 +3,9 @@
 
 """Softcapped logits from a q4nx vocabulary.
 
-Each core computes M_TILE out-features per round. The core RMS-normalizes the
-token once. Per round, it accumulates one weight block per K_TILE in-features
-and applies the tanh softcap to the sums.
+Each core RMS-normalizes the token once. Each round, the core computes M_TILE
+out-features. The core accumulates one weight block per K_TILE in-features and
+applies the tanh softcap to the sums.
 """
 
 import struct
@@ -35,12 +35,12 @@ from iron.operators.flm.q4nx import BLOCK_BYTES, GROUP, K_TILE, M_TILE, packed_b
 # the buffer to the granularity of the RTP write addresses.
 RTP_WORDS = 32
 
-# A shim tile holds 16 BDs. The sequence finishes each round's TaskGroup DEPTH
-# rounds later to free its BDs for the bd-id allocator.
+# The sequence finishes each round's TaskGroup DEPTH rounds later. The finish
+# frees the round's BDs for the bd-id allocator. A shim tile holds 16 BDs.
 DEPTH = 2
 
-# Core stack bytes. The kernel's b_group_sums array grows with dim. At both
-# Gemma 4 sizes it overflows the 1024-byte default.
+# Core stack bytes. The kernel's b_group_sums array grows with dim. The array
+# overflows the default stack of 1024 bytes at both Gemma 4 sizes.
 STACK_SIZE = 10 * 1024
 
 
@@ -78,7 +78,7 @@ def lm_head_kernel(dim: int, device=None):
 def lm_head(dev, dim, vocab, softcap, trace_size=0):
     """Program for :class:`~iron.operators.flm.LMHead`, which documents the arguments.
 
-    X holds the token and its RMS weight, so one transfer feeds the norm.
+    X holds the token and its RMS weight. One transfer therefore carries both norm inputs.
     """
     check_shape(dev, dim, vocab)
 
@@ -94,7 +94,7 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0):
 
     # ObjectFifo element types. A w or y column object holds one block per core
     # row. The split and the join separate or combine the blocks.
-    x_ty = np.ndarray[(dim, 2), bf16]  # token and its rms weight
+    x_ty = np.ndarray[(dim, 2), bf16]
     w_col_ty = np.ndarray[(ROWS, w_blk), bf16]
     w_blk_ty = np.ndarray[(w_blk,), bf16]
     y_col_ty = np.ndarray[(ROWS, M_TILE), bf16]
@@ -113,8 +113,8 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0):
     )
     k_epi = kernel.entry("q4nx_lm_head_epilogue", [y_blk_ty, y_acc_ty, rtp_ty])
 
-    # The host addresses the DMAs by column, so the design pins the shim tiles.
-    # The placer places the other tiles.
+    # The host addresses the DMAs by column. The design therefore pins the shim
+    # tiles. The placer places the other tiles.
     IT = [Tile(j, 0) for j in range(COLS)]
 
     def core_fn(x_in, w_in, y_out, k_rms, k_zero, k_block, k_epi, y_acc, sums, rtp):
@@ -196,8 +196,8 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0):
         for rtp in rtps:
             rtp[0] = softcap_bits
 
-        # The token goes to every core in one broadcast, without a completion
-        # token. x_task.free() at the end frees its BD.
+        # One broadcast sends the token to every core. The broadcast has no
+        # completion token. x_task.free() frees its BD at the end.
         x_task = x_prod.fill(
             X,
             sizes=[1, 1, 1, 2 * dim],
@@ -221,8 +221,8 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0):
                     wait=True,
                     group=tg,
                 )
-                # A strided descriptor lands weight rows at the wrong on-chip
-                # positions, so each column reads one contiguous slice.
+                # A strided descriptor places weight rows at the wrong on-chip
+                # positions. Each column therefore reads one contiguous slice.
                 w_prods[col].fill(
                     W,
                     sizes=[1, 1, 1, W_PER_COL],
