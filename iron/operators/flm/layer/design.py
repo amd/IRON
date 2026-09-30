@@ -1203,7 +1203,7 @@ def _build_proj_core(ctx, pt, kern, send_x_out, main_y0=None, main_y1=None):
     """One q4nx projection core. Returns its y buffers (y0, y1).
 
     A core that does not send y fills the second slot of main_y0 and main_y1,
-    the y buffers of the sending core in the previous row.
+    the y buffers of the sending core in the row below.
     """
     r, c = pt.row, pt.col
     is_swa = ctx.rtp_buffer(pt, "proj_swa", f"RTP_PROJ_IS_SWA_BUFFER_{r}_{c}")
