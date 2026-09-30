@@ -49,6 +49,7 @@ from aie.iron.dataflow import Flow, PacketFlow
 from aie.iron.device import Tile
 
 from iron.common.device_utils import call_factory
+from iron.operators.flm.dataflow import ping_pong
 
 LAYER_TYPES = ("global", "swa", "global_skip", "swa_skip")
 
@@ -316,20 +317,6 @@ def arg_sizes(geometry):
         "rope_rms": 3 * geometry.dh + pli * 2 + D + 64,
         "kv": 2 * dk * MAX_CONTEXT,
     }
-
-
-def _ping_pong(b0, b1, acq, rel, **bd_args):
-    """Two BDs that alternate between b0 and b1 behind one lock pair."""
-    return [
-        Bd(
-            b,
-            acquires=[Acquire(acq)],
-            releases=[Release(rel)],
-            next=nxt,
-            **bd_args,
-        )
-        for b, nxt in ((b0, 1), (b1, 0))
-    ]
 
 
 def _single_bd(direction, channel, buf, acq, rel, **bd_args):
@@ -702,7 +689,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     0,
-                    _ping_pong(
+                    ping_pong(
                         rms_x_ping,
                         rms_x_pong,
                         rl["x_prod_lock"],
@@ -784,7 +771,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                     DmaChannel(
                         DMAChannelDir.S2MM,
                         0,
-                        _ping_pong(
+                        ping_pong(
                             qkv_0, qkv_1, lk["qkv_prod_lock"], lk["qkv_cons_lock"]
                         ),
                     ),
@@ -922,7 +909,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     1,
-                    _ping_pong(
+                    ping_pong(
                         ple_w0,
                         ple_w1,
                         pl["proj_w_prod_lock"],
@@ -982,7 +969,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     1,
-                    _ping_pong(
+                    ping_pong(
                         gle_w0,
                         gle_w1,
                         gl["proj_w_prod_lock"],
@@ -1076,7 +1063,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     1,
-                    _ping_pong(
+                    ping_pong(
                         plu_w0,
                         plu_w1,
                         ul["proj_w_prod_lock"],
@@ -1131,12 +1118,12 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     0,
-                    _ping_pong(glu_x_0, glu_x_1, ll["x_prod_lock"], ll["x_cons_lock"]),
+                    ping_pong(glu_x_0, glu_x_1, ll["x_prod_lock"], ll["x_cons_lock"]),
                 ),
                 DmaChannel(
                     DMAChannelDir.MM2S,
                     0,
-                    _ping_pong(
+                    ping_pong(
                         glu_y_0,
                         glu_y_1,
                         ll["y_cons_lock"],
@@ -1215,12 +1202,12 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             DmaChannel(
                 DMAChannelDir.S2MM,
                 0,
-                _ping_pong(x0, x1, pk["x_prod_lock"], pk["x_cons_lock"]),
+                ping_pong(x0, x1, pk["x_prod_lock"], pk["x_cons_lock"]),
             ),
             DmaChannel(
                 DMAChannelDir.S2MM,
                 1,
-                _ping_pong(w0, w1, pk["w_prod_lock"], pk["w_cons_lock"]),
+                ping_pong(w0, w1, pk["w_prod_lock"], pk["w_cons_lock"]),
             ),
         ]
         if send_x_out:
@@ -1271,33 +1258,33 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
             "in0": DmaChannel(
                 DMAChannelDir.S2MM,
                 4,
-                _ping_pong(w0, w1, wp0, wp0c0, offset=0, length=2 * WB),
+                ping_pong(w0, w1, wp0, wp0c0, offset=0, length=2 * WB),
             ),
             "in1": DmaChannel(
                 DMAChannelDir.S2MM,
                 5,
-                _ping_pong(w0, w1, wp1, wp1c0, offset=2 * WB, length=2 * WB),
+                ping_pong(w0, w1, wp1, wp1c0, offset=2 * WB, length=2 * WB),
             ),
             "out": [
                 DmaChannel(
                     DMAChannelDir.MM2S,
                     0,
-                    _ping_pong(w0, w1, wp0c0, wp0c1, offset=0, length=WB),
+                    ping_pong(w0, w1, wp0c0, wp0c1, offset=0, length=WB),
                 ),
                 DmaChannel(
                     DMAChannelDir.MM2S,
                     1,
-                    _ping_pong(w0, w1, wp0c1, wp0, offset=WB, length=WB),
+                    ping_pong(w0, w1, wp0c1, wp0, offset=WB, length=WB),
                 ),
                 DmaChannel(
                     DMAChannelDir.MM2S,
                     2,
-                    _ping_pong(w0, w1, wp1c0, wp1c1, offset=2 * WB, length=WB),
+                    ping_pong(w0, w1, wp1c0, wp1c1, offset=2 * WB, length=WB),
                 ),
                 DmaChannel(
                     DMAChannelDir.MM2S,
                     3,
-                    _ping_pong(w0, w1, wp1c1, wp1, offset=3 * WB, length=WB),
+                    ping_pong(w0, w1, wp1c1, wp1, offset=3 * WB, length=WB),
                 ),
             ],
         }
@@ -1325,26 +1312,26 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                     DmaChannel(
                         DMAChannelDir.S2MM,
                         0,
-                        _ping_pong(y0, y1, yp0, yp1, offset=0, length=2 * m + 2),
+                        ping_pong(y0, y1, yp0, yp1, offset=0, length=2 * m + 2),
                     ),
                     DmaChannel(
                         DMAChannelDir.S2MM,
                         1,
-                        _ping_pong(y0, y1, yp1, yp2, offset=2 * m + 2, length=2 * m),
+                        ping_pong(y0, y1, yp1, yp2, offset=2 * m + 2, length=2 * m),
                     ),
                     DmaChannel(
                         DMAChannelDir.S2MM,
                         2,
-                        _ping_pong(y0, y1, yp2, yp3, offset=4 * m + 2, length=2 * m),
+                        ping_pong(y0, y1, yp2, yp3, offset=4 * m + 2, length=2 * m),
                     ),
                     DmaChannel(
                         DMAChannelDir.S2MM,
                         3,
-                        _ping_pong(y0, y1, yp3, yc, offset=6 * m + 2, length=2 * m),
+                        ping_pong(y0, y1, yp3, yc, offset=6 * m + 2, length=2 * m),
                     ),
                     wc["in0"],
                     *wc["out"],
-                    DmaChannel(DMAChannelDir.MM2S, 4, _ping_pong(y0, y1, yc, yp0)),
+                    DmaChannel(DMAChannelDir.MM2S, 4, ping_pong(y0, y1, yc, yp0)),
                     wc["in1"],
                 ],
             )
@@ -1373,18 +1360,18 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                     DmaChannel(
                         DMAChannelDir.S2MM,
                         0,
-                        _ping_pong(y0, y1, mp0, mp1, offset=0, length=8 * m + 2),
+                        ping_pong(y0, y1, mp0, mp1, offset=0, length=8 * m + 2),
                     ),
                     DmaChannel(
                         DMAChannelDir.S2MM,
                         1,
-                        _ping_pong(y0, y1, mp1, mc, offset=8 * m + 2, length=8 * m),
+                        ping_pong(y0, y1, mp1, mc, offset=8 * m + 2, length=8 * m),
                     ),
-                    DmaChannel(DMAChannelDir.S2MM, 3, _ping_pong(x0, x1, xp, xc)),
+                    DmaChannel(DMAChannelDir.S2MM, 3, ping_pong(x0, x1, xp, xc)),
                     wc["in0"],
                     wc["in1"],
-                    DmaChannel(DMAChannelDir.MM2S, 5, _ping_pong(y0, y1, mc, mp0)),
-                    DmaChannel(DMAChannelDir.MM2S, 4, _ping_pong(x0, x1, xc, xp)),
+                    DmaChannel(DMAChannelDir.MM2S, 5, ping_pong(y0, y1, mc, mp0)),
+                    DmaChannel(DMAChannelDir.MM2S, 4, ping_pong(x0, x1, xc, xp)),
                     *wc["out"],
                 ],
             )
@@ -1464,7 +1451,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                     DmaChannel(
                         DMAChannelDir.S2MM,
                         1,
-                        _ping_pong(v0, v1, kl["v_prod_lock"], kl["v_cons_lock"]),
+                        ping_pong(v0, v1, kl["v_prod_lock"], kl["v_cons_lock"]),
                     ),
                     _single_bd(
                         DMAChannelDir.MM2S,
@@ -1553,7 +1540,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
                     DmaChannel(
                         DMAChannelDir.S2MM,
                         1,
-                        _ping_pong(k0, k1, ql["k_prod_lock"], ql["k_cons_lock"]),
+                        ping_pong(k0, k1, ql["k_prod_lock"], ql["k_cons_lock"]),
                     ),
                 ],
             )
@@ -1604,11 +1591,11 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
         )
         prod, cons = add_locks(amt, [(lock_ids[0], 2), (lock_ids[1], 0)])
         amt_chans += [
-            DmaChannel(DMAChannelDir.S2MM, ch, _ping_pong(b0, b1, prod, cons)),
+            DmaChannel(DMAChannelDir.S2MM, ch, ping_pong(b0, b1, prod, cons)),
             DmaChannel(
                 DMAChannelDir.MM2S,
                 ch,
-                _ping_pong(
+                ping_pong(
                     b0,
                     b1,
                     cons,
