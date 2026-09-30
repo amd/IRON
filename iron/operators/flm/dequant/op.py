@@ -22,15 +22,13 @@ from iron.operators.flm.dequant.design import (
     BFP16_GROUP,
     COLS,
     CT_K,
-    GROUP,
-    K_TILE,
     K_TILE_B,
-    M_TILE,
     N_TILE,
     S,
     T,
     qw_bytes_for,
 )
+from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE
 
 BFP16_GROUP_BYTES = 9
 

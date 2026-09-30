@@ -8,10 +8,9 @@ import numpy as np
 import pytest
 import torch
 
-import aie.utils as aie_utils
-from aie.dialects._aie_enum_gen import AIEArch
 
 from iron.common.test_utils import run_test
+from iron.operators.flm.testing import requires_aie2p
 from iron.operators.flm.dequant.op import DequantBFP
 from iron.operators.flm.dequant.reference import (
     random_q4nx,
@@ -22,16 +21,6 @@ from iron.operators.flm.dequant.reference import (
 # K = 512 is excluded: flm.GEMM picks tile_n = 128 there, which this operator
 # refuses. test_rejects_unservable_shapes covers it.
 SHAPES = [(1024, 128), (1024, 512), (1536, 640), (2048, 256)]
-
-
-def _on_aie2p():
-    dev = aie_utils.get_current_device()
-    return dev is not None and dev.arch == AIEArch.AIE2p
-
-
-requires_aie2p = pytest.mark.skipif(
-    not _on_aie2p(), reason="bfp16ebs8 exists only on AIE2P"
-)
 
 
 def _check(op, blob, expected, label):

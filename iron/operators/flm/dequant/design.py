@@ -21,9 +21,7 @@ from iron.operators.flm.gemm.design import (
     T,
 )
 
-# q4nx block: 32 out-features x 256 in-features, 32 weights per scale and min.
-M_TILE, K_TILE, GROUP = 32, 256, 32
-BLOCK_BYTES = M_TILE * K_TILE * 5 // 8
+from iron.operators.flm.q4nx import BLOCK_BYTES, K_TILE, M_TILE, packed_bytes
 
 CT_K = CT_MAX_K_FOR_N[N_TILE]
 
@@ -78,7 +76,7 @@ def qw_bytes_for(K, N, run_out_features=None, run_period_out_features=None):
     )
     last = n_blocks - 1
     cb = (last // run_blocks) * period_blocks + last % run_blocks + 1
-    return cb * N_TILE * K * 5 // 8
+    return packed_bytes(cb * N_TILE * K)
 
 
 def dequant_bfp(
@@ -112,7 +110,7 @@ def dequant_bfp(
     blocks_per_row = K // K_TILE
     n_blocks = N // N_TILE
 
-    cb_bytes = N_TILE * K * 5 // 8
+    cb_bytes = packed_bytes(N_TILE * K)
     run_blocks, period_blocks = _run_geometry(
         run_out_features, run_period_out_features, n_blocks
     )

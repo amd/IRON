@@ -9,24 +9,24 @@ import torch
 
 from iron.operators.flm.dequant.design import (
     CT_K,
-    GROUP,
-    K_TILE,
     K_TILE_B,
-    M_TILE,
     N_TILE,
     S,
     T,
     qw_bytes_for,
 )
 from iron.operators.flm.packing import pack_b
+from iron.operators.flm.q4nx import (
+    BLOCK_BYTES,
+    GROUP,
+    K_TILE,
+    M_TILE,
+    bf16_to_f32,
+    packed_bytes,
+)
 
-BLOCK_BYTES = M_TILE * K_TILE * 5 // 8
 # Out-features one run of code bytes spans.
 PARALLEL = 16
-
-
-def _bf16_to_f32(u16):
-    return (u16.astype(np.uint32) << 16).view(np.float32)
 
 
 def f32_to_bf16_floor(x):
@@ -49,8 +49,8 @@ def dequantize(qw, K, N):
 
     n_groups = K_TILE // GROUP
     sm = n_groups * M_TILE * 2
-    scales = _bf16_to_f32(b[:, :sm].view(np.uint16).reshape(n_blocks, n_groups, M_TILE))
-    mins = _bf16_to_f32(
+    scales = bf16_to_f32(b[:, :sm].view(np.uint16).reshape(n_blocks, n_groups, M_TILE))
+    mins = bf16_to_f32(
         b[:, sm : 2 * sm].view(np.uint16).reshape(n_blocks, n_groups, M_TILE)
     )
 
@@ -80,7 +80,7 @@ def dequantize(qw, K, N):
 def reference(qw, K, N):
     """The bytes the operator must produce, as a flat uint8 array."""
     w = dequantize(np.asarray(qw, dtype=np.uint8).ravel(), K, N)
-    w = _bf16_to_f32(f32_to_bf16_floor(w))
+    w = bf16_to_f32(f32_to_bf16_floor(w))
     return pack_b(
         torch.from_numpy(np.ascontiguousarray(w.T)),
         K_TILE_B,
@@ -96,7 +96,7 @@ def reference(qw, K, N):
 def scatter_runs(qw, K, N, run_out_features, run_period_out_features, seed=0):
     """Place a matrix's column blocks at their offsets in an interleaved
     buffer. The gaps hold noise, so an operator that reads them fails."""
-    cb_bytes = N_TILE * K * 5 // 8
+    cb_bytes = packed_bytes(N_TILE * K)
     run_blocks = run_out_features // N_TILE
     period_blocks = run_period_out_features // N_TILE
 
