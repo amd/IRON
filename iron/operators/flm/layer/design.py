@@ -3,14 +3,14 @@
 
 """Gemma 4's fused decode layer on the whole array: one token through one layer.
 
-FastFlowLM's engine loads one xclbin and runs its own runtime sequence,
-gen_layer_seq, on it. The design reproduces that xclbin and that sequence.
+The design reproduces the xclbin and the runtime sequence of FastFlowLM's
+fused decode layer.
 
 One core runs each stage: RMS norm and residual, RoPE for the global and the
 sliding-window layers, 16 q4nx projection cores, GLU, the per-layer-input
-path, and one attention pair (qk and kv) for each attention kind. One xclbin
-serves the four layer types. The runtime sequence writes the layer type into
-RTPs. It then streams the weights, the KV cache and the hidden state.
+path, and one attention pair (qk and kv) for each attention kind. The runtime
+sequence writes the layer type into RTPs. It then streams the weights, the KV
+cache and the hidden state.
 """
 
 from dataclasses import dataclass
@@ -66,9 +66,10 @@ SLIDING_WINDOW = 512
 # The L1 address of each RTP, per model, from FastFlowLM's address book. The
 # runtime sequence writes the RTPs at these addresses.
 #
-# The allocator places four RTP buffers at other addresses. The sequence's
-# writes then land in other buffers. The design pins every RTP buffer at its
-# address.
+# The allocator places four unpinned RTP buffers at other addresses. The
+# sequence's writes then land in other buffers.
+#
+# The design pins every RTP buffer at its address.
 RTP_ADDRESSES = {
     "GEMMA4_E2B": {
         "l_qk": 57344,
@@ -125,8 +126,8 @@ LK = 16
 Q_HEADS_PADDING = 4
 # The padding in the engine's per-layer-input stream (gemma4e_npu_sequence.hpp).
 MIN_BF16_PAD = 32
-# The columns of the projection cores. Each column holds four cores, in rows 2
-# to 5, and its shim tile and memtile feed them weights.
+# The columns of the projection cores. Each column holds four cores in rows 2
+# to 5. The column's shim tile and memtile feed them weights.
 PROJ_COLS = (0, 1, 6, 7)
 
 # The tile of each stage, as (column, row). Row 0 holds the shim tiles, row 1
@@ -145,8 +146,7 @@ PLACEMENT = {
     "pl_embedding": (4, 3),
     "pl_up": (5, 2),
     "pl_merge": (5, 3),
-    # Memtiles. Each projection group of two columns gathers y in one
-    # memtile. proj_x gathers both groups' y and broadcasts x.
+    # Memtiles.
     "proj_gather_0": (0, 1),
     "proj_x": (1, 1),
     "attn_mem": (2, 1),
@@ -242,8 +242,7 @@ ATTN_QK_LOCKS = dict(k_prod_lock=2, k_cons_lock=3)
 
 # The RMS, GLU and projection cores acquire this lock before they read their
 # RTPs. The sequence sets it after it writes them. The RoPE and attention
-# cores read their RTPs after data from the projection cores arrives. A core
-# tile's lock n sits at 0x1F000 + 16 * n.
+# cores read their RTPs after data from the projection cores arrives.
 RTP_SYNC_LOCK = PROJ_LOCKS["rtp_available_lock"]
 assert RTP_SYNC_LOCK == RMS_LOCKS["rtp_available_lock"] == GLU_LOCKS["rtp_lock"]
 RTP_SYNC_LOCK_ADDR = 0x1F000 + 16 * RTP_SYNC_LOCK
@@ -326,7 +325,7 @@ def layer_kernels(geometry, device=None):
 
 
 def q_heads_padded(geometry):
-    """Query heads per attention core, each KV head's group padded."""
+    """Query heads per attention core."""
     groups = geometry.num_attn_heads // geometry.num_kv_heads
     pad = Q_HEADS_PADDING
     return (groups + pad - 1) // pad * pad * geometry.num_kv_heads
@@ -349,8 +348,8 @@ def weight_layout(geometry, layer_type):
 
     The engine packs one blob per layer: qkv, o, up_gate and down in q4nx,
     then the per-layer-input down, gate and up projections in bf16. qkv is
-    q alone on a skip layer, which reuses another layer's KV cache. A skip
-    layer with double_wide_mlp has twice the intermediate size.
+    q alone on a skip layer. A skip layer with double_wide_mlp has twice the
+    intermediate size.
     """
     g = geometry
     is_swa = layer_type in ("swa", "swa_skip")
@@ -377,11 +376,10 @@ def weight_layout(geometry, layer_type):
 
 
 def arg_sizes(geometry):
-    """Elements of the sequence's buffers: x, proj, rms, rope_rms and kv.
+    """Upper bounds on the element counts of the sequence's buffers, by name.
 
-    The engine binds its own buffers. These sizes bound what the sequence
-    reads and writes. The four layer types share one xclbin, so proj is the
-    largest blob of the four.
+    The four layer types share one xclbin. proj therefore holds the largest
+    blob of the four.
     """
     D, pli = geometry.model_dim, geometry.pli_d
     dk = geometry.num_kv_heads * geometry.dh
@@ -428,11 +426,7 @@ def _connect(
 
 @dataclass
 class _Ctx:
-    """The state that every stage builder adds to.
-
-    It holds the runtime, the workers, the geometry, the RTP addresses and the
-    kernels by name.
-    """
+    """The state that every stage builder adds to."""
 
     rt: Runtime
     workers: list
@@ -473,14 +467,13 @@ def _ceil_mul(v, chunk):
     return arith.divsi(v + (chunk - 1), _as_i32(chunk)) * chunk
 
 
-# The C++ generator has no arith.minsi, so min and the masks are branchless.
 def _mask_ge(v, bound):
     """All ones if v >= bound, else 0."""
     return arith.shrsi(_as_i32(bound - 1) - v, _as_i32(31))
 
 
 def _min_const(v, bound):
-    """min(v, bound)."""
+    """min(v, bound). The C++ generator cannot lower arith.minsi."""
     d = v - _as_i32(bound)
     return _as_i32(bound) + arith.andi(d, arith.shrsi(d, _as_i32(31)))
 
@@ -500,9 +493,9 @@ def _sequence(
 ):
     """The runtime sequence of one ``layer_type`` dispatch.
 
-    The sequence mirrors the engine's gen_layer_seq: the RTP writes, then the
-    shim DMA legs in the engine's order. Offsets and lengths count bf16
-    elements. L counts the tokens up to and including this one.
+    The sequence writes the RTPs, then starts the shim DMA legs in the order of
+    the engine's gen_layer_seq. Offsets and lengths count bf16 elements. L
+    counts the tokens up to and including this one.
     """
     IS_SWA = layer_type in ("swa", "swa_skip")
     IS_SKIP = layer_type in ("global_skip", "swa_skip")
@@ -514,8 +507,6 @@ def _sequence(
     DK = g.num_kv_heads * DH
     weights = weight_layout(g, layer_type)
 
-    # RTPs, then the sync lock that lets the proj, RMS and GLU cores read
-    # them.
     for c in PROJ_COLS:
         for r in (2, 3, 4, 5):
             npu_write32(rtp["proj_swa"], int(IS_SWA), column=c, row=r)
@@ -603,14 +594,11 @@ def _sequence(
         """One leg over the bf16 weight ``name``, on the shim symbol ``name``."""
         return leg(name, proj_arg.op, weights[name].offset, weights[name].size)
 
-    # V starts after the K rows: SW rows on a sliding-window layer, max_l rows
-    # on a global layer.
     v_cache_off = DK * SW if IS_SWA else MAX_L_v * DK
     move_weights(weights["qkv"])
     if not IS_SKIP:
-        # This token's K and V into the cache, at row L - 1, modulo the window
-        # on sliding-window layers. Both legs go on the layer type's receive
-        # channel.
+        # recv_k carries the global layers' k and v, recv_v the sliding-window
+        # layers'.
         L_off = (arith.andi(L - 1, _as_i32(SW - 1)) if IS_SWA else (L - 1)) * DK
         recv_sym = "recv_v" if IS_SWA else "recv_k"
         emit(leg(recv_sym, kv_arg.op, L_off, DK))
@@ -619,16 +607,16 @@ def _sequence(
     # x reuses pli_rope_rms's channel as a second BD.
     emit(leg("pli_rope_rms", x_arg.op, 2 * D, D, token=False))
     emit(pli_leg("pli_down"))
-    # The KV cache into the attention memtile: one phase on global layers. The
-    # sliding-window cache is a ring, so its window can wrap into two.
+    # The KV cache into the attention memtile.
     mv_pkt = _KV_PKT_SWA if IS_SWA else _KV_PKT_GLOBAL
     if not IS_SWA:
         d2m = _ceil_mul(L, LK) * DK
         emit(leg("move_k", kv_arg.op, 0, d2m, pkt=mv_pkt))
         emit(leg("move_v", kv_arg.op, v_cache_off, d2m, pkt=mv_pkt))
     else:
-        # Two phases when L >= SW, one when L < SW. A mask picks the lengths,
-        # so the leg count is fixed.
+        # The sliding-window cache is a ring. Its window wraps into a second
+        # phase when L >= SW. The sequence cannot branch on L. A mask sets the
+        # second phase's length to 0 when L < SW.
         _m = _mask_ge(L, SW)
         _nm = arith.xori(_m, _as_i32(-1))
         _lb = arith.andi(L, _as_i32(SW - 1))
@@ -640,7 +628,7 @@ def _sequence(
         p2_len = arith.andi(_m, _lb * DK)
         emit(leg("move_k", kv_arg.op, p1_off, p1_len, pkt=mv_pkt))
         emit(leg("move_v", kv_arg.op, p1_off + v_cache_off, p1_len, pkt=mv_pkt))
-        # A zero-length BD issues no token, so the second phase awaits none.
+        # A zero-length BD issues no token. The second phase awaits none.
         emit(leg("move_k", kv_arg.op, 0, p2_len, token=False, pkt=mv_pkt))
         emit(leg("move_v", kv_arg.op, v_cache_off, p2_len, token=False, pkt=mv_pkt))
     for name in ("o", "up_gate", "down"):
@@ -682,8 +670,8 @@ def _build_rms(ctx, rms_tile):
             y_cons_lock=0,
             x_prod_lock=2,
             x_cons_lock=0,
-            # No DMA takes the rest. The sequence sets the first. The other
-            # two hand y_out to the gate tile's kernel.
+            # No DMA takes these three. lm_head_out_* hand y_out to the gate
+            # tile's kernel.
             rtp_available_lock=0,
             lm_head_out_prod_lock=1,
             lm_head_out_cons_lock=0,
@@ -1028,10 +1016,10 @@ def _build_pl_gate(ctx, gle_tile, x):
 
 
 def _build_pl_merge(ctx, plm_tile):
-    """Per-layer-input merge, a tile without a core.
+    """Per-layer-input merge.
 
-    The tile gathers the embedding and the gate outputs into one buffer and
-    sends it to the up projection.
+    The tile runs no kernel. Its DMA gathers the embedding and the gate
+    outputs into one buffer and sends the buffer to the up projection.
     """
     D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     plm_dual_y_ty = np.ndarray[(2 * (PLI_D + D) + 32,), _BF16]
@@ -1281,8 +1269,8 @@ def _build_proj_core(ctx, pt, kern, send_x_out, main_y0=None, main_y1=None):
 def _build_proj_cores(ctx, grid):
     """The q4nx projection engine: 16 cores in PROJ_COLS.
 
-    The cores in rows 2 and 4 send y. Returns, per group of two columns, the
-    sending cores, whose y gathers into that group's memtile.
+    The cores in rows 2 and 4 send y. Returns the sending cores of each group
+    of two columns.
     """
     proj_k = ctx.kernel(
         "proj_main",
@@ -1500,8 +1488,6 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
     lbuf = Buffer(type=l_ty, name=f"l_{r}_{c}", tile=kv_tile)
     k_begin = ctx.kernel(name, f"{name}_begin", [y_ty, l_ty])
     k_finish = ctx.kernel(name, f"{name}_finish", [y_ty, o_ty, l_ty])
-    # The core runs one round per LK keys. The begin kernel waits on the qk
-    # core, which reads the RTP after q arrives.
     if two_kv_heads:
         k_sbeg = ctx.kernel(name, f"{name}_s_begin", [attn_s_ty, y_ty, l_ty])
         k_vhalf = ctx.kernel(
@@ -1716,7 +1702,7 @@ def _route(rt, grid, t, proj_send_tiles):
     _connect(rt, x_shim, 1, t["swa_rope"], 1, pkt_id=_ShimPkt.to_rope)
     _connect(rt, t["rms"], 0, proj_x, 3, pkt_id=_X_FROM_RMS)
 
-    # The weights from the shim into each memtile, halves on S2MM 4 and 5.
+    # The weights from the shim into each memtile.
     for col in PROJ_COLS:
         for ch in (0, 1):
             _connect(
@@ -1727,11 +1713,11 @@ def _route(rt, grid, t, proj_send_tiles):
                 4 + ch,
                 shim_symbol=f"proj_w{ch}_{col}",
             )
-    # The memtile's MM2S j to S2MM 1 of its column's core in row j.
+    # The weights from each memtile to its column's cores.
     for col in PROJ_COLS:
         for j in range(4):
             _connect(rt, grid[col, 1], j, grid[col, 2 + j], 1)
-    # x from proj_x's MM2S 4 to every projection core's S2MM 0.
+    # x to every projection core.
     for col in PROJ_COLS:
         for j in range(4):
             _connect(rt, proj_x, 4, grid[col, 2 + j], 0)
@@ -1790,8 +1776,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     """The MLIR module of one decode layer of ``layer_type`` for ``geometry``.
 
     ``rtp`` maps each RTP_ADDRESSES key to the address that the engine writes.
-    ``layer_type`` sets the runtime sequence only. The sequence takes x, proj,
-    rms, rope_rms and kv, then context_len and max_l.
+    ``layer_type`` sets the runtime sequence only.
     """
     if layer_type not in LAYER_TYPES:
         raise ValueError(f"layer_type must be one of {LAYER_TYPES}")
@@ -1849,7 +1834,6 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     _build_proj_weight_mem(ctx, t["proj_weight"])
     _build_proj_x_mem(ctx, t["proj_x"])
 
-    # The scores go from each qk core to its kv core through a fifo.
     of_g_s = ObjectFifo(_attn_s_ty(g), name="attn_s", delegate_tile=t["attn_kv"])
     _build_attn_kv(ctx, t["attn_kv"], "attn_kv", "l_kv", g.dh, of_g_s, two_kv)
     _build_attn_qk(ctx, t["attn_qk"], "attn_qk", "l_qk", g.dh, of_g_s, q_of_g, two_kv)
