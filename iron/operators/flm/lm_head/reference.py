@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CPU reference for :class:`iron.operators.flm.LMHead`, in float64.
-
-README.md states the tolerance between the device and this reference.
-"""
+"""CPU reference for :class:`iron.operators.flm.LMHead`, in float64."""
 
 import numpy as np
 
@@ -14,8 +11,9 @@ from iron.operators.flm.q4nx import BLOCK_BYTES, GROUP, K_TILE, M_TILE, bf16_to_
 def dequantize_block(block):
     """One q4nx block to its (M_TILE, K_TILE) weights.
 
-    The scales and minima are indexed ``[k // GROUP, m]``. The 4-bit codes,
-    low nibble first, are indexed ``[m // 16, k // 32, k % 32, m % 16]``.
+    The block stores the scales and the minima at ``[k // GROUP, m]``. It
+    stores the 4-bit codes at ``[m // 16, k // 32, k % 32, m % 16]``. Each byte
+    holds the code with the lower index in its low nibble.
     """
     groups = K_TILE // GROUP
     params = bf16_to_f32(np.frombuffer(block[: 4 * groups * M_TILE], "<u2"))
@@ -32,8 +30,8 @@ def dequantize_block(block):
 def dequantize(w, dim, vocab, cols, rows):
     """The whole q4nx vocabulary buffer to its (vocab, dim) weights.
 
-    Out-feature ``n`` is ``((round * cols + col) * rows + row) * M_TILE + m``,
-    and its k-th block sits at block index
+    Out-feature ``n`` is ``((round * cols + col) * rows + row) * M_TILE + m``.
+    Its k-th block has block index
     ``((round * cols + col) * k_blocks + k) * rows + row``.
     """
     w = np.asarray(w).view(np.uint8)
@@ -51,8 +49,8 @@ def dequantize(w, dim, vocab, cols, rows):
 def reference(weights, x, softcap, eps=1e-6):
     """Softcapped logits of the RMS-normalized token.
 
-    ``weights`` is ``dequantize``'s (vocab, dim) matrix, ``x`` the token
-    followed by its RMS weight.
+    ``weights`` is the (vocab, dim) matrix from ``dequantize``. ``x`` has the
+    layout of LMHead's X.
     """
     x = np.asarray(x, np.float64)
     dim = weights.shape[1]

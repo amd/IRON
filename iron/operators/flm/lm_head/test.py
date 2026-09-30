@@ -18,8 +18,7 @@ from iron.operators.flm.testing import requires_aie2p
 # unwritten output fails the check.
 SENTINEL = 99.0
 
-# Error bounds from README.md's Numerics section. PROJECTION_ERROR scales
-# with the largest logit. The softcap scales TANH_ERROR.
+# Error bounds from README.md's Numerics section.
 PROJECTION_ERROR = 0.025
 TANH_ERROR = 0.04
 
@@ -62,10 +61,7 @@ def _run(op, w, x):
 
 
 def _check(dim, vocab, softcap, aie_context, seed=0, tanh_error=True):
-    """Compare the device's logits for seed's inputs with the reference.
-
-    tanh_error adds the tanh approximation's error to the bound.
-    """
+    """Compare the device's logits for seed's inputs with the reference."""
     op = LMHead(dim=dim, vocab=vocab, softcap=softcap, context=aie_context)
     op.compile()
     w, x = _inputs(dim, vocab, seed)
@@ -88,7 +84,9 @@ def _check(dim, vocab, softcap, aie_context, seed=0, tanh_error=True):
 @requires_aie2p
 @pytest.mark.parametrize("dim", [1536, 2560])
 def test_projection_matches_reference(dim, aie_context):
-    """A cap of 1000 keeps tanh near zero, so this judges the projection alone.
+    """A softcap of 1000 keeps each tanh argument near zero.
+
+    The test therefore checks the projection alone.
 
     1536 and 2560 are Gemma 4 E2B's and E4B's hidden sizes.
     """
@@ -103,7 +101,7 @@ def test_gemma4_softcap(dim, aie_context):
 
 @requires_aie2p
 def test_softcap_bounds_the_logits(aie_context):
-    """A small cap saturates most logits; none may pass it."""
+    """A softcap of 5 saturates most logits. No logit may exceed the softcap."""
     got = _check(1536, 1024, 5.0, aie_context, seed=2)
     assert np.abs(got).max() <= 5.0
 
