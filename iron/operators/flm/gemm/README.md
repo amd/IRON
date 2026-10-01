@@ -14,8 +14,8 @@ op.compile()
 op.get_callable()(A, op.pack_B(B), C_out)
 ```
 
-`epilogue` and `rounding` are `StrEnum`s, so the bare strings `"silu"` /
-`"conv_even"` are accepted too.
+`epilogue`, `rounding` and `gelu` are `StrEnum`s, so the bare strings `"silu"` /
+`"conv_even"` / `"bf16_steps"` are accepted too.
 
 A second GEMM implementation alongside [`iron.operators.GEMM`](../../gemm),
 specialised for transformer projection shapes and ported from FastFlowLM's `mm`
@@ -213,16 +213,35 @@ Verified against the shipped overlay on identical inputs, driven through
 elements**. With the `conv_even` default it differs everywhere, and is far more
 accurate — see [Accuracy](#accuracy).
 
-**The activations deliberately do not match bit for bit**, even under `floor`.
-The overlay rounds its accumulator to bf16 and then applies the activation to
-that; this operator applies the activation to the f32 accumulator and rounds
-once, on the store. Rounding before a nonlinearity rounds twice and lets the
-activation's slope amplify the first rounding, so the overlay's order is the
-less accurate one and is not worth reproducing. The cost of diverging is
+**By default the activations deliberately do not match bit for bit**, even under
+`floor`. The overlay rounds its accumulator to bf16 and then applies the
+activation to that; this operator applies the activation to the f32 accumulator
+and rounds once, on the store. Rounding before a nonlinearity rounds twice and
+lets the activation's slope amplify the first rounding, so the overlay's order
+is the less accurate one and is not worth reproducing. The cost of diverging is
 visible — at M=256 K=512 N=1024, 117582/262144 silu elements differ from the
 overlay — and so is the benefit: against an exact f64 evaluation, mean |err|
 improves and gelu's worst case drops 5.5%. Measured perf-neutral (0.993-1.006x,
 inside the run-to-run spread).
+
+**gelu can match the overlay on request.** A port of a whole model must
+reproduce the shipped engine's tokens, and Gemma 4's gate projections use gelu.
+`gelu=Gelu.BF16_STEPS` selects the overlay's arithmetic: the kernel rounds the
+accumulator to bf16 and then rounds after each step of `x * sigmoid(1.702x)`,
+as the overlay's `getGeluBf16_nonLUT` does. fp32 is the default, for the
+accuracy reasons above. silu and sigmoid have no such option.
+
+```python
+GEMM(M=M, K=K, N=N, epilogue="gelu", rounding="floor", gelu="bf16_steps",
+     context=ctx)  # gelu matches shipped
+```
+
+With `floor`, gelu output is **bit-identical** to the overlay's on NPU2 at
+M=256 K=512 N=1024, M=512 K=1536 N=6144 (Gemma 4 E2B `gate_proj`) and M=512
+K=1536 N=256 (E2B per-layer-input gate), at input scales 0.5 and 4.0. With the
+fp32 default, 121917/262144 elements differ at the first shape and scale 0.5.
+`test_gemm_gelu_bf16_steps_matches_overlay` checks this against `MMPrebuilt`.
+`gelu` changes only the gelu arm of the kernel.
 
 The shipped kernel selects its activation -- and its shape -- from runtime
 parameters, one overlay serving every projection. This operator does the same
