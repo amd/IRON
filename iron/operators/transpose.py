@@ -23,6 +23,7 @@ from iron.common.declare import (
     Resident,
     StreamIn,
     StreamOut,
+    Transposed,
     Untunable,
     dim,
     operator,
@@ -86,7 +87,7 @@ class TransposeOverlay(Overlay):
         return dataclasses.replace(self, num_aie_columns=cols)
 
     def semantics(self) -> Semantics:
-        return Movement(has_cores=True)
+        return Movement(has_cores=True, within=Transposed(self.m, self.n))
 
     def design(self, target) -> list:
         from aie.iron import ObjectFifo, Worker

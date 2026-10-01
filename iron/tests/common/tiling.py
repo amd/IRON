@@ -17,6 +17,7 @@ from iron.common.tiling import (
     Block,
     contiguous,
     encode,
+    factor,
     granule_elements,
     legalize,
     repeated,
@@ -256,3 +257,52 @@ def test_view_then_legalize_round_trips_a_batched_block():
     (acc,) = legalize(nb * M * K, off, sizes, strides, bfloat16)
     hi, lo = split_run(32 * K, gran=2)
     assert acc.sizes == (1, nb, hi, lo) and acc.strides == (0, M * K, lo, 1)
+
+
+def _unroll(offset, dims):
+    grids = np.ix_(*(np.arange(n, dtype=np.int64) * s for n, s in dims))
+    return (offset + sum(grids)).reshape(-1) if dims else np.array([offset])
+
+
+@pytest.mark.parametrize(
+    "offset, dims",
+    [
+        (0, [(64, 1)]),
+        (8, [(16, 1), (4, 16)][::-1]),  # a transpose: 16 columns of 4 rows
+        (0, [(4, 16), (2, 0), (16, 1)]),  # a row read twice
+        (32, [(3, 0), (64, 1)]),  # the whole run three times
+        (0, [(8, 1024), (32, 2), (2, 1)]),
+        (5, [(5, 0)]),  # one element, re-read
+        (100, [(4, -8), (8, 1)]),  # rows walked backwards
+    ],
+)
+def test_factor_recovers_a_nest_from_its_indices(offset, dims):
+    got = factor(_unroll(offset, dims))
+    assert got is not None
+    off, found = got
+    assert off == offset
+    np.testing.assert_array_equal(_unroll(off, found), _unroll(offset, dims))
+    assert len(found) <= len(dims)
+
+
+def test_factor_merges_contiguous_levels():
+    assert factor(np.arange(10, 74)) == (10, [(64, 1)])
+    assert factor(_unroll(0, [(2, 32), (32, 1)])) == (0, [(64, 1)])
+
+
+def test_factor_rejects_what_no_nest_visits():
+    assert factor(np.array([0, 5, 1])) is None
+    assert factor(np.array([0, 1, 2, 4, 5])) is None
+
+
+def test_factor_random_nests_round_trip():
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        depth = int(rng.integers(1, 5))
+        dims = [
+            (int(rng.integers(2, 6)), int(rng.integers(-3, 40))) for _ in range(depth)
+        ]
+        offset = int(rng.integers(0, 100))
+        want = _unroll(offset, dims)
+        off, found = factor(want)
+        np.testing.assert_array_equal(_unroll(off, found), want)
