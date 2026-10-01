@@ -400,8 +400,8 @@ So B does not use an ObjectFifo. The **device** side is shape-independent:
   the placer places them all.
 
 The **runtime sequence**, which is generated per shape, programs both memtile
-channels with `tile_dma_chain`s of one BD per slot, walked with
-`repeat_count`:
+channels with tasks of one BD per slot (`flow.endpoint(memtile).task(...)`),
+walked `runs` times:
 
 | | resident (`k_iters <= B_SLOTS`, `n_units <= 63`) | streamed (otherwise) |
 |---|---|---|
@@ -438,10 +438,11 @@ Constraints, all enforced in design.py:
 * **NPU1 fits exactly**: bf16 B at `tile_n=64` leaves room for 5 slots, which
   fill the memtile to the byte. Lowered and placed, but not run on hardware.
 
-This needs mlir-aie's `tile_dma_chain`, `Task.start(repeat_count=...)`,
-`Lock.set`, repeat counts past one push, and compiler-side BD reclaim, which
-are not yet in a wheel. Every hardware limit the design uses comes from the
-target model.
+This needs mlir-aie #3791 (in the 1.4.4.dev69 wheel): runtime tasks on a
+memtile's channels, `Task.start(repeat_count=...)`, `Lock.set`, and repeat
+counts past one push. The instruction stream is built with
+`aiecc --reclaim-runtime-bds`, since a split leg's pieces outnumber the shim's
+BD ids. Every hardware limit the design uses comes from the target model.
 
 Measured on NPU2 (Strix, power mode `default`) against the fifo version over
 the 30 benchmark shapes, 8 interleaved rounds, errors bit-identical on all:

@@ -43,7 +43,6 @@ from aie.iron import (
     TileDma,
     Worker,
     WorkerRuntimeBarrier,
-    tile_dma_chain,
 )
 from aie.iron.controlflow import range_
 from aie.dialects.aie import get_target_model
@@ -882,9 +881,9 @@ def gemm(
                     releases=[Release(post, value=value)],
                 )
             )
-        return tile_dma_chain(
-            mt_tiles[c], direction, channel, chain, repeat_count=passes - 1
-        )
+        task = channel.task(*chain, runs=passes)
+        task.start()
+        return task
 
     def c_tap(mega_col, c, slab):
         # Every joined block this column produces: one ROWS*M_TILE x N_TILE
@@ -1018,9 +1017,8 @@ def gemm(
     )
     for flow in b_shim_flows + b_bcast_flows:
         rt.add_flow(flow)
-    # Only the sequence's memtile chains touch the pools.
-    for buf in b_mt_bufs:
-        rt.add_buffer(buf)
+    # Only the sequence touches the pools. Its tasks declare the buffers, but
+    # Lock.set also arms the producer locks before any task names them.
     for c in range(n_active_cols):
         for lock in b_mt_prod[c] + b_mt_cons[c]:
             rt.add_lock(lock)

@@ -375,6 +375,10 @@ class GEMM(MLIROperator):
             # aiecc compiles the cores on the way to an instruction stream, so
             # this needs the kernel objects too.
             dependencies=[shape_mlir] + kernels,
+            # A split leg's pieces outnumber the shim's BD ids, so the
+            # compiler recycles finished tasks' ids. Safe here: no task waits
+            # on a push issued after it (see design.py's emit_slab).
+            extra_flags=["--reclaim-runtime-bds"],
         )
         self.add_artifacts([self.xclbin_artifact, self.insts_artifact])
 
