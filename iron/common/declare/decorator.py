@@ -87,6 +87,14 @@ def _rewrite_refs(specs: tuple, cls: type, fields_by_obj: dict[int, Field]) -> t
     return tuple(out)
 
 
+def _rewrite_flag(spec, cls: type, fields_by_obj: dict[int, Field]):
+    """A stream setting that selects on a flag, with the flag as a DimRef."""
+    if not isinstance(spec, _Select):
+        return spec
+    flag = _rewrite_refs((spec.flag,), cls, fields_by_obj)[0]
+    return _Select(flag, spec.when_true, spec.when_false)
+
+
 def _check_dim_ref(
     cls: type, member: _Member, spec, what: str, *, allow_tunable: bool
 ) -> None:
@@ -190,6 +198,9 @@ def operator(cls: type) -> type:
                 _check_dim_ref(
                     cls, m, d, "dimension", allow_tunable=isinstance(m, _Stream)
                 )
+        if isinstance(m, _Stream):
+            m.replicate = _rewrite_flag(m.replicate, cls, fields_by_obj)
+            m.depth = _rewrite_flag(m.depth, cls, fields_by_obj)
         if isinstance(m, _Stream) and m.per is not None:
             per = m.per if isinstance(m.per, tuple) else (m.per,)
             per = _rewrite_refs(per, cls, fields_by_obj)

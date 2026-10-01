@@ -24,7 +24,7 @@ from aie.dialects.aie import WireBundle, get_target_model
 from aie.iron.device import Device
 from aie.utils.verify import Tolerance
 
-from .bound import BoundBuffer, BoundResident, BoundStream, BoundValue
+from .bound import BoundBuffer, BoundResident, BoundStream, BoundValue, _default_setting
 from .field import Untunable
 from .member import Resident, Xclbin, _Member, _Stream, _Value
 from .naming import label_parts
@@ -99,10 +99,12 @@ class Overlay:
         ``max(inputs, outputs) * num_channels`` channels in the busier
         direction. A ``replicate`` stream is shared by every column of a
         channel, so it is paid once per channel rather than per column.
+        A ``replicate`` that selects on a layout flag is counted at the
+        flag's default: the budget is the class's, not an instance's.
         """
         streams = [m for m in cls._members if isinstance(m, _Stream)]
-        shared = [m for m in streams if m.replicate]
-        per_core = [m for m in streams if not m.replicate]
+        shared = [m for m in streams if _default_setting(m.replicate)]
+        per_core = [m for m in streams if not _default_setting(m.replicate)]
         directions = [m.direction for m in per_core]
         cost = max(directions.count("in"), directions.count("out")) * num_channels
         fixed = len(shared) * num_channels

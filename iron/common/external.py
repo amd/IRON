@@ -127,7 +127,7 @@ class ExternalSequence(Transfers):
     @staticmethod
     def _depth(stream) -> int:
         s = stream.stream if isinstance(stream, _StreamSlot) else stream
-        return s.member.depth
+        return s.depth
 
     @staticmethod
     def _resolve(what) -> tuple[BoundBuffer, list[Access]]:

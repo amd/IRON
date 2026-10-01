@@ -40,8 +40,6 @@ class BoundStream:
         self.name = member.name
         self.direction = member.direction
         self.broadcast = member.broadcast
-        self.replicate = member.replicate
-        self.depth = member.depth
         self.via = member.via
         self._handle_slots: list[Any] | None = None
 
@@ -55,7 +53,21 @@ class BoundStream:
 
     @property
     def shape(self) -> tuple[int, ...]:
-        return tuple(self._resolve(d) for d in self.member.dims)
+        try:
+            return _resolve_shape(self.member.dims, self.overlay)
+        except Incompatible as e:
+            raise Incompatible(
+                f"stream {self.name!r}: {e}. Tune the overlay first (tuned(dev))"
+            ) from None
+
+    @property
+    def replicate(self) -> bool:
+        """Every slot receives the whole buffer (one fill per slot)."""
+        return bool(_resolve_setting(self.member.replicate, self.overlay))
+
+    @property
+    def depth(self) -> int:
+        return int(_resolve_setting(self.member.depth, self.overlay))
 
     @property
     def dtype(self):
@@ -405,6 +417,24 @@ def _flag_value(flag, instance, overlay: Overlay | None = None) -> bool:
     if isinstance(flag, Field):
         return bool(getattr(instance, flag.name))
     return bool(flag)
+
+
+def _resolve_setting(spec, instance, overlay: Overlay | None = None):
+    """A stream's ``replicate`` or ``depth``: a value, or a ``select()`` on a flag."""
+    if isinstance(spec, _Select):
+        return (
+            spec.when_true
+            if _flag_value(spec.flag, instance, overlay)
+            else spec.when_false
+        )
+    return spec
+
+
+def _default_setting(spec):
+    """:func:`_resolve_setting` with no instance: the flag at its default."""
+    if isinstance(spec, _Select):
+        return spec.when_true if spec.flag.default else spec.when_false
+    return spec
 
 
 def _resolve_shape(dims, instance, overlay: Overlay | None = None) -> tuple[int, ...]:

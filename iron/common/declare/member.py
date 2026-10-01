@@ -17,7 +17,7 @@ from typing import Any, ClassVar
 import numpy as np
 from ml_dtypes import bfloat16
 
-from .field import DeclarationError, _DimSpec, _describe
+from .field import DeclarationError, _DimSpec, _Select, _describe
 
 
 class Shim:
@@ -133,6 +133,7 @@ class _Stream(_Member):
     fifo per column, say), or a tuple of dimensions whose product is the
     count (columns x channels); ``broadcast=True`` is one fifo every worker
     consumes. ``via=`` pins the shim endpoint(s). ``depth`` is the fifo depth.
+    ``replicate`` and ``depth`` may be a ``select()`` on a layout flag.
     """
 
     direction: ClassVar[str] = ""
@@ -143,15 +144,20 @@ class _Stream(_Member):
         dtype: Any = bfloat16,
         per: _DimSpec | None = None,
         broadcast: bool = False,
-        replicate: bool = False,
+        replicate: bool | _Select = False,
         via: Shim | list[Shim] | None = None,
-        depth: int = 2,
+        depth: int | _Select = 2,
     ) -> None:
         if per is not None and broadcast:
             raise DeclarationError(
                 "a stream is either per=<dim> or broadcast, not both"
             )
-        if replicate and per is None:
+        can_replicate = (
+            replicate.when_true or replicate.when_false
+            if isinstance(replicate, _Select)
+            else replicate
+        )
+        if can_replicate and per is None:
             raise DeclarationError(
                 "replicate=True needs per=<dim>: every slot receives the whole buffer"
             )

@@ -146,16 +146,18 @@ class _Select:
     """A shape chosen by a flag: ``select(b_col_maj, (N, K), (K, N))``.
 
     The flag is a field with a default or one the caller passes explicitly;
-    it is never inferred. The only conditional shapes in the tree are GEMM's
-    layout flags, which transpose a declared shape rather than resize it.
+    it is never inferred. Layout flags transpose a declared shape (GEMM's
+    ``b_col_maj``) or change what a stream carries (GEMV's ``a_col_maj``),
+    so a stream's ``replicate=`` and ``depth=`` may be a select of two
+    values, where a shape's branches are tuples of dimensions.
     """
 
     __slots__ = ("flag", "when_true", "when_false")
 
     def __init__(self, flag, when_true, when_false) -> None:
         self.flag = flag
-        self.when_true = tuple(when_true)
-        self.when_false = tuple(when_false)
+        self.when_true = _branch(when_true)
+        self.when_false = _branch(when_false)
 
     def __repr__(self) -> str:
         return f"select({self.flag!r}, {self.when_true!r}, {self.when_false!r})"
@@ -164,6 +166,11 @@ class _Select:
 def select(flag, when_true, when_false) -> _Select:
     """A conditional shape. See :class:`_Select`."""
     return _Select(flag, when_true, when_false)
+
+
+def _branch(value):
+    """A shape's dimensions as a tuple; a single value as it is."""
+    return tuple(value) if isinstance(value, (tuple, list)) else value
 
 
 _DimSpec = Any  # Field (own class, pre-processing) | DimRef | int | _Optional
