@@ -29,7 +29,6 @@ from aie.helpers.util import v8bfp16ebs8
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
-    Kernel,
     ObjectFifo,
     Program,
     Runtime,
@@ -172,9 +171,18 @@ class Rounding(StrEnum):
     FLOOR = "floor"
 
 
-# The epilogue entry point, shared by the design and op.py (which needs it
-# to mark the symbol alwaysinline when building the inline .ll variant).
-EPILOGUE_SYMBOL = "mm_fused_epilogue_chunk"
+class Gelu(StrEnum):
+    """Arithmetic of the gelu epilogue, ``x * sigmoid(1.702x)``.
+
+    fp32 by default: the activation runs on the f32 accumulator and rounds once.
+    bf16_steps reproduces the shipped overlay: it rounds the accumulator to
+    bf16 and rounds again after each step of the activation. With
+    ``Rounding.FLOOR`` the result matches the overlay bit for bit.
+    """
+
+    FP32 = "fp32"
+    BF16_STEPS = "bf16_steps"
+
 
 # Minimum problem size in K. The minimum in M is M_TILE * compute_rows(dev) and
 # in N is the chosen n tile, both of which depend on the device or the config.
@@ -270,13 +278,16 @@ def gemm(
     k_tile=K_TILE,
     m_chunk=None,
     tile_ma=None,
-    kernel_object="mm_fused.o",
+    kernel=None,
     trace_size=0,
 ):
     """Emit the MLIR module for an M x K @ K x N bf16 GEMM.
 
     A, B and C are row-major bf16 dense tensors, except that B must arrive
     pre-packed by ``GEMM.pack_B`` in the order the cores consume it.
+
+    ``kernel`` is the ``aie.iron.kernels.fused_mm`` build the cores call, at
+    this design's tile geometry; ``GEMM._kernel`` builds it.
     """
     if tile_n not in CT_MAX_K_FOR_N:
         raise ValueError(
@@ -429,23 +440,12 @@ def gemm(
     b_l3_ty = np.ndarray[(K * N // B_GROUP,), b_elem_ty]
     c_l3_ty = np.ndarray[(M * N,), bf16_ty]
 
-    acc_init = Kernel("mm_fused_acc_init", kernel_object, [ct_acc_ty])
-    # The trailing int32 is the A band index: under asymmetric tile buffering
-    # the core folds RHO A bands into one accumulator, so the kernel needs to
-    # know which band it is writing.
-    k_step = Kernel(
-        "mm_fused_k_step",
-        kernel_object,
-        [ct_a_obj_ty, ct_b_ty, ct_acc_ty, np.int32],
-    )
-    # Same object as the mmul: the epilogue is compiled into mm_fused.h, so
-    # one -D flag set and one artifact cover both.
-    epilogue_chunk = Kernel(
-        EPILOGUE_SYMBOL,
-        kernel_object,
-        # outer, half, mode, clamp_min_bits, clamp_max_bits
-        [ct_out_ty, ct_acc_ty] + [np.int32] * 5,
-    )
+    # The factory binds each entry point with the buffer types above. Under
+    # asymmetric tile buffering the k step takes the A band index, since the
+    # core folds RHO A bands into one accumulator.
+    acc_init = kernel.mm_fused_acc_init
+    k_step = kernel.mm_fused_k_step
+    epilogue_chunk = kernel.mm_fused_epilogue_chunk
 
     # --- Data movement ----------------------------------------------------
     #
