@@ -67,3 +67,43 @@ bit for bit on 16 of them. On the other 4, one bf16 output of an RMS norm
 differs by 1 ulp, and the MLP spreads the difference over x. The relative L2
 error of x is at most 9.8e-4 there. The new K and V rows match bit for bit on
 all 20.
+
+## Tests
+
+`test_matches_reference` runs each layer type on synthetic inputs from
+`generate_inputs`, on the global layer's xclbin, at `max_l = 1024`. The context
+lengths cover a global layer near the start of its cache and deep into it, and
+a sliding-window layer before its ring is full, at the wrap and after it. E2B
+runs by default. E4B is `extensive`. A dispatch passes when:
+
+- the relative L2 error of x against the reference is at most 1e-2;
+- the relative L2 error of the new K and V rows is at most 2e-3;
+- the rest of x and of the kv cache equals the input bit for bit.
+
+Synthetic x has no outlier channels. A 1-ulp flip therefore costs more there
+than on captured data. Over 80 dispatches per model (8 seeds) the worst error
+of x is 5.7e-3 (E2B) and 6.1e-3 (E4B).
+
+`generate_inputs` plants needle rows in the kv cache. A needle key scores 8
+with every query head and has its own V row; the other keys score near 0. The
+needles sit at the oldest and newest key, at row 0, at the row that the layer
+overwrites and at the first row past the keys. A layer that reads a wrong set
+of rows therefore changes its output by far more than 1e-2. These bugs, run on
+the device, fail the test:
+
+| Bug | Smallest error of x |
+|---|---|
+| `context_len - 1` or `+ 1` passed to the layer | 0.14 |
+| kv rows 0 to 15 read as zero | 0.16 |
+| token embedding read as zero | 0.12 |
+
+A non-skip layer that gets a wrong `context_len` also writes a wrong kv row.
+The bit-exact check catches that. A sliding-window skip layer with a full ring
+(512 or more tokens) reads all 512 rows for any `context_len`. A wrong
+`context_len` changes only the order of the rows. Its error stays below 1e-2,
+and the test does not catch it.
+
+`test_captured_case` runs captured dispatches when the environment variable
+`FLM_LAYER_CASES` names a directory of them. Each dispatch is a directory
+with `manifest.json` and the buffers before and after the engine ran it. The
+test also requires x and the kv cache to equal the engine's bit for bit.
