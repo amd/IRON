@@ -27,6 +27,7 @@ from iron.operators.flm.layer.design import (
     RTP_SYMBOLS,
     arg_sizes,
     decode_layer,
+    layer_kernels,
     weight_layout,
 )
 from iron.operators.flm.layer.op import GEOMETRIES, DecodeLayer
@@ -174,16 +175,28 @@ def _proj_reads(module):
     return reads
 
 
+@pytest.fixture
+def npu2():
+    """NPU2 as the selected device, for a build without an NPU."""
+    previous = aie_utils.get_current_device(probe_runtime=False)
+    dev = NPU2()
+    aie_utils.set_current_device(dev)
+    yield dev
+    aie_utils.set_current_device(previous)
+
+
 @pytest.mark.parametrize("layer_type", LAYER_TYPES)
 @pytest.mark.parametrize("model", MODELS)
-def test_weight_reads_fit_proj(model, layer_type):
+def test_weight_reads_fit_proj(model, layer_type, npu2):
     """Each layer type's sequence reads its whole blob and nothing past proj.
 
     The test reads the BDs out of the generated runtime sequence. The build
     needs no NPU.
     """
     g = GEOMETRIES[model]
-    module = decode_layer(NPU2(), g, RTP_ADDRESSES[model], layer_type)
+    module = decode_layer(
+        npu2, g, RTP_ADDRESSES[model], layer_type, kernels=layer_kernels(g)
+    )
     end = 0
     for offset, length in sorted(_proj_reads(module)):
         assert offset == end, f"the reads skip or reread proj at {offset}"
