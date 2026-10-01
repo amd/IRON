@@ -339,6 +339,9 @@ class MemCopy(Operator[MemCopyOverlay]):
         stream = self.ov.s if buffer is self.x else self.ov.d
         return Order(stream, tuple(map(tuple, slots)))
 
+    def accepts_folds(self) -> bool:
+        return True
+
     def design(self, rt):
         """The whole partitions in one group. Then the remainder: each run of
         full-line cores in a group, and the padded core's fills and drains in
@@ -346,8 +349,8 @@ class MemCopy(Operator[MemCopyOverlay]):
         ov = self.ov
         s, d, x, y = ov.s, ov.d, self.x, self.y
         whole, partial = self._workload()
-        fills = [iter(taps) for taps in self.order(x).slots]
-        drains = [iter(taps) for taps in self.order(y).slots]
+        fills = [iter(taps) for taps in self.issued_order(x).slots]
+        drains = [iter(taps) for taps in self.issued_order(y).slots]
 
         if whole is not None:
             with rt.group():

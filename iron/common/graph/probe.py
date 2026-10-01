@@ -41,6 +41,7 @@ from ..declare import BoundBuffer, BoundValue, Operator
 from ..design import device_symbol
 from ..image.callable import SequenceCallable
 from ..image.sequence import OperatorSequence
+from ..image.packaging import EACH_STEP, FUSED, Mode
 from .narrowing import Calibration, CostTable, StepCost, Variant, cost_key
 
 
@@ -93,7 +94,8 @@ class Standalone:
     means, so a design that takes one is measured at what its caller gives.
     ``inputs`` does the same for input buffers, by buffer name: random bytes
     are no representative content for a buffer whose values steer the work,
-    such as a draw row's temperature and top-k."""
+    such as a draw row's temperature and top-k. ``mode`` is how the
+    runlist is packaged (:mod:`iron.common.image.packaging`)."""
 
     def __init__(
         self,
@@ -104,6 +106,7 @@ class Standalone:
         seed: int = 0,
         distinct: bool = True,
         inputs: Mapping[str, np.ndarray] | None = None,
+        mode: Mode = FUSED,
     ):
         self.steps = list(runlist)
         firsts = {}
@@ -124,7 +127,7 @@ class Standalone:
             [(op, *self._names(self._slot[k], op)) for k, op in enumerate(self.steps)],
             in_names,
             out_names,
-            dispatch="fused",
+            dispatch=mode.dispatch,
             share_designs=True,
             coresident=coresident,
         ).compile()
@@ -290,6 +293,112 @@ def calibrate(
         rounds=timing.rounds,
         calls=timing.calls,
         measured=CostTable.today(),
+        mode=FUSED.name,
     )
     table.record_calibration((ka, kb), cal)
     return cal
+
+
+def calibrate_each_step(
+    table: CostTable,
+    a: Operator,
+    b: Operator,
+    timing: Timing = Timing(),
+    pairs: int = 4,
+    repeats: int = 9,
+    values: Mapping[str, int] | None = None,
+) -> Calibration:
+    """The boundary costs of dispatching every step alone, for two measured
+    designs ``a`` and ``b``, recorded in ``table`` as an ``each_step``
+    calibration.
+
+    ``a`` once against ``a`` ``repeats`` times gives what a step's dispatch
+    adds to its full-ELF ``t_step``; ``A B A B ...`` against ``A A ... B B
+    ...`` (the same steps, 2p design changes against 2) gives what a change
+    of design between two dispatches adds.
+    """
+    ka, kb = cost_key(a), cost_key(b)
+    ta = table.steps[ka].t_step_us
+    tag = f"{ka}_{kb}"
+    runs = [
+        Standalone(f"es1_{tag}", [a], values=values, mode=EACH_STEP),
+        Standalone(f"es{repeats}_{tag}", [a] * repeats, values=values, mode=EACH_STEP),
+        Standalone(
+            f"es_alt{pairs}_{tag}", [a, b] * pairs, values=values, mode=EACH_STEP
+        ),
+        Standalone(
+            f"es_grp{pairs}_{tag}",
+            [a] * pairs + [b] * pairs,
+            values=values,
+            mode=EACH_STEP,
+        ),
+    ]
+    one, many, alt, grp = time_interleaved([r.callable for r in runs], timing)
+    switch = (alt - grp) / (2 * pairs - 2)
+    cal = Calibration(
+        dispatch_us=(many - one) / (repeats - 1) - ta,
+        reset_us=0.0,
+        base_us=switch,
+        switch_us=switch,
+        pmode=pmode(),
+        rounds=timing.rounds,
+        calls=timing.calls,
+        measured=CostTable.today(),
+        mode=EACH_STEP.name,
+    )
+    table.record_calibration((ka, kb), cal)
+    return cal
+
+
+def measure_each_step(
+    table: CostTable,
+    ops: Sequence[Operator],
+    reference: tuple[Operator, Operator],
+    timing: Timing = Timing(),
+    pairs: int = 4,
+    values: Mapping[str, int] | None = None,
+    inputs: Mapping[str, np.ndarray] | None = None,
+) -> dict[str, float]:
+    """Each design in ``ops`` (already in ``table``), entered by a dispatch of
+    its own right after another design's: its ``each_step_us``.
+
+    A step entered from another design costs ``E`` (its dispatch, its
+    configuration, its time), so two designs alternating ``pairs`` times run
+    ``pairs * (E(a) + E(b))``. Against a fixed reference pair ``r, s``,
+    ``E(v) = (T(v, r) + T(v, s) - T(r, s)) / 2`` per round; the reference
+    designs' own figures follow from the first ``v``. ``values`` and
+    ``inputs`` are :class:`Standalone`'s, for ``ops``.
+    """
+    r, s = reference
+    tag = f"{cost_key(r)}_{cost_key(s)}"
+    rs = Standalone(f"es_ref{pairs}_{tag}", [r, s] * pairs, mode=EACH_STEP)
+    out: dict[str, float] = {}
+    for op in ops:
+        key = cost_key(op)
+        runs = [
+            rs,
+            Standalone(
+                f"es_{key}_r",
+                [op, r] * pairs,
+                values=values,
+                inputs=inputs,
+                mode=EACH_STEP,
+            ),
+            Standalone(
+                f"es_{key}_s",
+                [op, s] * pairs,
+                values=values,
+                inputs=inputs,
+                mode=EACH_STEP,
+            ),
+        ]
+        t_rs, t_vr, t_vs = (
+            t / pairs for t in time_interleaved([x.callable for x in runs], timing)
+        )
+        e_v = (t_vr + t_vs - t_rs) / 2
+        out[key] = e_v
+        for ref, other in ((r, t_vr), (s, t_vs)):
+            out.setdefault(cost_key(ref), other - e_v)
+    for key, e in out.items():
+        table.steps[key] = dataclasses.replace(table.steps[key], each_step_us=e)
+    return out

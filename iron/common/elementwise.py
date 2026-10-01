@@ -58,6 +58,8 @@ from .declare import (
     O,
     Incompatible,
     In,
+    Local,
+    Pointwise,
     Operator,
     Out,
     Overlay,
@@ -149,6 +151,21 @@ class ElementwiseOverlay(Overlay):
         """Call the kernel on this core's acquired elements: inputs, then the
         output, then the line length."""
         kernel(*elements, self.line_size)
+
+    def pointwise(self, target: Target, elements: int) -> Pointwise | None:
+        """This kernel over one line of ``elements``, when it is one input
+        to one output and elementwise: the call a producer's core makes on
+        its own output object. Elementwise means its value at an element
+        does not depend on the line length, so any line gives the same
+        result."""
+        streams = [m for m in self._members if isinstance(m, _Stream)]
+        directions = sorted(m.direction for m in streams)
+        if directions != ["in", "out"] or self.semantics() != Local(1):
+            return None
+        sized = dataclasses.replace(self, tile_size=elements, line_size=elements)
+        return Pointwise(
+            sized.kernel(target), lambda fn, src, dst: sized.kernel_call(fn, src, dst)
+        )
 
     # -- the array ----------------------------------------------------------
 

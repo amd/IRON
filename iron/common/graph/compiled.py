@@ -31,8 +31,9 @@ from ..declare.member import _Value
 from ..image.allocator import ArenaPlan
 from ..image.callable import FullELFRun, ScratchArena, SequenceCallable
 from ..image.coresidence import AdjacentPacking
-from ..image.packaging import ELF, Plan, device_support, plan
+from ..image.packaging import ELF, Mode, Plan, device_support, modes, plan
 from ..image.sequence import ALIGNMENT
+from .fold import Folding, apply
 from .carried import (
     CARRY,
     EmitSite,
@@ -43,6 +44,7 @@ from .carried import (
 )
 from .handle import Affine, Carry, Handle, HostTensor, State, Value, _tensor_dtype
 from .narrowing import JointNarrowing, Tuning
+from .tuner import Choice, Tuner
 from .trace import NamedParameters, TracedGraph, Tracer, _ReferenceTracer
 
 # One (parameter, shape, dtype name) per input: what picks a version.
@@ -197,6 +199,18 @@ class GraphFunction:
         carry = self._traced_carry(carry, values, tracer)
         return tracer.finish(inputs, outputs, values, carry)
 
+    def _modes(self, traced: TracedGraph) -> list[Mode]:
+        """The packagings this version may take: the device's, less those
+        that would separate it from other versions it shares states with
+        (only a full ELF's arena holds a state across versions)."""
+        support = device_support(aie_utils.get_current_device())
+        signature = self._signature(traced.inputs)
+        others = [v for k, v in self._versions.items() if k != signature]
+        stateful = traced.states or any(v.traced.states for v in others)
+        return [
+            m for m in modes(support, traced) if m.packs or not (others and stateful)
+        ]
+
     def _split_carry(self, result) -> tuple[list, Carry | None]:
         """The returned outputs, and the :class:`Carry` returned last, if any.
 
@@ -280,6 +294,8 @@ class GraphFunction:
         record: str = "memory",
         feeds: CompiledGraph | None = None,
         coresident: AdjacentPacking | JointNarrowing | None = None,
+        fold: Folding | None = None,
+        tuner: Tuner | None = None,
         **shapes: Any,
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
@@ -292,6 +308,10 @@ class GraphFunction:
         (:mod:`iron.common.image.coresidence`); a full ELF only. A
         :class:`~.narrowing.JointNarrowing` also narrows designs so that
         they fit; what it chose is the version's :attr:`CompiledGraph.tuning`.
+        ``fold`` removes movement steps into their neighbours first
+        (:mod:`.fold`). A :class:`~.tuner.Tuner` decides all of it instead
+        -- the folds, the packaging, the widths and packs -- from measured
+        costs; what it chose is the version's :attr:`CompiledGraph.choice`.
 
         A full-ELF version is placed in :attr:`arena`, with the weights and
         states of every other version. Compile every version before the
@@ -310,11 +330,33 @@ class GraphFunction:
         else:
             aie_utils.ensure_current_device()
         traced = self.trace(**shapes)
-        tuning = None
-        groups: AdjacentPacking | list[list[Operator]] | None = coresident
+        dev = aie_utils.get_current_device()
+        tuning, choice = None, None
+        groups: AdjacentPacking | list[list[Operator]] | None = None
+        if tuner is not None:
+            given = dict(fold=fold, coresident=coresident, boundaries=boundaries)
+            given["image"] = image
+            clash = [name for name, v in given.items() if v is not None]
+            if clash:
+                raise ValueError(
+                    f"{self.__name__}: tuner= decides {clash} itself; pass one "
+                    f"or the other"
+                )
+            choice = tuner.tune(traced, dev, self._modes(traced))
+            if verbose:
+                print(f"{self.__name__}: tuned\n" + choice.report(traced))
+            traced = apply(traced, choice.folds, dev)
+            boundaries, image = choice.mode.boundaries, choice.mode.image
+            tuning = choice.tuning
+            if tuning is not None:
+                traced, groups = tuning.apply(traced)
+        if fold is not None:
+            traced = fold.fold(traced, dev)
         if isinstance(coresident, JointNarrowing):
-            tuning = coresident.tune(traced, aie_utils.get_current_device())
+            tuning = coresident.tune(traced, dev)
             traced, groups = tuning.apply(traced)
+        elif coresident is not None:
+            groups = coresident
         chosen = plan(
             device_support(aie_utils.get_current_device()), traced, boundaries, image
         )
@@ -360,6 +402,7 @@ class GraphFunction:
             emit=emit,
             coresident=groups,
             tuning=tuning,
+            choice=choice,
         )
         self._versions[signature] = version
         return version
@@ -425,6 +468,7 @@ class CompiledGraph:
         emit: EmitSite | None = None,
         coresident: AdjacentPacking | list[list[Operator]] | None = None,
         tuning: Tuning | None = None,
+        choice: Choice | None = None,
     ):
         self.traced = traced
         self.plan = plan
@@ -434,6 +478,8 @@ class CompiledGraph:
         self.emit = emit
         # (expression, device symbol) per binding: what is written where.
         self.tuning = tuning
+        # What a Tuner chose: folds and packaging besides the tuning.
+        self.choice = choice
         self.symbols = [(b.expression, b.symbol) for b in traced.bindings]
         # Equal design keys are one build (two projections on one array).
         # compile() builds the image; the runtime that loads it is made on

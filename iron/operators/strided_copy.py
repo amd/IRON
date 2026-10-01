@@ -279,9 +279,12 @@ class StridedCopy(Operator[StridedCopyOverlay]):
         by = self.out_offset if self.uses_value("out_offset") else None
         return Order(self.ov.d, tuple(map(tuple, taps)), offset_by=by)
 
+    def accepts_folds(self) -> bool:
+        return True
+
     def design(self, rt):
         """One group; per channel its fills, then its drains, the last one waited."""
-        src, dst = self.order(self.x), self.order(self.y)
+        src, dst = self.issued_order(self.x), self.issued_order(self.y)
         with rt.group() as tg:
             for c in range(self.ov.num_aie_channels):
                 for acc in src[c]:

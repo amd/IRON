@@ -89,10 +89,13 @@ python -m iron.applications.llama_3_2_1b.npu \
 
 ## Tuning the Decode Step
 
-`npu.py --cost-table TABLE` narrows the decode step's designs (fewer columns
-where a design gains little from more) and packs them into shared device
-configurations, choosing by what each design costs on the device. The costs
-come from a table that `tune.py` measures:
+`npu.py --cost-table TABLE` tunes the decode step by what each design costs
+on the device: it folds movement steps into their neighbours (the keys and
+values each head reads straight from the cache, a new token's keys and values
+written straight into it, the row gathers read in place), narrows designs
+(fewer columns where a design gains little from more), and packs them into
+shared device configurations. Every choice keeps the logits bit-identical.
+The costs come from a table that `tune.py` measures:
 
 ```bash
 python -m iron.applications.llama_3_2_1b.tune /path/to/model.safetensors /path/to/tokenizer.model
@@ -101,10 +104,13 @@ python -m iron.applications.llama_3_2_1b.npu /path/to/model.safetensors /path/to
 ```
 
 `decode_costs_npu2.json` is an example table, measured on a Strix Halo NPU
-(8 columns) in turbo power mode. Its entries are keyed by each design's
-identity -- its code and parameters -- so a design changed since the table was
-measured is not in it, and the tuner leaves that design as written (the
-`[Tuning]` report lists it as unmeasured). Run `tune.py` again after changing
+(8 columns) in turbo power mode. It holds the designs the folds make as well
+as the graph's own, and each packaging's boundary costs (a full ELF's
+configures; a dispatch per step, per design). Its entries are keyed by each
+design's identity -- its code and parameters -- so a design changed since the
+table was measured is not in it, and the tuner leaves that design as written
+(the `[Tuning]` report lists it as unmeasured, and a folded design it prices
+at the design it came from as estimated). Run `tune.py` again after changing
 a design; it keeps the entries that are still current, measures only the rest,
 and drops designs the graph no longer has (`--remeasure` measures everything
 again). `tune.py` updates `decode_costs_npu2.json` in place unless given

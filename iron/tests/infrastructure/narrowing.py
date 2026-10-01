@@ -86,7 +86,7 @@ def _table(path, steps, dispatch=50.0, reset=30.0, base=30.0):
         )
     table.record_calibration(
         ("x", "y"),
-        Calibration(dispatch, reset, base, base + 10, "turbo", 1, 1, "-"),
+        Calibration(dispatch, reset, base, base + 10, "turbo", 1, 1, "-", "elf"),
     )
     return table
 

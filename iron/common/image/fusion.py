@@ -19,7 +19,7 @@ from aie.utils import bfp
 from typing import Any, NamedTuple
 
 from ..design import DesignGenerator
-from .coresidence import AdjacentPacking, Packing, merge_devices
+from .coresidence import AdjacentPacking, Packing, array_text, merge_devices
 
 RESET_DEVICE = "reset_device"
 
@@ -123,6 +123,19 @@ def format_params(params: dict[str, Any]) -> str:
     )
 
 
+def arrays_of(device_texts: dict[str, str], params_preamble: str) -> dict[str, str]:
+    """Each design's array text (:func:`.coresidence.array_text`)."""
+    out = {}
+    with ir.Context(), ir.Location.unknown():
+        for name, text in device_texts.items():
+            module = ir.Module.parse(f"module {{\n{params_preamble}\n{text}\n}}")
+            device = next(
+                op for op in module.body.operations if isinstance(op, aie.DeviceOp)
+            )
+            out[name] = array_text(device)
+    return out
+
+
 def needs_additional_reset(runlist: list[Any]) -> bool:
     """Whether the sequence must configure one more device than the runlist asks for.
 
@@ -209,7 +222,9 @@ def fuse_mlir(
         packing, _ = packing.pack(
             [op_name for op_name, *_ in runlist], device_mlir_strings, params_preamble
         )
-    packing = packing or Packing()
+    packing = (packing or Packing()).sharing(
+        arrays_of(device_mlir_strings, params_preamble)
+    )
 
     # Build fused MLIR module
     with mlir_mod_ctx() as ctx:

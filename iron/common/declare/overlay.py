@@ -15,6 +15,7 @@ binary.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from math import prod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -36,6 +37,21 @@ if TYPE_CHECKING:
     from ..design.runtime import Transfers
     from ..design.target import Target
     from .operator import Operator
+
+
+@dataclasses.dataclass(frozen=True)
+class Pointwise:
+    """An array's computation as one call another core makes on one of its
+    own objects, out of place: ``apply(kernel_fn, src, dst)`` inside that
+    core's body, with ``kernel`` among the core's arguments (where
+    ``kernel_fn`` arrives)."""
+
+    kernel: Any
+    apply: Callable[[Any, Any, Any], None]
+
+
+def _keyed(value):
+    return value.design_key() if isinstance(value, Overlay) else value
 
 
 def get_shim_dma_limit(dev: Device) -> int:
@@ -215,6 +231,19 @@ class Overlay:
             return Undeclared(f"{name}'s shared streams {odd} are not {shape} inputs")
         return Local(prod(shape))
 
+    def pointwise(self, target: Target, elements: int) -> Pointwise | None:
+        """What this array computes, as a call another core can make on an
+        object of ``elements`` of its own: only an array that is
+        :class:`Local` over single elements, one stream in and one out, has
+        one. ``None`` by default."""
+        return None
+
+    def with_epilogue(self, epilogue: "Overlay") -> "Overlay | None":
+        """A copy whose cores also run ``epilogue``'s :meth:`pointwise` on
+        every output object before releasing it, or ``None`` if this array
+        cannot host one. ``None`` by default."""
+        return None
+
     def tolerance(self, target: Target) -> Tolerance | None:
         """How close this array's output comes to the operator's reference:
         the contract of the kernel it runs.
@@ -268,9 +297,10 @@ class Overlay:
         return None
 
     def design_key(self) -> tuple:
-        """Identity for sharing: the class and every compared field value."""
+        """Identity for sharing: the class and every compared field value (an
+        overlay a field holds, an epilogue, by its own key)."""
         return (type(self).__qualname__,) + tuple(
-            (f.name, getattr(self, f.name))
+            (f.name, _keyed(getattr(self, f.name)))
             for f in dataclasses.fields(self)
             if f.compare
         )

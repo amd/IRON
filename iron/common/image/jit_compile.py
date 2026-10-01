@@ -92,7 +92,11 @@ def _params_key(kwargs: dict) -> str:
         if _is_device(value):
             items.append((name, repr(_device_identity_key(value))))
             continue
-        text = str(value)
+        # An operator is spelled by its design key: every compared field of
+        # both layers, which is what decides the MLIR. Its repr leaves out
+        # repr=False fields that do (an epilogue, a kernel vector width), and
+        # two designs spelled alike share one cache entry.
+        text = repr(value.design_key()) if isinstance(value, Operator) else str(value)
         # A per-call value a graph bound on an operator is part of what it
         # builds (a device parameter, a patched descriptor), but not a field,
         # so its repr leaves it out.

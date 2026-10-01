@@ -13,9 +13,12 @@ extents, and the instance's buffer attributes answer in elements.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from abc import ABCMeta
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
+
+import numpy as np
 
 import aie.utils as aie_utils
 from aie.iron.device import Device
@@ -24,13 +27,15 @@ from aie.utils.verify import Tolerance
 
 from ..image.artifacts import Artifacts, Design, Step
 from ..kernels import kernels_dir
+from .field import Incompatible
 from ..testing import Testing
 from .bound import BoundBuffer, BoundValue
 from .infer import infer, infer_kwargs
-from .member import _Buffer, _Member, _Value
+from .member import Scratchpad, _Buffer, _Member, _Value
 from .naming import label_parts
 from .order import Order, derived
 from .overlay import Overlay
+from .refold import Refold, Reorder, Unfoldable
 
 if TYPE_CHECKING:
     from ..design.generator import DesignGenerator
@@ -133,6 +138,112 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
             return self.ov.order(self, buffer)
         return derived(buffer, buffer.stream(self.ov))
 
+    def accepts_folds(self) -> bool:
+        """Whether a fold may change this operator's transfers: its sequence
+        is derived, or its :meth:`design` issues :meth:`issued_order`. An
+        override that computes its own descriptors says no."""
+        return not self.has_design_override() and not self.ov.has_sequence()
+
+    def independent_batches(self) -> int:
+        """How many independent batches every batched buffer's leading axis
+        holds: batch ``b`` of each output depends only on batch ``b`` of
+        each input, and the array never learns which batch it is on, so the
+        batches may be walked in any order that every buffer walks alike
+        (:class:`~.refold.Reorder`). 1, the default, promises nothing."""
+        return 1
+
+    # -- folds ---------------------------------------------------------------
+
+    @property
+    def refolds(self) -> tuple[Refold, ...]:
+        """The buffers retargeted through a movement a fold took over."""
+        return self.__dict__.get("_refolds", ())
+
+    @property
+    def reorder(self) -> Reorder | None:
+        """The batch walk a fold needed, if not the declared one."""
+        return self.__dict__.get("_reorder")
+
+    def refold_of(self, name: str) -> Refold | None:
+        return next((r for r in self.refolds if r.buffer == name), None)
+
+    def refolded(
+        self, refolds: tuple[Refold, ...] = (), reorder: Reorder | None = None
+    ) -> "Operator":
+        """A copy that also does the movements ``refolds`` describe, walking
+        its batches as ``reorder`` says. Raises :class:`~.refold.Unfoldable`
+        if an order does not compose (checked when tuned)."""
+        taken = {r.buffer for r in self.refolds}
+        for r in refolds:
+            if r.buffer in taken:
+                raise Unfoldable(f"{type(self).__name__}.{r.buffer} is already folded")
+            if not any(b.name == r.buffer for b in self.buffers):
+                raise Unfoldable(f"{type(self).__name__} has no buffer {r.buffer!r}")
+            taken.add(r.buffer)
+        if reorder is not None:
+            if self.reorder is not None and self.reorder != reorder:
+                raise Unfoldable(
+                    f"{type(self).__name__} already walks its batches as {self.reorder}"
+                )
+            if reorder.batches != self.independent_batches():
+                raise Unfoldable(
+                    f"{type(self).__name__} declares {self.independent_batches()} "
+                    f"independent batches, not {reorder.batches}"
+                )
+        new = self.replace()
+        new.__dict__["_refolds"] = self.refolds + tuple(refolds)
+        if reorder is not None:
+            new.__dict__["_reorder"] = reorder
+        new._bind()
+        return new
+
+    def replace(self, **changes) -> "Operator":
+        """``dataclasses.replace``, keeping what a graph or a fold put on this
+        instance (its bound per-call values, its folds)."""
+        new = dataclasses.replace(self, **changes)
+        for key in ("_used_values", "_refolds", "_reorder"):
+            if key in self.__dict__:
+                value = self.__dict__[key]
+                new.__dict__[key] = set(value) if isinstance(value, set) else value
+        new._bind()
+        return new
+
+    def unfolded(self) -> "Operator":
+        """This operator without its folds: what its own ``order()``
+        describes, and the array it runs (a fold moves addresses only)."""
+        own = self.__dict__.get("_own_op")
+        if own is None:
+            own = dataclasses.replace(self)
+            if self.used_values:
+                own.__dict__["_used_values"] = set(self.used_values)
+            self.__dict__["_own_op"] = own
+        return own
+
+    def issued_order(self, buffer: BoundBuffer) -> Order:
+        """How ``buffer`` moves as issued: :meth:`order`, with the batch walk
+        and the folds this instance carries applied. What the sequence
+        issues and the build checks; an overridden :meth:`design` reads its
+        transfers from here."""
+        if not self.refolds and self.reorder is None:
+            return self.order(buffer)
+        cache = self.__dict__.setdefault("_issued", {})
+        if buffer.name in cache:
+            return cache[buffer.name]
+        own = self.unfolded()
+        own_buffer = own._bound[buffer.name]
+        order = own.order(own_buffer)
+        keep = self.has_design_override() or self.ov.has_sequence()
+        if self.reorder is not None:
+            order = self.reorder.apply(order, own_buffer, keep)
+        refold = self.refold_of(buffer.name)
+        if refold is not None:
+            offset_by = (
+                self._bound[refold.value_name] if refold.offset is not None else None
+            )
+            order = refold.compose(order, buffer.dtype, keep, offset_by)
+        cache[buffer.name] = order
+        return order
+
     @classmethod
     def has_design_override(cls) -> bool:
         return cls.design is not Operator.design
@@ -177,17 +288,31 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
                 for f in dataclasses.fields(self)
                 if f.compare and f.name != "ov"
             ),
+            self.refolds,
+            self.reorder,
         )
+
+    def _fold_digest(self) -> str | None:
+        """A short stable spelling of this instance's folds, or ``None``."""
+        if not self.refolds and self.reorder is None:
+            return None
+        text = repr((self.refolds, self.reorder))
+        return hashlib.sha256(text.encode()).hexdigest()[:12]
 
     def tuned(self, dev: Device) -> "Operator":
         """A copy bound to its own tuned copy of the overlay, with :meth:`compatible` checked."""
         ov = self.ov.tuned(dev).copy()
-        new = dataclasses.replace(self, ov=ov)
-        # What a graph bound on this instance is part of it, not of a field:
-        # the build works on the copy, and a copy that forgot would silently
-        # drop the per-call value from the sequence.
-        new._used_values = set(self._used_values)
+        # What a graph bound on this instance, and what a fold put on it, are
+        # part of it, not of a field: the build works on the copy, and a copy
+        # that forgot would silently drop them from the sequence.
+        new = self.replace(ov=ov)
         new.compatible()
+        if new.refolds or new.reorder is not None:
+            try:
+                for b in new.buffers:
+                    new.issued_order(b)
+            except Unfoldable as e:
+                raise Incompatible(f"{type(self).__name__}: {e}") from None
         return new
 
     @property
@@ -205,10 +330,13 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
     @property
     def values(self) -> list[BoundValue]:
         """The per-call values this instance uses (see :meth:`uses_value`)."""
-        return [
+        declared = [
             self._bound[m.name]
             for m in self._members
             if isinstance(m, _Value) and self.uses_value(m.name)
+        ]
+        return declared + [
+            self._bound[r.value_name] for r in self.refolds if r.offset is not None
         ]
 
     def uses_value(self, name: str) -> bool:
@@ -265,6 +393,17 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
                 bound[m.name] = BoundBuffer(m, self)
             elif isinstance(m, _Value):
                 bound[m.name] = BoundValue(m, self)
+        for r in self.refolds:
+            if r.offset is None:
+                continue
+            if r.value_name in bound:
+                raise Unfoldable(
+                    f"{type(self).__name__} already declares {r.value_name!r}"
+                )
+            member = Scratchpad(np.dtype(r.offset.dtype).type)
+            member.name = r.value_name
+            member.owner = type(self)
+            bound[r.value_name] = BoundValue(member, self)
         self._bound = bound
 
     # -- construction from operand shapes ----------------------------------
@@ -314,6 +453,9 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
         which the compile cache keys by content."""
         own = label_parts(self, skip=("ov",))
         base = type(self).__name__ + "_" + "_".join(own + self.ov.name_parts())
+        folds = self._fold_digest()
+        if folds is not None:
+            base += f"_fold{folds}"
         dev = aie_utils.get_current_device()
         return f"{base}_{dev.resolve().name}"
 
@@ -421,4 +563,7 @@ class Operator(Generic[O], metaclass=_OperatorMeta):
             for f in dataclasses.fields(self)
             if f.repr and f.name != "ov"
         )
+        folds = self._fold_digest()
+        if folds is not None:
+            own += f", folds={folds}"
         return f"{type(self).__name__}({self.ov!r}, {own})"

@@ -173,6 +173,10 @@ class BoundBuffer:
     # untuned overlay is still a valid thing to hold.
     @property
     def shape(self) -> tuple[int, ...]:
+        # A folded buffer is the movement's other buffer, whatever it was declared.
+        refold = self._op.refold_of(self.name)
+        if refold is not None:
+            return refold.shape
         return _resolve_shape(self.member.dims, self._op, self._op.ov)
 
     @property

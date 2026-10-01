@@ -5,8 +5,8 @@
 import pytest
 import aie.utils as aie_utils
 
+from iron.operators.gelu import GELUOverlay
 from iron.operators.gemv.op import GEMV, gelu_tanh_approx
-from iron.common.kernels import target_arch
 import numpy as np
 from ml_dtypes import bfloat16
 from iron.common.harness import record_metric, run_test, vectors
@@ -177,17 +177,14 @@ def test_gemv_repeated(
 def test_gemv_gelu(
     M, K, num_aie_columns, tile_size_input, tile_size_output, npu_runtime
 ):
-    """GEMV with the fused GELU epilogue (NPU2-only) vs a gelu(A @ B) golden."""
-    if target_arch() != "aie2p":
-        pytest.skip("gemv gelu epilogue is only available on NPU2 (aie2p)")
-
+    """GEMV with GELU's kernel as its epilogue vs a gelu(A @ B) golden."""
     operator = GEMV(
         M=M,
         K=K,
         num_aie_columns=num_aie_columns,
         tile_size_input=tile_size_input,
         tile_size_output=tile_size_output,
-        epilogue="gelu",
+        epilogue=GELUOverlay(),
     )
     # The reference is the plain product; the epilogue is applied here.
     data = vectors(operator, normal=("A", "B"))

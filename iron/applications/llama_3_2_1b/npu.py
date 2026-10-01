@@ -40,7 +40,9 @@ from ml_dtypes import bfloat16
 import iron
 from aie.iron.kernels.sample import ROW_WORDS
 from iron.common.graph.compiled import CompiledGraph
-from iron.common.graph.narrowing import CostTable, JointNarrowing
+from iron.common.graph.narrowing import CostTable
+from iron.common.graph.tuner import Tuner
+from iron.common.image.packaging import EACH_STEP, FUSED
 
 from . import harness
 from .graphs import LlamaGraph
@@ -92,20 +94,27 @@ class AIELlama:
         are dropped a piece at a time as they reach the device, so the
         process holds at most one piece of it beside the buffers; the
         embedding's rows fault back in as it is read.
-        With a ``cost_table`` the decode version's designs are narrowed and
-        packed by it (:class:`~iron.common.graph.narrowing.JointNarrowing`).
+        With a ``cost_table`` the decode version is tuned by it
+        (:class:`~iron.common.graph.tuner.Tuner`): movements folded into
+        their neighbours, designs narrowed and packed, in the packaging
+        ``boundaries`` names (a full ELF by default).
         """
         model = LlamaGraph(config, max_seq_len)
+        tuner = None
+        if cost_table is not None:
+            # The tuner picks the packaging itself, so boundaries= names it.
+            mode = FUSED if boundaries is None else EACH_STEP
+            tuner = Tuner(CostTable(cost_table), modes=(mode,))
         decode = model.compile(
             config,
             1,
-            coresident=(
-                None if cost_table is None else JointNarrowing(CostTable(cost_table))
-            ),
-            boundaries=boundaries,
+            tuner=tuner,
+            boundaries=None if tuner is not None else boundaries,
         )
-        if decode.tuning is not None:
-            print("[Tuning] decode:\n" + decode.tuning.report(), flush=True)
+        if decode.choice is not None:
+            print(
+                "[Tuning] decode:\n" + decode.choice.report(decode.traced), flush=True
+            )
         if decode.plan.image != iron.ELF:
             print(decode.plan.report("decode"), flush=True)
             decode.load(release=config.weights.release)
