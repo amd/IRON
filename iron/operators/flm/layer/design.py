@@ -33,6 +33,7 @@ from aie.dialects.aiex import (
 )
 from aie.extras import types as T
 from aie.extras.dialects.arith import constant
+from aie.helpers.npdtypes import np_ndarray_type_get_shape
 from aie.iron import (
     Acquire,
     Bd,
@@ -118,8 +119,6 @@ W_BLOCK = q4nx.BLOCK_BYTES // 2
 X_SLICE = 256
 # Keys per attention round.
 LK = 16
-# Each KV head's query group rounds up to a multiple of this many heads.
-Q_HEADS_PADDING = 4
 # The padding in the engine's per-layer-input stream (gemma4e_npu_sequence.hpp).
 MIN_BF16_PAD = 32
 # The columns of the projection cores. Each column holds four cores in rows 2
@@ -318,13 +317,6 @@ def layer_kernels(geometry):
             flm_gemma4.flm_gemma4_decode_attn_qk, swa_qk_locks, sliding_window=True
         ),
     }
-
-
-def q_heads_padded(geometry):
-    """Query heads per attention core."""
-    groups = geometry.num_attn_heads // geometry.num_kv_heads
-    pad = Q_HEADS_PADDING
-    return (groups + pad - 1) // pad * pad * geometry.num_kv_heads
 
 
 class BlobWeight(NamedTuple):
@@ -1471,8 +1463,6 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
 
     The core takes q from q_fifo and k on S2MM 1. It sends the scores to of_s.
     """
-    g = ctx.g
-    NQ_PADDED = q_heads_padded(g)
     r, c = qk_tile.row, qk_tile.col
     # Every qk kernel names its entry points attn_qk_*.
     k_begin = ctx.entry(name, "attn_qk_begin")
@@ -1483,7 +1473,10 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
     else:
         k_round = ctx.entry(name, "attn_qk_round")
         k_step = k_round
-    _, k_ty, _, _, m_ty, c_ty = k_step.arg_types()[:6]
+    q_ty, k_ty, _, _, m_ty, c_ty = k_step.arg_types()[:6]
+    # The kernel pads each KV head's query group.
+    (q_len,) = np_ndarray_type_get_shape(q_ty)
+    NQ_PADDED = q_len // dh
     k0 = Buffer(type=k_ty, name=f"k_0_{r}_{c}", tile=qk_tile)
     k1 = Buffer(type=k_ty, name=f"k_1_{r}_{c}", tile=qk_tile)
     ql = ctx.locks(qk_tile, ATTN_QK_LOCKS, dict(k_prod_lock=2, k_cons_lock=0))
