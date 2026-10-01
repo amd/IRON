@@ -46,13 +46,11 @@ from aie.iron import (
     TileDma,
     Worker,
 )
-from aie.iron import kernels
-from aie.iron.kernels import FlmGemma4DecodeGeometry
+from aie.iron.kernels import FlmGemma4DecodeGeometry, flm_gemma4
 from aie.iron.controlflow import range_
 from aie.iron.dataflow import Flow, PacketFlow
 from aie.iron.device import Tile
 
-from iron.common.device_utils import call_factory
 from iron.operators.flm import q4nx
 from iron.operators.flm.dataflow import ping_pong
 
@@ -270,55 +268,54 @@ _KV_PKT_GLOBAL = 12
 _KV_PKT_SWA = 13
 
 
-def layer_kernels(geometry, device=None):
+def layer_kernels(geometry):
     """The flm_gemma4_decode_* kernels that this design's cores link, by kernel name.
 
-    The global attention kernels depend on the geometry's KV head count.
+    The factories build for the selected device. The global attention kernels
+    depend on the geometry's KV head count.
     """
     two_kv = geometry.num_kv_heads == 2
     qk_handshake = "l_prod_lock" if two_kv else "l_cons_lock"
 
     def build(factory, locks, **kwargs):
-        return call_factory(
-            factory, device=device, geometry=geometry, **locks, **kwargs
-        )
+        return factory(geometry=geometry, **locks, **kwargs)
 
     attn_qk_locks = {**ATTN_QK_LOCKS, qk_handshake: ATTN_HANDSHAKE_LOCK}
     swa_qk_locks = {**ATTN_QK_LOCKS, "l_cons_lock": ATTN_HANDSHAKE_LOCK}
     return {
-        "rms_residual": build(kernels.flm_gemma4_decode_rms_residual, RMS_LOCKS),
-        "rope": build(kernels.flm_gemma4_decode_rope, ROPE_LOCKS),
+        "rms_residual": build(flm_gemma4.flm_gemma4_decode_rms_residual, RMS_LOCKS),
+        "rope": build(flm_gemma4.flm_gemma4_decode_rope, ROPE_LOCKS),
         "swa_rope": build(
-            kernels.flm_gemma4_decode_rope, ROPE_LOCKS, sliding_window=True
+            flm_gemma4.flm_gemma4_decode_rope, ROPE_LOCKS, sliding_window=True
         ),
         "proj_layer_embedding": build(
-            kernels.flm_gemma4_decode_proj_layer_embedding, PLE_LOCKS
+            flm_gemma4.flm_gemma4_decode_proj_layer_embedding, PLE_LOCKS
         ),
         "gate_layer_embedding": build(
-            kernels.flm_gemma4_decode_gate_layer_embedding, GLE_LOCKS
+            flm_gemma4.flm_gemma4_decode_gate_layer_embedding, GLE_LOCKS
         ),
-        "per_layer_up": build(kernels.flm_gemma4_decode_per_layer_up, PLU_LOCKS),
-        "glu": build(kernels.flm_gemma4_decode_glu, GLU_LOCKS),
-        "proj_main": build(kernels.flm_gemma4_decode_proj_main, PROJ_LOCKS),
+        "per_layer_up": build(flm_gemma4.flm_gemma4_decode_per_layer_up, PLU_LOCKS),
+        "glu": build(flm_gemma4.flm_gemma4_decode_glu, GLU_LOCKS),
+        "proj_main": build(flm_gemma4.flm_gemma4_decode_proj_main, PROJ_LOCKS),
         "attn_kv": build(
             (
-                kernels.flm_gemma4_decode_attn_kv_kvh2
+                flm_gemma4.flm_gemma4_decode_attn_kv_kvh2
                 if two_kv
-                else kernels.flm_gemma4_decode_attn_kv
+                else flm_gemma4.flm_gemma4_decode_attn_kv
             ),
             ATTN_KV_LOCKS,
         ),
         "attn_qk": build(
             (
-                kernels.flm_gemma4_decode_attn_qk_kvh2
+                flm_gemma4.flm_gemma4_decode_attn_qk_kvh2
                 if two_kv
-                else kernels.flm_gemma4_decode_attn_qk
+                else flm_gemma4.flm_gemma4_decode_attn_qk
             ),
             attn_qk_locks,
         ),
-        "swa_attn_kv": build(kernels.flm_gemma4_decode_swa_attn_kv, ATTN_KV_LOCKS),
+        "swa_attn_kv": build(flm_gemma4.flm_gemma4_decode_swa_attn_kv, ATTN_KV_LOCKS),
         "swa_attn_qk": build(
-            kernels.flm_gemma4_decode_attn_qk, swa_qk_locks, sliding_window=True
+            flm_gemma4.flm_gemma4_decode_attn_qk, swa_qk_locks, sliding_window=True
         ),
     }
 
@@ -1688,11 +1685,14 @@ def _route(rt, grid, t, proj_send_tiles):
     _connect(rt, t["pl_up"], 0, x_shim, 0, shim_symbol="recv_y")
 
 
-def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
+def decode_layer(
+    dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW, *, kernels
+):
     """The MLIR module of one decode layer of ``layer_type`` for ``geometry``.
 
     ``rtp`` maps each RTP_ADDRESSES key to the address that the engine writes.
-    ``layer_type`` sets the runtime sequence only.
+    ``layer_type`` sets the runtime sequence only. ``kernels`` holds
+    layer_kernels(geometry).
     """
     if layer_type not in LAYER_TYPES:
         raise ValueError(f"layer_type must be one of {LAYER_TYPES}")
@@ -1705,8 +1705,6 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     G_DQ = g.num_attn_heads * g.dh
     S_DQ = g.num_attn_heads * g.swa_dh
     two_kv = g.num_kv_heads == 2
-
-    kernel_fns = layer_kernels(g, dev)
 
     sizes = arg_sizes(g)
     rt = Runtime(
@@ -1730,7 +1728,7 @@ def decode_layer(dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW):
     }
     t = {stage: grid[at] for stage, at in PLACEMENT.items()}
 
-    ctx = _Ctx(rt, workers, g, rtp, kernel_fns)
+    ctx = _Ctx(rt, workers, g, rtp, kernels)
 
     rms_y_out = _build_rms(ctx, t["rms"])
     # q from RoPE to the qk core. The qk core's DMA reorders it.
