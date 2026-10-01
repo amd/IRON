@@ -26,8 +26,9 @@ from iron.common.image.jit_compile import (
     _bind_device,
     _design_generator,
     _params_key,
+    design_identity,
 )
-from iron.operators import ElementwiseAdd
+from iron.operators import GEMM, ElementwiseAdd
 
 
 @pytest.fixture(autouse=True)
@@ -144,6 +145,26 @@ def test_the_compile_key_is_stable_across_identical_operators():
     call.
     """
     assert _add_key()._compute_cache_hash() == _add_key()._compute_cache_hash()
+
+
+def test_a_hidden_field_reaches_the_compile_key():
+    """A ``repr=False`` field is not in the operator's repr, but changes the design.
+
+    GEMM's accumulator width and mmul emulation are both hidden fields.
+    Keyed by the repr alone, a GEMM differing only there was handed the
+    first one's build, and nothing reported it.
+    """
+
+    def key(**kw):
+        return design_identity(GEMM(M=256, K=256, N=512, **kw).generator())
+
+    keys = {
+        key(),
+        key(prio_accuracy=True),
+        key(emulate_bf16_mmul_with_bfp16=False),
+    }
+    assert len(keys) == 3
+    assert key(prio_accuracy=True) == key(prio_accuracy=True)
 
 
 def test_the_compile_key_does_not_depend_on_a_device_being_bound_yet():

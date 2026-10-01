@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import numpy as np
 import pytest
 import aie.utils as aie_utils
 
@@ -123,3 +124,98 @@ def test_gemm(
     record_metric("Throughput", (2.0 * M * K * N) / (latency_us * 1e-6) / 1e9)
 
     assert not errors, "Test failed"
+
+
+def get_batched_params():
+    max_aie_columns = aie_utils.get_current_device().cols
+    # fmt: off
+    #   batches,    M,    K,    N, num_aie_columns, b_col_maj, prio_accuracy,  m,  k,  n
+    regular_params = [
+        # Attention's scores (keys column-major) and context (values
+        # row-major, K the context length), at the scaled test's size.
+        (      4,  256,   64,   64,               4,      True,         False, 16, 64, 16),
+        (      4,  256,   64,   64,               4,     False,          True, 16, 64, 16),
+        # A transfer block that spans two batches: 3 row-blocks per batch.
+        (      3,  768,  128,  512,               8,      True,         False, 64, 64, 64),
+    ]
+    extensive_params = [
+        # Llama 3.2 1B prefill's attention over 512 query rows.
+        (      8, 2048,   64, 2048,               8,      True,         False, 64, 64, 64),
+        (      8, 2048, 2048,   64,               4,     False,          True, 64, 64, 16),
+    ]
+    # fmt: on
+    params = []
+    for plist, extensive in ((regular_params, False), (extensive_params, True)):
+        for p in plist:
+            if p[4] > max_aie_columns:
+                continue
+            marks = [pytest.mark.extensive] if extensive else []
+            params.append(pytest.param(*p, marks=marks))
+    return params
+
+
+def _device_output(operator, *inputs):
+    """``operator``'s one output, run once on the device on ``inputs``."""
+    operator.compile()
+    run = operator.get_callable()
+    tensor = aie_utils.DEFAULT_TENSOR_CLASS
+    (out,) = operator.outputs
+    args = [tensor(x) for x in inputs] + [tensor(out.host_shape, dtype=out.host_dtype)]
+    run(*args)
+    # A copy: the tensor's numpy view does not keep its device buffer alive.
+    return args[-1].numpy().copy()
+
+
+@pytest.mark.parametrize(
+    "num_batches,M,K,N,num_aie_columns,b_col_maj,prio_accuracy,m,k,n",
+    get_batched_params(),
+)
+def test_gemm_batched(
+    num_batches,
+    M,
+    K,
+    N,
+    num_aie_columns,
+    b_col_maj,
+    prio_accuracy,
+    m,
+    k,
+    n,
+    npu_runtime,
+):
+    """Each batch its own product: against the reference, and bit for bit
+    against the unbatched GEMM run on each batch alone."""
+    shape = dict(
+        M=M,
+        K=K,
+        N=N,
+        tile_m=m,
+        tile_k=k,
+        tile_n=n,
+        num_aie_columns=num_aie_columns,
+        prio_accuracy=prio_accuracy,
+        b_col_maj=b_col_maj,
+    )
+    operator = GEMM(**shape, num_batches=num_batches)
+    assert operator.A.shape == (num_batches, M, K)
+    assert operator.B.shape == (
+        (num_batches, N, K) if b_col_maj else (num_batches, K, N)
+    )
+    assert operator.C.shape == (num_batches, M, N)
+
+    data = vectors(operator, normal=("A",))
+    errors, latency_us, bandwidth_gbps = run_test(
+        operator, data.inputs, data.outputs, rel_tol=0.04, abs_tol=0.04
+    )
+    record_metric(
+        "Throughput", (2.0 * num_batches * M * K * N) / (latency_us * 1e-6) / 1e9
+    )
+    assert not errors, "Test failed"
+
+    A, B = data["A"], data["B"]
+    batched = _device_output(operator, A, B)
+    single = GEMM(**shape)
+    alone = np.stack([_device_output(single, A[i], B[i]) for i in range(num_batches)])
+    assert np.array_equal(
+        batched.view(np.uint16), alone.view(np.uint16)
+    ), "a batch of the batched GEMM differs from the GEMM of that batch alone"
