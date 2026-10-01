@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests of the build, the RTP placement, the weight reads and dispatch
-completion.
+"""Tests of the build, the RTP placement, the weight reads and the outputs.
 
-No test checks an output value. The layer's numerics need the engine's
-weights and caches.
+test_matches_reference runs every layer type on synthetic inputs and compares
+x and the kv cache with reference.py. test_captured_case does the same on
+dispatches captured from FastFlowLM's engine, when FLM_LAYER_CASES names them.
 """
 
+import json
+import os
 import re
 from pathlib import Path
 
@@ -31,6 +33,13 @@ from iron.operators.flm.layer.design import (
     weight_layout,
 )
 from iron.operators.flm.layer.op import GEOMETRIES, DecodeLayer
+from iron.operators.flm.layer.reference import (
+    generate_inputs,
+    geometry,
+    kv_row,
+    kv_rows,
+    reference,
+)
 from iron.operators.flm.testing import requires_aie2p
 
 MODELS = sorted(GEOMETRIES)
@@ -102,55 +111,164 @@ def test_layer_types_share_one_configuration(model, aie_context):
         assert config == first, f"{layer_type} configures the device differently"
 
 
-def _inputs(op, seed):
-    """Random bf16 in every buffer the sequence takes."""
-    rng = np.random.default_rng(seed)
-    tensor_class = aie_utils.DEFAULT_TENSOR_CLASS
-    bufs = []
-    for spec in op.get_arg_spec():
-        buf = tensor_class(spec.shape, dtype=bfloat16)
-        buf.numpy_view()[:] = (rng.standard_normal(spec.shape) * 0.1).astype(bfloat16)
-        bufs.append(buf)
-    return bufs
+# The largest relative L2 errors of x and of the new K and V rows.
+#
+# The reference matches the device bit for bit on most dispatches. On the rest,
+# one bf16 output of an RMS norm or of the attention differs by 1 ulp, and the
+# MLP spreads the difference over x. The new K and V rows have matched bit for
+# bit on every dispatch so far. The needle rows of generate_inputs make each
+# injected bug of README.md cost x far more than RTOL_X.
+RTOL_X = 1e-2
+RTOL_KV = 2e-3
+
+# Synthetic dispatches. A global layer runs near the start of its cache and deep
+# into it. A sliding-window layer runs before its 512-row ring is full, at the
+# wrap and after it.
+MAX_L = 1024
+CONTEXT_LENS = {
+    "global": (5, 700),
+    "swa": (37, 511, 700),
+    "global_skip": (37, 700),
+    "swa_skip": (37, 511, 700),
+}
 
 
-@requires_aie2p
-@pytest.mark.parametrize("model", MODELS)
-def test_dispatches_complete(model, aie_context):
-    """Run every layer type's sequence back to back on one xclbin, as the
-    engine does.
+def _dispatch(ops, layer_type, bufs, context_len, max_l):
+    """Run layer_type's sequence on the global layer's xclbin, as the engine
+    does: one xclbin serves all four layer types."""
+    xclbin = ops["global"].xclbin_artifact
+    op = ops[layer_type]
+    run = DispatchCallable(
+        NPUKernel(
+            xclbin_path=xclbin.filename,
+            kernel_name=xclbin.kernel_name,
+            dispatch_params=list(op.get_dispatch_params()),
+            dispatch_lib_path=Path(op.dispatch_artifact.filename).resolve(),
+        )
+    )
+    run.set_parameters(context_len=context_len, max_l=max_l)
+    run(*bufs)
 
-    A sequence that drives the dataflow differently from the cores hangs. The
-    inputs are random. The test checks that each dispatch completes and
-    writes x.
+
+def _tensors(op, inputs):
+    """Device buffers of the arg spec sizes, with inputs at their start."""
+    out = []
+    for spec, data in zip(op.get_arg_spec(), inputs):
+        t = aie_utils.DEFAULT_TENSOR_CLASS(spec.shape, dtype=bfloat16)
+        view = t.numpy_view().reshape(-1).view(np.uint8)
+        view[:] = 0
+        data = np.ascontiguousarray(data).reshape(-1).view(np.uint8)[: view.size]
+        view[: data.size] = data
+        out.append(t)
+    return out
+
+
+def _rel_l2(got, want):
+    got, want = (np.asarray(v, np.float64) for v in (got, want))
+    return np.linalg.norm(got - want) / max(np.linalg.norm(want), 1e-30)
+
+
+def check_outputs(model, layer_type, context_len, max_l, inputs, x_out, kv_out):
+    """Compare x_out and kv_out (bf16) with the reference on inputs.
+
+    Returns the relative L2 errors. Asserts that they are at most RTOL_X and
+    RTOL_KV, and that the rest of x and of the kv cache equals the input bit for
+    bit.
     """
+    ref_x, ref_kv = reference(model, layer_type, *inputs, context_len, max_l)
+    g = geometry(model, layer_type)
+    D, dk = g["D"], g["dk"]
+    got_x = np.asarray(x_out).view(np.uint16).reshape(-1)
+    got_kv = np.asarray(kv_out).view(np.uint16).reshape(-1)
+    errors = {"x": _rel_l2(got_x[:D].view(bfloat16), ref_x[:D].view(bfloat16))}
+    rest = np.ones(ref_kv.size, bool)
+    if not g["skip"]:
+        row = kv_row(model, layer_type, context_len)
+        v_off = kv_rows(model, layer_type, max_l) * dk
+        for name, start in (("k", row * dk), ("v", v_off + row * dk)):
+            rows = slice(start, start + dk)
+            errors[name] = _rel_l2(
+                got_kv[rows].view(bfloat16), ref_kv[rows].view(bfloat16)
+            )
+            rest[rows] = False
+    assert np.array_equal(got_x[D:], ref_x[D:]), "the layer wrote x past its output"
+    assert np.array_equal(got_kv[rest], ref_kv[rest]), "the layer wrote other kv rows"
+    limits = {"x": RTOL_X, "k": RTOL_KV, "v": RTOL_KV}
+    assert all(
+        e <= limits[k] for k, e in errors.items()
+    ), f"relative L2 errors {errors}"
+    return errors
+
+
+def _ops_for(model, layer_type, aie_context):
+    names = {"global", layer_type}
     ops = {
-        t: DecodeLayer(model=model, layer_type=t, context=aie_context)
-        for t in LAYER_TYPES
+        t: DecodeLayer(model=model, layer_type=t, context=aie_context) for t in names
     }
     for op in ops.values():
         op.compile()
-    xclbin = ops["global"].xclbin_artifact
-    bufs = _inputs(ops["global"], seed=0)
-    x = bufs[0]
-    for context_len in (0, 5, 600):
-        for t, op in ops.items():
-            run = DispatchCallable(
-                NPUKernel(
-                    xclbin_path=xclbin.filename,
-                    kernel_name=xclbin.kernel_name,
-                    dispatch_params=list(op.get_dispatch_params()),
-                    dispatch_lib_path=Path(op.dispatch_artifact.filename).resolve(),
-                )
+    return ops
+
+
+SYNTHETIC = [
+    pytest.param(m, t, c, marks=[] if m == "GEMMA4_E2B" else [pytest.mark.extensive])
+    for m in MODELS
+    for t in LAYER_TYPES
+    for c in CONTEXT_LENS[t]
+]
+
+
+@requires_aie2p
+@pytest.mark.parametrize("model, layer_type, context_len", SYNTHETIC)
+def test_matches_reference(model, layer_type, context_len, aie_context):
+    ops = _ops_for(model, layer_type, aie_context)
+    inputs = generate_inputs(model, layer_type, context_len, MAX_L, seed=context_len)
+    bufs = _tensors(ops[layer_type], inputs)
+    full = [b.numpy().copy() for b in bufs]
+    _dispatch(ops, layer_type, bufs, context_len, MAX_L)
+    check_outputs(
+        model, layer_type, context_len, MAX_L, full, bufs[0].numpy(), bufs[4].numpy()
+    )
+
+
+def _captured_cases():
+    root = os.environ.get("FLM_LAYER_CASES")
+    if not root:
+        return [
+            pytest.param(
+                None, marks=pytest.mark.skip(reason="FLM_LAYER_CASES is not set")
             )
-            before = x.numpy().copy()
-            run.set_parameters(context_len=context_len, max_l=4096)
-            run(*bufs)
-            after = x.numpy()
-            d = op.geometry.model_dim
-            assert not np.array_equal(
-                before[:d], after[:d]
-            ), f"{t} at context_len={context_len} left x as it was"
+        ]
+    return sorted(p.parent for p in Path(root).rglob("manifest.json"))
+
+
+@requires_aie2p
+@pytest.mark.parametrize(
+    "case", _captured_cases(), ids=lambda p: p and f"{p.parent.name}/{p.name}"
+)
+def test_captured_case(case, aie_context):
+    """A dispatch captured from the engine by an FLM_PLUGIN that hooks
+    decode.layer. The output must also equal the engine's bit for bit."""
+    man = json.loads((case / "manifest.json").read_text())
+    model = "GEMMA4_" + man["model"].split("-")[1]
+    layer_type, ctx, max_l = man["layer_type"], man["context_len"], man["max_l"]
+    names = ("x_in", "proj_weights", "rms_weights", "rope_rms_weights", "kv_cache_in")
+    files = {
+        k: case / man["files"][k]["file"]
+        for k in names + ("x_out", "kv_cache_out")
+        if k in man["files"]
+    }
+    ops = _ops_for(model, layer_type, aie_context)
+    bufs = _tensors(ops[layer_type], [np.fromfile(files[k], np.uint8) for k in names])
+    full = [b.numpy().copy() for b in bufs]
+    _dispatch(ops, layer_type, bufs, ctx, max_l)
+    check_outputs(model, layer_type, ctx, max_l, full, bufs[0].numpy(), bufs[4].numpy())
+    for buf, key in ((bufs[0], "x_out"), (bufs[4], "kv_cache_out")):
+        if key in files:
+            want = np.fromfile(files[key], np.uint8)
+            got = buf.numpy().reshape(-1).view(np.uint8)
+            n = min(want.size, got.size)
+            assert np.array_equal(got[:n], want[:n]), f"{key} differs from the engine's"
 
 
 def _ops(op):
