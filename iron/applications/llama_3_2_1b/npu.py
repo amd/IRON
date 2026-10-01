@@ -35,7 +35,9 @@ from ml_dtypes import bfloat16
 import iron
 from aie.iron.kernels.sample import ROW_WORDS
 from iron.common.graph.compiled import CompiledGraph
-from iron.common.graph.narrowing import CostTable, JointNarrowing
+from iron.common.graph.narrowing import CostTable
+from iron.common.graph.tuner import Tuner
+from iron.common.image.packaging import FUSED
 
 from . import harness
 from .graphs import LlamaGraph
@@ -76,19 +78,25 @@ class AIELlama:
         final size. The checkpoint's pages are dropped a piece at a time as
         they reach the device, so the process holds at most one piece of it
         beside the buffers; the embedding's rows fault back in as it is read.
-        With a ``cost_table`` the decode version's designs are narrowed and
-        packed by it (:class:`~iron.common.graph.narrowing.JointNarrowing`).
+        With a ``cost_table`` the decode version is tuned by it
+        (:class:`~iron.common.graph.tuner.Tuner`): movements folded into
+        their neighbours, designs narrowed and packed. As a full ELF only,
+        since the prompt shares its states through the arena.
         """
         model = LlamaGraph(config, max_seq_len)
         decode = model.compile(
             config,
             1,
-            coresident=(
-                None if cost_table is None else JointNarrowing(CostTable(cost_table))
+            tuner=(
+                None
+                if cost_table is None
+                else Tuner(CostTable(cost_table), modes=(FUSED,))
             ),
         )
-        if decode.tuning is not None:
-            print("[Tuning] decode:\n" + decode.tuning.report(), flush=True)
+        if decode.choice is not None:
+            print(
+                "[Tuning] decode:\n" + decode.choice.report(decode.traced), flush=True
+            )
         # A prompt's carried values start a decode step (see DeviceGeneration).
         prompt = model.compile(config, max_seq_len, feeds=decode)
         for version in (decode, prompt):
