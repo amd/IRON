@@ -52,3 +52,18 @@ argument spec gives upper bounds on their sizes.
 | `rms` | the four RMS norm weights |
 | `rope_rms` | the RoPE weights (`3 * head_dim`), then the token's per-layer input, its norm weight and `model_dim + 32` values for the up projection |
 | `kv` | the K cache, then the V cache. Every layer except a skip layer writes this token's k and v at row `context_len`. |
+
+## Reference
+
+`reference.py` computes the layer in numpy from the five buffers. It
+reproduces the kernels' bf16 rounding (toward minus infinity), their fp32
+accumulation order, their exp, GELU and reciprocal tables, the fast inverse
+square root and the BFP16 attention matmuls. It returns x and the kv cache as
+the device leaves them.
+
+FastFlowLM's engine served 20 dispatches as captures: E2B and E4B, all four
+layer types, `context_len` 36, 511 and 650. The reference matches the engine
+bit for bit on 16 of them. On the other 4, one bf16 output of an RMS norm
+differs by 1 ulp, and the MLP spreads the difference over x. The relative L2
+error of x is at most 9.8e-4 there. The new K and V rows match bit for bit on
+all 20.
