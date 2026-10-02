@@ -56,13 +56,11 @@ Run the steps below from this directory, `iron/applications/gemma4_flm`.
    ```
 
 4. Serve the model on the IRON engine.
-   `--prefill-chunk-len 512` is required: the IRON operators are built for
-   prompt chunks of up to 512 tokens.
 
    ```bash
    cd build/FastFlowLM/src
    LD_LIBRARY_PATH=../../engine/engines FLM_XCLBIN_PATH=../.. \
-       ./build/flm serve gemma4-it:e2b --prefill-chunk-len 512 --port 11434
+       ./build/flm serve gemma4-it:e2b --port 11434
    ```
 
    Send it a request from another terminal:
@@ -83,7 +81,7 @@ Run the steps below from this directory, `iron/applications/gemma4_flm`.
    ```bash
    cd build/FastFlowLM/src
    LD_LIBRARY_PATH=../../engine/engines FLM_XCLBIN_PATH=../.. \
-       ./build/flm run gemma4-it:e2b --prefill-chunk-len 512
+       ./build/flm run gemma4-it:e2b
    ```
 
 The test serves a word problem and a 1259-token prompt on both engines. It
@@ -111,7 +109,7 @@ This example uses six operator classes from `iron/operators/flm/`:
 
 | Operator | Class | Abstraction level | Sequence | Engine hooks |
 |---|---|---|---|---|
-| [GEMM](../../operators/flm/gemm) | `GEMM` | high | static, one per (M, K, N) | `*_proj`, `pli_*_proj` |
+| [GEMM](../../operators/flm/gemm) | `GEMM` | high | dynamic: `M`, one per (K, N) | `*_proj`, `pli_*_proj` |
 | [Dequantization](../../operators/flm/dequant) | `DequantBFP` | high | static, one per (K, N) | `dequant_*` |
 | [LM head](../../operators/flm/lm_head) | `LMHead` | high | static | `lm_head` |
 | [Prefill attention](../../operators/flm/prefill_attn) | `PrefillAttention`, `PrefillSlidingAttention` | low | dynamic: `L_begin`, `L_end`, `max_l` | `global_attn_core`, `swa_attn_core` |
@@ -188,7 +186,7 @@ layer.
   that the engine loads its xclbins from this directory.
 - `build/xclbins/Gemma4-E2B-IT-NPU2/iron/` holds the static instruction
   sequences and the repacked PLI weights. The file names carry the shape, for
-  example `gemm_M512_K1536_N2048.bin`.
+  example `dequant_K1536_N2048.bin`.
 - `build/gen/` holds the sequence generators of the dynamic operators. The
   engine build compiles them in.
 

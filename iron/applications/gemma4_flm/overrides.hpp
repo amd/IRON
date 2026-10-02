@@ -18,10 +18,12 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 // Instruction sequence generators that build.py extracts from IRON's dynamic operators.
 #include "attn.h"
+#include "gemm.h"
 #include "layer_global.h"
 #include "layer_global_skip.h"
 #include "layer_swa.h"
@@ -85,6 +87,7 @@ struct state {
     dynamic_op layer[4]; ///< indexed by the engine's gemma4e_layer_type_t
     dynamic_op attn, swa;
     std::map<std::string, npu_app> static_ops;
+    std::map<std::tuple<uint32_t, uint32_t, bool>, dynamic_op> gemms; ///< by (K, N, gelu)
     std::map<std::pair<void *, size_t>, std::unique_ptr<view>> views;
     buffer<uint8_t> pli_down, pli_gate, pli_up;
     uint32_t mlp_d = 0, mlp_i = 0; ///< the MLP shape of the layer being prefilled
@@ -141,14 +144,18 @@ inline npu_app &static_op(npu_app_manager *mgr, const std::string &file)
     return it->second;
 }
 
+/// The GEMM of shape (K, N) with `m` rows. Its generator writes the sequence for m.
 inline npu_app &gemm(uint32_t m, uint32_t k, uint32_t n, bool gelu = false)
 {
-    const std::string file = "gemm_M" + std::to_string(m) + "_K" + std::to_string(k) + "_N" + std::to_string(n) +
-                             (gelu ? "_gelu" : "") + ".bin";
-    require(S().static_ops.count(file) || std::filesystem::exists(S().dir + "/" + file),
-            "no GEMM for M=" + std::to_string(m) +
-                "; run flm with --prefill-chunk-len 512, or raise CHUNK in build.py");
-    return static_op(S().mm, file);
+    auto it = S().gemms.find({k, n, gelu});
+    if (it == S().gemms.end()) {
+        it = S().gemms.emplace(std::tuple{k, n, gelu}, dynamic_op{}).first;
+        it->second.app = S().mm->create_app();
+    }
+    for (const seq::gemm_generator &g : seq::gemm_generators)
+        if (g.k == k && g.n == n && g.gelu == gelu)
+            return it->second.at(g.generate, m);
+    throw std::runtime_error("gemma4_flm overrides: no GEMM for K=" + std::to_string(k) + ", N=" + std::to_string(n));
 }
 
 /// Dequantizes the (K, N) matrix `w` describes out of a layer's quantized weights.

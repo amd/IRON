@@ -49,4 +49,4 @@ engine: flm operators
 
 serve:
 	cd $(FLM) && LD_LIBRARY_PATH=$(BUILD)/engine/engines:$$LD_LIBRARY_PATH FLM_XCLBIN_PATH=$(BUILD) \
-	    ./build/flm serve gemma4-it:e2b --prefill-chunk-len 512 --port $(PORT)
+	    ./build/flm serve gemma4-it:e2b --port $(PORT)
