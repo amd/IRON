@@ -15,6 +15,7 @@ _OPERATOR_MODULES = {
     "ElementwiseMul": "elementwise_mul",
     "GEMM": "gemm",
     "GEMV": "gemv",
+    "GEMVInt8": "gemv_int8",
     "MHA": "mha",
     "RMSNorm": "rms_norm",
     "RoPE": "rope",
