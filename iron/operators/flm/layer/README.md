@@ -5,10 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # `iron.operators.flm.DecodeLayer`
 
-The operator runs one Gemma 4 decode layer for one token on the whole NPU2
+The operator runs one Gemma 4 decoder layer for one token on the whole NPU2
 array. It reproduces FastFlowLM's fused decode layer and its runtime sequence.
-FastFlowLM's engine can therefore drive it. The kernels come from mlir-aie's
-`flm_gemma4_decode_*` factories.
+The kernels come from mlir-aie's `flm_gemma4_decode_*` factories.
 
 ```python
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
@@ -22,15 +21,50 @@ run(x, proj, rms, rope_rms, kv)
 ```
 
 `geometry` is `FLM_GEMMA4_E2B_DECODE` or `FLM_GEMMA4_E4B_DECODE` from
-`aie.iron.kernels`. `layer_type` is one of `global`,
-`swa`, `global_skip` and `swa_skip`. A skip layer reads another layer's KV
-cache and has no k or v projection.
+`aie.iron.kernels`. `layer_type` is one of `global`, `swa`, `global_skip` and
+`swa_skip`.
 
-## One configuration, four sequences
+## Layer types
+
+Gemma 4 has two kinds of attention layer:
+
+- A `global` layer attends to every earlier token. Its KV cache holds
+  `max_l` rows. Its head dim is `geometry.dh`.
+- An `swa` layer (sliding-window attention) attends to the last 512 tokens
+  only. Its KV cache is a ring of 512 rows. Its head dim is
+  `geometry.swa_dh`.
+
+Gemma 4 shares KV caches between layers. A skip layer, `global_skip` or
+`swa_skip`, reads the KV cache of an earlier layer of the same kind. It has
+no k or v projection and writes no cache row. If `geometry.double_wide_mlp`
+is set, a skip layer has twice the intermediate size.
 
 The four layer types configure the device identically. They differ only in
-the runtime sequence. FastFlowLM's engine loads one xclbin and switches
-between the four sequences from one layer to the next.
+the runtime sequence. One xclbin therefore runs all four.
+
+## What the layer computes
+
+The operator computes one decoder layer of one decode step: the layer's
+output hidden state for one token. It does not compute the embedding lookup,
+the final norm or the LM head.
+
+1. Attention. The layer applies an RMS norm to the hidden state h and
+   projects it to q, k and v. It applies a per-head RMS norm and RoPE to q
+   and k, and an RMS norm without weight to v. A non-skip layer writes k and
+   v into the KV cache. q attends to the cached keys. The o projection and an
+   RMS norm follow. A residual adds the result to h.
+2. MLP. An RMS norm, the up and gate projections, `GELU(gate) * up`, the
+   down projection and an RMS norm follow. A residual adds the result.
+3. Per-layer input. The layer projects the token embedding to `pli_d`
+   values and scales them. It applies an RMS norm, adds the token's
+   per-layer embedding and scales the sum. GELU of a projection of the hidden state multiplies the
+   result. An up projection and an RMS norm follow. A residual adds the
+   result.
+4. The layer multiplies the hidden state by the layer scale.
+
+The weights of the attention and the MLP are q4nx. The per-layer-input
+weights are bf16. The activations are bf16. The cores accumulate in fp32.
+The attention matmuls run on bfp16 operands.
 
 ## Dispatch parameters
 
@@ -44,68 +78,42 @@ layer's cache is a ring of 512 rows.
 
 ## Buffers
 
-The buffers are the engine's, in the order the sequence takes them. The
-argument spec gives upper bounds on their sizes.
+The design expects these buffers, in this order. The argument spec gives
+upper bounds on their sizes.
 
 | Buffer | Holds |
 |---|---|
-| `x` | the hidden state at offset 0. The layer writes its output over it. The per-layer-input path reads `model_dim` values at `2 * model_dim`. |
+| `x` | the hidden state at offset 0. The layer writes its output over it. The per-layer-input path reads the token embedding, `model_dim` values at `2 * model_dim`. |
 | `proj` | the layer's weights, at the offsets that `weight_layout` in `design.py` gives |
 | `rms` | the four RMS norm weights |
-| `rope_rms` | the RoPE weights (`3 * head_dim`), then the token's per-layer input, its norm weight and `model_dim + 32` values for the up projection |
+| `rope_rms` | the cos and sin of the token's position and the q and k norm weights (`3 * head_dim`), then the token's per-layer embedding, its norm weight and `model_dim + 32` values for the up projection |
 | `kv` | the K cache, then the V cache. Every layer except a skip layer writes this token's k and v at row `context_len`. |
 
 ## Reference
 
-`reference.py` computes the layer in numpy from the five buffers. It
-reproduces the kernels' bf16 rounding (toward minus infinity), their fp32
-accumulation order, their exp, GELU and reciprocal tables, the fast inverse
-square root and the BFP16 attention matmuls. It returns x and the kv cache as
-the device leaves them.
-
-FastFlowLM's engine served 20 dispatches as captures: E2B and E4B, all four
-layer types, `context_len` 36, 511 and 650. The reference matches the engine
-bit for bit on 16 of them. On the other 4, one bf16 output of an RMS norm
-differs by 1 ulp, and the MLP spreads the difference over x. The relative L2
-error of x is at most 9.8e-4 there. The new K and V rows match bit for bit on
-all 20.
+`reference.py` computes the same output in numpy from the five buffers. It
+models the kernels' rounding, accumulation order and lookup tables with
+`aie2p_math_emulation.py`. It returns x and the kv cache as the device leaves
+them.
 
 ## Tests
 
-`test_matches_reference` runs each layer type on synthetic inputs from
-`generate_inputs`, on the global layer's xclbin, at `max_l = 1024`. The context
-lengths cover a global layer near the start of its cache and deep into it, and
-a sliding-window layer before its ring is full, at the wrap and after it. E2B
-runs by default. E4B is `extensive`. A dispatch passes when:
+The tests run the layer on synthetic inputs and compare x and the kv cache
+with the reference. Uniformly random inputs lack the features of real
+inputs: a few channels with large values, and attention that puts most of
+its weight on a few keys. On uniformly random inputs, the error of a layer
+that reads the wrong cache rows stays close to the rounding error. A
+comparison cannot separate such a bug from rounding error.
 
-- the relative L2 error of x against the reference is at most 1e-2;
-- the relative L2 error of the new K and V rows is at most 2e-3;
-- the rest of x and of the kv cache equals the input bit for bit.
+`generate_inputs` therefore plants needles in the KV cache. A needle is a
+cache row whose key scores high against the query and whose value row is
+distinct. The needles sit at the oldest and the newest key, at row 0, at the
+row that the layer writes and at the first row past the keys. A layer that reads one row too many, one too
+few or a wrong row changes its attention output by a large fraction.
+A sliding-window skip layer with a full ring reads all 512 rows for any
+`context_len`. A wrong `context_len` changes only the order of the rows, and
+the test does not detect it.
 
-Synthetic x has no outlier channels. A 1-ulp flip therefore costs more there
-than on captured data. Over 80 dispatches per model (8 seeds) the worst error
-of x is 5.7e-3 (E2B) and 6.1e-3 (E4B).
-
-`generate_inputs` plants needle rows in the kv cache. A needle key scores 8
-with every query head and has its own V row; the other keys score near 0. The
-needles sit at the oldest and newest key, at row 0, at the row that the layer
-overwrites and at the first row past the keys. A layer that reads a wrong set
-of rows therefore changes its output by far more than 1e-2. These bugs, run on
-the device, fail the test:
-
-| Bug | Smallest error of x |
-|---|---|
-| `context_len - 1` or `+ 1` passed to the layer | 0.14 |
-| kv rows 0 to 15 read as zero | 0.16 |
-| token embedding read as zero | 0.12 |
-
-A non-skip layer that gets a wrong `context_len` also writes a wrong kv row.
-The bit-exact check catches that. A sliding-window skip layer with a full ring
-(512 or more tokens) reads all 512 rows for any `context_len`. A wrong
-`context_len` changes only the order of the rows. Its error stays below 1e-2,
-and the test does not catch it.
-
-`test_captured_case` runs captured dispatches when the environment variable
-`FLM_LAYER_CASES` names a directory of them. Each dispatch is a directory
-with `manifest.json` and the buffers before and after the engine ran it. The
-test also requires x and the kv cache to equal the engine's bit for bit.
+`test_captured_case` runs dispatches captured from FastFlowLM's engine when
+the environment variable `FLM_LAYER_CASES` names a directory of them. It
+also requires x and the kv cache to equal the engine's bit for bit.
