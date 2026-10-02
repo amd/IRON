@@ -77,7 +77,7 @@ The test serves a word problem and a 1259-token prompt on both engines. It
 checks that the token ids match:
 
 ```bash
-pytest -m extensive --iterations 1 iron/applications/gemma4_flm
+pytest --iterations 1 iron/applications/gemma4_flm
 ```
 
 The `Makefile` clones FastFlowLM at the commit of

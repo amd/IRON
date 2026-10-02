@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Checks that the IRON engine generates the same tokens as FastFlowLM's own engine.
 
-    FLM_MODEL_PATH=<dir> pytest -m extensive --iterations 1 iron/applications/gemma4_flm
+    FLM_MODEL_PATH=<dir> pytest --iterations 1 iron/applications/gemma4_flm
 
 The test runs `make engine` first, which builds everything.
 """
@@ -20,11 +20,14 @@ import pytest
 
 APP = Path(__file__).parent
 FLM = APP / "build" / "FastFlowLM" / "src"
-MODEL = (
-    Path(os.environ.get("FLM_MODEL_PATH", "/nonexistent"))
-    / "models"
-    / "Gemma4-E2B-IT-NPU2"
+# CI keeps the model in /srv/fastflowlm/models/Gemma4-E2B-IT-NPU2.
+FLM_MODEL_PATH = Path(
+    os.environ.get(
+        "FLM_MODEL_PATH",
+        Path(os.environ.get("IRON_EXAMPLE_WEIGHTS_DIR", "/srv")) / "fastflowlm",
+    )
 )
+MODEL = FLM_MODEL_PATH / "models" / "Gemma4-E2B-IT-NPU2"
 PORT = 18099
 URL = f"http://127.0.0.1:{PORT}"
 
@@ -52,6 +55,7 @@ def serve(engine, xclbins):
         os.environ, LD_LIBRARY_PATH=f"{engine}:{os.environ.get('LD_LIBRARY_PATH', '')}"
     )
     env["FLM_XCLBIN_PATH"] = str(xclbins)
+    env["FLM_MODEL_PATH"] = str(FLM_MODEL_PATH)
     server = subprocess.Popen(
         [
             "./build/flm",
@@ -108,13 +112,17 @@ def tokens(engine, xclbins):
         ]
 
 
-@pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.skipif(
     not MODEL.exists(), reason="needs $FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2"
 )
 def test_iron_matches_engine():
-    subprocess.run(["make", "engine"], cwd=APP, check=True)
+    subprocess.run(
+        ["make", "engine"],
+        cwd=APP,
+        env=dict(os.environ, FLM_MODEL_PATH=str(FLM_MODEL_PATH)),
+        check=True,
+    )
     stock = tokens(APP / "build" / "stock" / "engines", FLM)
     iron = tokens(APP / "build" / "engine" / "engines", APP / "build")
     assert iron == stock
