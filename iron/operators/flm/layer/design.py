@@ -47,7 +47,12 @@ from aie.iron import (
     TileDma,
     Worker,
 )
-from aie.iron.kernels import FlmGemma4DecodeGeometry, flm_gemma4
+from aie.iron.kernels import (
+    FLM_GEMMA4_E2B_DECODE,
+    FLM_GEMMA4_E4B_DECODE,
+    FlmGemma4DecodeGeometry,
+    flm_gemma4,
+)
 from aie.iron.controlflow import range_
 from aie.iron.dataflow import Flow, PacketFlow
 from aie.iron.device import Tile
@@ -62,7 +67,7 @@ LAYER_TYPES = ("global", "swa", "global_skip", "swa_skip")
 MAX_CONTEXT = 32768
 SLIDING_WINDOW = 512
 
-# The L1 address of each RTP, per model, from FastFlowLM's address book. The
+# The L1 address of each RTP, per geometry, from FastFlowLM's address book. The
 # runtime sequence writes the RTPs at these addresses.
 #
 # The allocator places four unpinned RTP buffers at other addresses. The
@@ -70,7 +75,7 @@ SLIDING_WINDOW = 512
 #
 # The design pins every RTP buffer at its address.
 RTP_ADDRESSES = {
-    "GEMMA4_E2B": {
+    FLM_GEMMA4_E2B_DECODE: {
         "l_qk": 57344,
         "l_kv": 14976,
         "swa_l_qk": 9216,
@@ -83,7 +88,7 @@ RTP_ADDRESSES = {
         "swa_rope_skip_kv": 33280,
         "glu_skip": 34816,
     },
-    "GEMMA4_E4B": {
+    FLM_GEMMA4_E4B_DECODE: {
         "l_qk": 57344,
         "l_kv": 14976,
         "swa_l_qk": 53248,
