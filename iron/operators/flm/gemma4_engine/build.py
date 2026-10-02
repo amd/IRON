@@ -18,6 +18,8 @@ import shutil
 from pathlib import Path
 
 import aie.utils as aie_utils
+import numpy as np
+from aie.helpers.taplib import PerCall
 from aie.iron.device import NPU2
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 
@@ -37,15 +39,10 @@ from iron.operators.flm.layer.design import LayerType
 
 MODEL = "Gemma4-E2B-IT-NPU2"
 
-# The longest prompt chunk, flm's --prefill-chunk-len. The engine starts a
-# chunk up to 127 tokens early and pads it to a multiple of 256 rows. Each row
-# count M needs its own GEMM instruction sequence.
-CHUNK = 512
-# M=768 occurs only for a chunk that starts at an offset that is not a multiple
-# of 128. The current flm clears the context each turn and never dispatches it.
-WIDTHS = range(256, (CHUNK + 127 + 255) // 256 * 256 + 1, 256)
-# The per-layer-input projections pad M to a multiple of 512.
-PLI_WIDTHS = sorted({(m + 511) // 512 * 512 for m in WIDTHS})
+# FastFlowLM's longest prompt chunk starts up to 127 tokens early, then
+# pads to 256 rows (512 for the per-layer-input projections).
+MAX_M = 4352
+PLI_MAX_M = 4608
 
 # (K, N, gelu) of every projection GEMM of Gemma 4 E2B. Sliding-window and global layers
 # differ in head size; some layers have an MLP twice as wide. v has k's shape.
@@ -85,9 +82,9 @@ def gemm(M, K, N, gelu):
 
     Reproduce the engine's arithmetic bit for bit. ``k_tile=256`` divides
     every K, so one configuration serves all shapes; B's k slice comes
-    from DequantBFP's.
+    from DequantBFP's. One sequence generator serves every row count up to M.
     """
-    return ProjectionGEMM(
+    op = ProjectionGEMM(
         M=M,
         K=K,
         N=N,
@@ -100,6 +97,8 @@ def gemm(M, K, N, gelu):
         precision=Precision.MEDIUM,
         bfp16_b=True,
     )
+    op.use_value("valid")
+    return op
 
 
 def write_generator(artifacts, path, namespace):
@@ -110,6 +109,56 @@ def write_generator(artifacts, path, namespace):
     includes, body = cpp[: cpp.index('extern "C"')].split("\ninline ", 1)
     path.write_text(
         f"{includes}\nnamespace iron::seq::{namespace} {{\ninline {body}}}\n"
+    )
+
+
+def write_gemm_generators(gemms, built, gen):
+    """Export each GEMM's sequence with the engine's single row-count argument."""
+    includes, entries = [], []
+    m = PerCall("m", None, np.int32).affine()
+    for op in gemms:
+        op_resolved = op.resolved()
+        gelu = op.epilogue == Epilogue.GELU
+        name = f"gemm_K{op.K}_N{op.N}" + ("_gelu" if gelu else "")
+        path = gen / f"{name}.h"
+        write_generator(built[op], path, name)
+        # The declaration supplies the row-bound words in generator order.
+        # Their Affine expressions use integer +, *, and shifts: the same
+        # spelling and arithmetic in Python and C++ for these positive rows.
+        args = ", ".join(
+            str(op_resolved.derived_at(v.name, valid=m)) if v.derive else "m"
+            for v in op_resolved.values
+        )
+        with path.open("a") as f:
+            f.write(
+                f"namespace iron::seq::{name} {{\n"
+                "inline std::optional<std::vector<uint32_t>> generate(int32_t m) {\n"
+                f"    if (m < 256 || m > {op.M} || m % 256) return std::nullopt;\n"
+                f"    return generate_txn_main_sequence({args});\n"
+                "}\n}\n"
+            )
+        includes.append(f'#include "{name}.h"')
+        entries.append(
+            f"    {{{op.K}, {op.N}, {str(gelu).lower()}, {name}::generate}},"
+        )
+    (gen / "gemm.h").write_text(
+        "\n".join(
+            [
+                "#pragma once",
+                *includes,
+                "namespace iron::seq {",
+                "struct gemm_generator {",
+                "    uint32_t k, n;",
+                "    bool gelu;",
+                "    std::optional<std::vector<uint32_t>> (*generate)(int32_t m);",
+                "};",
+                "inline const gemm_generator gemm_generators[] = {",
+                *entries,
+                "};",
+                "} // namespace iron::seq",
+                "",
+            ]
+        )
     )
 
 
@@ -163,14 +212,14 @@ def main(engine_xclbins, out):
             )
             for k, n in UPGATE
         ]
-        gemms = [gemm(m, k, n, gelu) for m in WIDTHS for k, n, gelu in GEMMS]
+        gemms = [gemm(MAX_M, k, n, gelu) for k, n, gelu in GEMMS]
         d, pli_d = config["hidden_size"], config["hidden_size_per_layer_input"]
         pli_shapes = [
             (d, pli_d * config["num_hidden_layers"], False),
             (d, pli_d, True),
             (pli_d, d, False),
         ]
-        gemms += [gemm(m, k, n, gelu) for m in PLI_WIDTHS for k, n, gelu in pli_shapes]
+        gemms += [gemm(PLI_MAX_M, k, n, gelu) for k, n, gelu in pli_shapes]
 
         groups = {
             "layer": layers,
@@ -201,11 +250,6 @@ def main(engine_xclbins, out):
         shutil.copyfile(built[lm_head].insts, iron / "lm_head.bin")
         for op in dequants:
             shutil.copyfile(built[op].insts, iron / f"dequant_K{op.K}_N{op.N}.bin")
-        for op in gemms:
-            gelu = "_gelu" if op.epilogue == Epilogue.GELU else ""
-            shutil.copyfile(
-                built[op].insts, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin"
-            )
         pli_weights.write(model_dir, config, gemms[0], iron)
 
         # Dynamic instruction sequences.
@@ -216,6 +260,7 @@ def main(engine_xclbins, out):
             write_generator(built[op], gen / f"layer_{t}.h", f"layer_{t}")
         for name, op in (("attn", attn), ("swa", swa)):
             write_generator(built[op], gen / f"{name}.h", name)
+        write_gemm_generators(gemms, built, gen)
         print(f"staged {stage}")
 
 

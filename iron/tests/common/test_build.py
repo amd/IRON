@@ -19,7 +19,6 @@ import numpy as np
 import pytest
 from aie.dialects.aie import DMAChannelDir
 from aie.helpers.taplib import PerCall, TensorAccessPattern
-from aie.helpers.util import v8bfp16ebs8
 from aie.iron import DmaEndpoint, In, ObjectFifo, Out, Worker
 from aie.iron.device import Tile, from_name
 from aie.utils import bfp
@@ -401,7 +400,7 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
     )
     assert untuned.tile_n is None
     # B's layout is the caller's, so its host shape is known before a device.
-    assert untuned.buffers[1].shape == (1024 * 1024 // bfp.BLOCK,)
+    assert untuned.buffers[1].shape == (packed_b_size(1024, 1024, True),)
     with pytest.raises(ValueError, match="pass bfp16_b=True"):
         flm_gemm.ProjectionGEMM(
             M=512, K=1024, N=1024, precision=Precision.MEDIUM
@@ -427,8 +426,8 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
     assert op.name == op.config_name + "_M512_K1024_N1024"
     a, b, c = op.buffers
     assert a.shape == (512, 1024) and c.shape == (512, 1024)
-    # B is declared in bfp16ebs8 blocks; the host holds the same bytes as uint8.
-    assert b.shape == (1024 * 1024 // 8,) and b.dtype is v8bfp16ebs8
+    # B is declared in the same bytes its host buffer holds.
+    assert b.shape == (1024 * 1024 * 9 // 8,) and b.dtype is np.uint8
     assert b.host_shape == (packed_b_size(1024, 1024, True),)
     assert b.host_dtype is np.uint8
     assert op.residents == {
