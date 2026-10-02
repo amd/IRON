@@ -20,6 +20,7 @@ from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
+from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE, FLM_GEMMA4_E4B_DECODE
 from aie.utils.npukernel import NPUKernel
 
 from iron.common.base import DispatchCallable
@@ -32,17 +33,17 @@ from iron.operators.flm.layer.design import (
     layer_kernels,
     weight_layout,
 )
-from iron.operators.flm.layer.op import GEOMETRIES, DecodeLayer
+from iron.operators.flm.layer.op import DecodeLayer
 from iron.operators.flm.layer.reference import (
     generate_inputs,
-    geometry,
+    layer_dims,
     kv_row,
     kv_rows,
     reference,
 )
 from iron.operators.flm.testing import requires_aie2p
 
-MODELS = sorted(GEOMETRIES)
+GEOMETRIES = (FLM_GEMMA4_E2B_DECODE, FLM_GEMMA4_E4B_DECODE)
 
 
 def _work_dir(op):
@@ -71,38 +72,42 @@ def _device_configuration(op):
 def _check_rtps(op):
     """Assert that aiecc placed each RTP buffer at its RTP_ADDRESSES address."""
     placed = _placed_rtps(op)
-    want = {RTP_SYMBOLS[k]: RTP_ADDRESSES[op.model][k] for k in RTP_SYMBOLS}
+    want = {RTP_SYMBOLS[k]: RTP_ADDRESSES[op.geometry][k] for k in RTP_SYMBOLS}
     got = {sym: placed.get(sym) for sym in want}
     assert got == want
 
 
 CASES = [
     pytest.param(
-        m,
+        g,
         t,
-        marks=[] if (m, t) == ("GEMMA4_E2B", "global") else [pytest.mark.extensive],
+        marks=(
+            []
+            if (g, t) == (FLM_GEMMA4_E2B_DECODE, "global")
+            else [pytest.mark.extensive]
+        ),
     )
-    for m in MODELS
+    for g in GEOMETRIES
     for t in LAYER_TYPES
 ]
 
 
 @requires_aie2p
-@pytest.mark.parametrize("model, layer_type", CASES)
-def test_builds(model, layer_type, aie_context):
-    op = DecodeLayer(model=model, layer_type=layer_type, context=aie_context)
+@pytest.mark.parametrize("geometry, layer_type", CASES, ids=str)
+def test_builds(geometry, layer_type, aie_context):
+    op = DecodeLayer(geometry=geometry, layer_type=layer_type, context=aie_context)
     op.compile()
     _check_rtps(op)
 
 
 @requires_aie2p
 @pytest.mark.extensive
-@pytest.mark.parametrize("model", MODELS)
-def test_layer_types_share_one_configuration(model, aie_context):
+@pytest.mark.parametrize("geometry", GEOMETRIES, ids=str)
+def test_layer_types_share_one_configuration(geometry, aie_context):
     """The engine loads one xclbin and runs every layer type's sequence on it."""
     configs = {}
     for layer_type in LAYER_TYPES:
-        op = DecodeLayer(model=model, layer_type=layer_type, context=aie_context)
+        op = DecodeLayer(geometry=geometry, layer_type=layer_type, context=aie_context)
         op.compile()
         configs[layer_type] = _device_configuration(op)
     first = configs[LAYER_TYPES[0]]
@@ -168,23 +173,23 @@ def _rel_l2(got, want):
     return np.linalg.norm(got - want) / max(np.linalg.norm(want), 1e-30)
 
 
-def check_outputs(model, layer_type, context_len, max_l, inputs, x_out, kv_out):
+def check_outputs(geometry, layer_type, context_len, max_l, inputs, x_out, kv_out):
     """Compare x_out and kv_out (bf16) with the reference on inputs.
 
     Returns the relative L2 errors. Asserts that they are at most RTOL_X and
     RTOL_KV, and that the rest of x and of the kv cache equals the input bit for
     bit.
     """
-    ref_x, ref_kv = reference(model, layer_type, *inputs, context_len, max_l)
-    g = geometry(model, layer_type)
-    D, dk = g["D"], g["dk"]
+    ref_x, ref_kv = reference(geometry, layer_type, *inputs, context_len, max_l)
+    g = layer_dims(geometry, layer_type)
+    D, dk = g["model_dim"], g["dk"]
     got_x = np.asarray(x_out).view(np.uint16).reshape(-1)
     got_kv = np.asarray(kv_out).view(np.uint16).reshape(-1)
     errors = {"x": _rel_l2(got_x[:D].view(bfloat16), ref_x[:D].view(bfloat16))}
     rest = np.ones(ref_kv.size, bool)
     if not g["skip"]:
-        row = kv_row(model, layer_type, context_len)
-        v_off = kv_rows(model, layer_type, max_l) * dk
+        row = kv_row(geometry, layer_type, context_len)
+        v_off = kv_rows(geometry, layer_type, max_l) * dk
         for name, start in (("k", row * dk), ("v", v_off + row * dk)):
             rows = slice(start, start + dk)
             errors[name] = _rel_l2(
@@ -200,10 +205,11 @@ def check_outputs(model, layer_type, context_len, max_l, inputs, x_out, kv_out):
     return errors
 
 
-def _ops_for(model, layer_type, aie_context):
+def _ops_for(geometry, layer_type, aie_context):
     names = {"global", layer_type}
     ops = {
-        t: DecodeLayer(model=model, layer_type=t, context=aie_context) for t in names
+        t: DecodeLayer(geometry=geometry, layer_type=t, context=aie_context)
+        for t in names
     }
     for op in ops.values():
         op.compile()
@@ -211,23 +217,25 @@ def _ops_for(model, layer_type, aie_context):
 
 
 SYNTHETIC = [
-    pytest.param(m, t, c, marks=[] if m == "GEMMA4_E2B" else [pytest.mark.extensive])
-    for m in MODELS
+    pytest.param(
+        g, t, c, marks=[] if g == FLM_GEMMA4_E2B_DECODE else [pytest.mark.extensive]
+    )
+    for g in GEOMETRIES
     for t in LAYER_TYPES
     for c in CONTEXT_LENS[t]
 ]
 
 
 @requires_aie2p
-@pytest.mark.parametrize("model, layer_type, context_len", SYNTHETIC)
-def test_matches_reference(model, layer_type, context_len, aie_context):
-    ops = _ops_for(model, layer_type, aie_context)
-    inputs = generate_inputs(model, layer_type, context_len, MAX_L, seed=context_len)
+@pytest.mark.parametrize("geometry, layer_type, context_len", SYNTHETIC, ids=str)
+def test_matches_reference(geometry, layer_type, context_len, aie_context):
+    ops = _ops_for(geometry, layer_type, aie_context)
+    inputs = generate_inputs(geometry, layer_type, context_len, MAX_L, seed=context_len)
     bufs = _tensors(ops[layer_type], inputs)
     full = [b.numpy().copy() for b in bufs]
     _dispatch(ops, layer_type, bufs, context_len, MAX_L)
     check_outputs(
-        model, layer_type, context_len, MAX_L, full, bufs[0].numpy(), bufs[4].numpy()
+        geometry, layer_type, context_len, MAX_L, full, bufs[0].numpy(), bufs[4].numpy()
     )
 
 
@@ -250,7 +258,9 @@ def test_captured_case(case, aie_context):
     """A dispatch captured from the engine by an FLM_PLUGIN that hooks
     decode.layer. The output must also equal the engine's bit for bit."""
     man = json.loads((case / "manifest.json").read_text())
-    model = "GEMMA4_" + man["model"].split("-")[1]
+    geometry = {"E2B": FLM_GEMMA4_E2B_DECODE, "E4B": FLM_GEMMA4_E4B_DECODE}[
+        man["model"].split("-")[1]
+    ]
     layer_type, ctx, max_l = man["layer_type"], man["context_len"], man["max_l"]
     names = ("x_in", "proj_weights", "rms_weights", "rope_rms_weights", "kv_cache_in")
     files = {
@@ -258,11 +268,13 @@ def test_captured_case(case, aie_context):
         for k in names + ("x_out", "kv_cache_out")
         if k in man["files"]
     }
-    ops = _ops_for(model, layer_type, aie_context)
+    ops = _ops_for(geometry, layer_type, aie_context)
     bufs = _tensors(ops[layer_type], [np.fromfile(files[k], np.uint8) for k in names])
     full = [b.numpy().copy() for b in bufs]
     _dispatch(ops, layer_type, bufs, ctx, max_l)
-    check_outputs(model, layer_type, ctx, max_l, full, bufs[0].numpy(), bufs[4].numpy())
+    check_outputs(
+        geometry, layer_type, ctx, max_l, full, bufs[0].numpy(), bufs[4].numpy()
+    )
     for buf, key in ((bufs[0], "x_out"), (bufs[4], "kv_cache_out")):
         if key in files:
             want = np.fromfile(files[key], np.uint8)
@@ -304,16 +316,16 @@ def npu2():
 
 
 @pytest.mark.parametrize("layer_type", LAYER_TYPES)
-@pytest.mark.parametrize("model", MODELS)
-def test_weight_reads_fit_proj(model, layer_type, npu2):
+@pytest.mark.parametrize("geometry", GEOMETRIES, ids=str)
+def test_weight_reads_fit_proj(geometry, layer_type, npu2):
     """Each layer type's sequence reads its whole blob and nothing past proj.
 
     The test reads the BDs out of the generated runtime sequence. The build
     needs no NPU.
     """
-    g = GEOMETRIES[model]
+    g = geometry
     module = decode_layer(
-        npu2, g, RTP_ADDRESSES[model], layer_type, kernels=layer_kernels(g)
+        npu2, g, RTP_ADDRESSES[g], layer_type, kernels=layer_kernels(g)
     )
     end = 0
     for offset, length in sorted(_proj_reads(module)):
@@ -327,8 +339,11 @@ def test_weight_reads_fit_proj(model, layer_type, npu2):
 @pytest.mark.parametrize(
     "kwargs, match",
     [
-        (dict(model="GEMMA4_E8B", layer_type="global"), "model must be one of"),
-        (dict(model="GEMMA4_E2B", layer_type="sliding"), "layer_type must be one of"),
+        (dict(geometry="GEMMA4_E8B", layer_type="global"), "geometry must be"),
+        (
+            dict(geometry=FLM_GEMMA4_E2B_DECODE, layer_type="sliding"),
+            "layer_type must be one of",
+        ),
     ],
 )
 def test_rejects_unknown_configurations(kwargs, match, aie_context):
