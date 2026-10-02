@@ -33,7 +33,6 @@ class LMHead(MLIROperator):
     vocab: int
     softcap: float
     context: object = field(default=None, repr=False)
-    _lm_head_kernel: object = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         check_shape(aie_utils.get_current_device(), self.dim, self.vocab)
@@ -52,16 +51,11 @@ class LMHead(MLIROperator):
         return packed_bytes(self.vocab * self.dim)
 
     def _kernel(self):
-        """The flm_gemma4_q4nx_lm_head kernel for dim.
-
-        The design and the kernel artifact take this one object. The MLIR
-        artifact checks that its module links the object.
-        """
-        if self._lm_head_kernel is None:
-            self._lm_head_kernel = flm_gemma4.flm_gemma4_q4nx_lm_head(
-                dim=self.dim, m_tile=M_TILE, k_tile=K_TILE, group=GROUP
-            )
-        return self._lm_head_kernel
+        """The flm_gemma4_q4nx_lm_head kernel for dim, which the design and the
+        kernel artifact both take."""
+        return flm_gemma4.flm_gemma4_q4nx_lm_head(
+            dim=self.dim, m_tile=M_TILE, k_tile=K_TILE, group=GROUP
+        )
 
     def get_mlir_artifact(self):
         return PythonGeneratedMLIRArtifact(
