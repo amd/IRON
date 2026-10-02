@@ -7,6 +7,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
+from aie.utils.benchmark import run_iters
 
 from iron.operators.flm.prefill_attn.op import (
     PrefillAttention,
@@ -24,6 +25,12 @@ SENTINEL = 7.0
 # stale token range gives a mean error of 0.03 or more.
 MAX_ERROR = 0.25
 MEAN_ERROR = 0.02
+
+METRICS = dict(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
+    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
+)
 
 # Per operator: its class, the arguments of the build under test, and token
 # ranges (L_begin, L_end, max_l).
@@ -68,15 +75,32 @@ def _inputs(op, max_l, seed):
     return q, kv
 
 
-def _check(op, run, L_begin, L_end, max_l, seed):
+def _print_metrics(op, run, bufs, L_begin, L_end):
+    """Time one more dispatch and print its latency, bandwidth and throughput.
+
+    The bytes count the query and output rows of the range and the K and V rows
+    that its queries read. The FLOPs count the scores and the weighted sum of V.
+    """
+    dh = op.head_dim
+    keys = np.arange(L_begin, L_end) + 1
+    if op.window is not None:
+        keys = np.minimum(keys, op.window)
+    rows_read = L_end if op.window is None else L_end - max(L_begin - op.window, 0)
+    total_bytes = (
+        2 * dh * (2 * (L_end - L_begin) * NUM_HEADS + 2 * rows_read * op.num_kv_heads)
+    )
+    flops = 4 * NUM_HEADS * dh * int(keys.sum())
+    latency_us = run_iters(run, *bufs, warmup=1, iters=1).npu.avg_us
+    print(f"\nLatency (us): {latency_us:.1f}")
+    print(f"Effective Bandwidth: {total_bytes / latency_us / 1e3:.6e} GB/s")
+    print(f"Throughput: {flops / latency_us / 1e3:.6e} GFLOP/s\n")
+
+
+def _check(op, run, L_begin, L_end, max_l, seed, metrics=False):
     q, kv = _inputs(op, max_l, seed)
-    tensor_class = aie_utils.DEFAULT_TENSOR_CLASS
-    q_buf = tensor_class((q.size,), dtype=bfloat16)
-    q_buf.numpy_view()[:] = q
-    kv_buf = tensor_class((kv.size,), dtype=bfloat16)
-    kv_buf.numpy_view()[:] = kv
-    o_buf = tensor_class((q.size,), dtype=bfloat16)
-    o_buf.numpy_view()[:] = bfloat16(SENTINEL)
+    o_buf = aie_utils.full((q.size,), SENTINEL, dtype=bfloat16)
+    q_buf = aie_utils.tensor(q)
+    kv_buf = aie_utils.tensor(kv)
 
     run.set_parameters(L_begin=L_begin, L_end=L_end, max_l=max_l)
     run(o_buf, q_buf, kv_buf)
@@ -93,6 +117,8 @@ def _check(op, run, L_begin, L_end, max_l, seed):
     assert error.max() <= MAX_ERROR, f"{label}: max |error| {error.max():.3f}"
     assert error.mean() <= MEAN_ERROR, f"{label}: mean |error| {error.mean():.4f}"
     assert np.all(o[n:] == SENTINEL), f"{label}: wrote past its rows"
+    if metrics:
+        _print_metrics(op, run, (o_buf, q_buf, kv_buf), L_begin, L_end)
 
 
 def _build(kind, aie_context, **overrides):
@@ -102,15 +128,30 @@ def _build(kind, aie_context, **overrides):
     return op
 
 
+# One 512-token prompt chunk per operator, the chunk length of Gemma 4's engine.
+# The sliding-window chunk starts past the window, so the window cuts its keys.
+BENCH = {("attn", 0, 512, 1024, 1), ("swa", 512, 1024, 2048, 1)}
+
+
 @requires_aie2p
-@pytest.mark.parametrize("num_kv_heads", [1, 2])
+@pytest.mark.metrics(**METRICS)
 @pytest.mark.parametrize(
-    "kind, L_begin, L_end, max_l",
-    [(kind, *r) for kind, (_, _, ranges) in OPERATORS.items() for r in ranges],
+    "kind, L_begin, L_end, max_l, num_kv_heads",
+    [
+        pytest.param(
+            kind,
+            *r,
+            kv,
+            marks=[pytest.mark.bench] if (kind, *r, kv) in BENCH else [],
+        )
+        for kv in (1, 2)
+        for kind, (_, _, ranges) in OPERATORS.items()
+        for r in ranges
+    ],
 )
 def test_matches_reference(kind, L_begin, L_end, max_l, num_kv_heads, aie_context):
     op = _build(kind, aie_context, num_kv_heads=num_kv_heads)
-    _check(op, op.get_callable(), L_begin, L_end, max_l, seed=L_end)
+    _check(op, op.get_callable(), L_begin, L_end, max_l, seed=L_end, metrics=True)
 
 
 @requires_aie2p
@@ -146,6 +187,7 @@ def test_gemma4_cache_bound(kind, num_kv_heads, aie_context):
     "cls, kwargs, match",
     [
         (PrefillAttention, dict(num_kv_heads=3), "multiple of"),
+        (PrefillAttention, dict(num_kv_heads=0), "must be positive"),
         (PrefillAttention, dict(num_kv_heads=8), "query heads"),
         (PrefillSlidingAttention, dict(num_kv_heads=3), "multiple of"),
         (PrefillSlidingAttention, dict(num_kv_heads=4), "query heads"),
