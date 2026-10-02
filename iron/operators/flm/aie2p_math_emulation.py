@@ -10,13 +10,18 @@ The functions take and return float arrays unless they say otherwise. A
   minus infinity unless a kernel sets the rounding mode register. Host-side
   constants round to nearest even.
 - AIE2P has no fp32 multiplier. fmul emulates its bf16-limb product.
-- exp_kernel and inv_kernel are aie_runtime_lib's table lookups for AIE2P.
+- exp_kernel, inv_kernel and gelu_kernel are aie_runtime_lib's table lookups
+  for AIE2P.
 """
+
+import re
+from functools import cache
+from pathlib import Path
 
 import numpy as np
 from ml_dtypes import bfloat16
 
-from aie.utils import bfp
+from aie.utils import bfp, config
 
 from iron.operators.flm.q4nx import bf16_to_f32
 
@@ -150,3 +155,27 @@ def inv_kernel(l):
     return bf16_to_f32(
         (((inv_exp << 7) + INV_MANTISSA[mantissa]) & 0xFFFF).astype(np.uint16)
     )
+
+
+@cache
+def gelu_segments():
+    """getGeluBf16's table: 64 (slope, offset) segments of width 1/8 on [-4, 4).
+
+    The function reads gelu_lut_ab from the aie_runtime_lib sources that the
+    kernels compile against. No simple fit of GELU reproduces the table. The
+    source holds each run of four segments twice, for the gather read.
+    """
+    path = Path(config.aie_runtime_lib_dir()) / "AIE2P" / "lut_based_ops.cpp"
+    body = re.search(r"gelu_lut_ab\[\d+\]\s*=\s*\{([^}]*)\}", path.read_text())[1]
+    values = [float(v.strip().rstrip("f")) for v in body.split(",") if v.strip()]
+    return np.array(values, np.float32).reshape(-1, 2, 8)[:, 0].reshape(-1, 2)
+
+
+def gelu_kernel(x):
+    """getGeluBf16: GELU from gelu_segments. The device reads the slope as bf16
+    and the offset as fp32. Inputs outside [-4, 4) take the end segments."""
+    x = np.asarray(x, np.float64)
+    k = np.clip(np.floor(x * 128).astype(np.int64), -512, 511) >> 4
+    pair = gelu_segments()[k + 32]
+    slope = (pair[..., 0].view(np.uint32) & 0xFFFF0000).view(np.float32)
+    return rb(f32(slope.astype(np.float64) * x + pair[..., 1]))
