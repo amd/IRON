@@ -16,7 +16,6 @@ from iron.common import (
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
-from aie.dialects.aie import get_target_model
 from aie.dialects._aie_enum_gen import AIEArch
 from iron.common.device_utils import get_kernel_dir
 from iron.common.compilation import InstsBinArtifact, XclbinArtifact

@@ -18,9 +18,8 @@ the kernels as -D flags, so the C++ and the dataflow cannot drift apart.
 """
 
 import argparse
+from dataclasses import dataclass
 from enum import StrEnum
-from functools import partial
-from typing import NamedTuple
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -45,8 +44,8 @@ from aie.iron import (
     WorkerRuntimeBarrier,
 )
 from aie.iron.controlflow import range_
-from aie.dialects.aie import get_target_model
-from aie.dialects._aie_enum_gen import AIEArch, AIETileType, DMAChannelDir
+from aie.dialects.aie import AIETileType, DMAChannelDir, get_target_model
+from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron.device import NPU1, NPU2, Tile
 from iron.common.device_utils import get_kernel_dir
 from iron.common.utils import split_run
@@ -105,10 +104,10 @@ def l1_budget(dev):
 
 
 # Row-blocks a core folds into one B fetch, cutting B's DDR reads by M_CHUNK
-# at the cost of that many L1 accumulators. Off everywhere
-# for a contractual reason: it must divide m_row_blocks (M % 512 == 0) while
-# the overlay this replaces takes any multiple of 256, so a shape that cannot
-# use it forks config_name. See README.md.
+# at the cost of that many L1 accumulators. Off everywhere for a contractual
+# reason: it must divide m_row_blocks (M % 512 == 0) while the overlay this
+# replaces takes any multiple of 256, so a shape that cannot use it forks
+# config_name. See README.md.
 M_CHUNK_FOR_N = {16: 1, 32: 1, 64: 1, 128: 1}
 
 # --- B's explicit memtile path ---------------------------------------------
@@ -121,11 +120,13 @@ M_CHUNK_FOR_N = {16: 1, 32: 1, 64: 1, 128: 1}
 #
 # Slots in the pool, each one k-block. Bounded by the BDs a memtile channel's
 # parity half has left after the static objectfifo BDs, and, below that, by
-# what the memtile has left after A and C; see gemm().
+# what the memtile has left after A and C; see gemm(). The one limit not taken
+# from the target model, since which BDs are static is the compiler's choice.
 B_MAX_SLOTS = 8
 
 
-class _Slab(NamedTuple):
+@dataclass(frozen=True)
+class _Slab:
     """A run of row-block units the sequence arms B for at once; see gemm()."""
 
     first: int  # the first unit
@@ -796,8 +797,8 @@ def gemm(
             resident, b_uses = False, 1
         return _Slab(first, units, resident, b_slots, b_uses)
 
-    def n_work(c):
-        """Column ``c`` has work in the first n_work(c) column-blocks."""
+    def work_blocks(c):
+        """Column ``c`` has work in the first work_blocks(c) column-blocks."""
         return n_full + (1 if c < rem_blocks else 0)
 
     def b_mt_block_passes(slab):
@@ -815,12 +816,14 @@ def gemm(
     # where it keeps B resident past LOCK_MAX units: B is then read once per
     # slab instead of once per unit.
     def slab_fits(slab):
+        """Whether each memtile channel's passes per block fit one queue."""
         return all(
             passes <= DMA_TASK_QUEUE * MT_TASK_PASSES
             for passes in b_mt_block_passes(slab)
         )
 
     def cut(n_slabs):
+        """M's units split into ``n_slabs`` slabs as even as they go."""
         size, extra = divmod(n_units, n_slabs)
         slabs, first = [], 0
         for i in range(n_slabs):
@@ -921,20 +924,23 @@ def gemm(
             not issued yet.
             """
             for c in range(n_active_cols):
-                if bi >= n_work(c):
+                if bi >= work_blocks(c):
                     continue
                 for direction, passes in zip(
                     (DMAChannelDir.S2MM, DMAChannelDir.MM2S),
                     b_mt_block_passes(slab),
+                    strict=True,
                 ):
                     per_push = max(1, MT_TASK_PASSES // passes)
                     if bi % per_push:
                         continue
-                    count = min(per_push, n_work(c) - bi) * passes
+                    count = min(per_push, work_blocks(c) - bi) * passes
                     task = b_mt_tasks.get((c, direction))
                     if task is None:
                         b_mt_tasks[c, direction] = start_b_mt(c, direction, count, slab)
                     else:
+                        # runs= counts every pass, repeat_count= only the
+                        # passes after the first.
                         task.start(repeat_count=count - 1)
 
         def set_up():
@@ -942,7 +948,7 @@ def gemm(
             # always back at 0 by the end of a slab, so only the producer side
             # needs setting, and before its channel starts.
             for c in range(n_active_cols):
-                if n_work(c):
+                if work_blocks(c):
                     for i in range(slab.b_slots):
                         b_mt_prod[c][i].set(slab.b_uses)
             push_b_mt(0)
@@ -989,9 +995,12 @@ def gemm(
                 a_prods[r].fill(A, a_tap(r, slab), managed=False)
             for c in range(active_cols):
                 b_shim_flows[c].fill(B, tap=b_tap(mega_col, c, slab), managed=False)
-            set_up() if bi == 0 else push_b_mt(bi)
+            if bi == 0:
+                set_up()
+            else:
+                push_b_mt(bi)
             for c in range(active_cols):
-                last = bi == n_work(c) - 1
+                last = bi == work_blocks(c) - 1
                 task = c_conses[c].drain(
                     C, c_tap(mega_col, c, slab), wait=last, managed=False
                 )
@@ -1022,7 +1031,7 @@ def gemm(
     for c in range(n_active_cols):
         for lock in b_mt_prod[c] + b_mt_cons[c]:
             rt.add_lock(lock)
-    for (r, c), (_, prod, cons) in b_l1.items():
+    for _, prod, cons in b_l1.values():
         rt.add_lock(prod)
         rt.add_lock(cons)
     for td in b_l1_dmas:
@@ -1039,7 +1048,9 @@ def main():
         description="Emits MLIR code for a row-broadcast bf16 GEMM of the given input size",
     )
     argparser.add_argument("--dev", type=str, choices=["npu1", "npu2"], default="npu2")
-    argparser.add_argument("-M", type=int, default=MIN_M)
+    argparser.add_argument(
+        "-M", type=int, default=None, help="Defaults to one row-block per row"
+    )
     argparser.add_argument("-K", type=int, default=K_TILE)
     argparser.add_argument("-N", type=int, default=1024)
     argparser.add_argument(
@@ -1060,10 +1071,11 @@ def main():
     argparser.add_argument("--trace_size", type=int, default=0)
 
     args = argparser.parse_args()
+    dev = NPU1() if args.dev == "npu1" else NPU2()
     print(
         gemm(
-            NPU1() if args.dev == "npu1" else NPU2(),
-            args.M,
+            dev,
+            args.M if args.M is not None else M_TILE * compute_rows(dev),
             args.K,
             args.N,
             epilogue=args.epilogue,

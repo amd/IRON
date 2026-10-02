@@ -7,7 +7,6 @@ import os
 import pytest
 import aie.utils as aie_utils
 
-from aie.dialects.aie import get_target_model
 from aie.dialects._aie_enum_gen import AIEArch
 
 from iron.operators import GEMM as GenericGEMM
@@ -78,14 +77,16 @@ def get_params():
             (  512, 1024,  2048, SILU, (-4.0, 4.0),    CONV_EVEN),
             (  256,  512,  1024, SILU,     None,       FLOOR),
             # K or N = 10240 at M > 256 overflows the shim BD's 20-bit
-            # mega_row iteration step, so that leg goes out as one transfer
-            # per mega_row against a bounded outstanding count. These are the
-            # real E4B FFN projections, unsupported until that landed, and
-            # M=2048 is what pushes past the bound.
+            # mega_row iteration step, so the compiler cuts that leg into
+            # pieces, bounded by its queue polls and BD reclaim. These are the
+            # real E4B FFN projections, and M=2048 doubles the pieces.
             ( 1024, 10240,  2560, NONE,     None,       CONV_EVEN),  # E4B down
             ( 1024,  2560, 10240, NONE,     None,       CONV_EVEN),  # E4B gateup
             ( 2048, 10240,  2560, NONE,     None,       CONV_EVEN),  # E4B down, 2x
             ( 2048,  2560, 10240, NONE,     None,       CONV_EVEN),  # E4B gateup, 2x
+            # 64 row-block units, past the 63 a lock can count, so B is armed
+            # twice: two slabs, each resident.
+            (16384,  512,  1024, NONE,     None,       CONV_EVEN),
         ]
     else:  # npu1: _default_tile_n always returns 64 here, so with 4 columns
         # every sweep is N_TILE*COLS = 256 wide, not the 128*4=512 an
@@ -110,6 +111,8 @@ def get_params():
             (  256,  512,   512, SIGMOID,  None,       CONV_EVEN),
             (  512, 1024,  1024, SILU, (-4.0, 4.0),    CONV_EVEN),
             (  256,  512,   512, SILU,     None,       FLOOR),
+            # Two slabs, as on NPU2.
+            (16384,  512,   256, NONE,     None,       CONV_EVEN),
         ]
     # fmt: on
 

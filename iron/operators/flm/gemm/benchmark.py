@@ -102,7 +102,7 @@ def get_params():
     # No shape is skipped. The four E4B projections with a 10240-wide dimension
     # at M > 256 once overflowed the shim BD's 20-bit mega_row iteration step,
     # but IRON's GEMM splits that leg into per-mega_row transfers now, and for
-    # flm.GEMM the compiler does (test_gemm_split_leg_bounds).
+    # flm.GEMM the compiler does (test_gemm_split_leg_bounds_runs).
     params = []
     for model, projections in (("E2B", E2B_PROJ), ("E4B", E4B_PROJ)):
         for M in PREFILL_LENGTHS:

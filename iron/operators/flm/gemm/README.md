@@ -55,7 +55,7 @@ two lowering details differ.
 | | NPU2 | NPU1 |
 |---|---|---|
 | grid | 4 x 8 | 4 x 4 |
-| A broadcast sources | shim columns 0/2/4/6 | shim columns 0/1/2/3 |
+| A forwarded through | every other memtile | every memtile |
 | 8x8x8 mmul lowers to | 2 bfp16-emulated macs | 4 native 4x8x4 bf16 macs |
 | `tile_n` default | 128 at K=512, else 64 | always 64 |
 | epilogue `tanh` | native `aie::tanh` | `getTanhBf16` LUT |
@@ -436,23 +436,25 @@ Constraints, all enforced in design.py:
   C, the setup hides under the fill latency. That reordering is independent of
   residency and is part of the M=256 gain below.
 * **NPU1 fits exactly**: bf16 B at `tile_n=64` leaves room for 5 slots, which
-  fill the memtile to the byte. Lowered and placed, but not run on hardware.
+  fill the memtile to the byte. It builds and places, but every shape
+  currently times out on NPU1 hardware.
 
-This needs mlir-aie #3791 (in the 1.4.4.dev69 wheel): runtime tasks on a
+This needs mlir-aie #3791 (first in the 1.4.4.dev69 wheel): runtime tasks on a
 memtile's channels, `Task.start(repeat_count=...)`, `Lock.set`, and repeat
 counts past one push. The instruction stream is built with
 `aiecc --reclaim-runtime-bds`, since a split leg's pieces outnumber the shim's
-BD ids. Every hardware limit the design uses comes from the target model.
+BD ids. Every hardware limit the design uses but `B_MAX_SLOTS` comes from the
+target model.
 
 Measured on NPU2 (Strix, power mode `default`) against the fifo version over
-the 30 benchmark shapes, 8 interleaved rounds, errors bit-identical on all:
-median **-17.4%**, best -32.0% (E4B gateup M2048).
+the 30 benchmark shapes, 4 interleaved rounds on mlir_aie 1.4.4.dev73, errors
+bit-identical on all: median **-23.9%**, best -37.7% (E4B gateup M2048).
 
 | shapes | change |
 |---|---|
-| resident, M ≥ 1024 | -15% to -32% |
-| M = 256 (one row-block, nothing to replay) | -0.7% to -7.1%, from the setup ordering |
-| down projections (streamed), M ≥ 1024 | -1.4% to +0.3%, i.e. noise |
+| resident, M ≥ 1024 | -20.9% to -37.7% |
+| M = 256 (one row-block, nothing to replay) | +0.9% to -13.5%, from the setup ordering and queue depth |
+| down projections (streamed), M ≥ 1024 | -2.0% to +1.8%, i.e. noise |
 
 ### The compiler bounds what is outstanding
 
