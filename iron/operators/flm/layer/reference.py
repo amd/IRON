@@ -22,10 +22,10 @@ generate_inputs() draws synthetic buffers with a fixed seed.
 import dataclasses
 
 import numpy as np
+from aie.iron.kernels import bf16_exp_lut_ref
 
 from iron.operators.flm.aie2p_math_emulation import (
     bfp16,
-    exp_kernel,
     f32,
     fast_rsqrt,
     fmul,
@@ -298,9 +298,11 @@ def attention(q, K, V, valid, n_kv):
         sr = s_all[:, r0 : r0 + LK]
         mask = (np.arange(r0, r0 + LK) < valid)[None, :]
         vmax = np.maximum(np.max(np.where(mask, sr, neg_max), 1), m)
+        # The kernel clamps the exponent to [-87, 88]. bf16_exp_lut_ref
+        # equals FastFlowLM's table on that range.
         d = np.clip(rb(f32(sr - vmax[:, None])), -87.0, 88.0)
-        p = np.where(mask, rb(exp_kernel(d)), 0.0)
-        c = exp_kernel(np.clip(rb(f32(m - vmax)), -87.0, 88.0))
+        p = np.where(mask, rb(bf16_exp_lut_ref(d)), 0.0)
+        c = bf16_exp_lut_ref(np.clip(rb(f32(m - vmax)), -87.0, 88.0))
         m = vmax
         l = f32(fmul(l, c) + rb(tree_sum(p, 16)))
         y = fmul(y, c[:, None])
