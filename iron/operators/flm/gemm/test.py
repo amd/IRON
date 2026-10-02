@@ -454,3 +454,53 @@ def test_gemm_gelu_bf16_steps_matches_overlay(M, K, N, aie_context):
     assert float(shipped.float().min()) > -0.5, "the overlay applied no gelu"
     same = int((shipped.view(torch.int16) == ported.view(torch.int16)).sum())
     assert same == M * N, f"{M * N - same} of {M * N} elements differ"
+
+
+@pytest.mark.parametrize(
+    "K,N,epilogue",
+    [
+        (1536, 2048, NONE),
+        (1536, 6144, GELU),
+        # The split legs: K * 256 and N * 256 exceed a shim BD's stride.
+        pytest.param(12288, 1536, NONE, marks=pytest.mark.extensive),
+        pytest.param(1536, 12288, GELU, marks=pytest.mark.extensive),
+    ],
+)
+def test_dynamic_m_matches_static(K, N, epilogue, aie_context):
+    """One ``dynamic_m`` build gives each row count the static build's bits,
+    and leaves the rows past M untouched."""
+    max_m, sentinel = 1024, 7.0
+    kwargs = dict(
+        K=K,
+        N=N,
+        epilogue=epilogue,
+        tile_n=64,
+        k_tile=256,
+        rounding=FLOOR,
+        gelu=Gelu.BF16_STEPS,
+        context=aie_context,
+    )
+    dynamic = GEMM(M=max_m, dynamic_m=True, **kwargs)
+    dynamic.compile()
+    run = dynamic.get_callable()
+    golden_ref = generate_golden_reference(
+        M=max_m, K=K, N=N, epilogue=epilogue, scale=ACTIVATION_INPUT_SCALE
+    )
+    a = golden_ref["input"].view(torch.int16).numpy().view(np.dtype("bfloat16"))
+    b = dynamic.pack_B(golden_ref["input_b"]).numpy()
+
+    def output(fn, rows, m):
+        c = aie_utils.full((rows * N,), sentinel, dtype=np.dtype("bfloat16"))
+        fn(aie_utils.tensor(a[:rows].reshape(-1)), aie_utils.tensor(b), c)
+        return np.array(c.numpy(), copy=True)
+
+    for m in (256, 512, 1024):
+        static = GEMM(M=m, **kwargs)
+        static.compile()
+        expected = output(static.get_callable(), m, m)
+        run.set_parameters(M=m)
+        got = output(run, max_m, m)
+        assert np.array_equal(
+            got[: m * N].view(np.uint16), expected.view(np.uint16)
+        ), f"M={m}: the dynamic sequence differs from the static one"
+        assert np.all(got[m * N :] == sentinel), f"M={m}: wrote past row M"

@@ -161,6 +161,27 @@ regression test -- without the release it hangs the device on the second
 shape, and the parametrised tests cannot catch it, because the `aie_context`
 fixture reconfigures the array between cases.
 
+## Dynamic row count
+
+With `dynamic_m=True` the runtime sequence takes the row count as a dispatch
+parameter, and the field `M` bounds it. The operator then builds a library that
+generates the instruction sequence, in place of a `.bin`. One build serves
+every row count:
+
+```python
+op = GEMM(M=4096, K=1536, N=2048, dynamic_m=True, context=ctx)
+op.compile()
+run = op.get_callable()
+run.set_parameters(M=512)
+run(A, op.pack_B(B), C)
+```
+
+The output is bit-identical to the static build's for each M.
+`dynamic_m` needs `m_chunk` 1. A shape whose A or C stride exceeds a shim
+buffer descriptor (K or N times 256 rows above 2^20) moves those rows one row
+block at a time. The static build overlaps these row blocks; the dynamic build
+finishes each one before it starts the next.
+
 ## Shape constraints
 
 `M % 256 == 0`, `K % 512 == 0`, `N % tile_n == 0` (so 64 by default).

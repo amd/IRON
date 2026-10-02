@@ -15,7 +15,12 @@ from iron.common import (
 )
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron.kernels import fused_mm
-from iron.common.compilation import InstsBinArtifact, XclbinArtifact
+from aie.utils.compile.utils import SHARED_LIB_SUFFIX
+from iron.common.compilation import (
+    DispatchLibArtifact,
+    InstsBinArtifact,
+    XclbinArtifact,
+)
 import aie.utils as aie_utils
 
 from iron.operators.flm.packing import pack_b, packed_b_size
@@ -86,6 +91,10 @@ class GEMM(MLIROperator):
     # Arithmetic of the gelu epilogue; see Gelu in design.py. Only the gelu
     # mode reads it.
     gelu: Gelu = Gelu.FP32
+    # The row count is a dispatch parameter: set_parameters(M=...) selects it
+    # per call, up to the field M. One generated sequence then serves every
+    # row count.
+    dynamic_m: bool = False
     context: object = field(default=None, repr=False)
 
     _name_aliases: ClassVar[Dict[str, str]] = {
@@ -121,6 +130,9 @@ class GEMM(MLIROperator):
         # row-blocks sit ROWS*M_TILE*K apart inside the A descriptor, a stride
         # that must fit the shim BD's 20-bit step. K=10240 overflows it where
         # m_chunk=1 would not.
+        if self.m_chunk is None and self.dynamic_m:
+            # A group of row-blocks needs the row count at build time.
+            self.m_chunk = 1
         if self.m_chunk is None:
             want = M_CHUNK_FOR_N[self.tile_n]
             rows = M_TILE * compute_rows(dev)
@@ -235,7 +247,8 @@ class GEMM(MLIROperator):
         go in as raw bit patterns, so bounds that differ only below the printed
         precision still get their own stem.
         """
-        base = f"{self.config_name}_M{self.M}_K{self.K}_N{self.N}"
+        m = f"Mmax{self.M}" if self.dynamic_m else f"M{self.M}"
+        base = f"{self.config_name}_{m}_K{self.K}_N{self.N}"
         if self.epilogue != Epilogue.NONE:
             base = f"{base}_epi{self.epilogue}"
         if self.clamp is not None:
@@ -283,7 +296,10 @@ class GEMM(MLIROperator):
             self.tile_n * dev.cols,
         )
 
-    def _mlir_artifact(self, filename, M, K, N, epilogue, clamp):
+    def get_dispatch_params(self):
+        return {"M": np.int32} if self.dynamic_m else {}
+
+    def _mlir_artifact(self, filename, M, K, N, epilogue, clamp, dynamic_m=False):
         return PythonGeneratedMLIRArtifact(
             filename,
             DesignGenerator(
@@ -303,13 +319,20 @@ class GEMM(MLIROperator):
                     "clamp": clamp,
                     "kernel": self._kernel(),
                     "trace_size": 0,
+                    "dynamic_m": dynamic_m,
                 },
             ),
         )
 
     def get_mlir_artifact(self):
         return self._mlir_artifact(
-            f"{self.name}.mlir", self.M, self.K, self.N, self.epilogue, self.clamp
+            f"{self.name}.mlir",
+            self.M,
+            self.K,
+            self.N,
+            self.epilogue,
+            self.clamp,
+            self.dynamic_m,
         )
 
     def set_up_artifacts(self) -> None:
@@ -330,14 +353,22 @@ class GEMM(MLIROperator):
             dependencies=[config_mlir] + kernels,
         )
         shape_mlir = self.get_mlir_artifact()
-        self.insts_artifact = InstsBinArtifact(
-            f"{self.name}.bin",
-            mlir_input=shape_mlir,
-            # aiecc compiles the cores on the way to an instruction stream, so
-            # this needs the kernel objects too.
-            dependencies=[shape_mlir] + kernels,
-        )
-        self.add_artifacts([self.xclbin_artifact, self.insts_artifact])
+        # aiecc compiles the cores on the way to an instruction stream, so
+        # this needs the kernel objects too.
+        if self.dynamic_m:
+            stream = self.dispatch_artifact = DispatchLibArtifact(
+                f"{self.name}{SHARED_LIB_SUFFIX}",
+                mlir_input=shape_mlir,
+                dependencies=[shape_mlir] + kernels,
+                dispatch_params=self.get_dispatch_params(),
+            )
+        else:
+            stream = self.insts_artifact = InstsBinArtifact(
+                f"{self.name}.bin",
+                mlir_input=shape_mlir,
+                dependencies=[shape_mlir] + kernels,
+            )
+        self.add_artifacts([self.xclbin_artifact, stream])
 
     def _kernel(self):
         """The fused_mm kernel, whose entry points the design's cores call.

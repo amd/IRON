@@ -37,6 +37,9 @@ from aie.iron import (
     WorkerRuntimeBarrier,
 )
 from aie.iron.controlflow import range_
+from aie.dialects import arith
+from aie.dialects.aiex import _as_i32
+from aie.extras import types as mlir_types
 from aie.dialects.aie import get_target_model
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron.device import NPU1, NPU2, Tile
@@ -280,11 +283,15 @@ def gemm(
     tile_ma=None,
     kernel=None,
     trace_size=0,
+    dynamic_m=False,
 ):
     """Emit the MLIR module for an M x K @ K x N bf16 GEMM.
 
     A, B and C are row-major bf16 dense tensors, except that B must arrive
     pre-packed by ``GEMM.pack_B`` in the order the cores consume it.
+
+    With ``dynamic_m``, the runtime sequence takes the row count as a scalar
+    argument, and M bounds it.
 
     ``kernel`` is the ``aie.iron.kernels.fused_mm`` build the cores call, at
     this design's tile geometry; ``GEMM._kernel`` builds it.
@@ -395,6 +402,14 @@ def gemm(
     # descriptor and corrupt silently.
     a_split = n_units > 1 and (M_CHUNK > 1 or not _hw_stride_ok(ROWS * M_TILE * K))
     c_split = m_row_blocks > 1 and not _hw_stride_ok(ROWS * M_TILE * N)
+    if dynamic_m:
+        # The row count is known only at dispatch, so the split depends only
+        # on the strides. A split leg with one unit moves the same data as an
+        # unsplit one.
+        if M_CHUNK != 1:
+            raise ValueError(f"dynamic_m needs m_chunk 1, not {M_CHUNK}")
+        a_split = not _hw_stride_ok(ROWS * M_TILE * K)
+        c_split = not _hw_stride_ok(ROWS * M_TILE * N)
     # Split legs share one channel, whose task queue is 4 deep and modelled
     # nowhere; overrunning it hangs (4 outstanding run, 8 hang). emit_split()
     # bounds it by retiring the oldest as it issues the next, which also keeps
@@ -684,28 +699,52 @@ def gemm(
     # One transfer per (column-block, leg), not one per object: a descriptor
     # walks many fifo objects in consume order, and per-object issue meant a
     # host await per sweep. Dimension order must match the core's nest.
+    def _xfer(tensor_dims, offset, sizes, strides):
+        """The access pattern as fill/drain keyword arguments.
+
+        A static pattern is a TensorAccessPattern. A pattern with a runtime
+        size or offset goes as explicit sizes, strides, offset and transfer
+        length. The transfer length is computed here: the BD's length operand
+        is an i32 and lowers only constants.
+        """
+        if all(isinstance(v, int) for v in [offset, *sizes]):
+            return dict(
+                tap=TensorAccessPattern(
+                    tensor_dims=tensor_dims,
+                    offset=offset,
+                    sizes=sizes,
+                    strides=strides,
+                )
+            )
+        static = [v for v in sizes[-3:] if isinstance(v, int)]
+        dynamic = [v for v in sizes[-3:] if not isinstance(v, int)]
+        length = int(np.prod(static))
+        for v in dynamic:
+            length = v * length
+        return dict(sizes=sizes, strides=strides, offset=offset, transfer_len=length)
+
     def a_taps(mega_col, r, units):
         # Every (row-block, k) block this row consumes for one column-block,
         # k outermost. A does not depend on mega_col; it is re-fetched because
         # the cores re-consume it.
         if M_CHUNK == 1 and not a_split:
             return [
-                TensorAccessPattern(
-                    tensor_dims=(M * K,),
-                    offset=r * M_TILE * K,
-                    sizes=[m_row_blocks, k_iters, M_TILE, k_tile],
-                    strides=[ROWS * M_TILE * K, k_tile, K, 1],
+                _xfer(
+                    (M * K,),
+                    r * M_TILE * K,
+                    [m_row_blocks, k_iters, M_TILE, k_tile],
+                    [ROWS * M_TILE * K, k_tile, K, 1],
                 )
             ]
         taps = []
         for u in units:
             first, count = unit_rows(u)
             taps.append(
-                TensorAccessPattern(
-                    tensor_dims=(M * K,),
-                    offset=first * ROWS * M_TILE * K + r * M_TILE * K,
-                    sizes=[k_iters, M_CHUNK, M_TILE, k_tile],
-                    strides=[k_tile, ROWS * M_TILE * K, K, 1],
+                _xfer(
+                    (M * K,),
+                    first * (ROWS * M_TILE * K) + r * M_TILE * K,
+                    [k_iters, M_CHUNK, M_TILE, k_tile],
+                    [k_tile, ROWS * M_TILE * K, K, 1],
                 )
             )
         return taps
@@ -715,13 +754,13 @@ def gemm(
         # mega_row, hence the 0 stride. It must arrive pre-packed so each
         # k-block is one contiguous run; reordering in the descriptor instead
         # gives an innermost run of T=8 bf16 and measured 5.4x slower.
-        return TensorAccessPattern(
-            tensor_dims=(K * N // B_GROUP,),
-            offset=(mega_col * COLS + c) * N_TILE * K // B_GROUP,
-            # One k sweep per unit, not per row-block: the cores hold each B
-            # chunk across a group. The unit dimension keeps stride 0.
-            sizes=[n_units, k_iters, 1, k_tile * N_TILE // B_GROUP],
-            strides=[0, k_tile * N_TILE // B_GROUP, 0, 1],
+        # One k sweep per unit, not per row-block: the cores hold each B
+        # chunk across a group. The unit dimension keeps stride 0.
+        return _xfer(
+            (K * N // B_GROUP,),
+            (mega_col * COLS + c) * N_TILE * K // B_GROUP,
+            [n_units, k_iters, 1, k_tile * N_TILE // B_GROUP],
+            [0, k_tile * N_TILE // B_GROUP, 0, 1],
         )
 
     def c_taps(mega_col, c, units):
@@ -735,26 +774,34 @@ def gemm(
                 # ROWS*M_TILE*N stride back in, which c_split exists to avoid.
                 for i in range(count):
                     taps.append(
-                        TensorAccessPattern(
-                            tensor_dims=(M * N,),
-                            offset=(mega_col * COLS + c) * N_TILE
-                            + (first + i) * ROWS * M_TILE * N,
-                            sizes=[1, 1, ROWS * M_TILE, N_TILE],
-                            strides=[0, 0, N, 1],
+                        _xfer(
+                            (M * N,),
+                            (first + i) * (ROWS * M_TILE * N)
+                            + (mega_col * COLS + c) * N_TILE,
+                            [1, 1, ROWS * M_TILE, N_TILE],
+                            [0, 0, N, 1],
                         )
                     )
             return taps
         return [_c_tap_unsplit(mega_col, c)]
 
     def _c_tap_unsplit(mega_col, c):
-        return TensorAccessPattern(
-            tensor_dims=(M * N,),
-            offset=(mega_col * COLS + c) * N_TILE,
-            sizes=[1, m_row_blocks, ROWS * M_TILE, N_TILE],
-            strides=[0, ROWS * M_TILE * N, N, 1],
+        return _xfer(
+            (M * N,),
+            (mega_col * COLS + c) * N_TILE,
+            [1, m_row_blocks, ROWS * M_TILE, N_TILE],
+            [0, ROWS * M_TILE * N, N, 1],
         )
 
-    def sequence(A, B, C, a_prods, b_prods, c_conses):
+    def sequence(A, B, C, *args):
+        nonlocal m_row_blocks, n_chunks, n_units
+        if dynamic_m:
+            m_arg, a_prods, b_prods, c_conses = args
+            # The taps and the RTP writes below read these as runtime values.
+            m_row_blocks = arith.divsi(_as_i32(m_arg), _as_i32(MIN_M))
+            n_chunks = n_units = m_row_blocks
+        else:
+            a_prods, b_prods, c_conses = args
         # Write every core's parameters, then open every barrier. Both loops
         # run to completion before the first fill is issued, so no core can
         # read a half-written buffer.
@@ -783,7 +830,7 @@ def gemm(
         # C is issued first and retired last: keeping that S2MM outstanding
         # overlaps compute with write-back, and it must not share a group with
         # the fills it depends on. Tasks stay live until retired here.
-        all_mb = list(range(n_units))
+        all_mb = None if dynamic_m else list(range(n_units))
 
         # One emitter per leg, so the paths below differ only in how they
         # group and retire.
@@ -797,16 +844,16 @@ def gemm(
                     bounded = (
                         len(taps) > SHIM_TASK_QUEUE and (i + 1) % SHIM_TASK_QUEUE == 0
                     )
-                    a_prods[r].fill(A, tap, group=group, wait=wait or bounded)
+                    a_prods[r].fill(A, **tap, group=group, wait=wait or bounded)
 
         def issue_b(mega_col, active_cols, group):
             for c in range(active_cols):
-                b_prods[c].fill(B, b_tap(mega_col, c), group=group)
+                b_prods[c].fill(B, **b_tap(mega_col, c), group=group)
 
         def issue_c(mega_col, active_cols, mbs, group):
             for c in range(active_cols):
                 for tap in c_taps(mega_col, c, mbs):
-                    c_conses[c].drain(C, tap, group=group, wait=True)
+                    c_conses[c].drain(C, **tap, group=group, wait=True)
 
         def emit_unsplit():
             pending = []
@@ -880,7 +927,37 @@ def gemm(
             for tg, _ in pending:
                 tg.finish()
 
-        emit_split() if (a_split or c_split) else emit_unsplit()
+        def emit_split_dynamic():
+            """Issue split legs one unit at a time, in a loop over the units.
+
+            A task must retire in the loop iteration that issues it, so each
+            unit's transfers finish before the next unit's start.
+            """
+            for mega_col, active_cols in blocks:
+                tg_b = TaskGroup()
+                issue_b(mega_col, active_cols, tg_b)
+                tg_whole = TaskGroup()
+                if not c_split:
+                    issue_c(mega_col, active_cols, all_mb, tg_whole)
+                if not a_split:
+                    issue_a(mega_col, all_mb, tg_whole)
+                for u in range_(n_units):
+                    unit = [arith.index_cast(mlir_types.i32(), u)]
+                    tg_u = TaskGroup()
+                    if c_split:
+                        issue_c(mega_col, active_cols, unit, tg_u)
+                    if a_split:
+                        issue_a(mega_col, unit, tg_u, wait=True)
+                    tg_u.finish()
+                tg_whole.finish()
+                tg_b.finish()
+
+        if not (a_split or c_split):
+            emit_unsplit()
+        elif dynamic_m:
+            emit_split_dynamic()
+        else:
+            emit_split()
 
     rt = Runtime(
         sequence,
@@ -888,6 +965,7 @@ def gemm(
             a_l3_ty,
             b_l3_ty,
             c_l3_ty,
+            *([np.int32] if dynamic_m else []),
             [f.prod() for f in a_l3l2_fifos],
             [f.prod() for f in b_l3l2_fifos],
             [f.cons() for f in c_l2l3_fifos],
