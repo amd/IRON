@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests of the build, the RTP placement, the weight reads and the outputs.
+"""Tests of the outputs, the RTP placement and the weight reads.
 
 test_matches_reference runs every layer type on synthetic inputs and compares
 x and the kv cache with reference.py. test_captured_case does the same on
 dispatches captured from FastFlowLM's engine, when FLM_LAYER_CASES names them.
+Both check the RTP placement of every build they dispatch.
 """
 
 import json
@@ -21,6 +22,7 @@ from ml_dtypes import bfloat16
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE, FLM_GEMMA4_E4B_DECODE
+from aie.utils.benchmark import run_iters
 from aie.utils.npukernel import NPUKernel
 
 from iron.common.base import DispatchCallable
@@ -28,6 +30,7 @@ from iron.operators.flm.layer.design import (
     LAYER_TYPES,
     RTP_ADDRESSES,
     RTP_SYMBOLS,
+    SLIDING_WINDOW,
     arg_sizes,
     decode_layer,
     layer_kernels,
@@ -63,12 +66,6 @@ def _placed_rtps(op):
     }
 
 
-def _device_configuration(op):
-    """The CDO the xclbin configures the device with."""
-    cdo = _work_dir(op) / "cdo_main"
-    return {f.name: f.read_bytes() for f in sorted(cdo.glob("*.bin"))}
-
-
 def _check_rtps(op):
     """Assert that aiecc placed each RTP buffer at its RTP_ADDRESSES address."""
     placed = _placed_rtps(op)
@@ -77,52 +74,13 @@ def _check_rtps(op):
     assert got == want
 
 
-CASES = [
-    pytest.param(
-        g,
-        t,
-        marks=(
-            []
-            if (g, t) == (FLM_GEMMA4_E2B_DECODE, "global")
-            else [pytest.mark.extensive]
-        ),
-    )
-    for g in GEOMETRIES
-    for t in LAYER_TYPES
-]
-
-
-@requires_aie2p
-@pytest.mark.parametrize("geometry, layer_type", CASES, ids=str)
-def test_builds(geometry, layer_type, aie_context):
-    op = DecodeLayer(geometry=geometry, layer_type=layer_type, context=aie_context)
-    op.compile()
-    _check_rtps(op)
-
-
-@requires_aie2p
-@pytest.mark.extensive
-@pytest.mark.parametrize("geometry", GEOMETRIES, ids=str)
-def test_layer_types_share_one_configuration(geometry, aie_context):
-    """The engine loads one xclbin and runs every layer type's sequence on it."""
-    configs = {}
-    for layer_type in LAYER_TYPES:
-        op = DecodeLayer(geometry=geometry, layer_type=layer_type, context=aie_context)
-        op.compile()
-        configs[layer_type] = _device_configuration(op)
-    first = configs[LAYER_TYPES[0]]
-    assert first
-    for layer_type, config in configs.items():
-        assert config == first, f"{layer_type} configures the device differently"
-
-
 # The largest relative L2 errors of x and of the new K and V rows.
 #
 # The reference matches the device bit for bit on most dispatches. On the rest,
 # one bf16 output of an RMS norm or of the attention differs by 1 ulp, and the
 # MLP spreads the difference over x. The new K and V rows have matched bit for
-# bit on every dispatch so far. The needle rows of generate_inputs make each
-# injected bug of README.md cost x far more than RTOL_X.
+# bit. The needle rows of generate_inputs make a layer that reads a wrong set
+# of cache rows miss x by far more than RTOL_X.
 RTOL_X = 1e-2
 RTOL_KV = 2e-3
 
@@ -140,7 +98,7 @@ CONTEXT_LENS = {
 
 def _dispatch(ops, layer_type, bufs, context_len, max_l):
     """Run layer_type's sequence on the global layer's xclbin, as the engine
-    does: one xclbin serves all four layer types."""
+    does: one xclbin serves all four layer types. Returns the callable."""
     xclbin = ops["global"].xclbin_artifact
     op = ops[layer_type]
     run = DispatchCallable(
@@ -153,6 +111,32 @@ def _dispatch(ops, layer_type, bufs, context_len, max_l):
     )
     run.set_parameters(context_len=context_len, max_l=max_l)
     run(*bufs)
+    return run
+
+
+def _print_metrics(run, bufs, geometry, layer_type, context_len):
+    """Time one more dispatch and print its latency, bandwidth and throughput.
+
+    The bytes count the weights and the K and V rows that the layer reads. The
+    FLOPs count the projections and the attention.
+    """
+    g = layer_dims(geometry, layer_type)
+    blob = weight_layout(geometry, layer_type).values()
+    keys = min(context_len + 1, SLIDING_WINDOW) if g["swa"] else context_len + 1
+    total_bytes = 2 * (sum(w.size for w in blob) + 2 * keys * g["dk"])
+    flops = 2 * sum(w.dout * w.din for w in blob)
+    flops += 4 * g["num_attn_heads"] * g["dh"] * keys
+    latency_us = run_iters(run, *bufs, warmup=1, iters=1).npu.avg_us
+    print(f"\nLatency (us): {latency_us:.1f}")
+    print(f"Effective Bandwidth: {total_bytes / latency_us / 1e3:.6e} GB/s")
+    print(f"Throughput: {flops / latency_us / 1e3:.6e} GFLOP/s\n")
+
+
+METRICS = dict(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
+    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
+)
 
 
 def _tensors(op, inputs):
@@ -213,12 +197,21 @@ def _ops_for(geometry, layer_type, aie_context):
     }
     for op in ops.values():
         op.compile()
+        _check_rtps(op)
     return ops
 
 
+# The dispatches whose measurements CI tracks: deep into a global and a
+# sliding-window layer's cache.
+BENCH = {(FLM_GEMMA4_E2B_DECODE, "global", 700), (FLM_GEMMA4_E2B_DECODE, "swa", 700)}
+
 SYNTHETIC = [
     pytest.param(
-        g, t, c, marks=[] if g == FLM_GEMMA4_E2B_DECODE else [pytest.mark.extensive]
+        g,
+        t,
+        c,
+        marks=([] if g == FLM_GEMMA4_E2B_DECODE else [pytest.mark.extensive])
+        + ([pytest.mark.bench] if (g, t, c) in BENCH else []),
     )
     for g in GEOMETRIES
     for t in LAYER_TYPES
@@ -227,16 +220,18 @@ SYNTHETIC = [
 
 
 @requires_aie2p
+@pytest.mark.metrics(**METRICS)
 @pytest.mark.parametrize("geometry, layer_type, context_len", SYNTHETIC, ids=str)
 def test_matches_reference(geometry, layer_type, context_len, aie_context):
     ops = _ops_for(geometry, layer_type, aie_context)
     inputs = generate_inputs(geometry, layer_type, context_len, MAX_L, seed=context_len)
     bufs = _tensors(ops[layer_type], inputs)
     full = [b.numpy().copy() for b in bufs]
-    _dispatch(ops, layer_type, bufs, context_len, MAX_L)
+    run = _dispatch(ops, layer_type, bufs, context_len, MAX_L)
     check_outputs(
         geometry, layer_type, context_len, MAX_L, full, bufs[0].numpy(), bufs[4].numpy()
     )
+    _print_metrics(run, bufs, geometry, layer_type, context_len)
 
 
 def _captured_cases():
@@ -251,6 +246,7 @@ def _captured_cases():
 
 
 @requires_aie2p
+@pytest.mark.metrics(**METRICS)
 @pytest.mark.parametrize(
     "case", _captured_cases(), ids=lambda p: p and f"{p.parent.name}/{p.name}"
 )
@@ -271,7 +267,7 @@ def test_captured_case(case, aie_context):
     ops = _ops_for(geometry, layer_type, aie_context)
     bufs = _tensors(ops[layer_type], [np.fromfile(files[k], np.uint8) for k in names])
     full = [b.numpy().copy() for b in bufs]
-    _dispatch(ops, layer_type, bufs, ctx, max_l)
+    run = _dispatch(ops, layer_type, bufs, ctx, max_l)
     check_outputs(
         geometry, layer_type, ctx, max_l, full, bufs[0].numpy(), bufs[4].numpy()
     )
@@ -281,6 +277,7 @@ def test_captured_case(case, aie_context):
             got = buf.numpy().reshape(-1).view(np.uint8)
             n = min(want.size, got.size)
             assert np.array_equal(got[:n], want[:n]), f"{key} differs from the engine's"
+    _print_metrics(run, bufs, geometry, layer_type, ctx)
 
 
 def _ops(op):
@@ -345,6 +342,7 @@ def test_weight_reads_fit_proj(geometry, layer_type, npu2):
             "layer_type must be one of",
         ),
     ],
+    ids=["geometry", "layer_type"],
 )
 def test_rejects_unknown_configurations(kwargs, match, aie_context):
     with pytest.raises(ValueError, match=match):
