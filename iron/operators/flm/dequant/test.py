@@ -50,7 +50,8 @@ def test_output_feeds_gemm_unchanged(aie_context):
     that makes it a drop-in. Comparing against pack_B catches a drift in either
     operator's tiling that a self-consistent reference would not."""
     from iron.operators.flm.gemm.op import GEMM
-    from iron.operators.flm.dequant.reference import dequantize, f32_to_bf16_floor
+    from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor
+    from iron.operators.flm.dequant.reference import dequantize
 
     K, N = 1024, 128
     qw = random_q4nx(K, N, seed=3)
