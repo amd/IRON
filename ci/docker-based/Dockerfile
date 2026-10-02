@@ -22,9 +22,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # (via pydot) to render its workload graph; without it the stream-backed
     # operators fail at MLIR-generation time with: "dot" not found in path.
     graphviz \
+    # FastFlowLM, which iron/applications/gemma4_flm builds. Its tokenizers
+    # need rustc 1.80 or newer; Ubuntu's default rustc is 1.75.
+    cmake pkg-config cargo-1.85 rustc-1.85 libdrm-dev \
+    libcurl4-openssl-dev libfftw3-dev libreadline-dev libncurses-dev \
+    libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev \
     # GitHub Actions runner requirements
     git jq curl tar \
  && rm -rf /var/lib/apt/lists/*
+
+ENV PATH=/usr/lib/rust-1.85/bin:${PATH}
 
 ARG USER=iron
 RUN useradd -m -s /bin/bash ${USER}
