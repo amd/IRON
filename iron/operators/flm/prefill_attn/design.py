@@ -27,7 +27,6 @@ from aie.dialects.aiex import (
     _as_i32,
     dma_free_task,
     dma_start_task,
-    set_lock_value,
     shim_dma_single_bd_task,
 )
 from aie.extras import types as T
@@ -52,7 +51,7 @@ from aie.iron.dataflow import Flow
 from aie.iron.device import Tile
 from aie.iron.kernels import flm_gemma4
 
-from iron.operators.flm.dataflow import grid, ping_pong
+from iron.operators.flm.dataflow import ping_pong
 
 LK_MT = 128  # key rows per memtile buffer
 # Query rows per round. For each variant, the cores per group times the query
@@ -79,16 +78,6 @@ class Geometry:
         lq, dh = np_ndarray_type_get_shape(kernel.attn_round_begin.arg_types()[4])
         lk, _ = np_ndarray_type_get_shape(kernel.attn_qk_step.arg_types()[2])
         return cls(dh=dh, lq=lq, lk=lk)
-
-    @property
-    def lq_ct(self):
-        """Query rows in a core's q object: the rows of both columns of a pair."""
-        return 2 * self.lq
-
-    @property
-    def lq_mt(self):
-        """Query rows per memtile fifo half."""
-        return 4 * self.lq
 
 
 @dataclass(frozen=True)
@@ -157,10 +146,6 @@ SLIDING = Variant(
 VARIANTS = {v.name: v for v in (CAUSAL, SLIDING)}
 
 
-def _dims(d):
-    return dict(sizes=[x[0] for x in d], strides=[x[1] for x in d])
-
-
 def _stage_kv_causal(rt, MT, v, g):
     """The k/v memtile takes k and v on two channels and sends them interleaved on one.
 
@@ -168,7 +153,6 @@ def _stage_kv_causal(rt, MT, v, g):
     """
     mt, mt_left = MT[v.kv_memtile], MT[v.kv_memtile - 1]
     in_mem_ty = np.ndarray[(LK_MT, g.dh), bf16]
-    kvdims = [(LK_MT // g.lk, g.lk * g.dh), (g.lk, 8), (64, 64), (8, 1)]
     bufs = {
         (side, n): Buffer(type=in_mem_ty, name=f"in_{n}_0_{tile.col}", tile=tile)
         for side, tile in (("own", mt), ("left", mt_left))
@@ -179,13 +163,12 @@ def _stage_kv_causal(rt, MT, v, g):
     left_cons = Lock(tile=mt, lock_id=1, init=0)
     own_prod = Lock(tile=mt, lock_id=7, init=2)
     own_cons = Lock(tile=mt, lock_id=8, init=0)
-    for lock in (left_prod, left_cons, own_prod, own_cons):
-        rt.add_lock(lock)
-    fill = dict(offset=0, length=LK_MT * g.dh, **_dims(kvdims))
-
-    def out(b, cons, prod, nxt):
-        return Bd(b, acquires=[Acquire(cons)], releases=[Release(prod)], next=nxt)
-
+    fill = dict(
+        offset=0,
+        length=LK_MT * g.dh,
+        sizes=[LK_MT // g.lk, g.lk, 64, 8],
+        strides=[g.lk * g.dh, 8, 64, 1],
+    )
     rt.add_tile_dma(
         TileDma(
             mt,
@@ -216,18 +199,21 @@ def _stage_kv_causal(rt, MT, v, g):
                     DMAChannelDir.MM2S,
                     0,
                     [
-                        out(bufs[("left", 0)], left_cons, left_prod, 1),
-                        out(bufs[("own", 0)], own_cons, own_prod, 2),
-                        out(bufs[("left", 1)], left_cons, left_prod, 3),
-                        out(bufs[("own", 1)], own_cons, own_prod, 0),
+                        Bd(
+                            bufs[(side, n)],
+                            acquires=[Acquire(cons)],
+                            releases=[Release(prod)],
+                        )
+                        for n in (0, 1)
+                        for side, cons, prod in (
+                            ("left", left_cons, left_prod),
+                            ("own", own_cons, own_prod),
+                        )
                     ],
                 ),
             ],
         )
     )
-    # The placer removes a memtile that has no DMA program. The empty program
-    # retains mt_left and its buffers.
-    rt.add_tile_dma(TileDma(mt_left, []))
 
 
 def _stage_kv_sliding(rt, MT, v, g):
@@ -237,16 +223,12 @@ def _stage_kv_sliding(rt, MT, v, g):
     two counts. It therefore reads a buffer after both halves hold data.
     """
     in_mem_ty = np.ndarray[(LK_MT * 2, g.dh), bf16]
-    indims = [(LK_MT // g.lk, g.lk * g.dh), (g.lk, 8), (32, 128), (8, 1)]
-    outdims = [(2 * LK_MT // g.lk, g.lk * g.dh), (g.lk, g.dh), (g.dh, 1)]
     half = LK_MT * g.dh
     mt = MT[v.kv_memtile]
     in_0 = Buffer(type=in_mem_ty, name=f"in_0_0_{mt.col}", tile=mt)
     in_1 = Buffer(type=in_mem_ty, name=f"in_1_0_{mt.col}", tile=mt)
     prod = Lock(tile=mt, lock_id=0, init=4)
     cons = Lock(tile=mt, lock_id=1, init=0)
-    rt.add_lock(prod)
-    rt.add_lock(cons)
     rt.add_tile_dma(
         TileDma(
             mt,
@@ -261,7 +243,8 @@ def _stage_kv_sliding(rt, MT, v, g):
                         cons,
                         offset=offset,
                         length=half,
-                        **_dims(indims),
+                        sizes=[LK_MT // g.lk, g.lk, 32, 8],
+                        strides=[g.lk * g.dh, 8, 128, 1],
                     ),
                 )
                 for ch, offset in ((0, 0), (1, half))
@@ -279,7 +262,8 @@ def _stage_kv_sliding(rt, MT, v, g):
                         rel_val=2,
                         offset=0,
                         length=2 * half,
-                        **_dims(outdims),
+                        sizes=[2 * LK_MT // g.lk, g.lk, g.dh],
+                        strides=[g.lk * g.dh, g.dh, 1],
                     ),
                 ),
             ],
@@ -319,48 +303,42 @@ def prefill_attn(
     if v.windowed != (window is not None):
         need = "needs a" if v.windowed else "takes no"
         raise ValueError(f"the {v.name} variant {need} window")
-    COLS, ROWS = grid(dev)
     g = Geometry.of(kernel)
-    DH, LQ, LK, NUM_CU, L1 = g.dh, g.lq, g.lk, v.num_cu, v.l1
-    GROUP_COLS = COLS // NUM_CU
-    HEADS = num_heads
-    KV_D = num_kv_heads
-    GQA = HEADS // KV_D
-
-    k_rounds = kernel.attn_rounds
-    k_round_begin = kernel.attn_round_begin
-    k_blocks = kernel.attn_blocks
-    k_block_begin = kernel.attn_block_begin
-    k_qk = kernel.attn_qk_step
-    k_block_mid = kernel.attn_block_mid
-    k_fv = kernel.attn_fv_step
-    k_block_end = kernel.attn_block_end
-    k_finalize = kernel.attn_finalize
-    k_epilogue = kernel.attn_epilogue
+    group_cols = dev.cols // v.num_cu
+    gqa = num_heads // num_kv_heads
+    # Elements per token in Q and O, and in each of k and v.
+    qo_row = g.dh * num_heads
+    kv_row = g.dh * num_kv_heads
+    # Query rows in a core's q object: the rows of both columns of a pair.
+    lq_ct = 2 * g.lq
+    # Query rows per memtile fifo half.
+    lq_mt = 4 * g.lq
 
     # The core's buffers take the kernel's argument types.
-    s_ty, q_ty, in_ty, _, m_ty, L_ty = k_qk.arg_types()[:6]
-    mv_ty, _, cv_ty, _, y_ty = k_round_begin.arg_types()
-    o_ty, l_bf16_ty, _, _ = k_epilogue.arg_types()
-    q_half_ty = np.ndarray[(g.lq_mt, DH), bf16]
-    o_col_ty = np.ndarray[(g.lq_mt, DH), bf16]
+    s_ty, q_ty, in_ty, _, m_ty, L_ty = kernel.attn_qk_step.arg_types()[:6]
+    mv_ty, _, cv_ty, _, y_ty = kernel.attn_round_begin.arg_types()
+    o_ty, l_bf16_ty, _, _ = kernel.attn_epilogue.arg_types()
+    q_half_ty = np.ndarray[(lq_mt, g.dh), bf16]
+    o_col_ty = np.ndarray[(lq_mt, g.dh), bf16]
 
-    qdims = [(g.lq_ct // 8, 8 * DH), (DH // 8, 8), (8, DH), (8, 1)]
-    odims = [(LQ // 8, 8 * DH), (DH // 8, 8), (8, DH), (8, 1)]
+    qdims = [(lq_ct // 8, 8 * g.dh), (g.dh // 8, 8), (8, g.dh), (8, 1)]
+    odims = [(g.lq // 8, 8 * g.dh), (g.dh // 8, 8), (8, g.dh), (8, 1)]
 
-    # Shim row 0, memtile row 1, compute rows from 2. Each tile needs its type.
-    # The DMA of an untyped tile lowers to a core tile's aie.mem.
-    IT = [Tile(j, 0, tile_type=dev.get_tile_type(j, 0)) for j in range(COLS)]
-    MT = [Tile(j, 1, tile_type=dev.get_tile_type(j, 1)) for j in range(COLS)]
-    CT = [
-        [Tile(j, i + 2, tile_type=dev.get_tile_type(j, i + 2)) for j in range(COLS)]
-        for i in range(ROWS)
-    ]
+    # Shim row 0, memtile row 1. Each tile carries its type. A Worker stamps an
+    # untyped tile with Tile.with_type(). That call returns a second CoreTile
+    # at the coordinates of the first tile's buffers and locks.
+    IT = [Tile(j, 0, tile_type=dev.get_tile_type(j, 0)) for j in range(dev.cols)]
+    MT = [Tile(j, 1, tile_type=dev.get_tile_type(j, 1)) for j in range(dev.cols)]
+    CT = {
+        (j, r): Tile(j, r, tile_type=dev.get_tile_type(j, r))
+        for j in range(dev.cols)
+        for r in dev.core_rows
+    }
 
     def sequence(o, q, kv, lb_arg, le_arg, max_l_arg, o_shim, q_shims):
         q_shim = dict(zip(q_keys, q_shims))
         max_l = _as_i32(max_l_arg)
-        kv_cache_half = max_l * (DH * KV_D)
+        kv_cache_half = max_l * kv_row
         L_begin = _as_i32(lb_arg)
         L_end = _as_i32(le_arg)
         rounds = arith.divsi(L_end - L_begin + (ROUND - 1), _as_i32(ROUND))
@@ -372,49 +350,46 @@ def prefill_attn(
             # A window of L_end covers every key from token 0.
             ws[0] = L_end if window is None else window
         for key in sorted(go):
-            set_lock_value(go[key].op, HEADS // NUM_CU)
+            go[key].set(num_heads // v.num_cu)
 
-        def max0(x):
-            # max(x, 0) without a branch: x & (x >> 31) is x when x < 0, else 0.
-            return x - arith.andi(x, arith.shrsi(x, _as_i32(31)))
-
-        for head in range(HEADS // NUM_CU):
+        for head in range(num_heads // v.num_cu):
             for rnd in range_(rounds):
                 r = arith.index_cast(T.i32(), rnd)
                 if window is None:
                     kv_length = r * ROUND + (L_begin + ROUND)
                 else:
                     lq_current = L_begin + r * ROUND
-                    kv_begin = max0(lq_current - _as_i32(window))
+                    x = lq_current - _as_i32(window)
+                    # max(x, 0) without a branch: x & (x >> 31) is x when x < 0,
+                    # else 0.
+                    kv_begin = x - arith.andi(x, arith.shrsi(x, _as_i32(31)))
                     kv_length = lq_current - kv_begin + _as_i32(ROUND)
                 o_tasks, q_tasks, kv_tasks = [], [], []
-                for cu in range(NUM_CU):
-                    head_off = head * NUM_CU + cu
-                    for col in range(GROUP_COLS):
+                for cu in range(v.num_cu):
+                    head_off = head * v.num_cu + cu
+                    for col in range(group_cols):
                         o_tasks.append(
-                            o_shim[cu * GROUP_COLS + col].drain(
+                            o_shim[cu * group_cols + col].drain(
                                 o,
-                                sizes=[1, 1, g.lq_mt, DH],
-                                strides=[0, 0, DH * HEADS, 1],
-                                offset=r * (ROUND * DH * HEADS)
-                                + (head_off * DH + col * g.lq_mt * DH * HEADS),
-                                transfer_len=g.lq_mt * DH,
+                                sizes=[1, 1, lq_mt, g.dh],
+                                strides=[0, 0, qo_row, 1],
+                                offset=r * (ROUND * qo_row)
+                                + (head_off * g.dh + col * lq_mt * qo_row),
+                                transfer_len=lq_mt * g.dh,
                                 wait=True,
                                 managed=False,
                             )
                         )
-                    q_base = r * (ROUND * DH * HEADS) + head_off * DH
-                    pairs = range(cu * GROUP_COLS // 2, (cu + 1) * GROUP_COLS // 2)
+                    q_base = r * (ROUND * qo_row) + head_off * g.dh
+                    pairs = range(cu * group_cols // 2, (cu + 1) * group_cols // 2)
                     for qi, key in enumerate((p, h) for p in pairs for h in (0, 1)):
                         q_tasks.append(
                             q_shim[key].fill(
                                 q,
-                                sizes=[1, 1, g.lq_mt, DH],
-                                strides=[0, 0, DH * HEADS, 1],
-                                offset=(
-                                    q_base + qi * g.lq_mt * DH * HEADS if qi else q_base
-                                ),
-                                transfer_len=g.lq_mt * DH,
+                                sizes=[1, 1, lq_mt, g.dh],
+                                strides=[0, 0, qo_row, 1],
+                                offset=(q_base + qi * lq_mt * qo_row if qi else q_base),
+                                transfer_len=lq_mt * g.dh,
                                 wait=False,
                                 managed=False,
                             )
@@ -422,10 +397,13 @@ def prefill_attn(
                 # dma_bd's length operand is an i32. The product of the i64
                 # sizes does not fit in it. transfer_len sets the length.
                 kv_rows = arith.extsi(T.i64(), arith.divsi(kv_length, _as_i32(128)))
-                kv_head = head // (GQA // NUM_CU)
-                k_off = max_l * ((kv_head // KV_D) * DH * KV_D) + (kv_head % KV_D) * DH
+                kv_head = head // (gqa // v.num_cu)
+                k_off = (
+                    max_l * ((kv_head // num_kv_heads) * kv_row)
+                    + (kv_head % num_kv_heads) * g.dh
+                )
                 if window is not None:
-                    k_off = k_off + kv_begin * _as_i32(DH * KV_D)
+                    k_off = k_off + kv_begin * _as_i32(kv_row)
                 for symbol, offset in (
                     ("k_in", k_off),
                     ("v_in", k_off + kv_cache_half),
@@ -435,9 +413,9 @@ def prefill_attn(
                             symbol,
                             kv.op,
                             offset=offset,
-                            sizes=[1, kv_rows, 128, DH],
-                            strides=[0, 128 * DH * KV_D, DH * KV_D, 1],
-                            transfer_len=kv_length * DH,
+                            sizes=[1, kv_rows, 128, g.dh],
+                            strides=[0, 128 * kv_row, kv_row, 1],
+                            transfer_len=kv_length * g.dh,
                             issue_token=False,
                         )
                     )
@@ -465,11 +443,11 @@ def prefill_attn(
     # rows 0 and 1 for an even m, rows 2 and 3 for an odd m, in columns
     # 2*(m//2) and 2*(m//2)+1.
     o_shim, o_prod = [], {}
-    for m in range(COLS):
+    for m in range(dev.cols):
         of_o = ObjectFifo(o_col_ty, name=f"o{m}", depth=2)
         o_shim.append(of_o.cons(tile=IT[m], channel=0))
         sub = of_o.prod().join(
-            [LQ * DH * i for i in range(4)],
+            [g.lq * g.dh * i for i in range(4)],
             obj_types=[o_ty] * 4,
             names=[f"o{m}_{i}" for i in range(4)],
             dims_from_stream=[odims] * 4,
@@ -484,13 +462,13 @@ def prefill_attn(
     # broadcasts each slice to both columns of the pair. Half 0 feeds rows 0
     # and 1.
     q_shim, q_cons = {}, {}
-    for p in range(COLS // 2):
+    for p in range(dev.cols // 2):
         mt_idx = v.q_memtile(p)
         for half, rows in ((0, (0, 1)), (1, (2, 3))):
             of_q = ObjectFifo(q_half_ty, name=f"q{mt_idx}_{half}", depth=2)
             q_shim[(p, half)] = of_q.prod(tile=IT[mt_idx], channel=half)
             slices = of_q.cons().split(
-                [g.lq_ct * DH * t for t in range(2)],
+                [lq_ct * g.dh * t for t in range(2)],
                 obj_types=[q_ty] * 2,
                 names=[f"q{mt_idx}_{half}_{t}" for t in range(2)],
                 dims_to_stream=[qdims] * 2,
@@ -502,8 +480,8 @@ def prefill_attn(
                     q_cons[(row, col)] = slices[t]
     q_keys = list(q_shim)
 
-    o_l3_ty = np.ndarray[(max_context * DH * HEADS,), bf16]
-    kv_l3_ty = np.ndarray[(max_context * DH * KV_D * 2,), bf16]
+    o_l3_ty = np.ndarray[(max_context * qo_row,), bf16]
+    kv_l3_ty = np.ndarray[(max_context * kv_row * 2,), bf16]
     rt = Runtime(
         sequence,
         [
@@ -557,18 +535,18 @@ def prefill_attn(
                 blocks_k(*((lb, ws) if v.windowed else (lb,)), i, nb)
                 for b in range_(nb[0]):
                     block_begin_k(m, prev_m)
-                    for j in range_(LK_MT // LK):
+                    for j in range_(LK_MT // g.lk):
                         _no_unroll(j)
                         qk_k(s, q, in0, in1, m, lb, ws, row, col, i, b, j)
                     block_mid_k(s, m, new_m, prev_m, cbuf, lbuf, y)
-                    for j in range_(LK_MT // LK):
+                    for j in range_(LK_MT // g.lk):
                         _no_unroll(j)
                         fv_k(y, s, in0, in1, j)
                     block_end_k(prev_m, new_m)
                 finalize_k(lbuf, l_bf16)
                 if v.release_q_before_epilogue:
                     q_h.release(1)
-                for c in range_(LQ * DH // 64):
+                for c in range_(g.lq * g.dh // 64):
                     o = o_h.acquire(1)
                     epilogue_k(o, l_bf16, y, c)
                     o_h.release(1)
@@ -578,64 +556,62 @@ def prefill_attn(
         return core_fn
 
     workers = []
-    for j in range(COLS):
-        for i in range(ROWS):
-            tile = CT[i][j]
+    for j in range(dev.cols):
+        for i, r in enumerate(dev.core_rows):
+            tile = CT[(j, r)]
             name = f"{tile.row}_{tile.col}"
 
             def buf(ty, key, **kw):
                 return Buffer(type=ty, name=f"{key}_{name}", tile=tile, **kw)
 
             rtp[(tile.row, tile.col)] = [
-                buf(L_ty, f"{key}_attn_core", use_write_rtp=True, address=L1[key])
+                buf(L_ty, f"{key}_attn_core", use_write_rtp=True, address=v.l1[key])
                 for key in ("L_begin", "L_end", "window_size")
             ]
-            in_0 = buf(in_ty, "in_0", address=L1["in_0"])
-            in_1 = buf(in_ty, "in_1", address=L1["in_1"])
+            in_0 = buf(in_ty, "in_0", address=v.l1["in_0"])
+            in_1 = buf(in_ty, "in_1", address=v.l1["in_1"])
             core_bufs = [
                 in_0,
                 in_1,
-                buf(s_ty, "s", address=L1["s"]),
-                buf(m_ty, "m", address=L1["m"]),
-                buf(y_ty, "y", address=L1["y"]),
-                buf(l_bf16_ty, "l_bf16", address=L1.get("l_bf16")),
+                buf(s_ty, "s", address=v.l1["s"]),
+                buf(m_ty, "m", address=v.l1["m"]),
+                buf(y_ty, "y", address=v.l1["y"]),
+                buf(l_bf16_ty, "l_bf16", address=v.l1.get("l_bf16")),
                 buf(mv_ty, "prev_m"),
                 buf(mv_ty, "new_m"),
                 buf(cv_ty, "c"),
                 buf(cv_ty, "l"),
             ]
-            n_rounds = buf(L_ty, "n_rounds", address=L1["n_rounds"])
+            n_rounds = buf(L_ty, "n_rounds", address=v.l1["n_rounds"])
             n_blocks = buf(L_ty, "n_blocks")
             in_prod = Lock(tile=tile, lock_id=IN_PROD_LOCK, init=2)
             in_cons = Lock(tile=tile, lock_id=IN_CONS_LOCK, init=0)
             go_lock = Lock(tile=tile, init=0, name=f"go_{name}")
             go[(tile.row, tile.col)] = go_lock
-            for lock in (in_prod, in_cons, go_lock):
-                rt.add_lock(lock)
             workers.append(
                 Worker(
-                    make_core_fn(i, j % GROUP_COLS),
+                    make_core_fn(i, j % group_cols),
                     [q_cons[(i, j)].cons(), o_prod[(i, j)].prod()]
                     + core_bufs
                     + rtp[(tile.row, tile.col)]
                     + [
                         n_rounds,
                         n_blocks,
-                        k_rounds,
-                        k_round_begin,
-                        k_blocks,
-                        k_block_begin,
-                        k_qk,
-                        k_block_mid,
-                        k_fv,
-                        k_block_end,
-                        k_finalize,
-                        k_epilogue,
+                        kernel.attn_rounds,
+                        kernel.attn_round_begin,
+                        kernel.attn_blocks,
+                        kernel.attn_block_begin,
+                        kernel.attn_qk_step,
+                        kernel.attn_block_mid,
+                        kernel.attn_fv_step,
+                        kernel.attn_block_end,
+                        kernel.attn_finalize,
+                        kernel.attn_epilogue,
                         go_lock,
                     ],
                     tile=tile,
                     while_true=True,
-                    stack_size=L1["in_1"],
+                    stack_size=v.l1["in_1"],
                 )
             )
             # k and v share S2MM channel 1; q takes channel 0.
@@ -662,9 +638,8 @@ def prefill_attn(
     rt.add_flow(
         Flow(IT[kv_mt], MT[kv_mt], src_channel=1, dst_channel=1, shim_symbol="v_in")
     )
-    for j in range(COLS):
-        for i in range(ROWS):
-            rt.add_flow(Flow(MT[kv_mt], CT[i][j], src_channel=0, dst_channel=1))
+    for tile in CT.values():
+        rt.add_flow(Flow(MT[kv_mt], tile, src_channel=0, dst_channel=1))
 
     prog = Program(dev, rt, workers=workers)
     if trace_size > 0:
