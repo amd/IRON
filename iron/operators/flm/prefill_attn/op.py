@@ -20,10 +20,11 @@ from iron.common import (
 
 from iron.operators.flm.prefill_attn.design import (
     CAUSAL,
+    IN_CONS_LOCK,
+    IN_PROD_LOCK,
     SLIDING,
     Geometry,
     Variant,
-    make_kernel,
 )
 
 
@@ -67,10 +68,6 @@ class _PrefillAttentionBase(MLIROperator):
                 raise ValueError(f"{name} ({value}) must be a multiple of 128")
         MLIROperator.__init__(self, context=self.context)
 
-    def _kernel(self):
-        """The variant's kernel, which the design and the kernel artifact both take."""
-        return make_kernel(self.variant)
-
     def reference_tolerance(self):
         # The factory's tolerance covers attn_epilogue alone, one of the ten
         # entry points that the operator runs.
@@ -78,7 +75,9 @@ class _PrefillAttentionBase(MLIROperator):
 
     @property
     def head_dim(self) -> int:
-        return Geometry.of(self._kernel()).dh
+        return Geometry.of(
+            self.variant.factory(in_prod_lock=IN_PROD_LOCK, in_cons_lock=IN_CONS_LOCK)
+        ).dh
 
     @property
     def name(self) -> str:
@@ -110,12 +109,19 @@ class _PrefillAttentionBase(MLIROperator):
                     self.num_kv_heads,
                     self.window,
                 ),
-                {"kernel": self._kernel()},
+                {
+                    "kernel": self.variant.factory(
+                        in_prod_lock=IN_PROD_LOCK, in_cons_lock=IN_CONS_LOCK
+                    )
+                },
             ),
         )
 
     def get_kernel_artifacts(self):
-        return [KernelObjectArtifact.from_extern(self._kernel())]
+        kernel = self.variant.factory(
+            in_prod_lock=IN_PROD_LOCK, in_cons_lock=IN_CONS_LOCK
+        )
+        return [KernelObjectArtifact.from_extern(kernel)]
 
     def get_arg_spec(self):
         # The runtime sequence's order: o, q, kv.

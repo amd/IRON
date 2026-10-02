@@ -65,6 +65,98 @@ IN_PROD_LOCK, IN_CONS_LOCK = 2, 3
 bf16 = np.dtype[bfloat16]
 
 
+@dataclass(frozen=True)
+class Geometry:
+    """The tile shapes that the kernel build fixes."""
+
+    dh: int  # head dim
+    lq: int  # query rows per core
+    lk: int  # key rows per step
+
+    @classmethod
+    def of(cls, kernel):
+        """Read the shapes from the argument types of the kernel's entry points."""
+        lq, dh = np_ndarray_type_get_shape(kernel.attn_round_begin.arg_types()[4])
+        lk, _ = np_ndarray_type_get_shape(kernel.attn_qk_step.arg_types()[2])
+        return cls(dh=dh, lq=lq, lk=lk)
+
+    @property
+    def lq_ct(self):
+        """Query rows in a core's q object: the rows of both columns of a pair."""
+        return 2 * self.lq
+
+    @property
+    def lq_mt(self):
+        """Query rows per memtile fifo half."""
+        return 4 * self.lq
+
+
+@dataclass(frozen=True)
+class Variant:
+    """What differs between the causal and the sliding-window kernel's designs."""
+
+    name: str
+    factory: Callable[..., ExternalFunction]
+    num_cu: int  # column groups, one query head each per pass
+    # The buffer addresses of the FastFlowLM overlay. The stack occupies the
+    # addresses from 0 to in_1, the lowest buffer.
+    l1: dict
+    # The memtile that splits the q fifos of column pair p.
+    q_memtile: Callable[[int], int]
+    # The memtile that stages k and v.
+    kv_memtile: int
+    # True: the variant takes a window. attn_blocks then takes the window_size
+    # RTP as an argument, and _stage_kv_sliding stages k and v.
+    windowed: bool
+    release_q_before_epilogue: bool
+
+
+CAUSAL = Variant(
+    name="causal",
+    factory=flm_gemma4.flm_gemma4_attn_prefill,
+    num_cu=2,
+    l1={
+        "in_0": 49152,
+        "in_1": 3072,
+        "s": 57344,
+        "m": 11392,
+        "y": 32768,
+        "L_begin": 59520,
+        "L_end": 11520,
+        "window_size": 59552,
+        "n_rounds": 11552,
+    },
+    q_memtile=lambda p: 2 * p + p % 2,
+    kv_memtile=2,
+    windowed=False,
+    release_q_before_epilogue=False,
+)
+
+SLIDING = Variant(
+    name="sliding",
+    factory=flm_gemma4.flm_gemma4_swa_prefill,
+    num_cu=4,
+    l1={
+        "L_begin": 61568,
+        "L_end": 11904,
+        "window_size": 61600,
+        "in_0": 49152,
+        "in_1": 3712,
+        "s": 57344,
+        "m": 61760,
+        "y": 32768,
+        "l_bf16": 61440,
+        "n_rounds": 11936,
+    },
+    q_memtile=lambda p: 2 * p,
+    kv_memtile=3,
+    windowed=True,
+    release_q_before_epilogue=True,
+)
+
+VARIANTS = {v.name: v for v in (CAUSAL, SLIDING)}
+
+
 def _dims(d):
     return dict(sizes=[x[0] for x in d], strides=[x[1] for x in d])
 
@@ -195,106 +287,6 @@ def _stage_kv_sliding(rt, MT, v, g):
     )
 
 
-@dataclass(frozen=True)
-class Geometry:
-    """The tile shapes that the kernel build fixes."""
-
-    dh: int  # head dim
-    lq: int  # query rows per core
-    lk: int  # key rows per step
-
-    @classmethod
-    def of(cls, kernel):
-        """Read the shapes from the argument types of the kernel's entry points."""
-        lq, dh = np_ndarray_type_get_shape(kernel.attn_round_begin.arg_types()[4])
-        lk, _ = np_ndarray_type_get_shape(kernel.attn_qk_step.arg_types()[2])
-        return cls(dh=dh, lq=lq, lk=lk)
-
-    @property
-    def lq_ct(self):
-        """Query rows in a core's q object: the rows of both columns of a pair."""
-        return 2 * self.lq
-
-    @property
-    def lq_mt(self):
-        """Query rows per memtile fifo half."""
-        return 4 * self.lq
-
-
-@dataclass(frozen=True)
-class Variant:
-    """What differs between the causal and the sliding-window kernel's designs."""
-
-    name: str
-    factory: Callable[..., ExternalFunction]
-    num_cu: int  # column groups, one query head each per pass
-    # The buffer addresses of the FastFlowLM overlay. The stack occupies the
-    # addresses from 0 to in_1, the lowest buffer.
-    l1: dict
-    # The memtile that splits the q fifos of column pair p.
-    q_memtile: Callable[[int], int]
-    # The memtile that stages k and v, and its DMA program.
-    kv_memtile: int
-    stage_kv: Callable
-    # True: the variant takes a window. attn_blocks then takes the window_size
-    # RTP as an argument.
-    windowed: bool
-    release_q_before_epilogue: bool
-
-
-CAUSAL = Variant(
-    name="causal",
-    factory=flm_gemma4.flm_gemma4_attn_prefill,
-    num_cu=2,
-    l1={
-        "in_0": 49152,
-        "in_1": 3072,
-        "s": 57344,
-        "m": 11392,
-        "y": 32768,
-        "L_begin": 59520,
-        "L_end": 11520,
-        "window_size": 59552,
-        "n_rounds": 11552,
-    },
-    q_memtile=lambda p: 2 * p + p % 2,
-    kv_memtile=2,
-    stage_kv=_stage_kv_causal,
-    windowed=False,
-    release_q_before_epilogue=False,
-)
-
-SLIDING = Variant(
-    name="sliding",
-    factory=flm_gemma4.flm_gemma4_swa_prefill,
-    num_cu=4,
-    l1={
-        "L_begin": 61568,
-        "L_end": 11904,
-        "window_size": 61600,
-        "in_0": 49152,
-        "in_1": 3712,
-        "s": 57344,
-        "m": 61760,
-        "y": 32768,
-        "l_bf16": 61440,
-        "n_rounds": 11936,
-    },
-    q_memtile=lambda p: 2 * p,
-    kv_memtile=3,
-    stage_kv=_stage_kv_sliding,
-    windowed=True,
-    release_q_before_epilogue=True,
-)
-
-VARIANTS = {v.name: v for v in (CAUSAL, SLIDING)}
-
-
-def make_kernel(variant):
-    """Build the kernel that the variant's cores link, for the current device."""
-    return variant.factory(in_prod_lock=IN_PROD_LOCK, in_cons_lock=IN_CONS_LOCK)
-
-
 def _no_unroll(iv):
     """Disable unrolling of the scf.for that yields iv in Peano's opt.
 
@@ -321,7 +313,7 @@ def prefill_attn(
     """Prefill attention over a KV cache of up to max_context rows.
 
     The README gives the layout of O, Q and KV. ``kernel`` is the variant's
-    build from ``make_kernel``.
+    factory's build with the locks IN_PROD_LOCK and IN_CONS_LOCK.
     """
     v = VARIANTS[variant]
     if v.windowed != (window is not None):
@@ -660,7 +652,8 @@ def prefill_attn(
                 )
             )
 
-    v.stage_kv(rt, MT, v, g)
+    stage_kv = _stage_kv_sliding if v.windowed else _stage_kv_causal
+    stage_kv(rt, MT, v, g)
 
     kv_mt = v.kv_memtile
     rt.add_flow(
