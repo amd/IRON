@@ -4,33 +4,19 @@
 """Numpy reference of one Gemma 4 decode layer, as the flm_gemma4_decode
 kernels compute it.
 
-The reference takes the five buffers of DecodeLayer in the engine's formats and
-returns x and the kv cache as the device leaves them:
+The reference takes the five buffers of DecodeLayer and returns x and the kv
+cache as the device leaves them:
 
     x_out, kv_out = reference(
         FLM_GEMMA4_E2B_DECODE, "swa", x, proj, rms, rope_rms, kv,
         context_len=37, max_l=1024)
 
-It reproduces the kernels' bf16 rounding, accumulation order, lookup tables and
-fp32 emulation. On 20 dispatches captured from FastFlowLM's engine (E2B and E4B,
-all four layer types, context lengths 36, 511 and 650) it matches the device bit
-for bit on 16. On the other 4 a single RMS-norm output differs by one bf16 ulp
-and the MLP spreads it: the relative L2 error of x is at most 9.8e-4. See
-README.md.
+It reproduces the kernels' rounding, accumulation order and lookup tables with
+aie2p_math_emulation. A product or an inverse square root can still differ
+from the device's in the last fp32 bit. Near a bf16 boundary that difference
+changes the bf16 result by one ulp.
 
 generate_inputs() draws synthetic buffers with a fixed seed.
-
-Numerics that set the tolerance of a comparison:
-
-- Every float to bf16, bfp16 or integer conversion on the device rounds toward
-  minus infinity: the kernels never set the rounding mode register. Host-side
-  constants round to nearest even.
-- AIE2P emulates an fp32 multiply with bf16 limbs (fmul). The emulation and the
-  fast inverse square root of the RMS norm put a product within a few fp32 ulps
-  of where the reference puts it. Near a bf16 boundary that flips the bf16
-  result.
-- The attention rounds its scores to bf16. With scores near 30 one bf16 ulp
-  changes exp by up to 12%.
 """
 
 import dataclasses
