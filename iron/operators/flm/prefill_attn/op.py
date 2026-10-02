@@ -52,6 +52,9 @@ class _PrefillAttentionBase(MLIROperator):
             raise NotImplementedError(
                 f"the {self.variant.factory.__name__} kernel is AIE2P only"
             )
+        for name in ("max_context", "num_heads", "num_kv_heads"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} ({getattr(self, name)}) must be positive")
         if self.num_heads % self.num_kv_heads:
             raise ValueError(
                 f"num_heads ({self.num_heads}) must be a multiple of "
