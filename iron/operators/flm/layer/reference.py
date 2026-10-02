@@ -37,13 +37,31 @@ import dataclasses
 
 import numpy as np
 
+from iron.operators.flm.aie2p_math_emulation import (
+    bfp16,
+    exp_kernel,
+    f32,
+    fast_rsqrt,
+    fmul,
+    inv_kernel,
+    rb,
+    to_bf16,
+    tree_sum,
+)
 from iron.operators.flm.layer.design import (
     LAYER_TYPES,
     LK,
     MIN_BF16_PAD,
     SLIDING_WINDOW,
 )
-from iron.operators.flm.q4nx import BLOCK_BYTES, GROUP, K_TILE, M_TILE, packed_bytes
+from iron.operators.flm.q4nx import (
+    BLOCK_BYTES,
+    GROUP,
+    K_TILE,
+    M_TILE,
+    bf16_to_f32,
+    packed_bytes,
+)
 
 # The epsilon of aie_kernels/flm_gemma4/rms_norm.h.
 RMS_EPS = 1e-6
@@ -224,119 +242,8 @@ def _attention_rows(g, context_len):
 
 
 # ---------------------------------------------------------------------------
-# Number formats
+# Elementwise functions
 # ---------------------------------------------------------------------------
-
-
-def bf16_to_f32(u16):
-    return (np.asarray(u16, np.uint16).astype(np.uint32) << 16).view(np.float32)
-
-
-def to_bf16(x, rounding="floor"):
-    """float -> bf16 bit patterns. rounding is "floor" (the device) or "rne"."""
-    u = np.asarray(x, np.float64).astype(np.float32).view(np.uint32)
-    hi = u >> 16
-    if rounding == "rne":
-        hi = (u + 0x7FFF + (hi & 1)) >> 16
-    else:
-        hi = hi + (((u >> 31) == 1) & ((u & 0xFFFF) != 0))
-    return np.where(np.isnan(np.asarray(x, np.float32)), 0x7FC0, hi).astype(np.uint16)
-
-
-def rb(x, rounding="floor"):
-    """x rounded to a bf16 value."""
-    return bf16_to_f32(to_bf16(x, rounding))
-
-
-def f32(x):
-    return np.asarray(x, np.float64).astype(np.float32)
-
-
-def fmul(a, b):
-    """An fp32 product as AIE2P computes it.
-
-    AIE2P has no fp32 multiplier. It splits each operand into three bf16 limbs
-    and adds the nine limb products in fp32. The result differs from the IEEE
-    product in the last bit for a few inputs.
-    """
-    a, b = np.broadcast_arrays(np.asarray(a, np.float64), np.asarray(b, np.float64))
-
-    def limbs(v):
-        v = f32(v)
-        l0 = rb(v, "rne")
-        r = f32(v - l0)
-        l1 = rb(r, "rne")
-        return [l0, l1, rb(f32(r - l1), "rne")]
-
-    A, B = limbs(a), limbs(b)
-    acc = None
-    for i, j in (
-        (0, 0),
-        (0, 1),
-        (1, 0),
-        (0, 2),
-        (1, 1),
-        (2, 0),
-        (1, 2),
-        (2, 1),
-        (2, 2),
-    ):
-        p = A[i].astype(np.float64) * B[j]
-        acc = f32(p) if acc is None else f32(acc + p)
-    return acc
-
-
-def tree_sum(x, lanes):
-    """fp32 sum over the last axis as an accumulator of `lanes` lanes computes
-    it: running sums per lane, then a pairwise halving of the lanes."""
-    x = np.asarray(x, np.float64)
-    xs = x.reshape(x.shape[:-1] + (-1, lanes))
-    acc = f32(xs[..., 0, :])
-    for i in range(1, xs.shape[-2]):
-        acc = f32(acc + xs[..., i, :])
-    while acc.shape[-1] > 1:
-        h = acc.shape[-1] // 2
-        acc = f32(acc[..., :h] + acc[..., h:])
-    return acc[..., 0]
-
-
-def bfp16(x, axis):
-    """x in blocks of 8 along axis as bfp16ebs8: one shared exponent and 8-bit
-    mantissas. AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16 converts the operands
-    of the attention matmuls to this format."""
-    x = np.moveaxis(np.asarray(x, np.float64), axis, -1)
-    xb = x.reshape(x.shape[:-1] + (-1, 8))
-    amax = np.max(np.abs(xb), -1, keepdims=True)
-    scale = np.exp2(np.floor(np.log2(np.where(amax > 0, amax, 1.0))) - 6)
-    m = np.clip(np.floor(xb / scale), -128, 127)
-    return np.moveaxis((m * scale).reshape(x.shape), -1, axis)
-
-
-# ---------------------------------------------------------------------------
-# Lookup tables and elementwise functions
-# ---------------------------------------------------------------------------
-
-
-def _exp_tables():
-    """decode_lut_exp.h: e^n for the signed byte n, capped at e^88, and
-    e^(f/256) for the byte f, as bf16."""
-    n = np.minimum(np.arange(256).astype(np.int8).astype(np.float64), 88)
-    with np.errstate(under="ignore"):
-        whole = rb(np.exp(n), "rne")
-    return whole, rb(np.exp(np.arange(256) / 256), "rne")
-
-
-EXP_WHOLE, EXP_FRACTION = _exp_tables()
-# The mantissa of 1 / (1 + m / 128), in 7 bits.
-INV_MANTISSA = np.round(256 / (1 + np.arange(128) / 128)).astype(np.uint32) & 0x7F
-
-
-def exp_kernel(x):
-    """exp of a bf16 input in [-87, 88], in fp32: the product of e^n and
-    e^(f/256) for x = n + f/256 in fixed point. The result is a step function
-    with steps of 1/256."""
-    v = np.floor(np.asarray(x, np.float64) * 256).astype(np.int64) & 0xFFFF
-    return f32(EXP_WHOLE[v >> 8].astype(np.float64) * EXP_FRACTION[v & 0xFF])
 
 
 def gelu_kernel(x):
@@ -349,35 +256,15 @@ def gelu_kernel(x):
     return rb(f32(slope.astype(np.float64) * x + pair[..., 1]))
 
 
-def inv_kernel(l):
-    """1 / l as bf16, from the exponent and INV_MANTISSA. The relative error is
-    up to 0.4%."""
-    bits = f32(l).view(np.uint32).astype(np.uint64) + 0x8000
-    exponent = (bits & 0x7F800000) >> 23
-    mantissa = (bits & 0x007FFFFF) >> 16
-    inv_exp = (mantissa == 0).astype(np.uint64) + (253 - exponent)
-    return bf16_to_f32(
-        (((inv_exp << 7) + INV_MANTISSA[mantissa]) & 0xFFFF).astype(np.uint16)
-    )
-
-
 def rms_norm(x, w):
     """rms_norm.h: bf16(x * w * rsqrt(mean(x^2) + eps)). w is None for the v
-    norm. The rsqrt is a 0x5f3759df seed and two Newton steps."""
+    norm."""
     x = np.asarray(x, np.float64)
     s = f32(
         fmul(tree_sum(x * x, 16)[..., None], np.float32(1.0 / x.shape[-1]))
         + np.float32(RMS_EPS)
     )
-    half = fmul(s, np.float32(0.5))
-    y = (
-        (np.uint32(0x5F3759DF) - (s.view(np.uint32) >> 1))
-        .astype(np.uint32)
-        .view(np.float32)
-    )
-    for _ in range(2):
-        y = fmul(y, f32(np.float32(1.5) - fmul(fmul(half, y), y)))
-    return rb(fmul(x if w is None else f32(x * w), y))
+    return rb(fmul(x if w is None else f32(x * w), fast_rsqrt(s)))
 
 
 # ---------------------------------------------------------------------------

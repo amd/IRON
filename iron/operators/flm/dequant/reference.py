@@ -15,6 +15,7 @@ from iron.operators.flm.dequant.design import (
     T,
     qw_bytes_for,
 )
+from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor
 from iron.operators.flm.packing import pack_b
 from iron.operators.flm.q4nx import (
     BLOCK_BYTES,
@@ -27,14 +28,6 @@ from iron.operators.flm.q4nx import (
 
 # Out-features one run of code bytes spans.
 PARALLEL = 16
-
-
-def f32_to_bf16_floor(x):
-    """Round f32 to bf16 toward negative infinity, as the cores do."""
-    u = np.ascontiguousarray(x, dtype=np.float32).view(np.uint32)
-    inexact = (u & 0xFFFF) != 0
-    negative = (u >> 31) != 0
-    return ((u >> 16) + (inexact & negative)).astype(np.uint16)
 
 
 def dequantize(qw, K, N):
