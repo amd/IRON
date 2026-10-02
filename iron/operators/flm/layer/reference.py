@@ -37,16 +37,18 @@ import dataclasses
 
 import numpy as np
 
-LAYER_TYPES = ("global", "swa", "global_skip", "swa_skip")
-SLIDING_WINDOW = 512
-PLI_PROJECTION_SCALE = 1 / np.sqrt(2)
+from iron.operators.flm.layer.design import (
+    LAYER_TYPES,
+    LK,
+    MIN_BF16_PAD,
+    SLIDING_WINDOW,
+)
+from iron.operators.flm.q4nx import BLOCK_BYTES, GROUP, K_TILE, M_TILE, packed_bytes
+
+# The epsilon of aie_kernels/flm_gemma4/rms_norm.h.
 RMS_EPS = 1e-6
-LAYER_SCALE_PAD = 32  # elements behind the layer scale in rope_rms
-KEYS_PER_ROUND = 16  # attention keys per online-softmax round
-Q4_M, Q4_K, Q4_GROUP = 32, 256, 32
-Q4_BLOCK_BYTES = Q4_M * Q4_K * 5 // 8
-BF16_M, BF16_K = 32, 256  # block of a bf16 projection
-GLU_SLICE = 1024  # 512 up rows, then 512 gate rows
+# The block of a bf16 projection, from aie_kernels/flm_gemma4/decode_bf16_proj.h.
+BF16_M, BF16_K = 32, 256
 
 # decode_lut_activation.h: GELU as 64 (slope, offset) segments of width 1/8 on
 # [-4, 4). The table is copied: its fit to GELU is not documented, and no
@@ -176,8 +178,8 @@ def proj_layout(geometry, layer_type):
 
 
 def _size(fmt, rows, cols):
-    """Bytes of a weight: 5 bits per q4nx weight, 16 per bf16 weight."""
-    return rows * cols * (5 if fmt == "q4nx" else 16) // 8
+    """Bytes of a weight in q4nx or in bf16."""
+    return packed_bytes(rows * cols) if fmt == "q4nx" else 2 * rows * cols
 
 
 def rope_rms_layout(geometry, layer_type):
@@ -190,7 +192,7 @@ def rope_rms_layout(geometry, layer_type):
     lay["pli_norm"] = lay["pli_embed"] + P
     lay["post_pli_norm"] = lay["pli_norm"] + P
     lay["layer_scale"] = lay["post_pli_norm"] + D
-    lay["size"] = lay["layer_scale"] + 1 + LAYER_SCALE_PAD
+    lay["size"] = lay["layer_scale"] + 1 + MIN_BF16_PAD
     return lay
 
 
@@ -218,7 +220,7 @@ def _attention_rows(g, context_len):
             np.concatenate([np.arange(lb, SLIDING_WINDOW), np.arange(lb)]),
             SLIDING_WINDOW,
         )
-    return np.arange(-(-L // KEYS_PER_ROUND) * KEYS_PER_ROUND), L
+    return np.arange(-(-L // LK) * LK), L
 
 
 # ---------------------------------------------------------------------------
@@ -383,6 +385,10 @@ def rms_norm(x, w):
 # ---------------------------------------------------------------------------
 
 
+# The bytes of a q4nx block's bf16 scales and minima.
+_SM_BYTES = 2 * 2 * M_TILE * K_TILE // GROUP
+
+
 def parse_q4nx(proj_u8, offset, rows, cols):
     """A q4nx weight in natural order: (codes [rows, cols], scales and mins
     [rows, cols / 32]). The weight is min + scale * code.
@@ -392,17 +398,18 @@ def parse_q4nx(proj_u8, offset, rows, cols):
     (r // 16) * 4096 + c * 16 + r % 16, low nibble first. Blocks go by pairs of
     32-row bands: column block c of band 2p, then of band 2p + 1.
     """
-    nb_r, nb_c = rows // Q4_M, cols // Q4_K
-    blk = proj_u8[offset : offset + nb_r * nb_c * Q4_BLOCK_BYTES]
-    blk = blk.reshape(nb_r // 2, nb_c, 2, Q4_BLOCK_BYTES).transpose(0, 2, 1, 3)
-    blk = blk.reshape(nb_r, nb_c, Q4_BLOCK_BYTES)
-    sm = bf16_to_f32(blk[..., :1024].copy().view("<u2").reshape(nb_r, nb_c, 2, 8, 32))
-    sm = sm.transpose(2, 0, 4, 1, 3).reshape(2, rows, cols // Q4_GROUP)
-    qs = blk[..., 1024:]
-    codes = np.empty(qs.shape[:-1] + (8192,), np.uint8)
+    nb_r, nb_c = rows // M_TILE, cols // K_TILE
+    blk = proj_u8[offset : offset + nb_r * nb_c * BLOCK_BYTES]
+    blk = blk.reshape(nb_r // 2, nb_c, 2, BLOCK_BYTES).transpose(0, 2, 1, 3)
+    blk = blk.reshape(nb_r, nb_c, BLOCK_BYTES)
+    sm = blk[..., :_SM_BYTES].copy().view("<u2")
+    sm = bf16_to_f32(sm.reshape(nb_r, nb_c, 2, K_TILE // GROUP, M_TILE))
+    sm = sm.transpose(2, 0, 4, 1, 3).reshape(2, rows, cols // GROUP)
+    qs = blk[..., _SM_BYTES:]
+    codes = np.empty(qs.shape[:-1] + (M_TILE * K_TILE,), np.uint8)
     codes[..., 0::2] = qs & 0x0F
     codes[..., 1::2] = qs >> 4
-    codes = codes.reshape(nb_r, nb_c, 2, Q4_K, 16).transpose(0, 2, 4, 1, 3)
+    codes = codes.reshape(nb_r, nb_c, 2, K_TILE, 16).transpose(0, 2, 4, 1, 3)
     return codes.reshape(rows, cols), sm[0], sm[1]
 
 
@@ -423,15 +430,15 @@ def q4_matvec(x, codes, scales, mins, chunk=2048):
     """
     x = np.asarray(x, np.float64)
     rows, cols = codes.shape
-    G = cols // Q4_GROUP
-    xg = x.reshape(G, Q4_GROUP)
+    G = cols // GROUP
+    xg = x.reshape(G, GROUP)
     sx = rb(tree_sum(xg, 32))
     y = np.empty(rows)
     for r0 in range(0, rows, chunk):
-        c = codes[r0 : r0 + chunk].reshape(-1, G, Q4_GROUP).astype(np.float64)
+        c = codes[r0 : r0 + chunk].reshape(-1, G, GROUP).astype(np.float64)
         s, m = scales[r0 : r0 + chunk], mins[r0 : r0 + chunk]
         t = np.zeros(c.shape[:2], np.float32)
-        for ci in range(Q4_GROUP):
+        for ci in range(GROUP):
             t = f32(t + c[..., ci] * xg[:, ci])
         t = rb(t)
         acc = np.zeros(c.shape[0], np.float32)
@@ -496,9 +503,9 @@ def attention(q, K, V, valid, n_kv):
     m = np.full(H, neg_max)
     l = np.zeros(H, np.float32)
     y = np.zeros((H, dh), np.float32)
-    for r0 in range(0, n_rows, KEYS_PER_ROUND):
-        sr = s_all[:, r0 : r0 + KEYS_PER_ROUND]
-        mask = (np.arange(r0, r0 + KEYS_PER_ROUND) < valid)[None, :]
+    for r0 in range(0, n_rows, LK):
+        sr = s_all[:, r0 : r0 + LK]
+        mask = (np.arange(r0, r0 + LK) < valid)[None, :]
         vmax = np.maximum(np.max(np.where(mask, sr, neg_max), 1), m)
         d = np.clip(rb(f32(sr - vmax[:, None])), -87.0, 88.0)
         p = np.where(mask, rb(exp_kernel(d)), 0.0)
@@ -507,16 +514,16 @@ def attention(q, K, V, valid, n_kv):
         l = f32(fmul(l, c) + rb(tree_sum(p, 16)))
         y = fmul(y, c[:, None])
         pb = bfp16(p, 1)
-        vr = Vh[r0 : r0 + KEYS_PER_ROUND]
+        vr = Vh[r0 : r0 + LK]
         for k0 in (0, 8):
             y = f32(y + np.einsum("hk,khd->hd", pb[:, k0 : k0 + 8], vr[k0 : k0 + 8]))
     return rb(rb(y) * inv_kernel(l)[:, None])
 
 
-def glu(up_gate):
-    """bf16(gelu(gate) * up). Each 1024-row slice of the up/gate output holds
-    512 up values, then 512 gate values."""
-    u = up_gate.reshape(-1, 2, GLU_SLICE // 2)
+def glu(up_gate, glu_slice):
+    """bf16(gelu(gate) * up). Each glu_slice-row slice of the up/gate output
+    holds glu_slice / 2 up values, then glu_slice / 2 gate values."""
+    u = up_gate.reshape(-1, 2, glu_slice // 2)
     return rb(gelu_kernel(u[:, 1]) * u[:, 0]).reshape(-1)
 
 
@@ -585,7 +592,7 @@ def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max
     o = attention(q, K, V, valid, n_kv)
 
     h1 = rb(h0 + rms_norm(q4("o", o.reshape(-1)), w_post_attn))
-    act = glu(q4("up_gate", rms_norm(h1, w_pre_ff)))
+    act = glu(q4("up_gate", rms_norm(h1, w_pre_ff)), g["glu_slice"])
     h2 = rb(h1 + rms_norm(q4("down", act), w_post_ff))
 
     # The per-layer input of this layer, from the token embedding:
@@ -594,7 +601,7 @@ def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max
     pli = rb(
         rms_norm(pli, vec(rr16, lay["pli_norm"], P)) + vec(rr16, lay["pli_embed"], P)
     )
-    pli = rb(pli * rb(PLI_PROJECTION_SCALE, "rne"))
+    pli = rb(pli * rb(g["pli_projection_scale"], "rne"))
     gate = gelu_kernel(bf("pli_gate", h2))
     up = bf("pli_up", rb(pli * gate))
     out = rb(rb(h2 + rms_norm(up, vec(rr16, lay["post_pli_norm"], D))) * layer_scale)
@@ -612,20 +619,17 @@ def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max
 def pack_q4nx(codes, scales, mins):
     """The proj bytes of a q4nx weight; the inverse of parse_q4nx."""
     rows, cols = codes.shape
-    nb_r, nb_c = rows // Q4_M, cols // Q4_K
-    sm = np.stack([scales, mins]).reshape(2, nb_r, 32, nb_c, 8).transpose(1, 3, 0, 4, 2)
-    sm = (
-        to_bf16(sm.reshape(nb_r, nb_c, 512), "rne")
-        .view(np.uint8)
-        .reshape(nb_r, nb_c, 1024)
-    )
+    nb_r, nb_c = rows // M_TILE, cols // K_TILE
+    sm = np.stack([scales, mins]).reshape(2, nb_r, M_TILE, nb_c, K_TILE // GROUP)
+    sm = sm.transpose(1, 3, 0, 4, 2).reshape(nb_r, nb_c, _SM_BYTES // 2)
+    sm = to_bf16(sm, "rne").view(np.uint8).reshape(nb_r, nb_c, _SM_BYTES)
     c = (
-        codes.reshape(nb_r, 2, 16, nb_c, Q4_K)
+        codes.reshape(nb_r, 2, 16, nb_c, K_TILE)
         .transpose(0, 3, 1, 4, 2)
-        .reshape(nb_r, nb_c, 8192)
+        .reshape(nb_r, nb_c, M_TILE * K_TILE)
     )
     qs = (c[..., 0::2] | (c[..., 1::2] << 4)).astype(np.uint8)
-    blk = np.concatenate([sm, qs], -1).reshape(nb_r // 2, 2, nb_c, Q4_BLOCK_BYTES)
+    blk = np.concatenate([sm, qs], -1).reshape(nb_r // 2, 2, nb_c, BLOCK_BYTES)
     return blk.transpose(0, 2, 1, 3).reshape(-1)
 
 
@@ -658,7 +662,7 @@ def generate_inputs(geometry, layer_type, context_len, max_l, seed=0):
     for off, fmt, rows, cols in W.values():
         std = 1 / np.sqrt(cols)
         if fmt == "q4nx":
-            scale = np.abs(rng.normal(std / 4.6, std / 20, (rows, cols // Q4_GROUP)))
+            scale = np.abs(rng.normal(std / 4.6, std / 20, (rows, cols // GROUP)))
             mins = -7.5 * scale + rng.normal(0, std / 10, scale.shape)
             codes = rng.integers(0, 16, (rows, cols), dtype=np.uint8)
             blob = pack_q4nx(codes, scale, mins)
