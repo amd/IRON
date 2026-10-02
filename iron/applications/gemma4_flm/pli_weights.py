@@ -19,7 +19,9 @@ K_TILE, N_TILE, CT_K, S, T = 256, 64, 256, 8, 8
 
 def unblock(buf, K, N):
     """vision_mm's block order to a row-major (K, N) matrix."""
-    x = buf.reshape(N // N_TILE, K // K_TILE, K_TILE // CT_K, N_TILE // T, S, CT_K // S, T)
+    x = buf.reshape(
+        N // N_TILE, K // K_TILE, K_TILE // CT_K, N_TILE // T, S, CT_K // S, T
+    )
     return x.transpose(1, 2, 5, 6, 0, 3, 4).reshape(K, N)
 
 
@@ -40,11 +42,18 @@ def write(model_dir, config, op, out_dir):
     layers = range(config["num_hidden_layers"])
     files = {
         "down": [("model.per_layer_model_proj.weight_prefill", d, pli_d * len(layers))],
-        "gate": [(f"model.layers.{i}.inp_gate.weight_prefill", d, pli_d) for i in layers],
-        "up": [(f"model.layers.{i}.per_layer_projection.weight_prefill", pli_d, d) for i in layers],
+        "gate": [
+            (f"model.layers.{i}.inp_gate.weight_prefill", d, pli_d) for i in layers
+        ],
+        "up": [
+            (f"model.layers.{i}.per_layer_projection.weight_prefill", pli_d, d)
+            for i in layers
+        ],
     }
     for stem, tensors in files.items():
         with open(out_dir / f"pli_{stem}.weights", "wb") as out:
             for name, K, N in tensors:
                 B = unblock(read_bf16(model_dir / "model.q4nx", name), K, N)
-                out.write(op.pack_B(torch.from_numpy(B).to(torch.bfloat16)).numpy().tobytes())
+                out.write(
+                    op.pack_B(torch.from_numpy(B).to(torch.bfloat16)).numpy().tobytes()
+                )

@@ -8,7 +8,7 @@
 Reads the model from $FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2. Writes:
 
     <out>/xclbins/Gemma4-E2B-IT-NPU2/   the engine's xclbins, six of them replaced by IRON's
-    <out>/xclbins/.../iron/             instruction streams and repacked weights
+    <out>/xclbins/.../iron/             instruction sequences and repacked weights
     <out>/gen/                          sequence generators the engine compiles in
 """
 
@@ -36,15 +36,17 @@ import pli_weights
 
 MODEL = "Gemma4-E2B-IT-NPU2"
 
-# The longest prompt chunk, `flm serve --pcl`. The engine starts a chunk up to
-# 127 tokens early and pads it to a multiple of 256 rows; the GEMMs need one
-# instruction stream per resulting row count M.
+# The longest prompt chunk, flm's --prefill-chunk-len. The engine starts a
+# chunk up to 127 tokens early and pads it to a multiple of 256 rows. Each row
+# count M needs its own GEMM instruction sequence.
 CHUNK = 512
+# M=768 occurs only for a chunk that starts at an offset that is not a multiple
+# of 128. The current flm clears the context each turn and never dispatches it.
 WIDTHS = range(256, (CHUNK + 127 + 255) // 256 * 256 + 1, 256)
 # The per-layer-input projections pad M to a multiple of 512.
 PLI_WIDTHS = sorted({(m + 511) // 512 * 512 for m in WIDTHS})
 
-# (K, N, gelu) of every projection GEMM. Sliding-window and global layers
+# (K, N, gelu) of every projection GEMM of Gemma 4 E2B. Sliding-window and global layers
 # differ in head size; some layers have an MLP twice as wide. v has k's shape.
 GEMMS = [
     (1536, 2048, False),  # q, sliding window
@@ -103,7 +105,9 @@ def write_generator(op, path, namespace):
     # IRON emits a dlopen shim after the generator. The engine links several
     # generators, so drop the shim and give each generator a namespace.
     includes, body = cpp[: cpp.index('extern "C"')].split("\ninline ", 1)
-    path.write_text(f"{includes}\nnamespace iron::seq::{namespace} {{\ninline {body}}}\n")
+    path.write_text(
+        f"{includes}\nnamespace iron::seq::{namespace} {{\ninline {body}}}\n"
+    )
 
 
 def compile_all(ops):
@@ -113,7 +117,7 @@ def compile_all(ops):
 
 
 def one_xclbin(ops):
-    """The xclbin all `ops` share. The engine has one slot per operator."""
+    """The xclbin all `ops` share. The engine registers one xclbin per operator."""
     xclbins = {op.xclbin_artifact.filename for op in ops}
     assert len(xclbins) == 1, f"expected one configuration, got {sorted(xclbins)}"
     return xclbins.pop()
@@ -145,20 +149,31 @@ def main(engine_xclbins, out):
     )
     dequants = [DequantBFP(K=k, N=n, context=ctx) for k, n in DEQUANT]
     dequants += [
-        DequantBFP(K=k, N=n, run_out_features=UPGATE_RUN,
-                   run_period_out_features=2 * UPGATE_RUN, context=ctx)
+        DequantBFP(
+            K=k,
+            N=n,
+            run_out_features=UPGATE_RUN,
+            run_period_out_features=2 * UPGATE_RUN,
+            context=ctx,
+        )
         for k, n in UPGATE
     ]
     gemms = [gemm(m, k, n, gelu, ctx) for m in WIDTHS for k, n, gelu in GEMMS]
     d, pli_d = config["hidden_size"], config["hidden_size_per_layer_input"]
-    pli_shapes = [(d, pli_d * config["num_hidden_layers"], False), (d, pli_d, True), (pli_d, d, False)]
+    pli_shapes = [
+        (d, pli_d * config["num_hidden_layers"], False),
+        (d, pli_d, True),
+        (pli_d, d, False),
+    ]
     gemms += [gemm(m, k, n, gelu, ctx) for m in PLI_WIDTHS for k, n, gelu in pli_shapes]
 
     compile_all([*layers.values(), attn, swa, lm_head, *dequants, *gemms])
 
     # Stage the engine's xclbins with IRON's under the engine's file names. The
-    # engine registers each xclbin by its path, and the overrides register the
+    # engine registers each xclbin by its path, and overrides.hpp registers the
     # same paths, so IRON's operators take no hardware context of their own.
+    # The four layer types configure the array identically, so one xclbin
+    # serves all four.
     stage = out / "xclbins" / MODEL
     shutil.rmtree(stage, ignore_errors=True)
     shutil.copytree(Path(engine_xclbins) / MODEL, stage, symlinks=True)
@@ -177,10 +192,14 @@ def main(engine_xclbins, out):
     # Static instruction sequences, named by the shape the header looks them up by.
     shutil.copyfile(lm_head.insts_artifact.filename, iron / "lm_head.bin")
     for op in dequants:
-        shutil.copyfile(op.insts_artifact.filename, iron / f"dequant_K{op.K}_N{op.N}.bin")
+        shutil.copyfile(
+            op.insts_artifact.filename, iron / f"dequant_K{op.K}_N{op.N}.bin"
+        )
     for op in gemms:
         gelu = "_gelu" if op.epilogue == Epilogue.GELU else ""
-        shutil.copyfile(op.insts_artifact.filename, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin")
+        shutil.copyfile(
+            op.insts_artifact.filename, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin"
+        )
     pli_weights.write(model_dir, config, gemms[0], iron)
 
     # Dynamic instruction sequences.
