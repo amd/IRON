@@ -6,18 +6,19 @@ SPDX-License-Identifier: Apache-2.0
 # Gemma 4 on IRON operators in FastFlowLM
 
 This example application demonstrates how to use IRON operators inside the
-[FastFlowLM inference engine](https://github.com/ROCm/FastFlowLM) by overriding
-its dispatches to the NPU. The FastFlowLM infrastructure loads the model,
-tokenizes the prompt and serves the API; every operator on the text path of
-Gemma 4 E2B that runs on the NPU is overridden with its open-source IRON
-counterpart. The engine generates the same tokens as FastFlowLM without
-overrides.
+[FastFlowLM inference engine](https://github.com/ROCm/FastFlowLM) to build the
+Gemma 4 model from open source code. The FastFlowLM infrastructure loads the
+model, tokenizes the prompt and serves the API; this repository provides the
+operators that run on the NPU on the text path of Gemma 4 E2B.
 
 ## Quick start
 
-You need an NPU2 device (Strix, Krackan) and the IRON environment.
-FastFlowLM's build needs CMake, Ninja, g++ 13, Rust, Boost, CURL, FFTW3,
-FFmpeg, readline and ncurses.
+You need an NPU2 device (Strix, Krackan) and the IRON environment, see the
+[IRON installation instructions](../../../README.md#installation-linux) (in
+short, `pip install -r requirements.txt`). The `Makefile` pulls and builds the
+FastFlowLM engine, with its operators replaced by their open-source
+implementations from this repository. The build needs FastFlowLM's
+[documented prerequisites](https://github.com/ROCm/FastFlowLM/blob/main/docs/linux-getting-started.md#building-from-source).
 
 1. Choose the model directory. flm reads the model from
    `$FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2`.
@@ -41,18 +42,35 @@ FFmpeg, readline and ncurses.
    make engine
    ```
 
-4. Serve the model on the IRON engine, and send it a request.
+4. Serve the model on the IRON engine. Start from this directory.
+   `--prefill-chunk-len 512` is required: the IRON operators are built for
+   prompt chunks of up to 512 tokens.
 
    ```bash
-   make serve
+   cd build/FastFlowLM/src
+   LD_LIBRARY_PATH=../../engine/engines FLM_XCLBIN_PATH=../.. \
+       ./build/flm serve gemma4-it:e2b --prefill-chunk-len 512 --port 11434
+   ```
+
+   Send it a request from another terminal:
+
+   ```bash
    curl http://127.0.0.1:11434/api/chat -d '{"model": "gemma4-it:e2b", "stream": false,
        "messages": [{"role": "user", "content": "What is 347 + 589?"}]}'
    ```
 
-   The server log names the directory of the IRON operators:
+   Check the server log to confirm you are using the IRON operators:
 
    ```
    [info]  IRON operators from .../build/xclbins/Gemma4-E2B-IT-NPU2/iron
+   ```
+
+   Alternatively, for an interactive chatbot in your command line:
+
+   ```bash
+   cd build/FastFlowLM/src
+   LD_LIBRARY_PATH=../../engine/engines FLM_XCLBIN_PATH=../.. \
+       ./build/flm run gemma4-it:e2b --prefill-chunk-len 512
    ```
 
 The test serves a word problem and a 1259-token prompt on both engines. It
@@ -62,9 +80,9 @@ checks that the token ids match:
 pytest -m extensive --iterations 1 iron/applications/gemma4_flm
 ```
 
-The `Makefile` clones FastFlowLM from
-[andrej/FastFlowLM](https://github.com/andrej/FastFlowLM), which adds the
-`FLM_OVERRIDE` hooks and the Gemma 4 engine.
+The `Makefile` clones FastFlowLM at the commit of
+[ROCm/FastFlowLM#763](https://github.com/ROCm/FastFlowLM/pull/763), which adds
+the `FLM_OVERRIDE` hooks and the Gemma 4 engine.
 
 | File | Purpose |
 |---|---|
@@ -87,7 +105,8 @@ This example uses six operator classes from `iron/operators/flm/`:
 | [Decode layer](../../operators/flm/layer) | `DecodeLayer` | low | dynamic: `context_len`, `max_l` | `*_layer_run`, `*_layer`, `*_layer_mv` |
 
 The high-level operators describe their dataflow with IRON's Workers,
-ObjectFifos and runtime sequence:
+ObjectFifos and runtime sequence. Alongside the other operators in IRON, these
+are good examples of idiomatic IRON code:
 
 - `GEMM` runs every prefill projection: q, k, v, o, the MLP and the
   per-layer-input (PLI) projections. It applies the activation in its output
@@ -97,19 +116,16 @@ ObjectFifos and runtime sequence:
 - `LMHead` computes the logits of the last token from the 4-bit vocabulary
   weights.
 
-The low-level operators are ports of FastFlowLM's designs. Their designs
-also place locks, tile DMAs, flows and shim buffer descriptors by hand. They
-are not yet fully ported to IRON's high-level abstractions:
+The low-level operators are less portable and less idiomatic than the
+operators above. These low-level designs place locks, tile DMAs, flows and shim
+buffer descriptors by hand:
 
 - `PrefillAttention` and `PrefillSlidingAttention` run causal attention for
-  a chunk of prompt tokens. The sliding variant reads only the last 512 keys
-  of each query.
+  a chunk of prompt tokens.
 - `DecodeLayer` runs one token through one whole layer: norms, projections,
-  attention over the KV cache and the MLP. One design spans the whole array.
-  Gemma 4 has four layer types. They share one xclbin and differ in the
-  instruction sequence.
+  attention over the KV cache and the MLP.
 
-Each of these operators is an IRON operator. Its directory holds these files:
+Each of these operators is an IRON operator. Each operator consists of:
 
 - `op.py` defines the operator class, an `MLIROperator`. Its fields describe
   one problem, for example a GEMM's `M`, `K` and `N`. The class declares the
