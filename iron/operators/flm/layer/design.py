@@ -607,23 +607,38 @@ def _sequence(
         emit(leg("move_k", kv_arg.op, 0, d2m, pkt=mv_pkt))
         emit(leg("move_v", kv_arg.op, v_cache_off, d2m, pkt=mv_pkt))
     else:
-        # The sliding-window cache is a ring. Its window wraps into a second
-        # phase when L >= SW. The sequence cannot branch on L. A mask sets the
-        # second phase's length to 0 when L < SW.
+        # The sliding-window cache is a ring of `rows` rows. Its oldest row is
+        # `start`. Phase 1 sends rows start..rows-1. Phase 2 sends rows
+        # 0..start-1. The sequence cannot branch on L, so masks select the
+        # phase bounds. mlir-aie rejects a zero-length BD. When start is 0,
+        # phase 1 therefore ends one row early and phase 2 sends the last row.
+        # Both phases feed one stream into the memtile, so the split point
+        # does not change the data the memtile receives.
         _m = _mask_ge(L, SW)
         _nm = arith.xori(_m, _as_i32(-1))
         _lb = arith.andi(L, _as_i32(SW - 1))
         _Lp = arith.andi(L + (LK - 1), _as_i32(-LK))
-        p1_off = arith.andi(_m, _lb * DK)
-        p1_len = arith.ori(
-            arith.andi(_m, (_as_i32(SW) - _lb) * DK), arith.andi(_nm, _Lp * DK)
-        )
-        p2_len = arith.andi(_m, _lb * DK)
+        rows = arith.ori(arith.andi(_m, _as_i32(SW)), arith.andi(_nm, _Lp))
+        start = arith.andi(_m, _lb)
+        # All ones if start is 0, else 0.
+        _z = arith.xori(_mask_ge(start, 1), _as_i32(-1))
+        p1_off = start * DK
+        p1_len = (rows - start) * DK - arith.andi(_z, _as_i32(DK))
+        p2_off = arith.andi(_z, p1_len)
+        p2_len = arith.ori(start * DK, arith.andi(_z, _as_i32(DK)))
         emit(leg("move_k", kv_arg.op, p1_off, p1_len, pkt=mv_pkt))
         emit(leg("move_v", kv_arg.op, p1_off + v_cache_off, p1_len, pkt=mv_pkt))
-        # A zero-length BD issues no token. The second phase awaits none.
-        emit(leg("move_k", kv_arg.op, 0, p2_len, token=False, pkt=mv_pkt))
-        emit(leg("move_v", kv_arg.op, v_cache_off, p2_len, token=False, pkt=mv_pkt))
+        emit(leg("move_k", kv_arg.op, p2_off, p2_len, token=False, pkt=mv_pkt))
+        emit(
+            leg(
+                "move_v",
+                kv_arg.op,
+                p2_off + v_cache_off,
+                p2_len,
+                token=False,
+                pkt=mv_pkt,
+            )
+        )
     for name in ("o", "up_gate", "down"):
         move_weights(weights[name])
     emit(pli_leg("pli_gate"))
