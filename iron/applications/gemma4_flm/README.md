@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Gemma 4 on IRON operators in FastFlowLM
 
 This example runs the text path of Gemma 4 E2B on IRON operators inside
-[FastFlowLM](https://github.com/FastFlowLM/FastFlowLM)'s engine. FastFlowLM
+[FastFlowLM](https://github.com/ROCm/FastFlowLM)'s engine. FastFlowLM
 loads the model, tokenizes the prompt and serves the API. Every NPU operator
 of the text path is an IRON operator. The engine generates the same tokens as
 it does with FastFlowLM's own operators.
@@ -67,7 +67,7 @@ takes under a minute.
 The `Makefile` clones FastFlowLM from
 [andrej/FastFlowLM](https://github.com/andrej/FastFlowLM), which adds the
 `FLM_OVERRIDE` hooks and the Gemma 4 engine. The pin moves to
-[FastFlowLM/FastFlowLM](https://github.com/FastFlowLM/FastFlowLM) once that
+[ROCm/FastFlowLM](https://github.com/ROCm/FastFlowLM) once that
 repository contains the hooks.
 
 | File | Purpose |
