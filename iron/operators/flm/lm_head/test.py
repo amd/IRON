@@ -85,7 +85,7 @@ def _check(dim, vocab, softcap, aie_context, seed=0, tanh_error=True, metrics=Fa
     dev = aie_utils.get_current_device()
     weights = dequantize(w, dim, vocab, dev.cols, len(dev.core_rows))
     x64 = x.astype(np.float64)
-    expected = reference(weights, x64, softcap)
+    expected = op.reference(w, x)
     # The logits before the softcap set the projection's error scale.
     uncapped = reference(weights, x64, 1e30)
     bound = PROJECTION_ERROR * np.abs(uncapped).max()
@@ -133,9 +133,14 @@ def test_gemma4_vocabulary(dim, aie_context):
 
 @requires_aie2p
 @pytest.mark.parametrize(
-    "dim, vocab, match",
-    [(1000, 4096, "multiple of"), (1536, 1000, "multiple of")],
+    "dim, vocab, softcap, match",
+    [
+        (1000, 4096, 30.0, "multiple of"),
+        (1536, 1000, 30.0, "multiple of"),
+        (1536, 4096, 0.0, "finite and positive"),
+        (1536, 4096, float("inf"), "finite and positive"),
+    ],
 )
-def test_rejects_unservable_shapes(dim, vocab, match, aie_context):
+def test_rejects_unservable_shapes(dim, vocab, softcap, match, aie_context):
     with pytest.raises(ValueError, match=match):
-        LMHead(dim=dim, vocab=vocab, softcap=30.0, context=aie_context)
+        LMHead(dim=dim, vocab=vocab, softcap=softcap, context=aie_context)
