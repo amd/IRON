@@ -8,7 +8,8 @@ The reference takes the five buffers of DecodeLayer in the engine's formats and
 returns x and the kv cache as the device leaves them:
 
     x_out, kv_out = reference(
-        "GEMMA4_E2B", "swa", x, proj, rms, rope_rms, kv, context_len=37, max_l=1024)
+        FLM_GEMMA4_E2B_DECODE, "swa", x, proj, rms, rope_rms, kv,
+        context_len=37, max_l=1024)
 
 It reproduces the kernels' bf16 rounding, accumulation order, lookup tables and
 fp32 emulation. On 20 dispatches captured from FastFlowLM's engine (E2B and E4B,
@@ -32,35 +33,10 @@ Numerics that set the tolerance of a comparison:
   changes exp by up to 12%.
 """
 
+import dataclasses
+
 import numpy as np
 
-# Dimensions from aie_kernels/flm_gemma4/decode_geometry.h and the models'
-# config.json. dh is the head dim of a global layer, swa_dh of a sliding-window
-# layer. E2B's skip layers have a double-wide MLP.
-GEOMETRY = {
-    "GEMMA4_E2B": dict(
-        D=1536,
-        heads=8,
-        kv_heads=1,
-        intermediate=6144,
-        pli_d=256,
-        dh=512,
-        swa_dh=256,
-        double_wide_mlp=True,
-        pli_input_scale=1 / np.sqrt(1536),
-    ),
-    "GEMMA4_E4B": dict(
-        D=2560,
-        heads=8,
-        kv_heads=2,
-        intermediate=10240,
-        pli_d=256,
-        dh=512,
-        swa_dh=256,
-        double_wide_mlp=False,
-        pli_input_scale=1 / np.sqrt(2560),
-    ),
-}
 LAYER_TYPES = ("global", "swa", "global_skip", "swa_skip")
 SLIDING_WINDOW = 512
 PLI_PROJECTION_SCALE = 1 / np.sqrt(2)
@@ -146,21 +122,24 @@ GELU_SEGMENTS = np.array(
 )
 
 
-def geometry(model, layer_type):
-    """The dimensions of one layer type, in elements."""
-    if model not in GEOMETRY:
-        raise ValueError(f"model must be one of {sorted(GEOMETRY)}")
+def layer_dims(geometry, layer_type):
+    """The dimensions of one layer type, in elements, by geometry field name.
+
+    geometry is aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or FLM_GEMMA4_E4B_DECODE.
+    dh is the head dim of this layer type. A skip layer with double_wide_mlp has
+    twice the intermediate size.
+    """
     if layer_type not in LAYER_TYPES:
         raise ValueError(f"layer_type must be one of {LAYER_TYPES}")
-    g = dict(GEOMETRY[model])
+    g = dataclasses.asdict(geometry)
     g["swa"] = layer_type.startswith("swa")
     g["skip"] = layer_type.endswith("_skip")
     if g["swa"]:
         g["dh"] = g["swa_dh"]
-    g["dq"] = g["heads"] * g["dh"]
-    g["dk"] = g["kv_heads"] * g["dh"]
+    g["dq"] = g["num_attn_heads"] * g["dh"]
+    g["dk"] = g["num_kv_heads"] * g["dh"]
     if g["skip"] and g["double_wide_mlp"]:
-        g["intermediate"] *= 2
+        g["intermediate_size"] *= 2
     return g
 
 
@@ -169,15 +148,15 @@ def geometry(model, layer_type):
 # ---------------------------------------------------------------------------
 
 
-def proj_layout(model, layer_type):
+def proj_layout(geometry, layer_type):
     """Weight name -> (byte offset, format, rows, cols) in proj.
 
     The weights lie back to back: q, k and v (absent on a skip layer), o, the
     interleaved up/gate and down in q4nx, then the per-layer-input down, gate
     and up projections in blocked bf16. rows are output features.
     """
-    g = geometry(model, layer_type)
-    D, I, P = g["D"], g["intermediate"], g["pli_d"]
+    g = layer_dims(geometry, layer_type)
+    D, I, P = g["model_dim"], g["intermediate_size"], g["pli_d"]
     items = [("q", "q4nx", g["dq"], D)]
     if not g["skip"]:
         items += [("k", "q4nx", g["dk"], D), ("v", "q4nx", g["dk"], D)]
@@ -201,12 +180,12 @@ def _size(fmt, rows, cols):
     return rows * cols * (5 if fmt == "q4nx" else 16) // 8
 
 
-def rope_rms_layout(model, layer_type):
+def rope_rms_layout(geometry, layer_type):
     """Element offsets in rope_rms: cos and sin of this token's position, the q
     and k norm weights, the per-layer embedding of this token, the per-layer
     norm weight, the post-per-layer-input norm weight and the layer scale."""
-    g = geometry(model, layer_type)
-    dh, P, D = g["dh"], g["pli_d"], g["D"]
+    g = layer_dims(geometry, layer_type)
+    dh, P, D = g["dh"], g["pli_d"], g["model_dim"]
     lay = dict(cos=0, sin=dh // 2, q_norm=dh, k_norm=2 * dh, pli_embed=3 * dh)
     lay["pli_norm"] = lay["pli_embed"] + P
     lay["post_pli_norm"] = lay["pli_norm"] + P
@@ -215,14 +194,14 @@ def rope_rms_layout(model, layer_type):
     return lay
 
 
-def kv_rows(model, layer_type, max_l):
+def kv_rows(geometry, layer_type, max_l):
     """Rows of each half (K, then V) of the kv cache."""
-    return SLIDING_WINDOW if geometry(model, layer_type)["swa"] else max_l
+    return SLIDING_WINDOW if layer_dims(geometry, layer_type)["swa"] else max_l
 
 
-def kv_row(model, layer_type, context_len):
+def kv_row(geometry, layer_type, context_len):
     """The cache row of the token at position context_len."""
-    if geometry(model, layer_type)["swa"]:
+    if layer_dims(geometry, layer_type)["swa"]:
         return context_len % SLIDING_WINDOW
     return context_len
 
@@ -545,7 +524,7 @@ def _u8(buf):
     return np.ascontiguousarray(buf).reshape(-1).view(np.uint8)
 
 
-def reference(model, layer_type, x, proj, rms, rope_rms, kv, context_len, max_l):
+def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max_l):
     """One decode-layer dispatch on DecodeLayer's five buffers.
 
     The buffers are numpy arrays of any dtype (bf16, uint16 or uint8) and may be
@@ -553,19 +532,19 @@ def reference(model, layer_type, x, proj, rms, rope_rms, kv, context_len, max_l)
     patterns: the layer output in x[:D], and on a non-skip layer this token's K
     and V rows in kv.
     """
-    g = geometry(model, layer_type)
+    g = layer_dims(geometry, layer_type)
     D, dh, H, n_kv, P, dk = (
-        g["D"],
+        g["model_dim"],
         g["dh"],
-        g["heads"],
-        g["kv_heads"],
+        g["num_attn_heads"],
+        g["num_kv_heads"],
         g["pli_d"],
         g["dk"],
     )
     x16, rms16, rr16 = (_u8(b).view("<u2") for b in (x, rms, rope_rms))
     proj_u8 = _u8(proj)
-    W = proj_layout(model, layer_type)
-    lay = rope_rms_layout(model, layer_type)
+    W = proj_layout(geometry, layer_type)
+    lay = rope_rms_layout(geometry, layer_type)
 
     def vec(buf, off, n):
         return bf16_to_f32(buf[off : off + n]).astype(np.float64)
@@ -587,14 +566,14 @@ def reference(model, layer_type, x, proj, rms, rope_rms, kv, context_len, max_l)
     q = rope_head(q4("q", xn).reshape(H, dh), vec(rr16, lay["q_norm"], dh), cos, sin)
 
     kv_out = _u8(kv).view("<u2").copy()
-    rows = kv_rows(model, layer_type, max_l)
+    rows = kv_rows(geometry, layer_type, max_l)
     v_off = rows * dk
     if not g["skip"]:
         k_new = rope_head(
             q4("k", xn).reshape(n_kv, dh), vec(rr16, lay["k_norm"], dh), cos, sin
         )
         v_new = rms_norm(q4("v", xn).reshape(n_kv, dh), None)
-        r = kv_row(model, layer_type, context_len)
+        r = kv_row(geometry, layer_type, context_len)
         kv_out[r * dk : (r + 1) * dk] = to_bf16(k_new.reshape(-1))
         kv_out[v_off + r * dk : v_off + (r + 1) * dk] = to_bf16(v_new.reshape(-1))
 
@@ -657,7 +636,7 @@ def pack_bf16_blocked(w):
     return to_bf16(b.reshape(-1), "rne").view(np.uint8)
 
 
-def generate_inputs(model, layer_type, context_len, max_l, seed=0):
+def generate_inputs(geometry, layer_type, context_len, max_l, seed=0):
     """Random buffers (x, proj, rms, rope_rms, kv) for one dispatch, as uint16
     bf16 bit patterns (proj as uint8).
 
@@ -671,9 +650,9 @@ def generate_inputs(model, layer_type, context_len, max_l, seed=0):
     rows the layer reads.
     """
     rng = np.random.default_rng(seed)
-    g = geometry(model, layer_type)
-    D, P, dh, dk = g["D"], g["pli_d"], g["dh"], g["dk"]
-    W = proj_layout(model, layer_type)
+    g = layer_dims(geometry, layer_type)
+    D, P, dh, dk = g["model_dim"], g["pli_d"], g["dh"], g["dk"]
+    W = proj_layout(geometry, layer_type)
     end = max(off + _size(fmt, rows, cols) for off, fmt, rows, cols in W.values())
     proj = np.zeros(end, np.uint8)
     for off, fmt, rows, cols in W.values():
@@ -693,7 +672,7 @@ def generate_inputs(model, layer_type, context_len, max_l, seed=0):
     # The input, post-attention, pre-feedforward and post-feedforward norms.
     rms = (rng.normal(1, 0.2, (4, D)) * np.array([[20], [0.5], [4], [1]])).reshape(-1)
 
-    lay = rope_rms_layout(model, layer_type)
+    lay = rope_rms_layout(geometry, layer_type)
     rr = np.zeros(lay["size"])
     if g["swa"]:
         inv_freq = 10000.0 ** (-np.arange(dh // 2) * 2 / dh)
@@ -712,7 +691,7 @@ def generate_inputs(model, layer_type, context_len, max_l, seed=0):
         rr[lay[name] : lay[name] + n] = rng.normal(mean, std, n)
     rr[lay["layer_scale"]] = 0.6
 
-    rows = kv_rows(model, layer_type, max_l)
+    rows = kv_rows(geometry, layer_type, max_l)
     kv = np.zeros((2, rows, dk))
     n = min(context_len + g["skip"], rows)
     kv[0, :n] = rng.normal(0, 0.1, (n, dk))
@@ -724,10 +703,12 @@ def generate_inputs(model, layer_type, context_len, max_l, seed=0):
 
 def _query(g, W, x, proj, rms, rope_rms, lay):
     """The rotated query heads [heads, dh] of the layer."""
-    D, dh = g["D"], g["dh"]
+    D, dh = g["model_dim"], g["dh"]
     off, _, rows, cols = W["q"]
     xn = rms_norm(bf16_to_f32(x[:D]), bf16_to_f32(rms[:D]))
-    qp = q4_matvec(xn, *parse_q4nx(proj, off, rows, cols)).reshape(g["heads"], dh)
+    qp = q4_matvec(xn, *parse_q4nx(proj, off, rows, cols)).reshape(
+        g["num_attn_heads"], dh
+    )
     cos = bf16_to_f32(rope_rms[lay["cos"] : lay["cos"] + dh // 2])
     sin = bf16_to_f32(rope_rms[lay["sin"] : lay["sin"] + dh // 2])
     return rope_head(
@@ -758,8 +739,8 @@ def _plant_needles(g, context_len, kv, q, rng):
         rows.add(order[valid - 1])
     if valid < kv.shape[1] and context_len + 1 < kv.shape[1]:
         rows.add(context_len + 1)
-    n_kv, dh = g["kv_heads"], g["dh"]
-    group = g["heads"] // n_kv
+    n_kv, dh = g["num_kv_heads"], g["dh"]
+    group = g["num_attn_heads"] // n_kv
     for h in range(n_kv):
         qh = q[h * group : (h + 1) * group]
         u = (qh / np.linalg.norm(qh, axis=1, keepdims=True)).sum(0)

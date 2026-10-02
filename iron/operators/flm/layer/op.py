@@ -8,7 +8,7 @@ from ml_dtypes import bfloat16
 
 import aie.utils as aie_utils
 from aie.dialects._aie_enum_gen import AIEArch
-from aie.iron import kernels
+from aie.iron.kernels import FlmGemma4DecodeGeometry
 
 from iron.common import (
     AIERuntimeArgSpec,
@@ -24,11 +24,6 @@ from iron.operators.flm.layer.design import (
     layer_kernels,
 )
 
-GEOMETRIES = {
-    "GEMMA4_E2B": kernels.FLM_GEMMA4_E2B_DECODE,
-    "GEMMA4_E4B": kernels.FLM_GEMMA4_E4B_DECODE,
-}
-
 
 @dataclass
 class DecodeLayer(MLIROperator):
@@ -37,15 +32,16 @@ class DecodeLayer(MLIROperator):
     See README.md for the parameters, the buffers and the dispatch parameters.
     """
 
-    model: str
+    geometry: FlmGemma4DecodeGeometry
     layer_type: str
     context: object = field(default=None, repr=False)
     _kernel_fns: dict = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
-        if self.model not in GEOMETRIES:
+        if self.geometry not in RTP_ADDRESSES:
             raise ValueError(
-                f"model must be one of {sorted(GEOMETRIES)}, not {self.model!r}"
+                "geometry must be aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or "
+                f"FLM_GEMMA4_E4B_DECODE, not {self.geometry!r}"
             )
         if self.layer_type not in LAYER_TYPES:
             raise ValueError(
@@ -57,13 +53,9 @@ class DecodeLayer(MLIROperator):
         MLIROperator.__init__(self, context=self.context)
 
     @property
-    def geometry(self):
-        return GEOMETRIES[self.model]
-
-    @property
     def name(self) -> str:
         dev = aie_utils.get_current_device().resolve().name
-        return f"FLM_DecodeLayer_{self.model}_{self.layer_type}_{dev}"
+        return f"FLM_DecodeLayer_{self.geometry.name}_{self.layer_type}_{dev}"
 
     def _kernels(self):
         """layer_kernels(geometry), built once for the MLIR and the kernel objects."""
@@ -83,7 +75,7 @@ class DecodeLayer(MLIROperator):
                 (
                     aie_utils.get_current_device(),
                     self.geometry,
-                    RTP_ADDRESSES[self.model],
+                    RTP_ADDRESSES[self.geometry],
                     self.layer_type,
                 ),
                 {"kernels": self._kernels()},

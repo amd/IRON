@@ -11,16 +11,18 @@ FastFlowLM's engine can therefore drive it. The kernels come from mlir-aie's
 `flm_gemma4_decode_*` factories.
 
 ```python
+from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 from iron.operators.flm import DecodeLayer
 
-op = DecodeLayer(model="GEMMA4_E2B", layer_type="swa", context=ctx)
+op = DecodeLayer(geometry=FLM_GEMMA4_E2B_DECODE, layer_type="swa", context=ctx)
 op.compile()
 run = op.get_callable()
 run.set_parameters(context_len=37, max_l=4096)
 run(x, proj, rms, rope_rms, kv)
 ```
 
-`model` is `GEMMA4_E2B` or `GEMMA4_E4B`. `layer_type` is one of `global`,
+`geometry` is `FLM_GEMMA4_E2B_DECODE` or `FLM_GEMMA4_E4B_DECODE` from
+`aie.iron.kernels`. `layer_type` is one of `global`,
 `swa`, `global_skip` and `swa_skip`. A skip layer reads another layer's KV
 cache and has no k or v projection.
 
