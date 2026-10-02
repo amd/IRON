@@ -20,6 +20,7 @@ from pathlib import Path
 
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
+from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 
 from iron.common import AIEContext
 from iron.operators.flm import (
@@ -130,7 +131,7 @@ def main(engine_xclbins, out):
     ctx = AIEContext(build_dir=out / "ops")
 
     layers = {
-        t: DecodeLayer(model="GEMMA4_E2B", layer_type=t, context=ctx)
+        t: DecodeLayer(FLM_GEMMA4_E2B_DECODE, layer_type=t, context=ctx)
         for t in ("global", "swa", "global_skip", "swa_skip")
     }
     heads = dict(
