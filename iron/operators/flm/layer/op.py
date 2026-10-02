@@ -35,7 +35,6 @@ class DecodeLayer(MLIROperator):
     geometry: FlmGemma4DecodeGeometry
     layer_type: str
     context: object = field(default=None, repr=False)
-    _kernel_fns: dict = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         if self.geometry not in RTP_ADDRESSES:
@@ -57,12 +56,6 @@ class DecodeLayer(MLIROperator):
         dev = aie_utils.get_current_device().resolve().name
         return f"FLM_DecodeLayer_{self.geometry.name}_{self.layer_type}_{dev}"
 
-    def _kernels(self):
-        """layer_kernels(geometry), built once for the MLIR and the kernel objects."""
-        if self._kernel_fns is None:
-            self._kernel_fns = layer_kernels(self.geometry)
-        return self._kernel_fns
-
     def get_dispatch_params(self):
         return {"context_len": np.int32, "max_l": np.int32}
 
@@ -78,12 +71,15 @@ class DecodeLayer(MLIROperator):
                     RTP_ADDRESSES[self.geometry],
                     self.layer_type,
                 ),
-                {"kernels": self._kernels()},
+                {"kernels": layer_kernels(self.geometry)},
             ),
         )
 
     def get_kernel_artifacts(self):
-        return [KernelObjectArtifact.from_extern(fn) for fn in self._kernels().values()]
+        return [
+            KernelObjectArtifact.from_extern(fn)
+            for fn in layer_kernels(self.geometry).values()
+        ]
 
     def get_arg_spec(self):
         sizes = arg_sizes(self.geometry)
