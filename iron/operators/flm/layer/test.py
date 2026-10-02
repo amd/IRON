@@ -42,6 +42,7 @@ from iron.operators.flm.layer.reference import (
     layer_dims,
     kv_row,
     kv_rows,
+    proj_layout,
     reference,
 )
 from iron.operators.flm.testing import requires_aie2p
@@ -331,6 +332,9 @@ def test_weight_reads_fit_proj(geometry, layer_type, npu2):
     blob = weight_layout(g, layer_type)
     assert end == max(w.offset + w.size for w in blob.values())
     assert end <= arg_sizes(g)["proj"]
+    ref = proj_layout(g, layer_type)
+    for name in ("o", "up_gate", "down", "pli_down", "pli_gate", "pli_up"):
+        assert (blob[name].dout, blob[name].din) == ref[name][2:], name
 
 
 @pytest.mark.parametrize(

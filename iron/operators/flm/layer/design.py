@@ -358,7 +358,7 @@ def weight_layout(geometry, layer_type):
         "down": (D, inter, True),
         "pli_down": (g.pli_d, D, False),
         "pli_gate": (g.pli_d, D, False),
-        "pli_up": (g.pli_d, D, False),
+        "pli_up": (D, g.pli_d, False),
     }
     layout, offset = {}, 0
     for name, (dout, din, packed) in shapes.items():
@@ -1709,10 +1709,11 @@ def decode_layer(
     """
     if layer_type not in LAYER_TYPES:
         raise ValueError(f"layer_type must be one of {LAYER_TYPES}")
-    if sliding_window & (sliding_window - 1):
+    if sliding_window < LK or sliding_window & (sliding_window - 1):
         raise ValueError(
-            f"sliding_window ({sliding_window}) must be a power of two: the "
-            "sequence takes the remainder by it with a mask"
+            f"sliding_window ({sliding_window}) must be a power of two of at "
+            f"least {LK}: the sequence takes the remainder by it with a mask, "
+            "and the attention memtile takes the cache in buffers of LK rows"
         )
     g = geometry
     G_DQ = g.num_attn_heads * g.dh
