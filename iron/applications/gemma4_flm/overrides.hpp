@@ -2,14 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Runs every text-path operator of FastFlowLM's Gemma 4 engine on IRON's operators.
-//
-// The engine wraps each operator dispatch in FLM_OVERRIDE(name, expr, ...). By
-// default that expands to `expr`, the engine's own dispatch. The engine build
-// includes this header, which redefines FLM_OVERRIDE to paste FLM_OV_<name>,
-// and every FLM_OV_<name> below runs an IRON operator in its place.
-//
-// The engine includes this header before it defines its own types, so the
-// helpers are templates over what the call sites pass.
+// The engine build includes this header.
+
 #ifndef GEMMA4_FLM_OVERRIDES_HPP
 #define GEMMA4_FLM_OVERRIDES_HPP
 
@@ -36,6 +30,10 @@
 
 namespace iron
 {
+
+// ----------------------------------------------------------------------------
+// Common helpers
+// ----------------------------------------------------------------------------
 
 inline void require(bool ok, const std::string &what)
 {
@@ -106,6 +104,31 @@ inline bytes &at_offset(bytes &parent, size_t offset)
     return v->buf;
 }
 
+inline buffer<uint8_t> load_weights(const std::string &path)
+{
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    require(f.good(), path + " not found");
+    buffer<uint8_t> b = S().mm->create_bo_buffer<uint8_t>(size_t(f.tellg()));
+    f.seekg(0);
+    f.read(reinterpret_cast<char *>(b.data()), b.size());
+    b.sync_to_device();
+    return b;
+}
+
+// q4nx stores 5 bits per weight. IRON's GEMM reads bfp16ebs8, 9 bytes per 8 weights.
+inline size_t q4nx_bytes(size_t k, size_t n)
+{
+    return k * n * 5 / 8;
+}
+inline size_t bfp16_bytes(size_t k, size_t n)
+{
+    return k * n * 9 / 8;
+}
+
+// ----------------------------------------------------------------------------
+// Operator functions
+// ----------------------------------------------------------------------------
+
 /// The operator `file` holds the instruction sequence of, on the xclbin of `mgr`.
 inline npu_app &static_op(npu_app_manager *mgr, const std::string &file)
 {
@@ -128,22 +151,26 @@ inline npu_app &gemm(uint32_t m, uint32_t k, uint32_t n, bool gelu = false)
     return static_op(S().mm, file);
 }
 
-// q4nx stores 5 bits per weight. IRON's GEMM reads bfp16ebs8, 9 bytes per 8 weights.
-inline size_t q4nx_bytes(size_t k, size_t n)
-{
-    return k * n * 5 / 8;
-}
-inline size_t bfp16_bytes(size_t k, size_t n)
-{
-    return k * n * 9 / 8;
-}
-
 /// Dequantizes the (K, N) matrix `w` describes out of a layer's quantized weights.
 template <class Weight> ert_cmd_state dequant(bytes &quantized, const Weight &w, bytes &out, size_t extra_offset = 0)
 {
     const std::string file = "dequant_K" + std::to_string(w.shape[0]) + "_N" + std::to_string(w.shape[1]) + ".bin";
     return static_op(S().dequant, file)(at_offset(quantized, w.offset + extra_offset), out);
 }
+
+// ----------------------------------------------------------------------------
+// Overrides
+// ----------------------------------------------------------------------------
+
+// The engine wraps each operator dispatch in FLM_OVERRIDE(name, expr, ...). By
+// default the macro expands to `expr`, the engine's own dispatch. This header
+// redefines FLM_OVERRIDE to paste `name` onto FLM_OV_: FLM_OVERRIDE(lm_head, expr)
+// expands to FLM_OV_lm_head(expr). Each FLM_OV_<name> macro below dispatches an
+// IRON operator, or expands to `expr` to run the engine's operator. The macros
+// expand inside the engine's methods, so they can use the engine's members.
+//
+// The engine includes this header before it defines its own types. The override
+// functions are therefore templates over the types that the call sites pass.
 
 template <class Layer, class Shape, class Bufs>
 ert_cmd_state q_proj(const Layer &w, const Shape &s, Bufs &bufs, bytes &qkv)
@@ -191,17 +218,6 @@ template <class Npu, class Config> void engine_init(Npu *npu, const Config &conf
     s.mm = xclbin("mm.xclbin");
     s.dequant = xclbin("dequant.xclbin");
     header_print("info", "IRON operators from " + s.dir);
-}
-
-inline buffer<uint8_t> load_weights(const std::string &path)
-{
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    require(f.good(), path + " not found");
-    buffer<uint8_t> b = S().mm->create_bo_buffer<uint8_t>(size_t(f.tellg()));
-    f.seekg(0);
-    f.read(reinterpret_cast<char *>(b.data()), b.size());
-    b.sync_to_device();
-    return b;
 }
 
 /// Loads the per-layer-input projection weights that build.py repacked for IRON's GEMM.
