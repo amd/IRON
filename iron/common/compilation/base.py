@@ -463,14 +463,18 @@ class KernelObjectArtifact(CompilationArtifact):
 
         Every symbol bound from the same object (``fn.object_file.bind(...)``)
         is served by this one artifact.
+
+        A Worker calls the setup kernel of ``fn``'s contract before its loop.
+        Every design that links ``fn`` therefore also links the setup kernel.
+        The setup kernel is a dependency of this artifact, so the build
+        compiles it together with ``fn``.
         """
         if fn.source_file is None:
             raise ValueError(f"{fn.name}: only file-backed kernels are supported")
-        return cls(
-            fn.object_file_name,
-            dependencies=[SourceArtifact(fn.source_file)],
-            extern=fn,
-        )
+        dependencies = [SourceArtifact(fn.source_file)]
+        if fn.contract is not None and fn.contract.setup is not None:
+            dependencies.append(cls.from_extern(fn.contract.setup()))
+        return cls(fn.object_file_name, dependencies=dependencies, extern=fn)
 
     def is_available_in_filesystem(self) -> bool:
         if not super().is_available_in_filesystem():
