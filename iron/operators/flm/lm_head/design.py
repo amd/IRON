@@ -15,6 +15,7 @@ from ml_dtypes import bfloat16
 
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.npdtypes import np_ndarray_type_get_shape
+from aie.helpers.taplib import TensorTiler2D
 from aie.iron import (
     Buffer,
     ObjectFifo,
@@ -26,7 +27,6 @@ from aie.iron import (
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 
-from iron.operators.flm.dataflow import grid
 from iron.operators.flm.q4nx import K_TILE, M_TILE, packed_bytes
 
 # The sequence finishes each round's TaskGroup DEPTH rounds later. The finish
@@ -37,11 +37,12 @@ DEPTH = 2
 # overflows the default stack of 1024 bytes at both Gemma 4 sizes.
 STACK_SIZE = 10 * 1024
 
+bf16 = np.dtype[bfloat16]
+
 
 def vocab_per_round(dev) -> int:
     """Out-features the whole array produces in one round."""
-    cols, rows = grid(dev)
-    return cols * rows * M_TILE
+    return dev.cols * len(dev.core_rows) * M_TILE
 
 
 def check_shape(dev, dim, vocab):
@@ -65,21 +66,13 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0, *, lm_head_kernel):
     """
     check_shape(dev, dim, vocab)
 
-    COLS, ROWS = grid(dev)
-    K_BLKS = dim // K_TILE
+    COLS, ROWS = dev.cols, len(dev.core_rows)
     ROUNDS = vocab // vocab_per_round(dev)
-
-    bf16 = np.dtype[bfloat16]
-
-    k_rms = lm_head_kernel.q4nx_lm_head_rms
-    k_zero = lm_head_kernel.q4nx_lm_head_zero
-    k_block = lm_head_kernel.q4nx_lm_head_block
-    k_epi = lm_head_kernel.q4nx_lm_head_epilogue
 
     # The kernels' argument types are the x and w fifos' element types and the
     # core-local scratch.
-    w_blk_ty, x_ty, y_acc_ty, sums_ty, _ = k_block.arg_types()
-    y_blk_ty, _, rtp_ty = k_epi.arg_types()
+    w_blk_ty, x_ty, y_acc_ty, sums_ty, _ = lm_head_kernel.q4nx_lm_head_block.arg_types()
+    y_blk_ty, _, rtp_ty = lm_head_kernel.q4nx_lm_head_epilogue.arg_types()
     # The w fifos move q4nx blocks as bf16 elements. The kernel reinterprets
     # the bytes.
     (w_blk,) = np_ndarray_type_get_shape(w_blk_ty)
@@ -97,7 +90,7 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0, *, lm_head_kernel):
         k_rms(x, sums)
         for _ in range_(ROUNDS):
             k_zero(y_acc)
-            for k in range_(K_BLKS):
+            for k in range_(dim // K_TILE):
                 w = w_in.acquire(1)
                 k_block(w, x, y_acc, sums, k)
                 w_in.release(1)
@@ -146,10 +139,10 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0, *, lm_head_kernel):
                         of_x.cons(),
                         w_cores[i].cons(),
                         y_cores[i].prod(),
-                        k_rms,
-                        k_zero,
-                        k_block,
-                        k_epi,
+                        lm_head_kernel.q4nx_lm_head_rms,
+                        lm_head_kernel.q4nx_lm_head_zero,
+                        lm_head_kernel.q4nx_lm_head_block,
+                        lm_head_kernel.q4nx_lm_head_epilogue,
                         y_acc,
                         sums,
                         rtp,
@@ -159,9 +152,12 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0, *, lm_head_kernel):
             )
 
     M_PER_COL = ROWS * M_TILE  # y elements one column drains per round
-    M_PER_ROUND = COLS * M_PER_COL
     W_PER_COL = packed_bytes(M_PER_COL * dim) // np.dtype(np.uint32).itemsize
-    W_PER_ROUND = W_PER_COL * COLS
+    # Tap i covers round i // COLS of column i % COLS.
+    y_taps = TensorTiler2D.simple_tiler((ROUNDS * COLS, M_PER_COL), (1, M_PER_COL))
+    # A strided descriptor places weight rows at the wrong on-chip positions.
+    # Each column therefore reads one contiguous slice.
+    w_taps = TensorTiler2D.simple_tiler((ROUNDS * COLS, W_PER_COL), (1, W_PER_COL))
 
     # npu_write_rtp writes i32 words. The softcap travels as its f32 bit
     # pattern.
@@ -173,40 +169,15 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0, *, lm_head_kernel):
 
         # One broadcast sends the token to every core. The broadcast has no
         # completion token. x_task.free() frees its BD at the end.
-        x_task = x_prod.fill(
-            X,
-            sizes=[1, 1, 1, 2 * dim],
-            strides=[0, 0, 0, 1],
-            offset=0,
-            transfer_len=2 * dim,
-            wait=False,
-            managed=False,
-        )
+        x_task = x_prod.fill(X, wait=False, managed=False)
 
         window = []
         for rnd in range(ROUNDS):
             tg = TaskGroup()
             for col in range(COLS):
-                y_conses[col].drain(
-                    Y,
-                    sizes=[1, 1, 1, M_PER_COL],
-                    strides=[0, 0, 0, 1],
-                    offset=rnd * M_PER_ROUND + col * M_PER_COL,
-                    transfer_len=M_PER_COL,
-                    wait=True,
-                    group=tg,
-                )
-                # A strided descriptor places weight rows at the wrong on-chip
-                # positions. Each column therefore reads one contiguous slice.
-                w_prods[col].fill(
-                    W,
-                    sizes=[1, 1, 1, W_PER_COL],
-                    strides=[0, 0, 0, 1],
-                    offset=rnd * W_PER_ROUND + col * W_PER_COL,
-                    transfer_len=W_PER_COL,
-                    wait=False,
-                    group=tg,
-                )
+                i = rnd * COLS + col
+                y_conses[col].drain(Y, y_taps[i], wait=True, group=tg)
+                w_prods[col].fill(W, w_taps[i], wait=False, group=tg)
 
             window.append(tg)
             if len(window) > DEPTH:
