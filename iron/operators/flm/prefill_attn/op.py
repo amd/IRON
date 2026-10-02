@@ -44,7 +44,6 @@ class _PrefillAttentionBase(MLIROperator):
     num_heads: int
     num_kv_heads: int
     context: object = field(default=None, repr=False)
-    _built_kernel: object = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self):
         dev = aie_utils.get_current_device()
@@ -69,10 +68,8 @@ class _PrefillAttentionBase(MLIROperator):
         MLIROperator.__init__(self, context=self.context)
 
     def _kernel(self):
-        """The variant's kernel, built once: the design and the artifacts share it."""
-        if self._built_kernel is None:
-            self._built_kernel = make_kernel(self.variant)
-        return self._built_kernel
+        """The variant's kernel, which the design and the kernel artifact both take."""
+        return make_kernel(self.variant)
 
     def reference_tolerance(self):
         # The factory's tolerance covers attn_epilogue alone, one of the ten
