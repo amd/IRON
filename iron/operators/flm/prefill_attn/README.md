@@ -5,6 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # `iron.operators.flm.PrefillAttention`, `iron.operators.flm.PrefillSlidingAttention`
 
+> Note: This operator uses hand-placed and hand-allocated components.
+> As a result it is less portable and less idiomatic than most of the other operators
+> in this repository. If your goal is to learn IRON operator programming,
+> other operators in this repository are likely better examples.
+
 Causal prefill attention from a KV cache. The two operators reproduce
 FastFlowLM's prefill attention overlays for Gemma 4:
 
@@ -62,10 +67,5 @@ The scores carry no `1/sqrt(dh)` scale. To apply the scale, multiply `q` by it.
 ## Numerics
 
 The cores round the scores, the probabilities and the output to bfloat16 and
-accumulate in float32. Against the float32 reference in `reference.py`, with
-outputs of order 1:
-
-| Operator | Mean absolute error | Largest |
-|---|---|---|
-| `PrefillAttention` | about 0.009 | about 0.15 |
-| `PrefillSlidingAttention` | about 0.008 | about 0.1 |
+accumulate in float32. `test.py` compares the output with the float32 reference
+in `reference.py`.
