@@ -16,6 +16,7 @@ from iron.common import (
     MLIROperator,
     PythonGeneratedMLIRArtifact,
 )
+from iron.common.utils import float_to_name
 from iron.operators.flm.lm_head.design import check_shape
 from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE, packed_bytes
 
@@ -36,6 +37,8 @@ class LMHead(MLIROperator):
 
     def __post_init__(self):
         check_shape(aie_utils.get_current_device(), self.dim, self.vocab)
+        if not (np.isfinite(self.softcap) and self.softcap > 0):
+            raise ValueError(f"softcap ({self.softcap}) must be finite and positive")
         MLIROperator.__init__(self, context=self.context)
 
     @property
@@ -43,7 +46,7 @@ class LMHead(MLIROperator):
         dev = aie_utils.get_current_device().resolve().name
         # The name keys the build cache. The softcap is part of the runtime
         # sequence. The name therefore includes the softcap.
-        cap = f"{float(self.softcap):g}".replace(".", "p").replace("-", "n")
+        cap = float_to_name(float(self.softcap))
         return f"FLM_LMHead_d{self.dim}_v{self.vocab}_c{cap}_{dev}"
 
     def quantized_size(self) -> int:
@@ -87,3 +90,11 @@ class LMHead(MLIROperator):
             ),
             AIERuntimeArgSpec("in", (2 * self.dim,), dtype=bfloat16),
         ]
+
+    def reference(self, w, x):
+        """CPU reference, in float64: the softcapped logits of X for W."""
+        from iron.operators.flm.lm_head.reference import dequantize, reference
+
+        dev = aie_utils.get_current_device()
+        weights = dequantize(w, self.dim, self.vocab, dev.cols, len(dev.core_rows))
+        return reference(weights, np.asarray(x, np.float64), self.softcap)
