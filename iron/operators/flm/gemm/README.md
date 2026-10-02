@@ -437,7 +437,7 @@ Constraints, all enforced in design.py:
   residency and is part of the M=256 gain below.
 * **NPU1 fits exactly**: bf16 B at `tile_n=64` leaves room for 5 slots, which
   fill the memtile to the byte. It builds and places, but every shape
-  currently times out on NPU1 hardware.
+  currently times out on NPU1 hardware, so its tests and benchmark skip there.
 
 This needs mlir-aie #3791 (first in the 1.4.4.dev69 wheel): runtime tasks on a
 memtile's channels, `Task.start(repeat_count=...)`, `Lock.set`, and repeat

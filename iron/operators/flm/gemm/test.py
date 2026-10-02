@@ -25,7 +25,10 @@ from iron.operators.flm.gemm.design import (
 )
 from iron.operators.flm.gemm.op import GEMM
 from iron.operators.flm.gemm.reference import generate_golden_reference
+from iron.operators.flm.testing import skip_flm_gemm_on_npu1
 from iron.common.test_utils import run_test
+
+pytestmark = skip_flm_gemm_on_npu1
 
 # Unpacked so the parameter tables below stay column-aligned.
 NONE, GELU, SILU, SIGMOID = Epilogue
