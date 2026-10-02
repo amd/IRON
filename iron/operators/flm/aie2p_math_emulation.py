@@ -10,8 +10,8 @@ The functions take and return float arrays unless they say otherwise. A
   minus infinity unless a kernel sets the rounding mode register. Host-side
   constants round to nearest even.
 - AIE2P has no fp32 multiplier. fmul emulates its bf16-limb product.
-- exp_kernel, inv_kernel and gelu_kernel are aie_runtime_lib's table lookups
-  for AIE2P.
+- inv_kernel and gelu_kernel are aie_runtime_lib's table lookups for AIE2P.
+  aie.iron.kernels.bf16_exp_lut_ref models the exponential table.
 """
 
 import re
@@ -123,26 +123,8 @@ def fast_rsqrt(s):
     return y
 
 
-def _exp_tables():
-    """e^n for the signed byte n, capped at e^88, and e^(f/256) for the byte f,
-    as bf16."""
-    n = np.minimum(np.arange(256).astype(np.int8).astype(np.float64), 88)
-    with np.errstate(under="ignore"):
-        whole = rb(np.exp(n), "rne")
-    return whole, rb(np.exp(np.arange(256) / 256), "rne")
-
-
-EXP_WHOLE, EXP_FRACTION = _exp_tables()
 # The mantissa of 1 / (1 + m / 128), in 7 bits.
 INV_MANTISSA = np.round(256 / (1 + np.arange(128) / 128)).astype(np.uint32) & 0x7F
-
-
-def exp_kernel(x):
-    """exp of a bf16 input in [-87, 88], in fp32: the product of e^n and
-    e^(f/256) for x = n + f/256 in fixed point. The result is a step function
-    with steps of 1/256."""
-    v = np.floor(np.asarray(x, np.float64) * 256).astype(np.int64) & 0xFFFF
-    return f32(EXP_WHOLE[v >> 8].astype(np.float64) * EXP_FRACTION[v & 0xFF])
 
 
 def inv_kernel(l):
