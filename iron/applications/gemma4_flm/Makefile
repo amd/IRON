@@ -30,8 +30,12 @@ flm: | $(BUILD)/FastFlowLM
 
 weights: $(MODEL)/model.q4nx
 
+# flm looks for model_info.json next to its executable or in its install
+# prefix. A build that is not installed finds it through FLM_MODELINFO_PATH.
+# flm pull exits 0 when it downloads nothing, so the recipe checks the file.
 $(MODEL)/model.q4nx: | flm
-	cd $(FLM) && ./build/flm pull gemma4-it:e2b
+	cd $(FLM) && FLM_MODELINFO_PATH=$(FLM)/model_info.json ./build/flm pull gemma4-it:e2b
+	test -f $@
 
 # build.py reads the model's config and repacks its PLI weights.
 operators: $(MODEL)/model.q4nx | $(BUILD)/FastFlowLM

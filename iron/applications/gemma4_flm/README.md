@@ -18,7 +18,20 @@ You need an NPU2 device (Strix, Krackan) and the IRON environment, see the
 short, `pip install -r requirements.txt`). The `Makefile` pulls and builds the
 FastFlowLM engine, with its operators replaced by their open-source
 implementations from this repository. The build needs FastFlowLM's
-[documented prerequisites](https://github.com/ROCm/FastFlowLM/blob/main/docs/linux-getting-started.md#building-from-source).
+[documented prerequisites](https://github.com/ROCm/FastFlowLM/blob/main/docs/linux-getting-started.md#building-from-source),
+and in addition Boost, CURL, FFTW3, readline, ncurses and Rust 1.80 or newer.
+On Ubuntu 24.04, whose default Rust is 1.75, install them with:
+
+```bash
+sudo apt install cmake ninja-build pkg-config uuid-dev libdrm-dev libxrt-dev \
+    libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev \
+    libboost-dev libboost-filesystem-dev libboost-program-options-dev \
+    libcurl4-openssl-dev libfftw3-dev libreadline-dev libncurses-dev \
+    cargo-1.85 rustc-1.85
+export PATH=/usr/lib/rust-1.85/bin:$PATH
+```
+
+Run the steps below from this directory, `iron/applications/gemma4_flm`.
 
 1. Choose the model directory. flm reads the model from
    `$FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2`.
@@ -42,7 +55,7 @@ implementations from this repository. The build needs FastFlowLM's
    make engine
    ```
 
-4. Serve the model on the IRON engine. Start from this directory.
+4. Serve the model on the IRON engine.
    `--prefill-chunk-len 512` is required: the IRON operators are built for
    prompt chunks of up to 512 tokens.
 
@@ -74,7 +87,7 @@ implementations from this repository. The build needs FastFlowLM's
    ```
 
 The test serves a word problem and a 1259-token prompt on both engines. It
-checks that the token ids match:
+checks that the token ids match. Run it from the repository root:
 
 ```bash
 pytest --iterations 1 iron/applications/gemma4_flm
