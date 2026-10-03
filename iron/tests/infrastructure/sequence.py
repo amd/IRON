@@ -29,7 +29,11 @@ import aie.utils as aie_utils
 from aie.iron.device import NPU2
 from aie.utils.verify import Tolerance
 
-from iron.common.sequence import CompareDispatch, OperatorSequence
+from iron.common.sequence import (
+    CompareDispatch,
+    OperatorSequence,
+    SequenceSingleXclbinCallable,
+)
 from iron.common.compilation.sequence import fuse_mlir
 from iron.common.test_utils import verify_buffer
 from iron.operators.elementwise_add.op import ElementwiseAdd
@@ -362,3 +366,40 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch, aie_context):
             out, "out", torch.nn.functional.relu(a + b), rel_tol=0.04, abs_tol=1e-6
         )
         assert not errors, f"rep {rep}: out has {len(errors)} mismatches"
+
+
+# ---------------------------------------------------------------------------
+# 6. A runlist of one step needs no reconfiguration, so it dispatches one xclbin.
+# ---------------------------------------------------------------------------
+
+
+def test_a_single_step_runlist_dispatches_its_own_xclbin(aie_context):
+    if not isinstance(aie_utils.get_current_device(), NPU2):
+        pytest.skip("the single-step xclbin path is NPU2's alternative to the full ELF")
+    relu = ReLU(
+        size=_ADD_RELU_SIZE,
+        num_aie_columns=_ADD_RELU_COLS,
+        num_channels=1,
+        tile_size=_ADD_RELU_TILE,
+        context=aie_context,
+    )
+    seq = OperatorSequence(
+        name="infra_single_step_relu",
+        runlist=[(relu, "a", "out")],
+        input_args=["a"],
+        output_args=["out"],
+        context=aie_context,
+    )
+    seq.compile()
+    run = seq.get_callable()
+    assert isinstance(run, SequenceSingleXclbinCallable)
+
+    torch.manual_seed(0)
+    a = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
+    _set_input(run, "a", a)
+    run()
+    out = run.get_buffer("out").torch_view()[:_ADD_RELU_SIZE].clone()
+    errors = verify_buffer(
+        out, "out", torch.nn.functional.relu(a), rel_tol=0.04, abs_tol=1e-6
+    )
+    assert not errors, f"single-step sequence produced {len(errors)} mismatches"

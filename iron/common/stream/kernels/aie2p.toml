@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The aie2p kernel library stream-dse reads; the format is stream's docs/source/kernel_library.md.
+# Cycles are what one call costs the core running it in a generated design, traced on NPU2:
+# from the call's start to the next's with lock stalls taken out, so the loop and the locks
+# around the call count, which its event0/event1 span leaves out.
+
+[family.matmul]
+ops_per_cycle = 151.0
+mac = { m = 8, k = 8, n = 8 }
+
+[family.vector]
+ops_per_cycle = 16.0
+
+[kernel.matmul_bf16_bf16]
+family = "matmul"
+source = "linalg/mm.cc"
+object = "mm_{m}_{k}_{n}.o"
+# static_assert(m % (2 * r) == 0), k % s, n % (2 * t), with r = s = t = 8.
+dims = [
+    { name = "k", divisor = 8 },
+    { name = "n", divisor = 16 },
+    { name = "m", divisor = 16 },
+]
+# Traced on the flash score cores, without the zeroing each of their calls follows. 32x32x64
+# is its 515-cycle span and the 75 cycles the calls around it take beside theirs.
+cycles = [
+    { m = 64, k = 64, n = 64, cycles = 1576.0 },
+    { m = 32, k = 64, n = 64, cycles = 832.0 },
+    { m = 32, k = 32, n = 64, cycles = 590.0 },
+]
+per_op = { cycles = 1576.0, ops = 262144 }
+
+# B_q is 32 or 64: what a score core holds beside the 64x64 key block, walked 32 wide.
+[kernel.partial_softmax]
+family = "vector"
+source = "linalg/mha.cc"
+object = "mha_{m}.o"
+dims = [{ name = "n", fixed = 64 }, { name = "m", blocks = [32, 64] }]
+# With the scale snapshot each step takes beside it.
+cycles = [{ m = 32, n = 64, cycles = 1104.0 }, { m = 64, n = 64, cycles = 1848.0 }]
+
+[kernel.matmul_PV]
+family = "matmul"
+source = "linalg/mha.cc"
+object = "mha_{m}.o"
+dims = [{ name = "k", fixed = 64 }, { name = "n", fixed = 64 }, { name = "m", blocks = [32, 64] }]
+# The whole call, the rescale of O included; traced on column 7 at seq 2048.
+cycles = [{ m = 32, k = 64, n = 64, cycles = 1476.0 }, { m = 64, k = 64, n = 64, cycles = 2678.0 }]
+
+# The row length stays a tiling level at full extent: the slab hand-out rides on it.
+[kernel.silu_bf16_size]
+family = "vector"
+source = "activation/silu.cc"
+object = "silu_{m}x{n}.o"
+dims = [{ name = "n", runtime = true, keep_whole = true }, { name = "m", runtime = true }]
+cycles = [{ m = 1, n = 4096, cycles = 823.0 }, { m = 1, n = 8192, cycles = 1600.0 }]
+
+[kernel.eltwise_mul_bf16_vector_size]
+family = "vector"
+source = "eltwise/mul.cc"
+object = "mul_{m}x{n}.o"
+dims = [{ name = "n", runtime = true, keep_whole = true }, { name = "m", runtime = true }]
+cycles = [{ m = 1, n = 4096, cycles = 610.0 }]
+
+# The row-major softmax the non-flash designs call, traced on a 256-long row.
+[kernel.softmax_rows_bf16]
+family = "vector"
+source = "activation/softmax.cc"
+object = "softmax.o"
+dims = [{ name = "n", divisor = 32 }, { name = "m", runtime = true }]
+per_op = { cycles = 329.0, ops = 256 }
+
+[kernel.softmax_rows_causal_bf16]
+family = "vector"
+source = "activation/softmax.cc"
+object = "softmax.o"
+dims = [{ name = "n", divisor = 32 }, { name = "m", runtime = true }]
+per_op = { cycles = 1245.0, ops = 256 }
