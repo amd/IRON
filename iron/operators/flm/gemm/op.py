@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
 from typing import ClassVar, Dict
@@ -10,14 +9,12 @@ from typing import ClassVar, Dict
 from iron.common import (
     MLIROperator,
     AIERuntimeArgSpec,
-    KernelArchiveArtifact,
     KernelObjectArtifact,
-    SourceArtifact,
     PythonGeneratedMLIRArtifact,
     DesignGenerator,
 )
 from aie.dialects._aie_enum_gen import AIEArch
-from iron.common.device_utils import get_kernel_dir
+from aie.iron.kernels import fused_mm
 from iron.common.compilation import InstsBinArtifact, XclbinArtifact
 import aie.utils as aie_utils
 
@@ -31,6 +28,7 @@ from iron.operators.flm.gemm.design import (
     compute_rows,
     CT_OUT_LEN,
     Epilogue,
+    Gelu,
     K_TILE,
     M_TILE,
     R,
@@ -40,23 +38,6 @@ from iron.operators.flm.gemm.design import (
     _default_l1,
     l1_budget,
 )
-
-
-def lut_based_ops_artifacts(kernel_dir: str) -> list[KernelObjectArtifact]:
-    """Return the lut_based_ops kernel artifact for aie2 devices, empty list otherwise."""
-    if kernel_dir != "aie2":
-        return []
-    mlir_aie_dir = Path(aie_utils.config.root_path())
-    return [
-        KernelObjectArtifact(
-            "lut_based_ops.o",
-            dependencies=[
-                SourceArtifact(
-                    mlir_aie_dir / "aie_runtime_lib" / "AIE2" / "lut_based_ops.cpp"
-                )
-            ],
-        )
-    ]
 
 
 @dataclass
@@ -101,6 +82,9 @@ class GEMM(MLIROperator):
     m_chunk: int | None = None
     # Rounding for every f32->bf16 conversion; see Rounding in design.py.
     rounding: Rounding = Rounding.CONV_EVEN
+    # Arithmetic of the gelu epilogue; see Gelu in design.py. Only the gelu
+    # mode reads it.
+    gelu: Gelu = Gelu.FP32
     context: object = field(default=None, repr=False)
 
     _name_aliases: ClassVar[Dict[str, str]] = {
@@ -170,6 +154,7 @@ class GEMM(MLIROperator):
         # the resolved fields still serialize into artifact names unchanged.
         self.epilogue = Epilogue(self.epilogue)
         self.rounding = Rounding(self.rounding)
+        self.gelu = Gelu(self.gelu)
         # Deduplicated, since the mask ORs one bit per mode and a repeat would
         # otherwise have to be tolerated by every consumer of the tuple.
         self.epilogue_modes = tuple(
@@ -225,7 +210,7 @@ class GEMM(MLIROperator):
         return (
             f"FLM_GEMM_tn{self.tile_n}_kt{self.k_tile}_ck{CT_MAX_K_FOR_N[self.tile_n]}"
             f"_ma{self.tile_ma}_mc{self.m_chunk}"
-            f"_em{self._epilogue_mask:x}_{self.rounding}_{dev}"
+            f"_em{self._epilogue_mask:x}_{self.rounding}{self._gelu_suffix}_{dev}"
         )
 
     @property
@@ -255,6 +240,12 @@ class GEMM(MLIROperator):
         return base
 
     @property
+    def _gelu_suffix(self) -> str:
+        """The part of the artifact names that ``gelu`` contributes. Empty for
+        the fp32 default."""
+        return "" if self.gelu is Gelu.FP32 else f"_gelu_{self.gelu}"
+
+    @property
     def _bfp16_b(self) -> bool:
         """Whether B is stored as bfp16ebs8 rather than bf16.
 
@@ -268,41 +259,6 @@ class GEMM(MLIROperator):
     def _b_elem_bytes(self) -> float:
         """Bytes per B element in L1/L2: bfp16ebs8 packs 8 values into 9 bytes."""
         return BFP16_GROUP_BYTES / BFP16_GROUP if self._bfp16_b else 2
-
-    @property
-    def _kernel_object(self) -> str:
-        """Object name over every flag that changes the emitted code.
-
-        Every -D flag from ``get_kernel_artifacts`` has to appear, for the
-        cache reason above. ``ck`` looks derivable from tile_n, but that is a
-        tuning table: naming it means retuning an entry does not also require
-        wiping the build dir.
-        """
-        return (
-            f"mm_fused_{M_TILE}x{self.k_tile}x{self.tile_n}"
-            f"_ck{CT_MAX_K_FOR_N[self.tile_n]}"
-            f"_r{R}t{T}_ma{self.tile_ma}_{self.rounding}"
-            f"_em{self._epilogue_mask:x}.o"
-        )
-
-    @property
-    def _link_file(self) -> str:
-        """What the design names as its kernel: the bare object, or the archive
-        bundling it with the tanh LUT tables.
-
-        Only AIE2 evaluates activations through a LUT, and only an activation
-        references tanh. Getting this wrong is a link error, so it surfaces
-        late.
-        """
-        if (
-            any(Epilogue(m) is not Epilogue.NONE for m in self.epilogue_modes)
-            and get_kernel_dir() == "aie2"
-        ):
-            # config_name, not name: this string reaches the design's
-            # link_with, so a shape in it would put the shape in the device
-            # configuration.
-            return f"{self.config_name}_kernels.a"
-        return self._kernel_object
 
     @property
     def _reference_shape(self) -> tuple[int, int, int]:
@@ -339,7 +295,7 @@ class GEMM(MLIROperator):
                     "m_chunk": self.m_chunk,
                     "epilogue": epilogue,
                     "clamp": clamp,
-                    "kernel_object": self._link_file,
+                    "kernel": self._kernel(),
                     "trace_size": 0,
                 },
             ),
@@ -381,73 +337,34 @@ class GEMM(MLIROperator):
         )
         self.add_artifacts([self.xclbin_artifact, self.insts_artifact])
 
-    def get_kernel_artifacts(self):
-        # Built by hand rather than from aie.iron.kernels.fused_mm: that
-        # factory compiles in one epilogue mode (this operator selects among
-        # several at runtime, from one xclbin) and always rounds to
-        # nearest-even. Its translation unit, fused_mm_tile.cc, is still the
-        # one to compile, since mm_fused.h is a header. The whole-tile entry
-        # point it adds is never called, so the link drops it, but it also
-        # compiles out the per-step event0/event1 markers.
-        kernel_dir = get_kernel_dir()
-        kernels_dir = self.context.kernels_dir
-        fused = kernels_dir / "fused"
-        common = kernels_dir / "common"
+    def _kernel(self):
+        """The fused_mm kernel, whose entry points the design's cores call.
 
-        # AIE2P lowers the 8x8x8 mmul onto two bfp16-emulated macs, which this
-        # selects; AIE2 lowers it onto four native bf16 macs and ignores it.
-        # MM_FUSED_BFP16_B rides along, since bfp16ebs8 storage needs the
-        # scalar BFP types.
-        flags = [
-            # Tile geometry and register tiling, for the mmul.
-            f"-DMM_FUSED_TILE_M={M_TILE}",
-            f"-DMM_FUSED_TILE_K={self.k_tile}",
-            f"-DMM_FUSED_TILE_N={self.tile_n}",
-            f"-DMM_FUSED_TILE_MA={self.tile_ma}",
-            f"-DMM_FUSED_R={R}",
-            f"-DMM_FUSED_S={S}",
-            f"-DMM_FUSED_T={T}",
-            # The k slice. Passed rather than looked up in the kernel so that
-            # CT_MAX_K_FOR_N is the only place it is chosen.
-            f"-DMM_FUSED_CT_K={CT_MAX_K_FOR_N[self.tile_n]}",
-            # Output stage.
-            f"-DMM_FUSED_OUT_CHUNK={CT_OUT_LEN}",
-            f"-DMM_FUSED_C_DEPTH={C_DEPTH}",
-            f"-DMM_FUSED_EPILOGUE_MODE_MASK={self._epilogue_mask}",
-        ]
-        if self._bfp16_b:
-            flags += [
-                "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
-                "-DMM_FUSED_BFP16_B",
-            ]
-        if self.rounding is Rounding.CONV_EVEN:
-            # mm.cc's flag and polarity, reused: absent means the core's
-            # power-up floor mode, though this operator defaults the other way.
-            # Covers both conversions in the kernel, which must agree.
-            flags.append("-DROUND_CONV_EVEN")
-
-        kernel_obj = KernelObjectArtifact(
-            self._kernel_object,
-            dependencies=[
-                SourceArtifact(fused / "fused_mm_tile.cc"),
-                SourceArtifact(fused / "mm_fused.h"),
-                SourceArtifact(fused / "mm_fused_mmul.h"),
-                SourceArtifact(common / "activations.h"),
-                SourceArtifact(kernels_dir / "aie_kernel_utils.h"),
-                SourceArtifact(common / "zero.h"),
-            ],
-            extra_flags=flags,
+        Every field that changes the object reaches it here, so the factory's
+        object name and symbol prefix key the build cache. The activation is
+        absent: the cores select it at run time from ``epilogue_modes``.
+        Mode 0 is always in the mask, since the kernel falls back to it.
+        """
+        modes = dict.fromkeys([Epilogue.NONE, *self.epilogue_modes])
+        return fused_mm(
+            dim_m=M_TILE,
+            dim_k=self.k_tile,
+            dim_n=self.tile_n,
+            band_m=self.tile_ma,
+            chunk_k=CT_MAX_K_FOR_N[self.tile_n],
+            out_chunk=CT_OUT_LEN,
+            c_depth=C_DEPTH,
+            # 8x8x8 on both architectures: AIE2P lowers it onto two
+            # bfp16-emulated macs, AIE2 onto four native bf16 macs.
+            mmul_shape=(R, S, T),
+            bfp16_b=self._bfp16_b,
+            epilogue_modes=tuple(str(m) for m in modes),
+            rounding=str(self.rounding),
+            gelu=str(self.gelu),
         )
-        if self._link_file == self._kernel_object:
-            return [kernel_obj]
-        # The tanh LUT tables live in their own translation unit, so on AIE2
-        # the kernel object alone leaves them undefined at link time.
-        return [
-            KernelArchiveArtifact(
-                self._link_file,
-                dependencies=[kernel_obj] + lut_based_ops_artifacts(kernel_dir),
-            )
-        ]
+
+    def get_kernel_artifacts(self):
+        return [KernelObjectArtifact.from_extern(self._kernel())]
 
     def pack_B(self, B):
         """Reorder a row-major ``(K, N)`` weight matrix into consumption order.

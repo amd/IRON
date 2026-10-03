@@ -24,7 +24,7 @@ SHAPES = [(1024, 128), (1024, 512), (1536, 640), (2048, 256)]
 
 
 def _check(op, blob, expected, label):
-    errors, _, _ = run_test(
+    errors, latency_us, bandwidth_gbps = run_test(
         op,
         {"in": torch.from_numpy(blob)},
         {"out": torch.from_numpy(expected)},
@@ -32,6 +32,8 @@ def _check(op, blob, expected, label):
         abs_tol=0.0,
     )
     assert not errors, f"{label}: {errors}"
+    print(f"\nLatency (us): {latency_us:.1f}")
+    print(f"Effective Bandwidth: {bandwidth_gbps:.6e} GB/s\n")
 
 
 @requires_aie2p
@@ -50,7 +52,8 @@ def test_output_feeds_gemm_unchanged(aie_context):
     that makes it a drop-in. Comparing against pack_B catches a drift in either
     operator's tiling that a self-consistent reference would not."""
     from iron.operators.flm.gemm.op import GEMM
-    from iron.operators.flm.dequant.reference import dequantize, f32_to_bf16_floor
+    from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor
+    from iron.operators.flm.dequant.reference import dequantize
 
     K, N = 1024, 128
     qw = random_q4nx(K, N, seed=3)
@@ -81,11 +84,16 @@ def test_gate_up_interleaved_blob(aie_context):
 
 
 @requires_aie2p
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
+)
 @pytest.mark.parametrize(
     "K, N",
     [
         (4096, 1536),
-        (6144, 1536),
+        # Gemma 4 E2B's MLP down projection.
+        pytest.param(6144, 1536, marks=pytest.mark.bench),
         pytest.param(12288, 1536, marks=pytest.mark.extensive),
     ],
 )

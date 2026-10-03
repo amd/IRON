@@ -4,7 +4,9 @@
 
 import os
 
+import numpy as np
 import pytest
+import torch
 import aie.utils as aie_utils
 
 from aie.dialects._aie_enum_gen import AIEArch
@@ -16,6 +18,7 @@ from iron.operators.flm.gemm.design import (
     CT_MAX_K_FOR_N,
     M_CHUNK_FOR_N,
     Epilogue,
+    Gelu,
     M_TILE,
     R,
     Rounding,
@@ -24,6 +27,7 @@ from iron.operators.flm.gemm.design import (
     l1_budget,
 )
 from iron.operators.flm.gemm.op import GEMM
+from iron.operators.flm.mm_prebuilt.op import MMPrebuilt
 from iron.operators.flm.gemm.reference import generate_golden_reference
 from iron.operators.flm.testing import skip_flm_gemm_on_npu1
 from iron.common.test_utils import run_test
@@ -388,3 +392,53 @@ def test_one_xclbin_serves_every_clamp_bound(aie_context):
     assert (
         clamped.name != GEMM(M=M, K=K, N=N, clamp=bounds[1], context=aie_context).name
     )
+
+
+# Extensive: MMPrebuilt downloads the shipped mm.xclbin over the network.
+@pytest.mark.extensive
+@pytest.mark.parametrize(
+    "M,K,N",
+    [
+        (256, 512, 1024),  # tile_n 128
+        (512, 1536, 6144),  # Gemma 4 E2B gate_proj, tile_n 64
+        (512, 1536, 256),  # Gemma 4 E2B per-layer-input gate
+    ],
+)
+def test_gemm_gelu_bf16_steps_matches_overlay(M, K, N, aie_context):
+    """``gelu=bf16_steps`` with ``rounding=floor`` matches the shipped overlay's
+    gelu bit for bit, on identical inputs."""
+    dev = aie_utils.get_current_device()
+    if dev.resolve().name != "npu2" or dev.cols < 8:
+        pytest.skip("the shipped overlay is an 8-column NPU2 binary")
+    golden_ref = generate_golden_reference(
+        M=M, K=K, N=N, epilogue=GELU, scale=ACTIVATION_INPUT_SCALE
+    )
+    A, B = golden_ref["input"], golden_ref["input_b"]
+
+    def run(op):
+        op.compile()
+        tensor = aie_utils.DEFAULT_TENSOR_CLASS
+        out = tensor((M, N), dtype=np.dtype("bfloat16"))
+        op.get_callable()(
+            tensor.from_torch(A.flatten()), tensor.from_torch(op.pack_B(B)), out
+        )
+        # A copy: to_torch() aliases the device buffer, which is freed with out.
+        return out.to_torch().reshape(M, N).clone()
+
+    shipped = run(MMPrebuilt(M=M, K=K, N=N, epilogue=GELU, context=aie_context))
+    ported = run(
+        GEMM(
+            M=M,
+            K=K,
+            N=N,
+            epilogue=GELU,
+            rounding=FLOOR,
+            gelu=Gelu.BF16_STEPS,
+            context=aie_context,
+        )
+    )
+    # The accumulator reaches about -15 at this scale. gelu's minimum is
+    # about -0.17, so a lower minimum means the activation did not run.
+    assert float(shipped.float().min()) > -0.5, "the overlay applied no gelu"
+    same = int((shipped.view(torch.int16) == ported.view(torch.int16)).sum())
+    assert same == M * N, f"{M * N - same} of {M * N} elements differ"
