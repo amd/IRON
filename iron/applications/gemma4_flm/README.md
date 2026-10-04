@@ -87,7 +87,8 @@ Run the steps below from this directory, `iron/applications/gemma4_flm`.
    ```
 
 The test serves a word problem and a 1259-token prompt on both engines. It
-checks that the token ids match. Run it from the repository root:
+checks that the token ids match, and reports the IRON engine's time to first
+token and decode rate for each prompt. Run it from the repository root:
 
 ```bash
 pytest --iterations 1 iron/applications/gemma4_flm
