@@ -7,11 +7,8 @@
 
 | Test | Krackan Status | Krackan | Phoenix Status | Phoenix |
 |---|---|---|---|---|
-| test_iron_matches_engine[iter0] | ✅ | - | - | - |
-| test_iron_matches_engine[iter1] | ✅ | - | - | - |
-| test_iron_matches_engine[iter2] | ✅ | - | - | - |
-| test_iron_matches_engine[iter3] | ✅ | - | - | - |
-| test_iron_matches_engine[iter4] | ✅ | - | - | - |
+| test_iron_matches_engine[prompt_long_prompt] | ✅ | - | - | - |
+| test_iron_matches_engine[prompt_word_problem] | ✅ | - | - | - |
 
 </details>
 
