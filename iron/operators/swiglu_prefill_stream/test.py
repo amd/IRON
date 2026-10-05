@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
-import torch
 from aie.utils.benchmark import run_iters
 from aie.utils.verify import Tolerance
 
@@ -54,7 +53,7 @@ def _staged(operator, golden_ref):
     run = operator.get_callable()
     for name in (INPUT, *WEIGHTS):
         buffer = run.get_buffer(name)
-        buffer.torch_view()[:] = golden_ref[name].to(torch.bfloat16).flatten()
+        buffer.numpy_view()[:] = golden_ref[name].reshape(-1)
         buffer.to("npu")
     return run
 
@@ -81,13 +80,11 @@ def test_swiglu_prefill_stream(k, npu_runtime, trace, record_property):
     run()
     if trace is not None:
         dump_traces(run, trace.trace_file)
-    output = run.get_buffer(OUTPUT).to_torch().reshape((SEQ_LEN, EMBEDDING_DIM))
+    output = run.get_buffer(OUTPUT).numpy().reshape((SEQ_LEN, EMBEDDING_DIM))
     verdict = verify_buffer(
         output,
         OUTPUT,
-        golden_ref[
-            OUTPUT
-        ],  # pyright: ignore[reportArgumentType]  # a bf16 torch tensor
+        golden_ref[OUTPUT],
         Tolerance.relative(0.08, 0.7, max_mismatch_frac=0.25),
     )
     assert verdict, verdict.detail

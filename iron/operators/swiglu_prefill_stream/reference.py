@@ -3,8 +3,9 @@
 
 """Reference SwiGLU-prefill block: ``(SiLU(x @ gate) * (x @ up)) @ down``.
 
-Running this module produces the golden output; exporting it produces the
-workload stream-dse generates the design from.
+``LAYERS`` is the block. Evaluating it produces the golden output; building
+the ONNX graph from it produces the workload stream-dse generates the design
+from.
 
 The names below are the block's vocabulary, and they are the keys
 ``generate_golden_reference`` gives the same tensors. Everything
@@ -12,8 +13,8 @@ downstream is named from here: the ONNX tensors, the mapping's layers and runtim
 buffers, and the tensor handed between fusion groups.
 """
 
-import torch
-from torch import nn
+import numpy as np
+from ml_dtypes import bfloat16
 
 INPUT = "input"
 OUTPUT = "output"
@@ -35,87 +36,61 @@ TENSOR_NAMES = (
     *WEIGHTS,
 )
 
+# (result, ONNX operator, operands), in topological order.
+LAYERS = (
+    (GATE_PROJECTION, "Gemm", (INPUT, "w_gate")),
+    (UP_PROJECTION, "Gemm", (INPUT, "w_up")),
+    (ACTIVATION, "Silu", (GATE_PROJECTION,)),
+    (HIDDEN, "Mul", (ACTIVATION, UP_PROJECTION)),
+    (OUTPUT, "Gemm", (HIDDEN, "w_down")),
+)
 
-class SwiGLU(nn.Module):
-    """SwiGLU prefill block over a ``[seq_len, embedding_dim]`` activation."""
+# Each operator in float32; its result is rounded to bfloat16 once.
+COMPUTE = {
+    "Gemm": np.matmul,
+    "Silu": lambda x: x * np.exp(-np.logaddexp(0, -x)),
+    "Mul": np.multiply,
+}
 
-    def __init__(self, embedding_dim: int, hidden_dim: int, dtype=torch.bfloat16):
-        super().__init__()
-        gate_up = (embedding_dim, hidden_dim)
-        self.w_gate = nn.Parameter(torch.zeros(gate_up, dtype=dtype))
-        self.w_up = nn.Parameter(torch.zeros(gate_up, dtype=dtype))
-        self.w_down = nn.Parameter(
-            torch.zeros((hidden_dim, embedding_dim), dtype=dtype)
-        )
 
-    def forward(self, input):
-        gate = input @ self.w_gate
-        up = input @ self.w_up
-        return (torch.nn.functional.silu(gate) * up) @ self.w_down
+def operand_shapes(M, K, N) -> dict[str, tuple[int, int]]:
+    """The input's and the weights' shapes at sequence `M`, embedding `K`, hidden `N`."""
+    return {INPUT: (M, K), "w_gate": (K, N), "w_up": (K, N), "w_down": (N, K)}
+
+
+def swiglu(tensors: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Evaluate ``LAYERS`` in bfloat16.
+
+    Args:
+        `tensors`: the input and the weights, by name.
+
+    Returns:
+        `tensors` and every tensor the layers produce, by name.
+    """
+    tensors = dict(tensors)
+    for result, operator, operands in LAYERS:
+        args = (tensors[name].astype(np.float32) for name in operands)
+        tensors[result] = COMPUTE[operator](*args).astype(bfloat16)
+    return tensors
 
 
 def generate_golden_reference(M=1, K=2048, N=8192, seed=42):
     """Golden data for the block: random inputs and every tensor between them.
 
-    SwiGLU computes: W3 @ (SiLU(W1 @ x) * (W2 @ x))
-    where SiLU(x) = x * sigmoid(x)
-
-    Parameters:
-        M: Sequence length
-        K: Embedding dimension
-        N: Hidden dimension (FFN intermediate dimension)
-        seed: Random seed
+    Args:
+        `M`: sequence length.
+        `K`: embedding dimension.
+        `N`: hidden dimension (the FFN's intermediate dimension).
+        `seed`: random seed.
 
     Returns:
-        dict: Contains 'input', 'w_gate', 'w_up', 'w_down', 'left', 'left_swished', 'right', 'intermediate', 'output'
+        Every name in `TENSOR_NAMES`, mapped to its bfloat16 tensor.
     """
-    torch.manual_seed(seed)
-
-    # Generate golden inputs
+    rng = np.random.default_rng(seed)
     val_range = 4
-    x = torch.randn(M, K, dtype=torch.bfloat16) * val_range
-    w_gate = torch.randn(N, K, dtype=torch.bfloat16).T * val_range  # gate projection
-    # bias1 and bias2 are generated but not used; they are retained to preserve
-    # the random number sequence from the original reference implementation so
-    # that the test weights do not hit the SiLU kernel's tanh saturation region.
-    _bias1 = (
-        torch.randn(K, dtype=torch.bfloat16) * val_range
-    )  # unused; preserves RNG state
-    w_up = torch.randn(N, K, dtype=torch.bfloat16).T * val_range  # up projection
-    _bias2 = (
-        torch.randn(K, dtype=torch.bfloat16) * val_range
-    )  # unused; preserves RNG state
-    w_down = torch.randn(N, K, dtype=torch.bfloat16) * val_range  # down projection
-
-    # Generate golden outputs
-    left = x @ w_gate
-    left_swished = torch.nn.functional.silu(left)
-    right = x @ w_up
-    intermediate = left_swished * right
-    y = intermediate @ w_down
-
-    return {
-        "input": x,
-        "w_gate": w_gate,
-        "w_up": w_up,
-        "w_down": w_down,
-        "left": left,
-        "left_swished": left_swished,
-        "right": right,
-        "intermediate": intermediate,
-        "output": y,
-    }
-
-
-def swiglu_module(embedding_dim, hidden_dim, golden_reference=None) -> SwiGLU:
-    """A ``SwiGLU``, optionally holding ``golden_reference``'s weights.
-
-    Weight *values* are irrelevant to the exported graph (only shapes and the
-    topology are), so the operator builds its design from a zero-filled module.
-    """
-    module = SwiGLU(embedding_dim, hidden_dim).eval()
-    if golden_reference is not None:
-        with torch.no_grad():
-            for name in WEIGHTS:
-                getattr(module, name).copy_(golden_reference[name])
-    return module
+    return swiglu(
+        {
+            name: (rng.standard_normal(shape) * val_range).astype(bfloat16)
+            for name, shape in operand_shapes(M, K, N).items()
+        }
+    )

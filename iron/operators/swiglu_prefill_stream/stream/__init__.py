@@ -3,13 +3,12 @@
 
 """Building blocks for stream-dse-backed operators.
 
-An operator supplies a reference ``nn.Module`` and a placement; these modules turn
+An operator supplies its reference layers and a placement; these modules turn
 that into everything stream-dse needs:
 
-* ``ops`` -- the registry binding a torch ATen op to its ONNX
-  form, its stream-dse kernel and its ``aie_kernels`` source.
-* ``workload`` -- ``torch.export`` of the module into the ONNX
-  workload stream-dse optimizes.
+* ``ops`` -- the registry binding an ONNX operator to its stream-dse kernel
+  and its ``aie_kernels`` source.
+* ``workload`` -- the layers as the ONNX workload stream-dse optimizes.
 * ``mapping`` -- the mapping YAML, named from that same graph.
 
 The submodules are not re-exported here: they need ``onnx``/``pyyaml`` (installed

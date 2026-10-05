@@ -16,13 +16,14 @@ stream-dse needs two inputs, and IRON writes both from one source.
 
 | | Source | Built by |
 | --- | --- | --- |
-| Workload (ONNX) | [`reference.py`](./reference.py), the `SwiGLU` `nn.Module` | `torch.export` via [`stream/workload.py`](./stream/workload.py) |
+| Workload (ONNX) | [`reference.py`](./reference.py), its `LAYERS` | [`stream/workload.py`](./stream/workload.py) |
 | Mapping (YAML) | the placement in [`stream_design.py`](./stream_design.py) | [`stream/mapping.py`](./stream/mapping.py) |
 | Kernels (`.cc`) | the [mlir-aie `aie_kernels` library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels) | the registry in [`stream/ops.py`](./stream/ops.py) |
 
-`reference.py` is the single source of truth. Running it produces the golden output the
-test compares against; exporting it produces the workload the design is generated from.
-The mapping reads its layer names back from the exported graph rather than restating
+`reference.py` is the single source of truth. Evaluating its layers produces the golden
+output the test compares against; building the ONNX graph from them produces the
+workload the design is generated from.
+The mapping reads its layer names back from that graph rather than restating
 them, so workload and mapping cannot disagree. Both files are written into the
 experiment's output directory at build time; nothing is committed.
 
@@ -82,11 +83,11 @@ from the golden reference, against 0.139 to 0.144 here.
 
 ## Runtime buffers
 
-Named by the reference module: `input`, `w_gate`, `w_up`, `w_down`, `output`.
+Named by the reference: `input`, `w_gate`, `w_up`, `w_down`, `output`.
 
 ```python
 run = operator.get_callable()
-run.get_buffer("w_gate").torch_view()[:] = weights.flatten()
+run.get_buffer("w_gate").numpy_view()[:] = weights.reshape(-1)
 ```
 
 ## Installing
@@ -116,7 +117,7 @@ pytest iron/operators/swiglu_prefill_stream/test.py
 
 ## Adding another operator
 
-One `StreamKernel` plus one `TORCH_OPS` entry in `stream/ops.py`, pointing
+One `StreamKernel` plus one `STREAM_OPS` entry in `stream/ops.py`, pointing
 at mlir-aie's `aie_kernels/<family>/<name>.cc`, plus that operator's own placement. The
 kernel entry carries both the compile flags and the operand layouts, so the layout the
 generated DMAs produce and the layout the compiled object expects come from one place.
@@ -126,6 +127,5 @@ generated DMAs produce and the layout the compiled object expects come from one 
 The hardware description (`whole_array_strix.yaml`) is resolved from the installed
 `stream` package, where it ships as package data; nothing is vendored here.
 
-Node names are set explicitly, naming the role each layer plays rather than the ATen
-op the exporter captured (`matmul`, `matmul_1`, ...). The mapping and the generated
-design are both read by those names.
+Node names (`stream_design.NODE_NAMES`) name the role each layer plays. The mapping
+and the generated design are both read by those names.

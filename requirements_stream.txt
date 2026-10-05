@@ -19,5 +19,5 @@
 # OR-Tools GSCIP solver, and writes its workload and mapping into its own installed
 # package directory, so that environment must be writable.
 
-onnxscript>=0.7
+onnx
 stream-dse>=1.13.14

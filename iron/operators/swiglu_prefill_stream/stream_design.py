@@ -5,12 +5,12 @@
 
 Both inputs stream-dse needs are produced here, from IRON:
 
-* the **workload**, exported from ``iron.operators.swiglu_prefill_stream.reference``,
-  the same module the test checks the result against;
+* the **workload**, built from ``iron.operators.swiglu_prefill_stream.reference``'s
+  layers, the same ones the test checks the result against;
 * the **mapping**, from the placement below.
 
 Both are written into the experiment's output directory at build time, never into
-the source tree, and the mapping's node names come from the exported workload, so
+the source tree, and the mapping's node names come from the workload, so
 the two cannot disagree. stream-dse then solves the allocation and emits the MLIR.
 
 The operator imports this module where ``stream-dse`` is installed and
@@ -24,14 +24,14 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
+import numpy as np
 import stream
-import torch
 from aie import ir
 from aie.utils.config import aie_kernels_dir
+from ml_dtypes import bfloat16
 from stream.api import optimize_allocation_co
 
 from iron.operators.swiglu_prefill_stream import reference
-from iron.operators.swiglu_prefill_stream.reference import swiglu_module
 from iron.operators.swiglu_prefill_stream.stream.hardware import ComputeArray
 from iron.operators.swiglu_prefill_stream.stream.mapping import (
     FusedGroup,
@@ -39,7 +39,7 @@ from iron.operators.swiglu_prefill_stream.stream.mapping import (
     emit_mapping,
     group_boundaries,
 )
-from iron.operators.swiglu_prefill_stream.stream.workload import export_workload
+from iron.operators.swiglu_prefill_stream.stream.workload import build_workload
 
 # Hardware description for the whole-array Strix (npu2) target, shipped as package
 # data inside the installed stream package.
@@ -54,18 +54,11 @@ ACCELERATOR = os.path.join(
 BACKEND = "ortools_gscip"  # license-free OR-Tools GSCIP, no Gurobi needed
 OUTPUT_ROOT = "outputs"
 
-# Names for the exported graph's computation nodes, in topological order, and for
-# the tensors they produce. They name the roles rather than the ATen ops the
-# exporter captured, and they are what the mapping and the generated design are
+# Names for the workload's computation nodes, one per ``reference.LAYERS`` entry.
+# They name the roles, and they are what the mapping and the generated design are
 # read by.
 GATE, UP, SILU, MUL, DOWN = "Gemm_Left", "Gemm_Right", "Silu", "Elt_Mul", "Gemm_Down"
 NODE_NAMES = [GATE, UP, SILU, MUL, DOWN]
-RESULT_NAMES = {
-    GATE: reference.GATE_PROJECTION,
-    UP: reference.UP_PROJECTION,
-    SILU: reference.ACTIVATION,
-    MUL: reference.HIDDEN,
-}
 
 # The kernel tile each layer is compiled and mapped for, as (sequence, embedding,
 # hidden). A core holds the operands of every layer in its group, so the tile a group
@@ -238,12 +231,16 @@ def _check_shapes(seq_len, embedding_dim, hidden_dim, k):
 
 @lru_cache(maxsize=None)
 def workload_for(seq_len, embedding_dim, hidden_dim):
-    """The exported workload for one problem size."""
-    return export_workload(
-        swiglu_module(embedding_dim, hidden_dim),
-        (torch.zeros(seq_len, embedding_dim, dtype=torch.bfloat16),),
+    """The workload for one problem size."""
+    shapes = reference.operand_shapes(seq_len, embedding_dim, hidden_dim)
+    return build_workload(
+        reference.LAYERS,
+        reference.swiglu(
+            {name: np.zeros(shape, bfloat16) for name, shape in shapes.items()}
+        ),
+        inputs=(reference.INPUT,),
         node_names=NODE_NAMES,
-        result_names=RESULT_NAMES,
+        output_name=reference.OUTPUT,
     )
 
 
