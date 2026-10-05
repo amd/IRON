@@ -221,13 +221,14 @@ class CostTable:
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            "steps": {k: dataclasses.asdict(v) for k, v in sorted(self.steps.items())},
-            "calibrations": {
-                k: dataclasses.asdict(v) for k, v in sorted(self.calibrations.items())
-            },
-        }
-        self.path.write_text(json.dumps(data, indent=1) + "\n")
+        sections = []
+        for name, table in (("steps", self.steps), ("calibrations", self.calibrations)):
+            rows = [
+                f"{json.dumps(k)}: {json.dumps(dataclasses.asdict(v))}"
+                for k, v in sorted(table.items())
+            ]
+            sections.append(f'"{name}": {{\n  ' + ",\n  ".join(rows) + "\n}")
+        self.path.write_text("{" + ",\n".join(sections) + "}\n")
 
     def record_step(self, key: str, cost: StepCost) -> None:
         self.steps[key] = cost
