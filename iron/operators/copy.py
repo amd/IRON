@@ -193,15 +193,7 @@ class Copy(Operator):
     def _shares(self, tap: TensorAccessPattern) -> list[TensorAccessPattern]:
         """``tap`` with its innermost axis split among the channels, in order."""
         share = tap.sizes[-1] // self.num_channels
-        return [
-            TensorAccessPattern(
-                tap.tensor_dims,
-                tap.offset + c * share * tap.strides[-1],
-                [*tap.sizes[:-1], share],
-                tap.strides,
-            )
-            for c in range(self.num_channels)
-        ]
+        return [tap[..., c * share : (c + 1) * share] for c in range(self.num_channels)]
 
     def _taps(
         self, tap: TensorAccessPattern, bound: int | None, dtype
@@ -275,9 +267,7 @@ class Copy(Operator):
         def at(tap, bound, valid):
             if valid is None:
                 return tap
-            sizes = list(tap.sizes)
-            sizes[bound] = int(valid)
-            return TensorAccessPattern(tap.tensor_dims, tap.offset, sizes, tap.strides)
+            return tap[(*[slice(None)] * bound, slice(int(valid)))]
 
         src = at(self.src, self.src_bound, src_valid)
         dst = at(self.dst, self.dst_bound, dst_valid)

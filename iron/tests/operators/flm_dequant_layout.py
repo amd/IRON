@@ -17,16 +17,18 @@ from aie.utils import bfp
 from iron.operators.flm.dequant.design import (
     CORE_JOIN_OFFSETS,
     CT_K,
-    DRAIN_DIMS,
     HALF_BLOCKS,
     K_TILE_B,
     N_TILE,
     SLAB_BLOCKS,
     S,
     T,
+    drain_halves,
 )
 from iron.operators.flm.packing import pack_b
 from iron.operators.flm.q4nx import K_TILE, M_TILE
+
+DRAIN = drain_halves(HALF_BLOCKS)[0]
 
 # Every distinct (K in-features, N out-features) Gemma4 E2B needs, from
 # hidden_size 1536, intermediate_size 6144, DQ/DK/DV 4096/512/512 and the SWA
@@ -69,7 +71,7 @@ def _model(K, N):
     n_half, k_half = (n % N_TILE) // M_TILE, (k % K_TILE_B) // K_TILE
     mt = np.array(CORE_JOIN_OFFSETS)[n_half] + emit
 
-    pos = _apply(mt, [d[0] for d in DRAIN_DIMS], [d[1] for d in DRAIN_DIMS])
+    pos = _apply(mt, DRAIN.sizes, DRAIN.strides)
     cb, kb = n // N_TILE, k // K_TILE_B
     return (cb * (K // K_TILE_B) + kb) * SLAB_BLOCKS + k_half * HALF_BLOCKS + pos
 
@@ -124,16 +126,17 @@ def test_bytes_match_pack_b(K, N):
 
 def test_descriptors_are_dma_expressible():
     """A bfp16 block is 9 bytes and the DMA steps in 4, so only groups of
-    blocks are addressable. DRAIN_DIMS is written in blocks; this checks the
+    blocks are addressable. The drain is written in blocks; this checks the
     grouping survives translation to bytes and the field widths.
     """
     block_bytes = T + 1
-    for size, stride in DRAIN_DIMS[:-1]:
+    dims = DRAIN.transformation_dims
+    for size, stride in dims[:-1]:
         assert (stride * block_bytes) % 4 == 0, (size, stride)
-    assert (DRAIN_DIMS[-1][0] * block_bytes) % 4 == 0
-    assert DRAIN_DIMS[-1][1] == 1
-    assert DRAIN_DIMS[-1][0] <= 1023
-    assert int(np.prod([d[0] for d in DRAIN_DIMS])) == HALF_BLOCKS
+    assert (dims[-1][0] * block_bytes) % 4 == 0
+    assert dims[-1][1] == 1
+    assert dims[-1][0] <= 1023
+    assert int(np.prod(DRAIN.sizes)) == HALF_BLOCKS
 
 
 @pytest.mark.parametrize("K, N", E2B_SHAPES)

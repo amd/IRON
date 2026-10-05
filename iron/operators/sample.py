@@ -243,19 +243,14 @@ class Sample(Operator):
         into one, else one per stream.
         """
         run, streams = self.slice_size, self.select_streams
-        offset = core * run
+        piece = TensorAccessPattern.full((self.vocab,))[core * run : (core + 1) * run]
         shim = BdLimits.of(self.dev, 0, 0)
         halves = shim.factor(run, shim.granule(bfloat16))
         if halves is not None:
-            hi, lo = halves
-            tap = TensorAccessPattern(
-                (self.vocab,), offset, [streams, 1, hi, lo], [0, 0, lo, 1]
-            )
+            tap = piece.split(0, halves[1]).repeat(streams)
             if shim.fits(tap, bfloat16):
                 return [tap]
-        return [
-            TensorAccessPattern((self.vocab,), offset, [1, 1, 1, run], [0, 0, 0, 1])
-        ] * streams
+        return [piece] * streams
 
     def sequence(self, rt):
         """One group: the draw and the logits in, then the record and the token."""
@@ -264,12 +259,7 @@ class Sample(Operator):
         with rt.group() as tg:
             rt.fill(
                 self.draws.lane(),
-                TensorAccessPattern(
-                    self.draws.shape,
-                    0,
-                    [1, 1, 1, kernels.ROW_WORDS],
-                    [0, 0, 0, 1],
-                ),
+                TensorAccessPattern.full(self.draws.shape)[0],
                 group=tg,
                 offset_by=row,
             )
@@ -278,17 +268,12 @@ class Sample(Operator):
                     rt.fill(self.logits.lane(c), tap, group=tg)
             rt.drain(
                 self.tokens.lane(),
-                TensorAccessPattern(self.tokens.shape, 0, [1, 1, 1, 1], [0, 0, 0, 1]),
+                TensorAccessPattern.full(self.tokens.shape)[:1],
                 group=tg,
                 wait=True,
                 offset_by=at,
             )
-            rt.drain(
-                self.token.lane(),
-                TensorAccessPattern(self.token.shape, 0, [1, 1, 1, 1], [0, 0, 0, 1]),
-                group=tg,
-                wait=True,
-            )
+            rt.drain(self.token.lane(), self.token, group=tg, wait=True)
 
     def ops(self) -> int:
         return 0  # a draw, not arithmetic: its figure is latency

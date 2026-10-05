@@ -935,37 +935,27 @@ class MHA(Operator):
         group = self.num_heads // kv_heads
         rows = self.join_rows  # Q rows each shim carries per block
         blocks = ceildiv(self.seq_pad, rows * self.q_shims)  # per pipeline
-        B_kv, d = self.B_kv, self.d
+        B_kv = self.B_kv
         # K and V stream the blocks the keys cover, a call's by its bound.
         kv_blocks = ceildiv(self.kv_tokens, B_kv)
         kv_by = {1: self.value("kv_blocks")} if self.uses_value("kv_blocks") else None
 
-        def strides_of(buffer, interleaved):
-            # (head, row) element strides of a (heads, seq, d) or, interleaved
-            # per token, (seq, heads, d) buffer.
-            if interleaved:
-                return d, buffer.shape[1] * d
-            return buffer.shape[1] * d, d
+        def by_head(buffer, interleaved):
+            # A (heads, seq, d) or, interleaved per token, (seq, heads, d)
+            # buffer, walked as (head, row, d).
+            tap = TensorAccessPattern.full(buffer.shape)
+            return tap.permute((1, 0, 2)) if interleaved else tap
 
         def q_rows(buffer, head0, shim):
             # The group's heads, each block's `rows` rows for this shim.
-            head_s, row_s = strides_of(buffer, self.heads_interleaved)
-            return TensorAccessPattern(
-                buffer.shape,
-                head0 * head_s + shim * rows * row_s,
-                [group, blocks, rows, d],
-                [head_s, self.q_shims * rows * row_s, row_s, 1],
-            )
+            heads = by_head(buffer, self.heads_interleaved)[head0 : head0 + group]
+            by_shim = heads.split(1, self.q_shims * rows)
+            return by_shim[:, :, shim * rows : (shim + 1) * rows]
 
         def kv_rows(buffer, kv_head, reads):
             # The head's blocks, read `reads` times; a call patches their count.
-            head_s, row_s = strides_of(buffer, self.kv_interleaved)
-            return TensorAccessPattern(
-                buffer.shape,
-                kv_head * head_s,
-                [reads, kv_blocks, B_kv, d],
-                [0, B_kv * row_s, row_s, 1],
-            )
+            head = by_head(buffer, self.kv_interleaved)[kv_head, : kv_blocks * B_kv]
+            return head.split(0, B_kv).repeat(reads)
 
         if self.packed:
             steps = kv_heads // self.num_pipelines
@@ -973,12 +963,9 @@ class MHA(Operator):
             def packed_rows(buffer, kv_head):
                 # The group's heads, contiguous in (1, heads, d) as in
                 # (heads, 1, d), repeated to fill a block.
-                return TensorAccessPattern(
-                    buffer.shape,
-                    kv_head * group * d,
-                    [self.B_q // group, group * d],
-                    [0, 1],
-                )
+                heads = by_head(buffer, self.heads_interleaved)
+                heads = heads[kv_head * group : (kv_head + 1) * group, 0]
+                return heads.coalesce().repeat(self.B_q // group)
 
             for step in range(steps):
                 owned = [p * steps + step for p in range(self.num_pipelines)]

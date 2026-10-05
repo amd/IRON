@@ -183,8 +183,8 @@ def test_a_bounded_operand_goes_round_robin_over_the_lanes():
     op = Rows(rows=64, cols=8).resolved(NPU2_4COL)
     plan = Transfers.round_robin(op.x, op.streams["x"], 0)
     assert [(slot.index, tap, dim) for slot, tap, dim in plan] == [
-        (0, TensorAccessPattern((512,), 0, [1, 32, 1, 8], [0, 16, 8, 1]), 1),
-        (1, TensorAccessPattern((512,), 8, [1, 32, 1, 8], [0, 16, 8, 1]), 1),
+        (0, TensorAccessPattern((1, 32, 2, 8), 0, [1, 32, 1, 8], [0, 16, 8, 1]), 1),
+        (1, TensorAccessPattern((1, 32, 2, 8), 8, [1, 32, 1, 8], [0, 16, 8, 1]), 1),
     ]
     # A leading batch axis is the outer repeat; the tile count keeps its slot.
     batched = MV(M=256, K=128, num_batches=3).resolved(NPU2_4COL)
@@ -192,7 +192,7 @@ def test_a_bounded_operand_goes_round_robin_over_the_lanes():
     # The 64 x 128 tile is a run past one wrap, so it takes the two inner
     # slots as 8 x 1024; the tile count sits above them.
     assert tap == TensorAccessPattern(
-        (3 * 256 * 128,),
+        (3, 2, 2, 64 * 128),
         0,
         [3, 2, 8, 1024],
         [256 * 128, 2 * 64 * 128, 1024, 1],

@@ -598,21 +598,19 @@ class GEMM(Operator):
             rt.fill(self.B.lane(col), B_tiles[col], group=tg)
 
         # C: (n_aie_rows * m)-by-n tiles, every n_aie_cols-th column block, for
-        # c_n_rows row-blocks from c_row_base.
+        # c_n_rows row-blocks from c_row_base. Column-major, one row-block
+        # (tb_max_n_rows halves to 1) in its n_aie_rows m-tall pieces.
+        C_grid = (
+            TensorAccessPattern.full((N, M)).tile((n, m))
+            if c_col_maj
+            else TensorAccessPattern.full((M, N)).tile((mem_tile_m_C, n))
+        )
+
         def c_tile(col, c_row_base, c_n_rows):
             if c_col_maj:
-                return TensorAccessPattern(
-                    (N, M),
-                    col * n * M + c_row_base * mem_tile_m_C,
-                    [N // mem_tile_n, n_aie_rows, n, m],
-                    [M * mem_tile_n, m, M, 1],
-                )
-            return TensorAccessPattern(
-                (M, N),
-                col * n + c_row_base * mem_tile_m_C * N,
-                [c_n_rows, N // mem_tile_n, mem_tile_m_C, n],
-                [mem_tile_m_C * N if c_n_rows > 1 else 0, mem_tile_n, N, 1],
-            )
+                pieces = slice(c_row_base * n_aie_rows, (c_row_base + 1) * n_aie_rows)
+                return C_grid[col::n_aie_cols, pieces]
+            return C_grid[c_row_base : c_row_base + c_n_rows, col::n_aie_cols]
 
         # Task groups determine when to sync, await and free DMA runtime ops.
         tg = rt.new_group()

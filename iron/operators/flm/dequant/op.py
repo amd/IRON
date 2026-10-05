@@ -24,16 +24,14 @@ from iron.operators.flm.dequant.design import (
     CORE_BLOCKS,
     CORE_JOIN_OFFSETS,
     CT_K,
-    DRAIN_SIZES,
-    DRAIN_STRIDES,
     HALF_BLOCKS,
     HALVES,
     K_TILE_B,
     N_TILE,
     ROWS,
-    SLAB_BLOCKS,
     S,
     T,
+    drain_halves,
     qw_bytes_for,
     run_geometry,
 )
@@ -307,22 +305,18 @@ class DequantBFP(Operator):
 
         # A column block is read straight through. The block is split 10 x 512
         # so the innermost size stays inside the BD's field.
-        qw_sizes = (blocks_per_row, 2, BLOCK_BYTES // 512, 512)
-        qw_strides = (2 * BLOCK_BYTES, BLOCK_BYTES, 512, 1)
+        qw = TensorAccessPattern.full(
+            (qw_bytes // cb_bytes, blocks_per_row, 2, BLOCK_BYTES // 512, 512)
+        )
+        out = drain_halves(out_blocks)
 
         for cb0 in range(0, n_blocks, cols):
             columns = [(c, cb0 + c) for c in range(cols) if cb0 + c < n_blocks]
 
             tg_fill = rt.new_group()
             for c, cb in columns:
-                offset = (
-                    (cb // run_blocks) * period_blocks + cb % run_blocks
-                ) * cb_bytes
-                rt.fill(
-                    self.qw.lane(c),
-                    TensorAccessPattern((qw_bytes,), offset, qw_sizes, qw_strides),
-                    group=tg_fill,
-                )
+                at = (cb // run_blocks) * period_blocks + cb % run_blocks
+                rt.fill(self.qw.lane(c), qw[at], group=tg_fill)
 
             prev = rt.new_group()  # empty: closed on the first k-tile's turn
             for kb in range(k_tiles):
@@ -331,12 +325,7 @@ class DequantBFP(Operator):
                     for h in range(HALVES):
                         rt.drain(
                             self.out.lane(c * HALVES + h),
-                            TensorAccessPattern(
-                                (out_blocks,),
-                                (cb * k_tiles + kb) * SLAB_BLOCKS + h * HALF_BLOCKS,
-                                DRAIN_SIZES,
-                                DRAIN_STRIDES,
-                            ),
+                            out[(cb * k_tiles + kb) * HALVES + h],
                             wait=True,
                             group=tg,
                         )
@@ -391,9 +380,9 @@ class DequantBFP(Operator):
         enc = enc.reshape(len(b), K_TILE // CT_K, M_TILE // T, CT_K // S, T, 9)
         out = np.empty((K // CT_K, N // T, CT_K // S, T, 9), dtype=np.uint8)
         for i, (r0, c0) in enumerate(_block_origins(len(b), K)):
-            out[c0 // CT_K : (c0 + K_TILE) // CT_K, r0 // T : (r0 + M_TILE) // T] = (
-                enc[i]
-            )
+            out[c0 // CT_K : (c0 + K_TILE) // CT_K, r0 // T : (r0 + M_TILE) // T] = enc[
+                i
+            ]
         # pack_b's order: (cb, kb, k slice, n // T in cb, k // S in the slice,
         # n % T).
         out = out.reshape(

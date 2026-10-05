@@ -191,7 +191,7 @@ class BoundBuffer:
     @property
     def tap(self) -> TensorAccessPattern:
         """The whole buffer, one linear run."""
-        return TensorAccessPattern((self.elements,), 0, [self.elements], [1])
+        return TensorAccessPattern.full((self.elements,))
 
     @property
     def nbytes(self) -> int:

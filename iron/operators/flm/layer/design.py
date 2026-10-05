@@ -1450,9 +1450,7 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
                     kl["o_cons_lock"],
                     kl["o_prod_lock"],
                     packet=(0, _X_FROM_ATTN),
-                    tap=TensorAccessPattern(
-                        (NQ * dh,), 0, [NQ, dh // 8, 8], [8, NQ * 8, 1]
-                    ),
+                    tap=TensorAccessPattern.full((dh // 8, NQ, 8)).permute((1, 0, 2)),
                 ),
             ],
         )
@@ -1483,9 +1481,7 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
     ql = ctx.locks(qk_tile, ATTN_QK_LOCKS, dict(k_prod_lock=2, k_cons_lock=0))
     ctx.add_locks(qk_tile, [(ATTN_HANDSHAKE_LOCK, 0)])
     L = ctx.rtp_buffer(qk_tile, rtp_key)
-    q_in_order = TensorAccessPattern(
-        (q_len,), 0, [NQ_PADDED, dh // 8, 8], [8, NQ_PADDED * 8, 1]
-    )
+    q_in_order = TensorAccessPattern.full((dh // 8, NQ_PADDED, 8)).permute((1, 0, 2))
     m_buf = Buffer(type=m_ty, name=f"m_{r}_{c}", tile=qk_tile)
     c_local = Buffer(type=c_ty, name=f"c_local_{r}_{c}", tile=qk_tile)
     # The q acquire orders the RTP read after the sequence's RTP writes.
@@ -1551,20 +1547,19 @@ def _build_attn_mem(ctx, amt):
     amt_name = f"{amt.row}_{amt.col}"
     k_row = NUM_KV * g.dh
     sk_row = NUM_KV * g.swa_dh
-    k_order = [(k_row // 8, 8), (16, k_row), (8, 1)]
-    if not two_kv:
-        v_order = [(LK // 8, LK // 2 * k_row), (k_row // 8, 8), (8, k_row), (8, 1)]
-    else:
-        v_order = [(k_row // 8, 8), (LK, k_row), (8, 1)]
-    sk_order = [(sk_row // 8, 8), (16, sk_row), (8, 1)]
-    sv_order = [(LK // 8, LK // 2 * sk_row), (sk_row // 8, 8), (8, sk_row), (8, 1)]
+    k = TensorAccessPattern.full((LK, k_row))
+    sk = TensorAccessPattern.full((LK, sk_row))
+    # k column groups of 8 down every row; v in 8 x 8 blocks, but as k when
+    # two heads share the row.
+    k_order = k.tile((LK, 8))[0]
+    v_order = k_order if two_kv else k.tile((8, 8))
     amt_chans = []
     for ch, (key, row, order, lock_ids) in enumerate(
         (
             ("k", k_row, k_order, (0, 1)),
             ("v", k_row, v_order, (3, 4)),
-            ("swa_k", sk_row, sk_order, (5, 6)),
-            ("swa_v", sk_row, sv_order, (7, 8)),
+            ("swa_k", sk_row, sk.tile((LK, 8))[0], (5, 6)),
+            ("swa_v", sk_row, sk.tile((8, 8)), (7, 8)),
         )
     ):
         b0, b1 = (
@@ -1586,12 +1581,7 @@ def _build_attn_mem(ctx, amt):
                     b1,
                     cons,
                     prod,
-                    tap=TensorAccessPattern(
-                        (LK, row),
-                        0,
-                        [size for size, _ in order],
-                        [stride for _, stride in order],
-                    ),
+                    tap=order,
                 ),
             ),
         ]

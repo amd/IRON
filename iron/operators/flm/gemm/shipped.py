@@ -188,43 +188,19 @@ class Shipped(
         # column stops draining it.
         n_full = N // (N_TILE * COLS)
         rem_blocks = (N % (N_TILE * COLS)) // N_TILE
-        a_n, b_n, c_n = self.A.elements, self.B.elements, self.C.elements
+        A = TensorAccessPattern.full((m_row_blocks, ROWS, M_TILE, k_iters, K_TILE))
+        B = TensorAccessPattern.full((N // N_TILE, k_iters * K_TILE * N_TILE))
+        C = TensorAccessPattern.full((m_row_blocks, ROWS * M_TILE, N // N_TILE, N_TILE))
         for mega_col in range(n_full + (1 if rem_blocks else 0)):
             active = rem_blocks if (rem_blocks and mega_col == n_full) else COLS
             for mega_row in range(m_row_blocks):
                 for c in range(COLS):
                     if c in A_SOURCE_COL:
                         r = A_SOURCE_COL.index(c)
-                        rt.fill(
-                            self.A.lane(r),
-                            TensorAccessPattern(
-                                (a_n,),
-                                mega_row * ROWS * M_TILE * K + r * M_TILE * K,
-                                (1, k_iters, M_TILE, K_TILE),
-                                (0, K_TILE, K, 1),
-                            ),
-                        )
+                        rt.fill(self.A.lane(r), A[mega_row, r].permute((1, 0, 2)))
                     if c >= active:
                         continue
                     # One contiguous run: pack_B has already put this
                     # column's k-blocks in the order the memtile writes them.
-                    rt.fill(
-                        self.B.lane(c),
-                        TensorAccessPattern(
-                            (b_n,),
-                            (mega_col * COLS + c) * N_TILE * K,
-                            (1, 1, 1, k_iters * K_TILE * N_TILE),
-                            (0, 0, 0, 1),
-                        ),
-                    )
-                    rt.drain(
-                        self.C.lane(c),
-                        TensorAccessPattern(
-                            (c_n,),
-                            mega_col * COLS * N_TILE
-                            + mega_row * ROWS * M_TILE * N
-                            + c * N_TILE,
-                            (1, 1, ROWS * M_TILE, N_TILE),
-                            (0, 0, N, 1),
-                        ),
-                    )
+                    rt.fill(self.B.lane(c), B[mega_col * COLS + c])
+                    rt.drain(self.C.lane(c), C[mega_row, :, mega_col * COLS + c])

@@ -119,11 +119,8 @@ class Handle:
             raise ValueError(
                 f"axes {axes} do not permute a shape of rank {len(self.shape)}"
             )
-        whole = TensorAccessPattern.full(self.shape)
         shape = tuple(self.shape[a] for a in axes)
-        tap = TensorAccessPattern(
-            self.shape, 0, shape, [whole.strides[a] for a in axes]
-        )
+        tap = TensorAccessPattern.full(self.shape).permute(axes)
         bounds = {axes.index(axis): b for axis, b in self.bounds.items()}
         return Handle(shape, self.dtype, self.name, "view", self, 0, tap, bounds=bounds)
 

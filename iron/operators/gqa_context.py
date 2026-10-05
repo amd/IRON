@@ -257,42 +257,19 @@ class GQAContext(Operator):
         heads' probabilities a chunk of positions at a time, every head's
         chunk together; its heads' contexts back, contiguous.
         """
-        rows, length, dim, chunk = (
-            self.heads_per_group,
-            self.seq_len,
-            self.head_dim,
-            self.chunk,
-        )
+        cache = TensorAccessPattern.full(self.cache.shape)
+        weights = TensorAccessPattern.full(self.weights.shape)
+        ctx = TensorAccessPattern.full(self.ctx.shape)
         with rt.group() as tg:
             for g in range(self.groups):
-                span = length * dim
-                rt.fill(
-                    self.cache.lane(g),
-                    TensorAccessPattern(
-                        self.cache.shape, g * span, [1, 1, 1, span], [0, 0, 0, 1]
-                    ),
-                    group=tg,
-                )
+                rt.fill(self.cache.lane(g), cache[g].coalesce(), group=tg)
                 rt.fill(
                     self.weights.lane(g),
-                    TensorAccessPattern(
-                        self.weights.shape,
-                        g * rows * length,
-                        [1, length // chunk, rows, chunk],
-                        [0, chunk, length, 1],
-                    ),
+                    weights[g].split(1, self.chunk).permute((1, 0, 2)),
                     group=tg,
                 )
             for g in range(self.groups):
-                span = rows * dim
-                rt.drain(
-                    self.ctx.lane(g),
-                    TensorAccessPattern(
-                        self.ctx.shape, g * span, [1, 1, 1, span], [0, 0, 0, 1]
-                    ),
-                    group=tg,
-                    wait=True,
-                )
+                rt.drain(self.ctx.lane(g), ctx[g].coalesce(), group=tg, wait=True)
 
     def ops(self) -> int:
         return 2 * self.groups * self.heads_per_group * self.seq_len * self.head_dim

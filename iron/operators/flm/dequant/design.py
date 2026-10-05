@@ -6,6 +6,8 @@
 See README.md for the layout this describes.
 """
 
+from aie.helpers.taplib import TensorAccessPattern
+
 # flm.GEMM's B tiling, imported rather than restated: this design has to write
 # the buffer in the order that one reads it, and two copies would drift.
 from iron.operators.flm.gemm.design import (
@@ -20,8 +22,7 @@ from iron.operators.flm.gemm.design import (
 from iron.operators.flm.gemm.design import (
     N_TILE_DEFAULT as N_TILE,
 )
-
-from iron.operators.flm.q4nx import BLOCK_BYTES, K_TILE, M_TILE, packed_bytes
+from iron.operators.flm.q4nx import K_TILE, M_TILE, packed_bytes
 
 CT_K = CT_MAX_K_FOR_N[N_TILE]
 
@@ -37,16 +38,28 @@ HALF_BLOCKS = SLAB_BLOCKS // 2
 RUN = (M_TILE // T) * (CT_K // S) * T
 SPLIT = 2
 
-# Outermost first: n-half, k slice, then the core's run, split so the innermost
-# size stays inside the BD's field.
-DRAIN_SIZES = (N_TILE // M_TILE, K_TILE // CT_K, SPLIT, RUN // SPLIT)
-DRAIN_STRIDES = (RUN, (N_TILE // T) * (CT_K // S) * T, RUN // SPLIT, 1)
-DRAIN_DIMS = list(zip(DRAIN_SIZES, DRAIN_STRIDES))
 
 # Core i takes n-half i % 2 and k-half i // 2, so cores 0/1 form the k-half 0
 # object and cores 2/3 the k-half 1 object.
 CORE_JOIN_OFFSETS = [0, CORE_BLOCKS]
 HALVES = 2
+
+
+def drain_halves(out_blocks):
+    """The output's drain, per half slab.
+
+    Args:
+        out_blocks: The output's size, in bfp16 blocks.
+
+    Returns:
+        The walk over the output's half slabs, indexed by half: each one's
+        n-half, k slice, then the core's run, split so the innermost size
+        stays inside the BD's field.
+    """
+    halves = TensorAccessPattern.full(
+        (out_blocks // HALF_BLOCKS, K_TILE // CT_K, N_TILE // M_TILE, RUN)
+    )
+    return halves.permute((0, 2, 1, 3)).split(3, RUN // SPLIT)
 
 
 def run_geometry(run_out_features, run_period_out_features, n_blocks):

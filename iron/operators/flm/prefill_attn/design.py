@@ -161,8 +161,9 @@ def _stage_kv_causal(rt, MT, v, g):
     left_cons = Lock(tile=mt, lock_id=1, init=0)
     own_prod = Lock(tile=mt, lock_id=7, init=2)
     own_cons = Lock(tile=mt, lock_id=8, init=0)
-    fill = TensorAccessPattern(
-        (LK_MT, g.dh), 0, [LK_MT // g.lk, g.lk, 64, 8], [g.lk * g.dh, 8, 64, 1]
+    # Each lk-row block arrives row by row and lands as 8-column groups.
+    fill = TensorAccessPattern.full((LK_MT // g.lk, g.dh // 8, g.lk, 8)).permute(
+        (0, 2, 1, 3)
     )
     rt.add_tile_dma(
         TileDma(
@@ -218,7 +219,7 @@ def _stage_kv_sliding(rt, MT, v, g):
     two counts. It therefore reads a buffer after both halves hold data.
     """
     in_mem_ty = np.ndarray[(LK_MT * 2, g.dh), bf16]
-    half = LK_MT * g.dh
+    halves = TensorAccessPattern.full((2, LK_MT // g.lk, g.dh // 8, g.lk, 8))
     mt = MT[v.kv_memtile]
     in_0 = Buffer(type=in_mem_ty, name=f"in_0_0_{mt.col}", tile=mt)
     in_1 = Buffer(type=in_mem_ty, name=f"in_1_0_{mt.col}", tile=mt)
@@ -236,15 +237,10 @@ def _stage_kv_sliding(rt, MT, v, g):
                         in_1,
                         prod,
                         cons,
-                        tap=TensorAccessPattern(
-                            (2 * LK_MT, g.dh),
-                            offset,
-                            [LK_MT // g.lk, g.lk, 32, 8],
-                            [g.lk * g.dh, 8, 128, 1],
-                        ),
+                        tap=halves[ch].permute((0, 2, 1, 3)),
                     ),
                 )
-                for ch, offset in ((0, 0), (1, half))
+                for ch in (0, 1)
             ]
             + [
                 DmaChannel(

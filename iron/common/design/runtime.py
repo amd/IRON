@@ -179,13 +179,11 @@ class Transfers:
             raise ValueError(
                 f"{buffer.name}: a {run}-element tile does not fit one descriptor"
             )
-        hi, lo = halves
-        iterations, step = (shape[0], prod(shape[1:])) if axis else (1, 0)
-        sizes = [iterations, tiles, hi, lo]
-        strides = [step, lanes * run, lo, 1]
+        iterations = shape[0] if axis else 1
+        tiled = TensorAccessPattern.full((iterations, tiles, lanes, run))
         out = []
         for lane in range(lanes):
-            tap = TensorAccessPattern((buffer.elements,), lane * run, sizes, strides)
+            tap = tiled[:, :, lane].split(2, halves[1])
             if not shim.fits(tap, dtype):
                 raise ValueError(
                     f"{buffer.name} {shape}: the round-robin split over {lanes} lanes "

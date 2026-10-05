@@ -412,37 +412,27 @@ class GEMV(Operator):
         M, K, rep, nm = self.M, self.K, self.repeat, self.num_matrices
         rows = M // self.num_aie_columns
         shim = BdLimits.of(self.dev, 0, 0)
-        # (buffer, offset, run, (pass stride, matrix stride), batch stride):
-        # A's rows come from the batch's matrix, re-read each pass (stride
-        # 0); B's and C's go to the batch itself.
+        lane_rows = slice(lane * rows, (lane + 1) * rows)
+        # Each walk is (pass, matrix, run): A's rows come from the batch's
+        # matrix, re-read each pass (stride 0); B's and C's go to the batch
+        # itself, batch m * repeat + r of matrix m in pass r.
+        A = TensorAccessPattern.full((nm, M, K))
+        B = TensorAccessPattern.full((nm, rep, K))
+        C = TensorAccessPattern.full((nm, rep, M))
         walks = {
-            "A": (self.A, lane * rows * K, rows * K, (0, M * K), None),
-            "B": (self.B, 0, K, (K, rep * K), K),
-            "C": (self.C, lane * rows, rows, (M, rep * M), M),
+            "A": (self.A, A[:, lane_rows].merge(1).repeat(rep)),
+            "B": (self.B, B.permute((1, 0, 2))),
+            "C": (self.C, C[:, :, lane_rows].permute((1, 0, 2))),
         }
         out = {}
-        for name, (buf, offset, run, (pass_s, matrix_s), batch_s) in walks.items():
-            halves = shim.factor(run, shim.granule(buf.dtype))
+        for name, (buf, walk) in walks.items():
+            halves = shim.factor(walk.sizes[-1], shim.granule(buf.dtype))
             if halves is not None:
-                hi, lo = halves
-                tap = TensorAccessPattern(
-                    (buf.elements,),
-                    offset,
-                    [rep, nm, hi, lo],
-                    [pass_s, matrix_s, lo, 1],
-                )
+                tap = walk.split(2, halves[1])
                 if shim.fits(tap, buf.dtype):
                     out[name] = [tap]
                     continue
-            out[name] = [
-                TensorAccessPattern(
-                    (buf.elements,),
-                    offset + (b // rep * M * K if batch_s is None else b * batch_s),
-                    [1, 1, 1, run],
-                    [0, 0, 0, 1],
-                )
-                for b in self._batch_order()
-            ]
+            out[name] = [walk[b % rep, b // rep] for b in self._batch_order()]
         return out
 
     def _repeated_sequence(self, rt):

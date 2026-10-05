@@ -199,9 +199,7 @@ class Transpose(Operator):
         n_cores = cols * chans
         tile_ty = np.ndarray[(m * n,), np.dtype[bfloat16]]
         depth = target.fifo_depth(m * n, self.x.dtype)
-        l2l1 = TensorAccessPattern(
-            (m * n,), 0, [m // s, s, n // s, s], [s, m, s * m, 1]
-        )
+        l2l1 = TensorAccessPattern.full((n // s, s, m // s, s)).permute((2, 1, 0, 3))
 
         kernel = datamovement.transpose(m, n, s)
         of_l3l2 = [
@@ -267,7 +265,13 @@ class Transpose(Operator):
         """
         M, N, nb = self.M, self.N, self.num_batches
         m, n, cols, chans = self.m, self.n, self.num_aie_columns, self.num_channels
-        elems = M * N
+        # Each core's block of a batch: chans row-bands, cols column-bands.
+        x = TensorAccessPattern.full(
+            (nb, chans, M // chans // m, m, cols, N // cols // n, n)
+        )
+        y = TensorAccessPattern.full(
+            (nb, cols, N // cols // n, n, chans, M // chans // m, m)
+        )
         for batch in range(nb):
             with rt.group() as tg:
                 for i in range(cols):
@@ -275,22 +279,12 @@ class Transpose(Operator):
                         k = i * chans + j
                         # Partially transposes the input on the way in so the
                         # kernel only transposes s x s sub-tiles.
-                        tap_in = TensorAccessPattern(
-                            self.x.shape,
-                            batch * elems + (M // chans) * j * N + (N // cols) * i,
-                            [M // chans // m, N // cols // n, m, n],
-                            [m * N, n, N, 1],
-                        )
+                        tap_in = x[batch, j, :, :, i].permute((0, 2, 1, 3))
                         rt.fill(self.x.lane(k), tap_in, group=tg)
                 for i in range(cols):
                     for j in range(chans):
                         k = i * chans + j
-                        tap_out = TensorAccessPattern(
-                            self.y.shape,
-                            batch * elems + (N // cols) * i * M + (M // chans) * j,
-                            [M // chans // m, N // cols // n, n, m],
-                            [m, n * M, M, 1],
-                        )
+                        tap_out = y[batch, i, :, :, j].permute((2, 0, 1, 3))
                         rt.drain(self.y.lane(k), tap_out, group=tg, wait=True)
 
     def ops(self) -> int:

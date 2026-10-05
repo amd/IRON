@@ -108,26 +108,25 @@ class Repeat(Operator):
         shim = BdLimits.of(self.dev, 0, 0)
         row, gran = seq * cols, shim.granule(self.dtype)
         bound = self.bound_extents
+        x = TensorAccessPattern.full((rows, seq, cols))
+        y = TensorAccessPattern.full((rows, repeat, seq, cols))
         if "valid_seq" in bound:
             if "valid_rows" in bound:
                 raise ValueError("Repeat takes one bounded axis, not rows and seq")
             # A patched length bounds D2 (the dimension inside the
             # iteration), so the stack axis goes there and the rows inside
             # it: the same bytes both ways, in (copy, seq, row) order.
-            sizes = [repeat, seq, rows, cols]
-            in_strides, out_strides = [0, cols, row, 1], [row, cols, repeat * row, 1]
+            taps = (x.permute((1, 0, 2)).repeat(repeat), y.permute((1, 2, 0, 3)))
             dim, word = 1, "valid_seq"
         else:
             halves = shim.factor(row, gran)
             assert halves is not None  # resolve() refused a row without one
-            chunks, chunk = halves
-            sizes = [repeat, rows, chunks, chunk]
-            in_strides, out_strides = [0, row, chunk, 1], [row, repeat * row, chunk, 1]
+            chunk = halves[1]
+            taps = (
+                x.merge(1).split(1, chunk).repeat(repeat),
+                y.merge(2).permute((1, 0, 2)).split(2, chunk),
+            )
             dim, word = 1, "valid_rows"
-        taps = (
-            TensorAccessPattern(self.x.shape, 0, sizes, in_strides),
-            TensorAccessPattern(self.y.shape, 0, sizes, out_strides),
-        )
         with rt.group() as tg:
             rt.fill(
                 self.x,

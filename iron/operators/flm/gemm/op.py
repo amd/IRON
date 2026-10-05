@@ -480,18 +480,10 @@ class GEMM(Operator):
         # --- Data movement ------------------------------------------------
         # These turn a row-major DDR tile into the blocked layout the mmul
         # indexes. A mismatch is silently wrong, not a build error.
-        gather_dims = TensorAccessPattern(
-            (C_SLICE_LEN,),
-            0,
-            [M_TILE // R, N_TILE // T, R, T],
-            [R * N_TILE, T, N_TILE, 1],
-        )
-        a_l2 = M_CHUNK * M_TILE * K_TILE
-        a_recv_dims = TensorAccessPattern(
-            (a_l2,),
-            0,
-            [M_CHUNK * M_TILE // R, R, K_TILE // S, S],
-            [R * K_TILE, S, R * S, 1],
+        gather_dims = TensorAccessPattern.full((M_TILE, N_TILE)).tile((R, T))
+        a_bands = M_CHUNK * M_TILE // R
+        a_recv_dims = TensorAccessPattern.full((a_bands, K_TILE // S, R, S)).permute(
+            (0, 2, 1, 3)
         )
         # Emits (b_iter, mc, band): the order the core acquires A in while
         # holding a B chunk across the group.
@@ -499,17 +491,11 @@ class GEMM(Operator):
         a_split = BdLimits.of(target.dev, 0, 1).factor(R * CT_MAX_K)
         assert a_split is not None
         a_hi, a_lo = a_split
-        a_send_dims = TensorAccessPattern(
-            (a_l2,),
-            0,
-            [
-                K_DIV_CT_K_MAX,
-                M_CHUNK * M_TILE // R,
-                *([a_hi] if a_hi > 1 else []),
-                a_lo,
-            ],
-            [R * CT_MAX_K, R * K_TILE, *([a_lo] if a_hi > 1 else []), 1],
-        )
+        a_send_dims = TensorAccessPattern.full(
+            (a_bands, K_DIV_CT_K_MAX, R * CT_MAX_K)
+        ).permute((1, 0, 2))
+        if a_hi > 1:
+            a_send_dims = a_send_dims.split(2, a_lo)
 
         # No tile is pinned: column c and row r name logical tiles, and the
         # placer decides where each lands. One object per logical tile, since
@@ -861,17 +847,15 @@ class GEMM(Operator):
         # One transfer per (column-block, leg), not one per object: a
         # descriptor walks many fifo objects in consume order. Dimension
         # order must match the core's nest.
+        A = TensorAccessPattern.full((n_units, M_CHUNK, ROWS, M_TILE, k_iters, K_TILE))
+
         def a_tap(r, slab):
             # Every (row-block, k) block this row consumes for one
             # column-block: per unit, k outermost, then the unit's
             # row-blocks. A does not depend on the column-block; it is
             # re-fetched because the cores re-consume it.
-            return TensorAccessPattern(
-                tensor_dims=(M * K,),
-                offset=slab.first * M_CHUNK * ROWS * M_TILE * K + r * M_TILE * K,
-                sizes=[slab.units, k_iters, M_CHUNK, M_TILE, K_TILE],
-                strides=[M_CHUNK * ROWS * M_TILE * K, K_TILE, ROWS * M_TILE * K, K, 1],
-            )
+            rows = A[slab.first : slab.first + slab.units, :, r]
+            return rows.permute((0, 3, 1, 2, 4))
 
         # B's slot pool, per shape. Resident where the column-block fits: DDR
         # reads it once and the memtile replays it n_units times. Otherwise
@@ -943,21 +927,20 @@ class GEMM(Operator):
                 f"{pool.passes} one memtile channel can queue"
             )
 
+        B = TensorAccessPattern.full((N // N_TILE, k_iters, b_slot_elems))
+
         def b_tap(mega_col, c, slab):
             # Every (mega_row, k) chunk this column consumes. B arrives
             # pre-packed so each k-block is one contiguous run; reordering in
             # the descriptor instead gives an innermost run of T=8 bf16 and
             # measured 5.4x slower.
-            return TensorAccessPattern(
-                tensor_dims=(K * N // self.b_group,),
-                offset=(mega_col * COLS + c) * N_TILE * K // self.b_group,
-                # Resident, one k sweep for the whole column-block. Otherwise
-                # one per unit, not per row-block: the cores hold each B chunk
-                # across a group. The unit dimension has stride 0 because B
-                # does not depend on the row.
-                sizes=[1 if slab.b_resident else slab.units, k_iters, 1, b_slot_elems],
-                strides=[0, b_slot_elems, 0, 1],
-            )
+            #
+            # Resident, one k sweep for the whole column-block. Otherwise one
+            # per unit, not per row-block: the cores hold each B chunk across
+            # a group. The unit dimension has stride 0 because B does not
+            # depend on the row.
+            sweeps = 1 if slab.b_resident else slab.units
+            return B[mega_col * COLS + c][:, None].repeat(sweeps)
 
         def start_b_mt(c, direction, passes, slab):
             """Program and start one of column ``c``'s memtile B channels.
@@ -987,17 +970,18 @@ class GEMM(Operator):
                 )
             return flow.endpoint(pool.mt_tiles[c]).task(*chain, runs=passes).start()
 
+        C = TensorAccessPattern.full(
+            (M // (ROWS * M_TILE), ROWS * M_TILE, N // N_TILE, N_TILE)
+        )
+
         def c_tap(mega_col, c, slab):
             # Every joined block this column produces: one ROWS*M_TILE x
             # N_TILE per row-block, in plain row-block order even under
             # M_CHUNK.
-            return TensorAccessPattern(
-                tensor_dims=(M * N,),
-                offset=(mega_col * COLS + c) * N_TILE
-                + slab.first * M_CHUNK * ROWS * M_TILE * N,
-                sizes=[1, slab.units * M_CHUNK, ROWS * M_TILE, N_TILE],
-                strides=[0, ROWS * M_TILE * N, N, 1],
+            row_blocks = slice(
+                slab.first * M_CHUNK, (slab.first + slab.units) * M_CHUNK
             )
+            return C[row_blocks, :, mega_col * COLS + c]
 
         # A trailing block uses only the first rem_blocks columns. A is still
         # issued for every row, since the sitting-out columns drain it.
