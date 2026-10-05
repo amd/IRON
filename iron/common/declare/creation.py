@@ -219,12 +219,12 @@ def declare(cls: type) -> None:
                     )
             m.per = per
 
-    cls._members = tuple(members)  # type: ignore[attr-defined]
-    cls._param_fields = tuple(f.name for f in fields.values() if _tier_of(f) == "param")  # type: ignore[attr-defined]
-    cls._derived_params = {  # type: ignore[attr-defined]
+    cls._members = tuple(members)
+    cls._param_fields = tuple(f.name for f in fields.values() if _tier_of(f) == "param")
+    cls._derived_params = {
         f.name: f.metadata[_DERIVE] for f in fields.values() if _DERIVE in f.metadata
     }
-    cls._auto_fields = tuple(f.name for f in fields.values() if _tier_of(f) == "auto")  # type: ignore[attr-defined]
+    cls._auto_fields = tuple(f.name for f in fields.values() if _tier_of(f) == "auto")
     # The array tier: what a stream's tile, its dtype, its replication or
     # its presence names, and what declares itself array=True.
     named: set[str] = set()
@@ -237,7 +237,7 @@ def declare(cls: type) -> None:
                 named.add(m.dtype.name)
             if m.when is not None:
                 named.add(m.when.name)
-    cls._array_fields = tuple(  # type: ignore[attr-defined]
+    cls._array_fields = tuple(
         f.name for f in fields.values() if f.name in named or _declares_array(f)
     )
 

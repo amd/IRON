@@ -304,7 +304,7 @@ class Fusion:
             needs_reset = self.needs_reset(packing)
             if needs_reset:
 
-                @aie.device(device_ty)  # pyright: ignore[reportCallIssue]  # see main()
+                @aie.device(device_ty)
                 def reset():
                     @aiex.runtime_sequence()
                     def sequence():
@@ -316,9 +316,7 @@ class Fusion:
                 )
 
             # Create the main device -- this contains the runtime sequence calling into the other devices
-            # region_op annotates its decorator as the op it builds; a checker sees the
-            # decorated function as not callable.
-            @aie.device(device_ty)  # pyright: ignore[reportCallIssue]
+            @aie.device(device_ty)
             def main():
                 # Each argument is a flat run of bytes; a buffer in one is a
                 # view of the type its sub-design declares, at the buffer's

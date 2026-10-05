@@ -296,7 +296,7 @@ def test_shape_mismatch_and_rank_rules():
 def test_keyword_only_parameters_must_be_annotated_as_values():
     with pytest.raises(TypeError, match="annotated Scratchpad"):
 
-        class F(iron.Graph):  # noqa: F841
+        class F(iron.Graph):
             def body(self, x, *, n):
                 return x
 
@@ -731,7 +731,7 @@ def test_per_call_values_are_integer_expressions():
     ]
     assert str((p + 1) * 64) == "p * 64 + 64"
     with pytest.raises(TypeError):
-        _ = p * 0.5  # pyright: ignore[reportOperatorIssue] (a word is an integer)
+        _ = p * 0.5
 
 
 def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():

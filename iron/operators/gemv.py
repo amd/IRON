@@ -339,7 +339,7 @@ class GEMV(Operator):
                 for _ in range_(n):
                     c = C_fifo.acquire(1)
                     for j_idx in range_(tile_size_output // tile_size_input):
-                        j_i32: Any = index.casts(T.i32(), j_idx)  # pyright: ignore
+                        j_i32: Any = index.casts(T.i32(), j_idx)
                         output_row_offset = j_i32 * tile_size_input
                         a = A_fifo.acquire(1)
                         matvec(tile_size_input, output_row_offset, a, b, c)

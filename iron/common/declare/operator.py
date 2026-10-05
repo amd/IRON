@@ -137,7 +137,7 @@ class _ArrayView:
         object.__setattr__(self, "_op", op)
 
     @property
-    def __class__(self):  # type: ignore[override]
+    def __class__(self):
         # super() and isinstance() inside a hook see the operator's class.
         return type(object.__getattribute__(self, "_op"))
 
@@ -328,7 +328,7 @@ class Operator(metaclass=_OperatorMeta):
 
     def build_array(self, target) -> list:
         """Run ``array`` for the build, through the array-tier view."""
-        return type(self).array(_ArrayView(self), target)  # type: ignore[arg-type]
+        return type(self).array(_ArrayView(self), target)
 
     def tolerance(self) -> Tolerance | None:
         """How close the NPU output must come to ``reference``: the

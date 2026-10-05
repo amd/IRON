@@ -27,7 +27,7 @@ import numpy as np
 from aie.dialects import aie, aiex
 from aie.dialects.aie import (
     DMAChannelDir,
-    get_target_model,  # pyright: ignore[reportAttributeAccessIssue]  # not in _aie.pyi
+    get_target_model,
 )
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import np_ndarray_type_to_memref_type
@@ -83,9 +83,7 @@ class ExternalSequence(Transfers):
         with loc.context, loc, InsertionPoint(module.body):
             types = [np_ndarray_type_to_memref_type(b.flat_type) for b in buffers]
 
-            # region_op annotates its decorator as the op it builds; a checker
-            # sees the decorated function as not callable.
-            @aie.device(npu)  # pyright: ignore[reportCallIssue]
+            @aie.device(npu)
             def device_body():
                 tiles: dict[tuple[int, int], Any] = {}
 

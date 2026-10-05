@@ -11,7 +11,7 @@ from pathlib import Path
 
 import aie.utils as aie_utils
 import numpy as np
-import pyxrt  # pyright: ignore[reportMissingImports]
+import pyxrt
 from aie.utils.hostruntime.xrtruntime.hostruntime import (
     CachedXRTKernelHandle,
     XRTHostRuntime,

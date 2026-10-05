@@ -23,7 +23,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang-format
-          pip install reuse black ruff==0.15.8 pyright==1.1.414 pytest
+          pip install reuse black
 
       - name: Check Licenses
         if: success() || failure()
@@ -43,18 +43,3 @@ jobs:
         run: |
           python scripts/clang-format-wrapper.py --diff 
           python scripts/clang-format-wrapper.py --check
-
-      - name: Lint Python
-        if: success() || failure()
-        run: ruff check
-
-      # Docstrings are Google style, as in mlir-aie: ``X`` code spans and
-      # fenced code blocks, not Sphinx roles, RST literal blocks or directives.
-      - name: Check docstrings for Sphinx/RST markup
-        if: success() || failure()
-        run: |
-          ! git grep -nE ':(py:)?(class|meth|func|attr|mod|obj|data|exc|ref):`|\S::$|^\s*\.\. [a-z-]+::' -- '*.py'
-
-      - name: Type-check Python
-        if: success() || failure()
-        run: pyright

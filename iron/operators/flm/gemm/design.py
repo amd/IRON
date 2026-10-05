@@ -28,7 +28,7 @@ from typing import NamedTuple
 import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.dialects.aie import (
-    get_target_model,  # pyright: ignore[reportAttributeAccessIssue]  # not in _aie.pyi
+    get_target_model,
 )
 
 # --- Fixed geometry -------------------------------------------------------

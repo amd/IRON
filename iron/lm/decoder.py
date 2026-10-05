@@ -408,7 +408,7 @@ class CausalLM(iron.Graph):
         self._seen = tokens
         # The range holds the last token, so it runs at least once; a copy,
         # since the image's output buffer is rewritten by the next call.
-        logits = out.numpy()  # pyright: ignore[reportPossiblyUnboundVariable]
+        logits = out.numpy()
         return np.array(logits).reshape(-1)
 
     def generate(

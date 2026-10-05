@@ -29,7 +29,7 @@ _OPERATOR_MODULES = {
     "Shipped": "gemm.shipped",
 }
 
-__all__ = sorted(_OPERATOR_MODULES)  # pyright: ignore[reportUnsupportedDunderAll]
+__all__ = sorted(_OPERATOR_MODULES)
 
 
 def __getattr__(name):

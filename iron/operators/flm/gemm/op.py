@@ -23,7 +23,7 @@ from typing import Any, ClassVar, NamedTuple
 import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch, AIETileType, DMAChannelDir
 from aie.dialects.aie import (
-    get_target_model,  # pyright: ignore[reportAttributeAccessIssue]  # not in _aie.pyi
+    get_target_model,
 )
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
@@ -1115,7 +1115,7 @@ class GEMM(Operator):
 
     # -- host-side helpers -------------------------------------------------------
 
-    def pack_B(self, B):  # noqa: N802  (the operand's name)
+    def pack_B(self, B):
         """Reorder a row-major ``(K, N)`` weight matrix into consumption order.
 
         Flat uint8 bfp16ebs8 blocks on NPU2, flat bf16 on NPU1. Packing to
@@ -1135,7 +1135,7 @@ class GEMM(Operator):
             overlay_order=t.b_overlay_order,
         )
 
-    def packed_B_size(self, K, N):  # noqa: N802
+    def packed_B_size(self, K, N):
         """Elements (bf16) or bytes (bfp16ebs8) that ``pack_B`` returns."""
         return packed_b_size(K, N, bool(self._tuned.bfp16_b))
 

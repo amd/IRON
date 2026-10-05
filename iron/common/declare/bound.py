@@ -79,7 +79,7 @@ class BoundStream:
     @property
     def tile(self):
         """The ObjectFifo element type: ``np.ndarray[shape, dtype]``."""
-        return np.ndarray[self.shape, np.dtype[self.dtype]]  # type: ignore[misc]
+        return np.ndarray[self.shape, np.dtype[self.dtype]]
 
     @property
     def elements(self) -> int:
@@ -221,7 +221,7 @@ class BoundBuffer:
         blocks, so a descriptor's offset and length count blocks, as the
         array and the core do.
         """
-        return np.ndarray[(self.elements,), np.dtype[self.dtype]]  # type: ignore[misc]
+        return np.ndarray[(self.elements,), np.dtype[self.dtype]]
 
     # -- the stream side of a buffer that is its own stream ----------------
 

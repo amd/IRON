@@ -201,7 +201,7 @@ class GEMM(Operator):
         # this runs at construction, before resolution picks one. array()
         # asks for the geometry of the device it builds for, which on npu1
         # is the looser (4, 8, 4).
-        r, s, t = kernels.mm.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
+        r, s, t = kernels.mm.mac_dims(
             self.dtype_in,
             self.dtype_out,
             arch="aie2p",

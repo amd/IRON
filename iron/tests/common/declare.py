@@ -471,10 +471,7 @@ def test_a_derived_value_is_written_once_per_build():
 def test_a_value_a_graph_binds_is_per_call_and_no_longer_a_resident():
     class G(iron.Graph):
         def body(self, a, b, *, pos: Scratchpad[np.int32], n: Scratchpad[np.int32]):
-            # A per-call value at a call site is not a field a checker knows (yet).
-            return MV(
-                a, b, columns=8, start=pos, count=n
-            )  # pyright: ignore[reportCallIssue]
+            return MV(a, b, columns=8, start=pos, count=n)
 
     g = G()
 
@@ -557,7 +554,7 @@ def test_a_profile_scope_is_per_thread():
                 with p:
                     seen.append(MV(M=64, K=64).columns)
                 seen.append(MV(M=64, K=64).columns)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             errors.append(e)
 
     threads = [threading.Thread(target=work) for _ in range(4)]
@@ -570,7 +567,7 @@ def test_a_profile_scope_is_per_thread():
 
 def test_construction_is_by_keyword():
     with pytest.raises(TypeError, match="constructed by keyword"):
-        MV(3, M=64, K=64)  # pyright: ignore[reportCallIssue]
+        MV(3, M=64, K=64)
 
 
 def test_a_profile_is_checked_as_it_is_written_and_as_it_is_read():

@@ -75,7 +75,7 @@ from .testing import Sweep, Testing
 # Call sites that know their extent pass tile_size for performance.
 DEFAULT_TILE = 256
 
-_I32 = np.ndarray[(1,), np.dtype[np.int32]]  # type: ignore[misc]
+_I32 = np.ndarray[(1,), np.dtype[np.int32]]
 
 
 class Elementwise(Operator):
@@ -402,7 +402,7 @@ class Rowwise(Elementwise):
     rows: int = param()
     valid = Extent(rows)  # rows, or fewer per call
     # Required here, though the base defaults it: every field is keyword-only.
-    tile_size: int = param()  # pyright: ignore
+    tile_size: int = param()
     # One core by default: a core takes whole rows, and the row count is the
     # extent. Call sites with many rows spread them over columns.
     num_aie_columns: int = auto(1)

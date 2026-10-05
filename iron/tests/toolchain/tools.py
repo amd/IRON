@@ -23,7 +23,7 @@ AIEBU = shutil.which("aiebu-asm")
 XCLBINUTIL = shutil.which("xclbinutil")
 try:
     PEANO = Path(aie_config.peano_install_dir())
-except Exception:  # noqa: BLE001 - any failure means no Peano
+except Exception:
     PEANO = None
 
 _MISSING = {
@@ -47,6 +47,6 @@ DEVICES = {
 
 def swiglu():
     """The SwiGLU graph at Llama 3.2 1B's width, and that width."""
-    z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
+    z = lambda *s: np.zeros(s, dtype=bfloat16)
     E, H = 2048, 8192
     return SwiGLU(z(H, E), z(H, E), z(E, H)), E

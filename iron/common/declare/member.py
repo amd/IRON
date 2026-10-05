@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from typing import Self
 
     # Named in the subclasses' base expressions as strings (bound imports member).
-    from .bound import BoundBuffer, BoundStream, BoundValue  # noqa: F401
+    from .bound import BoundBuffer, BoundStream, BoundValue
 
 
 B = TypeVar("B")  # the bound form an instance serves

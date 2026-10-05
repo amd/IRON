@@ -42,7 +42,7 @@ _OPERATOR_MODULES = {
     "Transpose": "transpose",
 }
 
-__all__ = sorted(_OPERATOR_MODULES)  # pyright: ignore[reportUnsupportedDunderAll]
+__all__ = sorted(_OPERATOR_MODULES)
 
 
 def __getattr__(name):

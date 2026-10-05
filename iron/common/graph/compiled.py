@@ -478,8 +478,7 @@ class Graph:
                 name: (tuple(t.shape), _tensor_dtype(t)) for name, t in given.items()
             }
             print(f"{self.name}: compiling for {shapes}")
-            # A checker matches **shapes against compile()'s named parameters.
-            version = self.compile(**shapes)  # pyright: ignore[reportArgumentType]
+            version = self.compile(**shapes)
         return version(*given.values(), **values)
 
     def reference(self, *tensors, **values) -> Any:
@@ -922,7 +921,7 @@ def _words(
         groups: dict[Linear, list[str]] = {}
         for symbol, found in forms.items():
             if len(found) == 1 and None not in found:
-                groups.setdefault(next(iter(found)), []).append(symbol)  # type: ignore[arg-type]
+                groups.setdefault(next(iter(found)), []).append(symbol)
 
         def spell(r: Fraction) -> str:
             # An identifier's: m for minus, d for over.

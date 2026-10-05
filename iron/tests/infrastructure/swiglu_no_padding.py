@@ -17,7 +17,7 @@ pytestmark = pytest.mark.usefixtures("npu2")
 
 
 def _trace(rows, embedding_dim=2048, hidden_dim=2048):
-    z = lambda *s: np.zeros(s, dtype=bfloat16)  # noqa: E731
+    z = lambda *s: np.zeros(s, dtype=bfloat16)
     ffn = SwiGLU(
         z(hidden_dim, embedding_dim),
         z(hidden_dim, embedding_dim),

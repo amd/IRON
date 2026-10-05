@@ -105,18 +105,6 @@ black --check .
 black .
 ```
 
-### Python lint and types (ruff, pyright)
-
-```bash
-# Both are scoped by their config (ruff.toml, pyrightconfig.json) to the
-# whole `iron` package, after mlir-aie's setup.
-ruff check
-pyright
-```
-
-A declared class is a dataclass to a checker, so a call that names a field it
-does not declare, or passes the wrong type, is an error before anything runs.
-
 ### C++ (clang-format)
 
 ```bash

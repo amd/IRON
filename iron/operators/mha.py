@@ -152,7 +152,7 @@ class MHA(Operator):
         per=(kv_lanes,),
         via=Shim(6),
     )
-    O = Out(  # noqa: E741  (the operand's name)
+    O = Out(
         select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
         tile=(join_rows, d),
         per=(q_shims,),
@@ -256,7 +256,7 @@ class MHA(Operator):
         # by (d, B_kv), bfp16-emulated, the only one supported, on NPU2, the
         # only array MHA fits; P*V, (B_q, B_kv) by (B_kv, d).
         for pv, dims in ((False, ("B_q", "d", "B_kv")), (True, ("B_q", "B_kv", "d"))):
-            mac = kernels.linalg.mha.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
+            mac = kernels.linalg.mha.mac_dims(
                 pv=pv, arch="aie2p", emulate_bf16_mmul_with_bfp16=True
             )
             for name, m in zip(dims, mac):
@@ -414,9 +414,7 @@ class MHA(Operator):
         # it: Q, K (as stored) and the scores as QK^T's, V and O as P*V's
         # (matmul_PV, on the micro-tile mha.cc's P*V product expands).
         qk = matmul_QK.stream_dims
-        pv = mm_stream_dims(
-            B_q, B_kv, d, kernels.linalg.mha.mac_dims(pv=True)
-        )  # pyright: ignore[reportFunctionMemberAccess]
+        pv = mm_stream_dims(B_q, B_kv, d, kernels.linalg.mha.mac_dims(pv=True))
         q_dims = qk.A
         k_dims = qk.B
         a_dims = qk.C
