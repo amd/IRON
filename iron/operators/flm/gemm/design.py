@@ -14,7 +14,7 @@ README.md has the per-choice breakdown against both the shipped FastFlowLM
 overlay and ``iron.operators.GEMM``.
 
 The constants below are the single source of truth: ``op.py`` passes them to
-the kernels as -D flags, so the C++ and the dataflow cannot drift apart.
+the ``fused_mm`` kernel factory, so the C++ and the dataflow cannot drift apart.
 
 The array itself is ``GEMM.array`` and the runtime sequence is
 ``GEMM.sequence`` in ``op.py``; this module keeps the geometry, the L1 and
@@ -39,7 +39,7 @@ M_TILE, K_TILE = 64, 512
 # which wins when compute is the critical path. op.py picks per shape.
 N_TILE_DEFAULT = 64
 # How much of K one compute tile holds at a time, per n width. It is a fixed
-# L1 budget split two ways, passed to the kernel as -DMM_FUSED_CT_K. n=256 is
+# L1 budget split two ways, passed to the kernel as its ``chunk_k``. n=256 is
 # absent because its f32 accumulator alone (M_TILE*256*4) fills all of L1.
 CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 128, 128: 32}
 # (tile_n, ct_max_k) pairs verified on hardware. The table above looks tunable
@@ -121,7 +121,7 @@ class Epilogue(StrEnum):
     """Activation folded into the C drain.
 
     Declaration order is the wire format: it is both the kernel's
-    ``-DMM_FUSED_EPILOGUE_MODE`` and the shipped overlay's ``output_mode``.
+    epilogue mode argument and the shipped overlay's ``output_mode``.
     """
 
     NONE = "none"
@@ -204,9 +204,18 @@ class Rounding(StrEnum):
     FLOOR = "floor"
 
 
-# The epilogue entry point, shared by the design and op.py (which needs it
-# to mark the symbol alwaysinline when building the inline .ll variant).
-EPILOGUE_SYMBOL = "mm_fused_epilogue_chunk"
+class Gelu(StrEnum):
+    """Arithmetic of the gelu epilogue, ``x * sigmoid(1.702x)``.
+
+    fp32 by default: the activation runs on the f32 accumulator and rounds once.
+    bf16_steps reproduces the shipped overlay: it rounds the accumulator to
+    bf16 and rounds again after each step of the activation. With
+    ``Rounding.FLOOR`` the result matches the overlay bit for bit.
+    """
+
+    FP32 = "fp32"
+    BF16_STEPS = "bf16_steps"
+
 
 # B values per element of the MLIR type, and the bytes they occupy: v8bfp16ebs8
 # packs 8 values into 8 mantissa bytes plus one shared exponent. mlir-aie

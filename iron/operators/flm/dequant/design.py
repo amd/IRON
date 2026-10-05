@@ -21,9 +21,7 @@ from iron.operators.flm.gemm.design import (
     N_TILE_DEFAULT as N_TILE,
 )
 
-# q4nx block: 32 out-features x 256 in-features, 32 weights per scale and min.
-M_TILE, K_TILE, GROUP = 32, 256, 32
-BLOCK_BYTES = M_TILE * K_TILE * 5 // 8
+from iron.operators.flm.q4nx import BLOCK_BYTES, K_TILE, M_TILE, packed_bytes
 
 CT_K = CT_MAX_K_FOR_N[N_TILE]
 
@@ -75,4 +73,4 @@ def qw_bytes_for(K, N, run_out_features=None, run_period_out_features=None):
     )
     last = n_blocks - 1
     cb = (last // run_blocks) * period_blocks + last % run_blocks + 1
-    return cb * N_TILE * K * 5 // 8
+    return packed_bytes(cb * N_TILE * K)

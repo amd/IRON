@@ -15,6 +15,14 @@ _OPERATOR_MODULES = {
     "GEMM": "gemm.op",
     # q4nx weights to the bfp16 B that GEMM reads, without a host-side pack.
     "DequantBFP": "dequant.op",
+    # Gemma 4's fused decode layer, as FastFlowLM's engine drives it.
+    "DecodeLayer": "layer.op",
+    # Causal prefill attention, one build for every token range.
+    "PrefillAttention": "prefill_attn.op",
+    # Sliding-window causal prefill attention, one build for every token range.
+    "PrefillSlidingAttention": "prefill_attn.op",
+    # Softcapped logits straight from the q4nx vocabulary.
+    "LMHead": "lm_head.op",
     # The shipped binary itself, downloaded and pinned, as a second form of
     # GEMM: Shipped(...). NPU2 only; exists so the port can be measured
     # against what it was ported from.

@@ -14,8 +14,8 @@ op = GEMM(M=1024, K=1536, N=6144, epilogue=Epilogue.SILU)
 OperatorImage(op)(A, op.pack_B(B), C_out)
 ```
 
-`epilogue` and `rounding` are `StrEnum`s, so the bare strings `"silu"` /
-`"conv_even"` are accepted too.
+`epilogue`, `rounding` and `gelu` are `StrEnum`s, so the bare strings `"silu"` /
+`"conv_even"` / `"bf16_steps"` are accepted too.
 
 A second GEMM implementation alongside [`iron.operators.GEMM`](../../gemm),
 specialised for transformer projection shapes and ported from FastFlowLM's `mm`
@@ -55,7 +55,7 @@ two lowering details differ.
 | | NPU2 | NPU1 |
 |---|---|---|
 | grid | 4 x 8 | 4 x 4 |
-| A broadcast sources | shim columns 0/2/4/6 | shim columns 0/1/2/3 |
+| A forwarded through | every other memtile | every memtile |
 | 8x8x8 mmul lowers to | 2 bfp16-emulated macs | 4 native 4x8x4 bf16 macs |
 | `tile_n` default | 128 at K=512, else 64 | always 64 |
 | epilogue `tanh` | native `aie::tanh` | `getTanhBf16` LUT |
@@ -212,16 +212,35 @@ Verified against the shipped overlay on identical inputs, driven through
 elements**. With the `conv_even` default it differs everywhere, and is far more
 accurate — see [Accuracy](#accuracy).
 
-**The activations deliberately do not match bit for bit**, even under `floor`.
-The overlay rounds its accumulator to bf16 and then applies the activation to
-that; this operator applies the activation to the f32 accumulator and rounds
-once, on the store. Rounding before a nonlinearity rounds twice and lets the
-activation's slope amplify the first rounding, so the overlay's order is the
-less accurate one and is not worth reproducing. The cost of diverging is
+**By default the activations deliberately do not match bit for bit**, even under
+`floor`. The overlay rounds its accumulator to bf16 and then applies the
+activation to that; this operator applies the activation to the f32 accumulator
+and rounds once, on the store. Rounding before a nonlinearity rounds twice and
+lets the activation's slope amplify the first rounding, so the overlay's order
+is the less accurate one and is not worth reproducing. The cost of diverging is
 visible — at M=256 K=512 N=1024, 117582/262144 silu elements differ from the
 overlay — and so is the benefit: against an exact f64 evaluation, mean |err|
 improves and gelu's worst case drops 5.5%. Measured perf-neutral (0.993-1.006x,
 inside the run-to-run spread).
+
+**gelu can match the overlay on request.** A port of a whole model must
+reproduce the shipped engine's tokens, and Gemma 4's gate projections use gelu.
+`gelu=Gelu.BF16_STEPS` selects the overlay's arithmetic: the kernel rounds the
+accumulator to bf16 and then rounds after each step of `x * sigmoid(1.702x)`,
+as the overlay's `getGeluBf16_nonLUT` does. fp32 is the default, for the
+accuracy reasons above. silu and sigmoid have no such option.
+
+```python
+GEMM(M=M, K=K, N=N, epilogue="gelu", rounding="floor", gelu="bf16_steps")
+# gelu matches Shipped
+```
+
+With `floor`, gelu output is **bit-identical** to the overlay's on NPU2 at
+M=256 K=512 N=1024, M=512 K=1536 N=6144 (Gemma 4 E2B `gate_proj`) and M=512
+K=1536 N=256 (E2B per-layer-input gate), at input scales 0.5 and 4.0. With the
+fp32 default, 121917/262144 elements differ at the first shape and scale 0.5.
+`test_gemm_gelu_bf16_steps_matches_overlay` checks this against `Shipped`.
+`gelu` changes only the gelu arm of the kernel.
 
 The shipped kernel selects its activation -- and its shape -- from runtime
 parameters, one overlay serving every projection. This operator does the same
@@ -401,8 +420,8 @@ built in `array()` and handed to the Runtime with `target.register`:
 
 B's lanes are bound to the shim flows, so `sequence()` fills them like any
 other stream. The **runtime sequence**, which is generated per shape, programs
-both memtile channels with `tile_dma_chain`s of one BD per slot, walked with
-`repeat_count`:
+both memtile channels with tasks of one BD per slot
+(`flow.endpoint(memtile).task(...)`), walked `runs` times:
 
 | | resident (`k_iters <= B_SLOTS`, `n_units <= 63`) | streamed (otherwise) |
 |---|---|---|
@@ -438,22 +457,25 @@ Constraints, all enforced in op.py:
   C, the setup hides under the fill latency. That reordering is independent of
   residency and is part of the M=256 gain below.
 * **NPU1 fits exactly**: bf16 B at `tile_n=64` leaves room for 5 slots, which
-  fill the memtile to the byte. Lowered and placed, but not run on hardware.
+  fill the memtile to the byte. It builds and places, but every shape
+  currently times out on NPU1 hardware, so its tests and benchmark skip there.
 
-This needs mlir-aie's tile DMA chains, `Task.start(repeat_count=...)`,
-`Lock.set`, repeat counts past one push, and compiler-side BD reclaim. Every
-hardware limit the design uses comes from the target model.
+This needs mlir-aie #3791 (first in the 1.4.4.dev69 wheel): runtime tasks on a
+memtile's channels, `Task.start(repeat_count=...)`, `Lock.set`, and repeat
+counts past one push. The instruction stream is built with
+`aiecc --reclaim-runtime-bds` (`GEMM.aiecc_flags`), since a split leg's pieces outnumber the shim's
+BD ids. Every hardware limit the design uses but `B_MAX_SLOTS` comes from the
+target model.
 
-Measured on NPU2 (Strix, power mode `turbo`) against the fifo version over
-the 30 benchmark shapes, 8 interleaved rounds, errors bit-identical on all:
-median **-21.5%**, best -36.4% (E4B o M2048). A same-binary control run
-alongside moved the median by -0.4%, and no shape by more than 7.6%.
+Measured on NPU2 (Strix, power mode `default`) against the fifo version over
+the 30 benchmark shapes, 4 interleaved rounds on mlir_aie 1.4.4.dev73, errors
+bit-identical on all: median **-23.9%**, best -37.7% (E4B gateup M2048).
 
 | shapes | change |
 |---|---|
-| resident, M ≥ 1024 | -20% to -36% |
-| M = 256 (one row-block, nothing to replay) | -1.1% to -12.3%, from the setup ordering |
-| down projections (streamed), M ≥ 1024 | -2.2% to +0.5%, i.e. noise |
+| resident, M ≥ 1024 | -20.9% to -37.7% |
+| M = 256 (one row-block, nothing to replay) | +0.9% to -13.5%, from the setup ordering and queue depth |
+| down projections (streamed), M ≥ 1024 | -2.0% to +1.8%, i.e. noise |
 
 ### The compiler bounds what is outstanding
 

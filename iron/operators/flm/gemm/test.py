@@ -21,6 +21,7 @@ from iron.operators.flm.gemm.design import (
     M_CHUNK_FOR_N,
     M_TILE,
     Epilogue,
+    Gelu,
     R,
     Rounding,
     _b_depth_for,
@@ -29,6 +30,9 @@ from iron.operators.flm.gemm.design import (
 )
 from iron.operators.flm.gemm.op import GEMM
 from iron.operators.flm.gemm.shipped import Shipped
+from iron.operators.flm.testing import skip_flm_gemm_on_npu1
+
+pytestmark = skip_flm_gemm_on_npu1
 
 # Unpacked so the parameter tables below stay column-aligned.
 NONE, GELU, SILU, SIGMOID = Epilogue
@@ -79,14 +83,16 @@ def get_params():
             (  512, 1024,  2048, SILU, (-4.0, 4.0),    CONV_EVEN),
             (  256,  512,  1024, SILU,     None,       FLOOR),
             # K or N = 10240 at M > 256 overflows the shim BD's 20-bit
-            # mega_row iteration step, so that leg goes out as one transfer
-            # per mega_row against a bounded outstanding count. These are the
-            # real E4B FFN projections, unsupported until that landed, and
-            # M=2048 is what pushes past the bound.
+            # mega_row iteration step, so the compiler cuts that leg into
+            # pieces, bounded by its queue polls and BD reclaim. These are the
+            # real E4B FFN projections, and M=2048 doubles the pieces.
             ( 1024, 10240,  2560, NONE,     None,       CONV_EVEN),  # E4B down
             ( 1024,  2560, 10240, NONE,     None,       CONV_EVEN),  # E4B gateup
             ( 2048, 10240,  2560, NONE,     None,       CONV_EVEN),  # E4B down, 2x
             ( 2048,  2560, 10240, NONE,     None,       CONV_EVEN),  # E4B gateup, 2x
+            # 64 row-block units, past the 63 a lock can count, so B is armed
+            # twice: two slabs, each resident.
+            (16384,  512,  1024, NONE,     None,       CONV_EVEN),
         ]
     else:  # npu1: _default_tile_n always returns 64 here, so with 4 columns
         # every sweep is N_TILE*COLS = 256 wide, not the 128*4=512 an
@@ -111,6 +117,8 @@ def get_params():
             (  256,  512,   512, SIGMOID,  None,       CONV_EVEN),
             (  512, 1024,  1024, SILU, (-4.0, 4.0),    CONV_EVEN),
             (  256,  512,   512, SILU,     None,       FLOOR),
+            # Two slabs, as on NPU2.
+            (16384,  512,   256, NONE,     None,       CONV_EVEN),
         ]
     # fmt: on
 
@@ -556,3 +564,36 @@ def test_shipped_epilogue_matches_accumulator(epilogue, clamp, npu_runtime):
     assert (
         np.abs(expected) > tol
     ).any(), f"{epilogue}: tolerance is vacuous -- an all-zero result would pass"
+
+
+@pytest.mark.parametrize(
+    "M,K,N",
+    [
+        pytest.param(256, 512, 1024, marks=SHIPPED),  # tile_n 128
+        pytest.param(512, 1536, 6144, marks=SHIPPED),  # Gemma 4 E2B gate_proj
+        pytest.param(512, 1536, 256, marks=SHIPPED),  # Gemma 4 E2B per-layer gate
+    ],
+)
+def test_gemm_gelu_bf16_steps_matches_overlay(M, K, N, npu_runtime):
+    """``gelu=bf16_steps`` with ``rounding=floor`` matches the shipped overlay's
+    gelu bit for bit, on identical inputs.
+    """
+    probe = Shipped(M=M, K=K, N=N)
+    data = vectors(probe, normal=("A",), scale=ACTIVATION_INPUT_SCALE, B=(K, N))
+    A, B = data["A"], data["B"]
+
+    def run(op):
+        tensor = aie_utils.DEFAULT_TENSOR_CLASS
+        out = tensor((M, N), dtype=np.dtype("bfloat16"))
+        OperatorImage(op)(tensor(A.flatten()), tensor(op.pack_B(B)), out)
+        return out.numpy().reshape(M, N).copy()
+
+    shipped = run(Shipped(M=M, K=K, N=N, epilogue=GELU))
+    ported = run(
+        GEMM(M=M, K=K, N=N, epilogue=GELU, rounding=FLOOR, gelu=Gelu.BF16_STEPS)
+    )
+    # The accumulator reaches about -15 at this scale. gelu's minimum is
+    # about -0.17, so a lower minimum means the activation did not run.
+    assert float(shipped.astype(np.float32).min()) > -0.5, "the overlay applied no gelu"
+    same = int((shipped.view(np.int16) == ported.view(np.int16)).sum())
+    assert same == M * N, f"{M * N - same} of {M * N} elements differ"

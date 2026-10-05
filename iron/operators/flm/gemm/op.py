@@ -18,7 +18,6 @@ per-choice breakdown against the shipped FastFlowLM overlay
 """
 
 import dataclasses
-from pathlib import Path
 from typing import Any, ClassVar, NamedTuple
 
 import numpy as np
@@ -33,7 +32,6 @@ from aie.iron import (
     Bd,
     Buffer,
     DmaChannel,
-    ExternalFunction,
     Flow,
     Lock,
     ObjectFifo,
@@ -42,8 +40,8 @@ from aie.iron import (
     Worker,
 )
 from aie.iron.controlflow import range_
+from aie.iron.kernels import fused_mm
 from aie.iron.device import Tile
-from aie.utils.config import aie_kernels_dir
 from ml_dtypes import bfloat16
 
 from iron.common import (
@@ -67,7 +65,6 @@ from iron.operators.flm.gemm.design import (
     C_DEPTH,
     CT_MAX_K_FOR_N,
     CT_OUT_LEN,
-    EPILOGUE_SYMBOL,
     K_TILE,
     M_CHUNK_FOR_N,
     M_TILE,
@@ -80,6 +77,7 @@ from iron.operators.flm.gemm.design import (
     RTP_N_VAL,
     STACK_SIZE,
     Epilogue,
+    Gelu,
     R,
     Rounding,
     S,
@@ -174,6 +172,9 @@ class GEMM(Operator):
     epilogue_modes: tuple = param(default=tuple(Epilogue), array=True)
     # Rounding for every f32->bf16 conversion; see Rounding in design.py.
     rounding: Rounding | str = param(default=Rounding.CONV_EVEN, array=True)
+    # Arithmetic of the gelu epilogue; see Gelu in design.py. Only the gelu
+    # mode reads it.
+    gelu: Gelu | str = param(default=Gelu.FP32, array=True)
     # Filled by resolve, from the device: the grid, B's storage, the L2 tiles.
     rows: int = auto(repr=False)
     cols: int = auto(repr=False)
@@ -251,6 +252,7 @@ class GEMM(Operator):
         # Coerce so callers may pass bare strings; deduplicate, since the mask
         # ORs one bit per mode.
         self.rounding = Rounding(self.rounding)
+        self.gelu = Gelu(self.gelu)
         self.epilogue_modes = tuple(
             dict.fromkeys(Epilogue(m) for m in self.epilogue_modes)
         )
@@ -390,7 +392,9 @@ class GEMM(Operator):
         return (
             f"FLM_GEMM_tn{t.tile_n}_kt{t.k_tile}_ck{t.ct_max_k}"
             f"_ma{t.tile_ma}_mc{t.m_chunk}"
-            f"_em{t.epilogue_mask:x}_{t.rounding}_{dev.name}"
+            f"_em{t.epilogue_mask:x}_{t.rounding}"
+            + ("" if t.gelu is Gelu.FP32 else f"_gelu_{t.gelu}")
+            + f"_{dev.name}"
         )
 
     @property
@@ -412,46 +416,6 @@ class GEMM(Operator):
             )
             base = f"{base}_cl{lo:08x}{hi:08x}"
         return base
-
-    @property
-    def kernel_object(self) -> str:
-        """Object name over every flag that changes the emitted code."""
-        return (
-            f"mm_fused_{M_TILE}x{self.k_tile}x{self.tile_n}"
-            f"_ck{self.ct_max_k}"
-            f"_r{R}t{T}_ma{self.tile_ma}_{self.rounding}"
-            f"_em{self.epilogue_mask:x}.o"
-        )
-
-    def kernel_flags(self) -> list[str]:
-        """The -D set fused_mm_tile.cc is compiled with."""
-        flags = [
-            f"-DMM_FUSED_TILE_M={M_TILE}",
-            f"-DMM_FUSED_TILE_K={self.k_tile}",
-            f"-DMM_FUSED_TILE_N={self.tile_n}",
-            f"-DMM_FUSED_TILE_MA={self.tile_ma}",
-            f"-DMM_FUSED_R={R}",
-            f"-DMM_FUSED_S={S}",
-            f"-DMM_FUSED_T={T}",
-            # The k slice. Passed rather than looked up in the kernel so that
-            # CT_MAX_K_FOR_N is the only place it is chosen.
-            f"-DMM_FUSED_CT_K={self.ct_max_k}",
-            f"-DMM_FUSED_OUT_CHUNK={CT_OUT_LEN}",
-            f"-DMM_FUSED_C_DEPTH={C_DEPTH}",
-            f"-DMM_FUSED_EPILOGUE_MODE_MASK={self.epilogue_mask}",
-        ]
-        if self.bfp16_b:
-            # AIE2P lowers the 8x8x8 mmul onto two bfp16-emulated macs;
-            # MM_FUSED_BFP16_B rides along for the scalar BFP types.
-            flags += [
-                "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
-                "-DMM_FUSED_BFP16_B",
-            ]
-        if self.rounding is Rounding.CONV_EVEN:
-            # mm.cc's flag and polarity, reused: absent means the core's
-            # power-up floor mode. Covers both conversions in the kernel.
-            flags.append("-DROUND_CONV_EVEN")
-        return flags
 
     # -- the array -------------------------------------------------------------
 
@@ -486,36 +450,32 @@ class GEMM(Operator):
         mt_a_ty = self.A.tile
         mt_out_ty = self.C.tile
 
-        # All three are compiled from mm_fused.h, so they name one object.
-        # Declared by hand rather than from aie.iron.kernels.fused.fused_mm:
-        # that factory compiles in one epilogue mode (this overlay selects
-        # among several at runtime) and always rounds to nearest-even. The
-        # source is fused_mm_tile.cc, since mm_fused.h is a header. The
-        # whole-tile entry point it adds is never called, so the link drops
-        # it, but it also compiles out the per-step event0/event1 markers. On
-        # aie2 it includes lut_based_ops.cpp itself, for tanh's tables.
-        source = Path(aie_kernels_dir()) / "fused" / "fused_mm_tile.cc"
-
-        def fused_kernel(name, arg_types):
-            return ExternalFunction(
-                name,
-                source_file=str(source),
-                arg_types=arg_types,
-                compile_flags=self.kernel_flags(),
-                object_file_name=self.kernel_object,
-            )
-
-        acc_init = fused_kernel("mm_fused_acc_init", [ct_acc_ty])
-        # The trailing int32 is the A band index: under asymmetric tile
-        # buffering the core folds RHO A bands into one accumulator.
-        k_step = fused_kernel(
-            "mm_fused_k_step", [ct_a_obj_ty, ct_b_ty, ct_acc_ty, np.int32]
+        # Every field that changes the object reaches the factory, so its
+        # object name keys the build. The activation is absent: the cores
+        # select it at run time from the compiled-in modes, and mode 0 is
+        # always compiled in, since the kernel falls back to it. Under
+        # asymmetric tile buffering the k step takes the A band index, as the
+        # core folds RHO A bands into one accumulator.
+        modes = dict.fromkeys([Epilogue.NONE, *self.epilogue_modes])
+        kernel = fused_mm(
+            dim_m=M_TILE,
+            dim_k=K_TILE,
+            dim_n=N_TILE,
+            band_m=T_MA,
+            chunk_k=CT_MAX_K,
+            out_chunk=CT_OUT_LEN,
+            c_depth=C_DEPTH,
+            # 8x8x8 on both architectures: AIE2P lowers it onto two
+            # bfp16-emulated macs, AIE2 onto four native bf16 macs.
+            mmul_shape=(R, S, T),
+            bfp16_b=self.bfp16_b,
+            epilogue_modes=tuple(str(m) for m in modes),
+            rounding=str(self.rounding),
+            gelu=str(self.gelu),
         )
-        epilogue_chunk = fused_kernel(
-            EPILOGUE_SYMBOL,
-            # outer, half, mode, clamp_min_bits, clamp_max_bits
-            [ct_out_ty, ct_acc_ty] + [np.int32] * 5,
-        )
+        acc_init = kernel.mm_fused_acc_init
+        k_step = kernel.mm_fused_k_step
+        epilogue_chunk = kernel.mm_fused_epilogue_chunk
 
         # --- Data movement ------------------------------------------------
         # These turn a row-major DDR tile into the blocked layout the mmul

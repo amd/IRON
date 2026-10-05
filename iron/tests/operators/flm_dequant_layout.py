@@ -19,15 +19,14 @@ from iron.operators.flm.dequant.design import (
     CT_K,
     DRAIN_DIMS,
     HALF_BLOCKS,
-    K_TILE,
     K_TILE_B,
-    M_TILE,
     N_TILE,
     SLAB_BLOCKS,
     S,
     T,
 )
 from iron.operators.flm.packing import pack_b
+from iron.operators.flm.q4nx import K_TILE, M_TILE
 
 # Every distinct (K in-features, N out-features) Gemma4 E2B needs, from
 # hidden_size 1536, intermediate_size 6144, DQ/DK/DV 4096/512/512 and the SWA

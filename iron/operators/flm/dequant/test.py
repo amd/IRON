@@ -5,25 +5,20 @@
 import os
 from typing import Any
 
-import aie.utils as aie_utils
 import numpy as np
 import pytest
-from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron.device import from_name
 from aie.utils.verify import Tolerance
 
 from iron.common import Incompatible
 from iron.common.harness import run_test
 from iron.common.image import OperatorImage
-from iron.operators.flm.dequant.design import (
-    GROUP,
-    K_TILE,
-    M_TILE,
-    N_TILE,
-    qw_bytes_for,
-)
-from iron.operators.flm.dequant.op import DequantBFP, dequantize, f32_to_bf16_floor
+from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor
+from iron.operators.flm.dequant.design import N_TILE, qw_bytes_for
+from iron.operators.flm.dequant.op import DequantBFP, dequantize
 from iron.operators.flm.gemm.op import GEMM
+from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE, packed_bytes
+from iron.operators.flm.testing import requires_aie2p
 
 # K = 512 is one k-tile, where flm.GEMM at tile_n = 128 wins on NPU2. It
 # defaults to 64 regardless, which is the order this operator emits.
@@ -34,7 +29,7 @@ def scatter_runs(qw, K, N, run_out_features, run_period_out_features, seed=0):
     """Place a matrix's column blocks at their offsets in an interleaved
     buffer. The gaps hold noise, so an operator that reads them fails.
     """
-    cb_bytes = N_TILE * K * 5 // 8
+    cb_bytes = packed_bytes(N_TILE * K)
     run_blocks = run_out_features // N_TILE
     period_blocks = run_period_out_features // N_TILE
 
@@ -68,16 +63,6 @@ def random_q4nx(K, N, seed=0):
         ],
         axis=1,
     ).ravel()
-
-
-def _on_aie2p():
-    dev = aie_utils.get_current_device()
-    return dev is not None and dev.arch == AIEArch.AIE2p
-
-
-requires_aie2p = pytest.mark.skipif(
-    not _on_aie2p(), reason="bfp16ebs8 exists only on AIE2P"
-)
 
 
 def _check(op, blob, expected, label, record=None):
@@ -140,17 +125,18 @@ def test_gate_up_interleaved_blob(npu_runtime):
     "K, N",
     [
         (4096, 1536),
-        (6144, 1536),
+        # Gemma 4 E2B's MLP down projection.
+        pytest.param(6144, 1536, marks=pytest.mark.bench),
         pytest.param(12288, 1536, marks=pytest.mark.extensive),
     ],
 )
-def test_large_k_shapes(K, N, npu_runtime):
+def test_large_k_shapes(K, N, npu_runtime, record_property):
     """E2B's tall projections, whose k-tiles outnumber a shim tile's buffer
     descriptors. K = 12288 is 24 k-tiles, the deepest E2B reaches.
     """
     qw = random_q4nx(K, N, seed=21)
     op = DequantBFP(K=K, N=N)
-    _check(op, qw, op.reference(qw), f"K={K} N={N}")
+    _check(op, qw, op.reference(qw), f"K={K} N={N}", record_property)
 
 
 @requires_aie2p

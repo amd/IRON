@@ -48,12 +48,15 @@ class OperatorImage:
             raise RuntimeError(f"{self.op!r} is not compiled; compile() first")
         return self._artifacts
 
-    def __call__(self, *args):
+    def __call__(self, *args, **scalars):
         """Run the image on ``args``, loading it into the shared runtime
-        unless it is there already.
+        unless it is there already. ``scalars`` are the call's
+        ``DispatchTime`` values, by device symbol.
         """
         self.compile()
-        _, result = aie_utils.DefaultNPURuntime.load_and_run(self._kernel, list(args))
+        _, result = aie_utils.DefaultNPURuntime.load_and_run(
+            self._kernel, list(args), dispatch_scalars=scalars or None
+        )
         return result
 
     def _build(self) -> Artifacts:
@@ -71,14 +74,20 @@ class OperatorImage:
             entry = built.get_cache_entry()
             assert entry is not None and entry.xclbin is not None
             image = entry.xclbin
+            # A stream generated per call has no insts_only build: its
+            # dispatch library comes with a full one.
+            per_call = any(v.kind == "dispatch" for v in op.values)
             own = (
                 built
                 if config is op
-                else OperatorDesign(op, "xclbin").compile(insts_only=True)
+                else OperatorDesign(op, "xclbin").compile(insts_only=not per_call)
             )
             kernel_name = "MLIR_AIE"
         stream = own.get_cache_entry()
-        assert stream is not None and stream.insts is not None
+        # A design with DispatchTime values generates its stream per call.
+        assert stream is not None and (
+            stream.insts is not None or own.dispatch_params
+        )
         self._kernel = NPUKernel(
             image,
             stream.insts,
