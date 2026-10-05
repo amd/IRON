@@ -85,9 +85,7 @@ class OperatorImage:
             kernel_name = "MLIR_AIE"
         stream = own.get_cache_entry()
         # A design with DispatchTime values generates its stream per call.
-        assert stream is not None and (
-            stream.insts is not None or own.dispatch_params
-        )
+        assert stream is not None and (stream.insts is not None or own.dispatch_params)
         self._kernel = NPUKernel(
             image,
             stream.insts,

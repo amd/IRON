@@ -19,6 +19,7 @@ import shutil
 from pathlib import Path
 
 import aie.utils as aie_utils
+import pli_weights
 from aie.iron.device import NPU2
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 
@@ -32,8 +33,6 @@ from iron.operators.flm import (
     PrefillSlidingAttention,
 )
 from iron.operators.flm.gemm.design import Epilogue
-
-import pli_weights
 
 MODEL = "Gemma4-E2B-IT-NPU2"
 
@@ -211,7 +210,9 @@ def main(engine_xclbins, out):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--engine-xclbins", type=Path, required=True, help="FastFlowLM's src/xclbins"
     )

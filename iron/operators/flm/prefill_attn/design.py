@@ -19,8 +19,6 @@ from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
-from ml_dtypes import bfloat16
-
 from aie.dialects import arith
 from aie.dialects.aie import DMAChannelDir
 from aie.dialects.aiex import _as_i32
@@ -48,6 +46,7 @@ from aie.iron.controlflow import range_
 from aie.iron.dataflow import Flow
 from aie.iron.device import Tile
 from aie.iron.kernels import flm_gemma4
+from ml_dtypes import bfloat16
 
 from iron.operators.flm.dataflow import ping_pong
 

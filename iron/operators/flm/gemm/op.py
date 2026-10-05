@@ -40,8 +40,8 @@ from aie.iron import (
     Worker,
 )
 from aie.iron.controlflow import range_
-from aie.iron.kernels import fused_mm
 from aie.iron.device import Tile
+from aie.iron.kernels import fused_mm
 from ml_dtypes import bfloat16
 
 from iron.common import (

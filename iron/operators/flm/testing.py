@@ -3,9 +3,8 @@
 
 """Test helpers the FastFlowLM-derived operators share."""
 
-import pytest
-
 import aie.utils as aie_utils
+import pytest
 from aie.dialects._aie_enum_gen import AIEArch
 
 

@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
-from ml_dtypes import bfloat16
-
-import aie.utils as aie_utils
 from aie.utils.benchmark import run_iters
 from aie.utils.hostruntime.hostruntime import HostRuntimeError
+from ml_dtypes import bfloat16
 
 from iron.common.image import OperatorImage
 from iron.operators.flm.prefill_attn.op import (
@@ -59,7 +58,7 @@ OPERATORS = {
 
 
 def _inputs(op, max_l, seed):
-    """q and a KV cache whose scores stay in softmax's useful range."""
+    """Draw q and a KV cache whose scores stay in softmax's useful range."""
     rng = np.random.default_rng(seed)
     dh = op.head_dim
     q = (rng.standard_normal(op.max_context * NUM_HEADS * dh) * 0.2).astype(bfloat16)
@@ -158,7 +157,8 @@ def test_one_image_serves_every_range(kind, npu_runtime):
     image = OperatorImage(op)
     ranges = OPERATORS[kind][2]
     for seed, i in enumerate((0, 1, 1, 2, 4, 3, 0)):
-        _check(op, image, *ranges[i], seed)
+        L_begin, L_end, max_l = ranges[i]
+        _check(op, image, L_begin, L_end, max_l, seed)
 
 
 @requires_aie2p

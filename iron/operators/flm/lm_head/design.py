@@ -11,8 +11,6 @@ applies the tanh softcap to the sums.
 import struct
 
 import numpy as np
-from ml_dtypes import bfloat16
-
 from aie.helpers.npdtypes import np_ndarray_type_get_shape
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
@@ -25,6 +23,7 @@ from aie.iron import (
 )
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
+from ml_dtypes import bfloat16
 
 from iron.operators.flm.q4nx import K_TILE, M_TILE, packed_bytes
 

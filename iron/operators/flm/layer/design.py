@@ -453,7 +453,7 @@ class _Ctx:
 
 
 def _ceil_mul(v, chunk):
-    """v rounded up to a multiple of chunk."""
+    """Round `v` up to a multiple of `chunk`."""
     # The C++ generator cannot lower the floordivsi that `//` emits.
     return arith.divsi(v + (chunk - 1), _as_i32(chunk)) * chunk
 
@@ -1177,7 +1177,9 @@ def _build_proj_core(ctx, pt, kern, send_x_out, main_y0=None, main_y1=None):
                 [
                     Bd(
                         y,
-                        tap=TensorAccessPattern.full(y.shape)[14:],
+                        tap=TensorAccessPattern.full(np_ndarray_type_get_shape(y_ty))[
+                            14:
+                        ],
                         acquires=[Acquire(pk[f"y_cons_{half}_lock"], value=2)],
                         releases=[Release(pk[f"y_prod_{half}_lock"], value=2)],
                         next=nxt,
@@ -1392,9 +1394,33 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
         k_sbeg = ctx.entry(name, f"{name}_s_begin")
         k_vhalf = ctx.entry(name, f"{name}_v_half")
         v_ty = k_vhalf.arg_types()[1]
+        kerns = [k_begin, k_sbeg, k_vhalf, k_finish]
+
+        def kv_halves(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, ksb, kvh, kf):
+            kb(yy, ll)
+            for _ in range_((rtp_l[0] + (LK - 1)) // LK):
+                s = s_in.acquire(1)
+                ksb(s, yy, ll)
+                for j in range_(2):
+                    kvh(s, v_0, v_1, yy, j)
+                s_in.release(1)
+            kf(yy, oo, ll)
+
+        kv_body = kv_halves
     else:
         k_round = ctx.entry(name, f"{name}_round")
         v_ty = k_round.arg_types()[1]
+        kerns = [k_begin, k_round, k_finish]
+
+        def kv_rounds(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, kr, kf):
+            kb(yy, ll)
+            for _ in range_((rtp_l[0] + (LK - 1)) // LK):
+                s = s_in.acquire(1)
+                kr(s, v_0, v_1, yy, ll)
+                s_in.release(1)
+            kf(yy, oo, ll)
+
+        kv_body = kv_rounds
     y_ty, o_ty, l_ty = k_finish.arg_types()
     L = ctx.rtp_buffer(kv_tile, rtp_key)
     v0 = Buffer(type=v_ty, name=f"v_0_{r}_{c}", tile=kv_tile)
@@ -1407,32 +1433,7 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
         dict(o_prod_lock=o_repeats, o_cons_lock=0, v_prod_lock=2, v_cons_lock=0),
     )
     lbuf = Buffer(type=l_ty, name=f"l_{r}_{c}", tile=kv_tile)
-    if two_kv_heads:
-
-        def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, ksb, kvh, kf):
-            kb(yy, ll)
-            for _ in range_((rtp_l[0] + (LK - 1)) // LK):
-                s = s_in.acquire(1)
-                ksb(s, yy, ll)
-                for j in range_(2):
-                    kvh(s, v_0, v_1, yy, j)
-                s_in.release(1)
-            kf(yy, oo, ll)
-
-        args = [of_s.cons(), v0, v1, y, lbuf, o, L]
-        args += [k_begin, k_sbeg, k_vhalf, k_finish]
-    else:
-
-        def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, kr, kf):
-            kb(yy, ll)
-            for _ in range_((rtp_l[0] + (LK - 1)) // LK):
-                s = s_in.acquire(1)
-                kr(s, v_0, v_1, yy, ll)
-                s_in.release(1)
-            kf(yy, oo, ll)
-
-        args = [of_s.cons(), v0, v1, y, lbuf, o, L, k_begin, k_round, k_finish]
-
+    args = [of_s.cons(), v0, v1, y, lbuf, o, L, *kerns]
     ctx.workers.append(Worker(kv_body, args, tile=kv_tile, stack_size=1024 * 6))
     ctx.rt.add_tile_dma(
         TileDma(
@@ -1465,13 +1466,40 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
     r, c = qk_tile.row, qk_tile.col
     # Every qk kernel names its entry points attn_qk_*.
     k_begin = ctx.entry(name, "attn_qk_begin")
+    # The q acquire orders the RTP read after the sequence's RTP writes.
     if two_kv_heads:
         k_half = ctx.entry(name, "attn_qk_half")
         k_storec = ctx.entry(name, "attn_qk_store_c")
         k_step = k_half
+        kerns = [k_begin, k_half, k_storec]
+
+        def qk_halves(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kh, ks):
+            q = q_h.acquire(1)
+            kb(mm)
+            for i in range_((rtp_l[0] + (LK - 1)) // LK):
+                s = s_out.acquire(1)
+                for j in range_(2):
+                    kh(q, k_0, k_1, s, mm, cc, j, i, rtp_l[0])
+                ks(s, cc)
+                s_out.release(1)
+            q_h.release(1)
+
+        qk_body = qk_halves
     else:
         k_round = ctx.entry(name, "attn_qk_round")
         k_step = k_round
+        kerns = [k_begin, k_round]
+
+        def qk_rounds(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kr):
+            q = q_h.acquire(1)
+            kb(mm)
+            for i in range_((rtp_l[0] + (LK - 1)) // LK):
+                s = s_out.acquire(1)
+                kr(q, k_0, k_1, s, mm, cc, i, rtp_l[0])
+                s_out.release(1)
+            q_h.release(1)
+
+        qk_body = qk_rounds
     q_ty, k_ty, _, _, m_ty, c_ty = k_step.arg_types()[:6]
     # The kernel pads each KV head's query group.
     (q_len,) = np_ndarray_type_get_shape(q_ty)
@@ -1484,34 +1512,6 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
     q_in_order = TensorAccessPattern.full((dh // 8, NQ_PADDED, 8)).permute((1, 0, 2))
     m_buf = Buffer(type=m_ty, name=f"m_{r}_{c}", tile=qk_tile)
     c_local = Buffer(type=c_ty, name=f"c_local_{r}_{c}", tile=qk_tile)
-    # The q acquire orders the RTP read after the sequence's RTP writes.
-    if two_kv_heads:
-
-        def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kh, ks):
-            q = q_h.acquire(1)
-            kb(mm)
-            for i in range_((rtp_l[0] + (LK - 1)) // LK):
-                s = s_out.acquire(1)
-                for j in range_(2):
-                    kh(q, k_0, k_1, s, mm, cc, j, i, rtp_l[0])
-                ks(s, cc)
-                s_out.release(1)
-            q_h.release(1)
-
-        kerns = [k_begin, k_half, k_storec]
-    else:
-
-        def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kr):
-            q = q_h.acquire(1)
-            kb(mm)
-            for i in range_((rtp_l[0] + (LK - 1)) // LK):
-                s = s_out.acquire(1)
-                kr(q, k_0, k_1, s, mm, cc, i, rtp_l[0])
-                s_out.release(1)
-            q_h.release(1)
-
-        kerns = [k_begin, k_round]
-
     args = [
         of_s.prod(),
         q_fifo.cons(from_stream=q_in_order),

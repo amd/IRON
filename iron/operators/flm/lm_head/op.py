@@ -55,7 +55,9 @@ class LMHead(Operator):
 
     def resolve(self, dev):
         if dev is None:
-            raise Unresolvable("the LM head's grid defaults from the device; none given")
+            raise Unresolvable(
+                "the LM head's grid defaults from the device; none given"
+            )
         if dev.arch != AIEArch.AIE2p:
             raise Unresolvable("the q4nx_lm_head kernel is AIE2P only")
         return dataclasses.replace(
@@ -80,7 +82,13 @@ class LMHead(Operator):
             dim=self.dim, m_tile=M_TILE, k_tile=K_TILE, group=GROUP
         )
         return functools.partial(
-            lm_head, self.dev, self.dim, self.vocab, self.softcap, 0, lm_head_kernel=kernel
+            lm_head,
+            self.dev,
+            self.dim,
+            self.vocab,
+            self.softcap,
+            0,
+            lm_head_kernel=kernel,
         )
 
     def reference(self, w, x):

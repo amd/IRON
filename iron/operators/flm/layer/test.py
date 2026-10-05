@@ -142,7 +142,10 @@ def check_outputs(geometry, layer_type, context_len, max_l, inputs, x_out, kv_ou
     RTOL_KV, and that the rest of x and of the kv cache equals the input bit for
     bit.
     """
-    ref_x, ref_kv = reference(geometry, layer_type, *inputs, context_len, max_l)
+    x, proj, rms, rope_rms, kv = inputs
+    ref_x, ref_kv = reference(
+        geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max_l
+    )
     g = layer_dims(geometry, layer_type)
     D, dk = g["model_dim"], g["dk"]
     got_x = np.asarray(x_out).view(np.uint16).reshape(-1)
@@ -240,7 +243,8 @@ def _captured_cases():
 )
 def test_captured_case(case, npu_runtime, record_property):
     """A dispatch captured from the engine by an FLM_PLUGIN that hooks
-    decode.layer. The output must also equal the engine's bit for bit."""
+    decode.layer. The output must also equal the engine's bit for bit.
+    """
     man = json.loads((case / "manifest.json").read_text())
     geometry = {"E2B": FLM_GEMMA4_E2B_DECODE, "E4B": FLM_GEMMA4_E4B_DECODE}[
         man["model"].split("-")[1]
@@ -269,7 +273,7 @@ def test_captured_case(case, npu_runtime, record_property):
 
 
 def _ops(op):
-    """op and every operation nested in it."""
+    """Yield `op` and every operation nested in it."""
     yield op
     for region in op.regions:
         for block in region.blocks:
