@@ -308,10 +308,13 @@ class CarriedLoop:
         self.first, self.body, self.depth = first, body, depth
         first.emit_to(body)
         body.emit_to(body)
-        self._runs: list[FullELFRun] = [body.callable.new_run() for _ in range(depth)]
+        # Each run holds a copy of its ELF's control code in the device heap,
+        # 64 MB on older amdxdna, so the loop reuses each version's own run.
+        self._runs: list[FullELFRun] = [body.callable.run]
+        self._runs += [body.callable.new_run() for _ in range(depth - 1)]
         for k, run in enumerate(self._runs):
             run.bind_feedback(self._runs[(k + 1) % depth].scratchpad_alias())
-        self._first = first.callable.new_run()
+        self._first = first.callable.run
         self._first.bind_feedback(self._runs[0].scratchpad_alias())
 
     def run(self, steps: int, /, *tensors, **values) -> Iterator[int]:
