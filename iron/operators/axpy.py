@@ -9,7 +9,7 @@ from iron.common.testing import Sweep, Testing
 
 class AXPY(BinaryElementwise):
     """AIE-accelerated aX + Y operator: the elementwise design with the
-    scalar bound into the kernel.
+    scalar passed to the kernel.
     """
 
     # Every split at the default scalar and at a non-integer one that bf16
@@ -26,4 +26,7 @@ class AXPY(BinaryElementwise):
     scalar_factor: float = param(default=3.0, array=True)
 
     def kernel(self):
-        return datamovement.axpy(self.tile_size, a=self.scalar_factor)
+        return datamovement.axpy(self.tile_size)
+
+    def scalars(self) -> tuple:
+        return (self.scalar_factor,)

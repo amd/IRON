@@ -91,7 +91,7 @@ def measure(
     design at ``position`` and ``token``, Sample on the draw rows ``sample``
     gives, and the configure cost between ``CALIBRATION_PAIRS``.
     """
-    dev = aie_utils.ensure_current_device(required=True)
+    dev = aie_utils.ensure_current_device()
     traced = model.trace(**model.shapes(1))
     graph_values = dict(position=position, token=token)
     # Sample's work follows its draw row's temperature and top-k: measure it

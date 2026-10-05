@@ -14,7 +14,6 @@ from dataclasses import field
 from math import gcd, prod
 from typing import Any
 
-import aie.utils as aie_utils
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import ObjectFifo
@@ -22,6 +21,7 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import In, Incompatible, Operator, Out, Scratchpad, auto, param
+from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
 
@@ -30,8 +30,8 @@ def _into_slot(slot, seq=128, num_channels=1) -> dict[str, Any]:
     buffer: each of its rows lands ``seq * 64`` elements after the last.
     """
     return dict(
-        src=TensorAccessPattern.from_slice((8, 64), ()),
-        dst=TensorAccessPattern.from_slice((8, seq, 64), np.s_[:, slot]),
+        src=TensorAccessPattern.full((8, 64)),
+        dst=TensorAccessPattern.full((8, seq, 64))[:, slot],
         input_buffer_size=8 * 64,
         output_buffer_size=8 * seq * 64,
         num_channels=num_channels,
@@ -93,11 +93,11 @@ class Copy(Operator):
 
     input_buffer_size: int = param(repr=False)
     src: TensorAccessPattern = param(
-        default=lambda op: TensorAccessPattern.from_slice((op.input_buffer_size,), ())
+        default=lambda op: TensorAccessPattern.full((op.input_buffer_size,))
     )
     output_buffer_size: int = param(default=lambda op: prod(op.src.sizes), repr=False)
     dst: TensorAccessPattern = param(
-        default=lambda op: TensorAccessPattern.from_slice((op.output_buffer_size,), ())
+        default=lambda op: TensorAccessPattern.full((op.output_buffer_size,))
     )
     # The axis of each pattern a graph bounds per call (``x[:n]`` on a view):
     # its size is the full extent in the pattern and patched to the call's.
@@ -185,7 +185,7 @@ class Copy(Operator):
         bounded axis moves.
         """
         return [
-            prod(tap.sizes) // tap.sizes[bound] // self.num_channels
+            int(prod(tap.sizes) // tap.sizes[bound]) // self.num_channels
             for tap, bound in ((self.src, self.src_bound), (self.dst, self.dst_bound))
             if bound is not None
         ]
@@ -227,7 +227,7 @@ class Copy(Operator):
         # At most one axis outside the bound (the iteration slot) and one or
         # two inside it (D1, D0) put the bound on D2.
         on_d2 = bound <= 1 and 1 <= rank - bound - 1 <= 2
-        shim = aie_utils.ensure_current_device(required=True).bd_limits(0, 0)
+        shim = BdLimits.of(self.dev, 0, 0)
         out = []
         for share in self._shares(tap):
             dims = list(share.transformation_dims)
@@ -282,8 +282,14 @@ class Copy(Operator):
         src = at(self.src, self.src_bound, src_valid)
         dst = at(self.dst, self.dst_bound, dst_valid)
         # Channel by channel, as the design splits the patterns.
-        gather = [c.access_indices() + int(in_offset) for c in self._shares(src)]
-        scatter = [c.access_indices() + int(out_offset) for c in self._shares(dst)]
+        gather = [
+            c.gather(np.arange(prod(c.tensor_dims))) + int(in_offset)
+            for c in self._shares(src)
+        ]
+        scatter = [
+            c.gather(np.arange(prod(c.tensor_dims))) + int(out_offset)
+            for c in self._shares(dst)
+        ]
         out = (
             np.zeros(self.output_buffer_size, dtype=x.dtype)
             if y is None

@@ -89,7 +89,7 @@ def generate(design: OperatorDesign) -> GeneratedDesign:
     requires the declaration visible there.
     """
     with compile_context(_iron_full_elf=False):
-        module = design.generator()
+        module = design.build()
     if isinstance(module, str):
         module = ir.Module.parse(module, ir.Context())
     devices = []

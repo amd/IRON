@@ -11,7 +11,6 @@ construction. Host-only: what is checked is the refusal, not a dispatch.
 
 import functools
 
-import numpy as np
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron.device import from_name
@@ -68,7 +67,7 @@ def test_transfer_size_not_dividing_a_bounded_row_is_rejected():
     copy = functools.partial(
         Copy,
         src=TensorAccessPattern((rows, G, D), 0, [G, rows, D], [D, G * D, 1]),
-        dst=TensorAccessPattern.from_slice((G, rows, D), np.s_[:, :rows]),
+        dst=TensorAccessPattern.full((G, rows, D))[:, :rows],
         src_bound=1,
         dst_bound=1,
         input_buffer_size=rows * G * D,

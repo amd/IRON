@@ -48,7 +48,6 @@ class VectorAdd(BinaryElementwise):
             source_string=VADD,
             arg_types=tiles,
             contract=contract,
-            digest_prefix=True,
         )
 
 

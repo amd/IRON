@@ -105,8 +105,8 @@ def test_int32_step_at_nonzero_offsets(npu_runtime):
     _check_gathers(run, gather, table)
 
     c = run.get_buffer("c").numpy()[:ADD_SIZE]
-    errors = verify_buffer(c, "c", a + b, Tolerance.relative(0.04, 1e-6))
-    assert not errors, f"the bf16 step beside the int32 one: {len(errors)} mismatches"
+    verdict = verify_buffer(c, "c", a + b, Tolerance.relative(0.04, 1e-6))
+    assert verdict, f"the bf16 step beside the int32 one: {verdict.detail}"
 
 
 @pytest.mark.supported_devices("npu2")

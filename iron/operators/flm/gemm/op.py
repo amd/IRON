@@ -21,7 +21,6 @@ import dataclasses
 from pathlib import Path
 from typing import Any, ClassVar, NamedTuple
 
-import aie.utils as aie_utils
 import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch, AIETileType, DMAChannelDir
 from aie.dialects.aie import (
@@ -41,10 +40,8 @@ from aie.iron import (
     Release,
     TileDma,
     Worker,
-    tile_dma_chain,
 )
 from aie.iron.controlflow import range_
-from aie.iron.dataflow.objectfifo import StreamDims
 from aie.iron.device import Tile
 from aie.utils.config import aie_kernels_dir
 from ml_dtypes import bfloat16
@@ -60,6 +57,7 @@ from iron.common import (
     param,
     select,
 )
+from iron.common.design import BdLimits
 from iron.operators.flm.gemm.design import (
     _VERIFIED_CT_K,
     A_DEPTH,
@@ -194,6 +192,10 @@ class GEMM(Operator):
     # The sequence writes the cores' parameters itself, behind the first
     # block's fills and once per slab; see sequence().
     own_preamble: ClassVar[bool] = True
+    # A split leg's pieces outnumber the shim's BD ids, so the compiler
+    # recycles finished tasks' ids. Safe here: no task waits on a push
+    # issued after it (see sequence()'s emit_slab).
+    aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
     A = In(M, K, tile=(a_l2,), per=(rows,), depth=A_DEPTH)
     # On AIE2P B is quantized to bfp16ebs8, so it is declared as a count of
@@ -349,7 +351,7 @@ class GEMM(Operator):
         """
         if self._resolved:
             return self
-        return self.resolved(aie_utils.ensure_current_device(required=True))
+        return self.resolved()
 
     @property
     def ct_max_k(self) -> int:
@@ -380,7 +382,11 @@ class GEMM(Operator):
         xclbin built at one ck could serve a request for another.
         """
         t = self._tuned
-        dev = aie_utils.ensure_current_device(required=True)
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable(
+                "FLM GEMM: the xclbin is named for a device; none is bound"
+            )
         return (
             f"FLM_GEMM_tn{t.tile_n}_kt{t.k_tile}_ck{t.ct_max_k}"
             f"_ma{t.tile_ma}_mc{t.m_chunk}"
@@ -497,7 +503,6 @@ class GEMM(Operator):
                 arg_types=arg_types,
                 compile_flags=self.kernel_flags(),
                 object_file_name=self.kernel_object,
-                digest_prefix=True,
             )
 
         acc_init = fused_kernel("mm_fused_acc_init", [ct_acc_ty])
@@ -515,30 +520,36 @@ class GEMM(Operator):
         # --- Data movement ------------------------------------------------
         # These turn a row-major DDR tile into the blocked layout the mmul
         # indexes. A mismatch is silently wrong, not a build error.
-        gather_dims: StreamDims = [
-            (M_TILE // R, R * N_TILE),
-            (N_TILE // T, T),
-            (R, N_TILE),
-            (T, 1),
-        ]
-        a_recv_dims: StreamDims = [
-            (M_CHUNK * M_TILE // R, R * K_TILE),
-            (R, S),
-            (K_TILE // S, R * S),
-            (S, 1),
-        ]
+        gather_dims = TensorAccessPattern(
+            (C_SLICE_LEN,),
+            0,
+            [M_TILE // R, N_TILE // T, R, T],
+            [R * N_TILE, T, N_TILE, 1],
+        )
+        a_l2 = M_CHUNK * M_TILE * K_TILE
+        a_recv_dims = TensorAccessPattern(
+            (a_l2,),
+            0,
+            [M_CHUNK * M_TILE // R, R, K_TILE // S, S],
+            [R * K_TILE, S, R * S, 1],
+        )
         # Emits (b_iter, mc, band): the order the core acquires A in while
         # holding a B chunk across the group.
         # A mem tile's run is bounded in elements; one past the wrap splits.
-        a_split = target.dev.bd_limits(0, 1).factor(R * CT_MAX_K)
+        a_split = BdLimits.of(target.dev, 0, 1).factor(R * CT_MAX_K)
         assert a_split is not None
         a_hi, a_lo = a_split
-        a_send_dims: StreamDims = [
-            (K_DIV_CT_K_MAX, R * CT_MAX_K),
-            (M_CHUNK * M_TILE // R, R * K_TILE),
-            *([(a_hi, a_lo)] if a_hi > 1 else []),
-            (a_lo, 1),
-        ]
+        a_send_dims = TensorAccessPattern(
+            (a_l2,),
+            0,
+            [
+                K_DIV_CT_K_MAX,
+                M_CHUNK * M_TILE // R,
+                *([a_hi] if a_hi > 1 else []),
+                a_lo,
+            ],
+            [R * CT_MAX_K, R * K_TILE, *([a_lo] if a_hi > 1 else []), 1],
+        )
 
         # No tile is pinned: column c and row r name logical tiles, and the
         # placer decides where each lands. One object per logical tile, since
@@ -562,7 +573,7 @@ class GEMM(Operator):
                 tile=mt_tiles[c],
                 obj_types=[ct_out_ty] * ROWS,
                 names=[f"C_L1L2_{c}_{r}" for r in range(ROWS)],
-                dims_from_stream=[gather_dims] * ROWS,
+                from_stream=[gather_dims] * ROWS,
             )
             for r in range(ROWS):
                 c_prod[(r, c)] = sub[r]
@@ -574,12 +585,12 @@ class GEMM(Operator):
         for r in range(ROWS):
             of_a_in = ObjectFifo(mt_a_ty, name=f"A_L3L2_{r}", depth=A_DEPTH)
             a_l3l2_fifos.append(of_a_in)
-            of_a = of_a_in.cons(dims_from_stream=a_recv_dims).forward(
+            of_a = of_a_in.cons(from_stream=a_recv_dims).forward(
                 tile=mt_tiles[r * COLS // ROWS],
                 obj_type=ct_a_obj_ty,
                 depth=A_DEPTH,
                 name=f"A_L2L1_{r}",
-                dims_to_stream=a_send_dims,
+                to_stream=a_send_dims,
             )
             for c in range(COLS):
                 a_cons[(r, c)] = of_a.cons()
@@ -611,8 +622,7 @@ class GEMM(Operator):
             )
         b_mt_ty = np.ndarray[(B_SLOTS * b_slot_elems,), b_elem_ty]
         b_mt_bufs = [
-            target.register(Buffer(b_mt_ty, name=f"b_mt_{c}", tile=mt_tiles[c]))
-            for c in range(COLS)
+            Buffer(b_mt_ty, name=f"b_mt_{c}", tile=mt_tiles[c]) for c in range(COLS)
         ]
         # One lock pair per slot, not per pool: a resident slot is consumed
         # once per unit and refilled only when all of them have, independently
@@ -1000,6 +1010,9 @@ class GEMM(Operator):
             fill = direction == DMAChannelDir.S2MM
             flow = (pool.shim_flows if fill else pool.bcast_flows)[c]
             value = slab.b_uses if fill else 1
+            slots = TensorAccessPattern.full((B_SLOTS * b_slot_elems,)).partition(
+                B_SLOTS
+            )
             chain = []
             for i in range(slab.b_slots):
                 prod, cons = pool.prod[c][i], pool.cons[c][i]
@@ -1007,19 +1020,12 @@ class GEMM(Operator):
                 chain.append(
                     Bd(
                         pool.bufs[c],
-                        offset=i * b_slot_elems,
-                        length=b_slot_elems,
+                        tap=slots[i],
                         acquires=[Acquire(wait, value=value)],
                         releases=[Release(post, value=value)],
                     )
                 )
-            return tile_dma_chain(
-                pool.mt_tiles[c],
-                direction,
-                flow.endpoint(pool.mt_tiles[c]),
-                chain,
-                repeat_count=passes - 1,
-            )
+            return flow.endpoint(pool.mt_tiles[c]).task(*chain, runs=passes).start()
 
         def c_tap(mega_col, c, slab):
             # Every joined block this column produces: one ROWS*M_TILE x

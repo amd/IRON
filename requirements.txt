@@ -9,12 +9,11 @@
 # CUDA build served from PyPI. We therefore also pin torch to the "+cpu" local
 # version below, which is only available from the PyTorch CPU index.
 --index-url https://download.pytorch.org/whl/cpu
+--find-links https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4
 --find-links https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
 --extra-index-url https://pypi.org/simple
 
-# No mlir_aie wheel: this branch builds against mlir-aie's iron-next branch,
-# built from source (see README.md). Peano is that branch's pin, from its
-# utils/peano-requirements.txt.
+mlir_aie==1.4.4.dev88+gb15f350
 llvm-aie==22.0.0.2026092101+0006955e
 
 black

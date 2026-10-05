@@ -30,7 +30,6 @@ class OperatorImage:
         self.op = op
         self._artifacts: Artifacts | None = None
         self._kernel: NPUKernel | None = None
-        self._handle = None
 
     def compile(self, record: str = "memory") -> Self:
         """Build the image, once. ``record="disk"`` also writes its
@@ -50,13 +49,12 @@ class OperatorImage:
         return self._artifacts
 
     def __call__(self, *args):
-        """Run the image on ``args``, loading it on the first call (and again
-        should the shared runtime have evicted it).
+        """Run the image on ``args``, loading it into the shared runtime
+        unless it is there already.
         """
         self.compile()
-        if self._handle is None or not self._handle.is_loaded:
-            self._handle = aie_utils.DefaultNPURuntime.load(self._kernel)
-        return aie_utils.DefaultNPURuntime.run(self._handle, list(args))
+        _, result = aie_utils.DefaultNPURuntime.load_and_run(self._kernel, list(args))
+        return result
 
     def _build(self) -> Artifacts:
         op = self.op.resolved()
@@ -66,9 +64,7 @@ class OperatorImage:
             image = op.external.fetch()
             own = OperatorDesign(op, "xclbin").compile(insts_only=True)
             entry = own.get_cache_entry()
-            self._kernel = own.npu_kernel(
-                xclbin_path=image, kernel_name=op.external.kernel_name
-            )
+            kernel_name = op.external.kernel_name
         else:
             config = op.configuration()
             built = OperatorDesign(config, "xclbin").compile()
@@ -80,9 +76,16 @@ class OperatorImage:
                 if config is op
                 else OperatorDesign(op, "xclbin").compile(insts_only=True)
             )
-            self._kernel = own.npu_kernel(xclbin_path=image)
+            kernel_name = "MLIR_AIE"
         stream = own.get_cache_entry()
         assert stream is not None and stream.insts is not None
+        self._kernel = NPUKernel(
+            image,
+            stream.insts,
+            kernel_name=kernel_name,
+            dispatch_params=own.dispatch_params,
+            dispatch_lib_path=own.get_dispatch_lib_path(),
+        )
         buffers = op.buffers
         return Artifacts(
             kind="xclbin",

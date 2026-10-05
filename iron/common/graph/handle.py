@@ -119,7 +119,7 @@ class Handle:
             raise ValueError(
                 f"axes {axes} do not permute a shape of rank {len(self.shape)}"
             )
-        whole = TensorAccessPattern.from_slice(self.shape, ())
+        whole = TensorAccessPattern.full(self.shape)
         shape = tuple(self.shape[a] for a in axes)
         tap = TensorAccessPattern(
             self.shape, 0, shape, [whole.strides[a] for a in axes]
@@ -184,9 +184,9 @@ class Handle:
                 shape.append(len(range(*entry.indices(n))))
             else:
                 static.append(int(entry))
-        tap = TensorAccessPattern.from_slice(
-            self.shape, tuple(static)
-        )  # checks ranges, empties
+        tap = TensorAccessPattern.full(self.shape)[
+            tuple(static)
+        ]  # checks ranges, empties
         if bounds and tuple(shape) == self.shape:
             # The whole buffer, bounded: the same handle with the bound on it.
             return Handle(
@@ -198,9 +198,16 @@ class Handle:
                 self.start,
                 bounds=bounds,
             )
-        if index_by is None and tap.contiguous:
+        dense = tap.coalesce()
+        offset = tap.offset
+        if (
+            index_by is None
+            and isinstance(offset, (int, np.integer))
+            and dense.rank == 1
+            and 1 in (dense.sizes[0], dense.strides[0])
+        ):
             return Handle(
-                shape, self.dtype, self.name, "slice", self, tap.offset, bounds=bounds
+                shape, self.dtype, self.name, "slice", self, int(offset), bounds=bounds
             )
         return Handle(
             shape, self.dtype, self.name, "view", self, 0, tap, index_by, bounds=bounds

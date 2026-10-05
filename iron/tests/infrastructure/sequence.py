@@ -122,8 +122,8 @@ def test_auto_dispatch_selects_platform_default(size, npu_runtime):
     out = run.get_buffer("out").numpy_view()[:size].copy()
 
     expected = np.maximum(a + b, 0)
-    errors = verify_buffer(out, "out", expected, RELATIVE)
-    assert not errors, f"auto-dispatch sequence produced {len(errors)} mismatches"
+    verdict = verify_buffer(out, "out", expected, RELATIVE)
+    assert verdict, f"auto-dispatch sequence: {verdict.detail}"
 
 
 # ---------------------------------------------------------------------------
@@ -260,10 +260,8 @@ def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
     packed = run.get_buffer("packed").numpy_view()[: 2 * _SLICE_SIZE].copy()
 
     expected = np.concatenate([a0 + b0, a1 + b1])
-    errors = verify_buffer(packed, "packed", expected, RELATIVE)
-    assert (
-        not errors
-    ), f"reference-dispatch sliced buffer produced {len(errors)} mismatches"
+    verdict = verify_buffer(packed, "packed", expected, RELATIVE)
+    assert verdict, f"reference-dispatch sliced buffer: {verdict.detail}"
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +347,7 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch, npu_runtime):
 
         temp = run.get_buffer("temp").numpy()[:_ADD_RELU_SIZE]
         out = run.get_buffer("out").numpy()[:_ADD_RELU_SIZE]
-        errors = verify_buffer(temp, "temp", a + b, RELATIVE)
-        assert not errors, f"rep {rep}: temp has {len(errors)} mismatches"
-        errors = verify_buffer(out, "out", np.maximum(a + b, 0), RELATIVE)
-        assert not errors, f"rep {rep}: out has {len(errors)} mismatches"
+        verdict = verify_buffer(temp, "temp", a + b, RELATIVE)
+        assert verdict, f"rep {rep}: temp: {verdict.detail}"
+        verdict = verify_buffer(out, "out", np.maximum(a + b, 0), RELATIVE)
+        assert verdict, f"rep {rep}: out: {verdict.detail}"

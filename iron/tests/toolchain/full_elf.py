@@ -51,16 +51,6 @@ def build_elf(graph, **shapes):
     return version
 
 
-def _params(artifacts):
-    """The scratchpad parameter table aiecc emitted, as ``name -> line``."""
-    text = artifacts.params.read_text().strip().splitlines()
-    assert text, "params.txt is empty"
-    count = int(text[0])
-    rows = [line for line in text[1:] if line.strip()]
-    assert len(rows) == count, f"params.txt announces {count} rows, holds {len(rows)}"
-    return {row.split()[0]: row for row in rows}
-
-
 def test_swiglu_graph_compiles_to_a_full_elf():
     fn, E = swiglu()
     net = fn.compile(DEVICES["npu2"](), image=iron.ELF, x=(1, E))
@@ -80,7 +70,7 @@ def test_swiglu_graph_compiles_to_a_full_elf():
 
 
 def _assert_values_in_table(version):
-    table = _params(version.artifacts)
+    table = version.artifacts.parameters
     # The host writes every parameter the image declares ...
     assert {w.symbol for w in version.words} == set(table)
     # ... and every per-call index the graph bound is one, in the word it
@@ -151,6 +141,9 @@ def test_a_cached_build_leaves_no_kernel_for_the_next_graph_to_collide_with():
         return Project(b_col_maj).compile(DEVICES["npu2"](), image=iron.ELF, x=(M, K))
 
     build(False)
+    # What earlier tests' operator checks declared outside a build stays
+    # registered; mlir-aie scopes each compile to its own module's kernels.
+    ExternalFunction._instances.clear()
     build(False)  # a hit: compile() generates nothing
     assert not ExternalFunction._instances
     build(True)

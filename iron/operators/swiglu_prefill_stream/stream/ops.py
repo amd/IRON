@@ -91,14 +91,13 @@ def _gemm_declare(kernels_dir, m: int, k: int, n: int):
 
     stream-dse also sets one ``link_with`` per core, naming
     ``GemmKernel.linkwith_name``, so everything a core calls has to be in this
-    one object. mm.cc no longer carries the zero entry point, so zero.cc is
-    bundled into the same translation unit rather than left in an object
-    nothing would link. ``symbol_prefix`` renames every symbol an object
-    defines, so prefixing once covers ``zero`` as well.
+    one object. mm.cc no longer carries the zero entry point, so one
+    translation unit includes both mm.cc and zero.cc rather than leaving zero
+    in an object nothing would link. ``symbol_prefix`` renames every symbol an
+    object defines, so prefixing once covers ``zero`` as well.
     """
     suffix = f"{m}_{k}_{n}"
     prefix = f"mm{suffix}"
-    zero_source = kernels_dir / "zero" / "zero.cc"
     ExternalFunction(
         # Unused as a declaration: stream-dse emits the func.func this design
         # links against, so ExternalFunction is here only to compile the source
@@ -106,11 +105,13 @@ def _gemm_declare(kernels_dir, m: int, k: int, n: int):
         # object and, through the map returned below, the symbols: both must
         # be exactly as given, so no digest prefix.
         "matmul_bf16_bf16",
-        source_file=str(kernels_dir / "linalg" / "mm.cc"),
+        source_string="".join(
+            f'#include "{kernels_dir / source}"\n'
+            for source in ("linalg/mm.cc", "zero/zero.cc")
+        ),
         arg_types=[],
         object_file_name=f"mm_{suffix}.o",
         symbol_prefix=prefix,
-        bundled_sources=[str(zero_source)],
         compile_flags=[
             f"-DDIM_M={m}",
             f"-DDIM_K={k}",

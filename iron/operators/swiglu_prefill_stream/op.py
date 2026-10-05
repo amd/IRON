@@ -3,11 +3,10 @@
 
 import functools
 
-import aie.utils as aie_utils
 from aie.utils.trace import TraceConfig
 from ml_dtypes import bfloat16
 
-from iron.common import In, Operator, Out, param
+from iron.common import In, Operator, Out, Unresolvable, param
 from iron.common.image import OperatorSequence
 
 # stream-dse is optional: importing the operator does not need it, building does.
@@ -47,13 +46,16 @@ class SwiGLUStreamGroup(Operator):
     group_index: int = param()
 
     def _dims(self) -> dict:
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable("SwiGLU prefill is built for a device; none is bound")
         return dict(
             group_index=self.group_index,
             k=self.k,
             seq_len=self.seq_len,
             embedding_dim=self.embedding_dim,
             hidden_dim=self.hidden_dim,
-            npu=aie_utils.ensure_current_device(required=True).name,
+            npu=dev.name,
             trace_size=0 if self.trace is None else self.trace.trace_size,
         )
 

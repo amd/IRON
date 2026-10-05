@@ -388,15 +388,11 @@ class Graph:
         tuning = None
         groups: AdjacentPacking | list[list[Operator]] | None
         if isinstance(coresident, JointNarrowing):
-            tuning = coresident.tune(
-                traced, aie_utils.ensure_current_device(required=True)
-            )
+            tuning = coresident.tune(traced, aie_utils.ensure_current_device())
             traced, groups = tuning.apply(traced)
         else:
             groups = coresident
-        chosen = plan(
-            aie_utils.ensure_current_device(required=True), traced, boundaries, image
-        )
+        chosen = plan(aie_utils.ensure_current_device(), traced, boundaries, image)
         if verbose:
             print(chosen.report(self.name))
         signature = self._signature(traced.inputs)
@@ -506,7 +502,9 @@ class Graph:
         """The profile applied while ``body`` runs, if there is one."""
         profile = self.profile
         if isinstance(profile, (str, Path)):
-            dev = aie_utils.ensure_current_device(required=True)
+            dev = aie_utils.ensure_current_device()
+            if dev is None:
+                raise ValueError(f"{self.name}: a profile is per device; none is bound")
             path = Path(profile) / f"{dev.name}.json"
             if not path.exists():
                 raise ValueError(f"{self.name}: no profile {path}")

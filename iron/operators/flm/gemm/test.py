@@ -172,7 +172,9 @@ def check_on_device(operator, data, rounding=CONV_EVEN, record=None):
     """
     A, B = data["A"], data["B"]
     mass = accumulated_mass(operator.K, A, B)
-    if aie_utils.ensure_current_device(required=True).arch is AIEArch.AIE2:
+    dev = aie_utils.get_current_device()
+    assert dev is not None
+    if dev.arch is AIEArch.AIE2:
         budget = 0.002 if rounding is FLOOR else 0.0002
     else:
         budget = 0.05 if rounding is FLOOR else 0.004
@@ -305,7 +307,8 @@ def test_gemm_k_tile(K, npu_runtime):
     not divide. K = 768 takes three k steps, so the accumulator carries
     across tiles of the smaller size too.
     """
-    dev = aie_utils.ensure_current_device(required=True)
+    dev = aie_utils.get_current_device()
+    assert dev is not None
     operator = GEMM(M=256, K=K, N=64 * dev.cols, tile_n=64, k_tile=256)
     errors, _latency_us, _bandwidth_gbps = check_on_device(
         operator, flm_vectors(operator, INPUT_SCALE)

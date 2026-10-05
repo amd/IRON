@@ -49,7 +49,7 @@ def test_tuned_graph_is_bit_identical_and_packed(tmp_path):
     for s in traced.steps:
         first.setdefault(cost_key(s.op), s.op)
     timing = Timing(rounds=2, calls=10)
-    dev = aie_utils.ensure_current_device(required=True)
+    dev = aie_utils.ensure_current_device()
     for op in first.values():
         costs = measure_steps(table, variants(op, dev), timing)
         assert all(c.exact for c in costs.values())

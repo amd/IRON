@@ -43,10 +43,10 @@ def test_every_row_of_a_bound_is_computed(npu_runtime):
     for p in (0, 4, 12, 40, ROWS - 1):
         out = np.asarray(net(x, y, p=p), dtype=np.float32).reshape(ROWS, COLS)
         expected = np.asarray(step.reference(x, y, p=p), dtype=np.float32)
-        errors = verify_buffer(
+        verdict = verify_buffer(
             out[: p + 1],
             "out",
             expected.reshape(p + 1, COLS),
             tolerance=Tolerance.relative(0.04, 1e-2),
         )
-        assert not errors, f"{p=}: {len(errors)} of the valid rows differ"
+        assert verdict, f"{p=}: the valid rows differ: {verdict.detail}"

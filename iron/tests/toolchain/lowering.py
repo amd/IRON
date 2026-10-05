@@ -46,7 +46,7 @@ def lower(op, tmp_path, name=None):
     # compile() does: what stays registered is the next test's collision.
     ExternalFunction._instances.clear()
     try:
-        src.write_text(str(OperatorDesign(op).generator()))
+        src.write_text(str(OperatorDesign(op).build()))
         # aiecc merges these into the core IR it probes, reading them beside
         # the MLIR; the object-linked kernels it never reads here.
         merged = [f for f in ExternalFunction._instances if f.link_with_mode == "merge"]
@@ -62,6 +62,7 @@ def lower(op, tmp_path, name=None):
             f"--npu-insts-name={name}.bin",
             f"--output-dir={out}",
             f"--tmpdir={tmp_path / 'prj'}",
+            *op.aiecc_flags,
             str(src),
         ],
         capture_output=True,
@@ -110,13 +111,10 @@ def test_operator_lowers_to_instructions(device, module, cls_name, kwargs, tmp_p
     ],
     ids=lambda v: v if isinstance(v, str) and "." not in v else "",
 )
-def test_a_bounded_operator_lowers_or_waits_for_the_size_kind(
-    device, module, cls_name, kwargs, bound, tmp_path
-):
+def test_a_bounded_operator_lowers(device, module, cls_name, kwargs, bound, tmp_path):
     """An operator with a bounded extent builds its array against the
     per-call words (each core reads its count from the scratchpad) and
-    asks the toolchain to patch its descriptors' sizes. Until mlir-aie has
-    the size-kind parameter that is a skip naming it, not a failure.
+    asks the toolchain to patch its descriptors' lengths.
     """
     cls = getattr(importlib.import_module(f"iron.operators.{module}"), cls_name)
     try:
@@ -124,4 +122,4 @@ def test_a_bounded_operator_lowers_or_waits_for_the_size_kind(
     except (ValueError, Unresolvable, Incompatible) as e:
         pytest.skip(f"not for {device.name}: {e}")
     op.use_value(bound, "n")  # what x[:n] in a graph does
-    lower(op, tmp_path)  # or the conftest's skip, naming the missing kind
+    lower(op, tmp_path)

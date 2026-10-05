@@ -313,7 +313,7 @@ class CausalLM(iron.Graph):
         # Masked from the context length on: the cache's unwritten tail
         # contributes nothing.
         weights = Softmax(scores, vector_size=step.position + 1)
-        if GQAContext.fits(aie_utils.ensure_current_device(required=True), G):
+        if GQAContext.fits(aie_utils.ensure_current_device(), G):
             # A column per group weighs its values for all of its heads.
             ctx = GQAContext(values, weights.reshape(G, H // G, L))
             return ctx.reshape(1, H * D)

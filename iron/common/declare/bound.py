@@ -348,7 +348,7 @@ class BufferView:
     @property
     def tap(self) -> TensorAccessPattern:
         """The static part of the slice, over the buffer's shape."""
-        return TensorAccessPattern.from_slice(self.buffer.shape, self.static_index)
+        return TensorAccessPattern.full(self.buffer.shape)[self.static_index]
 
     def __repr__(self) -> str:
         return f"{self.buffer.name}[{self.index}]"

@@ -12,6 +12,7 @@ whether it is waited on.
 
 import dataclasses
 import re
+from math import prod
 from typing import NamedTuple
 
 import numpy as np
@@ -19,7 +20,6 @@ import pytest
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
 from aie.iron.device import from_name
-from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 import iron.operators.flm.gemm.op as flm_gemm
 from iron.common import (
@@ -89,7 +89,8 @@ class Task(NamedTuple):
     offset: int
     sizes: str
     strides: str
-    size_parameter: str  # the patched size's symbol, or ""
+    length_parameter: str  # the patched length's symbol, or ""
+    length_unit: str  # the elements per unit of it, or ""
     attributes: str
 
     @property
@@ -99,9 +100,10 @@ class Task(NamedTuple):
 
 _TASK = re.compile(
     r"%(\d+) = aiex\.dma_configure_task_for @(\w+) \{\s*"
-    r"aie\.dma_bd\(%arg(\d+) : \S+ offset = (\d+) len = %?\w+ "
+    r"aie\.dma_bd\(%arg(\d+) : \S+ offset = (\d+) (?:len = %?\w+ )?"
     r"sizes = \[([^\]]*)\] strides = \[([^\]]*)\]\)"
-    r"(?: \{size_parameter = @(\w+)\})?\s*aie\.end\s*\}(?: \{([^}]*)\})?"
+    r"(?: \{length_parameter = @(\w+), length_unit = (\d+) : i32\})?"
+    r"\s*aie\.end\s*\}(?: \{([^}]*)\})?"
 )
 _WRITE = re.compile(
     r"npu\.write32\(%c(-?\d+)_i32\S*, %c(-?\d+)_i32\S*\) "
@@ -119,7 +121,7 @@ def generated_sequence(op, image="elf") -> tuple[str, list[Task]]:
         module = build_design(op)
     else:
         design = OperatorDesign(op, image)
-        module = CompilableDesign(design.generator, key=design.key).generate_mlir()
+        module = design.compilable().generate_mlir()
     text = str(module)
     text = text[text.index("aie.runtime_sequence") :]
     tasks = [
@@ -213,8 +215,8 @@ def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles():
     angles = Transfers.round_robin(op.angles, op.streams["angles"], 0)
     for (xs, xa, _), (as_, aa, _) in zip(x, angles, strict=True):
         assert xs.index == as_.index
-        rows = xa.access_indices()[::cols] // cols
-        angle_rows = aa.access_indices()[::cols] // cols
+        rows = xa.gather(np.arange(prod(xa.tensor_dims)))[::cols] // cols
+        angle_rows = aa.gather(np.arange(prod(aa.tensor_dims)))[::cols] // cols
         assert list(angle_rows) == list(range(xs.index, positions, lanes))
         assert list(rows // heads) == list(np.repeat(angle_rows, heads))
 
@@ -369,7 +371,8 @@ def test_mha_of_one_query_packs_a_group_per_pipeline_over_its_own_kv():
             *[("memO", h * group, q) for h in heads],
         ]
         assert all("repeat_count = 15" in t.attributes for t in fills[:4])
-        assert all(t.size_parameter.endswith("kv_blocks") for t in fills[4:12])
+        assert all(t.length_parameter.endswith("kv_blocks") for t in fills[4:12])
+        assert all(t.length_unit == str(64 * 64) for t in fills[4:12])
         assert all(t.waited for t in fills[12:])
 
 
@@ -387,7 +390,8 @@ def test_mha_infers_the_padded_length_and_the_kv_head_count():
 
 
 def _bounded_gemv():
-    op = GEMV(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=4)
+    # A patched length is whole 16-byte units: an output tile of 8 bf16 rows.
+    op = GEMV(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=8)
     op.use_value("valid", "n")  # what a graph does for A[:n]
     return op
 
@@ -404,32 +408,38 @@ def test_the_derived_sequence_patches_a_bounded_operand():
         (1, 0, "1, 4, 1, 1024", "0, 2048, 1024, 1", True),
         (1, 1024, "1, 4, 1, 1024", "0, 2048, 1024, 1", True),
     ]
-    patched = [t.size_parameter.rsplit("_", 2)[-2:] for t in tasks]
+    patched = [t.length_parameter.rsplit("_", 2)[-2:] for t in tasks]
     assert patched == [["valid", "x"]] * 2 + [["valid", "y"]] * 2
 
 
 def test_a_bounded_gemv_moves_a_and_c_in_output_tiles_round_robin():
     """Under a bound on M, B goes whole as ever, then each column takes A in
-    output tiles (two input tiles each here) and C in the same tiles, both
+    output tiles (four input tiles each here) and C in the same tiles, both
     patched by the tile count the core also reads.
     """
     op = _bounded_gemv().resolved(from_name("npu2", n_cols=8))
     assert [v.name for v in op.values] == ["valid", "tiles", "valid_A", "valid_C"]
-    assert op.derived_at("tiles", valid=64) == 64 // (2 * 4)
-    assert op.derived_at("valid_A", valid=64) == 64 // (2 * 4)  # unit: output tiles
+    assert op.derived_at("tiles", valid=64) == 64 // (2 * 8)
+    assert op.derived_at("valid_A", valid=64) == 64 // (2 * 8)  # unit: output tiles
     text, tasks = generated_sequence(op)
     assert [
-        (t.lane, t.offset, t.sizes, t.strides, t.size_parameter.endswith(("_A", "_C")))
+        (
+            t.lane,
+            t.offset,
+            t.sizes,
+            t.strides,
+            t.length_parameter.endswith(("_A", "_C")),
+        )
         for t in tasks
     ] == [
         ("B_L3L1_0", 0, "1, 1, 1, 64", "0, 0, 0, 1", False),
         ("B_L3L1_1", 0, "1, 1, 1, 64", "0, 0, 0, 1", False),
-        ("A_L3L1_0", 0, "1, 32, 1, 256", "0, 512, 256, 1", True),
-        ("A_L3L1_1", 256, "1, 32, 1, 256", "0, 512, 256, 1", True),
-        ("C_L1L3_0", 0, "1, 32, 1, 4", "0, 8, 4, 1", True),
-        ("C_L1L3_1", 4, "1, 32, 1, 4", "0, 8, 4, 1", True),
+        ("A_L3L1_0", 0, "1, 16, 1, 512", "0, 1024, 512, 1", True),
+        ("A_L3L1_1", 512, "1, 16, 1, 512", "0, 1024, 512, 1", True),
+        ("C_L1L3_0", 0, "1, 16, 1, 8", "0, 16, 8, 1", True),
+        ("C_L1L3_1", 8, "1, 16, 1, 8", "0, 16, 8, 1", True),
     ]
-    assert {t.size_parameter[-7:] for t in tasks[2:]} == {"valid_A", "valid_C"}
+    assert {t.length_parameter[-7:] for t in tasks[2:]} == {"valid_A", "valid_C"}
     assert text.count("aiex.scratchpad_parameter @") == 2
 
 
@@ -438,13 +448,13 @@ def test_on_an_xclbin_the_size_is_the_dispatch_scalar():
     # per-call scalar standing in for the size itself.
     text, tasks = generated_sequence(_bounded_gemv(), "xclbin")
     assert "scratchpad_parameter" not in text
-    assert [(t.lane, t.offset, t.size_parameter) for t in tasks[2:]] == [
+    assert [(t.lane, t.offset, t.length_parameter) for t in tasks[2:]] == [
         ("A_L3L1_0", 0, ""),
-        ("A_L3L1_1", 256, ""),
+        ("A_L3L1_1", 512, ""),
         ("C_L1L3_0", 0, ""),
-        ("C_L1L3_1", 4, ""),
+        ("C_L1L3_1", 8, ""),
     ]
-    for t, run in zip(tasks[2:], (256, 256, 4, 4)):
+    for t, run in zip(tasks[2:], (512, 512, 8, 8)):
         assert re.fullmatch(rf"1, %\w+, 1, {run}", t.sizes), t.sizes
 
 
@@ -483,7 +493,7 @@ def test_a_bounded_repeat_patches_the_stack_axis():
     op = Repeat(rows=4, cols=8, seq=32, repeat=2).resolved(NPU2_4COL)
     op.use_value("valid_seq", "c")
     _, tasks = generated_sequence(op)
-    assert [(t.lane, t.sizes, t.strides, t.size_parameter[-11:]) for t in tasks] == [
+    assert [(t.lane, t.sizes, t.strides, t.length_parameter[-11:]) for t in tasks] == [
         ("fifo_in", "2, 32, 4, 8", "0, 8, 256, 1", "valid_seq_x"),
         ("fifo_out", "2, 32, 4, 8", "256, 8, 512, 1", "valid_seq_y"),
     ]
@@ -602,7 +612,7 @@ def test_shipped_sequence_writes_every_core_then_streams_in_consume_order(npu2):
     assert len(writes) == 32 * 8
     assert writes[0] == (4096, 2, 0, 2) and writes[7] == (4124, 1073741824, 0, 2)
     assert writes[-1] == (4124, 1073741824, 7, 5)
-    releases = re.findall(r"aiex\.set_lock\(%lock_(\d+)_(\d+), 1\)", sequence)
+    releases = re.findall(r"aiex\.set_lock\(%lock_(\d+)_(\d+), %c1_i32\w*\)", sequence)
     assert len(releases) == 32 and releases[-1] == ("7", "5")
     assert text.count("aie.lock(") == 32 and "aie.lock(%tile_0_2, 10)" in text
     assert sequence.rindex("aiex.set_lock") < sequence.index("aiex.dma_start_task")

@@ -72,13 +72,13 @@ def test_rows_past_the_valid_length_are_zero(npu_runtime):
         assert not padding.any(), f"{rows=} {n=}: padding rows are not zero"
         expected = reference.reference(q, k, v, s_q=n, s_kv=n)
         expected = np.asarray(expected, dtype=np.float32).reshape(SEQ, HEADS, D)
-        errors = verify_buffer(
+        verdict = verify_buffer(
             o[:n],
             "O",
             expected[:n],
             tolerance=Tolerance.relative(0.04, 0.15, max_mismatch_frac=0.005),
         )
-        assert not errors, f"{rows=} {n=}: {len(errors)} valid elements differ"
+        assert verdict, f"{rows=} {n=}: the valid elements differ: {verdict.detail}"
 
 
 CHUNK, CACHE = 512, 2048
@@ -128,13 +128,13 @@ def test_a_chunk_attends_over_the_cache_before_it(npu_runtime, boundaries):
         position = start + rows - 1
         o = net(q[start : start + CHUNK], k, v, rows=rows, position=position)
         o = np.asarray(o, dtype=np.float32).reshape(CHUNK, HEADS, D)
-        errors = verify_buffer(
+        verdict = verify_buffer(
             o[:rows],
             "O",
             whole[start : start + rows],
             tolerance=Tolerance.relative(0.04, 0.15, max_mismatch_frac=0.005),
         )
-        assert not errors, f"{c=} {rows=}: {len(errors)} valid elements differ"
+        assert verdict, f"{c=} {rows=}: the valid elements differ: {verdict.detail}"
 
 
 @pytest.mark.supported_devices("npu2")

@@ -256,7 +256,7 @@ class MHA(Operator):
         # by (d, B_kv), bfp16-emulated, the only one supported, on NPU2, the
         # only array MHA fits; P*V, (B_q, B_kv) by (B_kv, d).
         for pv, dims in ((False, ("B_q", "d", "B_kv")), (True, ("B_q", "B_kv", "d"))):
-            mac = kernels.linalg.mha.mac_dims(
+            mac = kernels.linalg.mha.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
                 pv=pv, arch="aie2p", emulate_bf16_mmul_with_bfp16=True
             )
             for name, m in zip(dims, mac):
@@ -414,7 +414,9 @@ class MHA(Operator):
         # it: Q, K (as stored) and the scores as QK^T's, V and O as P*V's
         # (matmul_PV, on the micro-tile mha.cc's P*V product expands).
         qk = matmul_QK.stream_dims
-        pv = mm_stream_dims(B_q, B_kv, d, kernels.linalg.mha.mac_dims(pv=True))
+        pv = mm_stream_dims(
+            B_q, B_kv, d, kernels.linalg.mha.mac_dims(pv=True)
+        )  # pyright: ignore[reportFunctionMemberAccess]
         q_dims = qk.A
         k_dims = qk.B
         a_dims = qk.C
@@ -431,11 +433,11 @@ class MHA(Operator):
                 offsets=[B_q * d * i for i in range(n_join)],
                 obj_types=[q_ty] * n_join,
                 names=[f"memQ{suffix}{i}" for i in range(n_join)],
-                dims_to_stream=None if q_dims is None else [q_dims] * n_join,
+                to_stream=None if q_dims is None else [q_dims] * n_join,
                 depths=[of_depth] * n_join,
                 tile=Tile(col=6 + shim, row=1),
             )
-            mem_o = ObjectFifo(joined_ty, name=f"memO{suffix}", dims_to_stream=o_dims)
+            mem_o = ObjectFifo(joined_ty, name=f"memO{suffix}", to_stream=o_dims)
             memO.append(mem_o)
             outO += mem_o.prod().join(
                 offsets=[B_q * d * i for i in range(n_join)],
@@ -459,7 +461,7 @@ class MHA(Operator):
                 .cons()
                 .forward(
                     name=f"memK{suffix}",
-                    dims_to_stream=k_dims,
+                    to_stream=k_dims,
                     tile=Tile(col=3 if shared else lane, row=1),
                     depth=of_depth,
                 )
@@ -470,7 +472,7 @@ class MHA(Operator):
                 .cons()
                 .forward(
                     name=f"memV{suffix}",
-                    dims_to_stream=v_dims,
+                    to_stream=v_dims,
                     tile=Tile(col=4 if shared else lane, row=1),
                     depth=of_depth,
                 )
@@ -483,13 +485,13 @@ class MHA(Operator):
             outA.append(
                 memA[i]
                 .cons()
-                .forward(name=f"outA{i}", dims_to_stream=a_dims, depth=of_depth)
+                .forward(name=f"outA{i}", to_stream=a_dims, depth=of_depth)
             )
             memP.append(ObjectFifo(qk_ty, depth=of_depth, name=f"memP{i}"))
             outP.append(
                 memP[i]
                 .cons()
-                .forward(name=f"outP{i}", dims_to_stream=q_dims, depth=of_depth)
+                .forward(name=f"outP{i}", to_stream=q_dims, depth=of_depth)
             )
             scaleOF.append(ObjectFifo(s_ty, depth=of_depth, name=f"scaleOF{i}"))
 

@@ -31,8 +31,8 @@ def _permuted(n, g, d) -> TensorAccessPattern:
 # One token's (G, D) keys into row `pos` of the (G, L, D) cache:
 # Copy(k, keys[:, pos]), the row a per-call value.
 ROW_INTO_CACHE = dict(
-    src=TensorAccessPattern.from_slice((G, D), ()),
-    dst=TensorAccessPattern.from_slice((G, L, D), np.s_[:, 0]),
+    src=TensorAccessPattern.full((G, D)),
+    dst=TensorAccessPattern.full((G, L, D))[:, 0],
     input_buffer_size=G * D,
     output_buffer_size=G * L * D,
 )
@@ -40,7 +40,7 @@ ROW_INTO_CACHE = dict(
 # rows: Copy(k.reshape(N, G, D).transpose(1, 0, 2), keys[:, :N]).
 ROWS_INTO_CACHE = dict(
     src=_permuted(N, G, D),
-    dst=TensorAccessPattern.from_slice((G, L, D), np.s_[:, 0:N]),
+    dst=TensorAccessPattern.full((G, L, D))[:, 0:N],
     input_buffer_size=N * G * D,
     output_buffer_size=G * L * D,
     tile_size=1024,
@@ -48,12 +48,12 @@ ROWS_INTO_CACHE = dict(
 # The last prompt row of (4, E), selected by the per-call index `last`:
 # Copy(x[last]).
 LAST_ROW = dict(
-    src=TensorAccessPattern.from_slice((4, E), np.s_[0]),
+    src=TensorAccessPattern.full((4, E))[0],
     input_buffer_size=4 * E,
     output_buffer_size=E,
 )
 # The same row at slot 5, on one channel and on two.
-SLOT5 = dict(ROW_INTO_CACHE, dst=TensorAccessPattern.from_slice((G, L, D), np.s_[:, 5]))
+SLOT5 = dict(ROW_INTO_CACHE, dst=TensorAccessPattern.full((G, L, D))[:, 5])
 SLOT5_TWO_CHANNELS = dict(SLOT5, num_channels=2)
 
 PINNED: dict[str, tuple[dict[str, Any], list]] = {
@@ -120,7 +120,7 @@ def test_a_bounded_axis_lands_on_d2_and_names_it():
     N, G, D, L = 16, 4, 8, 32
     op = Copy(
         src=_permuted(N, G, D),
-        dst=TensorAccessPattern.from_slice((G, L, D), np.s_[:, 0:N]),
+        dst=TensorAccessPattern.full((G, L, D))[:, 0:N],
         src_bound=1,
         dst_bound=1,
         input_buffer_size=N * G * D,
@@ -129,14 +129,14 @@ def test_a_bounded_axis_lands_on_d2_and_names_it():
     _, (fill, drain) = generated_sequence(_bounded(op))
     assert (fill.sizes, fill.strides) == (f"{G}, {N}, 1, {D}", f"{D}, {G * D}, 0, 1")
     assert (drain.sizes, drain.strides) == (f"{G}, {N}, 1, {D}", f"{L * D}, {D}, 0, 1")
-    assert fill.size_parameter.endswith("src_valid")
-    assert drain.size_parameter.endswith("dst_valid")
+    assert fill.length_parameter.endswith("src_valid")
+    assert drain.length_parameter.endswith("dst_valid")
     x = np.arange(N * G * D, dtype=np.float32).reshape(N, G, D)
     y = np.zeros((G, L, D), dtype=np.float32)
     op.reference(x, y, src_valid=5, dst_valid=5)
     assert (y[:, :5] == x[:5].transpose(1, 0, 2)).all() and not y[:, 5:].any()
     flat = Copy(
-        src=TensorAccessPattern.from_slice((N,), ()),
+        src=TensorAccessPattern.full((N,)),
         src_bound=0,
         input_buffer_size=N,
         num_channels=2,
@@ -152,7 +152,7 @@ def test_a_bounded_axis_past_the_d1_wrap_still_packs():
     N, G, D = 2048, 8, 64
     op = Copy(
         src=_permuted(N, G, D),
-        dst=TensorAccessPattern.from_slice((G, N, D), np.s_[:, 0:N]),
+        dst=TensorAccessPattern.full((G, N, D))[:, 0:N],
         src_bound=1,
         dst_bound=1,
         input_buffer_size=N * G * D,

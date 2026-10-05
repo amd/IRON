@@ -20,12 +20,14 @@ receives, ``runtime`` what an operator's ``sequence(rt)`` receives,
 ``build`` puts them together.
 """
 
+from .bd import BdLimits
 from .build import OperatorDesign, build_design, device_symbol
 from .external import ExternalSequence
 from .runtime import Sequence, Transfers
 from .target import Target
 
 __all__ = [
+    "BdLimits",
     "ExternalSequence",
     "OperatorDesign",
     "Sequence",

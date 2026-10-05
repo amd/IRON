@@ -4,18 +4,18 @@
 
 """What CompilableDesign's cache key does and does not distinguish.
 
-The plan is to retire IRON's artifact graph and hand a captured graph to
-``CompilableDesign``, which brings content-addressed caching, cross-process
-locking and depfile validation the artifact graph lacks. That only works if
-its key distinguishes two different graphs. It does not, in the obvious
-encoding, and these tests pin exactly where the line falls -- a cache that
-fails to discriminate is silent, handing back another graph's artifacts.
+IRON hands its designs and captured graphs to ``CompilableDesign``, which
+brings content-addressed caching, cross-process locking and depfile
+validation. That only works if its key distinguishes two different graphs,
+and these tests pin exactly where the line falls -- a cache that fails to
+discriminate is silent, handing back another graph's artifacts.
 
-The trap is easy to miss. Probing this with ``lambda: a`` and ``lambda: b``
-suggests the key discriminates, but those two lambdas have *different code
-objects* because they name different variables. Two captured graphs go through
-one call site, so their generators share a code object and differ only in what
-they close over -- which is the case below, and the one that collides.
+Two captured graphs go through one call site, so their generators share a
+code object and differ only in what they close over. The key reads a
+closure's plain values (strings, numbers), but an object it closes over only
+by the module that defines it: two ``Fusion``s of different sequences
+collide. So IRON's generators take their identity as a ``CompileTime``
+argument, through ``compile_kwargs``.
 
 Device-free; nothing here compiles.
 """
@@ -24,23 +24,39 @@ import pytest
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 
+class _Graph:
+    def __init__(self, text: str):
+        self.text = text
+
+
 def _design(mlir_text, **kwargs):
     """A generator closing over its MLIR, as a captured graph would arrive."""
     return CompilableDesign(lambda: mlir_text, full_elf=True, **kwargs)
 
 
-def test_closure_value_alone_does_not_change_the_key():
-    """The hole L3.5 has to route around.
-
-    Both generators share a code object and differ only in the MLIR they close
-    over. The key is the same, so handing captured graphs to CompilableDesign
-    as bare closures would give the second one the first one's artifacts.
-    """
+def test_a_plain_closure_value_changes_the_key():
     a = _design("module { /* graph A */ }")
     b = _design("module { /* graph B */ }")
+    assert a._compute_cache_hash() != b._compute_cache_hash()
+
+
+def _graph_design(graph: _Graph, **kwargs):
+    """A generator closing over an object, as ``Fusion`` and ``OperatorDesign``
+    arrive.
+    """
+    return CompilableDesign(lambda: graph.text, full_elf=True, **kwargs)
+
+
+def test_an_object_closed_over_alone_does_not_change_the_key():
+    """The hole IRON's ``CompileTime`` key routes around: handing objects to
+    CompilableDesign as bare closures would give the second one the first
+    one's artifacts.
+    """
+    a = _graph_design(_Graph("module { /* graph A */ }"))
+    b = _graph_design(_Graph("module { /* graph B */ }"))
     assert a._compute_cache_hash() == b._compute_cache_hash(), (
-        "if this now fails, upstream started hashing closure contents and "
-        "IRON can stop working around it"
+        "if this now fails, upstream started hashing objects' state and "
+        "IRON's generators can drop their key"
     )
 
 

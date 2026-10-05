@@ -21,7 +21,6 @@ from pathlib import Path
 import aie.utils as aie_utils
 import pytest
 from aie.iron.device import from_name
-from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from aie.utils.trace import TraceConfig
 
 import iron
@@ -129,7 +128,7 @@ def test_a_traced_build_carries_the_lowered_module():
 
 def _add_key():
     design = OperatorDesign(ElementwiseAdd(size=1024, tile_size=128))
-    return CompilableDesign(design.generator, key=design.key)
+    return design.compilable()
 
 
 def test_the_compile_key_covers_the_library_a_design_calls():

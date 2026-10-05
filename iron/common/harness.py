@@ -17,7 +17,7 @@ from typing import Callable, NamedTuple
 import aie.utils as aie_utils
 import numpy as np
 from aie.utils.benchmark import run_iters
-from aie.utils.verify import Tolerance, compare
+from aie.utils.verify import Tolerance, Verdict, compare
 from ml_dtypes import bfloat16
 
 from .declare import Operator
@@ -88,24 +88,21 @@ def verify_buffer(
     reference: np.ndarray,
     tolerance: Tolerance,
     bound=None,
-) -> list[int]:
-    """The indices where ``output`` is outside ``tolerance`` of ``reference``.
+) -> Verdict:
+    """Judge ``output`` against ``reference`` with mlir-aie's ``compare``.
 
-    The judge is mlir-aie's ``aie.utils.verify.compare``, under the contract
-    of the kernel the operator runs or a ``Tolerance.relative``, say; the
-    indices are its verdict's ``mismatches``, and none when the verdict
-    passes. A shorter output than reference counts the missing elements as
-    errors. A bound tolerance's limit is ``bound``, evaluated on the inputs
-    as ``compare`` takes it, of the output's size or broadcast to its shape.
+    The tolerance is the contract of the kernel the operator runs or a
+    ``Tolerance.relative``, say. An output longer than the reference is
+    judged on its leading elements; a shorter one fails as a shape mismatch.
+    A bound tolerance's limit is ``bound``, evaluated on the inputs as
+    ``compare`` takes it, of the output's size or broadcast to its shape.
+
+    Returns:
+        The ``Verdict``: true when the output passes, otherwise carrying the
+        mismatch count, the first bad index and a ``detail`` line.
     """
     expected = np.asarray(reference).reshape(-1)
-    got = np.asarray(output).reshape(-1)
-    if len(got) < len(expected):
-        print(
-            f"Buffer size mismatch for {buf_name}: expected {len(expected)}, got {len(got)}"
-        )
-        return list(range(len(got), len(expected)))
-    got = got[: len(expected)]
+    got = np.asarray(output).reshape(-1)[: len(expected)]
 
     if tolerance.kind == "bound":
         if bound is None:
@@ -123,15 +120,9 @@ def verify_buffer(
             f"({verdict.n_mismatch / verdict.n_checked * 100:.2f}%) {within} allowed "
             f"rate of {allowed * 100:.2f}%"
         )
-    if verdict:
-        return []
-    print(f"{buf_name}: {verdict.detail}")
-    errors = verdict.mismatches.tolist()
-    for i in errors[:10]:
-        print(
-            f"Mismatch in {buf_name}[{i}]: expected {float(expected[i]):.6f}, got {float(got[i]):.6f}"
-        )
-    return errors
+    if not verdict:
+        print(f"{buf_name}: {verdict.detail}")
+    return verdict
 
 
 def _nbytes(buf) -> int:
@@ -148,7 +139,7 @@ def _nbytes(buf) -> int:
 class Run(NamedTuple):
     """What a device run of one operator came back with."""
 
-    errors: dict[str, list[int]]  # output name -> mismatched indices
+    errors: dict[str, Verdict]  # output name -> its failing verdict
     latency_us: float
     bandwidth_gbps: float
 
@@ -229,15 +220,11 @@ def run_test(
         if name not in produced:
             print(f"Warning: Output buffer {name} not found in operator arguments")
             continue
-        bad = verify_buffer(
-            produced[name].numpy(),
-            name,
-            expected,
-            tolerance,
-            bound=bound,
+        verdict = verify_buffer(
+            produced[name].numpy(), name, expected, tolerance, bound=bound
         )
-        if bad:
-            errors[name] = bad
+        if not verdict:
+            errors[name] = verdict
 
     # NPU-side bandwidth (excludes host DMA transfer time)
     bandwidth_gbps = total_bytes / (latency_us * 1e-6) / 1e9

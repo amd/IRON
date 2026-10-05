@@ -40,18 +40,18 @@ def test_vectors_takes_a_given_array_a_shape_or_a_centred_draw():
         vectors(op, z=given)
 
 
-def test_verify_buffer_returns_the_indices_outside_tolerance():
+def test_verify_buffer_returns_the_verdict_of_compare():
     ref = np.arange(8, dtype=np.float32)
-    assert verify_buffer(ref.copy(), "y", ref, RELATIVE) == []
+    assert verify_buffer(ref.copy(), "y", ref, RELATIVE)
     out = ref.copy()
     out[3] += 1.0
     out[5] += 0.001
-    assert verify_buffer(out, "y", ref, RELATIVE) == [3]
-    assert verify_buffer(out, "y", ref, Tolerance.exact()) == [3, 5]
-    assert verify_buffer(ref[:6].copy(), "y", ref, RELATIVE) == [
-        6,
-        7,
-    ]  # short: the rest
+    relative = verify_buffer(out, "y", ref, RELATIVE)
+    assert (relative.n_mismatch, relative.first_bad_index) == (1, 3)
+    exact = verify_buffer(out, "y", ref, Tolerance.exact())
+    assert (exact.n_mismatch, exact.first_bad_index) == (2, 3)
+    short = verify_buffer(ref[:6].copy(), "y", ref, RELATIVE)
+    assert not short and "shape mismatch" in short.detail
 
 
 def test_verify_buffer_judges_a_bound_tolerance_by_its_evaluated_limit():
@@ -63,6 +63,7 @@ def test_verify_buffer_judges_a_bound_tolerance_by_its_evaluated_limit():
 
     judge = Tolerance.bounded(eighth)
     limit = eighth(ref)  # 0.25 from x = 2 on
-    assert verify_buffer(out, "y", ref, judge, bound=limit) == [0, 1]
+    verdict = verify_buffer(out, "y", ref, judge, bound=limit)
+    assert (verdict.n_mismatch, verdict.first_bad_index) == (2, 0)
     with pytest.raises(ValueError, match="needs its bound="):
         verify_buffer(out, "y", ref, judge)

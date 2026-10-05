@@ -7,8 +7,8 @@
 of KV group ``g`` weighs that group's cached values by its attention
 probabilities. It replaces repeating the cache per head, transposing it,
 and a GEMV over the transpose, and computes the same bits as that GEMV:
-``linalg.mv_col_maj`` is the GEMV's kernel reading its matrix transposed,
-operation for operation.
+``linalg.mv(..., a_col_maj=True)`` is the GEMV's kernel reading its matrix
+transposed, operation for operation.
 """
 
 import dataclasses
@@ -176,8 +176,13 @@ class GQAContext(Operator):
         self._kernel()
 
     def _kernel(self):
-        return linalg.mv_col_maj(
-            self.head_dim, self.chunk, vec_size=_lanes(self.seq_len)
+        return linalg.mv(
+            self.head_dim,
+            self.chunk,
+            bfloat16,
+            bfloat16,
+            vec_size=_lanes(self.seq_len),
+            a_col_maj=True,
         )
 
     def array(self, target) -> list:

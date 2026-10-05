@@ -12,6 +12,8 @@ import hashlib
 from pathlib import Path
 
 import aie.utils as aie_utils
+from aie import ir
+from aie.iron import CompileTime
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from ..design import OperatorDesign
@@ -40,7 +42,9 @@ class FusedImage:
         Keyed on ``Fusion.identity``, so a hit generates nothing: the
         designs are fused, inside ``compile()``, only on a miss.
         """
-        dev = aie_utils.ensure_current_device(required=True)
+        dev = aie_utils.ensure_current_device()
+        if dev is None:
+            raise RuntimeError("dispatch='fused' links for a device; none is bound")
         if not full_elf(dev):
             raise RuntimeError(
                 f"dispatch='fused' needs a full ELF, which {dev.name} "
@@ -48,13 +52,31 @@ class FusedImage:
             )
         design = self.design
         if design is None:
-            self.fusion = Fusion(seq)
+            fusion = self.fusion = Fusion(seq)
             flags = [*self.FLAGS, *([self.TRACE_FLAG] if seq.traced else [])]
+
+            # The cache keys a generator by its code and its CompileTime
+            # arguments, not by what it closes over, so the identity is one.
+            def generator(key: CompileTime[str]) -> ir.Module:
+                return ir.Module.parse(fusion.text())
+
             design = CompilableDesign(
-                self.fusion.text,
-                key=self.fusion.identity,
+                generator,
+                compile_kwargs={"key": fusion.identity},
                 full_elf=True,
-                aiecc_flags=[*flags, *seq.extra_flags],
+                aiecc_flags=list(
+                    dict.fromkeys(
+                        [
+                            *flags,
+                            *seq.extra_flags,
+                            *(
+                                f
+                                for op in seq.unique_operators()
+                                for f in op.aiecc_flags
+                            ),
+                        ]
+                    )
+                ),
             )
             design.compile()
             self.design = design

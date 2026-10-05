@@ -36,7 +36,7 @@ def _read(net, handle):
     return buf.numpy().reshape(tuple(handle.shape))
 
 
-def _errors(net, step):
+def _verdict(net, step):
     """The step's output against its operator's reference on the inputs
     the device gave it.
     """
@@ -71,5 +71,5 @@ def test_swiglu(rows, embedding_dim, hidden_dim, npu_runtime, record_property):
     # reuse it; the product's inputs and the down projection's are intact.
     (product,) = [s for s in net.traced.steps if type(s.op) is ElementwiseMul]
     down = net.traced.steps[-1]
-    errors = {"product": _errors(net, product), "down": _errors(net, down)}
-    assert not any(errors.values()), errors
+    verdicts = {"product": _verdict(net, product), "down": _verdict(net, down)}
+    assert all(verdicts.values()), {k: v.detail for k, v in verdicts.items()}

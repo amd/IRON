@@ -225,6 +225,9 @@ class Operator(metaclass=_OperatorMeta):
     # build run it first: to issue it behind the first fills, or once per
     # slab of a dispatch.
     own_preamble: ClassVar[bool] = False
+    # aiecc options the operator's sequence needs to lower; a fused image
+    # lowers every operator's sequence under the union.
+    aiecc_flags: ClassVar[tuple[str, ...]] = ()
 
     # Hardware tracing of this operator's build (the workers array() gives
     # Worker(trace=), else its first), in a buffer of trace.trace_size bytes;
@@ -808,7 +811,11 @@ class Operator(metaclass=_OperatorMeta):
         content. The label describes what is built, so it comes from the
         resolved operator.
         """
-        dev = aie_utils.ensure_current_device(required=True)
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable(
+                f"{type(self).__name__}: the label names the device; none is bound"
+            )
         op = self.resolved(dev)
         own = []
         for f in dataclasses.fields(op):

@@ -6,12 +6,12 @@ import math
 from typing import Any, ClassVar
 
 import aie.dialects.index as index
-import aie.utils as aie_utils
 import numpy as np
 from aie.dialects.aie import AIEArch, T
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ObjectFifo, Worker, ceildiv
 from aie.iron.controlflow import range_
+from aie.iron.device import Device
 from aie.iron.kernels import activation, linalg
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
@@ -28,11 +28,11 @@ from iron.common import (
     optional,
     param,
 )
-from iron.common.design import Target
+from iron.common.design import BdLimits, Target
 from iron.common.testing import Case, Testing
 
 
-def _cases(cls):
+def _cases(cls, dev: Device):
     # M, K, columns, tile_size_input, tile_size_output
     plain = [
         (128, 128, 1, 32, 128),
@@ -69,7 +69,7 @@ def _cases(cls):
 
     # Benched: the large matrices across the whole device, which run well
     # past the dispatch cost.
-    widest = aie_utils.ensure_current_device(required=True).cols
+    widest = dev.cols
 
     def bench(M, K, cols, *_):
         return cols == widest and M * K >= 2048 * 8192
@@ -411,7 +411,7 @@ class GEMV(Operator):
         """
         M, K, rep, nm = self.M, self.K, self.repeat, self.num_matrices
         rows = M // self.num_aie_columns
-        shim = aie_utils.ensure_current_device(required=True).bd_limits(0, 0)
+        shim = BdLimits.of(self.dev, 0, 0)
         # (buffer, offset, run, (pass stride, matrix stride), batch stride):
         # A's rows come from the batch's matrix, re-read each pass (stride
         # 0); B's and C's go to the batch itself.

@@ -65,7 +65,10 @@ class RMSNorm(Rowwise):
             )
 
     def kernel(self):
-        return norm.rms_norm_eps(self.tile_size, epsilon=self.epsilon)
+        return norm.rms_norm_eps(self.tile_size)
+
+    def scalars(self) -> tuple:
+        return (self.epsilon,)
 
     def reference(self, x, weight=None):
         """The kernels' references in turn: the normalized row rounded to
@@ -139,7 +142,7 @@ class RMSNorm(Rowwise):
             for _ in range_(n):
                 elem_in = of_in.acquire(1)
                 elem_out = of_out.acquire(1)
-                rms(elem_in, elem_out)
+                rms(elem_in, elem_out, self.tile_size, self.epsilon)
                 of_in.release(1)
                 of_out.release(1)
 
@@ -150,7 +153,7 @@ class RMSNorm(Rowwise):
             for _ in range_(n):
                 elem_in = of_in.acquire(1)
                 elem_out = of_out.acquire(1)
-                mul(elem_in, elem_w, elem_out)
+                mul(elem_in, elem_w, elem_out, self.tile_size)
                 of_in.release(1)
                 of_out.release(1)
             of_w.release(1)

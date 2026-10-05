@@ -53,7 +53,7 @@ def test_an_operator_written_by_inheritance_inherits_the_sweep():
             return -x
 
     assert Neg.test is not None
-    cases = Neg.test.resolve(Neg)
+    cases = Neg.test.resolve(Neg, NPU2)
     assert all(c.kwargs["tile_size"] <= Neg.tile_cap for c in cases)
 
 

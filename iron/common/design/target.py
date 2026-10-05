@@ -49,15 +49,15 @@ class Target:
         return b
 
     def register(self, obj):
-        """An explicit ``Flow``, ``Lock``, ``TileDma`` or ``Buffer`` the
-        runtime must know of; returns it.
+        """An explicit ``Flow``, ``Lock`` or ``TileDma`` the runtime must
+        know of; returns it.
 
-        A fifo reaches the program through its handles and a buffer through
-        the worker that takes it. These reach it through neither: a flow
-        only the sequence transfers on, a lock only DMA descriptors and the
-        sequence touch, a buffer only the sequence's DMA chains address. The
-        build hands each to the Runtime (``add_flow``, ``add_lock``,
-        ``add_tile_dma``, ``add_buffer``) before the program resolves.
+        A fifo reaches the program through its handles, a buffer through the
+        worker or the DMA task that takes it. These reach it through neither:
+        a flow only the sequence transfers on, a lock only DMA descriptors
+        and the sequence touch. The build hands each to the Runtime
+        (``add_flow``, ``add_lock``, ``add_tile_dma``) before the program
+        resolves.
         """
         self.registered.append(obj)
         return obj

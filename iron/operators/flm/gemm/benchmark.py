@@ -61,7 +61,12 @@ from iron.operators.flm import Shipped
 # run. See the note in the module docstring.
 pytestmark = pytest.mark.extensive
 
-_dev = aie_utils.ensure_current_device(required=True)
+_dev = aie_utils.ensure_current_device()
+if _dev is None:
+    pytest.skip(
+        "the benchmark measures on the bound device; none is bound",
+        allow_module_level=True,
+    )
 # The shipped overlay is a fixed 8-column NPU2 binary. Where that does not
 # match the device, drop that one candidate rather than skipping the module,
 # since flm vs iron.operators.GEMM is measurable on every supported device.

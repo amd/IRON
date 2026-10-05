@@ -440,10 +440,9 @@ Constraints, all enforced in op.py:
 * **NPU1 fits exactly**: bf16 B at `tile_n=64` leaves room for 5 slots, which
   fill the memtile to the byte. Lowered and placed, but not run on hardware.
 
-This needs mlir-aie's `tile_dma_chain`, `Task.start(repeat_count=...)`,
-`Lock.set`, repeat counts past one push, and compiler-side BD reclaim, all
-on mlir-aie's iron-next branch. Every hardware limit the design uses comes
-from the target model.
+This needs mlir-aie's tile DMA chains, `Task.start(repeat_count=...)`,
+`Lock.set`, repeat counts past one push, and compiler-side BD reclaim. Every
+hardware limit the design uses comes from the target model.
 
 Measured on NPU2 (Strix, power mode `turbo`) against the fifo version over
 the 30 benchmark shapes, 8 interleaved rounds, errors bit-identical on all:

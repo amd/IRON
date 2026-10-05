@@ -85,16 +85,17 @@ class Artifacts:
     @property
     def parameter_table(self) -> list[Parameter]:
         """The scratchpad words the image declares: those its designs read,
-        which the parameter table lists after its count, in its order.
+        which the parameter table lists after its count, in its order. Each
+        row's range, and the joint bounds after the rows, are what
+        ``ParameterScratchpad`` checks a write against.
         """
         if self.params is None:
             return []
-        _, *rows = self.params.read_text().splitlines()
+        count, *rows = self.params.read_text().splitlines()
         table = []
-        for row in rows:
-            if row.strip():
-                name, index, dtype, kind = row.split()
-                table.append(Parameter(name, int(index), dtype, kind))
+        for row in rows[: int(count)]:
+            name, index, dtype, kind, _, _ = row.split()
+            table.append(Parameter(name, int(index), dtype, kind))
         return table
 
     @property

@@ -25,17 +25,15 @@ from .allocator import ALIGNMENT, ArenaPlan, Pool
 if TYPE_CHECKING:
     import pyxrt
     from aie.utils.hostruntime.xrtruntime.hostruntime import XRTKernelHandle
-    from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
-        ParameterScratchpad,
-    )
     from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+
+    from .xrt import Scratchpad, loaded
 else:
     try:
         import pyxrt
-        from aie.utils.hostruntime.xrtruntime.parameter_scratchpad import (
-            ParameterScratchpad,
-        )
         from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
+
+        from .xrt import Scratchpad, loaded
     except ImportError:
         # Host stacks without XRT (e.g. the HRX/amdxdna runtime). The on-device
         # callables here take XRTTensor views, so they cannot run there;
@@ -226,10 +224,16 @@ class FullELFRun:
             self.bind(index, tensor.buffer_object())
         self._feedback_arg = feedback_arg
         self._params_path = params_path
-        self._params: ParameterScratchpad | None = None
+        self._params: Scratchpad | None = None
 
-    def bind(self, index: int, bo: pyxrt.bo) -> None:
-        """Run with ``bo`` as argument ``index``."""
+    def bind(self, index: int, bo: pyxrt.bo | None) -> None:
+        """Run with ``bo`` as argument ``index``.
+
+        Raises:
+            ValueError: ``bo`` is None, as a released tensor's is.
+        """
+        if bo is None:
+            raise ValueError(f"{self.name}: argument {index} has no buffer object")
         self.handle.set_arg(index, bo)
 
     def bind_feedback(self, bo: pyxrt.bo) -> None:
@@ -241,7 +245,7 @@ class FullELFRun:
         self.bind(self._feedback_arg, bo)
 
     @property
-    def params(self) -> ParameterScratchpad | None:
+    def params(self) -> Scratchpad | None:
         """The run's parameter scratchpad, made on first use.
 
         The ``params.txt`` describing the runtime parameters is requested
@@ -257,7 +261,7 @@ class FullELFRun:
             return None
         if self._params_path.read_text().split("\n", 1)[0].strip() == "0":
             return None
-        self._params = ParameterScratchpad(self.handle, self._params_path)
+        self._params = Scratchpad(self.handle, self._params_path)
         return self._params
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
@@ -284,16 +288,16 @@ class FullELFRun:
 
     def scratchpad_alias(self) -> pyxrt.bo:
         """A buffer object over this run's ctrl scratchpad, for another run to
-        drain its feedback into (``ParameterScratchpad.alias``). The host
+        drain its feedback into (``Scratchpad.alias``). The host
         must not write this run's values while a device writes them.
         """
         params = self.params
         if params is None:
             raise ValueError(f"{self.name} has no per-call values to feed back into")
-        return params.alias(aie_utils.DefaultNPURuntime.xrt_device)
+        return params.alias()
 
     def start(self) -> None:
-        if not self._handle.is_loaded:
+        if not loaded(self._handle):
             raise RuntimeError(
                 f"{self.name}: the runtime evicted the image this run was made on"
             )
@@ -365,7 +369,7 @@ class SequenceFullELFCallable(SequenceCallable):
         """The ELF loaded in the shared runtime; loaded again if the runtime
         has evicted it since, which ends every run made on it.
         """
-        if self._handle is None or not self._handle.is_loaded:
+        if self._handle is None or not loaded(self._handle):
             self._handle = aie_utils.DefaultNPURuntime.load(self.kernel)
             self._run = None
             self._runs = []
@@ -373,17 +377,17 @@ class SequenceFullELFCallable(SequenceCallable):
 
     @property
     def run(self) -> FullELFRun:
-        """The run a call dispatches: the handle's own, so what is written to
-        its scratchpad stays there from call to call.
+        """The run a call dispatches: one for the image's life, so what is
+        written to its scratchpad stays there from call to call.
         """
         handle = self.handle
         if self._run is None:
-            self._run = self._make_run(handle.run)
+            self._run = self._make_run(pyxrt.run(handle.kernel))
         return self._run
 
     def new_run(self) -> FullELFRun:
         """Another run of this image, bound to this callable's buffers."""
-        return self._make_run(self.handle.new_run())
+        return self._make_run(pyxrt.run(self.handle.kernel))
 
     def _make_run(self, run: pyxrt.run) -> FullELFRun:
         arguments = {
@@ -405,7 +409,7 @@ class SequenceFullELFCallable(SequenceCallable):
         return made
 
     @property
-    def params(self) -> ParameterScratchpad | None:
+    def params(self) -> Scratchpad | None:
         """``run``'s per-call values (``FullELFRun.params``)."""
         return self.run.params
 
@@ -580,8 +584,12 @@ class SequenceXclbinCallable(SequenceCallable):
         super()._allocate_buffers()
         chain = self.op._image
         self._op_callable_map = {  # id(op) -> NPUKernel
-            op_id: design.npu_kernel(
-                xclbin_path=chain.image, kernel_name=chain.labels[op_id]
+            op_id: NPUKernel(
+                chain.image,
+                design.get_cache_entry().insts,
+                kernel_name=chain.labels[op_id],
+                dispatch_params=design.dispatch_params,
+                dispatch_lib_path=design.get_dispatch_lib_path(),
             )
             for op_id, design in chain.designs.items()
         }

@@ -5,7 +5,6 @@ import dataclasses
 from dataclasses import field
 from typing import Any
 
-import aie.utils as aie_utils
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import ObjectFifo
@@ -22,6 +21,7 @@ from iron.common import (
     optional,
     param,
 )
+from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
 
@@ -80,7 +80,7 @@ class Repeat(Operator):
 
     def resolve(self, dev):
         # A row is one run over the descriptor's two innermost dimensions.
-        shim = dev.bd_limits(0, 0)
+        shim = BdLimits.of(dev, 0, 0)
         row, gran = self.seq * self.cols, shim.granule(self.dtype)
         if shim.factor(row, gran) is None:
             raise Unresolvable(
@@ -105,7 +105,7 @@ class Repeat(Operator):
         them), or the stack's, ``(repeat, seq, rows, cols)``.
         """
         rows, seq, cols, repeat = self.rows, self.seq, self.cols, self.repeat
-        shim = aie_utils.ensure_current_device(required=True).bd_limits(0, 0)
+        shim = BdLimits.of(self.dev, 0, 0)
         row, gran = seq * cols, shim.granule(self.dtype)
         bound = self.bound_extents
         if "valid_seq" in bound:

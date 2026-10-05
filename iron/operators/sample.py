@@ -28,7 +28,6 @@ tokens, token = Sample(logits, draws, tokens, row=position * 4, at=position)
 
 import dataclasses
 
-import aie.utils as aie_utils
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ObjectFifo, Worker
@@ -38,6 +37,7 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import In, Incompatible, InOut, Operator, Out, Scratchpad, auto, param
+from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
 # A select core's logits object: no more than this, and even (4-byte DMA).
@@ -141,15 +141,9 @@ class Sample(Operator):
 
     def compatible(self) -> None:
         # The factories' own checks: chunk divides the slice, k_max fits.
-        # Not the factories: those declare their kernels, and a kernel
-        # declared outside a build stays registered past it.
         try:
-            kernels.check_select(
-                slice_size=self.slice_size, chunk=self.chunk, k_max=self.k_max
-            )
-            kernels.check_combine(
-                columns=self.cores, slice_size=self.slice_size, k_max=self.k_max
-            )
+            self._select()
+            self._combine()
         except ValueError as e:
             raise Incompatible(str(e)) from e
 
@@ -250,7 +244,7 @@ class Sample(Operator):
         """
         run, streams = self.slice_size, self.select_streams
         offset = core * run
-        shim = aie_utils.ensure_current_device(required=True).bd_limits(0, 0)
+        shim = BdLimits.of(self.dev, 0, 0)
         halves = shim.factor(run, shim.granule(bfloat16))
         if halves is not None:
             hi, lo = halves

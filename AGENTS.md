@@ -33,16 +33,10 @@ source ironenv/bin/activate
 # 4. Install dependencies
 python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
-
-# 5. Use a source build of mlir-aie's iron-next branch (no wheel exists)
-export PYTHONPATH=/path/to/mlir-aie/build/python:$PYTHONPATH
-export PATH=/path/to/mlir-aie/build/bin:$PATH
-export MLIR_AIE_KERNEL_SOURCES=/path/to/mlir-aie
-export PEANO_INSTALL_DIR=$VIRTUAL_ENV/lib/python3.12/site-packages/llvm-aie
 ```
 
-**Note:** This branch tracks mlir-aie's `iron-next` branch, not a released
-wheel. Its kernel paths follow that branch's family layout of `aie_kernels/`.
+**Note:** `requirements.txt` pins an mlir-aie nightly wheel, which brings the
+kernel library (`aie_kernels/`) and finds the Peano wheel by itself.
 
 **Note:** XRT must be sourced before running any tests or operators.
 
@@ -547,9 +541,9 @@ code before relying on a line here; it is the authority.
   through reshape and transpose; under a bound a buffer is split
   round-robin by tile. GEMM bounds its compute, not its DMA; MHA's K and
   V move only the blocks up to the bound, so attention over a cache costs
-  the context, not the cache. A per-call size needs mlir-aie's size-kind
-  scratchpad parameter, `fill/drain(size_parameters=)`, on its iron-next
-  branch.
+  the context, not the cache. A per-call size is mlir-aie's runtime
+  transfer length, `fill/drain(length_parameter=, length_unit=)`: whole
+  16-byte units, so a bounded tile is at least 16 bytes.
 - **One compile, any context.** A decoder is two versions, a decode step
   and a `prefill_chunk`-row prompt chunk, both compiled once; `max_seq_len`
   sizes the caches and the RoPE table alone. A prompt runs chunk by chunk

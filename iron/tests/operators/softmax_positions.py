@@ -44,10 +44,7 @@ def test_rows_are_masked_to_the_per_call_length(npu_runtime):
         got = np.asarray(net(x, n=n)).reshape(HEADS, SEQ)
         tail = got[:, n:].view(np.uint16)
         assert not tail.any(), f"n={n}: {np.count_nonzero(tail)} tail elements not +0"
-        errors = verify_buffer(
-            got,
-            "y",
-            reference.reference(x, n),
-            tolerance=reference.tolerance(),
-        )
-        assert not errors, f"n={n}: {len(errors)} mismatches"
+        tolerance = reference.tolerance()
+        assert tolerance is not None
+        verdict = verify_buffer(got, "y", reference.reference(x, n), tolerance)
+        assert verdict, f"n={n}: {verdict.detail}"

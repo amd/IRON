@@ -360,7 +360,7 @@ def test_an_exported_design_replaces_the_derived_one():
 
     op = Exported(n=64)
     assert [b.shape for b in op.buffers] == [(64,), (64,)]
-    assert OperatorDesign(op).generator() == "module {}"
+    assert OperatorDesign(op).build() == "module {}"
     assert op.configuration() is op
 
 

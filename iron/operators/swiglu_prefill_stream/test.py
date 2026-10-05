@@ -82,7 +82,7 @@ def test_swiglu_prefill_stream(k, npu_runtime, trace, record_property):
     if trace is not None:
         dump_traces(run, trace.trace_file)
     output = run.get_buffer(OUTPUT).to_torch().reshape((SEQ_LEN, EMBEDDING_DIM))
-    errors = verify_buffer(
+    verdict = verify_buffer(
         output,
         OUTPUT,
         golden_ref[
@@ -90,7 +90,7 @@ def test_swiglu_prefill_stream(k, npu_runtime, trace, record_property):
         ],  # pyright: ignore[reportArgumentType]  # a bf16 torch tensor
         Tolerance.relative(0.08, 0.7, max_mismatch_frac=0.25),
     )
-    assert not errors, f"Test failed with errors: {errors}"
+    assert verdict, verdict.detail
 
     # The first dispatch on a callable pays for its hardware context, so time the
     # ones after it.

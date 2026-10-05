@@ -15,10 +15,10 @@ for the halves, so with those weights it must be the halves
 
 import dataclasses
 
-import aie.utils as aie_utils
 import numpy as np
 from aie.iron import Buffer, ObjectFifo, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
+from aie.iron.device import Device
 from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
@@ -36,13 +36,9 @@ from iron.common import (
 from iron.common.testing import Case, Testing
 
 
-def _cases(cls):
+def _cases(cls, dev: Device):
     out = []
-    for cols in [
-        c
-        for c in (1, 2, 4, 8)
-        if c <= aie_utils.ensure_current_device(required=True).cols
-    ]:
+    for cols in [c for c in (1, 2, 4, 8) if c <= dev.cols]:
         for rows in (32, 64):
             for angle_rows in (8, 16, 32):
                 for width in (128, 512):
@@ -199,7 +195,7 @@ class RoPE(Operator):
                 for _ in range_(rows_per_lut):
                     elem_in = of_in.acquire(1)
                     elem_out = of_out.acquire(1)
-                    rope_kernel(elem_in, elem_lut, elem_out)
+                    rope_kernel(elem_in, elem_lut, elem_out, self.cols)
                     of_in.release(1)
                     of_out.release(1)
                 of_lut.release(1)

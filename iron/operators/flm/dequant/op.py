@@ -3,7 +3,6 @@
 
 import dataclasses
 
-import aie.utils as aie_utils
 import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
@@ -203,7 +202,11 @@ class DequantBFP(Operator):
     @property
     def config_name(self) -> str:
         """Stem of the artifacts that do not depend on the shape: the xclbin's."""
-        dev = aie_utils.ensure_current_device(required=True)
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable(
+                "FLM dequant: the xclbin is named for a device; none is bound"
+            )
         t = self if self._resolved else self.resolved(dev)
         return f"FLM_DequantBFP_tn{t.tile_n}_c{t.cols}_{dev.name}"
 

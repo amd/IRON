@@ -126,7 +126,9 @@ def test_feedback_into_plain_buffers(npu_runtime):
     mine = XRTTensor((2,), dtype=np.int32)
     mine.numpy_view()[:] = -1
     mine.to("npu")
-    run.run.bind_feedback(mine.buffer_object())
+    bo = mine.buffer_object()
+    assert bo is not None
+    run.run.bind_feedback(bo)
     run.write_values({offset: np.int32(6 * ROW)})
     run()
     assert np.array_equal(_row(run), table[6])
@@ -203,7 +205,7 @@ def test_feedback_with_trace(npu_runtime):
     run = _setup(seq, table)
     offset = device_symbol(gather, gather.values[0])
     layout = get_trace_buffer(run.lowered_mlir_path.read_text(), "main:sequence")
-    assert layout["arg_index"] == 4, layout
+    assert layout is not None and layout["arg_index"] == 4, layout
 
     x = np.random.default_rng(0).standard_normal(LN_SIZE).astype(bfloat16)
     run.get_buffer("x").numpy_view()[:] = x

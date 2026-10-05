@@ -22,7 +22,8 @@ from iron.common import Operator, Unresolvable
 from iron.common.harness import run_test, vectors
 from iron.common.testing import Case, Testing
 
-if aie_utils.get_current_device() is None:
+DEVICE = aie_utils.get_current_device()
+if DEVICE is None:
     # Every case is sized from the device's width, so there is nothing to
     # parametrize over without one.
     pytest.skip(
@@ -43,7 +44,7 @@ def _declared():
         declaration = cls.test
         if declaration is None:
             continue
-        for case in declaration.resolve(cls):
+        for case in declaration.resolve(cls, DEVICE):
             params.append(
                 pytest.param(
                     cls,
@@ -64,7 +65,7 @@ def test_operator(
     cls: type[Operator], declaration: Testing, case: Case, npu_runtime, record_property
 ):
     try:
-        op = cls(**case.kwargs).resolved(aie_utils.ensure_current_device(required=True))
+        op = cls(**case.kwargs).resolved(DEVICE)
     except Unresolvable as e:  # more columns than this device has, say
         pytest.skip(str(e))
     draw = declaration.draw
@@ -78,4 +79,5 @@ def test_operator(
     run = run_test(
         op, vectors(op, **extra), tolerance=tolerance, record=record_property
     )
-    assert not run.errors, f"{cls.__name__}({case.label}) failed: {run.errors}"
+    failed = {name: verdict.detail for name, verdict in run.errors.items()}
+    assert not failed, f"{cls.__name__}({case.label}) failed: {failed}"

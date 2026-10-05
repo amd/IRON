@@ -88,11 +88,7 @@ def _take_views(cls, operands, kwargs, values):
         if i < len(accept):
             param, offset_member = accept[i]
             # A scalar (one element indexed out of a vector) is one element.
-            tap = (
-                TensorAccessPattern.from_slice(h.shape or (1,), ())
-                if h.tap is None
-                else h.tap
-            )
+            tap = TensorAccessPattern.full(h.shape or (1,)) if h.tap is None else h.tap
             kwargs.setdefault(param, tap)
             if h.bounds:
                 # A bound on one axis of the view: the pattern keeps that

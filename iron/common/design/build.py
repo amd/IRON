@@ -15,7 +15,7 @@ from typing import Any
 import aie
 import aie.utils as aie_utils
 from aie.iron import (
-    Buffer,
+    CompileTime,
     DispatchTime,
     Flow,
     Lock,
@@ -143,12 +143,10 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
             rt.add_lock(obj)
         elif isinstance(obj, TileDma):
             rt.add_tile_dma(obj)
-        elif isinstance(obj, Buffer):
-            rt.add_buffer(obj)
         else:
             raise TypeError(
-                f"target.register takes a Flow, PacketFlow, Lock, TileDma or "
-                f"Buffer, got {obj!r}"
+                f"target.register takes a Flow, PacketFlow, Lock or TileDma, "
+                f"got {obj!r}"
             )
     prog = Program(op.device(target), rt, workers=workers)
     if op.trace is not None:
@@ -168,16 +166,17 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
 class OperatorDesign:
     """One operator's design as ``CompilableDesign`` compiles it.
 
-    The generator is ``build_design`` bound to the operator, or the
-    design another tool exports for it (``Operator.exported_design``).
-    It runs inside ``compile()``, so the kernels it declares are the ones
-    built; on an xclbin its per-call values are its ``DispatchTime``
-    parameters, so the two images are two modules and two cache keys.
+    ``build`` is ``build_design`` bound to the operator, or the design
+    another tool exports for it (``Operator.exported_design``). It runs
+    inside ``compile()``, so the kernels it declares are the ones built; on
+    an xclbin its per-call values are its ``DispatchTime`` parameters, so the
+    two images are two modules and two cache keys.
 
     The cache key is what the module is a function of, which the generator's
     code alone does not spell: the operator's design key, the image, and the
     source that generates the text (the operator's modules, IRON's common
-    tree, mlir-aie's Python frontend and bindings).
+    tree, mlir-aie's Python frontend and bindings). The generator takes it
+    as its ``CompileTime`` ``key``.
     """
 
     _AIE = Path(inspect.getfile(aie)).resolve().parent
@@ -190,11 +189,11 @@ class OperatorDesign:
     def __init__(self, op: Operator, image: str = "elf"):
         self.op = op
         self.image = image
-        generator = op.exported_design(image)
-        if generator is None:
-            generator = functools.partial(build_design, op=op, image=image)
-            P = inspect.Parameter
-            dispatch = [
+        P = inspect.Parameter
+        build = op.exported_design(image)
+        if build is None:
+            build = functools.partial(build_design, op=op, image=image)
+            params = [
                 P(
                     device_symbol(op, v),
                     P.KEYWORD_ONLY,
@@ -203,7 +202,17 @@ class OperatorDesign:
                 for v in op.values
                 if image != "elf"
             ]
-            setattr(generator, "__signature__", inspect.Signature(dispatch))
+        else:
+            params = list(inspect.signature(build).parameters.values())
+        self.build = build
+
+        # The cache keys a generator by its code and its CompileTime
+        # arguments, not by what it closes over, so the key is one.
+        def generator(key: CompileTime[str], **kwargs):
+            return build(**kwargs)
+
+        key = P("key", P.KEYWORD_ONLY, annotation=CompileTime[str])
+        setattr(generator, "__signature__", inspect.Signature([*params, key]))
         self.generator = generator
 
     @functools.cached_property
@@ -230,8 +239,8 @@ class OperatorDesign:
         """The modules the design is defined in: the generator's and every
         class the operator's is built from.
         """
-        generator = self.generator
-        function = getattr(generator, "func", generator)
+        build = self.build
+        function = build.func if isinstance(build, functools.partial) else build
         files = set()
         for obj in (function, *type(self.op).__mro__):
             try:
@@ -244,14 +253,27 @@ class OperatorDesign:
     def key(self) -> str:
         return f"{self.identity}:{self.source_digest(tuple(self.sources))}"
 
+    def compilable(self, **options) -> CompilableDesign:
+        """The design for ``CompilableDesign``, keyed by ``key``; ``options``
+        are its own (``aiecc_flags``, ``insts_only``, ...); the operator's
+        ``aiecc_flags`` are added to theirs.
+        """
+        flags = [*options.pop("aiecc_flags", ()), *self.op.aiecc_flags]
+        return CompilableDesign(
+            self.generator,
+            compile_kwargs={"key": self.key},
+            aiecc_flags=flags,
+            **options,
+        )
+
     def compile(self, **options) -> CompilableDesign:
-        """Compile (or find in the cache) the design; ``options`` are
-        ``CompilableDesign``'s (``aiecc_flags``, ``insts_only``, ...).
+        """Compile (or find in the cache) the design; ``options`` as for
+        ``compilable``.
         """
         # The key reads the current device, which compile() binds from inside;
         # binding first makes a key computed before and after agree.
         aie_utils.ensure_current_device()
-        design = CompilableDesign(self.generator, key=self.key, **options)
+        design = self.compilable(**options)
         design.compile()
         return design
 

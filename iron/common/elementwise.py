@@ -37,11 +37,12 @@ class ReLU(UnaryElementwise):
 Kernels come from ``aie.iron.kernels``: its factories return the
 ``ExternalFunction`` for a symbol, its source and its argument types, handle
 aie2's LUT tables, and carry the contract the operator is tested by: the
-reference and the tolerance. A core calls the kernel with its acquired
-elements alone; the factory binds every scalar (the line length, and
-leaky_relu's alpha or axpy's factor when given), so the operator and the
-kernel agree by construction. A field passed to the factory is declared
-``param(..., array=True)``, since the array bakes it in.
+reference and the tolerance. A core calls the kernel in its contract's
+argument order: the acquired elements, the scalars the factory binds (the
+line length) and the free ones ``scalars()`` supplies (leaky_relu's alpha,
+axpy's factor), so the operator and the kernel agree by construction. A
+field the kernel or its scalars read is declared ``param(..., array=True)``,
+since the array bakes it in.
 """
 
 from __future__ import annotations
@@ -53,6 +54,7 @@ import numpy as np
 from aie.iron import Buffer, ObjectFifo, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.kernel import ExternalFunction
+from aie.iron.kernels import Param
 from aie.utils.verify import Tolerance
 
 from .declare import (
@@ -155,11 +157,56 @@ class Elementwise(Operator):
         """The ``ExternalFunction`` each core calls, over one line.
 
         Usually a factory from ``aie.iron.kernels`` at ``self.tile_size``;
-        an ``ExternalFunction(..., digest_prefix=True)`` declares one upstream
-        does not offer. Either way the kernel takes the elements alone: its
-        contract binds the rest.
+        an ``ExternalFunction`` with a ``KernelContract`` declares one
+        upstream does not offer.
         """
         raise NotImplementedError(f"{type(self).__name__} declares no kernel()")
+
+    def scalars(self) -> tuple:
+        """The values of the kernel's free scalar ``Param`` arguments, those its
+        contract leaves unbound, in argument order.
+        """
+        return ()
+
+    def _arguments(
+        self, kernel: ExternalFunction, n_in: int, n_out: int
+    ) -> tuple[list[int], dict]:
+        """Where each tile goes in a call, and the scalar arguments.
+
+        Args:
+            kernel: The kernel called.
+            n_in: The input tiles a call is given.
+            n_out: The output tiles a call is given.
+
+        Returns:
+            The argument positions of the inputs then the outputs, in the
+            order a core acquires them, and the scalar values by position.
+        """
+        contract = kernel.contract
+        if contract is None:
+            return list(range(n_in + n_out)), {}
+        if contract.accumulates:
+            raise ValueError(
+                f"{type(self).__name__}: an elementwise kernel writes its output; "
+                f"{kernel.name} accumulates into one"
+            )
+        roles = contract.roles
+        scalars = dict(contract.parameter_bindings)
+        free = [i for i, r in enumerate(roles) if r is Param and i not in scalars]
+        if len(free) != len(self.scalars()):
+            raise ValueError(
+                f"{type(self).__name__}: {kernel.name} leaves {len(free)} scalar(s) "
+                f"unbound; scalars() gives {len(self.scalars())}"
+            )
+        scalars.update(zip(free, self.scalars()))
+        outs = list(contract.out_indices)
+        ins = [i for i in range(len(roles)) if i not in scalars and i not in outs]
+        if (len(ins), len(outs)) != (n_in, n_out):
+            raise ValueError(
+                f"{type(self).__name__}: {kernel.name} takes {len(ins)} input and "
+                f"{len(outs)} output tile(s); it is given {n_in} and {n_out}"
+            )
+        return ins + outs, scalars
 
     def tolerance(self) -> Tolerance | None:
         """The contract of the one kernel every core runs; ``None`` for a
@@ -186,9 +233,16 @@ class Elementwise(Operator):
                 f"define reference()"
             )
         (out,) = op.outputs
+        _, scalars = op._arguments(op.kernel(), len(inputs), 1)
         # Views of the operands as the kernel's (calls, n) lines, never copies;
         # the one pass over the data is the cast, the store's bf16 rounding.
-        y = contract.reference(*(x.reshape(op.lines, -1, copy=False) for x in inputs))
+        lines = iter(x.reshape(op.lines, -1, copy=False) for x in inputs)
+        y = contract.reference(
+            *(
+                scalars[i] if i in scalars else next(lines)
+                for i in contract.reference_indices()
+            )
+        )
         y = np.asarray(y).astype(out.host_dtype, copy=False)
         return y.reshape(out.host_shape, copy=False)
 
@@ -201,6 +255,9 @@ class Elementwise(Operator):
         n_in = len(ins)
         cores = self.cores
         kernel = self.kernel()
+        positions, scalars = self._arguments(kernel, n_in, len(outs))
+        order = {i: k for k, i in enumerate(positions)}
+        n_args = len(positions) + len(scalars)
 
         def slot(k: int) -> str:
             col, chan = divmod(k, self.num_channels)
@@ -240,7 +297,12 @@ class Elementwise(Operator):
             n = count.read() if dynamic else count[0]
             for _ in range_(n):
                 elements = [f.acquire(1) for f in fifos_in + fifos_out]
-                kernel_fn(*elements)
+                kernel_fn(
+                    *(
+                        elements[order[i]] if i in order else scalars[i]
+                        for i in range(n_args)
+                    )
+                )
                 for f in fifos_in + fifos_out:
                     f.release(1)
 

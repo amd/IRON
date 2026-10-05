@@ -149,7 +149,7 @@ class ExternalSequence(Transfers):
         for col, row in core_tiles:
             for res in residents:
                 if res.lock is not None:
-                    aiex.set_lock(self._locks[(col, row, res.lock)], 1)
+                    aiex.set_lock_value(self._locks[(col, row, res.lock)], 1)
 
     # -- transfers ---------------------------------------------------------
 

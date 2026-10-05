@@ -160,7 +160,7 @@ def test_adversarial_logits_draw_the_reference_token(npu_runtime, kwargs):
     tokens = iron.state((steps,), np.int32, name="tokens")
     # The design the graph builds, for the shapes the patterns aim at.
     sample = Sample(**kwargs, k_max=K_MAX, steps=steps).resolved(
-        aie_utils.ensure_current_device(required=True)
+        aie_utils.ensure_current_device()
     )
     vocab, slice_size, chunk = sample.vocab, sample.slice_size, sample.chunk
 

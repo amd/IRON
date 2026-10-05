@@ -4,12 +4,11 @@
 
 import dataclasses
 
-import aie.utils as aie_utils
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ObjectFifo, Worker
 from aie.iron.controlflow import range_
-from aie.iron.dataflow.objectfifo import StreamDims
+from aie.iron.device import Device
 from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
@@ -27,14 +26,12 @@ from iron.common import (
 from iron.common.testing import Case, Testing
 
 
-def _cases(cls):
+def _cases(cls, dev: Device):
     m = n = 64
     out = []
     for M in (64, 2048):
         for N in (64, 128, 256, 512):
-            for cols in range(
-                1, aie_utils.ensure_current_device(required=True).cols + 1
-            ):
+            for cols in range(1, dev.cols + 1):
                 for channels in (1, 2):
                     if (M // channels) % m or (N // cols) % n:
                         continue
@@ -80,7 +77,7 @@ def _cases(cls):
             dict(
                 M=8192,
                 N=512,
-                num_aie_columns=aie_utils.ensure_current_device(required=True).cols,
+                num_aie_columns=dev.cols,
                 num_channels=2,
                 m=m,
                 n=n,
@@ -202,8 +199,9 @@ class Transpose(Operator):
         n_cores = cols * chans
         tile_ty = np.ndarray[(m * n,), np.dtype[bfloat16]]
         depth = target.fifo_depth(m * n, self.x.dtype)
-        # The memtile reshuffle, (size, stride) outermost first: extent-free.
-        l2l1: StreamDims = [(m // s, s), (s, m), (n // s, s * m), (s, 1)]
+        l2l1 = TensorAccessPattern(
+            (m * n,), 0, [m // s, s, n // s, s], [s, m, s * m, 1]
+        )
 
         kernel = datamovement.transpose(m, n, s)
         of_l3l2 = [
@@ -213,7 +211,7 @@ class Transpose(Operator):
         ]
         of_l2l1 = [
             of_l3l2[k]
-            .cons(dims_from_stream=l2l1)
+            .cons(from_stream=l2l1)
             .forward(
                 obj_type=tile_ty,
                 name=f"of_in1s_L2L1_{k // chans}_{k % chans}",

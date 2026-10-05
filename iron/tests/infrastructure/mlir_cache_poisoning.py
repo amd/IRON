@@ -56,7 +56,7 @@ def _linked_objects(operator):
     back: a standalone build no longer writes its MLIR to disk either (see
     the module docstring), so there is nothing to read.
     """
-    mlir = str(OperatorDesign(operator).generator())
+    mlir = str(OperatorDesign(operator).build())
     return sorted(set(re.findall(r'link_with\s*=\s*"([^"]+)"', mlir)))
 
 

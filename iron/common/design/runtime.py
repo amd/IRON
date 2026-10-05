@@ -14,9 +14,8 @@ from contextlib import contextmanager
 from math import prod
 from typing import Any
 
-import aie.utils as aie_utils
 from aie.extras.dialects import arith
-from aie.helpers.taplib import BdLimits, TensorAccessPattern
+from aie.helpers.taplib import TensorAccessPattern
 from aie.ir import IntegerType
 from aie.iron import TaskGroup, sync_parameters
 
@@ -28,6 +27,7 @@ from ..declare.bound import (
     BufferView,
     _StreamSlot,
 )
+from .bd import BdLimits
 from .target import Target
 
 
@@ -136,9 +136,9 @@ class Transfers:
         return [
             (
                 stream[i],
-                TensorAccessPattern.from_slice(
-                    shape, leading + (slice(i * share, (i + 1) * share),)
-                ),
+                TensorAccessPattern.full(shape)[
+                    leading + (slice(i * share, (i + 1) * share),)
+                ],
             )
             for i in range(stream.count)
         ]
@@ -173,7 +173,7 @@ class Transfers:
             )
         tiles = shape[axis] // (lanes * tile_rows)
         run = tile_rows * inner
-        shim = aie_utils.ensure_current_device(required=True).bd_limits(0, 0)
+        shim = BdLimits.of(buffer._op.dev, 0, 0)
         halves = shim.factor(run, shim.granule(dtype))
         if halves is None:
             raise ValueError(
@@ -294,9 +294,9 @@ class Sequence(Transfers):
             common = dict(wait=wait, managed=False)
         # A per-call offset or size lands in one descriptor, so the pattern
         # must fit one: the compiler cannot split a descriptor a call patches.
-        if (offset_by is not None or sizes_by) and not aie_utils.ensure_current_device(
-            required=True
-        ).bd_limits(0, 0).fits(tap, buffer.dtype):
+        if (offset_by is not None or sizes_by) and not BdLimits.of(
+            self.op.dev, 0, 0
+        ).fits(tap, buffer.dtype):
             raise ValueError(
                 f"{type(self.op).__name__}.{buffer.name}: {tap} moves by a per-call "
                 f"offset or size, so it must fit one buffer descriptor, and does not"
@@ -304,15 +304,27 @@ class Sequence(Transfers):
         dynamic = offset_by is not None and offset_by.ssa is not None
         dynamic = dynamic or any(v.ssa is not None for v in sizes_by.values())
         if not dynamic:
+            length = {}
+            if sizes_by:
+                # The word bounds the descriptor's length, so it patches the
+                # outermost dimension the descriptor walks: every one inside
+                # it moves whole, every one outside it but the iteration is 1.
+                ((dim, value),) = sizes_by.items()
+                sizes, _ = BdLimits.slots(tap.sizes, tap.strides)
+                if dim == 0 or prod(sizes[1:dim]) != 1:
+                    raise ValueError(
+                        f"{type(self.op).__name__}.{buffer.name}: {tap} is bounded "
+                        f"on dimension {dim}, which is not the outermost a "
+                        f"descriptor's length ends"
+                    )
+                length = dict(
+                    length_parameter=value.param, length_unit=prod(sizes[dim + 1 :])
+                )
             return fn(
                 data,
                 tap=tap,
                 offset_parameter=offset_by.param if offset_by is not None else None,
-                size_parameters=(
-                    {dim: value.param for dim, value in sizes_by.items()}
-                    if sizes_by
-                    else None
-                ),
+                **length,
                 **common,
             )
         # The dispatch-time form: the same pattern with the per-call scalars
@@ -330,9 +342,7 @@ class Sequence(Transfers):
                 )
         return fn(
             data,
-            sizes=sizes,
-            strides=strides,
-            offset=offset,
+            tap=TensorAccessPattern(tap.tensor_dims, offset, sizes, strides),
             **common,
         )
 
@@ -340,6 +350,11 @@ class Sequence(Transfers):
         """The checked ``{dim: value}`` of a per-call size."""
         if not size_by:
             return {}
+        if len(size_by) > 1:
+            raise ValueError(
+                f"a per-call size bounds one dimension, the descriptor's length; "
+                f"got dimensions {sorted(size_by)}"
+            )
         out = {}
         for dim, value in size_by.items():
             if not isinstance(value, BoundValue):

@@ -34,7 +34,6 @@ reproduces this overlay bit for bit without an activation.
 import dataclasses
 from typing import ClassVar
 
-import aie.utils as aie_utils
 import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
@@ -171,7 +170,10 @@ class Shipped(
 
     @property
     def config_name(self) -> str:
-        return f"FLM_MM_{FASTFLOWLM_COMMIT[:8]}_{aie_utils.ensure_current_device(required=True).name}"
+        dev = self.dev
+        if dev is None:
+            raise Unresolvable("the shipped FLM GEMM names its device; none is bound")
+        return f"FLM_MM_{FASTFLOWLM_COMMIT[:8]}_{dev.name}"
 
     def sequence(self, rt) -> None:
         """One transfer per (column-block, row-block, leg), in the order the

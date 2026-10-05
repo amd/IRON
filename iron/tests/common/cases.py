@@ -164,7 +164,7 @@ CASES = [
             # write of a prefill: a 3-D pattern, one descriptor on the shim.
             dict(
                 src=TensorAccessPattern((128, 4, 64), 0, [4, 128, 64], [64, 256, 1]),
-                dst=TensorAccessPattern.from_slice((4, 128, 64), np.s_[:, 0:128]),
+                dst=TensorAccessPattern.full((4, 128, 64))[:, 0:128],
                 input_buffer_size=4 * 128 * 64,
                 output_buffer_size=4 * 128 * 64,
                 tile_size=1024,

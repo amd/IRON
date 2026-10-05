@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
-import aie.utils as aie_utils
+from aie.iron.device import Device
 from aie.utils.verify import Tolerance
 
 __all__ = ["Case", "Sweep", "Testing"]
@@ -51,8 +51,8 @@ class Case:
         return self.id or "-".join(f"{k}_{v}" for k, v in self.kwargs.items())
 
 
-# What a sweep is to Testing: the operator class in, its cases out.
-_Cases = Callable[[type], Iterable[Case | dict]]
+# What a sweep is to Testing: the operator class and the device in, its cases out.
+_Cases = Callable[[type, Device], Iterable[Case | dict]]
 
 
 @dataclass(frozen=True)
@@ -60,9 +60,9 @@ class Testing:
     """How an operator is checked against its reference on a device.
 
     ``cases`` lists what to construct: ``Case`` objects, plain keyword
-    dicts, and callables of the operator class returning them (a
-    ``Sweep``), for shapes that follow the device's width; or is one
-    such callable. ``draw`` is extra
+    dicts, and callables of the operator class and the device returning
+    them (a ``Sweep``), for shapes that follow the device's width; or is
+    one such callable. ``draw`` is extra
     ``iron.common.harness.vectors`` arguments, or a callable of the
     operator returning them (for an input that must satisfy the kernel's
     preconditions: a packed quantization, an angle table).
@@ -80,14 +80,14 @@ class Testing:
     tolerance: Tolerance | None = None
     draw: dict[str, Any] | Callable[[Any], dict[str, Any]] | None = None
 
-    def resolve(self, cls: type) -> list[Case]:
-        """The cases for ``cls``: a callable is called with the class, so a
-        sweep inherited from a base reads the subclass's caps and shim
+    def resolve(self, cls: type, dev: Device) -> list[Case]:
+        """The cases for ``cls`` on ``dev``: a callable is called with both,
+        so a sweep inherited from a base reads the subclass's caps and shim
         budget; dicts are wrapped.
         """
         out = []
         for c in [self.cases] if callable(self.cases) else self.cases:
-            items = c(cls) if callable(c) else [c]
+            items = c(cls, dev) if callable(c) else [c]
             out += [i if isinstance(i, Case) else Case(dict(i)) for i in items]
         return out
 
@@ -105,11 +105,12 @@ class Sweep:
     """The cases of an elementwise operator: every column count its shim
     budget allows by every channel count, at each length.
 
-    Called with the operator class, as ``Testing`` calls it, it reads
-    the class's ``tile_cap`` (unless given one) and shim budget, so a sweep
-    a base declares serves its subclasses; the device is read then too,
-    since none is bound when a class body runs. A case's tile is its length
-    over its cores, at most the cap; only the ``regular`` length is in the
+    Called with the operator class and the device, as ``Testing`` calls
+    it, it reads the class's ``tile_cap`` (unless given one) and shim
+    budget, so a sweep a base declares serves its subclasses; the device
+    is given then, since none is bound when a class body runs. A case's
+    tile is its length over its cores, at most the cap; only the
+    ``regular`` length is in the
     default suite, every one when it is ``None``. ``channels=None`` leaves
     the channel count to the operator (a binary one, whose shim budget one
     channel fills). With ``rows``, a length is that many elements in rows
@@ -149,8 +150,7 @@ class Sweep:
         kwargs.update(tile_size=tile, **self.extra)
         return kwargs
 
-    def __call__(self, cls) -> list[Case]:
-        dev = aie_utils.ensure_current_device(required=True)
+    def __call__(self, cls, dev: Device) -> list[Case]:
         cap = cls.tile_cap if self.tile_cap is None else self.tile_cap
         out = []
         for length in self.lengths:

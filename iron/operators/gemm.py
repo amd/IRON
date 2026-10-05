@@ -5,14 +5,12 @@ import dataclasses
 from dataclasses import field
 from typing import Any
 
-import aie.utils as aie_utils
 import numpy as np
 from aie.dialects.aie import AIEArch
-from aie.helpers.taplib import TensorAccessPattern, TensorTiler2D
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ObjectFifo, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
-from aie.iron.dataflow.objectfifo import StreamDims
-from aie.iron.device import NPU1, NPU2, NPU1Col1, NPU1Col2, Tile
+from aie.iron.device import NPU1, NPU2, Device, NPU1Col1, NPU1Col2, Tile
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
@@ -28,6 +26,7 @@ from iron.common import (
     param,
     select,
 )
+from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
 # fmt: off
@@ -71,10 +70,9 @@ _EXTENSIVE = [
 # fmt: on
 
 
-def _cases(cls):
+def _cases(cls, dev: Device):
     # aie2's mm kernels block m by 4 r (mm_aie2.h), not aie2p's 2 r: an
     # 8-row tile does not compile there.
-    dev = aie_utils.ensure_current_device(required=True)
     min_tile_m = 16 if dev.arch is AIEArch.AIE2 else 1
     out = []
     for rows, extensive in ((_REGULAR, False), (_EXTENSIVE, True)):
@@ -191,20 +189,6 @@ class GEMM(Operator):
     def mem_tile_n(self) -> int:
         return self.tile_n * self.num_aie_columns
 
-    def mac_dims(self, dev=None) -> tuple[int, int, int]:
-        """r, s, t: the aie::mmul tile dims the kernel is built from.
-
-        Read from the kernel factory rather than tabulated here: the geometry
-        belongs to the kernel linalg/mm.cc compiles, and upstream's table is the one
-        its ``combos(X) X(..., r, s, t)`` macros are kept in step with.
-        """
-        return kernels.mm.mac_dims(
-            self.dtype_in,
-            self.dtype_out,
-            device=dev,
-            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
-        )
-
     # -- checks ---------------------------------------------------------------
 
     def validate(self) -> None:
@@ -217,7 +201,7 @@ class GEMM(Operator):
         # this runs at construction, before resolution picks one. array()
         # asks for the geometry of the device it builds for, which on npu1
         # is the looser (4, 8, 4).
-        r, s, t = kernels.mm.mac_dims(
+        r, s, t = kernels.mm.mac_dims(  # pyright: ignore[reportFunctionMemberAccess]
             self.dtype_in,
             self.dtype_out,
             arch="aie2p",
@@ -313,11 +297,6 @@ class GEMM(Operator):
         # bfloat16 accumulates in place in an f32 buffer, converted to bf16
         # after the reduction loop for the transfer to L2.
         dtype_out_internal = np.float32
-        r, s, t = self.mac_dims(target.dev)
-        if not use_scalar:
-            assert m % r == 0
-            assert k % s == 0
-            assert n % t == 0
         # If you get errors during CDO generation due to running out of program
         # memory, it may be because too much code is generated due to ObjectFIFO
         # loop unrollings. Reducing the depth to 1 here will work around that at
@@ -349,6 +328,9 @@ class GEMM(Operator):
             emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
             round_conv_even=self.round_conv_even,
         )
+        r, s, t = matmul_kernel.mac_dims
+        assert m % r == 0 and k % s == 0 and n % t == 0
+        streams = matmul_kernel.stream_dims
         zero_kernel = kernels.zero(m * n, dtype_acc, vectorized=not use_scalar)
         convert_copy_kernel = None
         C_l1_ty_internal = np.ndarray[(m * n,), np.dtype[dtype_out_internal]]
@@ -395,8 +377,6 @@ class GEMM(Operator):
             start_row = i * n_A_tiles_per_shim
             stop_row = start_row + n_A_tiles_per_shim
             of_offsets = [m * k * j for j in range(stop_row - start_row)]
-            a_dims: StreamDims = [(m // r, r * k), (k // s, s), (r, k), (s, 1)]
-            dims_to_stream = [a_dims] * (stop_row - start_row)
             a_tmp_fifos = (
                 A_l3l2_fifos[i]
                 .cons()
@@ -404,7 +384,7 @@ class GEMM(Operator):
                     of_offsets,
                     obj_types=[A_l1_ty] * (stop_row - start_row),
                     names=[f"A_L2L1_{row}" for row in range(start_row, stop_row)],
-                    dims_to_stream=dims_to_stream,
+                    to_stream=[streams.A] * (stop_row - start_row),
                 )
             )
             for j in range(stop_row - start_row):
@@ -415,31 +395,21 @@ class GEMM(Operator):
             B_l3l2_fifos[col] = ObjectFifo(
                 B_l2_ty, name=f"B_L3L2_{col}", depth=fifo_depth
             )
-            b_dims: StreamDims
-            if b_col_maj:
-                b_dims = [(n // t, t * k), (k // s, s), (t, k), (s, 1)]
-            else:
-                b_dims = [(k // s, s * n), (n // t, t), (s, n), (t, 1)]
             B_l2l1_fifos[col] = (
                 B_l3l2_fifos[col]
                 .cons()
                 .forward(
                     obj_type=B_l1_ty,
                     name=f"B_L2L1_{col}",
-                    dims_to_stream=b_dims,
+                    to_stream=streams.B,
                 )
             )
             # Output C
-            c_dims: StreamDims
-            if c_col_maj:
-                c_dims = [(n // t, t * m), (t, r), (m // r, r * t), (r, 1)]
-            else:
-                c_dims = [(m // r, r * n), (r, t), (n // t, r * t), (t, 1)]
             C_l2l3_fifos[col] = ObjectFifo(
                 C_l2_ty,
                 name=f"C_L2L3_{col}",
                 depth=fifo_depth,
-                dims_to_stream=c_dims,
+                to_stream=streams.C,
             )
             of_offsets = [m * n * i for i in range(n_aie_rows)]
             # join along one column
@@ -578,9 +548,8 @@ class GEMM(Operator):
         # What one shim descriptor holds. The compiler splits a constant
         # pattern that does not fit, but the transfer blocks below count
         # descriptors, so B and C are checked here and shaped to fit.
-        shim = aie_utils.ensure_current_device(required=True).bd_limits(0, 0)
+        shim = BdLimits.of(self.dev, 0, 0)
 
-        K_div_k = K // k
         n_c_col_tiles_per_core = N // mem_tile_n
         n_c_row_tiles_per_core = M // mem_tile_m_C
 
@@ -590,35 +559,20 @@ class GEMM(Operator):
         tb_max_n_rows = 4 if not c_col_maj else 2
 
         # Define tensor access patterns (tiling) for A, B, and C
-        A_tiles = TensorTiler2D.group_tiler(
-            (M, K),  # Size of A matrix
-            (mem_tile_m_A, k),  # Size of A (smallest) tile
-            (1, K_div_k),  # Size of "group" of tiles
-            # Repeat data so can distribute across whole column
-            pattern_repeat=n_c_col_tiles_per_core,
-            prune_step=False,
-        )
+        # A: one row of (mem_tile_m_A, k) tiles, repeated so it can be
+        # distributed across the whole column.
+        A_rows = TensorAccessPattern.full((M, K)).tile((mem_tile_m_A, k))
+        # B: every n_aie_cols-th (n)-wide block of columns from the shim's
+        # own, each block whole down K before the next.
         if b_col_maj:
-            B_tiles = TensorTiler2D.step_tiler(
-                (N, K),  # Size of B matrix
-                (n, k),  # Size of B tile
-                # Number of tiles per transfer in each dimension (whole col, partial row)
-                tile_group_repeats=(n_c_col_tiles_per_core, K_div_k),
-                # Contiguous tile group in col, but send every n_aie_cols-th tile in the row
-                tile_group_steps=(n_aie_cols, 1),
-                prune_step=False,
-            )
+            B_grid = TensorAccessPattern.full((N, K)).tile((n, k))
+            B_tiles = [B_grid[col::n_aie_cols] for col in range(n_aie_cols)]
         else:
-            B_tiles = TensorTiler2D.step_tiler(
-                (K, N),  # Size of B matrix
-                (k, n),  # Size of B tile
-                # Number of tiles per transfer in each dimension (whole col, partial row)
-                tile_group_repeats=(K_div_k, n_c_col_tiles_per_core),
-                # Contiguous tile group in col, but send every n_aie_cols-th tile in the row
-                tile_group_steps=(1, n_aie_cols),
-                tile_group_col_major=True,  # Send all tiles in column before moving on to next column
-                prune_step=False,
-            )
+            B_grid = TensorAccessPattern.full((K, N)).tile((k, n))
+            B_tiles = [
+                B_grid[:, col::n_aie_cols].permute((1, 0, 2, 3))
+                for col in range(n_aie_cols)
+            ]
 
         # A B fill that does not fit one descriptor (a column-major B whose
         # column-block stride is past the step field) is split by the
@@ -633,10 +587,11 @@ class GEMM(Operator):
             # (m*n_A_tiles_per_shim)-sized sub-tile, one per column,
             # repeated (N//n//n_aie_cols) times; each shim carries
             # separate rows.
-            tile_offset = (c_row * n_shim_mem_A + col) % len(A_tiles)
+            tile_offset = (c_row * n_shim_mem_A + col) % (M // mem_tile_m_A)
             # always equal to n_aie_rows since we have n_aie_rows row tiles for matrix A
             if col < n_aie_rows:
-                rt.fill(self.A.lane(col), A_tiles[tile_offset], group=tg)
+                A_tile = A_rows[tile_offset].repeat(n_c_col_tiles_per_core)
+                rt.fill(self.A.lane(col), A_tile, group=tg)
             # B input transfer: the first (n)-wide block of columns
             # of B, then the (n_aie_columns)-th such block, and so
             # on; each shim starts at a different column offset.
