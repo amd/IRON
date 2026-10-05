@@ -96,20 +96,18 @@ def _run(sequence, inputs):
     run = sequence.get_callable()
     names, (out_name,) = sequence.input_args, sequence.output_args
     for name, data in zip(names, inputs):
-        run.get_buffer(name).torch_view()[: data.numel()] = data.reshape(-1)
+        run.get_buffer(name).numpy_view()[: data.size] = data.reshape(-1)
     run()
-    return run.get_buffer(out_name).torch_view()[: inputs[0].numel()].clone()
+    return run.get_buffer(out_name).numpy()[: inputs[0].size].copy()
 
 
 @pytest.mark.parametrize("dispatch", ["reference", "fused"])
 @pytest.mark.parametrize("precompile", [True, False], ids=["aot", "jit"])
 def test_a_graph_matches_the_hand_written_runlist_numerically(precompile, dispatch):
     """The load-bearing claim, both ahead-of-time and just-in-time."""
-    import torch
-
-    torch.manual_seed(0)
-    x = torch.rand(SIZE, dtype=torch.float32)
-    w = torch.rand(SIZE, dtype=torch.float32)
+    rng = np.random.default_rng(0)
+    x = rng.random(SIZE, dtype=np.float32)
+    w = rng.random(SIZE, dtype=np.float32)
 
     _, graph_seq = _graph(f"graph_num_{precompile}_{dispatch}", dispatch=dispatch)
     hand = _hand_written(f"hand_num_{precompile}_{dispatch}", dispatch=dispatch)
@@ -119,7 +117,7 @@ def test_a_graph_matches_the_hand_written_runlist_numerically(precompile, dispat
 
     got = _run(graph_seq, (x, w))
     expected = _run(hand, (x, w))
-    assert torch.equal(got, expected), (
+    assert np.array_equal(got, expected), (
         "a graph must compute exactly what the hand-written runlist computes; "
         "a difference here means the traced wiring or the planned layout is wrong"
     )

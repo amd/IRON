@@ -47,7 +47,6 @@ from pathlib import Path
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-import torch
 from aie.dialects.aie import AIEArch
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from ml_dtypes import bfloat16
@@ -125,12 +124,12 @@ def get_params():
 
 def make_inputs(M, K, N):
     """Identical data for all three, and the reference to check them against."""
-    torch.manual_seed(1234)
-    A = (torch.randn(M, K) * 4).to(torch.bfloat16)
-    B = (torch.rand(K, N) * 4).to(torch.bfloat16)
-    Af, Bf = A.float(), B.float()
+    rng = np.random.default_rng(1234)
+    A = (rng.standard_normal((M, K), dtype=np.float32) * 4).astype(bfloat16)
+    B = (rng.random((K, N), dtype=np.float32) * 4).astype(bfloat16)
+    Af, Bf = A.astype(np.float32), B.astype(np.float32)
     # Bounded against accumulated mass rather than relatively; see test.py.
-    return A, B, Af @ Bf, float((Af.abs() @ Bf.abs()).mean())
+    return A, B, Af @ Bf, float((np.abs(Af) @ np.abs(Bf)).mean())
 
 
 class Candidate:
@@ -148,19 +147,14 @@ class Candidate:
         self.c_bo = XRTTensor((M, N), dtype=np.dtype("bfloat16"))
         # Only the flm operators take B pre-packed. iron.operators.GEMM
         # reorders in the descriptor, so it wants plain row-major (K, N).
-        # pack_B takes numpy; torch has no bfloat16 view to hand it.
-        if hasattr(op, "pack_B"):
-            b_np = B.view(torch.int16).numpy().view(bfloat16)
-            b_bo = XRTTensor(op.pack_B(b_np).reshape(-1))
-        else:
-            b_bo = XRTTensor.from_torch(B.flatten())
-        args = [XRTTensor.from_torch(A.flatten()), b_bo, self.c_bo]
+        packed = op.pack_B(B) if isinstance(op, FLMGEMM) else B
+        args = [XRTTensor(A.reshape(-1)), XRTTensor(packed.reshape(-1)), self.c_bo]
         self.run = lambda: image(*args)
 
     def verify(self, M, N, expected, mass):
         self.run()
-        C = self.c_bo.to_torch().reshape(M, N).float()
-        self.err = float((C - expected).abs().mean()) / mass
+        C = self.c_bo.numpy().reshape(M, N).astype(np.float32)
+        self.err = float(np.abs(C - expected).mean()) / mass
         return self.err < self.budget
 
     def time_round(self):

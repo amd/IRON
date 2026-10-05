@@ -548,8 +548,8 @@ def test_shipped_epilogue_matches_accumulator(epilogue, clamp, npu_runtime):
     # the epilogue across it: clamp lands inside for all 262144 elements, but
     # sigmoid, silu and gelu land outside for about half, by up to 0.018. That
     # residual is the overlay's own activation approximation -- a LUT or native
-    # instruction, not exact math -- which no reference built on torch.sigmoid
-    # can reproduce. 0.05 is ~3x the measured worst case and still ~20x below
+    # instruction, not exact math -- which no exact-sigmoid reference can
+    # reproduce. 0.05 is ~3x the measured worst case and still ~20x below
     # where the bound would go vacuous; the assertion at the end pins that down.
     approx = 0.0 if epilogue is NONE else 0.05
     tol = MAX_SLOPE[epilogue] * np.abs(acc) * 2.0**-8 + 2.0**-8 + approx
