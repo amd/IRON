@@ -668,20 +668,29 @@ run = run_test(op, vectors(op), tolerance=Tolerance.relative(0.04, 1e-6))
 `verify_buffer()` compares a single buffer the same way, for tests that
 dispatch by hand.
 
-### bfloat16 between torch and numpy
+### bfloat16 and runtime tensors
 
-numpy has no bfloat16 of its own; use `ml_dtypes.bfloat16` and move the bits,
-never going through float32:
+IRON is numpy only; nothing in it needs torch. numpy has no bfloat16 of its
+own, so use `ml_dtypes.bfloat16`. A reference upcasts to float32, computes,
+and rounds to bfloat16 once per tensor it names:
 
 ```python
-import ml_dtypes, torch
+import numpy as np
+from ml_dtypes import bfloat16
 
-np_array = torch_tensor.view(torch.uint16).numpy().view(ml_dtypes.bfloat16)
-torch_tensor = torch.from_numpy(np_array.view("uint16")).view(torch.bfloat16)
+x = (rng.standard_normal((M, K)) * 4).astype(bfloat16)
+y = (x.astype(np.float32) @ w.astype(np.float32)).astype(bfloat16)
 ```
 
-Runtime tensors take and return torch tensors directly
-(`aie.utils.DEFAULT_TENSOR_CLASS.from_torch()`, `.to_torch()`).
+Runtime tensors (`aie.utils.DEFAULT_TENSOR_CLASS`) are built from a numpy
+array, written through `numpy_view()` (no device sync; the buffer is
+marked for upload) and read with `numpy()` (synced from the device first):
+
+```python
+run.get_buffer("x").numpy_view()[:] = x.reshape(-1)
+run()
+out = run.get_buffer("out").numpy()
+```
 
 ## Debugging and Performance
 
