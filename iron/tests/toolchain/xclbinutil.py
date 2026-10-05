@@ -9,19 +9,15 @@ appending a PDI and re-adding it, so the tool's own dump must be something
 its own add accepts. The Boost-free ``xclbinutil`` mlir-aie vendors under
 ``tools/hrx-xclbinutil`` dumped every scalar array element nested one level
 too deep (``"start_columns": [["0"]]``) and then refused its own output
-("bad value: "), so no chain could be linked with it. The fix is carried in
-``patches/hrx-xclbinutil-empty-path.patch``; this names the failure when
-an unpatched build is on the PATH, instead of a chained build failing
-three tools down.
+("bad value: "), so no chain could be linked with it, until mlir-aie fixed
+it before 1.4.4.dev88; this names the failure when an older build is on
+the PATH, instead of a chained build failing three tools down.
 """
 
 import json
 import subprocess
-from pathlib import Path
 
 from iron.tests.toolchain.tools import XCLBINUTIL, requires
-
-PATCH = Path(__file__).with_name("patches") / "hrx-xclbinutil-empty-path.patch"
 
 pytestmark = requires("xclbinutil")
 
@@ -94,7 +90,7 @@ def test_a_dumped_partition_is_flat_and_re_adds(tmp_path):
     dumped = json.loads((tmp_path / "dump.json").read_text())
     assert _flat(dumped), (
         f"xclbinutil nests scalar array elements on dump: {dumped}\n"
-        f"an unpatched hrx-xclbinutil; apply {PATCH} to mlir-aie and rebuild"
+        "an hrx-xclbinutil from before mlir-aie 1.4.4.dev88; rebuild it"
     )
     part = dumped["aie_partition"]
     assert part["partition"]["start_columns"] == ["0", "4"]

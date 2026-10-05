@@ -589,8 +589,7 @@ code before relying on a line here; it is the authority.
 - Tuning: `auto(choices=, legal=)` is recorded but nothing reads it, and
   there is no per-kernel L1 budget.
 - Open upstream asks in mlir-aie: a builder for `aiex.configure` /
-  `aiex.run`; an accessor for L1 banking; hrx-xclbinutil's empty-path
-  patch. aiecc's split memory (a whole-module clone per split item) is
+  `aiex.run`; an accessor for L1 banking. aiecc's split memory (a whole-module clone per split item) is
   mlir-aie #3689's, which shares one clone per split.
 
 ## Common Patterns
