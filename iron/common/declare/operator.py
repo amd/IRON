@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import inspect
+import math
 from collections.abc import Mapping
 from contextvars import ContextVar
 from types import FunctionType
@@ -36,8 +37,7 @@ from aie.utils.verify import Tolerance
 from ..testing import Testing
 from .bound import BoundBuffer, BoundValue
 from .creation import declare
-from .field import DimRef, Tier, Unresolvable, param
-from .infer import call_operands, infer, infer_kwargs, operand_flags
+from .field import DimRef, OptionalDim, Select, Tier, Unresolvable, param
 from .member import (
     DispatchTime,
     Extent,
@@ -590,14 +590,157 @@ class Operator(metaclass=_OperatorMeta):
     @classmethod
     def from_operands(cls, *operand_shapes, **overrides) -> Self:
         """Construct from operand shapes, an optional input's by keyword."""
-        inputs, outputs, overrides = call_operands(cls, operand_shapes, overrides)
-        values = infer(
-            cls,
-            *inputs.values(),
-            outputs=outputs,
-            **{**infer_kwargs(cls, overrides), **operand_flags(cls, inputs, overrides)},
-        )
-        return cls(**{**overrides, **values})
+        inputs, outputs, overrides = cls.call_operands(operand_shapes, overrides)
+        return cls(**{**overrides, **cls.infer(inputs, outputs, **overrides)})
+
+    @classmethod
+    def call_operands(cls, args, kwargs) -> tuple[dict[str, Any], list, dict[str, Any]]:
+        """Bind a call's operands to the declared ones, as a signature
+        ``(x, ..., [outputs...], *, weight=None, ...)`` would.
+
+        The positional operands are the required inputs, in declaration
+        order, then any outputs; an optional input (``when=`` a flag) is a
+        keyword, its name, so an output is never taken for it.
+
+        Returns:
+            The inputs by name, in declaration order; the outputs; the other
+            keywords.
+        """
+        ins = [m for m in cls._members if isinstance(m, _Buffer) and m.direction.fills]
+        required = [m.name for m in ins if m.when is None]
+        optional = {m.name for m in ins if m.when is not None}
+        given = {k: v for k, v in kwargs.items() if k in optional and v is not None}
+        if len(args) < len(required):
+            raise TypeError(
+                f"{cls.__name__} takes {len(required)} positional operand(s) "
+                f"({', '.join(required)}), got {len(args)}"
+            )
+        bound = {**dict(zip(required, args)), **given}
+        inputs = {m.name: bound[m.name] for m in ins if m.name in bound}
+        rest = {k: v for k, v in kwargs.items() if k not in optional}
+        return inputs, list(args[len(required) :]), rest
+
+    @classmethod
+    def infer(cls, inputs: Mapping[str, Any], outputs=(), **kwargs) -> dict[str, Any]:
+        """Bind the dimension fields from operand shapes.
+
+        Each declared dimension is a field or a literal, so this is a lookup.
+        An optional input's ``when=`` flag is true where ``inputs`` names it.
+
+        Args:
+            inputs: The input shapes, by operand name.
+            outputs: The shapes of caller-supplied outputs, in declaration
+                order.
+            **kwargs: Construction arguments; the dimension fields and shape
+                flags among them pin values and are checked for agreement.
+
+        Returns:
+            ``{field: value}``: the pinned and the inferred fields, and the
+            operand flags.
+
+        Raises:
+            TypeError: The operands are not the declared ones.
+            ValueError: A shape disagrees with the declaration or another
+                operand.
+        """
+        buffers = [m for m in cls._members if isinstance(m, _Buffer)]
+        names = set(cls._param_fields)
+        for m in buffers:
+            names.update(d.flag.name for d in m.shape.dims if isinstance(d, Select))
+        given = {k: v for k, v in kwargs.items() if k in names}
+        flags: dict[str, bool] = {}
+        for m in buffers:
+            if not m.direction.fills or m.when is None:
+                continue
+            flag, has = m.when.name, m.name in inputs
+            if flags.setdefault(flag, has) != has:
+                raise TypeError(
+                    f"{cls.__name__}: the operands {flag}= brings are given together"
+                )
+            if flag in given and bool(given[flag]) != has:
+                raise TypeError(
+                    f"{cls.__name__}({flag}=True) takes {m.name}="
+                    if has is False
+                    else f"{cls.__name__}: {m.name}= is an operand only where "
+                    f"{flag} is true"
+                )
+        given |= flags
+        ins = [m for m in buffers if m.direction.fills and present(m, given)]
+        if [m.name for m in ins] != list(inputs):
+            raise TypeError(
+                f"{cls.__name__} takes {len(ins)} operand(s) "
+                f"({', '.join(m.name for m in ins)}), got {len(inputs)}"
+            )
+        outs = [m for m in buffers if not m.direction.fills and present(m, given)]
+        if outputs and len(outputs) != len(outs):
+            raise TypeError(
+                f"{cls.__name__} produces {len(outs)} output(s) "
+                f"({', '.join(m.name for m in outs)}), got {len(outputs)}"
+            )
+        pairs = [(m, inputs[m.name]) for m in ins] + list(zip(outs, outputs))
+        bound: dict[str, Any] = dict(given)
+        origin: dict[str, str] = {k: "given" for k in given}
+
+        def bind(ref: DimRef, value: int, where: str) -> None:
+            key = ref.name
+            if key in bound and bound[key] != value:
+                raise ValueError(
+                    f"{cls.__name__}: {ref!r} is {value} from {where} but "
+                    f"{bound[key]} from {origin[key]}"
+                )
+            bound[key] = value
+            origin.setdefault(key, where)
+
+        for m, shape in pairs:
+            shape = tuple(int(s) for s in shape)
+            dims = list(m.shape.dims)
+            at = next(
+                (i for i, d in enumerate(dims) if isinstance(d, OptionalDim)), None
+            )
+            if at is not None:
+                optional = dims.pop(at)
+                if len(shape) == len(dims) + 1:
+                    bind(optional.ref, shape[at], f"{m.name}.shape[{at}]")
+                    shape = shape[:at] + shape[at + 1 :]
+                elif len(shape) == len(dims):
+                    bind(optional.ref, 1, f"{m.name} (rank {len(shape)})")
+                else:
+                    raise ValueError(
+                        f"{cls.__name__}: operand {m.name} has rank {len(shape)}, "
+                        f"declared {m!r}"
+                    )
+            expanded: list = []
+            for d in dims:
+                if not isinstance(d, Select):
+                    expanded.append(d)
+                    continue
+                flag = d.flag
+                value = bound.get(flag.name, flag.default)
+                if value is dataclasses.MISSING:
+                    raise ValueError(
+                        f"{cls.__name__}: {flag!r} selects {m.name}'s shape and "
+                        f"has no default; pass it explicitly"
+                    )
+                expanded.extend(d.when_true if value else d.when_false)
+            dims = expanded
+            if len(dims) == 1 and len(shape) != 1:
+                # A flat buffer takes an operand of any rank: its one
+                # dimension is the element count.
+                shape = (math.prod(shape),)
+            if len(shape) != len(dims):
+                raise ValueError(
+                    f"{cls.__name__}: operand {m.name} has rank {len(shape)} "
+                    f"{shape}, declared rank {len(dims)} {m!r}"
+                )
+            for i, (d, n) in enumerate(zip(dims, shape)):
+                if isinstance(d, DimRef):
+                    bind(d, n, f"{m.name}.shape[{i}]")
+                elif int(d) != n:
+                    raise ValueError(
+                        f"{cls.__name__}: operand {m.name}.shape[{i}] is {n}, "
+                        f"declared {d}"
+                    )
+        return bound
 
     # -- the device and the label ---------------------------------------------
 

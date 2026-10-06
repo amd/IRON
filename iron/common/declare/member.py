@@ -122,7 +122,7 @@ class _Buffer(_Member["BoundBuffer"]):
     ``when=`` a boolean ``param()`` makes the operand optional: it, and its
     stream, exist only on an instance where the field is true. A call gives
     it by keyword, its name (``RMSNorm(x, weight=w)``), which sets the field
-    (see ``call_operands``).
+    (see ``Operator.call_operands``).
     """
 
     direction: ClassVar[Direction]

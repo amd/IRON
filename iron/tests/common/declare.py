@@ -35,7 +35,6 @@ from iron.common import (
 )
 from iron.common.declare import Direction
 from iron.common.declare.field import Auto, DimRef, Param
-from iron.common.declare.infer import infer
 from iron.common.design import OperatorDesign
 
 NPU2 = from_name("npu2", n_cols=8)
@@ -224,10 +223,10 @@ def test_an_optional_dim_is_omitted_when_one_and_may_sit_anywhere():
         x = In(rows, OptionalDim(seq), cols)
         y = Out(rows, OptionalDim(seq), cols)
 
-    assert infer(Stack, (8, 64)) == {"rows": 8, "cols": 64, "seq": 1}
-    assert infer(Stack, (8, 16, 64)) == {"rows": 8, "cols": 64, "seq": 16}
+    assert Stack.infer({"x": (8, 64)}) == {"rows": 8, "cols": 64, "seq": 1}
+    assert Stack.infer({"x": (8, 16, 64)}) == {"rows": 8, "cols": 64, "seq": 16}
     with pytest.raises(ValueError, match="rank 4"):
-        infer(Stack, (8, 2, 16, 64))
+        Stack.infer({"x": (8, 2, 16, 64)})
     assert Stack(rows=8, cols=64).x.shape == (8, 64)
     assert Stack(rows=8, cols=64, seq=16).y.shape == (8, 16, 64)
 
@@ -329,11 +328,11 @@ def test_infer_reports_conflicts_naming_both_operands():
     with pytest.raises(
         ValueError, match=r"K is 128 from B.shape\[0\] but 256 from A.shape\[1\]"
     ):
-        infer(MV, (1024, 256), (128,))
+        MV.infer({"A": (1024, 256), "B": (128,)})
     with pytest.raises(ValueError, match="rank"):
-        infer(MV, (1, 2, 3, 4), (256,))
+        MV.infer({"A": (1, 2, 3, 4), "B": (256,)})
     with pytest.raises(ValueError, match="K is 512 from A.shape"):
-        infer(MV, (1024, 512), (512,), K=256)
+        MV.infer({"A": (1024, 512), "B": (512,)}, K=256)
 
 
 def test_an_exported_design_replaces_the_derived_one():
@@ -630,7 +629,7 @@ def test_a_computed_default_is_inferred_from_a_shape_or_computed():
     assert Rep(rows=2, repeat=3, out_rows=6).out_rows == 6  # given, agrees
     with pytest.raises(ValueError, match="out_rows=5 is not what its other fields"):
         Rep(rows=2, repeat=3, out_rows=5)
-    assert infer(Rep, (2, 8), outputs=[(6, 8)]) == {"rows": 2, "out_rows": 6}
+    assert Rep.infer({"x": (2, 8)}, [(6, 8)]) == {"rows": 2, "out_rows": 6}
 
 
 def test_compatible_runs_at_construction_once_every_tunable_is_known():

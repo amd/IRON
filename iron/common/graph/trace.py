@@ -16,7 +16,6 @@ from aie.utils import bfp
 
 from ..declare import Direction, Operator
 from ..declare.bound import BoundValue
-from ..declare.infer import call_operands, infer, infer_kwargs, operand_flags
 from ..declare.member import Extent, _Value
 from ..declare.operator import graph_tracer
 from ..design import device_symbol
@@ -279,7 +278,7 @@ class Tracer:
         (dimensions, tunables, flags) when ``target`` is a class.
         """
         cls = target if isinstance(target, type) else type(target)
-        inputs, outputs, kwargs = call_operands(cls, args, kwargs)
+        inputs, outputs, kwargs = cls.call_operands(args, kwargs)
         names = list(inputs)
         operands = [self.operand(a) for a in [*inputs.values(), *outputs]]
         # A keyword whose value is a per-call handle (or an expression of
@@ -325,11 +324,10 @@ class Tracer:
         input's flag is set by its presence, as the extents are by the
         shapes, not by a keyword of the call.
         """
-        inferred = infer(
-            cls,
-            *[h.shape for h in inputs.values()],
-            outputs=[h.shape for h in outputs],
-            **{**infer_kwargs(cls, kwargs), **operand_flags(cls, inputs, kwargs)},
+        inferred = cls.infer(
+            {name: h.shape for name, h in inputs.items()},
+            [h.shape for h in outputs],
+            **kwargs,
         )
         return cls(**{**kwargs, **inferred})
 
@@ -533,7 +531,7 @@ class _ReferenceTracer(Tracer):
 
     def call(self, target, args, kwargs):
         cls = target if isinstance(target, type) else type(target)
-        inputs, outputs, kwargs = call_operands(cls, args, kwargs)
+        inputs, outputs, kwargs = cls.call_operands(args, kwargs)
         n_views = len(getattr(cls, "accept_views", ()))
         tensors, patterns = [], []
         for i, a in enumerate([*inputs.values(), *outputs]):

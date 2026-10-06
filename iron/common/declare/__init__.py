@@ -31,7 +31,7 @@ class GEMV(Operator):
 
 A host buffer's dimension is a ``param()`` field or an integer literal:
 never a tunable, a per-call value or an expression. This keeps inference a
-lookup (``infer``) and lets ``creation`` check a class once, as its
+lookup (``Operator.infer``) and lets ``creation`` check a class once, as its
 body finishes. A tile's dimension may also be a tunable, since resolution
 chooses the tile and inference never reads one. A ``Profile`` applied
 in a scope fills the tunables a call site leaves open, by operator shape,
@@ -45,8 +45,8 @@ not a design.
 
 Module by module: ``field`` is what a class body writes, ``member``
 what it declares alongside its fields, ``bound`` what an instance's
-attribute returns, ``infer`` how operand shapes fill a declaration's
-dimension fields, ``operator`` the class itself, ``creation``
+attribute returns, ``operator`` the class itself (and how operand shapes
+fill its dimension fields), ``creation``
 the checks run as a class body finishes, and ``xclbin`` an image someone
 else built.
 """
