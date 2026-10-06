@@ -34,24 +34,10 @@ import contextvars
 import dataclasses
 import json
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, ClassVar, Iterator, Mapping
 
 from ... import operators
 from .field import Auto, Param, Tier
-
-_active: contextvars.ContextVar[Profile | None] = contextvars.ContextVar(
-    "iron.profile", default=None
-)
-# The tokens of the scopes entered in this context, innermost last: kept
-# here rather than on the profile, which threads may share.
-_entered: contextvars.ContextVar[tuple[contextvars.Token, ...]] = (
-    contextvars.ContextVar("iron.profile.entered", default=())
-)
-
-
-def current() -> Profile | None:
-    """The profile applied in this scope, if any."""
-    return _active.get()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -68,21 +54,6 @@ class Entry:
         )
 
 
-def _dims_of(cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
-    """The dimensions of the ``cls`` a call with ``given`` keywords constructs."""
-    dims = {}
-    for f in dataclasses.fields(cls):
-        if not isinstance(f.metadata.get(Tier), Param):
-            continue
-        if f.name in given:
-            dims[f.name] = given[f.name]
-        elif f.default is not dataclasses.MISSING:
-            dims[f.name] = f.default
-        elif f.default_factory is not dataclasses.MISSING:
-            dims[f.name] = f.default_factory()
-    return dims
-
-
 class Profile:
     """Tunable values for operators, keyed by their shape.
 
@@ -97,8 +68,22 @@ class Profile:
     that call. A subclass matches its base's entries.
     """
 
+    _active: ClassVar[contextvars.ContextVar[Profile | None]] = contextvars.ContextVar(
+        "iron.profile", default=None
+    )
+    # The tokens of the scopes entered in this context, innermost last: kept
+    # here rather than on the profile, which threads may share.
+    _entered: ClassVar[contextvars.ContextVar[tuple[contextvars.Token, ...]]] = (
+        contextvars.ContextVar("iron.profile.entered", default=())
+    )
+
     def __init__(self) -> None:
         self._entries: list[Entry] = []
+
+    @classmethod
+    def current(cls) -> Profile | None:
+        """The profile applied in this scope, if any."""
+        return cls._active.get()
 
     def add(self, cls: type, **fields: Any) -> None:
         """Add an entry for ``cls``: dimensions to match and tunables to give."""
@@ -122,7 +107,16 @@ class Profile:
         """The tunables for the ``cls`` a call with ``given`` keywords makes,
         each from the most specific entry naming it.
         """
-        dims = _dims_of(cls, given)
+        dims = {}
+        for f in dataclasses.fields(cls):
+            if not isinstance(f.metadata.get(Tier), Param):
+                continue
+            if f.name in given:
+                dims[f.name] = given[f.name]
+            elif f.default is not dataclasses.MISSING:
+                dims[f.name] = f.default
+            elif f.default_factory is not dataclasses.MISSING:
+                dims[f.name] = f.default_factory()
         chosen: dict[str, tuple[int, Any]] = {}
         for entry in self._entries:
             if not entry.matches(cls, dims):
@@ -168,7 +162,10 @@ class Profile:
         lines = []
         for entry in self._entries:
             name = entry.cls.__name__
-            if getattr(operators, name, None) is not entry.cls:
+            if (
+                name not in operators.__all__
+                or getattr(operators, name) is not entry.cls
+            ):
                 raise ValueError(f"{name} is not iron.operators.{name}")
             lines.append(json.dumps({"operator": name, **entry.dims, **entry.tunables}))
         with open(path, "w") as f:
@@ -181,10 +178,10 @@ class Profile:
         return len(self._entries)
 
     def __enter__(self) -> Profile:
-        _entered.set(_entered.get() + (_active.set(self),))
+        Profile._entered.set(Profile._entered.get() + (Profile._active.set(self),))
         return self
 
     def __exit__(self, *exc) -> None:
-        *outer, token = _entered.get()
-        _active.reset(token)
-        _entered.set(tuple(outer))
+        *outer, token = Profile._entered.get()
+        Profile._active.reset(token)
+        Profile._entered.set(tuple(outer))

@@ -48,7 +48,7 @@ from .member import (
     _Value,
     present,
 )
-from .profile import current as current_profile
+from .profile import Profile
 
 if TYPE_CHECKING:
     from ..graph.handle import Handle
@@ -79,7 +79,7 @@ class _OperatorMeta(type):
                 f"{cls.__name__} is constructed by keyword ({cls.__name__}(M=..., "
                 f"K=...)); operands are given inside a graph's body"
             )
-        profile = current_profile()
+        profile = Profile.current()
         if profile is not None:
             kwargs = {**profile.tunables_for(cls, kwargs), **kwargs}
         return super().__call__(*args, **kwargs)
