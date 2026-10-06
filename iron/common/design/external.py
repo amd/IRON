@@ -20,24 +20,17 @@ groups have no meaning here and are accepted as no-ops, so an operator's
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from typing import Any
 
 import numpy as np
 from aie.dialects.aie import DMAChannelDir, shim_dma_allocation
-from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, Lock, Program, Runtime, Task
 from aie.iron.device import Tile
 from aie.iron.runtime.dmatask import emit_shim_transfer
 
 from ..declare import Operator
-from ..declare.bound import BoundBuffer, BoundStream, _StreamSlot
+from ..declare.bound import _StreamSlot
 from .runtime import Sequence
-
-
-class _NoGroup:
-    def finish(self) -> None:
-        pass
 
 
 class ImageRuntime(Runtime):
@@ -75,14 +68,13 @@ class ImageRuntime(Runtime):
 class ExternalSequence(Sequence):
     """What an operator's ``sequence(rt)`` receives against a shipped image.
 
-    The same surface ``Sequence`` offers, lowering a
-    transfer to shim DMA tasks on the image's pinned channels instead of
-    ObjectFIFO fills. ``module`` is the whole module for one operator.
+    ``Sequence`` with each transfer lowered to a shim DMA task on the
+    image's pinned channel instead of an ObjectFIFO fill. ``module`` is the
+    whole module for one operator.
     """
 
     def __init__(self, op: Operator, rt_data: dict[str, Any], channels: dict):
-        self.op = op
-        self._rt_data = rt_data
+        super().__init__(op, rt_data)
         self._channels = channels
         self._queues: dict[tuple[str, int], list[Task]] = {}
 
@@ -157,27 +149,27 @@ class ExternalSequence(Sequence):
             rt.add_lock(lock)
         return Program(dev, rt).resolve_program()
 
-    # -- transfers ---------------------------------------------------------
-
-    def fill(
-        self, stream, source, *, group=None, wait=False, offset_by=None, size_by=None
-    ):
-        self._transfer(stream, source, offset_by, size_by)
-
-    def drain(
-        self, stream, dest, *, group=None, wait=True, offset_by=None, size_by=None
-    ):
-        self._transfer(stream, dest, offset_by, size_by)
-
-    def _transfer(self, stream, what, offset_by, size_by) -> None:
-        if offset_by is not None or size_by is not None:
+    def _transfer(
+        self,
+        verb: str,
+        stream,
+        what,
+        group,
+        wait: bool,
+        offset_by=None,
+        size_by=None,
+        managed=True,
+    ) -> None:
+        buffer, tap, sliced_by = self._resolve(what, stream)
+        if offset_by is not None or sliced_by is not None or size_by is not None:
             raise NotImplementedError(
                 "per-call offsets and sizes are not supported on a shipped image"
             )
-        key = self._key(stream)
-        buffer, tap = self._resolve(what, stream)
+        lane = self._lane(stream)
+        slot = lane if isinstance(lane, _StreamSlot) else lane[0]
+        key = (slot.stream.name, slot.index)
         queue = self._queues.setdefault(key, [])
-        if len(queue) == self._depth(stream):
+        if len(queue) == slot.stream.depth:
             queue.pop(0).await_()
         queue.append(
             emit_shim_transfer(
@@ -189,66 +181,9 @@ class ExternalSequence(Sequence):
             )
         )
 
-    @staticmethod
-    def _lane(stream) -> _StreamSlot | BoundStream:
-        if isinstance(stream, BoundBuffer):
-            stream = stream.lanes  # an operand that is its own stream
-        if isinstance(stream, (_StreamSlot, BoundStream)):
-            return stream
-        raise TypeError(
-            f"fill/drain take a stream, one lane of it, or an operand that is its "
-            f"own stream, got {stream!r}"
-        )
-
-    def _key(self, stream) -> tuple[str, int]:
-        lane = self._lane(stream)
-        if isinstance(lane, _StreamSlot):
-            return (lane.stream.name, lane.index)
-        return (lane.name, 0)
-
-    def _depth(self, stream) -> int:
-        lane = self._lane(stream)
-        s = lane.stream if isinstance(lane, _StreamSlot) else lane
-        return s.member.depth
-
-    def _resolve(self, what, stream) -> tuple[BoundBuffer, TensorAccessPattern]:
-        if isinstance(what, TensorAccessPattern):
-            lane = self._lane(stream)
-            s = lane.stream if isinstance(lane, _StreamSlot) else lane
-            if s.buffer is None:
-                raise TypeError(
-                    f"a TensorAccessPattern alone names no buffer; {stream!r} is not "
-                    f"an operand's own stream, so give (buffer, tap)"
-                )
-            return s.buffer, what
-        if isinstance(what, BoundBuffer):
-            return what, what.tap
-        if (
-            isinstance(what, tuple)
-            and len(what) == 2
-            and isinstance(what[1], TensorAccessPattern)
-        ):
-            return what[0], what[1]
-        raise TypeError(
-            f"an external sequence takes a buffer, a TensorAccessPattern on an "
-            f"operand's own stream, or (buffer, tap); got {what!r}"
-        )
-
     def finish(self) -> None:
         """Await every outstanding transfer; the end of the sequence."""
         for queue in self._queues.values():
             for task in queue:
                 task.await_()
             queue.clear()
-
-    # -- structure (no-ops: the queues above are the only ordering) ----------
-
-    @contextmanager
-    def group(self):
-        yield _NoGroup()
-
-    def new_group(self):
-        return _NoGroup()
-
-    def data(self, buffer: BoundBuffer):
-        return self._rt_data[buffer.name]

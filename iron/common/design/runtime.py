@@ -221,7 +221,7 @@ class Sequence:
         size_by=None,
         managed=True,
     ):
-        fn = getattr(self._handle(stream), verb)
+        fn = getattr(self._lane(stream).handle, verb)
         buffer, tap, sliced_by = self._resolve(what, stream)
         offset_by = offset_by or sliced_by
         if offset_by is not None and offset_by.param is None:
@@ -322,11 +322,12 @@ class Sequence:
             out[int(dim)] = value
         return out
 
-    def _handle(self, stream):
+    @staticmethod
+    def _lane(stream) -> _StreamSlot | BoundStream:
         if isinstance(stream, BoundBuffer):
             stream = stream.lanes  # an operand that is its own stream
         if isinstance(stream, (_StreamSlot, BoundStream)):
-            return stream.handle
+            return stream
         raise TypeError(
             f"fill/drain take a stream, one lane of it, or an operand that is its "
             f"own stream, got {stream!r}"
