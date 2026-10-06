@@ -210,7 +210,7 @@ def test_dispatch_modes_bit_identical(dispatch, npu_runtime):
 #     rather than a hand-rolled numpy view. Not covered by
 #     test_dispatch_modes_bit_identical above, since reference() is a CPU
 #     re-implementation and only expected to match the NPU output within
-#     tolerance, not bit-for-bit (see SequenceCompareCallable's tolerance).
+#     tolerance, not bit-for-bit (see StepCallable's compare tolerance).
 # ---------------------------------------------------------------------------
 
 _SLICE_SIZE = 1024
@@ -240,7 +240,7 @@ def _build_packed_output_sequence(dispatch, name):
 
 def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
     """dispatch="reference" must resolve slice-notation buffers via
-    subview() on the CPU backend, matching SequenceXclbinCallable's behaviour,
+    subview() on the CPU backend, matching the xclbin chain's StepCallable,
     and each slice's write must be visible through the parent buffer name.
     """
     rng = np.random.default_rng(0)
@@ -265,8 +265,8 @@ def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
 
 
 # ---------------------------------------------------------------------------
-# 4. Compare mode holds each step to its kernel's contract, and flags (and by
-#    default raises on) a step that falls outside the tolerance it is judged by.
+# 4. Compare mode holds each step to its kernel's contract, and raises on a
+#    step that falls outside the tolerance it is judged by.
 #
 #    Tanh's kernel approximates np.tanh: within its contract, but not
 #    bit-exact. So the same NPU output must pass under the default tolerance
@@ -278,9 +278,8 @@ def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
 def test_compare_mode_judges_each_step_by_its_tolerance(exact, npu_runtime):
     """dispatch="compare" runs the NPU pipeline and, per step, re-runs the
     operator's ``reference()`` on the same NPU inputs. Under its kernel's
-    contract the step runs cleanly (no flagged step); held to exact equality it
-    makes compare mode raise on its own (``raise_on_mismatch`` defaults to
-    True).
+    contract the step runs cleanly; held to exact equality it makes compare
+    mode raise.
     """
     size = 1024
     rng = np.random.default_rng(0)
@@ -308,8 +307,6 @@ def test_compare_mode_judges_each_step_by_its_tolerance(exact, npu_runtime):
             run()
     else:
         run()  # must not raise
-        flagged = any(step.get("mismatch") for step in run.last_step_stats)
-        assert not flagged, "compare mode flagged a step within its kernel contract"
 
 
 # ---------------------------------------------------------------------------

@@ -13,14 +13,7 @@ from aie.utils import bfp
 from ..declare import Operator
 from .allocator import ALIGNMENT, Allocation, ArenaPlan, LiveRange, Pool
 from .artifacts import Artifacts, Design, Step
-from .callable import (
-    BF16,
-    ScratchArena,
-    SequenceCompareCallable,
-    SequenceFullELFCallable,
-    SequenceReferenceCallable,
-    SequenceXclbinCallable,
-)
+from .callable import BF16, FullELFCallable, ScratchArena, StepCallable
 from .coresidence import AdjacentPacking
 from .fused import FusedImage, XclbinChain
 from .fusion import ArgumentSizes
@@ -52,7 +45,7 @@ class OperatorSequence:
             one step at a time. ``"reference"`` builds nothing and runs each
             operator's CPU ``reference()``; ``"compare"`` runs the chain and
             after each step re-runs the reference on the NPU-produced inputs
-            (``SequenceCompareCallable`` judges each step by its
+            (``StepCallable`` judges each step by its
             operator's kernel contract).
         arena: Place the scratch buffers in this shared ``ArenaPlan``
             rather than a private arena. Only the full ELF addresses its
@@ -475,7 +468,7 @@ class OperatorSequence:
         self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
             self.calculate_buffer_layout()
         )
-        image, _ = _MODES[self.mode]
+        image = _MODES[self.mode]
         self._image = image() if image is not None else None
 
     def compile(self, record: str = "memory"):
@@ -583,10 +576,10 @@ class OperatorSequence:
         self.link()
         assert self.mode is not None, "link() chose the mode"
         if self.mode != "fused":
-            return _MODES[self.mode][1](self)
+            return StepCallable(self, compare=self.mode == "compare")
         if self.arena is not None and arena is None:
             arena = ScratchArena(self.arena)
-        return SequenceFullELFCallable(self, arena=arena)
+        return FullELFCallable(self, arena=arena)
 
     def get_layout_for_buffer(self, buffer_name):
         """Return the (buffer_type, offset, length) layout for a named buffer.
@@ -609,11 +602,11 @@ class OperatorSequence:
         return buf_type, offset, length
 
 
-# The modes a sequence can be built in: the image (None builds nothing) and
-# the callable that runs it.
+# The modes a sequence can be built in, and the image each builds (None
+# builds nothing).
 _MODES = {
-    "fused": (FusedImage, SequenceFullELFCallable),
-    "separate": (XclbinChain, SequenceXclbinCallable),
-    "reference": (None, SequenceReferenceCallable),
-    "compare": (XclbinChain, SequenceCompareCallable),
+    "fused": FusedImage,
+    "separate": XclbinChain,
+    "reference": None,
+    "compare": XclbinChain,
 }

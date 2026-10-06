@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -94,82 +95,6 @@ class ScratchArena:
     def view(self, offset: int, nbytes: int, dtype=BF16) -> XRTTensor:
         dtype = np.dtype(dtype)
         return self.tensor.subview(offset, (nbytes // dtype.itemsize,), dtype)
-
-
-class SequenceCallable:
-    """Runs an ``OperatorSequence`` once per call, one buffer per name."""
-
-    def __init__(self, seq):
-        self.op = seq
-        self.last_elapsed = 0.0
-        self._buffer_cache = {}
-        self._allocate_buffers()
-
-    def _make_buffer(self, n_elements, dtype):
-        return XRTTensor((n_elements,), dtype=dtype)
-
-    def _allocate_buffers(self):
-        self._buffers = {}
-        for name, (_, _, length) in self.op.subbuffer_layout.items():
-            dtype = self.op.buffer_dtype(name)
-            self._buffers[name] = self._make_buffer(_n_elements(length, dtype), dtype)
-
-    def _resolve_buffer(self, buf_name):
-        if buf_name in self._buffers:
-            return self._buffers[buf_name]
-        if buf_name in self.op.slice_info:
-            base_name, start_bytes, end_bytes = self.op.slice_info[buf_name]
-            size_bytes = end_bytes - start_bytes
-            dtype = self.op.buffer_dtype(buf_name)
-            sub = self._buffers[base_name].subview(
-                start_bytes, (size_bytes // dtype.itemsize,), dtype
-            )
-            self._buffers[buf_name] = sub
-            return sub
-        raise ValueError(f"Unknown buffer '{buf_name}' in fused runlist")
-
-    def get_buffer(self, buffer_name):
-        if buffer_name not in self._buffer_cache:
-            self._buffer_cache[buffer_name] = self._resolve_buffer(buffer_name)
-        return self._buffer_cache[buffer_name]
-
-    def get_storage(self, buffer_name):
-        """A flat view the host can synchronize that starts with the buffer."""
-        return self.get_buffer(buffer_name)
-
-    def _iter_steps(self):
-        for step_op, *buf_names in self.op.runlist:
-            specs = step_op.buffers
-            if len(specs) != len(buf_names):
-                raise ValueError(
-                    f"Operator {step_op!r} declares {len(specs)} buffers but the "
-                    f"runlist names {len(buf_names)}"
-                )
-            *in_names, out_name = buf_names
-            *in_specs, out_spec = specs
-            yield step_op, in_names, in_specs, out_name, out_spec
-
-    def _sync_inputs(self):
-        for name in self.op.input_args:
-            self._buffers[name].to("npu")
-
-    def _sync_outputs(self):
-        for name in self.op.subbuffer_layout:
-            if name not in self.op.input_args:
-                self._buffers[name].to("cpu")
-
-    def _run(self):
-        raise NotImplementedError
-
-    def write_values(self, values: Mapping[str, np.generic]) -> None:
-        raise NotImplementedError(f"{type(self).__name__} takes no per-call values")
-
-    def __call__(self):
-        self._sync_inputs()
-        t0 = time.perf_counter()
-        self._run()
-        self.last_elapsed = time.perf_counter() - t0
-        self._sync_outputs()
 
 
 class FullELFRun:
@@ -263,15 +188,11 @@ class FullELFRun:
             raise RuntimeError(f"{self.name}: the run ended in {state}")
 
 
-class SequenceFullELFCallable(SequenceCallable):
+class FullELFCallable:
     """The full ELF (NPU2): every operator shares consolidated buffers addressed by offset.
 
     A call dispatches ``run``; ``new_run`` makes more over the same buffers.
     """
-
-    trace_buffer: XRTTensor | None
-    _trace_arg: int | None
-    feedback_buffer: XRTTensor | None
 
     def __init__(
         self,
@@ -289,20 +210,43 @@ class SequenceFullELFCallable(SequenceCallable):
             )
         if arena is not None and arena.plan is not seq.arena:
             raise ValueError(f"{seq.name} was placed in another arena plan")
+        self.op = seq
         self.arena = arena
         self.device_name = device_name
         self.sequence_name = sequence_name
+        self.last_elapsed = 0.0
         self.kernel = NPUKernel(
             elf_path=str(seq.image), kernel_name=f"{device_name}:{sequence_name}"
         )
         self._handle = None
         self._run: FullELFRun | None = None
         self._runs: list[FullELFRun] = []
+        self._buffer_cache = {}
         self._storage_cache = {}
         self._argument_index = {
             kind: index for index, kind in enumerate(seq.buffer_sizes.arguments())
         }
-        super().__init__(seq)
+        sizes = seq.buffer_sizes
+        self.input_buffer = XRTTensor((_n_elements(sizes.input),), dtype=BF16)
+        self.output_buffer = XRTTensor((_n_elements(sizes.output),), dtype=BF16)
+        if arena is None:
+            self.scratch_buffer = XRTTensor((_n_elements(sizes.scratch),), dtype=BF16)
+        else:
+            self.scratch_buffer = arena.tensor
+            self._arena_generation = arena.generation
+        self.feedback_buffer: XRTTensor | None = None
+        if sizes.feedback is not None:
+            self.feedback_buffer = XRTTensor((sizes.feedback,), dtype=np.uint8)
+        # The trace buffer's argument and size are read from the lowered module.
+        self.trace_buffer: XRTTensor | None = None
+        self._trace_arg: int | None = None
+        if seq.traced:
+            layout = get_trace_buffer(
+                self.lowered_mlir_path.read_text(), f"{device_name}:{sequence_name}"
+            )
+            if layout:
+                self._trace_arg = layout["arg_index"]
+                self.trace_buffer = XRTTensor((layout["size"],), dtype=np.int8)
 
     @property
     def handle(self) -> XRTKernelHandle:
@@ -351,30 +295,6 @@ class SequenceFullELFCallable(SequenceCallable):
     def write_values(self, values: Mapping[str, np.generic]) -> None:
         self.run.write_values(values)
 
-    def _allocate_buffers(self):
-        sizes = self.op.buffer_sizes
-        self.input_buffer = XRTTensor((_n_elements(sizes.input),), dtype=BF16)
-        self.output_buffer = XRTTensor((_n_elements(sizes.output),), dtype=BF16)
-        if self.arena is None:
-            self.scratch_buffer = XRTTensor((_n_elements(sizes.scratch),), dtype=BF16)
-        else:
-            self.scratch_buffer = self.arena.tensor
-            self._arena_generation = self.arena.generation
-        self.feedback_buffer = None
-        if sizes.feedback is not None:
-            self.feedback_buffer = XRTTensor((sizes.feedback,), dtype=np.uint8)
-        # The trace buffer's argument and size are read from the lowered module.
-        self.trace_buffer = None
-        self._trace_arg = None
-        if self.op.traced:
-            layout = get_trace_buffer(
-                self.lowered_mlir_path.read_text(),
-                f"{self.device_name}:{self.sequence_name}",
-            )
-            if layout:
-                self._trace_arg = layout["arg_index"]
-                self.trace_buffer = XRTTensor((layout["size"],), dtype=np.int8)
-
     def _arguments(self) -> dict[str, XRTTensor]:
         buffers = {
             "input": self.input_buffer,
@@ -394,15 +314,15 @@ class SequenceFullELFCallable(SequenceCallable):
             )
         return path
 
-    def _get_buffer(self, buffer_name):
-        if buffer_name in self._buffer_cache:
-            return self._buffer_cache[buffer_name]
-        buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
-        parent = self._arguments()[buf_type]
-        dtype = self.op.buffer_dtype(buffer_name)
-        sub = parent.subview(offset, (length // dtype.itemsize,), dtype)
-        self._buffer_cache[buffer_name] = sub
-        return sub
+    def get_buffer(self, buffer_name):
+        self._follow_arena()
+        if buffer_name not in self._buffer_cache:
+            buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
+            dtype = self.op.buffer_dtype(buffer_name)
+            self._buffer_cache[buffer_name] = self._arguments()[buf_type].subview(
+                offset, (length // dtype.itemsize,), dtype
+            )
+        return self._buffer_cache[buffer_name]
 
     def get_storage(self, buffer_name):
         """The buffer and the rest of its last coherence line, which no other buffer holds.
@@ -434,10 +354,6 @@ class SequenceFullELFCallable(SequenceCallable):
         self._buffer_cache.clear()
         self._storage_cache.clear()
 
-    def get_buffer(self, buffer_name):
-        self._follow_arena()
-        return self._get_buffer(buffer_name)
-
     def _sync_inputs(self):
         # Sub-views share their parent's coherence map, so a write through one is flushed.
         self._follow_arena()
@@ -445,13 +361,6 @@ class SequenceFullELFCallable(SequenceCallable):
             tensor.to("npu")
         if self.trace_buffer is not None:
             self.trace_buffer.to("npu")
-
-    def _sync_outputs(self):
-        # Mark device residency so to("cpu") fires after a prior read marked it "cpu".
-        for buffer in (self.output_buffer, self.feedback_buffer, self.trace_buffer):
-            if buffer is not None:
-                buffer.device = "npu"
-                buffer.to("cpu")
 
     def start(self, *runs: FullELFRun) -> None:
         """Push what the host wrote, and start ``runs`` without waiting."""
@@ -476,183 +385,152 @@ class SequenceFullELFCallable(SequenceCallable):
         for run in runs:
             run.wait()
         self.last_elapsed = time.perf_counter() - t0
-        self._sync_outputs()
-
-
-class SequenceXclbinCallable(SequenceCallable):
-    """Executes each runlist step as its own xclbin dispatch, buffers shared by name."""
-
-    def __init__(self, seq):
-        _require_xrt()
-        super().__init__(seq)
-
-    def _allocate_buffers(self):
-        super()._allocate_buffers()
-        chain = self.op._image
-        self._op_callable_map = {
-            op_id: NPUKernel(
-                chain.image,
-                design.get_cache_entry().insts,
-                kernel_name=chain.labels[op_id],
-                dispatch_params=design.dispatch_params,
-                dispatch_lib_path=design.get_dispatch_lib_path(),
-            )
-            for op_id, design in chain.designs.items()
-        }
-        self.dispatch_values = {}
-        self._execution_plan = [
-            (
-                self._op_callable_map[id(step_op)],
-                [self._resolve_buffer(name) for name in buf_names],
-            )
-            for step_op, *buf_names in self.op.runlist
-        ]
-
-    def write_values(self, values: Mapping[str, np.generic]) -> None:
-        """Each kernel takes its values as dispatch-time scalars."""
-        self.dispatch_values = dict(values)
-
-    def _run(self):
-        for step_idx, ((kernel, args), step) in enumerate(
-            zip(self._execution_plan, self._iter_steps())
-        ):
-            self._run_step(step_idx, kernel, args, step)
-
-    def _run_step(self, step_idx, kernel, args, step):
-        scalars = {name: self.dispatch_values[name] for name in kernel.dispatch_params}
-        kernel(*args, **scalars)
-
-    def _sync_outputs(self):
         # Mark device residency so to("cpu") fires after a prior read marked it "cpu".
-        for name in self.op.subbuffer_layout:
-            if name not in self.op.input_args:
-                buf = self._buffers[name]
-                buf.device = "npu"
-                buf.to("cpu")
+        for buffer in (self.output_buffer, self.feedback_buffer, self.trace_buffer):
+            if buffer is not None:
+                buffer.device = "npu"
+                buffer.to("cpu")
 
 
-def _reshape_for_spec(flat_tensor, spec):
-    n = int(np.prod(spec.shape)) if spec.shape else 1
-    return flat_tensor[:n].reshape(spec.shape)
+class StepCallable:
+    """Runs a sequence one runlist step at a time, its buffers shared by name.
 
-
-class SequenceReferenceCallable(SequenceCallable):
-    """Pure-CPU evaluation via each operator's ``reference()``."""
-
-    def _make_buffer(self, n_elements, dtype):
-        return CPUOnlyTensor((n_elements,), dtype=dtype)
-
-    def _sync_inputs(self):
-        pass
-
-    def _run(self):
-        for step_op, in_names, in_specs, out_name, out_spec in self._iter_steps():
-            inputs = [
-                _reshape_for_spec(self._resolve_buffer(n).numpy_view(), s).copy()
-                for n, s in zip(in_names, in_specs)
-            ]
-            out = step_op.reference(*inputs)
-            out_flat = self._resolve_buffer(out_name).numpy_view()
-            n_out = int(np.prod(out_spec.shape)) if out_spec.shape else 1
-            out_flat[:n_out] = out.reshape(-1).astype(out_flat.dtype)
-
-
-class SequenceCompareCallable(SequenceXclbinCallable):
-    """Runs the xclbin chain, checking each step's reference on the NPU's own inputs.
-
-    The NPU output propagates, so each comparison isolates one operator.
+    On an ``XclbinChain`` each step is its own xclbin dispatch, taking the
+    per-call values as dispatch-time scalars; with no image each step is its
+    operator's ``reference()`` on the host. ``compare`` holds each dispatched
+    step to its reference on the inputs the NPU gave it, so the NPU output
+    propagates and each comparison isolates one operator; ``tolerance``, when
+    set, is the gate in place of each step's own.
     """
 
     # compare cannot judge a range-relative tolerance element by element.
     FALLBACK_TOLERANCE = Tolerance.relative(0.025, 1e-2)
 
-    def __init__(
-        self,
-        seq,
-        tolerance: Tolerance | None = None,
-        raise_on_mismatch: bool = True,
-    ):
-        super().__init__(seq)
-        self.tolerance = tolerance
-        self.raise_on_mismatch = raise_on_mismatch
-        self.last_step_stats = []
+    def __init__(self, seq, compare: bool = False):
+        chain = seq._image
+        if chain is not None:
+            _require_xrt()
+        self.op = seq
+        self.compare = compare
+        self.tolerance: Tolerance | None = None
+        self.last_elapsed = 0.0
+        self.dispatch_values: dict[str, np.generic] = {}
+        self._on_npu = chain is not None
+        tensor = XRTTensor if self._on_npu else CPUOnlyTensor
+        self._buffers = {}
+        for name, (_, _, length) in seq.subbuffer_layout.items():
+            dtype = seq.buffer_dtype(name)
+            self._buffers[name] = tensor((_n_elements(length, dtype),), dtype=dtype)
+        kernels = {}
+        if chain is not None:
+            kernels = {
+                op_id: NPUKernel(
+                    chain.image,
+                    design.get_cache_entry().insts,
+                    kernel_name=chain.labels[op_id],
+                    dispatch_params=design.dispatch_params,
+                    dispatch_lib_path=design.get_dispatch_lib_path(),
+                )
+                for op_id, design in chain.designs.items()
+            }
+        self._steps = []
+        for step_op, *names in seq.runlist:
+            if len(step_op.buffers) != len(names):
+                raise ValueError(
+                    f"Operator {step_op!r} declares {len(step_op.buffers)} buffers "
+                    f"but the runlist names {len(names)}"
+                )
+            args = [self.get_buffer(name) for name in names]
+            kernel = kernels[id(step_op)] if self._on_npu else None
+            self._steps.append((step_op, kernel, names, args))
 
-    def step_tolerance(self, op: Operator) -> Tolerance:
-        if self.tolerance is not None:
-            return self.tolerance
-        tol = op.resolved().tolerance()
-        if tol is None or tol.range_frac is not None:
-            return self.FALLBACK_TOLERANCE
-        return tol
-
-    def _read_to_cpu(self, name, spec):
-        buf = self._resolve_buffer(name)
-        buf.to("cpu")
-        n = int(np.prod(spec.shape)) if spec.shape else 1
-        return buf.numpy_view()[:n].copy().reshape(spec.shape)
-
-    def _run(self):
-        self.last_step_stats = []
-        super()._run()
-
-    def _run_step(self, step_idx, kernel, args, step):
-        step_op, in_names, in_specs, out_name, out_spec = step
-
-        cpu_inputs = [
-            self._read_to_cpu(name, spec) for name, spec in zip(in_names, in_specs)
-        ]
-
-        super()._run_step(step_idx, kernel, args, step)
-
-        npu_raw = self._read_to_cpu(out_name, out_spec)
-        npu_out = npu_raw.astype(np.float32)
-        ref_out = step_op.reference(*cpu_inputs)
-
-        stats = {
-            "step": step_idx,
-            "op": type(step_op).__name__,
-            "op_name": step_op.name,
-            "inputs": list(in_names),
-            "output": out_name,
-        }
-
-        ref_flat = ref_out.reshape(out_spec.shape).astype(np.float32)
-        diff = np.abs(npu_out - ref_flat)
-        ref_mag = np.abs(ref_flat)
-        max_abs = float(diff.max())
-        ref_max = float(ref_mag.max())
-        rel = float((diff / (ref_mag + 1e-6)).max())
-        mean_abs = float(diff.mean())
-        stats.update(
-            skipped=False,
-            max_abs=max_abs,
-            mean_abs=mean_abs,
-            max_rel=rel,
-            ref_max=ref_max,
-        )
-        tol = self.step_tolerance(step_op)
-        bound = tol.bound(*cpu_inputs) if tol.bound is not None else None
-        verdict = compare(npu_raw, ref_flat, tol, bound=bound)
-        fail = not verdict
-        stats["mismatch"] = fail
-        level = logging.ERROR if fail else logging.INFO
-        logger.log(
-            level,
-            "[compare step %d] %s -> %s: max_abs=%.4g mean_abs=%.4g max_rel=%.4g ref_max=%.4g%s",
-            step_idx,
-            stats["op"],
-            out_name,
-            max_abs,
-            mean_abs,
-            rel,
-            ref_max,
-            f"  MISMATCH: {verdict.detail}" if fail else "",
-        )
-        if fail and self.raise_on_mismatch:
-            raise RuntimeError(
-                f"[compare step {step_idx}] {stats['op']} (name={stats['op_name']}) "
-                f"-> {out_name}: NPU output deviates from reference "
-                f"({verdict.detail}; max_abs={max_abs:.4g}, max_rel={rel:.4g}, "
-                f"ref_max={ref_max:.4g}; inputs={list(in_names)}; tolerance {tol})"
+    def get_buffer(self, buffer_name):
+        if buffer_name not in self._buffers:
+            if buffer_name not in self.op.slice_info:
+                raise ValueError(f"Unknown buffer '{buffer_name}' in the runlist")
+            base_name, start, end = self.op.slice_info[buffer_name]
+            dtype = self.op.buffer_dtype(buffer_name)
+            self._buffers[buffer_name] = self._buffers[base_name].subview(
+                start, ((end - start) // dtype.itemsize,), dtype
             )
-        self.last_step_stats.append(stats)
+        return self._buffers[buffer_name]
+
+    get_storage = get_buffer
+
+    def write_values(self, values: Mapping[str, np.generic]) -> None:
+        if not self._on_npu:
+            raise NotImplementedError("the reference mode takes no per-call values")
+        self.dispatch_values = dict(values)
+
+    def __call__(self):
+        if self._on_npu:
+            for name in self.op.input_args:
+                self._buffers[name].to("npu")
+        t0 = time.perf_counter()
+        for index, (step_op, kernel, names, args) in enumerate(self._steps):
+            *in_specs, out_spec = step_op.buffers
+            if kernel is None or self.compare:
+                inputs = [
+                    buf.to("cpu")
+                    .numpy_view()[: math.prod(spec.shape)]
+                    .reshape(spec.shape)
+                    .copy()
+                    for buf, spec in zip(args, in_specs)
+                ]
+            if kernel is None:
+                out = args[-1].numpy_view()
+                n = math.prod(out_spec.shape)
+                out[:n] = step_op.reference(*inputs).reshape(-1).astype(out.dtype)
+                continue
+            kernel(
+                *args,
+                **{name: self.dispatch_values[name] for name in kernel.dispatch_params},
+            )
+            if self.compare:
+                self._check(index, step_op, names, inputs, args[-1], out_spec)
+        self.last_elapsed = time.perf_counter() - t0
+        if self._on_npu:
+            # Mark device residency so to("cpu") fires after a prior read marked it "cpu".
+            for name in self.op.subbuffer_layout:
+                if name not in self.op.input_args:
+                    self._buffers[name].device = "npu"
+                    self._buffers[name].to("cpu")
+
+    def _check(self, index, step_op: Operator, names, inputs, out, spec) -> None:
+        """Hold step ``index``'s NPU output to its reference on the same inputs.
+
+        Raises:
+            RuntimeError: The output is outside the step's tolerance.
+        """
+        npu = out.to("cpu").numpy_view()[: math.prod(spec.shape)].copy()
+        npu = npu.reshape(spec.shape)
+        ref = step_op.reference(*inputs).reshape(spec.shape).astype(np.float32)
+        diff = np.abs(npu.astype(np.float32) - ref)
+        figures = (
+            f"max_abs={float(diff.max()):.4g}, mean_abs={float(diff.mean()):.4g}, "
+            f"max_rel={float((diff / (np.abs(ref) + 1e-6)).max()):.4g}, "
+            f"ref_max={float(np.abs(ref).max()):.4g}"
+        )
+        tol = self.tolerance
+        if tol is None:
+            tol = step_op.resolved().tolerance()
+            if tol is None or tol.range_frac is not None:
+                tol = self.FALLBACK_TOLERANCE
+        verdict = compare(
+            npu, ref, tol, bound=tol.bound(*inputs) if tol.bound is not None else None
+        )
+        *in_names, out_name = names
+        logger.info(
+            "[compare step %d] %s -> %s: %s",
+            index,
+            type(step_op).__name__,
+            out_name,
+            figures,
+        )
+        if not verdict:
+            raise RuntimeError(
+                f"[compare step {index}] {type(step_op).__name__} "
+                f"(name={step_op.name}) -> {out_name}: NPU output deviates from "
+                f"reference ({verdict.detail}; {figures}; inputs={in_names}; "
+                f"tolerance {tol})"
+            )

@@ -24,7 +24,7 @@ the empty reset configure ``R`` when the entries are odd, and each step's
 A round runs every configuration ``calls`` times, and the figure is the
 median over ``rounds`` of each round's median, the configurations of one
 measurement interleaved. Only the run is timed
-(``SequenceCallable.last_elapsed``), not
+(the callable's ``last_elapsed``), not
 the host syncs around it. Hold the NPU: nothing else may dispatch meanwhile.
 """
 
@@ -40,7 +40,7 @@ import numpy as np
 from ..declare import Direction, Operator
 from ..declare.bound import BoundBuffer, BoundValue
 from ..design import device_symbol
-from ..image.callable import SequenceCallable
+from ..image.callable import FullELFCallable, StepCallable
 from ..image.sequence import OperatorSequence
 from .narrowing import Calibration, CostTable, StepCost, Variant, cost_key
 
@@ -185,7 +185,9 @@ class Standalone:
         )
 
 
-def time_interleaved(runs: Sequence[SequenceCallable], timing: Timing) -> list[float]:
+def time_interleaved(
+    runs: Sequence[FullELFCallable | StepCallable], timing: Timing
+) -> list[float]:
     """Each loaded image's median of per-round medians, microseconds, of the
     run alone, interleaved.
     """

@@ -37,13 +37,13 @@ from pathlib import Path
 import numpy as np
 from aie.utils.trace import TraceConfig, print_cycles_summary
 
-from .image.callable import SequenceCallable, SequenceFullELFCallable
+from .image.callable import FullELFCallable, StepCallable
 
 __all__ = ["dump_traces"]
 
 
 def dump_traces(
-    run: SequenceCallable,
+    run: FullELFCallable | StepCallable,
     trace_file: str | Path,
     *,
     colshift: int | None = None,
@@ -66,7 +66,7 @@ def dump_traces(
     Override it when that alignment picks the wrong columns. ``mlir`` is the
     lowered module the parser reads, the build's own unless given.
     """
-    if not isinstance(run, SequenceFullELFCallable):
+    if not isinstance(run, FullELFCallable):
         if run.op.traced:
             raise TypeError(
                 f"{type(run).__name__} was built with tracing enabled but has no "
