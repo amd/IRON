@@ -30,13 +30,22 @@ G, H, D, L = 8, 32, 64, 2048
 POSITIONS = (L, 300, 1, 2047, 127, 128, 129, 1000, 1024, 1025, 64, 2)
 
 
-pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
+NPU2 = pytest.mark.supported_devices("npu2")
 
 
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("columns", [None, 4], ids=["widest", "npu1_columns"])
 @pytest.mark.parametrize(
-    "boundaries", [None, iron.each_step], ids=["full_elf", "xclbin"]
+    "boundaries,columns",
+    [
+        pytest.param(None, None, id="full_elf-widest", marks=NPU2),
+        pytest.param(None, 4, id="full_elf-npu1_columns", marks=NPU2),
+        pytest.param(
+            iron.each_step,
+            None,
+            id="xclbin-widest",
+            marks=pytest.mark.supported_devices("npu1", "npu2"),
+        ),
+        pytest.param(iron.each_step, 4, id="xclbin-npu1_columns", marks=NPU2),
+    ],
 )
 def test_attention_follows_the_per_call_context(npu_runtime, boundaries, columns):
     class Attend(iron.Graph):
