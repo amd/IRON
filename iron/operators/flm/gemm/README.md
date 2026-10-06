@@ -408,7 +408,7 @@ memtile BDs are device configuration, so a resident fifo would put K (buffer
 size) and M (replay count) into the xclbin every shape shares.
 
 So B does not use an ObjectFifo. The **device** side is shape-independent,
-built in `array()` and handed to the Runtime with `target.register`:
+built in `array()` and returned from it with the Workers:
 
 * per column, a memtile pool of `B_SLOTS` k-block slots with one producer and
   one consumer lock per slot, and an L1 ring on each core fed by a static

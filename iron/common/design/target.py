@@ -5,35 +5,30 @@
 
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, ClassVar
 
 import numpy as np
-from aie.iron import WorkerRuntimeBarrier
 
 
+@dataclass(frozen=True)
 class Target:
     """What an operator's ``array()`` is given besides the operator itself.
 
-    The device, the image the array is built for, and what the build must
-    be told of: the barriers the preamble releases and the objects
-    ``register`` hands the Runtime.
+    Attributes:
+        dev: The device the array is built for.
+        image: ``"elf"``, where per-call values reach the array through the
+            parameter scratchpad, or ``"xclbin"``, which has none: there
+            they are dispatch-time scalars of the sequence, and a core-read
+            value is a resident the sequence writes.
     """
 
-    # One bank of a core's local memory. AIE2 and AIE2P both have eight 8 KB
-    # banks, and a fifo object spanning more than one cannot be double-
-    # buffered in what is left; the target model gives the total
-    # (Device.core_memory_bytes) but not the banking.
-    L1_BANK_BYTES = 8192
+    dev: Any
+    image: str = "elf"
 
-    def __init__(self, dev, image: str = "elf"):
-        self.dev = dev
-        # "elf": per-call values reach the array through the parameter
-        # scratchpad. "xclbin": an xclbin run has none; they are dispatch-
-        # time scalars of the sequence, and a core-read value is a resident
-        # the sequence writes (bind it to the runtime-parameter buffer).
-        self.image = image
-        self.barriers: list[Any] = []
-        self.registered: list[Any] = []
+    # AIE2 and AIE2P both have eight 8 KB banks of core memory; the target
+    # model gives the total (Device.core_memory_bytes) but not the banking.
+    L1_BANK_BYTES: ClassVar[int] = 8192
 
     @classmethod
     def fifo_depth(cls, elements: int, dtype) -> int:
@@ -41,23 +36,3 @@ class Target:
         two, or one when an object spans more than a bank.
         """
         return 1 if elements * np.dtype(dtype).itemsize > cls.L1_BANK_BYTES else 2
-
-    def barrier(self, initial_value: int = 0):
-        """A worker/runtime barrier the preamble sets to 1 after writing residents."""
-        b = WorkerRuntimeBarrier(initial_value)
-        self.barriers.append(b)
-        return b
-
-    def register(self, obj):
-        """An explicit ``Flow``, ``Lock`` or ``TileDma`` the runtime must
-        know of; returns it.
-
-        A fifo reaches the program through its handles, a buffer through the
-        worker or the DMA task that takes it. These reach it through neither:
-        a flow only the sequence transfers on, a lock only DMA descriptors
-        and the sequence touch. The build hands each to the Runtime
-        (``add_flow``, ``add_lock``, ``add_tile_dma``) before the program
-        resolves.
-        """
-        self.registered.append(obj)
-        return obj

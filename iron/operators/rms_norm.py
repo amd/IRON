@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import numpy as np
-from aie.iron import Buffer, ObjectFifo, Worker
+from aie.iron import Buffer, ObjectFifo, Worker, WorkerRuntimeBarrier
 from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise, norm
 from aie.utils.verify import Tolerance
@@ -134,7 +134,7 @@ class RMSNorm(Rowwise):
                 for k in range(2 * n_cores)
             ]
         )
-        barriers = [target.barrier() for _ in range(2 * n_cores)]
+        barriers = [WorkerRuntimeBarrier() for _ in range(2 * n_cores)]
 
         def core_norm(of_in, of_out, rms, count, barrier):
             barrier.wait_for_value(1)
@@ -197,4 +197,4 @@ class RMSNorm(Rowwise):
             self.weight.lane(j).bind(of_ws[j].prod())
         if not dynamic:
             self.count.bind(counts)
-        return workers
+        return workers + barriers

@@ -51,7 +51,7 @@ import dataclasses
 from typing import ClassVar, Self
 
 import numpy as np
-from aie.iron import Buffer, ObjectFifo, Worker, ceildiv
+from aie.iron import Buffer, ObjectFifo, Worker, WorkerRuntimeBarrier, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.kernel import ExternalFunction
 from aie.iron.kernels import Param
@@ -287,7 +287,7 @@ class Elementwise(Operator):
                 for k in range(cores)
             ]
         )
-        barriers = [target.barrier() for _ in range(cores)]
+        barriers = [WorkerRuntimeBarrier() for _ in range(cores)]
 
         def core_fn(*args):
             fifos_in = args[:n_in]
@@ -325,7 +325,7 @@ class Elementwise(Operator):
                 stream[k].bind(of[k].cons())
         if not dynamic:
             self.count.bind(counts)
-        return workers
+        return workers + barriers
 
 
 # --------------------------------------------------------------------------

@@ -38,6 +38,7 @@ from aie.iron import (
     Release,
     TileDma,
     Worker,
+    WorkerRuntimeBarrier,
 )
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
@@ -574,26 +575,28 @@ class GEMM(Operator):
         # once per unit and refilled only when all of them have, independently
         # of the other slots, so the next column-block's refill trails the
         # replay by one slot instead of waiting for the whole block.
+        # Flows, locks and DMAs only the sequence and descriptors reach.
+        unrouted: list = []
         b_mt_prod, b_mt_cons = [], []
         for c in range(COLS):
             for locks, side in ((b_mt_prod, "prod"), (b_mt_cons, "cons")):
-                locks.append(
-                    [
-                        target.register(
-                            Lock(mt_tiles[c], init=0, name=f"b_mt_{side}_{c}_{i}")
-                        )
-                        for i in range(B_SLOTS)
-                    ]
-                )
+                slots = [
+                    Lock(mt_tiles[c], init=0, name=f"b_mt_{side}_{c}_{i}")
+                    for i in range(B_SLOTS)
+                ]
+                locks.append(slots)
+                unrouted += slots
         b_shim_flows = [
-            target.register(Flow(shim_tiles[c], mt_tiles[c], shim_symbol=f"B_L3L2_{c}"))
+            Flow(shim_tiles[c], mt_tiles[c], shim_symbol=f"B_L3L2_{c}")
             for c in range(COLS)
         ]
+        unrouted += b_shim_flows
         # One source, ROWS destinations: a circuit-switched broadcast.
         b_bcast_flows = [
-            target.register(Flow(mt_tiles[c], [ct_tiles[r][c] for r in range(ROWS)]))
+            Flow(mt_tiles[c], [ct_tiles[r][c] for r in range(ROWS)])
             for c in range(COLS)
         ]
+        unrouted += b_bcast_flows
 
         # The cores' end is static: a ring of L1_B_DEPTH buffers any shape
         # uses the same way, filled by a looping BD chain and consumed under
@@ -606,12 +609,11 @@ class GEMM(Operator):
                     Buffer(ct_b_ty, name=f"b_l1_{r}_{c}_{d}", tile=tile)
                     for d in range(L1_B_DEPTH)
                 ]
-                prod = target.register(
-                    Lock(tile, init=L1_B_DEPTH, name=f"b_l1_prod_{r}_{c}")
-                )
-                cons = target.register(Lock(tile, init=0, name=f"b_l1_cons_{r}_{c}"))
+                prod = Lock(tile, init=L1_B_DEPTH, name=f"b_l1_prod_{r}_{c}")
+                cons = Lock(tile, init=0, name=f"b_l1_cons_{r}_{c}")
                 b_l1[(r, c)] = (bufs, prod, cons)
-                target.register(
+                unrouted += [prod, cons]
+                unrouted.append(
                     TileDma(
                         tile,
                         [
@@ -672,7 +674,7 @@ class GEMM(Operator):
             ]
             for r in range(ROWS)
         ]
-        barriers = [[target.barrier() for _ in range(COLS)] for _ in range(ROWS)]
+        barriers = [[WorkerRuntimeBarrier() for _ in range(COLS)] for _ in range(ROWS)]
 
         # --- Compute ------------------------------------------------------
         def core_fn(
@@ -813,7 +815,7 @@ class GEMM(Operator):
         if "n_chunks" in rtp_slots:
             self.n_chunks.bind(flat, rtp_slots["n_chunks"])
             self.n_units.bind(flat, rtp_slots["n_units"])
-        return workers
+        return workers + unrouted + [b for row in barriers for b in row]
 
     # -- geometry of one dispatch ------------------------------------------------
 

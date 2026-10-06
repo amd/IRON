@@ -11,7 +11,7 @@ from typing import Any
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.ir import IntegerType
-from aie.iron import TaskGroup, sync_parameters
+from aie.iron import TaskGroup, WorkerRuntimeBarrier, sync_parameters
 
 from ..declare import Operator
 from ..declare.bound import (
@@ -22,7 +22,6 @@ from ..declare.bound import (
     _StreamSlot,
 )
 from .bd import BdLimits
-from .target import Target
 
 
 class Sequence:
@@ -41,11 +40,16 @@ class Sequence:
     """
 
     def __init__(
-        self, op: Operator, rt_data: dict[str, Any], target: Target | None = None
+        self,
+        op: Operator,
+        rt_data: dict[str, Any],
+        image: str = "elf",
+        barriers: tuple[WorkerRuntimeBarrier, ...] = (),
     ):
         self.op = op
         self._rt_data = rt_data
-        self.target = target
+        self.image = image
+        self.barriers = barriers
 
     def run(self) -> None:
         """The transfers: the operator's override, else the one derived from
@@ -370,7 +374,7 @@ class Sequence:
         """The runtime-sequence argument for ``buffer`` (for hand-rolled transfers)."""
         return self._rt_data[buffer.name]
 
-    def preamble(self, target: Target | None = None, **values) -> None:
+    def preamble(self, **values) -> None:
         """Residents, then barriers, then the parameter sync, before any DMA.
 
         The build runs it ahead of the sequence unless the operator sets
@@ -379,9 +383,6 @@ class Sequence:
         writing (a slab of a larger dispatch, say).
         """
         op = self.op
-        target = target or self.target
-        if target is None:
-            raise ValueError("preamble() needs the Target the array was built on")
         residents = op.residents
         unknown = set(values) - set(residents)
         if unknown:
@@ -413,10 +414,10 @@ class Sequence:
                     raise ValueError(
                         f"{value.name} is bound to a runtime-parameter buffer but is "
                         f"not a dispatch-time scalar here; bind only under an image "
-                        f"without a scratchpad (target.image != 'elf')"
+                        f"without a scratchpad (an xclbin image)"
                     )
                 buf[index] = value.ssa
-        for b in target.barriers:
+        for b in self.barriers:
             b.set(1)
-        if target.image == "elf" and op.values:
+        if self.image == "elf" and op.values:
             sync_parameters()

@@ -193,8 +193,8 @@ reuse lint
      the bound device's `shim_dma_channels_in`/`out`; its `residents` the
      derived values the preamble writes once per build
    - `design/`: the library-owned build: the `Target` an
-     array is built against (its device, image, barriers and registered
-     objects), `build_design(op, image)` (the module for one operator),
+     array is built against (its device and image),
+     `build_design(op, image)` (the module for one operator),
      `OperatorDesign` (that module as mlir-aie's `CompilableDesign`
      compiles and caches it), the derived runtime sequence (`Sequence`,
      its `split`/`round_robin`), `ExternalSequence` (the sequence
@@ -347,9 +347,11 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      `param(..., array=True)`
    - `array(target)`: build ObjectFIFOs and Workers (`self.kernel()` or a
      factory's `ExternalFunction`, `Buffer(..., use_write_rtp=True)` for a
-     runtime parameter, `target.barrier()`), `range_()` for loops, and
+     runtime parameter, `WorkerRuntimeBarrier()`), `range_()` for loops, and
      `self.x.lane(i).bind(fifo.prod())` / `self.count.bind(rtps)` for every
-     member. It sees the array tier alone: reading an extent raises
+     member. It returns what it built: its Workers, its barriers and any
+     `Flow`, `Lock` or `TileDma` only the sequence reaches. It sees the
+     array tier alone: reading an extent raises
    - `compatible()` for divisibility against the resolved tunables
    - `sequence(rt)` only if the derived sequence is not the one you want:
      `rt.fill(self.A.lane(i), access)`, `rt.drain(self.C.lane(i), access)`

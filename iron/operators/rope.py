@@ -16,7 +16,7 @@ for the halves, so with those weights it must be the halves
 import dataclasses
 
 import numpy as np
-from aie.iron import Buffer, ObjectFifo, Worker, ceildiv, kernels
+from aie.iron import Buffer, ObjectFifo, Worker, WorkerRuntimeBarrier, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import datamovement
@@ -177,7 +177,7 @@ class RoPE(Operator):
             )
             if d
         ]
-        barriers = [target.barrier() for _ in range(n)]
+        barriers = [WorkerRuntimeBarrier() for _ in range(n)]
 
         def core_body(of_in, of_lut, of_out, rope_kernel, counts, barrier, *words):
             barrier.wait_for_value(1)
@@ -223,7 +223,7 @@ class RoPE(Operator):
             self.lut_rows.bind(counts, static.index("lut_rows"))
         if not dyn_rows:
             self.rows_per_lut.bind(counts, static.index("rows_per_lut"))
-        return workers
+        return workers + barriers
 
     def ops(self) -> int:
         kernel = kernels.datamovement.rope(self.cols, two_halves=self.method_type == 0)

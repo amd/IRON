@@ -24,6 +24,8 @@ from aie.iron import (
     Runtime,
     ScratchpadParameter,
     TileDma,
+    Worker,
+    WorkerRuntimeBarrier,
 )
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from aie.utils.trace import events as trace_events
@@ -110,9 +112,9 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
                 )
             value.param = dispatch[value.symbol]
 
-    workers = op.build_array(target)
-    if workers is None:
-        workers = []
+    built = op.build_array(target) or []
+    workers = [w for w in built if isinstance(w, Worker)]
+    barriers = tuple(b for b in built if isinstance(b, WorkerRuntimeBarrier))
 
     streams = list(op.streams.values())
     handles = [h for s in streams for h in s.handles]  # raises if any stream is unbound
@@ -128,25 +130,25 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
             # A dispatch parameter arrives in the body as its live scalar.
             for value, scalar in zip(values, args[len(buffers) + 1 :]):
                 value.ssa = scalar
-        seq = Sequence(op, rt_data, target)
+        seq = Sequence(op, rt_data, image, barriers)
         if not op.own_preamble:
             seq.preamble()
         seq.run()
 
     rt = Runtime(sequence, fn_args + params)
-    # What array() registered on the target: before the program resolves,
-    # since the sequence body, which runs last, may address all of it.
-    for obj in target.registered:
+    # Before the program resolves, since the sequence body, which runs last,
+    # may address all of it.
+    for obj in built:
         if isinstance(obj, (Flow, PacketFlow)):
             rt.add_flow(obj)
         elif isinstance(obj, Lock):
             rt.add_lock(obj)
         elif isinstance(obj, TileDma):
             rt.add_tile_dma(obj)
-        else:
+        elif not isinstance(obj, (Worker, WorkerRuntimeBarrier)):
             raise TypeError(
-                f"target.register takes a Flow, PacketFlow, Lock or TileDma, "
-                f"got {obj!r}"
+                f"{type(op).__name__}.array() returns Workers, WorkerRuntimeBarriers, "
+                f"Flows, PacketFlows, Locks and TileDmas; got {obj!r}"
             )
     prog = Program(op.device(target), rt, workers=workers)
     if op.trace is not None:

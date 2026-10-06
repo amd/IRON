@@ -8,7 +8,15 @@ from typing import Any
 import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker, ceildiv, kernels
+from aie.iron import (
+    Buffer,
+    ObjectFifo,
+    TaskGroup,
+    Worker,
+    WorkerRuntimeBarrier,
+    ceildiv,
+    kernels,
+)
 from aie.iron.controlflow import range_
 from aie.iron.device import NPU1, NPU2, Device, NPU1Col1, NPU1Col2, Tile
 from aie.utils.verify import Tolerance
@@ -364,7 +372,8 @@ class GEMM(Operator):
             for row in range(n_aie_rows)
         ]
         workerBarriers = [
-            [target.barrier() for col in range(n_aie_cols)] for row in range(n_aie_rows)
+            [WorkerRuntimeBarrier() for col in range(n_aie_cols)]
+            for row in range(n_aie_rows)
         ]
 
         # Input A
@@ -528,7 +537,7 @@ class GEMM(Operator):
         ]
         self.k_div_k.bind(flat_rtps, 0)
         self.n_tiles.bind(flat_rtps, 1)
-        return workers
+        return workers + [b for row in workerBarriers for b in row]
 
     # -- the runtime sequence --------------------------------------------------
 

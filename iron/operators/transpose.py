@@ -6,7 +6,7 @@ import dataclasses
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker
+from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker, WorkerRuntimeBarrier
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import datamovement
@@ -227,7 +227,7 @@ class Transpose(Operator):
             Buffer(i32x3, name=f"counts_{k}", use_write_rtp=True)
             for k in range(n_cores)
         ]
-        barriers = [target.barrier() for _ in range(n_cores)]
+        barriers = [WorkerRuntimeBarrier() for _ in range(n_cores)]
 
         def core_body(of_in, of_out, transpose, counts, barrier):
             barrier.wait_for_value(1)
@@ -257,7 +257,7 @@ class Transpose(Operator):
         self.batches.bind(counts, 0)
         self.col_tiles.bind(counts, 1)
         self.chan_tiles.bind(counts, 2)
-        return workers
+        return workers + barriers
 
     def sequence(self, rt):
         """One task group per batch (a parallel fill+drain over all cores), so the

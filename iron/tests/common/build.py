@@ -37,7 +37,6 @@ from iron.common import (
 from iron.common.design import (
     OperatorDesign,
     Sequence,
-    Target,
     build_design,
 )
 from iron.operators import ElementwiseAdd
@@ -264,7 +263,7 @@ def test_preamble_rejects_a_resident_the_array_never_bound(npu2):
         count = Value(np.int32, derive=lambda op: op.n // op.tile)
 
     with pytest.raises(ValueError, match="never bound this value"):
-        Sequence(Op(n=64), {}).preamble(Target(npu2))
+        Sequence(Op(n=64), {}).preamble()
 
 
 def test_mha_sequence_is_one_descriptor_set_per_kv_group():

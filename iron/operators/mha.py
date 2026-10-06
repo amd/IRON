@@ -29,7 +29,15 @@ import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.helpers.dialects.scf import else_, if_
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker, ceildiv, kernels
+from aie.iron import (
+    Buffer,
+    ObjectFifo,
+    TaskGroup,
+    Worker,
+    WorkerRuntimeBarrier,
+    ceildiv,
+    kernels,
+)
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 from aie.iron.kernels.linalg import mm_stream_dims
@@ -750,7 +758,7 @@ class MHA(Operator):
             for j in range(3)
         ]
         worker_barrier_list = [
-            [target.barrier() for _ in range(num_pipelines)] for _ in range(3)
+            [WorkerRuntimeBarrier() for _ in range(num_pipelines)] for _ in range(3)
         ]
 
         matmul_workers, softmax_workers, matmul_pv_workers = [], [], []
@@ -856,7 +864,8 @@ class MHA(Operator):
             if name not in per_call:
                 getattr(self, name).bind(flat_rtps, i)
 
-        return matmul_workers + softmax_workers + matmul_pv_workers
+        workers = matmul_workers + softmax_workers + matmul_pv_workers
+        return workers + [b for stage in worker_barrier_list for b in stage]
 
     def ops(self) -> int:
         """Q K^T and its product with V, causal, per head: a query attends

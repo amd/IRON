@@ -9,7 +9,14 @@ import aie.dialects.index as index
 import numpy as np
 from aie.dialects.aie import AIEArch, T
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker, ceildiv
+from aie.iron import (
+    Buffer,
+    ObjectFifo,
+    TaskGroup,
+    Worker,
+    WorkerRuntimeBarrier,
+    ceildiv,
+)
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import activation, linalg
@@ -327,7 +334,7 @@ class GEMV(Operator):
                 for i in range(cols)
             ]
         )
-        barriers = [target.barrier() for _ in range(cols)]
+        barriers = [WorkerRuntimeBarrier() for _ in range(cols)]
 
         def core_body(A_fifo, B_fifo, C_fifo, matvec, tiles, barrier, gelu_kernel=None):
             barrier.wait_for_value(1)
@@ -370,7 +377,7 @@ class GEMV(Operator):
             self.C.lane(i).bind(C_fifos[i].cons())
         if not dynamic:
             self.tiles.bind(tiles)
-        return workers
+        return workers + barriers
 
     def sequence(self, rt):
         """The runtime sequence: B, the whole vector, once to every column,
