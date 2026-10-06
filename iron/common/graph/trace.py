@@ -8,7 +8,7 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import math
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Iterable, Mapping
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
@@ -191,7 +191,12 @@ class Tracer:
 
     checks = True
 
-    def __init__(self, name: str, names: dict[int, str] | None = None):
+    def __init__(
+        self,
+        name: str,
+        names: dict[int, str] | None = None,
+        inputs: Iterable[str] = (),
+    ) -> None:
         self.name = name
         self.steps: list[TracedStep] = []
         self.weights: dict[int, tuple[object, Handle]] = {}
@@ -200,6 +205,19 @@ class Tracer:
         self._bound: dict[int, dict] = {}
         self._counter = itertools.count()
         self._names = names or {}
+        self._taken = {*self._names.values(), *inputs}
+
+    def fresh(self, name: str) -> str:
+        """``name``, or the first of ``name_1``, ``name_2``, ... no buffer of
+        the graph has: a name the tracer makes up never aliases one it was
+        given.
+        """
+        candidates = (f"{name}_{k}" for k in itertools.count(1))
+        free = next(
+            n for n in itertools.chain([name], candidates) if n not in self._taken
+        )
+        self._taken.add(free)
+        return free
 
     def __enter__(self):
         self._token = graph_tracer.set(self)
@@ -220,13 +238,18 @@ class Tracer:
         if isinstance(x, State):
             key = id(x)
             if key not in self.states:
-                x.name = x.name or self._names.get(key) or f"state{len(self.states)}"
+                x.name = (
+                    x.name
+                    or self._names.get(key)
+                    or self.fresh(f"state{len(self.states)}")
+                )
+                self._taken.add(x.name)
                 self.states[key] = (x, Handle(x.shape, x.dtype, x.name, "state"))
             return self.states[key][1]
         if is_operand(x):
             key = id(x)
             if key not in self.weights:
-                name = self._names.get(key) or f"w{len(self.weights)}"
+                name = self._names.get(key) or self.fresh(f"w{len(self.weights)}")
                 self.weights[key] = (
                     x,
                     Handle(x.shape, _tensor_dtype(x), name, "weight"),
@@ -398,7 +421,7 @@ class Tracer:
                 h = Handle(
                     shape,
                     b.dtype,
-                    f"{type(op).__name__.lower()}{next(self._counter)}",
+                    self.fresh(f"{type(op).__name__.lower()}{next(self._counter)}"),
                     "intermediate",
                     bounds=bounds,
                 )

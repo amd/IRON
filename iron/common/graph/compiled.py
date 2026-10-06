@@ -221,7 +221,7 @@ class Graph:
             Value(n, spec.kind, spec.dtype, spec.carried)
             for n, spec in self._values.items()
         ]
-        with self._scope(), Tracer(self.name, self.names()) as tracer:
+        with self._scope(), Tracer(self.name, self.names(), self._inputs) as tracer:
             result = self.body(*args, **{v.name: v for v in values})
         items, carry = self._split_carry(result)
         outputs = self._outputs(items, tracer)
@@ -278,7 +278,7 @@ class Graph:
                     f"is {np.dtype(dtypes[name]).name}"
                 )
             if nxt.role == "intermediate":
-                _rename(tracer, nxt, f"carry_{name}")
+                _rename(tracer, nxt, tracer.fresh(f"carry_{name}"))
             traced[name] = nxt
         return traced
 
@@ -295,7 +295,9 @@ class Graph:
                     f"{self.name} returns its input {item.name!r} unchanged"
                 )
             if item.role == "intermediate":
-                _rename(tracer, item, f"out{i}" if len(items) > 1 else "out")
+                _rename(
+                    tracer, item, tracer.fresh(f"out{i}" if len(items) > 1 else "out")
+                )
             outputs.append(item)
         return outputs
 

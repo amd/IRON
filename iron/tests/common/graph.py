@@ -104,6 +104,33 @@ def test_tracing_records_the_runlist_with_names_from_roles():
     }
 
 
+def test_a_name_the_tracer_makes_up_never_aliases_one_it_was_given():
+    class Held(iron.Graph):
+        def __init__(self):
+            self.out = iron.state((E,))
+            self.silu0 = iron.weight(z(E))
+
+        def body(self, x):
+            Copy(SiLU(x), self.out)
+            return ElementwiseAdd(SiLU(x), self.silu0)
+
+    t = Held().trace(x=(E,))
+    assert [(type(op).__name__, *names) for op, *names in t.runlist] == [
+        ("SiLU", "x", "silu0_1"),
+        ("Copy", "silu0_1", "out"),
+        ("SiLU", "x", "silu1"),
+        ("ElementwiseAdd", "silu1", "silu0", "out_1"),
+    ]
+    assert t.output_args == ["out_1"] and t.pinned == {"out": E * 2, "silu0": E * 2}
+
+    class Given(iron.Graph):
+        def body(self, out):
+            return SiLU(out)
+
+    t = Given().trace(out=(E,))
+    assert t.input_args == ["out"] and t.output_args == ["out_1"]
+
+
 def test_arrays_are_shared_by_array_key_and_extents_are_not():
     ffn, _ = _ffn()
     t = ffn.trace(x=(1, E))
