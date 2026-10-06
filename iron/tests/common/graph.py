@@ -23,7 +23,7 @@ import iron
 from iron.common import Carried, DispatchTime, Profile, Scratchpad
 from iron.common.design.build import device_symbol
 from iron.common.graph import Handle, TracedGraph, Tracer
-from iron.common.graph.carried import Form, attach_emit, compose
+from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import _words
 from iron.common.graph.handle import Affine, Value
 from iron.common.image import OperatorSequence
@@ -732,6 +732,9 @@ def test_per_call_values_are_integer_expressions():
     assert str((p + 1) * 64) == "p * 64 + 64"
     with pytest.raises(TypeError):
         _ = p * 0.5
+    cache = Handle((8, 4), bfloat16, "cache", "state")
+    with pytest.raises(TypeError, match="not linear"):
+        _ = cache[(p + 1) // 2]
 
 
 def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
@@ -855,14 +858,15 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
     elf = {w.symbol for w in _words(t, extents=False)[0]}
     assert elf == set(words) - {f"{op.name}_valid_n_x8"}
     for w in words.values():  # and each is what its Emit row computes
-        assert w.form is not None and w.form(call["n"]) == w(call)
+        assert w.form is not None and w.form.evaluate(call) == w(call)
 
 
-def test_a_form_is_what_integer_arithmetic_on_a_value_makes():
+def test_integer_arithmetic_on_an_expression_is_an_expression():
     """Sums, products and floor divisions by powers of two (so ``ceildiv``)
-    of a form are forms that compute the same; anything else is refused.
+    of an expression are expressions that compute the same; anything else
+    is refused.
     """
-    x = Form("x", 3, -5)
+    x = Affine(Value("x", "scratchpad", np.int32), 3, -5)
     cases = [
         (lambda v: v + 7, None),
         (lambda v: 2 - v, None),
@@ -886,9 +890,9 @@ def test_a_form_is_what_integer_arithmetic_on_a_value_makes():
                 f(x)
             continue
         form = f(x)
-        assert form.value == "x"
+        assert form.value is x.value
         for v in range(-300, 300):
-            assert form(v) == f(3 * v - 5), v
+            assert form.evaluate({"x": v}) == f(3 * v - 5), v
 
 
 def test_the_packed_decode_words_of_mha_have_emit_forms(npu2):
@@ -914,9 +918,10 @@ def test_the_packed_decode_words_of_mha_have_emit_forms(npu2):
     words, _ = _words(G().trace(q=(32, 64)), extents=False)
     assert words
     for w in words:
-        assert w.form is not None and w.form.value == "position", w.symbol
+        assert w.form is not None and w.form.value.name == "position", w.symbol
         for position in range(2048):
-            assert w.form(position) == w({"position": position}), w.symbol
+            at = {"position": position}
+            assert w.form.evaluate(at) == w(at), w.symbol
 
 
 def test_a_bound_on_rows_reaches_a_flat_buffer_in_elements(npu2):

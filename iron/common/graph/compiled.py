@@ -35,7 +35,7 @@ from ..image.callable import FullELFRun, ScratchArena
 from ..image.coresidence import AdjacentPacking
 from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
-from .carried import CARRY, EmitSite, Form, attach_emit, compose
+from .carried import CARRY, EmitSite, attach_emit, compose
 from .handle import Affine, Carry, Handle, State, Value, _tensor_dtype, is_operand
 from .narrowing import JointNarrowing, Tuning
 from .trace import TracedGraph, Tracer, _ReferenceTracer
@@ -696,23 +696,22 @@ class Word:
     dtype: Any
     compute: Callable[[Mapping[str, int]], Any]
     linear: Linear | None
-    form: Form | None = None
+    form: Affine | None = None
 
     def __call__(self, values: Mapping[str, int]) -> Any:
         return self.compute(values)
 
 
-def _derived_form(op, name: str, symbolic: Mapping[str, Form]) -> Form | None:
+def _derived_form(op, name: str, counts: Mapping[str, Affine]) -> Affine | None:
     """The Emit form of ``op``'s derived value ``name``, or ``None`` where no form expresses it."""
     try:
-        got = op.derived_at(name, **symbolic)
+        got = op.derived_at(name, **counts)
     except TypeError:
         return None
-    if isinstance(got, Form):
+    if isinstance(got, Affine):
         return got
-    if isinstance(got, (int, np.integer)) and symbolic:  # the same every call
-        value = next(iter(symbolic.values())).value
-        return Form(value, 0, 0, add=int(got))
+    if isinstance(got, (int, np.integer)) and counts:  # the same every call
+        return Affine(next(iter(counts.values())).value, 0, int(got))
     return None
 
 
@@ -737,10 +736,7 @@ def _words(
             Fraction(e.bias),
             np.dtype(b.member.dtype).name,
         )
-        form = Form(e.value.name, int(e.scale), int(e.bias))
-        words.append(
-            Word(b.symbol, e.dtype, lambda v, e=e: e.evaluate(v), linear, form)
-        )
+        words.append(Word(b.symbol, e.dtype, lambda v, e=e: e.evaluate(v), linear, e))
     seen: set[int] = set()
     derived: set[str] = set()
     for b in traced.bindings:
@@ -752,10 +748,6 @@ def _words(
             e.member.name: e.expression
             for e in traced.bindings
             if e.op is b.op and isinstance(e.member.member, Extent)
-        }
-        symbolic = {
-            name: Form(count.value.name, int(count.scale), int(count.bias))
-            for name, count in counts.items()
         }
 
         def at(v, counts=counts):
@@ -783,7 +775,7 @@ def _words(
                     word.dtype,
                     lambda v, op=op, name=name, at=at: op.derived_at(name, **at(v)),
                     linear,
-                    _derived_form(op, name, symbolic),
+                    _derived_form(op, name, counts),
                 )
             )
 

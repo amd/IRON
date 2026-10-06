@@ -359,33 +359,90 @@ class Value:
 
 @dataclasses.dataclass(frozen=True)
 class Affine:
-    """``scale * value + bias`` over the integers: what a binding writes.
+    """An integer expression in one graph value ``v``, evaluated per call:
 
-    Closed under adding and multiplying by integers, so ``(p + 1) * 64`` is
-    ``Affine(p, 64, 64)``. Evaluated per call from the graph's values.
+    ```text
+    ((v * scale + bias) >> down) * mul + add
+    ```
+
+    where ``>>`` floors. A binding writes a linear one (``down`` 0, kept in
+    ``scale`` and ``bias``, so ``(p + 1) * 64`` is ``Affine(p, 64, 64)``).
+    Sums, products and floor divisions by a power of two (and so
+    ``ceildiv``) with integers are expressions too, which is how an
+    operator's derivation run on its bound gives the Emit row of what it
+    derives; anything else (a comparison, two expressions, another divisor)
+    raises ``TypeError``.
     """
 
     value: Value
     scale: int = 1
     bias: int = 0
+    down: int = 0
+    mul: int = 1
+    add: int = 0
 
     def affine(self) -> Affine:
+        """This expression, which a binding takes only while it is linear.
+
+        Raises:
+            TypeError: it floors.
+        """
+        if self.down:
+            raise TypeError(f"{self} is not linear in {self.value.name}")
         return self
 
     def __add__(self, k: int) -> Affine:
-        if not isinstance(k, (int, np.integer)):
+        if isinstance(k, bool) or not isinstance(k, (int, np.integer)):
             return NotImplemented
-        return Affine(self.value, self.scale, self.bias + int(k))
+        if self.down:
+            return dataclasses.replace(self, add=self.add + int(k))
+        return dataclasses.replace(self, bias=self.bias + int(k))
 
     def __sub__(self, k: int) -> Affine:
         return self + (-k)
 
+    def __rsub__(self, k: int) -> Affine:
+        return -self + k
+
+    def __neg__(self) -> Affine:
+        return self * -1
+
     def __mul__(self, k: int) -> Affine:
-        if not isinstance(k, (int, np.integer)):
+        if isinstance(k, bool) or not isinstance(k, (int, np.integer)):
             return NotImplemented
-        return Affine(self.value, self.scale * int(k), self.bias * int(k))
+        k = int(k)
+        if self.down:
+            return dataclasses.replace(self, mul=self.mul * k, add=self.add * k)
+        return dataclasses.replace(self, scale=self.scale * k, bias=self.bias * k)
 
     __radd__, __rmul__ = __add__, __mul__
+
+    def __floordiv__(self, d: int) -> Affine:
+        if isinstance(d, bool) or not isinstance(d, (int, np.integer)):
+            return NotImplemented
+        d = int(d)
+        if d < 0:
+            return (-self) // -d
+        if d == 0 or d & (d - 1):
+            raise TypeError(f"no expression for a floor division by {d}")
+        k = d.bit_length() - 1
+        if not self.down:
+            return dataclasses.replace(self, down=k)
+        # floor((floor(u / 2^a) + c) / 2^k) = floor((u + c 2^a) / 2^(a+k))
+        if self.mul == 1:
+            bias = self.bias + (self.add << self.down)
+            return Affine(self.value, self.scale, bias, self.down + k)
+        if self.mul % d == 0:  # the floored term divides exactly
+            return dataclasses.replace(self, mul=self.mul // d, add=self.add // d)
+        raise TypeError(f"no expression for ({self}) // {d}")
+
+    def __bool__(self):
+        raise TypeError(f"{self} has no truth value: it is computed per call")
+
+    def __index__(self):
+        raise TypeError(f"{self} is not a number: it is computed per call")
+
+    __int__ = __index__
 
     @property
     def dtype(self):
@@ -403,12 +460,19 @@ class Affine:
 
     def evaluate(self, values: Mapping[str, int]) -> int:
         """The number this expression is for the graph's ``values``, by name."""
-        return self.scale * int(values[self.value.name]) + self.bias
+        v = int(values[self.value.name])
+        return ((self.scale * v + self.bias) >> self.down) * self.mul + self.add
 
     def __str__(self) -> str:
         text = self.value.name + (f" * {self.scale}" if self.scale != 1 else "")
         if self.bias:
             text += f" {'+' if self.bias > 0 else '-'} {abs(self.bias)}"
+        if self.down:
+            text = f"({text}) >> {self.down}"
+            if self.mul != 1:
+                text = f"({text}) * {self.mul}"
+            if self.add:
+                text += f" {'+' if self.add > 0 else '-'} {abs(self.add)}"
         return text
 
 
@@ -425,7 +489,7 @@ class Carry(Mapping[str, "Handle | Affine | int"]):
 
     def __init__(self, **next_values: Handle | Affine | Value | int):
         self._next: dict[str, Handle | Affine | int] = {
-            name: v.affine() if isinstance(v, Value) else v
+            name: v.affine() if isinstance(v, (Value, Affine)) else v
             for name, v in next_values.items()
         }
 

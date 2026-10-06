@@ -19,7 +19,7 @@ plane 1 the ones it computed. ``shift`` is 2 for a core-read parameter (the
 scratchpad holds those shifted, see ``ParameterScratchpad.writeBits``) and 0
 for an address or a carried value; ``>> down`` floors, so a row computes a
 trip count rounded up from a bound as well
-(``Form``). An all-zero row emits 0. The
+(an ``Affine`` of the graph value). An all-zero row emits 0. The
 first ``slots`` rows are the image, the rest the next state.
 """
 
