@@ -456,10 +456,10 @@ class Tracer:
             pinned[h.name] = h.nbytes
         for _, h in self.states.values():
             pinned[h.name] = h.nbytes
-        # A slice's parent must have an explicit size, whatever produced it.
+        # A slice's parent needs an explicit size: no step may name it whole.
         for step in self.steps:
             for h in step.inputs + step.outputs:
-                if h.parent is not None and h.parent.role == "intermediate":
+                if h.parent is not None:
                     pinned.setdefault(h.parent.name, h.parent.nbytes)
         return TracedGraph(
             self.name,

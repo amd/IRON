@@ -202,6 +202,22 @@ def test_slices_are_views_into_the_parent_in_bytes():
         h.reshape(3, 3)
 
 
+def test_an_input_read_only_through_slices_is_laid_out_whole():
+    class Halves(iron.Graph):
+        def body(self, x):
+            return SiLU(x[E // 2 :]), SiLU(x[: E // 2])
+
+    t = Halves().trace(x=(E,))
+    assert t.pinned == {"x": E * 2}
+    seq = t.sequence()
+    seq.prepare()
+    assert seq.subbuffer_layout["x"] == ("input", 0, E * 2)
+    assert seq.slice_info == {
+        f"x[{E}:{2 * E}]": ("x", E, 2 * E),
+        f"x[0:{E}]": ("x", 0, E),
+    }
+
+
 def test_alike_instances_bound_to_different_values_are_different_designs():
     """Two copies alike in every field, one indexed by ``a`` and one by ``b``,
     write through two symbols and build twice; two bound to one value share.
