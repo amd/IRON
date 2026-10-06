@@ -16,11 +16,11 @@ built here rather than mocked.
 """
 
 import inspect
-from pathlib import Path
 
 import aie.utils as aie_utils
 import pytest
 from aie.iron.device import from_name
+from aie.utils.compile.jit._hash import _python_identity
 from aie.utils.trace import TraceConfig
 
 import iron
@@ -141,14 +141,10 @@ def test_the_compile_key_covers_the_library_a_design_calls():
     """
     design = OperatorDesign(
         MHA(num_heads=8, num_KV_heads=2, seq_len=16384, num_pipelines=8)
-    )
-    digest = OperatorDesign.source_digest(tuple(design.sources))
-    assert design.key == f"{design.identity}:{digest}"
-    trees = {p.resolve() for p in OperatorDesign.TREES[0].rglob("*.py")}
-    assert Path(runtime.__file__).resolve() in trees
-    assert Path(inspect.getfile(MHA)).resolve() in {
-        Path(f).resolve() for f in design.sources
-    }
+    ).compilable()
+    reached = _python_identity([design.mlir_generator, *design.compile_kwargs.values()])
+    for module in (runtime, inspect.getmodule(MHA)):
+        assert f"{module.__name__}@".encode() in reached
 
 
 def test_the_compile_key_is_stable_across_identical_operators():
@@ -205,7 +201,10 @@ def test_a_field_the_repr_leaves_out_still_keys_the_build():
     plain = GEMM(M=256, K=256, N=256)
     other = GEMM(M=256, K=256, N=256, prio_accuracy=True)
     assert repr(plain) == repr(other), "the case no longer exercises a hidden field"
-    assert OperatorDesign(plain).identity != OperatorDesign(other).identity
+    assert (
+        OperatorDesign(plain).compilable().recipe_hash
+        != OperatorDesign(other).compilable().recipe_hash
+    )
 
 
 class _Opaque:

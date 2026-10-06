@@ -709,12 +709,13 @@ class JointNarrowing:
         """The file holding the placer's verdict on a pack of ``designs``:
         ``fits``, or ``refused:`` and the diagnostic.
 
-        Keyed as a design's build is (``OperatorDesign.key``), on each
-        design's identity and the source that generates and places it -- the
-        placer's pipeline is in IRON's common tree, the placer in mlir-aie's
-        bindings -- so a verdict is reused exactly when the build it
-        predicts would be. Generating and placing a pack costs about 50 ms,
-        and every process that tunes would otherwise ask again.
+        Keyed as a design's build is, on each design's recipe
+        (``CompilableDesign.recipe_hash``), so a verdict is reused exactly
+        when the build it predicts would be. Generating and placing a pack
+        costs about 50 ms, and every process that tunes would otherwise ask
+        again.
         """
-        h = hashlib.sha256(repr(sorted(d.key for d in designs)).encode())
+        h = hashlib.sha256(
+            repr(sorted(d.compilable().recipe_hash for d in designs)).encode()
+        )
         return self.fit_cache / h.hexdigest()[:24]

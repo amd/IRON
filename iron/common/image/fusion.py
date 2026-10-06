@@ -167,7 +167,7 @@ class Fusion:
     @property
     def identity(self) -> str:
         """What the fused text is a function of, without generating it: each
-        design's key (its identity and its sources), the runlist over them,
+        design's recipe (``CompilableDesign.recipe_hash``), the runlist over them,
         the buffer layout, the scratchpad words symbols share and the
         packing (a policy is its own identity: what it packs is a function
         of the designs and the runlist). A hit then costs a hash rather than
@@ -175,7 +175,7 @@ class Fusion:
         """
         h = hashlib.sha256()
         for name, design in self.designs.items():
-            h.update(f"{name}={design.key};".encode())
+            h.update(f"{name}={design.compilable().recipe_hash};".encode())
         state = (
             self.runlist,
             self.subbuffer_layout,

@@ -19,16 +19,15 @@ Peano and ``aiebu-asm``. Nothing dispatches: hardware checks the numbers
 
 import json
 import re
-from pathlib import Path
 
 import numpy as np
 import pytest
 from aie.dialects import aie as aie_dialect
 from aie.iron import ObjectFifo, Program, Runtime
 from aie.iron.device import NPU2, AnyShimTile, Tile
+from aie.utils.compile.jit._hash import _python_identity
 
 import iron
-from iron.common.design import OperatorDesign
 from iron.common.image import (
     AdjacentPacking,
     Fusion,
@@ -214,15 +213,14 @@ def test_pins_on_distinct_shim_channels_fit(col, channel):
 
 
 def test_packing_is_in_the_fused_identity():
-    # A design's key digests IRON's common tree, so an edit to how a pack is
-    # merged or chosen rebuilds what was packed; and the packing itself is
-    # part of the identity.
-    for module in (fusion, coresidence):
-        assert module.__file__ is not None
-        path = Path(module.__file__).resolve()
-        assert any(path.is_relative_to(root) for root in OperatorDesign.TREES)
+    # The fused generator closes over its Fusion, so the key follows the
+    # modules a pack is merged and chosen in; and the packing itself is part
+    # of the identity.
     temporal = Fusion(_sequence(4, lambda add, silu: []))
     packed = Fusion(_sequence(4, lambda add, silu: [[add, silu]]))
+    reached = _python_identity([temporal])
+    for module in (fusion, coresidence):
+        assert f"{module.__name__}@".encode() in reached
     assert temporal.identity != packed.identity
 
 

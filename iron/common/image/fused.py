@@ -55,8 +55,8 @@ class FusedImage:
             fusion = self.fusion = Fusion(seq)
             flags = [*self.FLAGS, *([self.TRACE_FLAG] if seq.traced else [])]
 
-            # The cache keys a generator by its code and its CompileTime
-            # arguments, not by what it closes over, so the identity is one.
+            # The cache follows the modules a generator reaches, not the state
+            # of what it closes over, so the identity is one.
             def generator(key: CompileTime[str]) -> ir.Module:
                 return ir.Module.parse(fusion.text())
 

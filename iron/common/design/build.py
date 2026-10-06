@@ -9,10 +9,8 @@ import functools
 import hashlib
 import inspect
 import re
-from pathlib import Path
 from typing import Any
 
-import aie
 import aie.utils as aie_utils
 from aie.iron import (
     CompileTime,
@@ -153,17 +151,12 @@ class OperatorDesign:
     an xclbin its per-call values are its ``DispatchTime`` parameters, so the
     two images are two modules and two cache keys.
 
-    The cache key is what the module is a function of, which the generator's
-    code alone does not spell: the operator's design key, the image, and the
-    source that generates the text (the operator's modules, IRON's common
-    tree, mlir-aie's Python frontend and bindings). The generator takes it
-    as its ``CompileTime`` ``key``.
+    The cache key is ``CompilableDesign``'s recipe. The generator takes the
+    operator as a ``CompileTime`` argument, so the key follows the modules
+    it is defined in, and ``identity``, which covers the fields its repr
+    leaves out.
     """
 
-    _AIE = Path(inspect.getfile(aie)).resolve().parent
-    TREES = (Path(__file__).resolve().parents[1], _AIE / "iron", _AIE / "dialects")
-    # Compiled, and large: by size and time rather than by content.
-    BINDINGS = _AIE / "_mlir_libs"
     # An object address in the key would re-key the cache every process.
     _ADDRESS = re.compile(r"0x[0-9a-f]{6,}")
 
@@ -187,13 +180,14 @@ class OperatorDesign:
             params = list(inspect.signature(build).parameters.values())
         self.build = build
 
-        # The cache keys a generator by its code and its CompileTime
-        # arguments, not by what it closes over, so the key is one.
-        def generator(key: CompileTime[str], **kwargs):
+        def generator(op: CompileTime[Operator], identity: CompileTime[str], **kwargs):
             return build(**kwargs)
 
-        key = P("key", P.KEYWORD_ONLY, annotation=CompileTime[str])
-        setattr(generator, "__signature__", inspect.Signature([*params, key]))
+        keys = [
+            P("op", P.KEYWORD_ONLY, annotation=CompileTime[Operator]),
+            P("identity", P.KEYWORD_ONLY, annotation=CompileTime[str]),
+        ]
+        setattr(generator, "__signature__", inspect.Signature([*params, *keys]))
         self.generator = generator
 
     @functools.cached_property
@@ -215,34 +209,15 @@ class OperatorDesign:
         """
         return f"{type(self.op).__name__}_{self.identity[:8]}"
 
-    @property
-    def sources(self) -> list[str]:
-        """The modules the design is defined in: the generator's and every
-        class the operator's is built from.
-        """
-        build = self.build
-        function = build.func if isinstance(build, functools.partial) else build
-        files = set()
-        for obj in (function, *type(self.op).__mro__):
-            try:
-                files.add(inspect.getsourcefile(obj))
-            except TypeError:
-                pass  # a builtin
-        return sorted(f for f in files if f)
-
-    @property
-    def key(self) -> str:
-        return f"{self.identity}:{self.source_digest(tuple(self.sources))}"
-
     def compilable(self, **options) -> CompilableDesign:
-        """The design for ``CompilableDesign``, keyed by ``key``; ``options``
+        """The design for ``CompilableDesign``; ``options``
         are its own (``aiecc_flags``, ``insts_only``, ...); the operator's
         ``aiecc_flags`` are added to theirs.
         """
         flags = [*options.pop("aiecc_flags", ()), *self.op.aiecc_flags]
         return CompilableDesign(
             self.generator,
-            compile_kwargs={"key": self.key},
+            compile_kwargs={"op": self.op, "identity": self.identity},
             aiecc_flags=flags,
             **options,
         )
@@ -257,27 +232,3 @@ class OperatorDesign:
         design = self.compilable(**options)
         design.compile()
         return design
-
-    @classmethod
-    @functools.cache
-    def source_digest(cls, files: tuple = ()) -> str:
-        """A digest of the source that generates MLIR: the trees every
-        design shares, and ``files`` besides.
-
-        Read once per process: a process runs the code it imported, so an
-        edit made while it runs is the next process's to see, in its key and
-        its text alike.
-        """
-        h = hashlib.sha256()
-        if files:
-            h.update(cls.source_digest().encode())
-            for path in files:
-                h.update(Path(path).read_bytes())
-            return h.hexdigest()
-        for root in cls.TREES:
-            for path in sorted(root.rglob("*.py")):
-                h.update(path.read_bytes())
-        for path in sorted(cls.BINDINGS.glob("*.so")):
-            stat = path.stat()
-            h.update(f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}".encode())
-        return h.hexdigest()
