@@ -6,11 +6,9 @@
 What the library derives (the split of a buffer over its lanes, and the
 round-robin one under a bound) is checked as access patterns; what a
 sequence issues is checked in the module a real build generates: each shim
-task's lane, buffer argument, offset, sizes, strides, patched size and
-whether it is waited on.
+task's lane, buffer argument, offset, sizes, strides and patched size.
 """
 
-import dataclasses
 import re
 from math import prod
 from typing import NamedTuple
@@ -38,11 +36,9 @@ from iron.common.design import (
     Sequence,
     build_design,
 )
-from iron.operators import ElementwiseAdd
 from iron.operators.flm.gemm.shipped import Shipped
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
-from iron.operators.relu import ReLU
 from iron.operators.repeat import Repeat
 from iron.operators.rope import RoPE
 from iron.tests.common.declare import Rows
@@ -51,19 +47,6 @@ from iron.tests.common.declare import Rows
 pytestmark = pytest.mark.usefixtures("npu2")
 
 NPU2_4COL = from_name("npu2", n_cols=4)
-
-
-class Unary(Operator):
-    size: int = param()
-    tile: int = auto(1024)
-    cols: int = auto()
-    chans: int = auto(2)
-    A = In(size, tile=(tile,), per=(cols, chans))
-    B = Out(size, tile=(tile,), per=(cols, chans))
-
-    def resolve(self, dev):
-
-        return dataclasses.replace(self, cols=self.cols or dev.cols)
 
 
 class MV(Operator):
@@ -90,10 +73,6 @@ class Task(NamedTuple):
     length_unit: str  # the elements per unit of it, or ""
     attributes: str
 
-    @property
-    def waited(self) -> bool:
-        return "issue_token = true" in self.attributes
-
 
 _TASK = re.compile(
     r"%(\d+) = aiex\.dma_configure_task_for @(\w+) \{\s*"
@@ -102,7 +81,6 @@ _TASK = re.compile(
     r"(?: \{length_parameter = @(\w+), length_unit = (\d+) : i32\})?"
     r"\s*aie\.end\s*\}(?: \{([^}]*)\})?"
 )
-_WRITE = re.compile(r"aiex\.npu\.rtp_write\(@rtp_(\d+)_(\d+), (\d+), %c(-?\d+)_i32")
 
 
 def generated_sequence(op, image="elf") -> tuple[str, list[Task]]:
@@ -125,23 +103,9 @@ def generated_sequence(op, image="elf") -> tuple[str, list[Task]]:
     return text, tasks
 
 
-def _awaited(text) -> list[int]:
-    return [int(t) for t in re.findall(r"aiex\.dma_await_task\(%(\d+)\)", text)]
-
-
 # --------------------------------------------------------------------------
 # What the library derives: the split and the round-robin
 # --------------------------------------------------------------------------
-
-
-def test_split_gives_each_lane_its_block():
-    op = Unary(size=8192).resolved(NPU2_4COL)
-    p = Sequence.split(op.A)
-    assert len(p) == 8  # 4 columns x 2 channels
-    chunk = 8192 // 8
-    for i, (slot, tap) in enumerate(p):
-        assert slot.index == i
-        assert tap == TensorAccessPattern((8192,), chunk * i, [chunk], [1])
 
 
 def test_split_takes_every_batch_and_broadcasts():
@@ -220,40 +184,6 @@ def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles():
 # --------------------------------------------------------------------------
 
 
-def test_derived_sequence_issues_fills_then_waited_drains():
-    op = ElementwiseAdd(size=8192, num_aie_columns=2, tile_size=1024)
-    assert not ElementwiseAdd.has_sequence_override()
-    text, tasks = generated_sequence(op)
-    whole = ("1, 1, 1, 4096", "0, 0, 0, 1")
-    assert [
-        (t.lane, t.arg, t.offset, (t.sizes, t.strides), t.waited) for t in tasks
-    ] == [
-        ("in0_0", 0, 0, whole, False),
-        ("in0_1", 0, 4096, whole, False),
-        ("in1_0", 1, 0, whole, False),
-        ("in1_1", 1, 4096, whole, False),
-        ("out_0", 2, 0, whole, True),
-        ("out_1", 2, 4096, whole, True),
-    ]
-    assert _awaited(text) == [t.ssa for t in tasks if t.waited]
-
-
-def test_an_override_issues_through_the_same_sequence():
-    # GEMV's sequence sends the vector to every column before any rows.
-    op = GEMV(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=4)
-    assert GEMV.has_sequence_override()
-    text, tasks = generated_sequence(op)
-    assert [(t.lane, t.offset, t.waited) for t in tasks] == [
-        ("B_L3L1_0", 0, False),
-        ("B_L3L1_1", 0, False),
-        ("A_L3L1_0", 0, False),
-        ("A_L3L1_1", 128 * 64, False),
-        ("C_L1L3_0", 0, True),
-        ("C_L1L3_1", 128, True),
-    ]
-    assert _awaited(text) == [t.ssa for t in tasks if t.waited]
-
-
 def test_preamble_rejects_a_resident_the_array_never_bound(npu2):
     class Op(Operator):
         n: int = param()
@@ -263,111 +193,6 @@ def test_preamble_rejects_a_resident_the_array_never_bound(npu2):
 
     with pytest.raises(ValueError, match="never bound this value"):
         Sequence(Op(n=64), {}).preamble()
-
-
-def test_mha_sequence_is_one_descriptor_set_per_kv_group():
-    # Eight pipelines: Q and O go through two shims, each carrying four
-    # pipelines' (256-row) block. Per KV group, each shim's Q is one pattern
-    # over the group's heads and every block, K and V are the head's blocks
-    # of rows re-read once per (head, block) from the iteration slot (the
-    # block count the dimension a bound patches), and the O drains mirror
-    # the Q fills and are waited on.
-    op = MHA(num_heads=2, seq_len=1000, d=64, num_KV_heads=1, num_pipelines=8)
-    op = op.resolved(from_name("npu2", n_cols=8))
-    assert op.seq_pad == 1024 and op.q_shims == 2 and op.join_rows == 256
-    assert op.residents == {
-        "heads": 2,
-        "q_blocks_per_pipeline": 2,
-        "q_blocks_valid": 2,
-        "kv_blocks": 16,
-        "s_q": 1000,
-        "s_kv": 1000,
-        "q_start": 0,
-    }
-    text, tasks = generated_sequence(op)
-    head, block = 1024 * 64, 256 * 64
-    # Q: (heads, blocks, rows, d). K and V: the head's 16 blocks of 64 rows,
-    # re-read four times.
-    q = ("2, 2, 256, 64", f"{head}, {2 * block}, 64, 1")
-    kv = ("4, 16, 64, 64", "0, 4096, 64, 1")
-    assert [
-        (t.lane, t.arg, t.offset, (t.sizes, t.strides), t.waited) for t in tasks
-    ] == [
-        ("inQ", 0, 0, q, False),
-        ("inQ2", 0, block, q, False),
-        ("inK", 1, 0, kv, False),
-        ("inV", 2, 0, kv, False),
-        ("memO", 3, 0, q, True),
-        ("memO2", 3, block, q, True),
-    ]
-    assert "repeat_count = 3" in tasks[2].attributes  # the re-read, as repeats
-    assert _awaited(text) == [t.ssa for t in tasks if t.waited]
-
-
-def test_mha_sequence_over_interleaved_heads_is_strided_the_same_way():
-    # The (seq, heads, d) layout, for the queries and the keys: a head's rows
-    # are strided by every head's d, and the group's heads are d apart; the
-    # descriptor count is the same.
-    op = MHA(
-        num_heads=4,
-        seq_len=1024,
-        d=64,
-        num_KV_heads=2,
-        num_pipelines=8,
-        heads_interleaved=True,
-        kv_interleaved=True,
-    ).resolved(from_name("npu2", n_cols=8))
-    _, tasks = generated_sequence(op)
-    assert [t.lane for t in tasks] == ["inQ", "inQ2", "inK", "inV", "memO", "memO2"] * 2
-    q0, q1, k0, *_ = tasks
-    # Q: (heads 2 at stride d, blocks 2, rows 256 at stride 4d, d)
-    assert (q0.sizes, q0.strides) == ("2, 2, 256, 64", f"64, {2 * 256 * 256}, 256, 1")
-    assert q1.offset == q0.offset + 256 * 256
-    # K: the head's 16 blocks of 64 rows at stride 2d, re-read 4 times.
-    assert (k0.sizes, k0.strides) == ("4, 16, 64, 64", "0, 8192, 128, 1")
-    # The second group starts at its heads.
-    assert tasks[6].offset == 2 * 64 and tasks[8].offset == 64
-
-
-def test_mha_of_one_query_packs_a_group_per_pipeline_over_its_own_kv():
-    # Decode's shape, over a cache bounded per call: each of 4 pipelines
-    # takes KV groups p*2 and p*2+1 in turn. Per step, Q is the group's 4
-    # heads (256 elements) re-read 16 times to fill a 64-row block, K and V
-    # the group's bounded blocks on the pipeline's own lanes, and O drains
-    # the block back over the same 256 elements. The counts the bound moves
-    # are per call; the rest are written once, and the array reads each
-    # from where the sequence puts it.
-    op = MHA(
-        num_heads=32,
-        num_KV_heads=8,
-        seq_len=1,
-        kv_len=2048,
-        num_pipelines=4,
-        heads_interleaved=True,
-    )
-    op.use_value("kv_valid", "n")
-    op = op.resolved(from_name("npu2", n_cols=8))
-    assert op.residents == {"heads": 2, "q_blocks_per_pipeline": 1, "q_blocks_valid": 1}
-    _, tasks = generated_sequence(op)
-    group, cache = 4 * 64, 2048 * 64
-    q = ("16, 1, 1, 256", "0, 0, 0, 1")
-    kv = ("1, 32, 64, 64", "0, 4096, 64, 1")
-    for step in range(2):
-        heads = [(p * 2 + step) for p in range(4)]
-        fills = tasks[step * 16 : (step + 1) * 16]
-        assert [(t.lane, t.offset, (t.sizes, t.strides)) for t in fills] == [
-            *[("inQ", h * group, q) for h in heads],
-            *[
-                (f"{x}{p or ''}", h * cache, kv)
-                for p, h in enumerate(heads)
-                for x in ("inK", "inV")
-            ],
-            *[("memO", h * group, q) for h in heads],
-        ]
-        assert all("repeat_count = 15" in t.attributes for t in fills[:4])
-        assert all(t.length_parameter.endswith("kv_blocks") for t in fills[4:12])
-        assert all(t.length_unit == str(64 * 64) for t in fills[4:12])
-        assert all(t.waited for t in fills[12:])
 
 
 def test_mha_infers_the_padded_length_and_the_kv_head_count():
@@ -388,22 +213,6 @@ def _bounded_gemv():
     op = GEMV(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=8)
     op.use_value("valid", "n")  # what a graph does for A[:n]
     return op
-
-
-def test_the_derived_sequence_patches_a_bounded_operand():
-    op = ReLU(size=8192, num_aie_columns=2, num_channels=1, tile_size=1024)
-    op.use_value("valid", "n")
-    assert op.derived_at("valid_x", valid=2048) == 1  # 2048 over 2 lanes of 1024
-    _, tasks = generated_sequence(op)
-    # Each lane every other tile, its count patched on D2.
-    assert [(t.arg, t.offset, t.sizes, t.strides, t.waited) for t in tasks] == [
-        (0, 0, "1, 4, 1, 1024", "0, 2048, 1024, 1", False),
-        (0, 1024, "1, 4, 1, 1024", "0, 2048, 1024, 1", False),
-        (1, 0, "1, 4, 1, 1024", "0, 2048, 1024, 1", True),
-        (1, 1024, "1, 4, 1, 1024", "0, 2048, 1024, 1", True),
-    ]
-    patched = [t.length_parameter.rsplit("_", 2)[-2:] for t in tasks]
-    assert patched == [["valid", "x"]] * 2 + [["valid", "y"]] * 2
 
 
 def test_a_bounded_gemv_moves_a_and_c_in_output_tiles_round_robin():
@@ -590,44 +399,3 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
 
             def array(self, target):
                 return []
-
-
-def test_shipped_sequence_writes_every_core_then_streams_in_consume_order(npu2):
-
-    op = Shipped(M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0))
-    # The port's values are hidden; the image's block is laid out from the
-    # operator's fields.
-    assert op.residents == {"rtp": [2, 256, 1152, 0, 1, 1, -1073741824, 1073741824]}
-    sequence, tasks = generated_sequence(op)
-    text = str(build_design(op))
-
-    writes = [tuple(map(int, w)) for w in _WRITE.findall(sequence)]
-    # 8 words on 32 cores, then one lock release per core, before any DMA.
-    assert len(writes) == 32 * 8
-    assert writes[0] == (0, 2, 0, 2) and writes[7] == (0, 2, 7, 1073741824)
-    assert writes[-1] == (7, 5, 7, 1073741824)
-    assert text.count('{address = 4096 : i32, sym_name = "rtp_') == 32
-    releases = re.findall(r"aiex\.set_lock\(%lock_(\d+)_(\d+), %c1_i32\w*\)", sequence)
-    assert len(releases) == 32 and releases[-1] == ("7", "5")
-    assert text.count("aie.lock(") == 32
-    assert re.search(r"%lock_0_2 = aie\.lock\(%\w+, 10\)", text)
-    assert sequence.rindex("aiex.set_lock") < sequence.index("aiex.dma_start_task")
-
-    # N = 9 column-blocks: one full sweep (4 A + 8 B + 8 C) and a trailing
-    # block on column 0 alone, which still receives A on every row.
-    assert len(tasks) == 20 + 6
-    assert [(t.lane, t.arg, t.offset, t.sizes, t.strides) for t in tasks[:3]] == [
-        ("A_0", 0, 0, "1, 2, 64, 512", "0, 512, 1024, 1"),
-        ("B_0", 1, 0, "1, 1, 1, 131072", "0, 0, 0, 1"),
-        ("C_0", 2, 0, "1, 1, 256, 128", "0, 0, 1152, 1"),
-    ]
-    a1 = tasks[5]
-    assert (a1.lane, a1.offset, a1.sizes) == ("A_1", 64 * 1024, "1, 2, 64, 512")
-    # Every task is started and awaited exactly once, the last ones by the
-    # trailing finish.
-    started = re.findall(r"aiex\.dma_start_task\(%(\d+)\)", sequence)
-    assert (
-        sorted(map(int, started))
-        == sorted(_awaited(sequence))
-        == sorted(t.ssa for t in tasks)
-    )

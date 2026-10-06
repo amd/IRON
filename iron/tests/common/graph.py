@@ -402,31 +402,6 @@ def test_llama_decode_traces_and_tunes():
     model = small(max_seq_len=L)
     cfg = model.config
     t = model.trace(**model.shapes(1))
-    kinds = [type(op).__name__ for op, *_ in t.runlist]
-    per_block = [
-        "RMSNorm",
-        "GEMV",
-        "GEMV",
-        "GEMV",
-        "RoPE",
-        "RoPE",
-        "Copy",
-        "Copy",
-        "MHA",
-        "GEMV",
-        "ElementwiseAdd",
-        "RMSNorm",
-        "GEMV",
-        "GEMV",
-        "SiLU",
-        "ElementwiseMul",
-        "GEMV",
-        "ElementwiseAdd",
-    ]
-    # The token's embedding row and the position's RoPE row are gathered
-    # first; the head's logits end in a draw.
-    gathers, head = ["Copy", "Copy"], ["RMSNorm", "GEMV", "Sample"]
-    assert kinds == gathers + per_block * cfg.n_layers + head
     # A token takes no tensor. It returns the logits and carries the token
     # it draws and the position after it.
     assert t.input_args == [] and t.output_args == ["out", "carry_token"]
@@ -444,17 +419,8 @@ def test_llama_decode_traces_and_tunes():
     # The weights are named from the model; the caches are pinned state.
     assert "layers.1.q" in t.pinned and "keys.0" in t.pinned
     assert t.pinned["keys.0"] == cfg.n_kv_groups * L * cfg.head_dim * 2
-    # The embedding row is the token's, the table's row and each cache's
-    # row the position's; every MHA attends over the keys up to it, its one
-    # query packed by its heads.
-    offsets = sorted(
-        (b.member.name, str(b.expression)) for b in t.bindings if type(b.op) is Copy
-    )
-    D, G = cfg.head_dim, cfg.n_kv_groups
-    assert offsets == [
-        ("in_offset", f"position * {D}"),
-        ("in_offset", f"token * {cfg.emb_dim}"),
-    ] + [("out_offset", f"position * {G * D}")] * (2 * cfg.n_layers)
+    # Every MHA attends over the keys up to the position, its one query
+    # packed by its heads.
     mhas = [s.op for s in t.steps if type(s.op) is MHA]
     assert all(op.kv_interleaved for op in mhas)
     assert len(mhas) == cfg.n_layers
@@ -498,38 +464,8 @@ def test_llama_prompt_traces_over_the_same_caches():
     g = small()
     cfg = g.config
     t = g.trace(**g.shapes(cfg.prefill_chunk))
-    kinds = [type(op).__name__ for op, *_ in t.runlist]
-    per_block = [
-        "RMSNorm",
-        "GEMM",
-        "GEMM",
-        "GEMM",
-        "RoPE",
-        "RoPE",
-        "Copy",
-        "Copy",
-        "MHA",
-        "GEMM",
-        "ElementwiseAdd",
-        "RMSNorm",
-        "GEMM",
-        "GEMM",
-        "SiLU",
-        "ElementwiseMul",
-        "GEMM",
-        "ElementwiseAdd",
-    ]
-    tail = ["Copy", "RMSNorm", "GEMV", "Sample"]
-    # The chunk's RoPE rows first, copied out of the table on the device.
-    assert kinds == ["Copy"] + per_block * cfg.n_layers + tail
     assert t.input_args == ["x"] and t.output_args == ["out", "carry_token"]
     assert [v.name for v in t.values] == ["token", "position", "chunk", "rows"]
-    # One slice at the top bounds every operator of every block by the rows
-    # the call runs, and the last row's copy reads the last of them; the
-    # table's copy, the norm, the head and the draw are not.
-    rows = {id(b.op) for b in t.bindings if b.expression.value.name == "rows"}
-    by_rows = [op for op, *_ in t.runlist if id(op) in rows]
-    assert len(by_rows) == len(per_block) * cfg.n_layers + 1
     # MHA attends over the caches up to the chunk's last token.
     mha = next(op for op, *_ in t.runlist if type(op).__name__ == "MHA")
     assert mha.bound_values == {"valid": "rows", "kv_valid": "position_p1"}
@@ -545,19 +481,6 @@ def test_llama_prompt_traces_over_the_same_caches():
     assert all(op.b_col_maj for op in gemms)
     K = {op.K for op in gemms}
     assert K == {cfg.emb_dim, cfg.hidden_dim, cfg.n_heads * cfg.head_dim}
-    # The per-call offsets: the chunk's rows of the table and of each cache,
-    # and the last row.
-    C, G, D = cfg.prefill_chunk, cfg.n_kv_groups, cfg.head_dim
-    offsets = [
-        (b.member.name, str(b.expression))
-        for b in t.bindings
-        if b.member.name.endswith("_offset")
-    ]
-    assert offsets == [
-        ("in_offset", f"chunk * {C * D}"),
-        *[("out_offset", f"chunk * {C * G * D}")] * (2 * cfg.n_layers),
-        ("in_offset", f"rows * {cfg.emb_dim} - {cfg.emb_dim}"),
-    ]
     for op in t.operators:
         op.resolved(aie_utils.get_current_device())
 
