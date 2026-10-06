@@ -4,8 +4,8 @@
 """A copy between two views: ``Copy(k, keys[i][:, pos])``.
 
 Each side is an access pattern over its buffer (offset, sizes, strides), the
-form a DMA takes; the shim channels split its innermost axis, and the
-compiler splits a share no one descriptor holds. A per-call value indexing a
+form a DMA takes; the shim channels split the innermost run the two sides
+share, and the compiler splits a share no one descriptor holds. A per-call value indexing a
 view reaches the copy as ``in_offset``/``out_offset``, an element offset.
 """
 
@@ -38,12 +38,22 @@ def _into_slot(slot, seq=128, num_channels=1) -> dict[str, Any]:
     )
 
 
+def _by_head(num_channels: int) -> dict[str, Any]:
+    """Kwargs reading a (16, 4, 64) buffer head by head into a flat one."""
+    return dict(
+        src=TensorAccessPattern.full((16, 4, 64)).permute((1, 0, 2)),
+        input_buffer_size=16 * 4 * 64,
+        num_channels=num_channels,
+    )
+
+
 class Copy(Operator):
     """AIE-accelerated copy between two views of two buffers.
 
     Gathers by ``src`` and scatters by ``dst``, split across
     ``num_channels`` memtile pass-throughs (no cores) on the innermost
-    axis. In a graph the patterns come from the operands: ``Copy(k,
+    run both patterns hold a whole number of (the greatest common divisor
+    of their innermost sizes), so each channel reads what it writes. In a graph the patterns come from the operands: ``Copy(k,
     keys[i][:, pos])``, ``Copy(x.transpose(1, 0, 2), y[:, :n])``; a per-call
     index on a view binds ``in_offset`` or ``out_offset``, and a per-call
     bound ``src_bound``/``dst_bound`` with its size. Standalone,
@@ -80,6 +90,10 @@ class Copy(Operator):
             # split the rows of a strided scatter.
             Case(_into_slot(5, num_channels=2), id="slot5_two_channels"),
             Case(_into_slot(5, num_channels=4), id="slot5_four_channels"),
+            # The sides' innermost axes differ: (16, 4, 64) read by head into
+            # a flat buffer, every channel's share of one in step with the other's.
+            Case(_by_head(num_channels=2), id="by_head_two_channels"),
+            Case(_by_head(num_channels=4), id="by_head_four_channels"),
             Case(_into_slot(1000, seq=2048), id="slot1000_of_2048", extensive=True),
             # Benched: 4 Mi elements, well past the dispatch cost.
             Case(
@@ -159,12 +173,12 @@ class Copy(Operator):
 
     def compatible(self) -> None:
         channels = self.num_channels
-        for tap in (self.src, self.dst):
-            if tap.sizes[-1] % channels:
-                raise ValueError(
-                    f"the innermost axis of {tap} ({tap.sizes[-1]}) must be "
-                    f"divisible by num_channels ({channels})"
-                )
+        step = gcd(self.src.sizes[-1], self.dst.sizes[-1])
+        if step % channels:
+            raise ValueError(
+                f"the innermost axes of {self.src} and {self.dst} have a common "
+                f"run of {step} elements, which num_channels ({channels}) must divide"
+            )
         per_channel = prod(self.src.sizes) // channels
         if per_channel % self.tile_size:
             raise ValueError(
@@ -191,8 +205,14 @@ class Copy(Operator):
         ]
 
     def _shares(self, tap: TensorAccessPattern) -> list[TensorAccessPattern]:
-        """``tap`` with its innermost axis split among the channels, in order."""
-        share = tap.sizes[-1] // self.num_channels
+        """``tap``'s share per channel, in order: every run of the elements
+        both sides' innermost axes hold a whole number of, split among the
+        channels, so the k-th element a channel reads is the k-th it writes.
+        """
+        step = gcd(self.src.sizes[-1], self.dst.sizes[-1])
+        if tap.sizes[-1] != step:
+            tap = tap.split(tap.rank - 1, step)
+        share = step // self.num_channels
         return [tap[..., c * share : (c + 1) * share] for c in range(self.num_channels)]
 
     def _taps(
@@ -207,21 +227,22 @@ class Copy(Operator):
         shim descriptor's length ends it. A bound on the innermost axis, the
         one the channels split, takes one channel.
         """
+        shares = self._shares(tap)
         if bound is None:
-            return [(share, None) for share in self._shares(tap)]
-        rank = len(tap.sizes)
-        dim = 4 - rank + bound
-        if dim == 3 and self.num_channels > 1:
+            return [(share, None) for share in shares]
+        if bound == tap.rank - 1 and self.num_channels > 1:
             raise ValueError(
                 f"{tap} is bounded on the axis the {self.num_channels} channels "
                 f"split; bound another axis or copy on one channel"
             )
+        rank = shares[0].rank
+        dim = 4 - rank + bound
         # At most one axis outside the bound (the iteration slot) and one or
         # two inside it (D1, D0) put the bound on D2.
         on_d2 = bound <= 1 and 1 <= rank - bound - 1 <= 2
         shim = BdLimits.of(self.dev, 0, 0)
         out = []
-        for share in self._shares(tap):
+        for share in shares:
             dims = list(share.transformation_dims)
             if on_d2:
                 lead, inner = dims[:bound], dims[bound + 1 :]
@@ -271,28 +292,19 @@ class Copy(Operator):
 
         src = at(self.src, self.src_bound, src_valid)
         dst = at(self.dst, self.dst_bound, dst_valid)
-        # Channel by channel, as the design splits the patterns.
-        gather = [
-            c.gather(np.arange(prod(c.tensor_dims))) + int(in_offset)
-            for c in self._shares(src)
-        ]
-        scatter = [
-            c.gather(np.arange(prod(c.tensor_dims))) + int(out_offset)
-            for c in self._shares(dst)
-        ]
+        gather = src.gather(np.arange(prod(src.tensor_dims))) + int(in_offset)
+        scatter = dst.gather(np.arange(prod(dst.tensor_dims))) + int(out_offset)
+        if len(gather) != len(scatter):
+            raise ValueError(
+                f"pattern element counts differ ({len(gather)} vs {len(scatter)}); "
+                "src and dst must move the same number of elements"
+            )
         out = (
             np.zeros(self.output_buffer_size, dtype=x.dtype)
             if y is None
             else y.reshape(-1)
         )
-        flat = x.reshape(-1)
-        for src_c, dst_c in zip(gather, scatter):
-            if len(src_c) != len(dst_c):
-                raise ValueError(
-                    f"pattern element counts differ ({len(src_c)} vs {len(dst_c)}); "
-                    "src and dst must move the same number of elements"
-                )
-            out[dst_c] = flat[src_c]
+        out[scatter] = x.reshape(-1)[gather]
         return out if y is None else y
 
     def sequence(self, rt):
