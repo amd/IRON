@@ -12,12 +12,15 @@ a mis-scaled addend (elements vs bytes) cannot land in the wrong slot
 undetected.
 """
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Scratchpad
+from iron.common.design import BdLimits
 from iron.operators.copy import Copy
 
 # Llama's KV-cache write, shrunk: (n_kv_groups, seq, head_dim), one token's
@@ -87,3 +90,36 @@ def test_a_chunk_lands_in_its_rows_of_the_cache(npu_runtime):
         assert not len(
             wrong
         ), f"{chunk=} {rows=}: {len(wrong)} elements differ, first {wrong[:4]}"
+
+
+# Rows of 4 out of 6, two blocks of 1031 per group: a pattern no one
+# descriptor holds, so the compiler splits it and the offset patches each piece.
+GROUPS, SLOTS, BLOCKS, ROWS, WIDE, KEEP = 3, 4, 2, 1031, 6, 4
+
+
+@pytest.mark.supported_devices("npu2")
+def test_the_offset_moves_every_piece_of_a_split_pattern(npu_runtime):
+    cache = iron.state((GROUPS, SLOTS, BLOCKS, ROWS, WIDE), name="cache")
+
+    class Write(iron.Graph):
+        def body(self, x, *, pos: Scratchpad[np.int32]):
+            Copy(x, cache[:, pos, :, :, :KEEP])
+
+    write = Write()
+    net = write.compile(x=(GROUPS, BLOCKS, ROWS, KEEP))
+    view = TensorAccessPattern.full((GROUPS, SLOTS, BLOCKS, ROWS, WIDE))
+    shim = BdLimits.of(aie_utils.get_current_device(), 0, 0)
+    assert not shim.fits(view[:, 0, :, :, :KEEP], bfloat16)
+
+    expected = np.zeros((GROUPS, SLOTS, BLOCKS, ROWS, WIDE), dtype=np.float32)
+    net.write(cache, expected)
+    rng = np.random.default_rng(0)
+    for slot in (0, 2, SLOTS - 1):
+        x = rng.standard_normal((GROUPS, BLOCKS, ROWS, KEEP)).astype(bfloat16)
+        expected[:, slot, :, :, :KEEP] = x.astype(np.float32)
+        write(x, pos=slot)
+        got = np.asarray(net.read(cache), dtype=np.float32).reshape(expected.shape)
+        wrong = np.argwhere(got != expected)
+        assert not len(
+            wrong
+        ), f"slot {slot}: {len(wrong)} elements differ, first {wrong[:4]}"

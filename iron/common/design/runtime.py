@@ -29,9 +29,10 @@ class Sequence:
     operator's ``sequence(rt)`` override, or the one derived from the
     declarations.
 
-    A constant pattern is issued as it is: the compiler splits one a buffer
-    descriptor cannot hold (``aie-decompose-large-dma-bd``). One patched per
-    call must fit a descriptor as given, so it is built to (``BdLimits``).
+    A pattern is issued as it is: the compiler splits one a buffer
+    descriptor cannot hold (``aie-decompose-large-dma-bd``), and a per-call
+    offset patches every piece. One whose size is patched per call must fit
+    a descriptor as given, so it is built to (``BdLimits``).
     """
 
     def __init__(
@@ -233,14 +234,13 @@ class Sequence:
             if group is not None:
                 raise ValueError("an unmanaged transfer joins no group")
             common = dict(wait=wait, managed=False)
-        # A per-call offset or size lands in one descriptor, so the pattern
-        # must fit one: the compiler cannot split a descriptor a call patches.
-        if (offset_by is not None or sizes_by) and not BdLimits.of(
-            self.op.dev, 0, 0
-        ).fits(tap, buffer.dtype):
+        # A per-call size lands in one descriptor's length, so the pattern
+        # must fit one; a per-call offset patches every piece the compiler
+        # splits a pattern into.
+        if sizes_by and not BdLimits.of(self.op.dev, 0, 0).fits(tap, buffer.dtype):
             raise ValueError(
                 f"{type(self.op).__name__}.{buffer.name}: {tap} moves by a per-call "
-                f"offset or size, so it must fit one buffer descriptor, and does not"
+                f"size, so it must fit one buffer descriptor, and does not"
             )
         dynamic = offset_by is not None and offset_by.ssa is not None
         dynamic = dynamic or any(v.ssa is not None for v in sizes_by.values())

@@ -20,9 +20,9 @@ class BdLimits:
     A descriptor has four dimensions, outermost first ``[iteration, d2, d1,
     d0]``. Whether an access pattern fits one is ``AIEX::verifyStridesWraps``,
     stated here over the pattern so a design can choose its transfers before
-    it builds them. A constant pattern that does not fit is split by the
-    compiler (``aie-decompose-large-dma-bd``); one with a runtime offset, size
-    or repeat must fit as given.
+    it builds them. A pattern that does not fit is split by the compiler
+    (``aie-decompose-large-dma-bd``), a runtime offset patched into every
+    piece; one with a runtime size or repeat must fit as given.
 
     Attributes:
         wrap: The largest ``d0`` (in granules) and ``d1`` (in elements).

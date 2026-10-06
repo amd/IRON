@@ -551,9 +551,10 @@ code before relying on a line here; it is the authority.
   dimension holds at most 1023 granules unless the transfer is linear, the
   next at most 1023 elements, the third has no wrap field, and the
   outermost is the iteration count (at most 64) and the only one whose
-  stride may be 0. A constant pattern past them is split by the compiler
-  (`aie-decompose-large-dma-bd`); one a per-call value patches (an offset,
-  a bounded size) must fit one descriptor, since the patch lands in it.
+  stride may be 0. A pattern past them is split by the compiler
+  (`aie-decompose-large-dma-bd`), a per-call offset patched into every
+  piece; one whose size a call bounds must fit one descriptor, since the
+  patch lands in its length.
 - **Placement.** Operator order is the final tiebreak for shim tile and
   channel, so a per-column stream is not guaranteed to sit in physical
   column `c`; pin it with `via=` where that matters.
