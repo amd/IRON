@@ -277,6 +277,8 @@ def measure_steps(
             )
             table.record_step(v.key, cost)
             out[v.key] = cost
+        # A probe holds its context while it lives; the next batch needs them.
+        del short, long
     return out
 
 
