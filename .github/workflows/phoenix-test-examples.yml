@@ -75,7 +75,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
         with:
           env_name: ci_env
-          test_suite: "lm"
+          test_suite: "applications"
 
       - name: Commit example test results
         uses: ./.github/actions/commit_results

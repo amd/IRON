@@ -188,11 +188,11 @@ To bypass the hook if needed: `git push --no-verify`
 
 IRON includes a complete LLM inference example demonstrating NPU acceleration:
 
-- **Location**: `iron/lm/llama3/`, over the decoder every model shares (`iron/lm/`)
+- **Location**: `iron/applications/llama_3.2_1b/`, over the model package `iron/lm/llama3/` and the decoder every model shares (`iron/lm/`)
 - **Model**: Meta Llama 3.2 1B
 - **Features**: Multi-head attention, fused operators, bfloat16 quantization
 
-See [iron/lm/llama3/README.md](./iron/lm/llama3/README.md) for setup and usage instructions.
+See [iron/applications/llama_3.2_1b/README.md](./iron/applications/llama_3.2_1b/README.md) for setup and usage instructions.
 
 ## Architecture
 

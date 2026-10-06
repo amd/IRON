@@ -36,6 +36,17 @@ def runner():
     return Runner(WEIGHTS, TOKENIZER)
 
 
+@pytest.fixture(scope="module")
+def model(runner, request):
+    """The model, compiled and loaded once, its decode step tuned by
+    ``--cost-table`` if given; the runtime is released after the module's
+    last test, as ``npu_runtime`` does after each of the others.
+    """
+    yield runner.npu(request.config.getoption("--cost-table"))
+    if aie_utils.DefaultNPURuntime is not None:
+        aie_utils.DefaultNPURuntime.cleanup()
+
+
 # KL(fp32 CPU || NPU), teacher-forced over 40 steps. The graphs measure a
 # mean of 0.0083 and a p90 of 0.018; over 140 positions of prompt.txt the
 # p90 is 0.017. The largest step is prefill at 0.091, one of two positions

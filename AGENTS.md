@@ -74,10 +74,10 @@ pytest iron/tests/operators/catalog.py -k AXPY   # a declared Testing
 pytest iron/operators/flm/              # an operator with a test of its own
 ```
 
-### Run Language Model Tests
+### Run Application Tests
 
 ```bash
-pytest iron/lm/
+pytest iron/applications/
 ```
 
 ### Run Specific Test Function
@@ -713,7 +713,7 @@ logging.basicConfig(level=logging.DEBUG)
 
 - **small.yml**: Fast operator tests (non-extensive, runs on every PR)
 - **extensive.yml**: Full test suite (all operators with extensive tests)
-- **test-examples.yml**: Language model tests (e.g., Llama inference)
+- **test-examples.yml**: Application tests (Llama inference, Gemma 4 on FastFlowLM)
 - **ci-lint.yml**: Linting checks (black, clang-format, reuse)
 - **pr-comment.yml**: Posts the performance trends of a PR as a comment
 - **publish-pages.yml**: Rebuilds the benchmark history site on GitHub Pages
@@ -813,8 +813,8 @@ shared layer, plus its tokenizer and profiles:
   x)` and `head(x)`, built from `layers.py`: `project(x, w)`, a weight's
   projection at either row count (GEMV for one row, GEMM for more), and
   `swiglu`, the SwiGLU feed-forward (`SwiGLU` is it as a graph of its own,
-  device-tested by `iron/lm/test.py`). `rope_angles` (`decoder.py`) is the
-  RoPE table a `Config` names the base and scaling of
+  device-tested by `iron/operators/swiglu/test.py`). `rope_angles`
+  (`decoder.py`) is the RoPE table a `Config` names the base and scaling of
 - `Oracle` (`decoder.py`): the same decoder's float32 forward pass on the
   host, the reference the model is judged by, as an operator's is its
   `reference()` (not composed from the operators' references, so it catches
@@ -841,14 +841,15 @@ Their dependencies (safetensors, tiktoken, ...) are in
 
 ### Llama 3.2 1B Inference
 
-Full LLM inference example at `iron/lm/llama3/`, on the shared
-layer: `model.py` (Llama 3's layer and head on the NPU and in numpy,
-Llama 3.2 1B's shape, the layout, the tokenizer), `profiles/` (tunables):
+Full LLM inference example at `iron/applications/llama_3.2_1b/` (its test
+and README), over the model package `iron/lm/llama3/`: `model.py` (Llama 3's
+layer and head on the NPU and in numpy, Llama 3.2 1B's shape, the layout, the
+tokenizer), `profiles/` (tunables):
 
 - **Required files**: `model.safetensors`, `tokenizer.model` from Hugging Face
 - **Default location**: `/srv/llama3.2-1b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
 - **Additional deps**: `pip install -r requirements_examples.txt`
-- **Run**: `pytest iron/lm/llama3/`, or
+- **Run**: `pytest iron/applications/llama_3.2_1b/`, or
   `python -m iron.lm.llama3.model model.safetensors tokenizer.model`
   (`--max-seq-len`, a multiple of 2048, sizes the caches: 32768 by default,
   1 GB of them; one compile serves every context up to it). XRT locks

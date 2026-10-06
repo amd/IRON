@@ -5,10 +5,10 @@
 CPU reference, and determinism, each over a ``Runner`` and
 the model it loaded.
 
-A test module defines a module-scoped ``runner`` fixture; the ``model``
-fixture (``iron/lm/conftest.py``) loads the model from it once
-for the module, and each test calls one of these on the two, with its
-``record_property``, through which the figures reach the CSV.
+A test module defines module-scoped ``runner`` and ``model`` fixtures, the
+model loaded from the runner once for the module, and each test calls one
+of these on the two, with its ``record_property``, through which the
+figures reach the CSV.
 """
 
 import os

@@ -16,7 +16,7 @@ inputs:
   test_suite:
     required: false
     default: "operators"
-    description: "Which tests to run: 'operators' or 'lm'"
+    description: "Which tests to run: 'operators', 'applications', or 'both'"
 
 runs:
   using: "composite"
@@ -33,8 +33,8 @@ runs:
           operators)
             TEST_PATH="iron/operators/ iron/tests/operators/catalog.py"
             ;;
-          lm)
-            TEST_PATH="iron/lm/"
+          applications)
+            TEST_PATH="iron/applications/"
             ;;
           *)
             echo "Invalid test_suite: ${{ inputs.test_suite }}"

@@ -105,8 +105,7 @@ CATALOG_TEST_FILE = "iron/tests/operators/catalog.py"
 def operator_name(test_path: str, test_name: str = "") -> str:
     """Name the operator a row of 'Test Path' and 'Test' belongs to.
 
-    'iron/operators/flm/gemm/test.py::test_gemm' names 'flm/gemm',
-    'iron/lm/llama3/test.py::test_llama_3_2_1b' names 'llama3', and
+    'iron/operators/flm/gemm/test.py::test_gemm' names 'flm/gemm', and
     'iron/applications/llama_3.2_1b/test.py::test_llama' names
     'llama_3.2_1b'. A catalog row is named by its test's leading id:
     'iron/tests/operators/catalog.py::test_operator' with test
@@ -116,7 +115,7 @@ def operator_name(test_path: str, test_name: str = "") -> str:
     if file_part == CATALOG_TEST_FILE:
         return test_name.split("-", 1)[0] or UNKNOWN_OPERATOR
     directory, _ = split_test_path(test_path)
-    for prefix in ("iron/operators/", "iron/lm/", "iron/applications/"):
+    for prefix in ("iron/operators/", "iron/applications/"):
         if directory.startswith(prefix):
             return directory[len(prefix) :] or UNKNOWN_OPERATOR
     stem = os.path.splitext(os.path.basename(file_part))[0]

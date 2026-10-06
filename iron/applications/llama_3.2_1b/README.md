@@ -10,10 +10,11 @@ compiled per input shape, and the float32 numpy forward pass it is checked
 against, `LlamaOracle`, its `oracle`. Both are built from the same config
 and weights, Llama 3.2 1B's here; nothing here needs torch.
 
-What is Llama's own is short, and all of it is in `model.py`: its layer
-and head on the NPU and in numpy, its shape, where its checkpoint keeps
-each weight and its tokenizer; its tunables are in `profiles/`. The rest is
-`iron.lm`, which a new model reuses the same way:
+What is Llama's own is short, and all of it is in `iron/lm/llama3/model.py`:
+its layer and head on the NPU and in numpy, its shape, where its checkpoint
+keeps each weight and its tokenizer; its tunables are in
+`iron/lm/llama3/profiles/`. The rest is `iron.lm`, which a new model reuses
+the same way:
 
 - `CausalLM`: the body over a prompt chunk and a decode step, the key and
   value caches,
@@ -122,6 +123,6 @@ counts it as unmeasured). Run `tune.py` again after changing a design, or
 to measure for another NPU; it keeps the entries still current and measures
 only the rest.
 
-`pytest iron/lm/llama3/` loads the model once and runs
+`pytest iron/applications/llama_3.2_1b/` loads the model once and runs
 all of these in-process through `model.Runner`, recording the throughput and
 accuracy figures.
