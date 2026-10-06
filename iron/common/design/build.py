@@ -28,7 +28,6 @@ from aie.iron import (
     WorkerRuntimeBarrier,
 )
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
-from aie.utils.trace import events as trace_events
 
 from .. import declare
 from ..declare import Operator
@@ -36,25 +35,6 @@ from ..declare.bound import BoundValue
 from .external import ExternalSequence
 from .runtime import Sequence
 from .target import Target
-
-# What a traced core records: its DMA ports running, the kernel's
-# event0()/event1() markers, and its stalls and vector instructions.
-CORE_EVENTS = [
-    trace_events.PortEvent(
-        trace_events.CoreEvent.PORT_RUNNING_0, trace_events.WireBundle.DMA, 0, True
-    ),
-    trace_events.PortEvent(
-        trace_events.CoreEvent.PORT_RUNNING_1, trace_events.WireBundle.DMA, 1, True
-    ),
-    trace_events.PortEvent(
-        trace_events.CoreEvent.PORT_RUNNING_2, trace_events.WireBundle.DMA, 0, False
-    ),
-    trace_events.CoreEvent.INSTR_EVENT_0,
-    trace_events.CoreEvent.INSTR_EVENT_1,
-    trace_events.CoreEvent.MEMORY_STALL,
-    trace_events.CoreEvent.LOCK_STALL,
-    trace_events.CoreEvent.INSTR_VECTOR,
-]
 
 
 def device_symbol(op: Operator, value: BoundValue) -> str:
@@ -160,9 +140,7 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
             )
         # The workers array() marked with Worker(trace=), or the first.
         traced = [w for w in workers if w.trace is not None] or list(workers)[:1]
-        prog.enable_trace(
-            op.trace.trace_size, workers=traced, coretile_events=CORE_EVENTS
-        )
+        prog.enable_trace(op.trace.trace_size, workers=traced)
     return prog.resolve_program()
 
 
