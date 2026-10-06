@@ -32,8 +32,9 @@ from iron.operators.transpose import Transpose
 # per-K-tile bf16 rounding cost the encoder accuracy.
 ACCURATE = dict(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
 
-# The projections' row block: a version's rows are a multiple of it.
-ROWS = 256
+# The fewest rows a version has, 16 to each row of cores: a version's rows
+# are a multiple of it.
+ROWS = 64
 
 
 @dataclasses.dataclass(frozen=True)
