@@ -3,12 +3,8 @@
 
 """The operator: one class declaring the array, the buffers and the sequence.
 
-Its fields fall into two tiers by what a change rebuilds: the fields a tile
-names, plus those marked ``array=True``, configure the array, and one array
-serves every extent; the rest size the host buffers and reach only the
-runtime sequence. Calling the class binds it:
-``infer`` turns operand shapes into the extents,
-and the instance's buffer attributes report shapes in elements.
+The fields a tile names, plus those marked ``array=True``, configure the
+array, which serves every extent; the rest reach only the runtime sequence.
 """
 
 from __future__ import annotations
@@ -59,20 +55,11 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-# The tracer a graph's body runs under (iron.common.graph sets it), or None.
-# Under one, a call whose arguments the tracer accepts records a step
-# rather than constructing.
 graph_tracer: ContextVar[Any] = ContextVar("graph_tracer", default=None)
 
 
 class _OperatorMeta(type):
-    """``GEMV(w, h)`` inside a graph's body records a step; anything else constructs.
-
-    A call with graph handles (or host tensors, which a graph closes over as
-    weights) records a step; see ``iron.common.graph``. Any other call
-    constructs. The two overloads below tell a type checker the same: a
-    call with operands yields a handle, a call by keyword constructs.
-    """
+    """``GEMV(w, h)`` inside a graph's body records a step; anything else constructs."""
 
     if TYPE_CHECKING:
 
@@ -94,15 +81,11 @@ class _OperatorMeta(type):
             )
         profile = current_profile()
         if profile is not None:
-            # The tunables this call leaves open, where the profile names them.
             kwargs = {**profile.tunables_for(cls, kwargs), **kwargs}
         return super().__call__(*args, **kwargs)
 
 
 def _check_shipped(cls: type) -> None:
-    """Check a class declared with ``image=``: nothing builds it, so it must pin
-    every endpoint itself.
-    """
     if "array" in vars(cls):
         raise DeclarationError(
             f"{cls.__name__} runs a shipped image, so nothing builds its array(); "
@@ -122,14 +105,7 @@ def _check_shipped(cls: type) -> None:
 
 
 class _ArrayView:
-    """The array tier of an operator, as ``Operator.array`` sees it.
-
-    Reading a field no tile names and that does not declare ``array=True``
-    raises, so an array cannot come to depend on an extent by accident
-    (one array serves every extent). The operator's methods and properties
-    run on the view too, so a ``kernel()`` reading an extent is caught as
-    well.
-    """
+    """The array tier of an operator: reading any other field raises."""
 
     __slots__ = ("_op",)
 
@@ -162,19 +138,8 @@ class _ArrayView:
         setattr(object.__getattribute__(self, "_op"), name, value)
 
 
-# kw_only_default: every declared field is passed by keyword (at runtime a
-# required field after one with a default is keyword-only too, see
-# field._specifier). ``param`` is listed as a field specifier so a ``param()``
-# without ``default=`` is a required constructor argument. ``auto`` is not
-# listed: pyright reads a specifier's default only from a ``default=`` keyword,
-# and ``auto(2)`` passes it positionally. Unlisted, an ``auto()`` field is one
-# with a default of type Any, which is accurate.
 class _ExtentWord(Value):
-    """The tiles per lane of one operand under a bound: the word its
-    transfers are patched with, derived from the extent as a ``Value`` is.
-    A bound that ends inside a tile takes the whole tile (the buffer holds
-    whole tiles), so a bound of ``position + 1`` rows covers its last row.
-    """
+    """The tiles per lane of one operand under a bound, rounded up to whole tiles."""
 
     def __init__(self, owner: type, extent: Extent, buffer: str, axis: int) -> None:
         super().__init__(np.int32, derive=self._tiles)
@@ -187,9 +152,6 @@ class _ExtentWord(Value):
         return ceildiv(extent, self.divisor(op))
 
     def divisor(self, op) -> int:
-        """What the extent is divided by on ``op``, resolved: its lanes
-        times the rows one lane takes at a time.
-        """
         b = op.value_buffer(self.buffer)
         lanes = 1 if b.lanes.replicate else b.lanes.count
         return lanes * b.extent_unit(self.axis)
@@ -198,19 +160,12 @@ class _ExtentWord(Value):
         return f"<tiles per lane of {self.buffer} under {self.extent.name}>"
 
 
+# ``auto`` is not a listed specifier: pyright reads a default only from
+# ``default=``, and ``auto(2)`` passes it positionally.
 @dataclass_transform(kw_only_default=True, field_specifiers=(param,))
 @dataclasses.dataclass(eq=False, repr=True)
 class Operator(metaclass=_OperatorMeta):
-    """An operator. Subclass it.
-
-    One class declares the whole thing: ``param()``/``auto()`` fields,
-    ``In``/``Out`` operands (with ``tile=`` an operand is its own stream),
-    ``Value`` members, ``array`` for the dataflow, ``sequence`` when
-    the derived one is not wanted, ``resolve``/``compatible`` and
-    ``reference``. A class declared with ``image=`` runs a shipped
-    binary instead of building an array. Every subclass is a dataclass and
-    is checked as its body finishes (``creation``).
-    """
+    """An operator. Subclass it; every subclass is a dataclass checked as its body finishes."""
 
     _members: ClassVar[tuple[_Member, ...]] = ()
     _param_fields: ClassVar[tuple[str, ...]] = ()
@@ -218,20 +173,12 @@ class Operator(metaclass=_OperatorMeta):
     _auto_fields: ClassVar[tuple[str, ...]] = ()
     _array_fields: ClassVar[tuple[str, ...]] = ()
     _external: ClassVar[Any] = None
-    # The cases iron/tests/operators/catalog.py runs this operator at; None for an
-    # operator tested by its own test.py, or not on its own.
     test: ClassVar[Testing | None] = None
-    # True when sequence() calls rt.preamble() itself rather than having the
-    # build run it first: to issue it behind the first fills, or once per
-    # slab of a dispatch.
+    # True when sequence() calls rt.preamble() itself, behind its first fills.
     own_preamble: ClassVar[bool] = False
-    # aiecc options the operator's sequence needs to lower; a fused image
-    # lowers every operator's sequence under the union.
+    # A fused image lowers every operator's sequence under the union.
     aiecc_flags: ClassVar[tuple[str, ...]] = ()
 
-    # Hardware tracing of this operator's build (the workers array() gives
-    # Worker(trace=), else its first), in a buffer of trace.trace_size bytes;
-    # None leaves it untraced.
     trace: TraceConfig | None = dataclasses.field(
         default=None, repr=False, kw_only=True
     )
@@ -239,9 +186,6 @@ class Operator(metaclass=_OperatorMeta):
     def __init_subclass__(cls, image=None, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
         if image is not None:
-            # A shipped image: ``class Shipped(GEMM, image=Xclbin(...))``.
-            # Nothing builds its array, so it declares where every stream
-            # enters and every value lives, and may not define array().
             cls._external = image
         declare(cls)
         if image is not None:
@@ -256,15 +200,10 @@ class Operator(metaclass=_OperatorMeta):
         if checked:
             self.validate()
         self._bind()
-        # Once every tunable is known the extents can be checked, so the check
-        # runs at construction rather than at resolution.
         if checked and not any(getattr(self, n) is None for n in self._auto_fields):
             self.compatible()
 
     def _derive_params(self) -> None:
-        """Compute each ``param(default=<callable>)`` a shape or the caller
-        left open, in declaration order.
-        """
         for name, derive in self._derived_params.items():
             if getattr(self, name) is None:
                 value = derive(self)
@@ -276,10 +215,7 @@ class Operator(metaclass=_OperatorMeta):
                 setattr(self, name, value)
 
     def check_derived(self, *names: str) -> None:
-        """Raise ``ValueError`` if a computed-default parameter was given a
-        value its rule disagrees with. For a parameter a shape may bind but
-        the other fields also determine (``out_rows = rows * repeat``).
-        """
+        """Raise ``ValueError`` if a given computed-default parameter disagrees with its rule."""
         for name in names:
             given, expected = getattr(self, name), self._derived_params[name](self)
             if given != expected:
@@ -297,93 +233,54 @@ class Operator(metaclass=_OperatorMeta):
         """Check the extents against the resolved tunables; raise ``Incompatible``."""
 
     def resolve(self, dev) -> Self:
-        """Return a copy resolved for ``dev``: every ``auto()`` filled, from
-        the device and from this operator's extents; raise ``Unresolvable``.
+        """Return a copy with every ``auto()`` filled from ``dev`` and the extents.
 
-        This is the only hook that sees both. The default fills nothing. A
-        tunable left ``None`` is an error once this returns:
-
-        ```python
-        def resolve(self, dev):
-            cols = self.columns or self.shim_columns(dev)
-            return dataclasses.replace(self, columns=cols)
-        ```
-
-        Identity for sharing a build is taken after this runs, so two
-        operators that describe one array resolve to one design.
+        Raises:
+            Unresolvable: No legal value exists on ``dev``.
         """
         return dataclasses.replace(self)
 
     def array(self, target) -> list:
         """Build the array for ``target`` and return its workers.
 
-        ``target`` (``iron.common.design.Target``) carries the device,
-        the image being built, ``barrier()`` and ``register()``. Bind the
-        shim end of a fifo to every operand's lane (``self.A.lane(i).bind(
-        fifo.prod())``) and every ``Value`` to the buffer a core reads it
-        from. Only the array tier is visible here: reading a field no tile
-        names raises.
+        Bind every operand's lane to a fifo's shim end and every ``Value`` to
+        the buffer a core reads it from.
         """
         raise NotImplementedError(f"{type(self).__name__}.array() is not implemented")
 
     def build_array(self, target) -> list:
-        """Run ``array`` for the build, through the array-tier view."""
         return type(self).array(_ArrayView(self), target)
 
     def tolerance(self) -> Tolerance | None:
-        """How close the NPU output must come to ``reference``: the
-        contract of the kernel this array runs; ``None`` when the operator
-        states its own (see ``test``). Asked of the resolved operator
-        (``op.resolved().tolerance()``), whose tunables it may read.
-        """
+        """The contract tolerance of the kernel this array runs; ``None`` if none applies."""
         return None
 
     def ops(self) -> int:
-        """The arithmetic operations one call performs, for its throughput:
-        one per output element unless the operator counts its own, and 0
-        for one that only moves data. Asked of the resolved operator, like
-        ``tolerance``.
-        """
+        """The arithmetic operations one call performs, for its throughput."""
         return sum(b.elements for b in self.outputs)
 
     def device(self, target):
-        """The device the Program is built for; the current device by default."""
         return target.dev
 
     @property
     def external(self):
-        """The downloaded image this operator runs on, if IRON did not build it."""
         return type(self)._external
 
     def configuration(self) -> Self:
-        """The operator whose xclbin this one runs when it runs alone: itself,
-        unless one xclbin serves every shape of a configuration and only the
-        instruction stream is this shape's (flm's GEMM, built at a reference
-        shape). Asked of the resolved operator.
-        """
+        """The operator whose xclbin this one runs when it runs alone."""
         return self
 
     def exported_design(self, image: str):
-        """The generator of this operator's design when another tool exports
-        it rather than the library deriving it from the declaration
-        (swiglu_prefill_stream's stream-dse groups); ``None``, the default,
-        derives it.
-        """
+        """The design another tool exports for this operator; ``None`` derives it."""
         return None
 
     @classmethod
     def shim_columns(
         cls, dev, num_channels: int = 1, flags: Mapping[str, Any] | None = None
     ) -> int:
-        """How many of ``dev``'s columns this operator's streams leave within
-        the shim DMA budget, with the optional operands ``flags`` (field
-        values) make present.
+        """How many of ``dev``'s columns fit this operator's streams in the shim DMA budget.
 
-        One core per (column, channel) fills one fifo per input stream from
-        the shim and drains one per output, so a column costs ``inputs *
-        num_channels`` of the device's shim channels in and ``outputs *
-        num_channels`` out. A ``replicate`` stream is shared by every column
-        of a channel, so it is paid once per channel rather than per column.
+        A ``replicate`` stream is paid once per channel rather than per column.
         """
         streams = [
             m
@@ -403,7 +300,6 @@ class Operator(metaclass=_OperatorMeta):
         return max(1, cols)
 
     def check_shim_columns(self, dev, cols: int, num_channels: int = 1) -> None:
-        """Raise ``Unresolvable`` if ``cols`` exceeds the shim budget."""
         allowed = self.shim_columns(dev, num_channels, vars(self))
         if cols > allowed:
             raise Unresolvable(
@@ -420,13 +316,9 @@ class Operator(metaclass=_OperatorMeta):
         *,
         fits: Callable[[int], bool] | None = None,
     ) -> int:
-        """The column count to resolve to: ``given``, checked against the
-        shim budget, or the most the budget allows that ``fits``.
+        """``given``, checked against the shim budget, or the most columns that ``fits``.
 
-        ``fits(c)`` is the operator's own rule for ``c`` columns leaving
-        whole tiles; when no count within the budget does, one column is
-        returned and ``compatible`` names the rule. With no device
-        bound and no count given, ``Unresolvable``.
+        When no count fits, one column is returned and ``compatible`` names the rule.
         """
         if given is not None:
             if dev is not None:
@@ -446,14 +338,7 @@ class Operator(metaclass=_OperatorMeta):
         )
 
     def sequence(self, rt) -> None:
-        """Override to write the runtime sequence by hand; otherwise it is derived.
-
-        ``rt`` is an ``iron.common.design.Sequence``: ``rt.fill(stream,
-        view)``, ``rt.drain(stream, view)``, ``rt.group()``. The preamble
-        (residents, barriers, parameter sync) has already run, unless the
-        class sets ``own_preamble``, when calling ``rt.preamble()`` is up to
-        this.
-        """
+        """Override to write the runtime sequence by hand; otherwise it is derived."""
         raise NotImplementedError
 
     @classmethod
@@ -463,38 +348,26 @@ class Operator(metaclass=_OperatorMeta):
     # -- library surface ---------------------------------------------------
 
     def value_symbol(self, value: "BoundValue") -> str | None:
-        """An explicit device symbol for a per-call value, or ``None`` for the default."""
         return None
 
     def design_key(self):
-        """Identity for sharing a build: the class, the array's key, every compared field.
-
-        Two operators with equal keys generate byte-identical MLIR, so a
-        sequence builds, prefixes and configures the design once.
-        """
+        """Identity for sharing a build: equal keys generate byte-identical MLIR."""
         own = tuple(
             (f.name, getattr(self, f.name))
             for f in dataclasses.fields(self)
             if f.compare
         )
-        # A per-call value a graph bound is built in (a device parameter, a
-        # patched descriptor, a core that reads it), so it tells designs apart.
         if self.bound_values:
             own += (("values", tuple(sorted(self.bound_values.items()))),)
         return (type(self).__qualname__, own)
 
     def array_key(self):
-        """Identity for sharing an array: the class and its array-tier fields."""
         return (type(self).__qualname__,) + tuple(
             (name, getattr(self, name)) for name in self._array_fields
         )
 
     def resolved(self, dev=None) -> Self:
-        """This operator resolved for ``dev``, the bound device unless given:
-        itself if it already is, else ``resolve``'s copy, every tunable
-        filled and ``validate`` and ``compatible`` checked. Nothing
-        else calls ``resolve``.
-        """
+        """This operator resolved for ``dev`` (the bound device unless given), checked."""
         if self._resolved:
             return self
         new = self.resolve(dev if dev is not None else self.dev)
@@ -513,9 +386,7 @@ class Operator(metaclass=_OperatorMeta):
                 f"{type(self).__name__}.resolve() left {missing} unset for {dev}"
             )
         new.validate()
-        # Values a graph bound on this instance live outside its fields, so
-        # replace() does not carry them. The build works on the copy, and
-        # losing them would silently drop the per-call value from the sequence.
+        # Bound values live outside the fields, so replace() drops them.
         if self.bound_values:
             vars(new)["_bound_values"] = self.bound_values
         new.compatible()
@@ -523,26 +394,18 @@ class Operator(metaclass=_OperatorMeta):
         return new
 
     def copy(self) -> Self:
-        """A fresh instance for one build, so the streams a build binds are
-        this build's alone; resolution state and the per-call values a graph
-        bound are kept.
-        """
+        """A fresh instance for one build, keeping resolution and bound values."""
         new = dataclasses.replace(self)
         if self.bound_values:
             vars(new)["_bound_values"] = self.bound_values
         new._resolved = self._resolved
         if self._resolved:
-            # What compatible() records is part of a resolved instance; a
-            # replace() resets an init=False field to its default, so the
-            # copy records it again.
+            # replace() resets the init=False fields compatible() records.
             new.compatible()
         return new
 
     def with_tunables(self, **tunables: Any) -> Self:
-        """This operator, unresolved, with the given ``auto()`` fields set:
-        another build of the same host ABI (a narrower array, say). The
-        per-call values a graph bound are kept.
-        """
+        """This operator, unresolved, with the given ``auto()`` fields set."""
         unknown = [n for n in tunables if n not in self._auto_fields]
         if unknown:
             raise TypeError(f"{type(self).__name__} has no tunable {unknown}")
@@ -553,12 +416,7 @@ class Operator(metaclass=_OperatorMeta):
 
     @property
     def widths(self) -> dict[str, int | None]:
-        """The settable tunables a ``per=`` stream's count is a product of,
-        and their values (``None`` until resolved): how many shim channels,
-        and cores behind them, the array takes. A narrower array leaves the
-        rest of the device to another design. A tunable the class fixes
-        (``init=False``) is not one.
-        """
+        """The settable tunables a ``per=`` stream's count is a product of, and their values."""
         settable = {
             f.name: getattr(self, f.name)
             for f in dataclasses.fields(self)
@@ -573,9 +431,6 @@ class Operator(metaclass=_OperatorMeta):
 
     @property
     def buffers(self) -> list[BoundBuffer]:
-        """The operands this instance has: every declared one but an
-        optional one whose ``when=`` flag is false.
-        """
         return [self._bound[m.name] for m in self._members_io()]
 
     @property
@@ -588,14 +443,12 @@ class Operator(metaclass=_OperatorMeta):
 
     @property
     def values(self) -> list[BoundValue]:
-        """The per-call values this instance uses (see ``uses_value``)."""
         return [
             self._bound[m.name] for m in self._value_members if self.uses_value(m.name)
         ]
 
     @property
     def streams(self) -> dict[str, BoundStream]:
-        """Every operand's own stream, by the operand's name."""
         return {
             m.name: self._bound[m.name].lanes
             for m in self._members_io()
@@ -604,28 +457,17 @@ class Operator(metaclass=_OperatorMeta):
 
     @property
     def residents(self) -> dict[str, Any]:
-        """What the preamble writes once per build: every ``Value(derive=)``
-        no graph bound per call, derived from this instance, by name (its
-        device word is ``value``).
-        """
+        """What the preamble writes once per build, by name."""
         return {
             m.name: m.derive(self)
             for m in self._members
             if isinstance(m, Value)
             and m.derive is not None
-            and not self.uses_value(m.name)  # bound per call: not a resident
+            and not self.uses_value(m.name)
         }
 
     def uses_value(self, name: str) -> bool:
-        """Whether this instance drives the declared per-call value ``name``.
-
-        A value an instance does not use gets no device parameter and no
-        sync. The default is every declared value, except an ``Extent``,
-        per call only when a graph bounds it, and a ``Value`` with a
-        derivation, per call when a graph binds it (``use_value``) or
-        its derivation reads a bound extent; an operator whose values are
-        optional (a copy with or without a patched offset) overrides this.
-        """
+        """Whether this instance drives the per-call value ``name``; unused ones get no parameter."""
         member = next((m for m in self._value_members if m.name == name), None)
         if isinstance(member, Extent):
             return name in self.bound_values
@@ -635,7 +477,6 @@ class Operator(metaclass=_OperatorMeta):
 
     @property
     def bound_extents(self) -> dict[str, str | None]:
-        """Extent name -> the graph value bounding it, for the bound ones."""
         bound = self.bound_values
         return {
             m.name: bound[m.name]
@@ -644,12 +485,9 @@ class Operator(metaclass=_OperatorMeta):
         }
 
     def _per_call_derived(self) -> frozenset[str]:
-        """The derived values whose derivation reads a bound extent."""
         if not self.bound_extents:
             return frozenset()
-        # Asked from array(), the derivations still run on the operator: the
-        # extents one reads say how its value reaches the device, which the
-        # array may depend on; that is not the array reading an extent.
+        # From array(), derivations run on the operator: reading an extent here is not the array's.
         op = object.__getattribute__(self, "_op") if type(self) is _ArrayView else self
         out = set()
         for m in self._value_members:
@@ -668,9 +506,7 @@ class Operator(metaclass=_OperatorMeta):
         return frozenset(out)
 
     def derived_at(self, name: str, **extents: int) -> Any:
-        """The value ``name``'s derivation with the extents at the given
-        bounds: the word the host writes for one call.
-        """
+        """The word the host writes for ``name`` with the extents at the given bounds."""
         member = next((m for m in self._value_members if m.name == name), None)
         if not (isinstance(member, Value) and member.derive is not None):
             raise TypeError(f"{type(self).__name__}.{name} is not a derived value")
@@ -686,27 +522,20 @@ class Operator(metaclass=_OperatorMeta):
         return member.derive(at)
 
     def extent_unit(self, buffer: str) -> int | None:
-        """The rows of operand ``buffer`` one lane takes at a time under a
-        bound, when it is not the stream tile's rows (GEMV's A moves in
-        output tiles, several input tiles each); ``None`` for the tile's;
-        ``0`` when the operand is not shortened under a bound at all (GEMM
-        and MHA stream every row and bound their compute), so no word of
-        tiles per lane is made for it.
+        """The rows of ``buffer`` one lane takes at a time under a bound.
+
+        ``None`` for the stream tile's rows; ``0`` when a bound does not shorten it.
         """
         return None
 
     def value_buffer(self, name: str) -> BoundBuffer:
-        """The bound operand ``name``."""
         b = self._bound.get(name)
         if not isinstance(b, BoundBuffer):
             raise TypeError(f"{type(self).__name__} declares no operand {name!r}")
         return b
 
     def value(self, name: str) -> BoundValue:
-        """The device word of the value member ``name`` (an ``Extent`` reads
-        as an integer on the instance, so this is how a sequence names its
-        word).
-        """
+        """The device word of value ``name`` (an ``Extent`` attribute reads as an integer)."""
         try:
             return self._bound[name]
         except KeyError:
@@ -715,13 +544,7 @@ class Operator(metaclass=_OperatorMeta):
             ) from None
 
     def use_value(self, name: str, bound_to: str | None = None) -> None:
-        """Record that a graph binds the per-call value ``name`` on this
-        instance, to its own value ``bound_to``.
-
-        The graph value is part of what is built: two instances alike in
-        every field but reading different graph values are two designs with
-        two device symbols.
-        """
+        """Record that a graph binds the per-call value ``name`` to its value ``bound_to``."""
         if not any(isinstance(m, _Value) and m.name == name for m in self._members):
             raise TypeError(
                 f"{type(self).__name__} declares no per-call value {name!r}"
@@ -730,13 +553,11 @@ class Operator(metaclass=_OperatorMeta):
 
     @property
     def bound_values(self) -> dict[str, str | None]:
-        """Per-call value name -> the graph value it is bound to."""
         return dict(self.__dict__.get("_bound_values", {}))
 
     # -- graphs ---------------------------------------------------------
 
     def __call__(self, *args, **kwargs):
-        """An explicit instance applied to graph handles records a step."""
         tracer = graph_tracer.get()
         if tracer is None:
             raise TypeError(
@@ -748,14 +569,11 @@ class Operator(metaclass=_OperatorMeta):
     def _bind(self) -> None:
         bound: dict[str, Any] = {}
         for m in self._members_io():
-            bound[m.name] = BoundBuffer(m, self)  # its own stream with it
+            bound[m.name] = BoundBuffer(m, self)
         for m in self._members:
             if isinstance(m, _Value):
                 bound[m.name] = BoundValue(m, self)
         self._bound = bound
-        # One word per (extent, operand it sizes): the tiles per lane a
-        # bounded transfer is patched with. Made here, so a build finds it
-        # among the values; per call only once the extent is bound.
         words = []
         for e in self._members:
             if not isinstance(e, Extent):
@@ -771,7 +589,6 @@ class Operator(metaclass=_OperatorMeta):
 
     @property
     def _value_members(self) -> list[_Value]:
-        """The declared value members and the extent words made with them."""
         return [m for m in self._members if isinstance(m, _Value)] + list(
             self.__dict__.get("_extent_words", ())
         )
@@ -780,9 +597,7 @@ class Operator(metaclass=_OperatorMeta):
 
     @classmethod
     def from_operands(cls, *operand_shapes, **overrides) -> Self:
-        """Construct an operator from operand shapes, given as a graph call
-        gives its operands: an optional input's by keyword.
-        """
+        """Construct from operand shapes, an optional input's by keyword."""
         inputs, outputs, overrides = call_operands(cls, operand_shapes, overrides)
         values = infer(
             cls,
@@ -796,21 +611,11 @@ class Operator(metaclass=_OperatorMeta):
 
     @property
     def dev(self):
-        """The device a design is generated for, bound as the current one
-        (``aie.utils.ensure_current_device``); ``None`` on a host
-        without one, where an operator can still be checked and lowered.
-        """
         return aie_utils.ensure_current_device()
 
     @property
     def name(self) -> str:
-        """This instance's label: the class, every shown field as resolved
-        for the device, and the device. It names the per-call value symbols
-        a host writes through and the kernel instances a chained image
-        carries. Nothing on disk is keyed by it; the compile cache keys by
-        content. The label describes what is built, so it comes from the
-        resolved operator.
-        """
+        """The label of the resolved operator: its class, shown fields and device."""
         dev = self.dev
         if dev is None:
             raise Unresolvable(
@@ -838,7 +643,6 @@ class Operator(metaclass=_OperatorMeta):
         return "_".join([type(self).__name__, *own, dev.name])
 
     def _members_io(self) -> list[_Buffer]:
-        """The declared buffers this instance has, without resolving a shape."""
         # getattr rather than vars(): array() runs this on its view.
         return [
             m
@@ -855,14 +659,7 @@ class Operator(metaclass=_OperatorMeta):
         return f"{type(self).__name__}({own})"
 
     def explain(self) -> str:
-        """What a build of this operator compiles in and what it takes per call.
-
-        One line per tier: the array's fields (every core is built from them;
-        one array serves every operator with the same), the sequence's (the
-        host's alone), then each value: written once per build, with its
-        number once resolved; per call, as a scratchpad word or a regenerated
-        instruction stream; or unused by this instance.
-        """
+        """What a build of this operator compiles in and what it takes per call."""
         fields = {
             f.name: getattr(self, f.name)
             for f in dataclasses.fields(self)
@@ -882,7 +679,7 @@ class Operator(metaclass=_OperatorMeta):
         per_call_derived = self._per_call_derived()
         for m in self._value_members:
             if isinstance(m, _ExtentWord) and m.name not in per_call_derived:
-                continue  # a word only a bounded extent needs
+                continue
             if isinstance(m, Extent):
                 bound = self.bound_extents.get(m.name)
                 how = (

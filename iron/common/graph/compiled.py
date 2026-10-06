@@ -1,15 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A graph, and the images it compiles to.
+"""A graph, and the images it compiles to: one version per input signature.
 
-A graph is compiled once per input signature (shapes and dtypes): each is a
-*version*, its own image. Every version reads the same weights and states,
-and on a full ELF they share one scratch arena
-(``ArenaPlan``), so a weight is on the device once
-and a state one version writes is where the next reads it. This needs no
-setup: calling the graph with a new shape compiles a version into the arena
-its other versions already use.
+Full-ELF versions share one scratch arena, so a weight is on the device once
+and a state one version writes is where the next reads it.
 """
 
 from __future__ import annotations
@@ -50,7 +45,6 @@ Signature = tuple[tuple[str, tuple[int, ...], str], ...]
 
 
 def _shape_and_dtype(spec):
-    """``(shape)`` or ``((shape), dtype)``."""
     if (
         isinstance(spec, tuple)
         and len(spec) == 2
@@ -60,7 +54,6 @@ def _shape_and_dtype(spec):
     return tuple(spec), bfloat16
 
 
-# A weight is uploaded in pieces of at most this many bytes of the host copy.
 UPLOAD_PIECE = 64 * 2**20
 
 
@@ -72,13 +65,8 @@ def _store(
 ) -> None:
     """Copy ``tensor`` into a buffer view, casting in place.
 
-    Assignment casts element by element into the destination; ``astype``
-    first would build a whole temporary, and faulting in the 501 MiB one
-    for Llama's embedding took 5-50 s per upload.
-
-    ``release``, if given, is called with each piece of the flattened host
-    copy once it is in the buffer, so a mapped checkpoint need never have
-    more than a piece of a weight resident beside it.
+    ``astype`` first would fault in a whole temporary: 5-50 s for Llama's
+    501 MiB embedding. ``release`` gets each piece once it is in the buffer.
     """
     flat = np.asarray(tensor).reshape(-1)
     if release is None:
@@ -94,30 +82,18 @@ def _store(
 class Graph:
     """A graph: a subclass whose ``body`` is traced on handles.
 
-    ``body``'s positional parameters are the inputs, its keyword-only ones
-    (annotated ``Scratchpad[T]`` or ``DispatchTime[T]``) the per-call values,
-    and what it returns the outputs. An input defaulting to None may be left
-    out: the version without it is traced with None in its place, and
-    ``body`` branches on that as it does on a shape. The weights and states are what the
-    instance holds: a tensor or an ``state`` in an attribute,
-    or in a list, tuple, dict, dataclass or namespace there, named by its
-    path (``self.layers[3].q`` is ``layers.3.q``). A tensor ``body`` reaches
-    any other way is a weight too, named ``w<n>``.
-
-    ``profile`` is the ``Profile`` applied
-    whenever ``body`` runs -- traced, compiled or as a reference -- or a
-    directory of them, ``<device>.json``, of which the bound device's is
-    read. A subclass or an instance sets it.
+    ``body``'s positional parameters are the inputs (one defaulting to None
+    may be left out), its keyword-only ones the per-call values, and what it
+    returns the outputs. Weights and states are what the instance holds,
+    named by attribute path (``self.layers[3].q`` is ``layers.3.q``).
+    ``profile`` is a ``Profile`` or a directory of ``<device>.json`` ones.
     """
 
     profile: Profile | Path | None = None
 
-    # (name) per input, (name -> spec) per per-call value: body's signature.
     _inputs: list[str] = []
     _values: dict[str, ValueSpec] = {}
-    # The inputs defaulting to None, which a version may be traced without.
     _optional: frozenset[str] = frozenset()
-    # The per-call values annotated Carried[T], which body computes the next of.
     _carried: list[str] = []
 
     def body(self, *inputs: Any, **values: Any) -> Any:
@@ -126,7 +102,7 @@ class Graph:
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         if "body" not in cls.__dict__:
-            return  # its parent's inputs and values
+            return
         params = list(inspect.signature(cls.body).parameters.values())[1:]
         cls._inputs = [
             p.name
@@ -176,21 +152,16 @@ class Graph:
 
     @functools.cached_property
     def _carry(self) -> State | None:
-        """The values a call started from and the elements it computed,
-        which every full-ELF version's Emit reads (see ``carried``).
-        """
         if not self._carried:
             return None
         return State((2, len(self._carried)), np.int32, CARRY)
 
     @property
     def versions(self) -> dict[Signature, CompiledGraph]:
-        """Every version compiled so far, by input signature."""
         return dict(self._versions)
 
     @property
     def arena(self) -> ScratchArena:
-        """The scratch arena every full-ELF version runs in."""
         return self._arena
 
     @staticmethod
@@ -200,7 +171,7 @@ class Graph:
     # -- tracing ---------------------------------------------------------------
 
     def names(self) -> dict[int, str]:
-        """The name of each tensor and state the instance holds, by identity."""
+        """The path name of each tensor and state the instance holds, by identity."""
         names: dict[int, str] = {}
         seen: set[int] = set()
 
@@ -230,12 +201,7 @@ class Graph:
         return names
 
     def trace(self, **shapes) -> TracedGraph:
-        """Run ``body`` on handles of the given shapes; return the graph.
-
-        An input defaulting to None that is given no shape (or None) is
-        absent: ``body`` sees None for it, and the version takes no such
-        input.
-        """
+        """Run ``body`` on handles of the given shapes; an optional input given none is None."""
         shapes = {k: v for k, v in shapes.items() if v is not None}
         missing = [
             p for p in self._inputs if p not in shapes and p not in self._optional
@@ -268,11 +234,6 @@ class Graph:
         )
 
     def _split_carry(self, result) -> tuple[list, Carry | None]:
-        """The returned outputs, and the ``Carry`` returned last, if any.
-
-        A graph with carried values must return their next values, and one
-        without must not.
-        """
         if result is None:
             items = []
         elif isinstance(result, (tuple, list)):
@@ -296,9 +257,7 @@ class Graph:
     def _traced_carry(
         self, carry: Carry | None, values: list[Value], tracer: Tracer
     ) -> dict[str, Handle | Affine]:
-        """Each traced next value, checked: an expression of the values, or
-        one integer element the graph computed, which becomes an output.
-        """
+        """Each next value: an expression of the values, or one element the graph computed."""
         if carry is None:
             return {}
         dtypes = {v.name: v.dtype for v in values}
@@ -360,27 +319,20 @@ class Graph:
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
 
-        ``boundaries`` and ``image`` are the two packaging choices
-        (``iron.common.image.packaging``); everything else is derived and, under
-        ``verbose``, printed. ``record="disk"`` writes the image's
-        ``Artifacts`` record beside it.
-        ``coresident`` packs designs into shared device configurations
-        (``iron.common.image.coresidence``); a full ELF only. A
-        ``JointNarrowing`` also narrows designs so that
-        they fit; what it chose is the version's ``CompiledGraph.tuning``.
+        Compile every version before the first call where you can: one placed
+        after the arena's buffer exists grows it, which copies it once.
 
-        A full-ELF version is placed in ``arena``, with the weights and
-        states of every other version. Compile every version before the
-        first call where you can: a version placed after the arena's buffer
-        exists grows it, which copies it once.
-
-        A full-ELF version with carried values ends in an Emit step, which
-        writes the scratchpad of the version it ``feeds`` -- by default
-        itself, where it takes no tensor (nothing would write one between
-        its calls) -- so that one can run without the host
-        (``CarriedLoop``). A version that
-        takes a tensor and feeds nothing has no Emit; a call still returns
-        its carried values.
+        Args:
+            dev: The device to bind, else the current one.
+            boundaries: Packaging choice (``iron.common.image.packaging``).
+            image: Packaging choice (``iron.common.image.packaging``).
+            verbose: Print why the packaging was chosen.
+            record: ``"disk"`` writes the image's ``Artifacts`` beside it.
+            feeds: The version a full ELF's Emit starts; by default itself
+                when it takes no tensor.
+            coresident: Packs designs into shared configurations; a
+                ``JointNarrowing`` narrows them to fit first.
+            **shapes: Each input's shape, or ``(shape, dtype)``.
         """
         if dev is not None:
             aie_utils.set_current_device(dev)
@@ -397,8 +349,7 @@ class Graph:
             print(chosen.report(self.name))
         signature = self._signature(traced.inputs)
         shared = chosen.dispatch == "fused"
-        # Versions see one state only through the arena. Weights alone could
-        # be copied per version, so a stateless graph still compiles.
+        # Versions share state only through the arena; weights could be copied.
         others = [v for k, v in self._versions.items() if k != signature]
         apart = not shared or any(v.arena is None for v in others)
         stateful = traced.states or any(v.traced.states for v in others)
@@ -453,7 +404,6 @@ class Graph:
         return version
 
     def _given(self, tensors) -> dict[str, Any]:
-        """Input name -> tensor, for the inputs a call passes (in order)."""
         if len(tensors) > len(self._inputs):
             raise TypeError(
                 f"{self.name} takes {len(self._inputs)} input(s), got {len(tensors)}"
@@ -482,12 +432,7 @@ class Graph:
         return version(*given.values(), **values)
 
     def reference(self, *tensors, **values) -> Any:
-        """``body`` on host tensors, each operator run through its ``reference()``.
-
-        An optional input left out, or passed as None, is None in ``body``.
-        Returns what a call returns: the outputs, then the next values of
-        the carried ones as numbers.
-        """
+        """``body`` on host tensors, each operator run through its ``reference()``."""
         args = list(tensors) + [None] * (len(self._inputs) - len(tensors))
         with self._scope(), _ReferenceTracer(self.name):
             result = self.body(*args, **{k: values.get(k) for k in self._values})
@@ -498,7 +443,6 @@ class Graph:
         return _results(items, nxt)
 
     def _scope(self):
-        """The profile applied while ``body`` runs, if there is one."""
         profile = self.profile
         if isinstance(profile, (str, Path)):
             dev = aie_utils.ensure_current_device()
@@ -512,11 +456,7 @@ class Graph:
 
 
 class CompiledGraph:
-    """A traced graph built into an image, ready to call.
-
-    With an ``arena`` its weights and states are residents of that shared
-    scratch arena: placed once for every image in it, and uploaded once.
-    """
+    """A traced graph built into an image, ready to call."""
 
     def __init__(
         self,
@@ -531,23 +471,11 @@ class CompiledGraph:
         self.traced = traced
         self.plan = plan
         self.arena = arena
-        # What a JointNarrowing chose for this version; None without one.
         self.tuning = tuning
-        # Where the Emit step ending a full ELF with carried values reads
-        # and writes; None without one.
         self.emit = emit
-        # Each scratchpad word a call writes (``Word``): each bound value (a
-        # per-call index on a view scaled to an element offset), and each
-        # value derived from a bounded extent, computed by the operator from
-        # the call's bound.
-        # On a full ELF, symbols that always hold one number share a word:
-        # ``shared`` maps each such design symbol to its word.
         self.words, self.shared = _words(
             traced, share=plan.dispatch == "fused", extents=plan.image != ELF
         )
-        # Equal design keys are one build (two projections on one array).
-        # compile() builds the image; the runtime that loads it is made on
-        # first use, so a host without an NPU can still compile.
         placement: dict[str, Any] = (
             {} if arena is None else dict(arena=arena.plan, residents=traced.residents)
         )
@@ -557,37 +485,29 @@ class CompiledGraph:
             dispatch=plan.dispatch, shared_words=self.shared, **placement
         ).compile(record=record)
         self.image = self.sequence.image
-        # What the image consists of, by identity: its designs, which step
-        # runs which, and where each buffer lands in its plan.
         self.artifacts = self.sequence.artifacts
         if self.artifacts.kind == "elf":
-            # The image declares only the words its designs read: an extent
-            # read only through its derivations has none.
+            # An extent read only through its derivations has no word.
             self.words = [
                 w for w in self.words if w.symbol in self.artifacts.parameters
             ]
         self._callable = None
-        # Weights in this image's buffers, by storage key; an arena's own set
-        # when there is one, since then every image's weights are the same.
+        # Shared with the arena when there is one: its weights are every image's.
         self._loaded: set = set() if arena is None else arena.loaded
 
     @property
     def callable(self):
-        """The loaded image, made on first use (needs the XRT runtime)."""
+        """The loaded image, made on first use so a host without an NPU can compile."""
         if self._callable is None:
             self._callable = self.sequence.get_callable(self.arena)
         return self._callable
 
     @property
     def parameters(self) -> list[Parameter]:
-        """The per-call values a full ELF's scratchpad holds, as its
-        parameter table lays them out; none on another image.
-        """
         return self.artifacts.parameter_table
 
     @property
     def is_loaded(self) -> bool:
-        """Whether the image is on the device, so a call pays no setup."""
         return self._callable is not None
 
     # -- buffers ---------------------------------------------------------------
@@ -602,26 +522,20 @@ class CompiledGraph:
         raise KeyError(f"{x!r} is not a state, weight or handle of this graph")
 
     def buffer(self, x):
-        """The device buffer of a state, a weight tensor, or a handle."""
         return self.callable.get_buffer(self._buffer_name(x))
 
     def _storage(self, x):
-        """A host-synchronizable flat view that starts with ``x``'s buffer
-        (a slice's own, which is aligned, else the whole of its lines).
-        """
         name = self._buffer_name(x)
         if isinstance(x, Handle) and x.parent is not None:
             return self.callable.get_buffer(name)
         return self.callable.get_storage(name)
 
     def write(self, x, tensor) -> None:
-        """Copy ``tensor`` into a state's or weight's buffer and push it to the device."""
         buf = self._storage(x)
         _store(buf.numpy_view()[: int(np.prod(x.shape))], tensor)
         buf.to("npu")
 
     def read(self, x):
-        """A state's or weight's current contents, as a host tensor of its shape."""
         buf = self._storage(x)
         buf.to("cpu")
         return buf.numpy()[: int(np.prod(x.shape))].reshape(tuple(x.shape))
@@ -643,11 +557,8 @@ class CompiledGraph:
     ) -> None:
         """Copy every closed-over weight into its buffer, once per storage.
 
-        ``release``, if given, is called with each piece of each weight (a
-        flat view of at most ``piece_bytes``) as soon as it is in its
-        buffer, so the weight's owner can drop the host copy's pages. In an
-        arena that is the last time the weight is read: a grown arena keeps
-        the device's contents.
+        In an arena ``release`` is the last time a weight is read: a grown
+        arena keeps the device's contents.
         """
         for key, (tensor, handle) in self.traced.weights.items():
             if key not in self._loaded:
@@ -659,12 +570,9 @@ class CompiledGraph:
         release: Callable[[np.ndarray], None] | None = None,
         piece_bytes: int = UPLOAD_PIECE,
     ) -> CompiledGraph:
-        """Load the image and upload its weights now, rather than on first
-        call; ``release`` and ``piece_bytes`` as for ``upload``.
+        """Load the image and upload its weights now rather than on first call.
 
-        The image is loaded even when there is nothing to upload: in an
-        arena, another version may have put every weight there already, and
-        loading on first call cost Llama's first prefill 88 ms.
+        Loading on first call cost Llama's first prefill 88 ms.
         """
         if not self.is_loaded:
             self._callable = self.sequence.get_callable(self.arena)
@@ -682,26 +590,18 @@ class CompiledGraph:
         return _results(outputs, self._next_values(values))
 
     def start(self, run: FullELFRun, /, *tensors, **values) -> None:
-        """Start a call of this full ELF on ``run`` (one of its callable's
-        ``new_run()``), without waiting for it.
-        """
+        """Start a call of this full ELF on ``run`` without waiting for it."""
         self._stage(tensors, values, run)
         self.callable.start(run)
 
     def emit_to(self, target: CompiledGraph) -> None:
-        """Program this version's Emit to start a call of ``target``: its
-        scratchpad words, and the carried values it starts from.
-        """
+        """Program this version's Emit to start a call of ``target``."""
         if self.emit is None:
             raise ValueError(f"{self.traced.name}: this version has no Emit step")
         program = compose(self.emit, self.traced.carry, target.words, target.parameters)
         self.write(self.emit.program, program)
 
     def _stage(self, tensors, values, run: FullELFRun | None = None) -> None:
-        """Everything a call writes before it is dispatched: the weights not
-        yet uploaded, the inputs, and the per-call values, into ``run``'s
-        scratchpad (the callable's own by default).
-        """
         if len(tensors) != len(self.traced.inputs):
             raise TypeError(
                 f"{self.traced.name} takes {len(self.traced.inputs)} input(s), "
@@ -719,9 +619,6 @@ class CompiledGraph:
         self._write_values(values, run)
 
     def _next_values(self, values: Mapping[str, int]) -> Carry:
-        """The carried values' next values, after a call with ``values``: an
-        expression evaluated here, a computed element read back.
-        """
         nxt: dict[str, int] = {}
         planes = None if self.emit is None else self.read(self.emit.carry)
         for name, expression in self.traced.carry.items():
@@ -746,7 +643,6 @@ class CompiledGraph:
                 + (f"; {sorted(unknown)} unknown" if unknown else "")
             )
         if self.emit is not None:
-            # The values this call starts from, for its Emit.
             n = len(self.emit.carried)
             head = self._storage(self.emit.carry).numpy_view()
             head[:n] = [values[name] for name in self.emit.carried]
@@ -757,9 +653,7 @@ class CompiledGraph:
 
 
 def _rename(tracer: Tracer, handle: Handle, name: str) -> None:
-    """Make an intermediate a graph output named ``name``: the handle, and
-    every view of its buffer the steps hold (a reshape is a new handle).
-    """
+    """Make an intermediate, and every view of its buffer, a graph output named ``name``."""
     old = handle.name
     for step in tracer.steps:
         for h in step.slots + step.inputs + step.outputs:
@@ -774,9 +668,6 @@ def _rename(tracer: Tracer, handle: Handle, name: str) -> None:
 
 
 def _results(outputs: list, carry: Carry | None):
-    """A call's return, shaped as the body's: one output alone, several as
-    a tuple, and the carry last.
-    """
     items = list(outputs) + ([] if carry is None else [carry])
     if not items:
         return None
@@ -794,17 +685,12 @@ class Linear:
 
     @property
     def is_integral(self) -> bool:
-        """Whether it rounds nothing: an integer scale and offset."""
         return self.ratio.denominator == 1 and self.offset.denominator == 1
 
 
 @dataclasses.dataclass(frozen=True)
 class Word:
-    """A scratchpad word a call writes: its device symbol, its dtype, how it
-    follows from the call's values and, where it has them, the linear form it
-    has in one graph value (by which words share) and the form an Emit row
-    computes it by.
-    """
+    """A scratchpad word a call writes; words with one ``linear`` form share a word."""
 
     symbol: str
     dtype: Any
@@ -817,10 +703,7 @@ class Word:
 
 
 def _derived_form(op, name: str, symbolic: Mapping[str, Form]) -> Form | None:
-    """The Emit form of ``op``'s derived value ``name``: its derivation run
-    on the forms of the bounds, or ``None`` where it does more than a form
-    can (it compares, or divides by other than a power of two).
-    """
+    """The Emit form of ``op``'s derived value ``name``, or ``None`` where no form expresses it."""
     try:
         got = op.derived_at(name, **symbolic)
     except TypeError:
@@ -836,26 +719,17 @@ def _derived_form(op, name: str, symbolic: Mapping[str, Form]) -> Form | None:
 def _words(
     traced: TracedGraph, *, share: bool = False, extents: bool = True
 ) -> tuple[list[Word], dict[str, str]]:
-    """The scratchpad words a call writes, each from the call's values, and
-    with ``share`` the design symbols that share one word.
+    """The scratchpad words a call writes, and with ``share`` the symbols sharing one.
 
-    A word is a bound value (a per-call index on a view, scaled to an
-    element offset) or a value an operator, resolved for the device, derives
-    from a bounded extent, computed from the call's bound. With ``extents``
-    a bound extent is a word itself, as an xclbin's dispatch scalar is;
-    without, it is not, as on a full ELF, where no design reads one but
-    through what it derives from it. The full ELF has
-    32 words for its whole image, and a bounded prompt binds its row count
-    to every operator's extents, so symbols that always hold one number
-    share a word: those whose derivation is ``Linear`` (a bound
-    expression, or a bounded extent over the lanes and rows it is divided
-    into), in one dtype. Any other derivation keeps its own word.
+    A full ELF has 32 words for its whole image and a bounded prompt binds
+    its row count to every operator, so symbols with one ``Linear`` form
+    share a word.
     """
     dev = aie_utils.get_current_device()
     words: list[Word] = []
     for b in traced.bindings:
         if not extents and isinstance(b.member.member, Extent):
-            continue  # its derivations below
+            continue
         e = b.expression
         linear = Linear(
             e.value.name,
@@ -888,7 +762,7 @@ def _words(
             return {name: count.evaluate(v) for name, count in counts.items()}
 
         for name in sorted(op._per_call_derived() - op.bound_values.keys()):
-            word = op.value(name)  # a value the graph binds itself is above
+            word = op.value(name)
             symbol = device_symbol(op, word)
             if symbol in derived:
                 continue  # another instance of the design, bound alike

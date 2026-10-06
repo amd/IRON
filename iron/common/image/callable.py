@@ -35,10 +35,7 @@ else:
 
         from .xrt import Scratchpad, loaded
     except ImportError:
-        # Host stacks without XRT (e.g. the HRX/amdxdna runtime). The on-device
-        # callables here take XRTTensor views, so they cannot run there;
-        # _require_xrt() makes that explicit at construction. The reference
-        # mode and the whole compile path do not care, and must keep importing.
+        # Host stacks without XRT still compile and run the reference mode.
         XRTTensor = None
 
 logger = logging.getLogger(__name__)
@@ -52,7 +49,6 @@ def _n_elements(nbytes, dtype=BF16):
 
 
 def _require_xrt() -> None:
-    """Fail with the reason, rather than a TypeError on calling ``None``."""
     if XRTTensor is None:
         raise RuntimeError(
             "this OperatorSequence mode needs the XRT host runtime (pyxrt), which is "
@@ -62,31 +58,24 @@ def _require_xrt() -> None:
 
 
 class ScratchArena:
-    """The device buffer behind an ``ArenaPlan``: one scratch buffer every
-    full ELF placed in the plan runs against.
+    """The device buffer behind an ``ArenaPlan``, shared by every full ELF placed in it.
 
-    Made on first use, at the plan's size then. A plan that has grown since
-    -- an image placed after the first dispatch -- grows the buffer on the
-    next use, keeping its contents, so resident weights and states survive.
-    Views taken before a growth are views of the old buffer; each callable
-    rebinds on its next call (see ``generation``).
+    A plan that grew since first use grows the buffer, keeping its contents;
+    each callable rebinds on its next call (``generation``).
     """
 
     def __init__(self, plan: ArenaPlan):
         self.plan = plan
         self._tensor: XRTTensor | None = None
         self._generation = 0
-        # Residents whose contents are in the buffer, by storage key.
         self.loaded: set = set()
 
     @property
     def generation(self) -> int:
-        """Bumped whenever ``tensor`` is replaced by a larger buffer."""
         return self._generation
 
     @property
     def tensor(self) -> XRTTensor:
-        """The buffer, at least as large as the plan now is."""
         _require_xrt()
         n = _n_elements(self.plan.size)
         if self._tensor is not None and self._tensor.shape[0] >= n:
@@ -103,20 +92,12 @@ class ScratchArena:
         return grown
 
     def view(self, offset: int, nbytes: int, dtype=BF16) -> XRTTensor:
-        """``nbytes`` of the buffer from ``offset``, as ``dtype``."""
         dtype = np.dtype(dtype)
         return self.tensor.subview(offset, (nbytes // dtype.itemsize,), dtype)
 
 
 class SequenceCallable:
-    """Runs an ``OperatorSequence`` once per call.
-
-    Buffers are one per name, a slice a view into its parent; inputs sync to
-    the device before the run and everything else back to the host after.
-    Subclasses give the buffer (``_make_buffer``) and the run (``_run``); the
-    full-ELF callable replaces the buffer model with its consolidated
-    arguments, and the run with run handles of its own.
-    """
+    """Runs an ``OperatorSequence`` once per call, one buffer per name."""
 
     def __init__(self, seq):
         self.op = seq
@@ -153,13 +134,10 @@ class SequenceCallable:
         return self._buffer_cache[buffer_name]
 
     def get_storage(self, buffer_name):
-        """A flat view the host can synchronize that starts with the buffer:
-        here each buffer is a tensor of its own, so the buffer itself.
-        """
+        """A flat view the host can synchronize that starts with the buffer."""
         return self.get_buffer(buffer_name)
 
     def _iter_steps(self):
-        """Yield ``(op, in_names, in_buffers, out_name, out_buffer)`` per runlist step."""
         for step_op, *buf_names in self.op.runlist:
             specs = step_op.buffers
             if len(specs) != len(buf_names):
@@ -184,7 +162,6 @@ class SequenceCallable:
         raise NotImplementedError
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
-        """Set the per-call values, by device symbol, for the next run."""
         raise NotImplementedError(f"{type(self).__name__} takes no per-call values")
 
     def __call__(self):
@@ -196,16 +173,10 @@ class SequenceCallable:
 
 
 class FullELFRun:
-    """One run of a full ELF: the buffers bound to its arguments, and its own
-    ctrl scratchpad.
+    """One run of a full ELF, with its own ctrl scratchpad of per-call values.
 
-    Runs of one image are separate dispatches: each has its own scratchpad,
-    so its own per-call values, and several can be started before any is
-    waited on. Binding one run's feedback argument to another's scratchpad
-    (``bind_feedback``, ``scratchpad_alias``) makes what the first
-    drains there the second's per-call values, with no host step between.
-    A run is valid while the image stays loaded; the runtime evicting it
-    ends every run made on it.
+    Binding one run's feedback argument to another's ``scratchpad_alias``
+    makes what the first drains there the second's per-call values.
     """
 
     def __init__(
@@ -237,24 +208,13 @@ class FullELFRun:
         self.handle.set_arg(index, bo)
 
     def bind_feedback(self, bo: pyxrt.bo) -> None:
-        """Run with ``bo`` as the feedback argument -- the callable's own
-        buffer until then. Typically another run's ``scratchpad_alias``.
-        """
         if self._feedback_arg is None:
             raise ValueError(f"{self.name} declares no feedback argument")
         self.bind(self._feedback_arg, bo)
 
     @property
     def params(self) -> Scratchpad | None:
-        """The run's parameter scratchpad, made on first use.
-
-        The ``params.txt`` describing the runtime parameters is requested
-        from aiecc via ``--get-scratchpad-parameters`` and lands in the
-        build's cache entry, which ``Artifacts.params`` names. Returns
-        ``None`` if the sequence declared no runtime parameters: the file
-        still exists, but holds a count of zero and there is no ctrl
-        scratchpad buffer object to bind to.
-        """
+        """The run's parameter scratchpad; ``None`` when ``params.txt`` counts none."""
         if self._params is not None:
             return self._params
         if self._params_path is None:
@@ -265,7 +225,6 @@ class FullELFRun:
         return self._params
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
-        """Write each value into the ctrl scratchpad and sync it."""
         params = self.params
         if params is None:
             raise ValueError(
@@ -277,9 +236,6 @@ class FullELFRun:
         params.sync()
 
     def read_value(self, symbol: str) -> int:
-        """The value ``symbol`` holds in the scratchpad now, as the device
-        left it (a feedback transfer into ``scratchpad_alias``).
-        """
         params = self.params
         if params is None:
             raise ValueError(f"{self.name} was built without per-call values")
@@ -287,10 +243,7 @@ class FullELFRun:
         return params.read(symbol)
 
     def scratchpad_alias(self) -> pyxrt.bo:
-        """A buffer object over this run's ctrl scratchpad, for another run to
-        drain its feedback into (``Scratchpad.alias``). The host
-        must not write this run's values while a device writes them.
-        """
+        """This run's ctrl scratchpad, for another run to drain its feedback into."""
         params = self.params
         if params is None:
             raise ValueError(f"{self.name} has no per-call values to feed back into")
@@ -311,25 +264,13 @@ class FullELFRun:
 
 
 class SequenceFullELFCallable(SequenceCallable):
-    """The full ELF (NPU2): every operator shares consolidated
-    input/output/scratch buffers (and a feedback one, if the sequence declares
-    feedback arguments) addressed by offset. ``get_buffer`` returns a sub-view
-    of the named argument's dtype into whichever consolidated buffer holds it.
+    """The full ELF (NPU2): every operator shares consolidated buffers addressed by offset.
 
-    A sequence placed in a shared arena (``OperatorSequence(arena=...)``) runs
-    its scratch in the ``arena`` buffer given here, which every other image
-    placed in the same plan runs in too; otherwise it allocates its own.
-
-    A call dispatches ``run``; ``new_run`` makes more, over the same
-    buffers, for callers that queue several or chain them through feedback
-    (see ``FullELFRun``).
+    A call dispatches ``run``; ``new_run`` makes more over the same buffers.
     """
 
-    # The buffer trace lowering appends, and the kernel argument it binds to;
-    # both None on an untraced build.
     trace_buffer: XRTTensor | None
     _trace_arg: int | None
-    # The callable's own feedback buffer; None without feedback arguments.
     feedback_buffer: XRTTensor | None
 
     def __init__(
@@ -358,7 +299,6 @@ class SequenceFullELFCallable(SequenceCallable):
         self._run: FullELFRun | None = None
         self._runs: list[FullELFRun] = []
         self._storage_cache = {}
-        # Argument index by kind: the order ArgumentSizes gives them in.
         self._argument_index = {
             kind: index for index, kind in enumerate(seq.buffer_sizes.arguments())
         }
@@ -366,9 +306,7 @@ class SequenceFullELFCallable(SequenceCallable):
 
     @property
     def handle(self) -> XRTKernelHandle:
-        """The ELF loaded in the shared runtime; loaded again if the runtime
-        has evicted it since, which ends every run made on it.
-        """
+        """The ELF in the shared runtime, reloaded (ending every run) if evicted."""
         if self._handle is None or not loaded(self._handle):
             self._handle = aie_utils.DefaultNPURuntime.load(self.kernel)
             self._run = None
@@ -377,16 +315,14 @@ class SequenceFullELFCallable(SequenceCallable):
 
     @property
     def run(self) -> FullELFRun:
-        """The run a call dispatches: one for the image's life, so what is
-        written to its scratchpad stays there from call to call.
-        """
+        """The run a call dispatches, one for the image's life."""
         handle = self.handle
         if self._run is None:
             self._run = self._make_run(pyxrt.run(handle.kernel))
         return self._run
 
     def new_run(self) -> FullELFRun:
-        """Another run of this image, bound to this callable's buffers."""
+        """Another run over this callable's buffers; each holds a copy of the ctrlcode."""
         return self._make_run(pyxrt.run(self.handle.kernel))
 
     def _make_run(self, run: pyxrt.run) -> FullELFRun:
@@ -410,11 +346,9 @@ class SequenceFullELFCallable(SequenceCallable):
 
     @property
     def params(self) -> Scratchpad | None:
-        """``run``'s per-call values (``FullELFRun.params``)."""
         return self.run.params
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
-        """Write each value into ``run``'s ctrl scratchpad and sync it."""
         self.run.write_values(values)
 
     def _allocate_buffers(self):
@@ -429,9 +363,7 @@ class SequenceFullELFCallable(SequenceCallable):
         self.feedback_buffer = None
         if sizes.feedback is not None:
             self.feedback_buffer = XRTTensor((sizes.feedback,), dtype=np.uint8)
-        # Trace lowering appends one buffer covering every configured design, after
-        # the consolidated ones. Its argument and size depend on how many channels
-        # and sub-designs claim a share, so read them from the lowered module.
+        # The trace buffer's argument and size are read from the lowered module.
         self.trace_buffer = None
         self._trace_arg = None
         if self.op.traced:
@@ -444,7 +376,6 @@ class SequenceFullELFCallable(SequenceCallable):
                 self.trace_buffer = XRTTensor((layout["size"],), dtype=np.int8)
 
     def _arguments(self) -> dict[str, XRTTensor]:
-        """The consolidated buffer of each kind the image takes."""
         buffers = {
             "input": self.input_buffer,
             "output": self.output_buffer,
@@ -455,10 +386,6 @@ class SequenceFullELFCallable(SequenceCallable):
 
     @property
     def lowered_mlir_path(self):
-        """Aiecc's post-lowering module, which carries the trace configuration and
-        the trace buffer layout. A traced build asks aiecc to keep it, in the
-        build's cache entry.
-        """
         path = self.op.artifacts.lowered_mlir
         if path is None:
             raise FileNotFoundError(
@@ -478,12 +405,9 @@ class SequenceFullELFCallable(SequenceCallable):
         return sub
 
     def get_storage(self, buffer_name):
-        """The buffer, and the rest of its last coherence line, as a flat view.
+        """The buffer and the rest of its last coherence line, which no other buffer holds.
 
-        An exact view of a buffer that does not end on a line cannot be
-        synchronized (``XRTTensor.subview``). Every buffer starts at a
-        multiple of ``ALIGNMENT``, though, so the rest of its last line is
-        padding no other buffer holds, and a view may take it along.
+        An exact view of a buffer that does not end on a line cannot be synchronized.
         """
         self._follow_arena()
         if buffer_name in self.op.slice_info:
@@ -499,7 +423,6 @@ class SequenceFullELFCallable(SequenceCallable):
         return self._storage_cache[buffer_name]
 
     def _follow_arena(self) -> None:
-        """Run against the arena's current buffer, if it grew since the last call."""
         if self.arena is None or self.arena.generation == self._arena_generation:
             return
         self.scratch_buffer = self.arena.tensor
@@ -516,9 +439,7 @@ class SequenceFullELFCallable(SequenceCallable):
         return self._get_buffer(buffer_name)
 
     def _sync_inputs(self):
-        # Each argument syncs to the device as a whole: sub-views handed out by
-        # get_buffer() share their parent's coherence map, so a write through
-        # one (weights, KV caches) is flushed with it.
+        # Sub-views share their parent's coherence map, so a write through one is flushed.
         self._follow_arena()
         for tensor in self._arguments().values():
             tensor.to("npu")
@@ -526,39 +447,27 @@ class SequenceFullELFCallable(SequenceCallable):
             self.trace_buffer.to("npu")
 
     def _sync_outputs(self):
-        # The run just rewrote the output arena on the device, so the device holds the
-        # authoritative copy. Force the device->host sync: assert device residency first
-        # so `to("cpu")` fires even if a prior read of get_buffer(...) marked some
-        # range "cpu" (otherwise a looped dispatch would read stale output).
+        # Mark device residency so to("cpu") fires after a prior read marked it "cpu".
         for buffer in (self.output_buffer, self.feedback_buffer, self.trace_buffer):
             if buffer is not None:
                 buffer.device = "npu"
                 buffer.to("cpu")
 
     def start(self, *runs: FullELFRun) -> None:
-        """Push what the host wrote, and start ``runs`` without waiting; the
-        caller waits on each (``wait``) and reads what it needs.
-        """
+        """Push what the host wrote, and start ``runs`` without waiting."""
         self._sync_inputs()
         for run in runs:
             run.start()
 
     def wait(self, *runs: FullELFRun) -> None:
-        """Wait on ``runs``, started with ``start`` or on their own.
-
-        The scratch and output arguments are marked device-resident after
-        them, so a read of a view of either pulls what they wrote: a run
-        restarted with ``FullELFRun.start()`` alone marks nothing.
-        """
+        """Wait on ``runs``, then mark scratch and output device-resident so a read pulls them."""
         for run in runs:
             run.wait()
         for buffer in (self.scratch_buffer, self.output_buffer):
             buffer.device = "npu"
 
     def __call__(self, *runs: FullELFRun):
-        """Dispatch ``run``, or ``runs`` in order. Every run is started
-        before any is waited on, so they queue back to back on the device.
-        """
+        """Dispatch ``run``, or ``runs`` queued back to back."""
         runs = runs or (self.run,)
         self._sync_inputs()
         t0 = time.perf_counter()
@@ -571,10 +480,7 @@ class SequenceFullELFCallable(SequenceCallable):
 
 
 class SequenceXclbinCallable(SequenceCallable):
-    """Executes each runlist step as its own xclbin dispatch. Buffers shared by
-    name give zero-copy handoff between consecutive operators. The chain's
-    per-operator paths are on ``seq._image`` (an ``XclbinChain``).
-    """
+    """Executes each runlist step as its own xclbin dispatch, buffers shared by name."""
 
     def __init__(self, seq):
         _require_xrt()
@@ -583,7 +489,7 @@ class SequenceXclbinCallable(SequenceCallable):
     def _allocate_buffers(self):
         super()._allocate_buffers()
         chain = self.op._image
-        self._op_callable_map = {  # id(op) -> NPUKernel
+        self._op_callable_map = {
             op_id: NPUKernel(
                 chain.image,
                 design.get_cache_entry().insts,
@@ -593,8 +499,6 @@ class SequenceXclbinCallable(SequenceCallable):
             )
             for op_id, design in chain.designs.items()
         }
-        # Per-call scalars of dispatch-time kernels, by symbol; a graph sets
-        # them before each run (CompiledGraph._write_values).
         self.dispatch_values = {}
         self._execution_plan = [
             (
@@ -605,15 +509,10 @@ class SequenceXclbinCallable(SequenceCallable):
         ]
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
-        """Each kernel takes its values as dispatch-time scalars and
-        regenerates its stream.
-        """
+        """Each kernel takes its values as dispatch-time scalars."""
         self.dispatch_values = dict(values)
 
     def _run(self):
-        # Walk the execution plan alongside the resolved runlist steps; the
-        # per-step behaviour is delegated to _run_step so that compare mode can
-        # reuse this loop verbatim.
         for step_idx, ((kernel, args), step) in enumerate(
             zip(self._execution_plan, self._iter_steps())
         ):
@@ -624,9 +523,7 @@ class SequenceXclbinCallable(SequenceCallable):
         kernel(*args, **scalars)
 
     def _sync_outputs(self):
-        # _run rewrote these on the device, which the coherence map does not observe.
-        # Assert device residency first so the pull fires even when a prior read left
-        # the range marked "cpu"; otherwise a second dispatch reads the first's output.
+        # Mark device residency so to("cpu") fires after a prior read marked it "cpu".
         for name in self.op.subbuffer_layout:
             if name not in self.op.input_args:
                 buf = self._buffers[name]
@@ -635,21 +532,17 @@ class SequenceXclbinCallable(SequenceCallable):
 
 
 def _reshape_for_spec(flat_tensor, spec):
-    """Slice a flat host buffer to ``spec``'s element count and reshape (a view)."""
     n = int(np.prod(spec.shape)) if spec.shape else 1
     return flat_tensor[:n].reshape(spec.shape)
 
 
 class SequenceReferenceCallable(SequenceCallable):
-    """Pure-CPU evaluation via each operator's ``reference()``; no NPU dispatch.
-    Device syncs are no-ops on the CPU buffers.
-    """
+    """Pure-CPU evaluation via each operator's ``reference()``."""
 
     def _make_buffer(self, n_elements, dtype):
         return CPUOnlyTensor((n_elements,), dtype=dtype)
 
     def _sync_inputs(self):
-        # CPU-only inputs must stay CPU-resident, including lazily created subviews.
         pass
 
     def _run(self):
@@ -665,16 +558,12 @@ class SequenceReferenceCallable(SequenceCallable):
 
 
 class SequenceCompareCallable(SequenceXclbinCallable):
-    """Runs the xclbin chain and, after each step, re-runs the operator's
-    reference on the same NPU-produced inputs, logging per-step deviation. The
-    NPU output propagates on both sides, so each comparison isolates a single
-    operator (no error accumulation). ``compare`` judges each step by
-    ``tolerance`` if given, else by ``step_tolerance``;
-    ``raise_on_mismatch`` turns the first mismatch into an error.
+    """Runs the xclbin chain, checking each step's reference on the NPU's own inputs.
+
+    The NPU output propagates, so each comparison isolates one operator.
     """
 
-    # For a step whose operator states no tolerance, or one relative to the
-    # output's range, which compare cannot judge element by element.
+    # compare cannot judge a range-relative tolerance element by element.
     FALLBACK_TOLERANCE = Tolerance.relative(0.025, 1e-2)
 
     def __init__(
@@ -689,7 +578,6 @@ class SequenceCompareCallable(SequenceXclbinCallable):
         self.last_step_stats = []
 
     def step_tolerance(self, op: Operator) -> Tolerance:
-        """The tolerance ``op``'s step is judged by."""
         if self.tolerance is not None:
             return self.tolerance
         tol = op.resolved().tolerance()
@@ -704,8 +592,6 @@ class SequenceCompareCallable(SequenceXclbinCallable):
         return buf.numpy_view()[:n].copy().reshape(spec.shape)
 
     def _run(self):
-        # Reset per-invocation stats, then reuse SequenceXclbinCallable._run's
-        # execution-plan loop; only the per-step behaviour (_run_step) differs.
         self.last_step_stats = []
         super()._run()
 
