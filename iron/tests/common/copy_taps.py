@@ -286,3 +286,59 @@ def test_a_permuting_copy_keeps_its_order_on_every_channel_count(channels):
     )
     x = np.arange(N * G * D, dtype=np.float32).reshape(N, G, D)
     assert (op.reference(x).reshape(G, N, D) == x.transpose(1, 0, 2)).all()
+
+
+CHANNEL_SPLITS = {
+    "permuted_on_4": dict(
+        src=_permuted(N, G, D), input_buffer_size=N * G * D, num_channels=4
+    ),
+    "rows_into_cache_on_2": dict(ROWS_INTO_CACHE, num_channels=2),
+    "slot5_on_2": SLOT5_TWO_CHANNELS,
+    # Innermost runs of 64 and 4096: the channels split the 64.
+    "by_head_on_4": dict(
+        src=TensorAccessPattern.full((16, 4, 64)).permute((1, 0, 2)),
+        dst=TensorAccessPattern.full((16 * 4 * 64,)),
+        input_buffer_size=16 * 4 * 64,
+        num_channels=4,
+    ),
+    # Rows of 48 into rows of 64 share runs of 16, neither side's row.
+    "rows_of_48_into_rows_of_64_on_2": dict(
+        src=TensorAccessPattern.full((8, 48)),
+        dst=TensorAccessPattern.full((6, 64)),
+        input_buffer_size=8 * 48,
+        num_channels=2,
+    ),
+    "gather_on_2": dict(
+        src=tuple(TensorAccessPattern.full((V, W))[i] for i in (3, 3, 60, 1)),
+        input_buffer_size=V * W,
+        num_channels=2,
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(CHANNEL_SPLITS))
+def test_each_channel_drains_the_elements_it_fills(name):
+    """A channel's memtile hands its fill stream to its drain in order, so
+    replaying each channel's issued descriptors, element for element, must
+    give the reference: a split whose two sides' shares do not line up
+    lands elements in the wrong places only on a device otherwise.
+    """
+    op = Copy(**CHANNEL_SPLITS[name]).resolved()
+    _, tasks = generated_sequence(op)
+    x = np.arange(1, op.input_buffer_size + 1, dtype=np.float32)
+    want = op.reference(x)
+    got = np.zeros_like(want)
+    for c in range(op.num_channels):
+        moved = {}
+        for side in ("in", "out"):
+            walks = []
+            for t in tasks:
+                if t.lane != f"fifo_{side}_{c}":
+                    continue
+                sizes = [int(s) for s in t.sizes.split(",")]
+                strides = [int(s) for s in t.strides.split(",")]
+                walks.append(t.offset + np.tensordot(strides, np.indices(sizes), 1))
+            moved[side] = np.concatenate(walks).reshape(-1)
+        assert len(moved["in"]) == len(moved["out"]), f"channel {c}"
+        got[moved["out"]] = x[moved["in"]]
+    assert (got == want).all()
