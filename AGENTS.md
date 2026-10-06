@@ -302,7 +302,6 @@ Common operator parameters and their constraints:
 
 - `tile_size`: Typically 64, 128, 256, or 4096 (depends on operator and data type)
 - `num_aie_columns`: Must match hardware (1-4 for NPU1, up to 8 for NPU2)
-- `num_aie_rows`: Always 4 for current NPU architectures
 
 **GEMM-specific**:
 
@@ -547,7 +546,7 @@ code before relying on a line here; it is the authority.
   `test_llama_does_not_grow_with_the_context` checks that no activation
   or array follows `max_seq_len`.
 - **DMA descriptors** (mlir-aie's `verifyStridesWraps`, restated over a
-  pattern by `BdLimits.fits`, `dev.bd_limits(col, row)`): the innermost
+  pattern by `BdLimits.fits`, `BdLimits.of(dev, col, row)`): the innermost
   dimension holds at most 1023 granules unless the transfer is linear, the
   next at most 1023 elements, the third has no wrap field, and the
   outermost is the iteration count (at most 64) and the only one whose
