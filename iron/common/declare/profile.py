@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 from ... import operators
-from .field import _tier_of
+from .field import Auto, Param, Tier
 
 _active: contextvars.ContextVar[Profile | None] = contextvars.ContextVar(
     "iron.profile", default=None
@@ -72,7 +72,7 @@ def _dims_of(cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
     """The dimensions of the ``cls`` a call with ``given`` keywords constructs."""
     dims = {}
     for f in dataclasses.fields(cls):
-        if _tier_of(f) != "param":
+        if not isinstance(f.metadata.get(Tier), Param):
             continue
         if f.name in given:
             dims[f.name] = given[f.name]
@@ -102,13 +102,13 @@ class Profile:
 
     def add(self, cls: type, **fields: Any) -> None:
         """Add an entry for ``cls``: dimensions to match and tunables to give."""
-        tiers = {f.name: _tier_of(f) for f in dataclasses.fields(cls)}
+        tiers = {f.name: f.metadata.get(Tier) for f in dataclasses.fields(cls)}
         dims, tunables, unknown = {}, {}, []
         for name, value in fields.items():
             tier = tiers.get(name)
-            if tier == "param":
+            if isinstance(tier, Param):
                 dims[name] = value
-            elif tier == "auto":
+            elif isinstance(tier, Auto):
                 tunables[name] = value
             else:
                 unknown.append(name)

@@ -11,7 +11,6 @@ from ml_dtypes import bfloat16
 
 from iron.common import (
     In,
-    Incompatible,
     Operator,
     Out,
     Unresolvable,
@@ -69,7 +68,7 @@ class LMHead(Operator):
     def compatible(self) -> None:
         per_round = self.cols * self.rows * M_TILE
         if self.vocab % per_round:
-            raise Incompatible(
+            raise ValueError(
                 f"vocab ({self.vocab}) must be a multiple of {per_round}, "
                 "the out-features one round produces"
             )

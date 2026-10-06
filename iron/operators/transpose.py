@@ -15,12 +15,11 @@ from ml_dtypes import bfloat16
 
 from iron.common import (
     In,
-    Incompatible,
     Operator,
     Out,
     Value,
     auto,
-    optional,
+    OptionalDim,
     param,
 )
 from iron.common.testing import Case, Testing
@@ -118,10 +117,10 @@ class Transpose(Operator):
     num_channels: int = auto(1)
 
     x = In(
-        optional(num_batches), M, N, tile=(m, n), per=(num_aie_columns, num_channels)
+        OptionalDim(num_batches), M, N, tile=(m, n), per=(num_aie_columns, num_channels)
     )
     y = Out(
-        optional(num_batches), N, M, tile=(m, n), per=(num_aie_columns, num_channels)
+        OptionalDim(num_batches), N, M, tile=(m, n), per=(num_aie_columns, num_channels)
     )
     batches = Value(np.int32, derive=lambda op: op.num_batches)
     col_tiles = Value(np.int32, derive=lambda op: op.N // op.n // op.num_aie_columns)
@@ -162,9 +161,9 @@ class Transpose(Operator):
     def compatible(self) -> None:
         cols, chans = self.num_aie_columns, self.num_channels
         if self.M % self.m != 0:
-            raise Incompatible(f"Matrix rows ({self.M}) must be a multiple of {self.m}")
+            raise ValueError(f"Matrix rows ({self.M}) must be a multiple of {self.m}")
         if self.N % self.n != 0:
-            raise Incompatible(
+            raise ValueError(
                 f"Matrix columns ({self.N}) must be a multiple of {self.n}"
             )
         # The design tiles each dimension separately, as
@@ -173,21 +172,21 @@ class Transpose(Operator):
         # and one that floors to zero reaches the transfer as a zero-length
         # size, so each split is checked on its own, then the product.
         if (self.N // cols) % self.n:
-            raise Incompatible(
+            raise ValueError(
                 f"num_aie_columns ({cols}) does not split N={self.N} "
                 f"into whole n-wide tiles: each column gets "
                 f"{self.N // cols} columns, which is not a multiple "
                 f"of n={self.n}"
             )
         if (self.M // chans) % self.m:
-            raise Incompatible(
+            raise ValueError(
                 f"num_channels ({chans}) does not split M={self.M} "
                 f"into whole m-tall tiles: each channel gets "
                 f"{self.M // chans} rows, which is not a multiple "
                 f"of m={self.m}"
             )
         if self.M * self.N % (self.m * self.n * cols * chans) != 0:
-            raise Incompatible(
+            raise ValueError(
                 f"M x N ({self.M} x {self.N}) is not whole {self.m} x {self.n} tiles "
                 f"over {cols} columns x {chans} channels"
             )

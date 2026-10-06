@@ -25,14 +25,13 @@ from ml_dtypes import bfloat16
 from iron.common import (
     Extent,
     In,
-    Incompatible,
     Operator,
     Out,
     Unresolvable,
     Value,
     auto,
     param,
-    select,
+    Select,
 )
 from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
@@ -143,13 +142,13 @@ class GEMM(Operator):
 
     A = In(M, K, dtype=dtype_in, tile=(a_l2,), per=(n_shim_mem_a,))
     B = In(
-        select(b_col_maj, (N, K), (K, N)),
+        Select(b_col_maj, (N, K), (K, N)),
         dtype=dtype_in,
         tile=(b_l2,),
         per=(num_aie_columns,),
     )
     C = Out(
-        select(c_col_maj, (N, M), (M, N)),
+        Select(c_col_maj, (N, M), (M, N)),
         dtype=dtype_out,
         tile=(c_l2,),
         per=(num_aie_columns,),
@@ -276,12 +275,12 @@ class GEMM(Operator):
 
     def compatible(self) -> None:
         if self.N % self.mem_tile_n != 0:
-            raise Incompatible(
+            raise ValueError(
                 f"N ({self.N}) must be a multiple of {self.mem_tile_n}: B is "
                 f"tiled into (k, n * num_aie_columns)-sized blocks"
             )
         if self.M % self.mem_tile_m_a != 0:
-            raise Incompatible(
+            raise ValueError(
                 "A must be tileable into (m * n_A_tiles_per_shim, k)-sized blocks"
             )
 

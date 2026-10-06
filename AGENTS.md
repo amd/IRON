@@ -577,8 +577,8 @@ code before relying on a line here; it is the authority.
   tdr_timeout_ms=10000` in `/etc/modprobe.d/`, read at module load). At
   10000 a 131008-token prompt runs, in 315 s, and decodes at 5.0 tok/s
   (198 ms a step).
-- Tuning: `auto(choices=, legal=)` is recorded but nothing reads it, and
-  there is no per-kernel L1 budget.
+- Tuning: there is no search over a tunable's legal values, and no
+  per-kernel L1 budget.
 - Open upstream asks in mlir-aie: a builder for `aiex.configure` /
   `aiex.run`; an accessor for L1 banking. aiecc's split memory (a whole-module clone per split item) is
   mlir-aie #3689's, which shares one clone per split.

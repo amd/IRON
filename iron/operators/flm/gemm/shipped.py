@@ -39,7 +39,7 @@ from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
-from iron.common import In, Out, Shim, Unresolvable, Value, Xclbin, auto, param, select
+from iron.common import In, Out, Shim, Unresolvable, Value, Xclbin, auto, param, Select
 from iron.operators.flm.gemm.design import K_TILE, M_TILE, Epilogue
 from iron.operators.flm.gemm.op import GEMM
 
@@ -128,7 +128,7 @@ class Shipped(
     )
     # B: one column's k-blocks, pre-packed, down each column on MM2S channel 1.
     B = In(
-        select(GEMM.bfp16_b, (GEMM.packed_blocks,), (GEMM.K, GEMM.N)),
+        Select(GEMM.bfp16_b, (GEMM.packed_blocks,), (GEMM.K, GEMM.N)),
         dtype=GEMM.b_dtype,
         tile=(K_TILE, N_TILE),
         per=(GEMM.cols,),

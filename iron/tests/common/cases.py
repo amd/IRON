@@ -47,7 +47,7 @@ CASES = [
             # M must be a multiple of 256 and N of 512.
             dict(M=256, K=64, N=512),
             # b_col_maj / c_col_maj transpose the declared shapes (GEMM's
-            # select()).
+            # Select()).
             dict(M=256, K=64, N=512, b_col_maj=True),
             dict(M=256, K=64, N=512, c_col_maj=True),
             # f32 output at the default 64-tile overflows a core's memory; smaller tiles.

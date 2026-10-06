@@ -60,7 +60,6 @@ from aie.utils.verify import Tolerance
 from .declare import (
     Extent,
     In,
-    Incompatible,
     Operator,
     Out,
     Unresolvable,
@@ -125,7 +124,7 @@ class Elementwise(Operator):
         (out,) = self.outputs
         share = self.cores * self.tile_size
         if out.elements % share:
-            raise Incompatible(
+            raise ValueError(
                 f"{type(self).__name__}: {out.elements} elements do not divide "
                 f"into whole {self.tile_size}-element lines over "
                 f"{self.num_aie_columns} columns x {self.num_channels} channels "

@@ -19,15 +19,7 @@ from dataclasses import Field
 
 import numpy as np
 
-from .field import (
-    _DERIVE,
-    DeclarationError,
-    DimRef,
-    _declares_array,
-    _Optional,
-    _Select,
-    _tier_of,
-)
+from .field import Auto, DimRef, OptionalDim, Param, Select, Tier
 from .member import Extent, _Buffer, _Member, _Stream
 
 
@@ -64,11 +56,11 @@ def _rewrite_refs(specs: tuple, cls: type, fields_by_obj: dict[int, Field]) -> t
     """Replace same-class Field objects in a member's dims with DimRefs."""
     out = []
     for spec in specs:
-        if isinstance(spec, _Optional):
-            out.append(_Optional(_rewrite_refs((spec.ref,), cls, fields_by_obj)[0]))
-        elif isinstance(spec, _Select):
+        if isinstance(spec, OptionalDim):
+            out.append(OptionalDim(_rewrite_refs((spec.ref,), cls, fields_by_obj)[0]))
+        elif isinstance(spec, Select):
             out.append(
-                _Select(
+                Select(
                     _rewrite_refs((spec.flag,), cls, fields_by_obj)[0],
                     _rewrite_refs(spec.when_true, cls, fields_by_obj),
                     _rewrite_refs(spec.when_false, cls, fields_by_obj),
@@ -77,7 +69,7 @@ def _rewrite_refs(specs: tuple, cls: type, fields_by_obj: dict[int, Field]) -> t
         elif isinstance(spec, Field):
             f = fields_by_obj.get(id(spec))
             if f is None:
-                raise DeclarationError(
+                raise TypeError(
                     f"{cls.__name__}: a shape references a field object that is "
                     f"not one of this class's fields"
                 )
@@ -97,33 +89,31 @@ def _check_dim_ref(
     A stream's tile dimension may also be an ``auto()``, since tuning chooses
     the tile and inference never reads a stream.
     """
-    if isinstance(spec, _Optional):
+    if isinstance(spec, OptionalDim):
         _check_dim_ref(cls, member, spec.ref, what, allow_tunable=allow_tunable)
         return
-    if isinstance(spec, _Select):
+    if isinstance(spec, Select):
         for d in spec.when_true + spec.when_false:
             _check_dim_ref(cls, member, d, what, allow_tunable=allow_tunable)
         return
     if isinstance(spec, bool):
-        raise DeclarationError(
-            f"{cls.__name__}.{member.name}: {spec!r} is not a {what}"
-        )
+        raise TypeError(f"{cls.__name__}.{member.name}: {spec!r} is not a {what}")
     if isinstance(spec, (int, np.integer)):
         return
     if isinstance(spec, DimRef):
-        allowed = ("param", "auto") if allow_tunable else ("param",)
-        if spec.tier not in allowed:
+        allowed = (Param, Auto) if allow_tunable else Param
+        if not isinstance(spec.tier, allowed):
             why = (
                 "an auto(); a host shape may not depend on tuning"
-                if spec.tier == "auto"
+                if isinstance(spec.tier, Auto)
                 else "not declared with param()"
             )
-            raise DeclarationError(
+            raise TypeError(
                 f"{cls.__name__}.{member.name}: {what} {spec!r} is {why}. A "
                 f"shape dimension is a param() field or an integer literal"
             )
         return
-    raise DeclarationError(
+    raise TypeError(
         f"{cls.__name__}.{member.name}: {what} {spec!r} is not a param() field or an "
         f"integer. Expressions are not allowed in shapes; declare the result as a field"
     )
@@ -138,7 +128,7 @@ def declare(cls: type) -> None:
     annotations = cls.__dict__.get("__annotations__", {})
     for name, value in list(vars(cls).items()):
         if isinstance(value, _Member) and name in annotations:
-            raise DeclarationError(
+            raise TypeError(
                 f"{cls.__name__}.{name}: members are declared without an "
                 f"annotation; annotating one turns it into a constructor argument"
             )
@@ -158,7 +148,7 @@ def declare(cls: type) -> None:
             and not callable(value)
             and not isinstance(value, (property, classmethod, staticmethod))
         ):
-            raise DeclarationError(
+            raise TypeError(
                 f"{cls.__name__}.{name} = {value!r} does not override the inherited "
                 f"field: annotate it, `{name}: int = auto({value!r})` (with "
                 f"init=False to pin it), or dataclass keeps the base's default"
@@ -175,7 +165,7 @@ def declare(cls: type) -> None:
 
     # Re-attach every field as a DimRef on the class.
     for f in fields.values():
-        setattr(cls, f.name, DimRef(cls, f.name, _tier_of(f), f.default))
+        setattr(cls, f.name, DimRef(cls, f.name, f.metadata.get(Tier), f.default))
 
     members = members_of(cls)
     for m in members:
@@ -189,22 +179,22 @@ def declare(cls: type) -> None:
                 _check_dim_ref(
                     cls, m, d, "dimension", allow_tunable=isinstance(m, _Stream)
                 )
-            if sum(isinstance(d, _Optional) for d in m.dims) > 1:
-                raise DeclarationError(
-                    f"{cls.__name__}.{m.name}: at most one optional() dimension, "
+            if sum(isinstance(d, OptionalDim) for d in m.dims) > 1:
+                raise TypeError(
+                    f"{cls.__name__}.{m.name}: at most one OptionalDim() dimension, "
                     f"since the rank tells whether it is present"
                 )
             if m.when is not None:
                 (m.when,) = _rewrite_refs((m.when,), cls, fields_by_obj)
-                if not isinstance(m.when, DimRef) or m.when.tier != "param":
-                    raise DeclarationError(
+                if not isinstance(m.when, DimRef) or not isinstance(m.when.tier, Param):
+                    raise TypeError(
                         f"{cls.__name__}.{m.name}: when={m.when!r} must be a "
                         f"param() field, the flag the operand exists under"
                     )
         if isinstance(m, Extent):
             (ref,) = _rewrite_refs((m.field,), cls, fields_by_obj)
-            if not isinstance(ref, DimRef) or ref.tier != "param":
-                raise DeclarationError(
+            if not isinstance(ref, DimRef) or not isinstance(ref.tier, Param):
+                raise TypeError(
                     f"{cls.__name__}.{m.name}: Extent({ref!r}) must name a param() "
                     f"field, the one a graph may bound per call"
                 )
@@ -214,17 +204,18 @@ def declare(cls: type) -> None:
             per = _rewrite_refs(per, cls, fields_by_obj)
             for ref in per:
                 if not isinstance(ref, DimRef) or ref.tier is None:
-                    raise DeclarationError(
+                    raise TypeError(
                         f"{cls.__name__}.{m.name}: per={ref!r} must be a param() or auto() field"
                     )
             m.per = per
 
     cls._members = tuple(members)
-    cls._param_fields = tuple(f.name for f in fields.values() if _tier_of(f) == "param")
+    tiers = {f.name: f.metadata.get(Tier) for f in fields.values()}
+    cls._param_fields = tuple(n for n, t in tiers.items() if isinstance(t, Param))
     cls._derived_params = {
-        f.name: f.metadata[_DERIVE] for f in fields.values() if _DERIVE in f.metadata
+        n: t.derive for n, t in tiers.items() if isinstance(t, Param) and t.derive
     }
-    cls._auto_fields = tuple(f.name for f in fields.values() if _tier_of(f) == "auto")
+    cls._auto_fields = tuple(n for n, t in tiers.items() if isinstance(t, Auto))
     # The array tier: what a stream's tile, its dtype, its replication or
     # its presence names, and what declares itself array=True.
     named: set[str] = set()
@@ -238,19 +229,19 @@ def declare(cls: type) -> None:
             if m.when is not None:
                 named.add(m.when.name)
     cls._array_fields = tuple(
-        f.name for f in fields.values() if f.name in named or _declares_array(f)
+        n for n, t in tiers.items() if n in named or (t is not None and t.array)
     )
 
 
 def _named_fields(specs) -> set[str]:
-    """The field names a shape or a per= names, through optional()/select()."""
+    """The field names a shape or a per= names, through OptionalDim()/Select()."""
     out: set[str] = set()
     for spec in specs if isinstance(specs, tuple) else (specs,):
         if isinstance(spec, DimRef):
             out.add(spec.name)
-        elif isinstance(spec, _Optional):
+        elif isinstance(spec, OptionalDim):
             out |= _named_fields((spec.ref,))
-        elif isinstance(spec, _Select):
+        elif isinstance(spec, Select):
             out |= _named_fields((spec.flag,)) | _named_fields(spec.when_true)
             out |= _named_fields(spec.when_false)
     return out

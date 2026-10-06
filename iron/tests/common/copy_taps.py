@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
 
-from iron.common import Incompatible
+
 from iron.operators.copy import Copy
 from iron.tests.common.build import generated_sequence
 
@@ -141,7 +141,7 @@ def test_a_bounded_axis_lands_on_d2_and_names_it():
         input_buffer_size=N,
         num_channels=2,
     )
-    with pytest.raises(Incompatible, match="channels split"):
+    with pytest.raises(ValueError, match="channels split"):
         generated_sequence(_bounded(flat))
 
 

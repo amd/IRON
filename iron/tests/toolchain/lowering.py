@@ -24,7 +24,7 @@ import subprocess
 
 import pytest
 
-from iron.common import Incompatible, Unresolvable
+from iron.common import Unresolvable
 from iron.common.design import OperatorDesign
 from iron.tests.common.cases import CASES
 from iron.tests.toolchain.tools import AIECC, requires
@@ -87,7 +87,7 @@ def test_operator_lowers_to_instructions(device, module, cls_name, kwargs, tmp_p
     try:
         op = cls(**kwargs)
         op.resolved(device)
-    except (ValueError, Unresolvable, Incompatible) as e:
+    except ValueError as e:
         pytest.skip(f"not for {device.name}: {e}")
     lower(op, tmp_path)
 
@@ -119,7 +119,7 @@ def test_a_bounded_operator_lowers(device, module, cls_name, kwargs, bound, tmp_
     cls = getattr(importlib.import_module(f"iron.operators.{module}"), cls_name)
     try:
         op = cls(**kwargs).resolved(device)
-    except (ValueError, Unresolvable, Incompatible) as e:
+    except ValueError as e:
         pytest.skip(f"not for {device.name}: {e}")
     op.use_value(bound, "n")  # what x[:n] in a graph does
     lower(op, tmp_path)

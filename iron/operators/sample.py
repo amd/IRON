@@ -36,7 +36,7 @@ from aie.iron.kernels import sample as kernels
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import In, Incompatible, InOut, Operator, Out, Scratchpad, auto, param
+from iron.common import In, InOut, Operator, Out, Scratchpad, auto, param
 from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
@@ -145,7 +145,7 @@ class Sample(Operator):
             self._select()
             self._combine()
         except ValueError as e:
-            raise Incompatible(str(e)) from e
+            raise ValueError(str(e)) from e
 
     def _select(self):
         return kernels.sample_select(

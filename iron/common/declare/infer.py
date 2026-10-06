@@ -18,7 +18,7 @@ from typing import Any
 
 import numpy as np
 
-from .field import DimRef, _Optional, _Select
+from .field import DimRef, OptionalDim, Select
 from .member import _Buffer, present
 
 
@@ -120,7 +120,7 @@ def infer(cls, *operand_shapes, outputs=(), **given) -> dict[str, Any]:
     for m, shape in pairs:
         shape = tuple(int(s) for s in shape)
         dims = list(m.dims)
-        at = next((i for i, d in enumerate(dims) if isinstance(d, _Optional)), None)
+        at = next((i for i, d in enumerate(dims) if isinstance(d, OptionalDim)), None)
         if at is not None:
             optional = dims.pop(at)
             if len(shape) == len(dims) + 1:
@@ -135,7 +135,7 @@ def infer(cls, *operand_shapes, outputs=(), **given) -> dict[str, Any]:
                 )
         expanded: list = []
         for d in dims:
-            if isinstance(d, _Select):
+            if isinstance(d, Select):
                 flag = d.flag
                 if flag.name in bound:
                     value = bound[flag.name]
@@ -183,5 +183,5 @@ def infer_kwargs(cls, kwargs) -> dict[str, Any]:
     """
     names = set(cls._param_fields)
     for m in _operands(cls, ("in", "inout", "out")):
-        names.update(d.flag.name for d in m.dims if isinstance(d, _Select))
+        names.update(d.flag.name for d in m.dims if isinstance(d, Select))
     return {k: v for k, v in kwargs.items() if k in names}

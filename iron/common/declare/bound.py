@@ -17,7 +17,7 @@ import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.utils import bfp
 
-from .field import DeclarationError, DimRef, Incompatible, _Optional, _Select
+from .field import DimRef, OptionalDim, Select
 from .member import Extent, Shim, _Buffer, _Stream, _Value
 
 if TYPE_CHECKING:
@@ -48,8 +48,8 @@ class BoundStream:
     def _resolve(self, spec) -> int:
         try:
             return _resolve_dim(spec, self.op)
-        except Incompatible as e:
-            raise Incompatible(
+        except ValueError as e:
+            raise ValueError(
                 f"stream {self.name!r}: {e}. Resolve the operator first (resolved(dev))"
             ) from None
 
@@ -262,10 +262,10 @@ class BoundBuffer:
 
     @property
     def batch_axes(self) -> int:
-        """Leading ``optional()`` dimensions that are present on this instance."""
+        """Leading ``OptionalDim()`` dimensions that are present on this instance."""
         n = 0
         for d in self.member.dims:
-            if not isinstance(d, _Optional):
+            if not isinstance(d, OptionalDim):
                 break
             if _resolve_dim(d.ref, self._op) > 1:
                 n += 1
@@ -401,7 +401,7 @@ def _lookup_ref(ref: DimRef, instance) -> Any:
     """Follow a DimRef from an instance of its class (or a subclass)."""
     if isinstance(instance, ref.owner):
         return getattr(instance, ref.name)
-    raise DeclarationError(
+    raise TypeError(
         f"{ref!r} is not reachable from {type(instance).__name__}: a shape may "
         f"reference the class's own fields"
     )
@@ -409,28 +409,28 @@ def _lookup_ref(ref: DimRef, instance) -> Any:
 
 def _resolve_dim(spec, instance) -> int:
     if isinstance(spec, bool):
-        raise DeclarationError(f"{spec!r} is not a dimension")
+        raise TypeError(f"{spec!r} is not a dimension")
     if isinstance(spec, (int, np.integer)):
         return int(spec)
     if isinstance(spec, DimRef):
         value = _lookup_ref(spec, instance)
         if value is None:
-            raise Incompatible(
+            raise ValueError(
                 f"{spec!r} is None; it must be set before the shape can be resolved"
             )
         return int(value)
     if isinstance(spec, Field):
         # A same-class reference the decorator did not rewrite: resolve by name.
         return int(getattr(instance, spec.name))
-    raise DeclarationError(f"cannot resolve {spec!r} as a dimension")
+    raise TypeError(f"cannot resolve {spec!r} as a dimension")
 
 
 def _flag_value(flag, instance) -> bool:
     if isinstance(flag, DimRef):
         value = _lookup_ref(flag, instance)
         if value is None:
-            raise Incompatible(
-                f"{flag!r} is None; a select() on it needs a resolved operator"
+            raise ValueError(
+                f"{flag!r} is None; a Select() on it needs a resolved operator"
             )
         return bool(value)
     if isinstance(flag, Field):
@@ -445,11 +445,11 @@ def _axis_of(dims, field: str, instance) -> int | None:
     """
     axis = 0
     for d in dims:
-        if isinstance(d, _Optional):
+        if isinstance(d, OptionalDim):
             if _resolve_dim(d.ref, instance) <= 1:
                 continue  # omitted at this rank
             d = d.ref
-        if isinstance(d, _Select):
+        if isinstance(d, Select):
             branch = d.when_true if _flag_value(d.flag, instance) else d.when_false
             inner = _axis_of(branch, field, instance)
             if inner is not None:
@@ -465,12 +465,12 @@ def _axis_of(dims, field: str, instance) -> int | None:
 def _resolve_shape(dims, instance) -> tuple[int, ...]:
     out: list[int] = []
     for d in dims:
-        if isinstance(d, _Optional):
+        if isinstance(d, OptionalDim):
             n = _resolve_dim(d.ref, instance)
             if n > 1:
                 out.append(n)
             continue
-        if isinstance(d, _Select):
+        if isinstance(d, Select):
             branch = d.when_true if _flag_value(d.flag, instance) else d.when_false
             out.extend(_resolve_shape(branch, instance))
             continue

@@ -20,7 +20,7 @@ from aie.iron import ObjectFifo, TaskGroup
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import In, Incompatible, Operator, Out, Scratchpad, auto, param
+from iron.common import In, Operator, Out, Scratchpad, auto, param
 from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
@@ -161,20 +161,20 @@ class Copy(Operator):
         channels = self.num_channels
         for tap in (self.src, self.dst):
             if tap.sizes[-1] % channels:
-                raise Incompatible(
+                raise ValueError(
                     f"the innermost axis of {tap} ({tap.sizes[-1]}) must be "
                     f"divisible by num_channels ({channels})"
                 )
         per_channel = prod(self.src.sizes) // channels
         if per_channel % self.tile_size:
-            raise Incompatible(
+            raise ValueError(
                 f"tile_size {self.tile_size} must divide the per-channel "
                 f"transfer {per_channel} (= {prod(self.src.sizes)} / {channels} "
                 f"channels)"
             )
         for row in self._row_shares():
             if row % self.tile_size:
-                raise Incompatible(
+                raise ValueError(
                     f"tile_size {self.tile_size} must divide the {row} elements "
                     f"per channel one row of the bounded axis moves: a call "
                     f"moves any number of rows"
@@ -212,7 +212,7 @@ class Copy(Operator):
         rank = len(tap.sizes)
         dim = 4 - rank + bound
         if dim == 3 and self.num_channels > 1:
-            raise Incompatible(
+            raise ValueError(
                 f"{tap} is bounded on the axis the {self.num_channels} channels "
                 f"split; bound another axis or copy on one channel"
             )
@@ -238,7 +238,7 @@ class Copy(Operator):
                 [s for _, s in dims],
             )
             if not shim.fits(placed, dtype):
-                raise Incompatible(
+                raise ValueError(
                     f"{tap} does not fit one descriptor per channel, which a "
                     f"bounded axis needs (its size is patched in place)"
                 )

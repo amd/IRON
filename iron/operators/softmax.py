@@ -12,7 +12,7 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, zero
 from aie.utils.verify import Tolerance
 
-from iron.common import Extent, In, Incompatible, Operator, Out, Value, auto, param
+from iron.common import Extent, In, Operator, Out, Value, auto, param
 from iron.common.testing import Case, Testing
 
 # softmax_bf16's vector step on both targets (activation.softmax holds a row
@@ -86,7 +86,7 @@ class Softmax(Operator):
 
     def compatible(self) -> None:
         if self.rows % self.cores:
-            raise Incompatible(
+            raise ValueError(
                 f"rows ({self.rows}) must be a multiple of the {self.cores} cores"
             )
 

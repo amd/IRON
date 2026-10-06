@@ -12,7 +12,6 @@ from aie.iron.kernels import quant
 
 from iron.common import (
     In,
-    Incompatible,
     Operator,
     Out,
     Unresolvable,
@@ -197,7 +196,7 @@ class DequantBFP(Operator):
             raise error(f"N ({N}) must be a multiple of {N_TILE}")
 
     def compatible(self) -> None:
-        self._check_extents(self.K, self.N, Incompatible)
+        self._check_extents(self.K, self.N, ValueError)
 
     # -- names -----------------------------------------------------------------
 

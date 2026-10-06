@@ -19,11 +19,9 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common import (
-    DeclarationError,
     DispatchTime,
     Extent,
     In,
-    Incompatible,
     Operator,
     Out,
     Profile,
@@ -32,10 +30,10 @@ from iron.common import (
     Unresolvable,
     Value,
     auto,
-    optional,
+    OptionalDim,
     param,
 )
-from iron.common.declare.field import DimRef
+from iron.common.declare.field import Auto, DimRef, Param
 from iron.common.declare.infer import infer
 from iron.common.design import OperatorDesign
 
@@ -56,9 +54,9 @@ class MV(Operator):
     vec: int | None = auto(repr=False)
     epilogue: str = param(default="none", array=True)
 
-    A = In(optional(num_batches), M, K, tile=(tile_out, K), per=columns)
-    B = In(optional(num_batches), K, tile=(K,), broadcast=True)
-    C = Out(optional(num_batches), M, tile=(tile_out,), per=columns)
+    A = In(OptionalDim(num_batches), M, K, tile=(tile_out, K), per=columns)
+    B = In(OptionalDim(num_batches), K, tile=(K,), broadcast=True)
+    C = Out(OptionalDim(num_batches), M, tile=(tile_out,), per=columns)
     count = Value(np.int32, derive=lambda op: op.M // (op.columns * op.tile_out))
     start = Value(np.int32)  # per-call when a graph binds it, else unused
 
@@ -73,7 +71,7 @@ class MV(Operator):
         assert self.columns is not None
         unit = self.columns * self.tile_out
         if self.M % unit:
-            raise Incompatible(f"M={self.M} is not a multiple of {unit}")
+            raise ValueError(f"M={self.M} is not a multiple of {unit}")
 
     def uses_value(self, name):
         return (
@@ -94,8 +92,8 @@ class MV(Operator):
 
 def test_fields_are_reattached_as_dim_refs():
     assert isinstance(MV.K, DimRef) and MV.K.owner is MV
-    assert MV.K.name == "K" and MV.K.tier == "param"
-    assert isinstance(MV.tile_out, DimRef) and MV.tile_out.tier == "auto"
+    assert MV.K.name == "K" and isinstance(MV.K.tier, Param)
+    assert isinstance(MV.tile_out, DimRef) and isinstance(MV.tile_out.tier, Auto)
 
 
 def test_members_keep_declaration_order_and_names():
@@ -145,7 +143,7 @@ def test_dataclass_constructor_is_typed_by_real_fields():
 
 def test_a_tunable_may_name_a_tile_but_not_a_buffer_shape():
     assert MV.A.stream is not None and MV.A.stream.dims[0] is MV.tile_out
-    with pytest.raises(DeclarationError, match="host shape may not depend on tuning"):
+    with pytest.raises(TypeError, match="host shape may not depend on tuning"):
 
         class Bad(Operator):
             M: int = param()
@@ -170,7 +168,7 @@ def test_plain_field_reference_from_outside_is_rejected():
         n: int = 4
         x = In(4)
 
-    with pytest.raises(DeclarationError, match="not declared with param"):
+    with pytest.raises(TypeError, match="not declared with param"):
 
         class Bad(Plain):
             M: int = param()
@@ -178,7 +176,7 @@ def test_plain_field_reference_from_outside_is_rejected():
 
 
 def test_expression_in_a_shape_is_rejected():
-    with pytest.raises(DeclarationError, match="Expressions are not allowed"):
+    with pytest.raises(TypeError, match="Expressions are not allowed"):
 
         class Bad(Operator):
             n: int = param()
@@ -186,7 +184,7 @@ def test_expression_in_a_shape_is_rejected():
 
 
 def test_annotated_member_is_rejected():
-    with pytest.raises(DeclarationError, match="without an annotation"):
+    with pytest.raises(TypeError, match="without an annotation"):
 
         class Bad(Operator):
             M: int = param()
@@ -194,12 +192,12 @@ def test_annotated_member_is_rejected():
 
 
 def test_float_scratchpad_is_rejected():
-    with pytest.raises(DeclarationError, match="floating point"):
+    with pytest.raises(TypeError, match="floating point"):
         Scratchpad(np.float32)
 
 
 def test_per_and_broadcast_are_exclusive():
-    with pytest.raises(DeclarationError, match="either per"):
+    with pytest.raises(TypeError, match="either per"):
 
         class Bad(Operator):
             n: int = param()
@@ -233,8 +231,8 @@ def test_an_optional_dim_is_omitted_when_one_and_may_sit_anywhere():
         rows: int = param()
         cols: int = param()
         seq: int = param(default=1)
-        x = In(rows, optional(seq), cols)
-        y = Out(rows, optional(seq), cols)
+        x = In(rows, OptionalDim(seq), cols)
+        y = Out(rows, OptionalDim(seq), cols)
 
     assert infer(Stack, (8, 64)) == {"rows": 8, "cols": 64, "seq": 1}
     assert infer(Stack, (8, 16, 64)) == {"rows": 8, "cols": 64, "seq": 16}
@@ -455,7 +453,7 @@ def test_a_positional_operand_past_the_inputs_is_an_output_not_an_optional_one()
 
 
 def test_when_names_a_param():
-    with pytest.raises(DeclarationError, match="must be a param"):
+    with pytest.raises(TypeError, match="must be a param"):
 
         class Bad(Operator):
             N: int = param()
@@ -514,7 +512,7 @@ def test_array_sees_the_array_tier_alone():
 def test_resolution_fills_every_tunable_or_says_which_it_left():
     with pytest.raises(Unresolvable, match="no vector width"):
         MV(M=1024, K=24).resolved(NPU2)
-    with pytest.raises(Incompatible, match="not a multiple"):
+    with pytest.raises(ValueError, match="not a multiple"):
         MV(M=1000, K=128).resolved(NPU2)
     ok = MV(M=1024, K=128, columns=2)
     assert not ok._resolved
@@ -600,7 +598,7 @@ def test_resolve_must_return_a_copy():
 
 
 def test_overriding_an_inherited_field_needs_an_annotation():
-    with pytest.raises(DeclarationError, match="tile_out: int = auto\\(32\\)"):
+    with pytest.raises(TypeError, match="tile_out: int = auto\\(32\\)"):
 
         class Pinned(MV):
             tile_out = 32  # dataclass would keep the base's 64 in silence
@@ -645,7 +643,7 @@ def test_a_computed_default_is_inferred_from_a_shape_or_computed():
 
 
 def test_compatible_runs_at_construction_once_every_tunable_is_known():
-    with pytest.raises(Incompatible, match="not a multiple"):
+    with pytest.raises(ValueError, match="not a multiple"):
         MV(M=1000, K=128, columns=8, tile_out=64, vec=64)  # nothing left to resolve
     MV(M=1000, K=128)  # a tunable is open: compatible() waits for resolution
 
@@ -730,7 +728,7 @@ def test_an_extent_reads_as_its_field_until_a_graph_bounds_it():
     assert "valid: rows, unbounded" in op.explain()
     with pytest.raises(TypeError, match="no Extent \\['n'\\]"):
         op.derived_at("count", n=1)
-    with pytest.raises(DeclarationError, match="must name a param"):
+    with pytest.raises(TypeError, match="must name a param"):
 
         class Bad(Operator):
             n: int = auto(4)

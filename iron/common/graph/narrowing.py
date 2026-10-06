@@ -134,7 +134,7 @@ def variants(op: Operator, dev) -> list[Variant]:
         candidate = op.with_tunables(**widths)
         try:
             out.append(Variant.of(candidate, dev))
-        except ValueError:  # Unresolvable or Incompatible at this width
+        except ValueError:  # unresolvable or incompatible at this width
             continue
     return out
 

@@ -11,11 +11,9 @@ that names only its kernel.
 
 from .declare import (
     Carried,
-    DeclarationError,
     DispatchTime,
     Extent,
     In,
-    Incompatible,
     InOut,
     Operator,
     Out,
@@ -26,22 +24,20 @@ from .declare import (
     Value,
     Xclbin,
     auto,
-    optional,
+    OptionalDim,
     param,
-    select,
+    Select,
 )
 from .elementwise import BinaryElementwise, Elementwise, Rowwise, UnaryElementwise
 
 __all__ = [
     "BinaryElementwise",
     "Carried",
-    "DeclarationError",
     "DispatchTime",
     "Elementwise",
     "Extent",
     "In",
     "InOut",
-    "Incompatible",
     "Operator",
     "Out",
     "Profile",
@@ -53,7 +49,7 @@ __all__ = [
     "Value",
     "Xclbin",
     "auto",
-    "optional",
+    "OptionalDim",
     "param",
-    "select",
+    "Select",
 ]

@@ -10,7 +10,7 @@ import pytest
 from aie.iron.device import from_name
 from aie.utils.verify import Tolerance
 
-from iron.common import Incompatible
+
 from iron.common.harness import run_test
 from iron.common.image import OperatorImage
 from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor
@@ -224,8 +224,8 @@ def test_one_xclbin_serves_every_shape(npu_runtime):
         # this operator does not emit that order and must say so.
         (512, 128, dict(tile_n=128), NotImplementedError, "tile_n"),
         # Extents the grid does not divide: refused once the grid is known.
-        (1000, 128, {}, Incompatible, "multiple of"),
-        (1024, 100, {}, Incompatible, "multiple of"),
+        (1000, 128, {}, ValueError, "multiple of"),
+        (1024, 100, {}, ValueError, "multiple of"),
     ],
 )
 def test_rejects_unservable_shapes(K, N, extra, exc, match):

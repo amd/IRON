@@ -47,7 +47,6 @@ from ml_dtypes import bfloat16
 from iron.common import (
     Extent,
     In,
-    Incompatible,
     Operator,
     Out,
     Shim,
@@ -55,7 +54,7 @@ from iron.common import (
     Value,
     auto,
     param,
-    select,
+    Select,
 )
 from iron.common.testing import Case, Testing
 
@@ -143,25 +142,25 @@ class MHA(Operator):
     kv_lanes: int = auto(array=True, repr=False)
 
     Q = In(
-        select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
+        Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
         tile=(join_rows, d),
         per=(q_shims,),
         via=Shim(4),
     )
     K = In(
-        select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
+        Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
         tile=(d, B_kv),
         per=(kv_lanes,),
         via=Shim(5),
     )
     V = In(
-        select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
+        Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
         tile=(d, B_kv),
         per=(kv_lanes,),
         via=Shim(6),
     )
     O = Out(
-        select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
+        Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
         tile=(join_rows, d),
         per=(q_shims,),
         via=Shim(7),
@@ -293,27 +292,27 @@ class MHA(Operator):
     def compatible(self) -> None:
         # mha.cc's causal skip compares a KV block's index with a Q block's.
         if self.B_q != self.B_kv:
-            raise Incompatible(f"B_q ({self.B_q}) and B_kv ({self.B_kv}) must match")
+            raise ValueError(f"B_q ({self.B_q}) and B_kv ({self.B_kv}) must match")
         if self.kv_len % self.B_kv or self.kv_len < self.seq_pad:
-            raise Incompatible(
+            raise ValueError(
                 f"kv_len ({self.kv_len}) must be whole {self.B_kv}-row blocks and "
                 f"at least seq_pad ({self.seq_pad}): the queries are its last rows"
             )
         if self.kv_lanes != (self.num_pipelines if self.packed else 1):
-            raise Incompatible(
+            raise ValueError(
                 f"kv_lanes ({self.kv_lanes}) is one per pipeline for one query, "
                 f"else one; resolve() sets it"
             )
         if self.packed:
             group = self.num_heads // self.num_KV_heads
             if self.B_q % group:
-                raise Incompatible(
+                raise ValueError(
                     f"one query packs a KV group's {group} heads into a block's "
                     f"B_q ({self.B_q}) rows, which they must divide"
                 )
             # K and V take both input channels of shims 0 to P-1, and Q shim 4's.
             if self.num_pipelines > 4 or self.num_KV_heads % self.num_pipelines:
-                raise Incompatible(
+                raise ValueError(
                     f"one query takes num_pipelines ({self.num_pipelines}) at most "
                     f"4 dividing num_KV_heads ({self.num_KV_heads}): each pipeline "
                     f"has its own K and V lanes, on its own column's shim"

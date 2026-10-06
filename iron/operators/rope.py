@@ -26,7 +26,6 @@ from ml_dtypes import bfloat16
 from iron.common import (
     Extent,
     In,
-    Incompatible,
     Operator,
     Out,
     Value,
@@ -137,9 +136,9 @@ class RoPE(Operator):
     def compatible(self) -> None:
         n = self.num_aie_columns
         if self.rows % n:
-            raise Incompatible("rows must be divisible by num_aie_columns")
+            raise ValueError("rows must be divisible by num_aie_columns")
         if not (self.angle_rows >= n and self.angle_rows % n == 0):
-            raise Incompatible("angle_rows must be divisible by num_aie_columns")
+            raise ValueError("angle_rows must be divisible by num_aie_columns")
 
     def extent_unit(self, buffer: str) -> int | None:
         """Under a bound the rows go round-robin over the columns, the input

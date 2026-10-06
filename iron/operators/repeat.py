@@ -18,7 +18,7 @@ from iron.common import (
     Out,
     Unresolvable,
     auto,
-    optional,
+    OptionalDim,
     param,
 )
 from iron.common.design import BdLimits
@@ -72,8 +72,8 @@ class Repeat(Operator):
     valid_rows = Extent(rows)
     valid_seq = Extent(seq)
 
-    x = In(rows, optional(seq), cols, dtype=dtype, tile=(tile_size,))
-    y = Out(out_rows, optional(seq), cols, dtype=dtype, tile=(tile_size,))
+    x = In(rows, OptionalDim(seq), cols, dtype=dtype, tile=(tile_size,))
+    y = Out(out_rows, OptionalDim(seq), cols, dtype=dtype, tile=(tile_size,))
 
     def validate(self) -> None:
         self.check_derived("out_rows")

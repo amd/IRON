@@ -26,13 +26,12 @@ from ml_dtypes import bfloat16
 from iron.common import (
     Extent,
     In,
-    Incompatible,
     Operator,
     Out,
     Unresolvable,
     Value,
     auto,
-    optional,
+    OptionalDim,
     param,
 )
 from iron.common.design import BdLimits, Target
@@ -137,16 +136,16 @@ class GEMV(Operator):
     # for each of A, B and C; B is the whole vector, sent to every column's
     # own fifo (see sequence).
     A = In(
-        optional(num_matrices),
+        OptionalDim(num_matrices),
         M,
         K,
         tile=(tile_size_input, K),
         per=(num_aie_columns,),
         depth=2,
     )
-    B = In(optional(num_batches), K, tile=(K,), per=(num_aie_columns,), depth=1)
+    B = In(OptionalDim(num_batches), K, tile=(K,), per=(num_aie_columns,), depth=1)
     C = Out(
-        optional(num_batches),
+        OptionalDim(num_batches),
         M,
         tile=(tile_size_output,),
         per=(num_aie_columns,),
@@ -260,7 +259,7 @@ class GEMV(Operator):
         cols = self.num_aie_columns
         rows = self.M // cols
         if self.M % cols:
-            raise Incompatible(f"M={self.M} does not divide across {cols} columns")
+            raise ValueError(f"M={self.M} does not divide across {cols} columns")
         # We first acquire output rows from the C FIFO, then fill those rows
         # from the A input, so both tiles must divide each column's share.
         for name, tile in (
@@ -268,9 +267,9 @@ class GEMV(Operator):
             ("tile_size_input", self.tile_size_input),
         ):
             if tile > rows:
-                raise Incompatible(f"{name}={tile} exceeds M/num_aie_columns={rows}")
+                raise ValueError(f"{name}={tile} exceeds M/num_aie_columns={rows}")
             if rows % tile:
-                raise Incompatible(
+                raise ValueError(
                     f"{name}={tile} does not evenly divide M/num_aie_columns={rows}"
                 )
 

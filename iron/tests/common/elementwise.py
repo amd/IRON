@@ -8,7 +8,7 @@ import pytest
 from aie.iron.device import from_name
 
 import iron
-from iron.common import Incompatible, UnaryElementwise, Unresolvable
+from iron.common import UnaryElementwise, Unresolvable
 from iron.common.design.build import build_design
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.relu import ReLU
@@ -26,7 +26,7 @@ def test_a_tunable_free_operator_takes_the_widest_split_that_leaves_whole_lines(
 
 
 def test_the_refusals_name_what_to_change():
-    with pytest.raises(Incompatible, match="give a tile_size= or num_aie_columns="):
+    with pytest.raises(ValueError, match="give a tile_size= or num_aie_columns="):
         ReLU(size=1000).resolved(NPU2)
     with pytest.raises(Unresolvable, match="none is bound and none was given"):
         ReLU(size=1024).resolve(None)  # what resolved() asks on a host with no device

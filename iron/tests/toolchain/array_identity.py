@@ -16,7 +16,7 @@ import importlib
 
 import pytest
 
-from iron.common import Incompatible, Unresolvable
+from iron.common import Unresolvable
 from iron.common.image import OperatorImage
 from iron.tests.toolchain.tools import requires
 
@@ -82,7 +82,7 @@ def test_the_array_is_the_same_at_two_extents(
     for size in (n, 2 * n):
         try:
             op = cls(**tunables, **{name: size}).resolved(device)
-        except (ValueError, Unresolvable, Incompatible) as e:
+        except ValueError as e:
             pytest.skip(f"not for {device.name}: {e}")
         elfs.append(_core_elfs(op))
     small, large = elfs

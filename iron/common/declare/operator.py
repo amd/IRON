@@ -36,7 +36,7 @@ from aie.utils.verify import Tolerance
 from ..testing import Testing
 from .bound import BoundBuffer, BoundStream, BoundValue
 from .creation import declare
-from .field import DeclarationError, DimRef, Unresolvable, _tier_of, param
+from .field import DimRef, Tier, Unresolvable, param
 from .infer import call_operands, infer, infer_kwargs, operand_flags
 from .member import (
     Extent,
@@ -87,18 +87,18 @@ class _OperatorMeta(type):
 
 def _check_shipped(cls: type) -> None:
     if "array" in vars(cls):
-        raise DeclarationError(
+        raise TypeError(
             f"{cls.__name__} runs a shipped image, so nothing builds its array(); "
             f"drop the override"
         )
     for m in cls._members:
         if isinstance(m, _Stream) and m.via is None:
-            raise DeclarationError(
+            raise TypeError(
                 f"{cls.__name__}.{m.name}: a stream into a shipped image must be "
                 f"pinned with via=; nothing else says which shim it uses"
             )
         if isinstance(m, Value) and m.derive is not None and m.address is None:
-            raise DeclarationError(
+            raise TypeError(
                 f"{cls.__name__}.{m.name}: a value written into a shipped image "
                 f"needs an address; the sequence writes it there"
             )
@@ -230,7 +230,7 @@ class Operator(metaclass=_OperatorMeta):
         """Check the sequence-tier fields on their own. Runs at construction."""
 
     def compatible(self) -> None:
-        """Check the extents against the resolved tunables; raise ``Incompatible``."""
+        """Check the extents against the resolved tunables; raise ``ValueError``."""
 
     def resolve(self, dev) -> Self:
         """Return a copy with every ``auto()`` filled from ``dev`` and the extents.
@@ -663,7 +663,7 @@ class Operator(metaclass=_OperatorMeta):
         fields = {
             f.name: getattr(self, f.name)
             for f in dataclasses.fields(self)
-            if f.compare and _tier_of(f) is not None
+            if f.compare and Tier in f.metadata
         }
 
         def spell(names):

@@ -12,7 +12,7 @@ against the class it lands on.
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import MISSING, Field
+from dataclasses import MISSING, Field, dataclass
 from typing import Any, Callable
 
 
@@ -25,19 +25,33 @@ class Unresolvable(ValueError):
     """
 
 
-class Incompatible(ValueError):
-    """An operator's extents do not fit its resolved tunables."""
+@dataclass(frozen=True)
+class Tier:
+    """What a ``param()`` or ``auto()`` field declares, kept in its metadata
+    under ``Tier``.
+
+    Attributes:
+        array: The array reads the field though no tile names it.
+    """
+
+    array: bool = False
 
 
-class DeclarationError(TypeError):
-    """A class body violates the declaration rules; raised at class creation."""
+@dataclass(frozen=True)
+class Param(Tier):
+    """A compile-time parameter.
+
+    Attributes:
+        derive: Computes the value from the operator when neither the caller
+            nor an operand's shape gives it.
+    """
+
+    derive: Callable[[Any], Any] | None = None
 
 
-_TIER = "iron.tier"  # dataclass Field.metadata key: "param" | "auto"
-_DERIVE = "iron.derive"  # a param()'s callable default: computed from the operator
-_CHOICES = "iron.choices"
-_LEGAL = "iron.legal"
-_ARRAY = "iron.array"  # the field is array-tier though no tile names it
+@dataclass(frozen=True)
+class Auto(Tier):
+    """A tunable the library resolves for the device."""
 
 
 def param(
@@ -61,19 +75,16 @@ def param(
     required constructor argument.
     """
     if callable(default):
-        return _specifier("param", None, repr, init, array=array, derive=default)
-    return _specifier("param", default, repr, init, array=array)
+        spec, default = Param(array, default), None
+    else:
+        spec = Param(array)
+    return dataclasses.field(
+        default=default, repr=repr, init=init, metadata={Tier: spec}
+    )
 
 
 def auto(
-    default: Any = None,
-    /,
-    *,
-    choices: tuple | None = None,
-    legal: Callable[..., bool] | None = None,
-    array: bool = False,
-    repr: bool = True,
-    init: bool = True,
+    default: Any = None, /, *, array: bool = False, repr: bool = True, init: bool = True
 ) -> Any:
     """Declare a tunable the library resolves for the device when the caller
     does not: a compile-time value that starts at ``default`` (``None``:
@@ -83,40 +94,13 @@ def auto(
     value.
 
     An ``auto()`` never appears in a host shape (inference would cycle
-    through resolution); a stream tile may name one. ``choices`` and ``legal``
-    describe the tunable for a tuner and are recorded, not yet read.
-    ``init=False`` fixes a subclass's value of an inherited tunable (a kernel
-    that only works with one channel per column).
+    through resolution); a stream tile may name one. ``init=False`` fixes a
+    subclass's value of an inherited tunable (a kernel that only works with
+    one channel per column).
     """
-    return _specifier(
-        "auto", default, repr, init, choices=choices, legal=legal, array=array
+    return dataclasses.field(
+        default=default, repr=repr, init=init, metadata={Tier: Auto(array)}
     )
-
-
-def _specifier(
-    tier: str, default: Any, repr_: bool, init: bool = True, **extra: Any
-) -> Field:
-    metadata: dict[str, Any] = {_TIER: tier}
-    if extra.get("choices") is not None:
-        metadata[_CHOICES] = tuple(extra["choices"])
-    if extra.get("legal") is not None:
-        metadata[_LEGAL] = extra["legal"]
-    if extra.get("array"):
-        metadata[_ARRAY] = True
-    if extra.get("derive") is not None:
-        metadata[_DERIVE] = extra["derive"]
-    kwargs: dict[str, Any] = {"metadata": metadata, "repr": repr_, "init": init}
-    if default is not MISSING:
-        kwargs["default"] = default
-    return dataclasses.field(**kwargs)
-
-
-def _tier_of(f: Field) -> str | None:
-    return f.metadata.get(_TIER) if f.metadata else None
-
-
-def _declares_array(f: Field) -> bool:
-    return bool(f.metadata and f.metadata.get(_ARRAY))
 
 
 # --------------------------------------------------------------------------
@@ -136,7 +120,7 @@ class DimRef:
     __slots__ = ("owner", "name", "tier", "default")
 
     def __init__(
-        self, owner: type, name: str, tier: str | None, default=MISSING
+        self, owner: type, name: str, tier: Tier | None, default=MISSING
     ) -> None:
         self.owner = owner
         self.name = name
@@ -166,55 +150,35 @@ class DimRef:
         return f"{self.owner.__qualname__}.{self.name}"
 
 
-class _Optional:
+@dataclass(frozen=True)
+class OptionalDim:
     """A dimension that is present only when greater than one.
 
-    ``In(optional(num_batches), M, K)`` declares ``(M, K)`` for a single batch
-    and ``(num_batches, M, K)`` otherwise, the convention batched operators
-    use for their host shapes; ``In(rows, optional(seq), cols)`` takes a
-    matrix or a stack of them. Inference reads the rank to tell the two
-    apart, so a declaration has at most one.
+    ``In(OptionalDim(num_batches), M, K)`` declares ``(M, K)`` for a single
+    batch and ``(num_batches, M, K)`` otherwise, the convention batched
+    operators use for their host shapes; ``In(rows, OptionalDim(seq), cols)``
+    takes a matrix or a stack of them. Inference reads the rank to tell the
+    two apart, so a declaration has at most one.
     """
 
-    __slots__ = ("ref",)
-
-    def __init__(self, ref) -> None:
-        self.ref = ref
-
-    def __repr__(self) -> str:
-        return f"optional({self.ref!r})"
+    ref: Any
 
 
-def optional(ref) -> _Optional:
-    """Mark a dimension as omitted when it equals one. See ``_Optional``."""
-    return _Optional(ref)
-
-
-class _Select:
-    """A shape chosen by a flag: ``select(b_col_maj, (N, K), (K, N))``.
+@dataclass(frozen=True)
+class Select:
+    """A shape chosen by a flag: ``Select(b_col_maj, (N, K), (K, N))``.
 
     The flag is a field with a default or one the caller passes explicitly;
     it is never inferred. The only conditional shapes in the tree are GEMM's
     layout flags, which transpose a declared shape rather than resize it.
     """
 
-    __slots__ = ("flag", "when_true", "when_false")
-
-    def __init__(self, flag, when_true, when_false) -> None:
-        self.flag = flag
-        self.when_true = tuple(when_true)
-        self.when_false = tuple(when_false)
-
-    def __repr__(self) -> str:
-        return f"select({self.flag!r}, {self.when_true!r}, {self.when_false!r})"
+    flag: Any
+    when_true: tuple
+    when_false: tuple
 
 
-def select(flag, when_true, when_false) -> _Select:
-    """A conditional shape. See ``_Select``."""
-    return _Select(flag, when_true, when_false)
-
-
-_DimSpec = Any  # Field (own class, pre-processing) | DimRef | int | _Optional
+_DimSpec = Any  # Field (own class, pre-processing) | DimRef | int | OptionalDim
 
 
 def _describe(spec) -> str:

@@ -15,7 +15,7 @@ import pytest
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron.device import from_name
 
-from iron.common import Incompatible, Unresolvable
+from iron.common import Unresolvable
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
@@ -51,7 +51,7 @@ def test_transfer_size_not_dividing_the_per_channel_share_is_rejected():
     sends, and the drain's dma_await_task returns ERT_CMD_STATE_TIMEOUT with
     no diagnostic.
     """
-    with pytest.raises(Incompatible, match="must divide the per-channel transfer"):
+    with pytest.raises(ValueError, match="must divide the per-channel transfer"):
         Copy(
             input_buffer_size=1024, num_channels=4, tile_size=512
         )  # every tunable given
@@ -72,7 +72,7 @@ def test_transfer_size_not_dividing_a_bounded_row_is_rejected():
         dst_bound=1,
         input_buffer_size=rows * G * D,
     )
-    with pytest.raises(Incompatible, match="one row of the bounded axis"):
+    with pytest.raises(ValueError, match="one row of the bounded axis"):
         copy(tile_size=1024)  # every tunable given
     assert copy().resolved(from_name("npu2")).tile_size == G * D
 
@@ -90,7 +90,7 @@ def test_transfer_size_not_dividing_a_bounded_row_is_rejected():
 def test_transpose_dimension_that_does_not_tile_is_refused_by_name(
     M, N, aie_columns, channels, m, n, bad
 ):
-    with pytest.raises(Incompatible, match=bad):  # every tunable given: at construction
+    with pytest.raises(ValueError, match=bad):  # every tunable given: at construction
         Transpose(
             M=M, N=N, num_aie_columns=aie_columns, num_channels=channels, m=m, n=n, s=8
         )
@@ -130,7 +130,7 @@ def test_the_default_column_count_is_the_most_that_leave_whole_tiles():
     assert Transpose(M=64, N=64).resolved(npu2).num_aie_columns == 1
     assert Transpose(M=64, N=256).resolved(npu2).num_aie_columns == 4
     # Nothing fits: one column, and compatible() names the rule.
-    with pytest.raises(Incompatible, match=r"rows \(16\) must be a multiple of the 3"):
+    with pytest.raises(ValueError, match=r"rows \(16\) must be a multiple of the 3"):
         Softmax(rows=16, cols=16, num_channels=3).resolved(npu2)
 
 
@@ -152,7 +152,7 @@ def test_mha_whose_blocks_do_not_line_up_is_refused(kwargs, why):
     the two block sizes must match; and the queries are the keys' last rows,
     whole blocks of them, so the cache must hold them.
     """
-    with pytest.raises(Incompatible, match=why):
+    with pytest.raises(ValueError, match=why):
         MHA(num_heads=2, seq_len=1024, num_pipelines=8, **kwargs).resolved(
             from_name("npu2", n_cols=8)
         )
@@ -171,5 +171,5 @@ def test_mha_of_one_query_that_does_not_pack_is_refused(kwargs, why):
     """One query packs each KV group's heads into a block's rows, and each
     pipeline reads its own groups' K and V over its own column's shim.
     """
-    with pytest.raises(Incompatible, match=why):
+    with pytest.raises(ValueError, match=why):
         MHA(seq_len=1, kv_len=512, **kwargs).resolved(from_name("npu2", n_cols=8))

@@ -23,9 +23,9 @@ class GEMV(Operator):
     num_aie_columns: int = auto()
     tile_size_output: int = auto(64)
 
-    A = In(optional(num_batches), M, K, tile=(tile_size_output, K), per=(num_aie_columns,))
-    B = In(optional(num_batches), K, tile=(K,), per=(num_aie_columns,))
-    C = Out(optional(num_batches), M, tile=(tile_size_output,), per=(num_aie_columns,))
+    A = In(OptionalDim(num_batches), M, K, tile=(tile_size_output, K), per=(num_aie_columns,))
+    B = In(OptionalDim(num_batches), K, tile=(K,), per=(num_aie_columns,))
+    C = Out(OptionalDim(num_batches), M, tile=(tile_size_output,), per=(num_aie_columns,))
     tiles = Value(np.int32, derive=lambda op: op.M // (op.num_aie_columns * op.tile_size_output))
 ```
 
@@ -51,13 +51,11 @@ the checks run as a class body finishes.
 """
 
 from .field import (
-    DeclarationError,
-    Incompatible,
     Unresolvable,
     auto,
-    optional,
+    OptionalDim,
     param,
-    select,
+    Select,
 )
 from .member import (
     Carried,
@@ -76,12 +74,10 @@ from .profile import Profile
 
 __all__ = [
     "Carried",
-    "DeclarationError",
     "DispatchTime",
     "Extent",
     "In",
     "InOut",
-    "Incompatible",
     "Operator",
     "Out",
     "Profile",
@@ -91,7 +87,7 @@ __all__ = [
     "Value",
     "Xclbin",
     "auto",
-    "optional",
+    "OptionalDim",
     "param",
-    "select",
+    "Select",
 ]

@@ -31,7 +31,7 @@ import numpy as np
 from aie.utils.compile import NPU_CACHE_HOME
 from ml_dtypes import bfloat16
 
-from .field import DeclarationError, _describe, _DimSpec
+from .field import _describe, _DimSpec
 
 if TYPE_CHECKING:
     from typing import Self
@@ -251,11 +251,9 @@ class _Stream(_Member["BoundStream"]):
         depth: int = 2,
     ) -> None:
         if per is not None and broadcast:
-            raise DeclarationError(
-                "a stream is either per=<dim> or broadcast, not both"
-            )
+            raise TypeError("a stream is either per=<dim> or broadcast, not both")
         if replicate and per is None:
-            raise DeclarationError(
+            raise TypeError(
                 "replicate=True needs per=<dim>: every slot receives the whole buffer"
             )
         self.dims = tuple(dims)
@@ -348,7 +346,7 @@ class Scratchpad(_Value):
 
     def __init__(self, dtype: Any = np.int32) -> None:
         if np.dtype(dtype).kind == "f":
-            raise DeclarationError(
+            raise TypeError(
                 "Scratchpad values cannot be floating point: the scratchpad "
                 "encoding zeroes the top two bits of the value"
             )
@@ -443,7 +441,7 @@ class Value(_Value):
         optional: bool = False,
     ) -> None:
         if np.dtype(dtype).kind == "f":
-            raise DeclarationError(
+            raise TypeError(
                 "a Value cannot be floating point (the scratchpad encoding)"
             )
         super().__init__(dtype)

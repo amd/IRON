@@ -47,14 +47,13 @@ from ml_dtypes import bfloat16
 
 from iron.common import (
     In,
-    Incompatible,
     Operator,
     Out,
     Unresolvable,
     Value,
     auto,
     param,
-    select,
+    Select,
 )
 from iron.common.design import BdLimits
 from iron.operators.flm.gemm.design import (
@@ -208,7 +207,7 @@ class GEMM(Operator):
     # pre-packed. Its lanes are flows into each column's memtile pool, whose
     # slots are one tile each.
     B = In(
-        select(bfp16_b, (packed_blocks,), (K, N)),
+        Select(bfp16_b, (packed_blocks,), (K, N)),
         dtype=b_dtype,
         tile=(b_l2,),
         per=(cols,),
@@ -318,7 +317,7 @@ class GEMM(Operator):
         # consumes, so a k tile the compute tile's slice does not divide is
         # inexpressible.
         if self.k_tile % self.ct_max_k:
-            raise Incompatible(
+            raise ValueError(
                 f"k_tile ({self.k_tile}) must be a multiple of ct_max_k "
                 f"({self.ct_max_k}) for tile_n={self.tile_n}"
             )
@@ -330,12 +329,12 @@ class GEMM(Operator):
             ("N", self.N, self.tile_n),
         ):
             if value % unit != 0:
-                raise Incompatible(f"{name} ({value}) must be a multiple of {unit}")
+                raise ValueError(f"{name} ({value}) must be a multiple of {unit}")
         m_row_blocks = self.M // (M_TILE * self.rows)
         if m_row_blocks % self.m_chunk:
             # A partial group is inexpressible: the object is m_chunk tiles
             # wide and the forward always drains that much.
-            raise Incompatible(
+            raise ValueError(
                 f"m_row_blocks ({m_row_blocks}) must be a multiple of m_chunk "
                 f"({self.m_chunk}); pass m_chunk=1 for this shape"
             )

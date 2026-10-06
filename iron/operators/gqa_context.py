@@ -21,7 +21,7 @@ from aie.iron.kernels import MV_COL_MAJ_FIRST, MV_COL_MAJ_LAST, linalg
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import In, Incompatible, Operator, Out, auto, param
+from iron.common import In, Operator, Out, auto, param
 from iron.common.testing import Case, Testing
 
 # Compute rows in a column, one head per row.
@@ -168,7 +168,7 @@ class GQAContext(Operator):
 
     def compatible(self) -> None:
         if self.seq_len % self.chunk:
-            raise Incompatible(
+            raise ValueError(
                 f"seq_len ({self.seq_len}) must be a multiple of chunk ({self.chunk})"
             )
         # The kernel checks the rest: head_dim a whole number of vectors,

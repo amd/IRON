@@ -23,7 +23,6 @@ from aie.iron.device import from_name
 
 import iron.operators.flm.gemm.op as flm_gemm
 from iron.common import (
-    DeclarationError,
     In,
     Operator,
     Out,
@@ -31,7 +30,7 @@ from iron.common import (
     Value,
     Xclbin,
     auto,
-    optional,
+    OptionalDim,
     param,
 )
 from iron.common.design import (
@@ -73,9 +72,9 @@ class MV(Operator):
     num_batches: int = param(default=1)
     cols: int = auto(2)
     tile_out: int = auto(64)
-    A = In(optional(num_batches), M, K, tile=(tile_out, K), per=(cols,))
-    B = In(optional(num_batches), K, tile=(K,), broadcast=True)
-    C = Out(optional(num_batches), M, tile=(tile_out,), per=(cols,))
+    A = In(OptionalDim(num_batches), M, K, tile=(tile_out, K), per=(cols,))
+    B = In(OptionalDim(num_batches), K, tile=(K,), broadcast=True)
+    C = Out(OptionalDim(num_batches), M, tile=(tile_out,), per=(cols,))
 
 
 class Task(NamedTuple):
@@ -543,7 +542,7 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
 
 def test_flm_gemm_layout_of_b_follows_the_device():
     untuned = flm_gemm.GEMM(M=256, K=512, N=512)
-    with pytest.raises(flm_gemm.Incompatible):
+    with pytest.raises(ValueError):
         [b.shape for b in untuned.buffers]  # B's layout follows the device
     assert untuned.resolved(from_name("npu2", n_cols=8)).B.shape == (512 * 512 // 8,)
 
@@ -570,20 +569,20 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
     image = Xclbin(url="u", sha256="s", filename="f")
     # Nothing builds a shipped image's array, so the declaration has to say
     # where every stream enters and every value lives, and may not build.
-    with pytest.raises(DeclarationError, match="pinned with via="):
+    with pytest.raises(TypeError, match="pinned with via="):
 
         class Unpinned(Operator, image=image):
             n: int = param()
             x = In(n, tile=(64,))
 
-    with pytest.raises(DeclarationError, match="needs an address"):
+    with pytest.raises(TypeError, match="needs an address"):
 
         class Unplaced(Operator, image=image):
             n: int = param()
             x = In(n, tile=(64,), via=Shim(0))
             count = Value(np.int32, derive=lambda op: op.n)
 
-    with pytest.raises(DeclarationError, match="nothing builds its array"):
+    with pytest.raises(TypeError, match="nothing builds its array"):
 
         class Built(Operator, image=image):
             n: int = param()
