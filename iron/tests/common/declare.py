@@ -232,28 +232,6 @@ def test_an_optional_dim_is_omitted_when_one_and_may_sit_anywhere():
     assert Stack(rows=8, cols=64, seq=16).y.shape == (8, 16, 64)
 
 
-def test_explain_says_what_a_build_compiles_in_and_what_it_takes_per_call():
-    op = MV(M=1024, K=128, columns=2)
-    lines = op.explain().splitlines()
-    assert lines[0].startswith("MV(") and lines[0].endswith("(unresolved)")
-    assert lines[1] == (
-        "  array, compiled into every core: K=128, columns=2, tile_out=64, "
-        "epilogue='none'"
-    )
-    assert lines[2] == "  sequence, the host's alone: M=1024, num_batches=1, vec=None"
-    assert lines[3] == "  count: written once per build"
-    assert lines[4] == "  start: unused here"  # MV binds it only when a graph does
-    resolved = op.resolved(NPU2).explain().splitlines()
-    assert resolved[0].endswith("(resolved)") and "vec=64" in resolved[2]
-    assert resolved[3] == "  count: written once per build, 8 here"
-    op.use_value("count")  # a graph binds them: per call from here on
-    op.use_value("start")
-    assert op.explain().splitlines()[3:] == [
-        "  count: per call, a scratchpad word patched or read",
-        "  start: per call, a scratchpad word patched or read",
-    ]
-
-
 def test_buffers_carry_the_declared_dtype_and_size(npu2):
     """The sizing contract: the sequence layout and the test harness allocate
     from ``b.dtype`` and ``b.nbytes`` of a declared buffer.
@@ -716,7 +694,6 @@ def test_an_extent_reads_as_its_field_until_a_graph_bounds_it():
     assert not op.uses_value("valid") and not op.uses_value("count")
     assert op.residents == {"count": 32, "width": 8}
     assert op.derived_at("count", valid=16) == 8 and op.valid == 64  # unchanged
-    assert "valid: rows, unbounded" in op.explain()
     with pytest.raises(TypeError, match="no Extent \\['n'\\]"):
         op.derived_at("count", n=1)
     with pytest.raises(TypeError, match="must name a param"):
@@ -750,9 +727,6 @@ def test_a_bounded_operand_binds_the_extent_and_what_derives_from_it(npu2):
         ("valid", "n"),
         ("valid", "n"),
     ]
-    lines = a.explain().splitlines()
-    assert "  valid: per call, bounds rows (graph value n)" in lines
-    assert "  count: per call, derived from a bounded extent" in lines
     # Two instances alike in every field but one bounded are two designs.
     assert a.design_key() != Rows(rows=64, cols=8).design_key()
     assert a.design_key() == b.design_key()

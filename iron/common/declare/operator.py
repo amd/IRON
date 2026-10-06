@@ -39,7 +39,6 @@ from .bound import BoundBuffer, BoundValue
 from .creation import declare
 from .field import DimRef, OptionalDim, Select, Tier, Unresolvable, param
 from .member import (
-    DispatchTime,
     Extent,
     Value,
     _Buffer,
@@ -786,58 +785,3 @@ class Operator(metaclass=_OperatorMeta):
             if f.repr
         )
         return f"{type(self).__name__}({own})"
-
-    def explain(self) -> str:
-        """What a build of this operator compiles in and what it takes per call."""
-        fields = {
-            f.name: getattr(self, f.name)
-            for f in dataclasses.fields(self)
-            if f.compare and Tier in f.metadata
-        }
-
-        def spell(names):
-            return ", ".join(f"{n}={fields[n]!r}" for n in names) or "nothing"
-
-        array = [n for n in fields if n in self._array_fields]
-        sequence = [n for n in fields if n not in self._array_fields]
-        lines = [
-            repr(self) + (" (resolved)" if self._resolved else " (unresolved)"),
-            f"  array, compiled into every core: {spell(array)}",
-            f"  sequence, the host's alone: {spell(sequence)}",
-        ]
-        per_call_derived = self._per_call_derived()
-        for m in self._value_members:
-            if isinstance(m, _ExtentWord) and m.name not in per_call_derived:
-                continue
-            if isinstance(m, Extent):
-                bound = self.bound_extents.get(m.name)
-                how = (
-                    f"per call, bounds {m.field.name} (graph value {bound})"
-                    if m.name in self.bound_extents
-                    else f"{m.field.name}, unbounded"
-                )
-            elif (
-                isinstance(m, Value)
-                and m.name in per_call_derived
-                and m.name not in self.bound_values
-            ):
-                how = "per call, derived from a bounded extent"
-            elif (
-                isinstance(m, Value)
-                and m.derive is not None
-                and not self.uses_value(m.name)
-            ):
-                given = f", {m.derive(self)!r} here" if self._resolved else ""
-                how = "written once per build" + given
-            elif self.uses_value(m.name):
-                how = "per call, " + (
-                    "the instruction stream regenerated around it"
-                    if isinstance(m, DispatchTime)
-                    else "a scratchpad word patched or read"
-                )
-            else:
-                how = "unused here"
-            lines.append(f"  {m.name}: {how}")
-        if self.trace is not None:
-            lines.append(f"  traced: {self.trace.trace_size} bytes of trace buffer")
-        return "\n".join(lines)

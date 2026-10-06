@@ -490,8 +490,7 @@ example (a test at the small shape loads
 graph still passes is one the profile could not have given.
 
 Operators with equal `array_key()` share one array; with equal
-`design_key()` they are one build; `op.explain()` prints which fields are
-which and how each value reaches the device. `compile(dev, boundaries=,
+`design_key()` they are one build. `compile(dev, boundaries=,
 image=, **shapes)` derives the image (a fused ELF on NPU2, per-step
 xclbins with `boundaries=iron.each_step`) and `verbose=True` prints why.
 It links the image (`version.image`) and stops

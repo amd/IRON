@@ -36,9 +36,6 @@ def test_the_trip_count_is_a_resident_the_build_writes():
     op = ReLU(size=2048, tile_size=512).resolved(NPU2)
     assert op.cores == 4 and op.lines == 4
     assert op.residents == {"count": 1}
-    lines = op.explain().splitlines()
-    assert lines[0].endswith("(resolved)") and "tile_size=512" in lines[1]
-    assert lines[-1] == "  count: written once per build, 1 here"
     # The preamble writes it into each core's runtime-parameter buffer.
     one_core = ReLU(size=2560, num_aie_columns=1, tile_size=256)
     assert "aiex.npu.rtp_write(@count_0, 0, %c10_i32)" in str(build_design(one_core))
@@ -76,9 +73,6 @@ def test_a_bounded_operand_makes_the_trip_count_per_call():
     assert op.derived_at("count", valid=1024) == 1024 // (2 * 256)
     assert op.derived_at("valid_x", valid=1024) == 1024 // (2 * 256)
     assert op.residents == {}  # nothing is written once per build
-    lines = op.explain().splitlines()
-    assert "  valid: per call, bounds size (graph value n)" in lines
-    assert "  count: per call, derived from a bounded extent" in lines
     # Unbounded, the same class is what it was: one resident, no words.
     plain = ReLU(size=4096, tile_size=256, num_aie_columns=2).resolved(NPU2)
     assert plain.valid == 4096 and plain.residents == {"count": 8}
