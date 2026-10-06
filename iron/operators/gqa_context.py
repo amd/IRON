@@ -15,7 +15,7 @@ import dataclasses
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, ObjectFifo, Worker
+from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import MV_COL_MAJ_FIRST, MV_COL_MAJ_LAST, linalg
 from aie.utils.verify import Tolerance
@@ -260,16 +260,17 @@ class GQAContext(Operator):
         cache = TensorAccessPattern.full(self.cache.shape)
         weights = TensorAccessPattern.full(self.weights.shape)
         ctx = TensorAccessPattern.full(self.ctx.shape)
-        with rt.group() as tg:
-            for g in range(self.groups):
-                rt.fill(self.cache.lane(g), cache[g].coalesce(), group=tg)
-                rt.fill(
-                    self.weights.lane(g),
-                    weights[g].split(1, self.chunk).permute((1, 0, 2)),
-                    group=tg,
-                )
-            for g in range(self.groups):
-                rt.drain(self.ctx.lane(g), ctx[g].coalesce(), group=tg, wait=True)
+        tg = TaskGroup()
+        for g in range(self.groups):
+            rt.fill(self.cache.lane(g), cache[g].coalesce(), group=tg)
+            rt.fill(
+                self.weights.lane(g),
+                weights[g].split(1, self.chunk).permute((1, 0, 2)),
+                group=tg,
+            )
+        for g in range(self.groups):
+            rt.drain(self.ctx.lane(g), ctx[g].coalesce(), group=tg, wait=True)
+        tg.finish()
 
     def ops(self) -> int:
         return 2 * self.groups * self.heads_per_group * self.seq_len * self.head_dim

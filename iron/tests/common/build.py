@@ -38,7 +38,6 @@ from iron.common.design import (
     OperatorDesign,
     Sequence,
     Target,
-    Transfers,
     build_design,
 )
 from iron.operators import ElementwiseAdd
@@ -139,7 +138,7 @@ def _awaited(text) -> list[int]:
 
 def test_split_gives_each_lane_its_block():
     op = Unary(size=8192).resolved(NPU2_4COL)
-    p = Transfers.split(op.A, op.streams["A"])
+    p = Sequence.split(op.A, op.streams["A"])
     assert len(p) == 8  # 4 columns x 2 channels
     chunk = 8192 // 8
     for i, (slot, tap) in enumerate(p):
@@ -149,13 +148,13 @@ def test_split_gives_each_lane_its_block():
 
 def test_split_takes_every_batch_and_broadcasts():
     op = MV(M=256, K=128, num_batches=100)
-    a_transfers = Transfers.split(op.A, op.streams["A"])
+    a_transfers = Sequence.split(op.A, op.streams["A"])
     assert [slot.index for slot, _ in a_transfers] == [0, 1]
     # Each lane's rows out of every batch: one pattern, however many batches.
     assert a_transfers[1][1] == TensorAccessPattern(
         (100, 256, 128), 128 * 128, [100, 128, 128], [256 * 128, 128, 1]
     )
-    ((b_slot, b_tap),) = Transfers.split(op.B, op.streams["B"])
+    ((b_slot, b_tap),) = Sequence.split(op.B, op.streams["B"])
     assert b_slot is op.streams["B"]
     assert b_tap == TensorAccessPattern((100 * 128,), 0, [100 * 128], [1])
 
@@ -178,14 +177,14 @@ def test_a_bounded_operand_goes_round_robin_over_the_lanes():
     for the full extent.
     """
     op = Rows(rows=64, cols=8).resolved(NPU2_4COL)
-    plan = Transfers.round_robin(op.x, op.streams["x"], 0)
+    plan = Sequence.round_robin(op.x, op.streams["x"], 0)
     assert [(slot.index, tap, dim) for slot, tap, dim in plan] == [
         (0, TensorAccessPattern((1, 32, 2, 8), 0, [1, 32, 1, 8], [0, 16, 8, 1]), 1),
         (1, TensorAccessPattern((1, 32, 2, 8), 8, [1, 32, 1, 8], [0, 16, 8, 1]), 1),
     ]
     # A leading batch axis is the outer repeat; the tile count keeps its slot.
     batched = MV(M=256, K=128, num_batches=3).resolved(NPU2_4COL)
-    (slot, tap, dim), *_ = Transfers.round_robin(batched.A, batched.streams["A"], 1)
+    (slot, tap, dim), *_ = Sequence.round_robin(batched.A, batched.streams["A"], 1)
     # The 64 x 128 tile is a run past one wrap, so it takes the two inner
     # slots as 8 x 1024; the tile count sits above them.
     assert tap == TensorAccessPattern(
@@ -208,8 +207,8 @@ def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles():
     )
     op = op.resolved(from_name("npu2", n_cols=8))
     lanes = op.num_aie_columns
-    x = Transfers.round_robin(op.x, op.streams["x"], 0)
-    angles = Transfers.round_robin(op.angles, op.streams["angles"], 0)
+    x = Sequence.round_robin(op.x, op.streams["x"], 0)
+    angles = Sequence.round_robin(op.angles, op.streams["angles"], 0)
     for (xs, xa, _), (as_, aa, _) in zip(x, angles, strict=True):
         assert xs.index == as_.index
         rows = xa.gather(np.arange(prod(xa.tensor_dims)))[::cols] // cols

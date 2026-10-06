@@ -30,7 +30,7 @@ import dataclasses
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, ObjectFifo, Worker
+from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import sample as kernels
 from aie.utils.verify import Tolerance
@@ -256,24 +256,25 @@ class Sample(Operator):
         """One group: the draw and the logits in, then the record and the token."""
         row = self.row if self.uses_value("row") else None
         at = self.at if self.uses_value("at") else None
-        with rt.group() as tg:
-            rt.fill(
-                self.draws.lane(),
-                TensorAccessPattern.full(self.draws.shape)[0],
-                group=tg,
-                offset_by=row,
-            )
-            for c in range(self.cores):
-                for tap in self._slice_taps(c):
-                    rt.fill(self.logits.lane(c), tap, group=tg)
-            rt.drain(
-                self.tokens.lane(),
-                TensorAccessPattern.full(self.tokens.shape)[:1],
-                group=tg,
-                wait=True,
-                offset_by=at,
-            )
-            rt.drain(self.token.lane(), self.token, group=tg, wait=True)
+        tg = TaskGroup()
+        rt.fill(
+            self.draws.lane(),
+            TensorAccessPattern.full(self.draws.shape)[0],
+            group=tg,
+            offset_by=row,
+        )
+        for c in range(self.cores):
+            for tap in self._slice_taps(c):
+                rt.fill(self.logits.lane(c), tap, group=tg)
+        rt.drain(
+            self.tokens.lane(),
+            TensorAccessPattern.full(self.tokens.shape)[:1],
+            group=tg,
+            wait=True,
+            offset_by=at,
+        )
+        rt.drain(self.token.lane(), self.token, group=tg, wait=True)
+        tg.finish()
 
     def ops(self) -> int:
         return 0  # a draw, not arithmetic: its figure is latency

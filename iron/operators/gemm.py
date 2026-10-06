@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, ObjectFifo, Worker, ceildiv, kernels
+from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.iron.device import NPU1, NPU2, Device, NPU1Col1, NPU1Col2, Tile
 from aie.utils.verify import Tolerance
@@ -613,7 +613,7 @@ class GEMM(Operator):
             return C_grid[c_row_base : c_row_base + c_n_rows, col::n_aie_cols]
 
         # Task groups determine when to sync, await and free DMA runtime ops.
-        tg = rt.new_group()
+        tg = TaskGroup()
         for tb in range(ceildiv(n_c_row_tiles_per_core, tb_max_n_rows)):
             for pingpong in [0, 1]:
                 row_base = tb * tb_max_n_rows + pingpong * tb_max_n_rows // 2
@@ -673,7 +673,7 @@ class GEMM(Operator):
                             fill(col, row_base + tile_row, tg)
                 if b_unrolled or tb > 0 or (tb == 0 and pingpong > 0):
                     tg.finish()
-                    tg = rt.new_group()
+                    tg = TaskGroup()
         tg.finish()
 
     # -- host-side helpers ---------------------------------------------------

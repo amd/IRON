@@ -9,7 +9,7 @@ import aie.dialects.index as index
 import numpy as np
 from aie.dialects.aie import AIEArch, T
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, ObjectFifo, Worker, ceildiv
+from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import activation, linalg
@@ -381,14 +381,16 @@ class GEMV(Operator):
         if self.repeat > 1:
             self._repeated_sequence(rt)
             return
-        with rt.group():
-            for col in range(self.num_aie_columns):
-                rt.fill(self.B.lane(col), self.B)
-            with rt.group() as tg:
-                for slot, tap, size_by in rt.plan(self.A):
-                    rt.fill(slot, (self.A, tap), group=tg, size_by=size_by)
-                for slot, tap, size_by in rt.plan(self.C):
-                    rt.drain(slot, (self.C, tap), group=tg, wait=True, size_by=size_by)
+        vector = TaskGroup()
+        for col in range(self.num_aie_columns):
+            rt.fill(self.B.lane(col), self.B, group=vector)
+        tg = TaskGroup()
+        for slot, tap, size_by in rt.plan(self.A):
+            rt.fill(slot, (self.A, tap), group=tg, size_by=size_by)
+        for slot, tap, size_by in rt.plan(self.C):
+            rt.drain(slot, (self.C, tap), group=tg, wait=True, size_by=size_by)
+        tg.finish()
+        vector.finish()
 
     def _batch_order(self) -> list[int]:
         """The batches in the order a repeated GEMV computes them.
@@ -442,17 +444,19 @@ class GEMV(Operator):
                     f"GEMV.{buf.name}: a repeated GEMV takes no per-call bound"
                 )
         walks = [self._walks(col) for col in range(self.num_aie_columns)]
-        with rt.group():
-            for col, w in enumerate(walks):
-                for tap in w["B"]:
-                    rt.fill(self.B.lane(col), (self.B, tap))
-            with rt.group() as tg:
-                for col, w in enumerate(walks):
-                    for tap in w["A"]:
-                        rt.fill(self.A.lane(col), (self.A, tap), group=tg)
-                for col, w in enumerate(walks):
-                    for tap in w["C"]:
-                        rt.drain(self.C.lane(col), (self.C, tap), group=tg, wait=True)
+        vectors = TaskGroup()
+        for col, w in enumerate(walks):
+            for tap in w["B"]:
+                rt.fill(self.B.lane(col), (self.B, tap), group=vectors)
+        tg = TaskGroup()
+        for col, w in enumerate(walks):
+            for tap in w["A"]:
+                rt.fill(self.A.lane(col), (self.A, tap), group=tg)
+        for col, w in enumerate(walks):
+            for tap in w["C"]:
+                rt.drain(self.C.lane(col), (self.C, tap), group=tg, wait=True)
+        tg.finish()
+        vectors.finish()
 
     def ops(self) -> int:
         return 2 * self.M * self.K * self.num_batches

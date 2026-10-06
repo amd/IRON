@@ -32,7 +32,7 @@ from aie.iron.runtime.dmatask import emit_shim_transfer
 
 from ..declare import Operator
 from ..declare.bound import BoundBuffer, BoundStream, _StreamSlot
-from .runtime import Transfers
+from .runtime import Sequence
 
 
 class _NoGroup:
@@ -72,7 +72,7 @@ class ImageRuntime(Runtime):
         super().resolve(loc, ip, device=device, **options)
 
 
-class ExternalSequence(Transfers):
+class ExternalSequence(Sequence):
     """What an operator's ``sequence(rt)`` receives against a shipped image.
 
     The same surface ``Sequence`` offers, lowering a

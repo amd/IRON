@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import ObjectFifo
+from aie.iron import ObjectFifo, TaskGroup
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
@@ -301,22 +301,23 @@ class Copy(Operator):
         in_off = self.in_offset if self.uses_value("in_offset") else None
         out_off = self.out_offset if self.uses_value("out_offset") else None
 
-        with rt.group() as tg:
-            for c in range(self.num_channels):
-                tap, dim = ins[c]
-                rt.fill(
-                    self.x.lane(c),
-                    tap,
-                    group=tg,
-                    offset_by=in_off,
-                    size_by=None if dim is None else {dim: self.value("src_valid")},
-                )
-                tap, dim = outs[c]
-                rt.drain(
-                    self.y.lane(c),
-                    tap,
-                    group=tg,
-                    wait=True,
-                    offset_by=out_off,
-                    size_by=None if dim is None else {dim: self.value("dst_valid")},
-                )
+        tg = TaskGroup()
+        for c in range(self.num_channels):
+            tap, dim = ins[c]
+            rt.fill(
+                self.x.lane(c),
+                tap,
+                group=tg,
+                offset_by=in_off,
+                size_by=None if dim is None else {dim: self.value("src_valid")},
+            )
+            tap, dim = outs[c]
+            rt.drain(
+                self.y.lane(c),
+                tap,
+                group=tg,
+                wait=True,
+                offset_by=out_off,
+                size_by=None if dim is None else {dim: self.value("dst_valid")},
+            )
+        tg.finish()

@@ -6,7 +6,7 @@ import dataclasses
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, ObjectFifo, Worker
+from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import datamovement
@@ -273,19 +273,20 @@ class Transpose(Operator):
             (nb, cols, N // cols // n, n, chans, M // chans // m, m)
         )
         for batch in range(nb):
-            with rt.group() as tg:
-                for i in range(cols):
-                    for j in range(chans):
-                        k = i * chans + j
-                        # Partially transposes the input on the way in so the
-                        # kernel only transposes s x s sub-tiles.
-                        tap_in = x[batch, j, :, :, i].permute((0, 2, 1, 3))
-                        rt.fill(self.x.lane(k), tap_in, group=tg)
-                for i in range(cols):
-                    for j in range(chans):
-                        k = i * chans + j
-                        tap_out = y[batch, i, :, :, j].permute((2, 0, 1, 3))
-                        rt.drain(self.y.lane(k), tap_out, group=tg, wait=True)
+            tg = TaskGroup()
+            for i in range(cols):
+                for j in range(chans):
+                    k = i * chans + j
+                    # Partially transposes the input on the way in so the
+                    # kernel only transposes s x s sub-tiles.
+                    tap_in = x[batch, j, :, :, i].permute((0, 2, 1, 3))
+                    rt.fill(self.x.lane(k), tap_in, group=tg)
+            for i in range(cols):
+                for j in range(chans):
+                    k = i * chans + j
+                    tap_out = y[batch, i, :, :, j].permute((2, 0, 1, 3))
+                    rt.drain(self.y.lane(k), tap_out, group=tg, wait=True)
+            tg.finish()
 
     def ops(self) -> int:
         return 0  # a data mover: its figure is bandwidth

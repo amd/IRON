@@ -7,7 +7,7 @@ import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
-from aie.iron import ObjectFifo, Worker
+from aie.iron import ObjectFifo, TaskGroup, Worker
 from aie.iron.kernels import quant
 
 from iron.common import (
@@ -313,14 +313,13 @@ class DequantBFP(Operator):
         for cb0 in range(0, n_blocks, cols):
             columns = [(c, cb0 + c) for c in range(cols) if cb0 + c < n_blocks]
 
-            tg_fill = rt.new_group()
+            tg_fill = TaskGroup()
             for c, cb in columns:
                 at = (cb // run_blocks) * period_blocks + cb % run_blocks
                 rt.fill(self.qw.lane(c), qw[at], group=tg_fill)
 
-            prev = rt.new_group()  # empty: closed on the first k-tile's turn
-            for kb in range(k_tiles):
-                tg = rt.new_group()
+            # Each k-tile's drains are awaited while the next one's run.
+            for kb, tg in TaskGroup.pipelined(k_tiles, depth=2):
                 for c, cb in columns:
                     for h in range(HALVES):
                         rt.drain(
@@ -329,11 +328,6 @@ class DequantBFP(Operator):
                             wait=True,
                             group=tg,
                         )
-                # finish() awaits the group, so closing the previous k-tile
-                # here overlaps its wait with this one, already running.
-                prev.finish()
-                prev = tg
-            prev.finish()
             # The fill is not awaited. A core reads it before it writes the
             # output a drain takes, so a completed drain implies a completed
             # fill.

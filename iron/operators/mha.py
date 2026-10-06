@@ -29,7 +29,7 @@ import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.helpers.dialects.scf import else_, if_
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, ObjectFifo, Worker, ceildiv, kernels
+from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 from aie.iron.kernels.linalg import mm_stream_dims
@@ -967,22 +967,26 @@ class MHA(Operator):
 
             for step in range(steps):
                 owned = [p * steps + step for p in range(self.num_pipelines)]
-                with rt.group():
-                    for kv_head in owned:
-                        rt.fill(self.Q.lane(0), packed_rows(self.Q, kv_head))
-                    for p, kv_head in enumerate(owned):
-                        for x in (self.K, self.V):
-                            rt.fill(x.lane(p), kv_rows(x, kv_head, 1), size_by=kv_by)
-                    for kv_head in owned:
-                        rt.drain(self.O.lane(0), packed_rows(self.O, kv_head))
+                tg = TaskGroup()
+                for kv_head in owned:
+                    rt.fill(self.Q.lane(0), packed_rows(self.Q, kv_head), group=tg)
+                for p, kv_head in enumerate(owned):
+                    for x in (self.K, self.V):
+                        rt.fill(
+                            x.lane(p), kv_rows(x, kv_head, 1), group=tg, size_by=kv_by
+                        )
+                for kv_head in owned:
+                    rt.drain(self.O.lane(0), packed_rows(self.O, kv_head), group=tg)
+                tg.finish()
             return
 
         for kv_head in range(kv_heads):
             head0 = kv_head * group
-            with rt.group():
-                for shim in range(self.q_shims):
-                    rt.fill(self.Q.lane(shim), q_rows(self.Q, head0, shim))
-                for x in (self.K, self.V):
-                    rt.fill(x, kv_rows(x, kv_head, group * blocks), size_by=kv_by)
-                for shim in range(self.q_shims):
-                    rt.drain(self.O.lane(shim), q_rows(self.O, head0, shim))
+            tg = TaskGroup()
+            for shim in range(self.q_shims):
+                rt.fill(self.Q.lane(shim), q_rows(self.Q, head0, shim), group=tg)
+            for x in (self.K, self.V):
+                rt.fill(x, kv_rows(x, kv_head, group * blocks), group=tg, size_by=kv_by)
+            for shim in range(self.q_shims):
+                rt.drain(self.O.lane(shim), q_rows(self.O, head0, shim), group=tg)
+            tg.finish()

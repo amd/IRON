@@ -23,7 +23,7 @@ receives, ``runtime`` what an operator's ``sequence(rt)`` receives,
 from .bd import BdLimits
 from .build import OperatorDesign, build_design, device_symbol
 from .external import ExternalSequence
-from .runtime import Sequence, Transfers
+from .runtime import Sequence
 from .target import Target
 
 __all__ = [
@@ -32,7 +32,6 @@ __all__ = [
     "OperatorDesign",
     "Sequence",
     "Target",
-    "Transfers",
     "build_design",
     "device_symbol",
 ]

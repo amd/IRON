@@ -1,16 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Transfers and Sequence: the runtime sequence of one operator.
-
-``Transfers`` decides what goes through a sequence; ``Sequence``
-lowers each transfer to MLIR tasks. The same base serves
-``ExternalSequence``, which emits words instead.
-"""
+"""The runtime sequence of one operator."""
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from math import prod
 from typing import Any
 
@@ -31,36 +25,27 @@ from .bd import BdLimits
 from .target import Target
 
 
-class Transfers:
-    """What an operator's sequence issues, over either way of issuing it.
+class Sequence:
+    """The runtime sequence of one operator, opened by the library.
 
-    A concrete sequence supplies ``op`` and the ``fill``/``drain``/``group``
-    surface; this decides what goes through it: the operator's
-    ``sequence(rt)`` override, or the one derived from the declarations.
-    ``Sequence`` lowers a transfer to MLIR tasks;
-    ``ExternalSequence`` as shim DMA tasks on a downloaded
-    image's pinned channels.
+    ``fill``/``drain`` take a stream (or one slot of a ``per=`` stream) and
+    a buffer, a slice of one (``op.A``, ``op.A[:, r0:r1, :]``) or a
+    ``TensorAccessPattern`` over it, and issue it as one transfer in the
+    ``TaskGroup`` given as ``group=``. What goes through it is the
+    operator's ``sequence(rt)`` override, or the one derived from the
+    declarations.
 
-    A transfer is a ``TensorAccessPattern`` over the flat buffer. A constant
-    one is issued as it is: the compiler splits one a buffer descriptor
-    cannot hold (``aie-decompose-large-dma-bd``). One patched per call must
-    fit a descriptor as given, so it is built to (``BdLimits``).
+    A constant pattern is issued as it is: the compiler splits one a buffer
+    descriptor cannot hold (``aie-decompose-large-dma-bd``). One patched per
+    call must fit a descriptor as given, so it is built to (``BdLimits``).
     """
 
-    op: Operator
-
-    def fill(
-        self, stream, source, *, group=None, wait=False, offset_by=None, size_by=None
+    def __init__(
+        self, op: Operator, rt_data: dict[str, Any], target: Target | None = None
     ):
-        raise NotImplementedError
-
-    def drain(
-        self, stream, dest, *, group=None, wait=True, offset_by=None, size_by=None
-    ):
-        raise NotImplementedError
-
-    def group(self):
-        raise NotImplementedError
+        self.op = op
+        self._rt_data = rt_data
+        self.target = target
 
     def run(self) -> None:
         """The transfers: the operator's override, else the one derived from
@@ -68,17 +53,15 @@ class Transfers:
         """
         if self.op.has_sequence_override():
             self.op.sequence(self)
-        else:
-            self._derived()
-
-    def _derived(self) -> None:
-        with self.group() as tg:
-            for buf in self.op.inputs:
-                for slot, tap, size_by in self.plan(buf):
-                    self.fill(slot, (buf, tap), group=tg, size_by=size_by)
-            for buf in self.op.outputs:
-                for slot, tap, size_by in self.plan(buf):
-                    self.drain(slot, (buf, tap), group=tg, wait=True, size_by=size_by)
+            return
+        tg = TaskGroup()
+        for buf in self.op.inputs:
+            for slot, tap, size_by in self.plan(buf):
+                self.fill(slot, (buf, tap), group=tg, size_by=size_by)
+        for buf in self.op.outputs:
+            for slot, tap, size_by in self.plan(buf):
+                self.drain(slot, (buf, tap), group=tg, wait=True, size_by=size_by)
+        tg.finish()
 
     def plan(
         self, buf: BoundBuffer
@@ -88,7 +71,12 @@ class Transfers:
         with its patched dimension under a bound. An override that keeps the
         derived movement for some operands issues them from here.
         """
-        stream = self._stream_of(buf)
+        stream = buf.lanes
+        if stream is None:
+            raise ValueError(
+                f"{type(self.op).__name__}.{buf.name} has no tile=, so its "
+                f"sequence cannot be derived; add tile= or override sequence(rt)"
+            )
         bounded = buf.bounded
         if bounded is None:
             return [(slot, tap, None) for slot, tap in self.split(buf, stream)]
@@ -120,28 +108,14 @@ class Transfers:
         if stream.replicate:
             return [(stream[i], buffer.tap) for i in range(stream.count)]
         shape, axis = buffer.shape, buffer.batch_axes
-        if axis >= len(shape):
+        if axis >= len(shape) or shape[axis] % stream.count:
             raise ValueError(
-                f"{buffer.name} {shape} has no axis to split across the "
-                f"{stream.count} slots of stream {stream.name!r}"
+                f"{buffer.name} {shape} does not divide across the {stream.count} "
+                f"slots of stream {stream.name!r} on axis {axis}. Check "
+                f"{type(buffer._op).__name__}.compatible()"
             )
-        share, remainder = divmod(shape[axis], stream.count)
-        if remainder:
-            raise ValueError(
-                f"{buffer.name} {shape} does not divide across stream "
-                f"{stream.name!r}: {shape[axis]} rows (axis {axis}) over "
-                f"{stream.count} slots. Check {type(buffer._op).__name__}.compatible()"
-            )
-        leading = (slice(None),) * axis
-        return [
-            (
-                stream[i],
-                TensorAccessPattern.full(shape)[
-                    leading + (slice(i * share, (i + 1) * share),)
-                ],
-            )
-            for i in range(stream.count)
-        ]
+        parts = TensorAccessPattern.full(shape).partition(stream.count, axis)
+        return [(stream[i], parts[i]) for i in range(stream.count)]
 
     @staticmethod
     def round_robin(
@@ -193,33 +167,6 @@ class Transfers:
             for s in slots:
                 out.append((stream[s] if stream.count > 1 else stream, tap, 1))
         return out
-
-    def _stream_of(self, buf: BoundBuffer) -> BoundStream:
-        if buf.lanes is None:
-            raise ValueError(
-                f"{type(self.op).__name__}.{buf.name} has no tile=, so its "
-                f"sequence cannot be derived; add tile= or override sequence(rt)"
-            )
-        return buf.lanes
-
-
-class Sequence(Transfers):
-    """The runtime sequence of one operator, opened by the library.
-
-    ``fill``/``drain`` take a stream (or one slot of a ``per=`` stream) and
-    a buffer, a slice of one (``op.A``, ``op.A[:, r0:r1, :]``) or a
-    ``TensorAccessPattern`` over it, and issue it as one transfer. Transfers
-    are enrolled in the current group; ``group()`` opens one and finishes it
-    on exit.
-    """
-
-    def __init__(
-        self, op: Operator, rt_data: dict[str, Any], target: Target | None = None
-    ):
-        self.op = op
-        self._rt_data = rt_data
-        self.target = target
-        self._group = None
 
     # -- transfers ---------------------------------------------------------
 
@@ -285,7 +232,7 @@ class Sequence(Transfers):
         sizes_by = self._sizes_by(size_by)
         data = self._rt_data[buffer.name]
         if managed:
-            common = dict(wait=wait, group=group if group is not None else self._group)
+            common = dict(wait=wait, group=group)
         else:
             if group is not None:
                 raise ValueError("an unmanaged transfer joins no group")
@@ -417,23 +364,6 @@ class Sequence(Transfers):
             f"fill/drain take a buffer, a slice of one, a TensorAccessPattern or "
             f"(buffer, TensorAccessPattern); got {what!r}"
         )
-
-    # -- structure ---------------------------------------------------------
-
-    @contextmanager
-    def group(self):
-        """Open a task group; transfers issued inside join it; finished on exit."""
-        tg = TaskGroup()
-        previous, self._group = self._group, tg
-        try:
-            yield tg
-        finally:
-            self._group = previous
-            tg.finish()
-
-    def new_group(self):
-        """A task group the caller finishes itself (for hand-rolled pipelines)."""
-        return TaskGroup()
 
     def data(self, buffer: BoundBuffer):
         """The runtime-sequence argument for ``buffer`` (for hand-rolled transfers)."""

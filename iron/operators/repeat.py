@@ -7,7 +7,7 @@ from typing import Any
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import ObjectFifo
+from aie.iron import ObjectFifo, TaskGroup
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
@@ -127,20 +127,21 @@ class Repeat(Operator):
                 y.merge(2).permute((1, 0, 2)).split(2, chunk),
             )
             dim, word = 1, "valid_rows"
-        with rt.group() as tg:
-            rt.fill(
-                self.x,
-                taps[0],
-                group=tg,
-                size_by={dim: self.value(f"{word}_x")} if bound else None,
-            )
-            rt.drain(
-                self.y,
-                taps[1],
-                group=tg,
-                wait=True,
-                size_by={dim: self.value(f"{word}_y")} if bound else None,
-            )
+        tg = TaskGroup()
+        rt.fill(
+            self.x,
+            taps[0],
+            group=tg,
+            size_by={dim: self.value(f"{word}_x")} if bound else None,
+        )
+        rt.drain(
+            self.y,
+            taps[1],
+            group=tg,
+            wait=True,
+            size_by={dim: self.value(f"{word}_y")} if bound else None,
+        )
+        tg.finish()
 
     def ops(self) -> int:
         return 0  # a data mover: its figure is bandwidth

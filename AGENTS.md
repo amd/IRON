@@ -197,9 +197,8 @@ reuse lint
      objects), `build_design(op, image)` (the module for one operator),
      `OperatorDesign` (that module as mlir-aie's `CompilableDesign`
      compiles and caches it), the derived runtime sequence (`Sequence`,
-     over `Transfers.split`/`round_robin`), `ExternalSequence` (the
-     sequence against a shipped image: `aie.lock`/`aiex.set_lock` releases
-     its parameter block)
+     its `split`/`round_robin`), `ExternalSequence` (the sequence
+     against a shipped image: `Lock.set` releases its parameter block)
    - `graph/`: graphs (`iron.Graph`, `iron.state`) and
      `compile(dev, boundaries=, image=)`
    - `image/`: what a graph lowers onto: `OperatorSequence`, the buffer
@@ -246,9 +245,11 @@ reuse lint
 the operator's declaration (each buffer split over its stream's slots); an
 operator that needs a different order overrides `sequence(rt)`:
 
-- `rt.fill(slot, view)`: DMA data from host → NPU (shim → L2/L1)
-- `rt.drain(slot, view)`: DMA data from NPU → host
-- `rt.group()`: Coordinate parallel DMA operations
+- `rt.fill(slot, view, group=tg)`: DMA data from host → NPU (shim → L2/L1)
+- `rt.drain(slot, view, group=tg)`: DMA data from NPU → host
+- `tg = TaskGroup()` ... `tg.finish()` (mlir-aie's): awaits and frees a
+  group's transfers; `TaskGroup.pipelined(n)` keeps a step's in flight
+  while the next is issued
 - views are slices of the declared buffers (`self.A[:, r0:r1, :]`) or
   mlir-aie's `TensorAccessPattern`s over one (`(self.A, tap)`); the
   compiler splits a constant pattern no one descriptor holds
