@@ -20,17 +20,13 @@ XRT sourced and the NPU otherwise idle.
 """
 
 import argparse
-import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from pathlib import Path
 
-import aie.utils as aie_utils
 import numpy as np
 
-from iron.common.declare import Operator
-from iron.common.graph.narrowing import CostTable, Runlist, cost_key, variants
-from iron.common.graph.probe import Timing, calibrate, measure_steps, pmode
-from iron.common.graph.trace import TracedGraph
+from iron.common.graph.narrowing import CostTable
+from iron.common.graph.probe import Call, Timing, measure_graph, pmode
 from iron.operators.sample import Sample
 
 from .decoder import CausalLM
@@ -47,35 +43,6 @@ CALIBRATION_PAIRS = [
 ]
 
 
-def per_call_values(
-    traced: TracedGraph, op: Operator, graph_values: Mapping[str, int]
-) -> dict[str, int]:
-    """The per-call values ``op`` is written in a call with ``graph_values``,
-    by member name: what the probe measures it at.
-    """
-    return {
-        b.member.name: b.expression.evaluate(graph_values)
-        for b in traced.bindings
-        if b.op is op
-    }
-
-
-def per_call_inputs(
-    traced: TracedGraph, op: Operator, contents: Mapping[str, np.ndarray]
-) -> dict[str, np.ndarray]:
-    """What ``op``'s buffers hold in a call where the graph's buffers hold
-    ``contents``, by graph buffer name; by ``op``'s buffer name: what the
-    probe fills them with.
-    """
-    return {
-        buf.name: contents[name]
-        for step in traced.steps
-        if step.op is op
-        for buf, name in zip(op.buffers, step.names)
-        if name in contents
-    }
-
-
 def measure(
     model: CausalLM,
     table: CostTable,
@@ -87,73 +54,21 @@ def measure(
     remeasure: bool = False,
     log: Callable[[str], None] = print,
 ) -> None:
-    """Measure ``model``'s decode step into ``table``, saved as it goes: each
-    design at ``position`` and ``token``, Sample on the draw rows ``sample``
-    gives, and the configure cost between ``CALIBRATION_PAIRS``.
+    """Measure ``model``'s decode step into ``table`` (``measure_graph``):
+    each design at ``position`` and ``token``, Sample on the draw rows
+    ``sample`` gives, and the configure cost between ``CALIBRATION_PAIRS``.
     """
-    dev = aie_utils.ensure_current_device()
     traced = model.trace(**model.shapes(1))
-    graph_values = dict(position=position, token=token)
     # Sample's work follows its draw row's temperature and top-k: measure it
     # at the rows generation writes, not at random words.
     [k_max] = {s.op.k_max for s in traced.steps if isinstance(s.op, Sample)}
     _, draws = traced.states[id(model.draws)]
-    contents: dict[str, np.ndarray] = {
-        draws.name: sample.rows(model.config.max_seq_len, k_max)
-    }
-    keys = [cost_key(s.op) for s in traced.steps]
-    first: dict[str, Operator] = {}
-    for key, step in zip(keys, traced.steps):
-        first.setdefault(key, step.op)
-    order = Runlist(keys).order
-    found = {key: variants(first[key], dev) for key in order}
-
-    current = {v.key for vs in found.values() for v in vs}
-    stale = [k for k in table.steps if k not in current]
-    for k in stale:
-        del table.steps[k]
-    if stale:
-        log(f"dropped {len(stale)} designs the graph no longer has")
-
-    for i, key in enumerate(order):
-        op = first[key]
-        name = type(op).__name__
-        if not remeasure and all(v.key in table.steps for v in found[key]):
-            log(f"[{i}] {name}: in the table")
-            continue
-        values = per_call_values(traced, op, graph_values)
-        inputs = per_call_inputs(traced, op, contents)
-        start = time.time()
-        costs = measure_steps(table, found[key], timing, repeats, values, inputs)
-        table.save()
-        log(f"[{i}] {name} ({time.time() - start:.0f}s) at {values}")
-        for v in found[key]:
-            c = costs[v.key]
-            log(
-                f"    {dict(v.widths)}: t_step {c.t_step_us:8.2f} us  "
-                f"alone {c.alone_us:8.2f} us  exact {c.exact}"
-            )
-
-    # Each pair's first designs of those classes, at their narrowest.
-    by_class = {}
-    for key in order:
-        by_class.setdefault(type(first[key]).__name__, found[key][-1])
-    pairs = [(by_class[a], by_class[b]) for a, b in CALIBRATION_PAIRS]
-    wanted = {f"{a.key}|{b.key}" for a, b in pairs}
-    for k in [k for k in table.calibrations if k not in wanted]:
-        del table.calibrations[k]
-    for (a, b), (name_a, name_b) in zip(pairs, CALIBRATION_PAIRS):
-        if not remeasure and f"{a.key}|{b.key}" in table.calibrations:
-            log(f"calibration {name_a}/{name_b}: in the table")
-            continue
-        cal = calibrate(table, a.op, b.op, timing)
-        table.save()
-        log(
-            f"calibration {name_a}/{name_b}: D0 {cal.dispatch_us:.1f}  "
-            f"R {cal.reset_us:.1f}  base {cal.base_us:.1f}  "
-            f"switch {cal.switch_us:.1f} us"
-        )
-    table.save()
+    call = Call(
+        traced,
+        dict(position=position, token=token),
+        {draws.name: sample.rows(model.config.max_seq_len, k_max)},
+    )
+    measure_graph(table, [call], CALIBRATION_PAIRS, timing, repeats, remeasure, log)
 
 
 def main(runner: type[Runner], description: str, default_table: Path) -> None:
