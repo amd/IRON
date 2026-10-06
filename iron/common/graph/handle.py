@@ -20,9 +20,11 @@ from ..declare.operator import graph_tracer
 class Handle:
     """A traced tensor: a buffer of the graph, with a shape and a dtype.
 
-    ``h[key]`` takes numpy's basic indexing and, on one axis, a per-call
-    ``Value`` (``keys[:, pos]``). A contiguous static region is a slice any
-    operator takes; any other view is an access pattern only a copy takes.
+    ``h[key]`` takes numpy's basic indexing, on one axis a per-call
+    ``Value`` (``keys[:, pos]``), and on the leading axis an integer array
+    of rows fixed when the graph is traced (``table[ids]``). A contiguous
+    static region is a slice any operator takes; any other view, a gather
+    included, is an access pattern only a copy takes.
     """
 
     __slots__ = (
@@ -56,7 +58,8 @@ class Handle:
         self.role = role
         self.parent = parent
         self.start = start  # a slice's element offset into the parent
-        self.tap: TensorAccessPattern | None = tap
+        # a gather's is one pattern per row
+        self.tap: TensorAccessPattern | tuple[TensorAccessPattern, ...] | None = tap
         self.index_by: Affine | None = index_by  # a view's per-call element offset
         # axis -> its leading entries valid this call (``x[:n]``)
         self.bounds: dict[int, Affine] = dict(bounds or {})
@@ -122,15 +125,34 @@ class Handle:
             raise TypeError("slicing a slice is not supported; slice the parent")
         entries = list(key) if isinstance(key, tuple) else [key]
         rank = len(self.shape)
-        if entries.count(Ellipsis) > 1:
+        # By identity: an array entry compares elementwise.
+        ellipses = [i for i, e in enumerate(entries) if e is Ellipsis]
+        if len(ellipses) > 1:
             raise IndexError("an index can only have a single ellipsis ('...')")
-        if Ellipsis in entries:
-            at = entries.index(Ellipsis)
+        if ellipses:
+            at = ellipses[0]
             fill = [slice(None)] * (rank - (len(entries) - 1))
             entries = entries[:at] + fill + entries[at + 1 :]
         if len(entries) > rank:
             raise IndexError(f"too many indices for shape {self.shape}")
         entries += [slice(None)] * (rank - len(entries))
+        if isinstance(entries[0], np.ndarray):
+            ids, n = entries[0], self.shape[0]
+            if ids.ndim != 1 or not np.issubdtype(ids.dtype, np.integer) or rank < 2:
+                raise IndexError(
+                    f"a gather takes a 1-D integer array of rows of a table of "
+                    f"rank 2 or more; got {ids.dtype} {ids.shape} on {self!r}"
+                )
+            if not all(isinstance(e, slice) and e == slice(None) for e in entries[1:]):
+                raise IndexError("a gather takes the whole of every axis but the first")
+            if self.bounds:
+                raise TypeError(f"{self!r} is bounded per call; gather what it bounds")
+            if not len(ids) or ((ids < -n) | (ids >= n)).any():
+                raise IndexError(f"gathering {ids} from the {n} rows of {self!r}")
+            whole = TensorAccessPattern.full(self.shape)
+            rows = tuple(whole[int(i) % n] for i in ids)
+            shape = (len(ids), *self.shape[1:])
+            return Handle(shape, self.dtype, self.name, "view", self, 0, rows)
         for axis in self.bounds:
             if isinstance(entries[axis], slice):
                 raise TypeError(

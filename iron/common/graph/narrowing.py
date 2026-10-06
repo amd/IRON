@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Joint narrowing: each design's width (``Operator.widths``) and which
-designs share a device, chosen together to minimise the modelled runlist time:
+"""Joint narrowing: each design's width (``Operator.widths``, narrower or
+wider than its default) and which designs share a device, chosen together
+to minimise the modelled runlist time:
 
     D0 + sum over steps of t_step
        + sum over device entries of (base + sum over its members of load)
@@ -88,30 +89,30 @@ class Variant:
         )
 
 
-def _narrower(width: int) -> list[int]:
-    """``width`` and every power of two below it, widest first."""
+def _widths(width: int, cols: int) -> list[int]:
+    """``width`` and every power of two up to ``cols``, widest first."""
     out = {width}
     w = 1
-    while w < width:
+    while w <= cols:
         out.add(w)
         w *= 2
     return sorted(out, reverse=True)
 
 
 def variants(op: Operator, dev) -> list[Variant]:
-    """``op`` at its default width, then at every narrower one it resolves
-    at. Each width tunable ranges over powers of two up to its default.
+    """``op`` at its default width, then at every other one it resolves at.
+    Each width tunable ranges over its default and the powers of two up to
+    the device's columns, widest first.
     """
     default = Variant.of(op, dev)
     defaults = dict(default.widths)
     out = [default]
-    for combo in itertools.product(*(_narrower(w) for w in defaults.values())):
+    for combo in itertools.product(*(_widths(w, dev.cols) for w in defaults.values())):
         widths = dict(zip(defaults, combo))
         if widths == defaults:
             continue
-        candidate = op.with_tunables(**widths)
         try:
-            out.append(Variant.of(candidate, dev))
+            out.append(Variant.of(op.with_tunables(**widths), dev))
         except ValueError:  # unresolvable or incompatible at this width
             continue
     return out
@@ -554,7 +555,7 @@ class JointNarrowing:
         return sum(alone[i][0] for i in pack.members) - pack.cost
 
     def _candidates(self, op: Operator, dev) -> list[Variant]:
-        """The default width, then every narrower one measured exact."""
+        """The default width, then every other one measured exact."""
         found = variants(op, dev)
         default = found[0]
         if default.key not in self.table.steps:

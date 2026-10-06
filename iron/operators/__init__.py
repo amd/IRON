@@ -18,6 +18,8 @@ import importlib
 # reference or a test of its own beside it.
 _OPERATOR_MODULES = {
     "AXPY": "axpy",
+    "Clamp": "clamp",
+    "DepthwiseConv1d": "depthwise_conv1d",
     "Dequant": "dequant",
     "ElementwiseAdd": "elementwise_add",
     "ElementwiseMul": "elementwise_mul",

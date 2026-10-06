@@ -15,10 +15,11 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
+from iron.common import Scratchpad
 from iron.common.graph.narrowing import CostTable, JointNarrowing, cost_key, variants
-from iron.common.graph.probe import Timing, calibrate, measure_steps
+from iron.common.graph.probe import CONTEXTS, Timing, calibrate, measure_steps
 from iron.common.image import Fusion
-from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
+from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU, Softmax
 
 SIZE = 8192
 TILE = 256
@@ -39,6 +40,28 @@ class Chain(iron.Graph):
     def body(self, a, b):
         x = self.mul(self.silu(self.add(a, b)), b)
         return self.silu(self.add(x, b))
+
+
+class Masked(iron.Graph):
+    """A softmax over each row's first `n` entries, `n` given per call."""
+
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        return Softmax(x, vector_size=n)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_measures_more_widths_than_one_batch_of_contexts(tmp_path):
+    # A probe that writes a per-call value loads its context when it is built.
+    op = Masked().trace(x=(256, 256)).steps[0].op
+    found = variants(op, aie_utils.ensure_current_device())
+    assert len(found) > CONTEXTS // 2
+    costs = measure_steps(
+        CostTable(tmp_path / "costs.json"),
+        found,
+        Timing(rounds=1, calls=5),
+        values={"vector_size": 200},
+    )
+    assert len(costs) == len(found) and all(c.exact for c in costs.values())
 
 
 @pytest.mark.supported_devices("npu2")

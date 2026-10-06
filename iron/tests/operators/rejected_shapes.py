@@ -77,6 +77,21 @@ def test_transfer_size_not_dividing_a_bounded_row_is_rejected():
     assert copy().resolved(from_name("npu2")).tile_size == G * D
 
 
+def test_channels_not_dividing_the_shared_run_are_rejected():
+    """The channels split the run both sides' innermost axes hold a whole
+    number of: 6-wide rows into a flat output share runs of 6, which 4
+    channels cannot split alike.
+    """
+    with pytest.raises(ValueError, match="common run of 6"):
+        Copy(
+            src=TensorAccessPattern.full((8, 6)),
+            dst=TensorAccessPattern.full((48,)),
+            input_buffer_size=48,
+            num_channels=4,
+            tile_size=12,
+        )  # every tunable given
+
+
 # Shapes whose M*N is divisible by every factor while one per-dimension quotient is not
 # a whole number of tiles. Without the guard these reach the transfer as sizes
 # [8, 0, 256, 32]. compatible() runs at resolved(), so that is where the refusal lands.

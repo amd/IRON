@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import inspect
 import math
 from collections.abc import Mapping
@@ -750,6 +751,12 @@ class Operator(metaclass=_OperatorMeta):
             elif isinstance(v, float):
                 # repr() round-trips; a symbol takes neither '.' nor '-'.
                 v = repr(v).replace(".", "p").replace("-", "n").replace("+", "")
+            elif isinstance(v, tuple) and all(
+                isinstance(x, TensorAccessPattern) for x in v
+            ):
+                # A gather's rows, one pattern each: too many to spell out.
+                digest = hashlib.sha256(repr(v).encode()).hexdigest()[:8]
+                v = f"{len(v)}p{digest}"
             elif isinstance(v, (list, tuple)):
                 v = "x".join(str(x) for x in v)
             elif isinstance(v, TensorAccessPattern):

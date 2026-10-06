@@ -58,12 +58,36 @@ def test_widths_are_the_settable_per_tunables(npu2):
     }
 
 
-def test_variants_halve_down_to_one_column(npu2):
+def test_variants_range_over_every_width_the_shims_allow(npu2):
     found = variants(ElementwiseAdd(size=SIZE, tile_size=TILE), npu2)
-    assert [dict(v.widths)["num_aie_columns"] for v in found] == [8, 4, 2, 1]
-    # Two inputs per column in, one out.
-    assert [(v.mm2s, v.s2mm) for v in found] == [(16, 8), (8, 4), (4, 2), (2, 1)]
-    assert len({v.key for v in found}) == 4
+    widths = [
+        (w["num_aie_columns"], w["num_channels"])
+        for w in map(dict, (v.widths for v in found))
+    ]
+    # The default first; none past the 16 MM2S channels of the shim row.
+    assert widths == [
+        (8, 1),
+        (4, 2),
+        (4, 1),
+        (2, 4),
+        (2, 2),
+        (2, 1),
+        (1, 8),
+        (1, 4),
+        (1, 2),
+        (1, 1),
+    ]
+    # Two inputs per stream in, one out.
+    assert all(
+        (v.mm2s, v.s2mm) == (2 * c * k, c * k) for v, (c, k) in zip(found, widths)
+    )
+    assert len({v.key for v in found}) == len(found)
+
+
+def test_variants_widen_a_default_its_resolution_keeps_narrow(npu2):
+    found = variants(ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=2), npu2)
+    assert dict(found[0].widths)["num_aie_columns"] == 2
+    assert {dict(v.widths)["num_aie_columns"] for v in found[1:]} == {8, 4, 2, 1}
 
 
 def test_a_narrowed_operator_keeps_its_fixed_fields():

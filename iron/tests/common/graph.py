@@ -779,6 +779,27 @@ def test_words_with_an_offset_share_by_ratio_and_offset(npu2):
             assert mine[shared.get(w.symbol, w.symbol)] == w({"p": p})
 
 
+def test_the_reference_writes_a_given_output_of_an_operator_that_returns_one(npu2):
+    """GEMM's reference takes its inputs and returns its result; given an
+    output, the graph's reference writes that result into it.
+    """
+
+    class Into(iron.Graph):
+        def body(self, x, a, b):
+            y = ElementwiseAdd(x, x)
+            GEMM(a, b, y[:256])
+            return y
+
+    rng = np.random.default_rng(0)
+    x = rng.integers(-4, 4, (512, 256)).astype(bfloat16)
+    a = rng.integers(-2, 2, (256, 256)).astype(bfloat16)
+    b = rng.integers(-2, 2, (256, 256)).astype(bfloat16)
+    y = np.asarray(Into().reference(x, a, b))
+    f = np.float32
+    np.testing.assert_array_equal(y[:256], (a.astype(f) @ b.astype(f)).astype(bfloat16))
+    np.testing.assert_array_equal(y[256:], x[256:] * 2)
+
+
 def test_the_reference_computes_the_expressions(npu2):
     """The reference runs the body on numbers: ``p + 1`` is the row the
     copy writes, as the device's offset word is.

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import itertools
 import math
 from collections.abc import Hashable, Iterable, Mapping
@@ -529,7 +530,14 @@ class _ReferenceTracer(Tracer):
             op = target
             values = self._split_values(cls, kwargs)
         values = {k: v for k, v in values.items() if v is not None}
-        result = op.reference(*tensors, **values)
+        # A reference that takes no output returns its result, which lands in
+        # the given output below.
+        positional = [
+            p
+            for p in inspect.signature(op.reference).parameters.values()
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+        result = op.reference(*tensors[: max(n_in, len(positional))], **values)
         # Shaped as Tracer._record shapes a flat output.
         outs = [b for b in op.buffers if b.direction is Direction.OUT]
         fresh = len(tensors) == n_in and len(outs) == 1
