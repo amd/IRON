@@ -181,6 +181,14 @@ def test_annotated_member_is_rejected():
             A: In = In(M)
 
 
+def test_a_member_hiding_the_operators_own_attribute_is_rejected():
+    with pytest.raises(TypeError, match="hides Operator.values"):
+
+        class Bad(Operator):
+            n: int = param()
+            values = In(n)
+
+
 def test_float_scratchpad_is_rejected():
     with pytest.raises(TypeError, match="floating point"):
         Scratchpad(np.float32)

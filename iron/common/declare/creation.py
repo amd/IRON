@@ -57,6 +57,14 @@ def declare(cls: type) -> None:
                 f"{cls.__name__}.{name}: members are declared without an "
                 f"annotation; annotating one turns it into a constructor argument"
             )
+        if not isinstance(value, _Member):
+            continue
+        base = next((b for b in cls.__mro__[1:] if name in vars(b)), None)
+        if base is not None and not isinstance(vars(base)[name], _Member):
+            raise TypeError(
+                f"{cls.__name__}.{name} hides {base.__name__}.{name}, which "
+                f"the library reads; name the member otherwise"
+            )
 
     inherited = {
         f.name
