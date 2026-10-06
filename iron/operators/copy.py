@@ -11,8 +11,8 @@ view reaches the copy as ``in_offset``/``out_offset``, an element offset.
 
 import dataclasses
 from dataclasses import field
-from math import gcd, prod
-from typing import Any
+from math import gcd, isqrt, prod
+from typing import Any, ClassVar
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
@@ -73,6 +73,8 @@ class Copy(Operator):
                 id="two_channels_chunked",
             ),
             Case(dict(input_buffer_size=1024, tile_size=256), id="chunked_transfer"),
+            # Left to resolve, a share past a memtile is cut to fit one.
+            Case(dict(input_buffer_size=1 << 19), id="past_one_memtile"),
             Case(_into_slot(0), id="slot0"),
             Case(_into_slot(5), id="slot5"),
             Case(_into_slot(127), id="slot_last"),
@@ -103,7 +105,9 @@ class Copy(Operator):
     # its size is the full extent in the pattern and patched to the call's.
     src_bound: int | None = param(default=None)
     dst_bound: int | None = param(default=None)
-    tile_size: int = auto()  # None: the per-channel share of the pattern
+    tile_size: int = auto()  # None: the per-channel share, cut to object_bytes
+    # A memtile holds 512 KiB; the cap leaves room for every channel placed on one.
+    object_bytes: ClassVar[int] = 64 * 1024
     num_channels: int = auto(1)
     dtype: Any = field(default=bfloat16, repr=False)
 
@@ -137,11 +141,20 @@ class Copy(Operator):
             )
 
     def resolve(self, dev):
-        """The transfer size is the per-channel share of the copy unless
-        given, or under a bound the share of one bounded row.
+        """The transfer size, unless given, is the largest divisor of the
+        per-channel share (under a bound, of one bounded row's share) whose
+        object fits ``object_bytes``.
         """
         share = prod(self.src.sizes) // self.num_channels
-        tile_size = self.tile_size or gcd(share, *self._row_shares())
+        whole = gcd(share, *self._row_shares())
+        cap = self.object_bytes // np.dtype(self.dtype).itemsize
+        tile_size = self.tile_size or max(
+            d
+            for i in range(1, isqrt(whole) + 1)
+            if whole % i == 0
+            for d in (i, whole // i)
+            if d <= cap
+        )
         return dataclasses.replace(self, tile_size=tile_size)
 
     def uses_value(self, name: str) -> bool:
