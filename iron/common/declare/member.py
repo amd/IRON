@@ -31,7 +31,7 @@ import numpy as np
 from aie.utils.compile import NPU_CACHE_HOME
 from ml_dtypes import bfloat16
 
-from .field import _describe, _DimSpec
+from .field import Shape, _DimSpec
 
 if TYPE_CHECKING:
     from typing import Self
@@ -180,7 +180,7 @@ class _Buffer(_Member["BoundBuffer"]):
         broadcast: bool = False,
         when: _DimSpec | None = None,
     ) -> None:
-        self.dims = tuple(dims)
+        self.shape = Shape(tuple(dims))
         self.dtype = dtype
         self.when = when
         self.stream: _Stream | None = None
@@ -204,7 +204,7 @@ class _Buffer(_Member["BoundBuffer"]):
             self.stream.__set_name__(owner, name)
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}({', '.join(_describe(d) for d in self.dims)})"
+        return f"{type(self).__name__}({self.shape})"
 
 
 class In(_Buffer):
@@ -256,9 +256,11 @@ class _Stream(_Member["BoundStream"]):
             raise TypeError(
                 "replicate=True needs per=<dim>: every slot receives the whole buffer"
             )
-        self.dims = tuple(dims)
+        self.shape = Shape(tuple(dims))
         self.dtype = dtype
-        self.per = per
+        self.per = (
+            None if per is None else Shape(per if isinstance(per, tuple) else (per,))
+        )
         self.broadcast = broadcast
         # per= slots that each receive the whole buffer (one fill per slot)
         # rather than a share of it.
@@ -267,7 +269,7 @@ class _Stream(_Member["BoundStream"]):
         self.depth = depth
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}({', '.join(_describe(d) for d in self.dims)})"
+        return f"{type(self).__name__}({self.shape})"
 
 
 class StreamIn(_Stream):

@@ -115,11 +115,12 @@ def test_members_keep_declaration_order_and_names():
 def test_shapes_captured_bare_names_resolve_to_refs():
     # ``M`` and ``num_batches`` were Field objects in the class body; class
     # creation rewrote them to DimRefs on the class.
-    dims = MV.A.dims
+    dims = MV.A.shape.dims
     assert dims[0].ref.name == "num_batches"
     assert dims[1] == MV.M and dims[2] is MV.K
     assert MV.A.stream is not None
-    assert MV.A.stream.dims == (MV.tile_out, MV.K) and MV.A.stream.per == (MV.columns,)
+    assert MV.A.stream.shape.dims == (MV.tile_out, MV.K)
+    assert MV.A.stream.per.dims == (MV.columns,)
 
 
 def test_dataclass_constructor_is_typed_by_real_fields():
@@ -142,7 +143,7 @@ def test_dataclass_constructor_is_typed_by_real_fields():
 
 
 def test_a_tunable_may_name_a_tile_but_not_a_buffer_shape():
-    assert MV.A.stream is not None and MV.A.stream.dims[0] is MV.tile_out
+    assert MV.A.stream is not None and MV.A.stream.shape.dims[0] is MV.tile_out
     with pytest.raises(TypeError, match="host shape may not depend on tuning"):
 
         class Bad(Operator):
@@ -159,7 +160,7 @@ def test_plain_defaulted_field_in_a_shape_is_its_literal():
         n: int = 4
         x = In(n, tile=(n,))
 
-    assert Plain.x.dims == (4,)
+    assert Plain.x.shape.dims == (4,)
     assert Plain(n=8).x.shape == (4,)
 
 

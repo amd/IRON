@@ -119,7 +119,7 @@ def infer(cls, *operand_shapes, outputs=(), **given) -> dict[str, Any]:
 
     for m, shape in pairs:
         shape = tuple(int(s) for s in shape)
-        dims = list(m.dims)
+        dims = list(m.shape.dims)
         at = next((i for i, d in enumerate(dims) if isinstance(d, OptionalDim)), None)
         if at is not None:
             optional = dims.pop(at)
@@ -183,5 +183,5 @@ def infer_kwargs(cls, kwargs) -> dict[str, Any]:
     """
     names = set(cls._param_fields)
     for m in _operands(cls, ("in", "inout", "out")):
-        names.update(d.flag.name for d in m.dims if isinstance(d, Select))
+        names.update(d.flag.name for d in m.shape.dims if isinstance(d, Select))
     return {k: v for k, v in kwargs.items() if k in names}

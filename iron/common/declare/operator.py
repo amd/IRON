@@ -424,7 +424,7 @@ class Operator(metaclass=_OperatorMeta):
         }
         found: dict[str, int | None] = {}
         for stream in self.streams.values():
-            for ref in stream.member.per or ():
+            for ref in stream.member.per.dims if stream.member.per else ():
                 if isinstance(ref, DimRef) and ref.name in settable:
                     found.setdefault(ref.name, settable[ref.name])
         return found

@@ -1,23 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What an instance's member attribute returns, and the resolvers behind it.
+"""What an instance's member attribute returns.
 
 A declaration is class-level and symbolic. Binding it to an instance turns
-every ``DimRef`` into an integer; the
-resolvers at the end of this module do that.
+every ``DimRef`` into an integer (``Shape.resolve``).
 """
 
 from __future__ import annotations
 
-from dataclasses import Field
+import math
 from typing import TYPE_CHECKING, Any, Iterator
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.utils import bfp
 
-from .field import DimRef, OptionalDim, Select
+from .field import DimRef, OptionalDim, Shape
 from .member import Extent, Shim, _Buffer, _Stream, _Value
 
 if TYPE_CHECKING:
@@ -45,9 +44,9 @@ class BoundStream:
         self.buffer: "BoundBuffer | None" = None
         self._handle_slots: list[Any] | None = None
 
-    def _resolve(self, spec) -> int:
+    def _resolve(self, shape: Shape) -> tuple[int, ...]:
         try:
-            return _resolve_dim(spec, self.op)
+            return shape.resolve(self.op)
         except ValueError as e:
             raise ValueError(
                 f"stream {self.name!r}: {e}. Resolve the operator first (resolved(dev))"
@@ -55,20 +54,18 @@ class BoundStream:
 
     @property
     def shape(self) -> tuple[int, ...]:
-        return tuple(self._resolve(d) for d in self.member.dims)
+        return self._resolve(self.member.shape)
 
     @property
     def dtype(self):
-        return _resolve_dtype(self.member.dtype, self.op)
+        dtype = self.member.dtype
+        return dtype.of(self.op) if isinstance(dtype, DimRef) else dtype
 
     @property
     def count(self) -> int:
         if self.member.per is None:
             return 1
-        n = 1
-        for ref in self.member.per:
-            n *= int(self._resolve(ref))
-        return n
+        return math.prod(self._resolve(self.member.per))
 
     @property
     def _handles(self) -> list[Any]:
@@ -178,11 +175,12 @@ class BoundBuffer:
     # unresolved operator must still be usable as a value.
     @property
     def shape(self) -> tuple[int, ...]:
-        return _resolve_shape(self.member.dims, self._op)
+        return self.member.shape.resolve(self._op)
 
     @property
     def dtype(self):
-        return _resolve_dtype(self.member.dtype, self._op)
+        dtype = self.member.dtype
+        return dtype.of(self._op) if isinstance(dtype, DimRef) else dtype
 
     @property
     def elements(self) -> int:
@@ -264,16 +262,16 @@ class BoundBuffer:
     def batch_axes(self) -> int:
         """Leading ``OptionalDim()`` dimensions that are present on this instance."""
         n = 0
-        for d in self.member.dims:
+        for d in self.member.shape.dims:
             if not isinstance(d, OptionalDim):
                 break
-            if _resolve_dim(d.ref, self._op) > 1:
+            if Shape.dim(d.ref, self._op) > 1:
                 n += 1
         return n
 
     def extent_axis(self, extent: Extent) -> int | None:
         """The axis of this operand that ``extent``'s field sizes, or None."""
-        return _axis_of(self.member.dims, extent.field.name, self._op)
+        return self.member.shape.axis_of(extent.field.name, self._op)
 
     def extent_unit(self, axis: int) -> int:
         """The rows along ``axis`` one round-robin unit of this operand holds
@@ -390,97 +388,3 @@ class BoundValue:
 
     def __repr__(self) -> str:
         return f"<{self.kind} {self.name} {np.dtype(self.dtype).name}>"
-
-
-# --------------------------------------------------------------------------
-# Resolution
-# --------------------------------------------------------------------------
-
-
-def _lookup_ref(ref: DimRef, instance) -> Any:
-    """Follow a DimRef from an instance of its class (or a subclass)."""
-    if isinstance(instance, ref.owner):
-        return getattr(instance, ref.name)
-    raise TypeError(
-        f"{ref!r} is not reachable from {type(instance).__name__}: a shape may "
-        f"reference the class's own fields"
-    )
-
-
-def _resolve_dim(spec, instance) -> int:
-    if isinstance(spec, bool):
-        raise TypeError(f"{spec!r} is not a dimension")
-    if isinstance(spec, (int, np.integer)):
-        return int(spec)
-    if isinstance(spec, DimRef):
-        value = _lookup_ref(spec, instance)
-        if value is None:
-            raise ValueError(
-                f"{spec!r} is None; it must be set before the shape can be resolved"
-            )
-        return int(value)
-    if isinstance(spec, Field):
-        # A same-class reference the decorator did not rewrite: resolve by name.
-        return int(getattr(instance, spec.name))
-    raise TypeError(f"cannot resolve {spec!r} as a dimension")
-
-
-def _flag_value(flag, instance) -> bool:
-    if isinstance(flag, DimRef):
-        value = _lookup_ref(flag, instance)
-        if value is None:
-            raise ValueError(
-                f"{flag!r} is None; a Select() on it needs a resolved operator"
-            )
-        return bool(value)
-    if isinstance(flag, Field):
-        return bool(getattr(instance, flag.name))
-    return bool(flag)
-
-
-def _axis_of(dims, field: str, instance) -> int | None:
-    """The axis of the shape ``dims`` resolves to that ``field`` sizes, or None:
-    through the optional dimensions present at this rank and the branch a
-    select takes.
-    """
-    axis = 0
-    for d in dims:
-        if isinstance(d, OptionalDim):
-            if _resolve_dim(d.ref, instance) <= 1:
-                continue  # omitted at this rank
-            d = d.ref
-        if isinstance(d, Select):
-            branch = d.when_true if _flag_value(d.flag, instance) else d.when_false
-            inner = _axis_of(branch, field, instance)
-            if inner is not None:
-                return axis + inner
-            axis += len(_resolve_shape(branch, instance))
-            continue
-        if isinstance(d, DimRef) and d.name == field:
-            return axis
-        axis += 1
-    return None
-
-
-def _resolve_shape(dims, instance) -> tuple[int, ...]:
-    out: list[int] = []
-    for d in dims:
-        if isinstance(d, OptionalDim):
-            n = _resolve_dim(d.ref, instance)
-            if n > 1:
-                out.append(n)
-            continue
-        if isinstance(d, Select):
-            branch = d.when_true if _flag_value(d.flag, instance) else d.when_false
-            out.extend(_resolve_shape(branch, instance))
-            continue
-        out.append(_resolve_dim(d, instance))
-    return tuple(out)
-
-
-def _resolve_dtype(spec, instance):
-    if isinstance(spec, DimRef):
-        return _lookup_ref(spec, instance)
-    if isinstance(spec, Field):
-        return getattr(instance, spec.name)
-    return spec
