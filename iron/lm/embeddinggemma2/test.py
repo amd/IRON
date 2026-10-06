@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""EmbeddingGemma 2's text encoder on the NPU, from the real checkpoint,
+against its float32 oracle: each embedding's cosine to the oracle's, and
+the ranking a query gives two documents.
+"""
+
+import time
+
+import aie.utils as aie_utils
+import numpy as np
+import pytest
+
+from iron.lm.embeddinggemma2.encoder import Encoder
+from iron.lm.testing import requires, weights_dir
+
+DIRECTORY = weights_dir("embeddinggemma-2")
+
+pytestmark = [
+    requires(DIRECTORY / "model.safetensors", DIRECTORY / "tokenizer.json"),
+    pytest.mark.supported_devices("npu2"),
+]
+
+QUERY = "What causes the northern lights?"
+DOCUMENTS = [
+    "The northern lights are caused by charged particles from the sun.",
+    "Photosynthesis converts light energy into chemical energy in plants.",
+]
+# About 370 tokens: the 512-row version.
+LONG = " ".join(
+    f"Paragraph {i}: the aurora borealis appears when solar wind particles collide "
+    "with oxygen and nitrogen atoms in the upper atmosphere, emitting green and red light."
+    for i in range(12)
+)
+
+MIN_COSINE = 0.999
+
+
+@pytest.fixture(scope="module")
+def encoder():
+    yield Encoder(DIRECTORY)
+    if aie_utils.DefaultNPURuntime is not None:
+        aie_utils.DefaultNPURuntime.cleanup()
+
+
+@pytest.fixture(scope="module")
+def oracle(encoder):
+    return encoder.oracle()
+
+
+@pytest.mark.parametrize(
+    "text,task",
+    [(QUERY, "query"), (DOCUMENTS[0], "document"), (LONG, "document")],
+    ids=["query", "document", "long_document"],
+)
+def test_embeddinggemma_2_accuracy(encoder, oracle, text, task, record_property):
+    tokens = encoder.tokens(text, task)
+    got, want = encoder.graph.encode(tokens), oracle(tokens)
+    cosine = float(got @ want)
+    record_property("Cosine", cosine)
+    assert cosine >= MIN_COSINE, cosine
+    np.testing.assert_allclose(np.linalg.norm(got), 1, rtol=2**-7)
+
+
+@pytest.mark.parametrize("dims", [512, 256, 128])
+def test_embeddinggemma_2_truncation(encoder, oracle, dims, record_property):
+    tokens = encoder.tokens(QUERY, "query")
+    got = encoder.graph.encode(tokens, dims)
+    record_property("Norm", float(np.linalg.norm(got)))
+    np.testing.assert_allclose(np.linalg.norm(got), 1, rtol=2**-7)
+    cosine = float(got @ oracle(tokens, dims))
+    record_property("Cosine", cosine)
+    assert cosine >= MIN_COSINE, cosine
+
+
+def test_embeddinggemma_2_ranking(encoder, oracle):
+    query = encoder(QUERY, "query")
+    scores = np.stack([encoder(d, "document") for d in DOCUMENTS]) @ query
+    want = np.stack(
+        [oracle(encoder.tokens(d, "document")) for d in DOCUMENTS]
+    ) @ oracle(encoder.tokens(QUERY, "query"))
+    assert scores[0] > scores[1]
+    # Measured: 0.0019 and 0.0025 below the oracle's 0.871 and 0.604.
+    np.testing.assert_allclose(scores, want, atol=5e-3)
+
+
+@pytest.mark.bench
+@pytest.mark.parametrize("text", [QUERY, LONG], ids=["query", "long_document"])
+def test_embeddinggemma_2_latency(encoder, text, record_property):
+    tokens = encoder.tokens(text, "document")
+    encoder.graph.encode(tokens)
+    times = []
+    for _ in range(10):
+        t = time.perf_counter()
+        encoder.graph.encode(tokens)
+        times.append(time.perf_counter() - t)
+    record_property("Latency", float(np.median(times)) * 1e6)
