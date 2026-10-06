@@ -77,6 +77,22 @@ def test_transfer_size_not_dividing_a_bounded_row_is_rejected():
     assert copy().resolved(from_name("npu2")).tile_size == G * D
 
 
+def test_channels_splitting_unlike_innermost_axes_are_rejected():
+    """Each channel takes its share of every pattern's innermost axis, so a
+    (16, 8, 64) source read transposed into a flat output would put the
+    channels' halves of each 64-wide row in the output's two flat halves.
+    """
+    src = TensorAccessPattern((16, 8, 64), 0, [8, 16, 64], [64, 512, 1])
+    with pytest.raises(ValueError, match="one innermost extent"):
+        Copy(
+            src=src,
+            dst=TensorAccessPattern.full((8192,)),
+            input_buffer_size=8192,
+            num_channels=2,
+            tile_size=1024,
+        )  # every tunable given
+
+
 # Shapes whose M*N is divisible by every factor while one per-dimension quotient is not
 # a whole number of tiles. Without the guard these reach the transfer as sizes
 # [8, 0, 256, 32]. compatible() runs at resolved(), so that is where the refusal lands.

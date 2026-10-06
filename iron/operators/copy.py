@@ -112,13 +112,13 @@ class Copy(Operator):
         ),
         repr=False,
     )
-    # Gathered, the output is rows as wide as a piece's innermost axis, so
-    # the channels split both sides alike.
+    # The output is rows as wide as the source's innermost axis, so the
+    # channels split both sides alike.
     dst: TensorAccessPattern | tuple[TensorAccessPattern, ...] = param(
         default=lambda op: TensorAccessPattern.full(
-            (op.output_buffer_size // op.src[0].sizes[-1], op.src[0].sizes[-1])
-            if isinstance(op.src, tuple)
-            else (op.output_buffer_size,)
+            (op.output_buffer_size // op.src.sizes[-1], op.src.sizes[-1])
+            if isinstance(op.src, TensorAccessPattern)
+            else (op.output_buffer_size // op.src[0].sizes[-1], op.src[0].sizes[-1])
         )
     )
     # The axis of each pattern a graph bounds per call (``x[:n]`` on a view):
@@ -214,6 +214,12 @@ class Copy(Operator):
 
     def compatible(self) -> None:
         channels = self.num_channels
+        inner = {tap.sizes[-1] for walk in self.walks() for tap in walk}
+        if channels > 1 and len(inner) > 1:
+            raise ValueError(
+                f"the {channels} channels split each pattern's innermost axis, "
+                f"so every pattern needs one innermost extent, not {sorted(inner)}"
+            )
         for walk in self.walks():
             for tap in walk:
                 if tap.sizes[-1] % channels:
