@@ -19,20 +19,11 @@ from .bd import BdLimits
 
 
 class Sequence:
-    """The runtime sequence of one operator, opened by the library.
+    """The runtime sequence of one operator: its ``sequence(rt)`` override, or
+    the one derived from the declarations.
 
-    ``fill``/``drain`` take an operand's lane (or the operand, for a
-    one-lane stream) and
-    a buffer, a slice of one (``op.A``, ``op.A[:, r0:r1, :]``) or a
-    ``TensorAccessPattern`` over it, and issue it as one transfer in the
-    ``TaskGroup`` given as ``group=``. What goes through it is the
-    operator's ``sequence(rt)`` override, or the one derived from the
-    declarations.
-
-    A pattern is issued as it is: the compiler splits one a buffer
-    descriptor cannot hold (``aie-decompose-large-dma-bd``), and a per-call
-    offset patches every piece. One whose size is patched per call must fit
-    a descriptor as given, so it is built to (``BdLimits``).
+    ``fill``/``drain`` take an operand's lane (or a one-lane operand) and a
+    buffer, a slice of one or ``(buffer, TensorAccessPattern)``.
     """
 
     def __init__(
@@ -48,9 +39,6 @@ class Sequence:
         self.barriers = barriers
 
     def run(self) -> None:
-        """The transfers: the operator's override, else the one derived from
-        the declarations.
-        """
         if self.op.has_sequence_override():
             self.op.sequence(self)
             return
@@ -66,10 +54,8 @@ class Sequence:
     def plan(
         self, buf: BoundBuffer
     ) -> list[tuple[Any, TensorAccessPattern, dict | None]]:
-        """The derived transfers of one operand, ``(slot, tap, size_by)``
-        each: the declared split across its lanes, or the round-robin one
-        with its patched dimension under a bound. An override that keeps the
-        derived movement for some operands issues them from here.
+        """The derived ``(slot, tap, size_by)`` transfers of one operand:
+        ``split``, or ``round_robin`` under a bound.
         """
         if not buf.streamed:
             raise ValueError(
@@ -92,12 +78,8 @@ class Sequence:
 
     @staticmethod
     def split(buffer: BoundBuffer) -> list[tuple[Lane, TensorAccessPattern]]:
-        """How ``buffer`` moves through its stream: ``[(lane, tap), ...]``.
-
-        A single-lane or broadcast stream takes the whole buffer in one linear
-        transfer. A ``per=`` stream splits the buffer's first non-batch axis
-        across its lanes, lane ``i`` taking the ``i``-th block of rows out of
-        every leading index.
+        """``[(lane, tap), ...]``: the whole buffer for a one-lane or broadcast
+        stream, else the first non-batch axis in one block per lane.
         """
         count = buffer.count
         if count == 1:
@@ -117,15 +99,11 @@ class Sequence:
     def round_robin(
         buffer: BoundBuffer, axis: int
     ) -> list[tuple[Lane, TensorAccessPattern, int]]:
-        """How ``buffer`` moves through its stream when ``axis`` is bounded per
-        call: ``[(lane, tap, dim), ...]``, ``dim`` the descriptor dimension a
-        call patches with the tiles per lane.
+        """``[(lane, tap, dim), ...]`` with ``axis`` bounded per call, ``dim``
+        the descriptor dimension a call patches.
 
-        The tiles along ``axis`` go round-robin over the lanes: lane ``k`` takes
-        tiles ``k, k + lanes, k + 2*lanes, ...``, so every lane has one fixed
-        offset, one fixed stride and the one patched count, on D2. An axis
-        before it iterates; a tile is a run split over D1 and D0. The
-        descriptor is built for the full extent; a call shortens it.
+        Lane ``k`` takes tiles ``k, k + lanes, ...``, so each lane has a fixed
+        offset and stride and one patched count.
         """
         shape, dtype = buffer.shape, buffer.dtype
         count = buffer.count
@@ -165,8 +143,6 @@ class Sequence:
                 out.append((buffer.lane(s), tap, 1))
         return out
 
-    # -- transfers ---------------------------------------------------------
-
     def fill(
         self,
         stream,
@@ -178,14 +154,14 @@ class Sequence:
         size_by=None,
         managed=True,
     ):
-        """Fill ``stream`` from ``source``. ``offset_by`` moves the transfer's
-        base address by a per-call value; ``size_by`` (``{dim: value}``)
-        patches the descriptor's size on those dimensions per call, the
-        outermost being 0. Both take scratchpad-kind values.
+        """Fill ``stream`` from ``source``.
 
-        ``managed=False`` hands the transfer's queue slot and descriptors to
-        the compiler, which frees them once a later wait proves it done; it
-        joins no group, and only a ``wait`` one returns a token.
+        Args:
+            offset_by: A per-call value moving the base address.
+            size_by: ``{dim: value}``, a per-call size of one descriptor
+                dimension (0 the outermost).
+            managed: False hands the queue slot and descriptors to the
+                compiler, which frees them after a later wait; joins no group.
         """
         return self._transfer(
             "fill", stream, source, group, wait, offset_by, size_by, managed
@@ -234,9 +210,7 @@ class Sequence:
             if group is not None:
                 raise ValueError("an unmanaged transfer joins no group")
             common = dict(wait=wait, managed=False)
-        # A per-call size lands in one descriptor's length, so the pattern
-        # must fit one; a per-call offset patches every piece the compiler
-        # splits a pattern into.
+        # A per-call size lands in one descriptor's length; an offset patches every split piece.
         if sizes_by and not BdLimits.of(self.op.dev, 0, 0).fits(tap, buffer.dtype):
             raise ValueError(
                 f"{type(self.op).__name__}.{buffer.name}: {tap} moves by a per-call "
@@ -247,9 +221,6 @@ class Sequence:
         if not dynamic:
             length = {}
             if sizes_by:
-                # The word bounds the descriptor's length, so it patches the
-                # outermost dimension the descriptor walks: every one inside
-                # it moves whole, every one outside it but the iteration is 1.
                 ((dim, value),) = sizes_by.items()
                 sizes, _ = BdLimits.slots(tap.sizes, tap.strides)
                 if dim == 0 or prod(sizes[1:dim]) != 1:
@@ -268,9 +239,6 @@ class Sequence:
                 **length,
                 **common,
             )
-        # The dispatch-time form: the same pattern with the per-call scalars
-        # in place of the constants, regenerated per call; the descriptor's
-        # length is the product mlir-aie takes of them.
         sizes, strides = BdLimits.slots(tap.sizes, tap.strides)
         for dim, value in sizes_by.items():
             sizes[dim] = value.ssa
@@ -288,7 +256,6 @@ class Sequence:
         )
 
     def _sizes_by(self, size_by) -> dict[int, BoundValue]:
-        """The checked ``{dim: value}`` of a per-call size."""
         if not size_by:
             return {}
         if len(size_by) > 1:
@@ -334,10 +301,7 @@ class Sequence:
     def _resolve(
         self, what, stream
     ) -> tuple[BoundBuffer, TensorAccessPattern, BoundValue | None]:
-        """``(buffer, tap, offset_by)`` of what a transfer moves: a buffer, a
-        slice of one, ``(buffer, tap)``, or a tap alone on an operand's own
-        stream.
-        """
+        """``(buffer, tap, offset_by)`` of what a transfer moves."""
         if isinstance(what, TensorAccessPattern):
             return self._lane(stream).buffer, what, None
         if isinstance(what, BoundBuffer):
@@ -357,16 +321,13 @@ class Sequence:
         )
 
     def data(self, buffer: BoundBuffer):
-        """The runtime-sequence argument for ``buffer`` (for hand-rolled transfers)."""
         return self._rt_data[buffer.name]
 
     def preamble(self, **values) -> None:
         """Residents, then barriers, then the parameter sync, before any DMA.
 
-        The build runs it ahead of the sequence unless the operator sets
-        ``own_preamble``; such a sequence calls it itself, where and as often
-        as it needs, and may override resident values by name for that
-        writing (a slab of a larger dispatch, say).
+        An ``own_preamble`` operator's sequence calls it itself, ``values``
+        overriding residents by name.
         """
         op = self.op
         residents = op.residents
@@ -387,13 +348,10 @@ class Sequence:
                 )
             for buf, index in res.targets:
                 writes.setdefault(id(buf), (buf, {}))[1][index] = values[name]
-        # One buffer at a time, its words in order: the order the hand-written
-        # sequences wrote, so a converted operator's instruction stream matches.
         for buf, words in writes.values():
             for index in sorted(words):
                 buf[index] = words[index]
-        # A core-read value on an image without a scratchpad: written from the
-        # sequence's per-call scalar, after the residents, before the barriers.
+        # Without a scratchpad, a core-read value is written from the per-call scalar.
         for value in op.values:
             for buf, index in value.targets:
                 if value.ssa is None:

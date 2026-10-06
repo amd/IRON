@@ -29,10 +29,8 @@ SHIM_ADDRESS_ALIGNMENT = 4
 
 
 class ArgumentSizes(NamedTuple):
-    """Bytes of each runtime-sequence argument of a fused image, in argument order.
-
-    ``feedback`` is ``None`` for an image that declares no feedback buffer; the
-    argument then does not exist, and the image takes the first three alone.
+    """Bytes of each runtime-sequence argument of a fused image, in argument
+    order; ``feedback`` is ``None`` where the image takes no such argument.
     """
 
     input: int
@@ -41,9 +39,7 @@ class ArgumentSizes(NamedTuple):
     feedback: int | None = None
 
     def arguments(self) -> dict[str, int]:
-        """The arguments the runtime sequence takes: size by kind, in order, so
-        a kind's argument index is its position.
-        """
+        """Size by kind, in argument order."""
         sizes = self._asdict()
         if self.feedback is None:
             del sizes["feedback"]
@@ -51,9 +47,7 @@ class ArgumentSizes(NamedTuple):
 
 
 def _memref_bytes(memref_type: ir.MemRefType) -> int:
-    """Bytes a runtime-sequence argument of ``memref_type`` spans (a block-float
-    element counts its packed block).
-    """
+    """Bytes a runtime-sequence argument of ``memref_type`` spans."""
     dtype = mlir_type_to_np_dtype(memref_type.element_type)
     if dtype is None:
         raise TypeError(f"no host dtype for the elements of {memref_type}")
@@ -61,9 +55,8 @@ def _memref_bytes(memref_type: ir.MemRefType) -> int:
 
 
 class GeneratedDesign(NamedTuple):
-    """A design's module as a fusion takes it apart: its one device, and the
-    scratchpad parameters it declares at module scope (symbol -> type). The
-    module is held so that the ops taken from it stay alive.
+    """A design's module taken apart: its one device and its module-scope
+    scratchpad parameters (symbol -> type). The module keeps the ops alive.
     """
 
     module: ir.Module
@@ -72,22 +65,9 @@ class GeneratedDesign(NamedTuple):
 
 
 def generate(design: OperatorDesign) -> GeneratedDesign:
-    """``design``'s module, generated as a child of a fusion, taken apart.
-
-    ``_iron_full_elf`` makes a design's runtime sequence load its own PDI,
-    because on that path no xclbin configures the device. Exactly one
-    program in a fused build needs that, and it is not the children: the
-    fusion inlines each child's device and drives PDI switching itself
-    (``Fusion.needs_reset``). Generated inside ``compile()`` without
-    this, every child also emits a ``load_pdi`` and the two schemes fight:
-    the build succeeds, the ELF links, and the device hangs at dispatch with
-    ERT_CMD_STATE_TIMEOUT.
-
-    ``aiex.scratchpad_parameter`` ops are emitted at module scope, above
-    the device: the scratchpad is one hardware resource shared by every PDI
-    in a runlist, and the verifier on ``aiex.read_scratchpad_parameter``
-    requires the declaration visible there.
-    """
+    """``design``'s module, generated as a child of a fusion, taken apart."""
+    # The fusion drives PDI loading itself; a child that also loads its own
+    # links fine and hangs at dispatch (ERT_CMD_STATE_TIMEOUT).
     with compile_context(_iron_full_elf=False):
         module = design.build()
     if isinstance(module, str):
@@ -109,9 +89,7 @@ def generate(design: OperatorDesign) -> GeneratedDesign:
 
 
 def parameters_preamble(parameters: Mapping[str, ir.Type]) -> str:
-    """Module-scope declarations of ``parameters``, as text a device's text
-    is parsed after.
-    """
+    """Module-scope declarations of ``parameters``, as text."""
     return "\n".join(
         f"  aiex.scratchpad_parameter @{name} : {param_type}"
         for name, param_type in parameters.items()
@@ -121,21 +99,10 @@ def parameters_preamble(parameters: Mapping[str, ir.Type]) -> str:
 class Fusion:
     """An operator sequence's designs, fused into one module.
 
-    Each design is one device, named for what it is
-    (``OperatorDesign.name``) rather than where it sits in the sequence,
-    so one design is one device text whichever graph it is fused into and at
-    whatever step: aiecc's device cache keys on that text. Designs whose
-    names agree generate the same device and are fused as one.
-
-    ``seq.coresident`` packs designs into one device each
-    (``coresidence``): consecutive steps in one pack then share its
-    configure point. Groups of operators name the packs; an
-    ``AdjacentPacking`` is resolved by ``text``, against the
-    designs' text.
-
-    ``seq``'s buffer layout (``subbuffer_layout``, ``buffer_sizes``,
-    ``slice_info``) must already be set. ``text`` is the generator
-    ``CompilableDesign`` runs, ``identity`` what it is keyed on.
+    Each device is named for its design, not its step, so its text is the
+    same in every graph and aiecc's device cache hits. ``seq.coresident``
+    packs designs into one device each. ``seq``'s buffer layout must already
+    be set.
     """
 
     RESET_DEVICE = "reset_device"
@@ -166,12 +133,8 @@ class Fusion:
 
     @property
     def identity(self) -> str:
-        """What the fused text is a function of, without generating it: each
-        design's recipe (``CompilableDesign.recipe_hash``), the runlist over them,
-        the buffer layout, the scratchpad words symbols share and the
-        packing (a policy is its own identity: what it packs is a function
-        of the designs and the runlist). A hit then costs a hash rather than
-        a fusion.
+        """What ``text()`` is a function of, so a cache hit costs a hash
+        rather than a fusion.
         """
         h = hashlib.sha256()
         for name, design in self.designs.items():
@@ -207,16 +170,11 @@ class Fusion:
     def text(self) -> str:
         """The fused module: every design's device, and a main device whose
         runtime sequence runs them in runlist order.
-
-        ``shared_words`` renames design symbols onto the scratchpad word they
-        share (``iron.common.graph.compiled._words``): each reference in a
-        device is rewritten and the word declared once.
         """
         runlist = self.runlist
         subbuffer_layout = self.subbuffer_layout
         slice_info = self.slice_info
         shared = self.shared_words
-        # A reference is ``@symbol`` ending where the symbol does.
         shared_ref = (
             re.compile(
                 "@("
@@ -318,11 +276,7 @@ class Fusion:
             # Create the main device -- this contains the runtime sequence calling into the other devices
             @aie.device(device_ty)
             def main():
-                # Each argument is a flat run of bytes; a buffer in one is a
-                # view of the type its sub-design declares, at the buffer's
-                # byte offset, so it keeps its dtype and an offset_parameter
-                # on it is scaled by its own element size.
-                # numpy array types, which runtime_sequence converts to memrefs.
+                # Flat bytes; each buffer is a typed view at its byte offset.
                 arg_types: list[Any] = [
                     np.ndarray[(nbytes,), np.dtype[np.int8]]
                     for nbytes in arguments.values()
@@ -383,10 +337,7 @@ class Fusion:
                                         f"{target_type} ({expected_bytes} bytes), the "
                                         f"layout gives it {length} bytes"
                                     )
-                                # The shim DMA addresses host memory in 32-bit
-                                # words: a descriptor's low address bits are
-                                # dropped, so a misaligned buffer would
-                                # silently move.
+                                # Low address bits are dropped: it would move.
                                 if offset % SHIM_ADDRESS_ALIGNMENT:
                                     raise ValueError(
                                         f"Buffer '{buf_name}' of '{op_name}' starts at "

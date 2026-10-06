@@ -1,32 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The shared elementwise design: N flat buffers in, one of the same size out.
+"""The shared elementwise array: one core per (column, channel), each
+streaming fixed-size lines of every declared operand through its kernel.
 
-One array serves every elementwise kernel IRON ships. It places one core per
-(column, channel), each streaming fixed-size lines in and out. An operator
-declares a flat buffer per stream with the line as its tile, and its
-runtime sequence is derived: the buffer is split evenly across the cores'
-fifos and drained back the same way.
-
-``UnaryElementwise`` and ``BinaryElementwise`` are the two flat
-operand shapes, and ``Rowwise`` a matrix whose rows are the lines, for
-a kernel that reduces over its line (a norm). The array reads whatever
-operands are declared, so an operator with a third input needs no new code
-here.
-
-The core's trip count is a ``Value`` the sequence
-writes before the first transfer, so the array does not depend on the
-extent and one array serves every size. This is
-the one difference from upstream's
-``aie.iron.algorithms.transform_parallel``, which is otherwise the same
-design: it takes the tensor at build time, folds the trip count into the
-core program, and owns the runtime sequence so it can issue the taps. An
-array here returns workers and leaves the sequence to the library, which
-lets several operators fuse into one image.
-
-A concrete operator is one small subclass, naming the kernel each core
-calls:
+A concrete operator is one small subclass naming the kernel:
 
 ```python
 class ReLU(UnaryElementwise):
@@ -34,15 +12,9 @@ class ReLU(UnaryElementwise):
         return eltwise.relu_sized(self.tile_size)
 ```
 
-Kernels come from ``aie.iron.kernels``: its factories return the
-``ExternalFunction`` for a symbol, its source and its argument types, handle
-aie2's LUT tables, and carry the contract the operator is tested by: the
-reference and the tolerance. A core calls the kernel in its contract's
-argument order: the acquired elements, the scalars the factory binds (the
-line length) and the free ones ``scalars()`` supplies (leaky_relu's alpha,
-axpy's factor), so the operator and the kernel agree by construction. A
-field the kernel or its scalars read is declared ``param(..., array=True)``,
-since the array bakes it in.
+A core calls the kernel in its contract's argument order, with the scalars
+the factory binds and those ``scalars()`` supplies. A field either reads is
+``param(..., array=True)``.
 """
 
 from __future__ import annotations
@@ -71,9 +43,7 @@ from .declare import (
 )
 from .testing import Sweep, Testing
 
-# The line an elementwise core streams when nothing else is asked for: small
-# enough to divide any extent a model has, at some cost in DMA efficiency.
-# Call sites that know their extent pass tile_size for performance.
+# Small enough to divide any extent a model has, at some DMA efficiency.
 DEFAULT_TILE = 256
 
 _I32 = np.ndarray[(1,), np.dtype[np.int32]]
@@ -82,22 +52,14 @@ _I32 = np.ndarray[(1,), np.dtype[np.int32]]
 class Elementwise(Operator):
     """The array for an elementwise kernel over lines of ``tile_size`` elements.
 
-    Subclasses declare the operands with the line as their tile, one lane
-    per (column, channel) (see the two below), and implement ``kernel``.
-    ``tile_cap`` is the largest line the kernel holds, so a larger tile is
-    refused rather than split; a line spanning more than one local-memory
-    bank drops the fifo depth to one.
+    Subclasses declare the operands with the line as their tile and
+    implement ``kernel``. ``tile_cap`` is the largest line the kernel holds.
     """
 
-    # Left None, the columns resolve to the most the device's shim budget
-    # allows that give every core whole lines, and the tile to default_tile.
     num_aie_columns: int = auto()
     num_channels: int = auto(1)
     tile_size: int = auto()
 
-    # The lines each core processes: written once per build, before the
-    # first transfer, so the array does not depend on the extent; per call
-    # when a graph bounds the extent (``x[:n]``), read by each core.
     count = Value(
         np.int32,
         derive=lambda op: ceildiv(op.valid_elements, op.cores * op.tile_size),
@@ -140,33 +102,21 @@ class Elementwise(Operator):
 
     @property
     def lines(self) -> int:
-        """How many lines the operands hold; each core streams an equal share."""
         (out,) = self.outputs
         return out.elements // self.tile_size
 
     @property
     def valid_elements(self) -> int:
-        """The elements a call processes: the whole operand, or the bounded
-        extent's worth (the templates read their ``Extent``).
-        """
+        """The elements a call processes, the bounded extent's worth if bound."""
         (out,) = self.outputs
         return out.elements
 
-    # -- the kernel --------------------------------------------------------
-
     def kernel(self) -> ExternalFunction:
-        """The ``ExternalFunction`` each core calls, over one line.
-
-        Usually a factory from ``aie.iron.kernels`` at ``self.tile_size``;
-        an ``ExternalFunction`` with a ``KernelContract`` declares one
-        upstream does not offer.
-        """
+        """The ``ExternalFunction`` each core calls over one line."""
         raise NotImplementedError(f"{type(self).__name__} declares no kernel()")
 
     def scalars(self) -> tuple:
-        """The values of the kernel's free scalar ``Param`` arguments, those its
-        contract leaves unbound, in argument order.
-        """
+        """The kernel's scalar arguments its contract leaves unbound, in order."""
         return ()
 
     def _arguments(
@@ -210,16 +160,10 @@ class Elementwise(Operator):
         return ins + outs, scalars
 
     def tolerance(self) -> Tolerance | None:
-        """The contract of the one kernel every core runs; ``None`` for a
-        kernel declared without one.
-        """
         contract = self.kernel().contract
         return None if contract is None else contract.tolerance
 
     def ops(self) -> int:
-        """The contract's count per call, one per output element unless it
-        states one, over every line.
-        """
         contract = self.kernel().contract
         per_call = None if contract is None else contract.ops_per_call
         return super().ops() if per_call is None else per_call * self.lines
@@ -235,8 +179,6 @@ class Elementwise(Operator):
             )
         (out,) = op.outputs
         _, scalars = op._arguments(op.kernel(), len(inputs), 1)
-        # Views of the operands as the kernel's (calls, n) lines, never copies;
-        # the one pass over the data is the cast, the store's bf16 rounding.
         lines = iter(x.reshape(op.lines, -1, copy=False) for x in inputs)
         y = contract.reference(
             *(
@@ -246,8 +188,6 @@ class Elementwise(Operator):
         )
         y = np.asarray(y).astype(out.host_dtype, copy=False)
         return y.reshape(out.host_shape, copy=False)
-
-    # -- the array ----------------------------------------------------------
 
     def array(self, target) -> list:
         streams = [b for b in self.buffers if b.streamed]
@@ -265,8 +205,6 @@ class Elementwise(Operator):
             return f"{col}" if self.num_channels == 1 else f"{col}_{chan}"
 
         def fifos(stream, name):
-            # A line spanning more than one bank cannot be double-buffered in
-            # what is left of local memory.
             depth = target.fifo_depth(math.prod(stream.tile_shape), stream.dtype)
             return [
                 ObjectFifo(stream.tile, name=f"{name}_{slot(k)}", depth=depth)
@@ -277,8 +215,7 @@ class Elementwise(Operator):
         of_outs = [
             fifos(s, f"out{i}" if len(outs) > 1 else "out") for i, s in enumerate(outs)
         ]
-        # The trip count: written once per build into an RTP, or, when a
-        # graph bounds the extent, a scratchpad word each core reads per call.
+        # A bounded extent makes the trip count a per-call scratchpad word.
         dynamic = self.uses_value("count") and target.image == "elf"
         counts = (
             [self.count.param] * cores
@@ -307,7 +244,6 @@ class Elementwise(Operator):
                 for f in fifos_in + fifos_out:
                     f.release(1)
 
-        # The kernel's contract knows its stack; None is the core's default.
         stack_size = None if kernel.contract is None else kernel.contract.stack_bytes
         workers = [
             Worker(
@@ -329,17 +265,12 @@ class Elementwise(Operator):
         return workers + barriers
 
 
-# --------------------------------------------------------------------------
-# The operand shapes
-# --------------------------------------------------------------------------
-
-
 class UnaryElementwise(Elementwise):
     """A flat buffer in, a flat buffer of the same size out."""
 
     test = Testing(Sweep())
     size: int = param()
-    valid = Extent(size)  # size, or fewer per call: x[:n] in a graph
+    valid = Extent(size)
 
     x = In(
         size,
@@ -358,10 +289,7 @@ class UnaryElementwise(Elementwise):
 
 
 class BinaryElementwise(Elementwise):
-    """Two flat buffers in, one of the same size out. Each core's two input
-    channels halve the columns the shim budget allows, so ``num_channels``
-    stays at one.
-    """
+    """Two flat buffers in, one of the same size out."""
 
     test = Testing(Sweep(channels=None))
     size: int = param()
@@ -390,22 +318,15 @@ class BinaryElementwise(Elementwise):
 
 class Rowwise(Elementwise):
     """``rows`` rows of ``tile_size`` elements in, the same out, one kernel
-    call per row.
-
-    For a kernel that reduces over its line, so the line is the row: it is
-    in the host shape (``rows x tile_size``) and a ``param()`` here rather
-    than the tunable the base declares, since a different line would compute
-    something else.
+    call per row. For a kernel that reduces over its line, so the line is a
+    ``param()``: another line would compute something else.
     """
 
     test = Testing(Sweep(rows=True))
 
     rows: int = param()
-    valid = Extent(rows)  # rows, or fewer per call
-    # Required here, though the base defaults it: every field is keyword-only.
+    valid = Extent(rows)
     tile_size: int = param()
-    # One core by default: a core takes whole rows, and the row count is the
-    # extent. Call sites with many rows spread them over columns.
     num_aie_columns: int = auto(1)
 
     tile_cap: ClassVar[int] = 8192

@@ -1,43 +1,28 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Joint narrowing: each design's width and which designs share a device,
-chosen together from measured costs.
-
-A design at its default width takes as much of the device as its resolution
-gives it -- an elementwise array every shim column -- and two such designs
-cannot share one configuration (``image.coresidence``). Narrowing one
-leaves room for another; it also changes its own step time and what
-configuring it costs. ``JointNarrowing`` picks, for a traced graph,
-each design's width among those its operator declares
-(``Operator.widths``) and a partition of the designs into devices, to
-minimise the modelled time of the runlist:
+"""Joint narrowing: each design's width (``Operator.widths``) and which
+designs share a device, chosen together to minimise the modelled runlist time:
 
     D0 + sum over steps of t_step
        + sum over device entries of (base + sum over its members of load)
        + R if the entries are odd
 
-A device is *entered* at a step whose design is in it when the step before
-is not; entering configures it. ``R`` is the empty configure the parity
-rule adds (``Fusion.needs_reset``). ``t_step`` and
-``load`` are measured per design and width, ``D0``, ``base`` and ``R`` per
-device (``probe``, into a ``CostTable``).
+A device is entered at a step whose design is in it when the step before is
+not; entering configures it. ``R`` is the empty configure the parity rule
+adds (``Fusion.needs_reset``). ``t_step`` and ``load`` are measured per
+design and width, ``D0``, ``base`` and ``R`` per device (``probe``, into a
+``CostTable``).
 
-The model decomposes over devices, bar the parity: a device's cost is its
-entries times its configure plus its members' steps. Only a pack that is
-connected in the runlist's adjacency can save an entry, so the candidates
-are the connected sets of designs; an exact search over partitions into
-them, carrying the parity, finds the cheapest. Whether a pack's widths fit
-is for the placer (``fits``), asked only for the packs a solution uses:
-a pack that does not fit tries its next-cheapest widths, then is dropped,
-and the search reruns.
+Only a pack connected in the runlist's adjacency can save an entry, so the
+candidates are the connected sets of designs, and an exact search over
+partitions into them, carrying the parity, finds the cheapest. The placer
+(``fits``) is asked only about the packs a solution uses; a refused pack
+tries its next-cheapest widths, then is dropped, and the search reruns.
 
-Nothing here names an operator. Candidates come from the width tunables,
-legality from the operator's own resolution, the shim prefilter from the
-declared streams, the fit from the placer, and the costs from measurement.
 A width is a candidate only if its output was measured bit-identical to the
-default width's, so tuning never trades accuracy. A design the table does
-not hold stays at its default width, alone in its device.
+default width's. A design the table does not hold stays at its default
+width, alone in its device.
 """
 
 from __future__ import annotations
@@ -66,24 +51,17 @@ from .trace import TracedGraph
 
 
 def cost_key(op: Operator, dev=None) -> str:
-    """What the cost table keys a design by: its class and its identity
-    (every compared field, resolved for ``dev``, the bound device unless
-    given), as the fused image names it. Sources aside: a table outlives
-    an edit to how a design is generated, so remeasure after one.
+    """A design's class and identity, resolved for ``dev``, as the fused
+    image names it. The key leaves out the sources, so remeasure after
+    editing how a design is generated.
     """
     design = OperatorDesign(op.resolved(dev))
     return f"{type(op).__name__}_{design.identity}"
 
 
-# -- candidates ------------------------------------------------------------
-
-
 @dataclasses.dataclass(frozen=True, eq=False)
 class Variant:
-    """One width of a design: the operator as a graph holds it (unresolved)
-    and resolved, its width tunables, its cost key, and the shim channels
-    its streams take.
-    """
+    """One width of a design, and the shim channels its streams take."""
 
     op: Operator
     resolved: Operator
@@ -159,15 +137,14 @@ def shim_budget(dev) -> tuple[int, int]:
     )
 
 
-# -- the measured costs ----------------------------------------------------
-
-
 @dataclasses.dataclass(frozen=True)
 class StepCost:
-    """One design at one width, measured alone: its time per step while its
-    device is configured; one run of one step less that (``D0 + base + load
-    + R``); and whether its output is bit-identical to the default width's
-    on the same inputs.
+    """One design at one width, measured alone.
+
+    Attributes:
+        t_step_us: Its time per step while its device is configured.
+        alone_us: One run of one step, less `t_step_us`: `D0 + base + load + R`.
+        exact: Its output is bit-identical to the default width's.
     """
 
     t_step_us: float
@@ -181,10 +158,13 @@ class StepCost:
 
 @dataclasses.dataclass(frozen=True)
 class Calibration:
-    """A configure's cost split, measured on one pair of designs: the
-    dispatch ``D0``, the empty reset configure ``R``, the part of a
-    configure no design accounts for (``base``), and the pair's mean
-    configure (``switch``).
+    """A configure's cost split, measured on one pair of designs.
+
+    Attributes:
+        dispatch_us: `D0`.
+        reset_us: `R`, the empty configure.
+        base_us: The part of a configure no design accounts for.
+        switch_us: The pair's mean configure.
     """
 
     dispatch_us: float
@@ -200,11 +180,8 @@ class Calibration:
 class CostTable:
     """Measured step and configure costs for one device, as JSON on disk.
 
-    ``steps`` is keyed by ``cost_key``, ``calibrations`` by the pair of
-    keys they were measured on; the model uses the median of each
-    calibrated figure. The key covers a design's fields, not the code that
-    generates it or the kernels it links, so a table outlives a change to
-    either: remeasure after one.
+    ``steps`` is keyed by ``cost_key``, ``calibrations`` by the pair of keys
+    measured; the model takes the median of each calibrated figure.
     """
 
     def __init__(self, path: Path | str):
@@ -261,14 +238,11 @@ class CostTable:
         return self._calibrated("base_us")
 
     def t_step(self, key: str) -> float:
-        """A measured design's step time; zero for one not measured."""
         cost = self.steps.get(key)
         return 0.0 if cost is None else cost.t_step_us
 
     def load(self, key: str) -> float:
-        """What configuring a measured design adds to a configure; zero for
-        one not measured.
-        """
+        """What configuring a design adds to a configure; 0 if unmeasured."""
         cost = self.steps.get(key)
         if cost is None:
             return 0.0
@@ -277,9 +251,6 @@ class CostTable:
     @staticmethod
     def today() -> str:
         return datetime.date.today().isoformat()
-
-
-# -- the model -------------------------------------------------------------
 
 
 class Runlist:
@@ -322,9 +293,16 @@ def model_us(
     groups: Sequence[Sequence[str]] = (),
     chosen: Mapping[str, str] | None = None,
 ) -> tuple[float, int]:
-    """The model's time for a runlist of design keys, and its configures
-    (the reset included): ``chosen`` maps a design to the key of the width
-    it runs at, ``groups`` lists the designs sharing a device.
+    """The model's time for a runlist of design keys, and its configures.
+
+    Args:
+        table: The measured costs.
+        keys: The runlist's design keys.
+        groups: The designs sharing a device.
+        chosen: Each design's key at the width it runs at.
+
+    Returns:
+        `(time_us, configures)`, the reset included.
     """
     chosen = chosen or {}
     device = {k: i for i, group in enumerate(groups) for k in group}
@@ -350,16 +328,11 @@ def model_us(
     return total, entries
 
 
-# -- the tuner -------------------------------------------------------------
-
-
 @dataclasses.dataclass
 class Tuning:
-    """What ``JointNarrowing`` chose for a graph, and what the model
-    predicts for it and for the graph as traced (``baseline``: default
-    widths, a device per design). ``unmeasured`` are the designs the table
-    did not hold: they stay as traced, and the predictions leave out their
-    steps and loads.
+    """What ``JointNarrowing`` chose, and the model's prediction for it and
+    for the graph as traced (``baseline``). The predictions leave out the
+    ``unmeasured`` designs, which stay as traced.
     """
 
     chosen: dict[str, Variant]  # default key -> the width it runs at
@@ -396,9 +369,7 @@ class Tuning:
         return narrowed, groups
 
     def report(self, names: Mapping[str, str] | None = None) -> str:
-        """What was chosen, one line per design that changed, and the
-        predictions. ``names`` labels a key (its class, say).
-        """
+        """One line per design that changed, then the predictions."""
         names = names or {}
         lines = []
         for key, v in self.chosen.items():
@@ -417,10 +388,8 @@ class Tuning:
 
 @dataclasses.dataclass
 class _Pack:
-    """A candidate device: a connected set of designs (indices into the
-    runlist's order), how often it is entered, and its cheapest widths
-    within the shim budget, cheapest first; ``options[0]`` is the one the
-    search prices it at, and the placer's refusals drop options.
+    """A candidate device: a connected set of designs, its entries, and its
+    cheapest widths within the shim budget; the search prices ``options[0]``.
     """
 
     members: tuple[int, ...]
@@ -445,11 +414,8 @@ def _cheapest(
     budget: tuple[int, int],
     k: int,
 ) -> list[tuple[float, tuple[Variant, ...]]]:
-    """The ``k`` cheapest picks of one ``(cost, variant)`` per member, each
-    member's ranked cheapest first, whose shim channels are within
-    ``budget``; cheapest first. Branch and bound: a partial pick is dropped
-    once its cost plus the cheapest rest cannot beat the k-th found, or its
-    channels plus the fewest the rest can take overrun the budget.
+    """The ``k`` cheapest picks of one variant per member within the shim
+    ``budget``, cheapest first, by branch and bound.
     """
     n = len(ranked)
     rest_cost = [0.0] * (n + 1)
@@ -485,12 +451,15 @@ def _cheapest(
 
 @dataclasses.dataclass(frozen=True)
 class JointNarrowing:
-    """Choose widths and packs for a traced graph from a ``CostTable``.
+    """Choose widths and packs for a traced graph; pass as ``coresident=``
+    to ``Graph.compile``.
 
-    Pass as ``coresident=`` to ``Graph.compile``. ``max_members`` caps a
-    pack; ``fit_attempts`` is how many of a pack's cheapest widths within
-    the shim budget are put to the placer before it is given up.
-    ``fit_cache`` is where the placer's verdicts are kept across processes.
+    Attributes:
+        table: The measured costs.
+        max_members: The most designs in one pack.
+        fit_attempts: How many of a pack's cheapest widths the placer is
+            asked about before the pack is dropped.
+        fit_cache: Where the placer's verdicts persist across processes.
     """
 
     table: CostTable = dataclasses.field(compare=False)
@@ -585,9 +554,7 @@ class JointNarrowing:
         return sum(alone[i][0] for i in pack.members) - pack.cost
 
     def _candidates(self, op: Operator, dev) -> list[Variant]:
-        """The widths the table allows: the default, first, and every
-        narrower one measured exact.
-        """
+        """The default width, then every narrower one measured exact."""
         found = variants(op, dev)
         default = found[0]
         if default.key not in self.table.steps:
@@ -613,8 +580,7 @@ class JointNarrowing:
         budget: tuple[int, int],
     ) -> Iterator[tuple[int, ...]]:
         """Every connected set of two or more measured designs, up to
-        ``max_members``, whose narrowest widths are within the shim budget
-        (a set that is not has no superset that is).
+        ``max_members``, whose narrowest widths are within the shim budget.
         """
         neighbours = runlist.neighbours()
         narrowest = [min(c, key=lambda v: (v.mm2s + v.s2mm, v.key)) for c in candidates]
@@ -651,9 +617,7 @@ class JointNarrowing:
         alone: list[tuple[float, Variant, int]],
         packs: list[_Pack],
     ) -> list[_Pack]:
-        """The cheapest partition into ``packs`` and single designs, exact,
-        with the reset charged when the entries are odd.
-        """
+        """The cheapest partition into ``packs`` and single designs."""
         n = len(runlist.order)
         reset = self.table.reset_us
         by_lowest: dict[int, list[_Pack]] = {}
@@ -706,14 +670,8 @@ class JointNarrowing:
         return fitted[key]
 
     def _fit_record(self, designs: Iterable[OperatorDesign]) -> Path:
-        """The file holding the placer's verdict on a pack of ``designs``:
-        ``fits``, or ``refused:`` and the diagnostic.
-
-        Keyed as a design's build is, on each design's recipe
-        (``CompilableDesign.recipe_hash``), so a verdict is reused exactly
-        when the build it predicts would be. Generating and placing a pack
-        costs about 50 ms, and every process that tunes would otherwise ask
-        again.
+        """The file holding the placer's verdict on ``designs``, keyed on
+        their recipes so a verdict is reused exactly when the build would be.
         """
         h = hashlib.sha256(
             repr(sorted(d.compilable().recipe_hash for d in designs)).encode()

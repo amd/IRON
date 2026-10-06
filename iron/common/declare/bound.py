@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What an instance's member attribute returns.
-
-A declaration is class-level and symbolic. Binding it to an instance turns
-every ``DimRef`` into an integer (``Shape.resolve``).
-"""
+"""A declared member bound to an operator instance, its ``DimRef``s resolved."""
 
 from __future__ import annotations
 
@@ -34,7 +30,6 @@ class Lane:
     index: int = 0
 
     def bind(self, handle) -> None:
-        """Bind the shim end of a fifo to this lane."""
         handles = self.buffer._handles
         if handles[self.index] is not None:
             raise ValueError(f"{self.buffer.name}[{self.index}] is already bound")
@@ -56,7 +51,6 @@ class Lane:
 
     @property
     def shim(self) -> Shim | None:
-        """The declared shim endpoint of this lane, if pinned."""
         via = self.buffer.member.via
         if isinstance(via, Shim):
             return via if self.buffer.count == 1 else None
@@ -83,9 +77,7 @@ class BoundBuffer:
                 f"{self.name}: {e}. Resolve the operator first (resolved(dev))"
             ) from None
 
-    # Resolved on use rather than at construction: a shape, dtype or tile
-    # may depend on a tunable the device fills (flm/gemm's B layout), and an
-    # unresolved operator must still be usable as a value.
+    # Resolved on use: a shape may depend on a tunable the device fills.
     @property
     def shape(self) -> tuple[int, ...]:
         return self.member.shape.resolve(self._op)
@@ -101,20 +93,14 @@ class BoundBuffer:
 
     @property
     def tap(self) -> TensorAccessPattern:
-        """The whole buffer, one linear run."""
         return TensorAccessPattern.full((self.elements,))
 
     @property
     def nbytes(self) -> int:
-        # bfp.itemsize covers ordinary dtypes too, and is the only thing that
-        # reports the 9 bytes a block-float block occupies: the marker class
-        # is not a numpy dtype, so np.dtype() raises on it.
+        # np.dtype() raises on the block-float marker class.
         return self.elements * bfp.itemsize(self.dtype)
 
-    # The host's view. Only block floating point makes the host and the array
-    # disagree on the unit: numpy has no block-float dtype, so the host buffer
-    # is the equivalent run of bytes while the array, the sequence and every
-    # descriptor count blocks.
+    # numpy has no block-float dtype: the host sees bytes where the array counts blocks.
     @property
     def host_shape(self) -> tuple[int, ...]:
         return (self.nbytes,) if bfp.is_bfp(self.dtype) else tuple(self.shape)
@@ -125,20 +111,13 @@ class BoundBuffer:
 
     @property
     def flat_type(self):
-        """The runtime-sequence argument type: the buffer flattened to 1-D.
-
-        In the buffer's own element units, the units its transfers use. A
-        packed operand declared in block-float blocks lowers to a memref of
-        blocks, so a descriptor's offset and length count blocks, as the
-        array and the core do.
+        """The runtime-sequence argument type: the buffer flattened to 1-D, in
+        its own element units (blocks, for block float).
         """
         return np.ndarray[(self.elements,), np.dtype[self.dtype]]
 
-    # -- the stream, for a buffer declared with a tile= --------------------
-
     @property
     def streamed(self) -> bool:
-        """Whether the buffer is its own stream (declared with ``tile=``)."""
         return self.member.tile is not None
 
     def _stream(self) -> _Buffer:
@@ -148,23 +127,21 @@ class BoundBuffer:
 
     @property
     def tile_shape(self) -> tuple[int, ...]:
-        """What one fifo element holds."""
         return self._resolve(self._stream().tile)
 
     @property
     def tile(self):
-        """The fifo element type of this buffer's stream: ``np.ndarray[shape, dtype]``."""
+        """The fifo element type: ``np.ndarray[shape, dtype]``."""
         return np.ndarray[self.tile_shape, np.dtype[self.dtype]]
 
     @property
     def count(self) -> int:
-        """How many lanes (fifos) the stream is replicated over."""
+        """The stream's lanes (fifos)."""
         per = self._stream().per
         return 1 if per is None else math.prod(self._resolve(per))
 
     @property
     def depth(self) -> int:
-        """The declared fifo depth of this buffer's stream."""
         return self._stream().depth
 
     @property
@@ -178,7 +155,6 @@ class BoundBuffer:
         return self._handle_slots
 
     def lane(self, index: int = 0) -> Lane:
-        """One lane of the stream, to bind a fifo's shim end to or fill/drain."""
         if not 0 <= index < self.count:
             raise IndexError(f"{self.name} has {self.count} lanes")
         return Lane(self, index)
@@ -208,13 +184,11 @@ class BoundBuffer:
         return n
 
     def extent_axis(self, extent: Extent) -> int | None:
-        """The axis of this operand that ``extent``'s field sizes, or None."""
         return self.member.shape.axis_of(extent.field.name, self._op)
 
     def extent_unit(self, axis: int) -> int:
-        """The rows along ``axis`` one round-robin unit of this operand holds
-        under a bound: what the operator says (``Operator.extent_unit``),
-        else the stream tile's rows there.
+        """The rows along ``axis`` of one round-robin unit under a bound:
+        ``Operator.extent_unit``, else the stream tile's.
         """
         unit = self._op.extent_unit(self.name)
         if unit is not None:
@@ -225,9 +199,8 @@ class BoundBuffer:
 
     @property
     def bounded(self) -> tuple[Extent, int, "BoundValue"] | None:
-        """``(extent, axis, word)`` when a bound extent sizes an axis of this
-        operand: the extent, the axis, and the per-call word of tiles per
-        lane the derived sequence patches its descriptors with.
+        """``(extent, axis, word)`` when a bound extent sizes an axis, ``word``
+        the per-call tiles per lane.
         """
         op = self._op
         for name in op.bound_extents:
@@ -239,10 +212,8 @@ class BoundBuffer:
         return None
 
     def __getitem__(self, index) -> "BufferView":
-        """A basic slice of this buffer, for ``rt.fill``/``rt.drain`` in an override.
-
-        A slice start may be a ``Scratchpad`` value, in which case the
-        transfer's base address is patched per call.
+        """A basic slice for ``rt.fill``/``rt.drain``; a ``Scratchpad`` start
+        patches the base address per call.
         """
         return BufferView(self, index)
 
@@ -284,7 +255,6 @@ class BufferView:
 
     @property
     def tap(self) -> TensorAccessPattern:
-        """The static part of the slice, over the buffer's shape."""
         return TensorAccessPattern.full(self.buffer.shape)[self.static_index]
 
     def __repr__(self) -> str:
@@ -294,32 +264,26 @@ class BufferView:
 class BoundValue:
     """A value on an operator: per call, or written once per build.
 
-    On a full ELF ``param`` is the upstream ``ScratchpadParameter`` the
-    build creates. On an image without a scratchpad (an xclbin run has none) the
-    value is lowered as a dispatch-time scalar of the sequence: ``param`` is
-    the dispatch parameter, ``ssa`` its live value inside the sequence body,
-    an offset use adds it to the transfer's offset, and a core-read use is a
-    resident the preamble writes from it (``bind``).
+    On a full ELF ``param`` is the ``ScratchpadParameter`` the build creates.
+    On an xclbin (no scratchpad) it is a dispatch-time scalar, ``ssa`` its
+    value in the sequence body.
     """
 
     def __init__(self, member: _Value, owner) -> None:
         self.member = member
         self.name = member.name
         self.dtype = member.dtype
-        self.param: Any = None  # the upstream ScratchpadParameter, set by the build
+        self.param: Any = None
         self.symbol: str | None = None
-        self.ssa = None  # the sequence's scalar, when lowered at dispatch time
+        self.ssa = None
         self.targets: list[tuple[Any, int]] = []
-        # A Value written once per build has a resident's placement.
         self.address = member.address
         self.lock = member.lock
         self.optional = member.optional
         self.derive = member.derive
 
     def bind(self, buffers, index: int = 0) -> None:
-        """Bind to one runtime-parameter buffer, or one per worker; the preamble
-        writes ``[index]`` from the per-call value (an image without a scratchpad).
-        """
+        """Bind to runtime-parameter buffers whose ``[index]`` the preamble writes."""
         if not isinstance(buffers, (list, tuple)):
             buffers = [buffers]
         self.targets.extend((b, index) for b in buffers)

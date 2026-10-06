@@ -231,8 +231,6 @@ class Operator(metaclass=_OperatorMeta):
                     f"other fields make it ({expected!r})"
                 )
 
-    # -- declared surface --------------------------------------------------
-
     def validate(self) -> None:
         """Check the sequence-tier fields on their own. Runs at construction."""
 
@@ -351,8 +349,6 @@ class Operator(metaclass=_OperatorMeta):
     @classmethod
     def has_sequence_override(cls) -> bool:
         return cls.sequence is not Operator.sequence
-
-    # -- library surface ---------------------------------------------------
 
     def value_symbol(self, value: "BoundValue") -> str | None:
         return None
@@ -543,8 +539,6 @@ class Operator(metaclass=_OperatorMeta):
         # Rebound, not updated: replace() hands a copy the same dict.
         self.bound_values = {**self.bound_values, name: bound_to}
 
-    # -- graphs ---------------------------------------------------------
-
     def __call__(self, *args, **kwargs):
         tracer = graph_tracer.get()
         if tracer is None:
@@ -581,8 +575,6 @@ class Operator(metaclass=_OperatorMeta):
             self.__dict__.get("_extent_words", ())
         )
 
-    # -- construction from operand shapes ----------------------------------
-
     @classmethod
     def from_operands(cls, *operand_shapes, **overrides) -> Self:
         """Construct from operand shapes, an optional input's by keyword."""
@@ -591,12 +583,9 @@ class Operator(metaclass=_OperatorMeta):
 
     @classmethod
     def call_operands(cls, args, kwargs) -> tuple[dict[str, Any], list, dict[str, Any]]:
-        """Bind a call's operands to the declared ones, as a signature
-        ``(x, ..., [outputs...], *, weight=None, ...)`` would.
-
-        The positional operands are the required inputs, in declaration
-        order, then any outputs; an optional input (``when=`` a flag) is a
-        keyword, its name, so an output is never taken for it.
+        """Bind a call's operands as ``(x, ..., [outputs...], *, weight=None,
+        ...)`` would: an optional input is a keyword, so an output is never
+        taken for it.
 
         Returns:
             The inputs by name, in declaration order; the outputs; the other
@@ -737,8 +726,6 @@ class Operator(metaclass=_OperatorMeta):
                         f"declared {d}"
                     )
         return bound
-
-    # -- the device and the label ---------------------------------------------
 
     @property
     def dev(self):

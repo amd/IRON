@@ -3,21 +3,12 @@
 
 """Carried values computed on the device, and a loop that never asks the host.
 
-A full-ELF version of a graph with ``Carried`` values ends in an
-``Emit`` step. Every version of the graph shares
-one ``carry`` state, ``(2, carried)`` int32: plane 0 holds the values a call
-started from, plane 1 the elements it computed (the producers write there
-directly). Emit evaluates a program over the two planes into
-
-- the next call's parameter scratchpad image, drained to the run's feedback
-  argument, and
-- plane 0 for the next call.
-
-The program depends on the image the words land in -- which slot is which
-value, and whether it is shifted for a core read -- so it is composed on the
-host once both images are built (``CompiledGraph.emit_to()``), and is data,
-not part of the design. ``CarriedLoop`` binds runs so that each one's
-Emit writes the scratchpad of the next.
+A full-ELF version with ``Carried`` values ends in an ``Emit`` step. The
+versions share one ``carry`` state, ``(2, carried)`` int32: plane 0 the values
+a call started from, plane 1 the elements it computed. Emit evaluates a
+program over the planes into the next call's scratchpad image and plane 0.
+The program depends on the target image's slots, so it is data composed once
+both images are built (``CompiledGraph.emit_to()``).
 """
 
 from __future__ import annotations
@@ -38,7 +29,6 @@ if TYPE_CHECKING:
     from ..image.callable import FullELFRun
     from .compiled import CompiledGraph, Word
 
-# The runlist names of the buffers an Emit step adds.
 CARRY, PROGRAM, IMAGE = "carry", "emit_program", "emit_image"
 
 
@@ -55,11 +45,8 @@ class EmitSite:
 def attach_emit(
     traced: TracedGraph, carried: list[str], carry: State, slots: int
 ) -> EmitSite:
-    """Append an Emit step to ``traced`` for a target of ``slots`` values.
-
-    Each carried element the graph computes is moved into plane 1 of
-    ``carry``: its producer writes there, and nothing else changes for
-    whatever reads it.
+    """Append an Emit step to ``traced`` for a target of ``slots`` values,
+    each computed carried element moved into plane 1 of ``carry``.
     """
     if slots < 1:
         raise ValueError(
@@ -98,7 +85,6 @@ def attach_emit(
 
 
 def _resident(traced: TracedGraph, state: State) -> Handle:
-    """Register ``state`` with the graph, as a held one is."""
     handle = Handle(state.shape, state.dtype, state.name, "state")
     traced.states[id(state)] = (state, handle)
     traced.pinned[handle.name] = handle.nbytes
@@ -106,9 +92,7 @@ def _resident(traced: TracedGraph, state: State) -> Handle:
 
 
 def _move(traced: TracedGraph, handle: Handle, parent: Handle, start: int) -> None:
-    """Make a computed element a slice of ``parent`` at ``start``: the
-    handle, and every other view of its buffer the steps hold.
-    """
+    """Make a computed element, and every view of it, a slice of ``parent``."""
     old = handle.name
     views = [handle] + [h for s in traced.steps for h in s.slots + s.inputs + s.outputs]
     for view in views:
@@ -132,12 +116,8 @@ def compose(
     words: list[Word],
     parameters: list[Parameter],
 ) -> np.ndarray:
-    """The Emit program a version with ``site`` and ``next_values`` runs to
-    start a call of the image with ``words`` and ``parameters``.
-
-    Every word of the target's scratchpad must follow from a carried value:
-    the device knows nothing else, and the host may not write a word the
-    device writes.
+    """The Emit program that starts a call of the image with ``words`` and
+    ``parameters``; every word of it must follow from a carried value.
     """
     plane_of = {name: j for j, name in enumerate(site.carried)}
     if len(parameters) != site.slots:
@@ -149,7 +129,6 @@ def compose(
         raise ValueError(f"scratchpad indices {[p.index for p in parameters]}")
 
     def source(name: str) -> tuple[int, int, int, int]:
-        """(plane, index, scale, bias) of carried ``name``'s next value."""
         nxt = next_values[name]
         if isinstance(nxt, Handle):
             return 1, plane_of[name], 1, 0
@@ -198,13 +177,9 @@ def compose(
 class CarriedLoop:
     """A graph's carried values, looped on the device.
 
-    ``first`` runs once, with inputs and values from the host; then ``body``
-    runs step after step, ``depth`` runs of it in flight. Each run's Emit
-    writes the scratchpad of the run after it, so after ``first`` the host
-    writes nothing: it waits on each step and restarts that run for the step
-    ``depth`` later. ``first`` and ``body`` are full-ELF versions of one
-    graph (they share its arena and its carry), and ``body`` takes no
-    tensor, since nothing would write one between its steps.
+    ``first`` runs once from the host; then ``body`` (taking no tensor) runs
+    with ``depth`` runs in flight, each run's Emit writing the next's
+    scratchpad, so the host only waits and restarts.
     """
 
     def __init__(self, first: CompiledGraph, body: CompiledGraph, depth: int = 2):
@@ -237,26 +212,19 @@ class CarriedLoop:
         self._first.bind_feedback(self._runs[0].scratchpad_alias())
 
     def run(self, steps: int, /, *tensors, **values) -> Iterator[int]:
-        """Run ``first`` on ``tensors`` and ``values``, then ``steps`` steps of
-        ``body``; yield each step's index once it has completed.
-
-        Closing the iterator early waits out the steps in flight.
-        """
+        """``start``, then ``steps``."""
         self.start(*tensors, **values)
         yield from self.steps(steps)
 
     def start(self, *tensors, **values) -> None:
         """Run ``first`` on ``tensors`` and ``values``, and wait for it."""
-        # Nothing stages the body's own call: its weights go up with first's.
         self.body.upload()
         self.first.start(self._first, *tensors, **values)
         self.first.callable.wait(self._first)
 
     def steps(self, steps: int) -> Iterator[int]:
-        """Run ``steps`` steps of ``body`` from the carry ``start()`` left;
-        yield each step's index once it has completed.
-
-        Closing the iterator early waits out the steps in flight.
+        """Run ``steps`` steps of ``body``, yielding each index once complete;
+        closing early waits out the steps in flight.
         """
         in_flight: deque[int] = deque()
         for k in range(min(self.depth, steps)):

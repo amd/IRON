@@ -393,14 +393,12 @@ class FullELFCallable:
 
 
 class StepCallable:
-    """Runs a sequence one runlist step at a time, its buffers shared by name.
+    """Runs a sequence one step at a time, its buffers shared by name: an
+    ``XclbinChain``'s dispatches, or with no image each ``reference()``.
 
-    On an ``XclbinChain`` each step is its own xclbin dispatch, taking the
-    per-call values as dispatch-time scalars; with no image each step is its
-    operator's ``reference()`` on the host. ``compare`` holds each dispatched
-    step to its reference on the inputs the NPU gave it, so the NPU output
-    propagates and each comparison isolates one operator; ``tolerance``, when
-    set, is the gate in place of each step's own.
+    ``compare`` holds each dispatched step to its reference on the NPU's
+    inputs, so each comparison isolates one operator; ``tolerance``, when
+    set, replaces each step's own.
     """
 
     # compare cannot judge a range-relative tolerance element by element.

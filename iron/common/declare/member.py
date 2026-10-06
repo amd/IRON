@@ -1,13 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What an operator declares besides its fields.
-
-Buffers are the host ABI, and an operand declared with a tile is its own
-stream into the array, so direction, dtype and shim binding agree by
-construction. The other members are values no host buffer carries: a
-``Value`` written once per build, or per call when a graph binds it,
-and a ``Scratchpad`` or ``DispatchTime`` written per call.
+"""What an operator declares besides its fields: its buffers (the host ABI,
+each with a tile its own stream) and the scalar values no buffer carries.
 """
 
 from __future__ import annotations
@@ -67,18 +62,12 @@ class Direction(Enum):
 
 
 class _Member(Generic[B]):
-    """Base of everything declared unannotated in an Operator body.
-
-    ``__set_name__`` gives the member its name and the class body gives it
-    its order. On an instance, ``__get__`` returns the bound form built as
-    the class is created (a ``BoundBuffer`` or ``BoundValue``). ``B`` is
-    that type, so a type checker sees ``op.A`` as it.
+    """Base of everything declared unannotated in an Operator body; on an
+    instance it reads as its bound form ``B``.
     """
 
     name: str = ""
     owner: type | None = None
-    # The flag an optional operand is declared when=; None for a member
-    # every instance has.
     when: _DimSpec | None = None
 
     def __set_name__(self, owner: type, name: str) -> None:
@@ -108,20 +97,19 @@ class _Member(Generic[B]):
 class _Buffer(_Member["BoundBuffer"]):
     """A host buffer: shape in extents, a dtype, and the stream it moves through.
 
-    With ``tile=`` the buffer is its own stream into (or out of) the array:
-    ``tile`` is what one fifo element holds, in the units a core reads
-    (its dimensions may be tunables), ``per=`` the field the stream is
-    replicated over (one fifo per column, say), or a tuple of fields whose
-    product is the count (columns x channels), ``depth`` the fifo depth,
-    ``via=`` a pinned shim endpoint. ``broadcast=True`` is one fifo every
-    worker consumes; ``replicate=True`` gives every ``per=`` lane the whole
-    buffer rather than a share of it. Without a tile the buffer is an
-    argument of a sequence written by hand (``Operator.sequence``).
-
-    ``when=`` a boolean ``param()`` makes the operand optional: it, and its
-    stream, exist only on an instance where the field is true. A call gives
-    it by keyword, its name (``RMSNorm(x, weight=w)``), which sets the field
-    (see ``Operator.call_operands``).
+    Args:
+        dims: The host shape.
+        dtype: The element type.
+        tile: What one fifo element holds, in the units a core reads. With
+            one the buffer is its own stream; without one it is an argument
+            of a hand-written `Operator.sequence`.
+        per: The field (or fields, multiplied) the stream is replicated over.
+        depth: The fifo depth.
+        via: A pinned shim endpoint.
+        replicate: Every `per=` lane gets the whole buffer, not a share.
+        broadcast: One fifo every worker consumes.
+        when: A bool `param()`; the operand and its stream exist only where
+            it is true, and a call giving the operand by keyword sets it.
     """
 
     direction: ClassVar[Direction]
@@ -177,30 +165,21 @@ class Out(_Buffer):
 
 
 class InOut(_Buffer):
-    """A buffer the host fills and the array writes in place: its stream,
-    with ``tile=``, leaves the array, and the sequence writes back only what
-    it drains (a record of the tokens so far, say), leaving the rest as the
-    host gave it. A call takes it as an input and returns it.
+    """A buffer the host fills and the array writes in place; what the
+    stream does not drain stays as the host gave it.
     """
 
     direction = Direction.INOUT
 
 
 def present(member: _Member, flags: Mapping[str, Any]) -> bool:
-    """Whether an operand (or its stream) exists under ``flags``, the field
-    values an instance holds or a call gives; a ``when=`` flag left out
-    reads as its default.
-    """
+    """Whether an operand exists under ``flags``; a flag left out is its default."""
     when = member.when
     return when is None or bool(flags.get(when.name, when.default))
 
 
 class ValueSpec:
-    """``Scratchpad[np.int32]``: the annotation of a graph body's per-call parameter.
-
-    ``carried`` marks a value the graph computes for its own next call
-    (``Carried``).
-    """
+    """``Scratchpad[np.int32]``: the annotation of a graph body's per-call parameter."""
 
     __slots__ = ("kind", "dtype", "carried")
 
@@ -217,8 +196,6 @@ class _Value(_Member["BoundValue"]):
 
     kind: ClassVar[str] = ""
     carried: ClassVar[bool] = False
-    # A Value's own: how the host derives it once per build and where a
-    # shipped image places it.
     derive: Callable[[Any], Any] | None = None
     address: int | None = None
     lock: int | None = None
@@ -231,9 +208,7 @@ class _Value(_Member["BoundValue"]):
         return ValueSpec(cls.kind, dtype, cls.carried)
 
     if TYPE_CHECKING:
-        # A graph body's parameter annotated ``Scratchpad[T]`` is the graph's
-        # per-call value (a number in its reference), on which integer
-        # arithmetic is an expression the graph computes per call.
+        # Integer arithmetic on a graph body's per-call parameter.
         def __add__(self, k: int) -> Any: ...
         def __sub__(self, k: int) -> Any: ...
         def __mul__(self, k: int) -> Any: ...
@@ -264,13 +239,10 @@ class Scratchpad(_Value):
 
 
 class Carried(Scratchpad):
-    """A scratchpad value a graph computes for its own next call.
-
-    The graph's body returns the next value last, with
-    ``iron.carry(name=...)``: an integer expression of its values
-    (``position + 1``) or a one-element integer handle it computed (a
-    sampled token). The host writes it only to seed the first call; after
-    that each call's carry is the next's.
+    """A scratchpad value a graph computes for its own next call, returned
+    last with ``iron.carry(name=...)``: an integer expression of its values
+    (``position + 1``) or a one-element handle (a sampled token). The host
+    writes it only to seed the first call.
     """
 
     carried = True
@@ -287,14 +259,11 @@ class DispatchTime(_Value):
 
 
 class Extent(_Value):
-    """A shape field a graph may bound per call.
+    """A ``param()`` shape field a graph may bound per call.
 
-    ``valid = Extent(size)`` reads as ``size`` on an instance until a graph
-    bounds an operand the field sizes (``x[:n]``); from then on it is per
-    call, and so is every ``Value`` whose ``derive`` reads it, which the
-    host evaluates with the call's bound and writes as a word. The image is
-    built for the field's full value, so a bound is at most it. The field is
-    a ``param()``.
+    ``valid = Extent(size)`` reads as ``size`` until a graph bounds an
+    operand the field sizes (``x[:n]``); then it, and every ``Value`` whose
+    ``derive`` reads it, is per call. The image is built for the full value.
     """
 
     kind = "scratchpad"
@@ -324,13 +293,14 @@ class Extent(_Value):
 
 
 class Value(_Value):
-    """A value the array reads: a per-call one when a graph binds it, else
-    written once per build, before the first DMA.
+    """A value the array reads: per call when a graph binds it, else written
+    once per build before the first DMA.
 
-    ``derive`` gives the once-per-build value from the operator (a trip count
-    from the extents); a graph binding a handle to it makes it per-call
-    instead, lowered as a ``Scratchpad`` value is. ``address``/``lock``
-    place it for an image IRON did not build.
+    Args:
+        dtype: An integer type.
+        derive: The once-per-build value, from the operator.
+        address: Where a shipped image reads it.
+        lock: The lock a shipped image waits on for it.
     """
 
     kind = "scratchpad"

@@ -3,29 +3,9 @@
 
 """How a traced graph is packaged: the image and the boundaries.
 
-Two arguments, both optional, and everything else derived and reported:
-
-    net = decode.compile(dev)                          # full ELF on NPU2, per-step xclbin on NPU1
-    net = decode.compile(dev, boundaries=each_step)    # one dispatch per step
-
-The rules, in order: a ``DispatchTime`` value anywhere forces ``xclbin``
-(its sequence is generated per call); NPU1 forces ``xclbin`` (no full-ELF
-dispatch); more than one boundary forces ``xclbin`` (one image, N
-kernels); otherwise ``elf``. Asking for ``elf`` where a rule forbids it is
-an error naming the member, the boundaries or the device.
-
-What the lowering builds today: ``elf`` is the fused ELF, ``xclbin``
-with ``each_step`` is the chained per-operator xclbin, and an xclbin a rule
-forces (NPU1, a ``DispatchTime`` value) takes ``each_step`` when no
-boundaries are given. A fused sequence
-in an xclbin (and dispatches of several steps on it) has no proven
-construction and is refused rather than built wrong; a draft is shelved on
-the branch ``claude/iron-pr215-step5-extras``. An xclbin run has no
-parameter scratchpad (XRT's ``get_ctrl_scratchpad_bo`` serves a module run
-only), so on that image every per-call value is a dispatch-time scalar of
-its kernel: an offset use regenerates the kernel's stream per call, a
-core-read use is written into the array by the sequence (an ``rtp_write``
-of the scalar).
+A ``DispatchTime`` value, NPU1, or more than one boundary forces ``xclbin``,
+one per step; otherwise the image is one full ELF. A fused sequence in an
+xclbin has no proven construction and is refused.
 """
 
 from __future__ import annotations
@@ -58,16 +38,10 @@ class Plan:
 
 
 def full_elf(dev) -> bool:
-    """Whether ``dev`` dispatches a full ELF: by its architecture, so every
-    column variant of a device generation answers as the whole one does.
-    """
-    # NPU1's lack of full-ELF dispatch is inferred from source, not tested on
-    # hardware. IRON's ELF carries .pdi sections, and XRT sends any such ELF
-    # as ERT_START_NPU_PREEMPT_ELF (XRT 2.25 xrt_elf.cpp:1031-1041); the
-    # amdxdna driver refuses that opcode unless the firmware has AIE2_PREEMPT
-    # (2.25 aie2_message.c:1006-1009), which npu1's feature table never lists
-    # (npu1_regs.c:68-72; npu4_regs.c:96 does). To verify: let AIE2 through
-    # here and run a full-ELF test on an npu1 machine.
+    """Whether ``dev``'s architecture dispatches a full ELF."""
+    # Inferred from source, untested on npu1: XRT sends an ELF with .pdi
+    # sections as ERT_START_NPU_PREEMPT_ELF (XRT 2.25 xrt_elf.cpp:1031), which
+    # amdxdna refuses without AIE2_PREEMPT, absent from npu1_regs.c:68-72.
     return dev.arch is AIEArch.AIE2p
 
 
@@ -99,8 +73,7 @@ def plan(dev, traced, boundaries=None, image: str | None = None) -> Plan:
         chosen = image
     reasons = forced or ["one sequence, one configuration set: a full ELF"]
 
-    # A forced xclbin with no boundary choice takes the one xclbin form that
-    # is built; asking for an xclbin outright still names what is missing.
+    # A forced xclbin takes the one xclbin form that is built.
     if chosen == XCLBIN and boundaries is None and forced:
         boundaries = each_step
         reasons = forced + [f"boundaries={each_step}: the xclbin form that is built"]

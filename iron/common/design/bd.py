@@ -17,12 +17,8 @@ from aie.helpers.taplib import TensorAccessPattern
 class BdLimits:
     """What one DMA buffer descriptor holds, on one tile.
 
-    A descriptor has four dimensions, outermost first ``[iteration, d2, d1,
-    d0]``. Whether an access pattern fits one is ``AIEX::verifyStridesWraps``,
-    stated here over the pattern so a design can choose its transfers before
-    it builds them. A pattern that does not fit is split by the compiler
-    (``aie-decompose-large-dma-bd``), a runtime offset patched into every
-    piece; one with a runtime size or repeat must fit as given.
+    ``AIEX::verifyStridesWraps`` over ``[iteration, d2, d1, d0]``, stated over
+    a pattern so a design can choose its transfers before it builds them.
 
     Attributes:
         wrap: The largest ``d0`` (in granules) and ``d1`` (in elements).
@@ -42,7 +38,6 @@ class BdLimits:
 
     @classmethod
     def of(cls, dev, col: int, row: int) -> BdLimits:
-        """The limits of the tile at ``(col, row)`` of ``dev``."""
         return cls(
             wrap=(1 << dev.get_dma_bd_wrap_bits(col, row)) - 1,
             step=1 << dev.get_dma_bd_step_bits(col, row),
@@ -55,11 +50,8 @@ class BdLimits:
     def slots(sizes: Sequence[Any], strides: Sequence[Any]):
         """``sizes`` and ``strides`` padded to a descriptor's four dimensions.
 
-        Unit dimensions go in front, except after a leading re-read (stride
-        0, size above 1): a stride of 0 is only encodable in the iteration
-        dimension, so a re-read stays outermost. More than four dimensions
-        are returned as they are. A size or stride may be a runtime value,
-        which is taken as no re-read.
+        Unit dimensions go in front, except after a leading re-read: a stride
+        of 0 is only encodable in the iteration dimension.
 
         Returns:
             tuple[list, list]: The sizes and strides, outermost first.
@@ -92,12 +84,8 @@ class BdLimits:
         return self.granule_bytes // itemsize
 
     def factor(self, run: int, granule: int = 1) -> tuple[int, int] | None:
-        """A contiguous run of ``run`` elements as ``(d1, d0)``, or None.
-
-        ``d0`` is a whole number of ``granule``-element granules, at most
-        ``wrap`` of them; ``d1`` is at most ``wrap``. With the default granule
-        of one element, ``d0`` is bounded in elements, as ``d1`` is. The
-        largest ``d0`` that divides the run is taken.
+        """A contiguous run as ``(d1, d0)``, the largest ``d0`` of whole
+        granules dividing it, or None.
         """
         largest = self.wrap * granule
         if run <= largest and run % granule == 0:
@@ -108,13 +96,8 @@ class BdLimits:
         return None
 
     def fits(self, tap: TensorAccessPattern, dtype) -> bool:
-        """Whether one descriptor holds ``tap`` over elements of ``dtype``.
-
-        The pattern is taken as the compiler lowers it: in the four
-        dimensions ``shim_dma_single_bd_task`` gives it (``slots``), and,
-        when it does not iterate, with its unit dimensions dropped and a
-        contiguous remainder made one linear transfer
-        (``aie-normalize-dma-bd-dims``).
+        """Whether one descriptor holds ``tap``, as ``slots`` and
+        ``aie-normalize-dma-bd-dims`` lower it.
         """
         itemsize = np.dtype(dtype).itemsize
 

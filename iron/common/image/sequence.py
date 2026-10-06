@@ -39,36 +39,23 @@ class OperatorSequence:
     single dispatch.
 
     Args:
-        dispatch: The mode. ``"auto"`` (default) is ``"fused"`` on NPU2 and
-            ``"separate"`` elsewhere. ``"fused"`` builds one full ELF (NPU2
-            only); ``"separate"`` one xclbin per design, chained, dispatched
-            one step at a time. ``"reference"`` builds nothing and runs each
-            operator's CPU ``reference()``; ``"compare"`` runs the chain and
-            after each step re-runs the reference on the NPU-produced inputs
-            (``StepCallable`` judges each step by its
-            operator's kernel contract).
-        arena: Place the scratch buffers in this shared ``ArenaPlan``
-            rather than a private arena. Only the full ELF addresses its
-            scratch by offset in a buffer it is handed, so only it can share.
-            The reference mode lays the arena out (a plan checkable without
-            an NPU) but runs each buffer on the host by name, so it shares
-            nothing.
-        residents: With ``arena``, the scratch buffers that are residents
-            there, by storage key; every other scratch buffer is a transient.
+        dispatch: ``"auto"`` (``"fused"`` on NPU2, else ``"separate"``),
+            ``"fused"`` (one full ELF), ``"separate"`` (one xclbin per
+            design, a step at a time), ``"reference"`` (each operator's
+            ``reference()`` on the host) or ``"compare"`` (the chain, each
+            step checked against its reference on the NPU's inputs).
+        arena: A shared ``ArenaPlan`` to place the scratch buffers in; only
+            the full ELF addresses scratch by offset, so only it can share.
+        residents: With ``arena``, the scratch buffers resident there, by
+            storage key.
         shared_words: On the full ELF, design symbol -> the scratchpad word
-            it shares with others that always hold the same number
-            (``iron.common.graph.compiled._words``).
-        feedback_args: Buffers the full ELF takes in one more argument, after
-            scratch, which the caller may bind to memory of its own per run
-            (``FullELFRun.bind_feedback``) -- another run's ctrl
-            scratchpad, so a value the device computes becomes that run's
-            per-call value. Laid out back to back from the argument's start,
-            in order; a sequence without any takes no such argument.
+            it shares with others that always hold the same number.
+        feedback_args: Buffers of one more full-ELF argument, after scratch,
+            which a caller may bind per run to another run's ctrl scratchpad
+            (``FullELFRun.bind_feedback``); laid out back to back.
         coresident: Groups of operators whose designs share one device
-            configuration in the full ELF (``coresidence``), so steps
-            moving between them do not reconfigure the array; each must be
-            in the runlist. An ``AdjacentPacking`` packs them itself,
-            asking the placer.
+            configuration in the full ELF, or an ``AdjacentPacking`` that
+            chooses them.
     """
 
     def __init__(
@@ -133,18 +120,12 @@ class OperatorSequence:
                     f"coresident names operators not in the runlist: {strays}"
                 )
             self.coresident = tuple(tuple(group) for group in coresident)
-        # Sharing changes which designs are built, so it belongs in the label
-        # the chain's kernel instances are named from.
+        # The chain's kernel instances are named from this label.
         self.name = name + "_shared" if share_designs else name
         self.input_args = input_args
         self.output_args = output_args
         self.feedback_args = list(feedback_args)
-        # Planned byte offsets per buffer name; None packs the buffers back
-        # to back.
         self.buffer_offsets = buffer_offsets
-        # Pool intermediates whose lifetimes do not overlap. On by default:
-        # the layout is inferred from the runlist, so a caller does not supply
-        # it. Pass False to pack every buffer back to back instead.
         self.plan_scratch = plan_scratch
         self.explicit_buffer_sizes = (
             buffer_sizes or {}
@@ -173,9 +154,7 @@ class OperatorSequence:
 
     @property
     def traced(self) -> bool:
-        """Whether any step's operator is built with a ``trace``: the image
-        then carries one trace buffer, shared by every traced design.
-        """
+        """Whether any step's operator is built with a ``trace``."""
         return any(op.trace is not None for op, *_ in self.runlist)
 
     def unique_operators(self):
@@ -212,12 +191,8 @@ class OperatorSequence:
         return designs, design_of
 
     def infer_buffer_offsets(self):
-        """Byte offsets letting intermediates with disjoint lifetimes overlap.
-
-        Only buffers this sequence both writes and later reads are pooled.
-        Anything the host addresses -- the sequence's own inputs and outputs,
-        and any buffer given an explicit size -- is pinned: its contents
-        outlive the sequence, so it needs a private, stable address.
+        """Byte offsets letting intermediates with disjoint lifetimes overlap;
+        a buffer the host addresses is never pooled.
         """
         sizes, steps = {}, []
         for op, *bufs in self.runlist:
@@ -233,20 +208,15 @@ class OperatorSequence:
         pinned = set(self.input_args) | set(self.output_args)
         pinned |= set(self.feedback_args)
         pinned |= set(self.explicit_buffer_sizes)
-        # A slice is not free to move: it has to sit at its parent's offset
-        # plus its start, and calculate_buffer_layout resolves it that way.
-        # Pooling one would hand it an address unrelated to its parent, which
-        # is silent -- the slice simply reads the wrong memory.
+        # A slice sits at its parent's offset plus its start.
         pinned |= {name for name in sizes if "[" in name}
         ranges = LiveRange.scan(steps, pinned=pinned)
         allocations, _ = Pool(ALIGNMENT).place(ranges, sizes)
         return {name: a.offset for name, a in allocations.items()}
 
     def _place_in_arena(self, sizes: Mapping[str, int]) -> dict[str, Allocation]:
-        """This sequence's scratch buffers placed in the shared arena, once.
-
-        A slice's use is a use of its parent, so a parent only ever reached
-        through slices is live from the first to the last of them.
+        """This sequence's scratch buffers placed in the shared arena, once; a
+        slice's use is a use of its parent.
         """
         if self._arena_layout is not None:
             return self._arena_layout
@@ -334,11 +304,6 @@ class OperatorSequence:
         slice_info = {}  # full_buffer_name -> (base_name, start, end)
 
         def add_buffers(buffer_type, args_list):
-            # Without a plan, buffers pack back to back in declaration order and
-            # every one stays resident for the whole sequence. A plan assigns
-            # offsets from liveness instead, so buffers whose lifetimes do not
-            # overlap share addresses; the arena still has to be large enough
-            # for the highest byte any of them reaches.
             def length_of(arg):
                 if arg in self.explicit_buffer_sizes:
                     # Explicit size specified - this is a parent buffer for slices
@@ -354,7 +319,6 @@ class OperatorSequence:
                 )
                 for arg, a in placed.items():
                     subbuffer_layout[arg] = (buffer_type, a.offset, a.size)
-                # This image's own extent; the arena it runs in may be larger.
                 return max((a.end for a in placed.values()), default=0)
 
             offsets = self.buffer_offsets
@@ -362,11 +326,9 @@ class OperatorSequence:
                 offsets = self.infer_buffer_offsets()
             offsets = offsets or {}
             if buffer_type == "feedback":
-                # Where the caller binds its own memory, a buffer's offset is
-                # part of the contract, so it is never planned.
+                # The caller binds its own memory here: offsets are the contract.
                 offsets = {}
 
-            # Unplanned buffers first, packed back to back, each aligned.
             cursor = end = 0
             planned = []
             for arg in args_list:
@@ -380,11 +342,7 @@ class OperatorSequence:
                 end = cursor + length
                 cursor = Pool(ALIGNMENT).align(end)
 
-            # Then the planned ones, rebased past everything unplanned. A plan
-            # is relative to its own pool and starts at zero, so applying it
-            # directly would drop the first planned buffer on top of the
-            # weights -- an aliasing that is silent, because the arena simply
-            # does not grow.
+            # A plan starts at zero, so it is rebased past the unplanned buffers.
             for arg, length in planned:
                 at = cursor + offsets[arg]
                 subbuffer_layout[arg] = (buffer_type, at, length)
@@ -417,12 +375,9 @@ class OperatorSequence:
         return subbuffer_layout, buffer_sizes, slice_info
 
     def buffer_dtype(self, name: str) -> np.dtype:
-        """The host dtype a named buffer (or slice) is viewed as.
-
-        What the first step naming it declares. A parent reached only
-        through slices takes its slices' dtype when they agree and is bytes
-        when they do not; one no step names stays bf16, as every buffer was
-        before buffers had a dtype of their own.
+        """The host dtype a named buffer (or slice) is viewed as: what the first
+        step naming it declares, else its slices' dtype if they agree (bytes
+        if not), else bf16.
         """
         sliced = set()
         for op, *bufs in self.runlist:
@@ -439,8 +394,6 @@ class OperatorSequence:
         """Settle the mode and lay the buffers out, before anything is built."""
         dev = aie_utils.get_current_device()
         if self.mode is None:
-            # The platform default for a hand-written sequence; a graph goes
-            # through packaging.plan, which also weighs its values and boundaries.
             elf = dev is not None and full_elf(dev)
             self.mode = "fused" if elf else "separate"
             if (self.arena is not None or self.feedback_args) and not elf:
@@ -453,9 +406,8 @@ class OperatorSequence:
                     f"{self.name}: co-residence packs designs into one full-ELF "
                     f"device, which this device does not dispatch"
                 )
-        # Every operator resolved for the device, once, before anything takes
-        # its identity: unique_designs() then sees the tunables as they will be
-        # built, so two operators that describe one array are one design.
+        # Resolved before unique_designs() takes identities, so operators that
+        # resolve alike are one design.
         resolved: dict[int, Operator] = {}
         for op, *_ in self.runlist:
             if id(op) not in resolved:
@@ -465,8 +417,8 @@ class OperatorSequence:
             self.coresident = tuple(
                 tuple(resolved[id(op)] for op in group) for group in self.coresident
             )
-        # After the mode: a sequence that cannot run in its arena must not
-        # have placed anything there.
+        # After the mode check: a sequence that cannot run in its arena must
+        # not place anything there.
         self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
             self.calculate_buffer_layout()
         )
@@ -474,13 +426,8 @@ class OperatorSequence:
         self._image = image() if image is not None else None
 
     def compile(self, record: str = "memory"):
-        """Build the image ahead of time, and record what it consists of.
-
-        ``link()`` is idempotent and ``get_callable()`` still goes through
-        it, so this is the ahead-of-time path: a host with the toolchain and
-        no runtime compiles and hands the image on. ``record="disk"`` also
-        writes the ``Artifacts`` record beside
-        the image.
+        """Build the image ahead of time; ``record="disk"`` also writes its
+        ``Artifacts`` record beside it.
         """
         self.prepare()
         self.link()
@@ -600,8 +547,6 @@ class OperatorSequence:
         return buf_type, offset, length
 
 
-# The modes a sequence can be built in, and the image each builds (None
-# builds nothing).
 _MODES = {
     "fused": FusedImage,
     "separate": XclbinChain,

@@ -19,12 +19,7 @@ import numpy as np
 
 
 class Unresolvable(ValueError):
-    """No legal resolution exists for this operator on this device.
-
-    An expected outcome, not a bug: raised by ``Operator.resolve`` so the
-    caller learns at resolution rather than from a design that compiles and
-    then hangs.
-    """
+    """No legal resolution exists for this operator on this device."""
 
 
 @dataclass(frozen=True)
@@ -60,21 +55,18 @@ def param(
     *, default: Any = MISSING, array: bool = False, repr: bool = True, init: bool = True
 ) -> Any:
     """Declare a compile-time parameter: given by the caller or inferred from
-    the operands, and fixed from then on.
+    the operands.
 
-    A callable ``default`` is computed from the operator at construction,
-    for a parameter its other fields determine when neither the caller nor
-    an operand's shape gives it (``default=lambda op: op.rows * op.repeat``);
-    ``Operator.check_derived`` checks that a value given as
-    well agrees.
+    A field named in an operand's ``tile=``/``per=``/``depth=``, or marked
+    ``array=True``, configures the array; any other rebuilds only the
+    instruction stream.
 
-    A ``param()`` may appear in a shape. Its tier follows from use: a field
-    named in an operand's ``tile=``/``per=``/``depth=`` configures the array,
-    so changing it rebuilds the array; any other field rebuilds only the
-    instruction stream, unless it is marked ``array=True`` because the array
-    reads it though no tile names it (a kernel's epilogue). ``default`` is
-    keyword-only so a type checker sees it; a ``param()`` without one is a
-    required constructor argument.
+    Args:
+        default: The value, or a callable of the operator computing it when
+            neither the caller nor an operand gives it
+            (``default=lambda op: op.rows * op.repeat``). Without one the
+            field is a required constructor argument.
+        array: The array reads the field though no tile names it.
     """
     if callable(default):
         spec, default = Param(array, default), None
@@ -88,35 +80,25 @@ def param(
 def auto(
     default: Any = None, /, *, array: bool = False, repr: bool = True, init: bool = True
 ) -> Any:
-    """Declare a tunable the library resolves for the device when the caller
-    does not: a compile-time value that starts at ``default`` (``None``:
-    ``Operator.resolve`` must fill it) and that
-    ``resolve`` may replace. Annotate it with the resolved type: the field
-    is ``None`` only until resolution, and every hook after it sees the
-    value.
+    """Declare a tunable ``Operator.resolve`` fills for the device when the
+    caller does not.
 
-    An ``auto()`` never appears in a host shape (inference would cycle
-    through resolution); a stream tile may name one. ``init=False`` fixes a
-    subclass's value of an inherited tunable (a kernel that only works with
-    one channel per column).
+    Annotate it with the resolved type. It may name a stream tile but never
+    a host shape, since inference would cycle through resolution.
+    ``init=False`` fixes a subclass's value of an inherited tunable.
+
+    Args:
+        default: The starting value; `None` means `resolve` must fill it.
+        array: The array reads the field though no tile names it.
     """
     return dataclasses.field(
         default=default, repr=repr, init=init, metadata={Tier: Auto(array)}
     )
 
 
-# --------------------------------------------------------------------------
-# Dimension references
-# --------------------------------------------------------------------------
-
-
 class DimRef:
-    """A reference to a ``param()`` or ``auto()`` field of a declared class.
-
-    As a class is created, each field is re-attached to the
-    class as a ``DimRef``, so ``GEMV.K`` names the dimension from
-    outside the class body while ``op.K`` on an instance is the integer. A
-    non-data descriptor: instance attributes take precedence.
+    """A ``param()`` or ``auto()`` field of a declared class: ``GEMV.K`` names
+    the dimension, while ``op.K`` on an instance is the integer.
     """
 
     __slots__ = ("owner", "name", "tier", "default")
@@ -132,8 +114,7 @@ class DimRef:
     def __get__(self, instance, owner=None):
         if instance is None:
             return self
-        # An init=False field is read from the class attribute, which is now
-        # this object: serve its default. Anything else has no value yet.
+        # An init=False field reads the class attribute, which is now this object.
         if self.default is not MISSING:
             return self.default
         raise AttributeError(self.name)
@@ -163,13 +144,11 @@ class DimRef:
 
 @dataclass(frozen=True)
 class OptionalDim:
-    """A dimension that is present only when greater than one.
+    """A dimension present only when greater than one.
 
-    ``In(OptionalDim(num_batches), M, K)`` declares ``(M, K)`` for a single
-    batch and ``(num_batches, M, K)`` otherwise, the convention batched
-    operators use for their host shapes; ``In(rows, OptionalDim(seq), cols)``
-    takes a matrix or a stack of them. Inference reads the rank to tell the
-    two apart, so a declaration has at most one.
+    ``In(OptionalDim(num_batches), M, K)`` is ``(M, K)`` for one batch and
+    ``(num_batches, M, K)`` otherwise. Inference tells them apart by rank, so
+    a shape has at most one.
     """
 
     ref: Any
@@ -177,11 +156,8 @@ class OptionalDim:
 
 @dataclass(frozen=True)
 class Select:
-    """A shape chosen by a flag: ``Select(b_col_maj, (N, K), (K, N))``.
-
-    The flag is a field with a default or one the caller passes explicitly;
-    it is never inferred. The only conditional shapes in the tree are GEMM's
-    layout flags, which transpose a declared shape rather than resize it.
+    """A shape chosen by a flag the caller gives or defaults, never inferred:
+    ``Select(b_col_maj, (N, K), (K, N))``.
     """
 
     flag: Any
@@ -246,12 +222,8 @@ class Shape:
         return Shape(tuple(out))
 
     def check(self, cls: type, member: Any, what: str, *, allow_tunable: bool) -> None:
-        """The shape rule.
-
-        A host buffer's dimension is a ``param()`` field or an integer: never
-        an ``auto()`` (inference would cycle through tuning) and never an
-        expression. A stream's tile dimension may also be an ``auto()``,
-        since tuning chooses the tile and inference never reads a stream.
+        """Check each dimension is a ``param()`` field or an integer, or with
+        ``allow_tunable`` (a stream's tile) also an ``auto()``.
 
         Raises:
             TypeError: A dimension breaks the rule.

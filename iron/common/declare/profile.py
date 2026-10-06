@@ -3,29 +3,10 @@
 
 """Profiles: tunable values for operator shapes, applied as an operator is made.
 
-A ``Profile`` is data: entries that name a class, some of its
-dimensions and values for its tunables. Applied in a ``with`` scope, it fills
-the tunables a call leaves open as the operator is constructed, before
-``Operator.resolve`` sees it, so the precedence is the
-explicit call-site value, then the profile, then the tunable's declared
-default or the value resolution proposes. A tuner writes a profile and a
-graph applies it; operator classes know nothing about profiles.
-
-On disk a profile is JSON, one object per entry holding what ``Profile.add``
-takes: ``"operator"``, the class's name in ``iron.operators``, then its
-dimensions and tunables as keywords:
-
-```json
-{"entries": [
-  {"operator": "GEMV", "M": 2048, "K": 8192, "tile_size_input": 1},
-  {"operator": "MHA", "seq_pad": 2048, "num_pipelines": 8}
-]}
-```
-
-An entry matches on what the call constructs the operator with: its
-keywords and, in a graph, the extents inferred from its operands. A
-dimension whose default follows from another (MHA's ``seq_len``, from the
-``seq_pad`` its shape gives) is not yet known then, so key by the one given.
+A call's own value wins, then the profile's, then ``Operator.resolve``. An
+entry matches on what the call constructs the operator with, so a dimension
+whose default follows from another (MHA's ``seq_len``) is keyed by the one
+given (``seq_pad``).
 """
 
 from __future__ import annotations
@@ -57,22 +38,15 @@ class Entry:
 class Profile:
     """Tunable values for operators, keyed by their shape.
 
-    ``add`` takes a class and keyword fields: its ``param()`` fields
-    select the operators the entry is for (one left out matches any value),
-    its ``auto()`` fields are the values given. Within ``with profile:``, a
-    call that constructs an operator and leaves a tunable open takes it from
-    the most specific entry that matches the class and the dimensions and
-    names that tunable, whether the tunable has a declared default or not; a tunable
-    the call gives is never touched. Two entries of equal specificity that
-    name one tunable for one operator and disagree are an error, raised at
-    that call. A subclass matches its base's entries.
+    Within ``with profile:``, a tunable a call leaves open comes from the
+    most specific entry naming it; entries of equal specificity that
+    disagree raise. A subclass matches its base's entries.
     """
 
     _active: ClassVar[contextvars.ContextVar[Profile | None]] = contextvars.ContextVar(
         "iron.profile", default=None
     )
-    # The tokens of the scopes entered in this context, innermost last: kept
-    # here rather than on the profile, which threads may share.
+    # Per context rather than on the profile, which threads may share.
     _entered: ClassVar[contextvars.ContextVar[tuple[contextvars.Token, ...]]] = (
         contextvars.ContextVar("iron.profile.entered", default=())
     )
@@ -86,7 +60,9 @@ class Profile:
         return cls._active.get()
 
     def add(self, cls: type, **fields: Any) -> None:
-        """Add an entry for ``cls``: dimensions to match and tunables to give."""
+        """Add an entry for ``cls``: ``param()`` fields to match (one left out
+        matches any value) and ``auto()`` fields to give.
+        """
         tiers = {f.name: f.metadata.get(Tier) for f in dataclasses.fields(cls)}
         dims, tunables, unknown = {}, {}, []
         for name, value in fields.items():
@@ -141,9 +117,7 @@ class Profile:
 
     @classmethod
     def load(cls, path: str | Path) -> Profile:
-        """The profile ``save`` wrote to ``path``; each entry is checked
-        as ``add`` checks it.
-        """
+        """The profile ``save`` wrote to ``path``."""
         with open(path) as f:
             data = json.load(f)
         if not isinstance(data, dict) or set(data) != {"entries"}:

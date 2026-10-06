@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The device test harness: draw vectors, run an operator, check and time it.
-
-Everything is numpy, like an operator's ``reference``: a draw becomes the
-device buffer it is handed to, and mlir-aie's ``compare`` judges what comes
-back. How an operator declares the shapes it is tested at is in
-``iron.common.testing``, which imports no pytest.
-"""
+"""The device test harness: draw vectors, run an operator, check and time it."""
 
 from __future__ import annotations
 
@@ -36,18 +30,14 @@ class Vectors:
 
 
 def vectors(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Vectors:
-    """Random inputs for ``op``'s declared buffers, and its reference's outputs.
+    """Random inputs for ``op``'s declared buffers, and ``op.reference()``'s outputs.
 
-    The expected outputs are ``op.reference()`` on the inputs drawn here,
-    not an independent oracle.
-
-    Each ``In`` buffer, in declaration order, is a uniform draw of its declared
-    shape and dtype times ``scale`` (a normal draw for the names in
-    ``normal``, shifted to centre on zero for those in ``centered``; an
-    integer buffer draws uniformly on ``[0, scale]``), or comes from
-    ``given``: an array as it is, or a shape to draw in place of the declared
-    one (an operand the sequence packs, such as flm GEMM's B). The outputs
-    are ``op.reference(*inputs)`` under the declared output names.
+    Args:
+        scale: A uniform draw's scale; an integer buffer draws on ``[0, scale]``.
+        normal: Names drawn normal instead.
+        centered: Names shifted to centre on zero.
+        **given: An array as it is, or a shape to draw in place of the
+            declared one (an operand the sequence packs).
     """
     unknown = set(given) - {b.name for b in op.inputs}
     if unknown:
@@ -60,10 +50,8 @@ def vectors(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Vecto
             inputs[b.name] = value
             continue
         shape = b.host_shape if value is None else tuple(value)
-        # A buffer whose dtype follows tuning (flm GEMM's packed B) has none
-        # until tuned; the unpacked operand a shape override asks for is bf16.
+        # A dtype that follows tuning is None until tuned; the unpacked operand is bf16.
         dtype = np.dtype(bfloat16 if b.dtype is None else b.host_dtype)
-        # ml_dtypes' bfloat16 has no numpy kind of its own: a float, as here.
         if dtype.kind not in "fc" and dtype != bfloat16:
             t = rng.integers(0, int(scale) + 1, shape).astype(dtype)
         else:
@@ -89,17 +77,8 @@ def verify_buffer(
     tolerance: Tolerance,
     bound=None,
 ) -> Verdict:
-    """Judge ``output`` against ``reference`` with mlir-aie's ``compare``.
-
-    The tolerance is the contract of the kernel the operator runs or a
-    ``Tolerance.relative``, say. An output longer than the reference is
-    judged on its leading elements; a shorter one fails as a shape mismatch.
-    A bound tolerance's limit is ``bound``, evaluated on the inputs as
-    ``compare`` takes it, of the output's size or broadcast to its shape.
-
-    Returns:
-        The ``Verdict``: true when the output passes, otherwise carrying the
-        mismatch count, the first bad index and a ``detail`` line.
+    """Judge ``output``'s leading elements against ``reference`` with
+    mlir-aie's ``compare``; ``bound`` is a bound tolerance's limit.
     """
     expected = np.asarray(reference).reshape(-1)
     got = np.asarray(output).reshape(-1)[: len(expected)]
@@ -156,18 +135,12 @@ def run_test(
 ) -> Run:
     """Compile ``operator``, run it on the device, time it, check its outputs.
 
-    ``inputs`` is a ``Vectors``, or the inputs by name with ``outputs``
-    the expected outputs by name (an expected value of ``None`` is not
-    checked); both are consumed in the order of the operator's declared
-    buffers. An ``inout`` buffer is given as an input and checked under that
-    name. The outputs are judged as ``verify_buffer`` judges them, by
-    ``tolerance``; a bound tolerance's limit is its bound on the
-    inputs, which holds for an elementwise kernel's contract whatever shape
-    the operator gives its operands. Latency (the NPU's own time) and effective
-    bandwidth are returned, and handed to ``record`` (a test's pytest
-    ``record_property``, which the root conftest writes to the CSV) with
-    throughput from ``Operator.ops`` for an
-    operator that computes.
+    Args:
+        inputs: A ``Vectors``, or the inputs by name in declaration order (an
+            ``inout`` buffer among them).
+        outputs: The expected outputs by name; None is not checked.
+        record: A test's ``record_property``: latency, bandwidth and, from
+            ``Operator.ops``, throughput.
     """
     if isinstance(inputs, Vectors):
         inputs, outputs = inputs.inputs, inputs.outputs
@@ -181,9 +154,6 @@ def run_test(
     # this function uses, and the operator dispatches through DefaultNPURuntime, which
     # is the matching runtime.
     tensor_class = aie_utils.DEFAULT_TENSOR_CLASS
-    # An inout buffer's expected value is among the outputs, under its name,
-    # but its tensor is the input given: the outputs a buffer is made for
-    # are the others.
     inout = {b.name for b in operator.buffers if b.direction is Direction.INOUT}
     ins = iter(inputs.items())
     outs = iter([(n, v) for n, v in outputs.items() if n not in inout])

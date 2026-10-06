@@ -36,23 +36,19 @@ from .handle import (
 @dataclasses.dataclass
 class TracedStep:
     op: Operator
-    slots: list  # the handle in each of the operator's buffers, in declaration order
-    inputs: list  # handles consumed
-    outputs: list  # handles produced
+    slots: list  # one handle per declared buffer
+    inputs: list
+    outputs: list
 
     @property
     def names(self) -> list:
-        """Buffer names in declaration order, as the runlist uses them."""
         return [h.buffer_name for h in self.slots]
 
 
 @dataclasses.dataclass(frozen=True)
 class Binding:
-    """A per-call value of the graph, bound to one operator's value member.
-
-    ``member`` is the value member the site binds, and ``expression`` what
-    it is written per call: a graph value, scaled and offset (a per-call
-    index on a view is scaled by the axis stride, to elements).
+    """A graph value bound to one operator's value member, written per call
+    as ``expression``.
     """
 
     op: Operator
@@ -61,12 +57,10 @@ class Binding:
 
     @property
     def symbol(self) -> str:
-        """The device symbol the host writes this value through."""
         return device_symbol(self.op, self.member)
 
 
 def _unbounded(h: Handle) -> Handle:
-    """``h`` without its per-call bounds (the same buffer)."""
     if not h.bounds:
         return h
     return Handle(
@@ -92,7 +86,6 @@ def _take_views(cls, operands, kwargs, values):
                 values[f"{param}_valid"] = count
             if h.index_by is not None:
                 values[offset_member] = h.index_by
-            # The bound is the pattern's now: the buffer stands in, plain.
             out.append(_unbounded(h.parent if h.tap is not None else h))
         elif h.tap is not None:
             raise TypeError(
@@ -108,24 +101,22 @@ def _take_views(cls, operands, kwargs, values):
 class TracedGraph:
     """What tracing a graph for given shapes produced.
 
-    ``weights`` and ``states`` are keyed by the identity of the object the
-    function closed over, and hold that object, so the key stays its own.
-    ``carry`` is the next value of each carried value, by name; a handle
-    there is an output buffer too, so the host can read it back.
+    ``weights`` and ``states`` hold the object they are keyed by the
+    identity of, so the key stays its own. ``carry`` is the next value of
+    each carried value; a handle there is an output too.
     """
 
     name: str
     steps: list
-    inputs: list  # Handles, in parameter order
-    outputs: list  # Handles returned, then carried handles not returned
-    values: list  # Values, in parameter order
+    inputs: list
+    outputs: list  # returned, then carried handles not returned
+    values: list
     pinned: dict  # buffer name -> nbytes, for weights, states and slice parents
-    weights: dict[int, tuple[object, Handle]]  # id(tensor) -> (tensor, Handle)
-    states: dict[int, tuple[State, Handle]]  # id(State) -> (State, Handle)
+    weights: dict[int, tuple[object, Handle]]
+    states: dict[int, tuple[State, Handle]]
     bindings: list[Binding]
-    returned: list = dataclasses.field(default_factory=list)  # Handles returned
+    returned: list = dataclasses.field(default_factory=list)
     carry: dict[str, Handle | Affine] = dataclasses.field(default_factory=dict)
-    # Buffers drained to the image's feedback argument (an Emit's image).
     feedback: list[str] = dataclasses.field(default_factory=list)
 
     @property
@@ -134,11 +125,8 @@ class TracedGraph:
 
     @property
     def residents(self) -> dict[str, Hashable]:
-        """Buffer name -> storage key of every weight and state.
-
-        The key is the identity of the tensor or ``State`` closed over:
-        the same in every trace of the function, so each version compiled
-        from it addresses one copy.
+        """Buffer name -> storage key of every weight and state, the same in
+        every trace so each version addresses one copy.
         """
         found: dict[str, Hashable] = {
             h.name: key for key, (_, h) in self.weights.items()
@@ -155,7 +143,6 @@ class TracedGraph:
         return [h.name for h in self.outputs]
 
     def sequence(self, name=None, **kwargs):
-        """The ``OperatorSequence`` this graph lowers to (the image builder)."""
         kwargs.setdefault("buffer_sizes", dict(self.pinned))
         kwargs.setdefault("share_designs", True)
         kwargs.setdefault("feedback_args", list(self.feedback))
@@ -169,9 +156,7 @@ class TracedGraph:
 
     def with_operators(self, replace: Mapping[int, Operator]) -> TracedGraph:
         """This graph with operators swapped, keyed by ``id`` of the one each
-        replaces: same host ABI, another build (a narrower array, say). A
-        binding on a swapped operator moves to the same-named value of its
-        replacement.
+        replaces; a binding moves to the replacement's same-named value.
         """
         steps = [
             dataclasses.replace(s, op=replace.get(id(s.op), s.op)) for s in self.steps
@@ -195,7 +180,6 @@ class TracedGraph:
 
     @property
     def arrays(self) -> list:
-        """One operator per distinct array, in runlist order."""
         seen = {}
         for op in self.operators:
             seen.setdefault(op.array_key(), op)
@@ -205,8 +189,6 @@ class TracedGraph:
 class Tracer:
     """Records operator calls on handles while a graph's body runs."""
 
-    # Whether an operator constructed under it checks its shape (validate(),
-    # compatible()).
     checks = True
 
     def __init__(self, name: str, names: dict[int, str] | None = None):
@@ -215,9 +197,8 @@ class Tracer:
         self.weights: dict[int, tuple[object, Handle]] = {}
         self.states: dict[int, tuple[State, Handle]] = {}
         self.bindings: list[Binding] = []
-        self._bound: dict[int, dict] = {}  # id(op) -> {member: Affine}
+        self._bound: dict[int, dict] = {}
         self._counter = itertools.count()
-        # A name per tensor and state the graph holds, by identity.
         self._names = names or {}
 
     def __enter__(self):
@@ -228,15 +209,9 @@ class Tracer:
         graph_tracer.reset(self._token)
 
     def accepts(self, args) -> bool:
-        """Whether a call on ``args`` is a step: every one an operand."""
         return all(is_operand(a) for a in args)
 
-    # -- operands ---------------------------------------------------------
-
     def viewed(self, x: State | Weight):
-        """What stands for a state or weight viewed inside the graph's body:
-        its handle.
-        """
         return self.operand(x)
 
     def operand(self, x) -> Handle:
@@ -259,23 +234,15 @@ class Tracer:
             return self.weights[key][1]
         raise TypeError(f"{x!r} is not a graph handle, a state, or a tensor")
 
-    # -- calls -------------------------------------------------------------
-
     def call(self, target, args, kwargs):
-        """Record ``target(*args, **kwargs)``.
-
-        ``args`` are the operator's inputs, optionally followed by its
-        outputs (a state it writes into); an optional input is a keyword
-        (``RMSNorm(x, weight=w)``). The other ``kwargs`` are per-call value
-        handles for its value members, and otherwise construction arguments
-        (dimensions, tunables, flags) when ``target`` is a class.
+        """Record ``target(*args, **kwargs)``: inputs, optionally followed by
+        outputs; keywords are optional inputs, per-call value handles, or
+        construction arguments when ``target`` is a class.
         """
         cls = target if isinstance(target, type) else type(target)
         inputs, outputs, kwargs = cls.call_operands(args, kwargs)
         names = list(inputs)
         operands = [self.operand(a) for a in [*inputs.values(), *outputs]]
-        # A keyword whose value is a per-call handle (or an expression of
-        # one) binds a value member.
         values = {
             k: kwargs.pop(k)
             for k in list(kwargs)
@@ -313,9 +280,8 @@ class Tracer:
         return {k: kwargs.pop(k) for k in list(kwargs) if k in names}
 
     def _construct(self, cls, inputs, outputs, kwargs) -> Operator:
-        """``cls`` on ``inputs`` (by name) and ``outputs``: an optional
-        input's flag is set by its presence, as the extents are by the
-        shapes, not by a keyword of the call.
+        """``cls`` on ``inputs`` (by name) and ``outputs``, its extents and
+        optional-input flags inferred from them.
         """
         inferred = cls.infer(
             {name: h.shape for name, h in inputs.items()},
@@ -370,9 +336,8 @@ class Tracer:
                 f"{len(outs)} output(s); got {len(operands)}"
             )
         for h, b in zip(operands, ins + outs):
-            # A buffer takes an operand of another rank with the same count
-            # (a flat buffer, a stack); at the same rank the shapes must agree,
-            # or a transposed weight would pass on its element count.
+            # Another rank matches on the count; the same rank must match the
+            # shape, or a transposed weight would pass.
             shape = tuple(b.shape)
             wrong = (
                 tuple(h.shape) != shape
@@ -389,8 +354,6 @@ class Tracer:
                     f"{type(op).__name__}.{b.name} is {bfp.dtype_name(b.dtype)}; "
                     f"operand {h!r} is {bfp.dtype_name(h.dtype)}"
                 )
-            # Of another rank, the operand is the buffer reshaped: a bound on
-            # its rows is so many more of the buffer's (a flat buffer's elements).
             bounds = (
                 h.bounds if len(h.shape) == len(shape) else _rescale_bounds(h, shape)
             )
@@ -417,20 +380,19 @@ class Tracer:
             elif b.direction is Direction.INOUT:
                 h = next(it)
                 slots.append(h)
-                outputs.append(h)  # in place: the handle given is the result
+                outputs.append(h)
             elif given_outs:
-                slots.append(next(given))  # written where the caller said
+                slots.append(next(given))
             else:
                 shape = b.shape
-                # A flat-declared output (an elementwise operator) keeps the
-                # shape of the operand it is the size of, so a (rows, cols)
-                # activation stays (rows, cols) through SiLU.
+                # A flat output keeps the shape and bounds of the operand it
+                # is the size of: (rows, cols) stays (rows, cols) through SiLU.
                 bounds: dict = {}
                 if len(shape) == 1:
                     like = next((h for h in operands if h.elements == b.elements), None)
                     if like is not None:
                         shape = like.shape
-                        bounds = dict(like.bounds)  # sized by it: bounded like it
+                        bounds = dict(like.bounds)
                 if not bounds:
                     bounds = self._output_bounds(op, b, len(shape))
                 h = Handle(
@@ -448,8 +410,6 @@ class Tracer:
         if not outputs:
             return None
         return outputs[0] if len(outputs) == 1 else tuple(outputs)
-
-    # -- the result ----------------------------------------------------------
 
     def finish(
         self,
@@ -494,28 +454,18 @@ class Tracer:
 
 
 class _ReferenceTracer(Tracer):
-    """Runs each operator's CPU reference on host tensors as the graph is traced.
-
-    Each call becomes ``op.reference(*inputs, *outputs, **values)``: the
-    tensors the graph passed, a state passed as an output as its host tensor
-    (the reference writes it in place, as the device writes the buffer), and
-    the per-call values the site binds, by name, as plain numbers. So a
-    graph's reference models the values too: a cache offset moves the copy,
-    a vector size masks the softmax.
+    """Runs each call as ``op.reference(*inputs, *outputs, **values)`` on host
+    tensors, a state written in place and per-call values as plain numbers.
     """
 
-    # Operators are constructed at the valid rows of a bounded call, which
-    # only their reference() runs at.
+    # Operators are constructed at a bounded call's valid rows, which only
+    # their reference() runs at.
     checks = False
 
     def operand(self, x):
         return x
 
     def viewed(self, x: State | Weight):
-        """A state viewed in the reference: a view of its host tensor that
-        remembers its shape and key (``_HostView``). A weight's is
-        numpy's own view, since nothing writes it.
-        """
         if isinstance(x, Weight):
             return x.array
         if x.host is None:
@@ -545,8 +495,6 @@ class _ReferenceTracer(Tracer):
             patterns.append(pattern)
         n_in = len(inputs)
         if isinstance(target, type):
-            # A per-call value's number goes to the reference, not to
-            # construction.
             values = self._split_values(cls, kwargs)
             shapes = [
                 Handle(t.shape, _tensor_dtype(t), "", "input") if p is None else p
@@ -559,9 +507,7 @@ class _ReferenceTracer(Tracer):
             values = self._split_values(cls, kwargs)
         values = {k: v for k, v in values.items() if v is not None}
         result = op.reference(*tensors, **values)
-        # A flat-declared output the call did not give keeps the shape of the
-        # operand it is the size of, as the traced handle does
-        # (``Tracer._record``): a view, never a copy.
+        # Shaped as Tracer._record shapes a flat output.
         outs = [b for b in op.buffers if b.direction is Direction.OUT]
         fresh = len(tensors) == n_in and len(outs) == 1
         if fresh and result is not None and len(outs[0].shape) == 1:
@@ -570,8 +516,6 @@ class _ReferenceTracer(Tracer):
             )
             if like is not None:
                 result = result.reshape(like.shape, copy=False)
-        # A state written in place keeps its host tensor; a result returned
-        # for a given output lands in it.
         for given in tensors[n_in:]:
             if result is not None and result is not given:
                 given[...] = np.asarray(result).reshape(given.shape)

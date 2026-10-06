@@ -63,10 +63,8 @@ def _store(
     release: Callable[[np.ndarray], None] | None = None,
     piece_bytes: int = UPLOAD_PIECE,
 ) -> None:
-    """Copy ``tensor`` into a buffer view, casting in place.
-
-    ``astype`` first would fault in a whole temporary: 5-50 s for Llama's
-    501 MiB embedding. ``release`` gets each piece once it is in the buffer.
+    """Copy ``tensor`` into a buffer view, casting in place (``astype`` would
+    fault in a whole temporary); ``release`` gets each piece once copied.
     """
     flat = np.asarray(tensor).reshape(-1)
     if release is None:
@@ -167,8 +165,6 @@ class Graph:
     @staticmethod
     def _signature(inputs: list[Handle]) -> Signature:
         return tuple((h.name, h.shape, bfp.dtype_name(h.dtype)) for h in inputs)
-
-    # -- tracing ---------------------------------------------------------------
 
     def names(self) -> dict[int, str]:
         """The path name of each tensor and state the instance holds, by identity."""
@@ -302,8 +298,6 @@ class Graph:
                 _rename(tracer, item, f"out{i}" if len(items) > 1 else "out")
             outputs.append(item)
         return outputs
-
-    # -- compiling and calling -----------------------------------------------------
 
     def compile(
         self,
@@ -510,8 +504,6 @@ class CompiledGraph:
     def is_loaded(self) -> bool:
         return self._callable is not None
 
-    # -- buffers ---------------------------------------------------------------
-
     def _buffer_name(self, x) -> str:
         if isinstance(x, State):
             return self.traced.states[id(x)][1].name
@@ -555,11 +547,7 @@ class CompiledGraph:
         release: Callable[[np.ndarray], None] | None = None,
         piece_bytes: int = UPLOAD_PIECE,
     ) -> None:
-        """Copy every closed-over weight into its buffer, once per storage.
-
-        In an arena ``release`` is the last time a weight is read: a grown
-        arena keeps the device's contents.
-        """
+        """Copy every closed-over weight into its buffer, once per storage."""
         for key, (tensor, handle) in self.traced.weights.items():
             if key not in self._loaded:
                 self._copy_in(handle.name, tensor, release, piece_bytes)
@@ -570,16 +558,11 @@ class CompiledGraph:
         release: Callable[[np.ndarray], None] | None = None,
         piece_bytes: int = UPLOAD_PIECE,
     ) -> CompiledGraph:
-        """Load the image and upload its weights now rather than on first call.
-
-        Loading on first call cost Llama's first prefill 88 ms.
-        """
+        """Load the image and upload its weights now rather than on first call."""
         if not self.is_loaded:
             self._callable = self.sequence.get_callable(self.arena)
         self.upload(release, piece_bytes)
         return self
-
-    # -- calling ---------------------------------------------------------------
 
     def __call__(self, *tensors, **values) -> Any:
         self._stage(tensors, values)
@@ -718,11 +701,8 @@ def _derived_form(op, name: str, counts: Mapping[str, Affine]) -> Affine | None:
 def _words(
     traced: TracedGraph, *, share: bool = False, extents: bool = True
 ) -> tuple[list[Word], dict[str, str]]:
-    """The scratchpad words a call writes, and with ``share`` the symbols sharing one.
-
-    A full ELF has 32 words for its whole image and a bounded prompt binds
-    its row count to every operator, so symbols with one ``Linear`` form
-    share a word.
+    """The scratchpad words a call writes, and with ``share`` the symbols
+    sharing one: a full ELF has 32 words for its whole image.
     """
     dev = aie_utils.get_current_device()
     words: list[Word] = []

@@ -3,29 +3,20 @@
 
 """Measuring what ``narrowing`` trades, on the NPU.
 
-Every figure is the time of one full-ELF run: ``D0`` for the dispatch, a
-configure per device the runlist enters (``base`` plus each member's load),
-the empty reset configure ``R`` when the entries are odd, and each step's
-``t_step``. Two kinds of measurement fill the model:
+A full-ELF run costs ``D0`` (dispatch), a configure per device entered
+(``base`` plus each member's load), the reset configure ``R`` when the
+entries are odd, and each step's ``t_step``.
 
-- ``measure_steps``, per design and width: a sequence running it once
-  and one running it ``repeats`` times. The difference over the extra steps
-  is ``t_step``; the single run less ``t_step`` is ``alone`` = ``D0 + base
-  + load + R``. Each narrower width is also run once on the inputs its
-  default ran on, and is a candidate only if its output is bit-identical.
-- ``calibrate``, once per device on a pair A, B of measured designs:
-  ``A B A B ...`` against ``A A ... B B ...`` (the same steps, 2p configures
-  against 2) gives the mean configure ``(E(A) + E(B)) / 2``; the grouped
-  run less its steps gives ``D0 + E(A) + E(B)``, hence ``D0``; the two
-  ``alone`` figures then give ``R``; and ``[A, B]`` as one pack gives the
-  pack's configure, hence the part of a configure that is not a design's
-  (``base``), as ``E(A) + E(B) - E(pack)``.
+- ``measure_steps``: one run against ``repeats`` runs of a design gives
+  ``t_step`` and ``alone = D0 + base + load + R``. A narrower width is a
+  candidate only if its output is bit-identical to the default's.
+- ``calibrate``, on measured designs A, B: ``A B A B ...`` against
+  ``A A ... B B ...`` gives ``(E(A) + E(B)) / 2``; the grouped run gives
+  ``D0``, the ``alone`` figures ``R``, and ``[A, B]`` packed gives ``base`` as
+  ``E(A) + E(B) - E(pack)``.
 
-A round runs every configuration ``calls`` times, and the figure is the
-median over ``rounds`` of each round's median, the configurations of one
-measurement interleaved. Only the run is timed
-(the callable's ``last_elapsed``), not
-the host syncs around it. Hold the NPU: nothing else may dispatch meanwhile.
+Figures are medians of per-round medians, interleaved; nothing else may
+dispatch meanwhile.
 """
 
 from __future__ import annotations
@@ -68,9 +59,7 @@ def pmode() -> str:
 
 
 def _sample(dtype, nbytes: int, rng: np.random.Generator) -> np.ndarray:
-    """``nbytes`` of data in ``dtype``, as bytes: normal values for a float
-    dtype, small integers otherwise.
-    """
+    """``nbytes`` of normal floats or small integers, as bytes."""
     dtype = np.dtype(dtype)
     if dtype.kind == "f" or dtype.name == "bfloat16":
         n = nbytes // dtype.itemsize
@@ -79,18 +68,16 @@ def _sample(dtype, nbytes: int, rng: np.random.Generator) -> np.ndarray:
 
 
 class Standalone:
-    """A runlist of operators built alone into a full ELF, loaded, with its
-    inputs filled with seeded random data. With ``distinct`` every step runs
-    on buffers of its own, as a graph's steps do: a step repeated on the
-    buffers it just read finds them in whatever cache the SoC keeps, which no
-    graph step reading another layer's weights does. Without it, each
-    operator's steps share its buffers (for steps far larger than any
-    cache, whose copies would not fit the host). ``values`` sets every per-call value an
-    operator drives, by the value's name; the tuner cannot know what a value
-    means, so a design that takes one is measured at what its caller gives.
-    ``inputs`` does the same for input buffers, by buffer name: random bytes
-    are no representative content for a buffer whose values steer the work,
-    such as a draw row's temperature and top-k.
+    """A runlist of operators built alone into a loaded full ELF, its inputs
+    seeded random data.
+
+    Args:
+        distinct: Every step runs on buffers of its own, as a graph's do, so
+            no step finds its inputs in a SoC cache.
+        values: Each per-call value by name: the tuner cannot know what a
+            value means.
+        inputs: Input buffers by name, where random bytes would not be
+            representative (a draw row's temperature and top-k).
     """
 
     def __init__(
@@ -107,7 +94,6 @@ class Standalone:
         firsts = {}
         for k, op in enumerate(self.steps):
             firsts.setdefault(id(op), k)
-        # The buffers step k runs on are slot k's.
         self._slot = [
             k if distinct else firsts[id(op)] for k, op in enumerate(self.steps)
         ]
@@ -188,9 +174,7 @@ class Standalone:
 def time_interleaved(
     runs: Sequence[FullELFCallable | StepCallable], timing: Timing
 ) -> list[float]:
-    """Each loaded image's median of per-round medians, microseconds, of the
-    run alone, interleaved.
-    """
+    """Each loaded image's median of per-round medians, microseconds."""
     for run in runs:
         run()  # warm: first-run setup lands on nobody's figure
     medians: list[list[float]] = [[] for _ in runs]
@@ -204,8 +188,7 @@ def time_interleaved(
     return [statistics.median(m) for m in medians]
 
 
-# A step whose buffers exceed this runs its repeats on one copy of them:
-# nothing of that size stays in a cache, and the copies would not fit.
+# Past this nothing stays in a cache, and the repeats' copies would not fit.
 DISTINCT_BYTES = 256 * 2**20
 
 
@@ -217,10 +200,7 @@ def measure_steps(
     values: Mapping[str, int] | None = None,
     inputs: Mapping[str, np.ndarray] | None = None,
 ) -> dict[str, StepCost]:
-    """Measure every width in ``found`` (a design's ``variants``, the
-    default first) and record each in ``table``. ``values`` and ``inputs``
-    are ``Standalone``'s.
-    """
+    """Measure every width in ``found`` (the default first) into ``table``."""
     mode = pmode()
     distinct = sum(b.nbytes for b in found[0].op.buffers) <= DISTINCT_BYTES
     short = [
@@ -266,9 +246,7 @@ def calibrate(
     pairs: int = 4,
     values: Mapping[str, int] | None = None,
 ) -> Calibration:
-    """Split a configure's cost for two measured designs ``a`` and ``b``
-    (see the module docstring), and record it in ``table``.
-    """
+    """Split a configure's cost over measured designs ``a`` and ``b`` into ``table``."""
     ka, kb = cost_key(a), cost_key(b)
     ta, tb = table.steps[ka].t_step_us, table.steps[kb].t_step_us
     tag = f"{ka}_{kb}"

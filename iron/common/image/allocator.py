@@ -3,44 +3,12 @@
 
 """Static memory planning for a recorded runlist.
 
-A recorded graph names every intermediate it produces, so a model that runs
-the same block 16 times asks for 16 copies of each scratch buffer. Sized for
-Llama-3.2-1B that is over 100 MB of duplicates. Today the model author avoids
-it by hand: reusing one pinned name per scratch slot, everywhere, forever.
-
-That is a register allocator written by hand, so write the allocator instead.
-Two passes over the runlist:
-
-1. ``LiveRange.scan`` -- one linear scan giving each buffer the step
-   interval ``[first_write, last_read]`` it must stay resident for.
-2. ``Pool.place`` -- assign each a byte offset in one pool, letting
-   buffers whose lifetimes do not overlap share addresses.
-
-This is Dynamic Storage Allocation: rectangles of fixed width (lifetime) and
-height (bytes), slid vertically only, packed into a minimum-height strip. It
-is NP-complete (Garey & Johnson, problem SR2; Stockmeyer 1976), and the best
-known general approximation is (2+eps) of peak-liveness (Buchsbaum, Karloff,
-Kenyon, Reingold & Thorup, STOC 2003) -- who also show a family forcing a 25%
-gap, so matching the bound is not always possible.
-
-In practice the simple heuristic is excellent. Greedy-by-size with best-fit
-placement is Algorithm 3 of Pisarchyk & Lee, "Efficient Memory Management for
-Deep Neural Net Inference" (MLSys 2020, arXiv:2001.03288), which they measured
-hitting the lower bound *exactly* on five of six production networks. It is
-what TensorFlow Lite ships (``SimpleMemoryArena::Allocate``) and what
-TorchInductor's pooled planner approximates (``allocate_groups`` sorts
-intermediates largest-first).
-
-Buffers the host addresses by name -- weights, KV caches, the sequence's own
-inputs and outputs -- are *pinned*: they need private, stable addresses, so
-they are never pooled. TorchInductor keeps the same exclusion list in
-``can_reuse``: graph inputs, constants, and explicitly never-reused buffers.
-
-``ArenaPlan`` carries this across images. One graph compiled
-for several input shapes is several images, and one runs at a time, so they
-can share a single scratch arena: *residents* (weights, states) get one
-offset, the same in every image, and each image's *transients* are planned
-around them, free to reuse the bytes of any other image's transients.
+``LiveRange.scan`` gives each buffer the steps it must stay resident for;
+``Pool.place`` gives each a byte offset, sharing bytes between buffers whose
+lifetimes do not overlap (greedy by size, best fit: Algorithm 3 of Pisarchyk
+& Lee, MLSys 2020). ``ArenaPlan`` shares one arena between the images of a
+graph: residents (weights, states) keep one offset in every image, and each
+image's transients are planned around them.
 """
 
 from collections.abc import Hashable, Iterable, Mapping, Sequence
@@ -48,11 +16,8 @@ from dataclasses import dataclass
 
 from aie.utils.hostruntime.tensor_class import COHERENCE_GRANULE
 
-# Where every buffer in an arena starts. The host reconciles a buffer with the
-# device a coherence granule (a cache line) at a time, so two buffers sharing
-# one cannot be synced independently -- XRTTensor.subview refuses such a view.
-# 64 bytes is also the DDR burst the shim DMA issues, so no transfer starts
-# mid-burst.
+# Two buffers sharing a coherence granule cannot be synced independently
+# (XRTTensor.subview refuses such a view); 64 bytes is also the shim's DDR burst.
 ALIGNMENT = max(64, COHERENCE_GRANULE)
 
 
@@ -89,10 +54,8 @@ class LiveRange:
         for name, begin in first_write.items():
             if name in pinned:
                 continue
-            # Read before ever written -> supplied by the host; not ours to pool.
             if first_read.get(name, begin) < begin:
                 continue
-            # Never read again -> an output the host reads back.
             if name not in last_read:
                 continue
             ranges[name] = cls(begin, last_read[name])
@@ -102,13 +65,8 @@ class LiveRange:
     def touching(cls, steps: Steps, names: Iterable[str]) -> dict[str, "LiveRange"]:
         """Each of ``names`` live from the first step that touches it to the last.
 
-        The planning rule for an arena whose host-visible buffers live elsewhere:
-        nothing in ``names`` outlives the run, so none is pinned for being read
-        first or never read. A write nobody reads still needs its bytes for the
-        step that writes it; a read before any write sees whatever was there, and
-        is only kept from being overwritten during its own span. A name no step
-        touches is resident for the whole run -- it has a size but no uses, and
-        the conservative reading of that is "always".
+        For an arena whose host-visible buffers live elsewhere, so nothing in
+        ``names`` is pinned. A name no step touches is live for the whole run.
         """
         wanted = set(names)
         first, last = {}, {}
@@ -126,14 +84,7 @@ class LiveRange:
 
     @staticmethod
     def peak(ranges: Mapping[str, "LiveRange"], sizes: Mapping[str, int]) -> int:
-        """Total bytes simultaneously live at the worst step: the lower bound.
-
-        Known as LOAD in the Dynamic Storage Allocation literature (max weighted
-        clique of the interval graph). No allocator can beat it, and greedy-by-size
-        usually matches it, so it is the number to check a plan against. Computed
-        as a difference array plus prefix sum, as TorchInductor's
-        ``estimate_peak_memory`` does.
-        """
+        """Total bytes simultaneously live at the worst step: the lower bound."""
         if not ranges:
             return 0
         events = []
@@ -168,21 +119,20 @@ class Pool:
         self.alignment = alignment
 
     def align(self, x: int) -> int:
-        """``x`` rounded up to the pool's alignment."""
         return -(-x // self.alignment) * self.alignment
 
     def place(self, ranges, sizes, fixed: Iterable[Allocation] = ()):
-        """Assign pool offsets. Returns ``(allocations, pool_bytes)``.
+        """Assign pool offsets, largest buffer first, each in the tightest gap
+        that clears every placed buffer whose lifetime overlaps its own.
 
-        Greedy by size descending; each buffer takes the lowest offset that clears
-        every already-placed buffer whose lifetime overlaps its own (best fit --
-        the tightest such gap). Buffers with disjoint lifetimes are invisible to
-        one another, and that is exactly where the reuse comes from.
+        Args:
+            ranges: Each buffer's `LiveRange`.
+            sizes: Each buffer's bytes.
+            fixed: Allocations made earlier, occupied at every step.
 
-        Every offset is a multiple of the pool's ``alignment``. ``fixed`` are allocations
-        made earlier that stay where they are and occupy their bytes at every
-        step; nothing is placed over them. ``pool_bytes`` is the highest byte any
-        allocation of this call reaches, zero if there are none.
+        Returns:
+            `(allocations, pool_bytes)`: each buffer's `Allocation`, and the
+            highest byte any of them reaches (0 if there are none).
         """
         fixed = list(fixed)
         placed: list[tuple[Allocation, LiveRange]] = []
@@ -199,10 +149,7 @@ class Pool:
                 gap = ob.offset - cursor
                 if gap >= size and (best_gap is None or gap < best_gap):
                     best, best_gap = cursor, gap
-                # Placed buffers nest, so the skyline is a running max, not an
-                # assignment: a tall buffer can span several short ones. Getting
-                # this wrong is the classic bug -- cf. TFLite's arena planner and
-                # TFLM's GreedyMemoryPlanner, which both take the max here.
+                # A running max: a tall buffer can span several short ones.
                 cursor = max(cursor, self.align(ob.end))
             offset = cursor if best is None else best
             placed.append((Allocation(name, offset, size), rng))
@@ -215,23 +162,11 @@ class Pool:
 class ArenaPlan(Pool):
     """One scratch arena, shared by every image placed in it.
 
-    An image is one compiled version of a graph: the same function traced at
-    another input shape is another image over the same weights and states.
-    Only one image runs at a time, so they can share one arena:
-
-    * A *resident* -- a weight, a state, anything the host addresses by what
-      it is rather than by image -- is keyed by its storage and gets one
-      offset for the life of the arena, the same in every image. It is
-      uploaded once, and a state one image writes is where the next reads it.
-    * A *transient* lives within one run of one image. Transients are planned
-      per image around the residents, and may reuse the bytes of any other
-      image's transients: those are dead whenever this image runs.
-
-    Nothing placed ever moves, because an image bakes its offsets into its
-    instruction stream. So an image added later puts its new residents above
-    everything placed so far -- below, a transient of an earlier image could
-    overwrite them -- and the arena only grows. Offsets are multiples of
-    ``alignment``.
+    A resident (keyed by its storage) has one offset in every image; a
+    transient lives within one run of one image and may reuse another image's
+    transients' bytes. An image bakes its offsets into its instruction
+    stream, so nothing placed moves: a later image's new residents go above
+    everything placed so far, and the arena only grows.
     """
 
     def __init__(self, alignment: int = 64):
@@ -241,12 +176,10 @@ class ArenaPlan(Pool):
 
     @property
     def size(self) -> int:
-        """Bytes the arena needs to hold every image placed so far."""
         return self._size
 
     @property
     def residents(self) -> Mapping[Hashable, Allocation]:
-        """Every resident placed so far, by storage key."""
         return dict(self._residents)
 
     def place_image(
@@ -255,12 +188,15 @@ class ArenaPlan(Pool):
         sizes: Mapping[str, int],
         residents: Mapping[str, Hashable],
     ) -> dict[str, Allocation]:
-        """Place one image's scratch buffers; return each one's allocation.
+        """Place one image's scratch buffers.
 
-        ``sizes`` names every buffer the image keeps in the arena and
-        ``residents`` which of them are residents, by storage key; the rest
-        are transients, live over the steps (``(reads, writes)`` names each)
-        that touch them.
+        Args:
+            steps: The image's `(reads, writes)` per step.
+            sizes: Every buffer the image keeps in the arena.
+            residents: Which of them are residents, by storage key.
+
+        Returns:
+            Each buffer's `Allocation`.
         """
         unknown = set(residents) - set(sizes)
         if unknown:

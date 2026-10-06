@@ -1,38 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Co-residence: several designs' arrays packed into one device configuration.
+"""Co-residence: several designs' arrays merged into one ``aie.device``.
 
-Temporal fusion (``fusion``) gives every design its own ``aie.device`` and
-reconfigures the array between steps that run different designs. Packing
-merges designs into one ``aie.device`` instead: their tiles, fifos and cores
-side by side, each design's runtime sequence kept under its own name, so the
-main sequence configures the pack once and runs (``aiex.run``) any member's
-sequence against it, in any order, any number of times. Dataflow between the
-members still goes through DDR.
-
-Nothing here reads an operator: the merge is over device ops, whatever built
-them. What makes it work is the shape every IRON design already has -- cores
-that loop forever, each round gated by a lock its own sequence sets -- so a
-member's cores idle while another member's sequence runs.
-
-What the merge has to settle:
-
-- symbols: every symbol a member defines at device scope (fifos, buffers,
-  its runtime sequence) is renamed into the member's namespace, uses
-  included. A kernel declaration is not: its symbol is the object's, and
-  the digest prefix ``declare_kernel`` gives it already keeps two kernels
-  apart, so two members calling one kernel share one declaration.
-- pinned tiles: two members naming one physical tile share its ``aie.tile``,
-  unless both put a core or a DMA program on it, which is a conflict.
-  Logical tiles are left to ``aie-place-tiles``, which sees the union.
-- device type: every member is built for the same device.
-
-Whether the union *fits* -- cores, shim channels, routes -- is for the
-placer, the fifo lowering and the router to say, as they would in aiecc;
-``fits`` asks them, and
-``AdjacentPacking`` uses it to pack a runlist without being told what
-goes with what.
+Each member keeps its runtime sequence under its own name, so the main
+sequence configures the pack once and runs any member's sequence against it.
+A member's cores idle on the lock its own sequence sets while another runs;
+dataflow between members still goes through DDR. Whether the union fits is
+for aiecc's placer, fifo lowering and router to say (``fits``).
 """
 
 from __future__ import annotations
@@ -45,19 +20,12 @@ from aie import ir
 from aie.dialects import aie, func
 from aie.passmanager import PassManager
 
-# The runtime sequence a device has when nothing names it otherwise.
 DEFAULT_SEQUENCE = "sequence"
 
-# Ops of which a physical tile carries at most one: two members pinning one
-# of these to the same tile cannot share it.
 _EXCLUSIVE_PER_TILE = ("aie.core", "aie.mem", "aie.memtile_dma", "aie.shim_dma")
 
-# What decides whether a merged device fits: the resource stages of aiecc's
-# own pipeline, in its order (tools/aiecc/IRTransforms.h: placement, then
-# getInputWithAddressesPipeline's fifo lowering and id/address assignment,
-# then routing). The fifo lowering is the whole stateful transform, not its
-# allocate pass alone: allocate on unsplit fifos checks nothing, which is how
-# two designs pinning one shim DMA channel once passed as fitting.
+# aiecc's resource stages, in its order (tools/aiecc/IRTransforms.h). The whole
+# stateful transform, since allocate alone on unsplit fifos checks nothing.
 _FIT_PIPELINE = (
     "builtin.module("
     "aie.device(aie-place-tiles),"
@@ -80,11 +48,8 @@ class CoResidenceError(ValueError):
 
 @dataclasses.dataclass(frozen=True)
 class Packing:
-    """A partition of a sequence's designs into device configurations.
-
-    ``groups`` lists the designs each configuration carries; a design in no
-    group has a configuration of its own. A group of one is the same as no
-    group, so the plain temporal fusion is ``Packing(())``.
+    """A partition of a sequence's designs into device configurations; a
+    design in no group (or a group of one) has its own.
     """
 
     groups: tuple[tuple[str, ...], ...] = ()
@@ -104,12 +69,10 @@ class Packing:
         return (design,)
 
     def device_of(self, design: str) -> str:
-        """The device symbol ``design`` runs in."""
         group = self._group_of(design)
         return design if len(group) == 1 else self.device_name(group)
 
     def sequence_of(self, design: str) -> str:
-        """The runtime sequence symbol ``design`` runs, inside its device."""
         return DEFAULT_SEQUENCE if len(self._group_of(design)) == 1 else design
 
     def devices(self, designs: Iterable[str]) -> dict[str, tuple[str, ...]]:
@@ -121,9 +84,7 @@ class Packing:
 
     @staticmethod
     def device_name(group: Sequence[str]) -> str:
-        """A pack's symbol: a function of its members, not of their order in
-        a runlist, so one pack is one device text wherever it is used.
-        """
+        """A pack's symbol, independent of its members' order."""
         digest = hashlib.sha256("|".join(sorted(group)).encode()).hexdigest()[:8]
         return f"pack{len(group)}_{digest}"
 
@@ -140,7 +101,6 @@ def _is_kernel_declaration(op: ir.OpView) -> bool:
 
 
 def _body(device: aie.DeviceOp) -> list[ir.OpView]:
-    """The device's ops, without its terminator."""
     return [
         op
         for op in device.body_region.blocks[0].operations
@@ -158,11 +118,8 @@ def _pinned_tile(op: ir.OpView) -> tuple[int, int] | None:
 
 
 def _namespace(device: aie.DeviceOp, member: str) -> None:
-    """Rename every symbol ``device`` defines into ``member``'s namespace.
-
-    Its runtime sequence becomes ``member``; everything else but a kernel
-    declaration gets ``member`` as a prefix. Uses anywhere under the device
-    (cores, the sequence, links) follow the rename.
+    """Rename the runtime sequence to ``member`` and prefix every other symbol
+    but a kernel declaration, which members share.
     """
     for op in _body(device):
         old = _symbol(op)
@@ -175,10 +132,12 @@ def _namespace(device: aie.DeviceOp, member: str) -> None:
 
 
 def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceOp:
-    """Merge ``members`` (design name -> its device op) into one device op.
+    """Merge ``members`` (design name -> device op, one module) into the first,
+    renamed ``name``.
 
-    The first member's op becomes the pack, renamed ``name``; the others are
-    emptied into it and erased. Every member must be in the same module.
+    Raises:
+        CoResidenceError: The members target different devices, declare one
+            kernel differently, or put an exclusive op on one pinned tile.
     """
     if len(members) < 2:
         raise ValueError(f"a pack needs two or more designs, got {list(members)}")
@@ -249,14 +208,8 @@ def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceO
 
 
 def fits(device_texts: Mapping[str, str], params_preamble: str = "") -> str | None:
-    """Whether ``device_texts`` (design name -> its ``aie.device`` text), merged
-    into one device if there are several, places and allocates: ``None`` if
-    it does, else the diagnostic.
-
-    Works on a copy in its own context, so nothing the caller holds is
-    touched. Each text is parsed alone and named for its design before they
-    meet: a device a generator emits carries no name of its own, and two
-    unnamed devices in one module are one symbol defined twice.
+    """``None`` if ``device_texts`` (design name -> ``aie.device`` text),
+    merged, places and allocates, else the diagnostic.
     """
     with ir.Context() as ctx, ir.Location.unknown():
         diagnostics: list[str] = []
@@ -270,6 +223,7 @@ def fits(device_texts: Mapping[str, str], params_preamble: str = "") -> str | No
         try:
             module = ir.Module.parse(f"module {{\n{params_preamble}\n}}")
             devices: dict[str, aie.DeviceOp] = {}
+            # Parsed alone and named first: two unnamed devices are one symbol twice.
             for design, text in device_texts.items():
                 alone = ir.Module.parse(f"module {{\n{params_preamble}\n{text}\n}}")
                 for op in alone.body.operations:
@@ -291,16 +245,9 @@ def fits(device_texts: Mapping[str, str], params_preamble: str = "") -> str | No
 
 @dataclasses.dataclass(frozen=True)
 class AdjacentPacking:
-    """Pack designs that run next to each other, as long as the union fits.
+    """Grow a pack along the runlist while ``fits`` accepts the union.
 
-    Walks the runlist in order and grows the current pack with each new
-    design while ``fits`` accepts the union; a design that does not fit
-    starts the next pack. A design seen before stays where it was placed.
-    It knows nothing about any operator: the placer is the only judge.
-
-    Greedy, so not optimal: the objective is the number of runlist steps
-    that change device, and a design recurring far apart (a layer's ops,
-    once per layer) is packed where it first appears.
+    Greedy: a design recurring far apart is packed where it first appears.
     """
 
     max_members: int | None = None
@@ -311,8 +258,8 @@ class AdjacentPacking:
         device_texts: Mapping[str, str],
         params_preamble: str = "",
     ) -> tuple[Packing, dict[tuple[str, ...], str]]:
-        """The packing for runlist ``order``, and why each pack stopped growing
-        (the diagnostic of the union that did not fit, keyed by the pack).
+        """The packing for runlist ``order``, and the diagnostic that stopped
+        each pack growing.
         """
         groups: list[tuple[str, ...]] = []
         stopped: dict[tuple[str, ...], str] = {}

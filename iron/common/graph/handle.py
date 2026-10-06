@@ -55,13 +55,10 @@ class Handle:
         # input | output | weight | state | intermediate | slice | view
         self.role = role
         self.parent = parent
-        self.start = start  # element offset into the parent, for a slice
-        # over the parent's buffer, for a view
+        self.start = start  # a slice's element offset into the parent
         self.tap: TensorAccessPattern | None = tap
-        # A per-call index, as the element offset it moves the view by.
-        self.index_by: Affine | None = index_by
-        # axis -> the count of that axis's leading entries valid this call
-        # (``x[:n]``); the rest are padding.
+        self.index_by: Affine | None = index_by  # a view's per-call element offset
+        # axis -> its leading entries valid this call (``x[:n]``)
         self.bounds: dict[int, Affine] = dict(bounds or {})
 
     @property
@@ -74,8 +71,8 @@ class Handle:
 
     @property
     def buffer_name(self) -> str:
-        """The name the runlist uses: a slice is ``parent[start:stop]`` in bytes;
-        a view is a pattern over its parent's buffer, so it is the parent's.
+        """The runlist's name: a slice is ``parent[start:stop]`` in bytes, a
+        view its parent's.
         """
         if self.parent is None:
             return self.name
@@ -134,8 +131,6 @@ class Handle:
         if len(entries) > rank:
             raise IndexError(f"too many indices for shape {self.shape}")
         entries += [slice(None)] * (rank - len(entries))
-        # A bounded axis may be indexed (one row of it, ``x[last]``), which
-        # drops the bound; it may not be sliced again.
         for axis in self.bounds:
             if isinstance(entries[axis], slice):
                 raise TypeError(
@@ -146,7 +141,6 @@ class Handle:
         static, shape, bounds = [], [], {}
         for axis, (entry, n) in enumerate(zip(entries, self.shape)):
             if isinstance(entry, slice) and isinstance(entry.stop, (Value, Affine)):
-                # x[:n]: the first n along this axis are the valid ones.
                 stop = entry.stop.affine()
                 if entry.start not in (None, 0) or entry.step not in (None, 1):
                     raise ValueError(f"{stop} bounds an axis from its start: [:{stop}]")
@@ -177,11 +171,8 @@ class Handle:
                 shape.append(len(range(*entry.indices(n))))
             else:
                 static.append(int(entry))
-        tap = TensorAccessPattern.full(self.shape)[
-            tuple(static)
-        ]  # checks ranges, empties
+        tap = TensorAccessPattern.full(self.shape)[tuple(static)]
         if bounds and tuple(shape) == self.shape:
-            # The whole buffer, bounded: the same handle with the bound on it.
             return Handle(
                 self.shape,
                 self.dtype,
@@ -211,10 +202,7 @@ class Handle:
 
 
 class _Viewed:
-    """A tensor the graph holds, viewed inside its body like a handle
-    (``keys[:, pos]``): the tracer decides what stands for it, a handle when
-    tracing, its host tensor when the reference runs.
-    """
+    """A tensor the graph holds, viewed inside its body as the tracer says."""
 
     __slots__ = ()
 
@@ -235,11 +223,8 @@ class _Viewed:
 
 
 class State(_Viewed):
-    """A tensor that persists on the device across calls (a KV cache).
-
-    Created with ``state`` and held by the graph.
-    Zero when the graph is first uploaded; read and written through
-    ``CompiledGraph.buffer``.
+    """A tensor that persists on the device across calls (a KV cache), zero
+    when first uploaded; read and written through ``CompiledGraph.buffer``.
     """
 
     __slots__ = ("shape", "dtype", "name", "host")
@@ -248,7 +233,6 @@ class State(_Viewed):
         self.shape = tuple(int(s) for s in shape)
         self.dtype = dtype
         self.name = name
-        # The reference path's copy, made on first use.
         self.host: np.ndarray | None = None
 
     def __repr__(self) -> str:
@@ -261,10 +245,7 @@ def state(shape, dtype=bfloat16, name=None) -> State:
 
 
 class Weight(_Viewed):
-    """A weight the graph's body views, ``rope[position]``: uploaded once,
-    as any tensor the graph holds is, and viewed as a state is. Created with
-    ``weight``.
-    """
+    """A weight the graph's body views (``rope[position]``)."""
 
     __slots__ = ("array",)
 
@@ -292,9 +273,8 @@ def weight(array) -> Weight:
 
 
 def _rescale_bounds(h: Handle, shape) -> dict[int, Affine]:
-    """The bounds of ``h`` on its reshape to ``shape``: a bound on the leading
-    axis survives when that axis is merged with the axes after it or split
-    into leading ones, the count rescaled by the factor.
+    """The bounds of ``h`` reshaped to ``shape``: a leading-axis bound,
+    rescaled as that axis merges or splits.
     """
     if not h.bounds:
         return {}
@@ -306,11 +286,9 @@ def _rescale_bounds(h: Handle, shape) -> dict[int, Affine]:
         )
     old, new = h.shape[0], int(shape[0])
     if new % old == 0:
-        # Each row becomes new // old rows: as many more of them are valid.
         return {0: count * (new // old)}
     group = old // new
     if old % new == 0 and count.scale % group == 0 and count.bias % group == 0:
-        # Rows are grouped old // new to a row: as many fewer are valid.
         return {0: Affine(count.value, count.scale // group, count.bias // group)}
     raise ValueError(
         f"cannot reshape {h!r} to {list(shape)}: the bound on its leading axis "
@@ -319,12 +297,8 @@ def _rescale_bounds(h: Handle, shape) -> dict[int, Affine]:
 
 
 class Value:
-    """A per-call scalar parameter of a graph's body.
-
-    Integer arithmetic on one makes an ``Affine``: ``position + 1`` or
-    ``chunk * 32`` is what an operator is bound to, and the graph computes
-    it from ``position`` on every call. A ``carried`` one the graph computes
-    for its own next call (``Carried``).
+    """A per-call scalar parameter of a graph's body; integer arithmetic on
+    one makes an ``Affine``.
     """
 
     __slots__ = ("name", "kind", "dtype", "carried")
@@ -334,7 +308,6 @@ class Value:
         self.carried = carried
 
     def affine(self) -> Affine:
-        """This value as an expression: itself, once."""
         return Affine(self)
 
     def __add__(self, k: int) -> Affine:
@@ -361,13 +334,9 @@ class Affine:
     ((v * scale + bias) >> down) * mul + add
     ```
 
-    where ``>>`` floors. A binding writes a linear one (``down`` 0, kept in
-    ``scale`` and ``bias``, so ``(p + 1) * 64`` is ``Affine(p, 64, 64)``).
-    Sums, products and floor divisions by a power of two (and so
-    ``ceildiv``) with integers are expressions too, which is how an
-    operator's derivation run on its bound gives the Emit row of what it
-    derives; anything else (a comparison, two expressions, another divisor)
-    raises ``TypeError``.
+    where ``>>`` floors. A binding takes only a linear one (``down`` 0). Any
+    operation besides integer sums, products and power-of-two floor
+    divisions raises ``TypeError``.
     """
 
     value: Value
@@ -378,10 +347,10 @@ class Affine:
     add: int = 0
 
     def affine(self) -> Affine:
-        """This expression, which a binding takes only while it is linear.
+        """This expression, as a binding takes it.
 
         Raises:
-            TypeError: it floors.
+            TypeError: It floors.
         """
         if self.down:
             raise TypeError(f"{self} is not linear in {self.value.name}")
@@ -446,16 +415,13 @@ class Affine:
 
     @property
     def name(self) -> str:
-        """An identifier for the expression: ``p``, ``p_x64``, ``p_x64_p64``,
-        ``p_m1`` (a device symbol carries it, so it names the word).
-        """
+        """An identifier for the device symbol: ``p``, ``p_x64``, ``p_x64_p64``, ``p_m1``."""
         text = self.value.name + (f"_x{self.scale}" if self.scale != 1 else "")
         if self.bias:
             text += f"_{'p' if self.bias > 0 else 'm'}{abs(self.bias)}"
         return text
 
     def evaluate(self, values: Mapping[str, int]) -> int:
-        """The number this expression is for the graph's ``values``, by name."""
         v = int(values[self.value.name])
         return ((self.scale * v + self.bias) >> self.down) * self.mul + self.add
 
@@ -473,12 +439,8 @@ class Affine:
 
 
 class Carry(Mapping[str, "Handle | Affine | int"]):
-    """The next values of a graph's carried values, by name: what
-    ``carry`` makes.
-
-    Traced, each is an ``Affine`` of the current values or a
-    one-element integer ``Handle`` the graph computed. Returned from a
-    call, each is the number the next call takes.
+    """The next values of a graph's carried values, by name: traced, an
+    ``Affine`` or a one-element ``Handle``; returned from a call, a number.
     """
 
     __slots__ = ("_next",)
@@ -530,9 +492,7 @@ def _tensor_dtype(t):
 
 class _HostView:
     """A state as the reference views it: reshaped, then indexed, both kept,
-    so an operator that takes views gets the whole host tensor and the
-    pattern (``pattern``) and writes it in place, as the device does. A
-    transpose is numpy's own view of the host tensor.
+    so a copy writes the whole host tensor in place through ``pattern``.
     """
 
     def __init__(self, state: State, shape, key=None) -> None:
@@ -554,13 +514,11 @@ class _HostView:
         return self.tensor().transpose(*axes)
 
     def pattern(self) -> Handle:
-        """The view as the traced graph has it, over the state's buffer."""
         s = self.state
         whole = Handle(s.shape, s.dtype, s.name, "state").reshape(self.shape)
         return whole if self.key is None else whole[self.key]
 
     def tensor(self) -> np.ndarray:
-        """The host tensor, viewed by numpy."""
         assert self.state.host is not None
         view = self.state.host.reshape(self.shape)
         return view if self.key is None else view[self.key]
