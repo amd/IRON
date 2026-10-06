@@ -318,8 +318,13 @@ class MHA(Operator):
                     f"has its own K and V lanes, on its own column's shim"
                 )
 
+    @classmethod
+    def fits(cls, dev) -> bool:
+        """Whether ``dev`` is the 8-column NPU2 array MHA is placed on."""
+        return dev.arch is AIEArch.AIE2p and dev.cols >= 8
+
     def resolve(self, dev):
-        if dev is not None and (dev.arch is not AIEArch.AIE2p or dev.cols < 8):
+        if dev is not None and not self.fits(dev):
             raise Unresolvable(
                 f"MHA is pinned to the 8-column NPU2 array (memtiles at columns "
                 f"3-7); got {dev.name} ({dev.arch}) with {dev.cols} columns"

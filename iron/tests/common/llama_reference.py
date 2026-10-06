@@ -26,8 +26,10 @@ to bf16 tolerance and the argmax exactly.
 import dataclasses
 from types import SimpleNamespace
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.iron.device import from_name
 
 from iron.lm import (
     Config,
@@ -40,6 +42,8 @@ from iron.lm import (
 )
 from iron.lm.llama3.model import Llama
 from iron.tests.common.llama_model import PROFILE, SMALL, random_weights
+
+pytestmark = pytest.mark.usefixtures("npu2")  # MHA decode on any host
 
 
 class _Output:
@@ -155,6 +159,18 @@ def test_gqa_decode_reads_the_caches_the_prompt_wrote(cpu):
     _assert_close([first], [cpu.first])
     got = _greedy(model, cpu.prompt, first, len(cpu.expected))
     _assert_close(got, cpu.expected)
+
+
+def test_decode_attention_is_mha_where_mha_fits_and_gqa_on_npu1(cpu):
+    assert OnHost(cpu.config, cpu.weights).decode_attention == "mha"
+    aie_utils.set_current_device(from_name("npu1", n_cols=4))
+    model = OnHost(cpu.config, cpu.weights)
+    assert model.decode_attention == "gqa"
+    assert model.keys[0].shape == (
+        cpu.config.n_kv_groups,
+        cpu.config.max_seq_len,
+        cpu.config.head_dim,
+    )
 
 
 def test_a_prompt_longer_than_a_chunk_runs_in_chunks(cpu):

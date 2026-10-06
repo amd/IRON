@@ -9,6 +9,8 @@ compiled and loaded once for the module and every test calls it
 in-process.
 """
 
+import dataclasses
+
 import aie.utils as aie_utils
 import pytest
 
@@ -59,9 +61,12 @@ MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.2}
 # dispatch of one xclbin, and the prompt fed through it a token at a time. A
 # shorter run than the full ELF's, since every step is a host round trip.
 # Its own model, built and dropped here, first: after any other test it
-# would be held beside the module's full-ELF one.
+# would be held beside the module's full-ELF one. On NPU1 its attention is
+# "gqa", whose step reads the whole cache, so the caches are one chunk.
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_llama_3_2_1b_each_step_accuracy(runner, record_property):
+def test_llama_3_2_1b_each_step_accuracy(record_property):
+    config = dataclasses.replace(Runner.config, max_seq_len=Runner.config.prefill_chunk)
+    runner = Runner(WEIGHTS, TOKENIZER, config)
     model = runner.npu(boundaries=iron.each_step)
     assert not model.full_elf
     try:

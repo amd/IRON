@@ -100,6 +100,13 @@ caches through. The prompt runs through the decode step a token at a time,
 and there is no `--device-loop`. `--each-step` builds the same form on NPU2,
 which is how `test_llama_3_2_1b_each_step_accuracy` checks it there.
 
+MHA is placed on NPU2's 8-column array, so on NPU1 decode attention is
+`"gqa"` (`CausalLM.decode_attention`): GEMV scores, a Softmax masked to the
+context and the weighted values. Its step reads the whole cache, so its cost
+follows `--max-seq-len` rather than the context. On NPU1 it builds at a
+`--max-seq-len` of 2048 or 4096; from 8192 a row of the cache no longer fits
+a core's memory. Any position below it runs without a rebuild.
+
 ## Tuning the decode step
 
 `--cost-table TABLE` narrows the decode step's designs (fewer columns where

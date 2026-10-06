@@ -108,19 +108,23 @@ class CausalLM(iron.Graph):
     The caches are ``(max_seq_len, n_kv_groups, head_dim)`` so no descriptor
     steps by ``max_seq_len``. ``decode_attention="gqa"`` reads a group's rows
     in place, so its caches are ``(n_kv_groups, max_seq_len, head_dim)``:
-    below 32768 rows, and a step costs the whole cache.
+    below 32768 rows, and a step costs the whole cache. Left ``None`` it is
+    ``"mha"`` where MHA fits the device (NPU2), else ``"gqa"`` (NPU1).
     """
 
     embedding: Weight
     layers: list
     oracle: "type[Oracle]"
-    decode_attention: Literal["mha", "gqa"] = "mha"
+    decode_attention: Literal["mha", "gqa"] | None = None
 
     def __init__(self, config: Config, weights):
         self.config = config
         vars(self).update(vars(weights))
         self.embedding = iron.weight(weights.embedding)
         G, L, D = config.n_kv_groups, config.max_seq_len, config.head_dim
+        if self.decode_attention is None:
+            dev = aie_utils.ensure_current_device()
+            self.decode_attention = "mha" if dev is None or MHA.fits(dev) else "gqa"
         cache = (L, G, D) if self.decode_attention == "mha" else (G, L, D)
         self.keys = [iron.state(cache) for _ in self.layers]
         self.values = [iron.state(cache) for _ in self.layers]
