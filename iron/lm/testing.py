@@ -114,17 +114,26 @@ def check_accuracy(
         assert stats[stat] <= bound, f"{stat.lower()} KL {stats[stat]} > {bound}"
 
 
-def check_determinism(runner, model, num_tokens: int = 4, rounds: int = 5, *, record):
+def check_determinism(
+    runner,
+    model,
+    num_tokens: int = 4,
+    rounds: int = 5,
+    chars: int = 1024,
+    *,
+    record,
+):
     """Repeated runs produce bit-identical logits.
 
-    Two prompts, alternated: a host write that never reaches the device then
-    reads the other prompt's data, so a missing flush fails every run rather
-    than some. (A prefill KV hand-off never flushed made 12% of runs
-    diverge; alternated, 38/38 in each of three trials.)
+    Two prompts of ``chars`` characters, alternated: a host write that never
+    reaches the device then reads the other prompt's data, so a missing
+    flush fails every run rather than some. (A prefill KV hand-off never
+    flushed made 12% of runs diverge; alternated, 38/38 in each of three
+    trials.)
     """
     prompts = [
-        prompt(runner, 1024, num_tokens),
-        prompt(runner, 1024, num_tokens, skip=1024),
+        prompt(runner, chars, num_tokens),
+        prompt(runner, chars, num_tokens, skip=chars),
     ]
     differing = determinism(model, prompts, num_tokens, rounds)
     record("DifferingRuns", differing)
@@ -158,7 +167,9 @@ def check_chat_turn(
     assert not steps, f"the turn's logits differ from scratch's at steps {steps}"
 
 
-def check_deep_decode(runner, model, position: int, bound: float, *, record):
+def check_deep_decode(
+    runner, model, position: int, bound: float, chars: int = 1024, *, record
+):
     """A decode step at ``position``, deep in the caches, against the
     graph's own reference (``Graph.reference``: each operator's
     ``reference()`` on host tensors, the caches as state), for a context
@@ -166,12 +177,13 @@ def check_deep_decode(runner, model, position: int, bound: float, *, record):
     KL. Whether both rank the same token first is recorded, not required:
     at a near-tie a step can differ in it at a KL of 0.014.
 
-    The caches hold a real prompt repeated up to ``position``, so the step
+    The caches hold a real prompt, ``chars`` characters of it, repeated up
+    to ``position``, so the step
     attends over a real prompt's scale of keys and values, the same ones on
     the device and in the reference. The prompt's own rows are left as it
     wrote them, so the model's record of what its caches hold stays true.
     """
-    tokens = prompt(runner, 1024, 1)
+    tokens = prompt(runner, chars, 1)
     n = len(tokens)
     token = greedy(model.logits(tokens))
     version = next(iter(model.versions.values()))
