@@ -30,13 +30,10 @@ from iron.common.graph.handle import Weight
 from iron.common.graph.narrowing import JointNarrowing, Tuning
 from iron.operators.copy import Copy
 from iron.operators.elementwise_mul import ElementwiseMul
-from iron.operators.gemv import GEMV
-from iron.operators.gqa_context import GQAContext
+from iron.operators.gqa import GQAContext, GQAScores
 from iron.operators.mha import MHA
-from iron.operators.repeat import Repeat
 from iron.operators.sample import Sample
 from iron.operators.softmax import Softmax
-from iron.operators.transpose import Transpose
 
 from .generation import Sampler
 
@@ -106,10 +103,11 @@ class CausalLM(iron.Graph):
     """A decoder on ``config``'s shape; a subclass gives ``layer``, ``head`` and ``oracle``.
 
     The caches are ``(max_seq_len, n_kv_groups, head_dim)`` so no descriptor
-    steps by ``max_seq_len``. ``decode_attention="gqa"`` reads a group's rows
-    in place, so its caches are ``(n_kv_groups, max_seq_len, head_dim)``:
-    below 32768 rows, and a step costs the whole cache. Left ``None`` it is
-    ``"mha"`` where MHA fits the device (NPU2), else ``"gqa"`` (NPU1).
+    steps by ``max_seq_len``. A decode step attends with ``MHA`` of one
+    query, or with ``decode_attention="gqa"`` with ``GQAScores``, ``Softmax``
+    and ``GQAContext`` reading each group's rows in place; either costs the
+    context, not the cache. Left ``None`` it is ``"mha"`` where MHA fits the
+    device (NPU2), else ``"gqa"`` (NPU1).
     """
 
     embedding: Weight
@@ -125,16 +123,16 @@ class CausalLM(iron.Graph):
         if self.decode_attention is None:
             dev = aie_utils.ensure_current_device()
             self.decode_attention = "mha" if dev is None or MHA.fits(dev) else "gqa"
-        cache = (L, G, D) if self.decode_attention == "mha" else (G, L, D)
-        self.keys = [iron.state(cache) for _ in self.layers]
-        self.values = [iron.state(cache) for _ in self.layers]
+        self.keys = [iron.state((L, G, D)) for _ in self.layers]
+        self.values = [iron.state((L, G, D)) for _ in self.layers]
         self.rope = iron.weight(config.angles().astype(bfloat16))
         # Zero until the host writes draws: a row of zeros is greedy.
         self.draws = iron.state((L, ROW_WORDS), np.int32)
         self.drawn = iron.state((L,), np.int32)
         if self.decode_attention == "gqa":
-            H = config.n_heads
-            scale = np.full((H, L), 1 / math.sqrt(D), dtype=bfloat16)
+            # On the query rather than the scores: the same bits where
+            # 1/sqrt(head_dim) is a power of two (64), and no row per position.
+            scale = np.full((1, config.n_heads * D), 1 / math.sqrt(D), dtype=bfloat16)
             self.scale = iron.weight(scale)
         self._seen = np.empty(0, dtype=np.int64)  # the tokens in the caches
         self._prompt: CompiledGraph | None = None
@@ -193,44 +191,25 @@ class CausalLM(iron.Graph):
         )
         keys, values = self.keys[i], self.values[i]
         n = q.shape[0] // H
-        interleaved = self.decode_attention == "mha"
         for x, cache in ((k, keys), (v, values)):
-            if step.prompt and interleaved:
+            if step.prompt:
                 rows = cache.reshape(L // C, C, G, D)[step.chunk, : step.rows]
                 Copy(x.reshape(n, G, D), rows)
-            elif step.prompt:
-                Copy(
-                    x.reshape(n, G, D).transpose(1, 0, 2),
-                    cache.reshape(G, L // C, C, D)[:, step.chunk, : step.rows],
-                )
-            elif interleaved:
-                Copy(x.reshape(G, D), cache[step.position])
             else:
-                Copy(x.reshape(G, D), cache[:, step.position])
-        if not step.prompt and not interleaved:
-            return self._decode_gqa(step, keys, values, q)
-        span = (
-            np.s_[: step.position + 1] if interleaved else np.s_[:, : step.position + 1]
-        )
+                Copy(x.reshape(G, D), cache[step.position])
+        span = np.s_[: step.position + 1]
+        if not step.prompt and self.decode_attention == "gqa":
+            scores = GQAScores(keys[span], ElementwiseMul(q, self.scale).reshape(H, D))
+            ctx = GQAContext(values[span], Softmax(scores))
+            return ctx.reshape(1, H * D)
         o = MHA(
             q.reshape(n, H, D),
             keys[span],
             values[span],
             heads_interleaved=True,
-            kv_interleaved=interleaved,
+            kv_interleaved=True,
         )
         return o.reshape(n, H * D)
-
-    def _decode_gqa(self, step: Step, keys, values, q):
-        c = self.config
-        H, G, D, L = c.n_heads, c.n_kv_groups, c.head_dim, c.max_seq_len
-        scores = ElementwiseMul(GEMV(keys, q, repeat=H // G), self.scale)
-        weights = Softmax(scores, vector_size=step.position + 1)
-        if GQAContext.fits(aie_utils.ensure_current_device(), G):
-            ctx = GQAContext(values, weights.reshape(G, H // G, L))
-            return ctx.reshape(1, H * D)
-        v_all = Repeat(values, repeat=H // G)
-        return GEMV(Transpose(v_all), weights).reshape(1, H * D)
 
     # -- on the host -----------------------------------------------------------
 

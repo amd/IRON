@@ -73,6 +73,23 @@ CASES = [
         ],
     ),
     (
+        "gqa",
+        "GQAScores",
+        [
+            dict(heads=8, groups=2, seq_len=256, num_aie_columns=2),
+            # Two groups a column, in turn.
+            dict(heads=8, groups=4, seq_len=256, num_aie_columns=2),
+        ],
+    ),
+    (
+        "gqa",
+        "GQAContext",
+        [
+            dict(heads=8, groups=2, seq_len=256, num_aie_columns=2),
+            dict(heads=8, groups=4, seq_len=256, num_aie_columns=2),
+        ],
+    ),
+    (
         "layer_norm",
         "LayerNorm",
         [dict(rows=4, num_aie_columns=1, num_channels=1, tile_size=256)],
@@ -138,7 +155,11 @@ CASES = [
         [dict(size=1024, num_aie_columns=1, num_channels=1, tile_size=1024)],
     ),
     ("silu", "SiLU", [dict(size=1024, num_aie_columns=1, tile_size=256)]),
-    ("softmax", "Softmax", [dict(rows=16, cols=64)]),
+    (
+        "softmax",
+        "Softmax",
+        [dict(rows=16, cols=64), dict(rows=16, cols=8192, block=1024)],
+    ),
     # SwiGLUPrefillStream is an OperatorSequence and declares no buffers of
     # its own; its per-group stream operator does, covered here.
     (

@@ -537,7 +537,8 @@ code before relying on a line here; it is the authority.
   and a `prefill_chunk`-row prompt chunk, both compiled once; `max_seq_len`
   sizes the caches and the RoPE table alone. A prompt runs chunk by chunk
   against the caches, and decode is MHA of one query (a KV group's heads
-  packed into a block, a pipeline's own K and V lanes). The caches are
+  packed into a block, a pipeline's own K and V lanes), or on NPU1
+  `GQAScores`, `Softmax` and `GQAContext` over the same caches. The caches are
   `(max_seq_len, n_kv_groups, head_dim)`, so a call's write is contiguous
   and no descriptor steps by the context: a `(groups, positions)` cache
   would step `max_seq_len * head_dim` between groups, past a descriptor's

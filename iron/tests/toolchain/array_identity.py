@@ -39,8 +39,15 @@ PAIRS = [
         dict(tile_size=256, num_aie_columns=1),
         ("size", 2048),
     ),
-    ("softmax", "Softmax", dict(cols=64, num_aie_columns=2), ("rows", 16)),
+    (
+        "softmax",
+        "Softmax",
+        dict(rows=16, block=64, streamed=True, num_aie_columns=2),
+        ("cols", 128),
+    ),
     ("rope", "RoPE", dict(cols=64, num_aie_columns=2), ("rows", 16)),
+    ("gqa", "GQAScores", dict(heads=8, groups=4, num_aie_columns=2), ("seq_len", 256)),
+    ("gqa", "GQAContext", dict(heads=8, groups=4, num_aie_columns=2), ("seq_len", 256)),
     (
         "gemv",
         "GEMV",

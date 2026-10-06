@@ -36,7 +36,7 @@ def _graph():
 
     class G(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32], pos: Scratchpad[np.int32]):
-            y = Softmax(x, vector_size=n)
+            y = Softmax(x[:, :n])
             Copy(y, cache[:, pos])
             return y
 
@@ -68,10 +68,10 @@ def test_values_become_dispatch_time_kernels_at_each_step(device):
     for name, design in designs.items():
         lib = design.get_dispatch_lib_path()
         assert lib is not None and Path(lib).exists(), f"{name}: no dispatch library"
-        assert len(design.dispatch_params) == 1, (name, design.dispatch_params)
+        assert design.dispatch_params, f"{name}: no dispatch parameter"
     # The graph's symbols are the kernels' parameter names.
     symbols = {w.symbol for w in net.words}
-    assert symbols == {d.dispatch_params[0] for d in designs.values()}
+    assert symbols == {p for d in designs.values() for p in d.dispatch_params}
     assert net.image is not None and Path(net.image).stat().st_size > 0
     assert net._callable is None
 

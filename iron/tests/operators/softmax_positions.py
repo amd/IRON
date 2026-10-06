@@ -4,10 +4,11 @@
 
 """Softmax's per-call row length, on a device.
 
-Decode masks every attention row to ``position + 1`` keys through a per-call
-value, and the kernels only run over that length rounded up to their vector
-step. This drives one compiled graph across positions on both sides of a
-step boundary, long ones before short ones, so a row whose tail a longer call
+Decode bounds every attention row to ``position + 1`` keys, ``Softmax(x[:,
+:n])``: the rows stream the blocks ``n`` covers, and the kernels only run over
+the last block's valid elements rounded up to their vector step. This drives
+one compiled graph across positions on both sides of a step and a block
+boundary, long ones before short ones, so a block whose tail a longer call
 wrote must still come back with exact zeros past the position.
 """
 
@@ -22,29 +23,34 @@ from iron.operators.softmax import Softmax
 
 # Llama decode's attention rows: one per head, one column per cache slot.
 HEADS, SEQ = 32, 2048
-POSITIONS = (SEQ, 300, 1, 2047, 31, 32, 33, 1000, 64, 2)
+POSITIONS = (SEQ, 300, 1, 2047, 31, 32, 33, 1000, 1024, 1025, 64, 2)
 
 
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 
 @pytest.mark.supported_devices("npu2")
-def test_rows_are_masked_to_the_per_call_length(npu_runtime):
+@pytest.mark.parametrize(
+    "boundaries", [None, iron.each_step], ids=["full_elf", "xclbin"]
+)
+def test_rows_are_masked_to_the_per_call_length(npu_runtime, boundaries):
     class Attend(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
-            return Softmax(x, vector_size=n)
+            return Softmax(x[:, :n])
 
     attend = Attend()
-    net = attend.compile(x=(HEADS, SEQ))
-    reference = Softmax(rows=HEADS, cols=SEQ)
+    net = attend.compile(x=(HEADS, SEQ), boundaries=boundaries)
+    op = Softmax(rows=HEADS, cols=SEQ, block=1024)
+    tolerance = op.tolerance()
+    assert tolerance is not None
 
     rng = np.random.default_rng(0)
     for n in POSITIONS:
         x = rng.standard_normal((HEADS, SEQ)).astype(bfloat16)
         got = np.asarray(net(x, n=n)).reshape(HEADS, SEQ)
-        tail = got[:, n:].view(np.uint16)
+        end = -(-n // op.block) * op.block
+        tail = got[:, n:end].view(np.uint16)
         assert not tail.any(), f"n={n}: {np.count_nonzero(tail)} tail elements not +0"
-        tolerance = reference.tolerance()
-        assert tolerance is not None
-        verdict = verify_buffer(got, "y", reference.reference(x, n), tolerance)
+        want = attend.reference(x, n=n)
+        verdict = verify_buffer(got[:, :n], "y", want, tolerance)
         assert verdict, f"n={n}: {verdict.detail}"

@@ -101,11 +101,13 @@ and there is no `--device-loop`. `--each-step` builds the same form on NPU2,
 which is how `test_llama_3_2_1b_each_step_accuracy` checks it there.
 
 MHA is placed on NPU2's 8-column array, so on NPU1 decode attention is
-`"gqa"` (`CausalLM.decode_attention`): GEMV scores, a Softmax masked to the
-context and the weighted values. Its step reads the whole cache, so its cost
-follows `--max-seq-len` rather than the context. On NPU1 it builds at a
-`--max-seq-len` of 2048 or 4096; from 8192 a row of the cache no longer fits
-a core's memory. Any position below it runs without a rebuild.
+`"gqa"` (`CausalLM.decode_attention`, `iron/operators/gqa.py`): `GQAScores`
+against the key cache, a `Softmax` bounded to the context, and `GQAContext`
+over the value cache. Both read the caches in place, a block of positions at
+a time, and only the blocks the context covers, so a step's cost follows the
+context. Their cores do not depend on the cache's length, so every
+`--max-seq-len` runs the same cores, and one compile serves every position
+below it.
 
 ## Tuning the decode step
 

@@ -146,9 +146,8 @@ def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
 
 
 def test_gqa_decode_reads_the_caches_the_prompt_wrote(cpu):
-    """``decode_attention="gqa"``: the prompt writes the caches split by
-    group, and each decode step's GEMVs, softmax and ``GQAContext`` read
-    them there.
+    """``decode_attention="gqa"``: each decode step's ``GQAScores``,
+    ``Softmax`` and ``GQAContext`` read the caches the prompt's MHA wrote.
     """
 
     class GQA(OnHost):
@@ -167,8 +166,8 @@ def test_decode_attention_is_mha_where_mha_fits_and_gqa_on_npu1(cpu):
     model = OnHost(cpu.config, cpu.weights)
     assert model.decode_attention == "gqa"
     assert model.keys[0].shape == (
-        cpu.config.n_kv_groups,
         cpu.config.max_seq_len,
+        cpu.config.n_kv_groups,
         cpu.config.head_dim,
     )
 
