@@ -105,10 +105,7 @@ _TASK = re.compile(
     r"(?: \{length_parameter = @(\w+), length_unit = (\d+) : i32\})?"
     r"\s*aie\.end\s*\}(?: \{([^}]*)\})?"
 )
-_WRITE = re.compile(
-    r"npu\.write32\(%c(-?\d+)_i32\S*, %c(-?\d+)_i32\S*\) "
-    r"\{column = (\d+) : i32, row = (\d+) : i32\}"
-)
+_WRITE = re.compile(r"aiex\.npu\.rtp_write\(@rtp_(\d+)_(\d+), (\d+), %c(-?\d+)_i32")
 
 
 def generated_sequence(op, image="elf") -> tuple[str, list[Task]]:
@@ -610,11 +607,13 @@ def test_shipped_sequence_writes_every_core_then_streams_in_consume_order(npu2):
     writes = [tuple(map(int, w)) for w in _WRITE.findall(sequence)]
     # 8 words on 32 cores, then one lock release per core, before any DMA.
     assert len(writes) == 32 * 8
-    assert writes[0] == (4096, 2, 0, 2) and writes[7] == (4124, 1073741824, 0, 2)
-    assert writes[-1] == (4124, 1073741824, 7, 5)
+    assert writes[0] == (0, 2, 0, 2) and writes[7] == (0, 2, 7, 1073741824)
+    assert writes[-1] == (7, 5, 7, 1073741824)
+    assert text.count('{address = 4096 : i32, sym_name = "rtp_') == 32
     releases = re.findall(r"aiex\.set_lock\(%lock_(\d+)_(\d+), %c1_i32\w*\)", sequence)
     assert len(releases) == 32 and releases[-1] == ("7", "5")
-    assert text.count("aie.lock(") == 32 and "aie.lock(%tile_0_2, 10)" in text
+    assert text.count("aie.lock(") == 32
+    assert re.search(r"%lock_0_2 = aie\.lock\(%\w+, 10\)", text)
     assert sequence.rindex("aiex.set_lock") < sequence.index("aiex.dma_start_task")
 
     # N = 9 column-blocks: one full sweep (4 A + 8 B + 8 C) and a trailing
