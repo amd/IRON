@@ -28,19 +28,22 @@ DOCUMENTS = [
     "The northern lights are caused by charged particles from the sun.",
     "Photosynthesis converts light energy into chemical energy in plants.",
 ]
-# About 370 tokens: the 512-row version.
-LONG = " ".join(
+PARAGRAPHS = [
     f"Paragraph {i}: the aurora borealis appears when solar wind particles collide "
     "with oxygen and nitrogen atoms in the upper atmosphere, emitting green and red light."
-    for i in range(12)
-)
+    for i in range(30)
+]
+# About 370 tokens: the 512-row version.
+LONG = " ".join(PARAGRAPHS[:12])
+# About 920 tokens: the 1024-row version, past the sliding window.
+LONGER = " ".join(PARAGRAPHS)
 
 MIN_COSINE = 0.999
 
 
 @pytest.fixture(scope="module")
 def encoder():
-    yield Encoder(DIRECTORY)
+    yield Encoder(DIRECTORY, max_tokens=1024)
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 
@@ -52,8 +55,13 @@ def oracle(encoder):
 
 @pytest.mark.parametrize(
     "text,task",
-    [(QUERY, "query"), (DOCUMENTS[0], "document"), (LONG, "document")],
-    ids=["query", "document", "long_document"],
+    [
+        (QUERY, "query"),
+        (DOCUMENTS[0], "document"),
+        (LONG, "document"),
+        (LONGER, "document"),
+    ],
+    ids=["query", "document", "long_document", "past_the_window"],
 )
 def test_embeddinggemma_2_accuracy(encoder, oracle, text, task, record_property):
     tokens = encoder.tokens(text, task)
@@ -87,7 +95,9 @@ def test_embeddinggemma_2_ranking(encoder, oracle):
 
 
 @pytest.mark.bench
-@pytest.mark.parametrize("text", [QUERY, LONG], ids=["query", "long_document"])
+@pytest.mark.parametrize(
+    "text", [QUERY, LONG, LONGER], ids=["query", "long_document", "past_the_window"]
+)
 def test_embeddinggemma_2_latency(encoder, text, record_property):
     tokens = encoder.tokens(text, "document")
     encoder.graph.encode(tokens)

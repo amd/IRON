@@ -33,8 +33,7 @@ class Encoder:
 
     Args:
         directory: Holds `model.safetensors` and `tokenizer.json`.
-        max_tokens: The longest prompt, its task prefix included; at most
-            the sliding window.
+        max_tokens: The longest prompt, its task prefix included.
         costs: The cost table the designs are narrowed and packed by; None
             leaves them as they resolve.
     """

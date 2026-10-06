@@ -11,7 +11,7 @@ import dataclasses
 import math
 
 import numpy as np
-from ml_dtypes import bfloat16
+from ml_dtypes import bfloat16, finfo
 
 import iron
 from iron.common import Scratchpad
@@ -127,21 +127,33 @@ class EmbeddingGemma(iron.Graph):
     rows, and ``n``, the real rows, which masks the padded keys and the
     pooling; padded rows are computed and never read. It returns one
     unit-length embedding per ``mrl_dims`` truncation, a row each, zero past
-    its length. Attention is bidirectional and unscaled; every sliding
-    window covers ``max_tokens``.
+    its length. Attention is bidirectional and unscaled. A version longer
+    than the sliding window adds a band mask to a sliding layer's scores,
+    its ``(heads, rows, rows)`` held per version.
     """
 
     def __init__(self, config: Config, weights, max_tokens: int):
-        if max_tokens > config.sliding_window:
-            raise ValueError(
-                f"{max_tokens} rows exceed the {config.sliding_window}-row "
-                f"sliding window, which is not masked"
-            )
         if max_tokens % ROWS:
             raise ValueError(f"{max_tokens} rows are not whole {ROWS}-row versions")
         c = config
         self.config = config
         self.max_tokens = max_tokens
+        # Each version's rows: doubling from ROWS, then max_tokens.
+        self.rows = [
+            ROWS * 2**j
+            for j in range(max_tokens.bit_length())
+            if ROWS * 2**j < max_tokens
+        ]
+        self.rows.append(max_tokens)
+        r = c.n_heads // c.sliding_kv_groups
+        self.bands = {}
+        for T in self.rows:
+            if T > c.sliding_window + 1:
+                i = np.arange(T)
+                band = abs(i[:, None] - i) <= c.sliding_window
+                self.bands[T] = np.tile(
+                    np.where(band, 0, finfo(bfloat16).min).astype(bfloat16), (r, 1)
+                )
         self.embedding = (
             weights.embedding.astype(np.float32) * np.sqrt(np.float32(c.emb_dim))
         ).astype(bfloat16)
@@ -223,6 +235,8 @@ class EmbeddingGemma(iron.Graph):
         for g in range(G):
             heads = q[g * r : (g + 1) * r].reshape(r * T, D)
             scores = GEMM(heads, k[g], b_col_maj=True, **ACCURATE)
+            if i not in c.global_layers and T in self.bands:
+                scores = ElementwiseAdd(scores, self.bands[T])
             weights = Softmax(scores, vector_size=n)
             # Over the group's queries, which the scores were their last use of.
             GEMM(weights, v[g], heads, **ACCURATE)
@@ -233,8 +247,7 @@ class EmbeddingGemma(iron.Graph):
 
     def shapes(self) -> list[dict]:
         """Each version's input shapes, fewest rows first."""
-        E = self.config.emb_dim
-        return [dict(x=(T, E)) for T in range(ROWS, self.max_tokens + 1, ROWS)]
+        return [dict(x=(T, self.config.emb_dim)) for T in self.rows]
 
     def load(self, tuner: JointNarrowing | None = None) -> "EmbeddingGemma":
         """Compile every version before the first call, so the arena is made once.
@@ -247,13 +260,15 @@ class EmbeddingGemma(iron.Graph):
         return self
 
     def inputs(self, tokens) -> tuple[np.ndarray, int]:
-        """A call's ``x`` and ``n`` for ``tokens``, padded to the next
-        multiple of ``ROWS``.
+        """A call's ``x`` and ``n`` for ``tokens``, padded to the fewest rows
+        a version has.
         """
         n = len(tokens)
         if not 0 < n <= self.max_tokens:
             raise ValueError(f"{n} tokens do not fit {self.max_tokens} rows")
-        x = np.zeros((-(-n // ROWS) * ROWS, self.config.emb_dim), bfloat16)
+        x = np.zeros(
+            (min(T for T in self.rows if T >= n), self.config.emb_dim), bfloat16
+        )
         x[:n] = self.embedding[np.asarray(tokens)]
         return x, n
 
