@@ -24,8 +24,14 @@ What the merge has to settle:
   the digest prefix ``declare_kernel`` gives it already keeps two kernels
   apart, so two members calling one kernel share one declaration.
 - pinned tiles: two members naming one physical tile share its ``aie.tile``,
-  unless both put a core or a DMA program on it, which is a conflict.
-  Logical tiles are left to ``aie-place-tiles``, which sees the union.
+  unless both put a core or a DMA program on it, which is a conflict. A
+  route into a tile's TileControl rewrites its DMA program, so it claims
+  the tile as one would. Logical tiles are left to ``aie-place-tiles``,
+  which sees the union.
+- hand-routed shim channels: the fifo lowering hands out shim DMA channels
+  around the ``aie.shim_dma_allocation`` ops it finds, not around
+  ``aie.flow`` or ``aie.packet_flow`` ends, so a member routing a pinned
+  shim channel by hand must allocate it too.
 - device type: every member is built for the same device.
 
 Whether the union *fits* -- cores, shim channels, routes -- is for the
@@ -157,6 +163,43 @@ def _pinned_tile(op: ir.OpView) -> tuple[int, int] | None:
     )
 
 
+def _route_ends(op: ir.OpView):
+    """The ends of a route declared by hand: ``(tile, direction, bundle,
+    channel)``, the tile its defining op, the bundle and channel ints.
+    """
+    if isinstance(op, aie.FlowOp):
+        ends = [
+            (op.source, aie.DMAChannelDir.MM2S, op.source_bundle, op.source_channel),
+            (op.dest, aie.DMAChannelDir.S2MM, op.dest_bundle, op.dest_channel),
+        ]
+    elif isinstance(op, aie.PacketFlowOp):
+        ends = [
+            (
+                end.tile,
+                (
+                    aie.DMAChannelDir.MM2S
+                    if isinstance(end, aie.PacketSourceOp)
+                    else aie.DMAChannelDir.S2MM
+                ),
+                end.bundle,
+                end.channel,
+            )
+            for end in op.regions[0].blocks[0].operations
+            if isinstance(end, (aie.PacketSourceOp, aie.PacketDestOp))
+        ]
+    else:
+        return []
+    return [
+        (
+            tile.owner,
+            direction,
+            ir.IntegerAttr(bundle).value,
+            ir.IntegerAttr(channel).value,
+        )
+        for tile, direction, bundle, channel in ends
+    ]
+
+
 def _namespace(device: aie.DeviceOp, member: str) -> None:
     """Rename every symbol ``device`` defines into ``member``'s namespace.
 
@@ -198,9 +241,11 @@ def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceO
     ]
     kernels: dict[str, str] = {}
     tiles: dict[tuple[int, int], ir.Value] = {}
-    exclusive: dict[tuple[str, tuple[int, int]], str] = {}
+    exclusive: dict[tuple[str, tuple[int, int]], tuple[str, str]] = {}
 
     for member, device in members.items():
+        routed: set[tuple[tuple[int, int], aie.DMAChannelDir, int]] = set()
+        allocated: set[tuple[tuple[int, int], aie.DMAChannelDir, int]] = set()
         for op in _body(device):
             if _is_kernel_declaration(op):
                 symbol = _symbol(op)
@@ -224,23 +269,54 @@ def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceO
                     op.operation.erase()
                     continue
                 tiles[coords] = op.result
+            claims: list[tuple[str, tuple[int, int], str]] = []
             if op.operation.name in _EXCLUSIVE_PER_TILE:
-                owner = op.operation.operands[0].owner
-                placed = (
-                    _pinned_tile(owner.opview)
-                    if isinstance(owner, ir.Operation)
-                    else None
-                )
+                placed = _pinned_tile(op.operation.operands[0].owner)
                 if placed is not None:
-                    key = (op.operation.name, placed)
-                    if key in exclusive and exclusive[key] != member:
-                        raise CoResidenceError(
-                            f"{exclusive[key]} and {member} both put an "
-                            f"{op.operation.name} on tile {placed}"
+                    claims.append(
+                        (op.operation.name, placed, f"an {op.operation.name}")
+                    )
+            for tile, direction, bundle, channel in _route_ends(op):
+                placed = _pinned_tile(tile)
+                if placed is None:
+                    continue
+                if bundle == aie.WireBundle.TileControl:
+                    kind = (
+                        "aie.shim_dma"
+                        if tile.is_shim_tile()
+                        else "aie.memtile_dma" if tile.is_mem_tile() else "aie.mem"
+                    )
+                    claims.append((kind, placed, "a TileControl route"))
+                elif bundle == aie.WireBundle.DMA and tile.is_shim_tile():
+                    routed.add((placed, direction, channel))
+            if isinstance(op, aie.ShimDMAAllocationOp):
+                placed = _pinned_tile(op.tile.owner)
+                if placed is not None:
+                    allocated.add(
+                        (
+                            placed,
+                            aie.DMAChannelDir(ir.IntegerAttr(op.channel_dir).value),
+                            ir.IntegerAttr(op.channel_index).value,
                         )
-                    exclusive[key] = member
+                    )
+            for kind, placed, what in claims:
+                key = (kind, placed)
+                if key in exclusive and exclusive[key][0] != member:
+                    holder, held = exclusive[key]
+                    raise CoResidenceError(
+                        f"{holder} puts {held} and {member} puts {what} "
+                        f"on tile {placed}, which carries one {kind}"
+                    )
+                exclusive[key] = (member, what)
             if device is not pack:
                 op.operation.move_before(end)
+        if routed - allocated:
+            placed, direction, channel = min(routed - allocated)
+            raise CoResidenceError(
+                f"{member} routes shim tile {placed} {direction} channel "
+                f"{channel} by hand with no aie.shim_dma_allocation for it, "
+                "so another member's fifo could be given it"
+            )
         if device is not pack:
             device.operation.erase()
 

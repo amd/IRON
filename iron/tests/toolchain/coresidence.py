@@ -96,6 +96,48 @@ def _shim_pinned(col: int, channel: int) -> str:
     return device
 
 
+def _routed(allocated: bool) -> str:
+    """Rows routed by hand from shim (0, 0) MM2S 1 into shim (1, 0) S2MM 0,
+    (0, 0)'s BDs written through its TileControl by packets from (1, 0)
+    MM2S 0: a per-call gather's routes, with or without the allocations
+    that tell the fifo lowering its channels are taken.
+    """
+    allocations = (
+        """
+  aie.shim_dma_allocation @ctrl(%t1, MM2S, 0)
+  aie.shim_dma_allocation @rows_src(%t0, MM2S, 1)
+  aie.shim_dma_allocation @rows(%t1, S2MM, 0)"""
+        if allocated
+        else ""
+    )
+    return f"""
+aie.device(npu2) {{
+  %t0 = aie.tile(0, 0)
+  %t1 = aie.tile(1, 0)
+  aie.packet_flow(29) {{
+    aie.packet_source<%t1, DMA : 0>
+    aie.packet_dest<%t0, TileControl : 0>
+  }}
+  aie.flow(%t0, DMA : 1, %t1, DMA : 0){allocations}
+  aie.runtime_sequence @sequence() {{
+  }}
+}}
+"""
+
+
+# A static DMA program on shim (0, 0).
+_SHIM_PROGRAM = """
+aie.device(npu2) {
+  %t = aie.tile(0, 0)
+  %dma = aie.shim_dma(%t) {
+    aie.end
+  }
+  aie.runtime_sequence @sequence() {
+  }
+}
+"""
+
+
 def _sequence(cols: int, coresident) -> OperatorSequence:
     add = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=cols)
     silu = SiLU(size=SIZE, tile_size=TILE, num_aie_columns=cols)
@@ -210,6 +252,33 @@ def test_two_pins_on_one_shim_channel_do_not_fit():
 @pytest.mark.parametrize("col, channel", [(0, 0), (1, 1)], ids=["channel", "column"])
 def test_pins_on_distinct_shim_channels_fit(col, channel):
     assert fits({"x": _shim_pinned(0, 1), "y": _shim_pinned(col, channel)}) is None
+
+
+def test_a_hand_routed_shim_channel_needs_its_allocation():
+    # Unallocated, (0, 0) MM2S 1 is free to the fifo lowering, which gives
+    # it to the pinned fifo too: one port feeding both routes.
+    reason = fits({"x": _routed(allocated=False), "y": _shim_pinned(0, 1)})
+    assert reason is not None and "shim_dma_allocation" in reason
+    assert "(0, 0) MM2S channel 1" in reason
+
+
+@pytest.mark.parametrize(
+    "col, channel, taken",
+    [(0, 1, True), (1, 0, True), (0, 0, False), (2, 0, False)],
+    ids=["routed", "packets", "same_tile", "elsewhere"],
+)
+def test_an_allocated_route_holds_its_channels(col, channel, taken):
+    assert fits({"x": _routed(allocated=True)}) is None
+    reason = fits({"x": _routed(allocated=True), "y": _shim_pinned(col, channel)})
+    if taken:
+        assert reason is not None and "already in use" in reason
+    else:
+        assert reason is None
+
+
+def test_a_tile_control_route_claims_the_dma_program():
+    reason = fits({"x": _routed(allocated=True), "y": _SHIM_PROGRAM})
+    assert reason is not None and "TileControl" in reason and "(0, 0)" in reason
 
 
 def test_packing_is_in_the_fused_identity():
