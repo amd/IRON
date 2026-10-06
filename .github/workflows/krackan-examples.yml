@@ -26,6 +26,10 @@ jobs:
         env:
           HOME: /workspace
 
+      - name: Use a compile cache of this job's own
+        shell: bash
+        run: echo "NPU_CACHE_HOME=$RUNNER_TEMP/npu-cache" >> "$GITHUB_ENV"
+
       - name: Prerequisites
         uses: ./.github/actions/prereqs
         with:
@@ -92,10 +96,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mlir-artifacts
-          # Builds land in mlir-aie's JIT cache, keyed on content; nothing is
-          # written beside the application any more.
           path: |
-            ~/.npu/cache/*/*.mlir
+            ${{ env.NPU_CACHE_HOME }}/*/*.mlir
           retention-days: 14
           if-no-files-found: warn
 
