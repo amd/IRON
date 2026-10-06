@@ -14,19 +14,15 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
-from ..declare import Operator
 from ..declare.operator import graph_tracer
 
 
 class Handle:
     """A traced tensor: a buffer of the graph, with a shape and a dtype.
 
-    Carries no data. ``h[key]`` takes numpy's basic indexing (integers,
-    unit-step slices, an ellipsis) and, on one axis, a per-call
-    ``Value``: ``keys[:, pos]``. A contiguous static region is a slice:
-    part of the parent's buffer, which any operator takes. Any other view
-    (a strided region, a transpose, a per-call index) is an access pattern
-    over the parent's buffer, which only a copy takes, since a DMA walks it.
+    ``h[key]`` takes numpy's basic indexing and, on one axis, a per-call
+    ``Value`` (``keys[:, pos]``). A contiguous static region is a slice any
+    operator takes; any other view is an access pattern only a copy takes.
     """
 
     __slots__ = (
@@ -515,16 +511,12 @@ def carry(**next_values: Handle | Affine | Value | int) -> Carry:
 
 
 def is_operand(x) -> bool:
-    """A graph handle, a state (or a view of one), or a host tensor (a weight)."""
-    if isinstance(x, (Handle, State, _HostView)):
-        return True
-    if isinstance(x, (Operator, type)):
-        return False
-    return hasattr(x, "shape") and hasattr(x, "dtype")
+    """A graph handle, a state or weight (or a view of one), or a host tensor."""
+    return isinstance(x, (Handle, State, Weight, _HostView, np.ndarray, np.generic))
 
 
 def _tensor_dtype(t):
-    dt = getattr(t, "dtype", None)
+    dt = t.dtype
     name = str(dt)
     return {
         "bfloat16": bfloat16,

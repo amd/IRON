@@ -156,13 +156,15 @@ class OperatorSequence:
         self.residents = dict(residents or {})
         self.shared_words = dict(shared_words or {})
         self._arena_layout: dict[str, Allocation] | None = None
-        self.mode = mode  # None until the device is known (prepare)
-        self._image = None  # the mode's image builder, once resolved
+        self.mode = mode
+        self.subbuffer_layout: dict[str, tuple[str, int, int]] | None = None
+        self._image = None
+        self._artifacts: Artifacts | None = None
 
     @staticmethod
     def _coerce_dispatch(dispatch):
         if dispatch == "auto" or dispatch is None:
-            return None  # the platform default, resolved when the device is known
+            return None
         if isinstance(dispatch, str) and dispatch in _MODES:
             return dispatch
         raise TypeError(
@@ -490,7 +492,7 @@ class OperatorSequence:
         """Build this sequence's image, once; sets ``self.image`` (``None`` for
         the reference mode) and ``artifacts``.
         """
-        if not hasattr(self, "subbuffer_layout"):
+        if self.subbuffer_layout is None:
             self.prepare()
         self.image = self._image.link(self) if self._image is not None else None
         self._artifacts = self._record()
@@ -504,10 +506,9 @@ class OperatorSequence:
     @property
     def artifacts(self) -> Artifacts:
         """The record of what ``link`` produced."""
-        artifacts = getattr(self, "_artifacts", None)
-        if artifacts is None:
+        if self._artifacts is None:
             raise RuntimeError(f"{self.name} is not linked; compile() first")
-        return artifacts
+        return self._artifacts
 
     def _record(self):
         """What this image consists of: its designs, its steps, its buffers."""
@@ -565,13 +566,10 @@ class OperatorSequence:
 
     def get_callable(self, arena: ScratchArena | None = None):
         """The runtime callable of this sequence's mode, compiling first if
-        that has not happened (``compile()`` beforehand is the ahead-of-time
-        path; the work is the same, only when it happens differs).
-
-        A sequence placed in an arena plan runs its scratch in ``arena``, the
-        buffer behind that plan; made here if not given.
+        needed. A sequence placed in an arena plan runs its scratch in
+        ``arena``, made here if not given.
         """
-        if not hasattr(self, "subbuffer_layout"):
+        if self.subbuffer_layout is None:
             self.compile()
         self.link()
         assert self.mode is not None, "link() chose the mode"

@@ -176,6 +176,9 @@ class Operator(metaclass=_OperatorMeta):
     own_preamble: ClassVar[bool] = False
     # A fused image lowers every operator's sequence under the union.
     aiecc_flags: ClassVar[tuple[str, ...]] = ()
+    # Per leading operand that may be a view: the param holding its pattern
+    # and the per-call value a dynamic index binds.
+    accept_views: ClassVar[tuple[tuple[str, str], ...]] = ()
 
     trace: TraceConfig | None = dataclasses.field(
         default=None, repr=False, kw_only=True

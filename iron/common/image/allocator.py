@@ -72,22 +72,14 @@ class LiveRange:
 
     @classmethod
     def scan(cls, steps: Steps, pinned=()) -> dict[str, "LiveRange"]:
-        """Map every poolable buffer to the step interval it must stay live for.
+        """Every poolable buffer's range, from its first write to its last read.
 
-        ``steps`` is an iterable of ``(reads, writes)`` buffer names, in execution
-        order. One linear scan suffices because that order is already total -- the
-        same reason TorchInductor computes last-use with a single reverse scan in
-        ``Scheduler.compute_last_usage`` rather than building a conflict graph.
-
-        A buffer is live from its first write to its last read; a
-        buffer that is read before it is ever written is an input, and one never
-        read again is an output -- both are treated as pinned, since their
-        contents outlive the sequence.
+        A buffer read before it is written is an input and one never read is an
+        output; like ``pinned``, neither is pooled.
         """
         first_write, last_read, first_read = {}, {}, {}
         for step, (reads, writes) in enumerate(steps):
             for n in reads:
-                last_read.setdefault(n, step)
                 last_read[n] = step
                 first_read.setdefault(n, step)
             for n in writes:

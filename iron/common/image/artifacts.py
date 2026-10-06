@@ -19,7 +19,8 @@ import dataclasses
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+
+from aie.utils.compile.jit.compilabledesign import CacheEntry
 
 
 @dataclass(frozen=True)
@@ -28,7 +29,7 @@ class Design:
 
     name: str  # its symbol in the module (``op3_RoPE``), or the operator's label
     operators: tuple[str, ...]  # labels of the operators sharing it
-    entry: Any = None  # its own cache entry, when built as its own image
+    entry: CacheEntry | None = None  # its own cache entry, when built as its own image
     image: Path | None = None  # its own image, when it has one (an xclbin chain)
     insts: Path | None = None  # its own instruction stream, likewise
 
@@ -63,32 +64,28 @@ class Parameter:
 class Artifacts:
     """The record of one image.
 
-    ``kind`` is ``"elf"`` (one fused image) or ``"xclbin"`` (one image per
-    design, chained; ``image`` is the last link). ``entry`` is the cache
-    entry whose work directory holds the image's sidecars: the parameter
-    table (``params``) and the lowered module (``lowered_mlir``).
-    ``buffers`` maps each buffer name to ``(arena, offset, nbytes)``.
+    Attributes:
+        kind: ``"elf"`` (one fused image) or ``"xclbin"`` (one per design,
+            chained; ``image`` is the last link).
+        entry: The cache entry holding the parameter table and lowered module.
+        buffers: Each buffer name to ``(arena, offset, nbytes)``.
     """
 
     kind: str
     image: Path
     insts: Path | None
-    entry: Any
+    entry: CacheEntry | None
     designs: tuple[Design, ...]
     steps: tuple[Step, ...]
     buffers: dict[str, tuple[str, int, int]]
 
     @property
     def params(self) -> Path | None:
-        return getattr(self.entry, "params", None)
+        return self.entry.params if self.entry is not None else None
 
     @property
     def parameter_table(self) -> list[Parameter]:
-        """The scratchpad words the image declares: those its designs read,
-        which the parameter table lists after its count, in its order. Each
-        row's range, and the joint bounds after the rows, are what
-        ``ParameterScratchpad`` checks a write against.
-        """
+        """The scratchpad words the image declares, in the table's order."""
         if self.params is None:
             return []
         count, *rows = self.params.read_text().splitlines()
@@ -105,11 +102,11 @@ class Artifacts:
 
     @property
     def lowered_mlir(self) -> Path | None:
-        return getattr(self.entry, "lowered_mlir", None)
+        return self.entry.lowered_mlir if self.entry is not None else None
 
     @property
     def directory(self) -> Path | None:
-        return getattr(self.entry, "directory", None)
+        return self.entry.directory if self.entry is not None else None
 
     def report(self, name: str = "") -> str:
         lines = [f"{name or 'image'}: {self.kind} {self.image}"]

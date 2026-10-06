@@ -75,23 +75,16 @@ def _unbounded(h: Handle) -> Handle:
 
 
 def _take_views(cls, operands, kwargs, values):
-    """Hand each view operand's pattern to the operator and stand its parent in.
-
-    A class that takes views names, in operand order, the param that holds
-    each operand's pattern and the per-call value a dynamic index binds
-    (``Copy.accept_views``). Any other operator takes contiguous operands.
+    """Hand each view operand's pattern to the operator (``cls.accept_views``)
+    and stand its parent in.
     """
-    accept = getattr(cls, "accept_views", ())
     out = []
     for i, h in enumerate(operands):
-        if i < len(accept):
-            param, offset_member = accept[i]
-            # A scalar (one element indexed out of a vector) is one element.
+        if i < len(cls.accept_views):
+            param, offset_member = cls.accept_views[i]
             tap = TensorAccessPattern.full(h.shape or (1,)) if h.tap is None else h.tap
             kwargs.setdefault(param, tap)
             if h.bounds:
-                # A bound on one axis of the view: the pattern keeps that
-                # axis and the copy patches its size from the value.
                 (axis, count), *more = h.bounds.items()
                 if more:
                     raise ValueError(f"{h!r}: a copy takes one bounded axis")
@@ -532,14 +525,14 @@ class _ReferenceTracer(Tracer):
     def call(self, target, args, kwargs):
         cls = target if isinstance(target, type) else type(target)
         inputs, outputs, kwargs = cls.call_operands(args, kwargs)
-        n_views = len(getattr(cls, "accept_views", ()))
+        n_views = len(cls.accept_views)
         tensors, patterns = [], []
         for i, a in enumerate([*inputs.values(), *outputs]):
             pattern = None
             if isinstance(a, _HostView):
                 pattern = a.pattern()
                 if pattern.tap is not None and i < n_views:
-                    a = a.state.host  # the whole tensor, walked by the pattern
+                    a = a.state.host
                 else:
                     pattern, a = None, a.tensor()
             elif isinstance(a, State):
