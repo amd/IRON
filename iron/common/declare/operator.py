@@ -43,7 +43,6 @@ from .member import (
     Extent,
     Value,
     _Buffer,
-    _extent_reads,
     _Member,
     _Value,
     present,
@@ -119,7 +118,7 @@ class _ArrayView:
 
     def __getattr__(self, name: str):
         op = object.__getattribute__(self, "_op")
-        fields = {f.name for f in dataclasses.fields(op)}
+        fields = {f.name for f in dataclasses.fields(op) if Tier in f.metadata}
         if name in fields and name not in op._array_fields:
             raise TypeError(
                 f"{type(op).__name__}.array() reads {name}, which no tile names: "
@@ -182,6 +181,11 @@ class Operator(metaclass=_OperatorMeta):
     trace: TraceConfig | None = dataclasses.field(
         default=None, repr=False, kw_only=True
     )
+    # The graph values bound to per-call values, by member name; design_key
+    # adds them, since a dict does not hash.
+    bound_values: dict[str, str | None] = dataclasses.field(
+        default_factory=dict, repr=False, compare=False, kw_only=True
+    )
 
     def __init_subclass__(cls, image=None, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
@@ -196,7 +200,8 @@ class Operator(metaclass=_OperatorMeta):
         self._derive_params()
         # A graph's reference constructs at a bounded call's valid rows, a
         # shape no device runs, for reference() alone: it is not checked.
-        checked = getattr(graph_tracer.get(), "checks", True)
+        tracer = graph_tracer.get()
+        checked = tracer is None or tracer.checks
         if checked:
             self.validate()
         self._bind()
@@ -386,9 +391,6 @@ class Operator(metaclass=_OperatorMeta):
                 f"{type(self).__name__}.resolve() left {missing} unset for {dev}"
             )
         new.validate()
-        # Bound values live outside the fields, so replace() drops them.
-        if self.bound_values:
-            vars(new)["_bound_values"] = self.bound_values
         new.compatible()
         new._resolved = True
         return new
@@ -396,8 +398,6 @@ class Operator(metaclass=_OperatorMeta):
     def copy(self) -> Self:
         """A fresh instance for one build, keeping resolution and bound values."""
         new = dataclasses.replace(self)
-        if self.bound_values:
-            vars(new)["_bound_values"] = self.bound_values
         new._resolved = self._resolved
         if self._resolved:
             # replace() resets the init=False fields compatible() records.
@@ -409,10 +409,7 @@ class Operator(metaclass=_OperatorMeta):
         unknown = [n for n in tunables if n not in self._auto_fields]
         if unknown:
             raise TypeError(f"{type(self).__name__} has no tunable {unknown}")
-        new = dataclasses.replace(self, **tunables)
-        if self.bound_values:
-            vars(new)["_bound_values"] = self.bound_values
-        return new
+        return dataclasses.replace(self, **tunables)
 
     @property
     def widths(self) -> dict[str, int | None]:
@@ -477,23 +474,23 @@ class Operator(metaclass=_OperatorMeta):
         }
 
     def _per_call_derived(self) -> frozenset[str]:
-        if not self.bound_extents:
+        bound = self.bound_extents
+        if not bound:
             return frozenset()
         # From array(), derivations run on the operator: reading an extent here is not the array's.
         op = object.__getattribute__(self, "_op") if type(self) is _ArrayView else self
+        probe = copy.copy(op)
         out = set()
         for m in self._value_members:
             if not (isinstance(m, Value) and m.derive is not None):
                 continue
             reads: set[str] = set()
-            token = _extent_reads.set(reads)
+            vars(probe)["_extent_reads"] = reads
             try:
-                m.derive(op)
+                m.derive(probe)
             except Exception:
                 pass  # unresolved: what it read before failing still counts
-            finally:
-                _extent_reads.reset(token)
-            if reads & self.bound_extents.keys():
+            if reads & bound.keys():
                 out.add(m.name)
         return frozenset(out)
 
@@ -541,11 +538,8 @@ class Operator(metaclass=_OperatorMeta):
             raise TypeError(
                 f"{type(self).__name__} declares no per-call value {name!r}"
             )
-        vars(self).setdefault("_bound_values", {})[name] = bound_to
-
-    @property
-    def bound_values(self) -> dict[str, str | None]:
-        return dict(self.__dict__.get("_bound_values", {}))
+        # Rebound, not updated: replace() hands a copy the same dict.
+        self.bound_values = {**self.bound_values, name: bound_to}
 
     # -- graphs ---------------------------------------------------------
 

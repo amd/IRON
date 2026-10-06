@@ -12,7 +12,6 @@ and a ``Scratchpad`` or ``DispatchTime`` written per call.
 
 from __future__ import annotations
 
-import contextvars
 from dataclasses import dataclass
 from enum import Enum
 from typing import (
@@ -287,13 +286,6 @@ class DispatchTime(_Value):
     kind = "dispatch"
 
 
-# The extents a ``derive`` reads, recorded while an operator evaluates one
-# (see Operator._per_call_derived); None when nothing is recording.
-_extent_reads: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
-    "iron.extent_reads", default=None
-)
-
-
 class Extent(_Value):
     """A shape field a graph may bound per call.
 
@@ -318,7 +310,8 @@ class Extent(_Value):
     def __get__(self, instance, owner=None):
         if instance is None:
             return self
-        reads = _extent_reads.get()
+        # The extents a derive reads, recorded on the copy Operator._per_call_derived probes.
+        reads = instance.__dict__.get("_extent_reads")
         if reads is not None:
             reads.add(self.name)
         bound = instance.__dict__.get("_extents", {}).get(self.name)
