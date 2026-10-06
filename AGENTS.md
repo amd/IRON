@@ -713,7 +713,7 @@ logging.basicConfig(level=logging.DEBUG)
 
 - **small.yml**: Fast operator tests (non-extensive, runs on every PR)
 - **extensive.yml**: Full test suite (all operators with extensive tests)
-- **test-examples.yml**: Application tests (Llama inference, Gemma 4 on FastFlowLM)
+- **test-examples.yml**: Application tests (Llama inference, EmbeddingGemma 2, Gemma 4 on FastFlowLM)
 - **ci-lint.yml**: Linting checks (black, clang-format, reuse)
 - **pr-comment.yml**: Posts the performance trends of a PR as a comment
 - **publish-pages.yml**: Rebuilds the benchmark history site on GitHub Pages
@@ -855,6 +855,22 @@ tokenizer), `profiles/` (tunables):
   1 GB of them; one compile serves every context up to it). XRT locks
   every device buffer, so `ulimit -l` must cover the weights and the
   caches: about 3.7 GB at 32768, 7 GB at 131072
+
+### EmbeddingGemma 2
+
+Its text encoder at `iron/applications/embeddinggemma_2/` (its test and
+README), over the model package `iron/lm/embeddinggemma2/`, which is not a
+`CausalLM`: one graph whose versions double in rows from 64 to the longest
+prompt, and `EmbeddingGemmaOracle`, its float32 encoder on the host:
+
+- **Required files**: `model.safetensors`, `tokenizer.json`
+- **Default location**: `/srv/embeddinggemma-2/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
+- **Run**: `pytest iron/applications/embeddinggemma_2/`, or
+  `python -m iron.lm.embeddinggemma2.encoder <dir> --query ... --document ...`
+
+A model's device test goes in `iron/applications/<name>/test.py`: CI's
+example suite runs `iron/applications/`, and the benchmark history names a
+row by that directory.
 
 ### AIE Kernel Reference
 

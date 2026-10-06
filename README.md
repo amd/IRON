@@ -194,6 +194,13 @@ IRON includes a complete LLM inference example demonstrating NPU acceleration:
 
 See [iron/applications/llama_3.2_1b/README.md](./iron/applications/llama_3.2_1b/README.md) for setup and usage instructions.
 
+### EmbeddingGemma 2
+
+- **Location**: `iron/applications/embeddinggemma_2/`, over the model package `iron/lm/embeddinggemma2/`
+- **Model**: EmbeddingGemma 2's text encoder, text to a unit-length embedding
+
+See [iron/applications/embeddinggemma_2/README.md](./iron/applications/embeddinggemma_2/README.md) for setup and usage instructions.
+
 ## Architecture
 
 IRON uses a three-layer architecture:

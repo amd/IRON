@@ -82,7 +82,7 @@ jobs:
         id: commit_results
         with:
           dir: phoenix/examples
-          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' -o pretty.md"
+          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' --metric='Latency (mean)' -o pretty.md"
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
