@@ -13,21 +13,16 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.ir import IntegerType
 from aie.iron import TaskGroup, WorkerRuntimeBarrier, sync_parameters
 
-from ..declare import Operator
-from ..declare.bound import (
-    BoundBuffer,
-    BoundStream,
-    BoundValue,
-    BufferView,
-    _StreamSlot,
-)
+from ..declare import DispatchTime, Operator
+from ..declare.bound import BoundBuffer, BoundValue, BufferView, Lane
 from .bd import BdLimits
 
 
 class Sequence:
     """The runtime sequence of one operator, opened by the library.
 
-    ``fill``/``drain`` take a stream (or one slot of a ``per=`` stream) and
+    ``fill``/``drain`` take an operand's lane (or the operand, for a
+    one-lane stream) and
     a buffer, a slice of one (``op.A``, ``op.A[:, r0:r1, :]``) or a
     ``TensorAccessPattern`` over it, and issue it as one transfer in the
     ``TaskGroup`` given as ``group=``. What goes through it is the
@@ -75,15 +70,14 @@ class Sequence:
         with its patched dimension under a bound. An override that keeps the
         derived movement for some operands issues them from here.
         """
-        stream = buf.lanes
-        if stream is None:
+        if not buf.streamed:
             raise ValueError(
                 f"{type(self.op).__name__}.{buf.name} has no tile=, so its "
                 f"sequence cannot be derived; add tile= or override sequence(rt)"
             )
         bounded = buf.bounded
         if bounded is None:
-            return [(slot, tap, None) for slot, tap in self.split(buf, stream)]
+            return [(slot, tap, None) for slot, tap in self.split(buf)]
         extent, axis, word = bounded
         if axis != buf.batch_axes:
             raise ValueError(
@@ -92,41 +86,38 @@ class Sequence:
                 f"override sequence(rt) to bound another axis"
             )
         return [
-            (slot, tap, {dim: word})
-            for slot, tap, dim in self.round_robin(buf, stream, axis)
+            (slot, tap, {dim: word}) for slot, tap, dim in self.round_robin(buf, axis)
         ]
 
     @staticmethod
-    def split(
-        buffer: BoundBuffer, stream: BoundStream
-    ) -> list[tuple[Any, TensorAccessPattern]]:
-        """How ``buffer`` moves through ``stream``: ``[(slot, tap), ...]``.
+    def split(buffer: BoundBuffer) -> list[tuple[Lane, TensorAccessPattern]]:
+        """How ``buffer`` moves through its stream: ``[(lane, tap), ...]``.
 
-        A single-slot or broadcast stream takes the whole buffer in one linear
+        A single-lane or broadcast stream takes the whole buffer in one linear
         transfer. A ``per=`` stream splits the buffer's first non-batch axis
-        across its slots, slot ``i`` taking the ``i``-th block of rows out of
+        across its lanes, lane ``i`` taking the ``i``-th block of rows out of
         every leading index.
         """
-        if stream.count == 1:
-            return [(stream, buffer.tap)]
-        if stream.replicate:
-            return [(stream[i], buffer.tap) for i in range(stream.count)]
+        count = buffer.count
+        if count == 1:
+            return [(buffer.lane(0), buffer.tap)]
+        if buffer.replicate:
+            return [(buffer.lane(i), buffer.tap) for i in range(count)]
         shape, axis = buffer.shape, buffer.batch_axes
-        if axis >= len(shape) or shape[axis] % stream.count:
+        if axis >= len(shape) or shape[axis] % count:
             raise ValueError(
-                f"{buffer.name} {shape} does not divide across the {stream.count} "
-                f"slots of stream {stream.name!r} on axis {axis}. Check "
-                f"{type(buffer._op).__name__}.compatible()"
+                f"{buffer.name} {shape} does not divide across its {count} lanes "
+                f"on axis {axis}. Check {type(buffer._op).__name__}.compatible()"
             )
-        parts = TensorAccessPattern.full(shape).partition(stream.count, axis)
-        return [(stream[i], parts[i]) for i in range(stream.count)]
+        parts = TensorAccessPattern.full(shape).partition(count, axis)
+        return [(buffer.lane(i), parts[i]) for i in range(count)]
 
     @staticmethod
     def round_robin(
-        buffer: BoundBuffer, stream: BoundStream, axis: int
-    ) -> list[tuple[Any, TensorAccessPattern, int]]:
-        """How ``buffer`` moves through ``stream`` when ``axis`` is bounded per
-        call: ``[(slot, tap, dim), ...]``, ``dim`` the descriptor dimension a
+        buffer: BoundBuffer, axis: int
+    ) -> list[tuple[Lane, TensorAccessPattern, int]]:
+        """How ``buffer`` moves through its stream when ``axis`` is bounded per
+        call: ``[(lane, tap, dim), ...]``, ``dim`` the descriptor dimension a
         call patches with the tiles per lane.
 
         The tiles along ``axis`` go round-robin over the lanes: lane ``k`` takes
@@ -136,7 +127,8 @@ class Sequence:
         descriptor is built for the full extent; a call shortens it.
         """
         shape, dtype = buffer.shape, buffer.dtype
-        lanes = 1 if stream.replicate else stream.count
+        count = buffer.count
+        lanes = 1 if buffer.replicate else count
         inner = prod(shape[axis + 1 :])
         tile_rows = buffer.extent_unit(axis)
         if shape[axis] % (lanes * tile_rows):
@@ -167,9 +159,9 @@ class Sequence:
                     f"{buffer.name} {shape}: the round-robin split over {lanes} lanes "
                     f"does not fit one descriptor per lane"
                 )
-            slots = range(stream.count) if stream.replicate else [lane]
+            slots = range(count) if buffer.replicate else [lane]
             for s in slots:
-                out.append((stream[s] if stream.count > 1 else stream, tap, 1))
+                out.append((buffer.lane(s), tap, 1))
         return out
 
     # -- transfers ---------------------------------------------------------
@@ -311,10 +303,10 @@ class Sequence:
                     f"size_by takes a value member's word (op.value(name)), got "
                     f"{value!r} for dimension {dim}"
                 )
-            if value.kind != "scratchpad":
+            if isinstance(value.member, DispatchTime):
                 raise ValueError(
-                    f"{value.name} is {value.kind}; a per-call size is a scratchpad "
-                    f"word patched into the descriptor"
+                    f"{value.name} is a DispatchTime value; a per-call size is a "
+                    f"scratchpad word patched into the descriptor"
                 )
             if value.param is None:
                 raise ValueError(
@@ -327,14 +319,16 @@ class Sequence:
         return out
 
     @staticmethod
-    def _lane(stream) -> _StreamSlot | BoundStream:
+    def _lane(stream) -> Lane:
         if isinstance(stream, BoundBuffer):
-            stream = stream.lanes  # an operand that is its own stream
-        if isinstance(stream, (_StreamSlot, BoundStream)):
+            if stream.count != 1:
+                raise ValueError(f"{stream.name} is per-{stream.count}; name a lane")
+            return stream.lane(0)
+        if isinstance(stream, Lane):
             return stream
         raise TypeError(
-            f"fill/drain take a stream, one lane of it, or an operand that is its "
-            f"own stream, got {stream!r}"
+            f"fill/drain take an operand's lane, or an operand that is its own "
+            f"one-lane stream, got {stream!r}"
         )
 
     def _resolve(
@@ -345,15 +339,7 @@ class Sequence:
         stream.
         """
         if isinstance(what, TensorAccessPattern):
-            buffer = stream.stream if isinstance(stream, _StreamSlot) else stream
-            if isinstance(buffer, BoundStream):
-                buffer = buffer.buffer
-            if not isinstance(buffer, BoundBuffer):
-                raise TypeError(
-                    f"{what!r} alone names no buffer; {stream!r} is not an "
-                    f"operand's own stream, so give (buffer, tap)"
-                )
-            return buffer, what, None
+            return self._lane(stream).buffer, what, None
         if isinstance(what, BoundBuffer):
             return what, what.tap, None
         if isinstance(what, BufferView):

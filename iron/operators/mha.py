@@ -847,9 +847,9 @@ class MHA(Operator):
         # preference. Q's slots share column 4's two channels, O's column 7's;
         # K and V's lanes, one per pipeline, its column's two.
         def shim_of(operand, lane=0) -> Tile:
-            lanes = operand.lanes
-            assert lanes is not None and isinstance(lanes.via, Shim)
-            return Tile(col=lanes.via.col if lanes.count == 1 else lane, row=0)
+            via = operand.member.via
+            assert isinstance(via, Shim)
+            return Tile(col=via.col if operand.count == 1 else lane, row=0)
 
         for s in range(self.q_shims):
             self.Q.lane(s).bind(inQ[s].prod(tile=shim_of(self.Q)))

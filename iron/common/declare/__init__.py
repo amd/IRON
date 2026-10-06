@@ -46,8 +46,9 @@ not a design.
 Module by module: ``field`` is what a class body writes, ``member``
 what it declares alongside its fields, ``bound`` what an instance's
 attribute returns, ``infer`` how operand shapes fill a declaration's
-dimension fields, ``operator`` the class itself, and ``creation``
-the checks run as a class body finishes.
+dimension fields, ``operator`` the class itself, ``creation``
+the checks run as a class body finishes, and ``xclbin`` an image someone
+else built.
 """
 
 from .field import (
@@ -59,6 +60,7 @@ from .field import (
 )
 from .member import (
     Carried,
+    Direction,
     DispatchTime,
     Extent,
     In,
@@ -67,13 +69,14 @@ from .member import (
     Scratchpad,
     Shim,
     Value,
-    Xclbin,
 )
 from .operator import Operator
 from .profile import Profile
+from .xclbin import Xclbin
 
 __all__ = [
     "Carried",
+    "Direction",
     "DispatchTime",
     "Extent",
     "In",

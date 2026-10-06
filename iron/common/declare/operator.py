@@ -34,17 +34,17 @@ from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance
 
 from ..testing import Testing
-from .bound import BoundBuffer, BoundStream, BoundValue
+from .bound import BoundBuffer, BoundValue
 from .creation import declare
 from .field import DimRef, Tier, Unresolvable, param
 from .infer import call_operands, infer, infer_kwargs, operand_flags
 from .member import (
+    DispatchTime,
     Extent,
     Value,
     _Buffer,
     _extent_reads,
     _Member,
-    _Stream,
     _Value,
     present,
 )
@@ -92,7 +92,7 @@ def _check_shipped(cls: type) -> None:
             f"drop the override"
         )
     for m in cls._members:
-        if isinstance(m, _Stream) and m.via is None:
+        if isinstance(m, _Buffer) and m.tile is not None and m.via is None:
             raise TypeError(
                 f"{cls.__name__}.{m.name}: a stream into a shipped image must be "
                 f"pinned with via=; nothing else says which shim it uses"
@@ -153,7 +153,7 @@ class _ExtentWord(Value):
 
     def divisor(self, op) -> int:
         b = op.value_buffer(self.buffer)
-        lanes = 1 if b.lanes.replicate else b.lanes.count
+        lanes = 1 if b.replicate else b.count
         return lanes * b.extent_unit(self.axis)
 
     def __repr__(self) -> str:
@@ -285,14 +285,14 @@ class Operator(metaclass=_OperatorMeta):
         streams = [
             m
             for m in cls._members
-            if isinstance(m, _Stream) and present(m, flags or {})
+            if isinstance(m, _Buffer) and m.tile is not None and present(m, flags or {})
         ]
         cols = dev.cols
-        for direction, budget in (
-            ("in", dev.shim_dma_channels_in),
-            ("out", dev.shim_dma_channels_out),
+        for drains, budget in (
+            (False, dev.shim_dma_channels_in),
+            (True, dev.shim_dma_channels_out),
         ):
-            ours = [m for m in streams if m.direction == direction]
+            ours = [m for m in streams if m.direction.drains == drains]
             per_core = sum(not m.replicate for m in ours) * num_channels
             shared = sum(m.replicate for m in ours) * num_channels
             if per_core:
@@ -423,8 +423,8 @@ class Operator(metaclass=_OperatorMeta):
             if f.init and f.name in self._auto_fields
         }
         found: dict[str, int | None] = {}
-        for stream in self.streams.values():
-            for ref in stream.member.per.dims if stream.member.per else ():
+        for b in self.buffers:
+            for ref in b.member.per.dims if b.streamed and b.member.per else ():
                 if isinstance(ref, DimRef) and ref.name in settable:
                     found.setdefault(ref.name, settable[ref.name])
         return found
@@ -435,25 +435,17 @@ class Operator(metaclass=_OperatorMeta):
 
     @property
     def inputs(self) -> list[BoundBuffer]:
-        return [b for b in self.buffers if b.direction in ("in", "inout")]
+        return [b for b in self.buffers if b.direction.fills]
 
     @property
     def outputs(self) -> list[BoundBuffer]:
-        return [b for b in self.buffers if b.direction in ("out", "inout")]
+        return [b for b in self.buffers if b.direction.drains]
 
     @property
     def values(self) -> list[BoundValue]:
         return [
             self._bound[m.name] for m in self._value_members if self.uses_value(m.name)
         ]
-
-    @property
-    def streams(self) -> dict[str, BoundStream]:
-        return {
-            m.name: self._bound[m.name].lanes
-            for m in self._members_io()
-            if m.stream is not None
-        }
 
     @property
     def residents(self) -> dict[str, Any]:
@@ -579,7 +571,7 @@ class Operator(metaclass=_OperatorMeta):
             if not isinstance(e, Extent):
                 continue
             for b in self._members_io():
-                if b.stream is not None:
+                if b.tile is not None:
                     axis = bound[b.name].extent_axis(e)
                     if axis is not None and self.extent_unit(b.name) != 0:
                         word = _ExtentWord(type(self), e, b.name, axis)
@@ -703,7 +695,7 @@ class Operator(metaclass=_OperatorMeta):
             elif self.uses_value(m.name):
                 how = "per call, " + (
                     "the instruction stream regenerated around it"
-                    if m.kind == "dispatch"
+                    if isinstance(m, DispatchTime)
                     else "a scratchpad word patched or read"
                 )
             else:

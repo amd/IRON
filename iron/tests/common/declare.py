@@ -33,6 +33,7 @@ from iron.common import (
     OptionalDim,
     param,
 )
+from iron.common.declare import Direction
 from iron.common.declare.field import Auto, DimRef, Param
 from iron.common.declare.infer import infer
 from iron.common.design import OperatorDesign
@@ -97,19 +98,8 @@ def test_fields_are_reattached_as_dim_refs():
 
 
 def test_members_keep_declaration_order_and_names():
-    # An operand's own stream follows it, under its name.
-    assert [m.name for m in MV._members] == [
-        "A",
-        "A",
-        "B",
-        "B",
-        "C",
-        "C",
-        "count",
-        "start",
-    ]
-    assert MV.A.direction == "in" and MV.C.direction == "out"
-    assert MV.A.stream is not None and MV.A.stream.direction == "in"
+    assert [m.name for m in MV._members] == ["A", "B", "C", "count", "start"]
+    assert MV.A.direction is Direction.IN and MV.C.direction is Direction.OUT
 
 
 def test_shapes_captured_bare_names_resolve_to_refs():
@@ -118,9 +108,8 @@ def test_shapes_captured_bare_names_resolve_to_refs():
     dims = MV.A.shape.dims
     assert dims[0].ref.name == "num_batches"
     assert dims[1] == MV.M and dims[2] is MV.K
-    assert MV.A.stream is not None
-    assert MV.A.stream.shape.dims == (MV.tile_out, MV.K)
-    assert MV.A.stream.per.dims == (MV.columns,)
+    assert MV.A.tile.dims == (MV.tile_out, MV.K)
+    assert MV.A.per.dims == (MV.columns,)
 
 
 def test_dataclass_constructor_is_typed_by_real_fields():
@@ -143,7 +132,7 @@ def test_dataclass_constructor_is_typed_by_real_fields():
 
 
 def test_a_tunable_may_name_a_tile_but_not_a_buffer_shape():
-    assert MV.A.stream is not None and MV.A.stream.shape.dims[0] is MV.tile_out
+    assert MV.A.tile.dims[0] is MV.tile_out
     with pytest.raises(TypeError, match="host shape may not depend on tuning"):
 
         class Bad(Operator):
@@ -214,9 +203,9 @@ def test_per_and_broadcast_are_exclusive():
 def test_buffers_resolve_shape_dtype_and_direction():
     specs = MV(M=64, K=256, num_batches=2).buffers
     assert [(s.direction, s.shape) for s in specs] == [
-        ("in", (2, 64, 256)),
-        ("in", (2, 256)),
-        ("out", (2, 64)),
+        (Direction.IN, (2, 64, 256)),
+        (Direction.IN, (2, 256)),
+        (Direction.OUT, (2, 64)),
     ]
     assert specs[0].dtype is bfloat16
     op = MV(M=1024, K=256)
@@ -273,7 +262,7 @@ def test_buffers_carry_the_declared_dtype_and_size(npu2):
 
     x, y = Repeat(rows=8, cols=64, repeat=4, dtype=np.int32).buffers
     assert x.dtype == np.int32 and y.dtype == np.int32
-    assert (x.direction, y.direction) == ("in", "out")
+    assert (x.direction, y.direction) == (Direction.IN, Direction.OUT)
     assert y.nbytes == 8 * 64 * 4 * 4
 
 
@@ -294,7 +283,7 @@ def test_a_stream_is_bound_lane_by_lane():
         op.A.lane(0).bind("again")
     with pytest.raises(ValueError, match="never bound"):
         op.C.handles
-    with pytest.raises(ValueError, match="index it"):
+    with pytest.raises(ValueError, match="name a lane"):
         op.A.handle
 
     class NoTile(Operator):
@@ -314,7 +303,8 @@ def test_per_call_values_bind_on_the_operator():
 
     op = Copy(n=256)
     assert [v.name for v in op.values] == ["off", "live"]
-    assert op.off.kind == "scratchpad" and op.live.kind == "dispatch"
+    assert isinstance(op.off.member, Scratchpad)
+    assert isinstance(op.live.member, DispatchTime)
 
 
 def test_shim_pins_declare():
@@ -388,7 +378,7 @@ def test_swiglu_stream_groups_are_chosen_by_their_ports():
 
 def test_an_operand_with_a_tile_is_its_own_stream():
     op = MV(M=1024, K=128).resolved(NPU2)
-    assert {k: (s.count, s.shape) for k, s in op.streams.items()} == {
+    assert {b.name: (b.count, b.tile_shape) for b in op.buffers} == {
         "A": (8, (64, 128)),
         "B": (1, (128,)),
         "C": (8, (64,)),
@@ -417,8 +407,8 @@ class Scaled(Operator):
 
 def test_an_operand_declared_when_a_flag_exists_only_where_it_is_true():
     plain, scaled = Scaled(N=64), Scaled(N=64, scaled=True)
-    assert [b.name for b in plain.buffers] == list(plain.streams) == ["x", "y"]
-    assert [b.name for b in scaled.buffers] == list(scaled.streams) == ["x", "s", "y"]
+    assert [b.name for b in plain.buffers if b.streamed] == ["x", "y"]
+    assert [b.name for b in scaled.buffers if b.streamed] == ["x", "s", "y"]
     assert scaled.s.shape == (64,)
     with pytest.raises(AttributeError, match="declared when=scaled"):
         plain.s
@@ -690,7 +680,7 @@ def test_mha_pads_the_sequence_and_groups_kv():
     # Grouped K/V are narrower than Q; plain K/V are exactly as wide.
     assert grouped[1].shape == (2, 128, 64)
     assert plain[1].shape == plain[0].shape
-    assert [spec.direction for spec in grouped] == ["in", "in", "in", "out"]
+    assert [spec.direction for spec in grouped] == [Direction.IN] * 3 + [Direction.OUT]
 
 
 # --------------------------------------------------------------------------

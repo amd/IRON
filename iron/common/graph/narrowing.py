@@ -95,7 +95,7 @@ class Variant:
     @classmethod
     def of(cls, op: Operator, dev) -> Variant:
         resolved = op.resolved(dev)
-        streams = resolved.streams.values()
+        streams = [b for b in resolved.buffers if b.streamed]
         widths: list[tuple[str, int]] = []
         for name, width in resolved.widths.items():
             assert width is not None, "a resolved operator sets its widths"
@@ -105,8 +105,8 @@ class Variant:
             resolved=resolved,
             widths=tuple(widths),
             key=cost_key(resolved),
-            mm2s=sum(s.count for s in streams if s.direction == "in"),
-            s2mm=sum(s.count for s in streams if s.direction == "out"),
+            mm2s=sum(s.count for s in streams if not s.direction.drains),
+            s2mm=sum(s.count for s in streams if s.direction.drains),
         )
 
 

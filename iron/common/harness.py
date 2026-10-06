@@ -20,7 +20,7 @@ from aie.utils.benchmark import run_iters
 from aie.utils.verify import Tolerance, Verdict, compare
 from ml_dtypes import bfloat16
 
-from .declare import Operator
+from .declare import Direction, Operator
 from .image import OperatorImage
 
 
@@ -184,23 +184,25 @@ def run_test(
     # An inout buffer's expected value is among the outputs, under its name,
     # but its tensor is the input given: the outputs a buffer is made for
     # are the others.
-    inout = {b.name for b in operator.buffers if b.direction == "inout"}
+    inout = {b.name for b in operator.buffers if b.direction is Direction.INOUT}
     ins = iter(inputs.items())
     outs = iter([(n, v) for n, v in outputs.items() if n not in inout])
     args, produced, total_bytes = [], {}, 0
     for b in operator.buffers:
         try:
-            if b.direction == "out":
+            if b.direction is Direction.OUT:
                 name, _ = next(outs)
                 buf = tensor_class(b.host_shape, dtype=b.host_dtype)
                 produced[name] = buf
             else:
                 name, data = next(ins)
                 buf = tensor_class(data)
-                if b.direction == "inout":
+                if b.direction is Direction.INOUT:
                     produced[name] = buf
         except StopIteration:
-            raise ValueError(f"no {b.direction} given for buffer {b.name!r}") from None
+            raise ValueError(
+                f"no {b.direction.value} given for buffer {b.name!r}"
+            ) from None
         args.append(buf)
         total_bytes += _nbytes(buf)
 

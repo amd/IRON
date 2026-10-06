@@ -28,8 +28,7 @@ from aie.iron import Buffer, Lock, Program, Runtime, Task
 from aie.iron.device import Tile
 from aie.iron.runtime.dmatask import emit_shim_transfer
 
-from ..declare import Operator
-from ..declare.bound import _StreamSlot
+from ..declare import Direction, Operator
 from .runtime import Sequence
 
 
@@ -83,16 +82,20 @@ class ExternalSequence(Sequence):
         """The module whose runtime sequence drives ``op``'s downloaded image."""
         shims = {col: Tile(col, 0) for col in range(dev.cols)}
         channels = {}
-        for s in op.streams.values():
+        for s in op.buffers:
+            if not s.streamed:
+                continue
             for i in range(s.count):
-                pin = s.pin(i)
+                pin = s.lane(i).shim
                 if pin is None or pin.channel is None:
                     raise ValueError(
                         f"{type(op).__name__}.{s.name}[{i}] has no (column, "
                         f"channel) pin; a shipped image's streams need one"
                     )
                 direction = (
-                    DMAChannelDir.MM2S if s.direction == "in" else DMAChannelDir.S2MM
+                    DMAChannelDir.MM2S
+                    if s.direction is Direction.IN
+                    else DMAChannelDir.S2MM
                 )
                 channels[(s.name, i)] = (
                     f"{s.name}_{i}",
@@ -166,10 +169,9 @@ class ExternalSequence(Sequence):
                 "per-call offsets and sizes are not supported on a shipped image"
             )
         lane = self._lane(stream)
-        slot = lane if isinstance(lane, _StreamSlot) else lane[0]
-        key = (slot.stream.name, slot.index)
+        key = (lane.buffer.name, lane.index)
         queue = self._queues.setdefault(key, [])
-        if len(queue) == slot.stream.depth:
+        if len(queue) == lane.buffer.depth:
             queue.pop(0).await_()
         queue.append(
             emit_shim_transfer(

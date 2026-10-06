@@ -17,7 +17,7 @@ from __future__ import annotations
 import dataclasses
 
 from .field import Auto, DimRef, OptionalDim, Param, Shape, Tier
-from .member import Extent, _Buffer, _Member, _Stream
+from .member import Extent, _Buffer, _Member
 
 
 def members_of(cls: type) -> list[_Member]:
@@ -41,12 +41,7 @@ def members_of(cls: type) -> list[_Member]:
             # values, whose block the image lays out differently.
             if isinstance(value, _Member):
                 ordered[name] = value
-    members = []
-    for m in ordered.values():
-        members.append(m)
-        if isinstance(m, _Buffer) and m.stream is not None:
-            members.append(m.stream)  # the buffer's own stream, right after it
-    return members
+    return list(ordered.values())
 
 
 def declare(cls: type) -> None:
@@ -96,10 +91,13 @@ def declare(cls: type) -> None:
     for m in members:
         if m.owner is not cls:
             continue  # inherited; already processed on its own class
-        if isinstance(m, (_Buffer, _Stream)):
+        if isinstance(m, _Buffer):
             m.shape = m.shape.rewrite(cls)
             (m.dtype,) = Shape((m.dtype,)).rewrite(cls).dims
-            m.shape.check(cls, m, "dimension", allow_tunable=isinstance(m, _Stream))
+            m.shape.check(cls, m, "dimension", allow_tunable=False)
+            if m.tile is not None:
+                m.tile = m.tile.rewrite(cls)
+                m.tile.check(cls, m, "tile dimension", allow_tunable=True)
             if sum(isinstance(d, OptionalDim) for d in m.shape.dims) > 1:
                 raise TypeError(
                     f"{cls.__name__}.{m.name}: at most one OptionalDim() dimension, "
@@ -120,7 +118,7 @@ def declare(cls: type) -> None:
                     f"field, the one a graph may bound per call"
                 )
             m.field = ref
-        if isinstance(m, _Stream) and m.per is not None:
+        if isinstance(m, _Buffer) and m.tile is not None and m.per is not None:
             m.per = m.per.rewrite(cls)
             for ref in m.per.dims:
                 if not isinstance(ref, DimRef) or ref.tier is None:
@@ -139,8 +137,8 @@ def declare(cls: type) -> None:
     # its presence names, and what declares itself array=True.
     named: set[str] = set()
     for m in members:
-        if isinstance(m, _Stream):
-            named |= m.shape.names()
+        if isinstance(m, _Buffer) and m.tile is not None:
+            named |= m.tile.names()
             if m.per is not None:
                 named |= m.per.names()
             if isinstance(m.dtype, DimRef):

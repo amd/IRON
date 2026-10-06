@@ -14,7 +14,7 @@ import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.utils import bfp
 
-from ..declare import Operator
+from ..declare import Direction, Operator
 from ..declare.bound import BoundValue
 from ..declare.infer import call_operands, infer, infer_kwargs, operand_flags
 from ..declare.member import Extent, _Value
@@ -366,8 +366,8 @@ class Tracer:
 
     def _record(self, op, operands):
         buffers = op.buffers
-        ins = [b for b in buffers if b.direction in ("in", "inout")]
-        outs = [b for b in buffers if b.direction == "out"]
+        ins = [b for b in buffers if b.direction.fills]
+        outs = [b for b in buffers if b.direction is Direction.OUT]
         if len(operands) == len(ins):
             given_outs = []
         elif len(operands) == len(ins) + len(outs):
@@ -421,9 +421,9 @@ class Tracer:
                 self._bind(op, extent.name, count)
         slots, outputs, it, given = [], [], iter(operands[: len(ins)]), iter(given_outs)
         for b in buffers:
-            if b.direction == "in":
+            if b.direction is Direction.IN:
                 slots.append(next(it))
-            elif b.direction == "inout":
+            elif b.direction is Direction.INOUT:
                 h = next(it)
                 slots.append(h)
                 outputs.append(h)  # in place: the handle given is the result
@@ -571,7 +571,7 @@ class _ReferenceTracer(Tracer):
         # A flat-declared output the call did not give keeps the shape of the
         # operand it is the size of, as the traced handle does
         # (``Tracer._record``): a view, never a copy.
-        outs = [b for b in op.buffers if b.direction == "out"]
+        outs = [b for b in op.buffers if b.direction is Direction.OUT]
         fresh = len(tensors) == n_in and len(outs) == 1
         if fresh and result is not None and len(outs[0].shape) == 1:
             like = next(

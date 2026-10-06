@@ -13,9 +13,8 @@ and a ``Scratchpad`` or ``DispatchTime`` written per call.
 from __future__ import annotations
 
 import contextvars
-import hashlib
-import urllib.request
-from pathlib import Path
+from dataclasses import dataclass
+from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -28,7 +27,6 @@ from typing import (
 )
 
 import numpy as np
-from aie.utils.compile import NPU_CACHE_HOME
 from ml_dtypes import bfloat16
 
 from .field import Shape, _DimSpec
@@ -37,77 +35,36 @@ if TYPE_CHECKING:
     from typing import Self
 
     # Named in the subclasses' base expressions as strings (bound imports member).
-    from .bound import BoundBuffer, BoundStream, BoundValue
+    from .bound import BoundBuffer, BoundValue
 
 
 B = TypeVar("B")  # the bound form an instance serves
 
 
+@dataclass(frozen=True)
 class Shim:
     """A pinned shim endpoint: column and DMA channel on row 0."""
 
-    __slots__ = ("col", "channel")
-
-    def __init__(self, col: int, channel: int | None = None) -> None:
-        self.col = col
-        self.channel = channel
-
-    def __repr__(self) -> str:
-        return f"Shim(col={self.col}, channel={self.channel})"
+    col: int
+    channel: int | None = None
 
 
-class Xclbin:
-    """An image someone else built: a downloaded xclbin, pinned by digest.
+class Direction(Enum):
+    """Which way a buffer moves between the host and the array."""
 
-    Given as ``image=`` when a class is declared (``class Shipped(GEMM,
-    image=Xclbin(...))``). Every stream of such a class is pinned with
-    ``via=`` and every derived value has an ``address``, because nothing else
-    records where its endpoints are; the library emits the sequence against
-    those pins.
-    """
+    IN = "in"
+    OUT = "out"
+    INOUT = "inout"
 
-    def __init__(
-        self, *, url: str, sha256: str, filename: str, kernel_name: str = "MLIR_AIE"
-    ) -> None:
-        self.url = url
-        self.sha256 = sha256
-        self.filename = filename
-        self.kernel_name = kernel_name
+    @property
+    def fills(self) -> bool:
+        """The host fills it: an input of a call."""
+        return self is not Direction.OUT
 
-    def __repr__(self) -> str:
-        return f"Xclbin({self.filename})"
-
-    def fetch(self, directory=None) -> Path:
-        """The downloaded file, by digest: fetched unless a file of the pinned
-        content is already there.
-
-        Into the JIT cache's own root by default (``NPU_CACHE_HOME``'s
-        ``prebuilt/``), so an external image is found where every other built
-        artifact is and no caller has to name a directory for it.
-        """
-        if directory is None:
-            directory = Path(NPU_CACHE_HOME) / "prebuilt"
-        target = Path(directory) / self.filename
-
-        def digest(path):
-            with open(path, "rb") as f:
-                return hashlib.file_digest(f, "sha256").hexdigest()
-
-        if target.exists() and digest(target) == self.sha256:
-            return target
-        if not self.url.startswith("https://"):
-            raise ValueError(f"refusing to download over {self.url!r}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # Beside the target and renamed, so an interrupted fetch cannot leave a
-        # truncated file that a later run reports as a digest mismatch.
-        partial = target.with_suffix(target.suffix + ".part")
-        with urllib.request.urlopen(self.url, timeout=60) as response:
-            partial.write_bytes(response.read())
-        if (got := digest(partial)) != self.sha256:
-            partial.unlink()
-            raise RuntimeError(f"{self.url} has SHA-256 {got}, expected {self.sha256}")
-        partial.replace(target)
-        return target
+    @property
+    def drains(self) -> bool:
+        """The host reads it back: an output of a call, its stream leaving the array."""
+        return self is not Direction.IN
 
 
 class _Member(Generic[B]):
@@ -115,15 +72,14 @@ class _Member(Generic[B]):
 
     ``__set_name__`` gives the member its name and the class body gives it
     its order. On an instance, ``__get__`` returns the bound form built as
-    the class is created (a ``BoundBuffer``, ``BoundStream`` or
-    ``BoundValue``). ``B`` is that type, so a type checker sees
-    ``op.A`` as it.
+    the class is created (a ``BoundBuffer`` or ``BoundValue``). ``B`` is
+    that type, so a type checker sees ``op.A`` as it.
     """
 
     name: str = ""
     owner: type | None = None
-    # The flag an optional operand and its stream are declared when=; None
-    # for a member every instance has.
+    # The flag an optional operand is declared when=; None for a member
+    # every instance has.
     when: _DimSpec | None = None
 
     def __set_name__(self, owner: type, name: str) -> None:
@@ -156,9 +112,12 @@ class _Buffer(_Member["BoundBuffer"]):
     With ``tile=`` the buffer is its own stream into (or out of) the array:
     ``tile`` is what one fifo element holds, in the units a core reads
     (its dimensions may be tunables), ``per=`` the field the stream is
-    replicated over, ``depth`` the fifo depth, ``via=`` a pinned shim
-    endpoint. Without it the buffer is an argument of a sequence written by
-    hand (``Operator.sequence``).
+    replicated over (one fifo per column, say), or a tuple of fields whose
+    product is the count (columns x channels), ``depth`` the fifo depth,
+    ``via=`` a pinned shim endpoint. ``broadcast=True`` is one fifo every
+    worker consumes; ``replicate=True`` gives every ``per=`` lane the whole
+    buffer rather than a share of it. Without a tile the buffer is an
+    argument of a sequence written by hand (``Operator.sequence``).
 
     ``when=`` a boolean ``param()`` makes the operand optional: it, and its
     stream, exist only on an instance where the field is true. A call gives
@@ -166,7 +125,7 @@ class _Buffer(_Member["BoundBuffer"]):
     (see ``call_operands``).
     """
 
-    direction: ClassVar[str] = ""
+    direction: ClassVar[Direction]
 
     def __init__(
         self,
@@ -175,80 +134,10 @@ class _Buffer(_Member["BoundBuffer"]):
         tile: Any = None,
         per: _DimSpec | None = None,
         depth: int = 2,
-        via: "Shim | list[Shim] | None" = None,
+        via: Shim | list[Shim] | None = None,
         replicate: bool = False,
         broadcast: bool = False,
         when: _DimSpec | None = None,
-    ) -> None:
-        self.shape = Shape(tuple(dims))
-        self.dtype = dtype
-        self.when = when
-        self.stream: _Stream | None = None
-        if tile is not None:
-            tile = tuple(tile) if isinstance(tile, (tuple, list)) else (tile,)
-            kind = StreamIn if self.direction == "in" else StreamOut
-            self.stream = kind(
-                *tile,
-                dtype=dtype,
-                per=per,
-                depth=depth,
-                via=via,
-                replicate=replicate,
-                broadcast=broadcast,
-            )
-            self.stream.when = when
-
-    def __set_name__(self, owner: type, name: str) -> None:
-        super().__set_name__(owner, name)
-        if self.stream is not None:
-            self.stream.__set_name__(owner, name)
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({self.shape})"
-
-
-class In(_Buffer):
-    """A buffer the host fills and the array reads."""
-
-    direction = "in"
-
-
-class Out(_Buffer):
-    """A buffer the array writes and the host reads."""
-
-    direction = "out"
-
-
-class InOut(_Buffer):
-    """A buffer the host fills and the array writes in place: its stream,
-    with ``tile=``, leaves the array, and the sequence writes back only what
-    it drains (a record of the tokens so far, say), leaving the rest as the
-    host gave it. A call takes it as an input and returns it.
-    """
-
-    direction = "inout"
-
-
-class _Stream(_Member["BoundStream"]):
-    """An operand's stream into or out of the array, in tile units.
-
-    ``per=`` names the field the stream is replicated over (one fifo per
-    column, say), or a tuple of fields whose product is the count (columns
-    x channels); ``broadcast=True`` is one fifo every worker consumes.
-    ``via=`` pins the shim endpoint(s). ``depth`` is the fifo depth.
-    """
-
-    direction: ClassVar[str] = ""
-
-    def __init__(
-        self,
-        *dims: _DimSpec,
-        dtype: Any = bfloat16,
-        per: _DimSpec | None = None,
-        broadcast: bool = False,
-        replicate: bool = False,
-        via: Shim | list[Shim] | None = None,
-        depth: int = 2,
     ) -> None:
         if per is not None and broadcast:
             raise TypeError("a stream is either per=<dim> or broadcast, not both")
@@ -258,30 +147,44 @@ class _Stream(_Member["BoundStream"]):
             )
         self.shape = Shape(tuple(dims))
         self.dtype = dtype
+        self.when = when
+        self.tile = (
+            None
+            if tile is None
+            else Shape(tuple(tile) if isinstance(tile, (tuple, list)) else (tile,))
+        )
         self.per = (
             None if per is None else Shape(per if isinstance(per, tuple) else (per,))
         )
-        self.broadcast = broadcast
-        # per= slots that each receive the whole buffer (one fill per slot)
-        # rather than a share of it.
-        self.replicate = replicate
-        self.via = via
         self.depth = depth
+        self.via = via
+        self.replicate = replicate
+        self.broadcast = broadcast
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.shape})"
 
 
-class StreamIn(_Stream):
-    """A stream entering the array; its shim end is a producer (MM2S)."""
+class In(_Buffer):
+    """A buffer the host fills and the array reads."""
 
-    direction = "in"
+    direction = Direction.IN
 
 
-class StreamOut(_Stream):
-    """A stream leaving the array; its shim end is a consumer (S2MM)."""
+class Out(_Buffer):
+    """A buffer the array writes and the host reads."""
 
-    direction = "out"
+    direction = Direction.OUT
+
+
+class InOut(_Buffer):
+    """A buffer the host fills and the array writes in place: its stream,
+    with ``tile=``, leaves the array, and the sequence writes back only what
+    it drains (a record of the tokens so far, say), leaving the rest as the
+    host gave it. A call takes it as an input and returns it.
+    """
+
+    direction = Direction.INOUT
 
 
 def present(member: _Member, flags: Mapping[str, Any]) -> bool:
@@ -315,6 +218,12 @@ class _Value(_Member["BoundValue"]):
 
     kind: ClassVar[str] = ""
     carried: ClassVar[bool] = False
+    # A Value's own: how the host derives it once per build and where a
+    # shipped image places it.
+    derive: Callable[[Any], Any] | None = None
+    address: int | None = None
+    lock: int | None = None
+    optional: bool = False
 
     def __init__(self, dtype: Any = np.int32) -> None:
         self.dtype = dtype

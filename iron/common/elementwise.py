@@ -48,6 +48,7 @@ since the array bakes it in.
 from __future__ import annotations
 
 import dataclasses
+import math
 from typing import ClassVar, Self
 
 import numpy as np
@@ -58,6 +59,7 @@ from aie.iron.kernels import Param
 from aie.utils.verify import Tolerance
 
 from .declare import (
+    Direction,
     Extent,
     In,
     Operator,
@@ -248,9 +250,9 @@ class Elementwise(Operator):
     # -- the array ----------------------------------------------------------
 
     def array(self, target) -> list:
-        streams = list(self.streams.values())
-        ins = [s for s in streams if s.direction == "in"]
-        outs = [s for s in streams if s.direction == "out"]
+        streams = [b for b in self.buffers if b.streamed]
+        ins = [b for b in streams if b.direction is Direction.IN]
+        outs = [b for b in streams if b.direction.drains]
         n_in = len(ins)
         cores = self.cores
         kernel = self.kernel()
@@ -265,7 +267,7 @@ class Elementwise(Operator):
         def fifos(stream, name):
             # A line spanning more than one bank cannot be double-buffered in
             # what is left of local memory.
-            depth = target.fifo_depth(stream.elements, stream.dtype)
+            depth = target.fifo_depth(math.prod(stream.tile_shape), stream.dtype)
             return [
                 ObjectFifo(stream.tile, name=f"{name}_{slot(k)}", depth=depth)
                 for k in range(cores)
@@ -319,9 +321,9 @@ class Elementwise(Operator):
         ]
         for k in range(cores):
             for stream, of in zip(ins, of_ins):
-                stream[k].bind(of[k].prod())
+                stream.lane(k).bind(of[k].prod())
             for stream, of in zip(outs, of_outs):
-                stream[k].bind(of[k].cons())
+                stream.lane(k).bind(of[k].cons())
         if not dynamic:
             self.count.bind(counts)
         return workers + barriers

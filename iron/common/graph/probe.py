@@ -37,7 +37,7 @@ from collections.abc import Mapping, Sequence
 
 import numpy as np
 
-from ..declare import Operator
+from ..declare import Direction, Operator
 from ..declare.bound import BoundBuffer, BoundValue
 from ..design import device_symbol
 from ..image.callable import SequenceCallable
@@ -116,7 +116,9 @@ class Standalone:
         for k in self._filled:
             op = self.steps[k]
             for buf, name_ in zip(op.buffers, self._names(k, op)):
-                (out_names if buf.direction == "out" else in_names).append(name_)
+                (out_names if buf.direction is Direction.OUT else in_names).append(
+                    name_
+                )
         self.sequence = OperatorSequence(
             name,
             [(op, *self._names(self._slot[k], op)) for k, op in enumerate(self.steps)],
@@ -131,7 +133,7 @@ class Standalone:
         for k in self._filled:
             op = self.steps[k]
             for buf, name_ in zip(op.buffers, self._names(k, op)):
-                if buf.direction in ("in", "inout"):
+                if buf.direction.fills:
                     self._bytes(name_)[: buf.nbytes] = self._content(buf, inputs, rng)
         ops = {id(op): op for op in self.steps}.values()
         symbols = {
@@ -179,7 +181,7 @@ class Standalone:
             self._bytes(name)[: buf.nbytes].tobytes()
             for k in self._filled
             for buf, name in zip(self.steps[k].buffers, self._names(k, self.steps[k]))
-            if buf.direction in ("out", "inout")
+            if buf.direction.drains
         )
 
 

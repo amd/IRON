@@ -30,6 +30,7 @@ from aie.iron import (
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from aie.utils.trace import events as trace_events
 
+from .. import declare
 from ..declare import Operator
 from ..declare.bound import BoundValue
 from .external import ExternalSequence
@@ -96,7 +97,7 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
         value.symbol = device_symbol(op, value)
         value.ssa = None
         value.targets = []
-        if image == "elf" and value.kind != "dispatch":
+        if image == "elf" and not isinstance(value.member, declare.DispatchTime):
             value.param = ScratchpadParameter(value.symbol, value.dtype)
         elif image == "elf":
             raise ValueError(
@@ -116,8 +117,8 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
     workers = [w for w in built if isinstance(w, Worker)]
     barriers = tuple(b for b in built if isinstance(b, WorkerRuntimeBarrier))
 
-    streams = list(op.streams.values())
-    handles = [h for s in streams for h in s.handles]  # raises if any stream is unbound
+    # Raises if any stream is unbound.
+    handles = [h for b in op.buffers if b.streamed for h in b.handles]
 
     buffers = op.buffers
     fn_args: list[Any] = [b.flat_type for b in buffers]

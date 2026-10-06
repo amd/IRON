@@ -19,10 +19,10 @@ from typing import Any
 import numpy as np
 
 from .field import DimRef, OptionalDim, Select
-from .member import _Buffer, present
+from .member import Direction, _Buffer, present
 
 
-def _operands(cls, directions) -> list[_Buffer]:
+def _operands(cls, *directions: Direction) -> list[_Buffer]:
     return [
         m for m in cls._members if isinstance(m, _Buffer) and m.direction in directions
     ]
@@ -37,7 +37,7 @@ def call_operands(cls, args, kwargs) -> tuple[dict[str, Any], list, dict[str, An
     its name, so an output is never taken for it. Returns the inputs by
     name, in declaration order, the outputs, and the other keywords.
     """
-    ins = _operands(cls, ("in", "inout"))
+    ins = _operands(cls, Direction.IN, Direction.INOUT)
     required = [m.name for m in ins if m.when is None]
     optional = {m.name for m in ins if m.when is not None}
     given = {k: v for k, v in kwargs.items() if k in optional and v is not None}
@@ -57,7 +57,7 @@ def operand_flags(cls, names, given: dict[str, Any]) -> dict[str, bool]:
     is true where its operand is given. A flag ``given`` states must agree.
     """
     flags: dict[str, bool] = {}
-    for m in _operands(cls, ("in", "inout")):
+    for m in _operands(cls, Direction.IN, Direction.INOUT):
         if m.when is None:
             continue
         flag, has = m.when.name, m.name in names
@@ -79,7 +79,9 @@ def inputs_of(cls, given: dict[str, Any]) -> list[_Buffer]:
     """The inputs of a ``cls`` constructed with ``given``: every declared one
     but an optional one whose flag is false.
     """
-    return [m for m in _operands(cls, ("in", "inout")) if present(m, given)]
+    return [
+        m for m in _operands(cls, Direction.IN, Direction.INOUT) if present(m, given)
+    ]
 
 
 def infer(cls, *operand_shapes, outputs=(), **given) -> dict[str, Any]:
@@ -97,7 +99,7 @@ def infer(cls, *operand_shapes, outputs=(), **given) -> dict[str, Any]:
             f"{cls.__name__} takes {len(ins)} operand(s) "
             f"({', '.join(m.name for m in ins)}), got {len(operand_shapes)}"
         )
-    outs = [m for m in _operands(cls, ("out",)) if present(m, given)]
+    outs = [m for m in _operands(cls, Direction.OUT) if present(m, given)]
     if outputs and len(outputs) != len(outs):
         raise TypeError(
             f"{cls.__name__} produces {len(outs)} output(s) "
@@ -182,6 +184,6 @@ def infer_kwargs(cls, kwargs) -> dict[str, Any]:
     and the flags that select a buffer's shape.
     """
     names = set(cls._param_fields)
-    for m in _operands(cls, ("in", "inout", "out")):
+    for m in _operands(cls, *Direction):
         names.update(d.flag.name for d in m.shape.dims if isinstance(d, Select))
     return {k: v for k, v in kwargs.items() if k in names}

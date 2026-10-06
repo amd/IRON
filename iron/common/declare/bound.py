@@ -10,168 +10,81 @@ every ``DimRef`` into an integer (``Shape.resolve``).
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Any, Iterator
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.utils import bfp
 
 from .field import DimRef, OptionalDim, Shape
-from .member import Extent, Shim, _Buffer, _Stream, _Value
+from .member import DispatchTime, Extent, Shim, _Buffer, _Value
 
 if TYPE_CHECKING:
     from .operator import Operator
 
 
-class BoundStream:
-    """An operand's stream on an operator instance: concrete tile, count, and
-    fifo handles.
-
-    Resolved lazily, because a tile or a ``per=`` count may name a tunable that
-    is ``None`` until ``Operator.resolved`` fills it.
+@dataclass(frozen=True)
+class Lane:
+    """One fifo of an operand's stream: what ``array()`` binds a shim end to
+    and a sequence fills or drains.
     """
 
-    def __init__(self, member: _Stream, op: Any) -> None:
-        self.member = member
-        self.op = op
-        self.name = member.name
-        self.direction = member.direction
-        self.broadcast = member.broadcast
-        self.replicate = member.replicate
-        self.depth = member.depth
-        self.via = member.via
-        # The buffer whose own stream this is (In(..., tile=)), else None.
-        self.buffer: "BoundBuffer | None" = None
-        self._handle_slots: list[Any] | None = None
+    buffer: BoundBuffer
+    index: int = 0
 
-    def _resolve(self, shape: Shape) -> tuple[int, ...]:
-        try:
-            return shape.resolve(self.op)
-        except ValueError as e:
-            raise ValueError(
-                f"stream {self.name!r}: {e}. Resolve the operator first (resolved(dev))"
-            ) from None
-
-    @property
-    def shape(self) -> tuple[int, ...]:
-        return self._resolve(self.member.shape)
-
-    @property
-    def dtype(self):
-        dtype = self.member.dtype
-        return dtype.of(self.op) if isinstance(dtype, DimRef) else dtype
-
-    @property
-    def count(self) -> int:
-        if self.member.per is None:
-            return 1
-        return math.prod(self._resolve(self.member.per))
-
-    @property
-    def _handles(self) -> list[Any]:
-        if self._handle_slots is None:
-            self._handle_slots = [None] * self.count
-        return self._handle_slots
-
-    @property
-    def tile(self):
-        """The ObjectFifo element type: ``np.ndarray[shape, dtype]``."""
-        return np.ndarray[self.shape, np.dtype[self.dtype]]
-
-    @property
-    def elements(self) -> int:
-        return int(np.prod(self.shape))
-
-    def bind(self, handle, index: int = 0) -> None:
-        """Bind the shim end of a fifo to this stream (or to one of its slots)."""
-        if self._handles[index] is not None:
-            raise ValueError(f"stream {self.name!r}[{index}] is already bound")
-        self._handles[index] = handle
-
-    def __getitem__(self, index: int) -> "_StreamSlot":
-        if not 0 <= index < self.count:
-            raise IndexError(f"stream {self.name!r} has {self.count} slots")
-        return _StreamSlot(self, index)
-
-    def __iter__(self) -> Iterator["_StreamSlot"]:
-        return (self[i] for i in range(self.count))
-
-    def __len__(self) -> int:
-        return self.count
+    def bind(self, handle) -> None:
+        """Bind the shim end of a fifo to this lane."""
+        handles = self.buffer._handles
+        if handles[self.index] is not None:
+            raise ValueError(f"{self.buffer.name}[{self.index}] is already bound")
+        handles[self.index] = handle
 
     @property
     def handle(self):
-        if self.count != 1:
-            raise ValueError(f"stream {self.name!r} is per-{self.count}; index it")
-        return self._require(0)
-
-    @property
-    def handles(self) -> list[Any]:
-        return [self._require(i) for i in range(self.count)]
-
-    def pin(self, index: int = 0) -> Shim | None:
-        """The declared shim endpoint of slot ``index``, if pinned."""
-        via = self.via
-        if via is None:
-            return None
-        if isinstance(via, Shim):
-            return via if self.count == 1 else None
-        return via[index]
-
-    def _require(self, index: int):
-        h = self._handles[index]
+        h = self.buffer._handles[self.index]
         if h is None:
             raise ValueError(
-                f"stream {self.name!r}[{index}] was never bound: array() must "
+                f"{self.buffer.name}[{self.index}] was never bound: array() must "
                 f"call .bind() on every operand's lane"
             )
         return h
 
-    def __repr__(self) -> str:
-        return f"<{self.direction} stream {self.name} {self.shape} x{self.count}>"
-
-
-class _StreamSlot:
-    __slots__ = ("stream", "index")
-
-    def __init__(self, stream: BoundStream, index: int) -> None:
-        self.stream = stream
-        self.index = index
-
-    def bind(self, handle) -> None:
-        self.stream.bind(handle, self.index)
-
-    @property
-    def handle(self):
-        return self.stream._require(self.index)
-
     @property
     def name(self) -> str:
-        return f"{self.stream.name}{self.index}"
+        return f"{self.buffer.name}{self.index}"
 
     @property
     def shim(self) -> Shim | None:
-        return self.stream.pin(self.index)
+        """The declared shim endpoint of this lane, if pinned."""
+        via = self.buffer.member.via
+        if isinstance(via, Shim):
+            return via if self.buffer.count == 1 else None
+        return None if via is None else via[self.index]
 
 
 class BoundBuffer:
-    """A buffer on an operator instance: concrete shape and dtype."""
+    """A buffer on an operator instance: concrete shape and dtype, and, with
+    a ``tile=``, its stream's tile, lanes and fifo handles.
+    """
 
     def __init__(self, member: _Buffer, op: "Operator") -> None:
         self.member = member
         self._op = op
         self.name = member.name
         self.direction = member.direction
-        # The buffer's own stream (In(..., tile=)), bound on the same
-        # instance. Its tile, lanes and handles come from here.
-        self.lanes: BoundStream | None = (
-            BoundStream(member.stream, op) if member.stream is not None else None
-        )
-        if self.lanes is not None:
-            self.lanes.buffer = self
+        self._handle_slots: list[Any] | None = None
 
-    # Resolved on use rather than at construction: a shape or dtype may
-    # depend on a tunable the device fills (flm/gemm's B layout), and an
+    def _resolve(self, shape: Shape) -> tuple[int, ...]:
+        try:
+            return shape.resolve(self._op)
+        except ValueError as e:
+            raise ValueError(
+                f"{self.name}: {e}. Resolve the operator first (resolved(dev))"
+            ) from None
+
+    # Resolved on use rather than at construction: a shape, dtype or tile
+    # may depend on a tunable the device fills (flm/gemm's B layout), and an
     # unresolved operator must still be usable as a value.
     @property
     def shape(self) -> tuple[int, ...]:
@@ -221,42 +134,67 @@ class BoundBuffer:
         """
         return np.ndarray[(self.elements,), np.dtype[self.dtype]]
 
-    # -- the stream side of a buffer that is its own stream ----------------
+    # -- the stream, for a buffer declared with a tile= --------------------
 
-    def _own(self) -> BoundStream:
-        if self.lanes is None:
+    @property
+    def streamed(self) -> bool:
+        """Whether the buffer is its own stream (declared with ``tile=``)."""
+        return self.member.tile is not None
+
+    def _stream(self) -> _Buffer:
+        if self.member.tile is None:
             raise TypeError(f"{self.name} is declared without a tile=: no stream")
-        return self.lanes
+        return self.member
+
+    @property
+    def tile_shape(self) -> tuple[int, ...]:
+        """What one fifo element holds."""
+        return self._resolve(self._stream().tile)
 
     @property
     def tile(self):
-        """The fifo element type of this buffer's stream."""
-        return self._own().tile
+        """The fifo element type of this buffer's stream: ``np.ndarray[shape, dtype]``."""
+        return np.ndarray[self.tile_shape, np.dtype[self.dtype]]
 
     @property
     def count(self) -> int:
         """How many lanes (fifos) the stream is replicated over."""
-        return self._own().count
+        per = self._stream().per
+        return 1 if per is None else math.prod(self._resolve(per))
 
     @property
     def depth(self) -> int:
         """The declared fifo depth of this buffer's stream."""
-        return self._own().depth
+        return self._stream().depth
 
-    def lane(self, index: int = 0) -> "_StreamSlot":
+    @property
+    def replicate(self) -> bool:
+        return self._stream().replicate
+
+    @property
+    def _handles(self) -> list[Any]:
+        if self._handle_slots is None:
+            self._handle_slots = [None] * self.count
+        return self._handle_slots
+
+    def lane(self, index: int = 0) -> Lane:
         """One lane of the stream, to bind a fifo's shim end to or fill/drain."""
-        return self._own()[index]
+        if not 0 <= index < self.count:
+            raise IndexError(f"{self.name} has {self.count} lanes")
+        return Lane(self, index)
 
     def bind(self, handle, index: int = 0) -> None:
-        self._own().bind(handle, index)
+        self.lane(index).bind(handle)
 
     @property
     def handle(self):
-        return self._own().handle
+        if self.count != 1:
+            raise ValueError(f"{self.name} is per-{self.count}; name a lane")
+        return self.lane(0).handle
 
     @property
     def handles(self) -> list[Any]:
-        return self._own().handles
+        return [self.lane(i).handle for i in range(self.count)]
 
     @property
     def batch_axes(self) -> int:
@@ -281,7 +219,7 @@ class BoundBuffer:
         unit = self._op.extent_unit(self.name)
         if unit is not None:
             return unit
-        tile_shape = self.lanes.shape if self.lanes is not None else ()
+        tile_shape = self.tile_shape if self.streamed else ()
         k = axis - (len(self.shape) - len(tile_shape))
         return tile_shape[k] if k >= 0 else 1
 
@@ -310,7 +248,8 @@ class BoundBuffer:
 
     def __repr__(self) -> str:
         return (
-            f"<{self.direction} {self.name} {self.shape} {bfp.dtype_name(self.dtype)}>"
+            f"<{self.direction.value} {self.name} {self.shape} "
+            f"{bfp.dtype_name(self.dtype)}>"
         )
 
 
@@ -332,10 +271,10 @@ class BufferView:
                     raise ValueError(
                         f"{buffer.name}: only one axis may start at a per-call value"
                     )
-                if idx.start.kind != "scratchpad":
+                if isinstance(idx.start.member, DispatchTime):
                     raise ValueError(
-                        f"{buffer.name}: {idx.start.name} is {idx.start.kind}; only a "
-                        f"Scratchpad value can move a transfer's base address"
+                        f"{buffer.name}: {idx.start.name} is a DispatchTime value; "
+                        f"only a Scratchpad value can move a transfer's base address"
                     )
                 self.offset_by = idx.start
                 static.append(slice(None))
@@ -366,17 +305,16 @@ class BoundValue:
     def __init__(self, member: _Value, owner) -> None:
         self.member = member
         self.name = member.name
-        self.kind = member.kind
         self.dtype = member.dtype
         self.param: Any = None  # the upstream ScratchpadParameter, set by the build
         self.symbol: str | None = None
         self.ssa = None  # the sequence's scalar, when lowered at dispatch time
         self.targets: list[tuple[Any, int]] = []
         # A Value written once per build has a resident's placement.
-        self.address = getattr(member, "address", None)
-        self.lock = getattr(member, "lock", None)
-        self.optional = getattr(member, "optional", False)
-        self.derive = getattr(member, "derive", None)
+        self.address = member.address
+        self.lock = member.lock
+        self.optional = member.optional
+        self.derive = member.derive
 
     def bind(self, buffers, index: int = 0) -> None:
         """Bind to one runtime-parameter buffer, or one per worker; the preamble
@@ -387,4 +325,4 @@ class BoundValue:
         self.targets.extend((b, index) for b in buffers)
 
     def __repr__(self) -> str:
-        return f"<{self.kind} {self.name} {np.dtype(self.dtype).name}>"
+        return f"<{self.member.kind} {self.name} {np.dtype(self.dtype).name}>"
