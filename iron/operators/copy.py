@@ -4,9 +4,10 @@
 """A copy between two views: ``Copy(k, keys[i][:, pos])``.
 
 Each side is an access pattern over its buffer (offset, sizes, strides), the
-form a DMA takes; the shim channels split its innermost axis, and the
-compiler splits a share no one descriptor holds. A per-call value indexing a
-view reaches the copy as ``in_offset``/``out_offset``, an element offset.
+form a DMA takes, or patterns walked in turn (a gather, ``table[ids]``); the
+shim channels split its innermost axis, and the compiler splits a share no
+one descriptor holds. A per-call value indexing a view reaches the copy as
+``in_offset``/``out_offset``, an element offset.
 """
 
 import dataclasses
@@ -48,6 +49,14 @@ class Copy(Operator):
     index on a view binds ``in_offset`` or ``out_offset``, and a per-call
     bound ``src_bound``/``dst_bound`` with its size. Standalone,
     ``src``/``dst`` are given, or default to the whole of each buffer.
+
+    A side that is a tuple of patterns walks them in turn: ``Copy(table[ids])``
+    gathers the rows ``ids`` names, fixed when the graph is traced. Each is
+    its own transfer, with runs of pieces whose offsets step evenly made one
+    (consecutive rows, a repeated row, a grid's rows), more than a task group
+    holds descriptors for; so they are unmanaged, the compiler metering each
+    channel's queue, and the two sides go out in stream order, so that no
+    transfer waits on one not yet issued.
 
     Each channel's descriptor carries 1/num_channels of the pattern, so the
     fifo object is sized against the per-channel share (``tile_size``). A
@@ -94,12 +103,23 @@ class Copy(Operator):
     )
 
     input_buffer_size: int = param(repr=False)
-    src: TensorAccessPattern = param(
+    src: TensorAccessPattern | tuple[TensorAccessPattern, ...] = param(
         default=lambda op: TensorAccessPattern.full((op.input_buffer_size,))
     )
-    output_buffer_size: int = param(default=lambda op: prod(op.src.sizes), repr=False)
-    dst: TensorAccessPattern = param(
-        default=lambda op: TensorAccessPattern.full((op.output_buffer_size,))
+    output_buffer_size: int = param(
+        default=lambda op: sum(
+            prod(p.sizes) for p in (op.src if isinstance(op.src, tuple) else (op.src,))
+        ),
+        repr=False,
+    )
+    # Gathered, the output is rows as wide as a piece's innermost axis, so
+    # the channels split both sides alike.
+    dst: TensorAccessPattern | tuple[TensorAccessPattern, ...] = param(
+        default=lambda op: TensorAccessPattern.full(
+            (op.output_buffer_size // op.src[0].sizes[-1], op.src[0].sizes[-1])
+            if isinstance(op.src, tuple)
+            else (op.output_buffer_size,)
+        )
     )
     # The axis of each pattern a graph bounds per call (``x[:n]`` on a view):
     # its size is the full extent in the pattern and patched to the call's.
@@ -132,21 +152,43 @@ class Copy(Operator):
     src_valid = Scratchpad(np.int32)
     dst_valid = Scratchpad(np.int32)
 
+    def walks(self) -> list[tuple[TensorAccessPattern, ...]]:
+        """The patterns each side walks in turn, ``[src, dst]``."""
+        return [t if isinstance(t, tuple) else (t,) for t in (self.src, self.dst)]
+
+    @property
+    def aiecc_flags(self) -> tuple[str, ...]:
+        """A gather's pieces outnumber the shim's BD ids, so the compiler
+        recycles finished tasks' ids; no task waits on a push issued after
+        it, since each channel's drains go out before the fills feeding them.
+        """
+        gathered = any(isinstance(t, tuple) for t in (self.src, self.dst))
+        return ("--reclaim-runtime-bds",) if gathered else ()
+
     def validate(self) -> None:
-        if prod(self.src.sizes) != prod(self.dst.sizes):
+        src, dst = (sum(prod(p.sizes) for p in w) for w in self.walks())
+        if src != dst:
             raise ValueError(
-                f"a copy moves the same element count both ways: src {self.src} "
-                f"has {prod(self.src.sizes)} elements, dst {self.dst} has "
-                f"{prod(self.dst.sizes)}"
+                f"a copy moves the same element count both ways: src has {src} "
+                f"elements, dst {dst}"
             )
+        for side, tap, bound in (
+            ("src", self.src, self.src_bound),
+            ("dst", self.dst, self.dst_bound),
+        ):
+            if isinstance(tap, tuple) and bound is not None:
+                raise ValueError(
+                    f"{side} walks {len(tap)} patterns in turn; a per-call bound "
+                    f"takes one pattern"
+                )
 
     def resolve(self, dev):
         """The transfer size, unless given, is the largest divisor of the
-        per-channel share (under a bound, of one bounded row's share) whose
-        object fits ``object_bytes``.
+        per-channel share (under a bound, of one bounded row's share; of a
+        gather, of every piece's) whose object fits ``object_bytes``.
         """
-        share = prod(self.src.sizes) // self.num_channels
-        whole = gcd(share, *self._row_shares())
+        pieces = [prod(p.sizes) // self.num_channels for w in self.walks() for p in w]
+        whole = gcd(*pieces, *self._row_shares())
         cap = self.object_bytes // np.dtype(self.dtype).itemsize
         tile_size = self.tile_size or max(
             d
@@ -172,19 +214,20 @@ class Copy(Operator):
 
     def compatible(self) -> None:
         channels = self.num_channels
-        for tap in (self.src, self.dst):
-            if tap.sizes[-1] % channels:
-                raise ValueError(
-                    f"the innermost axis of {tap} ({tap.sizes[-1]}) must be "
-                    f"divisible by num_channels ({channels})"
-                )
-        per_channel = prod(self.src.sizes) // channels
-        if per_channel % self.tile_size:
-            raise ValueError(
-                f"tile_size {self.tile_size} must divide the per-channel "
-                f"transfer {per_channel} (= {prod(self.src.sizes)} / {channels} "
-                f"channels)"
-            )
+        for walk in self.walks():
+            for tap in walk:
+                if tap.sizes[-1] % channels:
+                    raise ValueError(
+                        f"the innermost axis of {tap} ({tap.sizes[-1]}) must be "
+                        f"divisible by num_channels ({channels})"
+                    )
+                per_channel = prod(tap.sizes) // channels
+                if per_channel % self.tile_size:
+                    raise ValueError(
+                        f"tile_size {self.tile_size} must divide the per-channel "
+                        f"transfer {per_channel} (= {prod(tap.sizes)} / {channels} "
+                        f"channels)"
+                    )
         for row in self._row_shares():
             if row % self.tile_size:
                 raise ValueError(
@@ -284,15 +327,23 @@ class Copy(Operator):
 
         src = at(self.src, self.src_bound, src_valid)
         dst = at(self.dst, self.dst_bound, dst_valid)
-        # Channel by channel, as the design splits the patterns.
-        gather = [
-            c.gather(np.arange(prod(c.tensor_dims))) + int(in_offset)
-            for c in self._shares(src)
-        ]
-        scatter = [
-            c.gather(np.arange(prod(c.tensor_dims))) + int(out_offset)
-            for c in self._shares(dst)
-        ]
+        # Channel by channel, as the design splits the patterns, each
+        # channel's share of every piece in turn.
+        gather, scatter = (
+            [
+                np.concatenate(
+                    [c.gather(np.arange(prod(c.tensor_dims))) for c in pieces]
+                )
+                + int(offset)
+                for pieces in zip(
+                    *(
+                        self._shares(p)
+                        for p in (tap if isinstance(tap, tuple) else (tap,))
+                    )
+                )
+            ]
+            for tap, offset in ((src, in_offset), (dst, out_offset))
+        )
         out = (
             np.zeros(self.output_buffer_size, dtype=x.dtype)
             if y is None
@@ -308,12 +359,91 @@ class Copy(Operator):
             out[dst_c] = flat[src_c]
         return out if y is None else y
 
+    @staticmethod
+    def _stacked(
+        pieces: list[TensorAccessPattern], shim: BdLimits, dtype
+    ) -> list[TensorAccessPattern]:
+        """``pieces`` with each run of alike ones whose offsets step evenly
+        made one pattern with an outer axis, as far as one descriptor holds
+        it: twice, so rows make runs and runs make a grid.
+        """
+        for _ in range(2):
+            runs: list[tuple[TensorAccessPattern, int, int]] = []  # first, count, step
+            for p in pieces:
+                if runs:
+                    first, n, step = runs[-1]
+                    step = p.offset - first.offset if n == 1 else step
+                    if (
+                        (p.sizes, p.strides) == (first.sizes, first.strides)
+                        and step >= 0
+                        and p.offset == first.offset + n * step
+                        and shim.fits(
+                            TensorAccessPattern(
+                                first.tensor_dims,
+                                first.offset,
+                                [n + 1, *first.sizes],
+                                [step, *first.strides],
+                            ),
+                            dtype,
+                        )
+                    ):
+                        runs[-1] = (first, n + 1, step)
+                        continue
+                runs.append((p, 1, 0))
+            pieces = [
+                (
+                    first
+                    if n == 1
+                    else TensorAccessPattern(
+                        first.tensor_dims,
+                        first.offset,
+                        [n, *first.sizes],
+                        [step, *first.strides],
+                    )
+                )
+                for first, n, step in runs
+            ]
+        return pieces
+
     def sequence(self, rt):
-        ins = self._taps(self.src, self.src_bound, self.x.dtype)
-        outs = self._taps(self.dst, self.dst_bound, self.y.dtype)
         in_off = self.in_offset if self.uses_value("in_offset") else None
         out_off = self.out_offset if self.uses_value("out_offset") else None
+        if isinstance(self.src, tuple) or isinstance(self.dst, tuple):
+            shim = BdLimits.of(self.dev, 0, 0)
+            # (stream position, channel, is a fill, tap): a drain goes out
+            # before the fills that feed it.
+            issued = []
+            for side, walk in enumerate(self.walks()):
+                dtype = (self.x, self.y)[side].dtype
+                for c in range(self.num_channels):
+                    at = 0
+                    shares = [self._shares(p)[c] for p in walk]
+                    for tap in self._stacked(shares, shim, dtype):
+                        issued.append((at, c, side == 0, tap))
+                        at += prod(tap.sizes)
+            issued.sort(key=lambda t: t[:3])
+            # A channel's drains finish in order, so its last one is the copy's.
+            last = {c: i for i, (_, c, fill, _) in enumerate(issued) if not fill}
+            tokens = []
+            for i, (_, c, fill, tap) in enumerate(issued):
+                if fill:
+                    rt.fill(self.x.lane(c), tap, offset_by=in_off, managed=False)
+                    continue
+                task = rt.drain(
+                    self.y.lane(c),
+                    tap,
+                    offset_by=out_off,
+                    wait=last[c] == i,
+                    managed=False,
+                )
+                if last[c] == i:
+                    tokens.append(task)
+            for task in tokens:
+                task.await_()
+            return
 
+        ins = self._taps(self.src, self.src_bound, self.x.dtype)
+        outs = self._taps(self.dst, self.dst_bound, self.y.dtype)
         tg = TaskGroup()
         for c in range(self.num_channels):
             tap, dim = ins[c]
