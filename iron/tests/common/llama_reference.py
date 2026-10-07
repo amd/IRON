@@ -160,9 +160,11 @@ def test_gqa_decode_reads_the_caches_the_prompt_wrote(cpu):
     _assert_close(got, cpu.expected)
 
 
-def test_decode_attention_is_mha_where_mha_fits_and_gqa_on_npu1(cpu):
+def test_decode_attention_is_mha_where_mha_fits_else_gqa(cpu):
     assert OnHost(cpu.config, cpu.weights).decode_attention == "mha"
     aie_utils.set_current_device(from_name("npu1", n_cols=4))
+    assert OnHost(cpu.config, cpu.weights).decode_attention == "mha"
+    aie_utils.set_current_device(from_name("npu1"))
     model = OnHost(cpu.config, cpu.weights)
     assert model.decode_attention == "gqa"
     assert model.keys[0].shape == (

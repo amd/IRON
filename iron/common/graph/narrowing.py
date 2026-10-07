@@ -13,7 +13,9 @@ A device is entered at a step whose design is in it when the step before is
 not; entering configures it. ``R`` is the empty configure the parity rule
 adds (``Fusion.needs_reset``). ``t_step`` and ``load`` are measured per
 design and width, ``D0``, ``base`` and ``R`` per device (``probe``, into a
-``CostTable``).
+``CostTable``). Where each step is its own dispatch, ``t_step`` holds that
+dispatch, ``base`` and ``R`` are 0 and nothing is packed: the model is the
+steps plus a load per design entered.
 
 Only a pack connected in the runlist's adjacency can save an entry, so the
 candidates are the connected sets of designs, and an exact search over
@@ -473,7 +475,10 @@ class JointNarrowing:
         default=Path(NPU_CACHE_HOME) / "iron" / "fits", compare=False
     )
 
-    def tune(self, traced: TracedGraph, dev) -> Tuning:
+    def tune(self, traced: TracedGraph, dev, packs: bool = True) -> Tuning:
+        """Choose ``traced``'s widths, and its packs where ``packs``: a pack
+        is one configuration, which only a fused dispatch has.
+        """
         table = self.table
         keys = [cost_key(s.op, dev) for s in traced.steps]
         runlist = Runlist(keys)
@@ -496,8 +501,11 @@ class JointNarrowing:
             best = min(candidates[i], key=lambda v: member_cost(i, v, e))
             alone.append((e * table.base_us + member_cost(i, best, e), best, e))
 
-        packs: list[_Pack] = []
-        for members in self._connected(runlist, measured, candidates, budget):
+        connected = (
+            self._connected(runlist, measured, candidates, budget) if packs else []
+        )
+        offered: list[_Pack] = []
+        for members in connected:
             entries = runlist.entries(frozenset(runlist.order[i] for i in members))
             ranked = [
                 sorted(
@@ -515,11 +523,11 @@ class JointNarrowing:
             pack = _Pack(members, entries, options)
             # The parity can move the total by one reset either way.
             if self._gain(pack, alone) + table.reset_us > 0:
-                packs.append(pack)
+                offered.append(pack)
 
         fitted: dict[tuple[str, ...], bool] = {}
         while True:
-            chosen_packs = self._partition(runlist, alone, packs)
+            chosen_packs = self._partition(runlist, alone, offered)
             refused = [p for p in chosen_packs if not self._fit(p.combo, fitted)]
             if not refused:
                 break
@@ -527,7 +535,7 @@ class JointNarrowing:
                 while p.options and not self._fit(p.combo, fitted):
                     p.options.pop(0)
                 if not p.options or self._gain(p, alone) + table.reset_us <= 0:
-                    packs.remove(p)
+                    offered.remove(p)
 
         chosen: dict[str, Variant] = {
             k: alone[i][1] for i, k in enumerate(runlist.order)

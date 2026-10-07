@@ -31,9 +31,6 @@ from iron.operators.transpose import Transpose
 G, H, D, L = 8, 32, 64, 2048
 
 
-pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
-
-
 class Before(iron.Graph):
     def body(self, values, weights):
         return GEMV(Transpose(Repeat(values, repeat=H // G)), weights)
@@ -52,7 +49,7 @@ def _weights(rng, valid: int) -> np.ndarray:
     return (e / e.sum(axis=1, keepdims=True)).astype(bfloat16)
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_gqa_context_is_the_repeat_transpose_gemv_bit_for_bit(npu_runtime):
     before = Before().compile(values=(G, L, D), weights=(H, L))
     after = After().compile(values=(L, G, D), weights=(H, L))

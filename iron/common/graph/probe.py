@@ -9,7 +9,10 @@ entries are odd, and each step's ``t_step``.
 
 - ``measure_steps``: one run against ``repeats`` runs of a design gives
   ``t_step`` and ``alone = D0 + base + load + R``. Any other width is a
-  candidate only if its output is bit-identical to the default's.
+  candidate only if its output is bit-identical to the default's. Where
+  each step is its own dispatch (NPU1), ``t_step`` holds the step's
+  dispatch, there is no pack, ``base`` or ``R``, and the load is the
+  entry measured by alternation against two reference designs.
 - ``calibrate``, on measured designs A, B: ``A B A B ...`` against
   ``A A ... B B ...`` gives ``(E(A) + E(B)) / 2``; the grouped run gives
   ``D0``, the ``alone`` figures ``R``, and ``[A, B]`` packed gives ``base`` as
@@ -36,6 +39,7 @@ from ..declare import Direction, Operator
 from ..declare.bound import BoundBuffer, BoundValue
 from ..design import device_symbol
 from ..image.callable import FullELFCallable, StepCallable
+from ..image.packaging import full_elf
 from ..image.sequence import OperatorSequence
 from .narrowing import (
     Calibration,
@@ -81,8 +85,9 @@ def _sample(dtype, nbytes: int, rng: np.random.Generator) -> np.ndarray:
 
 
 class Standalone:
-    """A runlist of operators built alone into a loaded full ELF, its inputs
-    seeded random data.
+    """A runlist of operators built alone into a loaded image, its inputs
+    seeded random data: a full ELF where the device dispatches one, else a
+    dispatch per step (``XclbinChain``).
 
     Args:
         distinct: Every step runs on buffers of its own, as a graph's do, so
@@ -123,7 +128,7 @@ class Standalone:
             [(op, *self._names(self._slot[k], op)) for k, op in enumerate(self.steps)],
             in_names,
             out_names,
-            dispatch="fused",
+            dispatch="auto",
             share_designs=True,
             coresident=coresident,
         ).compile()
@@ -141,7 +146,8 @@ class Standalone:
                     self._bytes(name_)[: buf.nbytes] = content.view(np.uint8)
                 elif buf.direction.fills:
                     self._bytes(name_)[: buf.nbytes] = self._content(buf, inputs, rng)
-        ops = {id(op): op for op in self.steps}.values()
+        # Resolved: a value derived through a tunable is only seen once it is set.
+        ops = {id(op): op.resolved() for op in self.steps}.values()
         # An extent read only through its derivations has no word.
         read = self.sequence.artifacts.parameters
         symbols = {
@@ -155,12 +161,14 @@ class Standalone:
 
     @staticmethod
     def _value(op: Operator, values: Mapping[str, int], v: BoundValue) -> int:
+        """``v`` as given, or derived as a call derives it from the bounded
+        extents given, of the resolved ``op``.
+        """
         if v.name in values:
             return values[v.name]
-        bound = op.bound_extents.keys()
-        if v.name in op._per_call_derived() and bound <= values.keys():
-            extents = {name: values[name] for name in bound}
-            return op.resolved().derived_at(v.name, **extents)
+        extents = {e: values[e] for e in op.bound_extents if e in values}
+        if extents and v.name in op._per_call_derived():
+            return op.derived_at(v.name, **extents)
         raise ValueError(
             f"per-call value {v.name!r} needs a representative value to be measured"
         )
@@ -197,7 +205,10 @@ class Standalone:
         """What the steps wrote, after one run: every out and in-out buffer."""
         self.callable()
         return b"".join(
-            self._bytes(name)[: buf.nbytes].tobytes()
+            self.callable.get_storage(name)
+            .numpy()
+            .view(np.uint8)[: buf.nbytes]
+            .tobytes()
             for k in self._filled
             for buf, name in zip(self.steps[k].buffers, self._names(k, self.steps[k]))
             if buf.direction.drains
@@ -235,16 +246,35 @@ def measure_steps(
     repeats: int = 9,
     values: Mapping[str, int] | None = None,
     inputs: Mapping[str, np.ndarray] | None = None,
+    references: tuple[Operator, Operator] | None = None,
+    pairs: int = 4,
 ) -> dict[str, StepCost]:
     """Measure every width in ``found`` (the default first) into ``table``,
     as many at once as the device's contexts hold.
+
+    Where each step is its own dispatch, ``[v]`` run again never
+    reconfigures, so the entry ``E(v)`` comes from alternation against
+    ``references`` ``r`` and ``q``: ``[v, r] * pairs`` against
+    ``[v] * pairs + [r] * pairs`` gives ``E(v) + E(r)``, and with the same of
+    ``(v, q)`` and ``(r, q)``, ``E(v)``.
+
+    Args:
+        values: Per-call values by name, for ``found``'s and the references'.
+        references: Two designs other than ``found``'s, for a device without
+            a full ELF.
     """
     mode = pmode()
+    separate = not full_elf(aie_utils.ensure_current_device())
+    if separate and references is None:
+        raise ValueError(
+            "each step is its own dispatch here: the entry cost needs references"
+        )
     distinct = sum(b.nbytes for b in found[0].op.buffers) <= DISTINCT_BYTES
     reference = None
     out = {}
-    for begin in range(0, len(found), CONTEXTS // 2):
-        batch = found[begin : begin + CONTEXTS // 2]
+    per_batch = CONTEXTS // 6 if separate else CONTEXTS // 2
+    for begin in range(0, len(found), per_batch):
+        batch = found[begin : begin + per_batch]
         short = [
             Standalone(f"probe1_{v.key}", [v.op], values=values, inputs=inputs)
             for v in batch
@@ -259,16 +289,38 @@ def measure_steps(
             )
             for v in batch
         ]
+        switches = []
+        if separate:
+            r, q = references
+            for tag, a, b in [
+                (f"{v.key}_{s}", v.op, ref)
+                for v in batch
+                for s, ref in (("r", r), ("q", q))
+            ] + [("rq", r, q)]:
+                switches += [
+                    Standalone(f"alt{pairs}_{tag}", [a, b] * pairs, values=values),
+                    Standalone(
+                        f"grp{pairs}_{tag}", [a] * pairs + [b] * pairs, values=values
+                    ),
+                ]
         if reference is None:
             reference = short[0].output_bytes()
         exact = [run.output_bytes() == reference for run in short]
-        times = time_interleaved([r.callable for r in short + long], timing)
+        times = time_interleaved([r.callable for r in short + long + switches], timing)
         n = len(batch)
+        # Each `(alt, grp)` pair of `switches`, as `E(a) + E(b)`.
+        sums = [
+            (alt - grp) / (pairs - 1)
+            for alt, grp in zip(times[2 * n :: 2], times[2 * n + 1 :: 2])
+        ]
         for i, v in enumerate(batch):
             t_step = (times[n + i] - times[i]) / (repeats - 1)
+            alone = times[i] - t_step
+            if separate:
+                alone += (sums[2 * i] + sums[2 * i + 1] - sums[-1]) / 2
             cost = StepCost(
                 t_step_us=t_step,
-                alone_us=times[i] - t_step,
+                alone_us=alone,
                 exact=exact[i],
                 pmode=mode,
                 rounds=timing.rounds,
@@ -278,7 +330,7 @@ def measure_steps(
             table.record_step(v.key, cost)
             out[v.key] = cost
         # A probe holds its context while it lives; the next batch needs them.
-        del short, long
+        del short, long, switches
     return out
 
 
@@ -290,28 +342,36 @@ def calibrate(
     pairs: int = 4,
     values: Mapping[str, int] | None = None,
 ) -> Calibration:
-    """Split a configure's cost over measured designs ``a`` and ``b`` into ``table``."""
+    """Split a configure's cost over measured designs ``a`` and ``b`` into
+    ``table``. Where each step is its own dispatch there is no pack, and so
+    no ``base``, and no reset configure.
+    """
     ka, kb = cost_key(a), cost_key(b)
     ta, tb = table.steps[ka].t_step_us, table.steps[kb].t_step_us
     tag = f"{ka}_{kb}"
     runs = [
         Standalone(f"cal_alt{pairs}_{tag}", [a, b] * pairs, values=values),
         Standalone(f"cal_grp{pairs}_{tag}", [a] * pairs + [b] * pairs, values=values),
-        Standalone(f"cal_pack_{tag}", [a, b], coresident=[[a, b]], values=values),
-        Standalone(f"cal_a_{tag}", [a], values=values),
-        Standalone(f"cal_b_{tag}", [b], values=values),
     ]
-    alt, grp, pack, alone_a, alone_b = time_interleaved(
-        [r.callable for r in runs], timing
-    )
+    fused = full_elf(aie_utils.ensure_current_device())
+    if fused:
+        runs += [
+            Standalone(f"cal_pack_{tag}", [a, b], coresident=[[a, b]], values=values),
+            Standalone(f"cal_a_{tag}", [a], values=values),
+            Standalone(f"cal_b_{tag}", [b], values=values),
+        ]
+    alt, grp, *rest = time_interleaved([r.callable for r in runs], timing)
     switch = (alt - grp) / (2 * pairs - 2)  # (E(a) + E(b)) / 2
     dispatch = grp - pairs * (ta + tb) - 2 * switch
-    reset = ((alone_a - ta) + (alone_b - tb) - 2 * switch) / 2 - dispatch
-    entry_pack = pack - ta - tb - reset - dispatch
+    reset = base = 0.0
+    if fused:
+        pack, alone_a, alone_b = rest
+        reset = ((alone_a - ta) + (alone_b - tb) - 2 * switch) / 2 - dispatch
+        base = 2 * switch - (pack - ta - tb - reset - dispatch)
     cal = Calibration(
         dispatch_us=dispatch,
         reset_us=reset,
-        base_us=2 * switch - entry_pack,
+        base_us=base,
         switch_us=switch,
         pmode=pmode(),
         rounds=timing.rounds,
@@ -386,15 +446,40 @@ def measure_graph(
     if stale:
         log(f"dropped {len(stale)} designs the graphs no longer have")
 
+    by_class: dict[str, tuple[Variant, Call]] = {}
+    for key, (op, call) in first.items():
+        by_class.setdefault(type(op).__name__, (found[key][-1], call))
+    named = [by_class[name] for name in dict.fromkeys(n for p in pairs for n in p)]
+    if not full_elf(dev) and len(named) < 3:
+        raise ValueError(
+            f"each step is its own dispatch here: the pairs must name three "
+            f"designs, the references each design's entry is measured against; "
+            f"got {[type(v.op).__name__ for v, _ in named]}"
+        )
+
     for i, (key, (op, call)) in enumerate(first.items()):
         name = type(op).__name__
         if not remeasure and all(v.key in table.steps for v in found[key]):
             log(f"[{i}] {name}: in the table")
             continue
         values = call.op_values(op)
+        references = None
+        if not full_elf(dev):
+            mine = {v.key for v in found[key]}
+            (r, r_call), (q, q_call) = [(v, c) for v, c in named if v.key not in mine][
+                :2
+            ]
+            references = (r.op, q.op)
+            values = {**r_call.op_values(r.op), **q_call.op_values(q.op), **values}
         start = time.time()
         costs = measure_steps(
-            table, found[key], timing, repeats, values, call.op_inputs(op)
+            table,
+            found[key],
+            timing,
+            repeats,
+            values,
+            call.op_inputs(op),
+            references,
         )
         table.save()
         log(f"[{i}] {name} ({time.time() - start:.0f}s) at {values}")
@@ -405,10 +490,7 @@ def measure_graph(
                 f"alone {c.alone_us:8.2f} us  exact {c.exact}"
             )
 
-    by_class = {}
-    for key, (op, _) in first.items():
-        by_class.setdefault(type(op).__name__, found[key][-1])
-    chosen = [(by_class[a], by_class[b]) for a, b in pairs]
+    chosen = [(by_class[a][0], by_class[b][0]) for a, b in pairs]
     wanted = {f"{a.key}|{b.key}" for a, b in chosen}
     for k in [k for k in table.calibrations if k not in wanted]:
         del table.calibrations[k]

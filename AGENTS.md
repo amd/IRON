@@ -538,8 +538,8 @@ code before relying on a line here; it is the authority.
   and a `prefill_chunk`-row prompt chunk, both compiled once; `max_seq_len`
   sizes the caches and the RoPE table alone. A prompt runs chunk by chunk
   against the caches, and decode is MHA of one query (a KV group's heads
-  packed into a block, a pipeline's own K and V lanes), or on NPU1
-  `GQAScores`, `Softmax` and `GQAContext` over the same caches. The caches are
+  packed into a block, a pipeline's own K and V lanes), or where MHA does
+  not fit `GQAScores`, `Softmax` and `GQAContext` over the same caches. The caches are
   `(max_seq_len, n_kv_groups, head_dim)`, so a call's write is contiguous
   and no descriptor steps by the context: a `(groups, positions)` cache
   would step `max_seq_len * head_dim` between groups, past a descriptor's
@@ -568,7 +568,6 @@ code before relying on a line here; it is the authority.
 
 - A fused sequence in an xclbin (several steps in one dispatch) is refused;
   so are modules. NPU1 therefore needs `boundaries=iron.each_step`.
-- MHA is NPU2-only, so prefill on NPU1 is not planned.
 - A prompt chunk is one dispatch, and its attention grows with the
   context (about 1.2 s plus 0.12 s per 2048 rows before it; MHA streams
   every K and V block for each Q block, valid or not). amdxdna's watchdog

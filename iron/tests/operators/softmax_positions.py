@@ -26,12 +26,16 @@ HEADS, SEQ = 32, 2048
 POSITIONS = (SEQ, 300, 1, 2047, 31, 32, 33, 1000, 1024, 1025, 64, 2)
 
 
-pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
-
-
-@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
-    "boundaries", [None, iron.each_step], ids=["full_elf", "xclbin"]
+    "boundaries",
+    [
+        pytest.param(None, id="full_elf", marks=pytest.mark.supported_devices("npu2")),
+        pytest.param(
+            iron.each_step,
+            id="xclbin",
+            marks=pytest.mark.supported_devices("npu1", "npu2"),
+        ),
+    ],
 )
 def test_rows_are_masked_to_the_per_call_length(npu_runtime, boundaries):
     class Attend(iron.Graph):

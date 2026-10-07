@@ -93,18 +93,21 @@ python -m iron.lm.llama3.model \
 
 ## NPU1, and `--each-step`
 
-NPU1 has no full-ELF dispatch, so there its decode step is an xclbin whose
-steps are dispatched one at a time, and it is the model's only version:
-only a full ELF addresses the scratch arena a prompt version would share its
-caches through. The prompt runs through the decode step a token at a time,
-and there is no `--device-loop`. `--each-step` builds the same form on NPU2,
-which is how `test_llama_3_2_1b_each_step_accuracy` checks it there.
+NPU1 has no full-ELF dispatch, so there both versions are xclbins whose
+steps are dispatched one at a time, and the host draws each token: there is
+no `--device-loop`. The versions still share one copy of the weights and the
+caches, the views of one buffer object. A prompt chunk attends with MHA,
+placed on NPU1's four columns as on NPU2's eight (`MHA.COLUMNS`), so a
+prompt runs a chunk at a time there too. `--each-step` builds the same
+form on NPU2, which is how `test_llama_3_2_1b_each_step_accuracy` checks it
+there.
 
-MHA is placed on NPU2's 8-column array, so on NPU1 decode attention is
-`"gqa"` (`CausalLM.decode_attention`, `iron/operators/gqa.py`): `GQAScores`
-against the key cache, a `Softmax` bounded to the context, and `GQAContext`
-over the value cache. Both read the caches in place, a block of positions at
-a time, and only the blocks the context covers, so a step's cost follows the
+Decode attends with MHA of one query there too. Where MHA does not fit (an
+array narrower than four columns), decode attention is `"gqa"`
+(`CausalLM.decode_attention`, `iron/operators/gqa.py`): `GQAScores` against
+the key cache, a `Softmax` bounded to the context, and `GQAContext` over the
+value cache. Both read the caches in place, a block of positions at a time,
+and only the blocks the context covers, so a step's cost follows the
 context. Their cores do not depend on the cache's length, so every
 `--max-seq-len` runs the same cores, and one compile serves every position
 below it.
@@ -125,8 +128,16 @@ python -m iron.lm.llama3.model /path/to/model.safetensors /path/to/tokenizer.mod
 ```
 
 `decode_costs_npu2.json` is such a table, measured on a Strix Halo NPU (8
-columns), its newer designs on a Strix. Its entries are keyed by each design's identity -- its fields --
-so a design changed since the table was measured is not in it, and the
+columns), its newer designs on a Strix, and `decode_costs_npu1.json` one
+measured on a Phoenix NPU (4 columns); `tune.py` fills the current
+device's by default. On NPU1, where
+each step is its own dispatch, nothing is packed: a narrower design is
+chosen where it is cheaper to switch into. There the table narrows the
+elementwise steps and keeps every GEMV and MHA at the profile's width:
+with random weights, a token went from 726 to 653 ms (20 tokens after a
+16-token prompt, medians of 8 interleaved runs). Its entries are keyed by
+each design's identity -- its fields -- so a design changed since the
+table was measured is not in it, and the
 tuner leaves that design as the profile gives it (the `[Tuning]` report
 counts it as unmeasured). Run `tune.py` again after changing a design, or
 to measure for another NPU; it keeps the entries still current and measures

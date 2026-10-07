@@ -3,8 +3,9 @@
 
 """A graph, and the images it compiles to: one version per input signature.
 
-Full-ELF versions share one scratch arena, so a weight is on the device once
-and a state one version writes is where the next reads it.
+Versions share one scratch arena, so a weight is on the device once and a
+state one version writes is where the next reads it: a full ELF places its
+scratch there, an xclbin its weights and states.
 """
 
 from __future__ import annotations
@@ -333,28 +334,22 @@ class Graph:
         if dev is not None:
             aie_utils.set_current_device(dev)
         traced = self.trace(**shapes)
+        chosen = plan(aie_utils.ensure_current_device(), traced, boundaries, image)
         tuning = None
         groups: AdjacentPacking | list[list[Operator]] | None
         if isinstance(coresident, JointNarrowing):
-            tuning = coresident.tune(traced, aie_utils.ensure_current_device())
+            tuning = coresident.tune(
+                traced,
+                aie_utils.ensure_current_device(),
+                packs=chosen.dispatch == "fused",
+            )
             traced, groups = tuning.apply(traced)
         else:
             groups = coresident
-        chosen = plan(aie_utils.ensure_current_device(), traced, boundaries, image)
         if verbose:
             print(chosen.report(self.name))
         signature = self._signature(traced.inputs)
         shared = chosen.dispatch == "fused"
-        # Versions share state only through the arena; weights could be copied.
-        others = [v for k, v in self._versions.items() if k != signature]
-        apart = not shared or any(v.arena is None for v in others)
-        stateful = traced.states or any(v.traced.states for v in others)
-        if others and apart and stateful:
-            raise NotImplementedError(
-                f"{self.name}: versions share their states through one "
-                f"scratch arena, which only a full ELF addresses; this version "
-                f"dispatches {chosen.dispatch!r}"
-            )
         emit = None
         # The words an Emit feeding its own version was sized for.
         sized: list[Word] | None = None
@@ -383,7 +378,7 @@ class Graph:
             traced,
             chosen,
             record=record,
-            arena=self._arena if shared else None,
+            arena=self._arena,
             emit=emit,
             coresident=groups,
             tuning=tuning,

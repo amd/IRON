@@ -144,8 +144,8 @@ def main(runner: type[Runner], description: str):
     parser.add_argument(
         "--each-step",
         action="store_true",
-        help="dispatch every step of a decode step on its own from one xclbin, "
-        "as NPU1 does; the prompt then runs a token at a time",
+        help="dispatch every step of each version on its own from one xclbin, "
+        "as NPU1 does",
     )
     args = parser.parse_args()
     if args.compare_host and not args.device_loop:
@@ -165,10 +165,10 @@ def main(runner: type[Runner], description: str):
             f"{run.config.max_seq_len} rows"
         )
     model = run.npu(args.cost_table, iron.each_step if args.each_step else None)
-    if args.device_loop and not model.full_elf:
+    if args.device_loop and not model.device_loop:
         parser.error(
-            "--device-loop needs a full-ELF decode step, which this device "
-            "(NPU1) has not"
+            "--device-loop needs a full-ELF decode step, which --each-step "
+            "and NPU1 have not"
         )
     if model.tuning is not None:
         print("[Tuning] decode:\n" + model.tuning.report(), flush=True)

@@ -9,8 +9,6 @@ compiled and loaded once for the module and every test calls it
 in-process.
 """
 
-import dataclasses
-
 import aie.utils as aie_utils
 import pytest
 
@@ -57,23 +55,39 @@ def model(runner, request):
 MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.2}
 
 
-# The form NPU1 runs: the decode step alone, each of its steps its own
-# dispatch of one xclbin, and the prompt fed through it a token at a time. A
-# shorter run than the full ELF's, since every step is a host round trip.
-# Its own model, built and dropped here, first: after any other test it
-# would be held beside the module's full-ELF one. On NPU1 its attention is
-# "gqa", whose step reads the whole cache, so the caches are one chunk.
+# KL(graph reference || NPU) of one decode step, three tokens at each depth:
+# 0.002 to 0.015 just past the prompt, 0.009 to 0.033 at 16k and 0.030 to
+# 0.038 at 32k: it grows with the keys the step sums over.
+DEEP_KL = 0.1
+
+
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_llama_3_2_1b_each_step_accuracy(record_property):
-    config = dataclasses.replace(Runner.config, max_seq_len=Runner.config.prefill_chunk)
-    runner = Runner(WEIGHTS, TOKENIZER, config)
-    model = runner.npu(boundaries=iron.each_step)
-    assert not model.full_elf
-    try:
-        check_accuracy(runner, model, MAX_KL, 20, 256, record=record_property)
-    finally:
+class TestEachStep:
+    """The form NPU1 runs: each step its own dispatch of one xclbin, and the
+    host drawing each token. Its model is built and dropped with the class,
+    first: after any other test it would be held beside the module's
+    full-ELF one.
+    """
+
+    @pytest.fixture(scope="class")
+    def model(self, runner):
+        model = runner.npu(boundaries=iron.each_step)
+        assert not model.device_loop
+        yield model
         if aie_utils.DefaultNPURuntime is not None:
             aie_utils.DefaultNPURuntime.cleanup()
+
+    def test_llama_3_2_1b_each_step_accuracy(self, runner, model, record_property):
+        check_accuracy(runner, model, MAX_KL, 20, 256, record=record_property)
+
+    def test_llama_3_2_1b_each_step_determinism(self, runner, model, record_property):
+        check_determinism(runner, model, 4, 3, 128, record=record_property)
+
+    def test_llama_3_2_1b_each_step_decode_deep_in_the_cache(
+        self, runner, model, record_property
+    ):
+        position = runner.config.max_seq_len - 1
+        check_deep_decode(runner, model, position, DEEP_KL, 256, record=record_property)
 
 
 @pytest.mark.parametrize(
@@ -117,12 +131,6 @@ def test_llama_3_2_1b_accuracy_across_chunks(runner, model, record_property):
 def test_llama_3_2_1b_chat_turn(runner, model, record_property):
     """A turn of 1000 tokens reruns the second chunk alone."""
     check_chat_turn(runner, model, LONG, 1000, record=record_property)
-
-
-# KL(graph reference || NPU) of one decode step, three tokens at each depth:
-# 0.002 to 0.015 just past the prompt, 0.009 to 0.033 at 16k and 0.030 to
-# 0.038 at 32k: it grows with the keys the step sums over.
-DEEP_KL = 0.1
 
 
 def test_llama_3_2_1b_decode_deep_in_the_cache(runner, model, record_property):
