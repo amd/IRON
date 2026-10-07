@@ -16,7 +16,7 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.iron.device import from_name
 
 from iron.common import Unresolvable
-from iron.operators.copy import Copy
+from iron.operators.copy import Copy, Gather
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.transpose import Transpose
@@ -75,6 +75,29 @@ def test_transfer_size_not_dividing_a_bounded_row_is_rejected():
     with pytest.raises(ValueError, match="one row of the bounded axis"):
         copy(tile_size=1024)  # every tunable given
     assert copy().resolved(from_name("npu2")).tile_size == G * D
+
+
+@pytest.mark.parametrize(
+    "name,cols,feeds",
+    [("npu1", 4, 3), ("npu2", 8, 5), ("npu2", 8, 0)],
+)
+def test_a_gather_feeding_from_more_shim_pairs_than_the_device_has_is_refused(
+    name, cols, feeds
+):
+    """Feed ``k`` streams from shim column ``2k`` into column ``2k + 1``."""
+    gather = Gather(rows=512, table_rows=4096, row=512, feeds=feeds)
+    with pytest.raises(Unresolvable, match="shim columns"):
+        gather.resolved(from_name(name, n_cols=cols))
+
+
+def test_a_gather_whose_feeds_outnumber_its_batch_pairs_is_refused():
+    """A feed streams whole pairs of batches, so 33 rows (five batches of
+    eight, three pairs) keep three feeds busy and leave a fourth idle.
+    """
+    with pytest.raises(ValueError, match="leave 1 idle"):
+        Gather(rows=33, table_rows=4096, row=512, feeds=4)
+    gather = Gather(rows=33, table_rows=4096, row=512)
+    assert gather.resolved(from_name("npu2", n_cols=8)).feeds == 3
 
 
 # Shapes whose M*N is divisible by every factor while one per-dimension quotient is not

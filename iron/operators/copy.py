@@ -35,7 +35,7 @@ from aie.iron.runtime.dmatask import emit_shim_transfer
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import In, Operator, Out, Scratchpad, auto, param
+from iron.common import In, Operator, Out, Scratchpad, Unresolvable, auto, param
 from iron.common.design import BdLimits, ShimChannel
 from iron.common.testing import Case, Testing
 
@@ -55,18 +55,23 @@ class Gather(Operator):
     For ids a graph input the host turns each call's ids into control
     packets (``control_words``); for ids the device made, a
     ``GatherWords`` step writes them into the template (``word_source``).
-    Shim (1, 0) streams the packets to shim (0, 0)'s
-    TileControl: each writes a buffer descriptor of (0, 0), its address the
-    table's on the device plus the row's offset, and each batch of
-    ``chain`` descriptors is pushed onto (0, 0)'s MM2S 1 queue. That
-    channel streams the rows to (1, 0)'s S2MM 0, which drains them into
-    ``y``. Batches alternate between two sets of descriptors, and a set is
-    rewritten only after the sequence syncs on the token of the batch that
-    last ran it. The descriptors' addresses are physical, so only a full
-    ELF, whose table stays put across calls, runs it.
+    The rows go out over ``feeds`` pairs of shims. For feed ``k``, shim
+    (2k + 1, 0) streams the packets to shim (2k, 0)'s TileControl: each
+    writes a buffer descriptor of (2k, 0), its address the table's on the
+    device plus the row's offset, and each batch of ``chain`` descriptors
+    is pushed onto (2k, 0)'s MM2S 1 queue. That channel streams the rows to
+    (2k + 1, 0)'s S2MM 0, which drains them into ``y``. Each feed streams a
+    run of whole pairs of batches, and batch ``j`` runs on set ``j % 2`` of
+    its feed's descriptors, so the control words are one layout for every
+    feed count and a feed drains one span of ``y``. A set is rewritten only
+    after the sequence syncs on the token of the batch that last ran it.
+    The descriptors' addresses are physical, so only a full ELF, whose
+    table stays put across calls, runs it.
     """
 
     chain: ClassVar[int] = 8
+    # Measured: a fifth pair of shims would gain little over four.
+    max_feeds: ClassVar[int] = 4
     control_id: ClassVar[int] = 29
     bd_base: ClassVar[int] = 0x1D000
     # MM2S 1's control register; its task queue is the next word.
@@ -87,6 +92,7 @@ class Gather(Operator):
         + (3 if op.rows % op.chain else 0),
         repr=False,
     )
+    feeds: int = auto(array=True)
 
     table = In(table_rows, row, dtype=dtype)
     control = In(words, dtype=np.uint32)
@@ -97,6 +103,16 @@ class Gather(Operator):
         """The rows of each batch, ``chain`` at most."""
         return [min(self.chain, self.rows - r) for r in range(0, self.rows, self.chain)]
 
+    @property
+    def runs(self) -> list[range]:
+        """Per feed, the batches it streams: a run of whole pairs, the last
+        feed's ending where the rows do.
+        """
+        n = len(self.batches)
+        pairs = -(-n // 2)
+        bounds = [2 * (k * pairs // self.feeds) for k in range(self.feeds + 1)]
+        return [range(a, min(b, n)) for a, b in zip(bounds, bounds[1:])]
+
     def validate(self) -> None:
         if self.rows < 1:
             raise ValueError(f"a gather takes one row at least, not {self.rows}")
@@ -106,24 +122,57 @@ class Gather(Operator):
                 f"32-bit words, which a descriptor's length counts"
             )
 
+    def resolve(self, dev):
+        """As many feeds as the device's shim columns pair into, up to
+        ``max_feeds`` and to one per two batches.
+        """
+        pairs = -(-len(self.batches) // 2)
+        feeds = self.feeds
+        if feeds is None:
+            feeds = min(self.max_feeds, dev.cols // 2, pairs)
+        if not 1 <= feeds <= dev.cols // 2:
+            raise Unresolvable(
+                f"a gather feeds from 1 to {dev.cols // 2} pairs of shim "
+                f"columns on a device of {dev.cols}, not {feeds}"
+            )
+        return dataclasses.replace(self, feeds=feeds)
+
+    def compatible(self) -> None:
+        pairs = -(-len(self.batches) // 2)
+        if self.feeds > pairs:
+            raise ValueError(
+                f"{self.rows} rows are {pairs} pairs of batches of {self.chain}, "
+                f"and a feed streams whole pairs, so {self.feeds} feeds leave "
+                f"{self.feeds - pairs} idle"
+            )
+
     def ops(self) -> int:
         return 0  # a data mover: its figure is bandwidth
 
     def array(self, target) -> list:
-        feed, drain = Tile(0, 0), Tile(1, 0)
-        return [
-            PacketFlow(
-                self.control_id,
-                drain,
-                feed,
-                dst_port=WireBundle.TileControl,
-                # An explicit False drops the header TileControl reads: the run hangs.
-                keep_pkt_header=True,
-                shim_symbol="gather_ctrl",
-            ),
-            Flow(feed, drain, src_channel=1, dst_channel=0, shim_symbol="gather_feed"),
-            ShimChannel("gather_rows", drain, DMAChannelDir.S2MM, 0),
-        ]
+        routes = []
+        for k in range(self.feeds):
+            feed, drain = Tile(2 * k, 0), Tile(2 * k + 1, 0)
+            routes += [
+                PacketFlow(
+                    self.control_id - k,
+                    drain,
+                    feed,
+                    dst_port=WireBundle.TileControl,
+                    # An explicit False drops the header TileControl reads: the run hangs.
+                    keep_pkt_header=True,
+                    shim_symbol=f"gather_ctrl{k}",
+                ),
+                Flow(
+                    feed,
+                    drain,
+                    src_channel=1,
+                    dst_channel=0,
+                    shim_symbol=f"gather_feed{k}",
+                ),
+                ShimChannel(f"gather_rows{k}", drain, DMAChannelDir.S2MM, 0),
+            ]
+        return routes
 
     def sequence(self, rt) -> None:
         if rt.image != "elf":
@@ -131,49 +180,74 @@ class Gather(Operator):
                 "a gather by a graph input writes physical addresses, which "
                 "only a full ELF keeps across calls; package as a full ELF"
             )
-        words, packet = rt.data(self.control), (0, self.control_id)
-        drained = emit_shim_transfer(
-            "gather_rows", rt.data(self.y), wait=True, managed=False
-        )
-        pending = [
-            emit_shim_transfer(
-                "gather_ctrl",
-                words,
-                tap=TensorAccessPattern(
-                    (self.words,), 0, [4 * self.chain, 1, 1, 5], [5, 0, 0, 1]
-                ),
-                packet=packet,
-                managed=False,
-            )
-        ]
-        at = 20 * self.chain
-        batches = self.batches
-        for j, n in enumerate(batches):
-            if j >= 2:
-                # MM2S 1 finished batch j - 2, so its set and packets are free.
-                aiex.npu_sync(0, 0, DMAChannelDir.MM2S.value, 1)
-                for task in pending[:-1]:
-                    task.free()
-                pending = pending[-1:]
-            # A row's packet, the push, and on a short last batch its end.
-            packets = n + 1 + int(n < self.chain)
-            pending.append(
+        words, y = rt.data(self.control), rt.data(self.y)
+        chain, batches, runs = self.chain, self.batches, self.runs
+        drained, pending = [], []
+        for k, run in enumerate(runs):
+            first = run.start * chain * self.row
+            last = min(run.stop * chain, self.rows) * self.row
+            drained.append(
                 emit_shim_transfer(
-                    "gather_ctrl",
-                    words,
+                    f"gather_rows{k}",
+                    y,
                     tap=TensorAccessPattern(
-                        (self.words,), at, [packets, 1, 1, 3], [3, 0, 0, 1]
+                        (self.rows * self.row,),
+                        first,
+                        [1, 1, 1, last - first],
+                        [0, 0, 0, 1],
                     ),
-                    packet=packet,
+                    wait=True,
                     managed=False,
                 )
             )
-            at += 3 * packets
-        for _ in batches[-2:]:
-            aiex.npu_sync(0, 0, DMAChannelDir.MM2S.value, 1)
-        for task in pending:
-            task.free()
-        drained.await_()
+            # Every feed's preamble writes the same descriptors, from one copy.
+            pending.append(
+                [
+                    emit_shim_transfer(
+                        f"gather_ctrl{k}",
+                        words,
+                        tap=TensorAccessPattern(
+                            (self.words,), 0, [4 * chain, 1, 1, 5], [5, 0, 0, 1]
+                        ),
+                        packet=(0, self.control_id - k),
+                        managed=False,
+                    )
+                ]
+            )
+        for i in range(max(len(run) for run in runs)):
+            for k, run in enumerate(runs):
+                if i >= len(run):
+                    continue
+                j = run[i]
+                if i >= 2:
+                    # MM2S 1 finished the feed's batch i - 2: its set and packets are free.
+                    aiex.npu_sync(2 * k, 0, DMAChannelDir.MM2S.value, 1)
+                    for task in pending[k][:-1]:
+                        task.free()
+                    pending[k] = pending[k][-1:]
+                # A row's packet, the push, and on a short last batch its end.
+                packets = batches[j] + 1 + int(batches[j] < chain)
+                pending[k].append(
+                    emit_shim_transfer(
+                        f"gather_ctrl{k}",
+                        words,
+                        tap=TensorAccessPattern(
+                            (self.words,),
+                            20 * chain + 3 * (chain + 1) * j,
+                            [packets, 1, 1, 3],
+                            [3, 0, 0, 1],
+                        ),
+                        packet=(0, self.control_id - k),
+                        managed=False,
+                    )
+                )
+        for k, run in enumerate(runs):
+            for _ in run[-2:]:
+                aiex.npu_sync(2 * k, 0, DMAChannelDir.MM2S.value, 1)
+            for task in pending[k]:
+                task.free()
+        for task in drained:
+            task.await_()
 
     def word_source(self) -> "GatherWords":
         """The step writing this gather's row addresses into its template on
