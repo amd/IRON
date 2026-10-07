@@ -125,8 +125,15 @@ python -m iron.lm.llama3.model /path/to/model.safetensors /path/to/tokenizer.mod
 ```
 
 `decode_costs_npu2.json` is such a table, measured on a Strix Halo NPU (8
-columns). Its entries are keyed by each design's identity -- its fields --
-so a design changed since the table was measured is not in it, and the
+columns), and `decode_costs_npu1.json` one measured on a Phoenix NPU (4
+columns); `tune.py` fills the current device's by default. On NPU1, where
+each step is its own dispatch, nothing is packed: a narrower design is
+chosen where it is cheaper to switch into. There the table narrows
+attention and the elementwise steps and keeps every GEMV at four columns:
+with random weights, a token went from 774 to 603 ms (20 tokens after a
+4-token prompt, medians of 8 interleaved runs). Its entries are keyed by
+each design's identity -- its fields -- so a design changed since the
+table was measured is not in it, and the
 tuner leaves that design as the profile gives it (the `[Tuning]` report
 counts it as unmeasured). Run `tune.py` again after changing a design, or
 to measure for another NPU; it keeps the entries still current and measures
