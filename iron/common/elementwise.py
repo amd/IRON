@@ -501,8 +501,6 @@ class UnaryElementwise(Elementwise):
     """A flat buffer in, a flat buffer of the same size out."""
 
     test = Testing(Sweep())
-    # The epilogue a producer applies in its own cores in place of this step.
-    as_epilogue: ClassVar[str | None] = None
     size: int = param()
     valid = Extent(size)
 

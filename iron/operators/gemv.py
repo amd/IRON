@@ -3,14 +3,11 @@
 
 import dataclasses
 import math
-from contextlib import nullcontext
-from enum import StrEnum
 from typing import Any, ClassVar
 
-import aie.dialects.arith as arith
 import aie.dialects.index as index
 import numpy as np
-from aie.dialects.aie import AIEArch, T
+from aie.dialects.aie import T
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
@@ -20,19 +17,18 @@ from aie.iron import (
     WorkerRuntimeBarrier,
     ceildiv,
 )
-from aie.iron.controlflow import if_, range_
+from aie.iron.controlflow import range_
 from aie.iron.device import Device
-from aie.iron.kernels import activation, linalg
+from aie.iron.kernels import linalg
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
     Extent,
+    Finish,
     In,
     Operator,
     Out,
-    UnaryElementwise,
-    Unresolvable,
     Value,
     auto,
     OptionalDim,
@@ -40,6 +36,8 @@ from iron.common import (
 )
 from iron.common.design import BdLimits, Target
 from iron.common.testing import Case, Testing
+from iron.operators.gelu import GELU
+from iron.operators.silu import SiLU
 
 
 def _cases(cls, dev: Device):
@@ -77,6 +75,17 @@ def _cases(cls, dev: Device):
         kwargs = dict(M=M, K=K, num_aie_columns=cols, tile_size_input=tsi)
         return Case(dict(kwargs, tile_size_output=tso, **extra), bench=bench)
 
+    def finished(M, K, cols, tsi, tso, *chains):
+        # The first chain is the case's own; more share one array.
+        steps = [tuple(step(size=M) for step in c) for c in chains]
+        plain = case(M, K, cols, tsi, tso)
+        shared = tuple(steps) if len(steps) > 1 else ()
+        names = ["".join(step.__name__ for step in c) or "none" for c in chains]
+        label = f"{plain.label}-finish_{names[0]}" + "".join(
+            f"-shares_{n}" for n in names[1:]
+        )
+        return Case(dict(plain.kwargs, finish=steps[0], finishes=shared), id=label)
+
     # Benched: the large matrices across the whole device, which run well
     # past the dispatch cost.
     widest = dev.cols
@@ -88,29 +97,12 @@ def _cases(cls, dev: Device):
         [case(*p, bench=bench(*p)) for p in plain]
         + [case(*p, num_batches=batches) for *p, batches in batched]
         + [case(*p, num_batches=batches, repeat=r) for *p, batches, r in repeated]
-        # The fused GELU epilogue, aie2p's alone.
-        + [case(*p, epilogue="gelu") for p in plain[:3]]
-        + [case(*p, epilogue="silu") for p in plain[:3]]
+        # Each core finishing its output tiles.
+        + [finished(*p, (GELU,)) for p in plain[:3]]
+        + [finished(*p, (SiLU,)) for p in plain[:3]]
         # One array serving both, each design selecting its own.
-        + [
-            case(*p, epilogue=e, epilogues=("none", "silu"))
-            for e in ("none", "silu")
-            for p in plain[2:3]
-        ]
+        + [finished(*plain[2], (), (SiLU,)), finished(*plain[2], (SiLU,), ())]
     )
-
-
-class Epilogue(StrEnum):
-    """The activation each core applies to an output tile it produced."""
-
-    NONE = "none"
-    GELU = "gelu"  # tanh approximation, aie2p's in-place gelu_tile_bf16
-    SILU = "silu"
-
-    @property
-    def mode(self) -> int:
-        """The word a core reads to select this epilogue among its array's."""
-        return list(Epilogue).index(self)
 
 
 class GEMV(Operator):
@@ -151,10 +143,6 @@ class GEMV(Operator):
     tile_size_output: int = auto()
     # None picks the widest legal size for K (see validate).
     kernel_vector_size: int = auto(repr=False, array=True)
-    epilogue: Epilogue | str = param(default=Epilogue.NONE)
-    # The epilogues the array can apply. More than one, and each core reads
-    # its design's ``mode``, so designs differing in epilogue share an array.
-    epilogues: tuple = param(default=lambda op: (op.epilogue,), array=True)
 
     # A single batch carries no batch dimension at all, rather than one of
     # extent 1, so an unbatched operator has 2-D shapes. One fifo per column
@@ -175,6 +163,7 @@ class GEMV(Operator):
         tile=(tile_size_output,),
         per=(num_aie_columns,),
         depth=2,
+        finish=True,
     )
     valid = Extent(M)  # M, or fewer rows per call (``A[:n]`` in a graph)
     # Output tiles each column produces per batch: the core's trip count,
@@ -185,7 +174,6 @@ class GEMV(Operator):
         derive=lambda op: ceildiv(op.valid, op.num_aie_columns * op.tile_size_output),
     )
     batches = Value(np.int32, derive=lambda op: op.num_batches)
-    mode = Value(np.int32, derive=lambda op: Epilogue(op.epilogue).mode, optional=True)
 
     def extent_unit(self, buffer: str) -> int | None:
         # A column takes A in output tiles (several input tiles each) so
@@ -208,18 +196,6 @@ class GEMV(Operator):
         if tso is not None and tsi is not None and not (tso % tsi == 0 and tso >= tsi):
             raise ValueError("tile_size_output must be a multiple of tile_size_input")
         self._legal_kernel_vector_size()
-        self.epilogue = Epilogue(self.epilogue)
-        given = {Epilogue(e) for e in self.epilogues}
-        self.epilogues = tuple(e for e in Epilogue if e in given)
-        if self.epilogue not in self.epilogues:
-            raise ValueError(
-                f"epilogue {self.epilogue} is not in epilogues "
-                f"{tuple(str(e) for e in self.epilogues)}"
-            )
-        if Epilogue.GELU in self.epilogues and tso is not None and tso % 16 != 0:
-            raise ValueError(
-                f"gelu epilogue needs tile_size_output % 16 == 0 (got {tso})"
-            )
 
     def _legal_kernel_vector_size(self) -> int:
         """The vector width the matvec kernel is compiled at.
@@ -265,25 +241,14 @@ class GEMV(Operator):
     def resolve(self, dev):
         """Columns default to the most the device's shim budget allows that
         leave each column a whole number of tiles of M; the tiles follow
-        from K, not from the device.
+        from K, and from the line each finish of the array runs at.
         """
-        if Epilogue.GELU in self.epilogues and dev.arch is not AIEArch.AIE2p:
-            # gelu_tile_bf16 is exported by gelu_aie2p.h alone.
-            raise Unresolvable(f"GEMV's gelu epilogue is aie2p-only; got {dev.arch}")
         # Two rows of A per acquire where two fit a bank's worth of L1.
         row_bytes = self.K * np.dtype(bfloat16).itemsize
         rows = self.tile_size_input or (2 if row_bytes <= Target.L1_BANK_BYTES else 1)
-        # silu.cc runs whole vector registers over the tile.
-        lanes = 32 if dev.arch is AIEArch.AIE2p else 16
-        silu = Epilogue.SILU in self.epilogues
-        tile = self.tile_size_output or (
-            math.lcm(rows, lanes) if silu else max(rows, 2)
+        tile = self.tile_size_output or self.finish_line(
+            dev, (max(rows, 2), *(math.lcm(rows, 2**i) for i in range(2, 8)))
         )
-        if silu and tile % lanes:
-            raise ValueError(
-                f"silu epilogue needs tile_size_output % {lanes} == 0 on "
-                f"{dev.arch} (got {tile})"
-            )
         unit = math.lcm(tile, rows)
         cols = self.resolve_columns(
             dev, self.num_aie_columns, fits=lambda c: self.M % (c * unit) == 0
@@ -332,25 +297,10 @@ class GEMV(Operator):
             vec_size=self.kernel_vector_size,
             output_rows=tile_size_output,
         )
-        # The epilogue runs over the whole C tile, once the matvec calls have
-        # filled it: one call's tile_size_input rows can be narrower than an
-        # activation's vector.
-        epilogues = self.epilogues
-        select = len(epilogues) > 1
-        kernels = []
-        if Epilogue.GELU in epilogues:
-            # gelu.cc's in-place gelu_tile_bf16, which only gelu_aie2p.h
-            # exports; it rides in the object the gelu factory builds. A second
-            # object, not an archive bundled with the first: each func.func
-            # carries its own link_with and aie-assign-core-link-files
-            # aggregates them onto the core.
-            kernels.append(
-                activation.gelu().object_file.bind(
-                    "gelu_tile_bf16", [np.int32, self.C.tile]
-                )
-            )
-        if Epilogue.SILU in epilogues:
-            kernels.append(activation.silu_sized(tile_size_output))
+        # The finish runs over the whole C tile, once the matvec calls have
+        # filled it: one call's tile_size_input rows can be narrower than a
+        # step's vector.
+        finish = Finish(self, cols)
 
         A_fifos = [
             ObjectFifo(self.A.tile, name=f"A_L3L1_{i}", depth=self.A.depth)
@@ -362,12 +312,11 @@ class GEMV(Operator):
             for i in range(cols)
         ]
         # Per column: the trip count (unless a graph bounds M, when each core
-        # reads it from the scratchpad), the batches of a call and, when the
-        # array has a choice, the epilogue.
+        # reads it from the scratchpad) and the batches of a call.
         dynamic = self.uses_value("tiles") and target.image == "elf"
         rtps = [
             Buffer(
-                np.ndarray[(3,), np.dtype[np.int32]],
+                np.ndarray[(2,), np.dtype[np.int32]],
                 name=f"rtp_{i}",
                 use_write_rtp=True,
             )
@@ -376,48 +325,28 @@ class GEMV(Operator):
         barriers = [WorkerRuntimeBarrier() for _ in range(cols)]
 
         def core_body(A_fifo, B_fifo, C_fifo, matvec, rtp, barrier, *rest):
-            rest = iter(rest)
             barrier.wait_for_value(1)
-            n = next(rest).read() if dynamic else rtp[0]
+            n = rest[0].read() if dynamic else rtp[0]
+            rest = rest[1:] if dynamic else rest
             batches = rtp[1]
-            mode = rtp[2] if select else epilogues[0].mode
+            mode = finish.read(rest)
             # The wait leaves the barrier set: release it, or a design sharing
             # this array runs on these values.
             barrier.release_with_value(1)
-            gelu = next(rest) if Epilogue.GELU in epilogues else None
-            silu = next(rest) if Epilogue.SILU in epilogues else None
-            # silu.cc reads and writes through restrict pointers, so its
-            # input is a tile of its own.
-            acc = next(rest) if silu is not None else None
             for _ in range_(batches):
                 b = B_fifo.acquire(1)
                 # Each column produces tiles output tiles of tile_size_output
                 # rows per batch, tile_size_input rows per kernel call.
                 for _ in range_(n):
                     c = C_fifo.acquire(1)
-                    out = c
-                    if silu is not None:
-                        out = (
-                            arith.select(mode == Epilogue.SILU.mode, acc.op, c)
-                            if select
-                            else acc
-                        )
+                    out = finish.target(rest, mode, c)
                     for j_idx in range_(tile_size_output // tile_size_input):
                         j_i32: Any = index.casts(T.i32(), j_idx)
                         output_row_offset = j_i32 * tile_size_input
                         a = A_fifo.acquire(1)
                         matvec(tile_size_input, output_row_offset, a, b, out)
                         A_fifo.release(1)
-                    if gelu is not None:
-                        with (
-                            if_(mode == Epilogue.GELU.mode) if select else nullcontext()
-                        ):
-                            gelu(tile_size_output, c)
-                    if silu is not None:
-                        with (
-                            if_(mode == Epilogue.SILU.mode) if select else nullcontext()
-                        ):
-                            silu(acc, c, tile_size_output)
+                    finish.apply(rest, mode, c)
                     C_fifo.release(1)
                 B_fifo.release(1)
 
@@ -432,13 +361,9 @@ class GEMV(Operator):
                     rtps[i],
                     barriers[i],
                     *([self.tiles.param] if dynamic else []),
-                    *kernels,
-                    *(
-                        [Buffer(self.C.tile, name=f"acc_{i}")]
-                        if Epilogue.SILU in epilogues
-                        else []
-                    ),
+                    *finish.args(i),
                 ],
+                stack_size=finish.stack_bytes,
             )
             for i in range(cols)
         ]
@@ -449,8 +374,7 @@ class GEMV(Operator):
         if not dynamic:
             self.tiles.bind(rtps, 0)
         self.batches.bind(rtps, 1)
-        if select:
-            self.mode.bind(rtps, 2)
+        finish.bind()
         return workers + barriers
 
     def sequence(self, rt):
@@ -537,28 +461,11 @@ class GEMV(Operator):
         tg.finish()
         vectors.finish()
 
-    def fold(self, consumer):
-        if (
-            not isinstance(consumer, UnaryElementwise)
-            or consumer.as_epilogue not in Epilogue
-            or self.epilogue is not Epilogue.NONE
-        ):
-            return None
-        epilogue = Epilogue(consumer.as_epilogue)
-        return dataclasses.replace(
-            self, epilogue=epilogue, epilogues=(*self.epilogues, epilogue)
-        )
-
-    def on_array(self, other):
-        if not isinstance(other, GEMV) or self.epilogue not in other.epilogues:
-            return None
-        return dataclasses.replace(self, epilogues=other.epilogues)
-
     def ops(self) -> int:
         return 2 * self.M * self.K * self.num_batches
 
     def reference(self, A, B):
-        """``C = A @ B``, then the epilogue: one product per batch when ``A``
+        """``C = A @ B``, then its finish: one product per batch when ``A``
         is ``(batches, M, K)`` and ``B`` ``(batches, K)``, each matrix of
         ``A`` serving ``repeat`` consecutive batches.
         """
@@ -575,21 +482,14 @@ class GEMV(Operator):
             C = np.matmul(a, b).reshape(A.shape[0], A.shape[1]).astype(A.dtype)
         else:
             C = (a @ b.reshape(A.shape[-1])).astype(A.dtype)
-        match self.epilogue:
-            case Epilogue.GELU:
-                return activation.gelu_ref(C)
-            case Epilogue.SILU:
-                return activation.silu_ref(C)
-        return C
+        return Finish(self.resolved()).reference(C) if self.finish else C
 
     def tolerance(self) -> Tolerance:
         """The gate GEMV's sweeps hold: C accumulates in f32 and rounds
-        once, and an epilogue's tanh approximation adds its own.
+        once, and a finish carries that through its steps' own gates.
         Tighter than linalg.mv's contract, the C++ matmul harness's 0.05
         and 0.5.
         """
-        if self.epilogue is Epilogue.GELU:
-            return Tolerance.relative(0.06, 2e-2, note="f32 accumulation, then GELU")
-        if self.epilogue is Epilogue.SILU:
-            return Tolerance.relative(0.08, 0.035, note="f32 accumulation, then SiLU")
+        if self.finish:
+            return Finish(self).tolerance()
         return Tolerance.relative(0.04, 1e-3, note="f32 accumulation, rounded once")

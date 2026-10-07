@@ -12,7 +12,6 @@ from iron.common.testing import Sweep, Testing
 class GELU(UnaryElementwise):
     """AIE-accelerated GELU activation function."""
 
-    as_epilogue = "gelu"
     test = Testing(Sweep())
 
     tile_cap: ClassVar[int] = 8192

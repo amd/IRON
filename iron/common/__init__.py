@@ -28,7 +28,13 @@ from .declare import (
     param,
     Select,
 )
-from .elementwise import BinaryElementwise, Elementwise, Rowwise, UnaryElementwise
+from .elementwise import (
+    BinaryElementwise,
+    Elementwise,
+    Finish,
+    Rowwise,
+    UnaryElementwise,
+)
 
 __all__ = [
     "BinaryElementwise",
@@ -36,6 +42,7 @@ __all__ = [
     "DispatchTime",
     "Elementwise",
     "Extent",
+    "Finish",
     "In",
     "InOut",
     "Operator",

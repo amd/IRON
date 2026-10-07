@@ -36,7 +36,7 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.emit import reference as emit_reference
 from iron.operators.gemm import GEMM
-from iron.operators.gemv import GEMV, Epilogue
+from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.rms_norm import RMSNorm
@@ -411,10 +411,10 @@ def test_swiglu_folds_its_silu_into_the_gate_and_keeps_one_array(npu2):
         "GEMV",
     ]
     gate, up, mul, down = f.steps
-    assert (gate.op.epilogue, up.op.epilogue) == (Epilogue.SILU, Epilogue.NONE)
+    assert ([type(s) for s in gate.op.finish], up.op.finish) == ([SiLU], ())
     assert gate.op.resolved().array_key() == up.op.resolved().array_key()
     assert gate.op.design_key() != up.op.design_key()
-    assert down.op.epilogues == (Epilogue.NONE,)
+    assert (down.op.finish, down.op.finishes) == ((), ())
     silu = next(s for s in t.steps if type(s.op) is SiLU)
     assert gate.outputs[0].name == silu.outputs[0].name == mul.inputs[0].name
     assert f.input_args == t.input_args and f.output_args == t.output_args
@@ -455,7 +455,7 @@ def test_a_fold_the_producer_cannot_resolve_is_left_alone(npu2):
     # An output tile of 8 rows: silu's 32 lanes do not divide it.
     t = _Gate("once", rows=512, tile=8).trace(x=(E,))
     gemv, silu = (s.op for s in t.steps)
-    with pytest.raises(ValueError, match="silu epilogue"):
+    with pytest.raises(ValueError, match="not a multiple of the kernel"):
         gemv.fold(silu).resolved(npu2)
     assert folded(t, npu2) == (t, {})
 

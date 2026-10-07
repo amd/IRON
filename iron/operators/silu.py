@@ -10,7 +10,6 @@ from iron.common.testing import Sweep, Testing
 class SiLU(UnaryElementwise):
     """AIE-accelerated SiLU activation function."""
 
-    as_epilogue = "silu"
     test = Testing(Sweep(channels=None))
 
     # One channel per column: the LUT-based kernel is sized for it.

@@ -18,7 +18,7 @@ from ml_dtypes import bfloat16
 from iron.common.harness import verify_buffer
 from iron.lm.layers import SwiGLU
 from iron.operators.elementwise_mul import ElementwiseMul
-from iron.operators.gemv import GEMV, Epilogue
+from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
 
 # (rows, embedding_dim, hidden_dim). Qwen3.5-0.8B's FFN is 1024 by 3584.
@@ -78,13 +78,13 @@ def test_swiglu(rows, embedding_dim, hidden_dim, fold, npu_runtime, record_prope
     folded = [
         s
         for s in net.traced.steps
-        if type(s.op) is GEMV and s.op.epilogue is Epilogue.SILU
+        if type(s.op) is GEMV and [type(step) for step in s.op.finish] == [SiLU]
     ]
     assert len(folded) == (fold and rows == 1)
     assert any(type(s.op) is SiLU for s in net.traced.steps) != bool(folded)
     if folded:
         # Folded, both projections are the product's inputs, and run on one
-        # array each with its own epilogue.
+        # array each with its own finish.
         gate, up = net.traced.steps[:2]
         verdicts.update(gate=_verdict(net, gate), up=_verdict(net, up))
     assert all(verdicts.values()), {k: v.detail for k, v in verdicts.items()}

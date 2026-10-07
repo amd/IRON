@@ -34,7 +34,6 @@ from iron.common.graph.probe import judge
 from iron.common.harness import vectors
 from iron.lm.layers import SwiGLU
 from iron.operators import GELU, GEMM, MHA, ElementwiseAdd, ReLU, RoPE, SiLU
-from iron.operators.gemv import Epilogue
 
 SIZE = 8192
 TILE = 256
@@ -345,7 +344,7 @@ def test_a_fold_is_taken_where_the_model_says_it_gains(tmp_path, npu2):
         "ElementwiseMul",
         "GEMV",
     ]
-    assert applied.steps[0].op.epilogue is Epilogue.SILU
+    assert [type(s) for s in applied.steps[0].op.finish] == [SiLU]
 
 
 @pytest.mark.parametrize("gate_us", [400.0, None], ids=["dearer", "unmeasured"])

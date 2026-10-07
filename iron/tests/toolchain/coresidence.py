@@ -251,7 +251,7 @@ def test_designs_of_one_array_share_its_device():
 
 def test_a_folded_gate_shares_its_device_with_the_up_projection(npu2):
     # SwiGLU's gate and up are one array before the fold; the fold gives
-    # the up projection the gate's epilogues, so they stay one.
+    # the up projection the gate's finishes, so they stay one.
     hidden, embedding = 8192, 2048
     weights = (np.zeros((hidden, embedding), bfloat16),) * 2
     ffn = SwiGLU(*weights, np.zeros((embedding, hidden), bfloat16))
