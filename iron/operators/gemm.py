@@ -7,6 +7,7 @@ from typing import Any
 
 import numpy as np
 from aie.dialects.aie import AIEArch
+from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
@@ -17,7 +18,7 @@ from aie.iron import (
     ceildiv,
     kernels,
 )
-from aie.iron.controlflow import range_
+from aie.iron.controlflow import if_, range_
 from aie.iron.device import NPU1, NPU2, Device, NPU1Col1, NPU1Col2, Tile
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
@@ -161,9 +162,8 @@ class GEMM(Operator):
     # rest through, so the work follows the call and the traffic does not.
     valid = Extent(M)
     # K, or less per call (``GEMM(A[:, :n], B[:n])``): the cores reduce over
-    # the K tiles the bound covers and pass the rest through. The last of
-    # them is multiplied whole, so A's columns past n in it must be zero (a
-    # bounded Softmax's are) and B's rows there finite.
+    # the K tiles the bound covers, the last with A's columns and B's rows
+    # past n zeroed, and pass the rest through.
     valid_k = Extent(K)
     # Reduction steps per output tile, and output tiles per core.
     k_div_k = Value(np.int32, derive=lambda op: op.K // op.tile_k)
@@ -177,9 +177,9 @@ class GEMM(Operator):
         derive=lambda op: ceildiv(op.valid, op.mem_tile_m_c) * (op.N // op.mem_tile_n),
         optional=True,  # nothing reads it unbounded
     )
-    k_div_k_valid = Value(
-        np.int32, derive=lambda op: ceildiv(op.valid_k, op.tile_k), optional=True
-    )
+    # The cores derive their K tiles and the last one's columns from the bound
+    # itself: each value a core reads is patched into every core per call.
+    k_valid = Value(np.int32, derive=lambda op: op.valid_k, optional=True)
 
     def extent_unit(self, buffer: str) -> int:
         return 0  # nothing is shortened: the cores bound their compute
@@ -483,7 +483,7 @@ class GEMM(Operator):
                     "GEMM: a per-call bound on K needs a full ELF; an xclbin's "
                     "cores reduce over every K tile"
                 )
-            k_valid_param = self.k_div_k_valid.param
+            k_valid_param = self.k_valid.param
 
         # Tasks for each worker to perform
         def core_fn(
@@ -493,6 +493,7 @@ class GEMM(Operator):
             zero,
             matmul,
             convert_copy,
+            k_tail_zero,
             my_rtp,
             barrier,
             elem_out_internal,
@@ -505,7 +506,10 @@ class GEMM(Operator):
             # (K tiles, whether they are multiplied), in the order they arrive.
             spans = [(rtp_K_div_k, True)]
             if k_valid is not None:
-                k_compute = k_valid.read()
+                k_bound = k_valid.read()
+                k_compute = (k_bound + (k - 1)) // k
+                last = k_compute - 1
+                kept = k_bound - last * k
                 spans = [(k_compute, True), (rtp_K_div_k - k_compute, False)]
 
             def tile(compute: bool):
@@ -515,10 +519,13 @@ class GEMM(Operator):
                 if compute:
                     zero(elem_out_internal)
                 for count, multiply in spans:
-                    for _ in range_(count):
+                    for kk in range_(count):
                         elem_in_a = in_a.acquire(1)
                         elem_in_b = in_b.acquire(1)
                         if compute and multiply:
+                            if k_valid is not None:
+                                with if_(arith.index_cast(kk, to=last.type) == last):
+                                    k_tail_zero(elem_in_a, elem_in_b, kept)
                             matmul(elem_in_a, elem_in_b, elem_out_internal)
                         in_a.release(1)
                         in_b.release(1)
@@ -562,6 +569,7 @@ class GEMM(Operator):
                             zero_kernel,
                             matmul_kernel,
                             convert_copy_kernel if use_larger_internal_buffer else None,
+                            matmul_kernel.k_tail if k_valid_param is not None else None,
                             rtps[row][col],
                             workerBarriers[row][col],
                             acc_buffer,
