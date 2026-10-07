@@ -74,8 +74,7 @@ def measure(
 def main(runner: type[Runner], description: str, default_table: Path) -> None:
     """The command line that measures ``runner``'s model's cost table."""
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("weights_path", help="the .safetensors checkpoint")
-    parser.add_argument("tokenizer_path", help="the tokenizer's file")
+    runner.add_arguments(parser)
     parser.add_argument(
         "--table",
         type=Path,
@@ -110,8 +109,8 @@ def main(runner: type[Runner], description: str, default_table: Path) -> None:
     )
     args = parser.parse_args()
 
+    run = runner.from_arguments(parser, args)
     print(f"power mode: {pmode()}")
-    run = runner(args.weights_path, args.tokenizer_path)
     measure(
         run.model(run.config, run.weights),
         CostTable(args.table),

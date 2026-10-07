@@ -13,6 +13,7 @@ figures reach the CSV.
 
 import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -37,15 +38,13 @@ def weights_dir(name: str) -> Path:
     return Path(os.environ.get("IRON_EXAMPLE_WEIGHTS_DIR", "/srv")) / name
 
 
-def requires(*files: Path):
-    """Skip unless every one of ``files`` exists, except in CI, where a
-    missing file is a failure.
+def require(*files: Path) -> None:
+    """Skip the test unless every one of ``files`` exists, except in CI,
+    where a missing file is a failure.
     """
     missing = [str(f) for f in files if not f.exists()]
-    return pytest.mark.skipif(
-        not os.environ.get("CI") and bool(missing),
-        reason=f"not found outside CI: {missing}",
-    )
+    if missing and not os.environ.get("CI"):
+        pytest.skip(f"not found outside CI: {missing}")
 
 
 def prompt(runner, chars: int, num_tokens: int, skip: int = 0) -> list[int]:
@@ -61,7 +60,7 @@ def check_generation(runner, model, prompt_len: int, num_tokens: int, *, record)
     tokens = prompt(runner, prompt_len, num_tokens)
     sample = Sampler(0.7, 50, np.random.default_rng(SEED))
     drawn, first, later = generate(model, tokens, num_tokens, sample)
-    print(runner.tokenizer.decode(drawn))
+    print(runner.decode(drawn))
     record("TTFT", first)
     if num_tokens > 1:
         record("TPS", 1 / later)
@@ -79,7 +78,7 @@ def check_device_loop(runner, model, prompt_len: int, num_tokens: int, *, record
         return Sampler(0.7, 50, np.random.default_rng(SEED))
 
     drawn, first, later = model.generate(tokens, num_tokens, sampler())
-    print(runner.tokenizer.decode(drawn))
+    print(runner.decode(drawn))
     record("TTFT", first)
     if num_tokens > 1:
         record("TPS", 1 / later)
@@ -178,14 +177,63 @@ def check_deep_decode(
     at a near-tie a step can differ in it at a KL of 0.014.
 
     The caches hold a real prompt, ``chars`` characters of it, repeated up
-    to ``position``, so the step
-    attends over a real prompt's scale of keys and values, the same ones on
-    the device and in the reference. The prompt's own rows are left as it
-    wrote them, so the model's record of what its caches hold stays true.
+    to ``position`` (``_fill_caches``).
     """
     tokens = prompt(runner, chars, 1)
-    n = len(tokens)
     token = greedy(model.logits(tokens))
+    # A decode step takes the token; the device gathers its embedding row.
+    values = dict(token=token, position=position, chunk=0, rows=1)
+    with _fill_caches(model, len(tokens), position):
+        got, _ = model(**values)
+        got = got.numpy()
+        expected, _ = model.reference(**values)
+    kl, top1 = divergence(expected, got)
+    record("DeepKL", kl)
+    record("DeepTop1", top1)
+    assert kl <= bound, f"at {position}: KL {kl} > {bound}"
+
+
+def check_deep_prompt(
+    runner, model, rows: int, bound: float, chars: int = 1024, *, record
+):
+    """The last prompt chunk the caches hold, ``rows`` rows of it, against
+    the graph's own reference within ``bound`` of its KL, every position
+    before it filled as ``check_deep_decode`` fills them: the chunk attends
+    over the whole context. Records its seconds, the longest a prompt
+    chunk takes, which the driver's watchdog bounds where a chunk is one
+    dispatch.
+    """
+    tokens = prompt(runner, chars, 1)
+    model.logits(tokens)
+    C, L = runner.config.prefill_chunk, runner.config.max_seq_len
+    chunk = np.resize(tokens, rows)
+    x = np.zeros((C, runner.config.emb_dim), dtype=model.embedding.array.dtype)
+    x[:rows] = model.embedding.array[chunk]
+    values = dict(
+        token=int(chunk[-1]), position=L - C + rows - 1, chunk=L // C - 1, rows=rows
+    )
+    with _fill_caches(model, len(tokens), L - C):
+        start = time.perf_counter()
+        got, _ = model(x, **values)
+        record("DeepPromptSeconds", time.perf_counter() - start)
+        got = got.numpy()
+        expected, _ = model.reference(x, **values)
+    kl, top1 = divergence(expected, got)
+    record("DeepPromptKL", kl)
+    record("DeepPromptTop1", top1)
+    assert kl <= bound, f"the chunk at {L - C}: KL {kl} > {bound}"
+
+
+@contextmanager
+def _fill_caches(model, n: int, position: int):
+    """The caches' first ``n`` rows, a prompt's, repeated up to ``position``
+    on the device and as the graph reference's state, for the body of the
+    ``with``; the reference's state is dropped after it. The prompt's own
+    rows are left as it wrote them, so the model's record of what its
+    caches hold stays true, and the step attends over a real prompt's
+    scale of keys and values, the same ones on the device and in the
+    reference.
+    """
     version = next(iter(model.versions.values()))
     caches = [*model.keys, *model.values]
     for cache in caches:
@@ -193,16 +241,8 @@ def check_deep_decode(
         rows[n:position] = np.resize(rows[:n], (position - n, *rows.shape[1:]))
         version.write(cache, rows)
         cache.host = rows  # the reference's, written in place as the device's
-    # A decode step takes the token; the device gathers its embedding row.
-    values = dict(token=token, position=position, chunk=0, rows=1)
     try:
-        got, _ = model(**values)
-        got = got.numpy()
-        expected, _ = model.reference(**values)
+        yield
     finally:
         for cache in caches:
             cache.host = None
-    kl, top1 = divergence(expected, got)
-    record("DeepKL", kl)
-    record("DeepTop1", top1)
-    assert kl <= bound, f"at {position}: KL {kl} > {bound}"

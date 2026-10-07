@@ -61,7 +61,12 @@ python -m iron.lm.llama3.model \
     --prompt-len 2048 --num-tokens 40
 ```
 
-- `--prompt-len`: characters of `iron/lm/prompt.txt` to use as the prompt (default 2048)
+- `--random-weights SEED`: in place of the two files, weights drawn at
+  `SEED` and prompts of random tokens; the speed, the accuracy against the
+  oracle and the determinism are those of the real checkpoint's shape, on a
+  host without it
+- `--prompt-len`: characters of `iron/lm/prompt.txt` to use as the prompt,
+  or with `--random-weights` a third as many random tokens (default 2048)
 - `--num-tokens`: tokens to generate (default 40)
 - `--max-seq-len`: the rows the key and value caches hold, prompt and
   generated tokens together, a multiple of 2048 (default 32768, 1 GB of

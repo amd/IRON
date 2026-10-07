@@ -826,13 +826,17 @@ shared layer, plus its tokenizer and profiles:
   checks strictly against the mapped `.safetensors`
 - `Runner` and `main` (`runner.py`): the checkpoint, the tokenizer, the
   model and its oracle, and the command line. A model's runner names
-  its `config`, `layout`, `model`, `open_tokenizer` and `bos`
+  its `config`, `layout`, `model`, `open_tokenizer` and `bos`. With
+  `--random-weights SEED` (and pytest's option of that name) the weights
+  are drawn (`random_weights`) and the prompts random: speed, accuracy
+  against the oracle and determinism on a host without the files
 
 Nothing of a model's own is needed by `generation.py` (sampling, the
 generation loop and the accuracy and determinism checks over any model
 with `logits(tokens)`) or `testing.py` (what a model's device test checks
 with them, and where it finds the files,
-`$IRON_EXAMPLE_WEIGHTS_DIR/<name>`). Nothing in the library imports a
+`$IRON_EXAMPLE_WEIGHTS_DIR/<name>`; pytest's `--max-seq-len` runs a
+model's test at another context). Nothing in the library imports a
 model.
 
 Their dependencies (safetensors, tiktoken, ...) are in

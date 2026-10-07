@@ -76,6 +76,20 @@ def pytest_addoption(parser):
         help="Narrow and pack a language model's decode step by this measured "
         "cost table (iron.lm.tune)",
     )
+    parser.addoption(
+        "--random-weights",
+        type=int,
+        default=None,
+        metavar="SEED",
+        help="Run a language model's tests on weights drawn at SEED and random "
+        "prompts, in place of its checkpoint and tokenizer",
+    )
+    parser.addoption(
+        "--max-seq-len",
+        type=int,
+        default=None,
+        help="The rows a language model's caches hold, in place of its config's",
+    )
 
 
 def get_git_commit():
