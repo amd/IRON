@@ -13,7 +13,9 @@ identity -- its fields -- so a design that has changed since is not in it,
 and the tuner leaves that design as the profile gives it. ``measure``
 fills one for the decode step as the graph is now: every design, each
 width. Designs already in the table are kept unless ``remeasure``; entries
-for designs the graph no longer has are dropped.
+for designs the graph no longer has are dropped. A design another graph has
+had measured on this NPU is taken from the cost cache
+(``iron.common.graph.costcache``) rather than run again.
 
 A model's ``tune`` module calls ``main`` with its runner; run it with
 XRT sourced and the NPU otherwise idle.
@@ -106,7 +108,8 @@ def main(runner: type[Runner], description: str, default_table: Path) -> None:
     parser.add_argument(
         "--remeasure",
         action="store_true",
-        help="measure designs and calibrations already in the table again",
+        help="measure designs and calibrations already in the table or the "
+        "cost cache again",
     )
     args = parser.parse_args()
 

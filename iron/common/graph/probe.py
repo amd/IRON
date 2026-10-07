@@ -9,7 +9,8 @@ entries are odd, and each step's ``t_step``.
 
 - ``measure_steps``: one run against ``repeats`` runs of a design gives
   ``t_step`` and ``alone = D0 + base + load + R``. Any other width is a
-  candidate only if its output is bit-identical to the default's.
+  candidate only if its output is bit-identical to the default's. A design
+  the ``CostCache`` holds is taken from it, not run.
 - ``calibrate``, on measured designs A, B: ``A B A B ...`` against
   ``A A ... B B ...`` gives ``(E(A) + E(B)) / 2``; the grouped run gives
   ``D0``, the ``alone`` figures ``R``, and ``[A, B]`` packed gives ``base`` as
@@ -24,6 +25,7 @@ callable's ``last_elapsed``); nothing else may dispatch meanwhile.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import statistics
 import subprocess
 import time
@@ -37,6 +39,7 @@ from ..declare.bound import BoundBuffer, BoundValue
 from ..design import device_symbol
 from ..image.callable import FullELFCallable, StepCallable
 from ..image.sequence import OperatorSequence
+from .costcache import CostCache, Measurement
 from .narrowing import (
     Calibration,
     CostTable,
@@ -57,18 +60,35 @@ class Timing:
     calls: int = 50
 
 
-def pmode() -> str:
-    """The NPU's power mode, as ``xrt-smi`` reports it."""
+def platform() -> dict[str, str]:
+    """The NPU's platform report from ``xrt-smi``: its ``Name``, its
+    ``Power Mode``, ...
+    """
     out = subprocess.run(
         ["xrt-smi", "examine", "-r", "platform"],
         capture_output=True,
         text=True,
         check=True,
     ).stdout
+    report = {}
     for line in out.splitlines():
-        if "Power Mode" in line:
-            return line.split(":", 1)[1].strip()
-    raise RuntimeError(f"xrt-smi reports no power mode:\n{out}")
+        name, sep, value = line.partition(":")
+        if sep:
+            report[name.strip()] = value.strip()
+    if "Name" not in report or "Power Mode" not in report:
+        raise RuntimeError(f"xrt-smi reports no platform name or power mode:\n{out}")
+    return report
+
+
+def pmode() -> str:
+    """The NPU's power mode, as ``xrt-smi`` reports it."""
+    return platform()["Power Mode"]
+
+
+def cost_cache() -> CostCache:
+    """The cost cache of this NPU at its present power mode."""
+    report = platform()
+    return CostCache(report["Name"], report["Power Mode"])
 
 
 def _sample(dtype, nbytes: int, rng: np.random.Generator) -> np.ndarray:
@@ -215,19 +235,42 @@ def measure_steps(
     repeats: int = 9,
     values: Mapping[str, int] | None = None,
     inputs: Mapping[str, np.ndarray] | None = None,
+    cache: CostCache | None = None,
+    remeasure: bool = False,
 ) -> dict[str, StepCost]:
     """Measure every width in ``found`` (the default first) into ``table``,
     as many at once as the device's contexts hold.
+
+    Args:
+        cache: Widths it holds are recorded from it rather than run, unless
+            `remeasure`; those run are written to it.
+
+    Returns:
+        The widths run on the device, by key.
+
+    Raises:
+        ValueError: `cache` is for another power mode than the NPU's.
     """
     mode = pmode()
+    if cache is not None and cache.mode != mode:
+        raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
+    entries = [
+        None if cache is None else cache.key(v.resolved, values, inputs) for v in found
+    ]
+    held = {}
+    if cache is not None and not remeasure:
+        for v, entry in zip(found, entries):
+            m = cache.get(entry, Measurement)
+            if m is not None:
+                held[v.key] = m
+    todo = [(v, e) for v, e in zip(found, entries) if v.key not in held]
     distinct = sum(b.nbytes for b in found[0].op.buffers) <= DISTINCT_BYTES
-    reference = None
-    out = {}
-    for begin in range(0, len(found), CONTEXTS // 2):
-        batch = found[begin : begin + CONTEXTS // 2]
+    measured: dict[str, Measurement] = {}
+    for begin in range(0, len(todo), CONTEXTS // 2):
+        batch = todo[begin : begin + CONTEXTS // 2]
         short = [
             Standalone(f"probe1_{v.key}", [v.op], values=values, inputs=inputs)
-            for v in batch
+            for v, _ in batch
         ]
         long = [
             Standalone(
@@ -237,29 +280,31 @@ def measure_steps(
                 distinct=distinct,
                 inputs=inputs,
             )
-            for v in batch
+            for v, _ in batch
         ]
-        if reference is None:
-            reference = short[0].output_bytes()
-        exact = [run.output_bytes() == reference for run in short]
+        outputs = [hashlib.sha256(run.output_bytes()).hexdigest() for run in short]
         times = time_interleaved([r.callable for r in short + long], timing)
         n = len(batch)
-        for i, v in enumerate(batch):
+        for i, (v, entry) in enumerate(batch):
             t_step = (times[n + i] - times[i]) / (repeats - 1)
-            cost = StepCost(
+            measured[v.key] = m = Measurement(
                 t_step_us=t_step,
                 alone_us=times[i] - t_step,
-                exact=exact[i],
+                output=outputs[i],
                 pmode=mode,
                 rounds=timing.rounds,
                 calls=timing.calls,
                 measured=CostTable.today(),
             )
-            table.record_step(v.key, cost)
-            out[v.key] = cost
+            if cache is not None:
+                cache.put(entry, m)
         # A probe holds its context while it lives; the next batch needs them.
         del short, long
-    return out
+    known = held | measured
+    reference = known[found[0].key].output
+    for v in found:
+        table.record_step(v.key, known[v.key].cost(reference))
+    return {key: table.steps[key] for key in measured}
 
 
 def calibrate(
@@ -340,15 +385,22 @@ def measure_graph(
     repeats: int = 9,
     remeasure: bool = False,
     log: Callable[[str], None] = print,
-) -> None:
+    cache: CostCache | None = None,
+) -> list[str]:
     """Measure every design of ``calls``' graphs into ``table``, saved as it
     goes: each at every width ``variants`` gives, in the first call that
     runs it, then the configure cost between each of ``pairs``, the first
     designs of those operator classes at their narrowest. Designs and
-    calibrations already in the table are kept unless ``remeasure``; those
-    the graphs no longer have are dropped.
+    calibrations already in the table or ``cache`` (this NPU's
+    ``cost_cache()`` if not given) are kept unless ``remeasure``; those the
+    graphs no longer have are dropped from the table.
+
+    Returns:
+        The design keys and calibration pairs (``"a|b"``) run on the device.
     """
     dev = aie_utils.ensure_current_device()
+    if cache is None:
+        cache = cost_cache()
     first: dict[str, tuple[Operator, Call]] = {}
     for call in calls:
         keys = [cost_key(s.op) for s in call.traced.steps]
@@ -364,6 +416,7 @@ def measure_graph(
     if stale:
         log(f"dropped {len(stale)} designs the graphs no longer have")
 
+    ran = []
     for i, (key, (op, call)) in enumerate(first.items()):
         name = type(op).__name__
         if not remeasure and all(v.key in table.steps for v in found[key]):
@@ -372,15 +425,24 @@ def measure_graph(
         values = call.op_values(op)
         start = time.time()
         costs = measure_steps(
-            table, found[key], timing, repeats, values, call.op_inputs(op)
+            table,
+            found[key],
+            timing,
+            repeats,
+            values,
+            call.op_inputs(op),
+            cache,
+            remeasure,
         )
+        ran += costs
         table.save()
         log(f"[{i}] {name} ({time.time() - start:.0f}s) at {values}")
         for v in found[key]:
-            c = costs[v.key]
+            c = table.steps[v.key]
             log(
                 f"    {dict(v.widths)}: t_step {c.t_step_us:8.2f} us  "
                 f"alone {c.alone_us:8.2f} us  exact {c.exact}"
+                + ("" if v.key in costs else "  (cached)")
             )
 
     by_class = {}
@@ -391,14 +453,23 @@ def measure_graph(
     for k in [k for k in table.calibrations if k not in wanted]:
         del table.calibrations[k]
     for (a, b), (name_a, name_b) in zip(chosen, pairs):
-        if not remeasure and f"{a.key}|{b.key}" in table.calibrations:
+        pair = f"{a.key}|{b.key}"
+        if not remeasure and pair in table.calibrations:
             log(f"calibration {name_a}/{name_b}: in the table")
             continue
-        cal = calibrate(table, a.op, b.op, timing)
+        entry = cache.pair_key(cache.key(a.resolved), cache.key(b.resolved))
+        cal = None if remeasure else cache.get(entry, Calibration)
+        if cal is None:
+            cal = calibrate(table, a.op, b.op, timing)
+            cache.put(entry, cal)
+            ran.append(pair)
+        else:
+            table.record_calibration((a.key, b.key), cal)
         table.save()
         log(
             f"calibration {name_a}/{name_b}: D0 {cal.dispatch_us:.1f}  "
             f"R {cal.reset_us:.1f}  base {cal.base_us:.1f}  "
-            f"switch {cal.switch_us:.1f} us"
+            f"switch {cal.switch_us:.1f} us" + ("" if pair in ran else "  (cached)")
         )
     table.save()
+    return ran

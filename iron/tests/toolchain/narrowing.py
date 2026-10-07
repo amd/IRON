@@ -9,10 +9,12 @@ mlir-aie's passes in process. Hardware checks a tuned graph against the
 untuned one (``iron/tests/infrastructure/narrowing.py``).
 """
 
+import numpy as np
 import pytest
 
 import iron
 from iron.common.declare import Profile
+from iron.common.graph.costcache import CostCache, Measurement
 from iron.common.graph.narrowing import (
     Calibration,
     CostTable,
@@ -217,3 +219,39 @@ def test_placer_verdicts_are_kept_across_tunings(tmp_path, npu2):
     assert len(list(fit_cache.iterdir())) > len(records)
     assert second.groups == first.groups
     assert {k: v.widths for k, v in second.chosen.items()} != widths
+
+
+def test_cache_keys_follow_the_build_the_values_and_the_inputs(npu2):
+    add = ElementwiseAdd(size=SIZE, tile_size=TILE)
+    narrow = add.with_tunables(num_aie_columns=2)
+    x = np.arange(SIZE, dtype=np.float32)
+    key = CostCache.key(add)
+    assert CostCache.key(ElementwiseAdd(size=SIZE, tile_size=TILE)) == key
+    assert CostCache.key(add, {}, {}) == key
+    others = [
+        CostCache.key(narrow),
+        CostCache.key(add, {"n": 1}),
+        CostCache.key(add, {"n": 2}),
+        CostCache.key(add, inputs={"a": x}),
+        CostCache.key(add, inputs={"a": x + 1}),
+    ]
+    assert len({key, *others}) == 1 + len(others)
+
+
+def test_cache_entries_round_trip_per_platform_and_mode(tmp_path):
+    m = Measurement(4.0, 90.0, "ab" * 32, "turbo", 8, 50, "2026-10-06")
+    cal = Calibration(50.0, 30.0, 30.0, 40.0, "turbo", 8, 50, "2026-10-06")
+    cache = CostCache("NPU Strix Halo", "turbo", root=tmp_path)
+    cache.put("k", m)
+    cache.put("pair", cal)
+    assert cache.directory == tmp_path / "npu-strix-halo" / "turbo"
+    again = CostCache("NPU Strix Halo", "turbo", root=tmp_path)
+    assert again.get("k", Measurement) == m
+    assert again.get("pair", Calibration) == cal
+    assert (
+        CostCache("NPU Strix Halo", "default", root=tmp_path).get("k", Measurement)
+        is None
+    )
+    assert CostCache("NPU Strix", "turbo", root=tmp_path).get("k", Measurement) is None
+    # Exactness is against whichever width the table takes as default.
+    assert m.cost("ab" * 32).exact and not m.cost("cd" * 32).exact

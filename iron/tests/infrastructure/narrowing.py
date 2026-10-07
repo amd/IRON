@@ -16,8 +16,17 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Scratchpad
+from iron.common.graph.costcache import CostCache
 from iron.common.graph.narrowing import CostTable, JointNarrowing, cost_key, variants
-from iron.common.graph.probe import CONTEXTS, Timing, calibrate, measure_steps
+from iron.common.graph.probe import (
+    CONTEXTS,
+    Call,
+    Timing,
+    calibrate,
+    measure_graph,
+    measure_steps,
+    platform,
+)
 from iron.common.image import Fusion
 from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU, Softmax
 
@@ -40,6 +49,13 @@ class Chain(iron.Graph):
     def body(self, a, b):
         x = self.mul(self.silu(self.add(a, b)), b)
         return self.silu(self.add(x, b))
+
+
+class AddSilu(iron.Graph):
+    """silu of a sum: two of `Chain`'s designs."""
+
+    def body(self, a, b):
+        return SiLU(ElementwiseAdd(a, b, tile_size=TILE), tile_size=TILE)
 
 
 class Masked(iron.Graph):
@@ -97,3 +113,26 @@ def test_tuned_graph_is_bit_identical_and_packed(tmp_path):
     want = np.array(plain(a, b).numpy()[:SIZE])
     got = np.array(tuned(a, b).numpy()[:SIZE])
     assert want.view(np.uint16).tolist() == got.view(np.uint16).tolist()
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_graph_sharing_measured_designs_measures_nothing(tmp_path):
+    report = platform()
+    cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "costs")
+    pairs = [("ElementwiseAdd", "SiLU")]
+    timing = Timing(rounds=1, calls=5)
+    chain = CostTable(tmp_path / "chain.json")
+    shapes = dict(a=(SIZE,), b=(SIZE,))
+    ran = measure_graph(
+        chain, [Call(Chain().trace(**shapes))], pairs, timing, cache=cache
+    )
+    assert len(ran) == len(chain.steps) + 1
+    assert len(list(cache.directory.iterdir())) == len(ran)
+
+    table = CostTable(tmp_path / "add_silu.json")
+    ran = measure_graph(
+        table, [Call(AddSilu().trace(**shapes))], pairs, timing, cache=cache
+    )
+    assert ran == []
+    assert table.steps and table.steps.items() <= chain.steps.items()
+    assert table.calibrations == chain.calibrations

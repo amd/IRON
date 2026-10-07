@@ -49,7 +49,8 @@ def main():
     ap.add_argument(
         "--remeasure",
         action="store_true",
-        help="measure designs and calibrations already in the table again",
+        help="measure designs and calibrations already in the table or the "
+        "cost cache again",
     )
     args = ap.parse_args()
 
