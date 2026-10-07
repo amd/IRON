@@ -125,7 +125,7 @@ python -m iron.lm.llama3.model /path/to/model.safetensors /path/to/tokenizer.mod
 ```
 
 `decode_costs_npu2.json` is such a table, measured on a Strix Halo NPU (8
-columns). Its entries are keyed by each design's identity -- its fields --
+columns), its newer designs on a Strix. Its entries are keyed by each design's identity -- its fields --
 so a design changed since the table was measured is not in it, and the
 tuner leaves that design as the profile gives it (the `[Tuning]` report
 counts it as unmeasured). Run `tune.py` again after changing a design, or
