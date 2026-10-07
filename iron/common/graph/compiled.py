@@ -548,7 +548,7 @@ class CompiledGraph:
         release: Callable[[np.ndarray], None] | None = None,
         piece_bytes: int = UPLOAD_PIECE,
     ) -> None:
-        view = self.callable.get_buffer(name).numpy_view()
+        view = self.callable.get_storage(name).numpy_view()[: np.size(tensor)]
         _store(view, tensor, release, piece_bytes)
 
     def upload(

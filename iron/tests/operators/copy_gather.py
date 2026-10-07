@@ -64,6 +64,19 @@ class PerCall(iron.Graph):
         return Copy(self.table[ids])
 
 
+class Merged(iron.Graph):
+    def __init__(self, table, rows: int, soft: int):
+        self.table = iron.weight(table)
+        self.at = rows
+        self.merged = iron.state((rows + soft, WIDTH))
+
+    def body(self, ids, soft, merge):
+        x = Copy(self.table[ids])
+        Copy(x, self.merged[: x.shape[0]])
+        Copy(soft, self.merged[self.at : self.at + soft.shape[0]])
+        return Copy(self.merged[merge])
+
+
 def assert_equal(got, expected, what):
     got = np.asarray(got, dtype=np.float32).reshape(expected.shape)
     wrong = np.argwhere(got != expected.astype(np.float32))
@@ -115,6 +128,30 @@ def test_rows_each_call_names_are_gathered(npu_runtime, table, n_ids):
         expected = np.take(table, ids, axis=0)
         assert_equal(graph(ids), expected, f"call {call}")
         assert_equal(graph.reference(ids), expected, f"reference {call}")
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_graph_gathers_twice_from_a_weight_and_a_state(npu_runtime):
+    n_rows, rows, soft = 4096, 64, 64
+    rng = np.random.default_rng(3)
+    table = rng.standard_normal((n_rows, WIDTH)).astype(bfloat16)
+    graph = Merged(table, rows, soft)
+    net = graph.compile(
+        ids=((rows,), np.int32),
+        soft=((soft, WIDTH), bfloat16),
+        merge=((rows,), np.int32),
+    )
+    assert net.plan.image == "elf"
+    for call in range(3):
+        ids = rng.integers(0, n_rows, rows).astype(np.int32)
+        x = rng.standard_normal((soft, WIDTH)).astype(bfloat16)
+        k = int(rng.integers(1, rows))
+        start = int(rng.integers(0, rows - k + 1))
+        merge = np.arange(rows, dtype=np.int32)
+        merge[start : start + k] = rows + np.arange(k)
+        expected = np.take(table, ids, axis=0)
+        expected[start : start + k] = x[:k]
+        assert_equal(graph(ids, x, merge), expected, f"call {call}")
 
 
 @pytest.mark.supported_devices("npu2")
