@@ -20,12 +20,15 @@ the factory binds and those ``scalars()`` supplies. A field either reads is
 from __future__ import annotations
 
 import dataclasses
+import functools
 import math
+from contextlib import nullcontext
 from typing import ClassVar, Self
 
+import aie.dialects.arith as arith
 import numpy as np
 from aie.iron import Buffer, ObjectFifo, Worker, WorkerRuntimeBarrier, ceildiv
-from aie.iron.controlflow import range_
+from aie.iron.controlflow import if_, range_
 from aie.iron.kernel import ExternalFunction
 from aie.iron.kernels import Param
 from aie.utils.verify import Tolerance
@@ -47,6 +50,194 @@ from .testing import Sweep, Testing
 DEFAULT_TILE = 256
 
 _I32 = np.ndarray[(1,), np.dtype[np.int32]]
+
+
+def _rounded(t: np.ndarray, dtype, toward: float) -> np.ndarray:
+    """``t`` rounded to ``dtype`` toward ``toward`` (an infinity), as float64."""
+    r = t.astype(dtype)
+    past = r.astype(np.float64) > t if toward < 0 else r.astype(np.float64) < t
+    r = np.where(past, np.nextafter(r, np.asarray(-toward, dtype)), r)
+    return r.astype(np.float64)
+
+
+def _interval(
+    tol: Tolerance, values: list[np.ndarray], args: list[tuple], dtype
+) -> tuple[np.ndarray, np.ndarray]:
+    """The outputs of ``dtype`` ``tol`` admits for any of ``values``.
+
+    Args:
+        tol: The tolerance an output is held to.
+        values: Correctly rounded outputs, as float64.
+        args: Each value's reference arguments, for a bound tolerance.
+        dtype: The output's element type.
+
+    Returns:
+        The least and the greatest admitted output, elementwise.
+    """
+    lo, hi = [], []
+    scale = max(
+        float(np.max(np.abs(v), where=np.isfinite(v), initial=0)) for v in values
+    )
+    for v, a in zip(values, args):
+        match tol.kind:
+            case "bound":
+                e = np.broadcast_to(np.ravel(tol.bound(*a)).astype(np.float64), v.shape)
+            case "relative":
+                r = tol.rtol or 0.0
+                e = np.maximum(tol.atol or 0.0, 2 * r * np.abs(v) / (1 - r))
+            case _:
+                e = np.full(v.shape, tol.atol or 0.0)
+        if tol.range_frac is not None:
+            e = np.maximum(e, tol.range_frac * scale)
+        low, high = _rounded(v - e, dtype, np.inf), _rounded(v + e, dtype, -np.inf)
+        if tol.kind == "ulps":
+            down = up = v.astype(dtype)
+            for _ in range(tol.ulps):
+                down = np.nextafter(down, np.asarray(-np.inf, dtype))
+                up = np.nextafter(up, np.asarray(np.inf, dtype))
+            low = np.minimum(low, down.astype(np.float64))
+            high = np.maximum(high, up.astype(np.float64))
+        finite = np.isfinite(v)
+        lo.append(np.where(finite, low, v))
+        hi.append(np.where(finite, high, v))
+    return np.minimum.reduce(lo), np.maximum.reduce(hi)
+
+
+class Finish:
+    """The steps a producer's cores apply to each tile of its output declared
+    ``Out(..., finish=True)`` before releasing it: the chain of each design
+    its array serves, a design's selected by its ``finish_chain`` word.
+
+    A step's kernel reads and writes through restrict pointers, so the
+    steps alternate between the output tile and a scratch tile of the
+    core's own, the producer writing where the chain's first step reads.
+
+    Args:
+        op: The producer.
+        cores: The cores applying it, on the array side; none on the host.
+    """
+
+    def __init__(self, op: Operator, cores: int = 0) -> None:
+        self.op = op
+        self.chains = op.finishes or (op.finish,)
+        # The one output, where a chain has steps (Operator.resolved checks).
+        self.out = op.outputs[-1]
+        self.line = math.prod(self.out.tile_shape)
+        self.select = len(self.chains) > 1
+        # Each distinct step once: its kernel, argument positions and scalars.
+        self.steps: dict[tuple, tuple[ExternalFunction, list[int], dict]] = {}
+        for link in [link for chain in self.chains for link in chain]:
+            if not isinstance(link, Elementwise):
+                raise TypeError(f"a finish step is Elementwise, not {link!r}")
+            if cores and link.array_key() not in self.steps:
+                kernel = link.kernel()
+                self.steps[link.array_key()] = (kernel, *link._arguments(kernel, 1, 1))
+        self.rtps = [
+            Buffer(_I32, name=f"finish_{k}", use_write_rtp=True)
+            for k in range(cores if self.select else 0)
+        ]
+        self.scratch = [
+            Buffer(self.out.tile, name=f"finished_{k}")
+            for k in range(cores if any(self.chains) else 0)
+        ]
+
+    @property
+    def stack_bytes(self) -> int | None:
+        sizes = [
+            k.contract.stack_bytes
+            for k, _, _ in self.steps.values()
+            if k.contract is not None and k.contract.stack_bytes is not None
+        ]
+        return max(sizes, default=None)
+
+    def args(self, core: int) -> list:
+        """What core ``core``'s function is given for the finish, last."""
+        return [
+            *(k for k, _, _ in self.steps.values()),
+            *self.rtps[core : core + 1],
+            *self.scratch[core : core + 1],
+        ]
+
+    def bind(self) -> None:
+        if self.select:
+            self.op.value("finish_chain").bind(self.rtps)
+
+    def read(self, args):
+        """The chain a core applies, read between its barrier's wait and release."""
+        return args[len(self.steps)][0] if self.select else None
+
+    def target(self, args, mode, tile):
+        """Where the producer writes ``tile``: where the chain's first step reads."""
+        odd = [i for i, c in enumerate(self.chains) if len(c) % 2]
+        if not odd:
+            return tile
+        if len(odd) == len(self.chains):
+            return args[-1]
+        chosen = functools.reduce(arith.ori, (mode == i for i in odd))
+        return arith.select(chosen, args[-1].op, tile)
+
+    def apply(self, args, mode, tile) -> None:
+        """Run the selected chain over the tile the producer wrote, ending in ``tile``."""
+        kernels = dict(zip(self.steps, args))
+        for i, chain in enumerate(self.chains):
+            if not chain:
+                continue
+            with if_(mode == i) if self.select else nullcontext():
+                src = tile if len(chain) % 2 == 0 else args[-1]
+                for j, link in enumerate(chain):
+                    dst = tile if (len(chain) - j) % 2 else args[-1]
+                    key = link.array_key()
+                    _, positions, scalars = self.steps[key]
+                    tiles = {p: t for p, t in zip(positions, (src, dst))}
+                    kernels[key](
+                        *(
+                            tiles[p] if p in tiles else scalars[p]
+                            for p in range(len(tiles) + len(scalars))
+                        )
+                    )
+                    src = dst
+
+    def reference(self, y: np.ndarray) -> np.ndarray:
+        """``y``, the producer's output, through its own chain on the host."""
+        for link in self.op.finish:
+            y = np.asarray(link.over(y.size, self.line).reference(y)).reshape(y.shape)
+        return y
+
+    def tolerance(self) -> Tolerance:
+        """The producer's gate carried through its chain: each step's input
+        is anywhere the gate before it admits, and its output anywhere its
+        own gate admits around what it makes of that.
+        """
+        plain = dataclasses.replace(self.op, finish=(), finishes=())
+        own = plain.gate() or Tolerance.default_for(self.out.dtype)
+        dtype = self.out.dtype
+        steps = [link.over(self.out.elements, self.line) for link in self.op.finish]
+        gates = [s.gate() or Tolerance.default_for(dtype) for s in steps]
+
+        def bound(*inputs):
+            x = np.asarray(plain.reference(*inputs))
+            shape, x = x.shape, x.astype(dtype).astype(np.float64).ravel()
+            lo, hi = _interval(own, [x], [inputs], dtype)
+            for step, gate in zip(steps, gates):
+                ends = [x, lo, hi]
+                made = [
+                    np.asarray(step.reference(v.astype(dtype)), np.float64).ravel()
+                    for v in ends
+                ]
+                x = made[0]
+                lo, hi = _interval(
+                    gate, made, [(v.astype(dtype),) for v in ends], dtype
+                )
+            return np.maximum(hi - x, x - lo).reshape(shape)
+
+        return Tolerance.bounded(
+            bound,
+            max_mismatch_frac=sum(t.max_mismatch_frac for t in [own, *gates]),
+            note=f"{own.note}; through "
+            + ", then ".join(
+                f"{type(s).__name__} ({g.note})" for s, g in zip(steps, gates)
+            ),
+        )
 
 
 class Elementwise(Operator):
@@ -159,7 +350,32 @@ class Elementwise(Operator):
             )
         return ins + outs, scalars
 
+    def over(self, elements: int, line: int) -> Self:
+        """This operator over ``elements`` elements in lines of ``line``, on
+        one core.
+
+        Raises:
+            ValueError: Its shape is not a run of lines.
+        """
+        raise ValueError(f"{type(self).__name__} is not a run of lines")
+
+    def at_line(self, line: int, dtype, dev) -> Self:
+        if type(self).array is not Elementwise.array:
+            raise ValueError(f"{type(self).__name__}'s cores run an array of their own")
+        streamed = [np.dtype(b.dtype) for b in self.buffers if b.streamed]
+        if streamed != [np.dtype(dtype)] * 2:
+            raise ValueError(
+                f"{type(self).__name__} streams {[str(d) for d in streamed]}, not "
+                f"one {np.dtype(dtype)} tile in and one out"
+            )
+        op = self.over(line, line).resolved(dev)
+        kernel = op.kernel()  # its factory refuses a line it does not run at
+        op._arguments(kernel, 1, 1)
+        return op
+
     def tolerance(self) -> Tolerance | None:
+        if self.finish:
+            return Finish(self).tolerance()
         contract = self.kernel().contract
         return None if contract is None else contract.tolerance
 
@@ -187,7 +403,8 @@ class Elementwise(Operator):
             )
         )
         y = np.asarray(y).astype(out.host_dtype, copy=False)
-        return y.reshape(out.host_shape, copy=False)
+        y = y.reshape(out.host_shape, copy=False)
+        return Finish(op).reference(y) if op.finish else y
 
     def array(self, target) -> list:
         streams = [b for b in self.buffers if b.streamed]
@@ -226,33 +443,46 @@ class Elementwise(Operator):
             ]
         )
         barriers = [WorkerRuntimeBarrier() for _ in range(cores)]
+        finish = Finish(self, cores)
+        n_fifos = n_in + len(outs)
 
         def core_fn(*args):
-            fifos_in = args[:n_in]
-            fifos_out = args[n_in : n_in + len(outs)]
-            kernel_fn, count, barrier = args[-3:]
+            fifos = args[:n_fifos]
+            kernel_fn, count, barrier = args[n_fifos : n_fifos + 3]
+            rest = args[n_fifos + 3 :]
             barrier.wait_for_value(1)
             n = count.read() if dynamic else count[0]
+            mode = finish.read(rest)
             barrier.release_with_value(1)
             for _ in range_(n):
-                elements = [f.acquire(1) for f in fifos_in + fifos_out]
+                elements = [f.acquire(1) for f in fifos]
+                tile = elements[-1]
+                elements[-1] = finish.target(rest, mode, tile)
                 kernel_fn(
                     *(
                         elements[order[i]] if i in order else scalars[i]
                         for i in range(n_args)
                     )
                 )
-                for f in fifos_in + fifos_out:
+                finish.apply(rest, mode, tile)
+                for f in fifos:
                     f.release(1)
 
-        stack_size = None if kernel.contract is None else kernel.contract.stack_bytes
+        stacks = [
+            s
+            for s in (
+                kernel.contract and kernel.contract.stack_bytes,
+                finish.stack_bytes,
+            )
+            if s is not None
+        ]
         workers = [
             Worker(
                 core_fn,
                 [of[k].cons() for of in of_ins]
                 + [of[k].prod() for of in of_outs]
-                + [kernel, counts[k], barriers[k]],
-                stack_size=stack_size,
+                + [kernel, counts[k], barriers[k], *finish.args(k)],
+                stack_size=max(stacks, default=None),
             )
             for k in range(cores)
         ]
@@ -263,6 +493,7 @@ class Elementwise(Operator):
                 stream.lane(k).bind(of[k].cons())
         if not dynamic:
             self.count.bind(counts)
+        finish.bind()
         return workers + barriers
 
 
@@ -284,11 +515,22 @@ class UnaryElementwise(Elementwise):
         size,
         tile=(Elementwise.tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
+        finish=True,
     )
 
     @property
     def valid_elements(self) -> int:
         return self.valid
+
+    def over(self, elements: int, line: int) -> Self:
+        one = {
+            n: 1
+            for n in ("num_aie_columns", "num_channels")
+            if n in self._tunable_fields
+        }
+        return dataclasses.replace(
+            self, size=elements, tile_size=line, bound_values={}, **one
+        )
 
 
 class BinaryElementwise(Elementwise):
@@ -312,6 +554,7 @@ class BinaryElementwise(Elementwise):
         size,
         tile=(Elementwise.tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
+        finish=True,
     )
 
     @property
@@ -345,8 +588,22 @@ class Rowwise(Elementwise):
         tile_size,
         tile=(tile_size,),
         per=(num_aie_columns, Elementwise.num_channels),
+        finish=True,
     )
 
     @property
     def valid_elements(self) -> int:
         return self.valid * self.tile_size
+
+    def over(self, elements: int, line: int) -> Self:
+        if line != self.tile_size:
+            raise ValueError(
+                f"{type(self).__name__} reduces over rows of {self.tile_size}, "
+                f"not a {line}-element tile"
+            )
+        one = {
+            n: 1
+            for n in ("num_aie_columns", "num_channels")
+            if n in self._tunable_fields
+        }
+        return dataclasses.replace(self, rows=elements // line, bound_values={}, **one)

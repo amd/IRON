@@ -30,6 +30,7 @@ from iron.common.graph.handle import Affine, Value
 from iron.common.image import OperatorSequence
 from iron.common.image.artifacts import Parameter
 from iron.lm.layers import SwiGLU
+from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -456,6 +457,53 @@ def test_a_fold_the_producer_cannot_resolve_is_left_alone(npu2):
     gemv, silu = (s.op for s in t.steps)
     with pytest.raises(ValueError, match="silu epilogue"):
         gemv.fold(silu).resolved(npu2)
+    assert folded(t, npu2) == (t, {})
+
+
+class _Sums(iron.Graph):
+    def __init__(self, consumer=SiLU):
+        self.consumer = consumer
+
+    def body(self, a, b):
+        return self.consumer(ElementwiseAdd(a, b)), ElementwiseAdd(b, a)
+
+
+def test_an_elementwise_step_finishes_its_consumer_in_its_own_cores(npu2):
+    t = _Sums().trace(a=(E,), b=(E,))
+    f, count = folded(t, npu2)
+    assert [(str(fold), n) for fold, n in count.items()] == [
+        ("SiLU into ElementwiseAdd", 1)
+    ]
+    finished, plain = (s.op.resolved(npu2) for s in f.steps)
+    (step,) = finished.finish
+    assert (type(step), step.size, step.tile_size) == (SiLU, 256, 256)
+    # The other sum moved onto the finished one's array, choosing no step.
+    assert finished.array_key() == plain.array_key()
+    assert finished.design_key() != plain.design_key()
+    assert finished.name != plain.name
+    chains = [tuple(type(s) for s in c) for c in finished.finishes]
+    assert chains[finished.residents["finish_chain"]] == (SiLU,)
+    assert chains[plain.residents["finish_chain"]] == ()
+    rng = np.random.default_rng(0)
+    a, b = (rng.standard_normal(E).astype(bfloat16) for _ in range(2))
+    np.testing.assert_array_equal(
+        finished.reference(a, b),
+        SiLU(size=E).reference(ElementwiseAdd(size=E).reference(a, b)),
+    )
+
+
+def test_an_unfinished_operator_keeps_its_keys(npu2):
+    add = ElementwiseAdd(size=E).resolved(npu2)
+    assert "finish" not in repr((add.array_key(), add.design_key()))
+    assert "finish_chain" not in add.residents
+
+
+def test_an_operator_with_an_array_of_its_own_finishes_nothing(npu2):
+    with pytest.raises(ValueError, match="finish no output"):
+        Clamp(size=E, low=0, high=1).fold(SiLU(size=E)).resolved(npu2)
+    with pytest.raises(ValueError, match="array of their own"):
+        ElementwiseAdd(size=E).fold(Clamp(size=E, low=0, high=1)).resolved(npu2)
+    t = _Sums(lambda y: Clamp(y, low=0.0, high=1.0)).trace(a=(E,), b=(E,))
     assert folded(t, npu2) == (t, {})
 
 

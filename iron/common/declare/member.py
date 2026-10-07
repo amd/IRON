@@ -110,6 +110,9 @@ class _Buffer(_Member["BoundBuffer"]):
         broadcast: One fifo every worker consumes.
         when: A bool `param()`; the operand and its stream exist only where
             it is true, and a call giving the operand by keyword sets it.
+        finish: The cores apply the operator's `finish` to each tile of
+            this output before releasing it (`Finish`), so a consumer folds
+            into them.
     """
 
     direction: ClassVar[Direction]
@@ -125,12 +128,24 @@ class _Buffer(_Member["BoundBuffer"]):
         replicate: bool = False,
         broadcast: bool = False,
         when: _DimSpec | None = None,
+        finish: bool = False,
     ) -> None:
         if per is not None and broadcast:
             raise TypeError("a stream is either per=<dim> or broadcast, not both")
         if replicate and per is None:
             raise TypeError(
                 "replicate=True needs per=<dim>: every slot receives the whole buffer"
+            )
+        # A step over a line sees a tile as a run of the output's elements.
+        if finish and (
+            isinstance(tile, (tuple, list))
+            and len(tile) != 1
+            or tile is None
+            or not self.direction.drains
+        ):
+            raise TypeError(
+                "finish=True names a streamed output of one-dimensional tiles, "
+                "which a core finishes"
             )
         self.shape = Shape(tuple(dims))
         self.dtype = dtype
@@ -147,6 +162,7 @@ class _Buffer(_Member["BoundBuffer"]):
         self.via = via
         self.replicate = replicate
         self.broadcast = broadcast
+        self.finish = finish
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.shape})"

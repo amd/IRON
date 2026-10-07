@@ -112,10 +112,12 @@ def test_shapes_captured_bare_names_resolve_to_refs():
 
 
 def test_dataclass_constructor_is_typed_by_real_fields():
-    # trace and bound_values are every operator's, from the base.
+    # trace, bound_values and the finishes are every operator's, from the base.
     assert [f.name for f in dataclasses.fields(MV)] == [
         "trace",
         "bound_values",
+        "finish",
+        "finishes",
         "M",
         "K",
         "num_batches",

@@ -111,9 +111,14 @@ def folded(
             continue
         for key, f in arrays.items():
             moved = s.op.on_array(f)
-            if moved is not None and moved.resolved(dev).array_key() == key:
-                replace[id(s.op)] = moved
-                break
+            if moved is None:
+                continue
+            try:
+                if moved.resolved(dev).array_key() == key:
+                    replace[id(s.op)] = moved
+                    break
+            except (Unresolvable, ValueError):
+                continue
     kept = dataclasses.replace(traced, steps=[s for s in steps if s is not None])
     return kept.with_operators(replace), applied
 
