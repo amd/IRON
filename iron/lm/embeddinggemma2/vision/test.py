@@ -28,6 +28,12 @@ DIRECTORY = weights_dir("embeddinggemma-2")
 
 pytestmark = requires(DIRECTORY / "model.safetensors")
 
+# Measured at the worst of IMAGES: min cosine 0.9705, relative error 4.0e-2.
+# bf16 error grows over 16 layers: HF's own bf16 tower is 0.9973 and 2.3e-2
+# off the oracle, the graph's bf16 reference 0.9864 and 2.9e-2.
+MIN_COSINE = 0.96
+MAX_ERROR = 0.05
+
 # (height, width) in pixels, at the size the processor's resize picks, and
 # its soft-token budget.
 IMAGES = {
