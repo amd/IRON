@@ -11,7 +11,10 @@ FLM_REPO   := https://github.com/andrej/FastFlowLM
 FLM_COMMIT := 04877b481f9a9b17eece2a5515473816e607b332
 BUILD      := $(CURDIR)/build
 FLM        := $(BUILD)/FastFlowLM/src
-CMAKE      := cmake -S $(FLM) -G Ninja -DFLM_VERSION=1.0.5 -DNPU_VERSION=32.0.203.304
+# FLM_BUILD_GEMMA4E defaults to off, which links FastFlowLM's prebuilt Gemma 4
+# engine and leaves the gemma4e_npu target undefined.
+CMAKE      := cmake -S $(FLM) -G Ninja -DFLM_VERSION=1.0.5 -DNPU_VERSION=32.0.203.304 \
+              -DFLM_BUILD_GEMMA4E=ON
 TXN_INC    := $(shell python3 -c "import aie.utils.config as c; print(c.runtime_header_path())")
 MODEL      := $(or $(FLM_MODEL_PATH),$(error set FLM_MODEL_PATH))/models/Gemma4-E2B-IT-NPU2
 PORT       ?= 11434
