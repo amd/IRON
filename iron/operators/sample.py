@@ -29,6 +29,7 @@ tokens, token = Sample(logits, draws, tokens, row=position * 4, at=position)
 import dataclasses
 
 import numpy as np
+from aie.dialects.aie import WireBundle, get_target_model
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker
 from aie.iron.controlflow import range_
@@ -36,7 +37,16 @@ from aie.iron.kernels import sample as kernels
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import In, InOut, Operator, Out, Scratchpad, auto, param
+from iron.common import (
+    In,
+    InOut,
+    Operator,
+    Out,
+    Scratchpad,
+    Unresolvable,
+    auto,
+    param,
+)
 from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
@@ -132,6 +142,14 @@ class Sample(Operator):
 
     def resolve(self, dev):
         self.check_shim_columns(dev, self.cores)
+        tm = get_target_model(dev.resolve())
+        row = next(r for r in range(tm.rows()) if tm.is_mem_tile(0, r))
+        joined = tm.get_num_dest_switchbox_connections(0, row, WireBundle.DMA)
+        if self.cores > joined:
+            raise Unresolvable(
+                f"Sample's {self.cores} summaries join in one memtile, which "
+                f"takes {joined}"
+            )
         chunk = self.chunk or max(
             c
             for c in range(2, min(self.slice_size, _CHUNK_LIMIT) + 1, 2)

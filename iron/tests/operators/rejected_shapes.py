@@ -19,6 +19,7 @@ from iron.common import Unresolvable
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
+from iron.operators.sample import Sample
 from iron.operators.transpose import Transpose
 
 
@@ -188,3 +189,12 @@ def test_mha_of_one_query_that_does_not_pack_is_refused(kwargs, why):
     """
     with pytest.raises(ValueError, match=why):
         MHA(seq_len=1, kv_len=512, **kwargs).resolved(from_name("npu2", n_cols=8))
+
+
+def test_sample_with_more_summaries_than_a_memtile_takes_is_refused():
+    """The select cores' summaries join in one memtile, whose S2MM channels
+    bound the cores; past them the design fails to place.
+    """
+    with pytest.raises(Unresolvable, match="join in one memtile"):
+        Sample(vocab=128256, cores=8).resolved(from_name("npu2", n_cols=8))
+    Sample(vocab=128256, cores=4).resolved(from_name("npu2", n_cols=8))
