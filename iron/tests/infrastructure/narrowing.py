@@ -7,7 +7,10 @@ tuned image run against the untuned one, bit for bit. The model and the
 search are checked without a device (``iron/tests/toolchain/narrowing.py``).
 """
 
+import os
 import re
+import subprocess
+import sys
 
 import aie.utils as aie_utils
 import numpy as np
@@ -17,7 +20,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common import Scratchpad
 from iron.common.graph.costcache import CostCache, Measurement
-from iron.common.graph.fold import folded, replaced
+from iron.common.graph.fold import replaced
 from iron.common.graph.narrowing import CostTable, JointNarrowing, cost_key, variants
 from iron.common.graph.probe import (
     CONTEXTS,
@@ -144,6 +147,35 @@ def test_measures_more_widths_than_one_batch_of_contexts(tmp_path):
 
 
 @pytest.mark.supported_devices("npu2")
+def test_one_operator_is_measured_from_the_command_line(tmp_path):
+    table = tmp_path / "costs.json"
+    run = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "iron.common.graph.tune",
+            "ElementwiseAdd",
+            f"size={SIZE}",
+            f"tile_size={TILE}",
+            "--rounds=1",
+            "--calls=5",
+            f"--table={table}",
+        ],
+        env=os.environ | {"NPU_CACHE_HOME": str(tmp_path / "cache")},
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 0, run.stderr
+    found = variants(
+        ElementwiseAdd(size=SIZE, tile_size=TILE), aie_utils.ensure_current_device()
+    )
+    assert CostTable(table).steps.keys() == {v.key for v in found}
+    printed = [line for line in run.stdout.splitlines() if "t_step" in line]
+    assert len(printed) == len(found)
+    assert sum("(default)" in line for line in printed) == 1
+
+
+@pytest.mark.supported_devices("npu2")
 def test_descent_measures_every_line_through_the_default(tmp_path):
     found = variants(
         ElementwiseAdd(size=SIZE, tile_size=TILE), aie_utils.ensure_current_device()
@@ -210,12 +242,13 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
     ]
     dev = aie_utils.ensure_current_device()
     traced = SwiGLU(*weights).trace(x=(1, E))
-    folds, _ = folded(traced, dev)
+    calls = Call.admitted(traced, dev)
+    folds = calls[1].traced
     report = platform()
     table = CostTable(tmp_path / "costs.json")
     measure_graph(
         table,
-        [Call(traced), Call(folds, folded_from=traced)],
+        calls,
         [("SiLU", "ElementwiseMul")],
         Timing(rounds=1, calls=5),
         cache=CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
@@ -238,10 +271,10 @@ def test_a_folded_design_is_priced_beside_the_one_it_replaces(tmp_path):
     E = 2048
     weights = [np.zeros((E, E), bfloat16) for _ in range(3)]
     traced = SwiGLU(*weights).trace(x=(1, E))
-    folds, _ = folded(traced, aie_utils.ensure_current_device())
+    calls = Call.admitted(traced, aie_utils.ensure_current_device())
+    folds = calls[1].traced
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
-    calls = [Call(traced), Call(folds, folded_from=traced)]
     timing = Timing(rounds=1, calls=5)
     table = CostTable(tmp_path / "costs.json")
     measure_graph(table, calls, [], timing, cache=cache)

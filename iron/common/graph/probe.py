@@ -42,7 +42,7 @@ from ..design import device_symbol
 from ..image.callable import FullELFCallable, StepCallable
 from ..image.sequence import OperatorSequence
 from .costcache import CostCache, Measurement
-from .fold import replaced
+from .fold import folded, replaced
 from .narrowing import (
     Calibration,
     CostTable,
@@ -490,6 +490,25 @@ class Call:
     values: Mapping[str, int] = dataclasses.field(default_factory=dict)
     contents: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
     folded_from: TracedGraph | None = None
+
+    @classmethod
+    def admitted(
+        cls,
+        traced: TracedGraph,
+        dev,
+        values: Mapping[str, int] | None = None,
+        contents: Mapping[str, np.ndarray] | None = None,
+    ) -> list[Call]:
+        """The calls a version's tuning is priced by: ``traced`` with
+        ``values`` and ``contents``, then each fold it admits on ``dev``
+        applied alone, since the designs a set of folds runs are each fold's.
+        """
+        values, contents = values or {}, contents or {}
+        _, admitted = folded(traced, dev)
+        return [cls(traced, values, contents)] + [
+            cls(folded(traced, dev, (fold,))[0], values, contents, traced)
+            for fold in admitted
+        ]
 
     def op_values(self, op: Operator) -> dict[str, int]:
         """The per-call values ``op`` is written in this call, by member name."""

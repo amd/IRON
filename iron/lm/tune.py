@@ -11,9 +11,9 @@ table holds every design's step time at each width it tunes to, and the
 configure cost measured between a few pairs of designs. It is keyed by
 each design's identity -- its fields -- so a design that has changed since
 is not in it, and the tuner leaves that design as the profile gives it,
-unfolded. ``measure`` fills one for both versions as the graph is now:
-every design, each width, as traced and with each fold it admits. Designs
-already in the table are kept unless ``remeasure``; entries
+unfolded. ``main`` fills one for both versions as the graph is now
+(``calls``): every design, each setting, as traced and with each fold it
+admits. Designs already in the table are kept unless ``--remeasure``; entries
 for designs the graph no longer has are dropped. A design another graph has
 had measured on this NPU is taken from the cost cache
 (``iron.common.graph.costcache``) rather than run again.
@@ -24,16 +24,13 @@ weights it never touches. A model's ``tune`` module calls ``main`` with
 its runner; run it with XRT sourced and the NPU otherwise idle.
 """
 
-import argparse
-from collections.abc import Callable
 from pathlib import Path
 
 import aie.utils as aie_utils
 import numpy as np
 
-from iron.common.graph.fold import folded
-from iron.common.graph.narrowing import CostTable
-from iron.common.graph.probe import Call, Timing, measure_graph, pmode
+from iron.common.graph import tune as graph_tune
+from iron.common.graph.probe import Call
 from iron.operators.sample import Sample
 
 from .checkpoint import unread_weights
@@ -66,61 +63,20 @@ def calls(model: CausalLM, sample: Sampler, position: int, token: int) -> list[C
     out = []
     for shapes, values in versions:
         traced = model.trace(**shapes)
-        # The tuner prices a fold by its designs: those a set of folds runs are
-        # the designs of each fold alone, each measured beside the one it
-        # replaces.
-        _, admitted = folded(traced, dev)
-        graphs = [traced] + [folded(traced, dev, (fold,))[0] for fold in admitted]
         # Sample's work follows its draw row's temperature and top-k: measure
         # it at the rows generation writes, not at random words.
         [k_max] = {s.op.k_max for s in traced.steps if isinstance(s.op, Sample)}
         _, draws = traced.states[id(model.draws)]
-        out += [
-            Call(
-                graph,
-                values,
-                {draws.name: sample.rows(model.config.max_seq_len, k_max)},
-                None if graph is traced else traced,
-            )
-            for graph in graphs
-        ]
+        rows = sample.rows(model.config.max_seq_len, k_max)
+        out += Call.admitted(traced, dev, values, {draws.name: rows})
     return out
 
 
-def measure(
-    model: CausalLM,
-    table: CostTable,
-    sample: Sampler,
-    position: int,
-    token: int,
-    timing: Timing = Timing(),
-    repeats: int = 9,
-    remeasure: bool = False,
-    log: Callable[[str], None] = print,
-) -> None:
-    """Measure ``model``'s ``calls`` into ``table`` (``measure_graph``), and
-    the configure cost between ``CALIBRATION_PAIRS``.
-    """
-    measure_graph(
-        table,
-        calls(model, sample, position, token),
-        CALIBRATION_PAIRS,
-        timing,
-        repeats,
-        remeasure,
-        log,
-    )
-
-
 def main(runner: type[Runner], description: str, default_table: Path) -> None:
-    """The command line that measures ``runner``'s model's cost table."""
-    parser = argparse.ArgumentParser(description=description)
-    parser.add_argument(
-        "--table",
-        type=Path,
-        default=default_table,
-        help=f"the table to fill (default: {default_table})",
-    )
+    """The command line that measures ``runner``'s model's cost table: its
+    ``calls``, and the configure cost between ``CALIBRATION_PAIRS``.
+    """
+    parser = graph_tune.parser(description, default_table)
     parser.add_argument(
         "--position",
         type=int,
@@ -133,32 +89,11 @@ def main(runner: type[Runner], description: str, default_table: Path) -> None:
     )
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-k", type=int, default=50)
-    parser.add_argument("--rounds", type=int, default=8)
-    parser.add_argument("--calls", type=int, default=50)
-    parser.add_argument(
-        "--repeats",
-        type=int,
-        default=9,
-        help="steps per long run; a step's time is the long run's excess over "
-        "a run of one, per extra step (default: 9)",
-    )
-    parser.add_argument(
-        "--remeasure",
-        action="store_true",
-        help="measure designs and calibrations already in the table or the "
-        "cost cache again",
-    )
     args = parser.parse_args()
 
-    print(f"power mode: {pmode()}")
     config = runner.config
-    measure(
-        runner.model(config, unread_weights(runner.layout(config), config.n_layers)),
-        CostTable(args.table),
-        Sampler(args.temperature, args.top_k, np.random.default_rng(SEED)),
-        args.position,
-        args.token,
-        Timing(args.rounds, args.calls),
-        args.repeats,
-        args.remeasure,
+    model = runner.model(config, unread_weights(runner.layout(config), config.n_layers))
+    sample = Sampler(args.temperature, args.top_k, np.random.default_rng(SEED))
+    graph_tune.measure(
+        args, calls(model, sample, args.position, args.token), CALIBRATION_PAIRS
     )
