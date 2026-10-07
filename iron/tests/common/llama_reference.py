@@ -41,6 +41,7 @@ from iron.lm import (
 from iron.lm.llama3.model import Llama
 from iron.tests.common.llama_model import PROFILE, SMALL, random_weights
 
+pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 class _Output:
     """What an image returns: a buffer read with ``numpy()``."""
