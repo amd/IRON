@@ -49,7 +49,6 @@ from iron.common import (
     In,
     Operator,
     Out,
-    Shim,
     Unresolvable,
     Value,
     auto,
@@ -145,25 +144,21 @@ class MHA(Operator):
         Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
         tile=(join_rows, d),
         per=(q_shims,),
-        via=Shim(4),
     )
     K = In(
         Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
         tile=(d, B_kv),
         per=(kv_lanes,),
-        via=Shim(5),
     )
     V = In(
         Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
         tile=(d, B_kv),
         per=(kv_lanes,),
-        via=Shim(6),
     )
     O = Out(
         Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
         tile=(join_rows, d),
         per=(q_shims,),
-        via=Shim(7),
     )
     # The query rows, or fewer per call (``Q[:n]`` in a graph): Q and O
     # stream every row; the cores compute the blocks the bound covers and
@@ -310,12 +305,12 @@ class MHA(Operator):
                     f"one query packs a KV group's {group} heads into a block's "
                     f"B_q ({self.B_q}) rows, which they must divide"
                 )
-            # K and V take both input channels of shims 0 to P-1, and Q shim 4's.
+            # K and V take a lane per pipeline, forwarded through its column's memtile.
             if self.num_pipelines > 4 or self.num_KV_heads % self.num_pipelines:
                 raise ValueError(
                     f"one query takes num_pipelines ({self.num_pipelines}) at most "
                     f"4 dividing num_KV_heads ({self.num_KV_heads}): each pipeline "
-                    f"has its own K and V lanes, on its own column's shim"
+                    f"has its own K and V lanes, through its own column's memtile"
                 )
 
     @classmethod
@@ -433,6 +428,8 @@ class MHA(Operator):
         v_dims = pv.B
         o_dims = pv.C
 
+        # The memtiles are pinned: the default placer puts K's and V's broadcasts
+        # on one memtile and fills Q's with a pipeline's forward (11% slower).
         # The Q splits and O joins, one per shim, on memtiles (6, 1) and (7, 1).
         inQ, memQ, memO, outO = [], [], [], []
         for shim in range(self.q_shims):
@@ -765,6 +762,8 @@ class MHA(Operator):
             [WorkerRuntimeBarrier() for _ in range(num_pipelines)] for _ in range(3)
         ]
 
+        # A pipeline's cores share its column: placed freely, 8 pipelines pack
+        # into 6 columns that cannot be routed.
         matmul_workers, softmax_workers, matmul_pv_workers = [], [], []
         for i in range(num_pipelines):
             idx_buffer_qk = Buffer(
@@ -787,7 +786,7 @@ class MHA(Operator):
                     ]
                     + params,
                     stack_size=0xD00,
-                    tile=Tile(col=i, row=2),
+                    tile=Tile(col=i),
                 )
             )
             idx_buffer_softmax = Buffer(
@@ -816,7 +815,7 @@ class MHA(Operator):
                     ]
                     + params,
                     stack_size=0xD00,
-                    tile=Tile(col=i, row=3),
+                    tile=Tile(col=i),
                 )
             )
             idx_buffer_pv = Buffer(
@@ -841,27 +840,16 @@ class MHA(Operator):
                     ]
                     + params,
                     stack_size=0xD00,
-                    tile=Tile(col=i, row=4),
+                    tile=Tile(col=i),
                 )
             )
 
-        # The shim ends, on the columns the operands' via= pins declare.
-        # Every coordinate in this design is load-bearing: relaxed to
-        # AnyShimTile/AnyMemTile/AnyComputeTile the router reports "Unable
-        # to find a legal routing", so the map here is not a performance
-        # preference. Q's slots share column 4's two channels, O's column 7's;
-        # K and V's lanes, one per pipeline, its column's two.
-        def shim_of(operand, lane=0) -> Tile:
-            via = operand.member.via
-            assert isinstance(via, Shim)
-            return Tile(col=via.col if operand.count == 1 else lane, row=0)
-
         for s in range(self.q_shims):
-            self.Q.lane(s).bind(inQ[s].prod(tile=shim_of(self.Q)))
-            self.O.lane(s).bind(memO[s].cons(tile=shim_of(self.O)))
+            self.Q.lane(s).bind(inQ[s].prod())
+            self.O.lane(s).bind(memO[s].cons())
         for lane in range(kv_lanes):
-            self.K.lane(lane).bind(inK[lane].prod(tile=shim_of(self.K, lane)))
-            self.V.lane(lane).bind(inV[lane].prod(tile=shim_of(self.V, lane)))
+            self.K.lane(lane).bind(inK[lane].prod())
+            self.V.lane(lane).bind(inV[lane].prod())
 
         flat_rtps = [b for stage in mha_rtps_list for b in stage]
         for i, name in enumerate(counts):
