@@ -22,7 +22,6 @@ from aie.dialects import aiex
 from aie.dialects.aie import DMAChannelDir, WireBundle
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
-    ExternalFunction,
     Flow,
     ObjectFifo,
     PacketFlow,
@@ -31,6 +30,7 @@ from aie.iron import (
     WorkerRuntimeBarrier,
 )
 from aie.iron.device import Tile
+from aie.iron.kernels import datamovement
 from aie.iron.runtime.dmatask import emit_shim_transfer
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
@@ -332,24 +332,6 @@ class Gather(Operator):
         return {"control": self.control_words(ids, addresses["table"])}
 
 
-_ROW_ADDRESSES = """
-#include <stdint.h>
-
-extern "C" void {symbol}(int32_t *ids, uint32_t *out, int32_t lo, int32_t hi) {{
-    uint64_t base = ((uint64_t)(uint32_t)hi << {low_bits}) + (uint32_t)lo + {aperture}ull;
-    for (int r = 0; r < {rows}; r++) {{
-        int32_t id = ids[r] < -{table_rows} ? -{table_rows} : ids[r];
-        id = id > {table_rows} - 1 ? {table_rows} - 1 : id;
-        if (id < 0)
-            id += {table_rows};
-        uint64_t address = base + (uint64_t)id * {row_bytes}u;
-        out[2 * r] = (uint32_t)address & 0xFFFFFFFCu;
-        out[2 * r + 1] = (uint32_t)(address >> 32) & 0xFFFFu;
-    }}
-}}
-"""
-
-
 class GatherWords(Operator):
     """A ``Gather``'s control words for ids the device made, in a graph.
 
@@ -386,18 +368,12 @@ class GatherWords(Operator):
         )
 
     def array(self, target) -> list:
-        symbol = f"gather_words_{self.rows}_{self.table_rows}_{self.row_bytes}"
-        kernel = ExternalFunction(
-            symbol,
-            source_string=_ROW_ADDRESSES.format(
-                symbol=symbol,
-                rows=self.rows,
-                table_rows=self.table_rows,
-                row_bytes=self.row_bytes,
-                low_bits=self.low_bits,
-                aperture=APERTURE,
-            ),
-            arg_types=[self.ids.tile, self.control.tile, np.int32, np.int32],
+        kernel = datamovement.row_addresses(
+            self.rows,
+            self.table_rows,
+            self.row_bytes,
+            low_bits=self.low_bits,
+            aperture=APERTURE,
         )
         ids = ObjectFifo(self.ids.tile, name="gather_ids", depth=1)
         addresses = ObjectFifo(self.control.tile, name="gather_addresses", depth=1)
