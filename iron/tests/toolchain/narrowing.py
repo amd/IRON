@@ -14,6 +14,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
+from iron.common import Scratchpad
 from iron.common.declare import Profile
 from iron.common.graph.costcache import CostCache, Measurement
 from iron.common.graph.fold import folded
@@ -28,7 +29,7 @@ from iron.common.graph.narrowing import (
     variants,
 )
 from iron.lm.layers import SwiGLU
-from iron.operators import GELU, GEMM, MHA, ElementwiseAdd, SiLU
+from iron.operators import GELU, GEMM, MHA, ElementwiseAdd, RoPE, SiLU
 from iron.operators.gemv import Epilogue
 
 SIZE = 8192
@@ -63,6 +64,13 @@ class TwoExtents(iron.Graph):
         t = ElementwiseAdd(a, b, tile_size=TILE)
         u = SiLU(ElementwiseAdd(c, d, tile_size=TILE), tile_size=TILE)
         return ElementwiseAdd(t, b, tile_size=TILE), u
+
+
+class Rotate(iron.Graph):
+    """RoPE over the first `n` positions, `n` given per call."""
+
+    def body(self, x, angles, *, n: Scratchpad[np.int32]):
+        return RoPE(x[:n], angles[:n])
 
 
 def test_widths_are_the_settable_per_tunables(npu2):
@@ -104,6 +112,13 @@ def test_variants_widen_a_default_its_resolution_keeps_narrow(npu2):
     found = variants(ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=2), npu2)
     assert dict(found[0].widths)["num_aie_columns"] == 2
     assert {dict(v.widths)["num_aie_columns"] for v in found[1:]} == {8, 4, 2, 1}
+
+
+def test_variants_leave_out_a_width_whose_bounded_transfers_do_not_fit(npu2):
+    # Two lanes round-robin 1024 one-row tiles each: past a descriptor's 1023.
+    op = Rotate().trace(x=(2048, 64), angles=(2048, 64)).steps[0].op
+    found = variants(op, npu2)
+    assert [dict(v.widths)["num_aie_columns"] for v in found] == [8, 4, 1]
 
 
 def test_derived_fields_are_not_widths(npu2):

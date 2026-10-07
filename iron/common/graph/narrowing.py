@@ -53,7 +53,7 @@ from aie.dialects.aie import WireBundle, get_target_model
 from aie.utils.compile import NPU_CACHE_HOME
 
 from ..declare import Operator
-from ..design import OperatorDesign
+from ..design import OperatorDesign, runtime
 from ..image.coresidence import Packing, fits
 from ..image.fusion import generate, parameters_preamble
 from .fold import Fold, folded
@@ -111,9 +111,10 @@ def _widths(width: int, cols: int) -> list[int]:
 
 
 def variants(op: Operator, dev) -> list[Variant]:
-    """``op`` at its default width, then at every other one it resolves at.
-    Each width tunable ranges over its default and the powers of two up to
-    the device's columns, widest first.
+    """``op`` at its default width, then at every other one it resolves at
+    and whose derived transfers fit their descriptors. Each width tunable
+    ranges over its default and the powers of two up to the device's
+    columns, widest first.
     """
     default = Variant.of(op, dev)
     defaults = dict(default.widths)
@@ -123,9 +124,14 @@ def variants(op: Operator, dev) -> list[Variant]:
         if widths == defaults:
             continue
         try:
-            out.append(Variant.of(op.with_tunables(**widths), dev))
-        except ValueError:  # unresolvable or incompatible at this width
+            variant = Variant.of(op.with_tunables(**widths), dev)
+            resolved = variant.resolved
+            if not resolved.has_sequence_override():
+                for buf in resolved.buffers:
+                    runtime.Sequence(resolved, {}).plan(buf)
+        except ValueError:  # unresolvable, incompatible or untransferable here
             continue
+        out.append(variant)
     return out
 
 
