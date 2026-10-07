@@ -63,23 +63,24 @@ class Multimodal(EmbeddingGemma):
         self,
         ids,
         merge=None,
-        mel=None,
+        wave=None,
         pixels=None,
         xy=None,
         position_ids=None,
         *,
         n: Scratchpad[np.int32],
         n_audio: Scratchpad[np.int32],
+        frames: Scratchpad[np.int32],
         n_patches: Scratchpad[np.int32],
     ):
         x = Copy(self.embedding[ids])
         if merge is None:
-            if mel is not None or pixels is not None:
+            if wave is not None or pixels is not None:
                 raise ValueError("a tower's soft tokens take places merge= names")
             return self.encoder(x, n)
         Copy(x, self.merged[: x.shape[0]])
-        if mel is not None:
-            a = self.audio(mel, n_audio)
+        if wave is not None:
+            a = self.audio(wave, n_audio, frames)
             Copy(a, self.merged[self.audio_at : self.audio_at + a.shape[0]])
         if pixels is not None:
             v = self.vision(pixels, xy, position_ids, n_patches)
@@ -104,7 +105,7 @@ class Multimodal(EmbeddingGemma):
         Args:
             tokens: The token ids, each placeholder run as long as its soft
                 tokens.
-            audio: One clip's ``(features, frames)``, as ``LogMel`` gives them.
+            audio: One mono clip at the audio tower's ``sample_rate``.
             image: One image's ``(pixel_values, positions)``, as the
                 processor gives them.
 
@@ -114,12 +115,13 @@ class Multimodal(EmbeddingGemma):
         c = self.config
         tokens = np.asarray(tokens)
         ids, n = self.inputs(tokens)
-        values = dict(n=n, n_audio=0, n_patches=0)
-        mel, picture = None, (None,) * 3
+        values = dict(n=n, n_audio=0, frames=0, n_patches=0)
+        wave, picture = None, (None,) * 3
         soft = {c.audio_token: (0, 0), c.image_token: (0, 0)}
         if audio is not None:
-            mel, values["n_audio"] = self.audio.inputs(*audio)
-            soft[c.audio_token] = (self.audio_at, self.audio.config.tokens(audio[1]))
+            wave, values["n_audio"], values["frames"] = self.audio.inputs(audio)
+            tokens_audio = self.audio.config.tokens(values["frames"])
+            soft[c.audio_token] = (self.audio_at, tokens_audio)
         if image is not None:
             given, values["n_patches"] = self.vision.inputs(*image)
             picture = tuple(given.values())
@@ -135,7 +137,7 @@ class Multimodal(EmbeddingGemma):
             merge[places] = at + np.arange(count)
         if audio is None and image is None:
             return (ids,), values
-        return (ids, merge, mel, *picture), values
+        return (ids, merge, wave, *picture), values
 
     def encode(self, tokens, dims: int = 768, audio=None, image=None) -> np.ndarray:
         """The unit-length embedding of ``tokens`` with ``audio`` and

@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""EmbeddingGemma 2's audio tower on the NPU, from the real checkpoint,
-against its float32 oracle, and the oracle and the features once against
-Hugging Face's.
+"""EmbeddingGemma 2's audio tower on the NPU, from the real checkpoint:
+its features against the host extractor's, its soft tokens against its
+float32 oracle, and the oracle and the host features once against Hugging
+Face's.
 """
 
 import time
@@ -12,17 +13,22 @@ import time
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from ml_dtypes import bfloat16
 
+import iron
+from iron.common import Scratchpad
 from iron.lm import Checkpoint, load_weights
 from iron.lm.embeddinggemma2.audio.model import (
     AUDIO,
     Audio,
+    AudioTower,
     LogMel,
     audio_tensors,
     layout,
 )
 from iron.lm.embeddinggemma2.audio.oracle import AudioOracle
 from iron.lm.testing import requires, weights_dir
+from iron.operators.copy import Copy
 
 DIRECTORY = weights_dir("embeddinggemma-2")
 
@@ -38,10 +44,17 @@ CLIPS = {
     "long": 30.0,
 }
 
-# Measured: 0.987, 0.831 and 0.594 at the worst token (mean 0.997 or more),
+# Measured: 0.99925, 0.99953 and 0.99941 of the features are the host
+# extractor's rounded to bf16.
+MIN_EXACT = 0.999
+# The rest are within one bf16 ulp, bar a log near 0, where the energy's
+# relative error is the feature's absolute one: measured 1.9e-6 at most.
+ATOL = 4e-6
+
+# Measured: 0.983, 0.779 and 0.622 at the worst token (mean 0.996 or more),
 # where HF's own bf16 tower reaches 0.861, 0.834 and 0.655.
 MIN_COSINE = 0.55
-# Measured: 0.044, 0.070 and 0.076; the tower without its clamps is 0.88.
+# Measured: 0.042, 0.084 and 0.074; the tower without its clamps is 0.88.
 MAX_ERROR = 0.09
 
 
@@ -54,8 +67,15 @@ def chirp(seconds: float) -> np.ndarray:
     return (wave + 0.05 * rng.standard_normal(n)).astype(np.float32)
 
 
-def features(name: str):
-    return LogMel(AUDIO)(chirp(CLIPS[name]))
+class Features(iron.Graph):
+    """The tower's features of a waveform, and the frame after them."""
+
+    def __init__(self, tower: AudioTower):
+        self.audio = tower
+
+    def body(self, x, *, frames: Scratchpad[np.int32]):
+        self.audio.logmel(x, frames)
+        return Copy(self.audio.features[1 : x.shape[0] // AUDIO.hop + 1])
 
 
 @pytest.fixture(scope="module")
@@ -124,9 +144,29 @@ def test_audio_oracle_matches_hugging_face(oracle):
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("name", list(CLIPS))
+def test_audio_features(audio, name, record_property):
+    wave = chirp(CLIPS[name])
+    x, _, frames = audio.audio.inputs(wave)
+    features = Features(audio.audio)
+    got = features(x, frames=frames).numpy().astype(np.float32)
+    got = got.reshape(-1, AUDIO.mels)
+    host, valid = LogMel(AUDIO)(wave)
+    assert frames == valid
+    want = host[:frames].astype(bfloat16).astype(np.float32)
+    exact = float(np.mean(got[:frames] == want))
+    ulp = 2.0 ** (np.floor(np.log2(np.abs(want).clip(1e-30))) - 7)
+    record_property("Exact", exact)
+    assert exact >= MIN_EXACT, exact
+    assert (np.abs(got[:frames] - want) <= np.maximum(ulp, ATOL)).all()
+    assert not got[frames].any()
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("name", list(CLIPS))
 def test_audio_accuracy(audio, oracle, name, record_property):
-    x, frames = features(name)
-    got, want = audio.embed(x, frames), oracle(x, frames)
+    wave = chirp(CLIPS[name])
+    x, frames = LogMel(AUDIO)(wave)
+    got, want = audio.embed(wave), oracle(x, frames)
     assert got.shape == want.shape == (AUDIO.tokens(frames), AUDIO.text_dim)
     cosine = (got * want).sum(-1) / (
         np.linalg.norm(got, axis=-1) * np.linalg.norm(want, axis=-1)
@@ -142,11 +182,11 @@ def test_audio_accuracy(audio, oracle, name, record_property):
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("name", list(CLIPS))
 def test_audio_latency(audio, name, record_property):
-    x, frames = features(name)
-    audio.embed(x, frames)
+    wave = chirp(CLIPS[name])
+    audio.embed(wave)
     times = []
     for _ in range(10):
         t = time.perf_counter()
-        audio.embed(x, frames)
+        audio.embed(wave)
         times.append(time.perf_counter() - t)
     record_property("Latency", float(np.median(times)) * 1e6)

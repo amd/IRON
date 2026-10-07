@@ -148,7 +148,7 @@ def picture(height: int, width: int) -> np.ndarray:
 
 
 # 50 soft tokens, and 6 x 9 of an image's 280.
-CLIP = LogMel(AUDIO)(chirp(2.0))
+CLIP = chirp(2.0)
 IMAGE = patches(picture(288, 432), VISION.image_tokens, VISION)
 
 
@@ -174,7 +174,7 @@ def test_embeddinggemma_2_multimodal(multimodal, text, audio, image, record_prop
     audio_oracle, vision_oracle = multimodal.tower_oracles()
     soft = {}
     if audio is not None:
-        soft[c.audio_token] = audio_oracle(*audio)
+        soft[c.audio_token] = audio_oracle(*LogMel(AUDIO)(audio))
     if image is not None:
         soft[c.image_token] = vision_oracle(*image)
     tokens = multimodal.tokens(

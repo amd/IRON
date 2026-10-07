@@ -78,8 +78,10 @@ def main():
     calls = [
         *(Call(text.trace(**s), dict(n=s["ids"][0][0])) for s in text.shapes()),
         *(Call(vision.trace(**s), dict(n=s["pixels"][0])) for s in vision.shapes()),
-        *(Call(audio.trace(**s), dict(n=s["x"][0] // 2)) for s in audio.shapes()),
     ]
+    for s in audio.shapes():
+        frames = s["x"][0][0] // A.hop - 1
+        calls.append(Call(audio.trace(**s), dict(n=frames // 2, frames=frames)))
     measure_graph(
         CostTable(args.table),
         calls,
