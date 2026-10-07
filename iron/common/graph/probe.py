@@ -510,6 +510,98 @@ class Call:
         }
 
 
+@dataclasses.dataclass(frozen=True)
+class Designs:
+    """The designs of a set of calls as ``measure_graph`` measures them,
+    without a device: each design's first operator and the call it runs in,
+    its settings (``variants``), and for a design a folded call has of its
+    own, the design whose step it took.
+    """
+
+    first: dict[str, tuple[Operator, Call]]
+    settings: dict[str, list[Variant]]
+    twin_of: dict[str, str]
+
+    @classmethod
+    def of(cls, calls: Sequence[Call], dev) -> Designs:
+        """The designs of ``calls`` on ``dev``.
+
+        Raises:
+            ValueError: A call is folded from a graph no call has.
+        """
+        first: dict[str, tuple[Operator, Call]] = {}
+        twin_of: dict[str, str] = {}
+        for call in calls:
+            keys = [cost_key(s.op, dev) for s in call.traced.steps]
+            for key in Runlist(keys).order:
+                step = call.traced.steps[keys.index(key)]
+                first.setdefault(key, (step.op, call))
+            if call.folded_from is not None:
+                for old, new in replaced(call.folded_from, call.traced):
+                    twin_of.setdefault(cost_key(new, dev), cost_key(old, dev))
+        settings = {key: variants(op, dev) for key, (op, _) in first.items()}
+        if not set(twin_of.values()) <= settings.keys():
+            raise ValueError("a call is folded from a graph no call measures")
+        return cls(first, settings, twin_of)
+
+    def stale(self, table: CostTable) -> list[str]:
+        """The designs ``table`` holds that are no setting of these."""
+        current = {v.key for vs in self.settings.values() for v in vs}
+        return [k for k in table.steps if k not in current]
+
+    def unmeasured(self, table: CostTable) -> list[str]:
+        """The settings ``table`` lacks that ``search`` is sure to run: each
+        of a design with at most ``EXHAUSTIVE``, else its default, where
+        coordinate descent starts (its path follows the times).
+        """
+        return [
+            v.key
+            for vs in self.settings.values()
+            for v in (vs if len(vs) <= EXHAUSTIVE else vs[:1])
+            if v.key not in table.steps
+        ]
+
+    def calibrated(
+        self, table: CostTable, pairs: Sequence[tuple[str, str]]
+    ) -> list[tuple[Variant, Variant]]:
+        """The designs each of ``pairs`` is calibrated between: the first
+        design of each operator class, at its narrowest setting ``table``
+        holds whose other tunables are the default's.
+        """
+        by_class: dict[str, Variant] = {}
+        for key, (op, _) in self.first.items():
+            default = self.settings[key][0]
+            fixed = {
+                n: x for n, x in default.tunables if n not in default.resolved.widths
+            }
+            narrowest = min(
+                (
+                    v
+                    for v in self.settings[key]
+                    if v.key in table.steps
+                    and fixed.items() <= dict(v.tunables).items()
+                ),
+                key=lambda v: v.mm2s + v.s2mm,
+            )
+            by_class.setdefault(type(op).__name__, narrowest)
+        return [(by_class[a], by_class[b]) for a, b in pairs]
+
+    def missing(self, table: CostTable, pairs: Sequence[tuple[str, str]]) -> list[str]:
+        """What ``measure_graph`` would run for ``table``, in its return's
+        terms: the ``unmeasured`` settings, else the calibrations of
+        ``pairs`` the table lacks (``"a|b"``), which are between measured
+        designs.
+        """
+        designs = self.unmeasured(table)
+        if designs:
+            return designs
+        return [
+            f"{a.key}|{b.key}"
+            for a, b in self.calibrated(table, pairs)
+            if f"{a.key}|{b.key}" not in table.calibrations
+        ]
+
+
 def measure_graph(
     table: CostTable,
     calls: Sequence[Call],
@@ -538,29 +630,16 @@ def measure_graph(
     dev = aie_utils.ensure_current_device()
     if cache is None:
         cache = cost_cache()
-    first: dict[str, tuple[Operator, Call]] = {}
-    twin_of: dict[str, str] = {}
-    for call in calls:
-        keys = [cost_key(s.op) for s in call.traced.steps]
-        for key in Runlist(keys).order:
-            step = call.traced.steps[keys.index(key)]
-            first.setdefault(key, (step.op, call))
-        if call.folded_from is not None:
-            for old, new in replaced(call.folded_from, call.traced):
-                twin_of.setdefault(cost_key(new), cost_key(old))
-    found = {key: variants(op, dev) for key, (op, _) in first.items()}
-    if not set(twin_of.values()) <= found.keys():
-        raise ValueError("a call is folded from a graph no call measures")
-
-    current = {v.key for vs in found.values() for v in vs}
-    stale = [k for k in table.steps if k not in current]
+    designs = Designs.of(calls, dev)
+    found, twin_of = designs.settings, designs.twin_of
+    stale = designs.stale(table)
     for k in stale:
         del table.steps[k]
     if stale:
         log(f"dropped {len(stale)} designs the graphs no longer have")
 
     ran = []
-    for i, (key, (op, call)) in enumerate(first.items()):
+    for i, (key, (op, call)) in enumerate(designs.first.items()):
         name = type(op).__name__
         if not remeasure and all(v.key in table.steps for v in found[key]):
             log(f"[{i}] {name}: in the table")
@@ -598,20 +677,7 @@ def measure_graph(
                 + ("" if v.key in costs else "  (cached)")
             )
 
-    by_class = {}
-    for key, (op, _) in first.items():
-        default = found[key][0]
-        fixed = {n: x for n, x in default.tunables if n not in default.resolved.widths}
-        narrowest = min(
-            (
-                v
-                for v in found[key]
-                if v.key in table.steps and fixed.items() <= dict(v.tunables).items()
-            ),
-            key=lambda v: v.mm2s + v.s2mm,
-        )
-        by_class.setdefault(type(op).__name__, narrowest)
-    chosen = [(by_class[a], by_class[b]) for a, b in pairs]
+    chosen = designs.calibrated(table, pairs)
     wanted = {f"{a.key}|{b.key}" for a, b in chosen}
     for k in [k for k in table.calibrations if k not in wanted]:
         del table.calibrations[k]

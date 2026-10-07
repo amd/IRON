@@ -51,22 +51,11 @@ CALIBRATION_PAIRS = [
 ]
 
 
-def measure(
-    model: CausalLM,
-    table: CostTable,
-    sample: Sampler,
-    position: int,
-    token: int,
-    timing: Timing = Timing(),
-    repeats: int = 9,
-    remeasure: bool = False,
-    log: Callable[[str], None] = print,
-) -> None:
-    """Measure ``model``'s versions into ``table`` (``measure_graph``): the
-    decode step's designs at ``position`` and ``token``, the prompt chunk's
-    at a whole first chunk, each as traced and with each fold it admits,
-    Sample on the draw rows ``sample`` gives, and the configure cost between
-    ``CALIBRATION_PAIRS``.
+def calls(model: CausalLM, sample: Sampler, position: int, token: int) -> list[Call]:
+    """The calls ``model``'s designs are measured in on the current device:
+    the decode step at ``position`` and ``token``, the prompt chunk at a
+    whole first chunk, each as traced and with each fold it admits, Sample
+    on the draw rows ``sample`` gives.
     """
     dev = aie_utils.ensure_current_device()
     C = model.config.prefill_chunk
@@ -74,7 +63,7 @@ def measure(
         (model.shapes(1), dict(position=position, token=token)),
         (model.shapes(C), dict(position=C - 1, token=token, chunk=0, rows=C)),
     ]
-    calls = []
+    out = []
     for shapes, values in versions:
         traced = model.trace(**shapes)
         # The tuner prices a fold by its designs: those a set of folds runs are
@@ -86,7 +75,7 @@ def measure(
         # it at the rows generation writes, not at random words.
         [k_max] = {s.op.k_max for s in traced.steps if isinstance(s.op, Sample)}
         _, draws = traced.states[id(model.draws)]
-        calls += [
+        out += [
             Call(
                 graph,
                 values,
@@ -95,7 +84,32 @@ def measure(
             )
             for graph in graphs
         ]
-    measure_graph(table, calls, CALIBRATION_PAIRS, timing, repeats, remeasure, log)
+    return out
+
+
+def measure(
+    model: CausalLM,
+    table: CostTable,
+    sample: Sampler,
+    position: int,
+    token: int,
+    timing: Timing = Timing(),
+    repeats: int = 9,
+    remeasure: bool = False,
+    log: Callable[[str], None] = print,
+) -> None:
+    """Measure ``model``'s ``calls`` into ``table`` (``measure_graph``), and
+    the configure cost between ``CALIBRATION_PAIRS``.
+    """
+    measure_graph(
+        table,
+        calls(model, sample, position, token),
+        CALIBRATION_PAIRS,
+        timing,
+        repeats,
+        remeasure,
+        log,
+    )
 
 
 def main(runner: type[Runner], description: str, default_table: Path) -> None:

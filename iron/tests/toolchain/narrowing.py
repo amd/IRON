@@ -211,6 +211,7 @@ def test_packs_designs_apart_in_first_use_order(tmp_path, npu2):
     add, silu = cost_key(ops["ElementwiseAdd"]), cost_key(ops["SiLU"])
     assert tuning.groups in (((add, silu),), ((silu, add),))
     assert tuning.unmeasured == (cost_key(ops["GELU"]),)
+    assert f"unmeasured, left as traced: {cost_key(ops['GELU'])}" in tuning.report()
     # Every step but gelu's is in the pack: enter it, gelu, back into it.
     assert tuning.configures == 4
     keys = [cost_key(s.op) for s in traced.steps]
@@ -329,6 +330,10 @@ def test_a_fold_is_left_where_it_costs_or_is_unmeasured(gate_us, tmp_path, npu2)
         del table.steps[cost_key(folds.steps[0].op, npu2)]
     tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
     assert tuning.folds == ()
+    assert [str(f) for f in tuning.unpriced] == ([] if gate_us else ["SiLU into GEMV"])
+    assert ("unpriced, not taken: fold SiLU into GEMV" in tuning.report()) == (
+        gate_us is None
+    )
     applied, _ = tuning.apply(traced, npu2)
     assert [type(s.op).__name__ for s in applied.steps] == [
         type(s.op).__name__ for s in traced.steps

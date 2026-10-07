@@ -347,8 +347,9 @@ def model_us(
 class Tuning:
     """What ``JointNarrowing`` chose, and the model's prediction for it and
     for the graph as traced (``baseline``). The predictions leave out the
-    ``unmeasured`` designs, which stay as traced. ``chosen`` and ``groups``
-    name the designs of the graph with ``folds`` applied.
+    ``unmeasured`` designs, which stay as traced, and the ``unpriced`` folds,
+    which a design the table lacks keeps from being taken. ``chosen`` and
+    ``groups`` name the designs of the graph with ``folds`` applied.
     """
 
     chosen: dict[str, Variant]  # default key -> the setting it runs at
@@ -361,6 +362,7 @@ class Tuning:
     baseline_us: float
     unmeasured: tuple[str, ...]
     folds: tuple[Fold, ...] = ()
+    unpriced: tuple[Fold, ...] = ()
 
     def apply(
         self, traced: TracedGraph, dev=None
@@ -391,7 +393,9 @@ class Tuning:
         return narrowed, groups
 
     def report(self, names: Mapping[str, str] | None = None) -> str:
-        """One line per design that changed, then the predictions."""
+        """One line per fold and design that changed, the predictions, then
+        one per design and fold the table could not price.
+        """
         names = names or {}
         lines = [f"  fold: {fold}" for fold in self.folds]
         for key, v in self.chosen.items():
@@ -403,8 +407,10 @@ class Tuning:
             f"  model: {self.baseline_us:.1f} us ({self.baseline_configures} "
             f"configures) -> {self.predicted_us:.1f} us ({self.configures})"
         )
-        if self.unmeasured:
-            lines.append(f"  unmeasured (left out): {len(self.unmeasured)} designs")
+        lines += [
+            f"  unmeasured, left as traced: {names.get(k, k)}" for k in self.unmeasured
+        ]
+        lines += [f"  unpriced, not taken: fold {fold}" for fold in self.unpriced]
         return "\n".join(lines)
 
 
@@ -502,9 +508,12 @@ class JointNarrowing:
         keys = {cost_key(s.op, dev) for s in traced.steps}
         _, admitted = folded(traced, dev)
         gains = []
+        unpriced = []
         for fold in admitted:
             trial = self._folding(traced, dev, (fold,), keys)
-            if trial is not None and trial.predicted_us < plain.predicted_us:
+            if trial is None:
+                unpriced.append(fold)
+            elif trial.predicted_us < plain.predicted_us:
                 gains.append(trial)
         best = plain
         for single in sorted(gains, key=lambda t: t.predicted_us):
@@ -519,6 +528,7 @@ class JointNarrowing:
             best,
             baseline_us=plain.baseline_us,
             baseline_configures=plain.baseline_configures,
+            unpriced=tuple(unpriced),
         )
 
     def _folding(
