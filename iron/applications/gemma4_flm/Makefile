@@ -8,7 +8,7 @@
 #   make serve     serves the model on the IRON engine
 
 FLM_REPO   := https://github.com/andrej/FastFlowLM
-FLM_COMMIT := 609bc6714987beb8c35079ac8a51b53e0bf067d0
+FLM_COMMIT := 04877b481f9a9b17eece2a5515473816e607b332
 BUILD      := $(CURDIR)/build
 FLM        := $(BUILD)/FastFlowLM/src
 CMAKE      := cmake -S $(FLM) -G Ninja -DFLM_VERSION=1.0.5 -DNPU_VERSION=32.0.203.304
