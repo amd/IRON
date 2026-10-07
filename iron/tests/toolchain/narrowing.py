@@ -86,7 +86,7 @@ def test_variants_range_over_every_width_the_shims_allow(npu2):
     found = variants(ElementwiseAdd(size=SIZE, tile_size=TILE), npu2)
     widths = [
         (w["num_aie_columns"], w["num_channels"])
-        for w in map(dict, (v.widths for v in found))
+        for w in map(dict, (v.tunables for v in found))
     ]
     # The default first; none past the 16 MM2S channels of the shim row.
     assert widths == [
@@ -110,15 +110,15 @@ def test_variants_range_over_every_width_the_shims_allow(npu2):
 
 def test_variants_widen_a_default_its_resolution_keeps_narrow(npu2):
     found = variants(ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=2), npu2)
-    assert dict(found[0].widths)["num_aie_columns"] == 2
-    assert {dict(v.widths)["num_aie_columns"] for v in found[1:]} == {8, 4, 2, 1}
+    assert dict(found[0].tunables)["num_aie_columns"] == 2
+    assert {dict(v.tunables)["num_aie_columns"] for v in found[1:]} == {8, 4, 2, 1}
 
 
 def test_variants_leave_out_a_width_whose_bounded_transfers_do_not_fit(npu2):
     # Two lanes round-robin 1024 one-row tiles each: past a descriptor's 1023.
     op = Rotate().trace(x=(2048, 64), angles=(2048, 64)).steps[0].op
     found = variants(op, npu2)
-    assert [dict(v.widths)["num_aie_columns"] for v in found] == [8, 4, 1]
+    assert [dict(v.tunables)["num_aie_columns"] for v in found] == [8, 4, 1]
 
 
 def test_derived_fields_are_not_widths(npu2):
@@ -189,7 +189,7 @@ def _add_silu(tmp_path, dev):
     steps = {}
     for name in ("ElementwiseAdd", "SiLU"):
         for v in variants(ops[name], dev):
-            cols = dict(v.widths)["num_aie_columns"]
+            cols = dict(v.tunables)["num_aie_columns"]
             steps[v.key] = (4.0 + cols, 8.0 * cols)
     return traced, ops, _table(tmp_path / "costs.json", steps)
 
@@ -245,14 +245,14 @@ def test_designs_of_one_array_take_one_width(tmp_path, npu2):
     steps = {}
     for op in (small, large, silu):
         for v in variants(op, npu2):
-            cols = dict(v.widths)["num_aie_columns"]
+            cols = dict(v.tunables)["num_aie_columns"]
             steps[v.key] = (4.0 + cols, 8.0 * cols)
     table = _table(tmp_path / "costs.json", steps)
     tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
     # As traced, the adds' one array is entered twice around silu's.
     assert tuning.baseline_configures == 4
     adds = [tuning.chosen[cost_key(op)] for op in (small, large)]
-    assert adds[0].widths == adds[1].widths and adds[0].array == adds[1].array
+    assert adds[0].tunables == adds[1].tunables and adds[0].array == adds[1].array
     # The pack names the array by its first design, which brings the other.
     assert tuning.groups == ((cost_key(small), cost_key(silu)),)
     assert tuning.configures == 2
@@ -274,7 +274,7 @@ def test_placer_verdicts_are_kept_across_tunings(tmp_path, npu2):
     first = JointNarrowing(table, fit_cache=fit_cache).tune(traced, npu2)
     records = sorted(fit_cache.iterdir())
     assert records and all(r.read_text() == "fits" for r in records)
-    widths = {k: v.widths for k, v in first.chosen.items()}
+    widths = {k: v.tunables for k, v in first.chosen.items()}
 
     # A second tuning reads the verdicts rather than asking the placer: one
     # recorded as refused is taken as refused, and the pack moves to its
@@ -284,7 +284,7 @@ def test_placer_verdicts_are_kept_across_tunings(tmp_path, npu2):
     second = JointNarrowing(table, fit_cache=fit_cache).tune(traced, npu2)
     assert len(list(fit_cache.iterdir())) > len(records)
     assert second.groups == first.groups
-    assert {k: v.widths for k, v in second.chosen.items()} != widths
+    assert {k: v.tunables for k, v in second.chosen.items()} != widths
 
 
 def _swiglu(tmp_path, dev, gate_us):

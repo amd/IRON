@@ -445,6 +445,19 @@ class Operator(metaclass=_OperatorMeta):
                     found.setdefault(ref.name, getattr(self, ref.name))
         return found
 
+    def domains(self, dev) -> dict[str, tuple[Any, ...]]:
+        """The values the tuner tries for each tunable it searches, asked of
+        the resolved operator: a width at its own value and every power of
+        two up to ``dev``'s columns, widest first. An operator whose other
+        tunables are worth searching adds them; a combination it cannot
+        resolve at is left out.
+        """
+        powers = [1 << i for i in range(dev.cols.bit_length())]
+        return {
+            name: tuple(sorted({width, *powers}, reverse=True))
+            for name, width in self.widths.items()
+        }
+
     @property
     def buffers(self) -> list[BoundBuffer]:
         return [self._bound[m.name] for m in self._members_io()]

@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Joint narrowing: each design's width (``Operator.widths``, narrower or
-wider than its default) and which designs share a device, chosen together
-to minimise the modelled runlist time:
+"""Joint narrowing: each design's tunables (``Operator.domains``: its width,
+narrower or wider than its default, and any other its operator searches)
+and which designs share a device, chosen together to minimise the modelled
+runlist time:
 
     D0 + sum over steps of t_step
        + sum over device entries of (base + sum over its members of load)
@@ -12,20 +13,20 @@ to minimise the modelled runlist time:
 A device is entered at a step whose design is in it when the step before is
 not; entering configures it. The designs of one array share a device
 (``Packing.sharing``) that loads the array once, so the search takes them
-as one, at one width. ``R`` is the empty configure the parity rule
+as one, at one setting. ``R`` is the empty configure the parity rule
 adds (``Fusion.needs_reset``). ``t_step`` and ``load`` are measured per
-design and width, ``D0``, ``base`` and ``R`` per device (``probe``, into a
+design and setting, ``D0``, ``base`` and ``R`` per device (``probe``, into a
 ``CostTable``).
 
 Only a pack connected in the runlist's adjacency can save an entry, so the
 candidates are the connected sets of designs, and an exact search over
 partitions into them, carrying the parity, finds the cheapest. The placer
 (``fits``) is asked only about the packs a solution uses; a refused pack
-tries its next-cheapest widths, then is dropped, and the search reruns.
+tries its next-cheapest settings, then is dropped, and the search reruns.
 
-A width is a candidate only if its output was measured bit-identical to the
-default width's. A design the table does not hold stays at its default
-width, alone in its device.
+A setting is a candidate only if its output was measured bit-identical to
+the default's. A design the table does not hold stays at its default,
+alone in its device.
 
 A fold (``iron.common.graph.fold``) is another runlist: fewer steps, the
 producer's design in place of two. Each the graph admits is priced by the
@@ -48,6 +49,7 @@ import statistics
 from collections import Counter
 from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from aie.dialects.aie import WireBundle, get_target_model
 from aie.utils.compile import NPU_CACHE_HOME
@@ -71,11 +73,13 @@ def cost_key(op: Operator, dev=None) -> str:
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class Variant:
-    """One width of a design, its array and the shim channels its streams take."""
+    """One setting of a design's searched tunables, its array and the shim
+    channels its streams take.
+    """
 
     op: Operator
     resolved: Operator
-    widths: tuple[tuple[str, int], ...]
+    tunables: tuple[tuple[str, Any], ...]
     key: str
     array: Hashable
     mm2s: int
@@ -85,14 +89,12 @@ class Variant:
     def of(cls, op: Operator, dev) -> Variant:
         resolved = op.resolved(dev)
         streams = [b for b in resolved.buffers if b.streamed]
-        widths: list[tuple[str, int]] = []
-        for name, width in resolved.widths.items():
-            assert width is not None, "a resolved operator sets its widths"
-            widths.append((name, width))
         return cls(
             op=op,
             resolved=resolved,
-            widths=tuple(widths),
+            tunables=tuple(
+                (name, getattr(resolved, name)) for name in resolved.domains(dev)
+            ),
             key=cost_key(resolved),
             array=resolved.array_key(),
             mm2s=sum(s.count for s in streams if not s.direction.drains),
@@ -100,31 +102,21 @@ class Variant:
         )
 
 
-def _widths(width: int, cols: int) -> list[int]:
-    """``width`` and every power of two up to ``cols``, widest first."""
-    out = {width}
-    w = 1
-    while w <= cols:
-        out.add(w)
-        w *= 2
-    return sorted(out, reverse=True)
-
-
 def variants(op: Operator, dev) -> list[Variant]:
-    """``op`` at its default width, then at every other one it resolves at
-    and whose derived transfers fit their descriptors. Each width tunable
-    ranges over its default and the powers of two up to the device's
-    columns, widest first.
+    """``op`` at its default tunables, then at every other combination of
+    their ``Operator.domains`` it resolves at and whose derived transfers
+    fit their descriptors.
     """
     default = Variant.of(op, dev)
-    defaults = dict(default.widths)
+    defaults = dict(default.tunables)
     out = [default]
-    for combo in itertools.product(*(_widths(w, dev.cols) for w in defaults.values())):
-        widths = dict(zip(defaults, combo))
-        if widths == defaults:
+    domains = default.resolved.domains(dev)
+    for combo in itertools.product(*domains.values()):
+        tunables = dict(zip(domains, combo))
+        if tunables == defaults:
             continue
         try:
-            variant = Variant.of(op.with_tunables(**widths), dev)
+            variant = Variant.of(op.with_tunables(**tunables), dev)
             resolved = variant.resolved
             if not resolved.has_sequence_override():
                 for buf in resolved.buffers:
@@ -157,12 +149,12 @@ def shim_budget(dev) -> tuple[int, int]:
 
 @dataclasses.dataclass(frozen=True)
 class StepCost:
-    """One design at one width, measured alone.
+    """One design at one setting of its tunables, measured alone.
 
     Attributes:
         t_step_us: Its time per step while its device is configured.
         alone_us: One run of one step, less `t_step_us`: `D0 + base + load + R`.
-        exact: Its output is bit-identical to the default width's.
+        exact: Its output is bit-identical to the default setting's.
     """
 
     t_step_us: float
@@ -318,8 +310,8 @@ def model_us(
         table: The measured costs.
         keys: The runlist's design keys.
         groups: The designs sharing a device.
-        chosen: Each design's key at the width it runs at.
-        arrays: Each design's array at that width: the designs of one array
+        chosen: Each design's key at the setting it runs at.
+        arrays: Each design's array at that setting: the designs of one array
             share a device too, which loads the array once.
 
     Returns:
@@ -359,7 +351,7 @@ class Tuning:
     name the designs of the graph with ``folds`` applied.
     """
 
-    chosen: dict[str, Variant]  # default key -> the width it runs at
+    chosen: dict[str, Variant]  # default key -> the setting it runs at
     # Default keys sharing one device, an array's first design standing for
     # the array: the fusion adds its other designs.
     groups: tuple[tuple[str, ...], ...]
@@ -374,7 +366,7 @@ class Tuning:
         self, traced: TracedGraph, dev=None
     ) -> tuple[TracedGraph, list[list[Operator]]]:
         """``traced`` with the chosen folds applied, every narrowed design's
-        operators rebuilt at their width, and the packs as operator groups
+        operators rebuilt at their setting, and the packs as operator groups
         for ``coresident=``.
         """
         if self.folds:
@@ -388,7 +380,7 @@ class Tuning:
             keys[id(op)] = key = cost_key(op, dev)
             variant = self.chosen.get(key)
             if variant is not None and variant.key != key:
-                replace[id(op)] = op.with_tunables(**dict(variant.widths))
+                replace[id(op)] = op.with_tunables(**dict(variant.tunables))
         narrowed = traced.with_operators(replace)
         members: dict[str, list[Operator]] = {}
         for old, new in zip(traced.steps, narrowed.steps):
@@ -404,7 +396,7 @@ class Tuning:
         lines = [f"  fold: {fold}" for fold in self.folds]
         for key, v in self.chosen.items():
             if v.key != key:
-                lines.append(f"  {names.get(key, key)}: {dict(v.widths)}")
+                lines.append(f"  {names.get(key, key)}: {dict(v.tunables)}")
         for group in self.groups:
             lines.append("  pack: " + ", ".join(names.get(k, k) for k in group))
         lines.append(
@@ -419,7 +411,7 @@ class Tuning:
 @dataclasses.dataclass
 class _Pack:
     """A candidate device: a connected set of designs, its entries, and its
-    cheapest widths within the shim budget; the search prices ``options[0]``.
+    cheapest settings within the shim budget; the search prices ``options[0]``.
     """
 
     members: tuple[int, ...]
@@ -481,13 +473,13 @@ def _cheapest(
 
 @dataclasses.dataclass(frozen=True)
 class JointNarrowing:
-    """Choose widths and packs for a traced graph; pass as ``coresident=``
+    """Choose tunables and packs for a traced graph; pass as ``coresident=``
     to ``Graph.compile``.
 
     Attributes:
         table: The measured costs.
         max_members: The most designs in one pack.
-        fit_attempts: How many of a pack's cheapest widths the placer is
+        fit_attempts: How many of a pack's cheapest settings the placer is
             asked about before the pack is dropped.
         fit_cache: Where the placer's verdicts persist across processes.
     """
@@ -500,7 +492,7 @@ class JointNarrowing:
     )
 
     def tune(self, traced: TracedGraph, dev) -> Tuning:
-        """Choose the folds, widths and packs of ``traced`` for ``dev``.
+        """Choose the folds, tunables and packs of ``traced`` for ``dev``.
 
         Each fold the graph admits is priced on its own, then those that
         gain are taken cheapest first, each kept only if the model's time
@@ -546,14 +538,14 @@ class JointNarrowing:
         return dataclasses.replace(self._narrow(trial, dev), folds=folds)
 
     def _narrow(self, traced: TracedGraph, dev) -> Tuning:
-        """The widths and packs of ``traced`` as it is."""
+        """The tunables and packs of ``traced`` as it is."""
         table = self.table
         keys = [cost_key(s.op, dev) for s in traced.steps]
         first: dict[str, Operator] = {}
         for key, step in zip(keys, traced.steps):
             first.setdefault(key, step.op)
         found = {k: self._candidates(op, dev) for k, op in first.items()}
-        # The designs of one array are one device, so they take one width:
+        # The designs of one array are one device, so they take one setting:
         # the search runs over arrays, each named for its first design.
         units: dict[Hashable, list[str]] = {}
         for k, cands in found.items():
@@ -561,9 +553,9 @@ class JointNarrowing:
         unit = {k: designs[0] for designs in units.values() for k in designs}
         runlist = Runlist([unit[k] for k in keys])
         designs_of = [units[found[k][0].array] for k in runlist.order]
-        at = {k: {v.widths: v for v in cands} for k, cands in found.items()}
+        at = {k: {v.tunables: v for v in cands} for k, cands in found.items()}
         candidates = [
-            [v for v in found[k] if all(v.widths in at[m] for m in designs)]
+            [v for v in found[k] if all(v.tunables in at[m] for m in designs)]
             for k, designs in zip(runlist.order, designs_of)
         ]
         measured = [all(m in table.steps for m in designs) for designs in designs_of]
@@ -572,11 +564,11 @@ class JointNarrowing:
 
         def member_cost(i: int, v: Variant, entries: int) -> float:
             return entries * table.load(v.key) + sum(
-                occurrences[m] * table.t_step(at[m][v.widths].key)
+                occurrences[m] * table.t_step(at[m][v.tunables].key)
                 for m in designs_of[i]
             )
 
-        # Alone, each design takes its cheapest width.
+        # Alone, each design takes its cheapest setting.
         alone: list[tuple[float, Variant, int]] = []
         for i, key in enumerate(runlist.order):
             e = runlist.entries(frozenset([key]))
@@ -621,7 +613,7 @@ class JointNarrowing:
             for i, v in zip(p.members, p.combo):
                 picked[i] = v
         chosen: dict[str, Variant] = {
-            k: at[k][picked[runlist.index[unit[k]]].widths] for k in found
+            k: at[k][picked[runlist.index[unit[k]]].tunables] for k in found
         }
         groups = tuple(
             tuple(runlist.order[i] for i in sorted(p.members)) for p in chosen_packs
@@ -652,7 +644,7 @@ class JointNarrowing:
         return sum(alone[i][0] for i in pack.members) - pack.cost
 
     def _candidates(self, op: Operator, dev) -> list[Variant]:
-        """The default width, then every other one measured exact."""
+        """The default setting, then every other one measured exact."""
         found = variants(op, dev)
         default = found[0]
         if default.key not in self.table.steps:

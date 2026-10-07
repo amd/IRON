@@ -27,6 +27,7 @@ from iron.common.graph.probe import (
     measure_graph,
     measure_steps,
     platform,
+    search,
 )
 from iron.common.image import Fusion
 from iron.lm.layers import SwiGLU
@@ -140,6 +141,27 @@ def test_measures_more_widths_than_one_batch_of_contexts(tmp_path):
         values={"length": 200, "valid_cols": 200},
     )
     assert len(costs) == len(found) and all(c.exact for c in costs.values())
+
+
+@pytest.mark.supported_devices("npu2")
+def test_descent_measures_every_line_through_the_default(tmp_path):
+    found = variants(
+        ElementwiseAdd(size=SIZE, tile_size=TILE), aie_utils.ensure_current_device()
+    )
+    default = dict(found[0].tunables)
+    costs = search(
+        CostTable(tmp_path / "costs.json"),
+        found,
+        Timing(rounds=1, calls=5),
+        exhaustive=1,
+    )
+    lines = {
+        v.key
+        for v in found
+        if sum(dict(v.tunables)[n] != x for n, x in default.items()) <= 1
+    }
+    assert lines <= costs.keys() <= {v.key for v in found}
+    assert all(c.exact for c in costs.values()), costs
 
 
 @pytest.mark.supported_devices("npu2")

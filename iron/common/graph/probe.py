@@ -8,9 +8,11 @@ A full-ELF run costs ``D0`` (dispatch), a configure per device entered
 entries are odd, and each step's ``t_step``.
 
 - ``measure_steps``: one run against ``repeats`` runs of a design gives
-  ``t_step`` and ``alone = D0 + base + load + R``. Any other width is a
-  candidate only if its output is bit-identical to the default's. A design
-  the ``CostCache`` holds is taken from it, not run.
+  ``t_step`` and ``alone = D0 + base + load + R``. Any other setting of its
+  tunables is a candidate only if its output is bit-identical to the
+  default's. A design the ``CostCache`` holds is taken from it, not run.
+- ``search``: which of a design's settings ``measure_steps`` runs: all of
+  them, or coordinate descent where there are more than ``EXHAUSTIVE``.
 - ``calibrate``, on measured designs A, B: ``A B A B ...`` against
   ``A A ... B B ...`` gives ``(E(A) + E(B)) / 2``; the grouped run gives
   ``D0``, the ``alone`` figures ``R``, and ``[A, B]`` packed gives ``base`` as
@@ -368,6 +370,73 @@ def measure_steps(
     return {key: table.steps[key] for key in measured}
 
 
+# Past this many settings, a design's tunables are searched one at a time.
+EXHAUSTIVE = 32
+
+
+def search(
+    table: CostTable,
+    found: Sequence[Variant],
+    timing: Timing = Timing(),
+    repeats: int = 9,
+    values: Mapping[str, int] | None = None,
+    inputs: Mapping[str, np.ndarray] | None = None,
+    cache: CostCache | None = None,
+    remeasure: bool = False,
+    twins: Sequence[Variant | None] = (),
+    exhaustive: int = EXHAUSTIVE,
+) -> dict[str, StepCost]:
+    """Measure the settings of ``found`` (the default first) into ``table``:
+    every one when there are at most ``exhaustive``, else by coordinate
+    descent, each tunable's line through the fastest exact setting so far,
+    from the default until a pass over the tunables moves it no further.
+    The other arguments are ``measure_steps``'.
+
+    Returns:
+        The settings run on the device, by key.
+    """
+    if len(found) <= exhaustive:
+        return measure_steps(
+            table, found, timing, repeats, values, inputs, cache, remeasure, twins
+        )
+    twin_of = dict(zip((v.key for v in found), twins or [None] * len(found)))
+    default = found[0]
+    best = default
+    ran: dict[str, StepCost] = {}
+    moved = True
+    while moved:
+        moved = False
+        for i in range(len(default.tunables)):
+            line = [
+                v
+                for v in found
+                if all(
+                    a == b
+                    for j, (a, b) in enumerate(zip(v.tunables, best.tunables))
+                    if j != i
+                )
+            ]
+            batch = [default] + [v for v in line if v is not default]
+            ran |= measure_steps(
+                table,
+                batch,
+                timing,
+                repeats,
+                values,
+                inputs,
+                cache,
+                remeasure and not ran,
+                [twin_of[v.key] for v in batch] if twins else (),
+            )
+            fastest = min(
+                (v for v in line if table.steps[v.key].exact),
+                key=lambda v: table.steps[v.key].t_step_us,
+            )
+            if table.steps[fastest.key].t_step_us < table.steps[best.key].t_step_us:
+                best, moved = fastest, True
+    return ran
+
+
 def calibrate(
     table: CostTable,
     a: Operator,
@@ -452,14 +521,15 @@ def measure_graph(
     cache: CostCache | None = None,
 ) -> list[str]:
     """Measure every design of ``calls``' graphs into ``table``, saved as it
-    goes: each at every width ``variants`` gives, in the first call that
-    runs it, then the configure cost between each of ``pairs``, the first
-    designs of those operator classes at their narrowest. Designs and
+    goes: each at the settings ``variants`` gives that ``search`` runs, in
+    the first call that runs it, then the configure cost between each of
+    ``pairs``, the first designs of those operator classes at their
+    narrowest measured width. Designs and
     calibrations already in the table or ``cache`` (this NPU's
     ``cost_cache()`` if not given) are kept unless ``remeasure``; those the
     graphs no longer have are dropped from the table. A design a folded
     call has of its own is measured beside the one whose step it took, at
-    each width both have (``measure_steps``' `twins`); the call it is folded
+    each setting both have (``measure_steps``' `twins`); the call it is folded
     from comes first.
 
     Returns:
@@ -498,10 +568,10 @@ def measure_graph(
         values = call.op_values(op)
         twins = []
         if twin_of.get(key, key) != key:
-            widths = {v.widths: v for v in found[twin_of[key]]}
-            twins = [widths.get(v.widths) for v in found[key]]
+            settings = {v.tunables: v for v in found[twin_of[key]]}
+            twins = [settings.get(v.tunables) for v in found[key]]
         start = time.time()
-        costs = measure_steps(
+        costs = search(
             table,
             found[key],
             timing,
@@ -519,16 +589,28 @@ def measure_graph(
             + (f" beside {twin_of[key]}" if twins else "")
         )
         for v in found[key]:
+            if v.key not in table.steps:
+                continue
             c = table.steps[v.key]
             log(
-                f"    {dict(v.widths)}: t_step {c.t_step_us:8.2f} us  "
+                f"    {dict(v.tunables)}: t_step {c.t_step_us:8.2f} us  "
                 f"alone {c.alone_us:8.2f} us  exact {c.exact}"
                 + ("" if v.key in costs else "  (cached)")
             )
 
     by_class = {}
     for key, (op, _) in first.items():
-        by_class.setdefault(type(op).__name__, found[key][-1])
+        default = found[key][0]
+        fixed = {n: x for n, x in default.tunables if n not in default.resolved.widths}
+        narrowest = min(
+            (
+                v
+                for v in found[key]
+                if v.key in table.steps and fixed.items() <= dict(v.tunables).items()
+            ),
+            key=lambda v: v.mm2s + v.s2mm,
+        )
+        by_class.setdefault(type(op).__name__, narrowest)
     chosen = [(by_class[a], by_class[b]) for a, b in pairs]
     wanted = {f"{a.key}|{b.key}" for a, b in chosen}
     for k in [k for k in table.calibrations if k not in wanted]:
