@@ -107,9 +107,10 @@ def vision_tensors(tensors: dict) -> dict:
     }
 
 
-class Vision(iron.Graph):
-    """The vision tower and `embed_vision` over at most `rows[-1]` patches, a
-    version per entry of `rows`.
+class VisionTower(SimpleNamespace):
+    """The vision tower and `embed_vision` over at most `rows[-1]` patches,
+    called in a graph's body. It is a namespace, so the graph that holds it
+    names its weights by their path.
 
     A call takes an image's patches in pooling-window order: each soft
     token's `pool ** 2` patches are consecutive rows, the tokens row-major
@@ -126,11 +127,8 @@ class Vision(iron.Graph):
     Args:
         config: The tower's shape.
         weights: The tree `load_weights` gives over `layout(config)`.
-        rows: Each version's patch rows, whole `ROWS`-row blocks.
+        rows: The patch rows a call may take, whole `ROWS`-row blocks.
     """
-
-    # GEMM tiles narrow enough for N = 768 or 1280 to span every column.
-    profile = Path(__file__).with_name("profiles")
 
     def __init__(
         self, config: VisionConfig, weights: SimpleNamespace, rows=(1280, 2560)
@@ -175,7 +173,11 @@ class Vision(iron.Graph):
                 pool[j, j * window : (j + 1) * window] = 1
             self.pool[T] = pool
 
-    def body(self, pixels, px, py, angles, *, n: Scratchpad[np.int32]):
+    def __call__(self, pixels, px, py, angles, n):
+        """The `(tokens, text_dim)` soft tokens of `T` patch rows, `T` an
+        entry of `rows` and `tokens` `T // pool ** 2` rounded up to whole
+        `ROWS`; the first `n // pool ** 2` are the image's.
+        """
         c = self.config
         T = pixels.shape[0]
         x = AXPY(pixels, self.minus_one[:T], scalar_factor=2.0)
@@ -234,28 +236,15 @@ class Vision(iron.Graph):
 
     # -- on the host -----------------------------------------------------------
 
-    def shapes(self) -> list[dict]:
-        """Each version's input shapes, fewest rows first."""
+    def shapes(self, T: int) -> dict:
+        """The input shapes of a call over `T` patch rows."""
         c = self.config
-        return [
-            dict(
-                pixels=(T, 3 * c.patch**2),
-                px=(T, c.hidden),
-                py=(T, c.hidden),
-                angles=(T, c.head_dim),
-            )
-            for T in self.rows
-        ]
-
-    def load(self, tuner: JointNarrowing | None = None) -> "Vision":
-        """Compile every version before the first call, so the arena is made once.
-
-        Args:
-            tuner: Narrows and packs each version's designs by cost.
-        """
-        for shapes in self.shapes():
-            self.compile(coresident=tuner, **shapes)
-        return self
+        return dict(
+            pixels=(T, 3 * c.patch**2),
+            px=(T, c.hidden),
+            py=(T, c.hidden),
+            angles=(T, c.head_dim),
+        )
 
     def order(self, positions) -> np.ndarray:
         """The real patches of `positions` `(patches, 2)`, (x, y) with -1
@@ -300,8 +289,9 @@ class Vision(iron.Graph):
         if n > self.rows[-1]:
             raise ValueError(f"{n} patches do not fit {self.rows[-1]} rows")
         T = min(T for T in self.rows if T >= n)
-        shapes = next(s for s in self.shapes() if s["pixels"][0] == T)
-        out = {name: np.zeros(shape, bfloat16) for name, shape in shapes.items()}
+        out = {
+            name: np.zeros(shape, bfloat16) for name, shape in self.shapes(T).items()
+        }
         out["pixels"][:n] = np.asarray(pixel_values)[order]
         for name, rows in zip(
             ("px", "py", "angles"), self.gathered(np.asarray(positions)[order])
@@ -309,10 +299,48 @@ class Vision(iron.Graph):
             out[name][:n] = rows
         return out, n
 
+
+class Vision(iron.Graph):
+    """The vision tower as a graph of its own, a version per entry of `rows`.
+
+    Args:
+        config: The tower's shape.
+        weights: The tree `load_weights` gives over `layout(config)`.
+        rows: Each version's patch rows, whole `ROWS`-row blocks.
+    """
+
+    # GEMM tiles narrow enough for N = 768 or 1280 to span every column.
+    profile = Path(__file__).with_name("profiles")
+
+    def __init__(
+        self, config: VisionConfig, weights: SimpleNamespace, rows=(1280, 2560)
+    ):
+        self.config = config
+        self.vision = VisionTower(config, weights, rows)
+
+    def body(self, pixels, px, py, angles, *, n: Scratchpad[np.int32]):
+        return self.vision(pixels, px, py, angles, n)
+
+    # -- on the host -----------------------------------------------------------
+
+    def shapes(self) -> list[dict]:
+        """Each version's input shapes, fewest rows first."""
+        return [self.vision.shapes(T) for T in self.vision.rows]
+
+    def load(self, tuner: JointNarrowing | None = None) -> "Vision":
+        """Compile every version before the first call, so the arena is made once.
+
+        Args:
+            tuner: Narrows and packs each version's designs by cost.
+        """
+        for shapes in self.shapes():
+            self.compile(coresident=tuner, **shapes)
+        return self
+
     def embed(self, pixel_values, positions) -> np.ndarray:
         """The soft tokens of one image or video frame, `(tokens, text_dim)`
         float32, in the text model's space.
         """
-        inputs, n = self.inputs(pixel_values, positions)
+        inputs, n = self.vision.inputs(pixel_values, positions)
         tokens = self(*inputs.values(), n=n).numpy().reshape(-1, self.config.text_dim)
         return np.asarray(tokens[: n // self.config.pool**2], np.float32)
