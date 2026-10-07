@@ -21,7 +21,7 @@ from aie.iron import (
 )
 from aie.iron.device import NPU2, Tile
 from aie.iron.controlflow import range_
-from aie.helpers.taplib import TensorTiler2D, TensorAccessSequence, TensorAccessPattern
+from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.dialects.scf import if_, else_
 from aie.iron.kernels import eltwise, linalg, zero
 from aie.utils import set_current_device
@@ -274,9 +274,11 @@ def fused_mha(
     )
 
     # AIE-array data movement with object fifos
-    q_dims = None
+    q_tap = None
     if vectorized:
-        q_dims = [(B_q // r, r * d), (d // s, s), (r, d), (s, 1)]
+        q_tap = TensorAccessPattern(
+            (B_q, d), 0, [B_q // r, d // s, r, s], [r * d, s, d, 1]
+        )
 
     inQ = ObjectFifo(
         np.ndarray[(number_of_pipelines_join_distribute * B_q, d), np.dtype[dtype]],
@@ -286,7 +288,7 @@ def fused_mha(
         offsets=[B_q * d * i for i in range(number_of_pipelines_join_distribute)],
         obj_types=[q_ty] * number_of_pipelines_join_distribute,
         names=[f"memQ{i}" for i in range(number_of_pipelines_join_distribute)],
-        dims_to_stream=[q_dims] * number_of_pipelines_join_distribute,
+        to_stream=[q_tap] * number_of_pipelines_join_distribute,
         depths=[of_depth] * number_of_pipelines_join_distribute,
         tile=Tile(col=6, row=1),
     )  # Split between N pipelines
@@ -299,7 +301,7 @@ def fused_mha(
             offsets=[B_q * d * i for i in range(number_of_pipelines_join_distribute)],
             obj_types=[q_ty] * number_of_pipelines_join_distribute,
             names=[f"memQ2{i}" for i in range(number_of_pipelines_join_distribute)],
-            dims_to_stream=[q_dims] * number_of_pipelines_join_distribute,
+            to_stream=[q_tap] * number_of_pipelines_join_distribute,
             depths=[of_depth] * number_of_pipelines_join_distribute,
             tile=Tile(col=7, row=1),
         )  # Split between N pipelines
@@ -308,9 +310,11 @@ def fused_mha(
     # I think the Sequential Placer will fail if we do a split/join with more than 6 I/Os cuz it tries to place them all on the same tile.
 
     # K is stored in column-major order
-    k_dims = None
+    k_tap = None
     if vectorized:
-        k_dims = [(B_kv // t, t * d), (d // s, s), (t, d), (s, 1)]
+        k_tap = TensorAccessPattern(
+            (d, B_kv), 0, [B_kv // t, d // s, t, s], [t * d, s, d, 1]
+        )
     inK = ObjectFifo(
         k_ty,
         name="inK",
@@ -318,14 +322,19 @@ def fused_mha(
     )
     memK = inK.cons().forward(
         name="memK",
-        dims_to_stream=k_dims,
+        to_stream=k_tap,
         tile=Tile(col=3, row=1),
         depth=of_depth,
     )  # Broadcast, give this handle to N pipelines
 
-    v_dims = None
+    v_tap = None
     if vectorized:
-        v_dims = [(B_kv // s, s * B_kv), (B_kv // t, t), (s, B_kv), (t, 1)]
+        v_tap = TensorAccessPattern(
+            (d, B_kv),
+            0,
+            [B_kv // s, B_kv // t, s, t],
+            [s * B_kv, t, B_kv, 1],
+        )
 
     inV = ObjectFifo(
         k_ty,
@@ -334,14 +343,19 @@ def fused_mha(
     )
     memV = inV.cons().forward(
         name="memV",
-        dims_to_stream=v_dims,
+        to_stream=v_tap,
         tile=Tile(col=4, row=1),
         depth=of_depth,
     )  # Broadcast, give this handle to N pipelines
 
-    a_dims = None
+    a_tap = None
     if vectorized:
-        a_dims = [(B_q // r, r * B_kv), (r, t), (B_kv // t, r * t), (t, 1)]
+        a_tap = TensorAccessPattern(
+            (B_q, B_kv),
+            0,
+            [B_q // r, r, B_kv // t, t],
+            [r * B_kv, t, r * t, 1],
+        )
     memA = []
     outA = []
     for i in range(number_of_pipelines):
@@ -351,7 +365,7 @@ def fused_mha(
             .cons()
             .forward(
                 name=f"outA{i}",
-                dims_to_stream=a_dims,
+                to_stream=a_tap,
                 depth=of_depth,
                 # tile=Tile(col=i, row=1))
             )
@@ -366,7 +380,7 @@ def fused_mha(
             .cons()
             .forward(
                 name=f"outP{i}",
-                dims_to_stream=q_dims,
+                to_stream=q_tap,
                 depth=of_depth,
                 # tile=Tile(col=i, row=1)
             )
@@ -379,13 +393,18 @@ def fused_mha(
             ObjectFifo(s_ty, depth=of_depth, name=f"scaleOF{i}")
         )  # Local to 1 pipeline
 
-    o_dims = None
+    o_tap = None
     if vectorized:
-        o_dims = [(B_q // r, r * B_kv), (r, t), (B_kv // t, r * t), (t, 1)]
+        o_tap = TensorAccessPattern(
+            (B_q, B_kv),
+            0,
+            [B_q // r, r, B_kv // t, t],
+            [r * B_kv, t, r * t, 1],
+        )
     memO = ObjectFifo(
         np.ndarray[(number_of_pipelines_join_distribute * B_q, d), np.dtype[dtype]],
         name="memO",
-        dims_to_stream=o_dims,
+        to_stream=o_tap,
     )
     outO = memO.prod().join(
         offsets=[B_q * d * i for i in range(number_of_pipelines_join_distribute)],
@@ -398,7 +417,7 @@ def fused_mha(
         memO2 = ObjectFifo(
             np.ndarray[(number_of_pipelines_join_distribute * B_q, d), np.dtype[dtype]],
             name="memO2",
-            dims_to_stream=o_dims,
+            to_stream=o_tap,
         )
         outO += memO2.prod().join(
             offsets=[B_q * d * i for i in range(number_of_pipelines_join_distribute)],
@@ -724,23 +743,26 @@ def fused_mha(
             )
         )
 
-    # Define tensor access patterns for inputs/outputs
-    # A and B are tiled across M and N respectively, while C is tiled across M and N
-    Q_tiles = TensorTiler2D.group_tiler(
-        (heads * S_q_pad, d), (number_of_pipelines_join_distribute * B_q, d), (1, 1)
-    )
+    # Access patterns for inputs/outputs: one per (tile_rows, cols) block down
+    # the tensor.
+    def row_tiles(rows, cols, tile_rows):
+        return [
+            TensorAccessPattern(
+                (rows, cols),
+                i * tile_rows * cols,
+                [1, 1, tile_rows, cols],
+                [0, 0, cols, 1],
+            )
+            for i in range(rows // tile_rows)
+        ]
 
-    K_tiles = TensorTiler2D.group_tiler(
-        (num_KV_heads * S_kv_pad, d), (S_kv_pad, d), (1, 1)
-    )
+    Q_tiles = row_tiles(heads * S_q_pad, d, number_of_pipelines_join_distribute * B_q)
 
-    V_tiles = TensorTiler2D.group_tiler(
-        (num_KV_heads * S_kv_pad, d), (S_kv_pad, d), (1, 1)
-    )
+    K_tiles = row_tiles(num_KV_heads * S_kv_pad, d, S_kv_pad)
 
-    O_tiles = TensorTiler2D.group_tiler(
-        (heads * S_q_pad, d), (number_of_pipelines_join_distribute * B_q, d), (1, 1)
-    )
+    V_tiles = row_tiles(num_KV_heads * S_kv_pad, d, S_kv_pad)
+
+    O_tiles = row_tiles(heads * S_q_pad, d, number_of_pipelines_join_distribute * B_q)
 
     def print_tap_seq_info(tap_seq, name):
         for idx, tap in enumerate(tap_seq):
@@ -751,32 +773,33 @@ def fused_mha(
 
     def legalize_tap(tap: TensorAccessPattern, max_dim_size: int):
 
-        sizes = copy.deepcopy(tap._sizes)
+        sizes = list(tap.sizes)
 
         # Skip is no need to legalize
         if all(size <= max_dim_size for size in sizes):
             return tap
 
         # Check that the transfer is continuous
-        for idx, stride in enumerate(tap._strides[:-1]):
-            if stride != 0 and stride != tap._sizes[idx + 1]:
+        for idx, stride in enumerate(tap.strides[:-1]):
+            if stride != 0 and stride != tap.sizes[idx + 1]:
                 raise ValueError(f"Cannot legalize DMA non-contiguous DMA transfer")
-        assert tap._strides[-1] == 1, f"Cannot legalize DMA non-contiguous DMA transfer"
+        assert tap.strides[-1] == 1, f"Cannot legalize DMA non-contiguous DMA transfer"
 
-        tap._sizes = [1, 1, 1, math.prod(sizes)]
-        tap._strides = [0, 0, 0, 1]
+        return TensorAccessPattern(
+            tap.tensor_dims,
+            tap.offset,
+            [1, 1, 1, math.prod(sizes)],
+            [0, 0, 0, 1],
+        )
 
-        return tap
-
-    def legalize_tas(tas: TensorAccessSequence):
+    def legalize_taps(taps: list[TensorAccessPattern]):
 
         max_dim_size = 1023  # Max DMA dimension size for memTile DMA on NPU2
 
-        for tap in tas:
-            tap = legalize_tap(tap, max_dim_size)
+        return [legalize_tap(tap, max_dim_size) for tap in taps]
 
-    legalize_tas(K_tiles)
-    legalize_tas(V_tiles)
+    K_tiles = legalize_taps(K_tiles)
+    V_tiles = legalize_taps(V_tiles)
 
     if verbose:
         print(f"DMA Transfer Configuration: DRAM <-> Mem tile")

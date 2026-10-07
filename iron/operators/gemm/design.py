@@ -19,7 +19,7 @@ from aie.iron import (
     str_to_dtype,
 )
 from aie.iron.device import NPU1Col1, NPU1Col2, NPU1, NPU2, Tile
-from aie.helpers.taplib import TensorTiler2D, TensorAccessPattern
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron.controlflow import range_
 from aie.utils import set_current_device
 from aie.iron.kernels import datamovement, linalg, zero
@@ -345,13 +345,13 @@ def my_matmul(
         start_row = i * n_A_tiles_per_shim
         stop_row = start_row + n_A_tiles_per_shim
         of_offsets = [m * k * j for j in range(stop_row - start_row)]
-        dims_to_stream = [
-            [
-                (m // r, r * k),
-                (k // s, s),
-                (r, k),
-                (s, 1),
-            ]
+        a_to_stream = [
+            TensorAccessPattern(
+                (m, k),
+                0,
+                [m // r, k // s, r, s],
+                [r * k, s, k, 1],
+            )
         ] * (stop_row - start_row)
         a_tmp_fifos = (
             A_l3l2_fifos[i]
@@ -360,7 +360,7 @@ def my_matmul(
                 of_offsets,
                 obj_types=[A_l1_ty] * (stop_row - start_row),
                 names=[f"A_L2L1_{row}" for row in range(start_row, stop_row)],
-                dims_to_stream=dims_to_stream,
+                to_stream=a_to_stream,
                 tile=Tile(
                     2 * i if n_aie_cols == 8 else i, 1
                 ),  # alternate columns in full 4x8 NPU2 case
@@ -374,30 +374,38 @@ def my_matmul(
     for col in range(n_aie_cols):
         B_l3l2_fifos[col] = ObjectFifo(B_l2_ty, name=f"B_L3L2_{col}", depth=fifo_depth)
         if b_col_maj:
-            dims_to_stream = [(n // t, t * k), (k // s, s), (t, k), (s, 1)]
+            b_to_stream = TensorAccessPattern(
+                (k, n), 0, [n // t, k // s, t, s], [t * k, s, k, 1]
+            )
         else:
-            dims_to_stream = [(k // s, s * n), (n // t, t), (s, n), (t, 1)]
+            b_to_stream = TensorAccessPattern(
+                (k, n), 0, [k // s, n // t, s, t], [s * n, t, n, 1]
+            )
         B_l2l1_fifos[col] = (
             B_l3l2_fifos[col]
             .cons()
             .forward(
                 obj_type=B_l1_ty,
                 name=f"B_L2L1_{col}",
-                dims_to_stream=dims_to_stream,
+                to_stream=b_to_stream,
                 tile=Tile(col, 1),
             )
         )
 
         # Output C
         if c_col_maj:
-            dims_to_stream = [(n // t, t * m), (t, r), (m // r, r * t), (r, 1)]
+            c_to_stream = TensorAccessPattern(
+                (m, n), 0, [n // t, t, m // r, r], [t * m, r, r * t, 1]
+            )
         else:
-            dims_to_stream = [(m // r, r * n), (r, t), (n // t, r * t), (t, 1)]
+            c_to_stream = TensorAccessPattern(
+                (m, n), 0, [m // r, r, n // t, t], [r * n, t, r * t, 1]
+            )
         C_l2l3_fifos[col] = ObjectFifo(
             C_l2_ty,
             name=f"C_L2L3_{col}",
             depth=fifo_depth,
-            dims_to_stream=dims_to_stream,
+            to_stream=c_to_stream,
         )
         of_offsets = [m * n * i for i in range(n_aie_rows)]
 
@@ -493,36 +501,42 @@ def my_matmul(
     # tb = transfer block; block of transfers before sync call
     tb_max_n_rows = 4 if not c_col_maj else 2
 
-    # Define tensor access patterns (tiling) for A, B, and C
-    A_tiles = TensorTiler2D.group_tiler(
-        (M, K),  # Size of A matrix
-        (mem_tile_m_A, k),  # Size of A (smallest) tile
-        (1, K_div_k),  # Size of "group" of tiles
-        # Repeat data so can distribute across whole column
-        pattern_repeat=n_c_col_tiles_per_core,
-        prune_step=False,
-    )
+    # Access patterns (tiling) for A and B. One entry per shim transfer, in the
+    # order the shims index them.
+    #
+    # A: one (mem_tile_m_A, k) sub-tile per column, walking K, with the whole
+    # pattern repeated for each of the column's C tiles. The repeat is the
+    # leading dimension, and takes stride 0.
+    A_tiles = [
+        TensorAccessPattern(
+            (M, K),
+            row * mem_tile_m_A * K,
+            [n_c_col_tiles_per_core, K_div_k, mem_tile_m_A, k],
+            [0, k, K, 1],
+        )
+        for row in range(M // mem_tile_m_A)
+    ]
+    # B: each column starts at its own tile and takes every n_aie_cols-th one.
     if b_col_maj:
-        B_tiles = TensorTiler2D.step_tiler(
-            (N, K),  # Size of B matrix
-            (n, k),  # Size of B tile
-            # Number of tiles per transfer in each dimension (whole col, partial row)
-            tile_group_repeats=(n_c_col_tiles_per_core, K_div_k),
-            # Contiguous tile group in col, but send every n_aie_cols-th tile in the row
-            tile_group_steps=(n_aie_cols, 1),
-            prune_step=False,
-        )
+        B_tiles = [
+            TensorAccessPattern(
+                (N, K),
+                col * n * K,
+                [n_c_col_tiles_per_core, K_div_k, n, k],
+                [n * n_aie_cols * K, k, K, 1],
+            )
+            for col in range(n_aie_cols)
+        ]
     else:
-        B_tiles = TensorTiler2D.step_tiler(
-            (K, N),  # Size of B matrix
-            (k, n),  # Size of B tile
-            # Number of tiles per transfer in each dimension (whole col, partial row)
-            tile_group_repeats=(K_div_k, n_c_col_tiles_per_core),
-            # Contiguous tile group in col, but send every n_aie_cols-th tile in the row
-            tile_group_steps=(1, n_aie_cols),
-            tile_group_col_major=True,  # Send all tiles in column before moving on to next column
-            prune_step=False,
-        )
+        B_tiles = [
+            TensorAccessPattern(
+                (K, N),
+                col * n,
+                [n_c_col_tiles_per_core, K_div_k, k, n],
+                [n * n_aie_cols, k * N, N, 1],
+            )
+            for col in range(n_aie_cols)
+        ]
 
     # Runtime operations to move data to/from the AIE-array
     def sequence(A, B, C, A_prods, B_prods, C_conses):
