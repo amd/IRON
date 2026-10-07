@@ -233,6 +233,7 @@ class Transpose(Operator):
             batches = counts[0]
             col_tiles = counts[1]
             chan_tiles = counts[2]
+            barrier.release_with_value(1)
             # The kernel only ever sees s*s sub-tiles, so it is batch-agnostic.
             for _ in range_(batches):
                 for _ in range_(col_tiles):

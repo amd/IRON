@@ -479,6 +479,8 @@ class GEMM(Operator):
             barrier.wait_for_value(1)
             rtp_K_div_k = my_rtp[0]
             rtp_n_tiles_per_core = my_rtp[1]
+            n_compute = n_valid.read() if bounded else None
+            barrier.release_with_value(1)
 
             def tile(compute: bool):
                 nonlocal elem_out_internal
@@ -502,8 +504,6 @@ class GEMM(Operator):
                     out_c.release(1)
 
             if bounded:
-                assert n_valid is not None
-                n_compute = n_valid.read()
                 for _ in range_(n_compute):
                     tile(compute=True)
                 for _ in range_(rtp_n_tiles_per_core - n_compute):

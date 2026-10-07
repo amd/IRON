@@ -124,6 +124,7 @@ class Clamp(UnaryElementwise):
             barrier.wait_for_value(1)
             n = count[0].read() if dynamic else rtp[words.index("count")]
             low, high = rtp[words.index("low_bits")], rtp[words.index("high_bits")]
+            barrier.release_with_value(1)
             for _ in range_(n):
                 x, y = of_in.acquire(1), of_out.acquire(1)
                 kernel_fn(x, y, self.tile_size, low, high)

@@ -114,6 +114,7 @@ class DepthwiseConv1d(Operator):
         def core_fn(of_in, of_w, of_out, conv_fn, zero, lo, hi, rtp, barrier):
             barrier.wait_for_value(1)
             n = rtp[0]
+            barrier.release_with_value(1)
             w = of_w.acquire(TAPS)
             taps = [w[j] for j in range(TAPS)]
             if zero is not None:

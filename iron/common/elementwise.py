@@ -233,6 +233,7 @@ class Elementwise(Operator):
             kernel_fn, count, barrier = args[-3:]
             barrier.wait_for_value(1)
             n = count.read() if dynamic else count[0]
+            barrier.release_with_value(1)
             for _ in range_(n):
                 elements = [f.acquire(1) for f in fifos_in + fifos_out]
                 kernel_fn(

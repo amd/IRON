@@ -139,6 +139,7 @@ class RMSNorm(Rowwise):
         def core_norm(of_in, of_out, rms, count, barrier):
             barrier.wait_for_value(1)
             n = count.read() if dynamic else count[0]
+            barrier.release_with_value(1)
             for _ in range_(n):
                 elem_in = of_in.acquire(1)
                 elem_out = of_out.acquire(1)
@@ -149,6 +150,7 @@ class RMSNorm(Rowwise):
         def core_mul(of_in, of_w, of_out, mul, count, barrier):
             barrier.wait_for_value(1)
             n = count.read() if dynamic else count[0]
+            barrier.release_with_value(1)
             elem_w = of_w.acquire(1)
             for _ in range_(n):
                 elem_in = of_in.acquire(1)

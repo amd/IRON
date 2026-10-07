@@ -159,6 +159,7 @@ class GEMV(Operator):
         np.int32,
         derive=lambda op: ceildiv(op.valid, op.num_aie_columns * op.tile_size_output),
     )
+    batches = Value(np.int32, derive=lambda op: op.num_batches)
 
     def extent_unit(self, buffer: str) -> int | None:
         # A column takes A in output tiles (several input tiles each) so
@@ -318,27 +319,29 @@ class GEMV(Operator):
             ObjectFifo(self.C.tile, name=f"C_L1L3_{i}", depth=self.C.depth)
             for i in range(cols)
         ]
-        # The trip count: an RTP written once per build, or a scratchpad
-        # word each core reads per call when a graph bounds M.
+        # Per column: the trip count (unless a graph bounds M, when each core
+        # reads it from the scratchpad) and the batches of a call.
         dynamic = self.uses_value("tiles") and target.image == "elf"
-        tiles = (
-            [self.tiles.param] * cols
-            if dynamic
-            else [
-                Buffer(
-                    np.ndarray[(1,), np.dtype[np.int32]],
-                    name=f"tiles_{i}",
-                    use_write_rtp=True,
-                )
-                for i in range(cols)
-            ]
-        )
+        rtps = [
+            Buffer(
+                np.ndarray[(2,), np.dtype[np.int32]],
+                name=f"rtp_{i}",
+                use_write_rtp=True,
+            )
+            for i in range(cols)
+        ]
         barriers = [WorkerRuntimeBarrier() for _ in range(cols)]
 
-        def core_body(A_fifo, B_fifo, C_fifo, matvec, tiles, barrier, gelu_kernel=None):
+        def core_body(A_fifo, B_fifo, C_fifo, matvec, rtp, barrier, *rest):
+            rest = iter(rest)
             barrier.wait_for_value(1)
-            n = tiles.read() if dynamic else tiles[0]
-            for _ in range_(0xFFFFFFFF):  # batch dim handled as part of this loop
+            n = next(rest).read() if dynamic else rtp[0]
+            batches = rtp[1]
+            # The wait leaves the barrier set: release it, or a design sharing
+            # this array runs on these values.
+            barrier.release_with_value(1)
+            gelu_kernel = next(rest, None)
+            for _ in range_(batches):
                 b = B_fifo.acquire(1)
                 # Each column produces tiles output tiles of tile_size_output
                 # rows per batch, tile_size_input rows per kernel call.
@@ -363,8 +366,9 @@ class GEMV(Operator):
                     B_fifos[i].cons(),
                     C_fifos[i].prod(),
                     matvec,
-                    tiles[i],
+                    rtps[i],
                     barriers[i],
+                    *([self.tiles.param] if dynamic else []),
                 ]
                 + ([gelu_kernel] if self.epilogue == "gelu" else []),
             )
@@ -375,7 +379,8 @@ class GEMV(Operator):
             self.B.lane(i).bind(B_fifos[i].prod())
             self.C.lane(i).bind(C_fifos[i].cons())
         if not dynamic:
-            self.tiles.bind(tiles)
+            self.tiles.bind(rtps, 0)
+        self.batches.bind(rtps, 1)
         return workers + barriers
 
     def sequence(self, rt):
