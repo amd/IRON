@@ -15,6 +15,8 @@ The Makefile pins the FastFlowLM fork to
 [`afbbd18d`](https://github.com/andrej/FastFlowLM/commit/afbbd18d3fb73c71b1eb3b3ea655da0ee7396faf),
 which contains the IRON backend and the EmbeddingGemma 2 model entry.
 
+> [Changes to FastFlowLM to add the IRON backend and EmbeddingGemma 2 model](https://github.com/ROCm/FastFlowLM/compare/8d6768dab2fd8616ea3b814f611ff01a0758681f...andrej:FastFlowLM:iron-backend)
+
 ## Prerequisites
 
 Use an NPU2 machine with XRT and the IRON environment installed as described in
