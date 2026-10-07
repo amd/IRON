@@ -65,9 +65,8 @@ class Multimodal(EmbeddingGemma):
         merge=None,
         mel=None,
         pixels=None,
-        px=None,
-        py=None,
-        angles=None,
+        xy=None,
+        position_ids=None,
         *,
         n: Scratchpad[np.int32],
         n_audio: Scratchpad[np.int32],
@@ -83,7 +82,7 @@ class Multimodal(EmbeddingGemma):
             a = self.audio(mel, n_audio)
             Copy(a, self.merged[self.audio_at : self.audio_at + a.shape[0]])
         if pixels is not None:
-            v = self.vision(pixels, px, py, angles, n_patches)
+            v = self.vision(pixels, xy, position_ids, n_patches)
             Copy(v, self.merged[self.vision_at : self.vision_at + v.shape[0]])
         return self.encoder(Copy(self.merged[merge]), n)
 
@@ -116,7 +115,7 @@ class Multimodal(EmbeddingGemma):
         tokens = np.asarray(tokens)
         ids, n = self.inputs(tokens)
         values = dict(n=n, n_audio=0, n_patches=0)
-        mel, picture = None, (None,) * 4
+        mel, picture = None, (None,) * 3
         soft = {c.audio_token: (0, 0), c.image_token: (0, 0)}
         if audio is not None:
             mel, values["n_audio"] = self.audio.inputs(*audio)

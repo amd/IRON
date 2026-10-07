@@ -118,8 +118,11 @@ class VisionTower(SimpleNamespace):
     second, is one rotation of halves: a permutation within a head changes
     neither its norm nor a query's product with a key.
 
-    The rows a call looks up by patch position (the position embeddings and
-    the RoPE angles) are gathered on the host, in `gathered`.
+    The rows a call looks up by patch position are gathered on the NPU: the
+    RoPE angles by `xy`, each patch's x and y side by side, so a patch's row
+    is x's angles then y's; the position embeddings by `position_ids` from
+    x's table and y's as one, every patch's x, then every patch's y plus
+    `positions`. Padding looks up each table's last row, zero.
 
     Args:
         config: The tower's shape.
@@ -136,7 +139,9 @@ class VisionTower(SimpleNamespace):
         self.config = config
         self.rows = sorted(rows)
         self.patch = weights.patch
-        self.position = weights.position
+        position = np.zeros((2 * c.positions + 1, c.hidden), bfloat16)
+        position[:-1] = weights.position.reshape(-1, c.hidden)
+        self.position = iron.weight(position)
         self.projection = weights.projection
         half = c.head_dim // 2
         quarter = np.arange(half // 2)
@@ -157,7 +162,9 @@ class VisionTower(SimpleNamespace):
             )
             for w in weights.layers
         ]
-        self.angles = rope_angles(half, c.positions, c.rope_base).astype(bfloat16)
+        angles = np.zeros((c.positions + 1, half), bfloat16)
+        angles[:-1] = rope_angles(half, c.positions, c.rope_base)
+        self.angles = iron.weight(angles)
         self.minus_one = np.full((self.rows[-1], c.hidden), -1, bfloat16)
         # Soft token j sums rows j * pool ** 2 onwards; rows of padded tokens
         # are padding's.
@@ -170,7 +177,7 @@ class VisionTower(SimpleNamespace):
                 pool[j, j * window : (j + 1) * window] = 1
             self.pool[T] = pool
 
-    def __call__(self, pixels, px, py, angles, n):
+    def __call__(self, pixels, xy, position_ids, n):
         """The `(tokens, text_dim)` soft tokens of `T` patch rows, `T` an
         entry of `rows` and `tokens` `T // pool ** 2` rounded up to whole
         `ROWS`; the first `n // pool ** 2` are the image's.
@@ -179,7 +186,9 @@ class VisionTower(SimpleNamespace):
         T = pixels.shape[0]
         x = AXPY(pixels, self.minus_one[:T], scalar_factor=2.0)
         h = GEMM(x, self.patch, b_col_maj=True, **ACCURATE)
-        h = ElementwiseAdd(ElementwiseAdd(h, px), py)
+        position = Copy(self.position[position_ids])
+        h = ElementwiseAdd(ElementwiseAdd(h, position[:T]), position[T:])
+        angles = Copy(self.angles[xy]).reshape(T, c.head_dim)
         for w in self.layers:
             h = self.layer(w, h, angles, n)
         pooled = GEMM(self.pool[T], h, **ACCURATE)
@@ -238,9 +247,8 @@ class VisionTower(SimpleNamespace):
         c = self.config
         return dict(
             pixels=(T, 3 * c.patch**2),
-            px=(T, c.hidden),
-            py=(T, c.hidden),
-            angles=(T, c.head_dim),
+            xy=((2 * T,), np.int32),
+            position_ids=((2 * T,), np.int32),
         )
 
     def order(self, positions) -> np.ndarray:
@@ -262,16 +270,6 @@ class VisionTower(SimpleNamespace):
         token = x // k + width // k * (y // k)
         return real[np.lexsort((x % k, y % k, token))]
 
-    def gathered(self, positions):
-        """The rows the patches at `positions` (in the order a call takes
-        them) look up: their x and y position embeddings and their RoPE
-        angles, x's then y's. The one place a call's lookups run on the
-        host; an on-NPU gather by per-call indices replaces it.
-        """
-        x, y = positions.T
-        angles = np.concatenate([self.angles[x], self.angles[y]], axis=-1)
-        return self.position[0][x], self.position[1][y], angles
-
     def inputs(self, pixel_values, positions) -> tuple[dict, int]:
         """A call's inputs and `n` for the processor's `pixel_values`
         `(patches, 3 * patch ** 2)` and `positions` `(patches, 2)`, padded to
@@ -286,15 +284,15 @@ class VisionTower(SimpleNamespace):
         if n > self.rows[-1]:
             raise ValueError(f"{n} patches do not fit {self.rows[-1]} rows")
         T = min(T for T in self.rows if T >= n)
-        out = {
-            name: np.zeros(shape, bfloat16) for name, shape in self.shapes(T).items()
-        }
-        out["pixels"][:n] = np.asarray(pixel_values)[order]
-        for name, rows in zip(
-            ("px", "py", "angles"), self.gathered(np.asarray(positions)[order])
-        ):
-            out[name][:n] = rows
-        return out, n
+        P = c.positions
+        pixels = np.zeros(self.shapes(T)["pixels"], bfloat16)
+        pixels[:n] = np.asarray(pixel_values)[order]
+        x, y = np.asarray(positions)[order].T
+        xy = np.full(2 * T, P, np.int32)
+        xy.reshape(T, 2)[:n] = np.stack([x, y], axis=-1)
+        position_ids = np.full(2 * T, 2 * P, np.int32)
+        position_ids[:n], position_ids[T : T + n] = x, P + y
+        return dict(pixels=pixels, xy=xy, position_ids=position_ids), n
 
 
 class Vision(iron.Graph):
@@ -315,8 +313,8 @@ class Vision(iron.Graph):
         self.config = config
         self.vision = VisionTower(config, weights, rows)
 
-    def body(self, pixels, px, py, angles, *, n: Scratchpad[np.int32]):
-        return self.vision(pixels, px, py, angles, n)
+    def body(self, pixels, xy, position_ids, *, n: Scratchpad[np.int32]):
+        return self.vision(pixels, xy, position_ids, n)
 
     # -- on the host -----------------------------------------------------------
 
