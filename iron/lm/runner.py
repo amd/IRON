@@ -64,8 +64,8 @@ class Runner:
         self, cost_table: Path | None = None, boundaries: str | None = None
     ) -> CausalLM:
         """The model compiled and loaded, weights uploaded. With a
-        ``cost_table`` (``tune``) its decode step's designs are narrowed
-        and packed by it; ``boundaries`` are its decode step's
+        ``cost_table`` (``tune``) its decode step's designs are folded,
+        narrowed and packed by it; ``boundaries`` are its decode step's
         (``CausalLM.load``).
         """
         model = self.model(self.config, self.weights)
@@ -138,8 +138,8 @@ def main(runner: type[Runner], description: str):
     parser.add_argument(
         "--cost-table",
         type=Path,
-        help="narrow and pack the decode step's designs by this measured cost "
-        "table (iron.lm.tune); default: as the profile gives them",
+        help="fold, narrow and pack the decode step's designs by this measured "
+        "cost table (iron.lm.tune); default: as the profile gives them",
     )
     parser.add_argument(
         "--each-step",

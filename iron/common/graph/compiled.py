@@ -329,9 +329,11 @@ class Graph:
             feeds: The version a full ELF's Emit starts; by default itself
                 when it takes no tensor.
             coresident: Packs designs into shared configurations; a
-                ``JointNarrowing`` narrows them to fit first.
-            fold: Fold each step its producer can apply in its own cores
-                into the producer (``iron.common.graph.fold``).
+                ``JointNarrowing`` folds steps and narrows designs where its
+                cost table says they gain, then packs them.
+            fold: Fold every step its producer can apply in its own cores
+                into the producer (``iron.common.graph.fold``), whatever it
+                costs.
             **shapes: Each input's shape, or ``(shape, dtype)``.
         """
         if dev is not None:
@@ -340,12 +342,15 @@ class Graph:
         if fold:
             traced, count = folded(traced, aie_utils.ensure_current_device())
             if verbose:
-                print(f"{self.name}: {count} step(s) folded into their producers")
+                print(
+                    f"{self.name}: {count.total()} step(s) folded into their producers"
+                )
         tuning = None
         groups: AdjacentPacking | list[list[Operator]] | None
         if isinstance(coresident, JointNarrowing):
-            tuning = coresident.tune(traced, aie_utils.ensure_current_device())
-            traced, groups = tuning.apply(traced)
+            current = aie_utils.ensure_current_device()
+            tuning = coresident.tune(traced, current)
+            traced, groups = tuning.apply(traced, current)
         else:
             groups = coresident
         chosen = plan(aie_utils.ensure_current_device(), traced, boundaries, image)

@@ -26,6 +26,12 @@ tries its next-cheapest widths, then is dropped, and the search reruns.
 A width is a candidate only if its output was measured bit-identical to the
 default width's. A design the table does not hold stays at its default
 width, alone in its device.
+
+A fold (``iron.common.graph.fold``) is another runlist: fewer steps, the
+producer's design in place of two. Each the graph admits is priced by the
+same search over its folded graph, and taken where the model's time drops,
+the cheapest first; a fold changing a design the table does not hold is
+not taken.
 """
 
 from __future__ import annotations
@@ -50,6 +56,7 @@ from ..declare import Operator
 from ..design import OperatorDesign
 from ..image.coresidence import Packing, fits
 from ..image.fusion import generate, parameters_preamble
+from .fold import Fold, folded
 from .trace import TracedGraph
 
 
@@ -342,7 +349,8 @@ def model_us(
 class Tuning:
     """What ``JointNarrowing`` chose, and the model's prediction for it and
     for the graph as traced (``baseline``). The predictions leave out the
-    ``unmeasured`` designs, which stay as traced.
+    ``unmeasured`` designs, which stay as traced. ``chosen`` and ``groups``
+    name the designs of the graph with ``folds`` applied.
     """
 
     chosen: dict[str, Variant]  # default key -> the width it runs at
@@ -354,13 +362,17 @@ class Tuning:
     baseline_configures: int
     baseline_us: float
     unmeasured: tuple[str, ...]
+    folds: tuple[Fold, ...] = ()
 
     def apply(
         self, traced: TracedGraph, dev=None
     ) -> tuple[TracedGraph, list[list[Operator]]]:
-        """``traced`` with every narrowed design's operators rebuilt at their
-        width, and the packs as operator groups for ``coresident=``.
+        """``traced`` with the chosen folds applied, every narrowed design's
+        operators rebuilt at their width, and the packs as operator groups
+        for ``coresident=``.
         """
+        if self.folds:
+            traced, _ = folded(traced, dev, self.folds)
         replace: dict[int, Operator] = {}
         keys: dict[int, str] = {}
         for step in traced.steps:
@@ -383,7 +395,7 @@ class Tuning:
     def report(self, names: Mapping[str, str] | None = None) -> str:
         """One line per design that changed, then the predictions."""
         names = names or {}
-        lines = []
+        lines = [f"  fold: {fold}" for fold in self.folds]
         for key, v in self.chosen.items():
             if v.key != key:
                 lines.append(f"  {names.get(key, key)}: {dict(v.widths)}")
@@ -482,6 +494,53 @@ class JointNarrowing:
     )
 
     def tune(self, traced: TracedGraph, dev) -> Tuning:
+        """Choose the folds, widths and packs of ``traced`` for ``dev``.
+
+        Each fold the graph admits is priced on its own, then those that
+        gain are taken cheapest first, each kept only if the model's time
+        drops with it beside those already taken.
+        """
+        plain = self._narrow(traced, dev)
+        keys = {cost_key(s.op, dev) for s in traced.steps}
+        _, admitted = folded(traced, dev)
+        gains = []
+        for fold in admitted:
+            trial = self._folding(traced, dev, (fold,), keys)
+            if trial is not None and trial.predicted_us < plain.predicted_us:
+                gains.append(trial)
+        best = plain
+        for single in sorted(gains, key=lambda t: t.predicted_us):
+            trial = (
+                single
+                if not best.folds
+                else self._folding(traced, dev, best.folds + single.folds, keys)
+            )
+            if trial is not None and trial.predicted_us < best.predicted_us:
+                best = trial
+        return dataclasses.replace(
+            best,
+            baseline_us=plain.baseline_us,
+            baseline_configures=plain.baseline_configures,
+        )
+
+    def _folding(
+        self,
+        traced: TracedGraph,
+        dev,
+        folds: tuple[Fold, ...],
+        keys: set[str],
+    ) -> Tuning | None:
+        """``traced`` tuned with ``folds`` applied, or None where a design
+        the folds add or remove (beside ``keys``, the graph's) is unmeasured.
+        """
+        trial, _ = folded(traced, dev, folds)
+        changed = keys ^ {cost_key(s.op, dev) for s in trial.steps}
+        if any(k not in self.table.steps for k in changed):
+            return None
+        return dataclasses.replace(self._narrow(trial, dev), folds=folds)
+
+    def _narrow(self, traced: TracedGraph, dev) -> Tuning:
+        """The widths and packs of ``traced`` as it is."""
         table = self.table
         keys = [cost_key(s.op, dev) for s in traced.steps]
         first: dict[str, Operator] = {}

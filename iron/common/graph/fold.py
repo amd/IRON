@@ -7,12 +7,28 @@ from __future__ import annotations
 
 import dataclasses
 from collections import Counter
+from collections.abc import Collection, Hashable
 
 from ..declare import Operator, Unresolvable
 from .trace import TracedGraph
 
 
-def folded(traced: TracedGraph, dev) -> tuple[TracedGraph, int]:
+@dataclasses.dataclass(frozen=True)
+class Fold:
+    """The steps of one design folded into producers of another: each
+    names the resolved ``design_key()`` of its operator.
+    """
+
+    producer: Hashable
+    consumer: Hashable
+
+    def __str__(self) -> str:
+        return f"{self.consumer[0]} into {self.producer[0]}"
+
+
+def folded(
+    traced: TracedGraph, dev, only: Collection[Fold] | None = None
+) -> tuple[TracedGraph, Counter[Fold]]:
     """``traced`` with each step its producer can apply in its own cores
     folded into the producer (``Operator.fold``), then each operator that
     can run on a folded one's array moved onto it (``Operator.on_array``),
@@ -27,10 +43,11 @@ def folded(traced: TracedGraph, dev) -> tuple[TracedGraph, int]:
     Args:
         traced: The graph as traced.
         dev: The device the folded operators must resolve for.
+        only: The folds to apply; every one the graph admits if not given.
 
     Returns:
         The folded graph (``traced`` itself where nothing folds) and the
-        number of steps folded away.
+        steps folded away, by fold.
     """
     named = Counter((h.parent or h).name for s in traced.steps for h in s.slots)
     named.update((h.parent or h).name for h in traced.outputs)
@@ -39,6 +56,7 @@ def folded(traced: TracedGraph, dev) -> tuple[TracedGraph, int]:
     producers = {h.name: i for i, s in enumerate(traced.steps) for h in s.outputs}
     steps = list(traced.steps)
     replace: dict[int, Operator] = {}
+    applied: Counter[Fold] = Counter()
     for k, step in enumerate(traced.steps):
         if len(step.inputs) != 1 or len(step.outputs) != 1:
             continue
@@ -64,6 +82,11 @@ def folded(traced: TracedGraph, dev) -> tuple[TracedGraph, int]:
         fused = producer.op.fold(step.op)
         if fused is None:
             continue
+        fold = Fold(
+            producer.op.resolved(dev).design_key(), step.op.resolved(dev).design_key()
+        )
+        if only is not None and fold not in only:
+            continue
         try:
             fused.resolved(dev)
         except (Unresolvable, ValueError):
@@ -79,8 +102,9 @@ def folded(traced: TracedGraph, dev) -> tuple[TracedGraph, int]:
         )
         steps[k] = None
         replace[id(producer.op)] = fused
+        applied[fold] += 1
     if not replace:
-        return traced, 0
+        return traced, applied
     arrays = {f.resolved(dev).array_key(): f for f in replace.values()}
     for s in traced.steps:
         if id(s.op) in replace:
@@ -91,4 +115,4 @@ def folded(traced: TracedGraph, dev) -> tuple[TracedGraph, int]:
                 replace[id(s.op)] = moved
                 break
     kept = dataclasses.replace(traced, steps=[s for s in steps if s is not None])
-    return kept.with_operators(replace), len(traced.steps) - len(kept.steps)
+    return kept.with_operators(replace), applied

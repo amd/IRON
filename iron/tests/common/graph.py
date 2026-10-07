@@ -402,7 +402,7 @@ def test_swiglu_one_token_shares_one_array_and_one_build_for_gate_and_up():
 def test_swiglu_folds_its_silu_into_the_gate_and_keeps_one_array(npu2):
     t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
     f, count = folded(t, npu2)
-    assert count == 1
+    assert [(str(fold), n) for fold, n in count.items()] == [("SiLU into GEMV", 1)]
     assert [type(op).__name__ for op, *_ in f.runlist] == [
         "GEMV",
         "GEMV",
@@ -436,8 +436,8 @@ class _Gate(iron.Graph):
 @pytest.mark.parametrize("use", ["returned", "read twice"])
 def test_a_fold_needs_the_intermediate_to_itself(use, npu2):
     t = _Gate(use).trace(x=(E,))
-    assert folded(t, npu2) == (t, 0)
-    assert folded(_Gate("once").trace(x=(E,)), npu2)[1] == 1
+    assert folded(t, npu2) == (t, {})
+    assert folded(_Gate("once").trace(x=(E,)), npu2)[1].total() == 1
 
 
 def test_a_fold_the_producer_cannot_resolve_is_left_alone(npu2):
@@ -446,7 +446,7 @@ def test_a_fold_the_producer_cannot_resolve_is_left_alone(npu2):
     gemv, silu = (s.op for s in t.steps)
     with pytest.raises(ValueError, match="silu epilogue"):
         gemv.fold(silu).resolved(npu2)
-    assert folded(t, npu2) == (t, 0)
+    assert folded(t, npu2) == (t, {})
 
 
 def test_two_spellings_of_one_array_are_one_design():

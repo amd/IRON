@@ -17,6 +17,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common import Scratchpad
 from iron.common.graph.costcache import CostCache
+from iron.common.graph.fold import folded
 from iron.common.graph.narrowing import CostTable, JointNarrowing, cost_key, variants
 from iron.common.graph.probe import (
     CONTEXTS,
@@ -28,6 +29,7 @@ from iron.common.graph.probe import (
     platform,
 )
 from iron.common.image import Fusion
+from iron.lm.layers import SwiGLU
 from iron.operators import MHA, ElementwiseAdd, ElementwiseMul, SiLU, Softmax
 
 SIZE = 8192
@@ -135,6 +137,40 @@ def test_tuned_graph_is_bit_identical_and_packed(tmp_path):
     b = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
     want = np.array(plain(a, b).numpy()[:SIZE])
     got = np.array(tuned(a, b).numpy()[:SIZE])
+    assert want.view(np.uint16).tolist() == got.view(np.uint16).tolist()
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
+    # Measured as traced and folded, the tuner decides; either way its
+    # image is the untuned one folded alike, bit for bit.
+    rng = np.random.default_rng(0)
+    E = 2048
+    weights = [
+        (rng.standard_normal((E, E)) / np.sqrt(E)).astype(bfloat16) for _ in range(3)
+    ]
+    dev = aie_utils.ensure_current_device()
+    traced = SwiGLU(*weights).trace(x=(1, E))
+    folds, _ = folded(traced, dev)
+    report = platform()
+    table = CostTable(tmp_path / "costs.json")
+    measure_graph(
+        table,
+        [Call(traced), Call(folds)],
+        [("SiLU", "ElementwiseMul")],
+        Timing(rounds=1, calls=5),
+        cache=CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
+    )
+    assert {cost_key(s.op) for s in traced.steps + folds.steps} <= table.steps.keys()
+
+    tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
+    tuned = SwiGLU(*weights).compile(image=iron.ELF, coresident=tuner, x=(1, E))
+    fold = bool(tuned.tuning.folds)
+    assert any(isinstance(s.op, SiLU) for s in tuned.traced.steps) != fold
+    plain = SwiGLU(*weights).compile(image=iron.ELF, fold=fold, x=(1, E))
+    x = rng.standard_normal((1, E)).astype(bfloat16)
+    want = np.array(plain(x).numpy()[:E])
+    got = np.array(tuned(x).numpy()[:E])
     assert want.view(np.uint16).tolist() == got.view(np.uint16).tolist()
 
 

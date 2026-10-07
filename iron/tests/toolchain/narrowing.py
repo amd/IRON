@@ -11,10 +11,12 @@ untuned one (``iron/tests/infrastructure/narrowing.py``).
 
 import numpy as np
 import pytest
+from ml_dtypes import bfloat16
 
 import iron
 from iron.common.declare import Profile
 from iron.common.graph.costcache import CostCache, Measurement
+from iron.common.graph.fold import folded
 from iron.common.graph.narrowing import (
     Calibration,
     CostTable,
@@ -25,7 +27,9 @@ from iron.common.graph.narrowing import (
     model_us,
     variants,
 )
+from iron.lm.layers import SwiGLU
 from iron.operators import GELU, GEMM, MHA, ElementwiseAdd, SiLU
+from iron.operators.gemv import Epilogue
 
 SIZE = 8192
 TILE = 256
@@ -266,6 +270,54 @@ def test_placer_verdicts_are_kept_across_tunings(tmp_path, npu2):
     assert len(list(fit_cache.iterdir())) > len(records)
     assert second.groups == first.groups
     assert {k: v.widths for k, v in second.chosen.items()} != widths
+
+
+def _swiglu(tmp_path, dev, gate_us):
+    """SwiGLU at one row as traced, and a table holding every design it runs
+    as traced and folded at its default width, the folded gate taking
+    ``gate_us`` a step and every other design 10.
+    """
+    E, H = 2048, 8192
+    w = np.zeros((H, E), bfloat16)
+    traced = SwiGLU(w, w, np.zeros((E, H), bfloat16)).trace(x=(1, E))
+    folds, _ = folded(traced, dev)
+    steps = {
+        cost_key(s.op, dev): (10.0, 20.0) for g in (traced, folds) for s in g.steps
+    }
+    steps[cost_key(folds.steps[0].op, dev)] = (gate_us, 20.0)
+    return traced, _table(tmp_path / "costs.json", steps)
+
+
+def test_a_fold_is_taken_where_the_model_says_it_gains(tmp_path, npu2):
+    traced, table = _swiglu(tmp_path, npu2, gate_us=11.0)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    assert [str(f) for f in tuning.folds] == ["SiLU into GEMV"]
+    assert "fold: SiLU into GEMV" in tuning.report()
+    # The baseline is the graph as traced: gate and up, then silu, mul, down.
+    assert tuning.baseline_configures == 4
+    assert tuning.predicted_us < tuning.baseline_us
+    applied, _ = tuning.apply(traced, npu2)
+    assert [type(s.op).__name__ for s in applied.steps] == [
+        "GEMV",
+        "GEMV",
+        "ElementwiseMul",
+        "GEMV",
+    ]
+    assert applied.steps[0].op.epilogue is Epilogue.SILU
+
+
+@pytest.mark.parametrize("gate_us", [400.0, None], ids=["dearer", "unmeasured"])
+def test_a_fold_is_left_where_it_costs_or_is_unmeasured(gate_us, tmp_path, npu2):
+    traced, table = _swiglu(tmp_path, npu2, gate_us=gate_us or 11.0)
+    if gate_us is None:
+        folds, _ = folded(traced, npu2)
+        del table.steps[cost_key(folds.steps[0].op, npu2)]
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    assert tuning.folds == ()
+    applied, _ = tuning.apply(traced, npu2)
+    assert [type(s.op).__name__ for s in applied.steps] == [
+        type(s.op).__name__ for s in traced.steps
+    ]
 
 
 def test_cache_keys_follow_the_build_the_values_and_the_inputs(npu2):

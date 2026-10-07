@@ -86,8 +86,9 @@ python -m iron.lm.llama3.model \
 - `--compare-host`: with `--device-loop`, then generate again on the host
   from the same seed and count the tokens that differ (the text is the same,
   token for token)
-- `--cost-table TABLE`: narrow the decode step's designs and pack them
-  into shared device configurations by a measured cost table (below)
+- `--cost-table TABLE`: fold the decode step's steps, narrow its designs and
+  pack them into shared device configurations by a measured cost table
+  (below)
 - `--each-step`: dispatch every step of a decode step on its own from one
   xclbin, the form NPU1 runs (below)
 
@@ -111,11 +112,14 @@ below it.
 
 ## Tuning the decode step
 
-`--cost-table TABLE` narrows the decode step's designs (fewer columns where
-a design gains little from more) and packs them into shared device
-configurations, choosing by what each design costs on the device
-(`iron.common.graph.narrowing`). A narrower width is only a candidate if it
-was measured bit-identical to the profile's. The costs come from a table
+`--cost-table TABLE` folds steps into the step producing their input (the
+gate projection's SiLU into its GEMV), narrows the decode step's designs
+(fewer columns where a design gains little from more) and packs them into
+shared device configurations, choosing by what each design costs on the
+device (`iron.common.graph.narrowing`). A fold is taken only where the
+table prices the folded step below the two it replaces; without a table,
+nothing folds. A narrower width is only a candidate if it was measured
+bit-identical to the profile's. The costs come from a table
 that `tune.py` measures:
 
 ```bash

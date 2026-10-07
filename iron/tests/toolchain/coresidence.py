@@ -256,7 +256,7 @@ def test_a_folded_gate_shares_its_device_with_the_up_projection(npu2):
     weights = (np.zeros((hidden, embedding), bfloat16),) * 2
     ffn = SwiGLU(*weights, np.zeros((embedding, hidden), bfloat16))
     traced, count = folded(ffn.trace(x=(1, embedding)), npu2)
-    assert count == 1
+    assert count.total() == 1
     seq = traced.sequence(dispatch="fused")
     seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
         seq.calculate_buffer_layout()
