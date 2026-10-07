@@ -333,14 +333,18 @@ class Graph:
         if dev is not None:
             aie_utils.set_current_device(dev)
         traced = self.trace(**shapes)
+        chosen = plan(aie_utils.ensure_current_device(), traced, boundaries, image)
         tuning = None
         groups: AdjacentPacking | list[list[Operator]] | None
         if isinstance(coresident, JointNarrowing):
-            tuning = coresident.tune(traced, aie_utils.ensure_current_device())
+            tuning = coresident.tune(
+                traced,
+                aie_utils.ensure_current_device(),
+                packs=chosen.dispatch == "fused",
+            )
             traced, groups = tuning.apply(traced)
         else:
             groups = coresident
-        chosen = plan(aie_utils.ensure_current_device(), traced, boundaries, image)
         if verbose:
             print(chosen.report(self.name))
         signature = self._signature(traced.inputs)

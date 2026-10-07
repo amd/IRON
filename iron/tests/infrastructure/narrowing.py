@@ -18,6 +18,7 @@ import iron
 from iron.common import Scratchpad
 from iron.common.graph.narrowing import CostTable, JointNarrowing, cost_key, variants
 from iron.common.graph.probe import CONTEXTS, Timing, calibrate, measure_steps
+from iron.common.harness import verify_buffer
 from iron.common.image import Fusion
 from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU, Softmax
 
@@ -97,3 +98,44 @@ def test_tuned_graph_is_bit_identical_and_packed(tmp_path):
     want = np.array(plain(a, b).numpy()[:SIZE])
     got = np.array(tuned(a, b).numpy()[:SIZE])
     assert want.view(np.uint16).tolist() == got.view(np.uint16).tolist()
+
+
+@pytest.mark.supported_devices("npu1")
+def test_tuned_each_step_graph_is_bit_identical_and_narrowed(tmp_path):
+    # Each step its own dispatch: an entry is measured against the other two
+    # designs, and nothing is packed.
+    table = CostTable(tmp_path / "costs.json")
+    traced = Chain().trace(a=(SIZE,), b=(SIZE,))
+    first = {}
+    for s in traced.steps:
+        first.setdefault(cost_key(s.op), s.op)
+    timing = Timing(rounds=2, calls=10)
+    dev = aie_utils.ensure_current_device()
+    narrowest = [variants(op, dev)[-1].op for op in first.values()]
+    for i, op in enumerate(first.values()):
+        others = tuple(narrowest[:i] + narrowest[i + 1 :])
+        costs = measure_steps(table, variants(op, dev), timing, references=others)
+        assert all(c.exact for c in costs.values())
+    add, silu, _ = narrowest
+    cal = calibrate(table, add, silu, timing)
+    assert cal.reset_us == cal.base_us == 0
+
+    tuned = Chain().compile(
+        boundaries=iron.each_step,
+        coresident=JointNarrowing(table, fit_cache=tmp_path / "fits"),
+        a=(SIZE,),
+        b=(SIZE,),
+    )
+    plain = Chain().compile(boundaries=iron.each_step, a=(SIZE,), b=(SIZE,))
+    assert tuned.tuning is not None and not tuned.tuning.groups
+    assert tuned.tuning.predicted_us < tuned.tuning.baseline_us
+
+    rng = np.random.default_rng(0)
+    a = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
+    b = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
+    want = np.array(plain(a, b).numpy()[:SIZE])
+    got = np.array(tuned(a, b).numpy()[:SIZE])
+    assert want.view(np.uint16).tolist() == got.view(np.uint16).tolist()
+    silu = plain.traced.steps[-1].op.resolved()
+    verdict = verify_buffer(got, "out", Chain().reference(a, b), silu.tolerance())
+    assert verdict, verdict.detail
