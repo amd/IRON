@@ -31,6 +31,7 @@ from aie.dialects.aiex import (
 )
 from aie.extras import types as T
 from aie.helpers.npdtypes import np_ndarray_type_get_shape
+from aie.helpers.taplib import TensorAccessPattern
 from aie.ir import Attribute
 from aie.iron import (
     Acquire,
@@ -164,10 +165,12 @@ def _stage_kv_causal(rt, MT, v, g):
     own_prod = Lock(tile=mt, lock_id=7, init=2)
     own_cons = Lock(tile=mt, lock_id=8, init=0)
     fill = dict(
-        offset=0,
-        length=LK_MT * g.dh,
-        sizes=[LK_MT // g.lk, g.lk, 64, 8],
-        strides=[g.lk * g.dh, 8, 64, 1],
+        tap=TensorAccessPattern(
+            (LK_MT, g.dh),
+            0,
+            [LK_MT // g.lk, g.lk, 64, 8],
+            [g.lk * g.dh, 8, 64, 1],
+        )
     )
     rt.add_tile_dma(
         TileDma(
@@ -241,10 +244,12 @@ def _stage_kv_sliding(rt, MT, v, g):
                         in_1,
                         prod,
                         cons,
-                        offset=offset,
-                        length=half,
-                        sizes=[LK_MT // g.lk, g.lk, 32, 8],
-                        strides=[g.lk * g.dh, 8, 128, 1],
+                        tap=TensorAccessPattern(
+                            (LK_MT * 2, g.dh),
+                            offset,
+                            [LK_MT // g.lk, g.lk, 32, 8],
+                            [g.lk * g.dh, 8, 128, 1],
+                        ),
                     ),
                 )
                 for ch, offset in ((0, 0), (1, half))
@@ -260,10 +265,12 @@ def _stage_kv_sliding(rt, MT, v, g):
                         prod,
                         acq_val=2,
                         rel_val=2,
-                        offset=0,
-                        length=2 * half,
-                        sizes=[2 * LK_MT // g.lk, g.lk, g.dh],
-                        strides=[g.lk * g.dh, g.dh, 1],
+                        tap=TensorAccessPattern(
+                            (LK_MT * 2, g.dh),
+                            0,
+                            [2 * LK_MT // g.lk, g.lk, g.dh],
+                            [g.lk * g.dh, g.dh, 1],
+                        ),
                     ),
                 ),
             ],
@@ -321,8 +328,18 @@ def prefill_attn(
     q_half_ty = np.ndarray[(lq_mt, g.dh), bf16]
     o_col_ty = np.ndarray[(lq_mt, g.dh), bf16]
 
-    qdims = [(lq_ct // 8, 8 * g.dh), (g.dh // 8, 8), (8, g.dh), (8, 1)]
-    odims = [(g.lq // 8, 8 * g.dh), (g.dh // 8, 8), (8, g.dh), (8, 1)]
+    qtap = TensorAccessPattern(
+        (lq_ct, g.dh),
+        0,
+        [lq_ct // 8, g.dh // 8, 8, 8],
+        [8 * g.dh, 8, g.dh, 1],
+    )
+    otap = TensorAccessPattern(
+        (g.lq, g.dh),
+        0,
+        [g.lq // 8, g.dh // 8, 8, 8],
+        [8 * g.dh, 8, g.dh, 1],
+    )
 
     # Shim row 0, memtile row 1. Each tile carries its type. A Worker stamps an
     # untyped tile with Tile.with_type(). That call returns a second CoreTile
@@ -371,11 +388,13 @@ def prefill_attn(
                         o_tasks.append(
                             o_shim[cu * group_cols + col].drain(
                                 o,
-                                sizes=[1, 1, lq_mt, g.dh],
-                                strides=[0, 0, qo_row, 1],
-                                offset=r * (ROUND * qo_row)
-                                + (head_off * g.dh + col * lq_mt * qo_row),
-                                transfer_len=lq_mt * g.dh,
+                                tap=TensorAccessPattern(
+                                    (max_context * qo_row,),
+                                    r * (ROUND * qo_row)
+                                    + (head_off * g.dh + col * lq_mt * qo_row),
+                                    [1, 1, lq_mt, g.dh],
+                                    [0, 0, qo_row, 1],
+                                ),
                                 wait=True,
                                 managed=False,
                             )
@@ -386,10 +405,12 @@ def prefill_attn(
                         q_tasks.append(
                             q_shim[key].fill(
                                 q,
-                                sizes=[1, 1, lq_mt, g.dh],
-                                strides=[0, 0, qo_row, 1],
-                                offset=(q_base + qi * lq_mt * qo_row if qi else q_base),
-                                transfer_len=lq_mt * g.dh,
+                                tap=TensorAccessPattern(
+                                    (max_context * qo_row,),
+                                    (q_base + qi * lq_mt * qo_row if qi else q_base),
+                                    [1, 1, lq_mt, g.dh],
+                                    [0, 0, qo_row, 1],
+                                ),
                                 wait=False,
                                 managed=False,
                             )
@@ -450,7 +471,7 @@ def prefill_attn(
             [g.lq * g.dh * i for i in range(4)],
             obj_types=[o_ty] * 4,
             names=[f"o{m}_{i}" for i in range(4)],
-            dims_from_stream=[odims] * 4,
+            from_stream=[otap] * 4,
             tile=MT[m],
         )
         base_row = 0 if m % 2 == 0 else 2
@@ -471,7 +492,7 @@ def prefill_attn(
                 [lq_ct * g.dh * t for t in range(2)],
                 obj_types=[q_ty] * 2,
                 names=[f"q{mt_idx}_{half}_{t}" for t in range(2)],
-                dims_to_stream=[qdims] * 2,
+                to_stream=[qtap] * 2,
                 depths=[1, 1],
                 tile=MT[mt_idx],
             )

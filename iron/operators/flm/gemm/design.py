@@ -431,24 +431,35 @@ def gemm(
 
     # C: de-block each core's r x t tiled output back into row-major within its
     # 64x128 slice, on the way into the memtile.
-    gather_dims = [(M_TILE // R, R * N_TILE), (N_TILE // T, T), (R, N_TILE), (T, 1)]
+    gather_tap = TensorAccessPattern(
+        (C_SLICE_LEN,),
+        0,
+        [M_TILE // R, N_TILE // T, R, T],
+        [R * N_TILE, T, N_TILE, 1],
+    )
     # B needs no reblocking on either hop: pack_B emits it in consume order.
     # That frees the descriptor dimensions that let CT_MAX_K reach 128.
     # A: same idea, r x s blocks. The outermost row-group dimension spans
     # M_CHUNK tiles. mc's stride is exactly this dimension's size*stride, so
     # the two merge and the walk stays within the memtile BD's four dims.
-    a_recv_dims = [
-        (M_CHUNK * M_TILE // R, R * k_tile),
-        (R, S),
-        (k_tile // S, R * S),
-        (S, 1),
-    ]
+    a_recv_tap = TensorAccessPattern(
+        (M_CHUNK * M_TILE * k_tile,),
+        0,
+        [M_CHUNK * M_TILE // R, R, k_tile // S, S],
+        [R * k_tile, S, R * S, 1],
+    )
     # Emits (b_iter, mc, band): the order the core acquires A in while holding
     # a B chunk across the group.
     a_send_dims = [
         (K_DIV_CT_K_MAX, R * CT_MAX_K),
         (M_CHUNK * M_TILE // R, R * k_tile),
     ] + split_run(R * CT_MAX_K)
+    a_send_tap = TensorAccessPattern(
+        (M_CHUNK * M_TILE * k_tile,),
+        0,
+        [size for size, _ in a_send_dims],
+        [stride for _, stride in a_send_dims],
+    )
 
     # No tile is pinned: "column" c and "row" r name logical tiles, and the
     # placer decides where each lands. One object per logical tile, since
@@ -474,7 +485,7 @@ def gemm(
             tile=mt_tiles[c],
             obj_types=[ct_out_ty] * ROWS,
             names=[f"C_L1L2_{c}_{r}" for r in range(ROWS)],
-            dims_from_stream=[gather_dims] * ROWS,
+            from_stream=[gather_tap] * ROWS,
         )
         for r in range(ROWS):
             c_prod[(r, c)] = sub[r]
@@ -487,12 +498,12 @@ def gemm(
     for r in range(ROWS):
         of_a_in = ObjectFifo(mt_a_ty, name=f"A_L3L2_{r}", depth=A_DEPTH)
         a_l3l2_fifos.append(of_a_in)
-        of_a = of_a_in.cons(dims_from_stream=a_recv_dims).forward(
+        of_a = of_a_in.cons(from_stream=a_recv_tap).forward(
             tile=mt_tiles[r * n_active_cols // ROWS],
             obj_type=ct_a_obj_ty,
             depth=A_DEPTH,
             name=f"A_L2L1_{r}",
-            dims_to_stream=a_send_dims,
+            to_stream=a_send_tap,
         )
         # Every tile in the row sees this object, so inactive columns must
         # not be consumers at all.
@@ -878,8 +889,12 @@ def gemm(
             chain.append(
                 Bd(
                     b_mt_bufs[c],
-                    offset=i * b_slot_elems,
-                    length=b_slot_elems,
+                    tap=TensorAccessPattern(
+                        b_mt_bufs[c].shape,
+                        i * b_slot_elems,
+                        [b_slot_elems],
+                        [1],
+                    ),
                     acquires=[Acquire(wait, value=value)],
                     releases=[Release(post, value=value)],
                 )

@@ -71,16 +71,14 @@ def shuffle_transpose(
         for i in range(num_columns)
         for j in range(num_channels)
     ]
-    taps_in_L2L1 = [
-        TensorAccessPattern(
-            (M, N),
-            (M // num_channels) * j * N + (N // num_columns) * i,
-            [m // s, s, n // s, s],
-            [s, m, s * m, 1],
-        )
-        for i in range(num_columns)
-        for j in range(num_channels)
-    ]
+    # Read out of the L2 object in s x s blocks. The pattern walks the object,
+    # so it carries no offset into the L3 tensor.
+    tap_in_L2L1 = TensorAccessPattern(
+        (m, n),
+        0,
+        [m // s, s, n // s, s],
+        [s, m, s * m, 1],
+    )
     taps_out_L1L3 = [
         [
             TensorAccessPattern(
@@ -105,7 +103,7 @@ def shuffle_transpose(
     ]
     of_in1s_L2L1 = [
         of_in1s_L3L2[i * num_channels + j]
-        .cons(dims_from_stream=taps_in_L2L1[i * num_channels + j].transformation_dims)
+        .cons(from_stream=tap_in_L2L1)
         .forward(obj_type=tile_ty, name=f"of_in1s_L2L1_{i}_{j}", depth=fifodepth)
         for i in range(num_columns)
         for j in range(num_channels)
