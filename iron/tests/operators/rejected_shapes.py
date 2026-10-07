@@ -17,6 +17,7 @@ from aie.iron.device import from_name
 
 from iron.common import Unresolvable
 from iron.operators.copy import Copy
+from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.transpose import Transpose
@@ -188,3 +189,16 @@ def test_mha_of_one_query_that_does_not_pack_is_refused(kwargs, why):
     """
     with pytest.raises(ValueError, match=why):
         MHA(seq_len=1, kv_len=512, **kwargs).resolved(from_name("npu2", n_cols=8))
+
+
+def test_flm_gemm_reads_b_as_stored_only_where_b_is_bf16():
+    with pytest.raises(ValueError, match="b_col_maj reads a bf16 B"):
+        FLMGEMM(M=256, K=512, N=1024, b_col_maj=True).resolved(
+            from_name("npu2", n_cols=8)
+        )
+    op = FLMGEMM(M=256, K=512, N=256, b_col_maj=True).resolved(
+        from_name("npu1", n_cols=4)
+    )
+    assert op.B.shape == (256, 512)
+    with pytest.raises(ValueError, match="reads B as stored"):
+        op.pack_B(None)

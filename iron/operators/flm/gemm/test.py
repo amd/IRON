@@ -150,9 +150,12 @@ def flm_vectors(operator, scale=4.0):
     around +-200, where gelu/silu are indistinguishable from the identity (or
     from zero). Activation tests pass a smaller scale so the result sits in the
     range where the curve is actually interesting. B is drawn row-major
-    ``(K, N)``; the operator consumes it packed (see ``GEMM.pack_B``).
+    ``(K, N)``, which the operator consumes packed (see ``GEMM.pack_B``), or
+    ``(N, K)`` as stored under ``b_col_maj``.
     """
-    return vectors(operator, normal=("A",), scale=scale, B=(operator.K, operator.N))
+    K, N = operator.K, operator.N
+    B = (N, K) if operator.b_col_maj else (K, N)
+    return vectors(operator, normal=("A",), scale=scale, B=B)
 
 
 def accumulated_mass(K, A, B):
@@ -185,7 +188,10 @@ def check_on_device(operator, data, rounding=CONV_EVEN, record=None):
         budget = 0.05 if rounding is FLOOR else 0.004
     return run_test(
         operator,
-        {"A": A.flatten(), "B": operator.pack_B(B)},
+        {
+            "A": A.flatten(),
+            "B": B.flatten() if operator.b_col_maj else operator.pack_B(B),
+        },
         {"C": data["C"].flatten()},
         tolerance=Tolerance.relative(0.04, budget * mass),
         record=record,
@@ -221,6 +227,50 @@ def test_gemm_without_activations(M, K, N, npu_runtime, record_property):
         operator, flm_vectors(operator), record=record_property
     )
 
+    assert not errors, "Test failed"
+
+
+def b_col_maj_params():
+    """Where B as stored reaches the kernel by another path than packed B: a
+    resident and a streamed memtile pool, a trailing column, every tile width
+    and two slabs. AIE2 only; AIE2P's B is bfp16ebs8, packed.
+    """
+    dev = aie_utils.get_current_device()
+    if dev is None or dev.arch is not AIEArch.AIE2:
+        return []
+    cols = dev.cols
+    params = [
+        pytest.param(256, 512, 64 * cols, None, (NONE,), id="resident"),
+        pytest.param(256, 512, 64 * cols + 64, None, (NONE,), id="trailing-col"),
+        pytest.param(512, 6144, 64 * cols, None, (NONE,), id="streamed"),
+        pytest.param(256, 512, 64 * cols, None, tuple(Epilogue), id="tables-linked"),
+    ]
+    for tile_n in sorted(set(CT_MAX_K_FOR_N) - {64}):
+        params.append(
+            pytest.param(256, 512, tile_n * cols, tile_n, (NONE,), id=f"tn{tile_n}")
+        )
+    params.append(
+        pytest.param(
+            16384,
+            512,
+            64 * cols,
+            None,
+            (NONE,),
+            marks=pytest.mark.extensive,
+            id="slabs",
+        )
+    )
+    return params
+
+
+@pytest.mark.parametrize("M,K,N,tile_n,epilogue_modes", b_col_maj_params())
+def test_gemm_b_col_maj(M, K, N, tile_n, epilogue_modes, npu_runtime, record_property):
+    operator = GEMM(
+        M=M, K=K, N=N, tile_n=tile_n, epilogue_modes=epilogue_modes, b_col_maj=True
+    )
+    errors, _, _ = check_on_device(
+        operator, flm_vectors(operator), record=record_property
+    )
     assert not errors, "Test failed"
 
 
