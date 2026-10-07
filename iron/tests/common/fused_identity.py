@@ -59,14 +59,20 @@ SHAPES = [(512, 1024), (256, 1024), (512, 2048)]
 
 
 def _objects_by_step(shapes):
-    """Each step's device name and the kernel objects that device links."""
+    """Each step's design name and the kernel objects its device links."""
     fusion = Fusion(_sequence(shapes))
     devices = re.split(r"(?=aie\.device\()", fusion.text())
     linked = {}
     for body in devices:
         name = re.match(r"aie\.device\(\w+\) @(\w+)", body)
         if name:
-            linked[name.group(1)] = set(re.findall(r'link_with\s*=\s*"([^"]+)"', body))
+            objects = set(re.findall(r'link_with\s*=\s*"([^"]+)"', body))
+            # A device several designs share names each one's sequence.
+            for design in [
+                name.group(1),
+                *re.findall(r"runtime_sequence @(\w+)", body),
+            ]:
+                linked[design] = objects
     return [(name, linked[name]) for name, *_ in fusion.runlist]
 
 
