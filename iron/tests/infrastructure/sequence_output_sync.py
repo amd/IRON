@@ -23,6 +23,7 @@ SIZE = 1024
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("calls", [2, 3])
 def test_every_dispatch_returns_its_own_output(calls, npu_runtime):
     add = ElementwiseAdd(size=SIZE, tile_size=128)

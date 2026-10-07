@@ -157,6 +157,7 @@ def test_the_compile_key_is_stable_across_identical_operators():
     assert _add_key()._compute_cache_hash() == _add_key()._compute_cache_hash()
 
 
+@pytest.mark.supported_devices("npu2")
 def test_the_compile_key_does_not_depend_on_a_device_being_bound_yet():
     """The hash must not change once compile() binds the device.
 
