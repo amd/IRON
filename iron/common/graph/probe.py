@@ -189,7 +189,10 @@ class Standalone:
         """What the steps wrote, after one run: every out and in-out buffer."""
         self.callable()
         return b"".join(
-            self.callable.get_buffer(name).numpy().view(np.uint8)[: buf.nbytes].tobytes()
+            self.callable.get_buffer(name)
+            .numpy()
+            .view(np.uint8)[: buf.nbytes]
+            .tobytes()
             for k in self._filled
             for buf, name in zip(self.steps[k].buffers, self._names(k, self.steps[k]))
             if buf.direction.drains
