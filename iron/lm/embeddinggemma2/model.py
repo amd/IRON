@@ -26,7 +26,6 @@ from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
 from iron.operators.softmax import Softmax
-from iron.operators.transpose import Transpose
 
 # An f32 accumulator and native bf16 inputs: the defaults' bfp16 inputs and
 # per-K-tile bf16 rounding cost the encoder accuracy.
@@ -173,8 +172,9 @@ class EmbeddingGemma(iron.Graph):
                 (config.global_head_dim, config.global_rope_base),
             )
         }
-        # Softmax of zeros masked to n is the pooling weights, 1/n each.
-        self.pool = np.zeros(16 * max_tokens, bfloat16)
+        # Softmax of zeros bounded to n is the pooling weights, 1/n each; 32
+        # rows of them, the fewest a GEMM takes.
+        self.pool = {T: iron.weight(np.zeros((32, T), bfloat16)) for T in self.rows}
         # A power of four: a row's RMS over it is its norm over a power of two.
         width = 4 ** math.ceil(math.log(c.out_dim, 4))
         self.projection = np.zeros((len(c.mrl_dims), width, c.emb_dim), bfloat16)
@@ -194,8 +194,8 @@ class EmbeddingGemma(iron.Graph):
         for i, w in enumerate(self.layers):
             x = self.layer(i, w, x, ple[i], n)
         h = RMSNorm(x, weight=self.norm, epsilon=c.eps)
-        mean = Softmax(self.pool[: 16 * T].reshape(16, T), vector_size=n)[0]
-        y = GEMV(self.projection, GEMV(Transpose(h), mean))
+        mean = Softmax(self.pool[T][:, :n])
+        y = GEMV(self.projection, GEMM(mean, h[:n], **ACCURATE)[0])
         return RMSNorm(
             y.reshape(len(c.mrl_dims), self.unit.size), weight=self.unit, epsilon=0.0
         )
@@ -238,9 +238,9 @@ class EmbeddingGemma(iron.Graph):
             scores = GEMM(heads, k[g], b_col_maj=True, **ACCURATE)
             if i not in c.global_layers and T in self.bands:
                 scores = ElementwiseAdd(scores, self.bands[T])
-            weights = Softmax(scores, vector_size=n)
+            weights = Softmax(scores[:, :n])
             # Over the group's queries, which the scores were their last use of.
-            GEMM(weights, v[g], heads, **ACCURATE)
+            GEMM(weights, v[g, :n], heads, **ACCURATE)
         o = Copy(q.transpose(1, 0, 2)).reshape(T, H * D)
         return GEMM(o, w.o, b_col_maj=True, **ACCURATE)
 
