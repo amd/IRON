@@ -30,9 +30,6 @@ from iron.operators.flm.gemm.design import (
 )
 from iron.operators.flm.gemm.op import GEMM
 from iron.operators.flm.gemm.shipped import Shipped
-from iron.operators.flm.testing import skip_flm_gemm_on_npu1
-
-pytestmark = skip_flm_gemm_on_npu1
 
 # Unpacked so the parameter tables below stay column-aligned.
 NONE, GELU, SILU, SIGMOID = Epilogue
@@ -214,6 +211,19 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, npu_runtime, record_property):
     assert not errors, "Test failed"
 
 
+@pytest.mark.parametrize("M,K,N", [(256, 512, 256), (512, 1024, 512)])
+def test_gemm_without_activations(M, K, N, npu_runtime, record_property):
+    """Compiling no activation links no LUT tables, so on AIE2 the bytes they
+    held go to B and the tiles differ from every case above."""
+    operator = GEMM(M=M, K=K, N=N, epilogue_modes=(NONE,))
+
+    errors, _, _ = check_on_device(
+        operator, flm_vectors(operator), record=record_property
+    )
+
+    assert not errors, "Test failed"
+
+
 def test_gemm_split_leg_bounds_runs(npu_runtime):
     """K or N = 10240 overflows the shim BD's 20-bit mega_row step, so the
     compiler cuts that leg into pieces, bounded by its queue polls and BD
@@ -247,7 +257,7 @@ def tile_option_params():
     dev = aie_utils.get_current_device()
     if dev is None or dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
         return []
-    l1 = l1_budget(dev)
+    l1 = l1_budget(dev, tuple(Epilogue))
     b_elem = BFP16_GROUP_BYTES / BFP16_GROUP if dev.arch == AIEArch.AIE2p else 2
 
     params = []

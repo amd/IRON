@@ -78,10 +78,17 @@ STACK_SIZE = 2048
 LUT_STATIC_SIZE = 5248
 
 
-def l1_budget(dev):
-    """Local memory the buffer sizing may spend on this device."""
+def l1_budget(dev, epilogue_modes):
+    """Local memory the buffer sizing may spend on this device.
+
+    Args:
+        dev: The device the array is built for.
+        epilogue_modes: The activations compiled in. Without one the kernel
+            links no LUT tables, so their bytes go to the buffers.
+    """
     budget = get_target_model(dev.resolve()).get_local_memory_size()
-    return budget - (LUT_STATIC_SIZE if dev.arch == AIEArch.AIE2 else 0)
+    activated = any(Epilogue(m) is not Epilogue.NONE for m in epilogue_modes)
+    return budget - (LUT_STATIC_SIZE if dev.arch == AIEArch.AIE2 and activated else 0)
 
 
 # Row-blocks a core folds into one B fetch, cutting B's DDR reads by M_CHUNK

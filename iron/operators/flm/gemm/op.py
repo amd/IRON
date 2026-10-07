@@ -290,7 +290,7 @@ class GEMM(Operator):
         tile_n = N_TILE_DEFAULT if self.tile_n is None else self.tile_n
         ct_k = CT_MAX_K_FOR_N[tile_n]
         m_chunk = M_CHUNK_FOR_N[tile_n] if self.m_chunk is None else self.m_chunk
-        l1 = l1_budget(dev)
+        l1 = l1_budget(dev, self.epilogue_modes)
         if self.tile_ma is None:
             tile_ma, l1_b_depth = _default_l1(tile_n, ct_k, b_elem_bytes, l1, m_chunk)
         else:
