@@ -528,11 +528,12 @@ code before relying on a line here; it is the authority.
   have DDR address folding off, so a sequence cannot move between images.
 - **Length-free extents.** `Extent(field)` and `x[:n]` bounds are carried
   through reshape and transpose; under a bound a buffer is split
-  round-robin by tile. GEMM bounds its compute, not its DMA; MHA's K and
-  V move only the blocks up to the bound, so attention over a cache costs
-  the context, not the cache. A per-call size is mlir-aie's runtime
-  transfer length, `fill/drain(length_parameter=, length_unit=)`: whole
-  16-byte units, so a bounded tile is at least 16 bytes.
+  round-robin by tile. GEMM bounds its compute (M, and on a full ELF K),
+  not its DMA; MHA's K and V move only the blocks up to the bound, so
+  attention over a cache costs the context, not the cache. A per-call size
+  is mlir-aie's runtime transfer length, `fill/drain(length_parameter=,
+  length_unit=)`: whole 16-byte units, so a bounded tile is at least 16
+  bytes.
 - **One compile, any context.** A decoder is two versions, a decode step
   and a `prefill_chunk`-row prompt chunk, both compiled once; `max_seq_len`
   sizes the caches and the RoPE table alone. A prompt runs chunk by chunk

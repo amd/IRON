@@ -160,6 +160,11 @@ class GEMM(Operator):
     # dimensions; the cores compute the tiles the bound covers and pass the
     # rest through, so the work follows the call and the traffic does not.
     valid = Extent(M)
+    # K, or less per call (``GEMM(A[:, :n], B[:n])``): the cores reduce over
+    # the K tiles the bound covers and pass the rest through. The last of
+    # them is multiplied whole, so A's columns past n in it must be zero (a
+    # bounded Softmax's are) and B's rows there finite.
+    valid_k = Extent(K)
     # Reduction steps per output tile, and output tiles per core.
     k_div_k = Value(np.int32, derive=lambda op: op.K // op.tile_k)
     n_tiles = Value(
@@ -171,6 +176,9 @@ class GEMM(Operator):
         np.int32,
         derive=lambda op: ceildiv(op.valid, op.mem_tile_m_c) * (op.N // op.mem_tile_n),
         optional=True,  # nothing reads it unbounded
+    )
+    k_div_k_valid = Value(
+        np.int32, derive=lambda op: ceildiv(op.valid_k, op.tile_k), optional=True
     )
 
     def extent_unit(self, buffer: str) -> int:
@@ -462,9 +470,20 @@ class GEMM(Operator):
                 C_l1l2_fifos[j][col] = c_tmp_fifos[j]
 
         # Under a bound on M each core computes the tiles the bound covers
-        # and passes the rest through: the DMAs still move every row.
-        bounded = "valid" in self.bound_extents and target.image == "elf"
-        n_valid_param = self.n_tiles_valid.param if bounded else None
+        # and passes the rest through, and under one on K it reduces over
+        # the K tiles the bound covers: the DMAs still move all of A and B.
+        bound = self.bound_extents
+        n_valid_param = None
+        if "valid" in bound and target.image == "elf":
+            n_valid_param = self.n_tiles_valid.param
+        k_valid_param = None
+        if "valid_k" in bound:
+            if target.image != "elf":
+                raise ValueError(
+                    "GEMM: a per-call bound on K needs a full ELF; an xclbin's "
+                    "cores reduce over every K tile"
+                )
+            k_valid_param = self.k_div_k_valid.param
 
         # Tasks for each worker to perform
         def core_fn(
@@ -477,11 +496,17 @@ class GEMM(Operator):
             my_rtp,
             barrier,
             elem_out_internal,
-            n_valid=None,
+            n_valid,
+            k_valid,
         ):
             barrier.wait_for_value(1)
             rtp_K_div_k = my_rtp[0]
             rtp_n_tiles_per_core = my_rtp[1]
+            # (K tiles, whether they are multiplied), in the order they arrive.
+            spans = [(rtp_K_div_k, True)]
+            if k_valid is not None:
+                k_compute = k_valid.read()
+                spans = [(k_compute, True), (rtp_K_div_k - k_compute, False)]
 
             def tile(compute: bool):
                 nonlocal elem_out_internal
@@ -489,13 +514,14 @@ class GEMM(Operator):
                     elem_out_internal = out_c.acquire(1)
                 if compute:
                     zero(elem_out_internal)
-                for _ in range_(rtp_K_div_k):
-                    elem_in_a = in_a.acquire(1)
-                    elem_in_b = in_b.acquire(1)
-                    if compute:
-                        matmul(elem_in_a, elem_in_b, elem_out_internal)
-                    in_a.release(1)
-                    in_b.release(1)
+                for count, multiply in spans:
+                    for _ in range_(count):
+                        elem_in_a = in_a.acquire(1)
+                        elem_in_b = in_b.acquire(1)
+                        if compute and multiply:
+                            matmul(elem_in_a, elem_in_b, elem_out_internal)
+                        in_a.release(1)
+                        in_b.release(1)
                 if use_larger_internal_buffer:
                     elem_out_transfer = out_c.acquire(1)
                     if compute:
@@ -504,8 +530,7 @@ class GEMM(Operator):
                 else:
                     out_c.release(1)
 
-            if bounded:
-                assert n_valid is not None
+            if n_valid is not None:
                 n_compute = n_valid.read()
                 for _ in range_(n_compute):
                     tile(compute=True)
@@ -540,8 +565,9 @@ class GEMM(Operator):
                             rtps[row][col],
                             workerBarriers[row][col],
                             acc_buffer,
-                        ]
-                        + ([n_valid_param] if bounded else []),
+                            n_valid_param,
+                            k_valid_param,
+                        ],
                         stack_size=0xD00,
                     )
                 )
