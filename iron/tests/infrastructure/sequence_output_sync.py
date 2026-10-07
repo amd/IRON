@@ -20,7 +20,7 @@ from iron.operators import ElementwiseAdd
 SIZE = 1024
 
 
-pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
+pytestmark = pytest.mark.supported_devices("npu1", "npu2")
 
 
 @pytest.mark.parametrize("calls", [2, 3])

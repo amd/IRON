@@ -35,15 +35,6 @@ jobs:
         with:
           env_name: ci_env
 
-      - name: Install additional requirements for examples
-        shell: bash
-        env:
-          HOME: /workspace
-        run: |
-          set -euxo pipefail
-          source ci_env/bin/activate
-          pip install -r requirements_examples.txt
-
       - name: Print mlir-aie version
         shell: bash
         env:

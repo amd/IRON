@@ -58,13 +58,13 @@ in the cache.
 ### Run All Operators (non-extensive tests)
 
 ```bash
-pytest iron/operators/ iron/tests/operators/catalog.py -m "not extensive" --iterations 1
+pytest iron/operators/ iron/tests/ -m "not extensive" --iterations 1
 ```
 
 ### Run Extensive Test Suite
 
 ```bash
-pytest iron/operators/ iron/tests/operators/catalog.py
+pytest iron/operators/ iron/tests/
 ```
 
 ### Run Single Operator Test
@@ -90,7 +90,7 @@ pytest iron/tests/operators/catalog.py -k GEMM
 ### Parallel Testing (faster)
 
 ```bash
-pytest iron/operators/ iron/tests/operators/catalog.py -n auto -m "not extensive"
+pytest iron/operators/ iron/tests/ -n auto -m "not extensive"
 ```
 
 ## Code Style and Linting
@@ -712,8 +712,8 @@ logging.basicConfig(level=logging.DEBUG)
 
 ### GitHub Actions Workflows
 
-- **small.yml**: Fast operator tests (non-extensive, runs on every PR)
-- **extensive.yml**: Full test suite (all operators with extensive tests)
+- **small.yml**: Operator and library tests, `iron/operators/` and `iron/tests/` (non-extensive, runs on every PR)
+- **extensive.yml**: Full test suite (the same, with extensive tests)
 - **test-examples.yml**: Application tests (Llama inference, EmbeddingGemma 2, Gemma 4 on FastFlowLM)
 - **ci-lint.yml**: Linting checks (black, clang-format, reuse)
 - **pr-comment.yml**: Posts the performance trends of a PR as a comment

@@ -21,6 +21,7 @@ runs:
         source ${{ inputs.env_name }}/bin/activate
         pip install --upgrade pip
         pip install -r requirements.txt
+        pip install -r requirements_examples.txt
         pip install -r requirements_stream.txt
         # stream-dse's pure-Python AIE codegen dialects (xdsl-aie, snax-mlir) are
         # git installs, not PyPI dependencies; this console script installs them so
