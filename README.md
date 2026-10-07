@@ -150,13 +150,13 @@ Operators compose into graphs: a subclass of `iron.Graph` whose `body()` is call
 To build and test all the operators:
 
 ``` bash
-pytest iron/operators/ iron/tests/operators/catalog.py -m "not extensive"
+pytest iron/operators/ iron/tests/ -m "not extensive"
 ```
 
 To run the extensive test suite:
 
 ``` bash
-pytest iron/operators/ iron/tests/operators/catalog.py
+pytest iron/operators/ iron/tests/
 ```
 
 To run a specific operator's tests:
@@ -224,7 +224,7 @@ Run benchmarks:
 
 ```bash
 # Run all operators with performance metrics stored in tests_latest.csv
-pytest iron/operators/ iron/tests/operators/catalog.py -m "not extensive" -v
+pytest iron/operators/ iron/tests/ -m "not extensive" -v
 ```
 
 ## Community and Support

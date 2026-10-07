@@ -58,13 +58,13 @@ in the cache.
 ### Run All Operators (non-extensive tests)
 
 ```bash
-pytest iron/operators/ iron/tests/operators/catalog.py -m "not extensive" --iterations 1
+pytest iron/operators/ iron/tests/ -m "not extensive" --iterations 1
 ```
 
 ### Run Extensive Test Suite
 
 ```bash
-pytest iron/operators/ iron/tests/operators/catalog.py
+pytest iron/operators/ iron/tests/
 ```
 
 ### Run Single Operator Test
@@ -90,7 +90,7 @@ pytest iron/tests/operators/catalog.py -k GEMM
 ### Parallel Testing (faster)
 
 ```bash
-pytest iron/operators/ iron/tests/operators/catalog.py -n auto -m "not extensive"
+pytest iron/operators/ iron/tests/ -n auto -m "not extensive"
 ```
 
 ## Code Style and Linting
