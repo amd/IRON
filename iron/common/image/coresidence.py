@@ -26,8 +26,9 @@ What the merge has to settle:
 - pinned tiles: two members naming one physical tile share its ``aie.tile``,
   unless both put a core or a DMA program on it, which is a conflict. A
   route into a tile's TileControl rewrites its DMA program, so it claims
-  the tile as one would. Logical tiles are left to ``aie-place-tiles``,
-  which sees the union.
+  the tile as one would. A logical tile given its column and row claims
+  as a physical one does; the rest are left to ``aie-place-tiles``, which
+  sees the union.
 - hand-routed shim channels: the fifo lowering hands out shim DMA channels
   around the ``aie.shim_dma_allocation`` ops it finds, not around
   ``aie.flow`` or ``aie.packet_flow`` ends, so a member routing a pinned
@@ -155,7 +156,13 @@ def _body(device: aie.DeviceOp) -> list[ir.OpView]:
 
 
 def _pinned_tile(op: ir.OpView) -> tuple[int, int] | None:
-    if not isinstance(op, aie.TileOp):
+    """The physical tile ``op`` names: an ``aie.tile``'s, or a logical
+    tile's given both its column and its row.
+    """
+    if isinstance(op, aie.LogicalTileOp):
+        if op.col is None or op.row is None:
+            return None
+    elif not isinstance(op, aie.TileOp):
         return None
     return (
         ir.IntegerAttr(op.operation.attributes["col"]).value,
@@ -263,7 +270,7 @@ def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceO
                     continue
                 kernels[symbol] = text
             coords = _pinned_tile(op)
-            if coords is not None:
+            if coords is not None and isinstance(op, aie.TileOp):
                 if coords in tiles:
                     op.result.replace_all_uses_with(tiles[coords])
                     op.operation.erase()
