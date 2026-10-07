@@ -20,20 +20,24 @@ The ``OperatorSequence`` dispatch modes covered here are:
 * ``"reference"``– pure-CPU evaluation via each operator's ``reference()``.
 """
 
+import logging
 import re
 from typing import Any
 
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.iron.kernels.sample import draw_row
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
+from iron.common.design import device_symbol
 from iron.common.harness import verify_buffer
 from iron.common.image import Fusion, OperatorSequence
 from iron.common.image.packaging import full_elf
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.relu import ReLU
+from iron.operators.sample import Sample
 from iron.operators.tanh import Tanh
 
 RELATIVE = Tolerance.relative(0.04, 1e-6)
@@ -307,6 +311,45 @@ def test_compare_mode_judges_each_step_by_its_tolerance(exact, npu_runtime):
             run()
     else:
         run()  # must not raise
+
+
+def test_compare_mode_judges_every_output_at_the_calls_values(npu_runtime, caplog):
+    """Sample writes two buffers, its record in place and the token, at a row
+    and slot that are per-call values. Compare mode runs its reference at
+    the values the step was dispatched with and judges both buffers, so a
+    draw from any row but ``position``'s, or a record in any other slot,
+    raises.
+    """
+    steps, position = 4, 2
+    op = Sample(vocab=4096, cores=4, steps=steps)
+    op.use_value("row", "row")
+    op.use_value("at", "position")
+    seq = OperatorSequence(
+        name="infra_compare_sample",
+        runlist=[(op, "logits", "draws", "tokens", "token")],
+        input_args=["logits", "draws", "tokens"],
+        output_args=["token"],
+        dispatch="compare",
+    )
+    seq.compile()
+    run: Any = seq.get_callable()
+    run.tolerance = Tolerance.exact()
+    rng = np.random.default_rng(3)
+    _set_input(run, "logits", rng.normal(0, 3, op.vocab).astype(bfloat16))
+    rows = [(0.0, 1), (0.0, 1), (1.0, 64), (0.0, 1)]
+    draws = np.stack([draw_row(t, k, int(rng.integers(0, 1 << 53))) for t, k in rows])
+    _set_input(run, "draws", draws)
+    _set_input(run, "tokens", np.full(steps, -1, dtype=np.int32))
+    run.write_values(
+        {
+            device_symbol(op, op.value("row")): np.int32(4 * position),
+            device_symbol(op, op.value("at")): np.int32(position),
+        }
+    )
+    with caplog.at_level(logging.INFO, logger="iron.common.image.callable"):
+        run()
+    judged = re.findall(r"Sample -> (\w+)", caplog.text)
+    assert judged == ["tokens", "token"], caplog.text
 
 
 # ---------------------------------------------------------------------------

@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
-import math
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -20,7 +20,9 @@ from aie.utils.npukernel import NPUKernel
 from aie.utils.trace import get_trace_buffer
 from aie.utils.verify import Tolerance, compare
 
-from ..declare import Operator
+from ..declare import Direction, Operator
+from ..declare.member import Extent
+from ..design import device_symbol
 from .allocator import ALIGNMENT, ArenaPlan, Pool
 
 if TYPE_CHECKING:
@@ -507,26 +509,32 @@ class StepCallable:
                 self._buffers[name].to("npu")
         t0 = time.perf_counter()
         for index, (step_op, kernel, names, args) in enumerate(self._steps):
-            *in_specs, out_spec = step_op.buffers
-            if kernel is None or self.compare:
-                inputs = [
-                    buf.to("cpu")
-                    .numpy_view()[: math.prod(spec.shape)]
-                    .reshape(spec.shape)
-                    .copy()
-                    for buf, spec in zip(args, in_specs)
-                ]
+            checked = self.compare and not step_op.bound_extents
+            if self.compare and not checked:
+                logger.warning(
+                    "[compare step %d] %s not compared: %s bounded per call",
+                    index,
+                    type(step_op).__name__,
+                    sorted(step_op.bound_extents),
+                )
+            if kernel is None or checked:
+                inputs, expected = self._reference(step_op, args)
             if kernel is None:
-                out = args[-1].numpy_view()
-                n = math.prod(out_spec.shape)
-                out[:n] = step_op.reference(*inputs).reshape(-1).astype(out.dtype)
+                written = [
+                    (buf, spec)
+                    for buf, spec in zip(args, step_op.buffers)
+                    if spec.direction is not Direction.IN
+                ]
+                for (buf, spec), result in zip(written, expected):
+                    out = buf.numpy_view()
+                    out[: spec.elements] = result.reshape(-1).astype(out.dtype)
                 continue
             kernel(
                 *args,
                 **{name: self.dispatch_values[name] for name in kernel.dispatch_params},
             )
-            if self.compare:
-                self._check(index, step_op, names, inputs, args[-1], out_spec)
+            if checked:
+                self._check(index, step_op, names, args, inputs, expected)
         self.last_elapsed = time.perf_counter() - t0
         if self._on_npu:
             # Device-resident, so a read pulls what the steps wrote, and only then.
@@ -534,41 +542,100 @@ class StepCallable:
                 if name not in self.op.input_args:
                     self.get_storage(name).device = "npu"
 
-    def _check(self, index, step_op: Operator, names, inputs, out, spec) -> None:
-        """Hold step ``index``'s NPU output to its reference on the same inputs.
+    def _reference(
+        self, step_op: Operator, args
+    ) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        """``step_op``'s inputs as its buffers hold them, and its reference on
+        them: one result per buffer it writes, in declaration order.
+        """
+        specs = step_op.buffers
+        inputs = [
+            buf.to("cpu").numpy_view()[: spec.elements].reshape(spec.shape).copy()
+            for buf, spec in zip(args, specs)
+            if spec.direction.fills
+        ]
+        outputs = [
+            (buf, spec)
+            for buf, spec in zip(args, specs)
+            if spec.direction is Direction.OUT
+        ]
+        # A reference that takes its outputs writes them in place, keeping
+        # what it does not touch (a cache a Copy scatters into).
+        positional = [
+            p
+            for p in inspect.signature(step_op.reference).parameters.values()
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+        given = [
+            buf.to("cpu").numpy_view()[: spec.elements].reshape(spec.shape).copy()
+            for buf, spec in outputs[: max(0, len(positional) - len(inputs))]
+        ]
+        symbols = {
+            v.name: device_symbol(step_op, v)
+            for v in step_op.values
+            if not isinstance(v.member, Extent)
+        }
+        values = {
+            name: self.dispatch_values[symbol]
+            for name, symbol in symbols.items()
+            if symbol in self.dispatch_values
+        }
+        result = step_op.reference(*inputs, *given, **values)
+        if result is None:
+            result = tuple(given)
+        results = list(result) if isinstance(result, tuple) else [result]
+        written = [s for s in specs if s.direction is not Direction.IN]
+        if len(results) != len(written):
+            raise ValueError(
+                f"{type(step_op).__name__}.reference returned {len(results)} "
+                f"results for {len(written)} written buffers"
+            )
+        return inputs, [
+            np.asarray(r).reshape(s.shape) for r, s in zip(results, written)
+        ]
+
+    def _check(self, index, step_op: Operator, names, args, inputs, expected) -> None:
+        """Hold step ``index``'s NPU outputs to its reference on the same inputs.
 
         Raises:
-            RuntimeError: The output is outside the step's tolerance.
+            RuntimeError: An output is outside the step's tolerance.
         """
-        npu = out.to("cpu").numpy_view()[: math.prod(spec.shape)].copy()
-        npu = npu.reshape(spec.shape)
-        ref = step_op.reference(*inputs).reshape(spec.shape).astype(np.float32)
-        diff = np.abs(npu.astype(np.float32) - ref)
-        figures = (
-            f"max_abs={float(diff.max()):.4g}, mean_abs={float(diff.mean()):.4g}, "
-            f"max_rel={float((diff / (np.abs(ref) + 1e-6)).max()):.4g}, "
-            f"ref_max={float(np.abs(ref).max()):.4g}"
-        )
         tol = self.tolerance
         if tol is None:
             tol = step_op.resolved().tolerance()
             if tol is None or tol.range_frac is not None:
                 tol = self.FALLBACK_TOLERANCE
-        verdict = compare(
-            npu, ref, tol, bound=tol.bound(*inputs) if tol.bound is not None else None
-        )
-        *in_names, out_name = names
-        logger.info(
-            "[compare step %d] %s -> %s: %s",
-            index,
-            type(step_op).__name__,
-            out_name,
-            figures,
-        )
-        if not verdict:
-            raise RuntimeError(
-                f"[compare step {index}] {type(step_op).__name__} "
-                f"(name={step_op.name}) -> {out_name}: NPU output deviates from "
-                f"reference ({verdict.detail}; {figures}; inputs={in_names}; "
-                f"tolerance {tol})"
+        bound = tol.bound(*inputs) if tol.bound is not None else None
+        in_names = [
+            name for name, spec in zip(names, step_op.buffers) if spec.direction.fills
+        ]
+        written = [
+            (name, buf, spec)
+            for name, buf, spec in zip(names, args, step_op.buffers)
+            if spec.direction is not Direction.IN
+        ]
+        for (out_name, buf, spec), ref in zip(written, expected):
+            npu = buf.to("cpu").numpy_view()[: spec.elements].reshape(spec.shape)
+            ref = ref.astype(np.float32)
+            diff = np.abs(npu.astype(np.float32) - ref)
+            figures = (
+                f"max_abs={float(diff.max()):.4g}, "
+                f"mean_abs={float(diff.mean()):.4g}, "
+                f"max_rel={float((diff / (np.abs(ref) + 1e-6)).max()):.4g}, "
+                f"ref_max={float(np.abs(ref).max()):.4g}"
             )
+            verdict = compare(npu.copy(), ref, tol, bound=bound)
+            logger.info(
+                "[compare step %d] %s -> %s: %s",
+                index,
+                type(step_op).__name__,
+                out_name,
+                figures,
+            )
+            if not verdict:
+                raise RuntimeError(
+                    f"[compare step {index}] {type(step_op).__name__} "
+                    f"(name={step_op.name}) -> {out_name}: NPU output deviates "
+                    f"from reference ({verdict.detail}; {figures}; "
+                    f"inputs={in_names}; tolerance {tol})"
+                )
