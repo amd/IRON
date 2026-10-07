@@ -12,7 +12,9 @@ tools and device it is compiled with, as mlir-aie's compile cache keys it),
 the per-call values it was run at and the contents of the inputs it was
 given. Editing how a design is generated therefore misses rather than
 reusing a stale time. A configure calibration is kept the same way, keyed
-on its pair's entries, and so is the twin a design was measured beside.
+on its pair's entries, and so are the twin a design was measured beside and
+the verdict on a width judged against its default. Reference and tolerance
+code is in no key: after editing one, measure again with ``remeasure``.
 """
 
 from __future__ import annotations
@@ -66,7 +68,21 @@ class Measurement:
         )
 
 
-Record = TypeVar("Record", Measurement, Calibration)
+@dataclasses.dataclass(frozen=True)
+class Accuracy:
+    """A width whose output is not its default's, judged against its
+    reference by the default's gate and its own.
+
+    Attributes:
+        detail: The first output a gate refused, and why; empty if within.
+    """
+
+    within: bool
+    detail: str
+    measured: str  # ISO date
+
+
+Record = TypeVar("Record", Measurement, Calibration, Accuracy)
 
 
 class CostCache:
@@ -127,13 +143,22 @@ class CostCache:
         """
         return hashlib.sha256(repr(("beside", twin, entry)).encode()).hexdigest()[:32]
 
+    @staticmethod
+    def judged_key(default: str, entry: str) -> str:
+        """The entry the design at ``entry`` is kept in as judged against
+        its default's, at ``default``.
+        """
+        return hashlib.sha256(repr(("judged", default, entry)).encode()).hexdigest()[
+            :32
+        ]
+
     def get(self, key: str, kind: type[Record]) -> Record | None:
         path = self.directory / f"{key}.json"
         if not path.exists():
             return None
         return kind(**json.loads(path.read_text()))
 
-    def put(self, key: str, record: Measurement | Calibration) -> None:
+    def put(self, key: str, record: Measurement | Calibration | Accuracy) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / f"{key}.json"
         partial = path.with_suffix(f".{os.getpid()}")

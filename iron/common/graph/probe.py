@@ -37,14 +37,16 @@ from collections.abc import Callable, Mapping, Sequence
 
 import aie.utils as aie_utils
 import numpy as np
+from aie.utils import bfp
 
+from .. import harness
 from ..declare import Direction, Operator
 from ..declare.bound import BoundBuffer, BoundValue
 from ..design import device_symbol
 from ..image.callable import FullELFCallable, StepCallable
 from ..image.sequence import OperatorSequence
 from .compiled import CompiledGraph
-from .costcache import CostCache, Measurement
+from .costcache import Accuracy, CostCache, Measurement
 from .fold import folded, replaced
 from .narrowing import (
     Calibration,
@@ -156,11 +158,15 @@ class Standalone:
         ).compile()
         self.callable = self.sequence.get_callable()
         rng = np.random.default_rng(seed)
+        self._before: dict[str, np.ndarray] = {}
         for k in self._filled:
             op = self.steps[k]
             for buf, name_ in zip(op.buffers, self._names(k, op)):
                 if buf.direction.fills:
-                    self._bytes(name_)[: buf.nbytes] = self._content(buf, inputs, rng)
+                    content = self._content(buf, inputs, rng)
+                    self._bytes(name_)[: buf.nbytes] = content
+                    if buf.direction.drains:
+                        self._before[name_] = content.copy()
         ops = {id(op): op for op in self.steps}.values()
         # An extent read only through its derivations has no word.
         symbols = {
@@ -206,27 +212,80 @@ class Standalone:
     def _bytes(self, name: str) -> np.ndarray:
         return self.callable.get_buffer(name).numpy_view().view(np.uint8)
 
-    def output_bytes(self) -> bytes:
-        """What the steps wrote, after one run: every out and in-out buffer,
-        along a bounded axis only the rows under the call's bound.
-        """
+    def digest(self) -> str:
+        """Run once: the sha256 of what every step ``written``."""
         self.callable()
-        written = []
-        for k in self._filled:
-            op = self.steps[k]
-            for buf, name in zip(op.buffers, self._names(k, op)):
-                if not buf.direction.drains:
-                    continue
-                data = self._bytes(name)[: buf.nbytes]
-                under = [slice(None)] * len(buf.shape)
-                for extent in op.bound_extents:
-                    axis = buf.extent_axis(op.value(extent).member)
-                    if axis is not None:
-                        under[axis] = slice(0, self._values[extent])
-                if under != [slice(None)] * len(buf.shape):
-                    data = data.reshape(*buf.shape, -1)[tuple(under)]
-                written.append(data.tobytes())
-        return b"".join(written)
+        return hashlib.sha256(
+            b"".join(
+                a.tobytes() for k in self._filled for a in self.written(k).values()
+            )
+        ).hexdigest()
+
+    def inputs(self, k: int = 0) -> dict[str, np.ndarray]:
+        """What step ``k`` was given, by buffer name: views of the device
+        buffers, an in-out one as it was before any run.
+        """
+        op = self.steps[k]
+        out = {}
+        for buf, name in zip(op.buffers, self._names(self._slot[k], op)):
+            if buf.direction.fills:
+                data = self._before.get(name, self._bytes(name)[: buf.nbytes])
+                out[buf.name] = data.view(buf.host_dtype).reshape(buf.host_shape)
+        return out
+
+    def written(self, k: int = 0) -> dict[str, np.ndarray]:
+        """What step ``k`` wrote in the last run, by buffer name: along a
+        bounded axis only the rows under the call's bound.
+        """
+        op = self.steps[k]
+        out = {}
+        for buf, name in zip(op.buffers, self._names(self._slot[k], op)):
+            if not buf.direction.drains:
+                continue
+            under = [slice(None)] * len(buf.shape)
+            for extent in op.bound_extents:
+                axis = buf.extent_axis(op.value(extent).member)
+                if axis is not None:
+                    under[axis] = slice(0, self._values[extent])
+            data = self._bytes(name)[: buf.nbytes].reshape(*buf.shape, -1)
+            # A block-float buffer stays its blocks' bytes, as its host shape is.
+            data = np.ascontiguousarray(data[tuple(under)]).view(buf.host_dtype)
+            out[buf.name] = data if bfp.is_bfp(buf.dtype) else data[..., 0]
+        return out
+
+
+def judge(
+    default: Operator,
+    op: Operator,
+    inputs: Mapping[str, np.ndarray],
+    written: Mapping[str, np.ndarray],
+    values: Mapping[str, int] | None = None,
+) -> Accuracy | None:
+    """Whether ``op``'s output ``written`` on ``inputs`` is within the gate
+    of ``default``, the width it would replace, and within its own.
+
+    Returns:
+        None where a gate is missing or exact, or `values` bound an extent
+        short of its length: there only a bit-identical width is admitted.
+    """
+    gates = {"the default's": default.gate(), "its own": op.gate()}
+    if any(g is None or g.kind == "exact" for g in gates.values()):
+        return None
+    values = values or {}
+    for extent in op.bound_extents:
+        if values.get(extent) != getattr(op, op.value(extent).member.field.name):
+            return None
+    want = harness.expected(op, inputs, values)
+    for which, gate in gates.items():
+        bound = gate.bound(*inputs.values()) if gate.kind == "bound" else None
+        for name, reference in want.items():
+            verdict = harness.verify_buffer(
+                written[name], name, reference, gate, bound=bound
+            )
+            if not verdict:
+                detail = f"{name} under {which} gate: {verdict.detail}"
+                return Accuracy(False, detail, CostTable.today())
+    return Accuracy(True, "", CostTable.today())
 
 
 def time_interleaved(
@@ -401,7 +460,7 @@ def measure_steps(
             )
             for d, _, _ in runs
         ]
-        outputs = [hashlib.sha256(run.output_bytes()).hexdigest() for run in short]
+        outputs = [run.digest() for run in short]
         times = time_interleaved([r.callable for r in short + long], timing)
         n = len(runs)
         for i, (d, entry, of) in enumerate(runs):

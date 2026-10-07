@@ -16,7 +16,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common import Scratchpad
 from iron.common.declare import Profile
-from iron.common.graph.costcache import CostCache, Measurement
+from iron.common.graph.costcache import Accuracy, CostCache, Measurement
 from iron.common.graph.fold import folded
 from iron.common.graph.narrowing import (
     Calibration,
@@ -28,8 +28,10 @@ from iron.common.graph.narrowing import (
     model_us,
     variants,
 )
+from iron.common.graph.probe import judge
+from iron.common.harness import vectors
 from iron.lm.layers import SwiGLU
-from iron.operators import GELU, GEMM, MHA, ElementwiseAdd, RoPE, SiLU
+from iron.operators import GELU, GEMM, MHA, ElementwiseAdd, ReLU, RoPE, SiLU
 from iron.operators.gemv import Epilogue
 
 SIZE = 8192
@@ -374,3 +376,65 @@ def test_cache_entries_round_trip_per_platform_and_mode(tmp_path):
     assert CostCache("NPU Strix", "turbo", root=tmp_path).get("k", Measurement) is None
     # Exactness is against whichever width the table takes as default.
     assert m.cost("ab" * 32).exact and not m.cost("cd" * 32).exact
+    verdict = Accuracy(False, "C under the default's gate: 1 mismatch", "2026-10-07")
+    judged = CostCache.judged_key("k", "w")
+    assert judged not in {CostCache.beside_key("k", "w"), CostCache.pair_key("k", "w")}
+    cache.put(judged, verdict)
+    assert again.get(judged, Accuracy) == verdict
+
+
+def _gemm_judged(npu2):
+    """GEMM at its default tile_k and at 16, random inputs, its reference's
+    output, and each width's bound on C.
+    """
+    default = GEMM(M=256, K=256, N=256)
+    narrow = default.with_tunables(tile_k=16)
+    v = vectors(default)
+    bounds = [op.gate().bound(*v.inputs.values()) for op in (default, narrow)]
+    return default, narrow, v, bounds
+
+
+def test_a_width_within_its_default_s_gate_is_accurate(npu2):
+    default, narrow, v, _ = _gemm_judged(npu2)
+    verdict = judge(default, narrow, v.inputs, v.outputs)
+    assert verdict.within and verdict.detail == ""
+
+
+def test_a_width_past_its_default_s_bound_is_refused(npu2):
+    default, narrow, v, (bound, _) = _gemm_judged(npu2)
+    c = v["C"].astype(np.float32)
+    c[0, 0] += 2 * bound[0, 0]
+    verdict = judge(default, narrow, v.inputs, {"C": c.astype(bfloat16)})
+    assert not verdict.within and verdict.detail.startswith("C under the default's")
+
+
+def test_a_width_is_never_judged_by_its_looser_bound_alone(npu2):
+    # tile_k=16 rounds the accumulator four times as often as 64 does.
+    default, narrow, v, (tight, loose) = _gemm_judged(npu2)
+    c = v["C"].astype(np.float32)
+    c[0, 0] += 1.5 * tight[0, 0]
+    c = c.astype(bfloat16)
+    err = abs(float(c[0, 0]) - float(v["C"][0, 0]))
+    assert tight[0, 0] < err < loose[0, 0]
+    assert judge(narrow, narrow, v.inputs, {"C": c}).within
+    assert not judge(default, narrow, v.inputs, {"C": c}).within
+
+
+def test_a_declared_gate_judges_before_the_contract(npu2):
+    rope = RoPE(rows=8, cols=64)
+    v = vectors(rope, **RoPE.test.draw(rope))
+    off = (v["y"].astype(np.float32) * 1.03).astype(bfloat16)
+    assert judge(rope, rope, v.inputs, {"y": off}).within
+    assert not judge(rope, rope, v.inputs, {"y": -v["y"]}).within
+
+
+def test_an_exact_gate_or_a_short_bound_is_not_judged(npu2):
+    relu = ReLU(size=64, num_aie_columns=1, tile_size=64)
+    v = vectors(relu)
+    assert judge(relu, relu, v.inputs, v.outputs) is None
+    rope = Rotate().trace(x=(64, 64), angles=(64, 64)).steps[0].op
+    v = vectors(rope)
+    full = dict(valid=64, valid_angles=64)
+    assert judge(rope, rope, v.inputs, v.outputs, full).within
+    short = dict(valid=32, valid_angles=32)
+    assert judge(rope, rope, v.inputs, v.outputs, short) is None
