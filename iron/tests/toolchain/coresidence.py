@@ -96,11 +96,12 @@ def _shim_pinned(col: int, channel: int) -> str:
     return device
 
 
-def _routed(allocated: bool) -> str:
+def _routed(allocated: bool, logical: bool = False) -> str:
     """Rows routed by hand from shim (0, 0) MM2S 1 into shim (1, 0) S2MM 0,
     (0, 0)'s BDs written through its TileControl by packets from (1, 0)
     MM2S 0: a per-call gather's routes, with or without the allocations
-    that tell the fifo lowering its channels are taken.
+    that tell the fifo lowering its channels are taken, on physical tiles
+    or on logical ones pinned to them (as a ``Gather`` builds them).
     """
     allocations = (
         """
@@ -110,10 +111,15 @@ def _routed(allocated: bool) -> str:
         if allocated
         else ""
     )
+    t0, t1 = (
+        ("aie.logical_tile<ShimNOCTile>(0, 0)", "aie.logical_tile<ShimNOCTile>(1, 0)")
+        if logical
+        else ("aie.tile(0, 0)", "aie.tile(1, 0)")
+    )
     return f"""
 aie.device(npu2) {{
-  %t0 = aie.tile(0, 0)
-  %t1 = aie.tile(1, 0)
+  %t0 = {t0}
+  %t1 = {t1}
   aie.packet_flow(29) {{
     aie.packet_source<%t1, DMA : 0>
     aie.packet_dest<%t0, TileControl : 0>
@@ -254,10 +260,12 @@ def test_pins_on_distinct_shim_channels_fit(col, channel):
     assert fits({"x": _shim_pinned(0, 1), "y": _shim_pinned(col, channel)}) is None
 
 
-def test_a_hand_routed_shim_channel_needs_its_allocation():
+@pytest.mark.parametrize("logical", [False, True], ids=["physical", "logical"])
+def test_a_hand_routed_shim_channel_needs_its_allocation(logical):
     # Unallocated, (0, 0) MM2S 1 is free to the fifo lowering, which gives
     # it to the pinned fifo too: one port feeding both routes.
-    reason = fits({"x": _routed(allocated=False), "y": _shim_pinned(0, 1)})
+    routed = _routed(allocated=False, logical=logical)
+    reason = fits({"x": routed, "y": _shim_pinned(0, 1)})
     assert reason is not None and "shim_dma_allocation" in reason
     assert "(0, 0) MM2S channel 1" in reason
 
@@ -276,8 +284,9 @@ def test_an_allocated_route_holds_its_channels(col, channel, taken):
         assert reason is None
 
 
-def test_a_tile_control_route_claims_the_dma_program():
-    reason = fits({"x": _routed(allocated=True), "y": _SHIM_PROGRAM})
+@pytest.mark.parametrize("logical", [False, True], ids=["physical", "logical"])
+def test_a_tile_control_route_claims_the_dma_program(logical):
+    reason = fits({"x": _routed(allocated=True, logical=logical), "y": _SHIM_PROGRAM})
     assert reason is not None and "TileControl" in reason and "(0, 0)" in reason
 
 

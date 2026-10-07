@@ -22,7 +22,7 @@ from iron.common.graph.narrowing import (
     model_us,
     variants,
 )
-from iron.operators import GELU, ElementwiseAdd, SiLU
+from iron.operators import GELU, GEMM, ElementwiseAdd, SiLU
 
 SIZE = 8192
 TILE = 256
@@ -88,6 +88,13 @@ def test_variants_widen_a_default_its_resolution_keeps_narrow(npu2):
     found = variants(ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=2), npu2)
     assert dict(found[0].widths)["num_aie_columns"] == 2
     assert {dict(v.widths)["num_aie_columns"] for v in found[1:]} == {8, 4, 2, 1}
+
+
+def test_variants_give_each_design_once(npu2):
+    # GEMM resolves n_shim_mem_a to at most its columns: many settings, one design.
+    found = variants(GEMM(M=2560, K=768, N=3072, b_col_maj=True), npu2)
+    assert len({v.key for v in found}) == len(found)
+    assert [dict(v.widths)["num_aie_columns"] for v in found] == [8, 4, 2, 1]
 
 
 def test_a_narrowed_operator_keeps_its_fixed_fields():

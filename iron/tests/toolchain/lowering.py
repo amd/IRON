@@ -27,7 +27,7 @@ import pytest
 from iron.common import Unresolvable
 from iron.common.design import OperatorDesign
 from iron.tests.common.cases import CASES
-from iron.tests.toolchain.tools import AIECC, requires
+from iron.tests.toolchain.tools import AIECC, PEANO, requires
 
 pytestmark = requires("aiecc", "peano")
 
@@ -59,6 +59,7 @@ def lower(op, tmp_path, name=None):
         [
             str(AIECC),
             "--get-npu-insts",
+            f"--peano={PEANO}",
             f"--npu-insts-name={name}.bin",
             f"--output-dir={out}",
             f"--tmpdir={tmp_path / 'prj'}",

@@ -31,7 +31,7 @@ from ..declare.profile import Profile
 from ..design import device_symbol
 from ..image.allocator import ArenaPlan
 from ..image.artifacts import Parameter
-from ..image.callable import FullELFRun, ScratchArena
+from ..image.callable import FullELFCallable, FullELFRun, ScratchArena
 from ..image.coresidence import AdjacentPacking
 from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
@@ -488,6 +488,7 @@ class CompiledGraph:
                 w for w in self.words if w.symbol in self.artifacts.parameters
             ]
         self._callable = None
+        self._addressed: dict[str, tuple[Any, int]] = {}
         # Shared with the arena when there is one: its weights are every image's.
         self._loaded: set = set() if arena is None else arena.loaded
 
@@ -541,7 +542,7 @@ class CompiledGraph:
         release: Callable[[np.ndarray], None] | None = None,
         piece_bytes: int = UPLOAD_PIECE,
     ) -> None:
-        view = self.callable.get_buffer(name).numpy_view()
+        view = self.callable.get_storage(name).numpy_view()[: np.size(tensor)]
         _store(view, tensor, release, piece_bytes)
 
     def upload(
@@ -583,6 +584,15 @@ class CompiledGraph:
         """Program this version's Emit to start a call of ``target``."""
         if self.emit is None:
             raise ValueError(f"{self.traced.name}: this version has no Emit step")
+        if target.traced.addresses:
+            tables = sorted(
+                {buffer for buffer, _, _ in target.traced.addresses.values()}
+            )
+            raise ValueError(
+                f"{target.traced.name}: an Emit cannot start it: its gather by ids "
+                f"the device made reads the address of {tables}, which the host "
+                f"writes each call and no carried value holds"
+            )
         program = compose(self.emit, self.traced.carry, target.words, target.parameters)
         self.write(self.emit.program, program)
 
@@ -600,8 +610,27 @@ class CompiledGraph:
                     f"{handle.shape}, got {tuple(tensor.shape)}; a new shape is a "
                     f"new compile"
                 )
+            encoder = self.traced.encoders.get(handle.name)
+            if encoder is not None:
+                tensor = encoder[1](tensor, self._address(encoder[0]))
             self._copy_in(handle.name, tensor)
         self._write_values(values, run)
+
+    def _address(self, name: str) -> int:
+        """The device address of buffer ``name``, which a full ELF keeps put
+        until its arena grows (a new view).
+        """
+        if not isinstance(self.callable, FullELFCallable):
+            raise TypeError(
+                f"{self.traced.name}: only a full ELF addresses its buffers "
+                f"from the host"
+            )
+        view = self.callable.get_buffer(name)
+        if name not in self._addressed or self._addressed[name][0] is not view:
+            storage = view.storage
+            root = storage.binding_handle(0, storage.nbytes)
+            self._addressed[name] = (view, root.address() + view.storage_offset)
+        return self._addressed[name][1]
 
     def _next_values(self, values: Mapping[str, int]) -> Carry:
         nxt: dict[str, int] = {}
@@ -633,6 +662,9 @@ class CompiledGraph:
             head[:n] = [values[name] for name in self.emit.carried]
         if not self.words:
             return
+        values = dict(values)
+        for name, (buffer, address_words, word) in self.traced.addresses.items():
+            values[name] = address_words(self._address(buffer))[word]
         words = {w.symbol: np.dtype(w.dtype).type(w(values)) for w in self.words}
         (self.callable if run is None else run).write_values(words)
 

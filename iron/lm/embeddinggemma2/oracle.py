@@ -5,6 +5,7 @@
 NPU encoder is judged by, and its tokenizer and task prompts.
 """
 
+from collections.abc import Mapping
 from types import SimpleNamespace
 
 import numpy as np
@@ -111,13 +112,29 @@ class EmbeddingGemmaOracle:
         p /= p.sum(axis=-1, keepdims=True)
         return (p @ v.transpose(1, 0, 2)).transpose(1, 0, 2).reshape(n, H * D)
 
-    def token_states(self, tokens) -> np.ndarray:
-        """Each token's `(n, out_dim)` output, before pooling."""
+    def token_states(self, tokens, soft: Mapping[int, np.ndarray] = {}) -> np.ndarray:
+        """Each token's `(n, out_dim)` output, before pooling.
+
+        Args:
+            tokens: The token ids.
+            soft: Each placeholder id's soft tokens `(k, emb_dim)`, the
+                `k` placeholders' embeddings in order.
+
+        Raises:
+            ValueError: A placeholder's count is not its soft tokens'.
+        """
         c = self.config
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
         n = tokens.size
         # Hugging Face rounds the scale to the weights' dtype: 22.625 in bfloat16 only.
         x = self.embedding[tokens].astype(np.float32) * np.float32(np.sqrt(c.emb_dim))
+        for token, rows in soft.items():
+            at = tokens == token
+            if at.sum() != len(rows):
+                raise ValueError(
+                    f"{at.sum()} placeholders {token} for {len(rows)} soft tokens"
+                )
+            x[at] = rows
         ple = (x @ self.ple.T) * np.float32(c.emb_dim**-0.5)
         ple = rms_norm(ple.reshape(n, c.n_layers, c.ple_dim), self.ple_norm, c.eps)
         angles = {
@@ -128,9 +145,11 @@ class EmbeddingGemmaOracle:
             x = self.layer(i, angles[i in c.global_layers], w, x, ple[:, i])
         return rms_norm(x, self.norm, c.eps) @ self.projection.T
 
-    def __call__(self, tokens, dims: int | None = None) -> np.ndarray:
-        """The embedding of `tokens`: the mean of their states, its first
-        `dims` L2-normalized.
+    def __call__(
+        self, tokens, dims: int | None = None, soft: Mapping[int, np.ndarray] = {}
+    ) -> np.ndarray:
+        """The embedding of `tokens`, with `soft` as `token_states` takes it:
+        the mean of their states, its first `dims` L2-normalized.
         """
-        e = self.token_states(tokens).mean(axis=0)[:dims]
+        e = self.token_states(tokens, soft).mean(axis=0)[:dims]
         return e / np.linalg.norm(e)

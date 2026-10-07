@@ -30,7 +30,7 @@ from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from .. import declare
 from ..declare import Operator
 from ..declare.bound import BoundValue
-from .external import ExternalSequence
+from .external import ExternalSequence, ImageRuntime, ShimChannel
 from .runtime import Sequence
 from .target import Target
 
@@ -105,7 +105,12 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
             seq.preamble()
         seq.run()
 
-    rt = Runtime(sequence, fn_args + params)
+    channels = [c for c in built if isinstance(c, ShimChannel)]
+    rt = (
+        ImageRuntime(sequence, fn_args + params, channels, [])
+        if channels
+        else Runtime(sequence, fn_args + params)
+    )
     # Before resolving: the sequence body, generated last, may address any of it.
     for obj in built:
         if isinstance(obj, (Flow, PacketFlow)):
@@ -114,10 +119,10 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
             rt.add_lock(obj)
         elif isinstance(obj, TileDma):
             rt.add_tile_dma(obj)
-        elif not isinstance(obj, (Worker, WorkerRuntimeBarrier)):
+        elif not isinstance(obj, (Worker, WorkerRuntimeBarrier, ShimChannel)):
             raise TypeError(
                 f"{type(op).__name__}.array() returns Workers, WorkerRuntimeBarriers, "
-                f"Flows, PacketFlows, Locks and TileDmas; got {obj!r}"
+                f"Flows, PacketFlows, Locks, TileDmas and ShimChannels; got {obj!r}"
             )
     prog = Program(op.device(target), rt, workers=workers)
     if op.trace is not None:

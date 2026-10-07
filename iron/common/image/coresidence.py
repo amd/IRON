@@ -8,10 +8,11 @@ sequence configures the pack once and runs any member's sequence against it.
 A member's cores idle on the lock its own sequence sets while another runs;
 dataflow between members still goes through DDR. Two members may share a
 pinned tile unless both program its core or its DMA, which a route into its
-TileControl does too. The fifo lowering allocates shim channels around
-``aie.shim_dma_allocation`` ops alone, so a member routing a pinned shim
-channel by hand must allocate it. Whether the union fits is for aiecc's
-placer, fifo lowering and router to say (``fits``).
+TileControl does too; a logical tile given its column and row is pinned. The
+fifo lowering allocates shim channels around ``aie.shim_dma_allocation`` ops
+alone, so a member routing a pinned shim channel by hand must allocate it.
+Whether the union fits is for aiecc's placer, fifo lowering and router to
+say (``fits``).
 """
 
 from __future__ import annotations
@@ -113,7 +114,13 @@ def _body(device: aie.DeviceOp) -> list[ir.OpView]:
 
 
 def _pinned_tile(op: ir.OpView) -> tuple[int, int] | None:
-    if not isinstance(op, aie.TileOp):
+    """The physical tile ``op`` names: an ``aie.tile``'s, or a logical
+    tile's given both its column and its row.
+    """
+    if isinstance(op, aie.LogicalTileOp):
+        if op.col is None or op.row is None:
+            return None
+    elif not isinstance(op, aie.TileOp):
         return None
     return (
         ir.IntegerAttr(op.operation.attributes["col"]).value,
@@ -220,7 +227,7 @@ def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceO
                     continue
                 kernels[symbol] = text
             coords = _pinned_tile(op)
-            if coords is not None:
+            if coords is not None and isinstance(op, aie.TileOp):
                 if coords in tiles:
                     op.result.replace_all_uses_with(tiles[coords])
                     op.operation.erase()

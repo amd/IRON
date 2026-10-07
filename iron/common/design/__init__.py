@@ -22,7 +22,7 @@ receives, ``runtime`` what an operator's ``sequence(rt)`` receives,
 
 from .bd import BdLimits
 from .build import OperatorDesign, build_design, device_symbol
-from .external import ExternalSequence
+from .external import ExternalSequence, ShimChannel
 from .runtime import Sequence
 from .target import Target
 
@@ -31,6 +31,7 @@ __all__ = [
     "ExternalSequence",
     "OperatorDesign",
     "Sequence",
+    "ShimChannel",
     "Target",
     "build_design",
     "device_symbol",

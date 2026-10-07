@@ -22,9 +22,10 @@ class Handle:
 
     ``h[key]`` takes numpy's basic indexing, on one axis a per-call
     ``Value`` (``keys[:, pos]``), and on the leading axis an integer array
-    of rows fixed when the graph is traced (``table[ids]``). A contiguous
-    static region is a slice any operator takes; any other view, a gather
-    included, is an access pattern only a copy takes.
+    of rows fixed when the graph is traced (``table[ids]``) or a 1-D integer
+    handle naming the rows each call takes. A contiguous static region is a
+    slice any operator takes; any other view, a gather included, is an
+    access pattern only a copy takes.
     """
 
     __slots__ = (
@@ -37,6 +38,7 @@ class Handle:
         "tap",
         "index_by",
         "bounds",
+        "gather_by",
     )
 
     def __init__(
@@ -50,6 +52,7 @@ class Handle:
         tap=None,
         index_by=None,
         bounds=None,
+        gather_by=None,
     ):
         self.shape = tuple(int(s) for s in shape)
         self.dtype = dtype
@@ -63,6 +66,8 @@ class Handle:
         self.index_by: Affine | None = index_by  # a view's per-call element offset
         # axis -> its leading entries valid this call (``x[:n]``)
         self.bounds: dict[int, Affine] = dict(bounds or {})
+        # The handle whose ids pick the rows each call, for a gather.
+        self.gather_by: Handle | None = gather_by
 
     @property
     def elements(self) -> int:
@@ -90,7 +95,7 @@ class Handle:
             shape = tuple(shape[0])
         if prod(shape) != self.elements:
             raise ValueError(f"cannot reshape {self!r} to {list(shape)}")
-        if self.tap is not None:
+        if self.tap is not None or self.gather_by is not None:
             raise ValueError(f"cannot reshape a view {self!r}; reshape what it views")
         bounds = _rescale_bounds(self, shape)
         return Handle(
@@ -107,7 +112,7 @@ class Handle:
         """The same buffer walked with its axes permuted (no data moves)."""
         if len(axes) == 1 and isinstance(axes[0], (tuple, list)):
             axes = tuple(axes[0])
-        if self.tap is not None:
+        if self.tap is not None or self.gather_by is not None:
             raise ValueError(
                 f"cannot transpose a view {self!r}; transpose what it views"
             )
@@ -136,6 +141,30 @@ class Handle:
         if len(entries) > rank:
             raise IndexError(f"too many indices for shape {self.shape}")
         entries += [slice(None)] * (rank - len(entries))
+        if isinstance(entries[0], _Viewed):
+            entries[0] = entries[0]._as_operand()
+        if isinstance(entries[0], Handle):
+            ids = entries[0]
+            if (
+                ids.tap is not None
+                or ids.bounds
+                or len(ids.shape) != 1
+                or not np.issubdtype(np.dtype(ids.dtype), np.integer)
+                or rank < 2
+            ):
+                raise IndexError(
+                    f"a gather per call takes a whole 1-D integer handle as the "
+                    f"rows of a table of rank 2 or more; got {ids!r} on {self!r}"
+                )
+            if not all(isinstance(e, slice) and e == slice(None) for e in entries[1:]):
+                raise IndexError("a gather takes the whole of every axis but the first")
+            if self.role not in ("weight", "state") or self.bounds:
+                raise TypeError(
+                    f"a gather per call reads a whole table the graph holds, not "
+                    f"{self!r}"
+                )
+            shape = (ids.shape[0], *self.shape[1:])
+            return Handle(shape, self.dtype, self.name, "view", self, 0, gather_by=ids)
         if isinstance(entries[0], np.ndarray):
             ids, n = entries[0], self.shape[0]
             if ids.ndim != 1 or not np.issubdtype(ids.dtype, np.integer) or rank < 2:
@@ -235,6 +264,8 @@ class _Viewed:
         return tracer.viewed(self)
 
     def __getitem__(self, key):
+        if isinstance(key, _Viewed):  # a gather by the ids a state holds
+            key = key._as_operand()
         return self._as_operand()[key]
 
     def reshape(self, *shape):

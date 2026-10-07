@@ -275,14 +275,25 @@ def test_a_gather_refuses_what_it_cannot_lower(index, match):
         Bad().trace(x=(V, W))
 
 
+@pytest.mark.parametrize(
+    "rows", [None, N * D, G * N * D], ids=["source", "head", "flat"]
+)
 @pytest.mark.parametrize("channels", [1, 2, 4])
-def test_a_permuting_copy_keeps_its_order_on_every_channel_count(channels):
-    """The channels split the innermost axis of both sides, so the default
-    output is rows as wide as the source's: each channel's share of a source
-    row lands in the same share of the output row.
+def test_a_permuting_copy_keeps_its_order_on_every_channel_count(channels, rows):
+    """The channels split both sides at the innermost extent they share, so
+    each channel's share of a source row lands where the copy puts it,
+    whatever the output's rows (by default as wide as the source's).
     """
+    dst = (
+        {}
+        if rows is None
+        else dict(dst=TensorAccessPattern.full((G * N * D // rows, rows)))
+    )
     op = Copy(
-        src=_permuted(N, G, D), input_buffer_size=N * G * D, num_channels=channels
+        src=_permuted(N, G, D),
+        input_buffer_size=N * G * D,
+        num_channels=channels,
+        **dst,
     )
     x = np.arange(N * G * D, dtype=np.float32).reshape(N, G, D)
     assert (op.reference(x).reshape(G, N, D) == x.transpose(1, 0, 2)).all()
@@ -342,3 +353,21 @@ def test_each_channel_drains_the_elements_it_fills(name):
         assert len(moved["in"]) == len(moved["out"]), f"channel {c}"
         got[moved["out"]] = x[moved["in"]]
     assert (got == want).all()
+
+
+class _Views(iron.Graph):
+    def __init__(self):
+        self.cache = iron.state((G, L, D), dtype=bfloat16)
+
+    def body(self, x):
+        return Copy(x.reshape(N, G, D).transpose(1, 0, 2)), Copy(self.cache[:, 0:N])
+
+
+def test_a_copy_of_a_view_has_the_view_s_shape():
+    graph = _Views()
+    t = graph.trace(x=(N, G * D))
+    assert [h.shape for h in t.returned] == [(G, N, D), (G, N, D)]
+    x = np.arange(N * G * D, dtype=np.float32).reshape(N, G * D).astype(bfloat16)
+    transposed, cached = graph.reference(x)
+    assert transposed.shape == cached.shape == (G, N, D)
+    assert (transposed == x.reshape(N, G, D).transpose(1, 0, 2)).all()

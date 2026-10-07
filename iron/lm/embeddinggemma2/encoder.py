@@ -21,11 +21,13 @@ import numpy as np
 from iron.common.graph.narrowing import CostTable, JointNarrowing
 from iron.lm import Checkpoint, load_weights
 
-from .model import EMBEDDINGGEMMA_2, EmbeddingGemma, layout, text_tensors
+from .audio import model as audio_model
+from .audio.oracle import AudioOracle
+from .model import COSTS, EMBEDDINGGEMMA_2, EmbeddingGemma, layout, text_tensors
+from .multimodal import Multimodal
 from .oracle import PROMPTS, EmbeddingGemmaOracle, tokenizer
-
-# Where `python -m iron.lm.embeddinggemma2.tune` writes its measurements.
-COSTS = Path(__file__).with_name("costs_npu2.json")
+from .vision import model as vision_model
+from .vision.oracle import VisionOracle
 
 
 class Encoder:
@@ -36,9 +38,17 @@ class Encoder:
         max_tokens: The longest prompt, its task prefix included.
         costs: The cost table the designs are narrowed and packed by; None
             leaves them as they resolve.
+        towers: Also load the audio and vision towers, so that a call may
+            take a clip and an image.
     """
 
-    def __init__(self, directory, max_tokens: int = 512, costs: Path | None = None):
+    def __init__(
+        self,
+        directory,
+        max_tokens: int = 512,
+        costs: Path | None = None,
+        towers: bool = False,
+    ):
         directory = Path(directory)
         self.config = EMBEDDINGGEMMA_2
         tensors = Checkpoint(directory / "model.safetensors").tensors
@@ -46,20 +56,68 @@ class Encoder:
             text_tensors(tensors), layout(self.config), self.config.n_layers
         )
         self.tokenizer = tokenizer(directory / "tokenizer.json")
-        self.graph = EmbeddingGemma(self.config, self.weights, max_tokens)
+        if towers:
+            A, V = audio_model.AUDIO, vision_model.VISION
+            self.audio_weights = load_weights(
+                audio_model.audio_tensors(tensors), audio_model.layout(A), A.n_layers
+            )
+            self.vision_weights = load_weights(
+                vision_model.vision_tensors(tensors), vision_model.layout(V), V.n_layers
+            )
+            self.graph = Multimodal(
+                self.config,
+                self.weights,
+                max_tokens,
+                audio_model.AudioTower(A, self.audio_weights),
+                vision_model.VisionTower(V, self.vision_weights),
+            )
+        else:
+            self.graph = EmbeddingGemma(self.config, self.weights, max_tokens)
         self.graph.load(JointNarrowing(CostTable(costs)) if costs else None)
 
-    def tokens(self, text: str, task: str) -> list[int]:
-        """`text` behind `task`'s prompt (`PROMPTS`), with BOS and EOS."""
-        return self.tokenizer.encode(PROMPTS[task] + text).ids
+    def tokens(
+        self, text: str, task: str, audio_tokens: int = 0, image_tokens: int = 0
+    ) -> list[int]:
+        """`text` behind `task`'s prompt (`PROMPTS`), with BOS and EOS, each
+        `<|audio|>` and `<|image|>` in it a run of that many placeholders
+        between its markers, as the processor expands them.
+        """
+        c, out = self.config, []
+        runs = {
+            c.audio_token: [c.boa, *[c.audio_token] * audio_tokens, c.eoa],
+            c.image_token: [c.boi, *[c.image_token] * image_tokens, c.eoi],
+        }
+        for t in self.tokenizer.encode(PROMPTS[task] + text).ids:
+            out += runs.get(t, [t])
+        return out
 
-    def __call__(self, text: str, task: str, dims: int = 768) -> np.ndarray:
-        """The embedding of `text` for `task`, its first `dims` renormalized."""
-        return self.graph.encode(self.tokens(text, task), dims)
+    def __call__(
+        self, text: str, task: str, dims: int = 768, audio=None, image=None
+    ) -> np.ndarray:
+        """The embedding of `text` for `task`, its first `dims` renormalized,
+        with one clip's `audio` `(features, frames)` and one image's `image`
+        `(pixel_values, positions)` at their placeholders.
+        """
+        if audio is None and image is None:
+            return self.graph.encode(self.tokens(text, task), dims)
+        audio_tokens = 0 if audio is None else audio_model.AUDIO.tokens(audio[1])
+        image_tokens = 0
+        if image is not None:
+            real = (np.asarray(image[1]) >= 0).all(axis=-1).sum()
+            image_tokens = int(real) // vision_model.VISION.pool**2
+        tokens = self.tokens(text, task, audio_tokens, image_tokens)
+        return self.graph.encode(tokens, dims, audio, image)
 
     def oracle(self) -> EmbeddingGemmaOracle:
         """The float32 encoder on the host, its weights widened to float32."""
         return EmbeddingGemmaOracle(self.config, self.weights)
+
+    def tower_oracles(self) -> tuple[AudioOracle, VisionOracle]:
+        """The float32 towers on the host, of an encoder loaded with `towers`."""
+        return (
+            AudioOracle(audio_model.AUDIO, self.audio_weights),
+            VisionOracle(vision_model.VISION, self.vision_weights),
+        )
 
 
 def main():

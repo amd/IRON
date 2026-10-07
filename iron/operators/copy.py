@@ -11,19 +11,381 @@ reaches the copy as ``in_offset``/``out_offset``, an element offset.
 """
 
 import dataclasses
+import functools
+from collections.abc import Mapping
 from dataclasses import field
 from math import gcd, isqrt, prod
 from typing import Any, ClassVar
 
 import numpy as np
+from aie.dialects import aiex
+from aie.dialects.aie import DMAChannelDir, WireBundle
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import ObjectFifo, TaskGroup
+from aie.iron import (
+    ExternalFunction,
+    Flow,
+    ObjectFifo,
+    PacketFlow,
+    TaskGroup,
+    Worker,
+    WorkerRuntimeBarrier,
+)
+from aie.iron.device import Tile
+from aie.iron.runtime.dmatask import emit_shim_transfer
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import In, Operator, Out, Scratchpad, auto, param
-from iron.common.design import BdLimits
+from iron.common.design import BdLimits, ShimChannel
 from iron.common.testing import Case, Testing
+
+# kDDRAIEAddrOffset (TxnEncoding.h)
+APERTURE = 0x80000000
+
+
+def _control_header(beats: int, address: int) -> int:
+    """A control packet writing ``beats + 1`` words from ``address``, odd parity."""
+    header = (beats << 20) | address
+    return header | ((1 ^ (bin(header).count("1") & 1)) << 31)
+
+
+class Gather(Operator):
+    """``Copy(table[ids])`` with ``ids`` per call: the rows a call names.
+
+    For ids a graph input the host turns each call's ids into control
+    packets (``control_words``); for ids the device made, a
+    ``GatherWords`` step writes them into the template (``word_source``).
+    Shim (1, 0) streams the packets to shim (0, 0)'s
+    TileControl: each writes a buffer descriptor of (0, 0), its address the
+    table's on the device plus the row's offset, and each batch of
+    ``chain`` descriptors is pushed onto (0, 0)'s MM2S 1 queue. That
+    channel streams the rows to (1, 0)'s S2MM 0, which drains them into
+    ``y``. Batches alternate between two sets of descriptors, and a set is
+    rewritten only after the sequence syncs on the token of the batch that
+    last ran it. The descriptors' addresses are physical, so only a full
+    ELF, whose table stays put across calls, runs it.
+    """
+
+    chain: ClassVar[int] = 8
+    control_id: ClassVar[int] = 29
+    bd_base: ClassVar[int] = 0x1D000
+    # MM2S 1's control register; its task queue is the next word.
+    mm2s_1_control: ClassVar[int] = 0x1D218
+    # BD words 3 to 6 as the compiler writes a linear shim BD.
+    bd_tail: ClassVar[tuple[int, ...]] = (0, 0xC0000000, 0x2000000, 0)
+    valid: ClassVar[int] = 1 << 25
+    use_next: ClassVar[int] = 1 << 26
+    aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
+
+    rows: int = param()
+    table_rows: int = param()
+    row: int = param()
+    dtype: Any = field(default=bfloat16, repr=False)
+    words: int = param(
+        default=lambda op: 20 * op.chain
+        + 3 * (op.rows + len(op.batches))
+        + (3 if op.rows % op.chain else 0),
+        repr=False,
+    )
+
+    table = In(table_rows, row, dtype=dtype)
+    control = In(words, dtype=np.uint32)
+    y = Out(rows, row, dtype=dtype)
+
+    @property
+    def batches(self) -> list[int]:
+        """The rows of each batch, ``chain`` at most."""
+        return [min(self.chain, self.rows - r) for r in range(0, self.rows, self.chain)]
+
+    def validate(self) -> None:
+        if self.rows < 1:
+            raise ValueError(f"a gather takes one row at least, not {self.rows}")
+        if self.row * np.dtype(self.dtype).itemsize % 4:
+            raise ValueError(
+                f"a row of {self.row} {np.dtype(self.dtype).name} is not whole "
+                f"32-bit words, which a descriptor's length counts"
+            )
+
+    def ops(self) -> int:
+        return 0  # a data mover: its figure is bandwidth
+
+    def array(self, target) -> list:
+        feed, drain = Tile(0, 0), Tile(1, 0)
+        return [
+            PacketFlow(
+                self.control_id,
+                drain,
+                feed,
+                dst_port=WireBundle.TileControl,
+                # An explicit False drops the header TileControl reads: the run hangs.
+                keep_pkt_header=True,
+                shim_symbol="gather_ctrl",
+            ),
+            Flow(feed, drain, src_channel=1, dst_channel=0, shim_symbol="gather_feed"),
+            ShimChannel("gather_rows", drain, DMAChannelDir.S2MM, 0),
+        ]
+
+    def sequence(self, rt) -> None:
+        if rt.image != "elf":
+            raise ValueError(
+                "a gather by a graph input writes physical addresses, which "
+                "only a full ELF keeps across calls; package as a full ELF"
+            )
+        words, packet = rt.data(self.control), (0, self.control_id)
+        drained = emit_shim_transfer(
+            "gather_rows", rt.data(self.y), wait=True, managed=False
+        )
+        pending = [
+            emit_shim_transfer(
+                "gather_ctrl",
+                words,
+                tap=TensorAccessPattern(
+                    (self.words,), 0, [4 * self.chain, 1, 1, 5], [5, 0, 0, 1]
+                ),
+                packet=packet,
+                managed=False,
+            )
+        ]
+        at = 20 * self.chain
+        batches = self.batches
+        for j, n in enumerate(batches):
+            if j >= 2:
+                # MM2S 1 finished batch j - 2, so its set and packets are free.
+                aiex.npu_sync(0, 0, DMAChannelDir.MM2S.value, 1)
+                for task in pending[:-1]:
+                    task.free()
+                pending = pending[-1:]
+            # A row's packet, the push, and on a short last batch its end.
+            packets = n + 1 + int(n < self.chain)
+            pending.append(
+                emit_shim_transfer(
+                    "gather_ctrl",
+                    words,
+                    tap=TensorAccessPattern(
+                        (self.words,), at, [packets, 1, 1, 3], [3, 0, 0, 1]
+                    ),
+                    packet=packet,
+                    managed=False,
+                )
+            )
+            at += 3 * packets
+        for _ in batches[-2:]:
+            aiex.npu_sync(0, 0, DMAChannelDir.MM2S.value, 1)
+        for task in pending:
+            task.free()
+        drained.await_()
+
+    def word_source(self) -> "GatherWords":
+        """The step writing this gather's row addresses into its template on
+        a core, for ids the device made.
+        """
+        return GatherWords(
+            rows=self.rows,
+            table_rows=self.table_rows,
+            row_bytes=self.row * np.dtype(self.dtype).itemsize,
+            words=self.words,
+        )
+
+    @functools.cached_property
+    def template(self) -> tuple[np.ndarray, np.ndarray]:
+        """The control words with every row's address zero, and where each
+        row's address-low word is.
+        """
+        chain, words, slots = self.chain, [], []
+        for b in range(2 * chain):
+            at = self.bd_base + 0x20 * b
+            last = b % chain == chain - 1
+            word7 = self.valid | (0 if last else self.use_next | ((b + 1) << 27))
+            row_words = self.row * np.dtype(self.dtype).itemsize // 4
+            words += [_control_header(3, at), row_words, 0, 0, self.bd_tail[0]]
+            words += [_control_header(3, at + 16), *self.bd_tail[1:], word7]
+        for j, n in enumerate(self.batches):
+            sets = (j % 2) * chain
+            for k in range(n):
+                slots.append(len(words) + 1)
+                words += [
+                    _control_header(1, self.bd_base + 0x20 * (sets + k) + 4),
+                    0,
+                    0,
+                ]
+            if n < chain:
+                # The batch's last descriptor ends the chain.
+                at = self.bd_base + 0x20 * (sets + n - 1) + 24
+                words += [_control_header(1, at), self.bd_tail[3], self.valid]
+            words += [
+                _control_header(1, self.mm2s_1_control),
+                0xF00,
+                (1 << 31) | sets,
+            ]
+        assert len(words) == self.words
+        return np.array(words, dtype=np.uint32), np.array(slots)
+
+    def control_words(self, ids, address: int) -> np.ndarray:
+        """The control words gathering ``ids`` from a table at ``address``.
+
+        Args:
+            ids: The rows, numpy's indices: negative ones count from the end.
+            address: The table's XRT buffer address.
+
+        Returns:
+            The words ``ids`` takes, ``words`` of them.
+
+        Raises:
+            IndexError: An id is past the table, either way.
+        """
+        ids = np.asarray(ids).astype(np.int64)
+        if ids.shape != (self.rows,):
+            raise ValueError(
+                f"a gather of {self.rows} rows takes {self.rows} ids, got {ids.shape}"
+            )
+        n = self.table_rows
+        if ((ids < -n) | (ids >= n)).any():
+            raise IndexError(f"gathering {ids[(ids < -n) | (ids >= n)]} from {n} rows")
+        template, slots = self.template
+        stride = self.row * np.dtype(self.dtype).itemsize
+        rows = (address + APERTURE + (ids % n) * stride).astype(np.uint64)
+        words = template.copy()
+        words[slots] = (rows & np.uint64(0xFFFFFFFC)).astype(np.uint32)
+        words[slots + 1] = ((rows >> np.uint64(32)) & np.uint64(0xFFFF)).astype(
+            np.uint32
+        )
+        return words
+
+    def addressed_inputs(
+        self, addresses: Mapping[str, int], rng: np.random.Generator
+    ) -> dict[str, np.ndarray]:
+        ids = rng.integers(0, self.table_rows, self.rows)
+        return {"control": self.control_words(ids, addresses["table"])}
+
+
+_ROW_ADDRESSES = """
+#include <stdint.h>
+
+extern "C" void {symbol}(int32_t *ids, uint32_t *out, int32_t lo, int32_t hi) {{
+    uint64_t base = ((uint64_t)(uint32_t)hi << {low_bits}) + (uint32_t)lo + {aperture}ull;
+    for (int r = 0; r < {rows}; r++) {{
+        int32_t id = ids[r] < -{table_rows} ? -{table_rows} : ids[r];
+        id = id > {table_rows} - 1 ? {table_rows} - 1 : id;
+        if (id < 0)
+            id += {table_rows};
+        uint64_t address = base + (uint64_t)id * {row_bytes}u;
+        out[2 * r] = (uint32_t)address & 0xFFFFFFFCu;
+        out[2 * r + 1] = (uint32_t)(address >> 32) & 0xFFFFu;
+    }}
+}}
+"""
+
+
+class GatherWords(Operator):
+    """A ``Gather``'s control words for ids the device made, in a graph.
+
+    A core turns each id into its row's address words, which drain into
+    their slots of ``control``, a buffer holding the gather's template;
+    the gather that follows streams it. The table's address reaches the
+    core as ``base_lo`` and ``base_hi``, per-call values the graph fills
+    in, split at ``low_bits`` since a core reads 30 bits of a value. An id
+    past the table is clipped to its first or last row,
+    ``table[np.clip(ids, -n, n - 1)]``, so every id reads a row of it.
+    """
+
+    low_bits: ClassVar[int] = 29
+
+    rows: int = param(array=True)
+    table_rows: int = param(array=True)
+    row_bytes: int = param(array=True)
+    words: int = param()
+    pairs: int = param(default=lambda op: 2 * op.rows, array=True, repr=False)
+
+    ids = In(rows, dtype=np.int32, tile=(rows,), depth=1)
+    control = Out(words, dtype=np.uint32, tile=(pairs,), depth=1)
+    base_lo = Scratchpad(np.int32)
+    base_hi = Scratchpad(np.int32)
+
+    def ops(self) -> int:
+        return 0
+
+    def address_words(self, address: int) -> dict[str, int]:
+        """``base_lo`` and ``base_hi`` for a table at ``address``."""
+        return dict(
+            base_lo=address & ((1 << self.low_bits) - 1),
+            base_hi=address >> self.low_bits,
+        )
+
+    def array(self, target) -> list:
+        symbol = f"gather_words_{self.rows}_{self.table_rows}_{self.row_bytes}"
+        kernel = ExternalFunction(
+            symbol,
+            source_string=_ROW_ADDRESSES.format(
+                symbol=symbol,
+                rows=self.rows,
+                table_rows=self.table_rows,
+                row_bytes=self.row_bytes,
+                low_bits=self.low_bits,
+                aperture=APERTURE,
+            ),
+            arg_types=[self.ids.tile, self.control.tile, np.int32, np.int32],
+        )
+        ids = ObjectFifo(self.ids.tile, name="gather_ids", depth=1)
+        addresses = ObjectFifo(self.control.tile, name="gather_addresses", depth=1)
+        self.ids.lane(0).bind(ids.prod())
+        self.control.lane(0).bind(addresses.cons())
+        barrier = WorkerRuntimeBarrier()
+
+        def core(ids, addresses, kernel, lo, hi, barrier):
+            barrier.wait_for_value(1)
+            i, a = ids.acquire(1), addresses.acquire(1)
+            kernel(i, a, lo.read(), hi.read())
+            ids.release(1)
+            addresses.release(1)
+
+        worker = Worker(
+            core,
+            [
+                ids.cons(),
+                addresses.prod(),
+                kernel,
+                self.base_lo.param,
+                self.base_hi.param,
+                barrier,
+            ],
+        )
+        return [worker, barrier]
+
+    def sequence(self, rt) -> None:
+        tg = TaskGroup()
+        rt.fill(self.ids.lane(0), self.ids, group=tg)
+        for tap in self.taps():
+            rt.drain(self.control.lane(0), (self.control, tap), group=tg, wait=True)
+        tg.finish()
+
+    def taps(self) -> list[TensorAccessPattern]:
+        """Where the rows' address words go in ``control``, in row order.
+
+        A row's follow its packet's header, three words to a packet and a
+        push after every batch of ``chain``.
+        """
+        chain, at = Gather.chain, 20 * Gather.chain + 1
+        full, short = divmod(self.rows, chain)
+        taps = []
+        if full:
+            taps.append(
+                TensorAccessPattern(
+                    (self.words,),
+                    at,
+                    [1, full, chain, 2],
+                    [0, 3 * (chain + 1), 3, 1],
+                )
+            )
+        if short:
+            taps.append(
+                TensorAccessPattern(
+                    (self.words,),
+                    at + 3 * (chain + 1) * full,
+                    [1, 1, short, 2],
+                    [0, 0, 3, 1],
+                )
+            )
+        return taps
 
 
 def _into_slot(slot, seq=128, num_channels=1) -> dict[str, Any]:
@@ -62,8 +424,13 @@ class Copy(Operator):
     bound ``src_bound``/``dst_bound`` with its size. Standalone,
     ``src``/``dst`` are given, or default to the whole of each buffer.
 
+    With ``ids`` a 1-D integer handle (a graph input, a state, an output
+    of a step), ``Copy(table[ids])`` is a ``Gather``, the rows each call
+    names.
+
     A side that is a tuple of patterns walks them in turn: ``Copy(table[ids])``
-    gathers the rows ``ids`` names, fixed when the graph is traced. Each is
+    with ``ids`` an array gathers the rows it names, fixed when the graph is
+    traced. Each is
     its own transfer, with runs of pieces whose offsets step evenly made one
     (consecutive rows, a repeated row, a grid's rows), more than a task group
     holds descriptors for; so they are unmanaged, the compiler metering each
@@ -82,6 +449,7 @@ class Copy(Operator):
     # The params that take an operand's view, and the value its per-call
     # index binds, in operand order.
     accept_views = (("src", "in_offset"), ("dst", "out_offset"))
+    per_call_gather: ClassVar[type[Operator] | None] = Gather
 
     # Copy moves data and computes nothing, so the gate is exact.
     test = Testing(

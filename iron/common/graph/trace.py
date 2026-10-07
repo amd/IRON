@@ -9,7 +9,7 @@ import dataclasses
 import inspect
 import itertools
 import math
-from collections.abc import Hashable, Iterable, Mapping
+from collections.abc import Callable, Hashable, Iterable, Mapping
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
@@ -119,6 +119,17 @@ class TracedGraph:
     returned: list = dataclasses.field(default_factory=list)
     carry: dict[str, Handle | Affine] = dataclasses.field(default_factory=dict)
     feedback: list[str] = dataclasses.field(default_factory=list)
+    # An input the device reads as words the host encodes from it and a
+    # buffer's device address (a gather's ids): input -> (buffer, encode).
+    encoders: dict[str, tuple[str, Callable[[np.ndarray, int], np.ndarray]]] = (
+        dataclasses.field(default_factory=dict)
+    )
+    # A per-call value the graph fills in rather than the caller, from a
+    # buffer's device address (a gather by ids the device made):
+    # value -> (buffer, address -> words by name, its word's name).
+    addresses: dict[str, tuple[str, Callable[[int], dict], str]] = dataclasses.field(
+        default_factory=dict
+    )
 
     @property
     def runlist(self) -> list:
@@ -204,6 +215,8 @@ class Tracer:
         self.states: dict[int, tuple[State, Handle]] = {}
         self.bindings: list[Binding] = []
         self._bound: dict[int, dict] = {}
+        self.encoders: dict[str, tuple[str, Callable]] = {}
+        self.addresses: dict[str, tuple[str, Callable, str]] = {}
         self._counter = itertools.count()
         self._names = names or {}
         self._taken = {*self._names.values(), *inputs}
@@ -272,6 +285,9 @@ class Tracer:
             for k in list(kwargs)
             if isinstance(kwargs[k], (Value, Affine))
         }
+        if any(h.gather_by is not None for h in operands):
+            return self._gather(target, operands, kwargs or values)
+        called = operands
         if isinstance(target, type):
             own = self._split_values(cls, values)
             operands = _take_views(cls, operands, kwargs, own)
@@ -296,7 +312,56 @@ class Tracer:
             )
         for name, value in own.items():
             self._bind(op, name, value)
-        return self._record(op, operands)
+        return self._record(op, operands, called)
+
+    def _gather(self, target, operands: list[Handle], extra) -> Handle:
+        """``Copy(table[ids])`` with ``ids`` per call: the class's per-call
+        gather. For ids an input the host encodes its control words from
+        the ids each call; for ids the device made, its word source writes
+        them into its template first.
+        """
+        view = operands[0]
+        ids, table = view.gather_by, view.parent
+        if (
+            not isinstance(target, type)
+            or target.per_call_gather is None
+            or len(operands) != 1
+            or extra
+        ):
+            raise TypeError(
+                f"{view!r} takes the rows the input {ids.name!r} names each "
+                f"call; only a Copy of it alone does, Copy(table[ids])"
+            )
+        op = target.per_call_gather(
+            rows=ids.shape[0],
+            table_rows=table.shape[0],
+            row=math.prod(table.shape[1:]),
+            dtype=table.dtype,
+        )
+        if ids.role == "input":
+            if ids.name in self.encoders:
+                raise ValueError(f"the input {ids.name!r} gathers from one table once")
+            control = Handle((op.words,), np.uint32, ids.name, "input")
+            self.encoders[ids.name] = (table.name, op.control_words)
+        else:
+            source = op.word_source()
+            template = op.template[0]
+            self._names[id(template)] = self.fresh(f"{table.name}_gather")
+            control = self.operand(template)
+            for member in ("base_lo", "base_hi"):
+                name = next(
+                    (
+                        n
+                        for n, (buffer, _, m) in self.addresses.items()
+                        if (buffer, m) == (table.name, member)
+                    ),
+                    f"address{len(self.addresses) // 2}_{member}",
+                )
+                self.addresses[name] = (table.name, source.address_words, member)
+                self._bind(source, member, Value(name, "scratchpad", np.int32))
+            self._record(source, [ids, control])
+        out = self._record(op, [table, control])
+        return out if out.shape == view.shape else out.reshape(view.shape)
 
     @staticmethod
     def _split_values(op_cls, kwargs) -> dict:
@@ -345,7 +410,11 @@ class Tracer:
             member = next(v for v in op.values if v.name == name)
             self.bindings.append(Binding(op, member, value))
 
-    def _record(self, op, operands):
+    def _record(self, op, operands, called=None):
+        """Record ``op`` on ``operands``; ``called`` are the operands as the
+        call gave them, a view where ``operands`` holds its buffer.
+        """
+        called = operands if called is None else called
         buffers = op.buffers
         ins = [b for b in buffers if b.direction.fills]
         outs = [b for b in buffers if b.direction is Direction.OUT]
@@ -410,13 +479,17 @@ class Tracer:
             else:
                 shape = b.shape
                 # A flat output keeps the shape and bounds of the operand it
-                # is the size of: (rows, cols) stays (rows, cols) through SiLU.
+                # is the size of: (rows, cols) stays (rows, cols) through SiLU,
+                # and a copy of a view has the view's shape.
                 bounds: dict = {}
                 if len(shape) == 1:
-                    like = next((h for h in operands if h.elements == b.elements), None)
+                    like = next(
+                        (i for i, h in enumerate(called) if h.elements == b.elements),
+                        None,
+                    )
                     if like is not None:
-                        shape = like.shape
-                        bounds = dict(like.bounds)
+                        shape = called[like].shape
+                        bounds = dict(operands[like].bounds)
                 if not bounds:
                     bounds = self._output_bounds(op, b, len(shape))
                 h = Handle(
@@ -474,6 +547,8 @@ class Tracer:
             self.bindings,
             returned,
             next_values,
+            encoders=self.encoders,
+            addresses=self.addresses,
         )
 
 
@@ -542,8 +617,9 @@ class _ReferenceTracer(Tracer):
         outs = [b for b in op.buffers if b.direction is Direction.OUT]
         fresh = len(tensors) == n_in and len(outs) == 1
         if fresh and result is not None and len(outs[0].shape) == 1:
+            called = [t if p is None else p for t, p in zip(tensors, patterns)]
             like = next(
-                (t for t in tensors if math.prod(t.shape) == outs[0].elements), None
+                (t for t in called if math.prod(t.shape) == outs[0].elements), None
             )
             if like is not None:
                 result = result.reshape(like.shape, copy=False)

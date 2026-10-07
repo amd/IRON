@@ -101,6 +101,7 @@ def _run(sequence, inputs):
     return run.get_buffer(out_name).numpy()[: inputs[0].size].copy()
 
 
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("dispatch", ["reference", "fused"])
 @pytest.mark.parametrize("precompile", [True, False], ids=["aot", "jit"])
 def test_a_graph_matches_the_hand_written_runlist_numerically(precompile, dispatch):
@@ -140,6 +141,7 @@ class NarrowChain(iron.Graph):
         return self.silu(self.add(x, b))
 
 
+@pytest.mark.supported_devices("npu2")
 def test_a_packed_graph_computes_what_the_temporal_one_does():
     """compile(coresident=...) changes which device each step runs in, and
     nothing it computes.
