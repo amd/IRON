@@ -186,7 +186,7 @@ class Standalone:
         return [f"s{k}_{b.name}" for b in op.buffers]
 
     def _bytes(self, name: str) -> np.ndarray:
-        return self.callable.get_buffer(name).numpy_view().view(np.uint8)
+        return self.callable.get_storage(name).numpy_view().view(np.uint8)
 
     def output_bytes(self) -> bytes:
         """What the steps wrote, after one run: every out and in-out buffer."""
