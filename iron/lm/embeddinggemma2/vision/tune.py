@@ -18,7 +18,8 @@ from iron.common.graph.narrowing import CostTable
 from iron.common.graph.probe import Call, Timing, measure_graph, pmode
 from iron.lm import Checkpoint, load_weights
 
-from .model import COSTS, VISION, Vision, layout, vision_tensors
+from ..model import COSTS
+from .model import VISION, Vision, layout, vision_tensors
 
 CALIBRATION_PAIRS = [("ElementwiseAdd", "GELU"), ("GELU", "ElementwiseMul")]
 

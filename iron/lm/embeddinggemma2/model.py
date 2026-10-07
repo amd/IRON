@@ -9,6 +9,7 @@ each weight, and the encoder on the NPU as one graph.
 
 import dataclasses
 import math
+from pathlib import Path
 
 import numpy as np
 from ml_dtypes import bfloat16, finfo
@@ -35,6 +36,10 @@ ACCURATE = dict(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
 # The fewest rows a version has, 16 to each row of cores: a version's rows
 # are a multiple of it.
 ROWS = 64
+
+# Where the text and vision tunes write their measurements, one table the
+# towers and the text share.
+COSTS = Path(__file__).with_name("costs_npu2.json")
 
 
 @dataclasses.dataclass(frozen=True)

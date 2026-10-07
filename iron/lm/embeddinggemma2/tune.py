@@ -18,8 +18,7 @@ from iron.common.graph.probe import Call, Timing, measure_graph, pmode
 
 from iron.lm import Checkpoint, load_weights
 
-from .encoder import COSTS
-from .model import EMBEDDINGGEMMA_2, EmbeddingGemma, layout, text_tensors
+from .model import COSTS, EMBEDDINGGEMMA_2, EmbeddingGemma, layout, text_tensors
 
 CALIBRATION_PAIRS = [
     ("ElementwiseAdd", "ElementwiseMul"),

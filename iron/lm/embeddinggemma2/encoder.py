@@ -23,14 +23,11 @@ from iron.lm import Checkpoint, load_weights
 
 from .audio import model as audio_model
 from .audio.oracle import AudioOracle
-from .model import EMBEDDINGGEMMA_2, EmbeddingGemma, layout, text_tensors
+from .model import COSTS, EMBEDDINGGEMMA_2, EmbeddingGemma, layout, text_tensors
 from .multimodal import Multimodal
 from .oracle import PROMPTS, EmbeddingGemmaOracle, tokenizer
 from .vision import model as vision_model
 from .vision.oracle import VisionOracle
-
-# Where `python -m iron.lm.embeddinggemma2.tune` writes its measurements.
-COSTS = Path(__file__).with_name("costs_npu2.json")
 
 
 class Encoder:

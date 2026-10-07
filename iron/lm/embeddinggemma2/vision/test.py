@@ -14,13 +14,8 @@ import pytest
 
 from iron.common.graph.narrowing import CostTable, JointNarrowing
 from iron.lm import Checkpoint, load_weights
-from iron.lm.embeddinggemma2.vision.model import (
-    COSTS,
-    VISION,
-    Vision,
-    layout,
-    vision_tensors,
-)
+from iron.lm.embeddinggemma2.model import COSTS
+from iron.lm.embeddinggemma2.vision.model import VISION, Vision, layout, vision_tensors
 from iron.lm.embeddinggemma2.vision.oracle import VisionOracle, patches
 from iron.lm.testing import requires, weights_dir
 

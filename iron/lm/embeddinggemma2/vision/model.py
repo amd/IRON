@@ -35,9 +35,6 @@ from ..model import ACCURATE
 # A GEMM's row block at its default tile: a version's rows are a multiple of it.
 ROWS = 256
 
-# Where `python -m iron.lm.embeddinggemma2.vision.tune` writes its measurements.
-COSTS = Path(__file__).with_name("costs_npu2.json")
-
 
 @dataclasses.dataclass(frozen=True)
 class VisionConfig:
