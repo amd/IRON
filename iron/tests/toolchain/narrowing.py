@@ -234,15 +234,18 @@ def test_an_inexact_width_is_taken_only_if_accurate(accurate, tmp_path, npu2):
     key = cost_key(ops["ElementwiseAdd"])
     default, *others = variants(ops["ElementwiseAdd"], npu2)
     tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
-    exact = tuner.tune(traced, npu2).chosen[key]
-    assert exact.key != default.key
+    tuning = tuner.tune(traced, npu2)
+    exact = tuning.chosen[key]
+    assert exact.key != default.key and tuning.inexact == ()
     for v in others:
         table.record_step(
             v.key,
             dataclasses.replace(table.steps[v.key], exact=False, accurate=accurate),
         )
-    chosen = tuner.tune(traced, npu2).chosen[key]
-    assert chosen.key == (exact.key if accurate else default.key)
+    tuning = tuner.tune(traced, npu2)
+    assert tuning.chosen[key].key == (exact.key if accurate else default.key)
+    assert tuning.inexact == ((key,) if accurate else ())
+    assert ("not exact" in tuning.report()) == accurate
 
 
 def test_apply_rebuilds_the_narrowed_steps(tmp_path, npu2):

@@ -353,7 +353,9 @@ class Tuning:
     for the graph as traced (``baseline``). The predictions leave out the
     ``unmeasured`` designs, which stay as traced, and the ``unpriced`` folds,
     which a design the table lacks keeps from being taken. ``chosen`` and
-    ``groups`` name the designs of the graph with ``folds`` applied.
+    ``groups`` name the designs of the graph with ``folds`` applied;
+    ``inexact`` those whose setting was judged within their gates rather
+    than found bit-identical to their default.
     """
 
     chosen: dict[str, Variant]  # default key -> the setting it runs at
@@ -365,6 +367,7 @@ class Tuning:
     baseline_configures: int
     baseline_us: float
     unmeasured: tuple[str, ...]
+    inexact: tuple[str, ...] = ()
     folds: tuple[Fold, ...] = ()
     unpriced: tuple[Fold, ...] = ()
 
@@ -404,7 +407,8 @@ class Tuning:
         lines = [f"  fold: {fold}" for fold in self.folds]
         for key, v in self.chosen.items():
             if v.key != key:
-                lines.append(f"  {names.get(key, key)}: {dict(v.tunables)}")
+                note = " (within its gates, not exact)" if key in self.inexact else ""
+                lines.append(f"  {names.get(key, key)}: {dict(v.tunables)}{note}")
         for group in self.groups:
             lines.append("  pack: " + ", ".join(names.get(k, k) for k in group))
         lines.append(
@@ -650,6 +654,11 @@ class JointNarrowing:
             baseline_configures=baseline_configures,
             baseline_us=baseline,
             unmeasured=tuple(k for k in found if k not in table.steps),
+            inexact=tuple(
+                k
+                for k, v in chosen.items()
+                if v.key != k and not table.steps[v.key].exact
+            ),
         )
 
     @staticmethod
