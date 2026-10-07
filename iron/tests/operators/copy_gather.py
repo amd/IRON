@@ -15,9 +15,11 @@ output, a core writes those addresses in a step before the gather.
 
 import numpy as np
 import pytest
+from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
+from iron.common import Profile
 from iron.operators import ElementwiseAdd
 from iron.operators.copy import Copy, Gather
 
@@ -58,8 +60,11 @@ class FromIntermediate(iron.Graph):
 
 
 class PerCall(iron.Graph):
-    def __init__(self, table):
+    def __init__(self, table, feeds: int | None = None):
         self.table = iron.weight(table)
+        self.profile = Profile()
+        if feeds is not None:
+            self.profile.add(Gather, feeds=feeds)
 
     def body(self, ids):
         return Copy(self.table[ids])
@@ -68,9 +73,12 @@ class PerCall(iron.Graph):
 class FromDeviceIds(iron.Graph):
     """Two tables gathered by ids a step made, so no host encodes them."""
 
-    def __init__(self, table, other):
+    def __init__(self, table, other, feeds: int | None = None):
         self.table = iron.weight(table)
         self.other = iron.weight(other)
+        self.profile = Profile()
+        if feeds is not None:
+            self.profile.add(Gather, feeds=feeds)
 
     def body(self, ids):
         ids = Copy(ids, dtype=np.int32)
@@ -137,12 +145,18 @@ def test_rows_of_an_intermediate_are_gathered(npu_runtime, n_ids):
     assert_equal(graph.reference(table), table[ids], "reference")
 
 
+# A feed count left out resolves, to one feed for 15 rows and four past 48.
+FEEDS = [(None, 15), (None, 256), (1, 71), (4, 71), (1, 512), (4, 512)]
+
+
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("n_ids", [15, 256, 512])
-def test_rows_each_call_names_are_gathered(npu_runtime, table, n_ids):
-    graph = PerCall(table)
+@pytest.mark.parametrize("feeds,n_ids", FEEDS)
+def test_rows_each_call_names_are_gathered(npu_runtime, table, feeds, n_ids):
+    graph = PerCall(table, feeds)
     net = graph.compile(ids=((n_ids,), np.int32))
     assert net.plan.image == "elf"
+    (gather,) = [s.op for s in net.traced.steps if isinstance(s.op, Gather)]
+    assert gather.resolved().feeds == (feeds or (1 if n_ids <= 16 else 4))
     rng = np.random.default_rng(n_ids)
     for call in range(3):
         ids = rng.integers(-VOCAB, VOCAB, n_ids).astype(np.int32)
@@ -153,13 +167,17 @@ def test_rows_each_call_names_are_gathered(npu_runtime, table, n_ids):
 
 
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("n_ids", [1, 15, 256, 512])
-def test_rows_ids_the_device_made_name_are_gathered(npu_runtime, table, n_ids):
+@pytest.mark.parametrize("feeds,n_ids", [(None, 1), *FEEDS])
+def test_rows_ids_the_device_made_name_are_gathered(npu_runtime, table, feeds, n_ids):
     other = np.random.default_rng(4).standard_normal((3000, 256)).astype(bfloat16)
-    graph = FromDeviceIds(table, other)
+    graph = FromDeviceIds(table, other, feeds)
     net = graph.compile(ids=((n_ids,), np.int32))
     assert net.plan.image == "elf"
     assert not net.traced.encoders
+    resolved = {
+        s.op.resolved().feeds for s in net.traced.steps if isinstance(s.op, Gather)
+    }
+    assert resolved == {feeds or (1 if n_ids <= 16 else 4)}
     rng = np.random.default_rng(n_ids)
     for call in range(3):
         ids = rng.integers(-VOCAB, VOCAB, n_ids).astype(np.int32)
@@ -241,6 +259,39 @@ def test_a_core_writes_the_words_the_host_would():
             [tap.gather(np.arange(gather.words)) for tap in gather.word_source().taps()]
         )
         np.testing.assert_array_equal(written, np.stack([slots, slots + 1], -1).ravel())
+
+
+def test_a_gather_feeds_from_as_many_shim_pairs_as_the_device_has():
+    for name, cols, rows, feeds in (
+        ("npu1", 4, 512, 2),
+        ("npu2", 8, 512, 4),
+        ("npu2", 8, 33, 3),
+        ("npu2", 8, 16, 1),
+        ("npu2", 8, 1, 1),
+    ):
+        gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH)
+        assert gather.resolved(from_name(name, n_cols=cols)).feeds == feeds
+
+
+def test_the_feeds_stream_runs_of_whole_pairs_that_cover_the_batches_once():
+    for rows in (17, 33, 71, 512, 5120):
+        for feeds in range(1, min(4, -(-rows // 16)) + 1):
+            gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH, feeds=feeds)
+            runs = gather.runs
+            assert [j for run in runs for j in run] == list(range(len(gather.batches)))
+            assert all(len(run) and run.start % 2 == 0 for run in runs)
+
+
+def test_the_control_words_are_one_layout_for_every_feed_count():
+    ids = gathered_ids(VOCAB, 512)
+    words = {
+        feeds: Gather(rows=512, table_rows=VOCAB, row=WIDTH, feeds=feeds).control_words(
+            ids, 0x40000
+        )
+        for feeds in (1, 2, 3, 4)
+    }
+    for feeds in (2, 3, 4):
+        np.testing.assert_array_equal(words[feeds], words[1])
 
 
 def test_ids_the_device_made_take_a_word_step(table):
