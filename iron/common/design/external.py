@@ -20,7 +20,7 @@ groups have no meaning here and are accepted as no-ops, so an operator's
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 from aie.dialects.aie import DMAChannelDir, shim_dma_allocation
@@ -30,6 +30,20 @@ from aie.iron.runtime.dmatask import emit_shim_transfer
 
 from ..declare import Direction, Operator
 from .runtime import Sequence
+
+
+class ShimChannel(NamedTuple):
+    """A shim DMA channel the runtime sequence reaches by ``symbol``.
+
+    aie.iron allocates the shim end of a route it fills or drains, one end
+    per route; an ``array()`` whose route joins two shims names the other
+    end with one of these.
+    """
+
+    symbol: str
+    tile: Tile
+    direction: DMAChannelDir
+    channel: int
 
 
 class ImageRuntime(Runtime):
@@ -45,7 +59,7 @@ class ImageRuntime(Runtime):
         self,
         seq_fn,
         fn_args,
-        channels: list[tuple[str, Tile, DMAChannelDir, int]],
+        channels: list[ShimChannel],
         buffers: list[Buffer],
     ):
         super().__init__(seq_fn, fn_args)
@@ -97,7 +111,7 @@ class ExternalSequence(Sequence):
                     if s.direction is Direction.IN
                     else DMAChannelDir.S2MM
                 )
-                channels[(s.name, i)] = (
+                channels[(s.name, i)] = ShimChannel(
                     f"{s.name}_{i}",
                     shims[pin.col],
                     direction,

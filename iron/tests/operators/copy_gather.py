@@ -4,10 +4,12 @@
 
 """A gather of a table's rows, ``Copy(table[ids])``, on a device.
 
-The ids are known when the graph is traced; each row, or each run of rows
-whose ids step evenly, is one transfer of the step's sequence. The table is
-a weight at EmbeddingGemma 2's size, or an intermediate a step before
-produced.
+With ``ids`` an array, the ids are known when the graph is traced; each
+row, or each run of rows whose ids step evenly, is one transfer of the
+step's sequence. The table is a weight at EmbeddingGemma 2's size, or an
+intermediate a step before produced. With ``ids`` an input of the graph,
+each call names its rows, and the host encodes them as the addresses a
+``Gather`` writes into the shim's descriptors.
 """
 
 import numpy as np
@@ -16,7 +18,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.operators import ElementwiseAdd
-from iron.operators.copy import Copy
+from iron.operators.copy import Copy, Gather
 
 # EmbeddingGemma 2's per-layer embedding table.
 VOCAB, WIDTH = 262144, 512
@@ -52,6 +54,14 @@ class FromIntermediate(iron.Graph):
     def body(self, table):
         table = Copy(table).reshape(table.shape)
         return Copy(table[self.ids]).reshape(len(self.ids), WIDTH)
+
+
+class PerCall(iron.Graph):
+    def __init__(self, table):
+        self.table = iron.weight(table)
+
+    def body(self, ids):
+        return Copy(self.table[ids])
 
 
 def assert_equal(got, expected, what):
@@ -90,3 +100,43 @@ def test_rows_of_an_intermediate_are_gathered(npu_runtime, n_ids):
     graph = FromIntermediate(ids)
     assert_equal(graph(table), table[ids], "gathered")
     assert_equal(graph.reference(table), table[ids], "reference")
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("n_ids", [15, 256, 512])
+def test_rows_each_call_names_are_gathered(npu_runtime, table, n_ids):
+    graph = PerCall(table)
+    net = graph.compile(ids=((n_ids,), np.int32))
+    assert net.plan.image == "elf"
+    rng = np.random.default_rng(n_ids)
+    for call in range(3):
+        ids = rng.integers(-VOCAB, VOCAB, n_ids).astype(np.int32)
+        ids[:2] = (-VOCAB, VOCAB - 1)
+        expected = np.take(table, ids, axis=0)
+        assert_equal(graph(ids), expected, f"call {call}")
+        assert_equal(graph.reference(ids), expected, f"reference {call}")
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("outside", [VOCAB, -VOCAB - 1])
+def test_ids_past_the_table_are_refused(npu_runtime, table, outside):
+    graph = PerCall(table)
+    ids = np.arange(15, dtype=np.int32)
+    ids[7] = outside
+    with pytest.raises(IndexError):
+        graph(ids)
+    with pytest.raises(IndexError):
+        graph.reference(ids)
+
+
+def test_a_per_call_gather_needs_a_full_elf(table):
+    graph = PerCall(table)
+    with pytest.raises(ValueError, match="full ELF"):
+        graph.compile(ids=((15,), np.int32), boundaries=iron.each_step)
+
+
+def test_the_control_words_are_counted():
+    for rows in (1, 7, 8, 15, 256, 512):
+        gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH)
+        ids = np.arange(rows, dtype=np.int32)
+        assert gather.control_words(ids, 0).size == gather.words

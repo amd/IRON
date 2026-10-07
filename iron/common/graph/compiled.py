@@ -31,7 +31,7 @@ from ..declare.profile import Profile
 from ..design import device_symbol
 from ..image.allocator import ArenaPlan
 from ..image.artifacts import Parameter
-from ..image.callable import FullELFRun, ScratchArena
+from ..image.callable import FullELFCallable, FullELFRun, ScratchArena
 from ..image.coresidence import AdjacentPacking
 from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
@@ -492,6 +492,7 @@ class CompiledGraph:
                 w for w in self.words if w.symbol in self.artifacts.parameters
             ]
         self._callable = None
+        self._addressed: tuple[Any, int] | None = None
         # Shared with the arena when there is one: its weights are every image's.
         self._loaded: set = set() if arena is None else arena.loaded
 
@@ -615,8 +616,27 @@ class CompiledGraph:
                     f"{handle.shape}, got {tuple(tensor.shape)}; a new shape is a "
                     f"new compile"
                 )
+            encoder = self.traced.encoders.get(handle.name)
+            if encoder is not None:
+                tensor = encoder[1](tensor, self._address(encoder[0]))
             self._copy_in(handle.name, tensor)
         self._write_values(values, run)
+
+    def _address(self, name: str) -> int:
+        """The device address of buffer ``name``, which a full ELF keeps put
+        until its arena grows (a new view).
+        """
+        if not isinstance(self.callable, FullELFCallable):
+            raise TypeError(
+                f"{self.traced.name}: only a full ELF addresses its buffers "
+                f"from the host"
+            )
+        view = self.callable.get_buffer(name)
+        if self._addressed is None or self._addressed[0] is not view:
+            storage = view.storage
+            root = storage.binding_handle(0, storage.nbytes)
+            self._addressed = (view, root.address() + view.storage_offset)
+        return self._addressed[1]
 
     def _next_values(self, values: Mapping[str, int]) -> Carry:
         nxt: dict[str, int] = {}

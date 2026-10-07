@@ -24,7 +24,8 @@ class Handle:
     Carries no data. ``h[key]`` takes numpy's basic indexing (integers,
     unit-step slices, an ellipsis), on one axis a per-call ``Value``
     (``keys[:, pos]``), and on the leading axis an integer array, the rows
-    a gather takes, fixed when the graph is traced (``table[ids]``). A
+    a gather takes, fixed when the graph is traced (``table[ids]``), or an
+    integer input of the graph, the rows each call names. A
     contiguous static region is a slice: part of the parent's buffer, which
     any operator takes. Any other view (a strided region, a transpose, a
     per-call index) is an access pattern over the parent's buffer, and a
@@ -42,6 +43,7 @@ class Handle:
         "tap",
         "index_by",
         "bounds",
+        "gather_by",
     )
 
     def __init__(
@@ -55,6 +57,7 @@ class Handle:
         tap=None,
         index_by=None,
         bounds=None,
+        gather_by=None,
     ):
         self.shape = tuple(int(s) for s in shape)
         self.dtype = dtype
@@ -70,6 +73,8 @@ class Handle:
         # axis -> the count of that axis's leading entries valid this call
         # (``x[:n]``); the rest are padding.
         self.bounds: dict[int, Affine] = dict(bounds or {})
+        # The graph input whose ids pick the rows each call, for a gather.
+        self.gather_by: Handle | None = gather_by
 
     @property
     def elements(self) -> int:
@@ -97,7 +102,7 @@ class Handle:
             shape = tuple(shape[0])
         if prod(shape) != self.elements:
             raise ValueError(f"cannot reshape {self!r} to {list(shape)}")
-        if self.tap is not None:
+        if self.tap is not None or self.gather_by is not None:
             raise ValueError(f"cannot reshape a view {self!r}; reshape what it views")
         bounds = _rescale_bounds(self, shape)
         return Handle(
@@ -114,7 +119,7 @@ class Handle:
         """The same buffer walked with its axes permuted (no data moves)."""
         if len(axes) == 1 and isinstance(axes[0], (tuple, list)):
             axes = tuple(axes[0])
-        if self.tap is not None:
+        if self.tap is not None or self.gather_by is not None:
             raise ValueError(
                 f"cannot transpose a view {self!r}; transpose what it views"
             )
@@ -143,6 +148,28 @@ class Handle:
         if len(entries) > rank:
             raise IndexError(f"too many indices for shape {self.shape}")
         entries += [slice(None)] * (rank - len(entries))
+        if isinstance(entries[0], Handle):
+            ids = entries[0]
+            if (
+                ids.role != "input"
+                or len(ids.shape) != 1
+                or not np.issubdtype(np.dtype(ids.dtype), np.integer)
+                or rank < 2
+            ):
+                raise IndexError(
+                    f"a gather per call takes a 1-D integer input of the graph "
+                    f"as the rows of a table of rank 2 or more; got {ids!r} on "
+                    f"{self!r}"
+                )
+            if not all(isinstance(e, slice) and e == slice(None) for e in entries[1:]):
+                raise IndexError("a gather takes the whole of every axis but the first")
+            if self.role not in ("weight", "state") or self.bounds:
+                raise TypeError(
+                    f"a gather per call reads a whole table the graph holds, not "
+                    f"{self!r}"
+                )
+            shape = (ids.shape[0], *self.shape[1:])
+            return Handle(shape, self.dtype, self.name, "view", self, 0, gather_by=ids)
         if isinstance(entries[0], np.ndarray):
             ids, n = entries[0], self.shape[0]
             if ids.ndim != 1 or not np.issubdtype(ids.dtype, np.integer) or rank < 2:

@@ -178,6 +178,10 @@ class Operator(metaclass=_OperatorMeta):
     own_preamble: ClassVar[bool] = False
     # A fused image lowers every operator's sequence under the union.
     aiecc_flags: ClassVar[tuple[str, ...]] = ()
+    # What a call on a view gathered by a graph input (``Copy(table[ids])``)
+    # becomes: the class, built with ``rows``, ``table_rows``, ``row`` and
+    # ``dtype``, and ``control_words(ids, address)`` encoding each call's ids.
+    per_call_gather: ClassVar[type[Operator] | None] = None
 
     trace: TraceConfig | None = dataclasses.field(
         default=None, repr=False, kw_only=True

@@ -9,7 +9,7 @@ import dataclasses
 import inspect
 import itertools
 import math
-from collections.abc import Hashable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
@@ -135,6 +135,11 @@ class TracedGraph:
     carry: dict[str, Handle | Affine] = dataclasses.field(default_factory=dict)
     # Buffers drained to the image's feedback argument (an Emit's image).
     feedback: list[str] = dataclasses.field(default_factory=list)
+    # An input the device reads as words the host encodes from it and a
+    # buffer's device address (a gather's ids): input -> (buffer, encode).
+    encoders: dict[str, tuple[str, Callable[[np.ndarray, int], np.ndarray]]] = (
+        dataclasses.field(default_factory=dict)
+    )
 
     @property
     def runlist(self) -> list:
@@ -224,6 +229,7 @@ class Tracer:
         self.states: dict[int, tuple[State, Handle]] = {}
         self.bindings: list[Binding] = []
         self._bound: dict[int, dict] = {}  # id(op) -> {member: Affine}
+        self.encoders: dict[str, tuple[str, Callable]] = {}
         self._counter = itertools.count()
         # A name per tensor and state the graph holds, by identity.
         self._names = names or {}
@@ -289,6 +295,8 @@ class Tracer:
             for k in list(kwargs)
             if isinstance(kwargs[k], (Value, Affine))
         }
+        if any(h.gather_by is not None for h in operands):
+            return self._gather(target, operands, kwargs or values)
         called = operands
         if isinstance(target, type):
             own = self._split_values(cls, values)
@@ -315,6 +323,35 @@ class Tracer:
         for name, value in own.items():
             self._bind(op, name, value)
         return self._record(op, operands, called)
+
+    def _gather(self, target, operands: list[Handle], extra) -> Handle:
+        """``Copy(table[ids])`` with ``ids`` an input: the class's per-call
+        gather, whose input the host encodes from the ids each call.
+        """
+        view = operands[0]
+        ids, table = view.gather_by, view.parent
+        if (
+            not isinstance(target, type)
+            or target.per_call_gather is None
+            or len(operands) != 1
+            or extra
+        ):
+            raise TypeError(
+                f"{view!r} takes the rows the input {ids.name!r} names each "
+                f"call; only a Copy of it alone does, Copy(table[ids])"
+            )
+        if ids.name in self.encoders:
+            raise ValueError(f"the input {ids.name!r} gathers from one table once")
+        op = target.per_call_gather(
+            rows=ids.shape[0],
+            table_rows=table.shape[0],
+            row=math.prod(table.shape[1:]),
+            dtype=table.dtype,
+        )
+        control = Handle((op.words,), np.uint32, ids.name, "input")
+        self.encoders[ids.name] = (table.name, op.control_words)
+        out = self._record(op, [table, control])
+        return out if out.shape == view.shape else out.reshape(view.shape)
 
     @staticmethod
     def _split_values(op_cls, kwargs) -> dict:
@@ -508,6 +545,7 @@ class Tracer:
             self.bindings,
             returned,
             next_values,
+            encoders=self.encoders,
         )
 
 
