@@ -15,7 +15,7 @@ from ml_dtypes import bfloat16
 
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.npdtypes import np_ndarray_type_get_shape
-from aie.helpers.taplib import TensorTiler2D
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
     ObjectFifo,
@@ -153,11 +153,18 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0, *, lm_head_kernel):
 
     M_PER_COL = ROWS * M_TILE  # y elements one column drains per round
     W_PER_COL = packed_bytes(M_PER_COL * dim) // np.dtype(np.uint32).itemsize
+
     # Tap i covers round i // COLS of column i % COLS.
-    y_taps = TensorTiler2D.simple_tiler((ROUNDS * COLS, M_PER_COL), (1, M_PER_COL))
+    def row_taps(rows, cols):
+        return [
+            TensorAccessPattern((rows, cols), i * cols, [1, 1, 1, cols], [0, 0, 0, 1])
+            for i in range(rows)
+        ]
+
+    y_taps = row_taps(ROUNDS * COLS, M_PER_COL)
     # A strided descriptor places weight rows at the wrong on-chip positions.
     # Each column therefore reads one contiguous slice.
-    w_taps = TensorTiler2D.simple_tiler((ROUNDS * COLS, W_PER_COL), (1, W_PER_COL))
+    w_taps = row_taps(ROUNDS * COLS, W_PER_COL)
 
     # npu_write_rtp writes i32 words. The softcap travels as its f32 bit
     # pattern.
