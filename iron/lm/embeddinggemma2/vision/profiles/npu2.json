@@ -1,0 +1,4 @@
+{"entries": [
+  {"operator": "GEMM", "N": 768, "tile_k": 128, "tile_n": 32},
+  {"operator": "GEMM", "M": 64, "N": 1280, "tile_n": 32}
+]}

@@ -13,6 +13,8 @@ SPDX-License-Identifier = "CC0-1.0"
 path = [
     "iron/lm/llama3/profiles/*.json",
     "iron/lm/llama3/decode_costs_*.json",
+    "iron/lm/embeddinggemma2/vision/profiles/*.json",
+    "iron/lm/embeddinggemma2/vision/costs_*.json",
     "iron/tests/common/*.json",
 ]
 precedence = "closest"
