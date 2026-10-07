@@ -25,6 +25,7 @@ from iron.common.design.build import device_symbol
 from iron.common.graph import Handle, TracedGraph, Tracer
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import _words
+from iron.common.graph.fold import folded
 from iron.common.graph.handle import Affine, Value
 from iron.common.image import OperatorSequence
 from iron.common.image.artifacts import Parameter
@@ -34,7 +35,7 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.emit import reference as emit_reference
 from iron.operators.gemm import GEMM
-from iron.operators.gemv import GEMV
+from iron.operators.gemv import GEMV, Epilogue
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.rms_norm import RMSNorm
@@ -396,6 +397,56 @@ def test_swiglu_one_token_shares_one_array_and_one_build_for_gate_and_up():
     assert t.input_args == ["x"] and t.output_args == ["out"]
     with pytest.raises(ValueError, match="do not agree"):
         SwiGLU(z(H, E), z(H, E), z(H, E))
+
+
+def test_swiglu_folds_its_silu_into_the_gate_and_keeps_one_array(npu2):
+    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
+    f, count = folded(t, npu2)
+    assert count == 1
+    assert [type(op).__name__ for op, *_ in f.runlist] == [
+        "GEMV",
+        "GEMV",
+        "ElementwiseMul",
+        "GEMV",
+    ]
+    gate, up, mul, down = f.steps
+    assert (gate.op.epilogue, up.op.epilogue) == (Epilogue.SILU, Epilogue.NONE)
+    assert gate.op.resolved().array_key() == up.op.resolved().array_key()
+    assert gate.op.design_key() != up.op.design_key()
+    assert down.op.epilogues == (Epilogue.NONE,)
+    silu = next(s for s in t.steps if type(s.op) is SiLU)
+    assert gate.outputs[0].name == silu.outputs[0].name == mul.inputs[0].name
+    assert f.input_args == t.input_args and f.output_args == t.output_args
+
+
+class _Gate(iron.Graph):
+    def __init__(self, use, rows=H, tile=H // 8):
+        self.w, self.use, self.tile = z(rows, E), use, tile
+
+    def body(self, x):
+        gate = GEMV(self.w, x, num_aie_columns=8, tile_size_output=self.tile)
+        act = SiLU(gate)
+        if self.use == "returned":
+            return act, gate
+        if self.use == "read twice":
+            return ElementwiseAdd(act, gate)
+        return act
+
+
+@pytest.mark.parametrize("use", ["returned", "read twice"])
+def test_a_fold_needs_the_intermediate_to_itself(use, npu2):
+    t = _Gate(use).trace(x=(E,))
+    assert folded(t, npu2) == (t, 0)
+    assert folded(_Gate("once").trace(x=(E,)), npu2)[1] == 1
+
+
+def test_a_fold_the_producer_cannot_resolve_is_left_alone(npu2):
+    # An output tile of 8 rows: silu's 32 lanes do not divide it.
+    t = _Gate("once", rows=512, tile=8).trace(x=(E,))
+    gemv, silu = (s.op for s in t.steps)
+    with pytest.raises(ValueError, match="silu epilogue"):
+        gemv.fold(silu).resolved(npu2)
+    assert folded(t, npu2) == (t, 0)
 
 
 def test_two_spellings_of_one_array_are_one_design():

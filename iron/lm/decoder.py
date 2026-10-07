@@ -229,7 +229,9 @@ class CausalLM(iron.Graph):
             tuner: Narrows and packs the decode step's designs by cost.
             boundaries: The decode step's packaging.
         """
-        decode = self.compile(coresident=tuner, boundaries=boundaries, **self.shapes(1))
+        decode = self.compile(
+            coresident=tuner, boundaries=boundaries, fold=True, **self.shapes(1)
+        )
         if decode.plan.image != iron.ELF:
             print(decode.plan.report("decode"), flush=True)
             decode.load(release=release)

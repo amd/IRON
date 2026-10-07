@@ -18,6 +18,8 @@ from ml_dtypes import bfloat16
 from iron.common.harness import verify_buffer
 from iron.lm.layers import SwiGLU
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemv import GEMV, Epilogue
+from iron.operators.silu import SiLU
 
 # (rows, embedding_dim, hidden_dim). Qwen3.5-0.8B's FFN is 1024 by 3584.
 SHAPES = [(1, 2048, 2048), (1, 1024, 3584), (256, 2048, 2048)]
@@ -49,15 +51,16 @@ def _verdict(net, step):
     return verify_buffer(output, name, expected, tolerance, bound=bound)
 
 
+@pytest.mark.parametrize("fold", [False, True], ids=["apart", "folded"])
 @pytest.mark.parametrize("rows,embedding_dim,hidden_dim", SHAPES, ids=lambda v: str(v))
-def test_swiglu(rows, embedding_dim, hidden_dim, npu_runtime, record_property):
+def test_swiglu(rows, embedding_dim, hidden_dim, fold, npu_runtime, record_property):
     rng = np.random.default_rng(0)
     ffn = SwiGLU(
         _weight(rng, hidden_dim, embedding_dim),
         _weight(rng, hidden_dim, embedding_dim),
         _weight(rng, embedding_dim, hidden_dim),
     )
-    net = ffn.compile(x=(rows, embedding_dim))
+    net = ffn.compile(fold=fold, x=(rows, embedding_dim))
     x = rng.standard_normal((rows, embedding_dim)).astype(bfloat16)
 
     elapsed_us = run_iters(lambda: net(x), warmup=1, iters=1).e2e.avg_us
@@ -72,4 +75,16 @@ def test_swiglu(rows, embedding_dim, hidden_dim, npu_runtime, record_property):
     (product,) = [s for s in net.traced.steps if type(s.op) is ElementwiseMul]
     down = net.traced.steps[-1]
     verdicts = {"product": _verdict(net, product), "down": _verdict(net, down)}
+    folded = [
+        s
+        for s in net.traced.steps
+        if type(s.op) is GEMV and s.op.epilogue is Epilogue.SILU
+    ]
+    assert len(folded) == (fold and rows == 1)
+    assert any(type(s.op) is SiLU for s in net.traced.steps) != bool(folded)
+    if folded:
+        # Folded, both projections are the product's inputs, and run on one
+        # array each with its own epilogue.
+        gate, up = net.traced.steps[:2]
+        verdicts.update(gate=_verdict(net, gate), up=_verdict(net, up))
     assert all(verdicts.values()), {k: v.detail for k, v in verdicts.items()}

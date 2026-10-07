@@ -36,6 +36,7 @@ from ..image.coresidence import AdjacentPacking
 from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
 from .carried import CARRY, EmitSite, attach_emit, compose
+from .fold import folded
 from .handle import Affine, Carry, Handle, State, Value, _tensor_dtype, is_operand
 from .narrowing import JointNarrowing, Tuning
 from .trace import TracedGraph, Tracer, _ReferenceTracer
@@ -311,6 +312,7 @@ class Graph:
         record="memory",
         feeds: CompiledGraph | None = None,
         coresident: AdjacentPacking | JointNarrowing | None = None,
+        fold: bool = False,
         **shapes,
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
@@ -328,11 +330,17 @@ class Graph:
                 when it takes no tensor.
             coresident: Packs designs into shared configurations; a
                 ``JointNarrowing`` narrows them to fit first.
+            fold: Fold each step its producer can apply in its own cores
+                into the producer (``iron.common.graph.fold``).
             **shapes: Each input's shape, or ``(shape, dtype)``.
         """
         if dev is not None:
             aie_utils.set_current_device(dev)
         traced = self.trace(**shapes)
+        if fold:
+            traced, count = folded(traced, aie_utils.ensure_current_device())
+            if verbose:
+                print(f"{self.name}: {count} step(s) folded into their producers")
         tuning = None
         groups: AdjacentPacking | list[list[Operator]] | None
         if isinstance(coresident, JointNarrowing):

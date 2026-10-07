@@ -25,8 +25,10 @@ import argparse
 from collections.abc import Callable
 from pathlib import Path
 
+import aie.utils as aie_utils
 import numpy as np
 
+from iron.common.graph.fold import folded
 from iron.common.graph.narrowing import CostTable
 from iron.common.graph.probe import Call, Timing, measure_graph, pmode
 from iron.operators.sample import Sample
@@ -60,7 +62,10 @@ def measure(
     each design at ``position`` and ``token``, Sample on the draw rows
     ``sample`` gives, and the configure cost between ``CALIBRATION_PAIRS``.
     """
-    traced = model.trace(**model.shapes(1))
+    # The decode step as ``CausalLM.load`` compiles it, folded.
+    traced, _ = folded(
+        model.trace(**model.shapes(1)), aie_utils.ensure_current_device()
+    )
     # Sample's work follows its draw row's temperature and top-k: measure it
     # at the rows generation writes, not at random words.
     [k_max] = {s.op.k_max for s in traced.steps if isinstance(s.op, Sample)}

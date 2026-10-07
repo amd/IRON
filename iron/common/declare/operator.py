@@ -266,6 +266,25 @@ class Operator(metaclass=_OperatorMeta):
         """The arithmetic operations one call performs, for its throughput."""
         return sum(b.elements for b in self.outputs)
 
+    def fold(self, consumer: Operator) -> Self | None:
+        """This operator applying ``consumer`` to its output in its own cores.
+
+        Args:
+            consumer: The operator whose one input is this one's one output.
+
+        Returns:
+            The folded operator, or None where this one cannot apply it.
+        """
+        return None
+
+    def on_array(self, other: Operator) -> Self | None:
+        """This operator declared to run on ``other``'s array, or None.
+
+        A graph's fold calls it after folding ``other``; the replacement is
+        taken only where it resolves to ``other``'s array.
+        """
+        return None
+
     def device(self, target):
         return target.dev
 
