@@ -15,7 +15,7 @@ from iron.operators.copy import Copy
 
 from .audio.model import AudioTower
 from .model import Config, EmbeddingGemma
-from .vision.model import VisionTower
+from .vision.model import Vision, VisionTower
 
 
 class Multimodal(EmbeddingGemma):
@@ -38,6 +38,8 @@ class Multimodal(EmbeddingGemma):
         audio: The audio tower, its soft tokens in the text's space.
         vision: The vision tower, its soft tokens in the text's space.
     """
+
+    profile = Vision.profile
 
     def __init__(
         self,

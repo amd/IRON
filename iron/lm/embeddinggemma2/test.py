@@ -15,6 +15,7 @@ import pytest
 
 from iron.lm.embeddinggemma2.audio.model import AUDIO, LogMel
 from iron.lm.embeddinggemma2.encoder import Encoder
+from iron.lm.embeddinggemma2.model import COSTS
 from iron.lm.embeddinggemma2.vision.model import VISION
 from iron.lm.embeddinggemma2.vision.oracle import patches
 from iron.lm.testing import requires, weights_dir
@@ -136,7 +137,7 @@ IMAGE = patches(picture(288, 432), VISION.image_tokens, VISION)
 
 @pytest.fixture(scope="module")
 def multimodal():
-    yield Encoder(DIRECTORY, max_tokens=512, towers=True)
+    yield Encoder(DIRECTORY, max_tokens=512, towers=True, costs=COSTS)
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 
