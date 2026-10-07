@@ -19,9 +19,15 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Scratchpad
-from iron.common.graph.costcache import CostCache, Measurement
+from iron.common.graph.costcache import Accuracy, CostCache, Measurement
 from iron.common.graph.fold import replaced
-from iron.common.graph.narrowing import CostTable, JointNarrowing, cost_key, variants
+from iron.common.graph.narrowing import (
+    CostTable,
+    JointNarrowing,
+    Variant,
+    cost_key,
+    variants,
+)
 from iron.common.graph.probe import (
     CONTEXTS,
     Call,
@@ -318,6 +324,30 @@ def test_a_folded_design_is_priced_beside_the_one_it_replaces(tmp_path):
     again = CostTable(tmp_path / "again.json")
     assert measure_graph(again, calls, [], timing, cache=cache) == []
     assert again.steps == table.steps
+
+
+@pytest.mark.supported_devices("npu2")
+def test_an_inexact_width_within_its_gates_is_accurate_and_cached(tmp_path):
+    # tile_k=16 rounds C's bf16 accumulator after every 16 of K, the default every 64.
+    dev = aie_utils.ensure_current_device()
+    default = GEMM(M=256, K=256, N=256)
+    found = [Variant.of(op, dev) for op in (default, default.with_tunables(tile_k=16))]
+    report = platform()
+    cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    timing = Timing(rounds=1, calls=5)
+    table = CostTable(tmp_path / "costs.json")
+    measure_steps(table, found, timing, cache=cache)
+    narrow = table.steps[found[1].key]
+    assert not narrow.exact and narrow.accurate, narrow
+    entries = [cache.key(v.resolved) for v in found]
+    for entry in entries:
+        assert cache.get(cache.judged_key(entries[0], entry), Accuracy).within
+
+    stamps = {p: p.stat().st_mtime_ns for p in cache.directory.iterdir()}
+    again = CostTable(tmp_path / "again.json")
+    assert measure_steps(again, found, timing, cache=cache) == {}
+    assert again.steps == table.steps
+    assert {p: p.stat().st_mtime_ns for p in cache.directory.iterdir()} == stamps
 
 
 @pytest.mark.supported_devices("npu2")

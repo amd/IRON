@@ -388,11 +388,13 @@ def measure_steps(
     twins: Sequence[Variant | None] = (),
 ) -> dict[str, StepCost]:
     """Measure every width in ``found`` (the default first) into ``table``,
-    as many at once as the device's contexts hold.
+    as many at once as the device's contexts hold. A width whose output is
+    not the default's is run once more and judged: it is accurate if
+    ``judge`` finds it, and the default, within their gates.
 
     Args:
-        cache: Widths it holds are recorded from it rather than run, unless
-            `remeasure`; those run are written to it.
+        cache: Widths and verdicts it holds are taken from it rather than
+            run, unless `remeasure`; those run are written to it.
         twins: For each width, the design in `table` it is priced against,
             or None. A width with a twin is run beside it, its step time
             recorded as the twin's plus their difference in that run, so a
@@ -484,7 +486,29 @@ def measure_steps(
         # A probe holds its context while it lives; the next batch needs them.
         del short, long
     known = held | measured
-    reference = known[found[0].key].output
+    default = found[0]
+    reference = known[default.key].output
+    inexact = {v.key for v in found[1:] if known[v.key].output != reference}
+    judged = [
+        (v, e) for v, e in zip(found, entries) if v is default or v.key in inexact
+    ]
+    accurate = set()
+    for v, entry in judged if inexact else []:
+        key = None if cache is None else cache.judged_key(entries[0], entry)
+        verdict = None if key is None or remeasure else cache.get(key, Accuracy)
+        if verdict is None:
+            run = Standalone(f"judge_{v.key}", [v.op], values=values, inputs=inputs)
+            run.digest()
+            verdict = judge(
+                default.op, v.op, run.inputs(), run.written(), values
+            ) or Accuracy(False, "not judged", CostTable.today())
+            del run
+            if key is not None:
+                cache.put(key, verdict)
+        if verdict.within:
+            accurate.add(v.key)
+        elif v is default:
+            break  # a default its own gate refuses admits no inexact width
     for v, twin in zip(found, twins):
         m = known[v.key]
         if twin is not None:
@@ -492,7 +516,7 @@ def measure_steps(
             m = dataclasses.replace(
                 m, t_step_us=table.steps[twin.key].t_step_us + delta
             )
-        table.record_step(v.key, m.cost(reference, False))
+        table.record_step(v.key, m.cost(reference, v.key in accurate))
     return {key: table.steps[key] for key in measured}
 
 
