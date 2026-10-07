@@ -63,17 +63,18 @@ DEEP_KL = 0.1
 
 @pytest.mark.supported_devices("npu1", "npu2")
 class TestEachStep:
-    """The form NPU1 runs: the decode step alone, each of its steps its own
-    dispatch of one xclbin, and the prompt fed through it a token at a time,
-    so the prompts are shorter than the full ELF's. Its model is built and
-    dropped with the class, first: after any other test it would be held
-    beside the module's full-ELF one.
+    """The form NPU1 runs: each step its own dispatch of one xclbin, and the
+    host drawing each token. NPU2 feeds a prompt through its prompt version;
+    NPU1, without MHA, through the decode step a token at a time, so the
+    prompts are shorter than the full ELF's. Its model is built and dropped
+    with the class, first: after any other test it would be held beside the
+    module's full-ELF one.
     """
 
     @pytest.fixture(scope="class")
     def model(self, runner):
         model = runner.npu(boundaries=iron.each_step)
-        assert not model.full_elf
+        assert not model.device_loop
         yield model
         if aie_utils.DefaultNPURuntime is not None:
             aie_utils.DefaultNPURuntime.cleanup()

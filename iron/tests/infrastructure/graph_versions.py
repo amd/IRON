@@ -4,12 +4,13 @@
 
 """One graph function, called at two shapes, is two images over one arena.
 
-Each input signature compiles its own version, and every full-ELF version
-runs in the function's one scratch arena: a weight is placed and uploaded
-once, and a state one version writes is the bytes the next reads. These run
-on the device, because the claim is about bytes -- two hw contexts over one
-buffer object, offsets baked into two ELFs -- and a wrong offset produces
-wrong numbers, not an error.
+Each input signature compiles its own version, and every version runs in
+the function's one scratch arena: a full ELF places its scratch there, an
+xclbin its weights and states. A weight is placed and uploaded once, and a
+state one version writes is the bytes the next reads. These run on the
+device, because the claim is about bytes -- two hw contexts over one buffer
+object, offsets baked into two images -- and a wrong offset produces wrong
+numbers, not an error.
 
 The function below writes its state at one shape and reads it at the other:
 ``f(x)`` with ``x`` one line long stores ``x + w`` in the state and returns
@@ -29,7 +30,7 @@ E = 1024
 TILE = 128
 
 
-pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
+pytestmark = pytest.mark.usefixtures("npu_runtime")
 
 
 def _numbers(n, seed):
@@ -60,15 +61,11 @@ def _f32(a):
     return np.asarray(a, dtype=np.float32)
 
 
-def test_two_shapes_share_weights_and_state_through_one_arena():
-    """Both compiled before the first call: the arena is made once, at size."""
-    f, w, w2, s = _function()
-    one = f.compile(x=(E,))
-    two = f.compile(x=(2 * E,))
-    assert len(f.versions) == 2
-    assert one.arena is two.arena is f.arena
-    assert one.plan.dispatch == two.plan.dispatch == "fused"
-
+def _run_both(f, w, w2):
+    """Store through the one-line version, read through the two-line one, and
+    check that each weight went up once, whichever version touched it first.
+    """
+    one, two = f.versions.values()
     # The state is one resident: the same bytes in both images.
     layout_one = one.sequence.get_layout_for_buffer("line")
     assert layout_one == two.sequence.get_layout_for_buffer("line")
@@ -80,9 +77,19 @@ def test_two_shapes_share_weights_and_state_through_one_arena():
     out = f(x2).numpy()
     expect = (_f32(x2) + _f32(w2))[E:] + _f32(x1) + _f32(w)
     np.testing.assert_array_equal(_f32(out), expect)
-
-    # Each weight went up once, whichever version touched it first.
     assert f.arena.loaded == {id(w), id(w2)}
+
+
+@pytest.mark.supported_devices("npu2")
+def test_two_shapes_share_weights_and_state_through_one_arena():
+    """Both compiled before the first call: the arena is made once, at size."""
+    f, w, w2, s = _function()
+    one = f.compile(x=(E,))
+    two = f.compile(x=(2 * E,))
+    assert len(f.versions) == 2
+    assert one.arena is two.arena is f.arena
+    assert one.plan.dispatch == two.plan.dispatch == "fused"
+    _run_both(f, w, w2)
     assert f.arena.generation == 1
     # One buffer holds both images: their residents, and the larger of
     # their transients, not the sum of two private arenas.
@@ -178,8 +185,24 @@ def test_a_version_compiled_after_the_first_call_grows_the_arena_and_keeps_state
     np.testing.assert_array_equal(_f32(two.read(s)), _f32(line))
 
 
-def test_versions_that_cannot_share_an_arena_refuse_a_state():
-    f, *_ = _function()
-    f.compile(x=(E,), boundaries=packaging.each_step)
-    with pytest.raises(NotImplementedError, match="only a full ELF"):
-        f.compile(x=(2 * E,))
+def test_each_step_versions_share_weights_and_state_through_one_arena():
+    """Each step's other operands are buffer objects of their own; the
+    weights and the state are views of the arena's, and nothing else is.
+    """
+    f, w, w2, s = _function()
+    one = f.compile(x=(E,), boundaries=packaging.each_step)
+    two = f.compile(x=(2 * E,), boundaries=packaging.each_step)
+    assert one.arena is two.arena is f.arena
+    assert one.plan.dispatch == two.plan.dispatch == "separate"
+    _run_both(f, w, w2)
+    assert f.arena.plan.size == w.nbytes + w2.nbytes + E * 2
+
+
+@pytest.mark.supported_devices("npu2")
+def test_an_each_step_version_and_a_full_elf_share_one_arena():
+    """``--each-step``'s decode step beside a full-ELF prompt."""
+    f, w, w2, s = _function()
+    one = f.compile(x=(E,), boundaries=packaging.each_step)
+    two = f.compile(x=(2 * E,))
+    assert (one.plan.dispatch, two.plan.dispatch) == ("separate", "fused")
+    _run_both(f, w, w2)

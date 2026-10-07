@@ -165,10 +165,10 @@ def main(runner: type[Runner], description: str):
             f"{run.config.max_seq_len} rows"
         )
     model = run.npu(args.cost_table, iron.each_step if args.each_step else None)
-    if args.device_loop and not model.full_elf:
+    if args.device_loop and not model.device_loop:
         parser.error(
-            "--device-loop needs a full-ELF decode step, which this device "
-            "(NPU1) has not"
+            "--device-loop needs a full-ELF decode step, which --each-step "
+            "and NPU1 have not"
         )
     if model.tuning is not None:
         print("[Tuning] decode:\n" + model.tuning.report(), flush=True)

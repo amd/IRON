@@ -44,8 +44,9 @@ class OperatorSequence:
             design, a step at a time), ``"reference"`` (each operator's
             ``reference()`` on the host) or ``"compare"`` (the chain, each
             step checked against its reference on the NPU's inputs).
-        arena: A shared ``ArenaPlan`` to place the scratch buffers in; only
-            the full ELF addresses scratch by offset, so only it can share.
+        arena: A shared ``ArenaPlan`` to place the scratch buffers in. The
+            full ELF places them all; a step at a time, each buffer is its
+            own buffer object, so only the residents are placed there.
         residents: With ``arena``, the scratch buffers resident there, by
             storage key.
         shared_words: On the full ELF, design symbol -> the scratchpad word
@@ -77,11 +78,6 @@ class OperatorSequence:
         coresident: Sequence[Sequence[Operator]] | AdjacentPacking = (),
     ):
         mode = self._coerce_dispatch(dispatch)
-        if arena is not None and mode not in (None, "fused", "reference"):
-            raise ValueError(
-                f"a shared arena needs the full ELF, which addresses scratch by "
-                f"offset; dispatch={dispatch!r} gives each buffer its own"
-            )
         if residents and arena is None:
             raise ValueError("residents are placed in an arena; pass arena= too")
         if feedback_args and mode not in (None, "fused", "reference"):
@@ -313,13 +309,20 @@ class OperatorSequence:
                 return None  # sliced buffers are handled separately
 
             if buffer_type == "scratch" and self.arena is not None:
-                lengths = {a: length_of(a) for a in args_list}
+                stepwise = self.mode in ("separate", "compare")
+                lengths = {
+                    a: length_of(a)
+                    for a in args_list
+                    if not stepwise or a in self.residents
+                }
                 placed = self._place_in_arena(
                     {a: n for a, n in lengths.items() if n is not None}
                 )
                 for arg, a in placed.items():
                     subbuffer_layout[arg] = (buffer_type, a.offset, a.size)
-                return max((a.end for a in placed.values()), default=0)
+                if not stepwise:
+                    return max((a.end for a in placed.values()), default=0)
+                args_list = [a for a in args_list if a not in placed]
 
             offsets = self.buffer_offsets
             if offsets is None and self.plan_scratch:
@@ -396,10 +399,10 @@ class OperatorSequence:
         if self.mode is None:
             elf = dev is not None and full_elf(dev)
             self.mode = "fused" if elf else "separate"
-            if (self.arena is not None or self.feedback_args) and not elf:
+            if self.feedback_args and not elf:
                 raise ValueError(
-                    f"{self.name}: a shared arena and feedback arguments need the "
-                    f"full ELF, which this device does not dispatch"
+                    f"{self.name}: feedback arguments need the full ELF, which "
+                    f"this device does not dispatch"
                 )
             if self.coresident and not elf:
                 raise ValueError(
@@ -513,17 +516,17 @@ class OperatorSequence:
 
     def get_callable(self, arena: ScratchArena | None = None):
         """The runtime callable of this sequence's mode, compiling first if
-        needed. A sequence placed in an arena plan runs its scratch in
-        ``arena``, made here if not given.
+        needed. A sequence placed in an arena plan runs what it placed there
+        in ``arena``, made here if not given.
         """
         if self.subbuffer_layout is None:
             self.compile()
         self.link()
         assert self.mode is not None, "link() chose the mode"
-        if self.mode != "fused":
-            return StepCallable(self, compare=self.mode == "compare")
         if self.arena is not None and arena is None:
             arena = ScratchArena(self.arena)
+        if self.mode != "fused":
+            return StepCallable(self, compare=self.mode == "compare", arena=arena)
         return FullELFCallable(self, arena=arena)
 
     def get_layout_for_buffer(self, buffer_name):

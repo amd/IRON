@@ -502,7 +502,9 @@ def _add():
     return ElementwiseAdd(size=1024, tile_size=128)
 
 
-def _arena_sequence(name, runlist, arena, residents, buffer_sizes=None, **kwargs):
+def _arena_sequence(
+    name, runlist, arena, residents, buffer_sizes=None, dispatch="reference", **kwargs
+):
 
     return OperatorSequence(
         name,
@@ -510,7 +512,7 @@ def _arena_sequence(name, runlist, arena, residents, buffer_sizes=None, **kwargs
         input_args=["x"],
         output_args=["out"],
         buffer_sizes=buffer_sizes or {n: 2048 for n in residents},
-        dispatch="reference",
+        dispatch=dispatch,
         arena=arena,
         residents=residents,
         **kwargs,
@@ -591,17 +593,22 @@ def test_residents_must_be_scratch_buffers():
         seq.calculate_buffer_layout()
 
 
-def test_an_arena_needs_an_image_that_addresses_scratch_by_offset():
+def test_a_step_at_a_time_places_only_its_residents_in_the_arena():
+    add = _add()
+    arena = ArenaPlan(alignment=64)
+    seq = _arena_sequence(
+        "arena_each_step",
+        [(add, "x", "w", "t"), (add, "t", "w", "out")],
+        arena,
+        {"w": "W"},
+        dispatch="separate",
+    )
+    layout, _, _ = seq.calculate_buffer_layout()
+    assert layout["w"] == ("scratch", 0, 2048)
+    assert arena.size == 2048
 
-    with pytest.raises(ValueError, match="full ELF"):
-        OperatorSequence(
-            "arena_xclbin",
-            [(_add(), "x", "w", "out")],
-            ["x", "w"],
-            ["out"],
-            dispatch="separate",
-            arena=ArenaPlan(),
-        )
+
+def test_residents_need_an_arena():
     with pytest.raises(ValueError, match="pass arena"):
         OperatorSequence(
             "arena_missing",

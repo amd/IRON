@@ -6,9 +6,10 @@
 A call with no ``x`` is a decode step; ``prefill_chunk`` rows of ``x`` are a
 prompt chunk, of which a call runs the first ``rows``. Both draw the next
 token on the device and carry it and ``position + 1`` into the next call.
-Where the decode step is not a full ELF (NPU1, or ``boundaries=each_step``)
-only a full ELF could share the arena's caches, so there is no prompt
-version: a prompt runs a token at a time and there is no device loop.
+A prompt chunk attends with ``MHA``, so where MHA does not fit the device
+(NPU1) there is no prompt version and a prompt runs a token at a time. Where
+the decode step is not a full ELF (NPU1, or ``boundaries=each_step``) there
+is no device loop.
 """
 
 import dataclasses
@@ -227,27 +228,33 @@ class CausalLM(iron.Graph):
         Args:
             release: Given each piece of each weight once it is on the device.
             tuner: Narrows and packs the decode step's designs by cost.
-            boundaries: The decode step's packaging.
+            boundaries: Both versions' packaging.
         """
         decode = self.compile(coresident=tuner, boundaries=boundaries, **self.shapes(1))
         if decode.plan.image != iron.ELF:
             print(decode.plan.report("decode"), flush=True)
+        if not MHA.fits(aie_utils.ensure_current_device()):
             decode.load(release=release)
             self._prompt, self._decode = None, decode
             return self
         feeds = decode if decode.emit is not None else None
-        prompt = self.compile(feeds=feeds, **self.shapes(self.config.prefill_chunk))
+        prompt = self.compile(
+            feeds=feeds,
+            boundaries=boundaries,
+            **self.shapes(self.config.prefill_chunk),
+        )
         for version in (decode, prompt):
             version.load(release=release)
         self._prompt, self._decode = prompt, decode
         return self
 
     @property
-    def full_elf(self) -> bool:
-        """Whether there is a prompt version and a device loop."""
+    def device_loop(self) -> bool:
+        """Whether ``generate`` can draw on the device: a full-ELF decode step
+        beside a prompt version."""
         if self._decode is None:
             raise RuntimeError(f"{type(self).__name__}: load() first")
-        return self._prompt is not None
+        return self._prompt is not None and self._decode.emit is not None
 
     @property
     def tuning(self) -> Tuning | None:
@@ -297,12 +304,13 @@ class CausalLM(iron.Graph):
             raise ValueError(
                 f"{n} tokens and {num_tokens} more to draw do not fit {L} rows"
             )
-        if not self.full_elf:
+        if not self.device_loop:
             assert self._decode is not None
             raise RuntimeError(
                 f"{type(self).__name__}: the device loop needs a full-ELF "
-                f"decode step, and this one is an {self._decode.plan.image}; "
-                f"draw on the host (generation.generate)"
+                f"decode step beside a prompt version, and this decode step "
+                f"is an {self._decode.plan.image}; draw on the host "
+                f"(generation.generate)"
             )
         assert self._prompt is not None and self._decode is not None
         if self._loop is None:

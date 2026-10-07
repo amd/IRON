@@ -93,12 +93,14 @@ python -m iron.lm.llama3.model \
 
 ## NPU1, and `--each-step`
 
-NPU1 has no full-ELF dispatch, so there its decode step is an xclbin whose
-steps are dispatched one at a time, and it is the model's only version:
-only a full ELF addresses the scratch arena a prompt version would share its
-caches through. The prompt runs through the decode step a token at a time,
-and there is no `--device-loop`. `--each-step` builds the same form on NPU2,
-which is how `test_llama_3_2_1b_each_step_accuracy` checks it there.
+NPU1 has no full-ELF dispatch, so there both versions are xclbins whose
+steps are dispatched one at a time, and the host draws each token: there is
+no `--device-loop`. The versions still share one copy of the weights and the
+caches, the views of one buffer object. A prompt chunk attends with MHA, which
+NPU1 does not place (below), so there the decode step is the model's only
+version and a prompt runs through it a token at a time. `--each-step` builds
+the same form on NPU2, with a prompt version, which is how
+`test_llama_3_2_1b_each_step_accuracy` checks it there.
 
 MHA is placed on NPU2's 8-column array, so on NPU1 decode attention is
 `"gqa"` (`CausalLM.decode_attention`, `iron/operators/gqa.py`): `GQAScores`

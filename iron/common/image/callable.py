@@ -398,13 +398,15 @@ class StepCallable:
 
     ``compare`` holds each dispatched step to its reference on the NPU's
     inputs, so each comparison isolates one operator; ``tolerance``, when
-    set, replaces each step's own.
+    set, replaces each step's own. On the NPU, the residents a sequence
+    placed in an arena plan are views of ``arena``'s buffer, so every
+    version of a graph reads one copy.
     """
 
     # compare cannot judge a range-relative tolerance element by element.
     FALLBACK_TOLERANCE = Tolerance.relative(0.025, 1e-2)
 
-    def __init__(self, seq, compare: bool = False):
+    def __init__(self, seq, compare: bool = False, arena: ScratchArena | None = None):
         chain = seq._image
         if chain is not None:
             _require_xrt()
@@ -414,11 +416,18 @@ class StepCallable:
         self.last_elapsed = 0.0
         self.dispatch_values: dict[str, np.generic] = {}
         self._on_npu = chain is not None
+        self.arena = arena if self._on_npu else None
+        self._arena_generation: int | None = None
         tensor = XRTTensor if self._on_npu else CPUOnlyTensor
         self._buffers = {}
+        self._storage = {}
         for name, (_, _, length) in seq.subbuffer_layout.items():
+            if self.arena is not None and name in seq.residents:
+                continue
             dtype = seq.buffer_dtype(name)
             self._buffers[name] = tensor((_n_elements(length, dtype),), dtype=dtype)
+        self._steps = []
+        self._follow_arena()
         kernels = {}
         if chain is not None:
             kernels = {
@@ -431,7 +440,6 @@ class StepCallable:
                 )
                 for op_id, design in chain.designs.items()
             }
-        self._steps = []
         for step_op, *names in seq.runlist:
             if len(step_op.buffers) != len(names):
                 raise ValueError(
@@ -442,7 +450,32 @@ class StepCallable:
             kernel = kernels[id(step_op)] if self._on_npu else None
             self._steps.append((step_op, kernel, names, args))
 
+    def _follow_arena(self) -> None:
+        """View the residents in the arena's buffer, again once it has grown."""
+        if self.arena is None or self.arena.generation == self._arena_generation:
+            return
+        parent = self.arena.tensor
+        self._arena_generation = self.arena.generation
+        for name in self.op.residents:
+            _, offset, length = self.op.subbuffer_layout[name]
+            dtype = self.op.buffer_dtype(name)
+            stop = min(Pool(ALIGNMENT).align(offset + length), parent.nbytes)
+            self._buffers[name] = parent.subview(
+                offset, (length // dtype.itemsize,), dtype
+            )
+            self._storage[name] = parent.subview(
+                offset, ((stop - offset) // dtype.itemsize,), dtype
+            )
+        for name, (base_name, _, _) in self.op.slice_info.items():
+            if base_name in self.op.residents:
+                self._buffers.pop(name, None)
+        self._steps = [
+            (step_op, kernel, names, [self.get_buffer(name) for name in names])
+            for step_op, kernel, names, _ in self._steps
+        ]
+
     def get_buffer(self, buffer_name):
+        self._follow_arena()
         if buffer_name not in self._buffers:
             if buffer_name not in self.op.slice_info:
                 raise ValueError(f"Unknown buffer '{buffer_name}' in the runlist")
@@ -453,7 +486,14 @@ class StepCallable:
             )
         return self._buffers[buffer_name]
 
-    get_storage = get_buffer
+    def get_storage(self, buffer_name):
+        """The buffer, and for a resident in the arena the rest of its last
+        coherence line, which no other buffer holds.
+        """
+        self._follow_arena()
+        if buffer_name in self._storage:
+            return self._storage[buffer_name]
+        return self.get_buffer(buffer_name)
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
         if not self._on_npu:
@@ -461,6 +501,7 @@ class StepCallable:
         self.dispatch_values = dict(values)
 
     def __call__(self):
+        self._follow_arena()
         if self._on_npu:
             for name in self.op.input_args:
                 self._buffers[name].to("npu")
@@ -491,7 +532,7 @@ class StepCallable:
             # Device-resident, so a read pulls what the steps wrote, and only then.
             for name in self.op.subbuffer_layout:
                 if name not in self.op.input_args:
-                    self._buffers[name].device = "npu"
+                    self.get_storage(name).device = "npu"
 
     def _check(self, index, step_op: Operator, names, inputs, out, spec) -> None:
         """Hold step ``index``'s NPU output to its reference on the same inputs.
