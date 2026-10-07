@@ -25,7 +25,7 @@ from .audio import model as audio_model
 from .audio.oracle import AudioOracle
 from .model import COSTS, EMBEDDINGGEMMA_2, EmbeddingGemma, layout, text_tensors
 from .multimodal import Multimodal
-from .oracle import PROMPTS, EmbeddingGemmaOracle, tokenizer
+from .oracle import EmbeddingGemmaOracle, tokenizer, tokens
 from .vision import model as vision_model
 from .vision.oracle import VisionOracle
 
@@ -78,18 +78,10 @@ class Encoder:
     def tokens(
         self, text: str, task: str, audio_tokens: int = 0, image_tokens: int = 0
     ) -> list[int]:
-        """`text` behind `task`'s prompt (`PROMPTS`), with BOS and EOS, each
-        `<|audio|>` and `<|image|>` in it a run of that many placeholders
-        between its markers, as the processor expands them.
-        """
-        c, out = self.config, []
-        runs = {
-            c.audio_token: [c.boa, *[c.audio_token] * audio_tokens, c.eoa],
-            c.image_token: [c.boi, *[c.image_token] * image_tokens, c.eoi],
-        }
-        for t in self.tokenizer.encode(PROMPTS[task] + text).ids:
-            out += runs.get(t, [t])
-        return out
+        """`text`'s tokens for `task`, as `oracle.tokens` gives them."""
+        return tokens(
+            self.tokenizer, self.config, text, task, audio_tokens, image_tokens
+        )
 
     def __call__(
         self, text: str, task: str, dims: int = 768, audio=None, image=None

@@ -4,7 +4,9 @@
 
 """EmbeddingGemma 2's text encoder on the NPU, from the real checkpoint,
 against its float32 oracle: each embedding's cosine to the oracle's, its
-norm, and the cosine similarities a query gives two documents.
+norm, the cosine similarities a query gives two documents, and every call
+bit-identical to the first. The oracle, over text, a clip and an image,
+once against Hugging Face's processor and model.
 """
 
 import time
@@ -13,19 +15,31 @@ import aie.utils as aie_utils
 import numpy as np
 import pytest
 
+from iron.lm import Checkpoint, load_weights
+from iron.lm.embeddinggemma2.audio import model as audio_model
 from iron.lm.embeddinggemma2.audio.model import AUDIO, LogMel
+from iron.lm.embeddinggemma2.audio.oracle import AudioOracle
 from iron.lm.embeddinggemma2.encoder import Encoder
-from iron.lm.embeddinggemma2.model import COSTS
+from iron.lm.embeddinggemma2.model import (
+    COSTS,
+    EMBEDDINGGEMMA_2,
+    layout,
+    text_tensors,
+)
+from iron.lm.embeddinggemma2.oracle import (
+    PROMPTS,
+    EmbeddingGemmaOracle,
+    tokenizer,
+    tokens,
+)
+from iron.lm.embeddinggemma2.vision import model as vision_model
 from iron.lm.embeddinggemma2.vision.model import VISION
-from iron.lm.embeddinggemma2.vision.oracle import patches
+from iron.lm.embeddinggemma2.vision.oracle import VisionOracle, patches
 from iron.lm.testing import requires, weights_dir
 
 DIRECTORY = weights_dir("embeddinggemma-2")
 
-pytestmark = [
-    requires(DIRECTORY / "model.safetensors", DIRECTORY / "tokenizer.json"),
-    pytest.mark.supported_devices("npu2"),
-]
+pytestmark = requires(DIRECTORY / "model.safetensors", DIRECTORY / "tokenizer.json")
 
 QUERY = "What causes the northern lights?"
 DOCUMENTS = [
@@ -68,6 +82,7 @@ def oracle(encoder):
     return encoder.oracle()
 
 
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "text,task",
     [
@@ -88,6 +103,7 @@ def test_embeddinggemma_2_accuracy(encoder, oracle, text, task, record_property)
     np.testing.assert_allclose(np.linalg.norm(got), 1, rtol=NORM_RTOL)
 
 
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("dims", [512, 256, 128])
 def test_embeddinggemma_2_truncation(encoder, oracle, dims, record_property):
     tokens = encoder.tokens(QUERY, "query")
@@ -99,6 +115,7 @@ def test_embeddinggemma_2_truncation(encoder, oracle, dims, record_property):
     assert similarity >= MIN_COSINE, similarity
 
 
+@pytest.mark.supported_devices("npu2")
 def test_embeddinggemma_2_ranking(encoder, oracle):
     query = encoder(QUERY, "query")
     scores = [cosine(encoder(d, "document"), query) for d in DOCUMENTS]
@@ -142,14 +159,14 @@ def multimodal():
         aie_utils.DefaultNPURuntime.cleanup()
 
 
-@pytest.mark.parametrize(
-    "text,audio,image",
-    [
-        ("<|audio|> a bird singing", CLIP, None),
-        ("<|image|> waves at dusk", None, IMAGE),
-    ],
-    ids=["audio", "image"],
-)
+MIXED = {
+    "audio": ("<|audio|> a bird singing", CLIP, None),
+    "image": ("<|image|> waves at dusk", None, IMAGE),
+}
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("text,audio,image", MIXED.values(), ids=MIXED.keys())
 def test_embeddinggemma_2_multimodal(multimodal, text, audio, image, record_property):
     c = multimodal.config
     got = multimodal(text, "query", audio=audio, image=image)
@@ -172,6 +189,123 @@ def test_embeddinggemma_2_multimodal(multimodal, text, audio, image, record_prop
     np.testing.assert_allclose(np.linalg.norm(got), 1, rtol=NORM_RTOL)
 
 
+@pytest.mark.supported_devices("npu2")
+def test_embeddinggemma_2_determinism(multimodal):
+    # Interleaved, so that a version reading what another left in the shared
+    # arena or state differs from its first call.
+    calls = [(LONG, None, None), *MIXED.values()]
+    first = [multimodal(t, "query", audio=a, image=i) for t, a, i in calls]
+    for _ in range(4):
+        for (t, a, i), want in zip(calls, first):
+            np.testing.assert_array_equal(
+                multimodal(t, "query", audio=a, image=i), want
+            )
+
+
+@pytest.fixture(scope="module")
+def hugging_face():
+    """Hugging Face's processor and float32 model of the checkpoint."""
+    # Optional dependencies: the reference implementation, where installed.
+    torch = pytest.importorskip("torch")
+    # The processor's image resize needs both.
+    pytest.importorskip("torchvision")
+    pytest.importorskip("PIL")
+    transformers = pytest.importorskip("transformers")
+    pytest.importorskip(
+        "transformers.models.embedding_gemma2.modeling_embedding_gemma2"
+    )
+    processor = transformers.AutoProcessor.from_pretrained(DIRECTORY)
+    # Not eager: there Gemma4AudioAttention inverts the additive float mask
+    # create_bidirectional_mask gives it.
+    model = transformers.AutoModel.from_pretrained(
+        DIRECTORY, dtype=torch.float32, attn_implementation="sdpa"
+    ).eval()
+    return processor, model
+
+
+@pytest.fixture(scope="module")
+def oracles():
+    """The float32 text encoder and towers on the host, and the tokenizer."""
+    tensors = Checkpoint(DIRECTORY / "model.safetensors").tensors
+    c, A, V = EMBEDDINGGEMMA_2, AUDIO, VISION
+    return (
+        EmbeddingGemmaOracle(
+            c, load_weights(text_tensors(tensors), layout(c), c.n_layers)
+        ),
+        AudioOracle(
+            A,
+            load_weights(
+                audio_model.audio_tensors(tensors), audio_model.layout(A), A.n_layers
+            ),
+        ),
+        VisionOracle(
+            V,
+            load_weights(
+                vision_model.vision_tensors(tensors),
+                vision_model.layout(V),
+                V.n_layers,
+            ),
+        ),
+        tokenizer(DIRECTORY / "tokenizer.json"),
+    )
+
+
+# At the size the processor's resize picks, so that its pixels are ours: 14 x 20
+# tokens, the whole budget.
+PROCESSED = picture(672, 960)
+
+
+@pytest.mark.parametrize(
+    "text,task,wave,image",
+    [
+        (QUERY, "query", None, None),
+        (LONGER, "document", None, None),
+        ("<|audio|> a bird singing", "query", chirp(2.0), None),
+        ("<|image|> waves at dusk", "query", None, PROCESSED),
+        (
+            "<|image|> the picture, then the sound: <|audio|>",
+            "query",
+            chirp(2.0),
+            PROCESSED,
+        ),
+    ],
+    ids=["query", "past_the_window", "audio", "image", "both"],
+)
+def test_embeddinggemma_2_oracle_matches_hugging_face(
+    hugging_face, oracles, text, task, wave, image
+):
+    torch = pytest.importorskip("torch")
+    processor, model = hugging_face
+    text_oracle, audio_oracle, vision_oracle, tok = oracles
+    c = EMBEDDINGGEMMA_2
+    media, soft = {}, {}
+    if wave is not None:
+        media["audio"] = [wave]
+        soft[c.audio_token] = audio_oracle(*LogMel(AUDIO)(wave))
+    if image is not None:
+        media["images"] = [image]
+        soft[c.image_token] = vision_oracle(
+            *patches(image, VISION.image_tokens, VISION)
+        )
+    ids = tokens(
+        tok,
+        c,
+        text,
+        task,
+        len(soft.get(c.audio_token, ())),
+        len(soft.get(c.image_token, ())),
+    )
+    inputs = processor(text=PROMPTS[task] + text, return_tensors="pt", **media)
+    assert ids == inputs["input_ids"][0].tolist()
+    with torch.no_grad():
+        want = model(**inputs).last_hidden_state[0].numpy().mean(axis=0)
+    want /= np.linalg.norm(want)
+    got = text_oracle(ids, soft=soft)
+    # Measured: 1.4e-6 at the most, float32's own reordering.
+    np.testing.assert_allclose(np.linalg.norm(got - want), 0, atol=1e-5)
+
+
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.bench
 @pytest.mark.parametrize(
     "text", [QUERY, LONG, LONGER], ids=["query", "long_document", "past_the_window"]

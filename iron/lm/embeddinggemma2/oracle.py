@@ -44,6 +44,28 @@ def tokenizer(path) -> Tokenizer:
     return Tokenizer.from_file(str(path))
 
 
+def tokens(
+    tokenizer: Tokenizer,
+    config: Config,
+    text: str,
+    task: str,
+    audio_tokens: int = 0,
+    image_tokens: int = 0,
+) -> list[int]:
+    """`text` behind `task`'s prompt (`PROMPTS`), with BOS and EOS, each
+    `<|audio|>` and `<|image|>` in it a run of that many placeholders
+    between its markers, as the processor expands them.
+    """
+    c, out = config, []
+    runs = {
+        c.audio_token: [c.boa, *[c.audio_token] * audio_tokens, c.eoa],
+        c.image_token: [c.boi, *[c.image_token] * image_tokens, c.eoi],
+    }
+    for t in tokenizer.encode(PROMPTS[task] + text).ids:
+        out += runs.get(t, [t])
+    return out
+
+
 def rms_norm(x, w, eps):
     return (
         x * np.power(np.mean(x * x, axis=-1, keepdims=True) + eps, np.float32(-0.5)) * w
