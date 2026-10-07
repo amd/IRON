@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """SwiGLU does not pad: a row count its inner GEMM cannot tile is an error
-at trace time, and an aligned one traces with the extents it was given.
+when that GEMM resolves its tile, and an aligned one traces with the
+extents it was given.
 """
 
 import numpy as np
@@ -27,8 +28,9 @@ def _trace(rows, embedding_dim=2048, hidden_dim=2048):
 
 
 def test_non_aligned_row_count_raises_instead_of_being_padded():
+    gemm = next(s.op for s in _trace(rows=300).steps if type(s.op) is GEMM)
     with pytest.raises(ValueError, match=r"M \(300\) must be a multiple of 256"):
-        _trace(rows=300)
+        gemm.resolved()
 
 
 def test_aligned_row_count_traces_with_the_given_extents():
