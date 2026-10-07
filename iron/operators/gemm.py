@@ -251,11 +251,32 @@ class GEMM(Operator):
         if self.K % self.tile_k != 0:
             raise ValueError(f"K ({self.K}) must be a multiple of {self.tile_k}")
         rows = self.n_aie_rows or (self.dev and len(self.dev.core_rows))
-        if rows and self.tile_m and self.M % (self.tile_m * rows) != 0:
+        tile_m = self.tile_m or (self.dev and self._auto_tile_m(self.dev))
+        if rows and tile_m and self.M % (tile_m * rows) != 0:
             raise ValueError(
-                f"M ({self.M}) must be a multiple of {self.tile_m * rows}: C is "
+                f"M ({self.M}) must be a multiple of {tile_m * rows}: C is "
                 f"tiled into (m * n_aie_rows, n)-sized blocks"
             )
+
+    def _auto_tile_m(self, dev) -> int:
+        """The widest of 64, 32, 16 and 8 rows that splits M over ``dev``'s
+        rows of cores and that its kernel's m block divides; 64 where none
+        does, which validate() then refuses.
+        """
+        r, _, _ = kernels.mm.mac_dims(
+            self.dtype_in,
+            self.dtype_out,
+            device=dev,
+            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
+            vectorized=not self.use_scalar,
+        )
+        # aie2's mm kernels block m by 4 r (mm_aie2.h), aie2p's by 2 r.
+        block = (4 if dev.arch is AIEArch.AIE2 else 2) * r
+        rows = len(dev.core_rows)
+        return next(
+            (m for m in (64, 32, 16, 8) if m % block == 0 and self.M % (m * rows) == 0),
+            64,
+        )
 
     def resolve(self, dev):
         if dev is None:
@@ -265,33 +286,15 @@ class GEMM(Operator):
         cols = self.resolve_columns(
             dev, self.num_aie_columns, fits=lambda c: self.N % (self.tile_n * c) == 0
         )
-        rows = len(dev.core_rows)
-        tile_m = self.tile_m
-        if tile_m is None:
-            r, _, _ = kernels.mm.mac_dims(
-                self.dtype_in,
-                self.dtype_out,
-                device=dev,
-                emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
-                vectorized=not self.use_scalar,
-            )
-            # aie2's mm kernels block m by 4 r (mm_aie2.h), aie2p's by 2 r.
-            block = (4 if dev.arch is AIEArch.AIE2 else 2) * r
-            # None splits M: 64, and validate() names the rule.
-            tile_m = next(
-                (
-                    m
-                    for m in (64, 32, 16, 8)
-                    if m % block == 0 and self.M % (m * rows) == 0
-                ),
-                64,
-            )
         new = dataclasses.replace(
-            self, tile_m=tile_m, num_aie_columns=cols, n_aie_rows=rows
+            self,
+            tile_m=self.tile_m or self._auto_tile_m(dev),
+            num_aie_columns=cols,
+            n_aie_rows=len(dev.core_rows),
         )
         return dataclasses.replace(
             new,
-            n_shim_mem_a=min(cols, rows),
+            n_shim_mem_a=min(cols, new.n_aie_rows),
             a_l2=new.mem_tile_m_a * self.tile_k,
             b_l2=self.tile_k * self.tile_n,
             c_l2=new.mem_tile_m_c * self.tile_n,
