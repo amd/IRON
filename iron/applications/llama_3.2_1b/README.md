@@ -137,9 +137,10 @@ columns), and `decode_costs_npu1.json` one measured on a Phoenix NPU (4
 columns); `tune.py` fills the current device's by default. On NPU1, where
 each step is its own dispatch, nothing is packed: a narrower design is
 chosen where it is cheaper to switch into. There the table narrows the
-elementwise steps and keeps every GEMV and MHA at the profile's width:
-with random weights, a token went from 726 to 653 ms (20 tokens after a
-16-token prompt, medians of 8 interleaved runs). Its entries are keyed by
+elementwise steps, moves several GEMVs between columns and lanes, puts
+Sample on two cores and keeps MHA at the profile's width: with random
+weights and the default caches, a token went from 362 to 338 ms (20
+tokens after a 16-token prompt, medians of 8 interleaved runs). Its entries are keyed by
 each design's identity -- its fields -- so a design changed since the
 table was measured is not in it, and the
 tuner leaves that design as the profile gives it (the `[Tuning]` report
