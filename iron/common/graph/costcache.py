@@ -55,12 +55,18 @@ class Measurement:
     calls: int
     measured: str  # ISO date
 
-    def cost(self, reference: str) -> StepCost:
-        """The table's figure, exact if the output digest is `reference`."""
+    def cost(self, default: str, accurate: bool) -> StepCost:
+        """The table's figure, exact if the output digest is `default`'s.
+
+        Args:
+            accurate: An inexact width was judged within its gates.
+        """
+        exact = self.output == default
         return StepCost(
             t_step_us=self.t_step_us,
             alone_us=self.alone_us,
-            exact=self.output == reference,
+            exact=exact,
+            accurate=exact or accurate,
             pmode=self.pmode,
             rounds=self.rounds,
             calls=self.calls,

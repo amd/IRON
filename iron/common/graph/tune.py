@@ -129,7 +129,7 @@ def main() -> None:
             c = table.steps[v.key]
             print(
                 f"{dict(v.tunables)}: t_step {c.t_step_us:8.2f} us  "
-                f"alone {c.alone_us:8.2f} us  exact {c.exact}"
+                f"alone {c.alone_us:8.2f} us  exact {c.exact}  accurate {c.accurate}"
                 + ("  (default)" if v is found[0] else "")
             )
 

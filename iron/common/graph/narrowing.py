@@ -24,9 +24,10 @@ partitions into them, carrying the parity, finds the cheapest. The placer
 (``fits``) is asked only about the packs a solution uses; a refused pack
 tries its next-cheapest settings, then is dropped, and the search reruns.
 
-A setting is a candidate only if its output was measured bit-identical to
-the default's. A design the table does not hold stays at its default,
-alone in its device.
+A setting is a candidate only if it was measured accurate: its output
+bit-identical to the default's, or within the gate of the default and its
+own. A design the table does not hold stays at its default, alone in its
+device.
 
 A fold (``iron.common.graph.fold``) is another runlist: fewer steps, the
 producer's design in place of two. Each the graph admits is priced by the
@@ -155,11 +156,14 @@ class StepCost:
         t_step_us: Its time per step while its device is configured.
         alone_us: One run of one step, less `t_step_us`: `D0 + base + load + R`.
         exact: Its output is bit-identical to the default setting's.
+        accurate: It may replace the default: exact, or judged within the
+            default's gate and its own (``probe.judge``).
     """
 
     t_step_us: float
     alone_us: float
     exact: bool
+    accurate: bool
     pmode: str
     rounds: int
     calls: int
@@ -654,7 +658,7 @@ class JointNarrowing:
         return sum(alone[i][0] for i in pack.members) - pack.cost
 
     def _candidates(self, op: Operator, dev) -> list[Variant]:
-        """The default setting, then every other one measured exact."""
+        """The default setting, then every other one measured accurate."""
         found = variants(op, dev)
         default = found[0]
         if default.key not in self.table.steps:
@@ -662,7 +666,7 @@ class JointNarrowing:
         return [default] + [
             v
             for v in found[1:]
-            if v.key in self.table.steps and self.table.steps[v.key].exact
+            if v.key in self.table.steps and self.table.steps[v.key].accurate
         ]
 
     @staticmethod

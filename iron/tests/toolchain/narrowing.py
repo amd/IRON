@@ -9,6 +9,8 @@ mlir-aie's passes in process. Hardware checks a tuned graph against the
 untuned one (``iron/tests/infrastructure/narrowing.py``).
 """
 
+import dataclasses
+
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
@@ -173,7 +175,9 @@ def _table(path, steps, dispatch=50.0, reset=30.0, base=30.0):
     for key, (t_step, load) in steps.items():
         table.record_step(
             key,
-            StepCost(t_step, dispatch + base + load + reset, True, "turbo", 1, 1, "-"),
+            StepCost(
+                t_step, dispatch + base + load + reset, True, True, "turbo", 1, 1, "-"
+            ),
         )
     table.record_calibration(
         ("x", "y"),
@@ -222,6 +226,23 @@ def test_packs_designs_apart_in_first_use_order(tmp_path, npu2):
         model_us(table, keys, tuning.groups, chosen)[0]
     )
     assert tuning.predicted_us < tuning.baseline_us
+
+
+@pytest.mark.parametrize("accurate", [True, False])
+def test_an_inexact_width_is_taken_only_if_accurate(accurate, tmp_path, npu2):
+    traced, ops, table = _add_silu(tmp_path, npu2)
+    key = cost_key(ops["ElementwiseAdd"])
+    default, *others = variants(ops["ElementwiseAdd"], npu2)
+    tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
+    exact = tuner.tune(traced, npu2).chosen[key]
+    assert exact.key != default.key
+    for v in others:
+        table.record_step(
+            v.key,
+            dataclasses.replace(table.steps[v.key], exact=False, accurate=accurate),
+        )
+    chosen = tuner.tune(traced, npu2).chosen[key]
+    assert chosen.key == (exact.key if accurate else default.key)
 
 
 def test_apply_rebuilds_the_narrowed_steps(tmp_path, npu2):
@@ -375,7 +396,10 @@ def test_cache_entries_round_trip_per_platform_and_mode(tmp_path):
     )
     assert CostCache("NPU Strix", "turbo", root=tmp_path).get("k", Measurement) is None
     # Exactness is against whichever width the table takes as default.
-    assert m.cost("ab" * 32).exact and not m.cost("cd" * 32).exact
+    assert m.cost("ab" * 32, False).exact and not m.cost("cd" * 32, False).exact
+    # An inexact width is accurate only as judged; an exact one always is.
+    assert m.cost("ab" * 32, False).accurate
+    assert m.cost("cd" * 32, True).accurate and not m.cost("cd" * 32, False).accurate
     verdict = Accuracy(False, "C under the default's gate: 1 mismatch", "2026-10-07")
     judged = CostCache.judged_key("k", "w")
     assert judged not in {CostCache.beside_key("k", "w"), CostCache.pair_key("k", "w")}

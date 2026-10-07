@@ -10,7 +10,8 @@ entries are odd, and each step's ``t_step``.
 - ``measure_steps``: one run against ``repeats`` runs of a design gives
   ``t_step`` and ``alone = D0 + base + load + R``. Any other setting of its
   tunables is a candidate only if its output is bit-identical to the
-  default's. A design the ``CostCache`` holds is taken from it, not run.
+  default's, or ``judge`` finds it within the default's gate and its own.
+  A design the ``CostCache`` holds is taken from it, not run.
 - ``search``: which of a design's settings ``measure_steps`` runs: all of
   them, or coordinate descent where there are more than ``EXHAUSTIVE``.
 - ``calibrate``, on measured designs A, B: ``A B A B ...`` against
@@ -491,7 +492,7 @@ def measure_steps(
             m = dataclasses.replace(
                 m, t_step_us=table.steps[twin.key].t_step_us + delta
             )
-        table.record_step(v.key, m.cost(reference))
+        table.record_step(v.key, m.cost(reference, False))
     return {key: table.steps[key] for key in measured}
 
 
@@ -513,7 +514,7 @@ def search(
 ) -> dict[str, StepCost]:
     """Measure the settings of ``found`` (the default first) into ``table``:
     every one when there are at most ``exhaustive``, else by coordinate
-    descent, each tunable's line through the fastest exact setting so far,
+    descent, each tunable's line through the fastest accurate setting so far,
     from the default until a pass over the tunables moves it no further.
     The other arguments are ``measure_steps``'.
 
@@ -554,7 +555,7 @@ def search(
                 [twin_of[v.key] for v in batch] if twins else (),
             )
             fastest = min(
-                (v for v in line if table.steps[v.key].exact),
+                (v for v in line if table.steps[v.key].accurate),
                 key=lambda v: table.steps[v.key].t_step_us,
             )
             if table.steps[fastest.key].t_step_us < table.steps[best.key].t_step_us:
@@ -817,7 +818,7 @@ def measure_graph(
             c = table.steps[v.key]
             log(
                 f"    {dict(v.tunables)}: t_step {c.t_step_us:8.2f} us  "
-                f"alone {c.alone_us:8.2f} us  exact {c.exact}"
+                f"alone {c.alone_us:8.2f} us  exact {c.exact}  accurate {c.accurate}"
                 + ("" if v.key in costs else "  (cached)")
             )
 
