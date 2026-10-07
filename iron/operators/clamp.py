@@ -2,35 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.iron import Buffer, ExternalFunction, ObjectFifo, Worker, WorkerRuntimeBarrier
+from aie.iron import Buffer, ObjectFifo, Worker, WorkerRuntimeBarrier
 from aie.iron.controlflow import range_
-from aie.iron.kernels import KernelContract, Param
-from aie.utils.compile.jit.markers import In, Out
-from aie.utils.verify import Tolerance
+from aie.iron.kernels import eltwise
 from ml_dtypes import bfloat16
 
 from iron.common import UnaryElementwise, Value, param
 from iron.common.testing import Case, Sweep, Testing
-
-CLAMP = """
-#include <aie_api/aie.hpp>
-#include <stdint.h>
-
-extern "C" void clamp_bf16(bfloat16 *restrict x, bfloat16 *restrict y,
-                           int32_t n, int32_t low, int32_t high) {
-    event0();
-    // A bound arrives as its bf16 bits, which are a float's upper half.
-    const aie::vector<bfloat16, 32> lo = aie::broadcast<bfloat16, 32>(
-        bfloat16(__builtin_bit_cast(float, (uint32_t)low << 16)));
-    const aie::vector<bfloat16, 32> hi = aie::broadcast<bfloat16, 32>(
-        bfloat16(__builtin_bit_cast(float, (uint32_t)high << 16)));
-    for (int i = 0; i < n; i += 32) chess_prepare_for_pipelining {
-        aie::vector<bfloat16, 32> v = aie::load_v<32>(x + i);
-        aie::store_v(y + i, aie::min(aie::max(v, lo), hi));
-    }
-    event1();
-}
-"""
 
 
 class Clamp(UnaryElementwise):
@@ -55,12 +33,8 @@ class Clamp(UnaryElementwise):
     low: float = param()
     high: float = param()
 
-    low_bits = Value(
-        np.int32, derive=lambda op: int(np.array(op.low, bfloat16).view(np.uint16))
-    )
-    high_bits = Value(
-        np.int32, derive=lambda op: int(np.array(op.high, bfloat16).view(np.uint16))
-    )
+    low_bits = Value(np.int32, derive=lambda op: op.scalars()[0])
+    high_bits = Value(np.int32, derive=lambda op: op.scalars()[1])
 
     def validate(self) -> None:
         if not np.float32(self.low) <= np.float32(self.high):
@@ -75,23 +49,12 @@ class Clamp(UnaryElementwise):
             )
 
     def kernel(self):
-        contract = KernelContract(
-            roles=(In, Out, Param, Param, Param),
-            parameter_bindings=((2, self.tile_size),),
-            reference=lambda x, low, high: np.clip(x.astype(np.float32), low, high),
-            tolerance=Tolerance.exact(note="selection: min and max are exact in bf16"),
-            ops_per_call=self.tile_size,
-        )
-        return ExternalFunction(
-            "clamp_bf16",
-            source_string=CLAMP,
-            arg_types=[self.x.tile, self.y.tile, np.int32, np.int32, np.int32],
-            contract=contract,
-        )
+        return eltwise.clamp(self.tile_size)
 
-    def reference(self, x):
-        low, high = (np.float32(bfloat16(b)) for b in (self.low, self.high))
-        return np.clip(x.astype(np.float32), low, high).astype(bfloat16)
+    def scalars(self) -> tuple:
+        return tuple(
+            int(np.array(b, bfloat16).view(np.uint16)) for b in (self.low, self.high)
+        )
 
     def array(self, target) -> list:
         cores = self.cores
