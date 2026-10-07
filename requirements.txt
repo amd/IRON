@@ -6,7 +6,7 @@
 --find-links https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4
 --find-links https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
 
-mlir_aie==1.4.4.dev88+gb15f350
+mlir_aie==1.4.5.dev5+g4e75eb2
 llvm-aie==22.0.0.2026092101+0006955e
 
 black
