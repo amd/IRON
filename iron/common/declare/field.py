@@ -48,7 +48,14 @@ class Param(Tier):
 
 @dataclass(frozen=True)
 class Auto(Tier):
-    """A tunable the library resolves for the device."""
+    """A tunable the library resolves for the device.
+
+    Attributes:
+        derived: `resolve` always computes the field from the others, so no
+            caller, profile or tuner sets it.
+    """
+
+    derived: bool = False
 
 
 def param(
@@ -78,7 +85,13 @@ def param(
 
 
 def auto(
-    default: Any = None, /, *, array: bool = False, repr: bool = True, init: bool = True
+    default: Any = None,
+    /,
+    *,
+    array: bool = False,
+    derived: bool = False,
+    repr: bool = True,
+    init: bool = True,
 ) -> Any:
     """Declare a tunable ``Operator.resolve`` fills for the device when the
     caller does not.
@@ -90,9 +103,12 @@ def auto(
     Args:
         default: The starting value; `None` means `resolve` must fill it.
         array: The array reads the field though no tile names it.
+        derived: `resolve` computes the field from the device and the other
+            fields whatever it was given, so it is not a tunable a caller,
+            a profile or a tuner sets.
     """
     return dataclasses.field(
-        default=default, repr=repr, init=init, metadata={Tier: Auto(array)}
+        default=default, repr=repr, init=init, metadata={Tier: Auto(array, derived)}
     )
 
 

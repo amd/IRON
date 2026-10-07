@@ -176,16 +176,16 @@ class GEMM(Operator):
     # mode reads it.
     gelu: Gelu | str = param(default=Gelu.FP32, array=True)
     # Filled by resolve, from the device: the grid, B's storage, the L2 tiles.
-    rows: int = auto(repr=False)
-    cols: int = auto(repr=False)
-    bfp16_b: bool = auto(repr=False, array=True)
+    rows: int = auto(repr=False, derived=True)
+    cols: int = auto(repr=False, derived=True)
+    bfp16_b: bool = auto(repr=False, array=True, derived=True)
     # B's element type, on the array and in DDR alike; the host holds a
     # block-float B as bytes (BoundBuffer.host_dtype).
-    b_dtype: Any = auto(repr=False)
-    l1_b_depth: int = auto(repr=False, array=True)
-    a_l2: int = auto(repr=False)
-    b_l2: int = auto(repr=False)
-    c_l2: int = auto(repr=False)
+    b_dtype: Any = auto(repr=False, derived=True)
+    l1_b_depth: int = auto(repr=False, array=True, derived=True)
+    a_l2: int = auto(repr=False, derived=True)
+    b_l2: int = auto(repr=False, derived=True)
+    c_l2: int = auto(repr=False, derived=True)
 
     # The k order pack_B writes within a block: the port's kernel's, or the
     # shipped binary's own (see shipped.py).

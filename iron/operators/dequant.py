@@ -39,7 +39,7 @@ class Dequant(UnaryElementwise):
         default=lambda op: op.size // 2 + (op.size // op.group_size) * 2, repr=False
     )
     # The packed size of one line; filled by resolve from ``tile_size``.
-    in_tile: int = auto(repr=False)
+    in_tile: int = auto(repr=False, derived=True)
 
     default_tile: ClassVar[int] = 4096
     tile_cap: ClassVar[int] = 16384

@@ -141,6 +141,11 @@ def declare(cls: type) -> None:
         n: t.derive for n, t in tiers.items() if isinstance(t, Param) and t.derive
     }
     cls._auto_fields = tuple(n for n, t in tiers.items() if isinstance(t, Auto))
+    cls._tunable_fields = tuple(
+        n
+        for n in cls._auto_fields
+        if fields[n].init and not fields[n].metadata[Tier].derived
+    )
     # The array tier: what a stream's tile, its dtype, its replication or
     # its presence names, and what declares itself array=True.
     named: set[str] = set()

@@ -12,6 +12,7 @@ untuned one (``iron/tests/infrastructure/narrowing.py``).
 import pytest
 
 import iron
+from iron.common.declare import Profile
 from iron.common.graph.narrowing import (
     Calibration,
     CostTable,
@@ -22,7 +23,7 @@ from iron.common.graph.narrowing import (
     model_us,
     variants,
 )
-from iron.operators import GELU, ElementwiseAdd, SiLU
+from iron.operators import GELU, GEMM, MHA, ElementwiseAdd, SiLU
 
 SIZE = 8192
 TILE = 256
@@ -88,6 +89,24 @@ def test_variants_widen_a_default_its_resolution_keeps_narrow(npu2):
     found = variants(ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=2), npu2)
     assert dict(found[0].widths)["num_aie_columns"] == 2
     assert {dict(v.widths)["num_aie_columns"] for v in found[1:]} == {8, 4, 2, 1}
+
+
+def test_derived_fields_are_not_widths(npu2):
+    # resolve() sets GEMM's A shims and MHA's lanes from the other fields
+    # whatever it is given, so a width there would be measured once per
+    # value and built alike.
+    gemm = GEMM(M=512, K=512, N=512)
+    assert gemm.resolved(npu2).widths == {"num_aie_columns": 8}
+    found = variants(gemm, npu2)
+    assert len({v.key for v in found}) == len(found)
+    assert MHA(num_heads=8, seq_pad=256).resolved(npu2).widths == {}
+    with pytest.raises(TypeError, match="no tunable"):
+        gemm.with_tunables(n_shim_mem_a=1)
+
+
+def test_a_profile_refuses_a_derived_field():
+    with pytest.raises(TypeError, match="derived or fixed"):
+        Profile().add(GEMM, M=512, n_shim_mem_a=1)
 
 
 def test_a_narrowed_operator_keeps_its_fixed_fields():

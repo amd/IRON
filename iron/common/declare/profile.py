@@ -64,17 +64,24 @@ class Profile:
         matches any value) and ``auto()`` fields to give.
         """
         tiers = {f.name: f.metadata.get(Tier) for f in dataclasses.fields(cls)}
-        dims, tunables, unknown = {}, {}, []
+        dims, tunables, unknown, fixed = {}, {}, [], []
         for name, value in fields.items():
             tier = tiers.get(name)
             if isinstance(tier, Param):
                 dims[name] = value
-            elif isinstance(tier, Auto):
+            elif name in cls._tunable_fields:
                 tunables[name] = value
+            elif isinstance(tier, Auto):
+                fixed.append(name)
             else:
                 unknown.append(name)
         if unknown:
             raise TypeError(f"{cls.__name__} declares no field {unknown}")
+        if fixed:
+            raise TypeError(
+                f"{cls.__name__}.{fixed} are derived or fixed by the class, not "
+                f"tunables a profile gives"
+            )
         if not tunables:
             raise TypeError(f"an entry for {cls.__name__} must give a tunable")
         self._entries.append(Entry(cls, dims, tunables))

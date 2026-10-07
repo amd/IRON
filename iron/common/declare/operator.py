@@ -170,6 +170,7 @@ class Operator(metaclass=_OperatorMeta):
     _param_fields: ClassVar[tuple[str, ...]] = ()
     _derived_params: ClassVar[dict[str, Callable[[Any], Any]]] = {}
     _auto_fields: ClassVar[tuple[str, ...]] = ()
+    _tunable_fields: ClassVar[tuple[str, ...]] = ()
     _array_fields: ClassVar[tuple[str, ...]] = ()
     _external: ClassVar[Any] = None
     test: ClassVar[Testing | None] = None
@@ -404,8 +405,13 @@ class Operator(metaclass=_OperatorMeta):
         return new
 
     def with_tunables(self, **tunables: Any) -> Self:
-        """This operator, unresolved, with the given ``auto()`` fields set."""
-        unknown = [n for n in tunables if n not in self._auto_fields]
+        """This operator, unresolved, with the given ``auto()`` fields set.
+
+        Raises:
+            TypeError: A name is not a settable tunable: not an ``auto()``
+                field, fixed with ``init=False``, or ``derived``.
+        """
+        unknown = [n for n in tunables if n not in self._tunable_fields]
         if unknown:
             raise TypeError(f"{type(self).__name__} has no tunable {unknown}")
         return dataclasses.replace(self, **tunables)
@@ -413,16 +419,11 @@ class Operator(metaclass=_OperatorMeta):
     @property
     def widths(self) -> dict[str, int | None]:
         """The settable tunables a ``per=`` stream's count is a product of, and their values."""
-        settable = {
-            f.name: getattr(self, f.name)
-            for f in dataclasses.fields(self)
-            if f.init and f.name in self._auto_fields
-        }
         found: dict[str, int | None] = {}
         for b in self.buffers:
             for ref in b.member.per.dims if b.streamed and b.member.per else ():
-                if isinstance(ref, DimRef) and ref.name in settable:
-                    found.setdefault(ref.name, settable[ref.name])
+                if isinstance(ref, DimRef) and ref.name in self._tunable_fields:
+                    found.setdefault(ref.name, getattr(self, ref.name))
         return found
 
     @property

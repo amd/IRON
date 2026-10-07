@@ -137,9 +137,9 @@ class MHA(Operator):
     emulate_bf16_mmul_with_bfp16: bool = param(default=True, repr=False)
     # Filled by resolve: how the pipelines are split across shims, and K
     # and V's lanes, one every pipeline reads or, one query packed, one each.
-    q_shims: int = auto(repr=False)
-    join_rows: int = auto(repr=False)
-    kv_lanes: int = auto(array=True, repr=False)
+    q_shims: int = auto(repr=False, derived=True)
+    join_rows: int = auto(repr=False, derived=True)
+    kv_lanes: int = auto(array=True, repr=False, derived=True)
 
     Q = In(
         Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),

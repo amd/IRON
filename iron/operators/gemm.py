@@ -136,11 +136,11 @@ class GEMM(Operator):
     use_scalar: bool = param(default=False, repr=False, array=True)
     # Filled by resolve: the device's rows of cores, the L2 tile of each
     # stream and how many shims carry A.
-    n_aie_rows: int = auto(repr=False, array=True)
-    n_shim_mem_a: int = auto(repr=False)
-    a_l2: int = auto(repr=False)
-    b_l2: int = auto(repr=False)
-    c_l2: int = auto(repr=False)
+    n_aie_rows: int = auto(repr=False, array=True, derived=True)
+    n_shim_mem_a: int = auto(repr=False, derived=True)
+    a_l2: int = auto(repr=False, derived=True)
+    b_l2: int = auto(repr=False, derived=True)
+    c_l2: int = auto(repr=False, derived=True)
 
     A = In(M, K, dtype=dtype_in, tile=(a_l2,), per=(n_shim_mem_a,))
     B = In(
