@@ -289,6 +289,7 @@ class Tracer:
             for k in list(kwargs)
             if isinstance(kwargs[k], (Value, Affine))
         }
+        called = operands
         if isinstance(target, type):
             own = self._split_values(cls, values)
             operands = _take_views(cls, operands, kwargs, own)
@@ -313,7 +314,7 @@ class Tracer:
             )
         for name, value in own.items():
             self._bind(op, name, value)
-        return self._record(op, operands)
+        return self._record(op, operands, called)
 
     @staticmethod
     def _split_values(op_cls, kwargs) -> dict:
@@ -363,7 +364,11 @@ class Tracer:
             member = next(v for v in op.values if v.name == name)
             self.bindings.append(Binding(op, member, value))
 
-    def _record(self, op, operands):
+    def _record(self, op, operands, called=None):
+        """Record ``op`` on ``operands``; ``called`` are the operands as the
+        call gave them, a view where ``operands`` holds its buffer.
+        """
+        called = operands if called is None else called
         buffers = op.buffers
         ins = [b for b in buffers if b.direction.fills]
         outs = [b for b in buffers if b.direction is Direction.OUT]
@@ -432,13 +437,18 @@ class Tracer:
                 shape = b.shape
                 # A flat-declared output (an elementwise operator) keeps the
                 # shape of the operand it is the size of, so a (rows, cols)
-                # activation stays (rows, cols) through SiLU.
+                # activation stays (rows, cols) through SiLU, and a copy of a
+                # view has the view's.
                 bounds: dict = {}
                 if len(shape) == 1:
-                    like = next((h for h in operands if h.elements == b.elements), None)
+                    like = next(
+                        (i for i, h in enumerate(called) if h.elements == b.elements),
+                        None,
+                    )
                     if like is not None:
-                        shape = like.shape
-                        bounds = dict(like.bounds)  # sized by it: bounded like it
+                        shape = called[like].shape
+                        # Sized by it: bounded like it.
+                        bounds = dict(operands[like].bounds)
                 if not bounds:
                     bounds = self._output_bounds(op, b, len(shape))
                 h = Handle(
@@ -580,8 +590,9 @@ class _ReferenceTracer(Tracer):
         outs = [b for b in op.buffers if b.direction is Direction.OUT]
         fresh = len(tensors) == n_in and len(outs) == 1
         if fresh and result is not None and len(outs[0].shape) == 1:
+            called = [t if p is None else p for t, p in zip(tensors, patterns)]
             like = next(
-                (t for t in tensors if math.prod(t.shape) == outs[0].elements), None
+                (t for t in called if math.prod(t.shape) == outs[0].elements), None
             )
             if like is not None:
                 result = result.reshape(like.shape, copy=False)

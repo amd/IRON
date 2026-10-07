@@ -297,3 +297,21 @@ def test_a_permuting_copy_keeps_its_order_on_every_channel_count(channels, rows)
     )
     x = np.arange(N * G * D, dtype=np.float32).reshape(N, G, D)
     assert (op.reference(x).reshape(G, N, D) == x.transpose(1, 0, 2)).all()
+
+
+class _Views(iron.Graph):
+    def __init__(self):
+        self.cache = iron.state((G, L, D), dtype=bfloat16)
+
+    def body(self, x):
+        return Copy(x.reshape(N, G, D).transpose(1, 0, 2)), Copy(self.cache[:, 0:N])
+
+
+def test_a_copy_of_a_view_has_the_view_s_shape():
+    graph = _Views()
+    t = graph.trace(x=(N, G * D))
+    assert [h.shape for h in t.returned] == [(G, N, D), (G, N, D)]
+    x = np.arange(N * G * D, dtype=np.float32).reshape(N, G * D).astype(bfloat16)
+    transposed, cached = graph.reference(x)
+    assert transposed.shape == cached.shape == (G, N, D)
+    assert (transposed == x.reshape(N, G, D).transpose(1, 0, 2)).all()
