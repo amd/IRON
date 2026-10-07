@@ -108,7 +108,7 @@ class Standalone:
         distinct: Every step runs on buffers of its own, as a graph's do, so
             no step finds its inputs in a SoC cache.
         values: Each per-call value by name: the tuner cannot know what a
-            value means.
+            value means. One derived from bound extents follows from theirs.
         inputs: Input buffers by name, where random bytes would not be
             representative (a draw row's temperature and top-k).
     """
@@ -157,7 +157,7 @@ class Standalone:
         ops = {id(op): op for op in self.steps}.values()
         # An extent read only through its derivations has no word.
         symbols = {
-            device_symbol(op, v): np.int32(self._value(values, v))
+            device_symbol(op, v): np.int32(self._value(op, values, v))
             for op in ops
             for v in op.values
             if device_symbol(op, v) in self.sequence.artifacts.parameters
@@ -166,12 +166,16 @@ class Standalone:
             self.callable.write_values(symbols)
 
     @staticmethod
-    def _value(values: Mapping[str, int] | None, v: BoundValue) -> int:
-        if values is None or v.name not in values:
-            raise ValueError(
-                f"per-call value {v.name!r} needs a representative value to be measured"
-            )
-        return values[v.name]
+    def _value(op: Operator, values: Mapping[str, int] | None, v: BoundValue) -> int:
+        values = values or {}
+        if v.name in values:
+            return values[v.name]
+        extents = op.bound_extents
+        if v.name in op._per_call_derived() and extents.keys() <= values.keys():
+            return op.derived_at(v.name, **{e: values[e] for e in extents})
+        raise ValueError(
+            f"per-call value {v.name!r} needs a representative value to be measured"
+        )
 
     @staticmethod
     def _content(

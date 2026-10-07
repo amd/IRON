@@ -28,7 +28,7 @@ from iron.common.graph.probe import (
     platform,
 )
 from iron.common.image import Fusion
-from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU, Softmax
+from iron.operators import MHA, ElementwiseAdd, ElementwiseMul, SiLU, Softmax
 
 SIZE = 8192
 TILE = 256
@@ -63,6 +63,29 @@ class Masked(iron.Graph):
 
     def body(self, x, *, n: Scratchpad[np.int32]):
         return Softmax(x[:, :n])
+
+
+class Attend(iron.Graph):
+    """One query's heads over the first `n` rows of a key and value cache."""
+
+    def body(self, q, k, v, *, n: Scratchpad[np.int32]):
+        return MHA(q, k[:n], v[:n], heads_interleaved=True, kv_interleaved=True)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_value_derived_from_a_bound_extent_follows_the_call(tmp_path):
+    # MHA's KV block count follows the context, which the call gives alone.
+    traced = Attend().trace(q=(1, 32, 64), k=(2048, 8, 64), v=(2048, 8, 64))
+    report = platform()
+    cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    t_step = {}
+    for n in (64, 2048):
+        table = CostTable(tmp_path / f"costs{n}.json")
+        call = Call(traced, dict(n=n))
+        measure_graph(table, [call], [], Timing(rounds=2, calls=10), cache=cache)
+        [key] = {cost_key(s.op) for s in traced.steps}
+        t_step[n] = table.steps[key].t_step_us
+    assert t_step[2048] > 3 * t_step[64], t_step
 
 
 @pytest.mark.supported_devices("npu2")
