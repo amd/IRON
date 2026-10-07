@@ -241,6 +241,12 @@ class Sequence:
             )
         sizes, strides = BdLimits.slots(tap.sizes, tap.strides)
         for dim, value in sizes_by.items():
+            # A unit dimension's stride is normalised to 0, which a dynamic
+            # size may not have; its count never passes 1, so the stride the
+            # next block would have moves the same bytes.
+            if sizes[dim] == 1 and strides[dim] == 0:
+                inner = zip(sizes[dim + 1 :], strides[dim + 1 :])
+                strides[dim] = max(n * stride for n, stride in inner)
             sizes[dim] = value.ssa
         offset: Any = tap.offset
         if offset_by is not None and offset_by.ssa is not None:

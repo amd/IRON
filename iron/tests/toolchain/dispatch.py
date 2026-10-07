@@ -21,6 +21,7 @@ import numpy as np
 import iron
 from iron.common import Scratchpad
 from iron.operators.copy import Copy
+from iron.operators.mha import MHA
 from iron.operators.softmax import Softmax
 from iron.tests.toolchain.tools import DEVICES, requires
 
@@ -74,6 +75,34 @@ def test_values_become_dispatch_time_kernels_at_each_step(device):
     assert symbols == {p for d in designs.values() for p in d.dispatch_params}
     assert net.image is not None and Path(net.image).stat().st_size > 0
     assert net._callable is None
+
+
+def test_a_per_call_size_over_one_block_builds_at_each_step(npu2):
+    """One query over a cache of one key block: K and V's block count is
+    per call, over a dimension of one block, whose stride the pattern holds
+    as 0.
+    """
+    heads, kv_heads, d, cache = 8, 2, 64, 64
+
+    class Decode(iron.Graph):
+        def body(self, q, k, v, *, position: Scratchpad[np.int32]):
+            return MHA(
+                q,
+                k[:, : position + 1],
+                v[:, : position + 1],
+                heads_interleaved=True,
+                num_pipelines=2,
+            )
+
+    net = Decode().compile(
+        npu2,
+        boundaries=iron.each_step,
+        q=(1, heads, d),
+        k=(kv_heads, cache, d),
+        v=(kv_heads, cache, d),
+    )
+    assert net.plan.image == "xclbin"
+    assert net.image is not None and Path(net.image).stat().st_size > 0
 
 
 def test_npu1_compiles_each_step_unasked():
