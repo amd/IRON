@@ -134,9 +134,10 @@ class Standalone:
             for buf, name_ in zip(op.buffers, self._names(k, op)):
                 if buf.direction.fills:
                     self._bytes(name_)[: buf.nbytes] = self._content(buf, inputs, rng)
-        ops = {id(op): op for op in self.steps}.values()
+        # Resolved: a value derived through a tunable is only seen once it is set.
+        ops = {id(op): op.resolved() for op in self.steps}.values()
         symbols = {
-            device_symbol(op, v): np.int32(self._value(values, v))
+            device_symbol(op, v): np.int32(self._value(op, values or {}, v))
             for op in ops
             for v in op.values
         }
@@ -144,12 +145,18 @@ class Standalone:
             self.callable.write_values(symbols)
 
     @staticmethod
-    def _value(values: Mapping[str, int] | None, v: BoundValue) -> int:
-        if values is None or v.name not in values:
-            raise ValueError(
-                f"per-call value {v.name!r} needs a representative value to be measured"
-            )
-        return values[v.name]
+    def _value(op: Operator, values: Mapping[str, int], v: BoundValue) -> int:
+        """``v`` as given, or derived as a call derives it from the bounded
+        extents given, of the resolved ``op``.
+        """
+        if v.name in values:
+            return values[v.name]
+        extents = {e: values[e] for e in op.bound_extents if e in values}
+        if extents and v.name in op._per_call_derived():
+            return op.derived_at(v.name, **extents)
+        raise ValueError(
+            f"per-call value {v.name!r} needs a representative value to be measured"
+        )
 
     @staticmethod
     def _content(
