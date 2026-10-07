@@ -140,6 +140,12 @@ class TracedGraph:
     encoders: dict[str, tuple[str, Callable[[np.ndarray, int], np.ndarray]]] = (
         dataclasses.field(default_factory=dict)
     )
+    # A per-call value the graph fills in rather than the caller, from a
+    # buffer's device address (a gather by ids the device made):
+    # value -> (buffer, address -> words by name, its word's name).
+    addresses: dict[str, tuple[str, Callable[[int], dict], str]] = dataclasses.field(
+        default_factory=dict
+    )
 
     @property
     def runlist(self) -> list:
@@ -230,6 +236,7 @@ class Tracer:
         self.bindings: list[Binding] = []
         self._bound: dict[int, dict] = {}  # id(op) -> {member: Affine}
         self.encoders: dict[str, tuple[str, Callable]] = {}
+        self.addresses: dict[str, tuple[str, Callable, str]] = {}
         self._counter = itertools.count()
         # A name per tensor and state the graph holds, by identity.
         self._names = names or {}
@@ -325,8 +332,10 @@ class Tracer:
         return self._record(op, operands, called)
 
     def _gather(self, target, operands: list[Handle], extra) -> Handle:
-        """``Copy(table[ids])`` with ``ids`` an input: the class's per-call
-        gather, whose input the host encodes from the ids each call.
+        """``Copy(table[ids])`` with ``ids`` per call: the class's per-call
+        gather. For ids an input the host encodes its control words from
+        the ids each call; for ids the device made, its word source writes
+        them into its template first.
         """
         view = operands[0]
         ids, table = view.gather_by, view.parent
@@ -340,16 +349,34 @@ class Tracer:
                 f"{view!r} takes the rows the input {ids.name!r} names each "
                 f"call; only a Copy of it alone does, Copy(table[ids])"
             )
-        if ids.name in self.encoders:
-            raise ValueError(f"the input {ids.name!r} gathers from one table once")
         op = target.per_call_gather(
             rows=ids.shape[0],
             table_rows=table.shape[0],
             row=math.prod(table.shape[1:]),
             dtype=table.dtype,
         )
-        control = Handle((op.words,), np.uint32, ids.name, "input")
-        self.encoders[ids.name] = (table.name, op.control_words)
+        if ids.role == "input":
+            if ids.name in self.encoders:
+                raise ValueError(f"the input {ids.name!r} gathers from one table once")
+            control = Handle((op.words,), np.uint32, ids.name, "input")
+            self.encoders[ids.name] = (table.name, op.control_words)
+        else:
+            source = op.word_source()
+            template = op.template[0]
+            self._names[id(template)] = f"{table.name}_gather{len(self.weights)}"
+            control = self.operand(template)
+            for member in ("base_lo", "base_hi"):
+                name = next(
+                    (
+                        n
+                        for n, (buffer, _, m) in self.addresses.items()
+                        if (buffer, m) == (table.name, member)
+                    ),
+                    f"address{len(self.addresses) // 2}_{member}",
+                )
+                self.addresses[name] = (table.name, source.address_words, member)
+                self._bind(source, member, Value(name, "scratchpad", np.int32))
+            self._record(source, [ids, control])
         out = self._record(op, [table, control])
         return out if out.shape == view.shape else out.reshape(view.shape)
 
@@ -546,6 +573,7 @@ class Tracer:
             returned,
             next_values,
             encoders=self.encoders,
+            addresses=self.addresses,
         )
 
 

@@ -492,7 +492,7 @@ class CompiledGraph:
                 w for w in self.words if w.symbol in self.artifacts.parameters
             ]
         self._callable = None
-        self._addressed: tuple[Any, int] | None = None
+        self._addressed: dict[str, tuple[Any, int]] = {}
         # Shared with the arena when there is one: its weights are every image's.
         self._loaded: set = set() if arena is None else arena.loaded
 
@@ -632,11 +632,11 @@ class CompiledGraph:
                 f"from the host"
             )
         view = self.callable.get_buffer(name)
-        if self._addressed is None or self._addressed[0] is not view:
+        if name not in self._addressed or self._addressed[name][0] is not view:
             storage = view.storage
             root = storage.binding_handle(0, storage.nbytes)
-            self._addressed = (view, root.address() + view.storage_offset)
-        return self._addressed[1]
+            self._addressed[name] = (view, root.address() + view.storage_offset)
+        return self._addressed[name][1]
 
     def _next_values(self, values: Mapping[str, int]) -> Carry:
         nxt: dict[str, int] = {}
@@ -668,6 +668,9 @@ class CompiledGraph:
             head[:n] = [values[name] for name in self.emit.carried]
         if not self.words:
             return
+        values = dict(values)
+        for name, (buffer, address_words, word) in self.traced.addresses.items():
+            values[name] = address_words(self._address(buffer))[word]
         words = {w.symbol: np.dtype(w.dtype).type(w(values)) for w in self.words}
         (self.callable if run is None else run).write_values(words)
 

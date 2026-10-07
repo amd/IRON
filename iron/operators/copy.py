@@ -20,7 +20,15 @@ import numpy as np
 from aie.dialects import aiex
 from aie.dialects.aie import DMAChannelDir, WireBundle
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Flow, ObjectFifo, PacketFlow, TaskGroup
+from aie.iron import (
+    ExternalFunction,
+    Flow,
+    ObjectFifo,
+    PacketFlow,
+    TaskGroup,
+    Worker,
+    WorkerRuntimeBarrier,
+)
 from aie.iron.device import Tile
 from aie.iron.runtime.dmatask import emit_shim_transfer
 from aie.utils.verify import Tolerance
@@ -41,10 +49,12 @@ def _control_header(beats: int, address: int) -> int:
 
 
 class Gather(Operator):
-    """``Copy(table[ids])`` with ``ids`` a graph input: the rows a call names.
+    """``Copy(table[ids])`` with ``ids`` per call: the rows a call names.
 
-    The host turns each call's ids into control packets
-    (``control_words``), which shim (1, 0) streams to shim (0, 0)'s
+    For ids a graph input the host turns each call's ids into control
+    packets (``control_words``); for ids the device made, a
+    ``GatherWords`` step writes them into the template (``word_source``).
+    Shim (1, 0) streams the packets to shim (0, 0)'s
     TileControl: each writes a buffer descriptor of (0, 0), its address the
     table's on the device plus the row's offset, and each batch of
     ``chain`` descriptors is pushed onto (0, 0)'s MM2S 1 queue. That
@@ -164,8 +174,19 @@ class Gather(Operator):
             task.free()
         drained.await_()
 
+    def word_source(self) -> "GatherWords":
+        """The step writing this gather's row addresses into its template on
+        a core, for ids the device made.
+        """
+        return GatherWords(
+            rows=self.rows,
+            table_rows=self.table_rows,
+            row_bytes=self.row * np.dtype(self.dtype).itemsize,
+            words=self.words,
+        )
+
     @functools.cached_property
-    def _template(self) -> tuple[np.ndarray, np.ndarray]:
+    def template(self) -> tuple[np.ndarray, np.ndarray]:
         """The control words with every row's address zero, and where each
         row's address-low word is.
         """
@@ -219,7 +240,7 @@ class Gather(Operator):
         n = self.table_rows
         if ((ids < -n) | (ids >= n)).any():
             raise IndexError(f"gathering {ids[(ids < -n) | (ids >= n)]} from {n} rows")
-        template, slots = self._template
+        template, slots = self.template
         stride = self.row * np.dtype(self.dtype).itemsize
         rows = (address + APERTURE + (ids % n) * stride).astype(np.uint64)
         words = template.copy()
@@ -228,6 +249,136 @@ class Gather(Operator):
             np.uint32
         )
         return words
+
+
+_ROW_ADDRESSES = """
+#include <stdint.h>
+
+extern "C" void {symbol}(int32_t *ids, uint32_t *out, int32_t lo, int32_t hi) {{
+    uint64_t base = ((uint64_t)(uint32_t)hi << {low_bits}) + (uint32_t)lo + {aperture}ull;
+    for (int r = 0; r < {rows}; r++) {{
+        int32_t id = ids[r] < -{table_rows} ? -{table_rows} : ids[r];
+        id = id > {table_rows} - 1 ? {table_rows} - 1 : id;
+        if (id < 0)
+            id += {table_rows};
+        uint64_t address = base + (uint64_t)id * {row_bytes}u;
+        out[2 * r] = (uint32_t)address & 0xFFFFFFFCu;
+        out[2 * r + 1] = (uint32_t)(address >> 32) & 0xFFFFu;
+    }}
+}}
+"""
+
+
+class GatherWords(Operator):
+    """A ``Gather``'s control words for ids the device made, in a graph.
+
+    A core turns each id into its row's address words, which drain into
+    their slots of ``control``, a buffer holding the gather's template;
+    the gather that follows streams it. The table's address reaches the
+    core as ``base_lo`` and ``base_hi``, per-call values the graph fills
+    in, split at ``low_bits`` since a core reads 30 bits of a value. An id
+    past the table is clipped to its first or last row,
+    ``table[np.clip(ids, -n, n - 1)]``, so every id reads a row of it.
+    """
+
+    low_bits: ClassVar[int] = 29
+
+    rows: int = param(array=True)
+    table_rows: int = param(array=True)
+    row_bytes: int = param(array=True)
+    words: int = param()
+    pairs: int = param(default=lambda op: 2 * op.rows, array=True, repr=False)
+
+    ids = In(rows, dtype=np.int32, tile=(rows,), depth=1)
+    control = Out(words, dtype=np.uint32, tile=(pairs,), depth=1)
+    base_lo = Scratchpad(np.int32)
+    base_hi = Scratchpad(np.int32)
+
+    def ops(self) -> int:
+        return 0
+
+    def address_words(self, address: int) -> dict[str, int]:
+        """``base_lo`` and ``base_hi`` for a table at ``address``."""
+        return dict(
+            base_lo=address & ((1 << self.low_bits) - 1),
+            base_hi=address >> self.low_bits,
+        )
+
+    def array(self, target) -> list:
+        symbol = f"gather_words_{self.rows}_{self.table_rows}_{self.row_bytes}"
+        kernel = ExternalFunction(
+            symbol,
+            source_string=_ROW_ADDRESSES.format(
+                symbol=symbol,
+                rows=self.rows,
+                table_rows=self.table_rows,
+                row_bytes=self.row_bytes,
+                low_bits=self.low_bits,
+                aperture=APERTURE,
+            ),
+            arg_types=[self.ids.tile, self.control.tile, np.int32, np.int32],
+        )
+        ids = ObjectFifo(self.ids.tile, name="gather_ids", depth=1)
+        addresses = ObjectFifo(self.control.tile, name="gather_addresses", depth=1)
+        self.ids.lane(0).bind(ids.prod())
+        self.control.lane(0).bind(addresses.cons())
+        barrier = WorkerRuntimeBarrier()
+
+        def core(ids, addresses, kernel, lo, hi, barrier):
+            barrier.wait_for_value(1)
+            i, a = ids.acquire(1), addresses.acquire(1)
+            kernel(i, a, lo.read(), hi.read())
+            ids.release(1)
+            addresses.release(1)
+
+        worker = Worker(
+            core,
+            [
+                ids.cons(),
+                addresses.prod(),
+                kernel,
+                self.base_lo.param,
+                self.base_hi.param,
+                barrier,
+            ],
+        )
+        return [worker, barrier]
+
+    def sequence(self, rt) -> None:
+        tg = TaskGroup()
+        rt.fill(self.ids.lane(0), self.ids, group=tg)
+        for tap in self.taps():
+            rt.drain(self.control.lane(0), (self.control, tap), group=tg, wait=True)
+        tg.finish()
+
+    def taps(self) -> list[TensorAccessPattern]:
+        """Where the rows' address words go in ``control``, in row order.
+
+        A row's follow its packet's header, three words to a packet and a
+        push after every batch of ``chain``.
+        """
+        chain, at = Gather.chain, 20 * Gather.chain + 1
+        full, short = divmod(self.rows, chain)
+        taps = []
+        if full:
+            taps.append(
+                TensorAccessPattern(
+                    (self.words,),
+                    at,
+                    [1, full, chain, 2],
+                    [0, 3 * (chain + 1), 3, 1],
+                )
+            )
+        if short:
+            taps.append(
+                TensorAccessPattern(
+                    (self.words,),
+                    at + 3 * (chain + 1) * full,
+                    [1, 1, short, 2],
+                    [0, 0, 3, 1],
+                )
+            )
+        return taps
 
 
 def _into_slot(slot, seq=128, num_channels=1) -> dict[str, Any]:
@@ -254,8 +405,9 @@ class Copy(Operator):
     bound ``src_bound``/``dst_bound`` with its size. Standalone,
     ``src``/``dst`` are given, or default to the whole of each buffer.
 
-    With ``ids`` a graph input, ``Copy(table[ids])`` is a ``Gather``, the
-    rows each call names.
+    With ``ids`` a 1-D integer handle (a graph input, a state, an output
+    of a step), ``Copy(table[ids])`` is a ``Gather``, the rows each call
+    names.
 
     A side that is a tuple of patterns walks them in turn: ``Copy(table[ids])``
     with ``ids`` an array gathers the rows it names, fixed when the graph is

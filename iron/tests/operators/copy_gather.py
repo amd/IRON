@@ -9,7 +9,8 @@ row, or each run of rows whose ids step evenly, is one transfer of the
 step's sequence. The table is a weight at EmbeddingGemma 2's size, or an
 intermediate a step before produced. With ``ids`` an input of the graph,
 each call names its rows, and the host encodes them as the addresses a
-``Gather`` writes into the shim's descriptors.
+``Gather`` writes into the shim's descriptors; with ids a state or a step's
+output, a core writes those addresses in a step before the gather.
 """
 
 import numpy as np
@@ -62,6 +63,27 @@ class PerCall(iron.Graph):
 
     def body(self, ids):
         return Copy(self.table[ids])
+
+
+class FromDeviceIds(iron.Graph):
+    """Two tables gathered by ids a step made, so no host encodes them."""
+
+    def __init__(self, table, other):
+        self.table = iron.weight(table)
+        self.other = iron.weight(other)
+
+    def body(self, ids):
+        ids = Copy(ids, dtype=np.int32)
+        return Copy(self.table[ids]), Copy(self.other[ids])
+
+
+class FromState(iron.Graph):
+    def __init__(self, table, rows: int):
+        self.table = iron.weight(table)
+        self.ids = iron.state((rows,), np.int32)
+
+    def body(self):
+        return Copy(self.table[self.ids])
 
 
 class Merged(iron.Graph):
@@ -131,6 +153,38 @@ def test_rows_each_call_names_are_gathered(npu_runtime, table, n_ids):
 
 
 @pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("n_ids", [1, 15, 256, 512])
+def test_rows_ids_the_device_made_name_are_gathered(npu_runtime, table, n_ids):
+    other = np.random.default_rng(4).standard_normal((3000, 256)).astype(bfloat16)
+    graph = FromDeviceIds(table, other)
+    net = graph.compile(ids=((n_ids,), np.int32))
+    assert net.plan.image == "elf"
+    assert not net.traced.encoders
+    rng = np.random.default_rng(n_ids)
+    for call in range(3):
+        ids = rng.integers(-VOCAB, VOCAB, n_ids).astype(np.int32)
+        ids[1::2] = rng.integers(-len(other), len(other), n_ids // 2)
+        ids[:2] = (-VOCAB, VOCAB - 1)[:n_ids]
+        rows, others = graph(ids)
+        assert_equal(rows, np.take(table, ids, axis=0), f"call {call}")
+        # Past the table an id is clipped to its first or last row.
+        clipped = np.clip(ids, -len(other), len(other) - 1)
+        assert_equal(others, other[clipped], f"call {call}")
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("n_ids", [1, 256])
+def test_rows_a_state_names_are_gathered(npu_runtime, table, n_ids):
+    graph = FromState(table, n_ids)
+    net = graph.compile()
+    rng = np.random.default_rng(n_ids)
+    for call in range(3):
+        ids = rng.integers(0, VOCAB, n_ids).astype(np.int32)
+        net.write(graph.ids, ids)
+        assert_equal(graph(), table[ids], f"call {call}")
+
+
+@pytest.mark.supported_devices("npu2")
 def test_a_graph_gathers_twice_from_a_weight_and_a_state(npu_runtime):
     n_rows, rows, soft = 4096, 64, 64
     rng = np.random.default_rng(3)
@@ -177,3 +231,27 @@ def test_the_control_words_are_counted():
         gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH)
         ids = np.arange(rows, dtype=np.int32)
         assert gather.control_words(ids, 0).size == gather.words
+
+
+def test_a_core_writes_the_words_the_host_would():
+    for rows in (1, 7, 8, 15, 256, 512):
+        gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH)
+        _, slots = gather.template
+        written = np.concatenate(
+            [tap.gather(np.arange(gather.words)) for tap in gather.word_source().taps()]
+        )
+        np.testing.assert_array_equal(written, np.stack([slots, slots + 1], -1).ravel())
+
+
+def test_ids_the_device_made_take_a_word_step(table):
+    other = np.zeros((3000, 256), dtype=bfloat16)
+    traced = FromDeviceIds(table, other).trace(ids=((15,), np.int32))
+    steps = [type(s.op).__name__ for s in traced.steps]
+    assert steps == ["Copy", "GatherWords", "Gather", "GatherWords", "Gather"]
+    assert not traced.encoders
+    assert sorted((buffer, word) for buffer, _, word in traced.addresses.values()) == [
+        ("other", "base_hi"),
+        ("other", "base_lo"),
+        ("table", "base_hi"),
+        ("table", "base_lo"),
+    ]

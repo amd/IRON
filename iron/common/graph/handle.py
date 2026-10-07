@@ -24,8 +24,9 @@ class Handle:
     Carries no data. ``h[key]`` takes numpy's basic indexing (integers,
     unit-step slices, an ellipsis), on one axis a per-call ``Value``
     (``keys[:, pos]``), and on the leading axis an integer array, the rows
-    a gather takes, fixed when the graph is traced (``table[ids]``), or an
-    integer input of the graph, the rows each call names. A
+    a gather takes, fixed when the graph is traced (``table[ids]``), or a
+    1-D integer handle (an input, a state, a step's output), the rows each
+    call names. A
     contiguous static region is a slice: part of the parent's buffer, which
     any operator takes. Any other view (a strided region, a transpose, a
     per-call index) is an access pattern over the parent's buffer, and a
@@ -73,7 +74,7 @@ class Handle:
         # axis -> the count of that axis's leading entries valid this call
         # (``x[:n]``); the rest are padding.
         self.bounds: dict[int, Affine] = dict(bounds or {})
-        # The graph input whose ids pick the rows each call, for a gather.
+        # The handle whose ids pick the rows each call, for a gather.
         self.gather_by: Handle | None = gather_by
 
     @property
@@ -148,18 +149,20 @@ class Handle:
         if len(entries) > rank:
             raise IndexError(f"too many indices for shape {self.shape}")
         entries += [slice(None)] * (rank - len(entries))
+        if isinstance(entries[0], _Viewed):
+            entries[0] = entries[0]._as_operand()
         if isinstance(entries[0], Handle):
             ids = entries[0]
             if (
-                ids.role != "input"
+                ids.tap is not None
+                or ids.bounds
                 or len(ids.shape) != 1
                 or not np.issubdtype(np.dtype(ids.dtype), np.integer)
                 or rank < 2
             ):
                 raise IndexError(
-                    f"a gather per call takes a 1-D integer input of the graph "
-                    f"as the rows of a table of rank 2 or more; got {ids!r} on "
-                    f"{self!r}"
+                    f"a gather per call takes a whole 1-D integer handle as the "
+                    f"rows of a table of rank 2 or more; got {ids!r} on {self!r}"
                 )
             if not all(isinstance(e, slice) and e == slice(None) for e in entries[1:]):
                 raise IndexError("a gather takes the whole of every axis but the first")
@@ -278,6 +281,8 @@ class _Viewed:
         return tracer.viewed(self)
 
     def __getitem__(self, key):
+        if isinstance(key, _Viewed):  # a gather by the ids a state holds
+            key = key._as_operand()
         return self._as_operand()[key]
 
     def reshape(self, *shape):
