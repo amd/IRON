@@ -11,6 +11,7 @@ from ml_dtypes import bfloat16
 from iron.common.harness import vectors, verify_buffer
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.relu import ReLU
+from iron.operators.rope import RoPE
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -38,6 +39,13 @@ def test_vectors_takes_a_given_array_a_shape_or_a_centred_draw():
     assert (centred < 0).any() and (centred > 0).any()  # both signs, as ReLU asks
     with pytest.raises(ValueError, match=r"has no input \['z'\]"):
         vectors(op, z=given)
+
+
+def test_gate_is_the_declared_tolerance_else_the_contract():
+    rope = RoPE(rows=8, cols=64)
+    assert rope.gate() is RoPE.test.tolerance
+    relu = ReLU(size=64, num_aie_columns=1, tile_size=64)
+    assert relu.gate() == relu.resolved().tolerance() is not None
 
 
 def test_verify_buffer_returns_the_verdict_of_compare():

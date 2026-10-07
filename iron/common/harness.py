@@ -60,6 +60,16 @@ def vectors(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Vecto
             if b.name in centered:
                 t = (t.astype(np.float32) - scale / 2).astype(dtype)
         inputs[b.name] = t
+    return Vectors(inputs, expected(op, inputs))
+
+
+def expected(op: Operator, inputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """``op.reference()``'s outputs on ``inputs``, by output name.
+
+    Raises:
+        ValueError: The reference returns another number of outputs than
+            `op` declares.
+    """
     out = op.reference(*inputs.values())
     outs = (out,) if isinstance(out, np.ndarray) else tuple(out)
     names = [b.name for b in op.outputs]
@@ -67,7 +77,7 @@ def vectors(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Vecto
         raise ValueError(
             f"{type(op).__name__}.reference returned {len(outs)} outputs for {names}"
         )
-    return Vectors(inputs, dict(zip(names, outs)))
+    return dict(zip(names, outs))
 
 
 def verify_buffer(

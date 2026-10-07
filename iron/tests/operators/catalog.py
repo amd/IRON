@@ -70,7 +70,7 @@ def test_operator(
         pytest.skip(str(e))
     draw = declaration.draw
     extra = draw(op) if callable(draw) else (draw or {})
-    tolerance = declaration.tolerance or op.tolerance()
+    tolerance = op.gate()
     if tolerance is None:
         raise ValueError(
             f"{cls.__name__} runs no kernel with a tolerance contract; "

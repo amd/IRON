@@ -262,6 +262,15 @@ class Operator(metaclass=_OperatorMeta):
         """The contract tolerance of the kernel this array runs; ``None`` if none applies."""
         return None
 
+    def gate(self) -> Tolerance | None:
+        """What this operator's output is judged by: its ``Testing``
+        tolerance where it declares one, else its resolved contract's.
+        """
+        declared = type(self).test
+        if declared is not None and declared.tolerance is not None:
+            return declared.tolerance
+        return self.resolved().tolerance()
+
     def ops(self) -> int:
         """The arithmetic operations one call performs, for its throughput."""
         return sum(b.elements for b in self.outputs)
