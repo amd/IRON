@@ -235,14 +235,13 @@ def test_a_bounded_gemv_moves_a_and_c_in_output_tiles_round_robin():
         )
         for t in tasks
     ] == [
-        ("B_L3L1_0", 0, "1, 1, 1, 64", "0, 0, 0, 1", False),
-        ("B_L3L1_1", 0, "1, 1, 1, 64", "0, 0, 0, 1", False),
+        ("B_L3L1", 0, "1, 1, 1, 64", "0, 0, 0, 1", False),
         ("A_L3L1_0", 0, "1, 16, 1, 512", "0, 1024, 512, 1", True),
         ("A_L3L1_1", 512, "1, 16, 1, 512", "0, 1024, 512, 1", True),
         ("C_L1L3_0", 0, "1, 16, 1, 8", "0, 16, 8, 1", True),
         ("C_L1L3_1", 8, "1, 16, 1, 8", "0, 16, 8, 1", True),
     ]
-    assert {t.length_parameter[-7:] for t in tasks[2:]} == {"valid_A", "valid_C"}
+    assert {t.length_parameter[-7:] for t in tasks[1:]} == {"valid_A", "valid_C"}
     assert text.count("aiex.scratchpad_parameter @") == 2
 
 
@@ -251,13 +250,13 @@ def test_on_an_xclbin_the_size_is_the_dispatch_scalar():
     # per-call scalar standing in for the size itself.
     text, tasks = generated_sequence(_bounded_gemv(), "xclbin")
     assert "scratchpad_parameter" not in text
-    assert [(t.lane, t.offset, t.length_parameter) for t in tasks[2:]] == [
+    assert [(t.lane, t.offset, t.length_parameter) for t in tasks[1:]] == [
         ("A_L3L1_0", 0, ""),
         ("A_L3L1_1", 512, ""),
         ("C_L1L3_0", 0, ""),
         ("C_L1L3_1", 8, ""),
     ]
-    for t, run in zip(tasks[2:], (512, 512, 8, 8)):
+    for t, run in zip(tasks[1:], (512, 512, 8, 8)):
         assert re.fullmatch(rf"1, %\w+, 1, {run}", t.sizes), t.sizes
 
 

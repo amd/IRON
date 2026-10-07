@@ -158,8 +158,8 @@ class GEMV(Operator):
 
     # A single batch carries no batch dimension at all, rather than one of
     # extent 1, so an unbatched operator has 2-D shapes. One fifo per column
-    # for each of A, B and C; B is the whole vector, sent to every column's
-    # own fifo (see sequence).
+    # for each of A and C; B, the whole vector, is one fifo every column's
+    # core reads, so it takes one shim channel however wide the array.
     A = In(
         OptionalDim(num_matrices),
         M,
@@ -168,7 +168,7 @@ class GEMV(Operator):
         per=(num_aie_columns,),
         depth=2,
     )
-    B = In(OptionalDim(num_batches), K, tile=(K,), per=(num_aie_columns,), depth=1)
+    B = In(OptionalDim(num_batches), K, tile=(K,), depth=1)
     C = Out(
         OptionalDim(num_batches),
         M,
@@ -356,10 +356,7 @@ class GEMV(Operator):
             ObjectFifo(self.A.tile, name=f"A_L3L1_{i}", depth=self.A.depth)
             for i in range(cols)
         ]
-        B_fifos = [
-            ObjectFifo(self.B.tile, name=f"B_L3L1_{i}", depth=self.B.depth)
-            for i in range(cols)
-        ]
+        B_fifo = ObjectFifo(self.B.tile, name="B_L3L1", depth=self.B.depth)
         C_fifos = [
             ObjectFifo(self.C.tile, name=f"C_L1L3_{i}", depth=self.C.depth)
             for i in range(cols)
@@ -429,7 +426,7 @@ class GEMV(Operator):
                 core_body,
                 [
                     A_fifos[i].cons(),
-                    B_fifos[i].cons(),
+                    B_fifo.cons(),
                     C_fifos[i].prod(),
                     matvec,
                     rtps[i],
@@ -445,9 +442,9 @@ class GEMV(Operator):
             )
             for i in range(cols)
         ]
+        self.B.lane(0).bind(B_fifo.prod())
         for i in range(cols):
             self.A.lane(i).bind(A_fifos[i].prod())
-            self.B.lane(i).bind(B_fifos[i].prod())
             self.C.lane(i).bind(C_fifos[i].cons())
         if not dynamic:
             self.tiles.bind(rtps, 0)
@@ -457,7 +454,7 @@ class GEMV(Operator):
         return workers + barriers
 
     def sequence(self, rt):
-        """The runtime sequence: B, the whole vector, once to every column,
+        """The runtime sequence: B, the whole vector, once for every column,
         then A and C as derived: each column's rows of every batch, or,
         under a bound, output tiles round-robin over the columns. A repeated
         GEMV walks the batches in ``_batch_order`` instead.
@@ -466,8 +463,7 @@ class GEMV(Operator):
             self._repeated_sequence(rt)
             return
         vector = TaskGroup()
-        for col in range(self.num_aie_columns):
-            rt.fill(self.B.lane(col), self.B, group=vector)
+        rt.fill(self.B.lane(0), self.B, group=vector)
         tg = TaskGroup()
         for slot, tap, size_by in rt.plan(self.A):
             rt.fill(slot, (self.A, tap), group=tg, size_by=size_by)
@@ -529,9 +525,8 @@ class GEMV(Operator):
                 )
         walks = [self._walks(col) for col in range(self.num_aie_columns)]
         vectors = TaskGroup()
-        for col, w in enumerate(walks):
-            for tap in w["B"]:
-                rt.fill(self.B.lane(col), (self.B, tap), group=vectors)
+        for tap in walks[0]["B"]:
+            rt.fill(self.B.lane(0), (self.B, tap), group=vectors)
         tg = TaskGroup()
         for col, w in enumerate(walks):
             for tap in w["A"]:
