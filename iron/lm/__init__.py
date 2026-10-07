@@ -29,7 +29,13 @@ its profiles. Nothing in the library imports a model, so one can be
 replaced or deleted on its own.
 """
 
-from .checkpoint import Checkpoint, Layout, checkpoint_shapes, load_weights
+from .checkpoint import (
+    Checkpoint,
+    Layout,
+    checkpoint_shapes,
+    load_weights,
+    unread_weights,
+)
 from .decoder import (
     CausalLM,
     Config,
@@ -64,4 +70,5 @@ __all__ = [
     "project",
     "rope_angles",
     "swiglu",
+    "unread_weights",
 ]

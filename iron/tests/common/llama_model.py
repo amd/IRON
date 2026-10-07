@@ -10,7 +10,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron.common import Profile
-from iron.lm import checkpoint_shapes, load_weights
+from iron.lm import checkpoint_shapes, load_weights, unread_weights
 from iron.lm.llama3.model import LLAMA_3_2_1B, Llama, layout
 
 # The tunables the graph runs with at ``SMALL``'s shape on NPU2: decode
@@ -64,11 +64,8 @@ def small(seed=0, **config) -> Llama:
 def llama_1b(n_layers=16) -> Llama:
     """Llama 3.2 1B's real shape with unset weights: for builds, not numbers.
 
-    Each array is ``np.empty``, so the 2.5 GB is reserved and never
-    touched. ``n_layers`` below 16 builds a shallower model of the same
-    layer: the designs are the same at any depth.
+    ``n_layers`` below 16 builds a shallower model of the same layer: the
+    designs are the same at any depth.
     """
     config = dataclasses.replace(LLAMA_3_2_1B, n_layers=n_layers)
-    shapes = checkpoint_shapes(layout(config), n_layers)
-    tensors = {k: np.empty(s, dtype=bfloat16) for k, s in shapes.items()}
-    return Llama(config, load_weights(tensors, layout(config), n_layers))
+    return Llama(config, unread_weights(layout(config), n_layers))

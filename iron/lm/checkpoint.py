@@ -79,6 +79,18 @@ def checkpoint_shapes(layout: Layout, n_layers: int) -> dict[str, tuple[int, ...
     return {name: shape for name, (_, shape) in _expand(layout, n_layers).items()}
 
 
+def unread_weights(layout: Layout, n_layers: int) -> SimpleNamespace:
+    """The tree of ``layout`` over ``n_layers``, its arrays allocated and
+    never written: for tracing, building and measuring a model, none of
+    which reads a weight. The pages are reserved, not touched.
+    """
+    tensors = {
+        name: np.empty(shape, dtype=bfloat16)
+        for name, shape in checkpoint_shapes(layout, n_layers).items()
+    }
+    return load_weights(tensors, layout, n_layers)
+
+
 def load_weights(tensors: dict, layout: Layout, n_layers: int) -> SimpleNamespace:
     """The tree of ``layout`` over ``n_layers``, from ``tensors`` by
     checkpoint name. The arrays are used as they are. Strict: a missing

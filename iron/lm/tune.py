@@ -18,8 +18,10 @@ for designs the graph no longer has are dropped. A design another graph has
 had measured on this NPU is taken from the cost cache
 (``iron.common.graph.costcache``) rather than run again.
 
-A model's ``tune`` module calls ``main`` with its runner; run it with
-XRT sourced and the NPU otherwise idle.
+A design's time follows its shapes, per-call values and Sample's draw
+rows, not the weights, so no checkpoint is read: the model is built on
+weights it never touches. A model's ``tune`` module calls ``main`` with
+its runner; run it with XRT sourced and the NPU otherwise idle.
 """
 
 import argparse
@@ -34,6 +36,7 @@ from iron.common.graph.narrowing import CostTable
 from iron.common.graph.probe import Call, Timing, measure_graph, pmode
 from iron.operators.sample import Sample
 
+from .checkpoint import unread_weights
 from .decoder import CausalLM
 from .generation import SEED, Sampler
 from .runner import Runner
@@ -98,8 +101,6 @@ def measure(
 def main(runner: type[Runner], description: str, default_table: Path) -> None:
     """The command line that measures ``runner``'s model's cost table."""
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("weights_path", help="the .safetensors checkpoint")
-    parser.add_argument("tokenizer_path", help="the tokenizer's file")
     parser.add_argument(
         "--table",
         type=Path,
@@ -136,9 +137,9 @@ def main(runner: type[Runner], description: str, default_table: Path) -> None:
     args = parser.parse_args()
 
     print(f"power mode: {pmode()}")
-    run = runner(args.weights_path, args.tokenizer_path)
+    config = runner.config
     measure(
-        run.model(run.config, run.weights),
+        runner.model(config, unread_weights(runner.layout(config), config.n_layers)),
         CostTable(args.table),
         Sampler(args.temperature, args.top_k, np.random.default_rng(SEED)),
         args.position,

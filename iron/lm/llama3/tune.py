@@ -7,7 +7,7 @@
 Strix Halo NPU (8 columns):
 
 ```bash
-python -m iron.lm.llama3.tune model.safetensors tokenizer.model
+python -m iron.lm.llama3.tune
 ```
 """
 

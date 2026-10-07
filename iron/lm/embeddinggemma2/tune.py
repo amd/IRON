@@ -3,10 +3,12 @@
 
 """Measure EmbeddingGemma 2's cost table on this NPU (``probe.measure_graph``):
 every design of each version, at each width, and the configure cost
-between a few pairs of them. Run with XRT sourced and the NPU otherwise idle:
+between a few pairs of them. A design's time follows its shapes, not the
+weights, so no checkpoint is read. Run with XRT sourced and the NPU
+otherwise idle:
 
 ```bash
-python -m iron.lm.embeddinggemma2.tune /path/to/embeddinggemma-2
+python -m iron.lm.embeddinggemma2.tune
 ```
 """
 
@@ -16,10 +18,10 @@ from pathlib import Path
 from iron.common.graph.narrowing import CostTable
 from iron.common.graph.probe import Call, Timing, measure_graph, pmode
 
-from iron.lm import Checkpoint, load_weights
+from iron.lm import unread_weights
 
 from .encoder import COSTS
-from .model import EMBEDDINGGEMMA_2, EmbeddingGemma, layout, text_tensors
+from .model import EMBEDDINGGEMMA_2, EmbeddingGemma, layout
 
 CALIBRATION_PAIRS = [
     ("ElementwiseAdd", "ElementwiseMul"),
@@ -30,7 +32,6 @@ CALIBRATION_PAIRS = [
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("directory", type=Path, help="the checkpoint directory")
     ap.add_argument(
         "--table",
         type=Path,
@@ -56,9 +57,7 @@ def main():
 
     print(f"power mode: {pmode()}")
     c = EMBEDDINGGEMMA_2
-    tensors = text_tensors(Checkpoint(args.directory / "model.safetensors").tensors)
-    weights = load_weights(tensors, layout(c), c.n_layers)
-    graph = EmbeddingGemma(c, weights, c.sliding_window)
+    graph = EmbeddingGemma(c, unread_weights(layout(c), c.n_layers), c.sliding_window)
     # Each version at its every row real: the masked Softmax's longest span.
     calls = [Call(graph.trace(**s), dict(n=s["x"][0])) for s in graph.shapes()]
     measure_graph(
