@@ -30,7 +30,7 @@ from iron.common.graph.probe import (
 )
 from iron.common.image import Fusion
 from iron.lm.layers import SwiGLU
-from iron.operators import MHA, ElementwiseAdd, ElementwiseMul, SiLU, Softmax
+from iron.operators import GEMM, MHA, ElementwiseAdd, ElementwiseMul, SiLU, Softmax
 
 SIZE = 8192
 TILE = 256
@@ -74,6 +74,13 @@ class Attend(iron.Graph):
         return MHA(q, k[:n], v[:n], heads_interleaved=True, kv_interleaved=True)
 
 
+class Project(iron.Graph):
+    """The first `n` rows of `x` projected by `w`."""
+
+    def body(self, x, w, *, n: Scratchpad[np.int32]):
+        return GEMM(x[:n], w, b_col_maj=True)
+
+
 @pytest.mark.supported_devices("npu2")
 def test_a_value_derived_from_a_bound_extent_follows_the_call(tmp_path):
     # MHA's KV block count follows the context, which the call gives alone.
@@ -88,6 +95,20 @@ def test_a_value_derived_from_a_bound_extent_follows_the_call(tmp_path):
         [key] = {cost_key(s.op) for s in traced.steps}
         t_step[n] = table.steps[key].t_step_us
     assert t_step[2048] > 3 * t_step[64], t_step
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_value_derived_from_a_tunable_is_measured_at_its_resolution(tmp_path):
+    # GEMM's tile count reads its auto() tile shape as well as the row bound.
+    # Its DMAs move every row under the bound, so its time does not follow it.
+    traced = Project().trace(x=(2048, 2048), w=(2048, 2048))
+    report = platform()
+    cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    table = CostTable(tmp_path / "costs.json")
+    call = Call(traced, dict(n=256))
+    measure_graph(table, [call], [], Timing(rounds=2, calls=10), cache=cache)
+    [key] = {cost_key(s.op) for s in traced.steps}
+    assert table.steps[key].t_step_us > 0, table.steps[key]
 
 
 @pytest.mark.supported_devices("npu2")

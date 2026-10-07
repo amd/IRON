@@ -173,7 +173,7 @@ class Standalone:
             return values[v.name]
         extents = op.bound_extents
         if v.name in op._per_call_derived() and extents.keys() <= values.keys():
-            return op.derived_at(v.name, **{e: values[e] for e in extents})
+            return op.resolved().derived_at(v.name, **{e: values[e] for e in extents})
         raise ValueError(
             f"per-call value {v.name!r} needs a representative value to be measured"
         )
