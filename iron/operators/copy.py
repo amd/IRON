@@ -214,12 +214,6 @@ class Copy(Operator):
 
     def compatible(self) -> None:
         channels = self.num_channels
-        inner = {tap.sizes[-1] for walk in self.walks() for tap in walk}
-        if channels > 1 and len(inner) > 1:
-            raise ValueError(
-                f"the {channels} channels split each pattern's innermost axis, "
-                f"so every pattern needs one innermost extent, not {sorted(inner)}"
-            )
         for walk in self.walks():
             for tap in walk:
                 if tap.sizes[-1] % channels:
@@ -253,7 +247,13 @@ class Copy(Operator):
         ]
 
     def _shares(self, tap: TensorAccessPattern) -> list[TensorAccessPattern]:
-        """``tap`` with its innermost axis split among the channels, in order."""
+        """``tap`` split among the channels, in order: each takes its share of
+        every run of the innermost extent all the patterns divide into, so
+        channel ``c`` writes exactly the elements it reads.
+        """
+        if self.num_channels > 1:
+            inner = gcd(*(p.sizes[-1] for w in self.walks() for p in w))
+            tap = tap if tap.sizes[-1] == inner else tap.split(-1, inner)
         share = tap.sizes[-1] // self.num_channels
         return [tap[..., c * share : (c + 1) * share] for c in range(self.num_channels)]
 
@@ -269,21 +269,22 @@ class Copy(Operator):
         shim descriptor's length ends it. A bound on the innermost axis, the
         one the channels split, takes one channel.
         """
+        shares = self._shares(tap)
         if bound is None:
-            return [(share, None) for share in self._shares(tap)]
-        rank = len(tap.sizes)
-        dim = 4 - rank + bound
-        if dim == 3 and self.num_channels > 1:
+            return [(share, None) for share in shares]
+        if bound == len(tap.sizes) - 1 and self.num_channels > 1:
             raise ValueError(
                 f"{tap} is bounded on the axis the {self.num_channels} channels "
                 f"split; bound another axis or copy on one channel"
             )
+        rank = len(shares[0].sizes)
+        dim = 4 - rank + bound
         # At most one axis outside the bound (the iteration slot) and one or
         # two inside it (D1, D0) put the bound on D2.
         on_d2 = bound <= 1 and 1 <= rank - bound - 1 <= 2
         shim = BdLimits.of(self.dev, 0, 0)
         out = []
-        for share in self._shares(tap):
+        for share in shares:
             dims = list(share.transformation_dims)
             if on_d2:
                 lead, inner = dims[:bound], dims[bound + 1 :]
