@@ -852,6 +852,21 @@ def test_a_column_major_product_is_read_as_stored_by_the_next_reference(npu2):
     np.testing.assert_array_equal(y, np.maximum(c, 0))
 
 
+def test_a_float32_product_is_not_rounded_to_its_inputs_dtype(npu2):
+    class Wide(iron.Graph):
+        def body(self, a, b):
+            return GEMM(a, b, dtype_out=np.float32, tile_m=32)
+
+    rng = np.random.default_rng(0)
+    a = rng.standard_normal((256, 256)).astype(bfloat16)
+    b = rng.standard_normal((256, 512)).astype(bfloat16)
+    y = np.asarray(Wide().reference(a, b))
+    c = a.astype(np.float32) @ b.astype(np.float32)
+    assert y.dtype == np.float32
+    np.testing.assert_array_equal(y, c)
+    assert (c != c.astype(bfloat16).astype(np.float32)).any()
+
+
 def test_the_reference_computes_the_expressions(npu2):
     """The reference runs the body on numbers: ``p + 1`` is the row the
     copy writes, as the device's offset word is.

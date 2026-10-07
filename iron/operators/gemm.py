@@ -726,7 +726,7 @@ class GEMM(Operator):
         b = (B.T if self.b_col_maj else B).astype(np.float32)
         # C in its stored order, contiguous: a consumer reads it as laid out.
         C = np.matmul(b.T, a.T) if self.c_col_maj else np.matmul(a, b)
-        return C.astype(A.dtype)
+        return C.astype(self.dtype_out)
 
     def tolerance(self) -> Tolerance:
         """Each element of C within the roundings the design makes, in
