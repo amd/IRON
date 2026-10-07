@@ -632,7 +632,7 @@ class Operator(metaclass=_OperatorMeta):
         buffers = [m for m in cls._members if isinstance(m, _Buffer)]
         names = set(cls._param_fields)
         for m in buffers:
-            names.update(d.flag.name for d in m.shape.dims if isinstance(d, Select))
+            names.update(m.shape.names())
         given = {k: v for k, v in kwargs.items() if k in names}
         flags: dict[str, bool] = {}
         for m in buffers:
@@ -696,7 +696,8 @@ class Operator(metaclass=_OperatorMeta):
                         f"declared {m!r}"
                     )
             expanded: list = []
-            for d in dims:
+            while dims:
+                d = dims.pop(0)
                 if not isinstance(d, Select):
                     expanded.append(d)
                     continue
@@ -707,7 +708,7 @@ class Operator(metaclass=_OperatorMeta):
                         f"{cls.__name__}: {flag!r} selects {m.name}'s shape and "
                         f"has no default; pass it explicitly"
                     )
-                expanded.extend(d.when_true if value else d.when_false)
+                dims[:0] = d.when_true if value else d.when_false
             dims = expanded
             if len(dims) == 1 and len(shape) != 1:
                 # A flat buffer takes an operand of any rank: its one

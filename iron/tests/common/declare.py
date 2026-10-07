@@ -26,6 +26,7 @@ from iron.common import (
     Out,
     Profile,
     Scratchpad,
+    Select,
     Shim,
     Unresolvable,
     Value,
@@ -617,6 +618,25 @@ def test_a_computed_default_is_inferred_from_a_shape_or_computed():
     with pytest.raises(ValueError, match="out_rows=5 is not what its other fields"):
         Rep(rows=2, repeat=3, out_rows=5)
     assert Rep.infer({"x": (2, 8)}, [(6, 8)]) == {"rows": 2, "out_rows": 6}
+
+
+def test_a_select_picks_a_layout_within_a_storage():
+    class Weights(Operator):
+        K: int = param()
+        N: int = param()
+        blocks: int = param(default=0)
+        packed: bool = param(default=False)
+        transposed: bool = param(default=False)
+        w = In(Select(packed, (blocks,), (Select(transposed, (N, K), (K, N)),)))
+
+    assert Weights.infer({"w": (64, 32)}, transposed=True) == {
+        "transposed": True,
+        "N": 64,
+        "K": 32,
+    }
+    assert Weights.infer({"w": (64, 32)}) == {"K": 64, "N": 32}
+    assert Weights(K=32, N=64, transposed=True).buffers[0].shape == (64, 32)
+    assert Weights(K=32, N=64, blocks=8, packed=True).buffers[0].shape == (8,)
 
 
 def test_compatible_runs_at_construction_once_every_tunable_is_known():
