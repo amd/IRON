@@ -88,7 +88,7 @@ class Standalone:
         distinct: Every step runs on buffers of its own, as a graph's do, so
             no step finds its inputs in a SoC cache.
         values: Each per-call value by name: the tuner cannot know what a
-            value means.
+            value means. A value derived from bound extents follows from them.
         inputs: Input buffers by name, where random bytes would not be
             representative (a draw row's temperature and top-k).
     """
@@ -135,21 +135,28 @@ class Standalone:
                 if buf.direction.fills:
                     self._bytes(name_)[: buf.nbytes] = self._content(buf, inputs, rng)
         ops = {id(op): op for op in self.steps}.values()
+        # An extent read only through its derivations has no word.
+        read = self.sequence.artifacts.parameters
         symbols = {
-            device_symbol(op, v): np.int32(self._value(values, v))
+            device_symbol(op, v): np.int32(self._value(op, values or {}, v))
             for op in ops
             for v in op.values
+            if device_symbol(op, v) in read
         }
         if symbols:
             self.callable.write_values(symbols)
 
     @staticmethod
-    def _value(values: Mapping[str, int] | None, v: BoundValue) -> int:
-        if values is None or v.name not in values:
-            raise ValueError(
-                f"per-call value {v.name!r} needs a representative value to be measured"
-            )
-        return values[v.name]
+    def _value(op: Operator, values: Mapping[str, int], v: BoundValue) -> int:
+        if v.name in values:
+            return values[v.name]
+        bound = op.bound_extents.keys()
+        if v.name in op._per_call_derived() and bound <= values.keys():
+            extents = {name: values[name] for name in bound}
+            return op.resolved().derived_at(v.name, **extents)
+        raise ValueError(
+            f"per-call value {v.name!r} needs a representative value to be measured"
+        )
 
     @staticmethod
     def _content(
