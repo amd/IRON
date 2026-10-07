@@ -92,6 +92,7 @@ def test_an_open_tile_m_is_the_widest_that_splits_m(device, emulate, M, tile_m):
 
 @pytest.mark.parametrize("device, emulate", [("npu2", True), ("npu1", False)])
 def test_an_m_no_tile_splits_is_rejected(device, emulate):
-    op = GEMM(M=32, K=64, N=512, emulate_bf16_mmul_with_bfp16=emulate)
+    """Refused when constructed if the bound device has no such tile, else when resolved for ``device``."""
     with pytest.raises(ValueError, match=r"M \(32\) must be a multiple of 256"):
+        op = GEMM(M=32, K=64, N=512, emulate_bf16_mmul_with_bfp16=emulate)
         op.resolved(from_name(device))
