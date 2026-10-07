@@ -27,6 +27,7 @@ from iron.common.graph.probe import (
     Call,
     Timing,
     calibrate,
+    check_model,
     measure_graph,
     measure_steps,
     platform,
@@ -229,6 +230,34 @@ def test_tuned_graph_is_bit_identical_and_packed(tmp_path):
     want = np.array(plain(a, b).numpy()[:SIZE])
     got = np.array(tuned(a, b).numpy()[:SIZE])
     assert want.view(np.uint16).tolist() == got.view(np.uint16).tolist()
+
+
+@pytest.mark.supported_devices("npu2")
+def test_the_model_predicts_the_tuned_graph_and_the_graph_as_traced(tmp_path):
+    # Strix Halo at 8 rounds of 50: tuned within -6.8% to +2.6%; as traced
+    # the model held 618-634 us while runs measured 626-738 us.
+    report = platform()
+    cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    table = CostTable(tmp_path / "costs.json")
+    shapes = dict(a=(SIZE,), b=(SIZE,))
+    timing = Timing(rounds=8, calls=50)
+    calls = Call.admitted(Chain().trace(**shapes), aie_utils.ensure_current_device())
+    measure_graph(table, calls, [("ElementwiseAdd", "SiLU")], timing, cache=cache)
+
+    tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
+    tuned = Chain().compile(image=iron.ELF, coresident=tuner, **shapes)
+    untuned = Chain().compile(image=iron.ELF, **shapes)
+    rng = np.random.default_rng(0)
+    tensors = [(rng.random(SIZE) * 4 - 2).astype(bfloat16) for _ in range(2)]
+    check = check_model(tuned, untuned, tensors, timing=timing)
+    # A failure's traceback would hold their contexts from the next test.
+    del tuned, untuned
+    assert check.predicted_us == pytest.approx(
+        check.measured_us, rel=0.1
+    ), check.report()
+    assert check.baseline_us == pytest.approx(
+        check.baseline_measured_us, rel=0.2
+    ), check.report()
 
 
 @pytest.mark.supported_devices("npu2")

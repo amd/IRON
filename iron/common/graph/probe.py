@@ -19,6 +19,8 @@ entries are odd, and each step's ``t_step``.
   ``E(A) + E(B) - E(pack)``.
 - ``measure_graph``: every design of the versions it is given, each in a
   ``Call`` of its version.
+- ``check_model``: a tuned version timed against the untuned one, each
+  beside the model's prediction for it.
 
 Figures are medians of per-round medians, interleaved, of the run alone (the
 callable's ``last_elapsed``); nothing else may dispatch meanwhile.
@@ -41,6 +43,7 @@ from ..declare.bound import BoundBuffer, BoundValue
 from ..design import device_symbol
 from ..image.callable import FullELFCallable, StepCallable
 from ..image.sequence import OperatorSequence
+from .compiled import CompiledGraph
 from .costcache import CostCache, Measurement
 from .fold import folded, replaced
 from .narrowing import (
@@ -241,6 +244,69 @@ def time_interleaved(
                 times.append(run.last_elapsed)
             medians[i].append(statistics.median(times) * 1e6)
     return [statistics.median(m) for m in medians]
+
+
+@dataclasses.dataclass(frozen=True)
+class ModelCheck:
+    """The model's times for a tuned version and for the version as traced,
+    beside what each took on the device, microseconds."""
+
+    predicted_us: float
+    measured_us: float
+    baseline_us: float
+    baseline_measured_us: float
+
+    def report(self) -> str:
+        """The two versions' modelled and measured times, the gain each
+        side gives and the model's error."""
+        lines = [
+            f"  {name}: model {model:.1f} us, measured {measured:.1f} us "
+            f"({(model - measured) / measured:+.1%})"
+            for name, model, measured in (
+                ("tuned", self.predicted_us, self.measured_us),
+                ("as traced", self.baseline_us, self.baseline_measured_us),
+            )
+        ]
+        lines.append(
+            f"  gain: model {self.baseline_us - self.predicted_us:.1f} us, "
+            f"measured {self.baseline_measured_us - self.measured_us:.1f} us"
+        )
+        return "\n".join(lines)
+
+
+def check_model(
+    tuned: CompiledGraph,
+    untuned: CompiledGraph,
+    tensors: Sequence[np.ndarray] = (),
+    values: Mapping[str, int] | None = None,
+    timing: Timing = Timing(),
+) -> ModelCheck:
+    """Time a tuned version against the same version compiled untuned,
+    interleaved, and set each beside its prediction.
+
+    Args:
+        tuned: A version compiled with a `JointNarrowing`.
+        untuned: The same graph and shapes compiled without one, by a graph
+            instance of its own: a graph keeps one version per shape.
+        tensors: The inputs both are called on.
+        values: The per-call values both are called with.
+        timing: How long to time them.
+
+    Raises:
+        ValueError: `tuned` was not tuned, `untuned` was, or the tuning left
+            designs unmeasured, whose time the model leaves out.
+    """
+    tuning = tuned.tuning
+    if tuning is None or untuned.tuning is not None:
+        raise ValueError("check_model takes a tuned version and an untuned one")
+    if tuning.unmeasured:
+        raise ValueError(
+            f"the model leaves out the designs its table lacks: {tuning.unmeasured}"
+        )
+    for version in (tuned, untuned):
+        version(*tensors, **(values or {}))
+    measured, baseline = time_interleaved([tuned.callable, untuned.callable], timing)
+    return ModelCheck(tuning.predicted_us, measured, tuning.baseline_us, baseline)
 
 
 # The device contexts the driver holds at once; each run timed keeps one.
