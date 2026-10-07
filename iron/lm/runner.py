@@ -144,8 +144,8 @@ def main(runner: type[Runner], description: str):
     parser.add_argument(
         "--each-step",
         action="store_true",
-        help="dispatch every step of a decode step on its own from one xclbin, "
-        "as NPU1 does; the prompt then runs a token at a time",
+        help="dispatch every step of each version on its own from one xclbin, "
+        "as NPU1 does",
     )
     args = parser.parse_args()
     if args.compare_host and not args.device_loop:

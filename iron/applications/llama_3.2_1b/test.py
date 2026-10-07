@@ -64,11 +64,9 @@ DEEP_KL = 0.1
 @pytest.mark.supported_devices("npu1", "npu2")
 class TestEachStep:
     """The form NPU1 runs: each step its own dispatch of one xclbin, and the
-    host drawing each token. NPU2 feeds a prompt through its prompt version;
-    NPU1, without MHA, through the decode step a token at a time, so the
-    prompts are shorter than the full ELF's. Its model is built and dropped
-    with the class, first: after any other test it would be held beside the
-    module's full-ELF one.
+    host drawing each token. Its model is built and dropped with the class,
+    first: after any other test it would be held beside the module's
+    full-ELF one.
     """
 
     @pytest.fixture(scope="class")

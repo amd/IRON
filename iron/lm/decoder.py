@@ -7,9 +7,9 @@ A call with no ``x`` is a decode step; ``prefill_chunk`` rows of ``x`` are a
 prompt chunk, of which a call runs the first ``rows``. Both draw the next
 token on the device and carry it and ``position + 1`` into the next call.
 A prompt chunk attends with ``MHA``, so where MHA does not fit the device
-(NPU1) there is no prompt version and a prompt runs a token at a time. Where
-the decode step is not a full ELF (NPU1, or ``boundaries=each_step``) there
-is no device loop.
+there is no prompt version and a prompt runs a token at a time. Where the
+decode step is not a full ELF (NPU1, or ``boundaries=each_step``) there is
+no device loop.
 """
 
 import dataclasses
@@ -108,7 +108,7 @@ class CausalLM(iron.Graph):
     query, or with ``decode_attention="gqa"`` with ``GQAScores``, ``Softmax``
     and ``GQAContext`` reading each group's rows in place; either costs the
     context, not the cache. Left ``None`` it is ``"mha"`` where MHA fits the
-    device (NPU2), else ``"gqa"`` (NPU1).
+    device, else ``"gqa"``.
     """
 
     embedding: Weight

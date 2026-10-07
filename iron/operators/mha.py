@@ -24,9 +24,9 @@ pipeline rather than one every pipeline reads.
 """
 
 import dataclasses
+from typing import ClassVar
 
 import numpy as np
-from aie.dialects.aie import AIEArch
 from aie.helpers.dialects.scf import else_, if_
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
@@ -39,7 +39,7 @@ from aie.iron import (
     kernels,
 )
 from aie.iron.controlflow import range_
-from aie.iron.device import Tile
+from aie.iron.device import Device, Tile
 from aie.iron.kernels.linalg import mm_stream_dims
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
@@ -49,7 +49,6 @@ from iron.common import (
     In,
     Operator,
     Out,
-    Shim,
     Unresolvable,
     Value,
     auto,
@@ -57,6 +56,78 @@ from iron.common import (
     Select,
 )
 from iron.common.testing import Case, Testing
+
+
+@dataclasses.dataclass(frozen=True)
+class Columns:
+    """Where MHA's streams meet the array on one array width.
+
+    Attributes:
+        q: Q's shim column.
+        k: K's shim column, when every pipeline reads one K stream.
+        v: V's shim column, likewise.
+        o: O's shim column.
+        qo_mem: The memtile column of the Q split and the O join, the
+            second shim's the next one.
+        k_mem: K's memtile column, when every pipeline reads one K stream.
+        v_mem: V's memtile column, likewise.
+    """
+
+    q: int
+    k: int
+    v: int
+    o: int
+    qo_mem: int
+    k_mem: int
+    v_mem: int
+
+
+# At NPU2's eight pipelines; _cases halves them on a narrower array.
+_CASES = [
+    Case(dict(num_heads=1, seq_len=16384, num_pipelines=8), bench=True),
+    # Grouped-query: 8 query heads over 2 KV heads.
+    Case(
+        dict(num_heads=8, num_KV_heads=2, seq_len=16384, num_pipelines=8),
+        extensive=True,
+        bench=True,
+    ),
+    Case(dict(num_heads=1, seq_len=16384, num_pipelines=4), extensive=True),
+    # A chunk over a cache: 2048 queries, the last rows of 8192 keys.
+    Case(
+        dict(
+            num_heads=8,
+            num_KV_heads=2,
+            seq_len=2048,
+            kv_len=8192,
+            num_pipelines=8,
+        )
+    ),
+    # One query over a cache, its heads packed: Llama 3.2 1B's decode.
+    Case(
+        dict(
+            num_heads=32,
+            num_KV_heads=8,
+            seq_len=1,
+            kv_len=2048,
+            num_pipelines=4,
+            heads_interleaved=True,
+        )
+    ),
+    Case(
+        dict(num_heads=8, num_KV_heads=2, seq_len=1, kv_len=512, num_pipelines=2),
+        extensive=True,
+    ),
+]
+
+
+def _cases(cls, dev: Device):
+    share = 1 if dev.cols >= max(cls.COLUMNS) else 2
+    return [
+        dataclasses.replace(
+            c, kwargs={**c.kwargs, "num_pipelines": c.kwargs["num_pipelines"] // share}
+        )
+        for c in _CASES
+    ]
 
 
 class MHA(Operator):
@@ -72,44 +143,7 @@ class MHA(Operator):
     # Several kernels and no one contract to judge by: 4% or 0.15, with
     # 0.5% of the outputs allowed past it.
     test = Testing(
-        [
-            Case(dict(num_heads=1, seq_len=16384, num_pipelines=8), bench=True),
-            # Grouped-query: 8 query heads over 2 KV heads.
-            Case(
-                dict(num_heads=8, num_KV_heads=2, seq_len=16384, num_pipelines=8),
-                extensive=True,
-                bench=True,
-            ),
-            Case(dict(num_heads=1, seq_len=16384, num_pipelines=4), extensive=True),
-            # A chunk over a cache: 2048 queries, the last rows of 8192 keys.
-            Case(
-                dict(
-                    num_heads=8,
-                    num_KV_heads=2,
-                    seq_len=2048,
-                    kv_len=8192,
-                    num_pipelines=8,
-                )
-            ),
-            # One query over a cache, its heads packed: Llama 3.2 1B's decode.
-            Case(
-                dict(
-                    num_heads=32,
-                    num_KV_heads=8,
-                    seq_len=1,
-                    kv_len=2048,
-                    num_pipelines=4,
-                    heads_interleaved=True,
-                )
-            ),
-            Case(
-                dict(
-                    num_heads=8, num_KV_heads=2, seq_len=1, kv_len=512, num_pipelines=2
-                ),
-                extensive=True,
-            ),
-        ],
-        tolerance=Tolerance(rtol=0.04, atol=0.15, max_mismatch_frac=0.005),
+        _cases, tolerance=Tolerance(rtol=0.04, atol=0.15, max_mismatch_frac=0.005)
     )
 
     num_heads: int = param()
@@ -140,30 +174,37 @@ class MHA(Operator):
     q_shims: int = auto(repr=False)
     join_rows: int = auto(repr=False)
     kv_lanes: int = auto(array=True, repr=False)
+    # The width of the layout placed, a key of COLUMNS.
+    width: int = auto(array=True, repr=False)
+
+    # By array width. Every coordinate is load-bearing: relaxed to
+    # AnyShimTile/AnyMemTile/AnyComputeTile the router reports "Unable to
+    # find a legal routing". One query packed puts pipeline p's K and V
+    # lanes on shim and memtile p, so its pipelines stop short of q.
+    COLUMNS: ClassVar[dict[int, Columns]] = {
+        8: Columns(q=4, k=5, v=6, o=7, qo_mem=6, k_mem=3, v_mem=4),
+        4: Columns(q=2, k=0, v=1, o=3, qo_mem=2, k_mem=0, v_mem=1),
+    }
 
     Q = In(
         Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
         tile=(join_rows, d),
         per=(q_shims,),
-        via=Shim(4),
     )
     K = In(
         Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
         tile=(d, B_kv),
         per=(kv_lanes,),
-        via=Shim(5),
     )
     V = In(
         Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
         tile=(d, B_kv),
         per=(kv_lanes,),
-        via=Shim(6),
     )
     O = Out(
         Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
         tile=(join_rows, d),
         per=(q_shims,),
-        via=Shim(7),
     )
     # The query rows, or fewer per call (``Q[:n]`` in a graph): Q and O
     # stream every row; the cores compute the blocks the bound covers and
@@ -260,8 +301,8 @@ class MHA(Operator):
                 f"the pipelines are split over two shims"
             )
         # Each product's micro-tile must divide its operands: QK^T, (B_q, d)
-        # by (d, B_kv), bfp16-emulated, the only one supported, on NPU2, the
-        # only array MHA fits; P*V, (B_q, B_kv) by (B_kv, d).
+        # by (d, B_kv), bfp16-emulated on NPU2, whose (8, 8, 8) holds
+        # NPU1's (4, 8, 8) too; P*V, (B_q, B_kv) by (B_kv, d).
         for pv, dims in ((False, ("B_q", "d", "B_kv")), (True, ("B_q", "B_kv", "d"))):
             mac = kernels.linalg.mha.mac_dims(
                 pv=pv, arch="aie2p", emulate_bf16_mmul_with_bfp16=True
@@ -303,6 +344,11 @@ class MHA(Operator):
                 f"kv_lanes ({self.kv_lanes}) is one per pipeline for one query, "
                 f"else one; resolve() sets it"
             )
+        if self.num_pipelines > self.width:
+            raise ValueError(
+                f"num_pipelines ({self.num_pipelines}) is at most the "
+                f"{self.width} columns it is placed on, one pipeline a column"
+            )
         if self.packed:
             group = self.num_heads // self.num_KV_heads
             if self.B_q % group:
@@ -310,31 +356,37 @@ class MHA(Operator):
                     f"one query packs a KV group's {group} heads into a block's "
                     f"B_q ({self.B_q}) rows, which they must divide"
                 )
-            # K and V take both input channels of shims 0 to P-1, and Q shim 4's.
-            if self.num_pipelines > 4 or self.num_KV_heads % self.num_pipelines:
+            # K and V take both input channels of shims 0 to P-1, and Q its own.
+            q = self.COLUMNS[self.width].q
+            if self.num_pipelines > q or self.num_KV_heads % self.num_pipelines:
                 raise ValueError(
                     f"one query takes num_pipelines ({self.num_pipelines}) at most "
-                    f"4 dividing num_KV_heads ({self.num_KV_heads}): each pipeline "
+                    f"{q} dividing num_KV_heads ({self.num_KV_heads}): each pipeline "
                     f"has its own K and V lanes, on its own column's shim"
                 )
 
     @classmethod
     def fits(cls, dev) -> bool:
-        """Whether ``dev`` is the 8-column NPU2 array MHA is placed on."""
-        return dev.arch is AIEArch.AIE2p and dev.cols >= 8
+        """Whether ``dev`` has the columns of a layout MHA is placed on."""
+        return dev.cols >= min(cls.COLUMNS)
 
     def resolve(self, dev):
         if dev is not None and not self.fits(dev):
             raise Unresolvable(
-                f"MHA is pinned to the 8-column NPU2 array (memtiles at columns "
-                f"3-7); got {dev.name} ({dev.arch}) with {dev.cols} columns"
+                f"MHA is placed on {min(self.COLUMNS)} columns or more; got "
+                f"{dev.name} ({dev.arch}) with {dev.cols}"
             )
         q_shims = 2 if self.num_pipelines > 6 else 1
+        if dev is not None:
+            width = max(w for w in self.COLUMNS if w <= dev.cols)
+        else:
+            width = max(self.COLUMNS) if self.width is None else self.width
         return dataclasses.replace(
             self,
             q_shims=q_shims,
             join_rows=self.B_q * (self.num_pipelines // q_shims),
             kv_lanes=self.num_pipelines if self.packed else 1,
+            width=width,
         )
 
     # -- derived geometry ------------------------------------------------------
@@ -423,17 +475,19 @@ class MHA(Operator):
         # n_join pipelines and is split between them on a memtile; K and V
         # are forwarded through a memtile to every pipeline.
         # Each stream is blocked as the product that reads or writes it takes
-        # it: Q, K (as stored) and the scores as QK^T's, V and O as P*V's
+        # it: Q, K (as stored) and the scores as QK^T's, P, V and O as P*V's
         # (matmul_PV, on the micro-tile mha.cc's P*V product expands).
         qk = matmul_QK.stream_dims
         pv = mm_stream_dims(B_q, B_kv, d, kernels.linalg.mha.mac_dims(pv=True))
         q_dims = qk.A
         k_dims = qk.B
         a_dims = qk.C
+        p_dims = pv.A
         v_dims = pv.B
         o_dims = pv.C
 
-        # The Q splits and O joins, one per shim, on memtiles (6, 1) and (7, 1).
+        # The Q splits and O joins, one per shim, on the memtiles from qo_mem.
+        columns = self.COLUMNS[self.width]
         inQ, memQ, memO, outO = [], [], [], []
         for shim in range(self.q_shims):
             suffix = "" if shim == 0 else "2"
@@ -445,7 +499,7 @@ class MHA(Operator):
                 names=[f"memQ{suffix}{i}" for i in range(n_join)],
                 to_stream=None if q_dims is None else [q_dims] * n_join,
                 depths=[of_depth] * n_join,
-                tile=Tile(col=6 + shim, row=1),
+                tile=Tile(col=columns.qo_mem + shim, row=1),
             )
             mem_o = ObjectFifo(joined_ty, name=f"memO{suffix}", to_stream=o_dims)
             memO.append(mem_o)
@@ -454,12 +508,12 @@ class MHA(Operator):
                 obj_types=[q_ty] * n_join,
                 names=[f"outO{suffix}{i}" for i in range(n_join)],
                 depths=[of_depth] * n_join,
-                tile=Tile(col=6 + shim, row=1),
+                tile=Tile(col=columns.qo_mem + shim, row=1),
             )
 
         # K (stored column-major) and V are forwarded through a memtile: one
-        # stream each that every pipeline reads, through memtiles (3, 1) and
-        # (4, 1), or a lane per pipeline through its own column's.
+        # stream each that every pipeline reads, through memtiles k_mem and
+        # v_mem, or a lane per pipeline through its own column's.
         kv_lanes = self.kv_lanes
         inK, inV, memK, memV = [], [], [], []
         for lane in range(kv_lanes):
@@ -472,7 +526,7 @@ class MHA(Operator):
                 .forward(
                     name=f"memK{suffix}",
                     to_stream=k_dims,
-                    tile=Tile(col=3 if shared else lane, row=1),
+                    tile=Tile(col=columns.k_mem if shared else lane, row=1),
                     depth=of_depth,
                 )
             )
@@ -483,7 +537,7 @@ class MHA(Operator):
                 .forward(
                     name=f"memV{suffix}",
                     to_stream=v_dims,
-                    tile=Tile(col=4 if shared else lane, row=1),
+                    tile=Tile(col=columns.v_mem if shared else lane, row=1),
                     depth=of_depth,
                 )
             )
@@ -501,7 +555,7 @@ class MHA(Operator):
             outP.append(
                 memP[i]
                 .cons()
-                .forward(name=f"outP{i}", to_stream=q_dims, depth=of_depth)
+                .forward(name=f"outP{i}", to_stream=p_dims, depth=of_depth)
             )
             scaleOF.append(ObjectFifo(s_ty, depth=of_depth, name=f"scaleOF{i}"))
 
@@ -845,23 +899,21 @@ class MHA(Operator):
                 )
             )
 
-        # The shim ends, on the columns the operands' via= pins declare.
-        # Every coordinate in this design is load-bearing: relaxed to
-        # AnyShimTile/AnyMemTile/AnyComputeTile the router reports "Unable
-        # to find a legal routing", so the map here is not a performance
-        # preference. Q's slots share column 4's two channels, O's column 7's;
-        # K and V's lanes, one per pipeline, its column's two.
-        def shim_of(operand, lane=0) -> Tile:
-            via = operand.member.via
-            assert isinstance(via, Shim)
-            return Tile(col=via.col if operand.count == 1 else lane, row=0)
-
+        # The shim ends, on the width's columns. Split over two memtiles, Q's
+        # lanes share column 0's two channels, as O's do; K and V's lanes,
+        # one per pipeline, take their column's two.
+        split = self.q_shims > 1
+        q_shim = Tile(col=0 if split else columns.q, row=0)
+        o_shim = Tile(col=0 if split else columns.o, row=0)
         for s in range(self.q_shims):
-            self.Q.lane(s).bind(inQ[s].prod(tile=shim_of(self.Q)))
-            self.O.lane(s).bind(memO[s].cons(tile=shim_of(self.O)))
+            self.Q.lane(s).bind(inQ[s].prod(tile=q_shim))
+            self.O.lane(s).bind(memO[s].cons(tile=o_shim))
         for lane in range(kv_lanes):
-            self.K.lane(lane).bind(inK[lane].prod(tile=shim_of(self.K, lane)))
-            self.V.lane(lane).bind(inV[lane].prod(tile=shim_of(self.V, lane)))
+            shared = kv_lanes == 1
+            k_shim = Tile(col=columns.k if shared else lane, row=0)
+            v_shim = Tile(col=columns.v if shared else lane, row=0)
+            self.K.lane(lane).bind(inK[lane].prod(tile=k_shim))
+            self.V.lane(lane).bind(inV[lane].prod(tile=v_shim))
 
         flat_rtps = [b for stage in mha_rtps_list for b in stage]
         for i, name in enumerate(counts):
