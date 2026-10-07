@@ -112,6 +112,22 @@ def test_a_value_derived_from_a_tunable_is_measured_at_its_resolution(tmp_path):
 
 
 @pytest.mark.supported_devices("npu2")
+def test_widths_are_compared_on_the_rows_under_the_bound(tmp_path):
+    # GEMM drains every row; past the bound they hold what each width's L1 held.
+    traced = Project().trace(x=(1024, 1024), w=(1024, 1024))
+    [step] = traced.steps
+    found = variants(step.op, aie_utils.ensure_current_device())
+    assert len(found) > 1
+    costs = measure_steps(
+        CostTable(tmp_path / "costs.json"),
+        found,
+        Timing(rounds=1, calls=5),
+        values=Call(traced, dict(n=256)).op_values(step.op),
+    )
+    assert all(c.exact for c in costs.values()), costs
+
+
+@pytest.mark.supported_devices("npu2")
 def test_measures_more_widths_than_one_batch_of_contexts(tmp_path):
     # A probe that writes a per-call value loads its context when it is built.
     op = Masked().trace(x=(256, 256)).steps[0].op

@@ -125,6 +125,7 @@ class Standalone:
         inputs: Mapping[str, np.ndarray] | None = None,
     ):
         self.steps = list(runlist)
+        self._values = dict(values or {})
         firsts = {}
         for k, op in enumerate(self.steps):
             firsts.setdefault(id(op), k)
@@ -201,14 +202,26 @@ class Standalone:
         return self.callable.get_buffer(name).numpy_view().view(np.uint8)
 
     def output_bytes(self) -> bytes:
-        """What the steps wrote, after one run: every out and in-out buffer."""
+        """What the steps wrote, after one run: every out and in-out buffer,
+        along a bounded axis only the rows under the call's bound.
+        """
         self.callable()
-        return b"".join(
-            self._bytes(name)[: buf.nbytes].tobytes()
-            for k in self._filled
-            for buf, name in zip(self.steps[k].buffers, self._names(k, self.steps[k]))
-            if buf.direction.drains
-        )
+        written = []
+        for k in self._filled:
+            op = self.steps[k]
+            for buf, name in zip(op.buffers, self._names(k, op)):
+                if not buf.direction.drains:
+                    continue
+                data = self._bytes(name)[: buf.nbytes]
+                under = [slice(None)] * len(buf.shape)
+                for extent in op.bound_extents:
+                    axis = buf.extent_axis(op.value(extent).member)
+                    if axis is not None:
+                        under[axis] = slice(0, self._values[extent])
+                if under != [slice(None)] * len(buf.shape):
+                    data = data.reshape(*buf.shape, -1)[tuple(under)]
+                written.append(data.tobytes())
+        return b"".join(written)
 
 
 def time_interleaved(
