@@ -17,6 +17,8 @@ from aie.iron.device import from_name
 
 from iron.common import Unresolvable
 from iron.operators.copy import Copy, Gather
+from iron.operators.limbs import Limbs
+from iron.operators.magnitude import Magnitude
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.transpose import Transpose
@@ -196,3 +198,19 @@ def test_mha_of_one_query_that_does_not_pack_is_refused(kwargs, why):
     """
     with pytest.raises(ValueError, match=why):
         MHA(seq_len=1, kv_len=512, **kwargs).resolved(from_name("npu2", n_cols=8))
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: Limbs(rows=64, line=176),
+        lambda: Magnitude(rows=64, width=608),
+    ],
+    ids=["limbs", "magnitude"],
+)
+def test_a_line_of_part_of_a_vector_is_refused(make):
+    """Limbs and Magnitude load and store whole 32-lane vectors, so a line
+    (or each half of a complex row) of part of one would read past it.
+    """
+    with pytest.raises(ValueError, match="32-element vectors"):
+        make()
