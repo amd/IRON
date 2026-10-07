@@ -189,6 +189,16 @@ def test_a_prompt_longer_than_a_chunk_runs_in_chunks(cpu):
     _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
 
 
+def test_the_oracle_carries_nothing_from_call_to_call(cpu):
+    """Its buffers outlive a call: a shorter prompt after a longer one, and
+    each longer one after, gives a fresh oracle's logits bit for bit.
+    """
+    tokens = np.random.default_rng(5).integers(0, cpu.config.vocab_size, 40)
+    for n in (20, 8, 21, 40):
+        fresh = Llama.oracle(cpu.config, cpu.weights).logits(tokens[:n])
+        assert np.array_equal(cpu.oracle.logits(tokens[:n]), fresh), n
+
+
 def test_the_accuracy_check_scores_the_model_against_the_reference(cpu):
     """What ``--check-accuracy`` runs, the images stood in by the graph's
     reference: the model against the float32 reference, teacher-forced.

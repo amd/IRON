@@ -107,10 +107,15 @@ class LlamaOracle(Oracle):
         v = (h @ w.v.T).reshape(n, G, D)
         x = x + self.attend(q, k, v) @ w.o.T
         h = rms_norm(x, w.norm2)
-        gate = h @ w.gate.T
+        F = w.gate.shape[0]
+        half = np.matmul(h, w.gate.T, out=self.buffer("gate", (n, F)))
+        half *= np.float32(0.5)
         # SiLU, with the sigmoid as a tanh, which does not overflow.
-        silu = gate * np.float32(0.5) * (1 + np.tanh(gate * np.float32(0.5)))
-        return x + (silu * (h @ w.up.T)) @ w.down.T
+        silu = np.tanh(half, out=self.buffer("silu", (n, F)))
+        silu += 1
+        silu *= half
+        silu *= np.matmul(h, w.up.T, out=self.buffer("up", (n, F)))
+        return x + silu @ w.down.T
 
     def head(self, x):
         return rms_norm(x, self.norm) @ self.embedding.T

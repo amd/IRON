@@ -372,6 +372,7 @@ class Oracle:
         self.config = config
         vars(self).update(vars(_widen(weights)))
         self.angles = config.angles()
+        self.buffers: dict[str, np.ndarray] = {}
 
     def layer(self, angles, w, x):
         raise NotImplementedError(f"{type(self).__name__} defines no layer()")
@@ -393,12 +394,39 @@ class Oracle:
         x1, x2 = np.split(x, 2, axis=-1)
         return np.concatenate([x1 * cos - x2 * sin, x1 * sin + x2 * cos], axis=-1)
 
+    def buffer(self, name: str, shape: tuple[int, ...]) -> np.ndarray:
+        """A float32 array of `shape` that `name` reuses from call to call.
+
+        A temporary past glibc's mmap threshold is mapped afresh and faulted
+        in page by page, which under memory pressure costs more than the
+        arithmetic.
+
+        Args:
+            name: What the array holds; one array per name.
+            shape: Its shape this time.
+
+        Returns:
+            A view of the array, its contents undefined.
+        """
+        size = math.prod(shape)
+        held = self.buffers.get(name)
+        if held is None or held.size < size:
+            # Headroom, so a history growing a token a step seldom reallocates.
+            held = np.empty(
+                size if held is None else max(size, held.size * 5 // 4), np.float32
+            )
+            self.buffers[name] = held
+        return held[:size].reshape(shape)
+
     def attend(self, q, k, v):
         n, H, D = q.shape
         k, v = (np.repeat(a, H // self.config.n_kv_groups, axis=1) for a in (k, v))
-        # In place: a freed (H, n, n) temporary is paid again in page faults.
         # Batched matmuls, not einsum: BLAS is 10x faster at 3k.
-        p = q.transpose(1, 0, 2) @ k.transpose(1, 2, 0)
+        p = np.matmul(
+            q.transpose(1, 0, 2),
+            k.transpose(1, 2, 0),
+            out=self.buffer("scores", (H, n, n)),
+        )
         p *= np.float32(1 / np.sqrt(D))
         p += np.triu(np.full((n, n), -np.inf, dtype=np.float32), k=1)
         p -= p.max(axis=-1, keepdims=True)
