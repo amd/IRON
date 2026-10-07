@@ -599,6 +599,15 @@ class CompiledGraph:
         """Program this version's Emit to start a call of ``target``."""
         if self.emit is None:
             raise ValueError(f"{self.traced.name}: this version has no Emit step")
+        if target.traced.addresses:
+            tables = sorted(
+                {buffer for buffer, _, _ in target.traced.addresses.values()}
+            )
+            raise ValueError(
+                f"{target.traced.name}: an Emit cannot start it: its gather by ids "
+                f"the device made reads the address of {tables}, which the host "
+                f"writes each call and no carried value holds"
+            )
         program = compose(self.emit, self.traced.carry, target.words, target.parameters)
         self.write(self.emit.program, program)
 

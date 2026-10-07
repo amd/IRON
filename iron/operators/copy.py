@@ -12,6 +12,7 @@ one descriptor holds. A per-call value indexing a view reaches the copy as
 
 import dataclasses
 import functools
+from collections.abc import Mapping
 from dataclasses import field
 from math import gcd, isqrt, prod
 from typing import Any, ClassVar
@@ -249,6 +250,12 @@ class Gather(Operator):
             np.uint32
         )
         return words
+
+    def addressed_inputs(
+        self, addresses: Mapping[str, int], rng: np.random.Generator
+    ) -> dict[str, np.ndarray]:
+        ids = rng.integers(0, self.table_rows, self.rows)
+        return {"control": self.control_words(ids, addresses["table"])}
 
 
 _ROW_ADDRESSES = """

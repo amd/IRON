@@ -146,8 +146,15 @@ class Standalone:
         rng = np.random.default_rng(seed)
         for k in self._filled:
             op = self.steps[k]
-            for buf, name_ in zip(op.buffers, self._names(k, op)):
-                if buf.direction.fills:
+            names = self._names(k, op)
+            addressed = op.addressed_inputs(
+                {buf.name: self.address(n) for buf, n in zip(op.buffers, names)}, rng
+            )
+            for buf, name_ in zip(op.buffers, names):
+                if buf.name in addressed:
+                    content = np.ascontiguousarray(addressed[buf.name], buf.dtype)
+                    self._bytes(name_)[: buf.nbytes] = content.view(np.uint8)
+                elif buf.direction.fills:
                     self._bytes(name_)[: buf.nbytes] = self._content(buf, inputs, rng)
         ops = {id(op): op for op in self.steps}.values()
         symbols = {
@@ -187,6 +194,12 @@ class Standalone:
 
     def _bytes(self, name: str) -> np.ndarray:
         return self.callable.get_storage(name).numpy_view().view(np.uint8)
+
+    def address(self, name: str) -> int:
+        """The device address of buffer ``name``."""
+        view = self.callable.get_storage(name)
+        root = view.storage.binding_handle(0, view.storage.nbytes)
+        return root.address() + view.storage_offset
 
     def output_bytes(self) -> bytes:
         """What the steps wrote, after one run: every out and in-out buffer."""
@@ -337,8 +350,10 @@ class Call:
 
     def op_values(self, op: Operator) -> dict[str, int]:
         """The per-call values ``op`` is written in this call, by member name."""
+        # A table's address the graph fills in; a word step alone reads none.
+        values = {**dict.fromkeys(self.traced.addresses, 0), **self.values}
         return {
-            b.member.name: b.expression.evaluate(self.values)
+            b.member.name: b.expression.evaluate(values)
             for b in self.traced.bindings
             if b.op is op
         }

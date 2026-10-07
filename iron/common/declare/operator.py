@@ -342,6 +342,24 @@ class Operator(metaclass=_OperatorMeta):
         budget = self.shim_columns(dev, num_channels, vars(self))
         return next((c for c in range(budget, 0, -1) if fits is None or fits(c)), 1)
 
+    def addressed_inputs(
+        self, addresses: Mapping[str, int], rng: np.random.Generator
+    ) -> dict[str, np.ndarray]:
+        """What the inputs that name device addresses hold, for a run alone.
+
+        Random bytes in such an input would steer the operator's DMA
+        anywhere; every other input is safe to fill at random.
+
+        Args:
+            addresses: Each of the operator's buffers' device addresses, by
+                buffer name.
+            rng: The generator any representative content is drawn from.
+
+        Returns:
+            Each such input's content, by buffer name.
+        """
+        return {}
+
     def reference(self, *inputs):
         raise NotImplementedError(
             f"{type(self).__name__}.reference() is not implemented"
