@@ -36,6 +36,7 @@ from iron.operators.emit import reference as emit_reference
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
+from iron.operators.relu import ReLU
 from iron.operators.repeat import Repeat
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
@@ -832,6 +833,23 @@ def test_the_reference_writes_a_given_output_of_an_operator_that_returns_one(npu
     f = np.float32
     np.testing.assert_array_equal(y[:256], (a.astype(f) @ b.astype(f)).astype(bfloat16))
     np.testing.assert_array_equal(y[256:], x[256:] * 2)
+
+
+def test_a_column_major_product_is_read_as_stored_by_the_next_reference(npu2):
+    """A ``c_col_maj`` GEMM's C is ``(N, M)`` as stored, which an elementwise
+    operator's reference takes as lines of its own length.
+    """
+
+    class Transposed(iron.Graph):
+        def body(self, a, b):
+            return ReLU(GEMM(a, b, b_col_maj=True, c_col_maj=True))
+
+    rng = np.random.default_rng(0)
+    a = rng.integers(-2, 2, (32, 256)).astype(bfloat16)
+    b = rng.integers(-2, 2, (2048, 256)).astype(bfloat16)
+    y = np.asarray(Transposed().reference(a, b), np.float32)
+    c = b.astype(np.float32) @ a.astype(np.float32).T
+    np.testing.assert_array_equal(y, np.maximum(c, 0))
 
 
 def test_the_reference_computes_the_expressions(npu2):

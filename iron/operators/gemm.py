@@ -722,9 +722,11 @@ class GEMM(Operator):
         # reference multiplies. The exact product in float32, rounded once:
         # what the design rounds on the way (bfp16 inputs, a bf16 C between
         # K tiles) is its error, which tolerance() bounds.
-        b = B.T if self.b_col_maj else B
-        C = np.matmul(A.astype(np.float32), b.astype(np.float32)).astype(A.dtype)
-        return C.T if self.c_col_maj else C
+        a = A.astype(np.float32)
+        b = (B.T if self.b_col_maj else B).astype(np.float32)
+        # C in its stored order, contiguous: a consumer reads it as laid out.
+        C = np.matmul(b.T, a.T) if self.c_col_maj else np.matmul(a, b)
+        return C.astype(A.dtype)
 
     def tolerance(self) -> Tolerance:
         """Each element of C within the roundings the design makes, in
