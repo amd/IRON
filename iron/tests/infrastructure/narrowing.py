@@ -16,8 +16,8 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Scratchpad
-from iron.common.graph.costcache import CostCache
-from iron.common.graph.fold import folded
+from iron.common.graph.costcache import CostCache, Measurement
+from iron.common.graph.fold import folded, replaced
 from iron.common.graph.narrowing import CostTable, JointNarrowing, cost_key, variants
 from iron.common.graph.probe import (
     CONTEXTS,
@@ -156,7 +156,7 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
     table = CostTable(tmp_path / "costs.json")
     measure_graph(
         table,
-        [Call(traced), Call(folds)],
+        [Call(traced), Call(folds, folded_from=traced)],
         [("SiLU", "ElementwiseMul")],
         Timing(rounds=1, calls=5),
         cache=CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
@@ -172,6 +172,31 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
     want = np.array(plain(x).numpy()[:E])
     got = np.array(tuned(x).numpy()[:E])
     assert want.view(np.uint16).tolist() == got.view(np.uint16).tolist()
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_folded_design_is_priced_beside_the_one_it_replaces(tmp_path):
+    E = 2048
+    weights = [np.zeros((E, E), bfloat16) for _ in range(3)]
+    traced = SwiGLU(*weights).trace(x=(1, E))
+    folds, _ = folded(traced, aie_utils.ensure_current_device())
+    report = platform()
+    cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    calls = [Call(traced), Call(folds, folded_from=traced)]
+    timing = Timing(rounds=1, calls=5)
+    table = CostTable(tmp_path / "costs.json")
+    measure_graph(table, calls, [], timing, cache=cache)
+
+    gate, fused = replaced(traced, folds)[0]
+    entry = cache.key(fused.resolved())
+    raw = cache.get(entry, Measurement)
+    near = cache.get(cache.beside_key(cache.key(gate.resolved()), entry), Measurement)
+    paired = table.steps[cost_key(gate)].t_step_us + raw.t_step_us - near.t_step_us
+    assert table.steps[cost_key(fused)].t_step_us == pytest.approx(paired)
+
+    again = CostTable(tmp_path / "again.json")
+    assert measure_graph(again, calls, [], timing, cache=cache) == []
+    assert again.steps == table.steps
 
 
 @pytest.mark.supported_devices("npu2")

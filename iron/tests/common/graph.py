@@ -25,7 +25,7 @@ from iron.common.design.build import device_symbol
 from iron.common.graph import Handle, TracedGraph, Tracer
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import _words
-from iron.common.graph.fold import folded
+from iron.common.graph.fold import folded, replaced
 from iron.common.graph.handle import Affine, Value
 from iron.common.image import OperatorSequence
 from iron.common.image.artifacts import Parameter
@@ -417,6 +417,16 @@ def test_swiglu_folds_its_silu_into_the_gate_and_keeps_one_array(npu2):
     silu = next(s for s in t.steps if type(s.op) is SiLU)
     assert gate.outputs[0].name == silu.outputs[0].name == mul.inputs[0].name
     assert f.input_args == t.input_args and f.output_args == t.output_args
+
+
+def test_each_folded_design_is_paired_with_the_one_whose_step_it_took(npu2):
+    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
+    f, _ = folded(t, npu2)
+    # The gate took on the silu; up moved onto the gate's array.
+    assert replaced(t, f) == [
+        (t.steps[0].op, f.steps[0].op),
+        (t.steps[1].op, f.steps[1].op),
+    ]
 
 
 class _Gate(iron.Graph):

@@ -116,3 +116,24 @@ def folded(
                 break
     kept = dataclasses.replace(traced, steps=[s for s in steps if s is not None])
     return kept.with_operators(replace), applied
+
+
+def replaced(
+    traced: TracedGraph, folds: TracedGraph
+) -> list[tuple[Operator, Operator]]:
+    """The operators ``folded`` swapped to make ``folds`` from ``traced``:
+    each step of ``folds`` whose operator is not its step's in ``traced``,
+    as (traced's, folds').
+
+    A folded graph keeps its steps' order and inputs, and a step folded away
+    took an input no other step does, so each step of ``folds`` is the next
+    step of ``traced`` that reads what it reads.
+    """
+    plain = iter(traced.steps)
+    pairs = []
+    for step in folds.steps:
+        reads = [h.name for h in step.inputs]
+        twin = next(s for s in plain if [h.name for h in s.inputs] == reads)
+        if twin.op is not step.op:
+            pairs.append((twin.op, step.op))
+    return pairs

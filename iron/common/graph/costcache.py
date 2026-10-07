@@ -12,7 +12,7 @@ tools and device it is compiled with, as mlir-aie's compile cache keys it),
 the per-call values it was run at and the contents of the inputs it was
 given. Editing how a design is generated therefore misses rather than
 reusing a stale time. A configure calibration is kept the same way, keyed
-on its pair's entries.
+on its pair's entries, and so is the twin a design was measured beside.
 """
 
 from __future__ import annotations
@@ -119,6 +119,13 @@ class CostCache:
     def pair_key(a: str, b: str) -> str:
         """The entry the calibration between entries ``a`` and ``b`` is kept in."""
         return hashlib.sha256(repr(("calibration", a, b)).encode()).hexdigest()[:32]
+
+    @staticmethod
+    def beside_key(twin: str, entry: str) -> str:
+        """The entry the design at ``twin`` is kept in as measured beside
+        the one at ``entry``.
+        """
+        return hashlib.sha256(repr(("beside", twin, entry)).encode()).hexdigest()[:32]
 
     def get(self, key: str, kind: type[Record]) -> Record | None:
         path = self.directory / f"{key}.json"

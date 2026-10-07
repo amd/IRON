@@ -67,7 +67,7 @@ def measure(
     dev = aie_utils.ensure_current_device()
     traced = model.trace(**model.shapes(1))
     # The tuner prices a fold by its designs: those a set of folds runs are
-    # the designs of each fold alone.
+    # the designs of each fold alone, each measured beside the one it replaces.
     _, admitted = folded(traced, dev)
     graphs = [traced] + [folded(traced, dev, (fold,))[0] for fold in admitted]
     # Sample's work follows its draw row's temperature and top-k: measure it
@@ -79,6 +79,7 @@ def measure(
             graph,
             dict(position=position, token=token),
             {draws.name: sample.rows(model.config.max_seq_len, k_max)},
+            None if graph is traced else traced,
         )
         for graph in graphs
     ]

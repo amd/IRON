@@ -40,6 +40,7 @@ from ..design import device_symbol
 from ..image.callable import FullELFCallable, StepCallable
 from ..image.sequence import OperatorSequence
 from .costcache import CostCache, Measurement
+from .fold import replaced
 from .narrowing import (
     Calibration,
     CostTable,
@@ -243,6 +244,7 @@ def measure_steps(
     inputs: Mapping[str, np.ndarray] | None = None,
     cache: CostCache | None = None,
     remeasure: bool = False,
+    twins: Sequence[Variant | None] = (),
 ) -> dict[str, StepCost]:
     """Measure every width in ``found`` (the default first) into ``table``,
     as many at once as the device's contexts hold.
@@ -250,50 +252,80 @@ def measure_steps(
     Args:
         cache: Widths it holds are recorded from it rather than run, unless
             `remeasure`; those run are written to it.
+        twins: For each width, the design in `table` it is priced against,
+            or None. A width with a twin is run beside it, its step time
+            recorded as the twin's plus their difference in that run, so a
+            drift between this run and the twin's own does not reach it.
+            Its one-run figure is its own: one run's noise exceeds the drift.
 
     Returns:
         The widths run on the device, by key.
 
     Raises:
-        ValueError: `cache` is for another power mode than the NPU's.
+        ValueError: `cache` is for another power mode than the NPU's, or
+            a twin is not in `table`.
     """
     mode = pmode()
     if cache is not None and cache.mode != mode:
         raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
+    twins = list(twins) or [None] * len(found)
+    for t in twins:
+        if t is not None and t.key not in table.steps:
+            raise ValueError(f"twin {t.key} is not in the table")
     entries = [
         None if cache is None else cache.key(v.resolved, values, inputs) for v in found
     ]
-    held = {}
+    besides = [
+        (
+            None
+            if cache is None or t is None
+            else cache.beside_key(cache.key(t.resolved, values, inputs), e)
+        )
+        for t, e in zip(twins, entries)
+    ]
+    held: dict[str, Measurement] = {}
+    near: dict[str, Measurement] = {}
     if cache is not None and not remeasure:
-        for v, entry in zip(found, entries):
+        for v, entry, beside in zip(found, entries, besides):
             m = cache.get(entry, Measurement)
-            if m is not None:
+            b = None if beside is None else cache.get(beside, Measurement)
+            if m is not None and (beside is None or b is not None):
                 held[v.key] = m
-    todo = [(v, e) for v, e in zip(found, entries) if v.key not in held]
+                if b is not None:
+                    near[v.key] = b
+    todo = [
+        (v, e, t, b)
+        for v, e, t, b in zip(found, entries, twins, besides)
+        if v.key not in held
+    ]
     distinct = sum(b.nbytes for b in found[0].op.buffers) <= DISTINCT_BYTES
     measured: dict[str, Measurement] = {}
-    for begin in range(0, len(todo), CONTEXTS // 2):
-        batch = todo[begin : begin + CONTEXTS // 2]
+    size = CONTEXTS // (4 if any(twins) else 2)
+    for begin in range(0, len(todo), size):
+        batch = todo[begin : begin + size]
+        runs = [(v, e, v.key) for v, e, _, _ in batch] + [
+            (t, b, v.key) for v, _, t, b in batch if t is not None
+        ]
         short = [
-            Standalone(f"probe1_{v.key}", [v.op], values=values, inputs=inputs)
-            for v, _ in batch
+            Standalone(f"probe1_{d.key}", [d.op], values=values, inputs=inputs)
+            for d, _, _ in runs
         ]
         long = [
             Standalone(
-                f"probe{repeats}_{v.key}",
-                [v.op] * repeats,
+                f"probe{repeats}_{d.key}",
+                [d.op] * repeats,
                 values=values,
                 distinct=distinct,
                 inputs=inputs,
             )
-            for v, _ in batch
+            for d, _, _ in runs
         ]
         outputs = [hashlib.sha256(run.output_bytes()).hexdigest() for run in short]
         times = time_interleaved([r.callable for r in short + long], timing)
-        n = len(batch)
-        for i, (v, entry) in enumerate(batch):
+        n = len(runs)
+        for i, (d, entry, of) in enumerate(runs):
             t_step = (times[n + i] - times[i]) / (repeats - 1)
-            measured[v.key] = m = Measurement(
+            m = Measurement(
                 t_step_us=t_step,
                 alone_us=times[i] - t_step,
                 output=outputs[i],
@@ -302,14 +334,24 @@ def measure_steps(
                 calls=timing.calls,
                 measured=CostTable.today(),
             )
+            if i < len(batch):
+                measured[of] = m
+            else:
+                near[of] = m
             if cache is not None:
                 cache.put(entry, m)
         # A probe holds its context while it lives; the next batch needs them.
         del short, long
     known = held | measured
     reference = known[found[0].key].output
-    for v in found:
-        table.record_step(v.key, known[v.key].cost(reference))
+    for v, twin in zip(found, twins):
+        m = known[v.key]
+        if twin is not None:
+            delta = m.t_step_us - near[v.key].t_step_us
+            m = dataclasses.replace(
+                m, t_step_us=table.steps[twin.key].t_step_us + delta
+            )
+        table.record_step(v.key, m.cost(reference))
     return {key: table.steps[key] for key in measured}
 
 
@@ -357,12 +399,15 @@ def calibrate(
 class Call:
     """One call of a traced graph version, as its designs are measured at:
     the graph's per-call values, and what any buffer whose contents a step's
-    time follows holds, by graph buffer name.
+    time follows holds, by graph buffer name. A graph ``folded`` from
+    another names it in ``folded_from``: a design of its own is then priced
+    beside the one whose step it took.
     """
 
     traced: TracedGraph
     values: Mapping[str, int] = dataclasses.field(default_factory=dict)
     contents: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
+    folded_from: TracedGraph | None = None
 
     def op_values(self, op: Operator) -> dict[str, int]:
         """The per-call values ``op`` is written in this call, by member name."""
@@ -399,7 +444,10 @@ def measure_graph(
     designs of those operator classes at their narrowest. Designs and
     calibrations already in the table or ``cache`` (this NPU's
     ``cost_cache()`` if not given) are kept unless ``remeasure``; those the
-    graphs no longer have are dropped from the table.
+    graphs no longer have are dropped from the table. A design a folded
+    call has of its own is measured beside the one whose step it took, at
+    each width both have (``measure_steps``' `twins`); the call it is folded
+    from comes first.
 
     Returns:
         The design keys and calibration pairs (``"a|b"``) run on the device.
@@ -408,12 +456,18 @@ def measure_graph(
     if cache is None:
         cache = cost_cache()
     first: dict[str, tuple[Operator, Call]] = {}
+    twin_of: dict[str, str] = {}
     for call in calls:
         keys = [cost_key(s.op) for s in call.traced.steps]
         for key in Runlist(keys).order:
             step = call.traced.steps[keys.index(key)]
             first.setdefault(key, (step.op, call))
+        if call.folded_from is not None:
+            for old, new in replaced(call.folded_from, call.traced):
+                twin_of.setdefault(cost_key(new), cost_key(old))
     found = {key: variants(op, dev) for key, (op, _) in first.items()}
+    if not set(twin_of.values()) <= found.keys():
+        raise ValueError("a call is folded from a graph no call measures")
 
     current = {v.key for vs in found.values() for v in vs}
     stale = [k for k in table.steps if k not in current]
@@ -429,6 +483,10 @@ def measure_graph(
             log(f"[{i}] {name}: in the table")
             continue
         values = call.op_values(op)
+        twins = []
+        if twin_of.get(key, key) != key:
+            widths = {v.widths: v for v in found[twin_of[key]]}
+            twins = [widths.get(v.widths) for v in found[key]]
         start = time.time()
         costs = measure_steps(
             table,
@@ -439,10 +497,14 @@ def measure_graph(
             call.op_inputs(op),
             cache,
             remeasure,
+            twins,
         )
         ran += costs
         table.save()
-        log(f"[{i}] {name} ({time.time() - start:.0f}s) at {values}")
+        log(
+            f"[{i}] {name} ({time.time() - start:.0f}s) at {values}"
+            + (f" beside {twin_of[key]}" if twins else "")
+        )
         for v in found[key]:
             c = table.steps[v.key]
             log(

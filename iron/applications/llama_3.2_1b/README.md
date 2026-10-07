@@ -118,7 +118,9 @@ gate projection's SiLU into its GEMV), narrows the decode step's designs
 shared device configurations, choosing by what each design costs on the
 device (`iron.common.graph.narrowing`). A fold is taken only where the
 table prices the folded step below the two it replaces; without a table,
-nothing folds. A narrower width is only a candidate if it was measured
+nothing folds. A folded design is measured in the same run as the one it
+replaces and priced by their difference, since the NPU's step times drift
+by more between runs than a fold gains. A narrower width is only a candidate if it was measured
 bit-identical to the profile's. The costs come from a table
 that `tune.py` measures:
 
