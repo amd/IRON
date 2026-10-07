@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Measure the cost table a model's decode step is tuned by, on this NPU.
+"""Measure the cost table a model's versions are tuned by, on this NPU.
 
 ``--cost-table TABLE`` on a model's command line (``main``)
-folds the decode step's steps into their producers, narrows its designs
-and packs them into shared device configurations by what each costs on
-the device (``JointNarrowing``). A table holds every
-design's step time at each width it tunes to, and the configure cost
-measured between a few pairs of designs. It is keyed by each design's
-identity -- its fields -- so a design that has changed since is not in it,
-and the tuner leaves that design as the profile gives it, unfolded.
-``measure`` fills one for the decode step as the graph is now: every
-design, each width, as traced and with each fold it admits. Designs
+folds the steps of the decode step and the prompt chunk into their
+producers, narrows their designs and packs them into shared device
+configurations by what each costs on the device (``JointNarrowing``). A
+table holds every design's step time at each width it tunes to, and the
+configure cost measured between a few pairs of designs. It is keyed by
+each design's identity -- its fields -- so a design that has changed since
+is not in it, and the tuner leaves that design as the profile gives it,
+unfolded. ``measure`` fills one for both versions as the graph is now:
+every design, each width, as traced and with each fold it admits. Designs
 already in the table are kept unless ``remeasure``; entries
 for designs the graph no longer has are dropped. A design another graph has
 had measured on this NPU is taken from the cost cache
@@ -59,30 +59,39 @@ def measure(
     remeasure: bool = False,
     log: Callable[[str], None] = print,
 ) -> None:
-    """Measure ``model``'s decode step into ``table`` (``measure_graph``):
-    each design at ``position`` and ``token``, those of the step as traced
-    and of each fold it admits, Sample on the draw rows ``sample`` gives, and
-    the configure cost between ``CALIBRATION_PAIRS``.
+    """Measure ``model``'s versions into ``table`` (``measure_graph``): the
+    decode step's designs at ``position`` and ``token``, the prompt chunk's
+    at a whole first chunk, each as traced and with each fold it admits,
+    Sample on the draw rows ``sample`` gives, and the configure cost between
+    ``CALIBRATION_PAIRS``.
     """
     dev = aie_utils.ensure_current_device()
-    traced = model.trace(**model.shapes(1))
-    # The tuner prices a fold by its designs: those a set of folds runs are
-    # the designs of each fold alone, each measured beside the one it replaces.
-    _, admitted = folded(traced, dev)
-    graphs = [traced] + [folded(traced, dev, (fold,))[0] for fold in admitted]
-    # Sample's work follows its draw row's temperature and top-k: measure it
-    # at the rows generation writes, not at random words.
-    [k_max] = {s.op.k_max for s in traced.steps if isinstance(s.op, Sample)}
-    _, draws = traced.states[id(model.draws)]
-    calls = [
-        Call(
-            graph,
-            dict(position=position, token=token),
-            {draws.name: sample.rows(model.config.max_seq_len, k_max)},
-            None if graph is traced else traced,
-        )
-        for graph in graphs
+    C = model.config.prefill_chunk
+    versions = [
+        (model.shapes(1), dict(position=position, token=token)),
+        (model.shapes(C), dict(position=C - 1, token=token, chunk=0, rows=C)),
     ]
+    calls = []
+    for shapes, values in versions:
+        traced = model.trace(**shapes)
+        # The tuner prices a fold by its designs: those a set of folds runs are
+        # the designs of each fold alone, each measured beside the one it
+        # replaces.
+        _, admitted = folded(traced, dev)
+        graphs = [traced] + [folded(traced, dev, (fold,))[0] for fold in admitted]
+        # Sample's work follows its draw row's temperature and top-k: measure
+        # it at the rows generation writes, not at random words.
+        [k_max] = {s.op.k_max for s in traced.steps if isinstance(s.op, Sample)}
+        _, draws = traced.states[id(model.draws)]
+        calls += [
+            Call(
+                graph,
+                values,
+                {draws.name: sample.rows(model.config.max_seq_len, k_max)},
+                None if graph is traced else traced,
+            )
+            for graph in graphs
+        ]
     measure_graph(table, calls, CALIBRATION_PAIRS, timing, repeats, remeasure, log)
 
 
@@ -101,8 +110,8 @@ def main(runner: type[Runner], description: str, default_table: Path) -> None:
         "--position",
         type=int,
         default=256,
-        help="the decode position designs are measured at: what their "
-        "per-call values follow from (default: 256)",
+        help="the decode position the decode step's designs are measured at: "
+        "what their per-call values follow from (default: 256)",
     )
     parser.add_argument(
         "--token", type=int, default=0, help="the token the step embeds (default: 0)"

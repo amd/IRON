@@ -226,7 +226,7 @@ class CausalLM(iron.Graph):
 
         Args:
             release: Given each piece of each weight once it is on the device.
-            tuner: Folds, narrows and packs the decode step's designs by cost.
+            tuner: Folds, narrows and packs each version's designs by cost.
             boundaries: The decode step's packaging.
         """
         decode = self.compile(coresident=tuner, boundaries=boundaries, **self.shapes(1))
@@ -236,7 +236,11 @@ class CausalLM(iron.Graph):
             self._prompt, self._decode = None, decode
             return self
         feeds = decode if decode.emit is not None else None
-        prompt = self.compile(feeds=feeds, **self.shapes(self.config.prefill_chunk))
+        prompt = self.compile(
+            feeds=feeds,
+            coresident=tuner,
+            **self.shapes(self.config.prefill_chunk),
+        )
         for version in (decode, prompt):
             version.load(release=release)
         self._prompt, self._decode = prompt, decode
@@ -250,10 +254,16 @@ class CausalLM(iron.Graph):
         return self._prompt is not None
 
     @property
-    def tuning(self) -> Tuning | None:
+    def tunings(self) -> dict[str, Tuning]:
+        """Each tuned version's ``Tuning``, by ``"decode"`` and ``"prompt"``."""
         if self._decode is None:
             raise RuntimeError(f"{type(self).__name__}: load() first")
-        return self._decode.tuning
+        versions = dict(decode=self._decode, prompt=self._prompt)
+        return {
+            name: v.tuning
+            for name, v in versions.items()
+            if v is not None and v.tuning is not None
+        }
 
     def logits(self, tokens) -> np.ndarray:
         """The logits after the last of ``tokens``, the whole history.

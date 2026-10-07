@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Measure Llama 3's decode cost table on this NPU (``iron.lm.tune``).
+"""Measure Llama 3's cost table on this NPU (``iron.lm.tune``).
 
-``decode_costs_npu2.json`` beside this file is such a table, measured on a
+``costs_npu2.json`` beside this file is such a table, measured on a
 Strix Halo NPU (8 columns):
 
 ```bash
@@ -20,6 +20,6 @@ from .model import Runner
 if __name__ == "__main__":
     tune.main(
         Runner,
-        "Measure Llama 3.2 1B's decode cost table",
-        Path(__file__).with_name("decode_costs_npu2.json"),
+        "Measure Llama 3.2 1B's cost table, its decode step and prompt chunk",
+        Path(__file__).with_name("costs_npu2.json"),
     )

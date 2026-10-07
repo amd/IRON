@@ -86,9 +86,9 @@ python -m iron.lm.llama3.model \
 - `--compare-host`: with `--device-loop`, then generate again on the host
   from the same seed and count the tokens that differ (the text is the same,
   token for token)
-- `--cost-table TABLE`: fold the decode step's steps, narrow its designs and
-  pack them into shared device configurations by a measured cost table
-  (below)
+- `--cost-table TABLE`: fold the steps of the decode step and the prompt
+  chunk, narrow their designs and pack them into shared device
+  configurations by a measured cost table (below)
 - `--each-step`: dispatch every step of a decode step on its own from one
   xclbin, the form NPU1 runs (below)
 
@@ -110,31 +110,32 @@ context. Their cores do not depend on the cache's length, so every
 `--max-seq-len` runs the same cores, and one compile serves every position
 below it.
 
-## Tuning the decode step
+## Tuning
 
 `--cost-table TABLE` folds steps into the step producing their input (the
-gate projection's SiLU into its GEMV), narrows the decode step's designs
-(fewer columns where a design gains little from more) and packs them into
-shared device configurations, choosing by what each design costs on the
-device (`iron.common.graph.narrowing`). A fold is taken only where the
-table prices the folded step below the two it replaces; without a table,
-nothing folds. A folded design is measured in the same run as the one it
-replaces and priced by their difference, since the NPU's step times drift
-by more between runs than a fold gains. A narrower width is only a candidate if it was measured
-bit-identical to the profile's. The costs come from a table
-that `tune.py` measures:
+gate projection's SiLU into its GEMV), narrows the designs of the decode
+step and the prompt chunk (fewer columns where a design gains little from
+more) and packs them into shared device configurations, choosing by what
+each design costs on the device (`iron.common.graph.narrowing`). A fold is
+taken only where the table prices the folded step below the two it
+replaces; without a table, nothing folds. A folded design is measured in
+the same run as the one it replaces and priced by their difference, since
+the NPU's step times drift by more between runs than a fold gains. A
+narrower width is only a candidate if it was measured bit-identical to the
+profile's. The costs come from a table that `tune.py` measures:
 
 ```bash
 python -m iron.lm.llama3.tune /path/to/model.safetensors /path/to/tokenizer.model
 python -m iron.lm.llama3.model /path/to/model.safetensors /path/to/tokenizer.model \
-    --cost-table iron/lm/llama3/decode_costs_npu2.json
+    --cost-table iron/lm/llama3/costs_npu2.json
 ```
 
-`decode_costs_npu2.json` is such a table, measured on a Strix Halo NPU (8
-columns). Its entries are keyed by each design's identity -- its fields --
-so a design changed since the table was measured is not in it, and the
-tuner leaves that design as the profile gives it (the `[Tuning]` report
-counts it as unmeasured). Run `tune.py` again after changing a design, or
+`costs_npu2.json` is such a table, measured on a Strix Halo NPU (8
+columns): the decode step's designs at position 256, the prompt chunk's at
+a whole first chunk. Its entries are keyed by each design's identity -- its
+fields -- so a design changed since the table was measured is not in it,
+and the tuner leaves that design as the profile gives it (the `[Tuning]`
+report counts it as unmeasured). Run `tune.py` again after changing a design, or
 to measure for another NPU; it keeps the entries still current and measures
 only the rest.
 

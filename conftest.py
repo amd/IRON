@@ -73,8 +73,8 @@ def pytest_addoption(parser):
         "--cost-table",
         type=Path,
         default=None,
-        help="Narrow and pack a language model's decode step by this measured "
-        "cost table (iron.lm.tune)",
+        help="Fold, narrow and pack a language model's versions by this "
+        "measured cost table (iron.lm.tune)",
     )
 
 
