@@ -37,8 +37,8 @@ ACCURATE = dict(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
 # are a multiple of it.
 ROWS = 64
 
-# Where the text and vision tunes write their measurements, one table the
-# towers and the text share.
+# Where `tune` writes its measurements, one table the towers and the text
+# share.
 COSTS = Path(__file__).with_name("costs_npu2.json")
 
 
