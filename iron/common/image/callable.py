@@ -488,11 +488,10 @@ class StepCallable:
                 self._check(index, step_op, names, inputs, args[-1], out_spec)
         self.last_elapsed = time.perf_counter() - t0
         if self._on_npu:
-            # Mark device residency so to("cpu") fires after a prior read marked it "cpu".
+            # Device-resident, so a read pulls what the steps wrote, and only then.
             for name in self.op.subbuffer_layout:
                 if name not in self.op.input_args:
                     self._buffers[name].device = "npu"
-                    self._buffers[name].to("cpu")
 
     def _check(self, index, step_op: Operator, names, inputs, out, spec) -> None:
         """Hold step ``index``'s NPU output to its reference on the same inputs.

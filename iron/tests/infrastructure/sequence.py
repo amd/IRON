@@ -119,7 +119,7 @@ def test_auto_dispatch_selects_platform_default(size, npu_runtime):
     _set_input(run, "a", a)
     _set_input(run, "b", b)
     run()
-    out = run.get_buffer("out").numpy_view()[:size].copy()
+    out = run.get_buffer("out").numpy()[:size].copy()
 
     expected = np.maximum(a + b, 0)
     verdict = verify_buffer(out, "out", expected, RELATIVE)
@@ -179,7 +179,7 @@ def _run_add_relu(dispatch, a, b, name):
     _set_input(run, "a", a)
     _set_input(run, "b", b)
     run()
-    return run.get_buffer("out").numpy_view()[:_ADD_RELU_SIZE].copy()
+    return run.get_buffer("out").numpy()[:_ADD_RELU_SIZE].copy()
 
 
 @pytest.mark.parametrize("dispatch", ["separate", "fused", "compare"])
@@ -257,7 +257,7 @@ def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
     _set_input(run, "a1", a1)
     _set_input(run, "b1", b1)
     run()
-    packed = run.get_buffer("packed").numpy_view()[: 2 * _SLICE_SIZE].copy()
+    packed = run.get_buffer("packed").numpy()[: 2 * _SLICE_SIZE].copy()
 
     expected = np.concatenate([a0 + b0, a1 + b1])
     verdict = verify_buffer(packed, "packed", expected, RELATIVE)
