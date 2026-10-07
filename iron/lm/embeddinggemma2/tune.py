@@ -59,7 +59,7 @@ def main():
     weights = load_weights(tensors, layout(c), c.n_layers)
     graph = EmbeddingGemma(c, weights, c.sliding_window)
     # Each version at its every row real: the masked Softmax's longest span.
-    calls = [Call(graph.trace(**s), dict(n=s["x"][0])) for s in graph.shapes()]
+    calls = [Call(graph.trace(**s), dict(n=s["ids"][0][0])) for s in graph.shapes()]
     measure_graph(
         CostTable(args.table),
         calls,

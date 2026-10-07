@@ -60,6 +60,16 @@ class Config:
     eps: float = 1e-6
     bos: int = 2
     eos: int = 1
+    # The placeholders an image's or a clip's soft tokens take the place of,
+    # and the markers either side of a run of them.
+    image_token: int = 258880
+    audio_token: int = 258881
+    video_token: int = 258884
+    pad: int = 0
+    boi: int = 255999
+    eoi: int = 258882
+    boa: int = 256000
+    eoa: int = 258883
 
     def heads(self, i: int) -> tuple[int, int]:
         """Layer ``i``'s KV groups and head size."""
@@ -124,9 +134,10 @@ def layout(config: Config) -> Layout:
 class EmbeddingGemma(iron.Graph):
     """The encoder over ``max_tokens`` rows at most, a version per row count.
 
-    A call takes the token embeddings, already scaled and padded with zero
-    rows, and ``n``, the real rows, which masks the padded keys and the
-    pooling; padded rows are computed and never read. It returns one
+    A call takes the token ids, padded with ``vocab_size``, the id of a zero
+    row past the scaled embedding table, and ``n``, the real rows, which
+    masks the padded keys and the pooling; padded rows are computed and
+    never read. The table's rows are gathered on the device. It returns one
     unit-length embedding per ``mrl_dims`` truncation, a row each, zero past
     its length. Attention is bidirectional and unscaled. A version longer
     than the sliding window adds a band mask to a sliding layer's scores,
@@ -155,9 +166,11 @@ class EmbeddingGemma(iron.Graph):
                 self.bands[T] = np.tile(
                     np.where(band, 0, finfo(bfloat16).min).astype(bfloat16), (r, 1)
                 )
-        self.embedding = (
-            weights.embedding.astype(np.float32) * np.sqrt(np.float32(c.emb_dim))
-        ).astype(bfloat16)
+        table = np.zeros((c.vocab_size + 1, c.emb_dim), bfloat16)
+        table[:-1] = weights.embedding.astype(np.float32) * np.sqrt(
+            np.float32(c.emb_dim)
+        )
+        self.embedding = iron.weight(table)
         self.norm = weights.norm
         self.ple = weights.ple
         self.ple_norm = weights.ple_norm
@@ -183,7 +196,13 @@ class EmbeddingGemma(iron.Graph):
         self.projection = self.projection.reshape(-1, c.emb_dim)
         self.unit = np.full(width, 1 / np.sqrt(width), bfloat16)
 
-    def body(self, x, *, n: Scratchpad[np.int32]):
+    def body(self, ids, *, n: Scratchpad[np.int32]):
+        return self.encoder(Copy(self.embedding[ids]), n)
+
+    def encoder(self, x, n):
+        """The encoder over the token embeddings ``x`` ``(T, emb_dim)``, of
+        which the first ``n`` are real.
+        """
         c = self.config
         T, E, P, L = x.shape[0], c.emb_dim, c.ple_dim, c.n_layers
         # The projection's E ** -0.5 scale folded into the norm's epsilon:
@@ -248,7 +267,7 @@ class EmbeddingGemma(iron.Graph):
 
     def shapes(self) -> list[dict]:
         """Each version's input shapes, fewest rows first."""
-        return [dict(x=(T, self.config.emb_dim)) for T in self.rows]
+        return [dict(ids=((T,), np.int32)) for T in self.rows]
 
     def load(self, tuner: JointNarrowing | None = None) -> "EmbeddingGemma":
         """Compile every version before the first call, so the arena is made once.
@@ -261,24 +280,30 @@ class EmbeddingGemma(iron.Graph):
         return self
 
     def inputs(self, tokens) -> tuple[np.ndarray, int]:
-        """A call's ``x`` and ``n`` for ``tokens``, padded to the fewest rows
+        """A call's ``ids`` and ``n`` for ``tokens``, padded to the fewest rows
         a version has.
+
+        Raises:
+            ValueError: ``tokens`` is empty or longer than ``max_tokens``.
+            IndexError: A token is outside ``[-vocab_size, vocab_size)``.
         """
-        n = len(tokens)
+        tokens = np.asarray(tokens)
+        n, V = len(tokens), self.config.vocab_size
         if not 0 < n <= self.max_tokens:
             raise ValueError(f"{n} tokens do not fit {self.max_tokens} rows")
-        x = np.zeros(
-            (min(T for T in self.rows if T >= n), self.config.emb_dim), bfloat16
-        )
-        x[:n] = self.embedding[np.asarray(tokens)]
-        return x, n
+        outside = tokens[(tokens < -V) | (tokens >= V)]
+        if outside.size:
+            raise IndexError(f"tokens {outside} are outside [-{V}, {V})")
+        ids = np.full(min(T for T in self.rows if T >= n), V, np.int32)
+        ids[:n] = tokens % V
+        return ids, n
 
     def encode(self, tokens, dims: int = 768) -> np.ndarray:
         """The unit-length embedding of ``tokens`` truncated to ``dims``, one
         of ``mrl_dims``.
         """
-        x, n = self.inputs(tokens)
-        rows = self(x, n=n).numpy().reshape(len(self.config.mrl_dims), -1)
+        ids, n = self.inputs(tokens)
+        rows = self(ids, n=n).numpy().reshape(len(self.config.mrl_dims), -1)
         return np.asarray(rows[self.config.mrl_dims.index(dims), :dims], np.float32)
 
 
