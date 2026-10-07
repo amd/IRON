@@ -62,7 +62,7 @@ class Masked(iron.Graph):
     """A softmax over each row's first `n` entries, `n` given per call."""
 
     def body(self, x, *, n: Scratchpad[np.int32]):
-        return Softmax(x, vector_size=n)
+        return Softmax(x[:, :n])
 
 
 @pytest.mark.supported_devices("npu2")
@@ -75,7 +75,7 @@ def test_measures_more_widths_than_one_batch_of_contexts(tmp_path):
         CostTable(tmp_path / "costs.json"),
         found,
         Timing(rounds=1, calls=5),
-        values={"vector_size": 200},
+        values={"length": 200, "valid_cols": 200},
     )
     assert len(costs) == len(found) and all(c.exact for c in costs.values())
 

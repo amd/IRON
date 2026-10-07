@@ -155,10 +155,12 @@ class Standalone:
                 if buf.direction.fills:
                     self._bytes(name_)[: buf.nbytes] = self._content(buf, inputs, rng)
         ops = {id(op): op for op in self.steps}.values()
+        # An extent read only through its derivations has no word.
         symbols = {
             device_symbol(op, v): np.int32(self._value(values, v))
             for op in ops
             for v in op.values
+            if device_symbol(op, v) in self.sequence.artifacts.parameters
         }
         if symbols:
             self.callable.write_values(symbols)
