@@ -315,7 +315,8 @@ class Operator(metaclass=_OperatorMeta):
     ) -> int:
         """How many of ``dev``'s columns fit this operator's streams in the shim DMA budget.
 
-        A ``replicate`` stream is paid once per channel rather than per column.
+        A ``replicate`` stream is paid once per channel rather than per column,
+        and a stream with no ``per=`` once.
         """
         streams = [
             m
@@ -328,8 +329,10 @@ class Operator(metaclass=_OperatorMeta):
             (True, dev.shim_dma_channels_out),
         ):
             ours = [m for m in streams if m.direction.drains == drains]
-            per_core = sum(not m.replicate for m in ours) * num_channels
-            shared = sum(m.replicate for m in ours) * num_channels
+            lanes = [m for m in ours if m.per is not None]
+            per_core = sum(not m.replicate for m in lanes) * num_channels
+            once = len(ours) - len(lanes)
+            shared = sum(m.replicate for m in lanes) * num_channels + once
             if per_core:
                 cols = min(cols, (budget - shared) // per_core)
         return max(1, cols)

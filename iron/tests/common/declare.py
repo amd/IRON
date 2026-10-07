@@ -601,6 +601,15 @@ def test_resolve_columns_is_the_count_given_or_the_most_that_fit():
         op.resolve_columns(None, None)
 
 
+def test_a_stream_with_no_lanes_is_paid_once_in_the_shim_budget():
+    class Scaled(MV):
+        scale = In(MV.M, tile=(MV.tile_out,), per=MV.columns)
+
+    # 16 input channels: A's and scale's lanes per column, B once.
+    assert MV.shim_columns(NPU2) == 8
+    assert Scaled.shim_columns(NPU2) == (NPU2.shim_dma_channels_in - 1) // 2 == 7
+
+
 def test_a_computed_default_is_inferred_from_a_shape_or_computed():
     class Rep(Operator):
         rows: int = param()
