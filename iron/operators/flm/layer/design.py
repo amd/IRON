@@ -34,6 +34,7 @@ from aie.dialects.aiex import (
 from aie.extras import types as T
 from aie.extras.dialects.arith import constant
 from aie.helpers.npdtypes import np_ndarray_type_get_shape
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Acquire,
     Bd,
@@ -714,7 +715,7 @@ def _build_rms(ctx, rms_tile):
                         rms_x_pong,
                         rl["x_prod_lock"],
                         rl["x_cons_lock"],
-                        length=D,
+                        tap=TensorAccessPattern(rms_x_ping.shape, 0, [D], [1]),
                     ),
                 ),
                 _single_bd(
@@ -723,7 +724,7 @@ def _build_rms(ctx, rms_tile):
                     rms_w,
                     rl["w_prod_lock"],
                     rl["w_cons_lock"],
-                    length=4 * D,
+                    tap=TensorAccessPattern(rms_w.shape, 0, [4 * D], [1]),
                 ),
                 _single_bd(
                     DMAChannelDir.MM2S,
@@ -731,8 +732,7 @@ def _build_rms(ctx, rms_tile):
                     rms_y,
                     rl["y_cons_lock"],
                     rl["y_prod_lock"],
-                    offset=14,
-                    length=D + 2,
+                    tap=TensorAccessPattern(rms_y.shape, 14, [D + 2], [1]),
                 ),
             ],
         )
@@ -883,15 +883,16 @@ def _build_pl_embedding(ctx, ple_tile):
                         ),
                         Bd(
                             ple_norm_w,
-                            length=PLI_D,
+                            tap=TensorAccessPattern(ple_norm_w.shape, 0, [PLI_D], [1]),
                             acquires=[Acquire(pl["norm_w_prod_lock"])],
                             releases=[Release(ple_norm_w_p2)],
                             next=2,
                         ),
                         Bd(
                             ple_norm_w,
-                            offset=PLI_D,
-                            length=D + 32,
+                            tap=TensorAccessPattern(
+                                ple_norm_w.shape, PLI_D, [D + 32], [1]
+                            ),
                             acquires=[Acquire(ple_norm_w_p2)],
                             releases=[Release(pl["x0_prod_lock"])],
                             next=3,
@@ -1001,7 +1002,7 @@ def _build_pl_merge(ctx, plm_tile):
                     plm_y,
                     plm_norm_i_prod,
                     plm_res_gate_prod,
-                    length=D + PLI_D + 32,
+                    tap=TensorAccessPattern(plm_y.shape, 0, [D + PLI_D + 32], [1]),
                 ),
                 _single_bd(
                     DMAChannelDir.S2MM,
@@ -1009,8 +1010,9 @@ def _build_pl_merge(ctx, plm_tile):
                     plm_y,
                     plm_res_gate_prod,
                     plm_cons,
-                    offset=D + PLI_D + 32,
-                    length=D + PLI_D,
+                    tap=TensorAccessPattern(
+                        plm_y.shape, D + PLI_D + 32, [D + PLI_D], [1]
+                    ),
                 ),
                 _single_bd(DMAChannelDir.MM2S, 0, plm_y, plm_cons, plm_norm_i_prod),
             ],
@@ -1197,8 +1199,9 @@ def _build_proj_core(ctx, pt, kern, send_x_out, main_y0=None, main_y1=None):
                 [
                     Bd(
                         y,
-                        offset=14,
-                        length=2 * q4nx.M_TILE + 2,
+                        tap=TensorAccessPattern(
+                            y.shape, 14, [2 * q4nx.M_TILE + 2], [1]
+                        ),
                         acquires=[Acquire(pk[f"y_cons_{half}_lock"], value=2)],
                         releases=[Release(pk[f"y_prod_{half}_lock"], value=2)],
                         next=nxt,
@@ -1251,33 +1254,69 @@ def _proj_weight_channels(w0, w1, wp0, wp0c0, wp0c1, wp1, wp1c0, wp1c1):
         "in0": DmaChannel(
             DMAChannelDir.S2MM,
             4,
-            ping_pong(w0, w1, wp0, wp0c0, offset=0, length=2 * W_BLOCK),
+            ping_pong(
+                w0,
+                w1,
+                wp0,
+                wp0c0,
+                tap=TensorAccessPattern(w0.shape, 0, [2 * W_BLOCK], [1]),
+            ),
         ),
         "in1": DmaChannel(
             DMAChannelDir.S2MM,
             5,
-            ping_pong(w0, w1, wp1, wp1c0, offset=2 * W_BLOCK, length=2 * W_BLOCK),
+            ping_pong(
+                w0,
+                w1,
+                wp1,
+                wp1c0,
+                tap=TensorAccessPattern(w0.shape, 2 * W_BLOCK, [2 * W_BLOCK], [1]),
+            ),
         ),
         "out": [
             DmaChannel(
                 DMAChannelDir.MM2S,
                 0,
-                ping_pong(w0, w1, wp0c0, wp0c1, offset=0, length=W_BLOCK),
+                ping_pong(
+                    w0,
+                    w1,
+                    wp0c0,
+                    wp0c1,
+                    tap=TensorAccessPattern(w0.shape, 0, [W_BLOCK], [1]),
+                ),
             ),
             DmaChannel(
                 DMAChannelDir.MM2S,
                 1,
-                ping_pong(w0, w1, wp0c1, wp0, offset=W_BLOCK, length=W_BLOCK),
+                ping_pong(
+                    w0,
+                    w1,
+                    wp0c1,
+                    wp0,
+                    tap=TensorAccessPattern(w0.shape, W_BLOCK, [W_BLOCK], [1]),
+                ),
             ),
             DmaChannel(
                 DMAChannelDir.MM2S,
                 2,
-                ping_pong(w0, w1, wp1c0, wp1c1, offset=2 * W_BLOCK, length=W_BLOCK),
+                ping_pong(
+                    w0,
+                    w1,
+                    wp1c0,
+                    wp1c1,
+                    tap=TensorAccessPattern(w0.shape, 2 * W_BLOCK, [W_BLOCK], [1]),
+                ),
             ),
             DmaChannel(
                 DMAChannelDir.MM2S,
                 3,
-                ping_pong(w0, w1, wp1c1, wp1, offset=3 * W_BLOCK, length=W_BLOCK),
+                ping_pong(
+                    w0,
+                    w1,
+                    wp1c1,
+                    wp1,
+                    tap=TensorAccessPattern(w0.shape, 3 * W_BLOCK, [W_BLOCK], [1]),
+                ),
             ),
         ],
     }
@@ -1308,22 +1347,46 @@ def _build_proj_gather_mem(ctx, mt):
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     0,
-                    ping_pong(y0, y1, yp0, yp1, offset=0, length=2 * m + 2),
+                    ping_pong(
+                        y0,
+                        y1,
+                        yp0,
+                        yp1,
+                        tap=TensorAccessPattern(y0.shape, 0, [2 * m + 2], [1]),
+                    ),
                 ),
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     1,
-                    ping_pong(y0, y1, yp1, yp2, offset=2 * m + 2, length=2 * m),
+                    ping_pong(
+                        y0,
+                        y1,
+                        yp1,
+                        yp2,
+                        tap=TensorAccessPattern(y0.shape, 2 * m + 2, [2 * m], [1]),
+                    ),
                 ),
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     2,
-                    ping_pong(y0, y1, yp2, yp3, offset=4 * m + 2, length=2 * m),
+                    ping_pong(
+                        y0,
+                        y1,
+                        yp2,
+                        yp3,
+                        tap=TensorAccessPattern(y0.shape, 4 * m + 2, [2 * m], [1]),
+                    ),
                 ),
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     3,
-                    ping_pong(y0, y1, yp3, yc, offset=6 * m + 2, length=2 * m),
+                    ping_pong(
+                        y0,
+                        y1,
+                        yp3,
+                        yc,
+                        tap=TensorAccessPattern(y0.shape, 6 * m + 2, [2 * m], [1]),
+                    ),
                 ),
                 wc["in0"],
                 *wc["out"],
@@ -1361,12 +1424,24 @@ def _build_proj_x_mem(ctx, mt):
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     0,
-                    ping_pong(y0, y1, mp0, mp1, offset=0, length=8 * m + 2),
+                    ping_pong(
+                        y0,
+                        y1,
+                        mp0,
+                        mp1,
+                        tap=TensorAccessPattern(y0.shape, 0, [8 * m + 2], [1]),
+                    ),
                 ),
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     1,
-                    ping_pong(y0, y1, mp1, mc, offset=8 * m + 2, length=8 * m),
+                    ping_pong(
+                        y0,
+                        y1,
+                        mp1,
+                        mc,
+                        tap=TensorAccessPattern(y0.shape, 8 * m + 2, [8 * m], [1]),
+                    ),
                 ),
                 DmaChannel(DMAChannelDir.S2MM, 3, ping_pong(x0, x1, xp, xc)),
                 wc["in0"],
@@ -1468,10 +1543,9 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
                     kl["o_cons_lock"],
                     kl["o_prod_lock"],
                     packet=(0, _X_FROM_ATTN),
-                    offset=0,
-                    length=NQ * dh,
-                    sizes=[NQ, dh // 8, 8],
-                    strides=[8, NQ * 8, 1],
+                    tap=TensorAccessPattern(
+                        o.shape, 0, [NQ, dh // 8, 8], [8, NQ * 8, 1]
+                    ),
                 ),
             ],
         )
@@ -1502,7 +1576,9 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
     ql = ctx.locks(qk_tile, ATTN_QK_LOCKS, dict(k_prod_lock=2, k_cons_lock=0))
     ctx.add_locks(qk_tile, [(ATTN_HANDSHAKE_LOCK, 0)])
     L = ctx.rtp_buffer(qk_tile, rtp_key)
-    q_in_order = [(NQ_PADDED, 8), (dh // 8, NQ_PADDED * 8), (8, 1)]
+    q_in_order = TensorAccessPattern(
+        (NQ_PADDED, dh), 0, [NQ_PADDED, dh // 8, 8], [8, NQ_PADDED * 8, 1]
+    )
     m_buf = Buffer(type=m_ty, name=f"m_{r}_{c}", tile=qk_tile)
     c_local = Buffer(type=c_ty, name=f"c_local_{r}_{c}", tile=qk_tile)
     # The q acquire orders the RTP read after the sequence's RTP writes.
@@ -1535,7 +1611,7 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
 
     args = [
         of_s.prod(),
-        q_fifo.cons(dims_from_stream=q_in_order),
+        q_fifo.cons(from_stream=q_in_order),
         k0,
         k1,
         m_buf,
@@ -1603,9 +1679,12 @@ def _build_attn_mem(ctx, amt):
                     b1,
                     cons,
                     prod,
-                    length=LK * row,
-                    sizes=[size for size, _ in order],
-                    strides=[stride for _, stride in order],
+                    tap=TensorAccessPattern(
+                        b0.shape,
+                        0,
+                        [size for size, _ in order],
+                        [stride for _, stride in order],
+                    ),
                 ),
             ),
         ]
