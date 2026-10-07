@@ -162,6 +162,7 @@ def multimodal():
 MIXED = {
     "audio": ("<|audio|> a bird singing", CLIP, None),
     "image": ("<|image|> waves at dusk", None, IMAGE),
+    "both": ("<|image|> the picture, then the sound: <|audio|>", CLIP, IMAGE),
 }
 
 
