@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Temporal fusion: a sequence's designs as one module, one device per design
-(or per pack of designs, ``coresidence``) and a main runtime sequence
-that configures and runs them in turn.
+"""Temporal fusion: a sequence's designs as one module, one device per array
+(designs whose devices differ only in their runtime sequences share one) or
+per pack of arrays (``coresidence``), and a main runtime sequence that
+configures and runs them in turn.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from collections.abc import Mapping
 from typing import Any, NamedTuple
@@ -21,7 +23,9 @@ from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
 from ..design import OperatorDesign
-from .coresidence import AdjacentPacking, Packing, merge_devices
+from .coresidence import AdjacentPacking, Packing, array_text, merge_devices
+
+logger = logging.getLogger(__name__)
 
 # The shim DMA addresses host memory in 32-bit words, so every buffer handed
 # to a sub-design must start on one.
@@ -187,6 +191,7 @@ class Fusion:
         arguments = self.buffer_sizes.arguments()
 
         device_mlir_strings = {}
+        arrays: dict[str, str] = {}
         operator_param_decls: dict[str, dict[str, ir.Type]] = {}
         device_ty = None
         sequence_arg_types = {}
@@ -199,14 +204,24 @@ class Fusion:
             }
             if device_ty is None:
                 device_ty = device_op.device
-            device_str = str(device_op)
+            texts = [str(device_op), array_text(device_op)]
             if shared_ref is not None:
-                device_str = shared_ref.sub(
-                    lambda m: "@" + shared[m.group(1)], device_str
-                )
-            device_mlir_strings[op_name] = device_str
+                texts = [
+                    shared_ref.sub(lambda m: "@" + shared[m.group(1)], t) for t in texts
+                ]
+            device_mlir_strings[op_name], arrays[op_name] = texts
             operator_param_decls[op_name] = params_here
             sequence_arg_types[op_name] = self._sequence_arg_types(device_op)
+        by_key: dict[Any, list[str]] = {}
+        for op_name, design in self.designs.items():
+            by_key.setdefault(design.op.array_key(), []).append(op_name)
+        for names in by_key.values():
+            if len({arrays[n] for n in names}) > 1:
+                logger.info(
+                    "%s have one array_key, but their devices differ beyond "
+                    "the runtime sequence, so they do not share an array",
+                    names,
+                )
 
         # Deduplicate parameter decls across operators (same name must have the
         # same type; otherwise indices would collide in the global state table).
@@ -239,6 +254,7 @@ class Fusion:
                     device_mlir_strings,
                     params_preamble,
                 )
+            packing = packing.sharing(arrays)
             for device_name, members in packing.devices(device_mlir_strings).items():
                 member_ops = {}
                 for op_name in members:

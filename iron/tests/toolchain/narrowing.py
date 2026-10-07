@@ -52,6 +52,15 @@ class AddSilu(iron.Graph):
         return x
 
 
+class TwoExtents(iron.Graph):
+    """An add at two extents, one array, with a silu between."""
+
+    def body(self, a, b, c, d):
+        t = ElementwiseAdd(a, b, tile_size=TILE)
+        u = SiLU(ElementwiseAdd(c, d, tile_size=TILE), tile_size=TILE)
+        return ElementwiseAdd(t, b, tile_size=TILE), u
+
+
 def test_widths_are_the_settable_per_tunables(npu2):
     # SiLU fixes its channel count (init=False), so only its columns narrow.
     assert SiLU(size=SIZE, tile_size=TILE).widths == {"num_aie_columns": None}
@@ -124,6 +133,15 @@ def test_entries_count_arrivals_into_a_device():
     assert runlist.entries(frozenset("a")) == 2
     assert runlist.entries(frozenset("bc")) == 2
     assert runlist.entries(frozenset("abc")) == 1
+
+
+def test_designs_of_one_array_load_it_once(tmp_path):
+    table = _table(tmp_path / "costs.json", {"a": (1.0, 100.0), "b": (2.0, 100.0)})
+    alone = model_us(table, ["a", "b", "a"])
+    shared = model_us(table, ["a", "b", "a"], arrays={"a": 0, "b": 0})
+    assert (alone[1], shared[1]) == (4, 2)
+    # Three entries against one, each a base and one load; a reset in both.
+    assert alone[0] - shared[0] == pytest.approx(2 * (30.0 + 100.0))
 
 
 def _table(path, steps, dispatch=50.0, reset=30.0, base=30.0):
@@ -200,6 +218,35 @@ def test_apply_rebuilds_the_narrowed_steps(tmp_path, npu2):
     # gelu is untouched: the same operator, not a copy.
     [gelu] = [s.op for s in narrowed.steps if isinstance(s.op, GELU)]
     assert gelu is ops["GELU"]
+
+
+def test_designs_of_one_array_take_one_width(tmp_path, npu2):
+    traced = TwoExtents().trace(a=(SIZE,), b=(SIZE,), c=(2 * SIZE,), d=(2 * SIZE,))
+    small, large, silu, _ = (s.op for s in traced.steps)
+    steps = {}
+    for op in (small, large, silu):
+        for v in variants(op, npu2):
+            cols = dict(v.widths)["num_aie_columns"]
+            steps[v.key] = (4.0 + cols, 8.0 * cols)
+    table = _table(tmp_path / "costs.json", steps)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    # As traced, the adds' one array is entered twice around silu's.
+    assert tuning.baseline_configures == 4
+    adds = [tuning.chosen[cost_key(op)] for op in (small, large)]
+    assert adds[0].widths == adds[1].widths and adds[0].array == adds[1].array
+    # The pack names the array by its first design, which brings the other.
+    assert tuning.groups == ((cost_key(small), cost_key(silu)),)
+    assert tuning.configures == 2
+    keys = [cost_key(s.op) for s in traced.steps]
+    assert tuning.predicted_us == pytest.approx(
+        model_us(
+            table,
+            keys,
+            tuning.groups,
+            {k: v.key for k, v in tuning.chosen.items()},
+            {k: v.array for k, v in tuning.chosen.items()},
+        )[0]
+    )
 
 
 def test_placer_verdicts_are_kept_across_tunings(tmp_path, npu2):

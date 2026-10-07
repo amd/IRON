@@ -10,7 +10,9 @@ to minimise the modelled runlist time:
        + R if the entries are odd
 
 A device is entered at a step whose design is in it when the step before is
-not; entering configures it. ``R`` is the empty configure the parity rule
+not; entering configures it. The designs of one array share a device
+(``Packing.sharing``) that loads the array once, so the search takes them
+as one, at one width. ``R`` is the empty configure the parity rule
 adds (``Fusion.needs_reset``). ``t_step`` and ``load`` are measured per
 design and width, ``D0``, ``base`` and ``R`` per device (``probe``, into a
 ``CostTable``).
@@ -38,7 +40,7 @@ import json
 import os
 import statistics
 from collections import Counter
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 
 from aie.dialects.aie import WireBundle, get_target_model
@@ -46,7 +48,7 @@ from aie.utils.compile import NPU_CACHE_HOME
 
 from ..declare import Operator
 from ..design import OperatorDesign
-from ..image.coresidence import fits
+from ..image.coresidence import Packing, fits
 from ..image.fusion import generate, parameters_preamble
 from .trace import TracedGraph
 
@@ -62,12 +64,13 @@ def cost_key(op: Operator, dev=None) -> str:
 
 @dataclasses.dataclass(frozen=True, eq=False)
 class Variant:
-    """One width of a design, and the shim channels its streams take."""
+    """One width of a design, its array and the shim channels its streams take."""
 
     op: Operator
     resolved: Operator
     widths: tuple[tuple[str, int], ...]
     key: str
+    array: Hashable
     mm2s: int
     s2mm: int
 
@@ -84,6 +87,7 @@ class Variant:
             resolved=resolved,
             widths=tuple(widths),
             key=cost_key(resolved),
+            array=resolved.array_key(),
             mm2s=sum(s.count for s in streams if not s.direction.drains),
             s2mm=sum(s.count for s in streams if s.direction.drains),
         )
@@ -293,6 +297,7 @@ def model_us(
     keys: Sequence[str],
     groups: Sequence[Sequence[str]] = (),
     chosen: Mapping[str, str] | None = None,
+    arrays: Mapping[str, Hashable] | None = None,
 ) -> tuple[float, int]:
     """The model's time for a runlist of design keys, and its configures.
 
@@ -301,27 +306,31 @@ def model_us(
         keys: The runlist's design keys.
         groups: The designs sharing a device.
         chosen: Each design's key at the width it runs at.
+        arrays: Each design's array at that width: the designs of one array
+            share a device too, which loads the array once.
 
     Returns:
         `(time_us, configures)`, the reset included.
     """
     chosen = chosen or {}
-    device = {k: i for i, group in enumerate(groups) for k in group}
-    members: dict[object, list[str]] = {}
-    for k in dict.fromkeys(keys):
-        members.setdefault(device.get(k, k), []).append(k)
+    arrays = arrays or {}
+    order = list(dict.fromkeys(keys))
+    packing = Packing(tuple(map(tuple, groups))).sharing(
+        {k: arrays.get(k, k) for k in order}
+    )
+    members = packing.devices(order)
     total = table.dispatch_us
     entries = 0
     previous = None
     for k in keys:
-        width = chosen.get(k, k)
-        total += table.t_step(width)
-        here = device.get(k, k)
+        total += table.t_step(chosen.get(k, k))
+        here = packing.device_of(k)
         if here != previous:
             entries += 1
-            total += table.base_us + sum(
-                table.load(chosen.get(m, m)) for m in members[here]
-            )
+            loads: dict[Hashable, float] = {}
+            for m in members[here]:
+                loads.setdefault(arrays.get(m, m), table.load(chosen.get(m, m)))
+            total += table.base_us + sum(loads.values())
             previous = here
     if entries % 2:
         total += table.reset_us
@@ -337,7 +346,9 @@ class Tuning:
     """
 
     chosen: dict[str, Variant]  # default key -> the width it runs at
-    groups: tuple[tuple[str, ...], ...]  # default keys sharing one device
+    # Default keys sharing one device, an array's first design standing for
+    # the array: the fusion adds its other designs.
+    groups: tuple[tuple[str, ...], ...]
     configures: int
     predicted_us: float
     baseline_configures: int
@@ -473,18 +484,32 @@ class JointNarrowing:
     def tune(self, traced: TracedGraph, dev) -> Tuning:
         table = self.table
         keys = [cost_key(s.op, dev) for s in traced.steps]
-        runlist = Runlist(keys)
         first: dict[str, Operator] = {}
         for key, step in zip(keys, traced.steps):
             first.setdefault(key, step.op)
-        candidates = [self._candidates(first[k], dev) for k in runlist.order]
-        measured = [k in table.steps for k in runlist.order]
+        found = {k: self._candidates(op, dev) for k, op in first.items()}
+        # The designs of one array are one device, so they take one width:
+        # the search runs over arrays, each named for its first design.
+        units: dict[Hashable, list[str]] = {}
+        for k, cands in found.items():
+            units.setdefault(cands[0].array, []).append(k)
+        unit = {k: designs[0] for designs in units.values() for k in designs}
+        runlist = Runlist([unit[k] for k in keys])
+        designs_of = [units[found[k][0].array] for k in runlist.order]
+        at = {k: {v.widths: v for v in cands} for k, cands in found.items()}
+        candidates = [
+            [v for v in found[k] if all(v.widths in at[m] for m in designs)]
+            for k, designs in zip(runlist.order, designs_of)
+        ]
+        measured = [all(m in table.steps for m in designs) for designs in designs_of]
+        occurrences = Counter(keys)
         budget = shim_budget(dev)
 
         def member_cost(i: int, v: Variant, entries: int) -> float:
-            return entries * table.load(v.key) + runlist.occurrences[
-                runlist.order[i]
-            ] * table.t_step(v.key)
+            return entries * table.load(v.key) + sum(
+                occurrences[m] * table.t_step(at[m][v.widths].key)
+                for m in designs_of[i]
+            )
 
         # Alone, each design takes its cheapest width.
         alone: list[tuple[float, Variant, int]] = []
@@ -526,19 +551,26 @@ class JointNarrowing:
                 if not p.options or self._gain(p, alone) + table.reset_us <= 0:
                     packs.remove(p)
 
-        chosen: dict[str, Variant] = {
-            k: alone[i][1] for i, k in enumerate(runlist.order)
-        }
+        picked = [best for _, best, _ in alone]
         for p in chosen_packs:
             for i, v in zip(p.members, p.combo):
-                chosen[runlist.order[i]] = v
+                picked[i] = v
+        chosen: dict[str, Variant] = {
+            k: at[k][picked[runlist.index[unit[k]]].widths] for k in found
+        }
         groups = tuple(
             tuple(runlist.order[i] for i in sorted(p.members)) for p in chosen_packs
         )
         predicted, configures = model_us(
-            table, keys, groups, {k: v.key for k, v in chosen.items()}
+            table,
+            keys,
+            groups,
+            {k: v.key for k, v in chosen.items()},
+            {k: v.array for k, v in chosen.items()},
         )
-        baseline, baseline_configures = model_us(table, keys)
+        baseline, baseline_configures = model_us(
+            table, keys, arrays={k: cands[0].array for k, cands in found.items()}
+        )
         return Tuning(
             chosen=chosen,
             groups=groups,
@@ -546,7 +578,7 @@ class JointNarrowing:
             predicted_us=predicted,
             baseline_configures=baseline_configures,
             baseline_us=baseline,
-            unmeasured=tuple(k for k, m in zip(runlist.order, measured) if not m),
+            unmeasured=tuple(k for k in found if k not in table.steps),
         )
 
     @staticmethod
