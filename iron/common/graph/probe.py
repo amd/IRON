@@ -900,8 +900,8 @@ def measure_graph(
     ``cost_cache()`` if not given) are kept unless ``remeasure``; those the
     graphs no longer have are dropped from the table. A design a folded
     call has of its own is measured beside the one whose step it took, at
-    each setting both have (``measure_steps``' `twins`); the call it is folded
-    from comes first.
+    each setting both have that the other's ``search`` measured
+    (``measure_steps``' `twins`); the call it is folded from comes first.
 
     Returns:
         The design keys and calibration pairs (``"a|b"``) run on the device.
@@ -929,7 +929,10 @@ def measure_graph(
         values = call.op_values(op)
         twins = []
         if twin_of.get(key, key) != key:
-            settings = {v.tunables: v for v in found[twin_of[key]]}
+            # Descent measures only the settings on its path.
+            settings = {
+                v.tunables: v for v in found[twin_of[key]] if v.key in table.steps
+            }
             twins = [settings.get(v.tunables) for v in found[key]]
         start = time.time()
         costs = search(
