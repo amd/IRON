@@ -244,14 +244,12 @@ class Elementwise(Operator):
                 for f in fifos_in + fifos_out:
                     f.release(1)
 
-        stack_size = None if kernel.contract is None else kernel.contract.stack_bytes
         workers = [
             Worker(
                 core_fn,
                 [of[k].cons() for of in of_ins]
                 + [of[k].prod() for of in of_outs]
                 + [kernel, counts[k], barriers[k]],
-                stack_size=stack_size,
             )
             for k in range(cores)
         ]
