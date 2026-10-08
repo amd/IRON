@@ -279,7 +279,7 @@ def test_a_setting_that_does_not_build_is_left_out(tmp_path):
         log=logged.append,
     )
     assert costs.keys() == table.steps.keys() == {found[0].key}
-    assert len(logged) == 1 and "does not build" in logged[0], logged
+    assert len([line for line in logged if "does not build" in line]) == 1, logged
     # The build's verdict is kept, not the placer's.
     kept, refused = fitting(found, tmp_path / "fits")
     assert kept == found[:1]

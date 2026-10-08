@@ -22,6 +22,7 @@ Run with XRT sourced and the NPU otherwise idle.
 """
 
 import argparse
+import functools
 import json
 import tempfile
 from collections.abc import Sequence
@@ -117,7 +118,7 @@ def measure(
     ``calls``' designs and the configure cost between ``pairs``
     (``measure_graph``), timed as ``args`` says.
     """
-    print(f"power mode: {pmode()}")
+    print(f"power mode: {pmode()}", flush=True)
     dev = aie_utils.ensure_current_device()
     return measure_graph(
         CostTable(table(args, dev, tables), dev.name, dispatch(args, dev)),
@@ -126,6 +127,8 @@ def measure(
         Timing(args.rounds, args.calls, args.settle, args.cutoff),
         args.repeats,
         args.remeasure,
+        # Hours long and usually redirected: each line lands as it is logged.
+        log=functools.partial(print, flush=True),
     )
 
 

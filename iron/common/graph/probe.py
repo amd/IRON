@@ -525,8 +525,11 @@ def measure_steps(
     fastest = math.inf
     size = CONTEXTS // (4 if any(twins) else 2)
     failed: set[str] = set()
+    batches = math.ceil(len(todo) / size)
+    log(f"    {len(todo)} to run, {len(held)} from the cache, {batches} batches")
     for begin in range(0, len(todo), size):
         batch = todo[begin : begin + size]
+        log(f"    batch {begin // size + 1}/{batches}: building {len(batch)}")
         runs, short, long = [], [], []
         for d, entry, of, own in [(v, e, v.key, True) for v, e, _, _ in batch] + [
             (t, b, v.key, False) for v, _, t, b in batch if t is not None
@@ -563,6 +566,7 @@ def measure_steps(
             long.append(many)
         if not runs:
             continue
+        log(f"    batch {begin // size + 1}/{batches}: timing {len(runs)} runs")
         # The default is the untuned graph's figure: always timed in full.
         groups = [None if of == default.key else of for _, of, _ in runs] * 2
         outputs = [run.digest() for run in short]
@@ -1148,7 +1152,7 @@ def measure_graph(
     for i, (key, (op, call)) in enumerate(designs.first.items()):
         name = type(op).__name__
         if not remeasure and all(v.key in table.steps for v in found[key]):
-            log(f"[{i}] {name}: in the table")
+            log(f"[{i}/{len(designs.first)}] {name}: in the table")
             continue
         values = call.op_values(op)
         twins = []
@@ -1158,6 +1162,10 @@ def measure_graph(
                 v.tunables: v for v in found[twin_of[key]] if v.key in table.steps
             }
             twins = [settings.get(v.tunables) for v in found[key]]
+        log(
+            f"[{i}/{len(designs.first)}] {name}: {len(found[key])} settings at "
+            f"{values}, started {time.strftime('%H:%M:%S')}"
+        )
         start = time.time()
         costs = search(
             table,
@@ -1174,7 +1182,7 @@ def measure_graph(
         ran += costs
         table.save()
         log(
-            f"[{i}] {name} ({time.time() - start:.0f}s) at {values}"
+            f"[{i}/{len(designs.first)}] {name} ({time.time() - start:.0f}s) at {values}"
             + (f" beside {twin_of[key]}" if twins else "")
         )
         for v in found[key]:
