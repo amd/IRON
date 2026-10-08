@@ -27,7 +27,7 @@ def _trace(rows, embedding_dim=2048, hidden_dim=2048):
 
 
 def test_non_aligned_row_count_raises_instead_of_being_padded():
-    with pytest.raises(ValueError, match=r"M \(300\) must be a multiple of 256"):
+    with pytest.raises(ValueError, match=r"M \(300\) must be a multiple of 64"):
         _trace(rows=300)
 
 

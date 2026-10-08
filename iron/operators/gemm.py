@@ -251,9 +251,11 @@ class GEMM(Operator):
         if self.K % self.tile_k != 0:
             raise ValueError(f"K ({self.K}) must be a multiple of {self.tile_k}")
         rows = self.n_aie_rows or (self.dev and len(self.dev.core_rows))
-        if rows and self.tile_m and self.M % (self.tile_m * rows) != 0:
+        # An open tile_m is at least the kernel's narrowest.
+        m = self.tile_m or min_tile_m
+        if rows and self.M % (m * rows) != 0:
             raise ValueError(
-                f"M ({self.M}) must be a multiple of {self.tile_m * rows}: C is "
+                f"M ({self.M}) must be a multiple of {m * rows}: C is "
                 f"tiled into (m * n_aie_rows, n)-sized blocks"
             )
 
@@ -277,14 +279,14 @@ class GEMM(Operator):
             )
             # aie2's mm kernels block m by 4 r (mm_aie2.h), aie2p's by 2 r.
             block = (4 if dev.arch is AIEArch.AIE2 else 2) * r
-            # None splits M: 64, and validate() names the rule.
+            # None splits M: the narrowest, and validate() names the rule.
             tile_m = next(
                 (
                     m
                     for m in (64, 32, 16, 8)
                     if m % block == 0 and self.M % (m * rows) == 0
                 ),
-                64,
+                block,
             )
         new = dataclasses.replace(
             self, tile_m=tile_m, num_aie_columns=cols, n_aie_rows=rows
