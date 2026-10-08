@@ -23,8 +23,22 @@ def test_llamas_table_holds_every_design_it_tunes(npu2):
     table = CostTable(Path(llama_tune.__file__).with_name("costs_npu2.json"))
     stale = designs.stale(table)
     missing = designs.missing(table, CALIBRATION_PAIRS)
+    settings = {v.key: (vs[0], v) for vs in designs.settings.values() for v in vs}
+    unmeasured = []
+    for key in missing:
+        if key not in settings:
+            unmeasured.append(f"  calibration {key}")
+            continue
+        default, setting = settings[key]
+        start = dict(default.tunables)
+        moved = {n: x for n, x in setting.tunables if start[n] != x}
+        unmeasured.append(
+            f"  {key}: {type(setting.op).__name__} at {start}"
+            + (f", moved to {moved}" if moved else ", its default")
+        )
     assert not stale and not missing, (
-        f"{table.path} is out of date: {len(missing)} designs or calibrations "
-        f"to measure ({missing}), {len(stale)} the graph no longer has "
-        f"({stale}); run `python -m iron.lm.llama3.tune` on an idle NPU2"
+        f"{table.path} is out of date; run `python -m iron.lm.llama3.tune` on "
+        f"an idle NPU2. {len(missing)} to measure:\n"
+        + "\n".join(unmeasured)
+        + f"\n{len(stale)} the graph no longer has: {stale}"
     )
