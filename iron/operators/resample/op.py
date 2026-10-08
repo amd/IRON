@@ -468,49 +468,127 @@ SIDE = 16  # a patch's pixels on each axis, and the outputs of a taps chunk
 PIXELS = (np.arange(256, dtype=np.float32) * np.float32(1 / 255)).astype(bfloat16)
 
 RESIZE = """
+#include <aie_api/aie.hpp>
 #include <stdint.h>
 
 namespace {
+using taps_t = aie::vector<int16_t, 32>;
+using sum_t = aie::accum<acc32, 32>;
+
 constexpr int HEADER = 4;
 constexpr int SIDE = 16;
 constexpr int WIN = 2 * ((WORDS - HEADER) / SIDE - 2) - 1;
+static_assert(WIN <= 64, "a window is at most two vectors of taps");
 // The input pixels under one patch column's 16 outputs, at any scale a
-// WIN-tap window allows.
+// WIN-tap window allows, and the 64 a window's vectors read past them.
 constexpr int SPAN = 5 * WIN + 8;
+constexpr int PLANE = (SPAN + 64 + 63) / 64 * 64;
 constexpr int LINE = COLS * SIDE * 3;
 
 const uint16_t PIXEL[256] = {@PIXELS@};
 
 int rows, columns, cpr, owned, core;
-int consumed, arrived, opened, next, hp;
+// part: the next image chunk's in its row; ring: that row's in mid.
+int consumed, part, ring, arrived, opened, next, hp, hwin;
 bool ok;
-int hstart[COLS][SIDE], hcount[COLS][SIDE];
-int16_t hweight[COLS][SIDE][WIN];
+int hstart[COLS][SIDE];
+alignas(64) int16_t hweight[COLS][SIDE][64];
 int span0[COLS], span[COLS];
-uint8_t line[COLS][SPAN * 3];
-// The last WIN rows across, by row % WIN, and the band's rows down.
-uint8_t mid[WIN][LINE];
-uint8_t hold[SIDE][LINE];
-int32_t acc[LINE];
+// A row's pixels under each patch column, a plane to a channel.
+alignas(64) uint8_t line[COLS][3][PLANE];
+// The last WIN rows across, row r at r % WIN, and the band's rows down: patch
+// column i's channel ch is bytes (3 * i + ch) * SIDE on.
+alignas(64) uint8_t mid[WIN][LINE];
+alignas(64) uint8_t hold[SIDE][LINE];
 
-uint8_t clip(int32_t v, int p) {
-    v >>= p;
-    return v < 0 ? 0 : v > 255 ? 255 : v;
+taps_t widen(const uint8_t *x) {
+    return aie::load_unaligned_v<32>(x).unpack().cast_to<int16_t>();
 }
 
-void across(int r) {
-    uint8_t *m = mid[r % WIN];
+// The sums of outputs o..o+N-1 of patch column i over channel plane x,
+// output o + j in lanes j * 32 / N on, which add up to it.
+// Inlined whole and branch-free, so the leaves' loads overlap.
+template <int N, bool WIDE>
+__attribute__((always_inline)) aie::vector<int32_t, 32> tree(const uint8_t *x, int i,
+                                                             int o) {
+    if constexpr (N == 1) {
+        const int16_t *w = hweight[i][o];
+        x += hstart[i][o] - span0[i];
+        sum_t a = aie::mul<acc32>(widen(x), aie::load_v<32>(w));
+        if constexpr (WIDE)
+            a = aie::mac(a, widen(x + 32), aie::load_v<32>(w + 32));
+        return a.to_vector<int32_t>(0);
+    } else {
+        auto [even, odd] = aie::interleave_unzip(
+            tree<N / 2, WIDE>(x, i, o), tree<N / 2, WIDE>(x, i, o + N / 2), 32 / N);
+        return aie::add(even, odd);
+    }
+}
+
+// (bias + sum) >> p, clipped to [0, 255], as srs gives it.
+struct Srs {
+    aie::rounding_mode rounding = aie::swap_rounding(aie::rounding_mode::floor);
+    aie::saturation_mode saturation = aie::get_saturation();
+    Srs() { aie::set_saturation(aie::saturation_mode::saturate); }
+    ~Srs() {
+        aie::set_rounding(rounding);
+        aie::set_saturation(saturation);
+    }
+};
+
+template <bool WIDE> void across() {
+    Srs srs;
+    uint8_t *m = mid[ring];
+    const auto bias = aie::broadcast<int32_t, 32>(1 << (hp - 1));
+    const auto zero = aie::zeros<int32_t, 32>();
     for (int i = 0; i < owned; i++)
-        for (int o = 0; o < SIDE; o++) {
-            const int16_t *w = hweight[i][o];
-            const uint8_t *x = line[i] + 3 * (hstart[i][o] - span0[i]);
-            for (int ch = 0; ch < 3; ch++) {
-                int32_t a = 1 << (hp - 1);
-                for (int k = 0; k < hcount[i][o]; k++)
-                    a += x[3 * k + ch] * w[k];
-                m[(i * SIDE + o) * 3 + ch] = clip(a, hp);
-            }
+        for (int ch = 0; ch < 3; ch++) {
+            // A half at a time, so the leaves' vectors fit the registers.
+            aie::vector<int32_t, 32> half[2];
+#pragma clang loop unroll(disable)
+            for (int h = 0; h < 2; h++)
+                half[h] = tree<SIDE / 2, WIDE>(line[i][ch], i, h * SIDE / 2);
+            auto [lo, hi] = aie::interleave_unzip(half[0], half[1], 32 / SIDE);
+            auto [even, odd] = aie::interleave_unzip(aie::add(lo, hi), zero, 1);
+            sum_t a(aie::add(aie::add(even, odd), bias));
+            aie::store_v(m + (3 * i + ch) * SIDE, a.to_vector<uint8_t>(hp).extract<16>(0));
         }
+}
+
+// Peano cannot legalize this loop bounded by a pointer, `src + 3 <= stop`.
+// A byte store is a read-modify-write that serializes with the next, so
+// whole pixels go four to a word store.
+void split(const uint8_t *__restrict src, uint8_t *__restrict red,
+           uint8_t *__restrict green, uint8_t *__restrict blue, int n) {
+    int k = 0;
+    for (; k < n && (uintptr_t)(red + k) % 4; k++) {
+        red[k] = src[3 * k];
+        green[k] = src[3 * k + 1];
+        blue[k] = src[3 * k + 2];
+    }
+    int words = (n - k) / 4;
+    if (words >= 4) {
+        const uint8_t *s = src + 3 * k;
+        uint8_t *r = (uint8_t *)__builtin_assume_aligned(red + k, 4);
+        uint8_t *g = (uint8_t *)__builtin_assume_aligned(green + k, 4);
+        uint8_t *b = (uint8_t *)__builtin_assume_aligned(blue + k, 4);
+#pragma clang loop min_iteration_count(4)
+#pragma clang loop hint(aie-gpr-realloc, 1)
+        for (int w = 0; w < words; w++, s += 12) {
+            uint32_t x = s[0] | s[3] << 8 | s[6] << 16 | (uint32_t)s[9] << 24;
+            uint32_t y = s[1] | s[4] << 8 | s[7] << 16 | (uint32_t)s[10] << 24;
+            uint32_t z = s[2] | s[5] << 8 | s[8] << 16 | (uint32_t)s[11] << 24;
+            __builtin_memcpy(r + 4 * w, &x, 4);
+            __builtin_memcpy(g + 4 * w, &y, 4);
+            __builtin_memcpy(b + 4 * w, &z, 4);
+        }
+        k += 4 * words;
+    }
+    for (; k < n; k++) {
+        red[k] = src[3 * k];
+        green[k] = src[3 * k + 1];
+        blue[k] = src[3 * k + 2];
+    }
 }
 
 // The band's output rows whose input rows have all come, in order.
@@ -518,26 +596,31 @@ void down(const int32_t *vt) {
     if (!ok)
         return;
     int p = vt[0], slot = 2 + (vt[1] + 1) / 2, n = owned * SIDE * 3;
+    Srs srs;
+    const auto bias = aie::broadcast<int32_t, 32>(1 << (p - 1));
+    const uint8_t *in[WIN];
     for (; next < SIDE; next++) {
         const int32_t *t = vt + HEADER + next * slot;
         int s = t[0], c = t[1];
         if (s + c > arrived)
-            return;
+            break;
         if (s < 0 || s < arrived - WIN || c < 0 || c > WIN) {
             ok = false;
-            return;
+            break;
         }
         const int16_t *w = (const int16_t *)(t + 2);
-        for (int b = 0; b < n; b++)
-            acc[b] = 1 << (p - 1);
-        for (int k = 0; k < c; k++) {
-            const uint8_t *m = mid[(s + k) % WIN];
-            int32_t wk = w[k];
-            for (int b = 0; b < n; b++)
-                acc[b] += m[b] * wk;
+        // Row s's slot: ring is arrived's, and s is at most WIN rows before it.
+        int m = ring - (arrived - s);
+        m += m < 0 ? WIN : 0;
+        for (int k = 0; k < c; k++, m = m + 1 == WIN ? 0 : m + 1)
+            in[k] = mid[m];
+        for (int b = 0; b < n; b += 32) {
+            sum_t a(bias);
+            for (int k = 0; k < c; k++)
+                a = aie::mac(a, aie::load_v<32>(in[k] + b).unpack().cast_to<int16_t>(),
+                             w[k]);
+            aie::store_v(hold[next] + b, a.to_vector<uint8_t>(p));
         }
-        for (int b = 0; b < n; b++)
-            hold[next][b] = clip(acc[b], p);
     }
 }
 } // namespace
@@ -556,7 +639,7 @@ extern "C" void resize_setup(int32_t *counts, int32_t h, int32_t w, int32_t ho,
     owned = c < strips ? (strips - c + CORES - 1) / CORES : 0;
     ok = h >= 1 && w >= 1 && ho >= SIDE && wo >= SIDE && ho % SIDE == 0 &&
          wo % SIDE == 0 && nmax <= COLS;
-    consumed = arrived = opened = next = 0;
+    consumed = part = ring = arrived = opened = next = 0;
     counts[0] = strips;
     counts[1] = ho > 0 ? ho / SIDE : 0;
     counts[2] = 0;
@@ -575,24 +658,22 @@ extern "C" void resize_take(int32_t *chunk, int32_t k) {
         return;
     }
     hp = p;
+    hwin = win;
     int slot = 2 + (win + 1) / 2;
+    const int32_t *last = chunk + HEADER + (SIDE - 1) * slot;
+    int first = chunk[HEADER], end = last[0] + last[1];
     for (int o = 0; o < SIDE; o++) {
         const int32_t *t = chunk + HEADER + o * slot;
         const int16_t *w = (const int16_t *)(t + 2);
         hstart[i][o] = t[0];
-        hcount[i][o] = t[1];
-        if (t[0] < 0 || t[1] < 0 || t[1] > win || t[0] + t[1] > columns)
+        if (t[0] < first || t[1] < 0 || t[1] > win || t[0] + t[1] > end)
             ok = false;
-        for (int j = 0; j < WIN; j++)
+        for (int j = 0; j < 64; j++)
             hweight[i][o][j] = j < t[1] ? w[j] : 0;
     }
-    span0[i] = hstart[i][0];
-    int end = hstart[i][SIDE - 1] + hcount[i][SIDE - 1];
-    span[i] = end - span0[i];
-    for (int o = 0; o < SIDE; o++)
-        if (hstart[i][o] < span0[i] || hstart[i][o] + hcount[i][o] > end)
-            ok = false;
-    if (span[i] > SPAN)
+    span0[i] = first;
+    span[i] = end - first;
+    if (first < 0 || end > columns || span[i] > SPAN)
         ok = false;
 }
 
@@ -616,23 +697,42 @@ extern "C" void resize_band(int32_t *vt, int32_t *counts) {
 }
 
 extern "C" void resize_consume(uint8_t *chunk, int32_t *vt) {
-    int r = consumed / cpr, q = consumed % cpr;
     consumed++;
     if (ok) {
-        int at = q * CHUNK;
+        int at = part * CHUNK;
         for (int i = 0; i < owned; i++) {
             int lo = 3 * span0[i], hi = lo + 3 * span[i];
             int from = lo > at ? lo : at;
             int to = hi < at + CHUNK ? hi : at + CHUNK;
-            for (int b = from; b < to; b++)
-                line[i][b - lo] = chunk[b - at];
+            // x * 43691 >> 17 is x / 3 for 0 <= x < 98304, which Peano calls
+            // __divsi3 for; past this column's bytes px is not used.
+            int px = (unsigned)(from - lo) * 43691u >> 17, ch = from - lo - 3 * px;
+            const uint8_t *src = chunk + (from - at), *stop = chunk + (to - at);
+            uint8_t *red = line[i][0], *green = line[i][1], *blue = line[i][2];
+            // The pixels a chunk boundary splits, then whole ones.
+            if (ch == 1 && src < stop)
+                green[px] = *src++, ch = 2;
+            if (ch == 2 && src < stop)
+                blue[px++] = *src++;
+            int whole = stop > src ? (stop - src) * 43691 >> 17 : 0;
+            split(src, red + px, green + px, blue + px, whole);
+            src += 3 * whole;
+            px += whole;
+            if (src < stop)
+                red[px] = *src++;
+            if (src < stop)
+                green[px] = *src;
         }
     }
-    if (q != cpr - 1)
+    if (++part != cpr)
         return;
-    if (ok)
-        across(r);
-    arrived = r + 1;
+    if (ok && hwin > 32)
+        across<true>();
+    else if (ok)
+        across<false>();
+    part = 0;
+    ring = ring + 1 == WIN ? 0 : ring + 1;
+    arrived++;
     down(vt);
 }
 
@@ -640,10 +740,26 @@ extern "C" void resize_consume(uint8_t *chunk, int32_t *vt) {
 extern "C" void resize_emit(uint16_t *out, int32_t i) {
     if (next < SIDE)
         ok = false;
-    bool real = ok && i < owned;
-    for (int y = 0; y < SIDE; y++)
-        for (int b = 0; b < SIDE * 3; b++)
-            out[y * SIDE * 3 + b] = real ? PIXEL[hold[y][i * SIDE * 3 + b]] : 0;
+    if (!ok || i >= owned) {
+        for (int k = 0; k < SIDE * SIDE * 3; k += 32)
+            aie::store_v(out + k, aie::zeros<uint16_t, 32>());
+        return;
+    }
+    // Four pixels, a word of each plane in and six out. Byte loads here miscompile:
+    // llvm-aie's post-increment combine over a chained pointer reads row for row + SIDE.
+    uint16_t *o = (uint16_t *)__builtin_assume_aligned(out, 4);
+    for (int y = 0; y < SIDE; y++) {
+        const uint8_t *row = hold[y] + 3 * i * SIDE;
+        for (int x = 0; x < SIDE; x += 4, o += 12) {
+            uint32_t c[3], w[6];
+            for (int ch = 0; ch < 3; ch++)
+                __builtin_memcpy(&c[ch], __builtin_assume_aligned(row + ch * SIDE + x, 4), 4);
+            for (int v = 0; v < 12; v += 2)
+                w[v / 2] = PIXEL[c[v % 3] >> 8 * (v / 3) & 255] |
+                           (uint32_t)PIXEL[c[(v + 1) % 3] >> 8 * ((v + 1) / 3) & 255] << 16;
+            __builtin_memcpy(o, w, 24);
+        }
+    }
 }
 
 extern "C" void resize_finish(int32_t *counts) {
@@ -718,7 +834,8 @@ class Resample(Operator):
     width: int = param()
     out_height: int = param()
     out_width: int = param()
-    chunk: int = param(default=1024, array=True)
+    # Every chunk is a buffer handshake with every core: few and large ones.
+    chunk: int = param(default=4096, array=True)
     # A 39-tap window: a scale of up to 9.5.
     words: int = param(default=356, array=True)
     # The patch columns a core holds, so cores * patch_columns across.
