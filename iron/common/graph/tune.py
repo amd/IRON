@@ -5,7 +5,10 @@
 
 A graph's cost table is filled by a module of its own (``iron.lm.llama3.tune``):
 it takes ``parser``, adds the arguments its calls follow from, builds each
-version's calls (``probe.Call.admitted``) and passes them to ``measure``.
+version's calls (``probe.Call.admitted``) and passes them to ``measure``
+with the directory its tables are in: one per device, ``costs_<device>.json``
+for the packaging the device runs, ``costs_<device>_<dispatch>.json`` for
+another.
 
 One operator is measured at every setting it tunes to by this module's own
 command line, its fields as a profile entry names them:
@@ -32,16 +35,22 @@ from .narrowing import DISPATCHES, CostTable, fitting, variants
 from .probe import Call, Timing, cost_cache, measure_graph, pmode, search
 
 
-def parser(description: str, table: Path | None) -> argparse.ArgumentParser:
-    """The arguments every measurement takes: the table to fill (``table``
-    by default; a scratch one if None) and how each figure is timed.
+def parser(description: str, tables: Path | None) -> argparse.ArgumentParser:
+    """The arguments every measurement takes: the table to fill (by default
+    the device's in ``tables``, ``table``; a scratch one if None) and how
+    each figure is timed.
     """
     p = argparse.ArgumentParser(description=description)
     p.add_argument(
         "--table",
         type=Path,
-        default=table,
-        help=f"the table to fill (default: {table or 'a scratch table'})",
+        help="the table to fill (default: "
+        + (
+            f"costs_<device>[_<dispatch>].json in {tables}"
+            if tables
+            else "a scratch table"
+        )
+        + ")",
     )
     p.add_argument(
         "--dispatch",
@@ -84,16 +93,34 @@ def dispatch(args: argparse.Namespace, dev) -> str:
     return "fused" if full_elf(dev) else "separate"
 
 
+def table(args: argparse.Namespace, dev, tables: Path) -> Path:
+    """The table ``args`` fills on ``dev``: ``args.table``, else in
+    ``tables`` ``costs_<device>.json``, or ``costs_<device>_<dispatch>.json``
+    where ``args`` measures under a packaging other than the device's.
+    """
+    if args.table is not None:
+        return args.table
+    chosen = dispatch(args, dev)
+    own = "fused" if full_elf(dev) else "separate"
+    return tables / (
+        f"costs_{dev.name}.json" if chosen == own else f"costs_{dev.name}_{chosen}.json"
+    )
+
+
 def measure(
-    args: argparse.Namespace, calls: Sequence[Call], pairs: Sequence[tuple[str, str]]
+    args: argparse.Namespace,
+    calls: Sequence[Call],
+    pairs: Sequence[tuple[str, str]],
+    tables: Path,
 ) -> list[str]:
-    """Fill ``args.table`` with ``calls``' designs and the configure cost
-    between ``pairs`` (``measure_graph``), timed as ``args`` says.
+    """Fill the table ``args`` names in ``tables`` (``table``) with
+    ``calls``' designs and the configure cost between ``pairs``
+    (``measure_graph``), timed as ``args`` says.
     """
     print(f"power mode: {pmode()}")
     dev = aie_utils.ensure_current_device()
     return measure_graph(
-        CostTable(args.table, dev.name, dispatch(args, dev)),
+        CostTable(table(args, dev, tables), dev.name, dispatch(args, dev)),
         calls,
         pairs,
         Timing(args.rounds, args.calls, args.settle, args.cutoff),
@@ -140,11 +167,11 @@ def main() -> None:
         first_line, _, _ = why.partition("\n")
         print(f"not measured, the placer refuses {key}: {first_line}")
     with tempfile.TemporaryDirectory() as scratch:
-        table = CostTable(
+        costs = CostTable(
             args.table or Path(scratch) / "costs.json", dev.name, dispatch(args, dev)
         )
         search(
-            table,
+            costs,
             found,
             Timing(args.rounds, args.calls, args.settle, args.cutoff),
             args.repeats,
@@ -154,10 +181,10 @@ def main() -> None:
             args.remeasure,
         )
         if args.table:
-            table.save()
-        measured = [v for v in found if v.key in table.steps]
-        for v in sorted(measured, key=lambda v: table.steps[v.key].t_step_us):
-            c = table.steps[v.key]
+            costs.save()
+        measured = [v for v in found if v.key in costs.steps]
+        for v in sorted(measured, key=lambda v: costs.steps[v.key].t_step_us):
+            c = costs.steps[v.key]
             print(
                 f"{dict(v.tunables)}: t_step {c.t_step_us:8.2f} us  "
                 f"alone {c.alone_us:8.2f} us  exact {c.exact}  accurate {c.accurate}"

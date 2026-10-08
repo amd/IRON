@@ -39,7 +39,7 @@ def main():
         for s in graph.shapes()
         for call in Call.admitted(graph.trace(**s), dev, dict(n=s["x"][0]))
     ]
-    tune.measure(args, calls, CALIBRATION_PAIRS)
+    tune.measure(args, calls, CALIBRATION_PAIRS, COSTS)
 
 
 if __name__ == "__main__":

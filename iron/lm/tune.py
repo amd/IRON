@@ -11,11 +11,12 @@ table holds every design's step time at each width it tunes to, and the
 configure cost measured between a few pairs of designs. It is keyed by
 each design's identity -- its fields -- so a design that has changed since
 is not in it, and the tuner leaves that design as the profile gives it,
-unfolded. ``main`` fills one for both versions as the graph is now
-(``calls``): every design, each setting, as traced and with each fold it
-admits. Designs already in the table are kept unless ``--remeasure``; entries
-for designs the graph no longer has are dropped. A design another graph has
-had measured on this NPU is taken from the cost cache
+unfolded. ``main`` fills one for both versions as the graph is now, the
+decode step alone where it is an xclbin chain (``calls``): every design,
+each setting, as traced and with each fold it admits. Designs already in
+the table are kept unless ``--remeasure``; entries for designs the graph
+no longer has are dropped. A design another graph has had measured on
+this NPU is taken from the cost cache
 (``iron.common.graph.costcache``) rather than run again.
 
 A design's time follows its shapes, per-call values and Sample's draw
@@ -48,18 +49,23 @@ CALIBRATION_PAIRS = [
 ]
 
 
-def calls(model: CausalLM, sample: Sampler, position: int, token: int) -> list[Call]:
+def calls(
+    model: CausalLM, sample: Sampler, position: int, token: int, dispatch: str
+) -> list[Call]:
     """The calls ``model``'s designs are measured in on the current device:
-    the decode step at ``position`` and ``token``, the prompt chunk at a
-    whole first chunk, each as traced and with each fold it admits, Sample
-    on the draw rows ``sample`` gives.
+    the decode step at ``position`` and ``token``, and where it is packaged
+    as one full ELF (``dispatch``) the prompt chunk at a whole first chunk,
+    each as traced and with each fold it admits, Sample on the draw rows
+    ``sample`` gives. An xclbin decode step has no prompt version
+    (``CausalLM.load``).
     """
     dev = aie_utils.ensure_current_device()
     C = model.config.prefill_chunk
-    versions = [
-        (model.shapes(1), dict(position=position, token=token)),
-        (model.shapes(C), dict(position=C - 1, token=token, chunk=0, rows=C)),
-    ]
+    versions = [(model.shapes(1), dict(position=position, token=token))]
+    if dispatch == "fused":
+        versions.append(
+            (model.shapes(C), dict(position=C - 1, token=token, chunk=0, rows=C))
+        )
     out = []
     for shapes, values in versions:
         traced = model.trace(**shapes)
@@ -72,11 +78,12 @@ def calls(model: CausalLM, sample: Sampler, position: int, token: int) -> list[C
     return out
 
 
-def main(runner: type[Runner], description: str, default_table: Path) -> None:
-    """The command line that measures ``runner``'s model's cost table: its
-    ``calls``, and the configure cost between ``CALIBRATION_PAIRS``.
+def main(runner: type[Runner], description: str, tables: Path) -> None:
+    """The command line that measures ``runner``'s model's cost table in
+    ``tables`` (``graph_tune.table``): its ``calls``, and the configure cost
+    between ``CALIBRATION_PAIRS``.
     """
-    parser = graph_tune.parser(description, default_table)
+    parser = graph_tune.parser(description, tables)
     parser.add_argument(
         "--position",
         type=int,
@@ -94,6 +101,10 @@ def main(runner: type[Runner], description: str, default_table: Path) -> None:
     config = runner.config
     model = runner.model(config, unread_weights(runner.layout(config), config.n_layers))
     sample = Sampler(args.temperature, args.top_k, np.random.default_rng(SEED))
+    dispatch = graph_tune.dispatch(args, aie_utils.ensure_current_device())
     graph_tune.measure(
-        args, calls(model, sample, args.position, args.token), CALIBRATION_PAIRS
+        args,
+        calls(model, sample, args.position, args.token, dispatch),
+        CALIBRATION_PAIRS,
+        tables,
     )

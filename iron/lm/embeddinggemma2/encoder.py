@@ -24,8 +24,8 @@ from iron.lm import Checkpoint, load_weights
 from .model import EMBEDDINGGEMMA_2, EmbeddingGemma, layout, text_tensors
 from .oracle import PROMPTS, EmbeddingGemmaOracle, tokenizer
 
-# Where `python -m iron.lm.embeddinggemma2.tune` writes its measurements.
-COSTS = Path(__file__).with_name("costs_npu2.json")
+# Where `python -m iron.lm.embeddinggemma2.tune` writes its tables, one per device.
+COSTS = Path(__file__).parent
 
 
 class Encoder:
@@ -71,7 +71,8 @@ def main():
     ap.add_argument(
         "--costs",
         type=Path,
-        help=f"the cost table designs are tuned by (`tune` writes {COSTS})",
+        help="the cost table designs are tuned by (`tune` writes "
+        f"costs_<device>.json in {COSTS})",
     )
     args = ap.parse_args()
     encoder = Encoder(args.directory, costs=args.costs)
