@@ -16,7 +16,7 @@ from iron.common.graph.narrowing import CostTable
 from iron.common.graph.probe import Designs
 from iron.lm import SEED, Sampler
 from iron.lm.llama3 import tune as llama_tune
-from iron.lm.tune import CALIBRATION_PAIRS, calls
+from iron.lm.tune import CALIBRATION_PAIRS, calls, contexts
 from iron.tests.common.llama_model import llama_1b
 
 
@@ -26,7 +26,7 @@ from iron.tests.common.llama_model import llama_1b
 )
 def test_llamas_table_holds_every_design_it_tunes(npu2, dispatch, name):
     sample = Sampler(0.7, 50, np.random.default_rng(SEED))
-    designs = Designs.of(calls(llama_1b(), sample, 256, 0, dispatch), npu2)
+    designs = Designs.of(calls(llama_1b(), sample, 256, 0, dispatch, 8192, 6), npu2)
     table = CostTable(Path(llama_tune.__file__).with_name(name))
     stale = designs.stale(table)
     missing = designs.missing(table, CALIBRATION_PAIRS)
@@ -35,6 +35,9 @@ def test_llamas_table_holds_every_design_it_tunes(npu2, dispatch, name):
     for key in missing:
         if ">" in key:
             unmeasured.append(f"  entry {key}")
+            continue
+        if "@" in key:
+            unmeasured.append(f"  operating point {key}")
             continue
         if key not in settings:
             unmeasured.append(f"  calibration or pack {key}")
@@ -52,6 +55,28 @@ def test_llamas_table_holds_every_design_it_tunes(npu2, dispatch, name):
         + "\n".join(unmeasured)
         + f"\n{len(stale)} the graph no longer has: {stale}"
     )
+
+
+def test_a_ladder_of_contexts_halves_down_and_weighs_each_by_its_share():
+    found = contexts(8192, 6, 1)
+    assert [c for _, c in found] == [256, 512, 1024, 2048, 4096, 8192]
+    assert sum(w for w, _ in found) == pytest.approx(1.0)
+    # The contexts past halfway to the one below: (8192 - 6144) / 8192.
+    assert found[-1][0] == pytest.approx(0.25)
+    assert [c for _, c in contexts(8192, 6, 2048)] == [2048, 4096, 8192]
+    assert contexts(6144, 6, 2048) == [(1.0, 6144)]
+    with pytest.raises(ValueError, match="not a multiple of 2048"):
+        contexts(1000, 6, 2048)
+
+
+def test_llama_prices_only_attention_at_its_contexts(npu2):
+    sample = Sampler(0.7, 50, np.random.default_rng(SEED))
+    designs = Designs.of(calls(llama_1b(1), sample, 256, 0, "fused", 8192, 6), npu2)
+    priced = {k: designs.first[k][0] for k in designs.points}
+    assert {type(op).__name__ for op in priced.values()} == {"MHA"}
+    assert sorted(len(designs.points[k]) for k in priced) == [3, 6]
+    for points in designs.points.values():
+        assert sum(w for w, _ in points.values()) == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize(
