@@ -22,7 +22,7 @@ import iron
 from iron.common import Scratchpad
 from iron.common.declare import Profile
 from iron.common.graph.costcache import Accuracy, CostCache, Measurement
-from iron.common.graph.fold import folded
+from iron.common.graph.fold import FOLD_RUNS, folded, foldings
 from iron.common.graph.narrowing import (
     Calibration,
     CostTable,
@@ -45,6 +45,7 @@ from iron.operators import (
     MHA,
     Clamp,
     ElementwiseAdd,
+    ElementwiseMul,
     GQAContext,
     ReLU,
     RoPE,
@@ -819,21 +820,66 @@ def test_a_setting_the_placer_refuses_alone_is_not_measured(tmp_path, npu2):
     assert fitting(found, tmp_path / "fits") == (kept, refused)
 
 
-def _swiglu(tmp_path, dev, gate_us, step_us=10.0, table=_table):
+def _swiglu(tmp_path, dev, gate_us, step_us=10.0, table=_table, mul_us=None):
     """SwiGLU at one row as traced, and a table (``_table`` or ``_separate``)
     holding every design it runs as traced and folded at its default width,
-    the folded gate taking ``gate_us`` a step, every other design
+    the gate with SiLU folded in taking ``gate_us`` a step, SiLU with the
+    product folded in ``mul_us`` (unmeasured if None), every other design
     ``step_us``, and each a load of 20.
     """
     E, H = 2048, 8192
     w = np.zeros((H, E), bfloat16)
     traced = SwiGLU(w, w, np.zeros((E, H), bfloat16)).trace(x=(1, E))
-    folds, _ = folded(traced, dev)
+    ways, _ = foldings(traced, dev)
+    into_gate, into_silu = [trial for trial, applied in ways.values() if applied]
     steps = {
-        cost_key(s.op, dev): (step_us, 20.0) for g in (traced, folds) for s in g.steps
+        cost_key(s.op, dev): (step_us, 20.0)
+        for g in (traced, into_gate, into_silu)
+        for s in g.steps
     }
-    steps[cost_key(folds.steps[0].op, dev)] = (gate_us, 20.0)
+    steps[cost_key(into_gate.steps[0].op, dev)] = (gate_us, 20.0)
+    del steps[cost_key(into_silu.steps[2].op, dev)]
+    if mul_us is not None:
+        steps[cost_key(into_silu.steps[2].op, dev)] = (mul_us, 20.0)
     return traced, table(tmp_path / "costs.json", steps)
+
+
+def test_a_way_to_fold_is_found_with_the_fold_pre_empting_it_left_out(tmp_path, npu2):
+    traced, _ = _swiglu(tmp_path, npu2, gate_us=10.0)
+    ways, every = foldings(traced, npu2)
+    assert every
+    assert [sorted(str(f) for f in w) for w in ways] == [
+        ["SiLU into GEMV"],
+        ["ElementwiseMul into SiLU"],
+        [],
+    ]
+    assert ways[frozenset()][0] is traced
+    # Folding everything takes the first alone: SiLU is gone from the graph.
+    _, applied = folded(traced, npu2)
+    assert [str(f) for f in applied] == ["SiLU into GEMV"]
+    _, every = foldings(traced, npu2, limit=1)
+    assert not every
+
+
+@pytest.mark.parametrize("fold_runs", [FOLD_RUNS, 1], ids=["every way", "greedy"])
+def test_a_pre_empted_fold_is_taken_where_it_gains_most(fold_runs, tmp_path, npu2):
+    # The gate gains less from SiLU than SiLU does from the product; one run
+    # finds only the first.
+    traced, table = _swiglu(tmp_path, npu2, gate_us=19.0, mul_us=10.0)
+    tuner = JointNarrowing(table, fit_cache=tmp_path / "fits", fold_runs=fold_runs)
+    tuning = tuner.tune(traced, npu2, "fused")
+    if fold_runs == 1:
+        assert [str(f) for f in tuning.folds] == ["SiLU into GEMV"]
+        return
+    assert [str(f) for f in tuning.folds] == ["ElementwiseMul into SiLU"]
+    applied, _ = tuning.apply(traced, npu2)
+    assert [type(s.op).__name__ for s in applied.steps] == [
+        "GEMV",
+        "GEMV",
+        "SiLU",
+        "GEMV",
+    ]
+    assert [type(link.op) for link in applied.steps[2].op.finish] == [ElementwiseMul]
 
 
 def test_a_fold_is_taken_where_the_model_says_it_gains(tmp_path, npu2):
@@ -858,7 +904,7 @@ def test_a_fold_is_taken_where_the_model_says_it_gains(tmp_path, npu2):
 
 @pytest.mark.parametrize("gate_us", [400.0, None], ids=["dearer", "unmeasured"])
 def test_a_fold_is_left_where_it_costs_or_is_unmeasured(gate_us, tmp_path, npu2):
-    traced, table = _swiglu(tmp_path, npu2, gate_us=gate_us or 11.0)
+    traced, table = _swiglu(tmp_path, npu2, gate_us=gate_us or 11.0, mul_us=gate_us)
     if gate_us is None:
         folds, _ = folded(traced, npu2)
         del table.steps[cost_key(folds.steps[0].op, npu2)]
@@ -866,7 +912,9 @@ def test_a_fold_is_left_where_it_costs_or_is_unmeasured(gate_us, tmp_path, npu2)
         traced, npu2, "fused"
     )
     assert tuning.folds == ()
-    assert [str(f) for f in tuning.unpriced] == ([] if gate_us else ["SiLU into GEMV"])
+    assert [str(f) for f in tuning.unpriced] == (
+        [] if gate_us else ["SiLU into GEMV", "ElementwiseMul into SiLU"]
+    )
     assert ("unpriced, not taken: fold SiLU into GEMV" in tuning.report()) == (
         gate_us is None
     )

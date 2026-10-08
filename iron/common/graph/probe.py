@@ -62,7 +62,7 @@ from ..image.callable import FullELFCallable, StepCallable
 from ..image.sequence import OperatorSequence
 from .compiled import CompiledGraph
 from .costcache import Accuracy, CostCache, Measurement, Pairing
-from .fold import folded, replaced
+from .fold import Made, folded, foldings, replaced
 from .narrowing import (
     FIT_CACHE,
     Calibration,
@@ -73,6 +73,7 @@ from .narrowing import (
     StepCost,
     Variant,
     cost_key,
+    cost_keys,
     fitting,
     refuse,
     variants,
@@ -899,14 +900,19 @@ class Call:
         contents: Mapping[str, np.ndarray] | None = None,
     ) -> list[Call]:
         """The calls a version's tuning is priced by: ``traced`` with
-        ``values`` and ``contents``, then each fold it admits on ``dev``
-        applied alone, since the designs a set of folds runs are each fold's.
+        ``values`` and ``contents``, then ``traced`` folded each way it folds
+        on ``dev`` (``foldings``) and with each of those folds alone.
         """
         values, contents = values or {}, contents or {}
-        _, admitted = folded(traced, dev)
+        made = Made(dev)
+        ways, _ = foldings(traced, dev, made=made)
+        for fold in dict.fromkeys(f for applied in ways for f in applied):
+            trial, applied = folded(traced, dev, (fold,), made=made)
+            ways.setdefault(frozenset(applied), (trial, applied))
         return [cls(traced, values, contents)] + [
-            cls(folded(traced, dev, (fold,))[0], values, contents, traced)
-            for fold in admitted
+            cls(trial, values, contents, traced)
+            for trial, applied in ways.values()
+            if applied
         ]
 
     def op_values(self, op: Operator) -> dict[str, int]:
@@ -960,8 +966,9 @@ class Designs:
         first: dict[str, tuple[Operator, Call]] = {}
         pinned: dict[str, frozenset[str]] = {}
         twin_of: dict[str, str] = {}
+        keyed: dict[int, str] = {}
         for call in calls:
-            keys = [cost_key(s.op, dev) for s in call.traced.steps]
+            keys = cost_keys(call.traced, dev, keyed)
             for key, step in zip(keys, call.traced.steps):
                 pinned[key] = pinned.get(key, frozenset()) | step.op.pinned
             for key in Runlist(keys).order:

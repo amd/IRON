@@ -10,10 +10,14 @@ from __future__ import annotations
 import dataclasses
 from collections import Counter
 from collections.abc import Collection, Hashable
+from types import MethodType
 
 from ..declare import Operator, Unresolvable
 from ..declare.member import Extent
 from .trace import TracedGraph
+
+# The most ``folded`` runs ``foldings`` makes, each with others left out.
+FOLD_RUNS = 256
 
 
 @dataclasses.dataclass(frozen=True)
@@ -66,8 +70,45 @@ class Prologue:
         return f"{', then '.join(names)} into {consumers}"
 
 
+class Made:
+    """The operators ``folded`` makes from a graph's, and their
+    resolutions, each made once: the runs of one search (``foldings``)
+    share one, so what runs leaving different folds out make alike is made
+    once. Each is kept by the ``id`` of what it is made from, held here so
+    the ids stay theirs.
+    """
+
+    def __init__(self, dev):
+        self.dev = dev
+        self._made: dict[tuple, tuple[Operator, Operator, Operator | None]] = {}
+        self._resolved: dict[int, tuple[Operator, Operator | None]] = {}
+
+    def of(self, method: MethodType, other: Operator, *args: int) -> Operator | None:
+        """``method``, an operator's ``fold``, ``prefold`` or ``on_array``,
+        applied to ``other`` and ``args``.
+        """
+        key = (method.__func__, id(method.__self__), id(other), args)
+        if key not in self._made:
+            self._made[key] = (method.__self__, other, method(other, *args))
+        return self._made[key][2]
+
+    def resolved(self, op: Operator) -> Operator | None:
+        """``op`` resolved for the device, or None where it does not."""
+        if id(op) not in self._resolved:
+            try:
+                new = op.resolved(self.dev)
+            except (Unresolvable, ValueError):
+                new = None
+            self._resolved[id(op)] = (op, new)
+        return self._resolved[id(op)][1]
+
+
 def folded(
-    traced: TracedGraph, dev, only: Collection[Fold | Prologue] | None = None
+    traced: TracedGraph,
+    dev,
+    only: Collection[Fold | Prologue] | None = None,
+    without: Collection[Fold | Prologue] = (),
+    made: Made | None = None,
 ) -> tuple[TracedGraph, Counter[Fold | Prologue]]:
     """``traced`` with each step whose readers can apply it in their own
     cores folded into them (``Operator.prefold``), each step its producer
@@ -102,11 +143,15 @@ def folded(
         dev: The device the folded operators must resolve for.
         only: The folds to apply, each ``Fold`` with the folds of its
             chain before it; every one the graph admits if not given.
+        without: Folds not to apply, so that those they would pre-empt
+            can be.
+        made: The operators earlier runs over ``traced`` on ``dev`` made.
 
     Returns:
         The folded graph (``traced`` itself where nothing folds) and the
         steps folded away, by fold.
     """
+    made = Made(dev) if made is None else made
     named = Counter((h.parent or h).name for s in traced.steps for h in s.slots)
     named.update((h.parent or h).name for h in traced.outputs)
     calls = Counter(id(s.op) for s in traced.steps)
@@ -158,15 +203,17 @@ def folded(
             if x.elements != h.elements or x.dtype != h.dtype or x.bounds:
                 continue
             extras = [e for i, e in enumerate(producer.inputs) if i != at]
-            fused = _prefolded(steps, replace, readers, j, x, extras, at, dev)
+            fused = _prefolded(steps, replace, readers, j, x, extras, at, made)
             if fused is None:
                 continue
             fold = Prologue(
-                producer.op.resolved(dev).design_key(),
-                tuple(steps[k].op.resolved(dev).design_key() for k in readers),
+                made.resolved(producer.op).design_key(),
+                tuple(made.resolved(steps[k].op).design_key() for k in readers),
                 at,
                 prologues.get(readers[0], ()),
             )
+            if fold in without:
+                continue
             if only is not None and not any(
                 isinstance(f, Prologue)
                 and f.consumers == fold.consumers
@@ -246,11 +293,13 @@ def folded(
                 continue
             producer = steps[j]
             current = replace.get(id(producer.op), producer.op)
-            fused = current.fold(replace.get(id(step.op), step.op), at)
+            fused = made.of(current.fold, replace.get(id(step.op), step.op), at)
             if fused is None:
                 continue
-            start, after = origins.get(j, (producer.op.resolved(dev).design_key(), ()))
-            fold = Fold(start, step.op.resolved(dev).design_key(), at, after)
+            start, after = origins.get(j, (made.resolved(producer.op).design_key(), ()))
+            fold = Fold(start, made.resolved(step.op).design_key(), at, after)
+            if fold in without:
+                continue
             if only is not None and not any(
                 isinstance(f, Fold)
                 and f.producer == start
@@ -258,11 +307,10 @@ def folded(
                 for f in only
             ):
                 continue
-            try:
-                widths = fused.resolved(dev).widths
-            except (Unresolvable, ValueError):
-                continue
-            if any(widths[n] < w for n, w in current.resolved(dev).widths.items()):
+            new = made.resolved(fused)
+            if new is None or any(
+                new.widths[n] < w for n, w in made.resolved(current).widths.items()
+            ):
                 continue
             written = {
                 (h.parent or h).name
@@ -302,21 +350,17 @@ def folded(
             break
     if not replace:
         return traced, applied
-    arrays = {f.resolved(dev).array_key(): f for f in replace.values()}
+    arrays = {made.resolved(f).array_key(): f for f in replace.values()}
     for s in traced.steps:
         base = replace.get(id(s.op), s.op)
         for key, f in arrays.items():
             if base is f:
                 continue
-            moved = base.on_array(f)
-            if moved is None:
-                continue
-            try:
-                if moved.resolved(dev).array_key() == key:
-                    replace[id(s.op)] = moved
-                    break
-            except (Unresolvable, ValueError):
-                continue
+            moved = made.of(base.on_array, f)
+            new = None if moved is None else made.resolved(moved)
+            if new is not None and new.array_key() == key:
+                replace[id(s.op)] = moved
+                break
     kept = [s for s in steps if s is not None]
     running = {id(s.op) for s in kept}
     kept = dataclasses.replace(
@@ -327,8 +371,56 @@ def folded(
     return kept.with_operators(replace), applied
 
 
+def foldings(
+    traced: TracedGraph, dev, limit: int = FOLD_RUNS, made: Made | None = None
+) -> tuple[
+    dict[frozenset[Fold | Prologue], tuple[TracedGraph, Counter[Fold | Prologue]]],
+    bool,
+]:
+    """Each way ``folded`` folds ``traced`` with some of its folds left out:
+    leaving out a fold it applies lets one that fold pre-empted apply, and
+    leaving out each fold a site admits leaves the site as traced.
+
+    Args:
+        traced: The graph as traced.
+        dev: The device the folded operators must resolve for.
+        limit: The most ``folded`` runs, each with other folds left out.
+        made: The operators earlier runs over ``traced`` on ``dev`` made.
+
+    Returns:
+        Each folded graph and the steps it folded away, by the folds
+        applied, folding everything first; and whether they are every way,
+        False where ``limit`` runs did not reach them all.
+    """
+    found: dict[
+        frozenset[Fold | Prologue], tuple[TracedGraph, Counter[Fold | Prologue]]
+    ] = {}
+    queue: list[frozenset[Fold | Prologue]] = [frozenset()]
+    seen = set(queue)
+    made = Made(dev) if made is None else made
+    for _ in range(limit):
+        if not queue:
+            break
+        left = queue.pop(0)
+        trial, applied = folded(traced, dev, without=left, made=made)
+        found.setdefault(frozenset(applied), (trial, applied))
+        for fold in applied:
+            more = left | {fold}
+            if more not in seen:
+                seen.add(more)
+                queue.append(more)
+    return found, not queue
+
+
 def _prefolded(
-    steps: list, replace: dict[int, Operator], readers, j: int, x, extras, at, dev
+    steps: list,
+    replace: dict[int, Operator],
+    readers,
+    j: int,
+    x,
+    extras,
+    at,
+    made: Made,
 ) -> dict[int, Operator] | None:
     """Each of ``readers`` (indices of ``steps``) with the operator of step
     ``j`` folded into it, ``x`` the tile and ``extras`` its other inputs,
@@ -345,14 +437,13 @@ def _prefolded(
             for o in s.outputs
         }
         op = replace.get(id(steps[k].op), steps[k].op)
-        new = op.prefold(steps[j].op, at)
+        new = made.of(op.prefold, steps[j].op, at)
         if new is None or written & reads:
             return None
-        try:
-            widths = new.resolved(dev).widths
-        except (Unresolvable, ValueError):
-            return None
-        if any(widths[n] < w for n, w in op.resolved(dev).widths.items()):
+        resolved = made.resolved(new)
+        if resolved is None or any(
+            resolved.widths[n] < w for n, w in made.resolved(op).widths.items()
+        ):
             return None
         fused[k] = new
     return fused

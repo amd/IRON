@@ -26,7 +26,7 @@ from iron.common.graph import Handle, TracedGraph, Tracer
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import _words
 from iron.common.declare import Unresolvable
-from iron.common.graph.fold import Prologue, folded, replaced
+from iron.common.graph.fold import Made, Prologue, folded, replaced
 from iron.common.graph.handle import Affine, Value
 from iron.common.image import OperatorSequence
 from iron.common.image.artifacts import Parameter
@@ -420,6 +420,20 @@ def test_swiglu_folds_its_silu_into_the_gate_and_keeps_one_array(npu2):
     silu = next(s for s in t.steps if type(s.op) is SiLU)
     assert gate.outputs[0].name == silu.outputs[0].name == mul.inputs[0].name
     assert f.input_args == t.input_args and f.output_args == t.output_args
+
+
+def test_runs_sharing_what_they_made_fold_alike_with_the_same_operators(npu2):
+    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
+    made = Made(npu2)
+    first, count = folded(t, npu2, made=made)
+    again, recount = folded(t, npu2, made=made)
+    alone, _ = folded(t, npu2)
+    assert recount == count
+    assert [s.op for s in again.steps] == [s.op for s in first.steps]
+    assert [s.op.design_key() for s in alone.steps] == [
+        s.op.design_key() for s in first.steps
+    ]
+    assert alone.steps[0].op is not first.steps[0].op
 
 
 def test_each_folded_design_is_paired_with_the_one_whose_step_it_took(npu2):

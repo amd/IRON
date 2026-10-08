@@ -73,7 +73,7 @@ from ..declare import Operator
 from ..design import OperatorDesign, runtime
 from ..image.coresidence import Packing, fits
 from ..image.fusion import generate, parameters_preamble
-from .fold import Fold, Prologue, folded
+from .fold import FOLD_RUNS, Fold, Made, Prologue, folded, foldings
 from .trace import TracedGraph
 
 
@@ -86,6 +86,16 @@ def cost_key(op: Operator, dev=None) -> str:
     """
     design = OperatorDesign(op.probed().resolved(dev))
     return f"{type(op).__name__}_{design.identity}"
+
+
+def cost_keys(traced: TracedGraph, dev, keyed: dict[int, str]) -> list[str]:
+    """Each step's ``cost_key``, kept in ``keyed`` by its operator's ``id``:
+    the caller holds every operator ``keyed`` names, so an id stays its own.
+    """
+    for s in traced.steps:
+        if id(s.op) not in keyed:
+            keyed[id(s.op)] = cost_key(s.op, dev)
+    return [keyed[id(s.op)] for s in traced.steps]
 
 
 @dataclasses.dataclass(frozen=True, eq=False)
@@ -796,20 +806,26 @@ class JointNarrowing:
         fit_attempts: How many of a pack's cheapest settings the placer is
             asked about before the pack is dropped.
         fit_cache: Where the placer's verdicts persist across processes.
+        fold_runs: The most ``folded`` runs ``foldings`` makes to find
+            each way to fold a graph; past it the folds found are taken
+            greedily.
     """
 
     table: CostTable = dataclasses.field(compare=False)
     max_members: int = 8
     fit_attempts: int = 3
     fit_cache: Path = dataclasses.field(default=FIT_CACHE, compare=False)
+    fold_runs: int = FOLD_RUNS
 
     def tune(self, traced: TracedGraph, dev, dispatch: str) -> Tuning:
         """Choose the folds, tunables and packs of ``traced`` for ``dev``,
         packaged as ``dispatch`` (``packaging.plan``'s).
 
-        Each fold the graph admits is priced on its own, then those that
-        gain are taken cheapest first, each kept only if the model's time
-        drops with it beside those already taken.
+        Each way the graph folds (``foldings``) is priced and the cheapest
+        taken. Where ``fold_runs`` do not find every way, each fold found is
+        priced on its own, then those that gain are taken cheapest first,
+        each kept only if the model's time drops with it beside those
+        already taken.
 
         Raises:
             ValueError: The table is measured on another device or under
@@ -821,26 +837,55 @@ class JointNarrowing:
                 f"{self.table.path} prices dispatch {self.table.dispatch!r}; "
                 f"this version is packaged {dispatch!r}"
             )
-        plain = self._narrow(traced, dev)
-        keys = {cost_key(s.op, dev) for s in traced.steps}
-        _, admitted = folded(traced, dev)
-        gains = []
-        unpriced = []
-        for fold in admitted:
-            trial = self._folding(traced, dev, (fold,), keys)
-            if trial is None:
-                unpriced.append(fold)
-            elif trial.predicted_us < plain.predicted_us:
-                gains.append(trial)
+        # Each operator's cost key by ``id``: every one is traced's or made's,
+        # held throughout, so its id stays its own.
+        keyed: dict[int, str] = {}
+        plain = self._narrow(traced, dev, keyed)
+        keys = set(cost_keys(traced, dev, keyed))
+        made = Made(dev)
+        ways, every = foldings(traced, dev, self.fold_runs, made)
+        candidates = list(dict.fromkeys(f for applied in ways for f in applied))
+        # Ways folding alike are priced once.
+        priced: dict[frozenset[Fold | Prologue], Tuning | None] = {}
         best = plain
-        for single in sorted(gains, key=lambda t: t.predicted_us):
-            trial = (
-                single
-                if not best.folds
-                else self._folding(traced, dev, best.folds + single.folds, keys)
-            )
-            if trial is not None and trial.predicted_us < best.predicted_us:
-                best = trial
+        if every:
+            for trial, applied in ways.values():
+                self._priced(trial, applied, dev, keys, keyed, priced)
+            unpriced = [
+                f
+                for f in candidates
+                if not any(t is not None and f in t.folds for t in priced.values())
+            ]
+            for trial in priced.values():
+                if trial is not None and trial.predicted_us < best.predicted_us:
+                    best = trial
+        else:
+            singles = {
+                f: self._priced(
+                    *folded(traced, dev, (f,), made=made), dev, keys, keyed, priced
+                )
+                for f in candidates
+            }
+            unpriced = [f for f, t in singles.items() if t is None]
+            gains = [
+                t
+                for t in singles.values()
+                if t is not None and t.predicted_us < plain.predicted_us
+            ]
+            for single in sorted(gains, key=lambda t: t.predicted_us):
+                trial = (
+                    single
+                    if not best.folds
+                    else self._priced(
+                        *folded(traced, dev, best.folds + single.folds, made=made),
+                        dev,
+                        keys,
+                        keyed,
+                        priced,
+                    )
+                )
+                if trial is not None and trial.predicted_us < best.predicted_us:
+                    best = trial
         return dataclasses.replace(
             best,
             baseline_us=plain.baseline_us,
@@ -848,26 +893,38 @@ class JointNarrowing:
             unpriced=tuple(unpriced),
         )
 
-    def _folding(
+    def _priced(
         self,
-        traced: TracedGraph,
+        trial: TracedGraph,
+        applied: Counter[Fold | Prologue],
         dev,
-        folds: tuple[Fold | Prologue, ...],
         keys: set[str],
+        keyed: dict[int, str],
+        priced: dict[frozenset[Fold | Prologue], Tuning | None],
     ) -> Tuning | None:
-        """``traced`` tuned with ``folds`` applied, or None where a design
-        the folds add or remove (beside ``keys``, the graph's) is unmeasured.
+        """``trial``, the graph with the folds of ``applied`` applied, tuned;
+        or None where a design the folds add or remove (beside ``keys``, the
+        graph's) is unmeasured. Kept in ``priced`` by the folds, and taken
+        from it; each operator's cost key in ``keyed`` (``cost_keys``).
         """
-        trial, _ = folded(traced, dev, folds)
-        changed = keys ^ {cost_key(s.op, dev) for s in trial.steps}
-        if any(k not in self.table.steps for k in changed):
-            return None
-        return dataclasses.replace(self._narrow(trial, dev), folds=folds)
+        taken = frozenset(applied)
+        if taken not in priced:
+            changed = keys ^ set(cost_keys(trial, dev, keyed))
+            priced[taken] = (
+                None
+                if any(k not in self.table.steps for k in changed)
+                else dataclasses.replace(
+                    self._narrow(trial, dev, keyed), folds=tuple(applied)
+                )
+            )
+        return priced[taken]
 
-    def _narrow(self, traced: TracedGraph, dev) -> Tuning:
-        """The tunables and packs of ``traced`` as it is."""
+    def _narrow(self, traced: TracedGraph, dev, keyed: dict[int, str]) -> Tuning:
+        """The tunables and packs of ``traced`` as it is; each operator's
+        cost key in ``keyed`` (``cost_keys``).
+        """
         table = self.table
-        keys = [cost_key(s.op, dev) for s in traced.steps]
+        keys = cost_keys(traced, dev, keyed)
         first: dict[str, Operator] = {}
         pinned: dict[str, frozenset[str]] = {}
         for key, step in zip(keys, traced.steps):
