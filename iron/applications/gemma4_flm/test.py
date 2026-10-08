@@ -59,7 +59,7 @@ def serve(engine, xclbins):
     env["FLM_MODEL_PATH"] = str(FLM_MODEL_PATH)
     server = subprocess.Popen(
         [
-            "./build/flm",
+            str(APP / "build" / "stock" / "flm"),
             "serve",
             "gemma4-it:e2b",
             "--prefill-chunk-len",
