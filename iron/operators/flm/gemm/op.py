@@ -176,9 +176,12 @@ class GEMM(Operator):
     # Arithmetic of the gelu epilogue; see Gelu in design.py. Only the gelu
     # mode reads it.
     gelu: Gelu | str = param(default=Gelu.FP32, array=True)
-    # B as stored (N, K), a checkpoint's layout, read as is (AIE2 only): the
-    # memtile lays out the k panels the kernel transposes, so no packed copy.
+    # B as stored (N, K), a checkpoint's layout, read as is: the memtile lays
+    # out the k panels the kernel reads as B^T blocks, so no packed copy.
     b_col_maj: bool = param(default=False, array=True)
+    # Multiply on AIE2P's bfp16 macs, A and B rounded to bfp16ebs8 (the
+    # port's arithmetic, and AIE2P's default), or on its bf16 macs.
+    emulate_bf16_mmul_with_bfp16: bool = auto(array=True)
     # Filled by resolve, from the device: the grid, B's storage, the L2 tiles.
     rows: int = auto(repr=False)
     cols: int = auto(repr=False)
@@ -203,13 +206,13 @@ class GEMM(Operator):
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
     A = In(M, K, tile=(a_l2,), per=(rows,), depth=A_DEPTH)
-    # On AIE2P B is quantized to bfp16ebs8, so it is declared as a count of
-    # those blocks, the unit the array, the core and every descriptor into B
-    # count in. Declared in bytes, the sequence's offsets and lengths would
-    # address a ui8 buffer with block-unit numbers and a transfer would move
-    # a ninth of what it named. On AIE2 it is a (K, N) element count,
-    # pre-packed, or (N, K) as stored under b_col_maj. Its lanes are flows
-    # into each column's memtile pool, whose slots are one tile each.
+    # Packed for bfp16 macs, B is quantized to bfp16ebs8, so it is declared
+    # as a count of those blocks, the unit the array, the core and every
+    # descriptor into B count in. Declared in bytes, the sequence's offsets
+    # and lengths would address a ui8 buffer with block-unit numbers and a
+    # transfer would move a ninth of what it named. Otherwise it is bf16, a
+    # (K, N) count pre-packed, or (N, K) as stored under b_col_maj. Its lanes
+    # are flows into each column's memtile pool, whose slots are one tile each.
     B = In(
         Select(bfp16_b, (packed_blocks,), (Select(b_col_maj, (N, K), (K, N)),)),
         dtype=b_dtype,
@@ -292,13 +295,16 @@ class GEMM(Operator):
         if dev is None:
             raise Unresolvable("flm.GEMM is sized from the device's L1 and grid")
         rows, cols = compute_rows(dev), dev.cols
-        # B is bfp16ebs8 on AIE2P and bf16 on AIE2. AIE2 has no scalar BFP
-        # types, so B stays bf16 and the mmul lowers onto four native macs.
-        bfp16_b = dev.arch == AIEArch.AIE2p
-        if self.b_col_maj and bfp16_b:
-            raise ValueError(
-                "flm.GEMM: b_col_maj reads a bf16 B; AIE2P's B is bfp16ebs8, packed"
-            )
+        # B is packed to bfp16ebs8 where the macs are bfp16 and B is not read
+        # as stored; otherwise it is bf16. AIE2 has no BFP types, so its mmul
+        # lowers onto four native bf16 macs.
+        aie2p = dev.arch == AIEArch.AIE2p
+        emulate = self.emulate_bf16_mmul_with_bfp16
+        if emulate is None:
+            emulate = aie2p
+        if emulate and not aie2p:
+            raise ValueError("flm.GEMM: bfp16 macs are AIE2P's")
+        bfp16_b = emulate and not self.b_col_maj
         b_elem_bytes = BFP16_GROUP_BYTES / BFP16_GROUP if bfp16_b else 2
         b_group = BFP16_GROUP if bfp16_b else 1
         tile_n = N_TILE_DEFAULT if self.tile_n is None else self.tile_n
@@ -318,6 +324,7 @@ class GEMM(Operator):
             m_chunk=m_chunk,
             rows=rows,
             cols=cols,
+            emulate_bf16_mmul_with_bfp16=emulate,
             bfp16_b=bfp16_b,
             b_dtype=b_dtype,
             l1_b_depth=l1_b_depth,
@@ -409,6 +416,11 @@ class GEMM(Operator):
             f"_em{t.epilogue_mask:x}_{t.rounding}"
             + ("" if t.gelu is Gelu.FP32 else f"_gelu_{t.gelu}")
             + ("_bt" if t.b_col_maj else "")
+            + (
+                "_bf16mac"
+                if dev.arch == AIEArch.AIE2p and not t.emulate_bf16_mmul_with_bfp16
+                else ""
+            )
             + f"_{dev.name}"
         )
 
@@ -480,11 +492,12 @@ class GEMM(Operator):
             chunk_k=CT_MAX_K,
             out_chunk=CT_OUT_LEN,
             c_depth=C_DEPTH,
-            # 8x8x8 on both architectures: AIE2P lowers it onto two
-            # bfp16-emulated macs, AIE2 onto four native bf16 macs.
+            # 8x8x8 on both architectures: AIE2P lowers it onto one bfp16 mac
+            # or two bf16 ones, AIE2 onto four native bf16 macs.
             mmul_shape=(R, S, T),
             bfp16_b=self.bfp16_b,
             b_col_maj=self.b_col_maj,
+            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
             epilogue_modes=tuple(str(m) for m in modes),
             rounding=str(self.rounding),
             gelu=str(self.gelu),

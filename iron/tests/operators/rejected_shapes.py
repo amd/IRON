@@ -14,6 +14,7 @@ import functools
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron.device import from_name
+from ml_dtypes import bfloat16
 
 from iron.common import Unresolvable
 from iron.operators.copy import Copy, Gather
@@ -225,14 +226,22 @@ def test_sample_with_more_cores_than_a_memtile_joins_is_refused():
     assert Sample(vocab=4096, cores=4).resolved(dev).cores == 4
 
 
-def test_flm_gemm_reads_b_as_stored_only_where_b_is_bf16():
-    with pytest.raises(ValueError, match="b_col_maj reads a bf16 B"):
-        FLMGEMM(M=256, K=512, N=1024, b_col_maj=True).resolved(
-            from_name("npu2", n_cols=8)
-        )
-    op = FLMGEMM(M=256, K=512, N=256, b_col_maj=True).resolved(
-        from_name("npu1", n_cols=4)
-    )
-    assert op.B.shape == (256, 512)
+@pytest.mark.parametrize(
+    "device,emulate",
+    [(("npu1", 4), None), (("npu2", 8), None), (("npu2", 8), False)],
+)
+def test_flm_gemm_reads_b_as_stored_in_bf16(device, emulate):
+    op = FLMGEMM(
+        M=256, K=512, N=256, b_col_maj=True, emulate_bf16_mmul_with_bfp16=emulate
+    ).resolved(from_name(device[0], n_cols=device[1]))
+    assert op.B.shape == (256, 512) and op.b_dtype is bfloat16
+    assert not op.bfp16_b
     with pytest.raises(ValueError, match="reads B as stored"):
         op.pack_B(None)
+
+
+def test_flm_gemm_bfp16_macs_are_aie2p_only():
+    with pytest.raises(ValueError, match="bfp16 macs are AIE2P's"):
+        FLMGEMM(M=256, K=512, N=256, emulate_bf16_mmul_with_bfp16=True).resolved(
+            from_name("npu1", n_cols=4)
+        )

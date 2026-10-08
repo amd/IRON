@@ -233,10 +233,11 @@ def test_gemm_without_activations(M, K, N, npu_runtime, record_property):
 def b_col_maj_params():
     """Where B as stored reaches the kernel by another path than packed B: a
     resident and a streamed memtile pool, a trailing column, every tile width
-    and two slabs. AIE2 only; AIE2P's B is bfp16ebs8, packed.
+    and two slabs, on each kind of mac the device has: AIE2P's bfp16 and bf16
+    macs, AIE2's bf16 ones.
     """
     dev = aie_utils.get_current_device()
-    if dev is None or dev.arch is not AIEArch.AIE2:
+    if dev is None:
         return []
     cols = dev.cols
     params = [
@@ -260,13 +261,31 @@ def b_col_maj_params():
             id="slabs",
         )
     )
-    return params
+    macs = (True, False) if dev.arch is AIEArch.AIE2p else (False,)
+    return [
+        pytest.param(
+            *p.values,
+            emulate,
+            marks=p.marks,
+            id=f"{p.id}-{'bfp16' if emulate else 'bf16'}",
+        )
+        for emulate in macs
+        for p in params
+    ]
 
 
-@pytest.mark.parametrize("M,K,N,tile_n,epilogue_modes", b_col_maj_params())
-def test_gemm_b_col_maj(M, K, N, tile_n, epilogue_modes, npu_runtime, record_property):
+@pytest.mark.parametrize("M,K,N,tile_n,epilogue_modes,emulate", b_col_maj_params())
+def test_gemm_b_col_maj(
+    M, K, N, tile_n, epilogue_modes, emulate, npu_runtime, record_property
+):
     operator = GEMM(
-        M=M, K=K, N=N, tile_n=tile_n, epilogue_modes=epilogue_modes, b_col_maj=True
+        M=M,
+        K=K,
+        N=N,
+        tile_n=tile_n,
+        epilogue_modes=epilogue_modes,
+        b_col_maj=True,
+        emulate_bf16_mmul_with_bfp16=emulate,
     )
     errors, _, _ = check_on_device(
         operator, flm_vectors(operator), record=record_property

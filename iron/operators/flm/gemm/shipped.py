@@ -108,6 +108,7 @@ class Shipped(
     m_chunk: int = auto(1, repr=False, init=False)
     rows: int = auto(ROWS, repr=False, init=False)
     cols: int = auto(COLS, repr=False, init=False)
+    emulate_bf16_mmul_with_bfp16: bool = auto(True, repr=False, init=False)
     bfp16_b: bool = auto(False, repr=False, init=False)
     b_dtype: object = auto(bfloat16, repr=False, init=False)
     l1_b_depth: int = auto(QUEUE_DEPTH, repr=False, init=False)
