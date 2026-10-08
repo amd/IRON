@@ -13,7 +13,8 @@ fifos and drained back the same way.
 operand shapes, and ``Rowwise`` a matrix whose rows are the lines, for
 a kernel that reduces over its line (a norm). The array reads whatever
 operands are declared, so an operator with a third input needs no new code
-here.
+here. A ``replicate=True`` input is one line each core holds for the whole
+call and every line meets (``RowwiseMul``'s row).
 
 The core's trip count is a ``Value`` the sequence
 writes before the first transfer, so the array does not depend on the
@@ -237,7 +238,11 @@ class Elementwise(Operator):
         _, scalars = op._arguments(op.kernel(), len(inputs), 1)
         # Views of the operands as the kernel's (calls, n) lines, never copies;
         # the one pass over the data is the cast, the store's bf16 rounding.
-        lines = iter(x.reshape(op.lines, -1, copy=False) for x in inputs)
+        # A held line is one row every call broadcasts against.
+        lines = iter(
+            x.reshape(1 if b.replicate else op.lines, -1, copy=False)
+            for b, x in zip(op.inputs, inputs)
+        )
         y = contract.reference(
             *(
                 scalars[i] if i in scalars else next(lines)
@@ -265,6 +270,13 @@ class Elementwise(Operator):
             return f"{col}" if self.num_channels == 1 else f"{col}_{chan}"
 
         def fifos(stream, name):
+            # A held line, acquired once per call, is one fifo per lane that
+            # the cores of its lane share.
+            if stream.replicate:
+                return [
+                    ObjectFifo(stream.tile, name=f"{name}_held_{j}", depth=1)
+                    for j in range(stream.count)
+                ]
             # A line spanning more than one bank cannot be double-buffered in
             # what is left of local memory.
             depth = target.fifo_depth(math.prod(stream.tile_shape), stream.dtype)
@@ -289,28 +301,34 @@ class Elementwise(Operator):
             ]
         )
         barriers = [WorkerRuntimeBarrier() for _ in range(cores)]
+        held = [s.replicate for s in ins] + [False] * len(outs)
 
         def core_fn(*args):
-            fifos_in = args[:n_in]
-            fifos_out = args[n_in : n_in + len(outs)]
+            fifos = args[: n_in + len(outs)]
             kernel_fn, count, barrier = args[-3:]
             barrier.wait_for_value(1)
             n = count.read() if dynamic else count[0]
+            kept = {j: f.acquire(1) for j, f in enumerate(fifos) if held[j]}
             for _ in range_(n):
-                elements = [f.acquire(1) for f in fifos_in + fifos_out]
+                elements = [
+                    kept[j] if held[j] else f.acquire(1) for j, f in enumerate(fifos)
+                ]
                 kernel_fn(
                     *(
                         elements[order[i]] if i in order else scalars[i]
                         for i in range(n_args)
                     )
                 )
-                for f in fifos_in + fifos_out:
-                    f.release(1)
+                for j, f in enumerate(fifos):
+                    if not held[j]:
+                        f.release(1)
+            for j in kept:
+                fifos[j].release(1)
 
         workers = [
             Worker(
                 core_fn,
-                [of[k].cons() for of in of_ins]
+                [of[k % len(of)].cons() for of in of_ins]
                 + [of[k].prod() for of in of_outs]
                 + [kernel, counts[k], barriers[k]],
             )
@@ -318,7 +336,8 @@ class Elementwise(Operator):
         ]
         for k in range(cores):
             for stream, of in zip(ins, of_ins):
-                stream.lane(k).bind(of[k].prod())
+                if k < len(of):
+                    stream.lane(k).bind(of[k].prod())
             for stream, of in zip(outs, of_outs):
                 stream.lane(k).bind(of[k].cons())
         if not dynamic:

@@ -42,6 +42,7 @@ _OPERATOR_MODULES = {
     "Resample": "resample.op",
     "ResampleTaps": "resample.op",
     "RoPE": "rope",
+    "RowwiseMul": "elementwise_mul",
     "Sample": "sample",
     "Sigmoid": "sigmoid",
     "SiLU": "silu",
