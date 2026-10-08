@@ -216,18 +216,43 @@ def test_mha_band_and_head_that_do_not_tile_are_refused(kwargs, why):
 
 
 def test_mha_whose_head_fits_no_block_is_refused():
-    """At d=512 a P*V core's float32 O alone is half of L1 at 16 rows."""
+    """At d=768 even half the head's float32 O fills a P*V core at 16 rows."""
     with pytest.raises(Unresolvable, match="no block"):
-        MHA(num_heads=2, seq_len=1024, d=512, num_pipelines=8).resolved(
+        MHA(num_heads=2, seq_len=1024, d=768, num_pipelines=8).resolved(
             from_name("npu2", n_cols=8)
         )
 
 
 def test_mha_blocks_follow_the_head_size():
     npu2 = from_name("npu2", n_cols=8)
-    for d, block in ((64, 64), (128, 32), (256, 16)):
+    for d, block, pv_cores in ((64, 64, 1), (128, 32, 1), (256, 16, 1), (512, 16, 2)):
         op = MHA(num_heads=2, seq_len=1024, d=d, num_pipelines=8).resolved(npu2)
-        assert (op.B_q, op.B_kv) == (block, block)
+        assert (op.B_q, op.B_kv, op.pv_cores) == (block, block, pv_cores)
+        assert op.pv_width * pv_cores == d
+
+
+@pytest.mark.parametrize(
+    "kwargs,why",
+    [
+        (dict(seq_len=1024, d=512, pv_cores=3), "one core or two"),
+        (dict(seq_len=1536, d=512, num_pipelines=6), "at most 4 pipelines"),
+        (
+            dict(seq_len=1, kv_len=512, num_KV_heads=1, num_pipelines=2, pv_cores=2),
+            "P\\*V takes one core",
+        ),
+    ],
+    ids=["three_ways", "six_pipelines_to_a_join", "one_query_packed"],
+)
+def test_mha_whose_pv_split_does_not_route_is_refused(kwargs, why):
+    """Split, P*V's halves sit on the rows either side of the softmax core,
+    and each memtile then forwards its pipeline's scores and P as well as
+    its share of the O joins; one query packed has a shim's two channels
+    for its K and V.
+    """
+    with pytest.raises(ValueError, match=why):
+        MHA(**{"num_heads": 8, "num_pipelines": 8, **kwargs}).resolved(
+            from_name("npu2", n_cols=8)
+        )
 
 
 @pytest.mark.parametrize(

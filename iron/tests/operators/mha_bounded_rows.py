@@ -16,7 +16,7 @@ are the last rows of ``k[:, :position + 1]``, so a chunk at any offset
 attends causally over every key before it, and the keys past the bound are
 never read.
 
-A bidirectional window bounds the same way: a key past ``n`` is masked
+Bidirectional attention bounds the same way: a key past ``n`` is masked
 whether it lies before or after a query.
 """
 
@@ -85,11 +85,17 @@ def test_rows_past_the_valid_length_are_zero(npu_runtime):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_a_bidirectional_window_under_a_bound(npu_runtime):
-    """EmbeddingGemma 2's sliding layer: every key within 512 positions,
-    before or after, d=256 and unscaled, at a length that ends mid-block.
+@pytest.mark.parametrize(
+    "kv_heads,d,window",
+    [(2, 256, 512), (1, 512, None)],
+    ids=["sliding", "global"],
+)
+def test_bidirectional_attention_under_a_bound(npu_runtime, kv_heads, d, window):
+    """EmbeddingGemma 2's layers, unscaled, at a length that ends mid-block:
+    a sliding one sees every key within 512 positions, before or after, at
+    d=256; a global one every key, at d=512, its P*V split over two cores.
     """
-    heads, kv_heads, d, seq, window = 4, 2, 256, 2048, 512
+    heads, seq = 4, 2048
 
     class Attend(iron.Graph):
         def body(self, q, k, v, *, rows: Scratchpad[np.int32], n: Scratchpad[np.int32]):
