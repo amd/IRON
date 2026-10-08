@@ -184,7 +184,13 @@ def test_derived_fields_are_not_widths(npu2):
     assert gemm.resolved(npu2).widths == {"num_aie_columns": 8}
     found = variants(gemm, npu2)
     assert len({v.key for v in found}) == len(found)
-    assert MHA(num_heads=8, seq_pad=256).resolved(npu2).widths == {}
+    mha = MHA(num_heads=8, seq_pad=256).resolved(npu2)
+    assert mha.widths == {"num_pipelines": 1}
+    assert mha.domains(npu2) == {
+        "num_pipelines": (8, 4, 2, 1),
+        "B_q": (256, 128, 64),
+        "B_kv": (256, 128, 64),
+    }
     with pytest.raises(TypeError, match="no tunable"):
         gemm.with_tunables(n_shim_mem_a=1)
 

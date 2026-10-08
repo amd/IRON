@@ -45,12 +45,14 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Divisors,
     Extent,
     In,
     Operator,
     Out,
     Unresolvable,
     Value,
+    Width,
     auto,
     param,
     Select,
@@ -130,9 +132,27 @@ class MHA(Operator):
     kv_interleaved: bool = param(default=False)
     # The head dimension: the width of every tile and the kernel's DIM_K.
     d: int = param(default=64)
-    B_q: int = auto(64, array=True)
-    B_kv: int = auto(64)
-    num_pipelines: int = auto(1, array=True)
+    # A core holds one (B_q, B_kv) score tile, which caps either block.
+    B_q: int = auto(
+        64,
+        array=True,
+        domain=Divisors(
+            of=lambda op: op.kv_len,
+            step=64,
+            cap=lambda op, dev: dev.core_memory_bytes
+            // (op.B_kv * np.dtype(bfloat16).itemsize),
+        ),
+    )
+    B_kv: int = auto(
+        64,
+        domain=Divisors(
+            of=lambda op: op.kv_len,
+            step=64,
+            cap=lambda op, dev: dev.core_memory_bytes
+            // (op.B_q * np.dtype(bfloat16).itemsize),
+        ),
+    )
+    num_pipelines: int = auto(1, array=True, domain=Width())
     emulate_bf16_mmul_with_bfp16: bool = param(default=True, repr=False)
     # Filled by resolve: how the pipelines are split across shims, and K
     # and V's lanes, one every pipeline reads or, one query packed, one each.
