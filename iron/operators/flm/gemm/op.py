@@ -43,6 +43,7 @@ from aie.iron import (
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 from aie.iron.kernels import fused_mm
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
@@ -1210,3 +1211,31 @@ class GEMM(Operator):
         b = B.T if self.b_col_maj else B
         C = np.matmul(A.astype(np.float32), b.astype(np.float32)).astype(A.dtype)
         return Epilogue(self.epilogue).apply(C, self.clamp)
+
+    def tolerance(self) -> Tolerance | None:
+        """Each element of C within the roundings the kernel makes, in units
+        of 2^-8 of ``|A| @ |B|``: under 2 for C's conversion to bf16, even
+        truncating, and K * 2^-16 for the f32 accumulator. bfp16 macs round
+        A and B to bfp16ebs8 as well, 2 units more to nearest and 8
+        truncating.
+
+        A clamp moves no element further from its reference; an activation's
+        approximation is not bounded here, so an activated GEMM has none. On
+        npu2 over K = 512 to 8192, normal and all-positive inputs, no
+        configuration's worst element came above 0.89 of it.
+        """
+        if self.epilogue is not Epilogue.NONE:
+            return None
+        units = 2.0 + self.K * 2.0**-16
+        if self.emulate_bf16_mmul_with_bfp16:
+            units += 2.0 if self.rounding is Rounding.CONV_EVEN else 8.0
+
+        def bound(A, B):
+            b = B.T if self.b_col_maj else B
+            return (
+                units
+                * 2.0**-8
+                * (np.abs(A.astype(np.float32)) @ np.abs(b.astype(np.float32)))
+            )
+
+        return Tolerance.bounded(bound, note=f"{units:g} units of |A| @ |B|")
