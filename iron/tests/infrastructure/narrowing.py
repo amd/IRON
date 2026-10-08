@@ -34,10 +34,12 @@ from iron.common.graph.narrowing import (
 from iron.common.graph.probe import (
     CONTEXTS,
     Call,
+    Designs,
     Standalone,
     Timing,
     check_model,
     measure_graph,
+    measure_packs,
     measure_steps,
     others,
     platform,
@@ -53,6 +55,7 @@ from iron.operators import (
     Copy,
     ElementwiseAdd,
     ElementwiseMul,
+    RoPE,
     SiLU,
     Softmax,
 )
@@ -114,6 +117,13 @@ class Attend(iron.Graph):
         return MHA(q, k[:n], v[:n], heads_interleaved=True, kv_interleaved=True)
 
 
+class Rotate(iron.Graph):
+    """RoPE over the first `n` positions, `n` given per call."""
+
+    def body(self, x, angles, *, n: Scratchpad[np.int32]):
+        return RoPE(x[:n], angles[:n])
+
+
 class Project(iron.Graph):
     """The first `n` rows of `x` projected by `w`."""
 
@@ -135,6 +145,24 @@ def test_a_value_derived_from_a_bound_extent_follows_the_call(tmp_path):
         [key] = {cost_key(s.op) for s in traced.steps}
         t_step[n] = table.steps[key].t_step_us
     assert t_step[2048] > 3 * t_step[64], t_step
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_pack_runs_beside_a_reference_its_call_gives_values(tmp_path):
+    dev = aie_utils.ensure_current_device()
+    rotate = Call(Rotate().trace(x=(2048, 64), angles=(2048, 64)), dict(n=64))
+    calls = [rotate, Call(Chain().trace(a=(SIZE,), b=(SIZE,)))]
+    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    timing = Timing(rounds=1, calls=5)
+    measure_graph(table, calls, TRIANGLE, timing)
+    designs = Designs.of(calls, dev)
+    [rope] = {cost_key(s.op) for s in rotate.traced.steps}
+    # The narrowest settings, so the pack and its reference share the shims.
+    narrow = {k: min(vs, key=lambda v: v.mm2s) for k, vs in designs.settings.items()}
+    reference = narrow.pop(rope)
+    device = [v.key for v in narrow.values()]
+    [name] = measure_packs(table, [device], designs, [reference], timing)
+    assert table.packs[name].beside == reference.key
 
 
 @pytest.mark.supported_devices("npu2")

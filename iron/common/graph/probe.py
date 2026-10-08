@@ -1469,7 +1469,8 @@ def measure_packs(
             values and on the inputs of the call it first runs in.
         references: Designs whose loads the table holds, in the order
             preferred; a pack is run beside the first that is none of its
-            members, with random inputs at no per-call value.
+            members, at the values and on the inputs of the call it first
+            runs in where it is a setting of `designs`.
         cache: Packs it holds are taken from it rather than run, unless
             `remeasure`; those run are written to it.
 
@@ -1514,11 +1515,20 @@ def measure_packs(
         ops = [v.op for v, _, _ in members]
         values = {v.op: call.op_values(op) for v, op, call in members}
         inputs = {v.op: call.op_inputs(op) for v, op, call in members}
+        if reference.key in of:
+            _, op, call = of[reference.key]
+            values[reference.op] = call.op_values(op)
+            inputs[reference.op] = call.op_inputs(op)
         name = table.pack_name(keys)
         entry = None
         if cache is not None:
             entry = cache.pack_key(
-                cache.key(reference.resolved, dispatch=table.dispatch),
+                cache.key(
+                    reference.resolved,
+                    values.get(reference.op),
+                    inputs.get(reference.op),
+                    table.dispatch,
+                ),
                 [
                     cache.key(v.resolved, values[v.op], inputs[v.op], table.dispatch)
                     for v, _, _ in members
