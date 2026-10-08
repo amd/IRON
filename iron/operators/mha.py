@@ -39,7 +39,6 @@ from aie.iron import (
     kernels,
 )
 from aie.iron.controlflow import range_
-from aie.iron.device import Tile
 from aie.iron.kernels.linalg import mm_stream_dims
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
@@ -48,8 +47,11 @@ from iron.common import (
     Divisors,
     Extent,
     In,
+    Level,
     Operator,
     Out,
+    Pins,
+    Placement,
     Unresolvable,
     Value,
     Width,
@@ -58,6 +60,20 @@ from iron.common import (
     Select,
 )
 from iron.common.testing import Case, Testing
+
+# The hand-found memtiles: K's and V's broadcasts on (3, 1) and (4, 1), or a
+# lane per pipeline on its own column's, and Q's splits and O's joins on
+# (6, 1) and (7, 1). Left to the placer ("columns"), K's and V's share one
+# memtile and Q's takes a pipeline's forward. A pipeline's cores keep at
+# least its column: placed freely, 8 pipelines pack into 6 columns that
+# cannot be routed.
+PLACEMENT = Placement(
+    {
+        "memtiles": Pins(cores=Level.COLUMN, shims=Level.FREE),
+        "tiles": Pins(),
+        "columns": Pins(cores=Level.COLUMN, memtiles=Level.FREE, shims=Level.FREE),
+    }
+)
 
 
 class MHA(Operator):
@@ -102,6 +118,29 @@ class MHA(Operator):
                     num_pipelines=4,
                     heads_interleaved=True,
                 )
+            ),
+            # The chunk and the decode at each placement the tuner tries
+            # beside the default.
+            *(
+                Case(dict(shape, placement=placement), extensive=True)
+                for shape in (
+                    dict(
+                        num_heads=8,
+                        num_KV_heads=2,
+                        seq_len=2048,
+                        kv_len=8192,
+                        num_pipelines=8,
+                    ),
+                    dict(
+                        num_heads=32,
+                        num_KV_heads=8,
+                        seq_len=1,
+                        kv_len=2048,
+                        num_pipelines=4,
+                        heads_interleaved=True,
+                    ),
+                )
+                for placement in ("tiles", "columns")
             ),
             Case(
                 dict(
@@ -153,6 +192,7 @@ class MHA(Operator):
         ),
     )
     num_pipelines: int = auto(1, array=True, domain=Width())
+    placement: str = auto("memtiles", array=True, domain=PLACEMENT)
     emulate_bf16_mmul_with_bfp16: bool = param(default=True, repr=False)
     # Filled by resolve: how the pipelines are split across shims, and K
     # and V's lanes, one every pipeline reads or, one query packed, one each.
@@ -378,6 +418,7 @@ class MHA(Operator):
         B_q, B_kv, d = self.B_q, self.B_kv, self.d
         num_pipelines = self.num_pipelines
         n_join = num_pipelines // self.q_shims  # the pipelines on one shim
+        pins = PLACEMENT.pins(self.placement)
 
         inv_scale = (
             1 / np.sqrt(d)
@@ -463,9 +504,7 @@ class MHA(Operator):
         v_dims = pv.B
         o_dims = pv.C
 
-        # The memtiles are pinned: the default placer puts K's and V's broadcasts
-        # on one memtile and fills Q's with a pipeline's forward (11% slower).
-        # The Q splits and O joins, one per shim, on memtiles (6, 1) and (7, 1).
+        # The Q splits and O joins, one per shim.
         inQ, memQ, memO, outO = [], [], [], []
         for shim in range(self.q_shims):
             suffix = "" if shim == 0 else "2"
@@ -477,7 +516,7 @@ class MHA(Operator):
                 names=[f"memQ{suffix}{i}" for i in range(n_join)],
                 to_stream=None if q_dims is None else [q_dims] * n_join,
                 depths=[of_depth] * n_join,
-                tile=Tile(col=6 + shim, row=1),
+                tile=pins.memtiles.tile(6 + shim, 1),
             )
             mem_o = ObjectFifo(joined_ty, name=f"memO{suffix}", to_stream=o_dims)
             memO.append(mem_o)
@@ -486,12 +525,11 @@ class MHA(Operator):
                 obj_types=[q_ty] * n_join,
                 names=[f"outO{suffix}{i}" for i in range(n_join)],
                 depths=[of_depth] * n_join,
-                tile=Tile(col=6 + shim, row=1),
+                tile=pins.memtiles.tile(6 + shim, 1),
             )
 
         # K (stored column-major) and V are forwarded through a memtile: one
-        # stream each that every pipeline reads, through memtiles (3, 1) and
-        # (4, 1), or a lane per pipeline through its own column's.
+        # stream each that every pipeline reads, or a lane per pipeline.
         kv_lanes = self.kv_lanes
         inK, inV, memK, memV = [], [], [], []
         for lane in range(kv_lanes):
@@ -504,7 +542,7 @@ class MHA(Operator):
                 .forward(
                     name=f"memK{suffix}",
                     to_stream=k_dims,
-                    tile=Tile(col=3 if shared else lane, row=1),
+                    tile=pins.memtiles.tile(3 if shared else lane, 1),
                     depth=of_depth,
                 )
             )
@@ -515,7 +553,7 @@ class MHA(Operator):
                 .forward(
                     name=f"memV{suffix}",
                     to_stream=v_dims,
-                    tile=Tile(col=4 if shared else lane, row=1),
+                    tile=pins.memtiles.tile(4 if shared else lane, 1),
                     depth=of_depth,
                 )
             )
@@ -795,8 +833,6 @@ class MHA(Operator):
             [WorkerRuntimeBarrier() for _ in range(num_pipelines)] for _ in range(3)
         ]
 
-        # A pipeline's cores share its column: placed freely, 8 pipelines pack
-        # into 6 columns that cannot be routed.
         matmul_workers, softmax_workers, matmul_pv_workers = [], [], []
         for i in range(num_pipelines):
             idx_buffer_qk = Buffer(
@@ -819,7 +855,7 @@ class MHA(Operator):
                     ]
                     + params,
                     stack_size=0xD00,
-                    tile=Tile(col=i),
+                    tile=pins.cores.tile(i, 2),
                 )
             )
             idx_buffer_softmax = Buffer(
@@ -848,7 +884,7 @@ class MHA(Operator):
                     ]
                     + params,
                     stack_size=0xD00,
-                    tile=Tile(col=i),
+                    tile=pins.cores.tile(i, 3),
                 )
             )
             idx_buffer_pv = Buffer(
@@ -873,16 +909,22 @@ class MHA(Operator):
                     ]
                     + params,
                     stack_size=0xD00,
-                    tile=Tile(col=i),
+                    tile=pins.cores.tile(i, 4),
                 )
             )
 
+        # Q and O on shims 4 and 7, or on 0 and 1 split over two; K and V
+        # on 5 and 6, or a lane per pipeline on its own column's.
         for s in range(self.q_shims):
-            self.Q.lane(s).bind(inQ[s].prod())
-            self.O.lane(s).bind(memO[s].cons())
+            one = self.q_shims == 1
+            self.Q.lane(s).bind(inQ[s].prod(tile=pins.shims.tile(4 if one else s, 0)))
+            self.O.lane(s).bind(memO[s].cons(tile=pins.shims.tile(7 if one else s, 0)))
         for lane in range(kv_lanes):
-            self.K.lane(lane).bind(inK[lane].prod())
-            self.V.lane(lane).bind(inV[lane].prod())
+            shared = kv_lanes == 1
+            k_shim = pins.shims.tile(5 if shared else lane, 0)
+            v_shim = pins.shims.tile(6 if shared else lane, 0)
+            self.K.lane(lane).bind(inK[lane].prod(tile=k_shim))
+            self.V.lane(lane).bind(inV[lane].prod(tile=v_shim))
 
         flat_rtps = [b for stage in mha_rtps_list for b in stage]
         for i, name in enumerate(counts):

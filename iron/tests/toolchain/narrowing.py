@@ -208,6 +208,7 @@ def test_derived_fields_are_not_widths(npu2):
         "num_pipelines": (8, 4, 2, 1),
         "B_q": (256, 128, 64),
         "B_kv": (256, 128, 64),
+        "placement": ("memtiles", "tiles", "columns"),
     }
     with pytest.raises(TypeError, match="no tunable"):
         gemm.with_tunables(n_shim_mem_a=1)
@@ -288,12 +289,39 @@ def test_flm_gemm_searches_its_a_tile_and_row_blocks(npu2):
     assert gemm.domains(npu2) == {"tile_ma": (64, 32, 16), "m_chunk": (8, 4, 2, 1)}
 
 
+def test_a_placement_is_searched_by_name_and_keys_the_array(tmp_path, npu2):
+    chunk = MHA(num_heads=8, num_KV_heads=2, seq_len=2048, kv_len=8192)
+    chunk = chunk.with_tunables(num_pipelines=8, B_q=64, B_kv=64)
+    found = variants(chunk, npu2, frozenset({"num_pipelines", "B_q", "B_kv"}))
+    assert [v.tunables for v in found] == [
+        (("placement", p),) for p in ("memtiles", "tiles", "columns")
+    ]
+    assert len({v.array for v in found}) == len({v.key for v in found}) == 3
+    kept, refused = fitting(found, tmp_path / "fits")
+    assert kept == found and not refused
+    # A profile's placement starts the search, the declared ones after it.
+    profile = Profile()
+    profile.add(MHA, placement="columns")
+    with profile:
+        held = MHA(num_heads=8, seq_pad=256)
+    assert held.resolved(npu2).domains(npu2)["placement"] == (
+        "columns",
+        "memtiles",
+        "tiles",
+    )
+
+
 def test_a_placement_holds_each_kind_of_tile_at_its_level():
     assert Level.FREE.tile(3, 1) is None
     column = Level.COLUMN.tile(3, 1)
     assert (column.col, column.row) == (3, None)
     tile = Level.TILE.tile(3, 1)
     assert (tile.col, tile.row) == (3, 1)
+
+
+def test_a_placement_no_operator_declares_is_refused(npu2):
+    with pytest.raises(ValueError, match="'diagonal' is none of 'memtiles'"):
+        MHA(num_heads=8, seq_pad=256, placement="diagonal").resolved(npu2)
 
 
 def test_a_profile_refuses_a_derived_field():
