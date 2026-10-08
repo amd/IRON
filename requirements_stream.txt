@@ -20,4 +20,4 @@
 # package directory, so that environment must be writable.
 
 onnx
-stream-dse>=1.13.14
+stream-dse>=1.13.14,<1.15
