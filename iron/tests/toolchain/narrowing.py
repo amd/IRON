@@ -29,6 +29,7 @@ from iron.common.graph.narrowing import (
     CostTable,
     JointNarrowing,
     PackCost,
+    PointCost,
     Runlist,
     StepCost,
     cost_key,
@@ -399,6 +400,36 @@ def test_a_measured_pack_costs_its_entry_and_its_steps_on_it(tmp_path):
     assert again.packs == table.packs
 
 
+def test_a_step_priced_at_operating_points_costs_their_weighted_mean(tmp_path):
+    table = _table(tmp_path / "costs.json", {"a": (10.0, 100.0), "b": (2.0, 100.0)})
+    alone = model_us(table, ["a", "b", "a"])
+    points = {
+        "kv_valid=256": PointCost(0.25, 6.0, 0.1, True, True, 50),
+        "kv_valid=8192": PointCost(0.5, 30.0, 0.1, True, True, 50),
+    }
+    table.record_step("a", dataclasses.replace(table.steps["a"], points=points))
+    # The weights need not sum to 1: (0.25 * 6 + 0.5 * 30) / 0.75.
+    assert table.t_step("a") == pytest.approx(22.0)
+    assert model_us(table, ["a", "b", "a"]) == pytest.approx(
+        (alone[0] + 24.0, alone[1])
+    )
+    # Packed, its step there moves as much from what the pack measured.
+    x = table.load("x") + table.base_us
+    table.record_pack(
+        ["b", "a"], PackCost("x", x + 150.0, {"a": 3.0, "b": 4.0}, "turbo", 1, 1, "-")
+    )
+    assert table.pack_step(table.pack_name(["a", "b"]), "a") == pytest.approx(15.0)
+    assert model_us(table, ["a", "b", "a"], [("a", "b")]) == pytest.approx(
+        (50.0 + 34.0 + 150.0 + 30.0, 2)
+    )
+    table.save()
+    again = CostTable(table.path)
+    assert again.steps == table.steps and again.steps["a"].points == points
+    assert "points" not in next(
+        r for r in table.path.read_text().splitlines() if r.startswith('  "b"')
+    )
+
+
 def _table(path, steps, dispatch=50.0, reset=30.0, base=30.0):
     """A table holding the given (t_step, load) per key, composed as the
     probe measures them: each beside x, and the pairs of ``TRIANGLE``.
@@ -614,6 +645,31 @@ def test_a_setting_is_taken_only_where_it_wins_beyond_the_noise(
     assert tuning.chosen[default.key].key == (other.key if taken else default.key)
 
 
+@pytest.mark.parametrize("noise_us, taken", [(0.5, True), (2.0, False), (None, False)])
+def test_a_setting_priced_at_points_wins_only_beyond_their_noise(
+    noise_us, taken, tmp_path, npu2
+):
+    # 3 us faster at both points, each half the calls, against a margin of
+    # 2 * sqrt(0.5^2 + 4 * (0.5 * noise_us)^2): 1.4 us at 0.5, 4.1 us at 2.0.
+    traced = Apart().trace(a=(SIZE,), b=(SIZE,), c=(2 * SIZE,), d=(2 * SIZE,))
+    large = traced.steps[-1].op
+    default, other = variants(large, npu2)[:2]
+    table = _separate(
+        tmp_path / "costs.json", {default.key: (100.0, 80.0), other.key: (97.0, 80.0)}
+    )
+    for v in (default, other):
+        cost = table.steps[v.key]
+        points = {
+            label: PointCost(0.5, cost.t_step_us + shift, noise_us, True, True, 50)
+            for label, shift in (("n=1", 0.0), ("n=2", 40.0))
+        }
+        table.steps[v.key] = dataclasses.replace(cost, noise_us=0.5, points=points)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(
+        traced, npu2, "separate"
+    )
+    assert tuning.chosen[default.key].key == (other.key if taken else default.key)
+
+
 def _add_silu(tmp_path, dev):
     """The traced graph, its operators by class, and a table holding every
     width of add and silu, and none of gelu.
@@ -751,6 +807,54 @@ def test_an_inexact_width_is_taken_only_if_accurate(accurate, tmp_path, npu2):
     assert tuning.chosen[key].key == (exact.key if accurate else default.key)
     assert tuning.inexact == ((key,) if accurate else ())
     assert ("not exact" in tuning.report()) == accurate
+
+
+@pytest.mark.parametrize("weight", [0.0, 0.5])
+def test_the_tuner_takes_the_setting_cheapest_over_the_points(weight, tmp_path, npu2):
+    traced, ops, table = _add_silu(tmp_path, npu2)
+    key = cost_key(ops["SiLU"])
+    tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
+    first = tuner.tune(traced, npu2, "fused").chosen[key]
+    # The setting the reference prefers is far dearer at the long point.
+    for v in variants(ops["SiLU"], npu2):
+        cost = table.steps[v.key]
+        far = cost.t_step_us + (1000.0 if v.key == first.key else 0.0)
+        points = {
+            "n=1": PointCost(1.0 - weight, cost.t_step_us, 0.1, True, True, 50),
+            "n=2": PointCost(weight, far, 0.1, True, True, 50),
+        }
+        table.record_step(v.key, dataclasses.replace(cost, points=points))
+    chosen = tuner.tune(traced, npu2, "fused").chosen[key]
+    assert (chosen.key == first.key) == (weight == 0.0)
+
+
+@pytest.mark.parametrize("flaw", ["inaccurate", "unpriced", "inexact"])
+def test_a_setting_is_taken_only_if_accurate_at_the_defaults_points(
+    flaw, tmp_path, npu2
+):
+    traced, ops, table = _add_silu(tmp_path, npu2)
+    key = cost_key(ops["SiLU"])
+    tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
+    first = tuner.tune(traced, npu2, "fused").chosen[key]
+    assert first.key != key
+    for v in variants(ops["SiLU"], npu2):
+        cost = table.steps[v.key]
+        flawed = v.key == first.key
+        far = PointCost(0.5, cost.t_step_us, 0.1, True, True, 50)
+        if flawed and flaw == "inaccurate":
+            far = dataclasses.replace(far, exact=False, accurate=False)
+        if flawed and flaw == "inexact":
+            far = dataclasses.replace(far, exact=False)
+        points = {
+            "n=1": PointCost(0.5, cost.t_step_us, 0.1, True, True, 50),
+            "n=2": far,
+        }
+        if flawed and flaw == "unpriced":
+            points = None
+        table.record_step(v.key, dataclasses.replace(cost, points=points))
+    tuning = tuner.tune(traced, npu2, "fused")
+    assert (tuning.chosen[key].key == first.key) == (flaw == "inexact")
+    assert (key in tuning.inexact) == (flaw == "inexact")
 
 
 def test_apply_rebuilds_the_narrowed_steps(tmp_path, npu2):

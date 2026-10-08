@@ -30,6 +30,12 @@ bit-identical to the default's, or within the gate of the default and its
 own. A design the table does not hold stays at its default, alone in its
 device.
 
+A design whose work follows a per-call value (a bound extent: attention
+over the context so far) is priced at the calls' operating points where
+the table holds them (``StepCost.points``): ``t_step`` is their weighted
+mean, a pack's step moves with it, and a setting is a candidate only if
+accurate at each.
+
 An xclbin chain (a ``"separate"`` table) is a dispatch per step and a
 kernel per design, so nothing packs and the designs of one array are not
 tied:
@@ -58,6 +64,7 @@ import hashlib
 import heapq
 import itertools
 import json
+import math
 import os
 import statistics
 from collections import Counter
@@ -269,12 +276,38 @@ def shim_budget(dev) -> tuple[int, int]:
 
 
 @dataclasses.dataclass(frozen=True)
+class PointCost:
+    """One design at one setting, stepped at one of its operating points:
+    per-call values that change its work, as a long context does attention's.
+
+    Attributes:
+        weight: The share of the calls priced that run at this point.
+        t_step_us: Its time per step there: its ``StepCost.t_step_us`` plus
+            how much longer a step there took than one at the call's own
+            values, the two run interleaved.
+        noise_us: The standard error of that shift, paired round by round;
+            None from a single round.
+        exact: Its output there is bit-identical to the default setting's.
+        accurate: Exact, or judged within the default's gate and its own.
+        calls: The runs a round timed, fewer where a run is long.
+    """
+
+    weight: float
+    t_step_us: float
+    noise_us: float | None
+    exact: bool
+    accurate: bool
+    calls: int
+
+
+@dataclasses.dataclass(frozen=True)
 class StepCost:
     """One design at one setting of its tunables, measured alone.
 
     Attributes:
-        t_step_us: Its time per step while its device is configured; on an
-            xclbin chain, `c`, a step dispatched alone.
+        t_step_us: Its time per step while its device is configured, at the
+            per-call values of the call it is measured in; on an xclbin
+            chain, `c`, a step dispatched alone.
         noise_us: The standard error it is compared to its design's default
             by: on the default's own row, of `t_step_us`; on any other, of
             its difference from the default, paired round by round in the
@@ -289,6 +322,8 @@ class StepCost:
             step; None on that design's own row.
         pair_us: The entries of the two, `E(beside) + E`, where a design's
             entry `E` is `base + load` (on an xclbin chain, `L`).
+        points: Where the calls priced run it at more than one point, each
+            by the bound extents it writes there (``"kv_valid=1024"``).
     """
 
     t_step_us: float
@@ -302,6 +337,32 @@ class StepCost:
     measured: str  # ISO date
     beside: str | None = None
     pair_us: float | None = None
+    points: dict[str, PointCost] | None = None
+
+    @classmethod
+    def of(cls, row: Mapping[str, Any]) -> StepCost:
+        """The cost a table's JSON row holds."""
+        points = row.get("points")
+        if points is None:
+            return cls(**row)
+        return cls(**{**row, "points": {k: PointCost(**p) for k, p in points.items()}})
+
+    @property
+    def expected_us(self) -> float:
+        """Its step at the calls priced: its points' times by their weights,
+        else `t_step_us`.
+        """
+        if not self.points:
+            return self.t_step_us
+        points = self.points.values()
+        return sum(p.weight * p.t_step_us for p in points) / sum(
+            p.weight for p in points
+        )
+
+    @property
+    def admitted(self) -> bool:
+        """It may replace the default at every point it is priced at."""
+        return self.accurate and all(p.accurate for p in (self.points or {}).values())
 
 
 @dataclasses.dataclass(frozen=True)
@@ -405,7 +466,7 @@ class CostTable:
                     self,
                     name,
                     {
-                        k: kind(**v)
+                        k: StepCost.of(v) if kind is StepCost else kind(**v)
                         for k, v in data.get(name, {}).items()
                         if required <= v.keys()
                     },
@@ -436,19 +497,16 @@ class CostTable:
         if self.packs:
             sectioned.append(("packs", self.packs))
         for name, table in sectioned:
-            # A field left at its default None is left out; a required one is kept.
-            rows = [
-                f"{json.dumps(k)}: "
-                + json.dumps(
-                    {
-                        f.name: getattr(v, f.name)
-                        for f in dataclasses.fields(v)
-                        if getattr(v, f.name) is not None
-                        or f.default is dataclasses.MISSING
-                    }
-                )
-                for k, v in sorted(table.items())
-            ]
+            rows = []
+            for k, v in sorted(table.items()):
+                row = dataclasses.asdict(v)
+                # A field left at its default None is left out; a required one is kept.
+                kept = {
+                    f.name: row[f.name]
+                    for f in dataclasses.fields(v)
+                    if row[f.name] is not None or f.default is dataclasses.MISSING
+                }
+                rows.append(f"{json.dumps(k)}: {json.dumps(kept)}")
             sections.append(f'"{name}": {{\n  ' + ",\n  ".join(rows) + "\n}")
         self.path.write_text("{" + ",\n".join(sections) + "}\n")
 
@@ -531,21 +589,47 @@ class CostTable:
         return self._calibrated("base_us")
 
     def t_step(self, key: str) -> float:
+        """A design's step at the calls priced (``StepCost.expected_us``);
+        0 if unmeasured.
+        """
         cost = self.steps.get(key)
-        return 0.0 if cost is None else cost.t_step_us
+        return 0.0 if cost is None else cost.expected_us
+
+    def pack_step(self, name: str, key: str) -> float:
+        """A member's step on the device ``packs`` holds as ``name``, at the
+        calls priced: its step there, measured at its call's values, moved
+        as its own step moves from those to its points.
+        """
+        cost = self.steps[key]
+        return self.packs[name].t_step_us[key] + cost.expected_us - cost.t_step_us
 
     def step_against(self, key: str, default: str, confidence: float) -> float:
-        """Setting ``key``'s step time as a choice against its design's
-        ``default``: the default's where ``key`` is faster by less than
+        """Setting ``key``'s step time at the calls priced (``t_step``) as a
+        choice against its design's ``default``, which is priced at the same
+        points: the default's where ``key`` is faster by less than
         ``confidence`` standard errors of their difference, or by any
         amount where that is unknown. A win within the noise is not one.
         """
         t, d = self.steps.get(key), self.steps.get(default)
         if key == default or t is None or d is None:
             return self.t_step(key)
-        if t.noise_us is None or t.t_step_us >= d.t_step_us - confidence * t.noise_us:
-            return max(t.t_step_us, d.t_step_us)
-        return t.t_step_us
+        points = t.points or {}
+        total = sum(p.weight for p in points.values())
+        # The difference at each point is the one at the call's values plus
+        # the two settings' shifts there, each measured on its own.
+        noises = [(1.0, t.noise_us)] + [
+            (p.weight / total, noise)
+            for label, p in points.items()
+            for noise in (p.noise_us, d.points[label].noise_us)
+        ]
+        noise = (
+            None
+            if any(n is None for _, n in noises)
+            else math.sqrt(sum((w * n) ** 2 for w, n in noises))
+        )
+        if noise is None or t.expected_us >= d.expected_us - confidence * noise:
+            return max(t.expected_us, d.expected_us)
+        return t.expected_us
 
     def load(self, key: str) -> float:
         """What configuring a design adds to an entry's base; 0 if unmeasured.
@@ -709,7 +793,9 @@ def model_us(
         here = packing.device_of(k)
         pack = table.packs.get(names[here])
         key = chosen.get(k, k)
-        total += table.t_step(key) if pack is None else pack.t_step_us[key]
+        total += (
+            table.t_step(key) if pack is None else table.pack_step(names[here], key)
+        )
         if here != previous:
             entries += 1
             if pack is None:
@@ -1052,7 +1138,14 @@ class JointNarrowing:
             inexact=tuple(
                 k
                 for k, v in chosen.items()
-                if v.key != k and not table.steps[v.key].exact
+                if v.key != k
+                and not all(
+                    c.exact
+                    for c in [
+                        table.steps[v.key],
+                        *(table.steps[v.key].points or {}).values(),
+                    ]
+                )
             ),
         )
 
@@ -1137,9 +1230,8 @@ class JointNarrowing:
                 return entries * table.base_us + sum(
                     member_cost(i, v, entries) for i, v in zip(members, pick)
                 )
-            pack = table.packs[name]
             return entries * table.pack_entry(name) + sum(
-                occurrences[m] * pack.t_step_us[s.key] for m, s in settings
+                occurrences[m] * table.pack_step(name, s.key) for m, s in settings
             )
 
         # Alone, each design takes its cheapest setting.
@@ -1207,15 +1299,21 @@ class JointNarrowing:
     def _candidates(
         self, op: Operator, dev, pinned: frozenset[str] = frozenset()
     ) -> list[Variant]:
-        """The default setting, then every other one measured accurate."""
+        """The default setting, then every other one measured accurate at
+        every point the default is priced at, and at those alone.
+        """
         found = variants(op, dev, pinned)
         default = found[0]
-        if default.key not in self.table.steps:
+        steps = self.table.steps
+        if default.key not in steps:
             return [default]
+        points = (steps[default.key].points or {}).keys()
         return [default] + [
             v
             for v in found[1:]
-            if v.key in self.table.steps and self.table.steps[v.key].accurate
+            if v.key in steps
+            and steps[v.key].admitted
+            and (steps[v.key].points or {}).keys() == points
         ]
 
     @staticmethod
