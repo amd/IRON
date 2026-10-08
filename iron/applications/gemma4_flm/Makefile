@@ -7,11 +7,16 @@
 #   make engine    builds the IRON operators and the IRON engine
 #   make serve     serves the model on the IRON engine
 
-FLM_REPO   := https://github.com/andrej/FastFlowLM
-FLM_COMMIT := 609bc6714987beb8c35079ac8a51b53e0bf067d0
+FLM_REPO   := https://github.com/ROCm/FastFlowLM
+FLM_COMMIT := 95f455e7ca39a2088b8a457dc44af10ecb3c2b40
 BUILD      := $(CURDIR)/build
 FLM        := $(BUILD)/FastFlowLM/src
-CMAKE      := cmake -S $(FLM) -G Ninja -DFLM_VERSION=1.0.5 -DNPU_VERSION=32.0.203.304
+# The stock build writes flm to its own binary directory.
+FLM_BIN    := $(BUILD)/stock/flm
+# FLM_BUILD_GEMMA4E defaults to off, which links FastFlowLM's prebuilt Gemma 4
+# engine and leaves the gemma4e_npu target undefined.
+CMAKE      := cmake -S $(FLM) -G Ninja -DFLM_VERSION=1.0.5 -DNPU_VERSION=32.0.203.304 \
+              -DFLM_BUILD_GEMMA4E=ON
 TXN_INC    := $(shell python3 -c "import aie.utils.config as c; print(c.runtime_header_path())")
 MODEL      := $(or $(FLM_MODEL_PATH),$(error set FLM_MODEL_PATH))/models/Gemma4-E2B-IT-NPU2
 PORT       ?= 11434
@@ -34,7 +39,7 @@ weights: $(MODEL)/model.q4nx
 # prefix. A build that is not installed finds it through FLM_MODELINFO_PATH.
 # flm pull exits 0 when it downloads nothing, so the recipe checks the file.
 $(MODEL)/model.q4nx: | flm
-	cd $(FLM) && FLM_MODELINFO_PATH=$(FLM)/model_info.json ./build/flm pull gemma4-it:e2b
+	cd $(FLM) && FLM_MODELINFO_PATH=$(FLM)/model_info.json $(FLM_BIN) pull gemma4-it:e2b
 	test -f $@
 
 # build.py reads the model's config and repacks its PLI weights. The
@@ -50,4 +55,4 @@ engine: flm operators
 
 serve:
 	cd $(FLM) && LD_LIBRARY_PATH=$(BUILD)/engine/engines:$$LD_LIBRARY_PATH FLM_XCLBIN_PATH=$(BUILD) \
-	    ./build/flm serve gemma4-it:e2b --prefill-chunk-len 512 --port $(PORT)
+	    $(FLM_BIN) serve gemma4-it:e2b --prefill-chunk-len 512 --port $(PORT)

@@ -62,7 +62,7 @@ Run the steps below from this directory, `iron/applications/gemma4_flm`.
    ```bash
    cd build/FastFlowLM/src
    LD_LIBRARY_PATH=../../engine/engines FLM_XCLBIN_PATH=../.. \
-       ./build/flm serve gemma4-it:e2b --prefill-chunk-len 512 --port 11434
+       ../../stock/flm serve gemma4-it:e2b --prefill-chunk-len 512 --port 11434
    ```
 
    Send it a request from another terminal:
@@ -83,7 +83,7 @@ Run the steps below from this directory, `iron/applications/gemma4_flm`.
    ```bash
    cd build/FastFlowLM/src
    LD_LIBRARY_PATH=../../engine/engines FLM_XCLBIN_PATH=../.. \
-       ./build/flm run gemma4-it:e2b --prefill-chunk-len 512
+       ../../stock/flm run gemma4-it:e2b --prefill-chunk-len 512
    ```
 
 The test serves a word problem and a 1259-token prompt on both engines. It
@@ -94,9 +94,10 @@ token and decode rate for each prompt. Run it from the repository root:
 pytest --iterations 1 iron/applications/gemma4_flm
 ```
 
-The `Makefile` clones FastFlowLM at the commit of
+The `Makefile` clones FastFlowLM at the merge of
 [ROCm/FastFlowLM#763](https://github.com/ROCm/FastFlowLM/pull/763), which adds
-the `FLM_OVERRIDE` hooks and the Gemma 4 engine.
+the `FLM_OVERRIDE` hooks and the Gemma 4 engine. `FLM_BUILD_GEMMA4E=ON` builds
+that engine from source in place of FastFlowLM's prebuilt one.
 
 | File | Purpose |
 |---|---|
