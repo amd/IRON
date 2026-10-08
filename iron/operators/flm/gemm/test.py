@@ -14,6 +14,7 @@ from iron.common.design.build import build_design
 from iron.common.harness import run_test, vectors
 from iron.common.image import OperatorImage
 from iron.operators import GEMM as GenericGEMM
+from iron.operators.clamp import Clamp
 from iron.operators.flm.gemm.design import (
     BFP16_GROUP,
     BFP16_GROUP_BYTES,
@@ -31,6 +32,7 @@ from iron.operators.flm.gemm.design import (
 from iron.operators.flm.gemm.op import GEMM
 from iron.operators.flm.gemm.shipped import Shipped
 from iron.operators.flm.testing import skip_flm_gemm_on_npu1
+from iron.operators.silu import SiLU
 
 pytestmark = skip_flm_gemm_on_npu1
 
@@ -211,6 +213,23 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, npu_runtime, record_property):
         operator, flm_vectors(operator, scale), rounding, record=record_property
     )
 
+    assert not errors, "Test failed"
+
+
+def test_folded_silu_and_clamp_compute_what_their_operators_do(npu_runtime):
+    """SiLU then Clamp folded into the epilogue, against those operators'
+    own references applied to the product.
+    """
+    dev = aie_utils.get_current_device()
+    M, K, N = 256, 512, (1024 if dev.arch is AIEArch.AIE2p else 512)
+    plain = GEMM(M=M, K=K, N=N)
+    silu = SiLU(size=M * N)
+    clamp = Clamp(size=M * N, low=-0.25, high=1.5)
+    operator = plain.fold(silu).fold(clamp)
+    assert (operator.epilogue, operator.clamp) == (SILU, (-0.25, 1.5))
+    data = flm_vectors(plain, ACTIVATION_INPUT_SCALE)
+    C = clamp.reference(silu.reference(data["C"].reshape(-1)))
+    errors, _, _ = check_on_device(operator, {"A": data["A"], "B": data["B"], "C": C})
     assert not errors, "Test failed"
 
 

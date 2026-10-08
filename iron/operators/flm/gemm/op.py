@@ -56,6 +56,7 @@ from iron.common import (
     Select,
 )
 from iron.common.design import BdLimits
+from iron.operators.clamp import Clamp
 from iron.operators.flm.gemm.design import (
     _VERIFIED_CT_K,
     A_DEPTH,
@@ -91,6 +92,8 @@ from iron.operators.flm.gemm.design import (
     rtp_layout,
 )
 from iron.operators.flm.packing import pack_b, packed_b_size
+from iron.operators.sigmoid import Sigmoid
+from iron.operators.silu import SiLU
 
 
 class _BPool(NamedTuple):
@@ -1113,6 +1116,28 @@ class GEMM(Operator):
         return dataclasses.replace(
             self, M=M, K=K, N=N, epilogue=Epilogue.NONE, clamp=None, packed_blocks=None
         )
+
+    # -- folding -----------------------------------------------------------------
+
+    def fold(self, consumer, at: int = 0) -> "GEMM | None":
+        """This GEMM applying ``consumer`` in its epilogue: SiLU or Sigmoid as
+        its activation, then Clamp as its clamp, the bounds rounded to bf16
+        as Clamp rounds them. The epilogue's gelu is ``x * sigmoid(1.702x)``,
+        not the GELU operator's, so GELU does not fold.
+        """
+        if consumer.finish or consumer.prepare or self.clamp is not None:
+            return None
+        if isinstance(consumer, Clamp):
+            bounds = np.array([consumer.low, consumer.high], bfloat16)
+            return dataclasses.replace(self, clamp=tuple(bounds.astype(float).tolist()))
+        mode = {SiLU: Epilogue.SILU, Sigmoid: Epilogue.SIGMOID}.get(type(consumer))
+        if (
+            mode is None
+            or self.epilogue is not Epilogue.NONE
+            or mode not in self.epilogue_modes
+        ):
+            return None
+        return dataclasses.replace(self, epilogue=mode)
 
     # -- host-side helpers -------------------------------------------------------
 
