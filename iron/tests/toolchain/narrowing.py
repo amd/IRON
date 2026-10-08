@@ -34,6 +34,7 @@ from iron.common.graph.probe import judge
 from iron.common.harness import vectors
 from iron.lm.layers import SwiGLU
 from iron.operators import GELU, GEMM, MHA, ElementwiseAdd, ReLU, RoPE, SiLU
+from iron.operators.flm import DequantBFP
 
 SIZE = 8192
 TILE = 256
@@ -135,6 +136,13 @@ def test_derived_fields_are_not_widths(npu2):
     assert MHA(num_heads=8, seq_pad=256).resolved(npu2).widths == {}
     with pytest.raises(TypeError, match="no tunable"):
         gemm.with_tunables(n_shim_mem_a=1)
+
+
+def test_a_baked_replication_is_not_searched(npu2):
+    # The join bakes DequantBFP's two n-halves, though a per= names them.
+    assert DequantBFP(K=2048, N=2048).resolved(npu2).domains(npu2) == {
+        "cols": (8, 4, 2, 1)
+    }
 
 
 def test_a_profile_refuses_a_derived_field():

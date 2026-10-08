@@ -222,7 +222,7 @@ def test_one_xclbin_serves_every_shape(npu_runtime):
     [
         # flm.GEMM may be asked for tile_n=128, the NPU2 winner at K = 512;
         # this operator does not emit that order and must say so.
-        (512, 128, dict(tile_n=128), NotImplementedError, "tile_n"),
+        (512, 128, dict(tile_n=128), ValueError, "tile_n"),
         # Extents the grid does not divide: refused once the grid is known.
         (1000, 128, {}, ValueError, "multiple of"),
         (1024, 100, {}, ValueError, "multiple of"),

@@ -133,9 +133,9 @@ class DequantBFP(Operator):
     tile_n: int = auto()
     # cols follows the device. ROWS is baked into the split offsets and the
     # join, so it is not a field; halves is, because a stream's replication
-    # count must be declared to be indexed.
+    # count must be declared to be indexed, but the join bakes it too.
     cols: int = auto(repr=False)
-    halves: int = auto(HALVES, repr=False)
+    halves: int = auto(HALVES, repr=False, init=False)
 
     # One q4nx block per core, delivered as one per-column object the cores
     # split; one packed half-tile out per (column, n-half), joined from the
@@ -158,10 +158,8 @@ class DequantBFP(Operator):
     # -- checks ----------------------------------------------------------------
 
     def validate(self) -> None:
-        # NotImplementedError rather than ValueError: flm.GEMM may legitimately
-        # pick tile_n=128; this operator does not emit that order yet.
         if self.tile_n is not None and self.tile_n != N_TILE:
-            raise NotImplementedError(
+            raise ValueError(
                 f"tile_n must be {N_TILE}; this operator emits that order only. "
                 f"flm.GEMM picks {self.tile_n} for some shapes, and the two must "
                 "agree or the GEMM reads B in the wrong order"
