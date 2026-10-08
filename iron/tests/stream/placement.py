@@ -15,19 +15,20 @@ pytest.importorskip(
     "stream", reason="stream-dse not installed (see requirements_stream.txt)"
 )
 
-import aie.utils as aie_utils  # noqa: E402
-from aie.iron.device import NPU2  # noqa: E402
-
-aie_utils.set_current_device(NPU2())
-
 from iron.operators.swiglu_prefill_stream import stream_design  # noqa: E402
 from iron.operators.swiglu_prefill_stream.stream.hardware import (  # noqa: E402
     ComputeArray,
 )
 
-ARRAY = stream_design.array()
+pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 DIMS = (256, 512, 2048)
+
+
+@pytest.fixture
+def array(npu2):
+    return stream_design.array()
+
 
 # The core ids the fused placement resolves to on the whole-array Strix target.
 MEASURED_ALLOCATION = {
@@ -39,42 +40,42 @@ MEASURED_ALLOCATION = {
 }
 
 
-def test_array_matches_the_device():
-    assert (ARRAY.num_columns, ARRAY.num_rows) == (8, 4)
-    assert ARRAY.all_columns == tuple(range(8))
+def test_array_matches_the_device(array):
+    assert (array.num_columns, array.num_rows) == (8, 4)
+    assert array.all_columns == tuple(range(8))
 
 
-def test_columns_hold_only_compute_tiles():
-    ids = [core for column in ARRAY.columns for core in column]
-    assert len(ids) == ARRAY.num_columns * ARRAY.num_rows
+def test_columns_hold_only_compute_tiles(array):
+    ids = [core for column in array.columns for core in column]
+    assert len(ids) == array.num_columns * array.num_rows
     assert len(set(ids)) == len(ids)
 
 
-def test_cores_follow_column_then_row_order():
-    assert ARRAY.cores([0]) == ARRAY.columns[0]
-    assert ARRAY.cores([0, 1]) == ARRAY.columns[0] + ARRAY.columns[1]
+def test_cores_follow_column_then_row_order(array):
+    assert array.cores([0]) == array.columns[0]
+    assert array.cores([0, 1]) == array.columns[0] + array.columns[1]
 
 
-def test_rows_narrow_a_placement_to_one_worker_per_column():
+def test_rows_narrow_a_placement_to_one_worker_per_column(array):
     """The shape IRON's channeled operators give an elementwise layer."""
-    assert ARRAY.cores(ARRAY.all_columns, rows=[0]) == tuple(
-        column[0] for column in ARRAY.columns
+    assert array.cores(array.all_columns, rows=[0]) == tuple(
+        column[0] for column in array.columns
     )
 
 
-def test_allocate_gives_disjoint_consecutive_columns():
-    ranges = ARRAY.allocate([2, 2, 1, 1, 2])
+def test_allocate_gives_disjoint_consecutive_columns(array):
+    ranges = array.allocate([2, 2, 1, 1, 2])
     assert ranges == ((0, 1), (2, 3), (4,), (5,), (6, 7))
     flat = [column for group in ranges for column in group]
     assert len(set(flat)) == len(flat)
 
 
-def test_allocate_rejects_an_oversubscribed_array():
+def test_allocate_rejects_an_oversubscribed_array(array):
     with pytest.raises(ValueError):
-        ARRAY.allocate([ARRAY.num_columns, 1])
+        array.allocate([array.num_columns, 1])
 
 
-def test_ids_agree_with_the_accelerator_stream_solves_against():
+def test_ids_agree_with_the_accelerator_stream_solves_against(array):
     """IRON derives core ids from the device; stream-dse reads them from its own
     accelerator description. A design is only correct while the two agree.
     """
@@ -100,7 +101,7 @@ def test_ids_agree_with_the_accelerator_stream_solves_against():
         tuple(core_id for _, core_id in sorted(rows))
         for _, rows in sorted(by_column.items())
     )
-    assert ARRAY.columns == expected
+    assert array.columns == expected
 
 
 def test_emitted_allocation_resolves_to_the_expected_cores(tmp_path):
@@ -114,7 +115,7 @@ def test_emitted_allocation_resolves_to_the_expected_cores(tmp_path):
     assert emitted == MEASURED_ALLOCATION
 
 
-def test_layer_by_layer_gives_every_layer_the_whole_array(tmp_path):
+def test_layer_by_layer_gives_every_layer_the_whole_array(tmp_path, array):
     import yaml
 
     _, mapping_path = stream_design.build_inputs(
@@ -123,11 +124,11 @@ def test_layer_by_layer_gives_every_layer_the_whole_array(tmp_path):
     mapping = yaml.safe_load(open(mapping_path))
     columns = {
         layer["name"]: {
-            core // (ARRAY.num_rows + 2) for core in layer["core_allocation"][0]
+            core // (array.num_rows + 2) for core in layer["core_allocation"][0]
         }
         for layer in mapping["layers"]
     }
-    assert all(used == set(ARRAY.all_columns) for used in columns.values())
+    assert all(used == set(array.all_columns) for used in columns.values())
     assert len(mapping["fused_groups"]) == stream_design.LAYER_BY_LAYER
 
 
