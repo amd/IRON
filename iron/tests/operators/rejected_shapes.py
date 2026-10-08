@@ -15,11 +15,15 @@ import pytest
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron.device import from_name
 
-from iron.common import Unresolvable
+from iron.common import Link, Unresolvable
 from iron.operators.copy import Copy
+from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.sample import Sample
+from iron.operators.silu import SiLU
 from iron.operators.transpose import Transpose
 
 
@@ -198,3 +202,23 @@ def test_sample_with_more_summaries_than_a_memtile_takes_is_refused():
     with pytest.raises(Unresolvable, match="join in one memtile"):
         Sample(vocab=128256, cores=8).resolved(from_name("npu2", n_cols=8))
     Sample(vocab=128256, cores=4).resolved(from_name("npu2", n_cols=8))
+
+
+@pytest.mark.parametrize(
+    "producer,kwargs",
+    [
+        (GEMV, dict(M=2048, K=2048)),
+        (ElementwiseAdd, dict(size=2048, num_aie_columns=4)),
+    ],
+    ids=["GEMV", "ElementwiseAdd"],
+)
+def test_a_finish_input_past_the_cores_input_channels_is_refused(producer, kwargs):
+    """A core reading two streams has no input channel left for a finish
+    step's own input; past them the design fails to place. A one-stream
+    core takes it.
+    """
+    dev = from_name("npu2", n_cols=8)
+    finish = (Link(ElementwiseMul(size=2048), 1),)
+    with pytest.raises(Unresolvable, match="input channels"):
+        producer(**kwargs, finish=finish).resolved(dev)
+    SiLU(size=2048, num_aie_columns=4, finish=finish).resolved(dev)

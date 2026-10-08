@@ -344,7 +344,7 @@ def test_a_fold_is_taken_where_the_model_says_it_gains(tmp_path, npu2):
         "ElementwiseMul",
         "GEMV",
     ]
-    assert [type(s) for s in applied.steps[0].op.finish] == [SiLU]
+    assert [type(link.op) for link in applied.steps[0].op.finish] == [SiLU]
 
 
 @pytest.mark.parametrize("gate_us", [400.0, None], ids=["dearer", "unmeasured"])

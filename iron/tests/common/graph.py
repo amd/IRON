@@ -38,6 +38,7 @@ from iron.operators.emit import reference as emit_reference
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
+from iron.operators.relu import ReLU
 from iron.operators.repeat import Repeat
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
@@ -411,7 +412,7 @@ def test_swiglu_folds_its_silu_into_the_gate_and_keeps_one_array(npu2):
         "GEMV",
     ]
     gate, up, mul, down = f.steps
-    assert ([type(s) for s in gate.op.finish], up.op.finish) == ([SiLU], ())
+    assert ([type(link.op) for link in gate.op.finish], up.op.finish) == ([SiLU], ())
     assert gate.op.resolved().array_key() == up.op.resolved().array_key()
     assert gate.op.design_key() != up.op.design_key()
     assert (down.op.finish, down.op.finishes) == ((), ())
@@ -444,10 +445,12 @@ class _Gate(iron.Graph):
         return act
 
 
-@pytest.mark.parametrize("use", ["returned", "read twice"])
-def test_a_fold_needs_the_intermediate_to_itself(use, npu2):
-    t = _Gate(use).trace(x=(E,))
+def test_a_fold_needs_the_intermediate_to_itself(npu2):
+    t = _Gate("returned").trace(x=(E,))
     assert folded(t, npu2) == (t, {})
+    # Read twice, the gate keeps its output; the sum takes it beside silu's.
+    _, count = folded(_Gate("read twice").trace(x=(E,)), npu2)
+    assert [str(fold) for fold in count] == ["ElementwiseAdd into SiLU"]
     assert folded(_Gate("once").trace(x=(E,)), npu2)[1].total() == 1
 
 
@@ -475,13 +478,13 @@ def test_an_elementwise_step_finishes_its_consumer_in_its_own_cores(npu2):
         ("SiLU into ElementwiseAdd", 1)
     ]
     finished, plain = (s.op.resolved(npu2) for s in f.steps)
-    (step,) = finished.finish
-    assert (type(step), step.size, step.tile_size) == (SiLU, 256, 256)
+    ((step, at),) = [(link.op, link.at) for link in finished.finish]
+    assert (type(step), at, step.size, step.tile_size) == (SiLU, 0, 256, 256)
     # The other sum moved onto the finished one's array, choosing no step.
     assert finished.array_key() == plain.array_key()
     assert finished.design_key() != plain.design_key()
     assert finished.name != plain.name
-    chains = [tuple(type(s) for s in c) for c in finished.finishes]
+    chains = [tuple(type(link.op) for link in c) for c in finished.finishes]
     assert chains[finished.residents["finish_chain"]] == (SiLU,)
     assert chains[plain.residents["finish_chain"]] == ()
     rng = np.random.default_rng(0)
@@ -505,6 +508,102 @@ def test_an_operator_with_an_array_of_its_own_finishes_nothing(npu2):
         ElementwiseAdd(size=E).fold(Clamp(size=E, low=0, high=1)).resolved(npu2)
     t = _Sums(lambda y: Clamp(y, low=0.0, high=1.0)).trace(a=(E,), b=(E,))
     assert folded(t, npu2) == (t, {})
+
+
+class _Chain(iron.Graph):
+    def __init__(self, at=0, cols=4, channels=1):
+        self.at, self.cols, self.channels = at, cols, channels
+
+    def body(self, a, c):
+        s = SiLU(ReLU(a, num_aie_columns=self.cols, num_channels=self.channels))
+        return ElementwiseMul(s, c) if self.at == 0 else ElementwiseMul(c, s)
+
+
+@pytest.mark.parametrize("at", [0, 1])
+def test_a_step_folds_with_its_other_input_streamed_beside(at, npu2):
+    t = _Chain(at).trace(a=(E,), c=(E,))
+    f, count = folded(t, npu2)
+    mul = f"ElementwiseMul{' (input 1)' if at else ''}"
+    assert [str(fold) for fold in count] == [
+        "SiLU into ReLU",
+        f"SiLU, then {mul} into ReLU",
+    ]
+    (step,) = f.steps
+    fused = step.op.resolved(npu2)
+    assert [(type(link.op), link.at) for link in fused.finish] == [
+        (SiLU, 0),
+        (ElementwiseMul, at),
+    ]
+    # A chain streaming an input of its own has an array of its own.
+    assert fused.finishes == ()
+    assert [b.name for b in fused.inputs] == ["x", f"finish1_{'ab'[1 - at]}"]
+    assert [h.name for h in step.inputs] == ["a", "c"]
+    assert replaced(t, f) == [(t.steps[0].op, step.op)]
+    rng = np.random.default_rng(0)
+    a, c = (rng.standard_normal(E).astype(bfloat16) for _ in range(2))
+    s = SiLU(size=E).reference(ReLU(size=E).reference(a))
+    want = ElementwiseMul(size=E).reference(*((s, c) if at == 0 else (c, s)))
+    np.testing.assert_array_equal(fused.reference(a, c), want)
+    # A fold of a chain brings the folds before it; the first comes alone.
+    first, chain = count
+    assert folded(t, npu2, (chain,))[1] == count
+    assert list(folded(t, npu2, (first,))[1]) == [first]
+
+
+class _GemvAdd(iron.Graph):
+    def __init__(self):
+        self.w = z(E, E)
+
+    def body(self, x, r):
+        return ElementwiseAdd(GEMV(self.w, x, num_aie_columns=8), r)
+
+
+def test_a_fold_that_narrows_its_producer_is_refused(npu2):
+    # Eight columns of two channels each, twice, are past the shim's sixteen.
+    t = _Chain(cols=8, channels=2).trace(a=(2 * E,), c=(2 * E,))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == ["SiLU into ReLU"]
+
+
+class _SumChain(iron.Graph):
+    def body(self, a, b, c):
+        return ElementwiseMul(SiLU(ElementwiseAdd(a, b, num_aie_columns=4)), c)
+
+
+def test_a_fold_past_its_cores_input_channels_is_refused(npu2):
+    # A sum's and a matvec's cores read two streams: none is left for a product's.
+    t = _SumChain().trace(a=(E,), b=(E,), c=(E,))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == ["SiLU into ElementwiseAdd"]
+    gemv = _GemvAdd().trace(x=(E,), r=(E,))
+    assert folded(gemv, npu2) == (gemv, {})
+
+
+class _Late(iron.Graph):
+    def __init__(self, overwrite):
+        self.st = iron.state((E,))
+        self.overwrite = overwrite
+
+    def body(self, a, b):
+        s = SiLU(self.st)
+        if self.overwrite:
+            Copy(a, self.st)
+        return ElementwiseMul(s, ReLU(b))
+
+
+def test_a_fold_runs_where_what_it_reads_is_written(npu2):
+    # The product's other input is made after silu: the fold runs in its place.
+    t = _Late(overwrite=False).trace(a=(E,), b=(E,))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == ["ElementwiseMul into SiLU"]
+    assert [type(s.op).__name__ for s in f.steps] == ["ReLU", "SiLU"]
+    # Moved past the copy, silu would read the state it overwrites, so the
+    # product folds into the relu instead.
+    t = _Late(overwrite=True).trace(a=(E,), b=(E,))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == ["ElementwiseMul (input 1) into ReLU"]
+    assert [type(s.op).__name__ for s in f.steps] == ["SiLU", "Copy", "ReLU"]
+    assert [h.name for h in f.steps[2].inputs] == ["b", f.steps[0].outputs[0].name]
 
 
 def test_two_spellings_of_one_array_are_one_design():

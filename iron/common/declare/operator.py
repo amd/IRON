@@ -41,6 +41,7 @@ from .creation import declare
 from .field import DimRef, OptionalDim, Select, Tier, Unresolvable, param
 from .member import (
     Extent,
+    In,
     Value,
     _Buffer,
     _Member,
@@ -175,6 +176,30 @@ class _FinishWord(Value):
         return "<the finish chain a design selects>"
 
 
+@dataclasses.dataclass(frozen=True)
+class Link:
+    """One step of a finish: ``op`` applied to a tile of the producer's
+    output, which enters as its input ``at``. Its other inputs stream into
+    the producer's cores beside it, the producer's ``finish_inputs``.
+    """
+
+    op: Operator
+    at: int = 0
+
+    def array_key(self):
+        return (self.op.array_key(), self.at)
+
+    def at_line(self, line: int, dtype, dev) -> Link:
+        """This step resolved at one tile (``Operator.at_line``)."""
+        return Link(self.op.at_line(line, dtype, dev), self.at)
+
+    def operands(self, tile, extras) -> list:
+        """``tile`` at input ``at`` among this step's ``extras``."""
+        operands = list(extras)
+        operands.insert(self.at, tile)
+        return operands
+
+
 # ``auto`` is not a listed specifier: pyright reads a default only from
 # ``default=``, and ``auto(2)`` passes it positionally.
 @dataclass_transform(kw_only_default=True, field_specifiers=(param,))
@@ -197,6 +222,8 @@ class Operator(metaclass=_OperatorMeta):
     # Per leading operand that may be a view: the param holding its pattern
     # and the per-call value a dynamic index binds.
     accept_views: ClassVar[tuple[tuple[str, str], ...]] = ()
+    # An instance's streams beside the declared ones: its finish's other inputs.
+    _finish_inputs: ClassVar[tuple[_Buffer, ...]] = ()
 
     trace: TraceConfig | None = dataclasses.field(
         default=None, repr=False, kw_only=True
@@ -206,16 +233,16 @@ class Operator(metaclass=_OperatorMeta):
     bound_values: dict[str, str | None] = dataclasses.field(
         default_factory=dict, repr=False, compare=False, kw_only=True
     )
-    # The operators each core applies, in order, to a tile of the output
+    # The steps each core applies, in order, to a tile of the output
     # declared Out(finish=True) before releasing it; resolved, each one at
     # that tile (``at_line``). The keys add them, since operators compare by
     # identity.
-    finish: tuple[Operator, ...] = dataclasses.field(
+    finish: tuple[Link, ...] = dataclasses.field(
         default=(), repr=False, compare=False, kw_only=True
     )
     # The finishes the array applies, each design selecting its own; empty
     # for the array of ``finish`` alone.
-    finishes: tuple[tuple[Operator, ...], ...] = dataclasses.field(
+    finishes: tuple[tuple[Link, ...], ...] = dataclasses.field(
         default=(), repr=False, compare=False, kw_only=True
     )
 
@@ -305,14 +332,17 @@ class Operator(metaclass=_OperatorMeta):
         """The arithmetic operations one call performs, for its throughput."""
         return sum(b.elements for b in self.outputs)
 
-    def fold(self, consumer: Operator) -> Self | None:
+    def fold(self, consumer: Operator, at: int = 0) -> Self | None:
         """This operator applying ``consumer`` to its output in its own cores:
-        ``consumer`` appended to its ``finish``, the array keeping the
-        finishes it had. Whether ``consumer`` runs on one of its tiles is
-        asked when the result resolves (``at_line``).
+        ``consumer`` appended to its ``finish``. The array keeps the
+        finishes it had, unless a step of the chain takes inputs of its own,
+        which stream into this array alone. Whether ``consumer`` runs on one
+        of its tiles is asked when the result resolves (``at_line``).
 
         Args:
-            consumer: The operator whose one input is this one's one output.
+            consumer: The operator whose input ``at`` is this one's one output.
+            at: The input of ``consumer`` the output enters; its others
+                become this operator's ``finish_inputs``.
 
         Returns:
             The folded operator, or None where this one's one output is not
@@ -320,7 +350,9 @@ class Operator(metaclass=_OperatorMeta):
         """
         if len(self.outputs) != 1 or not self.outputs[0].member.finish:
             return None
-        chain = (*self.finish, consumer)
+        chain = (*self.finish, Link(consumer, at))
+        if any(len(link.op.inputs) > 1 for link in chain):
+            return dataclasses.replace(self, finish=chain, finishes=())
         return dataclasses.replace(
             self, finish=chain, finishes=(*(self.finishes or (self.finish,)), chain)
         )
@@ -384,16 +416,21 @@ class Operator(metaclass=_OperatorMeta):
 
     @classmethod
     def shim_columns(
-        cls, dev, num_channels: int = 1, flags: Mapping[str, Any] | None = None
+        cls,
+        dev,
+        num_channels: int = 1,
+        flags: Mapping[str, Any] | None = None,
+        operands: Iterable[_Buffer] = (),
     ) -> int:
         """How many of ``dev``'s columns fit this operator's streams in the shim DMA budget.
 
         A ``replicate`` stream is paid once per channel rather than per column,
-        and a stream with no ``per=`` once.
+        and a stream with no ``per=`` once. ``operands`` are an instance's
+        streams beside the declared ones (``finish_inputs``).
         """
         streams = [
             m
-            for m in cls._members
+            for m in (*cls._members, *operands)
             if isinstance(m, _Buffer) and m.tile is not None and present(m, flags or {})
         ]
         cols = dev.cols
@@ -411,7 +448,7 @@ class Operator(metaclass=_OperatorMeta):
         return max(1, cols)
 
     def check_shim_columns(self, dev, cols: int, num_channels: int = 1) -> None:
-        allowed = self.shim_columns(dev, num_channels, vars(self))
+        allowed = self.shim_columns(dev, num_channels, vars(self), self._finish_inputs)
         if cols > allowed:
             raise Unresolvable(
                 f"{type(self).__name__} with {cols} columns x {num_channels} "
@@ -440,7 +477,7 @@ class Operator(metaclass=_OperatorMeta):
                 f"{type(self).__name__}: the column count defaults from the "
                 f"device; none is bound and none was given"
             )
-        budget = self.shim_columns(dev, num_channels, vars(self))
+        budget = self.shim_columns(dev, num_channels, vars(self), self._finish_inputs)
         return next((c for c in range(budget, 0, -1) if fits is None or fits(c)), 1)
 
     def reference(self, *inputs):
@@ -523,6 +560,8 @@ class Operator(metaclass=_OperatorMeta):
             ValueError: No output is finished by the array that runs, a step
                 does not run at the tile, or ``finish`` is not among
                 ``finishes``.
+            Unresolvable: Each core reads more streams, its own and the
+                finish's inputs, than a core tile has input channels.
         """
         out = self.outputs[0] if len(self.outputs) == 1 else None
         # A subclass replacing array() does not apply what its base's output declares.
@@ -534,13 +573,20 @@ class Operator(metaclass=_OperatorMeta):
             )
         line = math.prod(out.tile_shape)
         own = tuple(link.at_line(line, out.dtype, dev) for link in self.finish)
-        chains: dict[tuple, tuple[Operator, ...]] = {}
+        chains: dict[tuple, tuple[Link, ...]] = {}
         for chain in self.finishes or (self.finish,):
             at = tuple(link.at_line(line, out.dtype, dev) for link in chain)
             chains.setdefault(tuple(link.array_key() for link in at), at)
         if tuple(link.array_key() for link in own) not in chains:
             raise ValueError(
                 f"{type(self).__name__}: its finish is not one its array applies"
+            )
+        if len(chains) > 1 and any(
+            len(link.op.inputs) > 1 for c in chains.values() for link in c
+        ):
+            raise ValueError(
+                f"{type(self).__name__}: a finish step with inputs of its own "
+                f"streams them into an array serving no other finish"
             )
         self.finish = own
         self.finishes = (
@@ -549,6 +595,15 @@ class Operator(metaclass=_OperatorMeta):
             else tuple(chains[k] for k in sorted(chains, key=repr))
         )
         self._bind()
+        reads = sum(
+            m.direction.fills and m.tile is not None for m in self._members_io()
+        )
+        if reads > dev.core_dma_channels_in:
+            raise Unresolvable(
+                f"{type(self).__name__}: its cores read {reads} streams with the "
+                f"finish's inputs, past a core tile's {dev.core_dma_channels_in} "
+                f"input channels"
+            )
 
     def copy(self) -> Self:
         """A fresh instance for one build, keeping resolution and bound values."""
@@ -605,6 +660,13 @@ class Operator(metaclass=_OperatorMeta):
     @property
     def outputs(self) -> list[BoundBuffer]:
         return [b for b in self.buffers if b.direction.drains]
+
+    @property
+    def finish_inputs(self) -> list[BoundBuffer]:
+        """The inputs of ``finish``'s steps other than the tile, in order,
+        each streamed as the finished output is: the last of ``inputs``.
+        """
+        return [self._bound[m.name] for m in self._finish_inputs]
 
     @property
     def values(self) -> list[BoundValue]:
@@ -719,6 +781,25 @@ class Operator(metaclass=_OperatorMeta):
         return tracer.call(self, args, kwargs)
 
     def _bind(self) -> None:
+        self._finish_inputs = ()
+        outs = [m for m in self._members_io() if m.direction.drains]
+        extras = []
+        if len(outs) == 1 and outs[0].finish:
+            (out,) = outs
+            for i, link in enumerate(self.finish):
+                for k, b in enumerate(link.op.inputs):
+                    if k == link.at:
+                        continue
+                    extra = In(
+                        *out.shape.dims,
+                        dtype=out.dtype,
+                        tile=out.tile.dims,
+                        per=None if out.per is None else out.per.dims,
+                        depth=out.depth,
+                    )
+                    extra.__set_name__(type(self), f"finish{i}_{b.name}")
+                    extras.append(extra)
+        self._finish_inputs = tuple(extras)
         bound: dict[str, Any] = {}
         for m in self._members_io():
             bound[m.name] = BoundBuffer(m, self)
@@ -944,7 +1025,7 @@ class Operator(metaclass=_OperatorMeta):
             # A step's scalars and the array's other finishes change the build too.
             keys = (tuple(link.array_key() for link in op.finish), op._finish_keys())
             digest = hashlib.sha256(repr(keys).encode()).hexdigest()[:8]
-            names = "".join(type(link).__name__ for link in op.finish)
+            names = "".join(type(link.op).__name__ for link in op.finish)
             own.append(f"finish{names}{digest}")
         return "_".join([type(self).__name__, *own, dev.name])
 
@@ -954,7 +1035,7 @@ class Operator(metaclass=_OperatorMeta):
             m
             for m in self._members
             if isinstance(m, _Buffer) and (m.when is None or getattr(self, m.when.name))
-        ]
+        ] + list(self._finish_inputs)
 
     def __repr__(self) -> str:
         own = ", ".join(

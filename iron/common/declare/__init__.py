@@ -27,7 +27,7 @@ from .member import (
     Shim,
     Value,
 )
-from .operator import Operator
+from .operator import Link, Operator
 from .profile import Profile
 from .xclbin import Xclbin
 
@@ -38,6 +38,7 @@ __all__ = [
     "Extent",
     "In",
     "InOut",
+    "Link",
     "Operator",
     "Out",
     "Profile",

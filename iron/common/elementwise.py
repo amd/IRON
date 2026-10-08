@@ -127,11 +127,26 @@ class Finish:
         # Each distinct step once: its kernel, argument positions and scalars.
         self.steps: dict[tuple, tuple[ExternalFunction, list[int], dict]] = {}
         for link in [link for chain in self.chains for link in chain]:
-            if not isinstance(link, Elementwise):
-                raise TypeError(f"a finish step is Elementwise, not {link!r}")
+            if not isinstance(link.op, Elementwise):
+                raise TypeError(f"a finish step is Elementwise, not {link.op!r}")
             if cores and link.array_key() not in self.steps:
-                kernel = link.kernel()
-                self.steps[link.array_key()] = (kernel, *link._arguments(kernel, 1, 1))
+                kernel = link.op.kernel()
+                self.steps[link.array_key()] = (
+                    kernel,
+                    *link.op._arguments(kernel, len(link.op.inputs), 1),
+                )
+        # Each step's other inputs, streamed per core as the output is.
+        extras = iter(op.finish_inputs)
+        self.extras = [
+            [next(extras) for _ in range(len(link.op.inputs) - 1)] for link in op.finish
+        ]
+        self.fifos = [
+            [
+                ObjectFifo(e.tile, name=f"{e.name}_{k}", depth=e.depth)
+                for k in range(cores)
+            ]
+            for e in op.finish_inputs
+        ]
         self.rtps = [
             Buffer(_I32, name=f"finish_{k}", use_write_rtp=True)
             for k in range(cores if self.select else 0)
@@ -155,12 +170,16 @@ class Finish:
         return [
             *(k for k, _, _ in self.steps.values()),
             *self.rtps[core : core + 1],
+            *(of[core].cons() for of in self.fifos),
             *self.scratch[core : core + 1],
         ]
 
     def bind(self) -> None:
         if self.select:
             self.op.value("finish_chain").bind(self.rtps)
+        for e, of in zip(self.op.finish_inputs, self.fifos):
+            for k, fifo in enumerate(of):
+                e.lane(k).bind(fifo.prod())
 
     def read(self, args):
         """The chain a core applies, read between its barrier's wait and release."""
@@ -179,6 +198,8 @@ class Finish:
     def apply(self, args, mode, tile) -> None:
         """Run the selected chain over the tile the producer wrote, ending in ``tile``."""
         kernels = dict(zip(self.steps, args))
+        at = len(self.steps) + self.select
+        fifos = iter(args[at : at + len(self.fifos)])
         for i, chain in enumerate(self.chains):
             if not chain:
                 continue
@@ -188,19 +209,34 @@ class Finish:
                     dst = tile if (len(chain) - j) % 2 else args[-1]
                     key = link.array_key()
                     _, positions, scalars = self.steps[key]
-                    tiles = {p: t for p, t in zip(positions, (src, dst))}
+                    # Only a lone chain has extras (Operator._finish_at).
+                    extras = [next(fifos) for _ in range(len(link.op.inputs) - 1)]
+                    held = [f.acquire(1) for f in extras]
+                    tiles = dict(zip(positions, [*link.operands(src, held), dst]))
                     kernels[key](
                         *(
                             tiles[p] if p in tiles else scalars[p]
                             for p in range(len(tiles) + len(scalars))
                         )
                     )
+                    for f in extras:
+                        f.release(1)
                     src = dst
 
-    def reference(self, y: np.ndarray) -> np.ndarray:
-        """``y``, the producer's output, through its own chain on the host."""
+    def reference(self, y: np.ndarray, *extras: np.ndarray) -> np.ndarray:
+        """``y``, the producer's output, through its own chain on the host,
+        each step given its ``extras`` (the producer's ``finish_inputs``).
+        """
+        given = iter(extras)
         for link in self.op.finish:
-            y = np.asarray(link.over(y.size, self.line).reference(y)).reshape(y.shape)
+            others = [
+                np.asarray(next(given)).reshape(-1)
+                for _ in range(len(link.op.inputs) - 1)
+            ]
+            step = link.op.over(y.size, self.line)
+            y = np.asarray(
+                step.reference(*link.operands(y.reshape(-1), others))
+            ).reshape(y.shape)
         return y
 
     def tolerance(self) -> Tolerance:
@@ -209,25 +245,28 @@ class Finish:
         own gate admits around what it makes of that.
         """
         plain = dataclasses.replace(self.op, finish=(), finishes=())
+        n = len(plain.inputs)
         own = plain.gate() or Tolerance.default_for(self.out.dtype)
         dtype = self.out.dtype
-        steps = [link.over(self.out.elements, self.line) for link in self.op.finish]
+        steps = [link.op.over(self.out.elements, self.line) for link in self.op.finish]
         gates = [s.gate() or Tolerance.default_for(dtype) for s in steps]
 
         def bound(*inputs):
-            x = np.asarray(plain.reference(*inputs))
+            given = iter(inputs[n:])
+            x = np.asarray(plain.reference(*inputs[:n]))
             shape, x = x.shape, x.astype(dtype).astype(np.float64).ravel()
-            lo, hi = _interval(own, [x], [inputs], dtype)
-            for step, gate in zip(steps, gates):
-                ends = [x, lo, hi]
+            lo, hi = _interval(own, [x], [inputs[:n]], dtype)
+            for link, step, gate in zip(self.op.finish, steps, gates):
+                others = [
+                    np.asarray(next(given)).reshape(-1)
+                    for _ in range(len(link.op.inputs) - 1)
+                ]
+                args = [link.operands(v.astype(dtype), others) for v in (x, lo, hi)]
                 made = [
-                    np.asarray(step.reference(v.astype(dtype)), np.float64).ravel()
-                    for v in ends
+                    np.asarray(step.reference(*a), np.float64).ravel() for a in args
                 ]
                 x = made[0]
-                lo, hi = _interval(
-                    gate, made, [(v.astype(dtype),) for v in ends], dtype
-                )
+                lo, hi = _interval(gate, made, [tuple(a) for a in args], dtype)
             return np.maximum(hi - x, x - lo).reshape(shape)
 
         return Tolerance.bounded(
@@ -363,14 +402,14 @@ class Elementwise(Operator):
         if type(self).array is not Elementwise.array:
             raise ValueError(f"{type(self).__name__}'s cores run an array of their own")
         streamed = [np.dtype(b.dtype) for b in self.buffers if b.streamed]
-        if streamed != [np.dtype(dtype)] * 2:
+        if len(self.outputs) != 1 or streamed != [np.dtype(dtype)] * len(streamed):
             raise ValueError(
                 f"{type(self).__name__} streams {[str(d) for d in streamed]}, not "
-                f"one {np.dtype(dtype)} tile in and one out"
+                f"{np.dtype(dtype)} tiles in and one out"
             )
         op = self.over(line, line).resolved(dev)
         kernel = op.kernel()  # its factory refuses a line it does not run at
-        op._arguments(kernel, 1, 1)
+        op._arguments(kernel, len(op.inputs), 1)
         return op
 
     def tolerance(self) -> Tolerance | None:
@@ -394,8 +433,9 @@ class Elementwise(Operator):
                 f"define reference()"
             )
         (out,) = op.outputs
-        _, scalars = op._arguments(op.kernel(), len(inputs), 1)
-        lines = iter(x.reshape(op.lines, -1, copy=False) for x in inputs)
+        n = len(inputs) - len(op.finish_inputs)
+        _, scalars = op._arguments(op.kernel(), n, 1)
+        lines = iter(x.reshape(op.lines, -1, copy=False) for x in inputs[:n])
         y = contract.reference(
             *(
                 scalars[i] if i in scalars else next(lines)
@@ -404,10 +444,13 @@ class Elementwise(Operator):
         )
         y = np.asarray(y).astype(out.host_dtype, copy=False)
         y = y.reshape(out.host_shape, copy=False)
-        return Finish(op).reference(y) if op.finish else y
+        return Finish(op).reference(y, *inputs[n:]) if op.finish else y
 
     def array(self, target) -> list:
-        streams = [b for b in self.buffers if b.streamed]
+        finish = Finish(self, self.cores)
+        streams = [
+            b for b in self.buffers if b.streamed and b not in self.finish_inputs
+        ]
         ins = [b for b in streams if b.direction is Direction.IN]
         outs = [b for b in streams if b.direction.drains]
         n_in = len(ins)
@@ -443,7 +486,6 @@ class Elementwise(Operator):
             ]
         )
         barriers = [WorkerRuntimeBarrier() for _ in range(cores)]
-        finish = Finish(self, cores)
         n_fifos = n_in + len(outs)
 
         def core_fn(*args):
@@ -558,6 +600,8 @@ class BinaryElementwise(Elementwise):
     @property
     def valid_elements(self) -> int:
         return self.valid
+
+    over = UnaryElementwise.over
 
 
 class Rowwise(Elementwise):

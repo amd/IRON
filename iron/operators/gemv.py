@@ -27,6 +27,7 @@ from iron.common import (
     Extent,
     Finish,
     In,
+    Link,
     Operator,
     Out,
     Value,
@@ -77,7 +78,7 @@ def _cases(cls, dev: Device):
 
     def finished(M, K, cols, tsi, tso, *chains):
         # The first chain is the case's own; more share one array.
-        steps = [tuple(step(size=M) for step in c) for c in chains]
+        steps = [tuple(Link(step(size=M)) for step in c) for c in chains]
         plain = case(M, K, cols, tsi, tso)
         shared = tuple(steps) if len(steps) > 1 else ()
         names = ["".join(step.__name__ for step in c) or "none" for c in chains]
