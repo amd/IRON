@@ -10,6 +10,8 @@ untuned one (``iron/tests/infrastructure/narrowing.py``).
 """
 
 import dataclasses
+from collections import Counter
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -332,6 +334,160 @@ def _table(path, steps, dispatch=50.0, reset=30.0, base=30.0):
     return table
 
 
+# The loads of the designs an xclbin-chain table is calibrated on, each
+# setting measured beside x.
+TRIANGLE = {"x": 80.0, "y": 90.0, "z": 100.0}
+
+
+def _separate(path, steps, fixed=7.0):
+    """An xclbin-chain table holding the given (c, L) per key, composed as
+    the probe measures them: each beside x, and the pairs of ``TRIANGLE``.
+    """
+    table = CostTable(path, "npu2", "separate")
+    for key, (c, load) in steps.items():
+        cost = StepCost(c, fixed, True, True, "turbo", 1, 1, "-")
+        table.record_step(
+            key, dataclasses.replace(cost, beside="x", pair_us=TRIANGLE["x"] + load)
+        )
+    for a, b in (("x", "y"), ("y", "z"), ("x", "z")):
+        mean = (TRIANGLE[a] + TRIANGLE[b]) / 2
+        table.record_calibration(
+            (a, b), Calibration(fixed, 0.0, 0.0, mean, "turbo", 1, 1, "-")
+        )
+    return table
+
+
+def test_a_switch_is_counted_wrapping_to_the_first_step():
+    assert Runlist(["a", "b", "a", "a", "c"]).switches() == Counter(a=2, b=1, c=1)
+    assert Runlist(["a", "a", "a"]).switches() == Counter()
+    assert Runlist(["a", "b"]).switches() == Counter(a=1, b=1)
+
+
+def test_an_xclbin_chain_pays_a_step_each_and_a_load_per_switch(tmp_path):
+    table = _separate(tmp_path / "costs.json", {"a": (10.0, 100.0), "b": (20.0, 50.0)})
+    # a a b a: into b, then back into a; the last a runs into the first.
+    assert model_us(table, ["a", "a", "b", "a"]) == pytest.approx(
+        (7.0 + 3 * 10.0 + 20.0 + 50.0 + 100.0, 2)
+    )
+    assert model_us(table, ["a", "b"]) == pytest.approx((7.0 + 30.0 + 150.0, 2))
+    assert model_us(table, ["a", "a"]) == pytest.approx((7.0 + 20.0, 0))
+    # Each design is its own kernel and load, one array or not.
+    assert model_us(table, ["a", "b"], arrays={"a": 0, "b": 0}) == model_us(
+        table, ["a", "b"]
+    )
+    assert model_us(table, ["a", "b"], chosen={"b": "a"}) == pytest.approx(
+        (7.0 + 20.0 + 200.0, 2)
+    )
+    with pytest.raises(ValueError, match="packs none"):
+        model_us(table, ["a", "b"], [("a", "b")])
+
+
+def test_a_load_is_solved_from_the_pairs_or_its_own_pair(tmp_path):
+    table = _separate(tmp_path / "costs.json", {"a": (10.0, 100.0)})
+    for key, load in TRIANGLE.items():
+        assert table.load(key) == pytest.approx(load)
+    assert table.load("a") == pytest.approx(100.0)
+    assert table.load("unmeasured") == 0.0
+    assert (table.dispatch_us, table.reset_us, table.base_us) == (7.0, 0.0, 0.0)
+    # The reference's own row is measured beside nothing; the pairs price it.
+    table.record_step("x", StepCost(5.0, 7.0, True, True, "turbo", 1, 1, "-"))
+    assert table.load("x") == pytest.approx(80.0)
+    # A design paired with one of a triangle is determined by least squares.
+    table.record_calibration(
+        ("x", "w"), Calibration(7.0, 0.0, 0.0, (80.0 + 60.0) / 2, "turbo", 1, 1, "-")
+    )
+    assert table.load("w") == pytest.approx(60.0)
+    assert table.load("y") == pytest.approx(90.0)
+
+
+def test_a_load_the_measurements_do_not_determine_is_refused(tmp_path):
+    table = CostTable(tmp_path / "costs.json", "npu2", "separate")
+    # A cycle of four is as undetermined as one pair: (L + d, L' - d) fits too.
+    for a, b in (("p", "q"), ("q", "r"), ("r", "s"), ("s", "p")):
+        table.record_calibration(
+            (a, b), Calibration(7.0, 0.0, 0.0, 90.0, "turbo", 1, 1, "-")
+        )
+    with pytest.raises(ValueError, match="do not determine the load of p"):
+        table.load("p")
+    alone = StepCost(5.0, 7.0, True, True, "turbo", 1, 1, "-")
+    table.record_step("t", alone)
+    with pytest.raises(ValueError, match="neither beside another design"):
+        table.load("t")
+    table.record_step("u", dataclasses.replace(alone, beside="v", pair_us=170.0))
+    with pytest.raises(ValueError, match="beside v, whose own load is not"):
+        table.load("u")
+
+
+def test_an_xclbin_table_round_trips_and_a_full_elf_one_keeps_its_bytes(tmp_path):
+    table = _separate(tmp_path / "costs.json", {"a": (10.0, 100.0)})
+    table.record_step("x", StepCost(5.0, 7.0, True, True, "turbo", 1, 1, "-"))
+    table.save()
+    again = CostTable(table.path, "npu2", "separate")
+    assert again.steps == table.steps and again.calibrations == table.calibrations
+    assert again.load("a") == pytest.approx(100.0)
+    rows = table.path.read_text().splitlines()
+    assert '"beside": "x"' in next(r for r in rows if r.startswith('  "a"'))
+    assert "beside" not in next(r for r in rows if r.startswith('  "x"'))
+    measured = Path(iron.__file__).parent / "lm" / "llama3" / "costs_npu2.json"
+    copy = tmp_path / "costs_npu2.json"
+    copy.write_bytes(measured.read_bytes())
+    CostTable(copy, "npu2", "fused").save()
+    assert copy.read_bytes() == measured.read_bytes()
+
+
+class Apart(iron.Graph):
+    """An add at two extents, one array: the smaller alternating with silu,
+    the larger sixteen times in a row.
+    """
+
+    def body(self, a, b, c, d):
+        x = a
+        for _ in range(3):
+            x = SiLU(ElementwiseAdd(x, b, tile_size=TILE), tile_size=TILE)
+        y = c
+        for _ in range(16):
+            y = ElementwiseAdd(y, d, tile_size=TILE)
+        return x, y
+
+
+def test_an_xclbin_chain_narrows_a_design_it_switches_into_often(tmp_path, npu2):
+    traced = Apart().trace(a=(SIZE,), b=(SIZE,), c=(2 * SIZE,), d=(2 * SIZE,))
+    small, silu, *_, large = (s.op for s in traced.steps)
+    steps = {}
+    for op in (small, large):
+        for v in variants(op, npu2):
+            cols = v.resolved.num_aie_columns
+            steps[v.key] = (4.0 + v.resolved.size / (64 * cols), 80.0 * cols)
+    table = _separate(tmp_path / "costs.json", steps)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(
+        traced, npu2, "separate"
+    )
+    # Three arrivals each: the small add's step cannot repay a wide load.
+    # One arrival into sixteen steps: the large add's wide step does.
+    narrow, wide = (tuning.chosen[cost_key(op)] for op in (small, large))
+    assert narrow.resolved.num_aie_columns == 1
+    assert wide.key == cost_key(large) and wide.resolved.num_aie_columns == 8
+    assert narrow.array != wide.array
+    assert tuning.groups == () and tuning.unmeasured == (cost_key(silu),)
+    assert tuning.chosen[cost_key(silu)].key == cost_key(silu)
+    assert (tuning.configures, tuning.baseline_configures) == (7, 7)
+    keys = [cost_key(s.op) for s in traced.steps]
+    chosen = {k: v.key for k, v in tuning.chosen.items()}
+    assert tuning.predicted_us == pytest.approx(model_us(table, keys, (), chosen)[0])
+    small_at = [steps[cost_key(small)], steps[narrow.key]]
+    saved = [3 * c + 3 * load for c, load in small_at]
+    assert tuning.baseline_us - tuning.predicted_us == pytest.approx(
+        saved[0] - saved[1]
+    )
+    narrowed, groups = tuning.apply(traced, npu2)
+    assert groups == []
+    assert {cost_key(s.op, npu2) for s in narrowed.steps} == {
+        narrow.key,
+        wide.key,
+        cost_key(silu),
+    }
+
+
 def _add_silu(tmp_path, dev):
     """The traced graph, its operators by class, and a table holding every
     width of add and silu, and none of gelu.
@@ -574,20 +730,21 @@ def test_a_setting_the_placer_refuses_alone_is_not_measured(tmp_path, npu2):
     assert fitting(found, tmp_path / "fits") == (kept, refused)
 
 
-def _swiglu(tmp_path, dev, gate_us):
-    """SwiGLU at one row as traced, and a table holding every design it runs
-    as traced and folded at its default width, the folded gate taking
-    ``gate_us`` a step and every other design 10.
+def _swiglu(tmp_path, dev, gate_us, step_us=10.0, table=_table):
+    """SwiGLU at one row as traced, and a table (``_table`` or ``_separate``)
+    holding every design it runs as traced and folded at its default width,
+    the folded gate taking ``gate_us`` a step, every other design
+    ``step_us``, and each a load of 20.
     """
     E, H = 2048, 8192
     w = np.zeros((H, E), bfloat16)
     traced = SwiGLU(w, w, np.zeros((E, H), bfloat16)).trace(x=(1, E))
     folds, _ = folded(traced, dev)
     steps = {
-        cost_key(s.op, dev): (10.0, 20.0) for g in (traced, folds) for s in g.steps
+        cost_key(s.op, dev): (step_us, 20.0) for g in (traced, folds) for s in g.steps
     }
     steps[cost_key(folds.steps[0].op, dev)] = (gate_us, 20.0)
-    return traced, _table(tmp_path / "costs.json", steps)
+    return traced, table(tmp_path / "costs.json", steps)
 
 
 def test_a_fold_is_taken_where_the_model_says_it_gains(tmp_path, npu2):
@@ -628,6 +785,30 @@ def test_a_fold_is_left_where_it_costs_or_is_unmeasured(gate_us, tmp_path, npu2)
     assert [type(s.op).__name__ for s in applied.steps] == [
         type(s.op).__name__ for s in traced.steps
     ]
+
+
+@pytest.mark.parametrize("gate_us", [135.0, 300.0], ids=["saves", "dearer"])
+def test_an_xclbin_chain_folds_where_it_saves_a_dispatch(gate_us, tmp_path, npu2):
+    # Each step is mostly its dispatch: folding silu into the gate saves one
+    # unless the folded gate costs more than the two.
+    traced, table = _swiglu(
+        tmp_path, npu2, gate_us=gate_us, step_us=130.0, table=_separate
+    )
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(
+        traced, npu2, "separate"
+    )
+    # gate and up, silu, mul, down: four switches, as the folded runlist has.
+    assert tuning.baseline_configures == 4
+    assert tuning.baseline_us == pytest.approx(7.0 + 5 * 130.0 + 4 * 20.0)
+    if gate_us < 2 * 130.0:
+        assert [str(f) for f in tuning.folds] == ["SiLU into GEMV"]
+        assert (tuning.configures, tuning.groups) == (4, ())
+        assert tuning.predicted_us == pytest.approx(
+            7.0 + gate_us + 3 * 130.0 + 4 * 20.0
+        )
+    else:
+        assert tuning.folds == ()
+        assert tuning.predicted_us == tuning.baseline_us
 
 
 def test_cache_keys_follow_the_build_the_values_and_the_inputs(npu2):

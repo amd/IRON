@@ -4,7 +4,7 @@
 """Joint narrowing: each design's tunables (``Operator.domains``: its width,
 narrower or wider than its default, and any other its operator searches)
 and which designs share a device, chosen together to minimise the modelled
-runlist time:
+time of a full-ELF runlist:
 
     D0 + sum over steps of t_step
        + sum over device entries of (base + sum over its members of load)
@@ -29,6 +29,18 @@ bit-identical to the default's, or within the gate of the default and its
 own. A design the table does not hold stays at its default, alone in its
 device.
 
+An xclbin chain (a ``"separate"`` table) is a dispatch per step and a
+kernel per design, so nothing packs and the designs of one array are not
+tied:
+
+    F + sum over steps of c + sum over switches of L(incoming design)
+
+counting the switches cyclically, as a decode loop calls the version back
+to back. ``c`` is a step dispatched alone, ``L`` a design's load, ``F`` the
+rest of a call. The switches follow from the runlist alone, so each design
+takes the setting minimising its occurrences times ``c`` plus its arrivals
+times ``L``, independently of the others.
+
 A fold (``iron.common.graph.fold``) is another runlist: fewer steps, the
 producer's design in place of two. Each the graph admits is priced by the
 same search over its folded graph, and taken where the model's time drops,
@@ -52,6 +64,7 @@ from collections.abc import Hashable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from aie.dialects.aie import WireBundle, get_target_model
 from aie.utils.compile import NPU_CACHE_HOME
 
@@ -246,11 +259,17 @@ class StepCost:
     """One design at one setting of its tunables, measured alone.
 
     Attributes:
-        t_step_us: Its time per step while its device is configured.
-        alone_us: One run of one step, less `t_step_us`: `D0 + base + load + R`.
+        t_step_us: Its time per step while its device is configured; on an
+            xclbin chain, `c`, a step dispatched alone.
+        alone_us: One run of one step, less `t_step_us`: `D0 + base + load + R`;
+            on an xclbin chain, `F`.
         exact: Its output is bit-identical to the default setting's.
         accurate: It may replace the default: exact, or judged within the
             default's gate and its own (``probe.judge``).
+        beside: On an xclbin chain, the key of the design it was run
+            beside, switching each step; None on a full ELF and on that
+            design's own row.
+        pair_us: The loads of the two, `L(beside) + L`.
     """
 
     t_step_us: float
@@ -261,6 +280,8 @@ class StepCost:
     rounds: int
     calls: int
     measured: str  # ISO date
+    beside: str | None = None
+    pair_us: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -268,10 +289,12 @@ class Calibration:
     """A configure's cost split, measured on one pair of designs.
 
     Attributes:
-        dispatch_us: `D0`.
-        reset_us: `R`, the empty configure.
-        base_us: The part of a configure no design accounts for.
-        switch_us: The pair's mean configure.
+        dispatch_us: `D0`; on an xclbin chain, `F`.
+        reset_us: `R`, the empty configure; 0 on an xclbin chain.
+        base_us: The part of a configure no design accounts for; 0 on an
+            xclbin chain.
+        switch_us: The pair's mean configure; on an xclbin chain, its mean
+            load, `(L(a) + L(b)) / 2`.
     """
 
     dispatch_us: float
@@ -313,6 +336,7 @@ class CostTable:
         self.steps: dict[str, StepCost] = {}
         self.calibrations: dict[str, Calibration] = {}
         self._medians: dict[str, float] | None = None
+        self._pair_loads: dict[str, float | None] | None = None
         if self.path.exists():
             data = json.loads(self.path.read_text())
             for name in ("device", "dispatch"):
@@ -351,7 +375,10 @@ class CostTable:
         ]
         for name, table in (("steps", self.steps), ("calibrations", self.calibrations)):
             rows = [
-                f"{json.dumps(k)}: {json.dumps(dataclasses.asdict(v))}"
+                f"{json.dumps(k)}: "
+                + json.dumps(
+                    {n: x for n, x in dataclasses.asdict(v).items() if x is not None}
+                )
                 for k, v in sorted(table.items())
             ]
             sections.append(f'"{name}": {{\n  ' + ",\n  ".join(rows) + "\n}")
@@ -363,6 +390,7 @@ class CostTable:
     def record_calibration(self, pair: tuple[str, str], cal: Calibration) -> None:
         self.calibrations["|".join(pair)] = cal
         self._medians = None
+        self._pair_loads = None
 
     def _calibrated(self, figure: str) -> float:
         if self._medians is None:
@@ -392,11 +420,67 @@ class CostTable:
         return 0.0 if cost is None else cost.t_step_us
 
     def load(self, key: str) -> float:
-        """What configuring a design adds to a configure; 0 if unmeasured."""
+        """What configuring a design adds to a configure; 0 if unmeasured.
+
+        On an xclbin chain it is `L`, the design's load on a switch into it:
+        solved from the calibrations where a pair names the design, else its
+        pair's loads less that of the design it was run beside.
+
+        Raises:
+            ValueError: On an xclbin chain, the measurements do not
+                determine it.
+        """
+        if self.dispatch != "separate":
+            cost = self.steps.get(key)
+            if cost is None:
+                return 0.0
+            return cost.alone_us - self.dispatch_us - self.reset_us - self.base_us
+        solved = self.pair_loads()
+        if key in solved:
+            if solved[key] is None:
+                raise ValueError(
+                    f"{self.path}: the calibration pairs do not determine the load "
+                    f"of {key}; pairs closing an odd cycle, a triangle, would"
+                )
+            return solved[key]
         cost = self.steps.get(key)
         if cost is None:
             return 0.0
-        return cost.alone_us - self.dispatch_us - self.reset_us - self.base_us
+        if cost.beside is None:
+            raise ValueError(
+                f"{self.path}: the load of {key} is measured neither beside "
+                f"another design nor in a calibration pair"
+            )
+        if cost.beside not in solved and cost.beside not in self.steps:
+            raise ValueError(
+                f"{self.path}: the load of {key} is measured beside "
+                f"{cost.beside}, whose own load is not"
+            )
+        return cost.pair_us - self.load(cost.beside)
+
+    def pair_loads(self) -> dict[str, float | None]:
+        """On an xclbin chain, each design a calibration pair names, by its
+        load solved from the pairs' mean switches, `s(a, b) = (L(a) + L(b))
+        / 2`, by least squares; None where the pairs do not determine it (a
+        pair alone, or pairs closing no odd cycle).
+        """
+        if self._pair_loads is None:
+            pairs = [(k.split("|"), c.switch_us) for k, c in self.calibrations.items()]
+            names = list(dict.fromkeys(n for pair, _ in pairs for n in pair))
+            index = {n: i for i, n in enumerate(names)}
+            halves = np.zeros((len(pairs), len(names)))
+            for row, (pair, _) in enumerate(pairs):
+                for n in pair:
+                    halves[row, index[n]] += 0.5
+            switches = np.array([s for _, s in pairs])
+            solved = np.linalg.lstsq(halves, switches, rcond=None)[0]
+            # A load is determined where its unit vector is in the row space.
+            free = np.eye(len(names)) - np.linalg.pinv(halves) @ halves
+            self._pair_loads = {
+                n: None if np.abs(free[i]).max() > 1e-9 else float(solved[i])
+                for n, i in index.items()
+            }
+        return self._pair_loads
 
     @staticmethod
     def today() -> str:
@@ -429,6 +513,16 @@ class Runlist:
             if k in members and (i == 0 or self.keys[i - 1] not in members)
         )
 
+    def switches(self) -> Counter:
+        """How often each design follows another, the last step wrapping to
+        the first: a runlist called back to back.
+        """
+        return Counter(
+            k
+            for previous, k in zip(self.keys[-1:] + self.keys[:-1], self.keys)
+            if previous != k
+        )
+
     def neighbours(self) -> dict[int, set[int]]:
         out: dict[int, set[int]] = {i: set() for i in range(len(self.order))}
         for i, j in self.pairs:
@@ -449,16 +543,31 @@ def model_us(
     Args:
         table: The measured costs.
         keys: The runlist's design keys.
-        groups: The designs sharing a device.
+        groups: The designs sharing a device; none on an xclbin chain.
         chosen: Each design's key at the setting it runs at.
         arrays: Each design's array at that setting: the designs of one array
-            share a device too, which loads the array once.
+            share a device too, which loads the array once. An xclbin chain
+            loads each design of its own.
 
     Returns:
-        `(time_us, configures)`, the reset included.
+        `(time_us, configures)`, the reset included; on an xclbin chain,
+        `configures` counts the switches.
+
+    Raises:
+        ValueError: `groups` are given for an xclbin chain.
     """
     chosen = chosen or {}
     arrays = arrays or {}
+    if table.dispatch == "separate":
+        if groups:
+            raise ValueError("an xclbin chain loads each design alone; it packs none")
+        runlist = Runlist(keys)
+        switches = runlist.switches()
+        total = table.dispatch_us + sum(
+            n * table.t_step(chosen.get(k, k)) for k, n in runlist.occurrences.items()
+        )
+        total += sum(n * table.load(chosen.get(k, k)) for k, n in switches.items())
+        return total, sum(switches.values())
     order = list(dict.fromkeys(keys))
     packing = Packing(tuple(map(tuple, groups))).sharing(
         {k: arrays.get(k, k) for k in order}
@@ -716,6 +825,59 @@ class JointNarrowing:
         # A setting applies to every operator of its design, so it moves no
         # tunable any of them pins.
         found = {k: self._candidates(op, dev, pinned[k]) for k, op in first.items()}
+        if table.dispatch == "separate":
+            chosen, groups = self._separate(keys, found), ()
+        else:
+            chosen, groups = self._packed(keys, found, dev)
+        predicted, configures = model_us(
+            table,
+            keys,
+            groups,
+            {k: v.key for k, v in chosen.items()},
+            {k: v.array for k, v in chosen.items()},
+        )
+        baseline, baseline_configures = model_us(
+            table, keys, arrays={k: cands[0].array for k, cands in found.items()}
+        )
+        return Tuning(
+            chosen=chosen,
+            groups=groups,
+            configures=configures,
+            predicted_us=predicted,
+            baseline_configures=baseline_configures,
+            baseline_us=baseline,
+            unmeasured=tuple(k for k in found if k not in table.steps),
+            inexact=tuple(
+                k
+                for k, v in chosen.items()
+                if v.key != k and not table.steps[v.key].exact
+            ),
+        )
+
+    def _separate(
+        self, keys: Sequence[str], found: Mapping[str, Sequence[Variant]]
+    ) -> dict[str, Variant]:
+        """Each design's setting on an xclbin chain, by default key: its
+        cheapest of ``found``, its occurrences in ``keys`` times its step
+        and its switches in times its load.
+        """
+        table = self.table
+        runlist = Runlist(keys)
+        arrivals = runlist.switches()
+        return {
+            k: min(
+                cands,
+                key=lambda v: runlist.occurrences[k] * table.t_step(v.key)
+                + arrivals[k] * table.load(v.key),
+            )
+            for k, cands in found.items()
+        }
+
+    def _packed(
+        self, keys: Sequence[str], found: Mapping[str, Sequence[Variant]], dev
+    ) -> tuple[dict[str, Variant], tuple[tuple[str, ...], ...]]:
+        """Each design's setting on a full ELF, by default key, and the packs."""
+        table = self.table
         # The designs of one array are one device, so they keep one array:
         # the search runs over arrays, each named for its first design, and
         # every other design of it takes its cheapest setting at that array
@@ -802,30 +964,7 @@ class JointNarrowing:
         groups = tuple(
             tuple(runlist.order[i] for i in sorted(p.members)) for p in chosen_packs
         )
-        predicted, configures = model_us(
-            table,
-            keys,
-            groups,
-            {k: v.key for k, v in chosen.items()},
-            {k: v.array for k, v in chosen.items()},
-        )
-        baseline, baseline_configures = model_us(
-            table, keys, arrays={k: cands[0].array for k, cands in found.items()}
-        )
-        return Tuning(
-            chosen=chosen,
-            groups=groups,
-            configures=configures,
-            predicted_us=predicted,
-            baseline_configures=baseline_configures,
-            baseline_us=baseline,
-            unmeasured=tuple(k for k in found if k not in table.steps),
-            inexact=tuple(
-                k
-                for k, v in chosen.items()
-                if v.key != k and not table.steps[v.key].exact
-            ),
-        )
+        return chosen, groups
 
     @staticmethod
     def _gain(pack: _Pack, alone: Sequence[tuple[float, Variant, int]]) -> float:
