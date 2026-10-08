@@ -40,21 +40,23 @@ CLIPS = {
     "short": 2.0,
     # 183 tokens in the 256-token version.
     "medium": 7.3,
+    # 450 tokens in the 512-token version.
+    "extended": 18.0,
     # 750 tokens in the 768-token version: the extractor's 30 s cap.
     "long": 30.0,
 }
 
-# Measured: 0.99925, 0.99953 and 0.99941 of the features are the host
-# extractor's rounded to bf16.
+# Measured: 0.99925, 0.99953, 0.99931 and 0.99941 of the features are the
+# host extractor's rounded to bf16.
 MIN_EXACT = 0.999
 # The rest are within one bf16 ulp, bar a log near 0, where the energy's
 # relative error is the feature's absolute one: measured 1.9e-6 at most.
 ATOL = 4e-6
 
-# Measured: 0.983, 0.779 and 0.622 at the worst token (mean 0.996 or more),
-# where HF's own bf16 tower reaches 0.861, 0.834 and 0.655.
+# Measured: 0.983, 0.779, 0.565 and 0.622 at the worst token (mean 0.996 or
+# more), where HF's own bf16 tower reaches 0.861, 0.795, 0.902 and 0.689.
 MIN_COSINE = 0.55
-# Measured: 0.042, 0.084 and 0.074; the tower without its clamps is 0.88.
+# Measured: 0.042, 0.084, 0.072 and 0.074; the tower without its clamps is 0.88.
 MAX_ERROR = 0.09
 
 
