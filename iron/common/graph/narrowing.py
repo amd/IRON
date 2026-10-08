@@ -16,7 +16,8 @@ not; entering configures it. The designs of one array share a device
 as one, at one setting. ``R`` is the empty configure the parity rule
 adds (``Fusion.needs_reset``). ``t_step`` and ``load`` are measured per
 design and setting, ``D0``, ``base`` and ``R`` per device (``probe``, into a
-``CostTable``).
+``CostTable``). A pack the table holds measured as one (``CostTable.packs``)
+is priced as measured instead: its entry, and each member's step on it.
 
 Only a pack connected in the runlist's adjacency can save an entry, so the
 candidates are the connected sets of designs, and an exact search over
@@ -60,7 +61,7 @@ import json
 import os
 import statistics
 from collections import Counter
-from collections.abc import Hashable, Iterator, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -266,10 +267,10 @@ class StepCost:
         exact: Its output is bit-identical to the default setting's.
         accurate: It may replace the default: exact, or judged within the
             default's gate and its own (``probe.judge``).
-        beside: On an xclbin chain, the key of the design it was run
-            beside, switching each step; None on a full ELF and on that
-            design's own row.
-        pair_us: The loads of the two, `L(beside) + L`.
+        beside: The key of the design it was run beside, alternating each
+            step; None on that design's own row.
+        pair_us: The entries of the two, `E(beside) + E`, where a design's
+            entry `E` is `base + load` (on an xclbin chain, `L`).
     """
 
     t_step_us: float
@@ -293,8 +294,8 @@ class Calibration:
         reset_us: `R`, the empty configure; 0 on an xclbin chain.
         base_us: The part of a configure no design accounts for; 0 on an
             xclbin chain.
-        switch_us: The pair's mean configure; on an xclbin chain, its mean
-            load, `(L(a) + L(b)) / 2`.
+        switch_us: The pair's mean entry, `(E(a) + E(b)) / 2`; on an xclbin
+            chain, its mean load.
     """
 
     dispatch_us: float
@@ -307,12 +308,33 @@ class Calibration:
     measured: str
 
 
+@dataclasses.dataclass(frozen=True)
+class PackCost:
+    """Designs sharing one device on a full ELF, measured as that device.
+
+    Attributes:
+        beside: The key of the design it was run beside, alternating.
+        pair_us: The entries of the two, `E(beside) + E`, where the pack's
+            entry `E` is its base and every member's load.
+        t_step_us: Each member's time per step on the device, by its key.
+    """
+
+    beside: str
+    pair_us: float
+    t_step_us: dict[str, float]
+    pmode: str
+    rounds: int
+    calls: int
+    measured: str
+
+
 class CostTable:
     """Measured step and configure costs for one device and one packaging,
     as JSON on disk.
 
     ``steps`` is keyed by ``cost_key``, ``calibrations`` by the pair of keys
-    measured; the model takes the median of each calibrated figure.
+    measured, ``packs`` by ``pack_name``; the model takes the median of each
+    calibrated figure.
 
     Args:
         path: The JSON file; read if it exists.
@@ -335,8 +357,9 @@ class CostTable:
         self.dispatch = dispatch
         self.steps: dict[str, StepCost] = {}
         self.calibrations: dict[str, Calibration] = {}
+        self.packs: dict[str, PackCost] = {}
         self._medians: dict[str, float] | None = None
-        self._pair_loads: dict[str, float | None] | None = None
+        self._entry_costs: dict[str, float | None] | None = None
         if self.path.exists():
             data = json.loads(self.path.read_text())
             for name in ("device", "dispatch"):
@@ -351,6 +374,7 @@ class CostTable:
             self.calibrations = {
                 k: Calibration(**v) for k, v in data["calibrations"].items()
             }
+            self.packs = {k: PackCost(**v) for k, v in data.get("packs", {}).items()}
 
     def measures(self, dev) -> None:
         """Check that this table is measured on ``dev``.
@@ -373,7 +397,10 @@ class CostTable:
             f'"device": {json.dumps(self.device)}',
             f'"dispatch": {json.dumps(self.dispatch)}',
         ]
-        for name, table in (("steps", self.steps), ("calibrations", self.calibrations)):
+        sectioned = [("steps", self.steps), ("calibrations", self.calibrations)]
+        if self.packs:
+            sectioned.append(("packs", self.packs))
+        for name, table in sectioned:
             rows = [
                 f"{json.dumps(k)}: "
                 + json.dumps(
@@ -390,7 +417,22 @@ class CostTable:
     def record_calibration(self, pair: tuple[str, str], cal: Calibration) -> None:
         self.calibrations["|".join(pair)] = cal
         self._medians = None
-        self._pair_loads = None
+        self._entry_costs = None
+
+    def record_pack(self, keys: Iterable[str], cost: PackCost) -> None:
+        self.packs[self.pack_name(keys)] = cost
+
+    def pack_entry(self, name: str) -> float:
+        """One entry into the device ``packs`` holds as ``name``: its pair's
+        entries less that of the design it was run beside.
+        """
+        pack = self.packs[name]
+        return pack.pair_us - self.load(pack.beside) - self.base_us
+
+    @staticmethod
+    def pack_name(keys: Iterable[str]) -> str:
+        """The name ``packs`` holds the designs of ``keys`` under, in any order."""
+        return "|".join(sorted(set(keys)))
 
     def _calibrated(self, figure: str) -> float:
         if self._medians is None:
@@ -420,29 +462,24 @@ class CostTable:
         return 0.0 if cost is None else cost.t_step_us
 
     def load(self, key: str) -> float:
-        """What configuring a design adds to a configure; 0 if unmeasured.
+        """What configuring a design adds to an entry's base; 0 if unmeasured.
 
-        On an xclbin chain it is `L`, the design's load on a switch into it:
-        solved from the calibrations where a pair names the design, else its
-        pair's loads less that of the design it was run beside.
+        It is the design's entry `E = base + load` less the base (on an
+        xclbin chain, `L`, its load on a switch into it): `E` solved from
+        the calibrations where a pair names the design, else its pair's
+        entries less that of the design it was run beside.
 
         Raises:
-            ValueError: On an xclbin chain, the measurements do not
-                determine it.
+            ValueError: The measurements do not determine it.
         """
-        if self.dispatch != "separate":
-            cost = self.steps.get(key)
-            if cost is None:
-                return 0.0
-            return cost.alone_us - self.dispatch_us - self.reset_us - self.base_us
-        solved = self.pair_loads()
+        solved = self.entry_costs()
         if key in solved:
             if solved[key] is None:
                 raise ValueError(
                     f"{self.path}: the calibration pairs do not determine the load "
                     f"of {key}; pairs closing an odd cycle, a triangle, would"
                 )
-            return solved[key]
+            return solved[key] - self.base_us
         cost = self.steps.get(key)
         if cost is None:
             return 0.0
@@ -456,15 +493,15 @@ class CostTable:
                 f"{self.path}: the load of {key} is measured beside "
                 f"{cost.beside}, whose own load is not"
             )
-        return cost.pair_us - self.load(cost.beside)
+        return cost.pair_us - self.load(cost.beside) - 2 * self.base_us
 
-    def pair_loads(self) -> dict[str, float | None]:
-        """On an xclbin chain, each design a calibration pair names, by its
-        load solved from the pairs' mean switches, `s(a, b) = (L(a) + L(b))
-        / 2`, by least squares; None where the pairs do not determine it (a
-        pair alone, or pairs closing no odd cycle).
+    def entry_costs(self) -> dict[str, float | None]:
+        """Each design a calibration pair names, by its entry `E` solved
+        from the pairs' mean entries, `s(a, b) = (E(a) + E(b)) / 2`, by least
+        squares; None where the pairs do not determine it (a pair alone, or
+        pairs closing no odd cycle).
         """
-        if self._pair_loads is None:
+        if self._entry_costs is None:
             pairs = [(k.split("|"), c.switch_us) for k, c in self.calibrations.items()]
             names = list(dict.fromkeys(n for pair, _ in pairs for n in pair))
             index = {n: i for i, n in enumerate(names)}
@@ -476,11 +513,11 @@ class CostTable:
             solved = np.linalg.lstsq(halves, switches, rcond=None)[0]
             # A load is determined where its unit vector is in the row space.
             free = np.eye(len(names)) - np.linalg.pinv(halves) @ halves
-            self._pair_loads = {
+            self._entry_costs = {
                 n: None if np.abs(free[i]).max() > 1e-9 else float(solved[i])
                 for n, i in index.items()
             }
-        return self._pair_loads
+        return self._entry_costs
 
     @staticmethod
     def today() -> str:
@@ -539,6 +576,8 @@ def model_us(
     arrays: Mapping[str, Hashable] | None = None,
 ) -> tuple[float, int]:
     """The model's time for a runlist of design keys, and its configures.
+    A device whose designs at their settings the table holds as a pack
+    costs that pack's entry and its members' steps on it.
 
     Args:
         table: The measured costs.
@@ -573,18 +612,27 @@ def model_us(
         {k: arrays.get(k, k) for k in order}
     )
     members = packing.devices(order)
+    names = {
+        here: table.pack_name(chosen.get(m, m) for m in designs)
+        for here, designs in members.items()
+    }
     total = table.dispatch_us
     entries = 0
     previous = None
     for k in keys:
-        total += table.t_step(chosen.get(k, k))
         here = packing.device_of(k)
+        pack = table.packs.get(names[here])
+        key = chosen.get(k, k)
+        total += table.t_step(key) if pack is None else pack.t_step_us[key]
         if here != previous:
             entries += 1
-            loads: dict[Hashable, float] = {}
-            for m in members[here]:
-                loads.setdefault(arrays.get(m, m), table.load(chosen.get(m, m)))
-            total += table.base_us + sum(loads.values())
+            if pack is None:
+                loads: dict[Hashable, float] = {}
+                for m in members[here]:
+                    loads.setdefault(arrays.get(m, m), table.load(chosen.get(m, m)))
+                total += table.base_us + sum(loads.values())
+            else:
+                total += table.pack_entry(names[here])
             previous = here
     if entries % 2:
         total += table.reset_us
@@ -607,6 +655,9 @@ class Tuning:
     # Default keys sharing one device, an array's first design standing for
     # the array: the fusion adds its other designs.
     groups: tuple[tuple[str, ...], ...]
+    # The setting keys of each device holding more than one design, array
+    # mates included: what ``CostTable.packs`` would price.
+    devices: tuple[tuple[str, ...], ...]
     configures: int
     predicted_us: float
     baseline_configures: int
@@ -829,6 +880,9 @@ class JointNarrowing:
             chosen, groups = self._separate(keys, found), ()
         else:
             chosen, groups = self._packed(keys, found, dev)
+        devices = Packing(groups).sharing(
+            {k: chosen[k].array for k in dict.fromkeys(keys)}
+        )
         predicted, configures = model_us(
             table,
             keys,
@@ -842,6 +896,9 @@ class JointNarrowing:
         return Tuning(
             chosen=chosen,
             groups=groups,
+            devices=tuple(
+                tuple(chosen[k].key for k in group) for group in devices.groups
+            ),
             configures=configures,
             predicted_us=predicted,
             baseline_configures=baseline_configures,
@@ -913,12 +970,30 @@ class JointNarrowing:
                 )
             )
 
+        def device_cost(
+            members: Sequence[int], pick: Sequence[Variant], entries: int
+        ) -> float:
+            settings = [
+                (m, v if m == designs_of[i][0] else at[m][v.array])
+                for i, v in zip(members, pick)
+                for m in designs_of[i]
+            ]
+            name = table.pack_name(s.key for _, s in settings)
+            if name not in table.packs:
+                return entries * table.base_us + sum(
+                    member_cost(i, v, entries) for i, v in zip(members, pick)
+                )
+            pack = table.packs[name]
+            return entries * table.pack_entry(name) + sum(
+                occurrences[m] * pack.t_step_us[s.key] for m, s in settings
+            )
+
         # Alone, each design takes its cheapest setting.
         alone: list[tuple[float, Variant, int]] = []
         for i, key in enumerate(runlist.order):
             e = runlist.entries(frozenset([key]))
-            best = min(candidates[i], key=lambda v: member_cost(i, v, e))
-            alone.append((e * table.base_us + member_cost(i, best, e), best, e))
+            best = min(candidates[i], key=lambda v: device_cost((i,), (v,), e))
+            alone.append((device_cost((i,), (best,), e), best, e))
 
         packs: list[_Pack] = []
         for members in self._connected(runlist, measured, candidates, budget):
@@ -930,10 +1005,14 @@ class JointNarrowing:
                 )
                 for i in members
             ]
-            options = [
-                (entries * table.base_us + c, pick)
-                for c, pick in _cheapest(ranked, budget, self.fit_attempts)
-            ]
+            # Ranked as each member alone, then priced as the pack where measured.
+            options = sorted(
+                (
+                    (device_cost(members, pick, entries), pick)
+                    for _, pick in _cheapest(ranked, budget, self.fit_attempts)
+                ),
+                key=lambda option: option[0],
+            )
             if not options:
                 continue
             pack = _Pack(members, entries, options)

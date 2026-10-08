@@ -13,7 +13,7 @@ import contextlib
 import dataclasses
 import functools
 import inspect
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,7 +36,7 @@ from ..image.coresidence import AdjacentPacking
 from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
 from .carried import CARRY, EmitSite, attach_emit, compose
-from .fold import folded
+from .fold import Fold, Prologue, folded
 from .handle import Affine, Carry, Handle, State, Value, _tensor_dtype, is_operand
 from .narrowing import JointNarrowing, Tuning
 from .trace import TracedGraph, Tracer, _ReferenceTracer
@@ -312,7 +312,7 @@ class Graph:
         record="memory",
         feeds: CompiledGraph | None = None,
         coresident: AdjacentPacking | JointNarrowing | None = None,
-        fold: bool = False,
+        fold: bool | Collection[Fold | Prologue] = False,
         **shapes,
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
@@ -333,14 +333,19 @@ class Graph:
                 cost table says they gain, then packs them.
             fold: Fold every step its readers or its producer can apply
                 in their own cores into them (``iron.common.graph.fold``),
-                whatever it costs.
+                whatever it costs; or those folds alone, as a tuning's
+                ``folds`` name them.
             **shapes: Each input's shape, or ``(shape, dtype)``.
         """
         if dev is not None:
             aie_utils.set_current_device(dev)
         traced = self.trace(**shapes)
         if fold:
-            traced, count = folded(traced, aie_utils.ensure_current_device())
+            traced, count = folded(
+                traced,
+                aie_utils.ensure_current_device(),
+                None if fold is True else fold,
+            )
             if verbose:
                 print(
                     f"{self.name}: {count.total()} step(s) folded into their "

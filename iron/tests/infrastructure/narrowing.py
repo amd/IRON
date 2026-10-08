@@ -35,7 +35,6 @@ from iron.common.graph.probe import (
     CONTEXTS,
     Call,
     Timing,
-    calibrate,
     check_model,
     measure_graph,
     measure_steps,
@@ -57,6 +56,12 @@ from iron.operators import (
 
 SIZE = 8192
 TILE = 256
+# Pairs closing an odd cycle determine each calibrated design's entry.
+TRIANGLE = [
+    ("ElementwiseAdd", "ElementwiseMul"),
+    ("ElementwiseAdd", "SiLU"),
+    ("SiLU", "ElementwiseMul"),
+]
 
 pytestmark = pytest.mark.usefixtures("npu_runtime")
 
@@ -76,11 +81,13 @@ class Chain(iron.Graph):
         return self.silu(self.add(x, b))
 
 
-class AddSilu(iron.Graph):
-    """silu of a sum: two of `Chain`'s designs."""
+class Calls(iron.Graph):
+    """`Chain` by class calls: another graph over its designs."""
 
     def body(self, a, b):
-        return SiLU(ElementwiseAdd(a, b, tile_size=TILE), tile_size=TILE)
+        x = ElementwiseAdd(a, b, tile_size=TILE)
+        x = ElementwiseMul(SiLU(x, tile_size=TILE), b, tile_size=TILE)
+        return SiLU(ElementwiseAdd(x, b, tile_size=TILE), tile_size=TILE)
 
 
 class Masked(iron.Graph):
@@ -281,18 +288,13 @@ def test_a_setting_that_does_not_build_is_left_out(tmp_path):
 
 @pytest.mark.supported_devices("npu2")
 def test_tuned_graph_is_bit_identical_and_packed(tmp_path):
+    report = platform()
+    cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     table = CostTable(tmp_path / "costs.json", "npu2", "fused")
     traced = Chain().trace(a=(SIZE,), b=(SIZE,))
-    first = {}
-    for s in traced.steps:
-        first.setdefault(cost_key(s.op), s.op)
     timing = Timing(rounds=2, calls=10)
-    dev = aie_utils.ensure_current_device()
-    for op in first.values():
-        costs = measure_steps(table, variants(op, dev), timing)
-        assert all(c.exact for c in costs.values())
-    add, silu = (variants(op, dev)[-1].op for op in list(first.values())[:2])
-    calibrate(table, add, silu, timing)
+    measure_graph(table, [Call(traced)], TRIANGLE, timing, cache=cache)
+    assert all(c.exact for c in table.steps.values())
 
     tuned = Chain().compile(
         image=iron.ELF,
@@ -324,10 +326,14 @@ def test_the_model_predicts_the_tuned_graph_and_the_graph_as_traced(tmp_path):
     shapes = dict(a=(SIZE,), b=(SIZE,))
     timing = Timing(rounds=8, calls=50)
     calls = Call.admitted(Chain().trace(**shapes), aie_utils.ensure_current_device())
-    measure_graph(table, calls, [("ElementwiseAdd", "SiLU")], timing, cache=cache)
+    measure_graph(table, calls, TRIANGLE, timing, cache=cache)
 
     tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
     tuned = Chain().compile(image=iron.ELF, coresident=tuner, **shapes)
+    # Every device the tuning packs is priced as measured, as one device.
+    assert tuned.tuning.devices
+    assert all(table.pack_name(d) in table.packs for d in tuned.tuning.devices)
+    assert all(p.beside not in n.split("|") for n, p in table.packs.items())
     untuned = Chain().compile(image=iron.ELF, **shapes)
     rng = np.random.default_rng(0)
     tensors = [(rng.random(SIZE) * 4 - 2).astype(bfloat16) for _ in range(2)]
@@ -360,7 +366,7 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
     measure_graph(
         table,
         calls,
-        [("SiLU", "ElementwiseMul")],
+        [("SiLU", "ElementwiseMul"), ("ElementwiseMul", "GEMV"), ("GEMV", "SiLU")],
         Timing(rounds=1, calls=5),
         cache=CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
     )
@@ -368,9 +374,12 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
 
     tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
     tuned = SwiGLU(*weights).compile(image=iron.ELF, coresident=tuner, x=(1, E))
-    fold = bool(tuned.tuning.folds)
-    assert any(isinstance(s.op, SiLU) for s in tuned.traced.steps) != fold
-    plain = SwiGLU(*weights).compile(image=iron.ELF, fold=fold, x=(1, E))
+    folds = tuned.tuning.folds
+    plain = SwiGLU(*weights).compile(image=iron.ELF, fold=folds, x=(1, E))
+    assert len(tuned.traced.steps) < len(traced.steps) or not folds
+    assert [type(s.op) for s in tuned.traced.steps] == [
+        type(s.op) for s in plain.traced.steps
+    ]
     x = rng.standard_normal((1, E)).astype(bfloat16)
     want = np.array(plain(x).numpy()[:E])
     got = np.array(tuned(x).numpy()[:E])
@@ -430,19 +439,20 @@ def test_an_inexact_width_within_its_gates_is_accurate_and_cached(tmp_path):
 def test_a_graph_sharing_measured_designs_measures_nothing(tmp_path):
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "costs")
-    pairs = [("ElementwiseAdd", "SiLU")]
     timing = Timing(rounds=1, calls=5)
     chain = CostTable(tmp_path / "chain.json", "npu2", "fused")
     shapes = dict(a=(SIZE,), b=(SIZE,))
     ran = measure_graph(
-        chain, [Call(Chain().trace(**shapes))], pairs, timing, cache=cache
+        chain, [Call(Chain().trace(**shapes))], TRIANGLE, timing, cache=cache
     )
-    assert len(ran) == len(chain.steps) + 1
+    # Each setting, the three calibrations, each setting's entry but the
+    # calibrated three's, and each pack.
+    assert len(ran) == 2 * len(chain.steps) + len(chain.packs)
     assert len(list(cache.directory.iterdir())) == len(ran)
 
-    table = CostTable(tmp_path / "add_silu.json", "npu2", "fused")
+    table = CostTable(tmp_path / "calls.json", "npu2", "fused")
     ran = measure_graph(
-        table, [Call(AddSilu().trace(**shapes))], pairs, timing, cache=cache
+        table, [Call(Calls().trace(**shapes))], TRIANGLE, timing, cache=cache
     )
     assert ran == []
     assert table.steps and table.steps.items() <= chain.steps.items()
@@ -457,14 +467,9 @@ def test_an_xclbin_chain_is_measured_and_tuned_by_its_own_model(tmp_path):
     table = CostTable(tmp_path / "costs.json", "npu2", "separate")
     shapes = dict(a=(SIZE,), b=(SIZE,))
     timing = Timing(rounds=4, calls=20)
-    triangle = [
-        ("ElementwiseAdd", "ElementwiseMul"),
-        ("ElementwiseAdd", "SiLU"),
-        ("SiLU", "ElementwiseMul"),
-    ]
     traced = Chain().trace(**shapes)
     dev = aie_utils.ensure_current_device()
-    measure_graph(table, [Call(traced)], triangle, timing, cache=cache)
+    measure_graph(table, [Call(traced)], TRIANGLE, timing, cache=cache)
 
     assert len(table.calibrations) == 3
     assert all(
@@ -479,7 +484,7 @@ def test_an_xclbin_chain_is_measured_and_tuned_by_its_own_model(tmp_path):
     narrow, wide = (min(add, key=lambda v: v.mm2s), max(add, key=lambda v: v.mm2s))
     assert table.load(wide.key) > 2 * table.load(narrow.key) > 0
     again = CostTable(tmp_path / "again.json", "npu2", "separate")
-    assert measure_graph(again, [Call(traced)], triangle, timing, cache=cache) == []
+    assert measure_graph(again, [Call(traced)], TRIANGLE, timing, cache=cache) == []
     assert again.steps == table.steps
 
     tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")

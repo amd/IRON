@@ -13,9 +13,10 @@ the per-call values it was run at, the contents of the inputs it was
 given and, for an xclbin chain, the packaging it was run under. Editing how a design is generated therefore misses rather than
 reusing a stale time. A configure calibration is kept the same way, keyed
 on its pair's entries, and so are the twin a design was measured beside and
-the verdict on a width judged against its default, and on an xclbin chain the
-loads of a design run after its table's reference design. Reference and tolerance
-code is in no key: after editing one, measure again with ``remeasure``.
+the verdict on a width judged against its default, the entries of a design
+run alternating with its table's reference design, and a full ELF's pack of
+designs measured as one device. Reference and tolerance code is in no key:
+after editing one, measure again with ``remeasure``.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import hashlib
 import json
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TypeVar
 
@@ -34,7 +35,7 @@ from aie.utils.compile import NPU_CACHE_HOME
 
 from ..declare import Operator
 from ..design import OperatorDesign
-from .narrowing import Calibration, StepCost
+from .narrowing import Calibration, PackCost, StepCost
 
 
 @dataclasses.dataclass(frozen=True)
@@ -77,10 +78,10 @@ class Measurement:
 
 @dataclasses.dataclass(frozen=True)
 class Pairing:
-    """An xclbin chain of a reference design and another, as the cache holds it.
+    """A reference design run alternating with another, as the cache holds it.
 
     Attributes:
-        pair_us: The two designs' loads, the reference's and the other's.
+        pair_us: The two designs' entries, the reference's and the other's.
     """
 
     pair_us: float
@@ -104,7 +105,7 @@ class Accuracy:
     measured: str  # ISO date
 
 
-Record = TypeVar("Record", Measurement, Calibration, Accuracy, Pairing)
+Record = TypeVar("Record", Measurement, Calibration, Accuracy, Pairing, PackCost)
 
 
 class CostCache:
@@ -168,12 +169,21 @@ class CostCache:
 
     @staticmethod
     def paired_key(reference: str, entry: str) -> str:
-        """The entry the loads of the design at ``entry`` are kept in, as
-        run after the one at ``reference``.
+        """The entry the design at ``entry`` is kept in as run alternating
+        with the one at ``reference``.
         """
-        return hashlib.sha256(repr(("paired", reference, entry)).encode()).hexdigest()[
-            :32
-        ]
+        return hashlib.sha256(
+            repr(("alternated", reference, entry)).encode()
+        ).hexdigest()[:32]
+
+    @staticmethod
+    def pack_key(reference: str, entries: Sequence[str]) -> str:
+        """The entry the designs at ``entries``, packed on one device, are
+        kept in as measured against the one at ``reference``.
+        """
+        return hashlib.sha256(
+            repr(("pack", reference, sorted(entries))).encode()
+        ).hexdigest()[:32]
 
     @staticmethod
     def judged_key(default: str, entry: str) -> str:
@@ -191,7 +201,9 @@ class CostCache:
         return kind(**json.loads(path.read_text()))
 
     def put(
-        self, key: str, record: Measurement | Calibration | Accuracy | Pairing
+        self,
+        key: str,
+        record: Measurement | Calibration | Accuracy | Pairing | PackCost,
     ) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / f"{key}.json"

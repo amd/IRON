@@ -27,6 +27,7 @@ from iron.common.graph.narrowing import (
     Calibration,
     CostTable,
     JointNarrowing,
+    PackCost,
     Runlist,
     StepCost,
     cost_key,
@@ -315,22 +316,60 @@ def test_designs_of_one_array_load_it_once(tmp_path):
     assert alone[0] - shared[0] == pytest.approx(2 * (30.0 + 100.0))
 
 
+def test_a_full_elf_load_is_an_entry_less_its_base(tmp_path):
+    table = _table(tmp_path / "costs.json", {"a": (1.0, 100.0)})
+    assert table.load("x") == pytest.approx(80.0)
+    assert table.load("a") == pytest.approx(100.0)
+    # What one run leaves over its step is not a load: D0 and R drift with it.
+    table.record_step("t", StepCost(1.0, 500.0, True, True, "turbo", 1, 1, "-"))
+    with pytest.raises(ValueError, match="neither beside another design"):
+        table.load("t")
+
+
+def test_a_measured_pack_costs_its_entry_and_its_steps_on_it(tmp_path):
+    table = _table(tmp_path / "costs.json", {"a": (1.0, 100.0), "b": (2.0, 100.0)})
+    apart = model_us(table, ["a", "b", "a"])
+    # One entry, odd: a reset.
+    assert model_us(table, ["a", "b", "a"], [("a", "b")]) == pytest.approx(
+        (50.0 + 4.0 + 30.0 + 200.0 + 30.0, 2)
+    )
+    # Run beside x, alternating: its entry and the pack's, 150.
+    x = table.load("x") + table.base_us
+    table.record_pack(
+        ["b", "a"], PackCost("x", x + 150.0, {"a": 3.0, "b": 4.0}, "turbo", 1, 1, "-")
+    )
+    assert table.pack_entry(table.pack_name(["a", "b"])) == pytest.approx(150.0)
+    assert table.pack_name(["b", "a", "b"]) in table.packs
+    assert model_us(table, ["a", "b", "a"], [("a", "b")]) == pytest.approx(
+        (50.0 + 10.0 + 150.0 + 30.0, 2)
+    )
+    # Apart, each is still priced as measured alone.
+    assert model_us(table, ["a", "b", "a"]) == apart
+    table.save()
+    again = CostTable(table.path)
+    assert again.packs == table.packs
+
+
 def _table(path, steps, dispatch=50.0, reset=30.0, base=30.0):
-    """A table holding the given (t_step, load) per key, alone figures
-    composed as the probe measures them.
+    """A table holding the given (t_step, load) per key, composed as the
+    probe measures them: each beside x, and the pairs of ``TRIANGLE``.
     """
     table = CostTable(path, "npu2", "fused")
     for key, (t_step, load) in steps.items():
+        cost = StepCost(
+            t_step, dispatch + base + load + reset, True, True, "turbo", 1, 1, "-"
+        )
         table.record_step(
             key,
-            StepCost(
-                t_step, dispatch + base + load + reset, True, True, "turbo", 1, 1, "-"
+            dataclasses.replace(
+                cost, beside="x", pair_us=2 * base + TRIANGLE["x"] + load
             ),
         )
-    table.record_calibration(
-        ("x", "y"),
-        Calibration(dispatch, reset, base, base + 10, "turbo", 1, 1, "-"),
-    )
+    for a, b in (("x", "y"), ("y", "z"), ("x", "z")):
+        mean = base + (TRIANGLE[a] + TRIANGLE[b]) / 2
+        table.record_calibration(
+            (a, b), Calibration(dispatch, reset, base, mean, "turbo", 1, 1, "-")
+        )
     return table
 
 
@@ -555,6 +594,56 @@ def test_packs_designs_apart_in_first_use_order(tmp_path, npu2):
         model_us(table, keys, tuning.groups, chosen)[0]
     )
     assert tuning.predicted_us < tuning.baseline_us
+    assert tuning.devices == (tuple(tuning.chosen[k].key for k in tuning.groups[0]),)
+
+
+def test_the_search_prices_a_pack_as_measured(tmp_path, npu2):
+    traced, _, table = _add_silu(tmp_path, npu2)
+    tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
+    keys = [cost_key(s.op) for s in traced.steps]
+
+    def modelled(tuning):
+        return model_us(
+            table,
+            keys,
+            tuning.groups,
+            {k: v.key for k, v in tuning.chosen.items()},
+            {k: v.array for k, v in tuning.chosen.items()},
+        )[0]
+
+    first = tuner.tune(traced, npu2, "fused")
+    [device] = first.devices
+    x = table.load("x") + table.base_us
+    # The pack, measured as one device, costs far more than the sum of its
+    # members' own measurements predicts: the search drops it.
+    table.record_pack(
+        device, PackCost("x", x + 1e6, {k: 1.0 for k in device}, "turbo", 1, 1, "-")
+    )
+    dearer = tuner.tune(traced, npu2, "fused")
+    assert device not in dearer.devices
+    assert dearer.predicted_us == pytest.approx(modelled(dearer))
+    # Measured cheaper than that sum: the search keeps it, at the measured cost.
+    table.record_pack(
+        device, PackCost("x", x + 1.0, {k: 0.0 for k in device}, "turbo", 1, 1, "-")
+    )
+    cheaper = tuner.tune(traced, npu2, "fused")
+    assert cheaper.devices == first.devices
+    assert cheaper.predicted_us == pytest.approx(modelled(cheaper))
+    assert cheaper.predicted_us < first.predicted_us
+
+
+def test_the_packs_a_tuning_takes_are_measured_until_none_is_missing(tmp_path, npu2):
+    traced, _, table = _add_silu(tmp_path, npu2)
+    designs = Designs.of([Call(traced)], npu2)
+    [device] = JointNarrowing(table).tune(traced, npu2, "fused").devices
+    assert designs.unpacked(table) == [device]
+    x = table.load("x") + table.base_us
+    table.record_pack(
+        device, PackCost("x", x + 1.0, {k: 0.0 for k in device}, "turbo", 1, 1, "-")
+    )
+    assert designs.unpacked(table) == []
+    separate = CostTable(tmp_path / "separate.json", "npu2", "separate")
+    assert designs.unpacked(separate) == []
 
 
 @pytest.mark.parametrize("accurate", [True, False])

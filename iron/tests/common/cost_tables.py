@@ -33,8 +33,11 @@ def test_llamas_table_holds_every_design_it_tunes(npu2, dispatch, name):
     settings = {v.key: (vs[0], v) for vs in designs.settings.values() for v in vs}
     unmeasured = []
     for key in missing:
+        if ">" in key:
+            unmeasured.append(f"  entry {key}")
+            continue
         if key not in settings:
-            unmeasured.append(f"  calibration {key}")
+            unmeasured.append(f"  calibration or pack {key}")
             continue
         default, setting = settings[key]
         start = dict(default.tunables)
