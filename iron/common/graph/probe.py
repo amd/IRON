@@ -46,7 +46,7 @@ from aie.utils import bfp
 from .. import harness
 from ..declare import Direction, Operator
 from ..declare.bound import BoundBuffer, BoundValue
-from ..design import device_symbol
+from ..design import OperatorDesign, device_symbol
 from ..image.callable import FullELFCallable, StepCallable
 from ..image.sequence import OperatorSequence
 from .compiled import CompiledGraph
@@ -61,6 +61,7 @@ from .narrowing import (
     Variant,
     cost_key,
     fitting,
+    refuse,
     variants,
 )
 from .trace import TracedGraph
@@ -429,6 +430,8 @@ def measure_steps(
     cache: CostCache | None = None,
     remeasure: bool = False,
     twins: Sequence[Variant | None] = (),
+    fit_cache: Path = FIT_CACHE,
+    log: Callable[[str], None] = print,
 ) -> dict[str, StepCost]:
     """Measure every width in ``found`` (the default first) into ``table``,
     as many at once as the device's contexts hold. A width whose output is
@@ -443,11 +446,16 @@ def measure_steps(
             recorded as the twin's plus their difference in that run, so a
             drift between this run and the twin's own does not reach it.
             Its one-run figure is its own: one run's noise exceeds the drift.
+        fit_cache: Where a width that does not build is recorded as
+            refused (``refuse``), so ``fitting`` leaves it out from then on.
+        log: Where a width that does not build is reported.
 
     Returns:
-        The widths run on the device, by key.
+        The widths run on the device, by key. One other than the default
+        that does not build is left out of it and of ``table``.
 
     Raises:
+        RuntimeError: The default or a twin does not build.
         ValueError: `cache` is for another power mode than the NPU's, or
             a twin is not in `table`.
     """
@@ -489,34 +497,49 @@ def measure_steps(
     measured: dict[str, Measurement] = {}
     fastest = math.inf
     size = CONTEXTS // (4 if any(twins) else 2)
+    failed: set[str] = set()
     for begin in range(0, len(todo), size):
         batch = todo[begin : begin + size]
-        runs = [(v, e, v.key) for v, e, _, _ in batch] + [
-            (t, b, v.key) for v, _, t, b in batch if t is not None
-        ]
+        runs, short, long = [], [], []
+        for d, entry, of, own in [(v, e, v.key, True) for v, e, _, _ in batch] + [
+            (t, b, v.key, False) for v, _, t, b in batch if t is not None
+        ]:
+            if of in failed:
+                continue
+            try:
+                one = Standalone(
+                    f"probe1_{d.key}", [d.op], values=values, inputs=inputs
+                )
+                many = Standalone(
+                    f"probe{repeats}_{d.key}",
+                    [d.op] * repeats,
+                    values=values,
+                    distinct=distinct,
+                    inputs=inputs,
+                )
+            except RuntimeError as e:
+                # The placer passed it, but the build did not. The default
+                # is the graph's own and a twin was measured, so both build.
+                if of == default.key or not own:
+                    raise
+                failed.add(of)
+                refuse({of: OperatorDesign(d.resolved)}, str(e), fit_cache)
+                log(f"{dict(d.tunables)} does not build, not measured: {e}")
+                continue
+            runs.append((entry, of, own))
+            short.append(one)
+            long.append(many)
+        if not runs:
+            continue
         # The default is the untuned graph's figure: always timed in full.
-        groups = [None if of == default.key else of for _, _, of in runs] * 2
-        short = [
-            Standalone(f"probe1_{d.key}", [d.op], values=values, inputs=inputs)
-            for d, _, _ in runs
-        ]
-        long = [
-            Standalone(
-                f"probe{repeats}_{d.key}",
-                [d.op] * repeats,
-                values=values,
-                distinct=distinct,
-                inputs=inputs,
-            )
-            for d, _, _ in runs
-        ]
+        groups = [None if of == default.key else of for _, of, _ in runs] * 2
         outputs = [run.digest() for run in short]
         times = time_interleaved(
             [r.callable for r in short + long], timing, groups, fastest
         )
         n = len(runs)
         slowest: dict[str, float] = {}
-        for i, (d, entry, of) in enumerate(runs):
+        for i, (entry, of, own) in enumerate(runs):
             t_step = (times[n + i].us - times[i].us) / (repeats - 1)
             m = Measurement(
                 t_step_us=t_step,
@@ -528,7 +551,7 @@ def measure_steps(
                 measured=CostTable.today(),
             )
             slowest[of] = max(slowest.get(of, 0.0), times[n + i].us)
-            if i < len(batch):
+            if own:
                 measured[of] = m
             else:
                 near[of] = m
@@ -537,6 +560,9 @@ def measure_steps(
         fastest = min(fastest, *slowest.values())
         # A probe holds its context while it lives; the next batch needs them.
         del short, long
+    found, entries, twins = zip(
+        *((v, e, t) for v, e, t in zip(found, entries, twins) if v.key not in failed)
+    )
     known = held | measured
     reference = known[default.key].output
     inexact = {v.key for v in found[1:] if known[v.key].output != reference}
@@ -586,11 +612,14 @@ def search(
     remeasure: bool = False,
     twins: Sequence[Variant | None] = (),
     exhaustive: int = EXHAUSTIVE,
+    fit_cache: Path = FIT_CACHE,
+    log: Callable[[str], None] = print,
 ) -> dict[str, StepCost]:
     """Measure the settings of ``found`` (the default first) into ``table``:
     every one when there are at most ``exhaustive``, else by coordinate
     descent, each tunable's line through the fastest accurate setting so far,
     from the default until a pass over the tunables moves it no further.
+    A setting that does not build is left off every line after.
     The other arguments are ``measure_steps``'.
 
     Returns:
@@ -598,7 +627,17 @@ def search(
     """
     if len(found) <= exhaustive:
         return measure_steps(
-            table, found, timing, repeats, values, inputs, cache, remeasure, twins
+            table,
+            found,
+            timing,
+            repeats,
+            values,
+            inputs,
+            cache,
+            remeasure,
+            twins,
+            fit_cache,
+            log,
         )
     twin_of = dict(zip((v.key for v in found), twins or [None] * len(found)))
     default = found[0]
@@ -628,9 +667,13 @@ def search(
                 cache,
                 remeasure and not ran,
                 [twin_of[v.key] for v in batch] if twins else (),
+                fit_cache,
+                log,
             )
+            built = [v for v in line if v.key in table.steps]
+            found = [v for v in found if v not in line or v in built]
             fastest = min(
-                (v for v in line if table.steps[v.key].accurate),
+                (v for v in built if table.steps[v.key].accurate),
                 key=lambda v: table.steps[v.key].t_step_us,
             )
             if table.steps[fastest.key].t_step_us < table.steps[best.key].t_step_us:
@@ -897,6 +940,7 @@ def measure_graph(
             cache,
             remeasure,
             twins,
+            log=log,
         )
         ran += costs
         table.save()

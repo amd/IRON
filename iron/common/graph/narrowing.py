@@ -157,10 +157,7 @@ def fit_verdict(
         designs: The designs, by the name each takes in the device.
         fit_cache: Where the verdicts persist across processes.
     """
-    h = hashlib.sha256(
-        repr(sorted(d.compilable().recipe_hash for d in designs.values())).encode()
-    )
-    record = fit_cache / h.hexdigest()[:24]
+    record = _fit_record(designs, fit_cache)
     if record.exists():
         verdict = record.read_text()
     else:
@@ -174,11 +171,33 @@ def fit_verdict(
         except ValueError as e:
             diagnostic = str(e)
         verdict = "fits" if diagnostic is None else f"refused: {diagnostic}"
-        record.parent.mkdir(parents=True, exist_ok=True)
-        partial = record.with_suffix(f".{os.getpid()}")
-        partial.write_text(verdict)
-        partial.replace(record)
+        _write(record, verdict)
     return None if verdict == "fits" else verdict.removeprefix("refused: ")
+
+
+def refuse(
+    designs: Mapping[str, OperatorDesign], why: str, fit_cache: Path = FIT_CACHE
+) -> None:
+    """Record that ``designs`` do not build on one device, which the placer
+    passed, so ``fit_verdict`` refuses them from now on.
+    """
+    _write(_fit_record(designs, fit_cache), f"refused: {why}")
+
+
+def _fit_record(designs: Mapping[str, OperatorDesign], fit_cache: Path) -> Path:
+    """The file holding the verdict on ``designs``, keyed on their recipes."""
+    h = hashlib.sha256(
+        repr(sorted(d.compilable().recipe_hash for d in designs.values())).encode()
+    )
+    return fit_cache / h.hexdigest()[:24]
+
+
+def _write(record: Path, verdict: str) -> None:
+    """Write ``verdict`` to ``record`` whole, as another process may read it."""
+    record.parent.mkdir(parents=True, exist_ok=True)
+    partial = record.with_suffix(f".{os.getpid()}")
+    partial.write_text(verdict)
+    partial.replace(record)
 
 
 def fitting(

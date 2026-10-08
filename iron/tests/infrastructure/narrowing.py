@@ -28,6 +28,7 @@ from iron.common.graph.narrowing import (
     JointNarrowing,
     Variant,
     cost_key,
+    fitting,
     variants,
 )
 from iron.common.graph.probe import (
@@ -241,6 +242,33 @@ def test_descent_measures_every_line_through_the_default(tmp_path):
     }
     assert lines <= costs.keys() <= {v.key for v in found}
     assert all(c.exact for c in costs.values()), costs
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_setting_that_does_not_build_is_left_out(tmp_path):
+    # 128x128 B tiles double-buffered beside A and C are past a core's memory.
+    dev = aie_utils.ensure_current_device()
+    gemm = GEMM(M=2048, K=2048, N=2048)
+    found = [
+        Variant.of(gemm, dev),
+        Variant.of(gemm.with_tunables(tile_k=128, tile_n=128), dev),
+    ]
+    table = CostTable(tmp_path / "costs.json")
+    logged = []
+    costs = search(
+        table,
+        found,
+        Timing(rounds=1, calls=5),
+        exhaustive=1,
+        fit_cache=tmp_path / "fits",
+        log=logged.append,
+    )
+    assert costs.keys() == table.steps.keys() == {found[0].key}
+    assert len(logged) == 1 and "does not build" in logged[0], logged
+    # The build's verdict is kept, not the placer's.
+    kept, refused = fitting(found, tmp_path / "fits")
+    assert kept == found[:1]
+    assert refused[found[1].key].startswith("[aiecc] Compilation failed")
 
 
 @pytest.mark.supported_devices("npu2")
