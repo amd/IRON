@@ -250,12 +250,15 @@ def test_designs_of_one_array_share_its_device():
 
 
 def test_a_folded_gate_shares_its_device_with_the_up_projection(npu2):
-    # SwiGLU's gate and up are one array before the fold; the fold gives
-    # the up projection the gate's finishes, so they stay one.
+    # SwiGLU's gate and up are one array before the fold; the SiLU fold
+    # gives the up projection the gate's finishes, so they stay one. The
+    # product riding the gate's matrix would make them two.
     hidden, embedding = 8192, 2048
     weights = (np.zeros((hidden, embedding), bfloat16),) * 2
     ffn = SwiGLU(*weights, np.zeros((embedding, hidden), bfloat16))
-    traced, count = folded(ffn.trace(x=(1, embedding)), npu2)
+    _, every = folded(ffn.trace(x=(1, embedding)), npu2)
+    silu = [fold for fold in every if str(fold) == "SiLU into GEMV"]
+    traced, count = folded(ffn.trace(x=(1, embedding)), npu2, only=silu)
     assert count.total() == 1
     seq = traced.sequence(dispatch="fused")
     seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (

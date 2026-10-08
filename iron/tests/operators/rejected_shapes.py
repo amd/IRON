@@ -204,24 +204,18 @@ def test_sample_with_more_summaries_than_a_memtile_takes_is_refused():
     Sample(vocab=128256, cores=4).resolved(from_name("npu2", n_cols=8))
 
 
-@pytest.mark.parametrize(
-    "producer,kwargs",
-    [
-        (GEMV, dict(M=2048, K=2048)),
-        (ElementwiseAdd, dict(size=2048, num_aie_columns=4)),
-    ],
-    ids=["GEMV", "ElementwiseAdd"],
-)
-def test_a_finish_input_past_the_cores_input_channels_is_refused(producer, kwargs):
-    """A core reading two streams has no input channel left for a finish
-    step's own input; past them the design fails to place. A one-stream
-    core takes it.
+def test_a_finish_input_past_the_cores_input_channels_is_refused():
+    """A sum's cores read two streams, neither declared for a finish step's
+    own input to ride; past them the design fails to place. A one-stream
+    core takes it, and so does a matvec's, on its matrix.
     """
     dev = from_name("npu2", n_cols=8)
     finish = (Link(ElementwiseMul(size=2048), 1),)
     with pytest.raises(Unresolvable, match="input channels"):
-        producer(**kwargs, finish=finish).resolved(dev)
+        ElementwiseAdd(size=2048, num_aie_columns=4, finish=finish).resolved(dev)
     SiLU(size=2048, num_aie_columns=4, finish=finish).resolved(dev)
+    fed = GEMV(M=2048, K=2048, finish=finish).resolved(dev)
+    assert [b.streamed for b in fed.finish_inputs] == [False]
 
 
 def test_a_step_that_needs_the_order_of_a_gemm_block_is_refused():

@@ -402,23 +402,24 @@ def test_swiglu_one_token_shares_one_array_and_one_build_for_gate_and_up():
         SwiGLU(z(H, E), z(H, E), z(H, E))
 
 
-def test_swiglu_folds_its_silu_into_the_gate_and_keeps_one_array(npu2):
+def test_swiglu_folds_its_silu_and_its_product_into_the_gate(npu2):
     t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
     f, count = folded(t, npu2)
-    assert [(str(fold), n) for fold, n in count.items()] == [("SiLU into GEMV", 1)]
-    assert [type(op).__name__ for op, *_ in f.runlist] == [
-        "GEMV",
-        "GEMV",
-        "ElementwiseMul",
-        "GEMV",
+    assert [(str(fold), n) for fold, n in count.items()] == [
+        ("SiLU into GEMV", 1),
+        ("SiLU, then ElementwiseMul into GEMV", 1),
     ]
-    gate, up, mul, down = f.steps
-    assert ([type(link.op) for link in gate.op.finish], up.op.finish) == ([SiLU], ())
-    assert gate.op.resolved().array_key() == up.op.resolved().array_key()
-    assert gate.op.design_key() != up.op.design_key()
-    assert (down.op.finish, down.op.finishes) == ((), ())
-    silu = next(s for s in t.steps if type(s.op) is SiLU)
-    assert gate.outputs[0].name == silu.outputs[0].name == mul.inputs[0].name
+    assert [type(op).__name__ for op, *_ in f.runlist] == ["GEMV", "GEMV", "GEMV"]
+    up, gate, down = f.steps
+    assert [type(link.op) for link in gate.op.finish] == [SiLU, ElementwiseMul]
+    assert (up.op.finish, down.op.finish, down.op.finishes) == ((), (), ())
+    # The up projection rides the gate's matrix, so the gate has an array
+    # of its own.
+    assert [b.name for b in gate.op.inputs if not b.streamed] == ["finish1_b"]
+    assert gate.op.resolved().array_key() != up.op.resolved().array_key()
+    mul = next(s for s in t.steps if type(s.op) is ElementwiseMul)
+    assert gate.inputs[2].name == up.outputs[0].name == mul.inputs[1].name
+    assert gate.outputs[0].name == mul.outputs[0].name == down.inputs[1].name
     assert f.input_args == t.input_args and f.output_args == t.output_args
 
 
@@ -433,17 +434,14 @@ def test_runs_sharing_what_they_made_fold_alike_with_the_same_operators(npu2):
     assert [s.op.design_key() for s in alone.steps] == [
         s.op.design_key() for s in first.steps
     ]
-    assert alone.steps[0].op is not first.steps[0].op
+    assert alone.steps[1].op is not first.steps[1].op
 
 
 def test_each_folded_design_is_paired_with_the_one_whose_step_it_took(npu2):
     t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
     f, _ = folded(t, npu2)
-    # The gate took on the silu; up moved onto the gate's array.
-    assert replaced(t, f) == [
-        (t.steps[0].op, f.steps[0].op),
-        (t.steps[1].op, f.steps[1].op),
-    ]
+    # The gate took on the silu and the product; up kept its own.
+    assert replaced(t, f) == [(t.steps[0].op, f.steps[1].op)]
 
 
 class _Gate(iron.Graph):
@@ -586,12 +584,48 @@ class _SumChain(iron.Graph):
 
 
 def test_a_fold_past_its_cores_input_channels_is_refused(npu2):
-    # A sum's and a matvec's cores read two streams: none is left for a product's.
+    # A sum's cores read two streams, and neither carries a product's input.
     t = _SumChain().trace(a=(E,), b=(E,), c=(E,))
     f, count = folded(t, npu2)
     assert [str(fold) for fold in count] == ["SiLU into ElementwiseAdd"]
+    sum_ = next(s.op for s in f.steps if type(s.op) is ElementwiseAdd)
+    mul = next(s.op for s in t.steps if type(s.op) is ElementwiseMul)
+    with pytest.raises(Unresolvable, match="no input of its is declared feed=True"):
+        sum_.fold(mul, 0).resolved()
+
+
+def test_a_finish_input_rides_a_matvecs_matrix(npu2):
     gemv = _GemvAdd().trace(x=(E,), r=(E,))
-    assert folded(gemv, npu2) == (gemv, {})
+    f, count = folded(gemv, npu2)
+    assert [str(fold) for fold in count] == ["ElementwiseAdd into GEMV"]
+    (step,) = f.steps
+    op = step.op.resolved()
+    assert [(b.name, b.streamed) for b in op.inputs] == [
+        ("A", True),
+        ("B", True),
+        ("finish0_b", False),
+    ]
+    # Its tile is a column's share of rows, read twice to fill one of A's.
+    assert (op.num_aie_columns, op.tile_size_input, op.tile_size_output) == (8, 2, 256)
+    assert step.inputs[2].name == "r"
+
+
+def test_a_finish_input_a_matvec_cannot_carry_is_refused(npu2):
+    # A 32-row tile is read 128 times to fill one of A's, past a descriptor's 64.
+    pinned = GEMV(M=256, K=1024, tile_size_input=4, tile_size_output=32)
+    with pytest.raises(Unresolvable, match="in at most 64 whole reads"):
+        pinned.fold(ElementwiseAdd(size=256), 0).resolved(npu2)
+    # Four batches are eight transfers on each lane of A.
+    batched = GEMV(M=256, K=128, num_batches=4)
+    with pytest.raises(Unresolvable, match="8 transfers, .* past the 4 descriptors"):
+        batched.fold(ElementwiseAdd(size=4 * 256), 0).resolved(npu2)
+    repeated = GEMV(M=256, K=128, num_batches=4, repeat=2)
+    with pytest.raises(ValueError, match="computes its batches out of order"):
+        repeated.fold(ElementwiseAdd(size=4 * 256), 0).resolved(npu2)
+    # A matmul's cores hold its output's blocks out of order.
+    gemm = GEMM(M=256, K=512, N=512).fold(ElementwiseAdd(size=256 * 512), 0)
+    with pytest.raises(Unresolvable, match="in an order of their own"):
+        gemm.resolved(npu2)
 
 
 class _Bounded(iron.Graph):
@@ -932,10 +966,11 @@ def test_llama_decode_folds_its_norms_into_the_projections(npu2):
         "SiLU, then ElementwiseMul into GEMV": 2,
         "RMSNorm into GEMV": 1,
         "ElementwiseAdd, then RMSNorm into GEMV": 1,
+        "ElementwiseAdd (input 1) into GEMV": 1,
         "Copy into the drain of RoPE": 2,
         "Copy into the drain of GEMV": 2,
     }
-    assert (len(t.steps), len(f.steps)) == (41, 27)
+    assert (len(t.steps), len(f.steps)) == (41, 26)
     assert not any(type(s.op) is RMSNorm for s in f.steps)
     row = model.config.n_kv_groups * model.config.head_dim
     placed = {

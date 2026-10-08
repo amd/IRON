@@ -187,7 +187,8 @@ class GEMV(Operator):
     # extent 1, so an unbatched operator has 2-D shapes. One fifo per column
     # for each of A and C; B, the whole vector, is one fifo every column's
     # core reads, so it takes one shim channel however wide the array. Each
-    # core prepares it, so the step producing it folds into them.
+    # core prepares it, so the step producing it folds into them. A finish's
+    # inputs ride A, a tile of each after an output tile's rows.
     A = In(
         OptionalDim(num_matrices),
         M,
@@ -195,6 +196,7 @@ class GEMV(Operator):
         tile=(tile_size_input, K),
         per=(num_aie_columns,),
         depth=2,
+        feed=True,
     )
     B = In(OptionalDim(num_batches), K, tile=(K,), depth=1, prepare=True)
     C = Out(
@@ -286,13 +288,31 @@ class GEMV(Operator):
         # Two rows of A per acquire where two fit a bank's worth of L1.
         row_bytes = self.K * np.dtype(bfloat16).itemsize
         rows = self.tile_size_input or (2 if row_bytes <= Target.L1_BANK_BYTES else 1)
-        tile = self.tile_size_output or self.finish_line(
-            dev, (max(rows, 2), *(math.lcm(rows, 2**i) for i in range(2, 8)))
-        )
-        unit = math.lcm(tile, rows)
-        cols = self.resolve_columns(
-            dev, self.num_aie_columns, fits=lambda c: self.M % (c * unit) == 0
-        )
+        if self.tile_size_output is None and self.finish_inputs:
+            # A finish input's tile, re-read to fill one of A's riding it,
+            # costs A's stream the less the more rows it is: a column's
+            # share, or the most that fits a descriptor's re-reads.
+            cols = self.resolve_columns(
+                dev, self.num_aie_columns, fits=lambda c: self.M % (c * rows) == 0
+            )
+            share, carried = self.M // cols, rows * self.K
+            reads = 1 << dev.get_dma_bd_iter_bits(0, 0)
+            tile = self.finish_line(
+                dev,
+                [
+                    n
+                    for n in range(share, 0, -rows)
+                    if share % n == 0 and carried % n == 0 and carried // n <= reads
+                ],
+            )
+        else:
+            tile = self.tile_size_output or self.finish_line(
+                dev, (max(rows, 2), *(math.lcm(rows, 2**i) for i in range(2, 8)))
+            )
+            unit = math.lcm(tile, rows)
+            cols = self.resolve_columns(
+                dev, self.num_aie_columns, fits=lambda c: self.M % (c * unit) == 0
+            )
         return dataclasses.replace(
             self,
             num_aie_columns=cols,
@@ -318,15 +338,22 @@ class GEMV(Operator):
                 raise ValueError(
                     f"{name}={tile} does not evenly divide M/num_aie_columns={rows}"
                 )
-        # A core holds A's tiles, B's line and each prologue input's, C's
-        # tiles and each finish input's, a scratch line per kind of chain it
-        # applies, and the default stack, which no elementwise kernel exceeds.
+        # Walked in _batch_order, A would carry a finish input's tiles out of C's order.
+        if self.repeat > 1 and self.finish_inputs:
+            raise ValueError(
+                f"repeat={self.repeat}: a repeated GEMV computes its batches out "
+                f"of order, and its finish's inputs ride A in C's"
+            )
+        # A core holds A's tiles (which carry each finish input's), B's line
+        # and each prologue input's, C's tiles, a scratch line per kind of
+        # chain it applies, and the default stack, which no elementwise
+        # kernel exceeds.
         item = np.dtype(bfloat16).itemsize
         line, out = self.K * item, self.tile_size_output * item
         held = (
             self.A.depth * self.tile_size_input * line
             + (self.B.depth + len(self.prepare_inputs)) * line
-            + self.C.depth * (1 + len(self.finish_inputs)) * out
+            + self.C.depth * out
             + line * any(self.prepares or (self.prepare,))
             + out * any(self.finishes or (self.finish,))
             + self.dev.default_core_stack_bytes
@@ -409,7 +436,7 @@ class GEMV(Operator):
                         a = A_fifo.acquire(1)
                         matvec(tile_size_input, output_row_offset, a, b, out)
                         A_fifo.release(1)
-                    finish.apply(rest, mode, c)
+                    finish.apply(rest, mode, c, A_fifo)
                     C_fifo.release(1)
                 B_fifo.release(prepare.tiles)
 

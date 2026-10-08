@@ -908,7 +908,8 @@ def test_a_setting_the_placer_refuses_alone_is_not_measured(tmp_path, npu2):
 
 def _swiglu(tmp_path, dev, gate_us, step_us=10.0, table=_table, mul_us=None):
     """SwiGLU at one row as traced, and a table (``_table`` or ``_separate``)
-    holding every design it runs as traced and folded at its default width,
+    holding every design it runs as traced, with SiLU folded into the gate
+    and with the product folded into SiLU, at its default width,
     the gate with SiLU folded in taking ``gate_us`` a step, SiLU with the
     product folded in ``mul_us`` (unmeasured if None), every other design
     ``step_us``, and each a load of 20.
@@ -917,7 +918,12 @@ def _swiglu(tmp_path, dev, gate_us, step_us=10.0, table=_table, mul_us=None):
     w = np.zeros((H, E), bfloat16)
     traced = SwiGLU(w, w, np.zeros((E, H), bfloat16)).trace(x=(1, E))
     ways, _ = foldings(traced, dev)
-    into_gate, into_silu = [trial for trial, applied in ways.values() if applied]
+    by_name = {
+        tuple(sorted(str(f) for f in applied)): trial
+        for trial, applied in ways.values()
+    }
+    into_gate = by_name[("SiLU into GEMV",)]
+    into_silu = by_name[("ElementwiseMul into SiLU",)]
     steps = {
         cost_key(s.op, dev): (step_us, 20.0)
         for g in (traced, into_gate, into_silu)
@@ -935,14 +941,21 @@ def test_a_way_to_fold_is_found_with_the_fold_pre_empting_it_left_out(tmp_path, 
     ways, every = foldings(traced, npu2)
     assert every
     assert [sorted(str(f) for f in w) for w in ways] == [
-        ["SiLU into GEMV"],
+        ["SiLU into GEMV", "SiLU, then ElementwiseMul into GEMV"],
         ["ElementwiseMul into SiLU"],
+        ["ElementwiseMul (input 1) into GEMV", "SiLU into GEMV"],
+        ["ElementwiseMul (input 1) into GEMV"],
+        ["SiLU into GEMV"],
         [],
     ]
     assert ways[frozenset()][0] is traced
-    # Folding everything takes the first alone: SiLU is gone from the graph.
+    # Folding everything gives the gate SiLU and the product, which rides
+    # the gate's matrix: neither is left in the graph.
     _, applied = folded(traced, npu2)
-    assert [str(f) for f in applied] == ["SiLU into GEMV"]
+    assert [str(f) for f in applied] == [
+        "SiLU into GEMV",
+        "SiLU, then ElementwiseMul into GEMV",
+    ]
     _, every = foldings(traced, npu2, limit=1)
     assert not every
 
@@ -992,14 +1005,21 @@ def test_a_fold_is_taken_where_the_model_says_it_gains(tmp_path, npu2):
 def test_a_fold_is_left_where_it_costs_or_is_unmeasured(gate_us, tmp_path, npu2):
     traced, table = _swiglu(tmp_path, npu2, gate_us=gate_us or 11.0, mul_us=gate_us)
     if gate_us is None:
-        folds, _ = folded(traced, npu2)
-        del table.steps[cost_key(folds.steps[0].op, npu2)]
+        _, every = folded(traced, npu2)
+        silu = [f for f in every if str(f) == "SiLU into GEMV"]
+        gate, *_ = folded(traced, npu2, only=silu)[0].steps
+        del table.steps[cost_key(gate.op, npu2)]
     tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(
         traced, npu2, "fused"
     )
     assert tuning.folds == ()
-    assert [str(f) for f in tuning.unpriced] == (
-        [] if gate_us else ["SiLU into GEMV", "ElementwiseMul into SiLU"]
+    # The table measures no design a product riding a matrix makes.
+    riding = [
+        "SiLU, then ElementwiseMul into GEMV",
+        "ElementwiseMul (input 1) into GEMV",
+    ]
+    assert sorted(str(f) for f in tuning.unpriced) == sorted(
+        riding if gate_us else [*riding, "SiLU into GEMV", "ElementwiseMul into SiLU"]
     )
     assert ("unpriced, not taken: fold SiLU into GEMV" in tuning.report()) == (
         gate_us is None
