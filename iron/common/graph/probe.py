@@ -104,10 +104,26 @@ class Timing:
 
 @dataclasses.dataclass(frozen=True)
 class Timed:
-    """A run's median of per-round medians, microseconds, over ``rounds``."""
+    """A run's per-round medians, microseconds, and their median ``us``."""
 
-    us: float
-    rounds: int
+    round_us: tuple[float, ...]
+
+    @property
+    def us(self) -> float:
+        return statistics.median(self.round_us)
+
+    @property
+    def rounds(self) -> int:
+        return len(self.round_us)
+
+
+def standard_error(samples: Sequence[float]) -> float | None:
+    """The standard error of the median of ``samples``, taken as normal
+    (sqrt(pi / 2) times the mean's); None from fewer than two.
+    """
+    if len(samples) < 2:
+        return None
+    return math.sqrt(math.pi / 2) * statistics.stdev(samples) / math.sqrt(len(samples))
 
 
 def platform() -> dict[str, str]:
@@ -443,7 +459,7 @@ def time_interleaved(
             slowest[groups[i]] = max(slowest.get(groups[i], 0.0), us)
         bar = timing.cutoff * min([fastest, *slowest.values()])
         live = {i for i in live if groups[i] is None or slowest[groups[i]] <= bar}
-    return [Timed(statistics.median(m), len(m)) for m in medians]
+    return [Timed(tuple(m)) for m in medians]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -544,7 +560,9 @@ def measure_steps(
             or None. A width with a twin is run beside it, its step time
             recorded as the twin's plus their difference in that run, so a
             drift between this run and the twin's own does not reach it.
-            Its one-run figure is its own: one run's noise exceeds the drift.
+            Any other but the default is priced so beside the default,
+            which each batch times. A one-run figure is its own: one run's
+            noise exceeds the drift.
         fit_cache: Where a width that does not build is recorded as
             refused (``refuse``), so ``fitting`` leaves it out from then on.
         log: Where a width that does not build is reported.
@@ -566,6 +584,8 @@ def measure_steps(
     for t in twins:
         if t is not None and t.key not in table.steps:
             raise ValueError(f"twin {t.key} is not in the table")
+    default = found[0]
+    partners = [twins[0]] + [default if t is None else t for t in twins[1:]]
     entries = [
         None if cache is None else cache.key(v.resolved, values, inputs, table.dispatch)
         for v in found
@@ -573,12 +593,17 @@ def measure_steps(
     besides = [
         (
             None
-            if cache is None or t is None
+            if cache is None or p is None
             else cache.beside_key(
-                cache.key(t.resolved, values, inputs, table.dispatch), e
+                (
+                    entries[0]
+                    if p is default
+                    else cache.key(p.resolved, values, inputs, table.dispatch)
+                ),
+                e,
             )
         )
-        for t, e in zip(twins, entries)
+        for p, e in zip(partners, entries)
     ]
     held: dict[str, Measurement] = {}
     near: dict[str, Measurement] = {}
@@ -591,26 +616,35 @@ def measure_steps(
                 if b is not None:
                     near[v.key] = b
     todo = [
-        (v, e, t, b)
-        for v, e, t, b in zip(found, entries, twins, besides)
+        (v, e, p, b)
+        for v, e, p, b in zip(found, entries, partners, besides)
         if v.key not in held
     ]
-    default = found[0]
     distinct = sum(b.nbytes for b in default.op.buffers) <= DISTINCT_BYTES
     measured: dict[str, Measurement] = {}
     fastest = math.inf
-    size = CONTEXTS // (4 if any(twins) else 2)
+    # Each run is two contexts; a batch keeps two for the default it is priced beside.
+    size = (CONTEXTS - 2 * any(p is default for p in partners)) // (
+        4 if any(t is not None for t in twins) else 2
+    )
     failed: set[str] = set()
     batches = math.ceil(len(todo) / size)
     log(f"    {len(todo)} to run, {len(held)} from the cache, {batches} batches")
     for begin in range(0, len(todo), size):
         batch = todo[begin : begin + size]
         log(f"    batch {begin // size + 1}/{batches}: building {len(batch)}")
-        runs, short, long = [], [], []
-        for d, entry, of, own in [(v, e, v.key, True) for v, e, _, _ in batch] + [
-            (t, b, v.key, False) for v, _, t, b in batch if t is not None
-        ]:
-            if of in failed:
+        own = {v.key for v, _, _, _ in batch}
+        # A twin is stopped with the width it is run beside; the default never is.
+        group_of = {
+            p.key: v.key for v, _, p, _ in batch if p is not None and p is not default
+        }
+        designs, short, long = [], [], []
+        for d in [v for v, _, _, _ in batch] + list(
+            {
+                p.key: p for _, _, p, _ in batch if p is not None and p.key not in own
+            }.values()
+        ):
+            if group_of.get(d.key, d.key) in failed:
                 continue
             try:
                 one = Standalone(
@@ -631,49 +665,61 @@ def measure_steps(
             except RuntimeError as e:
                 # The placer passed it, but the build did not. The default
                 # is the graph's own and a twin was measured, so both build.
-                if of == default.key or not own:
+                if d is default or d.key not in own:
                     raise
-                failed.add(of)
-                refuse({of: OperatorDesign(d.resolved)}, str(e), fit_cache)
+                failed.add(d.key)
+                refuse({d.key: OperatorDesign(d.resolved)}, str(e), fit_cache)
                 log(f"{dict(d.tunables)} does not build, not measured: {e}")
                 continue
-            runs.append((entry, of, own))
+            designs.append(d)
             short.append(one)
             long.append(many)
-        if not runs:
+        if not own - failed:
             continue
-        log(f"    batch {begin // size + 1}/{batches}: timing {len(runs)} runs")
+        log(f"    batch {begin // size + 1}/{batches}: timing {len(designs)} runs")
         # The default is the untuned graph's figure: always timed in full.
-        groups = [None if of == default.key else of for _, of, _ in runs] * 2
+        groups = [
+            None if d is default else group_of.get(d.key, d.key) for d in designs
+        ] * 2
         outputs = [run.digest() for run in short]
         times = time_interleaved(
             [r.callable for r in short + long], timing, groups, fastest, log
         )
-        n = len(runs)
+        n = len(designs)
+        ran: dict[str, Measurement] = {}
         slowest: dict[str, float] = {}
-        for i, (entry, of, own) in enumerate(runs):
+        for i, d in enumerate(designs):
             t_step = (times[n + i].us - times[i].us) / (repeats - 1)
-            m = Measurement(
+            ran[d.key] = Measurement(
                 t_step_us=t_step,
+                # A design's two runs are stopped together, so their rounds pair.
+                round_us=[
+                    (many - one) / (repeats - 1)
+                    for one, many in zip(times[i].round_us, times[n + i].round_us)
+                ],
                 alone_us=times[i].us - t_step,
                 output=outputs[i],
                 pmode=mode,
-                rounds=times[n + i].rounds,
                 calls=timing.calls,
                 measured=CostTable.today(),
             )
+            of = group_of.get(d.key, d.key)
             slowest[of] = max(slowest.get(of, 0.0), times[n + i].us)
-            if own:
-                measured[of] = m
-            else:
-                near[of] = m
+        for v, entry, p, beside in batch:
+            if v.key in failed:
+                continue
+            measured[v.key] = ran[v.key]
+            if p is not None:
+                near[v.key] = ran[p.key]
             if cache is not None:
-                cache.put(entry, m)
+                cache.put(entry, ran[v.key])
+                if p is not None:
+                    cache.put(beside, ran[p.key])
         fastest = min(fastest, *slowest.values())
         # A probe holds its context while it lives; the next batch needs them.
         del short, long
-    found, entries, twins = zip(
-        *((v, e, t) for v, e, t in zip(found, entries, twins) if v.key not in failed)
+    found, entries, partners = zip(
+        *((v, e, p) for v, e, p in zip(found, entries, partners) if v.key not in failed)
     )
     known = held | measured
     reference = known[default.key].output
@@ -704,14 +750,38 @@ def measure_steps(
             accurate.add(v.key)
         elif v is default:
             break  # a default its own gate refuses admits no inexact width
-    for v, twin in zip(found, twins):
+    # A width is priced at its partner's figure plus their difference in the
+    # run that timed both, so a drift between that run and the partner's own
+    # does not reach it.
+    priced: dict[str, tuple[float, float | None]] = {}
+    off_twin: float | None = None
+    for v, p in zip(found, partners):
         m = known[v.key]
-        if twin is not None:
+        if p is None:
+            priced[v.key] = (m.t_step_us, standard_error(m.round_us))
+        else:
             delta = m.t_step_us - near[v.key].t_step_us
-            m = dataclasses.replace(
-                m, t_step_us=table.steps[twin.key].t_step_us + delta
+            paired = standard_error(
+                [s - r for s, r in zip(m.round_us, near[v.key].round_us)]
             )
-        table.record_step(v.key, m.cost(reference, v.key in accurate))
+            if p is default:
+                priced[v.key] = (priced[default.key][0] + delta, paired)
+            else:
+                # Against its default through the twins: theirs, and each
+                # one's difference from its twin.
+                twin = table.steps[p.key]
+                noises = [twin.noise_us, paired] + ([] if v is default else [off_twin])
+                if v is default:
+                    off_twin = paired
+                priced[v.key] = (
+                    twin.t_step_us + delta,
+                    (
+                        None
+                        if None in noises
+                        else math.sqrt(sum(noise**2 for noise in noises))
+                    ),
+                )
+        table.record_step(v.key, m.cost(reference, v.key in accurate, *priced[v.key]))
     return {key: table.steps[key] for key in measured}
 
 

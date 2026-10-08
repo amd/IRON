@@ -10,6 +10,7 @@ untuned one (``iron/tests/infrastructure/narrowing.py``).
 """
 
 import dataclasses
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -369,7 +370,7 @@ def test_a_full_elf_load_is_an_entry_less_its_base(tmp_path):
     assert table.load("x") == pytest.approx(80.0)
     assert table.load("a") == pytest.approx(100.0)
     # What one run leaves over its step is not a load: D0 and R drift with it.
-    table.record_step("t", StepCost(1.0, 500.0, True, True, "turbo", 1, 1, "-"))
+    table.record_step("t", StepCost(1.0, 0.0, 500.0, True, True, "turbo", 1, 1, "-"))
     with pytest.raises(ValueError, match="neither beside another design"):
         table.load("t")
 
@@ -405,7 +406,7 @@ def _table(path, steps, dispatch=50.0, reset=30.0, base=30.0):
     table = CostTable(path, "npu2", "fused")
     for key, (t_step, load) in steps.items():
         cost = StepCost(
-            t_step, dispatch + base + load + reset, True, True, "turbo", 1, 1, "-"
+            t_step, 0.0, dispatch + base + load + reset, True, True, "turbo", 1, 1, "-"
         )
         table.record_step(
             key,
@@ -432,7 +433,7 @@ def _separate(path, steps, fixed=7.0):
     """
     table = CostTable(path, "npu2", "separate")
     for key, (c, load) in steps.items():
-        cost = StepCost(c, fixed, True, True, "turbo", 1, 1, "-")
+        cost = StepCost(c, 0.0, fixed, True, True, "turbo", 1, 1, "-")
         table.record_step(
             key, dataclasses.replace(cost, beside="x", pair_us=TRIANGLE["x"] + load)
         )
@@ -477,7 +478,7 @@ def test_a_load_is_solved_from_the_pairs_or_its_own_pair(tmp_path):
     assert table.load("unmeasured") == 0.0
     assert (table.dispatch_us, table.reset_us, table.base_us) == (7.0, 0.0, 0.0)
     # The reference's own row is measured beside nothing; the pairs price it.
-    table.record_step("x", StepCost(5.0, 7.0, True, True, "turbo", 1, 1, "-"))
+    table.record_step("x", StepCost(5.0, 0.0, 7.0, True, True, "turbo", 1, 1, "-"))
     assert table.load("x") == pytest.approx(80.0)
     # A design paired with one of a triangle is determined by least squares.
     table.record_calibration(
@@ -496,7 +497,7 @@ def test_a_load_the_measurements_do_not_determine_is_refused(tmp_path):
         )
     with pytest.raises(ValueError, match="do not determine the load of p"):
         table.load("p")
-    alone = StepCost(5.0, 7.0, True, True, "turbo", 1, 1, "-")
+    alone = StepCost(5.0, 0.0, 7.0, True, True, "turbo", 1, 1, "-")
     table.record_step("t", alone)
     with pytest.raises(ValueError, match="neither beside another design"):
         table.load("t")
@@ -507,7 +508,7 @@ def test_a_load_the_measurements_do_not_determine_is_refused(tmp_path):
 
 def test_a_table_takes_entries_at_one_power_mode(tmp_path):
     table = CostTable(tmp_path / "costs.json", "npu2", "separate")
-    alone = StepCost(5.0, 7.0, True, True, "turbo", 1, 1, "-")
+    alone = StepCost(5.0, 0.0, 7.0, True, True, "turbo", 1, 1, "-")
     table.record_step("x", alone)
     table.record_step("y", alone)
     with pytest.raises(ValueError, match="at power mode turbo, not default"):
@@ -525,7 +526,7 @@ def test_a_table_takes_entries_at_one_power_mode(tmp_path):
 
 def test_an_xclbin_table_round_trips_and_a_full_elf_one_keeps_its_bytes(tmp_path):
     table = _separate(tmp_path / "costs.json", {"a": (10.0, 100.0)})
-    table.record_step("x", StepCost(5.0, 7.0, True, True, "turbo", 1, 1, "-"))
+    table.record_step("x", StepCost(5.0, 0.0, 7.0, True, True, "turbo", 1, 1, "-"))
     table.save()
     again = CostTable(table.path, "npu2", "separate")
     assert again.steps == table.steps and again.calibrations == table.calibrations
@@ -591,6 +592,26 @@ def test_an_xclbin_chain_narrows_a_design_it_switches_into_often(tmp_path, npu2)
         wide.key,
         cost_key(silu),
     }
+
+
+@pytest.mark.parametrize("noise_us, taken", [(0.5, True), (2.0, False), (None, False)])
+def test_a_setting_is_taken_only_where_it_wins_beyond_the_noise(
+    noise_us, taken, tmp_path, npu2
+):
+    # 3 us faster a step against a margin of 2 * sqrt(2) standard errors:
+    # 1.4 us at 0.5, 5.7 us at 2.0, and no win claimed where it is unknown.
+    traced = Apart().trace(a=(SIZE,), b=(SIZE,), c=(2 * SIZE,), d=(2 * SIZE,))
+    large = traced.steps[-1].op
+    default, other = variants(large, npu2)[:2]
+    table = _separate(
+        tmp_path / "costs.json", {default.key: (100.0, 80.0), other.key: (97.0, 80.0)}
+    )
+    for v in (default, other):
+        table.steps[v.key] = dataclasses.replace(table.steps[v.key], noise_us=noise_us)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(
+        traced, npu2, "separate"
+    )
+    assert tuning.chosen[default.key].key == (other.key if taken else default.key)
 
 
 def _add_silu(tmp_path, dev):
@@ -1031,7 +1052,7 @@ def test_cache_keys_follow_the_build_the_values_and_the_inputs(npu2):
 
 
 def test_cache_entries_round_trip_per_platform_and_mode(tmp_path):
-    m = Measurement(4.0, 90.0, "ab" * 32, "turbo", 8, 50, "2026-10-06")
+    m = Measurement(4.0, [4.1, 3.9], 90.0, "ab" * 32, "turbo", 50, "2026-10-06")
     cal = Calibration(50.0, 30.0, 30.0, 40.0, "turbo", 8, 50, "2026-10-06")
     cache = CostCache("NPU Strix Halo", "turbo", root=tmp_path)
     cache.put("k", m)
@@ -1046,15 +1067,46 @@ def test_cache_entries_round_trip_per_platform_and_mode(tmp_path):
     )
     assert CostCache("NPU Strix", "turbo", root=tmp_path).get("k", Measurement) is None
     # Exactness is against whichever width the table takes as default.
-    assert m.cost("ab" * 32, False).exact and not m.cost("cd" * 32, False).exact
+    assert (
+        m.cost("ab" * 32, False, 4.0, 0.1).exact
+        and not m.cost("cd" * 32, False, 4.0, 0.1).exact
+    )
     # An inexact width is accurate only as judged; an exact one always is.
-    assert m.cost("ab" * 32, False).accurate
-    assert m.cost("cd" * 32, True).accurate and not m.cost("cd" * 32, False).accurate
+    assert m.cost("ab" * 32, False, 4.0, 0.1).accurate
+    assert (
+        m.cost("cd" * 32, True, 4.0, 0.1).accurate
+        and not m.cost("cd" * 32, False, 4.0, 0.1).accurate
+    )
     verdict = Accuracy(False, "C under the default's gate: 1 mismatch", "2026-10-07")
     judged = CostCache.judged_key("k", "w")
     assert judged not in {CostCache.beside_key("k", "w"), CostCache.pair_key("k", "w")}
     cache.put(judged, verdict)
     assert again.get(judged, Accuracy) == verdict
+
+
+def test_an_entry_recorded_with_other_fields_is_measured_again(tmp_path):
+    m = Measurement(4.0, [4.1, 3.9], 90.0, "ab" * 32, "turbo", 50, "2026-10-06")
+    cache = CostCache("NPU Strix Halo", "turbo", root=tmp_path)
+    cache.put("k", m)
+    path = cache.directory / "k.json"
+    fields = json.loads(path.read_text())
+    del fields["round_us"]
+    path.write_text(json.dumps(fields))
+    assert cache.get("k", Measurement) is None
+    table = _separate(tmp_path / "costs.json", {"a": (10.0, 100.0)})
+    table.save()
+    saved = json.loads(table.path.read_text())
+    del saved["steps"]["a"]["noise_us"]
+    table.path.write_text(json.dumps(saved))
+    again = CostTable(table.path)
+    assert "a" not in again.steps and again.calibrations == table.calibrations
+
+
+def test_a_step_of_unknown_noise_is_kept_through_a_save(tmp_path):
+    table = _separate(tmp_path / "costs.json", {"a": (10.0, 100.0)})
+    table.steps["a"] = dataclasses.replace(table.steps["a"], noise_us=None)
+    table.save()
+    assert CostTable(table.path).steps == table.steps
 
 
 def _gemm_judged(npu2):

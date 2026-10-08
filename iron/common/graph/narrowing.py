@@ -169,6 +169,9 @@ def variants(op: Operator, dev, pinned: frozenset[str] = frozenset()) -> list[Va
 
 FIT_CACHE = Path(NPU_CACHE_HOME) / "iron" / "fits"
 
+# Standard errors a setting's step must beat its default's by to be taken.
+CONFIDENCE = 2.0
+
 # The packagings a table is measured under (``packaging.plan``'s dispatch).
 DISPATCHES = ("fused", "separate")
 
@@ -272,6 +275,11 @@ class StepCost:
     Attributes:
         t_step_us: Its time per step while its device is configured; on an
             xclbin chain, `c`, a step dispatched alone.
+        noise_us: The standard error it is compared to its design's default
+            by: on the default's own row, of `t_step_us`; on any other, of
+            its difference from the default, paired round by round in the
+            run that timed both (through its twin's where it has one).
+            None from a single round.
         alone_us: One run of one step, less `t_step_us`: `D0 + base + load + R`;
             on an xclbin chain, `F`.
         exact: Its output is bit-identical to the default setting's.
@@ -284,6 +292,7 @@ class StepCost:
     """
 
     t_step_us: float
+    noise_us: float | None
     alone_us: float
     exact: bool
     accurate: bool
@@ -380,11 +389,27 @@ class CostTable:
                         f"not {given!r}"
                     )
             self.device, self.dispatch = data["device"], data["dispatch"]
-            self.steps = {k: StepCost(**v) for k, v in data["steps"].items()}
-            self.calibrations = {
-                k: Calibration(**v) for k, v in data["calibrations"].items()
-            }
-            self.packs = {k: PackCost(**v) for k, v in data.get("packs", {}).items()}
+            # An entry recorded without a field its kind now requires is
+            # left out, so it is measured again.
+            for name, kind in (
+                ("steps", StepCost),
+                ("calibrations", Calibration),
+                ("packs", PackCost),
+            ):
+                required = {
+                    f.name
+                    for f in dataclasses.fields(kind)
+                    if f.default is dataclasses.MISSING
+                }
+                setattr(
+                    self,
+                    name,
+                    {
+                        k: kind(**v)
+                        for k, v in data.get(name, {}).items()
+                        if required <= v.keys()
+                    },
+                )
 
     def measures(self, dev) -> None:
         """Check that this table is measured on ``dev``.
@@ -411,10 +436,16 @@ class CostTable:
         if self.packs:
             sectioned.append(("packs", self.packs))
         for name, table in sectioned:
+            # A field left at its default None is left out; a required one is kept.
             rows = [
                 f"{json.dumps(k)}: "
                 + json.dumps(
-                    {n: x for n, x in dataclasses.asdict(v).items() if x is not None}
+                    {
+                        f.name: getattr(v, f.name)
+                        for f in dataclasses.fields(v)
+                        if getattr(v, f.name) is not None
+                        or f.default is dataclasses.MISSING
+                    }
                 )
                 for k, v in sorted(table.items())
             ]
@@ -502,6 +533,19 @@ class CostTable:
     def t_step(self, key: str) -> float:
         cost = self.steps.get(key)
         return 0.0 if cost is None else cost.t_step_us
+
+    def step_against(self, key: str, default: str, confidence: float) -> float:
+        """Setting ``key``'s step time as a choice against its design's
+        ``default``: the default's where ``key`` is faster by less than
+        ``confidence`` standard errors of their difference, or by any
+        amount where that is unknown. A win within the noise is not one.
+        """
+        t, d = self.steps.get(key), self.steps.get(default)
+        if key == default or t is None or d is None:
+            return self.t_step(key)
+        if t.noise_us is None or t.t_step_us >= d.t_step_us - confidence * t.noise_us:
+            return max(t.t_step_us, d.t_step_us)
+        return t.t_step_us
 
     def load(self, key: str) -> float:
         """What configuring a design adds to an entry's base; 0 if unmeasured.
@@ -841,6 +885,9 @@ class JointNarrowing:
         fold_runs: The most ``folded`` runs ``foldings`` makes to find
             each way to fold a graph; past it the folds found are taken
             greedily.
+        confidence: How many standard errors of the difference a setting's
+            step must beat its default's by to be taken
+            (``CostTable.step_against``).
     """
 
     table: CostTable = dataclasses.field(compare=False)
@@ -848,6 +895,7 @@ class JointNarrowing:
     fit_attempts: int = 3
     fit_cache: Path = dataclasses.field(default=FIT_CACHE, compare=False)
     fold_runs: int = FOLD_RUNS
+    confidence: float = CONFIDENCE
 
     def tune(self, traced: TracedGraph, dev, dispatch: str) -> Tuning:
         """Choose the folds, tunables and packs of ``traced`` for ``dev``,
@@ -965,10 +1013,18 @@ class JointNarrowing:
         # A setting applies to every operator of its design, so it moves no
         # tunable any of them pins.
         found = {k: self._candidates(op, dev, pinned[k]) for k, op in first.items()}
+        # Each setting's step as the choice sees it, by design.
+        steps = {
+            k: {
+                v.key: table.step_against(v.key, cands[0].key, self.confidence)
+                for v in cands
+            }
+            for k, cands in found.items()
+        }
         if table.dispatch == "separate":
-            chosen, groups = self._separate(keys, found), ()
+            chosen, groups = self._separate(keys, found, steps), ()
         else:
-            chosen, groups = self._packed(keys, found, dev)
+            chosen, groups = self._packed(keys, found, steps, dev)
         devices = Packing(groups).sharing(
             {k: chosen[k].array for k in dict.fromkeys(keys)}
         )
@@ -1001,11 +1057,14 @@ class JointNarrowing:
         )
 
     def _separate(
-        self, keys: Sequence[str], found: Mapping[str, Sequence[Variant]]
+        self,
+        keys: Sequence[str],
+        found: Mapping[str, Sequence[Variant]],
+        steps: Mapping[str, Mapping[str, float]],
     ) -> dict[str, Variant]:
         """Each design's setting on an xclbin chain, by default key: its
         cheapest of ``found``, its occurrences in ``keys`` times its step
-        and its switches in times its load.
+        (``steps``) and its switches in times its load.
         """
         table = self.table
         runlist = Runlist(keys)
@@ -1013,16 +1072,22 @@ class JointNarrowing:
         return {
             k: min(
                 cands,
-                key=lambda v: runlist.occurrences[k] * table.t_step(v.key)
+                key=lambda v: runlist.occurrences[k] * steps[k][v.key]
                 + arrivals[k] * table.load(v.key),
             )
             for k, cands in found.items()
         }
 
     def _packed(
-        self, keys: Sequence[str], found: Mapping[str, Sequence[Variant]], dev
+        self,
+        keys: Sequence[str],
+        found: Mapping[str, Sequence[Variant]],
+        steps: Mapping[str, Mapping[str, float]],
+        dev,
     ) -> tuple[dict[str, Variant], tuple[tuple[str, ...], ...]]:
-        """Each design's setting on a full ELF, by default key, and the packs."""
+        """Each design's setting on a full ELF, by default key, and the
+        packs; a setting alone priced at its step in ``steps``.
+        """
         table = self.table
         # The designs of one array are one device, so they keep one array:
         # the search runs over arrays, each named for its first design, and
@@ -1039,7 +1104,7 @@ class JointNarrowing:
             cheapest = at.setdefault(k, {})
             for v in cands:
                 held = cheapest.get(v.array)
-                if held is None or table.t_step(v.key) < table.t_step(held.key):
+                if held is None or steps[k][v.key] < steps[k][held.key]:
                     cheapest[v.array] = v
         candidates = [
             [v for v in found[k] if all(v.array in at[m] for m in designs)]
@@ -1052,9 +1117,9 @@ class JointNarrowing:
         def member_cost(i: int, v: Variant, entries: int) -> float:
             return (
                 entries * table.load(v.key)
-                + occurrences[runlist.order[i]] * table.t_step(v.key)
+                + occurrences[runlist.order[i]] * steps[runlist.order[i]][v.key]
                 + sum(
-                    occurrences[m] * table.t_step(at[m][v.array].key)
+                    occurrences[m] * steps[m][at[m][v.array].key]
                     for m in designs_of[i][1:]
                 )
             )

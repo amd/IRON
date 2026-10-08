@@ -213,6 +213,27 @@ def test_a_batch_whose_every_setting_is_stopped_is_measured(tmp_path):
 
 
 @pytest.mark.supported_devices("npu2")
+def test_a_setting_is_priced_beside_the_default_its_batch_times(tmp_path):
+    found = variants(
+        ElementwiseAdd(size=SIZE, tile_size=TILE), aie_utils.ensure_current_device()
+    )
+    size = (CONTEXTS - 2) // 2
+    assert size < len(found) <= 2 * size
+    report = platform()
+    cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    timing = Timing(rounds=3, calls=5, cutoff=math.inf)
+    first = CostTable(tmp_path / "first.json", "npu2", "fused")
+    logged = []
+    measure_steps(first, found, timing, cache=cache, log=logged.append)
+    assert f"    batch 2/2: timing {len(found) - size + 1} runs" in logged, logged
+    assert all(first.steps[v.key].noise_us is not None for v in found)
+    # The cache holds each width beside its default, so it prices them alike.
+    again = CostTable(tmp_path / "again.json", "npu2", "fused")
+    assert measure_steps(again, found, timing, cache=cache) == {}
+    assert again.steps == first.steps
+
+
+@pytest.mark.supported_devices("npu2")
 def test_one_operator_is_measured_from_the_command_line(tmp_path):
     table = tmp_path / "costs.json"
     run = subprocess.run(

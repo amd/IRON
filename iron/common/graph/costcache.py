@@ -44,33 +44,42 @@ class Measurement:
 
     Attributes:
         t_step_us: Its time per step while its device is configured.
+        round_us: Its time per step as each round measured it, so two
+            designs timed in one run pair round by round.
         alone_us: One run of one step, less `t_step_us`.
         output: The sha256 of what one run wrote, so any two widths
             measured on the same inputs compare without a rerun.
     """
 
     t_step_us: float
+    round_us: list[float]
     alone_us: float
     output: str
     pmode: str
-    rounds: int
     calls: int
     measured: str  # ISO date
 
-    def cost(self, default: str, accurate: bool) -> StepCost:
+    def cost(
+        self, default: str, accurate: bool, t_step_us: float, noise_us: float | None
+    ) -> StepCost:
         """The table's figure, exact if the output digest is `default`'s.
 
         Args:
             accurate: An inexact width was judged within its gates.
+            t_step_us: Its step as priced, against the design it was run
+                beside.
+            noise_us: The standard error it is compared to its design's
+                default by (``StepCost``).
         """
         exact = self.output == default
         return StepCost(
-            t_step_us=self.t_step_us,
+            t_step_us=t_step_us,
+            noise_us=noise_us,
             alone_us=self.alone_us,
             exact=exact,
             accurate=exact or accurate,
             pmode=self.pmode,
-            rounds=self.rounds,
+            rounds=len(self.round_us),
             calls=self.calls,
             measured=self.measured,
         )
@@ -195,10 +204,16 @@ class CostCache:
         ]
 
     def get(self, key: str, kind: type[Record]) -> Record | None:
+        """The record at ``key``; None if there is none, or it was written
+        with other fields than ``kind`` has, so it is measured again.
+        """
         path = self.directory / f"{key}.json"
         if not path.exists():
             return None
-        return kind(**json.loads(path.read_text()))
+        fields = json.loads(path.read_text())
+        if fields.keys() != {f.name for f in dataclasses.fields(kind)}:
+            return None
+        return kind(**fields)
 
     def put(
         self,
