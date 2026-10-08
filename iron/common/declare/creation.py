@@ -183,3 +183,32 @@ def declare(cls: type) -> None:
     cls._array_fields = tuple(
         n for n, t in tiers.items() if n in named or (t is not None and t.array)
     )
+    cls._probe_fields = {
+        n: t.probe
+        for n, t in tiers.items()
+        if isinstance(t, Param) and t.probe is not dataclasses.MISSING
+    }
+    shaped: set[str] = set()
+    for m in members:
+        if isinstance(m, _Buffer):
+            shaped |= m.shape.names()
+            if m.when is not None:
+                shaped.add(m.when.name)
+        elif isinstance(m, Extent):
+            shaped.add(m.field.name)
+    for n in cls._probe_fields:
+        if n in cls._array_fields:
+            raise TypeError(
+                f"{cls.__name__}.{n}: probe= on an array field; the cores are "
+                f"built from it, so its cost may follow it"
+            )
+        if n in shaped:
+            raise TypeError(
+                f"{cls.__name__}.{n}: probe= on a field an operand's shape or "
+                f"presence names; the transfers follow it"
+            )
+        if not fields[n].init:
+            raise TypeError(
+                f"{cls.__name__}.{n}: probe= on an init=False field; the tuner "
+                f"sets the probe through the constructor"
+            )

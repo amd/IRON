@@ -233,6 +233,7 @@ class Operator(metaclass=_OperatorMeta):
     _tunable_fields: ClassVar[tuple[str, ...]] = ()
     _domains: ClassVar[dict[str, Domain]] = {}
     _array_fields: ClassVar[tuple[str, ...]] = ()
+    _probe_fields: ClassVar[dict[str, Any]] = {}
     _external: ClassVar[Any] = None
     test: ClassVar[Testing | None] = None
     # True when sequence() calls rt.preamble() itself, behind its first fills.
@@ -587,6 +588,15 @@ class Operator(metaclass=_OperatorMeta):
         if any(self.prepares):
             own += (("prepares", self._prepare_keys()),)
         return (type(self).__qualname__, own)
+
+    def probed(self) -> Self:
+        """This operator with each ``param(probe=)`` field at its probe: the
+        one its step time is measured as, for every value of those fields.
+        Itself when they are there already, unresolved otherwise.
+        """
+        if all(getattr(self, n) == v for n, v in self._probe_fields.items()):
+            return self
+        return dataclasses.replace(self, **self._probe_fields)
 
     def array_key(self):
         key = (type(self).__qualname__,) + tuple(

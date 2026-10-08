@@ -65,10 +65,12 @@ from .trace import TracedGraph
 
 def cost_key(op: Operator, dev=None) -> str:
     """A design's class and identity, resolved for ``dev``, as the fused
-    image names it. The key leaves out the sources, so remeasure after
-    editing how a design is generated.
+    image names it, at its probe (``Operator.probed``): the designs that
+    differ only in fields their cost cannot follow share one key. The key
+    leaves out the sources, so remeasure after editing how a design is
+    generated.
     """
-    design = OperatorDesign(op.resolved(dev))
+    design = OperatorDesign(op.probed().resolved(dev))
     return f"{type(op).__name__}_{design.identity}"
 
 
@@ -96,7 +98,7 @@ class Variant:
             tunables=tuple(
                 (name, getattr(resolved, name)) for name in resolved.domains(dev)
             ),
-            key=cost_key(resolved),
+            key=cost_key(resolved, dev),
             array=resolved.array_key(),
             mm2s=sum(s.count for s in streams if not s.direction.drains),
             s2mm=sum(s.count for s in streams if s.direction.drains),

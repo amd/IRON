@@ -209,6 +209,67 @@ def test_per_and_broadcast_are_exclusive():
             x = In(n, tile=(4,), per=(c,), broadcast=True)
 
 
+def test_a_probe_may_not_be_on_a_field_the_array_reads():
+    with pytest.raises(TypeError, match="probe= on an array field"):
+
+        class Baked(Operator):
+            n: int = param()
+            alpha: float = param(array=True, probe=1.0)
+            x = In(n)
+
+    with pytest.raises(TypeError, match="probe= on an array field"):
+
+        class Tiled(Operator):
+            n: int = param()
+            t: int = param(probe=16)
+            x = In(n, tile=(t,))
+
+
+def test_a_probe_may_not_be_on_a_field_the_transfers_follow():
+    with pytest.raises(TypeError, match="probe= on a field an operand's shape"):
+
+        class Shaped(Operator):
+            n: int = param(probe=1024)
+            x = In(n)
+
+    with pytest.raises(TypeError, match="probe= on a field an operand's shape"):
+
+        class Present(Operator):
+            n: int = param()
+            gated: bool = param(default=False, probe=False)
+            x = In(n)
+            w = In(n, when=gated)
+
+
+def test_a_probe_may_not_be_on_a_field_the_constructor_cannot_set():
+    with pytest.raises(TypeError, match="probe= on an init=False field"):
+
+        class Fixed(Operator):
+            n: int = param()
+            low: float = param(default=0.0, init=False, probe=0.0)
+            x = In(n)
+
+
+def test_probed_sets_each_probe_field_and_nothing_else():
+    class Bounded(Operator):
+        n: int = param()
+        low: float = param(probe=-np.inf)
+        cap: tuple | None = param(default=None, probe=None)
+        x = In(n)
+
+    assert Bounded._probe_fields == {"low": -np.inf, "cap": None}
+    at = Bounded(n=64, low=-np.inf)
+    assert at.probed() is at
+    off = Bounded(n=64, low=0.5, cap=(0.0, 1.0))
+    probe = off.probed()
+    assert (probe.n, probe.low, probe.cap) == (64, -np.inf, None)
+    assert (off.low, off.cap) == (0.5, (0.0, 1.0))
+    assert probe.design_key() == at.design_key() != off.design_key()
+    assert MV._probe_fields == {}
+    plain = MV(M=64, K=256)
+    assert plain.probed() is plain
+
+
 # --------------------------------------------------------------------------
 # Bound members on instances
 # --------------------------------------------------------------------------

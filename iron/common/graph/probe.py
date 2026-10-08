@@ -777,8 +777,9 @@ class Call:
 class Designs:
     """The designs of a set of calls as ``measure_graph`` measures them,
     without a device: each design's first operator and the call it runs in,
-    its settings (``variants`` the placer takes, ``fitting``), and for a
-    design a folded call has of its own, the design whose step it took.
+    its settings (``variants`` of it at its probe that the placer takes,
+    ``fitting``), and for a design a folded call has of its own, the design
+    whose step it took.
     """
 
     first: dict[str, tuple[Operator, Call]]
@@ -815,7 +816,8 @@ class Designs:
         # one moves no tunable any of them pins (``JointNarrowing``).
         settings, refused = {}, {}
         for key, (op, _) in first.items():
-            settings[key], why = fitting(variants(op, dev, pinned[key]), fit_cache)
+            found = variants(op.probed(), dev, pinned[key])
+            settings[key], why = fitting(found, fit_cache)
             refused.update(why)
         if not set(twin_of.values()) <= settings.keys():
             raise ValueError("a call is folded from a graph no call measures")

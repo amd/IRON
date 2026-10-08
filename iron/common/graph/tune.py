@@ -118,7 +118,7 @@ def main() -> None:
 
     dev = aie_utils.ensure_current_device()
     op = getattr(operators, args.operator)(**fields)
-    found, refused = fitting(variants(op, dev))
+    found, refused = fitting(variants(op.probed(), dev))
     print(f"power mode: {pmode()}; {len(found)} settings")
     for key, why in refused.items():
         first_line, _, _ = why.partition("\n")
