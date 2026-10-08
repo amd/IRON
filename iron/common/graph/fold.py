@@ -10,6 +10,7 @@ from collections import Counter
 from collections.abc import Collection, Hashable
 
 from ..declare import Operator, Unresolvable
+from ..declare.member import Extent
 from .trace import TracedGraph
 
 
@@ -47,9 +48,12 @@ def folded(
     A step folds where one input is a whole intermediate that it and its
     producer alone name, each other input a whole buffer of its output's
     size and type, its one output a whole buffer of that size the graph
-    does not hold, no per-call value is bound to it, and its producer runs
-    at one step and keeps every width it had. Its other inputs then stream
-    into the producer's cores. The folded step runs where the producer ran
+    does not hold, and its producer runs at one step and keeps every width
+    it had. A bounded input folds where the output and every other input
+    are of its shape and bounds, and the step's only per-call values are
+    the extents those bounds bind: the producer's own bound then sizes the
+    tiles it finishes. Its other inputs then stream into the producer's
+    cores. The folded step runs where the producer ran
     if no step between them writes those inputs, else where the consumer
     ran if none writes the producer's, and writes the consumer's output;
     a step it reads produces into it in turn.
@@ -67,7 +71,10 @@ def folded(
     named = Counter((h.parent or h).name for s in traced.steps for h in s.slots)
     named.update((h.parent or h).name for h in traced.outputs)
     calls = Counter(id(s.op) for s in traced.steps)
-    bound = {id(b.op) for b in traced.bindings}
+    bindings = Counter(id(b.op) for b in traced.bindings)
+    extents = Counter(
+        id(b.op) for b in traced.bindings if isinstance(b.member.member, Extent)
+    )
     producers = {h.name: i for i, s in enumerate(traced.steps) for h in s.outputs}
     steps = list(traced.steps)
     # Per folded step: its producer's design and the designs folded into it.
@@ -87,18 +94,20 @@ def folded(
                 or x.role != "intermediate"
                 or x.parent is not None
                 or x.tap is not None
-                or x.bounds
                 or named[x.name] != 2
                 or y.parent is not None
                 or y.role not in ("intermediate", "output")
                 or y.elements != x.elements
                 or y.dtype != x.dtype
-                or id(step.op) in bound
+                or y.bounds != x.bounds
+                or (x.bounds and y.shape != x.shape)
+                or bindings[id(step.op)] != (extents[id(step.op)] if x.bounds else 0)
                 or calls[id(steps[j].op)] != 1
                 or any(
                     e.parent is not None
                     or e.tap is not None
-                    or e.bounds
+                    or e.bounds != x.bounds
+                    or (x.bounds and e.shape != x.shape)
                     or e.elements != y.elements
                     or e.dtype != y.dtype
                     for e in extras
@@ -175,7 +184,13 @@ def folded(
                     break
             except (Unresolvable, ValueError):
                 continue
-    kept = dataclasses.replace(traced, steps=[s for s in steps if s is not None])
+    kept = [s for s in steps if s is not None]
+    running = {id(s.op) for s in kept}
+    kept = dataclasses.replace(
+        traced,
+        steps=kept,
+        bindings=[b for b in traced.bindings if id(b.op) in running],
+    )
     return kept.with_operators(replace), applied
 
 

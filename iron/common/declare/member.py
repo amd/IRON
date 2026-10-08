@@ -112,7 +112,9 @@ class _Buffer(_Member["BoundBuffer"]):
             it is true, and a call giving the operand by keyword sets it.
         finish: The cores apply the operator's `finish` to each tile of
             this output before releasing it (`Finish`), so a consumer folds
-            into them.
+            into them. `True`, or the block of the output one core fills
+            of a tile, in an order of its own (GEMM's C, joined from a
+            column's cores): a step there must not depend on the order.
     """
 
     direction: ClassVar[Direction]
@@ -128,7 +130,7 @@ class _Buffer(_Member["BoundBuffer"]):
         replicate: bool = False,
         broadcast: bool = False,
         when: _DimSpec | None = None,
-        finish: bool = False,
+        finish: bool | tuple[_DimSpec, ...] = False,
     ) -> None:
         if per is not None and broadcast:
             raise TypeError("a stream is either per=<dim> or broadcast, not both")
@@ -162,7 +164,8 @@ class _Buffer(_Member["BoundBuffer"]):
         self.via = via
         self.replicate = replicate
         self.broadcast = broadcast
-        self.finish = finish
+        self.finish = bool(finish)
+        self.finish_block = None if isinstance(finish, bool) else Shape(finish)
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.shape})"

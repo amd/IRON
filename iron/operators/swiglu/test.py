@@ -18,6 +18,7 @@ from ml_dtypes import bfloat16
 from iron.common.harness import verify_buffer
 from iron.lm.layers import SwiGLU
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
 
@@ -70,19 +71,14 @@ def test_swiglu(rows, embedding_dim, hidden_dim, fold, npu_runtime, record_prope
     ops = sum(s.op.resolved().ops() for s in net.traced.steps)
     record_property("Throughput", ops / (elapsed_us * 1e-6) / 1e9)
 
-    # Folded, one token's silu finishes the gate, whose cores have no input
-    # channel left for the product's other factor; a sequence's product
-    # finishes silu.
+    # Folded, silu finishes the gate, whose cores have no input channel (a
+    # matvec's) or row order (a matmul's) left for the product's other factor.
     finishes = [
         (type(s.op), [type(link.op) for link in s.op.finish])
         for s in net.traced.steps
         if s.op.finish
     ]
-    assert finishes == (
-        []
-        if not fold
-        else [(GEMV, [SiLU])] if rows == 1 else [(SiLU, [ElementwiseMul])]
-    )
+    assert finishes == ([] if not fold else [(GEMV if rows == 1 else GEMM, [SiLU])])
     # The gate's buffer is dead once SiLU has read it, so the planner may
     # reuse it; the product's inputs and the down projection's are intact.
     (product,) = [
@@ -92,7 +88,7 @@ def test_swiglu(rows, embedding_dim, hidden_dim, fold, npu_runtime, record_prope
     ]
     down = net.traced.steps[-1]
     verdicts = {"product": _verdict(net, product), "down": _verdict(net, down)}
-    if finishes and rows == 1:
+    if finishes:
         # Folded, both projections are the product's inputs, and run on one
         # array each with its own finish.
         gate, up = net.traced.steps[:2]

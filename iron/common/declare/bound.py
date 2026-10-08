@@ -135,6 +135,12 @@ class BoundBuffer:
         return np.ndarray[self.tile_shape, np.dtype[self.dtype]]
 
     @property
+    def finish_line(self) -> int:
+        """The elements a core finishes at once: its block of a tile, or the tile."""
+        block = self.member.finish_block
+        return math.prod(self.tile_shape if block is None else self._resolve(block))
+
+    @property
     def count(self) -> int:
         """The stream's lanes (fifos)."""
         per = self._stream().per

@@ -24,7 +24,9 @@ from ml_dtypes import bfloat16
 
 from iron.common import (
     Extent,
+    Finish,
     In,
+    Link,
     Operator,
     Out,
     Unresolvable,
@@ -35,6 +37,8 @@ from iron.common import (
 )
 from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
+from iron.operators.gelu import GELU
+from iron.operators.silu import SiLU
 
 # fmt: off
 # The rounding configuration that tracks the reference most closely (an f32
@@ -96,6 +100,32 @@ def _cases(cls, dev: Device):
     for K, extensive in ((2048, False), (8192, True)):
         kwargs = dict(M=2048, K=K, N=2048, b_col_maj=True)
         out.append(Case(kwargs, extensive, bench=not extensive))
+
+    def finished(kwargs, *chains):
+        # The first chain is the case's own; more share one array.
+        size = kwargs["M"] * kwargs["N"]
+        steps = [tuple(Link(step(size=size)) for step in c) for c in chains]
+        names = ["".join(step.__name__ for step in c) or "none" for c in chains]
+        label = f"{Case(kwargs).label}-finish_{names[0]}" + "".join(
+            f"-shares_{n}" for n in names[1:]
+        )
+        shared = tuple(steps) if len(steps) > 1 else ()
+        return Case(dict(kwargs, finish=steps[0], finishes=shared), id=label)
+
+    # Each core finishing its C tiles: a graph's projection, the f32
+    # accumulator, and one array serving a finished design and a plain one.
+    default = dict(M=2048, K=2048, N=2048, b_col_maj=True)
+    M, K, N, cols, b_col_maj, c_col_maj, m, k, n = _REGULAR[3]
+    exact = dict(M=M, K=K, N=N, num_aie_columns=cols, tile_m=m, tile_k=k)
+    exact.update(tile_n=n, b_col_maj=b_col_maj, prio_accuracy=True)
+    exact.update(emulate_bf16_mmul_with_bfp16=False)
+    out += [
+        finished(default, (SiLU,)),
+        finished(default, (GELU,)),
+        finished(exact, (SiLU,)),
+        finished(default, (), (SiLU,)),
+        finished(default, (SiLU,), ()),
+    ]
     return out
 
 
@@ -154,6 +184,7 @@ class GEMM(Operator):
         dtype=dtype_out,
         tile=(c_l2,),
         per=(num_aie_columns,),
+        finish=(tile_m, tile_n),
     )
     # M, or fewer rows per call (``A[:n]`` in a graph). The DMAs stream
     # every row either way, since A's pattern uses all four descriptor
@@ -341,7 +372,8 @@ class GEMM(Operator):
         C_l2_ty = self.C.tile
         A_l1_ty = np.ndarray[(m, k), np.dtype[dtype_in]]
         B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
-        C_l1_ty = np.ndarray[(m, n), np.dtype[dtype_out]]
+        # Flat, as the finish's scratch is: a core selects between the two.
+        C_l1_ty = np.ndarray[(m * n,), np.dtype[dtype_out]]
 
         # AIE Core Function declarations: upstream's factories, which pick the
         # source and the -D set for the device they are resolved against.
@@ -374,6 +406,9 @@ class GEMM(Operator):
             convert_copy_kernel = kernels.datamovement.convert_copy(m * n)
         else:
             fifo_depth_out = fifo_depth
+        # The finish runs over a core's whole C tile once the reduction has
+        # filled it.
+        finish = Finish(self, n_aie_rows * n_aie_cols)
 
         # AIE-array data movement with object fifos
         A_l3l2_fifos: list[Any] = [None] * n_shim_mem_A
@@ -476,34 +511,38 @@ class GEMM(Operator):
             my_rtp,
             barrier,
             elem_out_internal,
-            n_valid=None,
+            *rest,
         ):
             barrier.wait_for_value(1)
             rtp_K_div_k = my_rtp[0]
             rtp_n_tiles_per_core = my_rtp[1]
-            n_compute = n_valid.read() if bounded else None
+            n_compute = rest[0].read() if bounded else None
+            rest = rest[1:] if bounded else rest
+            mode = finish.read(rest)
             barrier.release_with_value(1)
 
             def tile(compute: bool):
-                nonlocal elem_out_internal
-                if not use_larger_internal_buffer:
-                    elem_out_internal = out_c.acquire(1)
+                if use_larger_internal_buffer:
+                    acc = elem_out_internal
+                else:
+                    c = out_c.acquire(1)
+                    acc = finish.target(rest, mode, c)
                 if compute:
-                    zero(elem_out_internal)
+                    zero(acc)
                 for _ in range_(rtp_K_div_k):
                     elem_in_a = in_a.acquire(1)
                     elem_in_b = in_b.acquire(1)
                     if compute:
-                        matmul(elem_in_a, elem_in_b, elem_out_internal)
+                        matmul(elem_in_a, elem_in_b, acc)
                     in_a.release(1)
                     in_b.release(1)
                 if use_larger_internal_buffer:
-                    elem_out_transfer = out_c.acquire(1)
+                    c = out_c.acquire(1)
                     if compute:
-                        convert_copy(elem_out_internal, elem_out_transfer, m * n)
-                    out_c.release(1)
-                else:
-                    out_c.release(1)
+                        convert_copy(acc, finish.target(rest, mode, c), m * n)
+                if compute:
+                    finish.apply(rest, mode, c)
+                out_c.release(1)
 
             if bounded:
                 for _ in range_(n_compute):
@@ -539,9 +578,10 @@ class GEMM(Operator):
                             rtps[row][col],
                             workerBarriers[row][col],
                             acc_buffer,
-                        ]
-                        + ([n_valid_param] if bounded else []),
-                        stack_size=0xD00,
+                            *([n_valid_param] if bounded else []),
+                            *finish.args(row * n_aie_cols + col),
+                        ],
+                        stack_size=max(0xD00, finish.stack_bytes or 0),
                     )
                 )
 
@@ -562,6 +602,7 @@ class GEMM(Operator):
         ]
         self.k_div_k.bind(flat_rtps, 0)
         self.n_tiles.bind(flat_rtps, 1)
+        finish.bind()
         return workers + [b for row in workerBarriers for b in row]
 
     # -- the runtime sequence --------------------------------------------------
@@ -716,8 +757,8 @@ class GEMM(Operator):
         return 2 * self.M * self.K * self.N
 
     def reference(self, A, B):
-        """``C = A @ B`` from the stored inputs: ``B`` is ``(N, K)`` when
-        ``b_col_maj``, and ``C`` ``(N, M)`` when ``c_col_maj``.
+        """``C = A @ B`` from the stored inputs, then its finish: ``B`` is
+        ``(N, K)`` when ``b_col_maj``, and ``C`` ``(N, M)`` when ``c_col_maj``.
         """
         # Not linalg.mm's contract: that is one tile's product, and mm_ref's
         # float64 would double the host copy of the largest weight a graph
@@ -726,7 +767,8 @@ class GEMM(Operator):
         # K tiles) is its error, which tolerance() bounds.
         b = B.T if self.b_col_maj else B
         C = np.matmul(A.astype(np.float32), b.astype(np.float32)).astype(A.dtype)
-        return C.T if self.c_col_maj else C
+        C = C.T if self.c_col_maj else C
+        return Finish(self.resolved()).reference(C) if self.finish else C
 
     def tolerance(self) -> Tolerance:
         """Each element of C within the roundings the design makes, in
@@ -740,8 +782,11 @@ class GEMM(Operator):
         cancel is small against the error of the terms it summed, and the
         bf16 accumulator's error grows with K. On npu2 over K = 256 to
         8192, normal and all-positive inputs, no configuration's worst
-        element came above 0.83 of it.
+        element came above 0.83 of it. A finish carries it through its
+        steps' own gates.
         """
+        if self.finish:
+            return Finish(self).tolerance()
         if np.issubdtype(np.dtype(self.dtype_in), np.integer):
             return Tolerance.exact(note="integer matmul")
         units = 4.0 if self.emulate_bf16_mmul_with_bfp16 else 2.0

@@ -122,7 +122,7 @@ class Finish:
         self.chains = op.finishes or (op.finish,)
         # The one output, where a chain has steps (Operator.resolved checks).
         self.out = op.outputs[-1]
-        self.line = math.prod(self.out.tile_shape)
+        self.line = self.out.finish_line
         self.select = len(self.chains) > 1
         # Each distinct step once: its kernel, argument positions and scalars.
         self.steps: dict[tuple, tuple[ExternalFunction, list[int], dict]] = {}
@@ -152,7 +152,9 @@ class Finish:
             for k in range(cores if self.select else 0)
         ]
         self.scratch = [
-            Buffer(self.out.tile, name=f"finished_{k}")
+            Buffer(
+                np.ndarray[(self.line,), np.dtype[self.out.dtype]], name=f"finished_{k}"
+            )
             for k in range(cores if any(self.chains) else 0)
         ]
 
@@ -398,7 +400,7 @@ class Elementwise(Operator):
         """
         raise ValueError(f"{type(self).__name__} is not a run of lines")
 
-    def at_line(self, line: int, dtype, dev) -> Self:
+    def at_line(self, line: int, dtype, dev, ordered: bool = True) -> Self:
         if type(self).array is not Elementwise.array:
             raise ValueError(f"{type(self).__name__}'s cores run an array of their own")
         streamed = [np.dtype(b.dtype) for b in self.buffers if b.streamed]
@@ -649,3 +651,11 @@ class Rowwise(Elementwise):
             if n in self._tunable_fields
         }
         return dataclasses.replace(self, rows=elements // line, bound_values={}, **one)
+
+    def at_line(self, line: int, dtype, dev, ordered: bool = True) -> Self:
+        if not ordered:
+            raise ValueError(
+                f"{type(self).__name__} reduces over rows, which a core holding "
+                f"its block in an order of its own does not hold"
+            )
+        return super().at_line(line, dtype, dev, ordered)

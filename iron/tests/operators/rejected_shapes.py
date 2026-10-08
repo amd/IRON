@@ -19,11 +19,14 @@ from iron.common import Link, Unresolvable
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
+from iron.operators.rms_norm import RMSNorm
 from iron.operators.sample import Sample
 from iron.operators.silu import SiLU
+from iron.operators.softmax import Softmax
 from iron.operators.transpose import Transpose
 
 
@@ -128,9 +131,6 @@ def test_a_tile_past_what_one_core_holds_is_refused_not_split():
     """A row an elementwise kernel cannot hold is an error at resolution; the
     library never halves it, since a norm's reference is the whole row.
     """
-    from iron.common import Unresolvable
-    from iron.operators.rms_norm import RMSNorm
-
     dev = from_name("npu2", n_cols=8)
     with pytest.raises(Unresolvable, match="tile_size=16384 exceeds the 8192"):
         RMSNorm(rows=1, tile_size=16384).resolved(dev)
@@ -141,9 +141,6 @@ def test_the_default_column_count_is_the_most_that_leave_whole_tiles():
     """A tunable-free operator resolves on either device to the widest count
     its shape divides over, rather than the whole shim budget and a refusal.
     """
-    from iron.operators.gemm import GEMM
-    from iron.operators.softmax import Softmax
-
     npu2, npu1 = from_name("npu2", n_cols=8), from_name("npu1", n_cols=4)
     assert GEMM(M=256, K=64, N=256).resolved(npu2).num_aie_columns == 4
     assert GEMM(M=256, K=64, N=512).resolved(npu1).num_aie_columns == 4
@@ -222,3 +219,19 @@ def test_a_finish_input_past_the_cores_input_channels_is_refused(producer, kwarg
     with pytest.raises(Unresolvable, match="input channels"):
         producer(**kwargs, finish=finish).resolved(dev)
     SiLU(size=2048, num_aie_columns=4, finish=finish).resolved(dev)
+
+
+def test_a_step_that_needs_the_order_of_a_gemm_block_is_refused():
+    """GEMM's cores hold their block of C in the matmul kernel's own layout:
+    a step independent of that order finishes it; a norm over rows, or a
+    product whose other input streams in row order, does not.
+    """
+    dev = from_name("npu2", n_cols=8)
+    kwargs = dict(M=2048, K=2048, N=2048, b_col_maj=True)
+    with pytest.raises(ValueError, match="reduces over rows"):
+        GEMM(**kwargs, finish=(Link(RMSNorm(rows=1024, tile_size=4096)),)).resolved(dev)
+    with pytest.raises(Unresolvable, match="order of their own"):
+        GEMM(**kwargs, finish=(Link(ElementwiseMul(size=2048 * 2048), 1),)).resolved(
+            dev
+        )
+    GEMM(**kwargs, finish=(Link(SiLU(size=2048 * 2048)),)).resolved(dev)

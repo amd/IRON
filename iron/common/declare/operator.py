@@ -189,9 +189,9 @@ class Link:
     def array_key(self):
         return (self.op.array_key(), self.at)
 
-    def at_line(self, line: int, dtype, dev) -> Link:
+    def at_line(self, line: int, dtype, dev, ordered: bool = True) -> Link:
         """This step resolved at one tile (``Operator.at_line``)."""
-        return Link(self.op.at_line(line, dtype, dev), self.at)
+        return Link(self.op.at_line(line, dtype, dev, ordered), self.at)
 
     def operands(self, tile, extras) -> list:
         """``tile`` at input ``at`` among this step's ``extras``."""
@@ -368,12 +368,15 @@ class Operator(metaclass=_OperatorMeta):
             return None
         return dataclasses.replace(self, finishes=other.finishes)
 
-    def at_line(self, line: int, dtype, dev) -> Self:
+    def at_line(self, line: int, dtype, dev, ordered: bool = True) -> Self:
         """This operator applied by another's core to one tile of its output,
         a run of ``line`` elements of ``dtype``, resolved for ``dev``.
+        ``ordered`` is False where the core holds the run in an order of its
+        own (``Out(finish=block)``).
 
         Raises:
-            ValueError: It runs on cores of its own, or not at this line.
+            ValueError: It runs on cores of its own, or not at this line or
+                in this order.
         """
         raise ValueError(f"{type(self).__name__} runs on cores of its own")
 
@@ -385,11 +388,13 @@ class Operator(metaclass=_OperatorMeta):
             Unresolvable: None of them.
         """
         links = [link for c in self.finishes or (self.finish,) for link in c]
+        out = self.outputs[0]
+        ordered = out.member.finish_block is None
         tried = []
         for line in lines:
             try:
                 for link in links:
-                    link.at_line(line, self.outputs[0].dtype, dev)
+                    link.at_line(line, out.dtype, dev, ordered)
             except ValueError as e:
                 tried.append(f"{line}: {e}")
                 continue
@@ -561,7 +566,8 @@ class Operator(metaclass=_OperatorMeta):
                 does not run at the tile, or ``finish`` is not among
                 ``finishes``.
             Unresolvable: Each core reads more streams, its own and the
-                finish's inputs, than a core tile has input channels.
+                finish's inputs, than a core tile has input channels, or a
+                finish input would stream into a block held out of order.
         """
         out = self.outputs[0] if len(self.outputs) == 1 else None
         # A subclass replacing array() does not apply what its base's output declares.
@@ -571,12 +577,18 @@ class Operator(metaclass=_OperatorMeta):
                 f"{type(self).__name__}: its cores finish no output, so it "
                 f"applies no finish"
             )
-        line = math.prod(out.tile_shape)
-        own = tuple(link.at_line(line, out.dtype, dev) for link in self.finish)
+        line = out.finish_line
+        ordered = out.member.finish_block is None
+        own = tuple(link.at_line(line, out.dtype, dev, ordered) for link in self.finish)
         chains: dict[tuple, tuple[Link, ...]] = {}
         for chain in self.finishes or (self.finish,):
-            at = tuple(link.at_line(line, out.dtype, dev) for link in chain)
+            at = tuple(link.at_line(line, out.dtype, dev, ordered) for link in chain)
             chains.setdefault(tuple(link.array_key() for link in at), at)
+        if not ordered and any(len(link.op.inputs) > 1 for link in own):
+            raise Unresolvable(
+                f"{type(self).__name__}: its cores hold each block of the output "
+                f"in an order of their own, which a finish input does not stream in"
+            )
         if tuple(link.array_key() for link in own) not in chains:
             raise ValueError(
                 f"{type(self).__name__}: its finish is not one its array applies"

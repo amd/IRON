@@ -106,6 +106,11 @@ def declare(cls: type) -> None:
             if m.tile is not None:
                 m.tile = m.tile.rewrite(cls)
                 m.tile.check(cls, m, "tile dimension", allow_tunable=True)
+            if m.finish_block is not None:
+                m.finish_block = m.finish_block.rewrite(cls)
+                m.finish_block.check(
+                    cls, m, "finish block dimension", allow_tunable=True
+                )
             if sum(isinstance(d, OptionalDim) for d in m.shape.dims) > 1:
                 raise TypeError(
                     f"{cls.__name__}.{m.name}: at most one OptionalDim() dimension, "
@@ -146,12 +151,14 @@ def declare(cls: type) -> None:
         for n in cls._auto_fields
         if fields[n].init and not fields[n].metadata[Tier].derived
     )
-    # The array tier: what a stream's tile, its dtype, its replication or
-    # its presence names, and what declares itself array=True.
+    # The array tier: what a stream's tile, a core's block of it, its dtype,
+    # its replication or its presence names, and what declares itself array=True.
     named: set[str] = set()
     for m in members:
         if isinstance(m, _Buffer) and m.tile is not None:
             named |= m.tile.names()
+            if m.finish_block is not None:
+                named |= m.finish_block.names()
             if m.per is not None:
                 named |= m.per.names()
             if isinstance(m.dtype, DimRef):

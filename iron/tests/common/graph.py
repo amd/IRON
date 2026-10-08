@@ -579,6 +579,46 @@ def test_a_fold_past_its_cores_input_channels_is_refused(npu2):
     assert folded(gemv, npu2) == (gemv, {})
 
 
+class _Bounded(iron.Graph):
+    def __init__(self, gemm, other_bounded=True):
+        self.w, self.gemm, self.other_bounded = z(256, 64), gemm, other_bounded
+
+    def body(self, x, y, *, n: Scratchpad[np.int32]):
+        if self.gemm:
+            return SiLU(GEMM(x[:n], self.w, b_col_maj=True))
+        other = y[:n] if self.other_bounded else y
+        return ElementwiseMul(SiLU(ReLU(x[:n], num_aie_columns=4)), other)
+
+
+def test_a_bounded_step_folds_under_its_producers_bound(npu2):
+    t = _Bounded(gemm=True).trace(x=(512, 64), y=(512, 256))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == ["SiLU into GEMM"]
+    (step,) = f.steps
+    assert step.op.bound_extents == {"valid": "n"}
+    assert [(b.op, b.member.name) for b in f.bindings] == [(step.op, "valid")]
+
+    t = _Bounded(gemm=False).trace(x=(512, 64), y=(512, 64))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == [
+        "SiLU into ReLU",
+        "SiLU, then ElementwiseMul into ReLU",
+    ]
+    (step,) = f.steps
+    fused = step.op.resolved(npu2)
+    assert {b.op for b in f.bindings} == {step.op}
+    # The product's other input streams under the relu's bound.
+    ((extent, _, _),) = (b.bounded for b in fused.finish_inputs)
+    assert extent.name == "valid"
+
+
+def test_a_fold_with_an_input_its_bound_does_not_reach_is_refused(npu2):
+    t = _Bounded(gemm=False, other_bounded=False).trace(x=(512, 64), y=(512, 64))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == ["SiLU into ReLU"]
+    assert {b.op for b in f.bindings} == {s.op for s in f.steps}
+
+
 class _Late(iron.Graph):
     def __init__(self, overwrite):
         self.st = iron.state((E,))
