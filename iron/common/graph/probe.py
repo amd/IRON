@@ -5,10 +5,14 @@
 
 A full-ELF run costs ``D0`` (dispatch), a configure per device entered
 (``base`` plus each member's load), the reset configure ``R`` when the
-entries are odd, and each step's ``t_step``.
+entries are odd, and each step's ``t_step``. An xclbin chain (a table's
+dispatch ``"separate"``) costs ``F`` per call, each step's ``c``, its own
+dispatch included, and the incoming design's load ``L`` at every switch,
+counted around the call: a chain of one design never switches.
 
 - ``measure_steps``: one run against ``repeats`` runs of a design gives
-  ``t_step`` and ``alone = D0 + base + load + R``. Any other setting of its
+  ``t_step`` and ``alone = D0 + base + load + R`` (on an xclbin chain ``c``
+  and ``F``). Any other setting of its
   tunables is a candidate only if its output is bit-identical to the
   default's, or ``judge`` finds it within the default's gate and its own.
   A design the ``CostCache`` holds is taken from it, not run.
@@ -17,9 +21,13 @@ entries are odd, and each step's ``t_step``.
 - ``calibrate``, on measured designs A, B: ``A B A B ...`` against
   ``A A ... B B ...`` gives ``(E(A) + E(B)) / 2``; the grouped run gives
   ``D0``, the ``alone`` figures ``R``, and ``[A, B]`` packed gives ``base`` as
-  ``E(A) + E(B) - E(pack)``.
+  ``E(A) + E(B) - E(pack)``. On an xclbin chain ``E`` is ``L``, the grouped
+  run gives ``F``, and there is no reset or pack.
+- ``measure_loads``, on an xclbin chain: ``[R, k]`` against ``[R]`` and
+  ``[k]`` gives ``L(R) + L(k)``, ``R`` a calibrated design.
 - ``measure_graph``: every design of the versions it is given, each in a
-  ``Call`` of its version.
+  ``Call`` of its version, then the calibrations, then on an xclbin chain
+  each design's load.
 - ``check_model``: a tuned version timed against the untuned one, each
   beside the model's prediction for it.
 
@@ -50,7 +58,7 @@ from ..design import OperatorDesign, device_symbol
 from ..image.callable import FullELFCallable, StepCallable
 from ..image.sequence import OperatorSequence
 from .compiled import CompiledGraph
-from .costcache import Accuracy, CostCache, Measurement
+from .costcache import Accuracy, CostCache, Measurement, Pairing
 from .fold import folded, replaced
 from .narrowing import (
     FIT_CACHE,
@@ -131,10 +139,12 @@ def _sample(dtype, nbytes: int, rng: np.random.Generator) -> np.ndarray:
 
 
 class Standalone:
-    """A runlist of operators built alone into a loaded full ELF, its inputs
+    """A runlist of operators built alone into a loaded image, its inputs
     seeded random data.
 
     Args:
+        dispatch: How the runlist is packaged (``narrowing.DISPATCHES``): one
+            full ELF, or an xclbin per design dispatched step by step.
         distinct: Every step runs on buffers of its own, as a graph's do, so
             no step finds its inputs in a SoC cache.
         values: Each per-call value by name: the tuner cannot know what a
@@ -152,6 +162,7 @@ class Standalone:
         seed: int = 0,
         distinct: bool = True,
         inputs: Mapping[str, np.ndarray] | None = None,
+        dispatch: str = "fused",
     ):
         self.steps = list(runlist)
         self._values = dict(values or {})
@@ -174,7 +185,7 @@ class Standalone:
             [(op, *self._names(self._slot[k], op)) for k, op in enumerate(self.steps)],
             in_names,
             out_names,
-            dispatch="fused",
+            dispatch=dispatch,
             share_designs=True,
             coresident=coresident,
         ).compile()
@@ -190,12 +201,15 @@ class Standalone:
                     if buf.direction.drains:
                         self._before[name_] = content.copy()
         ops = {id(op): op for op in self.steps}.values()
-        # An extent read only through its derivations has no word.
+        artifacts = self.sequence.artifacts
+        # An extent read only through its derivations has no word in a full
+        # ELF; an xclbin chain has no parameter table, its values dispatch-time.
         symbols = {
             device_symbol(op, v): np.int32(self._value(op, values, v))
             for op in ops
             for v in op.values
-            if device_symbol(op, v) in self.sequence.artifacts.parameters
+            if artifacts.kind == "xclbin"
+            or device_symbol(op, v) in artifacts.parameters
         }
         if symbols:
             self.callable.write_values(symbols)
@@ -459,8 +473,6 @@ def measure_steps(
         ValueError: `cache` is for another power mode than the NPU's, or
             a twin is not in `table`.
     """
-    if table.dispatch != "fused":
-        raise NotImplementedError(f"{table.path}: only a full ELF is measured")
     mode = pmode()
     if cache is not None and cache.mode != mode:
         raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
@@ -469,13 +481,16 @@ def measure_steps(
         if t is not None and t.key not in table.steps:
             raise ValueError(f"twin {t.key} is not in the table")
     entries = [
-        None if cache is None else cache.key(v.resolved, values, inputs) for v in found
+        None if cache is None else cache.key(v.resolved, values, inputs, table.dispatch)
+        for v in found
     ]
     besides = [
         (
             None
             if cache is None or t is None
-            else cache.beside_key(cache.key(t.resolved, values, inputs), e)
+            else cache.beside_key(
+                cache.key(t.resolved, values, inputs, table.dispatch), e
+            )
         )
         for t, e in zip(twins, entries)
     ]
@@ -510,7 +525,11 @@ def measure_steps(
                 continue
             try:
                 one = Standalone(
-                    f"probe1_{d.key}", [d.op], values=values, inputs=inputs
+                    f"probe1_{d.key}",
+                    [d.op],
+                    values=values,
+                    inputs=inputs,
+                    dispatch=table.dispatch,
                 )
                 many = Standalone(
                     f"probe{repeats}_{d.key}",
@@ -518,6 +537,7 @@ def measure_steps(
                     values=values,
                     distinct=distinct,
                     inputs=inputs,
+                    dispatch=table.dispatch,
                 )
             except RuntimeError as e:
                 # The placer passed it, but the build did not. The default
@@ -576,7 +596,13 @@ def measure_steps(
         key = None if cache is None else cache.judged_key(entries[0], entry)
         verdict = None if key is None or remeasure else cache.get(key, Accuracy)
         if verdict is None:
-            run = Standalone(f"judge_{v.key}", [v.op], values=values, inputs=inputs)
+            run = Standalone(
+                f"judge_{v.key}",
+                [v.op],
+                values=values,
+                inputs=inputs,
+                dispatch=table.dispatch,
+            )
             run.digest()
             verdict = judge(
                 default.op, v.op, run.inputs(), run.written(), values
@@ -691,30 +717,47 @@ def calibrate(
     pairs: int = 4,
     values: Mapping[str, int] | None = None,
 ) -> Calibration:
-    """Split a configure's cost over measured designs ``a`` and ``b`` into ``table``."""
-    if table.dispatch != "fused":
-        raise NotImplementedError(f"{table.path}: only a full ELF is calibrated")
+    """Split a configure's cost over measured designs ``a`` and ``b`` into
+    ``table``: on an xclbin chain, the mean of their loads and the dispatch,
+    which the runs of one design alone give with the grouped run.
+    """
     ka, kb = cost_key(a), cost_key(b)
     ta, tb = table.steps[ka].t_step_us, table.steps[kb].t_step_us
     tag = f"{ka}_{kb}"
+    fused = table.dispatch == "fused"
+    runlists = {
+        f"alt{pairs}": [a, b] * pairs,
+        f"grp{pairs}": [a] * pairs + [b] * pairs,
+        "a": [a],
+        "b": [b],
+    }
+    if fused:
+        runlists["pack"] = [a, b]
     runs = [
-        Standalone(f"cal_alt{pairs}_{tag}", [a, b] * pairs, values=values),
-        Standalone(f"cal_grp{pairs}_{tag}", [a] * pairs + [b] * pairs, values=values),
-        Standalone(f"cal_pack_{tag}", [a, b], coresident=[[a, b]], values=values),
-        Standalone(f"cal_a_{tag}", [a], values=values),
-        Standalone(f"cal_b_{tag}", [b], values=values),
+        Standalone(
+            f"cal_{name}_{tag}",
+            runlist,
+            coresident=[[a, b]] if name == "pack" else (),
+            values=values,
+            dispatch=table.dispatch,
+        )
+        for name, runlist in runlists.items()
     ]
-    alt, grp, pack, alone_a, alone_b = (
-        t.us for t in time_interleaved([r.callable for r in runs], timing)
-    )
+    times = [t.us for t in time_interleaved([r.callable for r in runs], timing)]
+    alt, grp, alone_a, alone_b = times[:4]
     switch = (alt - grp) / (2 * pairs - 2)  # (E(a) + E(b)) / 2
-    dispatch = grp - pairs * (ta + tb) - 2 * switch
-    reset = ((alone_a - ta) + (alone_b - tb) - 2 * switch) / 2 - dispatch
-    entry_pack = pack - ta - tb - reset - dispatch
+    reset = base = 0.0
+    if fused:
+        dispatch = grp - pairs * (ta + tb) - 2 * switch
+        reset = ((alone_a - ta) + (alone_b - tb) - 2 * switch) / 2 - dispatch
+        base = 2 * switch - (times[4] - ta - tb - reset - dispatch)
+    else:
+        # alone = F + c: the step times of this batch, not of the table's.
+        dispatch = (pairs * (alone_a + alone_b) + 2 * switch - grp) / (2 * pairs - 1)
     cal = Calibration(
         dispatch_us=dispatch,
         reset_us=reset,
-        base_us=2 * switch - entry_pack,
+        base_us=base,
         switch_us=switch,
         pmode=pmode(),
         rounds=timing.rounds,
@@ -723,6 +766,113 @@ def calibrate(
     )
     table.record_calibration((ka, kb), cal)
     return cal
+
+
+def measure_loads(
+    table: CostTable,
+    found: Sequence[Variant],
+    reference: Variant,
+    timing: Timing = Timing(),
+    values: Mapping[str, int] | None = None,
+    inputs: Mapping[str, np.ndarray] | None = None,
+    cache: CostCache | None = None,
+    remeasure: bool = False,
+) -> list[str]:
+    """Measure into an xclbin chain's ``table`` the load of each setting in
+    ``found`` beside ``reference``: ``[reference, k]`` timed with
+    ``[reference]`` and ``[k]`` gives ``L(reference) + L(k) - F``, and
+    ``k``'s ``alone`` is ``F``.
+
+    Args:
+        reference: A design the table's calibrations solve the load of, run
+            with random inputs at no per-call value.
+        values: The per-call values `found` is run at.
+        inputs: What `found`'s input buffers hold, by buffer name.
+        cache: Loads it holds are taken from it rather than run, unless
+            `remeasure`; those run are written to it.
+
+    Returns:
+        The settings run on the device, each ``"reference>key"``.
+
+    Raises:
+        ValueError: `table` prices a full ELF, a design is not in it, an
+            input is named as one of `reference`'s buffers, or `cache` is
+            for another power mode than the NPU's.
+    """
+    if table.dispatch != "separate":
+        raise ValueError(f"{table.path} prices a full ELF: no design loads alone")
+    for v in [reference, *found]:
+        if v.key not in table.steps:
+            raise ValueError(f"{v.key} is not in the table")
+    shared = (inputs or {}).keys() & {b.name for b in reference.op.buffers}
+    if shared:
+        raise ValueError(f"inputs {sorted(shared)} would fill the reference's buffers")
+    mode = pmode()
+    if cache is not None and cache.mode != mode:
+        raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
+    entries = [None] * len(found)
+    if cache is not None:
+        after = cache.key(reference.resolved, dispatch=table.dispatch)
+        entries = [
+            cache.paired_key(
+                after, cache.key(v.resolved, values, inputs, table.dispatch)
+            )
+            for v in found
+        ]
+    paired: dict[str, Pairing] = {}
+    if cache is not None and not remeasure:
+        for v, entry in zip(found, entries):
+            held = cache.get(entry, Pairing)
+            if held is not None:
+                paired[v.key] = held
+    todo = [(v, e) for v, e in zip(found, entries) if v.key not in paired]
+    ran = []
+    # The reference, then each setting alone and after it: three contexts each.
+    size = (CONTEXTS - 1) // 3
+    for begin in range(0, len(todo), size):
+        batch = todo[begin : begin + size]
+        runs = [
+            Standalone(f"load_{reference.key}", [reference.op], dispatch=table.dispatch)
+        ]
+        for v, _ in batch:
+            for name, runlist in (
+                (f"load_{v.key}", [v.op]),
+                (f"load_{reference.key}_{v.key}", [reference.op, v.op]),
+            ):
+                runs.append(
+                    Standalone(
+                        name,
+                        runlist,
+                        values=values,
+                        inputs=inputs,
+                        dispatch=table.dispatch,
+                    )
+                )
+        times = time_interleaved([r.callable for r in runs], timing)
+        for i, (v, entry) in enumerate(batch):
+            one, pair = times[1 + 2 * i], times[2 + 2 * i]
+            paired[v.key] = Pairing(
+                pair_us=pair.us - times[0].us - one.us + table.steps[v.key].alone_us,
+                pmode=mode,
+                rounds=pair.rounds,
+                calls=timing.calls,
+                measured=CostTable.today(),
+            )
+            if cache is not None:
+                cache.put(entry, paired[v.key])
+            ran.append(f"{reference.key}>{v.key}")
+        # A probe holds its context while it lives; the next batch needs them.
+        del runs
+    for v in found:
+        table.record_step(
+            v.key,
+            dataclasses.replace(
+                table.steps[v.key],
+                beside=reference.key,
+                pair_us=paired[v.key].pair_us,
+            ),
+        )
+    return ran
 
 
 @dataclasses.dataclass(frozen=True)
@@ -869,20 +1019,45 @@ class Designs:
             by_class.setdefault(type(op).__name__, narrowest)
         return [(by_class[a], by_class[b]) for a, b in pairs]
 
+    def unloaded(
+        self, table: CostTable, chosen: Sequence[tuple[Variant, Variant]]
+    ) -> list[Variant]:
+        """The measured settings of an xclbin chain's ``table`` whose load
+        ``measure_loads`` would run beside the first of the ``chosen``
+        calibrated designs, which are solved by their calibrations.
+        """
+        if table.dispatch != "separate" or not chosen:
+            return []
+        reference = chosen[0][0]
+        solved = {v.key for pair in chosen for v in pair}
+        return [
+            v
+            for vs in self.settings.values()
+            for v in vs
+            if v.key in table.steps
+            and v.key not in solved
+            and table.steps[v.key].beside != reference.key
+        ]
+
     def missing(self, table: CostTable, pairs: Sequence[tuple[str, str]]) -> list[str]:
         """What ``measure_graph`` would run for ``table``, in its return's
         terms: the ``unmeasured`` settings, else the calibrations of
         ``pairs`` the table lacks (``"a|b"``), which are between measured
-        designs.
+        designs, else on an xclbin chain the ``unloaded`` settings
+        (``"reference>key"``).
         """
         designs = self.unmeasured(table)
         if designs:
             return designs
-        return [
+        chosen = self.calibrated(table, pairs)
+        calibrations = [
             f"{a.key}|{b.key}"
-            for a, b in self.calibrated(table, pairs)
+            for a, b in chosen
             if f"{a.key}|{b.key}" not in table.calibrations
         ]
+        if calibrations:
+            return calibrations
+        return [f"{chosen[0][0].key}>{v.key}" for v in self.unloaded(table, chosen)]
 
 
 def measure_graph(
@@ -899,7 +1074,8 @@ def measure_graph(
     goes: each at the settings ``variants`` gives that ``search`` runs, in
     the first call that runs it, then the configure cost between each of
     ``pairs``, the first designs of those operator classes at their
-    narrowest measured width. Designs and
+    narrowest measured width, and on an xclbin chain each other setting's
+    load beside the first of those (``measure_loads``). Designs, loads and
     calibrations already in the table or ``cache`` (this NPU's
     ``cost_cache()`` if not given) are kept unless ``remeasure``; those the
     graphs no longer have are dropped from the table. A design a folded
@@ -908,7 +1084,8 @@ def measure_graph(
     (``measure_steps``' `twins`); the call it is folded from comes first.
 
     Returns:
-        The design keys and calibration pairs (``"a|b"``) run on the device.
+        The design keys, calibration pairs (``"a|b"``) and loads
+        (``"reference>key"``) run on the device.
     """
     dev = aie_utils.ensure_current_device()
     table.measures(dev)
@@ -977,7 +1154,10 @@ def measure_graph(
         if not remeasure and pair in table.calibrations:
             log(f"calibration {name_a}/{name_b}: in the table")
             continue
-        entry = cache.pair_key(cache.key(a.resolved), cache.key(b.resolved))
+        entry = cache.pair_key(
+            cache.key(a.resolved, dispatch=table.dispatch),
+            cache.key(b.resolved, dispatch=table.dispatch),
+        )
         cal = None if remeasure else cache.get(entry, Calibration)
         if cal is None:
             cal = calibrate(table, a.op, b.op, timing)
@@ -991,5 +1171,34 @@ def measure_graph(
             f"R {cal.reset_us:.1f}  base {cal.base_us:.1f}  "
             f"switch {cal.switch_us:.1f} us" + ("" if pair in ran else "  (cached)")
         )
+
+    if table.dispatch == "separate" and not chosen:
+        log("no calibration pairs: no design's load is measured")
+    # Every step measured again was recorded afresh, with no load.
+    unloaded = {v.key for v in designs.unloaded(table, chosen)}
+    for key, (op, call) in designs.first.items():
+        settings = [v for v in found[key] if v.key in unloaded]
+        if not settings:
+            continue
+        reference = chosen[0][0]
+        loaded = measure_loads(
+            table,
+            settings,
+            reference,
+            timing,
+            call.op_values(op),
+            call.op_inputs(op),
+            cache,
+            remeasure,
+        )
+        ran += loaded
+        table.save()
+        log(f"loads of {type(op).__name__} beside {reference.key}:")
+        for v in settings:
+            c = table.steps[v.key]
+            log(
+                f"    {dict(v.tunables)}: L + L(reference) {c.pair_us:8.2f} us"
+                + ("" if f"{reference.key}>{v.key}" in loaded else "  (cached)")
+            )
     table.save()
     return ran

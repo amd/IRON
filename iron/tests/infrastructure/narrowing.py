@@ -48,6 +48,7 @@ from iron.operators import (
     GEMM,
     GEMV,
     MHA,
+    Copy,
     ElementwiseAdd,
     ElementwiseMul,
     SiLU,
@@ -87,6 +88,13 @@ class Masked(iron.Graph):
 
     def body(self, x, *, n: Scratchpad[np.int32]):
         return Softmax(x[:, :n])
+
+
+class Gather(iron.Graph):
+    """Row `pos` of `rows`, gathered and added to `x`."""
+
+    def body(self, x, rows, *, pos: Scratchpad[np.int32]):
+        return ElementwiseAdd(x, Copy(rows[pos]), tile_size=TILE)
 
 
 class Attend(iron.Graph):
@@ -439,3 +447,75 @@ def test_a_graph_sharing_measured_designs_measures_nothing(tmp_path):
     assert ran == []
     assert table.steps and table.steps.items() <= chain.steps.items()
     assert table.calibrations == chain.calibrations
+
+
+@pytest.mark.supported_devices("npu2")
+def test_an_xclbin_chain_is_measured_and_tuned_by_its_own_model(tmp_path):
+    # Strix Halo: a 1-column add loads in ~84 us, an 8-column one in ~626 us.
+    report = platform()
+    cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    table = CostTable(tmp_path / "costs.json", "npu2", "separate")
+    shapes = dict(a=(SIZE,), b=(SIZE,))
+    timing = Timing(rounds=4, calls=20)
+    triangle = [
+        ("ElementwiseAdd", "ElementwiseMul"),
+        ("ElementwiseAdd", "SiLU"),
+        ("SiLU", "ElementwiseMul"),
+    ]
+    traced = Chain().trace(**shapes)
+    dev = aie_utils.ensure_current_device()
+    measure_graph(table, [Call(traced)], triangle, timing, cache=cache)
+
+    assert len(table.calibrations) == 3
+    assert all(
+        c.reset_us == c.base_us == 0 and c.switch_us > 0
+        for c in table.calibrations.values()
+    )
+    [(reference, _), *_] = [k.split("|") for k in table.calibrations]
+    solved = {k for pair in table.calibrations for k in pair.split("|")}
+    loaded = [k for k in table.steps if k not in solved]
+    assert loaded and all(table.steps[k].beside == reference for k in loaded)
+    add = variants(traced.steps[0].op, dev)
+    narrow, wide = (min(add, key=lambda v: v.mm2s), max(add, key=lambda v: v.mm2s))
+    assert table.load(wide.key) > 2 * table.load(narrow.key) > 0
+    again = CostTable(tmp_path / "again.json", "npu2", "separate")
+    assert measure_graph(again, [Call(traced)], triangle, timing, cache=cache) == []
+    assert again.steps == table.steps
+
+    tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
+    tuned = Chain().compile(boundaries=iron.each_step, coresident=tuner, **shapes)
+    untuned = Chain().compile(boundaries=iron.each_step, **shapes)
+    assert tuned.tuning.groups == () and tuned.tuning.configures == 5
+    rng = np.random.default_rng(0)
+    tensors = [(rng.random(SIZE) * 4 - 2).astype(bfloat16) for _ in range(2)]
+    want = np.array(untuned(*tensors).numpy()[:SIZE])
+    got = np.array(tuned(*tensors).numpy()[:SIZE])
+    check = check_model(tuned, untuned, tensors, timing=timing)
+    del tuned, untuned
+    assert want.view(np.uint16).tolist() == got.view(np.uint16).tolist()
+    # Each dispatch's host cost is bimodal by ~12% over minutes; the gain is not.
+    assert check.baseline_us - check.predicted_us == pytest.approx(
+        check.baseline_measured_us - check.measured_us, rel=0.1
+    ), check.report()
+
+
+@pytest.mark.supported_devices("npu2")
+def test_an_xclbin_chain_measures_a_design_its_call_gives_values(tmp_path):
+    # An xclbin has no parameter table: its per-call values are dispatch-time.
+    shapes = dict(x=(2048,), rows=(16, 2048))
+    traced = Gather().trace(**shapes)
+    table = CostTable(tmp_path / "costs.json", "npu2", "separate")
+    measure_graph(table, [Call(traced, dict(pos=5))], [], Timing(rounds=2, calls=10))
+    keys = {cost_key(s.op) for s in traced.steps}
+    assert keys <= table.steps.keys()
+    assert all(c.exact for c in table.steps.values())
+
+    version = Gather().compile(boundaries=iron.each_step, **shapes)
+    rng = np.random.default_rng(0)
+    x = (rng.random(2048) * 4 - 2).astype(bfloat16)
+    rows = (rng.random((16, 2048)) * 4 - 2).astype(bfloat16)
+    for pos in (5, 11):
+        got = np.array(version(x, rows, pos=pos).numpy()[:2048])
+        want = (x.astype(np.float32) + rows[pos].astype(np.float32)).astype(bfloat16)
+        assert got.view(np.uint16).tolist() == want.view(np.uint16).tolist(), pos
+    del version

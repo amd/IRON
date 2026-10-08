@@ -9,11 +9,12 @@ measured on an NPU, one JSON file each under
 graphs (or two versions of one) share is measured once. An entry is keyed
 on what its time follows: the design's build (its recipe and the sources,
 tools and device it is compiled with, as mlir-aie's compile cache keys it),
-the per-call values it was run at and the contents of the inputs it was
-given. Editing how a design is generated therefore misses rather than
+the per-call values it was run at, the contents of the inputs it was
+given and, for an xclbin chain, the packaging it was run under. Editing how a design is generated therefore misses rather than
 reusing a stale time. A configure calibration is kept the same way, keyed
 on its pair's entries, and so are the twin a design was measured beside and
-the verdict on a width judged against its default. Reference and tolerance
+the verdict on a width judged against its default, and on an xclbin chain the
+loads of a design run after its table's reference design. Reference and tolerance
 code is in no key: after editing one, measure again with ``remeasure``.
 """
 
@@ -75,6 +76,21 @@ class Measurement:
 
 
 @dataclasses.dataclass(frozen=True)
+class Pairing:
+    """An xclbin chain of a reference design and another, as the cache holds it.
+
+    Attributes:
+        pair_us: The two designs' loads, the reference's and the other's.
+    """
+
+    pair_us: float
+    pmode: str
+    rounds: int
+    calls: int
+    measured: str  # ISO date
+
+
+@dataclasses.dataclass(frozen=True)
 class Accuracy:
     """A width whose output is not its default's, judged against its
     reference by the default's gate and its own.
@@ -88,7 +104,7 @@ class Accuracy:
     measured: str  # ISO date
 
 
-Record = TypeVar("Record", Measurement, Calibration, Accuracy)
+Record = TypeVar("Record", Measurement, Calibration, Accuracy, Pairing)
 
 
 class CostCache:
@@ -116,26 +132,27 @@ class CostCache:
         op: Operator,
         values: Mapping[str, int] | None = None,
         inputs: Mapping[str, np.ndarray] | None = None,
+        dispatch: str = "fused",
     ) -> str:
         """The entry ``op`` is measured into, resolved for the current
-        device and run at ``values`` on ``inputs`` (random where not given).
+        device and run at ``values`` on ``inputs`` (random where not given),
+        packaged as ``dispatch`` says (``narrowing.DISPATCHES``).
         """
         design = OperatorDesign(op.resolved()).compilable()
         given = sorted(
             (name, hashlib.sha256(np.ascontiguousarray(a).tobytes()).hexdigest())
             for name, a in (inputs or {}).items()
         )
-        h = hashlib.sha256(
-            repr(
-                (
-                    design.recipe_hash,
-                    design.artifact_hash,
-                    sorted((values or {}).items()),
-                    given,
-                )
-            ).encode()
+        key = (
+            design.recipe_hash,
+            design.artifact_hash,
+            sorted((values or {}).items()),
+            given,
         )
-        return h.hexdigest()[:32]
+        # A full ELF keeps the key its cached entries were measured under.
+        if dispatch != "fused":
+            key += (dispatch,)
+        return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
 
     @staticmethod
     def pair_key(a: str, b: str) -> str:
@@ -148,6 +165,15 @@ class CostCache:
         the one at ``entry``.
         """
         return hashlib.sha256(repr(("beside", twin, entry)).encode()).hexdigest()[:32]
+
+    @staticmethod
+    def paired_key(reference: str, entry: str) -> str:
+        """The entry the loads of the design at ``entry`` are kept in, as
+        run after the one at ``reference``.
+        """
+        return hashlib.sha256(repr(("paired", reference, entry)).encode()).hexdigest()[
+            :32
+        ]
 
     @staticmethod
     def judged_key(default: str, entry: str) -> str:
@@ -164,7 +190,9 @@ class CostCache:
             return None
         return kind(**json.loads(path.read_text()))
 
-    def put(self, key: str, record: Measurement | Calibration | Accuracy) -> None:
+    def put(
+        self, key: str, record: Measurement | Calibration | Accuracy | Pairing
+    ) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / f"{key}.json"
         partial = path.with_suffix(f".{os.getpid()}")
