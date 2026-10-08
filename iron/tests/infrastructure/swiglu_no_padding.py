@@ -11,7 +11,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 from iron.lm.layers import SwiGLU
-from iron.operators.gemm import GEMM
+from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -33,7 +33,7 @@ def test_non_aligned_row_count_raises_instead_of_being_padded():
 
 def test_aligned_row_count_traces_with_the_given_extents():
     t = _trace(rows=512)
-    gemms = [s.op for s in t.steps if type(s.op) is GEMM]
+    gemms = [s.op for s in t.steps if type(s.op) is FLMGEMM]
     assert [(g.M, g.K, g.N) for g in gemms] == [
         (512, 2048, 2048),
         (512, 2048, 2048),

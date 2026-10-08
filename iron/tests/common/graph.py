@@ -429,7 +429,7 @@ def test_two_spellings_of_one_array_are_one_design():
 def test_swiglu_over_a_sequence_reads_the_weights_column_major():
 
     t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(256, E))
-    gemms = [s.op for s in t.steps if type(s.op) is GEMM]
+    gemms = [s.op for s in t.steps if type(s.op) is FLMGEMM]
     assert [(g.M, g.K, g.N) for g in gemms] == [(256, E, H), (256, E, H), (256, H, E)]
     assert all(g.b_col_maj for g in gemms)
     assert gemms[0].array_key() == gemms[1].array_key()
@@ -523,7 +523,7 @@ def test_llama_prompt_traces_over_the_same_caches():
     assert set(t.weights) == set(token.weights)
     # Every projection reads the (out, in) checkpoint layout through the
     # column-major flag, which the trace carries into shape inference.
-    gemms = [op for op, *_ in t.runlist if type(op).__name__ == "GEMM"]
+    gemms = [op for op, *_ in t.runlist if type(op) is FLMGEMM]
     assert all(op.b_col_maj for op in gemms)
     K = {op.K for op in gemms}
     assert K == {cfg.emb_dim, cfg.hidden_dim, cfg.n_heads * cfg.head_dim}
@@ -531,7 +531,9 @@ def test_llama_prompt_traces_over_the_same_caches():
         op.resolved(aie_utils.get_current_device())
 
 
-def test_llama_prompt_projects_with_flm_gemm_on_aie2(npu1):
+@pytest.mark.parametrize("device", ["npu1", "npu2"])
+def test_llama_prompt_projects_with_flm_gemm(device, request):
+    dev = request.getfixturevalue(device)
     g = llama_1b(n_layers=1)
     t = g.trace(**g.shapes(g.config.prefill_chunk))
     ops = [op for op, *_ in t.runlist]
@@ -541,7 +543,8 @@ def test_llama_prompt_projects_with_flm_gemm_on_aie2(npu1):
     for op in gemms:
         assert op.b_col_maj and op.epilogue_modes == (Epilogue.NONE,)
         assert op.bound_values == {"valid": "rows"}
-        assert op.resolved(npu1).B.shape == (op.N, op.K)
+        resolved = op.resolved(dev)
+        assert resolved.B.shape == (op.N, op.K) and not resolved.bfp16_b
 
 
 @pytest.mark.parametrize("step", ["decode", "prompt"])
@@ -559,7 +562,7 @@ def test_llama_does_not_grow_with_the_context(step):
         rows = 1 if step == "decode" else g.config.prefill_chunk
         return g.trace(**g.shapes(rows))
 
-    short, long = trace(64), trace(256)
+    short, long = trace(256), trace(1024)
     assert short.input_args == long.input_args == ([] if step == "decode" else ["x"])
     grown = {name for name, n in long.pinned.items() if short.pinned[name] != n}
     caches = {"keys.0", "keys.1", "values.0", "values.1"}

@@ -12,12 +12,8 @@
   {"operator": "GEMV", "M": 2048, "K": 8192, "num_batches": 1, "tile_size_input": 1, "tile_size_output": 256},
   {"operator": "GEMV", "M": 128256, "K": 2048, "num_batches": 1, "tile_size_input": 4, "tile_size_output": 32},
   {"operator": "RMSNorm", "weighted": true, "rows": 2048, "tile_size": 2048, "num_aie_columns": 8},
-  {"operator": "GEMM", "M": 2048, "K": 2048, "N": 2048, "tile_m": 64},
-  {"operator": "GEMM", "M": 2048, "K": 2048, "N": 512, "tile_m": 64},
   {"operator": "MHA", "num_heads": 32, "num_KV_heads": 8, "d": 64, "seq_pad": 2048, "num_pipelines": 8},
   {"operator": "ElementwiseAdd", "size": 4194304, "tile_size": 2048},
-  {"operator": "GEMM", "M": 2048, "K": 2048, "N": 8192, "tile_m": 64},
   {"operator": "SiLU", "size": 16777216, "tile_size": 4096},
-  {"operator": "ElementwiseMul", "size": 16777216, "tile_size": 4096},
-  {"operator": "GEMM", "M": 2048, "K": 8192, "N": 2048, "tile_m": 64}
+  {"operator": "ElementwiseMul", "size": 16777216, "tile_size": 4096}
 ]}

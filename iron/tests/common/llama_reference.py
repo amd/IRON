@@ -87,7 +87,8 @@ def cpu():
     config = SMALL
     weights = random_weights(layout(config), config.n_layers)
     oracle = Llama.oracle(config, weights)
-    prompt = np.random.default_rng(1).integers(0, config.vocab_size, 8)
+    # No greedy step of this prompt has a top-2 gap within bf16's resolution.
+    prompt = np.random.default_rng(7).integers(0, config.vocab_size, 8)
     tokens, expected = prompt, []
     first = logits = oracle.logits(tokens)
     for _ in range(6):

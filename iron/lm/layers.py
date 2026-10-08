@@ -11,35 +11,27 @@ own, holding the weights, so they are uploaded once.
 The weights are a checkpoint's ``(out, in)``: SwiGLU's ``w_gate`` and
 ``w_up`` are ``(hidden_dim, embedding_dim)`` and ``w_down`` is
 ``(embedding_dim, hidden_dim)``. One row projects with GEMV, more with
-a GEMM reading the weight as stored: flm.GEMM on AIE2, whose B is bf16
-there, and IRON's GEMM elsewhere. The gate and up projections share one
-array and one build. Nothing is padded: a row count the GEMM cannot tile
+flm.GEMM reading the weight as stored. The gate and up projections share
+one array and one build. Nothing is padded: a row count the GEMM cannot tile
 is an error at trace time.
 """
-
-import aie.utils as aie_utils
-from aie.dialects.aie import AIEArch
 
 import iron
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
-from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
 
 
 def project(x, weight, **gemv):
     """``x @ weight.T`` for a checkpoint's ``(out, in)`` weight: a GEMV for
-    one row (a GEMV's output is a vector), else a GEMM reading it
+    one row (a GEMV's output is a vector), else flm.GEMM reading it
     column-major. ``gemv`` are the GEMV's tunables, where the profile cannot
     tell it from another of its shape.
     """
     if len(x.shape) == 2 and x.shape[0] > 1:
-        dev = aie_utils.ensure_current_device()
-        if dev is not None and dev.arch == AIEArch.AIE2:
-            return FLMGEMM(x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,))
-        return GEMM(x, weight, b_col_maj=True)
+        return FLMGEMM(x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,))
     return GEMV(weight, x, **gemv)
 
 
