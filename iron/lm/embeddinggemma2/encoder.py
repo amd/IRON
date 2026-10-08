@@ -87,8 +87,8 @@ class Encoder:
         self, text: str, task: str, dims: int = 768, audio=None, image=None
     ) -> np.ndarray:
         """The embedding of `text` for `task`, its first `dims` renormalized,
-        with one mono clip `audio` at 16 kHz and one image's `image`
-        `(pixel_values, positions)` at their placeholders.
+        with one mono clip `audio` at 16 kHz and one decoded image `image`,
+        `(height, width, 3)` uint8, at their placeholders.
         """
         if audio is None and image is None:
             return self.graph.encode(self.tokens(text, task), dims)
@@ -98,8 +98,10 @@ class Encoder:
             audio_tokens = c.tokens(c.frames(np.asarray(audio).size))
         image_tokens = 0
         if image is not None:
-            real = (np.asarray(image[1]) >= 0).all(axis=-1).sum()
-            image_tokens = int(real) // vision_model.VISION.pool**2
+            V = vision_model.VISION
+            height, width = np.shape(image)[:2]
+            out_height, out_width = vision_model.size(height, width, V.image_tokens, V)
+            image_tokens = out_height * out_width // (V.pool * V.patch) ** 2
         tokens = self.tokens(text, task, audio_tokens, image_tokens)
         return self.graph.encode(tokens, dims, audio, image)
 

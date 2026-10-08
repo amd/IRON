@@ -147,9 +147,9 @@ def picture(height: int, width: int) -> np.ndarray:
     return np.clip(image + rng.normal(0, 12, image.shape), 0, 255).astype(np.uint8)
 
 
-# 50 soft tokens, and 6 x 9 of an image's 280.
+# 50 soft tokens, and an image the processor upscales to 13 x 20 of its 280.
 CLIP = chirp(2.0)
-IMAGE = patches(picture(288, 432), VISION.image_tokens, VISION)
+IMAGE = picture(288, 432)
 
 
 @pytest.fixture(scope="module")
@@ -176,7 +176,9 @@ def test_embeddinggemma_2_multimodal(multimodal, text, audio, image, record_prop
     if audio is not None:
         soft[c.audio_token] = audio_oracle(*LogMel(AUDIO)(audio))
     if image is not None:
-        soft[c.image_token] = vision_oracle(*image)
+        soft[c.image_token] = vision_oracle(
+            *patches(image, VISION.image_tokens, VISION)
+        )
     tokens = multimodal.tokens(
         text,
         "query",

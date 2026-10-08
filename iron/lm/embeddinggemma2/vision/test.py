@@ -4,7 +4,8 @@
 
 """EmbeddingGemma 2's vision tower on the NPU, from the real checkpoint,
 against its float32 oracle, and the oracle once against Hugging Face's;
-the image processor's resize against Hugging Face's.
+the image processor on the host against Hugging Face's, and on the NPU bit
+for bit against the host's.
 """
 
 import time
@@ -12,15 +13,22 @@ import time
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from ml_dtypes import bfloat16
 
+import iron
+from iron.common import Scratchpad
 from iron.common.graph.narrowing import CostTable, JointNarrowing
 from iron.lm import Checkpoint, load_weights
 from iron.lm.embeddinggemma2.model import COSTS
-from iron.lm.embeddinggemma2.vision.model import VISION, Vision, layout, vision_tensors
+from iron.lm.embeddinggemma2.vision.model import (
+    VISION,
+    ImageProcessor,
+    Vision,
+    layout,
+    vision_tensors,
+)
 from iron.lm.embeddinggemma2.vision.oracle import VisionOracle, patches
-from iron.lm.embeddinggemma2.vision.resize import size
 from iron.lm.testing import requires, weights_dir
-from iron.operators.resample.reference import resize
 
 DIRECTORY = weights_dir("embeddinggemma-2")
 
@@ -32,14 +40,13 @@ weighted = requires(DIRECTORY / "model.safetensors")
 MIN_COSINE = 0.96
 MAX_ERROR = 0.05
 
-# (height, width) in pixels, at the size the processor's resize picks, and
-# its soft-token budget.
+# (height, width) of a decoded image, and its soft-token budget.
 IMAGES = {
-    # 14 x 20 tokens: the whole image budget, 2520 patches.
+    # 14 x 20 tokens at its own size: the whole image budget, 2520 patches.
     "image": ((672, 960), VISION.image_tokens),
-    # 20 x 12 tokens, 2160 patches: the processor pads 360 of them.
+    # Resized to 21 x 12 tokens, 2268 patches: the processor pads 252 of them.
     "portrait": ((960, 576), VISION.image_tokens),
-    # 10 x 14 tokens: a video frame's budget, 1260 patches.
+    # 10 x 14 tokens at its own size: a video frame's budget, 1260 patches.
     "video_frame": ((480, 672), VISION.video_tokens),
 }
 
@@ -81,6 +88,56 @@ def processed(name: str):
     return patches(synthetic_image(height, width), tokens, VISION)
 
 
+class Processor(iron.Graph):
+    """The image processor alone, its outputs the tower's inputs."""
+
+    def __init__(self):
+        self.processor = ImageProcessor(VISION)
+
+    def body(
+        self,
+        rgb,
+        *,
+        height: Scratchpad[np.int32],
+        width: Scratchpad[np.int32],
+        out_height: Scratchpad[np.int32],
+        out_width: Scratchpad[np.int32],
+    ):
+        return self.processor(rgb, height, width, out_height, out_width)
+
+
+def processor_reference(image, tokens: int, T: int):
+    """The `(pixels, xy, position_ids)` `ImageProcessor` gives in `T` rows:
+    the host's patches in pooling-window order, then the padding, which
+    looks up each table's last row.
+    """
+    c, P = VISION, VISION.positions
+    values, positions = patches(image, tokens, c)
+    real = np.flatnonzero((positions >= 0).all(axis=-1))
+    x, y = positions[real].T
+    token = x // c.pool + (x.max() + 1) // c.pool * (y // c.pool)
+    order = real[np.lexsort((x % c.pool, y % c.pool, token))]
+    n = order.size
+    x, y = positions[order].T
+    pixels = np.zeros((T, 3 * c.patch**2), bfloat16)
+    pixels[:n] = values[order]
+    xy = np.full(2 * T, P, np.int32)
+    xy.reshape(T, 2)[:n] = np.stack([x, y], axis=-1)
+    position_ids = np.full(2 * T, 2 * P, np.int32)
+    position_ids[:n], position_ids[T : T + n] = x, P + y
+    return pixels, xy, position_ids
+
+
+@pytest.fixture(scope="module")
+def processor():
+    graph = Processor()
+    for T in graph.processor.resample:
+        graph.compile(**graph.processor.shapes(T))
+    yield graph
+    if aie_utils.DefaultNPURuntime is not None:
+        aie_utils.DefaultNPURuntime.cleanup()
+
+
 @pytest.fixture(scope="module")
 def weights():
     tensors = vision_tensors(Checkpoint(DIRECTORY / "model.safetensors").tensors)
@@ -112,11 +169,62 @@ def test_resize_matches_hugging_face(shape, tokens):
         max_soft_tokens=tokens,
         return_tensors="pt",
     )
-    values, positions = patches(
-        resize(image, *size(*shape, tokens, VISION)), tokens, VISION
-    )
+    values, positions = patches(image, tokens, VISION)
     np.testing.assert_array_equal(values, want["pixel_values"][0].numpy())
     np.testing.assert_array_equal(positions, want["image_position_ids"][0].numpy())
+
+
+# Within the versions: up- and downscales, both ways up, the widest and
+# tallest, a 4K photo and the largest image a version takes.
+PROCESSED = [
+    *IMAGES.values(),
+    ((3024, 4032), VISION.image_tokens),
+    ((333, 517), VISION.video_tokens),
+    ((1080, 1920), VISION.video_tokens),
+    ((97, 640), VISION.image_tokens),
+    ((2003, 97), VISION.video_tokens),
+    ((17, 23), VISION.video_tokens),
+    ((4096, 3072), VISION.image_tokens),
+]
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("shape, tokens", PROCESSED)
+def test_image_processor(processor, shape, tokens, record_property):
+    image = synthetic_image(*shape)
+    rgb, values = processor.processor.inputs(image, tokens)
+    values.pop("n")
+    T = next(
+        T
+        for T, op in processor.processor.resample.items()
+        if op.image_chunks == rgb.shape[0]
+    )
+    want = processor_reference(image, tokens, T)
+    got = processor(rgb, **values)
+    for name, g, w in zip(("pixels", "xy", "position_ids"), got, want):
+        g = np.asarray(g.numpy()).reshape(w.shape)
+        np.testing.assert_array_equal(g.view(np.uint8), w.view(np.uint8), err_msg=name)
+    times = []
+    for _ in range(5):
+        t = time.perf_counter()
+        processor(rgb, **values)
+        times.append(time.perf_counter() - t)
+    record_property("Latency", min(times) * 1e6)
+
+
+@pytest.mark.parametrize(
+    "shape, tokens, refusal",
+    [
+        # 3648 pixels wide: more patch columns than 16 cores hold.
+        ((97, 2003), VISION.image_tokens, "patch columns"),
+        ((1, 5000), VISION.image_tokens, "patch columns"),
+        # 20 MP: more than the largest version's image.
+        ((5000, 4000), VISION.image_tokens, "no version holds"),
+    ],
+)
+def test_image_processor_refuses(npu2, shape, tokens, refusal):
+    with pytest.raises(ValueError, match=refusal):
+        ImageProcessor(VISION).inputs(np.zeros((*shape, 3), np.uint8), tokens)
 
 
 @weighted
@@ -161,8 +269,9 @@ def test_vision_oracle_matches_hugging_face(weights, oracle):
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("name", list(IMAGES))
 def test_vision_accuracy(vision, oracle, name, record_property):
-    values, positions = processed(name)
-    got, want = vision.embed(values, positions), oracle(values, positions)
+    (height, width), tokens = IMAGES[name]
+    got = vision.embed(synthetic_image(height, width), tokens)
+    want = oracle(*processed(name))
     assert got.shape == want.shape
     cosine = (got * want).sum(-1) / (
         np.linalg.norm(got, axis=-1) * np.linalg.norm(want, axis=-1)
@@ -179,11 +288,12 @@ def test_vision_accuracy(vision, oracle, name, record_property):
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("name", ["image", "video_frame"])
 def test_vision_latency(vision, name, record_property):
-    values, positions = processed(name)
-    vision.embed(values, positions)
+    (height, width), tokens = IMAGES[name]
+    image = synthetic_image(height, width)
+    vision.embed(image, tokens)
     times = []
     for _ in range(10):
         t = time.perf_counter()
-        vision.embed(values, positions)
+        vision.embed(image, tokens)
         times.append(time.perf_counter() - t)
     record_property("Latency", float(np.median(times)) * 1e6)

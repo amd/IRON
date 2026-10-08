@@ -4,14 +4,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """EmbeddingGemma 2's vision tower: its shape, where its checkpoint keeps
-each weight, and the tower with its projection into the text model's space
-on the NPU as one graph.
+each weight, the size the image processor resizes an image to, and the
+resize, the tower and its projection into the text model's space on the
+NPU as one graph.
 """
 
 import dataclasses
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
+import aie.utils as aie_utils
 import numpy as np
 from ml_dtypes import bfloat16
 
@@ -25,6 +28,7 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM
+from iron.operators.resample.op import PatchPositions, Resample, ResampleTaps
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
 from iron.operators.softmax import Softmax
@@ -34,6 +38,14 @@ from ..model import ACCURATE
 
 # A GEMM's row block at its default tile: a version's rows are a multiple of it.
 ROWS = 256
+# The bytes of an image row Resample receives at a time.
+CHUNK = 4096
+# A core's patch columns, as many as its memory holds: 127 across on 16 cores.
+PATCH_COLUMNS = 8
+# Each version's patch rows, a video frame's budget then an image's, and the
+# largest image it takes either way up: 4K, then 12.6 MP.
+VERSIONS = (1280, 2560)
+LARGEST = ((2160, 3840), (3072, 4096))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -104,19 +116,208 @@ def vision_tensors(tensors: dict) -> dict:
     }
 
 
+def size(height: int, width: int, max_tokens: int, config: VisionConfig):
+    """The `(height, width)` the processor resizes an image to: the largest
+    whole `pool * patch` blocks within `max_tokens` soft tokens at the
+    image's aspect ratio.
+
+    Args:
+        height: The image's height in pixels.
+        width: The image's width in pixels.
+        max_tokens: The processor's `max_soft_tokens`.
+        config: The tower's shape.
+
+    Returns:
+        The resized `(height, width)`.
+
+    Raises:
+        ValueError: Both sides round to no block, or the size exceeds the budget.
+    """
+    side = config.pool * config.patch
+    max_patches = max_tokens * config.pool**2
+    target_px = max_patches * config.patch**2
+    factor = math.sqrt(target_px / (height * width))
+    out_height = int(math.floor(factor * height / side)) * side
+    out_width = int(math.floor(factor * width / side)) * side
+    if out_height == 0 and out_width == 0:
+        raise ValueError(f"a {height}x{width} image rounds to no {side}-pixel block")
+    max_side = max_tokens * side
+    if out_height == 0:
+        out_height = side
+        out_width = min(int(math.floor(width / height)) * side, max_side)
+    elif out_width == 0:
+        out_width = side
+        out_height = min(int(math.floor(height / width)) * side, max_side)
+    if out_height * out_width > target_px:
+        raise ValueError(
+            f"resizing {height}x{width} to {out_height}x{out_width} exceeds "
+            f"{max_patches} patches"
+        )
+    return out_height, out_width
+
+
+class ImageProcessor(SimpleNamespace):
+    """The image processor on the NPU, called in a graph's body: a decoded
+    image resized as torchvision resizes it, rescaled to `[0, 1]` and cut
+    into the tower's patches, each soft token's `pool ** 2` patches
+    consecutive rows, row-major within the window, the tokens row-major
+    over the image.
+
+    A call takes the image, `(height, width, 3)` uint8 with each row padded
+    to whole `CHUNK`-byte chunks (`inputs` lays it out), and the size the
+    processor resizes it to, all four sizes per call. `Resample` resizes it
+    by the `ResampleTaps` tables into the state `raster`, and
+    `PatchPositions` gives each tower row's patch in it, `xy` and
+    `position_ids`; rows past the image gather the raster's zero patch.
+
+    Args:
+        config: The tower's shape.
+        rows: Each version's patch rows, fewest first.
+        images: For each entry of `rows`, the `(height, width)` of the largest
+            image it takes either way up, each larger than the one before:
+            a version is known by its image's buffer.
+    """
+
+    def __init__(self, config: VisionConfig, rows=VERSIONS, images=LARGEST):
+        c = config
+        self.config = config
+        k, side = c.pool, c.pool * c.patch
+        cores = 2 * aie_utils.ensure_current_device().cols
+        # Every grid of whole pooling windows the largest version holds; the
+        # fewest patch columns give the most bands and padded raster rows.
+        grids = [(rows[-1] // s // k * k, s) for s in range(k, rows[-1] // k + 1, k)]
+        shared = dict(
+            height=side,
+            width=side,
+            out_height=side,
+            out_width=side,
+            chunk=CHUNK,
+            patch_columns=PATCH_COLUMNS,
+            width_chunks=PATCH_COLUMNS * cores,
+            height_chunks=16 * -(-grids[0][0] // 16),
+            patch_rows=max(b * (s // cores + 1) * cores for b, s in grids),
+            num_aie_columns=cores // 2,
+            num_channels=2,
+        )
+        self.resample = {
+            T: Resample(
+                image_chunks=max(a * -(-3 * b // CHUNK), b * -(-3 * a // CHUNK)),
+                **shared,
+            )
+            for T, (a, b) in zip(rows, images, strict=True)
+        }
+        chunks = [op.image_chunks for op in self.resample.values()]
+        if chunks != sorted(set(chunks)):
+            raise ValueError(
+                f"images {images} are not each larger than the one before, in "
+                f"{CHUNK}-byte rows: a version is known by its image's buffer"
+            )
+        self.raster = iron.state((shared["patch_rows"], 3 * c.patch**2))
+        taps = dict(
+            in_size=side,
+            out_size=side,
+            words=self.resample[rows[0]].words,
+            slots=c.patch,
+            num_aie_columns=cores // 2,
+            num_channels=2,
+        )
+        self.taps_w = ResampleTaps(chunks=shared["width_chunks"], **taps)
+        self.taps_h = ResampleTaps(chunks=shared["height_chunks"], **taps)
+        self.patch_positions = {
+            T: PatchPositions(
+                rows=T,
+                out_height=side,
+                out_width=side,
+                pool=k,
+                positions=c.positions,
+                cores=cores,
+            )
+            for T in rows
+        }
+
+    def __call__(self, rgb, height, width, out_height, out_width):
+        """The `(pixels, xy, position_ids)` of the image `rgb`, `height` by
+        `width` pixels resized to `out_height` by `out_width`, in the `T`
+        rows of the version its buffer is: `(T, 3 * patch ** 2)` bf16 and
+        `(2 * T,)` int32 twice.
+        """
+        T = next(
+            T for T, op in self.resample.items() if op.image_chunks == rgb.shape[0]
+        )
+        taps_w = self.taps_w(in_samples=width, out_samples=out_width)
+        taps_h = self.taps_h(in_samples=height, out_samples=out_height)
+        self.resample[T](
+            rgb,
+            taps_w,
+            taps_h,
+            self.raster,
+            rows=height,
+            columns=width,
+            out_rows=out_height,
+            out_columns=out_width,
+        )
+        xy, position_ids, order = self.patch_positions[T](
+            out_rows=out_height, out_columns=out_width
+        )
+        return Copy(self.raster[order]), xy.reshape(2 * T), position_ids.reshape(2 * T)
+
+    # -- on the host -----------------------------------------------------------
+
+    def shapes(self, T: int) -> dict:
+        """The input shape of a call over `T` patch rows."""
+        return dict(rgb=((self.resample[T].image_chunks, CHUNK), np.uint8))
+
+    def inputs(self, image, max_tokens: int) -> tuple[np.ndarray, dict]:
+        """A call's image buffer and per-call sizes, `n` (its patches) among
+        them, for a decoded `image` at the processor's `max_tokens`, in the
+        fewest rows a version with room for it has.
+
+        Args:
+            image: `(height, width, 3)` uint8.
+            max_tokens: The processor's `max_soft_tokens`.
+
+        Raises:
+            ValueError: No version holds the image, or `Resample` cannot
+                resize it.
+        """
+        image = np.asarray(image)
+        if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError(
+                f"an image is (height, width, 3) uint8, not {image.shape} {image.dtype}"
+            )
+        c = self.config
+        H, W, _ = image.shape
+        ho, wo = size(H, W, max_tokens, c)
+        n = ho // c.patch * (wo // c.patch)
+        line = -(-3 * W // CHUNK) * CHUNK
+        fits = [
+            T
+            for T, op in self.resample.items()
+            if T >= n and op.image_chunks * CHUNK >= H * line
+        ]
+        if not fits:
+            raise ValueError(f"no version holds a {H}x{W} image of {n} patches")
+        op = self.resample[fits[0]]
+        # Resample's own checks refuse a size it cannot resize.
+        dataclasses.replace(op, height=H, width=W, out_height=ho, out_width=wo)
+        buffer = np.zeros((op.image_chunks, CHUNK), np.uint8)
+        rows = buffer.reshape(-1)[: H * line].reshape(H, line)
+        rows[:, : 3 * W] = image.reshape(H, 3 * W)
+        return buffer, dict(n=n, height=H, width=W, out_height=ho, out_width=wo)
+
+
 class VisionTower(SimpleNamespace):
     """The vision tower and `embed_vision` over at most `rows[-1]` patches,
     called in a graph's body. It is a namespace, so the graph that holds it
     names its weights by their path.
 
-    A call takes an image's patches in pooling-window order: each soft
-    token's `pool ** 2` patches are consecutive rows, the tokens row-major
-    over the image, so pooling is a fixed sum of row blocks, a GEMM by a 0/1
-    matrix. `n`, the real patches, masks the padded keys; padded rows are
-    zero, stay finite and are never read. Each head's channels are
-    reordered so that the axial RoPE, x on its first half and y on its
-    second, is one rotation of halves: a permutation within a head changes
-    neither its norm nor a query's product with a key.
+    A call takes a decoded image, which `processor` resizes and cuts into
+    patches in pooling-window order on the NPU, so pooling is a fixed sum
+    of row blocks, a GEMM by a 0/1 matrix. `n`, the real patches, masks the
+    padded keys; padded rows are zero, stay finite and are never read. Each
+    head's channels are reordered so that the axial RoPE, x on its first
+    half and y on its second, is one rotation of halves: a permutation
+    within a head changes neither its norm nor a query's product with a key.
 
     The rows a call looks up by patch position are gathered on the NPU: the
     RoPE angles by `xy`, each patch's x and y side by side, so a patch's row
@@ -128,16 +329,23 @@ class VisionTower(SimpleNamespace):
         config: The tower's shape.
         weights: The tree `load_weights` gives over `layout(config)`.
         rows: The patch rows a call may take, whole `ROWS`-row blocks.
+        images: The largest image each version takes, as `ImageProcessor`
+            takes them.
     """
 
     def __init__(
-        self, config: VisionConfig, weights: SimpleNamespace, rows=(1280, 2560)
+        self,
+        config: VisionConfig,
+        weights: SimpleNamespace,
+        rows=VERSIONS,
+        images=LARGEST,
     ):
         c = config
         if any(T % ROWS for T in rows):
             raise ValueError(f"{rows} rows are not whole {ROWS}-row versions")
         self.config = config
         self.rows = sorted(rows)
+        self.processor = ImageProcessor(config, self.rows, images)
         self.patch = weights.patch
         position = np.zeros((2 * c.positions + 1, c.hidden), bfloat16)
         position[:-1] = weights.position.reshape(-1, c.hidden)
@@ -177,12 +385,17 @@ class VisionTower(SimpleNamespace):
                 pool[j, j * window : (j + 1) * window] = 1
             self.pool[T] = pool
 
-    def __call__(self, pixels, xy, position_ids, n):
-        """The `(tokens, text_dim)` soft tokens of `T` patch rows, `T` an
-        entry of `rows` and `tokens` `T // pool ** 2` rounded up to whole
-        `ROWS`; the first `n // pool ** 2` are the image's.
+    def __call__(self, rgb, n, height, width, out_height, out_width):
+        """The `(tokens, text_dim)` soft tokens of the image `rgb`, `height`
+        by `width` pixels resized to `out_height` by `out_width`, its `n`
+        patches in the `T` rows of the version its buffer is, `tokens`
+        `T // pool ** 2` rounded up to whole `ROWS`; the first
+        `n // pool ** 2` are the image's.
         """
         c = self.config
+        pixels, xy, position_ids = self.processor(
+            rgb, height, width, out_height, out_width
+        )
         T = pixels.shape[0]
         x = AXPY(pixels, self.minus_one[:T], scalar_factor=2.0)
         h = GEMM(x, self.patch, b_col_maj=True, **ACCURATE)
@@ -240,60 +453,6 @@ class VisionTower(SimpleNamespace):
         o = Copy(q.transpose(1, 0, 2)).reshape(T, H * D)
         return GEMM(o, w.o, b_col_maj=True, **ACCURATE)
 
-    # -- on the host -----------------------------------------------------------
-
-    def shapes(self, T: int) -> dict:
-        """The input shapes of a call over `T` patch rows."""
-        c = self.config
-        return dict(
-            pixels=(T, 3 * c.patch**2),
-            xy=((2 * T,), np.int32),
-            position_ids=((2 * T,), np.int32),
-        )
-
-    def order(self, positions) -> np.ndarray:
-        """The real patches of `positions` `(patches, 2)`, (x, y) with -1
-        for padding, in pooling-window order: each soft token's patches
-        consecutive, row-major within the window, the tokens row-major.
-
-        Raises:
-            ValueError: The real patches are not whole pooling windows.
-        """
-        k = self.config.pool
-        real = np.flatnonzero((positions >= 0).all(axis=-1))
-        x, y = positions[real].T
-        width, height = x.max() + 1, y.max() + 1
-        if width % k or height % k or real.size != width * height:
-            raise ValueError(
-                f"{real.size} patches are not a whole grid of {k}x{k} windows"
-            )
-        token = x // k + width // k * (y // k)
-        return real[np.lexsort((x % k, y % k, token))]
-
-    def inputs(self, pixel_values, positions) -> tuple[dict, int]:
-        """A call's inputs and `n` for the processor's `pixel_values`
-        `(patches, 3 * patch ** 2)` and `positions` `(patches, 2)`, padded to
-        the fewest rows a version has.
-
-        Raises:
-            ValueError: More real patches than the largest version holds.
-        """
-        c = self.config
-        order = self.order(np.asarray(positions))
-        n = order.size
-        if n > self.rows[-1]:
-            raise ValueError(f"{n} patches do not fit {self.rows[-1]} rows")
-        T = min(T for T in self.rows if T >= n)
-        P = c.positions
-        pixels = np.zeros(self.shapes(T)["pixels"], bfloat16)
-        pixels[:n] = np.asarray(pixel_values)[order]
-        x, y = np.asarray(positions)[order].T
-        xy = np.full(2 * T, P, np.int32)
-        xy.reshape(T, 2)[:n] = np.stack([x, y], axis=-1)
-        position_ids = np.full(2 * T, 2 * P, np.int32)
-        position_ids[:n], position_ids[T : T + n] = x, P + y
-        return dict(pixels=pixels, xy=xy, position_ids=position_ids), n
-
 
 class Vision(iron.Graph):
     """The vision tower as a graph of its own, a version per entry of `rows`.
@@ -302,25 +461,40 @@ class Vision(iron.Graph):
         config: The tower's shape.
         weights: The tree `load_weights` gives over `layout(config)`.
         rows: Each version's patch rows, whole `ROWS`-row blocks.
+        images: The largest image each version takes, as `ImageProcessor`
+            takes them.
     """
 
     # GEMM tiles narrow enough for N = 768 or 1280 to span every column.
     profile = Path(__file__).with_name("profiles")
 
     def __init__(
-        self, config: VisionConfig, weights: SimpleNamespace, rows=(1280, 2560)
+        self,
+        config: VisionConfig,
+        weights: SimpleNamespace,
+        rows=VERSIONS,
+        images=LARGEST,
     ):
         self.config = config
-        self.vision = VisionTower(config, weights, rows)
+        self.vision = VisionTower(config, weights, rows, images)
 
-    def body(self, pixels, xy, position_ids, *, n: Scratchpad[np.int32]):
-        return self.vision(pixels, xy, position_ids, n)
+    def body(
+        self,
+        rgb,
+        *,
+        n: Scratchpad[np.int32],
+        height: Scratchpad[np.int32],
+        width: Scratchpad[np.int32],
+        out_height: Scratchpad[np.int32],
+        out_width: Scratchpad[np.int32],
+    ):
+        return self.vision(rgb, n, height, width, out_height, out_width)
 
     # -- on the host -----------------------------------------------------------
 
     def shapes(self) -> list[dict]:
         """Each version's input shapes, fewest rows first."""
-        return [self.vision.shapes(T) for T in self.vision.rows]
+        return [self.vision.processor.shapes(T) for T in self.vision.rows]
 
     def load(self, tuner: JointNarrowing | None = None) -> "Vision":
         """Compile every version before the first call, so the arena is made once.
@@ -332,10 +506,15 @@ class Vision(iron.Graph):
             self.compile(coresident=tuner, **shapes)
         return self
 
-    def embed(self, pixel_values, positions) -> np.ndarray:
-        """The soft tokens of one image or video frame, `(tokens, text_dim)`
-        float32, in the text model's space.
+    def embed(self, image, max_tokens: int = VISION.image_tokens) -> np.ndarray:
+        """The soft tokens of one decoded image or video frame,
+        `(tokens, text_dim)` float32, in the text model's space.
+
+        Args:
+            image: `(height, width, 3)` uint8.
+            max_tokens: The processor's `max_soft_tokens`: `image_tokens`
+                for an image, `video_tokens` for a frame.
         """
-        inputs, n = self.vision.inputs(pixel_values, positions)
-        tokens = self(*inputs.values(), n=n).numpy().reshape(-1, self.config.text_dim)
-        return np.asarray(tokens[: n // self.config.pool**2], np.float32)
+        rgb, values = self.vision.processor.inputs(image, max_tokens)
+        tokens = self(rgb, **values).numpy().reshape(-1, self.config.text_dim)
+        return np.asarray(tokens[: values["n"] // self.config.pool**2], np.float32)

@@ -60,9 +60,19 @@ def calls(directory: Path) -> list[Call]:
             audio_model.audio_tensors(tensors), audio_model.layout(A), A.n_layers
         ),
     )
+    # Each vision version at the largest image it takes, its patches filled.
+    sized = {
+        T: vision.vision.processor.inputs(
+            np.zeros((*image, 3), np.uint8), T // V.pool**2
+        )[1]
+        for T, image in zip(vision.vision.rows, vision_model.LARGEST, strict=True)
+    }
     out = [
         *(Call(text.trace(**s), dict(n=s["ids"][0][0])) for s in text.shapes()),
-        *(Call(vision.trace(**s), dict(n=s["pixels"][0])) for s in vision.shapes()),
+        *(
+            Call(vision.trace(**s), sized[T])
+            for T, s in zip(vision.vision.rows, vision.shapes())
+        ),
     ]
     for s in audio.shapes():
         frames = s["x"][0][0] // A.hop - 1
@@ -79,12 +89,23 @@ def calls(directory: Path) -> list[Call]:
         rows = s["ids"][0][0]
         if not T_a and not T_v or fewest_audio[T_a] + fewest_image[T_v] > rows:
             continue
-        shapes = dict(ids=s["ids"], merge=((rows,), np.int32))
+        shapes = dict(ids=s["ids"])
         if T_a:
             shapes["wave"] = (((4 * T_a + 1) * A.hop,), np.float32)
+        values = dict(
+            n=rows,
+            n_audio=2 * T_a,
+            frames=4 * T_a,
+            n_patches=0,
+            height=0,
+            width=0,
+            out_height=0,
+            out_width=0,
+        )
         if T_v:
-            shapes.update(vision.vision.shapes(T_v))
-        values = dict(n=rows, n_audio=2 * T_a, frames=4 * T_a, n_patches=T_v)
+            shapes.update(vision.vision.processor.shapes(T_v))
+            sizes = dict(sized[T_v])
+            values.update(n_patches=sizes.pop("n"), **sizes)
         out.append(Call(graph.trace(**shapes), values))
     return out
 
