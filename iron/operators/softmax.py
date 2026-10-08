@@ -32,6 +32,9 @@ _ROW_CAP = 4096
 _BLOCK = 1024
 # The floats a streamed row carries between blocks: the lanes' sums and the maximum.
 _STATE = 64
+# A streamed core unrolls its rows, each with its own state: 48 fit its
+# program memory on AIE2P, 64 overflow it.
+_STREAMED_ROWS = 48
 
 
 class Softmax(Operator):
@@ -63,6 +66,7 @@ class Softmax(Operator):
             dict(rows=64, cols=512, num_aie_columns=2, num_channels=2),
             dict(rows=16, cols=2048, num_aie_columns=2, num_channels=2),
             dict(rows=16, cols=4096, block=1024, num_aie_columns=2, num_channels=2),
+            dict(rows=16, cols=4608, num_aie_columns=2, num_channels=2),
             dict(rows=32, cols=32768, num_aie_columns=2, num_channels=2),
             # Benched: 2 Mi elements, well past the dispatch cost.
             Case(
@@ -77,7 +81,8 @@ class Softmax(Operator):
     # None: every column the device's shim budget allows.
     num_aie_columns: int = auto()
     num_channels: int = auto(1)
-    # None: the whole row, or _BLOCK where the row is streamed.
+    # None: the whole row, or where the row is streamed the longest
+    # multiple of _VECTOR_STEP up to _BLOCK that divides it.
     block: int = auto()
     streamed: bool = auto(array=True)
 
@@ -101,21 +106,34 @@ class Softmax(Operator):
 
     def resolve(self, dev):
         """Columns default to the most the device's shim budget allows that
-        leave every core a whole number of rows. A row is streamed when a
-        call bounds it or it is longer than ``_ROW_CAP``.
+        leave every core a whole number of rows. A row is streamed when it
+        is longer than ``_ROW_CAP``, or when a call bounds it and a core's
+        rows fit a streamed core (``_STREAMED_ROWS``).
         """
-        block = self.block
-        if block is None:
-            bounded = "length" in self.bound_extents
-            long = bounded or self.cols > _ROW_CAP
-            block = min(self.cols, _BLOCK) if long else self.cols
-        streamed = block < self.cols if self.streamed is None else self.streamed
         cols = self.resolve_columns(
             dev,
             self.num_aie_columns,
             self.num_channels,
             fits=lambda c: self.rows % (c * self.num_channels) == 0,
         )
+        block = self.block
+        if block is None:
+            bounded = "length" in self.bound_extents
+            per_core = self.rows // (cols * self.num_channels)
+            long = self.cols > _ROW_CAP or (bounded and per_core <= _STREAMED_ROWS)
+            block = (
+                max(
+                    (
+                        b
+                        for b in range(_VECTOR_STEP, _BLOCK + 1, _VECTOR_STEP)
+                        if self.cols % b == 0
+                    ),
+                    default=min(self.cols, _BLOCK),
+                )
+                if long
+                else self.cols
+            )
+        streamed = block < self.cols if self.streamed is None else self.streamed
         return dataclasses.replace(
             self, num_aie_columns=cols, block=block, streamed=streamed
         )
