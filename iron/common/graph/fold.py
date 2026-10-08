@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Folding a step into the step that produced one of its inputs."""
+"""Folding a step into the step that produced one of its inputs, or into
+the steps that read its output.
+"""
 
 from __future__ import annotations
 
@@ -37,13 +39,50 @@ class Fold:
         return f"{', then '.join(names)} into {self.producer[0]}"
 
 
+@dataclasses.dataclass(frozen=True)
+class Prologue:
+    """A step of one design folded into the steps that read its output,
+    each applying it to the input it prepares, the tile taking its input
+    ``at``, before the steps of ``after`` folded into them already: each
+    names the resolved ``design_key()`` of its operator, those of ``after``
+    with the input each took the tile at.
+    """
+
+    producer: Hashable
+    consumers: tuple[Hashable, ...]
+    at: int = 0
+    after: tuple[tuple[Hashable, int], ...] = ()
+
+    @property
+    def chain(self) -> tuple[tuple[Hashable, int], ...]:
+        """The steps folded into the consumers through this one, in the
+        order they run.
+        """
+        return ((self.producer, self.at), *self.after)
+
+    def __str__(self) -> str:
+        names = [f"{k[0]}{f' (input {at})' if at else ''}" for k, at in self.chain]
+        consumers = ", ".join(k[0] for k in self.consumers)
+        return f"{', then '.join(names)} into {consumers}"
+
+
 def folded(
-    traced: TracedGraph, dev, only: Collection[Fold] | None = None
-) -> tuple[TracedGraph, Counter[Fold]]:
-    """``traced`` with each step its producer can apply in its own cores
-    folded into the producer (``Operator.fold``), then each operator that
-    can run on a folded one's array moved onto it (``Operator.on_array``),
-    so a fold does not split an array two designs shared.
+    traced: TracedGraph, dev, only: Collection[Fold | Prologue] | None = None
+) -> tuple[TracedGraph, Counter[Fold | Prologue]]:
+    """``traced`` with each step whose readers can apply it in their own
+    cores folded into them (``Operator.prefold``), each step its producer
+    can apply in its own cores folded into the producer
+    (``Operator.fold``), then each operator that can run on a folded one's
+    array moved onto it (``Operator.on_array``), so a fold does not split
+    an array two designs shared.
+
+    A step folds into its readers where its one output is a whole,
+    unbounded intermediate each of them reads, once, as the input it
+    prepares, they and it called once and it bound to no per-call value;
+    its input ``at`` takes the place of that output, of its size and type,
+    and its others stream into each reader's prepared input. No step
+    between it and a reader may write those inputs, and each reader must
+    keep every width it had.
 
     A step folds where one input is a whole intermediate that it and its
     producer alone name, each other input a whole buffer of its output's
@@ -61,8 +100,8 @@ def folded(
     Args:
         traced: The graph as traced.
         dev: The device the folded operators must resolve for.
-        only: The folds to apply, each with the folds of its chain before
-            it; every one the graph admits if not given.
+        only: The folds to apply, each ``Fold`` with the folds of its
+            chain before it; every one the graph admits if not given.
 
     Returns:
         The folded graph (``traced`` itself where nothing folds) and the
@@ -75,14 +114,105 @@ def folded(
     extents = Counter(
         id(b.op) for b in traced.bindings if isinstance(b.member.member, Extent)
     )
-    producers = {h.name: i for i, s in enumerate(traced.steps) for h in s.outputs}
-    steps = list(traced.steps)
+    steps: list = list(traced.steps)
+    replace: dict[int, Operator] = {}
+    applied: Counter[Fold | Prologue] = Counter()
+    # Per prepared step: the designs folded into it, the first applied first.
+    prologues: dict[int, tuple[tuple[Hashable, int], ...]] = {}
+    for j in reversed(range(len(steps))):
+        producer = steps[j]
+        if (
+            len(producer.outputs) != 1
+            or calls[id(producer.op)] != 1
+            or bindings[id(producer.op)]
+        ):
+            continue
+        (h,) = producer.outputs
+        if h.role != "intermediate" or h.parent or h.tap is not None or h.bounds:
+            continue
+        readers = [
+            k
+            for k in range(j + 1, len(steps))
+            if steps[k] is not None and any(i.name == h.name for i in steps[k].inputs)
+        ]
+        # Each reader's prepared input: the slot of its member declared so.
+        prepared = {
+            k: next(
+                (i for i, b in enumerate(steps[k].op.buffers) if b.member.prepare),
+                None,
+            )
+            for k in readers
+        }
+        if (
+            not readers
+            or named[h.name] != 1 + len(readers)
+            or any(calls[id(steps[k].op)] != 1 for k in readers)
+            or any(
+                i is None or steps[k].slots[i].name != h.name
+                for k, i in prepared.items()
+            )
+            or len({prologues.get(k, ()) for k in readers}) != 1
+        ):
+            continue
+        for at, x in enumerate(producer.inputs):
+            if x.elements != h.elements or x.dtype != h.dtype or x.bounds:
+                continue
+            extras = [e for i, e in enumerate(producer.inputs) if i != at]
+            fused = _prefolded(steps, replace, readers, j, x, extras, at, dev)
+            if fused is None:
+                continue
+            fold = Prologue(
+                producer.op.resolved(dev).design_key(),
+                tuple(steps[k].op.resolved(dev).design_key() for k in readers),
+                at,
+                prologues.get(readers[0], ()),
+            )
+            if only is not None and not any(
+                isinstance(f, Prologue)
+                and f.consumers == fold.consumers
+                and f.chain[len(f.chain) - len(fold.chain) :] == fold.chain
+                for f in only
+            ):
+                continue
+            for k in readers:
+                step, slot = steps[k], prepared[k]
+                op = replace.get(id(step.op), step.op)
+                # Before the prologue's inputs so far: the producer runs first.
+                tail = len(op.prepare_inputs) + len(op.finish_inputs)
+                given = [
+                    e.reshape(b.shape) for e, b in zip(extras, fused[k].prepare_inputs)
+                ]
+                tile = x.reshape(step.slots[slot].shape)
+                slots = [tile if i == slot else e for i, e in enumerate(step.slots)]
+                inputs = [tile if e.name == h.name else e for e in step.inputs]
+                steps[k] = dataclasses.replace(
+                    step,
+                    slots=[
+                        *slots[: len(slots) - tail],
+                        *given,
+                        *slots[len(slots) - tail :],
+                    ],
+                    inputs=[
+                        *inputs[: len(inputs) - tail],
+                        *given,
+                        *inputs[len(inputs) - tail :],
+                    ],
+                )
+                replace[id(step.op)] = fused[k]
+                prologues[k] = fold.chain
+            steps[j] = None
+            applied[fold] += 1
+            break
+    current = [s for s in steps if s is not None]
+    named = Counter((h.parent or h).name for s in current for h in s.slots)
+    named.update((h.parent or h).name for h in traced.outputs)
+    producers = {
+        h.name: i for i, s in enumerate(steps) if s is not None for h in s.outputs
+    }
     # Per folded step: its producer's design and the designs folded into it.
     origins: dict[int, tuple[Hashable, tuple[tuple[Hashable, int], ...]]] = {}
-    replace: dict[int, Operator] = {}
-    applied: Counter[Fold] = Counter()
-    for k, step in enumerate(traced.steps):
-        if len(step.outputs) != 1:
+    for k, step in enumerate(list(steps)):
+        if step is None or len(step.outputs) != 1:
             continue
         (y,) = step.outputs
         for at, x in enumerate(step.inputs):
@@ -116,13 +246,15 @@ def folded(
                 continue
             producer = steps[j]
             current = replace.get(id(producer.op), producer.op)
-            fused = current.fold(step.op, at)
+            fused = current.fold(replace.get(id(step.op), step.op), at)
             if fused is None:
                 continue
-            start, after = origins.get(j, (current.resolved(dev).design_key(), ()))
+            start, after = origins.get(j, (producer.op.resolved(dev).design_key(), ()))
             fold = Fold(start, step.op.resolved(dev).design_key(), at, after)
             if only is not None and not any(
-                f.producer == start and f.chain[: len(fold.chain)] == fold.chain
+                isinstance(f, Fold)
+                and f.producer == start
+                and f.chain[: len(fold.chain)] == fold.chain
                 for f in only
             ):
                 continue
@@ -172,10 +304,11 @@ def folded(
         return traced, applied
     arrays = {f.resolved(dev).array_key(): f for f in replace.values()}
     for s in traced.steps:
-        if id(s.op) in replace:
-            continue
+        base = replace.get(id(s.op), s.op)
         for key, f in arrays.items():
-            moved = s.op.on_array(f)
+            if base is f:
+                continue
+            moved = base.on_array(f)
             if moved is None:
                 continue
             try:
@@ -194,6 +327,37 @@ def folded(
     return kept.with_operators(replace), applied
 
 
+def _prefolded(
+    steps: list, replace: dict[int, Operator], readers, j: int, x, extras, at, dev
+) -> dict[int, Operator] | None:
+    """Each of ``readers`` (indices of ``steps``) with the operator of step
+    ``j`` folded into it, ``x`` the tile and ``extras`` its other inputs,
+    or None: where one does not prepare it, does not resolve, narrows, or
+    runs after a step that writes what the fold reads.
+    """
+    reads = {(e.parent or e).name for e in [x, *extras]}
+    fused = {}
+    for k in readers:
+        written = {
+            (o.parent or o).name
+            for s in steps[j + 1 : k]
+            if s is not None
+            for o in s.outputs
+        }
+        op = replace.get(id(steps[k].op), steps[k].op)
+        new = op.prefold(steps[j].op, at)
+        if new is None or written & reads:
+            return None
+        try:
+            widths = new.resolved(dev).widths
+        except (Unresolvable, ValueError):
+            return None
+        if any(widths[n] < w for n, w in op.resolved(dev).widths.items()):
+            return None
+        fused[k] = new
+    return fused
+
+
 def replaced(
     traced: TracedGraph, folds: TracedGraph
 ) -> list[tuple[Operator, Operator]]:
@@ -202,20 +366,32 @@ def replaced(
     as (traced's, folds').
 
     A folded step reads what its producer's step read, then its finish's
-    other inputs, so its twin is the first step of ``traced`` not yet
-    paired, of its type, that reads what it reads without them.
+    other inputs, and a step a prologue folded into reads that step's input
+    in place of its output, then the prologue's other inputs. Its twin is
+    the first step of ``traced`` not yet paired, of its type, that reads
+    what it reads without those, its prepared input aside.
     """
     paired: set[int] = set()
     pairs = []
     for step in folds.steps:
-        reads = [h.name for h in step.inputs]
-        own = reads[: len(reads) - len(step.op.finish_inputs)]
+        op = step.op
+        extra = {b.name for b in [*op.prepare_inputs, *op.finish_inputs]}
+        reads = [
+            None if b.member.prepare and op.prepare else h.name
+            for b, h in zip(op.buffers, step.slots)
+            if b.direction.fills and b.name not in extra
+        ]
         i = next(
             i
             for i, s in enumerate(traced.steps)
             if i not in paired
-            and type(s.op) is type(step.op)
-            and [h.name for h in s.inputs] == own
+            and type(s.op) is type(op)
+            and [
+                None if b.member.prepare and op.prepare else h.name
+                for b, h in zip(s.op.buffers, s.slots)
+                if b.direction.fills
+            ]
+            == reads
         )
         paired.add(i)
         if traced.steps[i].op is not step.op:

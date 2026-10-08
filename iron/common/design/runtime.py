@@ -43,7 +43,10 @@ class Sequence:
             self.op.sequence(self)
             return
         tg = TaskGroup()
+        prologue = {b.name for b in self.op.prepare_inputs}
         for buf in self.op.inputs:
+            if buf.name in prologue:
+                continue  # filled into the stream it prepares (fill)
             for slot, tap, size_by in self.plan(buf):
                 self.fill(slot, (buf, tap), group=tg, size_by=size_by)
         for buf in self.op.outputs:
@@ -154,7 +157,9 @@ class Sequence:
         size_by=None,
         managed=True,
     ):
-        """Fill ``stream`` from ``source``.
+        """Fill ``stream`` from ``source``; a prepared input's lane is then
+        filled with each of the operator's ``prepare_inputs``, which its
+        cores acquire with the tile.
 
         Args:
             offset_by: A per-call value moving the base address.
@@ -163,9 +168,16 @@ class Sequence:
             managed: False hands the queue slot and descriptors to the
                 compiler, which frees them after a later wait; joins no group.
         """
-        return self._transfer(
+        task = self._transfer(
             "fill", stream, source, group, wait, offset_by, size_by, managed
         )
+        if not self._lane(stream).buffer.member.prepare:
+            return task
+        for extra in self.op.prepare_inputs:
+            self._transfer(
+                "fill", stream, (extra, extra.tap), group, wait, None, None, managed
+            )
+        return task
 
     def drain(
         self,

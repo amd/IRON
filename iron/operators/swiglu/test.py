@@ -71,26 +71,33 @@ def test_swiglu(rows, embedding_dim, hidden_dim, fold, npu_runtime, record_prope
     ops = sum(s.op.resolved().ops() for s in net.traced.steps)
     record_property("Throughput", ops / (elapsed_us * 1e-6) / 1e9)
 
-    # Folded, silu finishes the gate, whose cores have no input channel (a
-    # matvec's) or row order (a matmul's) left for the product's other factor.
-    finishes = [
-        (type(s.op), [type(link.op) for link in s.op.finish])
+    # Folded, the down matvec applies silu and the product to each line of
+    # its input as it reads it. A matmul prepares no input, so silu
+    # finishes the gate, whose cores have no row order left for the
+    # product's other factor.
+    folds = [
+        (
+            type(s.op),
+            [type(link.op) for link in s.op.prepare],
+            [type(link.op) for link in s.op.finish],
+        )
         for s in net.traced.steps
-        if s.op.finish
+        if s.op.prepare or s.op.finish
     ]
-    assert finishes == ([] if not fold else [(GEMV if rows == 1 else GEMM, [SiLU])])
+    if not fold:
+        assert folds == []
+    elif rows == 1:
+        assert folds == [(GEMV, [SiLU, ElementwiseMul], [])]
+    else:
+        assert folds == [(GEMM, [], [SiLU])]
     # The gate's buffer is dead once SiLU has read it, so the planner may
     # reuse it; the product's inputs and the down projection's are intact.
-    (product,) = [
-        s
-        for s in net.traced.steps
-        if ElementwiseMul in [type(s.op), *(type(link.op) for link in s.op.finish)]
-    ]
-    down = net.traced.steps[-1]
-    verdicts = {"product": _verdict(net, product), "down": _verdict(net, down)}
-    if finishes:
-        # Folded, both projections are the product's inputs, and run on one
-        # array each with its own finish.
-        gate, up = net.traced.steps[:2]
-        verdicts.update(gate=_verdict(net, gate), up=_verdict(net, up))
+    steps = net.traced.steps
+    verdicts = {"down": _verdict(net, steps[-1])}
+    products = [s for s in steps if isinstance(s.op, ElementwiseMul)]
+    if products:
+        verdicts["product"] = _verdict(net, products[0])
+    if fold:
+        # Folded, both projections are the product's inputs.
+        verdicts.update(gate=_verdict(net, steps[0]), up=_verdict(net, steps[1]))
     assert all(verdicts.values()), {k: v.detail for k, v in verdicts.items()}

@@ -139,6 +139,12 @@ def declare(cls: type) -> None:
                         f"{cls.__name__}.{m.name}: per={ref!r} must be a param() or auto() field"
                     )
 
+    prepared = [m.name for m in members if isinstance(m, _Buffer) and m.prepare]
+    if len(prepared) > 1:
+        raise TypeError(
+            f"{cls.__name__}: {prepared} are each prepare=True; a core prepares "
+            f"one input, the one its operator's prepare names"
+        )
     cls._members = tuple(members)
     tiers = {f.name: f.metadata.get(Tier) for f in fields.values()}
     cls._param_fields = tuple(n for n, t in tiers.items() if isinstance(t, Param))

@@ -103,60 +103,80 @@ def _interval(
     return np.minimum.reduce(lo), np.maximum.reduce(hi)
 
 
-class Finish:
-    """The steps a producer's cores apply to each tile of its output declared
-    ``Out(..., finish=True)`` before releasing it: the chain of each design
-    its array serves, a design's selected by its ``finish_chain`` word.
-
-    A step's kernel reads and writes through restrict pointers, so the
-    steps alternate between the output tile and a scratch tile of the
-    core's own, the producer writing where the chain's first step reads.
+@dataclasses.dataclass(frozen=True)
+class KernelCall:
+    """One kernel call an elementwise operator's core makes over a line.
 
     Args:
-        op: The producer.
-        cores: The cores applying it, on the array side; none on the host.
+        kernel: The kernel called.
+        scalars: The scalar arguments its contract leaves unbound, in order.
+        operands: Each input tile, in the kernel's order: an input of the
+            operator by name, or None, the line the call before it wrote.
     """
 
-    def __init__(self, op: Operator, cores: int = 0) -> None:
+    kernel: ExternalFunction
+    scalars: tuple = ()
+    operands: tuple[str | None, ...] = ()
+
+
+class _Chains:
+    """The chains of steps a core applies to a line it holds (``Finish``,
+    ``Prepare``): the chain of each design its array serves, a design's
+    selected by its ``{kind}_chain`` word.
+
+    A kernel reads and writes through restrict pointers, so the calls of a
+    chain alternate between the line and a scratch line of the core's own.
+    """
+
+    kind: ClassVar[str] = ""
+    scratch_name: ClassVar[str] = ""
+
+    def __init__(self, op: Operator, chains, line: int, dtype, cores: int) -> None:
         self.op = op
-        self.chains = op.finishes or (op.finish,)
-        # The one output, where a chain has steps (Operator.resolved checks).
-        self.out = op.outputs[-1]
-        self.line = self.out.finish_line
-        self.select = len(self.chains) > 1
-        # Each distinct step once: its kernel, argument positions and scalars.
+        self.chains = chains
+        self.line = line
+        self.select = len(chains) > 1
+        # Each distinct kernel call once, by its step and its place in the
+        # step: its kernel, argument positions and scalars.
         self.steps: dict[tuple, tuple[ExternalFunction, list[int], dict]] = {}
-        for link in [link for chain in self.chains for link in chain]:
-            if not isinstance(link.op, Elementwise):
-                raise TypeError(f"a finish step is Elementwise, not {link.op!r}")
-            if cores and link.array_key() not in self.steps:
-                kernel = link.op.kernel()
-                self.steps[link.array_key()] = (
-                    kernel,
-                    *link.op._arguments(kernel, len(link.op.inputs), 1),
-                )
-        # Each step's other inputs, streamed per core as the output is.
-        extras = iter(op.finish_inputs)
-        self.extras = [
-            [next(extras) for _ in range(len(link.op.inputs) - 1)] for link in op.finish
-        ]
-        self.fifos = [
-            [
-                ObjectFifo(e.tile, name=f"{e.name}_{k}", depth=e.depth)
-                for k in range(cores)
-            ]
-            for e in op.finish_inputs
-        ]
+        # Per chain, its calls in order: the step, its place, its operands.
+        self.calls: list[list[tuple]] = [[] for _ in chains]
+        for chain, calls in zip(chains, self.calls):
+            for link in chain:
+                if not isinstance(link.op, Elementwise):
+                    raise TypeError(
+                        f"a {self.kind} step is Elementwise, not {link.op!r}"
+                    )
+                if not cores:
+                    continue
+                at = link.op.inputs[link.at].name
+                for j, call in enumerate(link.op.chain()):
+                    if j and at in call.operands:
+                        raise ValueError(
+                            f"{type(link.op).__name__}: a call after its first "
+                            f"names {at}, the line the first overwrites"
+                        )
+                    calls.append((link, j, call.operands))
+                    self.steps.setdefault(
+                        (link.array_key(), j),
+                        (
+                            call.kernel,
+                            *link.op._arguments(
+                                call.kernel, call.scalars, len(call.operands), 1
+                            ),
+                        ),
+                    )
         self.rtps = [
-            Buffer(_I32, name=f"finish_{k}", use_write_rtp=True)
+            Buffer(_I32, name=f"{self.kind}_{k}", use_write_rtp=True)
             for k in range(cores if self.select else 0)
         ]
         self.scratch = [
             Buffer(
-                np.ndarray[(self.line,), np.dtype[self.out.dtype]], name=f"finished_{k}"
+                np.ndarray[(line,), np.dtype[dtype]], name=f"{self.scratch_name}_{k}"
             )
-            for k in range(cores if any(self.chains) else 0)
+            for k in range(cores if any(chains) else 0)
         ]
+        self.fifos: list[list[ObjectFifo]] = []
 
     @property
     def stack_bytes(self) -> int | None:
@@ -167,8 +187,13 @@ class Finish:
         ]
         return max(sizes, default=None)
 
+    @property
+    def arity(self) -> int:
+        """How many arguments ``args`` gives a core."""
+        return len(self.steps) + self.select + len(self.fifos) + bool(self.scratch)
+
     def args(self, core: int) -> list:
-        """What core ``core``'s function is given for the finish, last."""
+        """What core ``core``'s function is given for the chains, together."""
         return [
             *(k for k, _, _ in self.steps.values()),
             *self.rtps[core : core + 1],
@@ -178,68 +203,152 @@ class Finish:
 
     def bind(self) -> None:
         if self.select:
-            self.op.value("finish_chain").bind(self.rtps)
-        for e, of in zip(self.op.finish_inputs, self.fifos):
-            for k, fifo in enumerate(of):
-                e.lane(k).bind(fifo.prod())
+            self.op.value(f"{self.kind}_chain").bind(self.rtps)
 
     def read(self, args):
         """The chain a core applies, read between its barrier's wait and release."""
         return args[len(self.steps)][0] if self.select else None
 
-    def target(self, args, mode, tile):
-        """Where the producer writes ``tile``: where the chain's first step reads."""
-        odd = [i for i, c in enumerate(self.chains) if len(c) % 2]
+    def _odd(self, args, mode, tile):
+        """``args``' scratch line where the selected chain makes an odd
+        number of calls, else ``tile``.
+        """
+        odd = [i for i, c in enumerate(self.calls) if len(c) % 2]
         if not odd:
             return tile
-        if len(odd) == len(self.chains):
+        if len(odd) == len(self.calls):
             return args[-1]
         chosen = functools.reduce(arith.ori, (mode == i for i in odd))
         return arith.select(chosen, args[-1].op, tile)
 
-    def apply(self, args, mode, tile) -> None:
-        """Run the selected chain over the tile the producer wrote, ending in ``tile``."""
+    def _ends(self, calls: int, tile, scratch) -> tuple:
+        """Where a chain of ``calls`` calls over ``tile`` starts, and the
+        line it alternates with.
+        """
+        raise NotImplementedError
+
+    def _run(self, args, mode, tile, extras) -> None:
+        """Run the selected chain over ``tile`` (``_ends``), ``extras`` its
+        steps' other input tiles, in order.
+        """
         kernels = dict(zip(self.steps, args))
-        at = len(self.steps) + self.select
-        fifos = iter(args[at : at + len(self.fifos)])
-        for i, chain in enumerate(self.chains):
-            if not chain:
+        for i, calls in enumerate(self.calls):
+            if not calls:
                 continue
             with if_(mode == i) if self.select else nullcontext():
-                src = tile if len(chain) % 2 == 0 else args[-1]
-                for j, link in enumerate(chain):
-                    dst = tile if (len(chain) - j) % 2 else args[-1]
-                    key = link.array_key()
-                    _, positions, scalars = self.steps[key]
-                    # Only a lone chain has extras (Operator._finish_at).
-                    extras = [next(fifos) for _ in range(len(link.op.inputs) - 1)]
-                    held = [f.acquire(1) for f in extras]
-                    tiles = dict(zip(positions, [*link.operands(src, held), dst]))
-                    kernels[key](
+                start, other = self._ends(len(calls), tile, args[-1])
+                given = iter(extras)
+                src, values = start, {}
+                for n, (link, j, operands) in enumerate(calls):
+                    names = [b.name for b in link.op.inputs]
+                    if j == 0:
+                        values = {
+                            name: src if k == link.at else next(given)
+                            for k, name in enumerate(names)
+                        }
+                    dst = other if n % 2 == 0 else start
+                    _, positions, scalars = self.steps[(link.array_key(), j)]
+                    ins = [src if o is None else values[o] for o in operands]
+                    tiles = dict(zip(positions, [*ins, dst]))
+                    kernels[(link.array_key(), j)](
                         *(
                             tiles[p] if p in tiles else scalars[p]
                             for p in range(len(tiles) + len(scalars))
                         )
                     )
-                    for f in extras:
-                        f.release(1)
+                    values.pop(names[link.at], None)
                     src = dst
+
+    @staticmethod
+    def _through(links, steps, gates, x, lo, hi, extras, dtype) -> tuple:
+        """``x`` and the interval ``[lo, hi]`` around it, flat float64,
+        through each of ``steps``: its input anywhere in the interval, its
+        output anywhere its gate admits around what it makes of that.
+        """
+        given = iter(extras)
+        for link, step, gate in zip(links, steps, gates):
+            others = [
+                np.asarray(next(given)).reshape(-1)
+                for _ in range(len(link.op.inputs) - 1)
+            ]
+            args = [link.operands(v.astype(dtype), others) for v in (x, lo, hi)]
+            made = [np.asarray(step.reference(*a), np.float64).ravel() for a in args]
+            x = made[0]
+            lo, hi = _interval(gate, made, [tuple(a) for a in args], dtype)
+        return x, lo, hi
+
+    @staticmethod
+    def _steps(links, x: np.ndarray, extras, line: int) -> np.ndarray:
+        """``x`` through ``links`` on the host, each step given its share of ``extras``."""
+        given = iter(extras)
+        for link in links:
+            others = [
+                np.asarray(next(given)).reshape(-1)
+                for _ in range(len(link.op.inputs) - 1)
+            ]
+            step = link.op.over(x.size, line)
+            x = np.asarray(
+                step.reference(*link.operands(x.reshape(-1), others))
+            ).reshape(x.shape)
+        return x
+
+
+class Finish(_Chains):
+    """The steps a producer's cores apply to each tile of its output declared
+    ``Out(..., finish=True)`` before releasing it, the producer writing
+    where the selected chain's first call reads.
+
+    Args:
+        op: The producer.
+        cores: The cores applying it, on the array side; none on the host.
+    """
+
+    kind = "finish"
+    scratch_name = "finished"
+
+    def __init__(self, op: Operator, cores: int = 0) -> None:
+        # The one output, where a chain has steps (Operator.resolved checks).
+        self.out = op.outputs[-1]
+        super().__init__(
+            op, op.finishes or (op.finish,), self.out.finish_line, self.out.dtype, cores
+        )
+        # Each step's other inputs, streamed per core as the output is.
+        self.fifos = [
+            [
+                ObjectFifo(e.tile, name=f"{e.name}_{k}", depth=e.depth)
+                for k in range(cores)
+            ]
+            for e in op.finish_inputs
+        ]
+
+    def bind(self) -> None:
+        super().bind()
+        for e, of in zip(self.op.finish_inputs, self.fifos):
+            for k, fifo in enumerate(of):
+                e.lane(k).bind(fifo.prod())
+
+    def target(self, args, mode, tile):
+        """Where the producer writes ``tile``: where the chain's first call reads."""
+        return self._odd(args, mode, tile)
+
+    def apply(self, args, mode, tile) -> None:
+        """Run the selected chain over the tile the producer wrote, ending in ``tile``."""
+        at = len(self.steps) + self.select
+        # Only a lone chain has extras (Operator._finish_at).
+        fifos = args[at : at + len(self.fifos)]
+        self._run(args, mode, tile, [f.acquire(1) for f in fifos])
+        for f in fifos:
+            f.release(1)
+
+    def _ends(self, calls: int, tile, scratch) -> tuple:
+        # The last call writes the tile.
+        return (tile, scratch) if calls % 2 == 0 else (scratch, tile)
 
     def reference(self, y: np.ndarray, *extras: np.ndarray) -> np.ndarray:
         """``y``, the producer's output, through its own chain on the host,
         each step given its ``extras`` (the producer's ``finish_inputs``).
         """
-        given = iter(extras)
-        for link in self.op.finish:
-            others = [
-                np.asarray(next(given)).reshape(-1)
-                for _ in range(len(link.op.inputs) - 1)
-            ]
-            step = link.op.over(y.size, self.line)
-            y = np.asarray(
-                step.reference(*link.operands(y.reshape(-1), others))
-            ).reshape(y.shape)
-        return y
+        return self._steps(self.op.finish, y, extras, self.line)
 
     def tolerance(self) -> Tolerance:
         """The producer's gate carried through its chain: each step's input
@@ -254,27 +363,109 @@ class Finish:
         gates = [s.gate() or Tolerance.default_for(dtype) for s in steps]
 
         def bound(*inputs):
-            given = iter(inputs[n:])
             x = np.asarray(plain.reference(*inputs[:n]))
             shape, x = x.shape, x.astype(dtype).astype(np.float64).ravel()
             lo, hi = _interval(own, [x], [inputs[:n]], dtype)
-            for link, step, gate in zip(self.op.finish, steps, gates):
-                others = [
-                    np.asarray(next(given)).reshape(-1)
-                    for _ in range(len(link.op.inputs) - 1)
-                ]
-                args = [link.operands(v.astype(dtype), others) for v in (x, lo, hi)]
-                made = [
-                    np.asarray(step.reference(*a), np.float64).ravel() for a in args
-                ]
-                x = made[0]
-                lo, hi = _interval(gate, made, [tuple(a) for a in args], dtype)
+            x, lo, hi = self._through(
+                self.op.finish, steps, gates, x, lo, hi, inputs[n:], dtype
+            )
             return np.maximum(hi - x, x - lo).reshape(shape)
 
         return Tolerance.bounded(
             bound,
             max_mismatch_frac=sum(t.max_mismatch_frac for t in [own, *gates]),
             note=f"{own.note}; through "
+            + ", then ".join(
+                f"{type(s).__name__} ({g.note})" for s, g in zip(steps, gates)
+            ),
+        )
+
+
+class Prepare(_Chains):
+    """The steps a consumer's cores apply to each tile of its input declared
+    ``In(..., prepare=True)`` after acquiring it, the consumer reading where
+    the selected chain's last call wrote. A step's other inputs are tiles
+    of the same stream, filled after the prepared one, so a core acquires
+    ``tiles`` of it at once.
+
+    Args:
+        op: The consumer.
+        cores: The cores applying it, on the array side; none on the host.
+    """
+
+    kind = "prepare"
+    scratch_name = "prepared"
+
+    def __init__(self, op: Operator, cores: int = 0) -> None:
+        self.into = next(b for b in op.inputs if b.member.prepare)
+        super().__init__(
+            op,
+            op.prepares or (op.prepare,),
+            math.prod(self.into.tile_shape),
+            self.into.dtype,
+            cores,
+        )
+        self.tiles = 1 + len(op.prepare_inputs)
+        # The prepared input's fifo: its own depth, and room for the steps' inputs.
+        self.depth = self.into.depth + len(op.prepare_inputs)
+
+    def apply(self, args, mode, held):
+        """Run the selected chain over ``held``, the ``tiles`` a core
+        acquired, and return the line it ended in.
+        """
+        tile, *extras = held if self.tiles > 1 else (held,)
+        self._run(args, mode, tile, extras)
+        return self._odd(args, mode, tile)
+
+    def _ends(self, calls: int, tile, scratch) -> tuple:
+        return tile, scratch
+
+    def reference(self, x: np.ndarray, *extras: np.ndarray) -> np.ndarray:
+        """``x``, the consumer's prepared input, through its own chain on
+        the host, each step given its ``extras`` (the consumer's
+        ``prepare_inputs``).
+        """
+        return self._steps(self.op.prepare, x, extras, self.line)
+
+    def tolerance(self) -> Tolerance:
+        """The consumer's gate around what it makes of the prepared input,
+        widened by the interval the prologue's gates admit of that input
+        carried through the consumer, which is linear in it: the consumer
+        of the interval's radius and the magnitudes of its other inputs, in
+        float32 and unrounded. For a consumer without a finish.
+        """
+        plain = dataclasses.replace(self.op, prepare=(), prepares=())
+        (out,) = plain.outputs
+        own = plain.gate() or Tolerance.default_for(out.dtype)
+        n = len(plain.inputs)
+        at = [b.name for b in plain.inputs].index(self.into.name)
+        dtype = self.into.dtype
+        steps = [
+            link.op.over(self.into.elements, self.line) for link in self.op.prepare
+        ]
+        gates = [s.gate() or Tolerance.default_for(dtype) for s in steps]
+
+        def bound(*inputs):
+            x = np.asarray(inputs[at])
+            v = x.astype(np.float64).ravel()
+            v, lo, hi = self._through(
+                self.op.prepare, steps, gates, v, v, v, inputs[n:], dtype
+            )
+            prepared = list(inputs[:n])
+            prepared[at] = v.astype(dtype).reshape(x.shape)
+            y = np.asarray(plain.reference(*prepared))
+            spread = [np.abs(np.asarray(i, np.float32)) for i in inputs[:n]]
+            spread[at] = np.maximum(hi - v, v - lo).astype(np.float32).reshape(x.shape)
+            spread = np.asarray(plain.reference(*spread), np.float64)
+            y64 = y.astype(np.float64).ravel()
+            ylo, yhi = _interval(own, [y64], [tuple(prepared)], out.dtype)
+            radius = np.maximum(yhi - y64, y64 - ylo)
+            return (spread.ravel() + radius).reshape(y.shape)
+
+        return Tolerance.bounded(
+            bound,
+            max_mismatch_frac=sum(t.max_mismatch_frac for t in [own, *gates]),
+            note=f"{own.note}; after "
             + ", then ".join(
                 f"{type(s).__name__} ({g.note})" for s, g in zip(steps, gates)
             ),
@@ -351,13 +542,24 @@ class Elementwise(Operator):
         """The kernel's scalar arguments its contract leaves unbound, in order."""
         return ()
 
+    def chain(self) -> tuple[KernelCall, ...]:
+        """The kernel calls a core makes over one line, in order, when
+        another operator's core applies this one (``Finish``, ``Prepare``):
+        ``kernel()`` over the inputs, unless an operator with an array of its
+        own makes more.
+        """
+        extra = {b.name for b in self.finish_inputs}
+        names = tuple(b.name for b in self.inputs if b.name not in extra)
+        return (KernelCall(self.kernel(), self.scalars(), names),)
+
     def _arguments(
-        self, kernel: ExternalFunction, n_in: int, n_out: int
+        self, kernel: ExternalFunction, given: tuple, n_in: int, n_out: int
     ) -> tuple[list[int], dict]:
         """Where each tile goes in a call, and the scalar arguments.
 
         Args:
             kernel: The kernel called.
+            given: The scalars its contract leaves unbound, in order.
             n_in: The input tiles a call is given.
             n_out: The output tiles a call is given.
 
@@ -376,12 +578,12 @@ class Elementwise(Operator):
         roles = contract.roles
         scalars = dict(contract.parameter_bindings)
         free = [i for i, r in enumerate(roles) if r is Param and i not in scalars]
-        if len(free) != len(self.scalars()):
+        if len(free) != len(given):
             raise ValueError(
                 f"{type(self).__name__}: {kernel.name} leaves {len(free)} scalar(s) "
-                f"unbound; scalars() gives {len(self.scalars())}"
+                f"unbound; {len(given)} given"
             )
-        scalars.update(zip(free, self.scalars()))
+        scalars.update(zip(free, given))
         outs = list(contract.out_indices)
         ins = [i for i in range(len(roles)) if i not in scalars and i not in outs]
         if (len(ins), len(outs)) != (n_in, n_out):
@@ -401,7 +603,8 @@ class Elementwise(Operator):
         raise ValueError(f"{type(self).__name__} is not a run of lines")
 
     def at_line(self, line: int, dtype, dev, ordered: bool = True) -> Self:
-        if type(self).array is not Elementwise.array:
+        own = type(self).array is not Elementwise.array
+        if own and type(self).chain is Elementwise.chain:
             raise ValueError(f"{type(self).__name__}'s cores run an array of their own")
         streamed = [np.dtype(b.dtype) for b in self.buffers if b.streamed]
         if len(self.outputs) != 1 or streamed != [np.dtype(dtype)] * len(streamed):
@@ -410,8 +613,9 @@ class Elementwise(Operator):
                 f"{np.dtype(dtype)} tiles in and one out"
             )
         op = self.over(line, line).resolved(dev)
-        kernel = op.kernel()  # its factory refuses a line it does not run at
-        op._arguments(kernel, len(op.inputs), 1)
+        # A factory refuses a line it does not run at.
+        for call in op.chain():
+            op._arguments(call.kernel, call.scalars, len(call.operands), 1)
         return op
 
     def tolerance(self) -> Tolerance | None:
@@ -436,7 +640,7 @@ class Elementwise(Operator):
             )
         (out,) = op.outputs
         n = len(inputs) - len(op.finish_inputs)
-        _, scalars = op._arguments(op.kernel(), n, 1)
+        _, scalars = op._arguments(op.kernel(), op.scalars(), n, 1)
         lines = iter(x.reshape(op.lines, -1, copy=False) for x in inputs[:n])
         y = contract.reference(
             *(
@@ -458,7 +662,7 @@ class Elementwise(Operator):
         n_in = len(ins)
         cores = self.cores
         kernel = self.kernel()
-        positions, scalars = self._arguments(kernel, n_in, len(outs))
+        positions, scalars = self._arguments(kernel, self.scalars(), n_in, len(outs))
         order = {i: k for k, i in enumerate(positions)}
         n_args = len(positions) + len(scalars)
 

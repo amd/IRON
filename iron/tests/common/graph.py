@@ -25,7 +25,8 @@ from iron.common.design.build import device_symbol
 from iron.common.graph import Handle, TracedGraph, Tracer
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import _words
-from iron.common.graph.fold import folded, replaced
+from iron.common.declare import Unresolvable
+from iron.common.graph.fold import Prologue, folded, replaced
 from iron.common.graph.handle import Affine, Value
 from iron.common.image import OperatorSequence
 from iron.common.image.artifacts import Parameter
@@ -646,6 +647,86 @@ def test_a_fold_runs_where_what_it_reads_is_written(npu2):
     assert [h.name for h in f.steps[2].inputs] == ["b", f.steps[0].outputs[0].name]
 
 
+class _Project(iron.Graph):
+    def __init__(self, heads=2, residual=False, shared=False):
+        self.ws = [z(512, E) for _ in range(heads)]
+        self.norm = z(E)
+        self.residual, self.shared = residual, shared
+
+    def body(self, x, r):
+        s = ElementwiseAdd(x, r) if self.residual else x
+        h = RMSNorm(s, weight=self.norm)
+        ys = [GEMV(w, h, num_aie_columns=8) for w in self.ws]
+        return (*ys, ElementwiseAdd(h, r)) if self.shared else tuple(ys)
+
+
+def test_a_norm_folds_into_the_matvecs_that_read_it(npu2):
+    t = _Project().trace(x=(1, E), r=(1, E))
+    f, count = folded(t, npu2)
+    assert [(str(fold), n) for fold, n in count.items()] == [
+        ("RMSNorm into GEMV, GEMV", 1)
+    ]
+    assert [type(s.op).__name__ for s in f.steps] == ["GEMV", "GEMV"]
+    # Each matvec reads the norm's input in place of its output, then its weight.
+    for step, w in zip(f.steps, ("ws.0", "ws.1")):
+        fused = step.op.resolved(npu2)
+        assert [(type(link.op), link.at) for link in fused.prepare] == [(RMSNorm, 0)]
+        assert [b.name for b in fused.inputs] == ["A", "B", "prepare0_weight"]
+        assert [h.name for h in step.inputs] == [w, "x", "norm"]
+    assert replaced(t, f) == [
+        (t.steps[1].op, f.steps[0].op),
+        (t.steps[2].op, f.steps[1].op),
+    ]
+    rng = np.random.default_rng(0)
+    A = rng.standard_normal((512, E)).astype(bfloat16)
+    x, w = (rng.standard_normal(E).astype(bfloat16) for _ in range(2))
+    norm = RMSNorm(rows=1, tile_size=E, weighted=True)
+    want = GEMV(M=512, K=E).reference(A, norm.reference(x.reshape(1, E), w).reshape(E))
+    np.testing.assert_array_equal(f.steps[0].op.reference(A, x, w), want)
+
+
+def test_a_norm_read_beside_the_matvecs_stays(npu2):
+    t = _Project(shared=True).trace(x=(1, E), r=(1, E))
+    assert not any(isinstance(fold, Prologue) for fold in folded(t, npu2)[1])
+
+
+def test_a_prologue_chains_through_the_step_before_it(npu2):
+    t = _Project(heads=1, residual=True).trace(x=(1, E), r=(1, E))
+    f, count = folded(t, npu2)
+    first, chain = count
+    assert [str(fold) for fold in count] == [
+        "RMSNorm into GEMV",
+        "ElementwiseAdd, then RMSNorm into GEMV",
+    ]
+    (step,) = f.steps
+    fused = step.op.resolved(npu2)
+    assert [type(link.op) for link in fused.prepare] == [ElementwiseAdd, RMSNorm]
+    assert [h.name for h in step.inputs] == ["ws.0", "x", "r", "norm"]
+    # A prologue of a chain brings the prologues after it; the last comes alone.
+    assert folded(t, npu2, (chain,))[1] == count
+    assert list(folded(t, npu2, (first,))[1]) == [first]
+    rng = np.random.default_rng(0)
+    A = rng.standard_normal((512, E)).astype(bfloat16)
+    x, r, w = (rng.standard_normal(E).astype(bfloat16) for _ in range(3))
+    s = ElementwiseAdd(size=E).reference(x, r)
+    h = RMSNorm(rows=1, tile_size=E, weighted=True).reference(s.reshape(1, E), w)
+    want = GEMV(M=512, K=E).reference(A, h.reshape(E))
+    np.testing.assert_array_equal(step.op.reference(A, x, r, w), want)
+
+
+def test_a_prologue_the_matvec_cannot_hold_is_refused(npu2):
+    # A K of 8192: A's tiles, B's line and the prepared line fill L1.
+    with pytest.raises(ValueError, match="past its 65536"):
+        GEMV(M=2048, K=H).prefold(RMSNorm(rows=1, tile_size=H)).resolved(npu2)
+    # Batched, a core takes a line per batch, beside which no weight streams.
+    batched = GEMV(M=256, K=128, num_batches=4)
+    batched.prefold(RMSNorm(rows=1, tile_size=128)).resolved(npu2)
+    with pytest.raises(Unresolvable, match="inputs stream in beside one"):
+        batched.prefold(RMSNorm(rows=1, tile_size=128, weighted=True)).resolved(npu2)
+    # GEMM prepares no input.
+    assert GEMM(M=256, K=E, N=512).prefold(RMSNorm(rows=256, tile_size=E)) is None
+
+
 def test_two_spellings_of_one_array_are_one_design():
     """Identity is taken after resolution: a tunable left to resolve and the same
     tunable given its resolved value name one array, and a sequence builds it
@@ -748,6 +829,25 @@ def test_llama_decode_traces_and_tunes():
         ).num_aie_columns
         == 1
     )
+
+
+def test_llama_decode_folds_its_norms_into_the_projections(npu2):
+    model = small(max_seq_len=256)
+    t = model.trace(**model.shapes(1))
+    f, count = folded(t, npu2)
+    # Per layer: the attention norm into q, k and v, the feed-forward's into
+    # gate and up, and its product into down; the last residual and the
+    # final norm into the head.
+    assert {str(fold): n for fold, n in count.items()} == {
+        "RMSNorm into GEMV, GEMV, GEMV": 2,
+        "RMSNorm into GEMV, GEMV": 2,
+        "ElementwiseMul into GEMV": 2,
+        "SiLU, then ElementwiseMul into GEMV": 2,
+        "RMSNorm into GEMV": 1,
+        "ElementwiseAdd, then RMSNorm into GEMV": 1,
+    }
+    assert (len(t.steps), len(f.steps)) == (41, 31)
+    assert not any(type(s.op) is RMSNorm for s in f.steps)
 
 
 def test_llama_prompt_traces_over_the_same_caches():

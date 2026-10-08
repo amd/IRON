@@ -6,7 +6,7 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise, norm
 from aie.utils.verify import Tolerance
 
-from iron.common import In, Out, Rowwise, param
+from iron.common import In, KernelCall, Out, Rowwise, param
 from iron.common.testing import Sweep, Testing
 
 # The longest weighted row: the multiplying core holds the weight row beside
@@ -69,6 +69,14 @@ class RMSNorm(Rowwise):
 
     def scalars(self) -> tuple:
         return (self.epsilon,)
+
+    def chain(self) -> tuple[KernelCall, ...]:
+        if not self.weighted:
+            return super().chain()
+        return (
+            KernelCall(self.kernel(), self.scalars(), ("x",)),
+            KernelCall(eltwise.mul_sized(self.tile_size), (), (None, "weight")),
+        )
 
     def reference(self, x, weight=None):
         """The kernels' references in turn: the normalized row rounded to

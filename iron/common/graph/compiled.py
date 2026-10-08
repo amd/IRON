@@ -331,9 +331,9 @@ class Graph:
             coresident: Packs designs into shared configurations; a
                 ``JointNarrowing`` folds steps and narrows designs where its
                 cost table says they gain, then packs them.
-            fold: Fold every step its producer can apply in its own cores
-                into the producer (``iron.common.graph.fold``), whatever it
-                costs.
+            fold: Fold every step its readers or its producer can apply
+                in their own cores into them (``iron.common.graph.fold``),
+                whatever it costs.
             **shapes: Each input's shape, or ``(shape, dtype)``.
         """
         if dev is not None:
@@ -343,7 +343,8 @@ class Graph:
             traced, count = folded(traced, aie_utils.ensure_current_device())
             if verbose:
                 print(
-                    f"{self.name}: {count.total()} step(s) folded into their producers"
+                    f"{self.name}: {count.total()} step(s) folded into their "
+                    f"readers or producers"
                 )
         tuning = None
         groups: AdjacentPacking | list[list[Operator]] | None

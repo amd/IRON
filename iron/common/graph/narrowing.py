@@ -59,7 +59,7 @@ from ..declare import Operator
 from ..design import OperatorDesign, runtime
 from ..image.coresidence import Packing, fits
 from ..image.fusion import generate, parameters_preamble
-from .fold import Fold, folded
+from .fold import Fold, Prologue, folded
 from .trace import TracedGraph
 
 
@@ -368,8 +368,8 @@ class Tuning:
     baseline_us: float
     unmeasured: tuple[str, ...]
     inexact: tuple[str, ...] = ()
-    folds: tuple[Fold, ...] = ()
-    unpriced: tuple[Fold, ...] = ()
+    folds: tuple[Fold | Prologue, ...] = ()
+    unpriced: tuple[Fold | Prologue, ...] = ()
 
     def apply(
         self, traced: TracedGraph, dev=None
@@ -543,7 +543,7 @@ class JointNarrowing:
         self,
         traced: TracedGraph,
         dev,
-        folds: tuple[Fold, ...],
+        folds: tuple[Fold | Prologue, ...],
         keys: set[str],
     ) -> Tuning | None:
         """``traced`` tuned with ``folds`` applied, or None where a design

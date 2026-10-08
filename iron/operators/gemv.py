@@ -30,6 +30,7 @@ from iron.common import (
     Link,
     Operator,
     Out,
+    Prepare,
     Value,
     auto,
     OptionalDim,
@@ -38,6 +39,7 @@ from iron.common import (
 from iron.common.design import BdLimits, Target
 from iron.common.testing import Case, Testing
 from iron.operators.gelu import GELU
+from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 
 
@@ -87,6 +89,21 @@ def _cases(cls, dev: Device):
         )
         return Case(dict(plain.kwargs, finish=steps[0], finishes=shared), id=label)
 
+    def prepared(M, K, cols, tsi, tso, *chains):
+        # Each chain names its steps; the first is the case's own, more share one array.
+        steps = [tuple(Link(op) for _, op in c) for c in chains]
+        plain = case(M, K, cols, tsi, tso)
+        shared = tuple(steps) if len(steps) > 1 else ()
+        names = ["".join(name for name, _ in c) or "none" for c in chains]
+        label = f"{plain.label}-prepare_{names[0]}" + "".join(
+            f"-shares_{n}" for n in names[1:]
+        )
+        return Case(dict(plain.kwargs, prepare=steps[0], prepares=shared), id=label)
+
+    def norm(K, weighted=False):
+        name = "RMSNormWeighted" if weighted else "RMSNorm"
+        return name, RMSNorm(rows=1, tile_size=K, weighted=weighted)
+
     # Benched: the large matrices across the whole device, which run well
     # past the dispatch cost.
     widest = dev.cols
@@ -103,6 +120,18 @@ def _cases(cls, dev: Device):
         + [finished(*p, (SiLU,)) for p in plain[:3]]
         # One array serving both, each design selecting its own.
         + [finished(*plain[2], (), (SiLU,)), finished(*plain[2], (SiLU,), ())]
+        # Each core preparing B, the step producing it folded in: a K of
+        # 8192 leaves no room in L1 for the prepared line, 4096 weighted the
+        # least.
+        + [
+            prepared(*p, (norm(p[1], weighted),))
+            for p in (plain[0], plain[2], plain[4], (2048, 4096, 8, 2, 256))
+            for weighted in (False, True)
+        ]
+        + [
+            prepared(*plain[2], (), (norm(2048),)),
+            prepared(*plain[2], (norm(2048),), ()),
+        ]
     )
 
 
@@ -148,7 +177,8 @@ class GEMV(Operator):
     # A single batch carries no batch dimension at all, rather than one of
     # extent 1, so an unbatched operator has 2-D shapes. One fifo per column
     # for each of A and C; B, the whole vector, is one fifo every column's
-    # core reads, so it takes one shim channel however wide the array.
+    # core reads, so it takes one shim channel however wide the array. Each
+    # core prepares it, so the step producing it folds into them.
     A = In(
         OptionalDim(num_matrices),
         M,
@@ -157,7 +187,7 @@ class GEMV(Operator):
         per=(num_aie_columns,),
         depth=2,
     )
-    B = In(OptionalDim(num_batches), K, tile=(K,), depth=1)
+    B = In(OptionalDim(num_batches), K, tile=(K,), depth=1, prepare=True)
     C = Out(
         OptionalDim(num_batches),
         M,
@@ -279,6 +309,24 @@ class GEMV(Operator):
                 raise ValueError(
                     f"{name}={tile} does not evenly divide M/num_aie_columns={rows}"
                 )
+        # A core holds A's tiles, B's line and each prologue input's, C's
+        # tiles and each finish input's, a scratch line per kind of chain it
+        # applies, and the default stack, which no elementwise kernel exceeds.
+        item = np.dtype(bfloat16).itemsize
+        line, out = self.K * item, self.tile_size_output * item
+        held = (
+            self.A.depth * self.tile_size_input * line
+            + (self.B.depth + len(self.prepare_inputs)) * line
+            + self.C.depth * (1 + len(self.finish_inputs)) * out
+            + line * any(self.prepares or (self.prepare,))
+            + out * any(self.finishes or (self.finish,))
+            + self.dev.default_core_stack_bytes
+        )
+        if held > self.dev.core_memory_bytes:
+            raise ValueError(
+                f"K={self.K}, tile_size_input={self.tile_size_input}: a core "
+                f"holds {held} bytes, past its {self.dev.core_memory_bytes}"
+            )
 
     def array(self, target):
         K, cols = self.K, self.num_aie_columns
@@ -302,12 +350,15 @@ class GEMV(Operator):
         # filled it: one call's tile_size_input rows can be narrower than a
         # step's vector.
         finish = Finish(self, cols)
+        prepare = Prepare(self, cols)
 
         A_fifos = [
             ObjectFifo(self.A.tile, name=f"A_L3L1_{i}", depth=self.A.depth)
             for i in range(cols)
         ]
-        B_fifo = ObjectFifo(self.B.tile, name="B_L3L1", depth=self.B.depth)
+        # Each core holds just the tiles it acquires at once: a depth its
+        # shim end shares would give it one more.
+        B_fifo = ObjectFifo(self.B.tile, name="B_L3L1", depth=1)
         C_fifos = [
             ObjectFifo(self.C.tile, name=f"C_L1L3_{i}", depth=self.C.depth)
             for i in range(cols)
@@ -329,13 +380,15 @@ class GEMV(Operator):
             barrier.wait_for_value(1)
             n = rest[0].read() if dynamic else rtp[0]
             rest = rest[1:] if dynamic else rest
+            prepared, rest = rest[: prepare.arity], rest[prepare.arity :]
             batches = rtp[1]
+            mode_p = prepare.read(prepared)
             mode = finish.read(rest)
             # The wait leaves the barrier set: release it, or a design sharing
             # this array runs on these values.
             barrier.release_with_value(1)
             for _ in range_(batches):
-                b = B_fifo.acquire(1)
+                b = prepare.apply(prepared, mode_p, B_fifo.acquire(prepare.tiles))
                 # Each column produces tiles output tiles of tile_size_output
                 # rows per batch, tile_size_input rows per kernel call.
                 for _ in range_(n):
@@ -349,22 +402,26 @@ class GEMV(Operator):
                         A_fifo.release(1)
                     finish.apply(rest, mode, c)
                     C_fifo.release(1)
-                B_fifo.release(1)
+                B_fifo.release(prepare.tiles)
 
         workers = [
             Worker(
                 core_body,
                 [
                     A_fifos[i].cons(),
-                    B_fifo.cons(),
+                    B_fifo.cons(depth=prepare.depth),
                     C_fifos[i].prod(),
                     matvec,
                     rtps[i],
                     barriers[i],
                     *([self.tiles.param] if dynamic else []),
+                    *prepare.args(i),
                     *finish.args(i),
                 ],
-                stack_size=finish.stack_bytes,
+                stack_size=max(
+                    (n for n in (prepare.stack_bytes, finish.stack_bytes) if n),
+                    default=None,
+                ),
             )
             for i in range(cols)
         ]
@@ -375,6 +432,7 @@ class GEMV(Operator):
         if not dynamic:
             self.tiles.bind(rtps, 0)
         self.batches.bind(rtps, 1)
+        prepare.bind()
         finish.bind()
         return workers + barriers
 
@@ -465,11 +523,16 @@ class GEMV(Operator):
     def ops(self) -> int:
         return 2 * self.M * self.K * self.num_batches
 
-    def reference(self, A, B):
-        """``C = A @ B``, then its finish: one product per batch when ``A``
+    def reference(self, A, B, *extras):
+        """``C = A @ B``, B through its prologue and C through its finish,
+        ``extras`` their steps' other inputs in turn: one product per batch when ``A``
         is ``(batches, M, K)`` and ``B`` ``(batches, K)``, each matrix of
         ``A`` serving ``repeat`` consecutive batches.
         """
+        op = self.resolved()
+        prologue = len(op.prepare_inputs)
+        if op.prepare:
+            B = Prepare(op).reference(B, *extras[:prologue])
         if self.repeat > 1:
             A = np.repeat(A.reshape(-1, *A.shape[-2:]), self.repeat, axis=0)
         # Not linalg.mv's contract: that is one tile's product, and mv_ref's
@@ -483,14 +546,19 @@ class GEMV(Operator):
             C = np.matmul(a, b).reshape(A.shape[0], A.shape[1]).astype(A.dtype)
         else:
             C = (a @ b.reshape(A.shape[-1])).astype(A.dtype)
-        return Finish(self.resolved()).reference(C) if self.finish else C
+        if op.finish:
+            return Finish(op).reference(C, *extras[prologue:])
+        return C
 
     def tolerance(self) -> Tolerance:
         """The gate GEMV's sweeps hold: C accumulates in f32 and rounds
-        once, and a finish carries that through its steps' own gates.
+        once, a prologue widens that by its steps' gates carried through
+        the product, and a finish carries it through its steps' own gates.
         Tighter than linalg.mv's contract, the C++ matmul harness's 0.05
         and 0.5.
         """
         if self.finish:
             return Finish(self).tolerance()
+        if self.prepare:
+            return Prepare(self).tolerance()
         return Tolerance.relative(0.04, 1e-3, note="f32 accumulation, rounded once")
