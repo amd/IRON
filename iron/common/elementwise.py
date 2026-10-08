@@ -26,7 +26,9 @@ from contextlib import nullcontext
 from typing import ClassVar, Self
 
 import aie.dialects.arith as arith
+import aie.dialects.memref as memref
 import numpy as np
+from aie.helpers.util import np_ndarray_type_to_memref_type
 from aie.iron import Buffer, ObjectFifo, Worker, WorkerRuntimeBarrier, ceildiv
 from aie.iron.controlflow import if_, range_
 from aie.iron.kernel import ExternalFunction
@@ -307,18 +309,21 @@ class Finish(_Chains):
         super().__init__(
             op, op.finishes or (op.finish,), self.out.finish_line, self.out.dtype, cores
         )
-        # Each step's other inputs, streamed per core as the output is.
+        # Each step's other inputs, streamed per core as the output is, or
+        # riding the producer's fed input.
+        self.streamed = [e for e in op.finish_inputs if e.streamed]
+        self.riding = len(op.finish_inputs) - len(self.streamed)
         self.fifos = [
             [
                 ObjectFifo(e.tile, name=f"{e.name}_{k}", depth=e.depth)
                 for k in range(cores)
             ]
-            for e in op.finish_inputs
+            for e in self.streamed
         ]
 
     def bind(self) -> None:
         super().bind()
-        for e, of in zip(self.op.finish_inputs, self.fifos):
+        for e, of in zip(self.streamed, self.fifos):
             for k, fifo in enumerate(of):
                 e.lane(k).bind(fifo.prod())
 
@@ -326,14 +331,36 @@ class Finish(_Chains):
         """Where the producer writes ``tile``: where the chain's first call reads."""
         return self._odd(args, mode, tile)
 
-    def apply(self, args, mode, tile) -> None:
-        """Run the selected chain over the tile the producer wrote, ending in ``tile``."""
+    def apply(self, args, mode, tile, feed=None) -> None:
+        """Run the selected chain over the tile the producer wrote, ending in ``tile``.
+
+        Args:
+            feed: The consumer end of the producer's fed input, whose next
+                tiles hold the riding inputs' share of ``tile``, in order.
+        """
         at = len(self.steps) + self.select
         # Only a lone chain has extras (Operator._finish_at).
         fifos = args[at : at + len(self.fifos)]
-        self._run(args, mode, tile, [f.acquire(1) for f in fifos])
-        for f in fifos:
-            f.release(1)
+        if not self.riding:
+            self._run(args, mode, tile, [f.acquire(1) for f in fifos])
+            for f in fifos:
+                f.release(1)
+            return
+        held = feed.acquire(self.riding)
+        held = [held[i] for i in range(self.riding)] if self.riding > 1 else [held]
+        line = np_ndarray_type_to_memref_type(
+            np.ndarray[(self.line,), np.dtype[self.out.dtype]]
+        )
+        self._run(
+            args,
+            mode,
+            tile,
+            [
+                memref.reinterpret_cast(line, h, [], [], [], [0], [self.line], [1])
+                for h in held
+            ],
+        )
+        feed.release(self.riding)
 
     def _ends(self, calls: int, tile, scratch) -> tuple:
         # The last call writes the tile.

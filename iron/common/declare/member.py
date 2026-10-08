@@ -119,6 +119,11 @@ class _Buffer(_Member["BoundBuffer"]):
             this input after acquiring it (`Prepare`), so the step that
             produced it folds into them. The operator's output must be
             linear in it, which its tolerance relies on.
+        feed: The finish's inputs ride this input's stream rather than
+            streams of their own: after the tiles a core reads for one
+            output tile, the next tile of this stream holds that output
+            tile's input of each (`Finish.apply`), so the finish takes no
+            input channel of the core's and no shim channel.
     """
 
     direction: ClassVar[Direction]
@@ -136,6 +141,7 @@ class _Buffer(_Member["BoundBuffer"]):
         when: _DimSpec | None = None,
         finish: bool | tuple[_DimSpec, ...] = False,
         prepare: bool = False,
+        feed: bool = False,
     ) -> None:
         if per is not None and broadcast:
             raise TypeError("a stream is either per=<dim> or broadcast, not both")
@@ -164,6 +170,8 @@ class _Buffer(_Member["BoundBuffer"]):
                 "prepare=True names a streamed input of one-dimensional tiles, "
                 "which a core prepares"
             )
+        if feed and (tile is None or self.direction is not Direction.IN):
+            raise TypeError("feed=True names a streamed input, which a finish rides")
         self.shape = Shape(tuple(dims))
         self.dtype = dtype
         self.when = when
@@ -182,6 +190,7 @@ class _Buffer(_Member["BoundBuffer"]):
         self.finish = bool(finish)
         self.finish_block = None if isinstance(finish, bool) else Shape(finish)
         self.prepare = prepare
+        self.feed = feed
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.shape})"

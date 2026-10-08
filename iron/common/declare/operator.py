@@ -30,6 +30,7 @@ from typing import (
 
 import aie.utils as aie_utils
 import numpy as np
+from aie.dialects.aie import AIETileType
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import ceildiv
 from aie.utils.trace import TraceConfig
@@ -727,8 +728,10 @@ class Operator(metaclass=_OperatorMeta):
                 does not run at the tile, or ``finish`` is not among
                 ``finishes``.
             Unresolvable: Each core reads more streams, its own and the
-                finish's inputs, than a core tile has input channels, or a
-                finish input would stream into a block held out of order.
+                finish's inputs, than a core tile has input channels, a
+                finish input would stream into a block held out of order,
+                or the finish's inputs do not fit the tiles or the
+                descriptors of the input they ride (`feed=True`).
         """
         out = self.outputs[0] if len(self.outputs) == 1 else None
         # A subclass replacing array() does not apply what its base's output declares.
@@ -768,14 +771,67 @@ class Operator(metaclass=_OperatorMeta):
             else tuple(chains[k] for k in sorted(chains, key=repr))
         )
         self._bind()
+        name = type(self).__name__
         reads = sum(
             m.direction.fills and m.tile is not None for m in self._members_io()
         )
         if reads > dev.core_dma_channels_in:
             raise Unresolvable(
-                f"{type(self).__name__}: its cores read {reads} streams with the "
-                f"finish's inputs, past a core tile's {dev.core_dma_channels_in} "
-                f"input channels"
+                f"{name}: its cores read {reads} streams with the finish's "
+                f"inputs, past a core tile's {dev.core_dma_channels_in} input "
+                f"channels, and no input of its is declared feed=True for them "
+                f"to ride"
+            )
+        riding = [b for b in self.finish_inputs if not b.streamed]
+        if not riding:
+            return
+        feed = next(b for b in self.inputs if b.member.feed)
+        carried, line = math.prod(feed.tile_shape), math.prod(out.tile_shape)
+        # The rest of the tile re-reads the input's: a shim descriptor's iterations.
+        repeats = carried // line
+        if feed.bounded is not None or out.bounded is not None:
+            raise Unresolvable(
+                f"{name}: the finish's inputs ride {feed.name} an output tile at "
+                f"a time, which a per-call bound does not move by"
+            )
+        if feed.count != out.count:
+            raise Unresolvable(
+                f"{name}: the finish's inputs ride {feed.name}'s {feed.count} "
+                f"lanes, which are not {out.name}'s {out.count}"
+            )
+        if feed.dtype != out.dtype:
+            raise Unresolvable(
+                f"{name}: the finish's inputs, of {out.name}'s dtype, ride "
+                f"{feed.name}, whose tiles are of another"
+            )
+        if carried % line or repeats > 1 << dev.get_dma_bd_iter_bits(0, 0):
+            raise Unresolvable(
+                f"{name}: a {line}-element tile of the finish's inputs fills a "
+                f"{carried}-element tile of {feed.name} in at most "
+                f"{1 << dev.get_dma_bd_iter_bits(0, 0)} whole reads, and does not"
+            )
+        if len(riding) > feed.depth:
+            raise Unresolvable(
+                f"{name}: the finish's {len(riding)} inputs ride {feed.name}, "
+                f"whose cores hold {feed.depth} tiles of it at once"
+            )
+        # Every one is live until the drains: a shim tile's descriptors serve
+        # both directions of each of its channels, a lane its share of them.
+        transfers = (1 + len(riding)) * out.elements // (out.count * line)
+        shims = sum(
+            dev.get_tile_type(col, 0) is AIETileType.ShimNOCTile
+            for col in range(dev.cols)
+        )
+        held = (
+            dev.get_num_bds(AIETileType.ShimNOCTile)
+            * shims
+            // (dev.shim_dma_channels_in + dev.shim_dma_channels_out)
+        )
+        if transfers > held:
+            raise Unresolvable(
+                f"{name}: a lane of {feed.name} carrying the finish's inputs is "
+                f"{transfers} transfers, one per tile of each, past the {held} "
+                f"descriptors a lane of a shim tile holds"
             )
 
     def _prepare_at(self, dev) -> None:
@@ -1055,6 +1111,8 @@ class Operator(metaclass=_OperatorMeta):
         extras = []
         if len(outs) == 1 and outs[0].finish:
             (out,) = outs
+            # Riding a feed, an input is no stream of its own (Sequence.fill).
+            fed = any(m.feed for m in self._members_io())
             for i, link in enumerate(self.finish):
                 for k, b in enumerate(link.op.inputs):
                     if k == link.at:
@@ -1062,8 +1120,8 @@ class Operator(metaclass=_OperatorMeta):
                     extra = In(
                         *out.shape.dims,
                         dtype=out.dtype,
-                        tile=out.tile.dims,
-                        per=None if out.per is None else out.per.dims,
+                        tile=None if fed else out.tile.dims,
+                        per=None if fed or out.per is None else out.per.dims,
                         depth=out.depth,
                     )
                     extra.__set_name__(type(self), f"finish{i}_{b.name}")

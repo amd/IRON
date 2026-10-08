@@ -8,6 +8,7 @@ from __future__ import annotations
 from math import prod
 from typing import Any
 
+import numpy as np
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.ir import IntegerType
@@ -44,10 +45,12 @@ class Sequence:
             self.op.sequence(self)
             return
         tg = TaskGroup()
-        prologue = {b.name for b in self.op.prepare_inputs}
+        riders = {b.name for b in self.op.prepare_inputs} | {
+            b.name for b in self.op.finish_inputs if not b.streamed
+        }
         for buf in self.op.inputs:
-            if buf.name in prologue:
-                continue  # filled into the stream it prepares (fill)
+            if buf.name in riders:
+                continue  # filled into the stream it prepares or rides (fill)
             for slot, tap, size_by in self.plan(buf):
                 self.fill(slot, (buf, tap), group=tg, size_by=size_by)
         for buf in self.op.outputs:
@@ -160,7 +163,9 @@ class Sequence:
     ):
         """Fill ``stream`` from ``source``; a prepared input's lane is then
         filled with each of the operator's ``prepare_inputs``, which its
-        cores acquire with the tile.
+        cores acquire with the tile. A fed input's lane takes its whole
+        share, an output tile's worth at a time, each followed by that
+        output tile of each finish input riding it, re-read to fill a tile.
 
         Args:
             offset_by: A per-call value moving the base address.
@@ -168,17 +173,81 @@ class Sequence:
                 dimension (0 the outermost).
             managed: False hands the queue slot and descriptors to the
                 compiler, which frees them after a later wait; joins no group.
+
+        Raises:
+            ValueError: A fed input's lane is filled with a per-call offset
+                or size, or with other than its share.
         """
+        lane = self._lane(stream)
+        riding = [e for e in self.op.finish_inputs if not e.streamed]
+        if lane.buffer.member.feed and riding:
+            buffer, tap, sliced_by = self._resolve(source, stream)
+            name = f"{type(self.op).__name__}.{buffer.name}"
+            if offset_by or size_by or sliced_by:
+                raise ValueError(
+                    f"{name}: the finish's inputs ride it an output tile at a "
+                    f"time, so it moves by no per-call offset or size"
+                )
+            if tap != self.split(buffer)[lane.index][1]:
+                raise ValueError(
+                    f"{name}: the finish's inputs ride it an output tile at a "
+                    f"time, so a fill of lane {lane.index} is its whole share"
+                )
+            (out,) = self.op.outputs
+            line = prod(out.tile_shape)
+            share = self.split(out)[lane.index][1]
+            tiles = prod(share.sizes) // line
+            reads = prod(buffer.tile_shape) // line
+            task = None
+            for held, finished in zip(
+                self._chunks(tap, tiles), self._chunks(share, tiles)
+            ):
+                task = self._transfer(
+                    "fill", lane, (buffer, held), group, wait, None, None, managed
+                )
+                for e in riding:
+                    self._transfer(
+                        "fill",
+                        lane,
+                        (e, finished.repeat(reads)),
+                        group,
+                        wait,
+                        None,
+                        None,
+                        managed,
+                    )
+            return task
         task = self._transfer(
             "fill", stream, source, group, wait, offset_by, size_by, managed
         )
-        if not self._lane(stream).buffer.member.prepare:
+        if not lane.buffer.member.prepare:
             return task
         for extra in self.op.prepare_inputs:
             self._transfer(
                 "fill", stream, (extra, extra.tap), group, wait, None, None, managed
             )
         return task
+
+    @staticmethod
+    def _chunks(tap: TensorAccessPattern, n: int) -> list[TensorAccessPattern]:
+        """``tap`` as ``n`` consecutive walks of equal length, in order.
+
+        Raises:
+            ValueError: No dimension of ``tap`` splits into them.
+        """
+        tap = tap.coalesce()
+        size = prod(tap.sizes) // n
+        for d in reversed(range(tap.rank) if size * n == prod(tap.sizes) else ()):
+            inner = prod(tap.sizes[d + 1 :])
+            if size % inner == 0 and tap.sizes[d] % (size // inner) == 0:
+                split = tap.split(d, size // inner)
+                return [
+                    split[
+                        tuple(int(i) for i in np.unravel_index(k, split.sizes[: d + 1]))
+                    ]
+                    for k in range(n)
+                ]
+        raise ValueError(f"{tap} does not split into {n} walks of {size} elements")
 
     def drain(
         self,
