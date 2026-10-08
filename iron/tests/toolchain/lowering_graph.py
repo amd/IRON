@@ -4,7 +4,7 @@
 """What the case table does not cover lowers too: graph-traced operators
 with bound per-call values, flm/gemm's configuration and shapes, the
 shipped image's sequence, and the swiglu graph functions' operators.
-Same gate as ``lowering.py``: aiecc to an instruction stream, no Peano.
+Same gate as ``lowering.py``: aiecc to an instruction stream.
 """
 
 import dataclasses

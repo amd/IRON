@@ -84,11 +84,14 @@ def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(npu2):
     (design,) = artifacts.designs
     assert design.name == op.resolved().configuration().name
     assert design.entry.directory != artifacts.entry.directory
-    # The shape's own compile is instructions-only: its entry holds the
-    # stream and nothing else: no second xclbin, no second kernel build.
+    # The shape's own compile is instructions-only: no second xclbin. Its
+    # placement reads the configuration's kernels, the same objects.
     own = artifacts.entry
-    assert own.xclbin is None and own.elf is None and own.objects == ()
+    assert own.xclbin is None and own.elf is None
     assert own.insts is not None
+    assert [o.read_bytes() for o in own.objects] == [
+        o.read_bytes() for o in design.entry.objects
+    ]
     # The configuration's entry is where the image and the kernels are.
     assert design.entry.xclbin == artifacts.image and design.entry.objects
     # Both entries are the cache's, which owns every path a build produces.

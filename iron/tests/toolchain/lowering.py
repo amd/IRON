@@ -6,10 +6,9 @@
 Needs the mlir-aie package (its bindings generate the MLIR, its ``aiecc``
 lowers it) and Peano, but no device: ``--get-npu-insts`` places, routes,
 assigns buffer addresses, lowers the DMAs and emits the runtime sequence's
-instructions. Peano is there for aiecc's probe of each core, which measures
-its stack and so lowers the core's IR with every kernel it merges (an
-``inline`` kernel, like the rounding-mode setup a kernel contract asks for);
-object-linked kernels are not compiled. What that checks is everything the
+instructions. Peano is there for the kernels and aiecc's probe of each
+core, which links the core with them to measure its stack and reserve each
+bank's kernel data before placement. What that checks is everything the
 operator model owns: the array an ``array()`` builds is placeable and
 routable, every descriptor a sequence issues is legal, the resident writes
 and barrier sets lower. What it cannot check is the kernels' objects and
@@ -47,13 +46,11 @@ def lower(op, tmp_path, name=None):
     ExternalFunction._instances.clear()
     try:
         src.write_text(str(OperatorDesign(op).build()))
-        # aiecc merges these into the core IR it probes, reading them beside
-        # the MLIR; the object-linked kernels it never reads here.
-        merged = [f for f in ExternalFunction._instances if f.link_with_mode == "merge"]
+        kernels = list(ExternalFunction._instances)
     finally:
         ExternalFunction._instances.clear()
     arch = resolve_target_arch(get_current_device(probe_runtime=False))
-    compile_external_kernels(merged, str(src.parent), arch)
+    compile_external_kernels(kernels, str(src.parent), arch)
     out = tmp_path / "out"
     result = subprocess.run(
         [
