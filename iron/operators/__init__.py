@@ -33,6 +33,7 @@ _OPERATOR_MODULES = {
     "Limbs": "limbs",
     "Log": "log",
     "Magnitude": "magnitude",
+    "Merge": "merge",
     "MHA": "mha",
     "PatchPositions": "resample.op",
     "ReLU": "relu",

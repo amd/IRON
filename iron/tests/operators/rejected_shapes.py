@@ -19,6 +19,7 @@ from iron.common import Unresolvable
 from iron.operators.copy import Copy, Gather
 from iron.operators.limbs import Limbs
 from iron.operators.magnitude import Magnitude
+from iron.operators.merge import Merge
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.resample.op import PatchPositions
@@ -232,3 +233,13 @@ def test_patch_positions_that_do_not_tile_are_refused(kwargs, why):
     """
     with pytest.raises(ValueError, match=why):
         PatchPositions(**kwargs).resolved(from_name("npu2", n_cols=8))
+
+
+def test_merge_of_part_of_a_block_is_refused():
+    """The core reads whole blocks of ids: a short one would leave the last
+    rows unwritten.
+    """
+    with pytest.raises(ValueError, match="64-row blocks"):
+        Merge(rows=100, audio_token=0, image_token=1, audio_at=0, vision_at=0).resolved(
+            from_name("npu2", n_cols=8)
+        )
