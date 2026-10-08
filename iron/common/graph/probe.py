@@ -747,16 +747,23 @@ class Designs:
             ValueError: A call is folded from a graph no call has.
         """
         first: dict[str, tuple[Operator, Call]] = {}
+        pinned: dict[str, frozenset[str]] = {}
         twin_of: dict[str, str] = {}
         for call in calls:
             keys = [cost_key(s.op, dev) for s in call.traced.steps]
+            for key, step in zip(keys, call.traced.steps):
+                pinned[key] = pinned.get(key, frozenset()) | step.op.pinned
             for key in Runlist(keys).order:
                 step = call.traced.steps[keys.index(key)]
                 first.setdefault(key, (step.op, call))
             if call.folded_from is not None:
                 for old, new in replaced(call.folded_from, call.traced):
                     twin_of.setdefault(cost_key(new, dev), cost_key(old, dev))
-        settings = {key: variants(op, dev) for key, (op, _) in first.items()}
+        # The tuner applies a setting to every operator of its design, so
+        # one moves no tunable any of them pins (``JointNarrowing``).
+        settings = {
+            key: variants(op, dev, pinned[key]) for key, (op, _) in first.items()
+        }
         if not set(twin_of.values()) <= settings.keys():
             raise ValueError("a call is folded from a graph no call measures")
         return cls(first, settings, twin_of)

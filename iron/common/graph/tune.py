@@ -94,7 +94,8 @@ def main() -> None:
         "fields",
         nargs="*",
         metavar="NAME=VALUE",
-        help="what the operator is made with, each value JSON or a bare string",
+        help="what the operator is made with, each value JSON or a bare "
+        "string; a tunable given here is held, not searched",
     )
     p.add_argument(
         "--value",

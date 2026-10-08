@@ -79,6 +79,14 @@ class _OperatorMeta(type):
                 f"{cls.__name__} is constructed by keyword ({cls.__name__}(M=..., "
                 f"K=...)); operands are given inside a graph's body"
             )
+        kwargs.setdefault(
+            "pinned",
+            frozenset(
+                k
+                for k, v in kwargs.items()
+                if k in cls._tunable_fields and v is not None
+            ),
+        )
         profile = Profile.current()
         if profile is not None:
             kwargs = {**profile.tunables_for(cls, kwargs), **kwargs}
@@ -244,6 +252,11 @@ class Operator(metaclass=_OperatorMeta):
     # adds them, since a dict does not hash.
     bound_values: dict[str, str | None] = dataclasses.field(
         default_factory=dict, repr=False, compare=False, kw_only=True
+    )
+    # The tunables its caller gave, which the tuner holds; a profile's and
+    # resolve()'s are starting points it may move.
+    pinned: frozenset[str] = dataclasses.field(
+        default=frozenset(), repr=False, compare=False, kw_only=True
     )
     # The steps each core applies, in order, to a tile of the output
     # declared Out(finish=True) before releasing it; resolved, each one at
@@ -778,12 +791,13 @@ class Operator(metaclass=_OperatorMeta):
         the resolved operator: a width at its own value and every power of
         two up to ``dev``'s columns, widest first. An operator whose other
         tunables are worth searching adds them; a combination it cannot
-        resolve at is left out.
+        resolve at is left out. A ``pinned`` tunable is not searched.
         """
         powers = [1 << i for i in range(dev.cols.bit_length())]
         return {
             name: tuple(sorted({width, *powers}, reverse=True))
             for name, width in self.widths.items()
+            if name not in self.pinned
         }
 
     @property

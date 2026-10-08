@@ -103,11 +103,24 @@ class Variant:
         )
 
 
-def variants(op: Operator, dev) -> list[Variant]:
+def variants(op: Operator, dev, pinned: frozenset[str] = frozenset()) -> list[Variant]:
     """``op`` at its default tunables, then at every other combination of
     their ``Operator.domains`` it resolves at and whose derived transfers
     fit their descriptors.
+
+    Args:
+        op: The operator.
+        dev: The device it is resolved against.
+        pinned: Tunables another operator of its design pins, held at the
+            value ``op`` resolves them to.
     """
+    if pinned - op.pinned:
+        resolved = op.resolved(dev)
+        op = dataclasses.replace(
+            op,
+            pinned=op.pinned | pinned,
+            **{name: getattr(resolved, name) for name in pinned - op.pinned},
+        )
     default = Variant.of(op, dev)
     defaults = dict(default.tunables)
     out = [default]
@@ -389,7 +402,11 @@ class Tuning:
             keys[id(op)] = key = cost_key(op, dev)
             variant = self.chosen.get(key)
             if variant is not None and variant.key != key:
-                replace[id(op)] = op.with_tunables(**dict(variant.tunables))
+                held = variant.op.pinned - op.pinned
+                replace[id(op)] = op.with_tunables(
+                    **dict(variant.tunables),
+                    **{name: getattr(variant.resolved, name) for name in held},
+                )
         narrowed = traced.with_operators(replace)
         members: dict[str, list[Operator]] = {}
         for old, new in zip(traced.steps, narrowed.steps):
@@ -560,9 +577,13 @@ class JointNarrowing:
         table = self.table
         keys = [cost_key(s.op, dev) for s in traced.steps]
         first: dict[str, Operator] = {}
+        pinned: dict[str, frozenset[str]] = {}
         for key, step in zip(keys, traced.steps):
             first.setdefault(key, step.op)
-        found = {k: self._candidates(op, dev) for k, op in first.items()}
+            pinned[key] = pinned.get(key, frozenset()) | step.op.pinned
+        # A setting applies to every operator of its design, so it moves no
+        # tunable any of them pins.
+        found = {k: self._candidates(op, dev, pinned[k]) for k, op in first.items()}
         # The designs of one array are one device, so they take one setting:
         # the search runs over arrays, each named for its first design.
         units: dict[Hashable, list[str]] = {}
@@ -666,9 +687,11 @@ class JointNarrowing:
         """What ``pack`` saves over its members each alone, bar the parity."""
         return sum(alone[i][0] for i in pack.members) - pack.cost
 
-    def _candidates(self, op: Operator, dev) -> list[Variant]:
+    def _candidates(
+        self, op: Operator, dev, pinned: frozenset[str] = frozenset()
+    ) -> list[Variant]:
         """The default setting, then every other one measured accurate."""
-        found = variants(op, dev)
+        found = variants(op, dev, pinned)
         default = found[0]
         if default.key not in self.table.steps:
             return [default]

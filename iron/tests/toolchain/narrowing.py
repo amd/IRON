@@ -113,9 +113,48 @@ def test_variants_range_over_every_width_the_shims_allow(npu2):
 
 
 def test_variants_widen_a_default_its_resolution_keeps_narrow(npu2):
-    found = variants(ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=2), npu2)
+    profile = Profile()
+    profile.add(ElementwiseAdd, num_aie_columns=2)
+    with profile:
+        found = variants(ElementwiseAdd(size=SIZE, tile_size=TILE), npu2)
     assert dict(found[0].tunables)["num_aie_columns"] == 2
     assert {dict(v.tunables)["num_aie_columns"] for v in found[1:]} == {8, 4, 2, 1}
+
+
+def test_a_tunable_the_call_gives_is_not_searched(npu2):
+    add = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=2)
+    assert add.pinned == {"tile_size", "num_aie_columns"}
+    found = variants(add, npu2)
+    # Eight channels would take past the 16 MM2S channels of the shim row.
+    assert [v.tunables for v in found] == [(("num_channels", c),) for c in (1, 4, 2)]
+    assert {v.resolved.num_aie_columns for v in found} == {2}
+    pinned = ElementwiseAdd(
+        size=SIZE, tile_size=TILE, num_aie_columns=2, num_channels=1
+    )
+    assert [v.tunables for v in variants(pinned, npu2)] == [()]
+
+
+class PinnedTwin(iron.Graph):
+    """Two adds of one design, the second's columns given by its call."""
+
+    def body(self, a, b):
+        t = ElementwiseAdd(a, b, tile_size=TILE)
+        return ElementwiseAdd(t, b, tile_size=TILE, num_aie_columns=8)
+
+
+def test_a_design_keeps_a_tunable_any_of_its_calls_pins(tmp_path, npu2):
+    traced = PinnedTwin().trace(a=(SIZE,), b=(SIZE,))
+    free, pinned = (s.op for s in traced.steps)
+    assert cost_key(free) == cost_key(pinned)
+    steps = {}
+    for v in variants(free, npu2):
+        cols = dict(v.tunables)["num_aie_columns"]
+        steps[v.key] = (4.0 + cols, 8.0 * cols)
+    table = _table(tmp_path / "costs.json", steps)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    assert tuning.chosen[cost_key(free)].resolved.num_aie_columns == 8
+    narrowed, _ = tuning.apply(traced, npu2)
+    assert {cost_key(s.op, npu2) for s in narrowed.steps} == {cost_key(free)}
 
 
 def test_variants_leave_out_a_width_whose_bounded_transfers_do_not_fit(npu2):
