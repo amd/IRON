@@ -21,6 +21,7 @@ from iron.operators.limbs import Limbs
 from iron.operators.magnitude import Magnitude
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
+from iron.operators.resample.op import PatchPositions
 from iron.operators.transpose import Transpose
 
 
@@ -214,3 +215,20 @@ def test_a_line_of_part_of_a_vector_is_refused(make):
     """
     with pytest.raises(ValueError, match="32-element vectors"):
         make()
+
+
+@pytest.mark.parametrize(
+    "kwargs,why",
+    [
+        (dict(rows=2560, out_height=64, out_width=912), "whole 48-pixel windows"),
+        (dict(rows=1280, out_height=672, out_width=912), "at most 1280 patches"),
+        (dict(rows=1000, out_height=48, out_width=48), "256-row blocks"),
+    ],
+    ids=["not_whole_windows", "more_patches_than_rows", "rows_not_whole_blocks"],
+)
+def test_patch_positions_that_do_not_tile_are_refused(kwargs, why):
+    """The tower pools whole windows of patches, and the core writes whole
+    blocks of rows: a short block would leave the last rows unwritten.
+    """
+    with pytest.raises(ValueError, match=why):
+        PatchPositions(**kwargs).resolved(from_name("npu2", n_cols=8))

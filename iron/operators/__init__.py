@@ -34,6 +34,7 @@ _OPERATOR_MODULES = {
     "Log": "log",
     "Magnitude": "magnitude",
     "MHA": "mha",
+    "PatchPositions": "resample.op",
     "ReLU": "relu",
     "RMSNorm": "rms_norm",
     "Repeat": "repeat",

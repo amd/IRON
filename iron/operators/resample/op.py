@@ -12,7 +12,8 @@ word. A size the table cannot hold (`per_chunk` below 1, too few chunks, or
 a size below 1) writes `[-1, window, 0, 0]` to every header instead.
 
 `Resample` resizes an image with two such tables and writes it as the
-vision tower's bf16 patches.
+vision tower's bf16 patches, and `PatchPositions` says where each of the
+tower's rows comes from in them.
 """
 
 import dataclasses
@@ -1138,3 +1139,221 @@ class Resample(Operator):
         for name in static:
             self.value(name).bind(rtps, static.index(name))
         return workers + barriers
+
+
+POSITIONS = """
+#include <stdint.h>
+
+namespace {
+int n, pad, across, wx, wy, tx, ty;
+}
+
+// Block `b` of the patches in pooling-window order: (x, y) side by side in
+// xy, x then POSITIONS + y in position, and the patch's row of Resample's
+// raster in order. Past the image, or for a size that is not whole windows,
+// the tables' padding rows and the raster's zero patch.
+extern "C" void patch_positions(int32_t *out, int32_t b, int32_t count, int32_t ho,
+                                int32_t wo) {
+    int32_t *xy = out, *position = out + 2 * BLOCK, *order = out + 4 * BLOCK;
+    if (b == 0) {
+        unsigned bands = ho > 0 ? (unsigned)ho / SIDE : 0;
+        unsigned strips = wo > 0 ? (unsigned)wo / SIDE : 0;
+        uint64_t all = (uint64_t)bands * strips;
+        bool ok = ho % SIDE == 0 && wo % SIDE == 0 && all > 0 && bands % POOL == 0 &&
+                  strips % POOL == 0 && all <= (uint64_t)count * BLOCK;
+        n = ok ? (int)all : 0;
+        pad = (strips / CORES + 1) * CORES;
+        across = strips / POOL;
+        wx = wy = tx = ty = 0;
+    }
+    for (int r = 0, i = b * BLOCK; r < BLOCK; r++, i++) {
+        if (i < n) {
+            int x = POOL * tx + wx, y = POOL * ty + wy;
+            xy[2 * r] = position[r] = x;
+            xy[2 * r + 1] = y;
+            position[BLOCK + r] = POSITIONS + y;
+            order[r] = y * pad + x;
+            if (++wx < POOL)
+                continue;
+            wx = 0;
+            if (++wy < POOL)
+                continue;
+            wy = 0;
+            if (++tx < across)
+                continue;
+            tx = 0;
+            ty++;
+        } else {
+            xy[2 * r] = xy[2 * r + 1] = POSITIONS;
+            position[r] = position[BLOCK + r] = 2 * POSITIONS;
+            order[r] = pad - 1;
+        }
+    }
+}
+"""
+
+
+class PatchPositions(Operator):
+    """Where each of `rows` patch rows of the vision tower comes from, for
+    an image resized to `out_rows` by `out_columns` pixels.
+
+    The patches are in pooling-window order: each soft token's `pool ** 2`
+    patches consecutive and row-major within the window, the tokens
+    row-major over the image. `xy` is each patch's x and y side by side,
+    `position_ids` every patch's x, then every patch's y plus `positions`,
+    and `order` its row of `Resample`'s raster over `cores` cores. Rows
+    past the image hold `positions`, `2 * positions` and the raster's zero
+    patch, the rows each gather pads with. One core writes `block` rows at
+    a time, reading `out_rows` and `out_columns`, so one build serves every
+    size `rows` holds.
+    """
+
+    test = Testing(
+        [
+            # The image budget's 42x57 patches.
+            Case(dict(rows=2560, out_height=672, out_width=912), bench=True),
+            # Whole: no padding, and 48 patch columns on 16 cores.
+            Case(dict(rows=2304, out_height=768, out_width=768)),
+            Case(dict(rows=256, out_height=48, out_width=48)),
+            Case(dict(rows=2048, out_height=480, out_width=1056, cores=8)),
+        ],
+        tolerance=Tolerance.exact(),
+    )
+
+    rows: int = param()
+    out_height: int = param()
+    out_width: int = param()
+    pool: int = param(default=3, array=True)
+    # The rows of each axis's position-embedding table.
+    positions: int = param(default=10240, array=True)
+    # Resample's cores, which its raster's columns are padded past.
+    cores: int = param(default=16, array=True)
+    block: int = param(default=256, array=True)
+
+    out_rows = Extent(out_height)
+    out_columns = Extent(out_width)
+
+    xy = Out(rows, 2, dtype=np.int32, tile=(block, 2))
+    position_ids = Out(2, rows, dtype=np.int32, tile=(2, block))
+    order = Out(rows, dtype=np.int32, tile=(block,))
+
+    count = Value(np.int32, derive=lambda op: op.rows // op.block)
+    dst_rows = Value(np.int32, derive=lambda op: op.out_rows)
+    dst_columns = Value(np.int32, derive=lambda op: op.out_columns)
+
+    def validate(self) -> None:
+        side = SIDE * self.pool
+        if (
+            self.out_height % side
+            or self.out_width % side
+            or not (0 < self.out_height * self.out_width // SIDE**2 <= self.rows)
+        ):
+            raise ValueError(
+                f"PatchPositions: {self.out_height}x{self.out_width} is not whole "
+                f"{side}-pixel windows of at most {self.rows} patches"
+            )
+
+    def compatible(self) -> None:
+        if self.rows % self.block:
+            raise ValueError(
+                f"PatchPositions: rows ({self.rows}) are not whole "
+                f"{self.block}-row blocks"
+            )
+
+    def ops(self) -> int:
+        return 0  # index arithmetic: its figure is latency
+
+    def reference(self, *, out_rows=None, out_columns=None):
+        ho = self.out_height if out_rows is None else int(out_rows)
+        wo = self.out_width if out_columns is None else int(out_columns)
+        T, P, k = self.rows, self.positions, self.pool
+        bands, strips = max(ho, 0) // SIDE, max(wo, 0) // SIDE
+        pad = (strips // self.cores + 1) * self.cores
+        xy = np.full((T, 2), P, np.int32)
+        position_ids = np.full((2, T), 2 * P, np.int32)
+        order = np.full(T, pad - 1, np.int32)
+        whole = not (ho % SIDE or wo % SIDE or bands % k or strips % k)
+        if whole and 0 < bands * strips <= T:
+            y, x = np.divmod(np.arange(bands * strips), strips)
+            token = x // k + strips // k * (y // k)
+            o = np.lexsort((x % k, y % k, token))
+            x, y = x[o], y[o]
+            xy[: o.size] = np.stack([x, y], axis=-1)
+            position_ids[0, : o.size], position_ids[1, : o.size] = x, P + y
+            order[: o.size] = y * pad + x
+        return xy, position_ids, order
+
+    def sequence(self, rt):
+        """`xy` and `order` as the core writes them; `position_ids` a block's
+        x into the first half and its y into the second.
+        """
+        T, B = self.rows, self.block
+        tg = TaskGroup()
+        rt.drain(self.xy.lane(0), self.xy, group=tg)
+        rt.drain(
+            self.position_ids.lane(0),
+            (
+                self.position_ids,
+                TensorAccessPattern((2, T), 0, [1, T // B, 2, B], [0, B, T, 1]),
+            ),
+            group=tg,
+        )
+        rt.drain(self.order.lane(0), self.order, group=tg)
+        tg.finish()
+
+    def array(self, target) -> list:
+        B = self.block
+        record_ty = np.ndarray[(5 * B,), np.dtype[np.int32]]
+        kernel = ExternalFunction(
+            "patch_positions",
+            source_string=POSITIONS,
+            arg_types=[record_ty] + [np.int32] * 4,
+            compile_flags=[
+                f"-DSIDE={SIDE}",
+                f"-DPOOL={self.pool}",
+                f"-DPOSITIONS={self.positions}",
+                f"-DCORES={self.cores}",
+                f"-DBLOCK={B}",
+            ],
+            symbol_prefix=(
+                f"patch_positions_{self.pool}_{self.positions}_{self.cores}_{B}"
+            ),
+        )
+        outs = (self.xy, self.position_ids, self.order)
+        # A core has two output channels: a memtile splits its record into three.
+        of_record = ObjectFifo(record_ty, name="positions", depth=2)
+        parts = of_record.cons().split(
+            [0, 2 * B, 4 * B],
+            obj_types=[out.tile for out in outs],
+            names=["xy", "position_ids", "order"],
+            depths=[2, 2, 2],
+        )
+        elf = target.image == "elf"
+        names = ["count", "dst_rows", "dst_columns"]
+        dynamic = {n: self.uses_value(n) and elf for n in names}
+        static = [n for n in names if not dynamic[n]]
+        rtp = Buffer(
+            np.ndarray[(max(1, len(static)),), np.dtype[np.int32]],
+            name="rtp",
+            use_write_rtp=True,
+        )
+        barrier = WorkerRuntimeBarrier()
+        params = [self.value(n).param for n in names if dynamic[n]]
+
+        def core_fn(record, kernel_fn, rtp, barrier, *words):
+            barrier.wait_for_value(1)
+            words = list(words)
+            n, ho, wo = (
+                words.pop(0).read() if dynamic[name] else rtp[static.index(name)]
+                for name in names
+            )
+            for b in range_(n):
+                kernel_fn(record.acquire(1), b, n, ho, wo)
+                record.release(1)
+
+        worker = Worker(core_fn, [of_record.prod(), kernel, rtp, barrier] + params)
+        for out, part in zip(outs, parts):
+            out.lane(0).bind(part.cons())
+        for name in static:
+            self.value(name).bind([rtp], static.index(name))
+        return [worker, barrier]
