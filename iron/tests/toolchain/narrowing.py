@@ -41,11 +41,14 @@ from iron.operators import (
     GEMV,
     MHA,
     ElementwiseAdd,
+    GQAContext,
     ReLU,
     RoPE,
     Sample,
     SiLU,
+    Softmax,
 )
+from iron.operators.flm import GEMM as FlmGEMM
 from iron.operators.flm import DequantBFP
 
 SIZE = 8192
@@ -246,6 +249,28 @@ def test_a_ladder_runs_through_the_resolved_value(npu2):
     # Three octaves either side of 256, kept to multiples of 64.
     add = ElementwiseAdd(size=1 << 16, num_aie_columns=8).resolved(npu2)
     assert add.domains(npu2)["tile_size"] == (2048, 1024, 512, 256, 128, 64)
+
+
+def test_a_block_is_no_larger_than_a_core_holds(npu2):
+    # Uncapped, a 32768-row prefill's ladder runs to kv_len, and generating
+    # MHA at a 32768 x 32768 score tile to ask the placer takes 8 GiB.
+    mha = MHA(num_heads=8, seq_pad=32768).resolved(npu2)
+    assert mha.domains(npu2)["B_kv"] == (512, 256, 128, 64)
+    context = GQAContext(heads=32, groups=8, seq_len=32768).resolved(npu2)
+    assert context.domains(npu2)["chunk"] == (512, 256, 128, 64)
+    softmax = Softmax(rows=32, cols=32768).resolved(npu2)
+    assert max(softmax.domains(npu2)["block"]) == 4096
+
+
+def test_a_row_a_core_holds_whole_is_one_block(npu2):
+    found = variants(Softmax(rows=32, cols=2048), npu2)
+    assert {v.resolved.streamed for v in found} == {False, True}
+    assert all(v.resolved.streamed or v.resolved.block == 2048 for v in found)
+
+
+def test_flm_gemm_searches_its_a_tile_and_row_blocks(npu2):
+    gemm = FlmGEMM(M=2048, K=2048, N=2048).resolved(npu2)
+    assert gemm.domains(npu2) == {"tile_ma": (64, 32, 16), "m_chunk": (8, 4, 2, 1)}
 
 
 def test_a_profile_refuses_a_derived_field():

@@ -46,6 +46,7 @@ from aie.iron.kernels import fused_mm
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Divisors,
     In,
     Operator,
     Out,
@@ -166,9 +167,11 @@ class GEMM(Operator):
     k_tile: int = param(default=K_TILE, array=True)
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). None resolves to whatever L1 affords.
-    tile_ma: int = auto(array=True)
+    tile_ma: int = auto(array=True, domain=Divisors(of=M_TILE, step=2 * R))
     # Row-blocks folded into one B fetch. None resolves from tile_n.
-    m_chunk: int = auto(array=True)
+    m_chunk: int = auto(
+        array=True, domain=Divisors(of=lambda op: op.M // (M_TILE * op.rows))
+    )
     # The activations the epilogue can select between at run time. Each one
     # compiled in costs program memory, so a deployment that dispatches two
     # should compile two.

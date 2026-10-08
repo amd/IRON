@@ -20,7 +20,17 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, zero
 from aie.utils.verify import Tolerance
 
-from iron.common import Extent, In, Operator, Out, Value, auto, param
+from iron.common import (
+    Choices,
+    Divisors,
+    Extent,
+    In,
+    Operator,
+    Out,
+    Value,
+    auto,
+    param,
+)
 from iron.common.testing import Case, Testing
 
 # softmax_bf16's vector step on both targets (activation.softmax holds a row
@@ -78,8 +88,10 @@ class Softmax(Operator):
     num_aie_columns: int = auto()
     num_channels: int = auto(1)
     # None: the whole row, or _BLOCK where the row is streamed.
-    block: int = auto()
-    streamed: bool = auto(array=True)
+    block: int = auto(
+        domain=Divisors(of=lambda op: op.cols, step=_VECTOR_STEP, cap=_ROW_CAP)
+    )
+    streamed: bool = auto(array=True, domain=Choices((False, True)))
 
     length = Extent(cols)  # cols, or fewer per call
 
