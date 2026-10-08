@@ -1,20 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""ResampleTaps: torchvision's antialiased bicubic filter for one axis,
-computed on the device bit for bit as torch computes it on the CPU.
+"""torchvision's antialiased bicubic resize of a uint8 image, on the device
+bit for bit as torch computes it on the CPU.
 
-The table is `chunks` objects of `words` int32. Each starts with a header,
-`[precision, window, first, outputs]`, and holds `outputs` slots from
-output `first` on, a slot being `[start, count]` then the output's
-`window` int16 weights, two to a word. A size the table cannot hold
-(`per_chunk` below 1, too few chunks, or a size below 1) writes
-`[-1, window, 0, 0]` to every header instead.
+`ResampleTaps` computes one axis's filter table. The table is `chunks`
+objects of `words` int32. Each starts with a header, `[precision, window,
+first, outputs]`, and holds `outputs` slots from output `first` on, a slot
+being `[start, count]` then the output's `window` int16 weights, two to a
+word. A size the table cannot hold (`per_chunk` below 1, too few chunks, or
+a size below 1) writes `[-1, window, 0, 0]` to every header instead.
+
+`Resample` resizes an image with two such tables and writes it as the
+vision tower's bf16 patches.
 """
 
 import dataclasses
 
 import numpy as np
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
     ExternalFunction,
@@ -25,11 +29,12 @@ from aie.iron import (
 )
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
+from ml_dtypes import bfloat16
 
-from iron.common import Operator, Out, Value, auto, param
+from iron.common import Extent, In, Operator, Out, Value, auto, param
 from iron.common.testing import Case, Testing
 
-from .reference import taps, window
+from .reference import resize, taps, window
 
 HEADER = 4
 
@@ -64,6 +69,8 @@ Axis axis(int32_t in, int32_t out, int32_t chunks) {
     a.invscale = a.scale >= 1.0 ? 1.0 / a.scale : 1.0;
     a.slot = 2 + (a.window + 1) / 2;
     a.per = (WORDS - HEADER) / a.slot;
+    if (PER)
+        a.per = PER <= a.per ? PER : 0;
     a.ok = a.per >= 1 && a.per * chunks >= out;
     return a;
 }
@@ -180,19 +187,23 @@ extern "C" void resample_quantize(int32_t *peak, int32_t *chunk, int32_t in,
 """
 
 
-def per_chunk(in_size: int, out_size: int, words: int) -> int:
+def per_chunk(in_size: int, out_size: int, words: int, slots: int | None = None) -> int:
     """The outputs one chunk of a `words`-word table holds.
 
     Args:
         in_size: The input samples on the axis.
         out_size: The output samples on the axis.
         words: The int32 words of a chunk.
+        slots: The slots a chunk is fixed to, or None for as many as fit.
 
     Returns:
         The slots after the header, each two words and the window's int16
-        weights two to a word; 0 if not one fits.
+        weights two to a word; 0 if not one fits, or not `slots`.
     """
-    return (words - HEADER) // (2 + (window(in_size, out_size) + 1) // 2)
+    fit = (words - HEADER) // (2 + (window(in_size, out_size) + 1) // 2)
+    if slots is None:
+        return fit
+    return slots if slots <= fit else 0
 
 
 class ResampleTaps(Operator):
@@ -219,6 +230,8 @@ class ResampleTaps(Operator):
             # A window of 49, and one core with no chain.
             Case(dict(in_size=8000, out_size=672, num_aie_columns=1, num_channels=1)),
             Case(dict(in_size=1, out_size=48, num_aie_columns=2)),
+            # A patch's 16 outputs to a chunk, as Resample reads them.
+            Case(dict(in_size=3024, out_size=672, words=356, slots=16)),
         ],
         tolerance=Tolerance.exact(),
     )
@@ -226,10 +239,15 @@ class ResampleTaps(Operator):
     in_size: int = param()
     out_size: int = param()
     words: int = param(default=256)
+    # The slots of a chunk, or None for as many as the window lets fit.
+    slots: int | None = param(default=None, array=True)
     # Enough for out_size, in a multiple of 16 so every core count up to it divides.
     chunks: int = param(
         default=lambda op: 16
-        * -(-op.out_size // (16 * max(1, per_chunk(op.in_size, op.out_size, op.words))))
+        * -(
+            -op.out_size
+            // (16 * max(1, per_chunk(op.in_size, op.out_size, op.words, op.slots)))
+        )
     )
     num_aie_columns: int = auto()
     num_channels: int = auto(2)
@@ -271,7 +289,7 @@ class ResampleTaps(Operator):
                 f"ResampleTaps: chunks ({self.chunks}) must be a multiple of the "
                 f"{self.cores} cores"
             )
-        per = per_chunk(self.in_size, self.out_size, self.words)
+        per = per_chunk(self.in_size, self.out_size, self.words, self.slots)
         if per < 1 or per * self.chunks < self.out_size:
             raise ValueError(
                 f"ResampleTaps: {self.chunks} chunks of {self.words} words do not "
@@ -290,7 +308,7 @@ class ResampleTaps(Operator):
             table[:, 0] = -1
             return table
         taps_window = window(n_in, n_out)
-        per = per_chunk(n_in, n_out, self.words)
+        per = per_chunk(n_in, n_out, self.words, self.slots)
         if per < 1 or per * self.chunks < n_out:
             table[:, 0], table[:, 1] = -1, taps_window
             return table
@@ -324,8 +342,12 @@ class ResampleTaps(Operator):
             "resample_peak",
             source_string=RESAMPLE,
             arg_types=[peak_ty, np.int32, np.int32, np.int32, np.int32],
-            compile_flags=[f"-DWORDS={self.words}", f"-DCORES={cores}"],
-            symbol_prefix=f"resample_{self.words}_{cores}",
+            compile_flags=[
+                f"-DWORDS={self.words}",
+                f"-DCORES={cores}",
+                f"-DPER={self.slots or 0}",
+            ],
+            symbol_prefix=f"resample_{self.words}_{cores}_{self.slots or 0}",
         )
         join_k = peak_k.object_file.bind("resample_join", [peak_ty] * 3)
         quantize_k = peak_k.object_file.bind(
@@ -434,6 +456,561 @@ class ResampleTaps(Operator):
                 )
             )
             self.table.lane(k).bind(of_tables[k].cons())
+        for name in static:
+            self.value(name).bind(rtps, static.index(name))
+        return workers + barriers
+
+
+SIDE = 16  # a patch's pixels on each axis, and the outputs of a taps chunk
+
+# The bf16 bits of u8 / 255 as the image processor rounds them: in float32,
+# then to bf16 once.
+PIXELS = (np.arange(256, dtype=np.float32) * np.float32(1 / 255)).astype(bfloat16)
+
+RESIZE = """
+#include <stdint.h>
+
+namespace {
+constexpr int HEADER = 4;
+constexpr int SIDE = 16;
+constexpr int WIN = 2 * ((WORDS - HEADER) / SIDE - 2) - 1;
+// The input pixels under one patch column's 16 outputs, at any scale a
+// WIN-tap window allows.
+constexpr int SPAN = 5 * WIN + 8;
+constexpr int LINE = COLS * SIDE * 3;
+
+const uint16_t PIXEL[256] = {@PIXELS@};
+
+int rows, columns, cpr, owned, core;
+int consumed, arrived, opened, next, hp;
+bool ok;
+int hstart[COLS][SIDE], hcount[COLS][SIDE];
+int16_t hweight[COLS][SIDE][WIN];
+int span0[COLS], span[COLS];
+uint8_t line[COLS][SPAN * 3];
+// The last WIN rows across, by row % WIN, and the band's rows down.
+uint8_t mid[WIN][LINE];
+uint8_t hold[SIDE][LINE];
+int32_t acc[LINE];
+
+uint8_t clip(int32_t v, int p) {
+    v >>= p;
+    return v < 0 ? 0 : v > 255 ? 255 : v;
+}
+
+void across(int r) {
+    uint8_t *m = mid[r % WIN];
+    for (int i = 0; i < owned; i++)
+        for (int o = 0; o < SIDE; o++) {
+            const int16_t *w = hweight[i][o];
+            const uint8_t *x = line[i] + 3 * (hstart[i][o] - span0[i]);
+            for (int ch = 0; ch < 3; ch++) {
+                int32_t a = 1 << (hp - 1);
+                for (int k = 0; k < hcount[i][o]; k++)
+                    a += x[3 * k + ch] * w[k];
+                m[(i * SIDE + o) * 3 + ch] = clip(a, hp);
+            }
+        }
+}
+
+// The band's output rows whose input rows have all come, in order.
+void down(const int32_t *vt) {
+    if (!ok)
+        return;
+    int p = vt[0], slot = 2 + (vt[1] + 1) / 2, n = owned * SIDE * 3;
+    for (; next < SIDE; next++) {
+        const int32_t *t = vt + HEADER + next * slot;
+        int s = t[0], c = t[1];
+        if (s + c > arrived)
+            return;
+        if (s < 0 || s < arrived - WIN || c < 0 || c > WIN) {
+            ok = false;
+            return;
+        }
+        const int16_t *w = (const int16_t *)(t + 2);
+        for (int b = 0; b < n; b++)
+            acc[b] = 1 << (p - 1);
+        for (int k = 0; k < c; k++) {
+            const uint8_t *m = mid[(s + k) % WIN];
+            int32_t wk = w[k];
+            for (int b = 0; b < n; b++)
+                acc[b] += m[b] * wk;
+        }
+        for (int b = 0; b < n; b++)
+            hold[next][b] = clip(acc[b], p);
+    }
+}
+} // namespace
+
+// counts: [width chunks, bands, image chunks now, patches a band, image
+// chunks left]. Every count is of what all cores share, never of `ok`, so
+// the broadcast streams stay in step on any input.
+extern "C" void resize_setup(int32_t *counts, int32_t h, int32_t w, int32_t ho,
+                             int32_t wo, int32_t c) {
+    rows = h;
+    columns = w;
+    core = c;
+    cpr = w > 0 ? (3 * w + CHUNK - 1) / CHUNK : 0;
+    int strips = wo > 0 ? wo / SIDE : 0;
+    int nmax = (strips + CORES - 1) / CORES;
+    owned = c < strips ? (strips - c + CORES - 1) / CORES : 0;
+    ok = h >= 1 && w >= 1 && ho >= SIDE && wo >= SIDE && ho % SIDE == 0 &&
+         wo % SIDE == 0 && nmax <= COLS;
+    consumed = arrived = opened = next = 0;
+    counts[0] = strips;
+    counts[1] = ho > 0 ? ho / SIDE : 0;
+    counts[2] = 0;
+    counts[3] = nmax;
+    counts[4] = 0;
+}
+
+// Width chunk k is patch column k, this core's when k % CORES == core.
+extern "C" void resize_take(int32_t *chunk, int32_t k) {
+    if (!ok || k % CORES != core)
+        return;
+    int i = k / CORES, p = chunk[0], win = chunk[1];
+    if (p < 1 || p > 22 || win < 1 || win > WIN || chunk[2] != k * SIDE ||
+        chunk[3] != SIDE) {
+        ok = false;
+        return;
+    }
+    hp = p;
+    int slot = 2 + (win + 1) / 2;
+    for (int o = 0; o < SIDE; o++) {
+        const int32_t *t = chunk + HEADER + o * slot;
+        const int16_t *w = (const int16_t *)(t + 2);
+        hstart[i][o] = t[0];
+        hcount[i][o] = t[1];
+        if (t[0] < 0 || t[1] < 0 || t[1] > win || t[0] + t[1] > columns)
+            ok = false;
+        for (int j = 0; j < WIN; j++)
+            hweight[i][o][j] = j < t[1] ? w[j] : 0;
+    }
+    span0[i] = hstart[i][0];
+    int end = hstart[i][SIDE - 1] + hcount[i][SIDE - 1];
+    span[i] = end - span0[i];
+    for (int o = 0; o < SIDE; o++)
+        if (hstart[i][o] < span0[i] || hstart[i][o] + hcount[i][o] > end)
+            ok = false;
+    if (span[i] > SPAN)
+        ok = false;
+}
+
+// The next height chunk opens: the image chunks up to the last input row its
+// outputs read.
+extern "C" void resize_band(int32_t *vt, int32_t *counts) {
+    int win = vt[1], e = rows;
+    if (vt[0] >= 1 && vt[0] <= 22 && win >= 1 && win <= WIN &&
+        vt[2] == opened * SIDE && vt[3] == SIDE) {
+        const int32_t *t = vt + HEADER + (SIDE - 1) * (2 + (win + 1) / 2);
+        e = t[0] + t[1];
+        e = e < 0 ? 0 : e > rows ? rows : e;
+    } else {
+        ok = false;
+    }
+    int need = e * cpr - consumed;
+    counts[2] = need > 0 ? need : 0;
+    opened++;
+    next = 0;
+    down(vt);
+}
+
+extern "C" void resize_consume(uint8_t *chunk, int32_t *vt) {
+    int r = consumed / cpr, q = consumed % cpr;
+    consumed++;
+    if (ok) {
+        int at = q * CHUNK;
+        for (int i = 0; i < owned; i++) {
+            int lo = 3 * span0[i], hi = lo + 3 * span[i];
+            int from = lo > at ? lo : at;
+            int to = hi < at + CHUNK ? hi : at + CHUNK;
+            for (int b = from; b < to; b++)
+                line[i][b - lo] = chunk[b - at];
+        }
+    }
+    if (q != cpr - 1)
+        return;
+    if (ok)
+        across(r);
+    arrived = r + 1;
+    down(vt);
+}
+
+// Patch column core + i * CORES of the band, zeros past the image.
+extern "C" void resize_emit(uint16_t *out, int32_t i) {
+    if (next < SIDE)
+        ok = false;
+    bool real = ok && i < owned;
+    for (int y = 0; y < SIDE; y++)
+        for (int b = 0; b < SIDE * 3; b++)
+            out[y * SIDE * 3 + b] = real ? PIXEL[hold[y][i * SIDE * 3 + b]] : 0;
+}
+
+extern "C" void resize_finish(int32_t *counts) {
+    counts[4] = rows * cpr - consumed;
+}
+""".replace("@PIXELS@", ", ".join(str(v) for v in PIXELS.view(np.uint16)))
+
+
+class Resample(Operator):
+    """An image resized as torchvision's antialiased bicubic resize does it
+    on the CPU, written as the vision tower's patches.
+
+    `image` is the `(height, width, 3)` uint8 image, each row padded to
+    whole `chunk`-byte chunks, which every core receives. `taps_w` and
+    `taps_h` are `ResampleTaps` tables with a patch's 16 outputs to a
+    chunk (`slots=16`), `width -> out_width` and `height -> out_height`.
+    Core `k` owns patch columns `k, k + cores, ...`: it takes their width
+    chunks, resamples each image row across them, and each band of 16
+    output rows down them once its input rows have come. Patch `(py, px)`
+    is row `py * pad + px` of `patches`, 16x16 pixels row-major, channels
+    last, `u8 / 255` in bf16; `pad` is the patch columns rounded up to the
+    cores, its extra columns zeros.
+
+    `rows`, `columns`, `out_rows` and `out_columns` may be bound per call,
+    so one build serves every size the buffers hold.
+    """
+
+    test = Testing(
+        [
+            # A phone photo to the image budget's 42x57 patches.
+            Case(
+                dict(height=3024, width=4032, out_height=672, out_width=912),
+                bench=True,
+            ),
+            # Across only, on 8 cores of 8 patch columns each.
+            Case(
+                dict(
+                    height=480,
+                    width=640,
+                    out_height=480,
+                    out_width=1008,
+                    num_aie_columns=4,
+                )
+            ),
+            Case(dict(height=37, width=53, out_height=96, out_width=144)),
+            # A 37-tap window down, the most a 356-word chunk holds.
+            Case(dict(height=6000, width=500, out_height=672, out_width=432)),
+        ],
+        draw=lambda op: dict(
+            image=np.random.default_rng(42).integers(
+                0, 256, (op.image_chunks, op.chunk), dtype=np.uint8
+            ),
+            taps_w=ResampleTaps(
+                in_size=op.width,
+                out_size=op.out_width,
+                words=op.words,
+                slots=SIDE,
+                chunks=op.width_chunks,
+            ).reference(),
+            taps_h=ResampleTaps(
+                in_size=op.height,
+                out_size=op.out_height,
+                words=op.words,
+                slots=SIDE,
+                chunks=op.height_chunks,
+            ).reference(),
+        ),
+        tolerance=Tolerance.exact(),
+    )
+
+    height: int = param()
+    width: int = param()
+    out_height: int = param()
+    out_width: int = param()
+    chunk: int = param(default=1024, array=True)
+    # A 39-tap window: a scale of up to 9.5.
+    words: int = param(default=356, array=True)
+    # The patch columns a core holds, so cores * patch_columns across.
+    patch_columns: int = param(default=8, array=True)
+    image_chunks: int = param(
+        default=lambda op: op.height * -(-3 * op.width // op.chunk)
+    )
+    # In multiples of 16, as ResampleTaps's are, so every core count up to it divides.
+    width_chunks: int = param(default=lambda op: 16 * -(-op.out_width // (16 * SIDE)))
+    height_chunks: int = param(default=lambda op: 16 * -(-op.out_height // (16 * SIDE)))
+    patch_rows: int = param(
+        default=lambda op: op.out_height // SIDE * 16 * -(-op.out_width // (16 * SIDE))
+    )
+    num_aie_columns: int = auto()
+    num_channels: int = auto(2)
+
+    rows = Extent(height)
+    columns = Extent(width)
+    out_rows = Extent(out_height)
+    out_columns = Extent(out_width)
+
+    image = In(image_chunks, chunk, dtype=np.uint8, tile=(chunk,), broadcast=True)
+    taps_w = In(width_chunks, words, dtype=np.int32, tile=(words,), broadcast=True)
+    # Through taps_w's stream, after it.
+    taps_h = In(height_chunks, words, dtype=np.int32)
+    patches = Out(
+        patch_rows,
+        SIDE * SIDE * 3,
+        dtype=bfloat16,
+        tile=(SIDE * SIDE * 3,),
+        per=(num_aie_columns, num_channels),
+    )
+
+    src_rows = Value(np.int32, derive=lambda op: op.rows)
+    src_columns = Value(np.int32, derive=lambda op: op.columns)
+    dst_rows = Value(np.int32, derive=lambda op: op.out_rows)
+    dst_columns = Value(np.int32, derive=lambda op: op.out_columns)
+    image_count = Value(
+        np.int32,
+        derive=lambda op: op.rows * -(-3 * op.columns // op.chunk),
+        optional=True,
+    )
+    width_count = Value(
+        np.int32, derive=lambda op: op.out_columns // SIDE, optional=True
+    )
+    height_count = Value(np.int32, derive=lambda op: op.out_rows // SIDE, optional=True)
+    # Patches per core: every band's, padded to the cores.
+    patch_count = Value(
+        np.int32,
+        derive=lambda op: op.out_rows
+        // SIDE
+        * -(-(op.out_columns // SIDE) // op.cores),
+        optional=True,
+    )
+
+    @property
+    def cores(self) -> int:
+        return self.num_aie_columns * self.num_channels
+
+    @property
+    def window_cap(self) -> int:
+        """The widest filter window a chunk of `words` holds 16 of."""
+        return 2 * ((self.words - HEADER) // SIDE - 2) - 1
+
+    def validate(self) -> None:
+        if min(self.height, self.width) < 1 or min(self.out_height, self.out_width) < 1:
+            raise ValueError(
+                f"Resample: {self.height}x{self.width} -> "
+                f"{self.out_height}x{self.out_width}; every size must be at least 1"
+            )
+        if self.out_height % SIDE or self.out_width % SIDE:
+            raise ValueError(
+                f"Resample: {self.out_height}x{self.out_width} is not whole "
+                f"{SIDE}-pixel patches"
+            )
+
+    def resolve(self, dev):
+        cols = self.resolve_columns(
+            dev,
+            self.num_aie_columns,
+            self.num_channels,
+            fits=lambda c: self.patch_rows % (c * self.num_channels) == 0,
+        )
+        return dataclasses.replace(self, num_aie_columns=cols)
+
+    def compatible(self) -> None:
+        cap = self.window_cap
+        for n_in, n_out in (
+            (self.width, self.out_width),
+            (self.height, self.out_height),
+        ):
+            if window(n_in, n_out) > cap:
+                raise ValueError(
+                    f"Resample: {n_in} -> {n_out} samples is a "
+                    f"{window(n_in, n_out)}-tap window; {self.words}-word chunks "
+                    f"hold {cap}"
+                )
+        strips, bands = self.out_width // SIDE, self.out_height // SIDE
+        nmax = -(-strips // self.cores)
+        if nmax > self.patch_columns:
+            raise ValueError(
+                f"Resample: {strips} patch columns over {self.cores} cores is "
+                f"{nmax} a core; a core holds {self.patch_columns}"
+            )
+        for name, have, need in (
+            (
+                "image_chunks",
+                self.image_chunks,
+                self.height * -(-3 * self.width // self.chunk),
+            ),
+            ("width_chunks", self.width_chunks, strips),
+            ("height_chunks", self.height_chunks, bands),
+            ("patch_rows", self.patch_rows, bands * nmax * self.cores),
+        ):
+            if have < need:
+                raise ValueError(f"Resample: {name} is {have}; the image needs {need}")
+
+    def ops(self) -> int:
+        return 0  # integer filters, not bf16 arithmetic: its figure is latency
+
+    def reference(
+        self,
+        image,
+        taps_w,
+        taps_h,
+        *,
+        rows=None,
+        columns=None,
+        out_rows=None,
+        out_columns=None,
+    ):
+        h = self.height if rows is None else int(rows)
+        w = self.width if columns is None else int(columns)
+        ho = self.out_height if out_rows is None else int(out_rows)
+        wo = self.out_width if out_columns is None else int(out_columns)
+        line = -(-3 * w // self.chunk) * self.chunk
+        pixels = np.asarray(image).reshape(-1)[: h * line].reshape(h, line)
+        out = resize(pixels[:, : 3 * w].reshape(h, w, 3), ho, wo)
+        bands, strips = ho // SIDE, wo // SIDE
+        pad = -(-strips // self.cores) * self.cores
+        grid = np.zeros((bands, pad, SIDE, SIDE, 3), np.uint8)
+        grid[:, :strips] = out.reshape(bands, SIDE, strips, SIDE, 3).transpose(
+            0, 2, 1, 3, 4
+        )
+        return PIXELS[grid.reshape(bands * pad, SIDE * SIDE * 3)]
+
+    def sequence(self, rt):
+        """The image, then both tables down one stream, and each core's
+        patches: every transfer sized at its buffer, shortened per call, or
+        at the build's sizes.
+        """
+        tg = TaskGroup()
+        moves = [
+            (rt.fill, self.image, self.image, "image_count", 0, 1),
+            (rt.fill, self.taps_w, self.taps_w, "width_count", 0, 1),
+            (rt.fill, self.taps_w, self.taps_h, "height_count", 0, 1),
+        ] + [
+            (rt.drain, self.patches.lane(k), self.patches, "patch_count", k, self.cores)
+            for k in range(self.cores)
+        ]
+        for move, stream, buffer, name, first, step in moves:
+            per_call = self.uses_value(name)
+            n, width = buffer.shape
+            count = n // step if per_call else self.residents[name]
+            tap = TensorAccessPattern(
+                (n, width), first * width, [1, count, 1, width], [0, step * width, 0, 1]
+            )
+            move(
+                stream,
+                (buffer, tap),
+                group=tg,
+                size_by={1: self.value(name)} if per_call else None,
+            )
+        tg.finish()
+
+    def array(self, target) -> list:
+        cores = self.cores
+        counts_ty = np.ndarray[(8,), np.dtype[np.int32]]
+        taps_ty, image_ty, patch_ty = (
+            self.taps_w.tile,
+            self.image.tile,
+            self.patches.tile,
+        )
+        setup_k = ExternalFunction(
+            "resize_setup",
+            source_string=RESIZE,
+            arg_types=[counts_ty] + [np.int32] * 5,
+            compile_flags=[
+                f"-DWORDS={self.words}",
+                f"-DCHUNK={self.chunk}",
+                f"-DCOLS={self.patch_columns}",
+                f"-DCORES={cores}",
+            ],
+            symbol_prefix=f"resize_{self.words}_{self.chunk}_{self.patch_columns}_{cores}",
+        )
+        lib = setup_k.object_file
+        take_k = lib.bind("resize_take", [taps_ty, np.int32])
+        band_k = lib.bind("resize_band", [taps_ty, counts_ty])
+        consume_k = lib.bind("resize_consume", [image_ty, taps_ty])
+        emit_k = lib.bind("resize_emit", [patch_ty, np.int32])
+        finish_k = lib.bind("resize_finish", [counts_ty])
+        of_image = ObjectFifo(image_ty, name="image", depth=2)
+        of_taps = ObjectFifo(taps_ty, name="taps", depth=2)
+        of_patches = [
+            ObjectFifo(patch_ty, name=f"patches_{k}", depth=2) for k in range(cores)
+        ]
+
+        elf = target.image == "elf"
+        names = ["src_rows", "src_columns", "dst_rows", "dst_columns"]
+        dynamic = {n: self.uses_value(n) and elf for n in names}
+        static = [n for n in names if not dynamic[n]]
+        rtps = [
+            Buffer(
+                np.ndarray[(max(1, len(static)),), np.dtype[np.int32]],
+                name=f"rtp_{k}",
+                use_write_rtp=True,
+            )
+            for k in range(cores)
+        ]
+        barriers = [WorkerRuntimeBarrier() for _ in range(cores)]
+        params = [self.value(n).param for n in names if dynamic[n]]
+
+        def core_fn(
+            core,
+            image,
+            taps,
+            patches,
+            counts,
+            setup_fn,
+            take_fn,
+            band_fn,
+            consume_fn,
+            emit_fn,
+            finish_fn,
+            rtp,
+            barrier,
+            *words,
+        ):
+            barrier.wait_for_value(1)
+            words = list(words)
+            h, w, ho, wo = (
+                words.pop(0).read() if dynamic[name] else rtp[static.index(name)]
+                for name in names
+            )
+            setup_fn(counts, h, w, ho, wo, core)
+            for k in range_(counts[0]):
+                chunk = taps.acquire(1)
+                take_fn(chunk, k)
+                taps.release(1)
+            for _ in range_(counts[1]):
+                vt = taps.acquire(1)
+                band_fn(vt, counts)
+                for _ in range_(counts[2]):
+                    chunk = image.acquire(1)
+                    consume_fn(chunk, vt)
+                    image.release(1)
+                for i in range_(counts[3]):
+                    out = patches.acquire(1)
+                    emit_fn(out, i)
+                    patches.release(1)
+                taps.release(1)
+            finish_fn(counts)
+            for _ in range_(counts[4]):
+                image.acquire(1)
+                image.release(1)
+
+        workers = [
+            Worker(
+                core_fn,
+                [
+                    k,
+                    of_image.cons(),
+                    of_taps.cons(),
+                    of_patches[k].prod(),
+                    Buffer(counts_ty, name=f"counts_{k}"),
+                    setup_k,
+                    take_k,
+                    band_k,
+                    consume_k,
+                    emit_k,
+                    finish_k,
+                    rtps[k],
+                    barriers[k],
+                ]
+                + params,
+            )
+            for k in range(cores)
+        ]
+        for k in range(cores):
+            self.patches.lane(k).bind(of_patches[k].cons())
+        self.image.lane(0).bind(of_image.prod())
+        self.taps_w.lane(0).bind(of_taps.prod())
         for name in static:
             self.value(name).bind(rtps, static.index(name))
         return workers + barriers

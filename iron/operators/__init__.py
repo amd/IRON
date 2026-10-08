@@ -37,6 +37,7 @@ _OPERATOR_MODULES = {
     "ReLU": "relu",
     "RMSNorm": "rms_norm",
     "Repeat": "repeat",
+    "Resample": "resample.op",
     "ResampleTaps": "resample.op",
     "RoPE": "rope",
     "Sample": "sample",
