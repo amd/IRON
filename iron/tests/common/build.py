@@ -211,6 +211,18 @@ def test_mha_infers_the_padded_length_and_the_kv_head_count():
         MHA(num_heads=1, seq_len=100, seq_pad=100, d=64)
 
 
+def test_mha_binds_p_times_v_at_its_own_shape():
+    """Past B_kv = d, P*V's operands are not QK^T's: P is (B_q, B_kv), V
+    (B_kv, d) and O (B_q, d), each streamed as P*V takes it.
+    """
+    op = MHA(num_heads=1, seq_len=1024, num_pipelines=8, B_q=128, B_kv=128)
+    text = str(build_design(op.resolved()))
+    p, v, o = "memref<128x128xbf16>", "memref<128x64xbf16>", "memref<128x64xbf16>"
+    assert re.search(rf'_matmul_PV"?\({p}, {v}, {o},', text)
+    assert re.search(rf'_rescale_O"?\({o},', text)
+    assert re.search(rf'_zero"?\({o}\)', text)
+
+
 # --------------------------------------------------------------------------
 # A per-call size in a transfer
 # --------------------------------------------------------------------------

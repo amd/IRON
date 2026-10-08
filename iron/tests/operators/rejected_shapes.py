@@ -155,19 +155,22 @@ def test_the_default_column_count_is_the_most_that_leave_whole_tiles():
     "kwargs,why",
     [
         (dict(B_q=64, B_kv=128), "B_q"),
+        (dict(B_q=32, B_kv=32), "multiple of 64"),
         (dict(kv_len=1000), "kv_len"),
         (dict(kv_len=512), "kv_len"),
     ],
     ids=[
         "q_and_kv_blocks_differ",
+        "kv_block_narrower_than_the_mask_vector",
         "kv_len_not_whole_blocks",
         "kv_len_short_of_queries",
     ],
 )
 def test_mha_whose_blocks_do_not_line_up_is_refused(kwargs, why):
     """mha.cc skips a KV block past a Q block by comparing their indices, so
-    the two block sizes must match; and the queries are the keys' last rows,
-    whole blocks of them, so the cache must hold them.
+    the two block sizes must match; its softmax masks a row of keys with
+    64-lane vectors, so a KV block is whole vectors; and the queries are the
+    keys' last rows, whole blocks of them, so the cache must hold them.
     """
     with pytest.raises(ValueError, match=why):
         MHA(num_heads=2, seq_len=1024, num_pipelines=8, **kwargs).resolved(

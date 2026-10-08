@@ -60,7 +60,7 @@ from iron.common.testing import Case, Testing
 
 class MHA(Operator):
     """AIE-accelerated Multi-Head Attention operator: fused attention over
-    ``(B_q, d)`` Q blocks and ``(d, B_kv)`` K/V blocks.
+    ``(B_q, d)`` Q blocks, ``(d, B_kv)`` K blocks and ``(B_kv, d)`` V blocks.
 
     More than six pipelines split the Q and O traffic over two shims (each
     memtile split serves at most six pipelines), so the Q and O streams have
@@ -152,7 +152,7 @@ class MHA(Operator):
     )
     V = In(
         Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
-        tile=(d, B_kv),
+        tile=(B_kv, d),
         per=(kv_lanes,),
     )
     O = Out(
@@ -288,6 +288,13 @@ class MHA(Operator):
         # mha.cc's causal skip compares a KV block's index with a Q block's.
         if self.B_q != self.B_kv:
             raise ValueError(f"B_q ({self.B_q}) and B_kv ({self.B_kv}) must match")
+        # partial_softmax masks a row with 64-lane loads and stores, which
+        # past a narrower row mask the next one too.
+        if self.B_kv % 64:
+            raise ValueError(
+                f"B_kv ({self.B_kv}) must be a multiple of 64, the vector "
+                f"mha.cc's softmax masks a row of keys by"
+            )
         if self.kv_len % self.B_kv or self.kv_len < self.seq_pad:
             raise ValueError(
                 f"kv_len ({self.kv_len}) must be whole {self.B_kv}-row blocks and "
@@ -359,22 +366,30 @@ class MHA(Operator):
         # Tensors living on the AIE-array
         q_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
         k_ty = np.ndarray[(d, B_kv), np.dtype[dtype]]
+        v_ty = np.ndarray[(B_kv, d), np.dtype[dtype]]
         qk_ty = np.ndarray[(B_q, B_kv), np.dtype[dtype]]
         s_ty = np.ndarray[(4 * B_q,), np.dtype[dtype]]
         joined_ty = self.Q.tile  # (n_join * B_q, d)
 
         # Every one of these comes out of mha.cc, which #includes mm.cc and
-        # softmax.cc, so they all name one object: matmul_QK is its QK^T
-        # product, and the rest of its symbols are bound from that object
-        # rather than declared separately, which would recompile the
-        # translation unit and redefine every symbol in it.
+        # softmax.cc: matmul_QK is its QK^T product, and the symbols its core
+        # and the softmax's call are bound from that object rather than
+        # declared separately, which would recompile the translation unit and
+        # redefine every symbol in it. mha.cc takes one (DIM_M, DIM_K, DIM_N),
+        # QK^T's (B_q, d, B_kv), and P*V is (B_q, B_kv, d): P*V's core binds
+        # its symbols from mha.cc built at that shape, the same object where
+        # B_kv is d.
         matmul_QK = kernels.linalg.mha(
             B_q, d, B_kv, b_col_maj=True, emulate_bf16_mmul_with_bfp16=True
         )
         mha_object = matmul_QK.object_file
+        pv_object = kernels.linalg.mha(
+            B_q, B_kv, d, b_col_maj=True, emulate_bf16_mmul_with_bfp16=True
+        ).object_file
 
         # Upstream's standalone zero over the (DIM_M, DIM_N) tile is the fill.
-        zero_kernel = kernels.zero(tile_size=(B_q, B_kv), dtype=dtype)
+        zero_scores = kernels.zero(tile_size=(B_q, B_kv), dtype=dtype)
+        zero_o = kernels.zero(tile_size=(B_q, d), dtype=dtype)
         # The 16-bit passThroughLine, bound to the bf16 scale buffers.
         memcopy_kernel_scale = kernels.eltwise.passthrough(
             4 * B_q, np.int16
@@ -396,12 +411,12 @@ class MHA(Operator):
                 np.int32,
             ],
         )
-        matmul_PV = mha_object.bind(
+        matmul_PV = pv_object.bind(
             "matmul_PV",
             [
                 qk_ty,
-                k_ty,
-                qk_ty,
+                v_ty,
+                q_ty,
                 s_ty,
                 np.int32,
                 np.int32,
@@ -409,9 +424,9 @@ class MHA(Operator):
                 np.int32,
             ],
         )
-        rescale_O = mha_object.bind(
+        rescale_O = pv_object.bind(
             "rescale_O",
-            [qk_ty, s_ty, np.int32, np.ndarray[(2,), np.dtype[np.int32]]],
+            [q_ty, s_ty, np.int32, np.ndarray[(2,), np.dtype[np.int32]]],
         )
 
         # AIE-array data movement with object fifos. Q arrives joined for
@@ -473,7 +488,7 @@ class MHA(Operator):
                     depth=of_depth,
                 )
             )
-            inV.append(ObjectFifo(k_ty, name=f"inV{suffix}", depth=of_depth))
+            inV.append(ObjectFifo(v_ty, name=f"inV{suffix}", depth=of_depth))
             memV.append(
                 inV[lane]
                 .cons()
@@ -496,9 +511,7 @@ class MHA(Operator):
             )
             memP.append(ObjectFifo(qk_ty, depth=of_depth, name=f"memP{i}"))
             outP.append(
-                memP[i]
-                .cons()
-                .forward(name=f"outP{i}", to_stream=q_dims, depth=of_depth)
+                memP[i].cons().forward(name=f"outP{i}", to_stream=pv.A, depth=of_depth)
             )
             scaleOF.append(ObjectFifo(s_ty, depth=of_depth, name=f"scaleOF{i}"))
 
@@ -777,7 +790,7 @@ class MHA(Operator):
                         memQ[i].cons(),
                         memK[i % kv_lanes].cons(),
                         memA[i].prod(),
-                        zero_kernel,
+                        zero_scores,
                         matmul_QK,
                         i,
                         mha_rtps_list[0][i],
@@ -830,7 +843,7 @@ class MHA(Operator):
                         memV[i % kv_lanes].cons(),
                         scaleOF[i].cons(),
                         outO[i].prod(),
-                        zero_kernel,
+                        zero_o,
                         matmul_PV,
                         rescale_O,
                         i,
