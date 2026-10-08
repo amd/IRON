@@ -18,7 +18,7 @@ from aie.iron import (
     kernels,
 )
 from aie.iron.controlflow import range_
-from aie.iron.device import NPU1, NPU2, Device, NPU1Col1, NPU1Col2, Tile
+from aie.iron.device import NPU1, NPU2, Device, NPU1Col1, NPU1Col2
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
@@ -27,9 +27,12 @@ from iron.common import (
     Extent,
     Finish,
     In,
+    Level,
     Link,
     Operator,
     Out,
+    Pins,
+    Placement,
     Unresolvable,
     Value,
     auto,
@@ -101,6 +104,11 @@ def _cases(cls, dev: Device):
     for K, extensive in ((2048, False), (8192, True)):
         kwargs = dict(M=2048, K=K, N=2048, b_col_maj=True)
         out.append(Case(kwargs, extensive, bench=not extensive))
+    # The placement the tuner tries beside the default, A split over a column's
+    # rows on two columns.
+    for cols in (8, 2):
+        kwargs = dict(M=2048, K=2048, N=2048, num_aie_columns=cols, b_col_maj=True)
+        out.append(Case(dict(kwargs, placement="tiles"), extensive=True))
 
     def finished(kwargs, *chains):
         # The first chain is the case's own; more share one array.
@@ -128,6 +136,19 @@ def _cases(cls, dev: Device):
         finished(default, (SiLU,), ()),
     ]
     return out
+
+
+# The shim ends are pinned in both, A on alternate columns in the 4x8 case:
+# relaxed as well, a real shape's descriptors (2048x8192x2048, b_col_maj)
+# pile onto one tile, and DMA lowering rejects it with "Too many
+# simultaneously active buffer descriptors on tile (3,0), which supports up
+# to 16". "tiles" also holds each core and memtile in its stream's column.
+PLACEMENT = Placement(
+    {
+        "shims": Pins(cores=Level.FREE, memtiles=Level.FREE),
+        "tiles": Pins(),
+    }
+)
 
 
 class GEMM(Operator):
@@ -175,6 +196,7 @@ class GEMM(Operator):
     # None: the most columns the device's shim budget allows that split N
     # into whole tile_n-wide tiles.
     num_aie_columns: int = auto()
+    placement: str = auto("shims", array=True, domain=PLACEMENT)
     # A @ B = C, with either operand optionally stored column-major. The
     # layout flags transpose a declared shape rather than resize it.
     b_col_maj: bool = param(default=False, array=True)
@@ -376,6 +398,8 @@ class GEMM(Operator):
         m, k, n = self.tile_m, self.tile_k, self.tile_n
         n_aie_cols = self.num_aie_columns
         n_aie_rows = self.n_aie_rows
+        pins = PLACEMENT.pins(self.placement)
+        a_cols = [2 * i if n_aie_cols == 8 else i for i in range(self.n_shim_mem_a)]
         n_shim_mem_A = self.n_shim_mem_a
         n_A_tiles_per_shim = self.n_a_tiles_per_shim
         b_col_maj, c_col_maj = self.b_col_maj, self.c_col_maj
@@ -478,6 +502,7 @@ class GEMM(Operator):
                     obj_types=[A_l1_ty] * (stop_row - start_row),
                     names=[f"A_L2L1_{row}" for row in range(start_row, stop_row)],
                     to_stream=[streams.A] * (stop_row - start_row),
+                    tile=pins.memtiles.tile(a_cols[i], 1),
                 )
             )
             for j in range(stop_row - start_row):
@@ -495,6 +520,7 @@ class GEMM(Operator):
                     obj_type=B_l1_ty,
                     name=f"B_L2L1_{col}",
                     to_stream=streams.B,
+                    tile=pins.memtiles.tile(col, 1),
                 )
             )
             # Output C
@@ -514,6 +540,7 @@ class GEMM(Operator):
                     obj_types=[C_l1_ty] * n_aie_rows,
                     names=[f"C_L1L2_{col}_{row}" for row in range(n_aie_rows)],
                     depths=[fifo_depth_out] * n_aie_rows,
+                    tile=pins.memtiles.tile(col, 1),
                 )
             )
             for j in range(n_aie_rows):
@@ -606,21 +633,16 @@ class GEMM(Operator):
                             *finish.args(row * n_aie_cols + col),
                         ],
                         stack_size=max(0xD00, finish.stack_bytes or 0),
+                        tile=pins.cores.tile(col, 2 + row),
                     )
                 )
 
-        # The shim ends stay pinned, and A on alternate columns in the 4x8
-        # case is the reason: the memtiles and the workers place themselves
-        # fine, but relaxing these three as well piles the descriptors of a
-        # real shape (2048x8192x2048, b_col_maj) onto one tile, and DMA
-        # lowering rejects it with "Too many simultaneously active buffer
-        # descriptors on tile (3,0), which supports up to 16".
         for c, f in enumerate(A_l3l2_fifos):
-            self.A.lane(c).bind(f.prod(tile=Tile(2 * c if n_aie_cols == 8 else c, 0)))
+            self.A.lane(c).bind(f.prod(tile=pins.shims.tile(a_cols[c], 0)))
         for c, f in enumerate(B_l3l2_fifos):
-            self.B.lane(c).bind(f.prod(tile=Tile(c, 0)))
+            self.B.lane(c).bind(f.prod(tile=pins.shims.tile(c, 0)))
         for c, f in enumerate(C_l2l3_fifos):
-            self.C.lane(c).bind(f.cons(tile=Tile(c, 0)))
+            self.C.lane(c).bind(f.cons(tile=pins.shims.tile(c, 0)))
         flat_rtps = [
             rtps[row][col] for row in range(n_aie_rows) for col in range(n_aie_cols)
         ]

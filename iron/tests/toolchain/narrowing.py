@@ -216,9 +216,20 @@ def test_derived_fields_are_not_widths(npu2):
 
 def test_gemm_searches_tile_k_only_where_c_accumulates_in_f32(npu2):
     plain = GEMM(M=2048, K=2048, N=2048).resolved(npu2)
-    assert set(plain.domains(npu2)) == {"num_aie_columns", "tile_m", "tile_n"}
+    assert set(plain.domains(npu2)) == {
+        "num_aie_columns",
+        "tile_m",
+        "tile_n",
+        "placement",
+    }
     exact = GEMM(M=2048, K=2048, N=2048, prio_accuracy=True).resolved(npu2)
-    assert set(exact.domains(npu2)) == {"num_aie_columns", "tile_m", "tile_k", "tile_n"}
+    assert set(exact.domains(npu2)) == {
+        "num_aie_columns",
+        "tile_m",
+        "tile_k",
+        "tile_n",
+        "placement",
+    }
 
 
 @pytest.mark.parametrize("name", ["npu1", "npu2"])

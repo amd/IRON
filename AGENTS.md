@@ -556,7 +556,13 @@ code before relying on a line here; it is the authority.
   patch lands in its length.
 - **Placement.** Operator order is the final tiebreak for shim tile and
   channel, so a per-column stream is not guaranteed to sit in physical
-  column `c`; pin it with `via=` where that matters.
+  column `c`; pin it with `via=` where that matters. Where the tiles an
+  `array()` names are a choice, the choice is a tunable:
+  `placement: str = auto("...", array=True, domain=Placement({...}))`, each
+  name a `Pins` holding cores, memtiles and shims at a `Level` (the tile,
+  its column, or the placer's), the hand-found one the default
+  (`iron/common/declare/placement.py`; MHA and GEMM). The tuner measures
+  each name the placer takes, like any other tunable.
 - **`Elementwise` is not upstream's `transform_parallel`.** They differ in
   the trip count (a `Value` here, folded into the core there), in who
   owns the sequence (the library here, so operators fuse into one image),
