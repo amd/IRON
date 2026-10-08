@@ -635,7 +635,8 @@ extern "C" void resize_setup(int32_t *counts, int32_t h, int32_t w, int32_t ho,
     core = c;
     cpr = w > 0 ? (3 * w + CHUNK - 1) / CHUNK : 0;
     int strips = wo > 0 ? wo / SIDE : 0;
-    int nmax = (strips + CORES - 1) / CORES;
+    // A column past the patches at least, so the last of every band is zeros.
+    int nmax = strips / CORES + 1;
     owned = c < strips ? (strips - c + CORES - 1) / CORES : 0;
     ok = h >= 1 && w >= 1 && ho >= SIDE && wo >= SIDE && ho % SIDE == 0 &&
          wo % SIDE == 0 && nmax <= COLS;
@@ -780,8 +781,9 @@ class Resample(Operator):
     chunks, resamples each image row across them, and each band of 16
     output rows down them once its input rows have come. Patch `(py, px)`
     is row `py * pad + px` of `patches`, 16x16 pixels row-major, channels
-    last, `u8 / 255` in bf16; `pad` is the patch columns rounded up to the
-    cores, its extra columns zeros.
+    last, `u8 / 255` in bf16; `pad` is `(columns // cores + 1) * cores`
+    for `columns` patch columns, its extra columns zeros: row `pad - 1` is
+    always a zero patch, which padding past the image gathers.
 
     `rows`, `columns`, `out_rows` and `out_columns` may be bound per call,
     so one build serves every size the buffers hold.
@@ -805,6 +807,8 @@ class Resample(Operator):
                 )
             ),
             Case(dict(height=37, width=53, out_height=96, out_width=144)),
+            # As many patch columns as cores: a column of zeros past them.
+            Case(dict(height=37, width=53, out_height=96, out_width=256)),
             # A 37-tap window down, the most a 356-word chunk holds.
             Case(dict(height=6000, width=500, out_height=672, out_width=432)),
         ],
@@ -847,7 +851,10 @@ class Resample(Operator):
     width_chunks: int = param(default=lambda op: 16 * -(-op.out_width // (16 * SIDE)))
     height_chunks: int = param(default=lambda op: 16 * -(-op.out_height // (16 * SIDE)))
     patch_rows: int = param(
-        default=lambda op: op.out_height // SIDE * 16 * -(-op.out_width // (16 * SIDE))
+        default=lambda op: op.out_height
+        // SIDE
+        * 16
+        * (op.out_width // (16 * SIDE) + 1)
     )
     num_aie_columns: int = auto()
     num_channels: int = auto(2)
@@ -882,12 +889,12 @@ class Resample(Operator):
         np.int32, derive=lambda op: op.out_columns // SIDE, optional=True
     )
     height_count = Value(np.int32, derive=lambda op: op.out_rows // SIDE, optional=True)
-    # Patches per core: every band's, padded to the cores.
+    # Patches per core: every band's, padded past the cores.
     patch_count = Value(
         np.int32,
         derive=lambda op: op.out_rows
         // SIDE
-        * -(-(op.out_columns // SIDE) // op.cores),
+        * (op.out_columns // SIDE // op.cores + 1),
         optional=True,
     )
 
@@ -934,7 +941,7 @@ class Resample(Operator):
                     f"hold {cap}"
                 )
         strips, bands = self.out_width // SIDE, self.out_height // SIDE
-        nmax = -(-strips // self.cores)
+        nmax = strips // self.cores + 1
         if nmax > self.patch_columns:
             raise ValueError(
                 f"Resample: {strips} patch columns over {self.cores} cores is "
@@ -975,7 +982,7 @@ class Resample(Operator):
         pixels = np.asarray(image).reshape(-1)[: h * line].reshape(h, line)
         out = resize(pixels[:, : 3 * w].reshape(h, w, 3), ho, wo)
         bands, strips = ho // SIDE, wo // SIDE
-        pad = -(-strips // self.cores) * self.cores
+        pad = (strips // self.cores + 1) * self.cores
         grid = np.zeros((bands, pad, SIDE, SIDE, 3), np.uint8)
         grid[:, :strips] = out.reshape(bands, SIDE, strips, SIDE, 3).transpose(
             0, 2, 1, 3, 4
