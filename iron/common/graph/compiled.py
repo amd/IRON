@@ -36,7 +36,7 @@ from ..image.coresidence import AdjacentPacking
 from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
 from .carried import CARRY, EmitSite, attach_emit, compose
-from .fold import Fold, Prologue, folded
+from .fold import Folding, folded
 from .handle import Affine, Carry, Handle, State, Value, _tensor_dtype, is_operand
 from .narrowing import JointNarrowing, Tuning
 from .trace import TracedGraph, Tracer, _ReferenceTracer
@@ -312,7 +312,7 @@ class Graph:
         record="memory",
         feeds: CompiledGraph | None = None,
         coresident: AdjacentPacking | JointNarrowing | None = None,
-        fold: bool | Collection[Fold | Prologue] = False,
+        fold: bool | Collection[Folding] = False,
         **shapes,
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
@@ -332,7 +332,8 @@ class Graph:
                 ``JointNarrowing`` folds steps and narrows designs where its
                 cost table says they gain, then packs them.
             fold: Fold every step its readers or its producer can apply
-                in their own cores into them (``iron.common.graph.fold``),
+                in their own cores into them, and every copy its producer
+                can write in its place (``iron.common.graph.fold``),
                 whatever it costs; or those folds alone, as a tuning's
                 ``folds`` name them.
             **shapes: Each input's shape, or ``(shape, dtype)``.

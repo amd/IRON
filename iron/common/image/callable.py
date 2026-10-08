@@ -21,6 +21,7 @@ from aie.utils.trace import get_trace_buffer
 from aie.utils.verify import Tolerance, compare
 
 from ..declare import Operator
+from ..design.build import device_symbol
 from .allocator import ALIGNMENT, ArenaPlan, Pool
 
 if TYPE_CHECKING:
@@ -467,6 +468,10 @@ class StepCallable:
         t0 = time.perf_counter()
         for index, (step_op, kernel, names, args) in enumerate(self._steps):
             *in_specs, out_spec = step_op.buffers
+            at = out_spec.placement[1]
+            if f"{out_spec.name}_offset" in step_op.bound_values:
+                word = step_op.value(f"{out_spec.name}_offset")
+                at += int(self.dispatch_values[device_symbol(step_op, word)])
             if kernel is None or self.compare:
                 inputs = [
                     buf.to("cpu")
@@ -478,14 +483,16 @@ class StepCallable:
             if kernel is None:
                 out = args[-1].numpy_view()
                 n = math.prod(out_spec.shape)
-                out[:n] = step_op.reference(*inputs).reshape(-1).astype(out.dtype)
+                out[at : at + n] = (
+                    step_op.reference(*inputs).reshape(-1).astype(out.dtype)
+                )
                 continue
             kernel(
                 *args,
                 **{name: self.dispatch_values[name] for name in kernel.dispatch_params},
             )
             if self.compare:
-                self._check(index, step_op, names, inputs, args[-1], out_spec)
+                self._check(index, step_op, names, inputs, args[-1], out_spec, at)
         self.last_elapsed = time.perf_counter() - t0
         if self._on_npu:
             # Mark device residency so to("cpu") fires after a prior read marked it "cpu".
@@ -494,13 +501,16 @@ class StepCallable:
                     self._buffers[name].device = "npu"
                     self._buffers[name].to("cpu")
 
-    def _check(self, index, step_op: Operator, names, inputs, out, spec) -> None:
-        """Hold step ``index``'s NPU output to its reference on the same inputs.
+    def _check(
+        self, index, step_op: Operator, names, inputs, out, spec, at: int
+    ) -> None:
+        """Hold step ``index``'s NPU output, from element ``at`` of ``out``,
+        to its reference on the same inputs.
 
         Raises:
             RuntimeError: The output is outside the step's tolerance.
         """
-        npu = out.to("cpu").numpy_view()[: math.prod(spec.shape)].copy()
+        npu = out.to("cpu").numpy_view()[at : at + math.prod(spec.shape)].copy()
         npu = npu.reshape(spec.shape)
         ref = step_op.reference(*inputs).reshape(spec.shape).astype(np.float32)
         diff = np.abs(npu.astype(np.float32) - ref)

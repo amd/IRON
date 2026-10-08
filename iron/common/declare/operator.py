@@ -43,6 +43,7 @@ from .field import DimRef, OptionalDim, Select, Tier, Unresolvable, param
 from .member import (
     Extent,
     In,
+    Scratchpad,
     Value,
     _Buffer,
     _Member,
@@ -193,6 +194,34 @@ class _ChainWord(Value):
         return f"<the {self.kind} chain a design selects>"
 
 
+class _PlaceWord(Scratchpad):
+    """The per-call element offset of an operand placed in a larger buffer:
+    every transfer of it moves by the word (``Operator.placed``).
+    """
+
+    def __init__(self, owner: type, buffer: str) -> None:
+        super().__init__(np.int32)
+        self.owner = owner
+        self.buffer = buffer
+        self.name = f"{buffer}_offset"
+
+    def __repr__(self) -> str:
+        return f"<the offset {self.buffer} is placed at>"
+
+
+@dataclasses.dataclass(frozen=True)
+class CopyRun:
+    """Where an operator writes its one input verbatim, as one contiguous
+    run of its one output (``Operator.copies_to``).
+    """
+
+    # The elements of the output, and the one the run starts at.
+    into: int
+    start: int
+    # The per-call value adding to ``start``, if any.
+    offset: str | None = None
+
+
 @dataclasses.dataclass(frozen=True)
 class Link:
     """One step of a finish or a prologue: ``op`` applied to a tile of the
@@ -280,6 +309,11 @@ class Operator(metaclass=_OperatorMeta):
         default=(), repr=False, compare=False, kw_only=True
     )
     prepares: tuple[tuple[Link, ...], ...] = dataclasses.field(
+        default=(), repr=False, compare=False, kw_only=True
+    )
+    # Per output a graph placed in a larger buffer (``placed``): its name,
+    # that buffer's elements and the one it starts at; design_key adds them.
+    placements: tuple[tuple[str, int, int], ...] = dataclasses.field(
         default=(), repr=False, compare=False, kw_only=True
     )
 
@@ -436,6 +470,36 @@ class Operator(metaclass=_OperatorMeta):
             self, finishes=other.finishes, prepares=other.prepares
         )
 
+    def copies_to(self) -> CopyRun | None:
+        """Where this operator writes its one input verbatim, as one run of
+        its one output; None where it does not, the default.
+        """
+        return None
+
+    def placed(self, copy: Operator, operand: str) -> Self | None:
+        """This operator writing its output ``operand`` where ``copy``
+        writes it (``copies_to``), so a graph drops the copy: the operand is
+        ``copy``'s output at runtime, every transfer of it moved to the run,
+        and by the per-call value moving the run.
+
+        Returns:
+            The placed operator, or None where its transfers cannot move:
+            a shipped image's, or one whose sequence moves them itself.
+        """
+        if self.external is not None:
+            return None
+        run = copy.copies_to()
+        if run is None:
+            return None
+        values = dict(self.bound_values)
+        if run.offset is not None:
+            values[f"{operand}_offset"] = copy.bound_values[run.offset]
+        return dataclasses.replace(
+            self,
+            bound_values=values,
+            placements=(*self.placements, (operand, run.into, run.start)),
+        )
+
     def at_line(self, line: int, dtype, dev, ordered: bool = True, at: int = 0) -> Self:
         """This operator applied by another's core to one tile of its output,
         a run of ``line`` elements of ``dtype``, resolved for ``dev``.
@@ -579,6 +643,8 @@ class Operator(metaclass=_OperatorMeta):
         )
         if self.bound_values:
             own += (("values", tuple(sorted(self.bound_values.items()))),)
+        if self.placements:
+            own += (("placements", self.placements),)
         if self.finish:
             own += (("finish", tuple(link.array_key() for link in self.finish)),)
         if any(self.finishes):
@@ -876,7 +942,7 @@ class Operator(metaclass=_OperatorMeta):
     def uses_value(self, name: str) -> bool:
         """Whether this instance drives the per-call value ``name``; unused ones get no parameter."""
         member = next((m for m in self._value_members if m.name == name), None)
-        if isinstance(member, Extent):
+        if isinstance(member, (Extent, _PlaceWord)):
             return name in self.bound_values
         if isinstance(member, Value) and member.derive is not None:
             return name in self.bound_values or name in self._per_call_derived()
@@ -952,7 +1018,7 @@ class Operator(metaclass=_OperatorMeta):
 
     def use_value(self, name: str, bound_to: str | None = None) -> None:
         """Record that a graph binds the per-call value ``name`` to its value ``bound_to``."""
-        if not any(isinstance(m, _Value) and m.name == name for m in self._members):
+        if not any(m.name == name for m in self._value_members):
             raise TypeError(
                 f"{type(self).__name__} declares no per-call value {name!r}"
             )
@@ -1024,12 +1090,18 @@ class Operator(metaclass=_OperatorMeta):
                 word = _ChainWord(type(self), kind)
                 bound[word.name] = BoundValue(word, self)
                 self._chain_words += (word,)
+        self._place_words = tuple(
+            _PlaceWord(type(self), m.name) for m in self._members_io()
+        )
+        for word in self._place_words:
+            bound[word.name] = BoundValue(word, self)
 
     @property
     def _value_members(self) -> list[_Value]:
         return [m for m in self._members if isinstance(m, _Value)] + [
             *self.__dict__.get("_extent_words", ()),
             *self.__dict__.get("_chain_words", ()),
+            *self.__dict__.get("_place_words", ()),
         ]
 
     @classmethod

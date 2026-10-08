@@ -57,6 +57,7 @@ from aie.utils import bfp
 from .. import harness
 from ..declare import Direction, Operator
 from ..declare.bound import BoundBuffer, BoundValue
+from ..declare.operator import _PlaceWord
 from ..design import OperatorDesign, device_symbol
 from ..image.callable import FullELFCallable, StepCallable
 from ..image.sequence import OperatorSequence
@@ -205,7 +206,8 @@ class Standalone:
             for buf, name_ in zip(op.buffers, self._names(k, op)):
                 if buf.direction.fills:
                     content = self._content(buf, inputs.get(op, {}), rng)
-                    self._bytes(name_)[: buf.nbytes] = content
+                    at = buf.placement[1] * bfp.itemsize(buf.dtype)
+                    self._bytes(name_)[at : at + buf.nbytes] = content
                     if buf.direction.drains:
                         self._before[name_] = content.copy()
         ops = {id(op): op for op in self.steps}.values()
@@ -224,6 +226,9 @@ class Standalone:
 
     @staticmethod
     def _value(op: Operator, values: Mapping[str, int], v: BoundValue) -> int:
+        # Each operand here is a buffer of its own: a placed one at its run.
+        if isinstance(v.member, _PlaceWord):
+            return 0
         if v.name in values:
             return values[v.name]
         extents = op.bound_extents
@@ -272,7 +277,8 @@ class Standalone:
         out = {}
         for buf, name in zip(op.buffers, self._names(self._slot[k], op)):
             if buf.direction.fills:
-                data = self._before.get(name, self._bytes(name)[: buf.nbytes])
+                at = buf.placement[1] * bfp.itemsize(buf.dtype)
+                data = self._before.get(name, self._bytes(name)[at : at + buf.nbytes])
                 out[buf.name] = data.view(buf.host_dtype).reshape(buf.host_shape)
         return out
 
@@ -290,7 +296,8 @@ class Standalone:
                 axis = buf.extent_axis(op.value(extent).member)
                 if axis is not None:
                     under[axis] = slice(0, self._values[op][extent])
-            data = self._bytes(name)[: buf.nbytes].reshape(*buf.shape, -1)
+            at = buf.placement[1] * bfp.itemsize(buf.dtype)
+            data = self._bytes(name)[at : at + buf.nbytes].reshape(*buf.shape, -1)
             # A block-float buffer stays its blocks' bytes, as its host shape is.
             data = np.ascontiguousarray(data[tuple(under)]).view(buf.host_dtype)
             out[buf.name] = data if bfp.is_bfp(buf.dtype) else data[..., 0]

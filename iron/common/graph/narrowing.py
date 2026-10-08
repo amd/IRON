@@ -73,7 +73,7 @@ from ..declare import Operator
 from ..design import OperatorDesign, runtime
 from ..image.coresidence import Packing, fits
 from ..image.fusion import generate, parameters_preamble
-from .fold import FOLD_RUNS, Fold, Made, Prologue, folded, foldings
+from .fold import FOLD_RUNS, Folding, Made, folded, foldings
 from .trace import TracedGraph
 
 
@@ -674,8 +674,8 @@ class Tuning:
     baseline_us: float
     unmeasured: tuple[str, ...]
     inexact: tuple[str, ...] = ()
-    folds: tuple[Fold | Prologue, ...] = ()
-    unpriced: tuple[Fold | Prologue, ...] = ()
+    folds: tuple[Folding, ...] = ()
+    unpriced: tuple[Folding, ...] = ()
 
     def apply(
         self, traced: TracedGraph, dev=None
@@ -846,7 +846,7 @@ class JointNarrowing:
         ways, every = foldings(traced, dev, self.fold_runs, made)
         candidates = list(dict.fromkeys(f for applied in ways for f in applied))
         # Ways folding alike are priced once.
-        priced: dict[frozenset[Fold | Prologue], Tuning | None] = {}
+        priced: dict[frozenset[Folding], Tuning | None] = {}
         best = plain
         if every:
             for trial, applied in ways.values():
@@ -896,11 +896,11 @@ class JointNarrowing:
     def _priced(
         self,
         trial: TracedGraph,
-        applied: Counter[Fold | Prologue],
+        applied: Counter[Folding],
         dev,
         keys: set[str],
         keyed: dict[int, str],
-        priced: dict[frozenset[Fold | Prologue], Tuning | None],
+        priced: dict[frozenset[Folding], Tuning | None],
     ) -> Tuning | None:
         """``trial``, the graph with the folds of ``applied`` applied, tuned;
         or None where a design the folds add or remove (beside ``keys``, the

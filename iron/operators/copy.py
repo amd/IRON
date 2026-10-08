@@ -21,7 +21,7 @@ from aie.iron import ObjectFifo, TaskGroup
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import Divisors, In, Operator, Out, Scratchpad, auto, param
+from iron.common import CopyRun, Divisors, In, Operator, Out, Scratchpad, auto, param
 from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
@@ -232,6 +232,41 @@ class Copy(Operator):
     def uses_value(self, name: str) -> bool:
         # An offset or a size is patched only when a graph binds a handle to it.
         return name in self.bound_values
+
+    def copies_to(self) -> CopyRun | None:
+        """The run ``dst`` writes, where ``src`` reads the whole input in
+        order and ``dst`` is one contiguous run, neither bounded.
+        """
+        src, dst = self.src, self.dst
+        # A bounded copy stays: a producer drains whole tiles past the bound.
+        if (
+            not isinstance(src, TensorAccessPattern)
+            or not isinstance(dst, TensorAccessPattern)
+            or "in_offset" in self.bound_values
+            or self.src_bound is not None
+            or self.dst_bound is not None
+        ):
+            return None
+        whole, run = src.coalesce(), dst.coalesce()
+        if (
+            whole.rank != 1
+            or whole.offset != 0
+            or whole.sizes[0] != self.input_buffer_size
+            or 1 not in (whole.sizes[0], whole.strides[0])
+            or run.rank != 1
+            or 1 not in (run.sizes[0], run.strides[0])
+            or not isinstance(run.offset, (int, np.integer))
+        ):
+            return None
+        return CopyRun(
+            self.output_buffer_size,
+            int(run.offset),
+            "out_offset" if "out_offset" in self.bound_values else None,
+        )
+
+    def placed(self, copy: Operator, operand: str) -> None:
+        """Never: a copy's sequence moves its transfers itself."""
+        return None
 
     def array(self, target) -> list:
 

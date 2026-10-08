@@ -15,6 +15,7 @@ from aie.iron import TaskGroup, WorkerRuntimeBarrier, sync_parameters
 
 from ..declare import DispatchTime, Operator
 from ..declare.bound import BoundBuffer, BoundValue, BufferView, Lane
+from ..declare.operator import _PlaceWord
 from .bd import BdLimits
 
 
@@ -208,7 +209,26 @@ class Sequence:
     ):
         fn = getattr(self._lane(stream).handle, verb)
         buffer, tap, sliced_by = self._resolve(what, stream)
-        offset_by = offset_by or sliced_by
+        placed = next(
+            (
+                v
+                for v in self.op.values
+                if isinstance(v.member, _PlaceWord) and v.member.buffer == buffer.name
+            ),
+            None,
+        )
+        if placed is not None and (offset_by is not None or sliced_by is not None):
+            raise ValueError(
+                f"{type(self.op).__name__}.{buffer.name} is placed in a larger "
+                f"buffer, {placed.name} moving its transfers; a transfer of it "
+                f"takes no per-call offset of its own"
+            )
+        offset_by = placed or offset_by or sliced_by
+        into, start = buffer.placement
+        if (into, start) != (buffer.elements, 0):
+            tap = TensorAccessPattern(
+                (into,), tap.offset + start, tap.sizes, tap.strides
+            )
         if offset_by is not None and offset_by.param is None:
             raise ValueError(
                 f"{offset_by.name} has no device parameter: the operator does not use "

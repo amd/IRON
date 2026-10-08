@@ -109,5 +109,5 @@ class OperatorImage:
                 ),
             ),
             steps=(Step(0, op.name, config.name, tuple(b.name for b in buffers)),),
-            buffers={b.name: ("arg", i, b.nbytes) for i, b in enumerate(buffers)},
+            buffers={b.name: ("arg", i, b.held_nbytes) for i, b in enumerate(buffers)},
         )

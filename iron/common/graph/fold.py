@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Folding a step into the step that produced one of its inputs, or into
-the steps that read its output.
+the steps that read its output, and a copy into its producer's drain.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from types import MethodType
 
 from ..declare import Operator, Unresolvable
 from ..declare.member import Extent
-from .trace import TracedGraph
+from .trace import Binding, TracedGraph
 
 # The most ``folded`` runs ``foldings`` makes, each with others left out.
 FOLD_RUNS = 256
@@ -70,6 +70,28 @@ class Prologue:
         return f"{', then '.join(names)} into {consumers}"
 
 
+@dataclasses.dataclass(frozen=True)
+class Place:
+    """A copy of one design folded into the drain of the producer of its
+    input, a step of another, after the steps of ``after`` were folded into
+    that: the producer writes the run the copy wrote. Each names the
+    resolved ``design_key()`` of its operator, those of ``after`` with the
+    input each took the tile at.
+    """
+
+    producer: Hashable
+    copy: Hashable
+    after: tuple[tuple[Hashable, int], ...] = ()
+
+    def __str__(self) -> str:
+        names = [self.producer[0], *(k[0] for k, _ in self.after)]
+        return f"{self.copy[0]} into the drain of {', then '.join(names)}"
+
+
+# Every kind of fold ``folded`` applies.
+Folding = Fold | Prologue | Place
+
+
 class Made:
     """The operators ``folded`` makes from a graph's, and their
     resolutions, each made once: the runs of one search (``foldings``)
@@ -83,9 +105,11 @@ class Made:
         self._made: dict[tuple, tuple[Operator, Operator, Operator | None]] = {}
         self._resolved: dict[int, tuple[Operator, Operator | None]] = {}
 
-    def of(self, method: MethodType, other: Operator, *args: int) -> Operator | None:
-        """``method``, an operator's ``fold``, ``prefold`` or ``on_array``,
-        applied to ``other`` and ``args``.
+    def of(
+        self, method: MethodType, other: Operator, *args: Hashable
+    ) -> Operator | None:
+        """``method``, an operator's ``fold``, ``prefold``, ``on_array`` or
+        ``placed``, applied to ``other`` and ``args``.
         """
         key = (method.__func__, id(method.__self__), id(other), args)
         if key not in self._made:
@@ -106,16 +130,18 @@ class Made:
 def folded(
     traced: TracedGraph,
     dev,
-    only: Collection[Fold | Prologue] | None = None,
-    without: Collection[Fold | Prologue] = (),
+    only: Collection[Folding] | None = None,
+    without: Collection[Folding] = (),
     made: Made | None = None,
-) -> tuple[TracedGraph, Counter[Fold | Prologue]]:
+) -> tuple[TracedGraph, Counter[Folding]]:
     """``traced`` with each step whose readers can apply it in their own
     cores folded into them (``Operator.prefold``), each step its producer
     can apply in its own cores folded into the producer
-    (``Operator.fold``), then each operator that can run on a folded one's
-    array moved onto it (``Operator.on_array``), so a fold does not split
-    an array two designs shared.
+    (``Operator.fold``), each copy its producer can write in its place
+    folded into the producer's drain (``Operator.placed``), then each
+    operator that can run on a folded one's array moved onto it
+    (``Operator.on_array``), so a fold does not split an array two designs
+    shared.
 
     A step folds into its readers where its one output is a whole,
     unbounded intermediate each of them reads, once, as the input it
@@ -137,6 +163,13 @@ def folded(
     if no step between them writes those inputs, else where the consumer
     ran if none writes the producer's, and writes the consumer's output;
     a step it reads produces into it in turn.
+
+    A copy folds into its producer's drain where it writes its input, a
+    whole intermediate that it and its producer alone name, verbatim to
+    one run of its output (``Operator.copies_to``), neither bounded, each
+    called once, and no step between them names that output: the producer
+    then drains into the copy's output, at the run and moved by the copy's
+    per-call offset (``Operator.placed``).
 
     Args:
         traced: The graph as traced.
@@ -161,7 +194,7 @@ def folded(
     )
     steps: list = list(traced.steps)
     replace: dict[int, Operator] = {}
-    applied: Counter[Fold | Prologue] = Counter()
+    applied: Counter[Folding] = Counter()
     # Per prepared step: the designs folded into it, the first applied first.
     prologues: dict[int, tuple[tuple[Hashable, int], ...]] = {}
     for j in reversed(range(len(steps))):
@@ -348,6 +381,62 @@ def folded(
             replace[id(producer.op)] = fused
             applied[fold] += 1
             break
+    given: dict[int, dict] = {}
+    for b in traced.bindings:
+        given.setdefault(id(b.op), {})[b.member.name] = b.expression
+    placings = []
+    for k, step in enumerate(list(steps)):
+        if step is None or len(step.inputs) != 1 or len(step.outputs) != 1:
+            continue
+        (x,), (y,) = step.inputs, step.outputs
+        run = step.op.copies_to()
+        j = producers.get(x.name)
+        values = given.get(id(step.op), {})
+        if (
+            run is None
+            or j is None
+            or steps[j] is None
+            or calls[id(step.op)] != 1
+            or calls[id(steps[j].op)] != 1
+            or extents[id(steps[j].op)]
+            or x.role != "intermediate"
+            or x.parent is not None
+            or x.tap is not None
+            or x.bounds
+            or named[x.name] != 2
+            or y.tap is not None
+            or y.bounds
+            or (y.parent is not None and y.parent.parent is not None)
+            or run.start + x.elements > y.elements
+            or any(
+                (y.parent or y).name in {(h.parent or h).name for h in s.slots}
+                for s in steps[j + 1 : k]
+                if s is not None
+            )
+        ):
+            continue
+        producer = steps[j]
+        current = replace.get(id(producer.op), producer.op)
+        i = next(i for i, h in enumerate(producer.slots) if h.name == x.name)
+        operand = current.buffers[i].name
+        fused = made.of(current.placed, step.op, operand)
+        if fused is None or made.resolved(fused) is None:
+            continue
+        start, after = origins.get(j, (made.resolved(producer.op).design_key(), ()))
+        place = Place(start, made.resolved(step.op).design_key(), after)
+        if place in without or (only is not None and place not in only):
+            continue
+        steps[j] = dataclasses.replace(
+            producer,
+            slots=[y if n == i else s for n, s in enumerate(producer.slots)],
+            outputs=[y if o.name == x.name else o for o in producer.outputs],
+        )
+        steps[k] = None
+        replace[id(producer.op)] = fused
+        if run.offset is not None:
+            word = producer.op.value(f"{operand}_offset")
+            placings.append(Binding(producer.op, word, values[run.offset]))
+        applied[place] += 1
     if not replace:
         return traced, applied
     arrays = {made.resolved(f).array_key(): f for f in replace.values()}
@@ -366,17 +455,14 @@ def folded(
     kept = dataclasses.replace(
         traced,
         steps=kept,
-        bindings=[b for b in traced.bindings if id(b.op) in running],
+        bindings=[b for b in [*traced.bindings, *placings] if id(b.op) in running],
     )
     return kept.with_operators(replace), applied
 
 
 def foldings(
     traced: TracedGraph, dev, limit: int = FOLD_RUNS, made: Made | None = None
-) -> tuple[
-    dict[frozenset[Fold | Prologue], tuple[TracedGraph, Counter[Fold | Prologue]]],
-    bool,
-]:
+) -> tuple[dict[frozenset[Folding], tuple[TracedGraph, Counter[Folding]]], bool]:
     """Each way ``folded`` folds ``traced`` with some of its folds left out:
     leaving out a fold it applies lets one that fold pre-empted apply, and
     leaving out each fold a site admits leaves the site as traced.
@@ -392,10 +478,8 @@ def foldings(
         applied, folding everything first; and whether they are every way,
         False where ``limit`` runs did not reach them all.
     """
-    found: dict[
-        frozenset[Fold | Prologue], tuple[TracedGraph, Counter[Fold | Prologue]]
-    ] = {}
-    queue: list[frozenset[Fold | Prologue]] = [frozenset()]
+    found: dict[frozenset[Folding], tuple[TracedGraph, Counter[Folding]]] = {}
+    queue: list[frozenset[Folding]] = [frozenset()]
     seen = set(queue)
     made = Made(dev) if made is None else made
     for _ in range(limit):

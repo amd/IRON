@@ -26,7 +26,7 @@ from iron.common.graph import Handle, TracedGraph, Tracer
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import _words
 from iron.common.declare import Unresolvable
-from iron.common.graph.fold import Made, Prologue, folded, replaced
+from iron.common.graph.fold import Made, Place, Prologue, folded, replaced
 from iron.common.graph.handle import Affine, Value
 from iron.common.image import OperatorSequence
 from iron.common.image.artifacts import Parameter
@@ -661,6 +661,68 @@ def test_a_fold_runs_where_what_it_reads_is_written(npu2):
     assert [h.name for h in f.steps[2].inputs] == ["b", f.steps[0].outputs[0].name]
 
 
+class _Store(iron.Graph):
+    def __init__(self, use="once", rows=512, length=8):
+        self.w, self.use = z(rows, E), use
+        self.cache = iron.state((length, rows))
+
+    def body(self, x, *, pos: Scratchpad[np.int32]):
+        y = GEMV(self.w, x, num_aie_columns=8)
+        if self.use == "read between":
+            out = ReLU(self.cache[0])
+        Copy(y, self.cache[pos])
+        if self.use == "returned":
+            return y
+        if self.use == "read between":
+            return out
+        return SiLU(x)
+
+
+def test_a_copy_into_a_state_folds_into_its_producers_drain(npu2):
+    t = _Store().trace(x=(E,))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == ["Copy into the drain of GEMV"]
+    assert [type(s.op).__name__ for s in f.steps] == ["GEMV", "SiLU"]
+    (slot,) = f.steps[0].outputs
+    # It drains into the whole cache, at the run the copy's offset moves.
+    assert slot.buffer_name == "cache"
+    assert f.steps[0].op.placements == (("C", 8 * 512, 0),)
+    (binding,) = f.bindings
+    assert binding.op is f.steps[0].op and binding.member.name == "C_offset"
+    assert binding.expression == Affine(t.values[0], scale=512)
+    assert folded(t, npu2, without=tuple(count)) == (t, {})
+
+
+@pytest.mark.parametrize("use", ["returned", "read between"])
+def test_a_copy_whose_input_or_output_another_step_names_stays(use, npu2):
+    t = _Store(use).trace(x=(E,))
+    assert folded(t, npu2) == (t, {})
+
+
+class _Row(iron.Graph):
+    def __init__(self, at):
+        self.w, self.at = z(512, E), at
+        self.cache = iron.state((8, 256))
+
+    def body(self, x, *, pos: Scratchpad[np.int32]):
+        y = GEMV(self.w, x, num_aie_columns=8)
+        if self.at == "static":
+            Copy(y.reshape(2, 256), self.cache[2:4])
+        else:
+            Copy(y.reshape(2, 256)[pos], self.cache[3])
+        return SiLU(x)
+
+
+def test_a_copy_to_a_fixed_run_folds_and_one_of_part_of_its_input_stays(npu2):
+    f, count = folded(_Row("static").trace(x=(E,)), npu2)
+    assert [str(fold) for fold in count] == ["Copy into the drain of GEMV"]
+    assert f.steps[0].outputs[0].buffer_name == "cache[1024:2048]"
+    assert f.steps[0].op.placements == (("C", 512, 0),)
+    assert not f.bindings
+    t = _Row("from pos").trace(x=(E,))
+    assert not any(isinstance(fold, Place) for fold in folded(t, npu2)[1])
+
+
 class _Project(iron.Graph):
     def __init__(self, heads=2, residual=False, shared=False):
         self.ws = [z(512, E) for _ in range(heads)]
@@ -861,7 +923,8 @@ def test_llama_decode_folds_its_norms_into_the_projections(npu2):
     f, count = folded(t, npu2)
     # Per layer: the attention norm into q, k and v, the feed-forward's into
     # gate and up, and its product into down; the last residual and the
-    # final norm into the head.
+    # final norm into the head; the rotated key and the value written into
+    # their caches by the steps that make them.
     assert {str(fold): n for fold, n in count.items()} == {
         "RMSNorm into GEMV, GEMV, GEMV": 2,
         "RMSNorm into GEMV, GEMV": 2,
@@ -869,9 +932,34 @@ def test_llama_decode_folds_its_norms_into_the_projections(npu2):
         "SiLU, then ElementwiseMul into GEMV": 2,
         "RMSNorm into GEMV": 1,
         "ElementwiseAdd, then RMSNorm into GEMV": 1,
+        "Copy into the drain of RoPE": 2,
+        "Copy into the drain of GEMV": 2,
     }
-    assert (len(t.steps), len(f.steps)) == (41, 31)
+    assert (len(t.steps), len(f.steps)) == (41, 27)
     assert not any(type(s.op) is RMSNorm for s in f.steps)
+    row = model.config.n_kv_groups * model.config.head_dim
+    placed = {
+        h.buffer_name: (s.op.placements, dict(s.op.bound_values))
+        for s in f.steps
+        for h in s.outputs
+        if s.op.placements
+    }
+    rows = model.config.max_seq_len * row
+    assert placed == {
+        f"{cache}.{i}": (((name, rows, 0),), {f"{name}_offset": f"position_x{row}"})
+        for i in range(2)
+        for cache, name in (("keys", "y"), ("values", "C"))
+    }
+
+
+def test_llama_prompt_keeps_its_bounded_cache_writes(npu2):
+    model = small(max_seq_len=256)
+    t = model.trace(**model.shapes(model.config.prefill_chunk))
+    f, count = folded(t, npu2)
+    assert not any(isinstance(fold, Place) for fold in count)
+    assert sum(type(s.op) is Copy for s in f.steps) == sum(
+        type(s.op) is Copy for s in t.steps
+    )
 
 
 def test_llama_prompt_traces_over_the_same_caches():

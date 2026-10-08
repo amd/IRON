@@ -12,6 +12,7 @@ that names only its kernel.
 from .declare import (
     Carried,
     Choices,
+    CopyRun,
     Divisors,
     DispatchTime,
     Extent,
@@ -46,6 +47,7 @@ __all__ = [
     "BinaryElementwise",
     "Carried",
     "Choices",
+    "CopyRun",
     "Divisors",
     "DispatchTime",
     "Elementwise",

@@ -28,13 +28,14 @@ from .member import (
     Shim,
     Value,
 )
-from .operator import Link, Operator
+from .operator import CopyRun, Link, Operator
 from .profile import Profile
 from .xclbin import Xclbin
 
 __all__ = [
     "Carried",
     "Choices",
+    "CopyRun",
     "Direction",
     "Divisors",
     "DispatchTime",
