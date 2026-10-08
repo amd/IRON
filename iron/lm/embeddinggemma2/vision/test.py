@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """EmbeddingGemma 2's vision tower on the NPU, from the real checkpoint,
-against its float32 oracle, and the oracle once against Hugging Face's.
+against its float32 oracle, and the oracle once against Hugging Face's;
+the image processor's resize against Hugging Face's.
 """
 
 import time
@@ -17,11 +18,13 @@ from iron.lm import Checkpoint, load_weights
 from iron.lm.embeddinggemma2.model import COSTS
 from iron.lm.embeddinggemma2.vision.model import VISION, Vision, layout, vision_tensors
 from iron.lm.embeddinggemma2.vision.oracle import VisionOracle, patches
+from iron.lm.embeddinggemma2.vision.resize import size
 from iron.lm.testing import requires, weights_dir
+from iron.operators.resample.reference import resize
 
 DIRECTORY = weights_dir("embeddinggemma-2")
 
-pytestmark = requires(DIRECTORY / "model.safetensors")
+weighted = requires(DIRECTORY / "model.safetensors")
 
 # Measured at the worst of IMAGES: min cosine 0.9705, relative error 4.0e-2.
 # bf16 error grows over 16 layers: HF's own bf16 tower is 0.9973 and 2.3e-2
@@ -39,6 +42,23 @@ IMAGES = {
     # 10 x 14 tokens: a video frame's budget, 1260 patches.
     "video_frame": ((480, 672), VISION.video_tokens),
 }
+
+# (height, width) of a decoded image and its soft-token budget: a phone
+# photo either way up, up- and downscales, extreme aspect ratios, one side
+# unchanged, and an image already at its size.
+RESIZES = [
+    ((3024, 4032), VISION.image_tokens),
+    ((4032, 3024), VISION.image_tokens),
+    ((480, 640), VISION.image_tokens),
+    ((333, 517), VISION.video_tokens),
+    ((1080, 1920), VISION.video_tokens),
+    ((97, 2003), VISION.image_tokens),
+    ((2003, 97), VISION.video_tokens),
+    ((1, 5000), VISION.image_tokens),
+    ((17, 23), VISION.video_tokens),
+    ((672, 517), VISION.image_tokens),
+    ((672, 960), VISION.image_tokens),
+]
 
 
 def synthetic_image(height: int, width: int) -> np.ndarray:
@@ -79,6 +99,27 @@ def vision(weights):
         aie_utils.DefaultNPURuntime.cleanup()
 
 
+@pytest.mark.parametrize("shape, tokens", RESIZES)
+def test_resize_matches_hugging_face(shape, tokens):
+    # Optional dependencies: the reference implementation, where installed.
+    torch = pytest.importorskip("torch")
+    processing = pytest.importorskip(
+        "transformers.models.gemma4.image_processing_gemma4"
+    )
+    image = np.random.default_rng(0).integers(0, 256, (*shape, 3), dtype=np.uint8)
+    want = processing.Gemma4ImageProcessor()(
+        torch.from_numpy(image).permute(2, 0, 1),
+        max_soft_tokens=tokens,
+        return_tensors="pt",
+    )
+    values, positions = patches(
+        resize(image, *size(*shape, tokens, VISION)), tokens, VISION
+    )
+    np.testing.assert_array_equal(values, want["pixel_values"][0].numpy())
+    np.testing.assert_array_equal(positions, want["image_position_ids"][0].numpy())
+
+
+@weighted
 def test_vision_oracle_matches_hugging_face(weights, oracle):
     # Optional dependencies: the reference implementation, where installed.
     torch = pytest.importorskip("torch")
@@ -116,6 +157,7 @@ def test_vision_oracle_matches_hugging_face(weights, oracle):
     )
 
 
+@weighted
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("name", list(IMAGES))
 def test_vision_accuracy(vision, oracle, name, record_property):
@@ -132,6 +174,7 @@ def test_vision_accuracy(vision, oracle, name, record_property):
     assert error <= MAX_ERROR, error
 
 
+@weighted
 @pytest.mark.bench
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("name", ["image", "video_frame"])
