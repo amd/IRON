@@ -5,7 +5,8 @@
 bit for bit as torch computes it on the CPU.
 
 `ResampleTaps` computes one axis's filter table. The table is `chunks`
-objects of `words` int32. Each starts with a header, `[precision, window,
+objects of `words` int32, of which a call writes the first its sizes fill
+(`ResampleTaps.filled`). Each starts with a header, `[precision, window,
 first, outputs]`, and holds `outputs` slots from output `first` on, a slot
 being `[start, count]` then the output's `window` int16 weights, two to a
 word. A size the table cannot hold (`per_chunk` below 1, too few chunks, or
@@ -209,15 +210,14 @@ def per_chunk(in_size: int, out_size: int, words: int, slots: int | None = None)
 
 class ResampleTaps(Operator):
     """The int16 filter table and precision torch resamples one axis with,
-    `in_length` samples to `out_length`.
+    `in_samples` samples to `out_samples`.
 
     Each core takes chunks `k, k + cores, ...` and computes its outputs'
     weights in float64 twice: once for the largest normalized weight, which
     a chain through the cores reduces and the last core broadcasts, and once
-    to quantize at the precision that weight sets. `in_length` and
-    `out_length` are values the cores read, `in_size` and `out_size` unless
-    a graph binds them per call, so one build serves every size the table
-    holds.
+    to quantize at the precision that weight sets. `in_samples` and
+    `out_samples` may be bound per call, and so then are the chunks the
+    cores write, so one build serves every size the table holds.
     """
 
     test = Testing(
@@ -260,13 +260,39 @@ class ResampleTaps(Operator):
         tile=(words,),
         per=(num_aie_columns, num_channels),
     )
-    count = Value(np.int32, derive=lambda op: op.chunks // op.cores)  # chunks per core
-    in_length = Value(np.int32, derive=lambda op: op.in_size)
-    out_length = Value(np.int32, derive=lambda op: op.out_size)
+    in_samples = Extent(in_size)
+    out_samples = Extent(out_size)
+
+    # Chunks per core.
+    count = Value(
+        np.int32,
+        derive=lambda op: -(-op.filled(op.in_samples, op.out_samples) // op.cores),
+    )
+    in_length = Value(np.int32, derive=lambda op: op.in_samples)
+    out_length = Value(np.int32, derive=lambda op: op.out_samples)
 
     @property
     def cores(self) -> int:
         return self.num_aie_columns * self.num_channels
+
+    def filled(self, n_in: int, n_out: int) -> int:
+        """The chunks a table of `n_in` samples to `n_out` is written in.
+
+        Args:
+            n_in: The input samples on the axis.
+            n_out: The output samples on the axis.
+
+        Returns:
+            Those its outputs fill, in a multiple of 16 as `chunks` is; every
+            chunk for sizes the table cannot hold, each header saying so. The
+            cores write whole rounds, so up to a round past them.
+        """
+        per = 0
+        if min(n_in, n_out) >= 1:
+            per = per_chunk(n_in, n_out, self.words, self.slots)
+        if not per:
+            return self.chunks
+        return min(16 * -(-n_out // (16 * per)), self.chunks)
 
     def validate(self) -> None:
         if self.in_size < 1 or self.out_size < 1:
@@ -301,9 +327,9 @@ class ResampleTaps(Operator):
     def ops(self) -> int:
         return 0  # a table, not arithmetic over its words: its figure is latency
 
-    def reference(self, *, in_length=None, out_length=None):
-        n_in = self.in_size if in_length is None else int(in_length)
-        n_out = self.out_size if out_length is None else int(out_length)
+    def reference(self, *, in_samples=None, out_samples=None):
+        n_in = self.in_size if in_samples is None else int(in_samples)
+        n_out = self.out_size if out_samples is None else int(out_samples)
         table = np.zeros((self.chunks, self.words), np.int32)
         if n_in < 1 or n_out < 1:
             table[:, 0] = -1
@@ -315,7 +341,7 @@ class ResampleTaps(Operator):
             return table
         t = taps(n_in, n_out)
         slot = 2 + (taps_window + 1) // 2
-        for c in range(self.chunks):
+        for c in range(self.filled(n_in, n_out)):
             first = c * per
             n = min(max(n_out - first, 0), per)
             table[c, :HEADER] = t.precision, taps_window, first, n
@@ -329,11 +355,25 @@ class ResampleTaps(Operator):
 
     def sequence(self, rt):
         """Chunk `c` from core `c % cores`, the round-robin order the cores
-        compute them in.
+        compute them in: the chunks filled per call, or at the build's sizes.
         """
+        per_call = self.uses_value("count")
+        n, words = self.table.shape
+        count = n // self.cores if per_call else self.residents["count"]
         tg = TaskGroup()
-        for lane, tap, _ in rt.round_robin(self.table, 0):
-            rt.drain(lane, (self.table, tap), group=tg)
+        for k in range(self.cores):
+            tap = TensorAccessPattern(
+                (n, words),
+                k * words,
+                [1, count, 1, words],
+                [0, self.cores * words, 0, 1],
+            )
+            rt.drain(
+                self.table.lane(k),
+                (self.table, tap),
+                group=tg,
+                size_by={1: self.value("count")} if per_call else None,
+            )
         tg.finish()
 
     def array(self, target) -> list:
