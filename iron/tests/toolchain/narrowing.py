@@ -19,7 +19,7 @@ from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Scratchpad
+from iron.common import Level, Scratchpad
 from iron.common.declare import Profile
 from iron.common.graph.costcache import Accuracy, CostCache, Measurement
 from iron.common.graph.fold import FOLD_RUNS, folded, foldings
@@ -286,6 +286,14 @@ def test_a_row_a_core_holds_whole_is_one_block(npu2):
 def test_flm_gemm_searches_its_a_tile_and_row_blocks(npu2):
     gemm = FlmGEMM(M=2048, K=2048, N=2048).resolved(npu2)
     assert gemm.domains(npu2) == {"tile_ma": (64, 32, 16), "m_chunk": (8, 4, 2, 1)}
+
+
+def test_a_placement_holds_each_kind_of_tile_at_its_level():
+    assert Level.FREE.tile(3, 1) is None
+    column = Level.COLUMN.tile(3, 1)
+    assert (column.col, column.row) == (3, None)
+    tile = Level.TILE.tile(3, 1)
+    assert (tile.col, tile.row) == (3, 1)
 
 
 def test_a_profile_refuses_a_derived_field():

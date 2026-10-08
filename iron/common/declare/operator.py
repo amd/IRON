@@ -50,6 +50,7 @@ from .member import (
     _Value,
     present,
 )
+from .placement import Placement
 from .profile import Profile
 
 if TYPE_CHECKING:
@@ -711,6 +712,9 @@ class Operator(metaclass=_OperatorMeta):
             new._finish_at(dev if dev is not None else self.dev)
         new.validate()
         new.compatible()
+        for name, domain in new._domains.items():
+            if isinstance(domain, Placement):
+                domain.pins(getattr(new, name))
         new._resolved = True
         return new
 

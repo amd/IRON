@@ -29,6 +29,7 @@ from .member import (
     Value,
 )
 from .operator import CopyRun, Link, Operator
+from .placement import Level, Pins, Placement
 from .profile import Profile
 from .xclbin import Xclbin
 
@@ -42,9 +43,12 @@ __all__ = [
     "Extent",
     "In",
     "InOut",
+    "Level",
     "Link",
     "Operator",
     "Out",
+    "Pins",
+    "Placement",
     "Profile",
     "Scratchpad",
     "Shim",
