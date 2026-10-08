@@ -4,10 +4,12 @@
 """Measure Llama 3's cost table on this NPU (``iron.lm.tune``), beside
 this file as ``costs_<device>.json``: ``costs_npu2.json`` is one, measured
 on a Strix Halo NPU (8 columns); on NPU1 it is an xclbin chain's,
-``costs_npu1.json``:
+``costs_npu1.json``. ``costs_npu2_separate.json`` prices an xclbin chain on
+the same NPU2 (``--each-step`` in ``iron.lm.runner``):
 
 ```bash
 python -m iron.lm.llama3.tune
+python -m iron.lm.llama3.tune --dispatch separate
 ```
 """
 

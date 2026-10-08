@@ -20,10 +20,14 @@ from iron.lm.tune import CALIBRATION_PAIRS, calls
 from iron.tests.common.llama_model import llama_1b
 
 
-def test_llamas_table_holds_every_design_it_tunes(npu2):
+@pytest.mark.parametrize(
+    "dispatch, name",
+    [("fused", "costs_npu2.json"), ("separate", "costs_npu2_separate.json")],
+)
+def test_llamas_table_holds_every_design_it_tunes(npu2, dispatch, name):
     sample = Sampler(0.7, 50, np.random.default_rng(SEED))
-    designs = Designs.of(calls(llama_1b(), sample, 256, 0, "fused"), npu2)
-    table = CostTable(Path(llama_tune.__file__).with_name("costs_npu2.json"))
+    designs = Designs.of(calls(llama_1b(), sample, 256, 0, dispatch), npu2)
+    table = CostTable(Path(llama_tune.__file__).with_name(name))
     stale = designs.stale(table)
     missing = designs.missing(table, CALIBRATION_PAIRS)
     settings = {v.key: (vs[0], v) for vs in designs.settings.values() for v in vs}
@@ -40,8 +44,8 @@ def test_llamas_table_holds_every_design_it_tunes(npu2):
             + (f", moved to {moved}" if moved else ", its default")
         )
     assert not stale and not missing, (
-        f"{table.path} is out of date; run `python -m iron.lm.llama3.tune` on "
-        f"an idle NPU2. {len(missing)} to measure:\n"
+        f"{table.path} is out of date; run `python -m iron.lm.llama3.tune "
+        f"--dispatch {dispatch}` on an idle NPU2. {len(missing)} to measure:\n"
         + "\n".join(unmeasured)
         + f"\n{len(stale)} the graph no longer has: {stale}"
     )
