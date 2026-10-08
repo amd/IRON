@@ -52,8 +52,8 @@ class Clamp(UnaryElementwise):
         draw=dict(centered=("x",)),
     )
 
-    low: float = param()
-    high: float = param()
+    low: float = param(probe=-np.inf)
+    high: float = param(probe=np.inf)
 
     low_bits = Value(
         np.int32, derive=lambda op: int(np.array(op.low, bfloat16).view(np.uint16))

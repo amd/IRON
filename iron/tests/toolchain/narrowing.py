@@ -32,7 +32,7 @@ from iron.common.graph.narrowing import (
     model_us,
     variants,
 )
-from iron.common.graph.probe import judge
+from iron.common.graph.probe import Call, Designs, judge
 from iron.common.harness import vectors
 from iron.lm.layers import SwiGLU
 from iron.operators import (
@@ -40,6 +40,7 @@ from iron.operators import (
     GEMM,
     GEMV,
     MHA,
+    Clamp,
     ElementwiseAdd,
     GQAContext,
     ReLU,
@@ -83,6 +84,14 @@ class TwoExtents(iron.Graph):
         t = ElementwiseAdd(a, b, tile_size=TILE)
         u = SiLU(ElementwiseAdd(c, d, tile_size=TILE), tile_size=TILE)
         return ElementwiseAdd(t, b, tile_size=TILE), u
+
+
+class TwoClamps(iron.Graph):
+    """Two clamps of one shape, apart only in their bounds."""
+
+    def body(self, x):
+        y = Clamp(x, low=-0.75, high=1.25, tile_size=TILE)
+        return Clamp(y, low=-3e4, high=3e4, tile_size=TILE)
 
 
 class Rotate(iron.Graph):
@@ -428,6 +437,44 @@ def test_designs_of_one_array_take_one_width(tmp_path, npu2):
             {k: v.array for k, v in tuning.chosen.items()},
         )[0]
     )
+
+
+def test_designs_apart_only_in_their_probes_share_one_cost(tmp_path, npu2):
+    traced = TwoClamps().trace(x=(SIZE,))
+    first, second = (s.op for s in traced.steps)
+    assert first.design_key() != second.design_key()
+    key = cost_key(first)
+    assert cost_key(second) == key
+    # Measured once, at the probe, whichever clamp was traced first.
+    designs = Designs.of([Call(traced)], npu2)
+    assert list(designs.settings) == [key]
+    found = designs.settings[key]
+    assert all((v.op.low, v.op.high) == (-np.inf, np.inf) for v in found)
+    assert [v.key for v in variants(second, npu2)] == [v.key for v in found]
+    steps = {}
+    for v in found:
+        cols = dict(v.tunables)["num_aie_columns"]
+        steps[v.key] = (4.0 + cols, 8.0 * cols)
+    table = _table(tmp_path / "costs.json", steps)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    assert list(tuning.chosen) == [key]
+    chosen = tuning.chosen[key]
+    assert chosen.key != found[0].key
+    narrowed, _ = tuning.apply(traced, npu2)
+    a, b = (s.op for s in narrowed.steps)
+    assert (a.low, a.high, b.low, b.high) == (-0.75, 1.25, -3e4, 3e4)
+    for op in (a, b):
+        assert dict(chosen.tunables).items() <= vars(op).items()
+        assert cost_key(op) == chosen.key
+
+
+def test_a_clamp_folded_into_flm_gemm_costs_what_the_gemm_does(npu2):
+    # The epilogue clamps whether or not one is asked for, at (-inf, inf).
+    plain = FlmGEMM(M=256, K=512, N=1024)
+    clamped = plain.fold(Clamp(size=256 * 1024, low=-0.25, high=1.5))
+    assert clamped.clamp == (-0.25, 1.5)
+    assert clamped.design_key() != plain.design_key()
+    assert cost_key(clamped, npu2) == cost_key(plain, npu2)
 
 
 def test_placer_verdicts_are_kept_across_tunings(tmp_path, npu2):

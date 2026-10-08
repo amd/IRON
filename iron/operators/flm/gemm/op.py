@@ -152,7 +152,7 @@ class GEMM(Operator):
     # compiled-in modes.
     epilogue: Epilogue | str = param(default=Epilogue.NONE)
     # Optional (min, max) applied after the activation.
-    clamp: tuple | None = param(default=None)
+    clamp: tuple | None = param(default=None, probe=None)
     # B's packed block count on AIE2P: blocks, not bytes, since B's
     # declaration counts bfp16ebs8 blocks and bfp.itemsize turns that back
     # into the byte count pack_B returns.
