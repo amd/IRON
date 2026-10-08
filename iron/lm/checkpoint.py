@@ -79,6 +79,25 @@ def checkpoint_shapes(layout: Layout, n_layers: int) -> dict[str, tuple[int, ...
     return {name: shape for name, (_, shape) in _expand(layout, n_layers).items()}
 
 
+def random_weights(layout: Layout, n_layers: int, seed: int = 0) -> SimpleNamespace:
+    """The tree of ``layout`` over ``n_layers``, drawn at ``seed`` in place of
+    a checkpoint: each matrix normal with deviation ``1/sqrt(in)`` (an
+    embedding's ``in`` its width), each norm weight one.
+    """
+    rng = np.random.default_rng(seed)
+    tensors = {
+        name: (
+            np.ones(shape, dtype=bfloat16)
+            if len(shape) == 1
+            else (
+                rng.standard_normal(shape, dtype=np.float32) / np.sqrt(shape[1])
+            ).astype(bfloat16)
+        )
+        for name, shape in checkpoint_shapes(layout, n_layers).items()
+    }
+    return load_weights(tensors, layout, n_layers)
+
+
 def load_weights(tensors: dict, layout: Layout, n_layers: int) -> SimpleNamespace:
     """The tree of ``layout`` over ``n_layers``, from ``tensors`` by
     checkpoint name. The arrays are used as they are. Strict: a missing

@@ -46,6 +46,7 @@ from aie.iron.kernels import fused_mm
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Extent,
     In,
     Operator,
     Out,
@@ -175,6 +176,9 @@ class GEMM(Operator):
     # Arithmetic of the gelu epilogue; see Gelu in design.py. Only the gelu
     # mode reads it.
     gelu: Gelu | str = param(default=Gelu.FP32, array=True)
+    # B as stored (N, K), a checkpoint's layout, read as is (AIE2 only): the
+    # memtile lays out the k panels the kernel transposes, so no packed copy.
+    b_col_maj: bool = param(default=False, array=True)
     # Filled by resolve, from the device: the grid, B's storage, the L2 tiles.
     rows: int = auto(repr=False)
     cols: int = auto(repr=False)
@@ -204,15 +208,18 @@ class GEMM(Operator):
     # count in. Declared in bytes, the sequence's offsets and lengths would
     # address a ui8 buffer with block-unit numbers and a transfer would move
     # a ninth of what it named. On AIE2 it is a (K, N) element count,
-    # pre-packed. Its lanes are flows into each column's memtile pool, whose
-    # slots are one tile each.
+    # pre-packed, or (N, K) as stored under b_col_maj. Its lanes are flows
+    # into each column's memtile pool, whose slots are one tile each.
     B = In(
-        Select(bfp16_b, (packed_blocks,), (K, N)),
+        Select(bfp16_b, (packed_blocks,), (Select(b_col_maj, (N, K), (K, N)),)),
         dtype=b_dtype,
         tile=(b_l2,),
         per=(cols,),
     )
     C = Out(M, N, tile=(c_l2,), per=(cols,), depth=C_DEPTH)
+    # M, or fewer rows per call (``A[:n]`` in a graph). Every row is streamed
+    # and computed either way; the rows past the bound are not read.
+    valid = Extent(M)
     # The parameter words every core reads once its barrier opens. The last
     # two exist only at m_chunk > 1 (rtp_layout); a word is not free.
     n_val = Value(np.int32, derive=lambda op: op.N)
@@ -223,6 +230,9 @@ class GEMM(Operator):
     clamp_max = Value(np.int32, derive=lambda op: _clamp_bits(op.clamp)[1])
     n_chunks = Value(np.int32, derive=lambda op: op._n_units, optional=True)
     n_units = Value(np.int32, derive=lambda op: op._n_units, optional=True)
+
+    def extent_unit(self, buffer: str) -> int:
+        return 0  # nothing is shortened
 
     # -- checks ----------------------------------------------------------------
 
@@ -285,12 +295,16 @@ class GEMM(Operator):
         # B is bfp16ebs8 on AIE2P and bf16 on AIE2. AIE2 has no scalar BFP
         # types, so B stays bf16 and the mmul lowers onto four native macs.
         bfp16_b = dev.arch == AIEArch.AIE2p
+        if self.b_col_maj and bfp16_b:
+            raise ValueError(
+                "flm.GEMM: b_col_maj reads a bf16 B; AIE2P's B is bfp16ebs8, packed"
+            )
         b_elem_bytes = BFP16_GROUP_BYTES / BFP16_GROUP if bfp16_b else 2
         b_group = BFP16_GROUP if bfp16_b else 1
         tile_n = N_TILE_DEFAULT if self.tile_n is None else self.tile_n
         ct_k = CT_MAX_K_FOR_N[tile_n]
         m_chunk = M_CHUNK_FOR_N[tile_n] if self.m_chunk is None else self.m_chunk
-        l1 = l1_budget(dev)
+        l1 = l1_budget(dev, self.epilogue_modes)
         if self.tile_ma is None:
             tile_ma, l1_b_depth = _default_l1(tile_n, ct_k, b_elem_bytes, l1, m_chunk)
         else:
@@ -394,6 +408,7 @@ class GEMM(Operator):
             f"_ma{t.tile_ma}_mc{t.m_chunk}"
             f"_em{t.epilogue_mask:x}_{t.rounding}"
             + ("" if t.gelu is Gelu.FP32 else f"_gelu_{t.gelu}")
+            + ("_bt" if t.b_col_maj else "")
             + f"_{dev.name}"
         )
 
@@ -469,6 +484,7 @@ class GEMM(Operator):
             # bfp16-emulated macs, AIE2 onto four native bf16 macs.
             mmul_shape=(R, S, T),
             bfp16_b=self.bfp16_b,
+            b_col_maj=self.b_col_maj,
             epilogue_modes=tuple(str(m) for m in modes),
             rounding=str(self.rounding),
             gelu=str(self.gelu),
@@ -928,20 +944,38 @@ class GEMM(Operator):
                 f"{pool.passes} one memtile channel can queue"
             )
 
-        B = TensorAccessPattern.full((N // N_TILE, k_iters, b_slot_elems))
+        if self.b_col_maj:
+            # A slot is the (N_TILE, K_TILE) block as stored, k_tile-long runs.
+            B = TensorAccessPattern.full(
+                (N // N_TILE, N_TILE, k_iters, K_TILE)
+            ).permute((0, 2, 1, 3))
+        else:
+            B = TensorAccessPattern.full((N // N_TILE, k_iters, b_slot_elems))[
+                :, :, None
+            ]
 
         def b_tap(mega_col, c, slab):
             # Every (mega_row, k) chunk this column consumes. B arrives
-            # pre-packed so each k-block is one contiguous run; reordering in
-            # the descriptor instead gives an innermost run of T=8 bf16 and
-            # measured 5.4x slower.
+            # pre-packed, or under b_col_maj as stored, so each slot is
+            # k_tile-long runs or longer; reordering into the kernel's blocks
+            # here instead gives an innermost run of T=8 bf16 and measured
+            # 5.4x slower, so b_col_maj's reorder is the memtile's.
             #
             # Resident, one k sweep for the whole column-block. Otherwise one
             # per unit, not per row-block: the cores hold each B chunk across
             # a group. The unit dimension has stride 0 because B does not
             # depend on the row.
             sweeps = 1 if slab.b_resident else slab.units
-            return B[mega_col * COLS + c][:, None].repeat(sweeps)
+            return B[mega_col * COLS + c].repeat(sweeps)
+
+        slots = TensorAccessPattern.full((B_SLOTS * b_slot_elems,)).partition(B_SLOTS)
+        if self.b_col_maj:
+            # Each s-deep k panel, every n row of it: the kernel's B^T blocks.
+            drains = TensorAccessPattern.full(
+                (B_SLOTS, N_TILE, K_TILE // S, S)
+            ).permute((0, 2, 1, 3))
+        else:
+            drains = slots
 
         def start_b_mt(c, direction, passes, slab):
             """Program and start one of column ``c``'s memtile B channels.
@@ -954,9 +988,6 @@ class GEMM(Operator):
             fill = direction == DMAChannelDir.S2MM
             flow = (pool.shim_flows if fill else pool.bcast_flows)[c]
             value = slab.b_uses if fill else 1
-            slots = TensorAccessPattern.full((B_SLOTS * b_slot_elems,)).partition(
-                B_SLOTS
-            )
             chain = []
             for i in range(slab.b_slots):
                 prod, cons = pool.prod[c][i], pool.cons[c][i]
@@ -964,7 +995,7 @@ class GEMM(Operator):
                 chain.append(
                     Bd(
                         pool.bufs[c],
-                        tap=slots[i],
+                        tap=(slots if fill else drains)[i],
                         acquires=[Acquire(wait, value=value)],
                         releases=[Release(post, value=value)],
                     )
@@ -1122,8 +1153,13 @@ class GEMM(Operator):
         Flat uint8 bfp16ebs8 blocks on NPU2, flat bf16 on NPU1. Packing to
         consumption order is what makes both B hops linear descriptors. See
         ``iron.operators.flm.packing``.
+
+        Raises:
+            ValueError: Under ``b_col_maj``, which reads B as stored.
         """
         t = self._tuned
+        if t.b_col_maj:
+            raise ValueError("flm.GEMM(b_col_maj=True) reads B as stored (N, K)")
         return pack_b(
             B,
             k_tile=t.k_tile,
@@ -1156,7 +1192,8 @@ class GEMM(Operator):
 
         Not bit-exact, and cannot be: the hardware's activation is a LUT on
         aie2 and a native instruction on aie2p, worth up to ~0.02 absolute,
-        which the tolerance absorbs.
+        which the tolerance absorbs. ``B`` is ``(N, K)`` under ``b_col_maj``.
         """
-        C = np.matmul(A.astype(np.float32), B.astype(np.float32)).astype(A.dtype)
+        b = B.T if self.b_col_maj else B
+        C = np.matmul(A.astype(np.float32), b.astype(np.float32)).astype(A.dtype)
         return Epilogue(self.epilogue).apply(C, self.clamp)

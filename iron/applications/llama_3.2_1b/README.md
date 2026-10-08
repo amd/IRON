@@ -61,7 +61,12 @@ python -m iron.lm.llama3.model \
     --prompt-len 2048 --num-tokens 40
 ```
 
-- `--prompt-len`: characters of `iron/lm/prompt.txt` to use as the prompt (default 2048)
+- `--random-weights SEED`: in place of the two files, weights drawn at
+  `SEED` and prompts of random tokens; the speed, the accuracy against the
+  oracle and the determinism are those of the real checkpoint's shape, on a
+  host without it
+- `--prompt-len`: characters of `iron/lm/prompt.txt` to use as the prompt,
+  or with `--random-weights` a third as many random tokens (default 2048)
 - `--num-tokens`: tokens to generate (default 40)
 - `--max-seq-len`: the rows the key and value caches hold, prompt and
   generated tokens together, a multiple of 2048 (default 32768, 1 GB of
@@ -98,7 +103,9 @@ steps are dispatched one at a time, and the host draws each token: there is
 no `--device-loop`. The versions still share one copy of the weights and the
 caches, the views of one buffer object. A prompt chunk attends with MHA,
 placed on NPU1's four columns as on NPU2's eight (`MHA.COLUMNS`), so a
-prompt runs a chunk at a time there too. `--each-step` builds the same
+prompt runs a chunk at a time there too. A chunk's projections are
+`flm.GEMM` there (`iron/lm/layers.py`'s `project`), which takes the
+weights as stored, with no activation linked in. `--each-step` builds the same
 form on NPU2, which is how `test_llama_3_2_1b_each_step_accuracy` checks it
 there.
 
@@ -133,9 +140,10 @@ measured on a Phoenix NPU (4 columns); `tune.py` fills the current
 device's by default. On NPU1, where
 each step is its own dispatch, nothing is packed: a narrower design is
 chosen where it is cheaper to switch into. There the table narrows the
-elementwise steps and keeps every GEMV and MHA at the profile's width:
-with random weights, a token went from 726 to 653 ms (20 tokens after a
-16-token prompt, medians of 8 interleaved runs). Its entries are keyed by
+elementwise steps, moves several GEMVs between columns and lanes, puts
+Sample on two cores and keeps MHA at the profile's width: with random
+weights and the default caches, a token went from 362 to 338 ms (20
+tokens after a 16-token prompt, medians of 8 interleaved runs). Its entries are keyed by
 each design's identity -- its fields -- so a design changed since the
 table was measured is not in it, and the
 tuner leaves that design as the profile gives it (the `[Tuning]` report

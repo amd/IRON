@@ -195,6 +195,32 @@ dispatch moves, so the operator ran at ~10 GB/s instead of ~47 — a 5.4x
 end-to-end penalty. Weights are packed once and reused across dispatches, so the
 cost belongs at the caller.
 
+### Or read as stored, on NPU1
+
+```python
+op = GEMM(M=M, K=K, N=N, b_col_maj=True)
+OperatorImage(op)(A, W, C_out)  # W is (N, K), a checkpoint's layout
+```
+
+On NPU1, where B is bf16, `b_col_maj=True` takes B as a checkpoint stores
+a projection, `(N, K)`, so no packed copy sits beside the one a decode GEMV
+reads. The shim reads each `(tile_n, k_tile)` block as `tile_n` runs of
+`k_tile` elements (1 KB each), the memtile hands the core one 8-deep k panel at
+a time, and the kernel transposes it (`fused_mm(..., b_col_maj=True)`). The
+short runs are between the memtile and the core, not in DDR. NPU2's B is
+bfp16ebs8, so there it must be packed, and `b_col_maj` is refused.
+
+At Llama 3.2 1B's prompt projections (M = 2048, `epilogue_modes=("none",)`)
+on Phoenix, the times below are the range over 8 interleaved rounds, each the
+median of 10 runs:
+
+| K × N | packed | `b_col_maj` | `iron.operators.GEMM` |
+|---|---|---|---|
+| 2048 × 8192 | 28.5–28.7 ms | 25.4–25.7 ms | 28.0–28.3 ms |
+| 2048 × 2048 | 7.5–8.0 ms | 7.0–7.3 ms | 7.3–7.9 ms |
+| 2048 × 512 | 2.5–3.8 ms | 1.9–3.6 ms | 2.9–3.7 ms |
+| 8192 × 2048 | 27.9–28.2 ms | 25.0–25.4 ms | 43.4–45.0 ms |
+
 ## Matching the shipped FastFlowLM overlay
 
 `Rounding.FLOOR` reproduces the shipped `mm.xclbin` **bit for bit**. The AIE

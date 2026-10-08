@@ -30,9 +30,6 @@ from iron.operators.flm.gemm.design import (
 )
 from iron.operators.flm.gemm.op import GEMM
 from iron.operators.flm.gemm.shipped import Shipped
-from iron.operators.flm.testing import skip_flm_gemm_on_npu1
-
-pytestmark = skip_flm_gemm_on_npu1
 
 # Unpacked so the parameter tables below stay column-aligned.
 NONE, GELU, SILU, SIGMOID = Epilogue
@@ -153,9 +150,12 @@ def flm_vectors(operator, scale=4.0):
     around +-200, where gelu/silu are indistinguishable from the identity (or
     from zero). Activation tests pass a smaller scale so the result sits in the
     range where the curve is actually interesting. B is drawn row-major
-    ``(K, N)``; the operator consumes it packed (see ``GEMM.pack_B``).
+    ``(K, N)``, which the operator consumes packed (see ``GEMM.pack_B``), or
+    ``(N, K)`` as stored under ``b_col_maj``.
     """
-    return vectors(operator, normal=("A",), scale=scale, B=(operator.K, operator.N))
+    K, N = operator.K, operator.N
+    B = (N, K) if operator.b_col_maj else (K, N)
+    return vectors(operator, normal=("A",), scale=scale, B=B)
 
 
 def accumulated_mass(K, A, B):
@@ -188,7 +188,10 @@ def check_on_device(operator, data, rounding=CONV_EVEN, record=None):
         budget = 0.05 if rounding is FLOOR else 0.004
     return run_test(
         operator,
-        {"A": A.flatten(), "B": operator.pack_B(B)},
+        {
+            "A": A.flatten(),
+            "B": B.flatten() if operator.b_col_maj else operator.pack_B(B),
+        },
         {"C": data["C"].flatten()},
         tolerance=Tolerance.relative(0.04, budget * mass),
         record=record,
@@ -211,6 +214,63 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, npu_runtime, record_property):
         operator, flm_vectors(operator, scale), rounding, record=record_property
     )
 
+    assert not errors, "Test failed"
+
+
+@pytest.mark.parametrize("M,K,N", [(256, 512, 256), (512, 1024, 512)])
+def test_gemm_without_activations(M, K, N, npu_runtime, record_property):
+    """Compiling no activation links no LUT tables, so on AIE2 the bytes they
+    held go to B and the tiles differ from every case above."""
+    operator = GEMM(M=M, K=K, N=N, epilogue_modes=(NONE,))
+
+    errors, _, _ = check_on_device(
+        operator, flm_vectors(operator), record=record_property
+    )
+
+    assert not errors, "Test failed"
+
+
+def b_col_maj_params():
+    """Where B as stored reaches the kernel by another path than packed B: a
+    resident and a streamed memtile pool, a trailing column, every tile width
+    and two slabs. AIE2 only; AIE2P's B is bfp16ebs8, packed.
+    """
+    dev = aie_utils.get_current_device()
+    if dev is None or dev.arch is not AIEArch.AIE2:
+        return []
+    cols = dev.cols
+    params = [
+        pytest.param(256, 512, 64 * cols, None, (NONE,), id="resident"),
+        pytest.param(256, 512, 64 * cols + 64, None, (NONE,), id="trailing-col"),
+        pytest.param(512, 6144, 64 * cols, None, (NONE,), id="streamed"),
+        pytest.param(256, 512, 64 * cols, None, tuple(Epilogue), id="tables-linked"),
+    ]
+    for tile_n in sorted(set(CT_MAX_K_FOR_N) - {64}):
+        params.append(
+            pytest.param(256, 512, tile_n * cols, tile_n, (NONE,), id=f"tn{tile_n}")
+        )
+    params.append(
+        pytest.param(
+            16384,
+            512,
+            64 * cols,
+            None,
+            (NONE,),
+            marks=pytest.mark.extensive,
+            id="slabs",
+        )
+    )
+    return params
+
+
+@pytest.mark.parametrize("M,K,N,tile_n,epilogue_modes", b_col_maj_params())
+def test_gemm_b_col_maj(M, K, N, tile_n, epilogue_modes, npu_runtime, record_property):
+    operator = GEMM(
+        M=M, K=K, N=N, tile_n=tile_n, epilogue_modes=epilogue_modes, b_col_maj=True
+    )
+    errors, _, _ = check_on_device(
+        operator, flm_vectors(operator), record=record_property
+    )
     assert not errors, "Test failed"
 
 
@@ -247,7 +307,7 @@ def tile_option_params():
     dev = aie_utils.get_current_device()
     if dev is None or dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
         return []
-    l1 = l1_budget(dev)
+    l1 = l1_budget(dev, tuple(Epilogue))
     b_elem = BFP16_GROUP_BYTES / BFP16_GROUP if dev.arch == AIEArch.AIE2p else 2
 
     params = []

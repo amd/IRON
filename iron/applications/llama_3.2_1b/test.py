@@ -4,10 +4,15 @@
 
 """Llama 3.2 1B on the NPU, from the real checkpoint: speed, accuracy
 against the float32 reference, determinism, and past one chunk: a prompt of
-two, a chat turn, and a step at the end of the caches. The model is
-compiled and loaded once for the module and every test calls it
-in-process.
+two, a chat turn, and a prompt chunk and a step at the end of the caches.
+The model is compiled and loaded once for the module and every test calls
+it in-process.
+
+``--random-weights SEED`` runs it on drawn weights and random prompts, on
+a host without the checkpoint, and ``--max-seq-len`` at another context.
 """
+
+import dataclasses
 
 import aie.utils as aie_utils
 import pytest
@@ -18,22 +23,31 @@ from iron.lm.testing import (
     check_accuracy,
     check_chat_turn,
     check_deep_decode,
+    check_deep_prompt,
     check_determinism,
     check_device_loop,
     check_generation,
-    requires,
+    require,
     weights_dir,
 )
 
 WEIGHTS = weights_dir("llama3.2-1b") / "model.safetensors"
 TOKENIZER = weights_dir("llama3.2-1b") / "tokenizer.model"
 
-pytestmark = [requires(WEIGHTS, TOKENIZER), pytest.mark.supported_devices("npu2")]
+pytestmark = pytest.mark.supported_devices("npu2")
 
 
 @pytest.fixture(scope="module")
-def runner():
-    return Runner(WEIGHTS, TOKENIZER)
+def runner(request):
+    config = Runner.config
+    max_seq_len = request.config.getoption("--max-seq-len")
+    if max_seq_len is not None:
+        config = dataclasses.replace(config, max_seq_len=max_seq_len)
+    seed = request.config.getoption("--random-weights")
+    if seed is not None:
+        return Runner(config=config, seed=seed)
+    require(WEIGHTS, TOKENIZER)
+    return Runner(WEIGHTS, TOKENIZER, config)
 
 
 @pytest.fixture(scope="module")
@@ -89,6 +103,12 @@ class TestEachStep:
         position = runner.config.max_seq_len - 1
         check_deep_decode(runner, model, position, DEEP_KL, 256, record=record_property)
 
+    def test_llama_3_2_1b_each_step_prompt_deep_in_the_cache(
+        self, runner, model, record_property
+    ):
+        rows = runner.config.prefill_chunk
+        check_deep_prompt(runner, model, rows, DEEP_KL, 256, record=record_property)
+
 
 @pytest.mark.parametrize(
     "prompt_len,num_tokens",
@@ -137,3 +157,11 @@ def test_llama_3_2_1b_decode_deep_in_the_cache(runner, model, record_property):
     """The deepest step the caches hold, at ``max_seq_len - 1``."""
     position = runner.config.max_seq_len - 1
     check_deep_decode(runner, model, position, DEEP_KL, record=record_property)
+
+
+def test_llama_3_2_1b_prompt_deep_in_the_cache(runner, model, record_property):
+    """The last chunk the caches hold, whole: the longest dispatch a prompt
+    makes, over the whole context.
+    """
+    rows = runner.config.prefill_chunk
+    check_deep_prompt(runner, model, rows, DEEP_KL, record=record_property)

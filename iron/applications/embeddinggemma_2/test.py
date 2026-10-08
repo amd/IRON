@@ -18,14 +18,11 @@ from iron.lm.embeddinggemma2.encoder import Encoder
 from iron.lm.embeddinggemma2.model import COSTS
 from iron.lm.embeddinggemma2.vision.model import VISION
 from iron.lm.embeddinggemma2.vision.oracle import patches
-from iron.lm.testing import requires, weights_dir
+from iron.lm.testing import require, weights_dir
 
 DIRECTORY = weights_dir("embeddinggemma-2")
 
-pytestmark = [
-    requires(DIRECTORY / "model.safetensors", DIRECTORY / "tokenizer.json"),
-    pytest.mark.supported_devices("npu2"),
-]
+pytestmark = pytest.mark.supported_devices("npu2")
 
 QUERY = "What causes the northern lights?"
 DOCUMENTS = [
@@ -58,6 +55,7 @@ def cosine(a, b):
 
 @pytest.fixture(scope="module")
 def encoder():
+    require(DIRECTORY / "model.safetensors", DIRECTORY / "tokenizer.json")
     yield Encoder(DIRECTORY, max_tokens=1024)
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
@@ -137,6 +135,7 @@ IMAGE = patches(picture(288, 432), VISION.image_tokens, VISION)
 
 @pytest.fixture(scope="module")
 def multimodal():
+    require(DIRECTORY / "model.safetensors", DIRECTORY / "tokenizer.json")
     yield Encoder(DIRECTORY, max_tokens=512, towers=True, costs=COSTS)
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()

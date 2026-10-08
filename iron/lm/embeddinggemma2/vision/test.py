@@ -17,11 +17,9 @@ from iron.lm import Checkpoint, load_weights
 from iron.lm.embeddinggemma2.model import COSTS
 from iron.lm.embeddinggemma2.vision.model import VISION, Vision, layout, vision_tensors
 from iron.lm.embeddinggemma2.vision.oracle import VisionOracle, patches
-from iron.lm.testing import requires, weights_dir
+from iron.lm.testing import require, weights_dir
 
 DIRECTORY = weights_dir("embeddinggemma-2")
-
-pytestmark = requires(DIRECTORY / "model.safetensors")
 
 # Measured at the worst of IMAGES: min cosine 0.9705, relative error 4.0e-2.
 # bf16 error grows over 16 layers: HF's own bf16 tower is 0.9973 and 2.3e-2
@@ -63,6 +61,7 @@ def processed(name: str):
 
 @pytest.fixture(scope="module")
 def weights():
+    require(DIRECTORY / "model.safetensors")
     tensors = vision_tensors(Checkpoint(DIRECTORY / "model.safetensors").tensors)
     return load_weights(tensors, layout(VISION), VISION.n_layers)
 

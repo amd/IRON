@@ -102,14 +102,13 @@ def _widths(width: int, cols: int) -> list[int]:
 
 
 def variants(op: Operator, dev) -> list[Variant]:
-    """``op`` at its default width, then at every other one it resolves at.
-    Each width tunable ranges over its default and the powers of two up to
-    the device's columns, widest first; widths that resolve to one design
-    give it once.
+    """``op`` at its default width, then at every other one it resolves at,
+    each design once. Each width tunable ranges over its default and the
+    powers of two up to the device's columns, widest first.
     """
     default = Variant.of(op, dev)
     defaults = dict(default.widths)
-    out = [default]
+    out = {default.key: default}
     for combo in itertools.product(*(_widths(w, dev.cols) for w in defaults.values())):
         widths = dict(zip(defaults, combo))
         if widths == defaults:
@@ -118,9 +117,8 @@ def variants(op: Operator, dev) -> list[Variant]:
             variant = Variant.of(op.with_tunables(**widths), dev)
         except ValueError:  # unresolvable or incompatible at this width
             continue
-        if all(v.key != variant.key for v in out):
-            out.append(variant)
-    return out
+        out.setdefault(variant.key, variant)
+    return list(out.values())
 
 
 def shim_budget(dev) -> tuple[int, int]:

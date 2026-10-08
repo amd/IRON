@@ -10,7 +10,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron.common import Profile
-from iron.lm import checkpoint_shapes, load_weights
+from iron.lm import checkpoint_shapes, load_weights, random_weights
 from iron.lm.llama3.model import LLAMA_3_2_1B, Llama, layout
 
 # The tunables the graph runs with at ``SMALL``'s shape on NPU2: decode
@@ -34,29 +34,12 @@ SMALL = dataclasses.replace(
 )
 
 
-def random_weights(config, seed=0):
-    """``config``'s weights through the checkpoint's names, drawn at ``seed``:
-    each matrix uniform in ``+-1/sqrt(in)``, each norm weight one.
-    """
-    rng = np.random.default_rng(seed)
-
-    def draw(shape):
-        if len(shape) == 1:
-            return np.ones(shape, dtype=bfloat16)
-        bound = 1.0 / np.sqrt(shape[1])
-        return rng.uniform(-bound, bound, shape).astype(bfloat16)
-
-    shapes = checkpoint_shapes(layout(config), config.n_layers)
-    tensors = {k: draw(s) for k, s in shapes.items()}
-    return load_weights(tensors, layout(config), config.n_layers)
-
-
 def small(seed=0, **config) -> Llama:
     """The model at ``SMALL``'s shape, as changed by ``config``, under
     ``PROFILE``.
     """
     config = dataclasses.replace(SMALL, **config)
-    model = Llama(config, random_weights(config, seed))
+    model = Llama(config, random_weights(layout(config), config.n_layers, seed))
     model.profile = PROFILE
     return model
 

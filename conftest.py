@@ -44,6 +44,16 @@ def npu2():
 
 
 @pytest.fixture
+def npu1():
+    """A four-column NPU1 bound as the current device, as ``npu2`` binds its."""
+    previous = aie_utils.get_current_device()
+    device = from_name("npu1", n_cols=4)
+    aie_utils.set_current_device(device)
+    yield device
+    aie_utils.set_current_device(previous)
+
+
+@pytest.fixture
 def trace(request, tmp_path):
     """The trace a run asks for, or None: ``IRON_TRACE_SIZE`` bytes of trace
     buffer, written to a file named after the test in ``IRON_TRACE_DIR``
@@ -75,6 +85,20 @@ def pytest_addoption(parser):
         default=None,
         help="Narrow and pack a language model's decode step by this measured "
         "cost table (iron.lm.tune)",
+    )
+    parser.addoption(
+        "--random-weights",
+        type=int,
+        default=None,
+        metavar="SEED",
+        help="Run a language model's tests on weights drawn at SEED and random "
+        "prompts, in place of its checkpoint and tokenizer",
+    )
+    parser.addoption(
+        "--max-seq-len",
+        type=int,
+        default=None,
+        help="The rows a language model's caches hold, in place of its config's",
     )
 
 

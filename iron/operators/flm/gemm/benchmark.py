@@ -55,11 +55,10 @@ from iron.common.image import OperatorImage
 from iron.operators import GEMM as IronGEMM
 from iron.operators.flm import GEMM as FLMGEMM
 from iron.operators.flm import Shipped
-from iron.operators.flm.testing import skip_flm_gemm_on_npu1
 
 # Opt-in only: this module downloads the overlay, so keep it out of the default
 # run. See the note in the module docstring.
-pytestmark = [pytest.mark.extensive, skip_flm_gemm_on_npu1]
+pytestmark = pytest.mark.extensive
 
 _dev = aie_utils.ensure_current_device()
 if _dev is None:

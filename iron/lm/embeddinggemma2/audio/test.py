@@ -22,11 +22,9 @@ from iron.lm.embeddinggemma2.audio.model import (
     layout,
 )
 from iron.lm.embeddinggemma2.audio.oracle import AudioOracle
-from iron.lm.testing import requires, weights_dir
+from iron.lm.testing import require, weights_dir
 
 DIRECTORY = weights_dir("embeddinggemma-2")
-
-pytestmark = requires(DIRECTORY / "model.safetensors")
 
 # Seconds of audio: soft tokens, and the version that holds them.
 CLIPS = {
@@ -60,6 +58,7 @@ def features(name: str):
 
 @pytest.fixture(scope="module")
 def weights():
+    require(DIRECTORY / "model.safetensors")
     tensors = audio_tensors(Checkpoint(DIRECTORY / "model.safetensors").tensors)
     return load_weights(tensors, layout(AUDIO), AUDIO.n_layers)
 

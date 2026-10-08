@@ -17,6 +17,7 @@ from aie.iron.device import from_name
 
 from iron.common import Unresolvable
 from iron.operators.copy import Copy, Gather
+from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.sample import Sample
@@ -222,3 +223,16 @@ def test_sample_with_more_cores_than_a_memtile_joins_is_refused():
     with pytest.raises(Unresolvable, match="join in one memtile"):
         Sample(vocab=4096, cores=8).resolved(dev)
     assert Sample(vocab=4096, cores=4).resolved(dev).cores == 4
+
+
+def test_flm_gemm_reads_b_as_stored_only_where_b_is_bf16():
+    with pytest.raises(ValueError, match="b_col_maj reads a bf16 B"):
+        FLMGEMM(M=256, K=512, N=1024, b_col_maj=True).resolved(
+            from_name("npu2", n_cols=8)
+        )
+    op = FLMGEMM(M=256, K=512, N=256, b_col_maj=True).resolved(
+        from_name("npu1", n_cols=4)
+    )
+    assert op.B.shape == (256, 512)
+    with pytest.raises(ValueError, match="reads B as stored"):
+        op.pack_B(None)

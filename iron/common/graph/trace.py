@@ -415,7 +415,13 @@ class Tracer:
         call gave them, a view where ``operands`` holds its buffer.
         """
         called = operands if called is None else called
-        buffers = op.buffers
+        # A shape that Selects on an auto() field is the device's: resolve()
+        # gives it, unchecked, so a profile may still tune the op.
+        unset = {n for n in type(op)._auto_fields if getattr(op, n) is None}
+        shaped = op
+        if any(unset & m.shape.names() for m in op._members_io()):
+            shaped = op.resolve(op.dev)
+        buffers = shaped.buffers
         ins = [b for b in buffers if b.direction.fills]
         outs = [b for b in buffers if b.direction is Direction.OUT]
         if len(operands) == len(ins):

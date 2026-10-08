@@ -39,9 +39,10 @@ from iron.lm import (
     determinism,
     generate,
     greedy,
+    random_weights,
 )
-from iron.lm.llama3.model import Llama
-from iron.tests.common.llama_model import PROFILE, SMALL, random_weights
+from iron.lm.llama3.model import Llama, layout
+from iron.tests.common.llama_model import PROFILE, SMALL
 
 pytestmark = pytest.mark.usefixtures("npu2")  # MHA decode on any host
 
@@ -84,7 +85,7 @@ def cpu():
     for it and six greedy tokens' logits.
     """
     config = SMALL
-    weights = random_weights(config)
+    weights = random_weights(layout(config), config.n_layers)
     oracle = Llama.oracle(config, weights)
     prompt = np.random.default_rng(1).integers(0, config.vocab_size, 8)
     tokens, expected = prompt, []
@@ -229,7 +230,7 @@ def test_a_short_prompt_runs_at_its_own_rows():
     continues from the caches it wrote.
     """
     config = dataclasses.replace(SMALL, max_seq_len=1024)
-    weights = random_weights(config)
+    weights = random_weights(layout(config), config.n_layers)
     model, oracle = OnHost(config, weights), Llama.oracle(config, weights)
     prompt = np.random.default_rng(2).integers(0, config.vocab_size, 8)
     first = oracle.logits(prompt)

@@ -9,7 +9,9 @@ mlir-aie's passes in process. Hardware checks a tuned graph against the
 untuned one (``iron/tests/infrastructure/narrowing.py``).
 """
 
+import aie.utils as aie_utils
 import pytest
+from aie.iron.device import from_name
 
 import iron
 from iron.common.graph.narrowing import (
@@ -22,7 +24,8 @@ from iron.common.graph.narrowing import (
     model_us,
     variants,
 )
-from iron.operators import GELU, GEMM, ElementwiseAdd, SiLU
+from iron.operators import GELU, GEMM, MHA, ElementwiseAdd, SiLU
+from iron.tests.common.llama_model import llama_1b
 
 SIZE = 8192
 TILE = 256
@@ -82,6 +85,17 @@ def test_variants_range_over_every_width_the_shims_allow(npu2):
         (v.mm2s, v.s2mm) == (2 * c * k, c * k) for v, (c, k) in zip(found, widths)
     )
     assert len({v.key for v in found}) == len(found)
+
+
+def test_variants_give_each_design_once():
+    # On NPU1's four columns every width of Llama's decode MHA resolves to
+    # one design, which the probe would otherwise build and time once a width.
+    dev = from_name("npu1", n_cols=4)
+    aie_utils.set_current_device(dev)
+    model = llama_1b(n_layers=1)
+    traced = model.trace(**model.shapes(1))
+    [mha] = {s.op for s in traced.steps if isinstance(s.op, MHA)}
+    assert len(variants(mha, dev)) == 1
 
 
 def test_variants_widen_a_default_its_resolution_keeps_narrow(npu2):

@@ -14,7 +14,7 @@ import numpy as np
 import iron
 from iron.common.graph.narrowing import CostTable, JointNarrowing
 
-from .checkpoint import Checkpoint, Layout, load_weights
+from .checkpoint import Checkpoint, Layout, load_weights, random_weights
 from .decoder import CausalLM, Config, Oracle
 from .generation import (
     SEED,
@@ -37,6 +37,11 @@ class Runner:
 
     The checkpoint is mapped, not read: ``npu`` uploads it a piece at a
     time and drops each piece's host pages once it is on the device.
+
+    With no checkpoint the weights are drawn at ``seed``
+    (``random_weights``), and with no tokenizer a prompt is random tokens:
+    the model's speed, its accuracy against its oracle and its determinism
+    are then measured on a host without the files.
     """
 
     config: Config
@@ -51,14 +56,59 @@ class Runner:
     def open_tokenizer(path):
         raise NotImplementedError
 
-    def __init__(self, weights_path, tokenizer_path, config: Config | None = None):
+    def __init__(
+        self,
+        weights_path=None,
+        tokenizer_path=None,
+        config: Config | None = None,
+        seed: int = 0,
+    ):
         self.config = config or type(self).config
-        self.checkpoint = Checkpoint(weights_path)
+        self.seed = seed
         layout = self.layout(self.config)
-        self.weights = load_weights(
-            self.checkpoint.tensors, layout, self.config.n_layers
+        if weights_path is None:
+            self.checkpoint = None
+            self.weights = random_weights(layout, self.config.n_layers, seed)
+        else:
+            self.checkpoint = Checkpoint(weights_path)
+            self.weights = load_weights(
+                self.checkpoint.tensors, layout, self.config.n_layers
+            )
+        self.tokenizer = (
+            None if tokenizer_path is None else self.open_tokenizer(tokenizer_path)
         )
-        self.tokenizer = self.open_tokenizer(tokenizer_path)
+
+    @staticmethod
+    def add_arguments(parser: argparse.ArgumentParser) -> None:
+        """The checkpoint and tokenizer arguments, or ``--random-weights``."""
+        parser.add_argument(
+            "weights_path", nargs="?", help="the .safetensors checkpoint"
+        )
+        parser.add_argument("tokenizer_path", nargs="?", help="the tokenizer's file")
+        parser.add_argument(
+            "--random-weights",
+            type=int,
+            metavar="SEED",
+            help="in place of the checkpoint and the tokenizer, weights drawn "
+            "at SEED and prompts of random tokens",
+        )
+
+    @classmethod
+    def from_arguments(
+        cls,
+        parser: argparse.ArgumentParser,
+        args: argparse.Namespace,
+        config: Config | None = None,
+    ) -> "Runner":
+        """The runner ``add_arguments``'s arguments name."""
+        given = [args.weights_path is not None, args.tokenizer_path is not None]
+        if args.random_weights is None and not all(given):
+            parser.error("give the checkpoint and the tokenizer, or --random-weights")
+        if args.random_weights is not None and any(given):
+            parser.error("--random-weights takes neither checkpoint nor tokenizer")
+        if args.random_weights is None:
+            return cls(args.weights_path, args.tokenizer_path, config)
+        return cls(config=config, seed=args.random_weights)
 
     def npu(
         self, cost_table: Path | None = None, boundaries: str | None = None
@@ -70,7 +120,8 @@ class Runner:
         """
         model = self.model(self.config, self.weights)
         tuner = None if cost_table is None else JointNarrowing(CostTable(cost_table))
-        return model.load(self.checkpoint.release, tuner, boundaries)
+        release = None if self.checkpoint is None else self.checkpoint.release
+        return model.load(release, tuner, boundaries)
 
     def cpu(self) -> Oracle:
         """The model's oracle, its weights widened (float32 is twice bf16)."""
@@ -79,8 +130,24 @@ class Runner:
     def encode(self, text: str) -> list[int]:
         return [self.bos, *self.tokenizer.encode(text)]
 
+    def decode(self, tokens: list[int]) -> str:
+        """``tokens`` as text, or as their numbers with no tokenizer."""
+        if self.tokenizer is None:
+            return "".join(f" {t}" for t in tokens)
+        return self.tokenizer.decode(tokens)
+
     def prompt(self, chars: int, skip: int = 0) -> list[int]:
-        """``chars`` characters of ``prompt.txt`` from ``skip`` on, encoded."""
+        """``chars`` characters of ``prompt.txt`` from ``skip`` on, encoded.
+
+        With no tokenizer, ``chars // 3`` tokens drawn at ``seed`` and
+        ``skip``: a little more than the text encodes to (Llama 3's
+        tokenizer takes 3.7 characters a token), so a check sized in
+        characters runs at about its size on the text.
+        """
+        if self.tokenizer is None:
+            rng = np.random.default_rng((self.seed, skip))
+            draw = rng.integers(0, self.config.vocab_size, chars // 3 - 1)
+            return [self.bos, *draw]
         text = Path(__file__).with_name("prompt.txt").read_text()
         return self.encode(text[skip : skip + chars])
 
@@ -88,13 +155,13 @@ class Runner:
 def main(runner: type[Runner], description: str):
     """The command line of ``runner``'s model: sample, or check it."""
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("weights_path", help="the .safetensors checkpoint")
-    parser.add_argument("tokenizer_path", help="the tokenizer's file")
+    runner.add_arguments(parser)
     parser.add_argument(
         "--prompt-len",
         type=int,
         default=2048,
-        help="characters of prompt.txt to prompt with (default: 2048)",
+        help="characters of prompt.txt to prompt with, or with --random-weights "
+        "a third as many random tokens (default: 2048)",
     )
     parser.add_argument(
         "--num-tokens", type=int, default=40, help="tokens to generate (default: 40)"
@@ -157,7 +224,7 @@ def main(runner: type[Runner], description: str):
         config = dataclasses.replace(runner.config, max_seq_len=args.max_seq_len)
     except ValueError as e:
         parser.error(str(e))
-    run = runner(args.weights_path, args.tokenizer_path, config)
+    run = runner.from_arguments(parser, args, config)
     tokens = run.prompt(args.prompt_len)
     if len(tokens) + args.num_tokens > run.config.max_seq_len:
         parser.error(
@@ -192,22 +259,22 @@ def main(runner: type[Runner], description: str):
             return Sampler(args.temperature, args.top_k, np.random.default_rng(SEED))
 
         def show(token):
-            print(run.tokenizer.decode([token]), end="", flush=True)
+            print(run.decode([token]), end="", flush=True)
 
         def report(first, later):
             print(f"\n\n[Prefill] Time to first token: {first:7.3f} s")
             if args.num_tokens > 1:
                 print(f"[Decode]  Tokens per second:   {1 / later:7.3f}")
 
-        print(run.tokenizer.decode(tokens[1:]), end="", flush=True)
+        print(run.decode(tokens[1:]), end="", flush=True)
         if not args.device_loop:
             report(*generate(model, tokens, args.num_tokens, sampler(), show)[1:])
             return
         drawn, first, later = model.generate(tokens, args.num_tokens, sampler())
-        print(run.tokenizer.decode(drawn), end="", flush=True)
+        print(run.decode(drawn), end="", flush=True)
         report(first, later)
         if args.compare_host:
-            print("\n[Host loop]\n" + run.tokenizer.decode(tokens[1:]), end="")
+            print("\n[Host loop]\n" + run.decode(tokens[1:]), end="")
             host, _, _ = generate(model, tokens, args.num_tokens, sampler(), show)
             differ = sum(a != b for a, b in zip(drawn, host))
             print(
