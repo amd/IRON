@@ -659,17 +659,25 @@ class JointNarrowing:
         # A setting applies to every operator of its design, so it moves no
         # tunable any of them pins.
         found = {k: self._candidates(op, dev, pinned[k]) for k, op in first.items()}
-        # The designs of one array are one device, so they take one setting:
-        # the search runs over arrays, each named for its first design.
+        # The designs of one array are one device, so they keep one array:
+        # the search runs over arrays, each named for its first design, and
+        # every other design of it takes its cheapest setting at that array
+        # (on the array, not the tunables: one call may pin what another searches).
         units: dict[Hashable, list[str]] = {}
         for k, cands in found.items():
             units.setdefault(cands[0].array, []).append(k)
         unit = {k: designs[0] for designs in units.values() for k in designs}
         runlist = Runlist([unit[k] for k in keys])
         designs_of = [units[found[k][0].array] for k in runlist.order]
-        at = {k: {v.tunables: v for v in cands} for k, cands in found.items()}
+        at: dict[str, dict[Hashable, Variant]] = {}
+        for k, cands in found.items():
+            cheapest = at.setdefault(k, {})
+            for v in cands:
+                held = cheapest.get(v.array)
+                if held is None or table.t_step(v.key) < table.t_step(held.key):
+                    cheapest[v.array] = v
         candidates = [
-            [v for v in found[k] if all(v.tunables in at[m] for m in designs)]
+            [v for v in found[k] if all(v.array in at[m] for m in designs)]
             for k, designs in zip(runlist.order, designs_of)
         ]
         measured = [all(m in table.steps for m in designs) for designs in designs_of]
@@ -677,9 +685,13 @@ class JointNarrowing:
         budget = shim_budget(dev)
 
         def member_cost(i: int, v: Variant, entries: int) -> float:
-            return entries * table.load(v.key) + sum(
-                occurrences[m] * table.t_step(at[m][v.tunables].key)
-                for m in designs_of[i]
+            return (
+                entries * table.load(v.key)
+                + occurrences[runlist.order[i]] * table.t_step(v.key)
+                + sum(
+                    occurrences[m] * table.t_step(at[m][v.array].key)
+                    for m in designs_of[i][1:]
+                )
             )
 
         # Alone, each design takes its cheapest setting.
@@ -726,9 +738,10 @@ class JointNarrowing:
         for p in chosen_packs:
             for i, v in zip(p.members, p.combo):
                 picked[i] = v
-        chosen: dict[str, Variant] = {
-            k: at[k][picked[runlist.index[unit[k]]].tunables] for k in found
-        }
+        chosen: dict[str, Variant] = {}
+        for k in found:
+            v = picked[runlist.index[unit[k]]]
+            chosen[k] = v if k == unit[k] else at[k][v.array]
         groups = tuple(
             tuple(runlist.order[i] for i in sorted(p.members)) for p in chosen_packs
         )

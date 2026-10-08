@@ -439,6 +439,35 @@ def test_designs_of_one_array_take_one_width(tmp_path, npu2):
     )
 
 
+class PinnedSibling(iron.Graph):
+    """An add at two extents, one array, the larger's columns given by its call."""
+
+    def body(self, a, b, c, d):
+        t = ElementwiseAdd(a, b, tile_size=TILE)
+        return t, ElementwiseAdd(c, d, tile_size=TILE, num_aie_columns=8)
+
+
+def test_designs_of_one_array_may_search_different_tunables(tmp_path, npu2):
+    traced = PinnedSibling().trace(a=(SIZE,), b=(SIZE,), c=(2 * SIZE,), d=(2 * SIZE,))
+    free, pinned = (s.op for s in traced.steps)
+    assert {n for n, _ in variants(free, npu2)[0].tunables} == {
+        "num_aie_columns",
+        "num_channels",
+    }
+    assert {n for n, _ in variants(pinned, npu2)[0].tunables} == {"num_channels"}
+    steps = {}
+    for op in (free, pinned):
+        for v in variants(op, npu2):
+            cols = v.resolved.num_aie_columns
+            steps[v.key] = (4.0 + cols, 8.0 * cols)
+    table = _table(tmp_path / "costs.json", steps)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    # Alone the free add would take one column; its sibling holds it at eight.
+    chosen = [tuning.chosen[cost_key(op)] for op in (free, pinned)]
+    assert chosen[0].resolved.num_aie_columns == 8
+    assert chosen[0].array == chosen[1].array
+
+
 def test_designs_apart_only_in_their_probes_share_one_cost(tmp_path, npu2):
     traced = TwoClamps().trace(x=(SIZE,))
     first, second = (s.op for s in traced.steps)
