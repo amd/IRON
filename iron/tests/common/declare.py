@@ -615,6 +615,11 @@ def test_resolve_columns_is_the_count_given_or_the_most_that_fit():
         op.resolve_columns(None, None)
 
 
+def test_a_broadcast_stream_is_paid_once_in_the_shim_budget():
+    # 16 input channels: B once, then A's two channels a column.
+    assert MV.shim_columns(NPU2, num_channels=2) == (16 - 1) // 2
+
+
 def test_a_computed_default_is_inferred_from_a_shape_or_computed():
     class Rep(Operator):
         rows: int = param()
