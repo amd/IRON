@@ -34,12 +34,15 @@ from iron.common.graph.narrowing import (
 from iron.common.graph.probe import (
     CONTEXTS,
     Call,
+    Standalone,
     Timing,
     check_model,
     measure_graph,
     measure_steps,
+    others,
     platform,
     search,
+    time_interleaved,
 )
 from iron.common.image import Fusion
 from iron.lm.layers import SwiGLU
@@ -236,6 +239,36 @@ def test_one_operator_is_measured_from_the_command_line(tmp_path):
     printed = [line for line in run.stdout.splitlines() if "t_step" in line]
     assert len(printed) == len(found)
     assert sum("(default)" in line for line in printed) == 1
+
+
+HOLD = """
+import sys
+import time
+
+import aie.utils as aie_utils
+from iron.common.graph.probe import Standalone
+from iron.operators import ElementwiseAdd
+
+aie_utils.ensure_current_device()
+run = Standalone("held", [ElementwiseAdd(size=8192, tile_size=256)])
+run.callable()
+print("held", flush=True)
+time.sleep(float(sys.argv[1]))
+"""
+
+
+@pytest.mark.supported_devices("npu2")
+def test_timing_waits_for_another_process_to_leave_the_npu():
+    child = subprocess.Popen(
+        [sys.executable, "-c", HOLD, "3"], stdout=subprocess.PIPE, text=True
+    )
+    assert child.stdout.readline().strip() == "held"
+    assert child.pid in others()
+    run = Standalone("waits", [SiLU(size=SIZE, tile_size=TILE)])
+    logged = []
+    time_interleaved([run.callable], Timing(rounds=2, calls=5), log=logged.append)
+    assert child.poll() == 0
+    assert any(f"in use by pid [{child.pid}]" in line for line in logged), logged
 
 
 @pytest.mark.supported_devices("npu2")

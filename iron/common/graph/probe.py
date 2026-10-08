@@ -35,16 +35,21 @@ counted around the call: a chain of one design never switches.
 
 Figures are medians of per-round medians, interleaved, of the run alone (the
 callable's ``last_elapsed``), a setting far behind the fastest over fewer
-rounds (``Timing``); nothing else may dispatch meanwhile.
+rounds (``Timing``). Nothing else may dispatch meanwhile: a round starts
+once no other process holds the NPU, and is timed again if one holds it
+when the round ends.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import hashlib
+import json
 import math
+import os
 import statistics
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
@@ -128,6 +133,53 @@ def platform() -> dict[str, str]:
 def pmode() -> str:
     """The NPU's power mode, as ``xrt-smi`` reports it."""
     return platform()["Power Mode"]
+
+
+def others() -> set[int]:
+    """The processes other than this one holding a context on the NPU, by
+    pid, as ``xrt-smi`` reports its partitions.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        report = Path(d) / "partitions.json"
+        subprocess.run(
+            ["xrt-smi", "examine", "-r", "aie-partitions", "-f", "JSON", "-o", report],
+            capture_output=True,
+            check=True,
+        )
+        devices = json.loads(report.read_text())["devices"]
+    return {
+        int(context["pid"])
+        for device in devices
+        for partition in device["aie_partitions"].get("partitions", [])
+        for context in partition.get("hw_contexts", [])
+    } - {os.getpid()}
+
+
+# Seconds between looks at an NPU another process holds, and the most waited.
+IDLE_POLL = 5.0
+IDLE_WAIT = 1800.0
+
+
+def wait_idle(log: Callable[[str], None] = print) -> None:
+    """Return once no other process holds a context on the NPU (``others``).
+
+    Raises:
+        TimeoutError: Another has held one for ``IDLE_WAIT`` seconds. Two
+            processes measuring at once would each wait for the other.
+    """
+    held, told = others(), set()
+    start = time.monotonic()
+    while held:
+        if held != told:
+            log(f"    the NPU is in use by pid {sorted(held)}: waiting")
+            told = held
+        if time.monotonic() - start > IDLE_WAIT:
+            raise TimeoutError(
+                f"pid {sorted(held)} has held the NPU for {IDLE_WAIT:.0f} s; "
+                f"measure once it is idle"
+            )
+        time.sleep(IDLE_POLL)
+        held = others()
 
 
 def cost_cache() -> CostCache:
@@ -343,8 +395,12 @@ def time_interleaved(
     timing: Timing,
     groups: Sequence[Hashable | None] = (),
     fastest: float = math.inf,
+    log: Callable[[str], None] = print,
 ) -> list[Timed]:
     """Each loaded image's median of per-round medians, microseconds.
+
+    A round starts once no other process holds the NPU (``wait_idle``), and
+    one that ends with another holding it is timed again.
 
     Args:
         groups: Per run, the setting it measures, where the runs are
@@ -353,12 +409,16 @@ def time_interleaved(
             setting's (``Timing``). None marks a run never stopped. Every
             run is timed every round if not given.
         fastest: The slowest run of the fastest setting timed before these.
+        log: Where waiting for the NPU, or a round timed again, is reported.
     """
     for run in runs:
         run()  # warm: first-run setup lands on nobody's figure
     medians: list[list[float]] = [[] for _ in runs]
     live = set(range(len(runs)))
-    for r in range(timing.rounds):
+    wait_idle(log)
+    r = 0
+    while r < timing.rounds:
+        timed = {}
         for i, run in enumerate(runs):
             if i not in live:
                 continue
@@ -366,8 +426,16 @@ def time_interleaved(
             for _ in range(timing.calls):
                 run()
                 times.append(run.last_elapsed)
-            medians[i].append(statistics.median(times) * 1e6)
-        if not groups or r + 1 < timing.settle:
+            timed[i] = statistics.median(times) * 1e6
+        held = others()
+        if held:
+            log(f"    pid {sorted(held)} used the NPU during a round: timing it again")
+            wait_idle(log)
+            continue
+        for i, us in timed.items():
+            medians[i].append(us)
+        r += 1
+        if not groups or r < timing.settle:
             continue
         slowest: dict[Hashable, float] = {}
         for i in live:
@@ -578,7 +646,7 @@ def measure_steps(
         groups = [None if of == default.key else of for _, of, _ in runs] * 2
         outputs = [run.digest() for run in short]
         times = time_interleaved(
-            [r.callable for r in short + long], timing, groups, fastest
+            [r.callable for r in short + long], timing, groups, fastest, log
         )
         n = len(runs)
         slowest: dict[str, float] = {}
@@ -736,10 +804,14 @@ def calibrate(
     b: Operator,
     timing: Timing = Timing(),
     pairs: int = 4,
+    log: Callable[[str], None] = print,
 ) -> Calibration:
     """Split a configure's cost over measured designs ``a`` and ``b`` into
     ``table``: on an xclbin chain, the mean of their loads and the dispatch,
     which the runs of one design alone give with the grouped run.
+
+    Args:
+        log: Where waiting for the NPU is reported (``time_interleaved``).
     """
     ka, kb = cost_key(a), cost_key(b)
     ta, tb = table.steps[ka].t_step_us, table.steps[kb].t_step_us
@@ -762,7 +834,9 @@ def calibrate(
         )
         for name, runlist in runlists.items()
     ]
-    times = [t.us for t in time_interleaved([r.callable for r in runs], timing)]
+    times = [
+        t.us for t in time_interleaved([r.callable for r in runs], timing, log=log)
+    ]
     alt, grp, alone_a, alone_b = times[:4]
     switch = (alt - grp) / (2 * pairs - 2)  # (E(a) + E(b)) / 2
     reset = base = 0.0
@@ -797,6 +871,7 @@ def measure_loads(
     inputs: Mapping[str, np.ndarray] | None = None,
     cache: CostCache | None = None,
     remeasure: bool = False,
+    log: Callable[[str], None] = print,
 ) -> list[str]:
     """Measure into ``table`` the entry of each setting in ``found`` beside
     ``reference``: ``[reference, k]`` alternating ``pairs`` times, against
@@ -810,6 +885,7 @@ def measure_loads(
         inputs: What `found`'s input buffers hold, by buffer name.
         cache: Entries it holds are taken from it rather than run, unless
             `remeasure`; those run are written to it.
+        log: Where waiting for the NPU is reported (``time_interleaved``).
 
     Returns:
         The settings run on the device, each ``"reference>key"``.
@@ -861,7 +937,7 @@ def measure_loads(
                         dispatch=table.dispatch,
                     )
                 )
-        times = time_interleaved([r.callable for r in runs], timing)
+        times = time_interleaved([r.callable for r in runs], timing, log=log)
         for i, (v, entry) in enumerate(batch):
             alt, grp = times[2 * i], times[2 * i + 1]
             paired[v.key] = Pairing(
@@ -1217,7 +1293,7 @@ def measure_graph(
         )
         cal = None if remeasure else cache.get(entry, Calibration)
         if cal is None:
-            cal = calibrate(table, a.op, b.op, timing)
+            cal = calibrate(table, a.op, b.op, timing, log=log)
             cache.put(entry, cal)
             ran.append(pair)
         else:
@@ -1253,6 +1329,7 @@ def measure_graph(
             inputs=call.op_inputs(op),
             cache=cache,
             remeasure=remeasure,
+            log=log,
         )
         ran += loaded
         table.save()
@@ -1386,7 +1463,7 @@ def measure_packs(
                 )
                 for n, runlist in enumerate(runlists)
             ]
-            times = time_interleaved([r.callable for r in runs], timing)
+            times = time_interleaved([r.callable for r in runs], timing, log=log)
             del runs
             alt, grp, once = times[:3]
             pack = PackCost(
