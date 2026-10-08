@@ -44,6 +44,16 @@ def npu2():
 
 
 @pytest.fixture
+def npu1():
+    """A four-column NPU1 bound as the current device, as ``npu2`` binds its."""
+    previous = aie_utils.get_current_device()
+    device = from_name("npu1", n_cols=4)
+    aie_utils.set_current_device(device)
+    yield device
+    aie_utils.set_current_device(previous)
+
+
+@pytest.fixture
 def trace(request, tmp_path):
     """The trace a run asks for, or None: ``IRON_TRACE_SIZE`` bytes of trace
     buffer, written to a file named after the test in ``IRON_TRACE_DIR``

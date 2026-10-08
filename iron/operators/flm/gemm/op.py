@@ -46,6 +46,7 @@ from aie.iron.kernels import fused_mm
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Extent,
     In,
     Operator,
     Out,
@@ -216,6 +217,9 @@ class GEMM(Operator):
         per=(cols,),
     )
     C = Out(M, N, tile=(c_l2,), per=(cols,), depth=C_DEPTH)
+    # M, or fewer rows per call (``A[:n]`` in a graph). Every row is streamed
+    # and computed either way; the rows past the bound are not read.
+    valid = Extent(M)
     # The parameter words every core reads once its barrier opens. The last
     # two exist only at m_chunk > 1 (rtp_layout); a word is not free.
     n_val = Value(np.int32, derive=lambda op: op.N)
@@ -226,6 +230,9 @@ class GEMM(Operator):
     clamp_max = Value(np.int32, derive=lambda op: _clamp_bits(op.clamp)[1])
     n_chunks = Value(np.int32, derive=lambda op: op._n_units, optional=True)
     n_units = Value(np.int32, derive=lambda op: op._n_units, optional=True)
+
+    def extent_unit(self, buffer: str) -> int:
+        return 0  # nothing is shortened
 
     # -- checks ----------------------------------------------------------------
 

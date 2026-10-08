@@ -33,6 +33,8 @@ from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.emit import reference as emit_reference
+from iron.operators.flm.gemm.design import Epilogue
+from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
@@ -526,6 +528,19 @@ def test_llama_prompt_traces_over_the_same_caches():
     assert K == {cfg.emb_dim, cfg.hidden_dim, cfg.n_heads * cfg.head_dim}
     for op in t.operators:
         op.resolved(aie_utils.get_current_device())
+
+
+def test_llama_prompt_projects_with_flm_gemm_on_aie2(npu1):
+    g = llama_1b(n_layers=1)
+    t = g.trace(**g.shapes(g.config.prefill_chunk))
+    ops = [op for op, *_ in t.runlist]
+    assert not any(type(op) is GEMM for op in ops)
+    gemms = [op for op in ops if type(op) is FLMGEMM]
+    assert len(gemms) == 7
+    for op in gemms:
+        assert op.b_col_maj and op.epilogue_modes == (Epilogue.NONE,)
+        assert op.bound_values == {"valid": "rows"}
+        assert op.resolved(npu1).B.shape == (op.N, op.K)
 
 
 @pytest.mark.parametrize("step", ["decode", "prompt"])

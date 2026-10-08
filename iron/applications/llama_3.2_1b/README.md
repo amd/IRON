@@ -103,7 +103,9 @@ steps are dispatched one at a time, and the host draws each token: there is
 no `--device-loop`. The versions still share one copy of the weights and the
 caches, the views of one buffer object. A prompt chunk attends with MHA,
 placed on NPU1's four columns as on NPU2's eight (`MHA.COLUMNS`), so a
-prompt runs a chunk at a time there too. `--each-step` builds the same
+prompt runs a chunk at a time there too. A chunk's projections are
+`flm.GEMM` there (`iron/lm/layers.py`'s `project`), which takes the
+weights as stored, with no activation linked in. `--each-step` builds the same
 form on NPU2, which is how `test_llama_3_2_1b_each_step_accuracy` checks it
 there.
 

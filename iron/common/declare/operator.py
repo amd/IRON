@@ -562,9 +562,10 @@ class Operator(metaclass=_OperatorMeta):
             if not isinstance(e, Extent):
                 continue
             for b in self._members_io():
-                if b.tile is not None:
+                # Asked first: an unshortened shape may Select on an auto() field.
+                if b.tile is not None and self.extent_unit(b.name) != 0:
                     axis = bound[b.name].extent_axis(e)
-                    if axis is not None and self.extent_unit(b.name) != 0:
+                    if axis is not None:
                         word = _ExtentWord(type(self), e, b.name, axis)
                         bound[word.name] = BoundValue(word, self)
                         words.append(word)
