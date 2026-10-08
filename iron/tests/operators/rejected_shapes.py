@@ -188,15 +188,70 @@ def test_mha_whose_blocks_do_not_line_up_is_refused(kwargs, why):
 @pytest.mark.parametrize(
     "kwargs,why",
     [
+        (dict(d=96), "multiple of 64"),
+        (dict(causal=False, window=0), "window must be positive"),
+        (dict(causal=False, window=500), "whole 64-row blocks"),
+        (dict(d=256, causal=False, window=520), "whole 16-row blocks"),
+        (dict(scale=-1.0), "scale"),
+        (dict(B_q=128, B_kv=128), "divide 64"),
+    ],
+    ids=[
+        "head_not_whole_64",
+        "empty_window",
+        "window_not_whole_blocks",
+        "window_not_whole_small_blocks",
+        "negative_scale",
+        "block_past_the_padding",
+    ],
+)
+def test_mha_band_and_head_that_do_not_tile_are_refused(kwargs, why):
+    """mha.cc keeps or skips whole key blocks for a whole query block, so a
+    window is whole blocks; d=256 resolves to 16-row blocks, the largest
+    whose P*V core fits L1.
+    """
+    with pytest.raises(ValueError, match=why):
+        MHA(num_heads=2, seq_len=1024, num_pipelines=8, **kwargs).resolved(
+            from_name("npu2", n_cols=8)
+        )
+
+
+def test_mha_whose_head_fits_no_block_is_refused():
+    """At d=512 a P*V core's float32 O alone is half of L1 at 16 rows."""
+    with pytest.raises(Unresolvable, match="no block"):
+        MHA(num_heads=2, seq_len=1024, d=512, num_pipelines=8).resolved(
+            from_name("npu2", n_cols=8)
+        )
+
+
+def test_mha_blocks_follow_the_head_size():
+    npu2 = from_name("npu2", n_cols=8)
+    for d, block in ((64, 64), (128, 32), (256, 16)):
+        op = MHA(num_heads=2, seq_len=1024, d=d, num_pipelines=8).resolved(npu2)
+        assert (op.B_q, op.B_kv) == (block, block)
+
+
+@pytest.mark.parametrize(
+    "kwargs,why",
+    [
+        (
+            dict(num_heads=8, num_KV_heads=2, num_pipelines=2, causal=False, window=64),
+            "window",
+        ),
         (dict(num_heads=24, num_KV_heads=8, num_pipelines=4), "packs"),
         (dict(num_heads=32, num_KV_heads=8, num_pipelines=8), "at most 4"),
         (dict(num_heads=24, num_KV_heads=6, num_pipelines=4), "dividing"),
     ],
-    ids=["group_not_dividing_a_block", "more_pipelines_than_shims", "uneven_groups"],
+    ids=[
+        "windowed",
+        "group_not_dividing_a_block",
+        "more_pipelines_than_shims",
+        "uneven_groups",
+    ],
 )
 def test_mha_of_one_query_that_does_not_pack_is_refused(kwargs, why):
-    """One query packs each KV group's heads into a block's rows, and each
-    pipeline reads its own groups' K and V over its own column's shim.
+    """One query packs each KV group's heads into a block's rows, past every
+    key block, where a window would mask them; and each pipeline reads its own
+    groups' K and V over its own column's shim.
     """
     with pytest.raises(ValueError, match=why):
         MHA(seq_len=1, kv_len=512, **kwargs).resolved(from_name("npu2", n_cols=8))

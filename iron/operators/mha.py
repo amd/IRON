@@ -12,8 +12,10 @@ time, reading their trip counts from seven values the sequence writes.
 
 The host ABI is Q and O as ``(num_heads, seq_pad, d)``, K and V as
 ``(num_KV_heads, kv_len, d)`` with the sequence padded to a multiple of
-``B_q * num_pipelines``. The queries are the last rows of the keys: a
-prompt's chunk attends over the cache it extends. The sequence is an
+``64 * num_pipelines``. The queries are the last rows of the keys: a
+prompt's chunk attends over the cache it extends. A query keeps the keys up
+to its own position (``causal``), those within ``window`` positions of it,
+or both; with neither, every key. The sequence is an
 override: one task group per KV group that fills Q for every shim, fills
 that group's K and V, and drains O.
 
@@ -56,6 +58,8 @@ from iron.common import (
     Select,
 )
 from iron.common.testing import Case, Testing
+
+STACK_SIZE = 0xD00
 
 
 class MHA(Operator):
@@ -107,6 +111,33 @@ class MHA(Operator):
                 ),
                 extensive=True,
             ),
+            # EmbeddingGemma 2's sliding layer: bidirectional within 512
+            # positions, d=256, over 2000 rows, the last block part padding.
+            Case(
+                dict(
+                    num_heads=4,
+                    num_KV_heads=2,
+                    seq_len=2000,
+                    d=256,
+                    causal=False,
+                    window=512,
+                    num_pipelines=8,
+                )
+            ),
+            # Bidirectional over every key.
+            Case(
+                dict(
+                    num_heads=8,
+                    num_KV_heads=2,
+                    seq_len=1000,
+                    causal=False,
+                    num_pipelines=8,
+                )
+            ),
+            Case(
+                dict(num_heads=8, num_KV_heads=2, seq_len=2048, d=128, num_pipelines=8),
+                extensive=True,
+            ),
         ],
         tolerance=Tolerance(rtol=0.04, atol=0.15, max_mismatch_frac=0.005),
     )
@@ -115,7 +146,7 @@ class MHA(Operator):
     # The K/V head count: fewer than num_heads is grouped-query attention;
     # left out, plain MHA.
     num_KV_heads: int = param(default=lambda op: op.num_heads)
-    # seq_pad is seq_len rounded up to a multiple of B_q * num_pipelines;
+    # seq_pad is seq_len rounded up to a multiple of 64 * num_pipelines;
     # a shape gives seq_pad, from which seq_len follows when it is not given.
     seq_len: int = param(default=lambda op: op.seq_pad)
     seq_pad: int = param(default=lambda op: op.seq_padding(op.seq_len), repr=False)
@@ -130,8 +161,14 @@ class MHA(Operator):
     kv_interleaved: bool = param(default=False)
     # The head dimension: the width of every tile and the kernel's DIM_K.
     d: int = param(default=64)
-    B_q: int = auto(64, array=True)
-    B_kv: int = auto(64)
+    causal: bool = param(default=True, array=True)
+    # Keys more than this many positions from a query are masked; None is
+    # no window.
+    window: int | None = param(default=None, array=True)
+    scale: float = param(default=lambda op: float(1 / np.sqrt(op.d)), array=True)
+    # Left out, the largest block whose P*V core fits L1 at this d.
+    B_q: int = auto(array=True)
+    B_kv: int = auto()
     num_pipelines: int = auto(1, array=True)
     emulate_bf16_mmul_with_bfp16: bool = param(default=True, repr=False)
     # Filled by resolve: how the pipelines are split across shims, and K
@@ -154,7 +191,7 @@ class MHA(Operator):
     )
     V = In(
         Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
-        tile=(d, B_kv),
+        tile=(B_kv, d),
         per=(kv_lanes,),
         via=Shim(6),
     )
@@ -196,7 +233,7 @@ class MHA(Operator):
         derive=lambda op: (
             (op.first_query_block + op.num_pipelines) * op.B_q
             if op.packed
-            else op.kv_tokens
+            else op.first_query_block * op.B_q + op.q_tokens
         ),
     )
     s_kv = Value(np.int32, derive=lambda op: op.kv_tokens)
@@ -230,9 +267,12 @@ class MHA(Operator):
         """The position of Q's first row, in blocks: the queries are the
         keys' last rows, and a block's position is what mha.cc masks by.
         One query packed is past every key block: it attends over them all.
+        With no band, nothing reads a position, and the queries start at 0.
         """
         if self.packed:
             return ceildiv(self.kv_tokens, self.B_kv)
+        if not (self.causal or self.window):
+            return 0
         start = self.kv_tokens - self.q_tokens
         if start < 0 or start % self.B_q:
             raise ValueError(
@@ -247,8 +287,13 @@ class MHA(Operator):
     # -- checks ----------------------------------------------------------------
 
     def validate(self) -> None:
-        if self.d != 64:
-            raise ValueError(f"Only d=64 is supported in this version, got d={self.d}")
+        if self.d <= 0 or self.d % 64:
+            raise ValueError(f"d must be a positive multiple of 64, got d={self.d}")
+        if self.window is not None and self.window <= 0:
+            raise ValueError(f"window must be positive or None, got {self.window}")
+        # partial_softmax scales a row's maximum in place of every element.
+        if not 0 <= self.scale < np.inf:
+            raise ValueError(f"scale must be finite and not negative, got {self.scale}")
         if not self.emulate_bf16_mmul_with_bfp16:
             raise ValueError("Only emulate_bf16_mmul_with_bfp16=True is supported")
         if self.num_pipelines < 1:
@@ -258,19 +303,6 @@ class MHA(Operator):
                 f"num_pipelines ({self.num_pipelines}) above 6 must be even: "
                 f"the pipelines are split over two shims"
             )
-        # Each product's micro-tile must divide its operands: QK^T, (B_q, d)
-        # by (d, B_kv), bfp16-emulated, the only one supported, on NPU2, the
-        # only array MHA fits; P*V, (B_q, B_kv) by (B_kv, d).
-        for pv, dims in ((False, ("B_q", "d", "B_kv")), (True, ("B_q", "B_kv", "d"))):
-            mac = kernels.linalg.mha.mac_dims(
-                pv=pv, arch="aie2p", emulate_bf16_mmul_with_bfp16=True
-            )
-            for name, m in zip(dims, mac):
-                if getattr(self, name) % m:
-                    raise ValueError(
-                        f"{name}={getattr(self, name)} must be a multiple of "
-                        f"{'P*V' if pv else 'QK^T'}'s micro-tile {mac}"
-                    )
         if self.num_heads <= 0:
             raise ValueError("Number of num_heads must be greater than 0")
         if self.num_KV_heads <= 0:
@@ -292,6 +324,29 @@ class MHA(Operator):
         # mha.cc's causal skip compares a KV block's index with a Q block's.
         if self.B_q != self.B_kv:
             raise ValueError(f"B_q ({self.B_q}) and B_kv ({self.B_kv}) must match")
+        if 64 % self.B_q:
+            raise ValueError(
+                f"B_q ({self.B_q}) must divide 64, the block seq_pad is whole of"
+            )
+        # Each product's micro-tile must divide its operands: QK^T, (B_q, d)
+        # by (d, B_kv), bfp16-emulated, the only one supported, on NPU2, the
+        # only array MHA fits; P*V, (B_q, B_kv) by (B_kv, d).
+        for pv, dims in ((False, ("B_q", "d", "B_kv")), (True, ("B_q", "B_kv", "d"))):
+            mac = kernels.linalg.mha.mac_dims(
+                pv=pv, arch="aie2p", emulate_bf16_mmul_with_bfp16=True
+            )
+            for name, m in zip(dims, mac):
+                if getattr(self, name) % m:
+                    raise ValueError(
+                        f"{name}={getattr(self, name)} must be a multiple of "
+                        f"{'P*V' if pv else 'QK^T'}'s micro-tile {mac}"
+                    )
+        # A row whose window misses a key block another row of its query
+        # block keeps would weigh its masked keys 1 (mha.cc).
+        if self.window and self.window % self.B_q:
+            raise ValueError(
+                f"window ({self.window}) must be whole {self.B_q}-row blocks"
+            )
         if self.kv_len % self.B_kv or self.kv_len < self.seq_pad:
             raise ValueError(
                 f"kv_len ({self.kv_len}) must be whole {self.B_kv}-row blocks and "
@@ -303,6 +358,11 @@ class MHA(Operator):
                 f"else one; resolve() sets it"
             )
         if self.packed:
+            if self.window:
+                raise ValueError(
+                    "one query packed sits past every key block, where a "
+                    "window would mask them"
+                )
             group = self.num_heads // self.num_KV_heads
             if self.B_q % group:
                 raise ValueError(
@@ -323,23 +383,49 @@ class MHA(Operator):
                 f"MHA is pinned to the 8-column NPU2 array (memtiles at columns "
                 f"3-7); got {dev.name} ({dev.arch}) with {dev.cols} columns"
             )
+        B_q = self.B_q
+        if B_q is None:
+            if dev is None:
+                raise Unresolvable(
+                    "MHA's block size follows the cores' memory; none is bound "
+                    "and none was given"
+                )
+            # The P*V core holds the most: P and V two deep, one bf16 O block,
+            # the float32 O, two row-state buffers and its stack.
+            B_q = next(
+                (
+                    b
+                    for b in (64, 32, 16)
+                    if 4 * b * b + 10 * self.d * b + 32 * b + STACK_SIZE
+                    <= dev.core_memory_bytes
+                ),
+                None,
+            )
+            if B_q is None:
+                raise Unresolvable(
+                    f"MHA at d={self.d}: no block of 16 rows or more fits a P*V "
+                    f"core's {dev.core_memory_bytes} bytes"
+                )
         q_shims = 2 if self.num_pipelines > 6 else 1
         return dataclasses.replace(
             self,
+            B_q=B_q,
+            B_kv=B_q if self.B_kv is None else self.B_kv,
             q_shims=q_shims,
-            join_rows=self.B_q * (self.num_pipelines // q_shims),
+            join_rows=B_q * (self.num_pipelines // q_shims),
             kv_lanes=self.num_pipelines if self.packed else 1,
         )
 
     # -- derived geometry ------------------------------------------------------
 
     def seq_padding(self, seq_len: int) -> int:
-        """``seq_len`` rounded up to a multiple of ``B_q * num_pipelines``;
-        one query, packed, is not padded.
+        """``seq_len`` rounded up to a multiple of ``64 * num_pipelines``,
+        whole blocks at every block size ``resolve`` picks; one query,
+        packed, is not padded.
         """
         if seq_len == 1:
             return 1
-        unit = self.B_q * self.num_pipelines
+        unit = 64 * self.num_pipelines
         return ceildiv(seq_len, unit) * unit
 
     # -- the array -------------------------------------------------------------
@@ -351,13 +437,13 @@ class MHA(Operator):
         num_pipelines = self.num_pipelines
         n_join = num_pipelines // self.q_shims  # the pipelines on one shim
 
-        inv_scale = (
-            1 / np.sqrt(d)
-        ) * 1.4453125  # 1.4453125 ≈ log2(e), converts softmax base
+        # partial_softmax takes exp2, so the scale is in the log2 domain.
+        inv_scale = float(bfloat16(self.scale * np.log2(np.e)))
 
         # Tensors living on the AIE-array
         q_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
         k_ty = np.ndarray[(d, B_kv), np.dtype[dtype]]
+        v_ty = np.ndarray[(B_kv, d), np.dtype[dtype]]
         qk_ty = np.ndarray[(B_q, B_kv), np.dtype[dtype]]
         s_ty = np.ndarray[(4 * B_q,), np.dtype[np.float32]]
         acc_ty = np.ndarray[(B_q, d), np.dtype[np.float32]]
@@ -369,7 +455,13 @@ class MHA(Operator):
         # rather than declared separately, which would recompile the
         # translation unit and redefine every symbol in it.
         matmul_QK = kernels.linalg.mha(
-            B_q, d, B_kv, b_col_maj=True, emulate_bf16_mmul_with_bfp16=True
+            B_q,
+            d,
+            B_kv,
+            b_col_maj=True,
+            emulate_bf16_mmul_with_bfp16=True,
+            causal=self.causal,
+            window=self.window or 0,
         )
         mha_object = matmul_QK.object_file
 
@@ -400,7 +492,7 @@ class MHA(Operator):
             "matmul_PV",
             [
                 qk_ty,
-                k_ty,
+                v_ty,
                 acc_ty,
                 s_ty,
                 np.int32,
@@ -425,6 +517,7 @@ class MHA(Operator):
         q_dims = qk.A
         k_dims = qk.B
         a_dims = qk.C
+        p_dims = pv.A
         v_dims = pv.B
         o_dims = pv.C
 
@@ -472,7 +565,7 @@ class MHA(Operator):
                     depth=of_depth,
                 )
             )
-            inV.append(ObjectFifo(k_ty, name=f"inV{suffix}", depth=of_depth))
+            inV.append(ObjectFifo(v_ty, name=f"inV{suffix}", depth=of_depth))
             memV.append(
                 inV[lane]
                 .cons()
@@ -497,7 +590,7 @@ class MHA(Operator):
             outP.append(
                 memP[i]
                 .cons()
-                .forward(name=f"outP{i}", to_stream=q_dims, depth=of_depth)
+                .forward(name=f"outP{i}", to_stream=p_dims, depth=of_depth)
             )
             scaleOF.append(ObjectFifo(s_ty, depth=of_depth, name=f"scaleOF{i}"))
 
@@ -747,7 +840,7 @@ class MHA(Operator):
                         idx_buffer_qk,
                     ]
                     + params,
-                    stack_size=0xD00,
+                    stack_size=STACK_SIZE,
                     tile=Tile(col=i, row=2),
                 )
             )
@@ -776,7 +869,7 @@ class MHA(Operator):
                         scale_buffer_softmax,
                     ]
                     + params,
-                    stack_size=0xD00,
+                    stack_size=STACK_SIZE,
                     tile=Tile(col=i, row=3),
                 )
             )
@@ -801,7 +894,7 @@ class MHA(Operator):
                         Buffer(acc_ty, name=f"acc_pv_{i}"),
                     ]
                     + params,
-                    stack_size=0xD00,
+                    stack_size=STACK_SIZE,
                     tile=Tile(col=i, row=4),
                 )
             )
@@ -833,20 +926,28 @@ class MHA(Operator):
         return workers + [b for stage in worker_barrier_list for b in stage]
 
     def ops(self) -> int:
-        """Q K^T and its product with V, causal, per head: a query attends
-        over the keys up to its own, ``kv_len - seq_pad`` before Q's first.
+        """Q K^T and its product with V per head, over the keys each query
+        keeps: the queries are the last ``seq_len`` of ``kv_len - seq_pad +
+        seq_len`` keys.
         """
-        start = self.kv_len - self.seq_pad
-        return 2 * self.num_heads * self.d * self.seq_len * (self.seq_len + 2 * start)
+        keys = self.kv_len - self.seq_pad + self.seq_len
+        position = keys - self.seq_len + np.arange(self.seq_len)
+        ahead = 0 if self.causal else (self.window or keys)
+        lo = np.maximum(position - self.window, 0) if self.window else 0
+        hi = np.minimum(position + ahead, keys - 1)
+        return 4 * self.num_heads * self.d * int((hi - lo + 1).sum())
 
     def reference(self, Q, K, V, s_q=None, s_kv=None):
-        """CPU reference: causal attention per head, K and V repeated over each
-        query group, the queries the keys' last rows: query row ``r`` is at
-        position ``len(K) - len(Q) + r`` and attends over the keys up to it.
-        ``s_q`` and ``s_kv`` are positions, the per-call lengths when a graph
-        binds them: query rows from ``s_q`` on (by default Q's padding past
-        ``seq_len``) come out as zeros, and keys from ``s_kv`` on are masked.
-        In an interleaved layout the operands are ``(seq, heads, d)``.
+        """CPU reference: attention per head, K and V repeated over each query
+        group, the queries the keys' last rows: query row ``r`` is at position
+        ``len(K) - len(Q) + r`` and keeps the keys up to it if ``causal`` and
+        within ``window`` of it if given. ``s_q`` and ``s_kv`` are positions,
+        the per-call lengths when a graph binds them: query rows from ``s_q``
+        on (by default Q's padding past ``seq_len``) come out as zeros, and
+        keys from ``s_kv`` on (by default the keys past the last query) are
+        masked. With no band, nothing reads a position and the queries start
+        at 0, so ``s_q`` is a row count. In an interleaved layout the operands
+        are ``(seq, heads, d)``.
         """
         # Not the linalg.mha contracts: each is one tile of an online softmax,
         # and the operator is whole attention.
@@ -855,30 +956,37 @@ class MHA(Operator):
         if self.kv_interleaved:
             K, V = (np.swapaxes(t, 0, 1) for t in (K, V))
         groups = self.num_heads // self.num_KV_heads
-        start = K.shape[1] - Q.shape[1]
+        offset = K.shape[1] - Q.shape[1]
+        start = offset if self.causal or self.window else 0
         s_q = start + self.seq_len if s_q is None else int(s_q)
-        s_kv = K.shape[1] if s_kv is None else int(s_kv)
+        s_kv = offset + self.seq_len if s_kv is None else int(s_kv)
         # Keys from s_kv on are masked, so a cache is widened only as far as
         # it is read.
         K, V = K[:, :s_kv], V[:, :s_kv]
-        # Causal scaled-dot-product attention, in float32 and rounded once.
+        # Scaled-dot-product attention, in float32 and rounded once.
         # Against torch's FLASH backend this differs by under 1e-6, which is
         # less than torch's own FLASH and MATH backends differ from each other.
-        q, k, v = (t.astype(np.float32) for t in (Q, K, V))
-        position = start + np.arange(q.shape[1])[:, None]
+        # The rows from s_q on are zeros; a window may keep none of their keys.
+        rows = max(s_q - start, 0)
+        q = Q[:, :rows].astype(np.float32)
+        k, v = (t.astype(np.float32) for t in (K, V))
+        position = offset + np.arange(q.shape[1])[:, None]
         key = np.arange(k.shape[1])
-        mask = np.where((key > position) | (key >= s_kv), -np.inf, 0)
-        mask = mask.astype(np.float32)
-        scale = np.sqrt(np.float32(self.d))
-        out = np.empty(Q.shape, dtype=Q.dtype)
+        masked = np.zeros((q.shape[1], k.shape[1]), dtype=bool)
+        if self.causal or self.window:
+            masked |= key > position + (0 if self.causal else self.window)
+        if self.window:
+            masked |= key < position - self.window
+        mask = np.where(masked, -np.inf, 0).astype(np.float32)
+        scale = np.float32(self.scale)
+        out = np.zeros(Q.shape, dtype=Q.dtype)
         # A head at a time: at 16K rows one head's scores are 1 GiB of
         # float32, and all of them at once more than a test host has.
         # Each K and V head serves ``groups`` consecutive query heads.
         for h in range(q.shape[0]):
-            scores = q[h] @ k[h // groups].T / scale + mask
+            scores = q[h] @ k[h // groups].T * scale + mask
             e = np.exp(scores - scores.max(axis=-1, keepdims=True))
-            out[h] = (e / e.sum(axis=-1, keepdims=True)) @ v[h // groups]
-        out[:, max(s_q - start, 0) :] = 0
+            out[h, :rows] = (e / e.sum(axis=-1, keepdims=True)) @ v[h // groups]
         if self.heads_interleaved:
             return np.ascontiguousarray(np.swapaxes(out, 0, 1))
         return out
