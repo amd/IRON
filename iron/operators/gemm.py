@@ -23,6 +23,7 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Divisors,
     Extent,
     Finish,
     In,
@@ -148,9 +149,29 @@ class GEMM(Operator):
     N: int = param()
     # None: the widest of 64, 32, 16 and 8 rows that splits M over the rows
     # of cores and that the kernel's m block divides.
-    tile_m: int = auto(array=True)
-    tile_k: int = auto(64, array=True)
-    tile_n: int = auto(64, array=True)
+    tile_m: int = auto(
+        array=True,
+        domain=Divisors(
+            of=lambda op: op.M // op.n_aie_rows,
+            step=lambda op, dev: op.mac_block(dev)[0],
+        ),
+    )
+    # Without prio_accuracy C is rounded to bf16 once per K tile, so another
+    # tile_k computes another result; with it C accumulates in f32.
+    tile_k: int = auto(
+        64,
+        array=True,
+        domain=Divisors(
+            of=lambda op: op.K,
+            step=lambda op, dev: op.mac_block(dev)[1],
+            when="prio_accuracy",
+        ),
+    )
+    tile_n: int = auto(
+        64,
+        array=True,
+        domain=Divisors(of=lambda op: op.N, step=lambda op, dev: op.mac_block(dev)[2]),
+    )
     # None: the most columns the device's shim budget allows that split N
     # into whole tile_n-wide tiles.
     num_aie_columns: int = auto()
@@ -231,37 +252,48 @@ class GEMM(Operator):
 
     # -- checks ---------------------------------------------------------------
 
+    def mac_block(self, dev) -> tuple[int, int, int]:
+        """What `tile_m`, `tile_k` and `tile_n` must each be a multiple of:
+        the kernel's own geometry rather than a second copy of it, since
+        mm.cc's matmul_vectorized_2x2_mmul works in r x s x t blocks, two of
+        them in m and n (four in m on aie2, mm_aie2.h).
+
+        Args:
+            dev: The device the kernel is built for, or None for aie2p's
+                geometry.
+        """
+        r, s, t = kernels.mm.mac_dims(
+            self.dtype_in,
+            self.dtype_out,
+            device=dev,
+            arch=None if dev is not None else "aie2p",
+            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
+            vectorized=not self.use_scalar,
+        )
+        aie2 = dev is not None and dev.arch is AIEArch.AIE2
+        return (4 if aie2 else 2) * r, s, 2 * t
+
     def validate(self) -> None:
-        # The kernel's own geometry rather than a second copy of it: mm.cc's
-        # matmul_vectorized_2x2_mmul works in r x s x t blocks, so a tile that
-        # does not divide into them cannot be compiled for.
-        #
         # aie2p's geometry whatever the device: the messages name
         # aie_kernels/linalg/mm_aie2p.h, and no device is known here anyway, since
         # this runs at construction, before resolution picks one. array()
         # asks for the geometry of the device it builds for, which on npu1
         # is the looser (4, 8, 4).
-        r, s, t = kernels.mm.mac_dims(
-            self.dtype_in,
-            self.dtype_out,
-            arch="aie2p",
-            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
-        )
-        min_tile_m, min_tile_k, min_tile_n = 2 * r, s, 2 * t
+        min_tile_m, min_tile_k, min_tile_n = self.mac_block(None)
         if self.tile_m is not None and self.tile_m % min_tile_m != 0:
             raise ValueError(
                 f"tile_m ({self.tile_m}) must be a multiple of {min_tile_m} "
-                f"(aie_kernels/linalg/mm_aie2p.h requires m % (2*r) == 0, r={r})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires m % (2*r) == 0)"
             )
         if self.tile_k % min_tile_k != 0:
             raise ValueError(
                 f"tile_k ({self.tile_k}) must be a multiple of {min_tile_k} "
-                f"(aie_kernels/linalg/mm_aie2p.h requires k % s == 0, s={s})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires k % s == 0)"
             )
         if self.tile_n % min_tile_n != 0:
             raise ValueError(
                 f"tile_n ({self.tile_n}) must be a multiple of {min_tile_n} "
-                f"(aie_kernels/linalg/mm_aie2p.h requires n % (2*t) == 0, t={t})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires n % (2*t) == 0)"
             )
         din, dout = np.dtype(self.dtype_in), np.dtype(self.dtype_out)
         if self.prio_accuracy and dout != np.dtype(bfloat16):
@@ -301,15 +333,7 @@ class GEMM(Operator):
         rows = len(dev.core_rows)
         tile_m = self.tile_m
         if tile_m is None:
-            r, _, _ = kernels.mm.mac_dims(
-                self.dtype_in,
-                self.dtype_out,
-                device=dev,
-                emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
-                vectorized=not self.use_scalar,
-            )
-            # aie2's mm kernels block m by 4 r (mm_aie2.h), aie2p's by 2 r.
-            block = (4 if dev.arch is AIEArch.AIE2 else 2) * r
+            block, _, _ = self.mac_block(dev)
             # None splits M: the narrowest, and validate() names the rule.
             tile_m = next(
                 (

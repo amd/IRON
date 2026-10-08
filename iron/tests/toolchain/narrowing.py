@@ -13,6 +13,7 @@ import dataclasses
 
 import numpy as np
 import pytest
+from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
@@ -186,6 +187,26 @@ def test_derived_fields_are_not_widths(npu2):
     assert MHA(num_heads=8, seq_pad=256).resolved(npu2).widths == {}
     with pytest.raises(TypeError, match="no tunable"):
         gemm.with_tunables(n_shim_mem_a=1)
+
+
+def test_gemm_searches_tile_k_only_where_c_accumulates_in_f32(npu2):
+    plain = GEMM(M=2048, K=2048, N=2048).resolved(npu2)
+    assert set(plain.domains(npu2)) == {"num_aie_columns", "tile_m", "tile_n"}
+    exact = GEMM(M=2048, K=2048, N=2048, prio_accuracy=True).resolved(npu2)
+    assert set(exact.domains(npu2)) == {"num_aie_columns", "tile_m", "tile_k", "tile_n"}
+
+
+@pytest.mark.parametrize("name", ["npu1", "npu2"])
+def test_gemm_tiles_are_whole_kernel_blocks(name):
+    dev = from_name(name, n_cols=4 if name == "npu1" else 8)
+    gemm = GEMM(
+        M=2048, K=2048, N=2048, prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False
+    ).resolved(dev)
+    # aie2's kernel blocks m by four of its r = 4, aie2p's by two.
+    assert gemm.mac_block(dev)[0] == (16 if name == "npu1" else 8)
+    domains = gemm.domains(dev)
+    for field, block in zip(("tile_m", "tile_k", "tile_n"), gemm.mac_block(dev)):
+        assert all(tile % block == 0 for tile in domains[field]), (field, block)
 
 
 def test_a_baked_replication_is_not_searched(npu2):
