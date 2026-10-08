@@ -458,6 +458,24 @@ def test_a_load_the_measurements_do_not_determine_is_refused(tmp_path):
         table.load("u")
 
 
+def test_a_table_takes_entries_at_one_power_mode(tmp_path):
+    table = CostTable(tmp_path / "costs.json", "npu2", "separate")
+    alone = StepCost(5.0, 7.0, True, True, "turbo", 1, 1, "-")
+    table.record_step("x", alone)
+    table.record_step("y", alone)
+    with pytest.raises(ValueError, match="at power mode turbo, not default"):
+        table.record_step("z", dataclasses.replace(alone, pmode="default"))
+    with pytest.raises(ValueError, match="at power mode turbo, not default"):
+        table.record_calibration(
+            ("x", "y"), Calibration(7.0, 0.0, 0.0, 90.0, "default", 1, 1, "-")
+        )
+    assert table.pmode == "turbo" and table.steps.keys() == {"x", "y"}
+    table.save()
+    table.path.write_text(table.path.read_text().replace('"turbo"', '"default"', 1))
+    with pytest.raises(ValueError, match=r"mixes power modes \['default', 'turbo'\]"):
+        CostTable(table.path).measures_at("turbo")
+
+
 def test_an_xclbin_table_round_trips_and_a_full_elf_one_keeps_its_bytes(tmp_path):
     table = _separate(tmp_path / "costs.json", {"a": (10.0, 100.0)})
     table.record_step("x", StepCost(5.0, 7.0, True, True, "turbo", 1, 1, "-"))

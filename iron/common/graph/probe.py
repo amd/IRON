@@ -555,12 +555,13 @@ def measure_steps(
 
     Raises:
         RuntimeError: The default or a twin does not build.
-        ValueError: `cache` is for another power mode than the NPU's, or
-            a twin is not in `table`.
+        ValueError: `cache` or `table` is for another power mode than the
+            NPU's, or a twin is not in `table`.
     """
     mode = pmode()
     if cache is not None and cache.mode != mode:
         raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
+    table.measures_at(mode)
     twins = list(twins) or [None] * len(found)
     for t in twins:
         if t is not None and t.key not in table.steps:
@@ -891,8 +892,8 @@ def measure_loads(
         The settings run on the device, each ``"reference>key"``.
 
     Raises:
-        ValueError: A design is not in `table`, or `cache` is for another
-            power mode than the NPU's.
+        ValueError: A design is not in `table`, or `cache` or `table` is
+            for another power mode than the NPU's.
     """
     for v in [reference, *found]:
         if v.key not in table.steps:
@@ -900,6 +901,7 @@ def measure_loads(
     mode = pmode()
     if cache is not None and cache.mode != mode:
         raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
+    table.measures_at(mode)
     entries = [None] * len(found)
     if cache is not None:
         after = cache.key(reference.resolved, dispatch=table.dispatch)
@@ -1208,10 +1210,18 @@ def measure_graph(
 
     Raises:
         ValueError: ``pairs`` leave a calibrated design's entry undetermined:
-            they close no odd cycle, as a triangle does.
+            they close no odd cycle, as a triangle does; or ``table`` is
+            measured at another power mode than the NPU's and not
+            ``remeasure``, which drops its entries at another first.
     """
     dev = aie_utils.ensure_current_device()
     table.measures(dev)
+    mode = pmode()
+    if remeasure:
+        for entries in (table.steps, table.calibrations, table.packs):
+            for k in [k for k, c in entries.items() if c.pmode != mode]:
+                del entries[k]
+    table.measures_at(mode)
     if cache is None:
         cache = cost_cache()
     designs = Designs.of(calls, dev)
@@ -1399,14 +1409,15 @@ def measure_packs(
     Raises:
         ValueError: `table` prices an xclbin chain, a key is no setting of
             `designs`, a pack has more members than the device's contexts
-            measure at once or holds every reference, or `cache` is for
-            another power mode than the NPU's.
+            measure at once or holds every reference, or `cache` or `table`
+            is for another power mode than the NPU's.
     """
     if table.dispatch != "fused":
         raise ValueError(f"{table.path} prices an xclbin chain: it packs no designs")
     mode = pmode()
     if cache is not None and cache.mode != mode:
         raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
+    table.measures_at(mode)
     of = {
         v.key: (v, *designs.first[design])
         for design, vs in designs.settings.items()

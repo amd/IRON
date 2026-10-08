@@ -421,15 +421,47 @@ class CostTable:
             sections.append(f'"{name}": {{\n  ' + ",\n  ".join(rows) + "\n}")
         self.path.write_text("{" + ",\n".join(sections) + "}\n")
 
+    @property
+    def pmode(self) -> str | None:
+        """The power mode its entries are measured at; None if it has none."""
+        modes = {
+            c.pmode
+            for entries in (self.steps, self.calibrations, self.packs)
+            for c in entries.values()
+        }
+        if len(modes) > 1:
+            raise ValueError(
+                f"{self.path} mixes power modes {sorted(modes)}: measure it "
+                f"again (remeasure)"
+            )
+        return next(iter(modes), None)
+
+    def measures_at(self, pmode: str) -> None:
+        """Check that an entry measured at power mode ``pmode`` may join
+        this table: its entries are at that mode, or it has none.
+
+        Raises:
+            ValueError: They are at another.
+        """
+        if self.pmode not in (None, pmode):
+            raise ValueError(
+                f"{self.path} is measured at power mode {self.pmode}, not "
+                f"{pmode}: set the NPU's back, or measure the table again "
+                f"(remeasure)"
+            )
+
     def record_step(self, key: str, cost: StepCost) -> None:
+        self.measures_at(cost.pmode)
         self.steps[key] = cost
 
     def record_calibration(self, pair: tuple[str, str], cal: Calibration) -> None:
+        self.measures_at(cal.pmode)
         self.calibrations["|".join(pair)] = cal
         self._medians = None
         self._entry_costs = None
 
     def record_pack(self, keys: Iterable[str], cost: PackCost) -> None:
+        self.measures_at(cost.pmode)
         self.packs[self.pack_name(keys)] = cost
 
     def pack_entry(self, name: str) -> float:

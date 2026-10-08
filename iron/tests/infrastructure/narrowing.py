@@ -272,6 +272,23 @@ def test_timing_waits_for_another_process_to_leave_the_npu():
 
 
 @pytest.mark.supported_devices("npu2")
+def test_a_table_at_another_power_mode_is_measured_again_whole(tmp_path):
+    report = platform()
+    cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    timing = Timing(rounds=1, calls=5)
+    call = Call(Gather().trace(x=(2048,), rows=(16, 2048)), dict(pos=5))
+    path = tmp_path / "costs.json"
+    measure_graph(CostTable(path, "npu2", "fused"), [call], [], timing, cache=cache)
+    mode = f'"pmode": "{report["Power Mode"]}"'
+    path.write_text(path.read_text().replace(mode, '"pmode": "elsewhere"'))
+    with pytest.raises(ValueError, match="at power mode elsewhere, not"):
+        measure_graph(CostTable(path), [call], [], timing, cache=cache)
+    table = CostTable(path)
+    ran = measure_graph(table, [call], [], timing, remeasure=True, cache=cache)
+    assert table.pmode == report["Power Mode"] and set(ran) == table.steps.keys()
+
+
+@pytest.mark.supported_devices("npu2")
 def test_descent_measures_every_line_through_the_default(tmp_path):
     found = variants(
         ElementwiseAdd(size=SIZE, tile_size=TILE), aie_utils.ensure_current_device()
