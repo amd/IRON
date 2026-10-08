@@ -6,6 +6,7 @@ Benchmarks that moved by at least 5% and by more than 2x the spread the runs mea
 
 | Operator | Parametrization | Metric | Previous | Current | Change |
 |---|---|---|---|---|---|
-| `strided_copy` | `bench_flat_4mi` | `Bandwidth` | 5.96 | 12.32 | 🟢 +106.61% |
-| `strided_copy` | `bench_flat_4mi` | `Latency` | 2955.90 | 1394.60 | 🟢 -52.82% |
+| `gemv` | `M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_1024` | `Bandwidth` | 8.24 | 11.56 | 🟢 +40.30% |
+| `gemv` | `M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_1024` | `Latency` | 4115.02 | 2945.32 | 🟢 -28.43% |
+| `gemv` | `M_8192-K_2048-num_aie_columns_4-tile_size_input_4-tile_size_output_1024` | `Throughput` | 8.24 | 11.56 | 🟢 +40.30% |
 
