@@ -27,7 +27,6 @@ import dataclasses
 
 import numpy as np
 from aie.dialects.aie import AIEArch
-from aie.helpers.dialects.scf import else_, if_
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
@@ -360,7 +359,8 @@ class MHA(Operator):
         q_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
         k_ty = np.ndarray[(d, B_kv), np.dtype[dtype]]
         qk_ty = np.ndarray[(B_q, B_kv), np.dtype[dtype]]
-        s_ty = np.ndarray[(4 * B_q,), np.dtype[dtype]]
+        s_ty = np.ndarray[(4 * B_q,), np.dtype[np.float32]]
+        acc_ty = np.ndarray[(B_q, d), np.dtype[np.float32]]
         joined_ty = self.Q.tile  # (n_join * B_q, d)
 
         # Every one of these comes out of mha.cc, which #includes mm.cc and
@@ -375,9 +375,9 @@ class MHA(Operator):
 
         # Upstream's standalone zero over the (DIM_M, DIM_N) tile is the fill.
         zero_kernel = kernels.zero(tile_size=(B_q, B_kv), dtype=dtype)
-        # The 16-bit passThroughLine, bound to the bf16 scale buffers.
+        # The 32-bit passThroughLine, bound to the float32 scale buffers.
         memcopy_kernel_scale = kernels.eltwise.passthrough(
-            4 * B_q, np.int16
+            4 * B_q, np.int32
         ).object_file.bind("passThroughLine", [s_ty, s_ty, np.int32])
         scale_buffer_init_kernel = mha_object.bind(
             "init_scale_buffer", [s_ty, np.int32]
@@ -401,7 +401,7 @@ class MHA(Operator):
             [
                 qk_ty,
                 k_ty,
-                qk_ty,
+                acc_ty,
                 s_ty,
                 np.int32,
                 np.int32,
@@ -411,7 +411,7 @@ class MHA(Operator):
         )
         rescale_O = mha_object.bind(
             "rescale_O",
-            [qk_ty, s_ty, np.int32, np.ndarray[(2,), np.dtype[np.int32]]],
+            [acc_ty, q_ty, s_ty, np.int32, np.ndarray[(2,), np.dtype[np.int32]]],
         )
 
         # AIE-array data movement with object fifos. Q arrives joined for
@@ -448,7 +448,8 @@ class MHA(Operator):
                 offsets=[B_q * d * i for i in range(n_join)],
                 obj_types=[q_ty] * n_join,
                 names=[f"outO{suffix}{i}" for i in range(n_join)],
-                depths=[of_depth] * n_join,
+                # One O block: the PV core's L1 also holds its float32 O.
+                depths=[1] * n_join,
                 tile=Tile(col=6 + shim, row=1),
             )
 
@@ -632,13 +633,13 @@ class MHA(Operator):
             of_v,
             of_scale,
             of_o_out,
-            zero,
             matmul_PV,
             rescale_O,
             q_block_bias,
             mha_rtps,
             barrier,
             idx_buffer,
+            acc,
             *words,
         ):
             barrier.wait_for_value(1)
@@ -651,85 +652,50 @@ class MHA(Operator):
                 idx_buffer[1] = q_start + q_block_bias
 
                 for _ in range_(q_valid):
-                    elem_o_out = of_o_out.acquire(1)
-                    zero(elem_o_out)
-
-                    # First iteration, don't rescale O_{i-1}
-                    elem_in_p = of_p.acquire(1)
-                    elem_in_v = of_v.acquire(1)
-                    elt_of_out_scale = of_scale.acquire(1)
-
-                    matmul_PV(
-                        elem_in_p,
-                        elem_in_v,
-                        elem_o_out,
-                        elt_of_out_scale,
-                        B_q,
-                        0,
-                        idx_buffer,
-                        s_kv,
-                    )
-
-                    of_p.release(1)
-                    of_v.release(1)
-                    of_scale.release(1)
-
-                    idx_buffer[0] += 1
-
-                    with if_(loop_idx_kv > 2) as if_op:
-                        for _ in range_(loop_idx_kv - 2):
-                            elem_in_p = of_p.acquire(1)
-                            elem_in_v = of_v.acquire(1)
-                            elt_of_out_scale2 = of_scale.acquire(1)
-
-                            matmul_PV(
-                                elem_in_p,
-                                elem_in_v,
-                                elem_o_out,
-                                elt_of_out_scale2,
-                                B_q,
-                                1,
-                                idx_buffer,
-                                s_kv,
-                            )
-
-                            of_p.release(1)
-                            of_v.release(1)
-                            of_scale.release(1)
-
-                            idx_buffer[0] += 1
-
-                    # Last iteration, final rescaling
-                    with if_(loop_idx_kv > 1) as if_op:
+                    # matmul_PV starts the accumulator on the KV block it is
+                    # told is block 0.
+                    for kv in range_(loop_idx_kv - 1):
                         elem_in_p = of_p.acquire(1)
                         elem_in_v = of_v.acquire(1)
-                        elt_of_out_scale3 = of_scale.acquire(1)
-
+                        elt_of_out_scale = of_scale.acquire(1)
                         matmul_PV(
                             elem_in_p,
                             elem_in_v,
-                            elem_o_out,
-                            elt_of_out_scale3,
+                            acc,
+                            elt_of_out_scale,
                             B_q,
-                            1,
+                            kv,
                             idx_buffer,
                             s_kv,
                         )
-                        rescale_O(elem_o_out, elt_of_out_scale3, B_q, idx_buffer)
-
                         of_p.release(1)
                         of_v.release(1)
                         of_scale.release(1)
+                        idx_buffer[0] += 1
 
-                        idx_buffer[0] += 1
-                    with else_(if_op):
-                        rescale_O(elem_o_out, elt_of_out_scale, B_q, idx_buffer)
-                        idx_buffer[0] += 1
+                    # The last block's scale holds the row sums rescale_O reads.
+                    elem_in_p = of_p.acquire(1)
+                    elem_in_v = of_v.acquire(1)
+                    elt_of_out_scale = of_scale.acquire(1)
+                    matmul_PV(
+                        elem_in_p,
+                        elem_in_v,
+                        acc,
+                        elt_of_out_scale,
+                        B_q,
+                        loop_idx_kv - 1,
+                        idx_buffer,
+                        s_kv,
+                    )
+                    of_p.release(1)
+                    of_v.release(1)
+                    elem_o_out = of_o_out.acquire(1)
+                    rescale_O(acc, elem_o_out, elt_of_out_scale, B_q, idx_buffer)
+                    of_scale.release(1)
+                    of_o_out.release(1)
 
                     idx_buffer[0] = 0
                     idx_buffer[1] += num_pipelines
-
-                    of_o_out.release(1)
 
                 for _ in range_(q_blocks - q_valid):
                     of_o_out.acquire(1)  # a padding block of O: left as is
@@ -790,7 +756,7 @@ class MHA(Operator):
                 name=f"idx_buffer_softmax_{i}",
             )
             scale_buffer_softmax = Buffer(
-                initial_value=np.zeros(shape=(4 * B_q,), dtype=dtype),
+                initial_value=np.zeros(shape=(4 * B_q,), dtype=np.float32),
                 name=f"scale_buffer_softmax_{i}",
             )
             softmax_workers.append(
@@ -826,13 +792,13 @@ class MHA(Operator):
                         memV[i % kv_lanes].cons(),
                         scaleOF[i].cons(),
                         outO[i].prod(),
-                        zero_kernel,
                         matmul_PV,
                         rescale_O,
                         i,
                         mha_rtps_list[2][i],
                         worker_barrier_list[2][i],
                         idx_buffer_pv,
+                        Buffer(acc_ty, name=f"acc_pv_{i}"),
                     ]
                     + params,
                     stack_size=0xD00,
