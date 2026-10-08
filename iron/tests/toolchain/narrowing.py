@@ -2,12 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Joint narrowing without a device: width candidates, the cost model, the
-pack search, and the placer verdicts it keeps.
+pack search, and the placer verdicts and tunings it keeps.
 
 The costs are made up, composed as the probe measures them; the placer runs
 mlir-aie's passes in process. Hardware checks a tuned graph against the
 untuned one (``iron/tests/infrastructure/narrowing.py``).
 """
+
+import dataclasses
+import json
 
 import pytest
 
@@ -156,7 +159,7 @@ def test_packs_designs_apart_in_first_use_order(tmp_path, npu2):
     # pack; add and silu are first used apart but adjacent five times, so
     # they share a device.
     traced, ops, table = _add_silu(tmp_path, npu2)
-    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    tuning = JointNarrowing(table, cache=tmp_path).tune(traced, npu2)
     add, silu = cost_key(ops["ElementwiseAdd"]), cost_key(ops["SiLU"])
     assert tuning.groups in (((add, silu),), ((silu, add),))
     assert tuning.unmeasured == (cost_key(ops["GELU"]),)
@@ -172,7 +175,7 @@ def test_packs_designs_apart_in_first_use_order(tmp_path, npu2):
 
 def test_apply_rebuilds_the_narrowed_steps(tmp_path, npu2):
     traced, ops, table = _add_silu(tmp_path, npu2)
-    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    tuning = JointNarrowing(table, cache=tmp_path).tune(traced, npu2)
     narrowed, groups = tuning.apply(traced)
     # One operator per design still: every add step runs the one new add.
     by_class = {}
@@ -190,18 +193,47 @@ def test_apply_rebuilds_the_narrowed_steps(tmp_path, npu2):
 
 def test_placer_verdicts_are_kept_across_tunings(tmp_path, npu2):
     traced, _, table = _add_silu(tmp_path, npu2)
-    fit_cache = tmp_path / "fits"
-    first = JointNarrowing(table, fit_cache=fit_cache).tune(traced, npu2)
-    records = sorted(fit_cache.iterdir())
+    fits = tmp_path / "fits"
+    first = JointNarrowing(table, cache=tmp_path).tune(traced, npu2)
+    records = sorted(fits.iterdir())
     assert records and all(r.read_text() == "fits" for r in records)
     widths = {k: v.widths for k, v in first.chosen.items()}
 
     # A second tuning reads the verdicts rather than asking the placer: one
     # recorded as refused is taken as refused, and the pack moves to its
-    # next-cheapest widths, which the placer is then asked about.
+    # next-cheapest widths, which the placer is then asked about. The
+    # recorded tuning's pack is refused too, so it is searched again.
     for r in records:
         r.write_text("refused: recorded by the test")
-    second = JointNarrowing(table, fit_cache=fit_cache).tune(traced, npu2)
-    assert len(list(fit_cache.iterdir())) > len(records)
+    second = JointNarrowing(table, cache=tmp_path).tune(traced, npu2)
+    assert len(list(fits.iterdir())) > len(records)
     assert second.groups == first.groups
     assert {k: v.widths for k, v in second.chosen.items()} != widths
+
+
+def test_a_tuning_is_kept_for_its_runlist_and_table(tmp_path, npu2):
+    traced, ops, table = _add_silu(tmp_path, npu2)
+    first = JointNarrowing(table, cache=tmp_path).tune(traced, npu2)
+    [record] = (tmp_path / "tunings").iterdir()
+    assert first.groups
+
+    # A second tuning takes the record, rebuilt, without searching: one
+    # rewritten to leave every design at its default width, alone, is what
+    # it returns.
+    again = JointNarrowing(table, cache=tmp_path).tune(traced, npu2)
+    assert again.groups == first.groups
+    assert {k: v.key for k, v in again.chosen.items()} == {
+        k: v.key for k, v in first.chosen.items()
+    }
+    record.write_text(json.dumps({"chosen": {}, "groups": []}))
+    taken = JointNarrowing(table, cache=tmp_path).tune(traced, npu2)
+    assert taken.groups == ()
+    assert all(v.key == k for k, v in taken.chosen.items())
+    assert taken.predicted_us == pytest.approx(taken.baseline_us)
+
+    # Another table is another record, searched for.
+    add = cost_key(ops["ElementwiseAdd"])
+    table.record_step(add, dataclasses.replace(table.steps[add], t_step_us=1.0))
+    searched = JointNarrowing(table, cache=tmp_path).tune(traced, npu2)
+    assert len(list((tmp_path / "tunings").iterdir())) == 2
+    assert searched.groups == first.groups

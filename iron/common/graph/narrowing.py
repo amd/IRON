@@ -30,7 +30,9 @@ are the connected sets of designs; an exact search over partitions into
 them, carrying the parity, finds the cheapest. Whether a pack's widths fit
 is for the placer (``fits``), asked only for the packs a solution uses:
 a pack that does not fit tries its next-cheapest widths, then is dropped,
-and the search reruns.
+and the search reruns. What the search chose is recorded, keyed on the
+runlist, the table and the device, and a later tuning of the same runlist
+takes it while its packs still fit.
 
 Nothing here names an operator. Candidates come from the width tunables,
 legality from the operator's own resolution, the shim prefilter from the
@@ -240,6 +242,17 @@ class CostTable:
         self.calibrations["|".join(pair)] = cal
         self._medians = None
 
+    def digest(self) -> str:
+        """The table's entries, hashed: what a tuning from it is keyed on."""
+        entries = {
+            name: {k: dataclasses.asdict(v) for k, v in table.items()}
+            for name, table in (
+                ("steps", self.steps),
+                ("calibrations", self.calibrations),
+            )
+        }
+        return hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest()
+
     def _calibrated(self, figure: str) -> float:
         if self._medians is None:
             if not self.calibrations:
@@ -429,6 +442,11 @@ class _Pack:
     members: tuple[int, ...]
     entries: int
     options: list[tuple[float, tuple[Variant, ...]]]
+    mask: int = dataclasses.field(init=False)
+
+    def __post_init__(self):
+        # Read once per search state: hundreds of millions of times.
+        self.mask = sum(1 << i for i in self.members)
 
     @property
     def cost(self) -> float:
@@ -437,10 +455,6 @@ class _Pack:
     @property
     def combo(self) -> tuple[Variant, ...]:
         return self.options[0][1]
-
-    @property
-    def mask(self) -> int:
-        return functools.reduce(lambda m, i: m | (1 << i), self.members, 0)
 
 
 def _cheapest(
@@ -493,14 +507,15 @@ class JointNarrowing:
     Pass as ``coresident=`` to ``Graph.compile``. ``max_members`` caps a
     pack; ``fit_attempts`` is how many of a pack's cheapest widths within
     the shim budget are put to the placer before it is given up.
-    ``fit_cache`` is where the placer's verdicts are kept across processes.
+    ``cache`` is where the placer's verdicts (``fits/``) and the tunings
+    (``tunings/``) are kept across processes.
     """
 
     table: CostTable = dataclasses.field(compare=False)
     max_members: int = 8
     fit_attempts: int = 3
-    fit_cache: Path = dataclasses.field(
-        default=Path(NPU_CACHE_HOME) / "iron" / "fits", compare=False
+    cache: Path = dataclasses.field(
+        default=Path(NPU_CACHE_HOME) / "iron", compare=False
     )
 
     def tune(self, traced: TracedGraph, dev) -> Tuning:
@@ -510,6 +525,80 @@ class JointNarrowing:
         first: dict[str, Operator] = {}
         for key, step in zip(keys, traced.steps):
             first.setdefault(key, step.op)
+        fitted: dict[tuple[str, ...], bool] = {}
+        record = self._tuning_record(keys, dev)
+        recorded = self._recorded(record, runlist, first, dev, fitted)
+        if recorded is None:
+            chosen, groups = self._search(runlist, first, dev, fitted)
+            narrowed = {
+                k: {"widths": dict(v.widths), "key": v.key}
+                for k, v in chosen.items()
+                if v.key != k
+            }
+            self._publish(
+                record,
+                json.dumps({"chosen": narrowed, "groups": groups}, sort_keys=True),
+            )
+        else:
+            chosen, groups = recorded
+        predicted, configures = model_us(
+            table, keys, groups, {k: v.key for k, v in chosen.items()}
+        )
+        baseline, baseline_configures = model_us(table, keys)
+        return Tuning(
+            chosen=chosen,
+            groups=groups,
+            configures=configures,
+            predicted_us=predicted,
+            baseline_configures=baseline_configures,
+            baseline_us=baseline,
+            unmeasured=tuple(k for k in runlist.order if k not in table.steps),
+        )
+
+    def _recorded(
+        self,
+        record: Path,
+        runlist: Runlist,
+        first: Mapping[str, Operator],
+        dev,
+        fitted: dict[tuple[str, ...], bool],
+    ) -> tuple[dict[str, Variant], tuple[tuple[str, ...], ...]] | None:
+        """The tuning ``record`` holds, rebuilt, if every design still
+        resolves to the key recorded for it and every pack still fits;
+        ``None`` otherwise.
+        """
+        if not record.exists():
+            return None
+        data = json.loads(record.read_text())
+        chosen: dict[str, Variant] = {}
+        for k in runlist.order:
+            narrowed = data["chosen"].get(k)
+            if narrowed is None:
+                chosen[k] = Variant.of(first[k], dev)
+                continue
+            try:
+                chosen[k] = Variant.of(
+                    first[k].with_tunables(**narrowed["widths"]), dev
+                )
+            except ValueError:
+                return None
+            if chosen[k].key != narrowed["key"]:
+                return None
+        groups = tuple(tuple(group) for group in data["groups"])
+        for group in groups:
+            if not self._fit([chosen[k] for k in group], fitted):
+                return None
+        return chosen, groups
+
+    def _search(
+        self,
+        runlist: Runlist,
+        first: Mapping[str, Operator],
+        dev,
+        fitted: dict[tuple[str, ...], bool],
+    ) -> tuple[dict[str, Variant], tuple[tuple[str, ...], ...]]:
+        """Each design's width and the packs, from the table and the placer."""
+        table = self.table
         candidates = [self._candidates(first[k], dev) for k in runlist.order]
         measured = [k in table.steps for k in runlist.order]
         budget = shim_budget(dev)
@@ -547,7 +636,6 @@ class JointNarrowing:
             if self._gain(pack, alone) + table.reset_us > 0:
                 packs.append(pack)
 
-        fitted: dict[tuple[str, ...], bool] = {}
         while True:
             chosen_packs = self._partition(runlist, alone, packs)
             refused = [p for p in chosen_packs if not self._fit(p.combo, fitted)]
@@ -568,19 +656,7 @@ class JointNarrowing:
         groups = tuple(
             tuple(runlist.order[i] for i in sorted(p.members)) for p in chosen_packs
         )
-        predicted, configures = model_us(
-            table, keys, groups, {k: v.key for k, v in chosen.items()}
-        )
-        baseline, baseline_configures = model_us(table, keys)
-        return Tuning(
-            chosen=chosen,
-            groups=groups,
-            configures=configures,
-            predicted_us=predicted,
-            baseline_configures=baseline_configures,
-            baseline_us=baseline,
-            unmeasured=tuple(k for k, m in zip(runlist.order, measured) if not m),
-        )
+        return chosen, groups
 
     @staticmethod
     def _gain(pack: _Pack, alone: Sequence[tuple[float, Variant, int]]) -> float:
@@ -701,12 +777,38 @@ class JointNarrowing:
                     params.update(generated.parameters)
                 diagnostic = fits(texts, parameters_preamble(params))
                 verdict = "fits" if diagnostic is None else f"refused: {diagnostic}"
-                record.parent.mkdir(parents=True, exist_ok=True)
-                partial = record.with_suffix(f".{os.getpid()}")
-                partial.write_text(verdict)
-                partial.replace(record)
+                self._publish(record, verdict)
             fitted[key] = verdict == "fits"
         return fitted[key]
+
+    @staticmethod
+    def _publish(record: Path, text: str) -> None:
+        """Write ``record`` whole or not at all: processes tune at once."""
+        record.parent.mkdir(parents=True, exist_ok=True)
+        partial = record.with_suffix(f".{os.getpid()}")
+        partial.write_text(text)
+        partial.replace(record)
+
+    def _tuning_record(self, keys: Sequence[str], dev) -> Path:
+        """The file holding what the search chose for the runlist ``keys``.
+
+        Keyed on everything the search reads bar the placer, whose verdicts
+        a recorded tuning is checked against when taken: the runlist, the
+        table's entries, the device and the search's own fields. The search
+        takes seconds to minutes on a graph of hundreds of designs.
+        """
+        h = hashlib.sha256(
+            json.dumps(
+                [
+                    list(keys),
+                    self.table.digest(),
+                    repr(dev),
+                    self.max_members,
+                    self.fit_attempts,
+                ]
+            ).encode()
+        )
+        return self.cache / "tunings" / h.hexdigest()[:24]
 
     def _fit_record(self, designs: Iterable[OperatorDesign]) -> Path:
         """The file holding the placer's verdict on a pack of ``designs``:
@@ -721,4 +823,4 @@ class JointNarrowing:
         h = hashlib.sha256(
             repr(sorted(d.compilable().recipe_hash for d in designs)).encode()
         )
-        return self.fit_cache / h.hexdigest()[:24]
+        return self.cache / "fits" / h.hexdigest()[:24]

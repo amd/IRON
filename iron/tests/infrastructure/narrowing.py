@@ -101,7 +101,7 @@ def test_tuned_graph_is_bit_identical_and_packed(tmp_path):
 
     tuned = Chain().compile(
         image=iron.ELF,
-        coresident=JointNarrowing(table, fit_cache=tmp_path / "fits"),
+        coresident=JointNarrowing(table, cache=tmp_path),
         a=(SIZE,),
         b=(SIZE,),
     )
