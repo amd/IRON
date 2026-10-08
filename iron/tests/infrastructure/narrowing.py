@@ -517,9 +517,10 @@ def test_a_graph_sharing_measured_designs_measures_nothing(tmp_path):
         chain, [Call(Chain().trace(**shapes))], TRIANGLE, timing, cache=cache
     )
     # Each setting, the three calibrations, each setting's entry but the
-    # calibrated three's, and each pack.
+    # calibrated three's, and each pack. The cache also holds, beside each
+    # setting but the three designs' defaults, the default it was run with.
     assert len(ran) == 2 * len(chain.steps) + len(chain.packs)
-    assert len(list(cache.directory.iterdir())) == len(ran)
+    assert len(list(cache.directory.iterdir())) == len(ran) + len(chain.steps) - 3
 
     table = CostTable(tmp_path / "calls.json", "npu2", "fused")
     ran = measure_graph(
