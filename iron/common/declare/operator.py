@@ -210,7 +210,7 @@ class Link:
 
     def at_line(self, line: int, dtype, dev, ordered: bool = True) -> Link:
         """This step resolved at one tile (``Operator.at_line``)."""
-        return Link(self.op.at_line(line, dtype, dev, ordered), self.at)
+        return Link(self.op.at_line(line, dtype, dev, ordered, self.at), self.at)
 
     def operands(self, tile, extras) -> list:
         """``tile`` at input ``at`` among this step's ``extras``."""
@@ -436,15 +436,15 @@ class Operator(metaclass=_OperatorMeta):
             self, finishes=other.finishes, prepares=other.prepares
         )
 
-    def at_line(self, line: int, dtype, dev, ordered: bool = True) -> Self:
+    def at_line(self, line: int, dtype, dev, ordered: bool = True, at: int = 0) -> Self:
         """This operator applied by another's core to one tile of its output,
         a run of ``line`` elements of ``dtype``, resolved for ``dev``.
         ``ordered`` is False where the core holds the run in an order of its
-        own (``Out(finish=block)``).
+        own (``Out(finish=block)``); the tile enters as its input ``at``.
 
         Raises:
-            ValueError: It runs on cores of its own, or not at this line or
-                in this order.
+            ValueError: It runs on cores of its own, or not at this line, in
+                this order or with the tile at this input.
         """
         raise ValueError(f"{type(self).__name__} runs on cores of its own")
 

@@ -150,13 +150,7 @@ class _Chains:
                     )
                 if not cores:
                     continue
-                at = link.op.inputs[link.at].name
                 for j, call in enumerate(link.op.chain()):
-                    if j and at in call.operands:
-                        raise ValueError(
-                            f"{type(link.op).__name__}: a call after its first "
-                            f"names {at}, the line the first overwrites"
-                        )
                     calls.append((link, j, call.operands))
                     self.steps.setdefault(
                         (link.array_key(), j),
@@ -610,7 +604,7 @@ class Elementwise(Operator):
         """
         raise ValueError(f"{type(self).__name__} is not a run of lines")
 
-    def at_line(self, line: int, dtype, dev, ordered: bool = True) -> Self:
+    def at_line(self, line: int, dtype, dev, ordered: bool = True, at: int = 0) -> Self:
         own = type(self).array is not Elementwise.array
         if own and type(self).chain is Elementwise.chain:
             raise ValueError(f"{type(self).__name__}'s cores run an array of their own")
@@ -621,8 +615,14 @@ class Elementwise(Operator):
                 f"{np.dtype(dtype)} tiles in and one out"
             )
         op = self.over(line, line).resolved(dev)
-        # A factory refuses a line it does not run at.
-        for call in op.chain():
+        tile = op.inputs[at].name
+        for j, call in enumerate(op.chain()):
+            if j and tile in call.operands:
+                raise ValueError(
+                    f"{type(self).__name__}: a call after its first names "
+                    f"{tile}, the line the first overwrites"
+                )
+            # A factory refuses a line it does not run at.
             op._arguments(call.kernel, call.scalars, len(call.operands), 1)
         return op
 
@@ -864,10 +864,10 @@ class Rowwise(Elementwise):
         }
         return dataclasses.replace(self, rows=elements // line, bound_values={}, **one)
 
-    def at_line(self, line: int, dtype, dev, ordered: bool = True) -> Self:
+    def at_line(self, line: int, dtype, dev, ordered: bool = True, at: int = 0) -> Self:
         if not ordered:
             raise ValueError(
                 f"{type(self).__name__} reduces over rows, which a core holding "
                 f"its block in an order of its own does not hold"
             )
-        return super().at_line(line, dtype, dev, ordered)
+        return super().at_line(line, dtype, dev, ordered, at)

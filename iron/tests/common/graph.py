@@ -699,6 +699,16 @@ def test_a_norm_folds_into_the_matvecs_that_read_it(npu2):
     np.testing.assert_array_equal(f.steps[0].op.reference(A, x, w), want)
 
 
+def test_a_norm_folds_with_its_input_as_the_tile_not_its_weight(npu2):
+    # The weight is multiplied in after the first call has overwritten the tile.
+    weighted = RMSNorm(rows=1, tile_size=E, weighted=True)
+    with pytest.raises(ValueError, match="names weight, the line the first overwrites"):
+        GEMV(M=512, K=E).prefold(weighted, at=1).resolved(npu2)
+    t = _Project().trace(x=(1, E), r=(1, E))
+    (fold,) = folded(t, npu2)[1]
+    assert not folded(t, npu2, without=(fold,))[1]
+
+
 def test_a_norm_read_beside_the_matvecs_stays(npu2):
     t = _Project(shared=True).trace(x=(1, E), r=(1, E))
     assert not any(isinstance(fold, Prologue) for fold in folded(t, npu2)[1])
