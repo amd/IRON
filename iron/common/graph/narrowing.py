@@ -145,6 +145,9 @@ def variants(op: Operator, dev, pinned: frozenset[str] = frozenset()) -> list[Va
 
 FIT_CACHE = Path(NPU_CACHE_HOME) / "iron" / "fits"
 
+# The packagings a table is measured under (``packaging.plan``'s dispatch).
+DISPATCHES = ("fused", "separate")
+
 
 def fit_verdict(
     designs: Mapping[str, OperatorDesign], fit_cache: Path = FIT_CACHE
@@ -282,27 +285,70 @@ class Calibration:
 
 
 class CostTable:
-    """Measured step and configure costs for one device, as JSON on disk.
+    """Measured step and configure costs for one device and one packaging,
+    as JSON on disk.
 
     ``steps`` is keyed by ``cost_key``, ``calibrations`` by the pair of keys
     measured; the model takes the median of each calibrated figure.
+
+    Args:
+        path: The JSON file; read if it exists.
+        device: The device's name (``dev.name``) it is measured on.
+        dispatch: The packaging it is measured under: ``"fused"`` (one full
+            ELF) or ``"separate"`` (an xclbin dispatch per step).
+
+    Raises:
+        ValueError: The file was measured for another device or packaging
+            than the one given.
     """
 
-    def __init__(self, path: Path | str):
+    def __init__(
+        self, path: Path | str, device: str | None = None, dispatch: str | None = None
+    ):
+        if dispatch not in (None, *DISPATCHES):
+            raise ValueError(f"dispatch must be one of {DISPATCHES}, got {dispatch!r}")
         self.path = Path(path)
+        self.device = device
+        self.dispatch = dispatch
         self.steps: dict[str, StepCost] = {}
         self.calibrations: dict[str, Calibration] = {}
         self._medians: dict[str, float] | None = None
         if self.path.exists():
             data = json.loads(self.path.read_text())
+            for name in ("device", "dispatch"):
+                given = vars(self)[name]
+                if given is not None and given != data[name]:
+                    raise ValueError(
+                        f"{self.path} is measured for {name} {data[name]!r}, "
+                        f"not {given!r}"
+                    )
+            self.device, self.dispatch = data["device"], data["dispatch"]
             self.steps = {k: StepCost(**v) for k, v in data["steps"].items()}
             self.calibrations = {
                 k: Calibration(**v) for k, v in data["calibrations"].items()
             }
 
+    def measures(self, dev) -> None:
+        """Check that this table is measured on ``dev``.
+
+        Raises:
+            ValueError: It is for another device, or names none.
+        """
+        if self.device is None or self.dispatch is None:
+            raise ValueError(f"{self.path}: give the table its device and dispatch")
+        if self.device != dev.name:
+            raise ValueError(
+                f"{self.path} is measured on {self.device}, not {dev.name}"
+            )
+
     def save(self) -> None:
+        if self.device is None or self.dispatch is None:
+            raise ValueError(f"{self.path}: give the table its device and dispatch")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        sections = []
+        sections = [
+            f'"device": {json.dumps(self.device)}',
+            f'"dispatch": {json.dumps(self.dispatch)}',
+        ]
         for name, table in (("steps", self.steps), ("calibrations", self.calibrations)):
             rows = [
                 f"{json.dumps(k)}: {json.dumps(dataclasses.asdict(v))}"
@@ -597,13 +643,24 @@ class JointNarrowing:
     fit_attempts: int = 3
     fit_cache: Path = dataclasses.field(default=FIT_CACHE, compare=False)
 
-    def tune(self, traced: TracedGraph, dev) -> Tuning:
-        """Choose the folds, tunables and packs of ``traced`` for ``dev``.
+    def tune(self, traced: TracedGraph, dev, dispatch: str) -> Tuning:
+        """Choose the folds, tunables and packs of ``traced`` for ``dev``,
+        packaged as ``dispatch`` (``packaging.plan``'s).
 
         Each fold the graph admits is priced on its own, then those that
         gain are taken cheapest first, each kept only if the model's time
         drops with it beside those already taken.
+
+        Raises:
+            ValueError: The table is measured on another device or under
+                another packaging.
         """
+        self.table.measures(dev)
+        if self.table.dispatch != dispatch:
+            raise ValueError(
+                f"{self.table.path} prices dispatch {self.table.dispatch!r}; "
+                f"this version is packaged {dispatch!r}"
+            )
         plain = self._narrow(traced, dev)
         keys = {cost_key(s.op, dev) for s in traced.steps}
         _, admitted = folded(traced, dev)

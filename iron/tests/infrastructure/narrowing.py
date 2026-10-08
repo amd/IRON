@@ -111,7 +111,7 @@ def test_a_value_derived_from_a_bound_extent_follows_the_call(tmp_path):
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     t_step = {}
     for n in (64, 2048):
-        table = CostTable(tmp_path / f"costs{n}.json")
+        table = CostTable(tmp_path / f"costs{n}.json", "npu2", "fused")
         call = Call(traced, dict(n=n))
         measure_graph(table, [call], [], Timing(rounds=2, calls=10), cache=cache)
         [key] = {cost_key(s.op) for s in traced.steps}
@@ -126,7 +126,7 @@ def test_a_value_derived_from_a_tunable_is_measured_at_its_resolution(tmp_path):
     traced = Project().trace(x=(2048, 2048), w=(2048, 2048))
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
-    table = CostTable(tmp_path / "costs.json")
+    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
     call = Call(traced, dict(n=256))
     measure_graph(table, [call], [], Timing(rounds=2, calls=10), cache=cache)
     [key] = {cost_key(s.op) for s in traced.steps}
@@ -141,7 +141,7 @@ def test_widths_are_compared_on_the_rows_under_the_bound(tmp_path):
     found = variants(step.op, aie_utils.ensure_current_device())
     assert len(found) > 1
     costs = measure_steps(
-        CostTable(tmp_path / "costs.json"),
+        CostTable(tmp_path / "costs.json", "npu2", "fused"),
         found,
         Timing(rounds=1, calls=5),
         values=Call(traced, dict(n=256)).op_values(step.op),
@@ -156,7 +156,7 @@ def test_measures_more_widths_than_one_batch_of_contexts(tmp_path):
     found = variants(op, aie_utils.ensure_current_device())
     assert len(found) > CONTEXTS // 2
     costs = measure_steps(
-        CostTable(tmp_path / "costs.json"),
+        CostTable(tmp_path / "costs.json", "npu2", "fused"),
         found,
         Timing(rounds=1, calls=5),
         values={"length": 200, "valid_cols": 200},
@@ -169,9 +169,9 @@ def test_a_setting_far_behind_the_fastest_is_timed_no_further(tmp_path):
     # GEMV at one column is several times its widest's step.
     found = variants(GEMV(M=2048, K=2048), aie_utils.ensure_current_device())
     timing = Timing(rounds=4, calls=10, settle=1)
-    cut = CostTable(tmp_path / "cut.json")
+    cut = CostTable(tmp_path / "cut.json", "npu2", "fused")
     measure_steps(cut, found, timing)
-    full = CostTable(tmp_path / "full.json")
+    full = CostTable(tmp_path / "full.json", "npu2", "fused")
     measure_steps(full, found, dataclasses.replace(timing, cutoff=math.inf))
     assert all(full.steps[v.key].rounds == timing.rounds for v in found)
     stopped = {v.key for v in found if cut.steps[v.key].rounds < timing.rounds}
@@ -188,7 +188,7 @@ def test_a_batch_whose_every_setting_is_stopped_is_measured(tmp_path):
     found = variants(op, aie_utils.ensure_current_device())
     assert len(found) > CONTEXTS // 2
     timing = Timing(rounds=2, calls=5, settle=1, cutoff=0.0)
-    table = CostTable(tmp_path / "costs.json")
+    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
     measure_steps(table, found, timing, values={"length": 200, "valid_cols": 200})
     rounds = [table.steps[v.key].rounds for v in found]
     assert rounds == [timing.rounds] + [timing.settle] * (len(found) - 1)
@@ -230,7 +230,7 @@ def test_descent_measures_every_line_through_the_default(tmp_path):
     )
     default = dict(found[0].tunables)
     costs = search(
-        CostTable(tmp_path / "costs.json"),
+        CostTable(tmp_path / "costs.json", "npu2", "fused"),
         found,
         Timing(rounds=1, calls=5),
         exhaustive=1,
@@ -253,7 +253,7 @@ def test_a_setting_that_does_not_build_is_left_out(tmp_path):
         Variant.of(gemm, dev),
         Variant.of(gemm.with_tunables(tile_k=128, tile_n=128), dev),
     ]
-    table = CostTable(tmp_path / "costs.json")
+    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
     logged = []
     costs = search(
         table,
@@ -273,7 +273,7 @@ def test_a_setting_that_does_not_build_is_left_out(tmp_path):
 
 @pytest.mark.supported_devices("npu2")
 def test_tuned_graph_is_bit_identical_and_packed(tmp_path):
-    table = CostTable(tmp_path / "costs.json")
+    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
     traced = Chain().trace(a=(SIZE,), b=(SIZE,))
     first = {}
     for s in traced.steps:
@@ -312,7 +312,7 @@ def test_the_model_predicts_the_tuned_graph_and_the_graph_as_traced(tmp_path):
     # the model held 618-634 us while runs measured 626-738 us.
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
-    table = CostTable(tmp_path / "costs.json")
+    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
     shapes = dict(a=(SIZE,), b=(SIZE,))
     timing = Timing(rounds=8, calls=50)
     calls = Call.admitted(Chain().trace(**shapes), aie_utils.ensure_current_device())
@@ -348,7 +348,7 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
     calls = Call.admitted(traced, dev)
     folds = calls[1].traced
     report = platform()
-    table = CostTable(tmp_path / "costs.json")
+    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
     measure_graph(
         table,
         calls,
@@ -379,7 +379,7 @@ def test_a_folded_design_is_priced_beside_the_one_it_replaces(tmp_path):
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     timing = Timing(rounds=1, calls=5)
-    table = CostTable(tmp_path / "costs.json")
+    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
     measure_graph(table, calls, [], timing, cache=cache)
 
     gate, fused = replaced(traced, folds)[0]
@@ -389,7 +389,7 @@ def test_a_folded_design_is_priced_beside_the_one_it_replaces(tmp_path):
     paired = table.steps[cost_key(gate)].t_step_us + raw.t_step_us - near.t_step_us
     assert table.steps[cost_key(fused)].t_step_us == pytest.approx(paired)
 
-    again = CostTable(tmp_path / "again.json")
+    again = CostTable(tmp_path / "again.json", "npu2", "fused")
     assert measure_graph(again, calls, [], timing, cache=cache) == []
     assert again.steps == table.steps
 
@@ -403,7 +403,7 @@ def test_an_inexact_width_within_its_gates_is_accurate_and_cached(tmp_path):
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     timing = Timing(rounds=1, calls=5)
-    table = CostTable(tmp_path / "costs.json")
+    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
     measure_steps(table, found, timing, cache=cache)
     narrow = table.steps[found[1].key]
     assert not narrow.exact and narrow.accurate, narrow
@@ -412,7 +412,7 @@ def test_an_inexact_width_within_its_gates_is_accurate_and_cached(tmp_path):
         assert cache.get(cache.judged_key(entries[0], entry), Accuracy).within
 
     stamps = {p: p.stat().st_mtime_ns for p in cache.directory.iterdir()}
-    again = CostTable(tmp_path / "again.json")
+    again = CostTable(tmp_path / "again.json", "npu2", "fused")
     assert measure_steps(again, found, timing, cache=cache) == {}
     assert again.steps == table.steps
     assert {p: p.stat().st_mtime_ns for p in cache.directory.iterdir()} == stamps
@@ -424,7 +424,7 @@ def test_a_graph_sharing_measured_designs_measures_nothing(tmp_path):
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "costs")
     pairs = [("ElementwiseAdd", "SiLU")]
     timing = Timing(rounds=1, calls=5)
-    chain = CostTable(tmp_path / "chain.json")
+    chain = CostTable(tmp_path / "chain.json", "npu2", "fused")
     shapes = dict(a=(SIZE,), b=(SIZE,))
     ran = measure_graph(
         chain, [Call(Chain().trace(**shapes))], pairs, timing, cache=cache
@@ -432,7 +432,7 @@ def test_a_graph_sharing_measured_designs_measures_nothing(tmp_path):
     assert len(ran) == len(chain.steps) + 1
     assert len(list(cache.directory.iterdir())) == len(ran)
 
-    table = CostTable(tmp_path / "add_silu.json")
+    table = CostTable(tmp_path / "add_silu.json", "npu2", "fused")
     ran = measure_graph(
         table, [Call(AddSilu().trace(**shapes))], pairs, timing, cache=cache
     )

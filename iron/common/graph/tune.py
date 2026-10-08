@@ -27,7 +27,8 @@ from pathlib import Path
 import aie.utils as aie_utils
 
 from ... import operators
-from .narrowing import CostTable, fitting, variants
+from ..image.packaging import full_elf
+from .narrowing import DISPATCHES, CostTable, fitting, variants
 from .probe import Call, Timing, cost_cache, measure_graph, pmode, search
 
 
@@ -41,6 +42,13 @@ def parser(description: str, table: Path | None) -> argparse.ArgumentParser:
         type=Path,
         default=table,
         help=f"the table to fill (default: {table or 'a scratch table'})",
+    )
+    p.add_argument(
+        "--dispatch",
+        choices=DISPATCHES,
+        help="the packaging measured under: fused (one full ELF) or separate "
+        "(an xclbin dispatch per step); default: fused where the device runs "
+        "a full ELF",
     )
     p.add_argument("--rounds", type=int, default=8)
     p.add_argument("--calls", type=int, default=50)
@@ -69,6 +77,13 @@ def parser(description: str, table: Path | None) -> argparse.ArgumentParser:
     return p
 
 
+def dispatch(args: argparse.Namespace, dev) -> str:
+    """The packaging ``args`` measures under on ``dev``."""
+    if args.dispatch is not None:
+        return args.dispatch
+    return "fused" if full_elf(dev) else "separate"
+
+
 def measure(
     args: argparse.Namespace, calls: Sequence[Call], pairs: Sequence[tuple[str, str]]
 ) -> list[str]:
@@ -76,8 +91,9 @@ def measure(
     between ``pairs`` (``measure_graph``), timed as ``args`` says.
     """
     print(f"power mode: {pmode()}")
+    dev = aie_utils.ensure_current_device()
     return measure_graph(
-        CostTable(args.table),
+        CostTable(args.table, dev.name, dispatch(args, dev)),
         calls,
         pairs,
         Timing(args.rounds, args.calls, args.settle, args.cutoff),
@@ -124,7 +140,9 @@ def main() -> None:
         first_line, _, _ = why.partition("\n")
         print(f"not measured, the placer refuses {key}: {first_line}")
     with tempfile.TemporaryDirectory() as scratch:
-        table = CostTable(args.table or Path(scratch) / "costs.json")
+        table = CostTable(
+            args.table or Path(scratch) / "costs.json", dev.name, dispatch(args, dev)
+        )
         search(
             table,
             found,

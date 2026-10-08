@@ -1,4 +1,6 @@
-{"steps": {
+{"device": "npu2",
+"dispatch": "fused",
+"steps": {
   "Copy_004ad3368159e8d9496f2ffe": {"t_step_us": 51.25656025484204, "alone_us": 153.714936459437, "exact": true, "accurate": true, "pmode": "default", "rounds": 2, "calls": 50, "measured": "2026-10-07"},
   "Copy_0d375096bd92244b85286019": {"t_step_us": 4.541998350759968, "alone_us": 133.39647921384312, "exact": true, "accurate": true, "pmode": "default", "rounds": 8, "calls": 50, "measured": "2026-10-08"},
   "Copy_0f9b565a9227e296e90bdf48": {"t_step_us": 5.041907570557669, "alone_us": 131.955119286431, "exact": true, "accurate": true, "pmode": "default", "rounds": 8, "calls": 50, "measured": "2026-10-07"},

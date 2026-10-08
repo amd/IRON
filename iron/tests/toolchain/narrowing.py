@@ -175,7 +175,9 @@ def test_a_design_keeps_a_tunable_any_of_its_calls_pins(tmp_path, npu2):
         cols = dict(v.tunables)["num_aie_columns"]
         steps[v.key] = (4.0 + cols, 8.0 * cols)
     table = _table(tmp_path / "costs.json", steps)
-    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(
+        traced, npu2, "fused"
+    )
     assert tuning.chosen[cost_key(free)].resolved.num_aie_columns == 8
     narrowed, _ = tuning.apply(traced, npu2)
     assert {cost_key(s.op, npu2) for s in narrowed.steps} == {cost_key(free)}
@@ -315,7 +317,7 @@ def _table(path, steps, dispatch=50.0, reset=30.0, base=30.0):
     """A table holding the given (t_step, load) per key, alone figures
     composed as the probe measures them.
     """
-    table = CostTable(path)
+    table = CostTable(path, "npu2", "fused")
     for key, (t_step, load) in steps.items():
         table.record_step(
             key,
@@ -350,6 +352,31 @@ def test_table_round_trips(tmp_path, npu2):
     again = CostTable(table.path)
     assert again.steps == table.steps and again.calibrations == table.calibrations
     assert again.base_us == table.base_us
+    assert (again.device, again.dispatch) == ("npu2", "fused")
+
+
+def test_a_table_prices_only_its_device_and_packaging(tmp_path, npu2):
+    traced, _, table = _add_silu(tmp_path, npu2)
+    table.save()
+    with pytest.raises(ValueError, match="measured for dispatch 'fused'"):
+        CostTable(table.path, "npu2", "separate")
+    tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
+    with pytest.raises(ValueError, match="this version is packaged 'separate'"):
+        tuner.tune(traced, npu2, "separate")
+    with pytest.raises(ValueError, match="measured on npu2, not npu1"):
+        tuner.tune(traced, from_name("npu1", n_cols=4), "fused")
+    with pytest.raises(ValueError, match="give the table its device"):
+        CostTable(tmp_path / "new.json").save()
+
+
+def test_a_tuned_compile_takes_the_packaging_first(tmp_path, npu2):
+    # each_step makes the version an xclbin, which a full-ELF table cannot price.
+    _, _, table = _add_silu(tmp_path, npu2)
+    tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
+    with pytest.raises(ValueError, match="this version is packaged 'separate'"):
+        AddSilu().compile(
+            npu2, boundaries=iron.each_step, coresident=tuner, a=(SIZE,), b=(SIZE,)
+        )
 
 
 def test_packs_designs_apart_in_first_use_order(tmp_path, npu2):
@@ -357,7 +384,9 @@ def test_packs_designs_apart_in_first_use_order(tmp_path, npu2):
     # pack; add and silu are first used apart but adjacent five times, so
     # they share a device.
     traced, ops, table = _add_silu(tmp_path, npu2)
-    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(
+        traced, npu2, "fused"
+    )
     add, silu = cost_key(ops["ElementwiseAdd"]), cost_key(ops["SiLU"])
     assert tuning.groups in (((add, silu),), ((silu, add),))
     assert tuning.unmeasured == (cost_key(ops["GELU"]),)
@@ -378,7 +407,7 @@ def test_an_inexact_width_is_taken_only_if_accurate(accurate, tmp_path, npu2):
     key = cost_key(ops["ElementwiseAdd"])
     default, *others = variants(ops["ElementwiseAdd"], npu2)
     tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
-    tuning = tuner.tune(traced, npu2)
+    tuning = tuner.tune(traced, npu2, "fused")
     exact = tuning.chosen[key]
     assert exact.key != default.key and tuning.inexact == ()
     for v in others:
@@ -386,7 +415,7 @@ def test_an_inexact_width_is_taken_only_if_accurate(accurate, tmp_path, npu2):
             v.key,
             dataclasses.replace(table.steps[v.key], exact=False, accurate=accurate),
         )
-    tuning = tuner.tune(traced, npu2)
+    tuning = tuner.tune(traced, npu2, "fused")
     assert tuning.chosen[key].key == (exact.key if accurate else default.key)
     assert tuning.inexact == ((key,) if accurate else ())
     assert ("not exact" in tuning.report()) == accurate
@@ -394,7 +423,9 @@ def test_an_inexact_width_is_taken_only_if_accurate(accurate, tmp_path, npu2):
 
 def test_apply_rebuilds_the_narrowed_steps(tmp_path, npu2):
     traced, ops, table = _add_silu(tmp_path, npu2)
-    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(
+        traced, npu2, "fused"
+    )
     narrowed, groups = tuning.apply(traced)
     # One operator per design still: every add step runs the one new add.
     by_class = {}
@@ -419,7 +450,9 @@ def test_designs_of_one_array_take_one_width(tmp_path, npu2):
             cols = dict(v.tunables)["num_aie_columns"]
             steps[v.key] = (4.0 + cols, 8.0 * cols)
     table = _table(tmp_path / "costs.json", steps)
-    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(
+        traced, npu2, "fused"
+    )
     # As traced, the adds' one array is entered twice around silu's.
     assert tuning.baseline_configures == 4
     adds = [tuning.chosen[cost_key(op)] for op in (small, large)]
@@ -461,7 +494,9 @@ def test_designs_of_one_array_may_search_different_tunables(tmp_path, npu2):
             cols = v.resolved.num_aie_columns
             steps[v.key] = (4.0 + cols, 8.0 * cols)
     table = _table(tmp_path / "costs.json", steps)
-    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(
+        traced, npu2, "fused"
+    )
     # Alone the free add would take one column; its sibling holds it at eight.
     chosen = [tuning.chosen[cost_key(op)] for op in (free, pinned)]
     assert chosen[0].resolved.num_aie_columns == 8
@@ -485,7 +520,9 @@ def test_designs_apart_only_in_their_probes_share_one_cost(tmp_path, npu2):
         cols = dict(v.tunables)["num_aie_columns"]
         steps[v.key] = (4.0 + cols, 8.0 * cols)
     table = _table(tmp_path / "costs.json", steps)
-    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(
+        traced, npu2, "fused"
+    )
     assert list(tuning.chosen) == [key]
     chosen = tuning.chosen[key]
     assert chosen.key != found[0].key
@@ -509,7 +546,7 @@ def test_a_clamp_folded_into_flm_gemm_costs_what_the_gemm_does(npu2):
 def test_placer_verdicts_are_kept_across_tunings(tmp_path, npu2):
     traced, _, table = _add_silu(tmp_path, npu2)
     fit_cache = tmp_path / "fits"
-    first = JointNarrowing(table, fit_cache=fit_cache).tune(traced, npu2)
+    first = JointNarrowing(table, fit_cache=fit_cache).tune(traced, npu2, "fused")
     records = sorted(fit_cache.iterdir())
     assert records and all(r.read_text() == "fits" for r in records)
     widths = {k: v.tunables for k, v in first.chosen.items()}
@@ -519,7 +556,7 @@ def test_placer_verdicts_are_kept_across_tunings(tmp_path, npu2):
     # next-cheapest widths, which the placer is then asked about.
     for r in records:
         r.write_text("refused: recorded by the test")
-    second = JointNarrowing(table, fit_cache=fit_cache).tune(traced, npu2)
+    second = JointNarrowing(table, fit_cache=fit_cache).tune(traced, npu2, "fused")
     assert len(list(fit_cache.iterdir())) > len(records)
     assert second.groups == first.groups
     assert {k: v.tunables for k, v in second.chosen.items()} != widths
@@ -555,7 +592,9 @@ def _swiglu(tmp_path, dev, gate_us):
 
 def test_a_fold_is_taken_where_the_model_says_it_gains(tmp_path, npu2):
     traced, table = _swiglu(tmp_path, npu2, gate_us=11.0)
-    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(
+        traced, npu2, "fused"
+    )
     assert [str(f) for f in tuning.folds] == ["SiLU into GEMV"]
     assert "fold: SiLU into GEMV" in tuning.report()
     # The baseline is the graph as traced: gate and up, then silu, mul, down.
@@ -577,7 +616,9 @@ def test_a_fold_is_left_where_it_costs_or_is_unmeasured(gate_us, tmp_path, npu2)
     if gate_us is None:
         folds, _ = folded(traced, npu2)
         del table.steps[cost_key(folds.steps[0].op, npu2)]
-    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(traced, npu2)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(
+        traced, npu2, "fused"
+    )
     assert tuning.folds == ()
     assert [str(f) for f in tuning.unpriced] == ([] if gate_us else ["SiLU into GEMV"])
     assert ("unpriced, not taken: fold SiLU into GEMV" in tuning.report()) == (

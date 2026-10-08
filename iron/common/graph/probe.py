@@ -459,6 +459,8 @@ def measure_steps(
         ValueError: `cache` is for another power mode than the NPU's, or
             a twin is not in `table`.
     """
+    if table.dispatch != "fused":
+        raise NotImplementedError(f"{table.path}: only a full ELF is measured")
     mode = pmode()
     if cache is not None and cache.mode != mode:
         raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
@@ -690,6 +692,8 @@ def calibrate(
     values: Mapping[str, int] | None = None,
 ) -> Calibration:
     """Split a configure's cost over measured designs ``a`` and ``b`` into ``table``."""
+    if table.dispatch != "fused":
+        raise NotImplementedError(f"{table.path}: only a full ELF is calibrated")
     ka, kb = cost_key(a), cost_key(b)
     ta, tb = table.steps[ka].t_step_us, table.steps[kb].t_step_us
     tag = f"{ka}_{kb}"
@@ -907,6 +911,7 @@ def measure_graph(
         The design keys and calibration pairs (``"a|b"``) run on the device.
     """
     dev = aie_utils.ensure_current_device()
+    table.measures(dev)
     if cache is None:
         cache = cost_cache()
     designs = Designs.of(calls, dev)

@@ -346,15 +346,16 @@ class Graph:
                     f"{self.name}: {count.total()} step(s) folded into their "
                     f"readers or producers"
                 )
+        current = aie_utils.ensure_current_device()
+        # Folding and narrowing change nothing the packaging follows from.
+        chosen = plan(current, traced, boundaries, image)
         tuning = None
         groups: AdjacentPacking | list[list[Operator]] | None
         if isinstance(coresident, JointNarrowing):
-            current = aie_utils.ensure_current_device()
-            tuning = coresident.tune(traced, current)
+            tuning = coresident.tune(traced, current, chosen.dispatch)
             traced, groups = tuning.apply(traced, current)
         else:
             groups = coresident
-        chosen = plan(aie_utils.ensure_current_device(), traced, boundaries, image)
         if verbose:
             print(chosen.report(self.name))
         signature = self._signature(traced.inputs)
