@@ -195,24 +195,39 @@ dispatch moves, so the operator ran at ~10 GB/s instead of ~47 — a 5.4x
 end-to-end penalty. Weights are packed once and reused across dispatches, so the
 cost belongs at the caller.
 
-### Or read as stored, on NPU1
+### Or read as stored
 
 ```python
 op = GEMM(M=M, K=K, N=N, b_col_maj=True)
 OperatorImage(op)(A, W, C_out)  # W is (N, K), a checkpoint's layout
 ```
 
-On NPU1, where B is bf16, `b_col_maj=True` takes B as a checkpoint stores
-a projection, `(N, K)`, so no packed copy sits beside the one a decode GEMV
-reads. The shim reads each `(tile_n, k_tile)` block as `tile_n` runs of
-`k_tile` elements (1 KB each), the memtile hands the core one 8-deep k panel at
-a time, and the kernel transposes it (`fused_mm(..., b_col_maj=True)`). The
-short runs are between the memtile and the core, not in DDR. NPU2's B is
-bfp16ebs8, so there it must be packed, and `b_col_maj` is refused.
+`b_col_maj=True` takes B as a checkpoint stores a projection, `(N, K)`, in
+bf16, so no packed copy sits beside the one a decode GEMV reads. The shim
+reads each `(tile_n, k_tile)` block as `tile_n` runs of `k_tile` elements
+(1 KB each), the memtile hands the core one 8-deep k panel at a time, and the
+kernel transposes it (`fused_mm(..., b_col_maj=True)`). The short runs are
+between the memtile and the core, not in DDR. On NPU2 the core converts the
+bf16 B to bfp16 for the bfp16 macs (`emulate_bf16_mmul_with_bfp16=True`, the
+default), so its arithmetic is the packed path's; `False` multiplies in bf16.
 
 At Llama 3.2 1B's prompt projections (M = 2048, `epilogue_modes=("none",)`)
-on Phoenix, the times below are the range over 8 interleaved rounds, each the
-median of 10 runs:
+on Strix, the times below are the fastest of 8 interleaved rounds, each the
+median of 10 runs, and the error is the mean |C − C_f32| over the mean |C_f32|:
+
+| K × N | packed | `b_col_maj` | `b_col_maj`, bf16 macs | `iron.operators.GEMM` |
+|---|---|---|---|---|
+| 2048 × 8192 | 4.10 ms | 4.40 ms | 103.4 ms | 12.8 ms |
+| 2048 × 2048 | 1.10 ms | 1.16 ms | 26.4 ms | 3.11 ms |
+| 2048 × 512 | 0.35 ms | 0.40 ms | 6.81 ms | 0.86 ms |
+| 8192 × 2048 | 5.55 ms | 7.35 ms | 103.5 ms | 28.0 ms |
+| error | 2.6e-4 | 2.6e-4 | 3.9e-5 | 3.2e-4 |
+
+`b_col_maj` moves 1.78x the B bytes of the packed path. Where B is resident
+(K ≤ 2048 here) that costs 5-14%; at K = 8192 both stream B, and it costs 32%.
+
+On Phoenix, where B is bf16 either way, the times below are the range over 8
+interleaved rounds, each the median of 10 runs:
 
 | K × N | packed | `b_col_maj` | `iron.operators.GEMM` |
 |---|---|---|---|
