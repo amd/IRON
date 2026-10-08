@@ -38,6 +38,7 @@ from aie.utils.verify import Tolerance
 from ..testing import Testing
 from .bound import BoundBuffer, BoundValue
 from .creation import declare
+from .domain import Domain, Width
 from .field import DimRef, OptionalDim, Select, Tier, Unresolvable, param
 from .member import (
     Extent,
@@ -230,6 +231,7 @@ class Operator(metaclass=_OperatorMeta):
     _derived_params: ClassVar[dict[str, Callable[[Any], Any]]] = {}
     _auto_fields: ClassVar[tuple[str, ...]] = ()
     _tunable_fields: ClassVar[tuple[str, ...]] = ()
+    _domains: ClassVar[dict[str, Domain]] = {}
     _array_fields: ClassVar[tuple[str, ...]] = ()
     _external: ClassVar[Any] = None
     test: ClassVar[Testing | None] = None
@@ -778,27 +780,44 @@ class Operator(metaclass=_OperatorMeta):
 
     @property
     def widths(self) -> dict[str, int | None]:
-        """The settable tunables a ``per=`` stream's count is a product of, and their values."""
-        found: dict[str, int | None] = {}
+        """The tunables searched as a `Width`, and their values: those that
+        declare one, and those a streamed ``per=`` names that declare no
+        other domain.
+        """
+        found = {
+            n: getattr(self, n)
+            for n, domain in self._domains.items()
+            if isinstance(domain, Width)
+        }
         for b in self.buffers:
             for ref in b.member.per.dims if b.streamed and b.member.per else ():
-                if isinstance(ref, DimRef) and ref.name in self._tunable_fields:
+                if (
+                    isinstance(ref, DimRef)
+                    and ref.name in self._tunable_fields
+                    and ref.name not in self._domains
+                ):
                     found.setdefault(ref.name, getattr(self, ref.name))
         return found
 
     def domains(self, dev) -> dict[str, tuple[Any, ...]]:
         """The values the tuner tries for each tunable it searches, asked of
-        the resolved operator: a width at its own value and every power of
-        two up to ``dev``'s columns, widest first. An operator whose other
-        tunables are worth searching adds them; a combination it cannot
-        resolve at is left out. A ``pinned`` tunable is not searched.
+        the resolved operator: the field's declared domain where its
+        ``when`` flag holds, a `Width` for one of `widths`, and nothing for
+        any other. A combination the operator cannot resolve at is left
+        out by the tuner. A ``pinned`` tunable is not searched.
         """
-        powers = [1 << i for i in range(dev.cols.bit_length())]
-        return {
-            name: tuple(sorted({width, *powers}, reverse=True))
-            for name, width in self.widths.items()
-            if name not in self.pinned
-        }
+        widths = self.widths
+        found = {}
+        for name in dict.fromkeys([*widths, *self._tunable_fields]):
+            domain = self._domains.get(name, Width() if name in widths else None)
+            if (
+                name in self.pinned
+                or domain is None
+                or (domain.when is not None and not getattr(self, domain.when))
+            ):
+                continue
+            found[name] = domain.values(self, dev, name)
+        return found
 
     @property
     def buffers(self) -> list[BoundBuffer]:

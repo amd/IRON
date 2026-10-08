@@ -17,6 +17,8 @@ from typing import Any, Callable
 
 import numpy as np
 
+from .domain import Domain
+
 
 class Unresolvable(ValueError):
     """No legal resolution exists for this operator on this device."""
@@ -53,9 +55,12 @@ class Auto(Tier):
     Attributes:
         derived: `resolve` always computes the field from the others, so no
             caller, profile or tuner sets it.
+        domain: The values a tuner searches it over, or None for a width's
+            inferred one or none.
     """
 
     derived: bool = False
+    domain: Domain | None = None
 
 
 def param(
@@ -90,6 +95,7 @@ def auto(
     *,
     array: bool = False,
     derived: bool = False,
+    domain: Domain | None = None,
     repr: bool = True,
     init: bool = True,
 ) -> Any:
@@ -106,9 +112,15 @@ def auto(
         derived: `resolve` computes the field from the device and the other
             fields whatever it was given, so it is not a tunable a caller,
             a profile or a tuner sets.
+        domain: The values a tuner searches the field over (`Width`,
+            `Divisors`, `Choices`). Left out, a tunable a streamed ``per=``
+            names is searched as a `Width` and any other is not searched.
     """
     return dataclasses.field(
-        default=default, repr=repr, init=init, metadata={Tier: Auto(array, derived)}
+        default=default,
+        repr=repr,
+        init=init,
+        metadata={Tier: Auto(array, derived, domain)},
     )
 
 

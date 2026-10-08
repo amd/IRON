@@ -157,6 +157,15 @@ def declare(cls: type) -> None:
         for n in cls._auto_fields
         if fields[n].init and not fields[n].metadata[Tier].derived
     )
+    cls._domains = {
+        n: tiers[n].domain for n in cls._tunable_fields if tiers[n].domain is not None
+    }
+    for n, domain in cls._domains.items():
+        if domain.when is not None and domain.when not in fields:
+            raise TypeError(
+                f"{cls.__name__}.{n}: when={domain.when!r} must name a bool field, "
+                f"the flag the tunable is searched under"
+            )
     # The array tier: what a stream's tile, a core's block of it, its dtype,
     # its replication or its presence names, and what declares itself array=True.
     named: set[str] = set()
