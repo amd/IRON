@@ -323,10 +323,18 @@ def calibrate(
     dispatch = grp - pairs * (ta + tb) - 2 * switch
     reset = ((alone_a - ta) + (alone_b - tb) - 2 * switch) / 2 - dispatch
     entry_pack = pack - ta - tb - reset - dispatch
+    base = 2 * switch - entry_pack
+    figures = dict(dispatch=dispatch, reset=reset, base=base, switch=switch)
+    negative = {name: round(us, 1) for name, us in figures.items() if us < 0}
+    if negative:
+        raise RuntimeError(
+            f"calibration {ka}/{kb}: negative {negative} us; measure it with the "
+            f"NPU otherwise idle, in the session that measured both steps"
+        )
     cal = Calibration(
         dispatch_us=dispatch,
         reset_us=reset,
-        base_us=2 * switch - entry_pack,
+        base_us=base,
         switch_us=switch,
         pmode=pmode(),
         rounds=timing.rounds,
