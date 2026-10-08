@@ -38,6 +38,7 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Divisors,
     In,
     InOut,
     Operator,
@@ -113,7 +114,9 @@ class Sample(Operator):
     cores: int = auto(4)
     # Logits per select call; the largest even divisor of the slice up to
     # 8192 unless given.
-    chunk: int = auto()
+    chunk: int = auto(
+        domain=Divisors(of=lambda op: op.slice_size, step=2, cap=_CHUNK_LIMIT)
+    )
 
     logits = In(vocab, tile=(chunk,), per=(cores,), depth=2)
     draws = In(

@@ -21,7 +21,7 @@ from aie.iron import ObjectFifo, TaskGroup
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import In, Operator, Out, Scratchpad, auto, param
+from iron.common import Divisors, In, Operator, Out, Scratchpad, auto, param
 from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
@@ -141,7 +141,14 @@ class Copy(Operator):
     # its size is the full extent in the pattern and patched to the call's.
     src_bound: int | None = param(default=None)
     dst_bound: int | None = param(default=None)
-    tile_size: int = auto()  # None: the per-channel share, cut to object_bytes
+    # None: the per-channel share, cut to object_bytes.
+    tile_size: int = auto(
+        domain=Divisors(
+            of=lambda op: op.channel_share,
+            cap=lambda op: op.object_bytes // np.dtype(op.dtype).itemsize,
+            span=3,
+        )
+    )
     # A memtile holds 512 KiB; the cap leaves room for every channel placed on one.
     object_bytes: ClassVar[int] = 64 * 1024
     num_channels: int = auto(1)
@@ -203,8 +210,7 @@ class Copy(Operator):
         per-channel share (under a bound, of one bounded row's share; of a
         gather, of every piece's) whose object fits ``object_bytes``.
         """
-        pieces = [prod(p.sizes) // self.num_channels for w in self.walks() for p in w]
-        whole = gcd(*pieces, *self._row_shares())
+        whole = self.channel_share
         cap = self.object_bytes // np.dtype(self.dtype).itemsize
         tile_size = self.tile_size or max(
             d
@@ -214,6 +220,14 @@ class Copy(Operator):
             if d <= cap
         )
         return dataclasses.replace(self, tile_size=tile_size)
+
+    @property
+    def channel_share(self) -> int:
+        """What each channel's transfers split into: of every pattern's
+        share, and of one bounded row's.
+        """
+        pieces = [prod(p.sizes) // self.num_channels for w in self.walks() for p in w]
+        return gcd(*pieces, *self._row_shares())
 
     def uses_value(self, name: str) -> bool:
         # An offset or a size is patched only when a graph binds a handle to it.

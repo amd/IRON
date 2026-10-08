@@ -24,6 +24,7 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Divisors,
     Extent,
     Finish,
     In,
@@ -166,11 +167,19 @@ class GEMV(Operator):
     # None: two rows, or one where two would span more than two banks: A is
     # double-buffered beside the whole of B, and at K = 8192 two rows each
     # way would be all of a core's memory.
-    tile_size_input: int = auto()
+    tile_size_input: int = auto(
+        domain=Divisors(
+            of=lambda op: op.M,
+            cap=lambda op, dev: dev.core_memory_bytes
+            // (op.A.depth * op.K * np.dtype(bfloat16).itemsize),
+        )
+    )
     # None: tile_size_input, and at least two rows: the shim moves C in
     # 4-byte granules. Not a column's rows, which M would set: one array
     # serves every M.
-    tile_size_output: int = auto()
+    tile_size_output: int = auto(
+        domain=Divisors(of=lambda op: op.M, step=lambda op: op.tile_size_input, span=3)
+    )
     # None picks the widest legal size for K (see validate).
     kernel_vector_size: int = auto(repr=False, array=True)
 

@@ -34,7 +34,17 @@ from iron.common.graph.narrowing import (
 from iron.common.graph.probe import judge
 from iron.common.harness import vectors
 from iron.lm.layers import SwiGLU
-from iron.operators import GELU, GEMM, MHA, ElementwiseAdd, ReLU, RoPE, SiLU
+from iron.operators import (
+    GELU,
+    GEMM,
+    GEMV,
+    MHA,
+    ElementwiseAdd,
+    ReLU,
+    RoPE,
+    Sample,
+    SiLU,
+)
 from iron.operators.flm import DequantBFP
 
 SIZE = 8192
@@ -183,6 +193,32 @@ def test_a_baked_replication_is_not_searched(npu2):
     assert DequantBFP(K=2048, N=2048).resolved(npu2).domains(npu2) == {
         "cols": (8, 4, 2, 1)
     }
+
+
+def test_a_tile_the_call_gives_never_moves(npu2):
+    found = variants(GEMV(M=2048, K=2048, tile_size_output=32), npu2)
+    assert len(found) > 1
+    assert {v.resolved.tile_size_output for v in found} == {32}
+
+
+def test_a_tile_a_profile_gives_is_searched(npu2):
+    profile = Profile()
+    profile.add(GEMV, tile_size_output=32)
+    with profile:
+        gemv = GEMV(M=2048, K=2048)
+    found = variants(gemv, npu2)
+    assert found[0].resolved.tile_size_output == 32
+    assert {v.resolved.tile_size_output for v in found} > {32}
+
+
+def test_a_ladder_runs_through_the_resolved_value(npu2):
+    # The default chunk, 8016, is the slice's largest even divisor to 8192,
+    # which no power of two from the step reaches.
+    sample = Sample(vocab=128256).resolved(npu2)
+    assert sample.domains(npu2)["chunk"] == (8016, 4008, 2004, 1002)
+    # Three octaves either side of 256, kept to multiples of 64.
+    add = ElementwiseAdd(size=1 << 16, num_aie_columns=8).resolved(npu2)
+    assert add.domains(npu2)["tile_size"] == (2048, 1024, 512, 256, 128, 64)
 
 
 def test_a_profile_refuses_a_derived_field():

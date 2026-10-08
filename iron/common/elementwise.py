@@ -35,6 +35,7 @@ from aie.utils.verify import Tolerance
 
 from .declare import (
     Direction,
+    Divisors,
     Extent,
     In,
     Operator,
@@ -481,7 +482,14 @@ class Elementwise(Operator):
 
     num_aie_columns: int = auto()
     num_channels: int = auto(1)
-    tile_size: int = auto()
+    tile_size: int = auto(
+        domain=Divisors(
+            of=lambda op: op.outputs[0].elements,
+            step=64,
+            cap=lambda op: op.tile_cap,
+            span=3,
+        )
+    )
 
     count = Value(
         np.int32,
