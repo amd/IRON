@@ -14,9 +14,10 @@ given and, for an xclbin chain, the packaging it was run under. Editing how a de
 reusing a stale time. A configure calibration is kept the same way, keyed
 on its pair's entries, and so are the twin a design was measured beside and
 the verdict on a width judged against its default, the entries of a design
-run alternating with its table's reference design, and a full ELF's pack of
-designs measured as one device. Reference and tolerance code is in no key:
-after editing one, measure again with ``remeasure``.
+run alternating with its table's reference design, a full ELF's pack of
+designs measured as one device, and a design's step at an operating point
+against its step at its call's own values. Reference and tolerance code is
+in no key: after editing one, measure again with ``remeasure``.
 """
 
 from __future__ import annotations
@@ -101,6 +102,26 @@ class Pairing:
 
 
 @dataclasses.dataclass(frozen=True)
+class Shift:
+    """A design at one operating point, run interleaved with itself at its
+    call's own values, as the cache holds it.
+
+    Attributes:
+        shift_us: How much longer a step there took.
+        round_us: That shift as each round measured it, both runs timed
+            in the round.
+        output: The sha256 of what a run there wrote.
+    """
+
+    shift_us: float
+    round_us: list[float]
+    output: str
+    pmode: str
+    calls: int
+    measured: str  # ISO date
+
+
+@dataclasses.dataclass(frozen=True)
 class Accuracy:
     """A width whose output is not its default's, judged against its
     reference by the default's gate and its own.
@@ -114,7 +135,7 @@ class Accuracy:
     measured: str  # ISO date
 
 
-Record = TypeVar("Record", Measurement, Calibration, Accuracy, Pairing, PackCost)
+Record = TypeVar("Record", Measurement, Calibration, Accuracy, Pairing, PackCost, Shift)
 
 
 class CostCache:
@@ -195,6 +216,15 @@ class CostCache:
         ).hexdigest()[:32]
 
     @staticmethod
+    def point_key(reference: str, entry: str) -> str:
+        """The entry the design at ``entry``, an operating point, is kept in
+        as run interleaved with itself at ``reference``.
+        """
+        return hashlib.sha256(repr(("point", reference, entry)).encode()).hexdigest()[
+            :32
+        ]
+
+    @staticmethod
     def judged_key(default: str, entry: str) -> str:
         """The entry the design at ``entry`` is kept in as judged against
         its default's, at ``default``.
@@ -218,7 +248,7 @@ class CostCache:
     def put(
         self,
         key: str,
-        record: Measurement | Calibration | Accuracy | Pairing | PackCost,
+        record: Measurement | Calibration | Accuracy | Pairing | PackCost | Shift,
     ) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         path = self.directory / f"{key}.json"

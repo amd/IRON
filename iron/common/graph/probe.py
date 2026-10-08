@@ -28,8 +28,13 @@ counted around the call: a chain of one design never switches.
 - ``measure_packs``: on a full ELF, designs sharing one device alternating
   with ``R`` against them grouped gives the pack's entry, and each member
   repeated on it its step there.
+- ``measure_points``: a design run at each of its call's operating points
+  (``Call.points``, where they write it different bound extents) against
+  as many steps at the call's own values, interleaved, gives its step at
+  each point (``StepCost.points``).
 - ``measure_graph``: every design of the versions it is given, each in a
-  ``Call`` of its version, then the calibrations, then each design's entry.
+  ``Call`` of its version, then its operating points, then the
+  calibrations, then each design's entry.
 - ``check_model``: a tuned version timed against the untuned one, each
   beside the model's prediction for it.
 
@@ -67,7 +72,7 @@ from ..design import OperatorDesign, device_symbol
 from ..image.callable import FullELFCallable, StepCallable
 from ..image.sequence import OperatorSequence
 from .compiled import CompiledGraph
-from .costcache import Accuracy, CostCache, Measurement, Pairing
+from .costcache import Accuracy, CostCache, Measurement, Pairing, Shift
 from .fold import Made, folded, foldings, replaced
 from .narrowing import (
     FIT_CACHE,
@@ -75,6 +80,7 @@ from .narrowing import (
     CostTable,
     JointNarrowing,
     PackCost,
+    PointCost,
     Runlist,
     StepCost,
     Variant,
@@ -723,33 +729,12 @@ def measure_steps(
     )
     known = held | measured
     reference = known[default.key].output
-    inexact = {v.key for v in found[1:] if known[v.key].output != reference}
-    judged = [
-        (v, e) for v, e in zip(found, entries) if v is default or v.key in inexact
+    judging = [
+        (v, e)
+        for v, e in zip(found, entries)
+        if v is default or known[v.key].output != reference
     ]
-    accurate = set()
-    for v, entry in judged if inexact else []:
-        key = None if cache is None else cache.judged_key(entries[0], entry)
-        verdict = None if key is None or remeasure else cache.get(key, Accuracy)
-        if verdict is None:
-            run = Standalone(
-                f"judge_{v.key}",
-                [v.op],
-                values={v.op: values or {}},
-                inputs={v.op: inputs or {}},
-                dispatch=table.dispatch,
-            )
-            run.digest()
-            verdict = judge(
-                default.op, v.op, run.inputs(), run.written(), values
-            ) or Accuracy(False, "not judged", CostTable.today())
-            del run
-            if key is not None:
-                cache.put(key, verdict)
-        if verdict.within:
-            accurate.add(v.key)
-        elif v is default:
-            break  # a default its own gate refuses admits no inexact width
+    accurate = judged(*zip(*judging), table.dispatch, values, inputs, cache, remeasure)
     # A width is priced at its partner's figure plus their difference in the
     # run that timed both, so a drift between that run and the partner's own
     # does not reach it.
@@ -783,6 +768,206 @@ def measure_steps(
                 )
         table.record_step(v.key, m.cost(reference, v.key in accurate, *priced[v.key]))
     return {key: table.steps[key] for key in measured}
+
+
+def judged(
+    found: Sequence[Variant],
+    entries: Sequence[str | None],
+    dispatch: str,
+    values: Mapping[str, int] | None = None,
+    inputs: Mapping[str, np.ndarray] | None = None,
+    cache: CostCache | None = None,
+    remeasure: bool = False,
+) -> set[str]:
+    """The settings of ``found`` that ``judge`` finds within their gates,
+    each run once at ``values`` on ``inputs``, packaged as ``dispatch``:
+    ``found[0]`` the default, each other one whose output is not the
+    default's; none where the default's own gate refuses it.
+
+    Args:
+        entries: Each setting's entry in `cache`, whose verdicts are taken
+            from it unless `remeasure`; those judged are written to it.
+    """
+    accurate: set[str] = set()
+    if len(found) < 2:
+        return accurate
+    default = found[0]
+    for v, entry in zip(found, entries):
+        key = None if cache is None else cache.judged_key(entries[0], entry)
+        verdict = None if key is None or remeasure else cache.get(key, Accuracy)
+        if verdict is None:
+            run = Standalone(
+                f"judge_{v.key}",
+                [v.op],
+                values={v.op: values or {}},
+                inputs={v.op: inputs or {}},
+                dispatch=dispatch,
+            )
+            run.digest()
+            verdict = judge(
+                default.op, v.op, run.inputs(), run.written(), values
+            ) or Accuracy(False, "not judged", CostTable.today())
+            del run
+            if key is not None:
+                cache.put(key, verdict)
+        if verdict.within:
+            accurate.add(v.key)
+        elif v is default:
+            break  # a default its own gate refuses admits no inexact width
+    return accurate
+
+
+# A round times each run at an operating point for about this long at most:
+# a long run's shift from its call's values dwarfs its noise.
+POINT_ROUND_S = 0.5
+
+
+def measure_points(
+    table: CostTable,
+    found: Sequence[Variant],
+    points: Mapping[str, tuple[float, Mapping[str, int]]],
+    values: Mapping[str, int] | None = None,
+    inputs: Mapping[str, np.ndarray] | None = None,
+    timing: Timing = Timing(),
+    repeats: int = 9,
+    cache: CostCache | None = None,
+    remeasure: bool = False,
+) -> list[str]:
+    """Measure into ``table`` each setting of ``found`` (the default first,
+    each in the table) at each of ``points``: ``repeats`` steps there against
+    as many at ``values``, interleaved, give how much longer a step there
+    takes than ``StepCost.t_step_us``, so a drift since that was measured
+    does not reach it. A setting whose output at a point is not the
+    default's there is judged there (``judged``). A setting not accurate at
+    ``values`` is left out: the tuner takes it nowhere.
+
+    Args:
+        points: Per label, the share of the calls priced that run there and
+            the per-call values `found` is written there (``Call.op_points``).
+        values: The per-call values its ``t_step_us`` is measured at.
+        inputs: What `found`'s input buffers hold, by buffer name.
+        timing: How long to time them; a round's runs take fewer calls
+            where they are long (``POINT_ROUND_S``).
+        cache: Points it holds are taken from it rather than run, unless
+            `remeasure`; those run are written to it.
+
+    Returns:
+        The points run on the device, each ``"key@label"``.
+
+    Raises:
+        ValueError: A setting is not in `table`, the points and the call's
+            values need more runs than the device's contexts hold, or
+            `cache` is for another power mode than the NPU's.
+    """
+    for v in found:
+        if v.key not in table.steps:
+            raise ValueError(f"{v.key} is not in the table")
+    if len(points) + 1 > CONTEXTS:
+        raise ValueError(f"{len(points)} points need more than {CONTEXTS} contexts")
+    mode = pmode()
+    if cache is not None and cache.mode != mode:
+        raise ValueError(f"the cost cache is for power mode {cache.mode}, not {mode}")
+    found = [v for v in found if table.steps[v.key].accurate]
+    labels = list(points)
+    # Each setting's entry at each point, and its shift's from its own.
+    entries: dict[tuple[str, str], str | None] = {}
+    kept: dict[tuple[str, str], str | None] = {}
+    shifts: dict[tuple[str, str], Shift] = {}
+    for v in found:
+        for label in labels:
+            if cache is None:
+                entries[v.key, label] = kept[v.key, label] = None
+                continue
+            entries[v.key, label] = cache.key(
+                v.resolved, points[label][1], inputs, table.dispatch
+            )
+            kept[v.key, label] = cache.point_key(
+                cache.key(v.resolved, values, inputs, table.dispatch),
+                entries[v.key, label],
+            )
+            held = None if remeasure else cache.get(kept[v.key, label], Shift)
+            if held is not None:
+                shifts[v.key, label] = held
+    todo = [v for v in found if any((v.key, l) not in shifts for l in labels)]
+    distinct = sum(b.nbytes for b in found[0].op.buffers) <= DISTINCT_BYTES
+    runs_each = len(labels) + 1
+    size = CONTEXTS // runs_each
+    ran = []
+    for begin in range(0, len(todo), size):
+        batch = todo[begin : begin + size]
+        runs = [
+            Standalone(
+                f"point{repeats}_{v.key}",
+                [v.op] * repeats,
+                values={v.op: at},
+                distinct=distinct,
+                inputs={v.op: inputs or {}},
+                dispatch=table.dispatch,
+            )
+            for v in batch
+            for at in [values or {}] + [points[label][1] for label in labels]
+        ]
+        outputs = [run.digest() for run in runs]
+        for run in runs:
+            run.callable()  # past the first run's setup
+        slowest = max(run.callable.last_elapsed for run in runs)
+        calls = max(1, min(timing.calls, int(POINT_ROUND_S / slowest)))
+        times = time_interleaved(
+            [run.callable for run in runs], dataclasses.replace(timing, calls=calls)
+        )
+        # A probe holds its context while it lives; the next batch needs them.
+        del runs
+        for i, v in enumerate(batch):
+            own = times[i * runs_each]
+            for j, label in enumerate(labels, 1):
+                there = times[i * runs_each + j]
+                shifts[v.key, label] = Shift(
+                    shift_us=(there.us - own.us) / repeats,
+                    # No run is stopped early, so their rounds pair.
+                    round_us=[
+                        (t - o) / repeats for o, t in zip(own.round_us, there.round_us)
+                    ],
+                    output=outputs[i * runs_each + j],
+                    pmode=mode,
+                    calls=calls,
+                    measured=CostTable.today(),
+                )
+                if cache is not None:
+                    cache.put(kept[v.key, label], shifts[v.key, label])
+                ran.append(f"{v.key}@{label}")
+    default = found[0]
+    costs: dict[str, dict[str, PointCost]] = {v.key: {} for v in found}
+    for label in labels:
+        weight, at = points[label]
+        reference = shifts[default.key, label].output
+        judging = [
+            v for v in found if v is default or shifts[v.key, label].output != reference
+        ]
+        accurate = judged(
+            judging,
+            [entries[v.key, label] for v in judging],
+            table.dispatch,
+            at,
+            inputs,
+            cache,
+            remeasure,
+        )
+        for v in found:
+            shift = shifts[v.key, label]
+            exact = shift.output == reference
+            costs[v.key][label] = PointCost(
+                weight=weight,
+                t_step_us=table.steps[v.key].t_step_us + shift.shift_us,
+                noise_us=standard_error(shift.round_us),
+                exact=exact,
+                accurate=exact or v.key in accurate,
+                calls=shift.calls,
+            )
+    for v in found:
+        table.record_step(
+            v.key, dataclasses.replace(table.steps[v.key], points=costs[v.key])
+        )
+    return ran
 
 
 # Past this many settings, a design's tunables are searched one at a time.
@@ -1037,18 +1222,34 @@ def measure_loads(
 
 
 @dataclasses.dataclass(frozen=True)
+class Point:
+    """A share of a version's calls, run at one set of its per-call values.
+
+    Attributes:
+        weight: The share; a call's points' weights sum to 1.
+        values: The graph's per-call values there, by name.
+    """
+
+    weight: float
+    values: Mapping[str, int]
+
+
+@dataclasses.dataclass(frozen=True)
 class Call:
     """One call of a traced graph version, as its designs are measured at:
     the graph's per-call values, and what any buffer whose contents a step's
     time follows holds, by graph buffer name. A graph ``folded`` from
     another names it in ``folded_from``: a design of its own is then priced
-    beside the one whose step it took.
+    beside the one whose step it took. ``points`` are the values the
+    version's calls run at, where they differ from call to call: a design
+    whose work they change is priced over them (``op_points``).
     """
 
     traced: TracedGraph
     values: Mapping[str, int] = dataclasses.field(default_factory=dict)
     contents: Mapping[str, np.ndarray] = dataclasses.field(default_factory=dict)
     folded_from: TracedGraph | None = None
+    points: Sequence[Point] = ()
 
     @classmethod
     def admitted(
@@ -1057,10 +1258,12 @@ class Call:
         dev,
         values: Mapping[str, int] | None = None,
         contents: Mapping[str, np.ndarray] | None = None,
+        points: Sequence[Point] = (),
     ) -> list[Call]:
         """The calls a version's tuning is priced by: ``traced`` with
-        ``values`` and ``contents``, then ``traced`` folded each way it folds
-        on ``dev`` (``foldings``) and with each of those folds alone.
+        ``values``, ``contents`` and ``points``, then ``traced`` folded each
+        way it folds on ``dev`` (``foldings``) and with each of those folds
+        alone.
         """
         values, contents = values or {}, contents or {}
         made = Made(dev)
@@ -1068,19 +1271,39 @@ class Call:
         for fold in dict.fromkeys(f for applied in ways for f in applied):
             trial, applied = folded(traced, dev, (fold,), made=made)
             ways.setdefault(frozenset(applied), (trial, applied))
-        return [cls(traced, values, contents)] + [
-            cls(trial, values, contents, traced)
+        return [cls(traced, values, contents, None, points)] + [
+            cls(trial, values, contents, traced, points)
             for trial, applied in ways.values()
             if applied
         ]
 
-    def op_values(self, op: Operator) -> dict[str, int]:
-        """The per-call values ``op`` is written in this call, by member name."""
+    def op_values(
+        self, op: Operator, values: Mapping[str, int] | None = None
+    ) -> dict[str, int]:
+        """The per-call values ``op`` is written in this call, or at the
+        graph's ``values``, by member name.
+        """
+        values = self.values if values is None else values
         return {
-            b.member.name: b.expression.evaluate(self.values)
+            b.member.name: b.expression.evaluate(values)
             for b in self.traced.bindings
             if b.op is op
         }
+
+    def op_points(self, op: Operator) -> dict[str, tuple[float, dict[str, int]]]:
+        """Where ``op``'s work differs over this call's ``points``: each set
+        of bound extents they write it, labelled (``"kv_valid=1024"``), with
+        the points' summed weight and the per-call values of the first.
+        Empty where every point writes it alike, as where it has no bound
+        extent: no other per-call value changes what it moves or computes.
+        """
+        out: dict[str, tuple[float, dict[str, int]]] = {}
+        for point in self.points:
+            values = self.op_values(op, point.values)
+            label = ",".join(f"{e}={values[e]}" for e in sorted(op.bound_extents))
+            weight, first = out.get(label, (0.0, values))
+            out[label] = (weight + point.weight, first)
+        return out if len(out) > 1 else {}
 
     def op_inputs(self, op: Operator) -> dict[str, np.ndarray]:
         """What ``op``'s buffers hold in this call, by ``op``'s buffer name."""
@@ -1100,7 +1323,8 @@ class Designs:
     its settings (``variants`` of it at its probe that the placer takes,
     ``fitting``), and for a design a folded call has of its own, the design
     whose step it took. ``versions`` are the graphs the calls are of, as
-    traced, and ``dev`` the device.
+    traced, and ``dev`` the device. ``points`` holds the operating points
+    of each design whose work its call's points change (``Call.op_points``).
     """
 
     first: dict[str, tuple[Operator, Call]]
@@ -1109,6 +1333,7 @@ class Designs:
     refused: dict[str, str]
     versions: tuple[TracedGraph, ...]
     dev: Device
+    points: dict[str, dict[str, tuple[float, dict[str, int]]]]
 
     @classmethod
     def of(cls, calls: Sequence[Call], dev, fit_cache: Path = FIT_CACHE) -> Designs:
@@ -1146,7 +1371,10 @@ class Designs:
         if not set(twin_of.values()) <= settings.keys():
             raise ValueError("a call is folded from a graph no call measures")
         versions = tuple(c.traced for c in calls if c.folded_from is None)
-        return cls(first, settings, twin_of, refused, versions, dev)
+        points = {
+            key: at for key, (op, call) in first.items() if (at := call.op_points(op))
+        }
+        return cls(first, settings, twin_of, refused, versions, dev, points)
 
     def stale(self, table: CostTable) -> list[str]:
         """The designs ``table`` holds that are no setting of these."""
@@ -1163,6 +1391,20 @@ class Designs:
             for vs in self.settings.values()
             for v in (vs if len(vs) <= EXHAUSTIVE else vs[:1])
             if v.key not in table.steps
+        ]
+
+    def unpointed(self, table: CostTable) -> list[str]:
+        """The operating points ``measure_points`` would run: each of a
+        design's ``points`` that a setting ``table`` holds accurate lacks,
+        ``"key@label"``.
+        """
+        return [
+            f"{v.key}@{label}"
+            for key, points in self.points.items()
+            for v in self.settings[key]
+            if v.key in table.steps and table.steps[v.key].accurate
+            for label in points
+            if label not in (table.steps[v.key].points or {})
         ]
 
     def calibrated(
@@ -1226,14 +1468,18 @@ class Designs:
 
     def missing(self, table: CostTable, pairs: Sequence[tuple[str, str]]) -> list[str]:
         """What ``measure_graph`` would run for ``table`` next, in its
-        return's terms: the ``unmeasured`` settings, else the calibrations
-        of ``pairs`` the table lacks (``"a|b"``), which are between measured
+        return's terms: the ``unmeasured`` settings, else the ``unpointed``
+        operating points (``"key@label"``), else the calibrations of
+        ``pairs`` the table lacks (``"a|b"``), which are between measured
         designs, else the ``unloaded`` settings (``"reference>key"``), else
         the ``unpacked`` packs (``CostTable.pack_name``).
         """
         designs = self.unmeasured(table)
         if designs:
             return designs
+        points = self.unpointed(table)
+        if points:
+            return points
         chosen = self.calibrated(table, pairs)
         calibrations = [
             f"{a.key}|{b.key}"
@@ -1260,7 +1506,8 @@ def measure_graph(
 ) -> list[str]:
     """Measure every design of ``calls``' graphs into ``table``, saved as it
     goes: each at the settings ``variants`` gives that ``search`` runs, in
-    the first call that runs it, then the configure cost between each of
+    the first call that runs it, then each accurate setting at its call's
+    operating points (``measure_points``), then the configure cost between each of
     ``pairs``, the first designs of those operator classes at their
     narrowest measured width, each other setting's entry beside the
     first of those (``measure_loads``), and on a full ELF the packs the
@@ -1274,9 +1521,9 @@ def measure_graph(
     (``measure_steps``' `twins`); the call it is folded from comes first.
 
     Returns:
-        The design keys, calibration pairs (``"a|b"``), entries
-        (``"reference>key"``) and packs (``CostTable.pack_name``) run on the
-        device.
+        The design keys, operating points (``"key@label"``), calibration
+        pairs (``"a|b"``), entries (``"reference>key"``) and packs
+        (``CostTable.pack_name``) run on the device.
 
     Raises:
         ValueError: ``pairs`` leave a calibrated design's entry undetermined:
@@ -1357,6 +1604,50 @@ def measure_graph(
                 f"alone {c.alone_us:8.2f} us  exact {c.exact}  accurate {c.accurate}"
                 + ("" if v.key in costs else "  (cached)")
             )
+
+    for key, (op, call) in designs.first.items():
+        points = designs.points.get(key, {})
+        settings = [v for v in found[key] if v.key in table.steps]
+        held = {v.key: table.steps[v.key].points or {} for v in settings}
+        if not points:
+            for v in settings:
+                if held[v.key]:
+                    table.record_step(
+                        v.key, dataclasses.replace(table.steps[v.key], points=None)
+                    )
+            continue
+        weights = {label: weight for label, (weight, _) in points.items()}
+        if not remeasure and all(
+            {label: p.weight for label, p in held[v.key].items()} == weights
+            for v in settings
+            if table.steps[v.key].accurate
+        ):
+            continue
+        name = type(op).__name__
+        log(
+            f"{name}: {len(points)} points of {len(settings)} settings, started "
+            f"{time.strftime('%H:%M:%S')}"
+        )
+        pointed = measure_points(
+            table,
+            settings,
+            points,
+            call.op_values(op),
+            call.op_inputs(op),
+            timing,
+            repeats,
+            cache,
+            remeasure,
+        )
+        ran += pointed
+        table.save()
+        for v in settings:
+            for label, p in (table.steps[v.key].points or {}).items():
+                log(
+                    f"    {dict(v.tunables)} at {label} ({p.weight:.3f}): t_step "
+                    f"{p.t_step_us:8.2f} us  exact {p.exact}  accurate {p.accurate}"
+                    + ("" if f"{v.key}@{label}" in pointed else "  (cached)")
+                )
 
     chosen = designs.calibrated(table, pairs)
     wanted = {f"{a.key}|{b.key}" for a, b in chosen}

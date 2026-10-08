@@ -29,12 +29,14 @@ from iron.common.graph.narrowing import (
     Variant,
     cost_key,
     fitting,
+    model_us,
     variants,
 )
 from iron.common.graph.probe import (
     CONTEXTS,
     Call,
     Designs,
+    Point,
     Standalone,
     Timing,
     check_model,
@@ -145,6 +147,62 @@ def test_a_value_derived_from_a_bound_extent_follows_the_call(tmp_path):
         [key] = {cost_key(s.op) for s in traced.steps}
         t_step[n] = table.steps[key].t_step_us
     assert t_step[2048] > 3 * t_step[64], t_step
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_design_following_the_context_is_priced_and_tuned_over_its_points(
+    tmp_path,
+):
+    # Strix Halo at 2 rounds of 10: RoPE over 64 rows steps in 12-14 us on
+    # one column or four, 22 us on eight; over 2048 rows in 204, 48 and 37 us.
+    # Its configure grows with its columns, so a call at 64 rows takes one
+    # column and one at 2048 four.
+    traced = Rotate().trace(x=(2048, 64), angles=(2048, 64))
+    [key] = {cost_key(s.op) for s in traced.steps}
+    report = platform()
+    cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    points = [Point(0.5, dict(n=64)), Point(0.5, dict(n=2048))]
+    calls = [
+        Call(traced, dict(n=64), points=points),
+        Call(Chain().trace(a=(SIZE,), b=(SIZE,))),
+    ]
+    timing = Timing(rounds=2, calls=10)
+    ran = measure_graph(table, calls, TRIANGLE, timing, cache=cache)
+    priced = {k: c for k, c in table.steps.items() if c.points}
+    assert key in priced and len(priced) > 1
+    for k, cost in priced.items():
+        near, far = (cost.points[f"valid={n},valid_angles={n}"] for n in (64, 2048))
+        assert all(f"{k}@{label}" in ran for label in cost.points)
+        # 64 rows is the call's own bound: its shift is noise beside 2048's.
+        assert (
+            abs(near.t_step_us - cost.t_step_us) < (far.t_step_us - cost.t_step_us) / 2
+        ), cost
+
+    tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
+    dev = aie_utils.ensure_current_device()
+    chosen = {}
+    for share in (0.0, 1.0):
+        for k, cost in priced.items():
+            weighted = {
+                label: dataclasses.replace(
+                    p, weight=share if "2048" in label else 1.0 - share
+                )
+                for label, p in cost.points.items()
+            }
+            table.record_step(k, dataclasses.replace(cost, points=weighted))
+        chosen[share] = tuner.tune(traced, dev, "fused").chosen[key]
+        assert chosen[share].key == min(
+            priced, key=lambda k: model_us(table, [key], chosen={key: k})[0]
+        )
+    columns = {s: v.resolved.num_aie_columns for s, v in chosen.items()}
+    assert columns[0.0] < columns[1.0], columns
+
+    again = CostTable(tmp_path / "again.json", "npu2", "fused")
+    assert measure_graph(again, calls, TRIANGLE, timing, cache=cache) == []
+    assert {k: c.points for k, c in again.steps.items()} == {
+        k: c.points for k, c in CostTable(table.path).steps.items()
+    }
 
 
 @pytest.mark.supported_devices("npu2")

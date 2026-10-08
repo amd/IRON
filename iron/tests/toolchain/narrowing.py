@@ -37,7 +37,7 @@ from iron.common.graph.narrowing import (
     model_us,
     variants,
 )
-from iron.common.graph.probe import Call, Designs, judge
+from iron.common.graph.probe import Call, Designs, Point, judge
 from iron.common.harness import vectors
 from iron.lm.layers import SwiGLU
 from iron.operators import (
@@ -807,6 +807,48 @@ def test_an_inexact_width_is_taken_only_if_accurate(accurate, tmp_path, npu2):
     assert tuning.chosen[key].key == (exact.key if accurate else default.key)
     assert tuning.inexact == ((key,) if accurate else ())
     assert ("not exact" in tuning.report()) == accurate
+
+
+def test_only_a_design_whose_bound_extents_move_is_priced_at_points(tmp_path, npu2):
+    traced = Rotate().trace(x=(2048, 64), angles=(2048, 64))
+    [rope] = [s.op for s in traced.steps]
+    points = [
+        Point(0.25, dict(n=16)),
+        Point(0.25, dict(n=16)),
+        Point(0.5, dict(n=2048)),
+    ]
+    call = Call(traced, dict(n=64), points=points)
+    found = call.op_points(rope)
+    assert {label: w for label, (w, _) in found.items()} == {
+        "valid=16,valid_angles=16": 0.5,
+        "valid=2048,valid_angles=2048": 0.5,
+    }
+    assert found["valid=16,valid_angles=16"][1]["valid"] == 16
+    alike = [Point(0.5, dict(n=64)), Point(0.5, dict(n=64))]
+    assert Call(traced, dict(n=64), points=alike).op_points(rope) == {}
+    add_silu = AddSilu().trace(a=(SIZE,), b=(SIZE,))
+    unbound = Call(add_silu, points=[Point(0.5, {}), Point(0.5, {})])
+    assert Designs.of([unbound], npu2).points == {}
+
+    designs = Designs.of([call], npu2)
+    key = cost_key(rope)
+    assert list(designs.points) == [key]
+    settings = designs.settings[key]
+    table = _table(
+        tmp_path / "costs.json",
+        {v.key: (4.0 + i, 10.0) for i, v in enumerate(settings)},
+    )
+    assert designs.missing(table, []) == [
+        f"{v.key}@{label}" for v in settings for label in found
+    ]
+    for v in settings:
+        cost = table.steps[v.key]
+        priced = {
+            label: PointCost(w, cost.t_step_us, 0.1, True, True, 50)
+            for label, (w, _) in found.items()
+        }
+        table.record_step(v.key, dataclasses.replace(cost, points=priced))
+    assert designs.unpointed(table) == []
 
 
 @pytest.mark.parametrize("weight", [0.0, 0.5])
