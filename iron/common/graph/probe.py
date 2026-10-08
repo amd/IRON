@@ -37,6 +37,7 @@ import statistics
 import subprocess
 import time
 from collections.abc import Callable, Hashable, Mapping, Sequence
+from pathlib import Path
 
 import aie.utils as aie_utils
 import numpy as np
@@ -52,12 +53,14 @@ from .compiled import CompiledGraph
 from .costcache import Accuracy, CostCache, Measurement
 from .fold import folded, replaced
 from .narrowing import (
+    FIT_CACHE,
     Calibration,
     CostTable,
     Runlist,
     StepCost,
     Variant,
     cost_key,
+    fitting,
     variants,
 )
 from .trace import TracedGraph
@@ -731,17 +734,23 @@ class Call:
 class Designs:
     """The designs of a set of calls as ``measure_graph`` measures them,
     without a device: each design's first operator and the call it runs in,
-    its settings (``variants``), and for a design a folded call has of its
-    own, the design whose step it took.
+    its settings (``variants`` the placer takes, ``fitting``), and for a
+    design a folded call has of its own, the design whose step it took.
     """
 
     first: dict[str, tuple[Operator, Call]]
     settings: dict[str, list[Variant]]
     twin_of: dict[str, str]
+    refused: dict[str, str]
 
     @classmethod
-    def of(cls, calls: Sequence[Call], dev) -> Designs:
+    def of(cls, calls: Sequence[Call], dev, fit_cache: Path = FIT_CACHE) -> Designs:
         """The designs of ``calls`` on ``dev``.
+
+        Args:
+            calls: The calls whose graphs are measured.
+            dev: The device.
+            fit_cache: Where the placer's verdicts persist.
 
         Raises:
             ValueError: A call is folded from a graph no call has.
@@ -761,12 +770,13 @@ class Designs:
                     twin_of.setdefault(cost_key(new, dev), cost_key(old, dev))
         # The tuner applies a setting to every operator of its design, so
         # one moves no tunable any of them pins (``JointNarrowing``).
-        settings = {
-            key: variants(op, dev, pinned[key]) for key, (op, _) in first.items()
-        }
+        settings, refused = {}, {}
+        for key, (op, _) in first.items():
+            settings[key], why = fitting(variants(op, dev, pinned[key]), fit_cache)
+            refused.update(why)
         if not set(twin_of.values()) <= settings.keys():
             raise ValueError("a call is folded from a graph no call measures")
-        return cls(first, settings, twin_of)
+        return cls(first, settings, twin_of, refused)
 
     def stale(self, table: CostTable) -> list[str]:
         """The designs ``table`` holds that are no setting of these."""
@@ -861,6 +871,9 @@ def measure_graph(
         del table.steps[k]
     if stale:
         log(f"dropped {len(stale)} designs the graphs no longer have")
+    for k, why in designs.refused.items():
+        first_line, _, _ = why.partition("\n")
+        log(f"not measured, the placer refuses {k}: {first_line}")
 
     ran = []
     for i, (key, (op, call)) in enumerate(designs.first.items()):

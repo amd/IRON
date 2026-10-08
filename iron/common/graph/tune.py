@@ -27,7 +27,7 @@ from pathlib import Path
 import aie.utils as aie_utils
 
 from ... import operators
-from .narrowing import CostTable, variants
+from .narrowing import CostTable, fitting, variants
 from .probe import Call, Timing, cost_cache, measure_graph, pmode, search
 
 
@@ -118,8 +118,11 @@ def main() -> None:
 
     dev = aie_utils.ensure_current_device()
     op = getattr(operators, args.operator)(**fields)
-    found = variants(op, dev)
+    found, refused = fitting(variants(op, dev))
     print(f"power mode: {pmode()}; {len(found)} settings")
+    for key, why in refused.items():
+        first_line, _, _ = why.partition("\n")
+        print(f"not measured, the placer refuses {key}: {first_line}")
     with tempfile.TemporaryDirectory() as scratch:
         table = CostTable(args.table or Path(scratch) / "costs.json")
         search(

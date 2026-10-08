@@ -27,6 +27,7 @@ from iron.common.graph.narrowing import (
     Runlist,
     StepCost,
     cost_key,
+    fitting,
     model_us,
     variants,
 )
@@ -358,6 +359,18 @@ def test_placer_verdicts_are_kept_across_tunings(tmp_path, npu2):
     assert len(list(fit_cache.iterdir())) > len(records)
     assert second.groups == first.groups
     assert {k: v.tunables for k, v in second.chosen.items()} != widths
+
+
+def test_a_setting_the_placer_refuses_alone_is_not_measured(tmp_path, npu2):
+    # 128x128 B tiles double-buffered beside A and C are past a core's
+    # memory at any column count; the default is kept for its build to say so.
+    gemm = GEMM(M=2048, K=2048, N=2048, tile_m=64, tile_k=128, tile_n=128)
+    found = variants(gemm, npu2)
+    kept, refused = fitting(found, tmp_path / "fits")
+    assert kept == found[:1]
+    assert refused.keys() == {v.key for v in found[1:]} and refused
+    assert all("could not be placed" in why for why in refused.values())
+    assert fitting(found, tmp_path / "fits") == (kept, refused)
 
 
 def _swiglu(tmp_path, dev, gate_us):

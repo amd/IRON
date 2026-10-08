@@ -48,7 +48,7 @@ import json
 import os
 import statistics
 from collections import Counter
-from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Hashable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -139,6 +139,62 @@ def variants(op: Operator, dev, pinned: frozenset[str] = frozenset()) -> list[Va
             continue
         out.append(variant)
     return out
+
+
+FIT_CACHE = Path(NPU_CACHE_HOME) / "iron" / "fits"
+
+
+def fit_verdict(
+    designs: Mapping[str, OperatorDesign], fit_cache: Path = FIT_CACHE
+) -> str | None:
+    """Why the placer refuses ``designs`` on one device, or None if they fit.
+
+    A design that cannot be generated is refused with the generator's error.
+    The verdict is kept under ``fit_cache``, keyed on the designs' recipes,
+    so it is reused exactly when the build would be.
+
+    Args:
+        designs: The designs, by the name each takes in the device.
+        fit_cache: Where the verdicts persist across processes.
+    """
+    h = hashlib.sha256(
+        repr(sorted(d.compilable().recipe_hash for d in designs.values())).encode()
+    )
+    record = fit_cache / h.hexdigest()[:24]
+    if record.exists():
+        verdict = record.read_text()
+    else:
+        texts, params = {}, {}
+        try:
+            for name, design in designs.items():
+                generated = generate(design)
+                texts[name] = str(generated.device)
+                params.update(generated.parameters)
+            diagnostic = fits(texts, parameters_preamble(params))
+        except ValueError as e:
+            diagnostic = str(e)
+        verdict = "fits" if diagnostic is None else f"refused: {diagnostic}"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        partial = record.with_suffix(f".{os.getpid()}")
+        partial.write_text(verdict)
+        partial.replace(record)
+    return None if verdict == "fits" else verdict.removeprefix("refused: ")
+
+
+def fitting(
+    found: Sequence[Variant], fit_cache: Path = FIT_CACHE
+) -> tuple[list[Variant], dict[str, str]]:
+    """The settings of ``found`` the placer takes alone on a device, the
+    default always among them, and why it refuses each other, by key.
+    """
+    kept, refused = [found[0]], {}
+    for v in found[1:]:
+        diagnostic = fit_verdict({v.key: OperatorDesign(v.resolved)}, fit_cache)
+        if diagnostic is None:
+            kept.append(v)
+        else:
+            refused[v.key] = diagnostic
+    return kept, refused
 
 
 def shim_budget(dev) -> tuple[int, int]:
@@ -518,9 +574,7 @@ class JointNarrowing:
     table: CostTable = dataclasses.field(compare=False)
     max_members: int = 8
     fit_attempts: int = 3
-    fit_cache: Path = dataclasses.field(
-        default=Path(NPU_CACHE_HOME) / "iron" / "fits", compare=False
-    )
+    fit_cache: Path = dataclasses.field(default=FIT_CACHE, compare=False)
 
     def tune(self, traced: TracedGraph, dev) -> Tuning:
         """Choose the folds, tunables and packs of ``traced`` for ``dev``.
@@ -786,30 +840,10 @@ class JointNarrowing:
     ) -> bool:
         key = tuple(sorted(v.key for v in combo))
         if key not in fitted:
-            designs = {v.key: OperatorDesign(v.resolved) for v in combo}
-            record = self._fit_record(designs.values())
-            if record.exists():
-                verdict = record.read_text()
-            else:
-                texts, params = {}, {}
-                for name, design in designs.items():
-                    generated = generate(design)
-                    texts[name] = str(generated.device)
-                    params.update(generated.parameters)
-                diagnostic = fits(texts, parameters_preamble(params))
-                verdict = "fits" if diagnostic is None else f"refused: {diagnostic}"
-                record.parent.mkdir(parents=True, exist_ok=True)
-                partial = record.with_suffix(f".{os.getpid()}")
-                partial.write_text(verdict)
-                partial.replace(record)
-            fitted[key] = verdict == "fits"
+            fitted[key] = (
+                fit_verdict(
+                    {v.key: OperatorDesign(v.resolved) for v in combo}, self.fit_cache
+                )
+                is None
+            )
         return fitted[key]
-
-    def _fit_record(self, designs: Iterable[OperatorDesign]) -> Path:
-        """The file holding the placer's verdict on ``designs``, keyed on
-        their recipes so a verdict is reused exactly when the build would be.
-        """
-        h = hashlib.sha256(
-            repr(sorted(d.compilable().recipe_hash for d in designs)).encode()
-        )
-        return self.fit_cache / h.hexdigest()[:24]
