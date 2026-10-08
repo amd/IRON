@@ -224,12 +224,12 @@ class VisionTower(SimpleNamespace):
         v = Transpose(v.reshape(T, H * D)).reshape(H, D, T)
         for i in range(H):
             scores = GEMM(q[i], k[i], b_col_maj=True, **ACCURATE)
-            weights = Softmax(scores, vector_size=n)
+            weights = Softmax(scores[:, :n])
             # weights @ v as (v^T @ weights^T)^T: N = T rather than D spans
             # every column. Over the head's queries, which the scores were
             # their last use of.
             GEMM(
-                v[i],
+                v[i, :, :n],
                 weights,
                 q[i],
                 b_col_maj=True,
