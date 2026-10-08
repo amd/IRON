@@ -45,6 +45,15 @@ def parser(description: str, table: Path | None) -> argparse.ArgumentParser:
     p.add_argument("--rounds", type=int, default=8)
     p.add_argument("--calls", type=int, default=50)
     p.add_argument(
+        "--cutoff",
+        type=float,
+        default=Timing.cutoff,
+        help="a setting this many times the fastest's run time is timed no "
+        f"further after --settle rounds; inf times every round (default: "
+        f"{Timing.cutoff})",
+    )
+    p.add_argument("--settle", type=int, default=Timing.settle)
+    p.add_argument(
         "--repeats",
         type=int,
         default=9,
@@ -71,7 +80,7 @@ def measure(
         CostTable(args.table),
         calls,
         pairs,
-        Timing(args.rounds, args.calls),
+        Timing(args.rounds, args.calls, args.settle, args.cutoff),
         args.repeats,
         args.remeasure,
     )
@@ -115,7 +124,7 @@ def main() -> None:
         search(
             table,
             found,
-            Timing(args.rounds, args.calls),
+            Timing(args.rounds, args.calls, args.settle, args.cutoff),
             args.repeats,
             values,
             None,

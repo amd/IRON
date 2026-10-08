@@ -24,17 +24,19 @@ entries are odd, and each step's ``t_step``.
   beside the model's prediction for it.
 
 Figures are medians of per-round medians, interleaved, of the run alone (the
-callable's ``last_elapsed``); nothing else may dispatch meanwhile.
+callable's ``last_elapsed``), a setting far behind the fastest over fewer
+rounds (``Timing``); nothing else may dispatch meanwhile.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import hashlib
+import math
 import statistics
 import subprocess
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 
 import aie.utils as aie_utils
 import numpy as np
@@ -63,10 +65,25 @@ from .trace import TracedGraph
 
 @dataclasses.dataclass(frozen=True)
 class Timing:
-    """How long to measure: ``rounds`` interleaved rounds of ``calls`` runs."""
+    """How long to measure: ``rounds`` interleaved rounds of ``calls`` runs.
+
+    Where the runs are settings of one design, a setting whose runs take
+    more than ``cutoff`` times the fastest setting's once ``settle`` rounds
+    are in is timed no further, its figure those rounds'.
+    """
 
     rounds: int = 8
     calls: int = 50
+    settle: int = 2
+    cutoff: float = 1.5
+
+
+@dataclasses.dataclass(frozen=True)
+class Timed:
+    """A run's median of per-round medians, microseconds, over ``rounds``."""
+
+    us: float
+    rounds: int
 
 
 def platform() -> dict[str, str]:
@@ -290,20 +307,43 @@ def judge(
 
 
 def time_interleaved(
-    runs: Sequence[FullELFCallable | StepCallable], timing: Timing
-) -> list[float]:
-    """Each loaded image's median of per-round medians, microseconds."""
+    runs: Sequence[FullELFCallable | StepCallable],
+    timing: Timing,
+    groups: Sequence[Hashable | None] = (),
+    fastest: float = math.inf,
+) -> list[Timed]:
+    """Each loaded image's median of per-round medians, microseconds.
+
+    Args:
+        groups: Per run, the setting it measures, where the runs are
+            settings of one design; a setting is timed no further once its
+            slowest run is past ``timing.cutoff`` times the fastest
+            setting's (``Timing``). None marks a run never stopped. Every
+            run is timed every round if not given.
+        fastest: The slowest run of the fastest setting timed before these.
+    """
     for run in runs:
         run()  # warm: first-run setup lands on nobody's figure
     medians: list[list[float]] = [[] for _ in runs]
-    for _ in range(timing.rounds):
+    live = set(range(len(runs)))
+    for r in range(timing.rounds):
         for i, run in enumerate(runs):
+            if i not in live:
+                continue
             times = []
             for _ in range(timing.calls):
                 run()
                 times.append(run.last_elapsed)
             medians[i].append(statistics.median(times) * 1e6)
-    return [statistics.median(m) for m in medians]
+        if not groups or r + 1 < timing.settle:
+            continue
+        slowest: dict[Hashable, float] = {}
+        for i in live:
+            us = statistics.median(medians[i])
+            slowest[groups[i]] = max(slowest.get(groups[i], 0.0), us)
+        bar = timing.cutoff * min([fastest, *slowest.values()])
+        live = {i for i in live if groups[i] is None or slowest[groups[i]] <= bar}
+    return [Timed(statistics.median(m), len(m)) for m in medians]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -366,7 +406,7 @@ def check_model(
     for version in (tuned, untuned):
         version(*tensors, **(values or {}))
     measured, baseline = time_interleaved([tuned.callable, untuned.callable], timing)
-    return ModelCheck(tuning.predicted_us, measured, tuning.baseline_us, baseline)
+    return ModelCheck(tuning.predicted_us, measured.us, tuning.baseline_us, baseline.us)
 
 
 # The device contexts the driver holds at once; each run timed keeps one.
@@ -441,14 +481,18 @@ def measure_steps(
         for v, e, t, b in zip(found, entries, twins, besides)
         if v.key not in held
     ]
-    distinct = sum(b.nbytes for b in found[0].op.buffers) <= DISTINCT_BYTES
+    default = found[0]
+    distinct = sum(b.nbytes for b in default.op.buffers) <= DISTINCT_BYTES
     measured: dict[str, Measurement] = {}
+    fastest = math.inf
     size = CONTEXTS // (4 if any(twins) else 2)
     for begin in range(0, len(todo), size):
         batch = todo[begin : begin + size]
         runs = [(v, e, v.key) for v, e, _, _ in batch] + [
             (t, b, v.key) for v, _, t, b in batch if t is not None
         ]
+        # The default is the untuned graph's figure: always timed in full.
+        groups = [None if of == default.key else of for _, _, of in runs] * 2
         short = [
             Standalone(f"probe1_{d.key}", [d.op], values=values, inputs=inputs)
             for d, _, _ in runs
@@ -464,29 +508,33 @@ def measure_steps(
             for d, _, _ in runs
         ]
         outputs = [run.digest() for run in short]
-        times = time_interleaved([r.callable for r in short + long], timing)
+        times = time_interleaved(
+            [r.callable for r in short + long], timing, groups, fastest
+        )
         n = len(runs)
+        slowest: dict[str, float] = {}
         for i, (d, entry, of) in enumerate(runs):
-            t_step = (times[n + i] - times[i]) / (repeats - 1)
+            t_step = (times[n + i].us - times[i].us) / (repeats - 1)
             m = Measurement(
                 t_step_us=t_step,
-                alone_us=times[i] - t_step,
+                alone_us=times[i].us - t_step,
                 output=outputs[i],
                 pmode=mode,
-                rounds=timing.rounds,
+                rounds=times[n + i].rounds,
                 calls=timing.calls,
                 measured=CostTable.today(),
             )
+            slowest[of] = max(slowest.get(of, 0.0), times[n + i].us)
             if i < len(batch):
                 measured[of] = m
             else:
                 near[of] = m
             if cache is not None:
                 cache.put(entry, m)
+        fastest = min(fastest, *slowest.values())
         # A probe holds its context while it lives; the next batch needs them.
         del short, long
     known = held | measured
-    default = found[0]
     reference = known[default.key].output
     inexact = {v.key for v in found[1:] if known[v.key].output != reference}
     judged = [
@@ -606,8 +654,8 @@ def calibrate(
         Standalone(f"cal_a_{tag}", [a], values=values),
         Standalone(f"cal_b_{tag}", [b], values=values),
     ]
-    alt, grp, pack, alone_a, alone_b = time_interleaved(
-        [r.callable for r in runs], timing
+    alt, grp, pack, alone_a, alone_b = (
+        t.us for t in time_interleaved([r.callable for r in runs], timing)
     )
     switch = (alt - grp) / (2 * pairs - 2)  # (E(a) + E(b)) / 2
     dispatch = grp - pairs * (ta + tb) - 2 * switch

@@ -7,6 +7,8 @@ tuned image run against the untuned one, bit for bit. The model and the
 search are checked without a device (``iron/tests/toolchain/narrowing.py``).
 """
 
+import dataclasses
+import math
 import os
 import re
 import subprocess
@@ -41,7 +43,15 @@ from iron.common.graph.probe import (
 )
 from iron.common.image import Fusion
 from iron.lm.layers import SwiGLU
-from iron.operators import GEMM, MHA, ElementwiseAdd, ElementwiseMul, SiLU, Softmax
+from iron.operators import (
+    GEMM,
+    GEMV,
+    MHA,
+    ElementwiseAdd,
+    ElementwiseMul,
+    SiLU,
+    Softmax,
+)
 
 SIZE = 8192
 TILE = 256
@@ -151,6 +161,36 @@ def test_measures_more_widths_than_one_batch_of_contexts(tmp_path):
         values={"length": 200, "valid_cols": 200},
     )
     assert len(costs) == len(found) and all(c.exact for c in costs.values())
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_setting_far_behind_the_fastest_is_timed_no_further(tmp_path):
+    # GEMV at one column is several times its widest's step.
+    found = variants(GEMV(M=2048, K=2048), aie_utils.ensure_current_device())
+    timing = Timing(rounds=4, calls=10, settle=1)
+    cut = CostTable(tmp_path / "cut.json")
+    measure_steps(cut, found, timing)
+    full = CostTable(tmp_path / "full.json")
+    measure_steps(full, found, dataclasses.replace(timing, cutoff=math.inf))
+    assert all(full.steps[v.key].rounds == timing.rounds for v in found)
+    stopped = {v.key for v in found if cut.steps[v.key].rounds < timing.rounds}
+    assert stopped and found[0].key not in stopped
+    # Timed in full, what was stopped is still well behind the fastest.
+    best = min(full.steps[v.key].t_step_us for v in found)
+    assert all(full.steps[key].t_step_us > 1.2 * best for key in stopped)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_batch_whose_every_setting_is_stopped_is_measured(tmp_path):
+    # At cutoff 0 all but the default stop after settling; a later batch has no default.
+    op = Masked().trace(x=(256, 256)).steps[0].op
+    found = variants(op, aie_utils.ensure_current_device())
+    assert len(found) > CONTEXTS // 2
+    timing = Timing(rounds=2, calls=5, settle=1, cutoff=0.0)
+    table = CostTable(tmp_path / "costs.json")
+    measure_steps(table, found, timing, values={"length": 200, "valid_cols": 200})
+    rounds = [table.steps[v.key].rounds for v in found]
+    assert rounds == [timing.rounds] + [timing.settle] * (len(found) - 1)
 
 
 @pytest.mark.supported_devices("npu2")
