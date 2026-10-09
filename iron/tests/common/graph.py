@@ -803,7 +803,7 @@ def test_words_with_an_offset_share_by_ratio_and_offset(npu2):
     t = G().trace(x=(64, 512), y=(64, 512))
     alone, _ = _words(t)
     words, shared = _words(t, share=True)
-    assert len(words) == 4
+    assert len(words) == 2
     assert sorted(set(shared.values())) == [
         "graph_p_x1d4p1d4_int32",
         "graph_p_x512p512_int32",
@@ -998,8 +998,8 @@ def test_words_that_always_hold_one_number_share_it(npu2):
     """On a full ELF, two designs bound to one graph value write one word
     for each ratio of it they read (their extents; the tiles per lane of
     each operand), and every symbol that shares a word reads its own value
-    there. A derivation the library cannot see through (``count``) keeps
-    its own word.
+    there. A derivation the library sees through (``count``, a ceiling
+    division) shares the word of the ratio it computes.
     """
 
     class G(iron.Graph):
@@ -1011,7 +1011,7 @@ def test_words_that_always_hold_one_number_share_it(npu2):
     t = g.trace(x=(64, 512), y=(64, 512))
     alone, _ = _words(t)
     words, shared = _words(t, share=True)
-    assert len(alone) == 10 and len(words) == 4
+    assert len(alone) == 10 and len(words) == 2
     assert sorted(set(shared.values())) == ["graph_n_x1d4_int32", "graph_n_x512_int32"]
     for n in (1, 16, 64):
         mine = {w.symbol: w({"n": n}) for w in words}
