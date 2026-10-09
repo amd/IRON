@@ -306,6 +306,8 @@ class Standalone:
             from theirs.
         inputs: Per operator, input buffers by name, where random bytes
             would not be representative (a draw row's temperature and top-k).
+        load: Write the per-call values now; with `False` the image is built
+            and seeded, and `load()` writes them.
     """
 
     def __init__(
@@ -318,6 +320,7 @@ class Standalone:
         distinct: bool = True,
         inputs: Mapping[Operator, Mapping[str, np.ndarray]] | None = None,
         dispatch: str = "fused",
+        load: bool = True,
     ):
         self.steps = list(runlist)
         values, inputs = values or {}, inputs or {}
@@ -368,15 +371,22 @@ class Standalone:
         artifacts = self.sequence.artifacts
         # An extent read only through its derivations has no word in a full
         # ELF; an xclbin chain has no parameter table, its values dispatch-time.
-        symbols = {
+        self._symbols = {
             device_symbol(op, v): np.int32(self._value(op, self._values[op], v))
             for op in ops
             for v in op.values
             if artifacts.kind == "xclbin"
             or device_symbol(op, v) in artifacts.parameters
         }
-        if symbols:
-            self.callable.write_values(symbols)
+        if load:
+            self.load()
+
+    def load(self) -> None:
+        """Write the per-call values, which loads a full ELF that holds any;
+        any other image is loaded by its first run.
+        """
+        if self._symbols:
+            self.callable.write_values(self._symbols)
 
     @staticmethod
     def _value(op: Operator, values: Mapping[str, int], v: BoundValue) -> int:
@@ -754,6 +764,7 @@ def measure_steps(
                     values={d.op: values or {}},
                     inputs={d.op: inputs or {}},
                     dispatch=table.dispatch,
+                    load=False,
                 )
                 many = Standalone(
                     f"probe{repeats}_{d.key}",
@@ -762,6 +773,7 @@ def measure_steps(
                     distinct=distinct,
                     inputs={d.op: inputs or {}},
                     dispatch=table.dispatch,
+                    load=False,
                 )
             except RuntimeError as e:
                 # The placer passed it, but the build did not. The default
@@ -772,6 +784,9 @@ def measure_steps(
                 refuse({d.key: OperatorDesign(d.resolved)}, str(e), fit_cache)
                 log(f"{dict(d.tunables)} does not build, not measured: {e}")
                 continue
+            # A load that fails is the device's state, not a verdict on the design.
+            one.load()
+            many.load()
             designs.append(d)
             short.append(one)
             long.append(many)
