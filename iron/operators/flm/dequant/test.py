@@ -68,7 +68,7 @@ def random_q4nx(K, N, seed=0):
 def _check(op, blob, expected, label, record=None):
     errors, _, _ = run_test(
         op,
-        {"in": blob},
+        {"qw": blob},
         {"out": expected},
         tolerance=Tolerance.exact(),
         record=record,
