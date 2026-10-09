@@ -19,6 +19,7 @@ from functools import cache
 from pathlib import Path
 
 import numpy as np
+from aie.iron.kernels.datamovement import limbs_f32_split
 from aie.utils import bfp, config
 from ml_dtypes import bfloat16
 
@@ -58,15 +59,7 @@ def fmul(a, b):
     for a few inputs.
     """
     a, b = np.broadcast_arrays(np.asarray(a, np.float64), np.asarray(b, np.float64))
-
-    def limbs(v):
-        v = f32(v)
-        l0 = rb(v, "rne")
-        r = f32(v - l0)
-        l1 = rb(r, "rne")
-        return [l0, l1, rb(f32(r - l1), "rne")]
-
-    A, B = limbs(a), limbs(b)
+    A, B = ([l.astype(np.float32) for l in limbs_f32_split(v)] for v in (a, b))
     acc = None
     for i, j in (
         (0, 0),
