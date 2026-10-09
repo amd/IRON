@@ -43,7 +43,6 @@ from iron.operators.flm.q4nx import (
     packed_bytes,
 )
 
-BFP16_GROUP_BYTES = 9
 # Out-features one run of code bytes spans.
 PARALLEL = 16
 
@@ -275,10 +274,6 @@ class DequantBFP(Operator):
         return workers
 
     # -- host-side sizes ---------------------------------------------------------
-
-    def packed_size(self) -> int:
-        """Bytes the operator writes: 9 per 8 values."""
-        return self.K * self.N // BFP16_GROUP * BFP16_GROUP_BYTES
 
     def quantized_size(self) -> int:
         """Bytes of q4nx input, counting any interleave gap it strides over."""

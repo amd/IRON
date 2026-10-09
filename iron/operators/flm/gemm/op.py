@@ -94,7 +94,7 @@ from iron.operators.flm.gemm.design import (
     l1_budget,
     rtp_layout,
 )
-from iron.operators.flm.packing import pack_b, packed_b_size
+from iron.operators.flm.packing import pack_b
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.silu import SiLU
 
@@ -1213,10 +1213,6 @@ class GEMM(Operator):
             round_conv_even=t.rounding is Rounding.CONV_EVEN,
             overlay_order=t.b_overlay_order,
         )
-
-    def packed_B_size(self, K, N):
-        """Elements (bf16) or bytes (bfp16ebs8) that ``pack_B`` returns."""
-        return packed_b_size(K, N, bool(self._tuned.bfp16_b))
 
     def ops(self) -> int:
         return 2 * self.M * self.K * self.N
