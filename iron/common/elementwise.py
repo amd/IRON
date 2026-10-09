@@ -880,7 +880,6 @@ class Rowwise(Elementwise):
     rows: int = param()
     valid = Extent(rows)
     tile_size: int = param()
-    num_aie_columns: int = auto(1)
 
     tile_cap: ClassVar[int] = 8192
 
@@ -888,13 +887,13 @@ class Rowwise(Elementwise):
         rows,
         tile_size,
         tile=(tile_size,),
-        per=(num_aie_columns, Elementwise.num_channels),
+        per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     y = Out(
         rows,
         tile_size,
         tile=(tile_size,),
-        per=(num_aie_columns, Elementwise.num_channels),
+        per=(Elementwise.num_aie_columns, Elementwise.num_channels),
         finish=True,
     )
 
