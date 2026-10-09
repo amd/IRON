@@ -7,8 +7,10 @@ import numpy as np
 import pytest
 from aie.iron.device import NPU1, NPU2, NPU1Col1, NPU2Col1, from_name
 
+import iron
 from iron.common.graph import TracedGraph, Value
 from iron.common.image.packaging import ELF, XCLBIN, each_step, full_elf, plan
+from iron.operators.flm.gemm.shipped import Shipped
 
 
 def _traced(*values):
@@ -84,6 +86,17 @@ def test_arguments_are_checked():
         plan(NPU2(), _traced(), image="pdi")
     with pytest.raises(ValueError, match="boundaries must be"):
         plan(NPU2(), _traced(), boundaries=8)
+
+
+def test_a_shipped_image_in_a_graph_is_refused(npu2):
+    class Shipping(iron.Graph):
+        def body(self, a, b):
+            return Shipped(a, b)
+
+    traced = Shipping().trace(a=(256, 1024), b=(1024, 1152))
+    for boundaries in (None, each_step):
+        with pytest.raises(ValueError, match=r"Shipped \(flm_mm_.*OperatorImage"):
+            plan(npu2, traced, boundaries=boundaries)
 
 
 def test_report_reads_as_one_block():

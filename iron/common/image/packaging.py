@@ -51,6 +51,15 @@ def plan(dev, traced, boundaries=None, image: str | None = None) -> Plan:
         raise ValueError(f"image must be {ELF!r} or {XCLBIN!r}, got {image!r}")
     if boundaries not in (None, each_step):
         raise ValueError(f"boundaries must be None or each_step, got {boundaries!r}")
+    shipped = [op for op in traced.operators if op.external is not None]
+    if shipped:
+        names = ", ".join(
+            f"{type(op).__name__} ({op.external.filename})" for op in shipped
+        )
+        raise ValueError(
+            f"{traced.name}: {names} runs a shipped image, which no graph image "
+            f"builds; run it on its own with OperatorImage(op)"
+        )
 
     forced: list[str] = []
     dispatch_values = [v for v in traced.values if v.kind == "dispatch"]
