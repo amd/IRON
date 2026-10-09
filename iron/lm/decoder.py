@@ -230,11 +230,13 @@ class CausalLM(iron.Graph):
             tuner: Folds, narrows and packs each version's designs by cost.
             boundaries: Both versions' packaging.
         """
-        decode = self.compile(coresident=tuner, boundaries=boundaries, **self.shapes(1))
+        decode = self.compile(
+            coresident=tuner, boundaries=boundaries, link=False, **self.shapes(1)
+        )
         if decode.plan.image != iron.ELF:
             print(decode.plan.report("decode"), flush=True)
         if not MHA.fits(aie_utils.ensure_current_device()):
-            decode.load(release=release)
+            decode.link().load(release=release)
             self._prompt, self._decode = None, decode
             return self
         feeds = decode if decode.emit is not None else None
@@ -242,8 +244,10 @@ class CausalLM(iron.Graph):
             feeds=feeds,
             coresident=tuner,
             boundaries=boundaries,
+            link=False,
             **self.shapes(self.config.prefill_chunk),
         )
+        self.link()
         for version in (decode, prompt):
             version.load(release=release)
         self._prompt, self._decode = prompt, decode

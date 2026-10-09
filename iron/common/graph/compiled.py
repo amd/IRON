@@ -14,7 +14,9 @@ import contextlib
 import dataclasses
 import functools
 import inspect
+import os
 from collections.abc import Callable, Collection, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,7 +33,7 @@ from ..declare.operator import _ExtentWord
 from ..declare.profile import Profile
 from ..design import device_symbol
 from ..image.allocator import ArenaPlan
-from ..image.artifacts import Parameter
+from ..image.artifacts import Artifacts, Parameter
 from ..image.callable import FullELFCallable, FullELFRun, ScratchArena
 from ..image.coresidence import AdjacentPacking
 from ..image.packaging import ELF, Plan, plan
@@ -57,6 +59,9 @@ def _shape_and_dtype(spec):
 
 
 UPLOAD_PIECE = 64 * 2**20
+# What one concurrent link may take: aiecc peaks near 1 GB on EmbeddingGemma 2's
+# longest text version.
+LINK_BYTES = 2 << 30
 
 
 def _store(
@@ -314,12 +319,15 @@ class Graph:
         feeds: CompiledGraph | None = None,
         coresident: AdjacentPacking | JointNarrowing | None = None,
         fold: bool | Collection[Folding] = False,
+        link: bool = True,
         **shapes,
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
 
         Compile every version before the first call where you can: one placed
-        after the arena's buffer exists grows it, which copies it once.
+        after the arena's buffer exists grows it, which copies it once. With
+        ``link=False`` the version is laid out but not built, and ``link()``
+        builds every such version at once.
 
         Args:
             dev: The device to bind, else the current one.
@@ -337,6 +345,7 @@ class Graph:
                 can write in its place (``iron.common.graph.fold``),
                 whatever it costs; or those folds alone, as a tuning's
                 ``folds`` name them.
+            link: Build the image now; else leave it to ``link()``.
             **shapes: Each input's shape, or ``(shape, dtype)``.
         """
         if dev is not None:
@@ -382,8 +391,11 @@ class Graph:
                     f"{self.name}: feeds= takes a full-ELF version of this "
                     f"graph, got {feeds!r}"
                 )
+            elif feeds.sized is not None:
+                # Its link checks that its image reads every word it was sized for.
+                slots = len(feeds.sized)
             else:
-                slots = len(feeds.parameters)
+                slots = len(feeds.link().parameters)
             assert self._carry is not None
             emit = attach_emit(traced, self._carried, self._carry, slots)
         elif feeds is not None:
@@ -399,17 +411,34 @@ class Graph:
             emit=emit,
             coresident=groups,
             tuning=tuning,
+            sized=sized,
         )
-        if sized is not None and len(version.parameters) != len(sized):
-            read = {p.name for p in version.parameters}
-            raise NotImplementedError(
-                f"{self.name}: the image reads {len(version.parameters)} of the "
-                f"{len(sized)} words its Emit was sized for; a word it reads only "
-                f"through a derivation cannot be fed yet (sized for but not "
-                f"read: {sorted(w.symbol for w in sized if w.symbol not in read)})"
-            )
+        if link:
+            version.link()
         self._versions[signature] = version
         return version
+
+    def link(self, jobs: int | None = None) -> None:
+        """Build every version compiled with ``link=False``, concurrently.
+
+        Args:
+            jobs: How many to build at once; by default as many as the
+                available memory holds.
+        """
+        pending = [v for v in self._versions.values() if not v.is_linked]
+        if not pending:
+            return
+        if jobs is None:
+            with open("/proc/meminfo") as meminfo:
+                available = next(
+                    int(line.split()[1]) * 1024
+                    for line in meminfo
+                    if line.startswith("MemAvailable:")
+                )
+            jobs = max(1, min(os.cpu_count() or 1, available // LINK_BYTES))
+        with ThreadPoolExecutor(min(jobs, len(pending))) as pool:
+            for built in [pool.submit(v.link) for v in pending]:
+                built.result()
 
     def _given(self, tensors) -> dict[str, Any]:
         if len(tensors) > len(self._inputs):
@@ -437,6 +466,8 @@ class Graph:
             }
             print(f"{self.name}: compiling for {shapes}")
             version = self.compile(**shapes)
+        elif not version.is_linked:
+            self.link()
         return version(*given.values(), **values)
 
     def reference(self, *tensors, **values) -> Any:
@@ -475,12 +506,16 @@ class CompiledGraph:
         emit: EmitSite | None = None,
         coresident: AdjacentPacking | list[list[Operator]] | None = None,
         tuning: Tuning | None = None,
+        sized: list[Word] | None = None,
     ):
         self.traced = traced
         self.plan = plan
         self.arena = arena
         self.tuning = tuning
         self.emit = emit
+        self.record = record
+        # The words an Emit feeding this version was sized for.
+        self.sized = sized
         self.words, self.shared = _words(
             traced, share=plan.dispatch == "fused", extents=plan.image != ELF
         )
@@ -491,18 +526,48 @@ class CompiledGraph:
             placement["coresident"] = coresident
         self.sequence = traced.sequence(
             dispatch=plan.dispatch, shared_words=self.shared, **placement
-        ).compile(record=record)
-        self.image = self.sequence.image
-        self.artifacts = self.sequence.artifacts
+        )
+        self.sequence.prepare()
+        self.image = None
+        self.is_linked = False
+        self._callable = None
+        self._addressed: dict[str, tuple[Any, int]] = {}
+        # Shared with the arena when there is one: its weights are every image's.
+        self._loaded: set = set() if arena is None else arena.loaded
+
+    def link(self) -> CompiledGraph:
+        """Build the image, once.
+
+        Raises:
+            NotImplementedError: The image reads fewer words than the Emit
+                feeding it was sized for.
+        """
+        if self.is_linked:
+            return self
+        self.sequence.link()
+        if self.record == "disk":
+            self.artifacts.dump()
         if self.artifacts.kind == "elf":
             # An extent read only through its derivations has no word.
             self.words = [
                 w for w in self.words if w.symbol in self.artifacts.parameters
             ]
-        self._callable = None
-        self._addressed: dict[str, tuple[Any, int]] = {}
-        # Shared with the arena when there is one: its weights are every image's.
-        self._loaded: set = set() if arena is None else arena.loaded
+        sized = self.sized
+        if sized is not None and len(self.parameters) != len(sized):
+            read = {p.name for p in self.parameters}
+            raise NotImplementedError(
+                f"{self.traced.name}: the image reads {len(self.parameters)} of "
+                f"the {len(sized)} words its Emit was sized for; a word it reads "
+                f"only through a derivation cannot be fed yet (sized for but not "
+                f"read: {sorted(w.symbol for w in sized if w.symbol not in read)})"
+            )
+        self.image = self.sequence.image
+        self.is_linked = True
+        return self
+
+    @property
+    def artifacts(self) -> Artifacts:
+        return self.sequence.artifacts
 
     @property
     def callable(self):

@@ -118,6 +118,47 @@ def test_prefill_graph_builds_a_full_elf_with_its_value_in_the_table():
     )
 
 
+def test_a_prompt_fed_by_an_unlinked_decode_is_sized_by_its_words():
+    from iron.tests.common.llama_model import small
+
+    model = small(max_seq_len=256)
+    decode = model.compile(image=iron.ELF, link=False, **model.shapes(1))
+    prompt = model.compile(
+        feeds=decode,
+        image=iron.ELF,
+        link=False,
+        **model.shapes(model.config.prefill_chunk),
+    )
+    assert not decode.is_linked and not prompt.is_linked
+    model.link()
+    assert prompt.emit.slots == len(decode.parameters)
+    for version in (decode, prompt):
+        _assert_values_in_table(version)
+
+
+def test_versions_linked_together_each_build_their_own_image():
+    K, N = 512, 512
+
+    class Project(iron.Graph):
+        def __init__(self):
+            self.w = np.zeros((K, N), dtype=bfloat16)
+
+        def body(self, x):
+            return GEMM(x, self.w)
+
+    graph = Project()
+    rows = (256, 512, 1024)
+    versions = [
+        graph.compile(DEVICES["npu2"](), image=iron.ELF, link=False, x=(M, K))
+        for M in rows
+    ]
+    graph.link(jobs=2)
+    for M, version in zip(rows, versions):
+        assert version.is_linked and Path(version.image).stat().st_size > 0
+        assert version.artifacts.buffers["x"][2] == M * K * 2
+    assert len({version.image for version in versions}) == len(rows)
+
+
 def test_a_cached_build_leaves_no_kernel_for_the_next_graph_to_collide_with():
     """A cache hit leaves the kernel registry empty.
 

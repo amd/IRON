@@ -495,7 +495,9 @@ image=, **shapes)` derives the image (a fused ELF on NPU2, per-step
 xclbins with `boundaries=iron.each_step`) and `verbose=True` prints why.
 It links the image (`version.image`) and stops
 there: the runtime that loads it is made on the first call, so a host with
-the toolchain and no NPU can compile ahead of time.
+the toolchain and no NPU can compile ahead of time. A graph of several
+versions compiles each with `link=False` and then calls `graph.link()`,
+which builds them at once (as many as the available memory holds).
 `iron/lm/llama3/model.py` is the worked example
 (`Llama`, a `CausalLM` from `iron.lm`, called through
 `logits(tokens)`, and `LlamaOracle`, its float32 forward pass on the host;

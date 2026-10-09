@@ -332,7 +332,8 @@ class Vision(iron.Graph):
             tuner: Narrows and packs each version's designs by cost.
         """
         for shapes in self.shapes():
-            self.compile(coresident=tuner, **shapes)
+            self.compile(coresident=tuner, link=False, **shapes)
+        self.link()
         return self
 
     def embed(self, pixel_values, positions) -> np.ndarray:
