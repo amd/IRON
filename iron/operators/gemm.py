@@ -98,8 +98,7 @@ def _cases(cls, dev: Device):
             kwargs.update(tile_n=n, b_col_maj=b_col_maj, c_col_maj=c_col_maj)
             kwargs.update(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
             out.append(Case(kwargs, extensive=extensive))
-    # The defaults, which a graph's projections run: bfp16 inputs, and C
-    # rounded to bf16 between K tiles.
+    # The defaults: bfp16 inputs, and C rounded to bf16 between K tiles.
     # The default-suite one is benched: it runs well past the dispatch cost.
     for K, extensive in ((2048, False), (8192, True)):
         kwargs = dict(M=2048, K=K, N=2048, b_col_maj=True)
@@ -722,7 +721,8 @@ class GEMM(Operator):
         n_c_row_tiles_per_core = M // mem_tile_m_C
 
         # We are limited in the number of BDs. After synchronizing, we can reuse BDs.
-        # We only transfer 6 rows of tiles at once before starting a new transfer block.
+        # We only transfer 4 rows of tiles (2 with a column-major C) at once
+        # before starting a new transfer block.
         # tb = transfer block; block of transfers before sync call
         tb_max_n_rows = 4 if not c_col_maj else 2
 
