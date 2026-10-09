@@ -31,6 +31,7 @@ from aie.iron.kernels.sample import draw_row
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
+from iron.common import graph
 from iron.common.design import device_symbol
 from iron.common.harness import verify_buffer
 from iron.common.image import Fusion, OperatorSequence
@@ -322,8 +323,8 @@ def test_compare_mode_judges_every_output_at_the_calls_values(npu_runtime, caplo
     """
     steps, position = 4, 2
     op = Sample(vocab=4096, cores=4, steps=steps)
-    op.use_value("row", "row")
-    op.use_value("at", "position")
+    op.use_value("row", graph.Value("row", "scratchpad", np.int32).affine())
+    op.use_value("at", graph.Value("position", "scratchpad", np.int32).affine())
     seq = OperatorSequence(
         name="infra_compare_sample",
         runlist=[(op, "logits", "draws", "tokens", "token")],
