@@ -3,13 +3,17 @@
 
 """The elementwise template: what an operator that names one kernel gets."""
 
+import ml_dtypes
 import numpy as np
 import pytest
 from aie.iron.device import from_name
+from aie.utils.verify import Tolerance, compare
+from ml_dtypes import bfloat16
 
 import iron
-from iron.common import UnaryElementwise, Unresolvable
+from iron.common import Scratchpad, UnaryElementwise, Unresolvable
 from iron.common.design.build import build_design
+from iron.common.elementwise import _interval
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.relu import ReLU
 
@@ -58,7 +62,6 @@ def test_a_bounded_operand_makes_the_trip_count_per_call():
     """``x[:n]`` bounds the template's extent: the count each core reads
     and the tiles each lane moves become words the host writes per call.
     """
-    from iron.common import Scratchpad
 
     class G(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
@@ -77,3 +80,45 @@ def test_a_bounded_operand_makes_the_trip_count_per_call():
     plain = ReLU(size=4096, tile_size=256, num_aie_columns=2).resolved(NPU2)
     assert plain.valid == 4096 and plain.residents == {"count": 8}
     assert [v.name for v in plain.values] == []
+
+
+def _bound(x):
+    return 0.01 * np.abs(x) + 1e-3
+
+
+@pytest.mark.parametrize(
+    "tol",
+    [
+        Tolerance.relative(0.04),
+        Tolerance.relative(0.04, 1e-3),
+        Tolerance.relative(0.04, range_frac=1e-3),
+        Tolerance.bf16_ulps(2),
+        Tolerance.bf16_ulps(1, atol=float(ml_dtypes.finfo(bfloat16).smallest_normal)),
+        Tolerance.bounded(_bound),
+        Tolerance.exact(),
+    ],
+    ids=[
+        "relative",
+        "relative_atol",
+        "relative_range",
+        "ulps",
+        "ulps_atol",
+        "bound",
+        "exact",
+    ],
+)
+def test_a_chains_interval_is_what_compare_admits(tol):
+    """A chain's gate carries each step's admitted outputs as an interval:
+    its edges pass ``compare``, and the next value past either fails.
+    """
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal(4096) * np.exp(rng.uniform(-8, 8, 4096))
+    x = np.concatenate([x, [0.0, 0.0, 1e-40, -1e-39]])
+    v = np.concatenate([x[:2048], x[2048:].astype(bfloat16).astype(np.float64)])
+    lo, hi = _interval(tol, [v], [(x,)], bfloat16)
+    bound = dict(bound=_bound(x)) if tol.kind == "bound" else {}
+    for edge, away in ((lo, -np.inf), (hi, np.inf)):
+        at = edge.astype(bfloat16)
+        past = np.nextafter(at, np.asarray(away, bfloat16))
+        assert compare(at, v, tol, **bound).n_mismatch == 0
+        assert compare(past, v, tol, **bound).n_mismatch == v.size
