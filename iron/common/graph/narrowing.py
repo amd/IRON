@@ -427,14 +427,23 @@ class CostTable:
         device: The device's name (``dev.name``) it is measured on.
         dispatch: The packaging it is measured under: ``"fused"`` (one full
             ELF) or ``"separate"`` (an xclbin dispatch per step).
+        remeasure_stale: Leave out an entry recorded without a field its
+            kind now requires, so it is measured again; else such an entry
+            refuses the table.
 
     Raises:
         ValueError: The file was measured for another device or packaging
-            than the one given.
+            than the one given, or holds an entry recorded without a field
+            its kind requires and ``remeasure_stale`` is not given.
     """
 
     def __init__(
-        self, path: Path | str, device: str | None = None, dispatch: str | None = None
+        self,
+        path: Path | str,
+        device: str | None = None,
+        dispatch: str | None = None,
+        *,
+        remeasure_stale: bool = False,
     ):
         if dispatch not in (None, *DISPATCHES):
             raise ValueError(f"dispatch must be one of {DISPATCHES}, got {dispatch!r}")
@@ -456,8 +465,6 @@ class CostTable:
                         f"not {given!r}"
                     )
             self.device, self.dispatch = data["device"], data["dispatch"]
-            # An entry recorded without a field its kind now requires is
-            # left out, so it is measured again.
             for name, kind in (
                 ("steps", StepCost),
                 ("calibrations", Calibration),
@@ -468,6 +475,18 @@ class CostTable:
                     for f in dataclasses.fields(kind)
                     if f.default is dataclasses.MISSING
                 }
+                stale = {
+                    k: sorted(required - v.keys())
+                    for k, v in data.get(name, {}).items()
+                    if not required <= v.keys()
+                }
+                if stale and not remeasure_stale:
+                    lacking = sorted({f for fs in stale.values() for f in fs})
+                    raise ValueError(
+                        f"{self.path}: {len(stale)} of its {name} are recorded "
+                        f"without {lacking}, which they now require; measure "
+                        f"them again (remeasure_stale=True leaves them out)"
+                    )
                 setattr(
                     self,
                     name,

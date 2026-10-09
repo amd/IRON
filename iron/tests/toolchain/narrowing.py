@@ -1367,7 +1367,9 @@ def test_a_verdict_is_keyed_by_its_gates_and_reference(npu2):
     assert CostCache.judged_key("k", "w", gemm, add) != judged
 
 
-def test_an_entry_recorded_with_other_fields_is_measured_again(tmp_path):
+def test_an_entry_recorded_with_other_fields_refuses_the_table_unless_remeasured(
+    tmp_path,
+):
     m = Measurement(4.0, [4.1, 3.9], 90.0, "ab" * 32, "turbo", 50, "2026-10-06")
     cache = CostCache("NPU Strix Halo", "turbo", root=tmp_path)
     cache.put("k", m)
@@ -1381,7 +1383,11 @@ def test_an_entry_recorded_with_other_fields_is_measured_again(tmp_path):
     saved = json.loads(table.path.read_text())
     del saved["steps"]["a"]["noise_us"]
     table.path.write_text(json.dumps(saved))
-    again = CostTable(table.path)
+    with pytest.raises(
+        ValueError, match=r"1 of its steps are recorded without \['noise_us'\]"
+    ):
+        CostTable(table.path)
+    again = CostTable(table.path, remeasure_stale=True)
     assert "a" not in again.steps and again.calibrations == table.calibrations
 
 

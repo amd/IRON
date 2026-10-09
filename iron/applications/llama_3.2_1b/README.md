@@ -140,10 +140,12 @@ python -m iron.lm.llama3.model /path/to/model.safetensors /path/to/tokenizer.mod
     --cost-table iron/lm/llama3/costs_npu2.json
 ```
 
-`costs_npu2.json` is such a table, measured on a Strix Halo NPU (8
-columns), its newer designs on a Strix: the decode step's designs at
-position 256, the prompt chunk's at a whole first chunk. `tune.py` fills
-the current device's by default (`costs_npu1.json` on a Phoenix NPU). On
+No table is checked in at present: one is measured on the NPU it is used
+on. `tune.py` fills the current device's by default, beside it
+(`costs_npu2.json` on an NPU2, `costs_npu1.json` on a Phoenix NPU): the
+decode step's designs at position 256, the prompt chunk's at a whole first
+chunk. A table that holds an entry recorded without a field its kind now
+requires is refused when loaded; `tune.py` measures such entries again. On
 NPU1, where each step is its own dispatch, nothing is packed: a narrower
 design is chosen where it is cheaper to switch into. There a table measured
 on a Phoenix NPU (4 columns) narrowed the elementwise steps, moves several GEMVs between

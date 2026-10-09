@@ -1,16 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A checked-in cost table holds every design its model's tuner prices, and
-nothing else: what ``measure_graph`` would run for it, found without a device.
+"""A checked-in cost table loads every entry it holds, and holds every design
+its model's tuner prices and nothing else: what ``measure_graph`` would run
+for it, found without a device.
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
 import pytest
 from aie.iron.device import from_name
 
+import iron
 from iron.common.graph import tune as graph_tune
 from iron.common.graph.narrowing import CostTable
 from iron.common.graph.probe import Designs
@@ -19,15 +22,24 @@ from iron.lm.llama3 import tune as llama_tune
 from iron.lm.tune import CALIBRATION_TRIANGLE, calls, contexts
 from iron.tests.common.llama_model import llama_1b
 
+TABLES = sorted(Path(iron.__file__).parent.rglob("costs_*.json"))
+
+
+@pytest.mark.parametrize("path", TABLES, ids=str)
+def test_a_checked_in_table_loads_every_entry_it_holds(path):
+    data = json.loads(path.read_text())
+    table = CostTable(path)
+    for name in ("steps", "calibrations", "packs"):
+        assert len(vars(table)[name]) == len(data.get(name, {})), name
+
 
 @pytest.mark.parametrize(
-    "dispatch, name",
-    [("fused", "costs_npu2.json"), ("separate", "costs_npu2_separate.json")],
+    "path", sorted(Path(llama_tune.__file__).parent.glob("costs_npu2*.json")), ids=str
 )
-def test_llamas_table_holds_every_design_it_tunes(npu2, dispatch, name):
+def test_llamas_table_holds_every_design_it_tunes(npu2, path):
     sample = Sampler(0.7, 50, np.random.default_rng(SEED))
     designs = Designs.of(calls(llama_1b(), sample, 256, 0, 8192, 6), npu2)
-    table = CostTable(Path(llama_tune.__file__).with_name(name))
+    table = CostTable(path)
     stale = designs.stale(table)
     missing = designs.missing(table, CALIBRATION_TRIANGLE)
     settings = {v.key: (vs[0], v) for vs in designs.settings.values() for v in vs}
@@ -51,7 +63,7 @@ def test_llamas_table_holds_every_design_it_tunes(npu2, dispatch, name):
         )
     assert not stale and not missing, (
         f"{table.path} is out of date; run `python -m iron.lm.llama3.tune "
-        f"--dispatch {dispatch}` on an idle NPU2. {len(missing)} to measure:\n"
+        f"--dispatch {table.dispatch}` on an idle NPU2. {len(missing)} to measure:\n"
         + "\n".join(unmeasured)
         + f"\n{len(stale)} the graph no longer has: {stale}"
     )

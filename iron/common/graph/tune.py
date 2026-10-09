@@ -122,7 +122,12 @@ def measure(
     print(f"power mode: {pmode()}", flush=True)
     dev = aie_utils.ensure_current_device()
     return measure_graph(
-        CostTable(table(args, dev, tables), dev.name, dispatch(args, dev)),
+        CostTable(
+            table(args, dev, tables),
+            dev.name,
+            dispatch(args, dev),
+            remeasure_stale=True,
+        ),
         calls,
         triangle,
         Timing(args.rounds, args.calls, args.settle, args.cutoff),
@@ -172,7 +177,10 @@ def main() -> None:
         print(f"not measured, the placer refuses {key}: {first_line}")
     with tempfile.TemporaryDirectory() as scratch:
         costs = CostTable(
-            args.table or Path(scratch) / "costs.json", dev.name, dispatch(args, dev)
+            args.table or Path(scratch) / "costs.json",
+            dev.name,
+            dispatch(args, dev),
+            remeasure_stale=True,
         )
         search(
             costs,

@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Measure Llama 3's cost table on this NPU (``iron.lm.tune``), beside
-this file as ``costs_<device>.json``: ``costs_npu2.json`` is one, measured
-on a Strix Halo NPU (8 columns), and ``costs_npu2_separate.json`` prices
-an xclbin chain on the same NPU2 (``--each-step`` in ``iron.lm.runner``):
+this file as ``costs_<device>.json``; ``--dispatch separate`` on an NPU2
+prices an xclbin chain (``--each-step`` in ``iron.lm.runner``) as
+``costs_npu2_separate.json``:
 
 ```bash
 python -m iron.lm.llama3.tune
