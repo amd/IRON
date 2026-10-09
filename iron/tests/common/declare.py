@@ -212,6 +212,16 @@ def test_a_field_hiding_the_operators_own_attribute_is_rejected():
             name: str = param()
 
 
+def test_a_field_may_replace_an_operator_bases_own_attribute():
+    class Base(Operator):
+        window = None
+
+    class Windowed(Base):
+        window: int = param(default=512)
+
+    assert Windowed().window == 512
+
+
 def test_float_scratchpad_is_rejected():
     with pytest.raises(TypeError, match="floating point"):
         Scratchpad(np.float32)

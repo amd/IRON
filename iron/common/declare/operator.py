@@ -327,7 +327,7 @@ class Operator(metaclass=_OperatorMeta):
         super().__init_subclass__(**kwargs)
         if image is not None:
             cls._external = image
-        declare(cls)
+        declare(cls, Operator)
         if image is not None:
             _check_shipped(cls)
 

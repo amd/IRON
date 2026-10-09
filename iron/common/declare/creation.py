@@ -44,10 +44,15 @@ def members_of(cls: type) -> list[_Member]:
     return list(ordered.values())
 
 
-def declare(cls: type) -> None:
+def declare(cls: type, library: type) -> None:
     """Process a freshly created ``Operator`` subclass.
 
     Equality is identity; the base defines its own ``repr``.
+
+    Args:
+        cls: The subclass.
+        library: The class whose attributes the library reads; a field may
+            not hide one of them, but may replace an operator base's own.
     """
     # Members must be unannotated, or dataclass would make them constructor args.
     annotations = cls.__dict__.get("__annotations__", {})
@@ -91,7 +96,7 @@ def declare(cls: type) -> None:
 
     fields = {f.name: f for f in dataclasses.fields(cls)}
     for name in fields.keys() - inherited:
-        base = next((b for b in cls.__mro__[1:] if name in vars(b)), None)
+        base = next((b for b in library.__mro__ if name in vars(b)), None)
         if base is not None:
             raise TypeError(
                 f"{cls.__name__}.{name} hides {base.__name__}.{name}, which "
