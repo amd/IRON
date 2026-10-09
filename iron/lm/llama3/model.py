@@ -178,14 +178,24 @@ def layout(config: Config) -> Layout:
 
 
 SPECIAL_TOKENS = {
-    "<|begin_of_text|>": 128000,
-    "<|end_of_text|>": 128001,
-    "<|start_header_id|>": 128006,
-    "<|end_header_id|>": 128007,
-    "<|eot_id|>": 128009,
-    **{
-        f"<|reserved_{i}|>": i for i in [*range(128002, 128006), *range(128009, 128256)]
-    },
+    name: 128000 + i
+    for i, name in enumerate(
+        [
+            "<|begin_of_text|>",
+            "<|end_of_text|>",
+            "<|reserved_special_token_0|>",
+            "<|reserved_special_token_1|>",
+            "<|finetune_right_pad_id|>",
+            "<|step_id|>",
+            "<|start_header_id|>",
+            "<|end_header_id|>",
+            "<|eom_id|>",
+            "<|eot_id|>",
+            "<|python_tag|>",
+            "<|image|>",
+            *(f"<|reserved_special_token_{i}|>" for i in range(2, 246)),
+        ]
+    )
 }
 
 

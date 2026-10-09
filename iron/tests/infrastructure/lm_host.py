@@ -12,6 +12,7 @@ view with what ``load_file`` reads; tier 2 reads the actual Llama-3.2-1B
 file and skips when it is absent. No NPU.
 """
 
+import base64
 import dataclasses
 import json
 import re
@@ -25,7 +26,7 @@ from safetensors.numpy import load_file, save_file
 
 from iron import lm
 from iron.lm import Checkpoint, Sampler
-from iron.lm.llama3.model import LLAMA_3_2_1B, layout
+from iron.lm.llama3.model import LLAMA_3_2_1B, SPECIAL_TOKENS, layout, tokenizer
 from iron.lm.testing import weights_dir
 from iron.operators import sample
 
@@ -331,6 +332,23 @@ def test_draws_follow_the_distribution():
     sampler = Sampler(1.0, None, np.random.default_rng(5))
     counts = np.bincount([sampler(logits) for _ in range(20000)], minlength=3)
     np.testing.assert_allclose(counts / counts.sum(), [0.5, 0.3, 0.2], atol=0.015)
+
+
+def test_every_special_token_decodes_once(tmp_path):
+    """Each id from 128000 to 128255 is one special token, as Meta's
+    llama-models numbers them, over a byte-level toy ``tokenizer.model``.
+    """
+    path = tmp_path / "tokenizer.model"
+    path.write_text(
+        "".join(f"{base64.b64encode(bytes([b])).decode()} {b}\n" for b in range(256))
+    )
+    enc = tokenizer(path)
+    assert sorted(SPECIAL_TOKENS.values()) == list(range(128000, 128256))
+    names = [enc.decode([i]) for i in range(128000, 128256)]
+    assert names == list(SPECIAL_TOKENS)
+    for name, token in [("<|eom_id|>", 128008), ("<|eot_id|>", 128009)]:
+        assert enc.encode(name, allowed_special="all") == [token]
+        assert enc.decode([token]) == name
 
 
 # Tier 2 -- the real checkpoint (no NPU), gated on its presence
