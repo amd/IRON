@@ -50,3 +50,28 @@ def test_every_row_of_a_bound_is_computed(npu_runtime):
             tolerance=Tolerance.relative(0.04, 1e-2),
         )
         assert verdict, f"{p=}: the valid rows differ: {verdict.detail}"
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_bound_past_a_wrap_of_tiles_per_lane(npu_runtime):
+    class Step(iron.Graph):
+        def body(self, x, y, *, n: Scratchpad[np.int32]):
+            return ElementwiseAdd(x[:n], y[:n])
+
+    step = Step()
+    # 8 lanes of 256-element tiles: 1024 tiles each, one past a D1 wrap.
+    rows, cols = 1024, 2048
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((rows, cols)).astype(bfloat16)
+    y = rng.standard_normal((rows, cols)).astype(bfloat16)
+    net = step.compile(x=x.shape, y=y.shape)
+    for n in (1, 777, rows):
+        out = np.asarray(net(x, y, n=n), dtype=np.float32).reshape(rows, cols)
+        expected = np.asarray(step.reference(x, y, n=n), dtype=np.float32)
+        verdict = verify_buffer(
+            out[:n],
+            "out",
+            expected.reshape(n, cols),
+            tolerance=Tolerance.relative(0.04, 1e-2),
+        )
+        assert verdict, f"{n=}: the valid rows differ: {verdict.detail}"
