@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import Self
 
-import aie.utils as aie_utils
 from aie.utils.npukernel import NPUKernel
 
 from ..declare import DispatchTime, Operator
@@ -54,9 +53,7 @@ class OperatorImage:
         ``DispatchTime`` values, by device symbol.
         """
         self.compile()
-        _, result = aie_utils.DefaultNPURuntime.load_and_run(
-            self._kernel, list(args), dispatch_scalars=scalars or None
-        )
+        _, result = self._kernel(*args, **scalars)
         return result
 
     def _build(self) -> Artifacts:
