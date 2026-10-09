@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """What the toolchain gates share: which tools are installed, the devices
-they build for, and the graph they all build.
+they build for, and the graph they all build. ``aiecc`` is the one a build
+runs, as mlir-aie's JIT resolves it.
 """
 
 import shutil
@@ -18,7 +19,10 @@ from aie.iron.device import NPU2, from_name  # noqa: E402
 
 from iron.lm.layers import SwiGLU  # noqa: E402
 
-AIECC = Path(shutil.which("aiecc") or Path(aie.__file__).parents[2] / "bin" / "aiecc")
+try:
+    AIECC = Path(aie_config.aiecc_path())
+except RuntimeError:
+    AIECC = None
 AIEBU = shutil.which("aiebu-asm")
 XCLBINUTIL = shutil.which("xclbinutil")
 try:
@@ -27,7 +31,7 @@ except Exception:
     PEANO = None
 
 _MISSING = {
-    "aiecc": (not AIECC.exists(), f"no aiecc at {AIECC}"),
+    "aiecc": (AIECC is None, "no aiecc (AIECC_PATH, mlir-aie's bin, or the PATH)"),
     "aiebu": (AIEBU is None, "no aiebu-asm on the PATH"),
     "xclbinutil": (XCLBINUTIL is None, "no xclbinutil on the PATH"),
     "peano": (PEANO is None or not PEANO.exists(), "no Peano (llvm-aie) installed"),
