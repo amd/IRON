@@ -204,6 +204,16 @@ def test_mha_whose_blocks_do_not_line_up_is_refused(kwargs, why):
         )
 
 
+def test_mha_whose_pipelines_do_not_fill_the_rows_is_refused():
+    """Q is split in rounds of 64 rows a pipeline, and 128 rows are a
+    quarter of a round of eight.
+    """
+    with pytest.raises(ValueError, match="whole rounds"):
+        MHA(num_heads=2, seq_len=100, num_pipelines=8).resolved(
+            from_name("npu2", n_cols=8)
+        )
+
+
 @pytest.mark.parametrize(
     "kwargs,why",
     [

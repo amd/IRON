@@ -16,7 +16,8 @@ beside the softmax core, and V and O move a stream per half.
 
 The host ABI is Q and O as ``(num_heads, seq_pad, d)``, K and V as
 ``(num_KV_heads, kv_len, d)`` with the sequence padded to a multiple of
-``64 * num_pipelines``. The queries are the last rows of the keys: a
+64, whatever the tunables; a pipeline count is legal where rounds of 64
+rows a pipeline fill it. The queries are the last rows of the keys: a
 prompt's chunk attends over the cache it extends. A query keeps the keys up
 to its own position (``causal``), those within ``window`` positions of it,
 or both; with neither, every key. The sequence is an
@@ -281,8 +282,8 @@ class MHA(Operator):
     # The K/V head count: fewer than num_heads is grouped-query attention;
     # left out, plain MHA.
     num_KV_heads: int = param(default=lambda op: op.num_heads)
-    # seq_pad is seq_len rounded up to a multiple of 64 * num_pipelines;
-    # a shape gives seq_pad, from which seq_len follows when it is not given.
+    # seq_pad is seq_len rounded up to a multiple of 64; a shape gives
+    # seq_pad, from which seq_len follows when it is not given.
     seq_len: int = param(default=lambda op: op.seq_pad)
     seq_pad: int = param(default=lambda op: op.seq_padding(op.seq_len), repr=False)
     # The rows of K and V: a cache longer than the queries, whose last
@@ -506,6 +507,11 @@ class MHA(Operator):
             raise ValueError(
                 f"window ({self.window}) must be whole {self.B_q}-row blocks"
             )
+        if not self.packed and self.seq_pad % (64 * self.num_pipelines):
+            raise ValueError(
+                f"seq_pad ({self.seq_pad}) must be whole rounds of 64 rows on "
+                f"each of num_pipelines ({self.num_pipelines})"
+            )
         if self.kv_len % self.B_kv or self.kv_len < self.seq_pad:
             raise ValueError(
                 f"kv_len ({self.kv_len}) must be whole {self.B_kv}-row blocks and "
@@ -621,14 +627,12 @@ class MHA(Operator):
     # -- derived geometry ------------------------------------------------------
 
     def seq_padding(self, seq_len: int) -> int:
-        """``seq_len`` rounded up to a multiple of ``64 * num_pipelines``,
-        whole blocks at every block size ``resolve`` picks; one query,
-        packed, is not padded.
+        """``seq_len`` rounded up to a multiple of 64, whole blocks at every
+        block size ``resolve`` picks; one query, packed, is not padded.
         """
         if seq_len == 1:
             return 1
-        unit = 64 * self.num_pipelines
-        return ceildiv(seq_len, unit) * unit
+        return ceildiv(seq_len, 64) * 64
 
     def core_bytes(self, block: int, pv_cores: int) -> int:
         """The L1 bytes the fuller of a pipeline's QK^T and P*V cores holds.

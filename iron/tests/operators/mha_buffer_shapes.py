@@ -33,3 +33,12 @@ def test_buffers_are_the_padded_sequence_by_head(num_heads, num_kv_heads):
     pad = op.seq_padding(seq_len)
     assert q == o == num_heads * pad * d
     assert k == v == num_kv_heads * pad * d
+
+
+def test_buffers_do_not_follow_the_pipeline_count():
+    """A tuner choosing ``num_pipelines`` leaves the host's buffers as they are."""
+    shapes = {
+        tuple(b.shape for b in MHA(num_heads=8, seq_len=100, num_pipelines=p).buffers)
+        for p in (1, 2, 4, 8)
+    }
+    assert shapes == {((8, 128, 64),) * 4}
