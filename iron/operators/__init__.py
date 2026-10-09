@@ -12,6 +12,40 @@ The FastFlowLM ports, and the binary they are measured against, are
 """
 
 import importlib
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # the same names, for a checker; the runtime loads them lazily
+    from .axpy import AXPY
+    from .clamp import Clamp
+    from .copy import Copy
+    from .depthwise_conv1d import DepthwiseConv1d
+    from .dequant import Dequant
+    from .elementwise_add import ElementwiseAdd
+    from .elementwise_mul import ElementwiseMul, RowwiseMul
+    from .emit import Emit
+    from .gelu import GELU
+    from .gemm import GEMM
+    from .gemv import GEMV
+    from .gqa import GQAContext, GQAScores
+    from .layer_norm import LayerNorm
+    from .leaky_relu import LeakyReLU
+    from .limbs import Limbs
+    from .log import Log
+    from .magnitude import Magnitude
+    from .merge import Merge
+    from .mha import MHA
+    from .relu import ReLU
+    from .repeat import Repeat
+    from .resample.op import PatchPositions, Resample, ResampleTaps
+    from .rms_norm import RMSNorm
+    from .rope import RoPE
+    from .sample import Sample
+    from .sigmoid import Sigmoid
+    from .silu import SiLU
+    from .softmax import Softmax
+    from .tanh import Tanh
+    from .transpose import Transpose
+
 
 # Operator name -> the module that defines it, relative to this package: one
 # file (``relu``), or ``<directory>.op`` for one that keeps a design, a

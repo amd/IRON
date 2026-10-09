@@ -55,3 +55,7 @@ def __getattr__(name):
     if module is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     return getattr(importlib.import_module(module), name)
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_LAZY))

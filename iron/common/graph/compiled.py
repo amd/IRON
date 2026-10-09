@@ -765,10 +765,6 @@ class Linear:
     offset: Fraction
     dtype: str  # the word's, by name: two dtypes of one number are two words
 
-    @property
-    def is_integral(self) -> bool:
-        return self.ratio.denominator == 1 and self.offset.denominator == 1
-
 
 @dataclasses.dataclass(frozen=True)
 class Word:
