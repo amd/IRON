@@ -401,6 +401,25 @@ def test_timing_waits_for_another_process_to_leave_the_npu():
 
 
 @pytest.mark.supported_devices("npu2")
+def test_a_step_costs_alike_however_long_the_run():
+    # A host core woken from deep idle by a long run's completion, and not
+    # by a short one's, would price a step above a short run's.
+    E = 2048
+    weights = [np.zeros((E, E), bfloat16) for _ in range(3)]
+    traced = SwiGLU(*weights).trace(x=(1, E))
+    gemv = next(s.op for s in traced.steps if isinstance(s.op, GEMV))
+    runs = [Standalone(f"long{k}", [gemv] * k) for k in (1, 6, 12)]
+    one, six, twelve = (
+        t.us
+        for t in time_interleaved(
+            [r.callable for r in runs], Timing(rounds=4, calls=20)
+        )
+    )
+    short, long = (six - one) / 5, (twelve - six) / 6
+    assert abs(long - short) < 0.05 * short, (short, long)
+
+
+@pytest.mark.supported_devices("npu2")
 def test_a_table_at_another_power_mode_is_measured_again_whole(tmp_path):
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")

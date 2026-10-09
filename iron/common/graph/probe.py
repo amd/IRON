@@ -54,6 +54,7 @@ import math
 import os
 import statistics
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Hashable, Mapping, Sequence
@@ -203,6 +204,76 @@ def wait_idle(log: Callable[[str], None] = print) -> None:
             )
         time.sleep(IDLE_POLL)
         held = others()
+
+
+class Awake:
+    """While entered, the calling thread on the CPUs the NPU's completions
+    interrupted since ``before`` (``interrupts``), and a spinner at nice 19
+    on each of their SMT siblings.
+
+    A core in deep idle when a completion arrives adds its exit latency to
+    the run, but only once the gap between completions is long enough for
+    the idle governor to choose it: a probe's long runs would carry it and
+    its short ones not. A busy sibling holds the core shallow without
+    delaying the completion work on it, and the waiting thread is woken on
+    that core.
+    """
+
+    IRQ = "xdna_mailbox"
+
+    def __init__(self, before: Mapping[str, int]):
+        self.cpus: set[int] = set()
+        for irq, count in self.interrupts().items():
+            if count > before.get(irq, 0):
+                self.cpus |= self._cpus(f"/proc/irq/{irq}/effective_affinity_list")
+        self.siblings: set[int] = set()
+        for cpu in self.cpus:
+            self.siblings |= self._cpus(
+                f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list"
+            )
+        self.siblings -= self.cpus
+        self._affinity: set[int] | None = None
+        self._spinners: list[subprocess.Popen] = []
+
+    @classmethod
+    def interrupts(cls) -> dict[str, int]:
+        """Each NPU completion interrupt's count over every CPU, by number."""
+        counts = {}
+        for line in Path("/proc/interrupts").read_text().splitlines():
+            fields = line.split()
+            if fields and fields[-1] == cls.IRQ:
+                counts[fields[0].rstrip(":")] = sum(
+                    int(f) for f in fields[1:] if f.isdigit()
+                )
+        return counts
+
+    @staticmethod
+    def _cpus(path: str) -> set[int]:
+        cpus = set()
+        for part in Path(path).read_text().strip().split(","):
+            first, _, last = part.partition("-")
+            cpus.update(range(int(first), int(last or first) + 1))
+        return cpus
+
+    def __enter__(self) -> Awake:
+        if self.cpus:
+            self._affinity = os.sched_getaffinity(0)
+            os.sched_setaffinity(0, self.cpus)
+        for cpu in sorted(self.siblings):
+            spinner = subprocess.Popen([sys.executable, "-c", "while True: pass"])
+            os.sched_setaffinity(spinner.pid, {cpu})
+            os.setpriority(os.PRIO_PROCESS, spinner.pid, 19)
+            self._spinners.append(spinner)
+        return self
+
+    def __exit__(self, *exc) -> None:
+        for spinner in self._spinners:
+            spinner.kill()
+            spinner.wait()
+        self._spinners.clear()
+        if self._affinity is not None:
+            os.sched_setaffinity(0, self._affinity)
+            self._affinity = None
 
 
 def cost_cache() -> CostCache:
@@ -437,7 +508,8 @@ def time_interleaved(
     """Each loaded image's median of per-round medians, microseconds.
 
     A round starts once no other process holds the NPU (``wait_idle``), and
-    one that ends with another holding it is timed again.
+    one that ends with another holding it is timed again. The cores the
+    runs' completions interrupt are held ``Awake`` throughout.
 
     Args:
         groups: Per run, the setting it measures, where the runs are
@@ -450,36 +522,43 @@ def time_interleaved(
     """
     for run in runs:
         run()  # warm: first-run setup lands on nobody's figure
+    # Which interrupts a call raises, its first one's setup aside.
+    before = Awake.interrupts()
+    for run in runs:
+        run()
     medians: list[list[float]] = [[] for _ in runs]
     live = set(range(len(runs)))
     wait_idle(log)
     r = 0
-    while r < timing.rounds:
-        timed = {}
-        for i, run in enumerate(runs):
-            if i not in live:
+    with Awake(before):
+        while r < timing.rounds:
+            timed = {}
+            for i, run in enumerate(runs):
+                if i not in live:
+                    continue
+                times = []
+                for _ in range(timing.calls):
+                    run()
+                    times.append(run.last_elapsed)
+                timed[i] = statistics.median(times) * 1e6
+            held = others()
+            if held:
+                log(
+                    f"    pid {sorted(held)} used the NPU during a round: timing it again"
+                )
+                wait_idle(log)
                 continue
-            times = []
-            for _ in range(timing.calls):
-                run()
-                times.append(run.last_elapsed)
-            timed[i] = statistics.median(times) * 1e6
-        held = others()
-        if held:
-            log(f"    pid {sorted(held)} used the NPU during a round: timing it again")
-            wait_idle(log)
-            continue
-        for i, us in timed.items():
-            medians[i].append(us)
-        r += 1
-        if not groups or r < timing.settle:
-            continue
-        slowest: dict[Hashable, float] = {}
-        for i in live:
-            us = statistics.median(medians[i])
-            slowest[groups[i]] = max(slowest.get(groups[i], 0.0), us)
-        bar = timing.cutoff * min([fastest, *slowest.values()])
-        live = {i for i in live if groups[i] is None or slowest[groups[i]] <= bar}
+            for i, us in timed.items():
+                medians[i].append(us)
+            r += 1
+            if not groups or r < timing.settle:
+                continue
+            slowest: dict[Hashable, float] = {}
+            for i in live:
+                us = statistics.median(medians[i])
+                slowest[groups[i]] = max(slowest.get(groups[i], 0.0), us)
+            bar = timing.cutoff * min([fastest, *slowest.values()])
+            live = {i for i in live if groups[i] is None or slowest[groups[i]] <= bar}
     return [Timed(tuple(m)) for m in medians]
 
 
