@@ -276,17 +276,19 @@ class CausalLM(iron.Graph):
         runs from the first token the caches do not hold.
         """
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
-        n, L = tokens.size, self.config.max_seq_len
+        n, L, C = tokens.size, self.config.max_seq_len, self.config.prefill_chunk
         if not 0 < n <= L:
             raise ValueError(f"{n} tokens do not fit {L} rows")
         held = self._held(tokens)
         if held == n - 1 == self._seen.size:
             out, _ = self(token=int(tokens[-1]), position=n - 1, chunk=0, rows=1)
         elif self._prompt is None:
+            self._seen = tokens[:held]
             for position in range(held, n):
                 token = int(tokens[position])
                 out, _ = self(token=token, position=position, chunk=0, rows=1)
         else:
+            self._seen = tokens[: held // C * C]
             for x, values in self._chunks(tokens, held):
                 out, _ = self(x, **values)
         self._seen = tokens
@@ -306,7 +308,7 @@ class CausalLM(iron.Graph):
             per token after it (NaN for one token).
         """
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
-        n, L = tokens.size, self.config.max_seq_len
+        n, L, C = tokens.size, self.config.max_seq_len, self.config.prefill_chunk
         if not (0 < n and 0 < num_tokens and n + num_tokens - 1 <= L):
             raise ValueError(
                 f"{n} tokens and {num_tokens} more to draw do not fit {L} rows"
@@ -327,7 +329,9 @@ class CausalLM(iron.Graph):
         draws = np.zeros((L, ROW_WORDS), dtype=np.int32)
         draws[n - 1 : n - 1 + num_tokens] = sample.rows(num_tokens, self._k_max())
         self._decode.write(self.draws, draws)
-        for x, values in self._chunks(tokens, self._held(tokens)):
+        held = self._held(tokens)
+        self._seen = tokens[: held // C * C]
+        for x, values in self._chunks(tokens, held):
             if values["position"] < n - 1:
                 self(x, **values)
             else:

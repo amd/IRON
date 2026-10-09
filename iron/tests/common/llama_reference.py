@@ -193,6 +193,23 @@ def test_a_prompt_longer_than_a_chunk_runs_in_chunks(cpu):
     _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
 
 
+def test_a_call_that_fails_partway_leaves_no_stale_history(cpu):
+    """A prompt whose second chunk cannot be embedded fails after its first
+    chunk rewrote the caches; the next call reruns what that chunk wrote.
+    """
+    config = dataclasses.replace(cpu.config, prefill_chunk=64)
+    model = OnHost(config, cpu.weights)
+    tokens = np.random.default_rng(6).integers(0, config.vocab_size, 100)
+    model.logits(tokens)
+    broken = tokens.copy()
+    broken[3] = (broken[3] + 1) % config.vocab_size
+    broken[70] = config.vocab_size
+    with pytest.raises(IndexError):
+        model.logits(broken)
+    fresh = OnHost(config, cpu.weights).logits(tokens)
+    np.testing.assert_array_equal(model.logits(tokens), fresh)
+
+
 def test_the_oracle_carries_nothing_from_call_to_call(cpu):
     """Its buffers outlive a call: a shorter prompt after a longer one, and
     each longer one after, gives a fresh oracle's logits bit for bit.
