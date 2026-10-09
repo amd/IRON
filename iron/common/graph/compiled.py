@@ -109,6 +109,17 @@ class Graph:
             for p in params
             if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
         ]
+        keywords = inspect.signature(Graph.compile).parameters
+        taken = [
+            n
+            for n in cls._inputs
+            if n in keywords and keywords[n].kind is not keywords[n].VAR_KEYWORD
+        ]
+        if taken:
+            raise TypeError(
+                f"{cls.__name__}.body: inputs {taken} are named as compile()'s "
+                f"keywords, so no shape could be given them; rename them"
+            )
         cls._values = {}
         optional = set()
         for p in params:
@@ -432,6 +443,7 @@ class Graph:
 
     def __call__(self, *tensors, **values) -> Any:
         given = self._given(tensors)
+        _check_values(self.name, self._values, values)
         signature = tuple(
             (name, tuple(int(n) for n in t.shape), bfp.dtype_name(_tensor_dtype(t)))
             for name, t in given.items()
@@ -635,7 +647,6 @@ class CompiledGraph:
                     f"{self.traced.name}: {limit.expression} is {at}, outside "
                     f"[{limit.lo}, {limit.hi}) for {limit.view}"
                 )
-        self.upload()
         for handle, tensor in zip(self.traced.inputs, tensors):
             if tuple(tensor.shape) != handle.shape:
                 raise ValueError(
@@ -643,6 +654,8 @@ class CompiledGraph:
                     f"{handle.shape}, got {tuple(tensor.shape)}; a new shape is a "
                     f"new compile"
                 )
+        self.upload()
+        for handle, tensor in zip(self.traced.inputs, tensors):
             encoder = self.traced.encoders.get(handle.name)
             if encoder is not None:
                 tensor = encoder[1](tensor, self._address(encoder[0]))

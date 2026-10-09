@@ -1251,7 +1251,14 @@ def test_a_per_call_value_cannot_steer_the_trace():
                 return ReLU(x)
             return ElementwiseAdd(x, x)
 
-    for test in (lambda p: p == 0, lambda p: p + 1 == 1, bool, lambda p: p != 3):
+    for test in (
+        lambda p: p == 0,
+        lambda p: p + 1 == 1,
+        lambda p: p + 1 == 1.0,
+        lambda p: p * 2 != np.float32(2),
+        bool,
+        lambda p: p != 3,
+    ):
         with pytest.raises(TypeError, match="per call"):
             Branches(test).trace(x=(64,))
     p = Value("p", "scratchpad", np.int32)
@@ -1751,6 +1758,14 @@ def test_only_none_may_default_an_input():
         _Ffn(pos=0)
 
 
+def test_an_input_named_as_a_compile_keyword_is_refused():
+    with pytest.raises(TypeError, match=r"inputs \['image'\] are named as compile"):
+
+        class _Bad(iron.Graph):
+            def body(self, x, image):
+                return x
+
+
 def test_the_reference_refuses_what_a_call_refuses():
     ffn, _ = _ffn()
     x = z(1, E)
@@ -1760,6 +1775,20 @@ def test_the_reference_refuses_what_a_call_refuses():
         ffn.reference(x)
     with pytest.raises(TypeError, match=r"\['position'\] unknown"):
         ffn.reference(x, pos=0, position=0)
+
+
+def test_a_call_refuses_its_values_before_it_compiles():
+    ffn, _ = _ffn()
+    with pytest.raises(TypeError, match=r"\['position'\] unknown"):
+        ffn(z(1, E), pos=0, position=0)
+    assert not ffn._versions
+
+
+def test_a_refused_compile_restores_the_device_it_was_given_over(npu2):
+    ffn, _ = _ffn()
+    with pytest.raises(TypeError, match=r"\['nope'\] are not inputs"):
+        ffn.compile(dev=from_name("npu1"), x=(1, E), nope=(1,))
+    assert aie_utils.get_current_device(probe_runtime=False) is npu2
 
 
 # --------------------------------------------------------------------------

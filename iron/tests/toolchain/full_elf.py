@@ -59,6 +59,9 @@ def test_swiglu_graph_compiles_to_a_full_elf():
     elf = Path(net.image)
     assert elf.suffix == ".elf" and elf.stat().st_size > 0
     assert net._callable is None, "the runtime is made on first call, not at compile"
+    with pytest.raises(ValueError, match=r"input x was compiled for \(1, \d+\)"):
+        net(np.zeros((2, E), bfloat16))
+    assert net._callable is None, "a refused call makes no runtime"
     artifacts = net.artifacts
     # Four designs, gate and up sharing one, and one step per runlist entry.
     assert len(artifacts.designs) == 4, artifacts.report("swiglu")

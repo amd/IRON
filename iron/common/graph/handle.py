@@ -524,7 +524,7 @@ class Affine:
                 other.mul,
                 other.add,
             )
-        if isinstance(other, (int, np.integer)):
+        if isinstance(other, (int, float, np.integer, np.floating)):
             raise TypeError(f"{self} has no value to compare: it is computed per call")
         return NotImplemented
 

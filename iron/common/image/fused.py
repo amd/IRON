@@ -42,16 +42,16 @@ class FusedImage:
         Keyed on ``Fusion.identity``, so a hit generates nothing: the
         designs are fused, inside ``compile()``, only on a miss.
         """
-        dev = aie_utils.ensure_current_device()
-        if dev is None:
-            raise RuntimeError("dispatch='fused' links for a device; none is bound")
-        if not full_elf(dev):
-            raise RuntimeError(
-                f"dispatch='fused' needs a full ELF, which {dev.name} "
-                f"({dev.arch}) does not dispatch"
-            )
         design = self.design
         if design is None:
+            dev = aie_utils.ensure_current_device()
+            if dev is None:
+                raise RuntimeError("dispatch='fused' links for a device; none is bound")
+            if not full_elf(dev):
+                raise RuntimeError(
+                    f"dispatch='fused' needs a full ELF, which {dev.name} "
+                    f"({dev.arch}) does not dispatch"
+                )
             fusion = self.fusion = Fusion(seq)
             flags = [*self.FLAGS, *([self.TRACE_FLAG] if seq.traced else [])]
 
