@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import pytest
+import torch
+from aie.utils.benchmark import run_iters
+
+pytest.importorskip(
+    "stream", reason="stream-dse not installed (see requirements_stream.txt)"
+)
+
+from iron.common.test_utils import verify_buffer
+from iron.common.tracing_utils import dump_traces
+from iron.operators.mha_prefill_stream.op import MHAPrefillStream
+from iron.operators.mha_prefill_stream.reference import (
+    CONTEXT,
+    KEY_TRANSPOSED,
+    QUERY,
+    VALUE,
+    generate_golden_reference,
+)
+
+SEQ_LEN, D_HEAD = 256, 64
+
+HEADS = [1, 2]
+
+FUSION_GROUPS = [1, 3]
+
+FLASH_CASES = [
+    (SEQ_LEN, 1),
+    (2 * SEQ_LEN, 1),
+    (SEQ_LEN, 2),
+    pytest.param(2048, 8, marks=pytest.mark.bench),
+]
+
+TIMED_RUNS = 3
+
+
+def _report(run, heads, seq_len):
+    """Time the dispatches after the first, which pays for the hardware context."""
+    elapsed_us = run_iters(run, iters=TIMED_RUNS).e2e.min_us
+    total_bytes = 8 * heads * seq_len * D_HEAD
+    print(f"Latency (us): {elapsed_us:.2f}")
+    print(f"Effective Bandwidth: {total_bytes / (elapsed_us * 1e-6) / 1e9:.4f} GB/s")
+
+
+def _staged(operator, golden_ref):
+    run = operator.get_callable()
+    for name in (QUERY, KEY_TRANSPOSED, VALUE):
+        buffer = run.get_buffer(name)
+        buffer.torch_view()[:] = golden_ref[name].to(torch.bfloat16).flatten()
+        buffer.to("npu")
+    return run
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
+)
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("k", FUSION_GROUPS)
+@pytest.mark.parametrize("heads", HEADS)
+def test_mha_prefill_stream(heads, k, causal, aie_context):
+    golden_ref = generate_golden_reference(SEQ_LEN, D_HEAD, heads=heads, causal=causal)
+    operator = MHAPrefillStream(
+        seq_len=SEQ_LEN,
+        d_head=D_HEAD,
+        heads=heads,
+        k=k,
+        causal=causal,
+        context=aie_context,
+    )
+    operator.compile()
+
+    run = _staged(operator, golden_ref)
+    run()
+    dump_traces(run, f"mha_prefill_stream_h{heads}_k{k}_causal{int(causal)}")
+    output = run.get_buffer("output").to_torch().reshape((heads, SEQ_LEN, D_HEAD))
+    errors = verify_buffer(
+        output, "output", golden_ref[CONTEXT], rel_tol=4e-2, abs_tol=1.5e-1
+    )
+    assert not errors, f"Test failed with errors: {errors}"
+
+    _report(run, heads, SEQ_LEN)
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.metrics(
+    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
+    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
+)
+@pytest.mark.parametrize("seq_len, heads", FLASH_CASES)
+def test_mha_prefill_stream_flash(seq_len, heads, aie_context):
+    """Blocking the key is what lifts the sequence length, so this runs past what the
+    resident-key design can reach. Masking is inside the kernels, so it is always causal.
+    """
+    golden_ref = generate_golden_reference(seq_len, D_HEAD, heads=heads, causal=True)
+    operator = MHAPrefillStream(
+        seq_len=seq_len, d_head=D_HEAD, heads=heads, flash=True, context=aie_context
+    )
+    operator.compile()
+
+    run = _staged(operator, golden_ref)
+    run()
+    output = run.get_buffer("output").to_torch().reshape((heads, seq_len, D_HEAD))
+    errors = verify_buffer(
+        output, "output", golden_ref[CONTEXT], rel_tol=4e-2, abs_tol=1.5e-1
+    )
+    assert not errors, f"Test failed with errors: {errors}"
+    _report(run, heads, seq_len)

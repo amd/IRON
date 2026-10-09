@@ -15,16 +15,8 @@ pytest.importorskip(
     "stream", reason="stream-dse not installed (see requirements_stream.txt)"
 )
 
-# stream-dse's codegen emits `!aie.objectfifosubview`, which mlir-aie removed in
-# Xilinx/mlir-aie#3553. Every wheel carrying the trace slice API this branch needs is
-# newer than that removal. Revert this commit once a stream-dse release targets a
-# post-#3553 mlir-aie.
-pytest.skip(
-    "stream-dse codegen does not parse against the pinned mlir-aie",
-    allow_module_level=True,
-)
-
 from iron.operators.swiglu_prefill_stream.op import SwiGLUPrefillStream
+from iron.operators.swiglu_prefill_stream.stream_design import LAYER_BY_LAYER
 
 # The operator's design is generated from this module; the values it is checked
 # against come from swiglu_decode's reference, which it shares.
@@ -35,9 +27,7 @@ from iron.common.test_utils import verify_buffer
 # The MILP-feasible shape on the whole-array Strix (npu2) target.
 SEQ_LEN, EMBEDDING_DIM, HIDDEN_DIM = 256, 512, 2048
 
-# Fused groups to deploy the block as: one design, a front end plus the down
-# projection, or one design per layer.
-FUSION_GROUPS = [1, 2, 5]
+FUSION_GROUPS = [pytest.param(None, marks=pytest.mark.bench), 1, 2, 5]
 
 # Timed dispatches per test; the reported latency is the fastest of them.
 TIMED_RUNS = 3
@@ -58,7 +48,6 @@ def _staged(operator, golden_ref):
 
 
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.bench
 @pytest.mark.metrics(
     Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
     Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
@@ -104,3 +93,32 @@ def test_swiglu_prefill_stream(k, aie_context):
         f"{latency.avg_us:.2f} / {latency.max_us:.2f}"
     )
     print(f"Effective Bandwidth: {total_bytes / (elapsed_us * 1e-6) / 1e9:.4f} GB/s")
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.extensive
+def test_swiglu_prefill_stream_splits_the_hidden_row(aie_context):
+    """Deployed layer by layer at a hidden dimension of 4096, the SiLU and multiply cores each take
+    half a row, so a call links an object built for the half it is handed."""
+    seq_len, embedding_dim, hidden_dim = 256, 1024, 4096
+    golden_ref = generate_golden_reference(M=seq_len, K=embedding_dim, N=hidden_dim)
+    operator = SwiGLUPrefillStream(
+        seq_len=seq_len,
+        embedding_dim=embedding_dim,
+        hidden_dim=hidden_dim,
+        k=LAYER_BY_LAYER,
+        context=aie_context,
+    )
+    operator.compile()
+    run = _staged(operator, golden_ref)
+    run()
+    output = run.get_buffer(OUTPUT).to_torch().reshape((seq_len, embedding_dim))
+    errors = verify_buffer(
+        output,
+        OUTPUT,
+        golden_ref[OUTPUT],
+        rel_tol=0.08,
+        abs_tol=0.7,
+        max_error_rate=0.25,
+    )
+    assert not errors, f"Test failed with errors: {errors}"

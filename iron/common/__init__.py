@@ -22,4 +22,3 @@ from .compilation import (
     DispatchLibArtifact,
     DesignGenerator,
 )
-from .layout import Stride, TiledStride, TiledStridedLayout, tiled_2d

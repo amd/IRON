@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Optional dependencies for the stream-dse-backed fused SwiGLU-prefill operator
-# (iron/operators/swiglu_prefill_stream).
+# Optional dependencies for the stream-dse-backed operators
+# (iron/operators/*_prefill_stream).
 #
 # Kept out of requirements.txt so an install without stream-dse still works: the
-# operator's test skips itself (pytest.importorskip) when it is absent. CI does
-# install this file (.github/actions/prereqs), so the operator runs there. To build
-# and run the operator and its test:
+# operators' tests skip themselves (pytest.importorskip) when it is absent. CI does
+# install this file (.github/actions/prereqs), so the operators run there. To build
+# and run the operators and their tests:
 #
 #     pip install -r requirements_stream.txt
 #     stream-setup-aie   # REQUIRED: installs stream-dse's pure-Python AIE codegen
@@ -15,9 +15,9 @@
 #                        # dependencies. It leaves mlir_aie/llvm-aie alone; IRON
 #                        # pins those in requirements.txt.
 #
-# stream-dse generates the fused MLIR design at build time with the license-free
-# OR-Tools GSCIP solver, and writes its workload and mapping into its own installed
-# package directory, so that environment must be writable.
+# stream-dse generates each design at build time with the license-free OR-Tools
+# GSCIP solver (STREAM_BACKEND selects another), and writes it under ./outputs, so
+# the working directory must be writable.
 
 onnxscript>=0.7
-stream-dse>=1.13.14
+stream-dse>=2.0.0
