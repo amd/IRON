@@ -477,8 +477,7 @@ class MHA(Operator):
                 f"B_q ({self.B_q}) must divide 64, the block seq_pad is whole of"
             )
         # Each product's micro-tile must divide its operands: QK^T, (B_q, d)
-        # by (d, B_kv), bfp16-emulated or not on NPU2, whose micro-tiles hold
-        # NPU1's; P*V, (B_q, B_kv) by (B_kv, pv_width).
+        # by (d, B_kv); P*V, (B_q, B_kv) by (B_kv, pv_width).
         if self.pv_cores not in (1, 2) or self.pv_width * self.pv_cores != self.d:
             raise ValueError(
                 f"P*V takes one core or two, each a pv_width ({self.pv_width}) "
@@ -490,7 +489,7 @@ class MHA(Operator):
         ):
             mac = kernels.linalg.mha.mac_dims(
                 pv=pv,
-                arch="aie2p",
+                device=self.dev,
                 emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
             )
             for name, m in zip(dims, mac):
