@@ -70,7 +70,6 @@ class OperatorSequence:
         plan_scratch=True,
         dispatch="auto",
         extra_flags=None,
-        share_designs=False,
         arena: ArenaPlan | None = None,
         residents: Mapping[str, Hashable] | None = None,
         shared_words: Mapping[str, str] | None = None,
@@ -117,7 +116,7 @@ class OperatorSequence:
                 )
             self.coresident = tuple(tuple(group) for group in coresident)
         # The chain's kernel instances are named from this label.
-        self.name = name + "_shared" if share_designs else name
+        self.name = name
         self.input_args = input_args
         self.output_args = output_args
         self.feedback_args = list(feedback_args)
@@ -128,7 +127,6 @@ class OperatorSequence:
         )  # Optional dict: buffer_name -> size_in_bytes
         # Extra aiecc flags forwarded to the full-ELF build.
         self.extra_flags = extra_flags or []
-        self.share_designs = share_designs
         self.arena = arena
         self.residents = dict(residents or {})
         self.shared_words = dict(shared_words or {})
@@ -163,15 +161,15 @@ class OperatorSequence:
     def unique_designs(self):
         """The designs to build, and which design each operator uses.
 
-        With ``share_designs`` set, operators reporting the same ``design_key``
-        collapse onto one design, so it is built, prefixed and configured once.
+        Operators reporting the same ``design_key`` collapse onto one design,
+        so it is built, prefixed and configured once.
         """
         designs = []
         design_of = {}
         first_with_key = {}
         for op in self.unique_operators():
-            key = op.design_key() if self.share_designs else None
-            if key is not None and key in first_with_key:
+            key = op.design_key()
+            if key in first_with_key:
                 shared = designs[first_with_key[key]]
                 if _signature(op) != _signature(shared):
                     raise ValueError(
@@ -180,8 +178,7 @@ class OperatorSequence:
                     )
                 design_of[id(op)] = first_with_key[key]
                 continue
-            if key is not None:
-                first_with_key[key] = len(designs)
+            first_with_key[key] = len(designs)
             design_of[id(op)] = len(designs)
             designs.append(op)
         return designs, design_of

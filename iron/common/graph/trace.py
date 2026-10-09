@@ -186,7 +186,6 @@ class TracedGraph:
 
     def sequence(self, name=None, **kwargs):
         kwargs.setdefault("buffer_sizes", dict(self.pinned))
-        kwargs.setdefault("share_designs", True)
         kwargs.setdefault("feedback_args", list(self.feedback))
         return OperatorSequence(
             name or self.name,

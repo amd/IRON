@@ -58,8 +58,7 @@ and `embedding_dim` and `hidden_dim` multiples of their tile times the column sp
 `stream_design._check_shapes` enforces this and names the offending dimension.
 
 Designs that come out byte-identical are built and configured once: at k=5 the gate and
-up projections are the same design, so the ELF holds four rather than five. Set
-`share_designs=False` on the operator to switch that off.
+up projections are the same design, so the ELF holds four rather than five.
 
 ## Expected performance
 

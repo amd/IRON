@@ -865,7 +865,6 @@ def test_two_spellings_of_one_array_are_one_design():
         [(a, "x", "w", "y"), (b, "x2", "w", "z")],
         input_args=["x", "x2", "w"],
         output_args=["z"],
-        share_designs=True,
     )
     seq.prepare()
     designs, _ = seq.unique_designs()

@@ -22,7 +22,9 @@ import aie.utils as aie_utils
 import pytest
 from aie.iron.device import from_name
 
+from iron.common.design import OperatorDesign
 from iron.common.image import Fusion, OperatorSequence
+from iron.operators import ReLU
 from iron.operators.gemv import GEMV
 
 
@@ -99,6 +101,33 @@ def test_identity_is_what_the_text_is_a_function_of():
     assert _identity(SHAPES) == _identity(SHAPES)
     assert _identity(SHAPES) != _identity([(512, 1024), (256, 1024), (512, 4096)])
     assert _identity(SHAPES) != _identity(SHAPES[::-1])
+
+
+def test_two_designs_whose_device_names_collide_are_refused():
+    """A device is named by eight hex digits of its design's identity, so two
+    designs can share one; the fusion refuses rather than run one design for both.
+    """
+    seen = {}
+    for size in range(1024, 1024 * 200_000, 1024):
+        op = ReLU(size=size, num_aie_columns=1, num_channels=1, tile_size=1024)
+        name = OperatorDesign(op).name
+        if name in seen:
+            break
+        seen[name] = op
+    else:
+        pytest.fail("no two ReLU sizes up to 200k tiles share a device name")
+    seq = OperatorSequence(
+        name="colliding_names",
+        runlist=[(seen[name], "x0", "y0"), (op, "x1", "y1")],
+        input_args=["x0", "x1"],
+        output_args=["y0", "y1"],
+        dispatch="fused",
+    )
+    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
+        seq.calculate_buffer_layout()
+    )
+    with pytest.raises(ValueError, match=f"device names collide, {name}"):
+        Fusion(seq)
 
 
 def test_identity_holds_across_processes():

@@ -344,7 +344,6 @@ class Standalone:
             in_names,
             out_names,
             dispatch=dispatch,
-            share_designs=True,
             coresident=coresident,
         ).compile()
         self.callable = self.sequence.get_callable()

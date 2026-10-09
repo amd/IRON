@@ -164,7 +164,6 @@ class SwiGLUPrefillStream(OperatorSequence):
         embedding_dim,
         hidden_dim,
         k=1,
-        share_designs=True,
         trace: TraceConfig | None = None,
     ):
         design = _stream_design()
@@ -202,5 +201,4 @@ class SwiGLUPrefillStream(OperatorSequence):
                     n for _, outputs in boundaries for n in outputs if n not in consumed
                 )
             ),
-            share_designs=share_designs,
         )

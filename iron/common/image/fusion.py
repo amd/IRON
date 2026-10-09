@@ -116,7 +116,13 @@ class Fusion:
         own = [OperatorDesign(op) for op in designs]
         self.designs: dict[str, OperatorDesign] = {}
         for design in own:
-            self.designs.setdefault(design.name, design)
+            existing = self.designs.setdefault(design.name, design)
+            if existing.identity != design.identity:
+                raise ValueError(
+                    f"{existing.op.name} and {design.op.name} are different designs "
+                    f"whose device names collide, {design.name}; a tunable given "
+                    f"to either one (a tile size, a column count) separates them"
+                )
         self.runlist = [
             (own[design_of[id(op)]].name, *bufs) for op, *bufs in seq.runlist
         ]
