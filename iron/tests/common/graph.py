@@ -1721,6 +1721,17 @@ def test_only_none_may_default_an_input():
         _Ffn(pos=0)
 
 
+def test_the_reference_refuses_what_a_call_refuses():
+    ffn, _ = _ffn()
+    x = z(1, E)
+    with pytest.raises(TypeError, match=r"inputs \['x'\] missing"):
+        ffn.reference(pos=0)
+    with pytest.raises(TypeError, match=r"per-call values \['pos'\] missing"):
+        ffn.reference(x)
+    with pytest.raises(TypeError, match=r"\['position'\] unknown"):
+        ffn.reference(x, pos=0, position=0)
+
+
 # --------------------------------------------------------------------------
 # Carried values: the graph computes them for its own next call
 # --------------------------------------------------------------------------

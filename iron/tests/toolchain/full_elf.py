@@ -89,7 +89,16 @@ def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():
     from iron.tests.common.llama_model import small
 
     model = small(max_seq_len=256)
-    _assert_values_in_table(build_elf(model, **model.shapes(1)))
+    version = build_elf(model, **model.shapes(1))
+    _assert_values_in_table(version)
+    # A call names every value and no other, refused before the device.
+    tensors = [np.zeros(h.shape, h.dtype) for h in version.traced.inputs]
+    values = {v.name: 0 for v in version.traced.values}
+    with pytest.raises(TypeError, match=r"\['row'\] unknown"):
+        version(*tensors, **values, row=0)
+    with pytest.raises(TypeError, match=r"per-call values \[.+\] missing"):
+        version(*tensors)
+    assert version._callable is None
 
 
 @pytest.mark.extensive

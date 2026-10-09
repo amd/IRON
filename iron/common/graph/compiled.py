@@ -440,10 +440,17 @@ class Graph:
         return version(*given.values(), **values)
 
     def reference(self, *tensors, **values) -> Any:
-        """``body`` on host tensors, each operator run through its ``reference()``."""
-        args = list(tensors) + [None] * (len(self._inputs) - len(tensors))
+        """``body`` on host tensors, each operator run through its ``reference()``.
+
+        Raises:
+            TypeError: An input is missing, or a per-call value is missing or
+                unknown, as a call on the device refuses them.
+        """
+        given = self._given(tensors)
+        _check_values(self.name, self._values, values)
+        args = [given.get(name) for name in self._inputs]
         with self._scope(), _ReferenceTracer(self.name):
-            result = self.body(*args, **{k: values.get(k) for k in self._values})
+            result = self.body(*args, **values)
         items, carry = self._split_carry(result)
         if carry is None:
             return result
@@ -614,6 +621,7 @@ class CompiledGraph:
                 f"{self.traced.name} takes {len(self.traced.inputs)} input(s), "
                 f"got {len(tensors)}"
             )
+        _check_values(self.traced.name, [v.name for v in self.traced.values], values)
         self.upload()
         for handle, tensor in zip(self.traced.inputs, tensors):
             if tuple(tensor.shape) != handle.shape:
@@ -661,13 +669,6 @@ class CompiledGraph:
         return Carry(**nxt)
 
     def _write_values(self, values, run: FullELFRun | None = None) -> None:
-        expected = {v.name for v in self.traced.values}
-        missing, unknown = expected - set(values), set(values) - expected
-        if missing or unknown:
-            raise TypeError(
-                f"{self.traced.name}: per-call values {sorted(missing)} missing"
-                + (f"; {sorted(unknown)} unknown" if unknown else "")
-            )
         if self.emit is not None:
             n = len(self.emit.carried)
             head = self._storage(self.emit.carry).numpy_view()
@@ -679,6 +680,16 @@ class CompiledGraph:
             values[name] = address_words(self._address(buffer))[word]
         words = {w.symbol: np.dtype(w.dtype).type(w(values)) for w in self.words}
         (self.callable if run is None else run).write_values(words)
+
+
+def _check_values(name: str, declared, values: Mapping[str, Any]) -> None:
+    """Refuse ``values`` unless they name every one of ``declared``, and no other."""
+    missing, unknown = set(declared) - set(values), set(values) - set(declared)
+    if missing or unknown:
+        raise TypeError(
+            f"{name}: per-call values {sorted(missing)} missing"
+            + (f"; {sorted(unknown)} unknown" if unknown else "")
+        )
 
 
 def _rename(tracer: Tracer, handle: Handle, name: str) -> None:
