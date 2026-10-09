@@ -1397,6 +1397,60 @@ def test_the_reference_writes_a_given_output_of_an_operator_that_returns_one(npu
     np.testing.assert_array_equal(y[256:], x[256:] * 2)
 
 
+@pytest.mark.parametrize("view", [False, True])
+def test_a_weight_given_where_an_optional_input_was_meant_is_refused(view):
+    """``RMSNorm(x, w)`` gives the weight as RMSNorm's output: a trace and
+    the reference refuse it, naming the keyword, whatever view of it, and
+    the reference leaves the weight as it was.
+    """
+    w = np.arange(E).astype(bfloat16)
+
+    class Norm(iron.Graph):
+        def __init__(self):
+            self.w = w
+
+        def body(self, x):
+            return RMSNorm(x, self.w.reshape(1, E) if view else self.w)
+
+    x = np.ones((1, E), dtype=bfloat16)
+    kept = w.copy()
+    with pytest.raises(TypeError, match=r"graph weight or a view of one.*\(weight=\)"):
+        Norm().trace(x=(1, E))
+    with pytest.raises(TypeError, match=r"graph weight or a view of one.*\(weight=\)"):
+        Norm().reference(x)
+    np.testing.assert_array_equal(w, kept)
+
+
+def test_an_input_given_as_an_output_is_refused():
+    class Over(iron.Graph):
+        def body(self, x, y):
+            ReLU(x, y[1:])
+            return y
+
+    with pytest.raises(TypeError, match="graph input or a view of one"):
+        Over().trace(x=(E - 1,), y=(E,))
+    y = np.ones(E, dtype=bfloat16)
+    with pytest.raises(TypeError, match="graph input or a view of one"):
+        Over().reference(np.ones(E - 1, dtype=bfloat16), y)
+    assert (y == 1).all()
+
+
+def test_a_given_output_of_another_rank_is_refused_unless_declared_flat():
+    """A class call infers from the ranks and refuses; a built operator's
+    call is checked as it records.
+    """
+    gemm = GEMM(M=256, K=256, N=256)
+
+    class Flat(iron.Graph):
+        def body(self, a, b):
+            y = ElementwiseAdd(a.reshape(256 * 256), a.reshape(256 * 256))
+            gemm(a, b, y)
+            return y
+
+    with pytest.raises(ValueError, match=r"GEMM.C is \(256, 256\)"):
+        Flat().trace(a=(256, 256), b=(256, 256))
+
+
 def test_a_column_major_product_is_read_as_stored_by_the_next_reference(npu2):
     """A ``c_col_maj`` GEMM's C is ``(N, M)`` as stored, which an elementwise
     operator's reference takes as lines of its own length.

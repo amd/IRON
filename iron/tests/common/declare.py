@@ -482,18 +482,21 @@ def test_an_operand_declared_when_a_flag_exists_only_where_it_is_true():
 
 def test_a_positional_operand_past_the_inputs_is_an_output_not_an_optional_one():
     class G(iron.Graph):
-        def body(self, x, y):
-            Scaled(x, y)  # y is written: an output, never the scale
+        def __init__(self):
+            self.y = iron.state((64,))
 
-    (step,) = G().trace(x=(64,), y=(64,)).steps
+        def body(self, x):
+            Scaled(x, self.y)  # y is written: an output, never the scale
+
+    (step,) = G().trace(x=(64,)).steps
     assert not step.op.scaled
     assert [b.name for b in step.op.buffers] == ["x", "y"]
 
-    class H(iron.Graph):
-        def body(self, x, s, y):
-            Scaled(x, y, s=s)
+    class H(G):
+        def body(self, x, s):
+            Scaled(x, self.y, s=s)
 
-    (step,) = H().trace(x=(64,), s=(64,), y=(64,)).steps
+    (step,) = H().trace(x=(64,), s=(64,)).steps
     assert step.op.scaled
     assert [b.name for b in step.op.buffers] == ["x", "s", "y"]
 

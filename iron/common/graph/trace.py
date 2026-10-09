@@ -16,7 +16,7 @@ from aie.utils import bfp
 
 from ..declare import Direction, Operator
 from ..declare.bound import BoundValue
-from ..declare.member import Extent, _Value
+from ..declare.member import Extent, _Buffer, _Value
 from ..declare.operator import graph_tracer
 from ..design import device_symbol
 from ..image.sequence import OperatorSequence
@@ -302,6 +302,43 @@ class Tracer:
             return self.weights[key][1]
         raise TypeError(f"{x!r} is not a graph handle, a state, or a tensor")
 
+    def overwrites(self, given) -> str | None:
+        """What an output a call gives would write over that no call may:
+        ``"weight"`` or ``"input"``, through any view of it, else None.
+        """
+        if isinstance(given, State):
+            return None
+        if not isinstance(given, Handle):
+            return "weight"
+        while given.parent is not None:
+            given = given.parent
+        return given.role if given.role in ("weight", "input") else None
+
+    def check_outputs(self, cls, outputs) -> None:
+        """Refuse an output a call gives that is a weight or an input.
+
+        A positional operand past the inputs is an output, so a weight given
+        where an optional input was meant would be written over.
+
+        Raises:
+            TypeError: An output is a weight or an input, or a view of one.
+        """
+        for given in outputs:
+            kind = self.overwrites(given)
+            if kind is None:
+                continue
+            keywords = [
+                f"{m.name}="
+                for m in cls._members
+                if isinstance(m, _Buffer) and m.direction.fills and m.when is not None
+            ]
+            hint = f"; an optional input is given by keyword ({', '.join(keywords)})"
+            raise TypeError(
+                f"{cls.__name__}: the output given, {list(given.shape)}, is a "
+                f"graph {kind} or a view of one, which a call does not write over"
+                f"{hint if keywords else ''}"
+            )
+
     def call(self, target, args, kwargs):
         """Record ``target(*args, **kwargs)``: inputs, optionally followed by
         outputs; keywords are optional inputs, per-call value handles, or
@@ -309,6 +346,7 @@ class Tracer:
         """
         cls = target if isinstance(target, type) else type(target)
         inputs, outputs, kwargs = cls.call_operands(args, kwargs)
+        self.check_outputs(cls, outputs)
         names = list(inputs)
         operands = [self.operand(a) for a in [*inputs.values(), *outputs]]
         values = {
@@ -465,14 +503,15 @@ class Tracer:
                 f"({', '.join(b.name for b in ins)}), optionally followed by "
                 f"{len(outs)} output(s); got {len(operands)}"
             )
-        for h, b in zip(operands, ins + outs):
-            # Another rank matches on the count; the same rank must match the
-            # shape, or a transposed weight would pass.
+        for i, (h, b) in enumerate(zip(operands, ins + outs)):
+            # Another rank matches on the count, for an output only a flat
+            # one; the same rank must match the shape, or a transposed weight
+            # would pass.
             shape = tuple(b.shape)
             wrong = (
                 tuple(h.shape) != shape
                 if len(h.shape) == len(shape)
-                else h.elements != b.elements
+                else h.elements != b.elements or (i >= len(ins) and len(shape) != 1)
             )
             if wrong:
                 raise ValueError(
@@ -605,6 +644,10 @@ class _ReferenceTracer(Tracer):
     # their reference() runs at.
     checks = False
 
+    def __init__(self, name: str, held: Iterable[tuple[str, np.ndarray]] = ()):
+        super().__init__(name)
+        self.held = list(held)
+
     def operand(self, x):
         return x
 
@@ -615,9 +658,19 @@ class _ReferenceTracer(Tracer):
             x.host = np.zeros(x.shape, dtype=x.dtype)
         return _HostView(x, x.shape)
 
+    def overwrites(self, given) -> str | None:
+        if isinstance(given, Weight):
+            return "weight"
+        if not isinstance(given, np.ndarray):
+            return None
+        return next(
+            (kind for kind, t in self.held if np.may_share_memory(given, t)), None
+        )
+
     def call(self, target, args, kwargs):
         cls = target if isinstance(target, type) else type(target)
         inputs, outputs, kwargs = cls.call_operands(args, kwargs)
+        self.check_outputs(cls, outputs)
         n_views = len(cls.accept_views)
         tensors, patterns = [], []
         for i, a in enumerate([*inputs.values(), *outputs]):

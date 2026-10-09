@@ -181,12 +181,18 @@ class Graph:
 
     def names(self) -> dict[int, str]:
         """The path name of each tensor and state the instance holds, by identity."""
-        names: dict[int, str] = {}
+        return {key: path for key, (path, _) in self.held().items()}
+
+    def held(self) -> dict[int, tuple[str, Any]]:
+        """Each tensor and state the instance holds, by identity, with its
+        path name.
+        """
+        held: dict[int, tuple[str, Any]] = {}
         seen: set[int] = set()
 
         def walk(x, path):
             if isinstance(x, State) or (is_operand(x) and not isinstance(x, Handle)):
-                names.setdefault(id(x), path)
+                held.setdefault(id(x), (path, x))
                 return
             if isinstance(x, (list, tuple)):
                 items = enumerate(x)
@@ -207,7 +213,7 @@ class Graph:
         for key, x in vars(self).items():
             if not key.startswith("_"):
                 walk(x, key)
-        return names
+        return held
 
     def trace(self, **shapes) -> TracedGraph:
         """Run ``body`` on handles of the given shapes; an optional input given none is None."""
@@ -462,12 +468,22 @@ class Graph:
 
         Raises:
             TypeError: An input is missing, or a per-call value is missing or
-                unknown, as a call on the device refuses them.
+                unknown, as a call on the device refuses them; or an output
+                a step is given is a weight or an input, as a trace refuses
+                it.
         """
         given = self._given(tensors)
         _check_values(self.name, self._values, values)
         args = [given.get(name) for name in self._inputs]
-        with self._scope(), _ReferenceTracer(self.name):
+        held = [
+            *(
+                ("weight", np.asarray(x))
+                for _, x in self.held().values()
+                if not isinstance(x, State)
+            ),
+            *(("input", t) for t in args if isinstance(t, np.ndarray)),
+        ]
+        with self._scope(), _ReferenceTracer(self.name, held):
             result = self.body(*args, **values)
         items, carry = self._split_carry(result)
         if carry is None:
