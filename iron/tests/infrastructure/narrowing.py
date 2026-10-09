@@ -653,8 +653,9 @@ def test_an_inexact_width_within_its_gates_is_accurate_and_cached(tmp_path):
     narrow = table.steps[found[1].key]
     assert not narrow.exact and narrow.accurate, narrow
     entries = [cache.key(v.resolved) for v in found]
-    for entry in entries:
-        assert cache.get(cache.judged_key(entries[0], entry), Accuracy).within
+    for v, entry in zip(found, entries):
+        judged = cache.judged_key(entries[0], entry, found[0].op, v.op)
+        assert cache.get(judged, Accuracy).within
 
     stamps = {p: p.stat().st_mtime_ns for p in cache.directory.iterdir()}
     again = CostTable(tmp_path / "again.json", "npu2", "fused")

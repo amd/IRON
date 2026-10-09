@@ -898,7 +898,11 @@ def judged(
         return accurate
     default = found[0]
     for v, entry in zip(found, entries):
-        key = None if cache is None else cache.judged_key(entries[0], entry)
+        key = (
+            None
+            if cache is None
+            else cache.judged_key(entries[0], entry, default.op, v.op)
+        )
         verdict = None if key is None or remeasure else cache.get(key, Accuracy)
         if verdict is None:
             run = Standalone(

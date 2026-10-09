@@ -1312,7 +1312,7 @@ def test_cache_keys_follow_the_build_the_values_and_the_inputs(npu2):
     assert len({key, *others}) == 1 + len(others)
 
 
-def test_cache_entries_round_trip_per_platform_and_mode(tmp_path):
+def test_cache_entries_round_trip_per_platform_and_mode(tmp_path, npu2):
     m = Measurement(4.0, [4.1, 3.9], 90.0, "ab" * 32, "turbo", 50, "2026-10-06")
     cal = Calibration(50.0, 30.0, 30.0, 40.0, "turbo", 8, 50, "2026-10-06")
     cache = CostCache("NPU Strix Halo", "turbo", root=tmp_path)
@@ -1339,10 +1339,28 @@ def test_cache_entries_round_trip_per_platform_and_mode(tmp_path):
         and not m.cost("cd" * 32, False, 4.0, 0.1).accurate
     )
     verdict = Accuracy(False, "C under the default's gate: 1 mismatch", "2026-10-07")
-    judged = CostCache.judged_key("k", "w")
+    gemm = GEMM(M=256, K=256, N=256)
+    judged = CostCache.judged_key("k", "w", gemm, gemm.with_tunables(tile_k=16))
     assert judged not in {CostCache.beside_key("k", "w"), CostCache.pair_key("k", "w")}
     cache.put(judged, verdict)
     assert again.get(judged, Accuracy) == verdict
+
+
+def test_a_verdict_is_keyed_by_its_gates_and_reference(npu2):
+    gemm = GEMM(M=256, K=256, N=256)
+    narrow = gemm.with_tunables(tile_k=16)
+    judged = CostCache.judged_key("k", "w", gemm, narrow)
+    # A bound gate is named by its function, so another instance keys alike.
+    assert gemm.gate().kind == "bound"
+    again = GEMM(M=256, K=256, N=256)
+    assert CostCache.judged_key("k", "w", again, again.with_tunables(tile_k=16)) == (
+        judged
+    )
+    emulated = GEMM(M=256, K=256, N=256, emulate_bf16_mmul_with_bfp16=False)
+    assert emulated.gate() != gemm.gate()
+    assert CostCache.judged_key("k", "w", emulated, narrow) != judged
+    add = ElementwiseAdd(size=SIZE, tile_size=TILE)
+    assert CostCache.judged_key("k", "w", gemm, add) != judged
 
 
 def test_an_entry_recorded_with_other_fields_is_measured_again(tmp_path):

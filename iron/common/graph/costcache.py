@@ -16,8 +16,9 @@ on its pair's entries, and so are the twin a design was measured beside and
 the verdict on a width judged against its default, the entries of a design
 run alternating with its table's reference design, a full ELF's pack of
 designs measured as one device, and a design's step at an operating point
-against its step at its call's own values. Reference and tolerance code is
-in no key: after editing one, measure again with ``remeasure``.
+against its step at its call's own values. A verdict's key names the
+gates and the reference it was judged by, but no code is in a key: after
+editing a reference or a tolerance, measure again with ``remeasure``.
 """
 
 from __future__ import annotations
@@ -225,13 +226,27 @@ class CostCache:
         ]
 
     @staticmethod
-    def judged_key(default: str, entry: str) -> str:
-        """The entry the design at ``entry`` is kept in as judged against
-        its default's, at ``default``.
+    def judged_key(default: str, entry: str, default_op: Operator, op: Operator) -> str:
+        """The entry the design at ``entry``, ``op``, is kept in as judged
+        against its default's, ``default_op`` at ``default``: under both
+        their gates, against ``op``'s reference.
         """
-        return hashlib.sha256(repr(("judged", default, entry)).encode()).hexdigest()[
-            :32
+        gates = [
+            (
+                None
+                if g is None
+                else {
+                    k: f"{v.__module__}.{v.__qualname__}" if callable(v) else v
+                    for k, v in dataclasses.asdict(g).items()
+                }
+            )
+            for g in (default_op.gate(), op.gate())
         ]
+        reference = type(op).reference
+        judgement = (gates, f"{reference.__module__}.{reference.__qualname__}")
+        return hashlib.sha256(
+            repr(("judged", default, entry, judgement)).encode()
+        ).hexdigest()[:32]
 
     def get(self, key: str, kind: type[Record]) -> Record | None:
         """The record at ``key``; None if there is none, or it was written
