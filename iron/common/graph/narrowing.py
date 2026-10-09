@@ -606,7 +606,7 @@ class CostTable:
         entries less that of the design it was run beside.
         """
         pack = self.packs[name]
-        return pack.pair_us - self.load(pack.beside) - self.base_us
+        return max(pack.pair_us - self.load(pack.beside) - self.base_us, 0.0)
 
     @staticmethod
     def pack_name(keys: Iterable[str]) -> str:
@@ -724,7 +724,8 @@ class CostTable:
                 f"{self.path}: the load of {key} is measured beside "
                 f"{cost.beside}, whose own load is not"
             )
-        return cost.pair_us - self.load(cost.beside) - 2 * self.base_us
+        # Measured within its noise of zero (``measure_loads``): zero.
+        return max(cost.pair_us - self.load(cost.beside) - 2 * self.base_us, 0.0)
 
     def entry_costs(self) -> dict[str, float | None]:
         """Each design a calibration pair names, by its entry `E` solved

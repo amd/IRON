@@ -1281,6 +1281,7 @@ def measure_loads(
     Raises:
         ValueError: A design is not in `table`, or `cache` or `table` is
             for another power mode than the NPU's.
+        RuntimeError: A load is measured below zero by more than its noise.
     """
     for v in [reference, *found]:
         if v.key not in table.steps:
@@ -1329,10 +1330,25 @@ def measure_loads(
         times = time_interleaved([r.callable for r in runs], timing, log=log)
         for i, (v, entry) in enumerate(batch):
             alt, grp = times[2 * i], times[2 * i + 1]
+            rounds = min(alt.rounds, grp.rounds)
+            pair_us = (alt.us - grp.us) / (pairs - 1)
+            load = pair_us - table.load(reference.key) - 2 * table.base_us
+            noise = standard_error(
+                [
+                    (a - g) / (pairs - 1)
+                    for a, g in zip(alt.round_us[:rounds], grp.round_us[:rounds])
+                ]
+            )
+            if load < -CONFIDENCE * (noise or 0.0):
+                raise RuntimeError(
+                    f"load of {v.key} beside {reference.key}: negative "
+                    f"{load:.1f} us; measure it with the NPU otherwise idle, in "
+                    f"the session that measured the calibrations"
+                )
             paired[v.key] = Pairing(
-                pair_us=(alt.us - grp.us) / (pairs - 1),
+                pair_us=pair_us,
                 pmode=mode,
-                rounds=min(alt.rounds, grp.rounds),
+                rounds=rounds,
                 calls=timing.calls,
                 measured=CostTable.today(),
             )
@@ -1663,7 +1679,8 @@ def measure_graph(
     which determines each one's entry, each other setting's entry beside
     the first of those (``measure_loads``), and on a full ELF the packs the
     versions' tunings take, each as one device (``measure_packs``), until
-    they take none the table lacks or ``PACK_ROUNDS`` have. Designs, entries,
+    they take none the table lacks or ``PACK_ROUNDS`` have (logging those
+    still lacking). Designs, entries,
     packs and calibrations already in the table or ``cache`` (this NPU's
     ``cost_cache()`` if not given) are kept unless ``remeasure``; those the
     graphs no longer have are dropped from the table. A design a folded
@@ -1890,6 +1907,14 @@ def measure_graph(
             remeasure=remeasure,
             log=log,
         )
+    else:
+        unpacked = designs.unpacked(table)
+        if unpacked:
+            log(
+                f"after {PACK_ROUNDS} rounds the tuning still takes "
+                f"{len(unpacked)} packs the table lacks, priced by their "
+                f"members: {[table.pack_name(d) for d in unpacked]}"
+            )
     table.save()
     return ran
 
@@ -1930,6 +1955,8 @@ def measure_packs(
             `designs`, a pack has more members than the device's contexts
             measure at once or holds every reference, or `cache` or `table`
             is for another power mode than the NPU's.
+        RuntimeError: A pack's entry is measured below zero by more than its
+            noise.
     """
     if table.dispatch != "fused":
         raise ValueError(f"{table.path} prices an xclbin chain: it packs no designs")
@@ -2005,9 +2032,24 @@ def measure_packs(
             times = time_interleaved([r.callable for r in runs], timing, log=log)
             del runs
             alt, grp, once = times[:3]
+            rounds = min(alt.rounds, grp.rounds)
+            pair_us = (alt.us - grp.us) / (pairs - 1)
+            entry_us = pair_us - table.load(reference.key) - table.base_us
+            noise = standard_error(
+                [
+                    (a - g) / (pairs - 1)
+                    for a, g in zip(alt.round_us[:rounds], grp.round_us[:rounds])
+                ]
+            )
+            if entry_us < -CONFIDENCE * (noise or 0.0):
+                raise RuntimeError(
+                    f"pack {name} beside {reference.key}: negative entry "
+                    f"{entry_us:.1f} us; measure it with the NPU otherwise idle, "
+                    f"in the session that measured the calibrations"
+                )
             pack = PackCost(
                 beside=reference.key,
-                pair_us=(alt.us - grp.us) / (pairs - 1),
+                pair_us=pair_us,
                 t_step_us={
                     k: (t.us - once.us) / (repeats - 1) for k, t in zip(keys, times[3:])
                 },

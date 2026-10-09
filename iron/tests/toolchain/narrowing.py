@@ -396,9 +396,10 @@ def test_designs_of_one_array_load_it_once(tmp_path):
 
 
 def test_a_full_elf_load_is_an_entry_less_its_base(tmp_path):
-    table = _table(tmp_path / "costs.json", {"a": (1.0, 100.0)})
+    table = _table(tmp_path / "costs.json", {"a": (1.0, 100.0), "n": (1.0, -2.0)})
     assert table.load("x") == pytest.approx(80.0)
     assert table.load("a") == pytest.approx(100.0)
+    assert table.load("n") == 0.0
     # What one run leaves over its step is not a load: D0 and R drift with it.
     table.record_step("t", StepCost(1.0, 0.0, 500.0, True, True, "turbo", 1, 1, "-"))
     with pytest.raises(ValueError, match="neither beside another design"):
@@ -419,6 +420,9 @@ def test_a_measured_pack_costs_its_entry_and_its_steps_on_it(tmp_path):
     )
     assert table.pack_entry(table.pack_name(["a", "b"])) == pytest.approx(150.0)
     assert table.pack_name(["b", "a", "b"]) in table.packs
+    # Measured within its noise of zero, an entry is zero.
+    table.record_pack(["c"], PackCost("x", x - 2.0, {"c": 1.0}, "turbo", 1, 1, "-"))
+    assert table.pack_entry("c") == 0.0
     assert model_us(table, ["a", "b", "a"], [("a", "b")]) == pytest.approx(
         (50.0 + 10.0 + 150.0 + 30.0, 2)
     )
