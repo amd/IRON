@@ -23,8 +23,12 @@ from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
+from iron.operators.limbs import Limbs
+from iron.operators.magnitude import Magnitude
+from iron.operators.merge import Merge
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
+from iron.operators.resample.op import PatchPositions
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.sample import Sample
 from iron.operators.silu import SiLU
@@ -180,22 +184,19 @@ def test_the_default_column_count_is_the_most_that_leave_whole_tiles():
     "kwargs,why",
     [
         (dict(B_q=64, B_kv=128), "B_q"),
-        (dict(B_q=32, B_kv=32), "multiple of 64"),
         (dict(kv_len=1000), "kv_len"),
         (dict(kv_len=512), "kv_len"),
     ],
     ids=[
         "q_and_kv_blocks_differ",
-        "kv_block_narrower_than_the_mask_vector",
         "kv_len_not_whole_blocks",
         "kv_len_short_of_queries",
     ],
 )
 def test_mha_whose_blocks_do_not_line_up_is_refused(kwargs, why):
     """mha.cc skips a KV block past a Q block by comparing their indices, so
-    the two block sizes must match; its softmax masks a row of keys with
-    64-lane vectors, so a KV block is whole vectors; and the queries are the
-    keys' last rows, whole blocks of them, so the cache must hold them.
+    the two block sizes must match; and the queries are the keys' last rows,
+    whole blocks of them, so the cache must hold them.
     """
     with pytest.raises(ValueError, match=why):
         MHA(num_heads=2, seq_len=1024, num_pipelines=8, **kwargs).resolved(
@@ -206,15 +207,95 @@ def test_mha_whose_blocks_do_not_line_up_is_refused(kwargs, why):
 @pytest.mark.parametrize(
     "kwargs,why",
     [
+        (dict(d=96), "multiple of 64"),
+        (dict(causal=False, window=0), "window must be positive"),
+        (dict(causal=False, window=500), "whole 64-row blocks"),
+        (dict(d=256, causal=False, window=520), "whole 16-row blocks"),
+        (dict(scale=-1.0), "scale"),
+        (dict(B_q=128, B_kv=128), "divide 64"),
+    ],
+    ids=[
+        "head_not_whole_64",
+        "empty_window",
+        "window_not_whole_blocks",
+        "window_not_whole_small_blocks",
+        "negative_scale",
+        "block_past_the_padding",
+    ],
+)
+def test_mha_band_and_head_that_do_not_tile_are_refused(kwargs, why):
+    """mha.cc keeps or skips whole key blocks for a whole query block, so a
+    window is whole blocks; d=256 resolves to 16-row blocks, the largest
+    whose P*V core fits L1.
+    """
+    with pytest.raises(ValueError, match=why):
+        MHA(num_heads=2, seq_len=1024, num_pipelines=8, **kwargs).resolved(
+            from_name("npu2", n_cols=8)
+        )
+
+
+def test_mha_whose_head_fits_no_block_is_refused():
+    """At d=768 even half the head's float32 O fills a P*V core at 16 rows."""
+    with pytest.raises(Unresolvable, match="no block"):
+        MHA(num_heads=2, seq_len=1024, d=768, num_pipelines=8).resolved(
+            from_name("npu2", n_cols=8)
+        )
+
+
+def test_mha_blocks_follow_the_head_size():
+    npu2 = from_name("npu2", n_cols=8)
+    for d, block, pv_cores in ((64, 64, 1), (128, 32, 1), (256, 16, 1), (512, 16, 2)):
+        op = MHA(num_heads=2, seq_len=1024, d=d, num_pipelines=8).resolved(npu2)
+        assert (op.B_q, op.B_kv, op.pv_cores) == (block, block, pv_cores)
+        assert op.pv_width * pv_cores == d
+
+
+@pytest.mark.parametrize(
+    "kwargs,why",
+    [
+        (dict(seq_len=1024, d=512, pv_cores=3), "one core or two"),
+        (dict(seq_len=1536, d=512, num_pipelines=6), "at most 4 pipelines"),
+        (
+            dict(seq_len=1, kv_len=512, num_KV_heads=1, num_pipelines=2, pv_cores=2),
+            "P\\*V takes one core",
+        ),
+    ],
+    ids=["three_ways", "six_pipelines_to_a_join", "one_query_packed"],
+)
+def test_mha_whose_pv_split_does_not_route_is_refused(kwargs, why):
+    """Split, P*V's halves sit on the rows either side of the softmax core,
+    and each memtile then forwards its pipeline's scores and P as well as
+    its share of the O joins; one query packed has a shim's two channels
+    for its K and V.
+    """
+    with pytest.raises(ValueError, match=why):
+        MHA(**{"num_heads": 8, "num_pipelines": 8, **kwargs}).resolved(
+            from_name("npu2", n_cols=8)
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs,why",
+    [
+        (
+            dict(num_heads=8, num_KV_heads=2, num_pipelines=2, causal=False, window=64),
+            "window",
+        ),
         (dict(num_heads=24, num_KV_heads=8, num_pipelines=4), "packs"),
         (dict(num_heads=32, num_KV_heads=8, num_pipelines=8), "at most 4"),
         (dict(num_heads=24, num_KV_heads=6, num_pipelines=4), "dividing"),
     ],
-    ids=["group_not_dividing_a_block", "more_than_four_pipelines", "uneven_groups"],
+    ids=[
+        "windowed",
+        "group_not_dividing_a_block",
+        "more_than_four_pipelines",
+        "uneven_groups",
+    ],
 )
 def test_mha_of_one_query_that_does_not_pack_is_refused(kwargs, why):
-    """One query packs each KV group's heads into a block's rows, and each
-    pipeline reads its own groups' K and V through its own column's memtile.
+    """One query packs each KV group's heads into a block's rows, past every
+    key block, where a window would mask them; and each pipeline reads its own
+    groups' K and V through its own column's memtile.
     """
     with pytest.raises(ValueError, match=why):
         MHA(seq_len=1, kv_len=512, **kwargs).resolved(from_name("npu2", n_cols=8))
@@ -289,3 +370,46 @@ def test_a_step_that_needs_the_order_of_a_gemm_block_is_refused():
             dev
         )
     GEMM(**kwargs, finish=(Link(SiLU(size=2048 * 2048)),)).resolved(dev)
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: Limbs(rows=64, line=176),
+        lambda: Magnitude(rows=64, width=608),
+    ],
+    ids=["limbs", "magnitude"],
+)
+def test_a_line_of_part_of_a_vector_is_refused(make):
+    """Limbs and Magnitude load and store whole 32-lane vectors, so a line
+    (or each half of a complex row) of part of one would read past it.
+    """
+    with pytest.raises(ValueError, match="32-element vectors"):
+        make()
+
+
+@pytest.mark.parametrize(
+    "kwargs,why",
+    [
+        (dict(rows=2560, out_height=64, out_width=912), "whole 48-pixel windows"),
+        (dict(rows=1280, out_height=672, out_width=912), "at most 1280 patches"),
+        (dict(rows=1000, out_height=48, out_width=48), "256-row blocks"),
+    ],
+    ids=["not_whole_windows", "more_patches_than_rows", "rows_not_whole_blocks"],
+)
+def test_patch_positions_that_do_not_tile_are_refused(kwargs, why):
+    """The tower pools whole windows of patches, and the core writes whole
+    blocks of rows: a short block would leave the last rows unwritten.
+    """
+    with pytest.raises(ValueError, match=why):
+        PatchPositions(**kwargs).resolved(from_name("npu2", n_cols=8))
+
+
+def test_merge_of_part_of_a_block_is_refused():
+    """The core reads whole blocks of ids: a short one would leave the last
+    rows unwritten.
+    """
+    with pytest.raises(ValueError, match="64-row blocks"):
+        Merge(rows=100, audio_token=0, image_token=1, audio_at=0, vision_at=0).resolved(
+            from_name("npu2", n_cols=8)
+        )

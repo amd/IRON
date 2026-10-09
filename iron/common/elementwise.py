@@ -4,6 +4,9 @@
 """The shared elementwise array: one core per (column, channel), each
 streaming fixed-size lines of every declared operand through its kernel.
 
+A ``replicate=True`` input is one line each core holds for the whole call
+and every line meets (``RowwiseMul``'s row).
+
 A concrete operator is one small subclass naming the kernel:
 
 ```python
@@ -687,7 +690,11 @@ class Elementwise(Operator):
         (out,) = op.outputs
         n = len(inputs) - len(op.finish_inputs)
         _, scalars = op._arguments(op.kernel(), op.scalars(), n, 1)
-        lines = iter(x.reshape(op.lines, -1, copy=False) for x in inputs[:n])
+        # A held line is one row every call broadcasts against.
+        lines = iter(
+            x.reshape(1 if b.replicate else op.lines, -1, copy=False)
+            for b, x in zip(op.inputs, inputs[:n])
+        )
         y = contract.reference(
             *(
                 scalars[i] if i in scalars else next(lines)
@@ -717,6 +724,13 @@ class Elementwise(Operator):
             return f"{col}" if self.num_channels == 1 else f"{col}_{chan}"
 
         def fifos(stream, name):
+            # A held line, acquired once per call, is one fifo per lane that
+            # the cores of its lane share.
+            if stream.replicate:
+                return [
+                    ObjectFifo(stream.tile, name=f"{name}_held_{j}", depth=1)
+                    for j in range(stream.count)
+                ]
             depth = target.fifo_depth(math.prod(stream.tile_shape), stream.dtype)
             return [
                 ObjectFifo(stream.tile, name=f"{name}_{slot(k)}", depth=depth)
@@ -739,6 +753,7 @@ class Elementwise(Operator):
         )
         barriers = [WorkerRuntimeBarrier() for _ in range(cores)]
         n_fifos = n_in + len(outs)
+        held = [s.replicate for s in ins] + [False] * len(outs)
 
         def core_fn(*args):
             fifos = args[:n_fifos]
@@ -748,8 +763,11 @@ class Elementwise(Operator):
             n = count.read() if dynamic else count[0]
             mode = finish.read(rest)
             barrier.release_with_value(1)
+            kept = {j: f.acquire(1) for j, f in enumerate(fifos) if held[j]}
             for _ in range_(n):
-                elements = [f.acquire(1) for f in fifos]
+                elements = [
+                    kept[j] if held[j] else f.acquire(1) for j, f in enumerate(fifos)
+                ]
                 tile = elements[-1]
                 elements[-1] = finish.target(rest, mode, tile)
                 kernel_fn(
@@ -759,13 +777,16 @@ class Elementwise(Operator):
                     )
                 )
                 finish.apply(rest, mode, tile)
-                for f in fifos:
-                    f.release(1)
+                for j, f in enumerate(fifos):
+                    if not held[j]:
+                        f.release(1)
+            for j in kept:
+                fifos[j].release(1)
 
         workers = [
             Worker(
                 core_fn,
-                [of[k].cons() for of in of_ins]
+                [of[k % len(of)].cons() for of in of_ins]
                 + [of[k].prod() for of in of_outs]
                 + [kernel, counts[k], barriers[k], *finish.args(k)],
             )
@@ -773,7 +794,8 @@ class Elementwise(Operator):
         ]
         for k in range(cores):
             for stream, of in zip(ins, of_ins):
-                stream.lane(k).bind(of[k].prod())
+                if k < len(of):
+                    stream.lane(k).bind(of[k].prod())
             for stream, of in zip(outs, of_outs):
                 stream.lane(k).bind(of[k].cons())
         if not dynamic:

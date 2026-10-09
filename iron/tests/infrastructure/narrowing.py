@@ -39,6 +39,7 @@ from iron.common.graph.probe import (
     Point,
     Standalone,
     Timing,
+    calibrate,
     check_model,
     measure_graph,
     measure_packs,
@@ -270,6 +271,25 @@ def test_measures_more_widths_than_one_batch_of_contexts(tmp_path):
 
 
 @pytest.mark.supported_devices("npu2")
+def test_a_calibration_against_another_sessions_steps_is_refused(tmp_path):
+    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    traced = Chain().trace(a=(SIZE,), b=(SIZE,))
+    dev = aie_utils.ensure_current_device()
+    add, silu = (variants(s.op, dev)[-1] for s in traced.steps[:2])
+    timing = Timing(rounds=2, calls=10)
+    for v in (add, silu):
+        measure_steps(table, [v], timing)
+    # A step measured slower than it runs here leaves the dispatch negative.
+    slow = table.steps[add.key]
+    table.record_step(
+        add.key, dataclasses.replace(slow, t_step_us=slow.t_step_us + 1000)
+    )
+    with pytest.raises(RuntimeError, match="negative"):
+        calibrate(table, add.op, silu.op, timing)
+    assert not table.calibrations
+
+
+@pytest.mark.supported_devices("npu2")
 def test_a_setting_far_behind_the_fastest_is_timed_no_further(tmp_path):
     # GEMV at one column is several times its widest's step.
     found = variants(GEMV(M=2048, K=2048), aie_utils.ensure_current_device())
@@ -456,7 +476,9 @@ def test_tuned_graph_is_bit_identical_and_packed(tmp_path):
 
     tuned = Chain().compile(
         image=iron.ELF,
-        coresident=JointNarrowing(table, fit_cache=tmp_path / "fits"),
+        coresident=JointNarrowing(
+            table, fit_cache=tmp_path / "fits", tuning_cache=tmp_path / "tunings"
+        ),
         a=(SIZE,),
         b=(SIZE,),
     )

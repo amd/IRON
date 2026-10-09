@@ -12,6 +12,7 @@ import iron
 from iron.common import Scratchpad
 from iron.common.graph.narrowing import JointNarrowing
 from iron.operators.copy import Copy
+from iron.operators.merge import Merge
 
 from .audio.model import AudioTower
 from .model import Config, EmbeddingGemma
@@ -26,9 +27,9 @@ class Multimodal(EmbeddingGemma):
 
     A call with neither is the text encoder's. A mixed call writes the token
     embeddings to the state ``merged`` from its first row, the clip's soft
-    tokens from ``audio_at`` and the image's from ``vision_at``; ``merge``,
-    a row of ``merged`` per position, gathers the sequence the encoder runs
-    over. Only the versions without a tower compile in ``load``: a mixed one
+    tokens from ``audio_at`` and the image's from ``vision_at``; ``Merge``
+    gives each position its row of ``merged`` from ``ids``, and those rows
+    are the sequence the encoder runs over. Only the versions without a tower compile in ``load``: a mixed one
     compiles on its first call, with the tuner ``load`` was given.
 
     Args:
@@ -62,27 +63,37 @@ class Multimodal(EmbeddingGemma):
     def body(
         self,
         ids,
-        merge=None,
-        mel=None,
-        pixels=None,
-        xy=None,
-        position_ids=None,
+        wave=None,
+        rgb=None,
         *,
         n: Scratchpad[np.int32],
         n_audio: Scratchpad[np.int32],
+        frames: Scratchpad[np.int32],
         n_patches: Scratchpad[np.int32],
+        height: Scratchpad[np.int32],
+        width: Scratchpad[np.int32],
+        out_height: Scratchpad[np.int32],
+        out_width: Scratchpad[np.int32],
     ):
-        x = Copy(self.embedding[ids])
-        if merge is None:
-            if mel is not None or pixels is not None:
-                raise ValueError("a tower's soft tokens take places merge= names")
-            return self.encoder(x, n)
+        if wave is None and rgb is None:
+            return self.encoder(Copy(self.embedding[ids]), n)
+        c = self.config
+        # An input's gather is encoded on the host into its buffer, which Merge
+        # reads as the ids: gather by the device's copy of them.
+        x = Copy(self.embedding[Copy(ids, dtype=np.int32)])
+        merge = Merge(
+            ids,
+            audio_token=c.audio_token,
+            image_token=c.image_token,
+            audio_at=self.audio_at,
+            vision_at=self.vision_at,
+        )
         Copy(x, self.merged[: x.shape[0]])
-        if mel is not None:
-            a = self.audio(mel, n_audio)
+        if wave is not None:
+            a = self.audio(wave, n_audio, frames)
             Copy(a, self.merged[self.audio_at : self.audio_at + a.shape[0]])
-        if pixels is not None:
-            v = self.vision(pixels, xy, position_ids, n_patches)
+        if rgb is not None:
+            v = self.vision(rgb, n_patches, height, width, out_height, out_width)
             Copy(v, self.merged[self.vision_at : self.vision_at + v.shape[0]])
         return self.encoder(Copy(self.merged[merge]), n)
 
@@ -104,9 +115,8 @@ class Multimodal(EmbeddingGemma):
         Args:
             tokens: The token ids, each placeholder run as long as its soft
                 tokens.
-            audio: One clip's ``(features, frames)``, as ``LogMel`` gives them.
-            image: One image's ``(pixel_values, positions)``, as the
-                processor gives them.
+            audio: One mono clip at the audio tower's ``sample_rate``.
+            image: One decoded image, ``(height, width, 3)`` uint8.
 
         Raises:
             ValueError: A placeholder's count is not its tower's soft tokens.
@@ -114,28 +124,35 @@ class Multimodal(EmbeddingGemma):
         c = self.config
         tokens = np.asarray(tokens)
         ids, n = self.inputs(tokens)
-        values = dict(n=n, n_audio=0, n_patches=0)
-        mel, picture = None, (None,) * 3
-        soft = {c.audio_token: (0, 0), c.image_token: (0, 0)}
+        values = dict(
+            n=n,
+            n_audio=0,
+            frames=0,
+            n_patches=0,
+            height=0,
+            width=0,
+            out_height=0,
+            out_width=0,
+        )
+        wave = rgb = None
+        soft = {c.audio_token: 0, c.image_token: 0}
         if audio is not None:
-            mel, values["n_audio"] = self.audio.inputs(*audio)
-            soft[c.audio_token] = (self.audio_at, self.audio.config.tokens(audio[1]))
+            wave, values["n_audio"], values["frames"] = self.audio.inputs(audio)
+            soft[c.audio_token] = self.audio.config.tokens(values["frames"])
         if image is not None:
-            given, values["n_patches"] = self.vision.inputs(*image)
-            picture = tuple(given.values())
-            pooled = values["n_patches"] // self.vision.config.pool**2
-            soft[c.image_token] = (self.vision_at, pooled)
-        merge = np.arange(ids.size, dtype=np.int32)
-        for token, (at, count) in soft.items():
-            places = np.flatnonzero(tokens == token)
-            if places.size != count:
+            vision = self.vision.config
+            rgb, sizes = self.vision.processor.inputs(image, vision.image_tokens)
+            values.update(sizes, n_patches=sizes.pop("n"))
+            soft[c.image_token] = values["n_patches"] // vision.pool**2
+        for token, count in soft.items():
+            places = np.count_nonzero(tokens == token)
+            if places != count:
                 raise ValueError(
-                    f"{places.size} placeholders {token} for {count} soft tokens"
+                    f"{places} placeholders {token} for {count} soft tokens"
                 )
-            merge[places] = at + np.arange(count)
         if audio is None and image is None:
             return (ids,), values
-        return (ids, merge, mel, *picture), values
+        return (ids, wave, rgb), values
 
     def encode(self, tokens, dims: int = 768, audio=None, image=None) -> np.ndarray:
         """The unit-length embedding of ``tokens`` with ``audio`` and
@@ -144,7 +161,7 @@ class Multimodal(EmbeddingGemma):
         inputs, values = self.mixed(tokens, audio, image)
         given = {k: t for k, t in zip(self._inputs, inputs) if t is not None}
         shapes = tuple((k, t.shape) for k, t in given.items())
-        if "merge" in given and shapes not in self.compiled:
+        if len(given) > 1 and shapes not in self.compiled:
             self.compile(
                 coresident=self.tuner,
                 **{k: (t.shape, t.dtype) for k, t in given.items()},

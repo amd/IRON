@@ -44,7 +44,7 @@ def device_symbol(op: Operator, value: BoundValue) -> str:
     if own is not None:
         return own
     bound = op.bound_values.get(value.name)
-    return f"{op.name}_{value.name}" + (f"_{bound}" if bound else "")
+    return f"{op.name}_{value.name}" + ("" if bound is None else f"_{bound.name}")
 
 
 def build_design(op: Operator, image: str = "elf", **dispatch):

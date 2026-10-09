@@ -679,6 +679,11 @@ def test_a_stream_with_no_lanes_is_paid_once_in_the_shim_budget():
     assert Scaled.shim_columns(NPU2) == (NPU2.shim_dma_channels_in - 1) // 2 == 7
 
 
+def test_a_broadcast_stream_is_paid_once_in_the_shim_budget():
+    # 16 input channels: B once, then A's two channels a column.
+    assert MV.shim_columns(NPU2, num_channels=2) == (16 - 1) // 2
+
+
 def test_a_computed_default_is_inferred_from_a_shape_or_computed():
     class Rep(Operator):
         rows: int = param()
@@ -820,7 +825,7 @@ def test_a_bounded_operand_binds_the_extent_and_what_derives_from_it(npu2):
     t = g.trace(x=(64, 8))
     a, b = t.operators
     for op in (a, b):
-        assert op.bound_extents == {"valid": "n"}
+        assert {k: e.name for k, e in op.bound_extents.items()} == {"valid": "n"}
         assert op.uses_value("valid") and op.uses_value("count")
         assert not op.uses_value("width")  # still written once per build
         assert set(op.residents) == {"width"}

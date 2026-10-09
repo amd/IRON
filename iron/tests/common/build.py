@@ -33,6 +33,7 @@ from iron.common import (
     OptionalDim,
     param,
 )
+from iron.common import graph
 from iron.common.design import (
     OperatorDesign,
     Sequence,
@@ -89,6 +90,8 @@ _TASK = re.compile(
     r"(?: \{length_parameter = @(\w+), length_unit = (\d+) : i32\})?"
     r"\s*aie\.end\s*\}(?: \{([^}]*)\})?"
 )
+# The graph value a test binds an extent to, as ``x[:n]`` does.
+N = graph.Value("n", "scratchpad", np.int32).affine()
 
 
 def generated_sequence(op, image="elf") -> tuple[str, list[Task]]:
@@ -212,14 +215,14 @@ def test_mha_infers_the_padded_length_and_the_kv_head_count():
 
 
 def test_mha_binds_p_times_v_at_its_own_shape():
-    """Past B_kv = d, P*V's operands are not QK^T's: P is (B_q, B_kv), V
+    """Away from B_kv = d, P*V's operands are not QK^T's: P is (B_q, B_kv), V
     (B_kv, d) and O (B_q, d), each streamed as P*V takes it, O accumulated
     in float32 and rounded once into the bf16 output.
     """
-    op = MHA(num_heads=1, seq_len=1024, num_pipelines=8, B_q=128, B_kv=128)
-    text = str(build_design(op.resolved()))
-    p, v = "memref<128x128xbf16>", "memref<128x64xbf16>"
-    acc, o = "memref<128x64xf32>", "memref<128x64xbf16>"
+    op = MHA(num_heads=1, seq_len=1024, d=128, num_pipelines=8, B_q=32, B_kv=32)
+    text = str(build_design(op.resolved(from_name("npu2", n_cols=8))))
+    p, v = "memref<32x32xbf16>", "memref<32x128xbf16>"
+    acc, o = "memref<32x128xf32>", "memref<32x128xbf16>"
     assert re.search(rf'_matmul_PV"?\({p}, {v}, {acc},', text)
     assert re.search(rf'_rescale_O"?\({acc}, {o},', text)
 
@@ -232,7 +235,7 @@ def test_mha_binds_p_times_v_at_its_own_shape():
 def _bounded_gemv():
     # A patched length is whole 16-byte units: an output tile of 8 bf16 rows.
     op = GEMV(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=8)
-    op.use_value("valid", "n")  # what a graph does for A[:n]
+    op.use_value("valid", N)  # what a graph does for A[:n]
     return op
 
 
@@ -313,7 +316,7 @@ def test_a_size_patch_names_a_dimension_and_a_word(size_by, error, match):
             rt.fill(self.A.lane(0), self.A, size_by=size_by(self))
 
     op = Patched(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=4)
-    op.use_value("valid", "n")
+    op.use_value("valid", N)
     with pytest.raises(error, match=match):
         build_design(op)
 
@@ -321,7 +324,7 @@ def test_a_size_patch_names_a_dimension_and_a_word(size_by, error, match):
 def test_a_bounded_repeat_patches_the_stack_axis():
     # The stack axis is on D2 with its patched count, rows and repeats around it.
     op = Repeat(rows=4, cols=8, seq=32, repeat=2).resolved(NPU2_4COL)
-    op.use_value("valid_seq", "c")
+    op.use_value("valid_seq", graph.Value("c", "scratchpad", np.int32).affine())
     _, tasks = generated_sequence(op)
     assert [(t.lane, t.sizes, t.strides, t.length_parameter[-11:]) for t in tasks] == [
         ("fifo_in", "2, 32, 4, 8", "0, 8, 256, 1", "valid_seq_x"),

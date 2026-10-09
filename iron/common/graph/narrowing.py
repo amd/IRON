@@ -24,6 +24,9 @@ candidates are the connected sets of designs, and an exact search over
 partitions into them, carrying the parity, finds the cheapest. The placer
 (``fits``) is asked only about the packs a solution uses; a refused pack
 tries its next-cheapest settings, then is dropped, and the search reruns.
+What the search chose is recorded, keyed on the runlist, the table and the
+device, and a later tuning of the same runlist takes it while its packs
+still fit.
 
 A setting is a candidate only if it was measured accurate: its output
 bit-identical to the default's, or within the gate of the default and its
@@ -175,6 +178,9 @@ def variants(op: Operator, dev, pinned: frozenset[str] = frozenset()) -> list[Va
 
 
 FIT_CACHE = Path(NPU_CACHE_HOME) / "iron" / "fits"
+TUNING_CACHE = Path(NPU_CACHE_HOME) / "iron" / "tunings"
+# A tuning another version of the search recorded is not taken.
+SEARCH_DIGEST = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 # Standard errors a setting's step must beat its default's by to be taken.
 CONFIDENCE = 2.0
@@ -588,6 +594,19 @@ class CostTable:
         """The name ``packs`` holds the designs of ``keys`` under, in any order."""
         return "|".join(sorted(set(keys)))
 
+    def digest(self) -> str:
+        """The table's entries, hashed: what a tuning from it is keyed on."""
+        entries = {
+            name: {k: dataclasses.asdict(v) for k, v in table.items()}
+            for name, table in (
+                ("steps", self.steps),
+                ("calibrations", self.calibrations),
+                ("packs", self.packs),
+            )
+        }
+        entries["measured"] = [self.device, self.dispatch]
+        return hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest()
+
     def _calibrated(self, figure: str) -> float:
         if self._medians is None:
             if not self.calibrations:
@@ -926,6 +945,11 @@ class _Pack:
     members: tuple[int, ...]
     entries: int
     options: list[tuple[float, tuple[Variant, ...]]]
+    mask: int = dataclasses.field(init=False)
+
+    def __post_init__(self):
+        # Read once per search state: hundreds of millions of times.
+        self.mask = sum(1 << i for i in self.members)
 
     @property
     def cost(self) -> float:
@@ -934,10 +958,6 @@ class _Pack:
     @property
     def combo(self) -> tuple[Variant, ...]:
         return self.options[0][1]
-
-    @property
-    def mask(self) -> int:
-        return functools.reduce(lambda m, i: m | (1 << i), self.members, 0)
 
 
 def _cheapest(
@@ -997,6 +1017,8 @@ class JointNarrowing:
         confidence: How many standard errors of the difference a setting's
             step must beat its default's by to be taken
             (``CostTable.step_against``).
+        tuning_cache: Where the packs search chose persist across
+            processes, taken again while every pack still fits.
     """
 
     table: CostTable = dataclasses.field(compare=False)
@@ -1005,6 +1027,7 @@ class JointNarrowing:
     fit_cache: Path = dataclasses.field(default=FIT_CACHE, compare=False)
     fold_runs: int = FOLD_RUNS
     confidence: float = CONFIDENCE
+    tuning_cache: Path = dataclasses.field(default=TUNING_CACHE, compare=False)
 
     def tune(self, traced: TracedGraph, dev, dispatch: str) -> Tuning:
         """Choose the folds, tunables and packs of ``traced`` for ``dev``,
@@ -1205,6 +1228,17 @@ class JointNarrowing:
         packs; a setting alone priced at its step in ``steps``.
         """
         table = self.table
+        record = self._tuning_record(keys, found, dev)
+        fitted: dict[tuple[str, ...], bool] = {}
+        if record.exists():
+            data = json.loads(record.read_text())
+            chosen = {
+                k: {v.key: v for v in found[k]}[key]
+                for k, key in data["chosen"].items()
+            }
+            groups = tuple(tuple(group) for group in data["groups"])
+            if all(self._fit([chosen[k] for k in g], fitted) for g in groups):
+                return chosen, groups
         # The designs of one array are one device, so they keep one array:
         # the search runs over arrays, each named for its first design, and
         # every other design of it takes its cheapest setting at that array
@@ -1289,7 +1323,6 @@ class JointNarrowing:
             if self._gain(pack, alone) + table.reset_us > 0:
                 packs.append(pack)
 
-        fitted: dict[tuple[str, ...], bool] = {}
         while True:
             chosen_packs = self._partition(runlist, alone, packs)
             refused = [p for p in chosen_packs if not self._fit(p.combo, fitted)]
@@ -1312,7 +1345,39 @@ class JointNarrowing:
         groups = tuple(
             tuple(runlist.order[i] for i in sorted(p.members)) for p in chosen_packs
         )
+        _write(
+            record,
+            json.dumps(
+                {"chosen": {k: v.key for k, v in chosen.items()}, "groups": groups}
+            ),
+        )
         return chosen, groups
+
+    def _tuning_record(
+        self, keys: Sequence[str], found: Mapping[str, Sequence[Variant]], dev
+    ) -> Path:
+        """The file holding what the packs search chose for the runlist
+        ``keys`` over the settings ``found``.
+
+        Keyed on everything the search reads bar the placer, whose verdicts
+        a recorded tuning is checked against when taken. The search takes
+        seconds to minutes on a graph of hundreds of designs.
+        """
+        h = hashlib.sha256(
+            json.dumps(
+                [
+                    SEARCH_DIGEST,
+                    list(keys),
+                    {k: [v.key for v in cands] for k, cands in found.items()},
+                    self.table.digest(),
+                    repr(dev),
+                    self.max_members,
+                    self.fit_attempts,
+                    self.confidence,
+                ]
+            ).encode()
+        )
+        return self.tuning_cache / h.hexdigest()[:24]
 
     @staticmethod
     def _gain(pack: _Pack, alone: Sequence[tuple[float, Variant, int]]) -> float:

@@ -130,11 +130,16 @@ class Sequence:
         tiles = shape[axis] // (lanes * tile_rows)
         run = tile_rows * inner
         shim = BdLimits.of(buffer._op.dev, 0, 0)
-        halves = shim.factor(run, shim.granule(dtype))
+        granule = shim.granule(dtype)
+        halves = shim.factor(run, granule)
         if halves is None:
             raise ValueError(
                 f"{buffer.name}: a {run}-element tile does not fit one descriptor"
             )
+        # A unit D1 is stripped, which would drop the tile count into D1's
+        # wrap; past it, a tile split in two keeps the count on D2, which has none.
+        if halves[0] == 1 and tiles > shim.wrap and run % (2 * granule) == 0:
+            halves = (2, run // 2)
         iterations = shape[0] if axis else 1
         tiled = TensorAccessPattern.full((iterations, tiles, lanes, run))
         out = []

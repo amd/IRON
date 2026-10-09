@@ -55,7 +55,7 @@ from .placement import Placement
 from .profile import Profile
 
 if TYPE_CHECKING:
-    from ..graph.handle import Handle
+    from ..graph.handle import Affine, Handle
 
 _T = TypeVar("_T")
 
@@ -286,9 +286,9 @@ class Operator(metaclass=_OperatorMeta):
     trace: TraceConfig | None = dataclasses.field(
         default=None, repr=False, kw_only=True
     )
-    # The graph values bound to per-call values, by member name; design_key
-    # adds them, since a dict does not hash.
-    bound_values: dict[str, str | None] = dataclasses.field(
+    # The graph expressions bound to per-call values, by member name;
+    # design_key adds their names, since a dict does not hash.
+    bound_values: dict[str, Affine | None] = dataclasses.field(
         default_factory=dict, repr=False, compare=False, kw_only=True
     )
     # The tunables its caller gave, which the tuner holds; a profile's and
@@ -568,9 +568,9 @@ class Operator(metaclass=_OperatorMeta):
         """How many of ``dev``'s columns fit this operator's streams in the shim DMA budget.
 
         A ``replicate`` stream is paid once per channel rather than per column,
-        and a stream with no ``per=`` once. ``operands`` are an instance's
-        streams beside the declared ones (``finish_inputs``; a prologue's
-        inputs share the stream they prepare).
+        and a stream with no ``per=`` (one lane, or a ``broadcast``) once.
+        ``operands`` are an instance's streams beside the declared ones
+        (``finish_inputs``; a prologue's inputs share the stream they prepare).
         """
         streams = [
             m
@@ -666,7 +666,10 @@ class Operator(metaclass=_OperatorMeta):
             if f.compare
         )
         if self.bound_values:
-            own += (("values", tuple(sorted(self.bound_values.items()))),)
+            names = {
+                k: None if v is None else v.name for k, v in self.bound_values.items()
+            }
+            own += (("values", tuple(sorted(names.items()))),)
         if self.placements:
             own += (("placements", self.placements),)
         if self.finish:
@@ -1031,8 +1034,9 @@ class Operator(metaclass=_OperatorMeta):
     @property
     def residents(self) -> dict[str, Any]:
         """What the preamble writes once per build, by name."""
+        fixed = self._derived_under_bound()
         return {
-            m.name: m.derive(self)
+            m.name: m.derive(self) if fixed.get(m.name) is None else fixed[m.name]
             for m in (*self._members, *self._chain_words)
             if isinstance(m, Value)
             and m.derive is not None
@@ -1049,7 +1053,7 @@ class Operator(metaclass=_OperatorMeta):
         return True
 
     @property
-    def bound_extents(self) -> dict[str, str | None]:
+    def bound_extents(self) -> dict[str, Affine | None]:
         bound = self.bound_values
         return {
             m.name: bound[m.name]
@@ -1058,13 +1062,21 @@ class Operator(metaclass=_OperatorMeta):
         }
 
     def _per_call_derived(self) -> frozenset[str]:
+        return frozenset(k for k, v in self._derived_under_bound().items() if v is None)
+
+    def _derived_under_bound(self) -> dict[str, int | None]:
+        """Each derived value that reads a bound extent: the number it is at
+        every bound (``n - n``, ``(4 * n) // n``), or None where it follows
+        the call.
+        """
         bound = self.bound_extents
         if not bound:
-            return frozenset()
+            return {}
         # From array(), derivations run on the operator: reading an extent here is not the array's.
         op = object.__getattribute__(self, "_op") if type(self) is _ArrayView else self
         probe = copy.copy(op)
-        out = set()
+        forms = None if None in bound.values() else bound
+        out: dict[str, int | None] = {}
         for m in self._value_members:
             if not (isinstance(m, Value) and m.derive is not None):
                 continue
@@ -1074,9 +1086,18 @@ class Operator(metaclass=_OperatorMeta):
                 m.derive(probe)
             except Exception:
                 pass  # unresolved: what it read before failing still counts
-            if reads & bound.keys():
-                out.add(m.name)
-        return frozenset(out)
+            if not reads & bound.keys():
+                continue
+            out[m.name] = None
+            if forms is None:
+                continue
+            try:
+                got = op.derived_at(m.name, **forms)
+            except Exception:
+                continue  # no form, or unresolved: per call either way
+            if isinstance(got, (int, np.integer)) and not isinstance(got, bool):
+                out[m.name] = int(got)
+        return out
 
     def derived_at(self, name: str, **extents: int) -> Any:
         """The word the host writes for ``name`` with the extents at the given bounds."""
@@ -1116,8 +1137,8 @@ class Operator(metaclass=_OperatorMeta):
                 f"{type(self).__name__} declares no value {name!r}"
             ) from None
 
-    def use_value(self, name: str, bound_to: str | None = None) -> None:
-        """Record that a graph binds the per-call value ``name`` to its value ``bound_to``."""
+    def use_value(self, name: str, bound_to: Affine | None = None) -> None:
+        """Record that a graph binds the per-call value ``name`` to its expression ``bound_to``."""
         if not any(m.name == name for m in self._value_members):
             raise TypeError(
                 f"{type(self).__name__} declares no per-call value {name!r}"

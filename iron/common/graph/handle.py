@@ -387,9 +387,16 @@ class Affine:
     ((v * scale + bias) >> down) * mul + add
     ```
 
-    where ``>>`` floors. A binding takes only a linear one (``down`` 0). Any
-    operation besides integer sums, products and power-of-two floor
-    divisions raises ``TypeError``.
+    where ``>>`` floors. A binding writes a linear one (``down`` 0, kept in
+    ``scale`` and ``bias``, so ``(p + 1) * 64`` is ``Affine(p, 64, 64)``).
+    Sums, products and floor divisions by a power of two (and so
+    ``ceildiv``) with integers are expressions too, which is how an
+    operator's derivation run on its bound gives the Emit row of what it
+    derives. So are the sum and difference of two linear expressions in one
+    value, and the quotient of two that are multiples of one another, an
+    integer where the value cancels (``n - n`` is 0, ``(4 * n) // n`` is 4).
+    Anything else (a comparison, another divisor, two values) raises
+    ``TypeError``.
     """
 
     value: Value
@@ -409,14 +416,21 @@ class Affine:
             raise TypeError(f"{self} is not linear in {self.value.name}")
         return self
 
-    def __add__(self, k: int) -> Affine:
+    def __add__(self, k: int | Affine) -> Affine | int:
+        if isinstance(k, Affine):
+            if k.value is not self.value or self.down or k.down:
+                return NotImplemented
+            scale = self.scale + k.scale
+            if not scale:
+                return self.bias + k.bias
+            return Affine(self.value, scale, self.bias + k.bias)
         if isinstance(k, bool) or not isinstance(k, (int, np.integer)):
             return NotImplemented
         if self.down:
             return dataclasses.replace(self, add=self.add + int(k))
         return dataclasses.replace(self, bias=self.bias + int(k))
 
-    def __sub__(self, k: int) -> Affine:
+    def __sub__(self, k: int | Affine) -> Affine | int:
         return self + (-k)
 
     def __rsub__(self, k: int) -> Affine:
@@ -435,7 +449,15 @@ class Affine:
 
     __radd__, __rmul__ = __add__, __mul__
 
-    def __floordiv__(self, d: int) -> Affine:
+    def __floordiv__(self, d: int | Affine) -> Affine | int:
+        if isinstance(d, Affine):
+            # floor(q u / u) = q, wherever u is not 0
+            linear = not (self.down or d.down) and d.value is self.value
+            if linear and d.scale and self.scale % d.scale == 0:
+                q = self.scale // d.scale
+                if self.bias == q * d.bias:
+                    return q
+            raise TypeError(f"no expression for ({self}) // ({d})")
         if isinstance(d, bool) or not isinstance(d, (int, np.integer)):
             return NotImplemented
         d = int(d)
@@ -443,16 +465,18 @@ class Affine:
             return (-self) // -d
         if d == 0 or d & (d - 1):
             raise TypeError(f"no expression for a floor division by {d}")
-        k = d.bit_length() - 1
-        if not self.down:
-            return dataclasses.replace(self, down=k)
+        if self.mul != 1:
+            if self.mul % d == 0:  # the floored term divides exactly
+                return dataclasses.replace(self, mul=self.mul // d, add=self.add // d)
+            raise TypeError(f"no expression for ({self}) // {d}")
         # floor((floor(u / 2^a) + c) / 2^k) = floor((u + c 2^a) / 2^(a+k))
-        if self.mul == 1:
-            bias = self.bias + (self.add << self.down)
-            return Affine(self.value, self.scale, bias, self.down + k)
-        if self.mul % d == 0:  # the floored term divides exactly
-            return dataclasses.replace(self, mul=self.mul // d, add=self.add // d)
-        raise TypeError(f"no expression for ({self}) // {d}")
+        scale, bias = self.scale, self.bias + (self.add << self.down)
+        k = self.down + d.bit_length() - 1
+        while k and scale % 2 == 0 and bias % 2 == 0:
+            scale, bias, k = scale // 2, bias // 2, k - 1
+        if scale % (1 << k) == 0:  # floor(s v / 2^k + b / 2^k) is linear
+            return Affine(self.value, scale >> k, bias >> k)
+        return Affine(self.value, scale, bias, k)
 
     def __bool__(self):
         raise TypeError(f"{self} has no truth value: it is computed per call")

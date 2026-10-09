@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Joint narrowing without a device: width candidates, the cost model, the
-pack search, and the placer verdicts it keeps.
+pack search, and the placer verdicts and tunings it keeps.
 
 The costs are made up, composed as the probe measures them; the placer runs
 mlir-aie's passes in process. Hardware checks a tuned graph against the
@@ -205,11 +205,12 @@ def test_a_design_keeps_a_tunable_any_of_its_calls_pins(tmp_path, npu2):
     assert {cost_key(s.op, npu2) for s in narrowed.steps} == {cost_key(free)}
 
 
-def test_variants_leave_out_a_width_whose_bounded_transfers_do_not_fit(npu2):
-    # Two lanes round-robin 1024 one-row tiles each: past a descriptor's 1023.
+def test_variants_keep_a_width_whose_bounded_tile_count_moves_to_d2(npu2):
+    # Two lanes round-robin 1024 one-row tiles each, past D1's 1023 wrap; a
+    # tile split over D1 and D0 keeps the count on D2, which has none.
     op = Rotate().trace(x=(2048, 64), angles=(2048, 64)).steps[0].op
     found = variants(op, npu2)
-    assert [dict(v.tunables)["num_aie_columns"] for v in found] == [8, 4, 1]
+    assert [dict(v.tunables)["num_aie_columns"] for v in found] == [8, 4, 2, 1]
 
 
 def test_derived_fields_are_not_widths(npu2):
@@ -224,9 +225,10 @@ def test_derived_fields_are_not_widths(npu2):
     assert mha.widths == {"num_pipelines": 1}
     assert mha.domains(npu2) == {
         "num_pipelines": (8, 4, 2, 1),
-        "B_q": (256, 128, 64),
-        "B_kv": (256, 128, 64),
+        "B_q": (64, 32, 16),
+        "B_kv": (64, 32, 16),
         "placement": ("memtiles", "tiles", "columns"),
+        "pv_cores": (1, 2),
     }
     with pytest.raises(TypeError, match="no tunable"):
         gemm.with_tunables(n_shim_mem_a=1)
@@ -300,7 +302,9 @@ def test_a_block_is_no_larger_than_a_core_holds(npu2):
     # Uncapped, a 32768-row prefill's ladder runs to kv_len, and generating
     # MHA at a 32768 x 32768 score tile to ask the placer takes 8 GiB.
     mha = MHA(num_heads=8, seq_pad=32768).resolved(npu2)
-    assert mha.domains(npu2)["B_kv"] == (512, 256, 128, 64)
+    assert mha.domains(npu2)["B_kv"] == (64, 32, 16)
+    wide = MHA(num_heads=4, seq_pad=2048, d=256, causal=False).resolved(npu2)
+    assert wide.domains(npu2)["B_kv"] == (16,)
     context = GQAContext(heads=32, groups=8, seq_len=32768).resolved(npu2)
     assert context.domains(npu2)["chunk"] == (512, 256, 128, 64)
     softmax = Softmax(rows=32, cols=32768).resolved(npu2)
@@ -321,7 +325,8 @@ def test_flm_gemm_searches_its_a_tile_and_row_blocks(npu2):
 def test_a_placement_is_searched_by_name_and_keys_the_array(tmp_path, npu2):
     chunk = MHA(num_heads=8, num_KV_heads=2, seq_len=2048, kv_len=8192)
     chunk = chunk.with_tunables(num_pipelines=8, B_q=64, B_kv=64)
-    found = variants(chunk, npu2, frozenset({"num_pipelines", "B_q", "B_kv"}))
+    fixed = frozenset({"num_pipelines", "B_q", "B_kv", "pv_cores"})
+    found = variants(chunk, npu2, fixed)
     assert [v.tunables for v in found] == [
         (("placement", p),) for p in ("memtiles", "tiles", "columns")
     ]
@@ -1069,17 +1074,21 @@ def test_a_clamp_folded_into_flm_gemm_costs_what_the_gemm_does(npu2):
 def test_placer_verdicts_are_kept_across_tunings(tmp_path, npu2):
     traced, _, table = _add_silu(tmp_path, npu2)
     fit_cache = tmp_path / "fits"
-    first = JointNarrowing(table, fit_cache=fit_cache).tune(traced, npu2, "fused")
+    tuner = JointNarrowing(
+        table, fit_cache=fit_cache, tuning_cache=tmp_path / "tunings"
+    )
+    first = tuner.tune(traced, npu2, "fused")
     records = sorted(fit_cache.iterdir())
     assert records and all(r.read_text() == "fits" for r in records)
     widths = {k: v.tunables for k, v in first.chosen.items()}
 
     # A second tuning reads the verdicts rather than asking the placer: one
     # recorded as refused is taken as refused, and the pack moves to its
-    # next-cheapest widths, which the placer is then asked about.
+    # next-cheapest widths, which the placer is then asked about. The
+    # recorded tuning's pack is refused too, so it is searched again.
     for r in records:
         r.write_text("refused: recorded by the test")
-    second = JointNarrowing(table, fit_cache=fit_cache).tune(traced, npu2, "fused")
+    second = tuner.tune(traced, npu2, "fused")
     assert len(list(fit_cache.iterdir())) > len(records)
     assert second.groups == first.groups
     assert {k: v.tunables for k, v in second.chosen.items()} != widths
@@ -1375,3 +1384,35 @@ def test_an_exact_gate_or_a_short_bound_is_not_judged(npu2):
     assert judge(rope, rope, v.inputs, v.outputs, full).within
     short = dict(valid=32, valid_angles=32)
     assert judge(rope, rope, v.inputs, v.outputs, short) is None
+
+
+def test_a_tuning_is_kept_for_its_runlist_and_table(tmp_path, npu2):
+    traced, ops, table = _add_silu(tmp_path, npu2)
+    tuner = JointNarrowing(
+        table, fit_cache=tmp_path / "fits", tuning_cache=tmp_path / "tunings"
+    )
+    first = tuner.tune(traced, npu2, "fused")
+    [record] = (tmp_path / "tunings").iterdir()
+    assert first.groups
+
+    # A second tuning takes the record without searching: one rewritten to
+    # leave every design at its default setting, alone, is what it returns.
+    again = tuner.tune(traced, npu2, "fused")
+    assert again.groups == first.groups
+    assert {k: v.key for k, v in again.chosen.items()} == {
+        k: v.key for k, v in first.chosen.items()
+    }
+    record.write_text(
+        json.dumps({"chosen": {k: k for k in first.chosen}, "groups": []})
+    )
+    taken = tuner.tune(traced, npu2, "fused")
+    assert taken.groups == ()
+    assert all(v.key == k for k, v in taken.chosen.items())
+    assert taken.predicted_us == pytest.approx(taken.baseline_us)
+
+    # Another table is another record, searched for.
+    add = cost_key(ops["ElementwiseAdd"])
+    table.record_step(add, dataclasses.replace(table.steps[add], t_step_us=1.0))
+    searched = tuner.tune(traced, npu2, "fused")
+    assert len(list((tmp_path / "tunings").iterdir())) == 2
+    assert searched.groups == first.groups

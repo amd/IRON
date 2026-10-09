@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """EmbeddingGemma 2's vision tower in float32 on the host, the oracle the
-NPU tower is judged by, and the image processor's steps after its resize.
+NPU tower is judged by, and the image processor's.
 """
 
 from types import SimpleNamespace
@@ -10,17 +10,19 @@ from types import SimpleNamespace
 import numpy as np
 
 from iron.lm import Oracle, rope_angles
+from iron.operators.resample.reference import resize
 
 from ..oracle import EmbeddingGemmaOracle, gelu_tanh, rms_norm
-from .model import VisionConfig
+from .model import VisionConfig, size
 
 
 def patches(image: np.ndarray, max_tokens: int, config: VisionConfig):
-    """What the image processor hands the model for `image`, an
-    `(height, width, 3)` uint8 array already at the size its resize picks.
+    """What the image processor hands the model for `image`: resized as
+    torchvision resizes it to the size `size` picks, rescaled and cut into
+    patches.
 
     Args:
-        image: Height and width whole `pool * patch` pixel blocks.
+        image: `(height, width, 3)` uint8.
         max_tokens: The processor's `max_soft_tokens`: 280 for an image,
             140 for a video frame.
         config: The tower's shape.
@@ -30,18 +32,11 @@ def patches(image: np.ndarray, max_tokens: int, config: VisionConfig):
         [0, 1], each patch's pixels row-major, channels last, padded with
         zero rows; and `positions` `(max_tokens * pool ** 2, 2)` int, each
         patch's (x, y), padded with -1.
-
-    Raises:
-        ValueError: The image is not whole pooling blocks or exceeds the budget.
     """
-    p, side = config.patch, config.patch * config.pool
+    image = resize(image, *size(*image.shape[:2], max_tokens, config))
+    p = config.patch
     height, width, _ = image.shape
     max_patches = max_tokens * config.pool**2
-    if height % side or width % side or (height // p) * (width // p) > max_patches:
-        raise ValueError(
-            f"a {height}x{width} image is not whole {side}-pixel blocks within "
-            f"{max_patches} patches"
-        )
     rows, cols = height // p, width // p
     pixels = image.astype(np.float32) * np.float32(1 / 255)
     pixels = pixels.reshape(rows, p, cols, p, 3).transpose(0, 2, 1, 3, 4)

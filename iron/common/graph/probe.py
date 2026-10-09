@@ -1117,6 +1117,13 @@ def calibrate(
     else:
         # alone = F + c: the step times of this batch, not of the table's.
         dispatch = (pairs * (alone_a + alone_b) + 2 * switch - grp) / (2 * pairs - 1)
+    figures = dict(dispatch=dispatch, reset=reset, base=base, switch=switch)
+    negative = {name: round(us, 1) for name, us in figures.items() if us < 0}
+    if negative:
+        raise RuntimeError(
+            f"calibration {ka}/{kb}: negative {negative} us; measure it with the "
+            f"NPU otherwise idle, in the session that measured both steps"
+        )
     cal = Calibration(
         dispatch_us=dispatch,
         reset_us=reset,

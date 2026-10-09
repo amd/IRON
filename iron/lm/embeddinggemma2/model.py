@@ -12,7 +12,7 @@ import math
 from pathlib import Path
 
 import numpy as np
-from ml_dtypes import bfloat16, finfo
+from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Scratchpad
@@ -20,24 +20,26 @@ from iron.common.graph.narrowing import JointNarrowing
 from iron.lm import Layout, rope_angles
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
-from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul
 from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
+from iron.operators.mha import MHA
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
-from iron.operators.softmax import Softmax
 
 # An f32 accumulator and native bf16 inputs: the defaults' bfp16 inputs and
 # per-K-tile bf16 rounding cost the encoder accuracy.
 ACCURATE = dict(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
 
-# The fewest rows a version has, 16 to each row of cores: a version's rows
-# are a multiple of it.
+# The rows of a block, 16 to each row of cores: a tower's versions are whole
+# blocks, and MHA's queries are whole blocks for each of its pipelines.
 ROWS = 64
+PIPELINES = 8
 
-# Where the text tune writes its tables, one per device; the vision tower's
-# are its own (``vision.model.COSTS``), merged where a graph holds both.
+# Where the text tune writes its tables, one per device; each tower's are its
+# own (``vision.model.COSTS``, ``audio.model.COSTS``), merged where a graph
+# holds them.
 COSTS = Path(__file__).parent
 
 
@@ -136,52 +138,39 @@ def layout(config: Config) -> Layout:
 
 
 class EmbeddingGemma(iron.Graph):
-    """The encoder over ``max_tokens`` rows at most, a version per row count.
+    """The encoder over ``max_tokens`` rows at most, one compile for every
+    length.
 
-    A call takes the token ids, padded with ``vocab_size``, the id of a zero
-    row past the scaled embedding table, and ``n``, the real rows, which
-    masks the padded keys and the pooling; padded rows are computed and
-    never read. The table's rows are gathered on the device. It returns one
-    unit-length embedding per ``mrl_dims`` truncation, a row each, zero past
-    its length. Attention is bidirectional and unscaled. A version longer
-    than the sliding window adds a band mask to a sliding layer's scores,
-    its ``(heads, rows, rows)`` held per version.
+    A call takes the token ids, padded to ``max_tokens`` with
+    ``vocab_size``, the id of a zero row past the scaled embedding table,
+    and ``n``, the real rows, which bound every operator after the gather.
+    The table's rows are gathered on the device. It returns one unit-length
+    embedding per ``mrl_dims`` truncation, a row each, zero past its length.
+    Attention is bidirectional and unscaled, a sliding layer's within
+    ``sliding_window`` positions.
     """
 
-    def __init__(self, config: Config, weights, max_tokens: int):
-        if max_tokens % ROWS:
-            raise ValueError(f"{max_tokens} rows are not whole {ROWS}-row versions")
+    def __init__(self, config: Config, weights, max_tokens: int = 2048):
+        if max_tokens % (ROWS * PIPELINES):
+            raise ValueError(
+                f"{max_tokens} rows are not whole {ROWS}-row blocks for each of "
+                f"attention's {PIPELINES} pipelines"
+            )
         c = config
         self.config = config
         self.max_tokens = max_tokens
-        # Each version's rows: doubling from ROWS, then max_tokens.
-        self.rows = [
-            ROWS * 2**j
-            for j in range(max_tokens.bit_length())
-            if ROWS * 2**j < max_tokens
-        ]
-        self.rows.append(max_tokens)
-        r = c.n_heads // c.sliding_kv_groups
-        self.bands = {}
-        for T in self.rows:
-            if T > c.sliding_window + 1:
-                i = np.arange(T)
-                band = abs(i[:, None] - i) <= c.sliding_window
-                self.bands[T] = np.tile(
-                    np.where(band, 0, finfo(bfloat16).min).astype(bfloat16), (r, 1)
-                )
         table = np.zeros((c.vocab_size + 1, c.emb_dim), bfloat16)
         table[:-1] = weights.embedding.astype(np.float32) * np.sqrt(
             np.float32(c.emb_dim)
         )
         self.embedding = iron.weight(table)
         self.norm = weights.norm
-        self.ple = weights.ple
+        P = c.ple_dim
+        self.ple = [weights.ple[i * P : (i + 1) * P] for i in range(c.n_layers)]
         self.ple_norm = weights.ple_norm
         self.layers = weights.layers
         self.scales = [
-            np.full((max_tokens, c.emb_dim), w.scalar[0], bfloat16)
-            for w in weights.layers
+            np.full(c.emb_dim, w.scalar[0], bfloat16) for w in weights.layers
         ]
         self.angles = {
             D: iron.weight(rope_angles(D, max_tokens, base).astype(bfloat16))
@@ -190,9 +179,7 @@ class EmbeddingGemma(iron.Graph):
                 (config.global_head_dim, config.global_rope_base),
             )
         }
-        # Softmax of zeros bounded to n is the pooling weights, 1/n each; 32
-        # rows of them, the fewest a GEMM takes.
-        self.pool = {T: iron.weight(np.zeros((32, T), bfloat16)) for T in self.rows}
+        self.query = np.zeros((ROWS, 1, c.emb_dim), bfloat16)
         # A power of four: a row's RMS over it is its norm over a power of two.
         width = 4 ** math.ceil(math.log(c.out_dim, 4))
         self.projection = np.zeros((len(c.mrl_dims), width, c.emb_dim), bfloat16)
@@ -209,22 +196,30 @@ class EmbeddingGemma(iron.Graph):
         which the first ``n`` are real.
         """
         c = self.config
-        T, E, P, L = x.shape[0], c.emb_dim, c.ple_dim, c.n_layers
-        # The projection's E ** -0.5 scale folded into the norm's epsilon:
-        # RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
-        ple = GEMM(x, self.ple, b_col_maj=True, **ACCURATE).reshape(T * L, P)
-        ple = RMSNorm(ple, weight=self.ple_norm, epsilon=c.eps * E)
-        ple = Copy(ple.reshape(T, L, P).transpose(1, 0, 2)).reshape(L, T, P)
+        T, E = x.shape[0], c.emb_dim
+        x = embeddings = x[:n]
         for i, w in enumerate(self.layers):
-            x = self.layer(i, w, x, ple[i], n)
-        h = RMSNorm(x, weight=self.norm, epsilon=c.eps)
-        mean = Softmax(self.pool[T][:, :n])
-        y = GEMV(self.projection, GEMM(mean, h[:n], **ACCURATE)[0])
+            x = self.layer(i, w, x, embeddings, n)
+        h = RMSNorm(x, weight=self.norm, epsilon=c.eps).reshape(T, 1, E)
+        # The mean of the n rows: one zero query at scale 0 weighs each key
+        # 1/n, and masks the rows past n rather than multiplying them by 0.
+        mean = MHA(
+            self.query,
+            h,
+            h,
+            heads_interleaved=True,
+            kv_interleaved=True,
+            causal=False,
+            emulate_bf16_mmul_with_bfp16=False,
+            scale=0.0,
+            num_pipelines=1,
+        )
+        y = GEMV(self.projection, mean.reshape(ROWS, E)[0])
         return RMSNorm(
             y.reshape(len(c.mrl_dims), self.unit.size), weight=self.unit, epsilon=0.0
         )
 
-    def layer(self, i, w, x, ple, n):
+    def layer(self, i, w, x, embeddings, n):
         c = self.config
         h = RMSNorm(x, weight=w.norm1, epsilon=c.eps)
         a = RMSNorm(self.attention(i, w, h, n), weight=w.norm2, epsilon=c.eps)
@@ -234,48 +229,48 @@ class EmbeddingGemma(iron.Graph):
         f = ElementwiseMul(gate, GEMM(h, w.up, b_col_maj=True, **ACCURATE))
         f = GEMM(f, w.down, b_col_maj=True, **ACCURATE)
         x = ElementwiseAdd(x, RMSNorm(f, weight=w.norm4, epsilon=c.eps))
+        # The projection's E ** -0.5 scale folded into the norm's epsilon:
+        # RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
+        ple = GEMM(embeddings, self.ple[i], b_col_maj=True, **ACCURATE)
+        ple = RMSNorm(ple, weight=self.ple_norm, epsilon=c.eps * c.emb_dim)
         g = GELU(GEMM(x, w.ple_gate, b_col_maj=True, **ACCURATE))
         g = GEMM(ElementwiseMul(g, ple), w.ple_proj, b_col_maj=True, **ACCURATE)
         x = ElementwiseAdd(x, RMSNorm(g, weight=w.ple_norm, epsilon=c.eps))
-        return ElementwiseMul(x, self.scales[i][: x.shape[0]])
+        return RowwiseMul(x, self.scales[i])
 
     def attention(self, i, w, h, n):
         c = self.config
         T, H = h.shape[0], c.n_heads
         G, D = c.heads(i)
-        r = H // G
-        angles = self.angles[D][:T]
+        angles = self.angles[D][:n]
         q = GEMM(h, w.q, b_col_maj=True, **ACCURATE).reshape(T * H, D)
         k = GEMM(h, w.k, b_col_maj=True, **ACCURATE).reshape(T * G, D)
         v = GEMM(h, w.v, b_col_maj=True, **ACCURATE).reshape(T * G, D)
         q = RoPE(RMSNorm(q, weight=w.q_norm, epsilon=c.eps), angles)
         k = RoPE(RMSNorm(k, weight=w.k_norm, epsilon=c.eps), angles)
         v = RMSNorm(v, epsilon=c.eps)
-        q = Copy(q.reshape(T, H, D).transpose(1, 0, 2)).reshape(H, T, D)
-        if G > 1:
-            k = Copy(k.reshape(T, G, D).transpose(1, 0, 2)).reshape(G, T, D)
-            v = Copy(v.reshape(T, G, D).transpose(1, 0, 2)).reshape(G, T, D)
-        else:
-            k, v = k.reshape(1, T, D), v.reshape(1, T, D)
-        for g in range(G):
-            heads = q[g * r : (g + 1) * r].reshape(r * T, D)
-            scores = GEMM(heads, k[g], b_col_maj=True, **ACCURATE)
-            if i not in c.global_layers and T in self.bands:
-                scores = ElementwiseAdd(scores, self.bands[T])
-            weights = Softmax(scores[:, :n])
-            # Over the group's queries, which the scores were their last use of.
-            GEMM(weights, v[g, :n], heads, **ACCURATE)
-        o = Copy(q.transpose(1, 0, 2)).reshape(T, H * D)
-        return GEMM(o, w.o, b_col_maj=True, **ACCURATE)
+        o = MHA(
+            q.reshape(T, H, D),
+            k.reshape(T, G, D),
+            v.reshape(T, G, D),
+            heads_interleaved=True,
+            kv_interleaved=True,
+            causal=False,
+            emulate_bf16_mmul_with_bfp16=False,
+            window=None if i in c.global_layers else c.sliding_window,
+            scale=1.0,
+            num_pipelines=PIPELINES,
+        )
+        return GEMM(o.reshape(T, H * D), w.o, b_col_maj=True, **ACCURATE)
 
     # -- on the host -----------------------------------------------------------
 
     def shapes(self) -> list[dict]:
-        """Each version's input shapes, fewest rows first."""
-        return [dict(ids=((T,), np.int32)) for T in self.rows]
+        """The input shapes of each version: one, ``max_tokens`` rows."""
+        return [dict(ids=((self.max_tokens,), np.int32))]
 
     def load(self, tuner: JointNarrowing | None = None) -> "EmbeddingGemma":
-        """Compile every version before the first call, so the arena is made once.
+        """Compile before the first call, so the arena is made once.
 
         Args:
             tuner: Narrows and packs each version's designs by cost.
@@ -285,8 +280,7 @@ class EmbeddingGemma(iron.Graph):
         return self
 
     def inputs(self, tokens) -> tuple[np.ndarray, int]:
-        """A call's ``ids`` and ``n`` for ``tokens``, padded to the fewest rows
-        a version has.
+        """A call's ``ids`` and ``n`` for ``tokens``, padded to ``max_tokens``.
 
         Raises:
             ValueError: ``tokens`` is empty or longer than ``max_tokens``.
@@ -299,7 +293,7 @@ class EmbeddingGemma(iron.Graph):
         outside = tokens[(tokens < -V) | (tokens >= V)]
         if outside.size:
             raise IndexError(f"tokens {outside} are outside [-{V}, {V})")
-        ids = np.full(min(T for T in self.rows if T >= n), V, np.int32)
+        ids = np.full(self.max_tokens, V, np.int32)
         ids[:n] = tokens % V
         return ids, n
 

@@ -243,7 +243,9 @@ def test_alike_instances_bound_to_different_values_are_different_designs():
     assert len(t.bindings) == 3 and set(by_value) == {"a", "b"}
     first, second, third = t.bindings
     assert first.expression == t.values[0] * 16  # an element offset: a rows of 16
-    assert first.op.bound_values == {"out_offset": "a_x16"}
+    assert {k: e.name for k, e in first.op.bound_values.items()} == {
+        "out_offset": "a_x16"
+    }
     assert first.op.design_key() != second.op.design_key()
     assert first.op.design_key() == third.op.design_key()
     symbols = [device_symbol(b.op, b.member) for b in t.bindings]
@@ -646,7 +648,7 @@ def test_a_bounded_step_folds_under_its_producers_bound(npu2):
     f, count = folded(t, npu2)
     assert [str(fold) for fold in count] == ["SiLU into GEMM"]
     (step,) = f.steps
-    assert step.op.bound_extents == {"valid": "n"}
+    assert {k: e.name for k, e in step.op.bound_extents.items()} == {"valid": "n"}
     assert [(b.op, b.member.name) for b in f.bindings] == [(step.op, "valid")]
 
     t = _Bounded(gemm=False).trace(x=(512, 64), y=(512, 64))
@@ -918,7 +920,10 @@ def test_llama_decode_traces_and_tunes():
     mhas = [s.op for s in t.steps if type(s.op) is MHA]
     assert all(op.kv_interleaved for op in mhas)
     assert len(mhas) == cfg.n_layers
-    assert all(op.bound_values == {"kv_valid": "position_p1"} for op in mhas)
+    assert all(
+        {k: e.name for k, e in op.bound_values.items()} == {"kv_valid": "position_p1"}
+        for op in mhas
+    )
     assert all(op.packed and op.kv_len == L for op in mhas)
     # The same array serves every layer's like projections.
     q_arrays = {
@@ -978,7 +983,10 @@ def test_llama_decode_folds_its_norms_into_the_projections(npu2):
     assert not any(type(s.op) is RMSNorm for s in f.steps)
     row = model.config.n_kv_groups * model.config.head_dim
     placed = {
-        h.buffer_name: (s.op.placements, dict(s.op.bound_values))
+        h.buffer_name: (
+            s.op.placements,
+            {k: e.name for k, e in s.op.bound_values.items()},
+        )
         for s in f.steps
         for h in s.outputs
         if s.op.placements
@@ -1010,7 +1018,10 @@ def test_llama_prompt_traces_over_the_same_caches():
     assert [v.name for v in t.values] == ["token", "position", "chunk", "rows"]
     # MHA attends over the caches up to the chunk's last token.
     mha = next(op for op, *_ in t.runlist if type(op).__name__ == "MHA")
-    assert mha.bound_values == {"valid": "rows", "kv_valid": "position_p1"}
+    assert {k: e.name for k, e in mha.bound_values.items()} == {
+        "valid": "rows",
+        "kv_valid": "position_p1",
+    }
     # The caches are the states a token's version reads: the same objects,
     # so one arena holds them once for both.
     token = g.trace(**g.shapes(1))
@@ -1038,7 +1049,7 @@ def test_llama_prompt_projects_with_flm_gemm(device, request):
     assert len(gemms) == 7
     for op in gemms:
         assert op.b_col_maj and op.epilogue_modes == (Epilogue.NONE,)
-        assert op.bound_values == {"valid": "rows"}
+        assert {k: e.name for k, e in op.bound_values.items()} == {"valid": "rows"}
         resolved = op.resolved(dev)
         assert resolved.B.shape == (op.N, op.K) and not resolved.bfp16_b
 
@@ -1240,7 +1251,9 @@ def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
 
     t = Chunked().trace(x=(C, G * D))
     (copy,) = t.operators
-    assert copy.dst_bound == 1 and copy.bound_values == {
+    assert copy.dst_bound == 1 and {
+        k: e.name for k, e in copy.bound_values.items()
+    } == {
         "src_valid": "rows",
         "out_offset": f"chunk_x{C * D}",
         "dst_valid": "rows",
@@ -1283,7 +1296,7 @@ def test_words_with_an_offset_share_by_ratio_and_offset(npu2):
     t = G().trace(x=(64, 512), y=(64, 512))
     alone, _ = _words(t)
     words, shared = _words(t, share=True)
-    assert len(words) == 4
+    assert len(words) == 2
     assert sorted(set(shared.values())) == [
         "graph_p_x1d4p1d4_int32",
         "graph_p_x512p512_int32",
@@ -1330,6 +1343,21 @@ def test_a_column_major_product_is_read_as_stored_by_the_next_reference(npu2):
     y = np.asarray(Transposed().reference(a, b), np.float32)
     c = b.astype(np.float32) @ a.astype(np.float32).T
     np.testing.assert_array_equal(y, np.maximum(c, 0))
+
+
+def test_a_float32_product_is_not_rounded_to_its_inputs_dtype(npu2):
+    class Wide(iron.Graph):
+        def body(self, a, b):
+            return GEMM(a, b, dtype_out=np.float32, tile_m=32)
+
+    rng = np.random.default_rng(0)
+    a = rng.standard_normal((256, 256)).astype(bfloat16)
+    b = rng.standard_normal((256, 512)).astype(bfloat16)
+    y = np.asarray(Wide().reference(a, b))
+    c = a.astype(np.float32) @ b.astype(np.float32)
+    assert y.dtype == np.float32
+    np.testing.assert_array_equal(y, c)
+    assert (c != c.astype(bfloat16).astype(np.float32)).any()
 
 
 def test_the_reference_computes_the_expressions(npu2):
@@ -1382,10 +1410,11 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
 
 def test_integer_arithmetic_on_an_expression_is_an_expression():
     """Sums, products and floor divisions by powers of two (so ``ceildiv``)
-    of an expression are expressions that compute the same; anything else
-    is refused.
+    of an expression are expressions that compute the same, and so are sums
+    of two linear ones in its value; anything else is refused.
     """
     x = Affine(Value("x", "scratchpad", np.int32), 3, -5)
+    y = Affine(Value("y", "scratchpad", np.int32))
     cases = [
         (lambda v: v + 7, None),
         (lambda v: 2 - v, None),
@@ -1396,12 +1425,21 @@ def test_integer_arithmetic_on_an_expression_is_an_expression():
         (lambda v: (ceildiv(v, 64) + 1) * 32, None),
         (lambda v: (v // 4 + 3) // 16, None),  # nested floors fold into one
         (lambda v: (v // 4) * 8 // 2 - 1, None),  # an exact division
+        (lambda v: (v * 512) // 512, None),  # linear again
+        (lambda v: ceildiv(v * 4, 256), None),
+        (lambda v: v * 3 + v + 1, None),
+        (lambda v: v * 4 - v, None),
+        (lambda v: v - v, None),  # the value cancels: a number
+        (lambda v: (v * 4) // v, None),
         (lambda v: v // 3, TypeError),
         (lambda v: (v // 4) * 3 // 2, TypeError),
         (lambda v: v // 1 if v else 0, TypeError),
         (lambda v: v % 64, TypeError),
         (lambda v: v < 0, TypeError),
-        (lambda v: v + x, TypeError),
+        (lambda v: v + y, TypeError),
+        (lambda v: v // 4 + v, TypeError),
+        (lambda v: (v + 1) // v, TypeError),
+        (lambda v: v // (v * 2), TypeError),
     ]
     for f, error in cases:
         if error is not None:
@@ -1409,9 +1447,13 @@ def test_integer_arithmetic_on_an_expression_is_an_expression():
                 f(x)
             continue
         form = f(x)
-        assert form.value is x.value
         for v in range(-300, 300):
-            assert form.evaluate({"x": v}) == f(3 * v - 5), v
+            u = 3 * v - 5
+            if isinstance(form, int):
+                assert f(u) == form, v
+                continue
+            assert form.value is x.value
+            assert form.evaluate({"x": v}) == f(u), v
 
 
 def test_the_packed_decode_words_of_mha_have_emit_forms(npu2):
@@ -1463,8 +1505,8 @@ def test_words_that_always_hold_one_number_share_it(npu2):
     """On a full ELF, two designs bound to one graph value write one word
     for each ratio of it they read (their extents; the tiles per lane of
     each operand), and every symbol that shares a word reads its own value
-    there. A derivation the library cannot see through (``count``) keeps
-    its own word.
+    there. A derivation the library sees through (``count``, a ceiling
+    division) shares the word of the ratio it computes.
     """
 
     class G(iron.Graph):
@@ -1476,7 +1518,7 @@ def test_words_that_always_hold_one_number_share_it(npu2):
     t = g.trace(x=(64, 512), y=(64, 512))
     alone, _ = _words(t)
     words, shared = _words(t, share=True)
-    assert len(alone) == 10 and len(words) == 4
+    assert len(alone) == 10 and len(words) == 2
     assert sorted(set(shared.values())) == ["graph_n_x1d4_int32", "graph_n_x512_int32"]
     for n in (1, 16, 64):
         mine = {w.symbol: w({"n": n}) for w in words}
@@ -1503,8 +1545,11 @@ def test_a_bound_reaches_a_copy_and_a_repeat_through_their_views(npu2):
     t = g.trace(x=(L, G * D))
     copy, rep = t.operators
     assert copy.src_bound == 1 and copy.dst_bound == 1
-    assert copy.bound_values == {"src_valid": "n", "dst_valid": "n"}
-    assert rep.bound_extents == {"valid_seq": "c"}
+    assert {k: e.name for k, e in copy.bound_values.items()} == {
+        "src_valid": "n",
+        "dst_valid": "n",
+    }
+    assert {k: e.name for k, e in rep.bound_extents.items()} == {"valid_seq": "c"}
     n, c = t.values
     assert [(b.member.name, b.expression) for b in t.bindings] == [
         ("src_valid", n.affine()),
@@ -1541,17 +1586,23 @@ def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
 
     t = g.trace(x=(512, 64), w=(256, 64))
     gemm, mha = t.operators
-    assert gemm.bound_extents == {"valid": "n"}
-    assert mha.bound_extents == {"valid": "n", "kv_valid": "n"}
+    assert {k: e.name for k, e in gemm.bound_extents.items()} == {"valid": "n"}
+    assert {k: e.name for k, e in mha.bound_extents.items()} == {
+        "valid": "n",
+        "kv_valid": "n",
+    }
     gemm, mha = (op.resolved(aie_utils.get_current_device()) for op in (gemm, mha))
-    assert [v.name for v in gemm.values] == ["valid", "n_tiles_valid"]
-    assert gemm.derived_at("n_tiles_valid", valid=100) == 1 * (256 // gemm.mem_tile_n)
+    assert [v.name for v in gemm.values] == ["valid", "row_blocks_valid"]
+    assert gemm.derived_at("row_blocks_valid", valid=100) == 1
+    assert gemm.residents["col_tiles"] == 256 // gemm.mem_tile_n
     at = dict(valid=100, kv_valid=100)
     assert mha.derived_at("s_q", **at) == mha.derived_at("s_kv", **at) == 100
     assert mha.derived_at("q_blocks_valid", **at) == 1  # 128 padded / (64 x 2)
     assert mha.derived_at("kv_blocks", **at) == 2  # ceil(100 / 64)
     assert mha.derived_at("q_start", **at) == 0
     assert mha.derived_at("q_start", valid=64, kv_valid=192) == 2  # a later chunk
+    # Bound alike, the queries start at 0 on every call: written once.
+    assert mha.residents["q_start"] == 0 and mha.uses_value("s_q")
     (out,) = t.outputs
     assert out.bounds == {0: t.values[0].affine()}  # O is bounded like Q
 
@@ -1584,7 +1635,7 @@ def test_an_optional_input_gives_a_version_without_it():
     assert [(b.member.name, b.expression) for b in alone.bindings] == [
         ("in_offset", alone.values[0] * 256)
     ]
-    assert copy.bound_values == {"in_offset": "r_x256"}
+    assert {k: e.name for k, e in copy.bound_values.items()} == {"in_offset": "r_x256"}
     x = np.full(256, 2, dtype=bfloat16)
     np.testing.assert_array_equal(g.reference(r=1), table[1])
     np.testing.assert_array_equal(g.reference(None, r=1), table[1])

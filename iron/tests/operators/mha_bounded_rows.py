@@ -15,6 +15,9 @@ A chunk of a longer prompt runs MHA over the cache it extends: its queries
 are the last rows of ``k[:, :position + 1]``, so a chunk at any offset
 attends causally over every key before it, and the keys past the bound are
 never read.
+
+Bidirectional attention bounds the same way: a key past ``n`` is masked
+whether it lies before or after a query.
 """
 
 import numpy as np
@@ -72,6 +75,71 @@ def test_rows_past_the_valid_length_are_zero(npu_runtime):
         assert not padding.any(), f"{rows=} {n=}: padding rows are not zero"
         expected = reference.reference(q, k, v, s_q=n, s_kv=n)
         expected = np.asarray(expected, dtype=np.float32).reshape(SEQ, HEADS, D)
+        verdict = verify_buffer(
+            o[:n],
+            "O",
+            expected[:n],
+            tolerance=Tolerance.relative(0.04, 0.15, max_mismatch_frac=0.005),
+        )
+        assert verdict, f"{rows=} {n=}: the valid elements differ: {verdict.detail}"
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize(
+    "kv_heads,d,window",
+    [(2, 256, 512), (1, 512, None)],
+    ids=["sliding", "global"],
+)
+def test_bidirectional_attention_under_a_bound(npu_runtime, kv_heads, d, window):
+    """EmbeddingGemma 2's layers, unscaled, at a length that ends mid-block:
+    a sliding one sees every key within 512 positions, before or after, at
+    d=256; a global one every key, at d=512, its P*V split over two cores.
+    """
+    heads, seq = 4, 2048
+
+    class Attend(iron.Graph):
+        def body(self, q, k, v, *, rows: Scratchpad[np.int32], n: Scratchpad[np.int32]):
+            q, k, v = q[:rows], k[:rows], v[:rows]
+            return MHA(
+                q,
+                k,
+                v,
+                heads_interleaved=True,
+                kv_interleaved=True,
+                causal=False,
+                window=window,
+                scale=1.0,
+                s_q=n,
+                s_kv=n,
+                num_pipelines=PIPELINES,
+            )
+
+    rng = np.random.default_rng(0)
+    # Unscaled, unit inputs would put every score's spread at sqrt(d).
+    q, k, v = (
+        (rng.standard_normal((seq, h, d)) * s).astype(bfloat16)
+        for h, s in ((heads, 0.25), (kv_heads, 0.25), (kv_heads, 1.0))
+    )
+    net = Attend().compile(q=q.shape, k=k.shape, v=v.shape)
+    reference = MHA(
+        num_heads=heads,
+        num_KV_heads=kv_heads,
+        seq_len=seq,
+        d=d,
+        causal=False,
+        window=window,
+        scale=1.0,
+        heads_interleaved=True,
+        kv_interleaved=True,
+    )
+    for rows, n in ((512, 37), (2048, 1500)):
+        o = np.asarray(net(q, k, v, rows=rows, n=n), dtype=np.float32)
+        o = o.reshape(seq, heads, d)
+        padding = o[n:rows]
+        assert np.isfinite(padding).all(), f"{rows=} {n=}: non-finite padding rows"
+        assert not padding.any(), f"{rows=} {n=}: padding rows are not zero"
+        expected = reference.reference(q, k, v, s_q=n, s_kv=n)
+        expected = np.asarray(expected, dtype=np.float32).reshape(seq, heads, d)
         verdict = verify_buffer(
             o[:n],
             "O",

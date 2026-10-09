@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Measure EmbeddingGemma 2's vision cost table on this NPU, beside this
+"""Measure EmbeddingGemma 2's audio cost table on this NPU, beside this
 file as ``costs_<device>.json`` (``iron.common.graph.tune``): every design
 of each version, at each width, as traced and with each fold it admits,
 and the configure cost between a pair of them. A design's time follows
@@ -9,37 +9,31 @@ its shapes, not the weights, so no checkpoint is read. Run with XRT
 sourced and the NPU otherwise idle:
 
 ```bash
-python -m iron.lm.embeddinggemma2.vision.tune
+python -m iron.lm.embeddinggemma2.audio.tune
 ```
 """
 
 import aie.utils as aie_utils
-import numpy as np
 
 from iron.common.graph import tune
 from iron.common.graph.probe import Call
-from iron.lm import unread_weights
 
-from .model import COSTS, LARGEST, VISION, Vision, layout
+from .model import AUDIO, COSTS, Audio, unread_audio_weights
 
-CALIBRATION_PAIRS = [("ElementwiseAdd", "GELU"), ("GELU", "ElementwiseMul")]
+CALIBRATION_PAIRS = [("ElementwiseAdd", "ElementwiseMul"), ("SiLU", "ElementwiseMul")]
 
 
 def main():
     args = tune.parser(__doc__.split("\n\n")[0], COSTS).parse_args()
     dev = aie_utils.ensure_current_device()
-    graph = Vision(VISION, unread_weights(layout(VISION), VISION.n_layers))
-    # Each version at the largest image it takes, its patches filled.
-    processor = graph.vision.processor
-    calls = [
-        call
-        for T, image, s in zip(graph.vision.rows, LARGEST, graph.shapes(), strict=True)
-        for call in Call.admitted(
-            graph.trace(**s),
-            dev,
-            processor.inputs(np.zeros((*image, 3), np.uint8), T // VISION.pool**2)[1],
+    graph = Audio(AUDIO, unread_audio_weights(AUDIO))
+    # Each version at its every frame real.
+    calls = []
+    for s in graph.shapes():
+        frames = s["x"][0][0] // AUDIO.hop - 1
+        calls += Call.admitted(
+            graph.trace(**s), dev, dict(n=frames // 2, frames=frames)
         )
-    ]
     tune.measure(args, calls, CALIBRATION_PAIRS, COSTS)
 
 

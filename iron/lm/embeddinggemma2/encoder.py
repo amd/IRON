@@ -26,7 +26,7 @@ from .audio import model as audio_model
 from .audio.oracle import AudioOracle
 from .model import COSTS, EMBEDDINGGEMMA_2, EmbeddingGemma, layout, text_tensors
 from .multimodal import Multimodal
-from .oracle import PROMPTS, EmbeddingGemmaOracle, tokenizer
+from .oracle import EmbeddingGemmaOracle, tokenizer, tokens
 from .vision import model as vision_model
 from .vision.oracle import VisionOracle
 
@@ -46,7 +46,7 @@ class Encoder:
     def __init__(
         self,
         directory,
-        max_tokens: int = 512,
+        max_tokens: int = 2048,
         costs: Sequence[Path] = (),
         towers: bool = False,
     ):
@@ -82,33 +82,30 @@ class Encoder:
     def tokens(
         self, text: str, task: str, audio_tokens: int = 0, image_tokens: int = 0
     ) -> list[int]:
-        """`text` behind `task`'s prompt (`PROMPTS`), with BOS and EOS, each
-        `<|audio|>` and `<|image|>` in it a run of that many placeholders
-        between its markers, as the processor expands them.
-        """
-        c, out = self.config, []
-        runs = {
-            c.audio_token: [c.boa, *[c.audio_token] * audio_tokens, c.eoa],
-            c.image_token: [c.boi, *[c.image_token] * image_tokens, c.eoi],
-        }
-        for t in self.tokenizer.encode(PROMPTS[task] + text).ids:
-            out += runs.get(t, [t])
-        return out
+        """`text`'s tokens for `task`, as `oracle.tokens` gives them."""
+        return tokens(
+            self.tokenizer, self.config, text, task, audio_tokens, image_tokens
+        )
 
     def __call__(
         self, text: str, task: str, dims: int = 768, audio=None, image=None
     ) -> np.ndarray:
         """The embedding of `text` for `task`, its first `dims` renormalized,
-        with one clip's `audio` `(features, frames)` and one image's `image`
-        `(pixel_values, positions)` at their placeholders.
+        with one mono clip `audio` at 16 kHz and one decoded image `image`,
+        `(height, width, 3)` uint8, at their placeholders.
         """
         if audio is None and image is None:
             return self.graph.encode(self.tokens(text, task), dims)
-        audio_tokens = 0 if audio is None else audio_model.AUDIO.tokens(audio[1])
+        audio_tokens = 0
+        if audio is not None:
+            c = audio_model.AUDIO
+            audio_tokens = c.tokens(c.frames(np.asarray(audio).size))
         image_tokens = 0
         if image is not None:
-            real = (np.asarray(image[1]) >= 0).all(axis=-1).sum()
-            image_tokens = int(real) // vision_model.VISION.pool**2
+            V = vision_model.VISION
+            height, width = np.shape(image)[:2]
+            out_height, out_width = vision_model.size(height, width, V.image_tokens, V)
+            image_tokens = out_height * out_width // (V.pool * V.patch) ** 2
         tokens = self.tokens(text, task, audio_tokens, image_tokens)
         return self.graph.encode(tokens, dims, audio, image)
 
@@ -136,7 +133,8 @@ def main():
         nargs="+",
         default=[],
         help="the cost tables designs are tuned by, merged (`tune` writes "
-        f"costs_<device>.json in {COSTS}, `vision.tune` in {vision_model.COSTS})",
+        f"costs_<device>.json in {COSTS}, `vision.tune` in {vision_model.COSTS}, "
+        f"`audio.tune` in {audio_model.COSTS})",
     )
     args = ap.parse_args()
     encoder = Encoder(args.directory, costs=args.costs)

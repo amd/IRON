@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """What a full ELF's runs need of XRT beyond mlir-aie's host runtime: a
-scratchpad another run can drain into and the host can read back, and
-whether the image a run was made on is still loaded.
+scratchpad another run can drain into and the host can read back,
+whether the image a run was made on is still loaded, and unloading it.
 """
 
 import ctypes
@@ -14,6 +14,7 @@ import numpy as np
 import pyxrt
 from aie.utils.hostruntime.xrtruntime.hostruntime import (
     CachedXRTKernelHandle,
+    CachedXRTRuntime,
     XRTHostRuntime,
     XRTKernelHandle,
 )
@@ -71,3 +72,15 @@ def loaded(handle: XRTKernelHandle) -> bool:
     one to make room for another, which ends every run made on it.
     """
     return not isinstance(handle, CachedXRTKernelHandle) or handle._is_valid
+
+
+def unload(image: str | Path) -> None:
+    """End the caching runtime's hw_context on ``image``, and every handle on it.
+
+    A context holds some of the driver's device heap, placed after the runs
+    made before it: while it lives, freeing those runs leaves holes no larger
+    run fits in.
+    """
+    runtime = aie_utils.DefaultNPURuntime
+    if isinstance(runtime, CachedXRTRuntime):
+        runtime.evict_context(Path(image))

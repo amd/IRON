@@ -809,7 +809,20 @@ def _words(
     if share:
         forms: dict[str, set[Linear | None]] = {}
         for w in words:
-            forms.setdefault(w.symbol, set()).add(w.linear)
+            found, e = w.linear, w.form
+            if found is None and e is not None and e.mul in (1, -1):
+                # ((s v + b) >> k) * m + a as a Linear, which rounds up: a
+                # floor is the ceiling of (s v + b - 2^k + 1) / 2^k, and
+                # -floor(x) is ceil(-x).
+                d = 1 << e.down
+                bias = e.bias * e.mul - (d - 1 if e.mul == 1 else 0)
+                found = Linear(
+                    e.value.name,
+                    Fraction(e.scale * e.mul, d),
+                    Fraction(bias, d) + e.add,
+                    np.dtype(w.dtype).name,
+                )
+            forms.setdefault(w.symbol, set()).add(found)
         groups: dict[Linear, list[str]] = {}
         for symbol, found in forms.items():
             if len(found) == 1 and None not in found:

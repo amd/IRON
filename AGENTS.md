@@ -870,8 +870,9 @@ tokenizer), `profiles/` (tunables):
 
 Its text encoder at `iron/applications/embeddinggemma_2/` (its test and
 README), over the model package `iron/lm/embeddinggemma2/`, which is not a
-`CausalLM`: one graph whose versions double in rows from 64 to the longest
-prompt, and `EmbeddingGemmaOracle`, its float32 encoder on the host:
+`CausalLM`: one graph compiled once at `max_tokens` rows (2048 by default),
+the prompt's length bound per call, and `EmbeddingGemmaOracle`, its float32
+encoder on the host:
 
 - **Required files**: `model.safetensors`, `tokenizer.json`
 - **Default location**: `/srv/embeddinggemma-2/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)

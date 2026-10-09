@@ -68,7 +68,7 @@ def test_a_bounded_operand_makes_the_trip_count_per_call():
 
     t = g.trace(x=(4096,))
     (op,) = t.operators
-    assert op.bound_extents == {"valid": "n"}
+    assert {k: e.name for k, e in op.bound_extents.items()} == {"valid": "n"}
     assert [v.name for v in op.values] == ["valid", "count", "valid_x", "valid_y"]
     assert op.derived_at("count", valid=1024) == 1024 // (2 * 256)
     assert op.derived_at("valid_x", valid=1024) == 1024 // (2 * 256)
