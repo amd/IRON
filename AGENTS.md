@@ -375,11 +375,11 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    `reference` of its own; a field it passes is `param(..., array=True)`.
    Bind a further symbol of the same object with
    `fn.object_file.bind(symbol, arg_types)`. A kernel the factories do not
-   cover is an `ExternalFunction(..., digest_prefix=True)` of mlir-aie's
-   (one whose compile flags are the operator's own, like flm's
-   `fused_mm_tile.cc`, from `aie_kernels_dir()`): the digest of its source
-   and flags prefixes its symbols and object, so two configurations of it
-   link into one image. With `source_string=` it is one written in the
+   cover is an `ExternalFunction` of mlir-aie's whose `symbol_prefix=`
+   names its configuration (the compile flags that are the operator's
+   own, as `merge.py` does), so two configurations of it link into one
+   image; a factory prefixes its symbols with the digest of its source
+   and flags itself. With `source_string=` it is one written in the
    operator's own file (the hello-world in
    `iron/tests/toolchain/inline_kernel.py`: a `vadd` in C++ text, the
    argument types the operands' tiles). Give such a kernel its
