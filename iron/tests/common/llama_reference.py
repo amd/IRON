@@ -193,9 +193,11 @@ def test_a_prompt_longer_than_a_chunk_runs_in_chunks(cpu):
     _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
 
 
-def test_a_call_that_fails_partway_leaves_no_stale_history(cpu):
-    """A prompt whose second chunk cannot be embedded fails after its first
-    chunk rewrote the caches; the next call reruns what that chunk wrote.
+@pytest.mark.parametrize("outside", [-1, SMALL.vocab_size])
+def test_a_token_outside_the_vocabulary_is_refused_before_any_dispatch(cpu, outside):
+    """A prompt that differs from the history in its first chunk and holds
+    an id no row embeds in its second: refused whole, the caches and the
+    history as the last call left them.
     """
     config = dataclasses.replace(cpu.config, prefill_chunk=64)
     model = OnHost(config, cpu.weights)
@@ -203,9 +205,10 @@ def test_a_call_that_fails_partway_leaves_no_stale_history(cpu):
     model.logits(tokens)
     broken = tokens.copy()
     broken[3] = (broken[3] + 1) % config.vocab_size
-    broken[70] = config.vocab_size
-    with pytest.raises(IndexError):
+    broken[70] = outside
+    with pytest.raises(IndexError, match=rf"\[{outside}\] are outside"):
         model.logits(broken)
+    np.testing.assert_array_equal(model._seen, tokens)
     fresh = OnHost(config, cpu.weights).logits(tokens)
     np.testing.assert_array_equal(model.logits(tokens), fresh)
 

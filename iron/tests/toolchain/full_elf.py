@@ -98,6 +98,12 @@ def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():
         version(*tensors, **values, row=0)
     with pytest.raises(TypeError, match=r"per-call values \[.+\] missing"):
         version(*tensors)
+    # ... and holds every index in the view it moves along.
+    L = model.config.max_seq_len
+    with pytest.raises(IndexError, match=rf"position is {L}, outside \[0, {L}\)"):
+        version(*tensors, **{**values, "position": L})
+    with pytest.raises(IndexError, match=r"token is -1, outside"):
+        version(*tensors, **{**values, "token": -1})
     assert version._callable is None
 
 

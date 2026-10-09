@@ -60,6 +60,16 @@ class Binding:
         return device_symbol(self.op, self.member)
 
 
+@dataclasses.dataclass(frozen=True)
+class Limit:
+    """A per-call ``expression`` a view of ``view`` holds in ``[lo, hi)``."""
+
+    expression: Affine
+    lo: int
+    hi: int
+    view: str
+
+
 def _unbounded(h: Handle) -> Handle:
     if not h.bounds:
         return h
@@ -149,6 +159,7 @@ class TracedGraph:
     addresses: dict[str, tuple[str, Callable[[int], dict], str]] = dataclasses.field(
         default_factory=dict
     )
+    limits: list[Limit] = dataclasses.field(default_factory=list)
 
     @property
     def runlist(self) -> list:
@@ -233,6 +244,7 @@ class Tracer:
         self.weights: dict[int, tuple[object, Handle]] = {}
         self.states: dict[int, tuple[State, Handle]] = {}
         self.bindings: list[Binding] = []
+        self.limits: list[Limit] = []
         self._bound: dict[int, dict] = {}
         self.encoders: dict[str, tuple[str, Callable]] = {}
         self.addresses: dict[str, tuple[str, Callable, str]] = {}
@@ -574,7 +586,14 @@ class Tracer:
             next_values,
             encoders=self.encoders,
             addresses=self.addresses,
+            limits=self.limits,
         )
+
+    def limit(self, expression: Affine, lo: int, hi: int, view: Handle) -> None:
+        """Record that a call's ``expression`` must lie in ``[lo, hi)`` for
+        ``view``, which it indexes or bounds.
+        """
+        self.limits.append(Limit(expression, lo, hi, repr(view)))
 
 
 class _ReferenceTracer(Tracer):

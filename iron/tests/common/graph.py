@@ -1292,6 +1292,36 @@ def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
     }
 
 
+def test_the_trace_records_the_range_each_per_call_index_and_bound_holds():
+    """A call checks these before it reaches the device, where an index past
+    its view moves a transfer onto another buffer.
+    """
+    G, L, C, D = 2, 64, 16, 8
+    keys = iron.state((G, L, D), name="keys")
+    table = iron.state((L, D), name="table")
+
+    class Chunked(iron.Graph):
+        def body(
+            self,
+            x,
+            *,
+            chunk: Scratchpad[np.int32],
+            rows: Scratchpad[np.int32],
+            pos: Scratchpad[np.int32],
+        ):
+            k = x[:rows].reshape(C, G, D).transpose(1, 0, 2)
+            Copy(k, keys.reshape(G, L // C, C, D)[:, chunk, :rows])
+            return Copy(table[pos + 1]).reshape(1, D)
+
+    t = Chunked().trace(x=(C, G * D))
+    got = {(str(m.expression), m.lo, m.hi) for m in t.limits}
+    assert got == {("rows", 0, C + 1), ("chunk", 0, L // C), ("pos + 1", 0, L)}
+    for m in t.limits:
+        assert m.expression.evaluate(dict(chunk=3, rows=C, pos=L - 2)) < m.hi
+    (outside,) = [m for m in t.limits if str(m.expression) == "pos + 1"]
+    assert outside.expression.evaluate(dict(pos=L - 1)) == outside.hi
+
+
 def test_a_bound_rounds_up_to_the_tiles_it_ends_in(npu2):
     """A bound ending inside a tile takes the tile: the words of tiles per
     lane and the trip counts derived from it round up, so ``p + 1`` rows

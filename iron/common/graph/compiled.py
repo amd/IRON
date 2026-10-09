@@ -622,6 +622,13 @@ class CompiledGraph:
                 f"got {len(tensors)}"
             )
         _check_values(self.traced.name, [v.name for v in self.traced.values], values)
+        for limit in self.traced.limits:
+            at = limit.expression.evaluate(values)
+            if not limit.lo <= at < limit.hi:
+                raise IndexError(
+                    f"{self.traced.name}: {limit.expression} is {at}, outside "
+                    f"[{limit.lo}, {limit.hi}) for {limit.view}"
+                )
         self.upload()
         for handle, tensor in zip(self.traced.inputs, tensors):
             if tuple(tensor.shape) != handle.shape:

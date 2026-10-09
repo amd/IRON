@@ -190,6 +190,7 @@ class Handle:
                 )
         index_by = None
         static, shape, bounds = [], [], {}
+        tracer = graph_tracer.get()
         for axis, (entry, n) in enumerate(zip(entries, self.shape)):
             if axis in self.bounds and isinstance(entry, slice):
                 bounds[len(shape)] = self.bounds[axis]
@@ -204,6 +205,8 @@ class Handle:
                         f"{stop} is {stop.value.kind}; only a Scratchpad value can "
                         f"bound an axis, since it patches a transfer's size"
                     )
+                if tracer is not None:
+                    tracer.limit(stop, 0, n + 1, self)
                 # Keyed by the axis of the result: an index before it drops one.
                 bounds[len(shape)] = stop
                 static.append(slice(None))
@@ -217,6 +220,8 @@ class Handle:
                         f"{entry} is {entry.value.kind}; only a Scratchpad value can "
                         f"index a view, since it moves a transfer's base address"
                     )
+                if tracer is not None:
+                    tracer.limit(entry, 0, n, self)
                 index_by = entry * prod(self.shape[axis + 1 :])
                 static.append(0)
             elif isinstance(entry, slice):

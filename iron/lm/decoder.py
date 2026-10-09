@@ -274,11 +274,21 @@ class CausalLM(iron.Graph):
 
         One more token than the last call's is a decode step; anything else
         runs from the first token the caches do not hold.
+
+        Raises:
+            ValueError: ``tokens`` is empty or longer than ``max_seq_len``.
+            IndexError: A token is outside ``[0, vocab_size)``; refused
+                before any dispatch, so the caches are as they were.
         """
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
         n, L, C = tokens.size, self.config.max_seq_len, self.config.prefill_chunk
         if not 0 < n <= L:
             raise ValueError(f"{n} tokens do not fit {L} rows")
+        V = self.config.vocab_size
+        if ((tokens < 0) | (tokens >= V)).any():
+            raise IndexError(
+                f"tokens {tokens[(tokens < 0) | (tokens >= V)]} are outside [0, {V})"
+            )
         held = self._held(tokens)
         if held == n - 1 == self._seen.size:
             out, _ = self(token=int(tokens[-1]), position=n - 1, chunk=0, rows=1)
@@ -306,12 +316,20 @@ class CausalLM(iron.Graph):
         Returns:
             The tokens drawn, the seconds to the first, and the mean seconds
             per token after it (NaN for one token).
+
+        Raises:
+            IndexError: A token is outside ``[0, vocab_size)``.
         """
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
         n, L, C = tokens.size, self.config.max_seq_len, self.config.prefill_chunk
         if not (0 < n and 0 < num_tokens and n + num_tokens - 1 <= L):
             raise ValueError(
                 f"{n} tokens and {num_tokens} more to draw do not fit {L} rows"
+            )
+        V = self.config.vocab_size
+        if ((tokens < 0) | (tokens >= V)).any():
+            raise IndexError(
+                f"tokens {tokens[(tokens < 0) | (tokens >= V)]} are outside [0, {V})"
             )
         if not self.device_loop:
             assert self._decode is not None
