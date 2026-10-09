@@ -197,15 +197,6 @@ class CSVReporter:
             writer.writerows(self.results)
 
 
-# Initialize the CSV writer once at test session setup
-@pytest.fixture(scope="session")
-def csv_reporter(request):
-    csv_path = request.config.getoption("--csv-output")
-    reporter = CSVReporter(csv_path)
-    yield reporter
-    reporter.write_csv()
-
-
 # Hook into test completion to collect each test's metrics into the CSVReporter
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
