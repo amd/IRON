@@ -1156,6 +1156,7 @@ def calibrate(
     timing: Timing = Timing(),
     pairs: int = 4,
     log: Callable[[str], None] = print,
+    values: Mapping[Operator, Mapping[str, int]] | None = None,
 ) -> Calibration:
     """Split a configure's cost over measured designs ``a`` and ``b`` into
     ``table``: on an xclbin chain, the mean of their loads and the dispatch,
@@ -1163,6 +1164,8 @@ def calibrate(
 
     Args:
         log: Where waiting for the NPU is reported (``time_interleaved``).
+        values: Per operator, each per-call value by name, as its steps
+            were measured at (``Standalone``).
     """
     ka, kb = cost_key(a), cost_key(b)
     ta, tb = table.steps[ka].t_step_us, table.steps[kb].t_step_us
@@ -1182,6 +1185,7 @@ def calibrate(
             runlist,
             coresident=[[a, b]] if name == "pack" else (),
             dispatch=table.dispatch,
+            values=values,
         )
         for name, runlist in runlists.items()
     ]
@@ -1780,18 +1784,30 @@ def measure_graph(
     wanted = {f"{a.key}|{b.key}" for a, b in chosen}
     for k in [k for k in table.calibrations if k not in wanted]:
         del table.calibrations[k]
+    op_values = {
+        v.key: call.op_values(op)
+        for key, (op, call) in designs.first.items()
+        for v in found[key]
+    }
     for (a, b), (name_a, name_b) in zip(chosen, pairs):
         pair = f"{a.key}|{b.key}"
         if not remeasure and pair in table.calibrations:
             log(f"calibration {name_a}/{name_b}: in the table")
             continue
         entry = cache.pair_key(
-            cache.key(a.resolved, dispatch=table.dispatch),
-            cache.key(b.resolved, dispatch=table.dispatch),
+            cache.key(a.resolved, op_values[a.key], dispatch=table.dispatch),
+            cache.key(b.resolved, op_values[b.key], dispatch=table.dispatch),
         )
         cal = None if remeasure else cache.get(entry, Calibration)
         if cal is None:
-            cal = calibrate(table, a.op, b.op, timing, log=log)
+            cal = calibrate(
+                table,
+                a.op,
+                b.op,
+                timing,
+                log=log,
+                values={a.op: op_values[a.key], b.op: op_values[b.key]},
+            )
             cache.put(entry, cal)
             ran.append(pair)
         else:
