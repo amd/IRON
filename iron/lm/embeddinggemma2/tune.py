@@ -14,8 +14,6 @@ python -m iron.lm.embeddinggemma2.tune
 ```
 """
 
-import itertools
-
 import aie.utils as aie_utils
 import numpy as np
 
@@ -45,45 +43,35 @@ def main():
     vision = vision_model.VisionTower(
         V, unread_weights(vision_model.layout(V), V.n_layers)
     )
-    # Every call at its longest bound: each row real, each vision version at
-    # the largest image it takes, its patches filled.
+    # Every call at its longest bound: each row real, the clip its longest,
+    # the image the largest, its patches filled.
     calls = [
         call
         for s in text.shapes()
         for call in Call.admitted(text.trace(**s), dev, dict(n=s["ids"][0][0]))
     ]
-    sized = {
-        T: vision.processor.inputs(np.zeros((*image, 3), np.uint8), T // V.pool**2)[1]
-        for T, image in zip(vision.rows, vision_model.LARGEST, strict=True)
-    }
-    graph = Multimodal(c, weights, text.max_tokens, audio, vision)
-    # A tower version's fewest soft tokens: one past the version before it.
-    fewest_audio = dict(zip(audio.rows, (1, *(T + 1 for T in audio.rows))))
-    fewest_image = dict(
-        zip(vision.rows, (1, *(T // V.pool**2 + 1 for T in vision.rows)))
+    processor = vision.processor
+    _, sized = processor.inputs(
+        np.zeros((*vision_model.LARGEST, 3), np.uint8),
+        processor.patches // V.pool**2,
     )
-    fewest_audio[0] = fewest_image[0] = 0
-    for s, T_a, T_v in itertools.product(graph.shapes(), fewest_audio, fewest_image):
-        rows = s["ids"][0][0]
-        if not T_a and not T_v or fewest_audio[T_a] + fewest_image[T_v] > rows:
-            continue
-        shapes = dict(ids=s["ids"])
-        if T_a:
-            shapes["wave"] = (((4 * T_a + 1) * A.hop,), np.float32)
-        values = dict(
-            n=rows,
-            n_audio=2 * T_a,
-            frames=4 * T_a,
-            n_patches=0,
-            height=0,
-            width=0,
-            out_height=0,
-            out_width=0,
-        )
-        if T_v:
-            shapes.update(vision.processor.shapes(T_v))
-            sizes = dict(sized[T_v])
-            values.update(n_patches=sizes.pop("n"), **sizes)
+    T_a = audio.max_tokens
+    graph = Multimodal(c, weights, text.max_tokens, audio, vision)
+    (s,) = graph.shapes()
+    sizes = dict(sized)
+    values = dict(
+        n=s["ids"][0][0],
+        n_audio=2 * T_a,
+        frames=4 * T_a,
+        audio_tokens=T_a,
+        n_patches=sizes.pop("n"),
+        **sizes,
+    )
+    for shapes in (
+        dict(wave=(((4 * T_a + 1) * A.hop,), np.float32)),
+        processor.shapes(),
+        dict(placed=s["ids"]),
+    ):
         calls += Call.admitted(graph.trace(**shapes), dev, values)
     tune.measure(args, calls, CALIBRATION_PAIRS, COSTS)
 

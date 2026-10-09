@@ -32,7 +32,7 @@ from iron.operators.rope import RoPE
 # per-K-tile bf16 rounding cost the encoder accuracy.
 ACCURATE = dict(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
 
-# The rows of a block, 16 to each row of cores: a tower's versions are whole
+# The rows of a block, 16 to each row of cores: a tower's rows are whole
 # blocks, and MHA's queries are whole blocks for each of its pipelines.
 ROWS = 64
 PIPELINES = 8

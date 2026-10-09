@@ -28,24 +28,25 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM
+from iron.operators.mha import MHA
 from iron.operators.resample.op import PatchPositions, Resample, ResampleTaps
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
-from iron.operators.softmax import Softmax
-from iron.operators.transpose import Transpose
 
-from ..model import ACCURATE
+from ..model import ACCURATE, PIPELINES
+from ..model import ROWS as BLOCK
 
-# A GEMM's row block at its default tile: a version's rows are a multiple of it.
+# A GEMM's row block at its default tile: the patch rows and the pooled rows
+# are whole blocks.
 ROWS = 256
 # The bytes of an image row Resample receives at a time.
 CHUNK = 4096
 # A core's patch columns, as many as its memory holds: 127 across on 16 cores.
 PATCH_COLUMNS = 8
-# Each version's patch rows, a video frame's budget then an image's, and the
-# largest image it takes either way up: 4K, then 12.6 MP.
-VERSIONS = (1280, 2560)
-LARGEST = ((2160, 3840), (3072, 4096))
+# The patch rows of a call, an image's budget, and the largest image it
+# takes either way up, 12.6 MP.
+PATCHES = 2560
+LARGEST = (3072, 4096)
 
 # Where the vision tune writes its tables, one per device.
 COSTS = Path(__file__).parent
@@ -175,20 +176,21 @@ class ImageProcessor(SimpleNamespace):
 
     Args:
         config: The tower's shape.
-        rows: Each version's patch rows, fewest first.
-        images: For each entry of `rows`, the `(height, width)` of the largest
-            image it takes either way up, each larger than the one before:
-            a version is known by its image's buffer.
+        patches: The patch rows of a call.
+        image: The `(height, width)` of the largest image a call takes
+            either way up.
     """
 
-    def __init__(self, config: VisionConfig, rows=VERSIONS, images=LARGEST):
+    def __init__(self, config: VisionConfig, patches=PATCHES, image=LARGEST):
         c = config
         self.config = config
+        self.patches = patches
+        self.image = image
         k, side = c.pool, c.pool * c.patch
         cores = 2 * aie_utils.ensure_current_device().cols
-        # Every grid of whole pooling windows the largest version holds; the
-        # fewest patch columns give the most bands and padded raster rows.
-        grids = [(rows[-1] // s // k * k, s) for s in range(k, rows[-1] // k + 1, k)]
+        # Every grid of whole pooling windows the rows hold; the fewest patch
+        # columns give the most bands and padded raster rows.
+        grids = [(patches // s // k * k, s) for s in range(k, patches // k + 1, k)]
         shared = dict(
             height=side,
             width=side,
@@ -202,54 +204,41 @@ class ImageProcessor(SimpleNamespace):
             num_aie_columns=cores // 2,
             num_channels=2,
         )
-        self.resample = {
-            T: Resample(
-                image_chunks=max(a * -(-3 * b // CHUNK), b * -(-3 * a // CHUNK)),
-                **shared,
-            )
-            for T, (a, b) in zip(rows, images, strict=True)
-        }
-        chunks = [op.image_chunks for op in self.resample.values()]
-        if chunks != sorted(set(chunks)):
-            raise ValueError(
-                f"images {images} are not each larger than the one before, in "
-                f"{CHUNK}-byte rows: a version is known by its image's buffer"
-            )
+        a, b = image
+        self.resample = Resample(
+            image_chunks=max(a * -(-3 * b // CHUNK), b * -(-3 * a // CHUNK)),
+            **shared,
+        )
         self.raster = iron.state((shared["patch_rows"], 3 * c.patch**2))
         taps = dict(
             in_size=side,
             out_size=side,
-            words=self.resample[rows[0]].words,
+            words=self.resample.words,
             slots=c.patch,
             num_aie_columns=cores // 2,
             num_channels=2,
         )
         self.taps_w = ResampleTaps(chunks=shared["width_chunks"], **taps)
         self.taps_h = ResampleTaps(chunks=shared["height_chunks"], **taps)
-        self.patch_positions = {
-            T: PatchPositions(
-                rows=T,
-                out_height=side,
-                out_width=side,
-                pool=k,
-                positions=c.positions,
-                cores=cores,
-            )
-            for T in rows
-        }
+        self.patch_positions = PatchPositions(
+            rows=patches,
+            out_height=side,
+            out_width=side,
+            pool=k,
+            positions=c.positions,
+            cores=cores,
+        )
 
     def __call__(self, rgb, height, width, out_height, out_width):
         """The `(pixels, xy, position_ids)` of the image `rgb`, `height` by
-        `width` pixels resized to `out_height` by `out_width`, in the `T`
-        rows of the version its buffer is: `(T, 3 * patch ** 2)` bf16 and
-        `(2 * T,)` int32 twice.
+        `width` pixels resized to `out_height` by `out_width`, in `patches`
+        rows: `(patches, 3 * patch ** 2)` bf16 and `(2 * patches,)` int32
+        twice.
         """
-        T = next(
-            T for T, op in self.resample.items() if op.image_chunks == rgb.shape[0]
-        )
+        T = self.patches
         taps_w = self.taps_w(in_samples=width, out_samples=out_width)
         taps_h = self.taps_h(in_samples=height, out_samples=out_height)
-        self.resample[T](
+        self.resample(
             rgb,
             taps_w,
             taps_h,
@@ -259,29 +248,28 @@ class ImageProcessor(SimpleNamespace):
             out_rows=out_height,
             out_columns=out_width,
         )
-        xy, position_ids, order = self.patch_positions[T](
+        xy, position_ids, order = self.patch_positions(
             out_rows=out_height, out_columns=out_width
         )
         return Copy(self.raster[order]), xy.reshape(2 * T), position_ids.reshape(2 * T)
 
     # -- on the host -----------------------------------------------------------
 
-    def shapes(self, T: int) -> dict:
-        """The input shape of a call over `T` patch rows."""
-        return dict(rgb=((self.resample[T].image_chunks, CHUNK), np.uint8))
+    def shapes(self) -> dict:
+        """The input shape of a call."""
+        return dict(rgb=((self.resample.image_chunks, CHUNK), np.uint8))
 
     def inputs(self, image, max_tokens: int) -> tuple[np.ndarray, dict]:
         """A call's image buffer and per-call sizes, `n` (its patches) among
-        them, for a decoded `image` at the processor's `max_tokens`, in the
-        fewest rows a version with room for it has.
+        them, for a decoded `image` at the processor's `max_tokens`.
 
         Args:
             image: `(height, width, 3)` uint8.
             max_tokens: The processor's `max_soft_tokens`.
 
         Raises:
-            ValueError: No version holds the image, or `Resample` cannot
-                resize it.
+            ValueError: The image or its patches do not fit a call, or
+                `Resample` cannot resize it.
         """
         image = np.asarray(image)
         if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
@@ -293,14 +281,13 @@ class ImageProcessor(SimpleNamespace):
         ho, wo = size(H, W, max_tokens, c)
         n = ho // c.patch * (wo // c.patch)
         line = -(-3 * W // CHUNK) * CHUNK
-        fits = [
-            T
-            for T, op in self.resample.items()
-            if T >= n and op.image_chunks * CHUNK >= H * line
-        ]
-        if not fits:
-            raise ValueError(f"no version holds a {H}x{W} image of {n} patches")
-        op = self.resample[fits[0]]
+        op = self.resample
+        if n > self.patches or op.image_chunks * CHUNK < H * line:
+            a, b = self.image
+            raise ValueError(
+                f"a {H}x{W} image of {n} patches does not fit a call's "
+                f"{self.patches} patches or {a}x{b} image"
+            )
         # Resample's own checks refuse a size it cannot resize.
         dataclasses.replace(op, height=H, width=W, out_height=ho, out_width=wo)
         buffer = np.zeros((op.image_chunks, CHUNK), np.uint8)
@@ -310,14 +297,14 @@ class ImageProcessor(SimpleNamespace):
 
 
 class VisionTower(SimpleNamespace):
-    """The vision tower and `embed_vision` over at most `rows[-1]` patches,
-    called in a graph's body. It is a namespace, so the graph that holds it
-    names its weights by their path.
+    """The vision tower and `embed_vision` over at most `patches` patches,
+    one compile for every image, called in a graph's body. It is a
+    namespace, so the graph that holds it names its weights by their path.
 
     A call takes a decoded image, which `processor` resizes and cuts into
     patches in pooling-window order on the NPU, so pooling is a fixed sum
-    of row blocks, a GEMM by a 0/1 matrix. `n`, the real patches, masks the
-    padded keys; padded rows are zero, stay finite and are never read. Each
+    of row blocks, a GEMM by a 0/1 matrix. `n`, the real patches, bounds
+    every operator after the processor, the pooling's sum among them. Each
     head's channels are reordered so that the axial RoPE, x on its first
     half and y on its second, is one rotation of halves: a permutation
     within a head changes neither its norm nor a query's product with a key.
@@ -331,24 +318,26 @@ class VisionTower(SimpleNamespace):
     Args:
         config: The tower's shape.
         weights: The tree `load_weights` gives over `layout(config)`.
-        rows: The patch rows a call may take, whole `ROWS`-row blocks.
-        images: The largest image each version takes, as `ImageProcessor`
-            takes them.
+        patches: The patch rows of a call, whole `ROWS`-row blocks and
+            attention's blocks for each of its pipelines.
+        image: The largest image a call takes, as `ImageProcessor` takes it.
     """
 
     def __init__(
         self,
         config: VisionConfig,
         weights: SimpleNamespace,
-        rows=VERSIONS,
-        images=LARGEST,
+        patches=PATCHES,
+        image=LARGEST,
     ):
         c = config
-        if any(T % ROWS for T in rows):
-            raise ValueError(f"{rows} rows are not whole {ROWS}-row versions")
+        if patches % ROWS or patches % (BLOCK * PIPELINES):
+            raise ValueError(
+                f"{patches} patches are not whole {ROWS}-row blocks and "
+                f"{BLOCK}-row blocks for each of attention's {PIPELINES} pipelines"
+            )
         self.config = config
-        self.rows = sorted(rows)
-        self.processor = ImageProcessor(config, self.rows, images)
+        self.processor = ImageProcessor(config, patches, image)
         self.patch = weights.patch
         position = np.zeros((2 * c.positions + 1, c.hidden), bfloat16)
         position[:-1] = weights.position.reshape(-1, c.hidden)
@@ -376,48 +365,45 @@ class VisionTower(SimpleNamespace):
         angles = np.zeros((c.positions + 1, half), bfloat16)
         angles[:-1] = rope_angles(half, c.positions, c.rope_base)
         self.angles = iron.weight(angles)
-        self.minus_one = np.full((self.rows[-1], c.hidden), -1, bfloat16)
-        # Soft token j sums rows j * pool ** 2 onwards; rows of padded tokens
-        # are padding's.
+        self.minus_one = iron.weight(np.full((patches, c.hidden), -1, bfloat16))
+        # Soft token j sums rows j * pool ** 2 onwards; a token past the
+        # image's sums none of its rows.
         window = c.pool**2
-        self.pool = {}
-        for T in self.rows:
-            tokens = -(-(T // window) // ROWS) * ROWS
-            pool = np.zeros((tokens, T), bfloat16)
-            for j in range(T // window):
-                pool[j, j * window : (j + 1) * window] = 1
-            self.pool[T] = pool
+        tokens = -(-(patches // window) // ROWS) * ROWS
+        pool = np.zeros((tokens, patches), bfloat16)
+        for j in range(patches // window):
+            pool[j, j * window : (j + 1) * window] = 1
+        self.pool = iron.weight(pool)
 
     def __call__(self, rgb, n, height, width, out_height, out_width):
         """The `(tokens, text_dim)` soft tokens of the image `rgb`, `height`
         by `width` pixels resized to `out_height` by `out_width`, its `n`
-        patches in the `T` rows of the version its buffer is, `tokens`
-        `T // pool ** 2` rounded up to whole `ROWS`; the first
-        `n // pool ** 2` are the image's.
+        patches, `tokens` `patches // pool ** 2` rounded up to whole `ROWS`;
+        the first `n // pool ** 2` are the image's, the rest zero.
         """
         c = self.config
         pixels, xy, position_ids = self.processor(
             rgb, height, width, out_height, out_width
         )
         T = pixels.shape[0]
-        x = AXPY(pixels, self.minus_one[:T], scalar_factor=2.0)
+        x = AXPY(pixels[:n], self.minus_one[:n], scalar_factor=2.0)
         h = GEMM(x, self.patch, b_col_maj=True, **ACCURATE)
-        position = Copy(self.position[position_ids])
-        h = ElementwiseAdd(ElementwiseAdd(h, position[:T]), position[T:])
-        angles = Copy(self.angles[xy]).reshape(T, c.head_dim)
+        position = Copy(self.position[position_ids]).reshape(2, T, c.hidden)
+        h = ElementwiseAdd(ElementwiseAdd(h, position[0, :n]), position[1, :n])
+        angles = Copy(self.angles[xy]).reshape(T, c.head_dim)[:n]
         for w in self.layers:
-            h = self.layer(w, h, angles, n)
-        pooled = GEMM(self.pool[T], h, **ACCURATE)
+            h = self.layer(w, h, angles)
+        pooled = GEMM(self.pool[:, :n], h, **ACCURATE)
         # The mean's 1 / pool ** 2 and the sqrt(hidden) scale folded into
         # the norm's epsilon: RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
         s2 = c.hidden / c.pool**4
         pooled = RMSNorm(pooled, epsilon=c.eps / s2)
         return GEMM(pooled, self.projection, b_col_maj=True, **ACCURATE)
 
-    def layer(self, w, x, angles, n):
+    def layer(self, w, x, angles):
         c = self.config
         h = RMSNorm(x, weight=w.norm1, epsilon=c.eps)
-        a = RMSNorm(self.attention(w, h, angles, n), weight=w.norm2, epsilon=c.eps)
+        a = RMSNorm(self.attention(w, h, angles), weight=w.norm2, epsilon=c.eps)
         x = ElementwiseAdd(x, a)
         h = RMSNorm(x, weight=w.norm3, epsilon=c.eps)
         gate = GELU(GEMM(h, w.gate, b_col_maj=True, **ACCURATE))
@@ -425,7 +411,7 @@ class VisionTower(SimpleNamespace):
         f = GEMM(f, w.down, b_col_maj=True, **ACCURATE)
         return ElementwiseAdd(x, RMSNorm(f, weight=w.norm4, epsilon=c.eps))
 
-    def attention(self, w, h, angles, n):
+    def attention(self, w, h, angles):
         c = self.config
         T, H, D = h.shape[0], c.n_heads, c.head_dim
         q = GEMM(h, w.q, b_col_maj=True, **ACCURATE).reshape(T * H, D)
@@ -434,52 +420,42 @@ class VisionTower(SimpleNamespace):
         q = RoPE(RMSNorm(q, weight=w.q_norm, epsilon=c.eps), angles)
         k = RoPE(RMSNorm(k, weight=w.k_norm, epsilon=c.eps), angles)
         v = RMSNorm(v, epsilon=c.eps)
-        q, k = (
-            Copy(t.reshape(T, H, D).transpose(1, 0, 2)).reshape(H, T, D) for t in (q, k)
+        o = MHA(
+            q.reshape(T, H, D),
+            k.reshape(T, H, D),
+            v.reshape(T, H, D),
+            heads_interleaved=True,
+            kv_interleaved=True,
+            causal=False,
+            emulate_bf16_mmul_with_bfp16=False,
+            scale=1.0,
+            num_pipelines=PIPELINES,
         )
-        v = Transpose(v.reshape(T, H * D)).reshape(H, D, T)
-        for i in range(H):
-            scores = GEMM(q[i], k[i], b_col_maj=True, **ACCURATE)
-            weights = Softmax(scores[:, :n])
-            # weights @ v as (v^T @ weights^T)^T: N = T rather than D spans
-            # every column. Over the head's queries, which the scores were
-            # their last use of.
-            GEMM(
-                v[i, :, :n],
-                weights,
-                q[i],
-                b_col_maj=True,
-                c_col_maj=True,
-                tile_k=128,
-                **ACCURATE,
-            )
-        o = Copy(q.transpose(1, 0, 2)).reshape(T, H * D)
-        return GEMM(o, w.o, b_col_maj=True, **ACCURATE)
+        return GEMM(o.reshape(T, H * D), w.o, b_col_maj=True, **ACCURATE)
 
 
 class Vision(iron.Graph):
-    """The vision tower as a graph of its own, a version per entry of `rows`.
+    """The vision tower as a graph of its own, one compile for every image.
 
     Args:
         config: The tower's shape.
         weights: The tree `load_weights` gives over `layout(config)`.
-        rows: Each version's patch rows, whole `ROWS`-row blocks.
-        images: The largest image each version takes, as `ImageProcessor`
-            takes them.
+        patches: The patch rows of a call, as `VisionTower` takes them.
+        image: The largest image a call takes, as `ImageProcessor` takes it.
     """
 
-    # GEMM tiles narrow enough for N = 768 or 1280 to span every column.
+    # GEMM tiles narrow enough for N = 768 to span every column.
     profile = Path(__file__).with_name("profiles")
 
     def __init__(
         self,
         config: VisionConfig,
         weights: SimpleNamespace,
-        rows=VERSIONS,
-        images=LARGEST,
+        patches=PATCHES,
+        image=LARGEST,
     ):
         self.config = config
-        self.vision = VisionTower(config, weights, rows, images)
+        self.vision = VisionTower(config, weights, patches, image)
 
     def body(
         self,
@@ -496,11 +472,11 @@ class Vision(iron.Graph):
     # -- on the host -----------------------------------------------------------
 
     def shapes(self) -> list[dict]:
-        """Each version's input shapes, fewest rows first."""
-        return [self.vision.processor.shapes(T) for T in self.vision.rows]
+        """The input shapes of each version: one, `patches` rows."""
+        return [self.vision.processor.shapes()]
 
     def load(self, tuner: JointNarrowing | None = None) -> "Vision":
-        """Compile every version before the first call, so the arena is made once.
+        """Compile before the first call, so the arena is made once.
 
         Args:
             tuner: Narrows and packs each version's designs by cost.

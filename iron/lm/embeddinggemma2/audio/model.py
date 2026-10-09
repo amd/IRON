@@ -255,19 +255,22 @@ class LogMel:
 
 
 class AudioTower(SimpleNamespace):
-    """The audio tower and `embed_audio` over at most `rows[-1]` soft
-    tokens, called in a graph's body. It is a namespace, so the graph that
-    holds it names its weights and states by their path.
+    """The audio tower and `embed_audio` over at most `max_tokens` soft
+    tokens, one compile for every clip, called in a graph's body. It is a
+    namespace, so the graph that holds it names its weights and states by
+    their path.
 
     A call takes the `4 * T + 1` hops of waveform its `4 * T` frames read
-    (the first the zeros in front of the clip, zero past it), the valid
-    frames, and `n`, the rows of the first convolution's output that are
-    valid. Its features are `LogMel`'s, each GEMM over float32 operands as
-    six products of their bf16 limbs. The frame after the valid ones is
-    zeroed, as are the first convolution's rows after its valid ones before
-    the second reads them, as Hugging Face's mask does. Past that nothing
-    masks padding: the attention and the light convolution look only back,
-    so a valid token never reads a padded one.
+    (the first the zeros in front of the clip, zero past it), `T` being
+    `max_tokens`, and per call the valid frames, `n`, the rows of the
+    first convolution's output that are valid, and `tokens`, the soft
+    tokens, which bound the operators over each. Its features are
+    `LogMel`'s, each GEMM over float32 operands as six products of their
+    bf16 limbs. The frame after the valid ones is zeroed, as are the first
+    convolution's rows after its valid ones before the second reads them,
+    as Hugging Face's mask does. Past that nothing masks padding: the
+    attention and the light convolution look only back, so a valid token
+    never reads a padded one.
 
     Each subsampling convolution is a GEMM over the rows a call's patterns
     gather, its weight centered over the output channels so that its layer
@@ -280,7 +283,7 @@ class AudioTower(SimpleNamespace):
     Args:
         config: The tower's shape.
         weights: The tree `load_weights` gives over `layout(config)`.
-        rows: The soft tokens of each `T` a call may take, whole `ROWS`-row
+        max_tokens: The soft tokens a call takes at most, whole `ROWS`-row
             blocks.
     """
 
@@ -288,19 +291,18 @@ class AudioTower(SimpleNamespace):
         self,
         config: AudioConfig,
         weights: SimpleNamespace,
-        rows=(64, 128, 256, 512, 768),
+        max_tokens: int = 768,
     ):
         c = config
-        if any(T % ROWS for T in rows):
-            raise ValueError(f"{rows} rows are not whole {ROWS}-row versions")
+        if max_tokens % ROWS:
+            raise ValueError(f"{max_tokens} tokens are not whole {ROWS}-row blocks")
         if c.frame != 2 * c.hop:
             raise ValueError(f"a frame of {c.frame} samples is not two hops")
         self.config = config
-        self.rows = sorted(rows)
+        self.max_tokens = T = max_tokens
         E, H, D, W = c.hidden, c.n_heads, c.head_dim, c.window
         C0, C1 = c.channels
         F0 = c.mels // 2
-        most = self.rows[-1]
         # The first convolution's output row: each frequency's channels in a
         # slot of their own, with a zero slot either side, the second's padding.
         self.slots = (F0 + 2) * C0
@@ -318,7 +320,7 @@ class AudioTower(SimpleNamespace):
         self.norm0, self.norm1 = weights.norm0, weights.norm1
         self.input_proj = weights.input_proj
         self.output_proj = weights.output_proj
-        self.output_bias = np.tile(weights.output_bias, (most, 1))
+        self.output_bias = iron.weight(np.tile(weights.output_bias, (T, 1)))
         self.projection = weights.projection
         logmel = LogMel(config)
         bins = logmel.filters.shape[0]
@@ -329,26 +331,24 @@ class AudioTower(SimpleNamespace):
         dft[:, width : width + bins] = logmel.basis[:, bins:]
         self.dft = stacked(dft)
         self.filters = stacked(np.pad(logmel.filters, ((0, width - bins), (0, 0))))
-        self.features = iron.state((4 * most + 2, c.mels))
+        self.features = iron.state((4 * T + 2, c.mels))
         self.zero_mel = np.zeros((1, c.mels), bfloat16)
-        self.subsampled = iron.state((2 * most + 2, self.slots))
+        self.subsampled = iron.state((2 * T + 2, self.slots))
         self.zero = np.zeros((1, self.slots), bfloat16)
         # The keys' rows: the `W - 1` before the first, the T keys, then from
         # an even row the relative-position rows twice, the second a row on.
-        self.width = [-(-(T + W + 2 * BAND) // 128) * 128 for T in self.rows]
-        self.keys = [iron.state((H, K, D)) for K in self.width]
-        self.values = [iron.state((H, K, D)) for K in self.width]
-        self.scores = [iron.state((H, T, K)) for T, K in zip(self.rows, self.width)]
-        self.probs = [iron.state((H, T, K)) for T, K in zip(self.rows, self.width)]
-        lowest = finfo(bfloat16).min
-        self.masks = []
-        for T in self.rows:
-            q, j = np.arange(T)[:, None], np.arange(BAND)
-            # An odd query's band starts a column early, at an even column.
-            d = j - q % 2
-            mask = np.where((d >= 0) & (d < W) & (q - (W - 1) + d >= 0), 0, lowest)
-            mask = mask.astype(bfloat16)
-            self.masks.append(np.tile(mask, (H, 1)))
+        self.width = K = -(-(T + W + 2 * BAND) // 128) * 128
+        self.keys = iron.state((H, K, D))
+        self.values = iron.state((H, K, D))
+        self.scores = iron.state((H, T, K))
+        self.probs = iron.state((H, T, K))
+        q, j = np.arange(T)[:, None], np.arange(BAND)
+        # An odd query's band starts a column early, at an even column.
+        d = j - q % 2
+        mask = np.where(
+            (d >= 0) & (d < W) & (q - (W - 1) + d >= 0), 0, finfo(bfloat16).min
+        )
+        self.mask = np.tile(mask.astype(bfloat16), (H, 1))
         # The logits scaled by 1 / logit_cap, the key scale moved to the queries.
         q_scale = D**-0.5 / math.log(2)
         k_scale = math.log(1 + math.e) / math.log(2)
@@ -385,8 +385,10 @@ class AudioTower(SimpleNamespace):
                         k=a.k,
                         v=a.v,
                         post=a.post,
-                        scale=np.tile(np.tile(softplus * scale, H), (most, 1)).astype(
-                            bfloat16
+                        scale=iron.weight(
+                            np.tile(np.tile(softplus * scale, H), (T, 1)).astype(
+                                bfloat16
+                            )
                         ),
                         relative=band.astype(bfloat16),
                     ),
@@ -402,8 +404,8 @@ class AudioTower(SimpleNamespace):
             )
 
     def logmel(self, wave, frames):
-        """Write the log-mel features of `wave` to `features[1 : F + 1]`,
-        `F = wave.shape[0] / hop - 1`, and zero the row after the valid ones.
+        """Write the log-mel features of `wave`'s valid frames to
+        `features[1 : frames + 1]`, and zero the row after them.
 
         Args:
             wave: `((F + 1) * hop,)` float32 samples: the `frame // 2` zeros
@@ -417,35 +419,36 @@ class AudioTower(SimpleNamespace):
         windows = TensorAccessPattern(
             wave.shape, 0, [F // 4, 4, c.frame], [4 * c.hop, c.hop, 1]
         )
-        a = Limbs(Copy(wave, src=windows, dtype=np.float32).reshape(F, c.frame))
+        a = Copy(wave, src=windows, dtype=np.float32).reshape(F, c.frame)[:frames]
+        a = Limbs(a)
         exact = dict(dtype_out=np.float32, emulate_bf16_mmul_with_bfp16=False)
         spectrum = GEMM(a, self.dft, tile_m=32, **exact)
         energy = GEMM(Limbs(Magnitude(spectrum)), self.filters, tile_m=32, **exact)
         Log(energy, self.features[1 : F + 1], offset=c.mel_floor)
         Copy(self.zero_mel, self.features[frames + 1])
 
-    def __call__(self, wave, n, frames):
-        """The soft tokens of `wave`, `(T, text_dim)` bfloat16, the first
-        `config.tokens(frames)` of them valid.
+    def __call__(self, wave, n, frames, tokens):
+        """The soft tokens of `wave`, `(max_tokens, text_dim)` bfloat16, the
+        first `tokens` of them valid.
 
         Args:
-            wave: `((4 * T + 1) * hop,)` float32 samples, as `logmel`
-                takes them, `T` an entry of `rows`.
+            wave: `((4 * max_tokens + 1) * hop,)` float32 samples, as
+                `logmel` takes them.
             n: The per-call `ceil(frames / 2)`, an int32 value.
             frames: The per-call valid frames, an int32 value.
+            tokens: The per-call `config.tokens(frames)`, an int32 value.
         """
         c = self.config
         C0, C1 = c.channels
         F1 = c.mels // 4
-        T = (wave.shape[0] // c.hop - 1) // 4
-        v = self.rows.index(T)
+        T = self.max_tokens
         # The first row of each convolution's input is its zero padding in time.
         self.logmel(wave, frames)
         patches = TensorAccessPattern(
             self.features.shape, 0, [2 * T, 3 * c.mels], [2 * c.mels, 1]
         )
         h = GEMM(
-            Copy(self.features, src=patches).reshape(2 * T, 3 * c.mels),
+            Copy(self.features, src=patches).reshape(2 * T, 3 * c.mels)[:n],
             self.conv0,
             **ACCURATE,
         )
@@ -455,20 +458,21 @@ class AudioTower(SimpleNamespace):
         ReLU(h.reshape(2 * T, self.slots), self.subsampled[1 : 2 * T + 1])
         Copy(self.zero, self.subsampled[n + 1])
         rows = TensorAccessPattern(
-            (2 * self.rows[-1] + 2, self.slots),
+            self.subsampled.shape,
             0,
             [T, F1, 3, 3 * C0],
             [2 * self.slots, 2 * C0, self.slots, 1],
         )
         h = Copy(self.subsampled, src=rows).reshape(T * F1, 9 * C0)
-        # The few output channels as M, so that the patches span every column.
+        # The few output channels as M, so that the patches span every column;
+        # every row, as a GEMM bounds no N.
         h = GEMM(self.conv1, h, b_col_maj=True, c_col_maj=True, **ACCURATE)
-        h = ReLU(RMSNorm(h, weight=self.norm1, epsilon=c.eps)).reshape(T, F1 * C1)
-        x = GEMM(h, self.input_proj, b_col_maj=True, **ACCURATE)
+        h = ReLU(RMSNorm(h[: tokens * F1], weight=self.norm1, epsilon=c.eps))
+        x = GEMM(h.reshape(T, F1 * C1), self.input_proj, b_col_maj=True, **ACCURATE)
         for w in self.layers:
-            x = self.layer(w, x, v)
+            x = self.layer(w, x, tokens)
         x = GEMM(x, self.output_proj, b_col_maj=True, **ACCURATE)
-        x = RMSNorm(ElementwiseAdd(x, self.output_bias[:T]), epsilon=c.eps)
+        x = RMSNorm(ElementwiseAdd(x, self.output_bias[:tokens]), epsilon=c.eps)
         return GEMM(x, self.projection, b_col_maj=True, **ACCURATE)
 
     def clamped(self, w, x, side: str):
@@ -483,12 +487,12 @@ class AudioTower(SimpleNamespace):
         weight = w.weight if weight is None else weight
         return self.clamped(w, GEMM(x, weight, b_col_maj=True, **ACCURATE), "output")
 
-    def layer(self, w, x, v):
+    def layer(self, w, x, tokens):
         c = self.config
         x = self.feed_forward(w.ff[0], x)
         h = RMSNorm(x, weight=w.norm_pre_attn, epsilon=c.eps)
         a = RMSNorm(
-            self.attention(w.attn, h, v), weight=w.norm_post_attn, epsilon=c.eps
+            self.attention(w.attn, h, tokens), weight=w.norm_post_attn, epsilon=c.eps
         )
         x = self.feed_forward(w.ff[1], self.light_conv(w.conv, ElementwiseAdd(x, a)))
         return RMSNorm(x, weight=w.norm_out, epsilon=c.eps)
@@ -500,20 +504,22 @@ class AudioTower(SimpleNamespace):
         h = self.linear(w.down, self.clamped(w.down, SiLU(h), "input"))
         return ElementwiseAdd(x, RMSNorm(h, weight=w.post, epsilon=c.eps))
 
-    def attention(self, w, h, v):
+    def attention(self, w, h, tokens):
         c = self.config
         T, H, D, W = h.shape[0], c.n_heads, c.head_dim, c.window
-        K = self.width[v]
-        keys, values = self.keys[v], self.values[v]
-        scores, probs = self.scores[v], self.probs[v]
+        K = self.width
+        keys, values = self.keys, self.values
+        scores, probs = self.scores, self.probs
         h = self.clamped(w.q, h, "input")
-        q = ElementwiseMul(self.linear(w.q, h), w.scale[:T])
+        q = ElementwiseMul(self.linear(w.q, h), w.scale[:tokens])
         k, val = self.linear(w.k, h), self.linear(w.v, h)
         Copy(k.reshape(T, H, D).transpose(1, 0, 2), keys[:, W - 1 : W - 1 + T])
         R = T + W - 1 + (T + W - 1) % 2
         Copy(w.relative, keys[:, R : R + 2 * BAND])
         Copy(val.reshape(T, H, D).transpose(1, 0, 2), values[:, W - 1 : W - 1 + T])
-        q = Copy(q.reshape(T, H, D).transpose(1, 0, 2)).reshape(H, T, D)
+        q = Copy(q.reshape(T, H, D).transpose(1, 0, 2))
+        # Over every key: those past the valid ones are stale but finite, as
+        # only bounded copies write them.
         for i in range(H):
             GEMM(q[i], keys[i], scores[i], b_col_maj=True, **ACCURATE)
         # Query t's band starts at the even column of t and t - 1, its
@@ -525,10 +531,10 @@ class AudioTower(SimpleNamespace):
             Copy(scores, src=band).reshape(H * T, BAND),
             Copy(scores, src=relative).reshape(H * T, BAND),
         )
-        logits = AXPY(Tanh(logits), self.masks[v], scalar_factor=c.logit_cap)
+        logits = AXPY(Tanh(logits), self.mask, scalar_factor=c.logit_cap)
         Copy(Softmax(logits), probs, dst=band)
         for i in range(H):
-            GEMM(probs[i], values[i], q[i], **ACCURATE)
+            GEMM(probs[i, :tokens], values[i], q[i], **ACCURATE)
         o = Copy(q.transpose(1, 0, 2)).reshape(T, H * D)
         return self.linear(w.post, self.clamped(w.post, o, "input"))
 
@@ -540,58 +546,69 @@ class AudioTower(SimpleNamespace):
         h = SiLU(RMSNorm(h, weight=w.norm, epsilon=c.eps))
         return ElementwiseAdd(x, self.linear(w.end, self.clamped(w.end, h, "input")))
 
-    def inputs(self, waveform) -> tuple[np.ndarray, int, int]:
-        """A call's `wave`, `n` and `frames` for a mono `waveform` at
-        `sample_rate`, truncated to `max_samples`, padded with zeros to the
-        fewest rows of `rows` that hold its tokens.
+    def inputs(self, waveform) -> tuple[np.ndarray, dict]:
+        """A call's `wave` and per-call sizes, `n`, `frames` and `tokens`,
+        for a mono `waveform` at `sample_rate`, truncated to `max_samples`
+        and padded with zeros.
 
         Raises:
-            ValueError: More soft tokens than `rows[-1]`.
+            ValueError: The clip has no valid frame, or more soft tokens
+                than `max_tokens`.
         """
         c = self.config
         audio = np.asarray(waveform, np.float32).reshape(-1)[: c.max_samples]
         frames = c.frames(audio.size)
         tokens = c.tokens(frames)
-        if tokens > self.rows[-1]:
-            raise ValueError(f"{tokens} soft tokens do not fit {self.rows[-1]} rows")
-        T = min(T for T in self.rows if T >= tokens)
+        if not 0 < tokens <= self.max_tokens:
+            raise ValueError(
+                f"{audio.size} samples give {tokens} soft tokens, not 1 to "
+                f"{self.max_tokens}"
+            )
         # Samples past the last frame are only ever read by invalid ones.
-        wave = np.zeros((4 * T + 1) * c.hop, np.float32)
+        wave = np.zeros((4 * self.max_tokens + 1) * c.hop, np.float32)
         held = min(audio.size, wave.size - c.hop)
         wave[c.hop : c.hop + held] = audio[:held]
-        return wave, -(-frames // 2), frames
+        return wave, dict(n=-(-frames // 2), frames=frames, tokens=tokens)
 
 
 class Audio(iron.Graph):
-    """The audio tower as a graph of its own, a version per entry of `rows`.
+    """The audio tower as a graph of its own, one compile for every clip.
 
     Args:
         config: The tower's shape.
         weights: The tree `load_weights` gives over `layout(config)`.
-        rows: Each version's soft tokens, whole `ROWS`-row blocks.
+        max_tokens: The soft tokens a call takes at most, whole `ROWS`-row
+            blocks.
     """
 
     def __init__(
         self,
         config: AudioConfig,
         weights: SimpleNamespace,
-        rows=(64, 128, 256, 512, 768),
+        max_tokens: int = 768,
     ):
         self.config = config
-        self.audio = AudioTower(config, weights, rows)
+        self.audio = AudioTower(config, weights, max_tokens)
 
-    def body(self, x, *, n: Scratchpad[np.int32], frames: Scratchpad[np.int32]):
-        return self.audio(x, n, frames)
+    def body(
+        self,
+        x,
+        *,
+        n: Scratchpad[np.int32],
+        frames: Scratchpad[np.int32],
+        tokens: Scratchpad[np.int32],
+    ):
+        return self.audio(x, n, frames, tokens)
 
     # -- on the host -----------------------------------------------------------
 
     def shapes(self) -> list[dict]:
-        """Each version's input shapes, fewest rows first."""
+        """The input shapes of each version: one, `max_tokens` rows."""
         hop = self.config.hop
-        return [dict(x=(((4 * T + 1) * hop,), np.float32)) for T in self.audio.rows]
+        return [dict(x=(((4 * self.audio.max_tokens + 1) * hop,), np.float32))]
 
     def load(self, tuner: JointNarrowing | None = None) -> "Audio":
-        """Compile every version before the first call, so the arena is made once.
+        """Compile before the first call, so the arena is made once.
 
         Args:
             tuner: Narrows and packs each version's designs by cost.
@@ -606,6 +623,6 @@ class Audio(iron.Graph):
         space.
         """
         c = self.config
-        x, n, frames = self.audio.inputs(waveform)
-        tokens = self(x, n=n, frames=frames).numpy().reshape(-1, c.text_dim)
-        return np.asarray(tokens[: c.tokens(frames)], np.float32)
+        x, values = self.audio.inputs(waveform)
+        tokens = self(x, **values).numpy().reshape(-1, c.text_dim)
+        return np.asarray(tokens[: values["tokens"]], np.float32)

@@ -34,15 +34,15 @@ from iron.operators.copy import Copy
 
 DIRECTORY = weights_dir("embeddinggemma-2")
 
-# Seconds of audio: soft tokens, and the version that holds them.
+# Seconds of audio, by the soft tokens they give.
 CLIPS = {
-    # 50 tokens in the 64-token version.
+    # 50 tokens.
     "short": 2.0,
-    # 183 tokens in the 256-token version.
+    # 183 tokens.
     "medium": 7.3,
-    # 450 tokens in the 512-token version.
+    # 450 tokens.
     "extended": 18.0,
-    # 750 tokens in the 768-token version: the extractor's 30 s cap.
+    # 750 tokens: the extractor's 30 s cap.
     "long": 30.0,
 }
 
@@ -151,7 +151,8 @@ def test_audio_oracle_matches_hugging_face(oracle):
 @pytest.mark.parametrize("name", list(CLIPS))
 def test_audio_features(audio, name, record_property):
     wave = chirp(CLIPS[name])
-    x, _, frames = audio.audio.inputs(wave)
+    x, values = audio.audio.inputs(wave)
+    frames = values["frames"]
     features = Features(audio.audio)
     got = features(x, frames=frames).numpy().astype(np.float32)
     got = got.reshape(-1, AUDIO.mels)
@@ -167,7 +168,8 @@ def test_audio_features(audio, name, record_property):
 
 
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("name", list(CLIPS))
+# Longest first: each clip runs over the rows a longer one left behind.
+@pytest.mark.parametrize("name", list(CLIPS)[::-1])
 def test_audio_accuracy(audio, oracle, name, record_property):
     wave = chirp(CLIPS[name])
     x, frames = LogMel(AUDIO)(wave)

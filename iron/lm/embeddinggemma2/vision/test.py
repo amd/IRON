@@ -129,8 +129,7 @@ def processor_reference(image, tokens: int, T: int):
 @pytest.fixture(scope="module")
 def processor():
     graph = Processor()
-    for T in graph.processor.resample:
-        graph.compile(**graph.processor.shapes(T))
+    graph.compile(**graph.processor.shapes())
     yield graph
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
@@ -175,8 +174,8 @@ def test_resize_matches_hugging_face(shape, tokens):
     np.testing.assert_array_equal(positions, want["image_position_ids"][0].numpy())
 
 
-# Within the versions: up- and downscales, both ways up, the widest and
-# tallest, a 4K photo and the largest image a version takes.
+# Up- and downscales, both ways up, the widest and tallest, a 4K photo and
+# the largest image a call takes.
 PROCESSED = [
     *IMAGES.values(),
     ((3024, 4032), VISION.image_tokens),
@@ -195,12 +194,7 @@ def test_image_processor(processor, shape, tokens, record_property):
     image = synthetic_image(*shape)
     rgb, values = processor.processor.inputs(image, tokens)
     values.pop("n")
-    T = next(
-        T
-        for T, op in processor.processor.resample.items()
-        if op.image_chunks == rgb.shape[0]
-    )
-    want = processor_reference(image, tokens, T)
+    want = processor_reference(image, tokens, processor.processor.patches)
     got = processor(rgb, **values)
     for name, g, w in zip(("pixels", "xy", "position_ids"), got, want):
         g = np.asarray(g.numpy()).reshape(w.shape)
@@ -219,8 +213,8 @@ def test_image_processor(processor, shape, tokens, record_property):
         # 3648 pixels wide: more patch columns than 16 cores hold.
         ((97, 2003), VISION.image_tokens, "patch columns"),
         ((1, 5000), VISION.image_tokens, "patch columns"),
-        # 20 MP: more than the largest version's image.
-        ((5000, 4000), VISION.image_tokens, "no version holds"),
+        # 20 MP: more than the largest image a call takes.
+        ((5000, 4000), VISION.image_tokens, "does not fit"),
     ],
 )
 def test_image_processor_refuses(npu2, shape, tokens, refusal):

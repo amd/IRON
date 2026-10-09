@@ -25,11 +25,15 @@ class Multimodal(EmbeddingGemma):
     as Hugging Face's ``masked_scatter`` places them: the j-th placeholder
     the j-th soft token, unscaled.
 
-    A call with neither is the text encoder's. A mixed call writes the token
-    embeddings to the state ``merged`` from its first row, the clip's soft
-    tokens from ``audio_at`` and the image's from ``vision_at``; ``Merge``
-    gives each position its row of ``merged`` from ``ids``, and those rows
-    are the sequence the encoder runs over. Only the versions without a tower compile in ``load``: a mixed one
+    Each version takes one input. ``ids`` alone is the text encoder's. A
+    mixed call is a version per tower and one over ``placed``, the ids
+    with their placeholders: ``wave``'s writes the clip's soft tokens to
+    the state ``merged`` from ``audio_at``, ``rgb``'s the image's from
+    ``vision_at``, and ``placed``'s the token embeddings from its first
+    row, then ``Merge`` gives each position its row of ``merged`` from the
+    ids, and those rows are the sequence the encoder runs over. A version
+    is one dispatch with its own scratchpad, which all three in one would
+    overrun. Only the text version compiles in ``load``: a mixed one
     compiles on its first call, with the tuner ``load`` was given.
 
     Args:
@@ -54,53 +58,61 @@ class Multimodal(EmbeddingGemma):
         self.audio = audio
         self.vision = vision
         self.audio_at = max_tokens
-        self.vision_at = max_tokens + audio.rows[-1]
-        soft = vision.pool[vision.rows[-1]].shape[0]
-        self.merged = iron.state((self.vision_at + soft, config.emb_dim))
+        self.vision_at = max_tokens + audio.max_tokens
+        self.merged = iron.state(
+            (self.vision_at + vision.pool.shape[0], config.emb_dim)
+        )
         self.tuner: JointNarrowing | None = None
         self.compiled: set[tuple] = set()
 
     def body(
         self,
-        ids,
+        ids=None,
         wave=None,
         rgb=None,
+        placed=None,
         *,
         n: Scratchpad[np.int32],
         n_audio: Scratchpad[np.int32],
         frames: Scratchpad[np.int32],
+        audio_tokens: Scratchpad[np.int32],
         n_patches: Scratchpad[np.int32],
         height: Scratchpad[np.int32],
         width: Scratchpad[np.int32],
         out_height: Scratchpad[np.int32],
         out_width: Scratchpad[np.int32],
     ):
-        if wave is None and rgb is None:
+        given = [t for t in (ids, wave, rgb, placed) if t is not None]
+        if len(given) != 1:
+            raise TypeError(f"a version takes one input, got {len(given)}")
+        if ids is not None:
             return self.encoder(Copy(self.embedding[ids]), n)
+        if wave is not None:
+            a = self.audio(wave, n_audio, frames, audio_tokens)
+            Copy(a, self.merged[self.audio_at : self.audio_at + a.shape[0]])
+            return None
+        if rgb is not None:
+            v = self.vision(rgb, n_patches, height, width, out_height, out_width)
+            Copy(v, self.merged[self.vision_at : self.vision_at + v.shape[0]])
+            return None
         c = self.config
         # An input's gather is encoded on the host into its buffer, which Merge
         # reads as the ids: gather by the device's copy of them.
-        x = Copy(self.embedding[Copy(ids, dtype=np.int32)])
+        x = Copy(self.embedding[Copy(placed, dtype=np.int32)])
         merge = Merge(
-            ids,
+            placed,
             audio_token=c.audio_token,
             image_token=c.image_token,
             audio_at=self.audio_at,
             vision_at=self.vision_at,
         )
         Copy(x, self.merged[: x.shape[0]])
-        if wave is not None:
-            a = self.audio(wave, n_audio, frames)
-            Copy(a, self.merged[self.audio_at : self.audio_at + a.shape[0]])
-        if rgb is not None:
-            v = self.vision(rgb, n_patches, height, width, out_height, out_width)
-            Copy(v, self.merged[self.vision_at : self.vision_at + v.shape[0]])
         return self.encoder(Copy(self.merged[merge]), n)
 
     # -- on the host -----------------------------------------------------------
 
     def load(self, tuner: JointNarrowing | None = None) -> "Multimodal":
-        """Compile the text versions, and keep ``tuner`` for the mixed ones.
+        """Compile the text version, and keep ``tuner`` for the mixed ones.
 
         Args:
             tuner: Narrows and packs each version's designs by cost.
@@ -109,8 +121,9 @@ class Multimodal(EmbeddingGemma):
         super().load(tuner)
         return self
 
-    def mixed(self, tokens, audio=None, image=None) -> tuple[tuple, dict]:
-        """A call's inputs, in ``body``'s order, and its per-call values.
+    def mixed(self, tokens, audio=None, image=None) -> tuple[list[tuple], dict]:
+        """The inputs of each version a call runs, in ``body``'s order and
+        the order they run in, and the call's per-call values.
 
         Args:
             tokens: The token ids, each placeholder run as long as its soft
@@ -128,44 +141,52 @@ class Multimodal(EmbeddingGemma):
             n=n,
             n_audio=0,
             frames=0,
+            audio_tokens=0,
             n_patches=0,
             height=0,
             width=0,
             out_height=0,
             out_width=0,
         )
-        wave = rgb = None
+        calls = []
         soft = {c.audio_token: 0, c.image_token: 0}
         if audio is not None:
-            wave, values["n_audio"], values["frames"] = self.audio.inputs(audio)
-            soft[c.audio_token] = self.audio.config.tokens(values["frames"])
+            wave, sizes = self.audio.inputs(audio)
+            values.update(
+                n_audio=sizes["n"], frames=sizes["frames"], audio_tokens=sizes["tokens"]
+            )
+            soft[c.audio_token] = sizes["tokens"]
+            calls.append((None, wave))
         if image is not None:
             vision = self.vision.config
             rgb, sizes = self.vision.processor.inputs(image, vision.image_tokens)
             values.update(sizes, n_patches=sizes.pop("n"))
             soft[c.image_token] = values["n_patches"] // vision.pool**2
+            calls.append((None, None, rgb))
         for token, count in soft.items():
             places = np.count_nonzero(tokens == token)
             if places != count:
                 raise ValueError(
                     f"{places} placeholders {token} for {count} soft tokens"
                 )
-        if audio is None and image is None:
-            return (ids,), values
-        return (ids, wave, rgb), values
+        if not calls:
+            return [(ids,)], values
+        return [*calls, (None, None, None, ids)], values
 
     def encode(self, tokens, dims: int = 768, audio=None, image=None) -> np.ndarray:
         """The unit-length embedding of ``tokens`` with ``audio`` and
         ``image`` (as ``mixed`` takes them), truncated to ``dims``.
         """
-        inputs, values = self.mixed(tokens, audio, image)
-        given = {k: t for k, t in zip(self._inputs, inputs) if t is not None}
-        shapes = tuple((k, t.shape) for k, t in given.items())
-        if len(given) > 1 and shapes not in self.compiled:
-            self.compile(
-                coresident=self.tuner,
-                **{k: (t.shape, t.dtype) for k, t in given.items()},
-            )
-            self.compiled.add(shapes)
-        rows = self(*inputs, **values).numpy().reshape(len(self.config.mrl_dims), -1)
+        calls, values = self.mixed(tokens, audio, image)
+        for inputs in calls:
+            given = {k: t for k, t in zip(self._inputs, inputs) if t is not None}
+            shapes = tuple((k, t.shape) for k, t in given.items())
+            if "ids" not in given and shapes not in self.compiled:
+                self.compile(
+                    coresident=self.tuner,
+                    **{k: (t.shape, t.dtype) for k, t in given.items()},
+                )
+                self.compiled.add(shapes)
+            out = self(*inputs, **values)
+        rows = out.numpy().reshape(len(self.config.mrl_dims), -1)
         return np.asarray(rows[self.config.mrl_dims.index(dims), :dims], np.float32)
