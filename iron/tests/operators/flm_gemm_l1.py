@@ -5,11 +5,10 @@
 
 import pytest
 from aie.iron.device import from_name
+from aie.utils import bfp
 
 from iron.operators.flm.gemm.design import (
     A_DEPTH,
-    BFP16_GROUP,
-    BFP16_GROUP_BYTES,
     C_DEPTH,
     CT_MAX_K_FOR_N,
     CT_OUT_LEN,
@@ -31,8 +30,8 @@ ACTIVATED = tuple(Epilogue)
     [
         ("npu1", 2, 64, (32, 1)),
         ("npu1", 2, 128, (32, 2)),
-        ("npu2", BFP16_GROUP_BYTES / BFP16_GROUP, 64, (32, 2)),
-        ("npu2", BFP16_GROUP_BYTES / BFP16_GROUP, 128, (64, 2)),
+        ("npu2", bfp.BLOCK_BYTES / bfp.BLOCK, 64, (32, 2)),
+        ("npu2", bfp.BLOCK_BYTES / bfp.BLOCK, 128, (64, 2)),
     ],
 )
 def test_default_tiles_account_for_static_memory(device, b_bytes, tile_n, expected):

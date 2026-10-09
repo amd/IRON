@@ -7,11 +7,11 @@ See README.md for the layout this describes.
 """
 
 from aie.helpers.taplib import TensorAccessPattern
+from aie.utils import bfp
 
 # flm.GEMM's B tiling, imported rather than restated: this design has to write
 # the buffer in the order that one reads it, and two copies would drift.
 from iron.operators.flm.gemm.design import (
-    BFP16_GROUP,
     CT_MAX_K_FOR_N,
     S,
     T,
@@ -30,8 +30,8 @@ CT_K = CT_MAX_K_FOR_N[N_TILE]
 # block. The column count is the device's, so it lives on the overlay.
 ROWS = 4
 
-CORE_BLOCKS = M_TILE * K_TILE // BFP16_GROUP
-SLAB_BLOCKS = N_TILE * K_TILE_B // BFP16_GROUP
+CORE_BLOCKS = M_TILE * K_TILE // bfp.BLOCK
+SLAB_BLOCKS = N_TILE * K_TILE_B // bfp.BLOCK
 HALF_BLOCKS = SLAB_BLOCKS // 2
 
 # One core's contiguous run: every n it owns over one k slice.

@@ -30,6 +30,7 @@ from aie.dialects._aie_enum_gen import AIEArch
 from aie.dialects.aie import (
     get_target_model,
 )
+from aie.utils import bfp
 
 # --- Fixed geometry -------------------------------------------------------
 # GEMM tiling per compute tile, and the register tiling inside it. K_TILE is
@@ -226,20 +227,14 @@ class Gelu(StrEnum):
     BF16_STEPS = "bf16_steps"
 
 
-# B values per element of the MLIR type, and the bytes they occupy: v8bfp16ebs8
-# packs 8 values into 8 mantissa bytes plus one shared exponent. mlir-aie
-# exposes no width query on the type, hence the literals.
-BFP16_GROUP, BFP16_GROUP_BYTES = 8, 9
-
-
 def _b_bytes(elems, bfp16_b):
     """Bytes B occupies in L1/L2. bfp16ebs8 packs 8 values as 8 mantissa bytes
     plus one shared exponent; bf16 is a plain 2 bytes each.
     """
     if not bfp16_b:
         return elems * 2
-    assert elems % BFP16_GROUP == 0
-    return elems // BFP16_GROUP * BFP16_GROUP_BYTES
+    assert elems % bfp.BLOCK == 0
+    return elems // bfp.BLOCK * bfp.BLOCK_BYTES
 
 
 def _default_l1(n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1):

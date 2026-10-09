@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.utils.verify import Tolerance
+from aie.utils import bfp
 
 from iron.common.design.build import build_design
 from iron.common.harness import run_test, vectors
@@ -16,8 +17,6 @@ from iron.common.image import OperatorImage
 from iron.operators import GEMM as GenericGEMM
 from iron.operators.clamp import Clamp
 from iron.operators.flm.gemm.design import (
-    BFP16_GROUP,
-    BFP16_GROUP_BYTES,
     CT_MAX_K_FOR_N,
     M_CHUNK_FOR_N,
     M_TILE,
@@ -346,7 +345,7 @@ def tile_option_params():
     if dev is None or dev.arch not in (AIEArch.AIE2, AIEArch.AIE2p):
         return []
     l1 = l1_budget(dev, tuple(Epilogue))
-    b_elem = BFP16_GROUP_BYTES / BFP16_GROUP if dev.arch == AIEArch.AIE2p else 2
+    b_elem = bfp.BLOCK_BYTES / bfp.BLOCK if dev.arch == AIEArch.AIE2p else 2
 
     params = []
     for tile_n, ct_k in sorted(CT_MAX_K_FOR_N.items()):

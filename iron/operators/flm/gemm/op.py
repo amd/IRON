@@ -44,6 +44,7 @@ from aie.iron.controlflow import range_
 from aie.iron.device import Tile
 from aie.iron.kernels import fused_mm
 from aie.utils.verify import Tolerance
+from aie.utils import bfp
 from ml_dtypes import bfloat16
 
 from iron.common import (
@@ -64,8 +65,6 @@ from iron.operators.flm.gemm.design import (
     _VERIFIED_CT_K,
     A_DEPTH,
     B_MAX_SLOTS,
-    BFP16_GROUP,
-    BFP16_GROUP_BYTES,
     C_DEPTH,
     CT_MAX_K_FOR_N,
     CT_OUT_LEN,
@@ -158,9 +157,7 @@ class GEMM(Operator):
     # B's packed block count on AIE2P: blocks, not bytes, since B's
     # declaration counts bfp16ebs8 blocks and bfp.itemsize turns that back
     # into the byte count pack_B returns.
-    packed_blocks: int = param(
-        default=lambda op: op.K * op.N // BFP16_GROUP, repr=False
-    )
+    packed_blocks: int = param(default=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
     # n tile width. 64 halves the mmul's accumulator traffic per mac; 128
     # halves A fetches instead. See README.md.
     tile_n: int = auto(array=True)
@@ -312,8 +309,8 @@ class GEMM(Operator):
         if emulate and not aie2p:
             raise ValueError("flm.GEMM: bfp16 macs are AIE2P's")
         bfp16_b = emulate and not self.b_col_maj
-        b_elem_bytes = BFP16_GROUP_BYTES / BFP16_GROUP if bfp16_b else 2
-        b_group = BFP16_GROUP if bfp16_b else 1
+        b_elem_bytes = bfp.BLOCK_BYTES / bfp.BLOCK if bfp16_b else 2
+        b_group = bfp.BLOCK if bfp16_b else 1
         tile_n = N_TILE_DEFAULT if self.tile_n is None else self.tile_n
         ct_k = CT_MAX_K_FOR_N[tile_n]
         m_chunk = M_CHUNK_FOR_N[tile_n] if self.m_chunk is None else self.m_chunk
@@ -390,7 +387,7 @@ class GEMM(Operator):
     @property
     def b_group(self) -> int:
         """B values per element of the array type: 8 per v8bfp16ebs8, 1 per bf16."""
-        return BFP16_GROUP if self.bfp16_b else 1
+        return bfp.BLOCK if self.bfp16_b else 1
 
     @property
     def epilogue_mask(self) -> int:

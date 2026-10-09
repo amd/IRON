@@ -9,6 +9,7 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
 from aie.iron import ObjectFifo, TaskGroup, Worker
 from aie.iron.kernels import quant
+from aie.utils import bfp
 
 from iron.common import (
     In,
@@ -19,7 +20,6 @@ from iron.common import (
     param,
 )
 from iron.operators.flm.dequant.design import (
-    BFP16_GROUP,
     CORE_BLOCKS,
     CORE_JOIN_OFFSETS,
     CT_K,
@@ -123,9 +123,7 @@ class DequantBFP(Operator):
     # every offset and length would address a ninth of what it names.
     # Filled by validate() from K, N and the interleave.
     quantized_bytes: int = param(default=lambda op: op.quantized_size(), repr=False)
-    packed_blocks: int = param(
-        default=lambda op: op.K * op.N // BFP16_GROUP, repr=False
-    )
+    packed_blocks: int = param(default=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
     # The n tile width the packed output is written for. It has to match the
     # tile_n flm.GEMM reads B at, or the GEMM reads the right bytes in the
     # wrong order.
@@ -288,7 +286,7 @@ class DequantBFP(Operator):
         k_tiles = self.K // K_TILE_B
         blocks_per_row = self.K // K_TILE
         n_blocks = self.N // N_TILE
-        out_blocks = self.K * self.N // BFP16_GROUP
+        out_blocks = self.K * self.N // bfp.BLOCK
         cb_bytes = packed_bytes(N_TILE * self.K)
         qw_bytes = self.quantized_size()
         run_blocks, period_blocks = run_geometry(
