@@ -16,7 +16,7 @@ from iron.common.graph.narrowing import CostTable
 from iron.common.graph.probe import Designs
 from iron.lm import SEED, Sampler
 from iron.lm.llama3 import tune as llama_tune
-from iron.lm.tune import CALIBRATION_PAIRS, calls, contexts
+from iron.lm.tune import CALIBRATION_TRIANGLE, calls, contexts
 from iron.tests.common.llama_model import llama_1b
 
 
@@ -29,7 +29,7 @@ def test_llamas_table_holds_every_design_it_tunes(npu2, dispatch, name):
     designs = Designs.of(calls(llama_1b(), sample, 256, 0, 8192, 6), npu2)
     table = CostTable(Path(llama_tune.__file__).with_name(name))
     stale = designs.stale(table)
-    missing = designs.missing(table, CALIBRATION_PAIRS)
+    missing = designs.missing(table, CALIBRATION_TRIANGLE)
     settings = {v.key: (vs[0], v) for vs in designs.settings.values() for v in vs}
     unmeasured = []
     for key in missing:

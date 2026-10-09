@@ -5,8 +5,8 @@
 as ``costs_<device>.json`` (``iron.common.graph.tune``; each tower's is its
 own, ``vision.tune``'s and ``audio.tune``'s): every design of the text
 encoder and of each mixed version of the multimodal graph, at each width,
-as traced and with each fold it admits, and the configure cost between a
-few pairs of them. A design's time follows its shapes, not the weights, so
+as traced and with each fold it admits, and the configure cost between
+three of them. A design's time follows its shapes, not the weights, so
 no checkpoint is read. Run with XRT sourced and the NPU otherwise idle:
 
 ```bash
@@ -26,11 +26,7 @@ from .model import COSTS, EMBEDDINGGEMMA_2, EmbeddingGemma, layout
 from .multimodal import Multimodal
 from .vision import model as vision_model
 
-CALIBRATION_PAIRS = [
-    ("ElementwiseAdd", "ElementwiseMul"),
-    ("ElementwiseAdd", "GELU"),
-    ("GELU", "ElementwiseMul"),
-]
+CALIBRATION_TRIANGLE = ("ElementwiseAdd", "GELU", "ElementwiseMul")
 
 
 def main():
@@ -73,7 +69,7 @@ def main():
         dict(placed=s["ids"]),
     ):
         calls += Call.admitted(graph.trace(**shapes), dev, values)
-    tune.measure(args, calls, CALIBRATION_PAIRS, COSTS)
+    tune.measure(args, calls, CALIBRATION_TRIANGLE, COSTS)
 
 
 if __name__ == "__main__":

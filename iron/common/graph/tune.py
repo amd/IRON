@@ -111,19 +111,20 @@ def table(args: argparse.Namespace, dev, tables: Path) -> Path:
 def measure(
     args: argparse.Namespace,
     calls: Sequence[Call],
-    pairs: Sequence[tuple[str, str]],
+    triangle: tuple[str, str, str],
     tables: Path,
 ) -> list[str]:
     """Fill the table ``args`` names in ``tables`` (``table``) with
-    ``calls``' designs and the configure cost between ``pairs``
-    (``measure_graph``), timed as ``args`` says.
+    ``calls``' designs and the configure cost between each pair of
+    ``triangle``'s operator classes (``measure_graph``), timed as ``args``
+    says.
     """
     print(f"power mode: {pmode()}", flush=True)
     dev = aie_utils.ensure_current_device()
     return measure_graph(
         CostTable(table(args, dev, tables), dev.name, dispatch(args, dev)),
         calls,
-        pairs,
+        triangle,
         Timing(args.rounds, args.calls, args.settle, args.cutoff),
         args.repeats,
         args.remeasure,

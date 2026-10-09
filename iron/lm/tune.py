@@ -48,11 +48,7 @@ from .runner import Runner
 # The configure cost is measured between small single-column designs, at
 # their narrowest: one design's configure then costs least beside the fixed
 # part the calibration isolates.
-CALIBRATION_PAIRS = [
-    ("ElementwiseAdd", "ElementwiseMul"),
-    ("ElementwiseAdd", "SiLU"),
-    ("SiLU", "ElementwiseMul"),
-]
+CALIBRATION_TRIANGLE = ("ElementwiseAdd", "SiLU", "ElementwiseMul")
 
 
 def contexts(top: int, count: int, unit: int) -> list[tuple[float, int]]:
@@ -129,7 +125,7 @@ def calls(
 def main(runner: type[Runner], description: str, tables: Path) -> None:
     """The command line that measures ``runner``'s model's cost table in
     ``tables`` (``graph_tune.table``): its ``calls``, and the configure cost
-    between ``CALIBRATION_PAIRS``.
+    between each pair of ``CALIBRATION_TRIANGLE``.
     """
     parser = graph_tune.parser(description, tables)
     parser.add_argument(
@@ -177,6 +173,6 @@ def main(runner: type[Runner], description: str, tables: Path) -> None:
             args.context,
             args.points,
         ),
-        CALIBRATION_PAIRS,
+        CALIBRATION_TRIANGLE,
         tables,
     )

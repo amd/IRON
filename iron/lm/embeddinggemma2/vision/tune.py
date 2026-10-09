@@ -4,7 +4,7 @@
 """Measure EmbeddingGemma 2's vision cost table on this NPU, beside this
 file as ``costs_<device>.json`` (``iron.common.graph.tune``): every design
 of the graph, at each width, as traced and with each fold it admits,
-and the configure cost between a pair of them. A design's time follows
+and the configure cost between three of them. A design's time follows
 its shapes, not the weights, so no checkpoint is read. Run with XRT
 sourced and the NPU otherwise idle:
 
@@ -22,7 +22,7 @@ from iron.lm import unread_weights
 
 from .model import COSTS, LARGEST, VISION, Vision, layout
 
-CALIBRATION_PAIRS = [("ElementwiseAdd", "GELU"), ("GELU", "ElementwiseMul")]
+CALIBRATION_TRIANGLE = ("ElementwiseAdd", "GELU", "ElementwiseMul")
 
 
 def main():
@@ -36,7 +36,7 @@ def main():
         np.zeros((*LARGEST, 3), np.uint8), processor.patches // VISION.pool**2
     )
     calls = Call.admitted(graph.trace(**s), dev, values)
-    tune.measure(args, calls, CALIBRATION_PAIRS, COSTS)
+    tune.measure(args, calls, CALIBRATION_TRIANGLE, COSTS)
 
 
 if __name__ == "__main__":

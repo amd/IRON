@@ -84,7 +84,7 @@ def test_a_graph_gathering_by_device_ids_is_measured(npu_runtime, table, tmp_pat
     costs = CostTable(tmp_path / "costs.json", "npu2", "fused")
     log = []
     measure_graph(
-        costs, [Call(traced)], [], Timing(rounds=1, calls=5), 2, log=log.append
+        costs, [Call(traced)], None, Timing(rounds=1, calls=5), 2, log=log.append
     )
     assert {type(s.op) for s in traced.steps} == {Copy, GatherWords, Gather}
     for step in traced.steps:

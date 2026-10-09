@@ -66,12 +66,7 @@ from iron.operators import (
 
 SIZE = 8192
 TILE = 256
-# Pairs closing an odd cycle determine each calibrated design's entry.
-TRIANGLE = [
-    ("ElementwiseAdd", "ElementwiseMul"),
-    ("ElementwiseAdd", "SiLU"),
-    ("SiLU", "ElementwiseMul"),
-]
+TRIANGLE = ("ElementwiseAdd", "SiLU", "ElementwiseMul")
 
 pytestmark = pytest.mark.usefixtures("npu_runtime")
 
@@ -145,7 +140,7 @@ def test_a_value_derived_from_a_bound_extent_follows_the_call(tmp_path):
     for n in (64, 2048):
         table = CostTable(tmp_path / f"costs{n}.json", "npu2", "fused")
         call = Call(traced, dict(n=n))
-        measure_graph(table, [call], [], Timing(rounds=2, calls=10), cache=cache)
+        measure_graph(table, [call], None, Timing(rounds=2, calls=10), cache=cache)
         [key] = {cost_key(s.op) for s in traced.steps}
         t_step[n] = table.steps[key].t_step_us
     assert t_step[2048] > 3 * t_step[64], t_step
@@ -235,7 +230,7 @@ def test_a_value_derived_from_a_tunable_is_measured_at_its_resolution(tmp_path):
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     table = CostTable(tmp_path / "costs.json", "npu2", "fused")
     call = Call(traced, dict(n=256))
-    measure_graph(table, [call], [], Timing(rounds=2, calls=10), cache=cache)
+    measure_graph(table, [call], None, Timing(rounds=2, calls=10), cache=cache)
     [key] = {cost_key(s.op) for s in traced.steps}
     assert table.steps[key].t_step_us > 0, table.steps[key]
 
@@ -426,13 +421,13 @@ def test_a_table_at_another_power_mode_is_measured_again_whole(tmp_path):
     timing = Timing(rounds=1, calls=5)
     call = Call(Gather().trace(x=(2048,), rows=(16, 2048)), dict(pos=5))
     path = tmp_path / "costs.json"
-    measure_graph(CostTable(path, "npu2", "fused"), [call], [], timing, cache=cache)
+    measure_graph(CostTable(path, "npu2", "fused"), [call], None, timing, cache=cache)
     mode = f'"pmode": "{report["Power Mode"]}"'
     path.write_text(path.read_text().replace(mode, '"pmode": "elsewhere"'))
     with pytest.raises(ValueError, match="at power mode elsewhere, not"):
-        measure_graph(CostTable(path), [call], [], timing, cache=cache)
+        measure_graph(CostTable(path), [call], None, timing, cache=cache)
     table = CostTable(path)
-    ran = measure_graph(table, [call], [], timing, remeasure=True, cache=cache)
+    ran = measure_graph(table, [call], None, timing, remeasure=True, cache=cache)
     assert table.pmode == report["Power Mode"] and set(ran) == table.steps.keys()
 
 
@@ -598,7 +593,7 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
     measure_graph(
         table,
         calls,
-        [("SiLU", "ElementwiseMul"), ("ElementwiseMul", "GEMV"), ("GEMV", "SiLU")],
+        ("SiLU", "ElementwiseMul", "GEMV"),
         # Rounds enough to judge a calibration figure near zero by its noise.
         Timing(rounds=3, calls=5),
         cache=CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
@@ -630,7 +625,7 @@ def test_a_folded_design_is_priced_beside_the_one_it_replaces(tmp_path):
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     timing = Timing(rounds=1, calls=5)
     table = CostTable(tmp_path / "costs.json", "npu2", "fused")
-    measure_graph(table, calls, [], timing, cache=cache)
+    measure_graph(table, calls, None, timing, cache=cache)
 
     gate, fused = replaced(traced, folds)[0]
     entry = cache.key(fused.resolved())
@@ -640,7 +635,7 @@ def test_a_folded_design_is_priced_beside_the_one_it_replaces(tmp_path):
     assert table.steps[cost_key(fused)].t_step_us == pytest.approx(paired)
 
     again = CostTable(tmp_path / "again.json", "npu2", "fused")
-    assert measure_graph(again, calls, [], timing, cache=cache) == []
+    assert measure_graph(again, calls, None, timing, cache=cache) == []
     assert again.steps == table.steps
 
 
@@ -745,7 +740,7 @@ def test_an_xclbin_chain_measures_a_design_its_call_gives_values(tmp_path):
     shapes = dict(x=(2048,), rows=(16, 2048))
     traced = Gather().trace(**shapes)
     table = CostTable(tmp_path / "costs.json", "npu2", "separate")
-    measure_graph(table, [Call(traced, dict(pos=5))], [], Timing(rounds=2, calls=10))
+    measure_graph(table, [Call(traced, dict(pos=5))], None, Timing(rounds=2, calls=10))
     keys = {cost_key(s.op) for s in traced.steps}
     assert keys <= table.steps.keys()
     assert all(c.exact for c in table.steps.values())

@@ -557,6 +557,16 @@ def test_a_load_the_measurements_do_not_determine_is_refused(tmp_path):
         )
     with pytest.raises(ValueError, match="do not determine the load of p"):
         table.load("p")
+    path = CostTable(tmp_path / "path.json", "npu2", "separate")
+    for a, b in (("p", "q"), ("q", "r")):
+        path.record_calibration(
+            (a, b), Calibration(7.0, 0.0, 0.0, 90.0, "turbo", 1, 1, "-")
+        )
+    assert path.entry_costs() == dict(p=None, q=None, r=None)
+    path.record_calibration(
+        ("p", "r"), Calibration(7.0, 0.0, 0.0, 90.0, "turbo", 1, 1, "-")
+    )
+    assert path.entry_costs() == pytest.approx(dict(p=90.0, q=90.0, r=90.0))
     alone = StepCost(5.0, 0.0, 7.0, True, True, "turbo", 1, 1, "-")
     table.record_step("t", alone)
     with pytest.raises(ValueError, match="neither beside another design"):
@@ -888,7 +898,7 @@ def test_only_a_design_whose_bound_extents_move_is_priced_at_points(tmp_path, np
         tmp_path / "costs.json",
         {v.key: (4.0 + i, 10.0) for i, v in enumerate(settings)},
     )
-    assert designs.missing(table, []) == [
+    assert designs.missing(table, None) == [
         f"{v.key}@{label}" for v in settings for label in found
     ]
     for v in settings:

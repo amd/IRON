@@ -4,7 +4,7 @@
 """Measure EmbeddingGemma 2's audio cost table on this NPU, beside this
 file as ``costs_<device>.json`` (``iron.common.graph.tune``): every design
 of the graph, at each width, as traced and with each fold it admits,
-and the configure cost between a pair of them. A design's time follows
+and the configure cost between three of them. A design's time follows
 its shapes, not the weights, so no checkpoint is read. Run with XRT
 sourced and the NPU otherwise idle:
 
@@ -20,7 +20,7 @@ from iron.common.graph.probe import Call
 
 from .model import AUDIO, COSTS, Audio, unread_audio_weights
 
-CALIBRATION_PAIRS = [("ElementwiseAdd", "ElementwiseMul"), ("SiLU", "ElementwiseMul")]
+CALIBRATION_TRIANGLE = ("ElementwiseAdd", "SiLU", "ElementwiseMul")
 
 
 def main():
@@ -31,7 +31,7 @@ def main():
     (s,) = graph.shapes()
     T = graph.audio.max_tokens
     calls = Call.admitted(graph.trace(**s), dev, dict(n=2 * T, frames=4 * T, tokens=T))
-    tune.measure(args, calls, CALIBRATION_PAIRS, COSTS)
+    tune.measure(args, calls, CALIBRATION_TRIANGLE, COSTS)
 
 
 if __name__ == "__main__":

@@ -1554,12 +1554,15 @@ class Designs:
         ]
 
     def calibrated(
-        self, table: CostTable, pairs: Sequence[tuple[str, str]]
+        self, table: CostTable, triangle: tuple[str, str, str] | None
     ) -> list[tuple[Variant, Variant]]:
-        """The designs each of ``pairs`` is calibrated between: the first
-        design of each operator class, at its narrowest setting ``table``
-        holds whose other tunables are the default's.
+        """The designs each pair of ``triangle``'s operator classes is
+        calibrated between, ``(a, b)``, ``(a, c)`` and ``(b, c)``: the first
+        design of each class, at its narrowest setting ``table`` holds whose
+        other tunables are the default's. None calibrates nothing.
         """
+        if triangle is None:
+            return []
         by_class: dict[str, Variant] = {}
         for key, (op, _) in self.first.items():
             default = self.settings[key][0]
@@ -1576,7 +1579,8 @@ class Designs:
                 key=lambda v: v.mm2s + v.s2mm,
             )
             by_class.setdefault(type(op).__name__, narrowest)
-        return [(by_class[a], by_class[b]) for a, b in pairs]
+        a, b, c = triangle
+        return [(by_class[x], by_class[y]) for x, y in ((a, b), (a, c), (b, c))]
 
     def unloaded(
         self, table: CostTable, chosen: Sequence[tuple[Variant, Variant]]
@@ -1612,11 +1616,13 @@ class Designs:
         }
         return [device for name, device in taken.items() if name not in table.packs]
 
-    def missing(self, table: CostTable, pairs: Sequence[tuple[str, str]]) -> list[str]:
+    def missing(
+        self, table: CostTable, triangle: tuple[str, str, str] | None
+    ) -> list[str]:
         """What ``measure_graph`` would run for ``table`` next, in its
         return's terms: the ``unmeasured`` settings, else the ``unpointed``
         operating points (``"key@label"``), else the calibrations of
-        ``pairs`` the table lacks (``"a|b"``), which are between measured
+        ``triangle`` the table lacks (``"a|b"``), which are between measured
         designs, else the ``unloaded`` settings (``"reference>key"``), else
         the ``unpacked`` packs (``CostTable.pack_name``).
         """
@@ -1626,7 +1632,7 @@ class Designs:
         points = self.unpointed(table)
         if points:
             return points
-        chosen = self.calibrated(table, pairs)
+        chosen = self.calibrated(table, triangle)
         calibrations = [
             f"{a.key}|{b.key}"
             for a, b in chosen
@@ -1643,7 +1649,7 @@ class Designs:
 def measure_graph(
     table: CostTable,
     calls: Sequence[Call],
-    pairs: Sequence[tuple[str, str]],
+    triangle: tuple[str, str, str] | None,
     timing: Timing = Timing(),
     repeats: int = 9,
     remeasure: bool = False,
@@ -1653,10 +1659,10 @@ def measure_graph(
     """Measure every design of ``calls``' graphs into ``table``, saved as it
     goes: each at the settings ``variants`` gives that ``search`` runs, in
     the first call that runs it, then each accurate setting at its call's
-    operating points (``measure_points``), then the configure cost between each of
-    ``pairs``, the first designs of those operator classes at their
-    narrowest measured width, each other setting's entry beside the
-    first of those (``measure_loads``), and on a full ELF the packs the
+    operating points (``measure_points``), then the configure cost between
+    each pair of ``triangle``'s operator classes (``Designs.calibrated``),
+    which determines each one's entry, each other setting's entry beside
+    the first of those (``measure_loads``), and on a full ELF the packs the
     versions' tunings take, each as one device (``measure_packs``), until
     they take none the table lacks or ``PACK_ROUNDS`` have. Designs, entries,
     packs and calibrations already in the table or ``cache`` (this NPU's
@@ -1672,10 +1678,9 @@ def measure_graph(
         (``CostTable.pack_name``) run on the device.
 
     Raises:
-        ValueError: ``pairs`` leave a calibrated design's entry undetermined:
-            they close no odd cycle, as a triangle does; or ``table`` is
-            measured at another power mode than the NPU's and not
-            ``remeasure``, which drops its entries at another first.
+        ValueError: ``table`` is measured at another power mode than the
+            NPU's and not ``remeasure``, which drops its entries at another
+            first.
     """
     dev = aie_utils.ensure_current_device()
     table.measures(dev)
@@ -1795,7 +1800,7 @@ def measure_graph(
                     + ("" if f"{v.key}@{label}" in pointed else "  (cached)")
                 )
 
-    chosen = designs.calibrated(table, pairs)
+    chosen = designs.calibrated(table, triangle)
     wanted = {f"{a.key}|{b.key}" for a, b in chosen}
     for k in [k for k in table.calibrations if k not in wanted]:
         del table.calibrations[k]
@@ -1804,10 +1809,11 @@ def measure_graph(
         for key, (op, call) in designs.first.items()
         for v in found[key]
     }
-    for (a, b), (name_a, name_b) in zip(chosen, pairs):
+    for a, b in chosen:
         pair = f"{a.key}|{b.key}"
+        names = f"{type(a.op).__name__}/{type(b.op).__name__}"
         if not remeasure and pair in table.calibrations:
-            log(f"calibration {name_a}/{name_b}: in the table")
+            log(f"calibration {names}: in the table")
             continue
         entry = cache.pair_key(
             cache.key(a.resolved, op_values[a.key], dispatch=table.dispatch),
@@ -1829,19 +1835,13 @@ def measure_graph(
             table.record_calibration((a.key, b.key), cal)
         table.save()
         log(
-            f"calibration {name_a}/{name_b}: D0 {cal.dispatch_us:.1f}  "
+            f"calibration {names}: D0 {cal.dispatch_us:.1f}  "
             f"R {cal.reset_us:.1f}  base {cal.base_us:.1f}  "
             f"switch {cal.switch_us:.1f} us" + ("" if pair in ran else "  (cached)")
         )
 
     if not chosen:
-        log("no calibration pairs: no design's load is measured")
-    undetermined = [k for k, e in table.entry_costs().items() if e is None]
-    if undetermined:
-        raise ValueError(
-            f"calibration pairs {list(pairs)} do not determine the entries of "
-            f"{undetermined}; pairs closing an odd cycle, a triangle, would"
-        )
+        log("no calibration triangle: no design's load is measured")
     # Every step measured again was recorded afresh, with no load.
     unloaded = {v.key for v in designs.unloaded(table, chosen)}
     for key, (op, call) in designs.first.items():
