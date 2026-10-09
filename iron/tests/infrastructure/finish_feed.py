@@ -49,7 +49,7 @@ def test_a_residual_rides_the_matrix_into_a_folded_matvec(M, K):
     want = (want.astype(np.float32) + r.astype(np.float32).reshape(-1)).astype(bfloat16)
     gate = step.op.gate()
     verdict = verify_buffer(got, "out", want, gate, bound=gate.bound(w, x, r))
-    assert verdict, verdict.mismatches
+    assert verdict, verdict.detail
     unfolded = np.array(plain(x, r).numpy()[:M])
     assert got.view(np.uint16).tolist() == unfolded.view(np.uint16).tolist()
 
@@ -77,13 +77,13 @@ def test_the_up_projection_rides_the_gate_into_its_product():
     plain = SwiGLU(*weights).compile(image=iron.ELF, x=(1, E))
 
     got = np.array(folded(x).numpy()[:E])
-    inputs = [folded.read(h) for h in gate.inputs]
-    (product,) = [folded.read(h) for h in gate.outputs]
     op = gate.op.resolved()
-    tolerance = op.tolerance()
-    bound = tolerance.bound(*inputs) if tolerance.kind == "bound" else None
-    want = op.reference(*inputs)
-    verdict = verify_buffer(product, "product", want, tolerance, bound=bound)
-    assert verdict, verdict.mismatches
+    held = {b.name: folded.read(h) for b, h in zip(op.buffers, gate.slots)}
+    (verdict,) = op.judge(
+        {b.name: held[b.name] for b in op.inputs},
+        {b.name: held[b.name] for b in op.outputs},
+        op.tolerance(),
+    ).values()
+    assert verdict, verdict.detail
     unfolded = np.array(plain(x).numpy()[:E])
     assert got.view(np.uint16).tolist() == unfolded.view(np.uint16).tolist()

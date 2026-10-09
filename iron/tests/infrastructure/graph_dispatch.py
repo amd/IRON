@@ -195,7 +195,7 @@ def test_designs_of_one_array_run_on_one_configure():
     ]
     for got, expected in zip(runs[0], want):
         verdict = verify_buffer(got, "shared", np.asarray(expected), tolerance)
-        assert verdict, verdict.mismatches
+        assert verdict, verdict.detail
     for got, expected in zip(*runs):
         assert got.view(np.uint16).tolist() == expected.view(np.uint16).tolist()
 
@@ -238,4 +238,4 @@ def test_each_design_of_one_array_runs_on_its_own_values():
             verdict = verify_buffer(
                 np.array(got.numpy()[: len(want)]), "shared", want, tolerance
             )
-            assert verdict, verdict.mismatches
+            assert verdict, verdict.detail

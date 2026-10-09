@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 import time
 import weakref
@@ -19,10 +18,9 @@ import numpy as np
 from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 from aie.utils.npukernel import NPUKernel
 from aie.utils.trace import get_trace_buffer
-from aie.utils.verify import Tolerance, compare
+from aie.utils.verify import Tolerance
 
-from ..declare import Direction, Operator
-from ..declare.member import Extent
+from ..declare import Operator
 from ..design import device_symbol
 from .allocator import ALIGNMENT, ArenaPlan, Pool
 
@@ -581,14 +579,11 @@ class StepCallable:
             if kernel is None or checked:
                 inputs, expected = self._reference(step_op, args, at)
             if kernel is None:
-                written = [
-                    (buf, spec)
-                    for buf, spec in zip(args, step_op.buffers)
-                    if spec.direction is not Direction.IN
-                ]
-                for (buf, spec), result in zip(written, expected):
-                    out = buf.numpy_view()[at[spec.name] :]
-                    out[: spec.elements] = result.reshape(-1).astype(out.dtype)
+                for buf, spec in zip(args, step_op.buffers):
+                    if spec.direction.drains:
+                        out = buf.numpy_view()[at[spec.name] :]
+                        result = expected[spec.name].reshape(-1)
+                        out[: spec.elements] = result.astype(out.dtype)
                 continue
             kernel(
                 *args,
@@ -605,62 +600,34 @@ class StepCallable:
 
     def _reference(
         self, step_op: Operator, args, at: Mapping[str, int]
-    ) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
         """``step_op``'s inputs as its buffers hold them, each from element
-        ``at`` its name, and its reference on them: one result per buffer it
-        writes, in declaration order.
+        ``at`` its name, and its reference on them, by buffer name.
         """
-        specs = step_op.buffers
-        inputs = [
-            buf.to("cpu")
+        held = {
+            spec.name: buf.to("cpu")
             .numpy_view()[at[spec.name] :][: spec.elements]
             .reshape(spec.shape)
             .copy()
-            for buf, spec in zip(args, specs)
-            if spec.direction.fills
-        ]
-        outputs = [
-            (buf, spec)
-            for buf, spec in zip(args, specs)
-            if spec.direction is Direction.OUT
-        ]
+            for buf, spec in zip(args, step_op.buffers)
+        }
+        inputs = {b.name: held[b.name] for b in step_op.inputs}
         # A reference that takes its outputs writes them in place, keeping
         # what it does not touch (a cache a Copy scatters into).
-        positional = [
-            p
-            for p in inspect.signature(step_op.reference).parameters.values()
-            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-        ]
-        given = [
-            buf.to("cpu")
-            .numpy_view()[at[spec.name] :][: spec.elements]
-            .reshape(spec.shape)
-            .copy()
-            for buf, spec in outputs[: max(0, len(positional) - len(inputs))]
-        ]
-        symbols = {
-            v.name: device_symbol(step_op, v)
-            for v in step_op.values
-            if not isinstance(v.member, Extent)
+        outputs = {
+            b.name: held[b.name] for b in step_op.outputs if not b.direction.fills
         }
+        symbols = {v.name: device_symbol(step_op, v) for v in step_op.values}
         values = {
             name: self.dispatch_values[symbol]
             for name, symbol in symbols.items()
             if symbol in self.dispatch_values
         }
-        result = step_op.reference(*inputs, *given, **values)
-        if result is None:
-            result = tuple(given)
-        results = list(result) if isinstance(result, tuple) else [result]
-        written = [s for s in specs if s.direction is not Direction.IN]
-        if len(results) != len(written):
-            raise ValueError(
-                f"{type(step_op).__name__}.reference returned {len(results)} "
-                f"results for {len(written)} written buffers"
-            )
-        return inputs, [
-            np.asarray(r).reshape(s.shape) for r, s in zip(results, written)
-        ]
+        expected = step_op.call_reference(inputs, outputs, values)
+        return inputs, {
+            b.name: np.asarray(expected[b.name]).reshape(b.shape)
+            for b in step_op.outputs
+        }
 
     def _check(
         self, index, step_op: Operator, names, args, at, inputs, expected
@@ -676,38 +643,25 @@ class StepCallable:
             tol = step_op.resolved().tolerance()
             if tol is None or tol.range_frac is not None:
                 tol = self.FALLBACK_TOLERANCE
-        bound = tol.bound(*inputs) if tol.bound is not None else None
-        in_names = [
-            name for name, spec in zip(names, step_op.buffers) if spec.direction.fills
-        ]
-        written = [
-            (name, buf, spec)
-            for name, buf, spec in zip(names, args, step_op.buffers)
-            if spec.direction is not Direction.IN
-        ]
-        for (out_name, buf, spec), ref in zip(written, expected):
-            npu = buf.to("cpu").numpy_view()[at[spec.name] :][: spec.elements]
-            npu = npu.reshape(spec.shape)
-            ref = ref.astype(np.float32)
-            diff = np.abs(npu.astype(np.float32) - ref)
-            figures = (
-                f"max_abs={float(diff.max()):.4g}, "
-                f"mean_abs={float(diff.mean()):.4g}, "
-                f"max_rel={float((diff / (np.abs(ref) + 1e-6)).max()):.4g}, "
-                f"ref_max={float(np.abs(ref).max()):.4g}"
-            )
-            verdict = compare(npu.copy(), ref, tol, bound=bound)
+        held = {spec.name: name for name, spec in zip(names, step_op.buffers)}
+        written = {
+            spec.name: buf.to("cpu").numpy_view()[at[spec.name] :][: spec.elements]
+            for buf, spec in zip(args, step_op.buffers)
+            if spec.direction.drains
+        }
+        for name, verdict in step_op.judge(inputs, written, tol, expected).items():
             logger.info(
-                "[compare step %d] %s -> %s: %s",
+                "[compare step %d] %s -> %s: max_abs=%.4g",
                 index,
                 type(step_op).__name__,
-                out_name,
-                figures,
+                held[name],
+                verdict.max_abs_err,
             )
             if not verdict:
                 raise RuntimeError(
                     f"[compare step {index}] {type(step_op).__name__} "
-                    f"(name={step_op.name}) -> {out_name}: NPU output deviates "
-                    f"from reference ({verdict.detail}; {figures}; "
-                    f"inputs={in_names}; tolerance {tol})"
+                    f"(name={step_op.name}) -> {held[name]}: NPU output deviates "
+                    f"from reference ({verdict.detail}; "
+                    f"inputs={[held[b.name] for b in step_op.inputs]}; "
+                    f"tolerance {tol})"
                 )

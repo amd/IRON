@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``vectors()`` and ``verify_buffer()``: the device test's two halves, host-side."""
+"""``vectors()``, ``verify_buffer()`` and an operator's ``call_reference``/``judge``:
+the device test's halves, host-side."""
 
 import numpy as np
 import pytest
@@ -11,7 +12,9 @@ from ml_dtypes import bfloat16
 from iron.common.harness import vectors, verify_buffer
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.relu import ReLU
+from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
+from iron.operators.sample import Sample
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -62,6 +65,13 @@ def test_verify_buffer_returns_the_verdict_of_compare():
     assert not short and "shape mismatch" in short.detail
 
 
+def test_verify_buffer_fails_a_longer_output_rather_than_truncate_it():
+    ref = np.arange(8, dtype=np.float32)
+    padded = np.concatenate([ref, np.full(4, 99.0, np.float32)])
+    longer = verify_buffer(padded, "y", ref, RELATIVE)
+    assert not longer and "shape mismatch" in longer.detail
+
+
 def test_verify_buffer_judges_a_bound_tolerance_by_its_evaluated_limit():
     ref = np.arange(8, dtype=np.float32)
     out = ref + np.float32(0.25)
@@ -73,5 +83,42 @@ def test_verify_buffer_judges_a_bound_tolerance_by_its_evaluated_limit():
     limit = eighth(ref)  # 0.25 from x = 2 on
     verdict = verify_buffer(out, "y", ref, judge, bound=limit)
     assert (verdict.n_mismatch, verdict.first_bad_index) == (2, 0)
-    with pytest.raises(ValueError, match="needs its bound="):
+    with pytest.raises(ValueError, match="needs its bound evaluated"):
         verify_buffer(out, "y", ref, judge)
+
+
+def _sample():
+    op = Sample(vocab=4096, cores=4, steps=3)
+    return op, vectors(op, **Sample.test.draw(op))
+
+
+def test_call_reference_pairs_buffers_by_name_not_by_order():
+    op, v = _sample()
+    reordered = dict(reversed(v.inputs.items()))
+    got = op.call_reference(reordered, values={"row": 4, "at": 1})
+    assert list(got) == ["tokens", "token"]
+    np.testing.assert_array_equal(got["tokens"][1], got["token"][0])
+    assert op.judge(reordered, dict(reversed(got.items())), Tolerance.exact(), got)
+    with pytest.raises(ValueError, match="takes the inputs"):
+        misspelled = {("logit" if k == "logits" else k): t for k, t in v.inputs.items()}
+        op.call_reference(misspelled)
+
+
+def test_judge_names_each_output_and_refuses_a_missing_one():
+    op, v = _sample()
+    verdicts = op.judge(v.inputs, v.outputs, Tolerance.exact())
+    assert list(verdicts) == ["tokens", "token"] and all(verdicts.values())
+    wrong = {**v.outputs, "token": v.outputs["token"] + 1}
+    assert not op.judge(v.inputs, wrong, Tolerance.exact())["token"]
+    with pytest.raises(ValueError):
+        op.judge(v.inputs, {"tokens": v.outputs["tokens"]}, Tolerance.exact())
+
+
+def test_call_reference_gives_an_output_only_to_a_reference_that_names_it():
+    op = RMSNorm(rows=2, tile_size=64)
+    x = vectors(op, seed=3)["x"]
+    given = {"y": np.zeros_like(x)}
+    got = op.call_reference({"x": x}, given)
+    np.testing.assert_array_equal(got["y"], op.reference(x))
+    with pytest.raises(ValueError, match=r"has no output \['out'\]"):
+        op.call_reference({"x": x}, {"out": given["y"]})

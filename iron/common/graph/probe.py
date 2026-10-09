@@ -65,7 +65,6 @@ import numpy as np
 from aie.iron.device import Device
 from aie.utils import bfp
 
-from .. import harness
 from ..declare import Direction, Operator
 from ..declare.bound import BoundBuffer, BoundValue
 from ..declare.operator import _PlaceWord
@@ -496,13 +495,9 @@ def judge(
     for extent in op.bound_extents:
         if values.get(extent) != getattr(op, op.value(extent).member.field.name):
             return None
-    want = harness.expected(op, inputs, values)
+    want = op.call_reference(inputs, values=values)
     for which, gate in gates.items():
-        bound = gate.bound(*inputs.values()) if gate.kind == "bound" else None
-        for name, reference in want.items():
-            verdict = harness.verify_buffer(
-                written[name], name, reference, gate, bound=bound
-            )
+        for name, verdict in op.judge(inputs, written, gate, want).items():
             if not verdict:
                 detail = f"{name} under {which} gate: {verdict.detail}"
                 return Accuracy(False, detail, CostTable.today())

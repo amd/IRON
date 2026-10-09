@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import dataclasses
-import inspect
 import itertools
 import math
 from collections.abc import Callable, Hashable, Iterable, Mapping
@@ -579,8 +578,8 @@ class Tracer:
 
 
 class _ReferenceTracer(Tracer):
-    """Runs each call as ``op.reference(*inputs, *outputs, **values)`` on host
-    tensors, a state written in place and per-call values as plain numbers.
+    """Runs each call as ``op.call_reference`` on host tensors, a state
+    written in place and per-call values as plain numbers.
     """
 
     # Operators are constructed at a bounded call's valid rows, which only
@@ -630,26 +629,21 @@ class _ReferenceTracer(Tracer):
         else:
             op = target
             values = self._split_values(cls, kwargs)
-        values = {k: v for k, v in values.items() if v is not None}
-        # A reference that takes no output returns its result, which lands in
-        # the given output below.
-        positional = [
-            p
-            for p in inspect.signature(op.reference).parameters.values()
-            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-        ]
-        result = op.reference(*tensors[: max(n_in, len(positional))], **values)
-        # Shaped as Tracer._record shapes a flat output.
         outs = [b for b in op.buffers if b.direction is Direction.OUT]
-        fresh = len(tensors) == n_in and len(outs) == 1
-        if fresh and result is not None and len(outs[0].shape) == 1:
+        given = dict(zip((b.name for b in outs), tensors[n_in:]))
+        results = op.call_reference(dict(zip(inputs, tensors[:n_in])), given, values)
+        for name, out in given.items():
+            if results[name] is not out:
+                out[...] = np.asarray(results[name]).reshape(out.shape)
+        if len(results) > 1:
+            return tuple(results.values())
+        (result,) = results.values()
+        # Shaped as Tracer._record shapes a flat output.
+        if not given and len(outs) == 1 and len(outs[0].shape) == 1:
             called = [t if p is None else p for t, p in zip(tensors, patterns)]
             like = next(
                 (t for t in called if math.prod(t.shape) == outs[0].elements), None
             )
             if like is not None:
                 result = result.reshape(like.shape, copy=False)
-        for given in tensors[n_in:]:
-            if result is not None and result is not given:
-                given[...] = np.asarray(result).reshape(given.shape)
         return result

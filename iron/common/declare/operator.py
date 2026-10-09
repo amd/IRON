@@ -34,7 +34,7 @@ from aie.dialects.aie import AIETileType
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import ceildiv
 from aie.utils.trace import TraceConfig
-from aie.utils.verify import Tolerance
+from aie.utils.verify import Tolerance, Verdict, compare
 
 from ..testing import Testing
 from .bound import BoundBuffer, BoundValue
@@ -646,6 +646,109 @@ class Operator(metaclass=_OperatorMeta):
         raise NotImplementedError(
             f"{type(self).__name__}.reference() is not implemented"
         )
+
+    def call_reference(
+        self,
+        inputs: Mapping[str, np.ndarray],
+        outputs: Mapping[str, np.ndarray] | None = None,
+        values: Mapping[str, Any] | None = None,
+    ) -> dict[str, np.ndarray]:
+        """Run `reference` on buffers named as this operator declares them.
+
+        The inputs are its positional arguments, in declaration order. An
+        output it names a parameter after (Copy's `y`) is given to it, to
+        write in place what it touches.
+
+        Args:
+            inputs: Every input, an `inout` buffer among them, by buffer name.
+            outputs: Outputs by buffer name; the reference is given those it
+                names.
+            values: Per-call values by name; the reference is given those it
+                names that are not None.
+
+        Returns:
+            The reference's result for each buffer this operator writes, by
+            buffer name.
+
+        Raises:
+            ValueError: `inputs` are not this operator's, `outputs` name a
+                buffer that is not its output, or the reference returns
+                another number of results than this operator writes.
+        """
+        name = type(self).__name__
+        declared = [b.name for b in self.inputs]
+        if sorted(inputs) != sorted(declared):
+            raise ValueError(
+                f"{name} takes the inputs {declared}, not {sorted(inputs)}"
+            )
+        outputs = outputs or {}
+        unknown = set(outputs) - {b.name for b in self.outputs}
+        if unknown:
+            raise ValueError(f"{name} has no output {sorted(unknown)}")
+        named = inspect.signature(self.reference).parameters
+        result = self.reference(
+            *(inputs[n] for n in declared),
+            **{k: v for k, v in outputs.items() if k in named},
+            **{k: v for k, v in (values or {}).items() if k in named and v is not None},
+        )
+        results = result if isinstance(result, tuple) else (result,)
+        written = [b.name for b in self.outputs]
+        if len(results) != len(written):
+            raise ValueError(
+                f"{name}.reference returned {len(results)} results for {written}"
+            )
+        return dict(zip(written, results))
+
+    def judge(
+        self,
+        inputs: Mapping[str, np.ndarray],
+        written: Mapping[str, np.ndarray],
+        tolerance: Tolerance,
+        expected: Mapping[str, np.ndarray] | None = None,
+    ) -> dict[str, Verdict]:
+        """Each buffer this operator writes held to its reference result.
+
+        Args:
+            inputs: The inputs it was given, by buffer name; a bound
+                tolerance is evaluated on them, in declaration order.
+            written: What it wrote to each buffer it writes, by buffer name.
+            tolerance: What every written buffer is judged by.
+            expected: Each written buffer's reference result, by buffer
+                name; `call_reference` on `inputs` where None.
+
+        Returns:
+            Each written buffer's verdict, by buffer name.
+
+        Raises:
+            ValueError: `written` or `expected` do not name every buffer this
+                operator writes and no other, an expected result is None, or
+                a written buffer holds another number of elements than its
+                result.
+        """
+        if expected is None:
+            expected = self.call_reference(inputs)
+        names = [b.name for b in self.outputs]
+        for given, what in ((written, "written"), (expected, "expected")):
+            if sorted(given) != sorted(names):
+                raise ValueError(
+                    f"{type(self).__name__} writes {names}; the {what} "
+                    f"buffers are {sorted(given)}"
+                )
+        unknown = [n for n in names if expected[n] is None]
+        if unknown:
+            raise ValueError(f"{type(self).__name__}: no expected result for {unknown}")
+        bound = None
+        if tolerance.kind == "bound":
+            bound = tolerance.bound(*(inputs[b.name] for b in self.inputs))
+        return {
+            n: compare(
+                np.reshape(written[n], np.shape(expected[n])),
+                expected[n],
+                tolerance,
+                bound=bound,
+            )
+            for n in names
+        }
 
     def sequence(self, rt) -> None:
         """Override to write the runtime sequence by hand; otherwise it is derived."""

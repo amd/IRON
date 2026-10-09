@@ -15,7 +15,6 @@ import pytest
 from aie.utils.benchmark import run_iters
 from ml_dtypes import bfloat16
 
-from iron.common.harness import verify_buffer
 from iron.lm.layers import SwiGLU
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemv import GEMV
@@ -42,13 +41,14 @@ def _verdict(net, step):
     """The step's output against its operator's reference on the inputs
     the device gave it.
     """
-    inputs = [_read(net, h) for h in step.inputs]
-    (output,) = [_read(net, h) for h in step.outputs]
-    tolerance = step.op.resolved().tolerance()
-    bound = tolerance.bound(*inputs) if tolerance.kind == "bound" else None
-    name = type(step.op).__name__
-    expected = step.op.reference(*inputs)
-    return verify_buffer(output, name, expected, tolerance, bound=bound)
+    op = step.op
+    held = {b.name: _read(net, h) for b, h in zip(op.buffers, step.slots)}
+    (verdict,) = op.judge(
+        {b.name: held[b.name] for b in op.inputs},
+        {b.name: held[b.name] for b in op.outputs},
+        op.resolved().tolerance(),
+    ).values()
+    return verdict
 
 
 @pytest.mark.parametrize("fold", [False, True], ids=["apart", "folded"])

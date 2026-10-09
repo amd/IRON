@@ -681,7 +681,8 @@ class Elementwise(Operator):
     def reference(self, *inputs):
         """The kernel contract's reference, line by line: what the cores compute."""
         op = self.resolved()
-        contract = op.kernel().contract
+        kernel = op.kernel()
+        contract = kernel.contract
         if contract is None or contract.reference is None:
             raise NotImplementedError(
                 f"{type(self).__name__}: its kernel declares no reference; "
@@ -689,17 +690,17 @@ class Elementwise(Operator):
             )
         (out,) = op.outputs
         n = len(inputs) - len(op.finish_inputs)
-        _, scalars = op._arguments(op.kernel(), op.scalars(), n, 1)
+        _, scalars = op._arguments(kernel, op.scalars(), n, 1)
         # A held line is one row every call broadcasts against.
-        lines = iter(
+        lines = [
             x.reshape(1 if b.replicate else op.lines, -1, copy=False)
             for b, x in zip(op.inputs, inputs[:n])
-        )
-        y = contract.reference(
-            *(
-                scalars[i] if i in scalars else next(lines)
-                for i in contract.reference_indices()
-            )
+        ]
+        y = kernel.expected(
+            lines,
+            scalars=tuple(
+                scalars[i] for i in contract.reference_indices() if i in scalars
+            ),
         )
         y = np.asarray(y).astype(out.host_dtype, copy=False)
         y = y.reshape(out.host_shape, copy=False)

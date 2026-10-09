@@ -210,10 +210,14 @@ reuse lint
      the record of what a compiled image consists of
    - `elementwise.py`: the shared elementwise array and its operand shapes (flat, binary, rowwise)
    - `harness.py`: the device test harness (`vectors`; `run_test`, timed with
-     `aie.utils.benchmark.run_iters`; `verify_buffer`, a wrapper over
-     mlir-aie's `aie.utils.verify.compare` listing its verdict's
-     `mismatches`); a test's figures go to pytest's `record_property`,
-     which the root conftest writes to the CSV
+     `aie.utils.benchmark.run_iters`, every buffer paired by name; and
+     `verify_buffer`, mlir-aie's `aie.utils.verify.compare` on one buffer
+     of the reference's size); a test's figures go to
+     pytest's `record_property`, which the root conftest writes to the CSV.
+     The reference and the judgement are the operator's own:
+     `op.call_reference(inputs, outputs, values)` runs `reference()` on
+     buffers by name, `op.judge(inputs, written, tolerance)` returns a
+     `Verdict` per written buffer
    - `testing.py`: how an operator declares the shapes it is tested at
      (`Testing`, `Case`, and `Sweep`, the elementwise sweep)
    - `tracing.py`: `dump_traces(run, trace_file)`, for a sequence holding an
@@ -662,8 +666,8 @@ assert not run.errors, run.errors
 run = run_test(op, vectors(op), tolerance=Tolerance.relative(0.04, 1e-6))
 ```
 
-`verify_buffer()` compares a single buffer the same way, for tests that
-dispatch by hand.
+`op.judge()` holds a step's buffers to its reference the same way, for
+tests that dispatch by hand, and `verify_buffer()` a single buffer.
 
 ### bfloat16 and runtime tensors
 
