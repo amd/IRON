@@ -117,7 +117,8 @@ class MHA(Operator):
                 extensive=True,
             ),
             # EmbeddingGemma 2's sliding layer: bidirectional within 512
-            # positions, d=256, over 2000 rows, the last block part padding.
+            # positions, d=256, over 2000 rows, the last block part padding,
+            # its products native bf16.
             Case(
                 dict(
                     num_heads=4,
@@ -127,6 +128,7 @@ class MHA(Operator):
                     causal=False,
                     window=512,
                     num_pipelines=8,
+                    emulate_bf16_mmul_with_bfp16=False,
                 )
             ),
             # Its global layer: bidirectional, d=512, P*V split over two cores.
@@ -138,6 +140,7 @@ class MHA(Operator):
                     d=512,
                     causal=False,
                     num_pipelines=8,
+                    emulate_bf16_mmul_with_bfp16=False,
                 )
             ),
             # Bidirectional over every key.
@@ -186,7 +189,7 @@ class MHA(Operator):
     B_q: int = auto(array=True)
     B_kv: int = auto()
     num_pipelines: int = auto(1, array=True)
-    emulate_bf16_mmul_with_bfp16: bool = param(default=True, repr=False)
+    emulate_bf16_mmul_with_bfp16: bool = param(default=True, array=True, repr=False)
     # Filled by resolve: how the pipelines are split across shims, and K
     # and V's lanes, one every pipeline reads or, one query packed, one each.
     q_shims: int = auto(repr=False)
@@ -314,8 +317,6 @@ class MHA(Operator):
         # partial_softmax scales a row's maximum in place of every element.
         if not 0 <= self.scale < np.inf:
             raise ValueError(f"scale must be finite and not negative, got {self.scale}")
-        if not self.emulate_bf16_mmul_with_bfp16:
-            raise ValueError("Only emulate_bf16_mmul_with_bfp16=True is supported")
         if self.num_pipelines < 1:
             raise ValueError("num_pipelines must be at least 1")
         if self.num_pipelines > 6 and self.num_pipelines % 2:
@@ -349,8 +350,8 @@ class MHA(Operator):
                 f"B_q ({self.B_q}) must divide 64, the block seq_pad is whole of"
             )
         # Each product's micro-tile must divide its operands: QK^T, (B_q, d)
-        # by (d, B_kv), bfp16-emulated, the only one supported, on NPU2, the
-        # only array MHA fits; P*V, (B_q, B_kv) by (B_kv, pv_width).
+        # by (d, B_kv), on NPU2, the only array MHA fits; P*V, (B_q, B_kv)
+        # by (B_kv, pv_width).
         if self.pv_cores not in (1, 2) or self.pv_width * self.pv_cores != self.d:
             raise ValueError(
                 f"P*V takes one core or two, each a pv_width ({self.pv_width}) "
@@ -361,7 +362,9 @@ class MHA(Operator):
             (True, ("B_q", "B_kv", "pv_width")),
         ):
             mac = kernels.linalg.mha.mac_dims(
-                pv=pv, arch="aie2p", emulate_bf16_mmul_with_bfp16=True
+                pv=pv,
+                arch="aie2p",
+                emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
             )
             for name, m in zip(dims, mac):
                 if getattr(self, name) % m:
@@ -510,7 +513,7 @@ class MHA(Operator):
             d,
             B_kv,
             b_col_maj=True,
-            emulate_bf16_mmul_with_bfp16=True,
+            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
             causal=self.causal,
             window=self.window or 0,
         )
@@ -548,7 +551,7 @@ class MHA(Operator):
                 width,
                 B_kv,
                 b_col_maj=True,
-                emulate_bf16_mmul_with_bfp16=True,
+                emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
                 causal=self.causal,
                 window=self.window or 0,
             ).object_file
