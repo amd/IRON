@@ -182,6 +182,33 @@ def test_a_version_compiled_after_the_first_call_grows_the_arena_and_keeps_state
     np.testing.assert_array_equal(_f32(two.read(s)), _f32(line))
 
 
+@pytest.mark.supported_devices("npu2")
+def test_a_released_run_is_made_again_on_the_next_call():
+    """What a full device heap does to the version least recently called (the
+    EmbeddingGemma 2 determinism test fills it): its run is freed and its
+    image unloaded, and its next call loads it and makes a run over the same
+    arena and state.
+    """
+    f, w, w2, s = _function()
+    one = f.compile(x=(E,))
+    two = f.compile(x=(2 * E,))
+    x1, x2 = _numbers(E, 11), _numbers(2 * E, 12)
+    f(x1)
+    first = one.callable.run
+    assert one.callable.release() and not one.callable.release()
+
+    out = f(x2).numpy()
+    expect = (_f32(x2) + _f32(w2))[E:] + _f32(x1) + _f32(w)
+    np.testing.assert_array_equal(_f32(out), expect)
+    x3 = _numbers(E, 13)
+    np.testing.assert_array_equal(_f32(f(x3).numpy()), _f32(x3) + 2 * _f32(w))
+    assert one.callable.run is not first
+
+    # A callable with another run out, as a loop makes, keeps its image.
+    two.callable.new_run()
+    assert not two.callable.release()
+
+
 def test_versions_that_cannot_share_an_arena_refuse_a_state():
     f, *_ = _function()
     f.compile(x=(E,), boundaries=packaging.each_step)

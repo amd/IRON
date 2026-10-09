@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+import weakref
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,13 +29,13 @@ if TYPE_CHECKING:
     from aie.utils.hostruntime.xrtruntime.hostruntime import XRTKernelHandle
     from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
-    from .xrt import Scratchpad, loaded
+    from .xrt import Scratchpad, loaded, unload
 else:
     try:
         import pyxrt
         from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
-        from .xrt import Scratchpad, loaded
+        from .xrt import Scratchpad, loaded, unload
     except ImportError:
         # Host stacks without XRT still compile and run the reference mode.
         XRTTensor = None
@@ -121,6 +122,8 @@ class FullELFRun:
         self._feedback_arg = feedback_arg
         self._params_path = params_path
         self._params: Scratchpad | None = None
+        # Bound to or from another run's scratchpad: a loop holds it.
+        self.wired = False
 
     def bind(self, index: int, bo: pyxrt.bo | None) -> None:
         """Run with ``bo`` as argument ``index``.
@@ -136,6 +139,7 @@ class FullELFRun:
         if self._feedback_arg is None:
             raise ValueError(f"{self.name} declares no feedback argument")
         self.bind(self._feedback_arg, bo)
+        self.wired = True
 
     @property
     def params(self) -> Scratchpad | None:
@@ -172,6 +176,7 @@ class FullELFRun:
         params = self.params
         if params is None:
             raise ValueError(f"{self.name} has no per-call values to feed back into")
+        self.wired = True
         return params.alias()
 
     def start(self) -> None:
@@ -192,7 +197,20 @@ class FullELFCallable:
     """The full ELF (NPU2): every operator shares consolidated buffers addressed by offset.
 
     A call dispatches ``run``; ``new_run`` makes more over the same buffers.
+
+    Each run holds a copy of the ELF's control code in the driver's device
+    heap, which a process fills at about 512 MiB. A run that does not fit
+    releases the run of the callable least recently called, as long as no
+    loop holds that run, and unloads its image: the image's hw_context holds
+    some of the heap too, between runs, and while it lives the freed run is
+    a hole a larger one may not fit in. The next call of that callable loads
+    the image and makes a new run.
     """
+
+    # The callables holding a run, least recently called first.
+    _holding: weakref.WeakValueDictionary[int, FullELFCallable] = (
+        weakref.WeakValueDictionary()
+    )
 
     def __init__(
         self,
@@ -260,16 +278,50 @@ class FullELFCallable:
     @property
     def run(self) -> FullELFRun:
         """The run a call dispatches, one for the image's life."""
-        handle = self.handle
-        if self._run is None:
-            self._run = self._make_run(pyxrt.run(handle.kernel))
+        if self._run is None or not loaded(self._handle):
+            self._run = self._make_run()
+        FullELFCallable._holding.pop(id(self), None)
+        FullELFCallable._holding[id(self)] = self
         return self._run
 
     def new_run(self) -> FullELFRun:
         """Another run over this callable's buffers; each holds a copy of the ctrlcode."""
-        return self._make_run(pyxrt.run(self.handle.kernel))
+        return self._make_run()
 
-    def _make_run(self, run: pyxrt.run) -> FullELFRun:
+    def release(self) -> bool:
+        """Free the run a call dispatches and unload the image, unless a loop
+        holds the run, another run is out, or another callable runs the image.
+
+        Returns:
+            Whether it was freed.
+        """
+        if self._run is None or self._run.wired or self._runs != [self._run]:
+            return False
+        image = self.kernel.elf_path
+        holding = FullELFCallable._holding.values()
+        if any(c.kernel.elf_path == image for c in holding if c is not self):
+            return False
+        self._run = None
+        self._runs = []
+        self._handle = None
+        FullELFCallable._holding.pop(id(self), None)
+        unload(image)
+        return True
+
+    def _make_run(self) -> FullELFRun:
+        handle = self.handle
+        while True:
+            try:
+                run = pyxrt.run(handle.kernel)
+                break
+            except RuntimeError as e:
+                # ENOSPC: the device heap holds no more control code.
+                if "err=-28" not in str(e):
+                    raise
+                held = [c for c in FullELFCallable._holding.values() if c is not self]
+                if not any(c.release() for c in held):
+                    raise
+                logger.info("%s: the device heap is full; released a run", self.op.name)
         arguments = {
             index: self._arguments()[kind]
             for kind, index in self._argument_index.items()
