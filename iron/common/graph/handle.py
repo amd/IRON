@@ -183,15 +183,19 @@ class Handle:
             shape = (len(ids), *self.shape[1:])
             return Handle(shape, self.dtype, self.name, "view", self, 0, rows)
         for axis in self.bounds:
-            if isinstance(entries[axis], slice):
+            if isinstance(entries[axis], slice) and entries[axis] != slice(None):
                 raise TypeError(
-                    f"{self!r} is bounded per call on axis {axis}; index it or "
-                    f"slice what it bounds"
+                    f"{self!r} is bounded per call on axis {axis}; index it, take "
+                    f"all of it, or slice what it bounds"
                 )
         index_by = None
         static, shape, bounds = [], [], {}
         for axis, (entry, n) in enumerate(zip(entries, self.shape)):
-            if isinstance(entry, slice) and isinstance(entry.stop, (Value, Affine)):
+            if axis in self.bounds and isinstance(entry, slice):
+                bounds[len(shape)] = self.bounds[axis]
+                static.append(entry)
+                shape.append(n)
+            elif isinstance(entry, slice) and isinstance(entry.stop, (Value, Affine)):
                 stop = entry.stop.affine()
                 if entry.start not in (None, 0) or entry.step not in (None, 1):
                     raise ValueError(f"{stop} bounds an axis from its start: [:{stop}]")

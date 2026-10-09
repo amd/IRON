@@ -1206,6 +1206,9 @@ def test_a_bound_travels_through_reshape_and_transpose():
         b[0:2]
     with pytest.raises(ValueError, match="from its start"):
         x[2:n]
+    v = b[:, 2:6]  # all of the bounded axis: the bound stays on it
+    assert v.shape == (64, 4, 4) and v.bounds == {0: n.affine()}
+    assert b[:, 3].bounds == {0: n.affine()} and b[:, 3].shape == (64, 4)
 
 
 def test_per_call_values_are_integer_expressions():
