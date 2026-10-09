@@ -14,6 +14,8 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Choices,
+    Divisors,
     In,
     Operator,
     Out,
@@ -110,9 +112,19 @@ class Transpose(Operator):
     N: int = param()
     num_batches: int = param(default=1)
     # Defaults: 64 x 64 tiles of 8 x 8 sub-tiles, every column, one channel.
-    m: int = auto(64)
-    n: int = auto(64)
-    s: int = auto(8, array=True)
+    m: int = auto(
+        64,
+        domain=Divisors(
+            of=lambda op: op.M, step=lambda op: op.s, cap=lambda op: 8192 // op.n
+        ),
+    )
+    n: int = auto(
+        64,
+        domain=Divisors(
+            of=lambda op: op.N, step=lambda op: op.s, cap=lambda op: 8192 // op.m
+        ),
+    )
+    s: int = auto(8, array=True, domain=Choices((8, 4)))
     num_aie_columns: int = auto()
     num_channels: int = auto(1)
 
@@ -233,6 +245,7 @@ class Transpose(Operator):
             batches = counts[0]
             col_tiles = counts[1]
             chan_tiles = counts[2]
+            barrier.release_with_value(1)
             # The kernel only ever sees s*s sub-tiles, so it is batch-agnostic.
             for _ in range_(batches):
                 for _ in range_(col_tiles):

@@ -194,7 +194,7 @@ class OperatorSequence:
         for op, *bufs in self.runlist:
             reads, writes = [], []
             for buf, b in zip(bufs, op.buffers):
-                sizes.setdefault(buf, b.nbytes)
+                sizes.setdefault(buf, b.held_nbytes)
                 if b.direction.fills:
                     reads.append(buf)
                 if b.direction.drains:
@@ -271,7 +271,7 @@ class OperatorSequence:
                     if buf_name not in args:
                         args[buf_name] = args_spec
                     else:
-                        if args[buf_name].nbytes != args_spec.nbytes:
+                        if args[buf_name].held_nbytes != args_spec.held_nbytes:
                             raise ValueError(
                                 f"Buffer '{buf_name}' has conflicting sizes between operators: "
                                 f"{args[buf_name].shape} {bfp.dtype_name(args[buf_name].dtype)} "
@@ -305,7 +305,7 @@ class OperatorSequence:
                     # Explicit size specified - this is a parent buffer for slices
                     return self.explicit_buffer_sizes[arg]
                 if arg in args:
-                    return args[arg].nbytes
+                    return args[arg].held_nbytes
                 return None  # sliced buffers are handled separately
 
             if buffer_type == "scratch" and self.arena is not None:

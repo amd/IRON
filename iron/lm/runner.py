@@ -114,8 +114,8 @@ class Runner:
         self, cost_table: Path | None = None, boundaries: str | None = None
     ) -> CausalLM:
         """The model compiled and loaded, weights uploaded. With a
-        ``cost_table`` (``tune``) its decode step's designs are narrowed
-        and packed by it; ``boundaries`` are its decode step's
+        ``cost_table`` (``tune``) each version's designs are folded,
+        narrowed and packed by it; ``boundaries`` are its decode step's
         (``CausalLM.load``).
         """
         model = self.model(self.config, self.weights)
@@ -205,8 +205,9 @@ def main(runner: type[Runner], description: str):
     parser.add_argument(
         "--cost-table",
         type=Path,
-        help="narrow and pack the decode step's designs by this measured cost "
-        "table (iron.lm.tune); default: as the profile gives them",
+        help="fold, narrow and pack the designs of the decode step and the "
+        "prompt chunk by this measured cost table (iron.lm.tune); default: as "
+        "the profile gives them",
     )
     parser.add_argument(
         "--each-step",
@@ -237,8 +238,8 @@ def main(runner: type[Runner], description: str):
             "--device-loop needs a full-ELF decode step, which --each-step "
             "and NPU1 have not"
         )
-    if model.tuning is not None:
-        print("[Tuning] decode:\n" + model.tuning.report(), flush=True)
+    for name, tuning in model.tunings.items():
+        print(f"[Tuning] {name}:\n" + tuning.report(), flush=True)
 
     if args.check_accuracy:
         results = accuracy(model, run.cpu(), tokens, args.num_tokens)

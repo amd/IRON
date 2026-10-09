@@ -110,11 +110,32 @@ class BoundBuffer:
         return np.uint8 if bfp.is_bfp(self.dtype) else self.dtype
 
     @property
-    def flat_type(self):
-        """The runtime-sequence argument type: the buffer flattened to 1-D, in
-        its own element units (blocks, for block float).
+    def placement(self) -> tuple[int, int]:
+        """The elements of the runtime tensor this buffer is, and the one it
+        starts at: a larger buffer's, where a graph placed it in one
+        (``Operator.placed``).
         """
-        return np.ndarray[(self.elements,), np.dtype[self.dtype]]
+        return next(
+            (
+                (into, start)
+                for name, into, start in self._op.placements
+                if name == self.name
+            ),
+            (self.elements, 0),
+        )
+
+    @property
+    def held_nbytes(self) -> int:
+        """The bytes of the runtime tensor this buffer is (``placement``)."""
+        return self.placement[0] * bfp.itemsize(self.dtype)
+
+    @property
+    def flat_type(self):
+        """The runtime-sequence argument type: the runtime tensor
+        (``placement``) flattened to 1-D, in its own element units (blocks,
+        for block float).
+        """
+        return np.ndarray[(self.placement[0],), np.dtype[self.dtype]]
 
     @property
     def streamed(self) -> bool:
@@ -133,6 +154,12 @@ class BoundBuffer:
     def tile(self):
         """The fifo element type: ``np.ndarray[shape, dtype]``."""
         return np.ndarray[self.tile_shape, np.dtype[self.dtype]]
+
+    @property
+    def finish_line(self) -> int:
+        """The elements a core finishes at once: its block of a tile, or the tile."""
+        block = self.member.finish_block
+        return math.prod(self.tile_shape if block is None else self._resolve(block))
 
     @property
     def count(self) -> int:

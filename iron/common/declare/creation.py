@@ -106,6 +106,11 @@ def declare(cls: type) -> None:
             if m.tile is not None:
                 m.tile = m.tile.rewrite(cls)
                 m.tile.check(cls, m, "tile dimension", allow_tunable=True)
+            if m.finish_block is not None:
+                m.finish_block = m.finish_block.rewrite(cls)
+                m.finish_block.check(
+                    cls, m, "finish block dimension", allow_tunable=True
+                )
             if sum(isinstance(d, OptionalDim) for d in m.shape.dims) > 1:
                 raise TypeError(
                     f"{cls.__name__}.{m.name}: at most one OptionalDim() dimension, "
@@ -134,6 +139,18 @@ def declare(cls: type) -> None:
                         f"{cls.__name__}.{m.name}: per={ref!r} must be a param() or auto() field"
                     )
 
+    prepared = [m.name for m in members if isinstance(m, _Buffer) and m.prepare]
+    if len(prepared) > 1:
+        raise TypeError(
+            f"{cls.__name__}: {prepared} are each prepare=True; a core prepares "
+            f"one input, the one its operator's prepare names"
+        )
+    fed = [m.name for m in members if isinstance(m, _Buffer) and m.feed]
+    if len(fed) > 1:
+        raise TypeError(
+            f"{cls.__name__}: {fed} are each feed=True; a finish's inputs ride "
+            f"one stream"
+        )
     cls._members = tuple(members)
     tiers = {f.name: f.metadata.get(Tier) for f in fields.values()}
     cls._param_fields = tuple(n for n, t in tiers.items() if isinstance(t, Param))
@@ -141,12 +158,28 @@ def declare(cls: type) -> None:
         n: t.derive for n, t in tiers.items() if isinstance(t, Param) and t.derive
     }
     cls._auto_fields = tuple(n for n, t in tiers.items() if isinstance(t, Auto))
-    # The array tier: what a stream's tile, its dtype, its replication or
-    # its presence names, and what declares itself array=True.
+    cls._tunable_fields = tuple(
+        n
+        for n in cls._auto_fields
+        if fields[n].init and not fields[n].metadata[Tier].derived
+    )
+    cls._domains = {
+        n: tiers[n].domain for n in cls._tunable_fields if tiers[n].domain is not None
+    }
+    for n, domain in cls._domains.items():
+        if domain.when is not None and domain.when not in fields:
+            raise TypeError(
+                f"{cls.__name__}.{n}: when={domain.when!r} must name a bool field, "
+                f"the flag the tunable is searched under"
+            )
+    # The array tier: what a stream's tile, a core's block of it, its dtype,
+    # its replication or its presence names, and what declares itself array=True.
     named: set[str] = set()
     for m in members:
         if isinstance(m, _Buffer) and m.tile is not None:
             named |= m.tile.names()
+            if m.finish_block is not None:
+                named |= m.finish_block.names()
             if m.per is not None:
                 named |= m.per.names()
             if isinstance(m.dtype, DimRef):
@@ -156,3 +189,32 @@ def declare(cls: type) -> None:
     cls._array_fields = tuple(
         n for n, t in tiers.items() if n in named or (t is not None and t.array)
     )
+    cls._probe_fields = {
+        n: t.probe
+        for n, t in tiers.items()
+        if isinstance(t, Param) and t.probe is not dataclasses.MISSING
+    }
+    shaped: set[str] = set()
+    for m in members:
+        if isinstance(m, _Buffer):
+            shaped |= m.shape.names()
+            if m.when is not None:
+                shaped.add(m.when.name)
+        elif isinstance(m, Extent):
+            shaped.add(m.field.name)
+    for n in cls._probe_fields:
+        if n in cls._array_fields:
+            raise TypeError(
+                f"{cls.__name__}.{n}: probe= on an array field; the cores are "
+                f"built from it, so its cost may follow it"
+            )
+        if n in shaped:
+            raise TypeError(
+                f"{cls.__name__}.{n}: probe= on a field an operand's shape or "
+                f"presence names; the transfers follow it"
+            )
+        if not fields[n].init:
+            raise TypeError(
+                f"{cls.__name__}.{n}: probe= on an init=False field; the tuner "
+                f"sets the probe through the constructor"
+            )

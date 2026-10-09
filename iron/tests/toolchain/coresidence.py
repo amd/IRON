@@ -26,6 +26,7 @@ from aie.dialects import aie as aie_dialect
 from aie.iron import ObjectFifo, Program, Runtime
 from aie.iron.device import NPU2, AnyShimTile, Tile
 from aie.utils.compile.jit._hash import _python_identity
+from ml_dtypes import bfloat16
 
 import iron
 from iron.common.image import (
@@ -36,7 +37,9 @@ from iron.common.image import (
     coresidence,
     fusion,
 )
+from iron.common.graph.fold import folded
 from iron.common.image.coresidence import fits
+from iron.lm.layers import SwiGLU
 from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 from iron.tests.toolchain.tools import requires
 
@@ -67,13 +70,14 @@ aie.device(npu2) {
 """
 
 
-def _shim_pinned(col: int, channel: int) -> str:
+def _shim_pinned(col: int, channel: int, depth: int = 2) -> str:
     """A pass-through design whose input enters on shim ``(col, 0)``, MM2S
-    ``channel``: the device text, as a generator would hand it to the merge.
+    ``channel``, through a fifo ``depth`` deep: the device text, as a
+    generator would hand it to the merge.
     """
     vec = np.ndarray[(1024,), np.dtype[np.int32]]
     line = np.ndarray[(256,), np.dtype[np.int32]]
-    of_in = ObjectFifo(line, name="in")
+    of_in = ObjectFifo(line, depth=depth, name="in")
     of_out = of_in.cons().forward()
 
     def sequence(a, c, in_h, out_h):
@@ -218,8 +222,69 @@ def test_policy_declines_what_does_not_fit():
     assert "ShimNOCTile" in reason
 
 
+def test_designs_of_one_array_share_its_device():
+    # Two extents of one add are one array: the full width packs with
+    # itself, and the steps run on one configure.
+    small = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=8)
+    large = ElementwiseAdd(size=2 * SIZE, tile_size=TILE, num_aie_columns=8)
+    seq = OperatorSequence(
+        name="shared_array",
+        runlist=[
+            (small, "a", "b", "t"),
+            (large, "c", "d", "u"),
+            (small, "t", "b", "y"),
+        ],
+        input_args=["a", "b", "c", "d"],
+        output_args=["y", "u"],
+        dispatch="fused",
+    )
+    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
+        seq.calculate_buffer_layout()
+    )
+    fused = Fusion(seq)
+    text = fused.text()
+    pack = Packing.device_name(list(fused.designs))
+    assert _devices(text) == [pack, Fusion.RESET_DEVICE]
+    assert re.findall(r"aiex\.configure @(\w+)", text) == [pack, Fusion.RESET_DEVICE]
+    assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, *_ in fused.runlist]
+    assert text.count("aie.core(") == 8
+    texts = {}
+    for name, design in fused.designs.items():
+        generated = fusion.generate(design)
+        texts[name] = str(generated.device)
+    assert fits(texts) is None
+
+
+def test_a_folded_gate_shares_its_device_with_the_up_projection(npu2):
+    # SwiGLU's gate and up are one array before the fold; the SiLU fold
+    # gives the up projection the gate's finishes, so they stay one. The
+    # product riding the gate's matrix would make them two.
+    hidden, embedding = 8192, 2048
+    weights = (np.zeros((hidden, embedding), bfloat16),) * 2
+    ffn = SwiGLU(*weights, np.zeros((embedding, hidden), bfloat16))
+    _, every = folded(ffn.trace(x=(1, embedding)), npu2)
+    silu = [fold for fold in every if str(fold) == "SiLU into GEMV"]
+    traced, count = folded(ffn.trace(x=(1, embedding)), npu2, only=silu)
+    assert count.total() == 1
+    seq = traced.sequence(dispatch="fused")
+    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
+        seq.calculate_buffer_layout()
+    )
+    fused = Fusion(seq)
+    text = fused.text()
+    gate, up, mul, down = (name for name, *_ in fused.runlist)
+    assert gate != up
+    pack = Packing.device_name([gate, up])
+    assert _devices(text) == [pack, mul, down, Fusion.RESET_DEVICE]
+    assert re.findall(r"aiex\.configure @(\w+)", text) == _devices(text)
+    assert re.findall(r"aiex\.run @(\w+)", text)[:2] == [gate, up]
+
+
 def test_merge_refuses_two_cores_on_one_tile():
-    reason = fits({"x": _PINNED, "y": _PINNED})
+    # A buffer makes the arrays differ, so the cores do not merge as one.
+    other = _PINNED.replace("%c =", "%b = aie.buffer(%t) : memref<4xi32>\n  %c =")
+    assert fits({"x": _PINNED, "y": _PINNED}) is None
+    reason = fits({"x": _PINNED, "y": other})
     assert reason is not None and "aie.core" in reason and "(0, 2)" in reason
 
 
@@ -250,8 +315,10 @@ def test_sequence_refuses_a_packing_without_a_full_elf():
 def test_two_pins_on_one_shim_channel_do_not_fit():
     # Both members' logical shim tiles pinned to (0, 0), MM2S channel 1: the
     # fifo lowering must refuse the second, not the merge (neither pins a
-    # physical aie.tile, so the merge sees nothing to share).
-    reason = fits({"x": _shim_pinned(0, 1), "y": _shim_pinned(0, 1)})
+    # physical aie.tile, so the merge sees nothing to share). Equal designs
+    # are one array, so the second differs in its fifo's depth.
+    assert fits({"x": _shim_pinned(0, 1), "y": _shim_pinned(0, 1)}) is None
+    reason = fits({"x": _shim_pinned(0, 1), "y": _shim_pinned(0, 1, depth=3)})
     assert reason is not None and "already in use" in reason
 
 

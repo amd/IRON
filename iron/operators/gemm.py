@@ -19,15 +19,22 @@ from aie.iron import (
     kernels,
 )
 from aie.iron.controlflow import if_, range_
-from aie.iron.device import NPU1, NPU2, Device, NPU1Col1, NPU1Col2, Tile
+from aie.iron.device import NPU1, NPU2, Device, NPU1Col1, NPU1Col2
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
+from iron import operators as catalog
 from iron.common import (
+    Divisors,
     Extent,
+    Finish,
     In,
+    Level,
+    Link,
     Operator,
     Out,
+    Pins,
+    Placement,
     Unresolvable,
     Value,
     auto,
@@ -97,7 +104,51 @@ def _cases(cls, dev: Device):
     for K, extensive in ((2048, False), (8192, True)):
         kwargs = dict(M=2048, K=K, N=2048, b_col_maj=True)
         out.append(Case(kwargs, extensive, bench=not extensive))
+    # The placement the tuner tries beside the default, A split over a column's
+    # rows on two columns.
+    for cols in (8, 2):
+        kwargs = dict(M=2048, K=2048, N=2048, num_aie_columns=cols, b_col_maj=True)
+        out.append(Case(dict(kwargs, placement="tiles"), extensive=True))
+
+    def finished(kwargs, *chains):
+        # The first chain is the case's own; more share one array.
+        size = kwargs["M"] * kwargs["N"]
+        steps = [tuple(Link(step(size=size)) for step in c) for c in chains]
+        names = ["".join(step.__name__ for step in c) or "none" for c in chains]
+        label = f"{Case(kwargs).label}-finish_{names[0]}" + "".join(
+            f"-shares_{n}" for n in names[1:]
+        )
+        shared = tuple(steps) if len(steps) > 1 else ()
+        return Case(dict(kwargs, finish=steps[0], finishes=shared), id=label)
+
+    # Each core finishing its C tiles: a graph's projection, the f32
+    # accumulator, and one array serving a finished design and a plain one.
+    default = dict(M=2048, K=2048, N=2048, b_col_maj=True)
+    M, K, N, cols, b_col_maj, c_col_maj, m, k, n = _REGULAR[3]
+    exact = dict(M=M, K=K, N=N, num_aie_columns=cols, tile_m=m, tile_k=k)
+    exact.update(tile_n=n, b_col_maj=b_col_maj, prio_accuracy=True)
+    exact.update(emulate_bf16_mmul_with_bfp16=False)
+    out += [
+        finished(default, (catalog.SiLU,)),
+        finished(default, (catalog.GELU,)),
+        finished(exact, (catalog.SiLU,)),
+        finished(default, (), (catalog.SiLU,)),
+        finished(default, (catalog.SiLU,), ()),
+    ]
     return out
+
+
+# The shim ends are pinned in both, A on alternate columns in the 4x8 case:
+# relaxed as well, a real shape's descriptors (2048x8192x2048, b_col_maj)
+# pile onto one tile, and DMA lowering rejects it with "Too many
+# simultaneously active buffer descriptors on tile (3,0), which supports up
+# to 16". "tiles" also holds each core and memtile in its stream's column.
+PLACEMENT = Placement(
+    {
+        "shims": Pins(cores=Level.FREE, memtiles=Level.FREE),
+        "tiles": Pins(),
+    }
+)
 
 
 class GEMM(Operator):
@@ -119,12 +170,33 @@ class GEMM(Operator):
     N: int = param()
     # None: the widest of 64, 32, 16 and 8 rows that splits M over the rows
     # of cores and that the kernel's m block divides.
-    tile_m: int = auto(array=True)
-    tile_k: int = auto(64, array=True)
-    tile_n: int = auto(64, array=True)
+    tile_m: int = auto(
+        array=True,
+        domain=Divisors(
+            of=lambda op: op.M // op.n_aie_rows,
+            step=lambda op, dev: op.mac_block(dev)[0],
+        ),
+    )
+    # Without prio_accuracy C is rounded to bf16 once per K tile, so another
+    # tile_k computes another result; with it C accumulates in f32.
+    tile_k: int = auto(
+        64,
+        array=True,
+        domain=Divisors(
+            of=lambda op: op.K,
+            step=lambda op, dev: op.mac_block(dev)[1],
+            when="prio_accuracy",
+        ),
+    )
+    tile_n: int = auto(
+        64,
+        array=True,
+        domain=Divisors(of=lambda op: op.N, step=lambda op, dev: op.mac_block(dev)[2]),
+    )
     # None: the most columns the device's shim budget allows that split N
     # into whole tile_n-wide tiles.
     num_aie_columns: int = auto()
+    placement: str = auto("shims", array=True, domain=PLACEMENT)
     # A @ B = C, with either operand optionally stored column-major. The
     # layout flags transpose a declared shape rather than resize it.
     b_col_maj: bool = param(default=False, array=True)
@@ -137,11 +209,11 @@ class GEMM(Operator):
     use_scalar: bool = param(default=False, repr=False, array=True)
     # Filled by resolve: the device's rows of cores, the L2 tile of each
     # stream and how many shims carry A.
-    n_aie_rows: int = auto(repr=False, array=True)
-    n_shim_mem_a: int = auto(repr=False)
-    a_l2: int = auto(repr=False)
-    b_l2: int = auto(repr=False)
-    c_l2: int = auto(repr=False)
+    n_aie_rows: int = auto(repr=False, array=True, derived=True)
+    n_shim_mem_a: int = auto(repr=False, derived=True)
+    a_l2: int = auto(repr=False, derived=True)
+    b_l2: int = auto(repr=False, derived=True)
+    c_l2: int = auto(repr=False, derived=True)
 
     A = In(M, K, dtype=dtype_in, tile=(a_l2,), per=(n_shim_mem_a,))
     B = In(
@@ -155,6 +227,7 @@ class GEMM(Operator):
         dtype=dtype_out,
         tile=(c_l2,),
         per=(num_aie_columns,),
+        finish=(tile_m, tile_n),
     )
     # M, or fewer rows per call (``A[:n]`` in a graph). The DMAs stream
     # every row either way, since A's pattern uses all four descriptor
@@ -208,37 +281,48 @@ class GEMM(Operator):
 
     # -- checks ---------------------------------------------------------------
 
+    def mac_block(self, dev) -> tuple[int, int, int]:
+        """What `tile_m`, `tile_k` and `tile_n` must each be a multiple of:
+        the kernel's own geometry rather than a second copy of it, since
+        mm.cc's matmul_vectorized_2x2_mmul works in r x s x t blocks, two of
+        them in m and n (four in m on aie2, mm_aie2.h).
+
+        Args:
+            dev: The device the kernel is built for, or None for aie2p's
+                geometry.
+        """
+        r, s, t = kernels.mm.mac_dims(
+            self.dtype_in,
+            self.dtype_out,
+            device=dev,
+            arch=None if dev is not None else "aie2p",
+            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
+            vectorized=not self.use_scalar,
+        )
+        aie2 = dev is not None and dev.arch is AIEArch.AIE2
+        return (4 if aie2 else 2) * r, s, 2 * t
+
     def validate(self) -> None:
-        # The kernel's own geometry rather than a second copy of it: mm.cc's
-        # matmul_vectorized_2x2_mmul works in r x s x t blocks, so a tile that
-        # does not divide into them cannot be compiled for.
-        #
         # aie2p's geometry whatever the device: the messages name
         # aie_kernels/linalg/mm_aie2p.h, and no device is known here anyway, since
         # this runs at construction, before resolution picks one. array()
         # asks for the geometry of the device it builds for, which on npu1
         # is the looser (4, 8, 4).
-        r, s, t = kernels.mm.mac_dims(
-            self.dtype_in,
-            self.dtype_out,
-            arch="aie2p",
-            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
-        )
-        min_tile_m, min_tile_k, min_tile_n = 2 * r, s, 2 * t
+        min_tile_m, min_tile_k, min_tile_n = self.mac_block(None)
         if self.tile_m is not None and self.tile_m % min_tile_m != 0:
             raise ValueError(
                 f"tile_m ({self.tile_m}) must be a multiple of {min_tile_m} "
-                f"(aie_kernels/linalg/mm_aie2p.h requires m % (2*r) == 0, r={r})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires m % (2*r) == 0)"
             )
         if self.tile_k % min_tile_k != 0:
             raise ValueError(
                 f"tile_k ({self.tile_k}) must be a multiple of {min_tile_k} "
-                f"(aie_kernels/linalg/mm_aie2p.h requires k % s == 0, s={s})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires k % s == 0)"
             )
         if self.tile_n % min_tile_n != 0:
             raise ValueError(
                 f"tile_n ({self.tile_n}) must be a multiple of {min_tile_n} "
-                f"(aie_kernels/linalg/mm_aie2p.h requires n % (2*t) == 0, t={t})"
+                f"(aie_kernels/linalg/mm_aie2p.h requires n % (2*t) == 0)"
             )
         din, dout = np.dtype(self.dtype_in), np.dtype(self.dtype_out)
         if self.prio_accuracy and dout != np.dtype(bfloat16):
@@ -259,8 +343,11 @@ class GEMM(Operator):
         if self.K % self.tile_k != 0:
             raise ValueError(f"K ({self.K}) must be a multiple of {self.tile_k}")
         rows = self.n_aie_rows or (self.dev and len(self.dev.core_rows))
-        tile_m = self.tile_m or (self.dev and self._auto_tile_m(self.dev))
-        if rows and tile_m and self.M % (tile_m * rows) != 0:
+        # An open tile_m is the bound device's choice, else the kernel's narrowest.
+        tile_m = self.tile_m or (
+            self._auto_tile_m(self.dev) if self.dev else min_tile_m
+        )
+        if rows and self.M % (tile_m * rows) != 0:
             raise ValueError(
                 f"M ({self.M}) must be a multiple of {tile_m * rows}: C is "
                 f"tiled into (m * n_aie_rows, n)-sized blocks"
@@ -268,22 +355,14 @@ class GEMM(Operator):
 
     def _auto_tile_m(self, dev) -> int:
         """The widest of 64, 32, 16 and 8 rows that splits M over ``dev``'s
-        rows of cores and that its kernel's m block divides; 64 where none
-        does, which validate() then refuses.
+        rows of cores and that its kernel's m block divides; the block, the
+        narrowest, where none does, which validate() then refuses.
         """
-        r, _, _ = kernels.mm.mac_dims(
-            self.dtype_in,
-            self.dtype_out,
-            device=dev,
-            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
-            vectorized=not self.use_scalar,
-        )
-        # aie2's mm kernels block m by 4 r (mm_aie2.h), aie2p's by 2 r.
-        block = (4 if dev.arch is AIEArch.AIE2 else 2) * r
+        block, _, _ = self.mac_block(dev)
         rows = len(dev.core_rows)
         return next(
             (m for m in (64, 32, 16, 8) if m % block == 0 and self.M % (m * rows) == 0),
-            64,
+            block,
         )
 
     def resolve(self, dev):
@@ -330,6 +409,8 @@ class GEMM(Operator):
         m, k, n = self.tile_m, self.tile_k, self.tile_n
         n_aie_cols = self.num_aie_columns
         n_aie_rows = self.n_aie_rows
+        pins = PLACEMENT.pins(self.placement)
+        a_cols = [2 * i if n_aie_cols == 8 else i for i in range(self.n_shim_mem_a)]
         n_shim_mem_A = self.n_shim_mem_a
         n_A_tiles_per_shim = self.n_a_tiles_per_shim
         b_col_maj, c_col_maj = self.b_col_maj, self.c_col_maj
@@ -350,7 +431,8 @@ class GEMM(Operator):
         C_l2_ty = self.C.tile
         A_l1_ty = np.ndarray[(m, k), np.dtype[dtype_in]]
         B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
-        C_l1_ty = np.ndarray[(m, n), np.dtype[dtype_out]]
+        # Flat, as the finish's scratch is: a core selects between the two.
+        C_l1_ty = np.ndarray[(m * n,), np.dtype[dtype_out]]
 
         # AIE Core Function declarations: upstream's factories, which pick the
         # source and the -D set for the device they are resolved against.
@@ -383,6 +465,9 @@ class GEMM(Operator):
             convert_copy_kernel = kernels.datamovement.convert_copy(m * n)
         else:
             fifo_depth_out = fifo_depth
+        # The finish runs over a core's whole C tile once the reduction has
+        # filled it.
+        finish = Finish(self, n_aie_rows * n_aie_cols)
 
         # AIE-array data movement with object fifos
         A_l3l2_fifos: list[Any] = [None] * n_shim_mem_A
@@ -428,6 +513,7 @@ class GEMM(Operator):
                     obj_types=[A_l1_ty] * (stop_row - start_row),
                     names=[f"A_L2L1_{row}" for row in range(start_row, stop_row)],
                     to_stream=[streams.A] * (stop_row - start_row),
+                    tile=pins.memtiles.tile(a_cols[i], 1),
                 )
             )
             for j in range(stop_row - start_row):
@@ -445,6 +531,7 @@ class GEMM(Operator):
                     obj_type=B_l1_ty,
                     name=f"B_L2L1_{col}",
                     to_stream=streams.B,
+                    tile=pins.memtiles.tile(col, 1),
                 )
             )
             # Output C
@@ -464,6 +551,7 @@ class GEMM(Operator):
                     obj_types=[C_l1_ty] * n_aie_rows,
                     names=[f"C_L1L2_{col}_{row}" for row in range(n_aie_rows)],
                     depths=[fifo_depth_out] * n_aie_rows,
+                    tile=pins.memtiles.tile(col, 1),
                 )
             )
             for j in range(n_aie_rows):
@@ -499,10 +587,12 @@ class GEMM(Operator):
             elem_out_internal,
             n_valid,
             k_valid,
+            *rest,
         ):
             barrier.wait_for_value(1)
             rtp_K_div_k = my_rtp[0]
             rtp_n_tiles_per_core = my_rtp[1]
+            n_compute = None if n_valid is None else n_valid.read()
             # (K tiles, whether they are multiplied), in the order they arrive.
             spans = [(rtp_K_div_k, True)]
             if k_valid is not None:
@@ -511,13 +601,19 @@ class GEMM(Operator):
                 last = k_compute - 1
                 kept = k_bound - last * k
                 spans = [(k_compute, True), (rtp_K_div_k - k_compute, False)]
+            mode = finish.read(rest)
+            # The wait leaves the barrier set: release it, or a design sharing
+            # this array runs on these values.
+            barrier.release_with_value(1)
 
             def tile(compute: bool):
-                nonlocal elem_out_internal
-                if not use_larger_internal_buffer:
-                    elem_out_internal = out_c.acquire(1)
+                if use_larger_internal_buffer:
+                    acc = elem_out_internal
+                else:
+                    c = out_c.acquire(1)
+                    acc = finish.target(rest, mode, c)
                 if compute:
-                    zero(elem_out_internal)
+                    zero(acc)
                 for count, multiply in spans:
                     for kk in range_(count):
                         elem_in_a = in_a.acquire(1)
@@ -526,19 +622,18 @@ class GEMM(Operator):
                             if k_valid is not None:
                                 with if_(arith.index_cast(kk, to=last.type) == last):
                                     k_tail_zero(elem_in_a, elem_in_b, kept)
-                            matmul(elem_in_a, elem_in_b, elem_out_internal)
+                            matmul(elem_in_a, elem_in_b, acc)
                         in_a.release(1)
                         in_b.release(1)
                 if use_larger_internal_buffer:
-                    elem_out_transfer = out_c.acquire(1)
+                    c = out_c.acquire(1)
                     if compute:
-                        convert_copy(elem_out_internal, elem_out_transfer, m * n)
-                    out_c.release(1)
-                else:
-                    out_c.release(1)
+                        convert_copy(acc, finish.target(rest, mode, c), m * n)
+                if compute:
+                    finish.apply(rest, mode, c)
+                out_c.release(1)
 
-            if n_valid is not None:
-                n_compute = n_valid.read()
+            if n_compute is not None:
                 for _ in range_(n_compute):
                     tile(compute=True)
                 for _ in range_(rtp_n_tiles_per_core - n_compute):
@@ -575,28 +670,25 @@ class GEMM(Operator):
                             acc_buffer,
                             n_valid_param,
                             k_valid_param,
+                            *finish.args(row * n_aie_cols + col),
                         ],
                         stack_size=0xD00,
+                        tile=pins.cores.tile(col, 2 + row),
                     )
                 )
 
-        # The shim ends stay pinned, and A on alternate columns in the 4x8
-        # case is the reason: the memtiles and the workers place themselves
-        # fine, but relaxing these three as well piles the descriptors of a
-        # real shape (2048x8192x2048, b_col_maj) onto one tile, and DMA
-        # lowering rejects it with "Too many simultaneously active buffer
-        # descriptors on tile (3,0), which supports up to 16".
         for c, f in enumerate(A_l3l2_fifos):
-            self.A.lane(c).bind(f.prod(tile=Tile(2 * c if n_aie_cols == 8 else c, 0)))
+            self.A.lane(c).bind(f.prod(tile=pins.shims.tile(a_cols[c], 0)))
         for c, f in enumerate(B_l3l2_fifos):
-            self.B.lane(c).bind(f.prod(tile=Tile(c, 0)))
+            self.B.lane(c).bind(f.prod(tile=pins.shims.tile(c, 0)))
         for c, f in enumerate(C_l2l3_fifos):
-            self.C.lane(c).bind(f.cons(tile=Tile(c, 0)))
+            self.C.lane(c).bind(f.cons(tile=pins.shims.tile(c, 0)))
         flat_rtps = [
             rtps[row][col] for row in range(n_aie_rows) for col in range(n_aie_cols)
         ]
         self.k_div_k.bind(flat_rtps, 0)
         self.n_tiles.bind(flat_rtps, 1)
+        finish.bind()
         return workers + [b for row in workerBarriers for b in row]
 
     # -- the runtime sequence --------------------------------------------------
@@ -751,8 +843,8 @@ class GEMM(Operator):
         return 2 * self.M * self.K * self.N
 
     def reference(self, A, B):
-        """``C = A @ B`` from the stored inputs: ``B`` is ``(N, K)`` when
-        ``b_col_maj``, and ``C`` ``(N, M)`` when ``c_col_maj``.
+        """``C = A @ B`` from the stored inputs, then its finish: ``B`` is
+        ``(N, K)`` when ``b_col_maj``, and ``C`` ``(N, M)`` when ``c_col_maj``.
         """
         # Not linalg.mm's contract: that is one tile's product, and mm_ref's
         # float64 would double the host copy of the largest weight a graph
@@ -762,8 +854,8 @@ class GEMM(Operator):
         a = A.astype(np.float32)
         b = (B.T if self.b_col_maj else B).astype(np.float32)
         # C in its stored order, contiguous: a consumer reads it as laid out.
-        C = np.matmul(b.T, a.T) if self.c_col_maj else np.matmul(a, b)
-        return C.astype(A.dtype)
+        C = (np.matmul(b.T, a.T) if self.c_col_maj else np.matmul(a, b)).astype(A.dtype)
+        return Finish(self.resolved()).reference(C) if self.finish else C
 
     def tolerance(self) -> Tolerance:
         """Each element of C within the roundings the design makes, in
@@ -777,8 +869,11 @@ class GEMM(Operator):
         cancel is small against the error of the terms it summed, and the
         bf16 accumulator's error grows with K. On npu2 over K = 256 to
         8192, normal and all-positive inputs, no configuration's worst
-        element came above 0.83 of it.
+        element came above 0.83 of it. A finish carries it through its
+        steps' own gates.
         """
+        if self.finish:
+            return Finish(self).tolerance()
         if np.issubdtype(np.dtype(self.dtype_in), np.integer):
             return Tolerance.exact(note="integer matmul")
         units = 4.0 if self.emulate_bf16_mmul_with_bfp16 else 2.0

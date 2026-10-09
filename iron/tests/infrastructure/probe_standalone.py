@@ -26,5 +26,6 @@ def test_repeats_on_buffers_off_the_coherence_line_are_read_back(npu_runtime):
     ids = [
         alone.callable.get_storage(f"s{k}_x").numpy_view()[:15].copy() for k in range(2)
     ]
-    got = np.frombuffer(alone.output_bytes(), np.int32)
+    alone.callable()
+    got = np.concatenate([alone.written(k)["y"] for k in range(2)])
     np.testing.assert_array_equal(got, np.concatenate(ids))

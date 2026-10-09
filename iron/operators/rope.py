@@ -189,6 +189,7 @@ class RoPE(Operator):
                 if dyn_rows
                 else counts[static.index("rows_per_lut")]
             )
+            barrier.release_with_value(1)
             for _ in range_(lut_rows):
                 elem_lut = of_lut.acquire(1)
                 for _ in range_(rows_per_lut):

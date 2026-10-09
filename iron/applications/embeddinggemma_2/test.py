@@ -16,6 +16,7 @@ import pytest
 from iron.lm.embeddinggemma2.audio.model import AUDIO, LogMel
 from iron.lm.embeddinggemma2.encoder import Encoder
 from iron.lm.embeddinggemma2.model import COSTS
+from iron.lm.embeddinggemma2.vision.model import COSTS as VISION_COSTS
 from iron.lm.embeddinggemma2.vision.model import VISION
 from iron.lm.embeddinggemma2.vision.oracle import patches
 from iron.lm.testing import require, weights_dir
@@ -136,7 +137,10 @@ IMAGE = patches(picture(288, 432), VISION.image_tokens, VISION)
 @pytest.fixture(scope="module")
 def multimodal():
     require(DIRECTORY / "model.safetensors", DIRECTORY / "tokenizer.json")
-    yield Encoder(DIRECTORY, max_tokens=512, towers=True, costs=COSTS)
+    name = f"costs_{aie_utils.ensure_current_device().name}.json"
+    # The tables measured so far; a part with none runs as its designs resolve.
+    tables = [d / name for d in (COSTS, VISION_COSTS) if (d / name).exists()]
+    yield Encoder(DIRECTORY, max_tokens=512, towers=True, costs=tables)
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 

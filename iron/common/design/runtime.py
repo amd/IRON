@@ -8,6 +8,7 @@ from __future__ import annotations
 from math import prod
 from typing import Any
 
+import numpy as np
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.ir import IntegerType
@@ -15,6 +16,7 @@ from aie.iron import TaskGroup, WorkerRuntimeBarrier, sync_parameters
 
 from ..declare import DispatchTime, Operator
 from ..declare.bound import BoundBuffer, BoundValue, BufferView, Lane
+from ..declare.operator import _PlaceWord
 from .bd import BdLimits
 
 
@@ -43,7 +45,12 @@ class Sequence:
             self.op.sequence(self)
             return
         tg = TaskGroup()
+        riders = {b.name for b in self.op.prepare_inputs} | {
+            b.name for b in self.op.finish_inputs if not b.streamed
+        }
         for buf in self.op.inputs:
+            if buf.name in riders:
+                continue  # filled into the stream it prepares or rides (fill)
             for slot, tap, size_by in self.plan(buf):
                 self.fill(slot, (buf, tap), group=tg, size_by=size_by)
         for buf in self.op.outputs:
@@ -153,8 +160,14 @@ class Sequence:
         offset_by=None,
         size_by=None,
         managed=True,
+        finishing=None,
     ):
-        """Fill ``stream`` from ``source``.
+        """Fill ``stream`` from ``source``; a prepared input's lane is then
+        filled with each of the operator's ``prepare_inputs``, which its
+        cores acquire with the tile. A fill of a fed input's lane from that
+        input takes its whole share, an output tile's worth at a time, each
+        followed by that output tile of each finish input riding it,
+        re-read to fill a tile.
 
         Args:
             offset_by: A per-call value moving the base address.
@@ -162,10 +175,85 @@ class Sequence:
                 dimension (0 the outermost).
             managed: False hands the queue slot and descriptors to the
                 compiler, which frees them after a later wait; joins no group.
+            finishing: For a fill of a fed input, the part of the lane's
+                share of the output it computes (a pattern over the
+                output), where it is not the whole: a hand-written
+                sequence filling a lane in pieces.
+
+        Raises:
+            ValueError: A fed input's lane is filled with a per-call offset
+                or size, or with other than its share and no ``finishing``.
         """
-        return self._transfer(
+        lane = self._lane(stream)
+        riding = [e for e in self.op.finish_inputs if not e.streamed]
+        buffer, tap, sliced_by = self._resolve(source, stream)
+        if lane.buffer.member.feed and riding and buffer.name == lane.buffer.name:
+            name = f"{type(self.op).__name__}.{buffer.name}"
+            if offset_by or size_by or sliced_by:
+                raise ValueError(
+                    f"{name}: the finish's inputs ride it an output tile at a "
+                    f"time, so it moves by no per-call offset or size"
+                )
+            if finishing is None and tap != self.split(buffer)[lane.index][1]:
+                raise ValueError(
+                    f"{name}: the finish's inputs ride it an output tile at a "
+                    f"time, so a fill of lane {lane.index} is its whole share"
+                )
+            (out,) = self.op.outputs
+            line = prod(out.tile_shape)
+            share = finishing or self.split(out)[lane.index][1]
+            tiles = prod(share.sizes) // line
+            reads = prod(buffer.tile_shape) // line
+            task = None
+            for held, finished in zip(
+                self._chunks(tap, tiles), self._chunks(share, tiles)
+            ):
+                task = self._transfer(
+                    "fill", lane, (buffer, held), group, wait, None, None, managed
+                )
+                for e in riding:
+                    self._transfer(
+                        "fill",
+                        lane,
+                        (e, finished.repeat(reads)),
+                        group,
+                        wait,
+                        None,
+                        None,
+                        managed,
+                    )
+            return task
+        task = self._transfer(
             "fill", stream, source, group, wait, offset_by, size_by, managed
         )
+        if not lane.buffer.member.prepare:
+            return task
+        for extra in self.op.prepare_inputs:
+            self._transfer(
+                "fill", stream, (extra, extra.tap), group, wait, None, None, managed
+            )
+        return task
+
+    @staticmethod
+    def _chunks(tap: TensorAccessPattern, n: int) -> list[TensorAccessPattern]:
+        """``tap`` as ``n`` consecutive walks of equal length, in order.
+
+        Raises:
+            ValueError: No dimension of ``tap`` splits into them.
+        """
+        tap = tap.coalesce()
+        size = prod(tap.sizes) // n
+        for d in reversed(range(tap.rank) if size * n == prod(tap.sizes) else ()):
+            inner = prod(tap.sizes[d + 1 :])
+            if size % inner == 0 and tap.sizes[d] % (size // inner) == 0:
+                split = tap.split(d, size // inner)
+                return [
+                    split[
+                        tuple(int(i) for i in np.unravel_index(k, split.sizes[: d + 1]))
+                    ]
+                    for k in range(n)
+                ]
+        raise ValueError(f"{tap} does not split into {n} walks of {size} elements")
 
     def drain(
         self,
@@ -196,7 +284,26 @@ class Sequence:
     ):
         fn = getattr(self._lane(stream).handle, verb)
         buffer, tap, sliced_by = self._resolve(what, stream)
-        offset_by = offset_by or sliced_by
+        placed = next(
+            (
+                v
+                for v in self.op.values
+                if isinstance(v.member, _PlaceWord) and v.member.buffer == buffer.name
+            ),
+            None,
+        )
+        if placed is not None and (offset_by is not None or sliced_by is not None):
+            raise ValueError(
+                f"{type(self.op).__name__}.{buffer.name} is placed in a larger "
+                f"buffer, {placed.name} moving its transfers; a transfer of it "
+                f"takes no per-call offset of its own"
+            )
+        offset_by = placed or offset_by or sliced_by
+        into, start = buffer.placement
+        if (into, start) != (buffer.elements, 0):
+            tap = TensorAccessPattern(
+                (into,), tap.offset + start, tap.sizes, tap.strides
+            )
         if offset_by is not None and offset_by.param is None:
             raise ValueError(
                 f"{offset_by.name} has no device parameter: the operator does not use "

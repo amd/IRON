@@ -35,6 +35,7 @@ from .checkpoint import (
     checkpoint_shapes,
     load_weights,
     random_weights,
+    unread_weights,
 )
 from .decoder import (
     CausalLM,
@@ -71,4 +72,5 @@ __all__ = [
     "random_weights",
     "rope_angles",
     "swiglu",
+    "unread_weights",
 ]

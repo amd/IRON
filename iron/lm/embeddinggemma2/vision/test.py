@@ -14,8 +14,13 @@ import pytest
 
 from iron.common.graph.narrowing import CostTable, JointNarrowing
 from iron.lm import Checkpoint, load_weights
-from iron.lm.embeddinggemma2.model import COSTS
-from iron.lm.embeddinggemma2.vision.model import VISION, Vision, layout, vision_tensors
+from iron.lm.embeddinggemma2.vision.model import (
+    COSTS,
+    VISION,
+    Vision,
+    layout,
+    vision_tensors,
+)
 from iron.lm.embeddinggemma2.vision.oracle import VisionOracle, patches
 from iron.lm.testing import require, weights_dir
 
@@ -73,7 +78,9 @@ def oracle(weights):
 
 @pytest.fixture(scope="module")
 def vision(weights):
-    yield Vision(VISION, weights).load(JointNarrowing(CostTable(COSTS)))
+    table = COSTS / f"costs_{aie_utils.ensure_current_device().name}.json"
+    tuner = JointNarrowing(CostTable(table)) if table.exists() else None
+    yield Vision(VISION, weights).load(tuner)
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 

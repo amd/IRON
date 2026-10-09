@@ -35,6 +35,9 @@ from ..model import ACCURATE
 # A GEMM's row block at its default tile: a version's rows are a multiple of it.
 ROWS = 256
 
+# Where the vision tune writes its tables, one per device.
+COSTS = Path(__file__).parent
+
 
 @dataclasses.dataclass(frozen=True)
 class VisionConfig:

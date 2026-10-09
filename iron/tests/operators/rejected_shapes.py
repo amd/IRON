@@ -16,12 +16,19 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
-from iron.common import Unresolvable
+from iron.common import Link, Unresolvable
 from iron.operators.copy import Copy, Gather
+from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
+from iron.operators.gemm import GEMM
+from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
+from iron.operators.rms_norm import RMSNorm
 from iron.operators.sample import Sample
+from iron.operators.silu import SiLU
+from iron.operators.softmax import Softmax
 from iron.operators.transpose import Transpose
 
 
@@ -149,9 +156,6 @@ def test_a_tile_past_what_one_core_holds_is_refused_not_split():
     """A row an elementwise kernel cannot hold is an error at resolution; the
     library never halves it, since a norm's reference is the whole row.
     """
-    from iron.common import Unresolvable
-    from iron.operators.rms_norm import RMSNorm
-
     dev = from_name("npu2", n_cols=8)
     with pytest.raises(Unresolvable, match="tile_size=16384 exceeds the 8192"):
         RMSNorm(rows=1, tile_size=16384).resolved(dev)
@@ -162,9 +166,6 @@ def test_the_default_column_count_is_the_most_that_leave_whole_tiles():
     """A tunable-free operator resolves on either device to the widest count
     its shape divides over, rather than the whole shim budget and a refusal.
     """
-    from iron.operators.gemm import GEMM
-    from iron.operators.softmax import Softmax
-
     npu2, npu1 = from_name("npu2", n_cols=8), from_name("npu1", n_cols=4)
     assert GEMM(M=256, K=64, N=256).resolved(npu2).num_aie_columns == 4
     assert GEMM(M=256, K=64, N=512).resolved(npu1).num_aie_columns == 4
@@ -179,19 +180,22 @@ def test_the_default_column_count_is_the_most_that_leave_whole_tiles():
     "kwargs,why",
     [
         (dict(B_q=64, B_kv=128), "B_q"),
+        (dict(B_q=32, B_kv=32), "multiple of 64"),
         (dict(kv_len=1000), "kv_len"),
         (dict(kv_len=512), "kv_len"),
     ],
     ids=[
         "q_and_kv_blocks_differ",
+        "kv_block_narrower_than_the_mask_vector",
         "kv_len_not_whole_blocks",
         "kv_len_short_of_queries",
     ],
 )
 def test_mha_whose_blocks_do_not_line_up_is_refused(kwargs, why):
     """mha.cc skips a KV block past a Q block by comparing their indices, so
-    the two block sizes must match; and the queries are the keys' last rows,
-    whole blocks of them, so the cache must hold them.
+    the two block sizes must match; its softmax masks a row of keys with
+    64-lane vectors, so a KV block is whole vectors; and the queries are the
+    keys' last rows, whole blocks of them, so the cache must hold them.
     """
     with pytest.raises(ValueError, match=why):
         MHA(num_heads=2, seq_len=1024, num_pipelines=8, **kwargs).resolved(
@@ -206,11 +210,11 @@ def test_mha_whose_blocks_do_not_line_up_is_refused(kwargs, why):
         (dict(num_heads=32, num_KV_heads=8, num_pipelines=8), "at most 4"),
         (dict(num_heads=24, num_KV_heads=6, num_pipelines=4), "dividing"),
     ],
-    ids=["group_not_dividing_a_block", "more_pipelines_than_shims", "uneven_groups"],
+    ids=["group_not_dividing_a_block", "more_than_four_pipelines", "uneven_groups"],
 )
 def test_mha_of_one_query_that_does_not_pack_is_refused(kwargs, why):
     """One query packs each KV group's heads into a block's rows, and each
-    pipeline reads its own groups' K and V over its own column's shim.
+    pipeline reads its own groups' K and V through its own column's memtile.
     """
     with pytest.raises(ValueError, match=why):
         MHA(seq_len=1, kv_len=512, **kwargs).resolved(from_name("npu2", n_cols=8))
@@ -224,6 +228,16 @@ def test_sample_with_more_cores_than_a_memtile_joins_is_refused():
     with pytest.raises(Unresolvable, match="join in one memtile"):
         Sample(vocab=4096, cores=8).resolved(dev)
     assert Sample(vocab=4096, cores=4).resolved(dev).cores == 4
+
+
+def test_a_streamed_softmax_core_with_more_rows_than_it_unrolls_is_refused():
+    """A streamed core unrolls its rows, each with its own state: past 48
+    its program overflows the core's memory.
+    """
+    dev = from_name("npu2", n_cols=8)
+    with pytest.raises(ValueError, match="at most 48 rows"):
+        Softmax(rows=1024, cols=8192, num_aie_columns=1).resolved(dev)
+    assert Softmax(rows=256, cols=8192, num_aie_columns=8).resolved(dev).streamed
 
 
 @pytest.mark.parametrize(
@@ -245,3 +259,33 @@ def test_flm_gemm_bfp16_macs_are_aie2p_only():
         FLMGEMM(M=256, K=512, N=256, emulate_bf16_mmul_with_bfp16=True).resolved(
             from_name("npu1", n_cols=4)
         )
+
+
+def test_a_finish_input_past_the_cores_input_channels_is_refused():
+    """A sum's cores read two streams, neither declared for a finish step's
+    own input to ride; past them the design fails to place. A one-stream
+    core takes it, and so does a matvec's, on its matrix.
+    """
+    dev = from_name("npu2", n_cols=8)
+    finish = (Link(ElementwiseMul(size=2048), 1),)
+    with pytest.raises(Unresolvable, match="input channels"):
+        ElementwiseAdd(size=2048, num_aie_columns=4, finish=finish).resolved(dev)
+    SiLU(size=2048, num_aie_columns=4, finish=finish).resolved(dev)
+    fed = GEMV(M=2048, K=2048, finish=finish).resolved(dev)
+    assert [b.streamed for b in fed.finish_inputs] == [False]
+
+
+def test_a_step_that_needs_the_order_of_a_gemm_block_is_refused():
+    """GEMM's cores hold their block of C in the matmul kernel's own layout:
+    a step independent of that order finishes it; a norm over rows, or a
+    product whose other input streams in row order, does not.
+    """
+    dev = from_name("npu2", n_cols=8)
+    kwargs = dict(M=2048, K=2048, N=2048, b_col_maj=True)
+    with pytest.raises(ValueError, match="reduces over rows"):
+        GEMM(**kwargs, finish=(Link(RMSNorm(rows=1024, tile_size=4096)),)).resolved(dev)
+    with pytest.raises(Unresolvable, match="order of their own"):
+        GEMM(**kwargs, finish=(Link(ElementwiseMul(size=2048 * 2048), 1),)).resolved(
+            dev
+        )
+    GEMM(**kwargs, finish=(Link(SiLU(size=2048 * 2048)),)).resolved(dev)

@@ -13,6 +13,7 @@ embedding out, on the NPU; the float32 oracle on demand.
 
 import argparse
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 import aie.utils as aie_utils
@@ -36,8 +37,8 @@ class Encoder:
     Args:
         directory: Holds `model.safetensors` and `tokenizer.json`.
         max_tokens: The longest prompt, its task prefix included.
-        costs: The cost table the designs are narrowed and packed by; None
-            leaves them as they resolve.
+        costs: The cost tables the designs are narrowed and packed by,
+            merged (`CostTable.merge`); none leaves them as they resolve.
         towers: Also load the audio and vision towers, so that a call may
             take a clip and an image.
     """
@@ -46,7 +47,7 @@ class Encoder:
         self,
         directory,
         max_tokens: int = 512,
-        costs: Path | None = None,
+        costs: Sequence[Path] = (),
         towers: bool = False,
     ):
         directory = Path(directory)
@@ -73,7 +74,10 @@ class Encoder:
             )
         else:
             self.graph = EmbeddingGemma(self.config, self.weights, max_tokens)
-        self.graph.load(JointNarrowing(CostTable(costs)) if costs else None)
+        tables = [CostTable(path) for path in costs]
+        for table in tables[1:]:
+            tables[0].merge(table)
+        self.graph.load(JointNarrowing(tables[0]) if tables else None)
 
     def tokens(
         self, text: str, task: str, audio_tokens: int = 0, image_tokens: int = 0
@@ -129,7 +133,10 @@ def main():
     ap.add_argument(
         "--costs",
         type=Path,
-        help=f"the cost table designs are tuned by (`tune` writes {COSTS})",
+        nargs="+",
+        default=[],
+        help="the cost tables designs are tuned by, merged (`tune` writes "
+        f"costs_<device>.json in {COSTS}, `vision.tune` in {vision_model.COSTS})",
     )
     args = ap.parse_args()
     encoder = Encoder(args.directory, costs=args.costs)

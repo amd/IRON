@@ -18,10 +18,12 @@ import pytest
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
 from aie.iron.device import from_name
+from ml_dtypes import bfloat16
 
 import iron.operators.flm.gemm.op as flm_gemm
 from iron.common import (
     In,
+    Link,
     Operator,
     Out,
     Shim,
@@ -36,11 +38,17 @@ from iron.common.design import (
     Sequence,
     build_design,
 )
+from iron.operators.clamp import Clamp
+from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.shipped import Shipped
+from iron.operators.gelu import GELU
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.repeat import Repeat
 from iron.operators.rope import RoPE
+from iron.operators.sigmoid import Sigmoid
+from iron.operators.silu import SiLU
 from iron.tests.common.declare import Rows
 
 # A descriptor's fields are the current device's.
@@ -203,6 +211,19 @@ def test_mha_infers_the_padded_length_and_the_kv_head_count():
         MHA(num_heads=1, seq_len=100, seq_pad=100, d=64)
 
 
+def test_mha_binds_p_times_v_at_its_own_shape():
+    """Past B_kv = d, P*V's operands are not QK^T's: P is (B_q, B_kv), V
+    (B_kv, d) and O (B_q, d), each streamed as P*V takes it, O accumulated
+    in float32 and rounded once into the bf16 output.
+    """
+    op = MHA(num_heads=1, seq_len=1024, num_pipelines=8, B_q=128, B_kv=128)
+    text = str(build_design(op.resolved()))
+    p, v = "memref<128x128xbf16>", "memref<128x64xbf16>"
+    acc, o = "memref<128x64xf32>", "memref<128x64xbf16>"
+    assert re.search(rf'_matmul_PV"?\({p}, {v}, {acc},', text)
+    assert re.search(rf'_rescale_O"?\({acc}, {o},', text)
+
+
 # --------------------------------------------------------------------------
 # A per-call size in a transfer
 # --------------------------------------------------------------------------
@@ -360,6 +381,25 @@ def test_flm_gemm_layout_of_b_follows_the_device():
     with pytest.raises(ValueError):
         [b.shape for b in untuned.buffers]  # B's layout follows the device
     assert untuned.resolved(from_name("npu2", n_cols=8)).B.shape == (512 * 512 // 8,)
+
+
+def test_flm_gemm_folds_an_activation_then_a_clamp_into_its_epilogue():
+    op = flm_gemm.GEMM(M=256, K=512, N=512)
+    size = 256 * 512
+    silu = op.fold(SiLU(size=size))
+    assert silu.epilogue is Epilogue.SILU and silu.clamp is None
+    clamped = silu.fold(Clamp(size=size, low=-0.7, high=2.0))
+    assert clamped.clamp == (float(bfloat16(-0.7)), 2.0)
+    assert clamped.config_name == op.config_name
+    # Its gelu is not the GELU operator's, nothing follows its clamp, and
+    # it applies one activation, of those compiled in.
+    assert op.fold(GELU(size=size)) is None
+    assert clamped.fold(Clamp(size=size, low=0.0, high=1.0)) is None
+    assert silu.fold(Sigmoid(size=size)) is None
+    plain = flm_gemm.GEMM(M=256, K=512, N=512, epilogue_modes=("none",))
+    assert plain.fold(SiLU(size=size)) is None
+    finished = SiLU(size=size, finish=(Link(ElementwiseMul(size=size)),))
+    assert op.fold(finished) is None
 
 
 # --------------------------------------------------------------------------

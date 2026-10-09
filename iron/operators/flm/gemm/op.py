@@ -47,6 +47,7 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Divisors,
     Extent,
     In,
     Operator,
@@ -58,6 +59,7 @@ from iron.common import (
     Select,
 )
 from iron.common.design import BdLimits
+from iron.operators.clamp import Clamp
 from iron.operators.flm.gemm.design import (
     _VERIFIED_CT_K,
     A_DEPTH,
@@ -93,6 +95,8 @@ from iron.operators.flm.gemm.design import (
     rtp_layout,
 )
 from iron.operators.flm.packing import pack_b, packed_b_size
+from iron.operators.sigmoid import Sigmoid
+from iron.operators.silu import SiLU
 
 
 class _BPool(NamedTuple):
@@ -150,7 +154,7 @@ class GEMM(Operator):
     # compiled-in modes.
     epilogue: Epilogue | str = param(default=Epilogue.NONE)
     # Optional (min, max) applied after the activation.
-    clamp: tuple | None = param(default=None)
+    clamp: tuple | None = param(default=None, probe=None)
     # B's packed block count on AIE2P: blocks, not bytes, since B's
     # declaration counts bfp16ebs8 blocks and bfp.itemsize turns that back
     # into the byte count pack_B returns.
@@ -165,9 +169,11 @@ class GEMM(Operator):
     k_tile: int = param(default=K_TILE, array=True)
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). None resolves to whatever L1 affords.
-    tile_ma: int = auto(array=True)
+    tile_ma: int = auto(array=True, domain=Divisors(of=M_TILE, step=2 * R))
     # Row-blocks folded into one B fetch. None resolves from tile_n.
-    m_chunk: int = auto(array=True)
+    m_chunk: int = auto(
+        array=True, domain=Divisors(of=lambda op: op.M // (M_TILE * op.rows))
+    )
     # The activations the epilogue can select between at run time. Each one
     # compiled in costs program memory, so a deployment that dispatches two
     # should compile two.
@@ -184,16 +190,16 @@ class GEMM(Operator):
     # port's arithmetic, and AIE2P's default), or on its bf16 macs.
     emulate_bf16_mmul_with_bfp16: bool = auto(array=True)
     # Filled by resolve, from the device: the grid, B's storage, the L2 tiles.
-    rows: int = auto(repr=False)
-    cols: int = auto(repr=False)
-    bfp16_b: bool = auto(repr=False, array=True)
+    rows: int = auto(repr=False, derived=True)
+    cols: int = auto(repr=False, derived=True)
+    bfp16_b: bool = auto(repr=False, array=True, derived=True)
     # B's element type, on the array and in DDR alike; the host holds a
     # block-float B as bytes (BoundBuffer.host_dtype).
-    b_dtype: Any = auto(repr=False)
-    l1_b_depth: int = auto(repr=False, array=True)
-    a_l2: int = auto(repr=False)
-    b_l2: int = auto(repr=False)
-    c_l2: int = auto(repr=False)
+    b_dtype: Any = auto(repr=False, derived=True)
+    l1_b_depth: int = auto(repr=False, array=True, derived=True)
+    a_l2: int = auto(repr=False, derived=True)
+    b_l2: int = auto(repr=False, derived=True)
+    c_l2: int = auto(repr=False, derived=True)
 
     # The k order pack_B writes within a block: the port's kernel's, or the
     # shipped binary's own (see shipped.py).
@@ -1158,6 +1164,28 @@ class GEMM(Operator):
         return dataclasses.replace(
             self, M=M, K=K, N=N, epilogue=Epilogue.NONE, clamp=None, packed_blocks=None
         )
+
+    # -- folding -----------------------------------------------------------------
+
+    def fold(self, consumer, at: int = 0) -> "GEMM | None":
+        """This GEMM applying ``consumer`` in its epilogue: SiLU or Sigmoid as
+        its activation, then Clamp as its clamp, the bounds rounded to bf16
+        as Clamp rounds them. The epilogue's gelu is ``x * sigmoid(1.702x)``,
+        not the GELU operator's, so GELU does not fold.
+        """
+        if consumer.finish or consumer.prepare or self.clamp is not None:
+            return None
+        if isinstance(consumer, Clamp):
+            bounds = np.array([consumer.low, consumer.high], bfloat16)
+            return dataclasses.replace(self, clamp=tuple(bounds.astype(float).tolist()))
+        mode = {SiLU: Epilogue.SILU, Sigmoid: Epilogue.SIGMOID}.get(type(consumer))
+        if (
+            mode is None
+            or self.epilogue is not Epilogue.NONE
+            or mode not in self.epilogue_modes
+        ):
+            return None
+        return dataclasses.replace(self, epilogue=mode)
 
     # -- host-side helpers -------------------------------------------------------
 

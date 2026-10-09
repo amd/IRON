@@ -39,23 +39,42 @@ from aie.iron import (
     kernels,
 )
 from aie.iron.controlflow import range_
-from aie.iron.device import Device, Tile
+from aie.iron.device import Device
 from aie.iron.kernels.linalg import mm_stream_dims
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Divisors,
     Extent,
     In,
+    Level,
     Operator,
     Out,
+    Pins,
+    Placement,
     Unresolvable,
     Value,
+    Width,
     auto,
     param,
     Select,
 )
 from iron.common.testing import Case, Testing
+
+# The hand-found memtiles of MHA.COLUMNS: K's and V's broadcasts on k_mem and
+# v_mem, or a lane per pipeline on its own column's, and Q's splits and O's
+# joins from qo_mem. Left to the placer ("columns"), K's and V's share one
+# memtile and Q's takes a pipeline's forward. A pipeline's cores keep at
+# least its column: placed freely, 8 pipelines pack into 6 columns that
+# cannot be routed.
+PLACEMENT = Placement(
+    {
+        "memtiles": Pins(cores=Level.COLUMN, shims=Level.FREE),
+        "tiles": Pins(),
+        "columns": Pins(cores=Level.COLUMN, memtiles=Level.FREE, shims=Level.FREE),
+    }
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -113,6 +132,29 @@ _CASES = [
             heads_interleaved=True,
         )
     ),
+    # The chunk and the decode at each placement the tuner tries beside the
+    # default.
+    *(
+        Case(dict(shape, placement=placement), extensive=True)
+        for shape in (
+            dict(
+                num_heads=8,
+                num_KV_heads=2,
+                seq_len=2048,
+                kv_len=8192,
+                num_pipelines=8,
+            ),
+            dict(
+                num_heads=32,
+                num_KV_heads=8,
+                seq_len=1,
+                kv_len=2048,
+                num_pipelines=4,
+                heads_interleaved=True,
+            ),
+        )
+        for placement in ("tiles", "columns")
+    ),
     Case(
         dict(num_heads=8, num_KV_heads=2, seq_len=1, kv_len=512, num_pipelines=2),
         extensive=True,
@@ -132,7 +174,7 @@ def _cases(cls, dev: Device):
 
 class MHA(Operator):
     """AIE-accelerated Multi-Head Attention operator: fused attention over
-    ``(B_q, d)`` Q blocks and ``(d, B_kv)`` K/V blocks.
+    ``(B_q, d)`` Q blocks, ``(d, B_kv)`` K blocks and ``(B_kv, d)`` V blocks.
 
     More than six pipelines split the Q and O traffic over two shims (each
     memtile split serves at most six pipelines), so the Q and O streams have
@@ -165,22 +207,40 @@ class MHA(Operator):
     kv_interleaved: bool = param(default=False)
     # The head dimension: the width of every tile and the kernel's DIM_K.
     d: int = param(default=64)
-    B_q: int = auto(64, array=True)
-    B_kv: int = auto(64)
-    num_pipelines: int = auto(1, array=True)
+    # A core holds one (B_q, B_kv) score tile, which caps either block.
+    B_q: int = auto(
+        64,
+        array=True,
+        domain=Divisors(
+            of=lambda op: op.kv_len,
+            step=64,
+            cap=lambda op, dev: dev.core_memory_bytes
+            // (op.B_kv * np.dtype(bfloat16).itemsize),
+        ),
+    )
+    B_kv: int = auto(
+        64,
+        domain=Divisors(
+            of=lambda op: op.kv_len,
+            step=64,
+            cap=lambda op, dev: dev.core_memory_bytes
+            // (op.B_q * np.dtype(bfloat16).itemsize),
+        ),
+    )
+    num_pipelines: int = auto(1, array=True, domain=Width())
+    placement: str = auto("memtiles", array=True, domain=PLACEMENT)
     emulate_bf16_mmul_with_bfp16: bool = param(default=True, repr=False)
     # Filled by resolve: how the pipelines are split across shims, and K
     # and V's lanes, one every pipeline reads or, one query packed, one each.
-    q_shims: int = auto(repr=False)
-    join_rows: int = auto(repr=False)
-    kv_lanes: int = auto(array=True, repr=False)
+    q_shims: int = auto(repr=False, derived=True)
+    join_rows: int = auto(repr=False, derived=True)
+    kv_lanes: int = auto(array=True, repr=False, derived=True)
     # The width of the layout placed, a key of COLUMNS.
-    width: int = auto(array=True, repr=False)
+    width: int = auto(array=True, repr=False, derived=True)
 
-    # By array width. Every coordinate is load-bearing: relaxed to
-    # AnyShimTile/AnyMemTile/AnyComputeTile the router reports "Unable to
-    # find a legal routing". One query packed puts pipeline p's K and V
-    # lanes on shim and memtile p, so its pipelines stop short of q.
+    # By array width, the coordinates the "memtiles" and "tiles" placements
+    # keep. One query packed puts pipeline p's K and V lanes on shim and
+    # memtile p, so its pipelines stop short of q.
     COLUMNS: ClassVar[dict[int, Columns]] = {
         8: Columns(q=4, k=5, v=6, o=7, qo_mem=6, k_mem=3, v_mem=4),
         4: Columns(q=2, k=0, v=1, o=3, qo_mem=2, k_mem=0, v_mem=1),
@@ -198,7 +258,7 @@ class MHA(Operator):
     )
     V = In(
         Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
-        tile=(d, B_kv),
+        tile=(B_kv, d),
         per=(kv_lanes,),
     )
     O = Out(
@@ -334,6 +394,13 @@ class MHA(Operator):
         # mha.cc's causal skip compares a KV block's index with a Q block's.
         if self.B_q != self.B_kv:
             raise ValueError(f"B_q ({self.B_q}) and B_kv ({self.B_kv}) must match")
+        # partial_softmax masks a row with 64-lane loads and stores, which
+        # past a narrower row mask the next one too.
+        if self.B_kv % 64:
+            raise ValueError(
+                f"B_kv ({self.B_kv}) must be a multiple of 64, the vector "
+                f"mha.cc's softmax masks a row of keys by"
+            )
         if self.kv_len % self.B_kv or self.kv_len < self.seq_pad:
             raise ValueError(
                 f"kv_len ({self.kv_len}) must be whole {self.B_kv}-row blocks and "
@@ -356,13 +423,14 @@ class MHA(Operator):
                     f"one query packs a KV group's {group} heads into a block's "
                     f"B_q ({self.B_q}) rows, which they must divide"
                 )
-            # K and V take both input channels of shims 0 to P-1, and Q its own.
+            # K and V take a lane per pipeline, forwarded through its column's
+            # memtile, and Q its own.
             q = self.COLUMNS[self.width].q
             if self.num_pipelines > q or self.num_KV_heads % self.num_pipelines:
                 raise ValueError(
                     f"one query takes num_pipelines ({self.num_pipelines}) at most "
                     f"{q} dividing num_KV_heads ({self.num_KV_heads}): each pipeline "
-                    f"has its own K and V lanes, on its own column's shim"
+                    f"has its own K and V lanes, through its own column's memtile"
                 )
 
     @classmethod
@@ -408,6 +476,7 @@ class MHA(Operator):
         B_q, B_kv, d = self.B_q, self.B_kv, self.d
         num_pipelines = self.num_pipelines
         n_join = num_pipelines // self.q_shims  # the pipelines on one shim
+        pins = PLACEMENT.pins(self.placement)
 
         inv_scale = (
             1 / np.sqrt(d)
@@ -416,23 +485,30 @@ class MHA(Operator):
         # Tensors living on the AIE-array
         q_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
         k_ty = np.ndarray[(d, B_kv), np.dtype[dtype]]
+        v_ty = np.ndarray[(B_kv, d), np.dtype[dtype]]
         qk_ty = np.ndarray[(B_q, B_kv), np.dtype[dtype]]
         s_ty = np.ndarray[(4 * B_q,), np.dtype[np.float32]]
         o_acc_ty = np.ndarray[(B_q, d), np.dtype[np.float32]]
         joined_ty = self.Q.tile  # (n_join * B_q, d)
 
         # Every one of these comes out of mha.cc, which #includes mm.cc and
-        # softmax.cc, so they all name one object: matmul_QK is its QK^T
-        # product, and the rest of its symbols are bound from that object
-        # rather than declared separately, which would recompile the
-        # translation unit and redefine every symbol in it.
+        # softmax.cc: matmul_QK is its QK^T product, and the symbols its core
+        # and the softmax's call are bound from that object rather than
+        # declared separately, which would recompile the translation unit and
+        # redefine every symbol in it. mha.cc takes one (DIM_M, DIM_K, DIM_N),
+        # QK^T's (B_q, d, B_kv), and P*V is (B_q, B_kv, d): P*V's core binds
+        # its symbols from mha.cc built at that shape, the same object where
+        # B_kv is d.
         matmul_QK = kernels.linalg.mha(
             B_q, d, B_kv, b_col_maj=True, emulate_bf16_mmul_with_bfp16=True
         )
         mha_object = matmul_QK.object_file
+        pv_object = kernels.linalg.mha(
+            B_q, B_kv, d, b_col_maj=True, emulate_bf16_mmul_with_bfp16=True
+        ).object_file
 
         # Upstream's standalone zero over the (DIM_M, DIM_N) tile is the fill.
-        zero_kernel = kernels.zero(tile_size=(B_q, B_kv), dtype=dtype)
+        zero_scores = kernels.zero(tile_size=(B_q, B_kv), dtype=dtype)
         # The 32-bit passThroughLine, bound to the float scale buffers.
         memcopy_kernel_scale = kernels.eltwise.passthrough(
             4 * B_q, np.int32
@@ -454,11 +530,11 @@ class MHA(Operator):
                 np.int32,
             ],
         )
-        matmul_PV = mha_object.bind(
+        matmul_PV = pv_object.bind(
             "matmul_PV",
             [
                 qk_ty,
-                k_ty,
+                v_ty,
                 o_acc_ty,
                 s_ty,
                 np.int32,
@@ -467,7 +543,7 @@ class MHA(Operator):
                 np.int32,
             ],
         )
-        rescale_O = mha_object.bind(
+        rescale_O = pv_object.bind(
             "rescale_O",
             [o_acc_ty, q_ty, s_ty, np.int32, np.ndarray[(2,), np.dtype[np.int32]]],
         )
@@ -500,7 +576,7 @@ class MHA(Operator):
                 names=[f"memQ{suffix}{i}" for i in range(n_join)],
                 to_stream=None if q_dims is None else [q_dims] * n_join,
                 depths=[of_depth] * n_join,
-                tile=Tile(col=columns.qo_mem + shim, row=1),
+                tile=pins.memtiles.tile(columns.qo_mem + shim, 1),
             )
             mem_o = ObjectFifo(joined_ty, name=f"memO{suffix}", to_stream=o_dims)
             memO.append(mem_o)
@@ -510,7 +586,7 @@ class MHA(Operator):
                 names=[f"outO{suffix}{i}" for i in range(n_join)],
                 # One buffer: the PV core's L1 also holds the float O.
                 depths=[1] * n_join,
-                tile=Tile(col=columns.qo_mem + shim, row=1),
+                tile=pins.memtiles.tile(columns.qo_mem + shim, 1),
             )
 
         # K (stored column-major) and V are forwarded through a memtile: one
@@ -528,18 +604,18 @@ class MHA(Operator):
                 .forward(
                     name=f"memK{suffix}",
                     to_stream=k_dims,
-                    tile=Tile(col=columns.k_mem if shared else lane, row=1),
+                    tile=pins.memtiles.tile(columns.k_mem if shared else lane, 1),
                     depth=of_depth,
                 )
             )
-            inV.append(ObjectFifo(k_ty, name=f"inV{suffix}", depth=of_depth))
+            inV.append(ObjectFifo(v_ty, name=f"inV{suffix}", depth=of_depth))
             memV.append(
                 inV[lane]
                 .cons()
                 .forward(
                     name=f"memV{suffix}",
                     to_stream=v_dims,
-                    tile=Tile(col=columns.v_mem if shared else lane, row=1),
+                    tile=pins.memtiles.tile(columns.v_mem if shared else lane, 1),
                     depth=of_depth,
                 )
             )
@@ -832,7 +908,7 @@ class MHA(Operator):
                         memQ[i].cons(),
                         memK[i % kv_lanes].cons(),
                         memA[i].prod(),
-                        zero_kernel,
+                        zero_scores,
                         matmul_QK,
                         i,
                         mha_rtps_list[0][i],
@@ -841,7 +917,7 @@ class MHA(Operator):
                     ]
                     + params,
                     stack_size=0xD00,
-                    tile=Tile(col=i, row=2),
+                    tile=pins.cores.tile(i, 2),
                 )
             )
             idx_buffer_softmax = Buffer(
@@ -870,7 +946,7 @@ class MHA(Operator):
                     ]
                     + params,
                     stack_size=0xD00,
-                    tile=Tile(col=i, row=3),
+                    tile=pins.cores.tile(i, 3),
                 )
             )
             idx_buffer_pv = Buffer(
@@ -895,7 +971,7 @@ class MHA(Operator):
                     ]
                     + params,
                     stack_size=0xD00,
-                    tile=Tile(col=i, row=4),
+                    tile=pins.cores.tile(i, 4),
                 )
             )
 
@@ -903,15 +979,15 @@ class MHA(Operator):
         # lanes share column 0's two channels, as O's do; K and V's lanes,
         # one per pipeline, take their column's two.
         split = self.q_shims > 1
-        q_shim = Tile(col=0 if split else columns.q, row=0)
-        o_shim = Tile(col=0 if split else columns.o, row=0)
+        q_shim = pins.shims.tile(0 if split else columns.q, 0)
+        o_shim = pins.shims.tile(0 if split else columns.o, 0)
         for s in range(self.q_shims):
             self.Q.lane(s).bind(inQ[s].prod(tile=q_shim))
             self.O.lane(s).bind(memO[s].cons(tile=o_shim))
         for lane in range(kv_lanes):
             shared = kv_lanes == 1
-            k_shim = Tile(col=columns.k if shared else lane, row=0)
-            v_shim = Tile(col=columns.v if shared else lane, row=0)
+            k_shim = pins.shims.tile(columns.k if shared else lane, 0)
+            v_shim = pins.shims.tile(columns.v if shared else lane, 0)
             self.K.lane(lane).bind(inK[lane].prod(tile=k_shim))
             self.V.lane(lane).bind(inV[lane].prod(tile=v_shim))
 

@@ -36,7 +36,7 @@ from aie.iron.kernels import MV_COL_MAJ_FIRST, MV_COL_MAJ_LAST, linalg
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import Extent, In, Operator, Out, Value, auto, param
+from iron.common import Divisors, Extent, In, Operator, Out, Value, auto, param
 from iron.common.testing import Case, Testing
 
 # The context kernel's partial sums per output: the vector width GEMV's
@@ -101,7 +101,17 @@ class _KVGroups(Operator):
     heads_per_group: int = param(default=lambda op: op.heads // op.groups)
     # None: the most columns the shim budget allows that divide the groups.
     num_aie_columns: int = auto()
-    chunk: int = auto(128)
+    # A core holds one (chunk, head_dim) block of the cache, and the context
+    # kernel takes chunk in whole rounds of its lanes.
+    chunk: int = auto(
+        128,
+        domain=Divisors(
+            of=lambda op: op.seq_len,
+            step=_LANES,
+            cap=lambda op, dev: dev.core_memory_bytes
+            // (op.head_dim * np.dtype(bfloat16).itemsize),
+        ),
+    )
 
     valid = Extent(seq_len)  # seq_len, or fewer positions per call
     calls = Value(np.int32, derive=lambda op: ceildiv(op.valid, op.chunk))

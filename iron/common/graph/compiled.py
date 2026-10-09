@@ -14,7 +14,7 @@ import contextlib
 import dataclasses
 import functools
 import inspect
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,6 +37,7 @@ from ..image.coresidence import AdjacentPacking
 from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
 from .carried import CARRY, EmitSite, attach_emit, compose
+from .fold import Folding, folded
 from .handle import Affine, Carry, Handle, State, Value, _tensor_dtype, is_operand
 from .narrowing import JointNarrowing, Tuning
 from .trace import TracedGraph, Tracer, _ReferenceTracer
@@ -312,6 +313,7 @@ class Graph:
         record="memory",
         feeds: CompiledGraph | None = None,
         coresident: AdjacentPacking | JointNarrowing | None = None,
+        fold: bool | Collection[Folding] = False,
         **shapes,
     ) -> CompiledGraph:
         """Compile the version for the given input shapes and return it.
@@ -328,22 +330,37 @@ class Graph:
             feeds: The version a full ELF's Emit starts; by default itself
                 when it takes no tensor.
             coresident: Packs designs into shared configurations; a
-                ``JointNarrowing`` narrows them to fit first.
+                ``JointNarrowing`` folds steps and narrows designs where its
+                cost table says they gain, then packs them.
+            fold: Fold every step its readers or its producer can apply
+                in their own cores into them, and every copy its producer
+                can write in its place (``iron.common.graph.fold``),
+                whatever it costs; or those folds alone, as a tuning's
+                ``folds`` name them.
             **shapes: Each input's shape, or ``(shape, dtype)``.
         """
         if dev is not None:
             aie_utils.set_current_device(dev)
         traced = self.trace(**shapes)
-        chosen = plan(aie_utils.ensure_current_device(), traced, boundaries, image)
+        if fold:
+            traced, count = folded(
+                traced,
+                aie_utils.ensure_current_device(),
+                None if fold is True else fold,
+            )
+            if verbose:
+                print(
+                    f"{self.name}: {count.total()} step(s) folded into their "
+                    f"readers or producers"
+                )
+        current = aie_utils.ensure_current_device()
+        # Folding and narrowing change nothing the packaging follows from.
+        chosen = plan(current, traced, boundaries, image)
         tuning = None
         groups: AdjacentPacking | list[list[Operator]] | None
         if isinstance(coresident, JointNarrowing):
-            tuning = coresident.tune(
-                traced,
-                aie_utils.ensure_current_device(),
-                packs=chosen.dispatch == "fused",
-            )
-            traced, groups = tuning.apply(traced)
+            tuning = coresident.tune(traced, current, chosen.dispatch)
+            traced, groups = tuning.apply(traced, current)
         else:
             groups = coresident
         if verbose:

@@ -48,7 +48,9 @@ python -m iron.lm.embeddinggemma2.encoder /path/to/embeddinggemma-2 \
 ```
 
 `--dims` truncates the embeddings, and `--costs` narrows and packs the
-designs by a table `python -m iron.lm.embeddinggemma2.tune` measured.
+designs by the tables `python -m iron.lm.embeddinggemma2.tune` (the text)
+and `python -m iron.lm.embeddinggemma2.vision.tune` (the vision tower)
+measured, merged.
 
 ## Testing
 

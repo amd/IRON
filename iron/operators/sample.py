@@ -29,7 +29,7 @@ tokens, token = Sample(logits, draws, tokens, row=position * 4, at=position)
 import dataclasses
 
 import numpy as np
-from aie.dialects.aie import AIETileType, WireBundle, get_target_model
+from aie.dialects.aie import WireBundle, get_target_model
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker
 from aie.iron.controlflow import range_
@@ -38,6 +38,7 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Divisors,
     In,
     InOut,
     Operator,
@@ -113,7 +114,9 @@ class Sample(Operator):
     cores: int = auto(4)
     # Logits per select call; the largest even divisor of the slice up to
     # 8192 unless given.
-    chunk: int = auto()
+    chunk: int = auto(
+        domain=Divisors(of=lambda op: op.slice_size, step=2, cap=_CHUNK_LIMIT)
+    )
 
     logits = In(vocab, tile=(chunk,), per=(cores,), depth=2)
     draws = In(
@@ -142,16 +145,13 @@ class Sample(Operator):
 
     def resolve(self, dev):
         self.check_shim_columns(dev, self.cores)
-        mem_row = next(
-            r for r in range(dev.rows) if dev.get_tile_type(0, r) is AIETileType.MemTile
-        )
-        joined = get_target_model(dev.resolve()).get_num_dest_switchbox_connections(
-            0, mem_row, WireBundle.DMA
-        )
+        tm = get_target_model(dev.resolve())
+        row = next(r for r in range(tm.rows()) if tm.is_mem_tile(0, r))
+        joined = tm.get_num_dest_switchbox_connections(0, row, WireBundle.DMA)
         if self.cores > joined:
             raise Unresolvable(
-                f"Sample: the summaries of {self.cores} cores join in one memtile, "
-                f"which takes {joined} input streams"
+                f"Sample's {self.cores} summaries join in one memtile, which "
+                f"takes {joined}"
             )
         chunk = self.chunk or max(
             c

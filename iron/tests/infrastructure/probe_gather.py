@@ -72,14 +72,16 @@ def test_a_gather_alone_reads_the_rows_its_words_name(npu_runtime, table, rows):
     assert ((ids >= 0) & (ids < ROWS)).all()
     stored = alone.callable.get_buffer("s0_table").numpy_view().view(np.uint16)
     expected = stored[: ROWS * WIDTH].reshape(ROWS, WIDTH)[ids]
-    got = np.frombuffer(alone.output_bytes(), np.uint16).reshape(rows, WIDTH)
+    alone.callable()
+    [got] = alone.written().values()
+    got = got.view(np.uint16).reshape(rows, WIDTH)
     np.testing.assert_array_equal(got, expected)
 
 
 @pytest.mark.supported_devices("npu2")
 def test_a_graph_gathering_by_device_ids_is_measured(npu_runtime, table, tmp_path):
     traced = DeviceIds(table).trace(ids=((15,), np.int32))
-    costs = CostTable(tmp_path / "costs.json")
+    costs = CostTable(tmp_path / "costs.json", "npu2", "fused")
     log = []
     measure_graph(
         costs, [Call(traced)], [], Timing(rounds=1, calls=5), 2, log=log.append

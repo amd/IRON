@@ -25,10 +25,13 @@ from iron.common.design.build import device_symbol
 from iron.common.graph import Handle, TracedGraph, Tracer
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import _words
+from iron.common.declare import Unresolvable
+from iron.common.graph.fold import Made, Place, Prologue, folded, replaced
 from iron.common.graph.handle import Affine, Value
 from iron.common.image import OperatorSequence
 from iron.common.image.artifacts import Parameter
 from iron.lm.layers import SwiGLU
+from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -401,6 +404,451 @@ def test_swiglu_one_token_shares_one_array_and_one_build_for_gate_and_up():
         SwiGLU(z(H, E), z(H, E), z(H, E))
 
 
+def test_swiglu_folds_its_silu_and_its_product_into_the_gate(npu2):
+    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
+    f, count = folded(t, npu2)
+    assert [(str(fold), n) for fold, n in count.items()] == [
+        ("SiLU into GEMV", 1),
+        ("SiLU, then ElementwiseMul into GEMV", 1),
+    ]
+    assert [type(op).__name__ for op, *_ in f.runlist] == ["GEMV", "GEMV", "GEMV"]
+    up, gate, down = f.steps
+    assert [type(link.op) for link in gate.op.finish] == [SiLU, ElementwiseMul]
+    assert (up.op.finish, down.op.finish, down.op.finishes) == ((), (), ())
+    # The up projection rides the gate's matrix beside B, so the gate has an
+    # array of its own.
+    assert [b.name for b in gate.op.inputs if not b.streamed] == ["B", "finish1_b"]
+    assert gate.op.resolved().array_key() != up.op.resolved().array_key()
+    mul = next(s for s in t.steps if type(s.op) is ElementwiseMul)
+    assert gate.inputs[2].name == up.outputs[0].name == mul.inputs[1].name
+    assert gate.outputs[0].name == mul.outputs[0].name == down.inputs[1].name
+    assert f.input_args == t.input_args and f.output_args == t.output_args
+
+
+def test_runs_sharing_what_they_made_fold_alike_with_the_same_operators(npu2):
+    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
+    made = Made(npu2)
+    first, count = folded(t, npu2, made=made)
+    again, recount = folded(t, npu2, made=made)
+    alone, _ = folded(t, npu2)
+    assert recount == count
+    assert [s.op for s in again.steps] == [s.op for s in first.steps]
+    assert [s.op.design_key() for s in alone.steps] == [
+        s.op.design_key() for s in first.steps
+    ]
+    assert alone.steps[1].op is not first.steps[1].op
+
+
+def test_each_folded_design_is_paired_with_the_one_whose_step_it_took(npu2):
+    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
+    f, _ = folded(t, npu2)
+    # The gate took on the silu and the product; up kept its own.
+    assert replaced(t, f) == [(t.steps[0].op, f.steps[1].op)]
+
+
+class _Gate(iron.Graph):
+    def __init__(self, use, rows=H, tile=H // 8):
+        self.w, self.use, self.tile = z(rows, E), use, tile
+
+    def body(self, x):
+        gate = GEMV(self.w, x, num_aie_columns=8, tile_size_output=self.tile)
+        act = SiLU(gate)
+        if self.use == "returned":
+            return act, gate
+        if self.use == "read twice":
+            return ElementwiseAdd(act, gate)
+        return act
+
+
+def test_a_fold_needs_the_intermediate_to_itself(npu2):
+    t = _Gate("returned").trace(x=(E,))
+    assert folded(t, npu2) == (t, {})
+    # Read twice, the gate keeps its output; the sum takes it beside silu's.
+    _, count = folded(_Gate("read twice").trace(x=(E,)), npu2)
+    assert [str(fold) for fold in count] == ["ElementwiseAdd into SiLU"]
+    assert folded(_Gate("once").trace(x=(E,)), npu2)[1].total() == 1
+
+
+def test_a_fold_the_producer_cannot_resolve_is_left_alone(npu2):
+    # An output tile of 8 rows: silu's 32 lanes do not divide it.
+    t = _Gate("once", rows=512, tile=8).trace(x=(E,))
+    gemv, silu = (s.op for s in t.steps)
+    with pytest.raises(ValueError, match="not a multiple of the kernel"):
+        gemv.fold(silu).resolved(npu2)
+    assert folded(t, npu2) == (t, {})
+
+
+class _Sums(iron.Graph):
+    def __init__(self, consumer=SiLU):
+        self.consumer = consumer
+
+    def body(self, a, b):
+        return self.consumer(ElementwiseAdd(a, b)), ElementwiseAdd(b, a)
+
+
+def test_an_elementwise_step_finishes_its_consumer_in_its_own_cores(npu2):
+    t = _Sums().trace(a=(E,), b=(E,))
+    f, count = folded(t, npu2)
+    assert [(str(fold), n) for fold, n in count.items()] == [
+        ("SiLU into ElementwiseAdd", 1)
+    ]
+    finished, plain = (s.op.resolved(npu2) for s in f.steps)
+    ((step, at),) = [(link.op, link.at) for link in finished.finish]
+    assert (type(step), at, step.size, step.tile_size) == (SiLU, 0, 256, 256)
+    # The other sum moved onto the finished one's array, choosing no step.
+    assert finished.array_key() == plain.array_key()
+    assert finished.design_key() != plain.design_key()
+    assert finished.name != plain.name
+    chains = [tuple(type(link.op) for link in c) for c in finished.finishes]
+    assert chains[finished.residents["finish_chain"]] == (SiLU,)
+    assert chains[plain.residents["finish_chain"]] == ()
+    rng = np.random.default_rng(0)
+    a, b = (rng.standard_normal(E).astype(bfloat16) for _ in range(2))
+    np.testing.assert_array_equal(
+        finished.reference(a, b),
+        SiLU(size=E).reference(ElementwiseAdd(size=E).reference(a, b)),
+    )
+
+
+def test_an_unfinished_operator_keeps_its_keys(npu2):
+    add = ElementwiseAdd(size=E).resolved(npu2)
+    assert "finish" not in repr((add.array_key(), add.design_key()))
+    assert "finish_chain" not in add.residents
+
+
+def test_an_operator_with_an_array_of_its_own_finishes_nothing(npu2):
+    with pytest.raises(ValueError, match="finish no output"):
+        Clamp(size=E, low=0, high=1).fold(SiLU(size=E)).resolved(npu2)
+    with pytest.raises(ValueError, match="array of their own"):
+        ElementwiseAdd(size=E).fold(Clamp(size=E, low=0, high=1)).resolved(npu2)
+    t = _Sums(lambda y: Clamp(y, low=0.0, high=1.0)).trace(a=(E,), b=(E,))
+    assert folded(t, npu2) == (t, {})
+
+
+class _Chain(iron.Graph):
+    def __init__(self, at=0, cols=4, channels=1):
+        self.at, self.cols, self.channels = at, cols, channels
+
+    def body(self, a, c):
+        s = SiLU(ReLU(a, num_aie_columns=self.cols, num_channels=self.channels))
+        return ElementwiseMul(s, c) if self.at == 0 else ElementwiseMul(c, s)
+
+
+@pytest.mark.parametrize("at", [0, 1])
+def test_a_step_folds_with_its_other_input_streamed_beside(at, npu2):
+    t = _Chain(at).trace(a=(E,), c=(E,))
+    f, count = folded(t, npu2)
+    mul = f"ElementwiseMul{' (input 1)' if at else ''}"
+    assert [str(fold) for fold in count] == [
+        "SiLU into ReLU",
+        f"SiLU, then {mul} into ReLU",
+    ]
+    (step,) = f.steps
+    fused = step.op.resolved(npu2)
+    assert [(type(link.op), link.at) for link in fused.finish] == [
+        (SiLU, 0),
+        (ElementwiseMul, at),
+    ]
+    # A chain streaming an input of its own has an array of its own.
+    assert fused.finishes == ()
+    assert [b.name for b in fused.inputs] == ["x", f"finish1_{'ab'[1 - at]}"]
+    assert [h.name for h in step.inputs] == ["a", "c"]
+    assert replaced(t, f) == [(t.steps[0].op, step.op)]
+    rng = np.random.default_rng(0)
+    a, c = (rng.standard_normal(E).astype(bfloat16) for _ in range(2))
+    s = SiLU(size=E).reference(ReLU(size=E).reference(a))
+    want = ElementwiseMul(size=E).reference(*((s, c) if at == 0 else (c, s)))
+    np.testing.assert_array_equal(fused.reference(a, c), want)
+    # A fold of a chain brings the folds before it; the first comes alone.
+    first, chain = count
+    assert folded(t, npu2, (chain,))[1] == count
+    assert list(folded(t, npu2, (first,))[1]) == [first]
+
+
+class _GemvAdd(iron.Graph):
+    def __init__(self):
+        self.w = z(E, E)
+
+    def body(self, x, r):
+        return ElementwiseAdd(GEMV(self.w, x, num_aie_columns=8), r)
+
+
+def test_a_fold_that_narrows_its_producer_is_refused(npu2):
+    # Eight columns of two channels each, twice, are past the shim's sixteen.
+    t = _Chain(cols=8, channels=2).trace(a=(2 * E,), c=(2 * E,))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == ["SiLU into ReLU"]
+
+
+class _SumChain(iron.Graph):
+    def body(self, a, b, c):
+        return ElementwiseMul(SiLU(ElementwiseAdd(a, b, num_aie_columns=4)), c)
+
+
+def test_a_fold_past_its_cores_input_channels_is_refused(npu2):
+    # A sum's cores read two streams, and neither carries a product's input.
+    t = _SumChain().trace(a=(E,), b=(E,), c=(E,))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == ["SiLU into ElementwiseAdd"]
+    sum_ = next(s.op for s in f.steps if type(s.op) is ElementwiseAdd)
+    mul = next(s.op for s in t.steps if type(s.op) is ElementwiseMul)
+    with pytest.raises(Unresolvable, match="no input of its is declared feed=True"):
+        sum_.fold(mul, 0).resolved()
+
+
+def test_a_finish_input_rides_a_matvecs_matrix(npu2):
+    gemv = _GemvAdd().trace(x=(E,), r=(E,))
+    f, count = folded(gemv, npu2)
+    assert [str(fold) for fold in count] == ["ElementwiseAdd into GEMV"]
+    (step,) = f.steps
+    op = step.op.resolved()
+    assert [(b.name, b.streamed) for b in op.inputs] == [
+        ("A", True),
+        ("B", False),
+        ("finish0_b", False),
+    ]
+    # Its tile is a column's share of rows, read twice to fill one of A's.
+    assert (op.num_aie_columns, op.tile_size_input, op.tile_size_output) == (8, 2, 256)
+    assert step.inputs[2].name == "r"
+
+
+def test_a_finish_input_a_matvec_cannot_carry_is_refused(npu2):
+    # A 32-row tile is read 128 times to fill one of A's, past a descriptor's 64.
+    pinned = GEMV(M=256, K=1024, tile_size_input=4, tile_size_output=32)
+    with pytest.raises(Unresolvable, match="in at most 64 whole reads"):
+        pinned.fold(ElementwiseAdd(size=256), 0).resolved(npu2)
+    # Four batches are eight transfers on each lane of A.
+    batched = GEMV(M=256, K=128, num_batches=4)
+    with pytest.raises(Unresolvable, match="8 transfers, .* past the 4 descriptors"):
+        batched.fold(ElementwiseAdd(size=4 * 256), 0).resolved(npu2)
+    # A repeat runs its batches in order, so each takes its own residual.
+    repeated = GEMV(M=256, K=128, num_batches=2, repeat=2)
+    repeated.fold(ElementwiseAdd(size=2 * 256), 0).resolved(npu2)
+    # A matmul's cores hold its output's blocks out of order.
+    gemm = GEMM(M=256, K=512, N=512).fold(ElementwiseAdd(size=256 * 512), 0)
+    with pytest.raises(Unresolvable, match="in an order of their own"):
+        gemm.resolved(npu2)
+
+
+class _Bounded(iron.Graph):
+    def __init__(self, gemm, other_bounded=True):
+        self.w, self.gemm, self.other_bounded = z(256, 64), gemm, other_bounded
+
+    def body(self, x, y, *, n: Scratchpad[np.int32]):
+        if self.gemm:
+            return SiLU(GEMM(x[:n], self.w, b_col_maj=True))
+        other = y[:n] if self.other_bounded else y
+        return ElementwiseMul(SiLU(ReLU(x[:n], num_aie_columns=4)), other)
+
+
+def test_a_bounded_step_folds_under_its_producers_bound(npu2):
+    t = _Bounded(gemm=True).trace(x=(512, 64), y=(512, 256))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == ["SiLU into GEMM"]
+    (step,) = f.steps
+    assert step.op.bound_extents == {"valid": "n"}
+    assert [(b.op, b.member.name) for b in f.bindings] == [(step.op, "valid")]
+
+    t = _Bounded(gemm=False).trace(x=(512, 64), y=(512, 64))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == [
+        "SiLU into ReLU",
+        "SiLU, then ElementwiseMul into ReLU",
+    ]
+    (step,) = f.steps
+    fused = step.op.resolved(npu2)
+    assert {b.op for b in f.bindings} == {step.op}
+    # The product's other input streams under the relu's bound.
+    ((extent, _, _),) = (b.bounded for b in fused.finish_inputs)
+    assert extent.name == "valid"
+
+
+def test_a_fold_with_an_input_its_bound_does_not_reach_is_refused(npu2):
+    t = _Bounded(gemm=False, other_bounded=False).trace(x=(512, 64), y=(512, 64))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == ["SiLU into ReLU"]
+    assert {b.op for b in f.bindings} == {s.op for s in f.steps}
+
+
+class _Late(iron.Graph):
+    def __init__(self, overwrite):
+        self.st = iron.state((E,))
+        self.overwrite = overwrite
+
+    def body(self, a, b):
+        s = SiLU(self.st)
+        if self.overwrite:
+            Copy(a, self.st)
+        return ElementwiseMul(s, ReLU(b))
+
+
+def test_a_fold_runs_where_what_it_reads_is_written(npu2):
+    # The product's other input is made after silu: the fold runs in its place.
+    t = _Late(overwrite=False).trace(a=(E,), b=(E,))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == ["ElementwiseMul into SiLU"]
+    assert [type(s.op).__name__ for s in f.steps] == ["ReLU", "SiLU"]
+    # Moved past the copy, silu would read the state it overwrites, so the
+    # product folds into the relu instead.
+    t = _Late(overwrite=True).trace(a=(E,), b=(E,))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == ["ElementwiseMul (input 1) into ReLU"]
+    assert [type(s.op).__name__ for s in f.steps] == ["SiLU", "Copy", "ReLU"]
+    assert [h.name for h in f.steps[2].inputs] == ["b", f.steps[0].outputs[0].name]
+
+
+class _Store(iron.Graph):
+    def __init__(self, use="once", rows=512, length=8):
+        self.w, self.use = z(rows, E), use
+        self.cache = iron.state((length, rows))
+
+    def body(self, x, *, pos: Scratchpad[np.int32]):
+        y = GEMV(self.w, x, num_aie_columns=8)
+        if self.use == "read between":
+            out = ReLU(self.cache[0])
+        Copy(y, self.cache[pos])
+        if self.use == "returned":
+            return y
+        if self.use == "read between":
+            return out
+        return SiLU(x)
+
+
+def test_a_copy_into_a_state_folds_into_its_producers_drain(npu2):
+    t = _Store().trace(x=(E,))
+    f, count = folded(t, npu2)
+    assert [str(fold) for fold in count] == ["Copy into the drain of GEMV"]
+    assert [type(s.op).__name__ for s in f.steps] == ["GEMV", "SiLU"]
+    (slot,) = f.steps[0].outputs
+    # It drains into the whole cache, at the run the copy's offset moves.
+    assert slot.buffer_name == "cache"
+    assert f.steps[0].op.placements == (("C", 8 * 512, 0),)
+    (binding,) = f.bindings
+    assert binding.op is f.steps[0].op and binding.member.name == "C_offset"
+    assert binding.expression == Affine(t.values[0], scale=512)
+    assert folded(t, npu2, without=tuple(count)) == (t, {})
+
+
+@pytest.mark.parametrize("use", ["returned", "read between"])
+def test_a_copy_whose_input_or_output_another_step_names_stays(use, npu2):
+    t = _Store(use).trace(x=(E,))
+    assert folded(t, npu2) == (t, {})
+
+
+class _Row(iron.Graph):
+    def __init__(self, at):
+        self.w, self.at = z(512, E), at
+        self.cache = iron.state((8, 256))
+
+    def body(self, x, *, pos: Scratchpad[np.int32]):
+        y = GEMV(self.w, x, num_aie_columns=8)
+        if self.at == "static":
+            Copy(y.reshape(2, 256), self.cache[2:4])
+        else:
+            Copy(y.reshape(2, 256)[pos], self.cache[3])
+        return SiLU(x)
+
+
+def test_a_copy_to_a_fixed_run_folds_and_one_of_part_of_its_input_stays(npu2):
+    f, count = folded(_Row("static").trace(x=(E,)), npu2)
+    assert [str(fold) for fold in count] == ["Copy into the drain of GEMV"]
+    assert f.steps[0].outputs[0].buffer_name == "cache[1024:2048]"
+    assert f.steps[0].op.placements == (("C", 512, 0),)
+    assert not f.bindings
+    t = _Row("from pos").trace(x=(E,))
+    assert not any(isinstance(fold, Place) for fold in folded(t, npu2)[1])
+
+
+class _Project(iron.Graph):
+    def __init__(self, heads=2, residual=False, shared=False):
+        self.ws = [z(512, E) for _ in range(heads)]
+        self.norm = z(E)
+        self.residual, self.shared = residual, shared
+
+    def body(self, x, r):
+        s = ElementwiseAdd(x, r) if self.residual else x
+        h = RMSNorm(s, weight=self.norm)
+        ys = [GEMV(w, h, num_aie_columns=8) for w in self.ws]
+        return (*ys, ElementwiseAdd(h, r)) if self.shared else tuple(ys)
+
+
+def test_a_norm_folds_into_the_matvecs_that_read_it(npu2):
+    t = _Project().trace(x=(1, E), r=(1, E))
+    f, count = folded(t, npu2)
+    assert [(str(fold), n) for fold, n in count.items()] == [
+        ("RMSNorm into GEMV, GEMV", 1)
+    ]
+    assert [type(s.op).__name__ for s in f.steps] == ["GEMV", "GEMV"]
+    # Each matvec reads the norm's input in place of its output, then its weight.
+    for step, w in zip(f.steps, ("ws.0", "ws.1")):
+        fused = step.op.resolved(npu2)
+        assert [(type(link.op), link.at) for link in fused.prepare] == [(RMSNorm, 0)]
+        assert [b.name for b in fused.inputs] == ["A", "B", "prepare0_weight"]
+        assert [h.name for h in step.inputs] == [w, "x", "norm"]
+    assert replaced(t, f) == [
+        (t.steps[1].op, f.steps[0].op),
+        (t.steps[2].op, f.steps[1].op),
+    ]
+    rng = np.random.default_rng(0)
+    A = rng.standard_normal((512, E)).astype(bfloat16)
+    x, w = (rng.standard_normal(E).astype(bfloat16) for _ in range(2))
+    norm = RMSNorm(rows=1, tile_size=E, weighted=True)
+    want = GEMV(M=512, K=E).reference(A, norm.reference(x.reshape(1, E), w).reshape(E))
+    np.testing.assert_array_equal(f.steps[0].op.reference(A, x, w), want)
+
+
+def test_a_norm_folds_with_its_input_as_the_tile_not_its_weight(npu2):
+    # The weight is multiplied in after the first call has overwritten the tile.
+    weighted = RMSNorm(rows=1, tile_size=E, weighted=True)
+    with pytest.raises(ValueError, match="names weight, the line the first overwrites"):
+        GEMV(M=512, K=E).prefold(weighted, at=1).resolved(npu2)
+    t = _Project().trace(x=(1, E), r=(1, E))
+    (fold,) = folded(t, npu2)[1]
+    assert not folded(t, npu2, without=(fold,))[1]
+
+
+def test_a_norm_read_beside_the_matvecs_stays(npu2):
+    t = _Project(shared=True).trace(x=(1, E), r=(1, E))
+    assert not any(isinstance(fold, Prologue) for fold in folded(t, npu2)[1])
+
+
+def test_a_prologue_chains_through_the_step_before_it(npu2):
+    t = _Project(heads=1, residual=True).trace(x=(1, E), r=(1, E))
+    f, count = folded(t, npu2)
+    first, chain = count
+    assert [str(fold) for fold in count] == [
+        "RMSNorm into GEMV",
+        "ElementwiseAdd, then RMSNorm into GEMV",
+    ]
+    (step,) = f.steps
+    fused = step.op.resolved(npu2)
+    assert [type(link.op) for link in fused.prepare] == [ElementwiseAdd, RMSNorm]
+    assert [h.name for h in step.inputs] == ["ws.0", "x", "r", "norm"]
+    # A prologue of a chain brings the prologues after it; the last comes alone.
+    assert folded(t, npu2, (chain,))[1] == count
+    assert list(folded(t, npu2, (first,))[1]) == [first]
+    rng = np.random.default_rng(0)
+    A = rng.standard_normal((512, E)).astype(bfloat16)
+    x, r, w = (rng.standard_normal(E).astype(bfloat16) for _ in range(3))
+    s = ElementwiseAdd(size=E).reference(x, r)
+    h = RMSNorm(rows=1, tile_size=E, weighted=True).reference(s.reshape(1, E), w)
+    want = GEMV(M=512, K=E).reference(A, h.reshape(E))
+    np.testing.assert_array_equal(step.op.reference(A, x, r, w), want)
+
+
+def test_a_prologue_the_matvec_cannot_hold_is_refused(npu2):
+    # A K of 8192: A's tiles, B's line and the prepared line fill L1.
+    with pytest.raises(ValueError, match="past its 65536"):
+        GEMV(M=2048, K=H).prefold(RMSNorm(rows=1, tile_size=H)).resolved(npu2)
+    # Batched, a core takes a line per batch, beside which no weight streams.
+    batched = GEMV(M=256, K=128, num_batches=4)
+    batched.prefold(RMSNorm(rows=1, tile_size=128)).resolved(npu2)
+    with pytest.raises(Unresolvable, match="inputs stream in beside one"):
+        batched.prefold(RMSNorm(rows=1, tile_size=128, weighted=True)).resolved(npu2)
+    # GEMM prepares no input.
+    assert GEMM(M=256, K=E, N=512).prefold(RMSNorm(rows=256, tile_size=E)) is None
+
+
 def test_two_spellings_of_one_array_are_one_design():
     """Identity is taken after resolution: a tunable left to resolve and the same
     tunable given its resolved value name one array, and a sequence builds it
@@ -502,6 +950,54 @@ def test_llama_decode_traces_and_tunes():
             s.op for s in t.steps if type(s.op) is RMSNorm and s.op.weighted
         ).num_aie_columns
         == 1
+    )
+
+
+def test_llama_decode_folds_its_norms_into_the_projections(npu2):
+    model = small(max_seq_len=256)
+    t = model.trace(**model.shapes(1))
+    f, count = folded(t, npu2)
+    # Per layer: the attention norm into q, k and v, the feed-forward's into
+    # gate and up, its product into down and the attention's residual into
+    # o; the first layer's last residual into its down, the second's and
+    # the final norm into the head; the rotated key and the value written
+    # into their caches by the steps that make them.
+    assert sorted((str(fold), n) for fold, n in count.items()) == [
+        ("Copy into the drain of GEMV", 2),
+        ("Copy into the drain of RoPE", 2),
+        ("ElementwiseAdd (input 1) into GEMV", 1),
+        ("ElementwiseAdd (input 1) into GEMV", 2),
+        ("ElementwiseAdd, then RMSNorm into GEMV", 1),
+        ("ElementwiseMul into GEMV", 2),
+        ("RMSNorm into GEMV", 1),
+        ("RMSNorm into GEMV, GEMV", 2),
+        ("RMSNorm into GEMV, GEMV, GEMV", 2),
+        ("SiLU, then ElementwiseMul into GEMV", 2),
+    ]
+    assert (len(t.steps), len(f.steps)) == (41, 24)
+    assert not any(type(s.op) is RMSNorm for s in f.steps)
+    row = model.config.n_kv_groups * model.config.head_dim
+    placed = {
+        h.buffer_name: (s.op.placements, dict(s.op.bound_values))
+        for s in f.steps
+        for h in s.outputs
+        if s.op.placements
+    }
+    rows = model.config.max_seq_len * row
+    assert placed == {
+        f"{cache}.{i}": (((name, rows, 0),), {f"{name}_offset": f"position_x{row}"})
+        for i in range(2)
+        for cache, name in (("keys", "y"), ("values", "C"))
+    }
+
+
+def test_llama_prompt_keeps_its_bounded_cache_writes(npu2):
+    model = small(max_seq_len=256)
+    t = model.trace(**model.shapes(model.config.prefill_chunk))
+    f, count = folded(t, npu2)
+    assert not any(isinstance(fold, Place) for fold in count)
+    assert sum(type(s.op) is Copy for s in f.steps) == sum(
+        type(s.op) is Copy for s in t.steps
     )
 
 

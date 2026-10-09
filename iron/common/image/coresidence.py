@@ -5,6 +5,7 @@
 
 Each member keeps its runtime sequence under its own name, so the main
 sequence configures the pack once and runs any member's sequence against it.
+Members whose devices are one array (``array_text``) keep one copy of it.
 A member's cores idle on the lock its own sequence sets while another runs;
 dataflow between members still goes through DDR. Two members may share a
 pinned tile unless both program its core or its DMA, which a route into its
@@ -19,7 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 
 from aie import ir
 from aie.dialects import aie, func
@@ -86,6 +87,28 @@ class Packing:
         for design in designs:
             out.setdefault(self.device_of(design), self._group_of(design))
         return out
+
+    def sharing(self, arrays: Mapping[str, Hashable]) -> Packing:
+        """This packing with the designs of one array in one device.
+
+        Args:
+            arrays: Every design, in first-use order, and its array: its
+                `array_text`, or what stands for it.
+        """
+        order = list(arrays)
+        by_text: dict[Hashable, list[str]] = {}
+        for design, text in arrays.items():
+            by_text.setdefault(text, []).append(design)
+        merged: list[set[str]] = []
+        for group in [
+            *map(set, self.groups),
+            *(set(c) for c in by_text.values() if len(c) > 1),
+        ]:
+            for other in [m for m in merged if m & group]:
+                merged.remove(other)
+                group |= other
+            merged.append(group)
+        return Packing(tuple(tuple(sorted(g, key=order.index)) for g in merged))
 
     @staticmethod
     def device_name(group: Sequence[str]) -> str:
@@ -165,23 +188,41 @@ def _route_ends(op: ir.OpView):
     ]
 
 
+def array_text(device: aie.DeviceOp) -> str:
+    """``device`` as text without its name or runtime sequences: equal for two
+    designs whose sequences can run on one configured array.
+    """
+    clone = device.operation.clone(ip=False)
+    if "sym_name" in clone.attributes:
+        del clone.attributes["sym_name"]
+    for op in list(clone.regions[0].blocks[0].operations):
+        if isinstance(op, aie.RuntimeSequenceOp):
+            op.operation.erase()
+    text = str(clone)
+    clone.erase()
+    return text
+
+
 def _namespace(device: aie.DeviceOp, member: str) -> None:
-    """Rename the runtime sequence to ``member`` and prefix every other symbol
-    but a kernel declaration, which members share.
+    """Prefix every symbol but a runtime sequence or a kernel declaration,
+    which members share, with ``member``.
     """
     for op in _body(device):
         old = _symbol(op)
-        if old is None or _is_kernel_declaration(op):
+        if (
+            old is None
+            or _is_kernel_declaration(op)
+            or isinstance(op, aie.RuntimeSequenceOp)
+        ):
             continue
-        is_sequence = isinstance(op, aie.RuntimeSequenceOp)
-        new = member if is_sequence else f"{member}__{old}"
+        new = f"{member}__{old}"
         ir.SymbolTable.replace_all_symbol_uses(old, new, device.operation)
         op.operation.attributes["sym_name"] = ir.StringAttr.get(new)
 
 
 def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceOp:
     """Merge ``members`` (design name -> device op, one module) into the first,
-    renamed ``name``.
+    renamed ``name``, each member's runtime sequence named for it.
 
     Raises:
         CoResidenceError: The members target different devices, declare one
@@ -189,17 +230,44 @@ def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceO
     """
     if len(members) < 2:
         raise ValueError(f"a pack needs two or more designs, got {list(members)}")
-    devices = list(members.values())
-    kinds = {str(d.device) for d in devices}
+    kinds = {str(d.device) for d in members.values()}
     if len(kinds) != 1:
         raise CoResidenceError(
             f"{list(members)} are built for different devices ({sorted(kinds)})"
         )
 
+    held: dict[str, aie.DeviceOp] = {}  # array text -> the device keeping it
+    arrays: dict[str, aie.DeviceOp] = {}  # member -> the array it keeps
     for member, device in members.items():
+        [sequence] = [
+            op for op in _body(device) if isinstance(op, aie.RuntimeSequenceOp)
+        ]
+        old = _symbol(sequence)
+        assert old is not None, "a runtime sequence has a symbol"
+        ir.SymbolTable.replace_all_symbol_uses(old, member, device.operation)
+        sequence.operation.attributes["sym_name"] = ir.StringAttr.get(member)
+        text = array_text(device)
+        holder = held.get(text)
+        if holder is None:
+            held[text] = arrays[member] = device
+            continue
+        # Equal text, so the arrays' ops correspond in order.
+        kept = [op for op in _body(holder) if not isinstance(op, aie.RuntimeSequenceOp)]
+        ours = [op for op in _body(device) if not isinstance(op, aie.RuntimeSequenceOp)]
+        for mine, theirs in zip(ours, kept):
+            for a, b in zip(mine.results, theirs.results):
+                a.replace_all_uses_with(b)
+        ops = holder.body_region.blocks[0].operations
+        sequence.operation.move_before(ops[len(ops) - 1])
+        device.operation.erase()
+
+    pack = next(iter(arrays.values()))
+    if len(arrays) == 1:
+        pack.operation.attributes["sym_name"] = ir.StringAttr.get(name)
+        return pack
+    for member, device in arrays.items():
         _namespace(device, member)
 
-    pack = devices[0]
     end = pack.body_region.blocks[0].operations[
         len(pack.body_region.blocks[0].operations) - 1
     ]
@@ -207,7 +275,7 @@ def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceO
     tiles: dict[tuple[int, int], ir.Value] = {}
     exclusive: dict[tuple[str, tuple[int, int]], tuple[str, str]] = {}
 
-    for member, device in members.items():
+    for member, device in arrays.items():
         routed: set[tuple[tuple[int, int], aie.DMAChannelDir, int]] = set()
         allocated: set[tuple[tuple[int, int], aie.DMAChannelDir, int]] = set()
         for op in _body(device):

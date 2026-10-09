@@ -21,8 +21,9 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
+from iron.common.harness import verify_buffer
 from iron.common.image import AdjacentPacking, Fusion, OperatorSequence
-from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
+from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, SiLU
 
 SIZE = 1024
 TILE = 128
@@ -162,3 +163,79 @@ def test_a_packed_graph_computes_what_the_temporal_one_does():
     assert configures == [6, 2]
     temporal, packed = outputs
     assert temporal.view(np.uint16).tolist() == packed.view(np.uint16).tolist()
+
+
+class TwoExtents(iron.Graph):
+    """One full-width add at two extents: two designs, one array."""
+
+    def body(self, a, b, c, d):
+        wide = dict(tile_size=TILE, num_aie_columns=8)
+        t = ElementwiseAdd(a, b, **wide)
+        u = ElementwiseAdd(c, d, **wide)
+        return ElementwiseAdd(t, b, **wide), u
+
+
+def test_designs_of_one_array_run_on_one_configure():
+    rng = np.random.default_rng(0)
+    a, b = ((rng.random(SIZE) * 4 - 2).astype(bfloat16) for _ in range(2))
+    c, d = ((rng.random(2 * SIZE) * 4 - 2).astype(bfloat16) for _ in range(2))
+    shapes = dict(a=(SIZE,), b=(SIZE,), c=(2 * SIZE,), d=(2 * SIZE,))
+    shared = TwoExtents().compile(image=iron.ELF, **shapes)
+    text = Fusion(shared.sequence).text()
+    # Against small, large, small and the reset, were each design its own device.
+    assert len(re.findall(r"aiex\.configure", text)) == 2
+    assert len(re.findall(r"aiex\.run", text)) == 3
+
+    alone = TwoExtents().compile(image=iron.XCLBIN, boundaries=iron.each_step, **shapes)
+    tolerance = shared.sequence.runlist[0][0].resolved().tolerance()
+    want = TwoExtents().reference(a, b, c, d)
+    runs = [
+        [np.array(t.numpy()[: len(w)]) for t, w in zip(v(a, b, c, d), want)]
+        for v in (shared, alone)
+    ]
+    for got, expected in zip(runs[0], want):
+        verdict = verify_buffer(got, "shared", np.asarray(expected), tolerance)
+        assert verdict, verdict.mismatches
+    for got, expected in zip(*runs):
+        assert got.view(np.uint16).tolist() == expected.view(np.uint16).tolist()
+
+
+class TwoProjections(iron.Graph):
+    """Two GEMVs of one array, the narrower first, each on a vector of its own."""
+
+    def __init__(self, narrow, wide):
+        self.narrow, self.wide = narrow, wide
+
+    def body(self, x, y):
+        tiles = dict(num_aie_columns=8, tile_size_input=4, tile_size_output=32)
+        return GEMV(self.narrow, x, **tiles), GEMV(self.wide, y, **tiles)
+
+
+def test_each_design_of_one_array_runs_on_its_own_values():
+    """The second design's cores read its trip count, not the first's.
+
+    The cores of a shared device are not reset between its sequences, so a
+    core that read its values once would run the wide GEMV at the narrow
+    one's trip count.
+    """
+    K = 2048
+    rng = np.random.default_rng(0)
+    narrow, wide = (
+        (rng.standard_normal((m, K)) / np.sqrt(K)).astype(bfloat16) for m in (512, 2048)
+    )
+    graph = TwoProjections(narrow, wide)
+    net = graph.compile(image=iron.ELF, x=(K,), y=(K,))
+    text = Fusion(net.sequence).text()
+    assert (
+        len(re.findall(r"aiex\.configure", text)) == 2
+    )  # the shared device, the reset
+    assert len(re.findall(r"aiex\.run", text)) == 2
+    tolerance = net.sequence.runlist[0][0].resolved().tolerance()
+    for _ in range(2):
+        x, y = (rng.standard_normal(K).astype(bfloat16) for _ in range(2))
+        for got, want in zip(net(x, y), graph.reference(x, y)):
+            want = np.asarray(want)
+            verdict = verify_buffer(
+                np.array(got.numpy()[: len(want)]), "shared", want, tolerance
+            )
+            assert verdict, verdict.mismatches

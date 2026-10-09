@@ -20,7 +20,17 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, zero
 from aie.utils.verify import Tolerance
 
-from iron.common import Extent, In, Operator, Out, Value, auto, param
+from iron.common import (
+    Choices,
+    Divisors,
+    Extent,
+    In,
+    Operator,
+    Out,
+    Value,
+    auto,
+    param,
+)
 from iron.common.testing import Case, Testing
 
 # softmax_bf16's vector step on both targets (activation.softmax holds a row
@@ -83,8 +93,10 @@ class Softmax(Operator):
     num_channels: int = auto(1)
     # None: the whole row, or where the row is streamed the longest
     # multiple of _VECTOR_STEP up to _BLOCK that divides it.
-    block: int = auto()
-    streamed: bool = auto(array=True)
+    block: int = auto(
+        domain=Divisors(of=lambda op: op.cols, step=_VECTOR_STEP, cap=_ROW_CAP)
+    )
+    streamed: bool = auto(array=True, domain=Choices((False, True)))
 
     length = Extent(cols)  # cols, or fewer per call
 
@@ -156,6 +168,11 @@ class Softmax(Operator):
             raise ValueError(
                 f"a row a core holds whole is one block: block ({self.block}) "
                 f"must be cols ({self.cols}) unless streamed"
+            )
+        if self.streamed and self.rows // self.cores > _STREAMED_ROWS:
+            raise ValueError(
+                f"a streamed core holds at most {_STREAMED_ROWS} rows, not "
+                f"{self.rows // self.cores}"
             )
 
     def extent_unit(self, buffer: str) -> int:

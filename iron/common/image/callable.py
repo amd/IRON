@@ -509,6 +509,15 @@ class StepCallable:
                 self._buffers[name].to("npu")
         t0 = time.perf_counter()
         for index, (step_op, kernel, names, args) in enumerate(self._steps):
+            # A placed buffer starts at its place in the tensor that holds it.
+            at = {}
+            for spec in step_op.buffers:
+                at[spec.name] = spec.placement[1]
+                if f"{spec.name}_offset" in step_op.bound_values:
+                    word = step_op.value(f"{spec.name}_offset")
+                    at[spec.name] += int(
+                        self.dispatch_values[device_symbol(step_op, word)]
+                    )
             checked = self.compare and not step_op.bound_extents
             if self.compare and not checked:
                 logger.warning(
@@ -518,7 +527,7 @@ class StepCallable:
                     sorted(step_op.bound_extents),
                 )
             if kernel is None or checked:
-                inputs, expected = self._reference(step_op, args)
+                inputs, expected = self._reference(step_op, args, at)
             if kernel is None:
                 written = [
                     (buf, spec)
@@ -526,7 +535,7 @@ class StepCallable:
                     if spec.direction is not Direction.IN
                 ]
                 for (buf, spec), result in zip(written, expected):
-                    out = buf.numpy_view()
+                    out = buf.numpy_view()[at[spec.name] :]
                     out[: spec.elements] = result.reshape(-1).astype(out.dtype)
                 continue
             kernel(
@@ -534,7 +543,7 @@ class StepCallable:
                 **{name: self.dispatch_values[name] for name in kernel.dispatch_params},
             )
             if checked:
-                self._check(index, step_op, names, args, inputs, expected)
+                self._check(index, step_op, names, args, at, inputs, expected)
         self.last_elapsed = time.perf_counter() - t0
         if self._on_npu:
             # Device-resident, so a read pulls what the steps wrote, and only then.
@@ -543,14 +552,18 @@ class StepCallable:
                     self.get_storage(name).device = "npu"
 
     def _reference(
-        self, step_op: Operator, args
+        self, step_op: Operator, args, at: Mapping[str, int]
     ) -> tuple[list[np.ndarray], list[np.ndarray]]:
-        """``step_op``'s inputs as its buffers hold them, and its reference on
-        them: one result per buffer it writes, in declaration order.
+        """``step_op``'s inputs as its buffers hold them, each from element
+        ``at`` its name, and its reference on them: one result per buffer it
+        writes, in declaration order.
         """
         specs = step_op.buffers
         inputs = [
-            buf.to("cpu").numpy_view()[: spec.elements].reshape(spec.shape).copy()
+            buf.to("cpu")
+            .numpy_view()[at[spec.name] :][: spec.elements]
+            .reshape(spec.shape)
+            .copy()
             for buf, spec in zip(args, specs)
             if spec.direction.fills
         ]
@@ -567,7 +580,10 @@ class StepCallable:
             if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
         ]
         given = [
-            buf.to("cpu").numpy_view()[: spec.elements].reshape(spec.shape).copy()
+            buf.to("cpu")
+            .numpy_view()[at[spec.name] :][: spec.elements]
+            .reshape(spec.shape)
+            .copy()
             for buf, spec in outputs[: max(0, len(positional) - len(inputs))]
         ]
         symbols = {
@@ -594,8 +610,11 @@ class StepCallable:
             np.asarray(r).reshape(s.shape) for r, s in zip(results, written)
         ]
 
-    def _check(self, index, step_op: Operator, names, args, inputs, expected) -> None:
-        """Hold step ``index``'s NPU outputs to its reference on the same inputs.
+    def _check(
+        self, index, step_op: Operator, names, args, at, inputs, expected
+    ) -> None:
+        """Hold step ``index``'s NPU outputs, each from element ``at`` its
+        name, to its reference on the same inputs.
 
         Raises:
             RuntimeError: An output is outside the step's tolerance.
@@ -615,7 +634,8 @@ class StepCallable:
             if spec.direction is not Direction.IN
         ]
         for (out_name, buf, spec), ref in zip(written, expected):
-            npu = buf.to("cpu").numpy_view()[: spec.elements].reshape(spec.shape)
+            npu = buf.to("cpu").numpy_view()[at[spec.name] :][: spec.elements]
+            npu = npu.reshape(spec.shape)
             ref = ref.astype(np.float32)
             diff = np.abs(npu.astype(np.float32) - ref)
             figures = (

@@ -35,7 +35,17 @@ from aie.iron.runtime.dmatask import emit_shim_transfer
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import In, Operator, Out, Scratchpad, Unresolvable, auto, param
+from iron.common import (
+    CopyRun,
+    Divisors,
+    In,
+    Operator,
+    Out,
+    Scratchpad,
+    Unresolvable,
+    auto,
+    param,
+)
 from iron.common.design import BdLimits, ShimChannel
 from iron.common.testing import Case, Testing
 
@@ -559,7 +569,14 @@ class Copy(Operator):
     # its size is the full extent in the pattern and patched to the call's.
     src_bound: int | None = param(default=None)
     dst_bound: int | None = param(default=None)
-    tile_size: int = auto()  # None: the per-channel share, cut to object_bytes
+    # None: the per-channel share, cut to object_bytes.
+    tile_size: int = auto(
+        domain=Divisors(
+            of=lambda op: op.channel_share,
+            cap=lambda op: op.object_bytes // np.dtype(op.dtype).itemsize,
+            span=3,
+        )
+    )
     # A memtile holds 512 KiB; the cap leaves room for every channel placed on one.
     object_bytes: ClassVar[int] = 64 * 1024
     num_channels: int = auto(1)
@@ -621,8 +638,7 @@ class Copy(Operator):
         per-channel share (under a bound, of one bounded row's share; of a
         gather, of every piece's) whose object fits ``object_bytes``.
         """
-        pieces = [prod(p.sizes) // self.num_channels for w in self.walks() for p in w]
-        whole = gcd(*pieces, *self._row_shares())
+        whole = self.channel_share
         cap = self.object_bytes // np.dtype(self.dtype).itemsize
         tile_size = self.tile_size or max(
             d
@@ -633,9 +649,52 @@ class Copy(Operator):
         )
         return dataclasses.replace(self, tile_size=tile_size)
 
+    @property
+    def channel_share(self) -> int:
+        """What each channel's transfers split into: of every pattern's
+        share, and of one bounded row's.
+        """
+        pieces = [prod(p.sizes) // self.num_channels for w in self.walks() for p in w]
+        return gcd(*pieces, *self._row_shares())
+
     def uses_value(self, name: str) -> bool:
         # An offset or a size is patched only when a graph binds a handle to it.
         return name in self.bound_values
+
+    def copies_to(self) -> CopyRun | None:
+        """The run ``dst`` writes, where ``src`` reads the whole input in
+        order and ``dst`` is one contiguous run, neither bounded.
+        """
+        src, dst = self.src, self.dst
+        # A bounded copy stays: a producer drains whole tiles past the bound.
+        if (
+            not isinstance(src, TensorAccessPattern)
+            or not isinstance(dst, TensorAccessPattern)
+            or "in_offset" in self.bound_values
+            or self.src_bound is not None
+            or self.dst_bound is not None
+        ):
+            return None
+        whole, run = src.coalesce(), dst.coalesce()
+        if (
+            whole.rank != 1
+            or whole.offset != 0
+            or whole.sizes[0] != self.input_buffer_size
+            or 1 not in (whole.sizes[0], whole.strides[0])
+            or run.rank != 1
+            or 1 not in (run.sizes[0], run.strides[0])
+            or not isinstance(run.offset, (int, np.integer))
+        ):
+            return None
+        return CopyRun(
+            self.output_buffer_size,
+            int(run.offset),
+            "out_offset" if "out_offset" in self.bound_values else None,
+        )
+
+    def placed(self, copy: Operator, operand: str) -> None:
+        """Never: a copy's sequence moves its transfers itself."""
+        return None
 
     def array(self, target) -> list:
 

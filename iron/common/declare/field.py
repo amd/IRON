@@ -17,6 +17,8 @@ from typing import Any, Callable
 
 import numpy as np
 
+from .domain import Domain
+
 
 class Unresolvable(ValueError):
     """No legal resolution exists for this operator on this device."""
@@ -41,18 +43,37 @@ class Param(Tier):
     Attributes:
         derive: Computes the value from the operator when neither the caller
             nor an operand's shape gives it.
+        probe: The value the operator's step time is measured at, or
+            ``MISSING`` where the time may follow the field.
     """
 
     derive: Callable[[Any], Any] | None = None
+    # A factory, since MISSING as a plain default would make the field required.
+    probe: Any = dataclasses.field(default_factory=lambda: MISSING)
 
 
 @dataclass(frozen=True)
 class Auto(Tier):
-    """A tunable the library resolves for the device."""
+    """A tunable the library resolves for the device.
+
+    Attributes:
+        derived: `resolve` always computes the field from the others, so no
+            caller, profile or tuner sets it.
+        domain: The values a tuner searches it over, or None for a width's
+            inferred one or none.
+    """
+
+    derived: bool = False
+    domain: Domain | None = None
 
 
 def param(
-    *, default: Any = MISSING, array: bool = False, repr: bool = True, init: bool = True
+    *,
+    default: Any = MISSING,
+    array: bool = False,
+    repr: bool = True,
+    init: bool = True,
+    probe: Any = MISSING,
 ) -> Any:
     """Declare a compile-time parameter: given by the caller or inferred from
     the operands.
@@ -67,18 +88,32 @@ def param(
             (``default=lambda op: op.rows * op.repeat``). Without one the
             field is a required constructor argument.
         array: The array reads the field though no tile names it.
+        probe: The field reaches the device only as the words of `Value`s
+            the cores read: no transfer, trip count, branch or core follows
+            it, so every value of it costs the same. The tuner measures the
+            operator at `probe` and takes that cost for every value. Pick
+            the value that leaves the output most informative (the
+            identity), since a setting judged exact there is taken as exact
+            at every value. `None` is a probe like any other.
     """
     if callable(default):
-        spec, default = Param(array, default), None
+        spec, default = Param(array, default, probe), None
     else:
-        spec = Param(array)
+        spec = Param(array, probe=probe)
     return dataclasses.field(
         default=default, repr=repr, init=init, metadata={Tier: spec}
     )
 
 
 def auto(
-    default: Any = None, /, *, array: bool = False, repr: bool = True, init: bool = True
+    default: Any = None,
+    /,
+    *,
+    array: bool = False,
+    derived: bool = False,
+    domain: Domain | None = None,
+    repr: bool = True,
+    init: bool = True,
 ) -> Any:
     """Declare a tunable ``Operator.resolve`` fills for the device when the
     caller does not.
@@ -90,9 +125,18 @@ def auto(
     Args:
         default: The starting value; `None` means `resolve` must fill it.
         array: The array reads the field though no tile names it.
+        derived: `resolve` computes the field from the device and the other
+            fields whatever it was given, so it is not a tunable a caller,
+            a profile or a tuner sets.
+        domain: The values a tuner searches the field over (`Width`,
+            `Divisors`, `Choices`). Left out, a tunable a streamed ``per=``
+            names is searched as a `Width` and any other is not searched.
     """
     return dataclasses.field(
-        default=default, repr=repr, init=init, metadata={Tier: Auto(array)}
+        default=default,
+        repr=repr,
+        init=init,
+        metadata={Tier: Auto(array, derived, domain)},
     )
 
 

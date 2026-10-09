@@ -9,15 +9,18 @@ is built for one extent or twice it, with the same tunables. Each case
 compiles an operator at two extents (the real build: an insts-only
 lowering compiles no core) and compares the per-core ELFs the build
 leaves, byte for byte. Compiles are cheap enough for this to run
-device-free, and the cache keeps a repeat quick.
+device-free, and the cache keeps a repeat quick. A fusion of the two extents
+holds one device, so their sequences run on one configured array.
 """
 
 import importlib
+import re
 
 import pytest
 
 from iron.common import Unresolvable
-from iron.common.image import OperatorImage
+from iron.common.declare import Direction
+from iron.common.image import Fusion, OperatorImage, OperatorSequence, Packing
 from iron.tests.toolchain.tools import requires
 
 pytestmark = requires("aiecc")
@@ -98,3 +101,31 @@ def test_the_array_is_the_same_at_two_extents(
     assert (
         not differing
     ), f"{cls_name}: cores {differing} compile differently at {name}={n} and {2 * n}"
+
+
+@pytest.mark.parametrize(
+    "module,cls_name,tunables,extent",
+    PAIRS,
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_the_extents_share_one_device(npu2, module, cls_name, tunables, extent):
+    cls = getattr(importlib.import_module(f"iron.operators.{module}"), cls_name)
+    name, n = extent
+    try:
+        ops = [cls(**tunables, **{name: size}).resolved(npu2) for size in (n, 2 * n)]
+    except ValueError as e:
+        pytest.skip(f"not for npu2: {e}")
+    runlist, inputs, outputs = [], [], []
+    for k, op in enumerate(ops):
+        names = [f"s{k}_{b.name}" for b in op.buffers]
+        runlist.append((op, *names))
+        for b, buf in zip(op.buffers, names):
+            (outputs if b.direction is Direction.OUT else inputs).append(buf)
+    seq = OperatorSequence(cls_name, runlist, inputs, outputs, dispatch="fused")
+    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
+        seq.calculate_buffer_layout()
+    )
+    fused = Fusion(seq)
+    pack = Packing.device_name(list(fused.designs))
+    devices = re.findall(r"^  aie\.device\(\w+\) @(\w+) \{$", fused.text(), re.M)
+    assert devices == [pack, Fusion.RESET_DEVICE]

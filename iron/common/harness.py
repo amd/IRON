@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
+from collections.abc import Mapping
 from typing import Callable, NamedTuple
 
 import aie.utils as aie_utils
@@ -60,14 +62,33 @@ def vectors(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Vecto
             if b.name in centered:
                 t = (t.astype(np.float32) - scale / 2).astype(dtype)
         inputs[b.name] = t
-    out = op.reference(*inputs.values())
+    return Vectors(inputs, expected(op, inputs))
+
+
+def expected(
+    op: Operator,
+    inputs: Mapping[str, np.ndarray],
+    values: Mapping[str, int] | None = None,
+) -> dict[str, np.ndarray]:
+    """``op.reference()``'s outputs on ``inputs``, by output name.
+
+    Args:
+        values: Per-call values; the reference is given those it names.
+
+    Raises:
+        ValueError: The reference returns another number of outputs than
+            `op` declares.
+    """
+    named = inspect.signature(op.reference).parameters
+    given = {k: v for k, v in (values or {}).items() if k in named}
+    out = op.reference(*inputs.values(), **given)
     outs = (out,) if isinstance(out, np.ndarray) else tuple(out)
     names = [b.name for b in op.outputs]
     if len(outs) != len(names):
         raise ValueError(
             f"{type(op).__name__}.reference returned {len(outs)} outputs for {names}"
         )
-    return Vectors(inputs, dict(zip(names, outs)))
+    return dict(zip(names, outs))
 
 
 def verify_buffer(

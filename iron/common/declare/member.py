@@ -110,6 +110,24 @@ class _Buffer(_Member["BoundBuffer"]):
         broadcast: One fifo every worker consumes.
         when: A bool `param()`; the operand and its stream exist only where
             it is true, and a call giving the operand by keyword sets it.
+        finish: The cores apply the operator's `finish` to each tile of
+            this output before releasing it (`Finish`), so a consumer folds
+            into them. `True`, or the block of the output one core fills
+            of a tile, in an order of its own (GEMM's C, joined from a
+            column's cores): a step there must not depend on the order.
+        prepare: The cores apply the operator's `prepare` to each tile of
+            this input after acquiring it (`Prepare`), so the step that
+            produced it folds into them. The operator's output must be
+            linear in it, which its tolerance relies on. Without a tile, a
+            hand-written sequence carries it, a line its innermost
+            dimension, and the prologue's inputs ride the `feed=True` input.
+        feed: The finish's inputs ride this input's stream rather than
+            streams of their own: after the tiles a core reads for one
+            output tile, the next tile of this stream holds that output
+            tile's input of each (`Finish.apply`), so the finish takes no
+            input channel of the core's and no shim channel. An untiled
+            prepared input's prologue inputs ride it too, a tile each,
+            where the operator's cores take them (`Prepare.apply`).
     """
 
     direction: ClassVar[Direction]
@@ -125,6 +143,9 @@ class _Buffer(_Member["BoundBuffer"]):
         replicate: bool = False,
         broadcast: bool = False,
         when: _DimSpec | None = None,
+        finish: bool | tuple[_DimSpec, ...] = False,
+        prepare: bool = False,
+        feed: bool = False,
     ) -> None:
         if per is not None and broadcast:
             raise TypeError("a stream is either per=<dim> or broadcast, not both")
@@ -132,6 +153,28 @@ class _Buffer(_Member["BoundBuffer"]):
             raise TypeError(
                 "replicate=True needs per=<dim>: every slot receives the whole buffer"
             )
+        # A step over a line sees a tile as a run of the output's elements.
+        if finish and (
+            isinstance(tile, (tuple, list))
+            and len(tile) != 1
+            or tile is None
+            or not self.direction.drains
+        ):
+            raise TypeError(
+                "finish=True names a streamed output of one-dimensional tiles, "
+                "which a core finishes"
+            )
+        if prepare and (
+            isinstance(tile, (tuple, list))
+            and len(tile) != 1
+            or self.direction is not Direction.IN
+        ):
+            raise TypeError(
+                "prepare=True names an input of one-dimensional tiles, or of "
+                "none, which a core prepares"
+            )
+        if feed and (tile is None or self.direction is not Direction.IN):
+            raise TypeError("feed=True names a streamed input, which a finish rides")
         self.shape = Shape(tuple(dims))
         self.dtype = dtype
         self.when = when
@@ -147,6 +190,10 @@ class _Buffer(_Member["BoundBuffer"]):
         self.via = via
         self.replicate = replicate
         self.broadcast = broadcast
+        self.finish = bool(finish)
+        self.finish_block = None if isinstance(finish, bool) else Shape(finish)
+        self.prepare = prepare
+        self.feed = feed
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.shape})"

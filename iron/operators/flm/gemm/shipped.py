@@ -116,6 +116,9 @@ class Shipped(
     b_l2: int = auto(K_TILE * N_TILE, repr=False, init=False)
     c_l2: int = auto(ROWS * M_TILE * N_TILE, repr=False, init=False)
     b_overlay_order: ClassVar[bool] = True
+    # No probe: the image's clamp-on word selects a branch, so its time may
+    # follow whether there is a clamp.
+    clamp: tuple | None = param(default=None)
 
     # A: one (M_TILE x K_TILE) block per transfer element, broadcast along
     # each compute row from alternate shim columns on MM2S channel 0.
