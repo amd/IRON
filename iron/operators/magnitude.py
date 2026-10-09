@@ -10,7 +10,7 @@ from aie.utils.verify import Tolerance
 from iron.common import In, Out, Rowwise, param
 from iron.common.testing import Case, Testing
 
-from .limbs import SPLIT
+from .split3 import SPLIT
 
 # aie2p has no float32 vector multiply: every product here is of bf16 limbs,
 # exact in the float32 accumulator.

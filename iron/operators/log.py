@@ -11,7 +11,7 @@ from ml_dtypes import bfloat16
 from iron.common import In, UnaryElementwise, param
 from iron.common.testing import Sweep, Testing
 
-from .limbs import SPLIT
+from .split3 import SPLIT
 
 # log(m) for m in [sqrt(1/2), sqrt(2)) is f q(f), f = m - 1, with q
 # log1p(f) / f interpolated at Chebyshev nodes: 7.5e-9 off in float32.

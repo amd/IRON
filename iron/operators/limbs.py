@@ -11,31 +11,12 @@ from ml_dtypes import bfloat16
 from iron.common import In, Rowwise, param
 from iron.common.testing import Case, Testing
 
+from .split3 import SPLIT
+
 # The limbs of each plane, in order: against a second operand split
 # [hi, hi, mid, hi, mid, lo], the six products a float32 product keeps.
 PLANES = (0, 1, 0, 2, 1, 0)
 WEIGHT_PLANES = (0, 0, 1, 0, 1, 2)
-
-# Three bf16 limbs summing to `a` exactly: each residual is taken in the
-# accumulator, where a bf16 times one is exact.
-SPLIT = """
-#include <aie_api/aie.hpp>
-#include <stdint.h>
-
-using acc_t = aie::accum<accfloat, 32>;
-using bf_t = aie::vector<bfloat16, 32>;
-
-static inline bf_t bf_lanes(int16_t bits) {
-    return aie::broadcast<int16_t, 32>(bits).cast_to<bfloat16>();
-}
-
-static inline void split3(acc_t a, bf_t &hi, bf_t &mid, bf_t &lo, bf_t one) {
-    hi = a.to_vector<bfloat16>();
-    acc_t r = aie::msc(a, hi, one);
-    mid = r.to_vector<bfloat16>();
-    lo = aie::msc(r, mid, one).to_vector<bfloat16>();
-}
-"""
 
 LIMBS = SPLIT + """
 extern "C" void limbs_f32(float *restrict x, bfloat16 *restrict y, int32_t n) {
