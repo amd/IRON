@@ -75,6 +75,7 @@ from .compiled import CompiledGraph
 from .costcache import Accuracy, CostCache, Measurement, Pairing, Shift
 from .fold import Made, folded, foldings, replaced
 from .narrowing import (
+    CONFIDENCE,
     FIT_CACHE,
     Calibration,
     CostTable,
@@ -1104,9 +1105,10 @@ def calibrate(
         )
         for name, runlist in runlists.items()
     ]
-    times = [
-        t.us for t in time_interleaved([r.callable for r in runs], timing, log=log)
-    ]
+    timed = time_interleaved([r.callable for r in runs], timing, log=log)
+    # Each run's median, then its rounds, which were interleaved: every figure
+    # is derived from the medians and, for its noise, round by round.
+    times = np.array([(t.us, *t.round_us) for t in timed])
     alt, grp, alone_a, alone_b = times[:4]
     switch = (alt - grp) / (2 * pairs - 2)  # (E(a) + E(b)) / 2
     reset = base = 0.0
@@ -1117,18 +1119,29 @@ def calibrate(
     else:
         # alone = F + c: the step times of this batch, not of the table's.
         dispatch = (pairs * (alone_a + alone_b) + 2 * switch - grp) / (2 * pairs - 1)
-    figures = dict(dispatch=dispatch, reset=reset, base=base, switch=switch)
-    negative = {name: round(us, 1) for name, us in figures.items() if us < 0}
+    figures = {
+        name: np.broadcast_to(us, times.shape[1])
+        for name, us in dict(
+            dispatch=dispatch, reset=reset, base=base, switch=switch
+        ).items()
+    }
+    negative = {
+        name: round(float(us[0]), 1)
+        for name, us in figures.items()
+        if us[0] < -CONFIDENCE * (standard_error(us[1:]) or 0.0)
+    }
     if negative:
         raise RuntimeError(
             f"calibration {ka}/{kb}: negative {negative} us; measure it with the "
             f"NPU otherwise idle, in the session that measured both steps"
         )
+    # A figure within its noise of zero is zero: no load is priced below it.
+    figures = {name: max(float(us[0]), 0.0) for name, us in figures.items()}
     cal = Calibration(
-        dispatch_us=dispatch,
-        reset_us=reset,
-        base_us=base,
-        switch_us=switch,
+        dispatch_us=figures["dispatch"],
+        reset_us=figures["reset"],
+        base_us=figures["base"],
+        switch_us=figures["switch"],
         pmode=pmode(),
         rounds=timing.rounds,
         calls=timing.calls,

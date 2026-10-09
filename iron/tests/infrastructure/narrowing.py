@@ -213,7 +213,8 @@ def test_a_pack_runs_beside_a_reference_its_call_gives_values(tmp_path):
     rotate = Call(Rotate().trace(x=(2048, 64), angles=(2048, 64)), dict(n=64))
     calls = [rotate, Call(Chain().trace(a=(SIZE,), b=(SIZE,)))]
     table = CostTable(tmp_path / "costs.json", "npu2", "fused")
-    timing = Timing(rounds=1, calls=5)
+    # Rounds enough to judge a calibration figure near zero by its noise.
+    timing = Timing(rounds=3, calls=5)
     measure_graph(table, calls, TRIANGLE, timing)
     designs = Designs.of(calls, dev)
     [rope] = {cost_key(s.op) for s in rotate.traced.steps}
@@ -579,7 +580,8 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
         table,
         calls,
         [("SiLU", "ElementwiseMul"), ("ElementwiseMul", "GEMV"), ("GEMV", "SiLU")],
-        Timing(rounds=1, calls=5),
+        # Rounds enough to judge a calibration figure near zero by its noise.
+        Timing(rounds=3, calls=5),
         cache=CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
     )
     assert {cost_key(s.op) for s in traced.steps + folds.steps} <= table.steps.keys()
@@ -651,7 +653,8 @@ def test_an_inexact_width_within_its_gates_is_accurate_and_cached(tmp_path):
 def test_a_graph_sharing_measured_designs_measures_nothing(tmp_path):
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "costs")
-    timing = Timing(rounds=1, calls=5)
+    # Rounds enough to judge a calibration figure near zero by its noise.
+    timing = Timing(rounds=3, calls=5)
     chain = CostTable(tmp_path / "chain.json", "npu2", "fused")
     shapes = dict(a=(SIZE,), b=(SIZE,))
     ran = measure_graph(
