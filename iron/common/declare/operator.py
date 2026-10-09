@@ -673,7 +673,8 @@ class Operator(metaclass=_OperatorMeta):
         Raises:
             ValueError: `inputs` are not this operator's, `outputs` name a
                 buffer that is not its output, or the reference returns
-                another number of results than this operator writes.
+                another number of results than this operator writes, or None
+                for one.
         """
         name = type(self).__name__
         declared = [b.name for b in self.inputs]
@@ -693,9 +694,11 @@ class Operator(metaclass=_OperatorMeta):
         )
         results = result if isinstance(result, tuple) else (result,)
         written = [b.name for b in self.outputs]
-        if len(results) != len(written):
+        if len(results) != len(written) or any(r is None for r in results):
             raise ValueError(
-                f"{name}.reference returned {len(results)} results for {written}"
+                f"{name}.reference returned {results!r:.80} for {written}; "
+                f"it returns each buffer it writes, an output written in place "
+                f"among them"
             )
         return dict(zip(written, results))
 

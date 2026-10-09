@@ -748,6 +748,35 @@ def _add_silu(tmp_path, dev):
     return traced, ops, _table(tmp_path / "costs.json", steps)
 
 
+def test_a_triangle_calibrates_each_pair_of_its_classes_at_their_narrowest(
+    tmp_path, npu2
+):
+    traced = AddSilu().trace(a=(SIZE,), b=(SIZE,))
+    designs = Designs.of([Call(traced)], npu2, tmp_path / "fits")
+    steps = {}
+    for found in designs.settings.values():
+        for v in found:
+            steps[v.key] = (4.0 + v.mm2s, 8.0 * v.mm2s)
+    table = _table(tmp_path / "costs.json", steps)
+    triangle = ("ElementwiseAdd", "SiLU", "GELU")
+    pairs = designs.calibrated(table, triangle)
+    assert [(type(a.op).__name__, type(b.op).__name__) for a, b in pairs] == [
+        ("ElementwiseAdd", "SiLU"),
+        ("ElementwiseAdd", "GELU"),
+        ("SiLU", "GELU"),
+    ]
+    # Three designs, each in two pairs: a cycle of three, which determines
+    # every load (a path of two does not).
+    ends = [v.key for pair in pairs for v in pair]
+    assert len(set(ends)) == 3 and all(ends.count(k) == 2 for k in ends)
+    chosen = {v.key: v for pair in pairs for v in pair}
+    for found in designs.settings.values():
+        for v in (u for u in found if u.key in chosen):
+            assert v.mm2s + v.s2mm == min(u.mm2s + u.s2mm for u in found)
+    assert sum(any(u.key in chosen for u in f) for f in designs.settings.values()) == 3
+    assert designs.calibrated(table, None) == []
+
+
 def test_table_round_trips(tmp_path, npu2):
     _, _, table = _add_silu(tmp_path, npu2)
     table.save()
@@ -1369,6 +1398,12 @@ def test_a_verdict_is_keyed_by_its_gates_and_reference(npu2):
     assert CostCache.judged_key("k", "w", emulated, narrow) != judged
     add = ElementwiseAdd(size=SIZE, tile_size=TILE)
     assert CostCache.judged_key("k", "w", gemm, add) != judged
+    # Elementwise operators share one reference(), their kernel contracts' own.
+    mul = ElementwiseMul(size=SIZE, tile_size=TILE)
+    assert add.gate() == mul.gate()
+    assert CostCache.judged_key("k", "w", add, add) != CostCache.judged_key(
+        "k", "w", mul, mul
+    )
 
 
 def test_an_entry_recorded_with_other_fields_refuses_the_table_unless_remeasured(

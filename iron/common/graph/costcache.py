@@ -37,6 +37,7 @@ from aie.utils.compile import NPU_CACHE_HOME
 
 from ..declare import Operator
 from ..design import OperatorDesign
+from ..elementwise import Elementwise
 from .narrowing import Calibration, PackCost, StepCost
 
 
@@ -229,7 +230,8 @@ class CostCache:
     def judged_key(default: str, entry: str, default_op: Operator, op: Operator) -> str:
         """The entry the design at ``entry``, ``op``, is kept in as judged
         against its default's, ``default_op`` at ``default``: under both
-        their gates, against ``op``'s reference.
+        their gates, against ``op``'s reference (an elementwise one's kernel
+        contract's).
         """
         gates = [
             (
@@ -242,8 +244,10 @@ class CostCache:
             )
             for g in (default_op.gate(), op.gate())
         ]
-        reference = type(op).reference
-        judgement = (gates, f"{reference.__module__}.{reference.__qualname__}")
+        references = [type(op).reference]
+        if references[0] is Elementwise.reference:
+            references.append(op.resolved().kernel().contract.reference)
+        judgement = (gates, [f"{r.__module__}.{r.__qualname__}" for r in references])
         return hashlib.sha256(
             repr(("judged", default, entry, judgement)).encode()
         ).hexdigest()[:32]

@@ -122,3 +122,15 @@ def test_call_reference_gives_an_output_only_to_a_reference_that_names_it():
     np.testing.assert_array_equal(got["y"], op.reference(x))
     with pytest.raises(ValueError, match=r"has no output \['out'\]"):
         op.call_reference({"x": x}, {"out": given["y"]})
+
+
+class InPlaceReLU(ReLU):
+    def reference(self, x, y):
+        y[:] = np.maximum(x, 0)
+
+
+def test_call_reference_refuses_a_reference_that_returns_nothing():
+    op = InPlaceReLU(size=64, num_aie_columns=1, tile_size=64)
+    x = np.arange(-32, 32, dtype=bfloat16)
+    with pytest.raises(ValueError, match=r"returned \(None,\) for \['y'\]"):
+        op.call_reference({"x": x}, {"y": np.zeros_like(x)})
