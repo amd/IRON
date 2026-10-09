@@ -88,6 +88,7 @@ from .narrowing import (
     Variant,
     cost_key,
     cost_keys,
+    fit_verdict,
     fitting,
     refuse,
     variants,
@@ -1439,8 +1440,9 @@ class Designs:
     without a device: each design's first operator and the call it runs in,
     its settings (``variants`` of it at its probe that the placer takes,
     ``fitting``), and for a design a folded call has of its own, the design
-    whose step it took. ``versions`` are the graphs the calls are of, as
-    traced, and ``dev`` the device. ``points`` holds the operating points
+    whose step it took; one whose default the placer refuses is left out,
+    so its fold is never priced. ``versions`` are the graphs the calls are
+    of, as traced, and ``dev`` the device. ``points`` holds the operating points
     of each design whose work its call's points change (``Call.op_points``).
     """
 
@@ -1481,8 +1483,16 @@ class Designs:
         # The tuner applies a setting to every operator of its design, so
         # one moves no tunable any of them pins (``JointNarrowing``).
         settings, refused = {}, {}
-        for key, (op, _) in first.items():
+        for key, (op, _) in list(first.items()):
             found = variants(op.probed(), dev, pinned[key])
+            # A fold's design has no traced build vouching for its default;
+            # where the placer refuses it, the fold stays unpriced.
+            if key in twin_of:
+                why = fit_verdict({key: OperatorDesign(found[0].resolved)}, fit_cache)
+                if why is not None:
+                    refused[found[0].key] = why
+                    del first[key], twin_of[key]
+                    continue
             settings[key], why = fitting(found, fit_cache)
             refused.update(why)
         if not set(twin_of.values()) <= settings.keys():

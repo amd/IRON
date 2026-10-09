@@ -1106,6 +1106,37 @@ def test_a_setting_the_placer_refuses_alone_is_not_measured(tmp_path, npu2):
     assert fitting(found, tmp_path / "fits") == (kept, refused)
 
 
+class AccurateGate(iron.Graph):
+    """GELU of an f32-accumulating projection, as EmbeddingGemma 2's gate is."""
+
+    def body(self, x, w):
+        return GELU(
+            GEMM(
+                x,
+                w,
+                b_col_maj=True,
+                prio_accuracy=True,
+                emulate_bf16_mmul_with_bfp16=False,
+            )
+        )
+
+
+def test_a_fold_whose_default_the_placer_refuses_is_not_measured(tmp_path, npu2):
+    # GELU's scratch line beside the f32 accumulator is past a core's memory
+    # at the default 64x64x64 tiles.
+    traced = AccurateGate().trace(x=(2048, 512), w=(1024, 512))
+    calls = Call.admitted(traced, npu2)
+    [own, fold] = calls
+    [gemm] = [s.op for s in traced.steps if isinstance(s.op, GEMM)]
+    [gate] = [s.op for s in fold.traced.steps]
+    designs = Designs.of(calls, npu2, tmp_path / "fits")
+    assert cost_key(gemm, npu2) in designs.settings
+    assert cost_key(gate, npu2) not in designs.first
+    assert designs.twin_of == {}
+    [why] = [w for k, w in designs.refused.items() if k == cost_key(gate, npu2)]
+    assert "could not be placed" in why
+
+
 def _swiglu(tmp_path, dev, gate_us, step_us=10.0, table=_table, mul_us=None):
     """SwiGLU at one row as traced, and a table (``_table`` or ``_separate``)
     holding every design it runs as traced, with SiLU folded into the gate
