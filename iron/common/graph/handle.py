@@ -378,6 +378,33 @@ class Value:
 
     __radd__, __rmul__ = __add__, __mul__
 
+    def __rsub__(self, k: int) -> Affine:
+        return k - self.affine()
+
+    def __neg__(self) -> Affine:
+        return -self.affine()
+
+    def __floordiv__(self, d: int | Affine) -> Affine | int:
+        return self.affine() // d
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, (Value, Affine)):
+            return self is other
+        raise TypeError(f"{self} has no value to compare: it is given per call")
+
+    def __ne__(self, other) -> bool:
+        return not self == other
+
+    __hash__ = object.__hash__
+
+    def __bool__(self):
+        raise TypeError(f"{self} has no truth value: it is given per call")
+
+    def __index__(self):
+        raise TypeError(f"{self} is not a number: it is given per call")
+
+    __int__ = __index__
+
     def __repr__(self) -> str:
         kind = f"carried {self.kind}" if self.carried else self.kind
         return f"Value({self.name!r}, {kind}[{np.dtype(self.dtype).name}])"
@@ -481,6 +508,23 @@ class Affine:
         if scale % (1 << k) == 0:  # floor(s v / 2^k + b / 2^k) is linear
             return Affine(self.value, scale >> k, bias >> k)
         return Affine(self.value, scale, bias, k)
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, Affine):
+            terms = (self.scale, self.bias, self.down, self.mul, self.add)
+            return self.value is other.value and terms == (
+                other.scale,
+                other.bias,
+                other.down,
+                other.mul,
+                other.add,
+            )
+        if isinstance(other, (int, np.integer)):
+            raise TypeError(f"{self} has no value to compare: it is computed per call")
+        return NotImplemented
+
+    def __ne__(self, other) -> bool:
+        return not self == other
 
     def __bool__(self):
         raise TypeError(f"{self} has no truth value: it is computed per call")

@@ -1230,6 +1230,35 @@ def test_per_call_values_are_integer_expressions():
     cache = Handle((8, 4), bfloat16, "cache", "state")
     with pytest.raises(TypeError, match="not linear"):
         _ = cache[(p + 1) // 2]
+    assert 10 - p == Affine(p, -1, 10) and -p == Affine(p, -1)
+    assert (p * 4) // 2 == p // 1 * 2 and p // 2 == Affine(p, 1, 0, 1)
+    arithmetic = {"__add__", "__sub__", "__mul__", "__radd__", "__rmul__"}
+    arithmetic |= {"__rsub__", "__neg__", "__floordiv__"}
+    assert arithmetic <= set(vars(Affine)) and arithmetic <= set(vars(Value))
+
+
+def test_a_per_call_value_cannot_steer_the_trace():
+    """A body is traced once for every call, so a branch on a per-call value
+    would take one side for all of them: a comparison or a truth test raises.
+    """
+
+    class Branches(iron.Graph):
+        def __init__(self, test):
+            self.test = test
+
+        def body(self, x, *, pos: Scratchpad[np.int32]):
+            if self.test(pos):
+                return ReLU(x)
+            return ElementwiseAdd(x, x)
+
+    for test in (lambda p: p == 0, lambda p: p + 1 == 1, bool, lambda p: p != 3):
+        with pytest.raises(TypeError, match="per call"):
+            Branches(test).trace(x=(64,))
+    p = Value("p", "scratchpad", np.int32)
+    assert p == p and p != Value("p", "scratchpad", np.int32) and p + 1 == p + 1
+    assert len({p, p}) == 1 and len({p + 1, 1 + p}) == 1
+    with pytest.raises(TypeError, match="not a number"):
+        int(p)
 
 
 def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
