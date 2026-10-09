@@ -607,19 +607,6 @@ def is_operand(x) -> bool:
     return isinstance(x, (Handle, State, Weight, _HostView, np.ndarray, np.generic))
 
 
-def _tensor_dtype(t):
-    dt = t.dtype
-    name = str(dt)
-    return {
-        "bfloat16": bfloat16,
-        "float32": np.float32,
-        "int32": np.int32,
-        "int8": np.int8,
-        "uint8": np.uint8,
-        "int16": np.int16,
-    }.get(name, dt)
-
-
 class _HostView:
     """A state as the reference views it: reshaped, then indexed, both kept,
     so a copy writes the whole host tensor in place through ``pattern``.

@@ -28,7 +28,6 @@ from .handle import (
     Weight,
     _HostView,
     _rescale_bounds,
-    _tensor_dtype,
     is_operand,
 )
 
@@ -296,7 +295,7 @@ class Tracer:
                 name = self._names.get(key) or self.fresh(f"w{len(self.weights)}")
                 self.weights[key] = (
                     x,
-                    Handle(x.shape, _tensor_dtype(x), name, "weight"),
+                    Handle(x.shape, np.dtype(x.dtype).type, name, "weight"),
                 )
             return self.weights[key][1]
         raise TypeError(f"{x!r} is not a graph handle, a state, or a tensor")
@@ -692,7 +691,7 @@ class _ReferenceTracer(Tracer):
         if isinstance(target, type):
             values = self._split_values(cls, kwargs)
             shapes = [
-                Handle(t.shape, _tensor_dtype(t), "", "input") if p is None else p
+                Handle(t.shape, np.dtype(t.dtype).type, "", "input") if p is None else p
                 for t, p in zip(tensors, patterns)
             ]
             shapes = _take_views(cls, shapes, kwargs, {})

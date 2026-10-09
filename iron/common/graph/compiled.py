@@ -38,7 +38,7 @@ from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .fold import Folding, folded
-from .handle import Affine, Carry, Handle, State, Value, _tensor_dtype, is_operand
+from .handle import Affine, Carry, Handle, State, Value, is_operand
 from .narrowing import JointNarrowing, Tuning
 from .trace import TracedGraph, Tracer, _ReferenceTracer
 
@@ -451,13 +451,18 @@ class Graph:
         given = self._given(tensors)
         _check_values(self.name, self._values, values)
         signature = tuple(
-            (name, tuple(int(n) for n in t.shape), bfp.dtype_name(_tensor_dtype(t)))
+            (
+                name,
+                tuple(int(n) for n in t.shape),
+                bfp.dtype_name(np.dtype(t.dtype).type),
+            )
             for name, t in given.items()
         )
         version = self._versions.get(signature)
         if version is None:
             shapes = {
-                name: (tuple(t.shape), _tensor_dtype(t)) for name, t in given.items()
+                name: (tuple(t.shape), np.dtype(t.dtype).type)
+                for name, t in given.items()
             }
             print(f"{self.name}: compiling for {shapes}")
             version = self.compile(**shapes)
