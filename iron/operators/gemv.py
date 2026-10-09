@@ -355,7 +355,7 @@ class GEMV(Operator):
                 channels,
                 fits=lambda c: self.M % (c * channels * unit) == 0,
             )
-        return dataclasses.replace(
+        new = dataclasses.replace(
             self,
             num_aie_columns=cols,
             num_channels=channels,
@@ -363,6 +363,25 @@ class GEMV(Operator):
             tile_size_output=tile,
             kernel_vector_size=self._legal_kernel_vector_size(),
         )
+        # A core holds A's tiles (which carry B and each prologue and finish
+        # input), B's line, C's tiles, a scratch line per kind of chain it
+        # applies, and the default stack, which no elementwise kernel exceeds.
+        item = np.dtype(bfloat16).itemsize
+        line, out = self.K * item, new.tile_size_output * item
+        held = (
+            new.A.depth * new.tile_size_input * line
+            + line
+            + new.C.depth * out
+            + line * any(new.prepares or (new.prepare,))
+            + out * any(new.finishes or (new.finish,))
+            + dev.default_core_stack_bytes
+        )
+        if held > dev.core_memory_bytes:
+            raise ValueError(
+                f"K={self.K}, tile_size_input={new.tile_size_input}: a core "
+                f"holds {held} bytes, past its {dev.core_memory_bytes}"
+            )
+        return new
 
     def compatible(self):
         lanes = self.num_aie_columns * self.num_channels
@@ -379,24 +398,6 @@ class GEMV(Operator):
                 raise ValueError(f"{name}={tile} exceeds M/lanes={rows}")
             if rows % tile:
                 raise ValueError(f"{name}={tile} does not evenly divide M/lanes={rows}")
-        # A core holds A's tiles (which carry B and each prologue and finish
-        # input), B's line, C's tiles, a scratch line per kind of chain it
-        # applies, and the default stack, which no elementwise kernel exceeds.
-        item = np.dtype(bfloat16).itemsize
-        line, out = self.K * item, self.tile_size_output * item
-        held = (
-            self.A.depth * self.tile_size_input * line
-            + line
-            + self.C.depth * out
-            + line * any(self.prepares or (self.prepare,))
-            + out * any(self.finishes or (self.finish,))
-            + self.dev.default_core_stack_bytes
-        )
-        if held > self.dev.core_memory_bytes:
-            raise ValueError(
-                f"K={self.K}, tile_size_input={self.tile_size_input}: a core "
-                f"holds {held} bytes, past its {self.dev.core_memory_bytes}"
-            )
 
     def array(self, target):
         K, lanes = self.K, self.num_aie_columns * self.num_channels
