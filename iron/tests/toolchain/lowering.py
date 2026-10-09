@@ -20,18 +20,21 @@ decision that one does not reach.
 """
 
 import importlib
-import subprocess
 
 import numpy as np
 import pytest
 from aie.iron import ExternalFunction
 from aie.utils import get_current_device
-from aie.utils.compile import compile_external_kernels, resolve_target_arch
+from aie.utils.compile import (
+    compile_external_kernels,
+    compile_mlir_module,
+    resolve_target_arch,
+)
 
 import iron.operators as catalog
 from iron.common import graph
 from iron.common.design import OperatorDesign
-from iron.tests.toolchain.tools import AIECC, DEVICES, PEANO, requires
+from iron.tests.toolchain.tools import DEVICES, requires
 
 pytestmark = requires("aiecc", "peano")
 
@@ -51,26 +54,12 @@ def lower(op, tmp_path, name=None):
     finally:
         ExternalFunction._instances.clear()
     arch = resolve_target_arch(get_current_device(probe_runtime=False))
-    compile_external_kernels(kernels, str(src.parent), arch)
-    out = tmp_path / "out"
-    result = subprocess.run(
-        [
-            str(AIECC),
-            "--get-npu-insts",
-            f"--peano={PEANO}",
-            f"--npu-insts-name={name}.bin",
-            f"--output-dir={out}",
-            f"--tmpdir={tmp_path / 'prj'}",
-            *op.aiecc_flags,
-            str(src),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=900,
+    compile_external_kernels(kernels, str(tmp_path), arch)
+    insts = tmp_path / f"{name}.bin"
+    compile_mlir_module(
+        src.read_text(), insts_path=insts, work_dir=tmp_path, options=op.aiecc_flags
     )
-    assert result.returncode == 0, f"aiecc failed on {src}:\n{result.stderr[-4000:]}"
-    insts = out / f"{name}.bin"
-    assert insts.exists() and insts.stat().st_size > 0
+    assert insts.stat().st_size > 0
     return src, insts
 
 
