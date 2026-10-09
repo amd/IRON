@@ -1568,7 +1568,7 @@ class Designs:
         ]
 
     def calibrated(
-        self, table: CostTable, triangle: tuple[str, str, str] | None
+        self, table: CostTable, triangle: tuple[type[Operator], ...] | None
     ) -> list[tuple[Variant, Variant]]:
         """The designs each pair of ``triangle``'s operator classes is
         calibrated between, ``(a, b)``, ``(a, c)`` and ``(b, c)``: the first
@@ -1577,7 +1577,7 @@ class Designs:
         """
         if triangle is None:
             return []
-        by_class: dict[str, Variant] = {}
+        by_class: dict[type[Operator], Variant] = {}
         for key, (op, _) in self.first.items():
             default = self.settings[key][0]
             fixed = {
@@ -1592,7 +1592,7 @@ class Designs:
                 ),
                 key=lambda v: v.mm2s + v.s2mm,
             )
-            by_class.setdefault(type(op).__name__, narrowest)
+            by_class.setdefault(type(op), narrowest)
         a, b, c = triangle
         return [(by_class[x], by_class[y]) for x, y in ((a, b), (a, c), (b, c))]
 
@@ -1631,7 +1631,7 @@ class Designs:
         return [device for name, device in taken.items() if name not in table.packs]
 
     def missing(
-        self, table: CostTable, triangle: tuple[str, str, str] | None
+        self, table: CostTable, triangle: tuple[type[Operator], ...] | None
     ) -> list[str]:
         """What ``measure_graph`` would run for ``table`` next, in its
         return's terms: the ``unmeasured`` settings, else the ``unpointed``
@@ -1663,7 +1663,7 @@ class Designs:
 def measure_graph(
     table: CostTable,
     calls: Sequence[Call],
-    triangle: tuple[str, str, str] | None,
+    triangle: tuple[type[Operator], ...] | None,
     timing: Timing = Timing(),
     repeats: int = 9,
     remeasure: bool = False,

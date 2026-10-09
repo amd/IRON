@@ -758,7 +758,7 @@ def test_a_triangle_calibrates_each_pair_of_its_classes_at_their_narrowest(
         for v in found:
             steps[v.key] = (4.0 + v.mm2s, 8.0 * v.mm2s)
     table = _table(tmp_path / "costs.json", steps)
-    triangle = ("ElementwiseAdd", "SiLU", "GELU")
+    triangle = (ElementwiseAdd, SiLU, GELU)
     pairs = designs.calibrated(table, triangle)
     assert [(type(a.op).__name__, type(b.op).__name__) for a, b in pairs] == [
         ("ElementwiseAdd", "SiLU"),

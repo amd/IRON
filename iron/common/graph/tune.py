@@ -31,6 +31,7 @@ from pathlib import Path
 import aie.utils as aie_utils
 
 from ... import operators
+from ..declare import Operator
 from ..image.packaging import full_elf
 from .narrowing import DISPATCHES, CostTable, fitting, variants
 from .probe import Call, Timing, cost_cache, measure_graph, pmode, search
@@ -111,7 +112,7 @@ def table(args: argparse.Namespace, dev, tables: Path) -> Path:
 def measure(
     args: argparse.Namespace,
     calls: Sequence[Call],
-    triangle: tuple[str, str, str],
+    triangle: tuple[type[Operator], ...],
     tables: Path,
 ) -> list[str]:
     """Fill the table ``args`` names in ``tables`` (``table``) with

@@ -37,6 +37,7 @@ import numpy as np
 
 from iron.common.graph import tune as graph_tune
 from iron.common.graph.probe import Call, Point
+from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 from iron.operators.mha import MHA
 from iron.operators.sample import Sample
 
@@ -48,7 +49,7 @@ from .runner import Runner
 # The configure cost is measured between small single-column designs, at
 # their narrowest: one design's configure then costs least beside the fixed
 # part the calibration isolates.
-CALIBRATION_TRIANGLE = ("ElementwiseAdd", "SiLU", "ElementwiseMul")
+CALIBRATION_TRIANGLE = (ElementwiseAdd, SiLU, ElementwiseMul)
 
 
 def contexts(top: int, count: int, unit: int) -> list[tuple[float, int]]:

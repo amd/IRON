@@ -15,6 +15,7 @@ import dataclasses
 import numpy as np
 import pytest
 from aie.iron.device import from_name
+from aie.utils.trace import TraceConfig
 from ml_dtypes import bfloat16
 
 import iron
@@ -37,6 +38,8 @@ from iron.common import (
 from iron.common.declare import Direction
 from iron.common.declare.field import Auto, DimRef, Param
 from iron.common.design import OperatorDesign
+from iron.operators import ReLU as LibraryReLU
+from iron.operators import Tanh
 
 NPU2 = from_name("npu2", n_cols=8)
 
@@ -539,12 +542,29 @@ def test_identity_is_the_array_tier_for_sharing_and_every_field_for_a_build():
     assert a.array_key() == b.array_key()
     assert a.design_key() != b.design_key()
     assert a.array_key() == (
-        "MV",
+        MV,
         ("K", 128),
         ("columns", 8),
         ("tile_out", 64),
         ("epilogue", "none"),
     )
+
+
+class ReLU(Tanh):
+    """A ReLU of this module's own, which runs tanh."""
+
+
+def test_two_operators_of_one_name_are_two_designs():
+    given = dict(size=4096, num_aie_columns=1, num_channels=1, tile_size=1024)
+    ours, theirs = ReLU(**given), LibraryReLU(**given)
+    assert ours.array_key() != theirs.array_key()
+    assert ours.design_key() != theirs.design_key()
+
+
+def test_a_traced_operator_is_not_the_untraced_ones_array():
+    given = dict(size=4096, num_aie_columns=1, num_channels=1, tile_size=1024)
+    traced = Tanh(**given, trace=TraceConfig(trace_size=8192))
+    assert traced.array_key() != Tanh(**given).array_key()
 
 
 def test_array_sees_the_array_tier_alone():

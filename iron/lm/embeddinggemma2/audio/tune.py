@@ -17,10 +17,11 @@ import aie.utils as aie_utils
 
 from iron.common.graph import tune
 from iron.common.graph.probe import Call
+from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 
 from .model import AUDIO, COSTS, Audio, unread_audio_weights
 
-CALIBRATION_TRIANGLE = ("ElementwiseAdd", "SiLU", "ElementwiseMul")
+CALIBRATION_TRIANGLE = (ElementwiseAdd, SiLU, ElementwiseMul)
 
 
 def main():

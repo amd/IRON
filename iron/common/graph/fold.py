@@ -39,8 +39,10 @@ class Fold:
         return (*self.after, (self.consumer, self.at))
 
     def __str__(self) -> str:
-        names = [f"{k[0]}{f' (input {at})' if at else ''}" for k, at in self.chain]
-        return f"{', then '.join(names)} into {self.producer[0]}"
+        names = [
+            f"{k[0].__name__}{f' (input {at})' if at else ''}" for k, at in self.chain
+        ]
+        return f"{', then '.join(names)} into {self.producer[0].__name__}"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -65,8 +67,10 @@ class Prologue:
         return ((self.producer, self.at), *self.after)
 
     def __str__(self) -> str:
-        names = [f"{k[0]}{f' (input {at})' if at else ''}" for k, at in self.chain]
-        consumers = ", ".join(k[0] for k in self.consumers)
+        names = [
+            f"{k[0].__name__}{f' (input {at})' if at else ''}" for k, at in self.chain
+        ]
+        consumers = ", ".join(k[0].__name__ for k in self.consumers)
         return f"{', then '.join(names)} into {consumers}"
 
 
@@ -84,8 +88,8 @@ class Place:
     after: tuple[tuple[Hashable, int], ...] = ()
 
     def __str__(self) -> str:
-        names = [self.producer[0], *(k[0] for k, _ in self.after)]
-        return f"{self.copy[0]} into the drain of {', then '.join(names)}"
+        names = [self.producer[0].__name__, *(k[0].__name__ for k, _ in self.after)]
+        return f"{self.copy[0].__name__} into the drain of {', then '.join(names)}"
 
 
 # Every kind of fold ``folded`` applies.

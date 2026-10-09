@@ -66,7 +66,7 @@ from iron.operators import (
 
 SIZE = 8192
 TILE = 256
-TRIANGLE = ("ElementwiseAdd", "SiLU", "ElementwiseMul")
+TRIANGLE = (ElementwiseAdd, SiLU, ElementwiseMul)
 
 pytestmark = pytest.mark.usefixtures("npu_runtime")
 

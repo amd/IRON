@@ -20,13 +20,14 @@ import numpy as np
 from iron.common.graph import tune
 from iron.common.graph.probe import Call
 from iron.lm import unread_weights
+from iron.operators import GELU, ElementwiseAdd, ElementwiseMul
 
 from .audio.model import AUDIO, AudioTower, unread_audio_weights
 from .model import COSTS, EMBEDDINGGEMMA_2, EmbeddingGemma, layout
 from .multimodal import Multimodal
 from .vision import model as vision_model
 
-CALIBRATION_TRIANGLE = ("ElementwiseAdd", "GELU", "ElementwiseMul")
+CALIBRATION_TRIANGLE = (ElementwiseAdd, GELU, ElementwiseMul)
 
 
 def main():

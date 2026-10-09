@@ -19,10 +19,11 @@ import numpy as np
 from iron.common.graph import tune
 from iron.common.graph.probe import Call
 from iron.lm import unread_weights
+from iron.operators import GELU, ElementwiseAdd, ElementwiseMul
 
 from .model import COSTS, LARGEST, VISION, Vision, layout
 
-CALIBRATION_TRIANGLE = ("ElementwiseAdd", "GELU", "ElementwiseMul")
+CALIBRATION_TRIANGLE = (ElementwiseAdd, GELU, ElementwiseMul)
 
 
 def main():

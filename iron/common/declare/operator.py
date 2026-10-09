@@ -786,7 +786,7 @@ class Operator(metaclass=_OperatorMeta):
             own += (("prepare", tuple(link.array_key() for link in self.prepare)),)
         if any(self.prepares):
             own += (("prepares", self._prepare_keys()),)
-        return (type(self).__qualname__, own)
+        return (type(self), own)
 
     def probed(self) -> Self:
         """This operator with each ``param(probe=)`` field at its probe: the
@@ -798,9 +798,11 @@ class Operator(metaclass=_OperatorMeta):
         return dataclasses.replace(self, **self._probe_fields)
 
     def array_key(self):
-        key = (type(self).__qualname__,) + tuple(
+        key = (type(self),) + tuple(
             (name, getattr(self, name)) for name in self._array_fields
         )
+        if self.trace is not None:
+            key += (("trace", self.trace),)
         if any(self.finishes or (self.finish,)):
             key += (("finishes", self._finish_keys()),)
         if any(self.prepares or (self.prepare,)):
