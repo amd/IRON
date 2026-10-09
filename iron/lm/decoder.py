@@ -249,6 +249,24 @@ class CausalLM(iron.Graph):
         self._prompt, self._decode = prompt, decode
         return self
 
+    def __call__(self, x=None, **values) -> Any:
+        """One call of the loaded prompt version on ``x``, else of the decode step.
+
+        Raises:
+            RuntimeError: Neither version is loaded: ``load()`` first, which
+                compiles them with the tuner and packaging asked for.
+        """
+        if self._decode is None:
+            raise RuntimeError(f"{type(self).__name__}: load() first")
+        if x is None:
+            return self._decode(**values)
+        if self._prompt is None:
+            raise RuntimeError(
+                f"{type(self).__name__}: no prompt version on this device; "
+                f"a prompt runs a decode step per token (logits)"
+            )
+        return self._prompt(x, **values)
+
     @property
     def device_loop(self) -> bool:
         """Whether ``generate`` can draw on the device: a full-ELF decode step

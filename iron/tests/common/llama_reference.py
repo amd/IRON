@@ -213,6 +213,18 @@ def test_a_token_outside_the_vocabulary_is_refused_before_any_dispatch(cpu, outs
     np.testing.assert_array_equal(model.logits(tokens), fresh)
 
 
+def test_a_model_runs_only_the_versions_it_loaded(cpu):
+    """Before ``load()`` a call compiles nothing on its own: that would build
+    an untuned version past the tuner and packaging ``load`` is given.
+    """
+    model = Llama(cpu.config, cpu.weights)
+    with pytest.raises(RuntimeError, match=r"load\(\) first"):
+        model.logits(cpu.prompt)
+    with pytest.raises(RuntimeError, match=r"load\(\) first"):
+        model(chunk=0, rows=1, token=0, position=0)
+    assert not model._versions
+
+
 def test_the_oracle_carries_nothing_from_call_to_call(cpu):
     """Its buffers outlive a call: a shorter prompt after a longer one, and
     each longer one after, gives a fresh oracle's logits bit for bit.
