@@ -5,9 +5,9 @@ SPDX-License-Identifier: Apache-2.0
 
 # EmbeddingGemma 2 on the NPU
 
-EmbeddingGemma 2's text encoder as one IRON graph, `EmbeddingGemma`, a
-version compiled per row count (doubling from 64 rows to the longest
-prompt), and the float32
+EmbeddingGemma 2's text encoder as one IRON graph, `EmbeddingGemma`,
+compiled once at `max_tokens` rows (2048 by default) with the prompt's
+length bound per call, and the float32
 numpy encoder it is checked against, `EmbeddingGemmaOracle`. Text goes in
 behind its task's prompt and a unit-length embedding of 768 comes out, or
 its first 512, 256 or 128 renormalized.
