@@ -1565,6 +1565,41 @@ def test_a_bound_reaches_a_copy_and_a_repeat_through_their_views(npu2):
     assert rep.derived_at("valid_seq_x", valid_seq=12) == 12  # the stack axis itself
 
 
+def test_a_bound_on_one_side_of_a_copy_holds_the_other(npu2):
+    """A copy of ``x[:n]`` by head makes an output of the view's shape bounded
+    alike, and into a given view of that shape bounds it on the same axis; a
+    side moving every row would wait on rows the other never moves. A given
+    view of another shape cannot follow the bound, and is refused.
+    """
+    G, D, L = 4, 8, 32
+    keys = iron.state((G, L, D), name="keys")
+
+    class ByHead(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32]):
+            k = x[:n].reshape(L, G, D).transpose(1, 0, 2)
+            Copy(k, keys)
+            return Copy(k)
+
+    t = ByHead().trace(x=(L, G * D))
+    (n,) = t.values
+    for copy in t.operators:
+        assert copy.src_bound == 1 and copy.dst_bound == 1
+        assert {k: e.name for k, e in copy.bound_values.items()} == {
+            "src_valid": "n",
+            "dst_valid": "n",
+        }
+    assert list(t.operators[1].dst.sizes) == [G, L, D]
+    (out,) = t.outputs
+    assert out.shape == (G, L, D) and out.bounds == {1: n.affine()}
+
+    class Flat(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32]):
+            Copy(x[:n].reshape(L, G, D).transpose(1, 0, 2), keys.reshape(G * L, D))
+
+    with pytest.raises(ValueError, match="bound it alike"):
+        Flat().trace(x=(L, G * D))
+
+
 def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
     """A bound reaches GEMM through A's rows and MHA through Q's padded
     length and K's and V's (select shapes): GEMM derives the counts its

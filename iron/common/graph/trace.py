@@ -72,7 +72,27 @@ def _unbounded(h: Handle) -> Handle:
 def _take_views(cls, operands, kwargs, values):
     """Hand each view operand's pattern to the operator (``cls.accept_views``)
     and stand its parent in.
+
+    A bound on one view holds the others: each side moves the same rows. A
+    side not given (a fresh output) is the bounded view's shape, bounded
+    alike; a given one must be that shape, and is bounded on the same axis.
     """
+    given = operands[: len(cls.accept_views)]
+    held = next((h for h in given if h.bounds), None)
+    if held is not None and len(held.bounds) == 1:
+        ((axis, count),) = held.bounds.items()
+        for i, (param, _) in enumerate(cls.accept_views):
+            if i < len(given) and given[i].bounds:
+                continue
+            if i >= len(given):
+                kwargs.setdefault(param, TensorAccessPattern.full(held.shape))
+            elif given[i].shape != held.shape:
+                raise ValueError(
+                    f"{given[i]!r} is every row of a {given[i].shape} view while "
+                    f"{held!r} moves {count} on axis {axis}; bound it alike"
+                )
+            kwargs.setdefault(f"{param}_bound", axis)
+            values[f"{param}_valid"] = count
     out = []
     for i, h in enumerate(operands):
         if i < len(cls.accept_views):
@@ -495,7 +515,7 @@ class Tracer:
                     )
                     if like is not None:
                         shape = called[like].shape
-                        bounds = dict(operands[like].bounds)
+                        bounds = dict(called[like].bounds)
                 if not bounds:
                     bounds = self._output_bounds(op, b, len(shape))
                 h = Handle(
