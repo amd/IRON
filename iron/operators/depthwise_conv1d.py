@@ -10,7 +10,7 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import conv
 from ml_dtypes import bfloat16
 
-from iron.common import In, Operator, Out, Value, auto, param
+from iron.common import Extent, In, Operator, Out, Value, auto, param
 from iron.common.testing import Case, Testing
 
 TAPS = 5
@@ -45,6 +45,9 @@ class DepthwiseConv1d(Operator):
     x = In(rows, channels, tile=(channels,), per=(num_aie_columns,), depth=TAPS + 1)
     weight = In(TAPS, channels, tile=(channels,), broadcast=True, depth=TAPS)
     y = Out(rows, channels, tile=(channels,), per=(num_aie_columns,))
+    # The rows, or fewer per call (``x[:n]``): every row is still computed,
+    # as a row reads only those before it.
+    valid = Extent(rows)
     steps = Value(np.int32, derive=lambda op: op.rows // op.num_aie_columns)
 
     def validate(self) -> None:
