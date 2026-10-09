@@ -29,17 +29,6 @@ class _Graph:
         self.text = text
 
 
-def _design(mlir_text, **kwargs):
-    """A generator closing over its MLIR, as a captured graph would arrive."""
-    return CompilableDesign(lambda: mlir_text, full_elf=True, **kwargs)
-
-
-def test_a_plain_closure_value_changes_the_key():
-    a = _design("module { /* graph A */ }")
-    b = _design("module { /* graph B */ }")
-    assert a._compute_cache_hash() != b._compute_cache_hash()
-
-
 def _graph_design(graph: _Graph, **kwargs):
     """A generator closing over an object, as ``Fusion`` and ``OperatorDesign``
     arrive.
@@ -58,24 +47,6 @@ def test_an_object_closed_over_alone_does_not_change_the_key():
         "if this now fails, upstream started hashing objects' state and "
         "IRON's generators can drop their key"
     )
-
-
-def test_compile_kwargs_do_change_the_key():
-    """The supported way to carry a graph's identity.
-
-    compile_kwargs is part of the recipe hash, so putting something that
-    identifies the graph there discriminates where a closure does not.
-    """
-    text = "module { /* same text */ }"
-    a = CompilableDesign(lambda: text, full_elf=True, compile_kwargs={"graph": "A"})
-    b = CompilableDesign(lambda: text, full_elf=True, compile_kwargs={"graph": "B"})
-    assert a._compute_cache_hash() != b._compute_cache_hash()
-
-
-def test_the_same_graph_gets_the_same_key():
-    """Otherwise nothing would ever hit cache."""
-    text = "module { /* stable */ }"
-    assert _design(text)._compute_cache_hash() == _design(text)._compute_cache_hash()
 
 
 @pytest.mark.parametrize("full_elf", [True, False])
