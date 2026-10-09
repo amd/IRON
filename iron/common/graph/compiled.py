@@ -15,8 +15,9 @@ import dataclasses
 import functools
 import inspect
 import os
+import sys
+import warnings
 from collections.abc import Callable, Collection, Mapping
-from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -421,6 +422,10 @@ class Graph:
     def link(self, jobs: int | None = None) -> None:
         """Build every version compiled with ``link=False``, concurrently.
 
+        Each version builds in a forked child, into the on-disk cache, and the
+        parent then links each from there; a version whose child failed
+        rebuilds in the parent, which raises its error.
+
         Args:
             jobs: How many to build at once; by default as many as the
                 available memory holds.
@@ -436,9 +441,36 @@ class Graph:
                     if line.startswith("MemAvailable:")
                 )
             jobs = max(1, min(os.cpu_count() or 1, available // LINK_BYTES))
-        with ThreadPoolExecutor(min(jobs, len(pending))) as pool:
-            for built in [pool.submit(v.link) for v in pending]:
-                built.result()
+        if jobs > 1 and len(pending) > 1:
+            children = set()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            for version in pending:
+                if len(children) == jobs:
+                    children.remove(os.wait()[0])
+                # The child only builds and leaves by os._exit; the other
+                # threads here (numpy's OpenBLAS pool) are none it needs.
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        "This process .* is multi-threaded",
+                        DeprecationWarning,
+                    )
+                    pid = os.fork()
+                if pid == 0:
+                    status = 1
+                    try:
+                        version.link()
+                        status = 0
+                    finally:
+                        sys.stdout.flush()
+                        sys.stderr.flush()
+                        os._exit(status)
+                children.add(pid)
+            for pid in children:
+                os.waitpid(pid, 0)
+        for version in pending:
+            version.link()
 
     def _given(self, tensors) -> dict[str, Any]:
         if len(tensors) > len(self._inputs):

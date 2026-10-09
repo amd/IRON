@@ -29,9 +29,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 from aie.iron import ExternalFunction
+from aie.iron.kernels import KernelContract, Param
+from aie.utils.compile.jit.markers import In, Out
 from ml_dtypes import bfloat16
 
 import iron
+from iron.common import BinaryElementwise
 from iron.common.declare.member import Extent
 from iron.operators.gemm import GEMM
 from iron.tests.toolchain.tools import DEVICES, requires, swiglu
@@ -157,6 +160,31 @@ def test_versions_linked_together_each_build_their_own_image():
         assert version.is_linked and Path(version.image).stat().st_size > 0
         assert version.artifacts.buffers["x"][2] == M * K * 2
     assert len({version.image for version in versions}) == len(rows)
+
+
+def test_a_version_that_fails_to_build_raises_its_error_from_link():
+    class Broken(BinaryElementwise):
+        def kernel(self):
+            return ExternalFunction(
+                "vadd",
+                source_string='extern "C" void vadd(int n) { undeclared(n); }',
+                arg_types=[self.a.tile, self.b.tile, self.y.tile, np.int32],
+                contract=KernelContract(
+                    roles=(In, In, Out, Param),
+                    parameter_bindings=((3, self.tile_size),),
+                    reference=np.add,
+                ),
+            )
+
+    class Sum(iron.Graph):
+        def body(self, a, b):
+            return Broken(a, b)
+
+    graph = Sum()
+    for n in (1024, 2048):
+        graph.compile(DEVICES["npu2"](), image=iron.ELF, link=False, a=(n,), b=(n,))
+    with pytest.raises(RuntimeError, match="undeclared identifier"):
+        graph.link(jobs=2)
 
 
 def test_a_cached_build_leaves_no_kernel_for_the_next_graph_to_collide_with():
