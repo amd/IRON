@@ -111,8 +111,8 @@ form on NPU2, which is how `test_llama_3_2_1b_each_step_accuracy` checks it
 there.
 
 Decode attends with MHA of one query there too. Where MHA does not fit (an
-array narrower than four columns), decode attention is `"gqa"`
-(`CausalLM.decode_attention`, `iron/operators/gqa.py`): `GQAScores` against
+array narrower than four columns), decode attention is `DecodeAttention.GQA`
+(`CausalLM.attention(dev)`, `iron/operators/gqa.py`): `GQAScores` against
 the key cache, a `Softmax` bounded to the context, and `GQAContext` over the
 value cache. Both read the caches in place, a block of positions at a time,
 and only the blocks the context covers, so a step's cost follows the

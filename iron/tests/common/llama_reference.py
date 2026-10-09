@@ -33,6 +33,7 @@ from aie.iron.device import from_name
 
 from iron.lm import (
     Config,
+    DecodeAttention,
     Oracle,
     Sampler,
     accuracy,
@@ -42,6 +43,8 @@ from iron.lm import (
     random_weights,
 )
 from iron.lm.llama3.model import Llama, layout
+from iron.operators.gqa import GQAScores
+from iron.operators.mha import MHA
 from iron.tests.common.llama_model import PROFILE, SMALL
 
 pytestmark = pytest.mark.usefixtures("npu2")  # MHA decode on any host
@@ -148,12 +151,12 @@ def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
 
 
 def test_gqa_decode_reads_the_caches_the_prompt_wrote(cpu):
-    """``decode_attention="gqa"``: each decode step's ``GQAScores``,
+    """``DecodeAttention.GQA``: each decode step's ``GQAScores``,
     ``Softmax`` and ``GQAContext`` read the caches the prompt's MHA wrote.
     """
 
     class GQA(OnHost):
-        decode_attention = "gqa"
+        decode_attention = DecodeAttention.GQA
 
     model = GQA(cpu.config, cpu.weights)
     first = model.logits(cpu.prompt)
@@ -162,13 +165,19 @@ def test_gqa_decode_reads_the_caches_the_prompt_wrote(cpu):
     _assert_close(got, cpu.expected)
 
 
-def test_decode_attention_is_mha_where_mha_fits_else_gqa(cpu):
-    assert OnHost(cpu.config, cpu.weights).decode_attention == "mha"
-    aie_utils.set_current_device(from_name("npu1", n_cols=4))
-    assert OnHost(cpu.config, cpu.weights).decode_attention == "mha"
-    aie_utils.set_current_device(from_name("npu1"))
+def test_decode_attention_is_mha_where_mha_fits_the_traced_device_else_gqa(cpu):
+    """Chosen by the device each trace is against, so one model compiled for
+    two devices attends as each allows; the caches are the same either way.
+    """
     model = OnHost(cpu.config, cpu.weights)
-    assert model.decode_attention == "gqa"
+    for dev, attention, step in (
+        (from_name("npu2", n_cols=8), DecodeAttention.MHA, MHA),
+        (from_name("npu1", n_cols=4), DecodeAttention.MHA, MHA),
+        (from_name("npu1"), DecodeAttention.GQA, GQAScores),
+    ):
+        aie_utils.set_current_device(dev)
+        assert model.attention(dev) is attention
+        assert step in {type(op) for op in model.trace().operators}
     assert model.keys[0].shape == (
         cpu.config.max_seq_len,
         cpu.config.n_kv_groups,

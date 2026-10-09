@@ -13,11 +13,12 @@ no device loop.
 """
 
 import dataclasses
+import enum
 import math
 import time
 from collections.abc import Callable, Iterator
 from types import SimpleNamespace
-from typing import Any, Literal
+from typing import Any
 
 import aie.utils as aie_utils
 import numpy as np
@@ -90,6 +91,13 @@ class Config:
         )
 
 
+class DecodeAttention(enum.Enum):
+    """How a decode step attends over the caches."""
+
+    MHA = "mha"
+    GQA = "gqa"
+
+
 @dataclasses.dataclass
 class Step:
     prompt: bool
@@ -105,36 +113,32 @@ class CausalLM(iron.Graph):
 
     The caches are ``(max_seq_len, n_kv_groups, head_dim)`` so no descriptor
     steps by ``max_seq_len``. A decode step attends with ``MHA`` of one
-    query, or with ``decode_attention="gqa"`` with ``GQAScores``, ``Softmax``
+    query, or with ``DecodeAttention.GQA`` with ``GQAScores``, ``Softmax``
     and ``GQAContext`` reading each group's rows in place; either costs the
-    context, not the cache. Left ``None`` it is ``"mha"`` where MHA fits the
-    device, else ``"gqa"``.
+    context, not the cache. Left ``None`` it is ``MHA`` where MHA fits the
+    device a trace is against, else ``GQA``.
     """
 
     embedding: Weight
     layers: list
     oracle: "type[Oracle]"
-    decode_attention: Literal["mha", "gqa"] | None = None
+    decode_attention: DecodeAttention | None = None
 
     def __init__(self, config: Config, weights):
         self.config = config
         vars(self).update(vars(weights))
         self.embedding = iron.weight(weights.embedding)
         G, L, D = config.n_kv_groups, config.max_seq_len, config.head_dim
-        if self.decode_attention is None:
-            dev = aie_utils.ensure_current_device()
-            self.decode_attention = "mha" if dev is None or MHA.fits(dev) else "gqa"
         self.keys = [iron.state((L, G, D)) for _ in self.layers]
         self.values = [iron.state((L, G, D)) for _ in self.layers]
         self.rope = iron.weight(config.angles().astype(bfloat16))
         # Zero until the host writes draws: a row of zeros is greedy.
         self.draws = iron.state((L, ROW_WORDS), np.int32)
         self.drawn = iron.state((L,), np.int32)
-        if self.decode_attention == "gqa":
-            # On the query rather than the scores: the same bits where
-            # 1/sqrt(head_dim) is a power of two (64), and no row per position.
-            scale = np.full((1, config.n_heads * D), 1 / math.sqrt(D), dtype=bfloat16)
-            self.scale = iron.weight(scale)
+        # On the query rather than the scores: the same bits where
+        # 1/sqrt(head_dim) is a power of two (64), and no row per position.
+        scale = np.full((1, config.n_heads * D), 1 / math.sqrt(D), dtype=bfloat16)
+        self.scale = iron.weight(scale)
         self._seen = np.empty(0, dtype=np.int64)  # the tokens in the caches
         self._prompt: CompiledGraph | None = None
         self._decode: CompiledGraph | None = None
@@ -199,7 +203,8 @@ class CausalLM(iron.Graph):
             else:
                 Copy(x.reshape(G, D), cache[step.position])
         span = np.s_[: step.position + 1]
-        if not step.prompt and self.decode_attention == "gqa":
+        attention = self.attention(aie_utils.ensure_current_device())
+        if not step.prompt and attention is DecodeAttention.GQA:
             scores = GQAScores(keys[span], ElementwiseMul(q, self.scale).reshape(H, D))
             ctx = GQAContext(values[span], Softmax(scores))
             return ctx.reshape(1, H * D)
@@ -214,6 +219,16 @@ class CausalLM(iron.Graph):
 
     # -- on the host -----------------------------------------------------------
 
+    def attention(self, dev) -> DecodeAttention:
+        """The decode step's attention on ``dev``: ``decode_attention`` where
+        given, else ``MHA`` where MHA fits ``dev``.
+        """
+        if self.decode_attention is not None:
+            return self.decode_attention
+        if dev is None or MHA.fits(dev):
+            return DecodeAttention.MHA
+        return DecodeAttention.GQA
+
     def shapes(self, rows: int) -> dict:
         return dict(x=(rows, self.config.emb_dim)) if rows > 1 else {}
 
@@ -222,6 +237,7 @@ class CausalLM(iron.Graph):
         release=None,
         tuner: JointNarrowing | None = None,
         boundaries: str | None = None,
+        dev=None,
     ) -> "CausalLM":
         """Compile and load both versions before the first call, so the arena is made once.
 
@@ -229,16 +245,22 @@ class CausalLM(iron.Graph):
             release: Given each piece of each weight once it is on the device.
             tuner: Folds, narrows and packs each version's designs by cost.
             boundaries: Both versions' packaging.
+            dev: The device both versions are compiled for, else the current one.
         """
-        decode = self.compile(coresident=tuner, boundaries=boundaries, **self.shapes(1))
+        if dev is None:
+            dev = aie_utils.ensure_current_device()
+        decode = self.compile(
+            dev, coresident=tuner, boundaries=boundaries, **self.shapes(1)
+        )
         if decode.plan.image != iron.ELF:
             print(decode.plan.report("decode"), flush=True)
-        if not MHA.fits(aie_utils.ensure_current_device()):
+        if not MHA.fits(dev):
             decode.load(release=release)
             self._prompt, self._decode = None, decode
             return self
         feeds = decode if decode.emit is not None else None
         prompt = self.compile(
+            dev,
             feeds=feeds,
             coresident=tuner,
             boundaries=boundaries,

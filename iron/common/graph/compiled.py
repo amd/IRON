@@ -322,7 +322,8 @@ class Graph:
         after the arena's buffer exists grows it, which copies it once.
 
         Args:
-            dev: The device to bind, else the current one.
+            dev: The device to compile for, bound for this compile alone;
+                else the current one.
             boundaries: Packaging choice (``iron.common.image.packaging``).
             image: Packaging choice (``iron.common.image.packaging``).
             verbose: Print why the packaging was chosen.
@@ -339,77 +340,82 @@ class Graph:
                 ``folds`` name them.
             **shapes: Each input's shape, or ``(shape, dtype)``.
         """
+        previous = aie_utils.get_current_device(probe_runtime=False)
         if dev is not None:
             aie_utils.set_current_device(dev)
-        traced = self.trace(**shapes)
-        if fold:
-            traced, count = folded(
-                traced,
-                aie_utils.ensure_current_device(),
-                None if fold is True else fold,
-            )
-            if verbose:
-                print(
-                    f"{self.name}: {count.total()} step(s) folded into their "
-                    f"readers or producers"
+        try:
+            traced = self.trace(**shapes)
+            if fold:
+                traced, count = folded(
+                    traced,
+                    aie_utils.ensure_current_device(),
+                    None if fold is True else fold,
                 )
-        current = aie_utils.ensure_current_device()
-        # Folding and narrowing change nothing the packaging follows from.
-        chosen = plan(current, traced, boundaries, image)
-        tuning = None
-        groups: AdjacentPacking | list[list[Operator]] | None
-        if isinstance(coresident, JointNarrowing):
-            tuning = coresident.tune(traced, current, chosen.dispatch)
-            traced, groups = tuning.apply(traced, current)
-        else:
-            groups = coresident
-        if verbose:
-            print(chosen.report(self.name))
-        signature = self._signature(traced.inputs)
-        shared = chosen.dispatch == "fused"
-        emit = None
-        # The words an Emit feeding its own version was sized for.
-        sized: list[Word] | None = None
-        loops = feeds is not None or not traced.inputs
-        if chosen.image == ELF and traced.carry and loops:
-            if feeds is None:
-                sized = _words(traced, share=shared, extents=False)[0]
-                slots = len(sized)
-            elif feeds.emit is None or not any(
-                feeds is v for v in self._versions.values()
-            ):
-                raise ValueError(
-                    f"{self.name}: feeds= takes a full-ELF version of this "
-                    f"graph, got {feeds!r}"
-                )
+                if verbose:
+                    print(
+                        f"{self.name}: {count.total()} step(s) folded into their "
+                        f"readers or producers"
+                    )
+            current = aie_utils.ensure_current_device()
+            # Folding and narrowing change nothing the packaging follows from.
+            chosen = plan(current, traced, boundaries, image)
+            tuning = None
+            groups: AdjacentPacking | list[list[Operator]] | None
+            if isinstance(coresident, JointNarrowing):
+                tuning = coresident.tune(traced, current, chosen.dispatch)
+                traced, groups = tuning.apply(traced, current)
             else:
-                slots = len(feeds.parameters)
-            assert self._carry is not None
-            emit = attach_emit(traced, self._carried, self._carry, slots)
-        elif feeds is not None:
-            raise ValueError(
-                f"{self.name}: only a full-ELF version with carried values "
-                f"feeds another"
+                groups = coresident
+            if verbose:
+                print(chosen.report(self.name))
+            signature = self._signature(traced.inputs)
+            shared = chosen.dispatch == "fused"
+            emit = None
+            # The words an Emit feeding its own version was sized for.
+            sized: list[Word] | None = None
+            loops = feeds is not None or not traced.inputs
+            if chosen.image == ELF and traced.carry and loops:
+                if feeds is None:
+                    sized = _words(traced, share=shared, extents=False)[0]
+                    slots = len(sized)
+                elif feeds.emit is None or not any(
+                    feeds is v for v in self._versions.values()
+                ):
+                    raise ValueError(
+                        f"{self.name}: feeds= takes a full-ELF version of this "
+                        f"graph, got {feeds!r}"
+                    )
+                else:
+                    slots = len(feeds.parameters)
+                assert self._carry is not None
+                emit = attach_emit(traced, self._carried, self._carry, slots)
+            elif feeds is not None:
+                raise ValueError(
+                    f"{self.name}: only a full-ELF version with carried values "
+                    f"feeds another"
+                )
+            version = CompiledGraph(
+                traced,
+                chosen,
+                record=record,
+                arena=self._arena,
+                emit=emit,
+                coresident=groups,
+                tuning=tuning,
             )
-        version = CompiledGraph(
-            traced,
-            chosen,
-            record=record,
-            arena=self._arena,
-            emit=emit,
-            coresident=groups,
-            tuning=tuning,
-        )
-        if sized is not None and len(version.parameters) != len(sized):
-            read = {p.name for p in version.parameters}
-            raise NotImplementedError(
-                f"{self.name}: the image reads {len(version.parameters)} of the "
-                f"{len(sized)} words its Emit was sized for; a word it reads only "
-                f"through a derivation cannot be fed yet (sized for but not "
-                f"read: {sorted(w.symbol for w in sized if w.symbol not in read)})"
-            )
-        self._versions[signature] = version
-        return version
+            if sized is not None and len(version.parameters) != len(sized):
+                read = {p.name for p in version.parameters}
+                raise NotImplementedError(
+                    f"{self.name}: the image reads {len(version.parameters)} of the "
+                    f"{len(sized)} words its Emit was sized for; a word it reads only "
+                    f"through a derivation cannot be fed yet (sized for but not "
+                    f"read: {sorted(w.symbol for w in sized if w.symbol not in read)})"
+                )
+            self._versions[signature] = version
+            return version
+        finally:
+            if dev is not None:
+                aie_utils.set_current_device(previous)
 
     def _given(self, tensors) -> dict[str, Any]:
         if len(tensors) > len(self._inputs):

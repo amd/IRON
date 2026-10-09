@@ -110,13 +110,9 @@ def test_npu1_compiles_each_step_unasked():
     the xclbin form that is built, one dispatch per step.
     """
     g, shape = _graph()
-    previous = aie_utils.get_current_device()
-    dev = DEVICES["npu1"]()
-    aie_utils.set_current_device(dev)
-    try:
-        net = g.compile(dev, x=shape)
-    finally:
-        aie_utils.set_current_device(previous)
+    previous = aie_utils.get_current_device(probe_runtime=False)
+    net = g.compile(DEVICES["npu1"](), x=shape)
+    assert aie_utils.get_current_device(probe_runtime=False) is previous
     assert net.plan.image == "xclbin" and net.plan.dispatch == "separate"
     assert net.plan.reasons[-1] == "boundaries=each_step: the xclbin form that is built"
     assert net.image is not None and Path(net.image).stat().st_size > 0

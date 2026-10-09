@@ -40,6 +40,7 @@ from .checkpoint import (
 from .decoder import (
     CausalLM,
     Config,
+    DecodeAttention,
     Oracle,
     RopeScaling,
     Step,
@@ -54,6 +55,7 @@ __all__ = [
     "CausalLM",
     "Checkpoint",
     "Config",
+    "DecodeAttention",
     "Layout",
     "Oracle",
     "RopeScaling",
