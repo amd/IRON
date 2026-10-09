@@ -515,6 +515,9 @@ class Copy(Operator):
     test = Testing(
         [
             Case(dict(input_buffer_size=1024), id="contiguous"),
+            Case(
+                dict(input_buffer_size=1024, dtype=np.float32), id="float32", lower=True
+            ),
             Case(dict(input_buffer_size=1024, num_channels=2), id="two_channels"),
             Case(dict(input_buffer_size=1024, num_channels=4), id="four_channels"),
             Case(
@@ -525,7 +528,7 @@ class Copy(Operator):
             # Left to resolve, a share past a memtile is cut to fit one.
             Case(dict(input_buffer_size=1 << 19), id="past_one_memtile"),
             Case(_into_slot(0), id="slot0"),
-            Case(_into_slot(5), id="slot5"),
+            Case(_into_slot(5), id="slot5", lower=True),
             Case(_into_slot(127), id="slot_last"),
             # The flat cases split a stride-1 run across the channels; these
             # split the rows of a strided scatter.
@@ -533,7 +536,7 @@ class Copy(Operator):
             Case(_into_slot(5, num_channels=4), id="slot5_four_channels"),
             # The sides' innermost axes differ: (16, 4, 64) read by head into
             # a flat buffer, every channel's share of one in step with the other's.
-            Case(_by_head(num_channels=2), id="by_head_two_channels"),
+            Case(_by_head(num_channels=2), id="by_head_two_channels", lower=True),
             Case(_by_head(num_channels=4), id="by_head_four_channels"),
             Case(_into_slot(1000, seq=2048), id="slot1000_of_2048", extensive=True),
             # Benched: 4 Mi elements, well past the dispatch cost.

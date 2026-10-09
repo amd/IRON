@@ -14,8 +14,9 @@ routable, every descriptor a sequence issues is legal, the resident writes
 and barrier sets lower. What it cannot check is the kernels' objects and
 the numbers, which need hardware.
 
-The case table is ``iron/tests/common/cases.py``, one construction per
-shape and dtype decision each operator makes.
+The cases are the catalog's own ``Testing`` declarations: each operator's
+first default case, and every case it flags ``lower`` for a shape or dtype
+decision that one does not reach.
 """
 
 import importlib
@@ -23,21 +24,20 @@ import subprocess
 
 import numpy as np
 import pytest
+from aie.iron import ExternalFunction
+from aie.utils import get_current_device
+from aie.utils.compile import compile_external_kernels, resolve_target_arch
 
-from iron.common import Unresolvable, graph
+import iron.operators as catalog
+from iron.common import graph
 from iron.common.design import OperatorDesign
-from iron.tests.common.cases import CASES
-from iron.tests.toolchain.tools import AIECC, PEANO, requires
+from iron.tests.toolchain.tools import AIECC, DEVICES, PEANO, requires
 
 pytestmark = requires("aiecc", "peano")
 
 
 def lower(op, tmp_path, name=None):
     """Generate the operator's MLIR and lower it to instructions; return both paths."""
-    from aie.iron import ExternalFunction
-    from aie.utils import get_current_device
-    from aie.utils.compile import compile_external_kernels, resolve_target_arch
-
     name = name or op.name
     src = tmp_path / f"{name}.mlir"
     # CompilableDesign clears the kernel registry before generating; a bare
@@ -75,17 +75,26 @@ def lower(op, tmp_path, name=None):
 
 
 def _cases():
-    for module, cls_name, kwargs_list in CASES:
-        for i, kwargs in enumerate(kwargs_list):
-            yield pytest.param(module, cls_name, kwargs, id=f"{cls_name}-{i}")
+    params = []
+    for device in sorted(DEVICES):
+        dev = DEVICES[device]()
+        for name in sorted(catalog._OPERATOR_MODULES):
+            cls = getattr(catalog, name)
+            if cls.test is None:
+                continue
+            cases = cls.test.resolve(cls, dev)
+            first = next(c for c in cases if not c.extensive)
+            for case in [first, *(c for c in cases if c.lower and c is not first)]:
+                params.append(
+                    pytest.param(device, cls, case, id=f"{device}-{name}-{case.label}")
+                )
+    return params
 
 
-@pytest.mark.parametrize("module,cls_name,kwargs", list(_cases()))
-def test_operator_lowers_to_instructions(device, module, cls_name, kwargs, tmp_path):
-    cls = getattr(importlib.import_module(f"iron.operators.{module}"), cls_name)
+@pytest.mark.parametrize("device,cls,case", _cases(), indirect=["device"])
+def test_operator_lowers_to_instructions(device, cls, case, tmp_path):
     try:
-        op = cls(**kwargs)
-        op.resolved(device)
+        op = cls(**case.kwargs).resolved(device)
     except ValueError as e:
         pytest.skip(f"not for {device.name}: {e}")
     lower(op, tmp_path)

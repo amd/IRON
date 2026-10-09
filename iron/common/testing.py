@@ -10,7 +10,7 @@ module stays importable without it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable
 
 from aie.iron.device import Device
@@ -28,12 +28,15 @@ class Case:
         extensive: Keeps the case out of the default suite.
         id: Its name in test output, else the arguments.
         bench: CI tracks it over time (``pytest.mark.bench``).
+        lower: The toolchain tests lower it to instructions on every
+            device, as they do each operator's first default case.
     """
 
     kwargs: dict = field(default_factory=dict)
     extensive: bool = False
     id: str | None = None
     bench: bool = False
+    lower: bool = False
 
     @property
     def label(self) -> str:
@@ -92,6 +95,7 @@ class Sweep:
             (a ``Rowwise`` operator).
         bench: The length of one CI-tracked case at the widest grid; None
             adds none.
+        lower: Flags its first default case ``Case.lower``.
         **extra: Given to every case.
     """
 
@@ -104,10 +108,12 @@ class Sweep:
         regular: int | None = 2048,
         rows: bool = False,
         bench: int | None = BENCH_ELEMENTS,
+        lower: bool = False,
         **extra,
     ):
         self.lengths = tuple(lengths)
         self.bench = bench
+        self.lower = lower
         self.channels = None if channels is None else tuple(channels)
         self.tile_cap = tile_cap
         self.regular = regular
@@ -138,6 +144,9 @@ class Sweep:
                             extensive=length != self.regular,
                         )
                     )
+        if self.lower:
+            i = next(i for i, c in enumerate(out) if not c.extensive)
+            out[i] = replace(out[i], lower=True)
         if self.bench is not None:
             chans = max(self.channels or (1,))
             tile = min(BENCH_TILE, cap)

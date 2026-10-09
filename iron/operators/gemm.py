@@ -97,12 +97,16 @@ def _cases(cls, dev: Device):
             kwargs = dict(M=M, K=K, N=N, num_aie_columns=cols, tile_m=m, tile_k=k)
             kwargs.update(tile_n=n, b_col_maj=b_col_maj, c_col_maj=c_col_maj)
             kwargs.update(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
-            out.append(Case(kwargs, extensive=extensive))
+            lower = b_col_maj and c_col_maj and not extensive
+            out.append(Case(kwargs, extensive=extensive, lower=lower))
     # The defaults: bfp16 inputs, and C rounded to bf16 between K tiles.
     # The default-suite one is benched: it runs well past the dispatch cost.
     for K, extensive in ((2048, False), (8192, True)):
         kwargs = dict(M=2048, K=K, N=2048, b_col_maj=True)
-        out.append(Case(kwargs, extensive, bench=not extensive))
+        out.append(Case(kwargs, extensive, bench=not extensive, lower=not extensive))
+    # An f32 C at the default 64-wide tiles overflows a core's memory.
+    f32 = dict(M=512, K=256, N=512, dtype_out=np.float32, tile_m=32, tile_k=32)
+    out.append(Case(dict(f32, tile_n=32), id="f32_out", lower=True))
     # The placement the tuner tries beside the default, A split over a column's
     # rows on two columns.
     for cols in (8, 2):

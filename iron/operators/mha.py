@@ -167,7 +167,8 @@ _CASES = [
             seq_len=2048,
             kv_len=8192,
             num_pipelines=8,
-        )
+        ),
+        lower=True,
     ),
     # One query over a cache, its heads packed: Llama 3.2 1B's decode.
     Case(
@@ -178,7 +179,8 @@ _CASES = [
             kv_len=2048,
             num_pipelines=4,
             heads_interleaved=True,
-        )
+        ),
+        lower=True,
     ),
     # The chunk and the decode at each placement the tuner tries beside the
     # default.

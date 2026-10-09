@@ -78,9 +78,10 @@ def _cases(cls, dev: Device):
         (8192, 2048, 8, 4, 512),
     ]
 
-    def case(M, K, cols, tsi, tso, *, bench=False, **extra):
+    def case(M, K, cols, tsi, tso, *, bench=False, lower=False, **extra):
         kwargs = dict(M=M, K=K, num_aie_columns=cols, tile_size_input=tsi)
-        return Case(dict(kwargs, tile_size_output=tso, **extra), bench=bench)
+        kwargs.update(tile_size_output=tso, **extra)
+        return Case(kwargs, bench=bench, lower=lower)
 
     def finished(M, K, cols, tsi, tso, *chains, **extra):
         # The first chain is the case's own; more share one array.
@@ -117,7 +118,10 @@ def _cases(cls, dev: Device):
 
     return (
         [case(*p, bench=bench(*p)) for p in plain]
-        + [case(*p, num_batches=batches) for *p, batches in batched]
+        + [
+            case(*p, num_batches=batches, lower=i == 0)
+            for i, (*p, batches) in enumerate(batched)
+        ]
         + [case(*p, num_batches=batches, repeat=r) for *p, batches, r in repeated]
         + [case(*p, bench=bench(*p), num_channels=2) for p in laned]
         + [

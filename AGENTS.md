@@ -419,6 +419,10 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      measurement; a case that finishes near that floor measures little, so
      an operator no input takes past it gets its least noisy case. `Sweep`
      adds one at `BENCH_ELEMENTS`
+   - `lower=True` adds a case to the device-free lowering gate
+     (`iron/tests/toolchain/lowering.py`), which lowers each operator's
+     first default case on every device: flag one for each layout or dtype
+     that case does not reach (`Sweep(lower=True)` flags its first)
    - `draw=` passes `vectors()` its arguments (`normal=`, `centered=`, a given
      tensor or shape per input), or a callable of the operator for an input
      with preconditions (a packed quantization, an angle table)

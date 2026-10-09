@@ -47,6 +47,11 @@ class Repeat(Operator):
     test = Testing(
         [
             Case(dict(rows=8, cols=64, repeat=4, tile_size=None)),
+            Case(
+                dict(rows=8, cols=64, repeat=4, tile_size=None, dtype=np.int32),
+                id="int32",
+                lower=True,
+            ),
             Case(dict(rows=8, cols=512, repeat=4, tile_size=64)),
             Case(dict(rows=4, cols=1024, repeat=2, tile_size=None)),
             Case(dict(rows=4, cols=2048, repeat=2, tile_size=None), extensive=True),

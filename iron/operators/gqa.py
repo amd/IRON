@@ -211,6 +211,7 @@ class GQAScores(_KVGroups):
             Case(
                 dict(heads=6, groups=3, seq_len=128, chunk=64, num_aie_columns=1),
                 id="three_groups_a_column",
+                lower=True,
             ),
             Case(dict(heads=4, groups=4, seq_len=128), id="one_head_a_group"),
             Case(
@@ -372,6 +373,7 @@ class GQAContext(_KVGroups):
             Case(
                 dict(heads=6, groups=3, seq_len=128, chunk=64, num_aie_columns=1),
                 id="three_groups_a_column",
+                lower=True,
             ),
             Case(dict(heads=1, groups=1, seq_len=128), id="single_call"),
             Case(dict(heads=16, groups=4, seq_len=64, chunk=64), id="shortest"),

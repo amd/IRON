@@ -27,7 +27,10 @@ class RMSNorm(Rowwise):
     """
 
     test = Testing(
-        [Sweep(rows=True), Sweep(rows=True, tile_cap=WEIGHTED_TILE_CAP, weighted=True)]
+        [
+            Sweep(rows=True),
+            Sweep(rows=True, tile_cap=WEIGHTED_TILE_CAP, lower=True, weighted=True),
+        ]
     )
 
     # The epsilon under the root: 1e-5 by default; a model states its own.
