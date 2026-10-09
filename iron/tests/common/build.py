@@ -21,6 +21,7 @@ from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron.operators.flm.gemm.op as flm_gemm
+from iron.operators.flm.packing import packed_b_size
 from iron.common import (
     In,
     Link,
@@ -359,7 +360,7 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
     assert a.shape == (512, 1024) and c.shape == (512, 1024)
     # B is declared in bfp16ebs8 blocks; the host holds the same bytes as uint8.
     assert b.shape == (1024 * 1024 // 8,) and b.dtype is v8bfp16ebs8
-    assert b.host_shape == (flm_gemm.packed_b_size(1024, 1024, True),)
+    assert b.host_shape == (packed_b_size(1024, 1024, True),)
     assert b.host_dtype is np.uint8
     assert op.residents == {
         "n_val": 1024,
