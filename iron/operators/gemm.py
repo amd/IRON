@@ -166,12 +166,13 @@ class GEMM(Operator):
         np.int32,
         derive=lambda op: (op.M // op.mem_tile_m_c) * (op.N // op.mem_tile_n),
     )
-    # The tiles the bound covers: whole row blocks of it, every column tile.
-    n_tiles_valid = Value(
+    # Under a bound: the row blocks it covers, and the column tiles of each.
+    row_blocks_valid = Value(
         np.int32,
-        derive=lambda op: ceildiv(op.valid, op.mem_tile_m_c) * (op.N // op.mem_tile_n),
-        optional=True,  # nothing reads it unbounded
+        derive=lambda op: ceildiv(op.valid, op.mem_tile_m_c),
+        optional=True,  # nothing reads them unbounded
     )
+    col_tiles = Value(np.int32, derive=lambda op: op.N // op.mem_tile_n, optional=True)
 
     def extent_unit(self, buffer: str) -> int:
         return 0  # nothing is shortened: the cores bound their compute
@@ -381,13 +382,19 @@ class GEMM(Operator):
         C_l1l2_fifos: list[list[Any]] = [[None] * n_aie_cols for _ in range(n_aie_rows)]
         C_l2l3_fifos: list[Any] = [None] * n_aie_cols
 
-        # Runtime parameters: [K_div_k, n_tiles_per_core] per core
+        # Under a bound on M each core computes the tiles the bound covers
+        # and passes the rest through: the DMAs still move every row.
+        bounded = "valid" in self.bound_extents and target.image == "elf"
+        n_rtp = 3 if bounded else 2
+
+        # Runtime parameters: [K_div_k, n_tiles_per_core, col_tiles if
+        # bounded] per core
         rtps = [
             [
                 Buffer(
-                    np.ndarray[(2,), np.dtype[np.int32]],
+                    np.ndarray[(n_rtp,), np.dtype[np.int32]],
                     name=f"rtp{row}_{col}",
-                    initial_value=np.zeros(2, dtype=np.int32),
+                    initial_value=np.zeros(n_rtp, dtype=np.int32),
                     use_write_rtp=True,
                 )
                 for col in range(n_aie_cols)
@@ -458,10 +465,7 @@ class GEMM(Operator):
             for j in range(n_aie_rows):
                 C_l1l2_fifos[j][col] = c_tmp_fifos[j]
 
-        # Under a bound on M each core computes the tiles the bound covers
-        # and passes the rest through: the DMAs still move every row.
-        bounded = "valid" in self.bound_extents and target.image == "elf"
-        n_valid_param = self.n_tiles_valid.param if bounded else None
+        n_valid_param = self.row_blocks_valid.param if bounded else None
 
         # Tasks for each worker to perform
         def core_fn(
@@ -503,10 +507,12 @@ class GEMM(Operator):
 
             if bounded:
                 assert n_valid is not None
-                n_compute = n_valid.read()
-                for _ in range_(n_compute):
-                    tile(compute=True)
-                for _ in range_(rtp_n_tiles_per_core - n_compute):
+                row_blocks = n_valid.read()
+                col_tiles = my_rtp[2]
+                for _ in range_(row_blocks):
+                    for _ in range_(col_tiles):
+                        tile(compute=True)
+                for _ in range_(rtp_n_tiles_per_core - row_blocks * col_tiles):
                     tile(compute=False)  # a padding tile: passed through
                 return
             loop = range(1)  # Workaround for issue #1547
@@ -560,6 +566,8 @@ class GEMM(Operator):
         ]
         self.k_div_k.bind(flat_rtps, 0)
         self.n_tiles.bind(flat_rtps, 1)
+        if bounded:
+            self.col_tiles.bind(flat_rtps, 2)
         return workers + [b for row in workerBarriers for b in row]
 
     # -- the runtime sequence --------------------------------------------------

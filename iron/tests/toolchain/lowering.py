@@ -22,9 +22,10 @@ shape and dtype decision each operator makes.
 import importlib
 import subprocess
 
+import numpy as np
 import pytest
 
-from iron.common import Unresolvable
+from iron.common import Unresolvable, graph
 from iron.common.design import OperatorDesign
 from iron.tests.common.cases import CASES
 from iron.tests.toolchain.tools import AIECC, PEANO, requires
@@ -122,5 +123,6 @@ def test_a_bounded_operator_lowers(device, module, cls_name, kwargs, bound, tmp_
         op = cls(**kwargs).resolved(device)
     except ValueError as e:
         pytest.skip(f"not for {device.name}: {e}")
-    op.use_value(bound, "n")  # what x[:n] in a graph does
+    n = graph.Value("n", "scratchpad", np.int32)
+    op.use_value(bound, n.affine())  # what x[:n] in a graph does
     lower(op, tmp_path)

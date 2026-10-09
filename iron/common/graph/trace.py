@@ -423,7 +423,7 @@ class Tracer:
                 f"value, bind one expression at every site or use two instances"
             )
         if name not in bound:
-            op.use_value(name, value.name)
+            op.use_value(name, value)
             bound[name] = value
             member = next(v for v in op.values if v.name == name)
             self.bindings.append(Binding(op, member, value))

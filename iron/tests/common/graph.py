@@ -195,7 +195,9 @@ def test_alike_instances_bound_to_different_values_are_different_designs():
     assert len(t.bindings) == 3 and set(by_value) == {"a", "b"}
     first, second, third = t.bindings
     assert first.expression == t.values[0] * 16  # an element offset: a rows of 16
-    assert first.op.bound_values == {"out_offset": "a_x16"}
+    assert {k: e.name for k, e in first.op.bound_values.items()} == {
+        "out_offset": "a_x16"
+    }
     assert first.op.design_key() != second.op.design_key()
     assert first.op.design_key() == third.op.design_key()
     symbols = [device_symbol(b.op, b.member) for b in t.bindings]
@@ -459,7 +461,10 @@ def test_llama_decode_traces_and_tunes():
     mhas = [s.op for s in t.steps if type(s.op) is MHA]
     assert all(op.kv_interleaved for op in mhas)
     assert len(mhas) == cfg.n_layers
-    assert all(op.bound_values == {"kv_valid": "position_p1"} for op in mhas)
+    assert all(
+        {k: e.name for k, e in op.bound_values.items()} == {"kv_valid": "position_p1"}
+        for op in mhas
+    )
     assert all(op.packed and op.kv_len == L for op in mhas)
     # The same array serves every layer's like projections.
     q_arrays = {
@@ -533,7 +538,10 @@ def test_llama_prompt_traces_over_the_same_caches():
     assert len(by_rows) == len(per_block) * cfg.n_layers + 1
     # MHA attends over the caches up to the chunk's last token.
     mha = next(op for op, *_ in t.runlist if type(op).__name__ == "MHA")
-    assert mha.bound_values == {"valid": "rows", "kv_valid": "position_p1"}
+    assert {k: e.name for k, e in mha.bound_values.items()} == {
+        "valid": "rows",
+        "kv_valid": "position_p1",
+    }
     # The caches are the states a token's version reads: the same objects,
     # so one arena holds them once for both.
     token = g.trace(**g.shapes(1))
@@ -760,7 +768,9 @@ def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
 
     t = Chunked().trace(x=(C, G * D))
     (copy,) = t.operators
-    assert copy.dst_bound == 1 and copy.bound_values == {
+    assert copy.dst_bound == 1 and {
+        k: e.name for k, e in copy.bound_values.items()
+    } == {
         "src_valid": "rows",
         "out_offset": f"chunk_x{C * D}",
         "dst_valid": "rows",
@@ -917,10 +927,11 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
 
 def test_integer_arithmetic_on_an_expression_is_an_expression():
     """Sums, products and floor divisions by powers of two (so ``ceildiv``)
-    of an expression are expressions that compute the same; anything else
-    is refused.
+    of an expression are expressions that compute the same, and so are sums
+    of two linear ones in its value; anything else is refused.
     """
     x = Affine(Value("x", "scratchpad", np.int32), 3, -5)
+    y = Affine(Value("y", "scratchpad", np.int32))
     cases = [
         (lambda v: v + 7, None),
         (lambda v: 2 - v, None),
@@ -931,12 +942,21 @@ def test_integer_arithmetic_on_an_expression_is_an_expression():
         (lambda v: (ceildiv(v, 64) + 1) * 32, None),
         (lambda v: (v // 4 + 3) // 16, None),  # nested floors fold into one
         (lambda v: (v // 4) * 8 // 2 - 1, None),  # an exact division
+        (lambda v: (v * 512) // 512, None),  # linear again
+        (lambda v: ceildiv(v * 4, 256), None),
+        (lambda v: v * 3 + v + 1, None),
+        (lambda v: v * 4 - v, None),
+        (lambda v: v - v, None),  # the value cancels: a number
+        (lambda v: (v * 4) // v, None),
         (lambda v: v // 3, TypeError),
         (lambda v: (v // 4) * 3 // 2, TypeError),
         (lambda v: v // 1 if v else 0, TypeError),
         (lambda v: v % 64, TypeError),
         (lambda v: v < 0, TypeError),
-        (lambda v: v + x, TypeError),
+        (lambda v: v + y, TypeError),
+        (lambda v: v // 4 + v, TypeError),
+        (lambda v: (v + 1) // v, TypeError),
+        (lambda v: v // (v * 2), TypeError),
     ]
     for f, error in cases:
         if error is not None:
@@ -944,9 +964,13 @@ def test_integer_arithmetic_on_an_expression_is_an_expression():
                 f(x)
             continue
         form = f(x)
-        assert form.value is x.value
         for v in range(-300, 300):
-            assert form.evaluate({"x": v}) == f(3 * v - 5), v
+            u = 3 * v - 5
+            if isinstance(form, int):
+                assert f(u) == form, v
+                continue
+            assert form.value is x.value
+            assert form.evaluate({"x": v}) == f(u), v
 
 
 def test_the_packed_decode_words_of_mha_have_emit_forms(npu2):
@@ -1038,8 +1062,11 @@ def test_a_bound_reaches_a_copy_and_a_repeat_through_their_views(npu2):
     t = g.trace(x=(L, G * D))
     copy, rep = t.operators
     assert copy.src_bound == 1 and copy.dst_bound == 1
-    assert copy.bound_values == {"src_valid": "n", "dst_valid": "n"}
-    assert rep.bound_extents == {"valid_seq": "c"}
+    assert {k: e.name for k, e in copy.bound_values.items()} == {
+        "src_valid": "n",
+        "dst_valid": "n",
+    }
+    assert {k: e.name for k, e in rep.bound_extents.items()} == {"valid_seq": "c"}
     n, c = t.values
     assert [(b.member.name, b.expression) for b in t.bindings] == [
         ("src_valid", n.affine()),
@@ -1076,17 +1103,23 @@ def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
 
     t = g.trace(x=(512, 64), w=(256, 64))
     gemm, mha = t.operators
-    assert gemm.bound_extents == {"valid": "n"}
-    assert mha.bound_extents == {"valid": "n", "kv_valid": "n"}
+    assert {k: e.name for k, e in gemm.bound_extents.items()} == {"valid": "n"}
+    assert {k: e.name for k, e in mha.bound_extents.items()} == {
+        "valid": "n",
+        "kv_valid": "n",
+    }
     gemm, mha = (op.resolved(aie_utils.get_current_device()) for op in (gemm, mha))
-    assert [v.name for v in gemm.values] == ["valid", "n_tiles_valid"]
-    assert gemm.derived_at("n_tiles_valid", valid=100) == 1 * (256 // gemm.mem_tile_n)
+    assert [v.name for v in gemm.values] == ["valid", "row_blocks_valid"]
+    assert gemm.derived_at("row_blocks_valid", valid=100) == 1
+    assert gemm.residents["col_tiles"] == 256 // gemm.mem_tile_n
     at = dict(valid=100, kv_valid=100)
     assert mha.derived_at("s_q", **at) == mha.derived_at("s_kv", **at) == 100
     assert mha.derived_at("q_blocks_valid", **at) == 1  # 128 padded / (64 x 2)
     assert mha.derived_at("kv_blocks", **at) == 2  # ceil(100 / 64)
     assert mha.derived_at("q_start", **at) == 0
     assert mha.derived_at("q_start", valid=64, kv_valid=192) == 2  # a later chunk
+    # Bound alike, the queries start at 0 on every call: written once.
+    assert mha.residents["q_start"] == 0 and mha.uses_value("s_q")
     (out,) = t.outputs
     assert out.bounds == {0: t.values[0].affine()}  # O is bounded like Q
 
@@ -1119,7 +1152,7 @@ def test_an_optional_input_gives_a_version_without_it():
     assert [(b.member.name, b.expression) for b in alone.bindings] == [
         ("in_offset", alone.values[0] * 256)
     ]
-    assert copy.bound_values == {"in_offset": "r_x256"}
+    assert {k: e.name for k, e in copy.bound_values.items()} == {"in_offset": "r_x256"}
     x = np.full(256, 2, dtype=bfloat16)
     np.testing.assert_array_equal(g.reference(r=1), table[1])
     np.testing.assert_array_equal(g.reference(None, r=1), table[1])

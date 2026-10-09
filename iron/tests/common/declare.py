@@ -743,7 +743,7 @@ def test_a_bounded_operand_binds_the_extent_and_what_derives_from_it(npu2):
     t = g.trace(x=(64, 8))
     a, b = t.operators
     for op in (a, b):
-        assert op.bound_extents == {"valid": "n"}
+        assert {k: e.name for k, e in op.bound_extents.items()} == {"valid": "n"}
         assert op.uses_value("valid") and op.uses_value("count")
         assert not op.uses_value("width")  # still written once per build
         assert set(op.residents) == {"width"}
