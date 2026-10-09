@@ -282,12 +282,15 @@ class Scratchpad(_Value):
     kind = "scratchpad"
 
     def __init__(self, dtype: Any = np.int32) -> None:
+        super().__init__(type(self)[dtype].dtype)
+
+    def __class_getitem__(cls, dtype) -> ValueSpec:
         if np.dtype(dtype).kind == "f":
             raise TypeError(
                 "Scratchpad values cannot be floating point: the scratchpad "
                 "encoding zeroes the top two bits of the value"
             )
-        super().__init__(dtype)
+        return super().__class_getitem__(dtype)
 
 
 class Carried(Scratchpad):

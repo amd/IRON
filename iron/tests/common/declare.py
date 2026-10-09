@@ -217,6 +217,14 @@ def test_float_scratchpad_is_rejected():
         Scratchpad(np.float32)
 
 
+def test_float_scratchpad_annotation_is_rejected():
+    with pytest.raises(TypeError, match="floating point"):
+
+        class Bad(iron.Graph):
+            def body(self, x, *, scale: Scratchpad[np.float32]):
+                return x
+
+
 def test_per_and_broadcast_are_exclusive():
     with pytest.raises(TypeError, match="either per"):
 
