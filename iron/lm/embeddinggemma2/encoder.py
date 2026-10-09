@@ -45,7 +45,7 @@ class Encoder:
     def __init__(
         self,
         directory,
-        max_tokens: int = 512,
+        max_tokens: int = 2048,
         costs: Path | None = None,
         towers: bool = False,
     ):

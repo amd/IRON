@@ -38,8 +38,8 @@ CALIBRATION_PAIRS = [
 
 def calls(directory: Path) -> list[Call]:
     """A call of each version of the text encoder, both towers and the
-    multimodal graph a prompt can reach, every row real (the masked
-    Softmax's longest span).
+    multimodal graph a prompt can reach, every row real (the longest bound a
+    call gives).
 
     Args:
         directory: The checkpoint directory.
@@ -47,7 +47,7 @@ def calls(directory: Path) -> list[Call]:
     c, A, V = EMBEDDINGGEMMA_2, audio_model.AUDIO, vision_model.VISION
     tensors = Checkpoint(directory / "model.safetensors").tensors
     weights = load_weights(text_tensors(tensors), layout(c), c.n_layers)
-    text = EmbeddingGemma(c, weights, c.sliding_window)
+    text = EmbeddingGemma(c, weights)
     vision = vision_model.Vision(
         V,
         load_weights(
@@ -78,7 +78,7 @@ def calls(directory: Path) -> list[Call]:
         frames = s["x"][0][0] // A.hop - 1
         out.append(Call(audio.trace(**s), dict(n=frames // 2, frames=frames)))
 
-    graph = Multimodal(c, weights, c.sliding_window, audio.audio, vision.vision)
+    graph = Multimodal(c, weights, text.max_tokens, audio.audio, vision.vision)
     # A tower version's fewest soft tokens: one past the version before it.
     fewest_audio = dict(zip(audio.audio.rows, (1, *(T + 1 for T in audio.audio.rows))))
     fewest_image = dict(

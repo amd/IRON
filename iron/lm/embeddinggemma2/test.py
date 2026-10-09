@@ -49,12 +49,14 @@ DOCUMENTS = [
 PARAGRAPHS = [
     f"Paragraph {i}: the aurora borealis appears when solar wind particles collide "
     "with oxygen and nitrogen atoms in the upper atmosphere, emitting green and red light."
-    for i in range(30)
+    for i in range(60)
 ]
-# About 370 tokens: the 512-row version.
+# About 370 tokens.
 LONG = " ".join(PARAGRAPHS[:12])
-# About 920 tokens: the 1024-row version, past the sliding window.
-LONGER = " ".join(PARAGRAPHS)
+# About 920 tokens, past the sliding window.
+LONGER = " ".join(PARAGRAPHS[:30])
+# About 1840 tokens, near the encoder's 2048.
+LONGEST = " ".join(PARAGRAPHS)
 
 # Measured: 0.99986 at the least, where HF's own bf16 model is 0.99997.
 MIN_COSINE = 0.9995
@@ -72,7 +74,7 @@ def cosine(a, b):
 
 @pytest.fixture(scope="module")
 def encoder():
-    yield Encoder(DIRECTORY, max_tokens=1024)
+    yield Encoder(DIRECTORY)
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 
@@ -90,8 +92,9 @@ def oracle(encoder):
         (DOCUMENTS[0], "document"),
         (LONG, "document"),
         (LONGER, "document"),
+        (LONGEST, "document"),
     ],
-    ids=["query", "document", "long_document", "past_the_window"],
+    ids=["query", "document", "long_document", "past_the_window", "near_the_limit"],
 )
 def test_embeddinggemma_2_accuracy(encoder, oracle, text, task, record_property):
     tokens = encoder.tokens(text, task)
@@ -124,7 +127,7 @@ def test_embeddinggemma_2_ranking(encoder, oracle):
         cosine(oracle(encoder.tokens(d, "document")), want_query) for d in DOCUMENTS
     ]
     assert scores[0] > scores[1]
-    # Measured: 0.0013 and 0.0016 below the oracle's 0.871 and 0.604.
+    # Measured: 0.0013 and 0.0009 below the oracle's 0.871 and 0.604.
     np.testing.assert_allclose(scores, want, atol=3e-3)
 
 
@@ -154,7 +157,7 @@ IMAGE = picture(288, 432)
 
 @pytest.fixture(scope="module")
 def multimodal():
-    yield Encoder(DIRECTORY, max_tokens=512, towers=True, costs=COSTS)
+    yield Encoder(DIRECTORY, towers=True, costs=COSTS)
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 
@@ -163,6 +166,12 @@ MIXED = {
     "audio": ("<|audio|> a bird singing", CLIP, None),
     "image": ("<|image|> waves at dusk", None, IMAGE),
     "both": ("<|image|> the picture, then the sound: <|audio|>", CLIP, IMAGE),
+    # 325 soft tokens of audio and an image's.
+    "long_clip_and_image": (
+        "<|image|> the picture, then the sound: <|audio|>",
+        chirp(13.0),
+        IMAGE,
+    ),
 }
 
 
