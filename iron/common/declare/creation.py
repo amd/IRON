@@ -89,9 +89,17 @@ def declare(cls: type) -> None:
 
     dataclasses.dataclass(cls, eq=False, repr=False, kw_only=True)  # in place
 
+    fields = {f.name: f for f in dataclasses.fields(cls)}
+    for name in fields.keys() - inherited:
+        base = next((b for b in cls.__mro__[1:] if name in vars(b)), None)
+        if base is not None:
+            raise TypeError(
+                f"{cls.__name__}.{name} hides {base.__name__}.{name}, which "
+                f"the library reads; name the field otherwise"
+            )
+
     # dataclass names the Field objects the class body bound to bare names,
     # so a shape that captured one is rewritten by name (Shape.rewrite).
-    fields = {f.name: f for f in dataclasses.fields(cls)}
     for f in fields.values():
         setattr(cls, f.name, DimRef(cls, f.name, f.metadata.get(Tier), f.default))
 

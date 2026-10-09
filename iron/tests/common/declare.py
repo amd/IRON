@@ -200,6 +200,18 @@ def test_a_member_hiding_the_operators_own_attribute_is_rejected():
             values = In(n)
 
 
+def test_a_field_hiding_the_operators_own_attribute_is_rejected():
+    with pytest.raises(TypeError, match="hides Operator.inputs"):
+
+        class Bad(Operator):
+            inputs: int = param()
+
+    with pytest.raises(TypeError, match="hides Operator.name"):
+
+        class Worse(Operator):
+            name: str = param()
+
+
 def test_float_scratchpad_is_rejected():
     with pytest.raises(TypeError, match="floating point"):
         Scratchpad(np.float32)
