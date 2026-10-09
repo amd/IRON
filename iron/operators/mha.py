@@ -133,7 +133,7 @@ class SplitColumns:
     v: tuple[int, ...]
 
 
-# B_q and B_kv, which match: whole in the 64-row unit seq_pad is padded by,
+# B_q, which B_kv matches: whole in the 64-row unit seq_pad is padded by,
 # up to the largest whose cores fit L1 at this head size.
 BLOCK_SIZES = Divisors(
     of=lambda op: op.kv_len,
@@ -304,7 +304,8 @@ class MHA(Operator):
     scale: float = param(default=lambda op: float(1 / np.sqrt(op.d)), array=True)
     # Left out, the largest block whose cores fit L1 at this d.
     B_q: int = auto(array=True, domain=BLOCK_SIZES)
-    B_kv: int = auto(domain=BLOCK_SIZES)
+    # mha.cc's causal skip compares a KV block's index with a Q block's.
+    B_kv: int = auto(repr=False, derived=True)
     num_pipelines: int = auto(1, array=True, domain=Width())
     # Left out, "memtiles", or "tiles" where P*V is split.
     placement: str = auto(array=True, domain=PLACEMENT)
@@ -471,9 +472,6 @@ class MHA(Operator):
         self.check_derived("seq_pad")
 
     def compatible(self) -> None:
-        # mha.cc's causal skip compares a KV block's index with a Q block's.
-        if self.B_q != self.B_kv:
-            raise ValueError(f"B_q ({self.B_q}) and B_kv ({self.B_kv}) must match")
         if 64 % self.B_q:
             raise ValueError(
                 f"B_q ({self.B_q}) must divide 64, the block seq_pad is whole of"
@@ -614,7 +612,7 @@ class MHA(Operator):
         return dataclasses.replace(
             self,
             B_q=B_q,
-            B_kv=B_q if self.B_kv is None else self.B_kv,
+            B_kv=B_q,
             placement=self.placement or ("tiles" if pv_cores > 1 else "memtiles"),
             q_shims=q_shims,
             join_rows=B_q * (self.num_pipelines // q_shims),
@@ -642,7 +640,7 @@ class MHA(Operator):
         Q (one deep where P*V is split), K two deep and the scores.
 
         Args:
-            block: ``B_q``, which ``B_kv`` matches.
+            block: ``B_q``, which ``B_kv`` is.
             pv_cores: The P*V cores the head is split over.
 
         Returns:

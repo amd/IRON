@@ -38,7 +38,7 @@ from iron.common.graph.narrowing import (
     model_us,
     variants,
 )
-from iron.common.graph.probe import Call, Designs, Point, judge
+from iron.common.graph.probe import Call, Designs, Point, judge, line
 from iron.common.harness import vectors
 from iron.lm.layers import SwiGLU
 from iron.operators import (
@@ -226,7 +226,6 @@ def test_derived_fields_are_not_widths(npu2):
     assert mha.domains(npu2) == {
         "num_pipelines": (8, 4, 2, 1),
         "B_q": (64, 32, 16),
-        "B_kv": (64, 32, 16),
         "placement": ("memtiles", "tiles", "columns"),
         "pv_cores": (1, 2),
     }
@@ -302,13 +301,36 @@ def test_a_block_is_no_larger_than_a_core_holds(npu2):
     # Uncapped, a 32768-row prefill's ladder runs to kv_len, and generating
     # MHA at a 32768 x 32768 score tile to ask the placer takes 8 GiB.
     mha = MHA(num_heads=8, seq_pad=32768).resolved(npu2)
-    assert mha.domains(npu2)["B_kv"] == (64, 32, 16)
+    assert mha.domains(npu2)["B_q"] == (64, 32, 16)
     wide = MHA(num_heads=4, seq_pad=2048, d=256, causal=False).resolved(npu2)
-    assert wide.domains(npu2)["B_kv"] == (16,)
+    assert wide.domains(npu2)["B_q"] == (16,)
     context = GQAContext(heads=32, groups=8, seq_len=32768).resolved(npu2)
     assert context.domains(npu2)["chunk"] == (512, 256, 128, 64)
     softmax = Softmax(rows=32, cols=32768).resolved(npu2)
     assert max(softmax.domains(npu2)["block"]) == 4096
+
+
+def test_descent_reaches_every_mha_setting_one_tunable_a_move(npu2):
+    found = variants(MHA(num_heads=2, seq_len=100), npu2)
+    default = found[0]
+    moves = {default.key: 0}
+    frontier = [default]
+    depth = 0
+    while frontier:
+        depth += 1
+        reached = {
+            w.key: w
+            for v in frontier
+            for i in range(len(v.tunables))
+            for w in line(found, v, i)
+            if w.key not in moves
+        }
+        moves |= dict.fromkeys(reached, depth)
+        frontier = list(reached.values())
+    assert len(moves) == len(found)
+    for v in found:
+        apart = sum(a != b for a, b in zip(v.tunables, default.tunables))
+        assert moves[v.key] <= apart, v.tunables
 
 
 def test_a_row_a_core_holds_whole_is_one_block(npu2):
@@ -324,8 +346,8 @@ def test_flm_gemm_searches_its_a_tile_and_row_blocks(npu2):
 
 def test_a_placement_is_searched_by_name_and_keys_the_array(tmp_path, npu2):
     chunk = MHA(num_heads=8, num_KV_heads=2, seq_len=2048, kv_len=8192)
-    chunk = chunk.with_tunables(num_pipelines=8, B_q=64, B_kv=64)
-    fixed = frozenset({"num_pipelines", "B_q", "B_kv", "pv_cores"})
+    chunk = chunk.with_tunables(num_pipelines=8, B_q=64)
+    fixed = frozenset({"num_pipelines", "B_q", "pv_cores"})
     found = variants(chunk, npu2, fixed)
     assert [v.tunables for v in found] == [
         (("placement", p),) for p in ("memtiles", "tiles", "columns")

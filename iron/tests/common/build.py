@@ -219,7 +219,7 @@ def test_mha_binds_p_times_v_at_its_own_shape():
     (B_kv, d) and O (B_q, d), each streamed as P*V takes it, O accumulated
     in float32 and rounded once into the bf16 output.
     """
-    op = MHA(num_heads=1, seq_len=1024, d=128, num_pipelines=8, B_q=32, B_kv=32)
+    op = MHA(num_heads=1, seq_len=1024, d=128, num_pipelines=8, B_q=32)
     text = str(build_design(op.resolved(from_name("npu2", n_cols=8))))
     p, v = "memref<32x32xbf16>", "memref<32x128xbf16>"
     acc, o = "memref<32x128xf32>", "memref<32x128xbf16>"

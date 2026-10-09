@@ -1082,6 +1082,25 @@ def measure_points(
 EXHAUSTIVE = 32
 
 
+def line(found: Sequence[Variant], through: Variant, i: int) -> list[Variant]:
+    """The settings of ``found`` a coordinate descent tries for the ``i``-th
+    tunable from ``through``: at each of its values, the setting that
+    differs from ``through`` in the fewest other tunables, the first in
+    ``found`` on a tie. Where tunables are coupled, a value is reached by
+    moving the others with it.
+
+    Returns:
+        One setting per value, in ``found``'s order of the values.
+    """
+    at: dict[Hashable, list[Variant]] = {}
+    for v in found:
+        at.setdefault(v.tunables[i][1], []).append(v)
+    return [
+        min(vs, key=lambda v: sum(a != b for a, b in zip(v.tunables, through.tunables)))
+        for vs in at.values()
+    ]
+
+
 def search(
     table: CostTable,
     found: Sequence[Variant],
@@ -1098,8 +1117,8 @@ def search(
 ) -> dict[str, StepCost]:
     """Measure the settings of ``found`` (the default first) into ``table``:
     every one when there are at most ``exhaustive``, else by coordinate
-    descent, each tunable's line through the fastest accurate setting so far,
-    from the default until a pass over the tunables moves it no further.
+    descent, each tunable's ``line`` through the fastest accurate setting so
+    far, from the default until a pass over the tunables moves it no further.
     A setting that does not build is left off every line after.
     The other arguments are ``measure_steps``'.
 
@@ -1128,16 +1147,8 @@ def search(
     while moved:
         moved = False
         for i in range(len(default.tunables)):
-            line = [
-                v
-                for v in found
-                if all(
-                    a == b
-                    for j, (a, b) in enumerate(zip(v.tunables, best.tunables))
-                    if j != i
-                )
-            ]
-            batch = [default] + [v for v in line if v is not default]
+            moves = line(found, best, i)
+            batch = [default] + [v for v in moves if v is not default]
             ran |= measure_steps(
                 table,
                 batch,
@@ -1151,8 +1162,8 @@ def search(
                 fit_cache,
                 log,
             )
-            built = [v for v in line if v.key in table.steps]
-            found = [v for v in found if v not in line or v in built]
+            built = [v for v in moves if v.key in table.steps]
+            found = [v for v in found if v not in moves or v in built]
             fastest = min(
                 (v for v in built if table.steps[v.key].accurate),
                 key=lambda v: table.steps[v.key].t_step_us,

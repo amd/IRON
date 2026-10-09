@@ -67,6 +67,7 @@ import hashlib
 import heapq
 import itertools
 import json
+import logging
 import math
 import os
 import statistics
@@ -85,6 +86,8 @@ from ..image.coresidence import Packing, fits
 from ..image.fusion import generate, parameters_preamble
 from .fold import FOLD_RUNS, Folding, Made, folded, foldings
 from .trace import TracedGraph
+
+logger = logging.getLogger(__name__)
 
 
 def cost_key(op: Operator, dev=None) -> str:
@@ -161,6 +164,7 @@ def variants(op: Operator, dev, pinned: frozenset[str] = frozenset()) -> list[Va
     defaults = dict(default.tunables)
     out = {default.key: default}
     domains = default.resolved.domains(dev)
+    dropped = 0
     for combo in itertools.product(*domains.values()):
         tunables = dict(zip(domains, combo))
         if tunables == defaults:
@@ -171,9 +175,18 @@ def variants(op: Operator, dev, pinned: frozenset[str] = frozenset()) -> list[Va
             if not resolved.has_sequence_override():
                 for buf in resolved.buffers:
                     runtime.Sequence(resolved, {}).plan(buf)
-        except ValueError:  # unresolvable, incompatible or untransferable here
+        except ValueError as e:  # unresolvable, incompatible or untransferable here
+            logger.debug("%s at %s dropped: %s", type(op).__name__, tunables, e)
+            dropped += 1
             continue
         out.setdefault(variant.key, variant)
+    if dropped:
+        logger.info(
+            "%s: %d of %d settings dropped",
+            type(op).__name__,
+            dropped,
+            math.prod(len(d) for d in domains.values()),
+        )
     return list(out.values())
 
 
