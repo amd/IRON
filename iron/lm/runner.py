@@ -259,8 +259,15 @@ def main(runner: type[Runner], description: str):
         def sampler():
             return Sampler(args.temperature, args.top_k, np.random.default_rng(SEED))
 
+        pending: list[int] = []
+
         def show(token):
-            print(run.decode([token]), end="", flush=True)
+            pending.append(token)
+            text = run.decode(pending)
+            # A token can end partway through a character; the next completes it.
+            if not text.endswith("\ufffd"):
+                print(text, end="", flush=True)
+                pending.clear()
 
         def report(first, later):
             print(f"\n\n[Prefill] Time to first token: {first:7.3f} s")
@@ -269,7 +276,9 @@ def main(runner: type[Runner], description: str):
 
         print(run.decode(tokens[1:]), end="", flush=True)
         if not args.device_loop:
-            report(*generate(model, tokens, args.num_tokens, sampler(), show)[1:])
+            timing = generate(model, tokens, args.num_tokens, sampler(), show)[1:]
+            print(run.decode(pending), end="")
+            report(*timing)
             return
         drawn, first, later = model.generate(tokens, args.num_tokens, sampler())
         print(run.decode(drawn), end="", flush=True)
@@ -277,6 +286,7 @@ def main(runner: type[Runner], description: str):
         if args.compare_host:
             print("\n[Host loop]\n" + run.decode(tokens[1:]), end="")
             host, _, _ = generate(model, tokens, args.num_tokens, sampler(), show)
+            print(run.decode(pending), end="")
             differ = sum(a != b for a, b in zip(drawn, host))
             print(
                 f"\n[DeviceLoop] Tokens differing from the host loop: {differ}/{len(host)}"
