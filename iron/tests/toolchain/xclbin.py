@@ -39,7 +39,7 @@ pytestmark = requires("xclbinutil", "peano")
 def test_a_graph_compiles_to_one_xclbin_per_operator_chained(device):
     fn, E = swiglu()
     net = fn.compile(
-        device,
+        dev=device,
         boundaries=iron.each_step,
         image=iron.XCLBIN,
         x=(1, E),

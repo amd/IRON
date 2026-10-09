@@ -250,7 +250,7 @@ class CausalLM(iron.Graph):
         if dev is None:
             dev = aie_utils.ensure_current_device()
         decode = self.compile(
-            dev, coresident=tuner, boundaries=boundaries, **self.shapes(1)
+            dev=dev, coresident=tuner, boundaries=boundaries, **self.shapes(1)
         )
         if decode.plan.image != iron.ELF:
             print(decode.plan.report("decode"), flush=True)
@@ -260,7 +260,7 @@ class CausalLM(iron.Graph):
             return self
         feeds = decode if decode.emit is not None else None
         prompt = self.compile(
-            dev,
+            dev=dev,
             feeds=feeds,
             coresident=tuner,
             boundaries=boundaries,

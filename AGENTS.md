@@ -200,7 +200,7 @@ reuse lint
      its `split`/`round_robin`), `ExternalSequence` (the sequence
      against a shipped image: `Lock.set` releases its parameter block)
    - `graph/`: graphs (`iron.Graph`, `iron.state`) and
-     `compile(dev, boundaries=, image=)`
+     `compile(dev=, boundaries=, image=)`
    - `image/`: what a graph lowers onto: `OperatorSequence`, the buffer
      allocator (`LiveRange`, `Pool`, `ArenaPlan`), `Fusion` (the designs of
      a sequence as one module), `FusedImage`/`XclbinChain` (the full ELF
@@ -494,7 +494,7 @@ example (a test at the small shape loads
 graph still passes is one the profile could not have given.
 
 Operators with equal `array_key()` share one array; with equal
-`design_key()` they are one build. `compile(dev, boundaries=,
+`design_key()` they are one build. `compile(dev=, boundaries=,
 image=, **shapes)` derives the image (a fused ELF on NPU2, per-step
 xclbins with `boundaries=iron.each_step`) and `verbose=True` prints why.
 It links the image (`version.image`) and stops

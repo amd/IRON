@@ -773,7 +773,11 @@ def test_a_tuned_compile_takes_the_packaging_first(tmp_path, npu2):
     tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
     with pytest.raises(ValueError, match="this version is packaged 'separate'"):
         AddSilu().compile(
-            npu2, boundaries=iron.each_step, coresident=tuner, a=(SIZE,), b=(SIZE,)
+            dev=npu2,
+            boundaries=iron.each_step,
+            coresident=tuner,
+            a=(SIZE,),
+            b=(SIZE,),
         )
 
 

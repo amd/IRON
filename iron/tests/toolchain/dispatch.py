@@ -49,7 +49,7 @@ def _graph():
 def test_values_become_dispatch_time_kernels_at_each_step(device):
     g, shape = _graph()
     net = g.compile(
-        device,
+        dev=device,
         boundaries=iron.each_step,
         image=iron.XCLBIN,
         x=shape,
@@ -95,7 +95,7 @@ def test_a_per_call_size_over_one_block_builds_at_each_step(npu2):
             )
 
     net = Decode().compile(
-        npu2,
+        dev=npu2,
         boundaries=iron.each_step,
         q=(1, heads, d),
         k=(kv_heads, cache, d),
@@ -111,7 +111,7 @@ def test_npu1_compiles_each_step_unasked():
     """
     g, shape = _graph()
     previous = aie_utils.get_current_device(probe_runtime=False)
-    net = g.compile(DEVICES["npu1"](), x=shape)
+    net = g.compile(dev=DEVICES["npu1"](), x=shape)
     assert aie_utils.get_current_device(probe_runtime=False) is previous
     assert net.plan.image == "xclbin" and net.plan.dispatch == "separate"
     assert net.plan.reasons[-1] == "boundaries=each_step: the xclbin form that is built"

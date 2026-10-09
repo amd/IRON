@@ -305,8 +305,8 @@ class Graph:
 
     def compile(
         self,
-        dev=None,
         *,
+        dev=None,
         boundaries=None,
         image=None,
         verbose=False,

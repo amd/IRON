@@ -17,7 +17,7 @@ is where a graph's bound per-call values become something the host writes
 through. The decode graph binds two, so its table must name both.
 
 The swiglu graph goes through ``GraphFunction.compile`` itself, so the one
-build also checks the packaging surface end to end: ``compile(dev,
+build also checks the packaging surface end to end: ``compile(dev=,
 image=)`` derives the dispatch, traces, builds and links the ELF, and the
 runtime that would load it is not made until the first call. A build host
 with the toolchain and no device compiles ahead of time and hands the
@@ -53,7 +53,7 @@ def build_elf(graph, **shapes):
 
 def test_swiglu_graph_compiles_to_a_full_elf():
     fn, E = swiglu()
-    net = fn.compile(DEVICES["npu2"](), image=iron.ELF, x=(1, E))
+    net = fn.compile(dev=DEVICES["npu2"](), image=iron.ELF, x=(1, E))
     assert net.plan.image == "elf" and net.plan.dispatch == "fused"
     assert net.image is not None
     elf = Path(net.image)
@@ -153,7 +153,9 @@ def test_a_cached_build_leaves_no_kernel_for_the_next_graph_to_collide_with():
             return GEMM(x, self.w, b_col_maj=self.b_col_maj)
 
     def build(b_col_maj):
-        return Project(b_col_maj).compile(DEVICES["npu2"](), image=iron.ELF, x=(M, K))
+        return Project(b_col_maj).compile(
+            dev=DEVICES["npu2"](), image=iron.ELF, x=(M, K)
+        )
 
     build(False)
     # What earlier tests' operator checks declared outside a build stays
