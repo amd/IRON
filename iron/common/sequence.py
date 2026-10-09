@@ -118,7 +118,11 @@ def _hand_built_kernels(op, objs=None):
 
 
 class FusedDispatch(SequenceDispatch):
-    """Single-ELF dispatch (NPU2 only): all operators fused into one ELF."""
+    """Single-ELF dispatch (NPU2 only): all operators fused into one ELF.
+
+    An untraced sequence of one design keeps its ``load_pdi`` unexpanded, so the
+    firmware configures the array on the first dispatch only.
+    """
 
     name = "fused"
 
@@ -138,6 +142,7 @@ class FusedDispatch(SequenceDispatch):
             dependencies=[mlir_artifact] + kernel_objects,
             extra_flags=seq.extra_flags,
             trace_size=seq.trace_size,
+            expand_load_pdis=mlir_artifact.expand_load_pdis,
         )
         seq.add_artifacts([full_elf_artifact])
 
@@ -172,6 +177,7 @@ class FusedDispatch(SequenceDispatch):
             buffer_sizes=seq.buffer_sizes,
             slice_info=seq.slice_info,
             trace_size=seq.trace_size,
+            expand_load_pdis=len(designs) > 1 or bool(seq.trace_size),
         )
 
     def _collect_kernel_artifacts(self, seq):

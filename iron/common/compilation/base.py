@@ -363,6 +363,7 @@ class FullElfArtifact(_MLIRInputMixin, CompilationArtifact):
         dependencies: list[CompilationArtifact],
         extra_flags: list[str] | None = None,
         trace_size: int = 0,
+        expand_load_pdis: bool = True,
     ) -> None:
         if mlir_input not in dependencies:
             dependencies = dependencies + [mlir_input]
@@ -370,6 +371,7 @@ class FullElfArtifact(_MLIRInputMixin, CompilationArtifact):
         self.extra_flags = extra_flags if extra_flags is not None else []
         # Bytes of trace buffer per runlist step, 0 for an untraced build.
         self.trace_size = trace_size
+        self.expand_load_pdis = expand_load_pdis
 
 
 class XclbinArtifact(_MLIRInputMixin, CompilationArtifact):
@@ -752,9 +754,10 @@ class AieccFullElfCompilationRule(AieccCompilationRule):
             work_dir = _aiecc_work_dir(mlir_source.filename)
             options = [
                 f"-j{os.environ.get('AIECC_JOBS', _AIECC_DEFAULT_JOBS)}",
-                "--expand-load-pdis",
                 "--get-scratchpad-parameters",
             ] + artifact.extra_flags
+            if artifact.expand_load_pdis:
+                options.append("--expand-load-pdis")
             if artifact.trace_size:
                 # The trace parser reads the lowered module for the buffer layout
                 # and each design's traced tiles and events.

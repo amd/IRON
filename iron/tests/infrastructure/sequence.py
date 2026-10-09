@@ -150,6 +150,7 @@ def test_fused_mlir_contains_reconfiguration(sequence, aie_context, tmp_path):
 
     text = Path(mlir_artifact.filename).read_text()
 
+    assert mlir_artifact.expand_load_pdis
     # Reconfiguration + dispatch ops between temporal steps.
     assert "aiex.configure" in text, "missing aiex.configure in fused MLIR"
     assert "aiex.run @sequence" in text, "missing aiex.run in fused MLIR"
@@ -360,5 +361,43 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch, aie_context):
         assert not errors, f"rep {rep}: temp has {len(errors)} mismatches"
         errors = verify_buffer(
             out, "out", torch.nn.functional.relu(a + b), rel_tol=0.04, abs_tol=1e-6
+        )
+        assert not errors, f"rep {rep}: out has {len(errors)} mismatches"
+
+
+def test_one_design_is_configured_once(aie_context):
+    """A fused sequence of one design keeps its load unexpanded and needs no reset
+    device, and every dispatch after the first still computes on its new inputs."""
+    if not isinstance(aie_utils.get_current_device(), NPU2):
+        pytest.skip("fused (single-ELF) dispatch requires NPU2")
+    relu = ReLU(
+        size=_ADD_RELU_SIZE,
+        num_aie_columns=_ADD_RELU_COLS,
+        num_channels=1,
+        tile_size=_ADD_RELU_TILE,
+        context=aie_context,
+    )
+    seq = OperatorSequence(
+        name="infra_fused_relu_once",
+        runlist=[(relu, "a", "out")],
+        input_args=["a"],
+        output_args=["out"],
+        dispatch="fused",
+        context=aie_context,
+    )
+    seq.compile()
+    elf = seq.artifacts[0]
+    assert not elf.expand_load_pdis
+    assert "reset_device" not in Path(elf.mlir_input.filename).read_text()
+
+    run = seq.get_callable()
+    torch.manual_seed(0)
+    for rep in range(4):
+        a = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
+        _set_input(run, "a", a)
+        run()
+        out = run.get_buffer("out").to_torch()[:_ADD_RELU_SIZE]
+        errors = verify_buffer(
+            out, "out", torch.nn.functional.relu(a), rel_tol=0.04, abs_tol=1e-6
         )
         assert not errors, f"rep {rep}: out has {len(errors)} mismatches"

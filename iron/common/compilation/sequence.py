@@ -44,6 +44,7 @@ class SequenceMLIRArtifact(MLIRArtifact):
         buffer_sizes: tuple[int, int, int],
         slice_info: dict[str, tuple[str, int, int]] | None = None,
         trace_size: int = 0,
+        expand_load_pdis: bool = True,
     ) -> None:
         dependencies = list(operator_mlir_map.values())
         super().__init__(filename, dependencies)
@@ -54,6 +55,7 @@ class SequenceMLIRArtifact(MLIRArtifact):
         self.slice_info = slice_info or {}
         # Bytes of trace buffer per runlist step, 0 for an untraced build.
         self.trace_size = trace_size
+        self.expand_load_pdis = expand_load_pdis
 
 
 # Helper Functions
@@ -196,7 +198,9 @@ def fuse_mlir(artifact: SequenceMLIRArtifact) -> None:
             dev_op.sym_name = ir.StringAttr.get(op_name)
             ctx.module.body.append(dev_op)
 
-        needs_reset = needs_additional_reset(artifact.runlist)
+        needs_reset = artifact.expand_load_pdis and needs_additional_reset(
+            artifact.runlist
+        )
         if needs_reset:
 
             @aie.device(device_ty)
