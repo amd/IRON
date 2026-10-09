@@ -58,7 +58,7 @@ class FusedImage:
             # The cache follows the modules a generator reaches, not the state
             # of what it closes over, so the identity is one.
             def generator(key: CompileTime[str]) -> ir.Module:
-                return ir.Module.parse(fusion.text())
+                return fusion.module(ir.Context.current)
 
             design = CompilableDesign(
                 generator,

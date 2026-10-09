@@ -22,6 +22,7 @@ import re
 
 import numpy as np
 import pytest
+from aie import ir
 from aie.dialects import aie as aie_dialect
 from aie.iron import ObjectFifo, Program, Runtime
 from aie.iron.device import NPU2, AnyShimTile, Tile
@@ -249,8 +250,9 @@ def test_designs_of_one_array_share_its_device():
     assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, *_ in fused.runlist]
     assert text.count("aie.core(") == 8
     texts = {}
+    context = ir.Context()
     for name, design in fused.designs.items():
-        generated = fusion.generate(design)
+        generated = fusion.generate(design, context)
         texts[name] = str(generated.device)
     assert fits(texts) is None
 

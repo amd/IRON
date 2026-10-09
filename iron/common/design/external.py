@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any, NamedTuple
 
 import numpy as np
+from aie import ir
 from aie.dialects.aie import DMAChannelDir, shim_dma_allocation
 from aie.iron import Buffer, Lock, Program, Runtime, Task
 from aie.iron.device import Tile
@@ -92,8 +93,10 @@ class ExternalSequence(Sequence):
         self._queues: dict[tuple[str, int], list[Task]] = {}
 
     @classmethod
-    def module(cls, dev, op: Operator):
-        """The module whose runtime sequence drives ``op``'s downloaded image."""
+    def module(cls, dev, op: Operator, context: ir.Context | None = None):
+        """The module whose runtime sequence drives ``op``'s downloaded image,
+        built in ``context`` (a new one when None).
+        """
         shims = {col: Tile(col, 0) for col in range(dev.cols)}
         channels = {}
         for s in op.buffers:
@@ -164,7 +167,7 @@ class ExternalSequence(Sequence):
         )
         for lock in locks:
             rt.add_lock(lock)
-        return Program(dev, rt).resolve_program()
+        return Program(dev, rt).resolve_program(context=context)
 
     def _transfer(
         self,

@@ -73,6 +73,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from aie import ir
 from aie.dialects.aie import WireBundle, get_target_model
 from aie.utils.compile import NPU_CACHE_HOME
 
@@ -201,9 +202,10 @@ def fit_verdict(
         verdict = record.read_text()
     else:
         texts, params = {}, {}
+        context = ir.Context()
         try:
             for name, design in designs.items():
-                generated = generate(design)
+                generated = generate(design, context)
                 texts[name] = str(generated.device)
                 params.update(generated.parameters)
             diagnostic = fits(texts, parameters_preamble(params))

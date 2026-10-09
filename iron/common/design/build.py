@@ -12,6 +12,7 @@ import re
 from typing import Any
 
 import aie.utils as aie_utils
+from aie import ir
 from aie.iron import (
     CompileTime,
     DispatchTime,
@@ -47,18 +48,25 @@ def device_symbol(op: Operator, value: BoundValue) -> str:
     return f"{op.name}_{value.name}" + (f"_{bound}" if bound else "")
 
 
-def build_design(op: Operator, image: str = "elf", **dispatch):
+def build_design(
+    op: Operator,
+    image: str = "elf",
+    *,
+    context: ir.Context | None = None,
+    **dispatch,
+):
     """The MLIR module for one declared operator, on the bound device.
 
     Args:
         image: ``"elf"``, where a per-call value is a scratchpad parameter,
             or ``"xclbin"``, which has none: there it is a dispatch-time
             scalar, given by symbol in ``dispatch``.
+        context: The context to build the module in; a new one when None.
     """
     dev = op.dev
     op = op.resolved(dev).copy()  # a build binds streams; each gets its own
     if op.external is not None:
-        return ExternalSequence.module(dev, op)
+        return ExternalSequence.module(dev, op, context)
     target = Target(dev, image)
 
     # Before array(), which may hand a core-read value to a worker.
@@ -133,7 +141,7 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
             )
         traced = [w for w in workers if w.trace is not None] or list(workers)[:1]
         prog.enable_trace(op.trace.trace_size, workers=traced)
-    return prog.resolve_program()
+    return prog.resolve_program(context=context)
 
 
 class OperatorDesign:
@@ -151,7 +159,7 @@ class OperatorDesign:
         self.op = op
         self.image = image
         P = inspect.Parameter
-        build = op.exported_design(image)
+        build = self.exported = op.exported_design(image)
         if build is None:
             build = functools.partial(build_design, op=op, image=image)
             params = [

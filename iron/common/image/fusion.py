@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 from collections.abc import Mapping
 from typing import Any, NamedTuple
 
@@ -68,14 +67,20 @@ class GeneratedDesign(NamedTuple):
     parameters: dict[str, ir.Type]
 
 
-def generate(design: OperatorDesign) -> GeneratedDesign:
-    """``design``'s module, generated as a child of a fusion, taken apart."""
+def generate(design: OperatorDesign, context: ir.Context) -> GeneratedDesign:
+    """``design``'s module, generated in ``context`` as a child of a fusion,
+    taken apart.
+    """
     # The fusion drives PDI loading itself; a child that also loads its own
     # links fine and hangs at dispatch (ERT_CMD_STATE_TIMEOUT).
     with compile_context(_iron_full_elf=False):
-        module = design.build()
-    if isinstance(module, str):
-        module = ir.Module.parse(module, ir.Context())
+        module = (
+            design.build(context=context)
+            if design.exported is None
+            else design.exported()
+        )
+    if not isinstance(module, ir.Module) or module.context is not context:
+        module = ir.Module.parse(str(module), context)
     devices = []
     parameters: dict[str, ir.Type] = {}
     for op in module.body.operations:
@@ -172,46 +177,42 @@ class Fusion:
         return points % 2 == 1
 
     def text(self) -> str:
-        """The fused module: every design's device, and a main device whose
-        runtime sequence runs them in runlist order.
+        """``module()`` as text."""
+        return str(self.module(ir.Context()))
+
+    def module(self, context: ir.Context) -> ir.Module:
+        """The fused module, built in ``context``: every design's device, and a
+        main device whose runtime sequence runs them in runlist order.
         """
         runlist = self.runlist
         subbuffer_layout = self.subbuffer_layout
         slice_info = self.slice_info
         shared = self.shared_words
-        shared_ref = (
-            re.compile(
-                "@("
-                + "|".join(re.escape(s) for s in sorted(shared, key=len, reverse=True))
-                + r")(?![\w$.])"
-            )
-            if shared
-            else None
-        )
         arguments = self.buffer_sizes.arguments()
 
-        device_mlir_strings = {}
+        devices: dict[str, Any] = {}
         arrays: dict[str, str] = {}
         operator_param_decls: dict[str, dict[str, ir.Type]] = {}
-        device_ty = None
         sequence_arg_types = {}
+        # Each design's module owns its device until the device moves.
+        generated_modules = []
         for op_name, design in self.designs.items():
-            generated = generate(design)
+            generated = generate(design, context)
+            generated_modules.append(generated.module)
             device_op = generated.device
-            params_here = {
+            for sym_name in generated.parameters:
+                if sym_name in shared:
+                    ir.SymbolTable.replace_all_symbol_uses(
+                        sym_name, shared[sym_name], device_op.operation
+                    )
+            devices[op_name] = device_op
+            arrays[op_name] = array_text(device_op)
+            operator_param_decls[op_name] = {
                 shared.get(sym_name) or sym_name: param_type
                 for sym_name, param_type in generated.parameters.items()
             }
-            if device_ty is None:
-                device_ty = device_op.device
-            texts = [str(device_op), array_text(device_op)]
-            if shared_ref is not None:
-                texts = [
-                    shared_ref.sub(lambda m: "@" + shared[m.group(1)], t) for t in texts
-                ]
-            device_mlir_strings[op_name], arrays[op_name] = texts
-            operator_param_decls[op_name] = params_here
             sequence_arg_types[op_name] = self._sequence_arg_types(device_op)
+        device_ty = next(iter(devices.values())).device
         by_key: dict[Any, list[str]] = {}
         for op_name, design in self.designs.items():
             by_key.setdefault(design.op.array_key(), []).append(op_name)
@@ -236,39 +237,27 @@ class Fusion:
                     )
                 hoisted_params[sym_name] = param_type
 
-        # Build fused MLIR module
-        loc = ir.Location.unknown(ir.Context())
+        loc = ir.Location.unknown(context)
         module = ir.Module.create(loc)
-        with loc.context, loc, ir.InsertionPoint(module.body):
+        with context, loc, ir.InsertionPoint(module.body):
             # Emit hoisted parameters first.
             with ir.InsertionPoint.at_block_begin(module.body):
                 for sym_name, param_type in hoisted_params.items():
                     aiex.scratchpad_parameter(sym_name, param_type)
 
             # Concatenate aie.device ops, merging each pack's into one.
-            params_preamble = parameters_preamble(hoisted_params)
             packing = self.packing
             if isinstance(packing, AdjacentPacking):
                 packing, _ = packing.pack(
                     [op_name for op_name, *_ in runlist],
-                    device_mlir_strings,
-                    params_preamble,
+                    {op_name: str(device) for op_name, device in devices.items()},
+                    parameters_preamble(hoisted_params),
                 )
             packing = packing.sharing(arrays)
-            for device_name, members in packing.devices(device_mlir_strings).items():
+            for device_name, members in packing.devices(devices).items():
                 member_ops = {}
                 for op_name in members:
-                    wrapped = f"module {{\n{params_preamble}\n{device_mlir_strings[op_name]}\n}}"
-                    wrapper_module = ir.Module.parse(wrapped)
-                    # Find the (sole) DeviceOp in the wrapper module.
-                    dev_op = None
-                    for op in wrapper_module.body.operations:
-                        if isinstance(op, aie.DeviceOp):
-                            dev_op = op
-                            break
-                    assert (
-                        dev_op is not None
-                    ), f"DeviceOp missing after re-parse for operator '{op_name}'"
+                    dev_op = devices[op_name]
                     dev_op.sym_name = ir.StringAttr.get(op_name)
                     module.body.append(dev_op)
                     member_ops[op_name] = dev_op
@@ -340,11 +329,7 @@ class Fusion:
                                         buf_name
                                     ]
 
-                                # Parsed anew: the sub-design's type may
-                                # belong to the context it was generated in.
-                                target_type = ir.MemRefType(
-                                    ir.Type.parse(str(expected_arg_types[idx]))
-                                )
+                                target_type = ir.MemRefType(expected_arg_types[idx])
                                 expected_bytes = _memref_bytes(target_type)
                                 if expected_bytes != length:
                                     raise ValueError(
@@ -382,7 +367,7 @@ class Fusion:
                         )
                         reset_op.body.blocks.append()
 
-            return str(module)
+            return module
 
     @staticmethod
     def _sequence_arg_types(dev_op: Any) -> list[Any]:
