@@ -3,9 +3,12 @@
 
 """A decoder-only language model on the NPU, as one graph.
 
-A call with no ``x`` is a decode step; ``prefill_chunk`` rows of ``x`` are a
-prompt chunk, of which a call runs the first ``rows``. Both draw the next
-token on the device and carry it and ``position + 1`` into the next call.
+A call with no tensor is a decode step; ``prefill_chunk`` token ``ids`` are
+a prompt chunk, of which a call runs the first ``rows``, their rows of the
+embedding table gathered on the device. Where the prompt chunk is not a full
+ELF, which alone gathers by a call's ids, it takes those rows as ``x``. Both
+draw the next token on the device and carry it and ``position + 1`` into
+the next call.
 Both attend with ``MHA``. Where the decode step is not a full ELF (NPU1, or
 ``boundaries=each_step``) there is no device loop.
 """
@@ -122,6 +125,8 @@ class CausalLM(iron.Graph):
         self.draws = iron.state((L, ROW_WORDS), np.int32)
         self.drawn = iron.state((L,), np.int32)
         self._seen = np.empty(0, dtype=np.int64)  # the tokens in the caches
+        # The prompt version's packaging, which decides what a chunk takes.
+        self._image = iron.ELF
         self._prompt: CompiledGraph | None = None
         self._decode: CompiledGraph | None = None
         self._loop: CarriedLoop | None = None
@@ -134,6 +139,7 @@ class CausalLM(iron.Graph):
 
     def body(
         self,
+        ids=None,
         x=None,
         *,
         token: Carried[np.int32],
@@ -143,6 +149,8 @@ class CausalLM(iron.Graph):
     ):
         c = self.config
         L, C, D = c.max_seq_len, c.prefill_chunk, c.head_dim
+        if ids is not None:
+            x = Copy(self.embedding[ids])
         prompt = x is not None
         if prompt:
             x = x[:rows]
@@ -196,8 +204,17 @@ class CausalLM(iron.Graph):
 
     # -- on the host -----------------------------------------------------------
 
-    def shapes(self, rows: int) -> dict:
-        return dict(x=(rows, self.config.emb_dim)) if rows > 1 else {}
+    def shapes(self, rows: int, image: str = iron.ELF) -> dict:
+        """The input shapes of the version of ``rows`` rows packaged as ``image``.
+
+        A prompt chunk takes its token ids where it is a full ELF, which
+        gathers their rows of the table, else those rows.
+        """
+        if rows == 1:
+            return {}
+        if image == iron.ELF:
+            return dict(ids=((rows,), np.int32))
+        return dict(x=(rows, self.config.emb_dim))
 
     def load(
         self,
@@ -223,20 +240,22 @@ class CausalLM(iron.Graph):
         if decode.plan.image != iron.ELF:
             logger.info("%s", decode.plan.report("decode"))
         feeds = decode if decode.emit is not None else None
+        self._image = decode.plan.image
         prompt = self.compile(
             dev=dev,
             feeds=feeds,
             coresident=tuner,
             boundaries=boundaries,
-            **self.shapes(self.config.prefill_chunk),
+            **self.shapes(self.config.prefill_chunk, self._image),
         )
         for version in (decode, prompt):
             version.load(release=release)
         self._prompt, self._decode = prompt, decode
         return self
 
-    def __call__(self, x=None, **values) -> Any:
-        """One call of the loaded prompt version on ``x``, else of the decode step.
+    def __call__(self, ids=None, x=None, **values) -> Any:
+        """One call of the loaded prompt version on ``ids`` or ``x``
+        (``prompt_inputs``), else of the decode step.
 
         Raises:
             RuntimeError: Neither version is loaded: ``load()`` first, which
@@ -244,10 +263,10 @@ class CausalLM(iron.Graph):
         """
         if self._decode is None:
             raise RuntimeError(f"{type(self).__name__}: load() first")
-        if x is None:
+        if ids is None and x is None:
             return self._decode(**values)
         assert self._prompt is not None
-        return self._prompt(x, **values)
+        return self._prompt(x if ids is None else ids, **values)
 
     @property
     def device_loop(self) -> bool:
@@ -288,8 +307,8 @@ class CausalLM(iron.Graph):
             out, _ = self(token=int(tokens[-1]), position=n - 1, chunk=0, rows=1)
         else:
             self._seen = tokens[: held // C * C]
-            for x, values in self._chunks(tokens, held):
-                out, _ = self(x, **values)
+            for inputs, values in self._chunks(tokens, held):
+                out, _ = self(*inputs, **values)
         self._seen = tokens
         # A copy: the next call rewrites the output buffer.
         logits = out.numpy()
@@ -333,11 +352,11 @@ class CausalLM(iron.Graph):
         self._decode.write(self.draws, draws)
         held = self._held(tokens)
         self._seen = tokens[: held // C * C]
-        for x, values in self._chunks(tokens, held):
+        for (ids, _), values in self._chunks(tokens, held):
             if values["position"] < n - 1:
-                self(x, **values)
+                self(ids, **values)
             else:
-                self._loop.start(x, **values)
+                self._loop.start(ids, **values)
         first = time.perf_counter()
         for _ in self._loop.steps(num_tokens - 1):
             pass
@@ -371,19 +390,33 @@ class CausalLM(iron.Graph):
         same = np.append(tokens[:held] == self._seen[:held], False)
         return int(np.argmin(same))
 
+    def prompt_inputs(self, tokens) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """A prompt call's ``ids`` and ``x`` for a chunk of ``tokens``, one
+        of them ``None``: on a full ELF the ids, padded to ``prefill_chunk``
+        with row 0, else their rows of the embedding table, padded with zeros.
+        """
+        tokens = np.asarray(tokens)
+        C = self.config.prefill_chunk
+        if self._image == iron.ELF:
+            ids = np.zeros(C, dtype=np.int32)
+            ids[: tokens.size] = tokens
+            return ids, None
+        x = np.zeros((C, self.config.emb_dim), dtype=bfloat16)
+        x[: tokens.size] = self.embedding.array[tokens]
+        return None, x
+
     def _chunks(self, tokens: np.ndarray, held: int) -> Iterator[tuple]:
         n, C = tokens.size, self.config.prefill_chunk
-        x = np.zeros((C, self.config.emb_dim), dtype=bfloat16)
         for begin in range(held // C * C, n, C):
             end = min(begin + C, n)
-            x[: end - begin] = self.embedding.array[tokens[begin:end]]
+            inputs = self.prompt_inputs(tokens[begin:end])
             values = dict(
                 token=int(tokens[end - 1]),
                 position=end - 1,
                 chunk=begin // C,
                 rows=end - begin,
             )
-            yield x, values
+            yield inputs, values
 
     def _k_max(self) -> int:
         assert self._decode is not None

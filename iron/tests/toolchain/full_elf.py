@@ -122,8 +122,9 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
 
     model = llama_1b(n_layers=1)
     version = build_elf(model, **model.shapes(model.config.prefill_chunk))
-    # The table's rows, the block, the last row, norm, head and draw.
-    assert len(version.traced.runlist) == 1 + 18 + 4
+    # The chunk's embedding rows and RoPE rows, the block, the last row,
+    # norm, head and draw.
+    assert len(version.traced.runlist) == 2 + 18 + 4
     _assert_values_in_table(version)
 
 

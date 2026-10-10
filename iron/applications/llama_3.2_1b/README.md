@@ -101,8 +101,10 @@ python -m iron.lm.llama3.model \
 
 NPU1 has no full-ELF dispatch, so there both versions are xclbins whose
 steps are dispatched one at a time, and the host draws each token: there is
-no `--device-loop`. The versions still share one copy of the weights and the
-caches, the views of one buffer object. A prompt chunk attends with MHA,
+no `--device-loop`. A full ELF alone gathers rows of the embedding table
+by a call's token ids, so there the host gathers each prompt chunk's rows
+and the chunk takes them. The versions still share one copy of the weights
+and the caches, the views of one buffer object. A prompt chunk attends with MHA,
 placed on NPU1's four columns as on NPU2's eight (`MHA.COLUMNS`), so a
 prompt runs a chunk at a time there too. A chunk's projections are
 `flm.GEMM` there (`iron/lm/layers.py`'s `project`), which takes the

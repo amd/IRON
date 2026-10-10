@@ -1034,7 +1034,7 @@ def test_llama_prompt_traces_over_the_same_caches():
     g = small()
     cfg = g.config
     t = g.trace(**g.shapes(cfg.prefill_chunk))
-    assert t.input_args == ["x"] and t.output_args == ["out", "carry_token"]
+    assert t.input_args == ["ids"] and t.output_args == ["out", "carry_token"]
     assert [v.name for v in t.values] == ["token", "position", "chunk", "rows"]
     # MHA attends over the caches up to the chunk's last token.
     mha = next(op for op, *_ in t.runlist if type(op).__name__ == "MHA")
@@ -1078,7 +1078,7 @@ def test_llama_prompt_projects_with_flm_gemm(device, request):
 def test_llama_does_not_grow_with_the_context(step):
     """``max_seq_len`` sizes the caches, the RoPE table and the draws a
     position each and nothing else a decode step or a prompt chunk runs: a
-    chunk's one input is its embedded tokens (a step's token is a value),
+    chunk's one input is its token ids (a step's token is a value),
     every activation and every array is the same at a four times longer
     context, and attention is the caches' two writes and MHA, the reshapes
     and transposes between them views the DMA walks.
@@ -1090,7 +1090,7 @@ def test_llama_does_not_grow_with_the_context(step):
         return g.trace(**g.shapes(rows))
 
     short, long = trace(256), trace(1024)
-    assert short.input_args == long.input_args == ([] if step == "decode" else ["x"])
+    assert short.input_args == long.input_args == ([] if step == "decode" else ["ids"])
     grown = {name for name, n in long.pinned.items() if short.pinned[name] != n}
     caches = {"keys.0", "keys.1", "values.0", "values.1"}
     assert grown == {"rope", "draws", "drawn"} | caches

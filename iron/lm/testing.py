@@ -207,17 +207,16 @@ def check_deep_prompt(
     model.logits(tokens)
     C, L = runner.config.prefill_chunk, runner.config.max_seq_len
     chunk = np.resize(tokens, rows)
-    x = np.zeros((C, runner.config.emb_dim), dtype=model.embedding.array.dtype)
-    x[:rows] = model.embedding.array[chunk]
+    inputs = model.prompt_inputs(chunk)
     values = dict(
         token=int(chunk[-1]), position=L - C + rows - 1, chunk=L // C - 1, rows=rows
     )
     with _fill_caches(model, len(tokens), L - C):
         start = time.perf_counter()
-        got, _ = model(x, **values)
+        got, _ = model(*inputs, **values)
         record("DeepPromptSeconds", time.perf_counter() - start)
         got = got.numpy()
-        expected, _ = model.reference(x, **values)
+        expected, _ = model.reference(*inputs, **values)
     kl, top1 = divergence(expected, got)
     record("DeepPromptKL", kl)
     record("DeepPromptTop1", top1)

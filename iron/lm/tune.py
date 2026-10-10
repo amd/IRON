@@ -34,6 +34,7 @@ from pathlib import Path
 import aie.utils as aie_utils
 import numpy as np
 
+import iron
 from iron.common.graph import tune as graph_tune
 from iron.common.graph.probe import Call, Point
 from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
@@ -75,13 +76,16 @@ def calls(
     token: int,
     context: int,
     count: int,
+    image: str = iron.ELF,
 ) -> list[Call]:
     """The calls ``model``'s designs are measured in on the current device:
     the decode step at ``position`` and ``token``, and the prompt chunk at
     a whole first chunk, each as traced and with each fold it admits, Sample on the
     draw rows ``sample`` gives. Each is priced over ``contexts`` up to ``context``,
     ``count`` of them: the decode step at their last position, the prompt
-    chunk as the whole chunk ending there.
+    chunk as the whole chunk ending there. ``image`` is the packaging they
+    are measured under, which decides what the prompt chunk takes
+    (``CausalLM.shapes``).
     """
     dev = aie_utils.ensure_current_device()
     C = model.config.prefill_chunk
@@ -95,7 +99,7 @@ def calls(
             ],
         ),
         (
-            model.shapes(C),
+            model.shapes(C, image),
             dict(position=C - 1, token=token, chunk=0, rows=C),
             [
                 Point(w, dict(position=c - 1, token=token, chunk=c // C - 1, rows=C))
@@ -156,6 +160,7 @@ def main(runner: type[Runner], description: str, tables: Path) -> None:
         parser.error(
             f"--context {args.context} is past max_seq_len {config.max_seq_len}"
         )
+    fused = graph_tune.dispatch(args, aie_utils.ensure_current_device()) == "fused"
     graph_tune.measure(
         args,
         calls(
@@ -165,6 +170,7 @@ def main(runner: type[Runner], description: str, tables: Path) -> None:
             args.token,
             args.context,
             args.points,
+            iron.ELF if fused else iron.XCLBIN,
         ),
         CALIBRATION_TRIANGLE,
         tables,
