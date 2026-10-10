@@ -18,7 +18,6 @@ from iron.operators.flm.dequant.design import N_TILE, qw_bytes_for
 from iron.operators.flm.dequant.op import DequantBFP, dequantize
 from iron.operators.flm.gemm.op import GEMM
 from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE, packed_bytes
-from iron.operators.flm.testing import requires_aie2p
 
 # K = 512 is one k-tile, where flm.GEMM at tile_n = 128 wins on NPU2. It
 # defaults to 64 regardless, which is the order this operator emits.
@@ -66,17 +65,17 @@ def random_q4nx(K, N, seed=0):
 
 
 def _check(op, blob, expected, label, record=None):
-    errors, _, _ = run_test(
+    errors = run_test(
         op,
         {"qw": blob},
         {"out": expected},
         tolerance=Tolerance.exact(),
         record=record,
-    )
+    ).errors
     assert not errors, f"{label}: {errors}"
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("K, N", SHAPES)
 def test_matches_reference(K, N, npu_runtime, record_property):
     """Byte-exact. Every rounding on the device is reproducible on the host, so
@@ -87,7 +86,7 @@ def test_matches_reference(K, N, npu_runtime, record_property):
     _check(op, qw, op.reference(qw), f"K={K} N={N}", record_property)
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 def test_output_feeds_gemm_unchanged(npu_runtime):
     """The output must equal what GEMM.pack_B produces, which is the contract
     that makes it a drop-in. Comparing against pack_B catches a drift in either
@@ -103,7 +102,7 @@ def test_output_feeds_gemm_unchanged(npu_runtime):
     _check(DequantBFP(K=K, N=N), qw, packed, "vs pack_B")
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 def test_gate_up_interleaved_blob(npu_runtime):
     """Gate and up share one blob at 512 out-features in a 1024 period."""
     K, N, run, period = 1024, 1024, 512, 1024
@@ -120,7 +119,7 @@ def test_gate_up_interleaved_blob(npu_runtime):
     _check(op, blob, op.reference(qw), "gate/up interleave")
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "K, N",
     [
@@ -139,7 +138,7 @@ def test_large_k_shapes(K, N, npu_runtime, record_property):
     _check(op, qw, op.reference(qw), f"K={K} N={N}", record_property)
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
 @pytest.mark.parametrize(
     "K, N",
@@ -158,7 +157,7 @@ def test_e4b_shapes(K, N, npu_runtime):
     _check(op, qw, op.reference(qw), f"K={K} N={N}")
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
 def test_e4b_gate_up_interleaved(npu_runtime):
     """E4B's gate/up blob: 5120 out-features each in a 10240 period."""
@@ -176,7 +175,7 @@ def test_e4b_gate_up_interleaved(npu_runtime):
     _check(op, blob, op.reference(qw), "E4B gate/up interleave")
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 def test_one_xclbin_serves_every_shape(npu_runtime):
     """Several shapes and parameter sets back to back on one loaded xclbin.
 

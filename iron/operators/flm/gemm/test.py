@@ -211,9 +211,9 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, npu_runtime, record_property):
         rounding=rounding,
     )
 
-    errors, _, _ = check_on_device(
+    errors = check_on_device(
         operator, flm_vectors(operator, scale), rounding, record=record_property
-    )
+    ).errors
 
     assert not errors, "Test failed"
 
@@ -224,9 +224,9 @@ def test_gemm_without_activations(M, K, N, npu_runtime, record_property):
     held go to B and the tiles differ from every case above."""
     operator = GEMM(M=M, K=K, N=N, epilogue_modes=(NONE,))
 
-    errors, _, _ = check_on_device(
+    errors = check_on_device(
         operator, flm_vectors(operator), record=record_property
-    )
+    ).errors
 
     assert not errors, "Test failed"
 
@@ -288,9 +288,9 @@ def test_gemm_b_col_maj(
         b_col_maj=True,
         emulate_bf16_mmul_with_bfp16=emulate,
     )
-    errors, _, _ = check_on_device(
+    errors = check_on_device(
         operator, flm_vectors(operator), record=record_property
-    )
+    ).errors
     assert not errors, "Test failed"
 
 
@@ -307,7 +307,7 @@ def test_folded_silu_and_clamp_compute_what_their_operators_do(npu_runtime):
     assert (operator.epilogue, operator.clamp) == (SILU, (-0.25, 1.5))
     data = flm_vectors(plain, ACTIVATION_INPUT_SCALE)
     C = clamp.reference(silu.reference(data["C"].reshape(-1)))
-    errors, _, _ = check_on_device(operator, {"A": data["A"], "B": data["B"], "C": C})
+    errors = check_on_device(operator, {"A": data["A"], "B": data["B"], "C": C}).errors
     assert not errors, "Test failed"
 
 
@@ -325,9 +325,7 @@ def test_gemm_split_leg_bounds_runs(npu_runtime):
     M, K, N = 512, 10240, 10240
     operator = GEMM(M=M, K=K, N=N)
 
-    errors, _latency_us, _bandwidth_gbps = check_on_device(
-        operator, flm_vectors(operator)
-    )
+    errors = check_on_device(operator, flm_vectors(operator)).errors
     assert not errors, "Test failed"
 
 
@@ -398,9 +396,7 @@ def test_gemm_tile_options(M, K, N, tile_n, tile_ma, npu_runtime):
     """Each accepted (tile_n, tile_ma) computes the right answer on hardware."""
     operator = GEMM(M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma)
     assert (operator._tuned.tile_n, operator._tuned.tile_ma) == (tile_n, tile_ma)
-    errors, _latency_us, _bandwidth_gbps = check_on_device(
-        operator, flm_vectors(operator, INPUT_SCALE)
-    )
+    errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE)).errors
     assert not errors, "Test failed"
 
 
@@ -415,9 +411,7 @@ def test_gemm_k_tile(K, npu_runtime):
     dev = aie_utils.get_current_device()
     assert dev is not None
     operator = GEMM(M=256, K=K, N=64 * dev.cols, tile_n=64, k_tile=256)
-    errors, _latency_us, _bandwidth_gbps = check_on_device(
-        operator, flm_vectors(operator, INPUT_SCALE)
-    )
+    errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE)).errors
     assert not errors, "Test failed"
 
 
@@ -454,12 +448,12 @@ def test_one_xclbin_serves_every_shape(npu_runtime):
         operator = GEMM(M=M, K=K, N=N, epilogue=epilogue)
         data = flm_vectors(operator, 4.0 if epilogue == "none" else 0.5)
         mass = accumulated_mass(K, data["A"], data["B"])
-        errors, _, _ = run_test(
+        errors = run_test(
             operator,
             {"A": data["A"].flatten(), "B": operator.pack_B(data["B"])},
             {"C": data["C"].flatten()},
             tolerance=Tolerance.relative(0.04, 0.004 * mass),
-        )
+        ).errors
         assert not errors, f"{M}x{K}x{N} {epilogue} failed"
 
         # A cache hit: the image run_test built and ran.
@@ -482,7 +476,7 @@ def test_one_xclbin_serves_every_clamp_bound(npu_runtime):
     xclbin = None
     for clamp in bounds:
         operator = GEMM(M=M, K=K, N=N, clamp=clamp)
-        errors, _, _ = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
+        errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE)).errors
         assert not errors, f"clamp={clamp} produced wrong output"
 
         # A cache hit: the image run_test built and ran.
@@ -576,13 +570,13 @@ def test_shipped_overlay(M, K, N, epilogue, clamp, npu_runtime, record_property)
     # covered functionally by test_mm_prebuilt_epilogue_matches_accumulator.
     mass = accumulated_mass(K, data["A"], data["B"])
     abs_tol = MAX_SLOPE[epilogue] * BUDGET_FLOOR * mass
-    errors, latency_us, bandwidth_gbps = run_test(
+    errors = run_test(
         operator,
         input_buffers,
         output_buffers,
         tolerance=Tolerance.relative(0.04, abs_tol),
         record=record_property,
-    )
+    ).errors
     assert not errors, "Test failed"
 
 

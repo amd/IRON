@@ -44,7 +44,6 @@ from iron.operators.flm.layer.reference import (
     proj_layout,
     reference,
 )
-from iron.operators.flm.testing import requires_aie2p
 
 GEOMETRIES = (FLM_GEMMA4_E2B_DECODE, FLM_GEMMA4_E4B_DECODE)
 
@@ -188,7 +187,7 @@ SYNTHETIC = [
 ]
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("geometry, layer_type, context_len", SYNTHETIC, ids=str)
 def test_matches_reference(
     geometry, layer_type, context_len, npu_runtime, record_property
@@ -206,7 +205,7 @@ def test_matches_reference(
     )
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "layer_type, context_len, max_l, match",
     [
@@ -237,7 +236,7 @@ def _captured_cases():
     return sorted(p.parent for p in Path(root).rglob("manifest.json"))
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "case", _captured_cases(), ids=lambda p: p and f"{p.parent.name}/{p.name}"
 )

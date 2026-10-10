@@ -14,7 +14,6 @@ from iron.operators.flm.prefill_attn.op import (
     PrefillAttention,
     PrefillSlidingAttention,
 )
-from iron.operators.flm.testing import requires_aie2p
 
 NUM_HEADS = 8
 # The operator cannot produce this value from the inputs below. The rows past
@@ -121,7 +120,7 @@ def _build(kind, **overrides):
 BENCH = {("attn", 0, 512, 1024, 1), ("swa", 512, 1024, 2048, 1)}
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "kind, L_begin, L_end, max_l, num_kv_heads",
     [
@@ -145,7 +144,7 @@ def test_matches_reference(
     )
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("kind", OPERATORS)
 def test_one_image_serves_every_range(kind, npu_runtime):
     """Check that each dispatch runs its own token range.
@@ -161,7 +160,7 @@ def test_one_image_serves_every_range(kind, npu_runtime):
         _check(op, image, L_begin, L_end, max_l, seed)
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "L_begin, L_end, max_l, match",
     [
@@ -183,7 +182,7 @@ def test_refuses_unservable_ranges(L_begin, L_end, max_l, match, npu_runtime):
         OperatorImage(op)(*bufs, L_begin=L_begin, L_end=L_end, max_l=max_l)
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
 @pytest.mark.parametrize("num_kv_heads", [1, 2])
 @pytest.mark.parametrize("kind", OPERATORS)
@@ -222,7 +221,7 @@ def test_gemma4_cache_bound(kind, num_kv_heads, npu_runtime):
         ),
     ],
 )
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 def test_rejects_unservable_shapes(cls, kwargs, match):
     with pytest.raises(ValueError, match=match):
         cls(**{"max_context": 1024, "num_heads": 8, **kwargs})

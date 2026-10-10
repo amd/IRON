@@ -11,7 +11,6 @@ from ml_dtypes import bfloat16
 from iron.common.image import OperatorImage
 from iron.operators.flm.lm_head.op import LMHead
 from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE
-from iron.operators.flm.testing import requires_aie2p
 
 # The initial value of y. No logit of the test inputs reaches it, so an
 # unwritten output fails the check.
@@ -77,7 +76,7 @@ def _check(dim, vocab, softcap, seed=0, tanh_error=True, record=None):
     return got
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("dim", [1536, 2560])
 def test_projection_matches_reference(dim, npu_runtime):
     """A softcap of 1000 keeps each tanh argument near zero.
@@ -89,20 +88,20 @@ def test_projection_matches_reference(dim, npu_runtime):
     _check(dim, 4096, 1000.0, tanh_error=False)
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("dim", [1536, 2560])
 def test_gemma4_softcap(dim, npu_runtime):
     _check(dim, 4096, GEMMA4_SOFTCAP, seed=1)
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 def test_softcap_bounds_the_logits(npu_runtime):
     """A softcap of 5 saturates most logits. No logit may exceed the softcap."""
     got = _check(1536, 1024, 5.0, seed=2)
     assert np.abs(got).max() <= 5.0
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
 @pytest.mark.parametrize("dim", [pytest.param(1536, marks=pytest.mark.bench), 2560])
 def test_gemma4_vocabulary(dim, npu_runtime, record_property):
@@ -110,7 +109,7 @@ def test_gemma4_vocabulary(dim, npu_runtime, record_property):
     _check(dim, 262144, GEMMA4_SOFTCAP, seed=3, record=record_property)
 
 
-@requires_aie2p
+@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "dim, vocab, softcap, match",
     [
