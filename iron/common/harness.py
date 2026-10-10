@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Callable, NamedTuple
+import logging
+from typing import Callable
 
 import aie.utils as aie_utils
 import numpy as np
@@ -16,6 +17,8 @@ from ml_dtypes import bfloat16
 
 from .declare import Operator
 from .image import OperatorImage
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -94,13 +97,16 @@ def _report(buf_name: str, verdict: Verdict, tolerance: Tolerance) -> None:
     allowed = tolerance.max_mismatch_frac
     if verdict.n_mismatch and allowed > 0.0:
         within = "within" if verdict else "exceeds"
-        print(
-            f"{buf_name}: {verdict.n_mismatch} errors "
-            f"({verdict.n_mismatch / verdict.n_checked * 100:.2f}%) {within} allowed "
-            f"rate of {allowed * 100:.2f}%"
+        logger.info(
+            "%s: %d errors (%.2f%%) %s allowed rate of %.2f%%",
+            buf_name,
+            verdict.n_mismatch,
+            verdict.n_mismatch / verdict.n_checked * 100,
+            within,
+            allowed * 100,
         )
     if not verdict:
-        print(f"{buf_name}: {verdict.detail}")
+        logger.warning("%s: %s", buf_name, verdict.detail)
 
 
 def _nbytes(buf) -> int:
@@ -114,11 +120,13 @@ def _nbytes(buf) -> int:
     return buf.data.nbytes
 
 
-class Run(NamedTuple):
+@dataclasses.dataclass(frozen=True)
+class Run:
     """What a device run of one operator came back with."""
 
     errors: dict[str, Verdict]  # output name -> its failing verdict
-    latency_us: float
+    latency_us: float  # the median of the timed runs' NPU time
+    spread_us: float  # their median absolute deviation
     bandwidth_gbps: float
 
 
@@ -128,17 +136,21 @@ def run_test(
     outputs=None,
     *,
     tolerance: Tolerance,
-    warmup_iters: int = 1,
-    timed_iters: int = 1,
+    timed_iters: int = 20,
     record: Callable[[str, float], object] | None = None,
 ) -> Run:
-    """Compile ``operator``, run it on the device, time it, check its outputs.
+    """Compile ``operator``, run it on the device, check its outputs, time it.
+
+    The first run is the one checked, before a timed run rewrites an
+    ``inout`` buffer; it also warms the device for the timed runs.
 
     Args:
         inputs: A ``Vectors``, or every input by buffer name (an ``inout``
             buffer among them).
         outputs: Each buffer the operator writes, its expected result by
             name; ``operator.call_reference`` on ``inputs`` where None.
+        timed_iters: The runs timed after the checked one; latency is
+            their median.
         record: A test's ``record_property``: latency, bandwidth and, from
             ``Operator.ops``, throughput.
 
@@ -173,16 +185,17 @@ def run_test(
         args.append(buf)
         total_bytes += _nbytes(buf)
 
-    benchmark = run_iters(fn, *args, warmup=warmup_iters, iters=timed_iters)
-    if benchmark.npu is None:
-        raise RuntimeError("Operator callable did not report NPU execution time")
-    latency_us = benchmark.npu.avg_us
-
+    fn(*args)
     written = {name: buf.numpy() for name, buf in produced.items()}
     verdicts = operator.judge(inputs, written, tolerance, outputs)
     for name, verdict in verdicts.items():
         _report(name, verdict, tolerance)
     errors = {name: verdict for name, verdict in verdicts.items() if not verdict}
+
+    benchmark = run_iters(fn, *args, iters=timed_iters)
+    if benchmark.npu is None:
+        raise RuntimeError("Operator callable did not report NPU execution time")
+    latency_us = benchmark.npu.median_us
 
     # NPU-side bandwidth (excludes host DMA transfer time)
     bandwidth_gbps = total_bytes / (latency_us * 1e-6) / 1e9
@@ -192,7 +205,15 @@ def run_test(
         ops = operator.resolved().ops()
         if ops:
             record("Throughput", ops / (latency_us * 1e-6) / 1e9)
-    print(
-        f"\nLatency (us): {latency_us:.1f}  Effective Bandwidth: {bandwidth_gbps:.6e} GB/s"
+    logger.info(
+        "Latency (us): %.1f ± %.1f  Effective Bandwidth: %.6e GB/s",
+        latency_us,
+        benchmark.npu.mad_us,
+        bandwidth_gbps,
     )
-    return Run(errors, latency_us, bandwidth_gbps)
+    return Run(
+        errors=errors,
+        latency_us=latency_us,
+        spread_us=benchmark.npu.mad_us,
+        bandwidth_gbps=bandwidth_gbps,
+    )
