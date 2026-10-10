@@ -110,15 +110,10 @@ weights as stored, with no activation linked in. `--each-step` builds the same
 form on NPU2, which is how `test_llama_3_2_1b_each_step_accuracy` checks it
 there.
 
-Decode attends with MHA of one query there too. Where MHA does not fit (an
-array narrower than four columns), decode attention is `DecodeAttention.GQA`
-(`CausalLM.attention(dev)`, `iron/operators/gqa.py`): `GQAScores` against
-the key cache, a `Softmax` bounded to the context, and `GQAContext` over the
-value cache. Both read the caches in place, a block of positions at a time,
-and only the blocks the context covers, so a step's cost follows the
-context. Their cores do not depend on the cache's length, so every
-`--max-seq-len` runs the same cores, and one compile serves every position
-below it.
+Decode attends with MHA of one query there too. It reads the caches in
+place and only the blocks the context covers, so a step's cost follows the
+context, and its cores do not depend on the cache's length: one compile
+serves every position below `--max-seq-len`.
 
 ## Tuning
 

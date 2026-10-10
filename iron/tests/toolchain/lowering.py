@@ -101,8 +101,6 @@ def test_operator_lowers_to_instructions(device, cls, case, tmp_path):
             "length",
         ),
         ("rope", "RoPE", dict(rows=64, cols=64, num_aie_columns=2), "valid"),
-        ("gqa", "GQAScores", dict(heads=8, groups=4, seq_len=256), "valid"),
-        ("gqa", "GQAContext", dict(heads=8, groups=4, seq_len=256), "valid"),
         # These stream every row and bound their compute: no size patch, so
         # they lower all the way through aiecc today.
         ("gemm", "GEMM", dict(M=256, K=64, N=512, num_aie_columns=4), "valid"),

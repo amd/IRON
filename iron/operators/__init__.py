@@ -26,7 +26,6 @@ if TYPE_CHECKING:  # the same names, for a checker; the runtime loads them lazil
     from .gelu import GELU
     from .gemm import GEMM
     from .gemv import GEMV
-    from .gqa import GQAContext, GQAScores
     from .layer_norm import LayerNorm
     from .leaky_relu import LeakyReLU
     from .limbs import Limbs
@@ -61,8 +60,6 @@ _OPERATOR_MODULES = {
     "GELU": "gelu",
     "GEMM": "gemm",
     "GEMV": "gemv",
-    "GQAContext": "gqa",
-    "GQAScores": "gqa",
     "LayerNorm": "layer_norm",
     "LeakyReLU": "leaky_relu",
     "Limbs": "limbs",

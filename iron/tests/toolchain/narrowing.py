@@ -50,7 +50,6 @@ from iron.operators import (
     Clamp,
     ElementwiseAdd,
     ElementwiseMul,
-    GQAContext,
     ReLU,
     RoPE,
     Sample,
@@ -299,8 +298,6 @@ def test_a_block_is_no_larger_than_a_core_holds(npu2):
     assert mha.domains(npu2)["B_q"] == (64, 32, 16)
     wide = MHA(num_heads=4, seq_pad=2048, d=256, causal=False).resolved(npu2)
     assert wide.domains(npu2)["B_q"] == (16,)
-    context = GQAContext(heads=32, groups=8, seq_len=32768).resolved(npu2)
-    assert context.domains(npu2)["chunk"] == (512, 256, 128, 64)
     softmax = Softmax(rows=32, cols=32768).resolved(npu2)
     assert max(softmax.domains(npu2)["block"]) == 4096
 

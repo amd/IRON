@@ -11,9 +11,8 @@ table holds every design's step time at each width it tunes to, and the
 configure cost measured between a few pairs of designs. It is keyed by
 each design's identity -- its fields -- so a design that has changed since
 is not in it, and the tuner leaves that design as the profile gives it,
-unfolded. ``main`` fills one for both versions as the graph is now, the
-decode step alone where the device has no prompt version (``calls``):
-every design, each setting, as traced and with each fold it admits.
+unfolded. ``main`` fills one for both versions as the graph is now
+(``calls``): every design, each setting, as traced and with each fold it admits.
 Designs already in the table are kept unless ``--remeasure``; entries for
 designs the graph no longer has are dropped. A design another graph has
 had measured on this NPU is taken from the cost cache
@@ -38,7 +37,6 @@ import numpy as np
 from iron.common.graph import tune as graph_tune
 from iron.common.graph.probe import Call, Point
 from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
-from iron.operators.mha import MHA
 from iron.operators.sample import Sample
 
 from .checkpoint import unread_weights
@@ -79,9 +77,8 @@ def calls(
     count: int,
 ) -> list[Call]:
     """The calls ``model``'s designs are measured in on the current device:
-    the decode step at ``position`` and ``token``, and where the device
-    has a prompt version (``CausalLM.load``) the prompt chunk at a whole
-    first chunk, each as traced and with each fold it admits, Sample on the
+    the decode step at ``position`` and ``token``, and the prompt chunk at
+    a whole first chunk, each as traced and with each fold it admits, Sample on the
     draw rows ``sample`` gives. Each is priced over ``contexts`` up to ``context``,
     ``count`` of them: the decode step at their last position, the prompt
     chunk as the whole chunk ending there.
@@ -96,21 +93,16 @@ def calls(
                 Point(w, dict(position=c - 1, token=token))
                 for w, c in contexts(context, count, 1)
             ],
-        )
+        ),
+        (
+            model.shapes(C),
+            dict(position=C - 1, token=token, chunk=0, rows=C),
+            [
+                Point(w, dict(position=c - 1, token=token, chunk=c // C - 1, rows=C))
+                for w, c in contexts(context, count, C)
+            ],
+        ),
     ]
-    if MHA.fits(dev):
-        versions.append(
-            (
-                model.shapes(C),
-                dict(position=C - 1, token=token, chunk=0, rows=C),
-                [
-                    Point(
-                        w, dict(position=c - 1, token=token, chunk=c // C - 1, rows=C)
-                    )
-                    for w, c in contexts(context, count, C)
-                ],
-            )
-        )
     out = []
     for shapes, values, points in versions:
         traced = model.trace(**shapes)

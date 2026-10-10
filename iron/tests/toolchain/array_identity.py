@@ -49,8 +49,6 @@ PAIRS = [
         ("cols", 128),
     ),
     ("rope", "RoPE", dict(cols=64, num_aie_columns=2), ("rows", 16)),
-    ("gqa", "GQAScores", dict(heads=8, groups=4, num_aie_columns=2), ("seq_len", 256)),
-    ("gqa", "GQAContext", dict(heads=8, groups=4, num_aie_columns=2), ("seq_len", 256)),
     (
         "gemv",
         "GEMV",

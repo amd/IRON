@@ -6,14 +6,11 @@
 A call with no ``x`` is a decode step; ``prefill_chunk`` rows of ``x`` are a
 prompt chunk, of which a call runs the first ``rows``. Both draw the next
 token on the device and carry it and ``position + 1`` into the next call.
-A prompt chunk attends with ``MHA``, so where MHA does not fit the device
-there is no prompt version and a prompt runs a token at a time. Where the
-decode step is not a full ELF (NPU1, or ``boundaries=each_step``) there is
-no device loop.
+Both attend with ``MHA``. Where the decode step is not a full ELF (NPU1, or
+``boundaries=each_step``) there is no device loop.
 """
 
 import dataclasses
-import enum
 import logging
 import math
 import time
@@ -32,11 +29,8 @@ from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.handle import Weight
 from iron.common.graph.narrowing import JointNarrowing, Tuning
 from iron.operators.copy import Copy
-from iron.operators.elementwise_mul import ElementwiseMul
-from iron.operators.gqa import GQAContext, GQAScores
 from iron.operators.mha import MHA
 from iron.operators.sample import Sample
-from iron.operators.softmax import Softmax
 
 from .generation import Sampler
 
@@ -94,13 +88,6 @@ class Config:
         )
 
 
-class DecodeAttention(enum.Enum):
-    """How a decode step attends over the caches."""
-
-    MHA = "mha"
-    GQA = "gqa"
-
-
 @dataclasses.dataclass
 class Step:
     prompt: bool
@@ -116,16 +103,12 @@ class CausalLM(iron.Graph):
 
     The caches are ``(max_seq_len, n_kv_groups, head_dim)`` so no descriptor
     steps by ``max_seq_len``. A decode step attends with ``MHA`` of one
-    query, or with ``DecodeAttention.GQA`` with ``GQAScores``, ``Softmax``
-    and ``GQAContext`` reading each group's rows in place; either costs the
-    context, not the cache. Left ``None`` it is ``MHA`` where MHA fits the
-    device a trace is against, else ``GQA``.
+    query, which costs the context, not the cache.
     """
 
     embedding: Weight
     layers: list
     oracle: "type[Oracle]"
-    decode_attention: DecodeAttention | None = None
 
     def __init__(self, config: Config, weights):
         self.config = config
@@ -138,10 +121,6 @@ class CausalLM(iron.Graph):
         # Zero until the host writes draws: a row of zeros is greedy.
         self.draws = iron.state((L, ROW_WORDS), np.int32)
         self.drawn = iron.state((L,), np.int32)
-        # On the query rather than the scores: the same bits where
-        # 1/sqrt(head_dim) is a power of two (64), and no row per position.
-        scale = np.full((1, config.n_heads * D), 1 / math.sqrt(D), dtype=bfloat16)
-        self.scale = iron.weight(scale)
         self._seen = np.empty(0, dtype=np.int64)  # the tokens in the caches
         self._prompt: CompiledGraph | None = None
         self._decode: CompiledGraph | None = None
@@ -206,11 +185,6 @@ class CausalLM(iron.Graph):
             else:
                 Copy(x.reshape(G, D), cache[step.position])
         span = np.s_[: step.position + 1]
-        attention = self.attention(aie_utils.ensure_current_device())
-        if not step.prompt and attention is DecodeAttention.GQA:
-            scores = GQAScores(keys[span], ElementwiseMul(q, self.scale).reshape(H, D))
-            ctx = GQAContext(values[span], Softmax(scores))
-            return ctx.reshape(1, H * D)
         o = MHA(
             q.reshape(n, H, D),
             keys[span],
@@ -221,22 +195,6 @@ class CausalLM(iron.Graph):
         return o.reshape(n, H * D)
 
     # -- on the host -----------------------------------------------------------
-
-    def attention(self, dev) -> DecodeAttention:
-        """The decode step's attention on ``dev``.
-
-        Args:
-            dev: The device the decode step is traced against; None takes MHA.
-
-        Returns:
-            ``decode_attention`` where given, else ``MHA`` where MHA fits
-            ``dev``, else ``GQA``.
-        """
-        if self.decode_attention is not None:
-            return self.decode_attention
-        if dev is None or MHA.fits(dev):
-            return DecodeAttention.MHA
-        return DecodeAttention.GQA
 
     def shapes(self, rows: int) -> dict:
         return dict(x=(rows, self.config.emb_dim)) if rows > 1 else {}
@@ -255,8 +213,7 @@ class CausalLM(iron.Graph):
             tuner: Folds, narrows and packs each version's designs by cost.
             boundaries: Both versions' packaging.
             dev: The device both versions are compiled for, else the current
-                one. ``reference`` traces against the current device, so
-                where they differ it may attend as the other does.
+                one.
         """
         if dev is None:
             dev = aie_utils.ensure_current_device()
@@ -265,10 +222,6 @@ class CausalLM(iron.Graph):
         )
         if decode.plan.image != iron.ELF:
             logger.info("%s", decode.plan.report("decode"))
-        if not MHA.fits(dev):
-            decode.load(release=release)
-            self._prompt, self._decode = None, decode
-            return self
         feeds = decode if decode.emit is not None else None
         prompt = self.compile(
             dev=dev,
@@ -293,20 +246,15 @@ class CausalLM(iron.Graph):
             raise RuntimeError(f"{type(self).__name__}: load() first")
         if x is None:
             return self._decode(**values)
-        if self._prompt is None:
-            raise RuntimeError(
-                f"{type(self).__name__}: no prompt version on this device; "
-                f"a prompt runs a decode step per token (logits)"
-            )
+        assert self._prompt is not None
         return self._prompt(x, **values)
 
     @property
     def device_loop(self) -> bool:
-        """Whether ``generate`` can draw on the device: a full-ELF decode step
-        beside a prompt version."""
+        """Whether ``generate`` can draw on the device: a full-ELF decode step."""
         if self._decode is None:
             raise RuntimeError(f"{type(self).__name__}: load() first")
-        return self._prompt is not None and self._decode.emit is not None
+        return self._decode.emit is not None
 
     @property
     def tunings(self) -> dict[str, Tuning]:
@@ -338,11 +286,6 @@ class CausalLM(iron.Graph):
         held = self._held(tokens)
         if held == n - 1 == self._seen.size:
             out, _ = self(token=int(tokens[-1]), position=n - 1, chunk=0, rows=1)
-        elif self._prompt is None:
-            self._seen = tokens[:held]
-            for position in range(held, n):
-                token = int(tokens[position])
-                out, _ = self(token=token, position=position, chunk=0, rows=1)
         else:
             self._seen = tokens[: held // C * C]
             for x, values in self._chunks(tokens, held):
@@ -376,7 +319,7 @@ class CausalLM(iron.Graph):
             assert self._decode is not None
             raise RuntimeError(
                 f"{type(self).__name__}: the device loop needs a full-ELF "
-                f"decode step beside a prompt version, and this decode step "
+                f"decode step, and this decode step "
                 f"is an {self._decode.plan.image}; draw on the host "
                 f"(generation.generate)"
             )
