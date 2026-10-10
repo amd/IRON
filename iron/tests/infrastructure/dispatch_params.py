@@ -5,39 +5,32 @@
 """Infrastructure tests for operators whose runtime sequence takes scalars.
 
 The operator under test copies ``n`` chunks from one buffer to another through
-a memtile. ``n`` is a dispatch parameter. It bounds the runtime sequence's loop
-and sets the offset of each transfer. The design has no cores, so the test
-needs no kernel.
+a memtile. ``n`` is a ``DispatchTime`` value. It bounds the runtime sequence's
+loop and sets the offset of each transfer. The design has no cores, so the
+test needs no kernel.
 """
 
-import os
-from dataclasses import dataclass, field
-from pathlib import Path
+import dataclasses
+import functools
 
+import aie.iron
+import aie.utils as aie_utils
 import numpy as np
 import pytest
-
-import aie.utils as aie_utils
-from aie.dialects import arith
-from aie.extras import types as T
-from aie.iron import ObjectFifo, Program, Runtime
+from aie.iron import ObjectFifo, Program, Runtime, require
 from aie.iron.controlflow import range_
+from aie.utils.hostruntime.hostruntime import HostRuntimeError
 
-from iron.common.sequence import OperatorSequence
-from iron.common import (
-    AIEContext,
-    AIERuntimeArgSpec,
-    DesignGenerator,
-    DispatchCallable,
-    MLIROperator,
-    PythonGeneratedMLIRArtifact,
-)
+from iron.common import DispatchTime, In, Operator, Out, param
+from iron.common.design.build import build_design
+from iron.common.image import OperatorImage
 
 CHUNK = 1024
 SENTINEL = -1
+MAX_CHUNKS = 16
 
 
-def chunk_copy(dev, max_chunks):
+def chunk_copy(dev, max_chunks, *, n: aie.iron.DispatchTime[np.int32]):
     chunk_ty = np.ndarray[(CHUNK,), np.dtype[np.int32]]
     buf_ty = np.ndarray[(max_chunks * CHUNK,), np.dtype[np.int32]]
 
@@ -45,146 +38,79 @@ def chunk_copy(dev, max_chunks):
     of_out = of_in.cons().forward(name="out")
 
     def sequence(src, dst, n, in_prod, out_cons):
+        require(n <= max_chunks, f"n exceeds {max_chunks}")
         for i in range_(n):
-            offset = arith.index_cast(T.i32(), i) * CHUNK
-            transfer = dict(
-                sizes=[1, 1, 1, CHUNK],
-                strides=[0, 0, 0, 1],
-                offset=offset,
-                transfer_len=CHUNK,
-                managed=False,
-            )
-            in_task = in_prod.fill(src, wait=False, **transfer)
-            out_task = out_cons.drain(dst, wait=True, **transfer)
+            chunk = slice(i * CHUNK, (i + 1) * CHUNK)
+            in_task = in_prod.fill(src, tap=src[chunk], managed=False)
+            out_task = out_cons.drain(dst, tap=dst[chunk], wait=True, managed=False)
             out_task.await_()
             out_task.free()
             in_task.free()
 
-    rt = Runtime(sequence, [buf_ty, buf_ty, np.int32, of_in.prod(), of_out.cons()])
+    rt = Runtime(sequence, [buf_ty, buf_ty, n, of_in.prod(), of_out.cons()])
     return Program(dev, rt).resolve_program()
 
 
-@dataclass
-class ChunkCopy(MLIROperator):
-    max_chunks: int
-    context: object = field(default=None, repr=False)
+class ChunkCopy(Operator):
+    max_chunks: int = param()
+    size: int = param(default=lambda op: op.max_chunks * CHUNK, repr=False)
 
-    def __post_init__(self):
-        MLIROperator.__init__(self, context=self.context)
+    src = In(size, dtype=np.int32)
+    dst = Out(size, dtype=np.int32)
+    n = DispatchTime(np.int32)
 
-    def get_mlir_artifact(self):
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(
-                Path(__file__),
-                "chunk_copy",
-                (aie_utils.get_current_device(), self.max_chunks),
-            ),
-        )
+    def validate(self) -> None:
+        self.check_derived("size")
 
-    def get_kernel_artifacts(self):
-        return []
+    def resolve(self, dev):
+        return dataclasses.replace(self)
 
-    def get_arg_spec(self):
-        size = (self.max_chunks * CHUNK,)
-        return [
-            AIERuntimeArgSpec("in", size, dtype=np.int32),
-            AIERuntimeArgSpec("out", size, dtype=np.int32),
-        ]
+    def value_symbol(self, value) -> str:
+        return value.name
 
-    def get_dispatch_params(self):
-        return {"n": np.int32}
+    def exported_design(self, image: str):
+        return functools.partial(chunk_copy, self.dev, self.max_chunks)
 
 
-MAX_CHUNKS = 16
+def _buffers():
+    tensor = aie_utils.DEFAULT_TENSOR_CLASS
+    src = tensor(np.arange(MAX_CHUNKS * CHUNK, dtype=np.int32))
+    dst = tensor(np.full(MAX_CHUNKS * CHUNK, SENTINEL, dtype=np.int32))
+    return src, dst
 
 
-@pytest.fixture
-def chunk_copy_op(aie_context):
-    op = ChunkCopy(max_chunks=MAX_CHUNKS, context=aie_context)
-    op.compile()
-    return op
+def test_the_stream_is_generated_per_call():
+    artifacts = OperatorImage(ChunkCopy(max_chunks=MAX_CHUNKS)).compile().artifacts
+    assert artifacts.insts is None
+    assert artifacts.entry.dispatch_library.is_file()
 
 
-def test_builds_a_generator_and_no_instruction_file(chunk_copy_op):
-    op = chunk_copy_op
-    assert Path(op.xclbin_artifact.filename).is_file()
-    assert Path(op.dispatch_artifact.filename).resolve().is_file()
-    cpp = Path(op.dispatch_artifact.cpp_filename).read_text()
-    assert "generate_txn_main_sequence(int32_t" in cpp
-    assert not hasattr(op, "insts_artifact")
-
-
-def test_one_callable_serves_every_parameter(chunk_copy_op):
-    """Each n must copy exactly n chunks: a stream generated for another n,
-    or none at all, leaves a different number of sentinels behind."""
-    tensor_class = aie_utils.DEFAULT_TENSOR_CLASS
-    size = MAX_CHUNKS * CHUNK
-    src = np.arange(size, dtype=np.int32)
-
-    run = chunk_copy_op.get_callable()
-    assert isinstance(run, DispatchCallable)
+def test_one_image_serves_every_parameter(npu_runtime):
+    """Each n must copy exactly n chunks: a stream generated for another n
+    leaves a different number of sentinels behind.
+    """
+    image = OperatorImage(ChunkCopy(max_chunks=MAX_CHUNKS))
     for n in (3, 1, MAX_CHUNKS, 3):
-        src_buf = tensor_class((size,), dtype=np.int32)
-        src_buf.numpy_view()[:] = src
-        dst_buf = tensor_class((size,), dtype=np.int32)
-        dst_buf.numpy_view()[:] = SENTINEL
-
-        run.set_parameters(n=n)
-        run(src_buf, dst_buf)
-
-        dst = dst_buf.numpy()
-        np.testing.assert_array_equal(dst[: n * CHUNK], src[: n * CHUNK])
-        assert np.all(dst[n * CHUNK :] == SENTINEL), f"n={n} copied too much"
+        src, dst = _buffers()
+        image(src, dst, n=n)
+        got, want = dst.numpy(), src.numpy()
+        np.testing.assert_array_equal(got[: n * CHUNK], want[: n * CHUNK])
+        assert np.all(got[n * CHUNK :] == SENTINEL), f"n={n} copied too much"
 
 
-def _fresh_build(tmp_path):
-    op = ChunkCopy(max_chunks=MAX_CHUNKS, context=AIEContext(build_dir=tmp_path))
-    op.compile()
-    return op
+def test_refuses_an_n_past_the_buffers(npu_runtime):
+    image = OperatorImage(ChunkCopy(max_chunks=MAX_CHUNKS))
+    with pytest.raises(HostRuntimeError, match=f"n exceeds {MAX_CHUNKS}"):
+        image(*_buffers(), n=MAX_CHUNKS + 1)
 
 
-def test_a_missing_cpp_rebuilds_the_generator(tmp_path):
-    """A native host compiles the published C++, so compile() restores it."""
-    op = _fresh_build(tmp_path)
-    Path(op.dispatch_artifact.cpp_filename).unlink()
-    op = _fresh_build(tmp_path)
-    assert Path(op.dispatch_artifact.cpp_filename).is_file()
+@pytest.mark.parametrize("scalars", [{}, {"m": 1}, {"n": 1, "m": 1}])
+def test_a_call_takes_exactly_the_declared_scalars(scalars, npu_runtime):
+    image = OperatorImage(ChunkCopy(max_chunks=MAX_CHUNKS))
+    with pytest.raises(HostRuntimeError, match="dispatch scalar mismatch"):
+        image(*_buffers(), **scalars)
 
 
-def test_a_missing_xclbin_rebuilds_the_generator_with_it(tmp_path):
-    """The generator writes to addresses the xclbin's aiecc run allocates."""
-    op = _fresh_build(tmp_path)
-    library = Path(op.dispatch_artifact.filename)
-    before = os.path.getmtime(library)
-    Path(op.xclbin_artifact.filename).unlink()
-    op = _fresh_build(tmp_path)
-    assert Path(op.xclbin_artifact.filename).is_file()
-    assert os.path.getmtime(library) > before
-
-
-def test_call_before_set_parameters_raises(chunk_copy_op):
-    run = chunk_copy_op.get_callable()
-    with pytest.raises(RuntimeError, match="set_parameters"):
-        run()
-
-
-@pytest.mark.parametrize("params", [{}, {"m": 1}, {"n": 1, "m": 1}])
-def test_set_parameters_takes_exactly_the_declared_names(chunk_copy_op, params):
-    run = chunk_copy_op.get_callable()
-    with pytest.raises(TypeError, match="takes exactly"):
-        run.set_parameters(**params)
-
-
-@pytest.mark.parametrize("dispatch", ["auto", "fused", "separate", "reference"])
-def test_sequences_reject_a_dispatch_operator(aie_context, dispatch):
-    op = ChunkCopy(max_chunks=MAX_CHUNKS, context=aie_context)
-    with pytest.raises(NotImplementedError, match="per dispatch"):
-        OperatorSequence(
-            name="chunk_copy_sequence",
-            runlist=[(op, "src", "dst")],
-            input_args=["src"],
-            output_args=["dst"],
-            dispatch=dispatch,
-            context=aie_context,
-        )
+def test_a_full_elf_refuses_a_dispatch_value():
+    with pytest.raises(ValueError, match="package as xclbin"):
+        build_design(ChunkCopy(max_chunks=MAX_CHUNKS))

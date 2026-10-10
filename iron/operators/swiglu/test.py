@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""SwiGLU on a device, one token and a sequence.
+
+The product and the down projection are each judged against their
+operator's reference, under its own tolerance, on the inputs the device
+gave them, so a drift within tolerance upstream is not amplified into a
+failure downstream.
+"""
+
+import numpy as np
+import pytest
+from aie.utils.benchmark import run_iters
+from ml_dtypes import bfloat16
+
+from iron.lm.layers import SwiGLU
+from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.gemv import GEMV
+from iron.operators.silu import SiLU
+
+# (rows, embedding_dim, hidden_dim). Qwen3.5-0.8B's FFN is 1024 by 3584.
+SHAPES = [(1, 2048, 2048), (1, 1024, 3584), (256, 2048, 2048)]
+
+
+def _weight(rng, rows, cols):
+    """``(out, in)``, scaled so a projection keeps its input's magnitude:
+    the gate stays where SiLU does not saturate.
+    """
+    return (rng.standard_normal((rows, cols)) / np.sqrt(cols)).astype(bfloat16)
+
+
+def _read(net, handle):
+    buf = net.buffer(handle)
+    buf.to("cpu")
+    return buf.numpy().reshape(tuple(handle.shape))
+
+
+def _verdict(net, step):
+    """The step's output against its operator's reference on the inputs
+    the device gave it.
+    """
+    op = step.op
+    held = {b.name: _read(net, h) for b, h in zip(op.buffers, step.slots)}
+    (verdict,) = op.judge(
+        {b.name: held[b.name] for b in op.inputs},
+        {b.name: held[b.name] for b in op.outputs},
+        op.resolved().tolerance(),
+    ).values()
+    return verdict
+
+
+@pytest.mark.parametrize("fold", [False, True], ids=["apart", "folded"])
+@pytest.mark.parametrize("rows,embedding_dim,hidden_dim", SHAPES, ids=lambda v: str(v))
+def test_swiglu(rows, embedding_dim, hidden_dim, fold, npu_runtime, record_property):
+    rng = np.random.default_rng(0)
+    ffn = SwiGLU(
+        _weight(rng, hidden_dim, embedding_dim),
+        _weight(rng, hidden_dim, embedding_dim),
+        _weight(rng, embedding_dim, hidden_dim),
+    )
+    net = ffn.compile(fold=fold, x=(rows, embedding_dim))
+    x = rng.standard_normal((rows, embedding_dim)).astype(bfloat16)
+
+    elapsed_us = run_iters(lambda: net(x), warmup=1, iters=1).e2e.avg_us
+    net(x)
+    record_property("Latency", elapsed_us)
+    record_property("Bandwidth", 2 * x.nbytes / (elapsed_us * 1e-6) / 1e9)
+    ops = sum(s.op.resolved().ops() for s in net.traced.steps)
+    record_property("Throughput", ops / (elapsed_us * 1e-6) / 1e9)
+
+    # Folded, the down matvec applies silu and the product to each line of
+    # its input as it reads it. flm.GEMM neither prepares nor finishes, so
+    # the product finishes silu in silu's cores.
+    folds = [
+        (
+            type(s.op),
+            [type(link.op) for link in s.op.prepare],
+            [type(link.op) for link in s.op.finish],
+        )
+        for s in net.traced.steps
+        if s.op.prepare or s.op.finish
+    ]
+    if not fold:
+        assert folds == []
+    elif rows == 1:
+        assert folds == [(GEMV, [SiLU, ElementwiseMul], [])]
+    else:
+        assert folds == [(SiLU, [], [ElementwiseMul])]
+    # The gate's buffer is dead once SiLU has read it, so the planner may
+    # reuse it; the product's inputs and the down projection's are intact.
+    steps = net.traced.steps
+    verdicts = {"down": _verdict(net, steps[-1])}
+    products = [s for s in steps if isinstance(s.op, ElementwiseMul) or s.op.finish]
+    if products:
+        verdicts["product"] = _verdict(net, products[0])
+    if fold:
+        # Folded, both projections are the product's inputs.
+        verdicts.update(gate=_verdict(net, steps[0]), up=_verdict(net, steps[1]))
+    assert all(verdicts.values()), {k: v.detail for k, v in verdicts.items()}

@@ -31,7 +31,7 @@ runs:
         
         case "${{ inputs.test_suite }}" in
           operators)
-            TEST_PATH="iron/operators/"
+            TEST_PATH="iron/operators/ iron/tests/"
             ;;
           applications)
             TEST_PATH="iron/applications/"

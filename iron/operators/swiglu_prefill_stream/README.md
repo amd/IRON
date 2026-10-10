@@ -16,18 +16,19 @@ stream-dse needs two inputs, and IRON writes both from one source.
 
 | | Source | Built by |
 | --- | --- | --- |
-| Workload (ONNX) | [`reference.py`](./reference.py), the `SwiGLU` `nn.Module` | `torch.export` via [`iron/common/stream/workload.py`](../../common/stream/workload.py) |
-| Mapping (YAML) | the placement in [`stream_design.py`](./stream_design.py) | [`iron/common/stream/mapping.py`](../../common/stream/mapping.py) |
-| Kernels (`.cc`) | the [mlir-aie `aie_kernels` library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels) | the registry in [`iron/common/stream/ops.py`](../../common/stream/ops.py) |
+| Workload (ONNX) | [`reference.py`](./reference.py), its `LAYERS` | [`stream/workload.py`](./stream/workload.py) |
+| Mapping (YAML) | the placement in [`stream_design.py`](./stream_design.py) | [`stream/mapping.py`](./stream/mapping.py) |
+| Kernels (`.cc`) | the [mlir-aie `aie_kernels` library](https://github.com/Xilinx/mlir-aie/tree/main/aie_kernels) | the registry in [`stream/ops.py`](./stream/ops.py) |
 
-`reference.py` is the single source of truth. Running it produces the golden output the
-test compares against; exporting it produces the workload the design is generated from.
-The mapping reads its layer names back from the exported graph rather than restating
+`reference.py` is the single source of truth. Evaluating its layers produces the golden
+output the test compares against; building the ONNX graph from them produces the
+workload the design is generated from.
+The mapping reads its layer names back from that graph rather than restating
 them, so workload and mapping cannot disagree. Both files are written into the
 experiment's output directory at build time; nothing is committed.
 
 stream-dse returns one MLIR design per fusion group. IRON takes it from there:
-`iron/common/sequence.py` fuses the designs into a single module and compiles it with
+`iron/common/image/` fuses the designs into a single module and compiles it with
 `aiecc` into one full ELF.
 
 Nothing crosses the boundary except those files, which is why stream-dse can be an
@@ -45,7 +46,7 @@ holds. The groups are `stream_design.GROUP_LAYERS`.
 | 5 | one per layer | layer by layer, each taking the whole array in turn |
 
 k=1 and k=2 fuse several layers onto each core, so intermediates stay on chip. k=5 is
-the shape [`swiglu_prefill`](../swiglu_prefill) uses, every layer its own design.
+the shape [`SwiGLU`](../../lm/layers.py) takes, every layer its own design.
 
 A core holds the operands of every layer in its group, so the kernel tile a group can
 afford shrinks as more layers fuse onto it. That is why the tile is chosen per `k`
@@ -57,13 +58,13 @@ and `embedding_dim` and `hidden_dim` multiples of their tile times the column sp
 `stream_design._check_shapes` enforces this and names the offending dimension.
 
 Designs that come out byte-identical are built and configured once: at k=5 the gate and
-up projections are the same design, so the ELF holds four rather than five. Set
-`share_designs=False` on the operator to switch that off.
+up projections are the same design, so the ELF holds four rather than five.
 
 ## Expected performance
 
 Warm dispatch on one callable, 20 dispatches, seq 256 / embedding 512 / hidden 2048, on
-an idle NPU2. `swiglu_prefill` is the hand-written operator at the same shape.
+an idle NPU2. `swiglu_prefill` is the hand-written graph at the same shape (since
+merged into `SwiGLU`, which projects through a column-major weight).
 
 | Design | Median (us) | Relative |
 | --- | --- | --- |
@@ -81,11 +82,11 @@ from the golden reference, against 0.139 to 0.144 here.
 
 ## Runtime buffers
 
-Named by the reference module: `input`, `w_gate`, `w_up`, `w_down`, `output`.
+Named by the reference: `input`, `w_gate`, `w_up`, `w_down`, `output`.
 
 ```python
 run = operator.get_callable()
-run.get_buffer("w_gate").torch_view()[:] = weights.flatten()
+run.get_buffer("w_gate").numpy_view()[:] = weights.reshape(-1)
 ```
 
 ## Installing
@@ -115,7 +116,7 @@ pytest iron/operators/swiglu_prefill_stream/test.py
 
 ## Adding another operator
 
-One `StreamKernel` plus one `TORCH_OPS` entry in `iron/common/stream/ops.py`, pointing
+One `StreamKernel` plus one `STREAM_OPS` entry in `stream/ops.py`, pointing
 at mlir-aie's `aie_kernels/<family>/<name>.cc`, plus that operator's own placement. The
 kernel entry carries both the compile flags and the operand layouts, so the layout the
 generated DMAs produce and the layout the compiled object expects come from one place.
@@ -125,6 +126,5 @@ generated DMAs produce and the layout the compiled object expects come from one 
 The hardware description (`whole_array_strix.yaml`) is resolved from the installed
 `stream` package, where it ships as package data; nothing is vendored here.
 
-Node names are set explicitly, naming the role each layer plays rather than the ATen
-op the exporter captured (`matmul`, `matmul_1`, ...). The mapping and the generated
-design are both read by those names.
+Node names (`stream_design.NODE_NAMES`) name the role each layer plays. The mapping
+and the generated design are both read by those names.

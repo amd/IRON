@@ -16,13 +16,11 @@ The kernels come from mlir-aie's `flm_gemma4_decode_*` factories.
 
 ```python
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
+from iron.common.image import OperatorImage
 from iron.operators.flm import DecodeLayer
 
-op = DecodeLayer(geometry=FLM_GEMMA4_E2B_DECODE, layer_type="swa", context=ctx)
-op.compile()
-run = op.get_callable()
-run.set_parameters(context_len=37, max_l=4096)
-run(x, proj, rms, rope_rms, kv)
+image = OperatorImage(DecodeLayer(geometry=FLM_GEMMA4_E2B_DECODE, layer_type="swa"))
+image(x, proj, rms, rope_rms, kv, context_len=37, max_l=4096)
 ```
 
 `geometry` is `FLM_GEMMA4_E2B_DECODE` or `FLM_GEMMA4_E4B_DECODE` from
@@ -45,7 +43,8 @@ no k or v projection and writes no cache row. If `geometry.double_wide_mlp`
 is set, a skip layer has twice the intermediate size.
 
 The four layer types configure the device identically. They differ only in
-the runtime sequence. One xclbin therefore runs all four.
+the runtime sequence. One xclbin, the `global` layer's, therefore runs all
+four.
 
 ## What the layer computes
 
@@ -79,12 +78,14 @@ The attention matmuls run on bfp16 operands.
 | `max_l` | rows of the KV cache, at most 32768 |
 
 `max_l` sets where V starts in a global layer's cache. A sliding-window
-layer's cache is a ring of 512 rows.
+layer's cache is a ring of 512 rows. The host refuses a dispatch with a
+negative `context_len`, a `max_l` above 32768 or, in a global layer, a
+`context_len` of `max_l` or more.
 
 ## Buffers
 
-The design expects these buffers, in this order. The argument spec gives
-upper bounds on their sizes.
+The design expects these buffers, in this order. The operator's buffer sizes
+(`arg_sizes` in `design.py`) are upper bounds on what a layer reads.
 
 | Buffer | Holds |
 |---|---|

@@ -1,0 +1,193 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""What the case table does not cover lowers too: graph-traced operators
+with bound per-call values, flm/gemm's configuration and shapes, the
+shipped image's sequence, and the swiglu graph functions' operators.
+Same gate as ``lowering.py``: aiecc to an instruction stream.
+"""
+
+import dataclasses
+
+import aie.utils as aie_utils
+import numpy as np
+import pytest
+from aie.helpers.taplib import TensorAccessPattern
+
+import iron.operators.flm.gemm.op as flm
+from iron.common.image import OperatorImage
+from iron.operators.copy import Copy
+from iron.operators.flm.gemm.shipped import Shipped
+from iron.operators.gemm import GEMM
+from iron.operators.mha import MHA
+from iron.tests.common.llama_model import small
+from iron.tests.toolchain.lowering import lower
+from iron.tests.toolchain.tools import requires, swiglu
+
+pytestmark = [*requires("aiecc", "peano"), pytest.mark.usefixtures("npu2")]
+
+
+def _lower_all(traced, tmp_path):
+    for i, op in enumerate(traced.operators):
+        (tmp_path / str(i)).mkdir()
+        lower(op, tmp_path / str(i), name=f"{i}_{type(op).__name__}")
+
+
+def test_decode_graph_operators_lower_with_their_values(tmp_path):
+    model = small(max_seq_len=256)
+    traced = model.trace(**model.shapes(1))
+    bound = {id(b.op) for b in traced.bindings}
+    assert bound, "the decode graph binds values"
+    _lower_all(traced, tmp_path)
+
+
+def test_prefill_graph_operators_lower_with_their_value(tmp_path):
+    model = small()
+    traced = model.trace(**model.shapes(model.config.prefill_chunk))
+    # Every block is bound by the rows the call runs, the cache writes and the
+    # RoPE rows by the chunk, and MHA's keys and the draw by the position.
+    named = {b.expression.value.name for b in traced.bindings}
+    assert named == {"chunk", "rows", "position"}
+    _lower_all(traced, tmp_path)
+
+
+@pytest.mark.parametrize("rows", ["decode", "prompt"])
+def test_attention_over_a_128k_cache_lowers(rows, tmp_path):
+    """The caches are (max_seq_len, n_kv_groups, head_dim), a position's
+    heads together, so neither their per-call writes nor MHA's bounded
+    reads step by the context: at 131072 rows, where a (groups, positions)
+    cache's writes would step past a descriptor's reach, they still lower.
+    """
+    model = small(max_seq_len=131072)
+    step = 1 if rows == "decode" else model.config.prefill_chunk
+    traced = model.trace(**model.shapes(step))
+    attention = {
+        op.design_key(): op for op in traced.operators if type(op) in (Copy, MHA)
+    }
+    for i, op in enumerate(attention.values()):
+        (tmp_path / str(i)).mkdir()
+        lower(op, tmp_path / str(i), name=f"{i}_{type(op).__name__}")
+
+
+@pytest.mark.parametrize(
+    "M,K,N",
+    [(512, 1024, 1024), (512, 1024, 10240), (256, 512, 512)],
+    ids=["base", "n10240", "tn128"],
+)
+def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path):
+    op = flm.GEMM(M=M, K=K, N=N)
+    (tmp_path / "shape").mkdir()
+    lower(op, tmp_path / "shape")
+    tuned = op.resolved(aie_utils.get_current_device())
+    rM, rK, rN = tuned._reference_shape
+    reference = dataclasses.replace(
+        tuned,
+        M=rM,
+        K=rK,
+        N=rN,
+        epilogue=flm.Epilogue.NONE,
+        clamp=None,
+        packed_blocks=None,
+    )
+    (tmp_path / "config").mkdir()
+    lower(reference, tmp_path / "config", name=op.config_name)
+
+
+def _shipped(**kwargs):
+    return Shipped(**kwargs)
+
+
+def test_shipped_external_sequence_lowers(tmp_path):
+    lower(_shipped(M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0)), tmp_path)
+
+
+def test_instructions_compile_alone_against_an_external_image():
+    """The instructions-only compile: the shipped image is downloaded,
+    so its link step lowers only the sequence. No kernel, no Peano, and the
+    second request is a cache hit.
+    """
+    op = _shipped(M=256, K=1024, N=1152)
+    artifacts = OperatorImage(op).compile().artifacts
+    insts = artifacts.insts
+    assert insts is not None and insts.stat().st_size > 0
+    # The image is the download, so nothing was built beside the stream.
+    assert artifacts.entry.xclbin is None
+    assert artifacts.image.suffix == ".xclbin"
+    first = insts.stat().st_mtime_ns
+    again = OperatorImage(_shipped(M=256, K=1024, N=1152)).compile()
+    assert again.artifacts.insts == insts
+    assert insts.stat().st_mtime_ns == first, "the same sequence recompiled"
+
+
+def test_swiglu_graphs_operators_lower(tmp_path):
+    fn, E = swiglu()
+    (tmp_path / "decode").mkdir()
+    _lower_all(fn.trace(x=(1, E)), tmp_path / "decode")
+    (tmp_path / "prefill").mkdir()
+    _lower_all(fn.trace(x=(256, E)), tmp_path / "prefill")
+
+
+PREFILL = dict(
+    S=2048, E=2048, F=8192, H=32, G=8, D=64
+)  # Llama 3.2 1B's prefill at the maximum length
+
+
+def _reorder(sizes, in_strides, out_strides, **kw):
+    n = int(np.prod(sizes))
+    return Copy(
+        src=TensorAccessPattern((n,), 0, sizes, in_strides),
+        dst=TensorAccessPattern((n,), 0, sizes, out_strides),
+        input_buffer_size=n,
+        output_buffer_size=n,
+        **kw,
+    )
+
+
+@pytest.mark.parametrize(
+    "make",
+    [
+        pytest.param(
+            lambda p: GEMM(
+                M=p["S"],
+                K=p["F"],
+                N=p["E"],
+                num_aie_columns=8,
+                tile_m=64,
+                tile_k=64,
+                tile_n=64,
+                b_col_maj=True,
+            ),
+            id="down_projection_checkpoint_layout",
+        ),
+        pytest.param(
+            lambda p: _reorder(
+                (p["G"], p["S"], p["D"]),
+                (p["D"], p["G"] * p["D"], 1),
+                (p["S"] * p["D"], p["D"], 1),
+                tile_size=1024,
+            ),
+            id="kv_into_cache",
+        ),
+        pytest.param(
+            lambda p: MHA(
+                num_heads=p["H"],
+                seq_len=p["S"],
+                d=p["D"],
+                num_KV_heads=p["G"],
+                num_pipelines=8,
+                heads_interleaved=True,
+                kv_interleaved=True,
+            ),
+            id="mha_in_the_projections_layout",
+        ),
+    ],
+)
+def test_prefill_steps_lower_at_llama_size(make, tmp_path):
+    """The steps a prefill graph needs that a small case does not exercise: the
+    down projection's column-major weight (its column-block stride is past the
+    descriptor's 20-bit step, so B unrolls), the cache write's 2048-wide
+    reorder (one descriptor, D1 past its wrap split by the compiler), and MHA reading (seq, heads, d).
+    """
+    op = make(PREFILL)
+    op.resolved(aie_utils.get_current_device())
+    lower(op, tmp_path)

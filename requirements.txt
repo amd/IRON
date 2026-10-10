@@ -1,24 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2025 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# The MLIR-AIE and LLVM-AIE (Peano) packages are not on the official PyPI, so
-# we add them as additional indices here. Furthermore, we want the CPU-only
-# version of torch (don't need CUDA). Note that pip does NOT respect index
-# ordering when resolving versions: it gathers candidates from every index and
-# picks the highest, so listing the CPU index first is not enough to avoid the
-# CUDA build served from PyPI. We therefore also pin torch to the "+cpu" local
-# version below, which is only available from the PyTorch CPU index.
---index-url https://download.pytorch.org/whl/cpu
---find-links https://github.com/Xilinx/mlir-aie/releases/expanded_assets/v1.4.4
+# The mlir-aie and LLVM-AIE (Peano) wheels are not on the official PyPI, so we
+# find them on their release pages.
+--find-links https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4
 --find-links https://github.com/Xilinx/llvm-aie/releases/expanded_assets/nightly
---extra-index-url https://pypi.org/simple
 
-mlir_aie==v1.4.4
-llvm-aie==22.0.0.2026092101+0006955e
+mlir_aie==1.4.5.dev22+g35fa6b1
+llvm-aie==22.0.0.2026100501+94b320c0
 
 black
 reuse
-torch==2.13.0+cpu
 pytest
 pytest-xdist
 

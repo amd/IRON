@@ -19,16 +19,9 @@ from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
-from ml_dtypes import bfloat16
-
 from aie.dialects import arith
 from aie.dialects.aie import DMAChannelDir
-from aie.dialects.aiex import (
-    _as_i32,
-    dma_free_task,
-    dma_start_task,
-    shim_dma_single_bd_task,
-)
+from aie.dialects.aiex import _as_i32
 from aie.extras import types as T
 from aie.helpers.npdtypes import np_ndarray_type_get_shape
 from aie.helpers.taplib import TensorAccessPattern
@@ -37,6 +30,7 @@ from aie.iron import (
     Acquire,
     Bd,
     Buffer,
+    DispatchTime,
     DmaChannel,
     ExternalFunction,
     Lock,
@@ -46,11 +40,13 @@ from aie.iron import (
     Runtime,
     TileDma,
     Worker,
+    require,
 )
 from aie.iron.controlflow import range_
 from aie.iron.dataflow import Flow
 from aie.iron.device import Tile
 from aie.iron.kernels import flm_gemma4
+from ml_dtypes import bfloat16
 
 from iron.operators.flm.dataflow import ping_pong
 
@@ -164,13 +160,9 @@ def _stage_kv_causal(rt, MT, v, g):
     left_cons = Lock(tile=mt, lock_id=1, init=0)
     own_prod = Lock(tile=mt, lock_id=7, init=2)
     own_cons = Lock(tile=mt, lock_id=8, init=0)
-    fill = dict(
-        tap=TensorAccessPattern(
-            (LK_MT, g.dh),
-            0,
-            [LK_MT // g.lk, g.lk, 64, 8],
-            [g.lk * g.dh, 8, 64, 1],
-        )
+    # Each lk-row block arrives row by row and lands as 8-column groups.
+    fill = TensorAccessPattern.full((LK_MT // g.lk, g.dh // 8, g.lk, 8)).permute(
+        (0, 2, 1, 3)
     )
     rt.add_tile_dma(
         TileDma(
@@ -184,7 +176,7 @@ def _stage_kv_causal(rt, MT, v, g):
                         bufs[("left", 1)],
                         left_prod,
                         left_cons,
-                        **fill,
+                        tap=fill,
                     ),
                 ),
                 DmaChannel(
@@ -195,7 +187,7 @@ def _stage_kv_causal(rt, MT, v, g):
                         bufs[("own", 1)],
                         own_prod,
                         own_cons,
-                        **fill,
+                        tap=fill,
                     ),
                 ),
                 DmaChannel(
@@ -226,7 +218,7 @@ def _stage_kv_sliding(rt, MT, v, g):
     two counts. It therefore reads a buffer after both halves hold data.
     """
     in_mem_ty = np.ndarray[(LK_MT * 2, g.dh), bf16]
-    half = LK_MT * g.dh
+    halves = TensorAccessPattern.full((2, LK_MT // g.lk, g.dh // 8, g.lk, 8))
     mt = MT[v.kv_memtile]
     in_0 = Buffer(type=in_mem_ty, name=f"in_0_0_{mt.col}", tile=mt)
     in_1 = Buffer(type=in_mem_ty, name=f"in_1_0_{mt.col}", tile=mt)
@@ -244,15 +236,10 @@ def _stage_kv_sliding(rt, MT, v, g):
                         in_1,
                         prod,
                         cons,
-                        tap=TensorAccessPattern(
-                            (LK_MT * 2, g.dh),
-                            offset,
-                            [LK_MT // g.lk, g.lk, 32, 8],
-                            [g.lk * g.dh, 8, 128, 1],
-                        ),
+                        tap=halves[ch].permute((0, 2, 1, 3)),
                     ),
                 )
-                for ch, offset in ((0, 0), (1, half))
+                for ch in (0, 1)
             ]
             + [
                 DmaChannel(
@@ -265,12 +252,7 @@ def _stage_kv_sliding(rt, MT, v, g):
                         prod,
                         acq_val=2,
                         rel_val=2,
-                        tap=TensorAccessPattern(
-                            (LK_MT * 2, g.dh),
-                            0,
-                            [2 * LK_MT // g.lk, g.lk, g.dh],
-                            [g.lk * g.dh, g.dh, 1],
-                        ),
+                        tap=TensorAccessPattern.full((2 * LK_MT, g.dh)),
                     ),
                 ),
             ],
@@ -300,11 +282,16 @@ def prefill_attn(
     trace_size=0,
     *,
     kernel,
+    L_begin: DispatchTime[np.int32],
+    L_end: DispatchTime[np.int32],
+    max_l: DispatchTime[np.int32],
 ):
     """Prefill attention over a KV cache of up to max_context rows.
 
-    The README gives the layout of O, Q and KV. ``kernel`` is the variant's
-    factory's build with the locks IN_PROD_LOCK and IN_CONS_LOCK.
+    The README gives the layout of O, Q and KV and the meaning of the
+    dispatch parameters ``L_begin``, ``L_end`` and ``max_l``. ``kernel`` is
+    the variant's factory's build with the locks IN_PROD_LOCK and
+    IN_CONS_LOCK.
     """
     v = VARIANTS[variant]
     if v.windowed != (window is not None):
@@ -328,18 +315,14 @@ def prefill_attn(
     q_half_ty = np.ndarray[(lq_mt, g.dh), bf16]
     o_col_ty = np.ndarray[(lq_mt, g.dh), bf16]
 
-    qtap = TensorAccessPattern(
-        (lq_ct, g.dh),
-        0,
-        [lq_ct // 8, g.dh // 8, 8, 8],
-        [8 * g.dh, 8, g.dh, 1],
+    # The memtiles move q and o in 8x8 blocks.
+    q_walk = TensorAccessPattern.full((lq_ct, g.dh)).tile((8, 8))
+    o_walk = TensorAccessPattern.full((g.lq, g.dh)).tile((8, 8))
+    # Block b of Q and O: query rows b * lq_mt onwards, all heads.
+    qo_blocks = TensorAccessPattern.full((max_context, num_heads, g.dh)).partition(
+        max_context // lq_mt
     )
-    otap = TensorAccessPattern(
-        (g.lq, g.dh),
-        0,
-        [g.lq // 8, g.dh // 8, 8, 8],
-        [8 * g.dh, 8, g.dh, 1],
-    )
+    blocks_per_round = ROUND // lq_mt
 
     # Shim row 0, memtile row 1. Each tile carries its type. A Worker stamps an
     # untyped tile with Tile.with_type(). That call returns a second CoreTile
@@ -354,10 +337,13 @@ def prefill_attn(
 
     def sequence(o, q, kv, lb_arg, le_arg, max_l_arg, o_shim, q_shims):
         q_shim = dict(zip(q_keys, q_shims))
-        max_l = _as_i32(max_l_arg)
-        kv_cache_half = max_l * kv_row
+        kv_cache = TensorAccessPattern.full((2, _as_i32(max_l_arg), num_kv_heads, g.dh))
         L_begin = _as_i32(lb_arg)
         L_end = _as_i32(le_arg)
+        require(L_begin >= 0, "L_begin must be >= 0")
+        require(L_begin % ROUND == 0, f"L_begin must be a multiple of {ROUND}")
+        require(L_end % ROUND == 0, f"L_end must be a multiple of {ROUND}")
+        require(_as_i32(max_l_arg) <= max_context, "max_l exceeds max_context")
         rounds = arith.divsi(L_end - L_begin + (ROUND - 1), _as_i32(ROUND))
 
         for key in sorted(rtp):
@@ -373,6 +359,7 @@ def prefill_attn(
             for rnd in range_(rounds):
                 r = arith.index_cast(T.i32(), rnd)
                 if window is None:
+                    kv_begin = 0
                     kv_length = r * ROUND + (L_begin + ROUND)
                 else:
                     lq_current = L_begin + r * ROUND
@@ -381,73 +368,46 @@ def prefill_attn(
                     # else 0.
                     kv_begin = x - arith.andi(x, arith.shrsi(x, _as_i32(31)))
                     kv_length = lq_current - kv_begin + _as_i32(ROUND)
-                o_tasks, q_tasks, kv_tasks = [], [], []
+                o_tasks, q_tasks = [], []
                 for cu in range(v.num_cu):
                     head_off = head * v.num_cu + cu
                     for col in range(group_cols):
                         o_tasks.append(
                             o_shim[cu * group_cols + col].drain(
                                 o,
-                                tap=TensorAccessPattern(
-                                    (max_context * qo_row,),
-                                    r * (ROUND * qo_row)
-                                    + (head_off * g.dh + col * lq_mt * qo_row),
-                                    [1, 1, lq_mt, g.dh],
-                                    [0, 0, qo_row, 1],
-                                ),
+                                qo_blocks[r * blocks_per_round + col, :, head_off],
                                 wait=True,
                                 managed=False,
                             )
                         )
-                    q_base = r * (ROUND * qo_row) + head_off * g.dh
                     pairs = range(cu * group_cols // 2, (cu + 1) * group_cols // 2)
                     for qi, key in enumerate((p, h) for p in pairs for h in (0, 1)):
                         q_tasks.append(
                             q_shim[key].fill(
                                 q,
-                                tap=TensorAccessPattern(
-                                    (max_context * qo_row,),
-                                    (q_base + qi * lq_mt * qo_row if qi else q_base),
-                                    [1, 1, lq_mt, g.dh],
-                                    [0, 0, qo_row, 1],
-                                ),
+                                qo_blocks[r * blocks_per_round + qi, :, head_off],
                                 wait=False,
                                 managed=False,
                             )
                         )
-                # dma_bd's length operand is an i32. The product of the i64
-                # sizes does not fit in it. transfer_len sets the length.
-                kv_rows = arith.extsi(T.i64(), arith.divsi(kv_length, _as_i32(128)))
+                # Rows of 128 keys: one row alone may exceed a BD dimension.
                 kv_head = head // (gqa // v.num_cu)
-                k_off = (
-                    max_l * ((kv_head // num_kv_heads) * kv_row)
-                    + (kv_head % num_kv_heads) * g.dh
-                )
-                if window is not None:
-                    k_off = k_off + kv_begin * _as_i32(kv_row)
-                for symbol, offset in (
-                    ("k_in", k_off),
-                    ("v_in", k_off + kv_cache_half),
-                ):
-                    kv_tasks.append(
-                        shim_dma_single_bd_task(
-                            symbol,
-                            kv.op,
-                            offset=offset,
-                            sizes=[1, kv_rows, 128, g.dh],
-                            strides=[0, 128 * kv_row, kv_row, 1],
-                            transfer_len=kv_length * g.dh,
-                            issue_token=False,
-                        )
+                rows = slice(kv_begin, kv_begin + kv_length)
+                kv_tasks = [
+                    flow.fill(
+                        kv,
+                        tap=kv_cache[half, rows, kv_head].split(0, 128),
+                        wait=False,
+                        managed=False,
                     )
-                dma_start_task(*kv_tasks)
+                    for half, flow in enumerate(kv_flows)
+                ]
                 # Every handle must retire inside the scf.for that created it.
                 for t in o_tasks:
                     t.await_()
                     t.free()
-                for t in q_tasks:
+                for t in q_tasks + kv_tasks:
                     t.free()
-                dma_free_task(*kv_tasks)
 
     # RTPs, one set per core, keyed by the tile's (row, col): the sequence
     # writes the token range and the window into them.
@@ -459,6 +419,8 @@ def prefill_attn(
     # The sequence sets go to the number of passes after it writes the RTPs.
     # A core acquires one count before each pass.
     go = {}
+    # The shim flows of k, then v.
+    kv_flows = []
 
     # o: one fifo per memtile m. Memtile m joins the output of four cores:
     # rows 0 and 1 for an even m, rows 2 and 3 for an odd m, in columns
@@ -471,7 +433,7 @@ def prefill_attn(
             [g.lq * g.dh * i for i in range(4)],
             obj_types=[o_ty] * 4,
             names=[f"o{m}_{i}" for i in range(4)],
-            from_stream=[otap] * 4,
+            from_stream=[o_walk] * 4,
             tile=MT[m],
         )
         base_row = 0 if m % 2 == 0 else 2
@@ -492,7 +454,7 @@ def prefill_attn(
                 [lq_ct * g.dh * t for t in range(2)],
                 obj_types=[q_ty] * 2,
                 names=[f"q{mt_idx}_{half}_{t}" for t in range(2)],
-                to_stream=[qtap] * 2,
+                to_stream=[q_walk] * 2,
                 depths=[1, 1],
                 tile=MT[mt_idx],
             )
@@ -509,9 +471,9 @@ def prefill_attn(
             o_l3_ty,
             o_l3_ty,
             kv_l3_ty,
-            np.int32,
-            np.int32,
-            np.int32,
+            L_begin,
+            L_end,
+            max_l,
             o_shim,
             list(q_shim.values()),
         ],
@@ -653,12 +615,13 @@ def prefill_attn(
     stage_kv(rt, MT, v, g)
 
     kv_mt = v.kv_memtile
-    rt.add_flow(
-        Flow(IT[kv_mt], MT[kv_mt], src_channel=0, dst_channel=0, shim_symbol="k_in")
-    )
-    rt.add_flow(
-        Flow(IT[kv_mt], MT[kv_mt], src_channel=1, dst_channel=1, shim_symbol="v_in")
-    )
+    for ch, symbol in enumerate(("k_in", "v_in")):
+        kv_flows.append(
+            Flow(
+                IT[kv_mt], MT[kv_mt], src_channel=ch, dst_channel=ch, shim_symbol=symbol
+            )
+        )
+        rt.add_flow(kv_flows[-1])
     for tile in CT.values():
         rt.add_flow(Flow(MT[kv_mt], tile, src_channel=0, dst_channel=1))
 

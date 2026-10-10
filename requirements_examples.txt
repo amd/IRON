@@ -2,13 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 tiktoken
+tokenizers
 safetensors
 blobfile
 packaging
-torchtune==0.6.1
-torchao==0.13.0
-# torchtune 0.6.1 leaves datasets unpinned. datasets 5.1.0 widened its own
-# huggingface-hub bound from <2.0 to <3.0, which leaves pip no solution and
-# sends it backtracking to tokenizers 0.13.3, a version with no cp312 wheel.
-# Building that sdist needs a Rust toolchain the CI image does not carry.
-datasets==5.0.1

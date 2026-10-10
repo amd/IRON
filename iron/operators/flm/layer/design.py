@@ -19,19 +19,9 @@ from functools import partial
 from typing import NamedTuple
 
 import numpy as np
-from ml_dtypes import bfloat16
-
 from aie.dialects import arith
 from aie.dialects.aie import DMAChannelDir
-from aie.dialects.aiex import (
-    _as_i32,
-    dma_await_task,
-    dma_free_task,
-    dma_start_task,
-    npu_write32,
-    shim_dma_single_bd_task,
-)
-from aie.extras import types as T
+from aie.dialects.aiex import _as_i32, npu_write32
 from aie.extras.dialects.arith import constant
 from aie.helpers.npdtypes import np_ndarray_type_get_shape
 from aie.helpers.taplib import TensorAccessPattern
@@ -39,6 +29,7 @@ from aie.iron import (
     Acquire,
     Bd,
     Buffer,
+    DispatchTime,
     DmaChannel,
     Lock,
     ObjectFifo,
@@ -47,16 +38,18 @@ from aie.iron import (
     Runtime,
     TileDma,
     Worker,
+    require,
 )
+from aie.iron.controlflow import range_
+from aie.iron.dataflow import Flow, PacketFlow
+from aie.iron.device import Tile
 from aie.iron.kernels import (
     FLM_GEMMA4_E2B_DECODE,
     FLM_GEMMA4_E4B_DECODE,
     FlmGemma4DecodeGeometry,
     flm_gemma4,
 )
-from aie.iron.controlflow import range_
-from aie.iron.dataflow import Flow, PacketFlow
-from aie.iron.device import Tile
+from ml_dtypes import bfloat16
 
 from iron.operators.flm import q4nx
 from iron.operators.flm.dataflow import ping_pong
@@ -406,16 +399,20 @@ def _call_kernel(*args):
 
 
 def _connect(
-    rt, src, src_ch, dst, dst_ch, pkt_id=None, keep_pkt_header=False, shim_symbol=None
+    rt, src, src_ch, dst, dst_ch, pkt_id=None, keep_pkt_header=False, name=None
 ):
-    """A circuit-switched flow, or a packet flow when pkt_id is set."""
-    ends = dict(src_channel=src_ch, dst_channel=dst_ch, shim_symbol=shim_symbol)
+    """Add a circuit-switched flow, or a packet flow when pkt_id is set.
+
+    Returns:
+        The flow.
+    """
+    ends = dict(src_channel=src_ch, dst_channel=dst_ch, name=name)
     if pkt_id is None:
-        rt.add_flow(Flow(src, dst, **ends))
+        flow = Flow(src, dst, **ends)
     else:
-        rt.add_flow(
-            PacketFlow(pkt_id, src, dst, keep_pkt_header=keep_pkt_header, **ends)
-        )
+        flow = PacketFlow(pkt_id, src, dst, keep_pkt_header=keep_pkt_header, **ends)
+    rt.add_flow(flow)
+    return flow
 
 
 @dataclass
@@ -456,7 +453,7 @@ class _Ctx:
 
 
 def _ceil_mul(v, chunk):
-    """v rounded up to a multiple of chunk."""
+    """Round `v` up to a multiple of `chunk`."""
     # The C++ generator cannot lower the floordivsi that `//` emits.
     return arith.divsi(v + (chunk - 1), _as_i32(chunk)) * chunk
 
@@ -477,6 +474,7 @@ def _sequence(
     rtp,
     layer_type,
     sliding_window,
+    shim,
     x_arg,
     proj_arg,
     rms_arg,
@@ -488,8 +486,9 @@ def _sequence(
     """The runtime sequence of one ``layer_type`` dispatch.
 
     The sequence writes the RTPs, then starts the shim DMA legs in the order of
-    the engine's gen_layer_seq. Offsets and lengths count bf16 elements. L
-    counts the tokens up to and including this one.
+    the engine's gen_layer_seq. ``shim`` holds the shim flows by name. Offsets
+    and lengths count bf16 elements. L counts the tokens up to and including
+    this one.
     """
     IS_SWA = layer_type in ("swa", "swa_skip")
     IS_SKIP = layer_type in ("global_skip", "swa_skip")
@@ -500,6 +499,11 @@ def _sequence(
     DH = g.swa_dh if IS_SWA else g.dh
     DK = g.num_kv_heads * DH
     weights = weight_layout(g, layer_type)
+
+    require(_as_i32(len_arg) >= 0, "context_len must be >= 0")
+    require(MAX_L_v <= MAX_CONTEXT, f"max_l exceeds {MAX_CONTEXT}")
+    if not IS_SWA:
+        require(L <= MAX_L_v, "context_len must be below max_l")
 
     for c in PROJ_COLS:
         for r in (2, 3, 4, 5):
@@ -534,39 +538,28 @@ def _sequence(
             tasks = window.pop(0)
             for task, token in tasks:
                 if token:
-                    dma_await_task(task)
-            dma_free_task(*[task for task, _ in tasks])
+                    task.await_()
+            for task, _ in tasks:
+                task.free()
 
     def emit(*legs):
-        """Start one round of legs."""
-        dma_start_task(*[task for task, _ in legs])
+        """Keep one round of started legs in flight."""
         window.append(legs)
         flush()
 
-    def leg(symbol, mem, off, length, token=True, pkt=None):
-        """A (task, token) pair: one linear shim BD over mem."""
-        # dma_bd takes i64 sizes and an i32 transfer_len.
-        size_len = length if isinstance(length, int) else arith.extsi(T.i64(), length)
-        task = shim_dma_single_bd_task(
-            symbol,
-            mem,
-            offset=off,
-            sizes=[1, 1, 1, size_len],
-            strides=[0, 0, 0, 1],
-            transfer_len=length,
-            issue_token=token,
-            packet=None if pkt is None else (0, pkt),
+    def leg(flow, mem, off, length, token=True):
+        """A (task, token) pair: ``mem[off : off + length]`` into ``shim[flow]``."""
+        task = shim[flow].fill(
+            mem, tap=mem[off : off + length], wait=token, managed=False
         )
         return task, token
 
-    emit(leg("send_x", x_arg.op, 0, D, pkt=_ShimPkt.to_rms))
-    emit(leg("send_rms", rms_arg.op, 0, 4 * D, pkt=_ShimPkt.to_rms))
+    emit(leg("send_x", x_arg, 0, D))
+    emit(leg("send_rms", rms_arg, 0, 4 * D))
     # The RoPE weights go out on the channel whose flow reaches this layer
     # type's RoPE tile.
-    rope_sym = "send_rms" if IS_SWA else "send_x"
-    emit(leg(rope_sym, rope_rms_arg.op, 0, 3 * DH, pkt=_ShimPkt.to_rope))
-    recv_y, _ = leg("recv_y", x_arg.op, 0, D)
-    dma_start_task(recv_y)
+    emit(leg("send_rms_rope" if IS_SWA else "send_x_rope", rope_rms_arg, 0, 3 * DH))
+    recv_y = shim["recv_y"].drain(x_arg, tap=x_arg[:D], wait=True, managed=False)
 
     def move_weights(w):
         """The engine's _move_weights: a round is 2 legs to each proj column."""
@@ -579,14 +572,12 @@ def _sequence(
             for ci, col in enumerate(PROJ_COLS):
                 for half in (0, 1):
                     off = w.offset + (rnd * cores + ci * 4 + 2 * half) * stripe
-                    legs.append(
-                        leg(f"proj_w{half}_{col}", proj_arg.op, off, 2 * stripe)
-                    )
+                    legs.append(leg(f"proj_w{half}_{col}", proj_arg, off, 2 * stripe))
             emit(*legs)
 
     def pli_leg(name):
-        """One leg over the bf16 weight ``name``, on the shim symbol ``name``."""
-        return leg(name, proj_arg.op, weights[name].offset, weights[name].size)
+        """One leg over the bf16 weight ``name``, on the shim flow ``name``."""
+        return leg(name, proj_arg, weights[name].offset, weights[name].size)
 
     v_cache_off = DK * SW if IS_SWA else MAX_L_v * DK
     move_weights(weights["qkv"])
@@ -594,19 +585,22 @@ def _sequence(
         # recv_k carries the global layers' k and v, recv_v the sliding-window
         # layers'.
         L_off = (arith.andi(L - 1, _as_i32(SW - 1)) if IS_SWA else (L - 1)) * DK
-        recv_sym = "recv_v" if IS_SWA else "recv_k"
-        emit(leg(recv_sym, kv_arg.op, L_off, DK))
-        emit(leg(recv_sym, kv_arg.op, L_off + v_cache_off, DK))
-    emit(leg("pli_rope_rms", rope_rms_arg.op, 3 * DH, g.pli_d * 2 + D + MIN_BF16_PAD))
+        recv = "recv_v" if IS_SWA else "recv_k"
+        for off in (L_off, L_off + v_cache_off):
+            task = shim[recv].drain(
+                kv_arg, tap=kv_arg[off : off + DK], wait=True, managed=False
+            )
+            emit((task, True))
+    emit(leg("pli_rope_rms", rope_rms_arg, 3 * DH, g.pli_d * 2 + D + MIN_BF16_PAD))
     # x reuses pli_rope_rms's channel as a second BD.
-    emit(leg("pli_rope_rms", x_arg.op, 2 * D, D, token=False))
+    emit(leg("pli_rope_rms", x_arg, 2 * D, D, token=False))
     emit(pli_leg("pli_down"))
     # The KV cache into the attention memtile.
-    mv_pkt = _KV_PKT_SWA if IS_SWA else _KV_PKT_GLOBAL
+    move_k, move_v = ("move_k_swa", "move_v_swa") if IS_SWA else ("move_k", "move_v")
     if not IS_SWA:
         d2m = _ceil_mul(L, LK) * DK
-        emit(leg("move_k", kv_arg.op, 0, d2m, pkt=mv_pkt))
-        emit(leg("move_v", kv_arg.op, v_cache_off, d2m, pkt=mv_pkt))
+        emit(leg(move_k, kv_arg, 0, d2m))
+        emit(leg(move_v, kv_arg, v_cache_off, d2m))
     else:
         # The sliding-window cache is a ring of `rows` rows. Its oldest row is
         # `start`. Phase 1 sends rows start..rows-1. Phase 2 sends rows
@@ -627,26 +621,17 @@ def _sequence(
         p1_len = (rows - start) * DK - arith.andi(_z, _as_i32(DK))
         p2_off = arith.andi(_z, p1_len)
         p2_len = arith.ori(start * DK, arith.andi(_z, _as_i32(DK)))
-        emit(leg("move_k", kv_arg.op, p1_off, p1_len, pkt=mv_pkt))
-        emit(leg("move_v", kv_arg.op, p1_off + v_cache_off, p1_len, pkt=mv_pkt))
-        emit(leg("move_k", kv_arg.op, p2_off, p2_len, token=False, pkt=mv_pkt))
-        emit(
-            leg(
-                "move_v",
-                kv_arg.op,
-                p2_off + v_cache_off,
-                p2_len,
-                token=False,
-                pkt=mv_pkt,
-            )
-        )
+        emit(leg(move_k, kv_arg, p1_off, p1_len))
+        emit(leg(move_v, kv_arg, p1_off + v_cache_off, p1_len))
+        emit(leg(move_k, kv_arg, p2_off, p2_len, token=False))
+        emit(leg(move_v, kv_arg, p2_off + v_cache_off, p2_len, token=False))
     for name in ("o", "up_gate", "down"):
         move_weights(weights[name])
     emit(pli_leg("pli_gate"))
     emit(pli_leg("pli_up"))
     flush(force=True)
-    dma_await_task(recv_y)
-    dma_free_task(recv_y)
+    recv_y.await_()
+    recv_y.free()
 
 
 def _build_rms(ctx, rms_tile):
@@ -655,7 +640,6 @@ def _build_rms(ctx, rms_tile):
     x arrives on S2MM 0, the norm weights on S2MM 1. y leaves on MM2S 0
     behind its packet header.
     """
-    D = ctx.g.model_dim
     rms_k = ctx.entry("rms_residual", "rms_residual")
     rms_y_pkt_ty, rms_x_ty, _, _, rms_w_ty, rms_x_buf_ty, _, _ = rms_k.arg_types()
     rms_name = f"{rms_tile.row}_{rms_tile.col}"
@@ -715,7 +699,6 @@ def _build_rms(ctx, rms_tile):
                         rms_x_pong,
                         rl["x_prod_lock"],
                         rl["x_cons_lock"],
-                        tap=TensorAccessPattern(rms_x_ping.shape, 0, [D], [1]),
                     ),
                 ),
                 _single_bd(
@@ -724,7 +707,6 @@ def _build_rms(ctx, rms_tile):
                     rms_w,
                     rl["w_prod_lock"],
                     rl["w_cons_lock"],
-                    tap=TensorAccessPattern(rms_w.shape, 0, [4 * D], [1]),
                 ),
                 _single_bd(
                     DMAChannelDir.MM2S,
@@ -732,7 +714,7 @@ def _build_rms(ctx, rms_tile):
                     rms_y,
                     rl["y_cons_lock"],
                     rl["y_prod_lock"],
-                    tap=TensorAccessPattern(rms_y.shape, 14, [D + 2], [1]),
+                    tap=TensorAccessPattern.full(rms_y.shape)[14:],
                 ),
             ],
         )
@@ -830,7 +812,7 @@ def _build_pl_embedding(ctx, ple_tile):
     x0_per_layer, the norm weights and x0 arrive on S2MM 0 as a 4-BD cycle,
     the weights on S2MM 1. y leaves on MM2S 1.
     """
-    D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
+    PLI_D = ctx.g.pli_d
     ple_name = f"{ple_tile.row}_{ple_tile.col}"
     ple_k = ctx.entry("proj_layer_embedding", "proj_layer_embedding")
     ple_norm_w_ty, ple_x0_pl_ty, ple_x0_ty, _, ple_y_ty, w_ty, _ = ple_k.arg_types()
@@ -883,16 +865,14 @@ def _build_pl_embedding(ctx, ple_tile):
                         ),
                         Bd(
                             ple_norm_w,
-                            tap=TensorAccessPattern(ple_norm_w.shape, 0, [PLI_D], [1]),
+                            tap=TensorAccessPattern.full(ple_norm_w.shape)[:PLI_D],
                             acquires=[Acquire(pl["norm_w_prod_lock"])],
                             releases=[Release(ple_norm_w_p2)],
                             next=2,
                         ),
                         Bd(
                             ple_norm_w,
-                            tap=TensorAccessPattern(
-                                ple_norm_w.shape, PLI_D, [D + 32], [1]
-                            ),
+                            tap=TensorAccessPattern.full(ple_norm_w.shape)[PLI_D:],
                             acquires=[Acquire(ple_norm_w_p2)],
                             releases=[Release(pl["x0_prod_lock"])],
                             next=3,
@@ -1002,7 +982,7 @@ def _build_pl_merge(ctx, plm_tile):
                     plm_y,
                     plm_norm_i_prod,
                     plm_res_gate_prod,
-                    tap=TensorAccessPattern(plm_y.shape, 0, [D + PLI_D + 32], [1]),
+                    tap=TensorAccessPattern.full(plm_y.shape)[: D + PLI_D + 32],
                 ),
                 _single_bd(
                     DMAChannelDir.S2MM,
@@ -1010,9 +990,7 @@ def _build_pl_merge(ctx, plm_tile):
                     plm_y,
                     plm_res_gate_prod,
                     plm_cons,
-                    tap=TensorAccessPattern(
-                        plm_y.shape, D + PLI_D + 32, [D + PLI_D], [1]
-                    ),
+                    tap=TensorAccessPattern.full(plm_y.shape)[D + PLI_D + 32 :],
                 ),
                 _single_bd(DMAChannelDir.MM2S, 0, plm_y, plm_cons, plm_norm_i_prod),
             ],
@@ -1199,9 +1177,9 @@ def _build_proj_core(ctx, pt, kern, send_x_out, main_y0=None, main_y1=None):
                 [
                     Bd(
                         y,
-                        tap=TensorAccessPattern(
-                            y.shape, 14, [2 * q4nx.M_TILE + 2], [1]
-                        ),
+                        tap=TensorAccessPattern.full(np_ndarray_type_get_shape(y_ty))[
+                            14:
+                        ],
                         acquires=[Acquire(pk[f"y_cons_{half}_lock"], value=2)],
                         releases=[Release(pk[f"y_prod_{half}_lock"], value=2)],
                         next=nxt,
@@ -1250,73 +1228,38 @@ def _proj_weight_channels(w0, w1, wp0, wp0c0, wp0c1, wp1, wp1c0, wp1c1):
     Each weight half arrives on S2MM 4 or 5 and leaves as two blocks, one to
     each of two cores.
     """
+    w = TensorAccessPattern.full(w0.shape)
     return {
         "in0": DmaChannel(
             DMAChannelDir.S2MM,
             4,
-            ping_pong(
-                w0,
-                w1,
-                wp0,
-                wp0c0,
-                tap=TensorAccessPattern(w0.shape, 0, [2 * W_BLOCK], [1]),
-            ),
+            ping_pong(w0, w1, wp0, wp0c0, tap=w[: 2 * W_BLOCK]),
         ),
         "in1": DmaChannel(
             DMAChannelDir.S2MM,
             5,
-            ping_pong(
-                w0,
-                w1,
-                wp1,
-                wp1c0,
-                tap=TensorAccessPattern(w0.shape, 2 * W_BLOCK, [2 * W_BLOCK], [1]),
-            ),
+            ping_pong(w0, w1, wp1, wp1c0, tap=w[2 * W_BLOCK :]),
         ),
         "out": [
             DmaChannel(
                 DMAChannelDir.MM2S,
                 0,
-                ping_pong(
-                    w0,
-                    w1,
-                    wp0c0,
-                    wp0c1,
-                    tap=TensorAccessPattern(w0.shape, 0, [W_BLOCK], [1]),
-                ),
+                ping_pong(w0, w1, wp0c0, wp0c1, tap=w[:W_BLOCK]),
             ),
             DmaChannel(
                 DMAChannelDir.MM2S,
                 1,
-                ping_pong(
-                    w0,
-                    w1,
-                    wp0c1,
-                    wp0,
-                    tap=TensorAccessPattern(w0.shape, W_BLOCK, [W_BLOCK], [1]),
-                ),
+                ping_pong(w0, w1, wp0c1, wp0, tap=w[W_BLOCK : 2 * W_BLOCK]),
             ),
             DmaChannel(
                 DMAChannelDir.MM2S,
                 2,
-                ping_pong(
-                    w0,
-                    w1,
-                    wp1c0,
-                    wp1c1,
-                    tap=TensorAccessPattern(w0.shape, 2 * W_BLOCK, [W_BLOCK], [1]),
-                ),
+                ping_pong(w0, w1, wp1c0, wp1c1, tap=w[2 * W_BLOCK : 3 * W_BLOCK]),
             ),
             DmaChannel(
                 DMAChannelDir.MM2S,
                 3,
-                ping_pong(
-                    w0,
-                    w1,
-                    wp1c1,
-                    wp1,
-                    tap=TensorAccessPattern(w0.shape, 3 * W_BLOCK, [W_BLOCK], [1]),
-                ),
+                ping_pong(w0, w1, wp1c1, wp1, tap=w[3 * W_BLOCK :]),
             ),
         ],
     }
@@ -1339,6 +1282,7 @@ def _build_proj_gather_mem(ctx, mt):
     y1 = Buffer(type=m_col_ty, name=f"y_buffer_1_{r}_{c}", tile=mt)
     w0, w1 = _proj_weight_buffers(mt)
     yp0, yp1, yp2, yp3, yc = ctx.add_locks(mt, [(0, 2), (1, 0), (2, 0), (3, 0), (4, 0)])
+    y = TensorAccessPattern.full(y0.shape)
     wc = _proj_weight_channels(w0, w1, *ctx.add_locks(mt, _PROJ_MEM_W_LOCKS))
     ctx.rt.add_tile_dma(
         TileDma(
@@ -1347,46 +1291,22 @@ def _build_proj_gather_mem(ctx, mt):
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     0,
-                    ping_pong(
-                        y0,
-                        y1,
-                        yp0,
-                        yp1,
-                        tap=TensorAccessPattern(y0.shape, 0, [2 * m + 2], [1]),
-                    ),
+                    ping_pong(y0, y1, yp0, yp1, tap=y[: 2 * m + 2]),
                 ),
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     1,
-                    ping_pong(
-                        y0,
-                        y1,
-                        yp1,
-                        yp2,
-                        tap=TensorAccessPattern(y0.shape, 2 * m + 2, [2 * m], [1]),
-                    ),
+                    ping_pong(y0, y1, yp1, yp2, tap=y[2 * m + 2 : 4 * m + 2]),
                 ),
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     2,
-                    ping_pong(
-                        y0,
-                        y1,
-                        yp2,
-                        yp3,
-                        tap=TensorAccessPattern(y0.shape, 4 * m + 2, [2 * m], [1]),
-                    ),
+                    ping_pong(y0, y1, yp2, yp3, tap=y[4 * m + 2 : 6 * m + 2]),
                 ),
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     3,
-                    ping_pong(
-                        y0,
-                        y1,
-                        yp3,
-                        yc,
-                        tap=TensorAccessPattern(y0.shape, 6 * m + 2, [2 * m], [1]),
-                    ),
+                    ping_pong(y0, y1, yp3, yc, tap=y[6 * m + 2 :]),
                 ),
                 wc["in0"],
                 *wc["out"],
@@ -1415,6 +1335,7 @@ def _build_proj_x_mem(ctx, mt):
     x0 = Buffer(type=x_chunk_ty, name=f"x_buffer_0_{r}_{c}", tile=mt)
     x1 = Buffer(type=x_chunk_ty, name=f"x_buffer_1_{r}_{c}", tile=mt)
     mp0, mp1, mc, xp, xc = ctx.add_locks(mt, [(0, 2), (1, 0), (2, 0), (3, 2), (4, 0)])
+    y = TensorAccessPattern.full(y0.shape)
     w0, w1 = _proj_weight_buffers(mt)
     wc = _proj_weight_channels(w0, w1, *ctx.add_locks(mt, _PROJ_MEM_W_LOCKS))
     ctx.rt.add_tile_dma(
@@ -1424,24 +1345,12 @@ def _build_proj_x_mem(ctx, mt):
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     0,
-                    ping_pong(
-                        y0,
-                        y1,
-                        mp0,
-                        mp1,
-                        tap=TensorAccessPattern(y0.shape, 0, [8 * m + 2], [1]),
-                    ),
+                    ping_pong(y0, y1, mp0, mp1, tap=y[: 8 * m + 2]),
                 ),
                 DmaChannel(
                     DMAChannelDir.S2MM,
                     1,
-                    ping_pong(
-                        y0,
-                        y1,
-                        mp1,
-                        mc,
-                        tap=TensorAccessPattern(y0.shape, 8 * m + 2, [8 * m], [1]),
-                    ),
+                    ping_pong(y0, y1, mp1, mc, tap=y[8 * m + 2 :]),
                 ),
                 DmaChannel(DMAChannelDir.S2MM, 3, ping_pong(x0, x1, xp, xc)),
                 wc["in0"],
@@ -1485,9 +1394,33 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
         k_sbeg = ctx.entry(name, f"{name}_s_begin")
         k_vhalf = ctx.entry(name, f"{name}_v_half")
         v_ty = k_vhalf.arg_types()[1]
+        kerns = [k_begin, k_sbeg, k_vhalf, k_finish]
+
+        def kv_halves(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, ksb, kvh, kf):
+            kb(yy, ll)
+            for _ in range_((rtp_l[0] + (LK - 1)) // LK):
+                s = s_in.acquire(1)
+                ksb(s, yy, ll)
+                for j in range_(2):
+                    kvh(s, v_0, v_1, yy, j)
+                s_in.release(1)
+            kf(yy, oo, ll)
+
+        kv_body = kv_halves
     else:
         k_round = ctx.entry(name, f"{name}_round")
         v_ty = k_round.arg_types()[1]
+        kerns = [k_begin, k_round, k_finish]
+
+        def kv_rounds(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, kr, kf):
+            kb(yy, ll)
+            for _ in range_((rtp_l[0] + (LK - 1)) // LK):
+                s = s_in.acquire(1)
+                kr(s, v_0, v_1, yy, ll)
+                s_in.release(1)
+            kf(yy, oo, ll)
+
+        kv_body = kv_rounds
     y_ty, o_ty, l_ty = k_finish.arg_types()
     L = ctx.rtp_buffer(kv_tile, rtp_key)
     v0 = Buffer(type=v_ty, name=f"v_0_{r}_{c}", tile=kv_tile)
@@ -1500,32 +1433,7 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
         dict(o_prod_lock=o_repeats, o_cons_lock=0, v_prod_lock=2, v_cons_lock=0),
     )
     lbuf = Buffer(type=l_ty, name=f"l_{r}_{c}", tile=kv_tile)
-    if two_kv_heads:
-
-        def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, ksb, kvh, kf):
-            kb(yy, ll)
-            for _ in range_((rtp_l[0] + (LK - 1)) // LK):
-                s = s_in.acquire(1)
-                ksb(s, yy, ll)
-                for j in range_(2):
-                    kvh(s, v_0, v_1, yy, j)
-                s_in.release(1)
-            kf(yy, oo, ll)
-
-        args = [of_s.cons(), v0, v1, y, lbuf, o, L]
-        args += [k_begin, k_sbeg, k_vhalf, k_finish]
-    else:
-
-        def kv_body(s_in, v_0, v_1, yy, ll, oo, rtp_l, kb, kr, kf):
-            kb(yy, ll)
-            for _ in range_((rtp_l[0] + (LK - 1)) // LK):
-                s = s_in.acquire(1)
-                kr(s, v_0, v_1, yy, ll)
-                s_in.release(1)
-            kf(yy, oo, ll)
-
-        args = [of_s.cons(), v0, v1, y, lbuf, o, L, k_begin, k_round, k_finish]
-
+    args = [of_s.cons(), v0, v1, y, lbuf, o, L, *kerns]
     ctx.workers.append(Worker(kv_body, args, tile=kv_tile, stack_size=1024 * 6))
     ctx.rt.add_tile_dma(
         TileDma(
@@ -1543,9 +1451,7 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
                     kl["o_cons_lock"],
                     kl["o_prod_lock"],
                     packet=(0, _X_FROM_ATTN),
-                    tap=TensorAccessPattern(
-                        o.shape, 0, [NQ, dh // 8, 8], [8, NQ * 8, 1]
-                    ),
+                    tap=TensorAccessPattern.full((dh // 8, NQ, 8)).permute((1, 0, 2)),
                 ),
             ],
         )
@@ -1560,31 +1466,14 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
     r, c = qk_tile.row, qk_tile.col
     # Every qk kernel names its entry points attn_qk_*.
     k_begin = ctx.entry(name, "attn_qk_begin")
+    # The q acquire orders the RTP read after the sequence's RTP writes.
     if two_kv_heads:
         k_half = ctx.entry(name, "attn_qk_half")
         k_storec = ctx.entry(name, "attn_qk_store_c")
         k_step = k_half
-    else:
-        k_round = ctx.entry(name, "attn_qk_round")
-        k_step = k_round
-    q_ty, k_ty, _, _, m_ty, c_ty = k_step.arg_types()[:6]
-    # The kernel pads each KV head's query group.
-    (q_len,) = np_ndarray_type_get_shape(q_ty)
-    NQ_PADDED = q_len // dh
-    k0 = Buffer(type=k_ty, name=f"k_0_{r}_{c}", tile=qk_tile)
-    k1 = Buffer(type=k_ty, name=f"k_1_{r}_{c}", tile=qk_tile)
-    ql = ctx.locks(qk_tile, ATTN_QK_LOCKS, dict(k_prod_lock=2, k_cons_lock=0))
-    ctx.add_locks(qk_tile, [(ATTN_HANDSHAKE_LOCK, 0)])
-    L = ctx.rtp_buffer(qk_tile, rtp_key)
-    q_in_order = TensorAccessPattern(
-        (NQ_PADDED, dh), 0, [NQ_PADDED, dh // 8, 8], [8, NQ_PADDED * 8, 1]
-    )
-    m_buf = Buffer(type=m_ty, name=f"m_{r}_{c}", tile=qk_tile)
-    c_local = Buffer(type=c_ty, name=f"c_local_{r}_{c}", tile=qk_tile)
-    # The q acquire orders the RTP read after the sequence's RTP writes.
-    if two_kv_heads:
+        kerns = [k_begin, k_half, k_storec]
 
-        def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kh, ks):
+        def qk_halves(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kh, ks):
             q = q_h.acquire(1)
             kb(mm)
             for i in range_((rtp_l[0] + (LK - 1)) // LK):
@@ -1595,10 +1484,13 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
                 s_out.release(1)
             q_h.release(1)
 
-        kerns = [k_begin, k_half, k_storec]
+        qk_body = qk_halves
     else:
+        k_round = ctx.entry(name, "attn_qk_round")
+        k_step = k_round
+        kerns = [k_begin, k_round]
 
-        def qk_body(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kr):
+        def qk_rounds(s_out, q_h, k_0, k_1, mm, cc, rtp_l, kb, kr):
             q = q_h.acquire(1)
             kb(mm)
             for i in range_((rtp_l[0] + (LK - 1)) // LK):
@@ -1607,8 +1499,19 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
                 s_out.release(1)
             q_h.release(1)
 
-        kerns = [k_begin, k_round]
-
+        qk_body = qk_rounds
+    q_ty, k_ty, _, _, m_ty, c_ty = k_step.arg_types()[:6]
+    # The kernel pads each KV head's query group.
+    (q_len,) = np_ndarray_type_get_shape(q_ty)
+    NQ_PADDED = q_len // dh
+    k0 = Buffer(type=k_ty, name=f"k_0_{r}_{c}", tile=qk_tile)
+    k1 = Buffer(type=k_ty, name=f"k_1_{r}_{c}", tile=qk_tile)
+    ql = ctx.locks(qk_tile, ATTN_QK_LOCKS, dict(k_prod_lock=2, k_cons_lock=0))
+    ctx.add_locks(qk_tile, [(ATTN_HANDSHAKE_LOCK, 0)])
+    L = ctx.rtp_buffer(qk_tile, rtp_key)
+    q_in_order = TensorAccessPattern.full((dh // 8, NQ_PADDED, 8)).permute((1, 0, 2))
+    m_buf = Buffer(type=m_ty, name=f"m_{r}_{c}", tile=qk_tile)
+    c_local = Buffer(type=c_ty, name=f"c_local_{r}_{c}", tile=qk_tile)
     args = [
         of_s.prod(),
         q_fifo.cons(from_stream=q_in_order),
@@ -1644,20 +1547,19 @@ def _build_attn_mem(ctx, amt):
     amt_name = f"{amt.row}_{amt.col}"
     k_row = NUM_KV * g.dh
     sk_row = NUM_KV * g.swa_dh
-    k_order = [(k_row // 8, 8), (16, k_row), (8, 1)]
-    if not two_kv:
-        v_order = [(LK // 8, LK // 2 * k_row), (k_row // 8, 8), (8, k_row), (8, 1)]
-    else:
-        v_order = [(k_row // 8, 8), (LK, k_row), (8, 1)]
-    sk_order = [(sk_row // 8, 8), (16, sk_row), (8, 1)]
-    sv_order = [(LK // 8, LK // 2 * sk_row), (sk_row // 8, 8), (8, sk_row), (8, 1)]
+    k = TensorAccessPattern.full((LK, k_row))
+    sk = TensorAccessPattern.full((LK, sk_row))
+    # k column groups of 8 down every row; v in 8 x 8 blocks, but as k when
+    # two heads share the row.
+    k_order = k.tile((LK, 8))[0]
+    v_order = k_order if two_kv else k.tile((8, 8))
     amt_chans = []
     for ch, (key, row, order, lock_ids) in enumerate(
         (
             ("k", k_row, k_order, (0, 1)),
             ("v", k_row, v_order, (3, 4)),
-            ("swa_k", sk_row, sk_order, (5, 6)),
-            ("swa_v", sk_row, sv_order, (7, 8)),
+            ("swa_k", sk_row, sk.tile((LK, 8))[0], (5, 6)),
+            ("swa_v", sk_row, sk.tile((8, 8)), (7, 8)),
         )
     ):
         b0, b1 = (
@@ -1679,12 +1581,7 @@ def _build_attn_mem(ctx, amt):
                     b1,
                     cons,
                     prod,
-                    tap=TensorAccessPattern(
-                        b0.shape,
-                        0,
-                        [size for size, _ in order],
-                        [stride for _, stride in order],
-                    ),
+                    tap=order,
                 ),
             ),
         ]
@@ -1696,28 +1593,28 @@ def _route(rt, grid, t, proj_send_tiles):
 
     ``grid`` holds every tile by (column, row), ``t`` the tile of each
     PLACEMENT stage. The router places flows in the order the design adds
-    them. Long flows go first. The sequence addresses a shim channel by the
-    shim symbol of its first flow.
+    them. Long flows go first.
+
+    Returns:
+        The flows the runtime sequence fills and drains, by name.
     """
     x_shim, kv_shim = t["x_shim"], t["kv_shim"]
     proj_x = t["proj_x"]
-    _connect(rt, x_shim, 0, t["rms"], 0, pkt_id=_ShimPkt.to_rms, shim_symbol="send_x")
-    _connect(rt, x_shim, 1, t["rms"], 1, pkt_id=_ShimPkt.to_rms, shim_symbol="send_rms")
-    _connect(rt, x_shim, 0, t["rope"], 1, pkt_id=_ShimPkt.to_rope)
-    _connect(rt, x_shim, 1, t["swa_rope"], 1, pkt_id=_ShimPkt.to_rope)
+    shim = {}
+    for name, ch, dst, dst_ch, pkt in (
+        ("send_x", 0, t["rms"], 0, _ShimPkt.to_rms),
+        ("send_rms", 1, t["rms"], 1, _ShimPkt.to_rms),
+        ("send_x_rope", 0, t["rope"], 1, _ShimPkt.to_rope),
+        ("send_rms_rope", 1, t["swa_rope"], 1, _ShimPkt.to_rope),
+    ):
+        shim[name] = _connect(rt, x_shim, ch, dst, dst_ch, pkt_id=pkt, name=name)
     _connect(rt, t["rms"], 0, proj_x, 3, pkt_id=_X_FROM_RMS)
 
     # The weights from the shim into each memtile.
     for col in PROJ_COLS:
         for ch in (0, 1):
-            _connect(
-                rt,
-                grid[col, 0],
-                ch,
-                grid[col, 1],
-                4 + ch,
-                shim_symbol=f"proj_w{ch}_{col}",
-            )
+            name = f"proj_w{ch}_{col}"
+            shim[name] = _connect(rt, grid[col, 0], ch, grid[col, 1], 4 + ch, name=name)
     # The weights from each memtile to its column's cores.
     for col in PROJ_COLS:
         for j in range(4):
@@ -1747,18 +1644,21 @@ def _route(rt, grid, t, proj_send_tiles):
         _connect(rt, proj_x, 5, t[dst], 0, pkt_id=pk)
 
     # This token's k and v, out to the KV cache.
-    _connect(rt, t["rope"], 1, kv_shim, 0, shim_symbol="recv_k")
-    _connect(rt, t["swa_rope"], 1, kv_shim, 1, shim_symbol="recv_v")
+    shim["recv_k"] = _connect(rt, t["rope"], 1, kv_shim, 0, name="recv_k")
+    shim["recv_v"] = _connect(rt, t["swa_rope"], 1, kv_shim, 1, name="recv_v")
     _connect(rt, t["attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
     _connect(rt, t["swa_attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
     _connect(rt, t["glu"], 0, proj_x, 3, pkt_id=_X_FROM_GLU)
 
     # The KV cache into the attention memtile.
     amt = t["attn_mem"]
-    _connect(rt, kv_shim, 0, amt, 0, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_k")
-    _connect(rt, kv_shim, 0, amt, 2, pkt_id=_KV_PKT_SWA)
-    _connect(rt, kv_shim, 1, amt, 1, pkt_id=_KV_PKT_GLOBAL, shim_symbol="move_v")
-    _connect(rt, kv_shim, 1, amt, 3, pkt_id=_KV_PKT_SWA)
+    for name, ch, amt_ch, pkt in (
+        ("move_k", 0, 0, _KV_PKT_GLOBAL),
+        ("move_k_swa", 0, 2, _KV_PKT_SWA),
+        ("move_v", 1, 1, _KV_PKT_GLOBAL),
+        ("move_v_swa", 1, 3, _KV_PKT_SWA),
+    ):
+        shim[name] = _connect(rt, kv_shim, ch, amt, amt_ch, pkt_id=pkt, name=name)
     _connect(rt, amt, 0, t["attn_qk"], 1)
     _connect(rt, amt, 1, t["attn_kv"], 1)
     _connect(rt, amt, 2, t["swa_attn_qk"], 1)
@@ -1766,25 +1666,37 @@ def _route(rt, grid, t, proj_send_tiles):
 
     # The per-layer-input path.
     pl_shim_0, pl_shim_1 = t["pl_shim_0"], t["pl_shim_1"]
-    _connect(rt, pl_shim_0, 0, t["pl_embedding"], 0, shim_symbol="pli_rope_rms")
-    _connect(rt, pl_shim_0, 1, t["pl_embedding"], 1, shim_symbol="pli_down")
+    shim["pli_rope_rms"] = _connect(
+        rt, pl_shim_0, 0, t["pl_embedding"], 0, name="pli_rope_rms"
+    )
+    shim["pli_down"] = _connect(rt, pl_shim_0, 1, t["pl_embedding"], 1, name="pli_down")
     _connect(rt, t["pl_embedding"], 1, t["pl_merge"], 0)
-    _connect(rt, pl_shim_1, 0, t["pl_gate"], 1, shim_symbol="pli_gate")
+    shim["pli_gate"] = _connect(rt, pl_shim_1, 0, t["pl_gate"], 1, name="pli_gate")
     _connect(rt, t["pl_gate"], 1, t["pl_merge"], 1)
     _connect(rt, t["pl_merge"], 0, t["pl_up"], 0)
-    _connect(rt, pl_shim_1, 1, t["pl_up"], 1, shim_symbol="pli_up")
+    shim["pli_up"] = _connect(rt, pl_shim_1, 1, t["pl_up"], 1, name="pli_up")
     # The layer output, out to x.
-    _connect(rt, t["pl_up"], 0, x_shim, 0, shim_symbol="recv_y")
+    shim["recv_y"] = _connect(rt, t["pl_up"], 0, x_shim, 0, name="recv_y")
+    return shim
 
 
 def decode_layer(
-    dev, geometry, rtp, layer_type, sliding_window=SLIDING_WINDOW, *, kernels
+    dev,
+    geometry,
+    rtp,
+    layer_type,
+    sliding_window=SLIDING_WINDOW,
+    *,
+    kernels,
+    context_len: DispatchTime[np.int32],
+    max_l: DispatchTime[np.int32],
 ):
     """The MLIR module of one decode layer of ``layer_type`` for ``geometry``.
 
     ``rtp`` maps each RTP_ADDRESSES key to the address that the engine writes.
     ``layer_type`` sets the runtime sequence only. ``kernels`` holds
-    layer_kernels(geometry).
+    layer_kernels(geometry). README.md gives the meaning of the dispatch
+    parameters ``context_len`` and ``max_l``.
     """
     if layer_type not in LAYER_TYPES:
         raise ValueError(f"layer_type must be one of {LAYER_TYPES}")
@@ -1800,16 +1712,18 @@ def decode_layer(
     two_kv = g.num_kv_heads == 2
 
     sizes = arg_sizes(g)
+    # _route fills the shim flows in before the sequence body runs.
+    shim = {}
     rt = Runtime(
-        partial(_sequence, g, rtp, layer_type, sliding_window),
+        partial(_sequence, g, rtp, layer_type, sliding_window, shim),
         [
             np.ndarray[(sizes["x"],), _BF16],
             np.ndarray[(sizes["proj"],), _BF16],
             np.ndarray[(sizes["rms"],), _BF16],
             np.ndarray[(sizes["rope_rms"],), _BF16],
             np.ndarray[(sizes["kv"],), _BF16],
-            np.int32,
-            np.int32,
+            context_len,
+            max_l,
         ],
     )
     workers = []
@@ -1866,5 +1780,5 @@ def decode_layer(
     )
     _build_attn_mem(ctx, t["attn_mem"])
 
-    _route(rt, grid, t, proj_send_tiles)
+    shim.update(_route(rt, grid, t, proj_send_tiles))
     return Program(dev, rt, workers=workers).resolve_program()

@@ -6,12 +6,12 @@ SPDX-License-Identifier: Apache-2.0
 # `iron.operators.flm.GEMM` — bf16 GEMM with a fused epilogue
 
 ```python
+from iron.common.image import OperatorImage
 from iron.operators.flm import GEMM
 from iron.operators.flm.gemm.design import Epilogue
 
-op = GEMM(M=1024, K=1536, N=6144, epilogue=Epilogue.SILU, context=ctx)
-op.compile()
-op.get_callable()(A, op.pack_B(B), C_out)
+op = GEMM(M=1024, K=1536, N=6144, epilogue=Epilogue.SILU)
+OperatorImage(op)(A, op.pack_B(B), C_out)
 ```
 
 `epilogue`, `rounding` and `gelu` are `StrEnum`s, so the bare strings `"silu"` /
@@ -43,7 +43,7 @@ and can pack its weights once. Pick `iron.operators.GEMM` when you need tiling
 control or cannot pre-pack B.
 
 The shipped overlay itself is available as
-[`iron.operators.flm.MMPrebuilt`](../mm_prebuilt) for comparison; `benchmark.py`
+`Shipped(...)` ([the shipped overlay](#the-shipped-overlay)) for comparison; `benchmark.py`
 measures the two against each other and against `iron.operators.GEMM`.
 
 ## Architectures
@@ -174,9 +174,8 @@ multiple of the full stride.
 ## B must be pre-packed
 
 ```python
-op = GEMM(M=M, K=K, N=N, context=ctx)
-op.compile()
-op.get_callable()(A, op.pack_B(B), C_out)
+op = GEMM(M=M, K=K, N=N)
+OperatorImage(op)(A, op.pack_B(B), C_out)
 ```
 
 `pack_B` reorders a row-major `(K, N)` matrix into the order the compute tiles
@@ -196,6 +195,47 @@ dispatch moves, so the operator ran at ~10 GB/s instead of ~47 — a 5.4x
 end-to-end penalty. Weights are packed once and reused across dispatches, so the
 cost belongs at the caller.
 
+### Or read as stored
+
+```python
+op = GEMM(M=M, K=K, N=N, b_col_maj=True)
+OperatorImage(op)(A, W, C_out)  # W is (N, K), a checkpoint's layout
+```
+
+`b_col_maj=True` takes B as a checkpoint stores a projection, `(N, K)`, in
+bf16, so no packed copy sits beside the one a decode GEMV reads. The shim
+reads each `(tile_n, k_tile)` block as `tile_n` runs of `k_tile` elements
+(1 KB each), the memtile hands the core one 8-deep k panel at a time, and the
+kernel transposes it (`fused_mm(..., b_col_maj=True)`). The short runs are
+between the memtile and the core, not in DDR. On NPU2 the core converts the
+bf16 B to bfp16 for the bfp16 macs (`emulate_bf16_mmul_with_bfp16=True`, the
+default), so its arithmetic is the packed path's; `False` multiplies in bf16.
+
+At Llama 3.2 1B's prompt projections (M = 2048, `epilogue_modes=("none",)`)
+on Strix, the times below are the fastest of 8 interleaved rounds, each the
+median of 10 runs, and the error is the mean |C − C_f32| over the mean |C_f32|:
+
+| K × N | packed | `b_col_maj` | `b_col_maj`, bf16 macs | `iron.operators.GEMM` |
+|---|---|---|---|---|
+| 2048 × 8192 | 4.10 ms | 4.40 ms | 103.4 ms | 12.8 ms |
+| 2048 × 2048 | 1.10 ms | 1.16 ms | 26.4 ms | 3.11 ms |
+| 2048 × 512 | 0.35 ms | 0.40 ms | 6.81 ms | 0.86 ms |
+| 8192 × 2048 | 5.55 ms | 7.35 ms | 103.5 ms | 28.0 ms |
+| error | 2.6e-4 | 2.6e-4 | 3.9e-5 | 3.2e-4 |
+
+`b_col_maj` moves 1.78x the B bytes of the packed path. Where B is resident
+(K ≤ 2048 here) that costs 5-14%; at K = 8192 both stream B, and it costs 32%.
+
+On Phoenix, where B is bf16 either way, the times below are the range over 8
+interleaved rounds, each the median of 10 runs:
+
+| K × N | packed | `b_col_maj` | `iron.operators.GEMM` |
+|---|---|---|---|
+| 2048 × 8192 | 28.5–28.7 ms | 25.4–25.7 ms | 28.0–28.3 ms |
+| 2048 × 2048 | 7.5–8.0 ms | 7.0–7.3 ms | 7.3–7.9 ms |
+| 2048 × 512 | 2.5–3.8 ms | 1.9–3.6 ms | 2.9–3.7 ms |
+| 8192 × 2048 | 27.9–28.2 ms | 25.0–25.4 ms | 43.4–45.0 ms |
+
 ## Matching the shipped FastFlowLM overlay
 
 `Rounding.FLOOR` reproduces the shipped `mm.xclbin` **bit for bit**. The AIE
@@ -203,12 +243,12 @@ core powers up in `rounding_mode::floor` and the original kernel never calls
 `set_rounding`, so that is the arithmetic it ships with.
 
 ```python
-GEMM(M=M, K=K, N=N, rounding=Rounding.FLOOR, context=ctx)  # matches shipped
-GEMM(M=M, K=K, N=N, context=ctx)                           # conv_even, default
+GEMM(M=M, K=K, N=N, rounding=Rounding.FLOOR)  # matches shipped
+GEMM(M=M, K=K, N=N)                           # conv_even, default
 ```
 
 Verified against the shipped overlay on identical inputs, driven through
-[`flm.MMPrebuilt`](../mm_prebuilt), which runs that xclbin unmodified: with
+`Shipped(...)`, which runs that xclbin unmodified: with
 `floor` and no activation, output is **bit-identical across all 6291456
 elements**. With the `conv_even` default it differs everywhere, and is far more
 accurate — see [Accuracy](#accuracy).
@@ -232,15 +272,15 @@ as the overlay's `getGeluBf16_nonLUT` does. fp32 is the default, for the
 accuracy reasons above. silu and sigmoid have no such option.
 
 ```python
-GEMM(M=M, K=K, N=N, epilogue="gelu", rounding="floor", gelu="bf16_steps",
-     context=ctx)  # gelu matches shipped
+GEMM(M=M, K=K, N=N, epilogue="gelu", rounding="floor", gelu="bf16_steps")
+# gelu matches Shipped
 ```
 
 With `floor`, gelu output is **bit-identical** to the overlay's on NPU2 at
 M=256 K=512 N=1024, M=512 K=1536 N=6144 (Gemma 4 E2B `gate_proj`) and M=512
 K=1536 N=256 (E2B per-layer-input gate), at input scales 0.5 and 4.0. With the
 fp32 default, 121917/262144 elements differ at the first shape and scale 0.5.
-`test_gemm_gelu_bf16_steps_matches_overlay` checks this against `MMPrebuilt`.
+`test_gemm_gelu_bf16_steps_matches_overlay` checks this against `Shipped`.
 `gelu` changes only the gelu arm of the kernel.
 
 The shipped kernel selects its activation -- and its shape -- from runtime
@@ -321,7 +361,7 @@ M=1024 K=1536 N=6144, min of per-run medians:
 | | bytes moved | latency | err/mass |
 |---|---|---|---|
 | `flm.GEMM` (`tile_n=64`) | 47 MB | **1143 us** | 2.39e-04 |
-| `flm.MMPrebuilt` (the shipped overlay) | 107 MB | 2175 us | 9.87e-03 |
+| `Shipped(...)` (the shipped overlay) | 107 MB | 2175 us | 9.87e-03 |
 | `iron.operators.GEMM` (same emulated mode) | 126 MB | 3353 us | 2.41e-04 |
 
 **1.90x the shipped overlay, and 41x more accurate than it** — the accuracy
@@ -408,7 +448,8 @@ memtile replays it to every row-block, instead of DDR re-reading it
 memtile BDs are device configuration, so a resident fifo would put K (buffer
 size) and M (replay count) into the xclbin every shape shares.
 
-So B does not use an ObjectFifo. The **device** side is shape-independent:
+So B does not use an ObjectFifo. The **device** side is shape-independent,
+built in `array()` and returned from it with the Workers:
 
 * per column, a memtile pool of `B_SLOTS` k-block slots with one producer and
   one consumer lock per slot, and an L1 ring on each core fed by a static
@@ -418,9 +459,10 @@ So B does not use an ObjectFifo. The **device** side is shape-independent:
   C, and the DMA programs run on `flow.endpoint(tile)`. No tile is pinned;
   the placer places them all.
 
-The **runtime sequence**, which is generated per shape, programs both memtile
-channels with tasks of one BD per slot (`flow.endpoint(memtile).task(...)`),
-walked `runs` times:
+B's lanes are bound to the shim flows, so `sequence()` fills them like any
+other stream. The **runtime sequence**, which is generated per shape, programs
+both memtile channels with tasks of one BD per slot
+(`flow.endpoint(memtile).task(...)`), walked `runs` times:
 
 | | resident (`k_iters <= B_SLOTS`, `n_units <= 63`) | streamed (otherwise) |
 |---|---|---|
@@ -440,7 +482,7 @@ which op.py only picks for K ≤ 512. The 63 is the 6-bit lock value, so
 residency also needs M ≤ 16128. **Down projections stay streamed**, K being
 6144 or 10240; for them B moves exactly as it did through the fifo.
 
-Constraints, all enforced in design.py:
+Constraints, all enforced in op.py:
 
 * **A column-block's memtile pushes must fit one task queue**, 4 pushes of 256
   passes (`repeat_count` is 8 bits). A chain is pushed at the first block it
@@ -449,7 +491,8 @@ Constraints, all enforced in design.py:
   block's C, which goes out after it. M is cut into slabs where needed. Memtile
   tasks are never awaited — C completing implies them. None of the benchmark
   shapes comes near.
-* **Arm B after the first block's fills, not before.** `set_lock` is cheap
+* **Arm B after the first block's fills, not before** (the class sets
+  `own_preamble`, so `sequence()` places `rt.preamble()` itself). `set_lock` is cheap
   (~0.2 µs each), but putting it and the RTP writes ahead of the first A and B
   fills cost up to +9% at M=256. Issued between the first block's fills and its
   C, the setup hides under the fill latency. That reordering is independent of
@@ -461,7 +504,7 @@ Constraints, all enforced in design.py:
 This needs mlir-aie #3791 (first in the 1.4.4.dev69 wheel): runtime tasks on a
 memtile's channels, `Task.start(repeat_count=...)`, `Lock.set`, and repeat
 counts past one push. The instruction stream is built with
-`aiecc --reclaim-runtime-bds`, since a split leg's pieces outnumber the shim's
+`aiecc --reclaim-runtime-bds` (`GEMM.aiecc_flags`), since a split leg's pieces outnumber the shim's
 BD ids. Every hardware limit the design uses but `B_MAX_SLOTS` comes from the
 target model.
 
@@ -499,3 +542,66 @@ done.
 
 `m_chunk` is off by default — see `M_CHUNK_FOR_N` in design.py, which would
 fork the xclbin.
+
+## The shipped overlay
+
+```python
+from iron.common.image import OperatorImage
+from iron.operators.flm import GEMM, Shipped
+
+op = Shipped(M=1024, K=1536, N=6144, epilogue="silu")
+OperatorImage(op)(A, op.pack_B(B), C_out)
+```
+
+`Shipped` (`shipped.py`) is FastFlowLM's `mm.xclbin` **unmodified**, as a
+second overlay for the same operator: the binary the port was ported from,
+driven by the same `GEMM`, its reference and its packing, so the two can be
+measured against each other on identical inputs through one host path.
+`benchmark.py` does exactly that, and `test.py` checks the shipped overlay's
+epilogues against its own accumulator.
+
+**NPU2 only** — the overlay is an 8-column NPU2 binary. Tuning it for
+anything else raises.
+
+### How it is obtained
+
+The xclbin is not checked in. It is a `RemoteFileArtifact`: downloaded on demand
+into the (gitignored) build directory and pinned by SHA-256 against an immutable
+FastFlowLM commit, so the fetch is reproducible and a substituted file is
+rejected.
+
+Because this is the only thing in the tree that touches the network, the
+benchmark that uses it is marked `extensive` and is not reached by the default
+`-m "not extensive"` run.
+
+### What the overlay supplies
+
+The overlay ships as a binary, so every core program, memtile buffer and
+stream-switch route comes from the xclbin. The overlay supplies only the
+host-side half of a dispatch, and `GEMM`'s own `pack_B`, `reference` and
+packaging serve it:
+
+* **The runtime parameters.** One overlay serves every projection in a model, so
+  the shape, the activation and the clamp arrive as words in each core's data
+  memory. A core blocks on a lock until the sequence releases it, so a dispatch
+  that writes no parameters hangs.
+* **The shim DMA transfers**, reproducing the overlay's fixed channel map.
+
+### Differences from the port
+
+| | `Shipped(...)` | `GEMM(...)` |
+|---|---|---|
+| provenance | shipped binary, downloaded | built from source in this repo |
+| devices | NPU2 only | NPU2 and NPU1 |
+| `tile_n` | fixed at 128 | 64 or 128, chosen per shape and device |
+| epilogue selected | at runtime, by parameter | at compile time |
+| rounding | core power-up `floor` | `conv_even` by default |
+| B | pre-packed bf16 | pre-packed, bfp16 on NPU2 |
+
+The epilogue difference is the interesting one. Selecting at runtime means one
+build serves every activation; baking it in, as `flm.GEMM` does, costs a build
+per activation but leaves the inner loop branch-free. The rounding difference is
+why `flm.GEMM` is ~41x more accurate by default — see
+[Matching the shipped FastFlowLM overlay](#matching-the-shipped-fastflowlm-overlay),
+which also records that `GEMM(rounding="floor")` reproduces this overlay bit
+for bit.

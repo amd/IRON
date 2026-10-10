@@ -1,0 +1,131 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""An operator's array does not depend on its extents.
+
+One array serves every extent: the core
+programs an array compiles to must be the same bytes whether the operator
+is built for one extent or twice it, with the same tunables. Each case
+compiles an operator at two extents (the real build: an insts-only
+lowering compiles no core) and compares the per-core ELFs the build
+leaves, byte for byte. Compiles are cheap enough for this to run
+device-free, and the cache keeps a repeat quick. A fusion of the two extents
+holds one device, so their sequences run on one configured array.
+"""
+
+import importlib
+import re
+
+import pytest
+
+from iron.common import Unresolvable
+from iron.common.declare import Direction
+from iron.common.image import Fusion, OperatorImage, OperatorSequence, Packing
+from iron.tests.toolchain.tools import requires
+
+pytestmark = requires("aiecc")
+
+# (module, class, tunables, the extent doubled). Every tunable the array could
+# resolve from the extent is given, so only the extent differs. Repeat and
+# Copy are memtile pass-throughs with no core, so nothing of theirs is
+# compiled per extent.
+PAIRS = [
+    (
+        "relu",
+        "ReLU",
+        dict(num_aie_columns=1, num_channels=1, tile_size=256),
+        ("size", 1024),
+    ),
+    (
+        "elementwise_add",
+        "ElementwiseAdd",
+        dict(tile_size=256, num_aie_columns=1),
+        ("size", 2048),
+    ),
+    (
+        "softmax",
+        "Softmax",
+        dict(rows=16, block=64, streamed=True, num_aie_columns=2),
+        ("cols", 128),
+    ),
+    ("rope", "RoPE", dict(cols=64, num_aie_columns=2), ("rows", 16)),
+    ("gqa", "GQAScores", dict(heads=8, groups=4, num_aie_columns=2), ("seq_len", 256)),
+    ("gqa", "GQAContext", dict(heads=8, groups=4, num_aie_columns=2), ("seq_len", 256)),
+    (
+        "gemv",
+        "GEMV",
+        dict(K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=2),
+        ("M", 256),
+    ),
+    ("gemm", "GEMM", dict(K=64, N=512, num_aie_columns=4), ("M", 256)),
+]
+
+
+def _core_elfs(op) -> dict[str, bytes]:
+    """The per-core ELFs of an operator's build, by core."""
+    entry = OperatorImage(op).compile().artifacts.entry
+    assert entry is not None
+    elfs = {
+        p.parent.name: p.read_bytes()
+        for p in sorted(entry.directory.glob("elfs_*_core_*/*.elf"))
+    }
+    assert elfs, f"{op.name}: the build left no core ELFs in {entry.directory}"
+    return elfs
+
+
+@pytest.mark.parametrize(
+    "module,cls_name,tunables,extent",
+    PAIRS,
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_the_array_is_the_same_at_two_extents(
+    device, module, cls_name, tunables, extent, tmp_path, monkeypatch
+):
+    # A cache of its own: an entry another test left for the same design,
+    # an insts-only lowering's say, holds no core ELF.
+    from aie.utils.compile.jit import compilabledesign
+
+    monkeypatch.setattr(compilabledesign, "NPU_CACHE_HOME", tmp_path)
+    cls = getattr(importlib.import_module(f"iron.operators.{module}"), cls_name)
+    name, n = extent
+    elfs = []
+    for size in (n, 2 * n):
+        try:
+            op = cls(**tunables, **{name: size}).resolved(device)
+        except ValueError as e:
+            pytest.skip(f"not for {device.name}: {e}")
+        elfs.append(_core_elfs(op))
+    small, large = elfs
+    assert small.keys() == large.keys(), "the same cores"
+    differing = [core for core in small if small[core] != large[core]]
+    assert (
+        not differing
+    ), f"{cls_name}: cores {differing} compile differently at {name}={n} and {2 * n}"
+
+
+@pytest.mark.parametrize(
+    "module,cls_name,tunables,extent",
+    PAIRS,
+    ids=lambda v: v if isinstance(v, str) else "",
+)
+def test_the_extents_share_one_device(npu2, module, cls_name, tunables, extent):
+    cls = getattr(importlib.import_module(f"iron.operators.{module}"), cls_name)
+    name, n = extent
+    try:
+        ops = [cls(**tunables, **{name: size}).resolved(npu2) for size in (n, 2 * n)]
+    except ValueError as e:
+        pytest.skip(f"not for npu2: {e}")
+    runlist, inputs, outputs = [], [], []
+    for k, op in enumerate(ops):
+        names = [f"s{k}_{b.name}" for b in op.buffers]
+        runlist.append((op, *names))
+        for b, buf in zip(op.buffers, names):
+            (outputs if b.direction is Direction.OUT else inputs).append(buf)
+    seq = OperatorSequence(cls_name, runlist, inputs, outputs, dispatch="fused")
+    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
+        seq.calculate_buffer_layout()
+    )
+    fused = Fusion(seq)
+    pack = Packing.device_name(list(fused.designs))
+    devices = re.findall(r"^  aie\.device\(\w+\) @(\w+) \{$", fused.text(), re.M)
+    assert devices == [pack, Fusion.RESET_DEVICE]

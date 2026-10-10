@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CPU reference for :class:`iron.operators.flm.LMHead`, in float64."""
+"""CPU reference for ``iron.operators.flm.LMHead``, in float64."""
 
 import numpy as np
 

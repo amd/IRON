@@ -11,9 +11,6 @@ applies the tanh softcap to the sums.
 import struct
 
 import numpy as np
-from ml_dtypes import bfloat16
-
-from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.npdtypes import np_ndarray_type_get_shape
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
@@ -26,6 +23,7 @@ from aie.iron import (
 )
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
+from ml_dtypes import bfloat16
 
 from iron.operators.flm.q4nx import K_TILE, M_TILE, packed_bytes
 
@@ -45,27 +43,12 @@ def vocab_per_round(dev) -> int:
     return dev.cols * len(dev.core_rows) * M_TILE
 
 
-def check_shape(dev, dim, vocab):
-    """Reject a device or shape the design does not support."""
-    if dev.arch != AIEArch.AIE2p:
-        raise NotImplementedError("the q4nx_lm_head kernel is AIE2P only")
-    if dim % K_TILE:
-        raise ValueError(f"dim ({dim}) must be a multiple of {K_TILE}")
-    if vocab % vocab_per_round(dev):
-        raise ValueError(
-            f"vocab ({vocab}) must be a multiple of {vocab_per_round(dev)}, "
-            "the out-features one round produces"
-        )
-
-
 def lm_head(dev, dim, vocab, softcap, trace_size=0, *, lm_head_kernel):
-    """Program for :class:`~iron.operators.flm.LMHead`, which documents the arguments.
+    """Program for ``iron.operators.flm.LMHead``, which documents the arguments.
 
     ``lm_head_kernel`` is the ``flm_gemma4_q4nx_lm_head`` kernel for ``dim``.
     X holds the token and its RMS weight. One transfer therefore carries both norm inputs.
     """
-    check_shape(dev, dim, vocab)
-
     COLS, ROWS = dev.cols, len(dev.core_rows)
     ROUNDS = vocab // vocab_per_round(dev)
 
@@ -153,18 +136,13 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0, *, lm_head_kernel):
 
     M_PER_COL = ROWS * M_TILE  # y elements one column drains per round
     W_PER_COL = packed_bytes(M_PER_COL * dim) // np.dtype(np.uint32).itemsize
-
     # Tap i covers round i // COLS of column i % COLS.
-    def row_taps(rows, cols):
-        return [
-            TensorAccessPattern((rows, cols), i * cols, [1, 1, 1, cols], [0, 0, 0, 1])
-            for i in range(rows)
-        ]
-
-    y_taps = row_taps(ROUNDS * COLS, M_PER_COL)
+    y_taps = TensorAccessPattern.full((vocab,)).partition(ROUNDS * COLS)
     # A strided descriptor places weight rows at the wrong on-chip positions.
     # Each column therefore reads one contiguous slice.
-    w_taps = row_taps(ROUNDS * COLS, W_PER_COL)
+    w_taps = TensorAccessPattern.full((ROUNDS * COLS * W_PER_COL,)).partition(
+        ROUNDS * COLS
+    )
 
     # npu_write_rtp writes i32 words. The softcap travels as its f32 bit
     # pattern.

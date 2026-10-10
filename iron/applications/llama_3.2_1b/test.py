@@ -2,112 +2,166 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import subprocess
+"""Llama 3.2 1B on the NPU, from the real checkpoint: speed, accuracy
+against the float32 reference, determinism, and past one chunk: a prompt of
+two, a chat turn, and a prompt chunk and a step at the end of the caches.
+The model is compiled and loaded once for the module and every test calls
+it in-process.
+
+``--random-weights SEED`` runs it on drawn weights and random prompts, on
+a host without the checkpoint, and ``--max-seq-len`` at another context.
+"""
+
+import dataclasses
+
+import aie.utils as aie_utils
 import pytest
-import os
-import re
-import sys
-from pathlib import Path
 
-test_dir = Path(__file__).parent
-weights_dir = Path(os.environ.get("IRON_EXAMPLE_WEIGHTS_DIR", "/srv"))
-
-
-def generate_test_params():
-    prompt_lengths = [1024, 13]
-    num_tokens_list = [40, 1]
-
-    params = []
-    names = []
-    for prompt_len in prompt_lengths:
-        for num_tokens in num_tokens_list:
-            params.append(
-                pytest.param(prompt_len, num_tokens, marks=[pytest.mark.bench])
-            )
-            names.append(f"llama_3.2_1b_prompt_{prompt_len}_tokens_{num_tokens}")
-    return params, names
-
-
-params, names = generate_test_params()
-
-requires_weights = pytest.mark.skipif(
-    not os.environ.get("CI")
-    and not (
-        (weights_dir / "llama3.2-1b" / "model.safetensors").exists()
-        and (weights_dir / "llama3.2-1b" / "tokenizer.model").exists()
-    ),
-    reason="llama3.2-1b weights not found outside CI",
+import iron
+from iron.lm.llama3.model import Runner
+from iron.lm.testing import (
+    check_accuracy,
+    check_chat_turn,
+    check_deep_decode,
+    check_deep_prompt,
+    check_determinism,
+    check_device_loop,
+    check_generation,
+    require,
+    weights_dir,
 )
 
+WEIGHTS = weights_dir("llama3.2-1b") / "model.safetensors"
+TOKENIZER = weights_dir("llama3.2-1b") / "tokenizer.model"
 
-def run_llama_npu(prompt_len, num_tokens, *extra_args):
-    command = [
-        sys.executable,
-        str(test_dir / "llama_npu.py"),
-        str(weights_dir / "llama3.2-1b" / "model.safetensors"),
-        str(weights_dir / "llama3.2-1b" / "tokenizer.model"),
-        "--num-tokens",
-        str(num_tokens),
-        "--prompt-len",
-        str(prompt_len),
-        *extra_args,
-    ]
-    result = subprocess.run(command, cwd=test_dir, capture_output=True, text=True)
-
-    print(result.stdout)
-    print(result.stderr)
-
-    assert (
-        result.returncode == 0
-    ), f"Command failed with return code {result.returncode}\nStderr: {result.stderr}"
-    return result
+pytestmark = pytest.mark.supported_devices("npu2")
 
 
-@requires_weights
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.metrics(
-    TTFT=r"\[Prefill\]\s*Time to first token:\s*(?P<value>[\d\.e\+-]+) s",
-    TPS=r"\[Decode\]\s*Tokens per second:\s*(?P<value>[\d\.e\+-]+)",
+@pytest.fixture(scope="module")
+def runner(request):
+    config = Runner.config
+    max_seq_len = request.config.getoption("--max-seq-len")
+    if max_seq_len is not None:
+        config = dataclasses.replace(config, max_seq_len=max_seq_len)
+    seed = request.config.getoption("--random-weights")
+    if seed is not None:
+        return Runner(config=config, seed=seed)
+    require(WEIGHTS, TOKENIZER)
+    return Runner(WEIGHTS, TOKENIZER, config)
+
+
+@pytest.fixture(scope="module")
+def model(runner, request):
+    """The model, compiled and loaded once, its versions tuned by
+    ``--cost-table`` if given; the runtime is released after the module's
+    last test, as ``npu_runtime`` does after each of the others.
+    """
+    yield runner.npu(request.config.getoption("--cost-table"))
+    if aie_utils.DefaultNPURuntime is not None:
+        aie_utils.DefaultNPURuntime.cleanup()
+
+
+# KL(fp32 CPU || NPU), teacher-forced over 40 steps. The graphs measure a
+# mean of 0.0083 and a p90 of 0.018; over 140 positions of prompt.txt the
+# p90 is 0.017. The largest step is prefill at 0.091, one of two positions
+# of the 140 above 0.05. Decode attention over unmasked KV-cache slots
+# measured 9.2.
+MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.2}
+
+
+# KL(graph reference || NPU) of one decode step, three tokens at each depth:
+# 0.002 to 0.015 just past the prompt, 0.009 to 0.033 at 16k and 0.030 to
+# 0.038 at 32k: it grows with the keys the step sums over.
+DEEP_KL = 0.1
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+class TestEachStep:
+    """The form NPU1 runs: each step its own dispatch of one xclbin, and the
+    host drawing each token. Its model is built and dropped with the class,
+    first: after any other test it would be held beside the module's
+    full-ELF one.
+    """
+
+    @pytest.fixture(scope="class")
+    def model(self, runner):
+        model = runner.npu(boundaries=iron.each_step)
+        assert not model.device_loop
+        yield model
+        if aie_utils.DefaultNPURuntime is not None:
+            aie_utils.DefaultNPURuntime.cleanup()
+
+    def test_llama_3_2_1b_each_step_accuracy(self, runner, model, record_property):
+        check_accuracy(runner, model, MAX_KL, 20, 256, record=record_property)
+
+    def test_llama_3_2_1b_each_step_determinism(self, runner, model, record_property):
+        check_determinism(runner, model, 4, 3, 128, record=record_property)
+
+    def test_llama_3_2_1b_each_step_decode_deep_in_the_cache(
+        self, runner, model, record_property
+    ):
+        position = runner.config.max_seq_len - 1
+        check_deep_decode(runner, model, position, DEEP_KL, 256, record=record_property)
+
+    def test_llama_3_2_1b_each_step_prompt_deep_in_the_cache(
+        self, runner, model, record_property
+    ):
+        rows = runner.config.prefill_chunk
+        check_deep_prompt(runner, model, rows, DEEP_KL, 256, record=record_property)
+
+
+@pytest.mark.parametrize(
+    "prompt_len,num_tokens",
+    [pytest.param(p, n, marks=pytest.mark.bench) for p in (1024, 13) for n in (40, 1)],
+    ids=[f"llama_3.2_1b_prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
 )
-@pytest.mark.parametrize("prompt_len,num_tokens", params, ids=names)
-def test_llama_3_2_1b(prompt_len, num_tokens):
-    run_llama_npu(prompt_len, num_tokens)
+def test_llama_3_2_1b(runner, model, prompt_len, num_tokens, record_property):
+    check_generation(runner, model, prompt_len, num_tokens, record=record_property)
 
 
-# KL(fp32 CPU || NPU) of the next-token distribution, teacher-forced over 40
-# steps. The NPU measures 0.074 on prefill and at most 0.013 on decode. Decode
-# attention over unmasked KV-cache slots measured 9.2.
-MAX_PREFILL_KL = 0.1
-MAX_DECODE_KL = 0.05
+# The device draws every token and starts every decode step itself; from the
+# same seed its text is the host loop's. The figures are the device loop's.
+@pytest.mark.bench
+def test_llama_3_2_1b_device_loop(runner, model, record_property):
+    check_device_loop(runner, model, 1024, 100, record=record_property)
 
 
-@requires_weights
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.metrics(
-    PrefillKL=r"\[Accuracy\] Prefill KL:\s*(?P<value>[\d\.e\+-]+)",
-    DecodeMaxKL=r"\[Accuracy\] Decode max KL:\s*(?P<value>[\d\.e\+-]+)",
-    Top1Mismatches=r"\[Accuracy\] Top-1 mismatches:\s*(?P<value>\d+)",
-)
-def test_llama_3_2_1b_accuracy():
-    result = run_llama_npu(1024, 40, "--check-accuracy")
-
-    prefill_kl = float(re.search(r"Prefill KL:\s*(\S+)", result.stdout).group(1))
-    decode_kl = float(re.search(r"Decode max KL:\s*(\S+)", result.stdout).group(1))
-    assert prefill_kl <= MAX_PREFILL_KL, f"prefill KL {prefill_kl} > {MAX_PREFILL_KL}"
-    assert decode_kl <= MAX_DECODE_KL, f"decode KL {decode_kl} > {MAX_DECODE_KL}"
+def test_llama_3_2_1b_accuracy(runner, model, record_property):
+    check_accuracy(runner, model, MAX_KL, record=record_property)
 
 
-# Repeated runs must produce bit-identical logits. A prefill KV hand-off that
-# was never flushed to the device made 12% of runs diverge. Alternating
-# two prompts makes such a missing flush fail every run: 38/38 in each of three
-# trials.
-@requires_weights
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.metrics(
-    DifferingRuns=r"\[Determinism\] Differing runs:\s*(?P<value>\d+)/",
-)
-def test_llama_3_2_1b_determinism():
-    result = run_llama_npu(1024, 4, "--check-determinism", "5")
+def test_llama_3_2_1b_determinism(runner, model, record_property):
+    check_determinism(runner, model, record=record_property)
 
-    differing = re.search(r"Differing runs:\s*(\d+)/(\d+)", result.stdout)
-    assert int(differing.group(1)) == 0, f"{differing.group(0)} (bitwise logits)"
+
+# 12000 characters of prompt.txt are 3262 tokens: a full chunk and most of a
+# second, which attends over the first's caches.
+LONG = 12000
+
+
+def test_llama_3_2_1b_accuracy_across_chunks(runner, model, record_property):
+    """The prompt's two chunks and two decode steps after them, against the
+    float32 reference over the whole prompt (each step a forward over 3k
+    tokens on the host, so only a few).
+    """
+    assert len(runner.prompt(LONG)) > runner.config.prefill_chunk
+    check_accuracy(runner, model, MAX_KL, 3, LONG, record=record_property)
+
+
+def test_llama_3_2_1b_chat_turn(runner, model, record_property):
+    """A turn of 1000 tokens reruns the second chunk alone."""
+    check_chat_turn(runner, model, LONG, 1000, record=record_property)
+
+
+def test_llama_3_2_1b_decode_deep_in_the_cache(runner, model, record_property):
+    """The deepest step the caches hold, at ``max_seq_len - 1``."""
+    position = runner.config.max_seq_len - 1
+    check_deep_decode(runner, model, position, DEEP_KL, record=record_property)
+
+
+def test_llama_3_2_1b_prompt_deep_in_the_cache(runner, model, record_property):
+    """The last chunk the caches hold, whole: the longest dispatch a prompt
+    makes, over the whole context.
+    """
+    rows = runner.config.prefill_chunk
+    check_deep_prompt(runner, model, rows, DEEP_KL, record=record_property)

@@ -19,17 +19,14 @@ FastFlowLM's prefill attention overlays for Gemma 4:
 | `PrefillSlidingAttention` | sliding-window attention | 256 | `p - window + 1` to `p` |
 
 ```python
+from iron.common.image import OperatorImage
 from iron.operators.flm import PrefillAttention, PrefillSlidingAttention
 
-op = PrefillAttention(max_context=32768, num_heads=8, num_kv_heads=1, context=ctx)
+op = PrefillAttention(max_context=32768, num_heads=8, num_kv_heads=1)
 # or
-op = PrefillSlidingAttention(
-    max_context=32768, num_heads=8, num_kv_heads=1, window=512, context=ctx
-)
-op.compile()
-run = op.get_callable()
-run.set_parameters(L_begin=0, L_end=2048, max_l=4096)
-run(o, q, kv)
+op = PrefillSlidingAttention(max_context=32768, num_heads=8, num_kv_heads=1, window=512)
+image = OperatorImage(op)
+image(o, q, kv, L_begin=0, L_end=2048, max_l=4096)
 ```
 
 `max_context` and `window` must be multiples of 128.
@@ -37,8 +34,8 @@ run(o, q, kv)
 ## Dispatch parameters
 
 One build serves every token range and every cache length up to `max_context`.
-The runtime sequence takes three scalars. Each call generates the instruction
-stream for the values of the last `set_parameters()` call:
+The runtime sequence takes three scalars. Each call passes them by keyword, and
+the instruction stream is generated for those values:
 
 | Parameter | Meaning |
 |---|---|
@@ -46,7 +43,10 @@ stream for the values of the last `set_parameters()` call:
 | `L_end` | one past the last query token, a multiple of 128 |
 | `max_l` | rows of the KV cache, at most `max_context` |
 
-`max_context` sets the buffer sizes in the argument spec. `max_l` sets the
+The host refuses a dispatch whose values break these bounds or whose query
+range runs past `max_l`, before the array runs.
+
+`max_context` sets the buffer sizes. `max_l` sets the
 first row of V in the cache.
 
 ## Layout

@@ -90,14 +90,14 @@ def proj_layout(geometry, layer_type):
     and up projections in blocked bf16. rows are output features.
     """
     g = layer_dims(geometry, layer_type)
-    D, I, P = g["model_dim"], g["intermediate_size"], g["pli_d"]
+    D, F, P = g["model_dim"], g["intermediate_size"], g["pli_d"]
     items = [("q", "q4nx", g["dq"], D)]
     if not g["skip"]:
         items += [("k", "q4nx", g["dk"], D), ("v", "q4nx", g["dk"], D)]
     items += [
         ("o", "q4nx", D, g["dq"]),
-        ("up_gate", "q4nx", 2 * I, D),
-        ("down", "q4nx", D, I),
+        ("up_gate", "q4nx", 2 * F, D),
+        ("down", "q4nx", D, F),
         ("pli_down", "bf16", P, D),
         ("pli_gate", "bf16", P, D),
         ("pli_up", "bf16", D, P),
@@ -117,7 +117,8 @@ def _size(fmt, rows, cols):
 def rope_rms_layout(geometry, layer_type):
     """Element offsets in rope_rms: cos and sin of this token's position, the q
     and k norm weights, the per-layer embedding of this token, the per-layer
-    norm weight, the post-per-layer-input norm weight and the layer scale."""
+    norm weight, the post-per-layer-input norm weight and the layer scale.
+    """
     g = layer_dims(geometry, layer_type)
     dh, P, D = g["dh"], g["pli_d"], g["model_dim"]
     lay = dict(cos=0, sin=dh // 2, q_norm=dh, k_norm=2 * dh, pli_embed=3 * dh)
@@ -144,7 +145,8 @@ def _attention_rows(g, context_len):
     """Cache rows in the order the attention core reads them, and how many hold
     keys. The core reads whole rounds and masks the rows past the keys. A
     sliding-window ring of L >= 512 tokens holds them in time order from row
-    L % 512."""
+    L % 512.
+    """
     L = context_len + 1
     if g["swa"] and L >= SLIDING_WINDOW:
         lb = L % SLIDING_WINDOW
@@ -162,7 +164,8 @@ def _attention_rows(g, context_len):
 
 def rms_norm(x, w):
     """rms_norm.h: bf16(x * w * rsqrt(mean(x^2) + eps)). w is None for the v
-    norm."""
+    norm.
+    """
     x = np.asarray(x, np.float64)
     s = f32(
         fmul(tree_sum(x * x, 16)[..., None], np.float32(1.0 / x.shape[-1]))
@@ -206,7 +209,8 @@ def parse_q4nx(proj_u8, offset, rows, cols):
 
 def parse_bf16_blocked(proj_u8, offset, rows, cols):
     """A bf16 weight in 32 x 256 blocks, row-block major. Element k * 32 + m of
-    block (i, j) is W[32 i + m, 256 j + k]."""
+    block (i, j) is W[32 i + m, 256 j + k].
+    """
     w = bf16_to_f32(proj_u8[offset : offset + 2 * rows * cols].view("<u2"))
     w = w.reshape(rows // BF16_M, cols // BF16_K, BF16_K, BF16_M).transpose(0, 3, 1, 2)
     return w.reshape(rows, cols)
@@ -255,7 +259,8 @@ def bf16_matvec(x, w):
 
 def rope_head(x, w_norm, cos, sin):
     """Per-head RMS norm, then rotate-half RoPE. A global layer rotates the first
-    64 pairs only: the engine passes cos 1 and sin 0 for the others."""
+    64 pairs only: the engine passes cos 1 and sin 0 for the others.
+    """
     xn = rms_norm(x, w_norm)
     h = xn.shape[-1] // 2
     x1, x2 = xn[..., :h], xn[..., h:]
@@ -269,13 +274,13 @@ def attention(q, K, V, valid, n_kv):
 
     Scale 1.0: q and k are RMS normalized. Per head the kernel runs an online
     softmax over rounds of 16 keys:
-        s  = bf16(q . k)
-        mx = max(m, max(s))
-        p  = bf16(exp(bf16(s - mx))), 0 for rows past `valid`
-        c  = exp(bf16(m - mx))
-        l  = l * c + bf16(sum(p))
-        y  = y * c + p . V
-    and returns bf16(bf16(y) * inv(l)). q . k and p . V run on bfp16 operands.
+        s     = bf16(q . k)
+        mx    = max(m, max(s))
+        p     = bf16(exp(bf16(s - mx))), 0 for rows past `valid`
+        c     = exp(bf16(m - mx))
+        denom = denom * c + bf16(sum(p))
+        y     = y * c + p . V
+    and returns bf16(bf16(y) * inv(denom)). q . k and p . V run on bfp16 operands.
     """
     H, dh = q.shape
     n_rows = K.shape[0]
@@ -292,7 +297,7 @@ def attention(q, K, V, valid, n_kv):
 
     neg_max = -3.3895313892515355e38  # the bf16 lowest value
     m = np.full(H, neg_max)
-    l = np.zeros(H, np.float32)
+    denom = np.zeros(H, np.float32)
     y = np.zeros((H, dh), np.float32)
     for r0 in range(0, n_rows, LK):
         sr = s_all[:, r0 : r0 + LK]
@@ -304,18 +309,19 @@ def attention(q, K, V, valid, n_kv):
         p = np.where(mask, rb(bf16_exp_lut_ref(d)), 0.0)
         c = bf16_exp_lut_ref(np.clip(rb(f32(m - vmax)), -87.0, 88.0))
         m = vmax
-        l = f32(fmul(l, c) + rb(tree_sum(p, 16)))
+        denom = f32(fmul(denom, c) + rb(tree_sum(p, 16)))
         y = fmul(y, c[:, None])
         pb = bfp16(p, 1)
         vr = Vh[r0 : r0 + LK]
         for k0 in (0, 8):
             y = f32(y + np.einsum("hk,khd->hd", pb[:, k0 : k0 + 8], vr[k0 : k0 + 8]))
-    return rb(rb(y) * inv_kernel(l)[:, None])
+    return rb(rb(y) * inv_kernel(denom)[:, None])
 
 
 def glu(up_gate, glu_slice):
     """bf16(gelu(gate) * up). Each glu_slice-row slice of the up/gate output
-    holds glu_slice / 2 up values, then glu_slice / 2 gate values."""
+    holds glu_slice / 2 up values, then glu_slice / 2 gate values.
+    """
     u = up_gate.reshape(-1, 2, glu_slice // 2)
     return rb(gelu_kernel(u[:, 1]) * u[:, 0]).reshape(-1)
 

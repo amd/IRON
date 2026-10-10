@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Builds the IRON operators of Gemma 4 E2B's text path and stages them for FastFlowLM.
 
-    python build.py <FastFlowLM's src/xclbins> <out dir>
+    python build.py --engine-xclbins <FastFlowLM's src/xclbins> --out <out dir>
 
 Reads the model from $FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2. Writes:
 
@@ -12,17 +12,18 @@ Reads the model from $FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2. Writes:
     <out>/gen/                          sequence generators the engine compiles in
 """
 
+import argparse
 import json
 import os
 import shutil
-import sys
 from pathlib import Path
 
 import aie.utils as aie_utils
+import pli_weights
 from aie.iron.device import NPU2
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 
-from iron.common import AIEContext
+from iron.common.image import OperatorImage
 from iron.operators.flm import (
     GEMM,
     DecodeLayer,
@@ -32,8 +33,6 @@ from iron.operators.flm import (
     PrefillSlidingAttention,
 )
 from iron.operators.flm.gemm.design import Epilogue
-
-import pli_weights
 
 MODEL = "Gemma4-E2B-IT-NPU2"
 
@@ -80,7 +79,7 @@ UPGATE = [(1536, 6144), (1536, 12288)]
 UPGATE_RUN = 512
 
 
-def gemm(M, K, N, gelu, ctx):
+def gemm(M, K, N, gelu):
     """Every GEMM of the model.
 
     floor rounding and bf16_steps gelu reproduce the engine's arithmetic bit for
@@ -96,14 +95,13 @@ def gemm(M, K, N, gelu, ctx):
         k_tile=256,
         rounding="floor",
         gelu="bf16_steps",
-        context=ctx,
     )
 
 
-def write_generator(op, path, namespace):
-    """Writes the C++ that generates `op`'s instruction sequence, for the engine to compile in."""
-    cpp = Path(op.dispatch_artifact.cpp_filename).read_text()
-    # IRON emits a dlopen shim after the generator. The engine links several
+def write_generator(image, path, namespace):
+    """Writes the C++ that generates `image`'s instruction sequence, for the engine to compile in."""
+    cpp = (image.artifacts.entry.directory / "dispatch_gen.cpp").read_text()
+    # mlir-aie emits a dlopen shim after the generator. The engine links several
     # generators, so drop the shim and give each generator a namespace.
     includes, body = cpp[: cpp.index('extern "C"')].split("\ninline ", 1)
     path.write_text(
@@ -112,14 +110,16 @@ def write_generator(op, path, namespace):
 
 
 def compile_all(ops):
+    images = {}
     for i, op in enumerate(ops, 1):
         print(f"[{i}/{len(ops)}] {op.name}", flush=True)
-        op.compile()
+        images[op] = OperatorImage(op).compile()
+    return images
 
 
-def one_xclbin(ops):
-    """The xclbin all `ops` share. The engine registers one xclbin per operator."""
-    xclbins = {op.xclbin_artifact.filename for op in ops}
+def one_xclbin(images):
+    """The xclbin all `images` share. The engine registers one xclbin per operator."""
+    xclbins = {image.artifacts.image for image in images}
     assert len(xclbins) == 1, f"expected one configuration, got {sorted(xclbins)}"
     return xclbins.pop()
 
@@ -128,17 +128,15 @@ def main(engine_xclbins, out):
     model_dir = Path(os.environ["FLM_MODEL_PATH"]) / "models" / MODEL
     config = json.loads((model_dir / "config.json").read_text())
     aie_utils.set_current_device(NPU2())
-    ctx = AIEContext(build_dir=out / "ops")
 
     layers = {
-        t: DecodeLayer(FLM_GEMMA4_E2B_DECODE, layer_type=t, context=ctx)
+        t: DecodeLayer(geometry=FLM_GEMMA4_E2B_DECODE, layer_type=t)
         for t in ("global", "swa", "global_skip", "swa_skip")
     }
     heads = dict(
         max_context=32768,  # bounds the KV cache rows; the stride is a dispatch parameter
         num_heads=config["num_attention_heads"],
         num_kv_heads=config["num_key_value_heads"],
-        context=ctx,
     )
     attn = PrefillAttention(**heads)
     swa = PrefillSlidingAttention(window=config["sliding_window"], **heads)
@@ -146,29 +144,27 @@ def main(engine_xclbins, out):
         dim=config["hidden_size"],
         vocab=config["vocab_size"],
         softcap=config["final_logit_softcapping"],
-        context=ctx,
     )
-    dequants = [DequantBFP(K=k, N=n, context=ctx) for k, n in DEQUANT]
+    dequants = [DequantBFP(K=k, N=n) for k, n in DEQUANT]
     dequants += [
         DequantBFP(
             K=k,
             N=n,
             run_out_features=UPGATE_RUN,
             run_period_out_features=2 * UPGATE_RUN,
-            context=ctx,
         )
         for k, n in UPGATE
     ]
-    gemms = [gemm(m, k, n, gelu, ctx) for m in WIDTHS for k, n, gelu in GEMMS]
+    gemms = [gemm(m, k, n, gelu) for m in WIDTHS for k, n, gelu in GEMMS]
     d, pli_d = config["hidden_size"], config["hidden_size_per_layer_input"]
     pli_shapes = [
         (d, pli_d * config["num_hidden_layers"], False),
         (d, pli_d, True),
         (pli_d, d, False),
     ]
-    gemms += [gemm(m, k, n, gelu, ctx) for m in PLI_WIDTHS for k, n, gelu in pli_shapes]
+    gemms += [gemm(m, k, n, gelu) for m in PLI_WIDTHS for k, n, gelu in pli_shapes]
 
-    compile_all([*layers.values(), attn, swa, lm_head, *dequants, *gemms])
+    images = compile_all([*layers.values(), attn, swa, lm_head, *dequants, *gemms])
 
     # Stage the engine's xclbins with IRON's under the engine's file names. The
     # engine registers each xclbin by its path, and overrides.hpp registers the
@@ -181,25 +177,25 @@ def main(engine_xclbins, out):
     iron = stage / "iron"
     iron.mkdir()
     for name, xclbin in {
-        "layer": layers["global"].xclbin_artifact.filename,
-        "attn": attn.xclbin_artifact.filename,
-        "swa": swa.xclbin_artifact.filename,
-        "lm_head": lm_head.xclbin_artifact.filename,
-        "mm": one_xclbin(gemms),
-        "dequant": one_xclbin(dequants),
+        "layer": one_xclbin(images[op] for op in layers.values()),
+        "attn": images[attn].artifacts.image,
+        "swa": images[swa].artifacts.image,
+        "lm_head": images[lm_head].artifacts.image,
+        "mm": one_xclbin(images[op] for op in gemms),
+        "dequant": one_xclbin(images[op] for op in dequants),
     }.items():
         shutil.copyfile(xclbin, stage / f"{name}.xclbin")
 
     # Static instruction sequences, named by the shape the header looks them up by.
-    shutil.copyfile(lm_head.insts_artifact.filename, iron / "lm_head.bin")
+    shutil.copyfile(images[lm_head].artifacts.insts, iron / "lm_head.bin")
     for op in dequants:
         shutil.copyfile(
-            op.insts_artifact.filename, iron / f"dequant_K{op.K}_N{op.N}.bin"
+            images[op].artifacts.insts, iron / f"dequant_K{op.K}_N{op.N}.bin"
         )
     for op in gemms:
         gelu = "_gelu" if op.epilogue == Epilogue.GELU else ""
         shutil.copyfile(
-            op.insts_artifact.filename, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin"
+            images[op].artifacts.insts, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin"
         )
     pli_weights.write(model_dir, config, gemms[0], iron)
 
@@ -207,11 +203,19 @@ def main(engine_xclbins, out):
     gen = out / "gen"
     gen.mkdir(exist_ok=True)
     for t, op in layers.items():
-        write_generator(op, gen / f"layer_{t}.h", f"layer_{t}")
-    write_generator(attn, gen / "attn.h", "attn")
-    write_generator(swa, gen / "swa.h", "swa")
+        write_generator(images[op], gen / f"layer_{t}.h", f"layer_{t}")
+    write_generator(images[attn], gen / "attn.h", "attn")
+    write_generator(images[swa], gen / "swa.h", "swa")
     print(f"staged {stage}")
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], Path(sys.argv[2]).resolve())
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--engine-xclbins", type=Path, required=True, help="FastFlowLM's src/xclbins"
+    )
+    parser.add_argument("--out", type=Path, required=True, help="the staging directory")
+    args = parser.parse_args()
+    main(args.engine_xclbins, args.out.resolve())

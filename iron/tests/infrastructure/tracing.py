@@ -12,52 +12,52 @@ import json
 
 import numpy as np
 import pytest
-import torch
 from aie.utils.trace import TraceConfig
+from ml_dtypes import bfloat16
 
-from iron.common.sequence import OperatorSequence
-from iron.common.tracing_utils import dump_traces
-from iron.operators.layer_norm.op import LayerNorm
+import iron
+from iron.common.tracing import dump_traces
+from iron.operators import LayerNorm
 
 SIZE = 2048
-TRACE_SIZE = 8192
 
 
-def _layer_norm_run(context, trace_size):
-    """A dispatched one-step sequence, and its output."""
+def _layer_norm_run(name, trace):
+    """A dispatched one-step fused sequence, and its output."""
     layer_norm = LayerNorm(
-        size=SIZE,
+        rows=1,
         num_aie_columns=1,
         num_channels=1,
         tile_size=SIZE,
-        trace_size=trace_size,
-        context=context,
+        trace=trace,
     )
-    seq = OperatorSequence(
-        name="infra_trace_layer_norm",
-        runlist=[(layer_norm, "x", "y")],
-        input_args=["x"],
-        output_args=["y"],
-        dispatch="fused",
-        trace_size=trace_size,
-        context=context,
-    )
-    seq.compile()
+
+    class F(iron.Graph):
+        def body(self, x):
+            return layer_norm(x)
+
+    f = F()
+
+    traced = f.trace(x=(1, SIZE))
+    seq = traced.sequence(name, dispatch="fused").compile()
     run = seq.get_callable()
-    torch.manual_seed(0)
-    run.get_buffer("x").torch_view()[:] = torch.randn(SIZE, dtype=torch.bfloat16)
+    x = run.get_buffer("x")
+    x.numpy_view()[:] = np.random.default_rng(0).standard_normal(SIZE).astype(bfloat16)
     run()
-    return run, run.get_buffer("y").torch_view()[:SIZE].clone()
+    return run, run.get_buffer(traced.output_args[0]).numpy()[:SIZE].copy()
 
 
 @pytest.mark.supported_devices("npu2")
-def test_dump_writes_raw_words_and_perfetto_json(aie_context, tmp_path):
-    run, traced = _layer_norm_run(aie_context, TRACE_SIZE)
-    _, untraced = _layer_norm_run(aie_context, 0)
-    assert torch.equal(traced, untraced), "tracing changed the result"
+def test_dump_writes_raw_words_and_perfetto_json(npu_runtime, tmp_path):
+    run, traced = _layer_norm_run("infra_trace_layer_norm", TraceConfig(8192))
+    _, untraced = _layer_norm_run("infra_trace_layer_norm_off", None)
+    assert np.array_equal(
+        traced.view(np.uint16), untraced.view(np.uint16)
+    ), "tracing changed the result"
 
-    written = dump_traces(run, "layer_norm", out_dir=tmp_path, summary=False)
+    written = dump_traces(run, tmp_path / "layer_norm.txt", summary=False)
 
+    assert run.trace_buffer is not None
     words = run.trace_buffer.numpy().view(np.uint32).reshape(-1)
     assert words.any(), "the traced dispatch captured no trace data"
     # The text reads back as the buffer's 32-bit words, unchanged by the int8

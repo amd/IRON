@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Infrastructure tests for :class:`OperatorSequence`.
+"""Infrastructure tests for ``OperatorSequence``.
 
 This is the first test module under ``iron/tests/`` and exercises the
 sequencing infrastructure itself (dispatch-mode selection, fused-MLIR
@@ -20,21 +20,34 @@ The ``OperatorSequence`` dispatch modes covered here are:
 * ``"reference"``– pure-CPU evaluation via each operator's ``reference()``.
 """
 
-from pathlib import Path
-
-import pytest
-import torch
+import logging
+import re
+from typing import Any
 
 import aie.utils as aie_utils
-from aie.iron.device import NPU2
+import numpy as np
+import pytest
+from aie.iron.kernels.sample import draw_row
 from aie.utils.verify import Tolerance
+from ml_dtypes import bfloat16
 
-from iron.common.sequence import CompareDispatch, OperatorSequence
-from iron.common.compilation.sequence import fuse_mlir
-from iron.common.test_utils import verify_buffer
-from iron.operators.elementwise_add.op import ElementwiseAdd
-from iron.operators.relu.op import ReLU
-from iron.operators.tanh.op import Tanh
+from iron.common import graph
+from iron.common.design import device_symbol
+from iron.common.harness import verify_buffer
+from iron.common.image import Fusion, OperatorSequence
+from iron.common.image.packaging import full_elf
+from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.relu import ReLU
+from iron.operators.sample import Sample
+from iron.operators.tanh import Tanh
+
+RELATIVE = Tolerance.relative(0.04, 1e-6)
+
+
+def _centered(rng, n) -> Any:
+    """``n`` bf16 values in [-2, 2), drawn as every test here draws them."""
+    x: Any = rng.random(n).astype(bfloat16)
+    return x * 4 - 2
 
 
 def _set_input(run, name, data):
@@ -45,7 +58,7 @@ def _set_input(run, name, data):
     is a no-op sync for the reference callable.
     """
     buf = run.get_buffer(name)
-    buf.torch_view()[: data.numel()] = data.reshape(-1)
+    buf.numpy_view()[: data.size] = data.reshape(-1)
     buf.to("npu")
 
 
@@ -58,20 +71,18 @@ _ADD_RELU_TILE = 1024
 _ADD_RELU_COLS = 4
 
 
-def _build_add_relu_sequence(context, dispatch, name, input_args=("a", "b")):
-    """out = relu(a + b), as a 2-step OperatorSequence."""
+def _build_add_relu_sequence(dispatch, name, input_args=("a", "b")):
+    """Out = relu(a + b), as a 2-step OperatorSequence."""
     add = ElementwiseAdd(
         size=_ADD_RELU_SIZE,
         tile_size=_ADD_RELU_TILE,
         num_aie_columns=_ADD_RELU_COLS,
-        context=context,
     )
     relu = ReLU(
         size=_ADD_RELU_SIZE,
         num_aie_columns=_ADD_RELU_COLS,
         num_channels=1,
         tile_size=_ADD_RELU_TILE,
-        context=context,
     )
     return OperatorSequence(
         name=name,
@@ -82,7 +93,6 @@ def _build_add_relu_sequence(context, dispatch, name, input_args=("a", "b")):
         input_args=list(input_args),
         output_args=["out"],
         dispatch=dispatch,
-        context=context,
     )
 
 
@@ -92,34 +102,33 @@ def _build_add_relu_sequence(context, dispatch, name, input_args=("a", "b")):
 
 
 @pytest.mark.parametrize("size", [_ADD_RELU_SIZE])
-def test_auto_dispatch_selects_platform_default(size, aie_context):
+def test_auto_dispatch_selects_platform_default(size, npu_runtime):
     """``dispatch="auto"`` must resolve to the full-ELF mode on Strix and to
     the separate-xclbin mode on Phoenix, and produce the correct result on
-    whichever platform the test runs on."""
-    torch.manual_seed(0)
-    a = torch.rand(size, dtype=torch.bfloat16) * 4 - 2
-    b = torch.rand(size, dtype=torch.bfloat16) * 4 - 2
+    whichever platform the test runs on.
+    """
+    rng = np.random.default_rng(0)
+    a = _centered(rng, size)
+    b = _centered(rng, size)
 
-    seq = _build_add_relu_sequence(aie_context, "auto", "infra_auto_add_relu")
+    seq = _build_add_relu_sequence("auto", "infra_auto_add_relu")
     seq.compile()
 
-    expected_mode = (
-        "fused" if isinstance(aie_utils.get_current_device(), NPU2) else "separate"
-    )
-    assert seq._dispatch.name == expected_mode, (
-        f"auto dispatch resolved to {seq._dispatch.name!r}, expected "
-        f"{expected_mode!r} on this device"
+    expected_mode = "fused" if full_elf(aie_utils.get_current_device()) else "separate"
+    assert seq.mode == expected_mode, (
+        f"auto dispatch resolved to {seq.mode!r}, expected {expected_mode!r} "
+        "on this device"
     )
 
     run = seq.get_callable()
     _set_input(run, "a", a)
     _set_input(run, "b", b)
     run()
-    out = run.get_buffer("out").torch_view()[:size].clone()
+    out = run.get_buffer("out").numpy()[:size].copy()
 
-    expected = torch.nn.functional.relu(a + b)
-    errors = verify_buffer(out, "out", expected, rel_tol=0.04, abs_tol=1e-6)
-    assert not errors, f"auto-dispatch sequence produced {len(errors)} mismatches"
+    expected = np.maximum(a + b, 0)
+    verdict = verify_buffer(out, "out", expected, RELATIVE)
+    assert verdict, f"auto-dispatch sequence: {verdict.detail}"
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +137,7 @@ def test_auto_dispatch_selects_platform_default(size, aie_context):
 
 
 @pytest.mark.parametrize("sequence", ["add_relu"])
-def test_fused_mlir_contains_reconfiguration(sequence, aie_context, tmp_path):
+def test_fused_mlir_contains_reconfiguration(sequence, npu_runtime):
     """The single-dispatch (fused) path emits one ``aie.device`` per operator
     plus a top-level device whose runtime sequence reconfigures the array
     between operators via ``aiex.configure`` / ``aiex.run``.
@@ -137,28 +146,26 @@ def test_fused_mlir_contains_reconfiguration(sequence, aie_context, tmp_path):
     so the check is device-agnostic and runs on all platforms even though the
     full fused dispatch itself requires NPU2.
     """
-    seq = _build_add_relu_sequence(aie_context, "fused", "infra_fused_mlir")
+    seq = _build_add_relu_sequence("fused", "infra_fused_mlir")
 
     # Generate the fused MLIR directly, bypassing the ELF backend (which is
-    # NPU2-only). This mirrors what set_up_artifacts() feeds to the compiler.
+    # NPU2-only). This mirrors what FusedImage.link() feeds to the compiler.
     seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
         seq.calculate_buffer_layout()
     )
-    mlir_artifact = seq._dispatch.build_fused_mlir(seq)
-    mlir_artifact.filename = str(tmp_path / mlir_artifact.filename)
-    fuse_mlir(mlir_artifact)
-
-    text = Path(mlir_artifact.filename).read_text()
+    text = Fusion(seq).text()
 
     # Reconfiguration + dispatch ops between temporal steps.
     assert "aiex.configure" in text, "missing aiex.configure in fused MLIR"
     assert "aiex.run @sequence" in text, "missing aiex.run in fused MLIR"
-    # Buffer sub-views handed to each operator's runtime sequence.
-    assert "memref.reinterpret_cast" in text, "missing buffer reinterpret in fused MLIR"
-    # One inlined device per unique operator plus the top-level driver device.
-    assert (
-        "op0_ElementwiseAdd" in text and "op1_ReLU" in text
-    ), "operator devices not inlined into fused module"
+    # Typed views of the byte arguments, handed to each operator's runtime sequence.
+    assert "memref.view" in text, "missing buffer view in fused MLIR"
+    # One inlined device per unique operator plus the top-level driver device,
+    # each named for its class and its design, not its position.
+    names = re.findall(r"aie\.device\(\w+\) @(\w+)", text)
+    assert any(re.fullmatch(r"ElementwiseAdd_[0-9a-f]{8}", n) for n in names) and any(
+        re.fullmatch(r"ReLU_[0-9a-f]{8}", n) for n in names
+    ), f"operator devices not inlined into fused module: {names}"
     assert (
         text.count("aie.device") >= 3
     ), "expected two operator devices plus a top-level device"
@@ -169,39 +176,37 @@ def test_fused_mlir_contains_reconfiguration(sequence, aie_context, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _run_add_relu(context, dispatch, a, b, name):
-    """out = relu(a + b), returned as a host bf16 tensor."""
-    seq = _build_add_relu_sequence(context, dispatch, name)
+def _run_add_relu(dispatch, a, b, name):
+    """Out = relu(a + b), returned as a host bf16 tensor."""
+    seq = _build_add_relu_sequence(dispatch, name)
     seq.compile()
     run = seq.get_callable()
     _set_input(run, "a", a)
     _set_input(run, "b", b)
     run()
-    return run.get_buffer("out").torch_view()[:_ADD_RELU_SIZE].clone()
+    return run.get_buffer("out").numpy()[:_ADD_RELU_SIZE].copy()
 
 
 @pytest.mark.parametrize("dispatch", ["separate", "fused", "compare"])
-def test_dispatch_modes_bit_identical(dispatch, aie_context):
-    """add -> relu must yield byte-for-byte identical output across every NPU
+def test_dispatch_modes_bit_identical(dispatch, npu_runtime):
+    """Add -> relu must yield byte-for-byte identical output across every NPU
     dispatch mode: the compiled kernels are the same, so only the dispatch
     mechanism differs. The ``separate`` mode is the baseline (it runs on every
-    platform)."""
-    if dispatch == "fused" and not isinstance(aie_utils.get_current_device(), NPU2):
-        pytest.skip("fused (single-ELF) dispatch requires NPU2")
+    platform).
+    """
+    if dispatch == "fused" and not full_elf(aie_utils.get_current_device()):
+        pytest.skip("fused dispatch needs a full ELF, which this device lacks")
 
-    torch.manual_seed(0)
-    a = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
-    b = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
+    rng = np.random.default_rng(0)
+    a = _centered(rng, _ADD_RELU_SIZE)
+    b = _centered(rng, _ADD_RELU_SIZE)
 
-    baseline = _run_add_relu(
-        aie_context, "separate", a, b, "infra_addrelu_parity_separate"
-    )
-    out = _run_add_relu(aie_context, dispatch, a, b, f"infra_addrelu_parity_{dispatch}")
+    baseline = _run_add_relu("separate", a, b, "infra_addrelu_parity_separate")
+    out = _run_add_relu(dispatch, a, b, f"infra_addrelu_parity_{dispatch}")
 
-    assert torch.equal(out, baseline), (
-        f"dispatch={dispatch!r} output is not bit-identical to the separate "
-        f"baseline"
-    )
+    assert np.array_equal(
+        out, baseline
+    ), f"dispatch={dispatch!r} output is not bit-identical to the separate baseline"
 
 
 # ---------------------------------------------------------------------------
@@ -210,24 +215,21 @@ def test_dispatch_modes_bit_identical(dispatch, aie_context):
 #     rather than a hand-rolled numpy view. Not covered by
 #     test_dispatch_modes_bit_identical above, since reference() is a CPU
 #     re-implementation and only expected to match the NPU output within
-#     tolerance, not bit-for-bit (see CompareDispatch's tolerance).
+#     tolerance, not bit-for-bit (see StepCallable's compare tolerance).
 # ---------------------------------------------------------------------------
 
 _SLICE_SIZE = 1024
 _SLICE_BYTES = _SLICE_SIZE * 2  # bf16
 
 
-def _build_packed_output_sequence(context, dispatch, name):
+def _build_packed_output_sequence(dispatch, name):
     """Two independent adds writing into disjoint halves of one explicitly
     sized buffer via slice notation ("packed[start:end]"). Unlike
     _build_add_relu_sequence's "temp" hand-off (a whole-buffer alias), this
-    exercises slice_info/explicit_buffer_sizes resolution directly."""
-    add0 = ElementwiseAdd(
-        size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1, context=context
-    )
-    add1 = ElementwiseAdd(
-        size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1, context=context
-    )
+    exercises slice_info/explicit_buffer_sizes resolution directly.
+    """
+    add0 = ElementwiseAdd(size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1)
+    add1 = ElementwiseAdd(size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1)
     return OperatorSequence(
         name=name,
         runlist=[
@@ -238,23 +240,21 @@ def _build_packed_output_sequence(context, dispatch, name):
         output_args=["packed"],
         buffer_sizes={"packed": 2 * _SLICE_BYTES},
         dispatch=dispatch,
-        context=context,
     )
 
 
-def test_reference_dispatch_resolves_sliced_buffer(aie_context):
+def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
     """dispatch="reference" must resolve slice-notation buffers via
-    subview() on the CPU backend, matching SequenceXclbinCallable's behaviour,
-    and each slice's write must be visible through the parent buffer name."""
-    torch.manual_seed(0)
-    a0 = torch.rand(_SLICE_SIZE, dtype=torch.bfloat16)
-    b0 = torch.rand(_SLICE_SIZE, dtype=torch.bfloat16)
-    a1 = torch.rand(_SLICE_SIZE, dtype=torch.bfloat16)
-    b1 = torch.rand(_SLICE_SIZE, dtype=torch.bfloat16)
+    subview() on the CPU backend, matching the xclbin chain's StepCallable,
+    and each slice's write must be visible through the parent buffer name.
+    """
+    rng = np.random.default_rng(0)
+    a0: Any = rng.random(_SLICE_SIZE).astype(bfloat16)
+    b0: Any = rng.random(_SLICE_SIZE).astype(bfloat16)
+    a1: Any = rng.random(_SLICE_SIZE).astype(bfloat16)
+    b1: Any = rng.random(_SLICE_SIZE).astype(bfloat16)
 
-    seq = _build_packed_output_sequence(
-        aie_context, "reference", "infra_reference_sliced_packed"
-    )
+    seq = _build_packed_output_sequence("reference", "infra_reference_sliced_packed")
     seq.compile()
     run = seq.get_callable()
     _set_input(run, "a0", a0)
@@ -262,55 +262,49 @@ def test_reference_dispatch_resolves_sliced_buffer(aie_context):
     _set_input(run, "a1", a1)
     _set_input(run, "b1", b1)
     run()
-    packed = run.get_buffer("packed").torch_view()[: 2 * _SLICE_SIZE].clone()
+    packed = run.get_buffer("packed").numpy()[: 2 * _SLICE_SIZE].copy()
 
-    expected = torch.cat([a0 + b0, a1 + b1])
-    errors = verify_buffer(packed, "packed", expected, rel_tol=0.04, abs_tol=1e-6)
-    assert (
-        not errors
-    ), f"reference-dispatch sliced buffer produced {len(errors)} mismatches"
+    expected = np.concatenate([a0 + b0, a1 + b1])
+    verdict = verify_buffer(packed, "packed", expected, RELATIVE)
+    assert verdict, f"reference-dispatch sliced buffer: {verdict.detail}"
 
 
 # ---------------------------------------------------------------------------
-# 4. Compare mode holds each step to its kernel's contract, and flags (and by
-#    default raises on) a step that falls outside the tolerance it is judged by.
+# 4. Compare mode holds each step to its kernel's contract, and raises on a
+#    step that falls outside the tolerance it is judged by.
 #
-#    Tanh's kernel approximates torch.tanh: within its contract, but not
+#    Tanh's kernel approximates np.tanh: within its contract, but not
 #    bit-exact. So the same NPU output must pass under the default tolerance
 #    and fail under an exact one.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("exact", [False, True])
-def test_compare_mode_judges_each_step_by_its_tolerance(exact, aie_context):
+def test_compare_mode_judges_each_step_by_its_tolerance(exact, npu_runtime):
     """dispatch="compare" runs the NPU pipeline and, per step, re-runs the
     operator's ``reference()`` on the same NPU inputs. Under its kernel's
-    contract the step runs cleanly (no flagged step); held to exact equality it
-    makes compare mode raise on its own (``raise_on_mismatch`` defaults to
-    True)."""
+    contract the step runs cleanly; held to exact equality it makes compare
+    mode raise.
+    """
     size = 1024
-    torch.manual_seed(0)
-    x = torch.rand(size, dtype=torch.bfloat16) * 4
+    rng = np.random.default_rng(0)
+    x: Any = rng.random(size).astype(bfloat16)
+    x = x * 4
 
-    op = Tanh(
-        size=size,
-        num_aie_columns=1,
-        num_channels=1,
-        tile_size=size,
-        context=aie_context,
-    )
+    op = Tanh(size=size, num_aie_columns=1, num_channels=1, tile_size=size)
     seq = OperatorSequence(
         name="infra_compare_tanh",
         runlist=[(op, "x", "out")],
         input_args=["x"],
         output_args=["out"],
-        dispatch=CompareDispatch(tolerance=Tolerance.exact() if exact else None),
-        context=aie_context,
+        dispatch="compare",
     )
     seq.compile()
-    assert seq._dispatch.name == "compare"
+    assert seq.mode == "compare"
 
-    run = seq.get_callable()
+    run: Any = seq.get_callable()
+    if exact:
+        run.tolerance = Tolerance.exact()
     _set_input(run, "x", x)
 
     if exact:
@@ -318,8 +312,45 @@ def test_compare_mode_judges_each_step_by_its_tolerance(exact, aie_context):
             run()
     else:
         run()  # must not raise
-        flagged = any(step.get("mismatch") for step in run.last_step_stats)
-        assert not flagged, "compare mode flagged a step within its kernel contract"
+
+
+def test_compare_mode_judges_every_output_at_the_calls_values(npu_runtime, caplog):
+    """Sample writes two buffers, its record in place and the token, at a row
+    and slot that are per-call values. Compare mode runs its reference at
+    the values the step was dispatched with and judges both buffers, so a
+    draw from any row but ``position``'s, or a record in any other slot,
+    raises.
+    """
+    steps, position = 4, 2
+    op = Sample(vocab=4096, cores=4, steps=steps)
+    op.use_value("row", graph.Value("row", "scratchpad", np.int32).affine())
+    op.use_value("at", graph.Value("position", "scratchpad", np.int32).affine())
+    seq = OperatorSequence(
+        name="infra_compare_sample",
+        runlist=[(op, "logits", "draws", "tokens", "token")],
+        input_args=["logits", "draws", "tokens"],
+        output_args=["token"],
+        dispatch="compare",
+    )
+    seq.compile()
+    run: Any = seq.get_callable()
+    run.tolerance = Tolerance.exact()
+    rng = np.random.default_rng(3)
+    _set_input(run, "logits", rng.normal(0, 3, op.vocab).astype(bfloat16))
+    rows = [(0.0, 1), (0.0, 1), (1.0, 64), (0.0, 1)]
+    draws = np.stack([draw_row(t, k, int(rng.integers(0, 1 << 53))) for t, k in rows])
+    _set_input(run, "draws", draws)
+    _set_input(run, "tokens", np.full(steps, -1, dtype=np.int32))
+    run.write_values(
+        {
+            device_symbol(op, op.value("row")): np.int32(4 * position),
+            device_symbol(op, op.value("at")): np.int32(position),
+        }
+    )
+    with caplog.at_level(logging.INFO, logger="iron.common.image.callable"):
+        run()
+    judged = re.findall(r"Sample -> (\w+)", caplog.text)
+    assert judged == ["tokens", "token"], caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -332,33 +363,32 @@ def test_compare_mode_judges_each_step_by_its_tolerance(exact, aie_context):
 
 
 @pytest.mark.parametrize("dispatch", ["separate", "fused"])
-def test_non_input_buffers_sync_without_explicit_flush(dispatch, aie_context):
+def test_non_input_buffers_sync_without_explicit_flush(dispatch, npu_runtime):
     """Host writes through get_buffer() to a non-input buffer reach the NPU at
     the next dispatch, and reads of a non-output buffer after a dispatch see
-    what the NPU wrote there, with no explicit ``to()`` from the caller."""
-    if dispatch == "fused" and not isinstance(aie_utils.get_current_device(), NPU2):
-        pytest.skip("fused (single-ELF) dispatch requires NPU2")
+    what the NPU wrote there, with no explicit ``to()`` from the caller.
+    """
+    if dispatch == "fused" and not full_elf(aie_utils.get_current_device()):
+        pytest.skip("fused dispatch needs a full ELF, which this device lacks")
 
     # b is not an input, so it is held like a weight (in scratch, when fused).
     seq = _build_add_relu_sequence(
-        aie_context, dispatch, f"infra_add_weight_relu_{dispatch}", input_args=["a"]
+        dispatch, f"infra_add_weight_relu_{dispatch}", input_args=["a"]
     )
     seq.compile()
     run = seq.get_callable()
 
-    torch.manual_seed(0)
+    rng = np.random.default_rng(0)
     for rep in range(4):
-        a = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
-        b = torch.rand(_ADD_RELU_SIZE, dtype=torch.bfloat16) * 4 - 2
-        run.get_buffer("a").torch_view()[:] = a
-        run.get_buffer("b").torch_view()[:] = b
+        a = _centered(rng, _ADD_RELU_SIZE)
+        b = _centered(rng, _ADD_RELU_SIZE)
+        run.get_buffer("a").numpy_view()[:] = a
+        run.get_buffer("b").numpy_view()[:] = b
         run()
 
-        temp = run.get_buffer("temp").to_torch()[:_ADD_RELU_SIZE]
-        out = run.get_buffer("out").to_torch()[:_ADD_RELU_SIZE]
-        errors = verify_buffer(temp, "temp", a + b, rel_tol=0.04, abs_tol=1e-6)
-        assert not errors, f"rep {rep}: temp has {len(errors)} mismatches"
-        errors = verify_buffer(
-            out, "out", torch.nn.functional.relu(a + b), rel_tol=0.04, abs_tol=1e-6
-        )
-        assert not errors, f"rep {rep}: out has {len(errors)} mismatches"
+        temp = run.get_buffer("temp").numpy()[:_ADD_RELU_SIZE]
+        out = run.get_buffer("out").numpy()[:_ADD_RELU_SIZE]
+        verdict = verify_buffer(temp, "temp", a + b, RELATIVE)
+        assert verdict, f"rep {rep}: temp: {verdict.detail}"
+        verdict = verify_buffer(out, "out", np.maximum(a + b, 0), RELATIVE)
+        assert verdict, f"rep {rep}: out: {verdict.detail}"

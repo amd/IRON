@@ -8,7 +8,8 @@ Its pytest_collection_modifyitems must not resolve a device unless some collecte
 test restricts itself via @pytest.mark.supported_devices: resolving one opens the
 single-tenant NPU on every plain `pytest` in this tree, whatever was selected.
 When a test does restrict itself, it skips the tests this device is not listed
-for, and stops with the reason when there is no NPU runtime at all.
+for, and skips them all, each with the reason, when there is no NPU runtime
+at all: the rest of the tree still runs on a host without an NPU.
 
 Each case runs pytest in a subprocess, over a directory holding a copy of the
 root conftest and one test module. The no-runtime cases hide pyxrt from it,
@@ -40,7 +41,7 @@ def _pytest(tmp_path, test_source, without_xrt=False):
     (tmp_path / "test_gated.py").write_text(test_source)
     env = dict(os.environ)
     pyxrt = importlib.util.find_spec("pyxrt")
-    if without_xrt and pyxrt is not None:
+    if without_xrt and pyxrt is not None and pyxrt.origin is not None:
         hidden = os.path.dirname(pyxrt.origin)
         entries = env.get("PYTHONPATH", "").split(os.pathsep)
         if hidden not in entries:
@@ -48,7 +49,7 @@ def _pytest(tmp_path, test_source, without_xrt=False):
         env["PYTHONPATH"] = os.pathsep.join(p for p in entries if p != hidden)
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider"]
-        + ["--iterations", "1", "-v", "test_gated.py"],
+        + ["--iterations", "1", "-v", "-rs", "test_gated.py"],
         cwd=tmp_path,
         env=env,
         capture_output=True,
@@ -66,17 +67,19 @@ def test_unrestricted_tests_need_no_npu_runtime(tmp_path):
     assert "1 passed" in result.stdout
 
 
-def test_restricted_test_without_npu_runtime_stops_with_the_reason(tmp_path):
+def test_restricted_test_without_npu_runtime_skips_with_the_reason(tmp_path):
     result = _pytest(
         tmp_path,
         "import pytest\n"
+        "def test_plain():\n    pass\n"
         "@pytest.mark.supported_devices('npu1', 'npu2')\n"
         "def test_gated():\n    pass\n",
         without_xrt=True,
     )
-    assert result.returncode == pytest.ExitCode.USAGE_ERROR, result.stdout
-    assert "No NPU runtime: " in result.stderr
-    assert "xrt" in result.stderr.lower(), result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 passed, 1 skipped" in result.stdout, result.stdout
+    (reason,) = [ln for ln in result.stdout.splitlines() if ln.startswith("SKIPPED")]
+    assert "No NPU runtime: " in reason and "xrt" in reason.lower(), reason
 
 
 @pytest.mark.supported_devices("npu1", "npu2")

@@ -42,9 +42,10 @@ $(MODEL)/model.q4nx: | flm
 	cd $(FLM) && FLM_MODELINFO_PATH=$(FLM)/model_info.json $(FLM_BIN) pull gemma4-it:e2b
 	test -f $@
 
-# build.py reads the model's config and repacks its PLI weights.
+# build.py reads the model's config and repacks its PLI weights. The
+# operators compile into mlir-aie's cache, kept under the build directory.
 operators: $(MODEL)/model.q4nx | $(BUILD)/FastFlowLM
-	python3 build.py $(FLM)/xclbins $(BUILD)
+	NPU_CACHE_HOME=$${NPU_CACHE_HOME:-$(BUILD)/cache} python3 build.py --engine-xclbins $(FLM)/xclbins --out $(BUILD)
 
 # The IRON engine. The flm of the stock build loads it through LD_LIBRARY_PATH.
 engine: flm operators

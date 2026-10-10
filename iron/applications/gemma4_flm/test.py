@@ -139,14 +139,10 @@ def stock_tokens(build_engines):
 @pytest.mark.skipif(
     not MODEL.exists(), reason="needs $FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2"
 )
-@pytest.mark.metrics(
-    TTFT=r"\[Prefill\]\s*Time to first token:\s*(?P<value>[\d\.e\+-]+) s",
-    TPS=r"\[Decode\]\s*Tokens per second:\s*(?P<value>[\d\.e\+-]+)",
-)
 @pytest.mark.parametrize(
     "prompt", [pytest.param(name, marks=pytest.mark.bench) for name in PROMPTS]
 )
-def test_iron_matches_engine(prompt, build_engines, stock_tokens):
+def test_iron_matches_engine(prompt, build_engines, stock_tokens, record_property):
     (reply,) = replies(
         APP / "build" / "engine" / "engines", APP / "build", [PROMPTS[prompt]]
     )
@@ -157,4 +153,6 @@ def test_iron_matches_engine(prompt, build_engines, stock_tokens):
     print(f"[Prefill] Time to first token: {ttft:.4f} s")
     print(f"[Decode] {reply['eval_count']} tokens")
     print(f"[Decode] Tokens per second: {tps:.2f}")
+    record_property("TTFT", ttft)
+    record_property("TPS", tps)
     assert reply["context"] == stock_tokens[prompt]

@@ -1,0 +1,153 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""The other image: operators and separate-dispatch graphs build to xclbins.
+
+The full ELF is NPU2's image; the xclbin is NPU1's, and what a graph
+compiled at ``each_step`` boundaries chains one operator at a time. This
+gate runs aiecc's xclbin pipeline (kernels with Peano, the PDI, then
+``xclbinutil`` packaging) on each path the model lowers that way:
+
+* a graph compiled at ``each_step`` boundaries, one xclbin per unique
+  operator linked onto the previous one (``--xclbin-input``), on both
+  device widths, with no runtime made until the first call;
+* flm/gemm's two compiles, the configuration's xclbin at the reference
+  shape and this shape's instruction stream;
+* the shipped flm image's instruction stream against its pins (the xclbin
+  itself is downloaded, not built, and is tried separately);
+* one plain declared operator's ``OperatorImage`` on NPU1.
+
+Needs Peano and ``xclbinutil`` on the PATH (mlir-aie vendors a Boost-free
+one under ``tools/hrx-xclbinutil``); no device.
+"""
+
+import urllib.error
+from pathlib import Path
+
+import pytest
+
+import iron
+from iron.common.image import OperatorImage
+from iron.operators.gemv import GEMV
+from iron.operators.mha import MHA
+from iron.tests.common.llama_model import llama_1b
+from iron.tests.toolchain.tools import requires, swiglu
+
+pytestmark = requires("xclbinutil", "peano")
+
+
+def test_a_graph_compiles_to_one_xclbin_per_operator_chained(device):
+    fn, E = swiglu()
+    net = fn.compile(
+        dev=device,
+        boundaries=iron.each_step,
+        image=iron.XCLBIN,
+        x=(1, E),
+    )
+    assert net.plan.image == "xclbin" and net.plan.dispatch == "separate"
+    assert net.image is not None
+    assert Path(net.image).suffix == ".xclbin" and Path(net.image).stat().st_size > 0
+    assert net._callable is None, "the runtime is made on first call, not at compile"
+    seq = net.sequence
+    dispatch = seq._image
+    assert dispatch is not None
+    ops = list(seq.unique_operators())
+    assert len(ops) == 5 and len(seq.runlist) == 5
+    # Five operators, four designs: the gate and up projections share one,
+    # so they link one kernel instance and run one instruction stream.
+    kernels = {dispatch.labels[id(op)] for op in ops}
+    assert len(kernels) == 4, kernels
+    entries = {id(op): dispatch.designs[id(op)].get_cache_entry() for op in ops}
+    gate, up = ops[0], ops[1]
+    assert type(gate).__name__ == type(up).__name__ == "GEMV"
+    assert entries[id(gate)].insts == entries[id(up)].insts
+    for entry in entries.values():
+        assert Path(entry.xclbin).stat().st_size > 0
+        assert Path(entry.insts).stat().st_size > 0
+    # The last link carries every instance: it is the largest of the chain,
+    # and it is the image compile() handed back.
+    sizes = [Path(entry.xclbin).stat().st_size for entry in entries.values()]
+    assert dispatch.image is not None
+    assert dispatch.image.stat().st_size == max(sizes)
+    assert Path(net.image) == dispatch.image
+
+
+def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(npu2):
+    import iron.operators.flm.gemm.op as flm
+
+    op = flm.GEMM(M=256, K=512, N=512)
+    artifacts = OperatorImage(op).compile().artifacts
+    assert artifacts.image.stat().st_size > 0
+    assert artifacts.insts is not None and artifacts.insts.stat().st_size > 0
+    # The configuration's image is its own entry, named for the configuration;
+    # the stream is this shape's, in another.
+    (design,) = artifacts.designs
+    assert design.name == op.resolved().configuration().name
+    assert design.entry.directory != artifacts.entry.directory
+    # The shape's own compile is instructions-only: no second xclbin. Its
+    # placement reads the configuration's kernels, the same objects.
+    own = artifacts.entry
+    assert own.xclbin is None and own.elf is None
+    assert own.insts is not None
+    assert [o.read_bytes() for o in own.objects] == [
+        o.read_bytes() for o in design.entry.objects
+    ]
+    # The configuration's entry is where the image and the kernels are.
+    assert design.entry.xclbin == artifacts.image and design.entry.objects
+    # Both entries are the cache's, which owns every path a build produces.
+    from aie.utils.compile import NPU_CACHE_HOME
+
+    for entry in (own, design.entry):
+        assert entry.directory.is_relative_to(NPU_CACHE_HOME)
+
+
+def _shipped(**kwargs):
+    from iron.operators.flm.gemm.shipped import Shipped
+
+    return Shipped(**kwargs)
+
+
+def test_shipped_builds_its_instructions_for_the_external_image(npu2):
+    op = _shipped(
+        M=256,
+        K=1024,
+        N=1152,
+        epilogue="gelu",
+        clamp=(-2.0, 2.0),
+    )
+    insts = OperatorImage(op).compile().artifacts.insts
+    assert insts is not None and insts.stat().st_size > 0
+
+
+def test_shipped_fetches_its_image(npu2):
+    op = _shipped(M=256, K=1024, N=1152)
+    try:
+        image = Path(OperatorImage(op).compile().artifacts.image)
+    except (urllib.error.URLError, OSError) as e:  # no network here
+        pytest.skip(f"the prebuilt xclbin could not be fetched: {e}")
+    assert image.exists() and image.stat().st_size > 0
+
+
+@pytest.mark.extensive
+@pytest.mark.parametrize("chunk,pipelines", [(True, 4), (False, 2)])
+def test_llama_builds_xclbins_at_its_size_on_npu1(npu1, chunk, pipelines):
+    """Every design of a prompt chunk and of a decode step at Llama 3.2
+    1B's shape and context, under NPU1's profile, builds into its xclbin
+    chain, MHA on four columns. One layer: the designs are the same for
+    sixteen.
+    """
+    model = llama_1b(n_layers=1)
+    rows = model.config.prefill_chunk if chunk else 1
+    version = model.compile(boundaries=iron.each_step, **model.shapes(rows))
+    assert version.plan.image == "xclbin"
+    assert Path(version.image).stat().st_size > 0
+    (mha,) = [op for op in version.sequence.unique_operators() if type(op) is MHA]
+    assert mha.width == 4 and mha.num_pipelines == pipelines
+
+
+def test_a_declared_operator_compiles_to_an_xclbin_on_npu1(npu1):
+    op = GEMV(M=512, K=1024)
+    artifacts = OperatorImage(op).compile().artifacts
+    assert artifacts.image.stat().st_size > 0
+    insts = artifacts.insts
+    assert insts is not None and insts.stat().st_size > 0

@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CPU reference for :mod:`iron.operators.flm.prefill_attn`, in float32."""
+"""CPU reference for ``iron.operators.flm.PrefillAttention`` and
+``PrefillSlidingAttention``, in float32.
+"""
 
 import numpy as np
 

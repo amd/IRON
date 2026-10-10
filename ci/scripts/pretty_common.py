@@ -97,17 +97,29 @@ def status_emoji(passed: int, total: int, partial: bool = True) -> str:
     return "🟠" if partial else "❌"
 
 
-def operator_name(test_path: str) -> str:
-    """Name the operator a 'Test Path' belongs to.
+# The module that runs every operator declaring its cases. Its parametrize ids
+# lead with the operator: 'GEMV-cols_4-...'.
+CATALOG_TEST_FILE = "iron/tests/operators/catalog.py"
+
+
+def operator_name(test_path: str, test_name: str = "") -> str:
+    """Name the operator a row of 'Test Path' and 'Test' belongs to.
 
     'iron/operators/flm/gemm/test.py::test_gemm' names 'flm/gemm', and
-    'iron/applications/llama_3.2_1b/test.py::test_llama' names 'llama_3.2_1b'.
+    'iron/applications/llama_3.2_1b/test.py::test_llama' names
+    'llama_3.2_1b'. A catalog row is named by its test's leading id:
+    'iron/tests/operators/catalog.py::test_operator' with test
+    'GEMV-cols_4' names 'GEMV'. Any other test is named by its module.
     """
+    file_part = test_path.split("::", 1)[0]
+    if file_part == CATALOG_TEST_FILE:
+        return test_name.split("-", 1)[0] or UNKNOWN_OPERATOR
     directory, _ = split_test_path(test_path)
     for prefix in ("iron/operators/", "iron/applications/"):
         if directory.startswith(prefix):
             return directory[len(prefix) :] or UNKNOWN_OPERATOR
-    return UNKNOWN_OPERATOR
+    stem = os.path.splitext(os.path.basename(file_part))[0]
+    return stem or UNKNOWN_OPERATOR
 
 
 def try_parse_float(value: Any) -> Optional[float]:

@@ -182,7 +182,8 @@ layer.
 
 `build.py` writes four things:
 
-- `build/ops/` holds IRON's build artifacts of every operator.
+- `build/cache/` is mlir-aie's compile cache (`NPU_CACHE_HOME`, unless set),
+  with the build artifacts of every operator.
 - `build/xclbins/Gemma4-E2B-IT-NPU2/` is the engine's xclbin directory, with
   six xclbins replaced by IRON's builds: `layer`, `attn`, `swa`, `lm_head`,
   `mm` and `dequant`. The server log line

@@ -26,19 +26,14 @@ jobs:
         env:
           HOME: /workspace
 
+      - name: Use a compile cache of this job's own
+        shell: bash
+        run: echo "NPU_CACHE_HOME=$RUNNER_TEMP/npu-cache" >> "$GITHUB_ENV"
+
       - name: Prerequisites
         uses: ./.github/actions/prereqs
         with:
           env_name: ci_env
-
-      - name: Install additional requirements for examples
-        shell: bash
-        env:
-          HOME: /workspace
-        run: |
-          set -euxo pipefail
-          source ci_env/bin/activate
-          pip install -r requirements_examples.txt
 
       - name: Print mlir-aie version
         shell: bash
@@ -78,7 +73,7 @@ jobs:
         id: commit_results
         with:
           dir: krackan/examples
-          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' -o pretty.md"
+          pretty_flags: "--metric='TTFT (mean)' --metric='TPS (mean)' --metric='Latency (mean)' -o pretty.md"
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -93,8 +88,7 @@ jobs:
         with:
           name: mlir-artifacts
           path: |
-            iron/applications/llama_3.2_1b/build/*.mlir
-            iron/applications/llama_3.2_1b/build_elf/*.mlir
+            ${{ env.NPU_CACHE_HOME }}/*/*.mlir
           retention-days: 14
           if-no-files-found: warn
 
