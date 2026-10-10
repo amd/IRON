@@ -219,7 +219,8 @@ def test_mha_whose_pipelines_do_not_fill_the_rows_is_refused():
         (dict(causal=False, window=500), "whole 64-row blocks"),
         (dict(d=256, causal=False, window=520), "whole 16-row blocks"),
         (dict(scale=-1.0), "scale"),
-        (dict(B_q=128, B_kv=128), "divide 64"),
+        (dict(B_q=128), "divide 64"),
+        (dict(B_q=32, B_kv=64), "causal skip"),
     ],
     ids=[
         "head_not_whole_64",
@@ -228,6 +229,7 @@ def test_mha_whose_pipelines_do_not_fill_the_rows_is_refused():
         "window_not_whole_small_blocks",
         "negative_scale",
         "block_past_the_padding",
+        "kv_block_not_the_q_block",
     ],
 )
 def test_mha_band_and_head_that_do_not_tile_are_refused(kwargs, why):

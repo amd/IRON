@@ -600,6 +600,11 @@ class MHA(Operator):
                 )
             # A block given is taken as given.
             pv_cores, B_q = fit or (pv_cores or 1, B_q)
+        if self.B_kv not in (None, B_q):
+            raise ValueError(
+                f"B_kv ({self.B_kv}) is B_q ({B_q}): mha.cc's causal skip "
+                f"compares a KV block's index with a Q block's"
+            )
         q_shims = 2 if self.num_pipelines > 6 else 1
         if dev is not None:
             width = max(w for w in self.COLUMNS if w <= dev.cols)
