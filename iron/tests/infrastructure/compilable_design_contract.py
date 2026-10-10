@@ -49,6 +49,18 @@ def test_an_object_closed_over_alone_does_not_change_the_key():
     )
 
 
+def test_compile_kwargs_do_change_the_key():
+    """The supported way to carry a graph's identity.
+
+    compile_kwargs is part of the recipe hash, so putting something that
+    identifies the graph there discriminates where a closure does not.
+    """
+    graph = _Graph("module { /* same text */ }")
+    a = _graph_design(graph, compile_kwargs={"graph": "A"})
+    b = _graph_design(graph, compile_kwargs={"graph": "B"})
+    assert a._compute_cache_hash() != b._compute_cache_hash()
+
+
 @pytest.mark.parametrize("full_elf", [True, False])
 def test_full_elf_is_part_of_the_key(full_elf):
     """Fused dispatch asks for a full ELF and separate does not, so the two
