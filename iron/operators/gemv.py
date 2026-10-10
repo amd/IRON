@@ -370,6 +370,8 @@ class GEMV(Operator):
         # A core holds A's tiles (which carry B and each prologue and finish
         # input), B's line, C's tiles, a scratch line per kind of chain it
         # applies, and the default stack, which no elementwise kernel exceeds.
+        if dev is None:
+            return new
         item = np.dtype(bfloat16).itemsize
         line, out = self.K * item, new.tile_size_output * item
         held = (

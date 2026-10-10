@@ -838,6 +838,14 @@ def test_a_prologue_chains_through_the_step_before_it(npu2):
     np.testing.assert_array_equal(step.op.reference(A, x, r, w), want)
 
 
+def test_a_matvec_whose_columns_are_given_resolves_with_no_device():
+    """What ``resolved()`` asks on a host with none bound: no memory to
+    hold the cores to, so none is checked.
+    """
+    op = GEMV(M=256, K=64, num_aie_columns=1, num_channels=1, tile_size_output=32)
+    assert op.resolve(None).tile_size_input == 2
+
+
 def test_a_prologue_the_matvec_cannot_hold_is_refused(npu2):
     # A K of 8192: A's tiles, B's line and the prepared line fill L1.
     with pytest.raises(ValueError, match="past its 65536"):
