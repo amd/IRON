@@ -499,8 +499,8 @@ def judge(
         for name, verdict in op.judge(inputs, written, gate, want).items():
             if not verdict:
                 detail = f"{name} under {which} gate: {verdict.detail}"
-                return Accuracy(False, detail, CostTable.today())
-    return Accuracy(True, "", CostTable.today())
+                return Accuracy(False, detail)
+    return Accuracy(True, "")
 
 
 def time_interleaved(
@@ -811,7 +811,6 @@ def measure_steps(
                 output=outputs[i],
                 pmode=mode,
                 calls=timing.calls,
-                measured=CostTable.today(),
             )
             of = group_of.get(d.key, d.key)
             slowest[of] = max(slowest.get(of, 0.0), times[n + i].us)
@@ -914,7 +913,7 @@ def judged(
             run.digest()
             verdict = judge(
                 default.op, v.op, run.inputs(), run.written(), values
-            ) or Accuracy(False, "not judged", CostTable.today())
+            ) or Accuracy(False, "not judged")
             del run
             if key is not None:
                 cache.put(key, verdict)
@@ -1038,7 +1037,6 @@ def measure_points(
                     output=outputs[i * runs_each + j],
                     pmode=mode,
                     calls=calls,
-                    measured=CostTable.today(),
                 )
                 if cache is not None:
                     cache.put(kept[v.key, label], shifts[v.key, label])
@@ -1254,7 +1252,6 @@ def calibrate(
         pmode=pmode(),
         rounds=timing.rounds,
         calls=timing.calls,
-        measured=CostTable.today(),
         switch_noise_us=noises["switch"],
         base_noise_us=noises["base"],
     )
@@ -1368,7 +1365,6 @@ def measure_loads(
                 pmode=mode,
                 rounds=rounds,
                 calls=timing.calls,
-                measured=CostTable.today(),
             )
             if cache is not None:
                 cache.put(entry, paired[v.key])
@@ -2079,7 +2075,6 @@ def measure_packs(
                 pmode=mode,
                 rounds=min(t.rounds for t in times),
                 calls=timing.calls,
-                measured=CostTable.today(),
             )
             if cache is not None:
                 cache.put(entry, pack)

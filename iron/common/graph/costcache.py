@@ -24,6 +24,7 @@ editing a reference or a tolerance, measure again with ``remeasure``.
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import hashlib
 import json
 import re
@@ -37,11 +38,11 @@ from aie.utils.compile import NPU_CACHE_HOME
 from ..declare import Operator
 from ..design import OperatorDesign
 from ..elementwise import Elementwise
-from .narrowing import Calibration, PackCost, StepCost, _write
+from .narrowing import Calibration, Measured, PackCost, StepCost, _write
 
 
 @dataclasses.dataclass(frozen=True)
-class Measurement:
+class Measurement(Measured):
     """One design measured alone, as the cache holds it.
 
     Attributes:
@@ -57,9 +58,6 @@ class Measurement:
     round_us: list[float]
     alone_us: float
     output: str
-    pmode: str
-    calls: int
-    measured: str  # ISO date
 
     def cost(
         self, default: str, accurate: bool, t_step_us: float, noise_us: float | None
@@ -88,7 +86,7 @@ class Measurement:
 
 
 @dataclasses.dataclass(frozen=True)
-class Pairing:
+class Pairing(Measured):
     """A reference design run alternating with another, as the cache holds it.
 
     Attributes:
@@ -96,14 +94,11 @@ class Pairing:
     """
 
     pair_us: float
-    pmode: str
     rounds: int
-    calls: int
-    measured: str  # ISO date
 
 
 @dataclasses.dataclass(frozen=True)
-class Shift:
+class Shift(Measured):
     """A design at one operating point, run interleaved with itself at its
     call's own values, as the cache holds it.
 
@@ -117,9 +112,6 @@ class Shift:
     shift_us: float
     round_us: list[float]
     output: str
-    pmode: str
-    calls: int
-    measured: str  # ISO date
 
 
 @dataclasses.dataclass(frozen=True)
@@ -133,7 +125,9 @@ class Accuracy:
 
     within: bool
     detail: str
-    measured: str  # ISO date
+    measured: str = dataclasses.field(
+        default_factory=lambda: datetime.date.today().isoformat()
+    )
 
 
 Record = TypeVar("Record", Measurement, Calibration, Accuracy, Pairing, PackCost, Shift)

@@ -319,8 +319,25 @@ class PointCost:
     calls: int
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class Measured:
+    """What a measured record was taken under.
+
+    Attributes:
+        pmode: The NPU's power mode.
+        calls: The runs a round timed.
+        measured: The day, as an ISO date; today unless read back.
+    """
+
+    pmode: str
+    calls: int
+    measured: str = dataclasses.field(
+        default_factory=lambda: datetime.date.today().isoformat()
+    )
+
+
 @dataclasses.dataclass(frozen=True)
-class StepCost:
+class StepCost(Measured):
     """One design at one setting of its tunables, measured alone.
 
     Attributes:
@@ -350,10 +367,7 @@ class StepCost:
     alone_us: float
     exact: bool
     accurate: bool
-    pmode: str
     rounds: int
-    calls: int
-    measured: str  # ISO date
     beside: str | None = None
     pair_us: float | None = None
     points: dict[str, PointCost] | None = None
@@ -385,7 +399,7 @@ class StepCost:
 
 
 @dataclasses.dataclass(frozen=True)
-class Calibration:
+class Calibration(Measured):
     """A configure's cost split, measured on one pair of designs.
 
     Attributes:
@@ -404,16 +418,13 @@ class Calibration:
     reset_us: float
     base_us: float
     switch_us: float
-    pmode: str
     rounds: int
-    calls: int
-    measured: str
     switch_noise_us: float | None = None
     base_noise_us: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)
-class PackCost:
+class PackCost(Measured):
     """Designs sharing one device on a full ELF, measured as that device.
 
     Attributes:
@@ -426,10 +437,7 @@ class PackCost:
     beside: str
     pair_us: float
     t_step_us: dict[str, float]
-    pmode: str
     rounds: int
-    calls: int
-    measured: str
 
 
 class CostTable:
@@ -798,10 +806,6 @@ class CostTable:
                 for n, i in index.items()
             }
         return self._entry_costs
-
-    @staticmethod
-    def today() -> str:
-        return datetime.date.today().isoformat()
 
 
 class Runlist:

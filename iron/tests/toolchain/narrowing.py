@@ -418,7 +418,9 @@ def test_a_full_elf_load_is_an_entry_less_its_base(tmp_path):
     assert table.load("a") == pytest.approx(100.0)
     assert table.load("n") == 0.0
     # What one run leaves over its step is not a load: D0 and R drift with it.
-    table.record_step("t", StepCost(1.0, 0.0, 500.0, True, True, "turbo", 1, 1, "-"))
+    table.record_step(
+        "t", StepCost(1.0, 0.0, 500.0, True, True, 1, pmode="turbo", calls=1)
+    )
     with pytest.raises(ValueError, match="neither beside another design"):
         table.load("t")
 
@@ -433,12 +435,15 @@ def test_a_measured_pack_costs_its_entry_and_its_steps_on_it(tmp_path):
     # Run beside x, alternating: its entry and the pack's, 150.
     x = table.load("x") + table.base_us
     table.record_pack(
-        ["b", "a"], PackCost("x", x + 150.0, {"a": 3.0, "b": 4.0}, "turbo", 1, 1, "-")
+        ["b", "a"],
+        PackCost("x", x + 150.0, {"a": 3.0, "b": 4.0}, 1, pmode="turbo", calls=1),
     )
     assert table.pack_entry(table.pack_name(["a", "b"])) == pytest.approx(150.0)
     assert table.pack_name(["b", "a", "b"]) in table.packs
     # Measured within its noise of zero, an entry is zero.
-    table.record_pack(["c"], PackCost("x", x - 2.0, {"c": 1.0}, "turbo", 1, 1, "-"))
+    table.record_pack(
+        ["c"], PackCost("x", x - 2.0, {"c": 1.0}, 1, pmode="turbo", calls=1)
+    )
     assert table.pack_entry("c") == 0.0
     assert model_us(table, ["a", "b", "a"], [("a", "b")]) == pytest.approx(
         (50.0 + 10.0 + 150.0 + 30.0, 2)
@@ -466,7 +471,8 @@ def test_a_step_priced_at_operating_points_costs_their_weighted_mean(tmp_path):
     # Packed, its step there moves as much from what the pack measured.
     x = table.load("x") + table.base_us
     table.record_pack(
-        ["b", "a"], PackCost("x", x + 150.0, {"a": 3.0, "b": 4.0}, "turbo", 1, 1, "-")
+        ["b", "a"],
+        PackCost("x", x + 150.0, {"a": 3.0, "b": 4.0}, 1, pmode="turbo", calls=1),
     )
     assert table.pack_step(table.pack_name(["a", "b"]), "a") == pytest.approx(15.0)
     assert model_us(table, ["a", "b", "a"], [("a", "b")]) == pytest.approx(
@@ -486,9 +492,8 @@ def _table(path, steps, dispatch=50.0, reset=30.0, base=30.0):
     """
     table = CostTable(path, "npu2", "fused")
     for key, (t_step, load) in steps.items():
-        cost = StepCost(
-            t_step, 0.0, dispatch + base + load + reset, True, True, "turbo", 1, 1, "-"
-        )
+        alone = dispatch + base + load + reset
+        cost = StepCost(t_step, 0.0, alone, True, True, 1, pmode="turbo", calls=1)
         table.record_step(
             key,
             dataclasses.replace(
@@ -498,7 +503,7 @@ def _table(path, steps, dispatch=50.0, reset=30.0, base=30.0):
     for a, b in (("x", "y"), ("y", "z"), ("x", "z")):
         mean = base + (TRIANGLE[a] + TRIANGLE[b]) / 2
         table.record_calibration(
-            (a, b), Calibration(dispatch, reset, base, mean, "turbo", 1, 1, "-")
+            (a, b), Calibration(dispatch, reset, base, mean, 1, pmode="turbo", calls=1)
         )
     return table
 
@@ -514,14 +519,14 @@ def _separate(path, steps, fixed=7.0):
     """
     table = CostTable(path, "npu2", "separate")
     for key, (c, load) in steps.items():
-        cost = StepCost(c, 0.0, fixed, True, True, "turbo", 1, 1, "-")
+        cost = StepCost(c, 0.0, fixed, True, True, 1, pmode="turbo", calls=1)
         table.record_step(
             key, dataclasses.replace(cost, beside="x", pair_us=TRIANGLE["x"] + load)
         )
     for a, b in (("x", "y"), ("y", "z"), ("x", "z")):
         mean = (TRIANGLE[a] + TRIANGLE[b]) / 2
         table.record_calibration(
-            (a, b), Calibration(fixed, 0.0, 0.0, mean, "turbo", 1, 1, "-")
+            (a, b), Calibration(fixed, 0.0, 0.0, mean, 1, pmode="turbo", calls=1)
         )
     return table
 
@@ -559,11 +564,14 @@ def test_a_load_is_solved_from_the_pairs_or_its_own_pair(tmp_path):
     assert table.load("unmeasured") == 0.0
     assert (table.dispatch_us, table.reset_us, table.base_us) == (7.0, 0.0, 0.0)
     # The reference's own row is measured beside nothing; the pairs price it.
-    table.record_step("x", StepCost(5.0, 0.0, 7.0, True, True, "turbo", 1, 1, "-"))
+    table.record_step(
+        "x", StepCost(5.0, 0.0, 7.0, True, True, 1, pmode="turbo", calls=1)
+    )
     assert table.load("x") == pytest.approx(80.0)
     # A design paired with one of a triangle is determined by least squares.
     table.record_calibration(
-        ("x", "w"), Calibration(7.0, 0.0, 0.0, (80.0 + 60.0) / 2, "turbo", 1, 1, "-")
+        ("x", "w"),
+        Calibration(7.0, 0.0, 0.0, (80.0 + 60.0) / 2, 1, pmode="turbo", calls=1),
     )
     assert table.load("w") == pytest.approx(60.0)
     assert table.load("y") == pytest.approx(90.0)
@@ -574,21 +582,21 @@ def test_a_load_the_measurements_do_not_determine_is_refused(tmp_path):
     # A cycle of four is as undetermined as one pair: (L + d, L' - d) fits too.
     for a, b in (("p", "q"), ("q", "r"), ("r", "s"), ("s", "p")):
         table.record_calibration(
-            (a, b), Calibration(7.0, 0.0, 0.0, 90.0, "turbo", 1, 1, "-")
+            (a, b), Calibration(7.0, 0.0, 0.0, 90.0, 1, pmode="turbo", calls=1)
         )
     with pytest.raises(ValueError, match="do not determine the load of p"):
         table.load("p")
     path = CostTable(tmp_path / "path.json", "npu2", "separate")
     for a, b in (("p", "q"), ("q", "r")):
         path.record_calibration(
-            (a, b), Calibration(7.0, 0.0, 0.0, 90.0, "turbo", 1, 1, "-")
+            (a, b), Calibration(7.0, 0.0, 0.0, 90.0, 1, pmode="turbo", calls=1)
         )
     assert path.entry_costs() == dict(p=None, q=None, r=None)
     path.record_calibration(
-        ("p", "r"), Calibration(7.0, 0.0, 0.0, 90.0, "turbo", 1, 1, "-")
+        ("p", "r"), Calibration(7.0, 0.0, 0.0, 90.0, 1, pmode="turbo", calls=1)
     )
     assert path.entry_costs() == pytest.approx(dict(p=90.0, q=90.0, r=90.0))
-    alone = StepCost(5.0, 0.0, 7.0, True, True, "turbo", 1, 1, "-")
+    alone = StepCost(5.0, 0.0, 7.0, True, True, 1, pmode="turbo", calls=1)
     table.record_step("t", alone)
     with pytest.raises(ValueError, match="neither beside another design"):
         table.load("t")
@@ -599,7 +607,7 @@ def test_a_load_the_measurements_do_not_determine_is_refused(tmp_path):
 
 def test_a_solved_load_carries_the_noise_of_its_pairs_and_the_base(tmp_path):
     table = CostTable(tmp_path / "costs.json", "npu2", "fused")
-    cal = Calibration(7.0, 30.0, 40.0, 90.0, "turbo", 3, 5, "-")
+    cal = Calibration(7.0, 30.0, 40.0, 90.0, 3, pmode="turbo", calls=5)
     for (a, b), base_noise in zip(
         (("x", "y"), ("y", "z"), ("x", "z")), (1.0, 3.0, 2.0)
     ):
@@ -617,14 +625,14 @@ def test_a_solved_load_carries_the_noise_of_its_pairs_and_the_base(tmp_path):
 
 def test_a_table_takes_entries_at_one_power_mode(tmp_path):
     table = CostTable(tmp_path / "costs.json", "npu2", "separate")
-    alone = StepCost(5.0, 0.0, 7.0, True, True, "turbo", 1, 1, "-")
+    alone = StepCost(5.0, 0.0, 7.0, True, True, 1, pmode="turbo", calls=1)
     table.record_step("x", alone)
     table.record_step("y", alone)
     with pytest.raises(ValueError, match="at power mode turbo, not default"):
         table.record_step("z", dataclasses.replace(alone, pmode="default"))
     with pytest.raises(ValueError, match="at power mode turbo, not default"):
         table.record_calibration(
-            ("x", "y"), Calibration(7.0, 0.0, 0.0, 90.0, "default", 1, 1, "-")
+            ("x", "y"), Calibration(7.0, 0.0, 0.0, 90.0, 1, pmode="default", calls=1)
         )
     assert table.pmode == "turbo" and table.steps.keys() == {"x", "y"}
     table.save()
@@ -635,7 +643,9 @@ def test_a_table_takes_entries_at_one_power_mode(tmp_path):
 
 def test_an_xclbin_table_round_trips_and_a_full_elf_one_keeps_its_bytes(tmp_path):
     table = _separate(tmp_path / "costs.json", {"a": (10.0, 100.0)})
-    table.record_step("x", StepCost(5.0, 0.0, 7.0, True, True, "turbo", 1, 1, "-"))
+    table.record_step(
+        "x", StepCost(5.0, 0.0, 7.0, True, True, 1, pmode="turbo", calls=1)
+    )
     table.save()
     again = CostTable(table.path, "npu2", "separate")
     assert again.steps == table.steps and again.calibrations == table.calibrations
@@ -646,7 +656,7 @@ def test_an_xclbin_table_round_trips_and_a_full_elf_one_keeps_its_bytes(tmp_path
     fused = CostTable(tmp_path / "fused.json", "npu2", "fused")
     for key, noise in (("b", None), ("a", 0.25)):
         fused.record_step(
-            key, StepCost(5.0, noise, 7.0, True, False, "turbo", 8, 50, "-")
+            key, StepCost(5.0, noise, 7.0, True, False, 8, pmode="turbo", calls=50)
         )
     fused.save()
     written = fused.path.read_bytes()
@@ -666,7 +676,9 @@ def test_merged_tables_price_their_union_and_keep_their_own_on_a_clash(tmp_path)
     with pytest.raises(ValueError, match="dispatch 'fused', not 'separate'"):
         tower.merge(fused)
     idle = CostTable(tmp_path / "idle.json", "npu2", "separate")
-    idle.record_step("c", StepCost(1.0, 0.0, 7.0, True, True, "default", 1, 1, "-"))
+    idle.record_step(
+        "c", StepCost(1.0, 0.0, 7.0, True, True, 1, pmode="default", calls=1)
+    )
     with pytest.raises(ValueError, match="power mode turbo, not default"):
         tower.merge(idle)
 
@@ -892,14 +904,16 @@ def test_the_search_prices_a_pack_as_measured(tmp_path, npu2):
     # The pack, measured as one device, costs far more than the sum of its
     # members' own measurements predicts: the search drops it.
     table.record_pack(
-        device, PackCost("x", x + 1e6, {k: 1.0 for k in device}, "turbo", 1, 1, "-")
+        device,
+        PackCost("x", x + 1e6, {k: 1.0 for k in device}, 1, pmode="turbo", calls=1),
     )
     dearer = tuner.tune(traced, npu2, "fused")
     assert device not in dearer.devices
     assert dearer.predicted_us == pytest.approx(modelled(dearer))
     # Measured cheaper than that sum: the search keeps it, at the measured cost.
     table.record_pack(
-        device, PackCost("x", x + 1.0, {k: 0.0 for k in device}, "turbo", 1, 1, "-")
+        device,
+        PackCost("x", x + 1.0, {k: 0.0 for k in device}, 1, pmode="turbo", calls=1),
     )
     cheaper = tuner.tune(traced, npu2, "fused")
     assert cheaper.devices == first.devices
@@ -914,7 +928,8 @@ def test_the_packs_a_tuning_takes_are_measured_until_none_is_missing(tmp_path, n
     assert designs.unpacked(table) == [device]
     x = table.load("x") + table.base_us
     table.record_pack(
-        device, PackCost("x", x + 1.0, {k: 0.0 for k in device}, "turbo", 1, 1, "-")
+        device,
+        PackCost("x", x + 1.0, {k: 0.0 for k in device}, 1, pmode="turbo", calls=1),
     )
     assert designs.unpacked(table) == []
     separate = CostTable(tmp_path / "separate.json", "npu2", "separate")
@@ -1385,8 +1400,9 @@ def test_cache_keys_follow_the_build_the_values_and_the_inputs(npu2):
 
 
 def test_cache_entries_round_trip_per_platform_and_mode(tmp_path, npu2):
-    m = Measurement(4.0, [4.1, 3.9], 90.0, "ab" * 32, "turbo", 50, "2026-10-06")
-    cal = Calibration(50.0, 30.0, 30.0, 40.0, "turbo", 8, 50, "2026-10-06")
+    measured = {"pmode": "turbo", "calls": 50, "measured": "2026-10-06"}
+    m = Measurement(4.0, [4.1, 3.9], 90.0, "ab" * 32, **measured)
+    cal = Calibration(50.0, 30.0, 30.0, 40.0, 8, **measured)
     cache = CostCache("NPU Strix Halo", "turbo", root=tmp_path)
     cache.put("k", m)
     cache.put("pair", cal)
@@ -1444,7 +1460,7 @@ def test_a_verdict_is_keyed_by_its_gates_and_reference(npu2):
 def test_an_entry_recorded_with_other_fields_refuses_the_table_unless_remeasured(
     tmp_path,
 ):
-    m = Measurement(4.0, [4.1, 3.9], 90.0, "ab" * 32, "turbo", 50, "2026-10-06")
+    m = Measurement(4.0, [4.1, 3.9], 90.0, "ab" * 32, pmode="turbo", calls=50)
     cache = CostCache("NPU Strix Halo", "turbo", root=tmp_path)
     cache.put("k", m)
     path = cache.directory / "k.json"
