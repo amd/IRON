@@ -77,7 +77,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from aie.dialects.aie import WireBundle, get_target_model
 from aie.utils.compile import NPU_CACHE_HOME
 
 from ..declare import Operator
@@ -272,26 +271,6 @@ def fitting(
         else:
             refused[v.key] = diagnostic
     return kept, refused
-
-
-def shim_budget(dev) -> tuple[int, int]:
-    """The device's shim DMA channels: (MM2S, S2MM)."""
-    tm = get_target_model(dev.resolve())
-    shims = [
-        (col, row)
-        for col in range(tm.columns())
-        for row in range(tm.rows())
-        if tm.is_shim_noc_or_pl_tile(col, row)
-    ]
-    return (
-        sum(
-            tm.get_num_source_shim_mux_connections(c, r, WireBundle.DMA)
-            for c, r in shims
-        ),
-        sum(
-            tm.get_num_dest_shim_mux_connections(c, r, WireBundle.DMA) for c, r in shims
-        ),
-    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1334,7 +1313,7 @@ class JointNarrowing:
         ]
         measured = [all(m in table.steps for m in designs) for designs in designs_of]
         occurrences = Counter(keys)
-        budget = shim_budget(dev)
+        budget = (dev.shim_dma_channels_in, dev.shim_dma_channels_out)
 
         def member_cost(i: int, v: Variant, entries: int) -> float:
             return (
