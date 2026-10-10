@@ -400,12 +400,15 @@ def test_flm_gemm_folds_an_activation_then_a_clamp_into_its_epilogue():
     assert clamped.clamp == (float(bfloat16(-0.7)), 2.0)
     assert clamped.config_name == op.config_name
     # Its gelu is not the GELU operator's, nothing follows its clamp, and
-    # it applies one activation, of those compiled in.
+    # it applies one activation.
     assert op.fold(GELU(size=size)) is None
     assert clamped.fold(Clamp(size=size, low=0.0, high=1.0)) is None
     assert silu.fold(Sigmoid(size=size)) is None
+    assert silu.epilogue_modes == op.epilogue_modes
     plain = flm_gemm.GEMM(M=256, K=512, N=512, epilogue_modes=("none",))
-    assert plain.fold(SiLU(size=size)) is None
+    compiled_in = plain.fold(SiLU(size=size))
+    assert compiled_in.epilogue_modes == (Epilogue.NONE, Epilogue.SILU)
+    assert plain.epilogue_modes == (Epilogue.NONE,)
     finished = SiLU(size=size, finish=(Link(ElementwiseMul(size=size)),))
     assert op.fold(finished) is None
 

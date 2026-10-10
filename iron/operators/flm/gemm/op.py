@@ -1166,9 +1166,10 @@ class GEMM(Operator):
 
     def fold(self, consumer, at: int = 0) -> "GEMM | None":
         """This GEMM applying ``consumer`` in its epilogue: SiLU or Sigmoid as
-        its activation, then Clamp as its clamp, the bounds rounded to bf16
-        as Clamp rounds them. The epilogue's gelu is ``x * sigmoid(1.702x)``,
-        not the GELU operator's, so GELU does not fold.
+        its activation, compiled in if `epilogue_modes` leaves it out, then
+        Clamp as its clamp, the bounds rounded to bf16 as Clamp rounds them.
+        The epilogue's gelu is ``x * sigmoid(1.702x)``, not the GELU
+        operator's, so GELU does not fold.
         """
         if consumer.finish or consumer.prepare or self.clamp is not None:
             return None
@@ -1176,13 +1177,13 @@ class GEMM(Operator):
             bounds = np.array([consumer.low, consumer.high], bfloat16)
             return dataclasses.replace(self, clamp=tuple(bounds.astype(float).tolist()))
         mode = {SiLU: Epilogue.SILU, Sigmoid: Epilogue.SIGMOID}.get(type(consumer))
-        if (
-            mode is None
-            or self.epilogue is not Epilogue.NONE
-            or mode not in self.epilogue_modes
-        ):
+        if mode is None or self.epilogue is not Epilogue.NONE:
             return None
-        return dataclasses.replace(self, epilogue=mode)
+        return dataclasses.replace(
+            self,
+            epilogue=mode,
+            epilogue_modes=tuple(dict.fromkeys((*self.epilogue_modes, mode))),
+        )
 
     # -- host-side helpers -------------------------------------------------------
 

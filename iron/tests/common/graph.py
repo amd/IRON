@@ -427,6 +427,19 @@ def test_swiglu_folds_its_silu_and_its_product_into_the_gate(npu2):
     assert f.input_args == t.input_args and f.output_args == t.output_args
 
 
+def test_a_prompt_swiglu_compiles_its_silu_into_the_gate_alone(npu2):
+    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(256, E))
+    f, count = folded(t, npu2)
+    assert [(str(fold), n) for fold, n in count.items()] == [("SiLU into GEMM", 1)]
+    gate, up, mul, down = (s.op for s in f.steps)
+    assert (type(gate), type(mul)) == (FLMGEMM, ElementwiseMul)
+    assert (gate.epilogue, gate.epilogue_modes) == (
+        Epilogue.SILU,
+        (Epilogue.NONE, Epilogue.SILU),
+    )
+    assert up.epilogue_modes == down.epilogue_modes == (Epilogue.NONE,)
+
+
 def test_runs_sharing_what_they_made_fold_alike_with_the_same_operators(npu2):
     t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
     made = Made(npu2)
