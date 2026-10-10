@@ -18,6 +18,7 @@ import pytest
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
 from aie.iron.device import from_name
+from aie.utils import bfp
 from ml_dtypes import bfloat16
 
 import iron.operators.flm.gemm.op as flm_gemm
@@ -345,7 +346,10 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
     assert flm_gemm.GEMM(M=512, K=1024, N=1024).tile_n is None
     op = flm_gemm.GEMM(M=512, K=1024, N=1024).resolved(from_name("npu2", n_cols=8))
     assert (op.tile_n, op.m_chunk, op.rows, op.cols, op.bfp16_b) == (64, 1, 4, 8, True)
-    assert op.tile_ma == flm_gemm._default_l1(64, 128, 9 / 8, 65536, 1)[0]
+    assert (
+        op.tile_ma
+        == flm_gemm._default_l1(64, 128, bfp.BLOCK_BYTES / bfp.BLOCK, 65536, 1)[0]
+    )
     # tile_n is resolution, not a function of K: the same on every shape.
     assert (
         flm_gemm.GEMM(M=256, K=512, N=1024).resolved(from_name("npu2", n_cols=8)).tile_n
