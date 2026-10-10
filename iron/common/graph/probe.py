@@ -639,6 +639,10 @@ DISTINCT_BYTES = 256 * 2**20
 # Measuring a pack reprices it, so a version's tuning may take another.
 PACK_ROUNDS = 3
 
+# Alternated and grouped runs of one step differ by up to this share of it,
+# whatever the rounds: 0.55-0.70% on an 11 ms DDR-bound GEMV beside an Add.
+ORDER_BIAS = 0.01
+
 
 def measure_steps(
     table: CostTable,
@@ -1361,6 +1365,7 @@ def measure_loads(
                 pair_noise or 0.0,
                 table.entry_noise(reference.key) or 0.0,
                 table.base_noise_us or 0.0,
+                ORDER_BIAS * table.steps[v.key].t_step_us,
             )
             if load < -CONFIDENCE * noise:
                 raise RuntimeError(
@@ -2073,7 +2078,9 @@ def measure_packs(
                 ]
             )
             noise = math.hypot(
-                pair_noise or 0.0, table.entry_noise(reference.key) or 0.0
+                pair_noise or 0.0,
+                table.entry_noise(reference.key) or 0.0,
+                ORDER_BIAS * sum(table.t_step(k) for k in keys),
             )
             if entry_us < -CONFIDENCE * noise:
                 raise RuntimeError(
