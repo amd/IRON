@@ -31,26 +31,24 @@ def npu_runtime():
         aie_utils.DefaultNPURuntime.cleanup()
 
 
-@pytest.fixture
-def npu2():
-    """An eight-column NPU2 bound as the current device, the previous one
-    restored after: what a test that resolves or compiles device-free needs.
+def _bound_device(name: str, n_cols: int):
+    """A fixture binding an ``n_cols``-column ``name`` NPU as the current
+    device, the previous one restored after: what a test that resolves or
+    compiles device-free needs.
     """
-    previous = aie_utils.get_current_device()
-    device = from_name("npu2", n_cols=8)
-    aie_utils.set_current_device(device)
-    yield device
-    aie_utils.set_current_device(previous)
+
+    def bound():
+        previous = aie_utils.get_current_device()
+        device = from_name(name, n_cols=n_cols)
+        aie_utils.set_current_device(device)
+        yield device
+        aie_utils.set_current_device(previous)
+
+    return pytest.fixture(bound, name=name)
 
 
-@pytest.fixture
-def npu1():
-    """A four-column NPU1 bound as the current device, as ``npu2`` binds its."""
-    previous = aie_utils.get_current_device()
-    device = from_name("npu1", n_cols=4)
-    aie_utils.set_current_device(device)
-    yield device
-    aie_utils.set_current_device(previous)
+npu2 = _bound_device("npu2", 8)
+npu1 = _bound_device("npu1", 4)
 
 
 @pytest.fixture
