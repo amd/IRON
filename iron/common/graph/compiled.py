@@ -14,6 +14,7 @@ import contextlib
 import dataclasses
 import functools
 import inspect
+import logging
 from collections.abc import Callable, Collection, Mapping
 from fractions import Fraction
 from pathlib import Path
@@ -41,6 +42,8 @@ from .fold import Folding, folded
 from .handle import Affine, Carry, Handle, State, Value, is_operand
 from .narrowing import JointNarrowing, Tuning
 from .trace import TracedGraph, Tracer, _ReferenceTracer
+
+logger = logging.getLogger(__name__)
 
 # One (parameter, shape, dtype name) per input: what picks a version.
 Signature = tuple[tuple[str, tuple[int, ...], str], ...]
@@ -461,7 +464,7 @@ class Graph:
         }
         version = self._versions.get(self._signature(shapes))
         if version is None:
-            print(f"{self.name}: compiling for {shapes}")
+            logger.info("%s: compiling for %s", self.name, shapes)
             version = self.compile(**shapes)
         return version(*given.values(), **values)
 

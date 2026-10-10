@@ -32,6 +32,7 @@ dispatch, plus one JSON file per traced design for https://ui.perfetto.dev.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,8 @@ from aie.utils.trace import TraceConfig, print_cycles_summary
 from .image.callable import FullELFCallable, StepCallable
 
 __all__ = ["dump_traces"]
+
+logger = logging.getLogger(__name__)
 
 
 def dump_traces(
@@ -82,11 +85,11 @@ def dump_traces(
     config = TraceConfig(trace_size=words.nbytes, trace_file=str(trace_file))
     config.write_trace(words)
     if not words.any():
-        print("[trace] buffer is all zeros, no trace data captured")
+        logger.warning("trace buffer is all zeros, no trace data captured")
         return []
 
     mlir = mlir or run.lowered_mlir_path
-    print(f"[trace] parsing against {mlir}")
+    logger.info("parsing the trace against %s", mlir)
     try:
         written = config.trace_to_json(
             str(mlir),
@@ -95,12 +98,12 @@ def dump_traces(
             kernel=f"{run.device_name}:{run.sequence_name}",
         )
     except Exception as exc:  # a visualisation failure must not fail a run
-        print(f"[trace] parse failed ({exc}); raw words kept at {trace_file}")
+        logger.warning("trace parse failed (%s); raw words kept at %s", exc, trace_file)
         return []
 
     paths = [Path(p) for p in written]
     for path in paths:
-        print(f"[trace] {path}")
+        logger.info("trace written to %s", path)
         if summary:
             print_cycles_summary(path)
     return paths

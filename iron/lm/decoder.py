@@ -14,6 +14,7 @@ no device loop.
 
 import dataclasses
 import enum
+import logging
 import math
 import time
 from collections.abc import Callable, Iterator
@@ -38,6 +39,8 @@ from iron.operators.sample import Sample
 from iron.operators.softmax import Softmax
 
 from .generation import Sampler
+
+logger = logging.getLogger(__name__)
 
 RopeScaling = Callable[[np.ndarray], np.ndarray]
 
@@ -261,7 +264,7 @@ class CausalLM(iron.Graph):
             dev=dev, coresident=tuner, boundaries=boundaries, **self.shapes(1)
         )
         if decode.plan.image != iron.ELF:
-            print(decode.plan.report("decode"), flush=True)
+            logger.info("%s", decode.plan.report("decode"))
         if not MHA.fits(dev):
             decode.load(release=release)
             self._prompt, self._decode = None, decode
