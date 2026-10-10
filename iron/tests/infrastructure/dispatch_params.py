@@ -104,10 +104,17 @@ def test_refuses_an_n_past_the_buffers(npu_runtime):
         image(*_buffers(), n=MAX_CHUNKS + 1)
 
 
-@pytest.mark.parametrize("scalars", [{}, {"m": 1}, {"n": 1, "m": 1}])
-def test_a_call_takes_exactly_the_declared_scalars(scalars, npu_runtime):
+@pytest.mark.parametrize(
+    "scalars, error, match",
+    [
+        ({}, HostRuntimeError, "dispatch scalar mismatch"),
+        ({"m": 1}, TypeError, r"unexpected keyword argument\(s\): \['m'\]"),
+        ({"n": 1, "m": 1}, TypeError, r"unexpected keyword argument\(s\): \['m'\]"),
+    ],
+)
+def test_a_call_takes_exactly_the_declared_scalars(scalars, error, match, npu_runtime):
     image = OperatorImage(ChunkCopy(max_chunks=MAX_CHUNKS))
-    with pytest.raises(HostRuntimeError, match="dispatch scalar mismatch"):
+    with pytest.raises(error, match=match):
         image(*_buffers(), **scalars)
 
 
