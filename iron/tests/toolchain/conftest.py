@@ -3,12 +3,10 @@
 
 """The devices the toolchain tests build for, each made current."""
 
+import aie.utils as aie_utils
 import pytest
 
-aie = pytest.importorskip("aie")
-import aie.utils as aie_utils  # noqa: E402
-
-from iron.tests.toolchain.tools import DEVICES  # noqa: E402
+from iron.tests.toolchain.tools import DEVICES
 
 
 @pytest.fixture(params=sorted(DEVICES))
