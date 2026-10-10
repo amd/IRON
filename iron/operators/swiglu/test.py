@@ -32,9 +32,7 @@ def _weight(rng, rows, cols):
 
 
 def _read(net, handle):
-    buf = net.buffer(handle)
-    buf.to("cpu")
-    return buf.numpy().reshape(tuple(handle.shape))
+    return net.buffer(handle).numpy().reshape(tuple(handle.shape))
 
 
 def _verdict(net, step):

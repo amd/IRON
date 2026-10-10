@@ -587,7 +587,6 @@ class CompiledGraph:
 
     def read(self, x):
         buf = self._storage(x)
-        buf.to("cpu")
         return buf.numpy()[: int(np.prod(x.shape))].reshape(tuple(x.shape))
 
     def _copy_in(
@@ -707,7 +706,6 @@ class CompiledGraph:
                 nxt[name] = int(planes[1, self.emit.carried.index(name)])
             else:
                 buf = self.callable.get_buffer(expression.name)
-                buf.to("cpu")
                 nxt[name] = int(buf.numpy().reshape(-1)[0])
         return Carry(**nxt)
 

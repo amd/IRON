@@ -212,6 +212,27 @@ def test_an_each_step_version_and_a_full_elf_share_one_arena():
 
 
 @pytest.mark.supported_devices("npu2")
+def test_a_read_leaves_nothing_for_the_next_call_to_push():
+    """Reading an output or a state pulls it without claiming it, so after
+    each call every argument is the device's, read or not; a host write
+    while a run is out is refused at its wait.
+    """
+    f, w, w2, s = _function()
+    one = f.compile(x=(E,))
+    arguments = (one.callable.input_buffer, one.callable.output_buffer, f.arena.tensor)
+    for seed in (14, 15):
+        x = _numbers(E, seed)
+        np.testing.assert_array_equal(_f32(f(x).numpy()), _f32(x) + 2 * _f32(w))
+        np.testing.assert_array_equal(_f32(one.read(s)), _f32(x) + _f32(w))
+        assert [t.device for t in arguments] == ["npu"] * 3
+    run = one.callable.run
+    one.start(run, _numbers(E, 16))
+    one.buffer(s).numpy_view()[:] = _numbers(E, 17)
+    with pytest.raises(RuntimeError, match=r"wrote \['scratch'\] while a run"):
+        one.callable.wait(run)
+
+
+@pytest.mark.supported_devices("npu2")
 def test_a_released_run_is_made_again_on_the_next_call():
     """What a full device heap does to the version least recently called (the
     EmbeddingGemma 2 determinism test fills it): its run is freed and its

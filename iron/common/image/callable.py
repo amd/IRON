@@ -421,11 +421,23 @@ class FullELFCallable:
             run.start()
 
     def wait(self, *runs: FullELFRun) -> None:
-        """Wait on ``runs``, then mark scratch and output device-resident so a read pulls them."""
+        """Wait on ``runs``.
+
+        Raises:
+            RuntimeError: The host wrote an argument since it was pushed,
+                which no run read and the next push would lay over what
+                the runs wrote.
+        """
         for run in runs:
             run.wait()
-        for buffer in (self.scratch_buffer, self.output_buffer):
-            buffer.device = "npu"
+        written = [
+            kind for kind, tensor in self._arguments().items() if tensor.device == "cpu"
+        ]
+        if written:
+            raise RuntimeError(
+                f"{self.op.name}: the host wrote {written} while a run was out; "
+                f"write between calls, or start the next run through start()"
+            )
 
     def __call__(self, *runs: FullELFRun):
         """Dispatch ``run``, or ``runs`` queued back to back."""
@@ -437,11 +449,6 @@ class FullELFCallable:
         for run in runs:
             run.wait()
         self.last_elapsed = time.perf_counter() - t0
-        # Mark device residency so to("cpu") fires after a prior read marked it "cpu".
-        for buffer in (self.output_buffer, self.feedback_buffer, self.trace_buffer):
-            if buffer is not None:
-                buffer.device = "npu"
-                buffer.to("cpu")
 
 
 class StepCallable:
@@ -605,8 +612,7 @@ class StepCallable:
         ``at`` its name, and its reference on them, by buffer name.
         """
         held = {
-            spec.name: buf.to("cpu")
-            .numpy_view()[at[spec.name] :][: spec.elements]
+            spec.name: buf.numpy()[at[spec.name] :][: spec.elements]
             .reshape(spec.shape)
             .copy()
             for buf, spec in zip(args, step_op.buffers)
@@ -645,7 +651,7 @@ class StepCallable:
                 tol = self.FALLBACK_TOLERANCE
         held = {spec.name: name for name, spec in zip(names, step_op.buffers)}
         written = {
-            spec.name: buf.to("cpu").numpy_view()[at[spec.name] :][: spec.elements]
+            spec.name: buf.numpy()[at[spec.name] :][: spec.elements]
             for buf, spec in zip(args, step_op.buffers)
             if spec.direction.drains
         }

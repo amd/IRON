@@ -52,9 +52,8 @@ def dump_traces(
 ) -> list[Path]:
     """Write a completed run's trace buffer as trace text and Perfetto JSON.
 
-    Call it after ``run()``: the callable syncs its trace buffer device->host as part
-    of the dispatch, so this only reads host memory. Returns the JSON paths written,
-    empty on an untraced build.
+    Call it after ``run()``; it reads the trace buffer back from the device.
+    Returns the JSON paths written, empty on an untraced build.
 
     The text goes to ``trace_file`` and the JSON beside it, under its stem: a
     fused sequence shares the buffer between the designs it configures, and each
