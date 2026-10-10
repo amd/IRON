@@ -1357,8 +1357,8 @@ def measure_loads(
             )
             noise = math.hypot(
                 pair_noise or 0.0,
-                table.load_noise(reference.key) or 0.0,
-                2 * (table.base_noise_us or 0.0),
+                table.entry_noise(reference.key) or 0.0,
+                table.base_noise_us or 0.0,
             )
             if load < -CONFIDENCE * noise:
                 raise RuntimeError(
@@ -2062,9 +2062,7 @@ def measure_packs(
                 ]
             )
             noise = math.hypot(
-                pair_noise or 0.0,
-                table.load_noise(reference.key) or 0.0,
-                table.base_noise_us or 0.0,
+                pair_noise or 0.0, table.entry_noise(reference.key) or 0.0
             )
             if entry_us < -CONFIDENCE * noise:
                 raise RuntimeError(

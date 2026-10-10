@@ -666,22 +666,21 @@ class CostTable:
             return None
         return statistics.median(noises)
 
-    def load_noise(self, key: str) -> float | None:
-        """The standard error of ``load(key)`` for a design a calibration
-        pair names: its entry's, through the least squares that solve it
-        from the pairs' switches, and the base's. None where any of those
-        is unknown, or the design's load is not solved from the pairs.
+    def entry_noise(self, key: str) -> float | None:
+        """The standard error of the entry `E` a design's ``load(key)`` is
+        taken from, for a design a calibration pair names: the pairs'
+        switch noises through the least squares that solve it. The load
+        less the base adds `base_noise_us` to it. None where a switch's is
+        unknown, or the design's entry is not solved from the pairs.
         """
         solved = self.entry_costs()
-        base = self.base_noise_us
-        if solved.get(key) is None or base is None:
+        if solved.get(key) is None:
             return None
         noises = [c.switch_noise_us for c in self.calibrations.values()]
         if None in noises:
             return None
         weights = self._entry_weights[list(solved).index(key)]
-        entry = float(np.sqrt(np.sum((weights * np.array(noises)) ** 2)))
-        return math.hypot(entry, base)
+        return float(np.sqrt(np.sum((weights * np.array(noises)) ** 2)))
 
     def t_step(self, key: str) -> float:
         """A design's step at the calls priced (``StepCost.expected_us``);

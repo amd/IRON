@@ -605,7 +605,7 @@ def test_a_load_the_measurements_do_not_determine_is_refused(tmp_path):
         table.load("u")
 
 
-def test_a_solved_load_carries_the_noise_of_its_pairs_and_the_base(tmp_path):
+def test_a_solved_entry_carries_the_noise_of_its_pairs_alone(tmp_path):
     table = CostTable(tmp_path / "costs.json", "npu2", "fused")
     cal = Calibration(7.0, 30.0, 40.0, 90.0, 3, pmode="turbo", calls=5)
     for (a, b), base_noise in zip(
@@ -615,12 +615,12 @@ def test_a_solved_load_carries_the_noise_of_its_pairs_and_the_base(tmp_path):
             (a, b),
             dataclasses.replace(cal, switch_noise_us=2.0, base_noise_us=base_noise),
         )
-    # E(x) = s(x, y) + s(x, z) - s(y, z), less the median base.
+    # E(x) = s(x, y) + s(x, z) - s(y, z): the base is not in it.
     assert table.base_noise_us == 2.0
-    assert table.load_noise("x") == pytest.approx(math.sqrt(3 * 2.0**2 + 2.0**2))
-    assert table.load_noise("unmeasured") is None
+    assert table.entry_noise("x") == pytest.approx(math.sqrt(3 * 2.0**2))
+    assert table.entry_noise("unmeasured") is None
     table.record_calibration(("x", "w"), cal)
-    assert table.load_noise("x") is None
+    assert table.entry_noise("x") is None
 
 
 def test_a_table_takes_entries_at_one_power_mode(tmp_path):
