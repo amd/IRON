@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 from aie.utils import bfp
 
+from iron.operators.flm.aie2p_math_emulation import rb
 from iron.operators.flm.dequant.design import (
     CORE_JOIN_OFFSETS,
     CT_K,
@@ -100,9 +101,7 @@ def test_bytes_match_pack_b(K, N):
     rng = np.random.default_rng(0)
     B = rng.standard_normal((K, N)).astype(np.float32)
     # The cores round to bf16 before converting, so the reference must too.
-    u = B.view(np.uint32)
-    bf = ((u >> 16) + (((u & 0xFFFF) != 0) & ((u >> 31) != 0))).astype(np.uint16)
-    B = (bf.astype(np.uint32) << 16).view(np.float32)
+    B = rb(B)
 
     golden = pack_b(
         B,

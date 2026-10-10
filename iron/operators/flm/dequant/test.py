@@ -13,7 +13,7 @@ from aie.utils.verify import Tolerance
 
 from iron.common.harness import run_test
 from iron.common.image import OperatorImage
-from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor
+from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor, rb
 from iron.operators.flm.dequant.design import N_TILE, qw_bytes_for
 from iron.operators.flm.dequant.op import DequantBFP, dequantize
 from iron.operators.flm.gemm.op import GEMM
@@ -96,7 +96,7 @@ def test_output_feeds_gemm_unchanged(npu_runtime):
     K, N = 1024, 128
     qw = random_q4nx(K, N, seed=3)
     w = dequantize(qw, K, N)
-    w = (f32_to_bf16_floor(w).astype(np.uint32) << 16).view(np.float32)
+    w = rb(w)
     gemm = GEMM(M=256, K=K, N=N, tile_n=64, rounding="floor")
     packed = gemm.pack_B(np.ascontiguousarray(w.T))
 
