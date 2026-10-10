@@ -439,6 +439,27 @@ def test_descent_measures_every_line_through_the_default(tmp_path):
 
 
 @pytest.mark.supported_devices("npu2")
+def test_remeasured_descent_runs_every_line_again(tmp_path):
+    report = platform()
+    cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
+    # The column line is the first setting alone, so the channel line is
+    # the second, whatever the timings.
+    found = [
+        v
+        for v in variants(
+            ElementwiseAdd(size=SIZE, tile_size=TILE), aie_utils.ensure_current_device()
+        )
+        if dict(v.tunables)["num_aie_columns"] == 4
+    ]
+    timing = Timing(rounds=1, calls=5)
+    every = CostTable(tmp_path / "every.json", "npu2", "fused")
+    search(every, found, timing, cache=cache, exhaustive=len(found))
+    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    ran = search(table, found, timing, cache=cache, remeasure=True, exhaustive=1)
+    assert ran.keys() == table.steps.keys()
+
+
+@pytest.mark.supported_devices("npu2")
 def test_a_setting_that_does_not_build_is_left_out(tmp_path):
     # 128x128 B tiles double-buffered beside A and C are past a core's memory.
     dev = aie_utils.ensure_current_device()

@@ -57,7 +57,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Hashable, Mapping, Sequence
+from collections.abc import Callable, Collection, Hashable, Mapping, Sequence
 from pathlib import Path
 
 import aie.utils as aie_utils
@@ -652,6 +652,7 @@ def measure_steps(
     twins: Sequence[Variant | None] = (),
     fit_cache: Path = FIT_CACHE,
     log: Callable[[str], None] = print,
+    earlier: Collection[str] = (),
 ) -> dict[str, StepCost]:
     """Measure every width in ``found`` (the default first) into ``table``,
     as many at once as the device's contexts hold. A width whose output is
@@ -671,6 +672,8 @@ def measure_steps(
         fit_cache: Where a width that does not build is recorded as
             refused (``refuse``), so ``fitting`` leaves it out from then on.
         log: Where a width that does not build is reported.
+        earlier: Widths run earlier in this search, taken from `cache` even
+            under `remeasure`.
 
     Returns:
         The widths run on the device, by key. One other than the default
@@ -712,8 +715,10 @@ def measure_steps(
     ]
     held: dict[str, Measurement] = {}
     near: dict[str, Measurement] = {}
-    if cache is not None and not remeasure:
+    if cache is not None:
         for v, entry, beside in zip(found, entries, besides):
+            if remeasure and v.key not in earlier:
+                continue
             m = cache.get(entry, Measurement)
             b = None if beside is None else cache.get(beside, Measurement)
             if m is not None and (beside is None or b is not None):
@@ -1155,10 +1160,11 @@ def search(
                 values,
                 inputs,
                 cache,
-                remeasure and not ran,
+                remeasure,
                 [twin_of[v.key] for v in batch] if twins else (),
                 fit_cache,
                 log,
+                ran,
             )
             built = [v for v in moves if v.key in table.steps]
             found = [v for v in found if v not in moves or v in built]
