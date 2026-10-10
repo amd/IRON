@@ -1,0 +1,201 @@
+SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Runtime.add_buffer in IRON, against mlir-aie iron-next ca96fee23 (not the dev22 pin).
+Apply from the repository root with: git apply docs/plans/add_buffer.patch
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 7ad498f3..b2181441 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -353,7 +353,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
+      runtime parameter, `WorkerRuntimeBarrier()`), `range_()` for loops, and
+      `self.x.lane(i).bind(fifo.prod())` / `self.count.bind(rtps)` for every
+      member. It returns what it built: its Workers, its barriers and any
+-     `Flow`, `Lock` or `TileDma` only the sequence reaches. It sees the
++     `Flow`, `Lock`, `Buffer` or `TileDma` only the sequence reaches. It sees the
+      array tier alone: reading an extent raises
+    - `compatible()` for divisibility against the resolved tunables
+    - `sequence(rt)` only if the derived sequence is not the one you want:
+diff --git a/iron/common/design/build.py b/iron/common/design/build.py
+index 88bb0ac0..c211cc24 100644
+--- a/iron/common/design/build.py
++++ b/iron/common/design/build.py
+@@ -13,6 +13,7 @@ from typing import Any
+ 
+ import aie.utils as aie_utils
+ from aie.iron import (
++    Buffer,
+     CompileTime,
+     DispatchTime,
+     Flow,
+@@ -119,10 +120,13 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
+             rt.add_lock(obj)
+         elif isinstance(obj, TileDma):
+             rt.add_tile_dma(obj)
++        elif isinstance(obj, Buffer):
++            rt.add_buffer(obj)
+         elif not isinstance(obj, (Worker, WorkerRuntimeBarrier, ShimChannel)):
+             raise TypeError(
+                 f"{type(op).__name__}.array() returns Workers, WorkerRuntimeBarriers, "
+-                f"Flows, PacketFlows, Locks, TileDmas and ShimChannels; got {obj!r}"
++                f"Flows, PacketFlows, Locks, Buffers, TileDmas and ShimChannels; "
++                f"got {obj!r}"
+             )
+     prog = Program(op.device(target), rt, workers=workers)
+     if op.trace is not None:
+diff --git a/iron/common/image/fusion.py b/iron/common/image/fusion.py
+index e5de3a64..40fbc07e 100644
+--- a/iron/common/image/fusion.py
++++ b/iron/common/image/fusion.py
+@@ -222,12 +222,41 @@ class Fusion:
+         for op_name, design in self.designs.items():
+             by_key.setdefault(design.op.array_key(), []).append(op_name)
+         for names in by_key.values():
+-            if len({arrays[n] for n in names}) > 1:
+-                logger.info(
+-                    "%s have one array_key, but their devices differ beyond "
+-                    "the runtime sequence, so they do not share an array",
+-                    names,
++            if len({arrays[n] for n in names}) == 1:
++                continue
++            # A core reading a per-call value reads the instance's own symbol.
++            unread = {}
++            for n in names:
++                text = arrays[n]
++                for symbol in operator_param_decls[n]:
++                    text = re.sub(
++                        f"@{re.escape(symbol)}(?![\\w$.])", "@parameter", text
++                    )
++                unread[n] = text
++            first = names[0]
++            for other in names[1:]:
++                if unread[other] == unread[first]:
++                    continue
++                line = next(
++                    (a, b)
++                    for a, b in zip(
++                        unread[first].splitlines() + [""],
++                        unread[other].splitlines() + [""],
++                    )
++                    if a != b
+                 )
++                raise ValueError(
++                    f"{self.designs[first].op.name} and "
++                    f"{self.designs[other].op.name} have one array_key, but "
++                    f"their arrays differ: {line[0].strip()!r} against "
++                    f"{line[1].strip()!r}; an array may depend only on what "
++                    f"array_key names"
++                )
++            logger.info(
++                "%s have one array, but their cores read per-call values of "
++                "their own, so each keeps its own",
++                names,
++            )
+ 
+         # Deduplicate parameter decls across operators (same name must have the
+         # same type; otherwise indices would collide in the global state table).
+diff --git a/iron/operators/flm/gemm/op.py b/iron/operators/flm/gemm/op.py
+index 1e79a998..397fcdb7 100644
+--- a/iron/operators/flm/gemm/op.py
++++ b/iron/operators/flm/gemm/op.py
+@@ -607,8 +607,8 @@ class GEMM(Operator):
+         # once per unit and refilled only when all of them have, independently
+         # of the other slots, so the next column-block's refill trails the
+         # replay by one slot instead of waiting for the whole block.
+-        # Flows, locks and DMAs only the sequence and descriptors reach.
+-        unrouted: list = []
++        # Flows, locks, buffers and DMAs only the sequence and descriptors reach.
++        unrouted: list = list(b_mt_bufs)
+         b_mt_prod, b_mt_cons = [], []
+         for c in range(COLS):
+             for locks, side in ((b_mt_prod, "prod"), (b_mt_cons, "cons")):
+@@ -619,13 +619,22 @@ class GEMM(Operator):
+                 locks.append(slots)
+                 unrouted += slots
+         b_shim_flows = [
+-            Flow(shim_tiles[c], mt_tiles[c], shim_symbol=f"B_L3L2_{c}")
++            Flow(
++                shim_tiles[c],
++                mt_tiles[c],
++                shim_symbol=f"B_L3L2_{c}",
++                name=f"b_l3l2_{c}",
++            )
+             for c in range(COLS)
+         ]
+         unrouted += b_shim_flows
+         # One source, ROWS destinations: a circuit-switched broadcast.
+         b_bcast_flows = [
+-            Flow(mt_tiles[c], [ct_tiles[r][c] for r in range(ROWS)])
++            Flow(
++                mt_tiles[c],
++                [ct_tiles[r][c] for r in range(ROWS)],
++                name=f"b_bcast_{c}",
++            )
+             for c in range(COLS)
+         ]
+         unrouted += b_bcast_flows
+diff --git a/iron/tests/common/fused_identity.py b/iron/tests/common/fused_identity.py
+index be4325e9..5af94f96 100644
+--- a/iron/tests/common/fused_identity.py
++++ b/iron/tests/common/fused_identity.py
+@@ -20,11 +20,15 @@ from pathlib import Path
+ 
+ import aie.utils as aie_utils
+ import pytest
+-from aie.iron.device import from_name
++from aie.iron import Flow
++from aie.iron.device import Tile, from_name
+ 
+ from iron.common.design import OperatorDesign
+ from iron.common.image import Fusion, OperatorSequence
++from iron.common.image.coresidence import array_text
++from iron.common.image.fusion import generate
+ from iron.operators import ReLU
++from iron.operators.flm.gemm.op import GEMM as FLMGEMM
+ from iron.operators.gemv import GEMV
+ 
+ 
+@@ -130,6 +134,42 @@ def test_two_designs_whose_device_names_collide_are_refused():
+         Fusion(seq)
+ 
+ 
++class RoutedReLU(ReLU):
++    """A ReLU that also routes a flow it does not name."""
++
++    def array(self, target) -> list:
++        return super().array(target) + [Flow(Tile(0, 0), Tile(0, 1))]
++
++
++def test_arrays_of_one_array_key_that_differ_are_refused():
++    """mlir-aie numbers an unnamed flow per process, so two designs of one
++    array would each keep a device of their own.
++    """
++    given = dict(num_aie_columns=1, num_channels=1, tile_size=1024)
++    a, b = (RoutedReLU(size=size, **given) for size in (4096, 8192))
++    assert a.array_key() == b.array_key()
++    seq = OperatorSequence(
++        name="one_array_key",
++        runlist=[(a, "x0", "y0"), (b, "x1", "y1")],
++        input_args=["x0", "x1"],
++        output_args=["y0", "y1"],
++        dispatch="fused",
++    )
++    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
++        seq.calculate_buffer_layout()
++    )
++    with pytest.raises(ValueError, match="have one array_key, but their arrays differ"):
++        Fusion(seq).text()
++
++
++def test_flm_gemm_at_any_width_is_one_array():
++    """At N=256 the B pools of four columns get no task, yet they are emitted."""
++    wide, narrow = (FLMGEMM(M=256, K=512, N=n).resolved() for n in (1024, 256))
++    assert wide.array_key() == narrow.array_key()
++    generated = [generate(OperatorDesign(op)) for op in (wide, narrow)]
++    assert array_text(generated[0].device) == array_text(generated[1].device)
++
++
+ def test_identity_holds_across_processes():
+     """The key a warm process computes is the one the cold process stored.
+ 
