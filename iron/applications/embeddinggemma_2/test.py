@@ -264,7 +264,6 @@ def test_embeddinggemma_2_determinism(multimodal):
 @pytest.fixture(scope="module")
 def hugging_face():
     """Hugging Face's processor and float32 model of the checkpoint."""
-    require(DIRECTORY / "model.safetensors", DIRECTORY / "tokenizer.json")
     # Optional dependencies: the reference implementation, where installed.
     torch = pytest.importorskip("torch")
     # The processor's image resize needs both.
@@ -274,6 +273,7 @@ def hugging_face():
     pytest.importorskip(
         "transformers.models.embedding_gemma2.modeling_embedding_gemma2"
     )
+    require(DIRECTORY / "model.safetensors", DIRECTORY / "tokenizer.json")
     processor = transformers.AutoProcessor.from_pretrained(DIRECTORY)
     # Not eager: there Gemma4AudioAttention inverts the additive float mask
     # create_bidirectional_mask gives it.

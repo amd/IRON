@@ -40,11 +40,19 @@ def weights_dir(name: str) -> Path:
 
 def require(*files: Path) -> None:
     """Skip the test unless every one of ``files`` exists, except in CI,
-    where a missing file is a failure.
+    where a missing file fails it, naming what the runner must hold.
     """
     missing = [str(f) for f in files if not f.exists()]
-    if missing and not os.environ.get("CI"):
-        pytest.skip(f"not found outside CI: {missing}")
+    if not missing:
+        return
+    if os.environ.get("CI"):
+        pytest.fail(
+            f"this CI runner lacks {', '.join(missing)}: install the model's "
+            "checkpoint files there (its README lists them), or set "
+            "IRON_EXAMPLE_WEIGHTS_DIR to a directory holding <model>/<file>",
+            pytrace=False,
+        )
+    pytest.skip(f"not found outside CI: {missing}")
 
 
 def prompt(runner, chars: int, num_tokens: int, skip: int = 0) -> list[int]:
