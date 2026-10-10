@@ -120,7 +120,9 @@ class Accuracy:
     reference by the default's gate and its own.
 
     Attributes:
+        within: Whether every output met both gates.
         detail: The first output a gate refused, and why; empty if within.
+        measured: The day, as an ISO date; today unless read back.
     """
 
     within: bool
