@@ -250,11 +250,11 @@ def _fit_record(designs: Mapping[str, OperatorDesign], fit_cache: Path) -> Path:
     return fit_cache / h.hexdigest()[:24]
 
 
-def _write(record: Path, verdict: str) -> None:
-    """Write ``verdict`` to ``record`` whole, as another process may read it."""
+def _write(record: Path, text: str) -> None:
+    """Write ``text`` to ``record`` whole, as another process may read it."""
     record.parent.mkdir(parents=True, exist_ok=True)
     partial = record.with_suffix(f".{os.getpid()}")
-    partial.write_text(verdict)
+    partial.write_text(text)
     partial.replace(record)
 
 

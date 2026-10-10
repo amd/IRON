@@ -26,7 +26,6 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
-import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -38,7 +37,7 @@ from aie.utils.compile import NPU_CACHE_HOME
 from ..declare import Operator
 from ..design import OperatorDesign
 from ..elementwise import Elementwise
-from .narrowing import Calibration, PackCost, StepCost
+from .narrowing import Calibration, PackCost, StepCost, _write
 
 
 @dataclasses.dataclass(frozen=True)
@@ -269,8 +268,7 @@ class CostCache:
         key: str,
         record: Measurement | Calibration | Accuracy | Pairing | PackCost | Shift,
     ) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
-        path = self.directory / f"{key}.json"
-        partial = path.with_suffix(f".{os.getpid()}")
-        partial.write_text(json.dumps(dataclasses.asdict(record)) + "\n")
-        partial.replace(path)
+        _write(
+            self.directory / f"{key}.json",
+            json.dumps(dataclasses.asdict(record)) + "\n",
+        )
