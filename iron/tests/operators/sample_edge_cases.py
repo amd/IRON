@@ -19,7 +19,8 @@ k distinct top values.
 Each design is compiled once and every pattern is drawn through it with
 every draw row (temperature 0, 0.7, 1.0 by top-k 1, 17, 64, and the extreme
 uniforms), one position per row. Every token must be sample_ref's; every
-mismatch is collected, so a failure lists all of them.
+mismatch is collected, so a failure lists all of them. The last pattern's
+tokens must be the records, each in its position's slot.
 """
 
 import aie.utils as aie_utils
@@ -185,12 +186,15 @@ def test_adversarial_logits_draw_the_reference_token(npu_runtime, kwargs):
         ]
     )
     net.write(draws, rows)
+    net.write(tokens, np.full(steps, -1, dtype=np.int32))
 
     failures = []
     for kind in KINDS:
         logits = _logits(kind, vocab, slice_size, chunk, rng)
+        last = []
         for position, (t, k, _) in enumerate(ROWS):
             want = reference(logits, rows[position])
+            last.append(want)
             got = int(np.asarray(net(logits, position=position)).reshape(-1)[0])
             if got != want:
                 n53 = int(rows[position, 2].view(np.uint32))
@@ -203,3 +207,4 @@ def test_adversarial_logits_draw_the_reference_token(npu_runtime, kwargs):
         f"{len(failures)} of {len(KINDS) * steps} draws differ "
         f"(slice {slice_size}, chunk {chunk}):\n" + "\n".join(failures)
     )
+    assert np.asarray(net.read(tokens)).reshape(-1).tolist() == last
