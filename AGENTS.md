@@ -593,6 +593,15 @@ code before relying on a line here; it is the authority.
   (198 ms a step).
 - Tuning: there is no search over a tunable's legal values, and no
   per-kernel L1 budget.
+- A fold whose cores would read more streams than a core tile's two input
+  channels is refused (`Operator._finish_at`). So EmbeddingGemma 2's
+  residual `ElementwiseAdd` does not fold into a weighted `RMSNorm` (its
+  multiplying core would read the normalized line, the weight and the
+  residual), its layer scale (`RowwiseMul` by a held row) does not fold
+  into the `ElementwiseAdd` before it, and a prompt SwiGLU's `* up` does
+  not fold into flm.GEMM's gate, whose cores read A and B. Pinning a
+  weighted RMSNorm's two cores adjacent, so the line between them is
+  shared memory, would free the first.
 - Open upstream asks in mlir-aie: a builder for `aiex.configure` /
   `aiex.run`; an accessor for L1 banking. aiecc's split memory (a whole-module clone per split item) is
   mlir-aie #3689's, which shares one clone per split.
