@@ -22,7 +22,7 @@ from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Level, Scratchpad
+from iron.common import Level
 from iron.common.declare import Profile
 from iron.common.graph.costcache import Accuracy, CostCache, Measurement
 from iron.common.graph.fold import FOLD_RUNS, folded, foldings
@@ -59,6 +59,7 @@ from iron.operators import (
 )
 from iron.operators.flm import GEMM as FlmGEMM
 from iron.operators.flm import DequantBFP
+from iron.tests.common.bounded_graphs import Rotate
 from iron.tests.common.llama_model import llama_1b
 
 SIZE = 8192
@@ -101,13 +102,6 @@ class TwoClamps(iron.Graph):
     def body(self, x):
         y = Clamp(x, low=-0.75, high=1.25, tile_size=TILE)
         return Clamp(y, low=-3e4, high=3e4, tile_size=TILE)
-
-
-class Rotate(iron.Graph):
-    """RoPE over the first `n` positions, `n` given per call."""
-
-    def body(self, x, angles, *, n: Scratchpad[np.int32]):
-        return RoPE(x[:n], angles[:n])
 
 
 def test_widths_are_the_settable_per_tunables(npu2):

@@ -59,10 +59,10 @@ from iron.operators import (
     Copy,
     ElementwiseAdd,
     ElementwiseMul,
-    RoPE,
     SiLU,
     Softmax,
 )
+from iron.tests.common.bounded_graphs import Project, Rotate
 
 SIZE = 8192
 TILE = 256
@@ -114,20 +114,6 @@ class Attend(iron.Graph):
 
     def body(self, q, k, v, *, n: Scratchpad[np.int32]):
         return MHA(q, k[:n], v[:n], heads_interleaved=True, kv_interleaved=True)
-
-
-class Rotate(iron.Graph):
-    """RoPE over the first `n` positions, `n` given per call."""
-
-    def body(self, x, angles, *, n: Scratchpad[np.int32]):
-        return RoPE(x[:n], angles[:n])
-
-
-class Project(iron.Graph):
-    """The first `n` rows of `x` projected by `w`."""
-
-    def body(self, x, w, *, n: Scratchpad[np.int32]):
-        return GEMM(x[:n], w, b_col_maj=True)
 
 
 @pytest.mark.supported_devices("npu2")

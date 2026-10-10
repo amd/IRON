@@ -16,9 +16,9 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Scratchpad
 from iron.common.harness import verify_buffer
 from iron.operators.gemm import GEMM
+from iron.tests.common.bounded_graphs import Project
 
 M, K, N = 512, 512, 512
 BOUNDS = (M, 1, 300, 64, 65, M, 17, 128, 3)
@@ -36,10 +36,6 @@ BOUNDS = (M, 1, 300, 64, 65, M, 17, 128, 3)
     ],
 )
 def test_the_rows_of_a_bound_are_computed(npu_runtime, boundaries):
-    class Project(iron.Graph):
-        def body(self, x, w, *, n: Scratchpad[np.int32]):
-            return GEMM(x[:n], w, b_col_maj=True)
-
     project = Project().compile(x=(M, K), w=(N, K), boundaries=boundaries)
     op = GEMM(M=M, K=K, N=N, b_col_maj=True)
     tolerance = op.resolved().tolerance()
