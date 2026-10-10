@@ -395,6 +395,9 @@ class Calibration:
             xclbin chain.
         switch_us: The pair's mean entry, `(E(a) + E(b)) / 2`; on an xclbin
             chain, its mean load.
+        switch_noise_us: The standard error of `switch_us`, round by round;
+            None from a single round or a table recorded without it.
+        base_noise_us: The same, of `base_us`.
     """
 
     dispatch_us: float
@@ -405,6 +408,8 @@ class Calibration:
     rounds: int
     calls: int
     measured: str
+    switch_noise_us: float | None = None
+    base_noise_us: float | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -468,6 +473,7 @@ class CostTable:
         self.packs: dict[str, PackCost] = {}
         self._medians: dict[str, float] | None = None
         self._entry_costs: dict[str, float | None] | None = None
+        self._entry_weights: np.ndarray | None = None
         if self.path.exists():
             data = json.loads(self.path.read_text())
             for name in ("device", "dispatch"):
@@ -662,6 +668,34 @@ class CostTable:
     def base_us(self) -> float:
         return self._calibrated("base_us")
 
+    @property
+    def base_noise_us(self) -> float | None:
+        """The standard error of `base_us`, the median of the calibrations':
+        their noises' median, as a median of estimates is no surer than its
+        middle one. None where a calibration's is unknown.
+        """
+        noises = [c.base_noise_us for c in self.calibrations.values()]
+        if not noises or None in noises:
+            return None
+        return statistics.median(noises)
+
+    def load_noise(self, key: str) -> float | None:
+        """The standard error of ``load(key)`` for a design a calibration
+        pair names: its entry's, through the least squares that solve it
+        from the pairs' switches, and the base's. None where any of those
+        is unknown, or the design's load is not solved from the pairs.
+        """
+        solved = self.entry_costs()
+        base = self.base_noise_us
+        if solved.get(key) is None or base is None:
+            return None
+        noises = [c.switch_noise_us for c in self.calibrations.values()]
+        if None in noises:
+            return None
+        weights = self._entry_weights[list(solved).index(key)]
+        entry = float(np.sqrt(np.sum((weights * np.array(noises)) ** 2)))
+        return math.hypot(entry, base)
+
     def t_step(self, key: str) -> float:
         """A design's step at the calls priced (``StepCost.expected_us``);
         0 if unmeasured.
@@ -756,8 +790,9 @@ class CostTable:
                     halves[row, index[n]] += 0.5
             switches = np.array([s for _, s in pairs])
             solved = np.linalg.lstsq(halves, switches, rcond=None)[0]
+            self._entry_weights = np.linalg.pinv(halves)
             # A load is determined where its unit vector is in the row space.
-            free = np.eye(len(names)) - np.linalg.pinv(halves) @ halves
+            free = np.eye(len(names)) - self._entry_weights @ halves
             self._entry_costs = {
                 n: None if np.abs(free[i]).max() > 1e-9 else float(solved[i])
                 for n, i in index.items()

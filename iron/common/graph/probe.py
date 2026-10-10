@@ -1233,10 +1233,11 @@ def calibrate(
             dispatch=dispatch, reset=reset, base=base, switch=switch
         ).items()
     }
+    noises = {name: standard_error(us[1:]) for name, us in figures.items()}
     negative = {
         name: round(float(us[0]), 1)
         for name, us in figures.items()
-        if us[0] < -CONFIDENCE * (standard_error(us[1:]) or 0.0)
+        if us[0] < -CONFIDENCE * (noises[name] or 0.0)
     }
     if negative:
         raise RuntimeError(
@@ -1254,6 +1255,8 @@ def calibrate(
         rounds=timing.rounds,
         calls=timing.calls,
         measured=CostTable.today(),
+        switch_noise_us=noises["switch"],
+        base_noise_us=noises["base"],
     )
     table.record_calibration((ka, kb), cal)
     return cal
@@ -1343,13 +1346,18 @@ def measure_loads(
             rounds = min(alt.rounds, grp.rounds)
             pair_us = (alt.us - grp.us) / (pairs - 1)
             load = pair_us - table.load(reference.key) - 2 * table.base_us
-            noise = standard_error(
+            pair_noise = standard_error(
                 [
                     (a - g) / (pairs - 1)
                     for a, g in zip(alt.round_us[:rounds], grp.round_us[:rounds])
                 ]
             )
-            if load < -CONFIDENCE * (noise or 0.0):
+            noise = math.hypot(
+                pair_noise or 0.0,
+                table.load_noise(reference.key) or 0.0,
+                2 * (table.base_noise_us or 0.0),
+            )
+            if load < -CONFIDENCE * noise:
                 raise RuntimeError(
                     f"load of {v.key} beside {reference.key}: negative "
                     f"{load:.1f} us; measure it with the NPU otherwise idle, in "
@@ -2045,13 +2053,18 @@ def measure_packs(
             rounds = min(alt.rounds, grp.rounds)
             pair_us = (alt.us - grp.us) / (pairs - 1)
             entry_us = pair_us - table.load(reference.key) - table.base_us
-            noise = standard_error(
+            pair_noise = standard_error(
                 [
                     (a - g) / (pairs - 1)
                     for a, g in zip(alt.round_us[:rounds], grp.round_us[:rounds])
                 ]
             )
-            if entry_us < -CONFIDENCE * (noise or 0.0):
+            noise = math.hypot(
+                pair_noise or 0.0,
+                table.load_noise(reference.key) or 0.0,
+                table.base_noise_us or 0.0,
+            )
+            if entry_us < -CONFIDENCE * noise:
                 raise RuntimeError(
                     f"pack {name} beside {reference.key}: negative entry "
                     f"{entry_us:.1f} us; measure it with the NPU otherwise idle, "
