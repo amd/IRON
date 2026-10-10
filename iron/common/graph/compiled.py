@@ -176,8 +176,11 @@ class Graph:
         return self._arena
 
     @staticmethod
-    def _signature(inputs: list[Handle]) -> Signature:
-        return tuple((h.name, h.shape, bfp.dtype_name(h.dtype)) for h in inputs)
+    def _signature(inputs: Mapping[str, tuple[tuple[int, ...], Any]]) -> Signature:
+        return tuple(
+            (name, shape, bfp.dtype_name(dtype))
+            for name, (shape, dtype) in inputs.items()
+        )
 
     def names(self) -> dict[int, str]:
         """The path name of each tensor and state the instance holds, by identity."""
@@ -385,7 +388,9 @@ class Graph:
                 groups = coresident
             if verbose:
                 print(chosen.report(self.name))
-            signature = self._signature(traced.inputs)
+            signature = self._signature(
+                {h.name: (h.shape, h.dtype) for h in traced.inputs}
+            )
             shared = chosen.dispatch == "fused"
             emit = None
             # The words an Emit feeding its own version was sized for.
@@ -450,20 +455,12 @@ class Graph:
     def __call__(self, *tensors, **values) -> Any:
         given = self._given(tensors)
         _check_values(self.name, self._values, values)
-        signature = tuple(
-            (
-                name,
-                tuple(int(n) for n in t.shape),
-                bfp.dtype_name(np.dtype(t.dtype).type),
-            )
+        shapes = {
+            name: (tuple(int(n) for n in t.shape), np.dtype(t.dtype).type)
             for name, t in given.items()
-        )
-        version = self._versions.get(signature)
+        }
+        version = self._versions.get(self._signature(shapes))
         if version is None:
-            shapes = {
-                name: (tuple(t.shape), np.dtype(t.dtype).type)
-                for name, t in given.items()
-            }
             print(f"{self.name}: compiling for {shapes}")
             version = self.compile(**shapes)
         return version(*given.values(), **values)
@@ -620,8 +617,7 @@ class CompiledGraph:
         piece_bytes: int = UPLOAD_PIECE,
     ) -> CompiledGraph:
         """Load the image and upload its weights now rather than on first call."""
-        if not self.is_loaded:
-            self._callable = self.sequence.get_callable(self.arena)
+        self.callable
         self.upload(release, piece_bytes)
         return self
 
