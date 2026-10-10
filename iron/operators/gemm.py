@@ -97,7 +97,7 @@ def _cases(cls, dev: Device):
             kwargs = dict(M=M, K=K, N=N, num_aie_columns=cols, tile_m=m, tile_k=k)
             kwargs.update(tile_n=n, b_col_maj=b_col_maj, c_col_maj=c_col_maj)
             kwargs.update(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
-            lower = b_col_maj and c_col_maj and not extensive
+            lower = c_col_maj and not extensive
             out.append(Case(kwargs, extensive=extensive, lower=lower))
     # The defaults: bfp16 inputs, and C rounded to bf16 between K tiles.
     # The default-suite one is benched: it runs well past the dispatch cost.

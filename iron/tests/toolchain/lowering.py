@@ -72,8 +72,8 @@ def _cases():
             if cls.test is None:
                 continue
             cases = cls.test.resolve(cls, dev)
-            first = next(c for c in cases if not c.extensive)
-            for case in [first, *(c for c in cases if c.lower and c is not first)]:
+            first = [c for c in cases if not c.extensive][:1]
+            for case in [*first, *(c for c in cases if c.lower and c not in first)]:
                 params.append(
                     pytest.param(device, cls, case, id=f"{device}-{name}-{case.label}")
                 )
