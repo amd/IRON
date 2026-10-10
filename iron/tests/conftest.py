@@ -15,6 +15,13 @@ import pytest
 
 _EXCLUDED_NAMES = {"conftest.py", "__init__.py"}
 
+# Helpers the tests import, with no tests of their own.
+collect_ignore = [
+    "common/bounded_graphs.py",
+    "common/llama_model.py",
+    "toolchain/tools.py",
+]
+
 
 def pytest_collect_file(parent, file_path):
     if file_path.suffix != ".py" or file_path.name in _EXCLUDED_NAMES:
