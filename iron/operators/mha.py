@@ -114,23 +114,31 @@ class Columns:
 @dataclasses.dataclass(frozen=True)
 class SplitColumns:
     """Where MHA's streams meet the array with P*V split over two cores by
-    halves of the head, each stream's shim beneath its memtile.
+    halves of the head, each stream's shim beneath its memtile (on four
+    columns, all but K's).
 
     Split, each column sends four streams to the memtiles (the scores, P
     and both O halves) and takes six from them, every one its links carry,
     so a pipeline's scores and P forward through its own column's memtile
     and these columns are the only ones the router finds.
 
+    On four columns, Q's split then fills one memtile's six outputs and
+    each O join another's six inputs, so K and both V halves forward
+    through the fourth, whose shim's two channels carry V: K comes from
+    Q's shim.
+
     Attributes:
         q: Each Q shim's split.
         o: Each Q shim's O joins, one per half of the head.
-        k: K's.
+        k: K's memtile.
+        k_shim: K's shim.
         v: V's, one per half of the head.
     """
 
     q: tuple[int, ...]
     o: tuple[tuple[int, ...], ...]
     k: int
+    k_shim: int
     v: tuple[int, ...]
 
 
@@ -242,7 +250,8 @@ _CASES = [
             emulate_bf16_mmul_with_bfp16=False,
         )
     ),
-    # Its global layer: bidirectional, d=512, P*V split over two cores.
+    # Its global layer: bidirectional, d=512, P*V split over two cores, at
+    # each width's SPLIT_COLUMNS.
     Case(
         dict(
             num_heads=4,
@@ -252,7 +261,8 @@ _CASES = [
             causal=False,
             num_pipelines=8,
             emulate_bf16_mmul_with_bfp16=False,
-        )
+        ),
+        lower=True,
     ),
     # Bidirectional over every key.
     Case(
@@ -351,7 +361,8 @@ class MHA(Operator):
     }
     # By array width, the coordinates P*V split over two cores is placed at.
     SPLIT_COLUMNS: ClassVar[dict[int, SplitColumns]] = {
-        8: SplitColumns(q=(1, 6), o=((0, 2), (5, 7)), k=3, v=(3, 4)),
+        8: SplitColumns(q=(1, 6), o=((0, 2), (5, 7)), k=3, k_shim=3, v=(3, 4)),
+        4: SplitColumns(q=(0,), o=((1, 2),), k=3, k_shim=0, v=(3, 3)),
     }
 
     Q = In(
@@ -1225,7 +1236,7 @@ class MHA(Operator):
         # The shim ends, on the width's columns. Split over two memtiles, Q's
         # lanes share column 0's two channels, as O's do; K and V's lanes,
         # one per pipeline, take their column's two. Split, every stream
-        # moves through the shim under its memtile.
+        # but K moves through the shim under its memtile.
         two_shims = self.q_shims > 1
         for s in range(self.q_shims):
             q_col = layout.q[s] if split else 0 if two_shims else columns.q
@@ -1237,7 +1248,7 @@ class MHA(Operator):
                 )
         for lane in range(kv_lanes):
             shared = kv_lanes == 1
-            k_col = layout.k if split else columns.k if shared else lane
+            k_col = layout.k_shim if split else columns.k if shared else lane
             self.K.lane(lane).bind(inK[lane].prod(tile=pins.shims.tile(k_col, 0)))
             for h in range(pv_cores):
                 v_col = layout.v[h] if split else columns.v if shared else lane
