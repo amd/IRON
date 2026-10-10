@@ -730,7 +730,7 @@ def measure_steps(
         for v, e, p, b in zip(found, entries, partners, besides)
         if v.key not in held
     ]
-    distinct = sum(b.nbytes for b in default.op.buffers) <= DISTINCT_BYTES
+    distinct = sum(b.nbytes for b in default.resolved.buffers) <= DISTINCT_BYTES
     measured: dict[str, Measurement] = {}
     fastest = math.inf
     # Each run is two contexts; a batch keeps two for the default it is priced beside.
@@ -759,18 +759,18 @@ def measure_steps(
             try:
                 one = Standalone(
                     f"probe1_{d.key}",
-                    [d.op],
-                    values={d.op: values or {}},
-                    inputs={d.op: inputs or {}},
+                    [d.resolved],
+                    values={d.resolved: values or {}},
+                    inputs={d.resolved: inputs or {}},
                     dispatch=table.dispatch,
                     load=False,
                 )
                 many = Standalone(
                     f"probe{repeats}_{d.key}",
-                    [d.op] * repeats,
-                    values={d.op: values or {}},
+                    [d.resolved] * repeats,
+                    values={d.resolved: values or {}},
                     distinct=distinct,
-                    inputs={d.op: inputs or {}},
+                    inputs={d.resolved: inputs or {}},
                     dispatch=table.dispatch,
                     load=False,
                 )
@@ -904,20 +904,20 @@ def judged(
         key = (
             None
             if cache is None
-            else cache.judged_key(entries[0], entry, default.op, v.op)
+            else cache.judged_key(entries[0], entry, default.resolved, v.resolved)
         )
         verdict = None if key is None or remeasure else cache.get(key, Accuracy)
         if verdict is None:
             run = Standalone(
                 f"judge_{v.key}",
-                [v.op],
-                values={v.op: values or {}},
-                inputs={v.op: inputs or {}},
+                [v.resolved],
+                values={v.resolved: values or {}},
+                inputs={v.resolved: inputs or {}},
                 dispatch=dispatch,
             )
             run.digest()
             verdict = judge(
-                default.op, v.op, run.inputs(), run.written(), values
+                default.resolved, v.resolved, run.inputs(), run.written(), values
             ) or Accuracy(False, "not judged")
             del run
             if key is not None:
@@ -1001,7 +1001,7 @@ def measure_points(
             if held is not None:
                 shifts[v.key, label] = held
     todo = [v for v in found if any((v.key, l) not in shifts for l in labels)]
-    distinct = sum(b.nbytes for b in found[0].op.buffers) <= DISTINCT_BYTES
+    distinct = sum(b.nbytes for b in found[0].resolved.buffers) <= DISTINCT_BYTES
     runs_each = len(labels) + 1
     size = CONTEXTS // runs_each
     ran = []
@@ -1010,10 +1010,10 @@ def measure_points(
         runs = [
             Standalone(
                 f"point{repeats}_{v.key}",
-                [v.op] * repeats,
-                values={v.op: at},
+                [v.resolved] * repeats,
+                values={v.resolved: at},
                 distinct=distinct,
-                inputs={v.op: inputs or {}},
+                inputs={v.resolved: inputs or {}},
                 dispatch=table.dispatch,
             )
             for v in batch
@@ -1328,18 +1328,20 @@ def measure_loads(
         batch = todo[begin : begin + size]
         runs = []
         for v, _ in batch:
-            nbytes = sum(b.nbytes for op in (reference.op, v.op) for b in op.buffers)
+            nbytes = sum(
+                b.nbytes for op in (reference.resolved, v.resolved) for b in op.buffers
+            )
             for name, runlist in (
-                (f"alt{pairs}", [reference.op, v.op] * pairs),
-                (f"grp{pairs}", [reference.op] * pairs + [v.op] * pairs),
+                (f"alt{pairs}", [reference.resolved, v.resolved] * pairs),
+                (f"grp{pairs}", [reference.resolved] * pairs + [v.resolved] * pairs),
             ):
                 runs.append(
                     Standalone(
                         f"load_{name}_{reference.key}_{v.key}",
                         runlist,
-                        values={v.op: values or {}},
+                        values={v.resolved: values or {}},
                         distinct=nbytes <= DISTINCT_BYTES,
-                        inputs={v.op: inputs or {}},
+                        inputs={v.resolved: inputs or {}},
                         dispatch=table.dispatch,
                     )
                 )
@@ -1859,11 +1861,11 @@ def measure_graph(
         if cal is None:
             cal = calibrate(
                 table,
-                a.op,
-                b.op,
+                a.resolved,
+                b.resolved,
                 timing,
                 log=log,
-                values={a.op: op_values[a.key], b.op: op_values[b.key]},
+                values={a.resolved: op_values[a.key], b.resolved: op_values[b.key]},
             )
             cache.put(entry, cal)
             ran.append(pair)
@@ -2007,34 +2009,43 @@ def measure_packs(
                 f"design's load to run it beside"
             )
         members = [of[k] for k in keys]
-        ops = [v.op for v, _, _ in members]
-        values = {v.op: call.op_values(op) for v, op, call in members}
-        inputs = {v.op: call.op_inputs(op) for v, op, call in members}
+        ops = [v.resolved for v, _, _ in members]
+        values = {v.resolved: call.op_values(op) for v, op, call in members}
+        inputs = {v.resolved: call.op_inputs(op) for v, op, call in members}
         if reference.key in of:
             _, op, call = of[reference.key]
-            values[reference.op] = call.op_values(op)
-            inputs[reference.op] = call.op_inputs(op)
+            values[reference.resolved] = call.op_values(op)
+            inputs[reference.resolved] = call.op_inputs(op)
         name = table.pack_name(keys)
         entry = None
         if cache is not None:
             entry = cache.pack_key(
                 cache.key(
                     reference.resolved,
-                    values.get(reference.op),
-                    inputs.get(reference.op),
+                    values.get(reference.resolved),
+                    inputs.get(reference.resolved),
                     table.dispatch,
                 ),
                 [
-                    cache.key(v.resolved, values[v.op], inputs[v.op], table.dispatch)
+                    cache.key(
+                        v.resolved,
+                        values[v.resolved],
+                        inputs[v.resolved],
+                        table.dispatch,
+                    )
                     for v, _, _ in members
                 ],
             )
         pack = None if entry is None or remeasure else cache.get(entry, PackCost)
         if pack is None:
-            nbytes = sum(b.nbytes for op in [reference.op, *ops] for b in op.buffers)
+            nbytes = sum(
+                b.nbytes
+                for op in [reference.resolved, *(v.resolved for v, _, _ in members)]
+                for b in op.buffers
+            )
             runlists = [
-                [reference.op, *ops] * pairs,
-                [reference.op] * pairs + ops * pairs,
+                [reference.resolved, *ops] * pairs,
+                [reference.resolved] * pairs + ops * pairs,
                 ops,
             ] + [ops[:j] + [ops[j]] * repeats + ops[j + 1 :] for j in range(len(ops))]
             runs = [

@@ -62,6 +62,7 @@ from iron.operators import (
     SiLU,
     Softmax,
 )
+from iron.operators.flm.gemm.op import GEMM as FlmGEMM
 from iron.tests.common.bounded_graphs import Project, Rotate
 
 SIZE = 8192
@@ -235,6 +236,19 @@ def test_widths_are_compared_on_the_rows_under_the_bound(tmp_path):
         values=Call(traced, dict(n=256)).op_values(step.op),
     )
     assert all(c.exact for c in costs.values()), costs
+
+
+@pytest.mark.supported_devices("npu2")
+def test_an_operator_whose_resolution_shapes_a_buffer_is_measured(tmp_path):
+    # flm.GEMM's B is a Select on a field resolve() fills.
+    op = FlmGEMM(M=256, K=512, N=1024, b_col_maj=True)
+    found = variants(op, aie_utils.ensure_current_device())
+    costs = measure_steps(
+        CostTable(tmp_path / "costs.json", "npu2", "fused"),
+        found,
+        Timing(rounds=1, calls=5),
+    )
+    assert found[0].key in costs and all(c.exact for c in costs.values()), costs
 
 
 @pytest.mark.supported_devices("npu2")
