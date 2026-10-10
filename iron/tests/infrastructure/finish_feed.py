@@ -14,7 +14,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common.harness import run_test, vectors, verify_buffer
+from iron.common.harness import run_test, vectors
 from iron.lm.layers import SwiGLU
 from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, SiLU
 
@@ -47,8 +47,13 @@ def test_a_residual_rides_the_matrix_into_a_folded_matvec(M, K):
     got = np.array(folded(x, r).numpy()[:M])
     want = (w.astype(np.float32) @ x.astype(np.float32).reshape(-1)).astype(bfloat16)
     want = (want.astype(np.float32) + r.astype(np.float32).reshape(-1)).astype(bfloat16)
-    gate = step.op.gate()
-    verdict = verify_buffer(got, "out", want, gate, bound=gate.bound(w, x, r))
+    (out,) = (b.name for b in step.op.outputs)
+    (verdict,) = step.op.judge(
+        {b.name: t for b, t in zip(step.op.inputs, (w, x, r))},
+        {out: got},
+        step.op.gate(),
+        {out: want},
+    ).values()
     assert verdict, verdict.detail
     unfolded = np.array(plain(x, r).numpy()[:M])
     assert got.view(np.uint16).tolist() == unfolded.view(np.uint16).tolist()
