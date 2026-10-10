@@ -593,7 +593,7 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
     measure_graph(
         table,
         calls,
-        ("SiLU", "ElementwiseMul", "GEMV"),
+        (SiLU, ElementwiseMul, GEMV),
         # Rounds enough to judge a calibration figure near zero by its noise.
         Timing(rounds=3, calls=5),
         cache=CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c"),
