@@ -110,6 +110,22 @@ def test_operator_lowers_to_instructions(device, cls, case, tmp_path):
             dict(num_heads=4, num_KV_heads=2, seq_len=256, num_pipelines=2),
             "valid",
         ),
+        # EmbeddingGemma 2's global layer on four pipelines: K and V re-read
+        # their head 128 times, past one descriptor's 64.
+        (
+            "mha",
+            "MHA",
+            dict(
+                num_heads=4,
+                num_KV_heads=1,
+                seq_len=2048,
+                d=512,
+                causal=False,
+                num_pipelines=4,
+                emulate_bf16_mmul_with_bfp16=False,
+            ),
+            "kv_valid",
+        ),
     ],
     ids=lambda v: v if isinstance(v, str) and "." not in v else "",
 )

@@ -68,6 +68,7 @@ from iron.common import (
     param,
     Select,
 )
+from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
 STACK_SIZE = 0xD00
@@ -1344,6 +1345,9 @@ class MHA(Operator):
         every block, and K and V are one pattern each, the head's rows
         re-read once per (head, block) from the descriptor's iteration
         slot: the same bytes in the same order, six descriptors a group.
+        Past the slot's count of re-reads (EmbeddingGemma 2's global layer
+        on four pipelines reads its KV head 128 times), K and V are a
+        pattern per count.
 
         One query packed is a task group per step, each pipeline's block
         that step one of its KV groups: the group's heads repeated from the
@@ -1416,22 +1420,29 @@ class MHA(Operator):
 
         # V and O move a stream per P*V core, its share of the head's columns.
         cores, pv_width = self.pv_cores, self.pv_width
+        iterations = BdLimits.of(self.dev, 0, 0).iterations
         for kv_head in range(kv_heads):
             head0 = kv_head * group
             tg = TaskGroup()
             for shim in range(self.q_shims):
                 rt.fill(self.Q.lane(shim), q_rows(self.Q, head0, shim), group=tg)
+            # A bounded pattern is one descriptor, its re-reads at most the
+            # iteration slot's count.
             reads = group * blocks
-            rt.fill(self.K, kv_rows(self.K, kv_head, reads), group=tg, size_by=kv_by)
-            for h in range(cores):
+            for first in range(0, reads, iterations):
+                count = min(iterations, reads - first)
                 rt.fill(
-                    self.V.lane(h),
-                    kv_rows(self.V, kv_head, reads)[
-                        ..., h * pv_width : (h + 1) * pv_width
-                    ],
-                    group=tg,
-                    size_by=kv_by,
+                    self.K, kv_rows(self.K, kv_head, count), group=tg, size_by=kv_by
                 )
+                for h in range(cores):
+                    rt.fill(
+                        self.V.lane(h),
+                        kv_rows(self.V, kv_head, count)[
+                            ..., h * pv_width : (h + 1) * pv_width
+                        ],
+                        group=tg,
+                        size_by=kv_by,
+                    )
             for shim in range(self.q_shims):
                 for h in range(cores):
                     rt.drain(
