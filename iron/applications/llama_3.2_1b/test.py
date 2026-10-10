@@ -51,14 +51,12 @@ def runner(request):
 
 
 @pytest.fixture(scope="module")
-def model(runner, request):
+def model(runner, request, module_npu_runtime):
     """The model, compiled and loaded once, its versions tuned by
     ``--cost-table`` if given; the runtime is released after the module's
     last test, as ``npu_runtime`` does after each of the others.
     """
     yield runner.npu(request.config.getoption("--cost-table"))
-    if aie_utils.DefaultNPURuntime is not None:
-        aie_utils.DefaultNPURuntime.cleanup()
 
 
 # KL(fp32 CPU || NPU), teacher-forced over 40 steps. The graphs measure a

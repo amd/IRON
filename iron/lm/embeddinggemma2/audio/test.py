@@ -93,12 +93,10 @@ def oracle(weights):
 
 
 @pytest.fixture(scope="module")
-def audio(weights):
+def audio(weights, module_npu_runtime):
     table = COSTS / f"costs_{aie_utils.ensure_current_device().name}.json"
     tuner = JointNarrowing(CostTable(table)) if table.exists() else None
     yield Audio(AUDIO, weights).load(tuner)
-    if aie_utils.DefaultNPURuntime is not None:
-        aie_utils.DefaultNPURuntime.cleanup()
 
 
 def test_audio_oracle_matches_hugging_face(oracle):

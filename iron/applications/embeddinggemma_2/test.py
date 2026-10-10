@@ -71,11 +71,9 @@ def cosine(a, b):
 
 
 @pytest.fixture(scope="module")
-def encoder():
+def encoder(module_npu_runtime):
     require(DIRECTORY / "model.safetensors", DIRECTORY / "tokenizer.json")
     yield Encoder(DIRECTORY)
-    if aie_utils.DefaultNPURuntime is not None:
-        aie_utils.DefaultNPURuntime.cleanup()
 
 
 @pytest.fixture(scope="module")
@@ -155,7 +153,7 @@ IMAGE = picture(288, 432)
 
 
 @pytest.fixture(scope="module")
-def multimodal():
+def multimodal(module_npu_runtime):
     require(DIRECTORY / "model.safetensors", DIRECTORY / "tokenizer.json")
     name = f"costs_{aie_utils.ensure_current_device().name}.json"
     # The tables measured so far; a part with none runs as its designs resolve.
@@ -165,8 +163,6 @@ def multimodal():
         if (d / name).exists()
     ]
     yield Encoder(DIRECTORY, towers=True, costs=tables)
-    if aie_utils.DefaultNPURuntime is not None:
-        aie_utils.DefaultNPURuntime.cleanup()
 
 
 MIXED = {

@@ -127,12 +127,10 @@ def processor_reference(image, tokens: int, T: int):
 
 
 @pytest.fixture(scope="module")
-def processor():
+def processor(module_npu_runtime):
     graph = Processor()
     graph.compile(**graph.processor.shapes())
     yield graph
-    if aie_utils.DefaultNPURuntime is not None:
-        aie_utils.DefaultNPURuntime.cleanup()
 
 
 @pytest.fixture(scope="module")
@@ -148,12 +146,10 @@ def oracle(weights):
 
 
 @pytest.fixture(scope="module")
-def vision(weights):
+def vision(weights, module_npu_runtime):
     table = COSTS / f"costs_{aie_utils.ensure_current_device().name}.json"
     tuner = JointNarrowing(CostTable(table)) if table.exists() else None
     yield Vision(VISION, weights).load(tuner)
-    if aie_utils.DefaultNPURuntime is not None:
-        aie_utils.DefaultNPURuntime.cleanup()
 
 
 @pytest.mark.parametrize("shape, tokens", RESIZES)

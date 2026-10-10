@@ -31,6 +31,16 @@ def npu_runtime():
         aie_utils.DefaultNPURuntime.cleanup()
 
 
+@pytest.fixture(scope="module")
+def module_npu_runtime():
+    """``npu_runtime`` for a module-scoped fixture: the runtime is released
+    after the module's last test.
+    """
+    yield
+    if aie_utils.DefaultNPURuntime is not None:
+        aie_utils.DefaultNPURuntime.cleanup()
+
+
 def _bound_device(name: str, n_cols: int):
     """A fixture binding an ``n_cols``-column ``name`` NPU as the current
     device, the previous one restored after: what a test that resolves or
