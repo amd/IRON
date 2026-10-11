@@ -72,6 +72,12 @@ MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.2}
 # 0.038 at 32k: it grows with the keys the step sums over.
 DEEP_KL = 0.1
 
+GENERATION = pytest.mark.parametrize(
+    "prompt_len,num_tokens",
+    [pytest.param(p, n, marks=pytest.mark.bench) for p in (1024, 13) for n in (40, 1)],
+    ids=[f"llama_3.2_1b_prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
+)
+
 
 @pytest.mark.supported_devices("npu1", "npu2")
 class TestEachStep:
@@ -88,6 +94,12 @@ class TestEachStep:
         yield model
         if aie_utils.DefaultNPURuntime is not None:
             aie_utils.DefaultNPURuntime.cleanup()
+
+    @GENERATION
+    def test_llama_3_2_1b_each_step(
+        self, runner, model, prompt_len, num_tokens, record_property
+    ):
+        check_generation(runner, model, prompt_len, num_tokens, record=record_property)
 
     def test_llama_3_2_1b_each_step_accuracy(self, runner, model, record_property):
         check_accuracy(runner, model, MAX_KL, 20, 256, record=record_property)
@@ -111,11 +123,7 @@ class TestEachStep:
         check_deep_prompt(runner, model, rows, DEEP_KL, 256, record=record_property)
 
 
-@pytest.mark.parametrize(
-    "prompt_len,num_tokens",
-    [pytest.param(p, n, marks=pytest.mark.bench) for p in (1024, 13) for n in (40, 1)],
-    ids=[f"llama_3.2_1b_prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
-)
+@GENERATION
 def test_llama_3_2_1b(runner, model, prompt_len, num_tokens, record_property):
     check_generation(runner, model, prompt_len, num_tokens, record=record_property)
 
