@@ -6,11 +6,13 @@
 against its float32 oracle: each embedding's cosine to the oracle's, its
 norm, the cosine similarities a query gives two documents, and every call
 bit-identical to the first. The oracle, over text, a clip and an image,
-once against Hugging Face's processor and model. On NPU1 each step is its
-own dispatch of an xclbin; on NPU2 that form is checked too.
+against Hugging Face's processor and model, their outputs saved by
+hugging_face.py. On NPU1 each step is its own dispatch of an xclbin; on
+NPU2 that form is checked too.
 """
 
 import time
+from pathlib import Path
 
 import aie.utils as aie_utils
 import numpy as np
@@ -29,7 +31,6 @@ from iron.lm.embeddinggemma2.model import (
     text_tensors,
 )
 from iron.lm.embeddinggemma2.oracle import (
-    PROMPTS,
     EmbeddingGemmaOracle,
     tokenizer,
     tokens,
@@ -263,24 +264,11 @@ def test_embeddinggemma_2_determinism(multimodal):
 
 @pytest.fixture(scope="module")
 def hugging_face():
-    """Hugging Face's processor and float32 model of the checkpoint."""
-    # Optional dependencies: the reference implementation, where installed.
-    torch = pytest.importorskip("torch")
-    # The processor's image resize needs both.
-    pytest.importorskip("torchvision")
-    pytest.importorskip("PIL")
-    transformers = pytest.importorskip("transformers")
-    pytest.importorskip(
-        "transformers.models.embedding_gemma2.modeling_embedding_gemma2"
-    )
-    require(DIRECTORY / "model.safetensors", DIRECTORY / "tokenizer.json")
-    processor = transformers.AutoProcessor.from_pretrained(DIRECTORY)
-    # Not eager: there Gemma4AudioAttention inverts the additive float mask
-    # create_bidirectional_mask gives it.
-    model = transformers.AutoModel.from_pretrained(
-        DIRECTORY, dtype=torch.float32, attn_implementation="sdpa"
-    ).eval()
-    return processor, model
+    """Hugging Face's processor and float32 model over `HUGGING_FACE`, as
+    `hugging_face.py` saved them.
+    """
+    with np.load(REFERENCES) as saved:
+        return dict(saved)
 
 
 @pytest.fixture(scope="module")
@@ -316,35 +304,30 @@ def oracles():
 PROCESSED = picture(672, 960)
 
 
-@pytest.mark.parametrize(
-    "text,task,wave,image",
-    [
-        (QUERY, "query", None, None),
-        (LONGER, "document", None, None),
-        ("<|audio|> a bird singing", "query", chirp(2.0), None),
-        ("<|image|> waves at dusk", "query", None, PROCESSED),
-        (
-            "<|image|> the picture, then the sound: <|audio|>",
-            "query",
-            chirp(2.0),
-            PROCESSED,
-        ),
-    ],
-    ids=["query", "past_the_window", "audio", "image", "both"],
-)
-def test_embeddinggemma_2_oracle_matches_hugging_face(
-    hugging_face, oracles, text, task, wave, image
-):
-    torch = pytest.importorskip("torch")
-    processor, model = hugging_face
+HUGGING_FACE = {
+    "query": (QUERY, "query", None, None),
+    "past_the_window": (LONGER, "document", None, None),
+    "audio": ("<|audio|> a bird singing", "query", chirp(2.0), None),
+    "image": ("<|image|> waves at dusk", "query", None, PROCESSED),
+    "both": (
+        "<|image|> the picture, then the sound: <|audio|>",
+        "query",
+        chirp(2.0),
+        PROCESSED,
+    ),
+}
+REFERENCES = Path(__file__).with_name("hugging_face.npz")
+
+
+@pytest.mark.parametrize("case", HUGGING_FACE)
+def test_embeddinggemma_2_oracle_matches_hugging_face(hugging_face, oracles, case):
+    text, task, wave, image = HUGGING_FACE[case]
     text_oracle, audio_oracle, vision_oracle, tok = oracles
     c = EMBEDDINGGEMMA_2
-    media, soft = {}, {}
+    soft = {}
     if wave is not None:
-        media["audio"] = [wave]
         soft[c.audio_token] = audio_oracle(*LogMel(AUDIO)(wave))
     if image is not None:
-        media["images"] = [image]
         soft[c.image_token] = vision_oracle(
             *patches(image, VISION.image_tokens, VISION)
         )
@@ -356,11 +339,8 @@ def test_embeddinggemma_2_oracle_matches_hugging_face(
         len(soft.get(c.audio_token, ())),
         len(soft.get(c.image_token, ())),
     )
-    inputs = processor(text=PROMPTS[task] + text, return_tensors="pt", **media)
-    assert ids == inputs["input_ids"][0].tolist()
-    with torch.no_grad():
-        want = model(**inputs).last_hidden_state[0].numpy().mean(axis=0)
-    want /= np.linalg.norm(want)
+    assert ids == hugging_face[f"{case}/input_ids"].tolist()
+    want = hugging_face[f"{case}/embedding"]
     got = text_oracle(ids, soft=soft)
     # Measured: 1.4e-6 at the most, float32's own reordering.
     np.testing.assert_allclose(np.linalg.norm(got - want), 0, atol=1e-5)

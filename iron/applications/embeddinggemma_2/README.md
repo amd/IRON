@@ -63,3 +63,13 @@ truncations, a query ranking two documents, and the latency of a query,
 a long document and one past the sliding window, and text with a clip and
 an image, on NPU1 and NPU2. On NPU1 each step is its own dispatch of an
 xclbin; `TestEachStep` checks that form on NPU2.
+
+The float32 oracles are checked against Hugging Face's processor and model
+through their outputs on the tests' inputs, saved as `hugging_face.npz`
+beside each test, so the tests need no torch. `hugging_face.py` makes them
+in an environment with torch, torchvision and transformers (not IRON's
+requirements), and with `--check` compares a fresh run with them:
+
+```bash
+python -m iron.applications.embeddinggemma_2.hugging_face /path/to/embeddinggemma-2
+```

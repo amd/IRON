@@ -9,6 +9,7 @@ Face's.
 """
 
 import time
+from pathlib import Path
 
 import aie.utils as aie_utils
 import numpy as np
@@ -33,6 +34,7 @@ from iron.lm.testing import require, weights_dir
 from iron.operators.copy import Copy
 
 DIRECTORY = weights_dir("embeddinggemma-2")
+REFERENCES = Path(__file__).with_name("hugging_face.npz")
 
 # Seconds of audio, by the soft tokens they give.
 CLIPS = {
@@ -101,54 +103,21 @@ def audio(weights, module_npu_runtime):
 
 @pytest.fixture(scope="module")
 def hugging_face():
-    """torch, transformers, and its Gemma 4 and EmbeddingGemma 2 modeling.
-
-    Requested before ``oracle``, so that a host without them skips before
-    looking for the checkpoint.
+    """Hugging Face's feature extractor and tower over a medium clip, as
+    iron/applications/embeddinggemma_2/hugging_face.py saved them.
     """
-    # Optional dependencies: the reference implementation, where installed.
-    return (
-        pytest.importorskip("torch"),
-        pytest.importorskip("transformers"),
-        pytest.importorskip("transformers.models.gemma4.modeling_gemma4"),
-        pytest.importorskip(
-            "transformers.models.embedding_gemma2.modeling_embedding_gemma2"
-        ),
-    )
+    with np.load(REFERENCES) as saved:
+        return dict(saved)
 
 
 def test_audio_oracle_matches_hugging_face(hugging_face, oracle):
-    torch, transformers, gemma4, embedding_gemma2 = hugging_face
-    config = transformers.AutoConfig.from_pretrained(DIRECTORY)
-    # Not eager: there Gemma4AudioAttention inverts the additive float mask
-    # create_bidirectional_mask gives it.
-    config.audio_config._attn_implementation = "sdpa"
-    tower = gemma4.Gemma4AudioModel(config.audio_config).eval()
-    embedder = embedding_gemma2.EmbeddingGemma2MultimodalEmbedder(
-        config.audio_config, config.text_config
-    ).eval()
-    tensors = audio_tensors(Checkpoint(DIRECTORY / "model.safetensors").tensors)
-    for module, prefix in ((tower, "audio_tower."), (embedder, "embed_audio.")):
-        module.load_state_dict(
-            {
-                k.removeprefix(prefix): torch.from_numpy(v.astype(np.float32))
-                for k, v in tensors.items()
-                if k.startswith(prefix)
-            }
-        )
-    extractor = transformers.AutoFeatureExtractor.from_pretrained(DIRECTORY)
-    wave = chirp(CLIPS["medium"])
-    processed = extractor([wave], return_tensors="np")
-    want_features = processed["input_features"][0]
-    mask = processed["input_features_mask"][0]
-    got_features, frames = LogMel(AUDIO)(wave)
+    want_features = hugging_face["medium/features"]
+    mask = hugging_face["medium/mask"]
+    got_features, frames = LogMel(AUDIO)(chirp(CLIPS["medium"]))
     assert frames == int(mask.sum()) and mask[:frames].all()
     # Measured: identical.
     np.testing.assert_allclose(got_features, want_features, atol=1e-5)
-    with torch.no_grad():
-        out = tower(torch.from_numpy(want_features)[None], torch.from_numpy(mask)[None])
-        valid = torch.from_numpy(out.attention_mask[0].numpy())
-        want = embedder(out.last_hidden_state)[0][valid].numpy()
+    want = hugging_face["medium/soft_tokens"]
     got = oracle(got_features, frames)
     assert got.shape == want.shape
     # Measured: 2.1e-5, float32's own reordering.
