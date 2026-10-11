@@ -12,8 +12,9 @@ norms with its residual (Gemma's sandwich norms), and ``attention`` an
 encoder's bidirectional attention over one sequence, its queries and keys
 RMS-normed and rotated. ``Block`` and ``BlockOracle`` are the attention +
 SwiGLU layer Llama 3 and Granite 4.2 3B share, on the NPU and in numpy. ``LogMel`` is an audio front end's log-mel
-spectrogram, ``Conv2d`` a convolution over rows of channels-last pixels
-and ``ImagePatches`` a vision front end's resize into patches. A graph
+spectrogram, ``Conv2d`` a convolution over rows of channels-last pixels,
+``Conv1d`` one over rows of full-channel-depth input (an audio encoder's
+front end) and ``ImagePatches`` a vision front end's resize into patches. A graph
 here is called in a model's body as it is on its own (``Graph``): its
 steps trace into the model's.
 
@@ -338,6 +339,74 @@ class Conv2d(iron.Graph):
         )
         out = np.pad(patches @ w, ((0, 0), (self.border, self.border), (0, 0)))
         return out.reshape(rows, self.out_line)
+
+
+class Conv1d(iron.Graph):
+    """A 1-D convolution over rows (time) of a full-channel-depth input: at
+    each of ``kernel`` consecutive rows every input channel is contracted,
+    by ``weight``, ``(out_channels, channels, kernel)``, at ``stride``, its
+    ``bias``, ``(out_channels,)``, added once. Unlike ``Conv2d``, which
+    slides one square kernel over both rows and a spatial ``width`` of
+    channels-last pixels, there is no ``width`` axis here at all: a row
+    already holds the whole channel vector a time step contracts.
+
+    A call takes the input ``(rows, channels)`` and the per-call ``rows`` of
+    output it computes, and writes the output ``(out_rows, out_channels)``
+    where a caller gives it, else returns it. The ``kernel`` consecutive
+    input rows are gathered whole (``Conv2d``'s single-channel row gather,
+    which already does not touch ``width``) and projected by the weight
+    reshaped to ``(kernel * channels, out_channels)`` in one GEMM, its bias
+    folded on with ``RowwiseAdd``. Padding in rows is rows the input holds,
+    so a producer writes past them in place.
+
+    Args:
+        weight: ``(out_channels, channels, kernel)``.
+        bias: ``(out_channels,)``.
+        channels: The input's channels a row.
+        stride: The step between output rows.
+    """
+
+    def __init__(
+        self,
+        weight: np.ndarray,
+        bias: np.ndarray,
+        channels: int,
+        stride: int = 1,
+    ):
+        w = np.asarray(weight, np.float32)
+        C_out, C, k = w.shape
+        if C != channels:
+            raise ValueError(f"Conv1d: weight holds {C} channels, not {channels}")
+        self.channels, self.out_channels, self.kernel, self.stride = C, C_out, k, stride
+        # Kernel tap as the slower axis, channel the faster: the same order
+        # a contiguous k * channels row gather reads them in.
+        self.matrix = w.transpose(2, 1, 0).reshape(k * C, C_out).astype(bfloat16)
+        self.bias = iron.weight(np.asarray(bias, np.float32).astype(bfloat16))
+
+    def body(self, x, y=None, *, rows: Scratchpad[np.int32]):
+        k, s, C = self.kernel, self.stride, self.channels
+        R, line = x.shape
+        out_rows = (R - k) // s + 1
+        pattern = TensorAccessPattern((R, line), 0, [out_rows, k * line], [s * line, 1])
+        a = Copy(x, src=pattern).reshape(out_rows, k * line)[:rows]
+        h = RowwiseAdd(GEMM(a, self.matrix, **ACCURATE), self.bias)
+        return Copy(h, y) if y is not None else h
+
+    def exact(self, x: np.ndarray, weight: np.ndarray, bias: np.ndarray) -> np.ndarray:
+        """The convolution of ``x`` ``(rows, channels)`` by ``weight`` and
+        ``bias`` in float32: what the graph's GEMM and bias add compute
+        before their one rounding each.
+        """
+        k, s = self.kernel, self.stride
+        rows = (x.shape[0] - k) // s + 1
+        x = np.asarray(x, np.float32)
+        patches = np.stack([x[b : b + s * rows : s] for b in range(k)], axis=1)
+        w = (
+            np.asarray(weight, np.float32)
+            .transpose(2, 1, 0)
+            .reshape(-1, self.out_channels)
+        )
+        return patches.reshape(rows, -1) @ w + np.asarray(bias, np.float32)
 
 
 class ImagePatches(iron.Graph):
