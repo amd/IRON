@@ -89,3 +89,14 @@ key/value cache is a list -- true of every dense model so far, not of a
 hybrid one) and a real environment gotcha that looked exactly like NPU
 lock contention until isolated (`export PYTHONPATH=.` must extend, not
 overwrite, the `pyxrt` path `xrt/setup.sh` sets).
+
+A context-length sweep (`deck/MEASUREMENT_PROTOCOL.md`, 1024 to 32640
+tokens, greedy, full-ELF device loop, 5 iterations + 1 discarded
+warm-up) is in `skill-ports/lfm2-1.2b/stats.md` and summarized in
+`strix-halo-220/validation-sweep.md`: decode tok/s falls gently from
+14.38 to 12.38 over the full range (~14%), prefill tok/s rises with
+context as dispatch overhead amortizes. KL(oracle||device) is measured
+at 1024/2048 tokens of context only -- the teacher-forced accuracy
+check's oracle cost scales worse than linearly with context and became
+intractable (not guessed: timed) past about 2048 tokens in one session's
+budget; points beyond it are performance-only, labeled as such.
