@@ -993,6 +993,32 @@ A model's device test goes in `iron/applications/<name>/test.py`: CI's
 example suite runs `iron/applications/`, and the benchmark history names a
 row by that directory.
 
+### Whisper-large-v3-turbo
+
+**Status: in progress** (see its own README.md for exactly what is
+verified). The first encoder-decoder model: `iron/applications/whisper/`
+holds `WhisperEncoder` (a 32-layer bidirectional audio encoder, log-mel
+through the device, not a `CausalLM`: one compile a clip, no decode step)
+and `WhisperDecoder` (a 4-layer causal `CausalLM` subclass with one
+cross-attention sub-layer a block, reading the encoder's static per-layer
+k/v -- written once a clip via `compiled_graph.write()`, the same
+mechanism `CausalLM.generate` uses for its draws, since the two towers are
+separately compiled graphs with no other way to share device state).
+Both towers are a plain pre-norm transformer (`LayerNorm` with a learned
+weight and bias, a GELU feed-forward, every projection but `k_proj`
+biased) rather than the `RMSNorm`/SwiGLU/RoPE shape every decoder-only
+model here shares.
+
+- **Required files**: `model.safetensors` (`openai/whisper-large-v3-turbo`)
+- **Default location**: `/srv/whisper-large-v3-turbo/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
+- **Run**: `pytest iron/applications/whisper/`
+- **Known gap**: the NPU-vs-oracle accuracy gate (`test_whisper_accuracy`)
+  is marked `xfail`, blocked on a real, measured `MHA` limit (`kv_len`
+  must be a whole 64-row block at least `seq_pad` long, so a model whose
+  valid key count is not itself 64-aligned cannot mask the padding out of
+  attention with a literal bound) rather than this model's own wiring;
+  see its README.
+
 ### AIE Kernel Reference
 
 See the [mlir-aie kernel library README](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/README.md) for the catalog of available kernels:
