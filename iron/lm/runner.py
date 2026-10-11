@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 import iron
-from iron.common.graph.narrowing import CostTable, JointNarrowing
+from iron.common.graph.narrowing import CostTable, JointNarrowing, NarrowingKinds
 
 from .checkpoint import Checkpoint, Layout, load_weights, random_weights
 from .decoder import CausalLM, Config, Oracle
@@ -111,15 +111,23 @@ class Runner:
         return cls(config=config, seed=args.random_weights)
 
     def npu(
-        self, cost_table: Path | None = None, boundaries: str | None = None
+        self,
+        cost_table: Path | None = None,
+        boundaries: str | None = None,
+        kinds: NarrowingKinds | None = None,
     ) -> CausalLM:
         """The model compiled and loaded, weights uploaded. With a
         ``cost_table`` (``tune``) each version's designs are folded,
-        narrowed and packed by it; ``boundaries`` are its decode step's
-        (``CausalLM.load``).
+        narrowed and packed by it, restricted to ``kinds`` if given
+        (``NarrowingKinds()``, every kind, if not: today's plan);
+        ``boundaries`` are its decode step's (``CausalLM.load``).
         """
         model = self.model(self.config, self.weights)
-        tuner = None if cost_table is None else JointNarrowing(CostTable(cost_table))
+        tuner = (
+            None
+            if cost_table is None
+            else JointNarrowing(CostTable(cost_table), kinds=kinds or NarrowingKinds())
+        )
         release = None if self.checkpoint is None else self.checkpoint.release
         return model.load(release, tuner, boundaries)
 

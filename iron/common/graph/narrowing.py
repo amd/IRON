@@ -58,6 +58,12 @@ producer's design in place of two. Each the graph admits is priced by the
 same search over its folded graph, and taken where the model's time drops,
 the cheapest first; a fold changing a design the table does not hold is
 not taken.
+
+``NarrowingKinds`` names which of these three the search takes, each
+independent of the others: widths, folds, packs. Every kind on
+(``JointNarrowing``'s default) is the search above, unchanged; a kind off
+leaves that decision at the graph's own default rather than searching it
+at all, so an ablation can measure one decision's gain at a time.
 """
 
 from __future__ import annotations
@@ -1064,6 +1070,30 @@ def _cheapest(
 
 
 @dataclasses.dataclass(frozen=True)
+class NarrowingKinds:
+    """Which decisions ``JointNarrowing`` may take, each independent of the
+    others. Every kind on (the default) is the plan it always chose before
+    this: a kind off leaves that decision at the graph's own default,
+    instead of refusing to tune at all.
+
+    Attributes:
+        widths: An alternate tunable setting per design
+            (``JointNarrowing._candidates``); off, every design keeps the
+            width it was traced at.
+        folds: Fewer steps, a step fused into its neighbour's kernel
+            (``JointNarrowing.tune``'s search over ``foldings``); off, the
+            graph is tuned as traced, with no fold search run at all.
+        packs: Two designs sharing one device (``JointNarrowing._packed``'s
+            search over connected sets); off, each design is its own
+            device, as an xclbin chain already runs every design.
+    """
+
+    widths: bool = True
+    folds: bool = True
+    packs: bool = True
+
+
+@dataclasses.dataclass(frozen=True)
 class JointNarrowing:
     """Choose tunables and packs for a traced graph; pass as ``coresident=``
     to ``Graph.compile``.
@@ -1082,6 +1112,9 @@ class JointNarrowing:
             (``CostTable.step_against``).
         tuning_cache: Where the packs search chose persist across
             processes, taken again while every pack still fits.
+        kinds: Which of widths, folds and packs this search may take;
+            every kind on (``NarrowingKinds()``, the default) is the plan
+            it has always chosen.
     """
 
     table: CostTable = dataclasses.field(compare=False)
@@ -1091,6 +1124,7 @@ class JointNarrowing:
     fold_runs: int = FOLD_RUNS
     confidence: float = CONFIDENCE
     tuning_cache: Path = dataclasses.field(default=TUNING_CACHE, compare=False)
+    kinds: NarrowingKinds = NarrowingKinds()
 
     def tune(self, traced: TracedGraph, dev, dispatch: str) -> Tuning:
         """Choose the folds, tunables and packs of ``traced`` for ``dev``,
@@ -1116,6 +1150,8 @@ class JointNarrowing:
         # held throughout, so its id stays its own.
         keyed: dict[int, str] = {}
         plain = self._narrow(traced, dev, keyed)
+        if not self.kinds.folds:
+            return plain
         keys = set(cost_keys(traced, dev, keyed))
         made = Made(dev)
         ways, every = foldings(traced, dev, self.fold_runs, made)
@@ -1370,41 +1406,43 @@ class JointNarrowing:
             best = min(candidates[i], key=lambda v: device_cost((i,), (v,), e))
             alone.append((device_cost((i,), (best,), e), best, e))
 
-        packs: list[_Pack] = []
-        for members in self._connected(runlist, measured, candidates, budget):
-            entries = runlist.entries(frozenset(runlist.order[i] for i in members))
-            ranked = [
-                sorted(
-                    ((member_cost(i, v, entries), v) for v in candidates[i]),
-                    key=lambda cv: cv[0],
+        chosen_packs: list[_Pack] = []
+        if self.kinds.packs:
+            packs: list[_Pack] = []
+            for members in self._connected(runlist, measured, candidates, budget):
+                entries = runlist.entries(frozenset(runlist.order[i] for i in members))
+                ranked = [
+                    sorted(
+                        ((member_cost(i, v, entries), v) for v in candidates[i]),
+                        key=lambda cv: cv[0],
+                    )
+                    for i in members
+                ]
+                # Ranked as each member alone, then priced as the pack where measured.
+                options = sorted(
+                    (
+                        (device_cost(members, pick, entries), pick)
+                        for _, pick in _cheapest(ranked, budget, self.fit_attempts)
+                    ),
+                    key=lambda option: option[0],
                 )
-                for i in members
-            ]
-            # Ranked as each member alone, then priced as the pack where measured.
-            options = sorted(
-                (
-                    (device_cost(members, pick, entries), pick)
-                    for _, pick in _cheapest(ranked, budget, self.fit_attempts)
-                ),
-                key=lambda option: option[0],
-            )
-            if not options:
-                continue
-            pack = _Pack(members, entries, options)
-            # The parity can move the total by one reset either way.
-            if self._gain(pack, alone) + table.reset_us > 0:
-                packs.append(pack)
+                if not options:
+                    continue
+                pack = _Pack(members, entries, options)
+                # The parity can move the total by one reset either way.
+                if self._gain(pack, alone) + table.reset_us > 0:
+                    packs.append(pack)
 
-        while True:
-            chosen_packs = self._partition(runlist, alone, packs)
-            refused = [p for p in chosen_packs if not self._fit(p.combo, fitted)]
-            if not refused:
-                break
-            for p in refused:
-                while p.options and not self._fit(p.combo, fitted):
-                    p.options.pop(0)
-                if not p.options or self._gain(p, alone) + table.reset_us <= 0:
-                    packs.remove(p)
+            while True:
+                chosen_packs = self._partition(runlist, alone, packs)
+                refused = [p for p in chosen_packs if not self._fit(p.combo, fitted)]
+                if not refused:
+                    break
+                for p in refused:
+                    while p.options and not self._fit(p.combo, fitted):
+                        p.options.pop(0)
+                    if not p.options or self._gain(p, alone) + table.reset_us <= 0:
+                        packs.remove(p)
 
         picked = [best for _, best, _ in alone]
         for p in chosen_packs:
@@ -1451,6 +1489,7 @@ class JointNarrowing:
                     self.fit_attempts,
                     self.confidence,
                     expands,
+                    dataclasses.asdict(self.kinds),
                 ]
             ).encode()
         )
@@ -1465,10 +1504,13 @@ class JointNarrowing:
         self, op: Operator, dev, pinned: frozenset[str] = frozenset()
     ) -> list[Variant]:
         """The default setting, then every other one measured accurate at
-        every point the default is priced at, and at those alone.
+        every point the default is priced at, and at those alone; the
+        default alone where ``kinds.widths`` is off.
         """
         found = variants(op, dev, pinned)
         default = found[0]
+        if not self.kinds.widths:
+            return [default]
         steps = self.table.steps
         if default.key not in steps:
             return [default]

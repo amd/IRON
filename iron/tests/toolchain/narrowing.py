@@ -31,6 +31,7 @@ from iron.common.graph.narrowing import (
     Calibration,
     CostTable,
     JointNarrowing,
+    NarrowingKinds,
     PackCost,
     PointCost,
     Runlist,
@@ -1455,6 +1456,71 @@ def test_an_xclbin_chain_folds_where_it_saves_a_dispatch(gate_us, tmp_path, npu2
     else:
         assert tuning.folds == ()
         assert tuning.predicted_us == tuning.baseline_us
+
+
+def test_kinds_all_matches_the_untouched_default(tmp_path, npu2):
+    # NarrowingKinds() is every JointNarrowing's default: naming it plainly
+    # chooses the same plan as not naming it at all.
+    traced, _, table = _add_silu(tmp_path, npu2)
+    fit_cache = tmp_path / "fits"
+    plain = JointNarrowing(table, fit_cache=fit_cache).tune(traced, npu2, "fused")
+    named = JointNarrowing(table, fit_cache=fit_cache, kinds=NarrowingKinds()).tune(
+        traced, npu2, "fused"
+    )
+    assert {k: v.key for k, v in named.chosen.items()} == {
+        k: v.key for k, v in plain.chosen.items()
+    }
+    assert named.groups == plain.groups and named.folds == plain.folds
+
+
+def test_kinds_widths_off_keeps_every_design_at_its_default(tmp_path, npu2):
+    # With every other kind on, the same table narrows SiLU's width
+    # (test_an_inexact_width_is_taken_only_if_accurate); off, it does not.
+    traced, ops, table = _add_silu(tmp_path, npu2)
+    tuner = JointNarrowing(
+        table, fit_cache=tmp_path / "fits", kinds=NarrowingKinds(widths=False)
+    )
+    tuning = tuner.tune(traced, npu2, "fused")
+    assert all(k == v.key for k, v in tuning.chosen.items())
+
+
+def test_kinds_packs_off_shares_no_device(tmp_path, npu2):
+    # Same table as test_packs_designs_apart_in_first_use_order, which packs
+    # add and silu onto one device by default; off, each stays its own,
+    # even reusing the tuning cache a packed run already wrote to.
+    traced, ops, table = _add_silu(tmp_path, npu2)
+    fit_cache, tuning_cache = tmp_path / "fits", tmp_path / "tunings"
+    packed = JointNarrowing(table, fit_cache=fit_cache, tuning_cache=tuning_cache).tune(
+        traced, npu2, "fused"
+    )
+    assert packed.groups != ()
+    tuner = JointNarrowing(
+        table,
+        fit_cache=fit_cache,
+        tuning_cache=tuning_cache,
+        kinds=NarrowingKinds(packs=False),
+    )
+    tuning = tuner.tune(traced, npu2, "fused")
+    assert tuning.groups == ()
+    # Widths still narrow: packs alone was turned off.
+    add, silu = cost_key(ops["ElementwiseAdd"]), cost_key(ops["SiLU"])
+    assert any(tuning.chosen[k].key != k for k in (add, silu))
+
+
+def test_kinds_folds_off_takes_no_fold(tmp_path, npu2):
+    # Same table as test_a_fold_is_taken_where_the_model_says_it_gains,
+    # which folds SiLU into the gate by default; off, the fold search does
+    # not even run.
+    traced, table = _swiglu(tmp_path, npu2, gate_us=11.0)
+    tuner = JointNarrowing(
+        table, fit_cache=tmp_path / "fits", kinds=NarrowingKinds(folds=False)
+    )
+    tuning = tuner.tune(traced, npu2, "fused")
+    assert tuning.folds == ()
+    applied, _ = tuning.apply(traced, npu2)
+    assert [type(s.op).__name__ for s in applied.steps] == [
+        type(s.op).__name__ for s in traced.steps
+    ]
 
 
 def test_cache_keys_follow_the_build_the_values_and_the_inputs(npu2):
