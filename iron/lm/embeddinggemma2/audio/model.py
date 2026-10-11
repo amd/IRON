@@ -20,7 +20,7 @@ from ml_dtypes import bfloat16, finfo
 import iron
 from iron.common import Scratchpad
 from iron.common.graph.narrowing import JointNarrowing
-from iron.lm import Layout, checkpoint_shapes, load_weights
+from iron.lm import Layout, checkpoint_shapes, filterbank, layers, load_weights
 from iron.operators.axpy import AXPY
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
@@ -28,9 +28,6 @@ from iron.operators.depthwise_conv1d import DepthwiseConv1d
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gemm import GEMM
-from iron.operators.limbs import Limbs, stacked
-from iron.operators.log import Log
-from iron.operators.magnitude import Magnitude
 from iron.operators.relu import ReLU
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.sigmoid import Sigmoid
@@ -218,22 +215,7 @@ class LogMel:
         c = config
         self.config = config
         self.window = np.hanning(c.frame + 1)[:-1].astype(np.float32)
-        # HTK mel triangles over the FFT bins, unnormalized.
-        mel = np.linspace(0, 2595 * math.log10(1 + c.max_hz / 700), c.mels + 2)
-        edges = 700 * (10 ** (mel / 2595) - 1)
-        bins = np.linspace(0, c.sample_rate // 2, c.fft // 2 + 1)
-        slopes = edges[None, :] - bins[:, None]
-        widths = np.diff(edges)
-        self.filters = np.maximum(
-            0, np.minimum(-slopes[:, :-2] / widths[:-1], slopes[:, 2:] / widths[1:])
-        )
-        # The rfft as a matrix: `(frame, 2 * bins)`, the real parts then the
-        # imaginary, the window folded in.
-        angle = 2 * np.pi * np.arange(c.frame)[:, None] * np.arange(bins.size) / c.fft
-        window = self.window.astype(np.float64)[:, None]
-        self.basis = np.concatenate(
-            [window * np.cos(angle), -window * np.sin(angle)], axis=1
-        )
+        self.filters = filterbank(c.fft, c.mels, c.sample_rate, c.max_hz)
 
     def __call__(self, waveform: np.ndarray) -> tuple[np.ndarray, int]:
         """The `(frames, mels)` float32 features of a mono `waveform` at
@@ -265,12 +247,11 @@ class AudioTower(SimpleNamespace):
     `max_tokens`, and per call the valid frames, `n`, the rows of the
     first convolution's output that are valid, and `tokens`, the soft
     tokens, which bound the operators over each. Its features are
-    `LogMel`'s, each GEMM over float32 operands as six products of their
-    bf16 limbs. The frame after the valid ones is zeroed, as are the first
-    convolution's rows after its valid ones before the second reads them,
-    as Hugging Face's mask does. Past that nothing masks padding: the
-    attention and the light convolution look only back, so a valid token
-    never reads a padded one.
+    `iron.lm.LogMel`'s, the host `LogMel`'s on the NPU. The frame after the
+    valid ones is zeroed, as are the first convolution's rows after its
+    valid ones before the second reads them, as Hugging Face's mask does.
+    Past that nothing masks padding: the attention and the light convolution
+    look only back, so a valid token never reads a padded one.
 
     Each subsampling convolution is a GEMM over the rows a call's patterns
     gather, its weight centered over the output channels so that its layer
@@ -322,15 +303,15 @@ class AudioTower(SimpleNamespace):
         self.output_proj = weights.output_proj
         self.output_bias = iron.weight(np.tile(weights.output_bias, (T, 1)))
         self.projection = weights.projection
-        logmel = LogMel(config)
-        bins = logmel.filters.shape[0]
-        # The bins padded to whole 64-column GEMM tiles, the padding zero.
-        width = -(-bins // 64) * 64
-        dft = np.zeros((c.frame, 2 * width))
-        dft[:, :bins] = logmel.basis[:, :bins]
-        dft[:, width : width + bins] = logmel.basis[:, bins:]
-        self.dft = stacked(dft)
-        self.filters = stacked(np.pad(logmel.filters, ((0, width - bins), (0, 0))))
+        self.log_mel = layers.LogMel(
+            frame=c.frame,
+            hop=c.hop,
+            fft=c.fft,
+            mels=c.mels,
+            sample_rate=c.sample_rate,
+            max_hz=c.max_hz,
+            mel_floor=c.mel_floor,
+        )
         self.features = iron.state((4 * T + 2, c.mels))
         self.zero_mel = np.zeros((1, c.mels), bfloat16)
         self.subsampled = iron.state((2 * T + 2, self.slots))
@@ -412,19 +393,8 @@ class AudioTower(SimpleNamespace):
                 in front of the clip, then the clip, zero past it.
             frames: The per-call valid frames, an int32 value.
         """
-        c = self.config
-        F = wave.shape[0] // c.hop - 1
-        # Frame f is hops f and f + 1; in three dimensions, as d1 wraps at
-        # 1023 and d2 does not, so that one descriptor holds it.
-        windows = TensorAccessPattern(
-            wave.shape, 0, [F // 4, 4, c.frame], [4 * c.hop, c.hop, 1]
-        )
-        a = Copy(wave, src=windows, dtype=np.float32).reshape(F, c.frame)[:frames]
-        a = Limbs(a)
-        exact = dict(dtype_out=np.float32, emulate_bf16_mmul_with_bfp16=False)
-        spectrum = GEMM(a, self.dft, tile_m=32, **exact)
-        energy = GEMM(Limbs(Magnitude(spectrum)), self.filters, tile_m=32, **exact)
-        Log(energy, self.features[1 : F + 1], offset=c.mel_floor)
+        F = wave.shape[0] // self.config.hop - 1
+        self.log_mel(wave, self.features[1 : F + 1], frames=frames)
         Copy(self.zero_mel, self.features[frames + 1])
 
     def __call__(self, wave, n, frames, tokens):
