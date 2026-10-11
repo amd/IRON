@@ -15,6 +15,8 @@ from ml_dtypes import bfloat16
 
 from iron.common.graph.fold import folded
 from iron.common.graph.visualize import Dataflow, render, side_by_side
+from iron.lm import unread_weights
+from iron.lm.embeddinggemma2.vision import model as vision
 from iron.lm.layers import SwiGLU
 from iron.tests.common.llama_model import small
 
@@ -79,6 +81,20 @@ def test_a_layer_drawn_alone_keeps_its_steps_and_marks_what_flows_in():
     assert not any(f"s{i}" in nodes(dot) for i in layer if layer[i] != 1)
     # The residual and the angles come in from steps not drawn.
     assert any(n.startswith("x_") for n in nodes(dot))
+
+
+def test_a_towers_layers_are_found_under_its_prefix():
+    c = vision.VISION
+    graph = vision.Vision(c, unread_weights(vision.layout(c), c.n_layers))
+    (shapes,) = graph.shapes()
+    t = graph.trace(**shapes)
+    drawn = set(Dataflow(t, layers={1}).drawn())
+    for i, s in enumerate(t.steps):
+        names = [Dataflow.root(h).name for h in s.inputs]
+        if any(n.startswith("vision.layers.1.") for n in names):
+            assert i in drawn
+        if any(n.startswith(("vision.layers.0.", "vision.layers.2.")) for n in names):
+            assert i not in drawn
 
 
 def test_a_folded_step_names_what_it_folded(npu2):

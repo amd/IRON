@@ -102,8 +102,9 @@ FAMILY = {
     "Dequant": "signal",
 }
 
-# A buffer of layer N: its weights, and a decoder's caches.
-LAYERED = re.compile(r"^(?:layers|keys|values|ple)\.(\d+)\b")
+# A buffer of layer N: its weights, a tower's too (vision.layers.N.q), and a
+# decoder's caches.
+LAYERED = re.compile(r"(?:^|\.)(?:layers|keys|values|ple)\.(\d+)(?:\.|$)")
 
 
 class Dataflow:
@@ -113,7 +114,7 @@ class Dataflow:
         traced: The graph's trace; a compiled version's is the graph it built,
             its folds applied and its designs narrowed.
         title: The caption.
-        layers: The layers drawn, by index (``layers.3.q`` is layer 3), or
+        layers: The layers drawn, by index (``layers.3.q`` and ``vision.layers.3.q`` are layer 3), or
             None for every step. A step reading no layer's buffer is in the
             layer of what it reads, or in none before the first layer and
             after the last.
@@ -152,7 +153,7 @@ class Dataflow:
         steps = self.traced.steps
         own = {}
         for i, s in enumerate(steps):
-            found = [LAYERED.match(self.root(h).name) for h in s.inputs + s.outputs]
+            found = [LAYERED.search(self.root(h).name) for h in s.inputs + s.outputs]
             own[i] = next((int(m.group(1)) for m in found if m), None)
         placed = [i for i, n in own.items() if n is not None]
         layer, made = {}, {}
