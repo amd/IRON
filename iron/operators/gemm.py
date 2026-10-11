@@ -534,10 +534,14 @@ class GEMM(Operator):
         # and passes the rest through, and under one on K it reduces over
         # the K tiles the bound covers: the DMAs still move all of A and B.
         bounded = "valid" in self.bound_extents and target.image == "elf"
-        n_rtp = 3 if bounded else 2
+        # A full ELF's cores read the bound on K from the scratchpad, an
+        # xclbin's from their runtime parameters, which the sequence writes.
+        k_bounded = "valid_k" in self.bound_extents
+        k_word = k_bounded and target.image != "elf"
+        n_rtp = (3 if bounded else 2) + k_word
 
         # Runtime parameters: [K_div_k, n_tiles_per_core, col_tiles if
-        # bounded] per core
+        # bounded, the bound on K if an xclbin's] per core
         rtps = [
             [
                 Buffer(
@@ -618,14 +622,7 @@ class GEMM(Operator):
                 C_l1l2_fifos[j][col] = c_tmp_fifos[j]
 
         n_valid_param = self.row_blocks_valid.param if bounded else None
-        k_valid_param = None
-        if "valid_k" in self.bound_extents:
-            if target.image != "elf":
-                raise ValueError(
-                    "GEMM: a per-call bound on K needs a full ELF; an xclbin's "
-                    "cores reduce over every K tile"
-                )
-            k_valid_param = self.k_valid.param
+        k_valid_param = self.k_valid.param if k_bounded and not k_word else None
 
         # Tasks for each worker to perform
         def core_fn(
@@ -651,8 +648,8 @@ class GEMM(Operator):
                 col_tiles = my_rtp[2]
             # (K tiles, whether they are multiplied), in the order they arrive.
             spans = [(rtp_K_div_k, True)]
-            if k_valid is not None:
-                k_bound = k_valid.read()
+            if k_bounded:
+                k_bound = my_rtp[n_rtp - 1] if k_word else k_valid.read()
                 k_compute = (k_bound + (k - 1)) // k
                 last = k_compute - 1
                 kept = k_bound - last * k
@@ -675,7 +672,7 @@ class GEMM(Operator):
                         elem_in_a = in_a.acquire(1)
                         elem_in_b = in_b.acquire(1)
                         if compute and multiply:
-                            if k_valid is not None:
+                            if k_bounded:
                                 with if_(arith.index_cast(kk, to=last.type) == last):
                                     k_tail_zero(elem_in_a, elem_in_b, kept)
                             matmul(elem_in_a, elem_in_b, acc)
@@ -721,7 +718,7 @@ class GEMM(Operator):
                             zero_kernel,
                             matmul_kernel,
                             convert_copy_kernel if use_larger_internal_buffer else None,
-                            matmul_kernel.k_tail if k_valid_param is not None else None,
+                            matmul_kernel.k_tail if k_bounded else None,
                             rtps[row][col],
                             workerBarriers[row][col],
                             acc_buffer,
@@ -747,6 +744,8 @@ class GEMM(Operator):
         self.n_tiles.bind(flat_rtps, 1)
         if bounded:
             self.col_tiles.bind(flat_rtps, 2)
+        if k_word:
+            self.k_valid.bind(flat_rtps, n_rtp - 1)
         finish.bind()
         return workers + [b for row in workerBarriers for b in row]
 

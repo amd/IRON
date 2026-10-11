@@ -7,7 +7,9 @@
 Attention over a padded prompt bounds its weights to the ``n`` valid keys,
 ``GEMM(Softmax(s[:, :n]), v[:n])``: the cores reduce over the K tiles ``n``
 covers, the last of them with its columns of A and rows of B past ``n``
-zeroed, and pass the rest through.
+zeroed, and pass the rest through. A full ELF's cores read ``n`` from the
+scratchpad, an xclbin's (each step its own dispatch, as NPU1 runs) from
+their runtime parameters.
 """
 
 import numpy as np
@@ -34,8 +36,11 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 
 @pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize(
+    "boundaries", [None, iron.each_step], ids=["full_elf", "xclbin"]
+)
 @pytest.mark.parametrize("mode", MODES)
-def test_the_reduction_stops_at_the_per_call_length(npu_runtime, mode):
+def test_the_reduction_stops_at_the_per_call_length(npu_runtime, mode, boundaries):
     """A and B are NaN past ``n``: a column or row past the bound that were
     multiplied, in the last K tile or past it, would bring a NaN into every
     element. Each micro-tile layout the cores zero it in is covered: A's,
@@ -48,7 +53,9 @@ def test_the_reduction_stops_at_the_per_call_length(npu_runtime, mode):
             return GEMM(a[:, :n], b[:, :n] if b_col_maj else b[:n], **MODES[mode])
 
     product = Product()
-    net = product.compile(a=(ROWS, SEQ), b=(D, SEQ) if b_col_maj else (SEQ, D))
+    net = product.compile(
+        a=(ROWS, SEQ), b=(D, SEQ) if b_col_maj else (SEQ, D), boundaries=boundaries
+    )
     tile_k = GEMM(M=ROWS, K=SEQ, N=D, **MODES[mode]).tile_k
 
     # bfp16's shared exponents hold a one-term product to past its tolerance,
@@ -105,13 +112,3 @@ def test_attention_reduces_over_the_valid_keys(npu_runtime):
         want = gemm.reference(weights, v_k)
         verdict = verify_buffer(got, "C", want, tolerance, bound=bound)
         assert verdict, f"n={n}: {verdict.detail}"
-
-
-@pytest.mark.supported_devices("npu2")
-def test_an_xclbin_refuses_a_bound_on_k():
-    class Attend(iron.Graph):
-        def body(self, a, b, *, n: Scratchpad[np.int32]):
-            return GEMM(a[:, :n], b[:n])
-
-    with pytest.raises(ValueError, match="a per-call bound on K needs a full ELF"):
-        Attend().compile(a=(ROWS, SEQ), b=(SEQ, D), boundaries=iron.each_step)
