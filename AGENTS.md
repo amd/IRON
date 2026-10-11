@@ -950,6 +950,29 @@ SwiGLU, plus a per-head RMSNorm on Q and K before RoPE and an epsilon of
   mapping; the weights and the caches are banks of at most 3.76 GB, a
   buffer object each (`allocator.BANK`), so the limit must cover one bank
 
+### Granite 4.2 3B
+
+A dense (no Mamba, MoE or hybrid layers) Granite model at
+`iron/applications/granite/` (`model.py`, its `profiles/`, `test.py`,
+`README.md`): `Granite`/`GraniteOracle` mix `iron.lm.blocks`'
+`Block`/`BlockOracle` in alongside `CausalLM`/`Oracle`, the same layer
+Llama 3 runs, and add only their own `Config`, the q-scale fold (its
+`attention_multiplier` replaces the library's hardcoded `1/sqrt(head_dim)`
+scale, folded into every layer's `q` once after loading), the untied
+output head, the `tokenizers.Tokenizer` wrapper and the sharded
+checkpoint (`Checkpoint` maps a `.safetensors.index.json`).
+
+Its ~7.3 GB of weights do not fit a full-ELF decode step (aiebu's 32-bit
+relocation addend overflows); it always runs `--each-step`, the form NPU1
+runs, and has no device loop.
+
+- **Required files**: `model.safetensors.index.json` and its two shards,
+  `tokenizer.json`, from
+  [`ibm-granite/granite-4.2-3b`](https://huggingface.co/ibm-granite/granite-4.2-3b)
+- **Default location**: `/srv/granite-4.2-3b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
+- **Run**: `pytest iron/applications/granite/`, or
+  `python -m iron.applications.granite.model model.safetensors.index.json tokenizer.json --each-step`
+
 ### EmbeddingGemma 2
 
 Its text encoder, audio and vision towers at
