@@ -6,9 +6,8 @@
 against its float32 oracle: each embedding's cosine to the oracle's, its
 norm, the cosine similarities a query gives two documents, and every call
 bit-identical to the first. The oracle, over text, a clip and an image,
-once against Hugging Face's processor and model. The text encoder runs on
-NPU1 as well, where each step is its own dispatch of an xclbin; on NPU2
-that form is checked too.
+once against Hugging Face's processor and model. On NPU1 each step is its
+own dispatch of an xclbin; on NPU2 that form is checked too.
 """
 
 import time
@@ -86,16 +85,16 @@ def oracle(encoder):
 
 @pytest.mark.supported_devices("npu2")
 class TestEachStep:
-    """The form NPU1 runs: each step its own dispatch of one xclbin, and
-    the host gathering the token embeddings. Its encoder is built and
-    dropped with the class, first: after any other test it would be held
-    beside the module's full-ELF one.
+    """The form NPU1 runs: each step its own dispatch of an xclbin. Its
+    encoder, the towers' included, is built and dropped with the class,
+    first: after any other test it would be held beside the module's
+    full-ELF ones.
     """
 
     @pytest.fixture(scope="class")
     def each_step(self, module_npu_runtime):
         require(DIRECTORY / "model.safetensors", DIRECTORY / "tokenizer.json")
-        yield Encoder(DIRECTORY, boundaries=iron.each_step)
+        yield Encoder(DIRECTORY, towers=True, boundaries=iron.each_step)
         if aie_utils.DefaultNPURuntime is not None:
             aie_utils.DefaultNPURuntime.cleanup()
 
@@ -114,6 +113,9 @@ class TestEachStep:
         assert similarity >= MIN_COSINE, similarity
         np.testing.assert_allclose(np.linalg.norm(got), 1, rtol=NORM_RTOL)
         np.testing.assert_array_equal(each_step.graph.encode(tokens), got)
+
+    def test_embeddinggemma_2_each_step_multimodal(self, each_step, record_property):
+        check_mixed(each_step, *MIXED["both"], record_property)
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
@@ -213,12 +215,13 @@ MIXED = {
 }
 
 
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("text,audio,image", MIXED.values(), ids=MIXED.keys())
-def test_embeddinggemma_2_multimodal(multimodal, text, audio, image, record_property):
-    c = multimodal.config
-    got = multimodal(text, "query", audio=audio, image=image)
-    audio_oracle, vision_oracle = multimodal.tower_oracles()
+def check_mixed(encoder, text, audio, image, record_property):
+    """The embedding of ``text`` with ``audio`` and ``image`` against the
+    oracle fed its own towers' soft tokens.
+    """
+    c = encoder.config
+    got = encoder(text, "query", audio=audio, image=image)
+    audio_oracle, vision_oracle = encoder.tower_oracles()
     soft = {}
     if audio is not None:
         soft[c.audio_token] = audio_oracle(*LogMel(AUDIO)(audio))
@@ -226,20 +229,26 @@ def test_embeddinggemma_2_multimodal(multimodal, text, audio, image, record_prop
         soft[c.image_token] = vision_oracle(
             *patches(image, VISION.image_tokens, VISION)
         )
-    tokens = multimodal.tokens(
+    tokens = encoder.tokens(
         text,
         "query",
         len(soft.get(c.audio_token, ())),
         len(soft.get(c.image_token, ())),
     )
-    similarity = cosine(got, multimodal.oracle()(tokens, soft=soft))
+    similarity = cosine(got, encoder.oracle()(tokens, soft=soft))
     record_property("Cosine", similarity)
     record_property("Norm", float(np.linalg.norm(got)))
     assert similarity >= MIN_COSINE_MIXED, similarity
     np.testing.assert_allclose(np.linalg.norm(got), 1, rtol=NORM_RTOL)
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize("text,audio,image", MIXED.values(), ids=MIXED.keys())
+def test_embeddinggemma_2_multimodal(multimodal, text, audio, image, record_property):
+    check_mixed(multimodal, text, audio, image, record_property)
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_embeddinggemma_2_determinism(multimodal):
     # Interleaved, so that a version reading what another left in the shared
     # arena or state differs from its first call.

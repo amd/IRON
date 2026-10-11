@@ -184,7 +184,7 @@ PROCESSED = [
 ]
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("shape, tokens", PROCESSED)
 def test_image_processor(processor, shape, tokens, record_property):
     image = synthetic_image(*shape)
@@ -255,7 +255,7 @@ def test_vision_oracle_matches_hugging_face(weights, oracle):
     )
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("name", list(IMAGES))
 def test_vision_accuracy(vision, oracle, name, record_property):
     (height, width), tokens = IMAGES[name]
@@ -273,7 +273,7 @@ def test_vision_accuracy(vision, oracle, name, record_property):
 
 
 @pytest.mark.bench
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("name", ["image", "video_frame"])
 def test_vision_latency(vision, name, record_property):
     (height, width), tokens = IMAGES[name]

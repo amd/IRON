@@ -60,7 +60,6 @@ pytest iron/applications/embeddinggemma_2/
 
 Each embedding against the oracle's (its cosine and its norm), the
 truncations, a query ranking two documents, and the latency of a query,
-a long document and one past the sliding window, on NPU1 and NPU2. On
-NPU1 each step is its own dispatch of an xclbin, and the host gathers the
-token embeddings; `TestEachStep` checks that form on NPU2. The towers and
-the multimodal versions are NPU2's alone.
+a long document and one past the sliding window, and text with a clip and
+an image, on NPU1 and NPU2. On NPU1 each step is its own dispatch of an
+xclbin; `TestEachStep` checks that form on NPU2.
