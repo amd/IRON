@@ -7,6 +7,7 @@ import ml_dtypes
 import numpy as np
 import pytest
 from aie.iron.device import from_name
+from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
@@ -14,8 +15,14 @@ import iron
 from iron.common import Scratchpad, UnaryElementwise, Unresolvable
 from iron.common.design.build import build_design
 from iron.common.elementwise import _interval
+from iron.common.graph.costcache import CostCache
+from iron.common.harness import vectors
 from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.gelu import GELU
 from iron.operators.relu import ReLU
+from iron.operators.sigmoid import Sigmoid
+from iron.operators.silu import SiLU
+from iron.operators.tanh import Tanh
 
 pytestmark = pytest.mark.usefixtures("npu2")
 NPU2 = from_name("npu2", n_cols=8)
@@ -122,3 +129,19 @@ def test_a_chains_interval_is_what_compare_admits(tol):
         past = np.nextafter(at, np.asarray(away, bfloat16))
         assert compare(at, v, tol, **bound).n_mismatch == 0
         assert compare(past, v, tol, **bound).n_mismatch == v.size
+
+
+@pytest.mark.parametrize("device", ["npu1", "npu2"])
+@pytest.mark.parametrize("cls", [GELU, SiLU, Tanh, Sigmoid], ids=lambda c: c.__name__)
+def test_an_activation_is_judged_by_its_devices_row(request, device, cls):
+    dev = request.getfixturevalue(device)
+    op = cls(size=2048).resolved(dev)
+    kernel = op.kernel()
+    row = kernel.contract_for(resolve_target_arch(dev))
+    assert op.gate() == row.tolerance
+    v = vectors(op)
+    (x,), (y,) = v.inputs.values(), v.outputs.values()
+    lines = x.reshape(-1, kernel.arg_shape(0)[0])
+    want = np.asarray(row.reference(lines)).astype(y.dtype)
+    np.testing.assert_array_equal(y.reshape(want.shape), want)
+    assert CostCache.judged_key("default", "entry", op, op)
