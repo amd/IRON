@@ -10,6 +10,13 @@ it in-process.
 
 ``--random-weights SEED`` runs it on drawn weights and random prompts, on
 a host without the checkpoint, and ``--max-seq-len`` at another context.
+
+``test_smollm2_1_7b_instruct_prompt_deep_in_the_cache`` is expected to fail
+with ``ERT_CMD_STATE_TIMEOUT`` at the default ``max_seq_len`` (8192): full
+MHA has no grouped-query compression, so a prompt chunk's attention over
+the whole cache streams about four times a same-context GQA model's K and
+V, past the amdxdna watchdog's default timeout. See the application's
+README ("Full MHA, and the prompt chunk's watchdog cost").
 """
 
 import dataclasses
