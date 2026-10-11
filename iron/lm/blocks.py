@@ -63,7 +63,7 @@ from .causal import Step
 NEG_INF = ml_dtypes.finfo(bfloat16).min
 
 
-def project(x, weight, bias=None, k_tile=None, tile_n=None, **gemv):
+def project(x, weight, bias=None, k_tile=None, tile_n=None, small=False, **gemv):
     """``x @ weight.T`` for a checkpoint's ``(out, in)`` weight, plus
     ``bias`` if given, broadcast over every row (a linear layer's bias,
     Qwen 2's q/k/v projections): a GEMV for one row (a GEMV's output is a
@@ -76,14 +76,41 @@ def project(x, weight, bias=None, k_tile=None, tile_n=None, **gemv):
     no multiple of 128 divides it, but ``tile_n=32``'s ``ct_max_k`` (32)
     does, at ``k_tile=192``). ``gemv`` are the GEMV's tunables, where the
     profile cannot tell it from another of its shape.
+
+    ``small=True`` routes the multi-row path through the plain
+    ``iron.operators.GEMM`` instead of ``flm.GEMM``: the latter's compiled
+    MLIR is rejected by aiecc (``'aie.objectfifo.pool' op segment 0 has no
+    drainer``) whenever ``k_tile`` is below ~256, a compiler gap that a
+    `K`/`N` under 256 throughout (every 1x1 conv in a small CNN) can never
+    avoid by choice of tunables alone.
+    Its own ``tile_k``/``tile_n`` default to the smaller of 32 or the real
+    `K`/`N` (a whole dimension in one tile, as at `K`/`N` 16, overflows a
+    core's 64 KiB L1 past 64-ish); give ``k_tile``/``tile_n`` explicitly to
+    override. ``small=False`` (the default) is every existing caller's
+    unchanged path.
     """
     if len(x.shape) == 2 and x.shape[0] > 1:
-        tiled = {}
-        if k_tile is not None:
-            tiled["k_tile"] = k_tile
-        if tile_n is not None:
-            tiled["tile_n"] = tile_n
-        y = FLMGEMM(x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled)
+        if small:
+            N, K = weight.shape
+            y = GEMM(
+                x,
+                weight,
+                b_col_maj=True,
+                tile_k=k_tile or min(K, 32),
+                tile_n=tile_n or min(N, 32),
+                num_aie_columns=1,
+                prio_accuracy=True,
+                emulate_bf16_mmul_with_bfp16=False,
+            )
+        else:
+            tiled = {}
+            if k_tile is not None:
+                tiled["k_tile"] = k_tile
+            if tile_n is not None:
+                tiled["tile_n"] = tile_n
+            y = FLMGEMM(
+                x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled
+            )
     else:
         y = GEMV(weight, x, **gemv)
     if bias is None:
@@ -331,17 +358,58 @@ class Conv2d(iron.Graph):
         else:
             self.matrix = w.transpose(0, 2, 3, 1).reshape(C_out, k * k * C)
             self.matrix = self.matrix.astype(bfloat16)
+        if banded:
+            # The banded GEMM's M is out_rows (from the input's own row
+            # count), not out_width: flm's mac geometry needs it a multiple
+            # of 8 (confirmed by tracing the real shape), which a real
+            # image's out_width rarely is. Pad the input physically, up
+            # front, by a few extra (discarded) rows -- the padding rows'
+            # own output is never read, so zero is exact, not approximate.
+            # Only when a caller's own input holds exactly width + 2 *
+            # padding rows (every caller this model and EG2's audio tower
+            # use): a caller that instead holds many output windows' worth
+            # in one buffer (EG2's own streaming convention, out_rows far
+            # past out_width already) is left to its own, usually already
+            # aligned, out_rows -- body() falls back to the unpadded path
+            # whenever the input it is actually given does not match.
+            unit = 8
+            self.native_R = width + 2 * padding
+            self.gemm_rows = -(-self.out_width // unit) * unit
+            if self.gemm_rows != self.out_width:
+                self.gemm_R = (self.gemm_rows - 1) * stride + k
+                line = width * C
+                self.gemm_border = np.zeros((self.gemm_R, line), bfloat16)
+                self.gemm_padded = iron.state((self.gemm_R, line))
+            else:
+                self.gemm_padded = None
 
     def body(self, x, y=None, *, rows: Scratchpad[np.int32]):
         k, s, C = self.kernel, self.stride, self.channels
         R, line = x.shape
         out_rows = (R - k) // s + 1
+        padded = (
+            self.banded
+            and self.gemm_padded is not None
+            and y is None
+            and R == self.native_R
+        )
+        if padded:
+            Copy(self.gemm_border, self.gemm_padded)
+            dst = TensorAccessPattern((self.gemm_R, line), 0, [R, line], [line, 1])
+            Copy(x, self.gemm_padded, dst=dst)
+            x, R, out_rows = Copy(self.gemm_padded[:]), self.gemm_R, self.gemm_rows
         if self.banded:
             pattern = TensorAccessPattern(
                 (R, line), 0, [out_rows, k * line], [s * line, 1]
             )
-            a = Copy(x, src=pattern).reshape(out_rows, k * line)[:rows]
-            return GEMM(a, self.matrix, *([] if y is None else [y]), **ACCURATE)
+            a = Copy(x, src=pattern).reshape(out_rows, k * line)
+            # A literal (not Scratchpad) rows bound, every caller's here,
+            # would shrink a padded a's static shape right back to the
+            # unpadded one; bound it on the GEMM's output instead, where
+            # the padding rows' own result is simply never read.
+            a = a if padded else a[:rows]
+            out = GEMM(a, self.matrix, *([] if y is None else [y]), **ACCURATE)
+            return out[:rows] if padded else out
         n = out_rows * self.out_width
         patches = TensorAccessPattern(
             (R, line),
