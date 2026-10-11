@@ -7,10 +7,11 @@
 compiles up front in the packaging asked for, and ``Runner`` and ``main``,
 a decoder's checkpoint, tokenizer and command line.
 
-``Checkpoint`` maps a ``.safetensors`` file. ``load_weights``
-places its tensors in a tree by a model's *layout*: each weight's path in
-the tree, its name in the checkpoint and its shape, ``{i}`` standing for a
-layer's index in both:
+``Checkpoint`` maps a ``.safetensors`` file, or, given its
+``.safetensors.index.json``, every shard a sharded checkpoint splits across.
+``load_weights`` places its tensors in a tree by a model's *layout*: each
+weight's path in the tree, its name in the checkpoint and its shape,
+``{i}`` standing for a layer's index in both:
 
 ```python
 {
@@ -109,8 +110,8 @@ class Config:
 Layout = dict[str, tuple[str, tuple[int, ...]]]
 
 
-class Checkpoint:
-    """A ``.safetensors`` file, mapped: ``tensors`` are read-only views of
+class _Shard:
+    """One ``.safetensors`` file, mapped: ``tensors`` are read-only views of
     it, read only when touched. The format is an 8-byte header length, a
     JSON header giving each tensor's dtype, shape and byte range, and the
     data. It is read here because safetensors' own numpy loader has no
@@ -119,8 +120,8 @@ class Checkpoint:
 
     DTYPES = {"BF16": bfloat16, "F16": np.float16, "F32": np.float32}
 
-    def __init__(self, path):
-        self.path = Path(path)
+    def __init__(self, path: Path):
+        self.path = path
         with open(self.path, "rb") as f:
             # The mapping holds its own reference to the file.
             self._map = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
@@ -137,17 +138,56 @@ class Checkpoint:
             view = data[begin:end].view(self.DTYPES[t["dtype"]])
             self.tensors[name] = view.reshape(t["shape"])
 
-    def release(self, array: np.ndarray) -> None:
-        """Drop the process's pages of ``array`` if it is a view of the file;
-        anything else is left alone. It stays readable: a later read faults
-        the bytes back in. What it saves is a weight counted twice, on the
-        host and on the device.
+    def release(self, array: np.ndarray) -> bool:
+        """Drop the process's pages of ``array`` and report it was this
+        shard's, if it is a view of this file; leave anything else alone and
+        report so. It stays readable: a later read faults the bytes back in.
+        What it saves is a weight counted twice, on the host and on the
+        device.
         """
         begin = array.ctypes.data - self._address
         if not (array.flags.c_contiguous and 0 <= begin < len(self._map)):
-            return
+            return False
         start = begin - begin % mmap.PAGESIZE
         self._map.madvise(mmap.MADV_DONTNEED, start, begin + array.nbytes - start)
+        return True
+
+
+class Checkpoint:
+    """A ``.safetensors`` file, or, given its ``.safetensors.index.json``,
+    every shard a sharded checkpoint splits across (``weight_map``, next to
+    one another on disk), its tensors merged into one mapping, ``tensors``.
+    """
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self._shards = [_Shard(p) for p in self._shard_paths(self.path)]
+        self.tensors: dict[str, np.ndarray] = {}
+        for shard in self._shards:
+            overlap = sorted(self.tensors.keys() & shard.tensors.keys())
+            if overlap:
+                raise ValueError(f"{self.path}: {overlap} is in more than one shard")
+            self.tensors.update(shard.tensors)
+
+    @staticmethod
+    def _shard_paths(path: Path) -> list[Path]:
+        """``path`` itself, or, given an index, every shard it names,
+        resolved beside it.
+        """
+        if path.suffix != ".json":
+            return [path]
+        index = json.loads(path.read_text())
+        return [
+            path.parent / name for name in sorted(set(index["weight_map"].values()))
+        ]
+
+    def release(self, array: np.ndarray) -> None:
+        """Drop the process's pages of ``array`` if it is a view of one of
+        the checkpoint's files; anything else is left alone.
+        """
+        for shard in self._shards:
+            if shard.release(array):
+                return
 
 
 def checkpoint_shapes(layout: Layout, n_layers: int) -> dict[str, tuple[int, ...]]:

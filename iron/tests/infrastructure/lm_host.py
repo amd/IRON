@@ -209,6 +209,73 @@ def test_checkpoint_rejects_an_unsupported_dtype(tmp_path):
         Checkpoint(path)
 
 
+# Tier 1 -- a sharded checkpoint (Qwen3's own: two files and an index)
+# ##########################################################################
+
+
+def shard(tensors: dict, tmp_path: Path, split: int) -> Path:
+    """``tensors`` written as two ``.safetensors`` shards and the index
+    naming each tensor's shard, as Hugging Face's ``save_pretrained``
+    splits a checkpoint past its size cap. Returns the index's path.
+    """
+    names = list(tensors)
+    shards = {
+        "model-00001-of-00002.safetensors": names[:split],
+        "model-00002-of-00002.safetensors": names[split:],
+    }
+    weight_map = {}
+    for filename, keys in shards.items():
+        save_file({k: tensors[k] for k in keys}, tmp_path / filename)
+        weight_map.update({k: filename for k in keys})
+    index = tmp_path / "toy.safetensors.index.json"
+    index.write_text(json.dumps({"metadata": {}, "weight_map": weight_map}))
+    return index
+
+
+@pytest.fixture
+def sharded_toy_path(tmp_path):
+    return shard(toy_checkpoint(), tmp_path, split=5)
+
+
+def test_checkpoint_reads_a_sharded_index(sharded_toy_path):
+    tensors = Checkpoint(sharded_toy_path).tensors
+    expected = {
+        **load_file(sharded_toy_path.parent / "model-00001-of-00002.safetensors"),
+        **load_file(sharded_toy_path.parent / "model-00002-of-00002.safetensors"),
+    }
+    assert set(tensors) == set(expected)
+    for name, t in expected.items():
+        assert bitwise_equal(tensors[name], t), name
+
+
+def test_checkpoint_rejects_a_tensor_named_in_two_shards(tmp_path):
+    """Both files on disk hold every tensor (a malformed split): the index
+    names each shard once, but ``name`` is in both files' own headers.
+    """
+    tensors = toy_checkpoint()
+    name = next(iter(tensors))
+    save_file(tensors, tmp_path / "a.safetensors")
+    save_file(tensors, tmp_path / "b.safetensors")
+    weight_map = {k: "a.safetensors" for k in tensors}
+    weight_map[name] = "b.safetensors"
+    index = tmp_path / "both.safetensors.index.json"
+    index.write_text(json.dumps({"weight_map": weight_map}))
+    with pytest.raises(ValueError, match=re.escape(name)):
+        Checkpoint(index)
+
+
+def test_checkpoint_release_drops_the_right_shard(sharded_toy_path):
+    first_shard = sharded_toy_path.parent / "model-00001-of-00002.safetensors"
+    second_shard = sharded_toy_path.parent / "model-00002-of-00002.safetensors"
+    checkpoint = Checkpoint(sharded_toy_path)
+    weights = arrays(load_weights(checkpoint.tensors))
+    assert _resident_bytes(first_shard) > 0 and _resident_bytes(second_shard) > 0
+    for a in weights.values():
+        checkpoint.release(a)
+    assert _resident_bytes(first_shard) == 0
+    assert _resident_bytes(second_shard) == 0
+
+
 # Tier 1 -- the tree
 # ##########################################################################
 
@@ -383,3 +450,30 @@ def test_real_checkpoint_is_llama_3_2_1b():
     weights = load_weights(Checkpoint(real_checkpoint).tensors, LLAMA_3_2_1B)
     assert weights.embedding.dtype == bfloat16
     assert len(weights.layers) == LLAMA_3_2_1B.n_layers
+
+
+# Tier 2 -- Qwen3's real, sharded checkpoint (no NPU), gated on its presence
+# ##########################################################################
+
+real_qwen3_index = weights_dir("qwen3-1.7b") / "model.safetensors.index.json"
+requires_qwen3_checkpoint = pytest.mark.skipif(
+    not real_qwen3_index.exists(),
+    reason=f"qwen3-1.7b checkpoint not found at {real_qwen3_index}",
+)
+
+
+@requires_qwen3_checkpoint
+def test_real_qwen3_checkpoint_every_tensor_bitwise():
+    """Every tensor the index names, read from whichever of its two shard
+    files holds it, bitwise the shard's own.
+    """
+    tensors = Checkpoint(real_qwen3_index).tensors
+    index = json.loads(real_qwen3_index.read_text())
+    by_shard: dict[str, list[str]] = {}
+    for name, filename in index["weight_map"].items():
+        by_shard.setdefault(filename, []).append(name)
+    assert set(tensors) == set(index["weight_map"])
+    for filename, names in by_shard.items():
+        expected = load_file(real_qwen3_index.parent / filename)
+        for name in names:
+            assert bitwise_equal(tensors[name], expected[name]), name
