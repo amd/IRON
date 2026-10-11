@@ -31,6 +31,7 @@ import math
 from collections.abc import Callable
 
 import aie.utils as aie_utils
+import ml_dtypes
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
@@ -39,6 +40,7 @@ import iron
 from iron.common import Scratchpad
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
+from iron.operators.elementwise_max import ElementwiseMax
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
@@ -55,6 +57,10 @@ from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
 
 from .causal import Step
+
+# The most negative finite bfloat16: a window's padding and its one
+# even-count filler column, neither of which may win a max-pool's max.
+NEG_INF = ml_dtypes.finfo(bfloat16).min
 
 
 def project(x, weight, bias=None, k_tile=None, tile_n=None, **gemv):
@@ -312,7 +318,9 @@ class Conv2d(iron.Graph):
                         band[:, i, f + border] = w[:, 0, :, b].T
             self.matrix = band.reshape(k * width, self.out_line).astype(bfloat16)
         elif depthwise:
-            band = np.zeros((k, width, C, self.out_width + 2 * border, C_out), np.float32)
+            band = np.zeros(
+                (k, width, C, self.out_width + 2 * border, C_out), np.float32
+            )
             for f in range(self.out_width):
                 for b in range(k):
                     i = stride * f - padding + b
@@ -453,6 +461,110 @@ class Conv1d(iron.Graph):
             .reshape(-1, self.out_channels)
         )
         return patches.reshape(rows, -1) @ w + np.asarray(bias, np.float32)
+
+
+class MaxPool2d(iron.Graph):
+    """Max pooling, stride 1, same padding (the output is ``rows`` by
+    ``width`` too), of channels-last pixels, independently per channel: no
+    output pixel ever takes another channel's value, the way a weighted
+    ``Conv2d`` necessarily would.
+
+    A channels-last row has no run of one channel's own neighbors: they are
+    ``channels`` elements apart, so gathering one channel's ``kernel *
+    kernel`` window into a contiguous line (a reduction's own row) is not an
+    aligned DMA (a transfer shorter than a 4-byte, 2-element bf16 pair).
+    Instead, the ``kernel * kernel`` offsets each read a whole, contiguous,
+    already-aligned ``(rows, width * channels)`` shifted view of the padded
+    input, combined by a running ``ElementwiseMax``: at ``kernel=13`` that
+    is 168 element-wise passes over a small plane (SPP's own, 13x13x128),
+    not the tens of thousands of columns a prompt chunk's GEMMs move.
+
+    A fixed-size scratch arena (SPP's whole feature map, not a streamed
+    sequence) holds the input bordered by ``kernel // 2`` pixels of
+    ``NEG_INF`` either side, in both rows and columns, so a window at the
+    edge never admits a value the real convolution's "same" padding would
+    have excluded: ``max(real values, replicated or excluded) == max(real
+    values)`` only holds for an identity element of the reduction, which
+    ``-inf`` is for max and zero is not (the real input, post-SiLU, can be
+    slightly negative).
+
+    A call takes the input ``(rows, width * channels)`` and returns the
+    pooled output of the same shape.
+    """
+
+    def __init__(self, rows: int, width: int, channels: int, kernel: int):
+        if kernel % 2 == 0:
+            raise ValueError(
+                f"MaxPool2d: kernel ({kernel}) must be odd, for same padding"
+            )
+        pad = kernel // 2
+        self.rows, self.width, self.channels, self.kernel = (
+            rows,
+            width,
+            channels,
+            kernel,
+        )
+        self.pad = pad
+        padded_rows, padded_width = rows + 2 * pad, width + 2 * pad
+        self.padded_rows, self.padded_width = padded_rows, padded_width
+        self.border = np.full(
+            (padded_rows, padded_width * channels), NEG_INF, np.float32
+        ).astype(bfloat16)
+        self.padded = iron.state((padded_rows, padded_width * channels))
+
+    def body(self, x):
+        pad, k, C = self.pad, self.kernel, self.channels
+        rows, width = self.rows, self.width
+        pw = self.padded_width
+        Copy(self.border, self.padded)
+        interior = TensorAccessPattern(
+            (self.padded_rows, pw * C),
+            pad * pw * C + pad * C,
+            [rows, width * C],
+            [pw * C, 1],
+        )
+        Copy(x, self.padded, dst=interior)
+
+        def shifted(a, b):
+            view = TensorAccessPattern(
+                (self.padded_rows, pw * C),
+                a * pw * C + b * C,
+                [rows, width * C],
+                [pw * C, 1],
+            )
+            return Copy(self.padded, src=view)
+
+        running = shifted(0, 0)
+        for a in range(k):
+            for b in range(k):
+                if a == 0 and b == 0:
+                    continue
+                # A tile of one channel's own width, given explicitly: SPP's
+                # own row count (13 * 13 = 169) has no divisor an auto-tuned
+                # tile_size would find on its own.
+                running = ElementwiseMax(running, shifted(a, b), tile_size=C)
+        return running.reshape(rows, width * C)
+
+    def exact(self, x: np.ndarray) -> np.ndarray:
+        """The max pooling of ``x`` ``(rows, width * channels)`` in float32,
+        independent of the graph's own gather: ``np.pad`` with ``-inf``,
+        a sliding window per channel, taken as a whole (no bf16 rounding
+        along the way, unlike the graph's one rounding in ``Reduce``).
+        """
+        k, pad = self.kernel, self.pad
+        image = np.asarray(x, np.float32).reshape(self.rows, self.width, self.channels)
+        padded = np.pad(
+            image, ((pad, pad), (pad, pad), (0, 0)), constant_values=NEG_INF
+        )
+        windows = np.stack(
+            [
+                padded[a : a + self.rows, b : b + self.width]
+                for a in range(k)
+                for b in range(k)
+            ],
+            axis=0,
+        )  # (k*k, rows, width, channels)
+        return windows.max(axis=0).reshape(self.rows, self.width * self.channels)
 
 
 class ImagePatches(iron.Graph):

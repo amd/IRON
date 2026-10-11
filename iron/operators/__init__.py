@@ -55,6 +55,7 @@ _OPERATOR_MODULES = {
     "DepthwiseConv1d": "depthwise_conv1d",
     "Dequant": "dequant",
     "ElementwiseAdd": "elementwise_add",
+    "ElementwiseMax": "elementwise_max",
     "ElementwiseMul": "elementwise_mul",
     "Emit": "emit",
     "GELU": "gelu",
