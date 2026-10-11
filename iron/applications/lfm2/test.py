@@ -54,16 +54,21 @@ def model(runner, request, module_npu_runtime):
     yield runner.npu(request.config.getoption("--cost-table"))
 
 
-# KL(fp32 CPU || NPU), teacher-forced. Not yet measured on a device: this
-# host's NPU lock was held by other work every time this port tried it
-# (skill-ports/lfm2-1.2b/README.md has the exact commands and what they
-# check). These bounds are Llama 3.2 1B's own, a dense model of the same
-# emb_dim/n_heads/hidden_dim, as a starting point only -- loosen or
-# tighten them from a real run before trusting this gate.
-MAX_KL = {"Mean": 0.02, "P90": 0.04, "Max": 0.2}
+# KL(fp32 CPU || NPU), teacher-forced, on xcoradaie220's npu2, 2026-10-10:
+# test_lfm2_1_2b_accuracy measures a mean of 0.0013, a P90 of 0.0026 and a
+# max of 0.0032 (40 steps); across two chunks (prompt + decode spanning the
+# conv layers' window-cache carry, the part of this port least sure of
+# itself) a mean of 0.0057, a P90 of 0.0068 and a max of 0.0071 -- lower
+# than Llama 3.2 1B's own (a dense model, every layer attending, accrues
+# more bf16 error than LFM2's six attention layers of sixteen). One run
+# each, so real headroom over the measured max, not a tight bound.
+MAX_KL = {"Mean": 0.02, "P90": 0.03, "Max": 0.05}
 
-# KL(graph reference || NPU) of one decode step, deep in the context: also
-# unmeasured, also Llama 3.2 1B's own bound as a placeholder.
+# KL(graph reference || NPU) of one decode step, deep in the context
+# (max_seq_len - 1): measured 0.0214 (decode) and 1.4e-6 (a whole prompt
+# chunk at the deepest the caches hold), one run each, xcoradaie220 npu2,
+# 2026-10-10; Llama 3.2 1B's own bound (0.1) has comfortable headroom over
+# both and is kept as is rather than tightened from a single sample.
 DEEP_KL = 0.1
 
 

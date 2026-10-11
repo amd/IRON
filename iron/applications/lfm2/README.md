@@ -75,12 +75,17 @@ ELF (device loop) on NPU2 with it.
 
 ## Status
 
-Device-free: the numpy oracle matches Hugging Face's own forward pass
-(KL(HF||oracle) mean 6.6e-12, max 1.1e-10, 0/64 top-1 mismatches over 64
-teacher-forced positions of a real prompt); both the decode step and the
-prompt chunk trace and compile to a full ELF on NPU2, with the real
-checkpoint's weights loaded. Real NPU logits are not yet measured here --
-this host's NPU lock was held by other work each time this port tried it;
-see `stats.md`/`skill-gaps.md` in
-`skill-ports/lfm2-1.2b/` (not under this tree) for the exact commands
-still to run and what they should check.
+The numpy oracle matches Hugging Face's own forward pass (KL(HF||oracle)
+mean 6.6e-12, max 1.1e-10, 0/64 top-1 mismatches over 64 teacher-forced
+positions of a real prompt). `pytest iron/applications/lfm2/` passes
+in full on real NPU2 hardware (xcoradaie220, 2026-10-10): generation,
+accuracy, determinism, across two chunks, a chat turn, and both the
+decode step and a prompt chunk deep in the caches (`max_seq_len - 1`) --
+see `test.py`'s `MAX_KL`/`DEEP_KL` comments for the measured figures.
+`skill-ports/lfm2-1.2b/` (not under this tree) has the full write-up,
+including one testing-infrastructure fix this port needed
+(`iron/lm/testing.py`'s `_fill_caches`, which assumed every layer's
+key/value cache is a list -- true of every dense model so far, not of a
+hybrid one) and a real environment gotcha that looked exactly like NPU
+lock contention until isolated (`export PYTHONPATH=.` must extend, not
+overwrite, the `pyxrt` path `xrt/setup.sh` sets).
