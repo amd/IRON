@@ -34,6 +34,7 @@ from typing import TypeVar
 
 import numpy as np
 from aie.utils.compile import NPU_CACHE_HOME
+from aie.utils.compile.utils import resolve_target_arch
 
 from ..declare import Operator
 from ..design import OperatorDesign
@@ -241,7 +242,9 @@ class CostCache:
         ]
         references = [type(op).reference]
         if references[0] is Elementwise.reference:
-            references.append(op.resolved().kernel().contract.reference)
+            resolved = op.resolved()
+            arch = resolve_target_arch(resolved.dev)
+            references.append(resolved.kernel().contract_for(arch).reference)
         judgement = (gates, [f"{r.__module__}.{r.__qualname__}" for r in references])
         return hashlib.sha256(
             repr(("judged", default, entry, judgement)).encode()

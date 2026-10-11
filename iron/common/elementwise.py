@@ -36,6 +36,7 @@ from aie.iron import Buffer, ObjectFifo, Worker, WorkerRuntimeBarrier, ceildiv
 from aie.iron.controlflow import if_, range_
 from aie.iron.kernel import ExternalFunction
 from aie.iron.kernels import Param
+from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance, round_to
 from ml_dtypes import bfloat16
 
@@ -696,8 +697,10 @@ class Elementwise(Operator):
     def tolerance(self) -> Tolerance | None:
         if self.finish:
             return Finish(self).tolerance()
-        contract = self.kernel().contract
-        return None if contract is None else contract.tolerance
+        kernel = self.kernel()
+        if kernel.contract is None:
+            return None
+        return kernel.contract_for(resolve_target_arch(self.dev)).tolerance
 
     def ops(self) -> int:
         contract = self.kernel().contract
@@ -708,7 +711,8 @@ class Elementwise(Operator):
         """The kernel contract's reference, line by line: what the cores compute."""
         op = self.resolved()
         kernel = op.kernel()
-        contract = kernel.contract
+        arch = resolve_target_arch(op.dev)
+        contract = None if kernel.contract is None else kernel.contract_for(arch)
         if contract is None or contract.reference is None:
             raise NotImplementedError(
                 f"{type(self).__name__}: its kernel declares no reference; "
@@ -727,6 +731,7 @@ class Elementwise(Operator):
             scalars=tuple(
                 scalars[i] for i in contract.reference_indices() if i in scalars
             ),
+            arch=arch,
         )
         y = np.asarray(y).astype(out.host_dtype, copy=False)
         y = y.reshape(out.host_shape, copy=False)
