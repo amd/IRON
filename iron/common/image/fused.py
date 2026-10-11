@@ -10,6 +10,7 @@ validates the kernels' depfiles, and the image lands in its entry.
 
 import hashlib
 from pathlib import Path
+from typing import ClassVar
 
 import aie.utils as aie_utils
 from aie import ir
@@ -93,16 +94,22 @@ class FusedImage:
 
 class XclbinChain:
     """One xclbin and instruction stream per design, each linked onto the
-    previous (``--xclbin-input``); the last link carries every kernel.
+    previous (``--xclbin-input``), ``KERNELS`` designs to a chain: the last
+    link of each carries its kernels, ``image`` the last chain's.
 
-    ``designs`` and ``labels`` are by ``id(op)`` over the sequence's
-    operators: the compiled design and the kernel name each dispatches with.
+    ``designs``, ``labels`` and ``images`` are by ``id(op)`` over the
+    sequence's operators: the compiled design, the kernel name each
+    dispatches with and the xclbin that carries it.
     """
+
+    # amdxdna's MAX_NUM_CUS: the kernels one hardware context configures.
+    KERNELS: ClassVar[int] = 32
 
     def __init__(self):
         self.image: Path | None = None
         self.designs: dict[int, CompilableDesign] = {}
         self.labels: dict[int, str] = {}
+        self.images: dict[int, Path] = {}
 
     def link(self, seq) -> Path:
         """Build the chain once (idempotent); returns the last link."""
@@ -123,17 +130,20 @@ class XclbinChain:
                 f"--xclbin-instance-name={label}",
                 f"--xclbin-kernel-id=0x{0x901 + idx:x}",
             ]
-            if self.image is not None:
+            if idx % self.KERNELS:
                 # The predecessor is part of what this image is, and reaches
                 # the key through the flags.
                 flags.append(f"--xclbin-input={self.image.resolve()}")
             design = OperatorDesign(op, "xclbin").compile(aiecc_flags=flags)
-            built.append((design, label))
             entry = design.get_cache_entry()
             assert entry is not None and entry.xclbin is not None
             self.image = Path(entry.xclbin)
+            built.append((design, label, self.image))
 
         for op in seq.unique_operators():
-            self.designs[id(op)], self.labels[id(op)] = built[design_of[id(op)]]
+            idx = design_of[id(op)]
+            last = min(idx // self.KERNELS * self.KERNELS + self.KERNELS, len(built))
+            self.designs[id(op)], self.labels[id(op)], _ = built[idx]
+            self.images[id(op)] = built[last - 1][2]
         assert self.image is not None, "a sequence has at least one design"
         return self.image

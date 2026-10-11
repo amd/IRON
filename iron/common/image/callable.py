@@ -491,7 +491,7 @@ class StepCallable:
         if chain is not None:
             kernels = {
                 op_id: NPUKernel(
-                    chain.image,
+                    chain.images[op_id],
                     design.get_cache_entry().insts,
                     kernel_name=chain.labels[op_id],
                     dispatch_params=design.dispatch_params,

@@ -24,8 +24,10 @@ import iron
 from iron.common import Scratchpad
 from iron.common.harness import verify_buffer
 from iron.common.image import AdjacentPacking, Fusion, OperatorSequence
+from iron.common.image.fused import XclbinChain
 from iron.operators import (
     GEMV,
+    Copy,
     ElementwiseAdd,
     ElementwiseMul,
     Merge,
@@ -389,3 +391,21 @@ def test_each_resize_of_one_array_runs_on_its_own_sizes():
                 np.array(got.numpy()).reshape(want.shape).view(np.uint16),
                 want.view(np.uint16),
             )
+
+
+@pytest.mark.supported_devices("npu2")
+def test_a_chain_of_more_designs_than_a_context_configures_runs(npu_runtime):
+    """Past the kernels one hardware context configures, the steps' designs
+    go into a second xclbin, and every step still runs.
+    """
+    n = XclbinChain.KERNELS + 2
+
+    class Prefixes(iron.Graph):
+        def body(self, x):
+            return tuple(Copy(x[: SIZE * (i + 1)]) for i in range(n))
+
+    graph = Prefixes()
+    graph.compile(x=(SIZE * n,), boundaries=iron.each_step)
+    x = np.arange(SIZE * n).astype(bfloat16)
+    for i, got in enumerate(graph(x)):
+        np.testing.assert_array_equal(np.asarray(got), x[: SIZE * (i + 1)])
