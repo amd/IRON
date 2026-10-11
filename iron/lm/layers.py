@@ -7,8 +7,9 @@
 is the SwiGLU feed-forward, ``W_down @ (SiLU(W_gate @ x) * (W_up @ x))``,
 for one token or a sequence, and ``SwiGLU`` is it as a graph of its
 own, holding the weights, so they are uploaded once. ``LogMel`` is an
-audio front end's log-mel spectrogram and ``Conv2d`` a convolution over
-rows of channels-last pixels. A graph here is called in a
+audio front end's log-mel spectrogram, ``Conv2d`` a convolution over
+rows of channels-last pixels and ``ImagePatches`` a vision front end's
+resize into patches. A graph here is called in a
 model's body as it is on its own (``Graph``): its steps trace into the
 model's.
 
@@ -20,8 +21,10 @@ one array and one build. Nothing is padded: a row count the GEMM cannot tile
 is an error at trace time.
 """
 
+import dataclasses
 import math
 
+import aie.utils as aie_utils
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
@@ -37,6 +40,7 @@ from iron.operators.gemv import GEMV
 from iron.operators.limbs import Limbs, stacked
 from iron.operators.log import Log
 from iron.operators.magnitude import Magnitude
+from iron.operators.resample.op import SIDE, PatchPositions, Resample, ResampleTaps
 from iron.operators.silu import SiLU
 
 
@@ -303,3 +307,153 @@ class Conv2d(iron.Graph):
         )
         out = np.pad(patches @ w, ((0, 0), (self.border, self.border), (0, 0)))
         return out.reshape(rows, self.out_line)
+
+
+class ImagePatches(iron.Graph):
+    """A decoded image resized as torchvision's antialiased bicubic resize
+    does it, rescaled to ``[0, 1]`` and cut into a vision tower's
+    ``patches`` rows of 16x16-pixel patches, each soft token's ``pool ** 2``
+    patches consecutive, row-major within its window, the tokens row-major
+    over the image.
+
+    A call takes the image, ``(height, width, 3)`` uint8 with each row
+    padded to whole ``chunk``-byte chunks (``pack`` lays it out), and, per
+    call, its ``height`` and ``width`` and the ``out_height`` by
+    ``out_width`` it is resized to, whole ``pool * 16``-pixel windows. It
+    returns the pixels, ``(patches, 768)`` bf16, each patch's ``xy``, its x
+    and y side by side, and its ``position_ids``, every patch's x, then
+    every patch's y plus ``positions``, ``(2 * patches,)`` int32 each; rows
+    past the image are the zero patch at ``positions`` (and ``2 *
+    positions``), the padding row of a table of that many. ``ResampleTaps``
+    computes each axis's filter table, ``Resample`` resizes the image into a
+    raster of patches over two cores a column, and ``PatchPositions``
+    orders them, which a gathering ``Copy`` follows.
+
+    Args:
+        patches: The patch rows of a call.
+        image: The ``(height, width)`` of the largest image a call takes
+            either way up.
+        pool: A soft token's side in patches.
+        positions: The rows of each axis's position table.
+        patch_columns: The patch columns a core holds.
+        chunk: The bytes of an image row ``Resample`` receives at a time.
+    """
+
+    def __init__(
+        self,
+        patches: int,
+        image: tuple[int, int],
+        pool: int = 3,
+        positions: int = 10240,
+        patch_columns: int = 8,
+        chunk: int = 4096,
+    ):
+        self.patches, self.image, self.pool, self.chunk = patches, image, pool, chunk
+        k, side = pool, pool * SIDE
+        cores = 2 * aie_utils.ensure_current_device().cols
+        # Every grid of whole pooling windows the rows hold; the fewest patch
+        # columns give the most bands and padded raster rows.
+        grids = [(patches // s // k * k, s) for s in range(k, patches // k + 1, k)]
+        shared = dict(
+            height=side,
+            width=side,
+            out_height=side,
+            out_width=side,
+            chunk=chunk,
+            patch_columns=patch_columns,
+            width_chunks=patch_columns * cores,
+            height_chunks=16 * -(-grids[0][0] // 16),
+            patch_rows=max(b * (s // cores + 1) * cores for b, s in grids),
+            num_aie_columns=cores // 2,
+            num_channels=2,
+        )
+        a, b = image
+        self.resample = Resample(
+            image_chunks=max(a * -(-3 * b // chunk), b * -(-3 * a // chunk)),
+            **shared,
+        )
+        self.raster = iron.state((shared["patch_rows"], 3 * SIDE**2))
+        taps = dict(
+            in_size=side,
+            out_size=side,
+            words=self.resample.words,
+            slots=SIDE,
+            num_aie_columns=cores // 2,
+            num_channels=2,
+        )
+        self.taps_w = ResampleTaps(chunks=shared["width_chunks"], **taps)
+        self.taps_h = ResampleTaps(chunks=shared["height_chunks"], **taps)
+        self.patch_positions = PatchPositions(
+            rows=patches,
+            out_height=side,
+            out_width=side,
+            pool=k,
+            positions=positions,
+            cores=cores,
+        )
+
+    def body(
+        self,
+        rgb,
+        *,
+        height: Scratchpad[np.int32],
+        width: Scratchpad[np.int32],
+        out_height: Scratchpad[np.int32],
+        out_width: Scratchpad[np.int32],
+    ):
+        T = self.patches
+        taps_w = self.taps_w(in_samples=width, out_samples=out_width)
+        taps_h = self.taps_h(in_samples=height, out_samples=out_height)
+        self.resample(
+            rgb,
+            taps_w,
+            taps_h,
+            self.raster,
+            rows=height,
+            columns=width,
+            out_rows=out_height,
+            out_columns=out_width,
+        )
+        xy, position_ids, order = self.patch_positions(
+            out_rows=out_height, out_columns=out_width
+        )
+        return Copy(self.raster[order]), xy.reshape(2 * T), position_ids.reshape(2 * T)
+
+    def pack(self, image, out_height: int, out_width: int) -> tuple[np.ndarray, dict]:
+        """A call's image buffer and per-call sizes for a decoded ``image``
+        resized to ``out_height`` by ``out_width``.
+
+        Args:
+            image: ``(height, width, 3)`` uint8.
+            out_height: The rows it is resized to.
+            out_width: The columns it is resized to.
+
+        Raises:
+            ValueError: The image or its patches do not fit a call, or
+                ``Resample`` cannot resize it.
+        """
+        image = np.asarray(image)
+        if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
+            raise ValueError(
+                f"an image is (height, width, 3) uint8, not {image.shape} {image.dtype}"
+            )
+        H, W, _ = image.shape
+        n = out_height // SIDE * (out_width // SIDE)
+        line = -(-3 * W // self.chunk) * self.chunk
+        op = self.resample
+        if n > self.patches or op.image_chunks * self.chunk < H * line:
+            a, b = self.image
+            raise ValueError(
+                f"a {H}x{W} image of {n} patches does not fit a call's "
+                f"{self.patches} patches or {a}x{b} image"
+            )
+        # Resample's own checks refuse a size it cannot resize.
+        dataclasses.replace(
+            op, height=H, width=W, out_height=out_height, out_width=out_width
+        )
+        buffer = np.zeros((op.image_chunks, self.chunk), np.uint8)
+        rows = buffer.reshape(-1)[: H * line].reshape(H, line)
+        rows[:, : 3 * W] = image.reshape(H, 3 * W)
+        return buffer, dict(
+            height=H, width=W, out_height=out_height, out_width=out_width
+        )

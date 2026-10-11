@@ -46,7 +46,15 @@ from .decoder import (
     rope_angles,
 )
 from .generation import SEED, Sampler, accuracy, determinism, generate, greedy
-from .layers import Conv2d, LogMel, SwiGLU, filterbank, project, swiglu
+from .layers import (
+    Conv2d,
+    ImagePatches,
+    LogMel,
+    SwiGLU,
+    filterbank,
+    project,
+    swiglu,
+)
 from .runner import Runner, main
 
 __all__ = [
@@ -55,6 +63,7 @@ __all__ = [
     "Checkpoint",
     "Config",
     "Conv2d",
+    "ImagePatches",
     "Layout",
     "LogMel",
     "Oracle",

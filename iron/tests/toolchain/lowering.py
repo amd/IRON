@@ -36,7 +36,7 @@ import iron
 import iron.operators as catalog
 from iron.common import Scratchpad, graph
 from iron.common.design import OperatorDesign
-from iron.lm import Conv2d, LogMel
+from iron.lm import Conv2d, ImagePatches, LogMel
 from iron.operators.copy import Copy
 from iron.tests.toolchain.tools import DEVICES, requires
 
@@ -196,6 +196,35 @@ def test_convolutions_called_in_a_graph_lower(device, tmp_path):
         x=((2 * 256 + 2, mels), bfloat16),
         y=((256 + 2, (mels // 2 + 2) * 64), bfloat16),
     )
+    for i, op in enumerate(traced.operators):
+        (tmp_path / str(i)).mkdir()
+        lower(op.resolved(device), tmp_path / str(i), name=f"{i}_{type(op).__name__}")
+
+
+class _Pixels(iron.Graph):
+    """A vision front end, a graph called in this one's body."""
+
+    def __init__(self):
+        self.processor = ImagePatches(256, (480, 640))
+
+    def body(
+        self,
+        rgb,
+        *,
+        height: Scratchpad[np.int32],
+        width: Scratchpad[np.int32],
+        out_height: Scratchpad[np.int32],
+        out_width: Scratchpad[np.int32],
+    ):
+        return self.processor(
+            rgb, height=height, width=width, out_height=out_height, out_width=out_width
+        )
+
+
+def test_image_patches_called_in_a_graph_lower(device, tmp_path):
+    graph = _Pixels()
+    rgb = graph.processor.resample.image_chunks, graph.processor.chunk
+    traced = graph.trace(rgb=(rgb, np.uint8))
     for i, op in enumerate(traced.operators):
         (tmp_path / str(i)).mkdir()
         lower(op.resolved(device), tmp_path / str(i), name=f"{i}_{type(op).__name__}")
