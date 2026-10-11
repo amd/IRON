@@ -253,9 +253,8 @@ class AudioTower(SimpleNamespace):
     Past that nothing masks padding: the attention and the light convolution
     look only back, so a valid token never reads a padded one.
 
-    Each subsampling convolution is a GEMM over the rows a call's patterns
-    gather, its weight centered over the output channels so that its layer
-    norm is an RMS norm. Attention is one GEMM a head over every key, of
+    Each subsampling convolution is an `iron.lm.Conv2d`, its weight centered
+    over the output channels so that its layer norm is an RMS norm. Attention is one GEMM a head over every key, of
     which each query's band of `BAND` columns (its window, the rest masked)
     is gathered, its relative-position terms keys of the same GEMM; the
     probabilities are scattered back to the band of zeros for the GEMM with
@@ -287,17 +286,11 @@ class AudioTower(SimpleNamespace):
         # The first convolution's output row: each frequency's channels in a
         # slot of their own, with a zero slot either side, the second's padding.
         self.slots = (F0 + 2) * C0
-        w0 = np.asarray(weights.conv0, np.float32)[:, 0]
-        w0 = w0 - w0.mean(axis=0)
-        conv0 = np.zeros((3, c.mels, F0 + 2, C0), np.float32)
-        for f in range(F0):
-            for b in range(3):
-                if 0 <= 2 * f - 1 + b < c.mels:
-                    conv0[:, 2 * f - 1 + b, f + 1] = w0[:, :, b].T
-        self.conv0 = conv0.reshape(3 * c.mels, self.slots).astype(bfloat16)
-        w1 = np.asarray(weights.conv1, np.float32)
-        w1 = w1 - w1.mean(axis=0)
-        self.conv1 = w1.transpose(0, 2, 3, 1).reshape(C1, 9 * C0).astype(bfloat16)
+        w0, w1 = (np.asarray(w, np.float32) for w in (weights.conv0, weights.conv1))
+        self.conv0 = layers.Conv2d(
+            w0 - w0.mean(axis=0), c.mels, stride=2, padding=1, border=1
+        )
+        self.conv1 = layers.Conv2d(w1 - w1.mean(axis=0), F0 + 2, stride=2)
         self.norm0, self.norm1 = weights.norm0, weights.norm1
         self.input_proj = weights.input_proj
         self.output_proj = weights.output_proj
@@ -414,30 +407,14 @@ class AudioTower(SimpleNamespace):
         T = self.max_tokens
         # The first row of each convolution's input is its zero padding in time.
         self.logmel(wave, frames)
-        patches = TensorAccessPattern(
-            self.features.shape, 0, [2 * T, 3 * c.mels], [2 * c.mels, 1]
-        )
-        h = GEMM(
-            Copy(self.features, src=patches).reshape(2 * T, 3 * c.mels)[:n],
-            self.conv0,
-            **ACCURATE,
-        )
+        h = self.conv0(self.features, rows=n)
         h = RMSNorm(
             h.reshape(2 * T * self.slots // C0, C0), weight=self.norm0, epsilon=c.eps
         )
         ReLU(h.reshape(2 * T, self.slots), self.subsampled[1 : 2 * T + 1])
         Copy(self.zero, self.subsampled[n + 1])
-        rows = TensorAccessPattern(
-            self.subsampled.shape,
-            0,
-            [T, F1, 3, 3 * C0],
-            [2 * self.slots, 2 * C0, self.slots, 1],
-        )
-        h = Copy(self.subsampled, src=rows).reshape(T * F1, 9 * C0)
-        # The few output channels as M, so that the patches span every column;
-        # every row, as a GEMM bounds no N.
-        h = GEMM(self.conv1, h, b_col_maj=True, c_col_maj=True, **ACCURATE)
-        h = ReLU(RMSNorm(h[: tokens * F1], weight=self.norm1, epsilon=c.eps))
+        h = self.conv1(self.subsampled, rows=tokens)
+        h = ReLU(RMSNorm(h.reshape(T * F1, C1), weight=self.norm1, epsilon=c.eps))
         x = GEMM(h.reshape(T, F1 * C1), self.input_proj, b_col_maj=True, **ACCURATE)
         for w in self.layers:
             x = self.layer(w, x, tokens)
