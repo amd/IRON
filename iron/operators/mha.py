@@ -26,7 +26,8 @@ that group's K and V, and drains O.
 
 One query (``seq_len`` 1, a decode step) is not padded: its heads are
 packed. A block's rows are one KV group's query heads, repeated to fill
-it, and each pipeline takes its own KV groups, so K and V have a lane per
+it (a group whose size does not divide it as two overlapping runs that
+do), and each pipeline takes its own KV groups, so K and V have a lane per
 pipeline rather than one every pipeline reads.
 """
 
@@ -181,6 +182,23 @@ _CASES = [
             heads_interleaved=True,
         ),
         lower=True,
+    ),
+    # Groups whose heads do not divide a block: Granite 4.2-3B's decode, 5
+    # heads a group, and Llama 3.2 3B's, 3 at d=128.
+    *(
+        Case(
+            dict(
+                num_heads=heads,
+                num_KV_heads=8,
+                d=d,
+                seq_len=1,
+                kv_len=2048,
+                num_pipelines=4,
+                heads_interleaved=True,
+            ),
+            lower=True,
+        )
+        for heads, d in ((40, 64), (24, 128))
     ),
     # The chunk and the decode at each placement the tuner tries beside the
     # default.
@@ -550,10 +568,10 @@ class MHA(Operator):
                     "shim, whose two channels leave V one lane: P*V takes one core"
                 )
             group = self.num_heads // self.num_KV_heads
-            if self.B_q % group:
+            if group > self.B_q:
                 raise ValueError(
                     f"one query packs a KV group's {group} heads into a block's "
-                    f"B_q ({self.B_q}) rows, which they must divide"
+                    f"B_q ({self.B_q}) rows, which must hold them"
                 )
             # K and V take a lane per pipeline, forwarded through its column's
             # memtile, and Q its own.
@@ -1319,7 +1337,8 @@ class MHA(Operator):
         One query packed is a task group per step, each pipeline's block
         that step one of its KV groups: the group's heads repeated from the
         iteration slot at stride 0 into Q, and drained from O the same way,
-        the same rows written over themselves.
+        the same rows written over themselves. Every row of a block is one
+        of the group's heads, so every row drained is that head's output.
         """
         kv_heads = self.num_KV_heads
         group = self.num_heads // kv_heads
@@ -1349,13 +1368,25 @@ class MHA(Operator):
 
         if self.packed:
             steps = kv_heads // self.num_pipelines
+            # A block is the group's heads repeated or, where their count
+            # does not divide it, its first and its last `width` heads, the
+            # largest power of two in it: two overlapping runs that cover it.
+            width = 1 << (group.bit_length() - 1)
 
             def packed_rows(buffer, kv_head):
-                # The group's heads, contiguous in (1, heads, d) as in
-                # (heads, 1, d), repeated to fill a block.
+                # Contiguous in (1, heads, d) as in (heads, 1, d).
                 heads = by_head(buffer, self.heads_interleaved)
-                heads = heads[kv_head * group : (kv_head + 1) * group, 0]
-                return heads.coalesce().repeat(self.B_q // group)
+                if width == group:
+                    heads = heads[kv_head * group : (kv_head + 1) * group, 0]
+                    return heads.coalesce().repeat(self.B_q // group)
+                first = heads[kv_head * group : kv_head * group + width, 0]
+                both = TensorAccessPattern(
+                    first.tensor_dims,
+                    first.offset,
+                    (2, *first.sizes),
+                    ((group - width) * first.strides[0], *first.strides),
+                )
+                return both.coalesce().repeat(self.B_q // (2 * width))
 
             for step in range(steps):
                 owned = [p * steps + step for p in range(self.num_pipelines)]
