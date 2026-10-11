@@ -24,10 +24,12 @@ from .packaging import full_elf
 class FusedImage:
     """The full ELF: every design fused into one module (NPU2 only)."""
 
-    # --expand-load-pdis is what makes a multi-device runlist switch PDIs
-    # between steps; --get-scratchpad-parameters emits the parameter table the
-    # host writes through. Without them the ELF is not the same program.
-    FLAGS = ("--expand-load-pdis", "--get-scratchpad-parameters")
+    # --get-scratchpad-parameters emits the parameter table the host writes
+    # through. Without it the ELF is not the same program.
+    FLAGS = ("--get-scratchpad-parameters",)
+    # Only when the fusion expands its loads (``Fusion.expands``): what makes
+    # a multi-device runlist switch PDIs between steps.
+    EXPAND_FLAG = "--expand-load-pdis"
     # Only when tracing: the trace parser reads the lowered module for the
     # buffer layout and each design's traced tiles and events.
     TRACE_FLAG = "--get-input-with-addresses"
@@ -53,7 +55,11 @@ class FusedImage:
                     f"({dev.arch}) does not dispatch"
                 )
             fusion = self.fusion = Fusion(seq)
-            flags = [*self.FLAGS, *([self.TRACE_FLAG] if seq.traced else [])]
+            flags = [
+                *([self.EXPAND_FLAG] if fusion.expands else []),
+                *self.FLAGS,
+                *([self.TRACE_FLAG] if seq.traced else []),
+            ]
 
             # The cache follows the modules a generator reaches, not the state
             # of what it closes over, so the identity is one.

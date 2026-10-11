@@ -57,6 +57,9 @@ class OperatorSequence:
         coresident: Groups of operators whose designs share one device
             configuration in the full ELF, or an ``AdjacentPacking`` that
             chooses them.
+        reconfigure: On the full ELF, configure the array at every call even
+            where it runs one design, which the first call otherwise
+            configures for all (``Fusion.expands``).
     """
 
     def __init__(
@@ -75,6 +78,7 @@ class OperatorSequence:
         shared_words: Mapping[str, str] | None = None,
         feedback_args: Sequence[str] = (),
         coresident: Sequence[Sequence[Operator]] | AdjacentPacking = (),
+        reconfigure: bool = False,
     ):
         mode = self._coerce_dispatch(dispatch)
         if residents and arena is None:
@@ -87,6 +91,11 @@ class OperatorSequence:
         if coresident and mode not in (None, "fused", "reference"):
             raise ValueError(
                 f"co-residence packs designs into one full-ELF device; "
+                f"dispatch={dispatch!r} builds none"
+            )
+        if reconfigure and mode not in (None, "fused", "reference"):
+            raise ValueError(
+                f"reconfigure configures the full ELF at every call; "
                 f"dispatch={dispatch!r} builds none"
             )
         if not all(
@@ -120,6 +129,7 @@ class OperatorSequence:
         self.input_args = input_args
         self.output_args = output_args
         self.feedback_args = list(feedback_args)
+        self.reconfigure = reconfigure
         self.buffer_offsets = buffer_offsets
         self.plan_scratch = plan_scratch
         self.explicit_buffer_sizes = (

@@ -126,6 +126,9 @@ class Fusion:
         self.runlist = [
             (own[design_of[id(op)]].name, *bufs) for op, *bufs in seq.runlist
         ]
+        # The firmware skips an unexpanded load of the PDI it has loaded, so
+        # one design is configured by the first dispatch alone.
+        self.expands = len(self.designs) > 1 or seq.traced or seq.reconfigure
         self.subbuffer_layout = seq.subbuffer_layout
         self.buffer_sizes = seq.buffer_sizes
         self.slice_info = seq.slice_info or {}
@@ -144,7 +147,8 @@ class Fusion:
     @property
     def identity(self) -> str:
         """What ``text()`` is a function of, so a cache hit costs a hash
-        rather than a fusion.
+        rather than a fusion. ``expands`` reaches the key through the link's
+        flags.
         """
         h = hashlib.sha256()
         for name, design in self.designs.items():
@@ -169,8 +173,10 @@ class Fusion:
         points ends on the one the next dispatch starts with, and that dispatch
         reconfigures over the state the last design left. Configuring one more device
         makes the count even. Consecutive entries running in one device (one design,
-        or one pack) share a configure point.
+        or one pack) share a configure point. An unexpanded load needs none.
         """
+        if not self.expands:
+            return False
         names = [packing.device_of(name) for name, *_ in self.runlist]
         points = sum(
             1 for i, name in enumerate(names) if i == 0 or name != names[i - 1]

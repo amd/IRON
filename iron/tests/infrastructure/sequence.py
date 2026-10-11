@@ -153,7 +153,9 @@ def test_fused_mlir_contains_reconfiguration(sequence, npu_runtime):
     seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
         seq.calculate_buffer_layout()
     )
-    text = Fusion(seq).text()
+    fusion = Fusion(seq)
+    assert fusion.expands
+    text = fusion.text()
 
     # Reconfiguration + dispatch ops between temporal steps.
     assert "aiex.configure" in text, "missing aiex.configure in fused MLIR"
@@ -392,3 +394,126 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch, npu_runtime):
         assert verdict, f"rep {rep}: temp: {verdict.detail}"
         verdict = verify_buffer(out, "out", np.maximum(a + b, 0), RELATIVE)
         assert verdict, f"rep {rep}: out: {verdict.detail}"
+
+
+# ---------------------------------------------------------------------------
+# 6. A full ELF of one design is configured by its first dispatch alone: its
+#    load stays unexpanded, so it builds no empty PDIs and no reset device.
+# ---------------------------------------------------------------------------
+
+
+def _build_one_design_sequence(op, name, reconfigure=False):
+    """Out = op(a), as a 1-step fused OperatorSequence."""
+    return OperatorSequence(
+        name=name,
+        runlist=[(op, "a", "out")],
+        input_args=["a"],
+        output_args=["out"],
+        dispatch="fused",
+        reconfigure=reconfigure,
+    )
+
+
+def _relu():
+    """ReLU at the add/relu sequence's size and tiling."""
+    return ReLU(
+        size=_ADD_RELU_SIZE,
+        num_aie_columns=_ADD_RELU_COLS,
+        num_channels=1,
+        tile_size=_ADD_RELU_TILE,
+    )
+
+
+def _expanded_pdis(seq):
+    """The PDIs only an expanded load builds: its empty ones and the reset."""
+    return [
+        p.name
+        for p in seq.artifacts.entry.pdis
+        if p.stem.startswith("empty_") or p.stem == Fusion.RESET_DEVICE
+    ]
+
+
+@pytest.mark.parametrize("reconfigure", [False, True])
+def test_one_design_expands_only_to_reconfigure(reconfigure):
+    """One design's fusion leaves its load unexpanded and adds no reset
+    device, unless the sequence asks to reconfigure at every call, as a
+    probe timing a design's entry does.
+    """
+    seq = _build_one_design_sequence(
+        _relu(), f"infra_fused_relu_reconfigure_{reconfigure}", reconfigure
+    )
+    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
+        seq.calculate_buffer_layout()
+    )
+    fusion = Fusion(seq)
+    assert fusion.expands == reconfigure
+    devices = re.findall(r"aie\.device\(\w+\) @(\w+)", fusion.text())
+    assert (Fusion.RESET_DEVICE in devices) == reconfigure, devices
+
+
+def test_reconfigure_needs_a_full_elf():
+    """Only a full ELF has a configure to repeat."""
+    with pytest.raises(ValueError, match="reconfigure"):
+        OperatorSequence(
+            name="infra_separate_reconfigure",
+            runlist=[(_relu(), "a", "out")],
+            input_args=["a"],
+            output_args=["out"],
+            dispatch="separate",
+            reconfigure=True,
+        )
+
+
+def test_one_design_is_configured_once(npu_runtime):
+    """A fused sequence of one design builds no expanded load, and every
+    dispatch after the first still computes on its new inputs.
+    """
+    if not full_elf(aie_utils.get_current_device()):
+        pytest.skip("fused dispatch needs a full ELF, which this device lacks")
+    seq = _build_one_design_sequence(_relu(), "infra_fused_relu_once").compile()
+    assert not _expanded_pdis(seq)
+
+    run = seq.get_callable()
+    rng = np.random.default_rng(0)
+    for rep in range(4):
+        a = _centered(rng, _ADD_RELU_SIZE)
+        _set_input(run, "a", a)
+        run()
+        out = run.get_buffer("out").numpy()[:_ADD_RELU_SIZE]
+        verdict = verify_buffer(out, "out", np.maximum(a, 0), RELATIVE)
+        assert verdict, f"rep {rep}: out: {verdict.detail}"
+
+
+def test_one_design_reconfigures_after_another_image(npu_runtime):
+    """Two one-design images dispatched in turn each configure the array
+    again after the other ran, so each still computes its own operator.
+    """
+    if not full_elf(aie_utils.get_current_device()):
+        pytest.skip("fused dispatch needs a full ELF, which this device lacks")
+    tanh = Tanh(
+        size=_ADD_RELU_SIZE,
+        num_aie_columns=_ADD_RELU_COLS,
+        num_channels=1,
+        tile_size=_ADD_RELU_TILE,
+    )
+    images = {
+        "relu": (_relu(), lambda x: np.maximum(x, 0)),
+        "tanh": (tanh, np.tanh),
+    }
+    runs = {}
+    for name, (op, _) in images.items():
+        seq = _build_one_design_sequence(op, f"infra_fused_{name}_turns").compile()
+        assert not _expanded_pdis(seq), name
+        runs[name] = seq.get_callable()
+
+    rng = np.random.default_rng(0)
+    for rep in range(3):
+        for name, run in runs.items():
+            op, reference = images[name]
+            a = _centered(rng, _ADD_RELU_SIZE)
+            _set_input(run, "a", a)
+            run()
+            out = run.get_buffer("out").numpy()[:_ADD_RELU_SIZE]
+            expected = reference(a.astype(np.float32))
+            verdict = verify_buffer(out, "out", expected, op.gate())
+            assert verdict, f"rep {rep}, {name}: out: {verdict.detail}"

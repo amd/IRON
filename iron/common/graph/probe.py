@@ -345,6 +345,8 @@ class Standalone:
             out_names,
             dispatch=dispatch,
             coresident=coresident,
+            # A design run alone must still pay its entry: alone = D0 + base + load + R.
+            reconfigure=dispatch == "fused",
         ).compile()
         self.callable = self.sequence.get_callable()
         rng = np.random.default_rng(seed)
