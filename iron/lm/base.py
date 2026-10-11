@@ -91,6 +91,12 @@ class Config:
     max_seq_len: int
     rope_base: float
     rope_scaling: RopeScaling | None = None
+    # The rotated prefix of head_dim (partial rotary, e.g. Phi's 0.75): None
+    # rotates the whole head, as every full-rotary model does.
+    rotary_dim: int | None = None
+    # A post-trig scalar the whole angle table is multiplied by once at
+    # build time (LongRoPE/YaRN's "mscale"): 1.0 leaves cos/sin as rotations.
+    rope_attention_scaling: float = 1.0
     prefill_chunk: int = 2048
 
     def __post_init__(self):
@@ -100,10 +106,20 @@ class Config:
                 f"({self.max_seq_len})"
             )
 
+    @property
+    def rope_width(self) -> int:
+        """The angle table's own width: ``head_dim``, or ``rotary_dim`` under
+        partial rotary.
+        """
+        return self.rotary_dim or self.head_dim
+
     def angles(self) -> np.ndarray:
-        return rope_angles(
-            self.head_dim, self.max_seq_len, self.rope_base, self.rope_scaling
+        angles = rope_angles(
+            self.rope_width, self.max_seq_len, self.rope_base, self.rope_scaling
         )
+        if self.rope_attention_scaling != 1.0:
+            angles = angles * np.float32(self.rope_attention_scaling)
+        return angles
 
 
 #: Each weight's path in the tree -> its checkpoint name and shape.

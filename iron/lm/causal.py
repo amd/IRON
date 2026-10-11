@@ -97,14 +97,14 @@ class CausalLM(iron.Graph):
         rows: Scratchpad[np.int32],
     ):
         c = self.config
-        L, C, D = c.max_seq_len, c.prefill_chunk, c.head_dim
+        L, C, A = c.max_seq_len, c.prefill_chunk, c.rope_width
         prompt = ids is not None
         if prompt:
             x = Copy(self.embedding[ids[:rows]])
-            angles = Copy(self.rope.reshape(L // C, C, D)[chunk, :rows])
+            angles = Copy(self.rope.reshape(L // C, C, A)[chunk, :rows])
         else:
             x = Copy(self.embedding[token]).reshape(1, c.emb_dim)
-            angles = Copy(self.rope[position]).reshape(1, D)
+            angles = Copy(self.rope[position]).reshape(1, A)
         x = self.embed(x, pixel_values, rows if prompt else None)
         step = Step(prompt, angles, chunk, rows, position)
         for i, weights in enumerate(self.layers):
