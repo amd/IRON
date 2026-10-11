@@ -240,31 +240,39 @@ ACCURATE = dict(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
 
 class Conv2d(iron.Graph):
     """A 2-D convolution without bias of rows of ``width`` channels-last
-    pixels by a ``(out_channels, channels, kernel, kernel)`` ``weight`` at
-    ``stride``. The width is padded with ``padding`` zero columns either
-    side; padding in rows is rows the input holds, so a producer writes past
-    them in place. Each output row is its pixels with ``border`` zero pixels
-    either side, the padding of a convolution that reads it.
+    pixels by a ``(out_channels, channels_per_group, kernel, kernel)``
+    ``weight`` at ``stride``. The width is padded with ``padding`` zero
+    columns either side; padding in rows is rows the input holds, so a
+    producer writes past them in place. Each output row is its pixels with
+    ``border`` zero pixels either side, the padding of a convolution that
+    reads it.
 
     A call takes the input ``(rows, width * channels)`` and the per-call
     ``rows`` of output it computes, and writes the output ``(out_rows,
     (out_width + 2 * border) * out_channels)`` where a caller gives it, else
-    returns it. One channel is a GEMM of ``kernel`` consecutive input rows,
-    gathered whole, by the weight laid out as a band over the width, the
-    padding and the border its zero columns. More channels are a GEMM of
-    the gathered ``kernel * kernel * channels`` patches by the weight, the
-    output channels as its rows, so that few of them leave the patches to
-    span every column (every row is then computed, as a GEMM bounds no
-    column, and the output bounded after). Each GEMM sums its products in
-    float32 and rounds once.
+    returns it. One channel (or ``groups == out_channels``, depthwise: each
+    output channel its own input channel, ``channels_per_group == 1``) is a
+    GEMM of ``kernel`` consecutive input rows, gathered whole, by the weight
+    laid out as a band over the width (and, depthwise, block-diagonal over
+    the channels too, so the GEMM mixes none of them). More channels, not
+    depthwise, are a GEMM of the gathered ``kernel * kernel * channels``
+    patches by the weight, the output channels as its rows, so that few of
+    them leave the patches to span every column (every row is then computed,
+    as a GEMM bounds no column, and the output bounded after). Each GEMM
+    sums its products in float32 and rounds once.
 
     Args:
-        weight: ``(out_channels, channels, kernel, kernel)``.
+        weight: ``(out_channels, channels_per_group, kernel, kernel)``,
+            ``channels_per_group`` the checkpoint's own (``in_channels //
+            groups``, as a depthwise checkpoint already stores it).
         width: The input's pixels a row, its held padding among them.
         stride: The step between output pixels, and rows.
         padding: The zero columns either side of the width, one channel only.
         border: The zero pixels either side of each output row, one channel
             only.
+        groups: ``1`` (every output channel reads every input channel) or
+            ``out_channels`` (depthwise: each its own). No other grouping is
+            built.
     """
 
     def __init__(
@@ -274,13 +282,23 @@ class Conv2d(iron.Graph):
         stride: int = 1,
         padding: int = 0,
         border: int = 0,
+        groups: int = 1,
     ):
         w = np.asarray(weight, np.float32)
-        C_out, C, k, _ = w.shape
-        if C > 1 and (padding or border):
+        C_out, channels_per_group, k, _ = w.shape
+        depthwise = groups > 1
+        if depthwise and (groups != C_out or channels_per_group != 1):
+            raise ValueError(
+                "Conv2d: groups > 1 is depthwise only: groups must equal "
+                "out_channels, and the weight's own channel axis must be 1"
+            )
+        C = groups if depthwise else channels_per_group
+        banded = C == 1 or depthwise
+        if not banded and (padding or border):
             raise ValueError(
                 "Conv2d: gathered patches hold no zero padding or border; with "
-                "more than one channel the input holds its padding columns"
+                "more than one channel (not depthwise) the input holds its "
+                "padding columns"
             )
         self.width, self.stride, self.padding, self.border = (
             width,
@@ -289,6 +307,7 @@ class Conv2d(iron.Graph):
             border,
         )
         self.channels, self.out_channels, self.kernel = C, C_out, k
+        self.banded, self.depthwise = banded, depthwise
         self.out_width = (width + 2 * padding - k) // stride + 1
         if self.out_width < 1:
             raise ValueError(
@@ -304,6 +323,17 @@ class Conv2d(iron.Graph):
                     if 0 <= i < width:
                         band[:, i, f + border] = w[:, 0, :, b].T
             self.matrix = band.reshape(k * width, self.out_line).astype(bfloat16)
+        elif depthwise:
+            band = np.zeros(
+                (k, width, C, self.out_width + 2 * border, C_out), np.float32
+            )
+            channel = np.arange(C)
+            for f in range(self.out_width):
+                for b in range(k):
+                    i = stride * f - padding + b
+                    if 0 <= i < width:
+                        band[:, i, channel, f + border, channel] = w[:, 0, :, b].T
+            self.matrix = band.reshape(k * width * C, self.out_line).astype(bfloat16)
         else:
             self.matrix = w.transpose(0, 2, 3, 1).reshape(C_out, k * k * C)
             self.matrix = self.matrix.astype(bfloat16)
@@ -312,7 +342,7 @@ class Conv2d(iron.Graph):
         k, s, C = self.kernel, self.stride, self.channels
         R, line = x.shape
         out_rows = (R - k) // s + 1
-        if C == 1:
+        if self.banded:
             pattern = TensorAccessPattern(
                 (R, line), 0, [out_rows, k * line], [s * line, 1]
             )
@@ -339,6 +369,7 @@ class Conv2d(iron.Graph):
         before their one rounding.
         """
         k, s, p = self.kernel, self.stride, self.padding
+        w = np.asarray(weight, np.float32)
         image = np.asarray(x, np.float32).reshape(x.shape[0], self.width, self.channels)
         image = np.pad(image, ((0, 0), (p, p), (0, 0)))
         rows = (image.shape[0] - k) // s + 1
@@ -349,13 +380,14 @@ class Conv2d(iron.Graph):
                 for b in range(k)
             ],
             axis=2,
-        ).reshape(rows, self.out_width, -1)
-        w = (
-            np.asarray(weight, np.float32)
-            .transpose(2, 3, 1, 0)
-            .reshape(-1, self.out_channels)
         )
-        out = np.pad(patches @ w, ((0, 0), (self.border, self.border), (0, 0)))
+        if self.depthwise:
+            taps = w[:, 0].reshape(self.out_channels, k * k)
+            out = np.einsum("rwtc,ct->rwc", patches, taps)
+        else:
+            taps = w.transpose(2, 3, 1, 0).reshape(-1, self.out_channels)
+            out = patches.reshape(rows, self.out_width, -1) @ taps
+        out = np.pad(out, ((0, 0), (self.border, self.border), (0, 0)))
         return out.reshape(rows, self.out_line)
 
 
