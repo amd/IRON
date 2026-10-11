@@ -26,6 +26,7 @@ path = [
     "iron/applications/whisper/profiles/*.json",
     "iron/applications/lfm2/profiles/*.json",
     "iron/applications/lfm2/costs_*.json",
+    "iron/applications/yolox/profiles/*.json",
     "iron/applications/embedding_gemma2/vision/profiles/*.json",
     "iron/applications/embedding_gemma2/costs_*.json",
     "iron/applications/embedding_gemma2/vision/costs_*.json",
