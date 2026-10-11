@@ -467,6 +467,22 @@ graph.compile(x=(1, emb))                        # or on the first call
 logits = graph(x_tok, pos=n)
 ```
 
+A graph is also how operators compose into a reusable block. Called in
+another graph's body, on its handles and per-call values
+(`self.log_mel(wave, self.features[1:F + 1], frames=frames)`), a graph's
+body traces into the caller's: its steps are the caller's, its weights
+and states are named by the caller's path to it (`log_mel.dft`), the
+values it is given bound its steps, and the caller's one compile covers
+it. It may take an output to write as an input defaulting to None (a
+state's rows), and carries no values of its own. On its own it compiles
+and runs like any graph, which is how its device test runs it.
+
+So a capability a model needs is an operator when it is new compute: a
+kernel, an array, a data movement no operator has (`iron/operators/`, as
+"Adding a New Operator" says). It is a graph when it composes operators
+the library has (`iron.lm.layers`: `SwiGLU`, `LogMel`); a model calls the
+graph rather than writing its operators into its own body.
+
 The versions of one graph share its weights and states: a full ELF
 version is placed in the graph's one scratch arena. `graph.reference(...)` runs the body through each operator's
 `reference()` on host tensors, per-call values and state modelled.
@@ -837,7 +853,9 @@ shared layer, plus its tokenizer and profiles:
   x)` and `head(x)`, built from `layers.py`: `project(x, w)`, a weight's
   projection at either row count (GEMV for one row, GEMM for more), and
   `swiglu`, the SwiGLU feed-forward (`SwiGLU` is it as a graph of its own,
-  device-tested by `iron/operators/swiglu/test.py`). `rope_angles`
+  called in a model's body or alone, device-tested by
+  `iron/operators/swiglu/test.py`; `LogMel`, an audio front end's log-mel
+  spectrogram, is one too, `iron/operators/log_mel/test.py`). `rope_angles`
   (`decoder.py`) is the RoPE table a `Config` names the base and scaling of
 - `Oracle` (`decoder.py`): the same decoder's float32 forward pass on the
   host, the reference the model is judged by, as an operator's is its

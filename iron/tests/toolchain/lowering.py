@@ -31,9 +31,12 @@ from aie.utils.compile import (
     resolve_target_arch,
 )
 
+import iron
 import iron.operators as catalog
-from iron.common import graph
+from iron.common import Scratchpad, graph
 from iron.common.design import OperatorDesign
+from iron.lm import LogMel
+from iron.operators.copy import Copy
 from iron.tests.toolchain.tools import DEVICES, requires
 
 pytestmark = requires("aiecc", "peano")
@@ -142,3 +145,27 @@ def test_a_bounded_operator_lowers(device, module, cls_name, kwargs, bound, tmp_
     n = graph.Value("n", "scratchpad", np.int32)
     op.use_value(bound, n.affine())  # what x[:n] in a graph does
     lower(op, tmp_path)
+
+
+class _Features(iron.Graph):
+    """Log-mel features, a graph called in this one's body, into a state's
+    rows after a zero one.
+    """
+
+    def __init__(self, frames: int):
+        self.log_mel = LogMel()
+        self.features = iron.state((frames + 1, 128))
+
+    def body(self, wave, *, frames: Scratchpad[np.int32]):
+        self.log_mel(wave, self.features[1:], frames=frames)
+        return Copy(self.features)
+
+
+def test_a_graph_called_in_a_graph_lowers(device, tmp_path):
+    """Its operators, traced into the caller's and bound by the caller's
+    per-call value, lower with the values they read.
+    """
+    traced = _Features(3072).trace(wave=((3073 * 160,), np.float32))
+    for i, op in enumerate(traced.operators):
+        (tmp_path / str(i)).mkdir()
+        lower(op.resolved(device), tmp_path / str(i), name=f"{i}_{type(op).__name__}")

@@ -46,7 +46,7 @@ from .decoder import (
     rope_angles,
 )
 from .generation import SEED, Sampler, accuracy, determinism, generate, greedy
-from .layers import SwiGLU, project, swiglu
+from .layers import LogMel, SwiGLU, filterbank, project, swiglu
 from .runner import Runner, main
 
 __all__ = [
@@ -55,6 +55,7 @@ __all__ = [
     "Checkpoint",
     "Config",
     "Layout",
+    "LogMel",
     "Oracle",
     "RopeScaling",
     "Runner",
@@ -64,6 +65,7 @@ __all__ = [
     "accuracy",
     "checkpoint_shapes",
     "determinism",
+    "filterbank",
     "generate",
     "greedy",
     "load_weights",
