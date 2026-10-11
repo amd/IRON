@@ -69,6 +69,7 @@ _OPERATOR_MODULES = {
     "MHA": "mha",
     "PatchPositions": "resample.op",
     "ReLU": "relu",
+    "Reduce": "reduce.op",
     "RMSNorm": "rms_norm",
     "Repeat": "repeat",
     "Resample": "resample.op",
