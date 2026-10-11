@@ -264,6 +264,23 @@ def test_checkpoint_rejects_a_tensor_named_in_two_shards(tmp_path):
         Checkpoint(index)
 
 
+def test_checkpoint_rejects_a_shard_that_disagrees_with_the_index(tmp_path):
+    """The index's own partition and a shard's real header disagree, with no
+    tensor duplicated across shards: a stale or hand-edited index, not the
+    two-shards-claim-the-same-name corruption above.
+    """
+    tensors = toy_checkpoint()
+    names = list(tensors)
+    weight_map = {n: "a.safetensors" for n in names[:-1]}
+    weight_map[names[-1]] = "b.safetensors"
+    save_file({n: tensors[n] for n in names[:-1]}, tmp_path / "a.safetensors")
+    save_file({}, tmp_path / "b.safetensors")  # b's real header holds nothing
+    index = tmp_path / "mismatched.safetensors.index.json"
+    index.write_text(json.dumps({"weight_map": weight_map}))
+    with pytest.raises(ValueError, match=re.escape(names[-1])):
+        Checkpoint(index)
+
+
 def test_checkpoint_release_drops_the_right_shard(sharded_toy_path):
     first_shard = sharded_toy_path.parent / "model-00001-of-00002.safetensors"
     second_shard = sharded_toy_path.parent / "model-00002-of-00002.safetensors"
