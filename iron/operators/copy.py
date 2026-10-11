@@ -20,6 +20,7 @@ from typing import Any, ClassVar
 import numpy as np
 from aie.dialects import aiex
 from aie.dialects.aie import DMAChannelDir, WireBundle
+from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
@@ -33,6 +34,7 @@ from aie.iron import (
 from aie.iron.device import Tile
 from aie.iron.kernels import datamovement
 from aie.iron.runtime.dmatask import emit_shim_transfer
+from aie.ir import IntegerType
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
@@ -88,7 +90,8 @@ class Gather(Operator):
     first ``n`` rows and, for each row past them, ``pad_bytes`` from the
     table's first row: a feed's drain is a whole number of 16-byte units
     long, and a descriptor moves one at least. Each feed drains what its
-    rows moved (``drained0`` ...), the valid ones first.
+    rows moved (``drained0`` ...), the valid ones first: a full ELF patches
+    the drain's length, an xclbin generates it per call.
     """
 
     chain: ClassVar[int] = 8
@@ -230,30 +233,29 @@ class Gather(Operator):
         words, y = rt.data(self.control), rt.data(self.y)
         chain, batches, runs = self.chain, self.batches, self.runs
         bounded = "valid_rows" in self.bound_extents
-        if bounded and rt.image != "elf":
-            raise ValueError(
-                "a gather bounded per call drains a per-call length, which only "
-                "a full ELF's scratchpad patches; package as a full ELF"
-            )
+        unit = 16 // np.dtype(self.dtype).itemsize
         drained, pending = [], []
         for k, run in enumerate(runs):
             first = run.start * chain * self.row
-            last = min(run.stop * chain, self.rows) * self.row
+            size: Any = min(run.stop * chain, self.rows) * self.row - first
             length = {}
-            if bounded:
+            if bounded and rt.image == "elf":
                 length = dict(
-                    length_parameter=self.value(f"drained{k}").param,
-                    length_unit=16 // np.dtype(self.dtype).itemsize,
+                    length_parameter=self.value(f"drained{k}").param, length_unit=unit
+                )
+            elif bounded:
+                # An xclbin's stream is generated per call: the length is a
+                # dispatch-time scalar.
+                count = self.value(f"drained{k}").ssa
+                size = arith.muli(
+                    count, arith.constant(unit, IntegerType.get_signless(32))
                 )
             drained.append(
                 emit_shim_transfer(
                     f"gather_rows{k}",
                     y,
                     tap=TensorAccessPattern(
-                        (self.rows * self.row,),
-                        first,
-                        [1, 1, 1, last - first],
-                        [0, 0, 0, 1],
+                        (self.rows * self.row,), first, [1, 1, 1, size], [0, 0, 0, 1]
                     ),
                     wait=True,
                     managed=False,

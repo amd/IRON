@@ -327,6 +327,26 @@ def test_each_step_gathers_the_rows_an_input_names(npu_runtime, table):
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize("n_ids", [15, 256])
+def test_each_step_gathers_the_rows_a_call_bounds(npu_runtime, table, n_ids):
+    """Each step its own xclbin, as NPU1 runs a prompt chunk's embedding
+    rows: the first ``n`` rows a call's ids name, the drains' lengths
+    generated per call.
+    """
+    graph = Bounded(table)
+    net = graph.compile(ids=((n_ids,), np.int32), boundaries=iron.each_step)
+    assert net.plan.image == "xclbin"
+    rng = np.random.default_rng(n_ids)
+    for n in sorted({1, 9, n_ids // 2, n_ids}):
+        ids = rng.integers(-VOCAB, VOCAB, n_ids).astype(np.int32)
+        ids[n:] = VOCAB  # past the table: a bounded call reads none of them
+        expected = np.take(table, ids[:n], axis=0)
+        got = np.asarray(graph(ids, n=n), dtype=np.float32)[:n]
+        assert_equal(got, expected, f"{n} of {n_ids}")
+        assert_equal(graph.reference(ids, n=n), expected, f"reference {n}")
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("n_ids", [15, 512])
 def test_each_step_gathers_by_ids_the_device_made(npu_runtime, table, n_ids):
     """An xclbin's word step reads the table's address from its runtime
