@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from iron.lm.testing import require
+
 APP = Path(__file__).parent
 FLM = APP / "build" / "FastFlowLM" / "src"
 # CI keeps the model in /srv/fastflowlm/models/Gemma4-E2B-IT-NPU2.
@@ -116,6 +118,7 @@ def replies(engine, xclbins, prompts):
 @pytest.fixture(scope="module")
 def build_engines():
     """Builds the stock engine and the IRON engine."""
+    require(MODEL / "model.q4nx")
     subprocess.run(
         ["make", "engine"],
         cwd=APP,
@@ -136,9 +139,6 @@ def stock_tokens(build_engines):
 
 
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.skipif(
-    not MODEL.exists(), reason="needs $FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2"
-)
 @pytest.mark.parametrize(
     "prompt", [pytest.param(name, marks=pytest.mark.bench) for name in PROMPTS]
 )

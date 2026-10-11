@@ -48,8 +48,7 @@ def require(*files: Path) -> None:
     if os.environ.get("CI"):
         pytest.fail(
             f"this CI runner lacks {', '.join(missing)}: install the model's "
-            "checkpoint files there (its README lists them), or set "
-            "IRON_EXAMPLE_WEIGHTS_DIR to a directory holding <model>/<file>",
+            "files at that path; its README says which and how",
             pytrace=False,
         )
     pytest.skip(f"not found outside CI: {missing}")

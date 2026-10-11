@@ -64,6 +64,7 @@ jobs:
         uses: ./.github/actions/test
         env:
           PYTHONUNBUFFERED: "1"
+          FLM_MODEL_PATH: /srv/fastflowlm
         with:
           env_name: ci_env
           test_suite: "applications"
