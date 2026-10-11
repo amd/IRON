@@ -444,6 +444,7 @@ class ResampleTaps(Operator):
                 words.pop(0).read() if dynamic[name] else rtp[static.index(name)]
                 for name in names
             )
+            barrier.release_with_value(1)
             if passed is not None:
                 mine = passed.acquire(1)
                 peak_fn(mine, n_in, n_out, core, n)
@@ -1128,6 +1129,7 @@ class Resample(Operator):
                 words.pop(0).read() if dynamic[name] else rtp[static.index(name)]
                 for name in names
             )
+            barrier.release_with_value(1)
             setup_fn(counts, h, w, ho, wo, core)
             for k in range_(counts[0]):
                 chunk = taps.acquire(1)
@@ -1387,6 +1389,7 @@ class PatchPositions(Operator):
                 words.pop(0).read() if dynamic[name] else rtp[static.index(name)]
                 for name in names
             )
+            barrier.release_with_value(1)
             for b in range_(n):
                 kernel_fn(record.acquire(1), b, n, ho, wo)
                 record.release(1)

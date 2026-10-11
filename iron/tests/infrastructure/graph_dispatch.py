@@ -21,9 +21,19 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
+from iron.common import Scratchpad
 from iron.common.harness import verify_buffer
 from iron.common.image import AdjacentPacking, Fusion, OperatorSequence
-from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, Merge, SiLU
+from iron.operators import (
+    GEMV,
+    ElementwiseAdd,
+    ElementwiseMul,
+    Merge,
+    PatchPositions,
+    Resample,
+    ResampleTaps,
+    SiLU,
+)
 from iron.operators.merge import GEMMA
 
 SIZE = 1024
@@ -269,3 +279,111 @@ def test_each_merge_of_one_array_runs_on_its_own_count():
         for got, want in zip(net(ids, more), graph.reference(ids, more)):
             want = np.asarray(want)
             np.testing.assert_array_equal(np.array(got.numpy()[: len(want)]), want)
+
+
+class TwoTables(iron.Graph):
+    """Two ResampleTaps of one array, the shorter table first."""
+
+    def __init__(self):
+        taps = dict(words=356, slots=16)
+        self.taps_h = ResampleTaps(in_size=3024, out_size=672, **taps)
+        self.taps_w = ResampleTaps(in_size=4032, out_size=912, **taps)
+
+    def body(self):
+        return self.taps_h(), self.taps_w()
+
+
+@pytest.mark.supported_devices("npu2")
+def test_each_table_of_one_array_runs_on_its_own_sizes():
+    graph = TwoTables()
+    net = graph.compile(image=iron.ELF)
+    text = Fusion(net.sequence).text()
+    assert re.findall(r"aiex\.configure @(\w+)", text)[1:] == ["reset_device"]
+    assert len(re.findall(r"aiex\.run", text)) == 2
+    for _ in range(2):
+        for got, want in zip(net(), graph.reference()):
+            want = np.asarray(want)
+            np.testing.assert_array_equal(
+                np.array(got.numpy()).reshape(want.shape), want
+            )
+
+
+class TwoPositions(iron.Graph):
+    """Two PatchPositions of one array, the fewer rows first."""
+
+    def __init__(self):
+        self.few = PatchPositions(rows=256, out_height=96, out_width=96)
+        self.many = PatchPositions(rows=512, out_height=96, out_width=96)
+
+    def body(
+        self,
+        *,
+        out_height: Scratchpad[np.int32],
+        out_width: Scratchpad[np.int32],
+    ):
+        return (
+            *self.few(out_rows=out_height, out_columns=out_width),
+            *self.many(out_rows=out_height, out_columns=out_width),
+        )
+
+
+@pytest.mark.supported_devices("npu2")
+def test_each_position_table_of_one_array_runs_on_its_own_rows():
+    graph = TwoPositions()
+    net = graph.compile(image=iron.ELF)
+    text = Fusion(net.sequence).text()
+    assert re.findall(r"aiex\.configure @(\w+)", text)[1:] == ["reset_device"]
+    assert len(re.findall(r"aiex\.run", text)) == 2
+    for sizes in (
+        dict(out_height=96, out_width=48),
+        dict(out_height=48, out_width=96),
+    ):
+        for got, want in zip(net(**sizes), graph.reference(**sizes)):
+            want = np.asarray(want)
+            np.testing.assert_array_equal(
+                np.array(got.numpy()).reshape(want.shape), want
+            )
+
+
+class TwoResizes(iron.Graph):
+    """Two Resamples of one array, the narrower first, as two images' would be."""
+
+    def __init__(self):
+        size = dict(height=37, width=53, out_height=96, num_aie_columns=8)
+        self.narrow = dict(size, out_width=144)
+        self.wide = dict(size, out_width=256)
+
+    def body(self, rgb, taps_w, taps_h, wide_w):
+        return (
+            Resample(rgb, taps_w, taps_h, **self.narrow),
+            Resample(rgb, wide_w, taps_h, **self.wide),
+        )
+
+
+@pytest.mark.supported_devices("npu2")
+def test_each_resize_of_one_array_runs_on_its_own_sizes():
+    graph = TwoResizes()
+    taps = [
+        ResampleTaps(
+            in_size=n_in, out_size=n_out, words=356, slots=16, chunks=16
+        ).reference()
+        for n_in, n_out in ((53, 144), (37, 96), (53, 256))
+    ]
+    rgb = np.random.default_rng(0).integers(0, 256, (37, 4096), dtype=np.uint8)
+    net = graph.compile(
+        image=iron.ELF,
+        **{
+            name: (t.shape, t.dtype.type)
+            for name, t in zip(("rgb", "taps_w", "taps_h", "wide_w"), (rgb, *taps))
+        },
+    )
+    text = Fusion(net.sequence).text()
+    assert re.findall(r"aiex\.configure @(\w+)", text)[1:] == ["reset_device"]
+    assert len(re.findall(r"aiex\.run", text)) == 2
+    for _ in range(2):
+        for got, want in zip(net(rgb, *taps), graph.reference(rgb, *taps)):
+            want = np.asarray(want)
+            np.testing.assert_array_equal(
+                np.array(got.numpy()).reshape(want.shape).view(np.uint16),
+                want.view(np.uint16),
+            )
