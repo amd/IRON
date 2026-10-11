@@ -21,18 +21,21 @@ pytestmark = pytest.mark.usefixtures("npu2")
 
 # EmbeddingGemma 2's subsampling convolutions at a tenth of their rows:
 # one channel to 128 as a band, padded and bordered, and 128 to 32 by
-# gathered patches.
+# gathered patches; YOLOX-Nano's depthwise (every output channel its own
+# input channel) at a representative downsample shape.
 CASES = {
     "band": ((128, 1), 130, 128, dict(stride=2, padding=1, border=1)),
     "patches": ((32, 128), 66, 18, dict(stride=2)),
+    "depthwise": ((16, 1), 34, 16, dict(stride=2, groups=16)),
 }
 
 
 def draw(case):
     (out, channels), rows, width, kwargs = CASES[case]
+    in_channels = kwargs.get("groups", channels)
     rng = np.random.default_rng(0)
     weight = rng.standard_normal((out, channels, 3, 3)).astype(np.float32)
-    x = rng.standard_normal((rows, width * channels)).astype(bfloat16)
+    x = rng.standard_normal((rows, width * in_channels)).astype(bfloat16)
     return Conv2d(weight, width, **kwargs), weight, x
 
 
