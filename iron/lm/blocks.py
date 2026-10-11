@@ -624,6 +624,11 @@ class Concat2(_ConcatChannelsBase):
         return self._write(x1, x2)
 
 
+class Concat3(_ConcatChannelsBase):
+    def body(self, x1, x2, x3):
+        return self._write(x1, x2, x3)
+
+
 class Concat4(_ConcatChannelsBase):
     def body(self, x1, x2, x3, x4):
         return self._write(x1, x2, x3, x4)
