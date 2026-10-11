@@ -28,7 +28,7 @@ from ml_dtypes import bfloat16
 
 from ..declare import Operator
 from ..declare.member import Extent, ValueSpec, _Value
-from ..declare.operator import _ExtentWord
+from ..declare.operator import _ExtentWord, graph_tracer
 from ..declare.profile import Profile
 from ..design import device_symbol
 from ..image.allocator import ArenaPlan
@@ -90,6 +90,11 @@ class Graph:
     returns the outputs. Weights and states are what the instance holds,
     named by attribute path (``self.layers[3].q`` is ``layers.3.q``).
     ``profile`` is a ``Profile`` or a directory of ``<device>.json`` ones.
+
+    Called in another graph's body, on its handles and per-call values, a
+    graph's body traces into that graph: its steps are the caller's, its
+    weights and states are named by the path the caller holds it at, and
+    the caller's one compile covers it.
     """
 
     profile: Profile | Path | None = None
@@ -208,6 +213,9 @@ class Graph:
                 items = ((f.name, getattr(x, f.name)) for f in dataclasses.fields(x))
             elif isinstance(x, SimpleNamespace):
                 items = vars(x).items()
+            elif isinstance(x, Graph):
+                # A graph held to be called in this one's body.
+                items = ((k, v) for k, v in vars(x).items() if not k.startswith("_"))
             else:
                 return
             if id(x) in seen:
@@ -458,6 +466,14 @@ class Graph:
     def __call__(self, *tensors, **values) -> Any:
         given = self._given(tensors)
         _check_values(self.name, self._values, values)
+        if graph_tracer.get() is not None:
+            if self._carried:
+                raise TypeError(
+                    f"{self.name}: a graph called in another's body carries "
+                    f"no values of its own; its caller carries them"
+                )
+            with self._scope():
+                return self.body(*(given.get(n) for n in self._inputs), **values)
         shapes = {
             name: (tuple(int(n) for n in t.shape), np.dtype(t.dtype).type)
             for name, t in given.items()
