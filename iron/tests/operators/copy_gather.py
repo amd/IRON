@@ -13,6 +13,8 @@ each call names its rows, and the host encodes them as the addresses a
 output, a core writes those addresses in a step before the gather.
 """
 
+import re
+
 import numpy as np
 import pytest
 from aie.iron.device import from_name
@@ -20,6 +22,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Profile
+from iron.common.image import AdjacentPacking, Fusion
 from iron.operators import ElementwiseAdd
 from iron.operators.copy import Copy, Gather
 
@@ -188,6 +191,27 @@ def test_rows_ids_the_device_made_name_are_gathered(npu_runtime, table, feeds, n
         # Past the table an id is clipped to its first or last row.
         clipped = np.clip(ids, -len(other), len(other) - 1)
         assert_equal(others, other[clipped], f"call {call}")
+
+
+@pytest.mark.supported_devices("npu2")
+def test_packed_word_steps_of_one_array_each_read_their_own_table(npu_runtime):
+    """Both tables' word steps run on one configure, the second reading its
+    own table's address, not the first's.
+    """
+    rng = np.random.default_rng(5)
+    table, other = (
+        rng.standard_normal((4096, WIDTH), dtype=np.float32).astype(bfloat16)
+        for _ in range(2)
+    )
+    graph = FromDeviceIds(table, other)
+    net = graph.compile(coresident=AdjacentPacking(), ids=((256,), np.int32))
+    text = Fusion(net.sequence).text()
+    assert re.findall(r"aiex\.configure @(\w+)", text)[1:] == ["reset_device"]
+    for call in range(3):
+        ids = rng.integers(0, len(table), 256).astype(np.int32)
+        rows, others = graph(ids)
+        assert_equal(rows, table[ids], f"call {call}")
+        assert_equal(others, other[ids], f"call {call}")
 
 
 @pytest.mark.supported_devices("npu2")
