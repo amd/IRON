@@ -927,6 +927,29 @@ layout, the tokenizer), `profiles/` (tunables), its test and README:
   weights and the caches are banks of at most 3.76 GB, a buffer object
   each (`allocator.BANK`), so the limit must cover one bank
 
+### Qwen3 1.7B Inference
+
+Full LLM inference example at `iron/applications/qwen3/`: `model.py`
+(Qwen3's layer and head on the NPU and in numpy -- Llama-style GQA and
+SwiGLU, plus a per-head RMSNorm on Q and K before RoPE and an epsilon of
+1e-6 -- Qwen3 1.7B's shape, the layout, the tokenizer), `profiles/`
+(tunables), its test and README:
+
+- **Required files**: `model-00001-of-00002.safetensors`,
+  `model-00002-of-00002.safetensors`, `model.safetensors.index.json`,
+  `tokenizer.json` from Hugging Face (the checkpoint is sharded;
+  `iron.lm.Checkpoint` reads the index, mapping every shard it names)
+- **Default location**: `/srv/qwen3-1.7b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
+- **Additional deps**: `pip install -r requirements_examples.txt` (the
+  tokenizer loads through `tokenizers`, already there; no `transformers`)
+- **Run**: `pytest iron/applications/qwen3/`, or
+  `python -m iron.applications.qwen3.model model.safetensors.index.json tokenizer.json`
+  (`--max-seq-len`, a multiple of 2048, sizes the caches: 32768 by default,
+  matching Qwen3-1.7B's trained context; one compile serves every context up
+  to it). XRT maps every device buffer locked and `ulimit -l` binds each
+  mapping; the weights and the caches are banks of at most 3.76 GB, a
+  buffer object each (`allocator.BANK`), so the limit must cover one bank
+
 ### EmbeddingGemma 2
 
 Its text encoder, audio and vision towers at

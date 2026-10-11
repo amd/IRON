@@ -13,6 +13,8 @@ SPDX-License-Identifier = "CC0-1.0"
 path = [
     "iron/applications/llama/profiles/*.json",
     "iron/applications/llama/costs_*.json",
+    "iron/applications/qwen3/profiles/*.json",
+    "iron/applications/qwen3/costs_*.json",
     "iron/applications/embedding_gemma2/vision/profiles/*.json",
     "iron/applications/embedding_gemma2/costs_*.json",
     "iron/applications/embedding_gemma2/vision/costs_*.json",
