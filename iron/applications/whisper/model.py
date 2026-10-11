@@ -314,9 +314,13 @@ def feed_forward(x, w, norm_key: str):
         )
         partial = project(g, w.fc2.weight[:, start:end], k_tile=256)
         out = partial if out is None else ElementwiseAdd(out, partial)
-    # emb_dim (fc2's own output width) is always <= 4096: one plain fold,
-    # on the already-summed (rows, emb_dim) output.
-    out = RowwiseAdd(out, w.fc2.bias)
+    # emb_dim (fc2's own output width) is always <= 4096: one plain fold.
+    # A decode step's GEVM path gives a flat vector, not a (rows, emb_dim)
+    # 2-D shape; reshape the same way project()'s own bias fold does.
+    out_shape = out.shape
+    emb_dim = w.fc2.bias.shape[0]
+    rows = math.prod(out_shape) // emb_dim
+    out = RowwiseAdd(out.reshape(rows, emb_dim), w.fc2.bias).reshape(out_shape)
     return ElementwiseAdd(x, out)
 
 
