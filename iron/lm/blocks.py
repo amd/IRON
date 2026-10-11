@@ -567,6 +567,68 @@ class MaxPool2d(iron.Graph):
         return windows.max(axis=0).reshape(self.rows, self.width * self.channels)
 
 
+class _ConcatChannelsBase(iron.Graph):
+    """Channel-wise concatenation of ``rows`` by ``width`` channels-last
+    pixel rows, each its own channel count: a fresh ``(rows, width *
+    sum(channels))`` buffer, each input ``Copy``'d into its own column
+    range, the same buffer-assembly a windowed op's own padding already is
+    (``MaxPool2d``). Elegant over wrappers at this model's scale (YOLOX-Nano
+    never grows past 52x52x128): the alternative, splitting the next 1x1
+    conv's weight by input range and summing two projections, saves the
+    extra transfer but threads a second bookkeeping scheme through every
+    concatenation point for a cost this small. ``body`` takes a fixed
+    number of inputs (a graph's body is not traceable with ``*args``), so
+    ``Concat2``/``Concat4`` are the two arities this model needs.
+    """
+
+    def __init__(self, rows: int, width: int, channels: tuple[int, ...]):
+        # Every input's own channel run, and every later input's offset
+        # into the row, is a separate bf16 DMA transfer: each needs its own
+        # whole 4-byte (2-element) units, so an odd channel count anywhere
+        # but the first input is refused outright rather than failing
+        # opaquely at MLIR verification (Focus's 3-channel corners are the
+        # one case in this model that needs an even-channel-count fix --
+        # pad the image to 4 channels and the stem conv's weight to match,
+        # not this graph).
+        if len(channels) > 1 and any(c % 2 for c in channels):
+            raise ValueError(
+                f"ConcatChannels: channel counts {channels} must all be even "
+                f"(a bf16 DMA transfer is whole 4-byte units); pad an odd "
+                f"input's channels (and the next conv's weight) instead"
+            )
+        self.rows, self.width, self.channels = rows, width, channels
+        self.total = sum(channels)
+        self.out = iron.state((rows, width * self.total))
+
+    def _write(self, *xs):
+        # Channels-last: at every width position the total's channels are
+        # adjacent, so one input's own c channels recur every `total`
+        # elements, not once as one contiguous block.
+        offset = 0
+        for x, c in zip(xs, self.channels):
+            dst = TensorAccessPattern(
+                (self.rows, self.width * self.total),
+                offset,
+                [self.rows, self.width, c],
+                [self.width * self.total, self.total, 1],
+            )
+            Copy(x, self.out, dst=dst)
+            offset += c
+        # A state is not itself a returnable activation (it is read back
+        # across calls, not produced fresh by one); materialize it.
+        return Copy(self.out[:])
+
+
+class Concat2(_ConcatChannelsBase):
+    def body(self, x1, x2):
+        return self._write(x1, x2)
+
+
+class Concat4(_ConcatChannelsBase):
+    def body(self, x1, x2, x3, x4):
+        return self._write(x1, x2, x3, x4)
+
+
 class ImagePatches(iron.Graph):
     """A decoded image resized as torchvision's antialiased bicubic resize
     does it, rescaled to ``[0, 1]`` and cut into a vision tower's
