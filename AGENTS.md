@@ -1004,6 +1004,22 @@ bias (`project(..., bias=...)`, folded with `RowwiseAdd`), and a
 - **Run**: `pytest iron/applications/qwen2/`, or
   `python -m iron.applications.qwen2.model model.safetensors tokenizer.json`
 
+### SmolVLM-256M-Instruct
+
+A small vision-language model (Idefics3) at
+`iron/applications/idefics3/` (its test and README): a
+plain-Llama-architecture text backbone
+(`model.py`, untied output head) and a 12-layer SigLIP-style vision tower
+plus connector (`vision/model.py`), spliced together through
+`CausalLM.embed()`'s `pixel_values` hook -- no cross-attention (traced
+from the real `transformers` source, confirmed). Scoped to one 512x512
+image, no splitting, a compile-time-constant splice position (the
+module's own docstring says what that leaves out):
+
+- **Required files**: `model.safetensors`, `tokenizer.json`
+- **Default location**: `/srv/smolvlm-256m-instruct/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
+- **Run**: `pytest iron/applications/idefics3/`
+
 A model's device test goes in `iron/applications/<name>/test.py`: CI's
 example suite runs `iron/applications/`, and the benchmark history names a
 row by that directory.

@@ -1,0 +1,3 @@
+{"entries": [
+  {"operator": "MHA", "num_heads": 12, "num_KV_heads": 12, "d": 64, "seq_pad": 1024, "num_pipelines": 8}
+]}

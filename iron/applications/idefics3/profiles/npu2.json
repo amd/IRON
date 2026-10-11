@@ -1,0 +1,6 @@
+{"entries": [
+  {"operator": "MHA", "num_heads": 9, "num_KV_heads": 3, "d": 64, "seq_pad": 2048, "num_pipelines": 8},
+  {"operator": "MHA", "num_heads": 12, "num_KV_heads": 12, "d": 64, "seq_pad": 1024, "num_pipelines": 8},
+  {"operator": "ElementwiseAdd", "size": 576, "tile_size": 192},
+  {"operator": "ElementwiseAdd", "size": 1179648, "tile_size": 192}
+]}

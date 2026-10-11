@@ -17,6 +17,8 @@ path = [
     "iron/applications/qwen3/costs_*.json",
     "iron/applications/qwen2/profiles/*.json",
     "iron/applications/qwen2/costs_*.json",
+    "iron/applications/idefics3/profiles/*.json",
+    "iron/applications/idefics3/vision/profiles/*.json",
     "iron/applications/phi3/profiles/*.json",
     "iron/applications/granite/profiles/*.json",
     "iron/applications/granite/costs_*.json",
