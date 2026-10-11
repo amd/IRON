@@ -7,11 +7,11 @@
 head on the NPU (``Llama``) and on the CPU in float32
 (``LlamaOracle``, the reference it is judged by; its layer is
 ``iron.lm.blocks``', shared with Granite 4.2 3B), where its
-checkpoint keeps each weight, its tokenizer, and Llama 3.2 1B's shape.
-Run it with ``python -m iron.applications.llama.model``.
+checkpoint keeps each weight, its tokenizer, and Llama 3.2's sizes, 1B and
+3B. Run it with ``python -m iron.applications.llama.model [--size 3b]``.
 
 The operators' tunables are the graph's profile, ``profiles/<device>.json``,
-keyed by operator shape at Llama 3.2 1B's shape: a decode step's and a
+keyed by operator shape at each size's shape: a decode step's and a
 2048-row prompt chunk's, at any ``max_seq_len``, which sizes the caches and
 the RoPE table alone. A call site gives a tunable only where two operators of
 one shape want different ones.
@@ -82,6 +82,19 @@ LLAMA_3_2_1B = Config(
     n_heads=32,
     n_kv_groups=8,
     head_dim=64,
+    hidden_dim=8192,
+    max_seq_len=32768,
+    rope_base=500000.0,
+    rope_scaling=LLAMA_3_2,
+)
+
+LLAMA_3_2_3B = Config(
+    vocab_size=128256,
+    emb_dim=3072,
+    n_layers=28,
+    n_heads=24,
+    n_kv_groups=8,
+    head_dim=128,
     hidden_dim=8192,
     max_seq_len=32768,
     rope_base=500000.0,
@@ -175,9 +188,12 @@ def tokenizer(path) -> tiktoken.Encoding:
 
 
 class Runner(lm.Runner):
-    """Llama 3.2 1B, from its checkpoint and ``tokenizer.model``."""
+    """Llama 3.2, 1B unless ``config`` is another size, from its checkpoint
+    and ``tokenizer.model``.
+    """
 
     config = LLAMA_3_2_1B
+    sizes = {"1b": LLAMA_3_2_1B, "3b": LLAMA_3_2_3B}
     layout = staticmethod(layout)
     model = Llama
     open_tokenizer = staticmethod(tokenizer)
@@ -185,4 +201,4 @@ class Runner(lm.Runner):
 
 
 if __name__ == "__main__":
-    lm.main(Runner, "Llama 3.2 1B on the NPU")
+    lm.main(Runner, "Llama 3.2 on the NPU")
