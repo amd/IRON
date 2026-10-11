@@ -36,7 +36,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common import Scratchpad
 from iron.operators.copy import Copy
-from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
@@ -53,15 +53,20 @@ from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
 
 
-def project(x, weight, **gemv):
-    """``x @ weight.T`` for a checkpoint's ``(out, in)`` weight: a GEMV for
-    one row (a GEMV's output is a vector), else flm.GEMM reading it
-    column-major. ``gemv`` are the GEMV's tunables, where the profile cannot
-    tell it from another of its shape.
+def project(x, weight, bias=None, **gemv):
+    """``x @ weight.T`` for a checkpoint's ``(out, in)`` weight, plus
+    ``bias`` if given, broadcast over every row (a linear layer's bias,
+    Qwen 2's q/k/v projections): a GEMV for one row (a GEMV's output is a
+    vector), else flm.GEMM reading it column-major. ``gemv`` are the GEMV's
+    tunables, where the profile cannot tell it from another of its shape.
     """
     if len(x.shape) == 2 and x.shape[0] > 1:
-        return FLMGEMM(x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,))
-    return GEMV(weight, x, **gemv)
+        y = FLMGEMM(x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,))
+    else:
+        y = GEMV(weight, x, **gemv)
+    if bias is None:
+        return y
+    return RowwiseAdd(y.reshape(-1, bias.shape[0]), bias).reshape(y.shape)
 
 
 def swiglu(x, w_gate, w_up, w_down):
