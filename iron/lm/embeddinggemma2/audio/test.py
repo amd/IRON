@@ -145,7 +145,7 @@ def test_audio_oracle_matches_hugging_face(oracle):
     )
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("name", list(CLIPS))
 def test_audio_features(audio, name, record_property):
     wave = chirp(CLIPS[name])
@@ -165,7 +165,7 @@ def test_audio_features(audio, name, record_property):
     assert not got[frames].any()
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 # Longest first: each clip runs over the rows a longer one left behind.
 @pytest.mark.parametrize("name", list(CLIPS)[::-1])
 def test_audio_accuracy(audio, oracle, name, record_property):
@@ -184,7 +184,7 @@ def test_audio_accuracy(audio, oracle, name, record_property):
 
 
 @pytest.mark.bench
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("name", list(CLIPS))
 def test_audio_latency(audio, name, record_property):
     wave = chirp(CLIPS[name])
