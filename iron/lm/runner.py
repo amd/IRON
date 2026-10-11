@@ -191,16 +191,10 @@ def main(runner: type[Runner], description: str):
         "alternating, and count the runs whose logits differ bitwise",
     )
     parser.add_argument(
-        "--device-loop",
-        action="store_true",
-        help="draw every token on the device, each decode step started by the "
-        "one before it, rather than on the host from each step's logits",
-    )
-    parser.add_argument(
         "--compare-host",
         action="store_true",
-        help="with --device-loop, then generate again on the host from the "
-        "same seed and count the tokens that differ",
+        help="after the device loop, generate again drawing on the host from "
+        "the same seed and count the tokens that differ",
     )
     parser.add_argument(
         "--cost-table",
@@ -216,10 +210,10 @@ def main(runner: type[Runner], description: str):
         "as NPU1 does",
     )
     args = parser.parse_args()
-    if args.compare_host and not args.device_loop:
-        parser.error("--compare-host compares the --device-loop run")
-    if args.device_loop and args.each_step:
-        parser.error("--device-loop needs a full-ELF decode step, not --each-step")
+    if args.compare_host and args.each_step:
+        parser.error(
+            "--compare-host compares the device loop, which --each-step has not"
+        )
 
     try:
         config = dataclasses.replace(runner.config, max_seq_len=args.max_seq_len)
@@ -233,10 +227,10 @@ def main(runner: type[Runner], description: str):
             f"{run.config.max_seq_len} rows"
         )
     model = run.npu(args.cost_table, iron.each_step if args.each_step else None)
-    if args.device_loop and not model.device_loop:
+    if args.compare_host and not model.device_loop:
         parser.error(
-            "--device-loop needs a full-ELF decode step, which --each-step "
-            "and NPU1 have not"
+            "--compare-host compares the device loop, which needs a full-ELF "
+            "decode step, and NPU1 has not"
         )
     for name, tuning in model.tunings.items():
         print(f"[Tuning] {name}:\n" + tuning.report(), flush=True)
@@ -275,7 +269,7 @@ def main(runner: type[Runner], description: str):
                 print(f"[Decode]  Tokens per second:   {1 / later:7.3f}")
 
         print(run.decode(tokens[1:]), end="", flush=True)
-        if not args.device_loop:
+        if not model.device_loop:
             timing = generate(model, tokens, args.num_tokens, sampler(), show)[1:]
             print(run.decode(pending), end="")
             report(*timing)

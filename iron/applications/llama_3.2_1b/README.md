@@ -61,6 +61,11 @@ python -m iron.lm.llama3.model \
     --prompt-len 2048 --num-tokens 40
 ```
 
+The NPU draws every token and writes the next decode step's values itself;
+the host only restarts each step and reads the tokens back at the end. The
+top-k must be at most 64. NPU1 and `--each-step` draw on the host from each
+step's logits (below).
+
 - `--random-weights SEED`: in place of the two files, weights drawn at
   `SEED` and prompts of random tokens; the speed, the accuracy against the
   oracle and the determinism are those of the real checkpoint's shape, on a
@@ -85,12 +90,9 @@ python -m iron.lm.llama3.model \
   and top-1 agreement
 - `--check-determinism ROUNDS`: instead of sampling, run two prompts
   `ROUNDS` times each and count the runs whose logits differ bitwise
-- `--device-loop`: draw every token on the device, each decode step started
-  by the one before it, instead of on the host from each step's logits; the
-  top-k must be at most 64
-- `--compare-host`: with `--device-loop`, then generate again on the host
-  from the same seed and count the tokens that differ (the text is the same,
-  token for token)
+- `--compare-host`: after the device loop, generate again drawing on the
+  host from the same seed and count the tokens that differ (the text is the
+  same, token for token)
 - `--cost-table TABLE`: fold the steps of the decode step and the prompt
   chunk, narrow their designs and pack them into shared device
   configurations by a measured cost table (below)
@@ -100,8 +102,9 @@ python -m iron.lm.llama3.model \
 ## NPU1, and `--each-step`
 
 NPU1 has no full-ELF dispatch, so there both versions are xclbins whose
-steps are dispatched one at a time, and the host draws each token: there is
-no `--device-loop`. A full ELF alone gathers rows of the embedding table
+steps are dispatched one at a time, and the host draws each token from each
+step's logits (`generation.generate`): there is no device loop, and no
+`--compare-host`. A full ELF alone gathers rows of the embedding table
 by a call's token ids, so there the host gathers each prompt chunk's rows
 and the chunk takes them. The versions still share one copy of the weights
 and the caches, the views of one buffer object. A prompt chunk attends with MHA,

@@ -54,12 +54,17 @@ def prompt(runner, chars: int, num_tokens: int, skip: int = 0) -> list[int]:
 
 
 def check_generation(runner, model, prompt_len: int, num_tokens: int, *, record):
-    """Sample ``num_tokens`` after a prompt of ``prompt_len`` characters;
-    record the time to the first token and the tokens per second after it.
+    """Sample ``num_tokens`` after a prompt of ``prompt_len`` characters,
+    with the host out of the loop where the model loops on the device
+    (``CausalLM.generate``), else drawing on the host; record the time to
+    the first token and the tokens per second after it.
     """
     tokens = prompt(runner, prompt_len, num_tokens)
     sample = Sampler(0.7, 50, np.random.default_rng(SEED))
-    drawn, first, later = generate(model, tokens, num_tokens, sample)
+    if model.device_loop:
+        drawn, first, later = model.generate(tokens, num_tokens, sample)
+    else:
+        drawn, first, later = generate(model, tokens, num_tokens, sample)
     print(runner.decode(drawn))
     record("TTFT", first)
     if num_tokens > 1:
