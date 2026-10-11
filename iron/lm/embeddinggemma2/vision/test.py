@@ -218,14 +218,26 @@ def test_image_processor_refuses(npu2, shape, tokens, refusal):
         ImageProcessor(VISION).inputs(np.zeros((*shape, 3), np.uint8), tokens)
 
 
-def test_vision_oracle_matches_hugging_face(weights, oracle):
+@pytest.fixture(scope="module")
+def hugging_face():
+    """torch, transformers, and its Gemma 4 and EmbeddingGemma 2 modeling.
+
+    Requested before ``oracle``, so that a host without them skips before
+    looking for the checkpoint.
+    """
     # Optional dependencies: the reference implementation, where installed.
-    torch = pytest.importorskip("torch")
-    gemma4 = pytest.importorskip("transformers.models.gemma4.modeling_gemma4")
-    embedding_gemma2 = pytest.importorskip(
-        "transformers.models.embedding_gemma2.modeling_embedding_gemma2"
+    return (
+        pytest.importorskip("torch"),
+        pytest.importorskip("transformers"),
+        pytest.importorskip("transformers.models.gemma4.modeling_gemma4"),
+        pytest.importorskip(
+            "transformers.models.embedding_gemma2.modeling_embedding_gemma2"
+        ),
     )
-    transformers = pytest.importorskip("transformers")
+
+
+def test_vision_oracle_matches_hugging_face(hugging_face, oracle):
+    torch, transformers, gemma4, embedding_gemma2 = hugging_face
     config = transformers.AutoConfig.from_pretrained(DIRECTORY)
     config.vision_config._attn_implementation = "eager"
     tower = gemma4.Gemma4VisionModel(config.vision_config).eval()

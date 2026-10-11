@@ -99,14 +99,26 @@ def audio(weights, module_npu_runtime):
     yield Audio(AUDIO, weights).load(tuner)
 
 
-def test_audio_oracle_matches_hugging_face(oracle):
+@pytest.fixture(scope="module")
+def hugging_face():
+    """torch, transformers, and its Gemma 4 and EmbeddingGemma 2 modeling.
+
+    Requested before ``oracle``, so that a host without them skips before
+    looking for the checkpoint.
+    """
     # Optional dependencies: the reference implementation, where installed.
-    torch = pytest.importorskip("torch")
-    transformers = pytest.importorskip("transformers")
-    gemma4 = pytest.importorskip("transformers.models.gemma4.modeling_gemma4")
-    embedding_gemma2 = pytest.importorskip(
-        "transformers.models.embedding_gemma2.modeling_embedding_gemma2"
+    return (
+        pytest.importorskip("torch"),
+        pytest.importorskip("transformers"),
+        pytest.importorskip("transformers.models.gemma4.modeling_gemma4"),
+        pytest.importorskip(
+            "transformers.models.embedding_gemma2.modeling_embedding_gemma2"
+        ),
     )
+
+
+def test_audio_oracle_matches_hugging_face(hugging_face, oracle):
+    torch, transformers, gemma4, embedding_gemma2 = hugging_face
     config = transformers.AutoConfig.from_pretrained(DIRECTORY)
     # Not eager: there Gemma4AudioAttention inverts the additive float mask
     # create_bidirectional_mask gives it.
