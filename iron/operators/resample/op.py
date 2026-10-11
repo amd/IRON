@@ -892,12 +892,7 @@ class Resample(Operator):
     # In multiples of 16, as ResampleTaps's are, so every core count up to it divides.
     width_chunks: int = param(default=lambda op: 16 * -(-op.out_width // (16 * SIDE)))
     height_chunks: int = param(default=lambda op: 16 * -(-op.out_height // (16 * SIDE)))
-    patch_rows: int = param(
-        default=lambda op: op.out_height
-        // SIDE
-        * 16
-        * (op.out_width // (16 * SIDE) + 1)
-    )
+    patch_rows: int = param(default=lambda op: op.padded_rows())
     num_aie_columns: int = auto()
     num_channels: int = auto(2)
 
@@ -943,6 +938,16 @@ class Resample(Operator):
     @property
     def cores(self) -> int:
         return self.num_aie_columns * self.num_channels
+
+    def padded_rows(self) -> int:
+        """Every band's patch columns, padded past the cores: the given
+        columns' or the bound device's every column (NPU2's eight with none
+        bound), two channels each.
+        """
+        dev = self.dev
+        cols = self.num_aie_columns or (dev.cols if dev is not None else 8)
+        cores = cols * self.num_channels
+        return self.out_height // SIDE * (self.out_width // SIDE // cores + 1) * cores
 
     @property
     def window_cap(self) -> int:
