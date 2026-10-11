@@ -52,11 +52,12 @@ Apache-2.0, ungated), over plain https, with no account:
 
 ```bash
 D=/path/to/granite-4.2-3b
+REV=e459acceac81e5fe67c07d9cfc72329a332e7eb1  # the revision every KL figure here is against
 for f in config.json generation_config.json tokenizer_config.json \
     special_tokens_map.json tokenizer.json model.safetensors.index.json \
     model-00001-of-00002.safetensors model-00002-of-00002.safetensors; do
   curl -fL -o "$D/$f" \
-    "https://huggingface.co/ibm-granite/granite-4.2-3b/resolve/main/$f"
+    "https://huggingface.co/ibm-granite/granite-4.2-3b/resolve/$REV/$f"
 done
 ```
 

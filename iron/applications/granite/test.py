@@ -66,9 +66,9 @@ def model(runner, request, module_npu_runtime):
 
 
 # KL(fp32 CPU || NPU), teacher-forced over 40 steps from a 1024-character
-# prompt. The graphs measure a mean of 0.0031 and a p90 of 0.0061; a
-# separate 20-step, 512-character run measured a mean of 0.0039 and a p90
-# of 0.0087. The largest step measured is 0.0152. 40 layers accumulate more
+# prompt (this test's default): a mean of 0.0031, a p90 of 0.0062, largest
+# step 0.0152; a separate 20-step, 512-character run measures a mean of
+# 0.0039, a p90 of 0.0087, largest step 0.0106. 40 layers accumulate more
 # bf16 error than Llama 3.2 1B's 16, so the bounds carry more headroom over
 # the measured values than Llama's test does.
 MAX_KL = {"Mean": 0.01, "P90": 0.02, "Max": 0.05}
