@@ -19,7 +19,8 @@ themselves are applications over it, each a package of
   length, and the sandwich layer EmbeddingGemma 2's towers share.
 * ``blocks``: what layers are built from: ``project``, a weight's
   projection at either row count, the SwiGLU and GELU-gated feed-forwards,
-  sandwich norms and an encoder's attention.
+  sandwich norms and an encoder's attention; and ``Block``/``BlockOracle``,
+  the attention + SwiGLU layer a Llama-style model mixes in.
 
 Sampling and the generation, accuracy and determinism loops
 (``generation``), and what a model's device test checks
@@ -45,6 +46,8 @@ from .base import (
     unread_weights,
 )
 from .blocks import (
+    Block,
+    BlockOracle,
     Conv2d,
     ImagePatches,
     LogMel,
@@ -53,6 +56,7 @@ from .blocks import (
     filterbank,
     geglu,
     project,
+    rms_norm,
     sandwich,
     swiglu,
 )
@@ -62,6 +66,8 @@ from .generation import SEED, Sampler, accuracy, determinism, generate, greedy
 
 __all__ = [
     "SEED",
+    "Block",
+    "BlockOracle",
     "CausalLM",
     "Checkpoint",
     "Config",
@@ -89,6 +95,7 @@ __all__ = [
     "main",
     "project",
     "random_weights",
+    "rms_norm",
     "rope_angles",
     "sandwich",
     "sandwich_layer",

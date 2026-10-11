@@ -3,9 +3,10 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama 3 over the shared decoder (``iron.lm``): its
-layer and head on the NPU (``Llama``) and on the CPU in float32
-(``LlamaOracle``, the reference it is judged by), where its
+"""Llama 3 over the shared decoder and block (``iron.lm``): its
+head on the NPU (``Llama``) and on the CPU in float32
+(``LlamaOracle``, the reference it is judged by; its layer is
+``iron.lm.blocks``', shared with Granite 4.2 3B), where its
 checkpoint keeps each weight, its tokenizer, and Llama 3.2 1B's shape.
 Run it with ``python -m iron.applications.llama.model``.
 
@@ -24,11 +25,9 @@ import tiktoken
 import tiktoken.load
 
 from iron import lm
-from iron.lm import CausalLM, Config, Layout, Oracle, project, swiglu
-from iron.operators.elementwise_add import ElementwiseAdd
+from iron.lm import Block, BlockOracle, CausalLM, Config, Layout, Oracle, rms_norm
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
-from iron.operators.rope import RoPE
 
 
 @dataclasses.dataclass(frozen=True)
@@ -89,43 +88,17 @@ LLAMA_3_2_1B = Config(
     rope_scaling=LLAMA_3_2,
 )
 
-# Llama's RMSNorm epsilon.
-EPS = np.float32(1e-5)
 
-
-class LlamaOracle(Oracle):
+class LlamaOracle(BlockOracle, Oracle):
     """Llama 3's forward pass in float32, on the host."""
 
     norm: np.ndarray
-
-    def layer(self, angles, w, x):
-        c, n = self.config, x.shape[0]
-        H, G, D = c.n_heads, c.n_kv_groups, c.head_dim
-        h = rms_norm(x, w.norm1)
-        q = self.rotate((h @ w.q.T).reshape(n, H, D), angles)
-        k = self.rotate((h @ w.k.T).reshape(n, G, D), angles)
-        v = (h @ w.v.T).reshape(n, G, D)
-        x = x + self.attend(q, k, v) @ w.o.T
-        h = rms_norm(x, w.norm2)
-        F = w.gate.shape[0]
-        half = np.matmul(h, w.gate.T, out=self.buffer("gate", (n, F)))
-        half *= np.float32(0.5)
-        # SiLU, with the sigmoid as a tanh, which does not overflow.
-        silu = np.tanh(half, out=self.buffer("silu", (n, F)))
-        silu += 1
-        silu *= half
-        silu *= np.matmul(h, w.up.T, out=self.buffer("up", (n, F)))
-        return x + silu @ w.down.T
 
     def head(self, x):
         return rms_norm(x, self.norm) @ self.embedding.T
 
 
-def rms_norm(x, w):
-    return x / np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + EPS) * w
-
-
-class Llama(CausalLM):
+class Llama(Block, CausalLM):
     """Llama 3 on ``config``'s shape and ``weights`` (``embedding``, which is
     the output head too, ``norm`` and ``layers``). Every matrix is read
     ``(out, in)``, as the checkpoint ships it: GEMV's ``(M, K)`` and GEMM's
@@ -135,20 +108,6 @@ class Llama(CausalLM):
     profile = Path(__file__).with_name("profiles")
     oracle = LlamaOracle
     norm: np.ndarray
-
-    def layer(self, step, i, w, x):
-        c, n = self.config, x.shape[0]
-        H, G, D = c.n_heads, c.n_kv_groups, c.head_dim
-        h = RMSNorm(x, weight=w.norm1)
-        # Half a head per tile for one row; q's shape is o's when H * D is
-        # the width, so it is given here rather than by the profile.
-        q, k, v = (project(h, p, tile_size_output=D // 2) for p in (w.q, w.k, w.v))
-        # One angle row per position, applied to that position's heads.
-        q = RoPE(q.reshape(n * H, D), step.angles)
-        k = RoPE(k.reshape(n * G, D), step.angles)
-        x = ElementwiseAdd(x, project(self.attend(step, i, q, k, v), w.o))
-        h = RMSNorm(x, weight=w.norm2)
-        return ElementwiseAdd(x, swiglu(h, w.gate, w.up, w.down))
 
     def head(self, x):
         return GEMV(self.embedding, RMSNorm(x, weight=self.norm))

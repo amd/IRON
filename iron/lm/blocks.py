@@ -10,7 +10,8 @@ own, holding the weights, so they are uploaded once. ``geglu`` is the
 GELU-gated feed-forward over GEMMs, ``sandwich`` a block between two RMS
 norms with its residual (Gemma's sandwich norms), and ``attention`` an
 encoder's bidirectional attention over one sequence, its queries and keys
-RMS-normed and rotated. ``LogMel`` is an audio front end's log-mel
+RMS-normed and rotated. ``Block`` and ``BlockOracle`` are the attention +
+SwiGLU layer Llama 3 and Granite 4.2 3B share, on the NPU and in numpy. ``LogMel`` is an audio front end's log-mel
 spectrogram, ``Conv2d`` a convolution over rows of channels-last pixels
 and ``ImagePatches`` a vision front end's resize into patches. A graph
 here is called in a model's body as it is on its own (``Graph``): its
@@ -51,6 +52,8 @@ from iron.operators.resample.op import SIDE, PatchPositions, Resample, ResampleT
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
+
+from .causal import Step
 
 
 def project(x, weight, bias=None, k_tile=None, tile_n=None, **gemv):
@@ -545,3 +548,58 @@ def attention(
         num_pipelines=pipelines,
     )
     return GEMM(o.reshape(T, H * D), w.o, b_col_maj=True, **gemm)
+
+
+#: RMSNorm's epsilon, shared by every model on ``Block``.
+EPS = np.float32(1e-5)
+
+
+def rms_norm(x, w):
+    return x / np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + EPS) * w
+
+
+class Block:
+    """The attention + SwiGLU layer Llama 3 and Granite 4.2 3B share, on the
+    NPU: pre-norm attention, then pre-norm SwiGLU, both residual. A model
+    mixes it in alongside ``CausalLM``, which gives ``attend`` and
+    ``config``, and adds its own ``head``.
+    """
+
+    def layer(self, step: Step, i: int, w, x):
+        c, n = self.config, x.shape[0]
+        H, G, D = c.n_heads, c.n_kv_groups, c.head_dim
+        h = RMSNorm(x, weight=w.norm1)
+        # Half a head per tile for one row; q's shape is o's when H * D is
+        # the width, so it is given here rather than by the profile.
+        q, k, v = (project(h, p, tile_size_output=D // 2) for p in (w.q, w.k, w.v))
+        # One angle row per position, applied to that position's heads.
+        q = RoPE(q.reshape(n * H, D), step.angles)
+        k = RoPE(k.reshape(n * G, D), step.angles)
+        x = ElementwiseAdd(x, project(self.attend(step, i, q, k, v), w.o))
+        h = RMSNorm(x, weight=w.norm2)
+        return ElementwiseAdd(x, swiglu(h, w.gate, w.up, w.down))
+
+
+class BlockOracle:
+    """``Block``'s layer in float32, on the host, mixed in alongside
+    ``Oracle``, which gives ``attend``, ``rotate``, ``buffer`` and ``config``.
+    """
+
+    def layer(self, angles, w, x):
+        c, n = self.config, x.shape[0]
+        H, G, D = c.n_heads, c.n_kv_groups, c.head_dim
+        h = rms_norm(x, w.norm1)
+        q = self.rotate((h @ w.q.T).reshape(n, H, D), angles)
+        k = self.rotate((h @ w.k.T).reshape(n, G, D), angles)
+        v = (h @ w.v.T).reshape(n, G, D)
+        x = x + self.attend(q, k, v) @ w.o.T
+        h = rms_norm(x, w.norm2)
+        F = w.gate.shape[0]
+        half = np.matmul(h, w.gate.T, out=self.buffer("gate", (n, F)))
+        half *= np.float32(0.5)
+        # SiLU, with the sigmoid as a tanh, which does not overflow.
+        silu = np.tanh(half, out=self.buffer("silu", (n, F)))
+        silu += 1
+        silu *= half
+        silu *= np.matmul(h, w.up.T, out=self.buffer("up", (n, F)))
+        return x + silu @ w.down.T
