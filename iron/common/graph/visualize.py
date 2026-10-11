@@ -115,10 +115,11 @@ class Dataflow:
         traced: The graph's trace; a compiled version's is the graph it built,
             its folds applied and its designs narrowed.
         title: The caption.
-        layers: The layers drawn, by index (``layers.3.q`` and ``vision.layers.3.q`` are layer 3), or
-            None for every step. A step reading no layer's buffer is in the
-            layer of what it reads, or in none before the first layer and
-            after the last.
+        layers: The layers drawn, by index (``layers.3.q`` and
+            ``vision.layers.3.q`` are layer 3), or None for every step. A step
+            reading no layer's buffer is in the layer of what it reads; before
+            the first layer, and after the last where it holds a weight or
+            state of no layer (a head), it is in none.
         weights: Draw each weight as its own node; else name it in the box
             of the step reading it.
         version: The compiled version ``traced`` is of: each box names its
@@ -224,8 +225,32 @@ class Dataflow:
             v.key: dict(v.tunables) for key, v in tuning.chosen.items() if v.key != key
         }
 
-    def box(self, i: int, values: Mapping[int, list[str]], context: dict) -> list[str]:
-        """The lines of step ``i``'s box, as Graphviz HTML-like label text."""
+    def values(self) -> dict[int, list[str]]:
+        """Each operator's per-call values as written, by the ``id`` of the
+        operator, which the trace holds.
+        """
+        found = defaultdict(list)
+        for b in self.traced.bindings:
+            found[id(b.op)].append(f"{b.member.name} = {b.expression}")
+        return found
+
+    def box(
+        self,
+        i: int,
+        values: Mapping[int, list[str]],
+        designs: Mapping[int, tuple[str, int]],
+        keys: Mapping[int, str],
+        moved: Mapping[str, dict],
+    ) -> list[str]:
+        """The lines of step ``i``'s box, as Graphviz HTML-like label text.
+
+        Args:
+            i: The step's index.
+            values: ``values()``.
+            designs: ``designs()``.
+            keys: ``keys()``, or none where nothing is priced or tuned.
+            moved: ``moved()``.
+        """
         s = self.traced.steps[i]
         op = s.op
         name = type(op).__name__
@@ -259,15 +284,15 @@ class Dataflow:
             lines.append(
                 f'<font point-size="9" color="{INK_2}"><i>{html.escape(v)}</i></font>'
             )
-        key = context["keys"].get(i)
-        moved = context["moved"].get(key) if key is not None else None
-        if moved:
-            text = ", ".join(f"{k}={v}" for k, v in moved.items())
+        key = keys.get(i)
+        tuned = moved.get(key) if key is not None else None
+        if tuned:
+            text = ", ".join(f"{k}={v}" for k, v in tuned.items())
             lines.append(
                 f'<font point-size="9" color="{INK}"><b>tuned</b> {html.escape(text)}</font>'
             )
-        if i in context["designs"]:
-            label, count = context["designs"][i]
+        if i in designs:
+            label, count = designs[i]
             shared = f", shared by {count}" if count > 1 else ""
             lines.append(
                 f'<font point-size="8" color="{MUTED}">design {label}{shared}</font>'
@@ -329,14 +354,8 @@ class Dataflow:
             for h in s.outputs:
                 if self.root(h).role in ("intermediate", "output"):
                     writer[self.root(h).name] = i
-        values = defaultdict(list)
-        for b in self.traced.bindings:
-            values[id(b.op)].append(f"{b.member.name} = {b.expression}")
-        context = dict(
-            designs=self.designs(),
-            keys={} if self.version is None and self.table is None else self.keys(),
-            moved=self.moved(),
-        )
+        values, designs, moved = self.values(), self.designs(), self.moved()
+        keys = {} if self.version is None and self.table is None else self.keys()
         packs = self.packs()
 
         nodes: dict[object, list[str]] = defaultdict(list)
@@ -383,7 +402,7 @@ class Dataflow:
             nodes[(("pack", packs[i]) if packs else ("layer", layer[i]))].append(
                 f'  "{prefix}s{i}" [shape=box, style="rounded,filled", '
                 f'fillcolor="{color}33", color="{color}", penwidth=2, '
-                f'tooltip="{tip}", label=<{"<br/>".join(self.box(i, values, context))}>];'
+                f'tooltip="{tip}", label=<{"<br/>".join(self.box(i, values, designs, keys, moved))}>];'
             )
             for h in s.inputs:
                 r = self.root(h)
@@ -473,9 +492,7 @@ class Dataflow:
 
     def panel(self, prefix: str = "") -> dict[str, dict]:
         """What the page shows for a clicked step, by its node's name."""
-        values = defaultdict(list)
-        for b in self.traced.bindings:
-            values[id(b.op)].append(f"{b.member.name} = {b.expression}")
+        values = self.values()
         return {
             f"{prefix}s{i}": dict(
                 op=type(self.traced.steps[i].op).__name__,
