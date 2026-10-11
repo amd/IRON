@@ -43,4 +43,6 @@ class SiLU(UnaryElementwise):
     num_channels: int = auto(1, repr=False, init=False)
 
     def kernel(self):
-        return activation.silu_sized(self.tile_size)
+        # vtanh's error, doubled through the sigmoid identity, is most of
+        # Llama 3.2 3B's divergence; the table costs nothing measurable.
+        return activation.silu_sized(self.tile_size, use_lut=True)
