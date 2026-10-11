@@ -22,8 +22,8 @@ extern "C" void magnitude_f32(float *restrict x, float *restrict out, int32_t n)
     const bf_t half = bf_lanes(0x3f00);
     for (int i = 0; i < n; i += 32) chess_prepare_for_pipelining {
         bf_t rh, rm, rl, ih, im, il;
-        split3(acc_t(aie::load_v<32>(x + i)), rh, rm, rl, one);
-        split3(acc_t(aie::load_v<32>(x + n + i)), ih, im, il, one);
+        split3(acc_t(aie::load_v<32>(x + i)), rh, rm, rl, one, half);
+        split3(acc_t(aie::load_v<32>(x + n + i)), ih, im, il, one, half);
         acc_t p = aie::mul(rm, rm);
         p = aie::mac(p, im, im);
         p = aie::mac(aie::mac(p, rh, rl), rh, rl);
@@ -39,7 +39,7 @@ extern "C" void magnitude_f32(float *restrict x, float *restrict out, int32_t n)
                                 aie::downshift(bits, 1));
         bf_t y0 = acc_t(y0_bits.cast_to<float>()).to_vector<bfloat16>();
         bf_t ph, pm, pl;
-        split3(p, ph, pm, pl, one);
+        split3(p, ph, pm, pl, one, half);
         bf_t py = aie::mac(aie::mul(pm, y0), ph, y0).to_vector<bfloat16>();
         acc_t r = aie::msc(acc_t(aie::broadcast<float, 32>(1.0f)), py, y0);
         bf_t y0_half = aie::mul(y0, half).to_vector<bfloat16>();
@@ -52,7 +52,7 @@ extern "C" void magnitude_f32(float *restrict x, float *restrict out, int32_t n)
         acc_t s = aie::mac(aie::mac(aie::mul(pl, y), pm, y), ph, y);
         for (int k = 0; k < 3; k++) {
             bf_t sh, sm, sl;
-            split3(s, sh, sm, sl, one);
+            split3(s, sh, sm, sl, one, half);
             acc_t e = aie::msc(p, sh, sh);
             e = aie::msc(aie::msc(e, sh, sm), sh, sm);
             e = aie::msc(aie::msc(e, sh, sl), sh, sl);

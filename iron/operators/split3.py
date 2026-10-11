@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Three bf16 limbs summing to `a` exactly: each residual is taken in the
-# accumulator, where a bf16 times one is exact.
+# accumulator, where a bf16 product is exact. aie2's accumulator add drops
+# an addend's bits below the larger addend's 24-bit significand, so `hi`,
+# which may round up a binade past `a`, is taken off in two halves.
 SPLIT = """
 #include <aie_api/aie.hpp>
 #include <stdint.h>
@@ -14,9 +16,10 @@ static inline bf_t bf_lanes(int16_t bits) {
     return aie::broadcast<int16_t, 32>(bits).cast_to<bfloat16>();
 }
 
-static inline void split3(acc_t a, bf_t &hi, bf_t &mid, bf_t &lo, bf_t one) {
+static inline void split3(acc_t a, bf_t &hi, bf_t &mid, bf_t &lo, bf_t one,
+                          bf_t half) {
     hi = a.to_vector<bfloat16>();
-    acc_t r = aie::msc(a, hi, one);
+    acc_t r = aie::msc(aie::msc(a, hi, half), hi, half);
     mid = r.to_vector<bfloat16>();
     lo = aie::msc(r, mid, one).to_vector<bfloat16>();
 }

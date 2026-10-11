@@ -23,9 +23,10 @@ extern "C" void limbs_f32(float *restrict x, bfloat16 *restrict y, int32_t n) {
     event0();
     aie::rounding_mode saved = aie::swap_rounding(aie::rounding_mode::conv_even);
     const bf_t one = bf_lanes(0x3f80);
+    const bf_t half = bf_lanes(0x3f00);
     for (int i = 0; i < n; i += 32) chess_prepare_for_pipelining {
         bf_t hi, mid, lo;
-        split3(acc_t(aie::load_v<32>(x + i)), hi, mid, lo, one);
+        split3(acc_t(aie::load_v<32>(x + i)), hi, mid, lo, one, half);
         aie::store_v(y + i, hi);
         aie::store_v(y + n + i, mid);
         aie::store_v(y + 2 * n + i, hi);

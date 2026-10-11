@@ -36,6 +36,7 @@ extern "C" void log_f32_bf16(float *restrict x, bfloat16 *restrict y, int32_t n,
     event0();
     aie::rounding_mode saved = aie::swap_rounding(aie::rounding_mode::conv_even);
     const bf_t one = bf_lanes(0x3f80);
+    const bf_t half = bf_lanes(0x3f00);
     const bf_t ln2_hi = bf_lanes({int(LN2_HI.view(np.int16))});
     const bf_t ln2_mid = bf_lanes({int(LN2_MID.view(np.int16))});
     const bf_t ln2_lo = bf_lanes({int(LN2_LO.view(np.int16))});
@@ -50,20 +51,22 @@ extern "C" void log_f32_bf16(float *restrict x, bfloat16 *restrict y, int32_t n,
         auto e_magic = aie::add(e, aie::broadcast<int32_t, 32>(0x4b400000));
         bf_t ef = aie::add(acc_t(e_magic.cast_to<float>()), -12582912.0f)
                       .to_vector<bfloat16>();
+        // f = m - 1, its one taken off in halves as split3 takes off hi.
         bf_t fh, fm, fl;
-        split3(aie::msc(acc_t(m), one, one), fh, fm, fl, one);
+        split3(aie::msc(aie::msc(acc_t(m), one, half), one, half), fh, fm, fl, one,
+               half);
 
         acc_t q = aie::add(acc_t(aie::broadcast<float, 32>(0.0f)), C[{DEGREE}]);
         for (int k = {DEGREE - 1}; k >= 0; k--) {{
             bf_t qh, qm, ql;
-            split3(q, qh, qm, ql, one);
+            split3(q, qh, qm, ql, one, half);
             q = aie::mul(ql, fh);
             q = aie::mac(aie::mac(q, qm, fm), qh, fl);
             q = aie::mac(aie::mac(q, qm, fh), qh, fm);
             q = aie::add(aie::mac(q, qh, fh), C[k]);
         }}
         bf_t qh, qm, ql;
-        split3(q, qh, qm, ql, one);
+        split3(q, qh, qm, ql, one, half);
         acc_t r = aie::mul(ef, ln2_lo);
         r = aie::mac(r, ef, ln2_mid);
         r = aie::mac(aie::mac(aie::mac(r, ql, fh), qm, fm), qh, fl);
