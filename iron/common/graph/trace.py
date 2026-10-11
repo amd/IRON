@@ -179,6 +179,12 @@ class TracedGraph:
     addresses: dict[str, tuple[str, Callable[[int], dict], str]] = dataclasses.field(
         default_factory=dict
     )
+    # A weight whose bytes are not known until its own table buffer is
+    # placed (GatherWords.static_base): handle name -> (buffer, address ->
+    # words by name). Filled in once, at upload, not a per-call value.
+    static_addresses: dict[str, tuple[str, Callable[[int], dict]]] = dataclasses.field(
+        default_factory=dict
+    )
     limits: list[Limit] = dataclasses.field(default_factory=list)
 
     @property
@@ -296,6 +302,10 @@ class Tracer:
         self._bound: dict[int, dict] = {}
         self.encoders: dict[str, Encoder] = {}
         self.addresses: dict[str, tuple[str, Callable, str]] = {}
+        # A weight whose bytes are not known until its own table buffer is
+        # placed (GatherWords.static_base): handle name -> (table name,
+        # address_words). Filled in once, at upload, not a per-call value.
+        self.static_addresses: dict[str, tuple[str, Callable]] = {}
         self._counter = itertools.count()
         self._names = names or {}
         self._taken = {*self._names.values(), *inputs}
@@ -439,6 +449,9 @@ class Tracer:
         """
         view = operands[0]
         ids, table = view.gather_by, view.parent
+        static_base = (
+            extra.pop("static_base", False) if isinstance(extra, dict) else False
+        )
         if (
             not isinstance(target, type)
             or target.per_call_gather is None
@@ -454,6 +467,7 @@ class Tracer:
             table_rows=table.shape[0],
             row=math.prod(table.shape[1:]),
             dtype=table.dtype,
+            static_base=static_base,
         )
         bound = ids.bounds.get(0)
         if bound is not None:
@@ -468,18 +482,26 @@ class Tracer:
             template = op.template[0]
             self._names[id(template)] = self.fresh(f"{table.name}_gather")
             control = self.operand(template)
-            for member in ("base_lo", "base_hi"):
-                name = next(
-                    (
-                        n
-                        for n, (buffer, _, m) in self.addresses.items()
-                        if (buffer, m) == (table.name, member)
-                    ),
-                    f"address{len(self.addresses) // 2}_{member}",
+            if source.static_base:
+                base_handle = self.operand(np.zeros(2, dtype=np.int32))
+                self.static_addresses[base_handle.name] = (
+                    table.name,
+                    source.address_words,
                 )
-                self.addresses[name] = (table.name, source.address_words, member)
-                self._bind(source, member, Value(name, "scratchpad", np.int32))
-            self._record(source, [ids, control])
+                self._record(source, [ids, base_handle, control])
+            else:
+                for member in ("base_lo", "base_hi"):
+                    name = next(
+                        (
+                            n
+                            for n, (buffer, _, m) in self.addresses.items()
+                            if (buffer, m) == (table.name, member)
+                        ),
+                        f"address{len(self.addresses) // 2}_{member}",
+                    )
+                    self.addresses[name] = (table.name, source.address_words, member)
+                    self._bind(source, member, Value(name, "scratchpad", np.int32))
+                self._record(source, [ids, control])
         out = self._record(op, [table, control])
         return out if out.shape == view.shape else out.reshape(view.shape)
 
@@ -676,6 +698,7 @@ class Tracer:
             next_values,
             encoders=self.encoders,
             addresses=self.addresses,
+            static_addresses=self.static_addresses,
             limits=self.limits,
         )
 

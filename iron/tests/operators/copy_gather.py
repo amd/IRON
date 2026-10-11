@@ -98,16 +98,22 @@ class Bounded(iron.Graph):
 class FromDeviceIds(iron.Graph):
     """Two tables gathered by ids a step made, so no host encodes them."""
 
-    def __init__(self, table, other, feeds: int | None = None):
+    def __init__(
+        self, table, other, feeds: int | None = None, static_base: bool = False
+    ):
         self.table = iron.weight(table)
         self.other = iron.weight(other)
+        self.static_base = static_base
         self.profile = Profile()
         if feeds is not None:
             self.profile.add(Gather, feeds=feeds)
 
     def body(self, ids):
         ids = Copy(ids, dtype=np.int32)
-        return Copy(self.table[ids]), Copy(self.other[ids])
+        return (
+            Copy(self.table[ids], static_base=self.static_base),
+            Copy(self.other[ids], static_base=self.static_base),
+        )
 
 
 class FromState(iron.Graph):
@@ -227,6 +233,38 @@ def test_rows_ids_the_device_made_name_are_gathered(npu_runtime, table, feeds, n
         rows, others = graph(ids)
         assert_equal(rows, np.take(table, ids, axis=0), f"call {call}")
         # Past the table an id is clipped to its first or last row.
+        clipped = np.clip(ids, -len(other), len(other) - 1)
+        assert_equal(others, other[clipped], f"call {call}")
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("n_ids", [1, 15, 71])
+def test_a_static_table_s_address_is_an_ordinary_resident_operand(
+    npu_runtime, table, n_ids
+):
+    """``static_base=True``: the table's address costs no scratchpad entry.
+
+    GatherWords's base_lo/base_hi otherwise cost one full-ELF scratchpad
+    parameter each, scaling with every distinct table a design gathers
+    from (the gap a 24-layer MoE model's per-layer expert tables hit).
+    static_base moves the address onto an ordinary resident operand
+    instead, the same way any other weight's device address reaches its
+    own DMA descriptors -- no per-table scratchpad cost at all.
+    """
+    other = np.random.default_rng(6).standard_normal((3000, 256)).astype(bfloat16)
+    graph = FromDeviceIds(table, other, static_base=True)
+    net = graph.compile(ids=((n_ids,), np.int32))
+    assert net.plan.image == "elf"
+    assert not net.traced.encoders
+    assert not net.traced.addresses, "static_base must not use the scratchpad path"
+    assert len(net.traced.static_addresses) == 2, "one resident address per table"
+    rng = np.random.default_rng(n_ids)
+    for call in range(3):
+        ids = rng.integers(-VOCAB, VOCAB, n_ids).astype(np.int32)
+        ids[1::2] = rng.integers(-len(other), len(other), n_ids // 2)
+        ids[:2] = (-VOCAB, VOCAB - 1)[:n_ids]
+        rows, others = graph(ids)
+        assert_equal(rows, np.take(table, ids, axis=0), f"call {call}")
         clipped = np.clip(ids, -len(other), len(other) - 1)
         assert_equal(others, other[clipped], f"call {call}")
 

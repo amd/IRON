@@ -120,6 +120,12 @@ class Gather(Operator):
         repr=False,
     )
     feeds: int = auto(array=True)
+    # True when the table a device-made ids' word source reads is the same
+    # buffer at every call (known at this op's own construction, not picked
+    # at runtime): its address then reaches GatherWords as an ordinary
+    # resident operand instead of through base_lo/base_hi, costing this
+    # design no full-ELF scratchpad parameter at all (see GatherWords).
+    static_base: bool = param(default=False, array=True)
 
     table = In(table_rows, row, dtype=dtype)
     control = In(words, dtype=np.uint32)
@@ -320,6 +326,7 @@ class Gather(Operator):
             table_rows=self.table_rows,
             row_bytes=self.row * np.dtype(self.dtype).itemsize,
             words=self.words,
+            static_base=self.static_base,
         )
 
     @functools.cached_property
@@ -409,10 +416,20 @@ class GatherWords(Operator):
     A core turns each id into its row's address words, which drain into
     their slots of ``control``, a buffer holding the gather's template;
     the gather that follows streams it. The table's address reaches the
-    core as ``base_lo`` and ``base_hi``, per-call values the graph fills
-    in, split at ``low_bits`` since a core reads 30 bits of a value. An id
-    past the table is clipped to its first or last row,
-    ``table[np.clip(ids, -n, n - 1)]``, so every id reads a row of it.
+    core as ``base_lo`` and ``base_hi``, split at ``low_bits`` since a core
+    reads 30 bits of a value. An id past the table is clipped to its first
+    or last row, ``table[np.clip(ids, -n, n - 1)]``, so every id reads a
+    row of it.
+
+    Unless ``static_base``, ``base_lo``/``base_hi`` are per-call values the
+    graph fills in (a full ELF's scratchpad, an xclbin's runtime
+    parameters) -- the table a call reads may differ call to call. A
+    caller whose table is the same buffer at every call (known at this
+    op's own construction) sets ``static_base``: the address then arrives
+    as ``base``, an ordinary resident operand like any other weight, not a
+    per-call value -- a full ELF's fixed 32-word scratchpad has no room
+    for one entry per distinct table a design holds, where an ordinary
+    operand has no such ceiling.
     """
 
     low_bits: ClassVar[int] = 29
@@ -422,11 +439,15 @@ class GatherWords(Operator):
     row_bytes: int = param(array=True)
     words: int = param()
     pairs: int = param(default=lambda op: 2 * op.rows, array=True, repr=False)
+    static_base: bool = param(default=False, array=True)
 
     ids = In(rows, dtype=np.int32, tile=(rows,), depth=1)
     control = Out(words, dtype=np.uint32, tile=(pairs,), depth=1)
     base_lo = Scratchpad(np.int32)
     base_hi = Scratchpad(np.int32)
+    # 2 words, not 1: base_lo and base_hi packed together, the order
+    # address_words() itself returns them in.
+    base = In(2, dtype=np.int32, tile=(2,), depth=1, when=static_base)
 
     def ops(self) -> int:
         return 0
@@ -451,9 +472,16 @@ class GatherWords(Operator):
         self.ids.lane(0).bind(ids.prod())
         self.control.lane(0).bind(addresses.cons())
         barrier = WorkerRuntimeBarrier()
+        base_stream = None
         # A full ELF's core reads the address from the scratchpad, an
-        # xclbin's from its runtime parameters, which the sequence writes.
-        if target.image == "elf":
+        # xclbin's from its runtime parameters, which the sequence writes
+        # -- unless static_base, where it is an ordinary resident operand
+        # instead (no per-call value, no scratchpad entry at all).
+        if self.static_base:
+            lo = hi = None
+            base_stream = ObjectFifo(self.base.tile, name="gather_base", depth=1)
+            self.base.lane(0).bind(base_stream.prod())
+        elif target.image == "elf":
             lo, hi = self.base_lo.param, self.base_hi.param
         else:
             lo = Buffer(
@@ -465,22 +493,39 @@ class GatherWords(Operator):
             self.base_lo.bind(lo, 0)
             self.base_hi.bind(lo, 1)
 
-        def core(ids, addresses, kernel, lo, hi, barrier):
+        def core(ids, addresses, kernel, lo, hi, base_stream, barrier):
             barrier.wait_for_value(1)
             i, a = ids.acquire(1), addresses.acquire(1)
-            if hi is None:
+            if base_stream is not None:
+                base = base_stream.acquire(1)
+                kernel(i, a, base[0], base[1])
+                base_stream.release(1)
+            elif hi is None:
                 kernel(i, a, lo[0], lo[1])
             else:
                 kernel(i, a, lo.read(), hi.read())
             ids.release(1)
             addresses.release(1)
 
-        worker = Worker(core, [ids.cons(), addresses.prod(), kernel, lo, hi, barrier])
+        worker = Worker(
+            core,
+            [
+                ids.cons(),
+                addresses.prod(),
+                kernel,
+                lo,
+                hi,
+                None if base_stream is None else base_stream.cons(),
+                barrier,
+            ],
+        )
         return [worker, barrier]
 
     def sequence(self, rt) -> None:
         tg = TaskGroup()
         rt.fill(self.ids.lane(0), self.ids, group=tg)
+        if self.static_base:
+            rt.fill(self.base.lane(0), self.base, group=tg)
         for tap in self.taps():
             rt.drain(self.control.lane(0), (self.control, tap), group=tg, wait=True)
         tg.finish()
