@@ -466,6 +466,8 @@ class ImagePatches(iron.Graph):
         return buffer, dict(
             height=H, width=W, out_height=out_height, out_width=out_width
         )
+
+
 def geglu(x, w_gate, w_up, w_down, **gemm):
     """The GELU-gated feed-forward of ``x``, ``(rows, embedding_dim)``,
     ``W_down @ (GELU(W_gate @ x) * (W_up @ x))``, each projection a GEMM
