@@ -2,14 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Measure Granite 4.2 3B's cost table on this NPU (``iron.lm.tune``),
-beside this file as ``costs_<device>.json``.
-
-Granite's decode step does not fit a full ELF at its scale (see
-``model.py``'s docstring), so it always runs each step as its own xclbin
-dispatch: give ``--dispatch separate``, not the default, which measures
-the fused (full-ELF) packaging this device cannot build:
+beside this file as ``costs_<device>.json``; ``--dispatch separate``
+prices the per-step xclbin chain (``--each-step`` in
+``iron.lm.base``) as ``costs_npu2_separate.json``:
 
 ```bash
+python -m iron.applications.granite.tune
 python -m iron.applications.granite.tune --dispatch separate
 ```
 """

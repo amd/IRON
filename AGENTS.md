@@ -962,16 +962,19 @@ scale, folded into every layer's `q` once after loading), the untied
 output head, the `tokenizers.Tokenizer` wrapper and the sharded
 checkpoint (`Checkpoint` maps a `.safetensors.index.json`).
 
-Its ~7.3 GB of weights do not fit a full-ELF decode step (aiebu's 32-bit
-relocation addend overflows); it always runs `--each-step`, the form NPU1
-runs, and has no device loop.
+Its ~7.3 GB of weights, plus caches, are past what one buffer object of
+the full-ELF decode step's arena can hold (aiebu's 32-bit relocation
+addend); the arena is banks of at most 3.5 GiB, each its own argument
+(`allocator.BANK`), so the decode step links as a full ELF, with the
+device loop, at Granite's scale.
+`--each-step`, the form NPU1 runs, is still available and tested.
 
 - **Required files**: `model.safetensors.index.json` and its two shards,
   `tokenizer.json`, from
   [`ibm-granite/granite-4.2-3b`](https://huggingface.co/ibm-granite/granite-4.2-3b)
 - **Default location**: `/srv/granite-4.2-3b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
 - **Run**: `pytest iron/applications/granite/`, or
-  `python -m iron.applications.granite.model model.safetensors.index.json tokenizer.json --each-step`
+  `python -m iron.applications.granite.model model.safetensors.index.json tokenizer.json`
 
 ### EmbeddingGemma 2
 

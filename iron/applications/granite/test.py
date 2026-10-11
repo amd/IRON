@@ -3,14 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Granite 4.2 3B on the NPU, from the real checkpoint: speed, accuracy
-against the float32 reference, determinism, and past one chunk: a prompt of
-two, a chat turn, and a prompt chunk and a step at the end of the caches.
-The model is compiled and loaded once for the module and every test calls
-it in-process.
-
-Granite's decode step does not fit a full ELF at its scale (see
-``model.py``'s docstring), so it always runs ``--each-step``: there is no
-full-ELF alternative to test, and no device loop.
+against the float32 reference, determinism, the device loop, and past one
+chunk: a prompt of two, a chat turn, and a prompt chunk and a step at the
+end of the caches. The model is compiled and loaded once for the module
+and every test calls it in-process.
 
 ``--random-weights SEED`` runs it on drawn weights and random prompts, on
 a host without the checkpoint, and ``--max-seq-len`` at another context.
@@ -18,6 +14,7 @@ a host without the checkpoint, and ``--max-seq-len`` at another context.
 
 import dataclasses
 
+import aie.utils as aie_utils
 import pytest
 
 import iron
@@ -28,6 +25,7 @@ from iron.lm.testing import (
     check_deep_decode,
     check_deep_prompt,
     check_determinism,
+    check_device_sampling,
     check_generation,
     require,
     weights_dir,
@@ -55,15 +53,15 @@ def runner(request):
 
 @pytest.fixture(scope="module")
 def model(runner, request, module_npu_runtime):
-    """The model, compiled and loaded once with ``--each-step`` (the only
-    packaging Granite's scale fits), its versions tuned by ``--cost-table``
-    if given; the runtime is released after the module's last test, as
-    ``npu_runtime`` does after each of the others.
+    """The model, compiled and loaded once (a full ELF: the arena's banks
+    hold its ~10 GB of weights and caches within aiebu's 32-bit
+    relocation addend, past which Granite's decode step did not link
+    before), its versions tuned by ``--cost-table`` if given; the runtime
+    is released after the module's last test, as ``npu_runtime`` does
+    after each of the others.
     """
-    loaded = runner.npu(
-        request.config.getoption("--cost-table"), boundaries=iron.each_step
-    )
-    assert not loaded.device_loop
+    loaded = runner.npu(request.config.getoption("--cost-table"))
+    assert loaded.device_loop
     yield loaded
 
 
@@ -89,6 +87,31 @@ MAX_KL = {"Mean": 0.01, "P90": 0.02, "Max": 0.05}
 DEEP_KL = 0.1
 
 
+@pytest.mark.supported_devices("npu2")
+class TestEachStep:
+    """``--each-step``: every step its own xclbin dispatch, the host
+    starting each on the token the last one drew -- the only form this NPU2 ran before the arena
+    was split into banks, and still the form NPU1 would need (Granite is
+    npu2-only for now). Its model is built and dropped with the class,
+    first: after any other test it would be held beside the module's
+    full-ELF one.
+    """
+
+    @pytest.fixture(scope="class")
+    def model(self, runner):
+        model = runner.npu(boundaries=iron.each_step)
+        assert not model.device_loop
+        yield model
+        if aie_utils.DefaultNPURuntime is not None:
+            aie_utils.DefaultNPURuntime.cleanup()
+
+    def test_granite_4_2_3b_each_step_accuracy(self, runner, model, record_property):
+        check_accuracy(runner, model, MAX_KL, 20, 512, record=record_property)
+
+    def test_granite_4_2_3b_each_step_determinism(self, runner, model, record_property):
+        check_determinism(runner, model, 4, 3, 128, record=record_property)
+
+
 @pytest.mark.parametrize(
     "prompt_len,num_tokens",
     [pytest.param(p, n, marks=pytest.mark.bench) for p in (1024, 13) for n in (40, 1)],
@@ -96,6 +119,13 @@ DEEP_KL = 0.1
 )
 def test_granite_4_2_3b(runner, model, prompt_len, num_tokens, record_property):
     check_generation(runner, model, prompt_len, num_tokens, record=record_property)
+
+
+# The device draws every token and starts every decode step itself; from the
+# same seed its text is the host loop's. The figures are the device loop's.
+@pytest.mark.bench
+def test_granite_4_2_3b_device_loop(runner, model, record_property):
+    check_device_sampling(runner, model, 1024, 100, record=record_property)
 
 
 def test_granite_4_2_3b_accuracy(runner, model, record_property):

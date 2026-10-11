@@ -32,19 +32,17 @@ tunables are in `profiles/`. Everything else -- `CausalLM`, `Oracle`,
 `generation` and `testing` -- is `iron.lm`, shared with Llama 3
 (`iron/applications/llama/`).
 
-## A note on scale: no full ELF
+## A note on scale: the full-ELF arena
 
 Granite's ~7.3 GB of weights pushes a device buffer offset in the full-ELF
 decode step's arena past aiebu's 32-bit relocation addend range (Llama 3.2
-1B and EmbeddingGemma 2 are both well under 4 GB total, so this has not
-been hit before). `--each-step` -- the library's existing per-step
-xclbin-chain packaging, the form NPU1 always runs -- compiles cleanly
-instead, and Granite always runs that way, on NPU2 too. The cost is no
-device loop (`CausalLM.generate`'s `CarriedLoop` needs a full-ELF decode
-step): sampling draws each token on the host from the step's logits,
-`--device-loop` is unavailable, and tuning measures `--dispatch separate`
-(below). This is a third-party limit (aiebu's relocation format), not an
-IRON one.
+1B and EmbeddingGemma 2 are both well under 4 GB total, so this was not hit
+before). The arena is now banks of at most 3.5 GiB, each its own buffer
+object and argument (`iron/common/image/allocator.py`'s `BANK`), so the
+decode step links as a full ELF again, with the device loop, at Granite's
+scale. Before that fix, `--each-step` (the library's existing per-step xclbin-chain packaging,
+the form NPU1 always runs) was the only way to run Granite at all; it still
+works and is still tested (`TestEachStep`), but is no longer the default.
 
 ## Weights and tokenizer
 
@@ -82,27 +80,25 @@ From the repository root:
 ```bash
 python -m iron.applications.granite.model \
     /path/to/model.safetensors.index.json /path/to/tokenizer.json \
-    --each-step --prompt-len 2048 --num-tokens 40
+    --prompt-len 2048 --num-tokens 40 --compare-host
 ```
 
-`--each-step` is required (see above); the rest of the flags are
-`iron.lm.base`'s, shared with every model -- `--random-weights SEED`,
-`--max-seq-len`, `--check-accuracy`, `--check-determinism`,
-`--cost-table`; see `iron/applications/llama/README.md` for what
-each does. `--device-loop` is not available.
+The flags are `iron.lm.base`'s, shared with every model --
+`--random-weights SEED`, `--max-seq-len`, `--check-accuracy`,
+`--check-determinism`, `--compare-host`, `--cost-table`, `--each-step`
+(the per-step form, still available); see
+`iron/applications/llama/README.md` for what each does.
 
 ## Tuning
 
 `iron.applications.granite.tune` measures Granite's cost table the way
-`iron.applications.llama.tune` does Llama's, but **always with `--dispatch
-separate`**: the default (`fused`) would measure the full-ELF packaging
-this device cannot build for Granite's scale.
+`iron.applications.llama.tune` does Llama's:
 
 ```bash
-python -m iron.applications.granite.tune --dispatch separate
+python -m iron.applications.granite.tune
 python -m iron.applications.granite.model /path/to/model.safetensors.index.json \
-    /path/to/tokenizer.json --each-step \
-    --cost-table iron/applications/granite/costs_npu2_separate.json
+    /path/to/tokenizer.json \
+    --cost-table iron/applications/granite/costs_npu2.json
 ```
 
 `pytest iron/applications/granite/` loads the model once and runs
