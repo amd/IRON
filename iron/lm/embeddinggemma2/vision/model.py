@@ -14,6 +14,7 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 
+import aie.utils as aie_utils
 import numpy as np
 from ml_dtypes import bfloat16
 
