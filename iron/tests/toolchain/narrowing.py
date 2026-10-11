@@ -25,6 +25,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common import Level
 from iron.common.declare import Profile
+from iron.common.design import OperatorDesign
 from iron.common.graph.costcache import Accuracy, CostCache, Measurement
 from iron.common.graph.fold import FOLD_RUNS, folded, foldings
 from iron.common.graph.narrowing import (
@@ -39,6 +40,7 @@ from iron.common.graph.narrowing import (
     cost_key,
     fitting,
     model_us,
+    refuse,
     variants,
 )
 from iron.common.graph.probe import Call, Designs, Point, judge, line
@@ -1268,10 +1270,11 @@ def test_placer_verdicts_are_kept_across_tunings(tmp_path, npu2):
 
 
 def test_a_setting_the_placer_refuses_alone_is_not_measured(tmp_path, npu2):
-    # 128x128 B tiles double-buffered beside A and C are past a core's
-    # memory at any column count; the default is kept for its build to say so.
-    gemm = GEMM(M=2048, K=2048, N=2048, tile_m=64, tile_k=128, tile_n=128)
-    found = variants(gemm, npu2)
+    # A 16384-element row held whole, double-buffered in and out, is past a
+    # core's memory at any column and channel count, which resolution does
+    # not count; the default is kept for its build to say so.
+    softmax = Softmax(rows=256, cols=16384, block=16384, streamed=False)
+    found = variants(softmax, npu2)
     kept, refused = fitting(found, tmp_path / "fits")
     assert kept == found[:1]
     assert refused.keys() == {v.key for v in found[1:]} and refused
@@ -1294,20 +1297,30 @@ class AccurateGate(iron.Graph):
         )
 
 
-def test_a_fold_whose_default_the_placer_refuses_is_not_measured(tmp_path, npu2):
+def test_a_fold_whose_default_does_not_build_is_not_measured(tmp_path, npu2):
     # GELU's scratch line beside the f32 accumulator is past a core's memory
-    # at the default 64x64x64 tiles.
+    # at 64-row tiles, so the fold's open tile_m narrows to 32, measured under
+    # the key its step is priced by.
     traced = AccurateGate().trace(x=(2048, 512), w=(1024, 512))
     calls = Call.admitted(traced, npu2)
     [own, fold] = calls
     [gemm] = [s.op for s in traced.steps if isinstance(s.op, GEMM)]
     [gate] = [s.op for s in fold.traced.steps]
-    designs = Designs.of(calls, npu2, tmp_path / "fits")
-    assert cost_key(gemm, npu2) in designs.settings
-    assert cost_key(gate, npu2) not in designs.first
-    assert designs.twin_of == {}
-    [why] = [w for k, w in designs.refused.items() if k == cost_key(gate, npu2)]
-    assert "could not be placed" in why
+    key, fits = cost_key(gate, npu2), tmp_path / "fits"
+    designs = Designs.of(calls, npu2, fits)
+    default = designs.settings[key][0]
+    assert default.key == key and default.resolved.tile_m == 32
+    assert designs.twin_of == {key: cost_key(gemm, npu2)}
+    assert key not in designs.refused
+
+    # Its build failing past the placer, as the prober records it, the fold
+    # is left out with the reason and stays unpriced.
+    refuse({key: OperatorDesign(default.resolved)}, "aiecc failed", fits)
+    again = Designs.of(calls, npu2, fits)
+    assert cost_key(gemm, npu2) in again.settings
+    assert key not in again.first
+    assert again.twin_of == {}
+    assert again.refused[key] == "aiecc failed"
 
 
 def _swiglu(tmp_path, dev, gate_us, step_us=10.0, table=_table, mul_us=None):
