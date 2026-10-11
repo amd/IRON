@@ -429,7 +429,8 @@ class Runner:
     each weight is in the checkpoint; ``model``, the ``CausalLM`` on the
     NPU, whose ``oracle`` is the CPU model it is checked against;
     ``open_tokenizer(path)``, with ``encode`` and ``decode``; and ``bos``,
-    the token every prompt starts with.
+    the token every prompt starts with. A model that comes in several sizes
+    names them in ``sizes``, ``config`` among them, and ``--size`` picks one.
 
     The checkpoint is mapped, not read: ``npu`` uploads it a piece at a
     time and drops each piece's host pages once it is on the device.
@@ -441,6 +442,7 @@ class Runner:
     """
 
     config: Config
+    sizes: dict[str, Config] = {}
     model: "type[CausalLM]"
     bos: int
 
@@ -560,6 +562,13 @@ def main(runner: type[Runner], description: str):
     """The command line of ``runner``'s model: sample, or check it."""
     parser = argparse.ArgumentParser(description=description)
     runner.add_arguments(parser)
+    if runner.sizes:
+        parser.add_argument(
+            "--size",
+            choices=runner.sizes,
+            default=next(n for n, c in runner.sizes.items() if c == runner.config),
+            help="the model's size (default: %(default)s)",
+        )
     parser.add_argument(
         "--prompt-len",
         type=int,
@@ -573,10 +582,9 @@ def main(runner: type[Runner], description: str):
     parser.add_argument(
         "--max-seq-len",
         type=int,
-        default=runner.config.max_seq_len,
         help="rows the caches hold, prompt and generated tokens together, a "
         f"multiple of {runner.config.prefill_chunk} "
-        f"(default: {runner.config.max_seq_len})",
+        "(default: the size's own)",
     )
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-k", type=int, default=50)
@@ -615,10 +623,12 @@ def main(runner: type[Runner], description: str):
     )
     args = parser.parse_args()
 
-    try:
-        config = dataclasses.replace(runner.config, max_seq_len=args.max_seq_len)
-    except ValueError as e:
-        parser.error(str(e))
+    config = runner.sizes[args.size] if runner.sizes else runner.config
+    if args.max_seq_len is not None:
+        try:
+            config = dataclasses.replace(config, max_seq_len=args.max_seq_len)
+        except ValueError as e:
+            parser.error(str(e))
     run = runner.from_arguments(parser, args, config)
     tokens = run.prompt(args.prompt_len)
     if len(tokens) + args.num_tokens > run.config.max_seq_len:
