@@ -111,7 +111,7 @@ def check_accuracy(
     bound a drift across many steps, the max a single broken step.
     """
     tokens = prompt(runner, chars, num_tokens)
-    # Built here alone: a float32 oracle is twice the weights.
+    # Built here alone: it holds the embedding in float32, twice the checkpoint's.
     results = accuracy(model, runner.cpu(), tokens, num_tokens)
     stats = kl_stats(results)
     for stat, value in stats.items():

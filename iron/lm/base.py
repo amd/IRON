@@ -311,8 +311,10 @@ class Oracle:
     """A decoder's float32 forward pass on the host, the oracle the model is judged by.
 
     It is numpy, not composed from the operators' references, so it catches
-    a wiring mistake the graph's own reference would repeat. Its weights are
-    twice the checkpoint, so it is built to check with and dropped.
+    a wiring mistake the graph's own reference would repeat. A layer's
+    weights are widened to float32 as the pass reaches it, so beside the
+    checkpoint it holds in float32 one layer's and the model's own (the
+    embedding, the final norm), not all of them.
     """
 
     embedding: np.ndarray
@@ -320,7 +322,9 @@ class Oracle:
 
     def __init__(self, config: Config, weights):
         self.config = config
-        vars(self).update(vars(_widen(weights)))
+        vars(self).update(
+            {k: v if k == "layers" else _widen(v) for k, v in vars(weights).items()}
+        )
         self.angles = config.angles()
         self.buffers: dict[str, np.ndarray] = {}
 
@@ -338,7 +342,7 @@ class Oracle:
         angles = self.angles[: tokens.size]
         x = self.embed(self.embedding[tokens], pixel_values)
         for w in self.layers:
-            x = self.layer(angles, w, x)
+            x = self.layer(angles, _widen(w), x)
         return self.head(x[-1])
 
     @staticmethod
@@ -530,7 +534,7 @@ class Runner:
         return model.load(release, tuner, boundaries)
 
     def cpu(self) -> Oracle:
-        """The model's oracle, its weights widened (float32 is twice bf16)."""
+        """The model's oracle over the same weights, widened a layer at a time."""
         return self.model.oracle(self.config, self.weights)
 
     def encode(self, text: str) -> list[int]:
