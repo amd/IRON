@@ -1,13 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A floorplan reads the built image: on each device, a step's tiles are
-the cores its tunables ask for and a host stream per operand per core, and
-every routed link joins neighbouring tiles or leaves a shim for the host.
+"""Pictures of a built image. A floorplan reads it: on each device, a
+step's tiles are the cores its tunables ask for and a host stream per
+operand per core, and every routed link joins neighbouring tiles or leaves
+a shim for the host. An arena draws each scratch buffer over the steps
+that touch it, at the offset the image placed it.
 """
 
 import iron
-from iron.common.graph.visualize import Floorplan
+from iron.common.graph.visualize import Arena, Floorplan
+from iron.common.image.allocator import LiveRange
 from iron.operators import ElementwiseAdd, SiLU
 from iron.tests.toolchain.tools import requires
 
@@ -39,3 +42,17 @@ def test_a_floorplan_holds_the_cores_and_streams_the_step_asks_for(device):
         assert svg.count("<title>tile (") == device.cols * (
             1 + max(r for _, r in plan.tiles)
         )
+
+
+def test_an_arena_draws_each_scratch_buffer_where_and_while_it_lives(device):
+    version = TwoSteps().compile(a=(N,), b=(N,))
+    plan = Arena(version)
+    [between] = [h.name for h in version.traced.steps[0].outputs]
+    assert set(plan.boxes) == {between}
+    assert plan.ranges[between] == LiveRange(0, 1)
+    _, offset, size = version.sequence.subbuffer_layout[between]
+    assert plan.boxes[between] == (offset, size) and size == 2 * N
+    assert (
+        f"<title>{between}: {size} bytes at {offset}, steps 0 to 1</title>"
+        in plan.svg()
+    )

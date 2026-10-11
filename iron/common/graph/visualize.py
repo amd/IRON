@@ -39,6 +39,7 @@ from aie.utils.config import aiecc_tool_path
 
 from ..declare import Operator, Unresolvable
 from ..design import OperatorDesign
+from ..image.allocator import LiveRange
 from .handle import Handle
 from .narrowing import cost_key
 
@@ -485,6 +486,128 @@ class Dataflow:
             )
             for i in self.drawn()
         }
+
+
+class Arena:
+    """A compiled version's scratch buffers over its runlist: each a box
+    from the first step touching it to the last, at its byte offset and
+    size, so the bytes two buffers share are where their boxes stack in
+    one column of steps and never overlap. Weights and states (residents),
+    which hold their bytes for every step, are summed under the boxes.
+
+    Args:
+        version: The compiled version.
+        title: The caption.
+    """
+
+    WIDTH, HEIGHT, LEFT, TOP, BOTTOM = 1100, 520, 80, 64, 70
+
+    def __init__(self, version: CompiledGraph, title: str = ""):
+        seq = version.sequence
+        self.title = title or f"{version.traced.name}: scratch buffers over the runlist"
+        layout = seq.subbuffer_layout
+        names = [
+            n
+            for n, (kind, _, _) in layout.items()
+            if kind == "scratch" and n not in seq.residents and n not in seq.slice_info
+        ]
+        steps, first_writer = [], {}
+        for i, (op, *bufs) in enumerate(seq.runlist):
+            reads, writes = [], []
+            for buf, b in zip(bufs, op.buffers):
+                name = buf[: buf.index("[")] if "[" in buf else buf
+                if b.direction.fills:
+                    reads.append(name)
+                if b.direction.drains:
+                    writes.append(name)
+                    first_writer.setdefault(name, op)
+            steps.append((reads, writes))
+        self.steps = len(steps)
+        self.ranges = LiveRange.touching(steps, names)
+        self.boxes = {n: layout[n][1:] for n in names}
+        self.colors = {
+            n: (
+                FAMILIES[FAMILY.get(type(first_writer[n]).__name__, "other")]
+                if n in first_writer
+                else MUTED
+            )
+            for n in names
+        }
+        self.resident_bytes = sum(layout[n][2] for n in seq.residents if n in layout)
+
+    def svg(self) -> str:
+        """The boxes as SVG: steps across, byte offsets up."""
+        if not self.boxes:
+            raise ValueError(f"{self.title}: no scratch buffer is planned")
+        base = min(offset for offset, _ in self.boxes.values())
+        top = max(offset + size for offset, size in self.boxes.values()) - base
+        width, height, left, upper = self.WIDTH, self.HEIGHT, self.LEFT, self.TOP
+        plot_w = width - left - 20
+        plot_h = height - upper - self.BOTTOM
+        per_step = plot_w / self.steps
+        per_byte = plot_h / top
+        out = [
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+            f'viewBox="0 0 {width} {height}" font-family="system-ui, sans-serif">',
+            f'<rect width="{width}" height="{height}" fill="{SURFACE}"/>',
+            f'<text x="{left}" y="28" font-size="17" fill="{INK}">{html.escape(self.title)}</text>',
+            f'<text x="{left}" y="48" font-size="12" fill="{INK_2}">{len(self.boxes)} '
+            f"buffers in {top / 1024:.1f} KiB; weights and states hold "
+            f"{self.resident_bytes / 2**20:.1f} MiB more, for every step</text>",
+        ]
+        for k in range(5):
+            y = upper + plot_h - k * plot_h / 4
+            out.append(
+                f'<line x1="{left}" x2="{left + plot_w}" y1="{y}" y2="{y}" '
+                f'stroke="{HAIRLINE}" stroke-width="1"/>'
+            )
+            out.append(
+                f'<text x="{left - 8}" y="{y + 4}" font-size="11" text-anchor="end" '
+                f'fill="{MUTED}">{k * top / 4 / 1024:.0f} KiB</text>'
+            )
+        tick = max(1, self.steps // 10)
+        for i in range(0, self.steps, tick):
+            x = left + (i + 0.5) * per_step
+            out.append(
+                f'<text x="{x}" y="{upper + plot_h + 18}" font-size="11" '
+                f'text-anchor="middle" fill="{MUTED}">{i}</text>'
+            )
+        out.append(
+            f'<text x="{left + plot_w / 2}" y="{upper + plot_h + 40}" font-size="12" '
+            f'text-anchor="middle" fill="{INK_2}">step</text>'
+        )
+        for name, (offset, size) in sorted(self.boxes.items(), key=lambda b: -b[1][1]):
+            r = self.ranges[name]
+            x = left + r.begin * per_step + 1
+            w = max((r.end - r.begin + 1) * per_step - 2, 2)
+            y = upper + plot_h - (offset - base + size) * per_byte + 1
+            h = max(size * per_byte - 2, 2)
+            out.append(
+                f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}" rx="3" '
+                f'fill="{self.colors[name]}" fill-opacity="0.45" '
+                f'stroke="{self.colors[name]}" stroke-width="1"><title>'
+                f"{html.escape(name)}: {size} bytes at {offset}, steps "
+                f"{r.begin} to {r.end}</title></rect>"
+            )
+            if w > 7 * len(name) and h > 13:
+                out.append(
+                    f'<text x="{x + 4:.1f}" y="{y + 12:.1f}" font-size="10" '
+                    f'fill="{INK}">{html.escape(name)}</text>'
+                )
+        x = left + plot_w
+        for family, color in reversed(FAMILIES.items()):
+            if color not in self.colors.values():
+                continue
+            x -= 14 + 7 * len(family) + 18
+            out.append(
+                f'<rect x="{x}" y="38" width="12" height="12" rx="2" fill="{color}" '
+                f'fill-opacity="0.45" stroke="{color}"/>'
+            )
+            out.append(
+                f'<text x="{x + 16}" y="48" font-size="11" fill="{INK_2}">{family}</text>'
+            )
+        out.append("</svg>")
+        return "\n".join(out)
 
 
 class Floorplan:
