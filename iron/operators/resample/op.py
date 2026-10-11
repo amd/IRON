@@ -1020,7 +1020,11 @@ class Resample(Operator):
         columns=None,
         out_rows=None,
         out_columns=None,
+        patches=None,
     ):
+        """The image's patches; given `patches`, written over its leading
+        rows, the ones a call writes, the rest kept.
+        """
         h = self.height if rows is None else int(rows)
         w = self.width if columns is None else int(columns)
         ho = self.out_height if out_rows is None else int(out_rows)
@@ -1034,7 +1038,11 @@ class Resample(Operator):
         grid[:, :strips] = out.reshape(bands, SIDE, strips, SIDE, 3).transpose(
             0, 2, 1, 3, 4
         )
-        return PIXELS[grid.reshape(bands * pad, SIDE * SIDE * 3)]
+        written = PIXELS[grid.reshape(bands * pad, SIDE * SIDE * 3)]
+        if patches is None:
+            return written
+        patches[: bands * pad] = written
+        return patches
 
     def sequence(self, rt):
         """The image, then both tables down one stream, and each core's
