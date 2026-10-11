@@ -1,0 +1,16 @@
+{"entries": [
+  {"operator": "RMSNorm", "tile_size": 2048, "rows": 1, "weighted": true, "num_aie_columns": 1, "num_channels": 1},
+  {"operator": "GEMV", "M": 2048, "K": 2048, "num_batches": 1, "num_aie_columns": 8, "num_channels": 1, "tile_size_input": 2, "tile_size_output": 32, "kernel_vector_size": 64},
+  {"operator": "MHA", "num_heads": 32, "num_KV_heads": 32, "seq_pad": 1, "d": 64, "B_q": 64, "num_pipelines": 1, "placement": "memtiles", "pv_cores": 1},
+  {"operator": "ElementwiseAdd", "size": 2048, "num_aie_columns": 8, "num_channels": 1, "tile_size": 256},
+  {"operator": "GEMV", "M": 8192, "K": 2048, "num_batches": 1, "num_aie_columns": 8, "num_channels": 1, "tile_size_input": 2, "tile_size_output": 2, "kernel_vector_size": 64},
+  {"operator": "SiLU", "size": 8192, "num_aie_columns": 8, "tile_size": 256},
+  {"operator": "ElementwiseMul", "size": 8192, "num_aie_columns": 8, "num_channels": 1, "tile_size": 256},
+  {"operator": "GEMV", "M": 2048, "K": 8192, "num_batches": 1, "num_aie_columns": 8, "num_channels": 1, "tile_size_input": 1, "tile_size_output": 2, "kernel_vector_size": 64},
+  {"operator": "GEMV", "M": 49152, "K": 2048, "num_batches": 1, "num_aie_columns": 8, "num_channels": 1, "tile_size_input": 2, "tile_size_output": 2, "kernel_vector_size": 64},
+  {"operator": "RMSNorm", "tile_size": 2048, "rows": 2048, "weighted": true, "num_aie_columns": 8, "num_channels": 1},
+  {"operator": "MHA", "num_heads": 32, "num_KV_heads": 32, "seq_pad": 2048, "d": 64, "B_q": 64, "num_pipelines": 1, "placement": "memtiles", "pv_cores": 1},
+  {"operator": "ElementwiseAdd", "size": 4194304, "num_aie_columns": 8, "num_channels": 1, "tile_size": 256},
+  {"operator": "SiLU", "size": 16777216, "num_aie_columns": 8, "tile_size": 256},
+  {"operator": "ElementwiseMul", "size": 16777216, "num_aie_columns": 8, "num_channels": 1, "tile_size": 256}
+]}

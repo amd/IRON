@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 import tiktoken
 import tiktoken.load
+from tokenizers import Tokenizer
 
 from iron import lm
 from iron.lm import Block, BlockOracle, CausalLM, Config, Layout, Oracle, rms_norm
@@ -86,6 +87,21 @@ LLAMA_3_2_1B = Config(
     max_seq_len=32768,
     rope_base=500000.0,
     rope_scaling=LLAMA_3_2,
+)
+
+#: SmolLM2 1.7B Instruct, a Llama checkpoint (``"model_type": "llama"``) at
+#: another shape: full MHA (a KV group of one), 24 layers, a 49152-token
+#: vocabulary and an unscaled RoPE at base 130000.
+SMOLLM2_1_7B = Config(
+    vocab_size=49152,
+    emb_dim=2048,
+    n_layers=24,
+    n_heads=32,
+    n_kv_groups=32,
+    head_dim=64,
+    hidden_dim=8192,
+    max_seq_len=8192,
+    rope_base=130000.0,
 )
 
 LLAMA_3_2_3B = Config(
@@ -187,6 +203,31 @@ def tokenizer(path) -> tiktoken.Encoding:
     )
 
 
+class SmolLM2(Llama):
+    """SmolLM2 1.7B Instruct: Llama's layer and tied head, tuned by its own
+    profiles (its shapes share operators with 1B's at other tunables).
+    """
+
+    profile = Path(__file__).with_name("profiles") / "smollm2"
+
+
+class SmolLM2Tokenizer:
+    """SmolLM2's BPE tokenizer (its ``tokenizer.json``), adapted to
+    ``encode(text) -> list[int]`` and ``decode(tokens) -> str``: its
+    ``post_processor`` is ``null``, so neither adds the special tokens its
+    chat template writes as literal text.
+    """
+
+    def __init__(self, path):
+        self.hf = Tokenizer.from_file(str(path))
+
+    def encode(self, text: str) -> list[int]:
+        return self.hf.encode(text).ids
+
+    def decode(self, tokens: list[int]) -> str:
+        return self.hf.decode(tokens)
+
+
 class Runner(lm.Runner):
     """Llama 3.2, 1B unless ``config`` is another size, from its checkpoint
     and ``tokenizer.model``.
@@ -198,6 +239,18 @@ class Runner(lm.Runner):
     model = Llama
     open_tokenizer = staticmethod(tokenizer)
     bos = SPECIAL_TOKENS["<|begin_of_text|>"]
+
+
+class SmolLM2Runner(Runner):
+    """SmolLM2 1.7B Instruct, from its checkpoint and ``tokenizer.json``;
+    its prompts start with ``<|im_start|>``, ChatML's turn marker.
+    """
+
+    config = SMOLLM2_1_7B
+    sizes = {}
+    model = SmolLM2
+    open_tokenizer = staticmethod(SmolLM2Tokenizer)
+    bos = 1
 
 
 if __name__ == "__main__":
