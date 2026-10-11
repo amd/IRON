@@ -97,6 +97,12 @@ def status_emoji(passed: int, total: int, partial: bool = True) -> str:
     return "🟠" if partial else "❌"
 
 
+# Test directories renamed since the results branch began, old to new.
+RENAMED_DIRECTORIES = {
+    "iron/applications/llama_3.2_1b/": "iron/applications/llama3/",
+    "iron/applications/embeddinggemma_2/": "iron/applications/embeddinggemma2/",
+}
+
 # The module that runs every operator declaring its cases. Its parametrize ids
 # lead with the operator: 'GEMV-cols_4-...'.
 CATALOG_TEST_FILE = "iron/tests/operators/catalog.py"
@@ -135,8 +141,14 @@ def try_parse_float(value: Any) -> Optional[float]:
 
 
 def row_key(row: Dict[str, str]) -> Tuple[str, str]:
-    """Identify the parametrization a row measures."""
-    return ((row.get("Test Path") or "").strip(), (row.get("Test") or "").strip())
+    """Identify the parametrization a row measures, by its test's path now:
+    a row recorded under a renamed directory continues its history.
+    """
+    test_path = (row.get("Test Path") or "").strip()
+    for old, new in RENAMED_DIRECTORIES.items():
+        if test_path.startswith(old):
+            test_path = new + test_path[len(old) :]
+    return test_path, (row.get("Test") or "").strip()
 
 
 def select_bench_rows(rows: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
