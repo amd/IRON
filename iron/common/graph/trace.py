@@ -9,6 +9,7 @@ import dataclasses
 import itertools
 import math
 from collections.abc import Callable, Hashable, Iterable, Mapping
+from typing import TYPE_CHECKING
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
@@ -30,6 +31,10 @@ from .handle import (
     _rescale_bounds,
     is_operand,
 )
+
+if TYPE_CHECKING:
+    from .narrowing import CostTable
+    from .visualize import Dataflow
 
 
 @dataclasses.dataclass
@@ -210,6 +215,35 @@ class TracedGraph:
             member = next(v for v in new.values if v.name == b.member.name)
             bindings.append(Binding(new, member, b.expression))
         return dataclasses.replace(self, steps=steps, bindings=bindings)
+
+    def picture(
+        self,
+        title: str = "",
+        layers: set[int] | None = None,
+        weights: bool = True,
+        table: CostTable | None = None,
+    ) -> Dataflow:
+        """This graph drawn (``visualize.Dataflow``): its ``dot()``, ``svg()``
+        and ``html()``.
+
+        Args:
+            title: The caption; the graph's name if empty.
+            layers: The layers drawn, or None for every step.
+            weights: Draw each weight as its own node.
+            table: Show the step time this table prices each design at.
+        """
+        # visualize prices steps through the tuner, which imports this module.
+        from .visualize import Dataflow
+
+        return Dataflow(self, title, layers, weights, table=table)
+
+    def dot(self) -> str:
+        """This graph drawn as Graphviz text (``picture``)."""
+        return self.picture().dot()
+
+    def html(self) -> str:
+        """This graph drawn as one self-contained page (``picture``)."""
+        return self.picture().html()
 
     @property
     def operators(self) -> list:
