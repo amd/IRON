@@ -30,8 +30,6 @@ from iron.operators.copy import Copy, Gather
 # EmbeddingGemma 2's per-layer embedding table.
 VOCAB, WIDTH = 262144, 512
 
-pytestmark = pytest.mark.usefixtures("npu2")
-
 
 def gathered_ids(n_rows: int, n_ids: int) -> np.ndarray:
     """Random ids, out of order, with repeats, a run and a reversed run."""
@@ -277,7 +275,7 @@ def test_ids_past_the_table_are_refused(npu_runtime, table, outside):
         graph.reference(ids)
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_each_step_gathers_the_rows_an_input_names(npu_runtime, table):
     """Each step its own xclbin, as NPU1 runs: the host encodes the ids
     against the table's address as a full ELF's do, and the step after reads
@@ -299,7 +297,7 @@ def test_each_step_gathers_the_rows_an_input_names(npu_runtime, table):
         assert_equal(graph.reference(ids, x), expected, f"reference {call}")
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("n_ids", [15, 512])
 def test_each_step_gathers_by_ids_the_device_made(npu_runtime, table, n_ids):
     """An xclbin's word step reads the table's address from its runtime
@@ -367,7 +365,7 @@ def test_the_control_words_are_one_layout_for_every_feed_count():
         np.testing.assert_array_equal(words[feeds], words[1])
 
 
-def test_ids_the_device_made_take_a_word_step(table):
+def test_ids_the_device_made_take_a_word_step(npu2, table):
     other = np.zeros((3000, 256), dtype=bfloat16)
     traced = FromDeviceIds(table, other).trace(ids=((15,), np.int32))
     steps = [type(s.op).__name__ for s in traced.steps]
