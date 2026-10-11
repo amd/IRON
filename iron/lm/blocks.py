@@ -53,18 +53,26 @@ from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
 
 
-def project(x, weight, bias=None, k_tile=None, **gemv):
+def project(x, weight, bias=None, k_tile=None, tile_n=None, **gemv):
     """``x @ weight.T`` for a checkpoint's ``(out, in)`` weight, plus
     ``bias`` if given, broadcast over every row (a linear layer's bias,
     Qwen 2's q/k/v projections): a GEMV for one row (a GEMV's output is a
     vector, batched into a row or not depending on its shape against the
     weight's), else flm.GEMM reading it column-major, ``k_tile`` if K is not
     a multiple of its default 512 (flm.GEMM's own ``k_tile``; Qwen 2.5's
-    hidden_dim is not). ``gemv`` are the GEMV's tunables, where the profile
-    cannot tell it from another of its shape.
+    hidden_dim is not). ``tile_n`` with ``k_tile``, where the default
+    ``tile_n``'s ``ct_max_k`` (128) does not divide a ``k_tile`` that does
+    divide K (SmolVLM's emb_dim, 576, is 2**6 * 3**2, under 128's own 2**7:
+    no multiple of 128 divides it, but ``tile_n=32``'s ``ct_max_k`` (32)
+    does, at ``k_tile=192``). ``gemv`` are the GEMV's tunables, where the
+    profile cannot tell it from another of its shape.
     """
     if len(x.shape) == 2 and x.shape[0] > 1:
-        tiled = {} if k_tile is None else dict(k_tile=k_tile)
+        tiled = {}
+        if k_tile is not None:
+            tiled["k_tile"] = k_tile
+        if tile_n is not None:
+            tiled["tile_n"] = tile_n
         y = FLMGEMM(x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled)
     else:
         y = GEMV(weight, x, **gemv)
@@ -74,10 +82,11 @@ def project(x, weight, bias=None, k_tile=None, **gemv):
     return RowwiseAdd(y.reshape(rows, bias.shape[0]), bias).reshape(y.shape)
 
 
-def swiglu(x, w_gate, w_up, w_down, k_tile=None):
+def swiglu(x, w_gate, w_up, w_down, k_tile=None, tile_n=None):
     """The feed-forward of ``x``, ``(rows, embedding_dim)``."""
-    gate, up = project(x, w_gate, k_tile=k_tile), project(x, w_up, k_tile=k_tile)
-    return project(ElementwiseMul(SiLU(gate), up), w_down, k_tile=k_tile)
+    tiled = dict(k_tile=k_tile, tile_n=tile_n)
+    gate, up = project(x, w_gate, **tiled), project(x, w_up, **tiled)
+    return project(ElementwiseMul(SiLU(gate), up), w_down, **tiled)
 
 
 class SwiGLU(iron.Graph):
