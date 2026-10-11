@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""SmolLM2 1.7B Instruct on the NPU, from the real checkpoint: speed, accuracy
+against the float32 reference, determinism, and past one chunk: a prompt of
+two, a chat turn, and a prompt chunk and a step at the end of the caches.
+The model is compiled and loaded once for the module and every test calls
+it in-process.
+
+``--random-weights SEED`` runs it on drawn weights and random prompts, on
+a host without the checkpoint, and ``--max-seq-len`` at another context.
+"""
+
+import dataclasses
+
+import aie.utils as aie_utils
+import pytest
+
+import iron
+from iron.applications.llama.model import SmolLM2Runner
+from iron.lm.testing import (
+    check_accuracy,
+    check_chat_turn,
+    check_deep_decode,
+    check_deep_prompt,
+    check_determinism,
+    check_device_sampling,
+    check_generation,
+    require,
+    weights_dir,
+)
+
+WEIGHTS = weights_dir("smollm2-1.7b-instruct") / "model.safetensors"
+TOKENIZER = weights_dir("smollm2-1.7b-instruct") / "tokenizer.json"
+
+pytestmark = pytest.mark.supported_devices("npu2")
+
+
+@pytest.fixture(scope="module")
+def runner(request):
+    config = SmolLM2Runner.config
+    max_seq_len = request.config.getoption("--max-seq-len")
+    if max_seq_len is not None:
+        config = dataclasses.replace(config, max_seq_len=max_seq_len)
+    seed = request.config.getoption("--random-weights")
+    if seed is not None:
+        return SmolLM2Runner(config=config, seed=seed)
+    require(WEIGHTS, TOKENIZER)
+    return SmolLM2Runner(WEIGHTS, TOKENIZER, config)
+
+
+@pytest.fixture(scope="module")
+def model(runner, request, module_npu_runtime):
+    """The model, compiled and loaded once, its versions tuned by
+    ``--cost-table`` if given; the runtime is released after the module's
+    last test, as ``npu_runtime`` does after each of the others.
+    """
+    yield runner.npu(request.config.getoption("--cost-table"))
+
+
+# KL(fp32 CPU || NPU), teacher-forced over 40 steps, the default 1024-
+# character prompt. The graphs measure a mean of 0.034 and a p90 of 0.074,
+# the largest step 0.287 (3 of 40 steps top-1 mismatch, not gated here, see
+# Top1Mismatches); a shorter 10-step, 512-character run measured much lower
+# (mean 0.0056, p90 0.011, max 0.032, 0 mismatches). SmolLM2 is 24 layers
+# against Llama 3.2 1B's 16 at the same emb_dim/head_dim/hidden_dim, so more
+# bf16 error accumulates per step; this bound is the longer run's figures
+# with headroom, not Llama's.
+MAX_KL = {"Mean": 0.05, "P90": 0.1, "Max": 0.35}
+
+
+# KL(graph reference || NPU) of one decode step, deep in the cache: unmeasured
+# at SmolLM2's full max_seq_len (8192). Left well above the shallow-context
+# bound above (0.35), the same relationship Llama 3.2 1B's own DEEP_KL (0.1
+# against its shallow Max of 0.2) keeps, scaled by SmolLM2's deeper-network
+# headroom; not a measured bound.
+DEEP_KL = 0.2
+
+GENERATION = pytest.mark.parametrize(
+    "prompt_len,num_tokens",
+    [pytest.param(p, n, marks=pytest.mark.bench) for p in (1024, 13) for n in (40, 1)],
+    ids=[
+        f"smollm2_1_7b_instruct_prompt_{p}_tokens_{n}"
+        for p in (1024, 13)
+        for n in (40, 1)
+    ],
+)
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+class TestEachStep:
+    """The form NPU1 runs: each step its own dispatch of one xclbin, the host
+    starting each on the token the last one drew. Its model is built and
+    dropped with the class, first: after any other test it would be held
+    beside the module's full-ELF one.
+    """
+
+    @pytest.fixture(scope="class")
+    def model(self, runner):
+        model = runner.npu(boundaries=iron.each_step)
+        assert not model.device_loop
+        yield model
+        if aie_utils.DefaultNPURuntime is not None:
+            aie_utils.DefaultNPURuntime.cleanup()
+
+    @GENERATION
+    def test_smollm2_1_7b_instruct_each_step(
+        self, runner, model, prompt_len, num_tokens, record_property
+    ):
+        check_generation(runner, model, prompt_len, num_tokens, record=record_property)
+
+    def test_smollm2_1_7b_instruct_each_step_accuracy(
+        self, runner, model, record_property
+    ):
+        check_accuracy(runner, model, MAX_KL, 20, 256, record=record_property)
+
+    def test_smollm2_1_7b_instruct_each_step_sampling(
+        self, runner, model, record_property
+    ):
+        check_device_sampling(runner, model, 256, 20, record=record_property)
+
+    def test_smollm2_1_7b_instruct_each_step_determinism(
+        self, runner, model, record_property
+    ):
+        check_determinism(runner, model, 4, 3, 128, record=record_property)
+
+    def test_smollm2_1_7b_instruct_each_step_decode_deep_in_the_cache(
+        self, runner, model, record_property
+    ):
+        position = runner.config.max_seq_len - 1
+        check_deep_decode(runner, model, position, DEEP_KL, 256, record=record_property)
+
+    def test_smollm2_1_7b_instruct_each_step_prompt_deep_in_the_cache(
+        self, runner, model, record_property
+    ):
+        rows = runner.config.prefill_chunk
+        check_deep_prompt(runner, model, rows, DEEP_KL, 256, record=record_property)
+
+
+@GENERATION
+def test_smollm2_1_7b_instruct(runner, model, prompt_len, num_tokens, record_property):
+    check_generation(runner, model, prompt_len, num_tokens, record=record_property)
+
+
+# The device draws every token and starts every decode step itself; from the
+# same seed its text is the host loop's. The figures are the device loop's.
+@pytest.mark.bench
+def test_smollm2_1_7b_instruct_device_loop(runner, model, record_property):
+    check_device_sampling(runner, model, 1024, 100, record=record_property)
+
+
+def test_smollm2_1_7b_instruct_accuracy(runner, model, record_property):
+    check_accuracy(runner, model, MAX_KL, record=record_property)
+
+
+def test_smollm2_1_7b_instruct_determinism(runner, model, record_property):
+    check_determinism(runner, model, record=record_property)
+
+
+# 12000 characters of prompt.txt are a full chunk and most of a second,
+# which attends over the first's caches.
+LONG = 12000
+
+
+def test_smollm2_1_7b_instruct_accuracy_across_chunks(runner, model, record_property):
+    """The prompt's two chunks and two decode steps after them, against the
+    float32 reference over the whole prompt (each step a forward over the
+    whole prompt on the host, so only a few).
+    """
+    assert len(runner.prompt(LONG)) > runner.config.prefill_chunk
+    check_accuracy(runner, model, MAX_KL, 3, LONG, record=record_property)
+
+
+def test_smollm2_1_7b_instruct_chat_turn(runner, model, record_property):
+    """A turn of 1000 tokens reruns the second chunk alone."""
+    check_chat_turn(runner, model, LONG, 1000, record=record_property)
+
+
+def test_smollm2_1_7b_instruct_decode_deep_in_the_cache(runner, model, record_property):
+    """The deepest step the caches hold, at ``max_seq_len - 1``."""
+    position = runner.config.max_seq_len - 1
+    check_deep_decode(runner, model, position, DEEP_KL, record=record_property)
+
+
+def test_smollm2_1_7b_instruct_prompt_deep_in_the_cache(runner, model, record_property):
+    """The last chunk the caches hold, whole: the longest dispatch a prompt
+    makes, over the whole context.
+    """
+    rows = runner.config.prefill_chunk
+    check_deep_prompt(runner, model, rows, DEEP_KL, record=record_property)

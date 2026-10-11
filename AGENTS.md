@@ -927,6 +927,28 @@ layout, the tokenizer), `profiles/` (tunables), its test and README:
   weights and the caches are banks of at most 3.76 GB, a buffer object
   each (`allocator.BANK`), so the limit must cover one bank
 
+### SmolLM2 1.7B Instruct
+
+A Llama checkpoint (`"model_type": "llama"`) at another shape -- full MHA
+(`num_key_value_heads == num_attention_heads`, a KV group of one, not Llama
+3's grouped-query eight), 24 layers and a 49152-token vocabulary -- so it is
+a `Config` of the Llama application, `SMOLLM2_1_7B` in
+`iron/applications/llama/model.py`, run by Llama's layer and head.
+`SmolLM2` is Llama with its own profiles (`profiles/smollm2/`: its operator
+shapes overlap 1B's at other tunables) and `SmolLM2Runner` opens its
+`tokenizer.json` with BOS 1. Its test, README and `tune.py` are in
+`iron/applications/llama/smollm2/`:
+
+- **Required files**: `model.safetensors`, `tokenizer.json` from Hugging Face
+- **Default location**: `/srv/smollm2-1.7b-instruct/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
+- **Run**: `pytest iron/applications/llama/smollm2/`, or
+  `python -m iron.applications.llama.smollm2 model.safetensors tokenizer.json`
+  (`--max-seq-len`, a multiple of 2048, sizes the caches: 8192 by default).
+  Full MHA's K and V streams are about four times a same-context
+  grouped-query model's, so a prompt chunk's attention dispatch can run
+  past the amdxdna watchdog's default timeout at the full context; see its
+  README
+
 ### Qwen3 1.7B Inference
 
 Full LLM inference example at `iron/applications/qwen3/`: `model.py`
