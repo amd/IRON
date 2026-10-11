@@ -885,7 +885,9 @@ class Resample(Operator):
     # A 39-tap window: a scale of up to 9.5.
     words: int = param(default=356, array=True)
     # The patch columns a core holds, so cores * patch_columns across.
-    patch_columns: int = param(default=8, array=True)
+    patch_columns: int = param(
+        default=lambda op: op.default_patch_columns(), array=True
+    )
     image_chunks: int = param(
         default=lambda op: op.height * -(-3 * op.width // op.chunk)
     )
@@ -939,6 +941,16 @@ class Resample(Operator):
     def cores(self) -> int:
         return self.num_aie_columns * self.num_channels
 
+    def default_patch_columns(self) -> int:
+        """Patch columns a core holds, at the given columns' or the bound
+        device's every column (NPU2's eight with none bound), two channels
+        each: `out_width`'s patch columns split over them.
+        """
+        dev = self.dev
+        cols = self.num_aie_columns or (dev.cols if dev is not None else 8)
+        cores = cols * self.num_channels
+        return self.out_width // SIDE // cores + 1
+
     def padded_rows(self) -> int:
         """Every band's patch columns, padded past the cores: the given
         columns' or the bound device's every column (NPU2's eight with none
@@ -947,12 +959,39 @@ class Resample(Operator):
         dev = self.dev
         cols = self.num_aie_columns or (dev.cols if dev is not None else 8)
         cores = cols * self.num_channels
-        return self.out_height // SIDE * (self.out_width // SIDE // cores + 1) * cores
+        return self.out_height // SIDE * self.default_patch_columns() * cores
 
     @property
     def window_cap(self) -> int:
         """The widest filter window a chunk of `words` holds 16 of."""
         return 2 * ((self.words - HEADER) // SIDE - 2) - 1
+
+    def held(self, dev) -> int:
+        """Core memory a core of `dev` holds at `patch_columns`: the resize
+        kernel's per-column tables and row bands (`hweight`'s two taps
+        vectors a slot, `line`/`mid`/`hold`'s pixel bands, `hstart` and
+        `span`), its image, taps and patches buffers, and the stack.
+        """
+        cols, win = self.patch_columns, self.window_cap
+        plane = (5 * win + 8 + 64 + 63) // 64 * 64
+        kernel = (
+            14 * 4  # resize_setup's own scalars
+            + cols * SIDE * 4  # hstart
+            + cols * SIDE * 64 * 2  # hweight, two taps vectors a slot
+            + 2 * cols * 4  # span0, span
+            + cols * 3 * plane  # line
+            + win * cols * SIDE * 3  # mid
+            + SIDE * cols * SIDE * 3  # hold
+            + 2 * 256  # PIXEL
+        )
+        item = np.dtype(bfloat16).itemsize
+        buffers = (
+            2 * self.chunk  # image, depth 2
+            + 2 * self.words * 4  # taps, depth 2
+            + 2 * SIDE * SIDE * 3 * item  # patches, depth 2
+            + 8 * 4  # counts
+        )
+        return kernel + buffers + dev.default_core_stack_bytes
 
     def validate(self) -> None:
         if min(self.height, self.width) < 1 or min(self.out_height, self.out_width) < 1:
@@ -994,6 +1033,14 @@ class Resample(Operator):
                 f"Resample: {strips} patch columns over {self.cores} cores is "
                 f"{nmax} a core; a core holds {self.patch_columns}"
             )
+        if (dev := self.dev) is not None:
+            held = self.held(dev)
+            if held > dev.core_memory_bytes:
+                raise ValueError(
+                    f"Resample: {self.patch_columns} patch columns of "
+                    f"{self.words}-word chunks and {self.chunk}-byte rows hold "
+                    f"{held} bytes a core, past its {dev.core_memory_bytes}"
+                )
         for name, have, need in (
             (
                 "image_chunks",

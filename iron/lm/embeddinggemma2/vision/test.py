@@ -185,16 +185,13 @@ PROCESSED = [
     ((3024, 4032), VISION.image_tokens),
     ((333, 517), VISION.video_tokens),
     ((1080, 1920), VISION.video_tokens),
-    ((97, 640), VISION.image_tokens),
     ((2003, 97), VISION.video_tokens),
     ((17, 23), VISION.video_tokens),
     ((4096, 3072), VISION.image_tokens),
 ]
 
 
-@pytest.mark.supported_devices("npu1", "npu2")
-@pytest.mark.parametrize("shape, tokens", PROCESSED)
-def test_image_processor(processor, shape, tokens, record_property):
+def _check_image_processor(shape, tokens, processor, record_property):
     image = synthetic_image(*shape)
     rgb, values = processor.processor.inputs(image, tokens)
     values.pop("n")
@@ -211,6 +208,20 @@ def test_image_processor(processor, shape, tokens, record_property):
     record_property("Latency", min(times) * 1e6)
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize("shape, tokens", PROCESSED)
+def test_image_processor(processor, shape, tokens, record_property):
+    _check_image_processor(shape, tokens, processor, record_property)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_image_processor_npu2_only(processor, record_property):
+    # 2016 pixels wide at image_tokens: 126 patch columns, 16 a core on
+    # npu1's eight cores (test_image_processor_refuses_on_npu1 below) but
+    # only 8 a core on npu2's sixteen, which Resample's default holds.
+    _check_image_processor((97, 640), VISION.image_tokens, processor, record_property)
+
+
 @pytest.mark.parametrize(
     "shape, tokens, refusal",
     [
@@ -224,6 +235,15 @@ def test_image_processor(processor, shape, tokens, record_property):
 def test_image_processor_refuses(npu2, shape, tokens, refusal):
     with pytest.raises(ValueError, match=refusal):
         ImageProcessor(VISION).inputs(np.zeros((*shape, 3), np.uint8), tokens)
+
+
+def test_image_processor_refuses_on_npu1(npu1):
+    # 2016 pixels wide at image_tokens: 16 patch columns a core on npu1's
+    # eight cores, over the eight Resample's default holds there.
+    with pytest.raises(ValueError, match="patch columns"):
+        ImageProcessor(VISION).inputs(
+            np.zeros((97, 640, 3), np.uint8), VISION.image_tokens
+        )
 
 
 def test_vision_oracle_matches_hugging_face(hugging_face, oracle):
