@@ -219,7 +219,7 @@ def test_a_read_leaves_nothing_for_the_next_call_to_push():
     """
     f, w, w2, s = _function()
     one = f.compile(x=(E,))
-    arguments = (one.callable.input_buffer, one.callable.output_buffer, f.arena.tensor)
+    arguments = (one.callable.input_buffer, one.callable.output_buffer, *f.arena.banks)
     for seed in (14, 15):
         x = _numbers(E, seed)
         np.testing.assert_array_equal(_f32(f(x).numpy()), _f32(x) + 2 * _f32(w))

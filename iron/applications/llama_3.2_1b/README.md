@@ -76,10 +76,12 @@ must be at most 64.
 - `--num-tokens`: tokens to generate (default 40)
 - `--max-seq-len`: the rows the key and value caches hold, prompt and
   generated tokens together, a multiple of 2048 (default 32768, 1 GB of
-  caches); the compile is the same at any of them. XRT locks every device
-  buffer, so the locked-memory limit (`ulimit -l`) must hold the weights
-  and the caches: about 3.7 GB at 32768 and 7 GB at 131072 (a
-  `memlock unlimited` line in `/etc/security/limits.d/`). A prompt past
+  caches); the compile is the same at any of them. XRT maps every device
+  buffer locked, and the locked-memory limit (`ulimit -l`) binds each
+  mapping: the weights and the caches are banks of at most 3.76 GB, a
+  buffer object each (`iron/common/image/allocator.py`'s `BANK`), so the
+  limit must hold one bank, 3.8 GB, at either size and any context (a
+  `memlock` line in `/etc/security/limits.d/`). A prompt past
   about 48k tokens runs chunks longer than the amdxdna driver's watchdog
   allows (`tdr_timeout_ms`, 4 to 6 s a dispatch by default); with
   `options amdxdna tdr_timeout_ms=10000` in `/etc/modprobe.d/` a

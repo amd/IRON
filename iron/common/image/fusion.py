@@ -23,6 +23,7 @@ from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
 from ..design import OperatorDesign
+from .allocator import BANK
 from .coresidence import AdjacentPacking, Packing, array_text, merge_devices
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,10 @@ SHIM_ADDRESS_ALIGNMENT = 4
 class ArgumentSizes(NamedTuple):
     """Bytes of each runtime-sequence argument of a fused image, in argument
     order; ``feedback`` is ``None`` where the image takes no such argument.
+
+    The scratch arena is passed as its banks (``allocator.BANK``), each an
+    argument: ``scratch`` the first, ``scratch_k`` the k-th after it, the
+    last arguments.
     """
 
     input: int
@@ -42,12 +47,38 @@ class ArgumentSizes(NamedTuple):
     scratch: int
     feedback: int | None = None
 
+    @property
+    def bank_kinds(self) -> list[str]:
+        """The scratch arena's arguments, a bank each: ``scratch``, then
+        ``scratch_1`` on.
+        """
+        banks = max(1, -(-self.scratch // BANK))
+        return ["scratch", *(f"scratch_{k}" for k in range(1, banks))]
+
     def arguments(self) -> dict[str, int]:
         """Size by kind, in argument order."""
-        sizes = self._asdict()
-        if self.feedback is None:
-            del sizes["feedback"]
+        kinds = self.bank_kinds
+        banks = [min(BANK, self.scratch - k * BANK) for k in range(len(kinds))]
+        sizes = {"input": self.input, "output": self.output, "scratch": banks[0]}
+        if self.feedback is not None:
+            sizes["feedback"] = self.feedback
+        sizes.update(zip(kinds[1:], banks[1:]))
         return sizes
+
+    def scratch_argument(self, offset: int, length: int) -> tuple[str, int]:
+        """The argument a scratch buffer of ``length`` bytes at ``offset``
+        is in, and its offset there.
+
+        Raises:
+            ValueError: It crosses from one bank into the next.
+        """
+        k = offset // BANK
+        if length and (offset + length - 1) // BANK != k:
+            raise ValueError(
+                f"a scratch buffer of {length} bytes at {offset} crosses from "
+                f"bank {k} into the next, of {BANK} bytes each"
+            )
+        return self.bank_kinds[k], offset - k * BANK
 
 
 def _memref_bytes(memref_type: ir.MemRefType) -> int:
@@ -386,6 +417,12 @@ class Fusion:
                                         f"byte {offset} of the {buf_type} argument, "
                                         f"which is not a multiple of "
                                         f"{SHIM_ADDRESS_ALIGNMENT}"
+                                    )
+                                if buf_type == "scratch":
+                                    buf_type, offset = (
+                                        self.buffer_sizes.scratch_argument(
+                                            offset, length
+                                        )
                                     )
                                 buffer_ssa_values.append(
                                     memref.view(

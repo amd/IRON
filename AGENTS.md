@@ -899,9 +899,10 @@ tokenizer), `profiles/` (tunables):
 - **Run**: `pytest iron/applications/llama_3.2_1b/`, or
   `python -m iron.lm.llama3.model model.safetensors tokenizer.model`
   (`--max-seq-len`, a multiple of 2048, sizes the caches: 32768 by default,
-  1 GB of them; one compile serves every context up to it). XRT locks
-  every device buffer, so `ulimit -l` must cover the weights and the
-  caches: about 3.7 GB at 32768, 7 GB at 131072
+  1 GB of them; one compile serves every context up to it). XRT maps
+  every device buffer locked and `ulimit -l` binds each mapping; the
+  weights and the caches are banks of at most 3.76 GB, a buffer object
+  each (`allocator.BANK`), so the limit must cover one bank
 
 ### EmbeddingGemma 2
 

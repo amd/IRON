@@ -9,6 +9,12 @@ lifetimes do not overlap (greedy by size, best fit: Algorithm 3 of Pisarchyk
 & Lee, MLSys 2020). ``ArenaPlan`` shares one arena between the images of a
 graph: residents (weights, states) keep one offset in every image, and each
 image's transients are planned around them.
+
+A pool is banks of ``BANK`` bytes, and no buffer crosses from one into the
+next: each bank is its own buffer object and its own argument of a full
+ELF. XRT maps a buffer object locked and the locked-memory limit binds
+each mapping, so a bank must map under it; and aiebu relocates an address
+by a 32-bit addend to its argument.
 """
 
 from collections.abc import Hashable, Iterable, Mapping, Sequence
@@ -19,6 +25,9 @@ from aie.utils.hostruntime.tensor_class import COHERENCE_GRANULE
 # Two buffers sharing a coherence granule cannot be synced independently
 # (XRTTensor.subview refuses such a view); 64 bytes is also the shim's DDR burst.
 ALIGNMENT = max(64, COHERENCE_GRANULE)
+
+# 3.5 GiB: under a 4 GB `ulimit -l` and the addend's 4 GiB.
+BANK = 7 << 29
 
 
 # (reads, writes) buffer names of one step, in execution order.
@@ -113,13 +122,32 @@ class Allocation:
 
 
 class Pool:
-    """Byte offsets in one pool, each a multiple of ``alignment``."""
+    """Byte offsets in one pool, each a multiple of ``alignment``, each
+    buffer within one bank of ``bank`` bytes (with ``None``, one bank).
+    """
 
-    def __init__(self, alignment: int = 64):
+    def __init__(self, alignment: int = 64, bank: int | None = BANK):
         self.alignment = alignment
+        self.bank = bank
 
     def align(self, x: int) -> int:
         return -(-x // self.alignment) * self.alignment
+
+    def fit(self, offset: int, size: int) -> int:
+        """The first aligned offset from ``offset`` at which ``size`` bytes
+        stay in one bank.
+
+        Raises:
+            ValueError: ``size`` is more than a bank.
+        """
+        offset = self.align(offset)
+        if self.bank is None:
+            return offset
+        if size > self.bank:
+            raise ValueError(f"{size} bytes do not fit a {self.bank}-byte bank")
+        if offset // self.bank != (offset + size - 1) // self.bank:
+            return -(-offset // self.bank) * self.bank
+        return offset
 
     def place(self, ranges, sizes, fixed: Iterable[Allocation] = ()):
         """Assign pool offsets, largest buffer first, each in the tightest gap
@@ -146,12 +174,13 @@ class Pool:
             )
             cursor, best, best_gap = 0, None, None
             for ob in obstacles:
-                gap = ob.offset - cursor
+                at = self.fit(cursor, size)
+                gap = ob.offset - at
                 if gap >= size and (best_gap is None or gap < best_gap):
-                    best, best_gap = cursor, gap
+                    best, best_gap = at, gap
                 # A running max: a tall buffer can span several short ones.
                 cursor = max(cursor, self.align(ob.end))
-            offset = cursor if best is None else best
+            offset = self.fit(cursor, size) if best is None else best
             placed.append((Allocation(name, offset, size), rng))
 
         allocations = {a.name: a for a, _ in placed}
@@ -206,7 +235,7 @@ class ArenaPlan(Pool):
             size = sizes[name]
             held = self._residents.get(key)
             if held is None:
-                held = Allocation(name, self.align(self._size), size)
+                held = Allocation(name, self.fit(self._size, size), size)
                 self._residents[key] = held
                 self._size = held.end
             elif held.size != size:

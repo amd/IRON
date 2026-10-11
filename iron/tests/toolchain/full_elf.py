@@ -33,6 +33,9 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common.declare.member import Extent
+from iron.common.image import OperatorSequence
+from iron.common.image.allocator import BANK
+from iron.operators import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.tests.toolchain.tools import DEVICES, requires, swiglu
 
@@ -108,6 +111,47 @@ def test_decode_graph_builds_a_full_elf_with_its_values_in_the_table():
     with pytest.raises(IndexError, match=r"token is -1, outside"):
         version(*tensors, **{**values, "token": -1})
     assert version._callable is None
+
+
+def test_a_scratch_arena_past_a_bank_links_as_its_banks():
+    """The scratch arena is passed as its banks, each an argument
+    (``ArgumentSizes``): one buffer object each, under the locked-memory
+    limit, and each buffer's addend under aiebu's 4 GiB. Llama 3.2 3B's
+    weights and caches are 10 GB; as one argument its link failed:
+    ``Invalid addend (0x266475800) > 32bit found``.
+    """
+    add = ElementwiseAdd(size=1024, tile_size=128)
+    seq = OperatorSequence(
+        "past_a_bank",
+        [(add, "x", "w", "t"), (add, "t", "w", "out")],
+        input_args=["x"],
+        output_args=["out"],
+        dispatch="fused",
+        # Rebased past the weight, at the next bank: the third.
+        buffer_offsets={"t": BANK + 64},
+    )
+    seq.compile()
+    _, offset, length = seq.subbuffer_layout["t"]
+    sizes = seq.buffer_sizes
+    assert sizes.bank_kinds == ["scratch", "scratch_1", "scratch_2"]
+    assert sizes.scratch_argument(offset, length) == ("scratch_2", offset - 2 * BANK)
+    assert Path(seq.artifacts.image).stat().st_size > 0
+
+
+def test_no_scratch_buffer_crosses_a_bank():
+    """A buffer that would end past its bank starts at the next: two 2 GiB
+    buffers are the first bank's start and the second's.
+    """
+    add = ElementwiseAdd(size=1 << 30, tile_size=4096)
+    seq = OperatorSequence(
+        "across_a_bank",
+        [(add, "x", "w", "t"), (add, "t", "w", "out")],
+        input_args=["x"],
+        output_args=["out"],
+        dispatch="reference",
+    )
+    seq.prepare()
+    assert [seq.subbuffer_layout[n][1] for n in ("w", "t")] == [0, BANK]
 
 
 @pytest.mark.extensive

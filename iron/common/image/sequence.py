@@ -11,7 +11,7 @@ import numpy as np
 from aie.utils import bfp
 
 from ..declare import Operator
-from .allocator import ALIGNMENT, Allocation, ArenaPlan, LiveRange, Pool
+from .allocator import ALIGNMENT, BANK, Allocation, ArenaPlan, LiveRange, Pool
 from .artifacts import Artifacts, Design, Step
 from .callable import BF16, FullELFCallable, ScratchArena, StepCallable
 from .coresidence import AdjacentPacking
@@ -339,6 +339,8 @@ class OperatorSequence:
                 # The caller binds its own memory here: offsets are the contract.
                 offsets = {}
 
+            # A host-visible kind is one buffer object, not banks.
+            pool = Pool(ALIGNMENT, BANK if buffer_type == "scratch" else None)
             cursor = end = 0
             planned = []
             for arg in args_list:
@@ -348,11 +350,16 @@ class OperatorSequence:
                 if arg in offsets:
                     planned.append((arg, length))
                     continue
+                cursor = pool.fit(cursor, length)
                 subbuffer_layout[arg] = (buffer_type, cursor, length)
                 end = cursor + length
-                cursor = Pool(ALIGNMENT).align(end)
+                cursor = pool.align(end)
 
-            # A plan starts at zero, so it is rebased past the unplanned buffers.
+            # A plan starts at zero, so it is rebased past the unplanned
+            # buffers, at a bank's start unless it fits the rest of this one.
+            span = max((offsets[arg] + length for arg, length in planned), default=0)
+            if pool.bank is not None and span > pool.bank - cursor % pool.bank:
+                cursor = -(-cursor // pool.bank) * pool.bank
             for arg, length in planned:
                 at = cursor + offsets[arg]
                 subbuffer_layout[arg] = (buffer_type, at, length)

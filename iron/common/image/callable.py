@@ -22,7 +22,7 @@ from aie.utils.verify import Tolerance
 
 from ..declare import Operator
 from ..design import device_symbol
-from .allocator import ALIGNMENT, ArenaPlan, Pool
+from .allocator import ALIGNMENT, BANK, ArenaPlan, Pool
 
 if TYPE_CHECKING:
     import pyxrt
@@ -60,15 +60,17 @@ def _require_xrt() -> None:
 
 
 class ScratchArena:
-    """The device buffer behind an ``ArenaPlan``, shared by every full ELF placed in it.
+    """The device buffers behind an ``ArenaPlan``, a buffer object per bank,
+    shared by every image placed in it.
 
-    A plan that grew since first use grows the buffer, keeping its contents;
-    each callable rebinds on its next call (``generation``).
+    A plan that grew since first use grows its last bank, keeping its
+    contents, and adds banks; each callable rebinds on its next call
+    (``generation``).
     """
 
     def __init__(self, plan: ArenaPlan):
         self.plan = plan
-        self._tensor: XRTTensor | None = None
+        self._banks: list[XRTTensor] = []
         self._generation = 0
         self.loaded: set = set()
 
@@ -77,25 +79,30 @@ class ScratchArena:
         return self._generation
 
     @property
-    def tensor(self) -> XRTTensor:
+    def banks(self) -> list[XRTTensor]:
+        """A buffer object per bank the plan reaches, the last holding the rest."""
         _require_xrt()
-        n = _n_elements(self.plan.size)
-        if self._tensor is not None and self._tensor.shape[0] >= n:
-            return self._tensor
-        grown = XRTTensor((n,), dtype=ml_dtypes.bfloat16)
-        if self._tensor is not None:
-            old = self._tensor.numpy()  # pulls what the device wrote
-            grown.numpy_view()[: old.size] = old
-            logger.info(
-                "scratch arena grew from %d to %d bytes", old.nbytes, grown.nbytes
-            )
-        self._tensor = grown
-        self._generation += 1
-        return grown
-
-    def view(self, offset: int, nbytes: int, dtype=BF16) -> XRTTensor:
-        dtype = np.dtype(dtype)
-        return self.tensor.subview(offset, (nbytes // dtype.itemsize,), dtype)
+        size = self.plan.size
+        wanted = [min(BANK, size - start) for start in range(0, size, BANK)] or [0]
+        for k, nbytes in enumerate(wanted):
+            held = self._banks[k] if k < len(self._banks) else None
+            if held is not None and held.shape[0] >= _n_elements(nbytes):
+                continue
+            grown = XRTTensor((_n_elements(nbytes),), dtype=ml_dtypes.bfloat16)
+            if held is None:
+                self._banks.append(grown)
+            else:
+                old = held.numpy()  # pulls what the device wrote
+                grown.numpy_view()[: old.size] = old
+                logger.info(
+                    "scratch bank %d grew from %d to %d bytes",
+                    k,
+                    old.nbytes,
+                    grown.nbytes,
+                )
+                self._banks[k] = grown
+            self._generation += 1
+        return list(self._banks)
 
 
 class FullELFRun:
@@ -248,9 +255,12 @@ class FullELFCallable:
         self.input_buffer = XRTTensor((_n_elements(sizes.input),), dtype=BF16)
         self.output_buffer = XRTTensor((_n_elements(sizes.output),), dtype=BF16)
         if arena is None:
-            self.scratch_buffer = XRTTensor((_n_elements(sizes.scratch),), dtype=BF16)
+            self.scratch_banks = [
+                XRTTensor((_n_elements(sizes.arguments()[kind]),), dtype=BF16)
+                for kind in sizes.bank_kinds
+            ]
         else:
-            self.scratch_buffer = arena.tensor
+            self.scratch_banks = arena.banks
             self._arena_generation = arena.generation
         self.feedback_buffer: XRTTensor | None = None
         if sizes.feedback is not None:
@@ -323,8 +333,8 @@ class FullELFCallable:
                     raise
                 logger.info("%s: the device heap is full; released a run", self.op.name)
         arguments = {
-            index: self._arguments()[kind]
-            for kind, index in self._argument_index.items()
+            self._argument_index[kind]: tensor
+            for kind, tensor in self._arguments().items()
         }
         if self.trace_buffer is not None:
             assert self._trace_arg is not None
@@ -351,8 +361,8 @@ class FullELFCallable:
         buffers = {
             "input": self.input_buffer,
             "output": self.output_buffer,
-            "scratch": self.scratch_buffer,
             "feedback": self.feedback_buffer,
+            **dict(zip(self.op.buffer_sizes.bank_kinds, self.scratch_banks)),
         }
         return {kind: buffers[kind] for kind in self._argument_index}
 
@@ -370,6 +380,8 @@ class FullELFCallable:
         self._follow_arena()
         if buffer_name not in self._buffer_cache:
             buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
+            if buf_type == "scratch":
+                buf_type, offset = self.op.buffer_sizes.scratch_argument(offset, length)
             dtype = self.op.buffer_dtype(buffer_name)
             self._buffer_cache[buffer_name] = self._arguments()[buf_type].subview(
                 offset, (length // dtype.itemsize,), dtype
@@ -386,6 +398,8 @@ class FullELFCallable:
             raise ValueError(f"{buffer_name} is a slice; its parent has the storage")
         if buffer_name not in self._storage_cache:
             buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
+            if buf_type == "scratch":
+                buf_type, offset = self.op.buffer_sizes.scratch_argument(offset, length)
             dtype = self.op.buffer_dtype(buffer_name)
             parent = self._arguments()[buf_type]
             stop = min(Pool(ALIGNMENT).align(offset + length), parent.nbytes)
@@ -397,12 +411,12 @@ class FullELFCallable:
     def _follow_arena(self) -> None:
         if self.arena is None or self.arena.generation == self._arena_generation:
             return
-        self.scratch_buffer = self.arena.tensor
+        self.scratch_banks = self.arena.banks
         self._arena_generation = self.arena.generation
+        arguments = self._arguments()
         for run in self._runs:
-            run.bind(
-                self._argument_index["scratch"], self.scratch_buffer.buffer_object()
-            )
+            for kind in self.op.buffer_sizes.bank_kinds:
+                run.bind(self._argument_index[kind], arguments[kind].buffer_object())
         self._buffer_cache.clear()
         self._storage_cache.clear()
 
@@ -510,13 +524,15 @@ class StepCallable:
             self._steps.append((step_op, kernel, names, args))
 
     def _follow_arena(self) -> None:
-        """View the residents in the arena's buffer, again once it has grown."""
+        """View the residents in the arena's banks, again once it has grown."""
         if self.arena is None or self.arena.generation == self._arena_generation:
             return
-        parent = self.arena.tensor
+        banks = self.arena.banks
         self._arena_generation = self.arena.generation
         for name in self.op.residents:
             _, offset, length = self.op.subbuffer_layout[name]
+            bank, offset = divmod(offset, BANK)
+            parent = banks[bank]
             dtype = self.op.buffer_dtype(name)
             stop = min(Pool(ALIGNMENT).align(offset + length), parent.nbytes)
             # A step takes the storage: an exact view of a resident whose
