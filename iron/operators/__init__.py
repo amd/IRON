@@ -20,7 +20,7 @@ if TYPE_CHECKING:  # the same names, for a checker; the runtime loads them lazil
     from .copy import Copy
     from .depthwise_conv1d import DepthwiseConv1d
     from .dequant import Dequant
-    from .elementwise_add import ElementwiseAdd
+    from .elementwise_add import ElementwiseAdd, RowwiseAdd
     from .elementwise_mul import ElementwiseMul, RowwiseMul
     from .emit import Emit
     from .gelu import GELU
@@ -74,6 +74,7 @@ _OPERATOR_MODULES = {
     "Resample": "resample.op",
     "ResampleTaps": "resample.op",
     "RoPE": "rope",
+    "RowwiseAdd": "elementwise_add",
     "RowwiseMul": "elementwise_mul",
     "Sample": "sample",
     "Sigmoid": "sigmoid",
