@@ -11,12 +11,14 @@ construction. Host-only: what is checked is the refusal, not a dispatch.
 
 import functools
 
+import numpy as np
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
-from iron.common import Link, Unresolvable
+import iron
+from iron.common import Link, Scratchpad, Unresolvable
 from iron.operators.copy import Copy, Gather
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -127,6 +129,26 @@ def test_a_gather_whose_feeds_outnumber_its_batch_pairs_is_refused():
         Gather(rows=33, table_rows=4096, row=512, feeds=4)
     gather = Gather(rows=33, table_rows=4096, row=512)
     assert gather.resolved(from_name("npu2", n_cols=8)).feeds == 3
+
+
+class _BoundedGather(iron.Graph):
+    def __init__(self, table):
+        self.table = iron.weight(table)
+
+    def body(self, ids, *, n: Scratchpad[np.int32]):
+        return Copy(self.table[ids[:n]])
+
+
+def test_a_bounded_gather_of_rows_not_whole_16_byte_units_is_refused():
+    """A bounded feed drains a per-call length in 16-byte units, so a row of
+    six bf16 (12 bytes) cannot be bounded, though it gathers whole.
+    """
+    table = np.zeros((64, 6), dtype=bfloat16)
+    traced = _BoundedGather(table).trace(ids=((16,), np.int32))
+    (gather,) = [s.op for s in traced.steps if isinstance(s.op, Gather)]
+    with pytest.raises(ValueError, match="16-byte units"):
+        gather.resolved(from_name("npu2", n_cols=8))
+    Gather(rows=16, table_rows=64, row=6).resolved(from_name("npu2", n_cols=8))
 
 
 # Shapes whose M*N is divisible by every factor while one per-dimension quotient is not

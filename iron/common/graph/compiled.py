@@ -721,7 +721,7 @@ class CompiledGraph:
         for handle, tensor in zip(self.traced.inputs, tensors):
             encoder = self.traced.encoders.get(handle.name)
             if encoder is not None:
-                tensor = encoder[1](tensor, self._address(encoder[0]))
+                tensor = encoder(tensor, self._address(encoder.buffer), values)
             self._copy_in(handle.name, tensor)
         self._write_values(values, run)
 

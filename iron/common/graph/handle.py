@@ -147,14 +147,14 @@ class Handle:
             ids = entries[0]
             if (
                 ids.tap is not None
-                or ids.bounds
                 or len(ids.shape) != 1
                 or not np.issubdtype(np.dtype(ids.dtype), np.integer)
                 or rank < 2
             ):
                 raise IndexError(
-                    f"a gather per call takes a whole 1-D integer handle as the "
-                    f"rows of a table of rank 2 or more; got {ids!r} on {self!r}"
+                    f"a gather per call takes a whole 1-D integer handle, or "
+                    f"its first rows per call, as the rows of a table of rank 2 "
+                    f"or more; got {ids!r} on {self!r}"
                 )
             if not all(isinstance(e, slice) and e == slice(None) for e in entries[1:]):
                 raise IndexError("a gather takes the whole of every axis but the first")

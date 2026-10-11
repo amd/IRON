@@ -39,11 +39,13 @@ from ml_dtypes import bfloat16
 from iron.common import (
     CopyRun,
     Divisors,
+    Extent,
     In,
     Operator,
     Out,
     Scratchpad,
     Unresolvable,
+    Value,
     auto,
     param,
 )
@@ -78,6 +80,13 @@ class Gather(Operator):
     after the sequence syncs on the token of the batch that last ran it.
     The descriptors' addresses are the table's device address, which the
     host reads from its buffer each call, in a full ELF or an xclbin.
+
+    A row's packet writes its descriptor's length with its address, so a
+    gather bounded per call (``table[ids[:n]]``, ``valid_rows``) moves the
+    first ``n`` rows and, for each row past them, ``pad_bytes`` from the
+    table's first row: a feed's drain is a whole number of 16-byte units
+    long, and a descriptor moves one at least. Each feed drains what its
+    rows moved (``drained0`` ...), the valid ones first.
     """
 
     chain: ClassVar[int] = 8
@@ -92,6 +101,7 @@ class Gather(Operator):
     valid: ClassVar[int] = 1 << 25
     use_next: ClassVar[int] = 1 << 26
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
+    pad_bytes: ClassVar[int] = 16
 
     rows: int = param()
     table_rows: int = param()
@@ -99,7 +109,8 @@ class Gather(Operator):
     dtype: Any = field(default=bfloat16, repr=False)
     words: int = param(
         default=lambda op: 20 * op.chain
-        + 3 * (op.rows + len(op.batches))
+        + 4 * op.rows
+        + 3 * len(op.batches)
         + (3 if op.rows % op.chain else 0),
         repr=False,
     )
@@ -108,6 +119,12 @@ class Gather(Operator):
     table = In(table_rows, row, dtype=dtype)
     control = In(words, dtype=np.uint32)
     y = Out(rows, row, dtype=dtype)
+    valid_rows = Extent(rows)
+    # Per feed, the 16-byte units it drains under a bound.
+    drained0 = Value(derive=lambda op: op.drained(0), optional=True)
+    drained1 = Value(derive=lambda op: op.drained(1), optional=True)
+    drained2 = Value(derive=lambda op: op.drained(2), optional=True)
+    drained3 = Value(derive=lambda op: op.drained(3), optional=True)
 
     @property
     def batches(self) -> list[int]:
@@ -123,6 +140,20 @@ class Gather(Operator):
         pairs = -(-n // 2)
         bounds = [2 * (k * pairs // self.feeds) for k in range(self.feeds + 1)]
         return [range(a, min(b, n)) for a, b in zip(bounds, bounds[1:])]
+
+    def drained(self, feed: int) -> int:
+        """The 16-byte units feed ``feed`` drains with ``valid_rows`` rows
+        valid: its valid rows whole, ``pad_bytes`` for each other row.
+        """
+        valid = self.valid_rows
+        if feed >= self.feeds:
+            return 0
+        run = self.runs[feed]
+        first = run.start * self.chain
+        count = min(run.stop * self.chain, self.rows) - first
+        kept = min(max(valid - first, 0), count)
+        row_bytes = self.row * np.dtype(self.dtype).itemsize
+        return (kept * row_bytes + (count - kept) * self.pad_bytes) // 16
 
     def validate(self) -> None:
         if self.rows < 1:
@@ -149,6 +180,14 @@ class Gather(Operator):
         return dataclasses.replace(self, feeds=feeds)
 
     def compatible(self) -> None:
+        if (
+            "valid_rows" in self.bound_extents
+            and self.row * np.dtype(self.dtype).itemsize % 16
+        ):
+            raise ValueError(
+                f"a row of {self.row} {np.dtype(self.dtype).name} is not whole "
+                f"16-byte units, which a bounded drain's length counts"
+            )
         pairs = -(-len(self.batches) // 2)
         if self.feeds > pairs:
             raise ValueError(
@@ -188,10 +227,22 @@ class Gather(Operator):
     def sequence(self, rt) -> None:
         words, y = rt.data(self.control), rt.data(self.y)
         chain, batches, runs = self.chain, self.batches, self.runs
+        bounded = "valid_rows" in self.bound_extents
+        if bounded and rt.image != "elf":
+            raise ValueError(
+                "a gather bounded per call drains a per-call length, which only "
+                "a full ELF's scratchpad patches; package as a full ELF"
+            )
         drained, pending = [], []
         for k, run in enumerate(runs):
             first = run.start * chain * self.row
             last = min(run.stop * chain, self.rows) * self.row
+            length = {}
+            if bounded:
+                length = dict(
+                    length_parameter=self.value(f"drained{k}").param,
+                    length_unit=16 // np.dtype(self.dtype).itemsize,
+                )
             drained.append(
                 emit_shim_transfer(
                     f"gather_rows{k}",
@@ -204,6 +255,7 @@ class Gather(Operator):
                     ),
                     wait=True,
                     managed=False,
+                    **length,
                 )
             )
             # Every feed's preamble writes the same descriptors, from one copy.
@@ -232,16 +284,16 @@ class Gather(Operator):
                         task.free()
                     pending[k] = pending[k][-1:]
                 # A row's packet, the push, and on a short last batch its end.
-                packets = batches[j] + 1 + int(batches[j] < chain)
+                count = 4 * batches[j] + 3 + (3 if batches[j] < chain else 0)
                 pending[k].append(
                     emit_shim_transfer(
                         f"gather_ctrl{k}",
                         words,
                         tap=TensorAccessPattern(
                             (self.words,),
-                            20 * chain + 3 * (chain + 1) * j,
-                            [packets, 1, 1, 3],
-                            [3, 0, 0, 1],
+                            20 * chain + (4 * chain + 3) * j,
+                            [1, 1, 1, count],
+                            [0, 0, 0, 1],
                         ),
                         packet=(0, self.control_id - k),
                         managed=False,
@@ -269,7 +321,7 @@ class Gather(Operator):
     @functools.cached_property
     def template(self) -> tuple[np.ndarray, np.ndarray]:
         """The control words with every row's address zero, and where each
-        row's address-low word is.
+        row's address-low word is; its length word is the one before.
         """
         chain, words, slots = self.chain, [], []
         for b in range(2 * chain):
@@ -282,9 +334,10 @@ class Gather(Operator):
         for j, n in enumerate(self.batches):
             sets = (j % 2) * chain
             for k in range(n):
-                slots.append(len(words) + 1)
+                slots.append(len(words) + 2)
                 words += [
-                    _control_header(1, self.bd_base + 0x20 * (sets + k) + 4),
+                    _control_header(2, self.bd_base + 0x20 * (sets + k)),
+                    row_words,
                     0,
                     0,
                 ]
@@ -300,31 +353,41 @@ class Gather(Operator):
         assert len(words) == self.words
         return np.array(words, dtype=np.uint32), np.array(slots)
 
-    def control_words(self, ids, address: int) -> np.ndarray:
+    def control_words(self, ids, address: int, valid: int | None = None) -> np.ndarray:
         """The control words gathering ``ids`` from a table at ``address``.
 
         Args:
             ids: The rows, numpy's indices: negative ones count from the end.
             address: The table's XRT buffer address.
+            valid: The rows a bounded call moves, the first ``valid`` of
+                ``ids``; each other moves ``pad_bytes`` of the table's first
+                row. ``None`` moves every row.
 
         Returns:
             The words ``ids`` takes, ``words`` of them.
 
         Raises:
-            IndexError: An id is past the table, either way.
+            IndexError: An id is past the table, either way, or ``valid`` is
+                outside ``[0, rows]``.
         """
         ids = np.asarray(ids).astype(np.int64)
         if ids.shape != (self.rows,):
             raise ValueError(
                 f"a gather of {self.rows} rows takes {self.rows} ids, got {ids.shape}"
             )
+        valid = self.rows if valid is None else int(valid)
+        if not 0 <= valid <= self.rows:
+            raise IndexError(f"{valid} valid rows of a gather of {self.rows}")
+        ids = ids[:valid]
         n = self.table_rows
         if ((ids < -n) | (ids >= n)).any():
             raise IndexError(f"gathering {ids[(ids < -n) | (ids >= n)]} from {n} rows")
         template, slots = self.template
         stride = self.row * np.dtype(self.dtype).itemsize
-        rows = (address + APERTURE + (ids % n) * stride).astype(np.uint64)
+        rows = np.full(self.rows, address + APERTURE, dtype=np.uint64)
+        rows[:valid] += ((ids % n) * stride).astype(np.uint64)
         words = template.copy()
+        words[slots[valid:] - 1] = self.pad_bytes // 4
         words[slots] = (rows & np.uint64(0xFFFFFFFC)).astype(np.uint32)
         words[slots + 1] = ((rows >> np.uint64(32)) & np.uint64(0xFFFF)).astype(
             np.uint32
@@ -423,10 +486,10 @@ class GatherWords(Operator):
     def taps(self) -> list[TensorAccessPattern]:
         """Where the rows' address words go in ``control``, in row order.
 
-        A row's follow its packet's header, three words to a packet and a
-        push after every batch of ``chain``.
+        A row's follow its packet's header and length, four words to a
+        packet and a three-word push after every batch of ``chain``.
         """
-        chain, at = Gather.chain, 20 * Gather.chain + 1
+        chain, at = Gather.chain, 20 * Gather.chain + 2
         full, short = divmod(self.rows, chain)
         taps = []
         if full:
@@ -435,16 +498,16 @@ class GatherWords(Operator):
                     (self.words,),
                     at,
                     [1, full, chain, 2],
-                    [0, 3 * (chain + 1), 3, 1],
+                    [0, 4 * chain + 3, 4, 1],
                 )
             )
         if short:
             taps.append(
                 TensorAccessPattern(
                     (self.words,),
-                    at + 3 * (chain + 1) * full,
+                    at + (4 * chain + 3) * full,
                     [1, 1, short, 2],
-                    [0, 0, 3, 1],
+                    [0, 0, 4, 1],
                 )
             )
         return taps

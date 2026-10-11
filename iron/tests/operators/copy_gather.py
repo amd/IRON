@@ -22,7 +22,7 @@ from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Profile
+from iron.common import Profile, Scratchpad
 from iron.common.image import AdjacentPacking, Fusion
 from iron.operators import ElementwiseAdd
 from iron.operators.copy import Copy, Gather
@@ -80,6 +80,19 @@ class Embedded(iron.Graph):
 
     def body(self, ids, x):
         return ElementwiseAdd(Copy(self.table[ids]), x)
+
+
+class Bounded(iron.Graph):
+    """The first ``n`` rows a call's ids name, ``n`` per call."""
+
+    def __init__(self, table, feeds: int | None = None):
+        self.table = iron.weight(table)
+        self.profile = Profile()
+        if feeds is not None:
+            self.profile.add(Gather, feeds=feeds)
+
+    def body(self, ids, *, n: Scratchpad[np.int32]):
+        return Copy(self.table[ids[:n]])
 
 
 class FromDeviceIds(iron.Graph):
@@ -176,6 +189,22 @@ def test_rows_each_call_names_are_gathered(npu_runtime, table, feeds, n_ids):
         expected = np.take(table, ids, axis=0)
         assert_equal(graph(ids), expected, f"call {call}")
         assert_equal(graph.reference(ids), expected, f"reference {call}")
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("feeds,n_ids", FEEDS)
+def test_the_rows_a_call_bounds_are_gathered(npu_runtime, table, feeds, n_ids):
+    graph = Bounded(table, feeds)
+    net = graph.compile(ids=((n_ids,), np.int32))
+    assert net.plan.image == "elf"
+    rng = np.random.default_rng(n_ids)
+    for n in sorted({1, 9, n_ids // 2, n_ids - 1, n_ids} - {0}):
+        ids = rng.integers(-VOCAB, VOCAB, n_ids).astype(np.int32)
+        ids[n:] = VOCAB  # past the table: a bounded call reads none of them
+        expected = np.take(table, ids[:n], axis=0)
+        got = np.asarray(graph(ids, n=n), dtype=np.float32)[:n]
+        assert_equal(got, expected, f"{n} of {n_ids}")
+        assert_equal(graph.reference(ids, n=n), expected, f"reference {n}")
 
 
 @pytest.mark.supported_devices("npu2")
@@ -330,6 +359,39 @@ def test_a_core_writes_the_words_the_host_would():
             [tap.gather(np.arange(gather.words)) for tap in gather.word_source().taps()]
         )
         np.testing.assert_array_equal(written, np.stack([slots, slots + 1], -1).ravel())
+
+
+def _moved(gather: Gather, valid: int) -> np.ndarray:
+    """The bytes each row's descriptor moves, read from the control words a
+    call with ``valid`` rows writes.
+    """
+    words = gather.control_words(np.arange(gather.rows), 0, valid)
+    return words[gather.template[1] - 1].astype(np.int64) * 4
+
+
+def test_a_bounded_gather_moves_its_rows_and_a_unit_for_each_other():
+    for rows, feeds in ((1, 1), (15, 1), (71, 4), (512, 4), (2048, 4)):
+        gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH, feeds=feeds)
+        row_bytes = WIDTH * 2
+        for valid in sorted(
+            {0, 1, 13, rows // 2, rows - 1, rows} & set(range(rows + 1))
+        ):
+            moved = _moved(gather, valid)
+            assert (moved[:valid] == row_bytes).all()
+            assert (moved[valid:] == Gather.pad_bytes).all()
+            # Each feed drains what its rows' descriptors moved.
+            for k, run in enumerate(gather.runs):
+                span = moved[run.start * Gather.chain : run.stop * Gather.chain]
+                drained = gather.derived_at(f"drained{k}", valid_rows=valid)
+                assert drained * 16 == span.sum(), (rows, valid, k)
+        assert _moved(gather, None).sum() == rows * row_bytes
+
+
+def test_a_bounded_prompt_chunk_moves_13_rows_not_2048():
+    """Llama 3.2 1B's chunk: 2048 rows of 4096 bytes from 128256."""
+    gather = Gather(rows=2048, table_rows=128256, row=2048, feeds=4)
+    assert _moved(gather, None).sum() == 8 * 1024 * 1024
+    assert _moved(gather, 13).sum() == 13 * 4096 + 2035 * 16 == 85808
 
 
 def test_a_gather_feeds_from_as_many_shim_pairs_as_the_device_has():

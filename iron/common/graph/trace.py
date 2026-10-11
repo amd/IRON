@@ -50,6 +50,24 @@ class TracedStep:
 
 
 @dataclasses.dataclass(frozen=True)
+class Encoder:
+    """How the host turns an input into the words the device reads, from
+    ``buffer``'s device address: ``encode(input, address, valid)``, with
+    ``valid`` the call's ``bound`` on the input's rows, or None.
+    """
+
+    buffer: str
+    encode: Callable[[np.ndarray, int, int | None], np.ndarray]
+    bound: Affine | None = None
+
+    def __call__(
+        self, tensor: np.ndarray, address: int, values: Mapping[str, int]
+    ) -> np.ndarray:
+        valid = None if self.bound is None else self.bound.evaluate(values)
+        return self.encode(tensor, address, valid)
+
+
+@dataclasses.dataclass(frozen=True)
 class Binding:
     """A graph value bound to one operator's value member, written per call
     as ``expression``.
@@ -153,10 +171,8 @@ class TracedGraph:
     carry: dict[str, Handle | Affine] = dataclasses.field(default_factory=dict)
     feedback: list[str] = dataclasses.field(default_factory=list)
     # An input the device reads as words the host encodes from it and a
-    # buffer's device address (a gather's ids): input -> (buffer, encode).
-    encoders: dict[str, tuple[str, Callable[[np.ndarray, int], np.ndarray]]] = (
-        dataclasses.field(default_factory=dict)
-    )
+    # buffer's device address (a gather's ids).
+    encoders: dict[str, Encoder] = dataclasses.field(default_factory=dict)
     # A per-call value the graph fills in rather than the caller, from a
     # buffer's device address (a gather by ids the device made):
     # value -> (buffer, address -> words by name, its word's name).
@@ -278,7 +294,7 @@ class Tracer:
         self.bindings: list[Binding] = []
         self.limits: list[Limit] = []
         self._bound: dict[int, dict] = {}
-        self.encoders: dict[str, tuple[str, Callable]] = {}
+        self.encoders: dict[str, Encoder] = {}
         self.addresses: dict[str, tuple[str, Callable, str]] = {}
         self._counter = itertools.count()
         self._names = names or {}
@@ -439,11 +455,14 @@ class Tracer:
             row=math.prod(table.shape[1:]),
             dtype=table.dtype,
         )
+        bound = ids.bounds.get(0)
+        if bound is not None:
+            self._bind(op, "valid_rows", bound)
         if ids.role == "input":
             if ids.name in self.encoders:
                 raise ValueError(f"the input {ids.name!r} gathers from one table once")
             control = Handle((op.words,), np.uint32, ids.name, "input")
-            self.encoders[ids.name] = (table.name, op.control_words)
+            self.encoders[ids.name] = Encoder(table.name, op.control_words, bound)
         else:
             source = op.word_source()
             template = op.template[0]
