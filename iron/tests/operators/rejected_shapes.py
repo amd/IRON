@@ -19,6 +19,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Link, Scratchpad, Unresolvable
+from iron.lm import project
 from iron.operators.copy import Copy, Gather
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -480,3 +481,21 @@ def test_gemm_on_columns_that_do_not_divide_its_rows_is_refused(device, n_cols):
     with pytest.raises(ValueError, match="do not divide the 4 rows"):
         GEMM(**shape, num_aie_columns=3).resolved(dev)
     assert GEMM(**shape).resolved(dev).num_aie_columns == {"npu1": 2, "npu2": 6}[device]
+
+
+@pytest.mark.usefixtures("npu2")
+def test_a_projection_bias_wider_than_rowwise_adds_line_is_refused():
+    """RowwiseAdd holds a bias's whole row on one core, so project() refuses
+    a bias past its tile_cap as it traces, not at resolution.
+    """
+
+    class Wide(iron.Graph):
+        def __init__(self):
+            self.w = iron.weight(np.zeros((5120, 1280), bfloat16))
+            self.b = iron.weight(np.zeros((5120,), bfloat16))
+
+        def body(self, x):
+            return project(x, self.w, bias=self.b, k_tile=256)
+
+    with pytest.raises(ValueError, match="exceeds RowwiseAdd's 4096-element"):
+        Wide().trace(x=((256, 1280), bfloat16))

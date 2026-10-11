@@ -82,6 +82,12 @@ def project(x, weight, bias=None, k_tile=None, tile_n=None, **gemv):
         y = GEMV(weight, x, **gemv)
     if bias is None:
         return y
+    if bias.shape[0] > RowwiseAdd.tile_cap:
+        raise ValueError(
+            f"project(): bias ({bias.shape[0]} elements) exceeds RowwiseAdd's "
+            f"{RowwiseAdd.tile_cap}-element tile_cap; split the projection's "
+            "weight and bias once at load time instead of folding them here"
+        )
     rows = math.prod(y.shape) // bias.shape[0]
     return RowwiseAdd(y.reshape(rows, bias.shape[0]), bias).reshape(y.shape)
 
