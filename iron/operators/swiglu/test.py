@@ -10,18 +10,27 @@ gave them, so a drift within tolerance upstream is not amplified into a
 failure downstream.
 """
 
+import dataclasses
+
 import numpy as np
 import pytest
 from aie.utils.benchmark import run_iters
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.lm.layers import SwiGLU
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.flm.gemm.design import Epilogue
+from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 from iron.operators.gemv import GEMV
 from iron.operators.silu import SiLU
 
 # (rows, embedding_dim, hidden_dim). Qwen3.5-0.8B's FFN is 1024 by 3584.
 SHAPES = [(1, 2048, 2048), (1, 1024, 3584), (256, 2048, 2048)]
+# silu's steepest slope, which carries a projection's bound through the
+# gate's epilogue, and its approximation's error: 0.018 at worst on npu2,
+# with margin.
+SILU_SLOPE, SILU_APPROX = 1.1, 0.05
 
 
 def _weight(rng, rows, cols):
@@ -41,10 +50,17 @@ def _verdict(net, step):
     """
     op = step.op
     held = {b.name: _read(net, h) for b, h in zip(op.buffers, step.slots)}
+    tolerance = op.resolved().tolerance()
+    if isinstance(op, FLMGEMM) and op.epilogue is Epilogue.SILU:
+        plain = dataclasses.replace(op, epilogue=Epilogue.NONE).resolved().tolerance()
+        tolerance = Tolerance.bounded(
+            lambda A, B: SILU_SLOPE * plain.bound(A, B) + SILU_APPROX,
+            note="the projection's bound through silu, and its approximation",
+        )
     (verdict,) = op.judge(
         {b.name: held[b.name] for b in op.inputs},
         {b.name: held[b.name] for b in op.outputs},
-        op.resolved().tolerance(),
+        tolerance,
     ).values()
     return verdict
 
@@ -69,26 +85,32 @@ def test_swiglu(rows, embedding_dim, hidden_dim, fold, npu_runtime, record_prope
     record_property("Throughput", ops / (elapsed_us * 1e-6) / 1e9)
 
     # Folded, the down matvec applies silu and the product to each line of
-    # its input as it reads it. flm.GEMM neither prepares nor finishes, so
-    # the product finishes silu in silu's cores.
+    # its input as it reads it. A sequence's gate GEMM takes silu as its
+    # epilogue, and the product stays a step of its own.
+    steps = net.traced.steps
     folds = [
         (
             type(s.op),
             [type(link.op) for link in s.op.prepare],
             [type(link.op) for link in s.op.finish],
         )
-        for s in net.traced.steps
+        for s in steps
         if s.op.prepare or s.op.finish
     ]
-    if not fold:
-        assert folds == []
-    elif rows == 1:
+    if fold and rows == 1:
         assert folds == [(GEMV, [SiLU, ElementwiseMul], [])]
     else:
-        assert folds == [(SiLU, [], [ElementwiseMul])]
+        assert folds == []
+    if fold and rows > 1:
+        assert [type(s.op) for s in steps] == [
+            FLMGEMM,
+            FLMGEMM,
+            ElementwiseMul,
+            FLMGEMM,
+        ]
+        assert steps[0].op.epilogue is Epilogue.SILU
     # The gate's buffer is dead once SiLU has read it, so the planner may
     # reuse it; the product's inputs and the down projection's are intact.
-    steps = net.traced.steps
     verdicts = {"down": _verdict(net, steps[-1])}
     products = [s for s in steps if isinstance(s.op, ElementwiseMul) or s.op.finish]
     if products:

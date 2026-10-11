@@ -427,9 +427,10 @@ def test_swiglu_folds_its_silu_and_its_product_into_the_gate(npu2):
     assert f.input_args == t.input_args and f.output_args == t.output_args
 
 
-def test_a_prompt_swiglu_compiles_its_silu_into_the_gate_alone(npu2):
+@pytest.mark.parametrize("device", ["npu1", "npu2"])
+def test_a_prompt_swiglu_compiles_its_silu_into_the_gate_alone(device, request):
     t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(256, E))
-    f, count = folded(t, npu2)
+    f, count = folded(t, request.getfixturevalue(device))
     assert [(str(fold), n) for fold, n in count.items()] == [("SiLU into GEMM", 1)]
     gate, up, mul, down = (s.op for s in f.steps)
     assert (type(gate), type(mul)) == (FLMGEMM, ElementwiseMul)
