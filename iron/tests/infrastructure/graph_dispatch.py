@@ -186,6 +186,7 @@ class TwoExtents(iron.Graph):
         return ElementwiseAdd(t, b, **wide), u
 
 
+@pytest.mark.supported_devices("npu2")
 def test_designs_of_one_array_run_on_one_configure():
     rng = np.random.default_rng(0)
     a, b = ((rng.random(SIZE) * 4 - 2).astype(bfloat16) for _ in range(2))
@@ -222,6 +223,7 @@ class TwoProjections(iron.Graph):
         return GEMV(self.narrow, x, **tiles), GEMV(self.wide, y, **tiles)
 
 
+@pytest.mark.supported_devices("npu2")
 def test_each_design_of_one_array_runs_on_its_own_values():
     """The second design's cores read its trip count, not the first's.
 
