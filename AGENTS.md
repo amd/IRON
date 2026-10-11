@@ -989,6 +989,21 @@ its float32 encoder on the host:
 - **Run**: `pytest iron/applications/embedding_gemma2/`, or
   `python -m iron.applications.embedding_gemma2.encoder <dir> --query ... --document ...`
 
+### Qwen 2.5 1.5B Instruct
+
+Full LLM inference example at `iron/applications/qwen2/` (`model.py`,
+its `profiles/`, `test.py`, `README.md`, `tune.py`): Llama-style
+(RMSNorm, RoPE, SwiGLU, grouped-query attention) with one difference a
+Llama checkpoint has no place for, its q/k/v projections each carrying a
+bias (`project(..., bias=...)`, folded with `RowwiseAdd`), and a
+`hidden_dim` (8960) not a multiple of `flm.GEMM`'s default `k_tile`
+(`swiglu(..., k_tile=256)`).
+
+- **Required files**: `model.safetensors`, `tokenizer.json` from Hugging Face
+- **Default location**: `/srv/qwen2.5-1.5b-instruct/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
+- **Run**: `pytest iron/applications/qwen2/`, or
+  `python -m iron.applications.qwen2.model model.safetensors tokenizer.json`
+
 A model's device test goes in `iron/applications/<name>/test.py`: CI's
 example suite runs `iron/applications/`, and the benchmark history names a
 row by that directory.
