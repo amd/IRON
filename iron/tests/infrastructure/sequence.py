@@ -37,6 +37,7 @@ from iron.common.harness import verify_buffer
 from iron.common.image import Fusion, OperatorSequence
 from iron.common.image.packaging import full_elf
 from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.magnitude import Magnitude
 from iron.operators.relu import ReLU
 from iron.operators.sample import Sample
 from iron.operators.tanh import Tanh
@@ -275,9 +276,10 @@ def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
 # 4. Compare mode holds each step to its kernel's contract, and raises on a
 #    step that falls outside the tolerance it is judged by.
 #
-#    Tanh's kernel approximates np.tanh: within its contract, but not
-#    bit-exact. So the same NPU output must pass under the default tolerance
-#    and fail under an exact one.
+#    Magnitude's kernel comes within 2e-7 of hypot, about a float32 ulp, on
+#    every device: within its contract, but not correctly rounded. So the
+#    same NPU output must pass under the default tolerance and fail under an
+#    exact one.
 # ---------------------------------------------------------------------------
 
 
@@ -288,14 +290,13 @@ def test_compare_mode_judges_each_step_by_its_tolerance(exact, npu_runtime):
     contract the step runs cleanly; held to exact equality it makes compare
     mode raise.
     """
-    size = 1024
+    rows, width = 8, 640
     rng = np.random.default_rng(0)
-    x: Any = rng.random(size).astype(bfloat16)
-    x = x * 4
+    x = (rng.standard_normal((rows, width)) * 10.0).astype(np.float32)
 
-    op = Tanh(size=size, num_aie_columns=1, num_channels=1, tile_size=size)
+    op = Magnitude(rows=rows, width=width, num_aie_columns=1)
     seq = OperatorSequence(
-        name="infra_compare_tanh",
+        name="infra_compare_magnitude",
         runlist=[(op, "x", "out")],
         input_args=["x"],
         output_args=["out"],
