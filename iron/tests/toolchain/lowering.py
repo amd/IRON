@@ -23,6 +23,7 @@ import importlib
 
 import numpy as np
 import pytest
+from ml_dtypes import bfloat16
 from aie.iron import ExternalFunction
 from aie.utils import get_current_device
 from aie.utils.compile import (
@@ -35,7 +36,7 @@ import iron
 import iron.operators as catalog
 from iron.common import Scratchpad, graph
 from iron.common.design import OperatorDesign
-from iron.lm import LogMel
+from iron.lm import Conv2d, LogMel
 from iron.operators.copy import Copy
 from iron.tests.toolchain.tools import DEVICES, requires
 
@@ -166,6 +167,35 @@ def test_a_graph_called_in_a_graph_lowers(device, tmp_path):
     per-call value, lower with the values they read.
     """
     traced = _Features(3072).trace(wave=((3073 * 160,), np.float32))
+    for i, op in enumerate(traced.operators):
+        (tmp_path / str(i)).mkdir()
+        lower(op.resolved(device), tmp_path / str(i), name=f"{i}_{type(op).__name__}")
+
+
+class _Subsample(iron.Graph):
+    """Two convolutions, graphs called in this one's body, as an audio front
+    end subsamples: one channel to 64 as a band, then 64 to 64 by patches.
+    """
+
+    def __init__(self, mels: int):
+        rng = np.random.default_rng(0)
+        self.conv0 = Conv2d(
+            rng.standard_normal((64, 1, 3, 3)), mels, stride=2, padding=1, border=1
+        )
+        self.conv1 = Conv2d(
+            rng.standard_normal((64, 64, 3, 3)), mels // 2 + 2, stride=2
+        )
+
+    def body(self, x, y, *, n: Scratchpad[np.int32]):
+        return self.conv0(x, rows=n), self.conv1(y, rows=n)
+
+
+def test_convolutions_called_in_a_graph_lower(device, tmp_path):
+    mels = 128
+    traced = _Subsample(mels).trace(
+        x=((2 * 256 + 2, mels), bfloat16),
+        y=((256 + 2, (mels // 2 + 2) * 64), bfloat16),
+    )
     for i, op in enumerate(traced.operators):
         (tmp_path / str(i)).mkdir()
         lower(op.resolved(device), tmp_path / str(i), name=f"{i}_{type(op).__name__}")

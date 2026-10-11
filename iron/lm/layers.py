@@ -7,7 +7,8 @@
 is the SwiGLU feed-forward, ``W_down @ (SiLU(W_gate @ x) * (W_up @ x))``,
 for one token or a sequence, and ``SwiGLU`` is it as a graph of its
 own, holding the weights, so they are uploaded once. ``LogMel`` is an
-audio front end's log-mel spectrogram. A graph here is called in a
+audio front end's log-mel spectrogram and ``Conv2d`` a convolution over
+rows of channels-last pixels. A graph here is called in a
 model's body as it is on its own (``Graph``): its steps trace into the
 model's.
 
@@ -23,6 +24,7 @@ import math
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
+from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Scratchpad
@@ -176,3 +178,128 @@ class LogMel(iron.Graph):
         rows = np.asarray(wave, np.float32)[starts + np.arange(self.frame)]
         magnitude = np.abs(np.fft.rfft(rows * self.window, n=self.fft, axis=-1))
         return np.log(magnitude @ self.filters + self.mel_floor).astype(np.float32)
+
+
+# Each product's float32 sum rounded once.
+ACCURATE = dict(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
+
+
+class Conv2d(iron.Graph):
+    """A 2-D convolution without bias of rows of ``width`` channels-last
+    pixels by a ``(out_channels, channels, kernel, kernel)`` ``weight`` at
+    ``stride``. The width is padded with ``padding`` zero columns either
+    side; padding in rows is rows the input holds, so a producer writes past
+    them in place. Each output row is its pixels with ``border`` zero pixels
+    either side, the padding of a convolution that reads it.
+
+    A call takes the input ``(rows, width * channels)`` and the per-call
+    ``rows`` of output it computes, and writes the output ``(out_rows,
+    (out_width + 2 * border) * out_channels)`` where a caller gives it, else
+    returns it. One channel is a GEMM of ``kernel`` consecutive input rows,
+    gathered whole, by the weight laid out as a band over the width, the
+    padding and the border its zero columns. More channels are a GEMM of
+    the gathered ``kernel * kernel * channels`` patches by the weight, the
+    output channels as its rows, so that few of them leave the patches to
+    span every column (every row is then computed, as a GEMM bounds no
+    column, and the output bounded after). Each GEMM sums its products in
+    float32 and rounds once.
+
+    Args:
+        weight: ``(out_channels, channels, kernel, kernel)``.
+        width: The input's pixels a row, its held padding among them.
+        stride: The step between output pixels, and rows.
+        padding: The zero columns either side of the width, one channel only.
+        border: The zero pixels either side of each output row, one channel
+            only.
+    """
+
+    def __init__(
+        self,
+        weight: np.ndarray,
+        width: int,
+        stride: int = 1,
+        padding: int = 0,
+        border: int = 0,
+    ):
+        w = np.asarray(weight, np.float32)
+        C_out, C, k, _ = w.shape
+        if C > 1 and (padding or border):
+            raise ValueError(
+                "Conv2d: gathered patches hold no zero padding or border; with "
+                "more than one channel the input holds its padding columns"
+            )
+        self.width, self.stride, self.padding, self.border = (
+            width,
+            stride,
+            padding,
+            border,
+        )
+        self.channels, self.out_channels, self.kernel = C, C_out, k
+        self.out_width = (width + 2 * padding - k) // stride + 1
+        if self.out_width < 1:
+            raise ValueError(
+                f"Conv2d: a {k}-wide kernel does not fit {width} pixels padded "
+                f"by {padding}"
+            )
+        self.out_line = (self.out_width + 2 * border) * C_out
+        if C == 1:
+            band = np.zeros((k, width, self.out_width + 2 * border, C_out), np.float32)
+            for f in range(self.out_width):
+                for b in range(k):
+                    i = stride * f - padding + b
+                    if 0 <= i < width:
+                        band[:, i, f + border] = w[:, 0, :, b].T
+            self.matrix = band.reshape(k * width, self.out_line).astype(bfloat16)
+        else:
+            self.matrix = w.transpose(0, 2, 3, 1).reshape(C_out, k * k * C)
+            self.matrix = self.matrix.astype(bfloat16)
+
+    def body(self, x, y=None, *, rows: Scratchpad[np.int32]):
+        k, s, C = self.kernel, self.stride, self.channels
+        R, line = x.shape
+        out_rows = (R - k) // s + 1
+        if C == 1:
+            pattern = TensorAccessPattern(
+                (R, line), 0, [out_rows, k * line], [s * line, 1]
+            )
+            a = Copy(x, src=pattern).reshape(out_rows, k * line)[:rows]
+            return GEMM(a, self.matrix, *([] if y is None else [y]), **ACCURATE)
+        n = out_rows * self.out_width
+        patches = TensorAccessPattern(
+            (R, line),
+            0,
+            [out_rows, self.out_width, k, k * C],
+            [s * line, s * C, line, 1],
+        )
+        a = Copy(x, src=patches).reshape(n, k * k * C)
+        # The few output channels as M, so that the patches span every
+        # column; every row, as a GEMM bounds no N, and the output after.
+        out = [] if y is None else [y.reshape(n, self.out_channels)]
+        h = GEMM(self.matrix, a, *out, b_col_maj=True, c_col_maj=True, **ACCURATE)
+        h = h if y is not None else h[: rows * self.out_width]
+        return None if y is not None else h.reshape(out_rows, self.out_line)
+
+    def exact(self, x: np.ndarray, weight: np.ndarray) -> np.ndarray:
+        """The convolution of ``x`` ``(rows, width * channels)`` by
+        ``weight`` in float32, bordered: what the graph's GEMMs compute
+        before their one rounding.
+        """
+        k, s, p = self.kernel, self.stride, self.padding
+        image = np.asarray(x, np.float32).reshape(x.shape[0], self.width, self.channels)
+        image = np.pad(image, ((0, 0), (p, p), (0, 0)))
+        rows = (image.shape[0] - k) // s + 1
+        patches = np.stack(
+            [
+                image[a : a + s * rows : s, b : b + s * self.out_width : s]
+                for a in range(k)
+                for b in range(k)
+            ],
+            axis=2,
+        ).reshape(rows, self.out_width, -1)
+        w = (
+            np.asarray(weight, np.float32)
+            .transpose(2, 3, 1, 0)
+            .reshape(-1, self.out_channels)
+        )
+        out = np.pad(patches @ w, ((0, 0), (self.border, self.border), (0, 0)))
+        return out.reshape(rows, self.out_line)

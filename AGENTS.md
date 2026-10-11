@@ -480,7 +480,7 @@ and runs like any graph, which is how its device test runs it.
 So a capability a model needs is an operator when it is new compute: a
 kernel, an array, a data movement no operator has (`iron/operators/`, as
 "Adding a New Operator" says). It is a graph when it composes operators
-the library has (`iron.lm.layers`: `SwiGLU`, `LogMel`); a model calls the
+the library has (`iron.lm.layers`: `SwiGLU`, `LogMel`, `Conv2d`); a model calls the
 graph rather than writing its operators into its own body.
 
 The versions of one graph share its weights and states: a full ELF
