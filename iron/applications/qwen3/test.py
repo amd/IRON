@@ -59,15 +59,21 @@ def model(runner, request, module_npu_runtime):
     yield runner.npu(request.config.getoption("--cost-table"))
 
 
-# KL(fp32 CPU || NPU), teacher-forced over 40 steps. Qwen3 is 28 layers
-# against Llama 3.2 1B's 16, so bf16 error has more steps to accumulate;
-# these bounds are provisional (Llama's own, at Llama's depth, with
-# headroom) until measured on real hardware -- see qwen/stats.md.
-MAX_KL = {"Mean": 0.04, "P90": 0.08, "Max": 0.4}
+# KL(fp32 CPU || NPU), teacher-forced. TestEachStep's 20-step, 256-char run
+# on npu1/Phoenix measured Mean 0.0110, P90 0.0331, Max 0.0553, 2/20 top-1
+# mismatches (2026-10-10, commit 7c26849e, tests_latest.csv); these bounds
+# give it about 2.5-3x headroom. Not yet measured at the module-scoped
+# tests' own 40-step/1024-char shape (full-ELF, npu2 only).
+MAX_KL = {"Mean": 0.03, "P90": 0.08, "Max": 0.2}
 
 
-# KL(graph reference || NPU) of one decode step, provisional like MAX_KL.
-DEEP_KL = 0.2
+# KL(graph reference || NPU) of one decode step, deep in the cache. Measured
+# 0.0039 at position 32767 (max_seq_len - 1, the default config's full
+# depth) from a 256-char prompt, one sample (2026-10-10, commit 7c26849e).
+# Llama's own bound spans several depths and prompts (0.002 to 0.038); this
+# one point doesn't yet characterize Qwen3's spread the way Llama's does,
+# so the bound keeps more headroom than the single measurement would need.
+DEEP_KL = 0.1
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
