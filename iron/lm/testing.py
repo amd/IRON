@@ -54,28 +54,24 @@ def prompt(runner, chars: int, num_tokens: int, skip: int = 0) -> list[int]:
 
 
 def check_generation(runner, model, prompt_len: int, num_tokens: int, *, record):
-    """Sample ``num_tokens`` after a prompt of ``prompt_len`` characters,
-    with the host out of the loop where the model loops on the device
-    (``CausalLM.generate``), else drawing on the host; record the time to
-    the first token and the tokens per second after it.
+    """Sample ``num_tokens`` on the device after a prompt of ``prompt_len``
+    characters (``CausalLM.generate``); record the time to the first token
+    and the tokens per second after it.
     """
     tokens = prompt(runner, prompt_len, num_tokens)
     sample = Sampler(0.7, 50, np.random.default_rng(SEED))
-    if model.device_loop:
-        drawn, first, later = model.generate(tokens, num_tokens, sample)
-    else:
-        drawn, first, later = generate(model, tokens, num_tokens, sample)
+    drawn, first, later = model.generate(tokens, num_tokens, sample)
     print(runner.decode(drawn))
     record("TTFT", first)
     if num_tokens > 1:
         record("TPS", 1 / later)
 
 
-def check_device_loop(runner, model, prompt_len: int, num_tokens: int, *, record):
-    """Sample ``num_tokens`` after a prompt of ``prompt_len`` characters with
-    the host out of the loop (``CausalLM.generate``); record its time to the
-    first token and tokens per second, then sample again on the host from
-    the same seed: the text is the same, token for token.
+def check_device_sampling(runner, model, prompt_len: int, num_tokens: int, *, record):
+    """Sample ``num_tokens`` on the device after a prompt of ``prompt_len``
+    characters (``CausalLM.generate``); record its time to the first token
+    and tokens per second, then sample again on the host from each step's
+    logits from the same seed: the text is the same, token for token.
     """
     tokens = prompt(runner, prompt_len, num_tokens)
 

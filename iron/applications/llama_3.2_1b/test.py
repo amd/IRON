@@ -25,7 +25,7 @@ from iron.lm.testing import (
     check_deep_decode,
     check_deep_prompt,
     check_determinism,
-    check_device_loop,
+    check_device_sampling,
     check_generation,
     require,
     weights_dir,
@@ -75,8 +75,8 @@ DEEP_KL = 0.1
 
 @pytest.mark.supported_devices("npu1", "npu2")
 class TestEachStep:
-    """The form NPU1 runs: each step its own dispatch of one xclbin, and the
-    host drawing each token. Its model is built and dropped with the class,
+    """The form NPU1 runs: each step its own dispatch of one xclbin, the host
+    starting each on the token the last one drew. Its model is built and dropped with the class,
     first: after any other test it would be held beside the module's
     full-ELF one.
     """
@@ -91,6 +91,9 @@ class TestEachStep:
 
     def test_llama_3_2_1b_each_step_accuracy(self, runner, model, record_property):
         check_accuracy(runner, model, MAX_KL, 20, 256, record=record_property)
+
+    def test_llama_3_2_1b_each_step_sampling(self, runner, model, record_property):
+        check_device_sampling(runner, model, 256, 20, record=record_property)
 
     def test_llama_3_2_1b_each_step_determinism(self, runner, model, record_property):
         check_determinism(runner, model, 4, 3, 128, record=record_property)
@@ -121,7 +124,7 @@ def test_llama_3_2_1b(runner, model, prompt_len, num_tokens, record_property):
 # same seed its text is the host loop's. The figures are the device loop's.
 @pytest.mark.bench
 def test_llama_3_2_1b_device_loop(runner, model, record_property):
-    check_device_loop(runner, model, 1024, 100, record=record_property)
+    check_device_sampling(runner, model, 1024, 100, record=record_property)
 
 
 def test_llama_3_2_1b_accuracy(runner, model, record_property):

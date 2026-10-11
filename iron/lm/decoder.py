@@ -10,7 +10,8 @@ ELF, which alone gathers by a call's ids, it takes those rows as ``x``. Both
 draw the next token on the device and carry it and ``position + 1`` into
 the next call.
 Both attend with ``MHA``. Where the decode step is not a full ELF (NPU1, or
-``boundaries=each_step``) there is no device loop.
+``boundaries=each_step``) there is no device loop: the host starts each step
+on the token the last one drew.
 """
 
 import dataclasses
@@ -317,9 +318,12 @@ class CausalLM(iron.Graph):
     def generate(
         self, tokens, num_tokens: int, sample: Sampler
     ) -> tuple[list[int], float, float]:
-        """Draw ``num_tokens`` after ``tokens`` with the host out of the loop.
+        """Draw ``num_tokens`` after ``tokens`` on the device.
 
-        The draws match ``generation.generate`` on the host with the same seed.
+        Where the decode step is a full ELF each step starts the next
+        (``device_loop``); elsewhere the host starts each step on the token
+        the last one drew, which it reads alone. The draws match
+        ``generation.generate`` on the host with the same seed.
 
         Returns:
             The tokens drawn, the seconds to the first, and the mean seconds
@@ -334,16 +338,9 @@ class CausalLM(iron.Graph):
             raise ValueError(
                 f"{n} tokens and {num_tokens} more to draw do not fit {L} rows"
             )
-        if not self.device_loop:
-            assert self._decode is not None
-            raise RuntimeError(
-                f"{type(self).__name__}: the device loop needs a full-ELF "
-                f"decode step, and this decode step "
-                f"is an {self._decode.plan.image}; draw on the host "
-                f"(generation.generate)"
-            )
+        loop = self.device_loop
         assert self._prompt is not None and self._decode is not None
-        if self._loop is None:
+        if loop and self._loop is None:
             self._loop = CarriedLoop(self._prompt, self._decode, depth=2)
         start = time.perf_counter()
         # The prompt draws at its last position, n - 1; decode step k at n + k.
@@ -352,20 +349,27 @@ class CausalLM(iron.Graph):
         self._decode.write(self.draws, draws)
         held = self._held(tokens)
         self._seen = tokens[: held // C * C]
-        for (ids, _), values in self._chunks(tokens, held):
-            if values["position"] < n - 1:
-                self(ids, **values)
+        for inputs, values in self._chunks(tokens, held):
+            if not loop or values["position"] < n - 1:
+                _, carry = self(*inputs, **values)
             else:
-                self._loop.start(ids, **values)
+                self._loop.start(inputs[0], **values)
         first = time.perf_counter()
-        for _ in self._loop.steps(num_tokens - 1):
-            pass
+        if loop:
+            for _ in self._loop.steps(num_tokens - 1):
+                pass
+        else:
+            drawn = [carry["token"]]
+            for _ in range(num_tokens - 1):
+                _, carry = self(chunk=0, rows=1, **carry)
+                drawn.append(carry["token"])
         later = (
             (time.perf_counter() - first) / (num_tokens - 1)
             if num_tokens > 1
             else float("nan")
         )
-        drawn = self._decode.read(self.drawn)[n - 1 : n - 1 + num_tokens]
+        if loop:
+            drawn = self._decode.read(self.drawn)[n - 1 : n - 1 + num_tokens]
         # The caches hold every token but the last drawn, which no step read.
         self._seen = np.concatenate([tokens, drawn[:-1]]).astype(np.int64)
         return [int(t) for t in drawn], first - start, later

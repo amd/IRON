@@ -193,8 +193,8 @@ def main(runner: type[Runner], description: str):
     parser.add_argument(
         "--compare-host",
         action="store_true",
-        help="after the device loop, generate again drawing on the host from "
-        "the same seed and count the tokens that differ",
+        help="after drawing on the device, generate again drawing on the host "
+        "from the same seed and count the tokens that differ",
     )
     parser.add_argument(
         "--cost-table",
@@ -210,10 +210,6 @@ def main(runner: type[Runner], description: str):
         "as NPU1 does",
     )
     args = parser.parse_args()
-    if args.compare_host and args.each_step:
-        parser.error(
-            "--compare-host compares the device loop, which --each-step has not"
-        )
 
     try:
         config = dataclasses.replace(runner.config, max_seq_len=args.max_seq_len)
@@ -227,11 +223,6 @@ def main(runner: type[Runner], description: str):
             f"{run.config.max_seq_len} rows"
         )
     model = run.npu(args.cost_table, iron.each_step if args.each_step else None)
-    if args.compare_host and not model.device_loop:
-        parser.error(
-            "--compare-host compares the device loop, which needs a full-ELF "
-            "decode step, and NPU1 has not"
-        )
     for name, tuning in model.tunings.items():
         print(f"[Tuning] {name}:\n" + tuning.report(), flush=True)
 
@@ -269,11 +260,6 @@ def main(runner: type[Runner], description: str):
                 print(f"[Decode]  Tokens per second:   {1 / later:7.3f}")
 
         print(run.decode(tokens[1:]), end="", flush=True)
-        if not model.device_loop:
-            timing = generate(model, tokens, args.num_tokens, sampler(), show)[1:]
-            print(run.decode(pending), end="")
-            report(*timing)
-            return
         drawn, first, later = model.generate(tokens, args.num_tokens, sampler())
         print(run.decode(drawn), end="", flush=True)
         report(first, later)
@@ -283,5 +269,5 @@ def main(runner: type[Runner], description: str):
             print(run.decode(pending), end="")
             differ = sum(a != b for a, b in zip(drawn, host))
             print(
-                f"\n[DeviceLoop] Tokens differing from the host loop: {differ}/{len(host)}"
+                f"\n[Device] Tokens differing from the host loop: {differ}/{len(host)}"
             )
