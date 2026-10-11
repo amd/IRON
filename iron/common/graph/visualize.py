@@ -190,7 +190,12 @@ class Dataflow:
         a tuned full ELF's devices holding more than one design.
         """
         tuning = None if self.version is None else self.version.tuning
-        if tuning is None or not tuning.devices:
+        # An xclbin chain loads each design alone: it has no shared device.
+        if (
+            tuning is None
+            or not tuning.devices
+            or self.version.plan.dispatch != "fused"
+        ):
             return {}
         keys = self.keys()
         return {
@@ -399,10 +404,12 @@ class Dataflow:
             s = steps[i]
             color = FAMILIES[FAMILY.get(type(s.op).__name__, "other")]
             tip = html.escape(self.tooltip(s.op), quote=True)
-            nodes[(("pack", packs[i]) if packs else ("layer", layer[i]))].append(
+            at = ("pack", packs[i]) if i in packs else ("layer", layer[i])
+            label = "<br/>".join(self.box(i, values, designs, keys, moved))
+            nodes[at].append(
                 f'  "{prefix}s{i}" [shape=box, style="rounded,filled", '
                 f'fillcolor="{color}33", color="{color}", penwidth=2, '
-                f'tooltip="{tip}", label=<{"<br/>".join(self.box(i, values, designs, keys, moved))}>];'
+                f'tooltip="{tip}", label=<{label}>];'
             )
             for h in s.inputs:
                 r = self.root(h)
@@ -411,13 +418,13 @@ class Dataflow:
                 bounded = " bounded" if h.bounds or h.index_by is not None else ""
                 dashed = ", style=dashed" if r.role in ("weight", "state") else ""
                 edges.append(
-                    f'  "{source(h, (("pack", packs[i]) if packs else ("layer", layer[i])))}" -> "{prefix}s{i}" '
+                    f'  "{source(h, at)}" -> "{prefix}s{i}" '
                     f'[label="{Dataflow.shape(h)}{bounded}"{dashed}];'
                 )
             for h in s.outputs:
                 if self.root(h).role == "state":
                     edges.append(
-                        f'  "{prefix}s{i}" -> "{source(h, (("pack", packs[i]) if packs else ("layer", layer[i])))}" '
+                        f'  "{prefix}s{i}" -> "{source(h, at)}" '
                         f'[label="write {Dataflow.shape(h)}", penwidth=1.5];'
                     )
         returned = {self.root(h).name for h in self.traced.returned}

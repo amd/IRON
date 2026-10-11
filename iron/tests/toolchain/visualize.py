@@ -8,8 +8,12 @@ a shim for the host. An arena draws each scratch buffer over the steps
 that touch it, at the offset the image placed it.
 """
 
+import re
+
 import iron
-from iron.common.graph.visualize import Arena, Floorplan
+from iron.common.graph import CompiledGraph
+from iron.common.graph.narrowing import Tuning
+from iron.common.graph.visualize import Arena, Dataflow, Floorplan
 from iron.common.image.allocator import LiveRange
 from iron.operators import ElementwiseAdd, SiLU
 from iron.tests.toolchain.tools import requires
@@ -56,3 +60,24 @@ def test_an_arena_draws_each_scratch_buffer_where_and_while_it_lives(device):
         f"<title>{between}: {size} bytes at {offset}, steps 0 to 1</title>"
         in plan.svg()
     )
+
+
+def test_a_chain_tuned_with_array_mates_draws_no_shared_device(npu1):
+    built = TwoSteps().compile(a=(N,), b=(N,))
+    keys = Dataflow(built.traced, version=built).keys()
+    # The tuner lists a chain's array mates as one device, as it does a pack's.
+    tuning = Tuning(
+        chosen={},
+        groups=(),
+        devices=(tuple(keys.values()),),
+        configures=2,
+        predicted_us=1.0,
+        baseline_configures=2,
+        baseline_us=1.0,
+        unmeasured=(),
+    )
+    version = CompiledGraph(built.traced, built.plan, tuning=tuning)
+    assert version.plan.dispatch == "separate"
+    dot = version.dot()
+    assert "one device" not in dot
+    assert {"s0", "s1"} <= set(re.findall(r'^\s*"(s\d+)" \[', dot, re.M))
