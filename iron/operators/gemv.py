@@ -77,6 +77,7 @@ def _cases(cls, dev: Device):
         (8192, 2048, 4, 4, 1024),
         (8192, 2048, 8, 4, 512),
     ]
+    finishing = [plain[0], (2048, 8192, 1, 1, 1024), plain[2]]
 
     def case(M, K, cols, tsi, tso, *, bench=False, lower=False, **extra):
         kwargs = dict(M=M, K=K, num_aie_columns=cols, tile_size_input=tsi)
@@ -128,9 +129,10 @@ def _cases(cls, dev: Device):
             case(256, 128, 2, 1, 32, num_channels=2, num_batches=8),
             case(2048, 64, 4, 4, 256, num_channels=2, num_batches=32, repeat=4),
         ]
-        # Each core finishing its output tiles.
-        + [finished(*p, (catalog.GELU,)) for p in plain[:3]]
-        + [finished(*p, (catalog.SiLU,)) for p in plain[:3]]
+        # Each core finishing its output tiles, K = 8192's at the 1024-row
+        # tile a core holds beside an AIE2 finish's LUT tables.
+        + [finished(*p, (catalog.GELU,)) for p in finishing]
+        + [finished(*p, (catalog.SiLU,)) for p in finishing]
         + [finished(*laned[1], (catalog.SiLU,), num_channels=2)]
         # One array serving both, each design selecting its own.
         + [
@@ -369,7 +371,8 @@ class GEMV(Operator):
         )
         # A core holds A's tiles (which carry B and each prologue and finish
         # input), B's line, C's tiles, a scratch line per kind of chain it
-        # applies, and the default stack, which no elementwise kernel exceeds.
+        # applies, its finish's LUT tables, and the default stack, which no
+        # elementwise kernel exceeds.
         if dev is None:
             return new
         item = np.dtype(bfloat16).itemsize
@@ -379,13 +382,14 @@ class GEMV(Operator):
             + line
             + new.C.depth * out
             + line * any(new.prepares or (new.prepare,))
-            + out * any(new.finishes or (new.finish,))
+            + new.finish_bytes(dev, new.tile_size_output)
             + dev.default_core_stack_bytes
         )
         if held > dev.core_memory_bytes:
             raise ValueError(
-                f"K={self.K}, tile_size_input={new.tile_size_input}: a core "
-                f"holds {held} bytes, past its {dev.core_memory_bytes}"
+                f"K={self.K}, tile_size_input={new.tile_size_input}, "
+                f"tile_size_output={new.tile_size_output}: a core holds {held} "
+                f"bytes, past its {dev.core_memory_bytes}"
             )
         return new
 

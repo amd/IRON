@@ -30,7 +30,7 @@ from typing import (
 
 import aie.utils as aie_utils
 import numpy as np
-from aie.dialects.aie import AIETileType
+from aie.dialects.aie import AIEArch, AIETileType
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import ceildiv
 from aie.utils.trace import TraceConfig
@@ -58,6 +58,10 @@ if TYPE_CHECKING:
     from ..graph.handle import Affine, Handle
 
 _T = TypeVar("_T")
+
+# The tables an AIE2 kernel gathering through lut_based_ops links, pinned to
+# banks of core memory; AIE2P computes its activations and links none.
+LUT_BYTES = 5248
 
 graph_tracer: ContextVar[Any] = ContextVar("graph_tracer", default=None)
 
@@ -541,6 +545,30 @@ class Operator(metaclass=_OperatorMeta):
             f"{type(self).__name__}: no output tile its finish runs at; "
             + "; ".join(tried)
         )
+
+    def finish_bytes(self, dev, line: int) -> int:
+        """Core memory a core spends on this operator's finish at a
+        ``line``-element output tile, beside its own buffers: the scratch
+        line its chains alternate with and, on AIE2, the tables of each LUT
+        kernel they link.
+
+        Raises:
+            ValueError: A step does not run at the line.
+        """
+        chains = self.finishes or (self.finish,)
+        if not any(chains):
+            return 0
+        out = self.outputs[0]
+        ordered = out.member.finish_block is None
+        luts = {
+            call.kernel.object_file_name
+            for chain in chains
+            for link in chain
+            for call in link.at_line(line, out.dtype, dev, ordered).op.chain()
+            if call.kernel.contract is not None and call.kernel.contract.uses_lut
+        }
+        tables = LUT_BYTES * len(luts) if dev.arch is AIEArch.AIE2 else 0
+        return line * np.dtype(out.dtype).itemsize + tables
 
     def device(self, target):
         return target.dev

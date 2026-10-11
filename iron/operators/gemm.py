@@ -141,6 +141,10 @@ def _cases(cls, dev: Device):
     return out
 
 
+# A core's stack, and the depth of each core-side fifo of A, B and C.
+STACK_BYTES = 0xD00
+FIFO_DEPTH = 2
+
 # The shim ends are pinned in both, A on alternate columns in the 4x8 case:
 # relaxed as well, a real shape's descriptors (2048x8192x2048, b_col_maj)
 # pile onto one tile, and DMA lowering rejects it with "Too many
@@ -369,6 +373,22 @@ class GEMM(Operator):
             block,
         )
 
+    def held(self, dev, tile_m: int) -> int:
+        """Core memory a core of ``dev`` holds at ``tile_m``: A's and B's
+        tiles, C's (one beside the f32 accumulator under prio_accuracy),
+        the finish's line and tables, and the stack.
+        """
+        m, k, n = tile_m, self.tile_k, self.tile_n
+        din = np.dtype(self.dtype_in).itemsize
+        dout = np.dtype(self.dtype_out).itemsize
+        c = m * n * (dout + 4 if self.prio_accuracy else FIFO_DEPTH * dout)
+        return (
+            FIFO_DEPTH * (m * k + k * n) * din
+            + c
+            + self.finish_bytes(dev, m * n)
+            + STACK_BYTES
+        )
+
     def resolve(self, dev):
         if dev is None:
             raise Unresolvable(
@@ -377,12 +397,28 @@ class GEMM(Operator):
         cols = self.resolve_columns(
             dev, self.num_aie_columns, fits=lambda c: self.N % (self.tile_n * c) == 0
         )
+        tile_m = self.tile_m or self._auto_tile_m(dev)
+        block, _, _ = self.mac_block(dev)
+        # An open tile_m narrows until a core holds its tiles and finish.
+        while (
+            self.tile_m is None
+            and tile_m // 2 % block == 0
+            and self.held(dev, tile_m) > dev.core_memory_bytes
+        ):
+            tile_m //= 2
         new = dataclasses.replace(
             self,
-            tile_m=self.tile_m or self._auto_tile_m(dev),
+            tile_m=tile_m,
             num_aie_columns=cols,
             n_aie_rows=len(dev.core_rows),
         )
+        held = new.held(dev, tile_m)
+        if held > dev.core_memory_bytes:
+            raise ValueError(
+                f"GEMM: tile_m={new.tile_m}, tile_k={self.tile_k}, "
+                f"tile_n={self.tile_n}: a core holds {held} bytes, past its "
+                f"{dev.core_memory_bytes}"
+            )
         return dataclasses.replace(
             new,
             n_shim_mem_a=min(cols, new.n_aie_rows),
@@ -428,7 +464,7 @@ class GEMM(Operator):
         # memory, it may be because too much code is generated due to ObjectFIFO
         # loop unrollings. Reducing the depth to 1 here will work around that at
         # a big performance cost.
-        fifo_depth = 2
+        fifo_depth = FIFO_DEPTH
 
         A_l2_ty = self.A.tile
         B_l2_ty = self.B.tile
@@ -680,7 +716,7 @@ class GEMM(Operator):
                             k_valid_param,
                             *finish.args(row * n_aie_cols + col),
                         ],
-                        stack_size=0xD00,
+                        stack_size=STACK_BYTES,
                         tile=pins.cores.tile(col, 2 + row),
                     )
                 )
