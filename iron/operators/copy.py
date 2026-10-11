@@ -723,14 +723,7 @@ class Copy(Operator):
         """The patterns each side walks in turn, ``[src, dst]``."""
         return [t if isinstance(t, tuple) else (t,) for t in (self.src, self.dst)]
 
-    @property
-    def aiecc_flags(self) -> tuple[str, ...]:
-        """A gather's pieces outnumber the shim's BD ids, so the compiler
-        recycles finished tasks' ids; no task waits on a push issued after
-        it, since each channel's drains go out before the fills feeding them.
-        """
-        gathered = any(isinstance(t, tuple) for t in (self.src, self.dst))
-        return ("--reclaim-runtime-bds",) if gathered else ()
+    aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
     def validate(self) -> None:
         src, dst = (sum(prod(p.sizes) for p in w) for w in self.walks())
