@@ -71,5 +71,5 @@ in an environment with torch, torchvision and transformers (not IRON's
 requirements), and with `--check` compares a fresh run with them:
 
 ```bash
-python -m iron.applications.embeddinggemma_2.hugging_face /path/to/embeddinggemma-2
+python -m iron.applications.embeddinggemma2.hugging_face /path/to/embeddinggemma-2
 ```

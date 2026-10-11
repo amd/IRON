@@ -8,7 +8,7 @@ the tests check the float32 oracles against without torch.
 Run where torch, torchvision and transformers are installed (they are not
 IRON's requirements), over the checkpoint directory:
 
-    python -m iron.applications.embeddinggemma_2.hugging_face <directory>
+    python -m iron.applications.embeddinggemma2.hugging_face <directory>
 
 It writes the `hugging_face.npz` beside each test, with the versions that
 made it and the checkpoint's sha256 in its `metadata`. With `--check` it
@@ -27,7 +27,7 @@ import transformers
 from transformers.models.embedding_gemma2 import modeling_embedding_gemma2
 from transformers.models.gemma4 import image_processing_gemma4, modeling_gemma4
 
-from iron.applications.embeddinggemma_2 import test as text_test
+from iron.applications.embeddinggemma2 import test as text_test
 from iron.lm import Checkpoint
 from iron.applications.embeddinggemma2.audio import test as audio_test
 from iron.applications.embeddinggemma2.audio.model import audio_tensors
