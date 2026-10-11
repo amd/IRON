@@ -414,6 +414,47 @@ class WhisperLogMel(iron.Graph):
         log_spec = np.maximum(log_spec, log_spec.max() - 8.0)
         return ((log_spec + 4.0) / 4.0).astype(np.float32)
 
+    def pack(self, waveform: np.ndarray) -> np.ndarray:
+        """``waveform`` (mono, ``sample_rate``), padded and reflected into
+        the ``(frames - 1) * hop + k_pad`` float32 samples ``body()`` reads:
+        ``n_fft // 2`` reflected either side of the real, truncated-or-
+        zero-padded ``n_samples``, then whatever extra raw samples
+        ``k_pad``'s Limbs alignment needs past the last real frame
+        (harmless: the dft matrix's rows past ``n_fft`` are zero, see
+        ``__init__``).
+        """
+        c = self.config
+        audio = np.asarray(waveform, np.float32)[: c.n_samples]
+        if audio.size < c.n_samples:
+            audio = np.pad(audio, (0, c.n_samples - audio.size))
+        pad = c.n_fft // 2
+        padded = np.pad(audio, (pad, pad), mode="reflect")
+        length = (c.frames - 1) * c.hop + self.k_pad
+        if padded.size < length:
+            padded = np.pad(padded, (0, length - padded.size))
+        return padded[:length]
+
+    def conv1_input(self, waveform: np.ndarray) -> np.ndarray:
+        """``waveform`` through this graph on the device, then the one
+        step left off ``body()``: the per-clip ``log_spec.max() - 8``
+        clamp and the ``(x + 4) / 4`` affine, on the host (one read-back
+        and one cheap numpy pass a clip, not a decode step -- this
+        library has no whole-tensor reduction yet, see skill-gaps.md), and
+        packed into ``WhisperEncoder``'s own ``conv1`` input shape
+        (``conv1_rows``, ``mels``: one zero row of padding either side of
+        the ``frames`` valid ones).
+        """
+        c = self.config
+        raw = np.asarray(self(self.pack(waveform)).numpy(), np.float32).reshape(
+            c.frames, c.mels
+        )
+        log10 = raw / math.log(10.0)
+        log10 = np.maximum(log10, log10.max() - 8.0)
+        affine = (log10 + 4.0) / 4.0
+        x = np.zeros((c.conv1_rows, c.mels), bfloat16)
+        x[1 : c.frames + 1] = affine.astype(bfloat16)
+        return x
+
 
 def self_attention(w, x, n_heads: int, head_dim: int, valid: int, causal: bool):
     """One tower's bidirectional or causal self-attention over its own,
