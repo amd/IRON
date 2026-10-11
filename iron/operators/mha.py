@@ -35,6 +35,7 @@ import dataclasses
 from typing import ClassVar
 
 import numpy as np
+from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
@@ -72,6 +73,8 @@ from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
 STACK_SIZE = 0xD00
+# The softmax core's accurate exp2 polynomial needs 4 KiB, as aiecc measures it.
+SOFTMAX_STACK_SIZE = 0x1000
 
 # The hand-found memtiles of MHA.COLUMNS: K's and V's broadcasts on k_mem and
 # v_mem, or a lane per pipeline on its own column's, and Q's splits and O's
@@ -340,7 +343,9 @@ class MHA(Operator):
     num_pipelines: int = auto(1, array=True, domain=Width())
     # Left out, "memtiles", or "tiles" where P*V is split.
     placement: str = auto(array=True, domain=PLACEMENT)
-    emulate_bf16_mmul_with_bfp16: bool = param(default=True, array=True, repr=False)
+    # bf16 macs: bfp16 shares one exponent over 8 keys of P*V, and the softmax
+    # core, not the products, bounds MHA's time.
+    emulate_bf16_mmul_with_bfp16: bool = param(default=False, array=True, repr=False)
     # Filled by resolve: how the pipelines are split across shims, and K
     # and V's lanes, one every pipeline reads or, one query packed, one each.
     q_shims: int = auto(repr=False, derived=True)
@@ -700,6 +705,8 @@ class MHA(Operator):
 
         # partial_softmax takes exp2, so the scale is in the log2 domain.
         inv_scale = float(bfloat16(self.scale * np.log2(np.e)))
+        # AIE2P's exp2 instruction is up to 6% high; AIE2 has none to replace.
+        accurate_exp2 = target.dev.arch is AIEArch.AIE2p
 
         # Tensors living on the AIE-array
         q_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
@@ -725,6 +732,7 @@ class MHA(Operator):
             B_kv,
             b_col_maj=True,
             emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
+            accurate_exp2=accurate_exp2,
             causal=self.causal,
             window=self.window or 0,
         )
@@ -1200,7 +1208,7 @@ class MHA(Operator):
                         scale_buffer_softmax,
                     ]
                     + params,
-                    stack_size=STACK_SIZE,
+                    stack_size=SOFTMAX_STACK_SIZE,
                     tile=pins.cores.tile(i, 3 if pv_cores == 1 else 4),
                 )
             )
