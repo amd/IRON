@@ -14,14 +14,13 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 
-import aie.utils as aie_utils
 import numpy as np
 from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Scratchpad
 from iron.common.graph.narrowing import JointNarrowing
-from iron.lm import Layout, rope_angles
+from iron.lm import Layout, layers, rope_angles
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -29,7 +28,6 @@ from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM
 from iron.operators.mha import MHA
-from iron.operators.resample.op import PatchPositions, Resample, ResampleTaps
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
 
@@ -161,18 +159,9 @@ def size(height: int, width: int, max_tokens: int, config: VisionConfig):
 
 
 class ImageProcessor(SimpleNamespace):
-    """The image processor on the NPU, called in a graph's body: a decoded
-    image resized as torchvision resizes it, rescaled to `[0, 1]` and cut
-    into the tower's patches, each soft token's `pool ** 2` patches
-    consecutive rows, row-major within the window, the tokens row-major
-    over the image.
-
-    A call takes the image, `(height, width, 3)` uint8 with each row padded
-    to whole `CHUNK`-byte chunks (`inputs` lays it out), and the size the
-    processor resizes it to, all four sizes per call. `Resample` resizes it
-    by the `ResampleTaps` tables into the state `raster`, and
-    `PatchPositions` gives each tower row's patch in it, `xy` and
-    `position_ids`; rows past the image gather the raster's zero patch.
+    """The image processor on the NPU, called in a graph's body: an
+    `iron.lm.ImagePatches` at the tower's patches, windows and positions,
+    and the size the processor resizes an image to.
 
     Args:
         config: The tower's shape.
@@ -182,51 +171,16 @@ class ImageProcessor(SimpleNamespace):
     """
 
     def __init__(self, config: VisionConfig, patches=PATCHES, image=LARGEST):
-        c = config
         self.config = config
         self.patches = patches
         self.image = image
-        k, side = c.pool, c.pool * c.patch
-        cores = 2 * aie_utils.ensure_current_device().cols
-        # Every grid of whole pooling windows the rows hold; the fewest patch
-        # columns give the most bands and padded raster rows.
-        grids = [(patches // s // k * k, s) for s in range(k, patches // k + 1, k)]
-        shared = dict(
-            height=side,
-            width=side,
-            out_height=side,
-            out_width=side,
-            chunk=CHUNK,
+        self.resize = layers.ImagePatches(
+            patches,
+            image,
+            pool=config.pool,
+            positions=config.positions,
             patch_columns=PATCH_COLUMNS,
-            width_chunks=PATCH_COLUMNS * cores,
-            height_chunks=16 * -(-grids[0][0] // 16),
-            patch_rows=max(b * (s // cores + 1) * cores for b, s in grids),
-            num_aie_columns=cores // 2,
-            num_channels=2,
-        )
-        a, b = image
-        self.resample = Resample(
-            image_chunks=max(a * -(-3 * b // CHUNK), b * -(-3 * a // CHUNK)),
-            **shared,
-        )
-        self.raster = iron.state((shared["patch_rows"], 3 * c.patch**2))
-        taps = dict(
-            in_size=side,
-            out_size=side,
-            words=self.resample.words,
-            slots=c.patch,
-            num_aie_columns=cores // 2,
-            num_channels=2,
-        )
-        self.taps_w = ResampleTaps(chunks=shared["width_chunks"], **taps)
-        self.taps_h = ResampleTaps(chunks=shared["height_chunks"], **taps)
-        self.patch_positions = PatchPositions(
-            rows=patches,
-            out_height=side,
-            out_width=side,
-            pool=k,
-            positions=c.positions,
-            cores=cores,
+            chunk=CHUNK,
         )
 
     def __call__(self, rgb, height, width, out_height, out_width):
@@ -235,29 +189,19 @@ class ImageProcessor(SimpleNamespace):
         rows: `(patches, 3 * patch ** 2)` bf16 and `(2 * patches,)` int32
         twice.
         """
-        T = self.patches
-        taps_w = self.taps_w(in_samples=width, out_samples=out_width)
-        taps_h = self.taps_h(in_samples=height, out_samples=out_height)
-        self.resample(
+        return self.resize(
             rgb,
-            taps_w,
-            taps_h,
-            self.raster,
-            rows=height,
-            columns=width,
-            out_rows=out_height,
-            out_columns=out_width,
+            height=height,
+            width=width,
+            out_height=out_height,
+            out_width=out_width,
         )
-        xy, position_ids, order = self.patch_positions(
-            out_rows=out_height, out_columns=out_width
-        )
-        return Copy(self.raster[order]), xy.reshape(2 * T), position_ids.reshape(2 * T)
 
     # -- on the host -----------------------------------------------------------
 
     def shapes(self) -> dict:
         """The input shape of a call."""
-        return dict(rgb=((self.resample.image_chunks, CHUNK), np.uint8))
+        return dict(rgb=((self.resize.resample.image_chunks, CHUNK), np.uint8))
 
     def inputs(self, image, max_tokens: int) -> tuple[np.ndarray, dict]:
         """A call's image buffer and per-call sizes, `n` (its patches) among
@@ -271,29 +215,10 @@ class ImageProcessor(SimpleNamespace):
             ValueError: The image or its patches do not fit a call, or
                 `Resample` cannot resize it.
         """
-        image = np.asarray(image)
-        if image.dtype != np.uint8 or image.ndim != 3 or image.shape[2] != 3:
-            raise ValueError(
-                f"an image is (height, width, 3) uint8, not {image.shape} {image.dtype}"
-            )
         c = self.config
-        H, W, _ = image.shape
-        ho, wo = size(H, W, max_tokens, c)
-        n = ho // c.patch * (wo // c.patch)
-        line = -(-3 * W // CHUNK) * CHUNK
-        op = self.resample
-        if n > self.patches or op.image_chunks * CHUNK < H * line:
-            a, b = self.image
-            raise ValueError(
-                f"a {H}x{W} image of {n} patches does not fit a call's "
-                f"{self.patches} patches or {a}x{b} image"
-            )
-        # Resample's own checks refuse a size it cannot resize.
-        dataclasses.replace(op, height=H, width=W, out_height=ho, out_width=wo)
-        buffer = np.zeros((op.image_chunks, CHUNK), np.uint8)
-        rows = buffer.reshape(-1)[: H * line].reshape(H, line)
-        rows[:, : 3 * W] = image.reshape(H, 3 * W)
-        return buffer, dict(n=n, height=H, width=W, out_height=ho, out_width=wo)
+        ho, wo = size(*np.shape(image)[:2], max_tokens, c)
+        buffer, values = self.resize.pack(image, ho, wo)
+        return buffer, dict(n=ho // c.patch * (wo // c.patch), **values)
 
 
 class VisionTower(SimpleNamespace):
