@@ -53,7 +53,7 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 | [RoPE](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/rope.cc) | Rotary Positional Embedding kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rope.py](./iron/operators/rope.py) |
 | [SiLU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/silu.cc) | Sigmoid Linear Unit activation kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/silu.py](./iron/operators/silu.py) |
 | [Softmax](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/softmax.cc) | Softmax kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/softmax.py](./iron/operators/softmax.py) |
-| SwiGLU | The gated feed-forward block, a graph of GEMV or GEMM (by row count), SiLU and element-wise multiplication | bfloat16 | | ✓ | 🟢 | [iron/lm/layers.py](./iron/lm/layers.py) |
+| SwiGLU | The gated feed-forward block, a graph of GEMV or GEMM (by row count), SiLU and element-wise multiplication | bfloat16 | | ✓ | 🟢 | [iron/lm/blocks.py](./iron/lm/blocks.py) |
 | [Weighted RMSNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/norm/rms_norm.cc) | Weighted RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rms_norm.py](./iron/operators/rms_norm.py) |
 | Copy | A copy between two views, moved by the DMAs alone (no kernel) | any | ✓ | ✓ | 🟢 | [iron/operators/copy.py](./iron/operators/copy.py) |
 | [Transpose](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/transpose.cc) | Transpose | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/transpose.py](./iron/operators/transpose.py) |
@@ -141,7 +141,7 @@ All available operators can be found in `iron/operators`. These each contain:
 - The operator's `reference()` method: the CPU implementation the NPU result is checked against, on the declared shapes.
 - `test = Testing(cases, ...)` on the operator class: the shapes it is checked at on a device. `iron/tests/operators/catalog.py` runs every operator's declaration, building it, running `vectors(op)` through it and verifying against the reference. An operator with a device test of its own keeps a `test.py` beside it.
 
-Operators compose into graphs: a subclass of `iron.Graph` whose `body()` is called on handles, traced once per input shape, compiled to one image per shape and called per token (see `iron/common/graph/`; `iron/lm/llama3/model.py` is the worked example, its tunables a `Profile` the graph carries rather than keywords at every call).
+Operators compose into graphs: a subclass of `iron.Graph` whose `body()` is called on handles, traced once per input shape, compiled to one image per shape and called per token (see `iron/common/graph/`; `iron/applications/llama3/model.py` is the worked example, its tunables a `Profile` the graph carries rather than keywords at every call).
 
 > NOTE: Be sure the XRT setup script has been sourced and the Python environment is activated:
 >       `source /opt/xilinx/xrt/setup.sh`
@@ -188,18 +188,18 @@ To bypass the hook if needed: `git push --no-verify`
 
 IRON includes a complete LLM inference example demonstrating NPU acceleration:
 
-- **Location**: `iron/applications/llama_3.2_1b/`, over the model package `iron/lm/llama3/` and the decoder every model shares (`iron/lm/`)
+- **Location**: `iron/applications/llama3/`, over the model package `iron/applications/llama3/` and the decoder every model shares (`iron/lm/`)
 - **Model**: Meta Llama 3.2 1B
 - **Features**: Multi-head attention, fused operators, bfloat16 quantization
 
-See [iron/applications/llama_3.2_1b/README.md](./iron/applications/llama_3.2_1b/README.md) for setup and usage instructions.
+See [iron/applications/llama3/README.md](./iron/applications/llama3/README.md) for setup and usage instructions.
 
 ### EmbeddingGemma 2
 
-- **Location**: `iron/applications/embeddinggemma_2/`, over the model package `iron/lm/embeddinggemma2/`
+- **Location**: `iron/applications/embeddinggemma2/`, over the model package `iron/applications/embeddinggemma2/`
 - **Model**: EmbeddingGemma 2's text encoder, text to a unit-length embedding
 
-See [iron/applications/embeddinggemma_2/README.md](./iron/applications/embeddinggemma_2/README.md) for setup and usage instructions.
+See [iron/applications/embeddinggemma2/README.md](./iron/applications/embeddinggemma2/README.md) for setup and usage instructions.
 
 ## Architecture
 

@@ -11,6 +11,7 @@ NPU as one graph.
 
 import dataclasses
 import math
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,17 +21,12 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Scratchpad
-from iron.common.graph.narrowing import JointNarrowing
-from iron.lm import Layout, layers, rope_angles
+from iron.lm import ImagePatches, Layout, Model, attention, rope_angles, sandwich_layer
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
-from iron.operators.elementwise_mul import ElementwiseMul
-from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM
-from iron.operators.mha import MHA
 from iron.operators.rms_norm import RMSNorm
-from iron.operators.rope import RoPE
 
 from ..model import ACCURATE, PIPELINES
 from ..model import ROWS as BLOCK
@@ -175,7 +171,7 @@ class ImageProcessor(SimpleNamespace):
         self.config = config
         self.patches = patches
         self.image = image
-        self.resize = layers.ImagePatches(
+        self.resize = ImagePatches(
             patches,
             image,
             pool=config.pool,
@@ -328,39 +324,21 @@ class VisionTower(SimpleNamespace):
 
     def layer(self, w, x, angles):
         c = self.config
-        h = RMSNorm(x, weight=w.norm1, epsilon=c.eps)
-        a = RMSNorm(self.attention(w, h, angles), weight=w.norm2, epsilon=c.eps)
-        x = ElementwiseAdd(x, a)
-        h = RMSNorm(x, weight=w.norm3, epsilon=c.eps)
-        gate = GELU(GEMM(h, w.gate, b_col_maj=True, **ACCURATE))
-        f = ElementwiseMul(gate, GEMM(h, w.up, b_col_maj=True, **ACCURATE))
-        f = GEMM(f, w.down, b_col_maj=True, **ACCURATE)
-        return ElementwiseAdd(x, RMSNorm(f, weight=w.norm4, epsilon=c.eps))
-
-    def attention(self, w, h, angles):
-        c = self.config
-        T, H, D = h.shape[0], c.n_heads, c.head_dim
-        q = GEMM(h, w.q, b_col_maj=True, **ACCURATE).reshape(T * H, D)
-        k = GEMM(h, w.k, b_col_maj=True, **ACCURATE).reshape(T * H, D)
-        v = GEMM(h, w.v, b_col_maj=True, **ACCURATE).reshape(T * H, D)
-        q = RoPE(RMSNorm(q, weight=w.q_norm, epsilon=c.eps), angles)
-        k = RoPE(RMSNorm(k, weight=w.k_norm, epsilon=c.eps), angles)
-        v = RMSNorm(v, epsilon=c.eps)
-        o = MHA(
-            q.reshape(T, H, D),
-            k.reshape(T, H, D),
-            v.reshape(T, H, D),
-            heads_interleaved=True,
-            kv_interleaved=True,
-            causal=False,
-            emulate_bf16_mmul_with_bfp16=False,
-            scale=1.0,
-            num_pipelines=min(PIPELINES, aie_utils.ensure_current_device().cols),
+        attend = partial(
+            attention,
+            w=w,
+            angles=angles,
+            heads=c.n_heads,
+            groups=c.n_heads,
+            head_dim=c.head_dim,
+            epsilon=c.eps,
+            pipelines=min(PIPELINES, aie_utils.ensure_current_device().cols),
+            **ACCURATE,
         )
-        return GEMM(o.reshape(T, H * D), w.o, b_col_maj=True, **ACCURATE)
+        return sandwich_layer(x, w, attend, c.eps, **ACCURATE)
 
 
-class Vision(iron.Graph):
+class Vision(Model):
     """The vision tower as a graph of its own, one compile for every image.
 
     Args:
@@ -400,16 +378,6 @@ class Vision(iron.Graph):
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, `patches` rows."""
         return [self.vision.processor.shapes()]
-
-    def load(self, tuner: JointNarrowing | None = None) -> "Vision":
-        """Compile before the first call, so the arena is made once.
-
-        Args:
-            tuner: Narrows and packs each version's designs by cost.
-        """
-        for shapes in self.shapes():
-            self.compile(coresident=tuner, **shapes)
-        return self
 
     def embed(self, image, max_tokens: int = VISION.image_tokens) -> np.ndarray:
         """The soft tokens of one decoded image or video frame,

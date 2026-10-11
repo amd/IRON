@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-from iron.lm.layers import SwiGLU
+from iron.lm.blocks import SwiGLU
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 
 pytestmark = pytest.mark.usefixtures("npu2")

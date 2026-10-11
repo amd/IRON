@@ -26,7 +26,12 @@ from safetensors.numpy import load_file, save_file
 
 from iron import lm
 from iron.lm import Checkpoint, Sampler
-from iron.lm.llama3.model import LLAMA_3_2_1B, SPECIAL_TOKENS, layout, tokenizer
+from iron.applications.llama3.model import (
+    LLAMA_3_2_1B,
+    SPECIAL_TOKENS,
+    layout,
+    tokenizer,
+)
 from iron.lm.testing import weights_dir
 from iron.operators import sample
 

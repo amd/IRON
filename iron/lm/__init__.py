@@ -1,61 +1,64 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Language models on IRON's operators: what every decoder shares, and one
-package per model (``llama3``).
+"""Language models on IRON's operators: what every model shares. The models
+themselves are applications over it, each a package of
+``iron/applications/`` (``llama3``, ``embeddinggemma2``).
 
-A model is five things over this package:
-
-* its ``Config``, the shape;
-* a ``CausalLM``, the decoder on the NPU as one graph (prefill and
+* ``base``: a model's ``Config``, its checkpoint ``Layout`` (each weight's
+  place in the model, its name in the ``.safetensors`` file and its shape)
+  and the ``Checkpoint`` it is read from; ``Oracle``, the float32 forward
+  pass on the host a model is judged by; ``Model``, a graph whose versions
+  ``load()`` compiles up front; and ``Runner``, which opens a decoder's
+  checkpoint and tokenizer and builds it and its oracle (``main`` is its
+  command line).
+* ``causal``: ``CausalLM``, a decoder on the NPU as one graph (prefill and
   decode, the caches, attention over them and ``logits(tokens)``), to
-  which it gives its ``layer`` and ``head``, built from ``layers``
-  (``project``, a weight's projection at either row count, and
-  ``swiglu``, the SwiGLU feed-forward);
-* an ``Oracle``, the same decoder's float32 forward pass on the host
-  that it is judged by, to which it gives the same ``layer`` and ``head``
-  in numpy;
-* its checkpoint ``Layout``, each weight's place in the model, its name
-  in the ``.safetensors`` file and its shape (``checkpoint``);
-* a ``Runner``, which opens the checkpoint and the tokenizer and
-  builds the model and its oracle; ``main`` is its command line.
+  which a model gives its ``layer`` and ``head``.
+* ``encoder``: ``Encoder``, a bidirectional encoder compiled once for every
+  length, and the sandwich layer EmbeddingGemma 2's towers share.
+* ``blocks``: what layers are built from: ``project``, a weight's
+  projection at either row count, the SwiGLU and GELU-gated feed-forwards,
+  sandwich norms and an encoder's attention.
 
 Sampling and the generation, accuracy and determinism loops
 (``generation``), and what a model's device test checks
 (``testing``), need nothing of a model but ``logits(tokens)``.
 
-A model's package holds what is its alone: those five, its tokenizer and
-its profiles. Nothing in the library imports a model, so one can be
-replaced or deleted on its own.
+Nothing in the library imports a model, so one can be replaced or deleted
+on its own.
 """
 
-from .checkpoint import (
+from .base import (
     Checkpoint,
-    Layout,
-    checkpoint_shapes,
-    load_weights,
-    random_weights,
-    unread_weights,
-)
-from .decoder import (
-    CausalLM,
     Config,
+    Layout,
+    Model,
     Oracle,
     RopeScaling,
-    Step,
+    Runner,
+    checkpoint_shapes,
+    load_weights,
+    main,
+    random_weights,
     rope_angles,
+    unread_weights,
 )
-from .generation import SEED, Sampler, accuracy, determinism, generate, greedy
-from .layers import (
+from .blocks import (
     Conv2d,
     ImagePatches,
     LogMel,
     SwiGLU,
+    attention,
     filterbank,
+    geglu,
     project,
+    sandwich,
     swiglu,
 )
-from .runner import Runner, main
+from .causal import CausalLM, Step
+from .encoder import Encoder, sandwich_layer
+from .generation import SEED, Sampler, accuracy, determinism, generate, greedy
 
 __all__ = [
     "SEED",
@@ -63,9 +66,11 @@ __all__ = [
     "Checkpoint",
     "Config",
     "Conv2d",
+    "Encoder",
     "ImagePatches",
     "Layout",
     "LogMel",
+    "Model",
     "Oracle",
     "RopeScaling",
     "Runner",
@@ -73,9 +78,11 @@ __all__ = [
     "Step",
     "SwiGLU",
     "accuracy",
+    "attention",
     "checkpoint_shapes",
     "determinism",
     "filterbank",
+    "geglu",
     "generate",
     "greedy",
     "load_weights",
@@ -83,6 +90,8 @@ __all__ = [
     "project",
     "random_weights",
     "rope_angles",
+    "sandwich",
+    "sandwich_layer",
     "swiglu",
     "unread_weights",
 ]

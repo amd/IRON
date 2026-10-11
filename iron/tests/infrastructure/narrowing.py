@@ -51,7 +51,7 @@ from iron.common.graph.probe import (
 )
 from iron.common.harness import verify_buffer
 from iron.common.image import Fusion
-from iron.lm.layers import SwiGLU
+from iron.lm.blocks import SwiGLU
 from iron.operators import (
     GEMM,
     GEMV,

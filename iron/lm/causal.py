@@ -15,10 +15,8 @@ on the token the last one drew.
 
 import dataclasses
 import logging
-import math
 import time
-from collections.abc import Callable, Iterator
-from types import SimpleNamespace
+from collections.abc import Iterator
 from typing import Any
 
 import aie.utils as aie_utils
@@ -35,60 +33,10 @@ from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.sample import Sample
 
+from .base import Config, Oracle
 from .generation import Sampler
 
 logger = logging.getLogger(__name__)
-
-RopeScaling = Callable[[np.ndarray], np.ndarray]
-
-
-def rope_angles(
-    head_dim: int,
-    context_length: int,
-    rope_base: float = 500000.0,
-    scaling: RopeScaling | None = None,
-) -> np.ndarray:
-    """The RoPE table, ``(context_length, head_dim)`` float32, cos and sin interleaved.
-
-    Each transcendental is evaluated in float64 and rounded once.
-    """
-    exponents = np.arange(0, head_dim, 2, dtype=np.float32) / np.float32(head_dim)
-    inv_freq = 1.0 / np.power(rope_base, exponents.astype(np.float64))
-    if scaling is not None:
-        inv_freq = scaling(inv_freq)
-    inv_freq = inv_freq.astype(np.float32)
-    freqs = np.outer(np.arange(context_length, dtype=np.float32), inv_freq)
-    angles = np.empty((context_length, head_dim), dtype=np.float32)
-    angles[:, ::2] = np.cos(freqs.astype(np.float64))
-    angles[:, 1::2] = np.sin(freqs.astype(np.float64))
-    return angles
-
-
-@dataclasses.dataclass(frozen=True)
-class Config:
-    vocab_size: int
-    emb_dim: int
-    n_layers: int
-    n_heads: int
-    n_kv_groups: int
-    head_dim: int
-    hidden_dim: int
-    max_seq_len: int
-    rope_base: float
-    rope_scaling: RopeScaling | None = None
-    prefill_chunk: int = 2048
-
-    def __post_init__(self):
-        if self.max_seq_len % self.prefill_chunk:
-            raise ValueError(
-                f"prefill_chunk ({self.prefill_chunk}) must divide max_seq_len "
-                f"({self.max_seq_len})"
-            )
-
-    def angles(self) -> np.ndarray:
-        return rope_angles(
-            self.head_dim, self.max_seq_len, self.rope_base, self.rope_scaling
-        )
 
 
 @dataclasses.dataclass
@@ -408,91 +356,3 @@ class CausalLM(iron.Graph):
         return next(
             s.op.k_max for s in self._decode.traced.steps if isinstance(s.op, Sample)
         )
-
-
-class Oracle:
-    """A decoder's float32 forward pass on the host, the oracle the model is judged by.
-
-    It is numpy, not composed from the operators' references, so it catches
-    a wiring mistake the graph's own reference would repeat. Its weights are
-    twice the checkpoint, so it is built to check with and dropped.
-    """
-
-    embedding: np.ndarray
-    layers: list
-
-    def __init__(self, config: Config, weights):
-        self.config = config
-        vars(self).update(vars(_widen(weights)))
-        self.angles = config.angles()
-        self.buffers: dict[str, np.ndarray] = {}
-
-    def layer(self, angles, w, x):
-        raise NotImplementedError(f"{type(self).__name__} defines no layer()")
-
-    def head(self, x):
-        raise NotImplementedError(f"{type(self).__name__} defines no head()")
-
-    def logits(self, tokens) -> np.ndarray:
-        tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
-        angles = self.angles[: tokens.size]
-        x = self.embedding[tokens]
-        for w in self.layers:
-            x = self.layer(angles, w, x)
-        return self.head(x[-1])
-
-    @staticmethod
-    def rotate(x, angles):
-        cos, sin = angles[:, None, ::2], angles[:, None, 1::2]
-        x1, x2 = np.split(x, 2, axis=-1)
-        return np.concatenate([x1 * cos - x2 * sin, x1 * sin + x2 * cos], axis=-1)
-
-    def buffer(self, name: str, shape: tuple[int, ...]) -> np.ndarray:
-        """A float32 array of `shape` that `name` reuses from call to call.
-
-        A temporary past glibc's mmap threshold is mapped afresh and faulted
-        in page by page, which under memory pressure costs more than the
-        arithmetic.
-
-        Args:
-            name: What the array holds; one array per name.
-            shape: Its shape this time.
-
-        Returns:
-            A view of the array, its contents undefined.
-        """
-        size = math.prod(shape)
-        held = self.buffers.get(name)
-        if held is None or held.size < size:
-            # Headroom, so a history growing a token a step seldom reallocates.
-            held = np.empty(
-                size if held is None else max(size, held.size * 5 // 4), np.float32
-            )
-            self.buffers[name] = held
-        return held[:size].reshape(shape)
-
-    def attend(self, q, k, v):
-        n, H, D = q.shape
-        k, v = (np.repeat(a, H // self.config.n_kv_groups, axis=1) for a in (k, v))
-        # Batched matmuls, not einsum: BLAS is 10x faster at 3k.
-        p = np.matmul(
-            q.transpose(1, 0, 2),
-            k.transpose(1, 2, 0),
-            out=self.buffer("scores", (H, n, n)),
-        )
-        p *= np.float32(1 / np.sqrt(D))
-        p += np.triu(np.full((n, n), -np.inf, dtype=np.float32), k=1)
-        p -= p.max(axis=-1, keepdims=True)
-        np.exp(p, out=p)
-        p /= p.sum(axis=-1, keepdims=True)
-        return (p @ v.transpose(1, 0, 2)).transpose(1, 0, 2).reshape(n, H * D)
-
-
-def _widen(value):
-    if isinstance(value, np.ndarray):
-        return value.astype(np.float32)
-    if isinstance(value, list):
-        return [_widen(v) for v in value]
-    if isinstance(value, SimpleNamespace):
-        return SimpleNamespace(**{k: _widen(v) for k, v in vars(value).items()})
-    return value

@@ -12,7 +12,7 @@ numpy encoder it is checked against, `EmbeddingGemmaOracle`. Text goes in
 behind its task's prompt and a unit-length embedding of 768 comes out, or
 its first 512, 256 or 128 renormalized.
 
-The model is a package of `iron.lm`, `iron/lm/embeddinggemma2/`:
+The model is a package of `iron.lm`, `iron/applications/embeddinggemma2/`:
 
 - `model.py`: its shape (`Config`), where its checkpoint keeps each weight
   (`layout`) and the graph
@@ -42,20 +42,20 @@ python3 -m pip install -r requirements_examples.txt
 From the repository root, a query ranked against documents:
 
 ```bash
-python -m iron.lm.embeddinggemma2.encoder /path/to/embeddinggemma-2 \
+python -m iron.applications.embeddinggemma2.encoder /path/to/embeddinggemma-2 \
     --query "What causes the northern lights?" \
     --document "Charged particles from the sun." "Photosynthesis in plants."
 ```
 
 `--dims` truncates the embeddings, and `--costs` narrows and packs the
-designs by the tables `python -m iron.lm.embeddinggemma2.tune` (the text)
-and `python -m iron.lm.embeddinggemma2.vision.tune` (the vision tower)
+designs by the tables `python -m iron.applications.embeddinggemma2.tune` (the text)
+and `python -m iron.applications.embeddinggemma2.vision.tune` (the vision tower)
 measured, merged.
 
 ## Testing
 
 ```bash
-pytest iron/applications/embeddinggemma_2/
+pytest iron/applications/embeddinggemma2/
 ```
 
 Each embedding against the oracle's (its cosine and its norm), the

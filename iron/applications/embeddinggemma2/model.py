@@ -9,6 +9,7 @@ each weight, and the encoder on the NPU as one graph.
 
 import dataclasses
 import math
+from functools import partial
 from pathlib import Path
 
 import aie.utils as aie_utils
@@ -17,8 +18,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Scratchpad
-from iron.common.graph.narrowing import JointNarrowing
-from iron.lm import Layout, rope_angles
+from iron.lm import Encoder, Layout, attention, rope_angles, sandwich_layer
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul
@@ -27,7 +27,6 @@ from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.operators.rms_norm import RMSNorm
-from iron.operators.rope import RoPE
 
 # An f32 accumulator and native bf16 inputs: the defaults' bfp16 inputs and
 # per-K-tile bf16 rounding cost the encoder accuracy.
@@ -139,7 +138,7 @@ def layout(config: Config) -> Layout:
     return out
 
 
-class EmbeddingGemma(iron.Graph):
+class EmbeddingGemma(Encoder):
     """The encoder over ``max_tokens`` rows at most, one compile for every
     length.
 
@@ -159,8 +158,7 @@ class EmbeddingGemma(iron.Graph):
                 f"attention's {PIPELINES} pipelines"
             )
         c = config
-        self.config = config
-        self.max_tokens = max_tokens
+        super().__init__(config, max_tokens)
         table = np.zeros((c.vocab_size + 1, c.emb_dim), bfloat16)
         table[:-1] = weights.embedding.astype(np.float32) * np.sqrt(
             np.float32(c.emb_dim)
@@ -223,14 +221,8 @@ class EmbeddingGemma(iron.Graph):
 
     def layer(self, i, w, x, embeddings, n):
         c = self.config
-        h = RMSNorm(x, weight=w.norm1, epsilon=c.eps)
-        a = RMSNorm(self.attention(i, w, h, n), weight=w.norm2, epsilon=c.eps)
-        x = ElementwiseAdd(x, a)
-        h = RMSNorm(x, weight=w.norm3, epsilon=c.eps)
-        gate = GELU(GEMM(h, w.gate, b_col_maj=True, **ACCURATE))
-        f = ElementwiseMul(gate, GEMM(h, w.up, b_col_maj=True, **ACCURATE))
-        f = GEMM(f, w.down, b_col_maj=True, **ACCURATE)
-        x = ElementwiseAdd(x, RMSNorm(f, weight=w.norm4, epsilon=c.eps))
+        attend = partial(self.attention, i, w, n)
+        x = sandwich_layer(x, w, attend, c.eps, **ACCURATE)
         # The projection's E ** -0.5 scale folded into the norm's epsilon:
         # RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
         ple = GEMM(embeddings, self.ple[i], b_col_maj=True, **ACCURATE)
@@ -240,67 +232,23 @@ class EmbeddingGemma(iron.Graph):
         x = ElementwiseAdd(x, RMSNorm(g, weight=w.ple_norm, epsilon=c.eps))
         return RowwiseMul(x, self.scales[i])
 
-    def attention(self, i, w, h, n):
+    def attention(self, i, w, n, h):
         c = self.config
-        T, H = h.shape[0], c.n_heads
         G, D = c.heads(i)
-        angles = self.angles[D][:n]
-        q = GEMM(h, w.q, b_col_maj=True, **ACCURATE).reshape(T * H, D)
-        k = GEMM(h, w.k, b_col_maj=True, **ACCURATE).reshape(T * G, D)
-        v = GEMM(h, w.v, b_col_maj=True, **ACCURATE).reshape(T * G, D)
-        q = RoPE(RMSNorm(q, weight=w.q_norm, epsilon=c.eps), angles)
-        k = RoPE(RMSNorm(k, weight=w.k_norm, epsilon=c.eps), angles)
-        v = RMSNorm(v, epsilon=c.eps)
-        o = MHA(
-            q.reshape(T, H, D),
-            k.reshape(T, G, D),
-            v.reshape(T, G, D),
-            heads_interleaved=True,
-            kv_interleaved=True,
-            causal=False,
-            emulate_bf16_mmul_with_bfp16=False,
+        return attention(
+            h,
+            w,
+            self.angles[D][:n],
+            heads=c.n_heads,
+            groups=G,
+            head_dim=D,
+            epsilon=c.eps,
+            pipelines=min(PIPELINES, aie_utils.ensure_current_device().cols),
             window=None if i in c.global_layers else c.sliding_window,
-            scale=1.0,
-            num_pipelines=min(PIPELINES, aie_utils.ensure_current_device().cols),
+            **ACCURATE,
         )
-        return GEMM(o.reshape(T, H * D), w.o, b_col_maj=True, **ACCURATE)
 
     # -- on the host -----------------------------------------------------------
-
-    def shapes(self) -> list[dict]:
-        """The input shapes of each version: one, ``max_tokens`` rows."""
-        return [dict(ids=((self.max_tokens,), np.int32))]
-
-    def load(
-        self, tuner: JointNarrowing | None = None, boundaries: str | None = None
-    ) -> "EmbeddingGemma":
-        """Compile before the first call, so the arena is made once.
-
-        Args:
-            tuner: Narrows and packs each version's designs by cost.
-            boundaries: Each version's packaging.
-        """
-        for shapes in self.shapes():
-            self.compile(coresident=tuner, boundaries=boundaries, **shapes)
-        return self
-
-    def inputs(self, tokens) -> tuple[np.ndarray, int]:
-        """A call's ``ids`` and ``n`` for ``tokens``, padded to ``max_tokens``.
-
-        Raises:
-            ValueError: ``tokens`` is empty or longer than ``max_tokens``.
-            IndexError: A token is outside ``[-vocab_size, vocab_size)``.
-        """
-        tokens = np.asarray(tokens)
-        n, V = len(tokens), self.config.vocab_size
-        if not 0 < n <= self.max_tokens:
-            raise ValueError(f"{n} tokens do not fit {self.max_tokens} rows")
-        outside = tokens[(tokens < -V) | (tokens >= V)]
-        if outside.size:
-            raise IndexError(f"tokens {outside} are outside [-{V}, {V})")
-        ids = np.full(self.max_tokens, V, np.int32)
-        ids[:n] = tokens % V
-        return ids, n
 
     def encode(self, tokens, dims: int = 768) -> np.ndarray:
         """The unit-length embedding of ``tokens`` truncated to ``dims``, one

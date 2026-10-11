@@ -12,7 +12,7 @@ import math
 import numpy as np
 
 from iron.lm import rope_angles
-from iron.lm.llama3.model import LLAMA_3_2
+from iron.applications.llama3.model import LLAMA_3_2
 
 
 def test_rope_is_the_formula_rounded_once():

@@ -19,8 +19,7 @@ from ml_dtypes import bfloat16, finfo
 
 import iron
 from iron.common import Scratchpad
-from iron.common.graph.narrowing import JointNarrowing
-from iron.lm import Layout, checkpoint_shapes, filterbank, layers, load_weights
+from iron.lm import Layout, Model, blocks, checkpoint_shapes, filterbank, load_weights
 from iron.operators.axpy import AXPY
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
@@ -287,16 +286,16 @@ class AudioTower(SimpleNamespace):
         # slot of their own, with a zero slot either side, the second's padding.
         self.slots = (F0 + 2) * C0
         w0, w1 = (np.asarray(w, np.float32) for w in (weights.conv0, weights.conv1))
-        self.conv0 = layers.Conv2d(
+        self.conv0 = blocks.Conv2d(
             w0 - w0.mean(axis=0), c.mels, stride=2, padding=1, border=1
         )
-        self.conv1 = layers.Conv2d(w1 - w1.mean(axis=0), F0 + 2, stride=2)
+        self.conv1 = blocks.Conv2d(w1 - w1.mean(axis=0), F0 + 2, stride=2)
         self.norm0, self.norm1 = weights.norm0, weights.norm1
         self.input_proj = weights.input_proj
         self.output_proj = weights.output_proj
         self.output_bias = iron.weight(np.tile(weights.output_bias, (T, 1)))
         self.projection = weights.projection
-        self.log_mel = layers.LogMel(
+        self.log_mel = blocks.LogMel(
             frame=c.frame,
             hop=c.hop,
             fft=c.fft,
@@ -518,7 +517,7 @@ class AudioTower(SimpleNamespace):
         return wave, dict(n=-(-frames // 2), frames=frames, tokens=tokens)
 
 
-class Audio(iron.Graph):
+class Audio(Model):
     """The audio tower as a graph of its own, one compile for every clip.
 
     Args:
@@ -553,16 +552,6 @@ class Audio(iron.Graph):
         """The input shapes of each version: one, `max_tokens` rows."""
         hop = self.config.hop
         return [dict(x=(((4 * self.audio.max_tokens + 1) * hop,), np.float32))]
-
-    def load(self, tuner: JointNarrowing | None = None) -> "Audio":
-        """Compile before the first call, so the arena is made once.
-
-        Args:
-            tuner: Narrows and packs each version's designs by cost.
-        """
-        for shapes in self.shapes():
-            self.compile(coresident=tuner, **shapes)
-        return self
 
     def embed(self, waveform) -> np.ndarray:
         """The soft tokens of one mono clip at `sample_rate`:

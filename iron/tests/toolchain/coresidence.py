@@ -39,7 +39,7 @@ from iron.common.image import (
 )
 from iron.common.graph.fold import folded
 from iron.common.image.coresidence import fits
-from iron.lm.layers import SwiGLU
+from iron.lm.blocks import SwiGLU
 from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 from iron.tests.toolchain.tools import requires
 

@@ -9,7 +9,7 @@ its shapes, not the weights, so no checkpoint is read. Run with XRT
 sourced and the NPU otherwise idle:
 
 ```bash
-python -m iron.lm.embeddinggemma2.vision.tune
+python -m iron.applications.embeddinggemma2.vision.tune
 ```
 """
 

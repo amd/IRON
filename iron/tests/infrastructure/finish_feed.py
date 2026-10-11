@@ -15,7 +15,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common.harness import run_test, vectors
-from iron.lm.layers import SwiGLU
+from iron.lm.blocks import SwiGLU
 from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, SiLU
 
 pytestmark = pytest.mark.usefixtures("npu_runtime")

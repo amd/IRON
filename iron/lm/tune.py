@@ -39,10 +39,9 @@ from iron.common.graph.probe import Call, Point
 from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 from iron.operators.sample import Sample
 
-from .checkpoint import unread_weights
-from .decoder import CausalLM
+from .base import Runner, unread_weights
+from .causal import CausalLM
 from .generation import SEED, Sampler
-from .runner import Runner
 
 # The configure cost is measured between small single-column designs, at
 # their narrowest: one design's configure then costs least beside the fixed

@@ -6,7 +6,7 @@
 """EmbeddingGemma 2 from its checkpoint directory: text in, a unit-length
 embedding out, on the NPU; the float32 oracle on demand.
 
-    python -m iron.lm.embeddinggemma2.encoder /path/to/embeddinggemma-2 \\
+    python -m iron.applications.embeddinggemma2.encoder /path/to/embeddinggemma-2 \\
         --query "What causes the northern lights?" \\
         --document "Charged particles from the sun." "Photosynthesis in plants."
 """

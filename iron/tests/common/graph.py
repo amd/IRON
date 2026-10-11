@@ -30,7 +30,7 @@ from iron.common.graph.fold import Made, Place, Prologue, folded, replaced
 from iron.common.graph.handle import Affine, Value
 from iron.common.image import OperatorSequence
 from iron.common.image.artifacts import Parameter
-from iron.lm.layers import SwiGLU
+from iron.lm.blocks import SwiGLU
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd

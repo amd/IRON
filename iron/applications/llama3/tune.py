@@ -3,12 +3,12 @@
 
 """Measure Llama 3's cost table on this NPU (``iron.lm.tune``), beside
 this file as ``costs_<device>.json``; ``--dispatch separate`` on an NPU2
-prices an xclbin chain (``--each-step`` in ``iron.lm.runner``) as
+prices an xclbin chain (``--each-step`` in ``iron.lm.base``) as
 ``costs_npu2_separate.json``:
 
 ```bash
-python -m iron.lm.llama3.tune
-python -m iron.lm.llama3.tune --dispatch separate
+python -m iron.applications.llama3.tune
+python -m iron.applications.llama3.tune --dispatch separate
 ```
 """
 

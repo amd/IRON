@@ -20,7 +20,7 @@ import iron
 from iron.common import Scratchpad
 from iron.common.graph.narrowing import CostTable, JointNarrowing
 from iron.lm import Checkpoint, load_weights
-from iron.lm.embeddinggemma2.audio.model import (
+from iron.applications.embeddinggemma2.audio.model import (
     AUDIO,
     COSTS,
     Audio,
@@ -29,7 +29,7 @@ from iron.lm.embeddinggemma2.audio.model import (
     audio_tensors,
     layout,
 )
-from iron.lm.embeddinggemma2.audio.oracle import AudioOracle
+from iron.applications.embeddinggemma2.audio.oracle import AudioOracle
 from iron.lm.testing import require, weights_dir
 from iron.operators.copy import Copy
 
@@ -104,7 +104,7 @@ def audio(weights, module_npu_runtime):
 @pytest.fixture(scope="module")
 def hugging_face():
     """Hugging Face's feature extractor and tower over a medium clip, as
-    iron/applications/embeddinggemma_2/hugging_face.py saved them.
+    iron/applications/embeddinggemma2/hugging_face.py saved them.
     """
     with np.load(REFERENCES) as saved:
         return dict(saved)

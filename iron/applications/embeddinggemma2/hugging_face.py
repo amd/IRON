@@ -29,11 +29,11 @@ from transformers.models.gemma4 import image_processing_gemma4, modeling_gemma4
 
 from iron.applications.embeddinggemma_2 import test as text_test
 from iron.lm import Checkpoint
-from iron.lm.embeddinggemma2.audio import test as audio_test
-from iron.lm.embeddinggemma2.audio.model import audio_tensors
-from iron.lm.embeddinggemma2.oracle import PROMPTS
-from iron.lm.embeddinggemma2.vision import test as vision_test
-from iron.lm.embeddinggemma2.vision.model import VISION, vision_tensors
+from iron.applications.embeddinggemma2.audio import test as audio_test
+from iron.applications.embeddinggemma2.audio.model import audio_tensors
+from iron.applications.embeddinggemma2.oracle import PROMPTS
+from iron.applications.embeddinggemma2.vision import test as vision_test
+from iron.applications.embeddinggemma2.vision.model import VISION, vision_tensors
 
 # A fresh run against the saved files, in relative norm: float32's own
 # reordering across hosts and thread counts.

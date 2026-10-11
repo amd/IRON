@@ -17,7 +17,7 @@ aie = pytest.importorskip("aie")
 import aie.utils.config as aie_config  # noqa: E402
 from aie.iron.device import NPU2, from_name  # noqa: E402
 
-from iron.lm.layers import SwiGLU  # noqa: E402
+from iron.lm.blocks import SwiGLU  # noqa: E402
 
 try:
     AIECC = Path(aie_config.aiecc_path())

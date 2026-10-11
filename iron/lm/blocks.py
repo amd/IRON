@@ -1,17 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The layers a model builds from operators, for a graph's body.
+"""The blocks a model builds from operators, for a graph's body.
 
 ``project`` is a weight's projection at either row count. ``swiglu``
 is the SwiGLU feed-forward, ``W_down @ (SiLU(W_gate @ x) * (W_up @ x))``,
 for one token or a sequence, and ``SwiGLU`` is it as a graph of its
-own, holding the weights, so they are uploaded once. ``LogMel`` is an
-audio front end's log-mel spectrogram, ``Conv2d`` a convolution over
-rows of channels-last pixels and ``ImagePatches`` a vision front end's
-resize into patches. A graph here is called in a
-model's body as it is on its own (``Graph``): its steps trace into the
-model's.
+own, holding the weights, so they are uploaded once. ``geglu`` is the
+GELU-gated feed-forward over GEMMs, ``sandwich`` a block between two RMS
+norms with its residual (Gemma's sandwich norms), and ``attention`` an
+encoder's bidirectional attention over one sequence, its queries and keys
+RMS-normed and rotated. ``LogMel`` is an audio front end's log-mel
+spectrogram, ``Conv2d`` a convolution over rows of channels-last pixels
+and ``ImagePatches`` a vision front end's resize into patches. A graph
+here is called in a model's body as it is on its own (``Graph``): its
+steps trace into the model's.
 
 The weights are a checkpoint's ``(out, in)``: SwiGLU's ``w_gate`` and
 ``w_up`` are ``(hidden_dim, embedding_dim)`` and ``w_down`` is
@@ -23,6 +26,7 @@ is an error at trace time.
 
 import dataclasses
 import math
+from collections.abc import Callable
 
 import aie.utils as aie_utils
 import numpy as np
@@ -32,15 +36,20 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common import Scratchpad
 from iron.operators.copy import Copy
+from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
+from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.limbs import Limbs, stacked
 from iron.operators.log import Log
 from iron.operators.magnitude import Magnitude
+from iron.operators.mha import MHA
 from iron.operators.resample.op import SIDE, PatchPositions, Resample, ResampleTaps
+from iron.operators.rms_norm import RMSNorm
+from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
 
 
@@ -457,3 +466,61 @@ class ImagePatches(iron.Graph):
         return buffer, dict(
             height=H, width=W, out_height=out_height, out_width=out_width
         )
+def geglu(x, w_gate, w_up, w_down, **gemm):
+    """The GELU-gated feed-forward of ``x``, ``(rows, embedding_dim)``,
+    ``W_down @ (GELU(W_gate @ x) * (W_up @ x))``, each projection a GEMM
+    with ``gemm``'s keywords reading the weight as stored.
+    """
+    gate = GELU(GEMM(x, w_gate, b_col_maj=True, **gemm))
+    f = ElementwiseMul(gate, GEMM(x, w_up, b_col_maj=True, **gemm))
+    return GEMM(f, w_down, b_col_maj=True, **gemm)
+
+
+def sandwich(x, block: Callable, pre, post, epsilon: float):
+    """``x`` plus ``block`` of it between two RMS norms, weighted ``pre``
+    before the block and ``post`` after it.
+    """
+    h = RMSNorm(x, weight=pre, epsilon=epsilon)
+    return ElementwiseAdd(x, RMSNorm(block(h), weight=post, epsilon=epsilon))
+
+
+def attention(
+    h,
+    w,
+    angles,
+    *,
+    heads: int,
+    groups: int,
+    head_dim: int,
+    epsilon: float,
+    pipelines: int,
+    window: int | None = None,
+    **gemm,
+):
+    """Bidirectional attention over the rows of ``h``, unscaled: ``w.q``,
+    ``w.k`` and ``w.v`` project them (GEMMs with ``gemm``'s keywords), the
+    queries and keys are RMS-normed by ``w.q_norm`` and ``w.k_norm`` and
+    rotated by ``angles``, a row each, and the values RMS-normed; ``MHA``
+    over ``pipelines`` attends within ``window`` positions if given, and
+    ``w.o`` projects the heads back.
+    """
+    T, H, G, D = h.shape[0], heads, groups, head_dim
+    q = GEMM(h, w.q, b_col_maj=True, **gemm).reshape(T * H, D)
+    k = GEMM(h, w.k, b_col_maj=True, **gemm).reshape(T * G, D)
+    v = GEMM(h, w.v, b_col_maj=True, **gemm).reshape(T * G, D)
+    q = RoPE(RMSNorm(q, weight=w.q_norm, epsilon=epsilon), angles)
+    k = RoPE(RMSNorm(k, weight=w.k_norm, epsilon=epsilon), angles)
+    v = RMSNorm(v, epsilon=epsilon)
+    o = MHA(
+        q.reshape(T, H, D),
+        k.reshape(T, G, D),
+        v.reshape(T, G, D),
+        heads_interleaved=True,
+        kv_interleaved=True,
+        causal=False,
+        emulate_bf16_mmul_with_bfp16=False,
+        window=window,
+        scale=1.0,
+        num_pipelines=pipelines,
+    )
+    return GEMM(o.reshape(T, H * D), w.o, b_col_maj=True, **gemm)

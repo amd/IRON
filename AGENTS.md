@@ -480,7 +480,7 @@ and runs like any graph, which is how its device test runs it.
 So a capability a model needs is an operator when it is new compute: a
 kernel, an array, a data movement no operator has (`iron/operators/`, as
 "Adding a New Operator" says). It is a graph when it composes operators
-the library has (`iron.lm.layers`: `SwiGLU`, `LogMel`, `Conv2d`,
+the library has (`iron.lm.blocks`: `SwiGLU`, `LogMel`, `Conv2d`,
 `ImagePatches`); a model calls the graph rather than writing its
 operators into its own body.
 
@@ -508,7 +508,7 @@ follows from it later. A profile is a JSON file, `Profile.load(path)` and
 ]}
 ```
 
-`iron/lm/llama3/profiles/<device>.json` is the worked
+`iron/applications/llama3/profiles/<device>.json` is the worked
 example (a test at the small shape loads
 `iron/tests/common/llama_small_profile.json`), and
 `test_llama_names_only_the_tunables_that_matter` checks that each keyword the
@@ -521,7 +521,7 @@ xclbins with `boundaries=iron.each_step`) and `verbose=True` prints why.
 It links the image (`version.image`) and stops
 there: the runtime that loads it is made on the first call, so a host with
 the toolchain and no NPU can compile ahead of time.
-`iron/lm/llama3/model.py` is the worked example
+`iron/applications/llama3/model.py` is the worked example
 (`Llama`, a `CausalLM` from `iron.lm`, called through
 `logits(tokens)`, and `LlamaOracle`, its float32 forward pass on the host;
 its `Runner` builds both and checks one against the other);
@@ -841,39 +841,49 @@ of its own that carries the mark.
 
 ## Language models (`iron/lm/`)
 
-### The shared decoder
+### The shared library
 
-`iron/lm/` is what every language model shares, and each model is a
-package under it (`iron/lm/llama3/`). A model is five things over the
-shared layer, plus its tokenizer and profiles:
+`iron/lm/` is what every language model shares; each model is an
+application over it, a package of its own under `iron/applications/`
+(`llama3`, `embeddinggemma2`) holding its test, README, tokenizer and
+profiles. The library is four modules:
 
-- `Config` (`decoder.py`): the shape
-- `CausalLM` (`decoder.py`): a decoder as one graph, a prompt chunk and a
+- `base.py`: what any model is over it. `Config`, the shape, and
+  `rope_angles`, the RoPE table a `Config` names the base and scaling of; a
+  checkpoint `Layout`, each weight's place in the model, its name in the
+  checkpoint and its shape, which `load_weights` checks strictly against the
+  mapped `.safetensors` (`Checkpoint`); `Oracle`, a model's float32 forward
+  pass on the host, the reference it is judged by, as an operator's is its
+  `reference()` (not composed from the operators' references, so it catches
+  a wiring mistake the graph's own reference repeats; its float32 weights
+  are twice the checkpoint, so it is built to check with); `Model`, a graph
+  whose versions `load(tuner, boundaries)` compiles before the first call,
+  in the packaging asked for; and `Runner` and `main`, a decoder's
+  checkpoint, tokenizer, model and oracle, and the command line. A model's
+  runner names its `config`, `layout`, `model`, `open_tokenizer` and `bos`.
+  With `--random-weights SEED` (and pytest's option of that name) the
+  weights are drawn (`random_weights`) and the prompts random: speed,
+  accuracy against the oracle and determinism on a host without the files
+- `causal.py`: `CausalLM`, a decoder as one graph, a prompt chunk and a
   decode step, the key and value caches, attention over them (`attend`) and
   `logits(tokens)`. A model subclasses it with `layer(step, i, weights,
-  x)` and `head(x)`, built from `layers.py`: `project(x, w)`, a weight's
-  projection at either row count (GEMV for one row, GEMM for more), and
+  x)` and `head(x)`, and `Oracle` with a numpy `layer(angles, weights, x)`
+  and `head(x)`, which it names as its `CausalLM`'s `oracle`; the pass,
+  RoPE and attention are shared
+- `encoder.py`: `Encoder`, EmbeddingGemma 2's kind, a bidirectional
+  encoder compiled once at `max_tokens` rows with the length bound per call,
+  and `sandwich_layer`, the layer its text encoder and vision tower share
+- `blocks.py`: what layers are built from: `project(x, w)`, a weight's
+  projection at either row count (GEMV for one row, GEMM for more);
   `swiglu`, the SwiGLU feed-forward (`SwiGLU` is it as a graph of its own,
   called in a model's body or alone, device-tested by
   `iron/operators/swiglu/test.py`; `LogMel`, an audio front end's log-mel
-  spectrogram, is one too, `iron/operators/log_mel/test.py`). `rope_angles`
-  (`decoder.py`) is the RoPE table a `Config` names the base and scaling of
-- `Oracle` (`decoder.py`): the same decoder's float32 forward pass on the
-  host, the reference the model is judged by, as an operator's is its
-  `reference()` (not composed from the operators' references, so it catches
-  a wiring mistake the graph's own reference repeats). A model subclasses it
-  with a numpy `layer(angles, weights, x)` and `head(x)` and names it as
-  its `CausalLM`'s `oracle`; the pass, RoPE and attention are shared. Its
-  float32 weights are twice the checkpoint, so it is built to check with
-- a checkpoint `Layout` (`checkpoint.py`): each weight's place in the
-  model, its name in the checkpoint and its shape, which `load_weights`
-  checks strictly against the mapped `.safetensors`
-- `Runner` and `main` (`runner.py`): the checkpoint, the tokenizer, the
-  model and its oracle, and the command line. A model's runner names
-  its `config`, `layout`, `model`, `open_tokenizer` and `bos`. With
-  `--random-weights SEED` (and pytest's option of that name) the weights
-  are drawn (`random_weights`) and the prompts random: speed, accuracy
-  against the oracle and determinism on a host without the files
+  spectrogram, and `Conv2d`, a channels-last convolution, are graphs too,
+  device-tested by `iron/operators/log_mel/test.py` and
+  `iron/operators/conv2d/test.py`, and `ImagePatches` resizes a vision
+  front end's image into patches, `iron/operators/image_patches/test.py`);
+  `geglu`, the GELU-gated one; `sandwich`, a block between two RMS norms;
+  and `attention`, an encoder's
 
 Nothing of a model's own is needed by `generation.py` (sampling, the
 generation loop and the accuracy and determinism checks over any model
@@ -888,16 +898,15 @@ Their dependencies (safetensors, tiktoken, ...) are in
 
 ### Llama 3.2 1B Inference
 
-Full LLM inference example at `iron/applications/llama_3.2_1b/` (its test
-and README), over the model package `iron/lm/llama3/`: `model.py` (Llama 3's
-layer and head on the NPU and in numpy, Llama 3.2 1B's shape, the layout, the
-tokenizer), `profiles/` (tunables):
+Full LLM inference example at `iron/applications/llama3/`: `model.py`
+(Llama 3's layer and head on the NPU and in numpy, Llama 3.2 1B's shape, the
+layout, the tokenizer), `profiles/` (tunables), its test and README:
 
 - **Required files**: `model.safetensors`, `tokenizer.model` from Hugging Face
 - **Default location**: `/srv/llama3.2-1b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
 - **Additional deps**: `pip install -r requirements_examples.txt`
-- **Run**: `pytest iron/applications/llama_3.2_1b/`, or
-  `python -m iron.lm.llama3.model model.safetensors tokenizer.model`
+- **Run**: `pytest iron/applications/llama3/`, or
+  `python -m iron.applications.llama3.model model.safetensors tokenizer.model`
   (`--max-seq-len`, a multiple of 2048, sizes the caches: 32768 by default,
   1 GB of them; one compile serves every context up to it). XRT maps
   every device buffer locked and `ulimit -l` binds each mapping; the
@@ -906,16 +915,16 @@ tokenizer), `profiles/` (tunables):
 
 ### EmbeddingGemma 2
 
-Its text encoder at `iron/applications/embeddinggemma_2/` (its test and
-README), over the model package `iron/lm/embeddinggemma2/`, which is not a
-`CausalLM`: one graph compiled once at `max_tokens` rows (2048 by default),
-the prompt's length bound per call, and `EmbeddingGemmaOracle`, its float32
-encoder on the host:
+Its text encoder, audio and vision towers at
+`iron/applications/embeddinggemma2/`, each with its test, an `Encoder`
+rather than a `CausalLM`: one graph compiled once at `max_tokens` rows (2048
+by default), the prompt's length bound per call, and `EmbeddingGemmaOracle`,
+its float32 encoder on the host:
 
 - **Required files**: `model.safetensors`, `tokenizer.json`
 - **Default location**: `/srv/embeddinggemma-2/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
-- **Run**: `pytest iron/applications/embeddinggemma_2/`, or
-  `python -m iron.lm.embeddinggemma2.encoder <dir> --query ... --document ...`
+- **Run**: `pytest iron/applications/embeddinggemma2/`, or
+  `python -m iron.applications.embeddinggemma2.encoder <dir> --query ... --document ...`
 
 A model's device test goes in `iron/applications/<name>/test.py`: CI's
 example suite runs `iron/applications/`, and the benchmark history names a

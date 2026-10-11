@@ -10,7 +10,7 @@ three of them. A design's time follows its shapes, not the weights, so
 no checkpoint is read. Run with XRT sourced and the NPU otherwise idle:
 
 ```bash
-python -m iron.lm.embeddinggemma2.tune
+python -m iron.applications.embeddinggemma2.tune
 ```
 """
 

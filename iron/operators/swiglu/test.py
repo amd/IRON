@@ -18,7 +18,7 @@ from aie.utils.benchmark import run_iters
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.lm.layers import SwiGLU
+from iron.lm.blocks import SwiGLU
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM

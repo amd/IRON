@@ -21,7 +21,7 @@ import iron
 from iron.common import Scratchpad
 from iron.common.graph.narrowing import CostTable, JointNarrowing
 from iron.lm import Checkpoint, load_weights
-from iron.lm.embeddinggemma2.vision.model import (
+from iron.applications.embeddinggemma2.vision.model import (
     COSTS,
     VISION,
     ImageProcessor,
@@ -29,7 +29,7 @@ from iron.lm.embeddinggemma2.vision.model import (
     layout,
     vision_tensors,
 )
-from iron.lm.embeddinggemma2.vision.oracle import VisionOracle, patches
+from iron.applications.embeddinggemma2.vision.oracle import VisionOracle, patches
 from iron.lm.testing import require, weights_dir
 
 DIRECTORY = weights_dir("embeddinggemma-2")
@@ -159,7 +159,7 @@ def vision(weights, module_npu_runtime):
 def hugging_face():
     """Hugging Face's image processor over `RESIZES` (the sha256 of its
     float32 pixels and int64 positions) and its tower over `processed("portrait")`,
-    as iron/applications/embeddinggemma_2/hugging_face.py saved them.
+    as iron/applications/embeddinggemma2/hugging_face.py saved them.
     """
     with np.load(REFERENCES) as saved:
         return dict(saved)
