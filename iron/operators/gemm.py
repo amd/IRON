@@ -410,8 +410,12 @@ class GEMM(Operator):
             raise Unresolvable(
                 "GEMM: the rows of cores are the device's; none is bound"
             )
+        rows = len(dev.core_rows)
         cols = self.resolve_columns(
-            dev, self.num_aie_columns, fits=lambda c: self.N % (self.tile_n * c) == 0
+            dev,
+            self.num_aie_columns,
+            fits=lambda c: self.N % (self.tile_n * c) == 0
+            and (c >= rows or rows % c == 0),
         )
         rows, tile_m = self._auto_tiling(dev)
         block, _, _ = self.mac_block(dev)
@@ -449,6 +453,12 @@ class GEMM(Operator):
         if self.M % self.mem_tile_m_a != 0:
             raise ValueError(
                 "A must be tileable into (m * n_A_tiles_per_shim, k)-sized blocks"
+            )
+        cols, rows = self.num_aie_columns, self.n_aie_rows
+        if cols < rows and rows % cols:
+            raise ValueError(
+                f"GEMM: {cols} columns do not divide the {rows} rows of cores "
+                f"among them, each shim carrying A to as many"
             )
 
     def device(self, target):

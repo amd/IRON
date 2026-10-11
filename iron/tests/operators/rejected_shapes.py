@@ -444,3 +444,17 @@ def test_merge_of_part_of_a_block_is_refused():
         Merge(rows=100, audio_token=0, image_token=1, audio_at=0, vision_at=0).resolved(
             from_name("npu2", n_cols=8)
         )
+
+
+@pytest.mark.parametrize("device,n_cols", [("npu1", 4), ("npu2", 8)])
+def test_gemm_on_columns_that_do_not_divide_its_rows_is_refused(device, n_cols):
+    """Each of a GEMM's first shims carries A to as many rows of cores as
+    the others: three columns leave a fourth row without its A. Left open,
+    the columns resolve to a count that divides the rows or covers them:
+    two on npu1, six on npu2.
+    """
+    dev = from_name(device, n_cols=n_cols)
+    shape = dict(M=256, K=128, N=384, b_col_maj=True)
+    with pytest.raises(ValueError, match="do not divide the 4 rows"):
+        GEMM(**shape, num_aie_columns=3).resolved(dev)
+    assert GEMM(**shape).resolved(dev).num_aie_columns == {"npu1": 2, "npu2": 6}[device]
