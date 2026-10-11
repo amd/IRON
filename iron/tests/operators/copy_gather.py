@@ -10,7 +10,8 @@ step's sequence. The table is a weight at EmbeddingGemma 2's size, or an
 intermediate a step before produced. With ``ids`` an input of the graph,
 each call names its rows, and the host encodes them as the addresses a
 ``Gather`` writes into the shim's descriptors; with ids a state or a step's
-output, a core writes those addresses in a step before the gather.
+output, a core writes those addresses in a step before the gather. Either
+runs in a full ELF or in an xclbin.
 """
 
 import re
@@ -71,6 +72,16 @@ class PerCall(iron.Graph):
 
     def body(self, ids):
         return Copy(self.table[ids])
+
+
+class Embedded(iron.Graph):
+    """The rows an input names, and a step reading them."""
+
+    def __init__(self, table):
+        self.table = iron.weight(table)
+
+    def body(self, ids, x):
+        return ElementwiseAdd(Copy(self.table[ids]), x)
 
 
 class FromDeviceIds(iron.Graph):
@@ -264,6 +275,28 @@ def test_ids_past_the_table_are_refused(npu_runtime, table, outside):
         graph(ids)
     with pytest.raises(IndexError):
         graph.reference(ids)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_each_step_gathers_the_rows_an_input_names(npu_runtime, table):
+    """Each step its own xclbin, as NPU1 runs: the host encodes the ids
+    against the table's address as a full ELF's do, and the step after reads
+    the rows.
+    """
+    graph = Embedded(table)
+    net = graph.compile(
+        ids=((256,), np.int32), x=(256, WIDTH), boundaries=iron.each_step
+    )
+    assert net.plan.image == "xclbin"
+    steps = [type(s.op).__name__ for s in net.traced.steps]
+    assert steps == ["Gather", "ElementwiseAdd"]
+    x = np.zeros((256, WIDTH), bfloat16)
+    rng = np.random.default_rng(5)
+    for call in range(3):
+        ids = rng.integers(-VOCAB, VOCAB, 256).astype(np.int32)
+        expected = np.take(table, ids, axis=0)
+        assert_equal(graph(ids, x), expected, f"call {call}")
+        assert_equal(graph.reference(ids, x), expected, f"reference {call}")
 
 
 @pytest.mark.supported_devices("npu2")

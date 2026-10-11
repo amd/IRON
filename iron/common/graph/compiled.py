@@ -685,7 +685,7 @@ class CompiledGraph:
         """The device address of buffer ``name``, put until the arena holding
         it grows (a new view).
         """
-        view = self.callable.get_buffer(name)
+        view = self.callable.get_storage(name)
         if name not in self._addressed or self._addressed[name][0] is not view:
             storage = view.storage
             root = storage.binding_handle(0, storage.nbytes)
