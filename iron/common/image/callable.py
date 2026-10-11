@@ -505,7 +505,7 @@ class StepCallable:
                     f"Operator {step_op!r} declares {len(step_op.buffers)} buffers "
                     f"but the runlist names {len(names)}"
                 )
-            args = [self.get_buffer(name) for name in names]
+            args = [self.get_storage(name) for name in names]
             kernel = kernels[id(step_op)] if self._on_npu else None
             self._steps.append((step_op, kernel, names, args))
 
@@ -519,9 +519,9 @@ class StepCallable:
             _, offset, length = self.op.subbuffer_layout[name]
             dtype = self.op.buffer_dtype(name)
             stop = min(Pool(ALIGNMENT).align(offset + length), parent.nbytes)
-            self._buffers[name] = parent.subview(
-                offset, (length // dtype.itemsize,), dtype
-            )
+            # A step takes the storage: an exact view of a resident whose
+            # bytes are not whole coherence lines cannot be made.
+            self._buffers.pop(name, None)
             self._storage[name] = parent.subview(
                 offset, ((stop - offset) // dtype.itemsize,), dtype
             )
@@ -529,20 +529,27 @@ class StepCallable:
             if base_name in self.op.residents:
                 self._buffers.pop(name, None)
         self._steps = [
-            (step_op, kernel, names, [self.get_buffer(name) for name in names])
+            (step_op, kernel, names, [self.get_storage(name) for name in names])
             for step_op, kernel, names, _ in self._steps
         ]
 
     def get_buffer(self, buffer_name):
         self._follow_arena()
-        if buffer_name not in self._buffers:
-            if buffer_name not in self.op.slice_info:
-                raise ValueError(f"Unknown buffer '{buffer_name}' in the runlist")
+        if buffer_name in self._buffers:
+            return self._buffers[buffer_name]
+        dtype = self.op.buffer_dtype(buffer_name)
+        if buffer_name in self._storage:
+            _, _, length = self.op.subbuffer_layout[buffer_name]
+            self._buffers[buffer_name] = self._storage[buffer_name].subview(
+                0, (length // dtype.itemsize,), dtype
+            )
+        elif buffer_name in self.op.slice_info:
             base_name, start, end = self.op.slice_info[buffer_name]
-            dtype = self.op.buffer_dtype(buffer_name)
-            self._buffers[buffer_name] = self._buffers[base_name].subview(
+            self._buffers[buffer_name] = self.get_storage(base_name).subview(
                 start, ((end - start) // dtype.itemsize,), dtype
             )
+        else:
+            raise ValueError(f"Unknown buffer '{buffer_name}' in the runlist")
         return self._buffers[buffer_name]
 
     def get_storage(self, buffer_name):
