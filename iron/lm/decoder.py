@@ -150,13 +150,13 @@ class CausalLM(iron.Graph):
     ):
         c = self.config
         L, C, D = c.max_seq_len, c.prefill_chunk, c.head_dim
+        prompt = ids is not None or x is not None
         if ids is not None:
-            x = Copy(self.embedding[ids])
-        prompt = x is not None
-        if prompt:
+            x = Copy(self.embedding[ids[:rows]])
+        elif prompt:
             x = x[:rows]
-            angles = Copy(self.rope.reshape(L // C, C, D)[chunk], tile_size=1024)
-            angles = angles.reshape(C, D)[:rows]
+        if prompt:
+            angles = Copy(self.rope.reshape(L // C, C, D)[chunk, :rows])
         else:
             x = Copy(self.embedding[token]).reshape(1, c.emb_dim)
             angles = Copy(self.rope[position]).reshape(1, D)
