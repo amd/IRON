@@ -227,7 +227,10 @@ def test_rows_a_state_names_are_gathered(npu_runtime, table, n_ids):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_a_graph_gathers_twice_from_a_weight_and_a_state(npu_runtime):
+@pytest.mark.parametrize(
+    "boundaries", [None, iron.each_step], ids=["full_elf", "xclbin"]
+)
+def test_a_graph_gathers_twice_from_a_weight_and_a_state(npu_runtime, boundaries):
     n_rows, rows, soft = 4096, 64, 64
     rng = np.random.default_rng(3)
     table = rng.standard_normal((n_rows, WIDTH)).astype(bfloat16)
@@ -236,8 +239,9 @@ def test_a_graph_gathers_twice_from_a_weight_and_a_state(npu_runtime):
         ids=((rows,), np.int32),
         soft=((soft, WIDTH), bfloat16),
         merge=((rows,), np.int32),
+        boundaries=boundaries,
     )
-    assert net.plan.image == "elf"
+    assert net.plan.image == ("elf" if boundaries is None else "xclbin")
     for call in range(3):
         ids = rng.integers(0, n_rows, rows).astype(np.int32)
         x = rng.standard_normal((soft, WIDTH)).astype(bfloat16)
@@ -262,10 +266,22 @@ def test_ids_past_the_table_are_refused(npu_runtime, table, outside):
         graph.reference(ids)
 
 
-def test_a_per_call_gather_needs_a_full_elf(table):
-    graph = PerCall(table)
-    with pytest.raises(ValueError, match="full ELF"):
-        graph.compile(ids=((15,), np.int32), boundaries=iron.each_step)
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("n_ids", [15, 512])
+def test_each_step_gathers_by_ids_the_device_made(npu_runtime, table, n_ids):
+    """An xclbin's word step reads the table's address from its runtime
+    parameters, which the sequence writes each call.
+    """
+    other = np.random.default_rng(4).standard_normal((3000, 256)).astype(bfloat16)
+    graph = FromDeviceIds(table, other)
+    net = graph.compile(ids=((n_ids,), np.int32), boundaries=iron.each_step)
+    assert net.plan.image == "xclbin"
+    rng = np.random.default_rng(n_ids)
+    for call in range(3):
+        ids = rng.integers(-len(other), len(other), n_ids).astype(np.int32)
+        rows, others = graph(ids)
+        assert_equal(rows, np.take(table, ids, axis=0), f"call {call}")
+        assert_equal(others, other[ids], f"call {call}")
 
 
 def test_the_control_words_are_counted():

@@ -33,7 +33,7 @@ from ..declare.profile import Profile
 from ..design import device_symbol
 from ..image.allocator import ArenaPlan
 from ..image.artifacts import Parameter
-from ..image.callable import FullELFCallable, FullELFRun, ScratchArena
+from ..image.callable import FullELFRun, ScratchArena
 from ..image.coresidence import AdjacentPacking
 from ..image.packaging import ELF, Plan, plan
 from ..image.sequence import ALIGNMENT
@@ -682,14 +682,9 @@ class CompiledGraph:
         self._write_values(values, run)
 
     def _address(self, name: str) -> int:
-        """The device address of buffer ``name``, which a full ELF keeps put
-        until its arena grows (a new view).
+        """The device address of buffer ``name``, put until the arena holding
+        it grows (a new view).
         """
-        if not isinstance(self.callable, FullELFCallable):
-            raise TypeError(
-                f"{self.traced.name}: only a full ELF addresses its buffers "
-                f"from the host"
-            )
         view = self.callable.get_buffer(name)
         if name not in self._addressed or self._addressed[name][0] is not view:
             storage = view.storage

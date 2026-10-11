@@ -22,6 +22,7 @@ from aie.dialects import aiex
 from aie.dialects.aie import DMAChannelDir, WireBundle
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
+    Buffer,
     Flow,
     ObjectFifo,
     PacketFlow,
@@ -75,8 +76,8 @@ class Gather(Operator):
     its feed's descriptors, so the control words are one layout for every
     feed count and a feed drains one span of ``y``. A set is rewritten only
     after the sequence syncs on the token of the batch that last ran it.
-    The descriptors' addresses are physical, so only a full ELF, whose
-    table stays put across calls, runs it.
+    The descriptors' addresses are the table's device address, which the
+    host reads from its buffer each call, in a full ELF or an xclbin.
     """
 
     chain: ClassVar[int] = 8
@@ -185,11 +186,6 @@ class Gather(Operator):
         return routes
 
     def sequence(self, rt) -> None:
-        if rt.image != "elf":
-            raise ValueError(
-                "a gather by a graph input writes physical addresses, which "
-                "only a full ELF keeps across calls; package as a full ELF"
-            )
         words, y = rt.data(self.control), rt.data(self.y)
         chain, batches, runs = self.chain, self.batches, self.runs
         drained, pending = [], []
@@ -390,25 +386,31 @@ class GatherWords(Operator):
         self.ids.lane(0).bind(ids.prod())
         self.control.lane(0).bind(addresses.cons())
         barrier = WorkerRuntimeBarrier()
+        # A full ELF's core reads the address from the scratchpad, an
+        # xclbin's from its runtime parameters, which the sequence writes.
+        if target.image == "elf":
+            lo, hi = self.base_lo.param, self.base_hi.param
+        else:
+            lo = Buffer(
+                np.ndarray[(2,), np.dtype[np.int32]],
+                name="gather_base",
+                use_write_rtp=True,
+            )
+            hi = None
+            self.base_lo.bind(lo, 0)
+            self.base_hi.bind(lo, 1)
 
         def core(ids, addresses, kernel, lo, hi, barrier):
             barrier.wait_for_value(1)
             i, a = ids.acquire(1), addresses.acquire(1)
-            kernel(i, a, lo.read(), hi.read())
+            if hi is None:
+                kernel(i, a, lo[0], lo[1])
+            else:
+                kernel(i, a, lo.read(), hi.read())
             ids.release(1)
             addresses.release(1)
 
-        worker = Worker(
-            core,
-            [
-                ids.cons(),
-                addresses.prod(),
-                kernel,
-                self.base_lo.param,
-                self.base_hi.param,
-                barrier,
-            ],
-        )
+        worker = Worker(core, [ids.cons(), addresses.prod(), kernel, lo, hi, barrier])
         return [worker, barrier]
 
     def sequence(self, rt) -> None:
