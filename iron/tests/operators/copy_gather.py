@@ -202,7 +202,7 @@ def test_the_rows_a_call_bounds_are_gathered(npu_runtime, table, feeds, n_ids):
         ids = rng.integers(-VOCAB, VOCAB, n_ids).astype(np.int32)
         ids[n:] = VOCAB  # past the table: a bounded call reads none of them
         expected = np.take(table, ids[:n], axis=0)
-        got = np.asarray(graph(ids, n=n), dtype=np.float32)[:n]
+        got = np.asarray(graph(ids, n=n), dtype=np.float32).reshape(-1, WIDTH)[:n]
         assert_equal(got, expected, f"{n} of {n_ids}")
         assert_equal(graph.reference(ids, n=n), expected, f"reference {n}")
 
@@ -341,7 +341,7 @@ def test_each_step_gathers_the_rows_a_call_bounds(npu_runtime, table, n_ids):
         ids = rng.integers(-VOCAB, VOCAB, n_ids).astype(np.int32)
         ids[n:] = VOCAB  # past the table: a bounded call reads none of them
         expected = np.take(table, ids[:n], axis=0)
-        got = np.asarray(graph(ids, n=n), dtype=np.float32)[:n]
+        got = np.asarray(graph(ids, n=n), dtype=np.float32).reshape(-1, WIDTH)[:n]
         assert_equal(got, expected, f"{n} of {n_ids}")
         assert_equal(graph.reference(ids, n=n), expected, f"reference {n}")
 
