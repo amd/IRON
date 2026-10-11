@@ -53,26 +53,31 @@ from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
 
 
-def project(x, weight, bias=None, **gemv):
+def project(x, weight, bias=None, k_tile=None, **gemv):
     """``x @ weight.T`` for a checkpoint's ``(out, in)`` weight, plus
     ``bias`` if given, broadcast over every row (a linear layer's bias,
     Qwen 2's q/k/v projections): a GEMV for one row (a GEMV's output is a
-    vector), else flm.GEMM reading it column-major. ``gemv`` are the GEMV's
-    tunables, where the profile cannot tell it from another of its shape.
+    vector, batched into a row or not depending on its shape against the
+    weight's), else flm.GEMM reading it column-major, ``k_tile`` if K is not
+    a multiple of its default 512 (flm.GEMM's own ``k_tile``; Qwen 2.5's
+    hidden_dim is not). ``gemv`` are the GEMV's tunables, where the profile
+    cannot tell it from another of its shape.
     """
     if len(x.shape) == 2 and x.shape[0] > 1:
-        y = FLMGEMM(x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,))
+        tiled = {} if k_tile is None else dict(k_tile=k_tile)
+        y = FLMGEMM(x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled)
     else:
         y = GEMV(weight, x, **gemv)
     if bias is None:
         return y
-    return RowwiseAdd(y.reshape(-1, bias.shape[0]), bias).reshape(y.shape)
+    rows = math.prod(y.shape) // bias.shape[0]
+    return RowwiseAdd(y.reshape(rows, bias.shape[0]), bias).reshape(y.shape)
 
 
-def swiglu(x, w_gate, w_up, w_down):
+def swiglu(x, w_gate, w_up, w_down, k_tile=None):
     """The feed-forward of ``x``, ``(rows, embedding_dim)``."""
-    gate, up = project(x, w_gate), project(x, w_up)
-    return project(ElementwiseMul(SiLU(gate), up), w_down)
+    gate, up = project(x, w_gate, k_tile=k_tile), project(x, w_up, k_tile=k_tile)
+    return project(ElementwiseMul(SiLU(gate), up), w_down, k_tile=k_tile)
 
 
 class SwiGLU(iron.Graph):
