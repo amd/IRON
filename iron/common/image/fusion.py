@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Hashable, Mapping
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -126,9 +126,9 @@ class Fusion:
         self.runlist = [
             (own[design_of[id(op)]].name, *bufs) for op, *bufs in seq.runlist
         ]
-        # The firmware skips an unexpanded load of the PDI it has loaded, so
-        # one design is configured by the first dispatch alone.
-        self.expands = len(self.designs) > 1 or seq.traced or seq.reconfigure
+        self.expands = self.expanded(
+            self.designs, traced=seq.traced, reconfigure=seq.reconfigure
+        )
         self.subbuffer_layout = seq.subbuffer_layout
         self.buffer_sizes = seq.buffer_sizes
         self.slice_info = seq.slice_info or {}
@@ -143,6 +143,20 @@ class Fusion:
                 )
             )
         )
+
+    @staticmethod
+    def expanded(
+        designs: Collection[Hashable],
+        *,
+        traced: bool = False,
+        reconfigure: bool = False,
+    ) -> bool:
+        """Whether a full ELF of ``designs`` expands its loads, configuring
+        the array at every call. One design is configured by the first
+        dispatch alone, as the firmware skips an unexpanded load of the PDI
+        it has loaded, unless the build is traced or asks to ``reconfigure``.
+        """
+        return len(designs) > 1 or traced or reconfigure
 
     @property
     def identity(self) -> str:

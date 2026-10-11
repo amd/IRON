@@ -18,6 +18,8 @@ adds (``Fusion.needs_reset``). ``t_step`` and ``load`` are measured per
 design and setting, ``D0``, ``base`` and ``R`` per device (``probe``, into a
 ``CostTable``). A pack the table holds measured as one (``CostTable.packs``)
 is priced as measured instead: its entry, and each member's step on it.
+A full ELF of one design is configured by its first call alone
+(``Fusion.expanded``), so a call costs `D0` and its steps.
 
 Only a pack connected in the runlist's adjacency can save an entry, so the
 candidates are the connected sets of designs, and an exact search over
@@ -82,7 +84,7 @@ from aie.utils.compile import NPU_CACHE_HOME
 from ..declare import Operator
 from ..design import OperatorDesign, runtime
 from ..image.coresidence import Packing, fits
-from ..image.fusion import generate, parameters_preamble
+from ..image.fusion import Fusion, generate, parameters_preamble
 from .fold import FOLD_RUNS, Folding, Made, folded, foldings
 from .trace import TracedGraph
 
@@ -836,6 +838,7 @@ def model_us(
     groups: Sequence[Sequence[str]] = (),
     chosen: Mapping[str, str] | None = None,
     arrays: Mapping[str, Hashable] | None = None,
+    expands: bool | None = None,
 ) -> tuple[float, int]:
     """The model's time for a runlist of design keys, and its configures.
     A device whose designs at their settings the table holds as a pack
@@ -849,10 +852,16 @@ def model_us(
         arrays: Each design's array at that setting: the designs of one array
             share a device too, which loads the array once. An xclbin chain
             loads each design of its own.
+        expands: Whether the full ELF configures at every call
+            (``Fusion.expanded``); by default, whether the designs at their
+            settings are more than one. Designs apart only in their probes
+            (``Operator.probed``) share a key, so a caller holding the
+            operators says.
 
     Returns:
         `(time_us, configures)`, the reset included; on an xclbin chain,
-        `configures` counts the switches.
+        `configures` counts the switches, and a full ELF of one design
+        configures at none.
 
     Raises:
         ValueError: `groups` are given for an xclbin chain.
@@ -869,6 +878,10 @@ def model_us(
         )
         total += sum(n * table.load(chosen.get(k, k)) for k, n in switches.items())
         return total, sum(switches.values())
+    if expands is None:
+        expands = Fusion.expanded({chosen.get(k, k) for k in keys})
+    if not expands:
+        return table.dispatch_us + sum(table.t_step(chosen.get(k, k)) for k in keys), 0
     order = list(dict.fromkeys(keys))
     packing = Packing(tuple(map(tuple, groups))).sharing(
         {k: arrays.get(k, k) for k in order}
@@ -1203,10 +1216,13 @@ class JointNarrowing:
             }
             for k, cands in found.items()
         }
+        # Designs apart only in their probes share a key, not a design.
+        operators = {id(s.op): s.op for s in traced.steps}.values()
+        expands = Fusion.expanded({op.resolved(dev).design_key() for op in operators})
         if table.dispatch == "separate":
             chosen, groups = self._separate(keys, found, steps), ()
         else:
-            chosen, groups = self._packed(keys, found, steps, dev)
+            chosen, groups = self._packed(keys, found, steps, dev, expands)
         devices = Packing(groups).sharing(
             {k: chosen[k].array for k in dict.fromkeys(keys)}
         )
@@ -1216,9 +1232,13 @@ class JointNarrowing:
             groups,
             {k: v.key for k, v in chosen.items()},
             {k: v.array for k, v in chosen.items()},
+            expands=expands,
         )
         baseline, baseline_configures = model_us(
-            table, keys, arrays={k: cands[0].array for k, cands in found.items()}
+            table,
+            keys,
+            arrays={k: cands[0].array for k, cands in found.items()},
+            expands=expands,
         )
         return Tuning(
             chosen=chosen,
@@ -1273,12 +1293,14 @@ class JointNarrowing:
         found: Mapping[str, Sequence[Variant]],
         steps: Mapping[str, Mapping[str, float]],
         dev,
+        expands: bool,
     ) -> tuple[dict[str, Variant], tuple[tuple[str, ...], ...]]:
         """Each design's setting on a full ELF, by default key, and the
-        packs; a setting alone priced at its step in ``steps``.
+        packs; a setting alone priced at its step in ``steps``, and its
+        entries only where the image ``expands`` (``Fusion.expanded``).
         """
         table = self.table
-        record = self._tuning_record(keys, found, dev)
+        record = self._tuning_record(keys, found, dev, expands)
         fitted: dict[tuple[str, ...], bool] = {}
         if record.exists():
             data = json.loads(record.read_text())
@@ -1344,7 +1366,7 @@ class JointNarrowing:
         # Alone, each design takes its cheapest setting.
         alone: list[tuple[float, Variant, int]] = []
         for i, key in enumerate(runlist.order):
-            e = runlist.entries(frozenset([key]))
+            e = runlist.entries(frozenset([key])) if expands else 0
             best = min(candidates[i], key=lambda v: device_cost((i,), (v,), e))
             alone.append((device_cost((i,), (best,), e), best, e))
 
@@ -1404,7 +1426,11 @@ class JointNarrowing:
         return chosen, groups
 
     def _tuning_record(
-        self, keys: Sequence[str], found: Mapping[str, Sequence[Variant]], dev
+        self,
+        keys: Sequence[str],
+        found: Mapping[str, Sequence[Variant]],
+        dev,
+        expands: bool,
     ) -> Path:
         """The file holding what the packs search chose for the runlist
         ``keys`` over the settings ``found``.
@@ -1424,6 +1450,7 @@ class JointNarrowing:
                     self.max_members,
                     self.fit_attempts,
                     self.confidence,
+                    expands,
                 ]
             ).encode()
         )

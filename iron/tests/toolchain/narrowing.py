@@ -12,6 +12,7 @@ untuned one (``iron/tests/infrastructure/narrowing.py``).
 import dataclasses
 import json
 import math
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -41,6 +42,7 @@ from iron.common.graph.narrowing import (
 )
 from iron.common.graph.probe import Call, Designs, Point, judge, line
 from iron.common.harness import vectors
+from iron.common.image import Fusion, OperatorSequence
 from iron.lm.layers import SwiGLU
 from iron.operators import (
     GELU,
@@ -172,6 +174,13 @@ def test_a_tunable_the_call_gives_is_not_searched(npu2):
         size=SIZE, tile_size=TILE, num_aie_columns=2, num_channels=1
     )
     assert [v.tunables for v in variants(pinned, npu2)] == [()]
+
+
+class Twice(iron.Graph):
+    """One silu applied twice: one design."""
+
+    def body(self, x):
+        return SiLU(SiLU(x, tile_size=TILE), tile_size=TILE)
 
 
 class PinnedTwin(iron.Graph):
@@ -450,6 +459,73 @@ def test_a_measured_pack_costs_its_entry_and_its_steps_on_it(tmp_path):
     table.save()
     again = CostTable(table.path)
     assert again.packs == table.packs
+
+
+@pytest.mark.parametrize(
+    "names, packed, configures",
+    [
+        (["relu", "relu", "relu"], False, 0),
+        (["add", "relu"], False, 2),
+        (["relu", "add", "relu"], False, 4),
+        (["add", "relu"], True, 2),
+    ],
+)
+def test_a_full_elf_is_priced_at_the_configures_its_fusion_runs(
+    names, packed, configures, tmp_path, npu2
+):
+    # One design is configured by the image's first call alone: D0 and its steps.
+    ops = {
+        "relu": ReLU(size=SIZE, tile_size=TILE).resolved(npu2),
+        "add": ElementwiseAdd(size=SIZE, tile_size=TILE).resolved(npu2),
+    }
+    runlist = [
+        (ops[name], f"x{i}", *(["b"] if name == "add" else []), f"x{i + 1}")
+        for i, name in enumerate(names)
+    ]
+    steps = [op for op, *_ in runlist]
+    seq = OperatorSequence(
+        f"model_configures_{'_'.join(names)}_{packed}",
+        runlist,
+        ["x0", "b"] if "add" in names else ["x0"],
+        [f"x{len(names)}"],
+        dispatch="fused",
+        coresident=[list({id(op): op for op in steps}.values())] if packed else (),
+    )
+    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
+        seq.calculate_buffer_layout()
+    )
+    fusion = Fusion(seq)
+    configured = re.findall(r"aiex\.configure @(\w+)", fusion.text())
+    assert (len(configured) if fusion.expands else 0) == configures
+
+    keys = [cost_key(op, npu2) for op in steps]
+    order = list(dict.fromkeys(keys))
+    table = _table(
+        tmp_path / "costs.json", {k: (1.0 + i, 100.0) for i, k in enumerate(order)}
+    )
+    time_us, priced = model_us(table, keys, [tuple(order)] if packed else ())
+    assert priced == configures
+    if not fusion.expands:
+        assert time_us == pytest.approx(50.0 + len(keys) * 1.0)
+
+
+def test_one_design_takes_its_fastest_step_whatever_its_load(tmp_path, npu2):
+    # Its entry is paid once, not per call, so a dear load costs it nothing.
+    traced = Twice().trace(x=(SIZE,))
+    silu = traced.steps[0].op
+    found = variants(silu, npu2)
+    steps = {}
+    for v in found:
+        cols = dict(v.tunables)["num_aie_columns"]
+        steps[v.key] = (20.0 - cols, 100.0 * cols)
+    table = _table(tmp_path / "costs.json", steps)
+    tuning = JointNarrowing(table, fit_cache=tmp_path / "fits").tune(
+        traced, npu2, "fused"
+    )
+    fastest = min(found, key=lambda v: steps[v.key][0])
+    assert tuning.chosen[cost_key(silu)].key == fastest.key
+    assert tuning.configures == tuning.baseline_configures == 0
+    assert tuning.predicted_us == pytest.approx(50.0 + 2 * steps[fastest.key][0])
 
 
 def test_a_step_priced_at_operating_points_costs_their_weighted_mean(tmp_path):
@@ -1146,6 +1222,8 @@ def test_designs_apart_only_in_their_probes_share_one_cost(tmp_path, npu2):
         traced, npu2, "fused"
     )
     assert list(tuning.chosen) == [key]
+    # Two designs, so the image configures at every call: one device and a reset.
+    assert tuning.configures == 2
     chosen = tuning.chosen[key]
     assert chosen.key != found[0].key
     narrowed, _ = tuning.apply(traced, npu2)
