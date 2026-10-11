@@ -83,12 +83,13 @@ class CausalLM(iron.Graph):
     def head(self, x):
         raise NotImplementedError(f"{type(self).__name__} defines no head()")
 
-    def embed(self, x):
+    def embed(self, x, pixel_values=None):
         return x
 
     def body(
         self,
         ids=None,
+        pixel_values=None,
         *,
         token: Carried[np.int32],
         position: Carried[np.int32],
@@ -104,7 +105,7 @@ class CausalLM(iron.Graph):
         else:
             x = Copy(self.embedding[token]).reshape(1, c.emb_dim)
             angles = Copy(self.rope[position]).reshape(1, D)
-        x = self.embed(x)
+        x = self.embed(x, pixel_values)
         step = Step(prompt, angles, chunk, rows, position)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
@@ -192,9 +193,10 @@ class CausalLM(iron.Graph):
         self._prompt, self._decode = prompt, decode
         return self
 
-    def __call__(self, ids=None, **values) -> Any:
+    def __call__(self, ids=None, pixel_values=None, **values) -> Any:
         """One call of the loaded prompt version on ``ids``
-        (``prompt_ids``), else of the decode step.
+        (``prompt_ids``) and, where the model takes one, ``pixel_values``,
+        else of the decode step.
 
         Raises:
             RuntimeError: Neither version is loaded: ``load()`` first, which
@@ -205,7 +207,9 @@ class CausalLM(iron.Graph):
         if ids is None:
             return self._decode(**values)
         assert self._prompt is not None
-        return self._prompt(ids, **values)
+        if pixel_values is None:
+            return self._prompt(ids, **values)
+        return self._prompt(ids, pixel_values, **values)
 
     @property
     def device_loop(self) -> bool:
