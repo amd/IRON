@@ -1019,6 +1019,31 @@ model here shares.
   attention with a literal bound) rather than this model's own wiring;
   see its README.
 
+### LFM2-1.2B
+
+A hybrid model at `iron/applications/lfm2/` (`model.py`, its
+`profiles/`, `test.py`, `README.md`, `tune.py`): sixteen layers, six of
+them full attention (`Config.full_attn_idxs`) and the rest a gated short
+causal depth-wise convolution, both still ending in the same SwiGLU
+feed-forward. `Lfm2`/`Lfm2Oracle` mix in no shared layer (not `iron.lm`'s
+`Block`, whose layers are all attention); its attention layer is written
+directly from `iron.lm`'s `project`/`RoPE`/`attend`, plus a per-head
+`RMSNorm` (`q_layernorm`/`k_layernorm`) before RoPE, and its conv layer
+(`Lfm2.conv`, parallel to the base class's `attend`) keeps a cache the
+same shape convention as attention's key/value caches, one extra leading
+block reserved and never written standing in for "before the sequence."
+Its checkpoint `layout()` is built directly in Python (no `{i}` template)
+since its layers are not uniform; its own `__init__` allocates a key/value
+cache only for its attention layers and a window/scratch cache only for
+its conv layers, rather than the base class's unconditional per-layer
+pair.
+
+- **Required files**: `model.safetensors`, `tokenizer.json`, from
+  [`LiquidAI/LFM2-1.2B`](https://huggingface.co/LiquidAI/LFM2-1.2B)
+- **Default location**: `/srv/lfm2-1.2b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
+- **Run**: `pytest iron/applications/lfm2/`, or
+  `python -m iron.applications.lfm2.model model.safetensors tokenizer.json`
+
 ### AIE Kernel Reference
 
 See the [mlir-aie kernel library README](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/README.md) for the catalog of available kernels:
