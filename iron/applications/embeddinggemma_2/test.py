@@ -6,7 +6,9 @@
 against its float32 oracle: each embedding's cosine to the oracle's, its
 norm, the cosine similarities a query gives two documents, and every call
 bit-identical to the first. The oracle, over text, a clip and an image,
-once against Hugging Face's processor and model.
+once against Hugging Face's processor and model. The text encoder runs on
+NPU1 as well, where each step is its own dispatch of an xclbin; on NPU2
+that form is checked too.
 """
 
 import time
@@ -15,6 +17,7 @@ import aie.utils as aie_utils
 import numpy as np
 import pytest
 
+import iron
 from iron.lm import Checkpoint, load_weights
 from iron.lm.embeddinggemma2.audio import model as audio_model
 from iron.lm.embeddinggemma2.audio.model import AUDIO, LogMel
@@ -82,6 +85,38 @@ def oracle(encoder):
 
 
 @pytest.mark.supported_devices("npu2")
+class TestEachStep:
+    """The form NPU1 runs: each step its own dispatch of one xclbin, and
+    the host gathering the token embeddings. Its encoder is built and
+    dropped with the class, first: after any other test it would be held
+    beside the module's full-ELF one.
+    """
+
+    @pytest.fixture(scope="class")
+    def each_step(self, module_npu_runtime):
+        require(DIRECTORY / "model.safetensors", DIRECTORY / "tokenizer.json")
+        yield Encoder(DIRECTORY, boundaries=iron.each_step)
+        if aie_utils.DefaultNPURuntime is not None:
+            aie_utils.DefaultNPURuntime.cleanup()
+
+    @pytest.mark.parametrize(
+        "text,task",
+        [(QUERY, "query"), (LONGER, "document")],
+        ids=["query", "past_the_window"],
+    )
+    def test_embeddinggemma_2_each_step_accuracy(
+        self, each_step, text, task, record_property
+    ):
+        tokens = each_step.tokens(text, task)
+        got = each_step.graph.encode(tokens)
+        similarity = cosine(got, each_step.oracle()(tokens))
+        record_property("Cosine", similarity)
+        assert similarity >= MIN_COSINE, similarity
+        np.testing.assert_allclose(np.linalg.norm(got), 1, rtol=NORM_RTOL)
+        np.testing.assert_array_equal(each_step.graph.encode(tokens), got)
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
     "text,task",
     [
@@ -103,7 +138,7 @@ def test_embeddinggemma_2_accuracy(encoder, oracle, text, task, record_property)
     np.testing.assert_allclose(np.linalg.norm(got), 1, rtol=NORM_RTOL)
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("dims", [512, 256, 128])
 def test_embeddinggemma_2_truncation(encoder, oracle, dims, record_property):
     tokens = encoder.tokens(QUERY, "query")
@@ -115,7 +150,7 @@ def test_embeddinggemma_2_truncation(encoder, oracle, dims, record_property):
     assert similarity >= MIN_COSINE, similarity
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_embeddinggemma_2_ranking(encoder, oracle):
     query = encoder(QUERY, "query")
     scores = [cosine(encoder(d, "document"), query) for d in DOCUMENTS]
@@ -322,7 +357,7 @@ def test_embeddinggemma_2_oracle_matches_hugging_face(
     np.testing.assert_allclose(np.linalg.norm(got - want), 0, atol=1e-5)
 
 
-@pytest.mark.supported_devices("npu2")
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.bench
 @pytest.mark.parametrize(
     "text", [QUERY, LONG, LONGER], ids=["query", "long_document", "past_the_window"]

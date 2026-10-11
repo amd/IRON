@@ -429,7 +429,7 @@ class VisionTower(SimpleNamespace):
             causal=False,
             emulate_bf16_mmul_with_bfp16=False,
             scale=1.0,
-            num_pipelines=PIPELINES,
+            num_pipelines=min(PIPELINES, aie_utils.ensure_current_device().cols),
         )
         return GEMM(o.reshape(T, H * D), w.o, b_col_maj=True, **ACCURATE)
 

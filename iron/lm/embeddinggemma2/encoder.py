@@ -41,6 +41,7 @@ class Encoder:
             merged (`CostTable.merge`); none leaves them as they resolve.
         towers: Also load the audio and vision towers, so that a call may
             take a clip and an image.
+        boundaries: The graph's packaging (`EmbeddingGemma.load`).
     """
 
     def __init__(
@@ -49,6 +50,7 @@ class Encoder:
         max_tokens: int = 2048,
         costs: Sequence[Path] = (),
         towers: bool = False,
+        boundaries: str | None = None,
     ):
         directory = Path(directory)
         self.config = EMBEDDINGGEMMA_2
@@ -77,7 +79,7 @@ class Encoder:
         tables = [CostTable(path) for path in costs]
         for table in tables[1:]:
             tables[0].merge(table)
-        self.graph.load(JointNarrowing(tables[0]) if tables else None)
+        self.graph.load(JointNarrowing(tables[0]) if tables else None, boundaries)
 
     def tokens(
         self, text: str, task: str, audio_tokens: int = 0, image_tokens: int = 0

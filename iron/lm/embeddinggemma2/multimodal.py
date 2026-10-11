@@ -63,6 +63,7 @@ class Multimodal(EmbeddingGemma):
             (self.vision_at + vision.pool.shape[0], config.emb_dim)
         )
         self.tuner: JointNarrowing | None = None
+        self.boundaries: str | None = None
         self.compiled: set[tuple] = set()
 
     def body(
@@ -111,14 +112,19 @@ class Multimodal(EmbeddingGemma):
 
     # -- on the host -----------------------------------------------------------
 
-    def load(self, tuner: JointNarrowing | None = None) -> "Multimodal":
-        """Compile the text version, and keep ``tuner`` for the mixed ones.
+    def load(
+        self, tuner: JointNarrowing | None = None, boundaries: str | None = None
+    ) -> "Multimodal":
+        """Compile the text version, and keep ``tuner`` and ``boundaries``
+        for the mixed ones.
 
         Args:
             tuner: Narrows and packs each version's designs by cost.
+            boundaries: Each version's packaging.
         """
         self.tuner = tuner
-        super().load(tuner)
+        self.boundaries = boundaries
+        super().load(tuner, boundaries)
         return self
 
     def mixed(self, tokens, audio=None, image=None) -> tuple[list[tuple], dict]:
@@ -184,6 +190,7 @@ class Multimodal(EmbeddingGemma):
             if "ids" not in given and shapes not in self.compiled:
                 self.compile(
                     coresident=self.tuner,
+                    boundaries=self.boundaries,
                     **{k: (t.shape, t.dtype) for k, t in given.items()},
                 )
                 self.compiled.add(shapes)

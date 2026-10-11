@@ -11,6 +11,7 @@ import dataclasses
 import math
 from pathlib import Path
 
+import aie.utils as aie_utils
 import numpy as np
 from ml_dtypes import bfloat16
 
@@ -33,7 +34,8 @@ from iron.operators.rope import RoPE
 ACCURATE = dict(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
 
 # The rows of a block, 16 to each row of cores: a tower's rows are whole
-# blocks, and MHA's queries are whole blocks for each of its pipelines.
+# blocks, and MHA's queries are whole blocks for each of its pipelines, one
+# per column, eight on NPU2's array and fewer on a narrower one.
 ROWS = 64
 PIPELINES = 8
 
@@ -259,7 +261,7 @@ class EmbeddingGemma(iron.Graph):
             emulate_bf16_mmul_with_bfp16=False,
             window=None if i in c.global_layers else c.sliding_window,
             scale=1.0,
-            num_pipelines=PIPELINES,
+            num_pipelines=min(PIPELINES, aie_utils.ensure_current_device().cols),
         )
         return GEMM(o.reshape(T, H * D), w.o, b_col_maj=True, **ACCURATE)
 
@@ -269,14 +271,17 @@ class EmbeddingGemma(iron.Graph):
         """The input shapes of each version: one, ``max_tokens`` rows."""
         return [dict(ids=((self.max_tokens,), np.int32))]
 
-    def load(self, tuner: JointNarrowing | None = None) -> "EmbeddingGemma":
+    def load(
+        self, tuner: JointNarrowing | None = None, boundaries: str | None = None
+    ) -> "EmbeddingGemma":
         """Compile before the first call, so the arena is made once.
 
         Args:
             tuner: Narrows and packs each version's designs by cost.
+            boundaries: Each version's packaging.
         """
         for shapes in self.shapes():
-            self.compile(coresident=tuner, **shapes)
+            self.compile(coresident=tuner, boundaries=boundaries, **shapes)
         return self
 
     def inputs(self, tokens) -> tuple[np.ndarray, int]:
