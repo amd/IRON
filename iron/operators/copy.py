@@ -81,7 +81,9 @@ class Gather(Operator):
     The descriptors' addresses are the table's device address, which the
     host reads from its buffer each call, in a full ELF or an xclbin.
 
-    A row's packet writes its descriptor's length with its address, so a
+    Each control packet is one iteration of its transfer, so a transfer's
+    packets are alike: the preamble's write four words, the rest two. A
+    row's two packets write its descriptor's length and address, so a
     gather bounded per call (``table[ids[:n]]``, ``valid_rows``) moves the
     first ``n`` rows and, for each row past them, ``pad_bytes`` from the
     table's first row: a feed's drain is a whole number of 16-byte units
@@ -109,7 +111,7 @@ class Gather(Operator):
     dtype: Any = field(default=bfloat16, repr=False)
     words: int = param(
         default=lambda op: 20 * op.chain
-        + 4 * op.rows
+        + 6 * op.rows
         + 3 * len(op.batches)
         + (3 if op.rows % op.chain else 0),
         repr=False,
@@ -283,17 +285,17 @@ class Gather(Operator):
                     for task in pending[k][:-1]:
                         task.free()
                     pending[k] = pending[k][-1:]
-                # A row's packet, the push, and on a short last batch its end.
-                count = 4 * batches[j] + 3 + (3 if batches[j] < chain else 0)
+                # A row's two packets, the push, and on a short last batch its end.
+                packets = 2 * batches[j] + 1 + int(batches[j] < chain)
                 pending[k].append(
                     emit_shim_transfer(
                         f"gather_ctrl{k}",
                         words,
                         tap=TensorAccessPattern(
                             (self.words,),
-                            20 * chain + (4 * chain + 3) * j,
-                            [1, 1, 1, count],
-                            [0, 0, 0, 1],
+                            20 * chain + (6 * chain + 3) * j,
+                            [packets, 1, 1, 3],
+                            [3, 0, 0, 1],
                         ),
                         packet=(0, self.control_id - k),
                         managed=False,
@@ -321,7 +323,8 @@ class Gather(Operator):
     @functools.cached_property
     def template(self) -> tuple[np.ndarray, np.ndarray]:
         """The control words with every row's address zero, and where each
-        row's address-low word is; its length word is the one before.
+        row's address-low word is: its length word is the one before, its
+        address-high word two after.
         """
         chain, words, slots = self.chain, [], []
         for b in range(2 * chain):
@@ -334,13 +337,10 @@ class Gather(Operator):
         for j, n in enumerate(self.batches):
             sets = (j % 2) * chain
             for k in range(n):
+                at = self.bd_base + 0x20 * (sets + k)
                 slots.append(len(words) + 2)
-                words += [
-                    _control_header(2, self.bd_base + 0x20 * (sets + k)),
-                    row_words,
-                    0,
-                    0,
-                ]
+                words += [_control_header(1, at), row_words, 0]
+                words += [_control_header(1, at + 8), 0, self.bd_tail[0]]
             if n < chain:
                 # The batch's last descriptor ends the chain.
                 at = self.bd_base + 0x20 * (sets + n - 1) + 24
@@ -389,7 +389,7 @@ class Gather(Operator):
         words = template.copy()
         words[slots[valid:] - 1] = self.pad_bytes // 4
         words[slots] = (rows & np.uint64(0xFFFFFFFC)).astype(np.uint32)
-        words[slots + 1] = ((rows >> np.uint64(32)) & np.uint64(0xFFFF)).astype(
+        words[slots + 2] = ((rows >> np.uint64(32)) & np.uint64(0xFFFF)).astype(
             np.uint32
         )
         return words
@@ -486,8 +486,9 @@ class GatherWords(Operator):
     def taps(self) -> list[TensorAccessPattern]:
         """Where the rows' address words go in ``control``, in row order.
 
-        A row's follow its packet's header and length, four words to a
-        packet and a three-word push after every batch of ``chain``.
+        A row's low word follows its first packet's header and length, its
+        high word its second packet's header: six words to a row, and a
+        three-word push after every batch of ``chain``.
         """
         chain, at = Gather.chain, 20 * Gather.chain + 2
         full, short = divmod(self.rows, chain)
@@ -498,16 +499,16 @@ class GatherWords(Operator):
                     (self.words,),
                     at,
                     [1, full, chain, 2],
-                    [0, 4 * chain + 3, 4, 1],
+                    [0, 6 * chain + 3, 6, 2],
                 )
             )
         if short:
             taps.append(
                 TensorAccessPattern(
                     (self.words,),
-                    at + (4 * chain + 3) * full,
+                    at + (6 * chain + 3) * full,
                     [1, 1, short, 2],
-                    [0, 0, 4, 1],
+                    [0, 0, 6, 2],
                 )
             )
         return taps

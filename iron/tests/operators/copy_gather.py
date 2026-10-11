@@ -351,6 +351,30 @@ def test_the_control_words_are_counted():
         assert gather.control_words(ids, 0).size == gather.words
 
 
+def test_each_control_transfer_is_a_run_of_alike_packets():
+    """A transfer of control words streams one packet an iteration, so the
+    packets of each are one size: the preamble's write four words of a
+    descriptor, and every row's, push's and chain end's two. Each row's two
+    packets write its descriptor's length and address.
+    """
+    for rows in (1, 7, 8, 15, 71, 256):
+        gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH)
+        words, slots = gather.template
+        sizes = []
+        at = 0
+        while at < words.size:
+            beats = (int(words[at]) >> 20) & 0x3
+            sizes.append(beats + 2)
+            at += beats + 2
+        preamble = 4 * Gather.chain
+        assert at == words.size
+        assert sizes[:preamble] == [5] * preamble
+        assert set(sizes[preamble:]) == {3}, rows
+        bd_words = (words[slots - 2] & 0xFFFFF) - Gather.bd_base
+        assert (bd_words % 0x20 == 0).all()
+        assert ((words[slots + 1] & 0xFFFFF) - Gather.bd_base == bd_words + 8).all()
+
+
 def test_a_core_writes_the_words_the_host_would():
     for rows in (1, 7, 8, 15, 256, 512):
         gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH)
@@ -358,7 +382,7 @@ def test_a_core_writes_the_words_the_host_would():
         written = np.concatenate(
             [tap.gather(np.arange(gather.words)) for tap in gather.word_source().taps()]
         )
-        np.testing.assert_array_equal(written, np.stack([slots, slots + 1], -1).ravel())
+        np.testing.assert_array_equal(written, np.stack([slots, slots + 2], -1).ravel())
 
 
 def _moved(gather: Gather, valid: int) -> np.ndarray:
