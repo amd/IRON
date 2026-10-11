@@ -61,11 +61,11 @@ from iron.lm import (
     Checkpoint,
     Conv1d,
     Layout,
-    Oracle,
     Step,
     checkpoint_shapes,
     load_weights,
     project,
+    random_weights,
 )
 from iron.lm import Config as DecoderConfig
 from aie.iron.kernels.sample import ROW_WORDS
@@ -686,3 +686,286 @@ class WhisperDecoder(CausalLM):
         for i in range(len(self.layers)):
             self._decode.write(self.cross_keys[i], cross_arrays[2 * i])
             self._decode.write(self.cross_values[i], cross_arrays[2 * i + 1])
+
+
+# -- the oracle: float32 on the host, not composed from the operators' own
+# -- references, so it catches a wiring mistake the graph's reference repeats
+# -- (iron.lm's own convention for every CausalLM's Oracle).
+
+
+def _widen(tree):
+    if isinstance(tree, list):
+        return [_widen(t) for t in tree]
+    if isinstance(tree, SimpleNamespace):
+        return SimpleNamespace(**{k: _widen(v) for k, v in vars(tree).items()})
+    return np.asarray(tree, np.float32)
+
+
+def _oracle_erf(x):
+    # Abramowitz & Stegun 7.1.26, max abs error 1.5e-7: well under bf16 noise,
+    # and this host has no torch/scipy to call exactly.
+    a1, a2, a3, a4, a5, p = (
+        0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429, 0.3275911,
+    )
+    sign, ax = np.sign(x), np.abs(x)
+    t = 1.0 / (1.0 + p * ax)
+    y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * np.exp(-ax * ax)
+    return sign * y
+
+
+def _oracle_gelu(x):
+    return 0.5 * x * (1.0 + _oracle_erf(x / np.sqrt(2.0)))
+
+
+def _oracle_norm(x, w, eps: float = 1e-5):
+    mean = x.mean(axis=-1, keepdims=True)
+    var = ((x - mean) ** 2).mean(axis=-1, keepdims=True)
+    return (x - mean) / np.sqrt(var + eps) * w.weight + w.bias
+
+
+def _oracle_linear(x, w, bias=None):
+    y = x @ w.T
+    return y if bias is None else y + bias
+
+
+def _oracle_mha(q, k, v, n_heads: int, causal: bool):
+    T, E = q.shape
+    S = k.shape[0]
+    D = E // n_heads
+    q = q.reshape(T, n_heads, D).transpose(1, 0, 2)
+    k = k.reshape(S, n_heads, D).transpose(1, 0, 2)
+    v = v.reshape(S, n_heads, D).transpose(1, 0, 2)
+    scores = (q @ k.transpose(0, 2, 1)) / np.sqrt(D)
+    if causal:
+        scores = scores + np.triu(np.full((T, S), -np.inf, np.float32), k=1 + (S - T))
+    scores = scores - scores.max(axis=-1, keepdims=True)
+    p = np.exp(scores)
+    p /= p.sum(axis=-1, keepdims=True)
+    return (p @ v).transpose(1, 0, 2).reshape(T, E)
+
+
+def _oracle_conv1d(x, weight, bias, stride: int):
+    k = weight.shape[-1]
+    pad = (k - 1) // 2
+    xp = np.pad(x, ((pad, pad), (0, 0)))
+    out_rows = (xp.shape[0] - k) // stride + 1
+    cols = [
+        np.tensordot(weight, xp[t * stride : t * stride + k], axes=([2, 1], [0, 1]))
+        for t in range(out_rows)
+    ]
+    return np.stack(cols, axis=0) + bias
+
+
+class WhisperEncoderOracle:
+    """The audio encoder's float32 forward pass on the host, from a raw
+    waveform, the reference ``WhisperEncoder`` is judged by. Not composed
+    from the operators' own ``reference()``s: a numpy reimplementation
+    from the architecture directly, so it catches a wiring mistake the
+    graph's own reference would repeat.
+
+    Args:
+        config: ``EncoderConfig``.
+        weights: ``load_weights`` over ``encoder_layout(config)``, any dtype.
+    """
+
+    def __init__(self, config: EncoderConfig, weights):
+        self.config = config
+        self.weights = _widen(weights)
+        self._logmel = WhisperLogMel(config)
+
+    def __call__(self, waveform: np.ndarray) -> np.ndarray:
+        """``(max_source_positions, d_model)`` float32 encoder output."""
+        c, w = self.config, self.weights
+        feats = self._logmel.exact(waveform)
+        h = _oracle_gelu(_oracle_conv1d(feats, w.conv1.weight, w.conv1.bias, 1))
+        h = _oracle_gelu(_oracle_conv1d(h, w.conv2.weight, w.conv2.bias, 2))
+        x = h + w.pos_embedding
+        for layer in w.layers:
+            h = _oracle_norm(x, layer.norm1)
+            q = _oracle_linear(h, layer.attn.q.weight, layer.attn.q.bias)
+            k = _oracle_linear(h, layer.attn.k.weight)
+            v = _oracle_linear(h, layer.attn.v.weight, layer.attn.v.bias)
+            a = _oracle_mha(q, k, v, c.n_heads, causal=False)
+            a = _oracle_linear(a, layer.attn.out.weight, layer.attn.out.bias)
+            x = x + a
+            h = _oracle_norm(x, layer.norm2)
+            h = _oracle_gelu(_oracle_linear(h, layer.fc1.weight, layer.fc1.bias))
+            h = _oracle_linear(h, layer.fc2.weight, layer.fc2.bias)
+            x = x + h
+        return _oracle_norm(x, w.norm)
+
+
+class WhisperDecoderOracle:
+    """The decoder's float32 forward pass on the host, cross-attending over
+    one fixed encoder output (as the real decoder's cross-attention k/v are
+    fixed once a clip): ``logits(tokens)`` matches
+    ``iron.lm.CausalLM.logits``'s own contract (the logits after the last
+    of ``tokens``) so ``iron.lm.generation``'s ``accuracy``/``determinism``/
+    ``generate`` take it exactly as they take the NPU model.
+
+    Args:
+        config: ``DecoderConfig`` (this application's ``DECODER``).
+        weights: ``load_weights`` over ``decoder_layout(config)``, any
+            dtype; ``embedding`` at the checkpoint's own ``vocab_size``
+            (unpadded -- padding is a ``Sample``-only concern).
+        encoder_hidden: ``(max_source_positions, d_model)`` float32, one
+            clip's ``WhisperEncoderOracle`` output.
+    """
+
+    def __init__(self, config: DecoderConfig, weights, encoder_hidden: np.ndarray):
+        self.config = config
+        self.weights = _widen(weights)
+        self.encoder_hidden = np.asarray(encoder_hidden, np.float32)
+
+    def logits(self, tokens) -> np.ndarray:
+        c, w = self.config, self.weights
+        ids = np.asarray(tokens, np.int64).reshape(-1)
+        x = w.embedding[ids] + w.pos_embedding[: len(ids)]
+        for layer in w.layers:
+            h = _oracle_norm(x, layer.norm1)
+            q = _oracle_linear(h, layer.self_attn.q.weight, layer.self_attn.q.bias)
+            k = _oracle_linear(h, layer.self_attn.k.weight)
+            v = _oracle_linear(h, layer.self_attn.v.weight, layer.self_attn.v.bias)
+            a = _oracle_mha(q, k, v, c.n_heads, causal=True)
+            a = _oracle_linear(a, layer.self_attn.out.weight, layer.self_attn.out.bias)
+            x = x + a
+            h = _oracle_norm(x, layer.norm2)
+            q = _oracle_linear(h, layer.cross_attn.q.weight, layer.cross_attn.q.bias)
+            k = _oracle_linear(self.encoder_hidden, layer.cross_attn.k.weight)
+            v = _oracle_linear(
+                self.encoder_hidden, layer.cross_attn.v.weight, layer.cross_attn.v.bias
+            )
+            a = _oracle_mha(q, k, v, c.n_heads, causal=False)
+            a = _oracle_linear(a, layer.cross_attn.out.weight, layer.cross_attn.out.bias)
+            x = x + a
+            h = _oracle_norm(x, layer.norm3)
+            h = _oracle_gelu(_oracle_linear(h, layer.fc1.weight, layer.fc1.bias))
+            h = _oracle_linear(h, layer.fc2.weight, layer.fc2.bias)
+            x = x + h
+        x = _oracle_norm(x, w.norm)
+        return (x[-1] @ w.embedding.T).reshape(-1)
+
+
+# -- the runner: the checkpoint (or random weights), the two towers, and the
+# -- pipeline that connects them.
+
+
+def _to_bf16(tree):
+    if isinstance(tree, list):
+        return [_to_bf16(t) for t in tree]
+    if isinstance(tree, SimpleNamespace):
+        return SimpleNamespace(**{k: _to_bf16(v) for k, v in vars(tree).items()})
+    return np.asarray(tree, np.float32).astype(bfloat16)
+
+
+class Runner:
+    """Whisper-large-v3-turbo: the encoder and the decoder, from one
+    checkpoint (or, with no ``weights_path``, weights drawn at ``seed``),
+    and the pipeline that connects them -- an audio clip's log-mel features
+    through the encoder once a clip, its cross-attention k/v written into
+    the decoder once (``encode``), then any number of decode steps or
+    ``generate`` calls against that fixed audio context.
+
+    Not a subclass of ``iron.lm.Runner``: that assumes one decoder-only
+    model, one tokenizer and a free-text prompt, none of which fits an
+    encoder-decoder speech model (Whisper's decoder prompt is four fixed
+    special tokens, not free text, and there are two towers' weights, not
+    one). ``iron.lm.generation``'s ``accuracy``/``determinism``/
+    ``generate`` are plain functions over anything with ``.logits()``/
+    ``.generate()``, so they still apply directly to ``WhisperDecoder`` and
+    ``WhisperDecoderOracle`` here without that base class at all.
+    """
+
+    #: <|startoftranscript|>, <|en|>, <|transcribe|>, <|notimestamps|>
+    #: (generation_config.json's decoder_start_token_id/lang_to_id['<|en|>']/
+    #: task_to_id['transcribe']/no_timestamps_token_id): not read from the
+    #: checkpoint directory here (no tokenizer wrapper yet, see README.md),
+    #: so hardcoded at the real checkpoint's own values.
+    PROMPT = (50258, 50259, 50360, 50364)
+
+    def __init__(self, weights_path=None, seed: int = 0):
+        self.seed = seed
+        real_decoder_config = dataclasses.replace(DECODER, vocab_size=51866)
+        if weights_path is None:
+            self.checkpoint = None
+            self.encoder_weights = random_weights(
+                encoder_layout(ENCODER), ENCODER.n_layers, seed
+            )
+            self.decoder_weights = random_weights(
+                decoder_layout(real_decoder_config), real_decoder_config.n_layers, seed
+            )
+        else:
+            self.checkpoint = Checkpoint(weights_path)
+            self.encoder_weights = load_weights(
+                encoder_tensors(self.checkpoint.tensors),
+                encoder_layout(ENCODER),
+                ENCODER.n_layers,
+            )
+            self.decoder_weights = load_weights(
+                decoder_tensors(self.checkpoint.tensors),
+                decoder_layout(real_decoder_config),
+                real_decoder_config.n_layers,
+            )
+        padded = np.zeros((VOCAB_SIZE, DECODER.emb_dim), np.float32)
+        padded[:51866] = np.asarray(self.decoder_weights.embedding, np.float32)
+        self._padded_embedding = padded
+        self.encoder: WhisperEncoder | None = None
+        self.decoder: WhisperDecoder | None = None
+        self._logmel: WhisperLogMel | None = None
+
+    def npu(self) -> "WhisperDecoder":
+        """Both towers compiled and loaded; returns the decoder (the model
+        ``iron.lm.generation``'s helpers call ``.logits()``/``.generate()``
+        on). Call ``encode(waveform)`` before either: cross-attention has no
+        audio context until then.
+        """
+        cross_weights = _to_bf16([w.cross_attn for w in self.decoder_weights.layers])
+        self.encoder = WhisperEncoder(ENCODER, _to_bf16(self.encoder_weights), cross_weights)
+        self.encoder.compile(x=((ENCODER.conv1_rows, ENCODER.mels), bfloat16))
+        decoder_weights = SimpleNamespace(**vars(self.decoder_weights))
+        decoder_weights.embedding = self._padded_embedding.astype(bfloat16)
+        self.decoder = WhisperDecoder(DECODER, _to_bf16(decoder_weights))
+        self.decoder.load()
+        self._logmel = WhisperLogMel(ENCODER)
+        wave_len = (ENCODER.frames - 1) * ENCODER.hop + self._logmel.k_pad
+        self._logmel.compile(wave=((wave_len,), np.float32))
+        return self.decoder
+
+    def encode(self, waveform: np.ndarray) -> None:
+        """Run the encoder on ``waveform`` and write its cross-attention
+        k/v into the loaded decoder: once a clip, not once a decode step.
+        """
+        assert self.encoder is not None and self.decoder is not None, "npu() first"
+        x = self._logmel.conv1_input(waveform)
+        out = self.encoder(x)
+        c = ENCODER
+        cross = tuple(
+            np.asarray(o.numpy(), np.float32)
+            .reshape(c.hidden_rows, c.d_model)
+            .astype(bfloat16)
+            for o in out[1:]
+        )
+        self.decoder.encode(cross)
+
+    def cpu(self, waveform: np.ndarray) -> WhisperDecoderOracle:
+        """The float32 oracle of both towers, for the same ``waveform``
+        ``encode`` was given: a fresh ``WhisperEncoderOracle`` run once,
+        its output fixed into a ``WhisperDecoderOracle``.
+        """
+        encoder_oracle = WhisperEncoderOracle(ENCODER, self.encoder_weights)
+        real_decoder_config = dataclasses.replace(DECODER, vocab_size=51866)
+        return WhisperDecoderOracle(
+            real_decoder_config, self.decoder_weights, encoder_oracle(waveform)
+        )
+
+    def prompt(self, num_tokens: int = 0) -> list[int]:
+        """The fixed special-token prompt, optionally extended by
+        ``num_tokens`` random continuation tokens (no tokenizer wrapper
+        yet: a real-text continuation needs a vocabulary and a decoder,
+        see README.md -- random tokens still exercise every real run path,
+        the same convention ``iron.lm.Runner.prompt`` uses with no
+        tokenizer).
+        """
+        rng = np.random.default_rng(self.seed)
+        extra = rng.integers(0, 51866, num_tokens).tolist()
+        return [*self.PROMPT, *extra]
