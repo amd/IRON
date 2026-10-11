@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -30,7 +31,14 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
+from aie import ir
+from aie.dialects import aie
+from aie.helpers.util import mlir_type_to_np_dtype
+from aie.utils import bfp
+from aie.utils.config import aiecc_tool_path
+
 from ..declare import Operator, Unresolvable
+from ..design import OperatorDesign
 from .handle import Handle
 from .narrowing import cost_key
 
@@ -476,6 +484,243 @@ class Dataflow:
             )
             for i in self.drawn()
         }
+
+
+class Floorplan:
+    """Where a compiled version runs one step on the array, as its built
+    image places it: the tiles of the device that step configures, which of
+    them run a core, hold buffers or move data to the host, and the stream
+    links the router laid between neighbouring tiles.
+
+    It reads the image's lowered module (``Artifacts.lowered_mlir``; on an
+    xclbin chain, the step's design's own): what aiecc placed and routed,
+    not a placement redone apart from the image. The links are mlir-aie's
+    own count of each switchbox's streams out to each side
+    (``aie-translate --aie-flows-to-json``); a shim's south side is the
+    host. A device several designs
+    share (a pack) names each tile by the design whose buffers it holds.
+
+    Args:
+        version: The compiled version.
+        step: The step's index in its runlist.
+        title: The caption; the step's operator if empty.
+    """
+
+    def __init__(self, version: CompiledGraph, step: int, title: str = ""):
+        artifacts = version.artifacts
+        record = artifacts.steps[step]
+        op = version.traced.steps[step].op
+        self.title = title or f"{type(op).__name__} (step {step})"
+        self.color = FAMILIES[FAMILY.get(type(op).__name__, "other")]
+        if artifacts.kind == "elf":
+            path = artifacts.lowered_mlir
+            name = OperatorDesign(op.resolved()).name
+        else:
+            [design] = [d for d in artifacts.designs if d.name == record.design]
+            path = design.entry.lowered_mlir
+            name = None
+        if path is None or not path.exists():
+            raise FileNotFoundError(
+                f"{version.traced.name}: the build kept no lowered module for "
+                f"step {step}"
+            )
+        with ir.Context(), ir.Location.unknown():
+            module = ir.Module.parse(path.read_text())
+            devices = [o for o in module.body.operations if isinstance(o, aie.DeviceOp)]
+            device = self.device_of(devices, name)
+            self.device = ir.StringAttr(device.attributes["sym_name"]).value
+            self.read(list(device.regions[0].blocks[0].operations))
+        routed = subprocess.run(
+            [
+                aiecc_tool_path("aie-translate"),
+                "--aie-flows-to-json",
+                f"--aie-device-name={self.device}",
+                str(path),
+            ],
+            capture_output=True,
+            check=True,
+            text=True,
+        ).stdout
+        heading = dict(
+            northbound=(0, 1), southbound=(0, -1), eastbound=(1, 0), westbound=(-1, 0)
+        )
+        self.links: dict[tuple[tuple[int, int], tuple[int, int]], int] = {}
+        for key, box in json.loads(routed).items():
+            if not key.startswith("switchbox"):
+                continue
+            col, row = box["col"], box["row"]
+            for way, (dx, dy) in heading.items():
+                if box[way]:
+                    self.links[(col, row), (col + dx, row + dy)] = box[way]
+
+    @staticmethod
+    def device_of(devices: list, name: str | None):
+        """The device running design ``name``: its own, or the pack whose
+        runtime sequence is named for it; on an xclbin's module, its one
+        device.
+        """
+        if name is None:
+            [device] = devices
+            return device
+        for device in devices:
+            if ir.StringAttr(device.attributes["sym_name"]).value == name:
+                return device
+        for device in devices:
+            for o in device.regions[0].blocks[0].operations:
+                if (
+                    isinstance(o, aie.RuntimeSequenceOp)
+                    and ir.StringAttr(o.attributes["sym_name"]).value == name
+                ):
+                    return device
+        raise KeyError(f"no device of the image runs {name}")
+
+    def read(self, ops: list) -> None:
+        """The tiles, cores, buffers and shim allocations of one device's ops."""
+        tiles = {
+            o.result.get_name(): (o.col.value, o.row.value)
+            for o in ops
+            if isinstance(o, aie.TileOp)
+        }
+        self.tiles = set(tiles.values())
+        self.cores = {
+            tiles[o.operands[0].get_name()] for o in ops if isinstance(o, aie.CoreOp)
+        }
+        self.held: dict[tuple[int, int], int] = defaultdict(int)
+        self.owner: dict[tuple[int, int], str] = {}
+        # A pack's runtime sequences are named for its members, which prefix
+        # the symbols of each array merged into it.
+        members = {
+            ir.StringAttr(o.attributes["sym_name"]).value
+            for o in ops
+            if isinstance(o, aie.RuntimeSequenceOp)
+        }
+        for o in ops:
+            if isinstance(o, aie.BufferOp):
+                at = tiles[o.operands[0].get_name()]
+                memref = ir.MemRefType(o.result.type)
+                self.held[at] += math.prod(memref.shape) * bfp.itemsize(
+                    mlir_type_to_np_dtype(memref.element_type)
+                )
+                member, _, _ = ir.StringAttr(o.attributes["sym_name"]).value.partition(
+                    "__"
+                )
+                if member in members:
+                    self.owner.setdefault(at, member)
+        self.shims = defaultdict(int)
+        for o in ops:
+            if isinstance(o, aie.ShimDMAAllocationOp):
+                self.shims[tiles[o.operands[0].get_name()]] += 1
+
+    CELL, GAP, LEFT, TOP = 128, 34, 76, 70
+
+    def corner(self, tile: tuple[int, int], rows: int) -> tuple[int, int]:
+        """The top left of ``tile``'s square, row 0 at the bottom of ``rows``."""
+        col, row = tile
+        step = self.CELL + self.GAP
+        return self.LEFT + col * step, self.TOP + (rows - 1 - row) * step
+
+    def svg(self, columns: int | None = None, rows: int | None = None) -> str:
+        """The array as SVG: ``columns`` and ``rows`` of tiles, by default
+        to the last one the device uses.
+        """
+        columns = columns or 1 + max(c for c, _ in self.tiles)
+        rows = rows or 1 + max(r for _, r in self.tiles)
+        cell, gap, left, top = self.CELL, self.GAP, self.LEFT, self.TOP
+        width = left + columns * (cell + gap) + 10
+        height = top + rows * (cell + gap) + 54
+        members = sorted(set(self.owner.values()))
+        out = [
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+            f'viewBox="0 0 {width} {height}" font-family="system-ui, sans-serif">',
+            f'<rect width="{width}" height="{height}" fill="{SURFACE}"/>',
+            f'<text x="{left}" y="30" font-size="18" fill="{INK}">{html.escape(self.title)}</text>',
+            f'<text x="{left}" y="50" font-size="12" fill="{INK_2}">device '
+            f"{html.escape(self.device)} of the built image"
+            + (f": a pack of {len(members)} designs" if len(members) > 1 else "")
+            + "</text>",
+        ]
+        for row in range(rows):
+            _, y = self.corner((0, row), rows)
+            kind = "shim" if row == 0 else "memtile" if row == 1 else "core"
+            out.append(
+                f'<text x="{left - 10}" y="{y + cell / 2 + 4}" font-size="11" '
+                f'text-anchor="end" fill="{MUTED}">{kind} row {row}</text>'
+            )
+        for col in range(columns):
+            x, _ = self.corner((col, 0), rows)
+            out.append(
+                f'<text x="{x + cell / 2}" y="{height - 30}" font-size="11" '
+                f'text-anchor="middle" fill="{MUTED}">col {col}</text>'
+            )
+            for row in range(rows):
+                tile = (col, row)
+                x, y = self.corner(tile, rows)
+                used = tile in self.cores or self.held.get(tile) or tile in self.shims
+                opacity = 0.35 if tile in self.cores else 0.12 if used else 0
+                stroke = self.color if used else HAIRLINE
+                if tile in self.owner and len(members) > 1:
+                    dash = (
+                        ' stroke-dasharray="6 3"'
+                        if members.index(self.owner[tile]) % 2
+                        else ""
+                    )
+                else:
+                    dash = ""
+                lines = []
+                if tile in self.cores:
+                    lines.append("core")
+                if self.held.get(tile):
+                    lines.append(f"{self.held[tile] / 1024:.1f} KiB buffers")
+                if tile in self.shims:
+                    lines.append(f"{self.shims[tile]} host streams")
+                if tile in self.owner and len(members) > 1:
+                    lines.append(self.owner[tile])
+                if tile in self.tiles and not used:
+                    lines.append("routes through")
+                out.append(
+                    f'<rect x="{x}" y="{y}" width="{cell}" height="{cell}" rx="6" '
+                    f'fill="{self.color}" fill-opacity="{opacity}" stroke="{stroke}" '
+                    f'stroke-width="{2 if used else 1}"{dash}><title>tile {tile}: '
+                    f"{html.escape(', '.join(lines))}</title></rect>"
+                )
+                for n, line in enumerate(lines):
+                    out.append(
+                        f'<text x="{x + 8}" y="{y + 20 + 15 * n}" font-size="11" '
+                        f'fill="{INK if n == 0 else INK_2}">{html.escape(line)}</text>'
+                    )
+        for (a, b), count in sorted(self.links.items()):
+            (x0, y0), (x1, y1) = self.corner(a, rows), self.corner(b, rows)
+            dx, dy = b[0] - a[0], -(b[1] - a[1])
+            # Each direction of a link on its own side of the tiles' centre line.
+            shift = 10 if (dx, dy) in ((1, 0), (0, -1)) else -10
+            ax = x0 + cell / 2 + dx * cell / 2 + (shift if dy else 0)
+            ay = y0 + cell / 2 + dy * cell / 2 + (shift if dx else 0)
+            bx = x1 + cell / 2 - dx * cell / 2 + (shift if dy else 0)
+            by = y1 + cell / 2 - dy * cell / 2 + (shift if dx else 0)
+            out.append(
+                f'<line x1="{ax}" y1="{ay}" x2="{bx}" y2="{by}" stroke="{INK_2}" '
+                f'stroke-width="{1 + min(count, 4)}" marker-end="url(#head)">'
+                f"<title>{count} stream(s) {a} to {b}</title></line>"
+            )
+            out.append(
+                f'<text x="{(ax + bx) / 2 + 4}" y="{(ay + by) / 2 - 3}" font-size="10" '
+                f'fill="{INK_2}">{count}</text>'
+            )
+        out.insert(
+            2,
+            '<defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" '
+            'markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path d="M0,0 L10,5 '
+            f'L0,10 z" fill="{INK_2}"/></marker></defs>',
+        )
+        out.append(
+            f'<text x="{left}" y="{height - 10}" font-size="12" fill="{INK_2}">'
+            f"{len(self.cores)} cores, "
+            f"{sum(1 for t in self.tiles if t[1] == 1 and self.held.get(t))} memtiles "
+            f"holding buffers, {len(self.shims)} shims, "
+            f"{sum(self.links.values())} routed stream hops, to the host included</text>"
+        )
+        out.append("</svg>")
+        return "\n".join(out)
 
 
 def header(caption: str) -> list[str]:
