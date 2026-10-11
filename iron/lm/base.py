@@ -484,7 +484,10 @@ class Runner:
     def add_arguments(parser: argparse.ArgumentParser) -> None:
         """The checkpoint and tokenizer arguments, or ``--random-weights``."""
         parser.add_argument(
-            "weights_path", nargs="?", help="the .safetensors checkpoint"
+            "weights_path",
+            nargs="?",
+            help="the .safetensors checkpoint, or a sharded one's "
+            "model.safetensors.index.json",
         )
         parser.add_argument("tokenizer_path", nargs="?", help="the tokenizer's file")
         parser.add_argument(
