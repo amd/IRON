@@ -286,11 +286,38 @@ def affine_norm(x, weight, bias):
 
 
 def feed_forward(x, w, norm_key: str):
+    """The GELU feed-forward, its residual included. ``ffn_dim`` (5120)
+    exceeds ``RowwiseAdd``'s 4096-element ``tile_cap`` for fc1's bias:
+    split into whole pieces here, each its own ``project()``+``GELU``+
+    ``project()`` with no fold past the cap, their partial outputs summed.
+    The split is of the plain numpy weight arrays, before either ever
+    becomes a device operand (`w.fc1`/`w.fc2` are read straight from
+    `load_weights`, not yet `iron.weight`-wrapped), so each piece is its
+    own ordinary contiguous constant -- no scratch state, no aliasing risk.
+    """
     norm = getattr(w, norm_key)
     h = affine_norm(x, norm.weight, norm.bias)
-    h = GELU(project(h, w.fc1.weight, bias=w.fc1.bias, k_tile=256))
-    h = project(h, w.fc2.weight, bias=w.fc2.bias, k_tile=256)
-    return ElementwiseAdd(x, h)
+    ffn_dim = w.fc1.bias.shape[0]
+    if ffn_dim <= 4096:
+        g = GELU(project(h, w.fc1.weight, bias=w.fc1.bias, k_tile=256))
+        out = project(g, w.fc2.weight, bias=w.fc2.bias, k_tile=256)
+        return ElementwiseAdd(x, out)
+    pieces = -(-ffn_dim // 4096)
+    piece = next(p for p in range(-(-ffn_dim // pieces), ffn_dim + 1) if ffn_dim % p == 0)
+    out = None
+    for start in range(0, ffn_dim, piece):
+        end = start + piece
+        g = GELU(
+            project(
+                h, w.fc1.weight[start:end], bias=w.fc1.bias[start:end], k_tile=256
+            )
+        )
+        partial = project(g, w.fc2.weight[:, start:end], k_tile=256)
+        out = partial if out is None else ElementwiseAdd(out, partial)
+    # emb_dim (fc2's own output width) is always <= 4096: one plain fold,
+    # on the already-summed (rows, emb_dim) output.
+    out = RowwiseAdd(out, w.fc2.bias)
+    return ElementwiseAdd(x, out)
 
 
 class WhisperLogMel(iron.Graph):
