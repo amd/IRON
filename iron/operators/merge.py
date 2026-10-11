@@ -125,6 +125,7 @@ class Merge(Operator):
         def core_fn(of_in, of_out, kernel_fn, rtp, barrier, *count):
             barrier.wait_for_value(1)
             n = count[0].read() if dynamic else rtp[0]
+            barrier.release_with_value(1)
             for b in range_(n):
                 kernel_fn(of_in.acquire(1), of_out.acquire(1), b)
                 of_in.release(1)

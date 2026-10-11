@@ -23,7 +23,8 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common.harness import verify_buffer
 from iron.common.image import AdjacentPacking, Fusion, OperatorSequence
-from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, SiLU
+from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, Merge, SiLU
+from iron.operators.merge import GEMMA
 
 SIZE = 1024
 TILE = 128
@@ -239,3 +240,32 @@ def test_each_design_of_one_array_runs_on_its_own_values():
                 np.array(got.numpy()[: len(want)]), "shared", want, tolerance
             )
             assert verdict, verdict.detail
+
+
+class TwoMerges(iron.Graph):
+    """Two Merges of one array, the shorter first, each on ids of its own."""
+
+    def body(self, ids, more):
+        return Merge(ids, **GEMMA), Merge(more, **GEMMA)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_each_merge_of_one_array_runs_on_its_own_count():
+    rng = np.random.default_rng(0)
+    graph = TwoMerges()
+    net = graph.compile(image=iron.ELF, ids=((64,), np.int32), more=((192,), np.int32))
+    text = Fusion(net.sequence).text()
+    assert re.findall(r"aiex\.configure @(\w+)", text)[1:] == ["reset_device"]
+    assert len(re.findall(r"aiex\.run", text)) == 2
+    for _ in range(2):
+        ids, more = (
+            np.where(
+                rng.random(n) < 1 / 3,
+                rng.choice([GEMMA["audio_token"], GEMMA["image_token"]], n),
+                rng.integers(0, 2**20, n),
+            ).astype(np.int32)
+            for n in (64, 192)
+        )
+        for got, want in zip(net(ids, more), graph.reference(ids, more)):
+            want = np.asarray(want)
+            np.testing.assert_array_equal(np.array(got.numpy()[: len(want)]), want)
