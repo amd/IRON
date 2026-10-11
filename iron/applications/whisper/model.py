@@ -655,6 +655,34 @@ class WhisperDecoder(CausalLM):
         h = affine_norm(x, self.norm.weight, self.norm.bias)
         return GEMV(self.embedding, h.reshape(self.config.emb_dim))
 
+    def logits(self, tokens) -> np.ndarray:
+        """The logits after the last of ``tokens``, overriding
+        ``CausalLM.logits``: with no prompt version
+        (``load()``), its own ``_chunks()`` path (anything but exactly
+        one new token) asserts ``self._prompt is not None``. A fresh
+        multi-token call here instead runs a decode step a token at a
+        time, which needs no prompt version at all (``self(token=...,
+        chunk=0, rows=1)`` takes ``__call__``'s ``x is None and ids is
+        None`` branch, straight to ``self._decode``).
+        """
+        tokens = self._tokens(tokens)
+        n, L = tokens.size, self.config.max_seq_len
+        if not 0 < n <= L:
+            raise ValueError(f"{n} tokens do not fit {L} rows")
+        held = self._held(tokens)
+        if held == n - 1 == self._seen.size:
+            out, _ = self(token=int(tokens[-1]), position=n - 1, chunk=0, rows=1)
+        else:
+            self._seen = tokens[:held]
+            for position in range(held, n):
+                out, _ = self(
+                    token=int(tokens[position]), position=position, chunk=0, rows=1
+                )
+        self._seen = tokens
+        # A copy: the next call rewrites the output buffer.
+        logits = out.numpy()
+        return np.array(logits).reshape(-1)
+
     def load(self, release=None, tuner=None, boundaries=None, dev=None) -> "WhisperDecoder":
         """Only the decode step: Whisper's own prompt (the four special
         tokens that open a transcription, ``<|startoftranscript|>`` and its
