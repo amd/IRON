@@ -57,6 +57,9 @@ _REGULAR = [
     ( 896,  1792,   640,       8,     False,      True,  32,  64,  80),
     ( 192,   384,    64,       4,     False,     False,  48,  96,  16),
     ( 192,   384,    64,       4,      True,      True,  48,  96,  16),
+    # M short of four rows of cores at 16 each, so split over two:
+    # EmbeddingGemma 2's audio convolution, its output channels as M.
+    (  32,  1152,  2048,       4,      True,      True,  16,  64,  64),
 ]
 _EXTENSIVE = [
     (2048,  2048,  2048,       8,     False,     False,  32,  32, 128),
@@ -161,7 +164,8 @@ PLACEMENT = Placement(
 class GEMM(Operator):
     """AIE-accelerated General Matrix Multiplication (GEMM) layer.
 
-    ``C = A @ B`` on the device's rows of cores, one column of B per AIE column,
+    ``C = A @ B`` on the device's rows of cores (fewer where M is too short
+    for them), one column of B per AIE column,
     tiled m x k x n. A is broadcast across columns and distributed across
     rows in (m * n_A_tiles_per_shim, k) blocks; B is distributed across
     columns and broadcast across rows in (k, n) blocks; C is joined across
@@ -214,8 +218,9 @@ class GEMM(Operator):
     dtype_in: Any = field(default=bfloat16, repr=False)
     dtype_out: Any = field(default=bfloat16, repr=False)
     use_scalar: bool = param(default=False, repr=False, array=True)
-    # Filled by resolve: the device's rows of cores, the L2 tile of each
-    # stream and how many shims carry A.
+    # Filled by resolve: the rows of cores, the device's or fewer where M is
+    # too short for them, the L2 tile of each stream and how many shims
+    # carry A.
     n_aie_rows: int = auto(repr=False, array=True, derived=True)
     n_shim_mem_a: int = auto(repr=False, derived=True)
     a_l2: int = auto(repr=False, derived=True)
@@ -350,27 +355,38 @@ class GEMM(Operator):
         # known (resolved, or the bound device's). N waits for the columns.
         if self.K % self.tile_k != 0:
             raise ValueError(f"K ({self.K}) must be a multiple of {self.tile_k}")
-        rows = self.n_aie_rows or (self.dev and len(self.dev.core_rows))
-        # An open tile_m is the bound device's choice, else the kernel's narrowest.
-        tile_m = self.tile_m or (
-            self._auto_tile_m(self.dev) if self.dev else min_tile_m
-        )
+        # Open, the rows and tile_m are the bound device's choice, else
+        # tile_m the kernel's narrowest.
+        rows, tile_m = self.n_aie_rows, self.tile_m
+        if not rows and self.dev:
+            rows, tile_m = self._auto_tiling(self.dev)
+        tile_m = tile_m or min_tile_m
         if rows and self.M % (tile_m * rows) != 0:
             raise ValueError(
                 f"M ({self.M}) must be a multiple of {tile_m * rows}: C is "
                 f"tiled into (m * n_aie_rows, n)-sized blocks"
             )
 
-    def _auto_tile_m(self, dev) -> int:
-        """The widest of 64, 32, 16 and 8 rows that splits M over ``dev``'s
-        rows of cores and that its kernel's m block divides; the block, the
-        narrowest, where none does, which validate() then refuses.
+    def _auto_tiling(self, dev) -> tuple[int, int]:
+        """The rows of ``dev``'s cores C is split over, and ``tile_m``.
+
+        Every row, or half as many down to one where M is too short to
+        split over them, each at the widest of 64, 32, 16 and 8 rows (or the
+        ``tile_m`` given) that its kernel's m block divides and that splits
+        M; every row at the block, the narrowest, where none does, which
+        validate() then refuses.
         """
         block, _, _ = self.mac_block(dev)
         rows = len(dev.core_rows)
+        widths = [self.tile_m] if self.tile_m else [64, 32, 16, 8]
         return next(
-            (m for m in (64, 32, 16, 8) if m % block == 0 and self.M % (m * rows) == 0),
-            block,
+            (
+                (r, m)
+                for r in (rows >> i for i in range(rows.bit_length()))
+                for m in widths
+                if m % block == 0 and self.M % (m * r) == 0
+            ),
+            (rows, self.tile_m or block),
         )
 
     def held(self, dev, tile_m: int) -> int:
@@ -397,7 +413,7 @@ class GEMM(Operator):
         cols = self.resolve_columns(
             dev, self.num_aie_columns, fits=lambda c: self.N % (self.tile_n * c) == 0
         )
-        tile_m = self.tile_m or self._auto_tile_m(dev)
+        rows, tile_m = self._auto_tiling(dev)
         block, _, _ = self.mac_block(dev)
         # An open tile_m narrows until a core holds its tiles and finish.
         while (
@@ -407,10 +423,7 @@ class GEMM(Operator):
         ):
             tile_m //= 2
         new = dataclasses.replace(
-            self,
-            tile_m=tile_m,
-            num_aie_columns=cols,
-            n_aie_rows=len(dev.core_rows),
+            self, tile_m=tile_m, num_aie_columns=cols, n_aie_rows=rows
         )
         held = new.held(dev, tile_m)
         if held > dev.core_memory_bytes:

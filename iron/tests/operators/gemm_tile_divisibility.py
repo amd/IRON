@@ -13,6 +13,7 @@ compile time, from a file this class never names.
 """
 
 import pytest
+from aie.iron.device import from_name
 
 from iron.operators.gemm import GEMM
 
@@ -92,9 +93,27 @@ def test_an_open_tile_m_is_the_widest_that_splits_m(
     assert op.resolved(dev).tile_m == tile_m
 
 
+@pytest.mark.parametrize(
+    "device, emulate, M, rows, tile_m",
+    [
+        ("npu2", True, 32, 2, 16),
+        ("npu2", False, 16, 2, 8),
+        ("npu1", False, 32, 2, 16),
+        ("npu1", False, 16, 1, 16),
+    ],
+)
+def test_a_short_m_takes_fewer_rows_of_cores(device, emulate, M, rows, tile_m):
+    """An M shorter than every row of cores at the kernel's m block is split
+    over half as many, down to one.
+    """
+    op = GEMM(M=M, K=64, N=512, emulate_bf16_mmul_with_bfp16=emulate)
+    resolved = op.resolved(from_name(device))
+    assert (resolved.n_aie_rows, resolved.tile_m) == (rows, tile_m)
+
+
 @pytest.mark.parametrize("device, emulate", [("npu2", True), ("npu1", False)])
 def test_an_m_no_tile_splits_is_rejected(device, emulate, request):
     """Refused when constructed for the bound device, which has no such tile."""
     request.getfixturevalue(device)
-    with pytest.raises(ValueError, match=r"M \(32\) must be a multiple of 64"):
-        GEMM(M=32, K=64, N=512, emulate_bf16_mmul_with_bfp16=emulate)
+    with pytest.raises(ValueError, match=r"M \(8\) must be a multiple of 64"):
+        GEMM(M=8, K=64, N=512, emulate_bf16_mmul_with_bfp16=emulate)
