@@ -242,7 +242,10 @@ def _fill_caches(model, n: int, position: int):
     reference.
     """
     version = next(iter(model.versions.values()))
-    caches = [*model.keys, *model.values]
+    caches = []
+    for states in (model.keys, model.values):
+        # A hybrid model's are a dict: only its attention layers', by index.
+        caches += states.values() if isinstance(states, dict) else states
     for cache in caches:
         rows = np.array(version.read(cache))
         rows[n:position] = np.resize(rows[:n], (position - n, *rows.shape[1:]))
