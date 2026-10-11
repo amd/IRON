@@ -83,6 +83,9 @@ class CausalLM(iron.Graph):
     def head(self, x):
         raise NotImplementedError(f"{type(self).__name__} defines no head()")
 
+    def embed(self, x):
+        return x
+
     def body(
         self,
         ids=None,
@@ -101,6 +104,7 @@ class CausalLM(iron.Graph):
         else:
             x = Copy(self.embedding[token]).reshape(1, c.emb_dim)
             angles = Copy(self.rope[position]).reshape(1, D)
+        x = self.embed(x)
         step = Step(prompt, angles, chunk, rows, position)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)

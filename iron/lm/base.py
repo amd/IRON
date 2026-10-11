@@ -314,10 +314,13 @@ class Oracle:
     def head(self, x):
         raise NotImplementedError(f"{type(self).__name__} defines no head()")
 
+    def embed(self, x):
+        return x
+
     def logits(self, tokens) -> np.ndarray:
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
         angles = self.angles[: tokens.size]
-        x = self.embedding[tokens]
+        x = self.embed(self.embedding[tokens])
         for w in self.layers:
             x = self.layer(angles, w, x)
         return self.head(x[-1])
