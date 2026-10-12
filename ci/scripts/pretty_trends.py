@@ -6,9 +6,9 @@
 """Report the performance changes a run introduced, as markdown.
 
 Reads a CSV holding the last two runs of each test. Reports the operators the
-run added or dropped, and the benched parametrizations whose measurements
-moved. A parametrization without the 'bench' marker runs inputs too small to
-measure, so this leaves it out.
+run added or dropped against the run before it, and the benched
+parametrizations whose measurements moved. A parametrization without the
+'bench' marker runs inputs too small to measure, so this leaves it out.
 
 A percentage gate on its own reports mostly noise. Over one 5-month window of
 the results branch, 633 of 1179 consecutive benched Latency pairs moved by 5%
@@ -147,10 +147,17 @@ def build_report(
     `all_rows` holds the last two runs of each test. Their values reach a pull
     request comment, so every cell passes through `cell`.
     """
-    dates = [d for d in (parse_date(r, date_fmt) for r in all_rows) if d is not None]
+    dates = sorted(
+        {d for d in (parse_date(r, date_fmt) for r in all_rows) if d is not None}
+    )
     if not dates:
         return ["# Performance trends", "", "_No results._"]
-    run_date = max(dates)
+    run_date = dates[-1]
+    # A run stamps one date on every row it writes, so the date below the
+    # newest names the run before this one. Counting every older date as the
+    # run before would name an operator dropped on each run after the one that
+    # stopped it, for as long as its last rows stay in the file.
+    previous_date = dates[-2] if len(dates) > 1 else None
 
     # Every row counts here, benched or not. An operator arrives with its whole
     # test module, and a rename of its benched parametrization must not read as
@@ -159,10 +166,12 @@ def build_report(
     operators_before = set()
     for row in all_rows:
         date = parse_date(row, date_fmt)
+        if date is None:
+            continue
         operator = operator_name((row.get("Test Path") or "").strip())
         if date == run_date:
             operators_now.add(operator)
-        else:
+        elif date == previous_date:
             operators_before.add(operator)
 
     # Group the benched parametrizations, newest row first.
