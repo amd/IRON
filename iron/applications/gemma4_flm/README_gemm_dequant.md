@@ -40,11 +40,11 @@ Pull and build the unmodified ("stock") FastFlowLM engine for comparison:
 
 ```bash
 git clone https://github.com/ROCm/FastFlowLM $BUILD/FastFlowLM
-git -C $BUILD/FastFlowLM checkout 95f455e7ca39a2088b8a457dc44af10ecb3c2b40
+git -C $BUILD/FastFlowLM checkout v1.0.8
 git -C $BUILD/FastFlowLM submodule update --init --recursive
 
 cmake -S $FLM -B $BUILD/stock -G Ninja \
-    -DFLM_VERSION=1.0.5 -DNPU_VERSION=32.0.203.304 \
+    -DFLM_VERSION=1.0.8 -DNPU_VERSION=32.0.203.304 \
     -DFLM_BUILD_GEMMA4E=ON
 cmake --build $BUILD/stock --parallel 2
 ```
@@ -118,7 +118,7 @@ Recompile the FastFlowLM engine with the overrides. The nested quotes make
 ```bash
 OVERRIDE_FLAGS="-I$APP -DFLM_OVERRIDES=\"\\\"gemm_dequant_overrides.hpp\\\"\""
 cmake -S $FLM -B $OUTPUT/engine -G Ninja \
-    -DFLM_VERSION=1.0.5 -DNPU_VERSION=32.0.203.304 \
+    -DFLM_VERSION=1.0.8 -DNPU_VERSION=32.0.203.304 \
     -DFLM_BUILD_GEMMA4E=ON \
     "-DFLM_OVERRIDE_FLAGS=$OVERRIDE_FLAGS"
 cmake --build $OUTPUT/engine --target gemma4e_npu --parallel 2

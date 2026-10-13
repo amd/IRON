@@ -21,7 +21,7 @@ BUILD = APP / "build"
 OUTPUT = BUILD / "gemm_dequant"
 FLM_ROOT = BUILD / "FastFlowLM"
 FLM = FLM_ROOT / "src"
-FLM_COMMIT = "95f455e7ca39a2088b8a457dc44af10ecb3c2b40"
+FLM_TAG = "v1.0.8"
 FLM_MODEL_PATH = Path(
     os.environ.get(
         "FLM_MODEL_PATH",
@@ -74,7 +74,7 @@ def test_example_overrides_only_gemm_and_dequant():
 def checkout_fastflowlm():
     if not FLM_ROOT.exists():
         run(["git", "clone", "https://github.com/ROCm/FastFlowLM", str(FLM_ROOT)])
-    run(["git", "-C", str(FLM_ROOT), "checkout", FLM_COMMIT])
+    run(["git", "-C", str(FLM_ROOT), "checkout", FLM_TAG])
     run(["git", "-C", str(FLM_ROOT), "submodule", "update", "--init", "--recursive"])
 
 
@@ -87,7 +87,7 @@ def configure(directory, override=False):
         str(directory),
         "-G",
         "Ninja",
-        "-DFLM_VERSION=1.0.5",
+        "-DFLM_VERSION=1.0.8",
         "-DNPU_VERSION=32.0.203.304",
         "-DFLM_BUILD_GEMMA4E=ON",
     ]
