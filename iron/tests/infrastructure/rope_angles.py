@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """RoPE's angle table (``rope_angles``) and Llama 3's frequency scaling
-(``LLAMA_3_2``) against their formulas and Meta's published reference.
+(``LLAMA_3_2_ROPE_SCALING``) against their formulas and Meta's published reference.
 No NPU.
 """
 
@@ -12,7 +12,7 @@ import math
 import numpy as np
 
 from iron.lm import rope_angles
-from iron.applications.llama.model import LLAMA_3_2
+from iron.applications.llama.model import LLAMA_3_2_ROPE_SCALING
 
 
 def test_rope_is_the_formula_rounded_once():
@@ -77,7 +77,7 @@ def test_llama3_scaling_is_the_published_formula():
     """
     D, base = 64, 500000.0
     inv_freq = 1.0 / base ** (np.arange(0, D, 2) / D)
-    ours = LLAMA_3_2(inv_freq)
+    ours = LLAMA_3_2_ROPE_SCALING(inv_freq)
     published = _published_llama3_scaling(inv_freq, 32.0, 1.0, 4.0, 8192)
     np.testing.assert_allclose(ours, published, rtol=1e-15, atol=0)
 
@@ -100,10 +100,10 @@ def test_scaled_rope_table_rotates_by_the_scaled_frequencies():
     D, L, base = 64, 2048, 500000.0
     exponents = np.arange(0, D, 2, dtype=np.float32) / np.float32(D)
     inv_freq = 1.0 / base ** exponents.astype(np.float64)
-    scaled = LLAMA_3_2(inv_freq).astype(np.float32)
+    scaled = LLAMA_3_2_ROPE_SCALING(inv_freq).astype(np.float32)
     freqs = np.outer(np.arange(L, dtype=np.float32), scaled).astype(np.float64)
 
-    angles = rope_angles(D, L, base, LLAMA_3_2)
+    angles = rope_angles(D, L, base, LLAMA_3_2_ROPE_SCALING)
     assert angles.dtype == np.float32 and angles.shape == (L, D)
     assert np.array_equal(angles[:, ::2], np.cos(freqs).astype(np.float32))
     assert np.array_equal(angles[:, 1::2], np.sin(freqs).astype(np.float32))

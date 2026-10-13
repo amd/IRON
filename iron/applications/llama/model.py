@@ -66,8 +66,9 @@ class Llama3RopeScaling:
         )
 
 
-#: Llama 3.2's scaling, as its checkpoints' ``rope_scaling`` gives it.
-LLAMA_3_2 = Llama3RopeScaling(
+#: Llama 3.2's scaling, as its checkpoints' ``rope_scaling`` gives it; every
+#: size shares it, so a size added beside 1B names it too.
+LLAMA_3_2_ROPE_SCALING = Llama3RopeScaling(
     factor=32.0,
     low_freq_factor=1.0,
     high_freq_factor=4.0,
@@ -85,7 +86,7 @@ LLAMA_3_2_1B = Config(
     hidden_dim=8192,
     max_seq_len=32768,
     rope_base=500000.0,
-    rope_scaling=LLAMA_3_2,
+    rope_scaling=LLAMA_3_2_ROPE_SCALING,
 )
 
 
