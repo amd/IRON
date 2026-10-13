@@ -7,6 +7,7 @@ import json
 import os
 import re
 import signal
+import statistics
 import subprocess
 import sys
 import time
@@ -34,6 +35,22 @@ FLM_MODEL_PATH = Path(
 MODEL = FLM_MODEL_PATH / "models" / "Gemma4-E2B-IT-NPU2"
 PORT = 18099
 URL = f"http://127.0.0.1:{PORT}"
+MEASURED_RUNS = 12
+PROMPT_TOKENS = 261
+PROMPT = """Alice's Adventures in Wonderland ALICE'S ADVENTURES IN WONDERLAND Lewis Carroll
+THE MILLENNIUM FULCRUM EDITION 3.0 CHAPTER I Down the Rabbit-Hole Alice was
+beginning to get very tired of sitting by her sister on the bank, and of having
+nothing to do: once or twice she had peeped into the book her sister was
+reading, but it had no pictures or conversations in it, `and what is the use of
+a book,' thought Alice `without pictures or conversation?' So she was
+considering in her own mind (as well as she could, for the hot day made her feel
+very sleepy and stupid), whether the pleasure of making a daisy-chain would be
+worth the trouble of getting up and picking the daisies, when suddenly a White
+Rabbit with pink eyes ran close by her. There was nothing so VERY remarkable in
+that; nor did Alice think it so VERY much out of the way to hear the Rabbit say
+to itself, `Oh dear! Oh dear! I shall be late!' (when she thought it over
+afterwards, it occurred to her that she ought to have wondered at this, but at
+the time it all seemed quite"""
 
 OVERRIDDEN = {
     "engine_init",
@@ -107,6 +124,22 @@ def test_offline_dequant_writes_a_sidecar(tmp_path):
     assert output.read_bytes()[data_start:] == b"\x01\x02\x03\x04\x05\x06"
 
 
+def test_plot_contains_all_selections(tmp_path):
+    output = tmp_path / "prefill.png"
+    run(
+        [sys.executable, str(APP / "plot_prefill.py")],
+        input=(
+            "stock: mean 1000\n"
+            "bf16: mean 800\n"
+            "dequant: mean 900\n"
+            "bfp16: mean 700\n"
+        ),
+        text=True,
+        env=dict(os.environ, IRON_PLOT=str(output)),
+    )
+    assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
 def checkout_fastflowlm():
     if not FLM_ROOT.exists():
         run(["git", "clone", "https://github.com/ROCm/FastFlowLM", str(FLM_ROOT)])
@@ -114,7 +147,7 @@ def checkout_fastflowlm():
     run(["git", "-C", str(FLM_ROOT), "submodule", "update", "--init", "--recursive"])
 
 
-def configure(directory, override=False):
+def configure(directory, mode=None):
     command = [
         "cmake",
         "-S",
@@ -127,15 +160,40 @@ def configure(directory, override=False):
         "-DNPU_VERSION=32.0.203.304",
         "-DFLM_BUILD_GEMMA4E=ON",
     ]
-    if override:
+    if mode is not None:
         flags = f'-I{APP} -DFLM_OVERRIDES="\\"gemm_dequant_overrides.hpp\\""'
+        if mode != "dequant":
+            flags += f" -DIRON_OFFLINE_{mode.upper()}"
         command.append(f"-DFLM_OVERRIDE_FLAGS={flags}")
     run(command)
+
+
+def build_sidecars():
+    commands = {
+        "model.dq_bf16": ["--mode", "bf16"],
+        "model.dq_bfp": ["--mode", "bfp", "--only", "mlp."],
+        "model.dq_bfp_attn": [
+            "--mode",
+            "bfp",
+            "--only",
+            "self_attn.",
+            "--out",
+            "model.dq_bfp_attn",
+        ],
+    }
+    for output, arguments in commands.items():
+        if (MODEL / output).exists():
+            continue
+        run(
+            [sys.executable, str(APP / "dequantize.py"), str(MODEL), *arguments],
+            env=dict(os.environ, IRON_PATH=str(APP.parents[2])),
+        )
 
 
 @pytest.fixture(scope="module")
 def build_engines():
     checkout_fastflowlm()
+    build_sidecars()
     configure(BUILD / "stock")
     run(["cmake", "--build", str(BUILD / "stock"), "--parallel", "2"])
     run(
@@ -147,18 +205,20 @@ def build_engines():
         ],
         env=dict(os.environ, FLM_MODEL_PATH=str(FLM_MODEL_PATH)),
     )
-    configure(OUTPUT / "engine", override=True)
-    run(
-        [
-            "cmake",
-            "--build",
-            str(OUTPUT / "engine"),
-            "--target",
-            "gemma4e_npu",
-            "--parallel",
-            "2",
-        ]
-    )
+    for mode in ("dequant", "bf16", "bfp16"):
+        directory = OUTPUT / ("engine" if mode == "dequant" else f"engine_{mode}")
+        configure(directory, mode=mode)
+        run(
+            [
+                "cmake",
+                "--build",
+                str(directory),
+                "--target",
+                "gemma4e_npu",
+                "--parallel",
+                "2",
+            ]
+        )
 
 
 def post(path, body):
@@ -202,7 +262,7 @@ def serve(engine, xclbins):
         server.wait()
 
 
-def generate(engine, xclbins):
+def generate(engine, xclbins, measured_runs=1):
     with serve(engine, xclbins):
         post(
             "/api/chat",
@@ -215,15 +275,14 @@ def generate(engine, xclbins):
                 "options": {"num_predict": 1},
             },
         )
-        return post(
-            "/api/generate",
-            {
-                "model": "gemma4-it:e2b",
-                "stream": False,
-                "prompt": "Explain block floating point in two sentences.",
-                "max_tokens": 64,
-            },
-        )
+        request = {
+            "model": "gemma4-it:e2b",
+            "stream": False,
+            "prompt": PROMPT,
+            "max_tokens": 1,
+        }
+        post("/api/generate", request)
+        return [post("/api/generate", request) for _ in range(measured_runs)]
 
 
 @pytest.mark.supported_devices("npu2")
@@ -232,8 +291,33 @@ def generate(engine, xclbins):
 )
 @pytest.mark.metrics(TTFT=r"\[Prefill\] Time to first token: (?P<value>[\d\.e\+-]+) s")
 @pytest.mark.bench
-def test_iron_gemm_dequant_matches_fastflowlm(build_engines):
-    stock = generate(BUILD / "stock" / "engines", FLM)
-    iron = generate(OUTPUT / "engine" / "engines", OUTPUT)
-    print(f"[Prefill] Time to first token: {iron['prompt_eval_duration'] / 1e9:.4f} s")
-    assert iron["context"] == stock["context"]
+def test_all_gemm_dequant_selections(build_engines):
+    selections = {
+        "stock": (BUILD / "stock" / "engines", FLM),
+        "bf16": (OUTPUT / "engine_bf16" / "engines", FLM),
+        "dequant": (OUTPUT / "engine" / "engines", OUTPUT),
+        "bfp16": (OUTPUT / "engine_bfp16" / "engines", OUTPUT),
+    }
+    reference = None
+    lines = []
+    for name, (engine, xclbins) in selections.items():
+        responses = generate(engine, xclbins, MEASURED_RUNS)
+        assert all(
+            response["prompt_eval_count"] == PROMPT_TOKENS for response in responses
+        )
+        contexts = [response["context"] for response in responses]
+        assert all(context == contexts[0] for context in contexts)
+        if reference is None:
+            reference = contexts[0]
+        else:
+            assert contexts[0] == reference
+        mean_ms = statistics.fmean(
+            response["prompt_eval_duration"] / 1e6 for response in responses
+        )
+        lines.append(f"{name}: mean {mean_ms:.3f}")
+
+    report = "\n".join(lines) + "\n"
+    (OUTPUT / "prefill_means.txt").write_text(report)
+    print(report, end="")
+    iron_mean_ms = float(lines[2].split()[-1])
+    print(f"[Prefill] Time to first token: {iron_mean_ms / 1e3:.4f} s")
