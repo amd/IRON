@@ -80,7 +80,7 @@ class MV(Operator):
             name in self.bound_values if name == "start" else super().uses_value(name)
         )
 
-    def array(self, target):
+    def array(self):
         return [self.K, self.columns, self.tile_out, self.epilogue]
 
     def reference(self, A, B):
@@ -487,7 +487,7 @@ class Scaled(Operator):
     s = In(N, tile=(N,), when=scaled)
     y = Out(N, tile=(N,))
 
-    def array(self, target):
+    def array(self):
         return [self.scaled]
 
 
@@ -597,13 +597,13 @@ def test_a_traced_operator_is_not_the_untraced_ones_array():
 
 def test_array_sees_the_array_tier_alone():
     class Leaky(MV):
-        def array(self, target):
+        def array(self):
             return self.M
 
     op = MV(M=1024, K=128).resolved(NPU2)
-    assert op.build_array(None) == [128, 8, 64, "none"]
+    assert op.build_array() == [128, 8, 64, "none"]
     with pytest.raises(TypeError, match="reads M, which no tile names"):
-        Leaky(M=1024, K=128).resolved(NPU2).build_array(None)
+        Leaky(M=1024, K=128).resolved(NPU2).build_array()
 
 
 def test_resolution_fills_every_tunable_or_says_which_it_left():
@@ -842,7 +842,7 @@ class Rows(Operator):
     def resolve(self, dev):
         return dataclasses.replace(self)
 
-    def array(self, target):
+    def array(self):
         return []
 
     def reference(self, x):

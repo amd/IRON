@@ -463,14 +463,14 @@ class GEMM(Operator):
                 f"among them, each shim carrying A to as many"
             )
 
-    def device(self, target):
-        if target.dev.arch is AIEArch.AIE2:
+    def device(self):
+        if self.dev.arch is AIEArch.AIE2:
             return {1: NPU1Col1, 2: NPU1Col2, 4: NPU1}[self.num_aie_columns]()
         return NPU2()
 
     # -- the array ----------------------------------------------------------
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         m, k, n = self.tile_m, self.tile_k, self.tile_n
         n_aie_cols = self.num_aie_columns
         n_aie_rows = self.n_aie_rows
@@ -545,11 +545,11 @@ class GEMM(Operator):
         # Under a bound on M each core computes the tiles the bound covers
         # and passes the rest through, and under one on K it reduces over
         # the K tiles the bound covers: the DMAs still move all of A and B.
-        bounded = "valid" in self.bound_extents and target.image == "elf"
+        bounded = self.value("valid").scratchpad
         # A full ELF's cores read the bound on K from the scratchpad, an
         # xclbin's from their runtime parameters, which the sequence writes.
         k_bounded = "valid_k" in self.bound_extents
-        k_word = k_bounded and target.image != "elf"
+        k_word = k_bounded and not self.value("valid_k").scratchpad
         n_rtp = (3 if bounded else 2) + k_word
 
         # Runtime parameters: [K_div_k, n_tiles_per_core, col_tiles if

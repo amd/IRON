@@ -220,7 +220,7 @@ class DequantBFP(Operator):
 
     # -- the array -------------------------------------------------------------
 
-    def array(self, target) -> list:
+    def array(self) -> list:
 
         cols = self.cols
         qw_col_ty, out_half_ty = self.qw.tile, self.out.tile

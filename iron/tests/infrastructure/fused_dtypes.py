@@ -18,7 +18,6 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common.design import device_symbol
 from iron.common.harness import verify_buffer
 from iron.common.image import Fusion, OperatorSequence
 from iron.operators.copy import Copy
@@ -47,7 +46,7 @@ def _gather():
 
 
 def _symbols(op):
-    return {value.name: device_symbol(op, value) for value in op.values}
+    return {value.name: value.symbol for value in op.values}
 
 
 def _check_gathers(run, gather, table):

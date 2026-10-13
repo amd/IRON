@@ -96,7 +96,7 @@ class Merge(Operator):
             merge[places] = at + np.arange(places.size)
         return merge
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         kernel = ExternalFunction(
             "merge_rows",
             source_string=MERGE,
@@ -115,7 +115,7 @@ class Merge(Operator):
         )
         of_ids = ObjectFifo(self.ids.tile, name="ids", depth=2)
         of_merge = ObjectFifo(self.merge.tile, name="merge", depth=2)
-        dynamic = self.uses_value("count") and target.image == "elf"
+        dynamic = self.value("count").scratchpad
         rtp = Buffer(
             np.ndarray[(1,), np.dtype[np.int32]], name="rtp", use_write_rtp=True
         )

@@ -32,7 +32,6 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import Scratchpad, graph
-from iron.common.design import device_symbol
 from iron.common.harness import verify_buffer
 from iron.common.image import Fusion, OperatorSequence
 from iron.common.image.packaging import full_elf
@@ -348,8 +347,8 @@ def test_compare_mode_judges_every_output_at_the_calls_values(npu_runtime, caplo
     _set_input(run, "tokens", np.full(steps, -1, dtype=np.int32))
     run.write_values(
         {
-            device_symbol(op, op.value("row")): np.int32(4 * position),
-            device_symbol(op, op.value("at")): np.int32(position),
+            op.value("row").symbol: np.int32(4 * position),
+            op.value("at").symbol: np.int32(position),
         }
     )
     with caplog.at_level(logging.INFO, logger="iron.common.image.callable"):

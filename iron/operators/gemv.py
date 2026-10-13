@@ -29,6 +29,7 @@ from iron.common import (
     Finish,
     In,
     Link,
+    Operand,
     Operator,
     Out,
     Prepare,
@@ -37,7 +38,6 @@ from iron.common import (
     OptionalDim,
     Param,
 )
-from iron.common.design import Target
 from iron.common.testing import Case, Testing
 
 
@@ -330,7 +330,7 @@ class GEMV(Operator):
         """
         # Two rows of A per acquire where two fit a bank's worth of L1.
         row_bytes = self.K * np.dtype(bfloat16).itemsize
-        rows = self.tile_size_input or (2 if row_bytes <= Target.L1_BANK_BYTES else 1)
+        rows = self.tile_size_input or (2 if row_bytes <= Operand.L1_BANK_BYTES else 1)
         channels = self.num_channels or 1
         if self.tile_size_output is None and self.finish_inputs:
             # A finish input's tile, re-read to fill one of A's riding it,
@@ -411,7 +411,7 @@ class GEMV(Operator):
             if rows % tile:
                 raise ValueError(f"{name}={tile} does not evenly divide M/lanes={rows}")
 
-    def array(self, target):
+    def array(self):
         K, lanes = self.K, self.num_aie_columns * self.num_channels
         tile_size_input, tile_size_output = self.tile_size_input, self.tile_size_output
 
@@ -451,7 +451,7 @@ class GEMV(Operator):
         vectors = [Buffer(vector, name=f"B_{i}") for i in range(lanes)]
         # Per lane: the trip count (unless a graph bounds M, when each core
         # reads it from the scratchpad) and the batches of a call.
-        dynamic = self.uses_value("tiles") and target.image == "elf"
+        dynamic = self.value("tiles").scratchpad
         rtps = [
             Buffer(
                 np.ndarray[(2,), np.dtype[np.int32]],

@@ -207,13 +207,13 @@ class Transpose(Operator):
                 f"over {cols} columns x {chans} channels"
             )
 
-    def array(self, target) -> list:
+    def array(self) -> list:
 
         m, n, s = self.m, self.n, self.s
         cols, chans = self.num_aie_columns, self.num_channels
         n_cores = cols * chans
         tile_ty = np.ndarray[(m * n,), np.dtype[bfloat16]]
-        depth = target.fifo_depth(m * n, self.x.dtype)
+        depth = self.x.l1_depth
         l2l1 = TensorAccessPattern.full((n // s, s, m // s, s)).permute((2, 1, 0, 3))
 
         kernel = datamovement.transpose(m, n, s)

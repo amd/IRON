@@ -484,7 +484,7 @@ class GEMM(Operator):
 
     # -- the array -------------------------------------------------------------
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         COLS, ROWS = self.cols, self.rows
         N_TILE, CT_MAX_K, M_CHUNK, T_MA = (
             self.tile_n,
@@ -503,9 +503,9 @@ class GEMM(Operator):
         # Under a row bound the cores read the units it reaches: from the
         # scratchpad on a full ELF, else from their parameter buffer.
         bounded = "valid" in self.bound_extents
-        per_call = bounded and target.image == "elf"
+        per_call = bounded and self.value("valid").scratchpad
         rtp_slots, rtp_words = rtp_layout(M_CHUNK, bounded and not per_call)
-        tm = get_target_model(target.dev.resolve())
+        tm = get_target_model(self.dev.resolve())
 
         bf16_ty = np.dtype[bfloat16]
         f32 = np.dtype[np.float32]
@@ -559,7 +559,7 @@ class GEMM(Operator):
         # Emits (b_iter, mc, band): the order the core acquires A in while
         # holding a B chunk across the group.
         # A mem tile's run is bounded in elements; one past the wrap splits.
-        a_split = BdLimits.of(target.dev, 0, 1).factor(R * CT_MAX_K)
+        a_split = BdLimits.of(self.dev, 0, 1).factor(R * CT_MAX_K)
         assert a_split is not None
         a_hi, a_lo = a_split
         a_send_dims = TensorAccessPattern.full(

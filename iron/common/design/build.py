@@ -28,22 +28,9 @@ from aie.iron import (
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from .. import declare
-from ..declare import Operator, Value
+from ..declare import Operator
 from .external import ExternalSequence, ImageRuntime, ShimChannel
 from .runtime import Sequence
-from .target import Target
-
-
-def device_symbol(op: Operator, value: Value) -> str:
-    """The symbol a per-call value is written through: the instance's name,
-    the value's, and the graph value bound to it, unless ``value_symbol``
-    names one.
-    """
-    own = op.value_symbol(value)
-    if own is not None:
-        return own
-    bound = op.bound_values.get(value.name)
-    return f"{op.name}_{value.name}" + ("" if bound is None else f"_{bound.name}")
 
 
 def build_design(op: Operator, image: str = "elf", **dispatch):
@@ -58,14 +45,9 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
     op = op.resolved(dev).copy()  # a build binds streams; each gets its own
     if op.external is not None:
         return ExternalSequence.module(dev, op)
-    target = Target(dev, image)
-
     # Before array(), which may hand a core-read value to a worker.
     values = op.values
     for value in values:
-        value.symbol = device_symbol(op, value)
-        value.ssa = None
-        value.targets = []
         if image == "elf" and not isinstance(value, declare.DispatchTime):
             value.param = ScratchpadParameter(value.symbol, value.dtype)
         elif image == "elf":
@@ -82,7 +64,7 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
                 )
             value.param = dispatch[value.symbol]
 
-    built = op.build_array(target) or []
+    built = op.build_array() or []
     workers = [w for w in built if isinstance(w, Worker)]
     barriers = tuple(b for b in built if isinstance(b, WorkerRuntimeBarrier))
 
@@ -99,7 +81,7 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
         if image != "elf":
             for value, scalar in zip(values, args[len(buffers) + 1 :]):
                 value.ssa = scalar
-        seq = Sequence(op, rt_data, image, barriers)
+        seq = Sequence(op, rt_data, barriers)
         if not op.own_preamble:
             seq.preamble()
         seq.run()
@@ -123,7 +105,7 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
                 f"{type(op).__name__}.array() returns Workers, WorkerRuntimeBarriers, "
                 f"Flows, PacketFlows, Locks, TileDmas and ShimChannels; got {obj!r}"
             )
-    prog = Program(op.device(target), rt, workers=workers)
+    prog = Program(op.device(), rt, workers=workers)
     if op.trace is not None:
         if op.trace.reuse_output_buffer:
             raise ValueError(
@@ -155,7 +137,7 @@ class OperatorDesign:
             build = functools.partial(build_design, op=op, image=image)
             params = [
                 P(
-                    device_symbol(op, v),
+                    v.symbol,
                     P.KEYWORD_ONLY,
                     annotation=DispatchTime[v.dtype],
                 )

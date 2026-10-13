@@ -109,6 +109,9 @@ class Operand(Member["Operand"]):
 
     fills: ClassVar[bool]
     drains: ClassVar[bool]
+    # AIE2 and AIE2P both have eight 8 KB banks of core memory; the target
+    # model gives the total (Device.core_memory_bytes) but not the banking.
+    L1_BANK_BYTES: ClassVar[int] = 8192
 
     def __init__(
         self,
@@ -264,6 +267,14 @@ class Operand(Member["Operand"]):
     def tile(self):
         """The fifo element type: ``np.ndarray[shape, dtype]``."""
         return np.ndarray[self.tile_shape, np.dtype[self.dtype]]
+
+    @property
+    def l1_depth(self) -> int:
+        """The depth a core-side fifo of this operand's tiles can have: two,
+        or one when a tile spans more than a bank.
+        """
+        tile_bytes = math.prod(self.tile_shape) * np.dtype(self.dtype).itemsize
+        return 1 if tile_bytes > self.L1_BANK_BYTES else 2
 
     @property
     def finish_line(self) -> int:

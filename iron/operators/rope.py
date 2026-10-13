@@ -147,7 +147,7 @@ class RoPE(Operator):
         """
         return self.rows // self.angle_rows if buffer in ("x", "y") else None
 
-    def array(self, target) -> list:
+    def array(self) -> list:
 
         tile = self.x.tile
         n = self.num_aie_columns
@@ -158,9 +158,8 @@ class RoPE(Operator):
         of_out = [ObjectFifo(tile, name=f"out_{i}") for i in range(n)]
         # The two trip counts in an RTP, less any a graph bounds, which each
         # core reads from the scratchpad per call.
-        elf = target.image == "elf"
-        dyn_lut = self.uses_value("lut_rows") and elf
-        dyn_rows = self.uses_value("rows_per_lut") and elf
+        dyn_lut = self.value("lut_rows").scratchpad
+        dyn_rows = self.value("rows_per_lut").scratchpad
         static = [
             nm for nm, d in (("lut_rows", dyn_lut), ("rows_per_lut", dyn_rows)) if not d
         ]

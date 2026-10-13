@@ -21,7 +21,6 @@ from aie.utils.trace import get_trace_buffer
 from aie.utils.verify import Tolerance
 
 from ..declare import Operator
-from ..design import device_symbol
 from .allocator import ALIGNMENT, BANK, ArenaPlan, Pool
 
 if TYPE_CHECKING:
@@ -595,9 +594,7 @@ class StepCallable:
                 at[spec.name] = spec.placement[1]
                 if f"{spec.name}_offset" in step_op.bound_values:
                     word = step_op.value(f"{spec.name}_offset")
-                    at[spec.name] += int(
-                        self.dispatch_values[device_symbol(step_op, word)]
-                    )
+                    at[spec.name] += int(self.dispatch_values[word.symbol])
             checked = self.compare and not step_op.bound_extents
             if self.compare and not checked:
                 logger.warning(
@@ -644,7 +641,7 @@ class StepCallable:
         # A reference that takes its outputs writes them in place, keeping
         # what it does not touch (a cache a Copy scatters into).
         outputs = {b.name: held[b.name] for b in step_op.outputs if not b.fills}
-        symbols = {v.name: device_symbol(step_op, v) for v in step_op.values}
+        symbols = {v.name: v.symbol for v in step_op.values}
         values = {
             name: self.dispatch_values[symbol]
             for name, symbol in symbols.items()

@@ -19,7 +19,6 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.utils.trace import TraceConfig, get_trace_buffer
 from ml_dtypes import bfloat16
 
-from iron.common.design import device_symbol
 from iron.common.image import Fusion, OperatorSequence
 from iron.operators import LayerNorm
 from iron.operators.copy import Copy
@@ -115,7 +114,7 @@ def test_feedback_into_plain_buffers(npu_runtime):
     table, successor = _chain_table()
     seq, gather = _feedback_sequence("infra_feedback_plain")
     run = _setup(seq, table)
-    offset = device_symbol(gather, gather.values[0])
+    offset = gather.values[0].symbol
 
     run.write_values({offset: np.int32(3 * ROW)})
     run()
@@ -146,7 +145,7 @@ def test_feedback_ping_pong(npu_runtime):
     table, successor = _chain_table(seed=1)
     seq, gather = _feedback_sequence("infra_feedback_ping_pong")
     run = _setup(seq, table)
-    offset = device_symbol(gather, gather.values[0])
+    offset = gather.values[0].symbol
 
     first, second = run.run, run.new_run()
     first.bind_feedback(second.scratchpad_alias())
@@ -169,7 +168,7 @@ def test_feedback_chain_queued(npu_runtime):
     table, successor = _chain_table(seed=2)
     seq, gather = _feedback_sequence("infra_feedback_queued")
     run = _setup(seq, table)
-    offset = device_symbol(gather, gather.values[0])
+    offset = gather.values[0].symbol
 
     runs = [run.run, *(run.new_run() for _ in range(ROWS + 2))]
     for producer, consumer in zip(runs, runs[1:]):
@@ -203,7 +202,7 @@ def test_feedback_with_trace(npu_runtime):
     table, successor = _chain_table(seed=3)
     seq, gather = _feedback_sequence("infra_feedback_traced", layer_norm)
     run = _setup(seq, table)
-    offset = device_symbol(gather, gather.values[0])
+    offset = gather.values[0].symbol
     layout = get_trace_buffer(run.lowered_mlir_path.read_text(), "main:sequence")
     assert layout is not None and layout["arg_index"] == 4, layout
 

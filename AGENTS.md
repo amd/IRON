@@ -148,7 +148,7 @@ reuse lint
        declared shape) whose `tile=` makes each its own stream into the
        array (`per=` a column count), `Value`
        members the cores read (trip counts, derived from the extents so the
-       array never depends on them), `array(target)`, which builds
+       array never depends on them), `array()`, which builds
        ObjectFIFOs and Workers and binds each operand's lane to a fifo's
        shim end, and optionally `sequence(rt)` when the runtime sequence is
        not the derived one. The array tier is what a tile names plus what
@@ -202,8 +202,7 @@ reuse lint
      or a callable of the operator and the device. An operator's shim budget, `shim_columns`, is
      the bound device's `shim_dma_channels_in`/`out`; its `residents` the
      derived values the preamble writes once per build
-   - `design/`: the library-owned build: the `Target` an
-     array is built against (its device and image),
+   - `design/`: the library-owned build:
      `build_design(op, image)` (the module for one operator),
      `OperatorDesign` (that module as mlir-aie's `CompilableDesign`
      compiles and caches it), the derived runtime sequence (`Sequence`,
@@ -358,11 +357,15 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    - a `Value(derive=...)` for every trip count the core reads, so the
      array never depends on the extent; what else the array bakes is
      `Param(..., array=True)`
-   - `array(target)`: build ObjectFIFOs and Workers (`self.kernel()` or a
+   - `array()`: build ObjectFIFOs and Workers (`self.kernel()` or a
      factory's `ExternalFunction`, `Buffer(..., use_write_rtp=True)` for a
      runtime parameter, `WorkerRuntimeBarrier()`), `range_()` for loops, and
      `self.x.lane(i).bind(fifo.prod())` / `self.count.bind(rtps)` for every
-     member. It returns what it built: its Workers, its barriers and any
+     member; a value the build made a scratchpad word
+     (`self.value("count").scratchpad`, a per-call value on a full ELF) a
+     core reads per call from `.param` instead, and `self.x.l1_depth` is the
+     depth a core-side fifo of `x`'s tiles can have. The device is
+     `self.dev`. It returns what it built: its Workers, its barriers and any
      `Flow`, `Lock` or `TileDma` only the sequence reaches. It sees the
      array tier alone: reading an extent raises
    - `compatible()` for divisibility against the resolved tunables

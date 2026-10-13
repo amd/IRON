@@ -103,13 +103,13 @@ class RMSNorm(Rowwise):
             "smallest normal bf16",
         )
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         if not self.weighted:
-            return super().array(target)
+            return super().array()
         tile_ty = self.x.tile
         weights_ty = self.weight.tile
         cols, chans = self.num_aie_columns, self.num_channels
-        depth = target.fifo_depth(self.tile_size, self.x.dtype)
+        depth = self.x.l1_depth
         rms_norm = self.kernel()
         eltwise_mul = eltwise.mul_sized(self.tile_size)
         of_ins = [
@@ -132,7 +132,7 @@ class RMSNorm(Rowwise):
             for j in range(chans)
         ]
         n_cores = cols * chans
-        dynamic = self.uses_value("count") and target.image == "elf"
+        dynamic = self.value("count").scratchpad
         counts = (
             [self.count.param] * (2 * n_cores)
             if dynamic

@@ -56,10 +56,10 @@ class Clamp(UnaryElementwise):
             int(np.array(b, bfloat16).view(np.uint16)) for b in (self.low, self.high)
         )
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         cores = self.cores
         kernel = self.kernel()
-        depth = target.fifo_depth(self.tile_size, bfloat16)
+        depth = self.x.l1_depth
         of_ins = [
             ObjectFifo(self.x.tile, name=f"in_{k}", depth=depth) for k in range(cores)
         ]
@@ -68,7 +68,7 @@ class Clamp(UnaryElementwise):
         ]
         # [count, low, high] per core; the count is a scratchpad word instead
         # when a graph bounds the extent.
-        dynamic = self.uses_value("count") and target.image == "elf"
+        dynamic = self.value("count").scratchpad
         words = (
             ["low_bits", "high_bits"] if dynamic else ["count", "low_bits", "high_bits"]
         )

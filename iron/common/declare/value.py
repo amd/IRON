@@ -9,7 +9,7 @@ import copy
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, NoReturn, Self, overload
 
 import numpy as np
-from aie.iron import ceildiv
+from aie.iron import ScratchpadParameter, ceildiv
 
 from .member import Member
 
@@ -35,7 +35,6 @@ class Value(Member["Value"]):
     Attributes:
         param: The build's parameter: on a full ELF the ``ScratchpadParameter``,
             on an xclbin (no scratchpad) a dispatch-time scalar.
-        symbol: The device symbol the host writes it through.
         ssa: Its value in the sequence body, on an xclbin.
         targets: The runtime-parameter buffers, and the index in each, that
             the preamble writes it to (`bind`).
@@ -64,7 +63,6 @@ class Value(Member["Value"]):
         self.optional = optional
         self.op: Operator | None = None
         self.param: Any = None
-        self.symbol: str | None = None
         self.ssa = None
         self.targets: list[tuple[Any, int]] = []
 
@@ -83,6 +81,20 @@ class Value(Member["Value"]):
         if not isinstance(buffers, (list, tuple)):
             buffers = [buffers]
         self.targets.extend((b, index) for b in buffers)
+
+    @property
+    def symbol(self) -> str:
+        """The device symbol the host writes this value through
+        (``Operator.value_symbol``).
+        """
+        return self.op.value_symbol(self)
+
+    @property
+    def scratchpad(self) -> bool:
+        """The cores read this value from the parameter scratchpad: a build
+        gave it a ``ScratchpadParameter`` (a per-call value on a full ELF).
+        """
+        return isinstance(self.param, ScratchpadParameter)
 
     if TYPE_CHECKING:
         # Integer arithmetic on a graph body's per-call parameter.

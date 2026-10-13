@@ -95,7 +95,7 @@ class Repeat(Operator):
             )
         return dataclasses.replace(self, tile_size=self.tile_size or self.cols)
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         fifo_in = ObjectFifo(self.x.tile, name="fifo_in", depth=2)
         fifo_out = fifo_in.cons().forward(name="fifo_out", depth=2)
         self.x.bind(fifo_in.prod())

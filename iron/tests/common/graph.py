@@ -21,7 +21,6 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Carried, DispatchTime, Profile, Scratchpad
-from iron.common.design.build import device_symbol
 from iron.common.graph import Handle, TracedGraph, Tracer
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import _words
@@ -249,7 +248,7 @@ def test_alike_instances_bound_to_different_values_are_different_designs():
     }
     assert first.op.design_key() != second.op.design_key()
     assert first.op.design_key() == third.op.design_key()
-    symbols = [device_symbol(b.op, b.member) for b in t.bindings]
+    symbols = [b.member.symbol for b in t.bindings]
     assert symbols[0] != symbols[1] and symbols[0] == symbols[2]
     assert symbols[0].endswith("_out_offset_a_x16")
     assert symbols[1].endswith("_out_offset_b_x16")
@@ -1110,7 +1109,7 @@ def test_llama_prompt_bounds_every_flm_gemm_by_its_rows(npu2):
     for op in gemms:
         assert {v.name for v in op.values} == names | {"valid"}
         for name in names:
-            symbol = device_symbol(op, op.value(name))
+            symbol = op.value(name).symbol
             symbols.add(shared.get(symbol, symbol))
         for rows, reached in ((1, 1), (15, 1), (256, 1), (257, 2), (2048, 8)):
             assert op.derived_at("units_valid", valid=rows) == reached

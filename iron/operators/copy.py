@@ -210,7 +210,7 @@ class Gather(Operator):
     def ops(self) -> int:
         return 0  # a data mover: its figure is bandwidth
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         routes = []
         for k in range(self.feeds):
             feed, drain = Tile(2 * k, 0), Tile(2 * k + 1, 0)
@@ -245,7 +245,7 @@ class Gather(Operator):
             first = run.start * chain * self.row
             size: Any = min(run.stop * chain, self.rows) * self.row - first
             length = {}
-            if bounded and rt.image == "elf":
+            if bounded and self.value(f"drained{k}").scratchpad:
                 length = dict(
                     length_parameter=self.value(f"drained{k}").param, length_unit=unit
                 )
@@ -459,7 +459,7 @@ class GatherWords(Operator):
             base_hi=address >> self.low_bits,
         )
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         kernel = datamovement.row_addresses(
             self.rows,
             self.table_rows,
@@ -481,7 +481,7 @@ class GatherWords(Operator):
             lo = hi = None
             base_stream = ObjectFifo(self.base.tile, name="gather_base", depth=1)
             self.base.lane(0).bind(base_stream.prod())
-        elif target.image == "elf":
+        elif self.base_lo.scratchpad:
             lo, hi = self.base_lo.param, self.base_hi.param
         else:
             lo = Buffer(
@@ -805,7 +805,7 @@ class Copy(Operator):
         """Never: a copy's sequence moves its transfers itself."""
         return None
 
-    def array(self, target) -> list:
+    def array(self) -> list:
 
         for c in range(self.num_channels):
             fifo_in = ObjectFifo(self.x.tile, name=f"fifo_in_{c}", depth=1)

@@ -181,7 +181,7 @@ class Softmax(Operator):
     def extent_unit(self, buffer: str) -> int:
         return 0  # no tiles-per-lane word: the sequence bounds the blocks itself
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         tile_ty = self.x.tile
         n_cores = self.cores
         rows_per_core = self.rows // n_cores
@@ -199,7 +199,7 @@ class Softmax(Operator):
         # writes. A core re-arms its barrier once it has read them: an xclbin's
         # cores outlive the call, and would else start the next on these counts.
         counts = ("valid_cols", "blocks") if self.streamed else ("valid_cols",)
-        per_call = [n for n in counts if target.image == "elf" and self.uses_value(n)]
+        per_call = [n for n in counts if self.value(n).scratchpad]
         static = [n for n in counts if n not in per_call]
         rtp_ty = np.ndarray[(max(1, len(static)),), np.dtype[np.int32]]
         rtps = [

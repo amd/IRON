@@ -694,7 +694,7 @@ class MHA(Operator):
 
     # -- the array -------------------------------------------------------------
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         of_depth = 2
         dtype = bfloat16
         B_q, B_kv, d = self.B_q, self.B_kv, self.d
@@ -706,7 +706,7 @@ class MHA(Operator):
         # partial_softmax takes exp2, so the scale is in the log2 domain.
         inv_scale = float(bfloat16(self.scale * np.log2(np.e)))
         # AIE2P's exp2 instruction is up to 6% high; AIE2 has none to replace.
-        accurate_exp2 = target.dev.arch is AIEArch.AIE2p
+        accurate_exp2 = self.dev.arch is AIEArch.AIE2p
 
         # Tensors living on the AIE-array
         q_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
@@ -950,7 +950,7 @@ class MHA(Operator):
             "s_kv",
             "q_start",
         )
-        per_call = [n for n in counts if target.image == "elf" and self.uses_value(n)]
+        per_call = [n for n in counts if self.value(n).scratchpad]
         params = [getattr(self, n).param for n in per_call]
 
         def read(rtps, words):

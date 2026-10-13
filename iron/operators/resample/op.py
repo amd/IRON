@@ -376,7 +376,7 @@ class ResampleTaps(Operator):
             )
         tg.finish()
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         cores = self.cores
         peak_ty = np.ndarray[(2,), np.dtype[np.int32]]
         peak_k = ExternalFunction(
@@ -409,9 +409,8 @@ class ResampleTaps(Operator):
             of_all = of_peak.cons().forward(name="peak_all", depth=1)
         local = Buffer(peak_ty, initial_value=np.zeros(2, np.int32), name="peak_last")
 
-        elf = target.image == "elf"
         names = ["count", "in_length", "out_length"]
-        dynamic = {n: self.uses_value(n) and elf for n in names}
+        dynamic = {n: self.value(n).scratchpad for n in names}
         static = [n for n in names if not dynamic[n]]
         rtps = [
             Buffer(
@@ -1122,7 +1121,7 @@ class Resample(Operator):
             )
         tg.finish()
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         cores = self.cores
         counts_ty = np.ndarray[(8,), np.dtype[np.int32]]
         taps_ty, image_ty, patch_ty = (
@@ -1154,9 +1153,8 @@ class Resample(Operator):
             ObjectFifo(patch_ty, name=f"patches_{k}", depth=2) for k in range(cores)
         ]
 
-        elf = target.image == "elf"
         names = ["src_rows", "src_columns", "dst_rows", "dst_columns"]
-        dynamic = {n: self.uses_value(n) and elf for n in names}
+        dynamic = {n: self.value(n).scratchpad for n in names}
         static = [n for n in names if not dynamic[n]]
         rtps = [
             Buffer(
@@ -1405,7 +1403,7 @@ class PatchPositions(Operator):
         rt.drain(self.order.lane(0), self.order, group=tg)
         tg.finish()
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         B = self.block
         record_ty = np.ndarray[(5 * B,), np.dtype[np.int32]]
         kernel = ExternalFunction(
@@ -1432,9 +1430,8 @@ class PatchPositions(Operator):
             names=["xy", "position_ids", "order"],
             depths=[2, 2, 2],
         )
-        elf = target.image == "elf"
         names = ["count", "dst_rows", "dst_columns"]
-        dynamic = {n: self.uses_value(n) and elf for n in names}
+        dynamic = {n: self.value(n).scratchpad for n in names}
         static = [n for n in names if not dynamic[n]]
         rtp = Buffer(
             np.ndarray[(max(1, len(static)),), np.dtype[np.int32]],

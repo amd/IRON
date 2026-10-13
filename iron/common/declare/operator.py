@@ -289,16 +289,17 @@ class Operator(metaclass=_OperatorMeta):
         """
         return dataclasses.replace(self)
 
-    def array(self, target) -> list:
-        """Build the array for ``target`` and return its workers.
+    def array(self) -> list:
+        """Build the array for the bound device and return its workers.
 
         Bind every operand's lane to a fifo's shim end and every ``Value`` to
-        the buffer a core reads it from.
+        the buffer a core reads it from; a value the build gave a scratchpad
+        word (``Value.scratchpad``) a core reads per call instead.
         """
         raise NotImplementedError(f"{type(self).__name__}.array() is not implemented")
 
-    def build_array(self, target) -> list:
-        return type(self).array(_ArrayView(self), target)
+    def build_array(self) -> list:
+        return type(self).array(_ArrayView(self))
 
     def tolerance(self) -> Tolerance | None:
         """The contract tolerance of the kernel this array runs; ``None`` if none applies."""
@@ -476,8 +477,11 @@ class Operator(metaclass=_OperatorMeta):
         tables = LUT_BYTES * len(luts) if dev.arch is AIEArch.AIE2 else 0
         return line * np.dtype(out.dtype).itemsize + tables
 
-    def device(self, target):
-        return target.dev
+    def device(self):
+        """The device the array's Program is built for: the bound device
+        unless the array takes a part of it.
+        """
+        return self.dev
 
     @property
     def external(self):
@@ -697,8 +701,12 @@ class Operator(metaclass=_OperatorMeta):
     def has_sequence_override(cls) -> bool:
         return cls.sequence is not Operator.sequence
 
-    def value_symbol(self, value: Value) -> str | None:
-        return None
+    def value_symbol(self, value: Value) -> str:
+        """The device symbol per-call value ``value`` is written through:
+        the instance's name, the value's, and the graph value bound to it.
+        """
+        bound = self.bound_values.get(value.name)
+        return f"{self.name}_{value.name}" + ("" if bound is None else f"_{bound.name}")
 
     def design_key(self):
         """Identity for sharing a build: equal keys generate byte-identical MLIR."""

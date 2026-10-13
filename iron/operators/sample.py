@@ -182,7 +182,7 @@ class Sample(Operator):
         # A position is patched only when a graph binds a handle to it.
         return name in self.bound_values
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         select, combine = self._select(), self._combine()
         words = kernels.summary_words(self.slice_size, self.k_max)
         calls = self.select_streams * self.slice_size // self.chunk

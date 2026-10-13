@@ -738,7 +738,7 @@ class Elementwise(Operator):
         y = y.reshape(out.host_shape, copy=False)
         return Finish(op).reference(y, *inputs[n:]) if op.finish else y
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         finish = Finish(self, self.cores)
         streams = [
             b for b in self.buffers if b.streamed and b not in self.finish_inputs
@@ -764,7 +764,7 @@ class Elementwise(Operator):
                     ObjectFifo(stream.tile, name=f"{name}_held_{j}", depth=1)
                     for j in range(stream.count)
                 ]
-            depth = target.fifo_depth(math.prod(stream.tile_shape), stream.dtype)
+            depth = stream.l1_depth
             return [
                 ObjectFifo(stream.tile, name=f"{name}_{slot(k)}", depth=depth)
                 for k in range(cores)
@@ -775,7 +775,7 @@ class Elementwise(Operator):
             fifos(s, f"out{i}" if len(outs) > 1 else "out") for i, s in enumerate(outs)
         ]
         # A bounded extent makes the trip count a per-call scratchpad word.
-        dynamic = self.uses_value("count") and target.image == "elf"
+        dynamic = self.value("count").scratchpad
         counts = (
             [self.count.param] * cores
             if dynamic

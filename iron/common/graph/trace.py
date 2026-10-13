@@ -19,7 +19,6 @@ from .. import declare
 from ..declare import In, InOut, Operand, Operator, Out
 from ..declare.value import Extent, Scratchpad
 from ..declare.operator import graph_tracer
-from ..design import device_symbol
 from ..image.sequence import OperatorSequence
 from .handle import (
     Affine,
@@ -79,7 +78,7 @@ class Binding:
 
     @property
     def symbol(self) -> str:
-        return device_symbol(self.op, self.member)
+        return self.member.symbol
 
 
 @dataclasses.dataclass(frozen=True)

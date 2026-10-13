@@ -69,7 +69,7 @@ from aie.utils import bfp
 
 from ..declare import Operand, Operator, Out
 from ..declare.value import PlaceWord, Value
-from ..design import OperatorDesign, device_symbol
+from ..design import OperatorDesign
 from ..image.callable import FullELFCallable, StepCallable
 from ..image.sequence import OperatorSequence
 from .compiled import CompiledGraph
@@ -383,11 +383,10 @@ class Standalone:
         # An extent read only through its derivations has no word in a full
         # ELF; an xclbin chain has no parameter table, its values dispatch-time.
         self._symbols = {
-            device_symbol(op, v): np.int32(self._value(op, self._values[op], v))
+            v.symbol: np.int32(self._value(op, self._values[op], v))
             for op in ops
             for v in op.values
-            if artifacts.kind == "xclbin"
-            or device_symbol(op, v) in artifacts.parameters
+            if artifacts.kind == "xclbin" or v.symbol in artifacts.parameters
         }
         if load:
             self.load()

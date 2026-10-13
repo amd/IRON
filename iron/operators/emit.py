@@ -101,7 +101,7 @@ class Emit(Operator):
                 f"({self.slots} + {self.carried})"
             )
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         slots, carried = self.slots, self.carried
         of_program = ObjectFifo(self.program.tile, name="program", depth=1)
         of_planes = ObjectFifo(self.planes.tile, name="planes", depth=1)

@@ -31,7 +31,6 @@ from ..declare import Operator
 from ..declare.operator import graph_tracer
 from ..declare.value import Extent, ExtentWord
 from ..declare.profile import Profile
-from ..design import device_symbol
 from ..image.allocator import ArenaPlan
 from ..image.artifacts import Parameter
 from ..image.callable import FullELFRun, ScratchArena
@@ -880,7 +879,7 @@ def _words(
 
         for name in sorted(op._per_call_derived() - op.bound_values.keys()):
             word = op.value(name)
-            symbol = device_symbol(op, word)
+            symbol = word.symbol
             if symbol in derived:
                 continue  # another instance of the design, bound alike
             derived.add(symbol)

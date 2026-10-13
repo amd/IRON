@@ -43,7 +43,6 @@ from iron.common.design import (
     Sequence,
     build_design,
 )
-from iron.common.design.build import device_symbol
 from iron.common.graph.compiled import _words
 from iron.operators.clamp import Clamp
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -428,11 +427,11 @@ def _flm_gemm_moves(op, image, rows):
     reaches, and a runtime outer size is the task's repeat.
     """
     words = {
-        device_symbol(op, v): op.derived_at(v.name, valid=rows)
+        v.symbol: op.derived_at(v.name, valid=rows)
         for v in op.values
         if v.name != "valid"
     }
-    units = words.get(device_symbol(op, op.value("units_valid")))
+    units = words.get(op.value("units_valid").symbol)
     text, tasks = generated_sequence(op, image)
     repeats = dict(
         re.findall(
@@ -558,7 +557,7 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
             n: int = Param()
             x = In(n, tile=(64,), via=Tile(0, 0))
 
-            def array(self, target):
+            def array(self):
                 return []
 
 

@@ -93,7 +93,7 @@ class DepthwiseConv1d(Operator):
         y = sum(w[j] * padded[j : j + self.rows] for j in range(TAPS))
         return y.astype(bfloat16)
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         cols, C = self.num_aie_columns, self.channels
         plane = self.x.tile
         kernel = self.kernel()

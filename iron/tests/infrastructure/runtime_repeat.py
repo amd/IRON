@@ -25,7 +25,7 @@ from aie.utils.txn_trace import trace
 import iron
 from iron.common import Extent, In, Operator, Out, Param, Scratchpad, Value
 from iron.common.design import OperatorDesign
-from iron.common.design.build import build_design, device_symbol
+from iron.common.design.build import build_design
 from iron.common.graph import Value as GraphValue
 
 WIDTH = 256
@@ -52,7 +52,7 @@ class RepeatTile(Operator):
     def resolve(self, dev):
         return dataclasses.replace(self)
 
-    def array(self, target) -> list:
+    def array(self) -> list:
         fifo_in = ObjectFifo(self.x.tile, name="fifo_in", depth=2)
         fifo_out = fifo_in.cons().forward(name="fifo_out", depth=2)
         self.x.bind(fifo_in.prod())
@@ -124,7 +124,7 @@ def test_npu1_xclbin_pushes_the_call_s_repeat_count(npu1):
         dispatch_params=design.dispatch_params,
         dispatch_lib_path=design.get_dispatch_lib_path(),
     )
-    symbol = {v.name: device_symbol(op, v) for v in op.values}
+    symbol = {v.name: v.symbol for v in op.values}
     tile_words = WIDTH * np.dtype(np.int32).itemsize // 4
     for k in (3, 7):
         words = kernel.instructions(
@@ -145,7 +145,7 @@ def test_a_full_elf_takes_the_repeat_count_from_the_scratchpad(npu2, tmp_path):
     """
     op = _bound_op().resolved()
     module = build_design(op)
-    reps, tiles = (device_symbol(op, op.value(n)) for n in ("reps", "valid_y"))
+    reps, tiles = (op.value(n).symbol for n in ("reps", "valid_y"))
     assert f"{{repeat_parameter = @{reps}}}" in str(module)
     params = tmp_path / "params.txt"
     with module.context:

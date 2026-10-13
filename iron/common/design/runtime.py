@@ -32,12 +32,10 @@ class Sequence:
         self,
         op: Operator,
         rt_data: dict[str, Any],
-        image: str = "elf",
         barriers: tuple[WorkerRuntimeBarrier, ...] = (),
     ):
         self.op = op
         self._rt_data = rt_data
-        self.image = image
         self.barriers = barriers
 
     def run(self) -> None:
@@ -509,7 +507,7 @@ class Sequence:
                     )
                 buf[index] = value.ssa
         # A barrier opens its core, which reads its per-call words at once.
-        if self.image == "elf" and op.values:
+        if any(value.scratchpad for value in op.values):
             sync_parameters()
         for b in self.barriers:
             b.set(1)
