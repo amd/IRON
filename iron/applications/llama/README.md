@@ -7,30 +7,18 @@ SPDX-License-Identifier: Apache-2.0
 
 Prefill and decode of Llama 3 as one IRON graph, `Llama`, a version
 compiled per input shape, and the float32 numpy forward pass it is checked
-against, `LlamaOracle`, its `oracle`. Both are built from the same config
-and weights, Llama 3.2 1B's here; nothing here needs torch.
+against, `LlamaOracle`. Both are built from the same config and weights,
+Llama 3.2 1B's here; nothing here needs torch.
 
-What is Llama's own is short, and all of it is in `iron/applications/llama/model.py`:
-its layer and head on the NPU and in numpy, its shape, where its checkpoint
-keeps each weight and its tokenizer; its tunables are in
-`iron/applications/llama/profiles/`. The rest is `iron.lm`, which a new model reuses
-the same way:
+The model is a package of `iron.lm` (its shared decoder, attention and
+SwiGLU block), `iron/applications/llama/`:
 
-- `CausalLM`: the body over a prompt chunk and a decode step, the key and
-  value caches,
-  attention over them (`attend`) and `logits(tokens)`; a model subclasses
-  it with `layer(step, i, weights, x)` and `head(x)`
-- `Oracle`: the same model's float32 forward pass on the host, attention
-  and RoPE shared; a model subclasses it with `layer(angles, weights, x)`
-  and `head(x)` in numpy, and names it as its `CausalLM`'s `oracle`
-- `Config`, and a checkpoint `Layout`: each weight's place in the model,
-  its name in the checkpoint and its shape, which `load_weights` checks
-  strictly
-- `Runner`: the checkpoint, the tokenizer, the model and its oracle, and
-  `main`, the command line below; a model names its `config`, `layout`,
-  `model`, `open_tokenizer` and `bos`
-- `generation`: sampling, the generation loop and the accuracy and
-  determinism checks; `testing`: what `test.py` checks with them
+- [`model.py`](model.py): its layer and head on the NPU and in numpy, its
+  shape, where its checkpoint keeps each weight, its tokenizer, and the
+  command line below
+- [`profiles/`](profiles): its tunables, one file per device
+- [`tune.py`](tune.py): measures the cost table its designs can be
+  narrowed and packed by
 
 ## Weights and tokenizer
 
@@ -62,43 +50,33 @@ python -m iron.applications.llama.model \
 ```
 
 The NPU draws every token and writes the next decode step's values itself;
-the host only restarts each step and reads the tokens back at the end. On
-NPU1 and with `--each-step` the NPU draws each token too, and the host
-reads that token alone and starts the next step on it (below). The top-k
-must be at most 64.
+the host only restarts each step and reads the tokens back at the end. The
+top-k must be at most 64.
 
 - `--random-weights SEED`: in place of the two files, weights drawn at
-  `SEED` and prompts of random tokens; the speed, the accuracy against the
-  oracle and the determinism are those of the real checkpoint's shape, on a
-  host without it
-- `--prompt-len`: characters of `iron/lm/prompt.txt` to use as the prompt,
-  or with `--random-weights` a third as many random tokens (default 2048)
-- `--num-tokens`: tokens to generate (default 40)
-- `--max-seq-len`: the rows the key and value caches hold, prompt and
-  generated tokens together, a multiple of 2048 (default 32768, 1 GB of
-  caches); the compile is the same at any of them. XRT maps every device
-  buffer locked, and the locked-memory limit (`ulimit -l`) binds each
-  mapping: the weights and the caches are banks of at most 3.76 GB, a
-  buffer object each (`iron/common/image/allocator.py`'s `BANK`), so the
-  limit must hold one bank, 3.8 GB, at either size and any context (a
-  `memlock` line in `/etc/security/limits.d/`). A prompt past
-  about 48k tokens runs chunks longer than the amdxdna driver's watchdog
-  allows (`tdr_timeout_ms`, 4 to 6 s a dispatch by default); with
-  `options amdxdna tdr_timeout_ms=10000` in `/etc/modprobe.d/` a
-  131008-token prompt runs (315 s to the first token, then 5 tokens a
-  second)
+  `SEED` and prompts of random tokens, for the speed, accuracy against the
+  oracle and determinism of the real checkpoint's shape on a host without it
+- `--prompt-len`, `--num-tokens`: characters of `iron/lm/prompt.txt` to use
+  as the prompt (default 2048) and tokens to generate (default 40)
+- `--max-seq-len`: the rows the key and value caches hold, a multiple of
+  2048 (default 32768, 1 GB of caches); the compile is the same at any of
+  them. XRT maps every device buffer locked, and the weights and the
+  caches are banks of at most 3.76 GB (`iron.common.image.allocator.BANK`),
+  so `ulimit -l` must cover one bank at either size. A prompt past about
+  48k tokens runs chunks longer than the amdxdna driver's watchdog allows
+  (`tdr_timeout_ms`, 4 to 6 s a dispatch by default); with `options amdxdna
+  tdr_timeout_ms=10000` in `/etc/modprobe.d/` a 131008-token prompt runs
+  (315 s to the first token, then 5 tokens a second)
 - `--temperature`, `--top-k`: the sampler's (default 0.7 and 50)
-- `--check-accuracy`: instead of sampling, compare each step's logits with a
-  float32 numpy forward pass (`LlamaOracle`) and print the KL divergence
-  and top-1 agreement
+- `--check-accuracy`: instead of sampling, compare each step's logits with
+  `LlamaOracle` and print the KL divergence and top-1 agreement
 - `--check-determinism ROUNDS`: instead of sampling, run two prompts
   `ROUNDS` times each and count the runs whose logits differ bitwise
 - `--compare-host`: then generate again drawing on the host from each
   step's logits, from the same seed, and count the tokens that differ (the
   text is the same, token for token)
-- `--cost-table TABLE`: fold the steps of the decode step and the prompt
-  chunk, narrow their designs and pack them into shared device
-  configurations by a measured cost table (below)
+- `--cost-table TABLE`: narrow and pack the decode step's and prompt
+  chunk's designs by a measured cost table (below)
 - `--each-step`: dispatch every step of a decode step on its own from one
   xclbin, the form NPU1 runs (below)
 
@@ -106,36 +84,21 @@ must be at most 64.
 
 NPU1 has no full-ELF dispatch, so there both versions are xclbins whose
 steps are dispatched one at a time: there is no device loop. Each step
-still draws its token on the NPU, and the host reads that token alone, not
-the logits, and dispatches the next step on it. A prompt chunk gathers its
-tokens' rows of the embedding table on the NPU there too, as many rows as
-the chunk holds (a `Gather` in an xclbin). The versions still share one
-copy of the weights and the caches, the views of one buffer object. A prompt chunk attends with MHA,
-placed on NPU1's four columns as on NPU2's eight (`MHA.COLUMNS`), so a
-prompt runs a chunk at a time there too. A chunk's projections are
-`flm.GEMM` there (`iron/lm/blocks.py`'s `project`), which takes the
-weights as stored, with no activation linked in. `--each-step` builds the same
-form on NPU2, which is how `test_llama_3_2_1b_each_step_accuracy` checks it
-there.
-
-Decode attends with MHA of one query there too. It reads the caches in
-place and only the blocks the context covers, so a step's cost follows the
-context, and its cores do not depend on the cache's length: one compile
-serves every position below `--max-seq-len`.
+still draws its token on the NPU, and the host reads that token alone and
+dispatches the next step on it. A prompt chunk gathers its tokens' rows of
+the embedding table on the NPU too, and attends with MHA placed on NPU1's
+four columns as on NPU2's eight (`MHA.COLUMNS`), so a prompt runs a chunk
+at a time there too. `--each-step` builds the same form on NPU2, which is
+how `test_llama_3_2_1b_each_step_accuracy` checks it there.
 
 ## Tuning
 
 `--cost-table TABLE` folds steps into the step producing their input (the
 gate projection's SiLU into its GEMV), narrows the designs of the decode
-step and the prompt chunk (fewer columns where a design gains little from
-more) and packs them into shared device configurations, choosing by what
-each design costs on the device (`iron.common.graph.narrowing`). A fold is
-taken only where the table prices the folded step below the two it
-replaces; without a table, nothing folds. A folded design is measured in
-the same run as the one it replaces and priced by their difference, since
-the NPU's step times drift by more between runs than a fold gains. A
-narrower width is only a candidate if it was measured bit-identical to the
-profile's. The costs come from a table that `tune.py` measures:
+step and the prompt chunk and packs them into shared device configurations,
+by what each design costs on the device
+(`iron.common.graph.narrowing`). No table is checked in: one is measured on
+the NPU it is used on.
 
 ```bash
 python -m iron.applications.llama.tune
@@ -143,25 +106,19 @@ python -m iron.applications.llama.model /path/to/model.safetensors /path/to/toke
     --cost-table iron/applications/llama/costs_npu2.json
 ```
 
-No table is checked in at present: one is measured on the NPU it is used
-on. `tune.py` fills the current device's by default, beside it
-(`costs_npu2.json` on an NPU2, `costs_npu1.json` on a Phoenix NPU): the
-decode step's designs at position 256, the prompt chunk's at a whole first
-chunk. A table that holds an entry recorded without a field its kind now
-requires is refused when loaded; `tune.py` measures such entries again. On
-NPU1, where each step is its own dispatch, nothing is packed: a narrower
-design is chosen where it is cheaper to switch into. There a table measured
-on a Phoenix NPU (4 columns) narrowed the elementwise steps, moves several GEMVs between
-columns and lanes, puts Sample on two cores and keeps MHA at the profile's
-width: with random weights and the default caches, a token went from 362
-to 338 ms (20 tokens after a 16-token prompt, medians of 8 interleaved
-runs). Its entries are keyed by each design's identity -- its fields -- so
-a design changed since the table was measured is not in it, and the tuner
-leaves that design as the profile gives it (the `[Tuning]` report counts
-it as unmeasured). Run `tune.py` again after changing a design, or
-to measure for another NPU; it keeps the entries still current and measures
-only the rest.
+On NPU1, where each step is its own dispatch, nothing is packed: a
+narrower design is chosen where it is cheaper to switch into. There a
+table measured on a Phoenix NPU (4 columns) narrowed the elementwise
+steps, moved several GEMVs between columns and lanes, put Sample on two
+cores and kept MHA at the profile's width: with random weights and the
+default caches, a token went from 362 to 338 ms (20 tokens after a
+16-token prompt, medians of 8 interleaved runs).
 
-`pytest iron/applications/llama/` loads the model once and runs
-all of these in-process through `model.Runner`, recording the throughput and
-accuracy figures.
+## Testing
+
+```bash
+pytest iron/applications/llama/
+```
+
+Loads the model once and runs the accuracy, determinism and throughput
+checks above in-process through `model.Runner`.
