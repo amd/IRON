@@ -39,6 +39,7 @@ from aie.iron import (
     TileDma,
     Worker,
     WorkerRuntimeBarrier,
+    ceildiv,
 )
 from aie.iron.controlflow import range_
 from aie.iron.device import Tile
@@ -130,6 +131,19 @@ def _clamp_bits(clamp) -> tuple[int, int]:
         int(np.float32(lo).view(np.int32)),
         int(np.float32(hi).view(np.int32)),
     )
+
+
+def _units_valid(op) -> Any:
+    """The 256-row units a call's row bound reaches, at least one.
+
+    Raises:
+        ValueError: A call with no rows, which would end before the cores
+            drain the B its units past the bound still receive.
+    """
+    rows = op.valid
+    if isinstance(rows, (int, np.integer)) and rows < 1:
+        raise ValueError(f"flm.GEMM: a call needs at least one row, got {rows}")
+    return ceildiv(rows, M_TILE * op.rows * op.m_chunk)
 
 
 class GEMM(Operator):
@@ -224,8 +238,13 @@ class GEMM(Operator):
         per=(cols,),
     )
     C = Out(M, N, tile=(c_l2,), per=(cols,), depth=C_DEPTH)
-    # M, or fewer rows per call (``A[:n]`` in a graph). Every row is streamed
-    # and computed either way; the rows past the bound are not read.
+    # M, or fewer rows per call (``A[:n]`` in a graph). On an xclbin A and C
+    # move, and the cores compute, only the units (rows * M_TILE rows each)
+    # the bound reaches; past them the cores drain each column-block's B
+    # replay uncomputed, since its count is in the memtile's lock values,
+    # which no per-call word reaches. B moves as it does unbounded. A full
+    # ELF has no per-call repeat count for A's units yet, so there every row
+    # is still moved and computed.
     valid = Extent(M)
     # The parameter words every core reads once its barrier opens. The last
     # two exist only at m_chunk > 1 (rtp_layout); a word is not free.
@@ -237,6 +256,9 @@ class GEMM(Operator):
     clamp_max = Value(np.int32, derive=lambda op: _clamp_bits(op.clamp)[1])
     n_chunks = Value(np.int32, derive=lambda op: op._n_units, optional=True)
     n_units = Value(np.int32, derive=lambda op: op._n_units, optional=True)
+    # Under a bound, the units it reaches: the cores' trip count and C's
+    # length, in row blocks.
+    units_valid = Value(np.int32, derive=_units_valid, optional=True)
 
     def extent_unit(self, buffer: str) -> int:
         return 0  # nothing is shortened
@@ -363,6 +385,12 @@ class GEMM(Operator):
                 f"m_row_blocks ({m_row_blocks}) must be a multiple of m_chunk "
                 f"({self.m_chunk}); pass m_chunk=1 for this shape"
             )
+        # A bound's A transfer is one unit's row block a descriptor
+        # dimension long; a unit of m_chunk blocks has no dimension left.
+        if "valid" in self.bound_extents and self.m_chunk != 1:
+            raise ValueError(
+                f"a per-call row bound needs m_chunk=1, got m_chunk={self.m_chunk}"
+            )
 
     def compatible(self) -> None:
         self._check_shape()
@@ -466,7 +494,10 @@ class GEMM(Operator):
         C_SLICE_LEN = M_TILE * N_TILE  # one compute tile's C contribution
         O_CHUNKS = C_SLICE_LEN // CT_OUT_LEN  # C objects an accumulator drains as
         B_ITERS = K_TILE // CT_MAX_K  # B chunks consumed per k step
-        rtp_slots, rtp_words = rtp_layout(M_CHUNK)
+        # Under a row bound on an xclbin the cores read the units it reaches
+        # from their parameter buffer.
+        bounded = "valid" in self.bound_extents and target.image != "elf"
+        rtp_slots, rtp_words = rtp_layout(M_CHUNK, bounded)
         tm = get_target_model(target.dev.resolve())
 
         bf16_ty = np.dtype[bfloat16]
@@ -744,6 +775,10 @@ class GEMM(Operator):
             else:
                 n_chunks = n_row_blocks
                 n_units_rt = n_row_blocks
+            # Bounded, m_chunk is 1: a unit is a chunk.
+            n_live = n_units_rt
+            if bounded:
+                n_live = my_rtp[rtp_slots["units_valid"]]
             # Acquire does not consume the barrier, so take it back to zero or
             # the next dispatch re-reads these instead of waiting. Safe before
             # the work: the sequence cannot re-set it until this dispatch's C
@@ -786,7 +821,17 @@ class GEMM(Operator):
                             o_h.release(1)
 
             for _ in range_(n_work):
-                for _ in range_(n_chunks):
+                # A unit past the bound has its B replay all the same; every
+                # replay is the same B, so those go first and the call's
+                # last C still comes after the cores' last acquire.
+                if bounded:
+                    for _ in range_(n_units_rt - n_live):
+                        for _ in range_(n_k_iters):
+                            for _ in range_(B_ITERS // L1_B_DEPTH):
+                                for _ in b_bufs:
+                                    b_cons.acquire(1)
+                                    b_prod.release(1)
+                for _ in range_(n_live if bounded else n_chunks):
                     sweep(accs)
 
             # Column-blocks this column sits out. A is broadcast along the
@@ -794,7 +839,7 @@ class GEMM(Operator):
             # have work stall on the fifo. No B and no C; the sequence issues
             # neither.
             for _ in range_(n_drain):
-                for _ in range_(n_units_rt):
+                for _ in range_(n_live):
                     for _ in range_(n_k_iters):
                         for _ in range_(B_ITERS // L1_B_DEPTH):
                             for _ in range(L1_B_DEPTH):
@@ -847,6 +892,8 @@ class GEMM(Operator):
         if "n_chunks" in rtp_slots:
             self.n_chunks.bind(flat, rtp_slots["n_chunks"])
             self.n_units.bind(flat, rtp_slots["n_units"])
+        if "units_valid" in rtp_slots:
+            self.units_valid.bind(flat, rtp_slots["units_valid"])
         return workers + unrouted + [b for row in barriers for b in row]
 
     # -- geometry of one dispatch ------------------------------------------------
@@ -959,6 +1006,14 @@ class GEMM(Operator):
                 f"M={M} K={K} N={N}: even one unit per slab needs more passes "
                 f"over a B pool per column-block than the {pool.queue} x "
                 f"{pool.passes} one memtile channel can queue"
+            )
+        # A bound reaches units from the first, and a slab past it would arm
+        # B and the cores for nothing.
+        bounded = "valid" in self.bound_extents and rt.image != "elf"
+        if bounded and len(slabs) > 1:
+            raise ValueError(
+                f"M={M} K={K} N={N}: a per-call row bound needs M in one slab, "
+                f"and this shape takes {len(slabs)}"
             )
 
         if self.b_col_maj:
@@ -1105,14 +1160,25 @@ class GEMM(Operator):
             # memtile chains and cores -- so only that one carries a token.
             last_c = []
 
+            # A's transfers, one per lane. Bounded, each repeats over the
+            # units the bound reaches, a per-call repeat count.
+            a_legs = [
+                (
+                    ((self.A, A[:, 0, r].permute((0, 2, 1, 3))), {0: self.units_valid})
+                    if bounded
+                    else ((self.A, a_tap(r, slab)), None)
+                )
+                for r in range(ROWS)
+            ]
+
             # C goes out after its block's fills, since the first C only
             # arrives after a whole k sweep. A leg whose pattern the shim
             # cannot take in one descriptor, or that needs more of them than a
             # task queue holds, the compiler cuts into pieces and interleaves
             # with the other legs'.
             for bi, (mega_col, active_cols) in enumerate(blocks):
-                for r in range(ROWS):
-                    rt.fill(self.A.lane(r), (self.A, a_tap(r, slab)), managed=False)
+                for r, (view, size_by) in enumerate(a_legs):
+                    rt.fill(self.A.lane(r), view, size_by=size_by, managed=False)
                 for c in range(active_cols):
                     rt.fill(
                         self.B.lane(c),
@@ -1129,6 +1195,7 @@ class GEMM(Operator):
                         self.C.lane(c),
                         (self.C, c_tap(mega_col, c, slab)),
                         wait=last,
+                        size_by={1: self.units_valid} if bounded else None,
                         managed=False,
                     )
                     if last:

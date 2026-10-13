@@ -1076,6 +1076,25 @@ def test_llama_prompt_projects_with_flm_gemm(device, request):
         assert resolved.B.shape == (op.N, op.K) and not resolved.bfp16_b
 
 
+def test_llama_prompt_bounds_every_flm_gemm_by_its_rows(npu2):
+    """Each projection of a prompt chunk derives one per-call word from its
+    rows, the 256-row units they reach, and every projection shares it.
+    """
+    g = llama_1b(n_layers=2)
+    t = g.trace(**g.shapes(g.config.prefill_chunk))
+    words, shared = _words(t, share=True)
+    assert len(words) <= 32
+    gemms = [op.resolved(npu2) for op in t.operators if type(op) is FLMGEMM]
+    symbols = set()
+    for op in gemms:
+        assert {v.name for v in op.values} == {"valid", "units_valid"}
+        symbol = device_symbol(op, op.value("units_valid"))
+        symbols.add(shared.get(symbol, symbol))
+        for rows, reached in ((1, 1), (15, 1), (256, 1), (257, 2), (2048, 8)):
+            assert op.derived_at("units_valid", valid=rows) == reached
+    assert len(symbols) == 1
+
+
 @pytest.mark.parametrize("step", ["decode", "prompt"])
 def test_llama_does_not_grow_with_the_context(step):
     """``max_seq_len`` sizes the caches, the RoPE table and the draws a

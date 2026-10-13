@@ -9,6 +9,7 @@ import iron
 from iron.common import Carried, Scratchpad
 from iron.operators import GEMM, ElementwiseAdd, ElementwiseMul, RoPE, SiLU
 from iron.operators.copy import Copy
+from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 
 
 class Rotate(iron.Graph):
@@ -23,6 +24,15 @@ class Project(iron.Graph):
 
     def body(self, x, w, *, n: Scratchpad[np.int32]):
         return GEMM(x[:n], w, b_col_maj=True)
+
+
+class ProjectAsStored(iron.Graph):
+    """The first `n` rows of `x` projected by `w` as a checkpoint stores it,
+    on flm.GEMM, as a prompt chunk's projections are.
+    """
+
+    def body(self, x, w, *, n: Scratchpad[np.int32]):
+        return FLMGEMM(x[:n], w, b_col_maj=True)
 
 
 class Walk(iron.Graph):

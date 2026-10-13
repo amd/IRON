@@ -41,6 +41,7 @@ from iron.common.design import (
     Sequence,
     build_design,
 )
+from iron.common.graph.compiled import _words
 from iron.operators.clamp import Clamp
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.design import Epilogue
@@ -52,6 +53,7 @@ from iron.operators.repeat import Repeat
 from iron.operators.rope import RoPE
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.silu import SiLU
+from iron.tests.common.graphs import ProjectAsStored
 from iron.tests.common.declare import Rows
 
 # A descriptor's fields are the current device's.
@@ -86,7 +88,7 @@ class Task(NamedTuple):
 
 
 _TASK = re.compile(
-    r"%(\d+) = aiex\.dma_configure_task_for @(\w+) \{\s*"
+    r"%(\d+) = aiex\.dma_configure_task_for @(\w+) (?:repeat %\w+ : \w+ )?\{\s*"
     r"aie\.dma_bd\(%arg(\d+) : \S+ offset = (\d+) (?:len = %?\w+ )?"
     r"sizes = \[([^\]]*)\] strides = \[([^\]]*)\]\)"
     r"(?: \{length_parameter = @(\w+), length_unit = (\d+) : i32\})?"
@@ -375,6 +377,7 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
         "clamp_max": int(np.float32(np.inf).view(np.int32)),
         "n_chunks": 2,
         "n_units": 2,
+        "units_valid": 2,
     }
     with pytest.raises(ValueError, match="multiple of 256"):
         flm_gemm.GEMM(M=100, K=1024, N=1024).resolved(
@@ -411,6 +414,86 @@ def test_flm_gemm_folds_an_activation_then_a_clamp_into_its_epilogue():
     assert plain.epilogue_modes == (Epilogue.NONE,)
     finished = SiLU(size=size, finish=(Link(ElementwiseMul(size=size)),))
     assert op.fold(finished) is None
+
+
+def _flm_gemm_moves(op, image, rows):
+    """Bytes each operand of ``op``'s sequence moves in a call whose row bound
+    is ``rows``: each shim task's elements times its runs. On an xclbin the
+    one per-call scalar a size takes is the units the bound reaches, and a
+    runtime outer size is the task's repeat.
+    """
+    units = op.derived_at("units_valid", valid=rows) if op.bound_extents else None
+    moved = dict.fromkeys((b.name for b in op.buffers), 0)
+    for t in generated_sequence(op, image)[1]:
+        sizes = [units if s.startswith("%") else int(s) for s in t.sizes.split(", ")]
+        repeat = re.search(r"repeat_count = (\d+)", t.attributes)
+        runs = 1 + int(repeat[1]) if repeat else 1
+        if t.sizes.startswith("%"):
+            runs = units
+        buffer = op.buffers[t.arg]
+        moved[buffer.name] += prod(sizes[1:]) * runs * bfp.itemsize(buffer.dtype)
+    return moved
+
+
+@pytest.mark.parametrize("device", ["npu1", "npu2"])
+def test_a_bounded_flm_gemm_moves_a_and_c_for_the_units_its_bound_reaches(
+    device, request
+):
+    """Llama's q projection on a 15-row prompt chunk, as an xclbin, moves A
+    and C for one unit, the 256 rows its four core rows join into a C block,
+    and at 2048 rows for all eight, as it does unbounded. B moves the same
+    at any bound, and A once per column block, as unbounded. A full ELF has
+    no per-call repeat count for A's units yet, so there it moves every row.
+    """
+    dev = request.getfixturevalue(device)
+    M = K = width = 2048
+    unbounded = flm_gemm.GEMM(M=M, K=K, N=width, b_col_maj=True).resolved(dev)
+    op = flm_gemm.GEMM(M=M, K=K, N=width, b_col_maj=True)
+    op.use_value("valid", N)
+    op = op.resolved(dev)
+    blocks = width // (op.tile_n * op.cols)
+    whole = _flm_gemm_moves(unbounded, "xclbin", M)
+    for rows, units in ((15, 1), (256, 1), (257, 2), (2048, 8)):
+        assert _flm_gemm_moves(op, "xclbin", rows) == {
+            "A": units * 256 * K * 2 * blocks,
+            "B": whole["B"],
+            "C": units * 256 * width * 2,
+        }, rows
+    assert _flm_gemm_moves(op, "xclbin", M) == whole
+    assert _flm_gemm_moves(op, "elf", 15) == _flm_gemm_moves(unbounded, "elf", M)
+
+
+def test_on_an_xclbin_a_bounded_flm_gemm_repeats_a_by_the_dispatch_scalar(npu1):
+    # No scratchpad: A's units are the repeat count of one task per row and
+    # column block, C's row blocks its D2, both the per-call scalar.
+    op = flm_gemm.GEMM(M=512, K=1024, N=512, b_col_maj=True)
+    op.use_value("valid", N)
+    _, tasks = generated_sequence(op.resolved(npu1), "xclbin")
+    a = [t.sizes for t in tasks if t.arg == 0]
+    c = [t.sizes for t in tasks if t.arg == 2]
+    assert len(a) == 2 * 4 and len(c) == 2 * 4  # two column blocks
+    assert all(re.fullmatch(r"%\w+, 2, 64, 512", s) for s in a), a
+    assert all(re.fullmatch(r"1, %\w+, 256, 64", s) for s in c), c
+
+
+def test_a_bounded_flm_gemm_refuses_a_call_with_no_rows(npu2):
+    """The cores drain the B replays past the bound before the units it
+    reaches, so the last C ends the call; with no units there is no C to
+    wait on, and the call is refused as it writes its words, before it is
+    dispatched.
+    """
+    traced = ProjectAsStored().trace(x=(512, 512), w=(512, 512))
+    words, _ = _words(traced)
+    assert [w({"n": 1}) for w in words if w.symbol.endswith("units_valid")] == [1]
+    with pytest.raises(ValueError, match="at least one row, got 0"):
+        [w({"n": 0}) for w in words]
+
+
+def test_a_row_bound_needs_one_row_block_per_unit():
+    op = flm_gemm.GEMM(M=512, K=512, N=512, b_col_maj=True, m_chunk=2)
+    op.use_value("valid", N)
+    with pytest.raises(ValueError, match="row bound needs m_chunk=1"):
+        op.resolved(from_name("npu2", n_cols=8))
 
 
 # --------------------------------------------------------------------------

@@ -187,12 +187,17 @@ def _sigmoid(x):
 ) = range(6)
 
 
-def rtp_layout(m_chunk):
+def rtp_layout(m_chunk, units_valid=False):
     """Slot index for each optional parameter, and the total word count.
 
     A word is not free: the sequence writes one per core, costing ~2 us of
     dispatch latency against a ~107 us floor. So optional groups are omitted
     rather than defaulted.
+
+    Args:
+        m_chunk: Row blocks per unit; past 1, the unit counts get words.
+        units_valid: A slot for the units a row bound reaches, where the
+            cores read it from this buffer rather than the scratchpad.
     """
     slots = {}
     n = 6
@@ -200,6 +205,9 @@ def rtp_layout(m_chunk):
         slots["n_chunks"] = n
         slots["n_units"] = n + 1
         n += 2
+    if units_valid:
+        slots["units_valid"] = n
+        n += 1
     return slots, n
 
 
