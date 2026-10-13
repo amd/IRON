@@ -236,6 +236,8 @@ class LogMel(iron.Graph):
 
 # Each product's float32 sum rounded once.
 ACCURATE = dict(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
+# What every device's GEMM row block divides (aie2's 16 rows, aie2p's 8).
+GEMM_ROWS = 16
 
 
 class Conv2d(iron.Graph):
@@ -254,7 +256,11 @@ class Conv2d(iron.Graph):
     output channel its own input channel, ``channels_per_group == 1``) is a
     GEMM of ``kernel`` consecutive input rows, gathered whole, by the weight
     laid out as a band over the width (and, depthwise, block-diagonal over
-    the channels too, so the GEMM mixes none of them). More channels, not
+    the channels too, so the GEMM mixes none of them). Where ``out_rows`` is
+    not a whole number of ``GEMM_ROWS``-row blocks, the gather repeats its
+    first row up to the next block and the GEMM computes every row: the
+    output is those rows, bounded by ``rows`` (``rows`` rows where it is a
+    number), and a caller cannot give it. More channels, not
     depthwise, are a GEMM of the gathered ``kernel * kernel * channels``
     patches by the weight, the output channels as its rows, so that few of
     them leave the patches to span every column (every row is then computed,
@@ -343,11 +349,23 @@ class Conv2d(iron.Graph):
         R, line = x.shape
         out_rows = (R - k) // s + 1
         if self.banded:
-            pattern = TensorAccessPattern(
+            gathered = TensorAccessPattern(
                 (R, line), 0, [out_rows, k * line], [s * line, 1]
             )
-            a = Copy(x, src=pattern).reshape(out_rows, k * line)[:rows]
-            return GEMM(a, self.matrix, *([] if y is None else [y]), **ACCURATE)
+            spare = -out_rows % GEMM_ROWS
+            if not spare:
+                a = Copy(x, src=gathered).reshape(out_rows, k * line)[:rows]
+                return GEMM(a, self.matrix, *([] if y is None else [y]), **ACCURATE)
+            if y is not None:
+                raise ValueError(
+                    f"Conv2d: {out_rows} output rows are not whole {GEMM_ROWS}-row "
+                    f"blocks, so the GEMM computes {spare} more than a caller's "
+                    f"output holds; take the returned output instead"
+                )
+            first = TensorAccessPattern((R, line), 0, [1, k * line], [s * line, 1])
+            a = Copy(x, src=(gathered, *[first] * spare))
+            out = GEMM(a.reshape(out_rows + spare, k * line), self.matrix, **ACCURATE)
+            return out[:rows]
         n = out_rows * self.out_width
         patches = TensorAccessPattern(
             (R, line),

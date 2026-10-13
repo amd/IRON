@@ -22,11 +22,12 @@ pytestmark = pytest.mark.usefixtures("npu2")
 # EmbeddingGemma 2's subsampling convolutions at a tenth of their rows:
 # one channel to 128 as a band, padded and bordered, and 128 to 32 by
 # gathered patches; and a depthwise one, every output channel its own
-# input channel, at stride 2.
+# input channel, at stride 2, its 13 output rows not whole GEMM row blocks.
 CASES = {
     "band": ((128, 1), 130, 128, dict(stride=2, padding=1, border=1)),
     "patches": ((32, 128), 66, 18, dict(stride=2)),
     "depthwise": ((16, 1), 34, 16, dict(stride=2, groups=16)),
+    "depthwise_13_rows": ((64, 1), 27, 26, dict(stride=2, padding=1, groups=64)),
 }
 
 
@@ -66,6 +67,28 @@ def test_a_caller_bounds_its_rows(case):
     bound = {type(b.op) for b in traced.bindings if b.expression.value.name == "n"}
     assert ReLU in bound
     assert {h.name for _, h in traced.weights.values()} == {"conv.matrix"}
+
+
+def test_an_unaligned_gather_computes_whole_blocks():
+    conv, _, x = draw("depthwise_13_rows")
+    traced = Subsample(conv).trace(x=(x.shape, bfloat16))
+    gemm = next(s.op for s in traced.steps if isinstance(s.op, GEMM))
+    assert gemm.M == 16
+
+
+class Into(iron.Graph):
+    def __init__(self, conv: Conv2d, rows: int):
+        self.conv = conv
+        self.out = iron.state((rows, conv.out_line))
+
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        self.conv(x, self.out, rows=n)
+
+
+def test_an_unaligned_gather_writes_no_callers_output():
+    conv, _, x = draw("depthwise_13_rows")
+    with pytest.raises(ValueError, match="not whole 16-row blocks"):
+        Into(conv, 13).trace(x=(x.shape, bfloat16))
 
 
 def test_gathered_patches_hold_no_padding():

@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """iron.lm.Conv2d on a device, at EmbeddingGemma 2's subsampling shapes
-and a depthwise one: one compile each, called at two row counts, every
-output row the call computes held to the float32 convolution within its
-GEMM's bound, 2 units of 2^-8 of the convolution of |x| by |weight|.
+and two depthwise ones, the second's 13 output rows not whole GEMM row
+blocks: one compile each, called at two row counts, every output row the
+call computes held to the float32 convolution within its GEMM's bound, 2
+units of 2^-8 of the convolution of |x| by |weight|.
 """
 
 import numpy as np
@@ -23,6 +24,7 @@ SHAPES = {
     "band": ((128, 1), 3074, 128, dict(stride=2, padding=1, border=1)),
     "patches": ((32, 128), 1538, 66, dict(stride=2)),
     "depthwise": ((64, 1), 514, 64, dict(stride=2, groups=64)),
+    "depthwise_13_rows": ((64, 1), 27, 26, dict(stride=2, padding=1, groups=64)),
 }
 
 
@@ -43,7 +45,7 @@ def test_conv2d(case, share):
     conv, weight, x = case
     out_rows = (x.shape[0] - 3) // 2 + 1
     rows = int(out_rows * share)
-    got = conv(x, rows=rows).numpy().reshape(out_rows, conv.out_line)[:rows]
+    got = conv(x, rows=rows).numpy().reshape(-1, conv.out_line)[:rows]
     want = conv.exact(x, weight)[:rows]
     bound = 2.0**-7 * conv.exact(np.abs(x.astype(np.float32)), np.abs(weight))[:rows]
     assert (np.abs(got.astype(np.float32) - want) <= bound).all()
