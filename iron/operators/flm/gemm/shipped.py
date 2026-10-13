@@ -152,7 +152,7 @@ class Shipped(
     # The port's named values are not this image's: it reads one block of
     # eight words behind a lock.
     n_val = m_row_blocks = k_iters = mode = clamp_min = clamp_max = None
-    n_chunks = n_units = units_valid = None
+    n_chunks = n_units = units_valid = units_repeat = None
     rtp = Value(
         np.int32, address=RTP_ADDRESS, lock=RTP_LOCK_ID, derive=_parameter_words
     )

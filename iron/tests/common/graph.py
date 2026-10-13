@@ -1077,22 +1077,26 @@ def test_llama_prompt_projects_with_flm_gemm(device, request):
 
 
 def test_llama_prompt_bounds_every_flm_gemm_by_its_rows(npu2):
-    """Each projection of a prompt chunk derives one per-call word from its
-    rows, the 256-row units they reach, and every projection shares it.
+    """Each projection of a prompt chunk derives two per-call words from its
+    rows, the 256-row units they reach and that less one, A's repeat count,
+    and every projection shares them.
     """
     g = llama_1b(n_layers=2)
     t = g.trace(**g.shapes(g.config.prefill_chunk))
     words, shared = _words(t, share=True)
     assert len(words) <= 32
     gemms = [op.resolved(npu2) for op in t.operators if type(op) is FLMGEMM]
+    names = {"units_valid", "units_repeat"}
     symbols = set()
     for op in gemms:
-        assert {v.name for v in op.values} == {"valid", "units_valid"}
-        symbol = device_symbol(op, op.value("units_valid"))
-        symbols.add(shared.get(symbol, symbol))
+        assert {v.name for v in op.values} == names | {"valid"}
+        for name in names:
+            symbol = device_symbol(op, op.value(name))
+            symbols.add(shared.get(symbol, symbol))
         for rows, reached in ((1, 1), (15, 1), (256, 1), (257, 2), (2048, 8)):
             assert op.derived_at("units_valid", valid=rows) == reached
-    assert len(symbols) == 1
+            assert op.derived_at("units_repeat", valid=rows) == reached - 1
+    assert len(symbols) == len(names)
 
 
 @pytest.mark.parametrize("step", ["decode", "prompt"])
