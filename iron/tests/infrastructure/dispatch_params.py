@@ -20,6 +20,7 @@ import pytest
 import aie.utils as aie_utils
 from aie.dialects import arith
 from aie.extras import types as T
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import ObjectFifo, Program, Runtime
 from aie.iron.controlflow import range_
 
@@ -48,10 +49,9 @@ def chunk_copy(dev, max_chunks):
         for i in range_(n):
             offset = arith.index_cast(T.i32(), i) * CHUNK
             transfer = dict(
-                sizes=[1, 1, 1, CHUNK],
-                strides=[0, 0, 0, 1],
-                offset=offset,
-                transfer_len=CHUNK,
+                tap=TensorAccessPattern(
+                    (max_chunks * CHUNK,), offset, [1, 1, 1, CHUNK], [0, 0, 0, 1]
+                ),
                 managed=False,
             )
             in_task = in_prod.fill(src, wait=False, **transfer)

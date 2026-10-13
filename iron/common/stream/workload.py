@@ -145,8 +145,7 @@ def export_workload(
     _rename(model, node_names, result_names or {}, output_name)
 
     nodes = tuple(
-        (node.name, op_for_onnx_type(node.op_type).kernel.key)
-        for node in model.graph.node
+        (node.name, op_for_onnx_type(node.op_type).kernel) for node in model.graph.node
     )
     # Runtime buffer order: activations, then weights in module order, then the
     # output -- the order the operator's argument spec and the mapping follow.
