@@ -205,7 +205,7 @@ class GEMM(Operator):
     cols: int = auto(repr=False, derived=True)
     bfp16_b: bool = auto(repr=False, array=True, derived=True)
     # B's element type, on the array and in DDR alike; the host holds a
-    # block-float B as bytes (BoundBuffer.host_dtype).
+    # block-float B as bytes (Operand.host_dtype).
     b_dtype: Any = auto(repr=False, derived=True)
     l1_b_depth: int = auto(repr=False, array=True, derived=True)
     a_l2: int = auto(repr=False, derived=True)

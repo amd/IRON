@@ -30,7 +30,7 @@ def _base_name(buf: str) -> str:
 def _signature(op):
     """The runtime arguments an operator takes: direction, shape and dtype each."""
     return [
-        (b.direction.value, tuple(b.shape), bfp.dtype_name(b.dtype)) for b in op.buffers
+        (type(b).__name__, tuple(b.shape), bfp.dtype_name(b.dtype)) for b in op.buffers
     ]
 
 
@@ -202,9 +202,9 @@ class OperatorSequence:
             reads, writes = [], []
             for buf, b in zip(bufs, op.buffers):
                 sizes.setdefault(buf, b.held_nbytes)
-                if b.direction.fills:
+                if b.fills:
                     reads.append(buf)
-                if b.direction.drains:
+                if b.drains:
                     writes.append(buf)
             steps.append((reads, writes))
 
@@ -235,9 +235,9 @@ class OperatorSequence:
                 name = _base_name(buf)
                 if name not in sizes:
                     continue
-                if b.direction.fills:
+                if b.fills:
                     reads.append(name)
-                if b.direction.drains:
+                if b.drains:
                     writes.append(name)
             steps.append((reads, writes))
         assert self.arena is not None, "placed in an arena plan"

@@ -16,18 +16,8 @@ from .field import (
     param,
     Select,
 )
-from .member import (
-    Carried,
-    Direction,
-    DispatchTime,
-    Extent,
-    In,
-    InOut,
-    Out,
-    Scratchpad,
-    Shim,
-    Value,
-)
+from .member import Carried, DispatchTime, Extent, Scratchpad, Value
+from .operand import In, InOut, Operand, Out
 from .operator import CopyRun, Link, Operator
 from .placement import Level, Pins, Placement
 from .profile import Profile
@@ -37,7 +27,6 @@ __all__ = [
     "Carried",
     "Choices",
     "CopyRun",
-    "Direction",
     "Divisors",
     "DispatchTime",
     "Extent",
@@ -45,13 +34,13 @@ __all__ = [
     "InOut",
     "Level",
     "Link",
+    "Operand",
     "Operator",
     "Out",
     "Pins",
     "Placement",
     "Profile",
     "Scratchpad",
-    "Shim",
     "Unresolvable",
     "Value",
     "Width",

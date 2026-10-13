@@ -1,14 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What an operator declares besides its fields: its buffers (the host ABI,
-each with a tile its own stream) and the scalar values no buffer carries.
+"""What an operator declares besides its fields: the ``Member`` base, and the
+scalar values no operand carries.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -22,47 +20,20 @@ from typing import (
 )
 
 import numpy as np
-from ml_dtypes import bfloat16
 
-from .field import Shape, _DimSpec
+from .field import _DimSpec
 
 if TYPE_CHECKING:
     from typing import Self
 
     # Named in the subclasses' base expressions as strings (bound imports member).
-    from .bound import BoundBuffer, BoundValue
+    from .bound import BoundValue
 
 
 B = TypeVar("B")  # the bound form an instance serves
 
 
-@dataclass(frozen=True)
-class Shim:
-    """A pinned shim endpoint: column and DMA channel on row 0."""
-
-    col: int
-    channel: int | None = None
-
-
-class Direction(Enum):
-    """Which way a buffer moves between the host and the array."""
-
-    IN = "in"
-    OUT = "out"
-    INOUT = "inout"
-
-    @property
-    def fills(self) -> bool:
-        """The host fills it: an input of a call."""
-        return self is not Direction.OUT
-
-    @property
-    def drains(self) -> bool:
-        """The host reads it back: an output of a call, its stream leaving the array."""
-        return self is not Direction.IN
-
-
-class _Member(Generic[B]):
+class Member(Generic[B]):
     """Base of everything declared unannotated in an Operator body; on an
     instance it reads as its bound form ``B``.
     """
@@ -85,7 +56,7 @@ class _Member(Generic[B]):
         try:
             return instance._bound[self.name]
         except (AttributeError, KeyError):
-            if self.when is not None and not getattr(instance, self.when.name, True):
+            if self.when is not None and not self.when.of(instance):
                 raise AttributeError(
                     f"{type(instance).__name__}.{self.name} is declared when="
                     f"{self.when.name}, which is False on this instance"
@@ -94,136 +65,10 @@ class _Member(Generic[B]):
                 f"{type(instance).__name__}.{self.name} is not bound yet"
             ) from None
 
-
-class _Buffer(_Member["BoundBuffer"]):
-    """A host buffer: shape in extents, a dtype, and the stream it moves through.
-
-    Args:
-        dims: The host shape.
-        dtype: The element type.
-        tile: What one fifo element holds, in the units a core reads. With
-            one the buffer is its own stream; without one it is an argument
-            of a hand-written `Operator.sequence`.
-        per: The field (or fields, multiplied) the stream is replicated over.
-        depth: The fifo depth.
-        via: A pinned shim endpoint.
-        replicate: Every `per=` lane gets the whole buffer, not a share.
-        broadcast: One fifo every worker consumes.
-        when: A bool `param()`; the operand and its stream exist only where
-            it is true, and a call giving the operand by keyword sets it.
-        finish: The cores apply the operator's `finish` to each tile of
-            this output before releasing it (`Finish`), so a consumer folds
-            into them. `True`, or the block of the output one core fills
-            of a tile, in an order of its own (GEMM's C, joined from a
-            column's cores): a step there must not depend on the order.
-        prepare: The cores apply the operator's `prepare` to each tile of
-            this input after acquiring it (`Prepare`), so the step that
-            produced it folds into them. The operator's output must be
-            linear in it, which its tolerance relies on. Without a tile, a
-            hand-written sequence carries it, a line its innermost
-            dimension, and the prologue's inputs ride the `feed=True` input.
-        feed: The finish's inputs ride this input's stream rather than
-            streams of their own: after the tiles a core reads for one
-            output tile, the next tile of this stream holds that output
-            tile's input of each (`Finish.apply`), so the finish takes no
-            input channel of the core's and no shim channel. An untiled
-            prepared input's prologue inputs ride it too, a tile each,
-            where the operator's cores take them (`Prepare.apply`).
-    """
-
-    direction: ClassVar[Direction]
-
-    def __init__(
-        self,
-        *dims: _DimSpec,
-        dtype: Any = bfloat16,
-        tile: Any = None,
-        per: _DimSpec | None = None,
-        depth: int = 2,
-        via: Shim | list[Shim] | None = None,
-        replicate: bool = False,
-        broadcast: bool = False,
-        when: _DimSpec | None = None,
-        finish: bool | tuple[_DimSpec, ...] = False,
-        prepare: bool = False,
-        feed: bool = False,
-    ) -> None:
-        if per is not None and broadcast:
-            raise TypeError("a stream is either per=<dim> or broadcast, not both")
-        if replicate and per is None:
-            raise TypeError(
-                "replicate=True needs per=<dim>: every slot receives the whole buffer"
-            )
-        # A step over a line sees a tile as a run of the output's elements.
-        if finish and (
-            isinstance(tile, (tuple, list))
-            and len(tile) != 1
-            or tile is None
-            or not self.direction.drains
-        ):
-            raise TypeError(
-                "finish=True names a streamed output of one-dimensional tiles, "
-                "which a core finishes"
-            )
-        if prepare and (
-            isinstance(tile, (tuple, list))
-            and len(tile) != 1
-            or self.direction is not Direction.IN
-        ):
-            raise TypeError(
-                "prepare=True names an input of one-dimensional tiles, or of "
-                "none, which a core prepares"
-            )
-        if feed and (tile is None or self.direction is not Direction.IN):
-            raise TypeError("feed=True names a streamed input, which a finish rides")
-        self.shape = Shape(tuple(dims))
-        self.dtype = dtype
-        self.when = when
-        self.tile = (
-            None
-            if tile is None
-            else Shape(tuple(tile) if isinstance(tile, (tuple, list)) else (tile,))
-        )
-        self.per = (
-            None if per is None else Shape(per if isinstance(per, tuple) else (per,))
-        )
-        self.depth = depth
-        self.via = via
-        self.replicate = replicate
-        self.broadcast = broadcast
-        self.finish = bool(finish)
-        self.finish_block = None if isinstance(finish, bool) else Shape(finish)
-        self.prepare = prepare
-        self.feed = feed
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({self.shape})"
-
-
-class In(_Buffer):
-    """A buffer the host fills and the array reads."""
-
-    direction = Direction.IN
-
-
-class Out(_Buffer):
-    """A buffer the array writes and the host reads."""
-
-    direction = Direction.OUT
-
-
-class InOut(_Buffer):
-    """A buffer the host fills and the array writes in place; what the
-    stream does not drain stays as the host gave it.
-    """
-
-    direction = Direction.INOUT
-
-
-def present(member: _Member, flags: Mapping[str, Any]) -> bool:
-    """Whether an operand exists under ``flags``; a flag left out is its default."""
-    when = member.when
-    return when is None or bool(flags.get(when.name, when.default))
+    def present(self, flags: Mapping[str, Any]) -> bool:
+        """Whether this member exists under ``flags``; a flag left out is its default."""
+        when = self.when
+        return when is None or bool(flags.get(when.name, when.default))
 
 
 class ValueSpec:
@@ -239,7 +84,7 @@ class ValueSpec:
         return f"carried {text}" if self.carried else text
 
 
-class _Value(_Member["BoundValue"]):
+class _Value(Member["BoundValue"]):
     """A per-call scalar. See ``Scratchpad`` and ``DispatchTime``."""
 
     kind: ClassVar[str] = ""

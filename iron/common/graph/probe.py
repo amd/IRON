@@ -67,8 +67,8 @@ import numpy as np
 from aie.iron.device import Device
 from aie.utils import bfp
 
-from ..declare import Direction, Operator
-from ..declare.bound import BoundBuffer, BoundValue
+from ..declare import Operand, Operator, Out
+from ..declare.bound import BoundValue
 from ..declare.operator import _PlaceWord
 from ..design import OperatorDesign, device_symbol
 from ..image.callable import FullELFCallable, StepCallable
@@ -349,9 +349,7 @@ class Standalone:
         for k in self._filled:
             op = self.steps[k]
             for buf, name_ in zip(op.buffers, self._names(k, op)):
-                (out_names if buf.direction is Direction.OUT else in_names).append(
-                    name_
-                )
+                (out_names if isinstance(buf, Out) else in_names).append(name_)
         self.sequence = OperatorSequence(
             name,
             [(op, *self._names(self._slot[k], op)) for k, op in enumerate(self.steps)],
@@ -375,11 +373,11 @@ class Standalone:
                 if buf.name in addressed:
                     content = np.ascontiguousarray(addressed[buf.name], buf.dtype)
                     self._bytes(name_)[: buf.nbytes] = content.view(np.uint8)
-                elif buf.direction.fills:
+                elif buf.fills:
                     content = self._content(buf, inputs.get(op, {}), rng)
                     at = buf.placement[1] * bfp.itemsize(buf.dtype)
                     self._bytes(name_)[at : at + buf.nbytes] = content
-                    if buf.direction.drains:
+                    if buf.drains:
                         self._before[name_] = content.copy()
         ops = {id(op): op for op in self.steps}.values()
         artifacts = self.sequence.artifacts
@@ -418,7 +416,7 @@ class Standalone:
 
     @staticmethod
     def _content(
-        buf: BoundBuffer,
+        buf: Operand,
         inputs: Mapping[str, np.ndarray],
         rng: np.random.Generator,
     ) -> np.ndarray:
@@ -460,7 +458,7 @@ class Standalone:
         op = self.steps[k]
         out = {}
         for buf, name in zip(op.buffers, self._names(self._slot[k], op)):
-            if buf.direction.fills:
+            if buf.fills:
                 at = buf.placement[1] * bfp.itemsize(buf.dtype)
                 data = self._before.get(name, self._bytes(name)[at : at + buf.nbytes])
                 out[buf.name] = data.view(buf.host_dtype).reshape(buf.host_shape)
@@ -473,7 +471,7 @@ class Standalone:
         op = self.steps[k]
         out = {}
         for buf, name in zip(op.buffers, self._names(self._slot[k], op)):
-            if not buf.direction.drains:
+            if not buf.drains:
                 continue
             under = [slice(None)] * len(buf.shape)
             for extent in op.bound_extents:

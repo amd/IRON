@@ -15,7 +15,8 @@ from aie.ir import IntegerType
 from aie.iron import TaskGroup, WorkerRuntimeBarrier, sync_parameters
 
 from ..declare import DispatchTime, Operator
-from ..declare.bound import BoundBuffer, BoundValue, BufferView, Lane
+from ..declare.bound import BoundValue
+from ..declare.operand import BufferView, Lane, Operand
 from ..declare.operator import _PlaceWord
 from .bd import BdLimits
 
@@ -58,9 +59,7 @@ class Sequence:
                 self.drain(slot, (buf, tap), group=tg, wait=True, size_by=size_by)
         tg.finish()
 
-    def plan(
-        self, buf: BoundBuffer
-    ) -> list[tuple[Any, TensorAccessPattern, dict | None]]:
+    def plan(self, buf: Operand) -> list[tuple[Any, TensorAccessPattern, dict | None]]:
         """The derived ``(slot, tap, size_by)`` transfers of one operand:
         ``split``, or ``round_robin`` under a bound.
         """
@@ -84,7 +83,7 @@ class Sequence:
         ]
 
     @staticmethod
-    def split(buffer: BoundBuffer) -> list[tuple[Lane, TensorAccessPattern]]:
+    def split(buffer: Operand) -> list[tuple[Lane, TensorAccessPattern]]:
         """``[(lane, tap), ...]``: the whole buffer for a one-lane or broadcast
         stream, else the first non-batch axis in one block per lane.
         """
@@ -97,14 +96,14 @@ class Sequence:
         if axis >= len(shape) or shape[axis] % count:
             raise ValueError(
                 f"{buffer.name} {shape} does not divide across its {count} lanes "
-                f"on axis {axis}. Check {type(buffer._op).__name__}.compatible()"
+                f"on axis {axis}. Check {type(buffer.op).__name__}.compatible()"
             )
         parts = TensorAccessPattern.full(shape).partition(count, axis)
         return [(buffer.lane(i), parts[i]) for i in range(count)]
 
     @staticmethod
     def round_robin(
-        buffer: BoundBuffer, axis: int
+        buffer: Operand, axis: int
     ) -> list[tuple[Lane, TensorAccessPattern, int]]:
         """``[(lane, tap, dim), ...]`` with ``axis`` bounded per call, ``dim``
         the descriptor dimension a call patches.
@@ -129,7 +128,7 @@ class Sequence:
             )
         tiles = shape[axis] // (lanes * tile_rows)
         run = tile_rows * inner
-        shim = BdLimits.of(buffer._op.dev, 0, 0)
+        shim = BdLimits.of(buffer.op.dev, 0, 0)
         granule = shim.granule(dtype)
         halves = shim.factor(run, granule)
         if halves is None:
@@ -197,7 +196,7 @@ class Sequence:
         lane = self._lane(stream)
         riding = [e for e in self.op.finish_inputs if not e.streamed]
         buffer, tap, sliced_by = self._resolve(source, stream)
-        if lane.buffer.member.feed and riding and buffer.name == lane.buffer.name:
+        if lane.buffer.feed and riding and buffer.name == lane.buffer.name:
             name = f"{type(self.op).__name__}.{buffer.name}"
             if offset_by or size_by or sliced_by or repeat_by:
                 raise ValueError(
@@ -236,7 +235,7 @@ class Sequence:
         task = self._transfer(
             "fill", stream, source, group, wait, offset_by, size_by, managed, repeat_by
         )
-        if not lane.buffer.member.prepare:
+        if not lane.buffer.prepare:
             return task
         for extra in self.op.prepare_inputs:
             self._transfer(
@@ -436,7 +435,7 @@ class Sequence:
 
     @staticmethod
     def _lane(stream) -> Lane:
-        if isinstance(stream, BoundBuffer):
+        if isinstance(stream, Operand):
             if stream.count != 1:
                 raise ValueError(f"{stream.name} is per-{stream.count}; name a lane")
             return stream.lane(0)
@@ -449,18 +448,18 @@ class Sequence:
 
     def _resolve(
         self, what, stream
-    ) -> tuple[BoundBuffer, TensorAccessPattern, BoundValue | None]:
+    ) -> tuple[Operand, TensorAccessPattern, BoundValue | None]:
         """``(buffer, tap, offset_by)`` of what a transfer moves."""
         if isinstance(what, TensorAccessPattern):
             return self._lane(stream).buffer, what, None
-        if isinstance(what, BoundBuffer):
+        if isinstance(what, Operand):
             return what, what.tap, None
         if isinstance(what, BufferView):
             return what.buffer, what.tap, what.offset_by
         if (
             isinstance(what, tuple)
             and len(what) == 2
-            and isinstance(what[0], BoundBuffer)
+            and isinstance(what[0], Operand)
             and isinstance(what[1], TensorAccessPattern)
         ):
             return what[0], what[1], None
@@ -469,7 +468,7 @@ class Sequence:
             f"(buffer, TensorAccessPattern); got {what!r}"
         )
 
-    def data(self, buffer: BoundBuffer):
+    def data(self, buffer: Operand):
         return self._rt_data[buffer.name]
 
     def preamble(self, **values) -> None:

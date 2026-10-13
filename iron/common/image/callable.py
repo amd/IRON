@@ -610,7 +610,7 @@ class StepCallable:
                 inputs, expected = self._reference(step_op, args, at)
             if kernel is None:
                 for buf, spec in zip(args, step_op.buffers):
-                    if spec.direction.drains:
+                    if spec.drains:
                         out = buf.numpy_view()[at[spec.name] :]
                         result = expected[spec.name].reshape(-1)
                         out[: spec.elements] = result.astype(out.dtype)
@@ -643,9 +643,7 @@ class StepCallable:
         inputs = {b.name: held[b.name] for b in step_op.inputs}
         # A reference that takes its outputs writes them in place, keeping
         # what it does not touch (a cache a Copy scatters into).
-        outputs = {
-            b.name: held[b.name] for b in step_op.outputs if not b.direction.fills
-        }
+        outputs = {b.name: held[b.name] for b in step_op.outputs if not b.fills}
         symbols = {v.name: device_symbol(step_op, v) for v in step_op.values}
         values = {
             name: self.dispatch_values[symbol]
@@ -676,7 +674,7 @@ class StepCallable:
         written = {
             spec.name: buf.numpy()[at[spec.name] :][: spec.elements]
             for buf, spec in zip(args, step_op.buffers)
-            if spec.direction.drains
+            if spec.drains
         }
         for name, verdict in step_op.judge(inputs, written, tol, expected).items():
             logger.info(

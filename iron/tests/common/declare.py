@@ -14,7 +14,7 @@ import dataclasses
 
 import numpy as np
 import pytest
-from aie.iron.device import from_name
+from aie.iron.device import Tile, from_name
 from aie.utils.trace import TraceConfig
 from ml_dtypes import bfloat16
 
@@ -28,14 +28,12 @@ from iron.common import (
     Profile,
     Scratchpad,
     Select,
-    Shim,
     Unresolvable,
     Value,
     auto,
     OptionalDim,
     param,
 )
-from iron.common.declare import Direction
 from iron.common.declare.field import Auto, DimRef, Param
 from iron.common.design import OperatorDesign
 from iron.operators import ReLU as LibraryReLU
@@ -102,16 +100,16 @@ def test_fields_are_reattached_as_dim_refs():
 
 def test_members_keep_declaration_order_and_names():
     assert [m.name for m in MV._members] == ["A", "B", "C", "count", "start"]
-    assert MV.A.direction is Direction.IN and MV.C.direction is Direction.OUT
+    assert isinstance(MV.A, In) and isinstance(MV.C, Out)
 
 
 def test_shapes_captured_bare_names_resolve_to_refs():
     # ``M`` and ``num_batches`` were Field objects in the class body; class
     # creation rewrote them to DimRefs on the class.
-    dims = MV.A.shape.dims
+    dims = MV.A.dims.dims
     assert dims[0].ref.name == "num_batches"
     assert dims[1] == MV.M and dims[2] is MV.K
-    assert MV.A.tile.dims == (MV.tile_out, MV.K)
+    assert MV.A.tile_dims.dims == (MV.tile_out, MV.K)
     assert MV.A.per.dims == (MV.columns,)
 
 
@@ -143,7 +141,7 @@ def test_dataclass_constructor_is_typed_by_real_fields():
 
 
 def test_a_tunable_may_name_a_tile_but_not_a_buffer_shape():
-    assert MV.A.tile.dims[0] is MV.tile_out
+    assert MV.A.tile_dims.dims[0] is MV.tile_out
     with pytest.raises(TypeError, match="host shape may not depend on tuning"):
 
         class Bad(Operator):
@@ -160,7 +158,7 @@ def test_plain_defaulted_field_in_a_shape_is_its_literal():
         n: int = 4
         x = In(n, tile=(n,))
 
-    assert Plain.x.shape.dims == (4,)
+    assert Plain.x.dims.dims == (4,)
     assert Plain(n=8).x.shape == (4,)
 
 
@@ -312,10 +310,10 @@ def test_probed_sets_each_probe_field_and_nothing_else():
 
 def test_buffers_resolve_shape_dtype_and_direction():
     specs = MV(M=64, K=256, num_batches=2).buffers
-    assert [(s.direction, s.shape) for s in specs] == [
-        (Direction.IN, (2, 64, 256)),
-        (Direction.IN, (2, 256)),
-        (Direction.OUT, (2, 64)),
+    assert [(type(s), s.shape) for s in specs] == [
+        (In, (2, 64, 256)),
+        (In, (2, 256)),
+        (Out, (2, 64)),
     ]
     assert specs[0].dtype is bfloat16
     op = MV(M=1024, K=256)
@@ -350,7 +348,7 @@ def test_buffers_carry_the_declared_dtype_and_size(npu2):
 
     x, y = Repeat(rows=8, cols=64, repeat=4, dtype=np.int32).buffers
     assert x.dtype == np.int32 and y.dtype == np.int32
-    assert (x.direction, y.direction) == (Direction.IN, Direction.OUT)
+    assert (type(x), type(y)) == (In, Out)
     assert y.nbytes == 8 * 64 * 4 * 4
 
 
@@ -399,8 +397,8 @@ def test_shim_pins_declare():
     class Pinned(Operator):
         n: int = param()
         c: int = auto(2)
-        x = In(n, tile=(n,), via=Shim(col=1, channel=0))
-        y = Out(n, tile=(n,), via=[Shim(col=c, channel=0) for c in range(2)], per=(c,))
+        x = In(n, tile=(n,), via=Tile(1, 0), channel=0)
+        y = Out(n, tile=(n,), via=[Tile(c, 0) for c in range(2)], channel=0, per=(c,))
 
     op = Pinned(n=2)
     pins = [op.x.lane().shim] + [op.y.lane(i).shim for i in range(2)]
@@ -709,7 +707,7 @@ def test_overriding_an_inherited_field_needs_an_annotation():
 
 
 def test_resolve_columns_is_the_count_given_or_the_most_that_fit():
-    from aie.iron.device import from_name
+    from aie.iron.device import Tile, from_name
 
     op = MV(M=96, K=64)
     dev = from_name("npu2", n_cols=8)  # the shim budget is the device's
@@ -821,7 +819,7 @@ def test_mha_pads_the_sequence_and_groups_kv():
     # Grouped K/V are narrower than Q; plain K/V are exactly as wide.
     assert grouped[1].shape == (2, 128, 64)
     assert plain[1].shape == plain[0].shape
-    assert [spec.direction for spec in grouped] == [Direction.IN] * 3 + [Direction.OUT]
+    assert [type(spec) for spec in grouped] == [In] * 3 + [Out]
 
 
 # --------------------------------------------------------------------------

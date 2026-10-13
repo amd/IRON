@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
-from aie.iron.device import from_name
+from aie.iron.device import Tile, from_name
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
@@ -30,7 +30,6 @@ from iron.common import (
     Link,
     Operator,
     Out,
-    Shim,
     Value,
     Xclbin,
     auto,
@@ -525,8 +524,9 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
 
     op = Shipped(M=256, K=1024, N=1152)
     assert op.external.filename == "flm_mm_f81eba71.xclbin"
-    pins = [op.A.lane(r).shim for r in range(4)] + [op.B.lane(3).shim]
-    assert [(p.col, p.channel) for p in pins if p is not None] == [
+    pins = [(op.A.lane(r).shim, op.A.channel) for r in range(4)]
+    pins.append((op.B.lane(3).shim, op.B.channel))
+    assert [(tile.col, channel) for tile, channel in pins] == [
         (0, 0),
         (2, 0),
         (4, 0),
@@ -548,14 +548,14 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
 
         class Unplaced(Operator, image=image):
             n: int = param()
-            x = In(n, tile=(64,), via=Shim(0))
+            x = In(n, tile=(64,), via=Tile(0, 0))
             count = Value(np.int32, derive=lambda op: op.n)
 
     with pytest.raises(TypeError, match="nothing builds its array"):
 
         class Built(Operator, image=image):
             n: int = param()
-            x = In(n, tile=(64,), via=Shim(0))
+            x = In(n, tile=(64,), via=Tile(0, 0))
 
             def array(self, target):
                 return []

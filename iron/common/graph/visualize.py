@@ -540,9 +540,9 @@ class Arena:
             reads, writes = [], []
             for buf, b in zip(bufs, op.buffers):
                 name = buf[: buf.index("[")] if "[" in buf else buf
-                if b.direction.fills:
+                if b.fills:
                     reads.append(name)
-                if b.direction.drains:
+                if b.drains:
                     writes.append(name)
                     first_writer.setdefault(name, op)
             steps.append((reads, writes))

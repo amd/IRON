@@ -15,9 +15,9 @@ import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.utils import bfp
 
-from ..declare import Direction, Operator
+from ..declare import In, InOut, Operand, Operator, Out
 from ..declare.bound import BoundValue
-from ..declare.member import Extent, _Buffer, _Value
+from ..declare.member import Extent, _Value
 from ..declare.operator import graph_tracer
 from ..design import device_symbol
 from ..image.sequence import OperatorSequence
@@ -388,7 +388,7 @@ class Tracer:
             keywords = [
                 f"{m.name}="
                 for m in cls._members
-                if isinstance(m, _Buffer) and m.direction.fills and m.when is not None
+                if isinstance(m, Operand) and m.fills and m.when is not None
             ]
             hint = f"; an optional input is given by keyword ({', '.join(keywords)})"
             raise TypeError(
@@ -561,11 +561,11 @@ class Tracer:
         # gives it, unchecked, so a profile may still tune the op.
         unset = {n for n in type(op)._auto_fields if getattr(op, n) is None}
         shaped = op
-        if any(unset & m.shape.names() for m in op._members_io()):
+        if any(unset & m.dims.names() for m in op._members_io()):
             shaped = op.resolve(op.dev)
         buffers = shaped.buffers
-        ins = [b for b in buffers if b.direction.fills]
-        outs = [b for b in buffers if b.direction is Direction.OUT]
+        ins = [b for b in buffers if b.fills]
+        outs = [b for b in buffers if isinstance(b, Out)]
         if len(operands) == len(ins):
             given_outs = []
         elif len(operands) == len(ins) + len(outs):
@@ -617,9 +617,9 @@ class Tracer:
                 self._bind(op, extent.name, count)
         slots, outputs, it, given = [], [], iter(operands[: len(ins)]), iter(given_outs)
         for b in buffers:
-            if b.direction is Direction.IN:
+            if isinstance(b, In):
                 slots.append(next(it))
-            elif b.direction is Direction.INOUT:
+            elif isinstance(b, InOut):
                 h = next(it)
                 slots.append(h)
                 outputs.append(h)
@@ -775,7 +775,7 @@ class _ReferenceTracer(Tracer):
         else:
             op = target
             values = self._split_values(cls, kwargs)
-        outs = [b for b in op.buffers if b.direction is Direction.OUT]
+        outs = [b for b in op.buffers if isinstance(b, Out)]
         given = dict(zip((b.name for b in outs), tensors[n_in:]))
         results = op.call_reference(dict(zip(inputs, tensors[:n_in])), given, values)
         for name, out in given.items():

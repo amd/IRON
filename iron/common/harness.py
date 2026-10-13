@@ -176,11 +176,11 @@ def run_test(
     tensor_class = aie_utils.DEFAULT_TENSOR_CLASS
     args, produced, total_bytes = [], {}, 0
     for b in operator.buffers:
-        if b.direction.fills:
+        if b.fills:
             buf = tensor_class(inputs[b.name])
         else:
             buf = tensor_class(b.host_shape, dtype=b.host_dtype)
-        if b.direction.drains:
+        if b.drains:
             produced[b.name] = buf
         args.append(buf)
         total_bytes += _nbytes(buf)

@@ -28,7 +28,7 @@ from aie.iron import Buffer, Lock, Program, Runtime, Task
 from aie.iron.device import Tile
 from aie.iron.runtime.dmatask import emit_shim_transfer
 
-from ..declare import Direction, Operator
+from ..declare import Operator
 from .runtime import Sequence
 
 
@@ -101,21 +101,16 @@ class ExternalSequence(Sequence):
                 continue
             for i in range(s.count):
                 pin = s.lane(i).shim
-                if pin is None or pin.channel is None:
+                if pin is None or s.channel is None:
                     raise ValueError(
-                        f"{type(op).__name__}.{s.name}[{i}] has no (column, "
-                        f"channel) pin; a shipped image's streams need one"
+                        f"{type(op).__name__}.{s.name}[{i}] has no shim tile and "
+                        f"channel pin; a shipped image's streams need one"
                     )
-                direction = (
-                    DMAChannelDir.MM2S
-                    if s.direction is Direction.IN
-                    else DMAChannelDir.S2MM
-                )
                 channels[(s.name, i)] = ShimChannel(
                     f"{s.name}_{i}",
                     shims[pin.col],
-                    direction,
-                    pin.channel,
+                    DMAChannelDir.S2MM if s.drains else DMAChannelDir.MM2S,
+                    s.channel,
                 )
 
         cores = [Tile(col, row) for row in dev.core_rows for col in range(dev.cols)]

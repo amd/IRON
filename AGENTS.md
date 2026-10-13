@@ -143,8 +143,10 @@ reuse lint
      - the operator, one class (`iron/common/declare/`): `param()` fields for what a host shape
        names, `auto()` tunables `resolve(dev)` fills from the device and the
        extents (a tunable is an `auto()` field: the caller or a profile may
-       give it, and the library resolves it when neither does), `In`/`Out` operands declared by shape whose `tile=` makes
-       each its own stream into the array (`per=` a column count), `Value`
+       give it, and the library resolves it when neither does), `In`/`Out`
+       operands (mlir-aie's `aie.iron.In`/`Out`/`InOut` markers, with a
+       declared shape) whose `tile=` makes each its own stream into the
+       array (`per=` a column count), `Value`
        members the cores read (trip counts, derived from the extents so the
        array never depends on them), `array(target)`, which builds
        ObjectFIFOs and Workers and binds each operand's lane to a fifo's
@@ -152,7 +154,7 @@ reuse lint
        not the derived one. The array tier is what a tile names plus what
        says `array=True`; one array serves every extent. A shipped binary
        is a subclass declared with `image=Xclbin(...)`, its operands pinned
-       with `via=`. Two hooks change what is built: `configuration()`, the
+       with `via=` (each lane's shim, an mlir-aie `Tile`) and `channel=`. Two hooks change what is built: `configuration()`, the
        operator whose xclbin this one runs (itself by default; flm's GEMM
        returns its shape-free half, so one xclbin serves every shape), and
        `exported_design(image)`, a callable returning the module (an
@@ -188,7 +190,8 @@ reuse lint
 
 3. **Common Infrastructure** (`iron/common/`)
    - `declare/`: the declaration layer (`Operator`, `param`/`auto`,
-     operands, `Value`, `Scratchpad`/`DispatchTime`, `Xclbin` and its
+     operands (`Operand`: `op.x` is the declared operand bound to the
+     instance, its shape and lanes resolved), `Value`, `Scratchpad`/`DispatchTime`, `Xclbin` and its
      `fetch()`, inference). An operator's shim budget, `shim_columns`, is
      the bound device's `shim_dma_channels_in`/`out`; its `residents` the
      derived values the preamble writes once per build
@@ -362,7 +365,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      `gemm.py` or `mha.py` for hand-written sequences
 3. A shipped binary is a subclass declared with the image, `class
    Shipped(X, image=Xclbin(url=, sha256=, filename=))`: it pins the tunables,
-   redeclares the operands with `via=` and lays the image's parameter block
+   redeclares the operands with `via=` and `channel=` and lays the image's parameter block
    out as a `Value(address=, lock=)`; nothing builds its array
 4. Name the kernel with a factory from `aie.iron.kernels`
    (`eltwise.relu_sized(line)`, `norm.rms_norm_eps(tile)`, ...): it carries

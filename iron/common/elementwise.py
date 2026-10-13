@@ -41,7 +41,6 @@ from aie.utils.verify import Tolerance, round_to
 from ml_dtypes import bfloat16
 
 from .declare import (
-    Direction,
     Divisors,
     Extent,
     In,
@@ -443,7 +442,7 @@ class Prepare(_Chains):
     scratch_name = "prepared"
 
     def __init__(self, op: Operator, cores: int = 0) -> None:
-        self.into = next(b for b in op.inputs if b.member.prepare)
+        self.into = next(b for b in op.inputs if b.prepare)
         super().__init__(
             op,
             op.prepares or (op.prepare,),
@@ -742,8 +741,8 @@ class Elementwise(Operator):
         streams = [
             b for b in self.buffers if b.streamed and b not in self.finish_inputs
         ]
-        ins = [b for b in streams if b.direction is Direction.IN]
-        outs = [b for b in streams if b.direction.drains]
+        ins = [b for b in streams if isinstance(b, In)]
+        outs = [b for b in streams if b.drains]
         n_in = len(ins)
         cores = self.cores
         kernel = self.kernel()

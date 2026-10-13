@@ -37,20 +37,12 @@ from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance, Verdict, compare
 
 from ..testing import Testing
-from .bound import BoundBuffer, BoundValue
+from .bound import BoundValue
 from .creation import declare
 from .domain import Domain, Width
 from .field import DimRef, OptionalDim, Select, Tier, Unresolvable, param
-from .member import (
-    Extent,
-    In,
-    Scratchpad,
-    Value,
-    _Buffer,
-    _Member,
-    _Value,
-    present,
-)
+from .member import Extent, Member, Scratchpad, Value, _Value
+from .operand import In, Operand
 from .placement import Placement
 from .profile import Profile
 
@@ -108,7 +100,7 @@ def _check_shipped(cls: type) -> None:
             f"drop the override"
         )
     for m in cls._members:
-        if isinstance(m, _Buffer) and m.tile is not None and m.via is None:
+        if isinstance(m, Operand) and m.tile_dims is not None and m.via is None:
             raise TypeError(
                 f"{cls.__name__}.{m.name}: a stream into a shipped image must be "
                 f"pinned with via=; nothing else says which shim it uses"
@@ -261,7 +253,7 @@ class Link:
 class Operator(metaclass=_OperatorMeta):
     """An operator. Subclass it; every subclass is a dataclass checked as its body finishes."""
 
-    _members: ClassVar[tuple[_Member, ...]] = ()
+    _members: ClassVar[tuple[Member, ...]] = ()
     _param_fields: ClassVar[tuple[str, ...]] = ()
     _derived_params: ClassVar[dict[str, Callable[[Any], Any]]] = {}
     _auto_fields: ClassVar[tuple[str, ...]] = ()
@@ -284,8 +276,8 @@ class Operator(metaclass=_OperatorMeta):
     per_call_gather: ClassVar[type[Operator] | None] = None
     # An instance's operands beside the declared ones: its prologue's and
     # its finish's other inputs.
-    _prepare_inputs: ClassVar[tuple[_Buffer, ...]] = ()
-    _finish_inputs: ClassVar[tuple[_Buffer, ...]] = ()
+    _prepare_inputs: ClassVar[tuple[Operand, ...]] = ()
+    _finish_inputs: ClassVar[tuple[Operand, ...]] = ()
 
     trace: TraceConfig | None = dataclasses.field(
         default=None, repr=False, kw_only=True
@@ -433,7 +425,7 @@ class Operator(metaclass=_OperatorMeta):
             The folded operator, or None where this one's one output is not
             declared ``finish=True``.
         """
-        if len(self.outputs) != 1 or not self.outputs[0].member.finish:
+        if len(self.outputs) != 1 or not self.outputs[0].finish:
             return None
         chain = (*self.finish, Link(consumer, at))
         if any(len(link.op.inputs) > 1 for link in chain):
@@ -531,7 +523,7 @@ class Operator(metaclass=_OperatorMeta):
         """
         links = [link for c in self.finishes or (self.finish,) for link in c]
         out = self.outputs[0]
-        ordered = out.member.finish_block is None
+        ordered = out.finish_block is None
         tried = []
         for line in lines:
             try:
@@ -559,7 +551,7 @@ class Operator(metaclass=_OperatorMeta):
         if not any(chains):
             return 0
         out = self.outputs[0]
-        ordered = out.member.finish_block is None
+        ordered = out.finish_block is None
         luts = {
             call.kernel.object_file_name
             for chain in chains
@@ -591,7 +583,7 @@ class Operator(metaclass=_OperatorMeta):
         dev,
         num_channels: int = 1,
         flags: Mapping[str, Any] | None = None,
-        operands: Iterable[_Buffer] = (),
+        operands: Iterable[Operand] = (),
     ) -> int:
         """How many of ``dev``'s columns fit this operator's streams in the shim DMA budget.
 
@@ -603,14 +595,16 @@ class Operator(metaclass=_OperatorMeta):
         streams = [
             m
             for m in (*cls._members, *operands)
-            if isinstance(m, _Buffer) and m.tile is not None and present(m, flags or {})
+            if isinstance(m, Operand)
+            and m.tile_dims is not None
+            and m.present(flags or {})
         ]
         cols = dev.cols
         for drains, budget in (
             (False, dev.shim_dma_channels_in),
             (True, dev.shim_dma_channels_out),
         ):
-            ours = [m for m in streams if m.direction.drains == drains]
+            ours = [m for m in streams if m.drains == drains]
             lanes = [m for m in ours if m.per is not None]
             per_core = sum(not m.replicate for m in lanes) * num_channels
             once = len(ours) - len(lanes)
@@ -897,13 +891,13 @@ class Operator(metaclass=_OperatorMeta):
         out = self.outputs[0] if len(self.outputs) == 1 else None
         # A subclass replacing array() does not apply what its base's output declares.
         runs = next(k for k in type(self).__mro__ if "array" in vars(k))
-        if out is None or not out.member.finish or runs not in out.member.owner.__mro__:
+        if out is None or not out.finish or runs not in out.owner.__mro__:
             raise ValueError(
                 f"{type(self).__name__}: its cores finish no output, so it "
                 f"applies no finish"
             )
         line = out.finish_line
-        ordered = out.member.finish_block is None
+        ordered = out.finish_block is None
         own = tuple(link.at_line(line, out.dtype, dev, ordered) for link in self.finish)
         chains: dict[tuple, tuple[Link, ...]] = {}
         for chain in self.finishes or (self.finish,):
@@ -933,9 +927,7 @@ class Operator(metaclass=_OperatorMeta):
         )
         self._bind()
         name = type(self).__name__
-        reads = sum(
-            m.direction.fills and m.tile is not None for m in self._members_io()
-        )
+        reads = sum(m.fills and m.tile_dims is not None for m in self._members_io())
         if reads > dev.core_dma_channels_in:
             raise Unresolvable(
                 f"{name}: its cores read {reads} streams with the finish's "
@@ -946,7 +938,7 @@ class Operator(metaclass=_OperatorMeta):
         riding = [b for b in self.finish_inputs if not b.streamed]
         if not riding:
             return
-        feed = next(b for b in self.inputs if b.member.feed)
+        feed = next(b for b in self.inputs if b.feed)
         carried, line = math.prod(feed.tile_shape), math.prod(out.tile_shape)
         # The rest of the tile re-reads the input's: a shim descriptor's iterations.
         repeats = carried // line
@@ -1010,7 +1002,7 @@ class Operator(metaclass=_OperatorMeta):
                 its steps' inputs do not fit the tiles of the input they
                 ride (`feed=True`).
         """
-        into = next((b for b in self.inputs if b.member.prepare), None)
+        into = next((b for b in self.inputs if b.prepare), None)
         if into is None:
             raise ValueError(
                 f"{type(self).__name__}: its cores prepare no input, so it "
@@ -1036,7 +1028,7 @@ class Operator(metaclass=_OperatorMeta):
                 f"{into.name} a call, and a prologue's inputs stream in beside one"
             )
         if riding and not into.streamed:
-            feed = next(b for b in self.inputs if b.member.feed)
+            feed = next(b for b in self.inputs if b.feed)
             if feed.dtype != into.dtype or math.prod(feed.tile_shape) < line:
                 raise Unresolvable(
                     f"{name}: the prologue's inputs ride {feed.name}, whose "
@@ -1104,7 +1096,7 @@ class Operator(metaclass=_OperatorMeta):
             if isinstance(domain, Width)
         }
         for b in self.buffers:
-            for ref in b.member.per.dims if b.streamed and b.member.per else ():
+            for ref in b.per.dims if b.streamed and b.per else ():
                 if (
                     isinstance(ref, DimRef)
                     and ref.name in self._tunable_fields
@@ -1134,19 +1126,19 @@ class Operator(metaclass=_OperatorMeta):
         return found
 
     @property
-    def buffers(self) -> list[BoundBuffer]:
+    def buffers(self) -> list[Operand]:
         return [self._bound[m.name] for m in self._members_io()]
 
     @property
-    def inputs(self) -> list[BoundBuffer]:
-        return [b for b in self.buffers if b.direction.fills]
+    def inputs(self) -> list[Operand]:
+        return [b for b in self.buffers if b.fills]
 
     @property
-    def outputs(self) -> list[BoundBuffer]:
-        return [b for b in self.buffers if b.direction.drains]
+    def outputs(self) -> list[Operand]:
+        return [b for b in self.buffers if b.drains]
 
     @property
-    def prepare_inputs(self) -> list[BoundBuffer]:
+    def prepare_inputs(self) -> list[Operand]:
         """The inputs of ``prepare``'s steps other than the tile, in order,
         each a tile filled into the prepared input's stream after it (an
         untiled one's ``feed=True`` input): the inputs after the declared
@@ -1155,7 +1147,7 @@ class Operator(metaclass=_OperatorMeta):
         return [self._bound[m.name] for m in self._prepare_inputs]
 
     @property
-    def finish_inputs(self) -> list[BoundBuffer]:
+    def finish_inputs(self) -> list[Operand]:
         """The inputs of ``finish``'s steps other than the tile, in order,
         each streamed as the finished output is: the last of ``inputs``.
         """
@@ -1258,9 +1250,9 @@ class Operator(metaclass=_OperatorMeta):
         """
         return None
 
-    def value_buffer(self, name: str) -> BoundBuffer:
+    def value_buffer(self, name: str) -> Operand:
         b = self._bound.get(name)
-        if not isinstance(b, BoundBuffer):
+        if not isinstance(b, Operand):
             raise TypeError(f"{type(self).__name__} declares no operand {name!r}")
         return b
 
@@ -1297,15 +1289,15 @@ class Operator(metaclass=_OperatorMeta):
         prepared = next((m for m in self._members_io() if m.prepare), None)
         extras = []
         for i, link in enumerate(self.prepare if prepared is not None else ()):
-            line = (prepared.tile or prepared.shape).dims[-1:]
+            line = (prepared.tile_dims or prepared.dims).dims[-1:]
             for k, b in enumerate(link.op.inputs):
                 if k == link.at:
                     continue
-                extra = In(*line, dtype=prepared.dtype)
+                extra = In(*line, dtype=prepared.declared_dtype)
                 extra.__set_name__(type(self), f"prepare{i}_{b.name}")
                 extras.append(extra)
         self._prepare_inputs = tuple(extras)
-        outs = [m for m in self._members_io() if m.direction.drains]
+        outs = [m for m in self._members_io() if m.drains]
         extras = []
         if len(outs) == 1 and outs[0].finish:
             (out,) = outs
@@ -1316,9 +1308,9 @@ class Operator(metaclass=_OperatorMeta):
                     if k == link.at:
                         continue
                     extra = In(
-                        *out.shape.dims,
-                        dtype=out.dtype,
-                        tile=None if fed else out.tile.dims,
+                        *out.dims.dims,
+                        dtype=out.declared_dtype,
+                        tile=None if fed else out.tile_dims.dims,
                         per=None if fed or out.per is None else out.per.dims,
                         depth=out.depth,
                     )
@@ -1327,7 +1319,7 @@ class Operator(metaclass=_OperatorMeta):
         self._finish_inputs = tuple(extras)
         bound: dict[str, Any] = {}
         for m in self._members_io():
-            bound[m.name] = BoundBuffer(m, self)
+            bound[m.name] = m.of(self)
         for m in self._members:
             if isinstance(m, _Value):
                 bound[m.name] = BoundValue(m, self)
@@ -1338,7 +1330,7 @@ class Operator(metaclass=_OperatorMeta):
                 continue
             for b in self._members_io():
                 # Asked first: an unshortened shape may Select on an auto() field.
-                if b.tile is not None and self.extent_unit(b.name) != 0:
+                if b.tile_dims is not None and self.extent_unit(b.name) != 0:
                     axis = bound[b.name].extent_axis(e)
                     if axis is not None:
                         word = _ExtentWord(type(self), e, b.name, axis)
@@ -1381,7 +1373,7 @@ class Operator(metaclass=_OperatorMeta):
             The inputs by name, in declaration order; the outputs; the other
             keywords.
         """
-        ins = [m for m in cls._members if isinstance(m, _Buffer) and m.direction.fills]
+        ins = [m for m in cls._members if isinstance(m, Operand) and m.fills]
         required = [m.name for m in ins if m.when is None]
         optional = {m.name for m in ins if m.when is not None}
         given = {k: v for k, v in kwargs.items() if k in optional and v is not None}
@@ -1418,14 +1410,14 @@ class Operator(metaclass=_OperatorMeta):
             ValueError: A shape disagrees with the declaration or another
                 operand.
         """
-        buffers = [m for m in cls._members if isinstance(m, _Buffer)]
+        buffers = [m for m in cls._members if isinstance(m, Operand)]
         names = set(cls._param_fields)
         for m in buffers:
-            names.update(m.shape.names())
+            names.update(m.dims.names())
         given = {k: v for k, v in kwargs.items() if k in names}
         flags: dict[str, bool] = {}
         for m in buffers:
-            if not m.direction.fills or m.when is None:
+            if not m.fills or m.when is None:
                 continue
             flag, has = m.when.name, m.name in inputs
             if flags.setdefault(flag, has) != has:
@@ -1440,13 +1432,13 @@ class Operator(metaclass=_OperatorMeta):
                     f"{flag} is true"
                 )
         given |= flags
-        ins = [m for m in buffers if m.direction.fills and present(m, given)]
+        ins = [m for m in buffers if m.fills and m.present(given)]
         if [m.name for m in ins] != list(inputs):
             raise TypeError(
                 f"{cls.__name__} takes {len(ins)} operand(s) "
                 f"({', '.join(m.name for m in ins)}), got {len(inputs)}"
             )
-        outs = [m for m in buffers if not m.direction.fills and present(m, given)]
+        outs = [m for m in buffers if not m.fills and m.present(given)]
         if outputs and len(outputs) != len(outs):
             raise TypeError(
                 f"{cls.__name__} produces {len(outs)} output(s) "
@@ -1468,7 +1460,7 @@ class Operator(metaclass=_OperatorMeta):
 
         for m, shape in pairs:
             shape = tuple(int(s) for s in shape)
-            dims = list(m.shape.dims)
+            dims = list(m.dims.dims)
             at = next(
                 (i for i, d in enumerate(dims) if isinstance(d, OptionalDim)), None
             )
@@ -1568,12 +1560,11 @@ class Operator(metaclass=_OperatorMeta):
             own.append(f"prepare{names}{digest}")
         return "_".join([type(self).__name__, *own, dev.name])
 
-    def _members_io(self) -> list[_Buffer]:
-        # getattr rather than vars(): array() runs this on its view.
+    def _members_io(self) -> list[Operand]:
         return [
             m
             for m in self._members
-            if isinstance(m, _Buffer) and (m.when is None or getattr(self, m.when.name))
+            if isinstance(m, Operand) and (m.when is None or m.when.of(self))
         ] + [*self._prepare_inputs, *self._finish_inputs]
 
     def __repr__(self) -> str:

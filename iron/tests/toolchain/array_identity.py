@@ -19,7 +19,7 @@ import re
 import pytest
 
 from iron.common import Unresolvable
-from iron.common.declare import Direction
+from iron.common.declare import Out
 from iron.common.design import OperatorDesign
 from iron.common.image import Fusion, OperatorSequence, Packing
 from iron.tests.toolchain.tools import requires
@@ -112,7 +112,7 @@ def test_the_extents_share_one_device(npu2, module, cls_name, tunables, extent):
         names = [f"s{k}_{b.name}" for b in op.buffers]
         runlist.append((op, *names))
         for b, buf in zip(op.buffers, names):
-            (outputs if b.direction is Direction.OUT else inputs).append(buf)
+            (outputs if isinstance(b, Out) else inputs).append(buf)
     seq = OperatorSequence(cls_name, runlist, inputs, outputs, dispatch="fused")
     seq.prepare()
     fused = Fusion(seq)

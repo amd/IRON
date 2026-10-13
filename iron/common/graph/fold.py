@@ -220,7 +220,7 @@ def folded(
         # Each reader's prepared input: the slot of its member declared so.
         prepared = {
             k: next(
-                (i for i, b in enumerate(steps[k].op.buffers) if b.member.prepare),
+                (i for i, b in enumerate(steps[k].op.buffers) if b.prepare),
                 None,
             )
             for k in readers
@@ -556,9 +556,9 @@ def replaced(
         op = step.op
         extra = {b.name for b in [*op.prepare_inputs, *op.finish_inputs]}
         reads = [
-            None if b.member.prepare and op.prepare else h.name
+            None if b.prepare and op.prepare else h.name
             for b, h in zip(op.buffers, step.slots)
-            if b.direction.fills and b.name not in extra
+            if b.fills and b.name not in extra
         ]
         i = next(
             i
@@ -566,9 +566,9 @@ def replaced(
             if i not in paired
             and type(s.op) is type(op)
             and [
-                None if b.member.prepare and op.prepare else h.name
+                None if b.prepare and op.prepare else h.name
                 for b, h in zip(s.op.buffers, s.slots)
-                if b.direction.fills
+                if b.fills
             ]
             == reads
         )

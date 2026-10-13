@@ -144,8 +144,8 @@ class Variant:
             ),
             key=cost_key(resolved, dev),
             array=resolved.array_key(),
-            mm2s=sum(s.count for s in streams if not s.direction.drains),
-            s2mm=sum(s.count for s in streams if s.direction.drains),
+            mm2s=sum(s.count for s in streams if not s.drains),
+            s2mm=sum(s.count for s in streams if s.drains),
         )
 
 

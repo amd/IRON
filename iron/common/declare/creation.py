@@ -17,10 +17,11 @@ from __future__ import annotations
 import dataclasses
 
 from .field import Auto, DimRef, OptionalDim, Param, Shape, Tier
-from .member import Extent, _Buffer, _Member
+from .member import Extent, Member
+from .operand import Operand
 
 
-def members_of(cls: type) -> list[_Member]:
+def members_of(cls: type) -> list[Member]:
     """Members declared in this class body and its declared bases, in order.
 
     The most derived class's body order wins for the members it declares;
@@ -29,7 +30,7 @@ def members_of(cls: type) -> list[_Member]:
     between an input and an output) gets the order it wrote. A member the
     subclass sets to ``None`` is hidden.
     """
-    ordered: dict[str, _Member] = {}
+    ordered: dict[str, Member] = {}
     seen: set[str] = set()
     for klass in cls.__mro__:
         for name, value in vars(klass).items():
@@ -39,7 +40,7 @@ def members_of(cls: type) -> list[_Member]:
             # A subclass hides an inherited member by assigning it None: a
             # shipped image keeps the port's fields and operands but not its
             # values, whose block the image lays out differently.
-            if isinstance(value, _Member):
+            if isinstance(value, Member):
                 ordered[name] = value
     return list(ordered.values())
 
@@ -57,15 +58,15 @@ def declare(cls: type, library: type) -> None:
     # Members must be unannotated, or dataclass would make them constructor args.
     annotations = cls.__dict__.get("__annotations__", {})
     for name, value in list(vars(cls).items()):
-        if isinstance(value, _Member) and name in annotations:
+        if isinstance(value, Member) and name in annotations:
             raise TypeError(
                 f"{cls.__name__}.{name}: members are declared without an "
                 f"annotation; annotating one turns it into a constructor argument"
             )
-        if not isinstance(value, _Member):
+        if not isinstance(value, Member):
             continue
         base = next((b for b in cls.__mro__[1:] if name in vars(b)), None)
-        if base is not None and not isinstance(vars(base)[name], _Member):
+        if base is not None and not isinstance(vars(base)[name], Member):
             raise TypeError(
                 f"{cls.__name__}.{name} hides {base.__name__}.{name}, which "
                 f"the library reads; name the member otherwise"
@@ -82,7 +83,7 @@ def declare(cls: type, library: type) -> None:
             name in inherited
             and name not in annotations
             and value is not None
-            and not isinstance(value, _Member)
+            and not isinstance(value, Member)
             and not callable(value)
             and not isinstance(value, (property, classmethod, staticmethod))
         ):
@@ -112,19 +113,19 @@ def declare(cls: type, library: type) -> None:
     for m in members:
         if m.owner is not cls:
             continue  # inherited; already processed on its own class
-        if isinstance(m, _Buffer):
-            m.shape = m.shape.rewrite(cls)
-            (m.dtype,) = Shape((m.dtype,)).rewrite(cls).dims
-            m.shape.check(cls, m, "dimension", allow_tunable=False)
-            if m.tile is not None:
-                m.tile = m.tile.rewrite(cls)
-                m.tile.check(cls, m, "tile dimension", allow_tunable=True)
+        if isinstance(m, Operand):
+            m.dims = m.dims.rewrite(cls)
+            (m.declared_dtype,) = Shape((m.declared_dtype,)).rewrite(cls).dims
+            m.dims.check(cls, m, "dimension", allow_tunable=False)
+            if m.tile_dims is not None:
+                m.tile_dims = m.tile_dims.rewrite(cls)
+                m.tile_dims.check(cls, m, "tile dimension", allow_tunable=True)
             if m.finish_block is not None:
                 m.finish_block = m.finish_block.rewrite(cls)
                 m.finish_block.check(
                     cls, m, "finish block dimension", allow_tunable=True
                 )
-            if sum(isinstance(d, OptionalDim) for d in m.shape.dims) > 1:
+            if sum(isinstance(d, OptionalDim) for d in m.dims.dims) > 1:
                 raise TypeError(
                     f"{cls.__name__}.{m.name}: at most one OptionalDim() dimension, "
                     f"since the rank tells whether it is present"
@@ -144,7 +145,7 @@ def declare(cls: type, library: type) -> None:
                     f"field, the one a graph may bound per call"
                 )
             m.field = ref
-        if isinstance(m, _Buffer) and m.tile is not None and m.per is not None:
+        if isinstance(m, Operand) and m.tile_dims is not None and m.per is not None:
             m.per = m.per.rewrite(cls)
             for ref in m.per.dims:
                 if not isinstance(ref, DimRef) or ref.tier is None:
@@ -152,13 +153,13 @@ def declare(cls: type, library: type) -> None:
                         f"{cls.__name__}.{m.name}: per={ref!r} must be a param() or auto() field"
                     )
 
-    prepared = [m.name for m in members if isinstance(m, _Buffer) and m.prepare]
+    prepared = [m.name for m in members if isinstance(m, Operand) and m.prepare]
     if len(prepared) > 1:
         raise TypeError(
             f"{cls.__name__}: {prepared} are each prepare=True; a core prepares "
             f"one input, the one its operator's prepare names"
         )
-    fed = [m.name for m in members if isinstance(m, _Buffer) and m.feed]
+    fed = [m.name for m in members if isinstance(m, Operand) and m.feed]
     if len(fed) > 1:
         raise TypeError(
             f"{cls.__name__}: {fed} are each feed=True; a finish's inputs ride "
@@ -189,14 +190,14 @@ def declare(cls: type, library: type) -> None:
     # its replication or its presence names, and what declares itself array=True.
     named: set[str] = set()
     for m in members:
-        if isinstance(m, _Buffer) and m.tile is not None:
-            named |= m.tile.names()
+        if isinstance(m, Operand) and m.tile_dims is not None:
+            named |= m.tile_dims.names()
             if m.finish_block is not None:
                 named |= m.finish_block.names()
             if m.per is not None:
                 named |= m.per.names()
-            if isinstance(m.dtype, DimRef):
-                named.add(m.dtype.name)
+            if isinstance(m.declared_dtype, DimRef):
+                named.add(m.declared_dtype.name)
             if m.when is not None:
                 named.add(m.when.name)
     cls._array_fields = tuple(
@@ -209,8 +210,8 @@ def declare(cls: type, library: type) -> None:
     }
     shaped: set[str] = set()
     for m in members:
-        if isinstance(m, _Buffer):
-            shaped |= m.shape.names()
+        if isinstance(m, Operand):
+            shaped |= m.dims.names()
             if m.when is not None:
                 shaped.add(m.when.name)
         elif isinstance(m, Extent):

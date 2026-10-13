@@ -37,9 +37,10 @@ from typing import ClassVar
 import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
+from aie.iron.device import Tile
 from ml_dtypes import bfloat16
 
-from iron.common import In, Out, Shim, Unresolvable, Value, Xclbin, auto, param, Select
+from iron.common import In, Out, Unresolvable, Value, Xclbin, auto, param, Select
 from iron.operators.flm.gemm.design import K_TILE, M_TILE, Epilogue
 from iron.operators.flm.gemm.op import GEMM
 
@@ -128,7 +129,8 @@ class Shipped(
         tile=(M_TILE, K_TILE),
         per=(GEMM.rows,),
         depth=QUEUE_DEPTH,
-        via=[Shim(col, 0) for col in A_SOURCE_COL],
+        via=[Tile(col, 0) for col in A_SOURCE_COL],
+        channel=0,
     )
     # B: one column's k-blocks, pre-packed, down each column on MM2S channel 1.
     B = In(
@@ -137,7 +139,8 @@ class Shipped(
         tile=(K_TILE, N_TILE),
         per=(GEMM.cols,),
         depth=QUEUE_DEPTH,
-        via=[Shim(c, 1) for c in range(COLS)],
+        via=[Tile(c, 0) for c in range(COLS)],
+        channel=1,
     )
     # C: the joined (ROWS*M_TILE x N_TILE) block, out of every column on
     # S2MM channel 0.
@@ -147,7 +150,8 @@ class Shipped(
         tile=(ROWS * M_TILE, N_TILE),
         per=(GEMM.cols,),
         depth=QUEUE_DEPTH,
-        via=[Shim(c, 0) for c in range(COLS)],
+        via=[Tile(c, 0) for c in range(COLS)],
+        channel=0,
     )
     # The port's named values are not this image's: it reads one block of
     # eight words behind a lock.

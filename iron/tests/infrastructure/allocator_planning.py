@@ -32,8 +32,8 @@ def steps_of(runlist):
     for op, *bufs in runlist:
         steps.append(
             (
-                [b for b, s in zip(bufs, op.buffers) if s.direction.fills],
-                [b for b, s in zip(bufs, op.buffers) if s.direction.drains],
+                [b for b, s in zip(bufs, op.buffers) if s.fills],
+                [b for b, s in zip(bufs, op.buffers) if s.drains],
             )
         )
     return steps
