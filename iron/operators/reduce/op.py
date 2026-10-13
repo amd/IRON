@@ -5,6 +5,7 @@ import numpy as np
 from aie.iron.kernels import reduce
 
 from iron.common import In, Out, Rowwise, param
+from iron.common.testing import Case, Testing
 
 # A reduction writes one value into a DMA-aligned output tile; bf16's is two
 # elements (``_min_dma_aligned_elems``, mlir-aie's), the only dtype this
@@ -20,6 +21,16 @@ class Reduce(Rowwise):
     or max) out: element 0 of a 2-element row, the other undefined (the
     kernel writes fewer elements than it reads, like ``Magnitude``'s).
     """
+
+    test = Testing(
+        [
+            Case(dict(rows=17, window=96, op="max")),
+            Case(dict(rows=17, window=26, op="max"), lower=True),
+            Case(dict(rows=17, window=96, op="min")),
+            Case(dict(rows=17, window=96, op="add")),
+            Case(dict(rows=4096, window=96, op="max"), bench=True),
+        ],
+    )
 
     op: str = param(default="max", array=True)
     window: int = param()
@@ -50,9 +61,11 @@ class Reduce(Rowwise):
             )
 
     def kernel(self):
-        factory = {"add": reduce.reduce_add, "min": reduce.reduce_min, "max": reduce.reduce_max}[
-            self.op
-        ]
+        factory = {
+            "add": reduce.reduce_add,
+            "min": reduce.reduce_min,
+            "max": reduce.reduce_max,
+        }[self.op]
         return factory(self.window, self.x.dtype, vectorized=self.window % 32 == 0)
 
     def reference(self, x):
@@ -67,3 +80,22 @@ class Reduce(Rowwise):
         }[self.op]
         value = ref(x.reshape(-1, self.window))  # (rows, 1)
         return np.broadcast_to(value, (value.shape[0], OUT_WIDTH))
+
+    def judge(self, inputs, written, tolerance, expected=None):
+        """Each output row's element 0 held to its reference; element 1 is
+        undefined on the device.
+        """
+        if expected is None:
+            expected = self.call_reference(inputs)
+        return super().judge(
+            inputs,
+            {
+                n: np.asarray(a).reshape(-1, OUT_WIDTH)[:, :1]
+                for n, a in written.items()
+            },
+            tolerance,
+            {
+                n: np.asarray(a).reshape(-1, OUT_WIDTH)[:, :1]
+                for n, a in expected.items()
+            },
+        )
