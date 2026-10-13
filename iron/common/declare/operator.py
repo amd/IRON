@@ -32,17 +32,16 @@ import aie.utils as aie_utils
 import numpy as np
 from aie.dialects.aie import AIEArch, AIETileType
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import ceildiv
 from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance, Verdict, compare
 
 from ..testing import Testing
-from .bound import BoundValue
 from .creation import declare
 from .domain import Domain, Width
 from .field import DimRef, OptionalDim, Select, Tier, Unresolvable, param
-from .member import Extent, Member, Scratchpad, Value, _Value
+from .member import Member
 from .operand import In, Operand
+from .value import ChainWord, Extent, ExtentWord, PlaceWord, Value
 from .placement import Placement
 from .profile import Profile
 
@@ -144,67 +143,6 @@ class _ArrayView:
 
     def __setattr__(self, name: str, value) -> None:
         setattr(object.__getattribute__(self, "_op"), name, value)
-
-
-class _ExtentWord(Value):
-    """The tiles per lane of one operand under a bound, rounded up to whole tiles."""
-
-    def __init__(self, owner: type, extent: Extent, buffer: str, axis: int) -> None:
-        super().__init__(np.int32, derive=self._tiles)
-        self.owner = owner
-        self.name = f"{extent.name}_{buffer}"
-        self.extent, self.buffer, self.axis = extent, buffer, axis
-
-    def _tiles(self, op) -> int:
-        extent = getattr(op, self.extent.name)  # read first: it makes this per call
-        return ceildiv(extent, self.divisor(op))
-
-    def divisor(self, op) -> int:
-        b = op.value_buffer(self.buffer)
-        lanes = 1 if b.replicate else b.count
-        return lanes * b.extent_unit(self.axis)
-
-    def __repr__(self) -> str:
-        return f"<tiles per lane of {self.buffer} under {self.extent.name}>"
-
-
-class _ChainWord(Value):
-    """Which of its array's chains, ``finishes`` or ``prepares``, an
-    operator's cores apply.
-    """
-
-    def __init__(self, owner: type, kind: str) -> None:
-        super().__init__(np.int32, derive=self._index, optional=True)
-        self.owner = owner
-        self.kind = kind
-        self.name = f"{kind}_chain"
-
-    def _index(self, op) -> int:
-        own, chains = (
-            (op.finish, op.finishes)
-            if self.kind == "finish"
-            else (op.prepare, op.prepares)
-        )
-        keys = [tuple(link.array_key() for link in c) for c in chains]
-        return keys.index(tuple(link.array_key() for link in own))
-
-    def __repr__(self) -> str:
-        return f"<the {self.kind} chain a design selects>"
-
-
-class _PlaceWord(Scratchpad):
-    """The per-call element offset of an operand placed in a larger buffer:
-    every transfer of it moves by the word (``Operator.placed``).
-    """
-
-    def __init__(self, owner: type, buffer: str) -> None:
-        super().__init__(np.int32)
-        self.owner = owner
-        self.buffer = buffer
-        self.name = f"{buffer}_offset"
-
-    def __repr__(self) -> str:
-        return f"<the offset {self.buffer} is placed at>"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -783,7 +721,7 @@ class Operator(metaclass=_OperatorMeta):
     def has_sequence_override(cls) -> bool:
         return cls.sequence is not Operator.sequence
 
-    def value_symbol(self, value: "BoundValue") -> str | None:
+    def value_symbol(self, value: Value) -> str | None:
         return None
 
     def design_key(self):
@@ -1154,7 +1092,7 @@ class Operator(metaclass=_OperatorMeta):
         return [self._bound[m.name] for m in self._finish_inputs]
 
     @property
-    def values(self) -> list[BoundValue]:
+    def values(self) -> list[Value]:
         return [
             self._bound[m.name] for m in self._value_members if self.uses_value(m.name)
         ]
@@ -1174,7 +1112,7 @@ class Operator(metaclass=_OperatorMeta):
     def uses_value(self, name: str) -> bool:
         """Whether this instance drives the per-call value ``name``; unused ones get no parameter."""
         member = next((m for m in self._value_members if m.name == name), None)
-        if isinstance(member, (Extent, _PlaceWord)):
+        if isinstance(member, (Extent, PlaceWord)):
             return name in self.bound_values
         if isinstance(member, Value) and member.derive is not None:
             return name in self.bound_values or name in self._per_call_derived()
@@ -1256,7 +1194,7 @@ class Operator(metaclass=_OperatorMeta):
             raise TypeError(f"{type(self).__name__} declares no operand {name!r}")
         return b
 
-    def value(self, name: str) -> BoundValue:
+    def value(self, name: str) -> Value:
         """The device word of value ``name`` (an ``Extent`` attribute reads as an integer)."""
         try:
             return self._bound[name]
@@ -1321,8 +1259,8 @@ class Operator(metaclass=_OperatorMeta):
         for m in self._members_io():
             bound[m.name] = m.of(self)
         for m in self._members:
-            if isinstance(m, _Value):
-                bound[m.name] = BoundValue(m, self)
+            if isinstance(m, Value):
+                bound[m.name] = m.of(self)
         self._bound = bound
         words = []
         for e in self._members:
@@ -1333,25 +1271,25 @@ class Operator(metaclass=_OperatorMeta):
                 if b.tile_dims is not None and self.extent_unit(b.name) != 0:
                     axis = bound[b.name].extent_axis(e)
                     if axis is not None:
-                        word = _ExtentWord(type(self), e, b.name, axis)
-                        bound[word.name] = BoundValue(word, self)
+                        word = ExtentWord(type(self), e, b.name, axis)
+                        bound[word.name] = word.of(self)
                         words.append(word)
         self._extent_words = tuple(words)
-        self._chain_words: tuple[_ChainWord, ...] = ()
-        for kind, chains in (("prepare", self.prepares), ("finish", self.finishes)):
+        self._chain_words: tuple[ChainWord, ...] = ()
+        for finish, chains in ((False, self.prepares), (True, self.finishes)):
             if len(chains) > 1:
-                word = _ChainWord(type(self), kind)
-                bound[word.name] = BoundValue(word, self)
+                word = ChainWord(type(self), finish)
+                bound[word.name] = word.of(self)
                 self._chain_words += (word,)
         self._place_words = tuple(
-            _PlaceWord(type(self), m.name) for m in self._members_io()
+            PlaceWord(type(self), m.name) for m in self._members_io()
         )
         for word in self._place_words:
-            bound[word.name] = BoundValue(word, self)
+            bound[word.name] = word.of(self)
 
     @property
-    def _value_members(self) -> list[_Value]:
-        return [m for m in self._members if isinstance(m, _Value)] + [
+    def _value_members(self) -> list[Value]:
+        return [m for m in self._members if isinstance(m, Value)] + [
             *self.__dict__.get("_extent_words", ()),
             *self.__dict__.get("_chain_words", ()),
             *self.__dict__.get("_place_words", ()),

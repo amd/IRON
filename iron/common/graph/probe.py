@@ -68,8 +68,7 @@ from aie.iron.device import Device
 from aie.utils import bfp
 
 from ..declare import Operand, Operator, Out
-from ..declare.bound import BoundValue
-from ..declare.operator import _PlaceWord
+from ..declare.value import PlaceWord, Value
 from ..design import OperatorDesign, device_symbol
 from ..image.callable import FullELFCallable, StepCallable
 from ..image.sequence import OperatorSequence
@@ -401,9 +400,9 @@ class Standalone:
             self.callable.write_values(self._symbols)
 
     @staticmethod
-    def _value(op: Operator, values: Mapping[str, int], v: BoundValue) -> int:
+    def _value(op: Operator, values: Mapping[str, int], v: Value) -> int:
         # Each operand here is a buffer of its own: a placed one at its run.
-        if isinstance(v.member, _PlaceWord):
+        if isinstance(v, PlaceWord):
             return 0
         if v.name in values:
             return values[v.name]
@@ -475,7 +474,7 @@ class Standalone:
                 continue
             under = [slice(None)] * len(buf.shape)
             for extent in op.bound_extents:
-                axis = buf.extent_axis(op.value(extent).member)
+                axis = buf.extent_axis(op.value(extent))
                 if axis is not None:
                     under[axis] = slice(0, self._values[op][extent])
             at = buf.placement[1] * bfp.itemsize(buf.dtype)
@@ -506,7 +505,7 @@ def judge(
         return None
     values = values or {}
     for extent in op.bound_extents:
-        if values.get(extent) != getattr(op, op.value(extent).member.field.name):
+        if values.get(extent) != op.value(extent).field.of(op):
             return None
     want = op.call_reference(inputs, values=values)
     for which, gate in gates.items():

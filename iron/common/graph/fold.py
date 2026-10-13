@@ -13,7 +13,7 @@ from collections.abc import Collection, Hashable
 from types import MethodType
 
 from ..declare import Operator, Unresolvable
-from ..declare.member import Extent
+from ..declare.value import Extent
 from .trace import Binding, TracedGraph
 
 # The most ``folded`` runs ``foldings`` makes, each with others left out.
@@ -193,9 +193,7 @@ def folded(
     named.update((h.parent or h).name for h in traced.outputs)
     calls = Counter(id(s.op) for s in traced.steps)
     bindings = Counter(id(b.op) for b in traced.bindings)
-    extents = Counter(
-        id(b.op) for b in traced.bindings if isinstance(b.member.member, Extent)
-    )
+    extents = Counter(id(b.op) for b in traced.bindings if isinstance(b.member, Extent))
     steps: list = list(traced.steps)
     replace: dict[int, Operator] = {}
     applied: Counter[Folding] = Counter()

@@ -147,7 +147,7 @@ def test_a_bounded_operator_lowers(device, module, cls_name, kwargs, bound, tmp_
     """
     cls = getattr(importlib.import_module(f"iron.operators.{module}"), cls_name)
     op = cls(**kwargs).resolved(device)
-    n = graph.Value("n", "scratchpad", np.int32)
+    n = graph.Value("n", Scratchpad, np.int32)
     op.use_value(bound, n.affine())  # what x[:n] in a graph does
     lower(op, tmp_path)
 

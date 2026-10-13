@@ -15,9 +15,9 @@ import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.utils import bfp
 
+from .. import declare
 from ..declare import In, InOut, Operand, Operator, Out
-from ..declare.bound import BoundValue
-from ..declare.member import Extent, _Value
+from ..declare.value import Extent, Scratchpad
 from ..declare.operator import graph_tracer
 from ..design import device_symbol
 from ..image.sequence import OperatorSequence
@@ -74,7 +74,7 @@ class Binding:
     """
 
     op: Operator
-    member: BoundValue
+    member: declare.Value
     expression: Affine
 
     @property
@@ -500,14 +500,14 @@ class Tracer:
                         f"address{len(self.addresses) // 2}_{member}",
                     )
                     self.addresses[name] = (table.name, source.address_words, member)
-                    self._bind(source, member, Value(name, "scratchpad", np.int32))
+                    self._bind(source, member, Value(name, Scratchpad, np.int32))
                 self._record(source, [ids, control])
         out = self._record(op, [table, control])
         return out if out.shape == view.shape else out.reshape(view.shape)
 
     @staticmethod
     def _split_values(op_cls, kwargs) -> dict:
-        names = {m.name for m in op_cls._members if isinstance(m, _Value)}
+        names = {m.name for m in op_cls._members if isinstance(m, declare.Value)}
         return {k: kwargs.pop(k) for k in list(kwargs) if k in names}
 
     def _construct(self, cls, inputs, outputs, kwargs) -> Operator:
@@ -525,9 +525,9 @@ class Tracer:
         """An output sized by a bounded extent's field is bounded the same way."""
         bounds = {}
         for binding in self.bindings:
-            if binding.op is not op or not isinstance(binding.member.member, Extent):
+            if binding.op is not op or not isinstance(binding.member, Extent):
                 continue
-            axis = buffer.extent_axis(binding.member.member)
+            axis = buffer.extent_axis(binding.member)
             if axis is not None:
                 bounds[axis] = binding.expression
         return bounds

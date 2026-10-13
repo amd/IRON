@@ -15,6 +15,7 @@ from aie.utils import bfp
 from ml_dtypes import bfloat16
 
 from ..declare.operator import graph_tracer
+from ..declare.value import Scratchpad
 
 
 class Handle:
@@ -200,9 +201,9 @@ class Handle:
                 stop = entry.stop.affine()
                 if entry.start not in (None, 0) or entry.step not in (None, 1):
                     raise ValueError(f"{stop} bounds an axis from its start: [:{stop}]")
-                if stop.value.kind != "scratchpad":
+                if not issubclass(stop.value.kind, Scratchpad):
                     raise ValueError(
-                        f"{stop} is {stop.value.kind}; only a Scratchpad value can "
+                        f"{stop} is {stop.value.kind.__name__}; only a Scratchpad value can "
                         f"bound an axis, since it patches a transfer's size"
                     )
                 if tracer is not None:
@@ -215,9 +216,9 @@ class Handle:
                 entry = entry.affine()
                 if index_by is not None:
                     raise ValueError("one axis at most is indexed by a per-call value")
-                if entry.value.kind != "scratchpad":
+                if not issubclass(entry.value.kind, Scratchpad):
                     raise ValueError(
-                        f"{entry} is {entry.value.kind}; only a Scratchpad value can "
+                        f"{entry} is {entry.value.kind.__name__}; only a Scratchpad value can "
                         f"index a view, since it moves a transfer's base address"
                     )
                 if tracer is not None:
@@ -363,11 +364,14 @@ class Value:
     one makes an ``Affine``.
     """
 
-    __slots__ = ("name", "kind", "dtype", "carried")
+    __slots__ = ("name", "kind", "dtype")
 
-    def __init__(self, name, kind, dtype, carried: bool = False):
+    def __init__(self, name: str, kind: type, dtype):
         self.name, self.kind, self.dtype = name, kind, dtype
-        self.carried = carried
+
+    @property
+    def carried(self) -> bool:
+        return self.kind.carried
 
     def affine(self) -> Affine:
         return Affine(self)
@@ -411,8 +415,9 @@ class Value:
     __int__ = __index__
 
     def __repr__(self) -> str:
-        kind = f"carried {self.kind}" if self.carried else self.kind
-        return f"Value({self.name!r}, {kind}[{np.dtype(self.dtype).name}])"
+        return (
+            f"Value({self.name!r}, {self.kind.__name__}[{np.dtype(self.dtype).name}])"
+        )
 
 
 @dataclasses.dataclass(frozen=True)

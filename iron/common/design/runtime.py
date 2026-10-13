@@ -14,10 +14,9 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.ir import IntegerType
 from aie.iron import TaskGroup, WorkerRuntimeBarrier, sync_parameters
 
-from ..declare import DispatchTime, Operator
-from ..declare.bound import BoundValue
+from ..declare import DispatchTime, Operator, Value
 from ..declare.operand import BufferView, Lane, Operand
-from ..declare.operator import _PlaceWord
+from ..declare.value import PlaceWord
 from .bd import BdLimits
 
 
@@ -299,7 +298,7 @@ class Sequence:
             (
                 v
                 for v in self.op.values
-                if isinstance(v.member, _PlaceWord) and v.member.buffer == buffer.name
+                if isinstance(v, PlaceWord) and v.buffer == buffer.name
             ),
             None,
         )
@@ -322,7 +321,7 @@ class Sequence:
             )
         sizes_by = self._sizes_by(size_by)
         if repeat_by is not None:
-            if not isinstance(repeat_by, BoundValue):
+            if not isinstance(repeat_by, Value):
                 raise TypeError(
                     f"repeat_by takes a value member's word (op.value(name)), "
                     f"got {repeat_by!r}"
@@ -403,7 +402,7 @@ class Sequence:
             **common,
         )
 
-    def _sizes_by(self, size_by) -> dict[int, BoundValue]:
+    def _sizes_by(self, size_by) -> dict[int, Value]:
         if not size_by:
             return {}
         if len(size_by) > 1:
@@ -413,12 +412,12 @@ class Sequence:
             )
         out = {}
         for dim, value in size_by.items():
-            if not isinstance(value, BoundValue):
+            if not isinstance(value, Value):
                 raise TypeError(
                     f"size_by takes a value member's word (op.value(name)), got "
                     f"{value!r} for dimension {dim}"
                 )
-            if isinstance(value.member, DispatchTime):
+            if isinstance(value, DispatchTime):
                 raise ValueError(
                     f"{value.name} is a DispatchTime value; a per-call size is a "
                     f"scratchpad word patched into the descriptor"
@@ -448,7 +447,7 @@ class Sequence:
 
     def _resolve(
         self, what, stream
-    ) -> tuple[Operand, TensorAccessPattern, BoundValue | None]:
+    ) -> tuple[Operand, TensorAccessPattern, Value | None]:
         """``(buffer, tap, offset_by)`` of what a transfer moves."""
         if isinstance(what, TensorAccessPattern):
             return self._lane(stream).buffer, what, None

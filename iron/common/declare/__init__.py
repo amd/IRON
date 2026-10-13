@@ -16,11 +16,11 @@ from .field import (
     param,
     Select,
 )
-from .member import Carried, DispatchTime, Extent, Scratchpad, Value
 from .operand import In, InOut, Operand, Out
 from .operator import CopyRun, Link, Operator
 from .placement import Level, Pins, Placement
 from .profile import Profile
+from .value import Carried, DispatchTime, Extent, Scratchpad, Value
 from .xclbin import Xclbin
 
 __all__ = [

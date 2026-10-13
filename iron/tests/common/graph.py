@@ -163,7 +163,7 @@ def test_per_call_values_bind_to_the_operator_and_enable_it():
     (binding,) = t.bindings
     op, value = binding.op, binding.expression.value
     assert type(op) is Copy and binding.member.name == "out_offset"
-    assert value.name == "pos" and value.kind == "scratchpad"
+    assert value.name == "pos" and value.kind is Scratchpad
     assert op.uses_value("out_offset") and not op.uses_value("in_offset")
     assert [v.name for v in op.values] == ["out_offset"]
 
@@ -359,7 +359,7 @@ def test_keyword_only_parameters_must_be_annotated_as_values():
     g = G()
 
     t = g.trace(x=(1024,))
-    assert [(v.name, v.kind) for v in t.values] == [("n", "dispatch")]
+    assert [(v.name, v.kind) for v in t.values] == [("n", DispatchTime)]
 
 
 def test_returning_an_input_or_a_slice_is_refused():
@@ -1255,7 +1255,7 @@ def test_a_bound_value_survives_tuning():
 
 def test_a_bound_travels_through_reshape_and_transpose():
 
-    n = Value("n", "scratchpad", np.int32)
+    n = Value("n", Scratchpad, np.int32)
     x = Handle((64, 8, 4), bfloat16, "x", "input")
     b = x[:n]
     assert b.shape == x.shape and b.bounds == {0: n.affine()} and b.tap is None
@@ -1279,7 +1279,7 @@ def test_per_call_values_are_integer_expressions():
     """Integer arithmetic on a per-call value is an ``Affine`` of it,
     which a binding writes and names its word by.
     """
-    p = Value("p", "scratchpad", np.int32)
+    p = Value("p", Scratchpad, np.int32)
     assert (p + 1) * 64 == Affine(p, 64, 64) == 64 * (1 + p)
     assert (p - 1).evaluate({"p": 5}) == 4 and (p * 3 + 2).evaluate({"p": 5}) == 17
     assert [e.name for e in (p.affine(), p * 64, (p + 1) * 64, p - 1)] == [
@@ -1325,8 +1325,8 @@ def test_a_per_call_value_cannot_steer_the_trace():
     ):
         with pytest.raises(TypeError, match="per call"):
             Branches(test).trace(x=(64,))
-    p = Value("p", "scratchpad", np.int32)
-    assert p == p and p != Value("p", "scratchpad", np.int32) and p + 1 == p + 1
+    p = Value("p", Scratchpad, np.int32)
+    assert p == p and p != Value("p", Scratchpad, np.int32) and p + 1 == p + 1
     assert len({p, p}) == 1 and len({p + 1, 1 + p}) == 1
     with pytest.raises(TypeError, match="not a number"):
         int(p)
@@ -1337,8 +1337,8 @@ def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
     axis: the bound is on axis 1 of the view, and the index an offset of
     whole chunks.
     """
-    chunk = Value("chunk", "scratchpad", np.int32)
-    rows = Value("rows", "scratchpad", np.int32)
+    chunk = Value("chunk", Scratchpad, np.int32)
+    rows = Value("rows", Scratchpad, np.int32)
     G, L, C, D = 2, 64, 16, 8
     cache = Handle((G, L // C, C, D), bfloat16, "cache", "state")
     v = cache[:, chunk, : rows + 1]
@@ -1600,8 +1600,8 @@ def test_integer_arithmetic_on_an_expression_is_an_expression():
     of an expression are expressions that compute the same, and so are sums
     of two linear ones in its value; anything else is refused.
     """
-    x = Affine(Value("x", "scratchpad", np.int32), 3, -5)
-    y = Affine(Value("y", "scratchpad", np.int32))
+    x = Affine(Value("x", Scratchpad, np.int32), 3, -5)
+    y = Affine(Value("y", Scratchpad, np.int32))
     cases = [
         (lambda v: v + 7, None),
         (lambda v: 2 - v, None),

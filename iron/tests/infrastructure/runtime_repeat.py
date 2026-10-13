@@ -94,7 +94,7 @@ class Repeated(iron.Graph):
 
 def _bound_op() -> RepeatTile:
     op = RepeatTile(width=WIDTH, max_k=MAX_K)
-    op.use_value("valid", GraphValue("k", "scratchpad", np.int32).affine())
+    op.use_value("valid", GraphValue("k", Scratchpad, np.int32).affine())
     return op
 
 

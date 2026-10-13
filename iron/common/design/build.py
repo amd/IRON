@@ -28,14 +28,13 @@ from aie.iron import (
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from .. import declare
-from ..declare import Operator
-from ..declare.bound import BoundValue
+from ..declare import Operator, Value
 from .external import ExternalSequence, ImageRuntime, ShimChannel
 from .runtime import Sequence
 from .target import Target
 
 
-def device_symbol(op: Operator, value: BoundValue) -> str:
+def device_symbol(op: Operator, value: Value) -> str:
     """The symbol a per-call value is written through: the instance's name,
     the value's, and the graph value bound to it, unless ``value_symbol``
     names one.
@@ -67,7 +66,7 @@ def build_design(op: Operator, image: str = "elf", **dispatch):
         value.symbol = device_symbol(op, value)
         value.ssa = None
         value.targets = []
-        if image == "elf" and not isinstance(value.member, declare.DispatchTime):
+        if image == "elf" and not isinstance(value, declare.DispatchTime):
             value.param = ScratchpadParameter(value.symbol, value.dtype)
         elif image == "elf":
             raise ValueError(

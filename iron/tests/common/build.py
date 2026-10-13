@@ -30,6 +30,7 @@ from iron.common import (
     Link,
     Operator,
     Out,
+    Scratchpad,
     Value,
     Xclbin,
     auto,
@@ -97,7 +98,7 @@ _TASK = re.compile(
     r"\s*aie\.end\s*\}(?: \{([^}]*)\})?"
 )
 # The graph value a test binds an extent to, as ``x[:n]`` does.
-N = graph.Value("n", "scratchpad", np.int32).affine()
+N = graph.Value("n", Scratchpad, np.int32).affine()
 
 
 def generated_sequence(op, image="elf") -> tuple[str, list[Task]]:
@@ -330,7 +331,7 @@ def test_a_size_patch_names_a_dimension_and_a_word(size_by, error, match):
 def test_a_bounded_repeat_patches_the_stack_axis():
     # The stack axis is on D2 with its patched count, rows and repeats around it.
     op = Repeat(rows=4, cols=8, seq=32, repeat=2).resolved(NPU2_4COL)
-    op.use_value("valid_seq", graph.Value("c", "scratchpad", np.int32).affine())
+    op.use_value("valid_seq", graph.Value("c", Scratchpad, np.int32).affine())
     _, tasks = generated_sequence(op)
     assert [(t.lane, t.sizes, t.strides, t.length_parameter[-11:]) for t in tasks] == [
         ("fifo_in", "2, 32, 4, 8", "0, 8, 256, 1", "valid_seq_x"),

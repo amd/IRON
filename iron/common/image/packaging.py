@@ -14,6 +14,8 @@ import dataclasses
 
 from aie.dialects.aie import AIEArch
 
+from ..declare.value import DispatchTime, Scratchpad
+
 ELF = "elf"
 XCLBIN = "xclbin"
 
@@ -62,7 +64,7 @@ def plan(dev, traced, boundaries=None, image: str | None = None) -> Plan:
         )
 
     forced: list[str] = []
-    dispatch_values = [v for v in traced.values if v.kind == "dispatch"]
+    dispatch_values = [v for v in traced.values if issubclass(v.kind, DispatchTime)]
     if dispatch_values:
         names = ", ".join(v.name for v in dispatch_values)
         forced.append(
@@ -100,9 +102,9 @@ def plan(dev, traced, boundaries=None, image: str | None = None) -> Plan:
 
     values = []
     for v in traced.values:
-        if v.kind == "scratchpad" and chosen == ELF:
+        if issubclass(v.kind, Scratchpad) and chosen == ELF:
             lowering = "patched through the parameter scratchpad"
-        elif v.kind == "scratchpad":
+        elif issubclass(v.kind, Scratchpad):
             lowering = (
                 "no scratchpad on an xclbin: a dispatch-time scalar; "
                 "an offset use regenerates the stream, a core-read use is "
@@ -110,5 +112,5 @@ def plan(dev, traced, boundaries=None, image: str | None = None) -> Plan:
             )
         else:
             lowering = "sizes, strides and offsets regenerated per call"
-        values.append((v.name, v.kind, lowering))
+        values.append((v.name, v.kind.__name__, lowering))
     return Plan(chosen, dispatch, reasons, values)

@@ -17,8 +17,9 @@ from __future__ import annotations
 import dataclasses
 
 from .field import Auto, DimRef, OptionalDim, Param, Shape, Tier
-from .member import Extent, Member
+from .member import Member
 from .operand import Operand
+from .value import Extent
 
 
 def members_of(cls: type) -> list[Member]:

@@ -26,9 +26,10 @@ import numpy as np
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
+from .. import declare
 from ..declare import Operator
-from ..declare.member import Extent, ValueSpec, _Value
-from ..declare.operator import _ExtentWord, graph_tracer
+from ..declare.operator import graph_tracer
+from ..declare.value import Extent, ExtentWord
 from ..declare.profile import Profile
 from ..design import device_symbol
 from ..image.allocator import ArenaPlan
@@ -101,7 +102,7 @@ class Graph:
     profile: Profile | Path | None = None
 
     _inputs: list[str] = []
-    _values: dict[str, ValueSpec] = {}
+    _values: dict[str, declare.Value] = {}
     _optional: frozenset[str] = frozenset()
     _carried: list[str] = []
 
@@ -142,9 +143,9 @@ class Graph:
                     )
             elif p.kind is p.KEYWORD_ONLY:
                 ann = p.annotation
-                if isinstance(ann, type) and issubclass(ann, _Value):
-                    ann = ValueSpec(ann.kind, np.int32, ann.carried)
-                if not isinstance(ann, ValueSpec):
+                if isinstance(ann, type) and issubclass(ann, declare.Value):
+                    ann = ann(np.int32)
+                if not isinstance(ann, declare.Value):
                     raise TypeError(
                         f"{cls.__name__}.body: keyword-only parameter {p.name!r} "
                         f"is a per-call value and must be annotated Scratchpad[T], "
@@ -251,10 +252,7 @@ class Graph:
             shape, dtype = _shape_and_dtype(shapes[name])
             inputs.append(Handle(shape, dtype, name, "input"))
             args.append(inputs[-1])
-        values = [
-            Value(n, spec.kind, spec.dtype, spec.carried)
-            for n, spec in self._values.items()
-        ]
+        values = [Value(n, type(spec), spec.dtype) for n, spec in self._values.items()]
         with self._scope(), Tracer(self.name, self.names(), self._inputs) as tracer:
             result = self.body(*args, **{v.name: v for v in values})
         items, carry = self._split_carry(result)
@@ -854,7 +852,7 @@ def _words(
     dev = aie_utils.get_current_device()
     words: list[Word] = []
     for b in traced.bindings:
-        if not extents and isinstance(b.member.member, Extent):
+        if not extents and isinstance(b.member, Extent):
             continue
         e = b.expression
         linear = Linear(
@@ -867,14 +865,14 @@ def _words(
     seen: set[int] = set()
     derived: set[str] = set()
     for b in traced.bindings:
-        if id(b.op) in seen or not isinstance(b.member.member, Extent):
+        if id(b.op) in seen or not isinstance(b.member, Extent):
             continue
         seen.add(id(b.op))
         op = b.op.resolved(dev)
         counts = {
             e.member.name: e.expression
             for e in traced.bindings
-            if e.op is b.op and isinstance(e.member.member, Extent)
+            if e.op is b.op and isinstance(e.member, Extent)
         }
 
         def at(v, counts=counts):
@@ -887,8 +885,8 @@ def _words(
                 continue  # another instance of the design, bound alike
             derived.add(symbol)
             linear = None
-            spec = word.member
-            if isinstance(spec, _ExtentWord) and spec.extent.name in counts:
+            spec = word
+            if isinstance(spec, ExtentWord) and spec.extent.name in counts:
                 count, divisor = counts[spec.extent.name], spec.divisor(op)
                 linear = Linear(
                     count.value.name,

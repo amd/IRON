@@ -19,9 +19,9 @@ from aie.iron.device import Tile
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
-from .bound import BoundValue
 from .field import DimRef, OptionalDim, Shape, _DimSpec
-from .member import DispatchTime, Extent, Member
+from .member import Member
+from .value import DispatchTime, Extent, Value
 
 if TYPE_CHECKING:
     from .operator import Operator
@@ -323,13 +323,13 @@ class Operand(Member["Operand"]):
         return tile_shape[k] if k >= 0 else 1
 
     @property
-    def bounded(self) -> tuple[Extent, int, BoundValue] | None:
+    def bounded(self) -> tuple[Extent, int, Value] | None:
         """``(extent, axis, word)`` when a bound extent sizes an axis, ``word``
         the per-call tiles per lane.
         """
         op = self.op
         for name in op.bound_extents:
-            extent = op.value(name).member
+            extent = op.value(name)
             assert isinstance(extent, Extent)
             axis = self.extent_axis(extent)
             if axis is not None:
@@ -378,10 +378,10 @@ class BufferView:
     def __init__(self, buffer: Operand, index) -> None:
         self.buffer = buffer
         self.index = index if isinstance(index, tuple) else (index,)
-        self.offset_by: BoundValue | None = None
+        self.offset_by: Value | None = None
         static = []
         for idx in self.index:
-            if isinstance(idx, slice) and isinstance(idx.start, BoundValue):
+            if isinstance(idx, slice) and isinstance(idx.start, Value):
                 if idx.stop is not None or idx.step is not None:
                     raise ValueError(
                         f"{buffer.name}[{idx}]: a per-call start takes the whole axis"
@@ -390,7 +390,7 @@ class BufferView:
                     raise ValueError(
                         f"{buffer.name}: only one axis may start at a per-call value"
                     )
-                if isinstance(idx.start.member, DispatchTime):
+                if isinstance(idx.start, DispatchTime):
                     raise ValueError(
                         f"{buffer.name}: {idx.start.name} is a DispatchTime value; "
                         f"only a Scratchpad value can move a transfer's base address"

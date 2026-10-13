@@ -8,6 +8,7 @@ import pytest
 from aie.iron.device import NPU1, NPU2, NPU1Col1, NPU2Col1, from_name
 
 import iron
+from iron.common import DispatchTime, Scratchpad
 from iron.common.graph import TracedGraph, Value
 from iron.common.image.packaging import ELF, XCLBIN, each_step, full_elf, plan
 from iron.operators.flm.gemm.shipped import Shipped
@@ -24,7 +25,7 @@ def test_default_is_a_full_elf_on_npu2():
 
 
 def test_a_dispatch_time_value_forces_xclbin_and_names_itself():
-    t = _traced(Value("n", "dispatch", np.int32))
+    t = _traced(Value("n", DispatchTime, np.int32))
     with pytest.raises(
         ValueError, match="image=elf is not possible.*n: a DispatchTime"
     ):
@@ -32,12 +33,12 @@ def test_a_dispatch_time_value_forces_xclbin_and_names_itself():
     p = plan(NPU2(), t, boundaries=each_step)
     assert (p.image, p.dispatch) == (XCLBIN, "separate")
     assert p.values == [
-        ("n", "dispatch", "sizes, strides and offsets regenerated per call")
+        ("n", "DispatchTime", "sizes, strides and offsets regenerated per call")
     ]
 
 
 def test_npu1_forces_xclbin_and_reports_the_scratchpad_lowering():
-    t = _traced(Value("pos", "scratchpad", np.int32))
+    t = _traced(Value("pos", Scratchpad, np.int32))
     with pytest.raises(ValueError, match=r"npu1 \(AIE2\) has no full-ELF dispatch"):
         plan(NPU1(), t, image=ELF)
     # An xclbin run has no parameter scratchpad: the value is a dispatch-
@@ -68,7 +69,7 @@ def test_a_forced_xclbin_defaults_to_each_step():
         "npu1 (AIE2) has no full-ELF dispatch",
         "boundaries=each_step: the xclbin form that is built",
     ]
-    p = plan(NPU2(), _traced(Value("n", "dispatch", np.int32)))
+    p = plan(NPU2(), _traced(Value("n", DispatchTime, np.int32)))
     assert (p.image, p.dispatch) == (XCLBIN, "separate")
     assert plan(NPU1(), _traced(), image=XCLBIN).dispatch == "separate"
 
@@ -100,9 +101,9 @@ def test_a_shipped_image_in_a_graph_is_refused(npu2):
 
 
 def test_report_reads_as_one_block():
-    p = plan(NPU2(), _traced(Value("pos", "scratchpad", np.int32)))
+    p = plan(NPU2(), _traced(Value("pos", Scratchpad, np.int32)))
     assert p.report("decode").splitlines() == [
         "decode: image elf, dispatch 'fused'",
         "  one sequence, one configuration set: a full ELF",
-        "  pos: scratchpad; patched through the parameter scratchpad",
+        "  pos: Scratchpad; patched through the parameter scratchpad",
     ]

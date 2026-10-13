@@ -389,8 +389,8 @@ def test_per_call_values_bind_on_the_operator():
 
     op = Copy(n=256)
     assert [v.name for v in op.values] == ["off", "live"]
-    assert isinstance(op.off.member, Scratchpad)
-    assert isinstance(op.live.member, DispatchTime)
+    assert isinstance(op.off, Scratchpad) and op.off.op is op
+    assert isinstance(op.live, DispatchTime) and op.live is not Copy.live
 
 
 def test_shim_pins_declare():

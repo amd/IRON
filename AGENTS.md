@@ -191,7 +191,10 @@ reuse lint
 3. **Common Infrastructure** (`iron/common/`)
    - `declare/`: the declaration layer (`Operator`, `param`/`auto`,
      operands (`Operand`: `op.x` is the declared operand bound to the
-     instance, its shape and lanes resolved), `Value`, `Scratchpad`/`DispatchTime`, `Xclbin` and its
+     instance, its shape and lanes resolved), the `Value` hierarchy
+     (`Scratchpad`/`Carried`/`DispatchTime`/`Extent`; `op.value(name)` is
+     the value bound to the instance, its device parameter once built),
+     `Xclbin` and its
      `fetch()`, inference). An operator's shim budget, `shim_columns`, is
      the bound device's `shim_dma_channels_in`/`out`; its `residents` the
      derived values the preamble writes once per build

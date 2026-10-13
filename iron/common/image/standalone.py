@@ -73,7 +73,7 @@ class OperatorImage:
             image = entry.xclbin
             # A stream generated per call has no insts_only build: its
             # dispatch library comes with a full one.
-            per_call = any(isinstance(v.member, DispatchTime) for v in op.values)
+            per_call = any(isinstance(v, DispatchTime) for v in op.values)
             own = (
                 built
                 if config is op
