@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
+from aie.iron import ObjectFifo, Worker
 from aie.iron.device import Tile, from_name
 from aie.utils import bfp
 from ml_dtypes import bfloat16
@@ -38,11 +39,7 @@ from iron.common import (
     Param,
 )
 from iron.common import graph
-from iron.common.design import (
-    OperatorDesign,
-    Sequence,
-    build_design,
-)
+from iron.common.design import OperatorDesign, OperatorRuntime
 from iron.common.graph.compiled import _words
 from iron.operators.clamp import Clamp
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -107,7 +104,7 @@ def generated_sequence(op, image="elf") -> tuple[str, list[Task]]:
     design's generator declares, so it is generated as it would be compiled.
     """
     if image == "elf":
-        module = build_design(op)
+        module = OperatorDesign(op).module()
     else:
         design = OperatorDesign(op, image)
         module = design.compilable().generate_mlir()
@@ -127,13 +124,13 @@ def generated_sequence(op, image="elf") -> tuple[str, list[Task]]:
 
 def test_split_takes_every_batch_and_broadcasts():
     op = MV(M=256, K=128, num_batches=100)
-    a_transfers = Sequence.split(op.A)
+    a_transfers = OperatorRuntime.split(op.A)
     assert [slot.index for slot, _ in a_transfers] == [0, 1]
     # Each lane's rows out of every batch: one pattern, however many batches.
     assert a_transfers[1][1] == TensorAccessPattern(
         (100, 256, 128), 128 * 128, [100, 128, 128], [256 * 128, 128, 1]
     )
-    ((b_slot, b_tap),) = Sequence.split(op.B)
+    ((b_slot, b_tap),) = OperatorRuntime.split(op.B)
     assert b_slot == op.B.lane(0)
     assert b_tap == TensorAccessPattern((100 * 128,), 0, [100 * 128], [1])
 
@@ -147,7 +144,7 @@ def test_a_buffer_without_a_stream_has_no_derived_transfers():
 
     op = NoStream(M=256, K=128)
     with pytest.raises(ValueError, match="NoStream.A has no tile="):
-        Sequence(op, {}).plan(op.A)
+        OperatorRuntime.plan(op.A)
 
 
 def test_a_bounded_operand_goes_round_robin_over_the_lanes():
@@ -156,14 +153,14 @@ def test_a_bounded_operand_goes_round_robin_over_the_lanes():
     for the full extent.
     """
     op = Rows(rows=64, cols=8).resolved(NPU2_4COL)
-    plan = Sequence.round_robin(op.x, 0)
+    plan = OperatorRuntime.round_robin(op.x, 0)
     assert [(slot.index, tap, dim) for slot, tap, dim in plan] == [
         (0, TensorAccessPattern((1, 32, 2, 8), 0, [1, 32, 1, 8], [0, 16, 8, 1]), 1),
         (1, TensorAccessPattern((1, 32, 2, 8), 8, [1, 32, 1, 8], [0, 16, 8, 1]), 1),
     ]
     # A leading batch axis is the outer repeat; the tile count keeps its slot.
     batched = MV(M=256, K=128, num_batches=3).resolved(NPU2_4COL)
-    (slot, tap, dim), *_ = Sequence.round_robin(batched.A, 1)
+    (slot, tap, dim), *_ = OperatorRuntime.round_robin(batched.A, 1)
     # The 64 x 128 tile is a run past one wrap, so it takes the two inner
     # slots as 8 x 1024; the tile count sits above them.
     assert tap == TensorAccessPattern(
@@ -186,8 +183,8 @@ def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles():
     )
     op = op.resolved(from_name("npu2", n_cols=8))
     lanes = op.num_aie_columns
-    x = Sequence.round_robin(op.x, 0)
-    angles = Sequence.round_robin(op.angles, 0)
+    x = OperatorRuntime.round_robin(op.x, 0)
+    angles = OperatorRuntime.round_robin(op.angles, 0)
     for (xs, xa, _), (as_, aa, _) in zip(x, angles, strict=True):
         assert xs.index == as_.index
         rows = xa.gather(np.arange(prod(xa.tensor_dims)))[::cols] // cols
@@ -208,8 +205,18 @@ def test_preamble_rejects_a_resident_the_array_never_bound(npu2):
         A = In(n, tile=(tile,))
         count = Value(np.int32, derive=lambda op: op.n // op.tile)
 
+        def array(self):
+            fifo = ObjectFifo(self.A.tile, name="a")
+            self.A.lane(0).bind(fifo.prod())
+
+            def core(of):
+                of.acquire(1)
+                of.release(1)
+
+            return [Worker(core, [fifo.cons()])]
+
     with pytest.raises(ValueError, match="never bound this value"):
-        Sequence(Op(n=64), {}).preamble()
+        OperatorDesign(Op(n=64)).module()
 
 
 def test_mha_infers_the_padded_length_and_the_kv_head_count():
@@ -226,7 +233,7 @@ def test_mha_binds_p_times_v_at_its_own_shape():
     in float32 and rounded once into the bf16 output.
     """
     op = MHA(num_heads=1, seq_len=1024, d=128, num_pipelines=8, B_q=32)
-    text = str(build_design(op.resolved(from_name("npu2", n_cols=8))))
+    text = str(OperatorDesign(op.resolved(from_name("npu2", n_cols=8))).module())
     p, v = "memref<32x32xbf16>", "memref<32x128xbf16>"
     acc, o = "memref<32x128xf32>", "memref<32x128xbf16>"
     assert re.search(rf'_matmul_PV"?\({p}, {v}, {acc},', text)
@@ -324,7 +331,7 @@ def test_a_size_patch_names_a_dimension_and_a_word(size_by, error, match):
     op = Patched(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=4)
     op.use_value("valid", N)
     with pytest.raises(error, match=match):
-        build_design(op)
+        OperatorDesign(op).module()
 
 
 def test_a_bounded_repeat_patches_the_stack_axis():

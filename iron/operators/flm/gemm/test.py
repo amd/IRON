@@ -12,7 +12,7 @@ from aie.utils.verify import Tolerance
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
-from iron.common.design.build import build_design
+from iron.common.design import OperatorDesign
 from iron.common.harness import run_test, vectors
 from iron.common.image import OperatorImage
 from iron.operators import GEMM as GenericGEMM
@@ -390,7 +390,7 @@ def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N, npu2):
     the memtile locks are armed per dispatch, and one slab awaits one C per
     column.
     """
-    mlir = str(build_design(GEMM(M=M, K=K, N=N)))
+    mlir = str(OperatorDesign(GEMM(M=M, K=K, N=N)).module())
     assert "aie.objectfifo @B" not in mlir
     assert "bd_id" not in mlir
     assert "aiex.set_lock" in mlir

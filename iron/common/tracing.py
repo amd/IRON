@@ -5,7 +5,7 @@
 """NPU hardware tracing, read back after a run.
 
 An operator is traced when it is built with a ``trace``
-(``aie.utils.trace.TraceConfig``): ``build_design`` switches the trace
+(``aie.utils.trace.TraceConfig``): ``OperatorDesign.module`` switches the trace
 on for the workers its ``array()`` marks with ``Worker(trace=)``, or its
 first. A sequence holding a traced operator carries one trace buffer, and
 ``dump_traces`` is called after ``run()`` to write what it holds:

@@ -13,7 +13,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common import Scratchpad, UnaryElementwise, Unresolvable
-from iron.common.design.build import build_design
+from iron.common.design import OperatorDesign
 from iron.common.elementwise import _interval
 from iron.common.graph.costcache import CostCache
 from iron.common.harness import vectors
@@ -49,7 +49,9 @@ def test_the_trip_count_is_a_resident_the_build_writes():
     assert op.residents == {"count": 1}
     # The preamble writes it into each core's runtime-parameter buffer.
     one_core = ReLU(size=2560, num_aie_columns=1, tile_size=256)
-    assert "aiex.npu.rtp_write(@count_0, 0, %c10_i32)" in str(build_design(one_core))
+    assert "aiex.npu.rtp_write(@count_0, 0, %c10_i32)" in str(
+        OperatorDesign(one_core).module()
+    )
 
 
 def test_an_operator_written_by_inheritance_inherits_the_sweep():

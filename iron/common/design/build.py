@@ -9,117 +9,20 @@ import functools
 import hashlib
 import inspect
 import re
-from typing import Any
 
 import aie.utils as aie_utils
-from aie.iron import (
-    CompileTime,
-    DispatchTime,
-    Flow,
-    Lock,
-    PacketFlow,
-    Program,
-    Runtime,
-    ScratchpadParameter,
-    TileDma,
-    Worker,
-    WorkerRuntimeBarrier,
-)
+from aie.iron import CompileTime, DispatchTime, Program, ScratchpadParameter, Worker
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from .. import declare
 from ..declare import Operator
-from .external import ExternalSequence, ImageRuntime, ShimChannel
-from .runtime import Sequence
-
-
-def build_design(op: Operator, image: str = "elf", **dispatch):
-    """The MLIR module for one declared operator, on the bound device.
-
-    Args:
-        image: ``"elf"``, where a per-call value is a scratchpad parameter,
-            or ``"xclbin"``, which has none: there it is a dispatch-time
-            scalar, given by symbol in ``dispatch``.
-    """
-    dev = op.dev
-    op = op.resolved(dev).copy()  # a build binds streams; each gets its own
-    if op.external is not None:
-        return ExternalSequence.module(dev, op)
-    # Before array(), which may hand a core-read value to a worker.
-    values = op.values
-    for value in values:
-        if image == "elf" and not isinstance(value, declare.DispatchTime):
-            value.param = ScratchpadParameter(value.symbol, value.dtype)
-        elif image == "elf":
-            raise ValueError(
-                f"{type(op).__name__}.{value.name} is a DispatchTime value, which a "
-                f"full ELF cannot carry (its stream is fixed at build time); "
-                f"package as xclbin"
-            )
-        else:
-            if value.symbol not in dispatch:
-                raise ValueError(
-                    f"{type(op).__name__}.{value.name}: no dispatch parameter "
-                    f"{value.symbol!r} was handed to build_design"
-                )
-            value.param = dispatch[value.symbol]
-
-    built = op.build_array() or []
-    workers = [w for w in built if isinstance(w, Worker)]
-    barriers = tuple(b for b in built if isinstance(b, WorkerRuntimeBarrier))
-
-    # Raises if any stream is unbound.
-    handles = [h for b in op.buffers if b.streamed for h in b.handles]
-
-    buffers = op.buffers
-    fn_args: list[Any] = [b.flat_type for b in buffers]
-    fn_args.append(handles)
-    params = [v.param for v in values]
-
-    def sequence(*args):
-        rt_data = {b.name: a for b, a in zip(buffers, args)}
-        if image != "elf":
-            for value, scalar in zip(values, args[len(buffers) + 1 :]):
-                value.ssa = scalar
-        seq = Sequence(op, rt_data, barriers)
-        if not op.own_preamble:
-            seq.preamble()
-        seq.run()
-
-    channels = [c for c in built if isinstance(c, ShimChannel)]
-    rt = (
-        ImageRuntime(sequence, fn_args + params, channels, [])
-        if channels
-        else Runtime(sequence, fn_args + params)
-    )
-    # Before resolving: the sequence body, generated last, may address any of it.
-    for obj in built:
-        if isinstance(obj, (Flow, PacketFlow)):
-            rt.add_flow(obj)
-        elif isinstance(obj, Lock):
-            rt.add_lock(obj)
-        elif isinstance(obj, TileDma):
-            rt.add_tile_dma(obj)
-        elif not isinstance(obj, (Worker, WorkerRuntimeBarrier, ShimChannel)):
-            raise TypeError(
-                f"{type(op).__name__}.array() returns Workers, WorkerRuntimeBarriers, "
-                f"Flows, PacketFlows, Locks, TileDmas and ShimChannels; got {obj!r}"
-            )
-    prog = Program(op.device(), rt, workers=workers)
-    if op.trace is not None:
-        if op.trace.reuse_output_buffer:
-            raise ValueError(
-                f"{type(op).__name__}: a full ELF consolidates its outputs, so "
-                f"its trace takes a buffer of its own (reuse_output_buffer=False)"
-            )
-        traced = [w for w in workers if w.trace is not None] or list(workers)[:1]
-        prog.enable_trace(op.trace.trace_size, workers=traced)
-    return prog.resolve_program()
+from .runtime import OperatorRuntime
+from .shipped import ShippedRuntime
 
 
 class OperatorDesign:
     """One operator's design as ``CompilableDesign`` compiles and caches it:
-    ``build_design``, or ``Operator.exported_design``.
+    ``module``, or ``Operator.exported_design``.
 
     The cache key is ``CompilableDesign``'s recipe; ``identity`` adds the
     fields the operator's repr leaves out.
@@ -134,7 +37,7 @@ class OperatorDesign:
         P = inspect.Parameter
         build = op.exported_design(image)
         if build is None:
-            build = functools.partial(build_design, op=op, image=image)
+            build = self.module
             params = [
                 P(
                     v.symbol,
@@ -157,6 +60,51 @@ class OperatorDesign:
         ]
         setattr(generator, "__signature__", inspect.Signature([*params, *keys]))
         self.generator = generator
+
+    def module(self, **dispatch):
+        """The MLIR module for the operator, on the bound device.
+
+        Args:
+            **dispatch: On an xclbin, which has no parameter scratchpad, each
+                per-call value's dispatch-time scalar, by device symbol.
+
+        Raises:
+            ValueError: A full ELF is asked to carry a `DispatchTime` value,
+                or an xclbin is given no scalar for a value.
+        """
+        dev = self.op.dev
+        op = self.op.resolved(dev).copy()  # a build binds streams; each gets its own
+        if op.external is not None:
+            return Program(dev, ShippedRuntime(op, dev)).resolve_program()
+        # Before array(), which may hand a core-read value to a worker.
+        for value in op.values:
+            if self.image == "elf" and not isinstance(value, declare.DispatchTime):
+                value.param = ScratchpadParameter(value.symbol, value.dtype)
+            elif self.image == "elf":
+                raise ValueError(
+                    f"{type(op).__name__}.{value.name} is a DispatchTime value, "
+                    f"which a full ELF cannot carry (its stream is fixed at build "
+                    f"time); package as xclbin"
+                )
+            elif value.symbol not in dispatch:
+                raise ValueError(
+                    f"{type(op).__name__}.{value.name}: no dispatch parameter "
+                    f"{value.symbol!r} was handed to the build"
+                )
+            else:
+                value.param = dispatch[value.symbol]
+        built = op.build_array() or []
+        workers = [w for w in built if isinstance(w, Worker)]
+        prog = Program(op.device(), OperatorRuntime(op, built), workers=workers)
+        if op.trace is not None:
+            if op.trace.reuse_output_buffer:
+                raise ValueError(
+                    f"{type(op).__name__}: a full ELF consolidates its outputs, so "
+                    f"its trace takes a buffer of its own (reuse_output_buffer=False)"
+                )
+            traced = [w for w in workers if w.trace is not None] or list(workers)[:1]
+            prog.enable_trace(op.trace.trace_size, workers=traced)
+        return prog.resolve_program()
 
     @functools.cached_property
     def identity(self) -> str:

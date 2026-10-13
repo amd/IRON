@@ -1,18 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The runtime sequence of one operator."""
+"""The runtime sequence of one operator, as aie.iron's ``Runtime``."""
 
 from __future__ import annotations
 
 from math import prod
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
+from aie.dialects.aie import DMAChannelDir, shim_dma_allocation
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.ir import IntegerType
-from aie.iron import TaskGroup, WorkerRuntimeBarrier, sync_parameters
+from aie.iron import (
+    Buffer,
+    Flow,
+    Lock,
+    PacketFlow,
+    Runtime,
+    TaskGroup,
+    TileDma,
+    Worker,
+    WorkerRuntimeBarrier,
+    sync_parameters,
+)
+from aie.iron.device import Tile
 
 from ..declare import DispatchTime, Operator, Value
 from ..declare.operand import BufferView, Lane, Operand
@@ -20,23 +33,104 @@ from ..declare.value import PlaceWord
 from .bd import BdLimits
 
 
-class Sequence:
-    """The runtime sequence of one operator: its ``sequence(rt)`` override, or
-    the one derived from the declarations.
+class ShimChannel(NamedTuple):
+    """A shim DMA channel the runtime sequence reaches by ``symbol``.
 
-    ``fill``/``drain`` take an operand's lane (or a one-lane operand) and a
-    buffer, a slice of one or ``(buffer, TensorAccessPattern)``.
+    aie.iron allocates the shim end of a route it fills or drains, one end
+    per route; an ``array()`` whose route joins two shims names the other
+    end with one of these.
     """
 
-    def __init__(
-        self,
-        op: Operator,
-        rt_data: dict[str, Any],
-        barriers: tuple[WorkerRuntimeBarrier, ...] = (),
-    ):
+    symbol: str
+    tile: Tile
+    direction: DMAChannelDir
+    channel: int
+
+
+class OperatorRuntime(Runtime):
+    """The runtime sequence of one operator: aie.iron's ``Runtime``, whose
+    body runs the preamble and then the operator's ``sequence(rt)``, or the
+    sequence derived from its declaration.
+
+    It is what ``sequence(rt)`` receives: ``fill``/``drain`` take an
+    operand's lane (or a one-lane operand) and a buffer, a slice of one or
+    ``(buffer, TensorAccessPattern)``.
+
+    Args:
+        op: The resolved operator, its array built and its operands' lanes
+            bound (a shipped image's has no array).
+        built: What its ``array()`` returned: its workers and barriers, and
+            the flows, locks, tile DMAs and shim channels only the sequence
+            reaches.
+
+    Attributes:
+        barriers: The barriers the preamble opens.
+        channels: The shim channels the sequence names beside the routes
+            aie.iron allocates.
+        buffers: Buffers the sequence writes that no worker places: a
+            shipped image's parameter block.
+    """
+
+    def __init__(self, op: Operator, built: list = ()) -> None:
         self.op = op
-        self._rt_data = rt_data
-        self.barriers = barriers
+        self.barriers = tuple(b for b in built if isinstance(b, WorkerRuntimeBarrier))
+        self.channels = [c for c in built if isinstance(c, ShimChannel)]
+        self.buffers: list[Buffer] = []
+        self._tensors: dict[str, Any] = {}
+        # Raises if any stream of a built array is unbound.
+        handles = (
+            [h for b in op.buffers if b.streamed for h in b.handles]
+            if op.external is None
+            else []
+        )
+        super().__init__(
+            self.body,
+            [
+                *(b.flat_type for b in op.buffers),
+                handles,
+                *(v.param for v in op.values),
+            ],
+        )
+        # Before resolving: the sequence body, generated last, may address any of it.
+        for obj in built:
+            if isinstance(obj, (Flow, PacketFlow)):
+                self.add_flow(obj)
+            elif isinstance(obj, Lock):
+                self.add_lock(obj)
+            elif isinstance(obj, TileDma):
+                self.add_tile_dma(obj)
+            elif not isinstance(obj, (Worker, WorkerRuntimeBarrier, ShimChannel)):
+                raise TypeError(
+                    f"{type(op).__name__}.array() returns Workers, "
+                    f"WorkerRuntimeBarriers, Flows, PacketFlows, Locks, TileDmas "
+                    f"and ShimChannels; got {obj!r}"
+                )
+
+    def body(self, *args) -> None:
+        """The sequence body aie.iron runs: the operator's runtime tensors,
+        its lanes' handles, then each per-call value, a dispatch-time scalar
+        where it is not a scratchpad word.
+        """
+        buffers = self.op.buffers
+        self._tensors = {b.name: a for b, a in zip(buffers, args)}
+        for value, arg in zip(self.op.values, args[len(buffers) + 1 :]):
+            if not value.scratchpad:
+                value.ssa = arg
+        if not self.op.own_preamble:
+            self.preamble()
+        self.run()
+
+    def resolve(self, loc=None, ip=None, *, device=None, **options) -> None:
+        # aie.iron names a shim channel through the route it starts or ends,
+        # and places a buffer through the worker that reads it; these have
+        # neither, so they are declared at device scope ahead of the sequence.
+        for symbol, tile, direction, channel in self.channels:
+            device.resolve_tile(tile)
+            shim_dma_allocation(symbol, tile.op, direction, channel)
+        for buffer in self.buffers:
+            device.resolve_tile(buffer.tile)
+            buffer.resolve()
+        super().resolve(loc, ip, device=device, **options)
 
     def run(self) -> None:
         if self.op.has_sequence_override():
@@ -56,27 +150,29 @@ class Sequence:
                 self.drain(slot, (buf, tap), group=tg, wait=True, size_by=size_by)
         tg.finish()
 
-    def plan(self, buf: Operand) -> list[tuple[Any, TensorAccessPattern, dict | None]]:
+    @staticmethod
+    def plan(buf: Operand) -> list[tuple[Any, TensorAccessPattern, dict | None]]:
         """The derived ``(slot, tap, size_by)`` transfers of one operand:
         ``split``, or ``round_robin`` under a bound.
         """
         if not buf.streamed:
             raise ValueError(
-                f"{type(self.op).__name__}.{buf.name} has no tile=, so its "
+                f"{type(buf.op).__name__}.{buf.name} has no tile=, so its "
                 f"sequence cannot be derived; add tile= or override sequence(rt)"
             )
         bounded = buf.bounded
         if bounded is None:
-            return [(slot, tap, None) for slot, tap in self.split(buf)]
+            return [(slot, tap, None) for slot, tap in OperatorRuntime.split(buf)]
         extent, axis, word = bounded
         if axis != buf.batch_axes:
             raise ValueError(
-                f"{type(self.op).__name__}.{buf.name}: {extent.name} bounds axis "
+                f"{type(buf.op).__name__}.{buf.name}: {extent.name} bounds axis "
                 f"{axis}, but the derived sequence splits axis {buf.batch_axes}; "
                 f"override sequence(rt) to bound another axis"
             )
         return [
-            (slot, tap, {dim: word}) for slot, tap, dim in self.round_robin(buf, axis)
+            (slot, tap, {dim: word})
+            for slot, tap, dim in OperatorRuntime.round_robin(buf, axis)
         ]
 
     @staticmethod
@@ -335,7 +431,7 @@ class Sequence:
                     f"count is the outermost dimension's size, which size_by "
                     f"also sets"
                 )
-        data = self._rt_data[buffer.name]
+        data = self._tensors[buffer.name]
         if managed:
             common = dict(wait=wait, group=group)
         else:
@@ -466,7 +562,7 @@ class Sequence:
         )
 
     def data(self, buffer: Operand):
-        return self._rt_data[buffer.name]
+        return self._tensors[buffer.name]
 
     def preamble(self, **values) -> None:
         """Residents, then the parameter sync, then barriers, before any DMA.

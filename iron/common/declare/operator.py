@@ -1225,7 +1225,7 @@ class Operator(metaclass=_OperatorMeta):
         extras = []
         if len(outs) == 1 and outs[0].finish:
             (out,) = outs
-            # Riding a feed, an input is no stream of its own (Sequence.fill).
+            # Riding a feed, an input is no stream of its own (OperatorRuntime.fill).
             fed = any(m.feed for m in self._members_io())
             for i, link in enumerate(self.finish):
                 for k, b in enumerate(link.op.inputs):

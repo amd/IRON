@@ -25,7 +25,6 @@ from aie.utils.txn_trace import trace
 import iron
 from iron.common import Extent, In, Operator, Out, Param, Scratchpad, Value
 from iron.common.design import OperatorDesign
-from iron.common.design.build import build_design
 from iron.common.graph import Value as GraphValue
 
 WIDTH = 256
@@ -144,7 +143,7 @@ def test_a_full_elf_takes_the_repeat_count_from_the_scratchpad(npu2, tmp_path):
     length is a word of its own.
     """
     op = _bound_op().resolved()
-    module = build_design(op)
+    module = OperatorDesign(op).module()
     reps, tiles = (op.value(n).symbol for n in ("reps", "valid_y"))
     assert f"{{repeat_parameter = @{reps}}}" in str(module)
     params = tmp_path / "params.txt"

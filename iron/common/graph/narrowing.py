@@ -181,7 +181,7 @@ def variants(op: Operator, dev, pinned: frozenset[str] = frozenset()) -> list[Va
             resolved = variant.resolved
             if not resolved.has_sequence_override():
                 for buf in resolved.buffers:
-                    runtime.Sequence(resolved, {}).plan(buf)
+                    runtime.OperatorRuntime.plan(buf)
         except ValueError as e:  # unresolvable, incompatible or untransferable here
             logger.debug("%s at %s dropped: %s", type(op).__name__, tunables, e)
             dropped += 1

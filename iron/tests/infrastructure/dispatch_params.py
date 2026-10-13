@@ -22,7 +22,7 @@ from aie.iron.controlflow import range_
 from aie.utils.hostruntime.hostruntime import HostRuntimeError
 
 from iron.common import DispatchTime, In, Operator, Out, Param
-from iron.common.design.build import build_design
+from iron.common.design import OperatorDesign
 from iron.common.image import OperatorImage
 
 CHUNK = 1024
@@ -124,4 +124,4 @@ def test_a_call_takes_exactly_the_declared_scalars(scalars, error, match, npu_ru
 
 def test_a_full_elf_refuses_a_dispatch_value():
     with pytest.raises(ValueError, match="package as xclbin"):
-        build_design(ChunkCopy(max_chunks=MAX_CHUNKS))
+        OperatorDesign(ChunkCopy(max_chunks=MAX_CHUNKS)).module()

@@ -202,12 +202,13 @@ reuse lint
      or a callable of the operator and the device. An operator's shim budget, `shim_columns`, is
      the bound device's `shim_dma_channels_in`/`out`; its `residents` the
      derived values the preamble writes once per build
-   - `design/`: the library-owned build:
-     `build_design(op, image)` (the module for one operator),
-     `OperatorDesign` (that module as mlir-aie's `CompilableDesign`
-     compiles and caches it), the derived runtime sequence (`Sequence`,
-     its `split`/`round_robin`), `ExternalSequence` (the sequence
-     against a shipped image: `Lock.set` releases its parameter block)
+   - `design/`: the library-owned build: `OperatorDesign(op, image)`,
+     whose `module()` is the MLIR module for one operator and which
+     mlir-aie's `CompilableDesign` compiles and caches; `OperatorRuntime`,
+     the operator's sequence as an aie.iron `Runtime` subclass (what
+     `sequence(rt)` receives; the derived sequence, its
+     `plan`/`split`/`round_robin`); `ShippedRuntime`, its subclass against
+     a shipped image (`Lock.set` releases its parameter block)
    - `graph/`: graphs (`iron.Graph`, `iron.state`) and
      `compile(dev=, boundaries=, image=)`
    - `image/`: what a graph lowers onto: `OperatorSequence`, the buffer
@@ -254,9 +255,10 @@ reuse lint
 - Used to parallelize work across multiple columns
 - Format: `(tensor_shape, offset, dimensions, strides)`
 
-**Runtime Sequence**: Host-side control flow. The library derives it from
-the operator's declaration (each buffer split over its stream's slots); an
-operator that needs a different order overrides `sequence(rt)`:
+**Runtime Sequence**: Host-side control flow, an aie.iron `Runtime`
+(`OperatorRuntime`). The library derives it from the operator's declaration
+(each buffer split over its stream's slots); an operator that needs a
+different order overrides `sequence(rt)`:
 
 - `rt.fill(slot, view, group=tg)`: DMA data from host → NPU (shim → L2/L1)
 - `rt.drain(slot, view, group=tg)`: DMA data from NPU → host
@@ -280,7 +282,7 @@ regenerates the stream, a core-read use is an `rtp_write` of the scalar.
 ```text
 op.py (X.array + X.sequence or the derived sequence)
     ↓
-iron.common.design.build_design (library-owned Runtime/Program)
+iron.common.design.OperatorDesign.module (library-owned Runtime/Program)
     ↓
 MLIR (.mlir file)
     ↓ (aie-opt + aie-translate via Peano toolchain)

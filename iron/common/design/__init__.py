@@ -1,35 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The library-owned build of a declared operator: Runtime, Program, and the sequence.
+"""The library-owned build of a declared operator: its Program and runtime.
 
-A declared ``Operator`` never constructs a
-``Runtime`` or a ``Program``. ``build_design`` does, from the
-declaration: it resolves the operator for the device, calls its
-``array()`` to build the array and bind its operands' lanes, opens
-the runtime sequence from the operator's buffers in declaration order, runs
-the preamble (values, parameter sync, barriers), then either derives the
-fill/drain sequence from the operands' tiles or hands a ``Sequence``
-to the operator's ``sequence(rt)`` override. ``OperatorDesign`` is
-that generator as mlir-aie's ``CompilableDesign`` compiles it, keyed on
-what the module is built from.
-
-One module per participant: ``runtime`` is what an operator's
-``sequence(rt)`` receives,
-``external`` what it receives against a shipped image, and
-``build`` puts them together.
+A declared ``Operator`` never constructs a ``Runtime`` or a ``Program``.
+``OperatorDesign.module`` does, from the declaration: it resolves the
+operator for the device, calls its ``array()`` to build the array and bind
+its operands' lanes, and builds aie.iron's ``Program`` around an
+``OperatorRuntime``, the ``Runtime`` whose body runs the preamble (values,
+parameter sync, barriers) and then either the fill/drain sequence derived
+from the operands' tiles or the operator's ``sequence(rt)`` override, which
+receives it. Against a shipped image the runtime is a ``ShippedRuntime``.
+``OperatorDesign`` is that generator as mlir-aie's ``CompilableDesign``
+compiles it, keyed on what the module is built from.
 """
 
 from .bd import BdLimits
-from .build import OperatorDesign, build_design
-from .external import ExternalSequence, ShimChannel
-from .runtime import Sequence
+from .build import OperatorDesign
+from .runtime import OperatorRuntime, ShimChannel
+from .shipped import ShippedRuntime
 
 __all__ = [
     "BdLimits",
-    "ExternalSequence",
     "OperatorDesign",
-    "Sequence",
+    "OperatorRuntime",
     "ShimChannel",
-    "build_design",
+    "ShippedRuntime",
 ]
