@@ -166,6 +166,7 @@ class Sequence:
         size_by=None,
         managed=True,
         finishing=None,
+        repeat_by=None,
     ):
         """Fill ``stream`` from ``source``; a prepared input's lane is then
         filled with each of the operator's ``prepare_inputs``, which its
@@ -178,6 +179,10 @@ class Sequence:
             offset_by: A per-call value moving the base address.
             size_by: ``{dim: value}``, a per-call size of one descriptor
                 dimension (0 the outermost).
+            repeat_by: A per-call value, the task's repeat count: the
+                pattern runs it plus one times, at most the pattern's
+                outermost size, its iteration stopping early. A full ELF
+                writes it to the queue push from the scratchpad.
             managed: False hands the queue slot and descriptors to the
                 compiler, which frees them after a later wait; joins no group.
             finishing: For a fill of a fed input, the part of the lane's
@@ -194,7 +199,7 @@ class Sequence:
         buffer, tap, sliced_by = self._resolve(source, stream)
         if lane.buffer.member.feed and riding and buffer.name == lane.buffer.name:
             name = f"{type(self.op).__name__}.{buffer.name}"
-            if offset_by or size_by or sliced_by:
+            if offset_by or size_by or sliced_by or repeat_by:
                 raise ValueError(
                     f"{name}: the finish's inputs ride it an output tile at a "
                     f"time, so it moves by no per-call offset or size"
@@ -229,7 +234,7 @@ class Sequence:
                     )
             return task
         task = self._transfer(
-            "fill", stream, source, group, wait, offset_by, size_by, managed
+            "fill", stream, source, group, wait, offset_by, size_by, managed, repeat_by
         )
         if not lane.buffer.member.prepare:
             return task
@@ -270,10 +275,11 @@ class Sequence:
         offset_by=None,
         size_by=None,
         managed=True,
+        repeat_by=None,
     ):
         """Drain ``stream`` into ``dest``; see ``fill`` for the other forms."""
         return self._transfer(
-            "drain", stream, dest, group, wait, offset_by, size_by, managed
+            "drain", stream, dest, group, wait, offset_by, size_by, managed, repeat_by
         )
 
     def _transfer(
@@ -286,6 +292,7 @@ class Sequence:
         offset_by=None,
         size_by=None,
         managed=True,
+        repeat_by=None,
     ):
         fn = getattr(self._lane(stream).handle, verb)
         buffer, tap, sliced_by = self._resolve(what, stream)
@@ -315,6 +322,23 @@ class Sequence:
                 f"it (uses_value) or the build has not created it yet"
             )
         sizes_by = self._sizes_by(size_by)
+        if repeat_by is not None:
+            if not isinstance(repeat_by, BoundValue):
+                raise TypeError(
+                    f"repeat_by takes a value member's word (op.value(name)), "
+                    f"got {repeat_by!r}"
+                )
+            if repeat_by.param is None:
+                raise ValueError(
+                    f"{repeat_by.name} has no device parameter: the operator does "
+                    f"not use it (uses_value) or the build has not created it yet"
+                )
+            if 0 in sizes_by:
+                raise ValueError(
+                    f"{type(self.op).__name__}.{buffer.name}: a per-call repeat "
+                    f"count is the outermost dimension's size, which size_by "
+                    f"also sets"
+                )
         data = self._rt_data[buffer.name]
         if managed:
             common = dict(wait=wait, group=group)
@@ -322,14 +346,17 @@ class Sequence:
             if group is not None:
                 raise ValueError("an unmanaged transfer joins no group")
             common = dict(wait=wait, managed=False)
-        # A per-call size lands in one descriptor's length; an offset patches every split piece.
-        if sizes_by and not BdLimits.of(self.op.dev, 0, 0).fits(tap, buffer.dtype):
+        # A per-call size lands in one descriptor's length, a repeat count in
+        # its push; an offset patches every split piece.
+        per_call = sizes_by or repeat_by is not None
+        if per_call and not BdLimits.of(self.op.dev, 0, 0).fits(tap, buffer.dtype):
             raise ValueError(
                 f"{type(self.op).__name__}.{buffer.name}: {tap} moves by a per-call "
                 f"size, so it must fit one buffer descriptor, and does not"
             )
         dynamic = offset_by is not None and offset_by.ssa is not None
         dynamic = dynamic or any(v.ssa is not None for v in sizes_by.values())
+        dynamic = dynamic or (repeat_by is not None and repeat_by.ssa is not None)
         if not dynamic:
             length = {}
             if sizes_by:
@@ -344,6 +371,8 @@ class Sequence:
                 length = dict(
                     length_parameter=value.param, length_unit=prod(sizes[dim + 1 :])
                 )
+            if repeat_by is not None:
+                length["repeat_parameter"] = repeat_by.param
             return fn(
                 data,
                 tap=tap,
@@ -360,6 +389,8 @@ class Sequence:
                 inner = zip(sizes[dim + 1 :], strides[dim + 1 :])
                 strides[dim] = max(n * stride for n, stride in inner)
             sizes[dim] = value.ssa
+        if repeat_by is not None:
+            sizes[0] = repeat_by.ssa + arith.constant(1, IntegerType.get_signless(32))
         offset: Any = tap.offset
         if offset_by is not None and offset_by.ssa is not None:
             offset = offset_by.ssa

@@ -176,11 +176,14 @@ class ExternalSequence(Sequence):
         offset_by=None,
         size_by=None,
         managed=True,
+        repeat_by=None,
     ) -> None:
         buffer, tap, sliced_by = self._resolve(what, stream)
-        if offset_by is not None or sliced_by is not None or size_by is not None:
+        per_call = (offset_by, sliced_by, size_by, repeat_by)
+        if any(v is not None for v in per_call):
             raise NotImplementedError(
-                "per-call offsets and sizes are not supported on a shipped image"
+                "per-call offsets, sizes and repeat counts are not supported on a "
+                "shipped image"
             )
         lane = self._lane(stream)
         key = (lane.buffer.name, lane.index)
