@@ -262,8 +262,8 @@ template <class Npu, class Config> void engine_init(Npu *npu, const Config &conf
 #define FLM_HAS_OVERRIDE_down_proj FLM_PP_PROBE()
 
 #define FLM_OVERRIDE(name, expr, ...)                                                                                  \
-    FLM_PP_CAT(FLM_OVERRIDE_, FLM_PP_IS_PROBE(FLM_PP_CAT(FLM_HAS_OVERRIDE_, name)))(name,                              \
-                                                                                    expr __VA_OPT__(, ) __VA_ARGS__)
+    FLM_PP_CAT(FLM_OVERRIDE_, FLM_PP_IS_PROBE(FLM_PP_CAT(FLM_HAS_OVERRIDE_, name)))                                    \
+    (name, expr __VA_OPT__(, ) __VA_ARGS__)
 #define FLM_OVERRIDE_0(name, expr, ...) (expr)
 #define FLM_OVERRIDE_1(name, expr, ...) FLM_PP_CAT(FLM_OV_, name)(expr __VA_OPT__(, ) __VA_ARGS__)
 
