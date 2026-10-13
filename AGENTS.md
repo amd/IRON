@@ -852,15 +852,20 @@ profiles. The library is four modules:
   `rope_angles`, the RoPE table a `Config` names the base and scaling of; a
   checkpoint `Layout`, each weight's place in the model, its name in the
   checkpoint and its shape, which `load_weights` checks strictly against the
-  mapped `.safetensors` (`Checkpoint`); `Oracle`, a model's float32 forward
-  pass on the host, the reference it is judged by, as an operator's is its
-  `reference()` (not composed from the operators' references, so it catches
-  a wiring mistake the graph's own reference repeats; its float32 weights
-  are twice the checkpoint, so it is built to check with); `Model`, a graph
+  mapped `.safetensors` (`Checkpoint`, which also maps a sharded checkpoint
+  by its `.safetensors.index.json`, every shard the index names); `Oracle`,
+  a model's float32 forward pass on the host, the reference it is judged
+  by, as an operator's is its `reference()` (not composed from the
+  operators' references, so it catches a wiring mistake the graph's own
+  reference repeats; it widens a layer's weights to float32 as the pass
+  reaches them, and holds the embedding in float32, so it is built to check
+  with); `Model`, a graph
   whose versions `load(tuner, boundaries)` compiles before the first call,
   in the packaging asked for; and `Runner` and `main`, a decoder's
   checkpoint, tokenizer, model and oracle, and the command line. A model's
-  runner names its `config`, `layout`, `model`, `open_tokenizer` and `bos`.
+  runner names its `config`, `layout`, `model`, `open_tokenizer` and `bos`,
+  and, for a model that comes in several sizes, `sizes`, of which `--size`
+  picks one.
   With `--random-weights SEED` (and pytest's option of that name) the
   weights are drawn (`random_weights`) and the prompts random: speed,
   accuracy against the oracle and determinism on a host without the files
@@ -869,12 +874,19 @@ profiles. The library is four modules:
   `logits(tokens)`. A model subclasses it with `layer(step, i, weights,
   x)` and `head(x)`, and `Oracle` with a numpy `layer(angles, weights, x)`
   and `head(x)`, which it names as its `CausalLM`'s `oracle`; the pass,
-  RoPE and attention are shared
+  RoPE and attention are shared. `embed()` on both, the identity by
+  default, is where a model scales or splices the rows the embedding gather
+  gives (a vision tower's features, by a call's `pixel_values`). A `Config`'s
+  `rotary_dim` rotates only that prefix of each head, and its
+  `rope_attention_scaling` scales the whole angle table once
 - `encoder.py`: `Encoder`, EmbeddingGemma 2's kind, a bidirectional
   encoder compiled once at `max_tokens` rows with the length bound per call,
   and `sandwich_layer`, the layer its text encoder and vision tower share
 - `blocks.py`: what layers are built from: `project(x, w)`, a weight's
-  projection at either row count (GEMV for one row, GEMM for more);
+  projection at either row count (GEMV for one row, GEMM for more), with a
+  `bias` folded on by `RowwiseAdd` where a checkpoint's projection carries
+  one, and the GEMM's `k_tile` and `tile_n` where the weight's dimensions
+  are not multiples of their defaults;
   `swiglu`, the SwiGLU feed-forward (`SwiGLU` is it as a graph of its own,
   called in a model's body or alone, device-tested by
   `iron/operators/swiglu/test.py`; `LogMel`, an audio front end's log-mel
@@ -883,7 +895,9 @@ profiles. The library is four modules:
   `iron/operators/conv2d/test.py`, and `ImagePatches` resizes a vision
   front end's image into patches, `iron/operators/image_patches/test.py`);
   `geglu`, the GELU-gated one; `sandwich`, a block between two RMS norms;
-  and `attention`, an encoder's
+  `attention`, an encoder's; and `Block` and `BlockOracle`, the attention +
+  SwiGLU layer a Llama-style model (Llama 3, Granite 4.2 3B) mixes in
+  alongside `CausalLM` and `Oracle`
 
 Nothing of a model's own is needed by `generation.py` (sampling, the
 generation loop and the accuracy and determinism checks over any model
