@@ -10,7 +10,6 @@ dispatches captured from FastFlowLM's engine, when FLM_LAYER_CASES names them.
 Both check the RTP placement of every build they dispatch.
 """
 
-import dataclasses
 import json
 import os
 import re
@@ -314,27 +313,3 @@ def test_weight_reads_fit_proj(geometry, layer_type, npu2):
     ref = proj_layout(g, layer_type)
     for name in ("o", "up_gate", "down", "pli_down", "pli_gate", "pli_up"):
         assert (blob[name].dout, blob[name].din) == ref[name][2:], name
-
-
-@pytest.mark.parametrize(
-    "kwargs, match",
-    [
-        (
-            dict(
-                geometry=dataclasses.replace(
-                    FLM_GEMMA4_E2B_DECODE, model_dim=2048, name="gemma4_e8b"
-                ),
-                layer_type="global",
-            ),
-            "geometry must be",
-        ),
-        (
-            dict(geometry=FLM_GEMMA4_E2B_DECODE, layer_type="sliding"),
-            "layer_type must be one of",
-        ),
-    ],
-    ids=["geometry", "layer_type"],
-)
-def test_rejects_unknown_configurations(kwargs, match):
-    with pytest.raises(ValueError, match=match):
-        DecodeLayer(**kwargs)

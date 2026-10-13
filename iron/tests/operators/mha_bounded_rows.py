@@ -38,65 +38,39 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 
 @pytest.mark.supported_devices("npu2")
-def test_rows_past_the_valid_length_are_zero(npu_runtime):
-    class Attend(iron.Graph):
-        def body(self, q, k, v, *, rows: Scratchpad[np.int32], n: Scratchpad[np.int32]):
-            q, k, v = q[:rows], k[:rows], v[:rows]
-            return MHA(
-                q,
-                k,
-                v,
-                heads_interleaved=True,
-                kv_interleaved=True,
-                s_q=n,
-                s_kv=n,
-                num_pipelines=PIPELINES,
-            )
-
-    attend = Attend()
-
-    rng = np.random.default_rng(0)
-    q = rng.standard_normal((SEQ, HEADS, D)).astype(bfloat16)
-    k = rng.standard_normal((SEQ, KV_HEADS, D)).astype(bfloat16)
-    v = rng.standard_normal((SEQ, KV_HEADS, D)).astype(bfloat16)
-    net = attend.compile(q=q.shape, k=k.shape, v=v.shape)
-    reference = MHA(
-        num_heads=HEADS,
-        num_KV_heads=KV_HEADS,
-        seq_len=SEQ,
-        heads_interleaved=True,
-        kv_interleaved=True,
-    )
-    for rows, n in ((512, 13), (1024, 600)):
-        o = np.asarray(net(q, k, v, rows=rows, n=n), dtype=np.float32)
-        o = o.reshape(SEQ, HEADS, D)
-        padding = o[n:rows]
-        assert np.isfinite(padding).all(), f"{rows=} {n=}: non-finite padding rows"
-        assert not padding.any(), f"{rows=} {n=}: padding rows are not zero"
-        expected = reference.reference(q, k, v, s_q=n, s_kv=n)
-        expected = np.asarray(expected, dtype=np.float32).reshape(SEQ, HEADS, D)
-        verdict = verify_buffer(
-            o[:n],
-            "O",
-            expected[:n],
-            tolerance=Tolerance.relative(0.04, 0.15, max_mismatch_frac=0.005),
-        )
-        assert verdict, f"{rows=} {n=}: the valid elements differ: {verdict.detail}"
-
-
-@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
-    "kv_heads,d,window",
-    [(2, 256, 512), (1, 512, None)],
-    ids=["sliding", "global"],
+    "heads,kv_heads,d,seq,scales,attention,calls",
+    [
+        (HEADS, KV_HEADS, D, SEQ, (1.0, 1.0, 1.0), {}, ((512, 13), (1024, 600))),
+        # EmbeddingGemma 2's layers, unscaled, at a length that ends
+        # mid-block: a sliding one sees every key within 512 positions,
+        # before or after, at d=256; a global one every key, at d=512, its
+        # P*V split over two cores. Unscaled, unit inputs would put every
+        # score's spread at sqrt(d).
+        (
+            4,
+            2,
+            256,
+            2048,
+            (0.25, 0.25, 1.0),
+            dict(causal=False, window=512, scale=1.0),
+            ((512, 37), (2048, 1500)),
+        ),
+        (
+            4,
+            1,
+            512,
+            2048,
+            (0.25, 0.25, 1.0),
+            dict(causal=False, window=None, scale=1.0),
+            ((512, 37), (2048, 1500)),
+        ),
+    ],
+    ids=["causal", "sliding", "global"],
 )
-def test_bidirectional_attention_under_a_bound(npu_runtime, kv_heads, d, window):
-    """EmbeddingGemma 2's layers, unscaled, at a length that ends mid-block:
-    a sliding one sees every key within 512 positions, before or after, at
-    d=256; a global one every key, at d=512, its P*V split over two cores.
-    """
-    heads, seq = 4, 2048
-
+def test_rows_past_the_valid_length_are_zero(
+    npu_runtime, heads, kv_heads, d, seq, scales, attention, calls
+):
     class Attend(iron.Graph):
         def body(self, q, k, v, *, rows: Scratchpad[np.int32], n: Scratchpad[np.int32]):
             q, k, v = q[:rows], k[:rows], v[:rows]
@@ -106,19 +80,16 @@ def test_bidirectional_attention_under_a_bound(npu_runtime, kv_heads, d, window)
                 v,
                 heads_interleaved=True,
                 kv_interleaved=True,
-                causal=False,
-                window=window,
-                scale=1.0,
                 s_q=n,
                 s_kv=n,
                 num_pipelines=PIPELINES,
+                **attention,
             )
 
     rng = np.random.default_rng(0)
-    # Unscaled, unit inputs would put every score's spread at sqrt(d).
     q, k, v = (
         (rng.standard_normal((seq, h, d)) * s).astype(bfloat16)
-        for h, s in ((heads, 0.25), (kv_heads, 0.25), (kv_heads, 1.0))
+        for h, s in zip((heads, kv_heads, kv_heads), scales)
     )
     net = Attend().compile(q=q.shape, k=k.shape, v=v.shape)
     reference = MHA(
@@ -126,13 +97,11 @@ def test_bidirectional_attention_under_a_bound(npu_runtime, kv_heads, d, window)
         num_KV_heads=kv_heads,
         seq_len=seq,
         d=d,
-        causal=False,
-        window=window,
-        scale=1.0,
         heads_interleaved=True,
         kv_interleaved=True,
+        **attention,
     )
-    for rows, n in ((512, 37), (2048, 1500)):
+    for rows, n in calls:
         o = np.asarray(net(q, k, v, rows=rows, n=n), dtype=np.float32)
         o = o.reshape(seq, heads, d)
         padding = o[n:rows]

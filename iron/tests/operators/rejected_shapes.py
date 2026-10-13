@@ -9,12 +9,15 @@ answer, with no diagnostic worth reading -- so the operator rejects it at
 construction. Host-only: what is checked is the refusal, not a dispatch.
 """
 
+import contextlib
+import dataclasses
 import functools
 
 import numpy as np
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron.device import from_name
+from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 from ml_dtypes import bfloat16
 
 import iron
@@ -23,7 +26,14 @@ from iron.lm import project
 from iron.operators.copy import Copy, Gather
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.flm.dequant.op import DequantBFP
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
+from iron.operators.flm.layer.op import DecodeLayer
+from iron.operators.flm.lm_head.op import LMHead
+from iron.operators.flm.prefill_attn.op import (
+    PrefillAttention,
+    PrefillSlidingAttention,
+)
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.limbs import Limbs
@@ -499,3 +509,187 @@ def test_a_projection_bias_wider_than_rowwise_adds_line_is_refused():
 
     with pytest.raises(ValueError, match="exceeds RowwiseAdd's 4096-element"):
         Wide().trace(x=((256, 1280), bfloat16))
+
+
+@pytest.mark.parametrize(
+    "tile_m, tile_k, tile_n, emulate, expectation",
+    [
+        (8, 64, 64, True, pytest.raises(ValueError, match="tile_m .* multiple of 16")),
+        (16, 64, 64, True, contextlib.nullcontext()),
+        (64, 64, 64, True, contextlib.nullcontext()),
+        (8, 64, 64, False, contextlib.nullcontext()),
+        (4, 64, 64, False, pytest.raises(ValueError, match="tile_m .* multiple of 8")),
+        (64, 64, 8, False, pytest.raises(ValueError, match="tile_n .* multiple of 16")),
+        (64, 64, 8, True, pytest.raises(ValueError, match="tile_n .* multiple of 16")),
+        # tile_k=4 still divides K=512 evenly (the outer K % tile_k check),
+        # so this exercises the s-divisibility check rather than that one.
+        (64, 4, 64, True, pytest.raises(ValueError, match="tile_k .* multiple of 8")),
+    ],
+    ids=[
+        "m8_emulated",
+        "m16_emulated",
+        "m64_emulated",
+        "m8",
+        "m4",
+        "n8",
+        "n8_emulated",
+        "k4_emulated",
+    ],
+)
+def test_gemm_tile_the_kernel_cannot_build_is_rejected(
+    tile_m, tile_k, tile_n, emulate, expectation
+):
+    """GEMM must reject tile sizes the kernel cannot build.
+
+    aie_kernels/linalg/mm_aie2p.h's matmul_vectorized_*x*x*_bf16_* wrappers
+    static_assert m % (2*r) == 0, k % s == 0 and n % (2*t) == 0 for the (r,
+    s, t) triple selected by emulate_bf16_mmul_with_bfp16 (r=t=8 when
+    enabled, the default; r=4, t=8 otherwise). A tile size that meets a
+    lower bound without dividing evenly would construct without error and
+    then fail that static_assert at kernel compile time, from a file this
+    class never names.
+    """
+    with expectation:
+        GEMM(
+            M=512,
+            K=512,
+            N=512,
+            tile_m=tile_m,
+            tile_k=tile_k,
+            tile_n=tile_n,
+            emulate_bf16_mmul_with_bfp16=emulate,
+        )
+
+
+@pytest.mark.parametrize(
+    "device, emulate, M, tile_m",
+    [
+        ("npu2", True, 2048, 64),
+        ("npu2", True, 128, 32),
+        ("npu2", True, 64, 16),
+        ("npu2", False, 32, 8),
+        ("npu1", False, 64, 16),
+    ],
+)
+def test_an_open_tile_m_is_the_widest_that_splits_m(
+    device, emulate, M, tile_m, request
+):
+    """Four rows of cores each take tile_m of M's rows, so a short M takes a
+    short tile rather than padding to 256 rows: down to the kernel's m block,
+    16 under emulation (2 r, r=8) and on aie2 (4 r, r=4), else 8.
+    """
+    dev = request.getfixturevalue(device)
+    op = GEMM(M=M, K=64, N=512, emulate_bf16_mmul_with_bfp16=emulate)
+    assert op.resolved(dev).tile_m == tile_m
+
+
+@pytest.mark.parametrize(
+    "device, emulate, M, rows, tile_m",
+    [
+        ("npu2", True, 32, 2, 16),
+        ("npu2", False, 16, 2, 8),
+        ("npu1", False, 32, 2, 16),
+        ("npu1", False, 16, 1, 16),
+    ],
+)
+def test_a_short_m_takes_fewer_rows_of_cores(device, emulate, M, rows, tile_m):
+    """An M shorter than every row of cores at the kernel's m block is split
+    over half as many, down to one.
+    """
+    op = GEMM(M=M, K=64, N=512, emulate_bf16_mmul_with_bfp16=emulate)
+    resolved = op.resolved(from_name(device))
+    assert (resolved.n_aie_rows, resolved.tile_m) == (rows, tile_m)
+
+
+@pytest.mark.parametrize("device, emulate", [("npu2", True), ("npu1", False)])
+def test_an_m_no_tile_splits_is_rejected(device, emulate, request):
+    """Refused when constructed for the bound device, which has no such tile."""
+    request.getfixturevalue(device)
+    with pytest.raises(ValueError, match=r"M \(8\) must be a multiple of 64"):
+        GEMM(M=8, K=64, N=512, emulate_bf16_mmul_with_bfp16=emulate)
+
+
+@pytest.mark.parametrize(
+    "K, N, extra, exc, match",
+    [
+        # flm.GEMM may be asked for tile_n=128, the NPU2 winner at K = 512;
+        # this operator does not emit that order and must say so.
+        (512, 128, dict(tile_n=128), ValueError, "tile_n"),
+        # Extents the grid does not divide: refused once the grid is known.
+        (1000, 128, {}, ValueError, "multiple of"),
+        (1024, 100, {}, ValueError, "multiple of"),
+    ],
+)
+def test_flm_dequant_rejects_unservable_shapes(K, N, extra, exc, match):
+    with pytest.raises(exc, match=match):
+        DequantBFP(K=K, N=N, **extra).resolved(from_name("npu2", n_cols=8))
+
+
+@pytest.mark.parametrize(
+    "cls, kwargs, match",
+    [
+        (PrefillAttention, dict(num_kv_heads=3), "multiple of"),
+        (PrefillAttention, dict(num_kv_heads=0), "must be positive"),
+        (PrefillAttention, dict(num_kv_heads=8), "query heads"),
+        (PrefillSlidingAttention, dict(num_kv_heads=3), "multiple of"),
+        (PrefillSlidingAttention, dict(num_kv_heads=4), "query heads"),
+        (
+            PrefillAttention,
+            dict(max_context=1000, num_kv_heads=1),
+            "multiple of 128",
+        ),
+        (
+            PrefillSlidingAttention,
+            dict(max_context=1000, num_kv_heads=1),
+            "multiple of 128",
+        ),
+        (
+            PrefillSlidingAttention,
+            dict(num_kv_heads=1, window=500),
+            "multiple of 128",
+        ),
+    ],
+)
+def test_flm_prefill_attention_rejects_unservable_shapes(cls, kwargs, match, npu2):
+    with pytest.raises(ValueError, match=match):
+        cls(**{"max_context": 1024, "num_heads": 8, **kwargs})
+
+
+@pytest.mark.parametrize(
+    "dim, vocab, softcap, match",
+    [
+        (1000, 4096, 30.0, "multiple of"),
+        (1536, 1000, 30.0, "multiple of"),
+        (1536, 4096, 0.0, "finite and positive"),
+        (1536, 4096, float("inf"), "finite and positive"),
+    ],
+)
+def test_flm_lm_head_rejects_unservable_shapes(dim, vocab, softcap, match):
+    with pytest.raises(ValueError, match=match):
+        LMHead(dim=dim, vocab=vocab, softcap=softcap).resolved(
+            from_name("npu2", n_cols=8)
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        (
+            dict(
+                geometry=dataclasses.replace(
+                    FLM_GEMMA4_E2B_DECODE, model_dim=2048, name="gemma4_e8b"
+                ),
+                layer_type="global",
+            ),
+            "geometry must be",
+        ),
+        (
+            dict(geometry=FLM_GEMMA4_E2B_DECODE, layer_type="sliding"),
+            "layer_type must be one of",
+        ),
+    ],
+    ids=["geometry", "layer_type"],
+)
+def test_flm_decode_layer_rejects_unknown_configurations(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        DecodeLayer(**kwargs)

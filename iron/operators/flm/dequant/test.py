@@ -7,7 +7,6 @@ from typing import Any
 
 import numpy as np
 import pytest
-from aie.iron.device import from_name
 from aie.utils.verify import Tolerance
 
 
@@ -214,19 +213,3 @@ def test_one_xclbin_serves_every_shape(npu_runtime):
         if xclbin is None:
             xclbin = stamp
         assert stamp == xclbin, f"{case} rebuilt the xclbin"
-
-
-@pytest.mark.parametrize(
-    "K, N, extra, exc, match",
-    [
-        # flm.GEMM may be asked for tile_n=128, the NPU2 winner at K = 512;
-        # this operator does not emit that order and must say so.
-        (512, 128, dict(tile_n=128), ValueError, "tile_n"),
-        # Extents the grid does not divide: refused once the grid is known.
-        (1000, 128, {}, ValueError, "multiple of"),
-        (1024, 100, {}, ValueError, "multiple of"),
-    ],
-)
-def test_rejects_unservable_shapes(K, N, extra, exc, match):
-    with pytest.raises(exc, match=match):
-        DequantBFP(K=K, N=N, **extra).resolved(from_name("npu2", n_cols=8))

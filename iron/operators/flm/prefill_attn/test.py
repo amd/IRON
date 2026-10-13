@@ -194,34 +194,3 @@ def test_gemma4_cache_bound(kind, num_kv_heads, npu_runtime):
         [(0, 2048, 4096), (2048, 2304, 4096), (0, 1024, 32768)]
     ):
         _check(op, image, L_begin, L_end, max_l, seed)
-
-
-@pytest.mark.parametrize(
-    "cls, kwargs, match",
-    [
-        (PrefillAttention, dict(num_kv_heads=3), "multiple of"),
-        (PrefillAttention, dict(num_kv_heads=0), "must be positive"),
-        (PrefillAttention, dict(num_kv_heads=8), "query heads"),
-        (PrefillSlidingAttention, dict(num_kv_heads=3), "multiple of"),
-        (PrefillSlidingAttention, dict(num_kv_heads=4), "query heads"),
-        (
-            PrefillAttention,
-            dict(max_context=1000, num_kv_heads=1),
-            "multiple of 128",
-        ),
-        (
-            PrefillSlidingAttention,
-            dict(max_context=1000, num_kv_heads=1),
-            "multiple of 128",
-        ),
-        (
-            PrefillSlidingAttention,
-            dict(num_kv_heads=1, window=500),
-            "multiple of 128",
-        ),
-    ],
-)
-@pytest.mark.supported_devices("npu2")
-def test_rejects_unservable_shapes(cls, kwargs, match):
-    with pytest.raises(ValueError, match=match):
-        cls(**{"max_context": 1024, "num_heads": 8, **kwargs})

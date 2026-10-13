@@ -107,18 +107,3 @@ def test_softcap_bounds_the_logits(npu_runtime):
 def test_gemma4_vocabulary(dim, npu_runtime, record_property):
     """Gemma 4's whole vocabulary of 262144 logits."""
     _check(dim, 262144, GEMMA4_SOFTCAP, seed=3, record=record_property)
-
-
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize(
-    "dim, vocab, softcap, match",
-    [
-        (1000, 4096, 30.0, "multiple of"),
-        (1536, 1000, 30.0, "multiple of"),
-        (1536, 4096, 0.0, "finite and positive"),
-        (1536, 4096, float("inf"), "finite and positive"),
-    ],
-)
-def test_rejects_unservable_shapes(dim, vocab, softcap, match):
-    with pytest.raises(ValueError, match=match):
-        LMHead(dim=dim, vocab=vocab, softcap=softcap).resolved()
