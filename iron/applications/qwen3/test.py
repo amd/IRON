@@ -15,10 +15,13 @@ a host without the checkpoint, and ``--max-seq-len`` at another context.
 import dataclasses
 
 import aie.utils as aie_utils
+import numpy as np
 import pytest
+from ml_dtypes import bfloat16
 
 import iron
-from iron.applications.qwen3.model import Runner
+from iron.applications.qwen3.model import QWEN3_1_7B, Runner, layout
+from iron.lm import Checkpoint, load_weights
 from iron.lm.testing import (
     check_accuracy,
     check_chat_turn,
@@ -167,3 +170,19 @@ def test_qwen3_1_7b_prompt_deep_in_the_cache(runner, model, record_property):
     """
     rows = runner.config.prefill_chunk
     check_deep_prompt(runner, model, rows, DEEP_KL, record=record_property)
+
+
+def test_qwen3_1_7b_checkpoint_is_its_layout():
+    """The real checkpoint's key spelling and shapes are the default
+    config's (``lm_head.weight``, tied to the embedding, included), read
+    from both shards by their index.
+    """
+    require(WEIGHTS)
+    weights = load_weights(
+        Checkpoint(WEIGHTS).tensors, layout(QWEN3_1_7B), QWEN3_1_7B.n_layers
+    )
+    assert weights.embedding.dtype == bfloat16
+    assert len(weights.layers) == QWEN3_1_7B.n_layers
+    assert np.array_equal(
+        weights.lm_head.view(np.uint16), weights.embedding.view(np.uint16)
+    )
