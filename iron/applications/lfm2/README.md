@@ -58,20 +58,20 @@ python -m iron.applications.lfm2.model \
     --prompt-len 2048 --num-tokens 40
 ```
 
-The flags are `iron.lm.runner`'s, shared with every model here
+The flags are `iron.lm.base`'s, shared with every model here
 (`--random-weights SEED`, `--check-accuracy`, `--check-determinism`,
-`--device-loop`, `--cost-table`, `--each-step`; see
-`iron/applications/llama_3.2_1b/README.md` for what each does).
+`--compare-host`, `--cost-table`, `--each-step`; see
+`iron/applications/llama/README.md` for what each does).
 
 ## The arena past 4 GiB
 
 LFM2-1.2B's prompt chunk (weights, six attention layers' key/value caches
 and ten conv layers' window and scratch caches) pushes the full-ELF
-scratch arena past 4 GiB, the same `aiebu` 32-bit relocation addend limit
-Granite 4.2 3B's port found; this port cherry-picked that fix
-(`iron/common/image/fusion.py`'s windows onto the arena) rather than
-reimplement it. Both the decode step and the prompt chunk link as a full
-ELF (device loop) on NPU2 with it.
+scratch arena past 4 GiB, past what one buffer object can address within
+`aiebu`'s 32-bit relocation addend, the limit Granite 4.2 3B's port found.
+The arena is banks of at most 3.5 GiB, each its own buffer object and
+argument (`iron/common/image/allocator.py`'s `BANK`), so both the decode
+step and the prompt chunk link as a full ELF (device loop) on NPU2.
 
 ## Status
 

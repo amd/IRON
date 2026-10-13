@@ -3,7 +3,7 @@
 
 """Measure LFM2-1.2B's cost table on this NPU (``iron.lm.tune``), beside
 this file as ``costs_<device>.json``; ``--dispatch separate`` on an NPU2
-prices an xclbin chain (``--each-step`` in ``iron.lm.runner``) as
+prices an xclbin chain (``--each-step`` in ``iron.lm.base``) as
 ``costs_npu2_separate.json``:
 
 ```bash
