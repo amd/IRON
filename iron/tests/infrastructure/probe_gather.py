@@ -64,7 +64,7 @@ def test_a_gather_alone_reads_the_rows_its_words_name(npu_runtime, table, rows):
     alone = Standalone(f"probe_gather{rows}", [gather])
     words = alone.callable.get_buffer("s0_control").numpy_view().view(np.uint32)
     _, slots = gather.template
-    addresses = words[slots].astype(np.int64) | words[slots + 1].astype(np.int64) << 32
+    addresses = words[slots].astype(np.int64) | words[slots + 2].astype(np.int64) << 32
     offsets = addresses - (alone.address("s0_table") + APERTURE)
     row_bytes = WIDTH * np.dtype(bfloat16).itemsize
     assert not (offsets % row_bytes).any()
