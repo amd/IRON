@@ -8,12 +8,12 @@ float32 oracle, and the oracle and the host features once against Hugging
 Face's.
 """
 
-import time
 from pathlib import Path
 
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.utils.benchmark import run_iters
 from ml_dtypes import bfloat16
 
 import iron
@@ -169,10 +169,5 @@ def test_audio_accuracy(audio, oracle, name, record_property):
 @pytest.mark.parametrize("name", list(CLIPS))
 def test_audio_latency(audio, name, record_property):
     wave = chirp(CLIPS[name])
-    audio.embed(wave)
-    times = []
-    for _ in range(10):
-        t = time.perf_counter()
-        audio.embed(wave)
-        times.append(time.perf_counter() - t)
-    record_property("Latency", float(np.median(times)) * 1e6)
+    latency = run_iters(audio.embed, wave, warmup=1, iters=10).e2e
+    record_property("Latency", latency.median_us)

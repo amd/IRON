@@ -15,6 +15,7 @@ from pathlib import Path
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.utils.benchmark import run_iters
 from ml_dtypes import bfloat16
 
 import iron
@@ -278,10 +279,5 @@ def test_vision_accuracy(vision, oracle, name, record_property):
 def test_vision_latency(vision, name, record_property):
     (height, width), tokens = IMAGES[name]
     image = synthetic_image(height, width)
-    vision.embed(image, tokens)
-    times = []
-    for _ in range(10):
-        t = time.perf_counter()
-        vision.embed(image, tokens)
-        times.append(time.perf_counter() - t)
-    record_property("Latency", float(np.median(times)) * 1e6)
+    latency = run_iters(vision.embed, image, tokens, warmup=1, iters=10).e2e
+    record_property("Latency", latency.median_us)

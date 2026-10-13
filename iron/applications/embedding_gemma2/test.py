@@ -11,12 +11,12 @@ hugging_face.py. On NPU1 each step is its own dispatch of an xclbin; on
 NPU2 that form is checked too.
 """
 
-import time
 from pathlib import Path
 
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.utils.benchmark import run_iters
 
 import iron
 from iron.lm import Checkpoint, load_weights
@@ -353,10 +353,5 @@ def test_embeddinggemma_2_oracle_matches_hugging_face(hugging_face, oracles, cas
 )
 def test_embeddinggemma_2_latency(encoder, text, record_property):
     tokens = encoder.tokens(text, "document")
-    encoder.graph.encode(tokens)
-    times = []
-    for _ in range(10):
-        t = time.perf_counter()
-        encoder.graph.encode(tokens)
-        times.append(time.perf_counter() - t)
-    record_property("Latency", float(np.median(times)) * 1e6)
+    latency = run_iters(encoder.graph.encode, tokens, warmup=1, iters=10).e2e
+    record_property("Latency", latency.median_us)
