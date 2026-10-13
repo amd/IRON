@@ -39,7 +39,7 @@ from iron.lm import (
     greedy,
     random_weights,
 )
-from iron.applications.llama3.model import Llama, layout
+from iron.applications.llama.model import Llama, layout
 from iron.tests.common.llama_model import PROFILE, SMALL
 
 pytestmark = pytest.mark.usefixtures("npu2")  # MHA decode on any host

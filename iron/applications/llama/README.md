@@ -10,10 +10,10 @@ compiled per input shape, and the float32 numpy forward pass it is checked
 against, `LlamaOracle`, its `oracle`. Both are built from the same config
 and weights, Llama 3.2 1B's here; nothing here needs torch.
 
-What is Llama's own is short, and all of it is in `iron/applications/llama3/model.py`:
+What is Llama's own is short, and all of it is in `iron/applications/llama/model.py`:
 its layer and head on the NPU and in numpy, its shape, where its checkpoint
 keeps each weight and its tokenizer; its tunables are in
-`iron/applications/llama3/profiles/`. The rest is `iron.lm`, which a new model reuses
+`iron/applications/llama/profiles/`. The rest is `iron.lm`, which a new model reuses
 the same way:
 
 - `CausalLM`: the body over a prompt chunk and a decode step, the key and
@@ -56,7 +56,7 @@ python3 -m pip install -r requirements_examples.txt
 From the repository root:
 
 ```bash
-python -m iron.applications.llama3.model \
+python -m iron.applications.llama.model \
     /path/to/model.safetensors /path/to/tokenizer.model \
     --prompt-len 2048 --num-tokens 40
 ```
@@ -138,9 +138,9 @@ narrower width is only a candidate if it was measured bit-identical to the
 profile's. The costs come from a table that `tune.py` measures:
 
 ```bash
-python -m iron.applications.llama3.tune
-python -m iron.applications.llama3.model /path/to/model.safetensors /path/to/tokenizer.model \
-    --cost-table iron/applications/llama3/costs_npu2.json
+python -m iron.applications.llama.tune
+python -m iron.applications.llama.model /path/to/model.safetensors /path/to/tokenizer.model \
+    --cost-table iron/applications/llama/costs_npu2.json
 ```
 
 No table is checked in at present: one is measured on the NPU it is used
@@ -162,6 +162,6 @@ it as unmeasured). Run `tune.py` again after changing a design, or
 to measure for another NPU; it keeps the entries still current and measures
 only the rest.
 
-`pytest iron/applications/llama3/` loads the model once and runs
+`pytest iron/applications/llama/` loads the model once and runs
 all of these in-process through `model.Runner`, recording the throughput and
 accuracy figures.

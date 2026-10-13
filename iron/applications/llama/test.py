@@ -18,7 +18,7 @@ import aie.utils as aie_utils
 import pytest
 
 import iron
-from iron.applications.llama3.model import Runner
+from iron.applications.llama.model import Runner
 from iron.lm.testing import (
     check_accuracy,
     check_chat_turn,

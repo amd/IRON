@@ -26,7 +26,7 @@ from safetensors.numpy import load_file, save_file
 
 from iron import lm
 from iron.lm import Checkpoint, Sampler
-from iron.applications.llama3.model import (
+from iron.applications.llama.model import (
     LLAMA_3_2_1B,
     SPECIAL_TOKENS,
     layout,

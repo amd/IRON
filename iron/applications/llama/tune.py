@@ -7,8 +7,8 @@ prices an xclbin chain (``--each-step`` in ``iron.lm.base``) as
 ``costs_npu2_separate.json``:
 
 ```bash
-python -m iron.applications.llama3.tune
-python -m iron.applications.llama3.tune --dispatch separate
+python -m iron.applications.llama.tune
+python -m iron.applications.llama.tune --dispatch separate
 ```
 """
 

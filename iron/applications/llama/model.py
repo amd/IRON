@@ -7,7 +7,7 @@
 layer and head on the NPU (``Llama``) and on the CPU in float32
 (``LlamaOracle``, the reference it is judged by), where its
 checkpoint keeps each weight, its tokenizer, and Llama 3.2 1B's shape.
-Run it with ``python -m iron.applications.llama3.model``.
+Run it with ``python -m iron.applications.llama.model``.
 
 The operators' tunables are the graph's profile, ``profiles/<device>.json``,
 keyed by operator shape at Llama 3.2 1B's shape: a decode step's and a

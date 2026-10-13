@@ -97,10 +97,13 @@ def status_emoji(passed: int, total: int, partial: bool = True) -> str:
     return "🟠" if partial else "❌"
 
 
-# Test directories renamed since the results branch began, old to new.
+# Test directories renamed since the results branch began, each old name
+# straight to the newest: row_key maps a path once, so no entry chains.
 RENAMED_DIRECTORIES = {
-    "iron/applications/llama_3.2_1b/": "iron/applications/llama3/",
-    "iron/applications/embeddinggemma_2/": "iron/applications/embeddinggemma2/",
+    "iron/applications/llama_3.2_1b/": "iron/applications/llama/",
+    "iron/applications/llama3/": "iron/applications/llama/",
+    "iron/applications/embeddinggemma_2/": "iron/applications/embedding_gemma2/",
+    "iron/applications/embeddinggemma2/": "iron/applications/embedding_gemma2/",
 }
 
 # The module that runs every operator declaring its cases. Its parametrize ids

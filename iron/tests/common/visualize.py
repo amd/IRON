@@ -16,7 +16,7 @@ from ml_dtypes import bfloat16
 from iron.common.graph.fold import folded
 from iron.common.graph.visualize import Dataflow, render, side_by_side
 from iron.lm import unread_weights
-from iron.applications.embeddinggemma2.vision import model as vision
+from iron.applications.embedding_gemma2.vision import model as vision
 from iron.lm.blocks import SwiGLU
 from iron.tests.common.llama_model import small
 

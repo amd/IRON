@@ -11,7 +11,7 @@ from ml_dtypes import bfloat16
 
 from iron.common import Profile
 from iron.lm import checkpoint_shapes, load_weights, random_weights, unread_weights
-from iron.applications.llama3.model import LLAMA_3_2_1B, Llama, layout
+from iron.applications.llama.model import LLAMA_3_2_1B, Llama, layout
 
 # The tunables the graph runs with at ``SMALL``'s shape on NPU2: decode
 # and the prompt at 256 rows. The application's own profiles are for Llama

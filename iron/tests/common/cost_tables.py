@@ -18,7 +18,7 @@ from iron.common.graph import tune as graph_tune
 from iron.common.graph.narrowing import CostTable
 from iron.common.graph.probe import Designs
 from iron.lm import SEED, Sampler
-from iron.applications.llama3 import tune as llama_tune
+from iron.applications.llama import tune as llama_tune
 from iron.lm.tune import CALIBRATION_TRIANGLE, calls, contexts
 from iron.tests.common.llama_model import llama_1b
 
@@ -62,7 +62,7 @@ def test_llamas_table_holds_every_design_it_tunes(npu2, path):
             + (f", moved to {moved}" if moved else ", its default")
         )
     assert not stale and not missing, (
-        f"{table.path} is out of date; run `python -m iron.applications.llama3.tune "
+        f"{table.path} is out of date; run `python -m iron.applications.llama.tune "
         f"--dispatch {table.dispatch}` on an idle NPU2. {len(missing)} to measure:\n"
         + "\n".join(unmeasured)
         + f"\n{len(stale)} the graph no longer has: {stale}"

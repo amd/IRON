@@ -3,7 +3,7 @@
 
 """Language models on IRON's operators: what every model shares. The models
 themselves are applications over it, each a package of
-``iron/applications/`` (``llama3``, ``embeddinggemma2``).
+``iron/applications/`` (``llama``, ``embedding_gemma2``).
 
 * ``base``: a model's ``Config``, its checkpoint ``Layout`` (each weight's
   place in the model, its name in the ``.safetensors`` file and its shape)

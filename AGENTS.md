@@ -508,7 +508,7 @@ follows from it later. A profile is a JSON file, `Profile.load(path)` and
 ]}
 ```
 
-`iron/applications/llama3/profiles/<device>.json` is the worked
+`iron/applications/llama/profiles/<device>.json` is the worked
 example (a test at the small shape loads
 `iron/tests/common/llama_small_profile.json`), and
 `test_llama_names_only_the_tunables_that_matter` checks that each keyword the
@@ -521,7 +521,7 @@ xclbins with `boundaries=iron.each_step`) and `verbose=True` prints why.
 It links the image (`version.image`) and stops
 there: the runtime that loads it is made on the first call, so a host with
 the toolchain and no NPU can compile ahead of time.
-`iron/applications/llama3/model.py` is the worked example
+`iron/applications/llama/model.py` is the worked example
 (`Llama`, a `CausalLM` from `iron.lm`, called through
 `logits(tokens)`, and `LlamaOracle`, its float32 forward pass on the host;
 its `Runner` builds both and checks one against the other);
@@ -845,7 +845,7 @@ of its own that carries the mark.
 
 `iron/lm/` is what every language model shares; each model is an
 application over it, a package of its own under `iron/applications/`
-(`llama3`, `embeddinggemma2`) holding its test, README, tokenizer and
+(`llama`, `embedding_gemma2`) holding its test, README, tokenizer and
 profiles. The library is four modules:
 
 - `base.py`: what any model is over it. `Config`, the shape, and
@@ -898,15 +898,15 @@ Their dependencies (safetensors, tiktoken, ...) are in
 
 ### Llama 3.2 1B Inference
 
-Full LLM inference example at `iron/applications/llama3/`: `model.py`
+Full LLM inference example at `iron/applications/llama/`: `model.py`
 (Llama 3's layer and head on the NPU and in numpy, Llama 3.2 1B's shape, the
 layout, the tokenizer), `profiles/` (tunables), its test and README:
 
 - **Required files**: `model.safetensors`, `tokenizer.model` from Hugging Face
 - **Default location**: `/srv/llama3.2-1b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
 - **Additional deps**: `pip install -r requirements_examples.txt`
-- **Run**: `pytest iron/applications/llama3/`, or
-  `python -m iron.applications.llama3.model model.safetensors tokenizer.model`
+- **Run**: `pytest iron/applications/llama/`, or
+  `python -m iron.applications.llama.model model.safetensors tokenizer.model`
   (`--max-seq-len`, a multiple of 2048, sizes the caches: 32768 by default,
   1 GB of them; one compile serves every context up to it). XRT maps
   every device buffer locked and `ulimit -l` binds each mapping; the
@@ -916,15 +916,15 @@ layout, the tokenizer), `profiles/` (tunables), its test and README:
 ### EmbeddingGemma 2
 
 Its text encoder, audio and vision towers at
-`iron/applications/embeddinggemma2/`, each with its test, an `Encoder`
+`iron/applications/embedding_gemma2/`, each with its test, an `Encoder`
 rather than a `CausalLM`: one graph compiled once at `max_tokens` rows (2048
 by default), the prompt's length bound per call, and `EmbeddingGemmaOracle`,
 its float32 encoder on the host:
 
 - **Required files**: `model.safetensors`, `tokenizer.json`
 - **Default location**: `/srv/embeddinggemma-2/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
-- **Run**: `pytest iron/applications/embeddinggemma2/`, or
-  `python -m iron.applications.embeddinggemma2.encoder <dir> --query ... --document ...`
+- **Run**: `pytest iron/applications/embedding_gemma2/`, or
+  `python -m iron.applications.embedding_gemma2.encoder <dir> --query ... --document ...`
 
 A model's device test goes in `iron/applications/<name>/test.py`: CI's
 example suite runs `iron/applications/`, and the benchmark history names a

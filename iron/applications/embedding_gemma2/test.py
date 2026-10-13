@@ -20,24 +20,24 @@ import pytest
 
 import iron
 from iron.lm import Checkpoint, load_weights
-from iron.applications.embeddinggemma2.audio import model as audio_model
-from iron.applications.embeddinggemma2.audio.model import AUDIO, LogMel
-from iron.applications.embeddinggemma2.audio.oracle import AudioOracle
-from iron.applications.embeddinggemma2.encoder import Encoder
-from iron.applications.embeddinggemma2.model import (
+from iron.applications.embedding_gemma2.audio import model as audio_model
+from iron.applications.embedding_gemma2.audio.model import AUDIO, LogMel
+from iron.applications.embedding_gemma2.audio.oracle import AudioOracle
+from iron.applications.embedding_gemma2.encoder import Encoder
+from iron.applications.embedding_gemma2.model import (
     COSTS,
     EMBEDDINGGEMMA_2,
     layout,
     text_tensors,
 )
-from iron.applications.embeddinggemma2.oracle import (
+from iron.applications.embedding_gemma2.oracle import (
     EmbeddingGemmaOracle,
     tokenizer,
     tokens,
 )
-from iron.applications.embeddinggemma2.vision import model as vision_model
-from iron.applications.embeddinggemma2.vision.model import VISION
-from iron.applications.embeddinggemma2.vision.oracle import VisionOracle, patches
+from iron.applications.embedding_gemma2.vision import model as vision_model
+from iron.applications.embedding_gemma2.vision.model import VISION
+from iron.applications.embedding_gemma2.vision.oracle import VisionOracle, patches
 from iron.lm.testing import require, weights_dir
 
 DIRECTORY = weights_dir("embeddinggemma-2")

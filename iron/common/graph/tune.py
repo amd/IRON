@@ -3,7 +3,7 @@
 
 """Measuring costs on this NPU from the command line.
 
-A graph's cost table is filled by a module of its own (``iron.applications.llama3.tune``):
+A graph's cost table is filled by a module of its own (``iron.applications.llama.tune``):
 it takes ``parser``, adds the arguments its calls follow from, builds each
 version's calls (``probe.Call.admitted``) and passes them to ``measure``
 with the directory its tables are in: one per device, ``costs_<device>.json``
