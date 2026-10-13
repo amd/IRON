@@ -102,13 +102,17 @@ def slaney_mel(num_freq_bins: int, num_mels: int, sample_rate: int) -> np.ndarra
         freq = np.asarray(freq, np.float64)
         linear = 3.0 * freq / 200.0
         return np.where(
-            freq >= low_hz, low_mel + np.log(np.maximum(freq, 1e-10) / low_hz) * logstep, linear
+            freq >= low_hz,
+            low_mel + np.log(np.maximum(freq, 1e-10) / low_hz) * logstep,
+            linear,
         )
 
     def to_hz(mel):
         low_hz, low_mel, logstep = 1000.0, 15.0, math.log(6.4) / 27.0
         linear = 200.0 * mel / 3.0
-        return np.where(mel >= low_mel, low_hz * np.exp(logstep * (mel - low_mel)), linear)
+        return np.where(
+            mel >= low_mel, low_hz * np.exp(logstep * (mel - low_mel)), linear
+        )
 
     mel_min, mel_max = to_mel(0.0), to_mel(sample_rate / 2)
     mel_freqs = np.linspace(mel_min, mel_max, num_mels + 2)
@@ -242,7 +246,10 @@ def decoder_layout(config: DecoderConfig) -> Layout:
     layer = "model.decoder.layers.{i}"
     out = {
         "embedding": ("model.decoder.embed_tokens.weight", (config.vocab_size, E)),
-        "pos_embedding": ("model.decoder.embed_positions.weight", (config.max_seq_len, E)),
+        "pos_embedding": (
+            "model.decoder.embed_positions.weight",
+            (config.max_seq_len, E),
+        ),
         "norm.weight": ("model.decoder.layer_norm.weight", (E,)),
         "norm.bias": ("model.decoder.layer_norm.bias", (E,)),
     }
@@ -303,14 +310,14 @@ def feed_forward(x, w, norm_key: str):
         out = project(g, w.fc2.weight, bias=w.fc2.bias, k_tile=256)
         return ElementwiseAdd(x, out)
     pieces = -(-ffn_dim // 4096)
-    piece = next(p for p in range(-(-ffn_dim // pieces), ffn_dim + 1) if ffn_dim % p == 0)
+    piece = next(
+        p for p in range(-(-ffn_dim // pieces), ffn_dim + 1) if ffn_dim % p == 0
+    )
     out = None
     for start in range(0, ffn_dim, piece):
         end = start + piece
         g = GELU(
-            project(
-                h, w.fc1.weight[start:end], bias=w.fc1.bias[start:end], k_tile=256
-            )
+            project(h, w.fc1.weight[start:end], bias=w.fc1.bias[start:end], k_tile=256)
         )
         partial = project(g, w.fc2.weight[:, start:end], k_tile=256)
         out = partial if out is None else ElementwiseAdd(out, partial)
@@ -360,7 +367,9 @@ class WhisperLogMel(iron.Graph):
         # Plain bf16, not Limbs/stacked: power is already a deliberate single
         # bf16 rounding (below), so the filterbank GEMM needs no further
         # float32 preservation past that point.
-        self.filterbank = np.pad(self.filters, ((0, width - bins), (0, 0))).astype(bfloat16)
+        self.filterbank = np.pad(self.filters, ((0, width - bins), (0, 0))).astype(
+            bfloat16
+        )
         # An exact (one-rounding) float32 -> bf16 cast of the magnitude,
         # via Limbs/GEMM like every other step here: magnitude @ I is exact,
         # so the only rounding is dtype_out's, not a second approximate one.
@@ -378,16 +387,21 @@ class WhisperLogMel(iron.Graph):
         exact = dict(dtype_out=np.float32, emulate_bf16_mmul_with_bfp16=False)
         spectrum = GEMM(Limbs(a), self.dft, **exact)
         magnitude = Magnitude(spectrum)
-        cast = GEMM(Limbs(magnitude), self.identity, dtype_out=bfloat16, **{
-            k: v for k, v in exact.items() if k != "dtype_out"
-        })
+        cast = GEMM(
+            Limbs(magnitude),
+            self.identity,
+            dtype_out=bfloat16,
+            **{k: v for k, v in exact.items() if k != "dtype_out"},
+        )
         # power = magnitude ** 2, the one bf16 rounding of this cast; the
         # filterbank GEMM is plain bf16 from here, not Limbs/exact. filters
         # is (bins, mels), the same (K, N) row-major layout Conv1d's weight
         # matrix uses, not a checkpoint's (out, in).
         power = ElementwiseMul(cast, cast)
         energy = GEMM(
-            power, self.filterbank, dtype_out=np.float32,
+            power,
+            self.filterbank,
+            dtype_out=np.float32,
             emulate_bf16_mmul_with_bfp16=False,
         )
         # Natural log, rounded once to bf16 (Log's own contract); the
@@ -483,7 +497,9 @@ def self_attention(w, x, n_heads: int, head_dim: int, valid: int, causal: bool):
         heads_interleaved=True,
         kv_interleaved=True,
     )
-    return project(o.reshape(o.shape[0], H * D), w.out.weight, bias=w.out.bias, k_tile=256)
+    return project(
+        o.reshape(o.shape[0], H * D), w.out.weight, bias=w.out.bias, k_tile=256
+    )
 
 
 def cross_attention(w, q_x, k, v, n_heads: int, head_dim: int, valid: int):
@@ -506,7 +522,9 @@ def cross_attention(w, q_x, k, v, n_heads: int, head_dim: int, valid: int):
         heads_interleaved=True,
         kv_interleaved=True,
     )
-    return project(o.reshape(o.shape[0], H * D), w.out.weight, bias=w.out.bias, k_tile=256)
+    return project(
+        o.reshape(o.shape[0], H * D), w.out.weight, bias=w.out.bias, k_tile=256
+    )
 
 
 class WhisperEncoder(iron.Graph):
@@ -530,8 +548,12 @@ class WhisperEncoder(iron.Graph):
         self.weights = weights
         self.cross_weights = cross_weights
         c = config
-        self.conv1 = Conv1d(weights.conv1.weight, weights.conv1.bias, channels=c.mels, stride=1)
-        self.conv2 = Conv1d(weights.conv2.weight, weights.conv2.bias, channels=c.d_model, stride=2)
+        self.conv1 = Conv1d(
+            weights.conv1.weight, weights.conv1.bias, channels=c.mels, stride=1
+        )
+        self.conv2 = Conv1d(
+            weights.conv2.weight, weights.conv2.bias, channels=c.d_model, stride=2
+        )
         pos = np.zeros((c.hidden_rows, c.d_model), bfloat16)
         pos[: c.max_source_positions] = np.asarray(weights.pos_embedding, bfloat16)
         self.pos_embedding = iron.weight(pos)
@@ -590,7 +612,9 @@ class WhisperDecoder(CausalLM):
         super().__init__(config, weights)
         self.pos_embedding = iron.weight(np.asarray(weights.pos_embedding, bfloat16))
         H, D = config.n_heads, config.head_dim
-        self.cross_keys = [iron.state((ENCODER.hidden_rows, H * D)) for _ in self.layers]
+        self.cross_keys = [
+            iron.state((ENCODER.hidden_rows, H * D)) for _ in self.layers
+        ]
         self.cross_values = [
             iron.state((ENCODER.hidden_rows, H * D)) for _ in self.layers
         ]
@@ -640,13 +664,21 @@ class WhisperDecoder(CausalLM):
         v = project(h, w.self_attn.v.weight, bias=w.self_attn.v.bias, k_tile=256)
         q, k, v = (t.reshape(n * H, D) for t in (q, k, v))
         a = project(
-            self.attend(step, i, q, k, v), w.self_attn.out.weight,
-            bias=w.self_attn.out.bias, k_tile=256,
+            self.attend(step, i, q, k, v),
+            w.self_attn.out.weight,
+            bias=w.self_attn.out.bias,
+            k_tile=256,
         )
         x = ElementwiseAdd(x, a)
         h = affine_norm(x, w.norm2.weight, w.norm2.bias)
         a = cross_attention(
-            w.cross_attn, h, self.cross_keys[i], self.cross_values[i], H, D, valid=ENCODER.max_source_positions
+            w.cross_attn,
+            h,
+            self.cross_keys[i],
+            self.cross_values[i],
+            H,
+            D,
+            valid=ENCODER.max_source_positions,
         )
         x = ElementwiseAdd(x, a)
         return feed_forward(x, w, "norm3")
@@ -683,7 +715,9 @@ class WhisperDecoder(CausalLM):
         logits = out.numpy()
         return np.array(logits).reshape(-1)
 
-    def load(self, release=None, tuner=None, boundaries=None, dev=None) -> "WhisperDecoder":
+    def load(
+        self, release=None, tuner=None, boundaries=None, dev=None
+    ) -> "WhisperDecoder":
         """Only the decode step: Whisper's own prompt (the four special
         tokens that open a transcription, ``<|startoftranscript|>`` and its
         language/task/timestamp tokens) is far too short for a dedicated
@@ -697,7 +731,9 @@ class WhisperDecoder(CausalLM):
         """
         if dev is None:
             dev = aie_utils.ensure_current_device()
-        decode = self.compile(dev=dev, coresident=tuner, boundaries=boundaries, **self.shapes(1))
+        decode = self.compile(
+            dev=dev, coresident=tuner, boundaries=boundaries, **self.shapes(1)
+        )
         decode.load(release=release)
         self._image = decode.plan.image
         self._prompt, self._decode = None, decode
@@ -733,7 +769,12 @@ def _oracle_erf(x):
     # Abramowitz & Stegun 7.1.26, max abs error 1.5e-7: well under bf16 noise,
     # and this host has no torch/scipy to call exactly.
     a1, a2, a3, a4, a5, p = (
-        0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429, 0.3275911,
+        0.254829592,
+        -0.284496736,
+        1.421413741,
+        -1.453152027,
+        1.061405429,
+        0.3275911,
     )
     sign, ax = np.sign(x), np.abs(x)
     t = 1.0 / (1.0 + p * ax)
@@ -864,7 +905,9 @@ class WhisperDecoderOracle:
                 self.encoder_hidden, layer.cross_attn.v.weight, layer.cross_attn.v.bias
             )
             a = _oracle_mha(q, k, v, c.n_heads, causal=False)
-            a = _oracle_linear(a, layer.cross_attn.out.weight, layer.cross_attn.out.bias)
+            a = _oracle_linear(
+                a, layer.cross_attn.out.weight, layer.cross_attn.out.bias
+            )
             x = x + a
             h = _oracle_norm(x, layer.norm3)
             h = _oracle_gelu(_oracle_linear(h, layer.fc1.weight, layer.fc1.bias))
@@ -948,7 +991,9 @@ class Runner:
         audio context until then.
         """
         cross_weights = _to_bf16([w.cross_attn for w in self.decoder_weights.layers])
-        self.encoder = WhisperEncoder(ENCODER, _to_bf16(self.encoder_weights), cross_weights)
+        self.encoder = WhisperEncoder(
+            ENCODER, _to_bf16(self.encoder_weights), cross_weights
+        )
         self.encoder.compile(x=((ENCODER.conv1_rows, ENCODER.mels), bfloat16))
         decoder_weights = SimpleNamespace(**vars(self.decoder_weights))
         decoder_weights.embedding = self._padded_embedding.astype(bfloat16)

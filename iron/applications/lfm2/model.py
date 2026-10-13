@@ -107,9 +107,7 @@ class Lfm2Oracle(Oracle):
         b, cc, x = bcx[:, :E], bcx[:, E : 2 * E], bcx[:, 2 * E :]
         gated = b * x
         taps = w.conv_weight.reshape(E, K)
-        padded = np.concatenate(
-            [np.zeros((K - 1, E), dtype=np.float32), gated], axis=0
-        )
+        padded = np.concatenate([np.zeros((K - 1, E), dtype=np.float32), gated], axis=0)
         total = np.zeros((n, E), dtype=np.float32)
         for k in range(K):
             total += taps[:, k] * padded[k : k + n]
@@ -197,7 +195,9 @@ class Lfm2(CausalLM):
             Copy(view[step.chunk + 1, :], scratch[K - 1 :])
             total = RowwiseMul(scratch[0:Cc], taps[:, 0])
             for k in range(1, K):
-                total = ElementwiseAdd(total, RowwiseMul(scratch[k : k + Cc], taps[:, k]))
+                total = ElementwiseAdd(
+                    total, RowwiseMul(scratch[k : k + Cc], taps[:, k])
+                )
             total = total[: step.rows]
         else:
             pos = step.position
