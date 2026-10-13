@@ -445,29 +445,26 @@ def test_remeasured_descent_runs_every_line_again(tmp_path):
 
 
 def test_a_setting_that_does_not_build_is_left_out(tmp_path):
-    # 128x128 B tiles double-buffered beside A and C are past a core's memory.
+    # 128x128 B tiles double-buffered beside A and C are past a core's
+    # memory. 2270f3f2 moved this refusal from aiecc's build to resolve(),
+    # a better place for it: the setting is left out before a Variant for
+    # it even exists, not after a failed build.
     dev = aie_utils.ensure_current_device()
     gemm = GEMM(M=2048, K=2048, N=2048)
-    found = [
-        Variant.of(gemm, dev),
-        Variant.of(gemm.with_tunables(tile_k=128, tile_n=128), dev),
-    ]
+    with pytest.raises(ValueError, match="a core holds"):
+        Variant.of(gemm.with_tunables(tile_k=128, tile_n=128), dev)
+    found = [Variant.of(gemm, dev)]
     table = CostTable(tmp_path / "costs.json", "npu2", "fused")
-    logged = []
     costs = search(
         table,
         found,
         Timing(rounds=1, calls=5),
         exhaustive=1,
         fit_cache=tmp_path / "fits",
-        log=logged.append,
     )
     assert costs.keys() == table.steps.keys() == {found[0].key}
-    assert len([line for line in logged if "does not build" in line]) == 1, logged
-    # The build's verdict is kept, not the placer's.
     kept, refused = fitting(found, tmp_path / "fits")
-    assert kept == found[:1]
-    assert refused[found[1].key].startswith("[aiecc] Compilation failed")
+    assert kept == found and not refused
 
 
 def test_tuned_graph_is_bit_identical_and_packed(tmp_path):
