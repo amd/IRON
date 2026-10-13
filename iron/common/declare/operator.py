@@ -38,7 +38,8 @@ from aie.utils.verify import Tolerance, Verdict, compare
 from ..testing import Testing
 from .creation import declare
 from .domain import Domain, Width
-from .field import DimRef, OptionalDim, Select, Tier, Unresolvable, param
+from .field import Auto, DimRef, Param, Unresolvable
+from .shape import OptionalDim, Select
 from .member import Member
 from .operand import In, Operand
 from .value import ChainWord, Extent, ExtentWord, PlaceWord, Value
@@ -126,11 +127,13 @@ class _ArrayView:
 
     def __getattr__(self, name: str):
         op = object.__getattribute__(self, "_op")
-        fields = {f.name for f in dataclasses.fields(op) if Tier in f.metadata}
+        fields = {
+            f.name for f in dataclasses.fields(op) if isinstance(f, (Param, Auto))
+        }
         if name in fields and name not in op._array_fields:
             raise TypeError(
                 f"{type(op).__name__}.array() reads {name}, which no tile names: "
-                f"an array serves every extent. Declare it param(..., array=True) "
+                f"an array serves every extent. Declare it Param(..., array=True) "
                 f"if the array does read it, or move the dependence into the "
                 f"sequence or a Value"
             )
@@ -184,9 +187,9 @@ class Link:
         return operands
 
 
-# ``auto`` is not a listed specifier: pyright reads a default only from
-# ``default=``, and ``auto(2)`` passes it positionally.
-@dataclass_transform(kw_only_default=True, field_specifiers=(param,))
+# ``Auto`` is not a listed specifier: pyright reads a default only from
+# ``default=``, and ``Auto(2)`` passes it positionally.
+@dataclass_transform(kw_only_default=True, field_specifiers=(Param,))
 @dataclasses.dataclass(eq=False, repr=True)
 class Operator(metaclass=_OperatorMeta):
     """An operator. Subclass it; every subclass is a dataclass checked as its body finishes."""
@@ -306,7 +309,7 @@ class Operator(metaclass=_OperatorMeta):
         """Check the extents against the resolved tunables; raise ``ValueError``."""
 
     def resolve(self, dev) -> Self:
-        """Return a copy with every ``auto()`` filled from ``dev`` and the extents.
+        """Return a copy with every ``Auto()`` filled from ``dev`` and the extents.
 
         Raises:
             Unresolvable: No legal value exists on ``dev``.
@@ -749,7 +752,7 @@ class Operator(metaclass=_OperatorMeta):
         return (type(self), own)
 
     def probed(self) -> Self:
-        """This operator with each ``param(probe=)`` field at its probe: the
+        """This operator with each ``Param(probe=)`` field at its probe: the
         one its step time is measured as, for every value of those fields.
         Itself when they are there already, unresolved otherwise.
         """
@@ -1011,10 +1014,10 @@ class Operator(metaclass=_OperatorMeta):
         return new
 
     def with_tunables(self, **tunables: Any) -> Self:
-        """This operator, unresolved, with the given ``auto()`` fields set.
+        """This operator, unresolved, with the given ``Auto()`` fields set.
 
         Raises:
-            TypeError: A name is not a settable tunable: not an ``auto()``
+            TypeError: A name is not a settable tunable: not an ``Auto()``
                 field, fixed with ``init=False``, or ``derived``.
         """
         unknown = [n for n in tunables if n not in self._tunable_fields]
@@ -1267,7 +1270,7 @@ class Operator(metaclass=_OperatorMeta):
             if not isinstance(e, Extent):
                 continue
             for b in self._members_io():
-                # Asked first: an unshortened shape may Select on an auto() field.
+                # Asked first: an unshortened shape may Select on an Auto() field.
                 if b.tile_dims is not None and self.extent_unit(b.name) != 0:
                     axis = bound[b.name].extent_axis(e)
                     if axis is not None:

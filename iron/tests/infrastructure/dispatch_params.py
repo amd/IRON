@@ -21,7 +21,7 @@ from aie.iron import ObjectFifo, Program, Runtime, require
 from aie.iron.controlflow import range_
 from aie.utils.hostruntime.hostruntime import HostRuntimeError
 
-from iron.common import DispatchTime, In, Operator, Out, param
+from iron.common import DispatchTime, In, Operator, Out, Param
 from iron.common.design.build import build_design
 from iron.common.image import OperatorImage
 
@@ -52,8 +52,8 @@ def chunk_copy(dev, max_chunks, *, n: aie.iron.DispatchTime[np.int32]):
 
 
 class ChunkCopy(Operator):
-    max_chunks: int = param()
-    size: int = param(default=lambda op: op.max_chunks * CHUNK, repr=False)
+    max_chunks: int = Param()
+    size: int = Param(default=lambda op: op.max_chunks * CHUNK, repr=False)
 
     src = In(size, dtype=np.int32)
     dst = Out(size, dtype=np.int32)

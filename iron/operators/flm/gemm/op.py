@@ -56,8 +56,8 @@ from iron.common import (
     Out,
     Unresolvable,
     Value,
-    auto,
-    param,
+    Auto,
+    Param,
     Select,
 )
 from iron.common.design import BdLimits
@@ -160,57 +160,57 @@ class GEMM(Operator):
     filled from the device's L1 and the tuning tables.
     """
 
-    M: int = param()
-    K: int = param()
-    N: int = param()
+    M: int = Param()
+    K: int = Param()
+    N: int = Param()
     # Activation fused into the C drain, selected at run time from the
     # compiled-in modes.
-    epilogue: Epilogue | str = param(default=Epilogue.NONE)
+    epilogue: Epilogue | str = Param(default=Epilogue.NONE)
     # Optional (min, max) applied after the activation.
-    clamp: tuple | None = param(default=None, probe=None)
+    clamp: tuple | None = Param(default=None, probe=None)
     # B's packed block count on AIE2P: blocks, not bytes, since B's
     # declaration counts bfp16ebs8 blocks and bfp.itemsize turns that back
     # into the byte count pack_B returns.
-    packed_blocks: int = param(default=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
+    packed_blocks: int = Param(default=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
     # n tile width. 64 halves the mmul's accumulator traffic per mac; 128
     # halves A fetches instead. See README.md.
-    tile_n: int = auto(array=True)
+    tile_n: int = Auto(array=True)
     # k tile. K must be a multiple of it, and it of the compute tile's k slice.
     # 256 is what Gemma 4's per-layer-input projection needs, its K being 256.
-    k_tile: int = param(default=K_TILE, array=True)
+    k_tile: int = Param(default=K_TILE, array=True)
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). None resolves to whatever L1 affords.
-    tile_ma: int = auto(array=True, domain=Divisors(of=M_TILE, step=2 * R))
+    tile_ma: int = Auto(array=True, domain=Divisors(of=M_TILE, step=2 * R))
     # Row-blocks folded into one B fetch. None resolves from tile_n.
-    m_chunk: int = auto(
+    m_chunk: int = Auto(
         array=True, domain=Divisors(of=lambda op: op.M // (M_TILE * op.rows))
     )
     # The activations the epilogue can select between at run time. Each one
     # compiled in costs program memory, so a deployment that dispatches two
     # should compile two.
-    epilogue_modes: tuple = param(default=tuple(Epilogue), array=True)
+    epilogue_modes: tuple = Param(default=tuple(Epilogue), array=True)
     # Rounding for every f32->bf16 conversion; see Rounding in design.py.
-    rounding: Rounding | str = param(default=Rounding.CONV_EVEN, array=True)
+    rounding: Rounding | str = Param(default=Rounding.CONV_EVEN, array=True)
     # Arithmetic of the gelu epilogue; see Gelu in design.py. Only the gelu
     # mode reads it.
-    gelu: Gelu | str = param(default=Gelu.FP32, array=True)
+    gelu: Gelu | str = Param(default=Gelu.FP32, array=True)
     # B as stored (N, K), a checkpoint's layout, read as is: the memtile lays
     # out the k panels the kernel reads as B^T blocks, so no packed copy.
-    b_col_maj: bool = param(default=False, array=True)
+    b_col_maj: bool = Param(default=False, array=True)
     # Multiply on AIE2P's bfp16 macs, A and B rounded to bfp16ebs8 (the
     # port's arithmetic, and AIE2P's default), or on its bf16 macs.
-    emulate_bf16_mmul_with_bfp16: bool = auto(array=True)
+    emulate_bf16_mmul_with_bfp16: bool = Auto(array=True)
     # Filled by resolve, from the device: the grid, B's storage, the L2 tiles.
-    rows: int = auto(repr=False, derived=True)
-    cols: int = auto(repr=False, derived=True)
-    bfp16_b: bool = auto(repr=False, array=True, derived=True)
+    rows: int = Auto(repr=False, derived=True)
+    cols: int = Auto(repr=False, derived=True)
+    bfp16_b: bool = Auto(repr=False, array=True, derived=True)
     # B's element type, on the array and in DDR alike; the host holds a
     # block-float B as bytes (Operand.host_dtype).
-    b_dtype: Any = auto(repr=False, derived=True)
-    l1_b_depth: int = auto(repr=False, array=True, derived=True)
-    a_l2: int = auto(repr=False, derived=True)
-    b_l2: int = auto(repr=False, derived=True)
-    c_l2: int = auto(repr=False, derived=True)
+    b_dtype: Any = Auto(repr=False, derived=True)
+    l1_b_depth: int = Auto(repr=False, array=True, derived=True)
+    a_l2: int = Auto(repr=False, derived=True)
+    b_l2: int = Auto(repr=False, derived=True)
+    c_l2: int = Auto(repr=False, derived=True)
 
     # The k order pack_B writes within a block: the port's kernel's, or the
     # shipped binary's own (see shipped.py).

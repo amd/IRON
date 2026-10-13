@@ -29,8 +29,8 @@ from iron.common import (
     Operator,
     Out,
     Value,
-    auto,
-    param,
+    Auto,
+    Param,
 )
 from iron.common.testing import Case, Testing
 
@@ -94,12 +94,12 @@ class RoPE(Operator):
 
     test = Testing(_cases, tolerance=Tolerance.relative(0.05), draw=_angles)
 
-    rows: int = param()
-    cols: int = param()
-    angle_rows: int = param(default=lambda op: op.rows)  # one row per position
+    rows: int = Param()
+    cols: int = Param()
+    angle_rows: int = Param(default=lambda op: op.rows)  # one row per position
     # None: every column the device's shim budget allows.
-    num_aie_columns: int = auto()
-    method_type: int = param(default=0, array=True)
+    num_aie_columns: int = Auto()
+    method_type: int = Param(default=0, array=True)
 
     x = In(rows, cols, tile=(1, cols), per=(num_aie_columns,))
     angles = In(angle_rows, cols, tile=(1, cols), per=(num_aie_columns,))

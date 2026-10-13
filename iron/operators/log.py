@@ -3,12 +3,13 @@
 
 import numpy as np
 from aie.iron import ExternalFunction
-from aie.iron.kernels import KernelContract, Param
+from aie.iron import kernels
+from aie.iron.kernels import KernelContract
 from aie.utils.compile.jit import markers
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import In, UnaryElementwise, param
+from iron.common import In, UnaryElementwise, Param
 from iron.common.testing import Sweep, Testing
 
 from .split3 import SPLIT
@@ -97,7 +98,7 @@ class Log(UnaryElementwise):
         ),
     )
 
-    offset: float = param(default=0.0, array=True)
+    offset: float = Param(default=0.0, array=True)
 
     x = In(
         UnaryElementwise.size,
@@ -108,7 +109,7 @@ class Log(UnaryElementwise):
 
     def kernel(self):
         contract = KernelContract(
-            roles=(markers.In, markers.Out, Param, Param),
+            roles=(markers.In, markers.Out, kernels.Param, kernels.Param),
             parameter_bindings=((2, self.tile_size),),
             reference=log,
             tolerance=Tolerance.bf16_ulps(

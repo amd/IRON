@@ -194,7 +194,7 @@ def test_a_pack_runs_beside_a_reference_its_call_gives_values(tmp_path):
 
 
 def test_a_value_derived_from_a_tunable_is_measured_at_its_resolution(tmp_path):
-    # GEMM's tile count reads its auto() tile shape as well as the row bound.
+    # GEMM's tile count reads its Auto() tile shape as well as the row bound.
     # Its DMAs move every row under the bound, so its time does not follow it.
     traced = Project().trace(x=(2048, 2048), w=(2048, 2048))
     report = platform()

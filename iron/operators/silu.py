@@ -4,7 +4,7 @@
 from aie.iron.kernels import activation
 
 from iron import operators as catalog
-from iron.common import Link, UnaryElementwise, auto
+from iron.common import Link, UnaryElementwise, Auto
 from iron.common.testing import Case, Sweep, Testing
 
 
@@ -40,7 +40,7 @@ class SiLU(UnaryElementwise):
     )
 
     # One channel per column: the LUT-based kernel is sized for it.
-    num_channels: int = auto(1, repr=False, init=False)
+    num_channels: int = Auto(1, repr=False, init=False)
 
     def kernel(self):
         # vtanh's error, doubled through the sigmoid identity, is most of

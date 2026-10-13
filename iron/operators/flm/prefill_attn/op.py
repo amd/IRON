@@ -10,7 +10,7 @@ from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron import ExternalFunction
 from ml_dtypes import bfloat16
 
-from iron.common import DispatchTime, In, Operator, Out, Unresolvable, param
+from iron.common import DispatchTime, In, Operator, Out, Unresolvable, Param
 from iron.operators.flm.prefill_attn import reference
 from iron.operators.flm.prefill_attn.design import (
     CAUSAL,
@@ -36,14 +36,14 @@ class _PrefillAttentionBase(Operator):
     # query.
     window = None
 
-    max_context: int = param()
-    num_heads: int = param()
-    num_kv_heads: int = param()
-    head_dim: int = param(default=lambda op: Geometry.of(op.kernel()).dh, repr=False)
-    qo_len: int = param(
+    max_context: int = Param()
+    num_heads: int = Param()
+    num_kv_heads: int = Param()
+    head_dim: int = Param(default=lambda op: Geometry.of(op.kernel()).dh, repr=False)
+    qo_len: int = Param(
         default=lambda op: op.max_context * op.num_heads * op.head_dim, repr=False
     )
-    kv_len: int = param(
+    kv_len: int = Param(
         default=lambda op: 2 * op.max_context * op.num_kv_heads * op.head_dim,
         repr=False,
     )
@@ -133,4 +133,4 @@ class PrefillSlidingAttention(_PrefillAttentionBase):
     """Sliding-window causal prefill attention with a head dim of 256, from a KV cache."""
 
     variant = SLIDING
-    window: int = param(default=512)
+    window: int = Param(default=512)

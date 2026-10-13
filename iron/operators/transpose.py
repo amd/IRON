@@ -20,9 +20,9 @@ from iron.common import (
     Operator,
     Out,
     Value,
-    auto,
+    Auto,
     OptionalDim,
-    param,
+    Param,
 )
 from iron.common.testing import Case, Testing
 
@@ -108,25 +108,25 @@ class Transpose(Operator):
     # of wrong permutation, so gate it exactly.
     test = Testing(_cases, tolerance=Tolerance.exact())
 
-    M: int = param()
-    N: int = param()
-    num_batches: int = param(default=1)
+    M: int = Param()
+    N: int = Param()
+    num_batches: int = Param(default=1)
     # Defaults: 64 x 64 tiles of 8 x 8 sub-tiles, every column, one channel.
-    m: int = auto(
+    m: int = Auto(
         64,
         domain=Divisors(
             of=lambda op: op.M, step=lambda op: op.s, cap=lambda op: 8192 // op.n
         ),
     )
-    n: int = auto(
+    n: int = Auto(
         64,
         domain=Divisors(
             of=lambda op: op.N, step=lambda op: op.s, cap=lambda op: 8192 // op.m
         ),
     )
-    s: int = auto(8, array=True, domain=Choices((8, 4)))
-    num_aie_columns: int = auto()
-    num_channels: int = auto(1)
+    s: int = Auto(8, array=True, domain=Choices((8, 4)))
+    num_aie_columns: int = Auto()
+    num_channels: int = Auto(1)
 
     x = In(
         OptionalDim(num_batches), M, N, tile=(m, n), per=(num_aie_columns, num_channels)

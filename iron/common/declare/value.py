@@ -135,7 +135,7 @@ class DispatchTime(Value):
 
 
 class Extent(Value):
-    """A ``param()`` shape field a graph may bound per call.
+    """A ``Param()`` shape field a graph may bound per call.
 
     ``valid = Extent(size)`` reads as ``size`` until a graph bounds an
     operand the field sizes (``x[:n]``); then it, and every ``Value`` whose

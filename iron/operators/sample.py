@@ -45,8 +45,8 @@ from iron.common import (
     Out,
     Scratchpad,
     Unresolvable,
-    auto,
-    param,
+    Auto,
+    Param,
 )
 from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
@@ -107,14 +107,14 @@ class Sample(Operator):
     )
 
     # The array reads both: the slice each core takes, the summary's size.
-    vocab: int = param(array=True)
-    k_max: int = param(default=64, array=True)
+    vocab: int = Param(array=True)
+    k_max: int = Param(default=64, array=True)
     # Positions the draws and the record hold; the sequence picks one.
-    steps: int = param(default=1)
-    cores: int = auto(4)
+    steps: int = Param(default=1)
+    cores: int = Auto(4)
     # Logits per select call; the largest even divisor of the slice up to
     # 8192 unless given.
-    chunk: int = auto(
+    chunk: int = Auto(
         domain=Divisors(of=lambda op: op.slice_size, step=2, cap=_CHUNK_LIMIT)
     )
 

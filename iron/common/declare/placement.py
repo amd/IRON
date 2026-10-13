@@ -4,7 +4,7 @@
 """Where an array's tiles go, as a tunable the tuner searches.
 
 An operator names its placements and declares a field holding one name,
-``placement: str = auto("memtiles", array=True, domain=PLACEMENT)``, with
+``placement: str = Auto("memtiles", array=True, domain=PLACEMENT)``, with
 ``PLACEMENT = Placement({...})``. Each name is a `Pins`: how much of the
 coordinates its ``array()`` writes it keeps for cores, memtiles and shims.
 ``array()`` asks ``PLACEMENT.pins(self.placement)`` for the tile of each

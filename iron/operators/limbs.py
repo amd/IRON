@@ -3,12 +3,13 @@
 
 import numpy as np
 from aie.iron import ExternalFunction
-from aie.iron.kernels import KernelContract, Param
+from aie.iron import kernels
+from aie.iron.kernels import KernelContract
 from aie.utils.compile.jit import markers
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import In, Rowwise, param
+from iron.common import In, Rowwise, Param
 from iron.common.testing import Case, Testing
 
 from .split3 import SPLIT
@@ -84,8 +85,8 @@ class Limbs(Rowwise):
         draw=dict(normal=("x",)),
     )
 
-    line: int = param()
-    tile_size: int = param(default=lambda op: len(PLANES) * op.line)
+    line: int = Param()
+    tile_size: int = Param(default=lambda op: len(PLANES) * op.line)
 
     x = In(
         Rowwise.rows,
@@ -105,7 +106,7 @@ class Limbs(Rowwise):
 
     def kernel(self):
         contract = KernelContract(
-            roles=(markers.In, markers.Out, Param),
+            roles=(markers.In, markers.Out, kernels.Param),
             parameter_bindings=((2, self.line),),
             reference=planes,
             tolerance=Tolerance.exact(

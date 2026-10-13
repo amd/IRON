@@ -7,7 +7,7 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise
 from ml_dtypes import bfloat16
 
-from iron.common import UnaryElementwise, Value, param
+from iron.common import UnaryElementwise, Value, Param
 from iron.common.testing import Case, Sweep, Testing
 
 
@@ -30,8 +30,8 @@ class Clamp(UnaryElementwise):
         draw=dict(centered=("x",)),
     )
 
-    low: float = param(probe=-np.inf)
-    high: float = param(probe=np.inf)
+    low: float = Param(probe=-np.inf)
+    high: float = Param(probe=np.inf)
 
     low_bits = Value(np.int32, derive=lambda op: op.scalars()[0])
     high_bits = Value(np.int32, derive=lambda op: op.scalars()[1])

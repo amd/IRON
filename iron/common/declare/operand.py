@@ -19,7 +19,8 @@ from aie.iron.device import Tile
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
-from .field import DimRef, OptionalDim, Shape, _DimSpec
+from .field import DimRef
+from .shape import OptionalDim, Shape, _DimSpec
 from .member import Member
 from .value import DispatchTime, Extent, Value
 
@@ -84,7 +85,7 @@ class Operand(Member["Operand"]):
         channel: The shim DMA channel every lane of a pinned stream uses.
         replicate: Every `per=` lane gets the whole buffer, not a share.
         broadcast: One fifo every worker consumes.
-        when: A bool `param()`; the operand and its stream exist only where
+        when: A bool `Param()`; the operand and its stream exist only where
             it is true, and a call giving the operand by keyword sets it.
         finish: The cores apply the operator's `finish` to each tile of
             this output before releasing it (`Finish`), so a consumer folds

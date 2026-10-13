@@ -14,8 +14,8 @@ from iron.common import (
     Operator,
     Out,
     Unresolvable,
-    auto,
-    param,
+    Auto,
+    Param,
 )
 from iron.operators.flm.lm_head import reference
 from iron.operators.flm.lm_head.design import lm_head
@@ -30,15 +30,15 @@ class LMHead(Operator):
     Y receives the logits. See README.md.
     """
 
-    dim: int = param()
-    vocab: int = param()
-    softcap: float = param()
-    w_words: int = param(
+    dim: int = Param()
+    vocab: int = Param()
+    softcap: float = Param()
+    w_words: int = Param(
         default=lambda op: packed_bytes(op.vocab * op.dim) // 4, repr=False
     )
-    x_len: int = param(default=lambda op: 2 * op.dim, repr=False)
-    cols: int = auto(repr=False)
-    rows: int = auto(repr=False)
+    x_len: int = Param(default=lambda op: 2 * op.dim, repr=False)
+    cols: int = Auto(repr=False)
+    rows: int = Auto(repr=False)
 
     # The runtime sequence's argument order.
     y = Out(vocab, dtype=bfloat16)

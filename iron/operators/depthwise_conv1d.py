@@ -10,7 +10,7 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import conv
 from ml_dtypes import bfloat16
 
-from iron.common import Extent, In, Operator, Out, Value, auto, param
+from iron.common import Extent, In, Operator, Out, Value, Auto, Param
 from iron.common.testing import Case, Testing
 
 TAPS = 5
@@ -38,9 +38,9 @@ class DepthwiseConv1d(Operator):
         draw=dict(centered=("x", "weight")),
     )
 
-    rows: int = param()
-    channels: int = param(array=True)
-    num_aie_columns: int = auto()
+    rows: int = Param()
+    channels: int = Param(array=True)
+    num_aie_columns: int = Auto()
 
     x = In(rows, channels, tile=(channels,), per=(num_aie_columns,), depth=TAPS + 1)
     weight = In(TAPS, channels, tile=(channels,), broadcast=True, depth=TAPS)

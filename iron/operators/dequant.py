@@ -7,7 +7,7 @@ from typing import ClassVar
 import numpy as np
 from aie.iron.kernels import datamovement
 
-from iron.common import In, UnaryElementwise, Unresolvable, auto, param
+from iron.common import In, UnaryElementwise, Unresolvable, Auto, Param
 from iron.common.testing import Sweep, Testing
 
 
@@ -32,14 +32,14 @@ class Dequant(UnaryElementwise):
         ),
     )
 
-    group_size: int = param(default=32, repr=False, array=True)
+    group_size: int = Param(default=32, repr=False, array=True)
     # The packed input's length: two 4-bit values per byte plus a bf16 scale
     # per group.
-    packed: int = param(
+    packed: int = Param(
         default=lambda op: op.size // 2 + (op.size // op.group_size) * 2, repr=False
     )
     # The packed size of one line; filled by resolve from ``tile_size``.
-    in_tile: int = auto(repr=False, derived=True)
+    in_tile: int = Auto(repr=False, derived=True)
 
     default_tile: ClassVar[int] = 4096
     tile_cap: ClassVar[int] = 16384

@@ -65,8 +65,8 @@ from iron.common import (
     Unresolvable,
     Value,
     Width,
-    auto,
-    param,
+    Auto,
+    Param,
     Select,
 )
 from iron.common.design import BdLimits
@@ -312,51 +312,51 @@ class MHA(Operator):
         _cases, tolerance=Tolerance(rtol=0.04, atol=0.15, max_mismatch_frac=0.005)
     )
 
-    num_heads: int = param()
+    num_heads: int = Param()
     # The K/V head count: fewer than num_heads is grouped-query attention;
     # left out, plain MHA.
-    num_KV_heads: int = param(default=lambda op: op.num_heads)
+    num_KV_heads: int = Param(default=lambda op: op.num_heads)
     # seq_pad is seq_len rounded up to a multiple of 64; a shape gives
     # seq_pad, from which seq_len follows when it is not given.
-    seq_len: int = param(default=lambda op: op.seq_pad)
-    seq_pad: int = param(default=lambda op: op.seq_padding(op.seq_len), repr=False)
+    seq_len: int = Param(default=lambda op: op.seq_pad)
+    seq_pad: int = Param(default=lambda op: op.seq_padding(op.seq_len), repr=False)
     # The rows of K and V: a cache longer than the queries, whose last
     # rows the queries are; left out, as many as Q's.
-    kv_len: int = param(default=lambda op: op.seq_pad)
+    kv_len: int = Param(default=lambda op: op.seq_pad)
     # The layout a projection GEMM produces, ``(seq, heads, d)`` with the
     # heads interleaved per token, read and written as it is: a head's block
     # is then a strided slice, and no copy reorders the heads to the front.
     # One flag for Q and O, one for K and V, which may come from a cache.
-    heads_interleaved: bool = param(default=False)
-    kv_interleaved: bool = param(default=False)
+    heads_interleaved: bool = Param(default=False)
+    kv_interleaved: bool = Param(default=False)
     # The head dimension: the width of every tile and the kernel's DIM_K.
-    d: int = param(default=64)
-    causal: bool = param(default=True, array=True)
+    d: int = Param(default=64)
+    causal: bool = Param(default=True, array=True)
     # Keys more than this many positions from a query are masked; None is
     # no window.
-    window: int | None = param(default=None, array=True)
-    scale: float = param(default=lambda op: float(1 / np.sqrt(op.d)), array=True)
+    window: int | None = Param(default=None, array=True)
+    scale: float = Param(default=lambda op: float(1 / np.sqrt(op.d)), array=True)
     # Left out, the largest block whose cores fit L1 at this d.
-    B_q: int = auto(array=True, domain=BLOCK_SIZES)
+    B_q: int = Auto(array=True, domain=BLOCK_SIZES)
     # mha.cc's causal skip compares a KV block's index with a Q block's.
-    B_kv: int = auto(repr=False, derived=True)
-    num_pipelines: int = auto(1, array=True, domain=Width())
+    B_kv: int = Auto(repr=False, derived=True)
+    num_pipelines: int = Auto(1, array=True, domain=Width())
     # Left out, "memtiles", or "tiles" where P*V is split.
-    placement: str = auto(array=True, domain=PLACEMENT)
+    placement: str = Auto(array=True, domain=PLACEMENT)
     # bf16 macs: bfp16 shares one exponent over 8 keys of P*V, and the softmax
     # core, not the products, bounds MHA's time.
-    emulate_bf16_mmul_with_bfp16: bool = param(default=False, array=True, repr=False)
+    emulate_bf16_mmul_with_bfp16: bool = Param(default=False, array=True, repr=False)
     # Filled by resolve: how the pipelines are split across shims, and K
     # and V's lanes, one every pipeline reads or, one query packed, one each.
-    q_shims: int = auto(repr=False, derived=True)
-    join_rows: int = auto(repr=False, derived=True)
-    kv_lanes: int = auto(array=True, repr=False, derived=True)
+    q_shims: int = Auto(repr=False, derived=True)
+    join_rows: int = Auto(repr=False, derived=True)
+    kv_lanes: int = Auto(array=True, repr=False, derived=True)
     # The width of the layout placed, a key of COLUMNS.
-    width: int = auto(array=True, repr=False, derived=True)
+    width: int = Auto(array=True, repr=False, derived=True)
     # The P*V cores per pipeline, one or, where one's L1 holds no block, two
     # by halves of the head, and the width of the head each holds.
-    pv_cores: int = auto(array=True, repr=False, domain=Choices((1, 2)))
-    pv_width: int = auto(array=True, repr=False, derived=True)
+    pv_cores: int = Auto(array=True, repr=False, domain=Choices((1, 2)))
+    pv_width: int = Auto(array=True, repr=False, derived=True)
 
     # By array width, the coordinates the "memtiles" and "tiles" placements
     # keep. One query packed puts pipeline p's K and V lanes on shim and

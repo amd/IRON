@@ -557,7 +557,7 @@ class Tracer:
         call gave them, a view where ``operands`` holds its buffer.
         """
         called = operands if called is None else called
-        # A shape that Selects on an auto() field is the device's: resolve()
+        # A shape that Selects on an Auto() field is the device's: resolve()
         # gives it, unchecked, so a profile may still tune the op.
         unset = {n for n in type(op)._auto_fields if getattr(op, n) is None}
         shaped = op

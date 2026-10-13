@@ -3,7 +3,7 @@
 
 from aie.iron.kernels import activation
 
-from iron.common import UnaryElementwise, param
+from iron.common import UnaryElementwise, Param
 from iron.common.testing import Case, Sweep, Testing
 
 
@@ -34,7 +34,7 @@ class LeakyReLU(UnaryElementwise):
         draw=dict(centered=("x",)),
     )
 
-    alpha: float = param(default=0.01, array=True)
+    alpha: float = Param(default=0.01, array=True)
 
     def kernel(self):
         # The factory holds what the line length must satisfy: a whole

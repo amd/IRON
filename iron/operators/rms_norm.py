@@ -6,7 +6,7 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise, norm
 from aie.utils.verify import Tolerance
 
-from iron.common import In, KernelCall, Out, Rowwise, param
+from iron.common import In, KernelCall, Out, Rowwise, Param
 from iron.common.testing import Sweep, Testing
 
 # The longest weighted row: the multiplying core holds the weight row beside
@@ -34,8 +34,8 @@ class RMSNorm(Rowwise):
     )
 
     # The epsilon under the root: 1e-5 by default; a model states its own.
-    epsilon: float = param(default=1e-5, array=True)
-    weighted: bool = param(default=False, array=True)
+    epsilon: float = Param(default=1e-5, array=True)
+    weighted: bool = Param(default=False, array=True)
 
     x = In(
         Rowwise.rows,

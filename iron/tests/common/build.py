@@ -33,9 +33,9 @@ from iron.common import (
     Scratchpad,
     Value,
     Xclbin,
-    auto,
+    Auto,
     OptionalDim,
-    param,
+    Param,
 )
 from iron.common import graph
 from iron.common.design import (
@@ -66,11 +66,11 @@ NPU2_4COL = from_name("npu2", n_cols=4)
 
 
 class MV(Operator):
-    M: int = param()
-    K: int = param()
-    num_batches: int = param(default=1)
-    cols: int = auto(2)
-    tile_out: int = auto(64)
+    M: int = Param()
+    K: int = Param()
+    num_batches: int = Param(default=1)
+    cols: int = Auto(2)
+    tile_out: int = Auto(64)
     A = In(OptionalDim(num_batches), M, K, tile=(tile_out, K), per=(cols,))
     B = In(OptionalDim(num_batches), K, tile=(K,), broadcast=True)
     C = Out(OptionalDim(num_batches), M, tile=(tile_out,), per=(cols,))
@@ -141,8 +141,8 @@ def test_split_takes_every_batch_and_broadcasts():
 
 def test_a_buffer_without_a_stream_has_no_derived_transfers():
     class NoStream(Operator):
-        M: int = param()
-        K: int = param()
+        M: int = Param()
+        K: int = Param()
         A = In(M, K)
         C = Out(M, tile=(64,))
 
@@ -204,8 +204,8 @@ def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles():
 
 def test_preamble_rejects_a_resident_the_array_never_bound(npu2):
     class Op(Operator):
-        n: int = param()
-        tile: int = auto(64)
+        n: int = Param()
+        tile: int = Auto(64)
         A = In(n, tile=(tile,))
         count = Value(np.int32, derive=lambda op: op.n // op.tile)
 
@@ -542,20 +542,20 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
     with pytest.raises(TypeError, match="pinned with via="):
 
         class Unpinned(Operator, image=image):
-            n: int = param()
+            n: int = Param()
             x = In(n, tile=(64,))
 
     with pytest.raises(TypeError, match="needs an address"):
 
         class Unplaced(Operator, image=image):
-            n: int = param()
+            n: int = Param()
             x = In(n, tile=(64,), via=Tile(0, 0))
             count = Value(np.int32, derive=lambda op: op.n)
 
     with pytest.raises(TypeError, match="nothing builds its array"):
 
         class Built(Operator, image=image):
-            n: int = param()
+            n: int = Param()
             x = In(n, tile=(64,), via=Tile(0, 0))
 
             def array(self, target):

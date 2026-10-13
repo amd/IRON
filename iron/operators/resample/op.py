@@ -33,7 +33,7 @@ from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import Extent, In, Operator, Out, Value, auto, param
+from iron.common import Extent, In, Operator, Out, Value, Auto, Param
 from iron.common.testing import Case, Testing
 
 from .reference import resize, taps, window
@@ -237,21 +237,21 @@ class ResampleTaps(Operator):
         tolerance=Tolerance.exact(),
     )
 
-    in_size: int = param()
-    out_size: int = param()
-    words: int = param(default=256)
+    in_size: int = Param()
+    out_size: int = Param()
+    words: int = Param(default=256)
     # The slots of a chunk, or None for as many as the window lets fit.
-    slots: int | None = param(default=None, array=True)
+    slots: int | None = Param(default=None, array=True)
     # Enough for out_size, in a multiple of 16 so every core count up to it divides.
-    chunks: int = param(
+    chunks: int = Param(
         default=lambda op: 16
         * -(
             -op.out_size
             // (16 * max(1, per_chunk(op.in_size, op.out_size, op.words, op.slots)))
         )
     )
-    num_aie_columns: int = auto()
-    num_channels: int = auto(2)
+    num_aie_columns: int = Auto()
+    num_channels: int = Auto(2)
 
     table = Out(
         chunks,
@@ -876,29 +876,29 @@ class Resample(Operator):
         tolerance=Tolerance.exact(),
     )
 
-    height: int = param()
-    width: int = param()
-    out_height: int = param()
-    out_width: int = param()
+    height: int = Param()
+    width: int = Param()
+    out_height: int = Param()
+    out_width: int = Param()
     # Every chunk is a buffer handshake with every core: few and large ones.
-    chunk: int = param(default=4096, array=True)
+    chunk: int = Param(default=4096, array=True)
     # A 39-tap window: a scale of up to 9.5.
-    words: int = param(default=356, array=True)
+    words: int = Param(default=356, array=True)
     # The patch columns a core holds, so cores * patch_columns across. The
     # old flat default is a floor, so two resizes of one image that each
     # need no more of it still resolve to the same array.
-    patch_columns: int = param(
+    patch_columns: int = Param(
         default=lambda op: max(8, op.default_patch_columns()), array=True
     )
-    image_chunks: int = param(
+    image_chunks: int = Param(
         default=lambda op: op.height * -(-3 * op.width // op.chunk)
     )
     # In multiples of 16, as ResampleTaps's are, so every core count up to it divides.
-    width_chunks: int = param(default=lambda op: 16 * -(-op.out_width // (16 * SIDE)))
-    height_chunks: int = param(default=lambda op: 16 * -(-op.out_height // (16 * SIDE)))
-    patch_rows: int = param(default=lambda op: op.padded_rows())
-    num_aie_columns: int = auto()
-    num_channels: int = auto(2)
+    width_chunks: int = Param(default=lambda op: 16 * -(-op.out_width // (16 * SIDE)))
+    height_chunks: int = Param(default=lambda op: 16 * -(-op.out_height // (16 * SIDE)))
+    patch_rows: int = Param(default=lambda op: op.padded_rows())
+    num_aie_columns: int = Auto()
+    num_channels: int = Auto(2)
 
     rows = Extent(height)
     columns = Extent(width)
@@ -1324,15 +1324,15 @@ class PatchPositions(Operator):
         tolerance=Tolerance.exact(),
     )
 
-    rows: int = param()
-    out_height: int = param()
-    out_width: int = param()
-    pool: int = param(default=3, array=True)
+    rows: int = Param()
+    out_height: int = Param()
+    out_width: int = Param()
+    pool: int = Param(default=3, array=True)
     # The rows of each axis's position-embedding table.
-    positions: int = param(default=10240, array=True)
+    positions: int = Param(default=10240, array=True)
     # Resample's cores, which its raster's columns are padded past.
-    cores: int = param(default=16, array=True)
-    block: int = param(default=256, array=True)
+    cores: int = Param(default=16, array=True)
+    block: int = Param(default=256, array=True)
 
     out_rows = Extent(out_height)
     out_columns = Extent(out_width)

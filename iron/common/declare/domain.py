@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The values a tuner tries for a tunable, declared with ``auto(domain=)``.
+"""The values a tuner tries for a tunable, declared with ``Auto(domain=)``.
 
 Each kind is asked of the resolved operator, so its ladder runs through the
 value the library would choose and the default is always among them. A

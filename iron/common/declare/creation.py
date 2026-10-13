@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import dataclasses
 
-from .field import Auto, DimRef, OptionalDim, Param, Shape, Tier
+from .field import Auto, DimRef, Param
+from .shape import OptionalDim, Shape
 from .member import Member
 from .operand import Operand
 from .value import Extent
@@ -90,7 +91,7 @@ def declare(cls: type, library: type) -> None:
         ):
             raise TypeError(
                 f"{cls.__name__}.{name} = {value!r} does not override the inherited "
-                f"field: annotate it, `{name}: int = auto({value!r})` (with "
+                f"field: annotate it, `{name}: int = Auto({value!r})` (with "
                 f"init=False to pin it), or dataclass keeps the base's default"
             )
 
@@ -108,7 +109,7 @@ def declare(cls: type, library: type) -> None:
     # dataclass names the Field objects the class body bound to bare names,
     # so a shape that captured one is rewritten by name (Shape.rewrite).
     for f in fields.values():
-        setattr(cls, f.name, DimRef(cls, f.name, f.metadata.get(Tier), f.default))
+        setattr(cls, f.name, DimRef(cls, f))
 
     members = members_of(cls)
     for m in members:
@@ -133,25 +134,29 @@ def declare(cls: type, library: type) -> None:
                 )
             if m.when is not None:
                 (m.when,) = Shape((m.when,)).rewrite(cls).dims
-                if not isinstance(m.when, DimRef) or not isinstance(m.when.tier, Param):
+                if not isinstance(m.when, DimRef) or not isinstance(
+                    m.when.field, Param
+                ):
                     raise TypeError(
                         f"{cls.__name__}.{m.name}: when={m.when!r} must be a "
-                        f"param() field, the flag the operand exists under"
+                        f"Param() field, the flag the operand exists under"
                     )
         if isinstance(m, Extent):
             (ref,) = Shape((m.field,)).rewrite(cls).dims
-            if not isinstance(ref, DimRef) or not isinstance(ref.tier, Param):
+            if not isinstance(ref, DimRef) or not isinstance(ref.field, Param):
                 raise TypeError(
-                    f"{cls.__name__}.{m.name}: Extent({ref!r}) must name a param() "
+                    f"{cls.__name__}.{m.name}: Extent({ref!r}) must name a Param() "
                     f"field, the one a graph may bound per call"
                 )
             m.field = ref
         if isinstance(m, Operand) and m.tile_dims is not None and m.per is not None:
             m.per = m.per.rewrite(cls)
             for ref in m.per.dims:
-                if not isinstance(ref, DimRef) or ref.tier is None:
+                if not isinstance(ref, DimRef) or not isinstance(
+                    ref.field, (Param, Auto)
+                ):
                     raise TypeError(
-                        f"{cls.__name__}.{m.name}: per={ref!r} must be a param() or auto() field"
+                        f"{cls.__name__}.{m.name}: per={ref!r} must be a Param() or Auto() field"
                     )
 
     prepared = [m.name for m in members if isinstance(m, Operand) and m.prepare]
@@ -167,19 +172,17 @@ def declare(cls: type, library: type) -> None:
             f"one stream"
         )
     cls._members = tuple(members)
-    tiers = {f.name: f.metadata.get(Tier) for f in fields.values()}
-    cls._param_fields = tuple(n for n, t in tiers.items() if isinstance(t, Param))
+
+    cls._param_fields = tuple(n for n, t in fields.items() if isinstance(t, Param))
     cls._derived_params = {
-        n: t.derive for n, t in tiers.items() if isinstance(t, Param) and t.derive
+        n: t.derive for n, t in fields.items() if isinstance(t, Param) and t.derive
     }
-    cls._auto_fields = tuple(n for n, t in tiers.items() if isinstance(t, Auto))
+    cls._auto_fields = tuple(n for n, t in fields.items() if isinstance(t, Auto))
     cls._tunable_fields = tuple(
-        n
-        for n in cls._auto_fields
-        if fields[n].init and not fields[n].metadata[Tier].derived
+        n for n in cls._auto_fields if fields[n].init and not fields[n].derived
     )
     cls._domains = {
-        n: tiers[n].domain for n in cls._tunable_fields if tiers[n].domain is not None
+        n: fields[n].domain for n in cls._tunable_fields if fields[n].domain is not None
     }
     for n, domain in cls._domains.items():
         if domain.when is not None and domain.when not in fields:
@@ -202,11 +205,13 @@ def declare(cls: type, library: type) -> None:
             if m.when is not None:
                 named.add(m.when.name)
     cls._array_fields = tuple(
-        n for n, t in tiers.items() if n in named or (t is not None and t.array)
+        n
+        for n, t in fields.items()
+        if n in named or (isinstance(t, (Param, Auto)) and t.array)
     )
     cls._probe_fields = {
         n: t.probe
-        for n, t in tiers.items()
+        for n, t in fields.items()
         if isinstance(t, Param) and t.probe is not dataclasses.MISSING
     }
     shaped: set[str] = set()

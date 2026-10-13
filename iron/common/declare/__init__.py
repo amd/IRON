@@ -3,19 +3,14 @@
 
 """The declaration layer: operators and their members.
 
-A host buffer's dimension is a ``param()`` field or an integer literal, so
+A host buffer's dimension is a ``Param()`` field or an integer literal, so
 inference stays a lookup (``Operator.infer``); a tile's may also be a
 tunable, since inference never reads one.
 """
 
 from .domain import Choices, Divisors, Width
-from .field import (
-    Unresolvable,
-    auto,
-    OptionalDim,
-    param,
-    Select,
-)
+from .field import Auto, Param, Unresolvable
+from .shape import OptionalDim, Select
 from .operand import In, InOut, Operand, Out
 from .operator import CopyRun, Link, Operator
 from .placement import Level, Pins, Placement
@@ -45,8 +40,8 @@ __all__ = [
     "Value",
     "Width",
     "Xclbin",
-    "auto",
+    "Auto",
     "OptionalDim",
-    "param",
+    "Param",
     "Select",
 ]

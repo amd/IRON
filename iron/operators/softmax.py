@@ -28,8 +28,8 @@ from iron.common import (
     Operator,
     Out,
     Value,
-    auto,
-    param,
+    Auto,
+    Param,
 )
 from iron.common.testing import Case, Testing
 
@@ -89,17 +89,17 @@ class Softmax(Operator):
         ]
     )
 
-    rows: int = param(array=True)
-    cols: int = param()
+    rows: int = Param(array=True)
+    cols: int = Param()
     # None: every column the device's shim budget allows.
-    num_aie_columns: int = auto()
-    num_channels: int = auto(1)
+    num_aie_columns: int = Auto()
+    num_channels: int = Auto(1)
     # None: the whole row, or where the row is streamed the longest
     # multiple of _VECTOR_STEP up to _BLOCK that divides it.
-    block: int = auto(
+    block: int = Auto(
         domain=Divisors(of=lambda op: op.cols, step=_VECTOR_STEP, cap=_ROW_CAP)
     )
-    streamed: bool = auto(array=True, domain=Choices((False, True)))
+    streamed: bool = Auto(array=True, domain=Choices((False, True)))
 
     length = Extent(cols)  # cols, or fewer per call
 

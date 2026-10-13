@@ -29,7 +29,7 @@ from aie.iron import ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 
-from iron.common import In, Operator, Out, param
+from iron.common import In, Operator, Out, Param
 from iron.common.testing import Case, Testing
 
 # A program row: (plane, index, scale, bias, down, mul, add, shift).
@@ -85,9 +85,9 @@ class Emit(Operator):
         draw=_program,
     )
 
-    slots: int = param(array=True)
-    carried: int = param(array=True)
-    rows: int = param(default=lambda op: op.slots + op.carried, repr=False)
+    slots: int = Param(array=True)
+    carried: int = Param(array=True)
+    rows: int = Param(default=lambda op: op.slots + op.carried, repr=False)
 
     program = In(rows, ROW, dtype=np.int32, tile=(rows, ROW), depth=1)
     planes = In(2, carried, dtype=np.int32, tile=(2, carried), depth=1)

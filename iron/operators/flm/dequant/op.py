@@ -16,8 +16,8 @@ from iron.common import (
     Operator,
     Out,
     Unresolvable,
-    auto,
-    param,
+    Auto,
+    Param,
 )
 from iron.operators.flm.dequant.design import (
     CORE_BLOCKS,
@@ -110,29 +110,29 @@ class DequantBFP(Operator):
     See README.md for the layout, the parameters and the constraints.
     """
 
-    K: int = param()
-    N: int = param()
+    K: int = Param()
+    N: int = Param()
     # A projection interleaved with another in the same buffer: this one
     # occupies ``run_out_features`` of every ``run_period_out_features``.
-    run_out_features: int | None = param(default=None)
-    run_period_out_features: int | None = param(default=None)
+    run_out_features: int | None = Param(default=None)
+    run_period_out_features: int | None = Param(default=None)
     # Each buffer is declared in the unit its transfers count in. The q4nx
     # input is bytes, because a block interleaves three tables at 5 bits per
     # weight and the fill walks it bytewise. The output is bfp16ebs8 blocks,
     # because the drains index blocks; declared in its 9-byte equivalent,
     # every offset and length would address a ninth of what it names.
     # Filled by validate() from K, N and the interleave.
-    quantized_bytes: int = param(default=lambda op: op.quantized_size(), repr=False)
-    packed_blocks: int = param(default=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
+    quantized_bytes: int = Param(default=lambda op: op.quantized_size(), repr=False)
+    packed_blocks: int = Param(default=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
     # The n tile width the packed output is written for. It has to match the
     # tile_n flm.GEMM reads B at, or the GEMM reads the right bytes in the
     # wrong order.
-    tile_n: int = auto()
+    tile_n: int = Auto()
     # cols follows the device. ROWS is baked into the split offsets and the
     # join, so it is not a field; halves is, because a stream's replication
     # count must be declared to be indexed, but the join bakes it too.
-    cols: int = auto(repr=False)
-    halves: int = auto(HALVES, repr=False, init=False)
+    cols: int = Auto(repr=False)
+    halves: int = Auto(HALVES, repr=False, init=False)
 
     # One q4nx block per core, delivered as one per-column object the cores
     # split; one packed half-tile out per (column, n-half), joined from the

@@ -37,8 +37,8 @@ from iron.common import (
     Placement,
     Unresolvable,
     Value,
-    auto,
-    param,
+    Auto,
+    Param,
     Select,
 )
 from iron.common.design import BdLimits
@@ -176,12 +176,12 @@ class GEMM(Operator):
 
     test = Testing(_cases, draw=dict(normal=("A",)))
 
-    M: int = param()
-    K: int = param()
-    N: int = param()
+    M: int = Param()
+    K: int = Param()
+    N: int = Param()
     # None: the widest of 64, 32, 16 and 8 rows that splits M over the rows
     # of cores and that the kernel's m block divides.
-    tile_m: int = auto(
+    tile_m: int = Auto(
         array=True,
         domain=Divisors(
             of=lambda op: op.M // op.n_aie_rows,
@@ -190,7 +190,7 @@ class GEMM(Operator):
     )
     # Without prio_accuracy C is rounded to bf16 once per K tile, so another
     # tile_k computes another result; with it C accumulates in f32.
-    tile_k: int = auto(
+    tile_k: int = Auto(
         64,
         array=True,
         domain=Divisors(
@@ -199,33 +199,33 @@ class GEMM(Operator):
             when="prio_accuracy",
         ),
     )
-    tile_n: int = auto(
+    tile_n: int = Auto(
         64,
         array=True,
         domain=Divisors(of=lambda op: op.N, step=lambda op, dev: op.mac_block(dev)[2]),
     )
     # None: the most columns the device's shim budget allows that split N
     # into whole tile_n-wide tiles.
-    num_aie_columns: int = auto()
-    placement: str = auto("shims", array=True, domain=PLACEMENT)
+    num_aie_columns: int = Auto()
+    placement: str = Auto("shims", array=True, domain=PLACEMENT)
     # A @ B = C, with either operand optionally stored column-major. The
     # layout flags transpose a declared shape rather than resize it.
-    b_col_maj: bool = param(default=False, array=True)
-    c_col_maj: bool = param(default=False, array=True)
-    emulate_bf16_mmul_with_bfp16: bool = param(default=True, repr=False, array=True)
-    prio_accuracy: bool = param(default=False, repr=False, array=True)
-    round_conv_even: bool = param(default=True, repr=False, array=True)
+    b_col_maj: bool = Param(default=False, array=True)
+    c_col_maj: bool = Param(default=False, array=True)
+    emulate_bf16_mmul_with_bfp16: bool = Param(default=True, repr=False, array=True)
+    prio_accuracy: bool = Param(default=False, repr=False, array=True)
+    round_conv_even: bool = Param(default=True, repr=False, array=True)
     dtype_in: Any = field(default=bfloat16, repr=False)
     dtype_out: Any = field(default=bfloat16, repr=False)
-    use_scalar: bool = param(default=False, repr=False, array=True)
+    use_scalar: bool = Param(default=False, repr=False, array=True)
     # Filled by resolve: the rows of cores, the device's or fewer where M is
     # too short for them, the L2 tile of each stream and how many shims
     # carry A.
-    n_aie_rows: int = auto(repr=False, array=True, derived=True)
-    n_shim_mem_a: int = auto(repr=False, derived=True)
-    a_l2: int = auto(repr=False, derived=True)
-    b_l2: int = auto(repr=False, derived=True)
-    c_l2: int = auto(repr=False, derived=True)
+    n_aie_rows: int = Auto(repr=False, array=True, derived=True)
+    n_shim_mem_a: int = Auto(repr=False, derived=True)
+    a_l2: int = Auto(repr=False, derived=True)
+    b_l2: int = Auto(repr=False, derived=True)
+    c_l2: int = Auto(repr=False, derived=True)
 
     A = In(M, K, dtype=dtype_in, tile=(a_l2,), per=(n_shim_mem_a,))
     B = In(

@@ -17,9 +17,9 @@ from iron.common import (
     Operator,
     Out,
     Unresolvable,
-    auto,
+    Auto,
     OptionalDim,
-    param,
+    Param,
 )
 from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
@@ -64,12 +64,12 @@ class Repeat(Operator):
         tolerance=Tolerance.exact(),
     )
 
-    rows: int = param()
-    cols: int = param()
-    repeat: int = param()
-    seq: int = param(default=1)  # the stack's middle axis; absent when one
-    out_rows: int = param(default=lambda op: op.rows * op.repeat, repr=False)
-    tile_size: int = auto(repr=False)  # None: cols
+    rows: int = Param()
+    cols: int = Param()
+    repeat: int = Param()
+    seq: int = Param(default=1)  # the stack's middle axis; absent when one
+    out_rows: int = Param(default=lambda op: op.rows * op.repeat, repr=False)
+    tile_size: int = Auto(repr=False)  # None: cols
     dtype: Any = field(default=bfloat16, repr=False)
 
     # Either may be bounded per call: the rows of a matrix (``x[:n]``) or

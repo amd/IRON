@@ -17,7 +17,7 @@ class ReLU(UnaryElementwise):
 
 A core calls the kernel in its contract's argument order, with the scalars
 the factory binds and those ``scalars()`` supplies. A field either reads is
-``param(..., array=True)``.
+``Param(..., array=True)``.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from aie.helpers.util import np_ndarray_type_to_memref_type
 from aie.iron import Buffer, ObjectFifo, Worker, WorkerRuntimeBarrier, ceildiv
 from aie.iron.controlflow import if_, range_
 from aie.iron.kernel import ExternalFunction
-from aie.iron.kernels import Param
+from aie.iron import kernels
 from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance, round_to
 from ml_dtypes import bfloat16
@@ -48,8 +48,8 @@ from .declare import (
     Out,
     Unresolvable,
     Value,
-    auto,
-    param,
+    Auto,
+    Param,
 )
 from .testing import Sweep, Testing
 
@@ -264,7 +264,7 @@ class _Chains:
         """Run the selected chain over ``tile`` (``_ends``), ``extras`` its
         steps' other input tiles, in order.
         """
-        kernels = dict(zip(self.steps, args))
+        fns = dict(zip(self.steps, args))
         for i, calls in enumerate(self.calls):
             if not calls:
                 continue
@@ -283,7 +283,7 @@ class _Chains:
                     _, positions, scalars = self.steps[(link.array_key(), j)]
                     ins = [src if o is None else values[o] for o in operands]
                     tiles = dict(zip(positions, [*ins, dst]))
-                    kernels[(link.array_key(), j)](
+                    fns[(link.array_key(), j)](
                         *(
                             tiles[p] if p in tiles else scalars[p]
                             for p in range(len(tiles) + len(scalars))
@@ -541,9 +541,9 @@ class Elementwise(Operator):
     implement ``kernel``. ``tile_cap`` is the largest line the kernel holds.
     """
 
-    num_aie_columns: int = auto()
-    num_channels: int = auto(1)
-    tile_size: int = auto(
+    num_aie_columns: int = Auto()
+    num_channels: int = Auto(1)
+    tile_size: int = Auto(
         domain=Divisors(
             of=lambda op: op.outputs[0].elements,
             step=64,
@@ -646,7 +646,9 @@ class Elementwise(Operator):
             )
         roles = contract.roles
         scalars = dict(contract.parameter_bindings)
-        free = [i for i, r in enumerate(roles) if r is Param and i not in scalars]
+        free = [
+            i for i, r in enumerate(roles) if r is kernels.Param and i not in scalars
+        ]
         if len(free) != len(given):
             raise ValueError(
                 f"{type(self).__name__}: {kernel.name} leaves {len(free)} scalar(s) "
@@ -839,7 +841,7 @@ class UnaryElementwise(Elementwise):
     """A flat buffer in, a flat buffer of the same size out."""
 
     test = Testing(Sweep())
-    size: int = param()
+    size: int = Param()
     valid = Extent(size)
 
     x = In(
@@ -873,7 +875,7 @@ class BinaryElementwise(Elementwise):
     """Two flat buffers in, one of the same size out."""
 
     test = Testing(Sweep(channels=None))
-    size: int = param()
+    size: int = Param()
     valid = Extent(size)
 
     a = In(
@@ -903,14 +905,14 @@ class BinaryElementwise(Elementwise):
 class Rowwise(Elementwise):
     """``rows`` rows of ``tile_size`` elements in, the same out, one kernel
     call per row. For a kernel that reduces over its line, so the line is a
-    ``param()``: another line would compute something else.
+    ``Param()``: another line would compute something else.
     """
 
     test = Testing(Sweep(rows=True))
 
-    rows: int = param()
+    rows: int = Param()
     valid = Extent(rows)
-    tile_size: int = param()
+    tile_size: int = Param()
 
     tile_cap: ClassVar[int] = 8192
 

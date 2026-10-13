@@ -23,7 +23,7 @@ from aie.utils.npukernel import NPUKernel
 from aie.utils.txn_trace import trace
 
 import iron
-from iron.common import Extent, In, Operator, Out, Scratchpad, Value, param
+from iron.common import Extent, In, Operator, Out, Param, Scratchpad, Value
 from iron.common.design import OperatorDesign
 from iron.common.design.build import build_design, device_symbol
 from iron.common.graph import Value as GraphValue
@@ -40,8 +40,8 @@ IMAGES = {
 class RepeatTile(Operator):
     """`y[:valid]` is `valid` copies of `x`; past it, `y` is untouched."""
 
-    width: int = param()
-    max_k: int = param()
+    width: int = Param()
+    max_k: int = Param()
 
     valid = Extent(max_k)
     reps = Value(np.int32, derive=lambda op: op.valid - 1)

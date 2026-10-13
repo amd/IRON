@@ -48,8 +48,8 @@ from iron.common import (
     Scratchpad,
     Unresolvable,
     Value,
-    auto,
-    param,
+    Auto,
+    Param,
 )
 from iron.common.design import BdLimits, ShimChannel
 from iron.common.testing import Case, Testing
@@ -108,24 +108,24 @@ class Gather(Operator):
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
     pad_bytes: ClassVar[int] = 16
 
-    rows: int = param()
-    table_rows: int = param()
-    row: int = param()
+    rows: int = Param()
+    table_rows: int = Param()
+    row: int = Param()
     dtype: Any = field(default=bfloat16, repr=False)
-    words: int = param(
+    words: int = Param(
         default=lambda op: 20 * op.chain
         + 6 * op.rows
         + 3 * len(op.batches)
         + (3 if op.rows % op.chain else 0),
         repr=False,
     )
-    feeds: int = auto(array=True)
+    feeds: int = Auto(array=True)
     # True when the table a device-made ids' word source reads is the same
     # buffer at every call (known at this op's own construction, not picked
     # at runtime): its address then reaches GatherWords as an ordinary
     # resident operand instead of through base_lo/base_hi, costing this
     # design no full-ELF scratchpad parameter at all (see GatherWords).
-    static_base: bool = param(default=False, array=True)
+    static_base: bool = Param(default=False, array=True)
 
     table = In(table_rows, row, dtype=dtype)
     control = In(words, dtype=np.uint32)
@@ -434,12 +434,12 @@ class GatherWords(Operator):
 
     low_bits: ClassVar[int] = 29
 
-    rows: int = param(array=True)
-    table_rows: int = param(array=True)
-    row_bytes: int = param(array=True)
-    words: int = param()
-    pairs: int = param(default=lambda op: 2 * op.rows, array=True, repr=False)
-    static_base: bool = param(default=False, array=True)
+    rows: int = Param(array=True)
+    table_rows: int = Param(array=True)
+    row_bytes: int = Param(array=True)
+    words: int = Param()
+    pairs: int = Param(default=lambda op: 2 * op.rows, array=True, repr=False)
+    static_base: bool = Param(default=False, array=True)
 
     ids = In(rows, dtype=np.int32, tile=(rows,), depth=1)
     control = Out(words, dtype=np.uint32, tile=(pairs,), depth=1)
@@ -662,11 +662,11 @@ class Copy(Operator):
         tolerance=Tolerance.exact(),
     )
 
-    input_buffer_size: int = param(repr=False)
-    src: TensorAccessPattern | tuple[TensorAccessPattern, ...] = param(
+    input_buffer_size: int = Param(repr=False)
+    src: TensorAccessPattern | tuple[TensorAccessPattern, ...] = Param(
         default=lambda op: TensorAccessPattern.full((op.input_buffer_size,))
     )
-    output_buffer_size: int = param(
+    output_buffer_size: int = Param(
         default=lambda op: sum(
             prod(p.sizes) for p in (op.src if isinstance(op.src, tuple) else (op.src,))
         ),
@@ -674,7 +674,7 @@ class Copy(Operator):
     )
     # The output is rows as wide as the source's innermost axis, so the
     # channels split both sides alike.
-    dst: TensorAccessPattern | tuple[TensorAccessPattern, ...] = param(
+    dst: TensorAccessPattern | tuple[TensorAccessPattern, ...] = Param(
         default=lambda op: TensorAccessPattern.full(
             (op.output_buffer_size // op.src.sizes[-1], op.src.sizes[-1])
             if isinstance(op.src, TensorAccessPattern)
@@ -683,10 +683,10 @@ class Copy(Operator):
     )
     # The axis of each pattern a graph bounds per call (``x[:n]`` on a view):
     # its size is the full extent in the pattern and patched to the call's.
-    src_bound: int | None = param(default=None)
-    dst_bound: int | None = param(default=None)
+    src_bound: int | None = Param(default=None)
+    dst_bound: int | None = Param(default=None)
     # None: the per-channel share, cut to object_bytes.
-    tile_size: int = auto(
+    tile_size: int = Auto(
         domain=Divisors(
             of=lambda op: op.channel_share,
             cap=lambda op: op.object_bytes // np.dtype(op.dtype).itemsize,
@@ -695,7 +695,7 @@ class Copy(Operator):
     )
     # A memtile holds 512 KiB; the cap leaves room for every channel placed on one.
     object_bytes: ClassVar[int] = 64 * 1024
-    num_channels: int = auto(1)
+    num_channels: int = Auto(1)
     dtype: Any = field(default=bfloat16, repr=False)
 
     x = In(

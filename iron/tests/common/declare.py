@@ -30,11 +30,11 @@ from iron.common import (
     Select,
     Unresolvable,
     Value,
-    auto,
+    Auto,
     OptionalDim,
-    param,
+    Param,
 )
-from iron.common.declare.field import Auto, DimRef, Param
+from iron.common.declare.field import DimRef
 from iron.common.design import OperatorDesign
 from iron.operators import ReLU as LibraryReLU
 from iron.operators import Tanh
@@ -48,13 +48,13 @@ NPU2 = from_name("npu2", n_cols=8)
 
 
 class MV(Operator):
-    M: int = param()
-    K: int = param()
-    num_batches: int = param(default=1)
-    columns: int | None = auto()
-    tile_out: int = auto(64)
-    vec: int | None = auto(repr=False)
-    epilogue: str = param(default="none", array=True)
+    M: int = Param()
+    K: int = Param()
+    num_batches: int = Param(default=1)
+    columns: int | None = Auto()
+    tile_out: int = Auto(64)
+    vec: int | None = Auto(repr=False)
+    epilogue: str = Param(default="none", array=True)
 
     A = In(OptionalDim(num_batches), M, K, tile=(tile_out, K), per=columns)
     B = In(OptionalDim(num_batches), K, tile=(K,), broadcast=True)
@@ -94,8 +94,8 @@ class MV(Operator):
 
 def test_fields_are_reattached_as_dim_refs():
     assert isinstance(MV.K, DimRef) and MV.K.owner is MV
-    assert MV.K.name == "K" and isinstance(MV.K.tier, Param)
-    assert isinstance(MV.tile_out, DimRef) and isinstance(MV.tile_out.tier, Auto)
+    assert MV.K.name == "K" and isinstance(MV.K.field, Param)
+    assert isinstance(MV.tile_out, DimRef) and isinstance(MV.tile_out.field, Auto)
 
 
 def test_members_keep_declaration_order_and_names():
@@ -145,15 +145,15 @@ def test_a_tunable_may_name_a_tile_but_not_a_buffer_shape():
     with pytest.raises(TypeError, match="host shape may not depend on tuning"):
 
         class Bad(Operator):
-            M: int = param()
-            t: int = auto(64)
+            M: int = Param()
+            t: int = Auto(64)
             A = In(M, t)
 
 
 def test_plain_defaulted_field_in_a_shape_is_its_literal():
     # A plain field with a default is bound to that default in the class
     # body, so a shape written against it captures the literal, not the
-    # field. This is why anything a shape names must be declared with param().
+    # field. This is why anything a shape names must be declared with Param().
     class Plain(Operator):
         n: int = 4
         x = In(n, tile=(n,))
@@ -167,10 +167,10 @@ def test_plain_field_reference_from_outside_is_rejected():
         n: int = 4
         x = In(4)
 
-    with pytest.raises(TypeError, match="not declared with param"):
+    with pytest.raises(TypeError, match="not declared with Param"):
 
         class Bad(Plain):
-            M: int = param()
+            M: int = Param()
             A = In(M, Plain.n)
 
 
@@ -178,7 +178,7 @@ def test_expression_in_a_shape_is_rejected():
     with pytest.raises(TypeError, match="Expressions are not allowed"):
 
         class Bad(Operator):
-            n: int = param()
+            n: int = Param()
             x = In("n // 2")
 
 
@@ -186,7 +186,7 @@ def test_annotated_member_is_rejected():
     with pytest.raises(TypeError, match="without an annotation"):
 
         class Bad(Operator):
-            M: int = param()
+            M: int = Param()
             A: In = In(M)
 
 
@@ -194,7 +194,7 @@ def test_a_member_hiding_the_operators_own_attribute_is_rejected():
     with pytest.raises(TypeError, match="hides Operator.values"):
 
         class Bad(Operator):
-            n: int = param()
+            n: int = Param()
             values = In(n)
 
 
@@ -202,12 +202,12 @@ def test_a_field_hiding_the_operators_own_attribute_is_rejected():
     with pytest.raises(TypeError, match="hides Operator.inputs"):
 
         class Bad(Operator):
-            inputs: int = param()
+            inputs: int = Param()
 
     with pytest.raises(TypeError, match="hides Operator.name"):
 
         class Worse(Operator):
-            name: str = param()
+            name: str = Param()
 
 
 def test_a_field_may_replace_an_operator_bases_own_attribute():
@@ -215,7 +215,7 @@ def test_a_field_may_replace_an_operator_bases_own_attribute():
         window = None
 
     class Windowed(Base):
-        window: int = param(default=512)
+        window: int = Param(default=512)
 
     assert Windowed().window == 512
 
@@ -237,8 +237,8 @@ def test_per_and_broadcast_are_exclusive():
     with pytest.raises(TypeError, match="either per"):
 
         class Bad(Operator):
-            n: int = param()
-            c: int = auto(2)
+            n: int = Param()
+            c: int = Auto(2)
             x = In(n, tile=(4,), per=(c,), broadcast=True)
 
 
@@ -246,15 +246,15 @@ def test_a_probe_may_not_be_on_a_field_the_array_reads():
     with pytest.raises(TypeError, match="probe= on an array field"):
 
         class Baked(Operator):
-            n: int = param()
-            alpha: float = param(array=True, probe=1.0)
+            n: int = Param()
+            alpha: float = Param(array=True, probe=1.0)
             x = In(n)
 
     with pytest.raises(TypeError, match="probe= on an array field"):
 
         class Tiled(Operator):
-            n: int = param()
-            t: int = param(probe=16)
+            n: int = Param()
+            t: int = Param(probe=16)
             x = In(n, tile=(t,))
 
 
@@ -262,14 +262,14 @@ def test_a_probe_may_not_be_on_a_field_the_transfers_follow():
     with pytest.raises(TypeError, match="probe= on a field an operand's shape"):
 
         class Shaped(Operator):
-            n: int = param(probe=1024)
+            n: int = Param(probe=1024)
             x = In(n)
 
     with pytest.raises(TypeError, match="probe= on a field an operand's shape"):
 
         class Present(Operator):
-            n: int = param()
-            gated: bool = param(default=False, probe=False)
+            n: int = Param()
+            gated: bool = Param(default=False, probe=False)
             x = In(n)
             w = In(n, when=gated)
 
@@ -278,16 +278,16 @@ def test_a_probe_may_not_be_on_a_field_the_constructor_cannot_set():
     with pytest.raises(TypeError, match="probe= on an init=False field"):
 
         class Fixed(Operator):
-            n: int = param()
-            low: float = param(default=0.0, init=False, probe=0.0)
+            n: int = Param()
+            low: float = Param(default=0.0, init=False, probe=0.0)
             x = In(n)
 
 
 def test_probed_sets_each_probe_field_and_nothing_else():
     class Bounded(Operator):
-        n: int = param()
-        low: float = param(probe=-np.inf)
-        cap: tuple | None = param(default=None, probe=None)
+        n: int = Param()
+        low: float = Param(probe=-np.inf)
+        cap: tuple | None = Param(default=None, probe=None)
         x = In(n)
 
     assert Bounded._probe_fields == {"low": -np.inf, "cap": None}
@@ -326,9 +326,9 @@ def test_an_optional_dim_is_omitted_when_one_and_may_sit_anywhere():
     assert MV(M=64, K=256, num_batches=3).C.shape == (3, 64)
 
     class Stack(Operator):
-        rows: int = param()
-        cols: int = param()
-        seq: int = param(default=1)
+        rows: int = Param()
+        cols: int = Param()
+        seq: int = Param(default=1)
         x = In(rows, OptionalDim(seq), cols)
         y = Out(rows, OptionalDim(seq), cols)
 
@@ -373,7 +373,7 @@ def test_a_stream_is_bound_lane_by_lane():
         op.A.handle
 
     class NoTile(Operator):
-        n: int = param()
+        n: int = Param()
         x = In(n)
 
     with pytest.raises(TypeError, match="without a tile"):
@@ -382,7 +382,7 @@ def test_a_stream_is_bound_lane_by_lane():
 
 def test_per_call_values_bind_on_the_operator():
     class Copy(Operator):
-        n: int = param()
+        n: int = Param()
         src = In(n, tile=(n,))
         off = Scratchpad(np.int32)
         live = DispatchTime(np.int32)
@@ -395,8 +395,8 @@ def test_per_call_values_bind_on_the_operator():
 
 def test_shim_pins_declare():
     class Pinned(Operator):
-        n: int = param()
-        c: int = auto(2)
+        n: int = Param()
+        c: int = Auto(2)
         x = In(n, tile=(n,), via=Tile(1, 0), channel=0)
         y = Out(n, tile=(n,), via=[Tile(c, 0) for c in range(2)], channel=0, per=(c,))
 
@@ -426,7 +426,7 @@ def test_an_exported_design_replaces_the_derived_one():
     # swiglu_prefill_stream's escape: the design is another tool's text,
     # the operands are declared as any operator's are.
     class Exported(Operator):
-        n: int = param()
+        n: int = Param()
         x = In(n)
         y = Out(n)
 
@@ -480,8 +480,8 @@ def test_an_operand_with_a_tile_is_its_own_stream():
 class Scaled(Operator):
     """``x`` times a scale row when ``scaled``, else a copy of it."""
 
-    N: int = param()
-    scaled: bool = param(default=False)
+    N: int = Param()
+    scaled: bool = Param(default=False)
 
     x = In(N, tile=(N,))
     s = In(N, tile=(N,), when=scaled)
@@ -533,11 +533,11 @@ def test_a_positional_operand_past_the_inputs_is_an_output_not_an_optional_one()
 
 
 def test_when_names_a_param():
-    with pytest.raises(TypeError, match="must be a param"):
+    with pytest.raises(TypeError, match="must be a Param"):
 
         class Bad(Operator):
-            N: int = param()
-            flag: bool = auto(False)
+            N: int = Param()
+            flag: bool = Auto(False)
             s = In(N, when=flag)
 
 
@@ -695,13 +695,13 @@ def test_resolve_must_return_a_copy():
 
 
 def test_overriding_an_inherited_field_needs_an_annotation():
-    with pytest.raises(TypeError, match="tile_out: int = auto\\(32\\)"):
+    with pytest.raises(TypeError, match="tile_out: int = Auto\\(32\\)"):
 
         class Pinned(MV):
             tile_out = 32  # dataclass would keep the base's 64 in silence
 
     class Annotated(MV):
-        tile_out: int = auto(32)
+        tile_out: int = Auto(32)
 
     assert Annotated(M=64, K=64).tile_out == 32
 
@@ -737,9 +737,9 @@ def test_a_broadcast_stream_is_paid_once_in_the_shim_budget():
 
 def test_a_computed_default_is_inferred_from_a_shape_or_computed():
     class Rep(Operator):
-        rows: int = param()
-        repeat: int = param()
-        out_rows: int = param(default=lambda op: op.rows * op.repeat)
+        rows: int = Param()
+        repeat: int = Param()
+        out_rows: int = Param(default=lambda op: op.rows * op.repeat)
         x = In(rows, 8)
         y = Out(out_rows, 8)
 
@@ -755,11 +755,11 @@ def test_a_computed_default_is_inferred_from_a_shape_or_computed():
 
 def test_a_select_picks_a_layout_within_a_storage():
     class Weights(Operator):
-        K: int = param()
-        N: int = param()
-        blocks: int = param(default=0)
-        packed: bool = param(default=False)
-        transposed: bool = param(default=False)
+        K: int = Param()
+        N: int = Param()
+        blocks: int = Param(default=0)
+        packed: bool = Param(default=False)
+        transposed: bool = Param(default=False)
         w = In(Select(packed, (blocks,), (Select(transposed, (N, K), (K, N)),)))
 
     assert Weights.infer({"w": (64, 32)}, transposed=True) == {
@@ -830,9 +830,9 @@ def test_mha_pads_the_sequence_and_groups_kv():
 class Rows(Operator):
     """Rows of ``cols`` elements over ``lanes`` lanes; ``rows`` may be bounded."""
 
-    rows: int = param()
-    cols: int = param()
-    lanes: int = auto(2)
+    rows: int = Param()
+    cols: int = Param()
+    lanes: int = Auto(2)
     valid = Extent(rows)
     count = Value(np.int32, derive=lambda op: op.valid // op.lanes)  # reads the extent
     width = Value(np.int32, derive=lambda op: op.cols)  # does not
@@ -857,10 +857,10 @@ def test_an_extent_reads_as_its_field_until_a_graph_bounds_it():
     assert op.derived_at("count", valid=16) == 8 and op.valid == 64  # unchanged
     with pytest.raises(TypeError, match="no Extent \\['n'\\]"):
         op.derived_at("count", n=1)
-    with pytest.raises(TypeError, match="must name a param"):
+    with pytest.raises(TypeError, match="must name a Param"):
 
         class Bad(Operator):
-            n: int = auto(4)
+            n: int = Auto(4)
             valid = Extent(n)
             x = In(n)
 

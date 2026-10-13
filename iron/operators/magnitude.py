@@ -3,11 +3,12 @@
 
 import numpy as np
 from aie.iron import ExternalFunction
-from aie.iron.kernels import KernelContract, Param
+from aie.iron import kernels
+from aie.iron.kernels import KernelContract
 from aie.utils.compile.jit import markers
 from aie.utils.verify import Tolerance
 
-from iron.common import In, Out, Rowwise, param
+from iron.common import In, Out, Rowwise, Param
 from iron.common.testing import Case, Testing
 
 from .split3 import SPLIT
@@ -96,8 +97,8 @@ class Magnitude(Rowwise):
         ),
     )
 
-    width: int = param()
-    tile_size: int = param(default=lambda op: op.width // 2)
+    width: int = Param()
+    tile_size: int = Param(default=lambda op: op.width // 2)
 
     x = In(
         Rowwise.rows,
@@ -124,7 +125,7 @@ class Magnitude(Rowwise):
 
     def kernel(self):
         contract = KernelContract(
-            roles=(markers.In, markers.Out, Param),
+            roles=(markers.In, markers.Out, kernels.Param),
             parameter_bindings=((2, self.tile_size),),
             reference=magnitude,
             tolerance=Tolerance.relative(

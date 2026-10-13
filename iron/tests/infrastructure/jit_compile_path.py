@@ -23,7 +23,7 @@ from aie.iron.device import from_name
 from aie.utils.compile.jit._hash import _python_identity
 from aie.utils.trace import TraceConfig
 
-from iron.common import In, Operator, Out, param
+from iron.common import In, Operator, Out, Param
 from iron.common.design import OperatorDesign, runtime
 from iron.common.image import OperatorImage
 from iron.operators import GEMM, MHA, ElementwiseAdd
@@ -206,8 +206,8 @@ class _Opaque:
 
 
 class _Holding(Operator):
-    n: int = param()
-    thing: object = param()
+    n: int = Param()
+    thing: object = Param()
     x = In(n)
     y = Out(n)
 

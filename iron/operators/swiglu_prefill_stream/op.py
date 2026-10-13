@@ -6,7 +6,7 @@ import functools
 from aie.utils.trace import TraceConfig
 from ml_dtypes import bfloat16
 
-from iron.common import In, Operator, Out, Unresolvable, param
+from iron.common import In, Operator, Out, Unresolvable, Param
 from iron.common.image import OperatorSequence
 
 # stream-dse is optional: importing the operator does not need it, building does.
@@ -39,11 +39,11 @@ class SwiGLUStreamGroup(Operator):
     declaration, and groups whose text is byte-identical share it.
     """
 
-    seq_len: int = param()
-    embedding_dim: int = param()
-    hidden_dim: int = param()
-    k: int = param()
-    group_index: int = param()
+    seq_len: int = Param()
+    embedding_dim: int = Param()
+    hidden_dim: int = Param()
+    k: int = Param()
+    group_index: int = Param()
 
     def _dims(self) -> dict:
         dev = self.dev

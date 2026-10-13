@@ -3,7 +3,7 @@
 
 from aie.iron.kernels import datamovement
 
-from iron.common import BinaryElementwise, param
+from iron.common import BinaryElementwise, Param
 from iron.common.testing import Sweep, Testing
 
 
@@ -23,7 +23,7 @@ class AXPY(BinaryElementwise):
         ]
     )
 
-    scalar_factor: float = param(default=3.0, array=True)
+    scalar_factor: float = Param(default=3.0, array=True)
 
     def kernel(self):
         return datamovement.axpy(self.tile_size)

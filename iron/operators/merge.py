@@ -6,7 +6,7 @@ from aie.iron import Buffer, ExternalFunction, ObjectFifo, Worker, WorkerRuntime
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 
-from iron.common import In, Operator, Out, Value, param
+from iron.common import In, Operator, Out, Value, Param
 from iron.common.testing import Case, Testing
 
 # EmbeddingGemma 2's placeholder ids, the towers' rows past 2048 text rows.
@@ -65,12 +65,12 @@ class Merge(Operator):
         tolerance=Tolerance.exact(),
     )
 
-    rows: int = param()
-    audio_token: int = param(array=True)
-    image_token: int = param(array=True)
-    audio_at: int = param(array=True)
-    vision_at: int = param(array=True)
-    block: int = param(default=64, array=True)
+    rows: int = Param()
+    audio_token: int = Param(array=True)
+    image_token: int = Param(array=True)
+    audio_at: int = Param(array=True)
+    vision_at: int = Param(array=True)
+    block: int = Param(default=64, array=True)
 
     ids = In(rows, dtype=np.int32, tile=(block,))
     merge = Out(rows, dtype=np.int32, tile=(block,))

@@ -30,9 +30,9 @@ from .declare import (
     Value,
     Width,
     Xclbin,
-    auto,
+    Auto,
     OptionalDim,
-    param,
+    Param,
     Select,
 )
 from .elementwise import (
@@ -75,6 +75,6 @@ __all__ = [
     "Value",
     "Width",
     "Xclbin",
-    "auto",
-    "param",
+    "Auto",
+    "Param",
 ]

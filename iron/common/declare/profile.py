@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Iterator, Mapping
 
 from ... import operators
-from .field import Auto, Param, Tier
+from .field import Auto, Param
 
 
 @dataclasses.dataclass(frozen=True)
@@ -26,8 +26,8 @@ class Entry:
     """One line of a profile: the tunables for the operators ``dims`` selects."""
 
     cls: type
-    dims: dict[str, Any]  # param() values to match; a dimension left out matches any
-    tunables: dict[str, Any]  # auto() values to give
+    dims: dict[str, Any]  # Param() values to match; a dimension left out matches any
+    tunables: dict[str, Any]  # Auto() values to give
 
     def matches(self, cls: type, dims: Mapping[str, Any]) -> bool:
         return issubclass(cls, self.cls) and all(
@@ -60,18 +60,18 @@ class Profile:
         return cls._active.get()
 
     def add(self, cls: type, **fields: Any) -> None:
-        """Add an entry for ``cls``: ``param()`` fields to match (one left out
-        matches any value) and ``auto()`` fields to give.
+        """Add an entry for ``cls``: ``Param()`` fields to match (one left out
+        matches any value) and ``Auto()`` fields to give.
         """
-        tiers = {f.name: f.metadata.get(Tier) for f in dataclasses.fields(cls)}
+        declared = {f.name: f for f in dataclasses.fields(cls)}
         dims, tunables, unknown, fixed = {}, {}, [], []
         for name, value in fields.items():
-            tier = tiers.get(name)
-            if isinstance(tier, Param):
+            field = declared.get(name)
+            if isinstance(field, Param):
                 dims[name] = value
             elif name in cls._tunable_fields:
                 tunables[name] = value
-            elif isinstance(tier, Auto):
+            elif isinstance(field, Auto):
                 fixed.append(name)
             else:
                 unknown.append(name)
@@ -92,7 +92,7 @@ class Profile:
         """
         dims = {}
         for f in dataclasses.fields(cls):
-            if not isinstance(f.metadata.get(Tier), Param):
+            if not isinstance(f, Param):
                 continue
             if f.name in given:
                 dims[f.name] = given[f.name]

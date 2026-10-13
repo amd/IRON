@@ -33,9 +33,9 @@ from iron.common import (
     Out,
     Prepare,
     Value,
-    auto,
+    Auto,
     OptionalDim,
-    param,
+    Param,
 )
 from iron.common.design import Target
 from iron.common.testing import Case, Testing
@@ -176,24 +176,24 @@ class GEMV(Operator):
 
     test = Testing(_cases, draw=dict(normal=("A", "B")))
 
-    M: int = param()
-    K: int = param()
-    num_batches: int = param(default=1)
+    M: int = Param()
+    K: int = Param()
+    num_batches: int = Param(default=1)
     # Batches per matrix of A: batch ``b`` is multiplied by matrix
     # ``b // repeat``. Grouped-query attention's scores, where each group's
     # keys serve ``n_heads // n_kv_groups`` query heads: the matrix is read
     # once per batch it serves, so no repeated copy is ever materialized.
-    repeat: int = param(default=1)
-    num_matrices: int = param(default=lambda op: op.num_batches // op.repeat)
+    repeat: int = Param(default=1)
+    num_matrices: int = Param(default=lambda op: op.num_batches // op.repeat)
     # None: every column the device's shim budget allows that leaves each
     # column a whole number of tiles of M.
-    num_aie_columns: int = auto()
+    num_aie_columns: int = Auto()
     # None: one.
-    num_channels: int = auto()
+    num_channels: int = Auto()
     # None: two rows, or one where two would span more than two banks: A is
     # double-buffered beside the whole of B, and at K = 8192 two rows each
     # way would be all of a core's memory.
-    tile_size_input: int = auto(
+    tile_size_input: int = Auto(
         domain=Divisors(
             of=lambda op: op.M,
             cap=lambda op, dev: dev.core_memory_bytes
@@ -203,11 +203,11 @@ class GEMV(Operator):
     # None: tile_size_input, and at least two rows: the shim moves C in
     # 4-byte granules. Not a column's rows, which M would set: one array
     # serves every M.
-    tile_size_output: int = auto(
+    tile_size_output: int = Auto(
         domain=Divisors(of=lambda op: op.M, step=lambda op: op.tile_size_input, span=3)
     )
     # None picks the widest legal size for K (see validate).
-    kernel_vector_size: int = auto(repr=False, array=True)
+    kernel_vector_size: int = Auto(repr=False, array=True)
 
     # A single batch carries no batch dimension at all, rather than one of
     # extent 1, so an unbatched operator has 2-D shapes. One fifo per lane

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Generic, Mapping, Self, TypeVar, overload
 
-from .field import _DimSpec
+from .shape import _DimSpec
 
 B = TypeVar("B")  # the bound form an instance serves
 

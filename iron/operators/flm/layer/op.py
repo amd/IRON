@@ -9,7 +9,7 @@ from aie.dialects._aie_enum_gen import AIEArch
 from aie.iron.kernels import FlmGemma4DecodeGeometry
 from ml_dtypes import bfloat16
 
-from iron.common import DispatchTime, In, InOut, Operator, Unresolvable, param
+from iron.common import DispatchTime, In, InOut, Operator, Unresolvable, Param
 from iron.operators.flm.layer.design import (
     LAYER_TYPES,
     RTP_ADDRESSES,
@@ -26,15 +26,15 @@ class DecodeLayer(Operator):
     See README.md for the parameters, the buffers and the dispatch parameters.
     """
 
-    geometry: FlmGemma4DecodeGeometry = param()
-    layer_type: str = param()
-    x_len: int = param(default=lambda op: arg_sizes(op.geometry)["x"], repr=False)
-    proj_len: int = param(default=lambda op: arg_sizes(op.geometry)["proj"], repr=False)
-    rms_len: int = param(default=lambda op: arg_sizes(op.geometry)["rms"], repr=False)
-    rope_rms_len: int = param(
+    geometry: FlmGemma4DecodeGeometry = Param()
+    layer_type: str = Param()
+    x_len: int = Param(default=lambda op: arg_sizes(op.geometry)["x"], repr=False)
+    proj_len: int = Param(default=lambda op: arg_sizes(op.geometry)["proj"], repr=False)
+    rms_len: int = Param(default=lambda op: arg_sizes(op.geometry)["rms"], repr=False)
+    rope_rms_len: int = Param(
         default=lambda op: arg_sizes(op.geometry)["rope_rms"], repr=False
     )
-    kv_len: int = param(default=lambda op: arg_sizes(op.geometry)["kv"], repr=False)
+    kv_len: int = Param(default=lambda op: arg_sizes(op.geometry)["kv"], repr=False)
 
     # The runtime sequence's argument order.
     x = InOut(x_len, dtype=bfloat16)

@@ -140,9 +140,9 @@ reuse lint
      are measured against and their weight packing; its GEMM is not
      `iron.operators.GEMM`.
    - An operator module holds:
-     - the operator, one class (`iron/common/declare/`): `param()` fields for what a host shape
-       names, `auto()` tunables `resolve(dev)` fills from the device and the
-       extents (a tunable is an `auto()` field: the caller or a profile may
+     - the operator, one class (`iron/common/declare/`): `Param()` fields for what a host shape
+       names, `Auto()` tunables `resolve(dev)` fills from the device and the
+       extents (a tunable is an `Auto()` field: the caller or a profile may
        give it, and the library resolves it when neither does), `In`/`Out`
        operands (mlir-aie's `aie.iron.In`/`Out`/`InOut` markers, with a
        declared shape) whose `tile=` makes each its own stream into the
@@ -189,7 +189,7 @@ reuse lint
    - Compiled to `.o` files and linked into operator `.xclbin`
 
 3. **Common Infrastructure** (`iron/common/`)
-   - `declare/`: the declaration layer (`Operator`, `param`/`auto`,
+   - `declare/`: the declaration layer (`Operator`, its `Param`/`Auto` fields (`dataclasses.Field`s),
      operands (`Operand`: `op.x` is the declared operand bound to the
      instance, its shape and lanes resolved), the `Value` hierarchy
      (`Scratchpad`/`Carried`/`DispatchTime`/`Extent`; `op.value(name)` is
@@ -343,17 +343,17 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    if it needs more than one module: a hand-written design, its own
    reference, a README, a device test of its own)
 2. Declare the operator (`class X(Operator)`):
-   - `param()` fields for what a host shape names; `auto()` tunables, filled
+   - `Param()` fields for what a host shape names; `Auto()` tunables, filled
      by `resolve(dev)` from the device and the extents
    - `In`/`Out` operands by shape, each with its `tile=` in the units a
      core reads (`per=` a column count): an operand with a tile is its own
      stream, `op.x.lane(i)` a shim endpoint, `op.x.tile` the fifo type;
-     `when=flag`, a bool `param()`, makes an operand (and its stream) exist
+     `when=flag`, a bool `Param()`, makes an operand (and its stream) exist
      only where the flag is true; a call gives it by keyword, its name,
      which sets the flag (`RMSNorm(x, weight=w)` is `weighted=True`)
    - a `Value(derive=...)` for every trip count the core reads, so the
      array never depends on the extent; what else the array bakes is
-     `param(..., array=True)`
+     `Param(..., array=True)`
    - `array(target)`: build ObjectFIFOs and Workers (`self.kernel()` or a
      factory's `ExternalFunction`, `Buffer(..., use_write_rtp=True)` for a
      runtime parameter, `WorkerRuntimeBarrier()`), `range_()` for loops, and
@@ -378,7 +378,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    (`activation.leaky_relu(tile, alpha=)`, `datamovement.axpy(tile, a=)`,
    `norm.rms_norm_eps(tile, epsilon=)`), so a core calls the kernel with
    its elements alone and the operator declares no `kernel_call` or
-   `reference` of its own; a field it passes is `param(..., array=True)`.
+   `reference` of its own; a field it passes is `Param(..., array=True)`.
    Bind a further symbol of the same object with
    `fn.object_file.bind(symbol, arg_types)`. A kernel the factories do not
    cover is an `ExternalFunction` of mlir-aie's whose `symbol_prefix=`
@@ -550,7 +550,7 @@ code before relying on a line here; it is the authority.
   `iron/tests/toolchain/array_identity.py` compiles operators at two
   extents and compares the core ELFs byte for byte.
 - **Tunable precedence.** A call site's value, then the graph's profile, then
-  `resolve(dev)`, then the `auto()` default. Identity (`array_key`,
+  `resolve(dev)`, then the `Auto()` default. Identity (`array_key`,
   `design_key`) is taken after resolution, so two calls that resolve alike
   share a build.
 - **Packaging is derived** (`iron/common/image/packaging.py`, reported with
@@ -591,7 +591,7 @@ code before relying on a line here; it is the authority.
   channel, so a per-column stream is not guaranteed to sit in physical
   column `c`; pin it with `via=` where that matters. Where the tiles an
   `array()` names are a choice, the choice is a tunable:
-  `placement: str = auto("...", array=True, domain=Placement({...}))`, each
+  `placement: str = Auto("...", array=True, domain=Placement({...}))`, each
   name a `Pins` holding cores, memtiles and shims at a `Level` (the tile,
   its column, or the placer's), the hand-found one the default
   (`iron/common/declare/placement.py`; MHA and GEMM). The tuner measures
