@@ -9,7 +9,7 @@ is built for one extent or twice it, with the same tunables. Each case
 compiles an operator at two extents (the real build: an insts-only
 lowering compiles no core) and compares the per-core ELFs the build
 leaves, byte for byte. Compiles are cheap enough for this to run
-device-free, and the cache keeps a repeat quick. A fusion of the two extents
+device-free. A fusion of the two extents
 holds one device, so their sequences run on one configured array.
 """
 
@@ -20,7 +20,8 @@ import pytest
 
 from iron.common import Unresolvable
 from iron.common.declare import Direction
-from iron.common.image import Fusion, OperatorImage, OperatorSequence, Packing
+from iron.common.design import OperatorDesign
+from iron.common.image import Fusion, OperatorSequence, Packing
 from iron.tests.toolchain.tools import requires
 
 pytestmark = requires("aiecc")
@@ -60,8 +61,13 @@ PAIRS = [
 
 
 def _core_elfs(op) -> dict[str, bytes]:
-    """The per-core ELFs of an operator's build, by core."""
-    entry = OperatorImage(op).compile().artifacts.entry
+    """The per-core ELFs of an operator's build, by core.
+
+    Built past the cache: a cached build shares each device's compiled cores
+    across designs, and an entry that reused them holds no core ELF.
+    """
+    design = OperatorDesign(op.configuration(), "xclbin").compile(use_cache=False)
+    entry = design.get_cache_entry()
     assert entry is not None
     elfs = {
         p.parent.name: p.read_bytes()
@@ -77,13 +83,8 @@ def _core_elfs(op) -> dict[str, bytes]:
     ids=lambda v: v if isinstance(v, str) else "",
 )
 def test_the_array_is_the_same_at_two_extents(
-    device, module, cls_name, tunables, extent, tmp_path, monkeypatch
+    device, module, cls_name, tunables, extent
 ):
-    # A cache of its own: an entry another test left for the same design,
-    # an insts-only lowering's say, holds no core ELF.
-    from aie.utils.compile.jit import compilabledesign
-
-    monkeypatch.setattr(compilabledesign, "NPU_CACHE_HOME", tmp_path)
     cls = getattr(importlib.import_module(f"iron.operators.{module}"), cls_name)
     name, n = extent
     elfs = []
