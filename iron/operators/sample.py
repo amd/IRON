@@ -115,7 +115,7 @@ class Sample(Operator):
     # Logits per select call; the largest even divisor of the slice up to
     # 8192 unless given.
     chunk: int = Auto(
-        domain=Divisors(of=lambda op: op.slice_size, step=2, cap=_CHUNK_LIMIT)
+        domain=Divisors(of=lambda op, dev: op.slice_size, step=2, cap=_CHUNK_LIMIT)
     )
 
     logits = In(vocab, tile=(chunk,), per=(cores,), depth=2)

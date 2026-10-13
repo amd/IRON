@@ -183,7 +183,7 @@ class GEMM(Operator):
     tile_ma: int = Auto(array=True, domain=Divisors(of=M_TILE, step=2 * R))
     # Row-blocks folded into one B fetch. None resolves from tile_n.
     m_chunk: int = Auto(
-        array=True, domain=Divisors(of=lambda op: op.M // (M_TILE * op.rows))
+        array=True, domain=Divisors(of=lambda op, dev: op.M // (M_TILE * op.rows))
     )
     # The activations the epilogue can select between at run time. Each one
     # compiled in costs program memory, so a deployment that dispatches two

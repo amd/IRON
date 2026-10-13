@@ -195,7 +195,11 @@ reuse lint
      (`Scratchpad`/`Carried`/`DispatchTime`/`Extent`; `op.value(name)` is
      the value bound to the instance, its device parameter once built),
      `Xclbin` and its
-     `fetch()`, inference). An operator's shim budget, `shim_columns`, is
+     `fetch()`, inference; `cls.declaration`, a `Declaration`, is what a
+     class declares, read once as its body finishes: its members and which
+     fields are parameters, tunables, array-tier or probed). A domain's
+     bound (`Divisors(of=, step=, cap=)`, `Choices(options)`) is an integer
+     or a callable of the operator and the device. An operator's shim budget, `shim_columns`, is
      the bound device's `shim_dma_channels_in`/`out`; its `residents` the
      derived values the preamble writes once per build
    - `design/`: the library-owned build: the `Target` an

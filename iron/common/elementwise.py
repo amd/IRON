@@ -545,9 +545,9 @@ class Elementwise(Operator):
     num_channels: int = Auto(1)
     tile_size: int = Auto(
         domain=Divisors(
-            of=lambda op: op.outputs[0].elements,
+            of=lambda op, dev: op.outputs[0].elements,
             step=64,
-            cap=lambda op: op.tile_cap,
+            cap=lambda op, dev: op.tile_cap,
             span=3,
         )
     )
@@ -864,7 +864,7 @@ class UnaryElementwise(Elementwise):
         one = {
             n: 1
             for n in ("num_aie_columns", "num_channels")
-            if n in self._tunable_fields
+            if n in self.declaration.tunables
         }
         return dataclasses.replace(
             self, size=elements, tile_size=line, bound_values={}, **one
@@ -943,7 +943,7 @@ class Rowwise(Elementwise):
         one = {
             n: 1
             for n in ("num_aie_columns", "num_channels")
-            if n in self._tunable_fields
+            if n in self.declaration.tunables
         }
         return dataclasses.replace(self, rows=elements // line, bound_values={}, **one)
 

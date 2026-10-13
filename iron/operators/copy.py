@@ -688,8 +688,8 @@ class Copy(Operator):
     # None: the per-channel share, cut to object_bytes.
     tile_size: int = Auto(
         domain=Divisors(
-            of=lambda op: op.channel_share,
-            cap=lambda op: op.object_bytes // np.dtype(op.dtype).itemsize,
+            of=lambda op, dev: op.channel_share,
+            cap=lambda op, dev: op.object_bytes // np.dtype(op.dtype).itemsize,
             span=3,
         )
     )

@@ -195,7 +195,7 @@ class GEMV(Operator):
     # way would be all of a core's memory.
     tile_size_input: int = Auto(
         domain=Divisors(
-            of=lambda op: op.M,
+            of=lambda op, dev: op.M,
             cap=lambda op, dev: dev.core_memory_bytes
             // (op.A.depth * op.K * np.dtype(bfloat16).itemsize),
         )
@@ -204,7 +204,9 @@ class GEMV(Operator):
     # 4-byte granules. Not a column's rows, which M would set: one array
     # serves every M.
     tile_size_output: int = Auto(
-        domain=Divisors(of=lambda op: op.M, step=lambda op: op.tile_size_input, span=3)
+        domain=Divisors(
+            of=lambda op, dev: op.M, step=lambda op, dev: op.tile_size_input, span=3
+        )
     )
     # None picks the widest legal size for K (see validate).
     kernel_vector_size: int = Auto(repr=False, array=True)

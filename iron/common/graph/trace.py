@@ -387,7 +387,7 @@ class Tracer:
                 continue
             keywords = [
                 f"{m.name}="
-                for m in cls._members
+                for m in cls.declaration.members
                 if isinstance(m, Operand) and m.fills and m.when is not None
             ]
             hint = f"; an optional input is given by keyword ({', '.join(keywords)})"
@@ -507,7 +507,9 @@ class Tracer:
 
     @staticmethod
     def _split_values(op_cls, kwargs) -> dict:
-        names = {m.name for m in op_cls._members if isinstance(m, declare.Value)}
+        names = {
+            m.name for m in op_cls.declaration.members if isinstance(m, declare.Value)
+        }
         return {k: kwargs.pop(k) for k in list(kwargs) if k in names}
 
     def _construct(self, cls, inputs, outputs, kwargs) -> Operator:
@@ -559,7 +561,7 @@ class Tracer:
         called = operands if called is None else called
         # A shape that Selects on an Auto() field is the device's: resolve()
         # gives it, unchecked, so a profile may still tune the op.
-        unset = {n for n in type(op)._auto_fields if getattr(op, n) is None}
+        unset = {n for n in type(op).declaration.autos if getattr(op, n) is None}
         shaped = op
         if any(unset & m.dims.names() for m in op._members_io()):
             shaped = op.resolve(op.dev)
@@ -603,7 +605,7 @@ class Tracer:
                 extent = next(
                     (
                         m
-                        for m in type(op)._members
+                        for m in type(op).declaration.members
                         if isinstance(m, Extent) and b.extent_axis(m) == axis
                     ),
                     None,

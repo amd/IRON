@@ -20,7 +20,7 @@ from iron.common.declare import Operand
 def test_exported_operator_is_declared(name):
     cls = getattr(ops, name)
     assert isinstance(cls, type) and issubclass(cls, Operator), name
-    assert [b.name for b in cls._members if isinstance(b, Operand)], name
+    assert [b.name for b in cls.declaration.members if isinstance(b, Operand)], name
 
 
 def test_flm_declares_one_operator_and_its_shipped_form():

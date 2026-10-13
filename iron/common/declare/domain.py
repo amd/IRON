@@ -12,28 +12,12 @@ here.
 from __future__ import annotations
 
 import dataclasses
-import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Union
+from typing import Any, Callable
 
-Bound = Union[int, Callable[..., int], None]
-
-
-def evaluate(bound: Any, op: Any, dev: Any) -> Any:
-    """``bound`` itself, or what it returns when it is a callable of the
-    operator, or of the operator and the device.
-
-    Args:
-        bound: A value, `op -> value` or `(op, dev) -> value`.
-        op: The resolved operator.
-        dev: The device it is resolved against.
-    """
-    if not callable(bound):
-        return bound
-    if len(inspect.signature(bound).parameters) == 2:
-        return bound(op, dev)
-    return bound(op)
+# An integer, or what a callable of the resolved operator and its device returns.
+Bound = int | Callable[[Any, Any], int] | None
 
 
 @dataclass(frozen=True)
@@ -48,13 +32,13 @@ class Domain(ABC):
     when: str | None = dataclasses.field(default=None, kw_only=True)
 
     @abstractmethod
-    def values(self, op: Any, dev: Any, name: str) -> tuple[Any, ...]:
-        """The values to try for `name`, its resolved value among them.
+    def values(self, op: Any, dev: Any, start: Any) -> tuple[Any, ...]:
+        """The values to try for a tunable, `start` among them.
 
         Args:
             op: The resolved operator.
             dev: The device it is resolved against.
-            name: The tunable's field name.
+            start: The tunable's resolved value.
         """
 
 
@@ -65,9 +49,9 @@ class Width(Domain):
     a streamed ``per=`` names and that declares no domain is a width.
     """
 
-    def values(self, op: Any, dev: Any, name: str) -> tuple[Any, ...]:
+    def values(self, op: Any, dev: Any, start: Any) -> tuple[Any, ...]:
         powers = {1 << i for i in range(dev.cols.bit_length())}
-        return tuple(sorted({getattr(op, name), *powers}, reverse=True))
+        return tuple(sorted({start, *powers}, reverse=True))
 
 
 @dataclass(frozen=True)
@@ -89,10 +73,10 @@ class Divisors(Domain):
     cap: Bound = None
     span: int | None = None
 
-    def values(self, op: Any, dev: Any, name: str) -> tuple[Any, ...]:
-        start = getattr(op, name)
-        of, step = evaluate(self.of, op, dev), evaluate(self.step, op, dev)
-        cap = evaluate(self.cap, op, dev)
+    def values(self, op: Any, dev: Any, start: Any) -> tuple[Any, ...]:
+        of = self.of(op, dev) if callable(self.of) else self.of
+        step = self.step(op, dev) if callable(self.step) else self.step
+        cap = self.cap(op, dev) if callable(self.cap) else self.cap
         found = [start]
         value, octave = start * 2, 1
         while (
@@ -120,13 +104,14 @@ class Choices(Domain):
     them.
 
     Attributes:
-        options: The values, or a callable of the operator (or of the
-            operator and the device) returning them.
+        options: The values, or a callable of the operator and the device
+            returning them.
     """
 
     options: Any
 
-    def values(self, op: Any, dev: Any, name: str) -> tuple[Any, ...]:
-        options = tuple(evaluate(self.options, op, dev))
-        start = getattr(op, name)
+    def values(self, op: Any, dev: Any, start: Any) -> tuple[Any, ...]:
+        options = tuple(
+            self.options(op, dev) if callable(self.options) else self.options
+        )
         return options if start in options else (start, *options)

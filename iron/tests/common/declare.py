@@ -99,7 +99,7 @@ def test_fields_are_reattached_as_dim_refs():
 
 
 def test_members_keep_declaration_order_and_names():
-    assert [m.name for m in MV._members] == ["A", "B", "C", "count", "start"]
+    assert [m.name for m in MV.declaration.members] == ["A", "B", "C", "count", "start"]
     assert isinstance(MV.A, In) and isinstance(MV.C, Out)
 
 
@@ -290,7 +290,7 @@ def test_probed_sets_each_probe_field_and_nothing_else():
         cap: tuple | None = Param(default=None, probe=None)
         x = In(n)
 
-    assert Bounded._probe_fields == {"low": -np.inf, "cap": None}
+    assert Bounded.declaration.probes == {"low": -np.inf, "cap": None}
     at = Bounded(n=64, low=-np.inf)
     assert at.probed() is at
     off = Bounded(n=64, low=0.5, cap=(0.0, 1.0))
@@ -298,7 +298,7 @@ def test_probed_sets_each_probe_field_and_nothing_else():
     assert (probe.n, probe.low, probe.cap) == (64, -np.inf, None)
     assert (off.low, off.cap) == (0.5, (0.0, 1.0))
     assert probe.design_key() == at.design_key() != off.design_key()
-    assert MV._probe_fields == {}
+    assert MV.declaration.probes == {}
     plain = MV(M=64, K=256)
     assert plain.probed() is plain
 
@@ -499,7 +499,7 @@ def test_an_operand_declared_when_a_flag_exists_only_where_it_is_true():
     with pytest.raises(AttributeError, match="declared when=scaled"):
         plain.s
     # The flag decides the streams, so it is of the array tier.
-    assert "scaled" in Scaled._array_fields
+    assert "scaled" in Scaled.declaration.array
     assert plain.array_key() != scaled.array_key()
     # A call gives the optional input by keyword, which sets its flag.
     assert not Scaled.from_operands((64,)).scaled

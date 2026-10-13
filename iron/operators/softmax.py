@@ -97,7 +97,7 @@ class Softmax(Operator):
     # None: the whole row, or where the row is streamed the longest
     # multiple of _VECTOR_STEP up to _BLOCK that divides it.
     block: int = Auto(
-        domain=Divisors(of=lambda op: op.cols, step=_VECTOR_STEP, cap=_ROW_CAP)
+        domain=Divisors(of=lambda op, dev: op.cols, step=_VECTOR_STEP, cap=_ROW_CAP)
     )
     streamed: bool = Auto(array=True, domain=Choices((False, True)))
 

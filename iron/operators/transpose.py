@@ -115,13 +115,17 @@ class Transpose(Operator):
     m: int = Auto(
         64,
         domain=Divisors(
-            of=lambda op: op.M, step=lambda op: op.s, cap=lambda op: 8192 // op.n
+            of=lambda op, dev: op.M,
+            step=lambda op, dev: op.s,
+            cap=lambda op, dev: 8192 // op.n,
         ),
     )
     n: int = Auto(
         64,
         domain=Divisors(
-            of=lambda op: op.N, step=lambda op: op.s, cap=lambda op: 8192 // op.m
+            of=lambda op, dev: op.N,
+            step=lambda op, dev: op.s,
+            cap=lambda op, dev: 8192 // op.m,
         ),
     )
     s: int = Auto(8, array=True, domain=Choices((8, 4)))

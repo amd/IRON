@@ -66,14 +66,14 @@ def _attributes(op, flows: dict[str, int]) -> dict[str, str]:
 def test_every_operator_declaring_a_probe_is_checked():
     catalog = {getattr(ops, n) for n in ops.__all__}
     catalog |= {getattr(flm, n) for n in flm.__all__}
-    assert {cls for cls in catalog if cls._probe_fields} == set(AWAY)
+    assert {cls for cls in catalog if cls.declaration.probes} == set(AWAY)
 
 
 @pytest.mark.parametrize("cls", list(AWAY), ids=lambda cls: cls.__qualname__)
 def test_a_probe_field_moves_only_runtime_parameter_words(cls):
     away = cls(**AWAY[cls])
     probe = away.probed()
-    assert all(getattr(away, n) != v for n, v in cls._probe_fields.items())
+    assert all(getattr(away, n) != v for n, v in cls.declaration.probes.items())
     modules = [generate(OperatorDesign(op.resolved())).module for op in (away, probe)]
     flows = ({}, {})
     moved = 0

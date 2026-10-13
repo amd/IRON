@@ -149,7 +149,7 @@ class SplitColumns:
 # B_q, which B_kv matches: whole in the 64-row unit seq_pad is padded by,
 # up to the largest whose cores fit L1 at this head size.
 BLOCK_SIZES = Divisors(
-    of=lambda op: op.kv_len,
+    of=lambda op, dev: op.kv_len,
     step=16,
     cap=lambda op, dev: max(
         (

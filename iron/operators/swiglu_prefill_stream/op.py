@@ -69,8 +69,8 @@ class SwiGLUStreamGroup(Operator):
     def for_ports(cls, inputs, outputs) -> type["SwiGLUStreamGroup"]:
         """The group class whose ports are ``inputs`` then ``outputs``."""
         for group in cls.__subclasses__():
-            ins = [m.name for m in group._members if isinstance(m, In)]
-            outs = [m.name for m in group._members if isinstance(m, Out)]
+            ins = [m.name for m in group.declaration.members if isinstance(m, In)]
+            outs = [m.name for m in group.declaration.members if isinstance(m, Out)]
             if (ins, outs) == (list(inputs), list(outputs)):
                 return group
         raise NotImplementedError(

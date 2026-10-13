@@ -69,8 +69,7 @@ class Placement(Domain):
 
     named: Mapping[str, Pins]
 
-    def values(self, op: Any, dev: Any, name: str) -> tuple[Any, ...]:
-        start = getattr(op, name)
+    def values(self, op: Any, dev: Any, start: Any) -> tuple[Any, ...]:
         return (start, *(n for n in self.named if n != start))
 
     def pins(self, name: str) -> Pins:

@@ -184,7 +184,7 @@ class GEMM(Operator):
     tile_m: int = Auto(
         array=True,
         domain=Divisors(
-            of=lambda op: op.M // op.n_aie_rows,
+            of=lambda op, dev: op.M // op.n_aie_rows,
             step=lambda op, dev: op.mac_block(dev)[0],
         ),
     )
@@ -194,7 +194,7 @@ class GEMM(Operator):
         64,
         array=True,
         domain=Divisors(
-            of=lambda op: op.K,
+            of=lambda op, dev: op.K,
             step=lambda op, dev: op.mac_block(dev)[1],
             when="prio_accuracy",
         ),
@@ -202,7 +202,9 @@ class GEMM(Operator):
     tile_n: int = Auto(
         64,
         array=True,
-        domain=Divisors(of=lambda op: op.N, step=lambda op, dev: op.mac_block(dev)[2]),
+        domain=Divisors(
+            of=lambda op, dev: op.N, step=lambda op, dev: op.mac_block(dev)[2]
+        ),
     )
     # None: the most columns the device's shim budget allows that split N
     # into whole tile_n-wide tiles.

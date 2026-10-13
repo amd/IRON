@@ -69,7 +69,7 @@ class Profile:
             field = declared.get(name)
             if isinstance(field, Param):
                 dims[name] = value
-            elif name in cls._tunable_fields:
+            elif name in cls.declaration.tunables:
                 tunables[name] = value
             elif isinstance(field, Auto):
                 fixed.append(name)

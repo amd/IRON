@@ -36,15 +36,14 @@ from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance, Verdict, compare
 
 from ..testing import Testing
-from .creation import declare
-from .domain import Domain, Width
+from .declaration import Declaration
+from .domain import Width
 from .field import Auto, DimRef, Param, Unresolvable
-from .shape import OptionalDim, Select
-from .member import Member
 from .operand import In, Operand
-from .value import ChainWord, Extent, ExtentWord, PlaceWord, Value
 from .placement import Placement
 from .profile import Profile
+from .shape import OptionalDim, Select
+from .value import ChainWord, Extent, ExtentWord, PlaceWord, Value
 
 if TYPE_CHECKING:
     from ..graph.handle import Affine, Handle
@@ -84,32 +83,13 @@ class _OperatorMeta(type):
             frozenset(
                 k
                 for k, v in kwargs.items()
-                if k in cls._tunable_fields and v is not None
+                if k in cls.declaration.tunables and v is not None
             ),
         )
         profile = Profile.current()
         if profile is not None:
             kwargs = {**profile.tunables_for(cls, kwargs), **kwargs}
         return super().__call__(*args, **kwargs)
-
-
-def _check_shipped(cls: type) -> None:
-    if "array" in vars(cls):
-        raise TypeError(
-            f"{cls.__name__} runs a shipped image, so nothing builds its array(); "
-            f"drop the override"
-        )
-    for m in cls._members:
-        if isinstance(m, Operand) and m.tile_dims is not None and m.via is None:
-            raise TypeError(
-                f"{cls.__name__}.{m.name}: a stream into a shipped image must be "
-                f"pinned with via=; nothing else says which shim it uses"
-            )
-        if isinstance(m, Value) and m.derive is not None and m.address is None:
-            raise TypeError(
-                f"{cls.__name__}.{m.name}: a value written into a shipped image "
-                f"needs an address; the sequence writes it there"
-            )
 
 
 class _ArrayView:
@@ -130,7 +110,7 @@ class _ArrayView:
         fields = {
             f.name for f in dataclasses.fields(op) if isinstance(f, (Param, Auto))
         }
-        if name in fields and name not in op._array_fields:
+        if name in fields and name not in op.declaration.array:
             raise TypeError(
                 f"{type(op).__name__}.array() reads {name}, which no tile names: "
                 f"an array serves every extent. Declare it Param(..., array=True) "
@@ -194,14 +174,7 @@ class Link:
 class Operator(metaclass=_OperatorMeta):
     """An operator. Subclass it; every subclass is a dataclass checked as its body finishes."""
 
-    _members: ClassVar[tuple[Member, ...]] = ()
-    _param_fields: ClassVar[tuple[str, ...]] = ()
-    _derived_params: ClassVar[dict[str, Callable[[Any], Any]]] = {}
-    _auto_fields: ClassVar[tuple[str, ...]] = ()
-    _tunable_fields: ClassVar[tuple[str, ...]] = ()
-    _domains: ClassVar[dict[str, Domain]] = {}
-    _array_fields: ClassVar[tuple[str, ...]] = ()
-    _probe_fields: ClassVar[dict[str, Any]] = {}
+    declaration: ClassVar[Declaration]
     _external: ClassVar[Any] = None
     test: ClassVar[Testing | None] = None
     # True when sequence() calls rt.preamble() itself, behind its first fills.
@@ -264,9 +237,7 @@ class Operator(metaclass=_OperatorMeta):
         super().__init_subclass__(**kwargs)
         if image is not None:
             cls._external = image
-        declare(cls, Operator)
-        if image is not None:
-            _check_shipped(cls)
+        cls.declaration = Declaration(cls, Operator, shipped=image is not None)
 
     def __post_init__(self) -> None:
         self._resolved = False
@@ -278,11 +249,13 @@ class Operator(metaclass=_OperatorMeta):
         if checked:
             self.validate()
         self._bind()
-        if checked and not any(getattr(self, n) is None for n in self._auto_fields):
+        if checked and not any(
+            getattr(self, n) is None for n in self.declaration.autos
+        ):
             self.compatible()
 
     def _derive_params(self) -> None:
-        for name, derive in self._derived_params.items():
+        for name, derive in self.declaration.derived.items():
             if getattr(self, name) is None:
                 value = derive(self)
                 if value is None:
@@ -295,7 +268,7 @@ class Operator(metaclass=_OperatorMeta):
     def check_derived(self, *names: str) -> None:
         """Raise ``ValueError`` if a given computed-default parameter disagrees with its rule."""
         for name in names:
-            given, expected = getattr(self, name), self._derived_params[name](self)
+            given, expected = getattr(self, name), self.declaration.derived[name](self)
             if given != expected:
                 raise ValueError(
                     f"{type(self).__name__}.{name}={given!r} is not what its "
@@ -535,7 +508,7 @@ class Operator(metaclass=_OperatorMeta):
         """
         streams = [
             m
-            for m in (*cls._members, *operands)
+            for m in (*cls.declaration.members, *operands)
             if isinstance(m, Operand)
             and m.tile_dims is not None
             and m.present(flags or {})
@@ -756,13 +729,13 @@ class Operator(metaclass=_OperatorMeta):
         one its step time is measured as, for every value of those fields.
         Itself when they are there already, unresolved otherwise.
         """
-        if all(getattr(self, n) == v for n, v in self._probe_fields.items()):
+        if all(getattr(self, n) == v for n, v in self.declaration.probes.items()):
             return self
-        return dataclasses.replace(self, **self._probe_fields)
+        return dataclasses.replace(self, **self.declaration.probes)
 
     def array_key(self):
         key = (type(self),) + tuple(
-            (name, getattr(self, name)) for name in self._array_fields
+            (name, getattr(self, name)) for name in self.declaration.array
         )
         if self.trace is not None:
             key += (("trace", self.trace),)
@@ -798,7 +771,7 @@ class Operator(metaclass=_OperatorMeta):
             raise TypeError(
                 f"{type(self).__name__}.resolve() must return a {type(self).__name__}"
             )
-        missing = [n for n in self._auto_fields if getattr(new, n) is None]
+        missing = [n for n in self.declaration.autos if getattr(new, n) is None]
         if missing:
             raise Unresolvable(
                 f"{type(self).__name__}.resolve() left {missing} unset for {dev}"
@@ -809,7 +782,7 @@ class Operator(metaclass=_OperatorMeta):
             new._finish_at(dev if dev is not None else self.dev)
         new.validate()
         new.compatible()
-        for name, domain in new._domains.items():
+        for name, domain in new.declaration.domains.items():
             if isinstance(domain, Placement):
                 domain.pins(getattr(new, name))
         new._resolved = True
@@ -1020,7 +993,7 @@ class Operator(metaclass=_OperatorMeta):
             TypeError: A name is not a settable tunable: not an ``Auto()``
                 field, fixed with ``init=False``, or ``derived``.
         """
-        unknown = [n for n in tunables if n not in self._tunable_fields]
+        unknown = [n for n in tunables if n not in self.declaration.tunables]
         if unknown:
             raise TypeError(f"{type(self).__name__} has no tunable {unknown}")
         return dataclasses.replace(self, **tunables)
@@ -1033,15 +1006,15 @@ class Operator(metaclass=_OperatorMeta):
         """
         found = {
             n: getattr(self, n)
-            for n, domain in self._domains.items()
+            for n, domain in self.declaration.domains.items()
             if isinstance(domain, Width)
         }
         for b in self.buffers:
             for ref in b.per.dims if b.streamed and b.per else ():
                 if (
                     isinstance(ref, DimRef)
-                    and ref.name in self._tunable_fields
-                    and ref.name not in self._domains
+                    and ref.name in self.declaration.tunables
+                    and ref.name not in self.declaration.domains
                 ):
                     found.setdefault(ref.name, getattr(self, ref.name))
         return found
@@ -1055,15 +1028,17 @@ class Operator(metaclass=_OperatorMeta):
         """
         widths = self.widths
         found = {}
-        for name in dict.fromkeys([*widths, *self._tunable_fields]):
-            domain = self._domains.get(name, Width() if name in widths else None)
+        for name in dict.fromkeys([*widths, *self.declaration.tunables]):
+            domain = self.declaration.domains.get(
+                name, Width() if name in widths else None
+            )
             if (
                 name in self.pinned
                 or domain is None
                 or (domain.when is not None and not getattr(self, domain.when))
             ):
                 continue
-            found[name] = domain.values(self, dev, name)
+            found[name] = domain.values(self, dev, vars(self)[name])
         return found
 
     @property
@@ -1106,7 +1081,7 @@ class Operator(metaclass=_OperatorMeta):
         fixed = self._derived_under_bound()
         return {
             m.name: m.derive(self) if fixed.get(m.name) is None else fixed[m.name]
-            for m in (*self._members, *self._chain_words)
+            for m in (*self.declaration.members, *self._chain_words)
             if isinstance(m, Value)
             and m.derive is not None
             and not self.uses_value(m.name)
@@ -1126,7 +1101,7 @@ class Operator(metaclass=_OperatorMeta):
         bound = self.bound_values
         return {
             m.name: bound[m.name]
-            for m in self._members
+            for m in self.declaration.members
             if isinstance(m, Extent) and m.name in bound
         }
 
@@ -1174,7 +1149,7 @@ class Operator(metaclass=_OperatorMeta):
         if not (isinstance(member, Value) and member.derive is not None):
             raise TypeError(f"{type(self).__name__}.{name} is not a derived value")
         unknown = set(extents) - {
-            m.name for m in self._members if isinstance(m, Extent)
+            m.name for m in self.declaration.members if isinstance(m, Extent)
         }
         if unknown:
             raise TypeError(
@@ -1261,12 +1236,12 @@ class Operator(metaclass=_OperatorMeta):
         bound: dict[str, Any] = {}
         for m in self._members_io():
             bound[m.name] = m.of(self)
-        for m in self._members:
+        for m in self.declaration.members:
             if isinstance(m, Value):
                 bound[m.name] = m.of(self)
         self._bound = bound
         words = []
-        for e in self._members:
+        for e in self.declaration.members:
             if not isinstance(e, Extent):
                 continue
             for b in self._members_io():
@@ -1292,7 +1267,7 @@ class Operator(metaclass=_OperatorMeta):
 
     @property
     def _value_members(self) -> list[Value]:
-        return [m for m in self._members if isinstance(m, Value)] + [
+        return [m for m in self.declaration.members if isinstance(m, Value)] + [
             *self.__dict__.get("_extent_words", ()),
             *self.__dict__.get("_chain_words", ()),
             *self.__dict__.get("_place_words", ()),
@@ -1314,7 +1289,7 @@ class Operator(metaclass=_OperatorMeta):
             The inputs by name, in declaration order; the outputs; the other
             keywords.
         """
-        ins = [m for m in cls._members if isinstance(m, Operand) and m.fills]
+        ins = [m for m in cls.declaration.members if isinstance(m, Operand) and m.fills]
         required = [m.name for m in ins if m.when is None]
         optional = {m.name for m in ins if m.when is not None}
         given = {k: v for k, v in kwargs.items() if k in optional and v is not None}
@@ -1351,8 +1326,8 @@ class Operator(metaclass=_OperatorMeta):
             ValueError: A shape disagrees with the declaration or another
                 operand.
         """
-        buffers = [m for m in cls._members if isinstance(m, Operand)]
-        names = set(cls._param_fields)
+        buffers = [m for m in cls.declaration.members if isinstance(m, Operand)]
+        names = set(cls.declaration.params)
         for m in buffers:
             names.update(m.dims.names())
         given = {k: v for k, v in kwargs.items() if k in names}
@@ -1387,18 +1362,8 @@ class Operator(metaclass=_OperatorMeta):
             )
         pairs = [(m, inputs[m.name]) for m in ins] + list(zip(outs, outputs))
         bound: dict[str, Any] = dict(given)
-        origin: dict[str, str] = {k: "given" for k in given}
-
-        def bind(ref: DimRef, value: int, where: str) -> None:
-            key = ref.name
-            if key in bound and bound[key] != value:
-                raise ValueError(
-                    f"{cls.__name__}: {ref!r} is {value} from {where} but "
-                    f"{bound[key]} from {origin[key]}"
-                )
-            bound[key] = value
-            origin.setdefault(key, where)
-
+        # Each dimension an operand's shape gives: (field, value, where).
+        found: list[tuple[DimRef, int, str]] = []
         for m, shape in pairs:
             shape = tuple(int(s) for s in shape)
             dims = list(m.dims.dims)
@@ -1408,10 +1373,10 @@ class Operator(metaclass=_OperatorMeta):
             if at is not None:
                 optional = dims.pop(at)
                 if len(shape) == len(dims) + 1:
-                    bind(optional.ref, shape[at], f"{m.name}.shape[{at}]")
+                    found.append((optional.ref, shape[at], f"{m.name}.shape[{at}]"))
                     shape = shape[:at] + shape[at + 1 :]
                 elif len(shape) == len(dims):
-                    bind(optional.ref, 1, f"{m.name} (rank {len(shape)})")
+                    found.append((optional.ref, 1, f"{m.name} (rank {len(shape)})"))
                 else:
                     raise ValueError(
                         f"{cls.__name__}: operand {m.name} has rank {len(shape)}, "
@@ -1443,12 +1408,21 @@ class Operator(metaclass=_OperatorMeta):
                 )
             for i, (d, n) in enumerate(zip(dims, shape)):
                 if isinstance(d, DimRef):
-                    bind(d, n, f"{m.name}.shape[{i}]")
+                    found.append((d, n, f"{m.name}.shape[{i}]"))
                 elif int(d) != n:
                     raise ValueError(
                         f"{cls.__name__}: operand {m.name}.shape[{i}] is {n}, "
                         f"declared {d}"
                     )
+        origin: dict[str, str] = {k: "given" for k in given}
+        for ref, value, where in found:
+            if ref.name in bound and bound[ref.name] != value:
+                raise ValueError(
+                    f"{cls.__name__}: {ref!r} is {value} from {where} but "
+                    f"{bound[ref.name]} from {origin[ref.name]}"
+                )
+            bound[ref.name] = value
+            origin.setdefault(ref.name, where)
         return bound
 
     @property
@@ -1504,7 +1478,7 @@ class Operator(metaclass=_OperatorMeta):
     def _members_io(self) -> list[Operand]:
         return [
             m
-            for m in self._members
+            for m in self.declaration.members
             if isinstance(m, Operand) and (m.when is None or m.when.of(self))
         ] + [*self._prepare_inputs, *self._finish_inputs]
 
