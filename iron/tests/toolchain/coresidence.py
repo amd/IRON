@@ -40,7 +40,8 @@ from iron.common.image import (
 from iron.common.graph.fold import folded
 from iron.common.image.coresidence import fits
 from iron.lm.blocks import SwiGLU
-from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
+from iron.operators import ElementwiseAdd, SiLU
+from iron.tests.common.graphs import Chain
 from iron.tests.toolchain.tools import requires
 
 SIZE = 8192
@@ -161,21 +162,6 @@ def _sequence(cols: int, coresident) -> OperatorSequence:
     )
     seq.prepare()
     return seq
-
-
-class Chain(iron.Graph):
-    """add, silu, mul, add, silu on two columns: three designs, two recurring."""
-
-    def __init__(self):
-        super().__init__()
-        narrow = dict(size=SIZE, tile_size=TILE, num_aie_columns=2)
-        self.add = ElementwiseAdd(**narrow)
-        self.silu = SiLU(**narrow)
-        self.mul = ElementwiseMul(**narrow)
-
-    def body(self, a, b):
-        x = self.mul(self.silu(self.add(a, b)), b)
-        return self.silu(self.add(x, b))
 
 
 def _devices(text: str) -> list[str]:
@@ -366,7 +352,7 @@ def test_packing_is_in_the_fused_identity():
 def test_traced_graph_packs():
     # Three designs, add and silu recurring: the policy packs all three, so
     # the whole graph is one configure.
-    traced = Chain().trace(a=(SIZE,), b=(SIZE,))
+    traced = Chain(SIZE, TILE, columns=2).trace(a=(SIZE,), b=(SIZE,))
     temporal = traced.sequence("graph_temporal", dispatch="fused")
     packed = traced.sequence(
         "graph_packed", dispatch="fused", coresident=AdjacentPacking()
@@ -405,7 +391,7 @@ def test_pack_compiles_to_a_full_elf():
 
 @_builds_elf
 def test_graph_compile_forwards_the_packing():
-    version = Chain().compile(
+    version = Chain(SIZE, TILE, columns=2).compile(
         image=iron.ELF, coresident=AdjacentPacking(), a=(SIZE,), b=(SIZE,)
     )
     assert version.sequence.coresident == AdjacentPacking()

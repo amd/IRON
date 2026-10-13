@@ -63,7 +63,7 @@ from iron.operators import (
 )
 from iron.operators.flm import GEMM as FlmGEMM
 from iron.operators.flm import DequantBFP
-from iron.tests.common.bounded_graphs import Rotate
+from iron.tests.common.graphs import Rotate
 from iron.tests.common.llama_model import llama_1b
 
 SIZE = 8192

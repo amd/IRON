@@ -18,7 +18,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common.harness import verify_buffer
 from iron.operators.gemm import GEMM
-from iron.tests.common.bounded_graphs import Project
+from iron.tests.common.graphs import Project
 
 M, K, N = 512, 512, 512
 BOUNDS = (M, 1, 300, 64, 65, M, 17, 128, 3)

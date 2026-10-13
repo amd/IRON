@@ -33,10 +33,10 @@ import re
 
 import pytest
 
-import iron
 from iron.common.design import OperatorDesign
 from iron.common.image import Fusion
 from iron.operators import ElementwiseAdd
+from iron.tests.common.graphs import Adds
 
 SIZE = 1024
 TILE = 128
@@ -67,16 +67,10 @@ def test_fused_build_does_not_poison_the_standalone_mlir():
     one reading what the fused build left behind. Doing it the other way round
     passes whatever happens.
     """
-    add = _operator()
-
-    class Probe(iron.Graph):
-        def body(self, x, w):
-            return add(x, w)
-
-    probe = Probe()
-
-    seq = probe.trace(x=(SIZE,), w=(SIZE,)).sequence(
-        "poisoning_probe", dispatch="fused"
+    seq = (
+        Adds(_operator(), 1)
+        .trace(x=(SIZE,), w=(SIZE,))
+        .sequence("poisoning_probe", dispatch="fused")
     )
     seq.compile()
     fused = set(re.findall(r'link_with\s*=\s*"([^"]+)"', Fusion(seq).text()))

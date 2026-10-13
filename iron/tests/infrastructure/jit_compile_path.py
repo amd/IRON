@@ -23,11 +23,11 @@ from aie.iron.device import from_name
 from aie.utils.compile.jit._hash import _python_identity
 from aie.utils.trace import TraceConfig
 
-import iron
 from iron.common import In, Operator, Out, param
 from iron.common.design import OperatorDesign, runtime
 from iron.common.image import OperatorImage
 from iron.operators import GEMM, MHA, ElementwiseAdd
+from iron.tests.common.graphs import Adds
 
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
@@ -35,16 +35,9 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 def _captured(name, adds=2, **declared):
     """X + w + w (or as many adds of w) as a graph function, fused and compiled."""
     add = ElementwiseAdd(size=1024, tile_size=128, **declared)
-
-    class F(iron.Graph):
-        def body(self, x, w):
-            for _ in range(adds):
-                x = add(x, w)
-            return x
-
-    f = F()
-
-    sequence = f.trace(x=(1024,), w=(1024,)).sequence(name, dispatch="fused")
+    sequence = (
+        Adds(add, adds).trace(x=(1024,), w=(1024,)).sequence(name, dispatch="fused")
+    )
     return sequence.compile()
 
 

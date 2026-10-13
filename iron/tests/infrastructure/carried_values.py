@@ -16,20 +16,9 @@ leaves the permutation's cycle and is caught at the step it happens.
 import numpy as np
 import pytest
 
-import iron
-from iron.common import Carried
-from iron.operators.copy import Copy
+from iron.tests.common.graphs import Walk
 
 N = 64
-
-
-class Walk(iron.Graph):
-    def __init__(self, successor):
-        self.successor = iron.weight(successor)
-
-    def body(self, *, node: Carried[np.int32], steps: Carried[np.int32]):
-        nxt = Copy(self.successor[node], dtype=np.int32)
-        return iron.carry(node=nxt, steps=steps + 1)
 
 
 @pytest.mark.supported_devices("npu2")

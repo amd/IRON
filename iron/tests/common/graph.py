@@ -46,6 +46,7 @@ from iron.operators.repeat import Repeat
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
 from iron.tests.common.declare import Rows
+from iron.tests.common.graphs import Trail, Walk
 from iron.tests.common.llama_model import llama_1b, small
 
 E, H = 2048, 8192
@@ -1871,23 +1872,9 @@ def test_a_refused_compile_restores_the_device_it_was_given_over(npu2):
 # --------------------------------------------------------------------------
 
 
-class _Walk(iron.Graph):
-    """Walks a linked list one node per call: the next node is gathered from
-    the successor table on the device, the step count is an expression of
-    the current one. It takes no tensor.
-    """
-
-    def __init__(self, successor):
-        self.successor = iron.weight(successor)
-
-    def body(self, *, node: Carried[np.int32], steps: Carried[np.int32]):
-        nxt = Copy(self.successor[node], dtype=np.int32)
-        return iron.carry(node=nxt, steps=steps + 1)
-
-
 def test_a_graph_carries_its_next_values():
     successor = np.random.default_rng(0).permutation(16).astype(np.int32)
-    walk = _Walk(successor)
+    walk = Walk(successor)
     t = walk.trace()
     assert [(v.name, v.carried) for v in t.values] == [
         ("node", True),
@@ -1966,37 +1953,11 @@ def test_every_carried_value_is_carried_and_nothing_else():
         CarriesTwice().trace()
 
 
-class _Trail(iron.Graph):
-    """Walks a linked list and records each node at the step count. The
-    version with ``jump`` starts from a table the host gives, at a plain
-    per-call value; the one without follows the list from ``node``.
-    """
-
-    def __init__(self, successor, steps: int):
-        self.successor = iron.weight(successor)
-        self.trail = iron.state((steps + 1,), np.int32, name="trail")
-
-    def body(
-        self,
-        jump=None,
-        *,
-        node: Carried[np.int32],
-        steps: Carried[np.int32],
-        skip: Scratchpad[np.int32],
-    ):
-        if jump is None:
-            nxt = Copy(self.successor[node], dtype=np.int32)
-        else:
-            nxt = Copy(jump[skip], dtype=np.int32)
-        Copy(nxt, self.trail[steps], dtype=np.int32)
-        return iron.carry(node=nxt, steps=steps + 1)
-
-
 def test_the_emit_program_follows_the_target_parameters():
     """Each word of the target's scratchpad comes from a carried value, in
     the target's order and encoding; anything else is refused.
     """
-    walk = _Trail(np.arange(16, dtype=np.int32), steps=8)
+    walk = Trail(np.arange(16, dtype=np.int32), steps=8)
     traced = walk.trace()
     assert traced.feedback == []  # tracing alone adds no Emit
     assert walk._carry is not None

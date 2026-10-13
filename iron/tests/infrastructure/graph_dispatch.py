@@ -29,14 +29,13 @@ from iron.operators import (
     GEMV,
     Copy,
     ElementwiseAdd,
-    ElementwiseMul,
     Merge,
     PatchPositions,
     Resample,
     ResampleTaps,
-    SiLU,
 )
 from iron.operators.merge import GEMMA
+from iron.tests.common.graphs import Adds, Chain
 
 SIZE = 1024
 TILE = 128
@@ -51,15 +50,7 @@ def _operator():
 
 def _graph(name, **kwargs):
     """X + w + w + w, traced from dataflow, as the sequence it lowers to."""
-    add = _operator()
-
-    class F(iron.Graph):
-        def body(self, x, w):
-            return add(add(add(x, w), w), w)
-
-    f = F()
-
-    traced = f.trace(x=(SIZE,), w=(SIZE,))
+    traced = Adds(_operator(), 3).trace(x=(SIZE,), w=(SIZE,))
     kwargs.setdefault("dispatch", "reference")
     return traced, traced.sequence(name, **kwargs)
 
@@ -140,23 +131,6 @@ def test_a_graph_matches_the_hand_written_runlist_numerically(
     )
 
 
-class NarrowChain(iron.Graph):
-    """Five steps over three designs, each on two columns: small enough that
-    all three share the array.
-    """
-
-    def __init__(self):
-        super().__init__()
-        narrow = dict(size=SIZE, tile_size=TILE, num_aie_columns=2)
-        self.add = ElementwiseAdd(**narrow)
-        self.silu = SiLU(**narrow)
-        self.mul = ElementwiseMul(**narrow)
-
-    def body(self, a, b):
-        x = self.mul(self.silu(self.add(a, b)), b)
-        return self.silu(self.add(x, b))
-
-
 @pytest.mark.supported_devices("npu2")
 def test_a_packed_graph_computes_what_the_temporal_one_does(npu_runtime):
     """compile(coresident=...) changes which device each step runs in, and
@@ -167,7 +141,7 @@ def test_a_packed_graph_computes_what_the_temporal_one_does(npu_runtime):
     b = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
     outputs, configures = [], []
     for coresident in (None, AdjacentPacking()):
-        version = NarrowChain().compile(
+        version = Chain(SIZE, TILE, columns=2).compile(
             image=iron.ELF, coresident=coresident, a=(SIZE,), b=(SIZE,)
         )
         text = Fusion(version.sequence).text()

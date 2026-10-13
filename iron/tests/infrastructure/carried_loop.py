@@ -19,32 +19,10 @@ import numpy as np
 import pytest
 
 import iron
-from iron.common import Carried, Scratchpad
-from iron.operators.copy import Copy
+from iron.tests.common.graphs import Trail
 
 N = 64
 STEPS = 3 * N
-
-
-class Trail(iron.Graph):
-    def __init__(self, successor):
-        self.successor = iron.weight(successor)
-        self.trail = iron.state((STEPS + 1,), np.int32, name="trail")
-
-    def body(
-        self,
-        jump=None,
-        *,
-        node: Carried[np.int32],
-        steps: Carried[np.int32],
-        skip: Scratchpad[np.int32],
-    ):
-        if jump is None:
-            nxt = Copy(self.successor[node], dtype=np.int32)
-        else:
-            nxt = Copy(jump[skip], dtype=np.int32)
-        Copy(nxt, self.trail[steps], dtype=np.int32)
-        return iron.carry(node=nxt, steps=steps + 1)
 
 
 def _expected(successor, start):
@@ -60,7 +38,7 @@ def test_a_carried_loop_walks_a_linked_list_on_the_device(npu_runtime, depth):
     rng = np.random.default_rng(depth)
     successor = rng.permutation(N).astype(np.int32)
     jump = rng.permutation(N).astype(np.int32)
-    walk = Trail(successor)
+    walk = Trail(successor, STEPS)
     body = walk.compile()
     first = walk.compile(jump=((N,), np.int32), feeds=body)
     assert body.plan.image == first.plan.image == "elf"

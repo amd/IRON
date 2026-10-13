@@ -17,7 +17,7 @@ _EXCLUDED_NAMES = {"conftest.py", "__init__.py"}
 
 # Helpers the tests import, with no tests of their own.
 collect_ignore = [
-    "common/bounded_graphs.py",
+    "common/graphs.py",
     "common/llama_model.py",
     "toolchain/tools.py",
 ]
