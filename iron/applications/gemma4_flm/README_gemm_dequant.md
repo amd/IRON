@@ -3,25 +3,25 @@ SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All righ
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Replace Gemma 4 GEMM and dequant in FastFlowLM
+# Replace Gemma 4 GEMM and dequant in FastFlowLM engine
 
-This example replaces two operators in FastFlowLM's Gemma 4 E2B prefill path:
+This example replaces two operators in the FastFlowLM engine's Gemma 4 E2B
+prefill path:
 
 - dequant converts the model's q4nx weights to bfp16;
 - GEMM runs the attention and MLP projections with those bfp16 weights.
 
-The rest of the model uses FastFlowLM's operators. This gives two useful
-selections to compare: the FastFlowLM engine and the same engine with the IRON
-GEMM/dequant pair.
+The rest of the model uses the original FastFlowLM operators.
 
 You need an NPU2 device, an IRON environment, the
-[FastFlowLM build dependencies](https://github.com/ROCm/FastFlowLM/blob/main/docs/linux-getting-started.md#building-from-source),
+[FastFlowLM build dependencies],
 and Gemma 4 E2B weights. The commands below run from this directory.
 
-## Build FastFlowLM
+[FastFlowLM build dependencies]: https://github.com/ROCm/FastFlowLM/blob/main/docs/linux-getting-started.md#building-from-source
 
-Set the paths first. `FLM_MODEL_PATH` names the directory above `models/`, not
-the model directory itself.
+## Build the FastFlowLM inference engine
+
+We will be using the following paths throughout:
 
 ```bash
 export IRON=$(git rev-parse --show-toplevel)
@@ -29,8 +29,16 @@ export APP=$IRON/iron/applications/gemma4_flm
 export BUILD=$APP/build
 export OUTPUT=$BUILD/gemm_dequant
 export FLM=$BUILD/FastFlowLM/src
-export FLM_MODEL_PATH=/path/to/fastflowlm
+export FLM_MODEL_PATH=/path/to/fastflowlm-models-dir
+```
 
+`FLM_MODEL_PATH` must point to the parent of the `models` directory that
+contains the Gemma 4 weights. FastFlowLM appends `/models` to the path. The
+steps below explain how to download the weights if you do not have them.
+
+Pull and build the unmodified ("stock") FastFlowLM engine for comparison:
+
+```bash
 git clone https://github.com/ROCm/FastFlowLM $BUILD/FastFlowLM
 git -C $BUILD/FastFlowLM checkout 95f455e7ca39a2088b8a457dc44af10ecb3c2b40
 git -C $BUILD/FastFlowLM submodule update --init --recursive
@@ -41,7 +49,8 @@ cmake -S $FLM -B $BUILD/stock -G Ninja \
 cmake --build $BUILD/stock --parallel 2
 ```
 
-If the model is not present, download it with the engine:
+If the weights are absent from `$FLM_MODEL_PATH/models`, download them with the
+engine you just built:
 
 ```bash
 cd $FLM
@@ -49,14 +58,13 @@ FLM_MODELINFO_PATH=$FLM/model_info.json \
     $BUILD/stock/flm pull gemma4-it:e2b
 ```
 
-FastFlowLM reads
-`$FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2/model.q4nx`.
+## Build the replacement IRON operators
 
-## Build the replacement operators
-
+Now build the NPU programs for the operators you want to replace.
 `build_gemm_dequant.py` compiles the Gemma 4 E2B shapes and creates a copy of
-FastFlowLM's xclbin directory under `$OUTPUT/xclbins`. It replaces only `mm.xclbin` and
-`dequant.xclbin`. The instruction streams go in the adjacent `iron/` directory.
+FastFlowLM's xclbin directory under `$OUTPUT/xclbins`. It replaces only
+`mm.xclbin` and `dequant.xclbin`. The instruction streams go in the adjacent
+`iron/` directory.
 
 ```bash
 cd $APP
@@ -68,19 +76,20 @@ Increase `CHUNK` in `build_gemm_dequant.py` to serve larger chunks.
 
 ## The override header
 
-[`gemm_dequant_overrides.hpp`](gemm_dequant_overrides.hpp) is a source header,
-not a library or a runtime plugin. FastFlowLM includes `flm_override.hpp` at its
-operator call sites. The build definition below makes that file include this
-header in every Gemma engine translation unit.
+Next, build a modified FastFlowLM engine that runs the IRON operators instead
+of the built-in stock operators.
+[`gemm_dequant_overrides.hpp`](gemm_dequant_overrides.hpp) is the source header
+that defines these replacements.
 
-FastFlowLM writes a dispatch like this:
+In the FastFlowLM source code, dispatches use `FLM_OVERRIDE` like this:
 
 ```cpp
 FLM_OVERRIDE(q_swa_proj, q_swa_proj(out, in, weights), desc, type, shape)
 ```
 
-Without an override header, `FLM_OVERRIDE` evaluates the second argument. This
-header redefines the macro so that the operator name selects another macro:
+This makes each dispatch overridable. Without an override header,
+`FLM_OVERRIDE` evaluates the second argument. This example's header redefines
+the macro so that the operator name selects another macro:
 
 ```cpp
 #define FLM_OVERRIDE(name, expr, ...) \
@@ -96,13 +105,14 @@ for every unmarked hook, so unused hooks need no definitions. This header marks
 only projection GEMM, dequant, and the setup hooks they require.
 
 GEMM and dequant form one replacement set. IRON dequant writes the bfp16 layout
-that IRON GEMM reads, so select both together. To experiment with another
-operator, add its `FLM_OV_<name>` macro and preserve the exact result type and
-buffer lifetime of the expression it replaces.
+that IRON GEMM reads, so select both together.
+
+To experiment with another operator, add its `FLM_OV_<name>` macro and preserve
+the exact result type and buffer lifetime of the expression it replaces.
 
 ## Rebuild the engine
 
-Compile the header into the source-built Gemma engine. The nested quotes make
+Recompile the FastFlowLM engine with the overrides. The nested quotes make
 `FLM_OVERRIDES` a C++ include string.
 
 ```bash
@@ -118,7 +128,7 @@ Edit the header and rerun the last command to test another implementation.
 
 ## Compare the selections
 
-Run the FastFlowLM selection:
+Run the stock FastFlowLM engine:
 
 ```bash
 cd $FLM
@@ -127,7 +137,7 @@ LD_LIBRARY_PATH=$BUILD/stock/engines FLM_XCLBIN_PATH=$FLM \
     --prefill-chunk-len 512 --port 11434
 ```
 
-Run the IRON GEMM/dequant selection on another port:
+Run the engine with IRON-replaced GEMM/dequant on another port:
 
 ```bash
 cd $FLM
@@ -139,16 +149,27 @@ LD_LIBRARY_PATH=$OUTPUT/engine/engines FLM_XCLBIN_PATH=$OUTPUT \
 Send the same request to each port:
 
 ```bash
+# Test stock:
+REQUEST='{
+  "model": "gemma4-it:e2b",
+  "prompt": "Explain block floating point in two sentences.",
+  "stream": false,
+  "max_tokens": 64
+}'
 curl -s http://127.0.0.1:11434/api/generate -d \
-  '{"model":"gemma4-it:e2b","prompt":"Explain block floating point in two sentences.","stream":false,"max_tokens":64}'
+    "$REQUEST"
+
+# Test IRON-overridden:
+curl -s http://127.0.0.1:11435/api/generate -d \
+    "$REQUEST"
 ```
 
 Compare `context` for token IDs and `prompt_eval_duration` for prefill time.
-The duration is in nanoseconds. Discard the first request, then use the median
-of several requests. The IRON pair trades FastFlowLM's shipped implementation
-for operator source that you can change and rebuild independently.
+The duration is in nanoseconds. Discard the first request as a warm-up, then
+use the median of several requests.
 
-The focused test builds both selections and compares their token IDs:
+The Python test performs these steps. Run it from the repository root. It
+builds both selections and compares their token IDs:
 
 ```bash
 pytest --iterations 1 iron/applications/gemma4_flm/gemm_dequant
