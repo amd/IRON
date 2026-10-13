@@ -48,6 +48,7 @@ from .base import (
 from .blocks import (
     Block,
     BlockOracle,
+    ConcatChannels,
     Conv1d,
     Conv2d,
     ImagePatches,
@@ -72,6 +73,7 @@ __all__ = [
     "BlockOracle",
     "CausalLM",
     "Checkpoint",
+    "ConcatChannels",
     "Config",
     "Conv1d",
     "Conv2d",

@@ -14,7 +14,8 @@ RMS-normed and rotated. ``Block`` and ``BlockOracle`` are the attention +
 SwiGLU layer Llama 3 and Granite 4.2 3B share, on the NPU and in numpy. ``LogMel`` is an audio front end's log-mel
 spectrogram, ``Conv2d`` a convolution over rows of channels-last pixels,
 ``Conv1d`` one over rows of full-channel-depth input (an audio encoder's
-front end), ``MaxPool2d`` a max pooling of channels-last pixels and
+front end), ``MaxPool2d`` a max pooling of channels-last pixels,
+``ConcatChannels`` their concatenation along the channels and
 ``ImagePatches`` a vision front end's resize into patches. A graph
 here is called in a model's body as it is on its own (``Graph``): its
 steps trace into the model's.
@@ -551,6 +552,54 @@ class MaxPool2d(iron.Graph):
             ]
         )
         return windows.max(axis=0).reshape(self.rows, self.width * self.channels)
+
+
+class ConcatChannels(iron.Graph):
+    """Two to four inputs of ``rows`` rows of ``width`` channels-last pixels
+    concatenated along their channels, ``channels`` each input's a pixel.
+
+    A call takes each input ``(rows, width * channels[i])`` and returns
+    ``(rows, width * sum(channels))``: each input copied into its channels
+    of every pixel of a held buffer, which a last copy returns.
+
+    Args:
+        rows: The inputs' rows.
+        width: The inputs' pixels a row.
+        channels: Each input's channels a pixel, two to four of them.
+    """
+
+    def __init__(self, rows: int, width: int, channels: tuple[int, ...]):
+        if not 2 <= len(channels) <= 4:
+            raise ValueError(
+                f"ConcatChannels: {len(channels)} inputs; it joins two to four"
+            )
+        if any(c % 2 for c in channels):
+            raise ValueError(
+                f"ConcatChannels: channels {tuple(channels)} are not all even; "
+                f"each input's run of a pixel is one transfer of whole 4-byte units"
+            )
+        self.rows, self.width, self.channels = rows, width, tuple(channels)
+        self.out = iron.state((rows, width * sum(channels)))
+
+    def body(self, x0, x1, x2=None, x3=None):
+        xs = [x for x in (x0, x1, x2, x3) if x is not None]
+        if len(xs) != len(self.channels):
+            raise TypeError(
+                f"ConcatChannels: {len(xs)} inputs given, {len(self.channels)} "
+                f"declared"
+            )
+        total = sum(self.channels)
+        offset = 0
+        for x, c in zip(xs, self.channels):
+            dst = TensorAccessPattern(
+                self.out.shape,
+                offset,
+                [self.rows, self.width, c],
+                [self.width * total, total, 1],
+            )
+            Copy(x, self.out, dst=dst)
+            offset += c
+        return Copy(self.out[:])
 
 
 class ImagePatches(iron.Graph):
