@@ -44,6 +44,7 @@ from .base import (
     random_weights,
     rope_angles,
     unread_weights,
+    widen,
 )
 from .blocks import (
     Block,
@@ -107,4 +108,5 @@ __all__ = [
     "sandwich_layer",
     "swiglu",
     "unread_weights",
+    "widen",
 ]

@@ -246,10 +246,11 @@ def random_weights(layout: Layout, n_layers: int, seed: int = 0) -> SimpleNamesp
 def unread_weights(layout: Layout, n_layers: int) -> SimpleNamespace:
     """The tree of ``layout`` over ``n_layers``, its arrays allocated and
     never written: for tracing, building and measuring a model, none of
-    which reads a weight. The pages are reserved, not touched.
+    which reads a weight. The pages are reserved, not touched. A scalar is
+    zero: a graph may read one as it is built (a clamp's bounds).
     """
     tensors = {
-        name: np.empty(shape, dtype=bfloat16)
+        name: np.zeros(shape, bfloat16) if not shape else np.empty(shape, bfloat16)
         for name, shape in checkpoint_shapes(layout, n_layers).items()
     }
     return load_weights(tensors, layout, n_layers)
@@ -323,7 +324,7 @@ class Oracle:
     def __init__(self, config: Config, weights):
         self.config = config
         vars(self).update(
-            {k: v if k == "layers" else _widen(v) for k, v in vars(weights).items()}
+            {k: v if k == "layers" else widen(v) for k, v in vars(weights).items()}
         )
         self.angles = config.angles()
         self.buffers: dict[str, np.ndarray] = {}
@@ -342,7 +343,7 @@ class Oracle:
         angles = self.angles[: tokens.size]
         x = self.embed(self.embedding[tokens], pixel_values)
         for w in self.layers:
-            x = self.layer(angles, _widen(w), x)
+            x = self.layer(angles, widen(w), x)
         return self.head(x[-1])
 
     @staticmethod
@@ -392,13 +393,14 @@ class Oracle:
         return (p @ v.transpose(1, 0, 2)).transpose(1, 0, 2).reshape(n, H * D)
 
 
-def _widen(value):
+def widen(value):
+    """``value``, an array or a weight tree of namespaces and lists, in float32."""
     if isinstance(value, np.ndarray):
         return value.astype(np.float32)
     if isinstance(value, list):
-        return [_widen(v) for v in value]
+        return [widen(v) for v in value]
     if isinstance(value, SimpleNamespace):
-        return SimpleNamespace(**{k: _widen(v) for k, v in vars(value).items()})
+        return SimpleNamespace(**{k: widen(v) for k, v in vars(value).items()})
     return value
 
 
