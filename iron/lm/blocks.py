@@ -14,7 +14,8 @@ RMS-normed and rotated. ``Block`` and ``BlockOracle`` are the attention +
 SwiGLU layer Llama 3 and Granite 4.2 3B share, on the NPU and in numpy. ``LogMel`` is an audio front end's log-mel
 spectrogram, ``Conv2d`` a convolution over rows of channels-last pixels,
 ``Conv1d`` one over rows of full-channel-depth input (an audio encoder's
-front end) and ``ImagePatches`` a vision front end's resize into patches. A graph
+front end), ``MaxPool2d`` a max pooling of channels-last pixels and
+``ImagePatches`` a vision front end's resize into patches. A graph
 here is called in a model's body as it is on its own (``Graph``): its
 steps trace into the model's.
 
@@ -39,6 +40,7 @@ import iron
 from iron.common import Scratchpad
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
+from iron.operators.elementwise_max import ElementwiseMax
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
@@ -475,6 +477,80 @@ class Conv1d(iron.Graph):
             .reshape(-1, self.out_channels)
         )
         return patches.reshape(rows, -1) @ w + np.asarray(bias, np.float32)
+
+
+class MaxPool2d(iron.Graph):
+    """Max pooling of ``rows`` rows of ``width`` channels-last pixels, each
+    channel on its own, by a ``kernel``-wide square window at stride 1,
+    padded with ``-inf`` so the output is the input's shape.
+
+    A call takes the input ``(rows, width * channels)`` and returns the
+    pooled output of the same shape. The input is written into a held
+    border of ``kernel // 2`` pixels of ``-inf`` either side, in rows and
+    columns, and the ``kernel * kernel`` shifted views of it, each whole
+    rows of the input's shape, are combined by a running ``ElementwiseMax``:
+    a selection, so the output is the max pooling exactly.
+
+    Args:
+        rows: The input's rows.
+        width: The input's pixels a row.
+        channels: The channels a pixel.
+        kernel: The window's side, odd.
+    """
+
+    def __init__(self, rows: int, width: int, channels: int, kernel: int):
+        if kernel % 2 == 0:
+            raise ValueError(
+                f"MaxPool2d: kernel ({kernel}) must be odd, for same padding"
+            )
+        self.rows, self.width, self.channels, self.kernel = (
+            rows,
+            width,
+            channels,
+            kernel,
+        )
+        pad = kernel // 2
+        shape = (rows + 2 * pad, (width + 2 * pad) * channels)
+        self.border = np.full(shape, -np.inf, bfloat16)
+        self.padded = iron.state(shape)
+
+    def body(self, x):
+        k, C, pad = self.kernel, self.channels, self.kernel // 2
+        shape = self.padded.shape
+        line = shape[1]
+        Copy(self.border, self.padded)
+        interior = TensorAccessPattern(
+            shape, pad * line + pad * C, [self.rows, self.width * C], [line, 1]
+        )
+        Copy(x, self.padded, dst=interior)
+        pooled = None
+        for a in range(k):
+            for b in range(k):
+                view = TensorAccessPattern(
+                    shape, a * line + b * C, [self.rows, self.width * C], [line, 1]
+                )
+                window = Copy(self.padded, src=view)
+                # A pixel's channels are a line any plane divides into.
+                pooled = (
+                    window
+                    if pooled is None
+                    else ElementwiseMax(pooled, window, tile_size=C)
+                )
+        return pooled.reshape(self.rows, self.width * C)
+
+    def exact(self, x: np.ndarray) -> np.ndarray:
+        """The max pooling of ``x`` ``(rows, width * channels)`` in float32."""
+        k, pad = self.kernel, self.kernel // 2
+        image = np.asarray(x, np.float32).reshape(self.rows, self.width, self.channels)
+        image = np.pad(image, ((pad, pad), (pad, pad), (0, 0)), constant_values=-np.inf)
+        windows = np.stack(
+            [
+                image[a : a + self.rows, b : b + self.width]
+                for a in range(k)
+                for b in range(k)
+            ]
+        )
+        return windows.max(axis=0).reshape(self.rows, self.width * self.channels)
 
 
 class ImagePatches(iron.Graph):
