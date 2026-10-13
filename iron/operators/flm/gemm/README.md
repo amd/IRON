@@ -99,6 +99,9 @@ use. Two groups are therefore conditional or gone:
 * `n_chunks` / `n_units` are sent **only when `m_chunk > 1`**. They are
   `m_row_blocks // M_CHUNK` and each other, so at the shipped `M_CHUNK = 1`
   the core just reads `m_row_blocks`.
+* `units_valid`, the 256-row units a per-call row bound reaches, is a word
+  **only for a bounded design on an xclbin**; elsewhere the cores run
+  `m_row_blocks`. See "A row bound per call" below.
 * `n_work` / `n_drain` are **not sent at all**. The core derives them from `N`
   and its own column, which it reads from a per-tile buffer initialised at
   build time. Branch-free, and both divisors are powers of two, so it costs
@@ -542,6 +545,35 @@ done.
 
 `m_chunk` is off by default — see `M_CHUNK_FOR_N` in design.py, which would
 fork the xclbin.
+
+### A row bound per call
+
+A prompt chunk projects `x[:rows]` (`valid`, an `Extent` of M), and one
+compile serves every row count. On an xclbin, A and C move, and the cores
+compute, only the units the bound reaches. A unit is the 256 rows
+(`rows * M_TILE`) the four core rows join into one C block, so a bound rounds
+up to it: that is the array's granularity, not a DMA rule.
+
+| | xclbin | full ELF (NPU2) |
+|---|---|---|
+| cores | read `units_valid` from a parameter word bounded designs add | every unit, as unbounded |
+| A | one transfer per lane, `units_valid` its runtime repeat count | every row |
+| C | `units_valid` row blocks, a runtime size | every row |
+| B | as unbounded | as unbounded |
+
+A full ELF patches a shim BD's length and address per call, but not a repeat
+count, and A's units are its transfers' outermost (repeat) dimension. Until
+mlir-aie can set a repeat count from a scratchpad word, a full ELF moves and
+computes every row, and its module is the unbounded one.
+
+B is not bounded. Its resident replay count is the memtile's lock values and
+task runs, which no per-call word reaches on either image, so the memtile
+replays B for every unit and the cores drain a unit past the bound's replay
+without computing it. They drain those first, since every replay is the same
+B, so each column's last C still ends the call; a call with no rows has no C
+to end it, and is refused. A unit past the bound therefore still costs its B
+broadcast from L2, and down's streamed B is still read from DDR once per
+unit. A bound needs `m_chunk = 1` and M in one slab.
 
 ## The shipped overlay
 
