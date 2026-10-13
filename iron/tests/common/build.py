@@ -41,6 +41,7 @@ from iron.common.design import (
     Sequence,
     build_design,
 )
+from iron.common.design.build import device_symbol
 from iron.common.graph.compiled import _words
 from iron.operators.clamp import Clamp
 from iron.operators.elementwise_mul import ElementwiseMul
@@ -378,6 +379,7 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
         "n_chunks": 2,
         "n_units": 2,
         "units_valid": 2,
+        "units_repeat": 1,
     }
     with pytest.raises(ValueError, match="multiple of 256"):
         flm_gemm.GEMM(M=100, K=1024, N=1024).resolved(
@@ -418,32 +420,49 @@ def test_flm_gemm_folds_an_activation_then_a_clamp_into_its_epilogue():
 
 def _flm_gemm_moves(op, image, rows):
     """Bytes each operand of ``op``'s sequence moves in a call whose row bound
-    is ``rows``: each shim task's elements times its runs. On an xclbin the
-    one per-call scalar a size takes is the units the bound reaches, and a
-    runtime outer size is the task's repeat.
+    is ``rows``: each shim task's elements, a patched length its word's value
+    in its units, times its runs, a repeat parameter's word plus one. On an
+    xclbin the one per-call scalar a size takes is the units the bound
+    reaches, and a runtime outer size is the task's repeat.
     """
-    units = op.derived_at("units_valid", valid=rows) if op.bound_extents else None
+    words = {
+        device_symbol(op, v): op.derived_at(v.name, valid=rows)
+        for v in op.values
+        if v.name != "valid"
+    }
+    units = words.get(device_symbol(op, op.value("units_valid")))
+    text, tasks = generated_sequence(op, image)
+    repeats = dict(
+        re.findall(
+            r"aiex\.dma_start_task\(%(\d+)\) \{repeat_parameter = @(\w+)\}", text
+        )
+    )
     moved = dict.fromkeys((b.name for b in op.buffers), 0)
-    for t in generated_sequence(op, image)[1]:
+    for t in tasks:
         sizes = [units if s.startswith("%") else int(s) for s in t.sizes.split(", ")]
+        elements = prod(sizes[1:])
+        if t.length_parameter:
+            elements = words[t.length_parameter] * int(t.length_unit)
         repeat = re.search(r"repeat_count = (\d+)", t.attributes)
         runs = 1 + int(repeat[1]) if repeat else 1
-        if t.sizes.startswith("%"):
+        if str(t.ssa) in repeats:
+            runs = 1 + words[repeats[str(t.ssa)]]
+        elif t.sizes.startswith("%"):
             runs = units
         buffer = op.buffers[t.arg]
-        moved[buffer.name] += prod(sizes[1:]) * runs * bfp.itemsize(buffer.dtype)
+        moved[buffer.name] += elements * runs * bfp.itemsize(buffer.dtype)
     return moved
 
 
+@pytest.mark.parametrize("image", ["elf", "xclbin"])
 @pytest.mark.parametrize("device", ["npu1", "npu2"])
 def test_a_bounded_flm_gemm_moves_a_and_c_for_the_units_its_bound_reaches(
-    device, request
+    device, image, request
 ):
-    """Llama's q projection on a 15-row prompt chunk, as an xclbin, moves A
-    and C for one unit, the 256 rows its four core rows join into a C block,
-    and at 2048 rows for all eight, as it does unbounded. B moves the same
-    at any bound, and A once per column block, as unbounded. A full ELF has
-    no per-call repeat count for A's units yet, so there it moves every row.
+    """Llama's q projection on a 15-row prompt chunk moves A and C for one
+    unit, the 256 rows its four core rows join into a C block, and at 2048
+    rows for all eight, as it does unbounded. B moves the same at any bound,
+    and A once per column block, as unbounded.
     """
     dev = request.getfixturevalue(device)
     M = K = width = 2048
@@ -452,15 +471,14 @@ def test_a_bounded_flm_gemm_moves_a_and_c_for_the_units_its_bound_reaches(
     op.use_value("valid", N)
     op = op.resolved(dev)
     blocks = width // (op.tile_n * op.cols)
-    whole = _flm_gemm_moves(unbounded, "xclbin", M)
+    whole = _flm_gemm_moves(unbounded, image, M)
     for rows, units in ((15, 1), (256, 1), (257, 2), (2048, 8)):
-        assert _flm_gemm_moves(op, "xclbin", rows) == {
+        assert _flm_gemm_moves(op, image, rows) == {
             "A": units * 256 * K * 2 * blocks,
             "B": whole["B"],
             "C": units * 256 * width * 2,
         }, rows
-    assert _flm_gemm_moves(op, "xclbin", M) == whole
-    assert _flm_gemm_moves(op, "elf", 15) == _flm_gemm_moves(unbounded, "elf", M)
+    assert _flm_gemm_moves(op, image, M) == whole
 
 
 def test_on_an_xclbin_a_bounded_flm_gemm_repeats_a_by_the_dispatch_scalar(npu1):

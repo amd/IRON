@@ -238,13 +238,11 @@ class GEMM(Operator):
         per=(cols,),
     )
     C = Out(M, N, tile=(c_l2,), per=(cols,), depth=C_DEPTH)
-    # M, or fewer rows per call (``A[:n]`` in a graph). On an xclbin A and C
-    # move, and the cores compute, only the units (rows * M_TILE rows each)
-    # the bound reaches; past them the cores drain each column-block's B
-    # replay uncomputed, since its count is in the memtile's lock values,
-    # which no per-call word reaches. B moves as it does unbounded. A full
-    # ELF has no per-call repeat count for A's units yet, so there every row
-    # is still moved and computed.
+    # M, or fewer rows per call (``A[:n]`` in a graph). A and C move, and the
+    # cores compute, only the units (rows * M_TILE rows each) the bound
+    # reaches; past them the cores drain each column-block's B replay
+    # uncomputed, since its count is in the memtile's lock values, which no
+    # per-call word reaches. B moves as it does unbounded.
     valid = Extent(M)
     # The parameter words every core reads once its barrier opens. The last
     # two exist only at m_chunk > 1 (rtp_layout); a word is not free.
@@ -259,6 +257,10 @@ class GEMM(Operator):
     # Under a bound, the units it reaches: the cores' trip count and C's
     # length, in row blocks.
     units_valid = Value(np.int32, derive=_units_valid, optional=True)
+    # A's repeat count on a full ELF: the units less one.
+    units_repeat = Value(
+        np.int32, derive=lambda op: _units_valid(op) - 1, optional=True
+    )
 
     def extent_unit(self, buffer: str) -> int:
         return 0  # nothing is shortened
@@ -494,10 +496,11 @@ class GEMM(Operator):
         C_SLICE_LEN = M_TILE * N_TILE  # one compute tile's C contribution
         O_CHUNKS = C_SLICE_LEN // CT_OUT_LEN  # C objects an accumulator drains as
         B_ITERS = K_TILE // CT_MAX_K  # B chunks consumed per k step
-        # Under a row bound on an xclbin the cores read the units it reaches
-        # from their parameter buffer.
-        bounded = "valid" in self.bound_extents and target.image != "elf"
-        rtp_slots, rtp_words = rtp_layout(M_CHUNK, bounded)
+        # Under a row bound the cores read the units it reaches: from the
+        # scratchpad on a full ELF, else from their parameter buffer.
+        bounded = "valid" in self.bound_extents
+        per_call = bounded and target.image == "elf"
+        rtp_slots, rtp_words = rtp_layout(M_CHUNK, bounded and not per_call)
         tm = get_target_model(target.dev.resolve())
 
         bf16_ty = np.dtype[bfloat16]
@@ -753,6 +756,7 @@ class GEMM(Operator):
             my_rtp,
             my_col,
             barrier,
+            *words,
         ):
             """Core body. Every trip count and the activation come from the
             runtime parameter buffer, so one core program serves every shape.
@@ -777,7 +781,9 @@ class GEMM(Operator):
                 n_units_rt = n_row_blocks
             # Bounded, m_chunk is 1: a unit is a chunk.
             n_live = n_units_rt
-            if bounded:
+            if per_call:
+                n_live = words[0].read()
+            elif bounded:
                 n_live = my_rtp[rtp_slots["units_valid"]]
             # Acquire does not consume the barrier, so take it back to zero or
             # the next dispatch re-reads these instead of waiting. Safe before
@@ -871,6 +877,7 @@ class GEMM(Operator):
                             rtps[r][c],
                             my_cols[r][c],
                             barriers[r][c],
+                            *([self.units_valid.param] if per_call else []),
                         ],
                         tile=ct_tiles[r][c],
                         stack_size=STACK_SIZE,
@@ -1009,7 +1016,7 @@ class GEMM(Operator):
             )
         # A bound reaches units from the first, and a slab past it would arm
         # B and the cores for nothing.
-        bounded = "valid" in self.bound_extents and rt.image != "elf"
+        bounded = "valid" in self.bound_extents
         if bounded and len(slabs) > 1:
             raise ValueError(
                 f"M={M} K={K} N={N}: a per-call row bound needs M in one slab, "
@@ -1162,14 +1169,13 @@ class GEMM(Operator):
 
             # A's transfers, one per lane. Bounded, each repeats over the
             # units the bound reaches, a per-call repeat count.
-            a_legs = [
-                (
-                    ((self.A, A[:, 0, r].permute((0, 2, 1, 3))), {0: self.units_valid})
-                    if bounded
-                    else ((self.A, a_tap(r, slab)), None)
-                )
-                for r in range(ROWS)
-            ]
+            if bounded:
+                a_legs = [
+                    (A[:, 0, r].permute((0, 2, 1, 3)), self.units_repeat)
+                    for r in range(ROWS)
+                ]
+            else:
+                a_legs = [(a_tap(r, slab), None) for r in range(ROWS)]
 
             # C goes out after its block's fills, since the first C only
             # arrives after a whole k sweep. A leg whose pattern the shim
@@ -1177,8 +1183,13 @@ class GEMM(Operator):
             # task queue holds, the compiler cuts into pieces and interleaves
             # with the other legs'.
             for bi, (mega_col, active_cols) in enumerate(blocks):
-                for r, (view, size_by) in enumerate(a_legs):
-                    rt.fill(self.A.lane(r), view, size_by=size_by, managed=False)
+                for r, (tap, repeat_by) in enumerate(a_legs):
+                    rt.fill(
+                        self.A.lane(r),
+                        (self.A, tap),
+                        repeat_by=repeat_by,
+                        managed=False,
+                    )
                 for c in range(active_cols):
                     rt.fill(
                         self.B.lane(c),

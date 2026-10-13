@@ -549,22 +549,20 @@ fork the xclbin.
 ### A row bound per call
 
 A prompt chunk projects `x[:rows]` (`valid`, an `Extent` of M), and one
-compile serves every row count. On an xclbin, A and C move, and the cores
-compute, only the units the bound reaches. A unit is the 256 rows
-(`rows * M_TILE`) the four core rows join into one C block, so a bound rounds
-up to it: that is the array's granularity, not a DMA rule.
+compile serves every row count. A and C move, and the cores compute, only the
+units the bound reaches. A unit is the 256 rows (`rows * M_TILE`) the four
+core rows join into one C block, so a bound rounds up to it: that is the
+array's granularity, not a DMA rule.
 
 | | xclbin | full ELF (NPU2) |
 |---|---|---|
-| cores | read `units_valid` from a parameter word bounded designs add | every unit, as unbounded |
-| A | one transfer per lane, `units_valid` its runtime repeat count | every row |
-| C | `units_valid` row blocks, a runtime size | every row |
+| cores | read `units_valid` from a parameter word bounded designs add | read it from the scratchpad |
+| A | one transfer per lane, `units_repeat` (units less one) its runtime repeat count | the same, a scratchpad repeat parameter (mlir-aie's repeat-parameter) |
+| C | `units_valid` row blocks, a runtime size | the same, a patched length |
 | B | as unbounded | as unbounded |
 
-A full ELF patches a shim BD's length and address per call, but not a repeat
-count, and A's units are its transfers' outermost (repeat) dimension. Until
-mlir-aie can set a repeat count from a scratchpad word, a full ELF moves and
-computes every row, and its module is the unbounded one.
+Every GEMM bounded by the same rows shares the two words, so Llama 3.2 1B's
+prompt chunk takes 2 of a full ELF's 32.
 
 B is not bounded. Its resident replay count is the memtile's lock values and
 task runs, which no per-call word reaches on either image, so the memtile
