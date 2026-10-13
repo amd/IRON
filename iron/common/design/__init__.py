@@ -8,7 +8,7 @@ A declared ``Operator`` never constructs a
 declaration: it resolves the operator for the device, calls its
 ``array(target)`` to build the array and bind its operands' lanes, opens
 the runtime sequence from the operator's buffers in declaration order, runs
-the preamble (values, barriers, parameter sync), then either derives the
+the preamble (values, parameter sync, barriers), then either derives the
 fill/drain sequence from the operands' tiles or hands a ``Sequence``
 to the operator's ``sequence(rt)`` override. ``OperatorDesign`` is
 that generator as mlir-aie's ``CompilableDesign`` compiles it, keyed on

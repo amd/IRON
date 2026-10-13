@@ -442,7 +442,7 @@ class Sequence:
         return self._rt_data[buffer.name]
 
     def preamble(self, **values) -> None:
-        """Residents, then barriers, then the parameter sync, before any DMA.
+        """Residents, then the parameter sync, then barriers, before any DMA.
 
         An ``own_preamble`` operator's sequence calls it itself, ``values``
         overriding residents by name.
@@ -479,7 +479,8 @@ class Sequence:
                         f"without a scratchpad (an xclbin image)"
                     )
                 buf[index] = value.ssa
-        for b in self.barriers:
-            b.set(1)
+        # A barrier opens its core, which reads its per-call words at once.
         if self.image == "elf" and op.values:
             sync_parameters()
+        for b in self.barriers:
+            b.set(1)
