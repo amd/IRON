@@ -93,6 +93,13 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+      - name: Clean up this job's compile cache
+        # This runner is self-hosted, so $RUNNER_TEMP is not emptied for us
+        # between jobs; remove it ourselves, win or lose.
+        if: always()
+        shell: bash
+        run: rm -rf "$NPU_CACHE_HOME"
+
       - name: Fail workflow if examples failed
         if: steps.test.outcome == 'failure'
         run: exit 1
