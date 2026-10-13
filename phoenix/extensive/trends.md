@@ -1,4 +1,4 @@
 # Performance trends
 
-**Operators dropped:** `flm/gemm`
+No benchmark moved by 5% and by more than 2x the spread the runs measured.
 
