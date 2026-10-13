@@ -159,9 +159,7 @@ def _sequence(cols: int, coresident) -> OperatorSequence:
         dispatch="fused",
         coresident=coresident(add, silu),
     )
-    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
-        seq.calculate_buffer_layout()
-    )
+    seq.prepare()
     return seq
 
 
@@ -238,9 +236,7 @@ def test_designs_of_one_array_share_its_device():
         output_args=["y", "u"],
         dispatch="fused",
     )
-    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
-        seq.calculate_buffer_layout()
-    )
+    seq.prepare()
     fused = Fusion(seq)
     text = fused.text()
     pack = Packing.device_name(list(fused.designs))
@@ -267,9 +263,7 @@ def test_a_folded_gate_shares_its_device_with_the_up_projection(npu2):
     traced, count = folded(ffn.trace(x=(1, embedding)), npu2, only=silu)
     assert count.total() == 1
     seq = traced.sequence(dispatch="fused")
-    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
-        seq.calculate_buffer_layout()
-    )
+    seq.prepare()
     fused = Fusion(seq)
     text = fused.text()
     gate, up, mul, down = (name for name, *_ in fused.runlist)

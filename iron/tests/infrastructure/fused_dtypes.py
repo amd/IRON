@@ -147,8 +147,6 @@ def test_misaligned_buffer_is_rejected():
         buffer_sizes={"packed": TABLE_BYTES + 64},
         dispatch="fused",
     )
-    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
-        seq.calculate_buffer_layout()
-    )
+    seq.prepare()
     with pytest.raises(ValueError, match="not a multiple of 4"):
         Fusion(seq).text()

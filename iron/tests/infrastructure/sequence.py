@@ -152,9 +152,7 @@ def test_fused_mlir_contains_reconfiguration(sequence, npu2):
 
     # Generate the fused MLIR directly, bypassing the ELF backend (which is
     # NPU2-only). This mirrors what FusedImage.link() feeds to the compiler.
-    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
-        seq.calculate_buffer_layout()
-    )
+    seq.prepare()
     fusion = Fusion(seq)
     assert fusion.expands
     text = fusion.text()
@@ -448,9 +446,7 @@ def test_one_design_expands_only_to_reconfigure(reconfigure, npu2):
     seq = _build_one_design_sequence(
         _relu(), f"infra_fused_relu_reconfigure_{reconfigure}", reconfigure
     )
-    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
-        seq.calculate_buffer_layout()
-    )
+    seq.prepare()
     fusion = Fusion(seq)
     assert fusion.expands == reconfigure
     devices = re.findall(r"aie\.device\(\w+\) @(\w+)", fusion.text())

@@ -494,9 +494,7 @@ def test_a_full_elf_is_priced_at_the_configures_its_fusion_runs(
         dispatch="fused",
         coresident=[list({id(op): op for op in steps}.values())] if packed else (),
     )
-    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
-        seq.calculate_buffer_layout()
-    )
+    seq.prepare()
     fusion = Fusion(seq)
     configured = re.findall(r"aiex\.configure @(\w+)", fusion.text())
     assert (len(configured) if fusion.expands else 0) == configures

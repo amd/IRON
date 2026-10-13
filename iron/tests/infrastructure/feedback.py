@@ -231,9 +231,7 @@ def test_feedback_argument_only_when_declared():
             feedback_args=feedback,
             dispatch="fused",
         )
-        seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
-            seq.calculate_buffer_layout()
-        )
+        seq.prepare()
         # The main device's runtime sequence is the last one in the module.
         header = [
             line

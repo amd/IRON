@@ -114,9 +114,7 @@ def test_the_extents_share_one_device(npu2, module, cls_name, tunables, extent):
         for b, buf in zip(op.buffers, names):
             (outputs if b.direction is Direction.OUT else inputs).append(buf)
     seq = OperatorSequence(cls_name, runlist, inputs, outputs, dispatch="fused")
-    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
-        seq.calculate_buffer_layout()
-    )
+    seq.prepare()
     fused = Fusion(seq)
     pack = Packing.device_name(list(fused.designs))
     devices = re.findall(r"^  aie\.device\(\w+\) @(\w+) \{$", fused.text(), re.M)

@@ -47,9 +47,7 @@ def _sequence(shapes):
         output_args=[y for *_, y in runlist],
         dispatch="fused",
     )
-    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
-        seq.calculate_buffer_layout()
-    )
+    seq.prepare()
     return seq
 
 
@@ -123,9 +121,7 @@ def test_two_designs_whose_device_names_collide_are_refused():
         output_args=["y0", "y1"],
         dispatch="fused",
     )
-    seq.subbuffer_layout, seq.buffer_sizes, seq.slice_info = (
-        seq.calculate_buffer_layout()
-    )
+    seq.prepare()
     with pytest.raises(ValueError, match=f"device names collide, {name}"):
         Fusion(seq)
 
