@@ -85,6 +85,12 @@ python -m iron.applications.qwen3.model \
     --prompt-len 2048 --num-tokens 40
 ```
 
+The NPU draws every token and writes the next decode step's values itself;
+the host only restarts each step and reads the tokens back at the end. On
+NPU1 and with `--each-step` the NPU draws each token too, and the host
+reads that token alone and starts the next step on it (below). The top-k
+must be at most 64.
+
 - `--random-weights SEED`: in place of the two files, weights drawn at
   `SEED` and prompts of random tokens; the speed, the accuracy against the
   oracle and the determinism are those of the real checkpoint's shape, on a
@@ -102,11 +108,9 @@ python -m iron.applications.qwen3.model \
   and top-1 agreement
 - `--check-determinism ROUNDS`: instead of sampling, run two prompts
   `ROUNDS` times each and count the runs whose logits differ bitwise
-- `--device-loop`: draw every token on the device, each decode step started
-  by the one before it, instead of on the host from each step's logits; the
-  top-k must be at most 64
-- `--compare-host`: with `--device-loop`, then generate again on the host
-  from the same seed and count the tokens that differ
+- `--compare-host`: then generate again drawing on the host from each
+  step's logits, from the same seed, and count the tokens that differ (the
+  text is the same, token for token)
 - `--cost-table TABLE`: fold the steps of the decode step and the prompt
   chunk, narrow their designs and pack them into shared device
   configurations by a measured cost table (`iron.applications.qwen3.tune`)
@@ -116,8 +120,9 @@ python -m iron.applications.qwen3.model \
 ## NPU1, and `--each-step`
 
 NPU1 has no full-ELF dispatch, so there both versions are xclbins whose
-steps are dispatched one at a time, and the host draws each token: there is
-no `--device-loop`. `--each-step` builds the same form on NPU2, which is how
+steps are dispatched one at a time: there is no device loop. Each step
+still draws its token on the NPU, and the host reads that token alone, not
+the logits, and dispatches the next step on it. `--each-step` builds the same form on NPU2, which is how
 `test_qwen3_1_7b_each_step_accuracy` checks it there. See
 `iron/applications/llama/README.md` for the fuller account (shared,
 since nothing about this is Qwen3-specific): the versions share one copy of
