@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,23 +45,28 @@ class Xclbin:
         if directory is None:
             directory = Path(NPU_CACHE_HOME) / "prebuilt"
         target = Path(directory) / self.filename
-
-        def digest(path):
-            with open(path, "rb") as f:
-                return hashlib.file_digest(f, "sha256").hexdigest()
-
-        if target.exists() and digest(target) == self.sha256:
-            return target
+        if target.exists():
+            with open(target, "rb") as f:
+                if hashlib.file_digest(f, "sha256").hexdigest() == self.sha256:
+                    return target
         if not self.url.startswith("https://"):
             raise ValueError(f"refusing to download over {self.url!r}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # Beside the target and renamed, so an interrupted fetch cannot leave a
-        # truncated file that a later run reports as a digest mismatch.
-        partial = target.with_suffix(target.suffix + ".part")
         with urllib.request.urlopen(self.url, timeout=60) as response:
-            partial.write_bytes(response.read())
-        if (got := digest(partial)) != self.sha256:
-            partial.unlink()
+            content = response.read()
+        if (got := hashlib.sha256(content).hexdigest()) != self.sha256:
             raise RuntimeError(f"{self.url} has SHA-256 {got}, expected {self.sha256}")
-        partial.replace(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # A file of this fetch's own, renamed over the target whole: concurrent
+        # fetches never share one, and none sees a partial target.
+        with tempfile.NamedTemporaryFile(
+            dir=target.parent, prefix=f"{target.name}.", suffix=".part", delete=False
+        ) as partial:
+            partial.write(content)
+            # A temporary file is created owner-only; the cache is read as any file is.
+            os.fchmod(partial.fileno(), 0o644)
+        try:
+            os.replace(partial.name, target)
+        except OSError:
+            os.unlink(partial.name)
+            raise
         return target

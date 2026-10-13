@@ -9,7 +9,9 @@ sequence issues is checked in the module a real build generates: each shim
 task's lane, buffer argument, offset, sizes, strides and patched size.
 """
 
+import hashlib
 import re
+from concurrent.futures import ThreadPoolExecutor
 from math import prod
 from typing import NamedTuple
 
@@ -557,3 +559,13 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
 
             def array(self, target):
                 return []
+
+
+def test_concurrent_fetches_of_a_shipped_image_each_get_the_whole_file(tmp_path):
+    image = Shipped(M=256, K=1024, N=1152).external
+    with ThreadPoolExecutor(8) as pool:
+        paths = list(pool.map(lambda _: image.fetch(tmp_path), range(8)))
+    assert set(paths) == {tmp_path / image.filename}
+    with open(paths[0], "rb") as f:
+        assert hashlib.file_digest(f, "sha256").hexdigest() == image.sha256
+    assert [p.name for p in tmp_path.iterdir()] == [image.filename]
