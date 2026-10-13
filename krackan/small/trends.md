@@ -1,4 +1,4 @@
 # Performance trends
 
-**Operators dropped:** `swiglu_prefill_stream`
+No benchmark moved by 5% and by more than 2x the spread the runs measured.
 
