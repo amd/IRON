@@ -8,7 +8,6 @@
 #include "utils/utils.hpp"
 
 #include <cstdint>
-#include <filesystem>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -18,6 +17,8 @@
 
 namespace iron
 {
+
+// Common state and helper functions
 
 inline void require(bool ok, const std::string &what)
 {
@@ -51,15 +52,11 @@ struct state {
     uint32_t mlp_i = 0;
 };
 
-inline state &S()
-{
-    static state state;
-    return state;
-}
+inline state registered;
 
 inline bytes &at_offset(bytes &parent, size_t offset)
 {
-    auto &result = S().views[{parent.bo().get_handle().get(), offset}];
+    auto &result = registered.views[{parent.bo().get_handle().get(), offset}];
     if (!result)
         result = std::make_unique<view>(parent, offset);
     return result->buf;
@@ -77,28 +74,29 @@ inline size_t bfp16_bytes(size_t k, size_t n)
 
 inline npu_app &operator_for(npu_app_manager *manager, const std::string &file)
 {
-    auto result = S().apps.find(file);
-    if (result == S().apps.end()) {
+    auto result = registered.apps.find(file);
+    if (result == registered.apps.end()) {
         npu_app app = manager->create_app();
-        load_sequence(app, S().dir + "/" + file);
-        result = S().apps.emplace(file, std::move(app)).first;
+        load_sequence(app, registered.dir + "/" + file);
+        result = registered.apps.emplace(file, std::move(app)).first;
     }
     return result->second;
 }
+
+// Operator dispatch functions
 
 inline npu_app &gemm(uint32_t m, uint32_t k, uint32_t n, bool gelu = false)
 {
     const std::string file = "gemm_M" + std::to_string(m) + "_K" + std::to_string(k) + "_N" + std::to_string(n) +
                              (gelu ? "_gelu" : "") + ".bin";
-    require(std::filesystem::exists(S().dir + "/" + file), "no GEMM instruction sequence for M=" + std::to_string(m));
-    return operator_for(S().mm, file);
+    return operator_for(registered.mm, file);
 }
 
 template <class Weight> ert_cmd_state dequant(bytes &quantized, const Weight &weight, bytes &out, size_t offset = 0)
 {
     const std::string file =
         "dequant_K" + std::to_string(weight.shape[0]) + "_N" + std::to_string(weight.shape[1]) + ".bin";
-    return operator_for(S().dequant, file)(at_offset(quantized, weight.offset + offset), out);
+    return operator_for(registered.dequant, file)(at_offset(quantized, weight.offset + offset), out);
 }
 
 template <class Layer, class Shape, class Buffers>
@@ -133,17 +131,18 @@ ert_cmd_state o_proj(const Layer &weight, const Shape &shape, Buffers &buffers, 
 
 template <class Npu, class Config> void engine_init(Npu *npu, const Config &config)
 {
-    state &state = S();
     const auto xclbin = [&](const char *name) {
         return npu->register_xclbin(utils::path_join(config.exec_path, "xclbins", config.model_name, name));
     };
-    state.dir = utils::path_join(config.exec_path, "xclbins", config.model_name, "iron");
-    state.mm = xclbin("mm.xclbin");
-    state.dequant = xclbin("dequant.xclbin");
-    header_print("info", "IRON GEMM and dequant from " + state.dir);
+    registered.dir = utils::path_join(config.exec_path, "xclbins", config.model_name, "iron");
+    registered.mm = xclbin("mm.xclbin");
+    registered.dequant = xclbin("dequant.xclbin");
+    header_print("info", "IRON GEMM and dequant from " + registered.dir);
 }
 
 } // namespace iron
+
+// Dispatch override macros
 
 #define FLM_PP_CAT_(a, b) a##b
 #define FLM_PP_CAT(a, b) FLM_PP_CAT_(a, b)
@@ -178,8 +177,8 @@ template <class Npu, class Config> void engine_init(Npu *npu, const Config &conf
 
 #define FLM_OV_engine_init(expr, npu, config) ::iron::engine_init(npu, config)
 #define FLM_OV_prefill_layer_begin(expr, desc, layer_idx, type, prefill_shape)                                         \
-    (::iron::S().mlp_d = (desc)->weight_desc(type).ffn_gate.shape[0],                                                  \
-     ::iron::S().mlp_i = (desc)->weight_desc(type).ffn_gate.shape[1])
+    (::iron::registered.mlp_d = (desc)->weight_desc(type).ffn_gate.shape[0],                                           \
+     ::iron::registered.mlp_i = (desc)->weight_desc(type).ffn_gate.shape[1])
 
 #define IRON_DEQUANT(matrix, out, ...)                                                                                 \
     ::iron::dequant(proj_weights, (desc)->weight_desc(type).matrix, out, ##__VA_ARGS__)
@@ -200,13 +199,13 @@ template <class Npu, class Config> void engine_init(Npu *npu, const Config &conf
 #define FLM_OV_o_global_proj FLM_OV_o_swa_proj
 
 #define FLM_OV_gate_proj(expr, desc, double_wide, shape)                                                               \
-    ::iron::gemm((shape).L_padded, ::iron::S().mlp_d, ::iron::S().mlp_i, true)(                                        \
+    ::iron::gemm((shape).L_padded, ::iron::registered.mlp_d, ::iron::registered.mlp_i, true)(                          \
         bufs->hidden_state_buffer, gate_weights, bufs->gate_buffer)
 #define FLM_OV_up_proj(expr, desc, double_wide, shape)                                                                 \
-    ::iron::gemm((shape).L_padded, ::iron::S().mlp_d, ::iron::S().mlp_i)(                                              \
+    ::iron::gemm((shape).L_padded, ::iron::registered.mlp_d, ::iron::registered.mlp_i)(                                \
         bufs->hidden_state_buffer, up_weights, bufs->up_buffer)
 #define FLM_OV_down_proj(expr, desc, double_wide, shape)                                                               \
-    ::iron::gemm((shape).L_padded, ::iron::S().mlp_i, ::iron::S().mlp_d)(                                              \
+    ::iron::gemm((shape).L_padded, ::iron::registered.mlp_i, ::iron::registered.mlp_d)(                                \
         bufs->hid_buffer, down_weights, bufs->hidden_state_buffer)
 
 #endif // GEMMA4_FLM_GEMM_DEQUANT_OVERRIDES_HPP
