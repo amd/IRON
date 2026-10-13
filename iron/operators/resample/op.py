@@ -884,9 +884,11 @@ class Resample(Operator):
     chunk: int = param(default=4096, array=True)
     # A 39-tap window: a scale of up to 9.5.
     words: int = param(default=356, array=True)
-    # The patch columns a core holds, so cores * patch_columns across.
+    # The patch columns a core holds, so cores * patch_columns across. The
+    # old flat default is a floor, so two resizes of one image that each
+    # need no more of it still resolve to the same array.
     patch_columns: int = param(
-        default=lambda op: op.default_patch_columns(), array=True
+        default=lambda op: max(8, op.default_patch_columns()), array=True
     )
     image_chunks: int = param(
         default=lambda op: op.height * -(-3 * op.width // op.chunk)
