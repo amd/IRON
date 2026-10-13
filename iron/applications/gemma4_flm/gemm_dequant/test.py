@@ -13,7 +13,10 @@ import time
 import urllib.request
 from pathlib import Path
 
+import numpy as np
 import pytest
+
+from iron.applications.gemma4_flm import dequantize
 
 EXAMPLE = Path(__file__).parent
 APP = EXAMPLE.parent
@@ -69,6 +72,39 @@ def test_example_overrides_only_gemm_and_dequant():
     assert "from iron.operators.flm import GEMM, DequantBFP" in build_source
     for operator in ("DecodeLayer", "LMHead", "PrefillAttention"):
         assert operator not in build_source
+
+
+def test_offline_dequant_uses_floor_rounding():
+    values = np.array([1.0, 1.00390625, -1.0, -1.00390625], dtype=np.float32)
+    expected = np.array([0x3F80, 0x3F80, 0xBF80, 0xBF81], dtype=np.uint16)
+    np.testing.assert_array_equal(dequantize.f32_to_bf16_floor(values), expected)
+
+
+def test_offline_dequant_layout_is_a_permutation():
+    k_dim, n_dim = 512, 128
+    kk, nn = np.meshgrid(np.arange(k_dim), np.arange(n_dim), indexing="ij")
+    offsets = dequantize.dequant_offset(kk, nn, k_dim)
+    np.testing.assert_array_equal(np.sort(offsets, axis=None), np.arange(k_dim * n_dim))
+
+
+def test_offline_dequant_writes_a_sidecar(tmp_path):
+    first = np.array([1, 2, 3, 4], dtype=np.uint8)
+    second = np.array([5, 6], dtype=np.uint8)
+    plan = [
+        ("first", first.nbytes, "U8", lambda: first),
+        ("second", second.nbytes, "U8", lambda: second),
+    ]
+    output = tmp_path / "weights"
+    assert list(dequantize.write_container(output, plan, {"mode": "test"})) == [
+        "first",
+        "second",
+    ]
+
+    header, data_start = dequantize.read_header(output)
+    assert header["first"]["data_offsets"] == [0, 4]
+    assert header["second"]["data_offsets"] == [4, 6]
+    assert header["__metadata__"] == {"mode": "test"}
+    assert output.read_bytes()[data_start:] == b"\x01\x02\x03\x04\x05\x06"
 
 
 def checkout_fastflowlm():
