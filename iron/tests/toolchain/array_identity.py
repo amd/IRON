@@ -88,11 +88,7 @@ def test_the_array_is_the_same_at_two_extents(
     name, n = extent
     elfs = []
     for size in (n, 2 * n):
-        try:
-            op = cls(**tunables, **{name: size}).resolved(device)
-        except ValueError as e:
-            pytest.skip(f"not for {device.name}: {e}")
-        elfs.append(_core_elfs(op))
+        elfs.append(_core_elfs(cls(**tunables, **{name: size}).resolved(device)))
     small, large = elfs
     assert small.keys() == large.keys(), "the same cores"
     differing = [core for core in small if small[core] != large[core]]
@@ -109,10 +105,7 @@ def test_the_array_is_the_same_at_two_extents(
 def test_the_extents_share_one_device(npu2, module, cls_name, tunables, extent):
     cls = getattr(importlib.import_module(f"iron.operators.{module}"), cls_name)
     name, n = extent
-    try:
-        ops = [cls(**tunables, **{name: size}).resolved(npu2) for size in (n, 2 * n)]
-    except ValueError as e:
-        pytest.skip(f"not for npu2: {e}")
+    ops = [cls(**tunables, **{name: size}).resolved(npu2) for size in (n, 2 * n)]
     runlist, inputs, outputs = [], [], []
     for k, op in enumerate(ops):
         names = [f"s{k}_{b.name}" for b in op.buffers]

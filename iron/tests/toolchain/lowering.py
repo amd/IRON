@@ -25,7 +25,7 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 from aie.iron import ExternalFunction
-from aie.utils import get_current_device
+from aie.utils import get_current_device, set_current_device
 from aie.utils.compile import (
     compile_external_kernels,
     compile_mlir_module,
@@ -34,7 +34,7 @@ from aie.utils.compile import (
 
 import iron
 import iron.operators as catalog
-from iron.common import Scratchpad, graph
+from iron.common import Scratchpad, Unresolvable, graph
 from iron.common.design import OperatorDesign
 from iron.lm import Conv2d, ImagePatches, LogMel
 from iron.operators.copy import Copy
@@ -68,9 +68,16 @@ def lower(op, tmp_path, name=None):
 
 
 def _cases():
+    """Each device's cases, a case it cannot resolve skipped with the reason.
+
+    Resolving reads the bound device, so each is bound while its cases
+    resolve, and the previous one restored after.
+    """
     params = []
+    previous = get_current_device(probe_runtime=False)
     for device in sorted(DEVICES):
         dev = DEVICES[device]()
+        set_current_device(dev)
         for name in sorted(catalog._OPERATOR_MODULES):
             cls = getattr(catalog, name)
             if cls.test is None:
@@ -78,19 +85,27 @@ def _cases():
             cases = cls.test.resolve(cls, dev)
             first = [c for c in cases if not c.extensive][:1]
             for case in [*first, *(c for c in cases if c.lower and c not in first)]:
+                try:
+                    cls(**case.kwargs).resolved(dev)
+                    marks = ()
+                except Unresolvable as e:
+                    marks = pytest.mark.skip(reason=f"not for {device}: {e}")
                 params.append(
-                    pytest.param(device, cls, case, id=f"{device}-{name}-{case.label}")
+                    pytest.param(
+                        device,
+                        cls,
+                        case,
+                        id=f"{device}-{name}-{case.label}",
+                        marks=marks,
+                    )
                 )
+    set_current_device(previous)
     return params
 
 
 @pytest.mark.parametrize("device,cls,case", _cases(), indirect=["device"])
 def test_operator_lowers_to_instructions(device, cls, case, tmp_path):
-    try:
-        op = cls(**case.kwargs).resolved(device)
-    except ValueError as e:
-        pytest.skip(f"not for {device.name}: {e}")
-    lower(op, tmp_path)
+    lower(cls(**case.kwargs).resolved(device), tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -139,10 +154,7 @@ def test_a_bounded_operator_lowers(device, module, cls_name, kwargs, bound, tmp_
     asks the toolchain to patch its descriptors' lengths.
     """
     cls = getattr(importlib.import_module(f"iron.operators.{module}"), cls_name)
-    try:
-        op = cls(**kwargs).resolved(device)
-    except ValueError as e:
-        pytest.skip(f"not for {device.name}: {e}")
+    op = cls(**kwargs).resolved(device)
     n = graph.Value("n", "scratchpad", np.int32)
     op.use_value(bound, n.affine())  # what x[:n] in a graph does
     lower(op, tmp_path)

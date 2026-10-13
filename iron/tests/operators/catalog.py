@@ -45,6 +45,11 @@ def _declared():
         if declaration is None:
             continue
         for case in declaration.resolve(cls, DEVICE):
+            try:
+                cls(**case.kwargs).resolved(DEVICE)
+                unresolvable = []
+            except Unresolvable as e:  # more columns than this device has, say
+                unresolvable = [pytest.mark.skip(reason=str(e))]
             params.append(
                 pytest.param(
                     cls,
@@ -54,6 +59,7 @@ def _declared():
                     marks=[
                         *([pytest.mark.extensive] if case.extensive else []),
                         *([pytest.mark.bench] if case.bench else []),
+                        *unresolvable,
                     ],
                 )
             )
@@ -64,10 +70,7 @@ def _declared():
 def test_operator(
     cls: type[Operator], declaration: Testing, case: Case, npu_runtime, record_property
 ):
-    try:
-        op = cls(**case.kwargs).resolved(DEVICE)
-    except Unresolvable as e:  # more columns than this device has, say
-        pytest.skip(str(e))
+    op = cls(**case.kwargs).resolved(DEVICE)
     draw = declaration.draw
     extra = draw(op) if callable(draw) else (draw or {})
     tolerance = op.gate()
