@@ -88,13 +88,6 @@ def test_phi_4_mini_instruct(runner, model, prompt_len, num_tokens, record_prope
     check_generation(runner, model, prompt_len, num_tokens, record=record_property)
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="model.generate()'s on-device loop needs a full-ELF decode step; "
-    "this model's decode step is each-step/xclbin (the full-ELF link is "
-    "impractically slow at this depth, see the module docstring) -- a "
-    "pre-existing CausalLM.generate() constraint, not specific to this model.",
-)
 def test_phi_4_mini_instruct_sampling(runner, model, record_property):
     check_device_sampling(runner, model, 256, 20, record=record_property)
 
