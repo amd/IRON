@@ -23,10 +23,12 @@ from iron.operators.rms_norm import RMSNorm
 
 ROWS, COLS = 64, 512
 
-pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
+pytestmark = [
+    pytest.mark.usefixtures("npu2"),  # a bound device, restored
+    pytest.mark.supported_devices("npu2"),
+]
 
 
-@pytest.mark.supported_devices("npu2")
 def test_every_row_of_a_bound_is_computed(npu_runtime):
     class Step(iron.Graph):
         def body(self, x, y, *, p: Scratchpad[np.int32]):
@@ -52,7 +54,6 @@ def test_every_row_of_a_bound_is_computed(npu_runtime):
         assert verdict, f"{p=}: the valid rows differ: {verdict.detail}"
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_bound_past_a_wrap_of_tiles_per_lane(npu_runtime):
     class Step(iron.Graph):
         def body(self, x, y, *, n: Scratchpad[np.int32]):

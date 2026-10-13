@@ -18,7 +18,10 @@ from iron.common.harness import run_test, vectors
 from iron.lm.blocks import SwiGLU
 from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, SiLU
 
-pytestmark = pytest.mark.usefixtures("npu_runtime")
+pytestmark = [
+    pytest.mark.usefixtures("npu_runtime"),
+    pytest.mark.supported_devices("npu2"),
+]
 
 
 class Residual(iron.Graph):
@@ -29,7 +32,6 @@ class Residual(iron.Graph):
         return ElementwiseAdd(GEMV(self.w, x, num_aie_columns=8), r)
 
 
-@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("M,K", [(2048, 2048), (2048, 8192), (512, 2048)])
 def test_a_residual_rides_the_matrix_into_a_folded_matvec(M, K):
     rng = np.random.default_rng(0)
@@ -56,14 +58,12 @@ def test_a_residual_rides_the_matrix_into_a_folded_matvec(M, K):
     assert got.view(np.uint16).tolist() == unfolded.view(np.uint16).tolist()
 
 
-@pytest.mark.supported_devices("npu2")
 def test_each_batch_of_a_matvec_takes_its_own_residual():
     op = GEMV(M=256, K=128, num_batches=2).fold(ElementwiseAdd(size=2 * 256), 0)
     run = run_test(op, vectors(op), tolerance=op.gate())
     assert not run.errors, run.errors
 
 
-@pytest.mark.supported_devices("npu2")
 def test_the_up_projection_rides_the_gate_into_its_product():
     E, H = 2048, 8192
     rng = np.random.default_rng(0)

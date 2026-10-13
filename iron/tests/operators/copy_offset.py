@@ -28,10 +28,12 @@ from iron.operators.copy import Copy
 N_KV, HEAD_DIM, SEQ = 8, 64, 128
 
 
-pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
+pytestmark = [
+    pytest.mark.usefixtures("npu2"),  # a bound device, restored
+    pytest.mark.supported_devices("npu2"),
+]
 
 
-@pytest.mark.supported_devices("npu2")
 def test_the_cache_offset_is_applied_per_call(npu_runtime):
     cache = iron.state((N_KV, SEQ, HEAD_DIM), name="cache")
 
@@ -64,7 +66,6 @@ def test_the_cache_offset_is_applied_per_call(npu_runtime):
 CHUNK, CHUNKS = 64, 4
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_chunk_lands_in_its_rows_of_the_cache(npu_runtime):
     cache = iron.state((N_KV, CHUNKS * CHUNK, HEAD_DIM), name="cache")
 
@@ -97,7 +98,6 @@ def test_a_chunk_lands_in_its_rows_of_the_cache(npu_runtime):
 GROUPS, SLOTS, BLOCKS, ROWS, WIDE, KEEP = 3, 4, 2, 1031, 6, 4
 
 
-@pytest.mark.supported_devices("npu2")
 def test_the_offset_moves_every_piece_of_a_split_pattern(npu_runtime):
     cache = iron.state((GROUPS, SLOTS, BLOCKS, ROWS, WIDE), name="cache")
 

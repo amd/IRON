@@ -69,7 +69,10 @@ SIZE = 8192
 TILE = 256
 TRIANGLE = (ElementwiseAdd, SiLU, ElementwiseMul)
 
-pytestmark = pytest.mark.usefixtures("npu_runtime")
+pytestmark = [
+    pytest.mark.usefixtures("npu_runtime"),
+    pytest.mark.supported_devices("npu2"),
+]
 
 
 class Calls(iron.Graph):
@@ -102,7 +105,6 @@ class Attend(iron.Graph):
         return MHA(q, k[:n], v[:n], heads_interleaved=True, kv_interleaved=True)
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_value_derived_from_a_bound_extent_follows_the_call(tmp_path):
     # MHA's KV block count follows the context, which the call gives alone.
     traced = Attend().trace(q=(1, 32, 64), k=(2048, 8, 64), v=(2048, 8, 64))
@@ -118,7 +120,6 @@ def test_a_value_derived_from_a_bound_extent_follows_the_call(tmp_path):
     assert t_step[2048] > 3 * t_step[64], t_step
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_design_following_the_context_is_priced_and_tuned_over_its_points(
     tmp_path,
 ):
@@ -174,7 +175,6 @@ def test_a_design_following_the_context_is_priced_and_tuned_over_its_points(
     }
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_pack_runs_beside_a_reference_its_call_gives_values(tmp_path):
     dev = aie_utils.ensure_current_device()
     rotate = Call(Rotate().trace(x=(2048, 64), angles=(2048, 64)), dict(n=64))
@@ -193,7 +193,6 @@ def test_a_pack_runs_beside_a_reference_its_call_gives_values(tmp_path):
     assert table.packs[name].beside == reference.key
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_value_derived_from_a_tunable_is_measured_at_its_resolution(tmp_path):
     # GEMM's tile count reads its auto() tile shape as well as the row bound.
     # Its DMAs move every row under the bound, so its time does not follow it.
@@ -207,7 +206,6 @@ def test_a_value_derived_from_a_tunable_is_measured_at_its_resolution(tmp_path):
     assert table.steps[key].t_step_us > 0, table.steps[key]
 
 
-@pytest.mark.supported_devices("npu2")
 def test_widths_are_compared_on_the_rows_under_the_bound(tmp_path):
     # GEMM drains every row; past the bound they hold what each width's L1 held.
     traced = Project().trace(x=(1024, 1024), w=(1024, 1024))
@@ -223,7 +221,6 @@ def test_widths_are_compared_on_the_rows_under_the_bound(tmp_path):
     assert all(c.exact for c in costs.values()), costs
 
 
-@pytest.mark.supported_devices("npu2")
 def test_an_operator_whose_resolution_shapes_a_buffer_is_measured(tmp_path):
     # flm.GEMM's B is a Select on a field resolve() fills.
     op = FlmGEMM(M=256, K=512, N=1024, b_col_maj=True)
@@ -236,7 +233,6 @@ def test_an_operator_whose_resolution_shapes_a_buffer_is_measured(tmp_path):
     assert found[0].key in costs and all(c.exact for c in costs.values()), costs
 
 
-@pytest.mark.supported_devices("npu2")
 def test_measures_more_widths_than_one_batch_of_contexts(tmp_path):
     # A probe that writes a per-call value loads its context when it is built.
     op = Masked().trace(x=(256, 256)).steps[0].op
@@ -251,7 +247,6 @@ def test_measures_more_widths_than_one_batch_of_contexts(tmp_path):
     assert len(costs) == len(found) and all(c.exact for c in costs.values())
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_calibration_against_another_sessions_steps_is_refused(tmp_path):
     table = CostTable(tmp_path / "costs.json", "npu2", "fused")
     traced = Chain(SIZE, TILE).trace(a=(SIZE,), b=(SIZE,))
@@ -270,7 +265,6 @@ def test_a_calibration_against_another_sessions_steps_is_refused(tmp_path):
     assert not table.calibrations
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_setting_far_behind_the_fastest_is_timed_no_further(tmp_path):
     # GEMV at one column is several times its widest's step.
     found = variants(GEMV(M=2048, K=2048), aie_utils.ensure_current_device())
@@ -287,7 +281,6 @@ def test_a_setting_far_behind_the_fastest_is_timed_no_further(tmp_path):
     assert all(full.steps[key].t_step_us > 1.2 * best for key in stopped)
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_batch_whose_every_setting_is_stopped_is_measured(tmp_path):
     # At cutoff 0 all but the default stop after settling; a later batch has no default.
     op = Masked().trace(x=(256, 256)).steps[0].op
@@ -300,7 +293,6 @@ def test_a_batch_whose_every_setting_is_stopped_is_measured(tmp_path):
     assert rounds == [timing.rounds] + [timing.settle] * (len(found) - 1)
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_setting_is_priced_beside_the_default_its_batch_times(tmp_path):
     found = variants(
         ElementwiseAdd(size=SIZE, tile_size=TILE), aie_utils.ensure_current_device()
@@ -321,7 +313,6 @@ def test_a_setting_is_priced_beside_the_default_its_batch_times(tmp_path):
     assert again.steps == first.steps
 
 
-@pytest.mark.supported_devices("npu2")
 def test_one_operator_is_measured_from_the_command_line(tmp_path):
     table = tmp_path / "costs.json"
     run = subprocess.run(
@@ -366,7 +357,6 @@ time.sleep(float(sys.argv[1]))
 """
 
 
-@pytest.mark.supported_devices("npu2")
 def test_timing_waits_for_another_process_to_leave_the_npu():
     child = subprocess.Popen(
         [sys.executable, "-c", HOLD, "3"], stdout=subprocess.PIPE, text=True
@@ -380,7 +370,6 @@ def test_timing_waits_for_another_process_to_leave_the_npu():
     assert any(f"in use by pid [{child.pid}]" in line for line in logged), logged
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_step_costs_alike_however_long_the_run():
     # A host core woken from deep idle by a long run's completion, and not
     # by a short one's, would price a step above a short run's.
@@ -399,7 +388,6 @@ def test_a_step_costs_alike_however_long_the_run():
     assert abs(long - short) < 0.05 * short, (short, long)
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_table_at_another_power_mode_is_measured_again_whole(tmp_path):
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
@@ -416,7 +404,6 @@ def test_a_table_at_another_power_mode_is_measured_again_whole(tmp_path):
     assert table.pmode == report["Power Mode"] and set(ran) == table.steps.keys()
 
 
-@pytest.mark.supported_devices("npu2")
 def test_descent_measures_every_line_through_the_default(tmp_path):
     found = variants(
         ElementwiseAdd(size=SIZE, tile_size=TILE), aie_utils.ensure_current_device()
@@ -437,7 +424,6 @@ def test_descent_measures_every_line_through_the_default(tmp_path):
     assert all(c.exact for c in costs.values()), costs
 
 
-@pytest.mark.supported_devices("npu2")
 def test_remeasured_descent_runs_every_line_again(tmp_path):
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
@@ -458,7 +444,6 @@ def test_remeasured_descent_runs_every_line_again(tmp_path):
     assert ran.keys() == table.steps.keys()
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_setting_that_does_not_build_is_left_out(tmp_path):
     # 128x128 B tiles double-buffered beside A and C are past a core's memory.
     dev = aie_utils.ensure_current_device()
@@ -485,7 +470,6 @@ def test_a_setting_that_does_not_build_is_left_out(tmp_path):
     assert refused[found[1].key].startswith("[aiecc] Compilation failed")
 
 
-@pytest.mark.supported_devices("npu2")
 def test_tuned_graph_is_bit_identical_and_packed(tmp_path):
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
@@ -553,7 +537,6 @@ def test_tuned_each_step_graph_is_bit_identical_and_narrowed(tmp_path):
     assert verdict, verdict.detail
 
 
-@pytest.mark.supported_devices("npu2")
 def test_the_model_predicts_the_tuned_graph_and_the_graph_as_traced(tmp_path):
     # Strix Halo at 8 rounds of 50: tuned within -6.8% to +2.6%; as traced
     # the model held 618-634 us while runs measured 626-738 us.
@@ -587,7 +570,6 @@ def test_the_model_predicts_the_tuned_graph_and_the_graph_as_traced(tmp_path):
     ), check.report()
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
     # Measured as traced and folded, the tuner decides; either way its
     # image is the untuned one folded alike, bit for bit.
@@ -626,7 +608,6 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
     assert want.view(np.uint16).tolist() == got.view(np.uint16).tolist()
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_folded_design_is_priced_beside_the_one_it_replaces(tmp_path):
     E = 2048
     weights = [np.zeros((E, E), bfloat16) for _ in range(3)]
@@ -651,7 +632,6 @@ def test_a_folded_design_is_priced_beside_the_one_it_replaces(tmp_path):
     assert again.steps == table.steps
 
 
-@pytest.mark.supported_devices("npu2")
 def test_an_inexact_width_within_its_gates_is_accurate_and_cached(tmp_path):
     # tile_k=16 rounds C's bf16 accumulator after every 16 of K, the default every 64.
     dev = aie_utils.ensure_current_device()
@@ -676,7 +656,6 @@ def test_an_inexact_width_within_its_gates_is_accurate_and_cached(tmp_path):
     assert {p: p.stat().st_mtime_ns for p in cache.directory.iterdir()} == stamps
 
 
-@pytest.mark.supported_devices("npu2")
 def test_a_graph_sharing_measured_designs_measures_nothing(tmp_path):
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "costs")
@@ -702,7 +681,6 @@ def test_a_graph_sharing_measured_designs_measures_nothing(tmp_path):
     assert table.calibrations == chain.calibrations
 
 
-@pytest.mark.supported_devices("npu2")
 def test_an_xclbin_chain_is_measured_and_tuned_by_its_own_model(tmp_path):
     # Strix Halo: a 1-column add loads in ~84 us, an 8-column one in ~626 us.
     report = platform()
@@ -749,7 +727,6 @@ def test_an_xclbin_chain_is_measured_and_tuned_by_its_own_model(tmp_path):
     ), check.report()
 
 
-@pytest.mark.supported_devices("npu2")
 def test_an_xclbin_chain_measures_a_design_its_call_gives_values(tmp_path):
     # An xclbin has no parameter table: its per-call values are dispatch-time.
     shapes = dict(x=(2048,), rows=(16, 2048))

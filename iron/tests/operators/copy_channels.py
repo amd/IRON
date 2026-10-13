@@ -22,7 +22,10 @@ from iron.operators.copy import Copy
 N, G, D = 64, 8, 64
 T, H, W = 64, 4, 256
 
-pytestmark = pytest.mark.usefixtures("npu2")
+pytestmark = [
+    pytest.mark.usefixtures("npu2"),
+    pytest.mark.supported_devices("npu2"),
+]
 
 
 class _Permute(iron.Graph):
@@ -33,7 +36,6 @@ class _Permute(iron.Graph):
         return Copy(x.reshape(N, G, D).transpose(1, 0, 2), num_channels=self.channels)
 
 
-@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("channels", [1, 2, 4])
 def test_a_transposing_copy_on_any_channel_count(npu_runtime, channels):
     x = np.random.default_rng(channels).standard_normal((N, G * D)).astype(bfloat16)
@@ -44,7 +46,6 @@ def test_a_transposing_copy_on_any_channel_count(npu_runtime, channels):
     assert not len(wrong), f"{len(wrong)} elements differ, first {wrong[:4]}"
 
 
-@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("channels", [1, 2, 4])
 @pytest.mark.parametrize("rows", [T * H * W, T * W], ids=["flat", "head_rows"])
 def test_a_transpose_into_wider_rows_on_any_channel_count(npu_runtime, channels, rows):

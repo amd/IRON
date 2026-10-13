@@ -28,7 +28,10 @@ IMAGES = {
 }
 
 
-pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
+pytestmark = [
+    pytest.mark.usefixtures("npu2"),  # a bound device, restored
+    pytest.mark.supported_devices("npu2"),
+]
 
 
 class _Sum(iron.Graph):
@@ -58,7 +61,6 @@ def _cache(net, graph):
     return np.asarray(net.read(graph.cache), dtype=np.float32).reshape(SLOTS, ROWS)
 
 
-@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("image", IMAGES)
 def test_a_sum_written_into_a_state_lands_in_its_slot(image, npu_runtime):
     graph = _Sum()
@@ -77,7 +79,6 @@ def test_a_sum_written_into_a_state_lands_in_its_slot(image, npu_runtime):
         assert wrong.size == 0, f"{slot=}: {len(wrong)} differ, first {wrong[:4]}"
 
 
-@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("image", IMAGES)
 def test_a_projection_written_into_a_state_is_the_one_copied(image, npu_runtime):
     rng = np.random.default_rng(1)

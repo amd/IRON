@@ -15,6 +15,8 @@ from iron.operators.flm.prefill_attn.op import (
     PrefillSlidingAttention,
 )
 
+pytestmark = pytest.mark.supported_devices("npu2")
+
 NUM_HEADS = 8
 # The operator cannot produce this value from the inputs below. The rows past
 # L_end - L_begin must keep it.
@@ -120,7 +122,6 @@ def _build(kind, **overrides):
 BENCH = {("attn", 0, 512, 1024, 1), ("swa", 512, 1024, 2048, 1)}
 
 
-@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "kind, L_begin, L_end, max_l, num_kv_heads",
     [
@@ -144,7 +145,6 @@ def test_matches_reference(
     )
 
 
-@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("kind", OPERATORS)
 def test_one_image_serves_every_range(kind, npu_runtime):
     """Check that each dispatch runs its own token range.
@@ -160,7 +160,6 @@ def test_one_image_serves_every_range(kind, npu_runtime):
         _check(op, image, L_begin, L_end, max_l, seed)
 
 
-@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "L_begin, L_end, max_l, match",
     [
@@ -182,7 +181,6 @@ def test_refuses_unservable_ranges(L_begin, L_end, max_l, match, npu_runtime):
         OperatorImage(op)(*bufs, L_begin=L_begin, L_end=L_end, max_l=max_l)
 
 
-@pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
 @pytest.mark.parametrize("num_kv_heads", [1, 2])
 @pytest.mark.parametrize("kind", OPERATORS)

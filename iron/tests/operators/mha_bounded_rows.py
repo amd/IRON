@@ -33,10 +33,12 @@ from iron.operators.mha import MHA
 HEADS, KV_HEADS, D, SEQ, PIPELINES = 32, 8, 64, 1024, 8
 
 
-pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
+pytestmark = [
+    pytest.mark.usefixtures("npu2"),  # a bound device, restored
+    pytest.mark.supported_devices("npu2"),
+]
 
 
-@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "heads,kv_heads,d,seq,scales,attention,calls",
     [
@@ -131,7 +133,6 @@ class Chunk(iron.Graph):
         )
 
 
-@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "boundaries", [None, iron.each_step], ids=["full_elf", "xclbin"]
 )
@@ -165,7 +166,6 @@ def test_a_chunk_attends_over_the_cache_before_it(npu_runtime, boundaries):
         assert verdict, f"{c=} {rows=}: the valid elements differ: {verdict.detail}"
 
 
-@pytest.mark.supported_devices("npu2")
 def test_what_lies_past_the_bound_does_not_reach_the_output(npu_runtime):
     """Q past a chunk's rows holds whatever the step before left there, and
     the cache past its last position whatever an earlier prompt did; the

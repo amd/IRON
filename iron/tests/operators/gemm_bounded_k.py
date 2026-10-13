@@ -32,10 +32,12 @@ MODES = {
     "scalar": dict(ACCURATE, use_scalar=True),
 }
 
-pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
+pytestmark = [
+    pytest.mark.usefixtures("npu2"),  # a bound device, restored
+    pytest.mark.supported_devices("npu2"),
+]
 
 
-@pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize(
     "boundaries", [None, iron.each_step], ids=["full_elf", "xclbin"]
 )
@@ -78,7 +80,6 @@ def test_the_reduction_stops_at_the_per_call_length(npu_runtime, mode, boundarie
         assert verdict, f"n={n}: {verdict.detail}"
 
 
-@pytest.mark.supported_devices("npu2")
 def test_attention_reduces_over_the_valid_keys(npu_runtime):
     """The Softmax writes only the blocks ``n`` covers, so the calls run
     long before short: a block a longer call wrote holds its weights, and a
