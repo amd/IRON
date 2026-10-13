@@ -102,6 +102,7 @@ def _build_add_relu_sequence(dispatch, name, input_args=("a", "b")):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("size", [_ADD_RELU_SIZE])
 def test_auto_dispatch_selects_platform_default(size, npu_runtime):
     """``dispatch="auto"`` must resolve to the full-ELF mode on Strix and to
@@ -138,14 +139,14 @@ def test_auto_dispatch_selects_platform_default(size, npu_runtime):
 
 
 @pytest.mark.parametrize("sequence", ["add_relu"])
-def test_fused_mlir_contains_reconfiguration(sequence, npu_runtime):
+def test_fused_mlir_contains_reconfiguration(sequence, npu2):
     """The single-dispatch (fused) path emits one ``aie.device`` per operator
     plus a top-level device whose runtime sequence reconfigures the array
     between operators via ``aiex.configure`` / ``aiex.run``.
 
     Only the *generated MLIR* is inspected here (no ELF backend is invoked),
-    so the check is device-agnostic and runs on all platforms even though the
-    full fused dispatch itself requires NPU2.
+    so it needs no device: it builds for NPU2, which the full fused dispatch
+    itself requires.
     """
     seq = _build_add_relu_sequence("fused", "infra_fused_mlir")
 
@@ -190,6 +191,7 @@ def _run_add_relu(dispatch, a, b, name):
     return run.get_buffer("out").numpy()[:_ADD_RELU_SIZE].copy()
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("dispatch", ["separate", "fused", "compare"])
 def test_dispatch_modes_bit_identical(dispatch, npu_runtime):
     """Add -> relu must yield byte-for-byte identical output across every NPU
@@ -283,6 +285,7 @@ def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("exact", [False, True])
 def test_compare_mode_judges_each_step_by_its_tolerance(exact, npu_runtime):
     """dispatch="compare" runs the NPU pipeline and, per step, re-runs the
@@ -317,6 +320,7 @@ def test_compare_mode_judges_each_step_by_its_tolerance(exact, npu_runtime):
         run()  # must not raise
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_compare_mode_judges_every_output_at_the_calls_values(npu_runtime, caplog):
     """Sample writes two buffers, its record in place and the token, at a row
     and slot that are per-call values. Compare mode runs its reference at
@@ -365,6 +369,7 @@ def test_compare_mode_judges_every_output_at_the_calls_values(npu_runtime, caplo
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("dispatch", ["separate", "fused"])
 def test_non_input_buffers_sync_without_explicit_flush(dispatch, npu_runtime):
     """Host writes through get_buffer() to a non-input buffer reach the NPU at
@@ -435,7 +440,7 @@ def _expanded_pdis(seq):
 
 
 @pytest.mark.parametrize("reconfigure", [False, True])
-def test_one_design_expands_only_to_reconfigure(reconfigure):
+def test_one_design_expands_only_to_reconfigure(reconfigure, npu2):
     """One design's fusion leaves its load unexpanded and adds no reset
     device, unless the sequence asks to reconfigure at every call, as a
     probe timing a design's entry does.
@@ -465,6 +470,7 @@ def test_reconfigure_needs_a_full_elf():
         )
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_one_design_is_configured_once(npu_runtime):
     """A fused sequence of one design builds no expanded load, and every
     dispatch after the first still computes on its new inputs.
@@ -485,6 +491,7 @@ def test_one_design_is_configured_once(npu_runtime):
         assert verdict, f"rep {rep}: out: {verdict.detail}"
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_one_design_reconfigures_after_another_image(npu_runtime):
     """Two one-design images dispatched in turn each configure the array
     again after the other ran, so each still computes its own operator.

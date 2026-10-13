@@ -199,6 +199,7 @@ def check_on_device(operator, data, rounding=CONV_EVEN, record=None):
     )
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("M,K,N,epilogue,clamp,rounding", get_params())
 def test_gemm(M, K, N, epilogue, clamp, rounding, npu_runtime, record_property):
     scale = INPUT_SCALE if epilogue is NONE else ACTIVATION_INPUT_SCALE
@@ -218,6 +219,7 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, npu_runtime, record_property):
     assert not errors, "Test failed"
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("M,K,N", [(256, 512, 256), (512, 1024, 512)])
 def test_gemm_without_activations(M, K, N, npu_runtime, record_property):
     """Compiling no activation links no LUT tables, so on AIE2 the bytes they
@@ -275,6 +277,7 @@ def b_col_maj_params():
     ]
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("M,K,N,tile_n,epilogue_modes,emulate", b_col_maj_params())
 def test_gemm_b_col_maj(
     M, K, N, tile_n, epilogue_modes, emulate, npu_runtime, record_property
@@ -294,6 +297,7 @@ def test_gemm_b_col_maj(
     assert not errors, "Test failed"
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_folded_silu_and_clamp_compute_what_their_operators_do(npu_runtime):
     """SiLU then Clamp folded into the epilogue, against those operators'
     own references applied to the product.
@@ -311,6 +315,7 @@ def test_folded_silu_and_clamp_compute_what_their_operators_do(npu_runtime):
     assert not errors, "Test failed"
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_gemm_split_leg_bounds_runs(npu_runtime):
     """K or N = 10240 overflows the shim BD's 20-bit mega_row step, so the
     compiler cuts that leg into pieces, bounded by its queue polls and BD
@@ -391,6 +396,7 @@ def test_sequence_programs_b_and_awaits_only_each_columns_last_c(M, K, N, npu2):
     assert mlir.count("aiex.dma_await_task") == npu2.cols
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("M,K,N,tile_n,tile_ma", tile_option_params())
 def test_gemm_tile_options(M, K, N, tile_n, tile_ma, npu_runtime):
     """Each accepted (tile_n, tile_ma) computes the right answer on hardware."""
@@ -400,6 +406,7 @@ def test_gemm_tile_options(M, K, N, tile_n, tile_ma, npu_runtime):
     assert not errors, "Test failed"
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("K", [256, 768])
 def test_gemm_k_tile(K, npu_runtime):
     """A k tile other than the default 512 computes the right answer.
@@ -415,6 +422,7 @@ def test_gemm_k_tile(K, npu_runtime):
     assert not errors, "Test failed"
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("M,K,N", [(256, 512, 1024), (512, 1024, 2048)])
 def test_artifact_stem_differs_from_generic_gemm(M, K, N, npu_runtime):
     """``flm.GEMM`` must never share an artifact stem with ``GEMM``.
@@ -426,6 +434,7 @@ def test_artifact_stem_differs_from_generic_gemm(M, K, N, npu_runtime):
     assert GEMM(M=M, K=K, N=N).name != GenericGEMM(M=M, K=K, N=N).name
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_one_xclbin_serves_every_shape(npu_runtime):
     """Several shapes back to back on one loaded xclbin.
 
@@ -464,6 +473,7 @@ def test_one_xclbin_serves_every_shape(npu_runtime):
         assert stamp == xclbin, f"{M}x{K}x{N} rebuilt the xclbin"
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_one_xclbin_serves_every_clamp_bound(npu_runtime):
     """Different clamp bounds back to back on one loaded xclbin.
 
@@ -531,6 +541,7 @@ SHIPPED = _shipped_marks()
 BUDGET_FLOOR = 2e-2
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
     "M,K,N,epilogue,clamp",
     [
@@ -580,6 +591,7 @@ def test_shipped_overlay(M, K, N, epilogue, clamp, npu_runtime, record_property)
     assert not errors, "Test failed"
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
     "epilogue,clamp",
     [
@@ -657,6 +669,7 @@ def test_shipped_epilogue_matches_accumulator(epilogue, clamp, npu_runtime):
     ).any(), f"{epilogue}: tolerance is vacuous -- an all-zero result would pass"
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
     "M,K,N",
     [

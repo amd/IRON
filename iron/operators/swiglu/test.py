@@ -65,6 +65,7 @@ def _verdict(net, step):
     return verdict
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("fold", [False, True], ids=["apart", "folded"])
 @pytest.mark.parametrize("rows,embedding_dim,hidden_dim", SHAPES, ids=lambda v: str(v))
 def test_swiglu(rows, embedding_dim, hidden_dim, fold, npu_runtime, record_property):

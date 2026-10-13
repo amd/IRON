@@ -79,12 +79,14 @@ def _buffers():
     return src, dst
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_the_stream_is_generated_per_call():
     artifacts = OperatorImage(ChunkCopy(max_chunks=MAX_CHUNKS)).compile().artifacts
     assert artifacts.insts is None
     assert artifacts.entry.dispatch_library.is_file()
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_one_image_serves_every_parameter(npu_runtime):
     """Each n must copy exactly n chunks: a stream generated for another n
     leaves a different number of sentinels behind.
@@ -98,12 +100,14 @@ def test_one_image_serves_every_parameter(npu_runtime):
         assert np.all(got[n * CHUNK :] == SENTINEL), f"n={n} copied too much"
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 def test_refuses_an_n_past_the_buffers(npu_runtime):
     image = OperatorImage(ChunkCopy(max_chunks=MAX_CHUNKS))
     with pytest.raises(HostRuntimeError, match=f"n exceeds {MAX_CHUNKS}"):
         image(*_buffers(), n=MAX_CHUNKS + 1)
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize(
     "scalars, error, match",
     [

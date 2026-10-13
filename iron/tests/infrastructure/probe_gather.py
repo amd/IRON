@@ -92,7 +92,7 @@ def test_a_graph_gathering_by_device_ids_is_measured(npu_runtime, table, tmp_pat
 
 
 @pytest.mark.supported_devices("npu2")
-def test_an_emit_cannot_start_a_gather_by_device_ids(table):
+def test_an_emit_cannot_start_a_gather_by_device_ids(table, npu_runtime):
     walk = Walk(table, 15)
     body = walk.compile()
     with pytest.raises(ValueError, match=r"an Emit cannot start it.*\['table'\]"):

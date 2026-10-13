@@ -12,10 +12,10 @@ only the first. The table's successor is a single cycle through every row,
 so a run that read a stale or misplaced offset lands on the wrong row.
 """
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
-from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from aie.utils.trace import TraceConfig, get_trace_buffer
 from ml_dtypes import bfloat16
 
@@ -123,7 +123,7 @@ def test_feedback_into_plain_buffers(npu_runtime):
     fed = _fed(run)
     assert fed.tolist() == [successor[3] * ROW, 0], fed
 
-    mine = XRTTensor((2,), dtype=np.int32)
+    mine = aie_utils.DEFAULT_TENSOR_CLASS((2,), dtype=np.int32)
     mine.numpy_view()[:] = -1
     mine.to("npu")
     bo = mine.buffer_object()
