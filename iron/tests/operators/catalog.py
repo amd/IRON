@@ -17,10 +17,10 @@ against its own accumulator, say) has its own ``test.py`` beside it.
 import aie.utils as aie_utils
 import pytest
 
-import iron.operators as catalog
-from iron.common import Operator, Unresolvable
+from iron.common import Operator
 from iron.common.harness import run_test, vectors
 from iron.common.testing import Case, Testing
+from iron.tests.common.declared import declared
 
 DEVICE = aie_utils.get_current_device()
 if DEVICE is None:
@@ -33,37 +33,21 @@ if DEVICE is None:
 
 
 def _declared():
-    """Every operator in the catalog that declares its cases, with those cases.
-
-    Read from the catalog's own table, so an operator added there is covered
-    without touching this module.
-    """
-    params = []
-    for name in sorted(catalog._OPERATOR_MODULES):
-        cls = getattr(catalog, name)
-        declaration = cls.test
-        if declaration is None:
-            continue
-        for case in declaration.resolve(cls, DEVICE):
-            try:
-                cls(**case.kwargs).resolved(DEVICE)
-                unresolvable = []
-            except Unresolvable as e:  # more columns than this device has, say
-                unresolvable = [pytest.mark.skip(reason=str(e))]
-            params.append(
-                pytest.param(
-                    cls,
-                    declaration,
-                    case,
-                    id=f"{name}-{case.label}",
-                    marks=[
-                        *([pytest.mark.extensive] if case.extensive else []),
-                        *([pytest.mark.bench] if case.bench else []),
-                        *unresolvable,
-                    ],
-                )
-            )
-    return params
+    """Every operator in the catalog that declares its cases, with those cases."""
+    return [
+        pytest.param(
+            cls,
+            cls.test,
+            case,
+            id=f"{name}-{case.label}",
+            marks=[
+                *([pytest.mark.extensive] if case.extensive else []),
+                *([pytest.mark.bench] if case.bench else []),
+                *([pytest.mark.skip(reason=unresolvable)] if unresolvable else []),
+            ],
+        )
+        for name, cls, case, unresolvable in declared(DEVICE)
+    ]
 
 
 @pytest.mark.parametrize("cls,declaration,case", _declared())
