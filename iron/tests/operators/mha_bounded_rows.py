@@ -22,7 +22,6 @@ whether it lies before or after a query.
 
 import numpy as np
 import pytest
-from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 import iron
@@ -91,29 +90,21 @@ def test_rows_past_the_valid_length_are_zero(
         (rng.standard_normal((seq, h, d)) * s).astype(bfloat16)
         for h, s in zip((heads, kv_heads, kv_heads), scales)
     )
-    net = Attend().compile(q=q.shape, k=k.shape, v=v.shape)
-    reference = MHA(
-        num_heads=heads,
-        num_KV_heads=kv_heads,
-        seq_len=seq,
-        d=d,
-        heads_interleaved=True,
-        kv_interleaved=True,
-        **attention,
-    )
+    attend = Attend()
+    net = attend.compile(q=q.shape, k=k.shape, v=v.shape)
     for rows, n in calls:
         o = np.asarray(net(q, k, v, rows=rows, n=n), dtype=np.float32)
         o = o.reshape(seq, heads, d)
         padding = o[n:rows]
         assert np.isfinite(padding).all(), f"{rows=} {n=}: non-finite padding rows"
         assert not padding.any(), f"{rows=} {n=}: padding rows are not zero"
-        expected = reference.reference(q, k, v, s_q=n, s_kv=n)
-        expected = np.asarray(expected, dtype=np.float32).reshape(seq, heads, d)
+        expected = attend.reference(q, k, v, rows=rows, n=n)
+        expected = np.asarray(expected, dtype=np.float32).reshape(-1, heads, d)
         verdict = verify_buffer(
             o[:n],
             "O",
             expected[:n],
-            tolerance=Tolerance.relative(0.04, 0.15, max_mismatch_frac=0.005),
+            tolerance=MHA.test.tolerance,
         )
         assert verdict, f"{rows=} {n=}: the valid elements differ: {verdict.detail}"
 
@@ -169,7 +160,7 @@ def test_a_chunk_attends_over_the_cache_before_it(npu_runtime, boundaries):
             o[:rows],
             "O",
             whole[start : start + rows],
-            tolerance=Tolerance.relative(0.04, 0.15, max_mismatch_frac=0.005),
+            tolerance=MHA.test.tolerance,
         )
         assert verdict, f"{c=} {rows=}: the valid elements differ: {verdict.detail}"
 

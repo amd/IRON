@@ -45,14 +45,11 @@ def test_a_residual_rides_the_matrix_into_a_folded_matvec(M, K):
     assert len(plain.traced.steps) == 2
 
     got = np.array(folded(x, r).numpy()[:M])
-    want = (w.astype(np.float32) @ x.astype(np.float32).reshape(-1)).astype(bfloat16)
-    want = (want.astype(np.float32) + r.astype(np.float32).reshape(-1)).astype(bfloat16)
     (out,) = (b.name for b in step.op.outputs)
     (verdict,) = step.op.judge(
         {b.name: t for b, t in zip(step.op.inputs, (w, x, r))},
         {out: got},
         step.op.gate(),
-        {out: want},
     ).values()
     assert verdict, verdict.detail
     unfolded = np.array(plain(x, r).numpy()[:M])

@@ -49,18 +49,11 @@ def test_one_query_is_as_accurate_deep_in_the_cache_as_near_its_start(npu_runtim
     k = np.resize(rng.standard_normal(rows) * 2, (CACHE, KV_HEADS, D)).astype(bfloat16)
     v = np.resize(rng.standard_normal(rows), (CACHE, KV_HEADS, D)).astype(bfloat16)
     q = rng.standard_normal((1, HEADS * D)).astype(bfloat16)
-    net = Decode().compile(q=q.shape, k=k.shape, v=v.shape)
+    decode = Decode()
+    net = decode.compile(q=q.shape, k=k.shape, v=v.shape)
     for position in (1023, CACHE - 65):
-        n = position + 1
         o = np.asarray(net(q, k, v, position=position), np.float32)
-        expected = MHA(
-            num_heads=HEADS,
-            num_KV_heads=KV_HEADS,
-            seq_len=1,
-            kv_len=n,
-            heads_interleaved=True,
-            kv_interleaved=True,
-        ).reference(q.reshape(1, HEADS, D), k[:n], v[:n])
+        expected = decode.reference(q, k, v, position=position)
         expected = np.asarray(expected, np.float32).reshape(o.shape)
         # 2.0% of the range measured at both positions, aie::exp2's error.
         peak = float(np.abs(expected).max())
