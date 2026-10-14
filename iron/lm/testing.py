@@ -3,7 +3,8 @@
 
 """What a model's device test checks: speed, accuracy against the
 CPU reference, and determinism, each over a ``Runner`` and
-the model it loaded.
+the model it loaded; where it finds the model's files, and ``Download``,
+a test input fetched by URL and kept beside them.
 
 A test module defines module-scoped ``runner`` and ``model`` fixtures, the
 model loaded from the runner once for the module, and each test calls one
@@ -11,8 +12,11 @@ of these on the two, with its ``record_property``, through which the
 figures reach the CSV.
 """
 
+import dataclasses
+import hashlib
 import os
 import time
+import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -36,6 +40,43 @@ from .generation import (
 def weights_dir(name: str) -> Path:
     """Where the tests find a model's files: ``$IRON_EXAMPLE_WEIGHTS_DIR/<name>``."""
     return Path(os.environ.get("IRON_EXAMPLE_WEIGHTS_DIR", "/srv")) / name
+
+
+@dataclasses.dataclass(frozen=True)
+class Download:
+    """A file a test reads that the repository does not hold, fetched from
+    ``url`` and pinned by its ``sha256``.
+    """
+
+    url: str
+    sha256: str
+
+    def fetch(self, directory: Path) -> Path:
+        """The file in ``directory``, by digest: fetched unless a file of the
+        pinned content is already there.
+
+        Raises:
+            ValueError: ``url`` is not https.
+            RuntimeError: What ``url`` serves is not the pinned content.
+        """
+        target = Path(directory) / self.url.rsplit("/", 1)[-1]
+        if target.exists():
+            with open(target, "rb") as f:
+                if hashlib.file_digest(f, "sha256").hexdigest() == self.sha256:
+                    return target
+        if not self.url.startswith("https://"):
+            raise ValueError(f"refusing to download over {self.url!r}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Beside the target and renamed, so an interrupted fetch leaves no
+        # truncated file behind.
+        partial = target.with_suffix(target.suffix + ".part")
+        with urllib.request.urlopen(self.url, timeout=60) as response:
+            data = response.read()
+        if (got := hashlib.sha256(data).hexdigest()) != self.sha256:
+            raise RuntimeError(f"{self.url} has SHA-256 {got}, expected {self.sha256}")
+        partial.write_bytes(data)
+        partial.replace(target)
+        return target
 
 
 def require(*files: Path) -> None:

@@ -6,3 +6,4 @@ tokenizers
 safetensors
 blobfile
 packaging
+pillow==12.3.0

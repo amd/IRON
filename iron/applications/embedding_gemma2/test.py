@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 from aie.utils.benchmark import run_iters
 from ml_dtypes import bfloat16
+from PIL import Image
 
 import iron
 from iron.common import Scratchpad
@@ -47,7 +48,7 @@ from iron.applications.embedding_gemma2.oracle import (
 from iron.applications.embedding_gemma2.vision import VisionTower
 from iron.applications.embedding_gemma2.weights import Weights
 from iron.lm import prompt_text
-from iron.lm.testing import require, weights_dir
+from iron.lm.testing import Download, require, weights_dir
 from iron.operators.copy import Copy
 
 DIRECTORY = weights_dir("embeddinggemma-2")
@@ -85,11 +86,12 @@ AUDIO_MIN_COSINE = 0.55
 # Measured: 0.042, 0.084, 0.072 and 0.074; the tower without its clamps is 0.88.
 AUDIO_MAX_ERROR = 0.09
 
-# Measured at the worst of IMAGES: min cosine 0.9705, relative error 4.0e-2.
-# bf16 error grows over 16 layers: HF's own bf16 tower is 0.9973 and 2.3e-2
-# off the oracle, the graph's bf16 reference 0.9864 and 2.9e-2.
-VISION_MIN_COSINE = 0.96
-VISION_MAX_ERROR = 0.05
+# Measured on npu2 at the worst token of IMAGES: min cosine 0.9745, 0.9633
+# and 0.9801, relative error 4.4e-2, 4.8e-2 and 5.3e-2. bf16 error grows
+# over 16 layers: HF's own bf16 tower is 0.9684, 0.9673 and 0.9924, and
+# 3.4e-2, 4.0e-2 and 4.1e-2, off its float32 one on the same photos.
+VISION_MIN_COSINE = 0.95
+VISION_MAX_ERROR = 0.06
 
 # Seconds of audio, by the soft tokens they give.
 CLIPS = {
@@ -105,20 +107,47 @@ CLIPS = {
 
 I, V = VisionConfig().image_tokens, VisionConfig().video_tokens
 
-# (height, width) of a decoded image, and its soft-token budget.
+VAL2017 = "https://s3.amazonaws.com/images.cocodataset.org/val2017"
+
+# COCO val2017 photos, fetched beside the checkpoint.
+COCO = {
+    # 640x480.
+    "cats": Download(
+        f"{VAL2017}/000000039769.jpg",
+        "dea9e7ef97386345f7cff32f9055da4982da5471c48d575146c796ab4563b04e",
+    ),
+    # 375x500, portrait.
+    "stop_sign": Download(
+        f"{VAL2017}/000000000724.jpg",
+        "5c0e559c75d3969c8e3e297b61f61063f78045c9d4802b526ba616361f3823fd",
+    ),
+    # 640x426.
+    "living_room": Download(
+        f"{VAL2017}/000000000139.jpg",
+        "ffe0f0cec3b2e27aab1967229cdf0a0d7751dcdd5800322f0b8ac0dffb3b8a8d",
+    ),
+    # 621x640: the image of the text encoder's cases.
+    "baseball": Download(
+        f"{VAL2017}/000000000872.jpg",
+        "c2aa138ee3a59b057a7ba6fc5a6a18e62af531aa7dab78a7bfd33c1cd7e55eb6",
+    ),
+}
+
+# The vision tower's photos and the soft-token budget each is resized to.
 IMAGES = {
-    # 14 x 20 tokens at its own size: the whole image budget, 2520 patches.
-    "image": ((672, 960), I),
-    # Resized to 21 x 12 tokens, 2268 patches: the processor pads 252 of them.
-    "portrait": ((960, 576), I),
-    # 10 x 14 tokens at its own size: a video frame's budget, 1260 patches.
-    "video_frame": ((480, 672), V),
+    # 14 x 19 tokens, 2394 patches: an upscale to nearly the whole budget.
+    "cats": I,
+    # 19 x 14 tokens, the other way up.
+    "stop_sign": I,
+    # 9 x 14 tokens, 1134 patches: a video frame's budget.
+    "living_room": V,
 }
 
 # The resizes the image processor is checked on, against Hugging Face's and
-# on the NPU, each a (height, width) and budget and what the NPU's refuses
-# it for: a phone photo either way up, up- and downscales, extreme aspect
-# ratios, one side unchanged, and an image already at its size.
+# on the NPU, the cats photo tiled to each (height, width), with its budget
+# and what the NPU's refuses it for: a phone photo either way up, up- and
+# downscales, extreme aspect ratios, one side unchanged, and an image
+# already at its size.
 RESIZES = [
     ((3024, 4032), I, None),
     ((4032, 3024), I, None),
@@ -156,61 +185,49 @@ def clip(name: str) -> np.ndarray:
     return chirp(seconds, 1800, max(seconds, 1))
 
 
-def synthetic_image(height: int, width: int) -> np.ndarray:
-    """A `(height, width, 3)` uint8 image: smooth waves and a ramp under noise."""
-    rng = np.random.default_rng(0)
-    y, x = np.mgrid[:height, :width]
-    image = np.stack(
-        [
-            128 + 100 * np.sin(x / 37) * np.cos(y / 23),
-            128 + 90 * np.cos((x + y) / 51),
-            255 * x / width,
-        ],
-        axis=-1,
-    )
-    return np.clip(image + rng.normal(0, 12, image.shape), 0, 255).astype(np.uint8)
+def photo(name: str) -> np.ndarray:
+    """`COCO[name]`, fetched beside the checkpoint and decoded:
+    `(height, width, 3)` uint8.
+    """
+    with Image.open(COCO[name].fetch(DIRECTORY)) as image:
+        return np.array(image.convert("RGB"))
 
 
-def picture(height: int, width: int) -> np.ndarray:
-    """A `(height, width, 3)` uint8 image of smooth waves under noise."""
-    rng = np.random.default_rng(1)
-    y, x = np.mgrid[:height, :width]
-    image = np.stack(
-        [128 + 100 * np.sin(x / 37), 128 + 90 * np.cos((x + y) / 51), 255 * y / height],
-        axis=-1,
-    )
-    return np.clip(image + rng.normal(0, 12, image.shape), 0, 255).astype(np.uint8)
+def tiled(image: np.ndarray, height: int, width: int) -> np.ndarray:
+    """`image` repeated to `(height, width, 3)`: a photo's content at any shape."""
+    reps = (-(-height // image.shape[0]), -(-width // image.shape[1]), 1)
+    return np.tile(image, reps)[:height, :width]
 
 
-# 50 soft tokens, and an image the processor upscales to 13 x 20 of its 280.
+# 50 soft tokens.
 CLIP = chirp(2.0)
-IMAGE = picture(288, 432)
 
+# Text with a clip and the baseball photo (16 x 16 tokens) at its
+# placeholders, each a mixed call's text, clip and photo.
 MIXED = {
     "audio": ("<|audio|> a bird singing", CLIP, None),
-    "image": ("<|image|> waves at dusk", None, IMAGE),
-    "both": ("<|image|> the picture, then the sound: <|audio|>", CLIP, IMAGE),
+    "image": ("<|image|> a baseball game", None, "baseball"),
+    "both": ("<|image|> the picture, then the sound: <|audio|>", CLIP, "baseball"),
     # 325 soft tokens of audio and an image's.
     "long_clip_and_image": (
         "<|image|> the picture, then the sound: <|audio|>",
         chirp(13.0),
-        IMAGE,
+        "baseball",
     ),
 }
 
 # The cases the oracle's ids and embedding are checked against Hugging
-# Face's processor and model on: text, and text with a clip and an image at
-# the size the processor's resize picks (14 x 20 tokens, the whole budget).
+# Face's processor and model on: text, and text with a clip and a photo.
 HUGGING_FACE = {
     "query": (QUERY, "query", None, None),
     "past_the_window": (LONGER, "document", None, None),
     "audio": ("<|audio|> a bird singing", "query", CLIP, None),
-    "image": ("<|image|> waves at dusk", "query", None, picture(672, 960)),
+    "image": ("<|image|> a baseball game", "query", None, "baseball"),
     "both": (
         "<|image|> the picture, then the sound: <|audio|>",
         "query",
         CLIP,
-        picture(672, 960),
+        "baseball",
     ),
 }
 
@@ -276,7 +293,8 @@ def check_mixed(graph, oracle, audio_oracle, vision_oracle, case, record_propert
     """The embedding of `MIXED[case]` against the oracle fed its own towers'
     soft tokens.
     """
-    text, audio, image = MIXED[case]
+    text, audio, name = MIXED[case]
+    image = None if name is None else photo(name)
     c = graph.config
     got = graph.embed(text, "query", audio=audio, image=image)
     soft = {}
@@ -410,8 +428,7 @@ class TestVision:
         vision.processor.compile(**shapes)
         return vision.processor
 
-    def check_processor(self, vision, processor, oracle, shape, tokens, record):
-        image = synthetic_image(*shape)
+    def check_processor(self, vision, processor, oracle, image, tokens, record):
         rgb, values = vision.inputs(image, tokens)
         values.pop("n")
         want = oracle.windows(*oracle.patches(image, tokens), vision.config.patches)
@@ -429,19 +446,20 @@ class TestVision:
         record("Latency", min(times) * 1e6)
 
     @pytest.mark.parametrize(
-        "shape, tokens",
+        "name, shape, tokens",
         [
-            *IMAGES.values(),
-            *((shape, tokens) for shape, tokens, refusal in RESIZES if not refusal),
+            *((name, None, tokens) for name, tokens in IMAGES.items()),
+            *(("cats", s, tokens) for s, tokens, refusal in RESIZES if not refusal),
             # The largest image a call takes, the other way up.
-            (VisionConfig().largest[::-1], I),
+            ("cats", VisionConfig().largest[::-1], I),
         ],
     )
     def test_image_processor(
-        self, vision, processor, vision_oracle, shape, tokens, record_property
+        self, vision, processor, vision_oracle, name, shape, tokens, record_property
     ):
+        image = photo(name) if shape is None else tiled(photo(name), *shape)
         self.check_processor(
-            vision, processor, vision_oracle, shape, tokens, record_property
+            vision, processor, vision_oracle, image, tokens, record_property
         )
 
     @pytest.mark.supported_devices("npu2")
@@ -451,14 +469,14 @@ class TestVision:
         # 2016 pixels wide at image_tokens: 126 patch columns, 16 a core on
         # npu1's eight cores (test_image_processor_refuses_on_npu1 below) but
         # only 8 a core on npu2's sixteen, which Resample's default holds.
+        image = tiled(photo("cats"), 97, 640)
         self.check_processor(
-            vision, processor, vision_oracle, (97, 640), I, record_property
+            vision, processor, vision_oracle, image, I, record_property
         )
 
     @pytest.mark.parametrize("name", list(IMAGES))
     def test_vision_accuracy(self, vision, vision_oracle, name, record_property):
-        (height, width), tokens = IMAGES[name]
-        image = synthetic_image(height, width)
+        image, tokens = photo(name), IMAGES[name]
         got, want = vision.embed(image, tokens), vision_oracle.embed(image, tokens)
         assert got.shape == want.shape
         cosines = (got * want).sum(-1) / (
@@ -471,10 +489,9 @@ class TestVision:
         assert error <= VISION_MAX_ERROR, error
 
     @pytest.mark.bench
-    @pytest.mark.parametrize("name", ["image", "video_frame"])
+    @pytest.mark.parametrize("name", ["cats", "living_room"])
     def test_vision_latency(self, vision, name, record_property):
-        (height, width), tokens = IMAGES[name]
-        image = synthetic_image(height, width)
+        image, tokens = photo(name), IMAGES[name]
         latency = run_iters(vision.embed, image, tokens, warmup=1, iters=10).e2e
         record_property("Latency", latency.median_us)
 
@@ -549,7 +566,10 @@ def test_embeddinggemma_2_multimodal(
 def test_embeddinggemma_2_determinism(multimodal):
     # Interleaved, so that a version reading what another left in the shared
     # arena or state differs from its first call.
-    calls = [(LONG, None, None), *MIXED.values()]
+    calls = [
+        (t, a, None if name is None else photo(name))
+        for t, a, name in [(LONG, None, None), *MIXED.values()]
+    ]
     first = [multimodal.embed(t, "query", audio=a, image=i) for t, a, i in calls]
     for _ in range(4):
         for (t, a, i), want in zip(calls, first):
@@ -595,7 +615,7 @@ def test_image_processor_refuses_on_npu1(npu1):
 def test_resize_matches_hugging_face(
     hugging_face, vision_oracle, shape, tokens, refusal
 ):
-    image = np.random.default_rng(0).integers(0, 256, (*shape, 3), dtype=np.uint8)
+    image = tiled(photo("cats"), *shape)
     got_values, got_positions = vision_oracle.patches(image, tokens)
     want_values, want_positions = hugging_face.patches(image, tokens)
     np.testing.assert_array_equal(got_values, want_values)
@@ -619,9 +639,8 @@ def test_audio_oracle_matches_hugging_face(hugging_face, audio_oracle):
 
 
 def test_vision_oracle_matches_hugging_face(hugging_face, vision_oracle):
-    (height, width), tokens = IMAGES["portrait"]
     pixel_values, positions = vision_oracle.patches(
-        synthetic_image(height, width), tokens
+        photo("stop_sign"), IMAGES["stop_sign"]
     )
     want = hugging_face.vision_tower(pixel_values, positions)
     got = vision_oracle.tower(pixel_values, positions)
@@ -635,7 +654,8 @@ def test_vision_oracle_matches_hugging_face(hugging_face, vision_oracle):
 def test_embeddinggemma_2_oracle_matches_hugging_face(
     hugging_face, tokenizer, oracle, audio_oracle, vision_oracle, case
 ):
-    text, task, wave, image = HUGGING_FACE[case]
+    text, task, wave, name = HUGGING_FACE[case]
+    image = None if name is None else photo(name)
     c = oracle.config
     soft = {}
     if wave is not None:
