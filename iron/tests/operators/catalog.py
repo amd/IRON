@@ -18,8 +18,7 @@ import aie.utils as aie_utils
 import pytest
 
 from iron.common import Operator
-from iron.common.harness import run_test, vectors
-from iron.common.testing import Case, Testing
+from iron.common.testing import Case, Testing, run_test, vectors
 from iron.tests.common.declared import declared
 
 DEVICE = aie_utils.get_current_device()
@@ -58,8 +57,8 @@ def test_operator(
             f"{cls.__name__} runs no kernel with a tolerance contract; "
             "override tolerance()"
         )
-    run = run_test(
+    errors = run_test(
         op, vectors(op, **extra), tolerance=tolerance, record=record_property
     )
-    failed = {name: verdict.detail for name, verdict in run.errors.items()}
+    failed = {name: verdict.detail for name, verdict in errors.items()}
     assert not failed, f"{cls.__name__}({case.label}) failed: {failed}"

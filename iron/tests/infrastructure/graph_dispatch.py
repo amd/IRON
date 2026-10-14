@@ -19,12 +19,11 @@ import re
 
 import numpy as np
 import pytest
-from aie.utils.verify import Tolerance
+from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common.harness import verify_buffer
 from iron.common.image import AdjacentPacking, Fusion
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.fused import XclbinChain
@@ -246,7 +245,7 @@ def test_designs_of_one_array_run_on_one_configure():
         for v in (shared, alone)
     ]
     for got, expected in zip(runs[0], want):
-        verdict = verify_buffer(got, "shared", np.asarray(expected), tolerance)
+        verdict = compare(got, np.asarray(expected), tolerance)
         assert verdict, verdict.detail
     for got, expected in zip(*runs):
         assert got.view(np.uint16).tolist() == expected.view(np.uint16).tolist()
@@ -288,9 +287,7 @@ def test_each_design_of_one_array_runs_on_its_own_values():
         x, y = (rng.standard_normal(K).astype(bfloat16) for _ in range(2))
         for got, want in zip(net(x, y), graph.reference(x, y)):
             want = np.asarray(want)
-            verdict = verify_buffer(
-                np.array(got.numpy()[: len(want)]), "shared", want, tolerance
-            )
+            verdict = compare(np.array(got.numpy()[: len(want)]), want, tolerance)
             assert verdict, verdict.detail
 
 

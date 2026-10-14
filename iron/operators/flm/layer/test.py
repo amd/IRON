@@ -19,11 +19,11 @@ import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE, FLM_GEMMA4_E4B_DECODE
-from aie.utils.benchmark import run_iters
 from aie.utils.hostruntime.hostruntime import HostRuntimeError
 from ml_dtypes import bfloat16
 
 from iron.common.design import OperatorDesign
+from iron.common.testing import time_call
 from iron.operators.flm.layer.design import (
     LAYER_TYPES,
     MAX_CONTEXT,
@@ -105,12 +105,17 @@ def _record_metrics(record, op, bufs, geometry, layer_type, context_len, max_l):
     total_bytes = 2 * (sum(w.size for w in blob) + 2 * keys * g["dk"])
     flops = 2 * sum(w.dout * w.din for w in blob)
     flops += 4 * g["num_attn_heads"] * g["dh"] * keys
-    latency_us = run_iters(
-        op, *bufs, warmup=1, iters=1, context_len=context_len, max_l=max_l
-    ).npu.avg_us
-    record("Latency", latency_us)
-    record("Bandwidth", total_bytes / latency_us / 1e3)
-    record("Throughput", flops / latency_us / 1e3)
+    time_call(
+        op,
+        *bufs,
+        bytes_moved=total_bytes,
+        ops=flops,
+        warmup=1,
+        iters=1,
+        record=record,
+        context_len=context_len,
+        max_l=max_l,
+    )
 
 
 def _tensors(op, inputs):

@@ -6,7 +6,7 @@ import pytest
 from aie.utils.benchmark import run_iters
 from ml_dtypes import bfloat16
 from aie.utils.trace import TraceConfig
-from aie.utils.verify import Tolerance
+from aie.utils.verify import Tolerance, compare
 
 from iron.common.tracing import dump_traces
 
@@ -26,7 +26,6 @@ pytest.skip(
     allow_module_level=True,
 )
 
-from iron.common.harness import verify_buffer  # noqa: E402
 from iron.operators.swiglu_prefill_stream.op import SwiGLUPrefillStream  # noqa: E402
 from iron.operators.swiglu_prefill_stream.reference import (  # noqa: E402
     INPUT,
@@ -77,9 +76,8 @@ def test_swiglu_prefill_stream(k, tmp_path, record_property):
     out = net(*inputs)
     dump_traces(net.callable, trace.trace_file)
     output = out.numpy()[: SEQ_LEN * EMBEDDING_DIM].reshape((SEQ_LEN, EMBEDDING_DIM))
-    verdict = verify_buffer(
+    verdict = compare(
         output,
-        OUTPUT,
         golden_ref[OUTPUT],
         Tolerance.relative(0.08, 0.7, max_mismatch_frac=0.25),
     )

@@ -7,7 +7,8 @@ from aie.iron.kernels import eltwise, norm
 from aie.utils.verify import Tolerance
 
 from iron.common import In, KernelCall, Out, Rowwise, Param
-from iron.common.testing import Sweep, Testing
+from iron.common.elementwise import Sweep
+from iron.common.testing import Testing
 
 # The longest weighted row: the multiplying core holds the weight row beside
 # each line, which halves the line a core holds.

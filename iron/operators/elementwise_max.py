@@ -8,7 +8,8 @@ from aie.utils.compile.jit import markers
 from aie.utils.verify import Tolerance
 
 from iron.common import BinaryElementwise
-from iron.common.testing import Case, Sweep, Testing
+from iron.common.elementwise import Sweep
+from iron.common.testing import Case, Testing
 
 MAX = """
 #include <aie_api/aie.hpp>

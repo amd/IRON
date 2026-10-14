@@ -14,7 +14,7 @@ from ml_dtypes import bfloat16
 
 from iron.common import Chain, Link
 from iron.common.design import OperatorDesign
-from iron.common.harness import run_test, vectors
+from iron.common.testing import run_test, vectors
 from iron.operators import GEMM as GenericGEMM
 from iron.operators.clamp import Clamp
 from iron.operators.flm.gemm.design import (
@@ -228,7 +228,7 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, record_property):
 
     errors = check_on_device(
         operator, flm_vectors(operator, scale), rounding, record=record_property
-    ).errors
+    )
 
     assert not errors, "Test failed"
 
@@ -240,9 +240,7 @@ def test_gemm_without_activations(M, K, N, record_property):
     held go to B and the tiles differ from every case above."""
     operator = GEMM(M=M, K=K, N=N, epilogue_modes=(NONE,))
 
-    errors = check_on_device(
-        operator, flm_vectors(operator), record=record_property
-    ).errors
+    errors = check_on_device(operator, flm_vectors(operator), record=record_property)
 
     assert not errors, "Test failed"
 
@@ -303,9 +301,7 @@ def test_gemm_b_col_maj(M, K, N, tile_n, epilogue_modes, emulate, record_propert
         b_col_maj=True,
         emulate_bf16_mmul_with_bfp16=emulate,
     )
-    errors = check_on_device(
-        operator, flm_vectors(operator), record=record_property
-    ).errors
+    errors = check_on_device(operator, flm_vectors(operator), record=record_property)
     assert not errors, "Test failed"
 
 
@@ -323,7 +319,7 @@ def test_folded_silu_and_clamp_compute_what_their_operators_do():
     assert (operator.activation, operator.clamp) == (SILU, (-0.25, 1.5))
     data = flm_vectors(plain, ACTIVATION_INPUT_SCALE)
     C = clamp.reference(silu.reference(data["C"].reshape(-1)))
-    errors = check_on_device(operator, {"A": data["A"], "B": data["B"], "C": C}).errors
+    errors = check_on_device(operator, {"A": data["A"], "B": data["B"], "C": C})
     assert not errors, "Test failed"
 
 
@@ -342,7 +338,7 @@ def test_gemm_split_leg_bounds_runs():
     M, K, N = 512, 10240, 10240
     operator = GEMM(M=M, K=K, N=N)
 
-    errors = check_on_device(operator, flm_vectors(operator)).errors
+    errors = check_on_device(operator, flm_vectors(operator))
     assert not errors, "Test failed"
 
 
@@ -414,7 +410,7 @@ def test_gemm_tile_options(M, K, N, tile_n, tile_ma):
     """Each accepted (tile_n, tile_ma) computes the right answer on hardware."""
     operator = GEMM(M=M, K=K, N=N, tile_n=tile_n, tile_ma=tile_ma)
     assert (operator._tuned.tile_n, operator._tuned.tile_ma) == (tile_n, tile_ma)
-    errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE)).errors
+    errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
     assert not errors, "Test failed"
 
 
@@ -430,7 +426,7 @@ def test_gemm_k_tile(K):
     dev = aie_utils.get_current_device()
     assert dev is not None
     operator = GEMM(M=256, K=K, N=64 * dev.cols, tile_n=64, k_tile=256)
-    errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE)).errors
+    errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
     assert not errors, "Test failed"
 
 
@@ -467,7 +463,7 @@ def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, emulate):
         {"A": A.flatten(), "B": operator.pack_B(B)},
         {"C": C.flatten()},
         tolerance=Tolerance.exact(note="integers, exact in every sum"),
-    ).errors
+    )
     assert not errors, errors
 
 
@@ -511,7 +507,7 @@ def test_one_xclbin_serves_every_shape():
             {"A": data["A"].flatten(), "B": operator.pack_B(data["B"])},
             {"C": data["C"].flatten()},
             tolerance=Tolerance.relative(0.04, 0.004 * mass),
-        ).errors
+        )
         assert not errors, f"{M}x{K}x{N} {epilogue} failed"
 
         # A cache hit: the image run_test built and ran.
@@ -535,7 +531,7 @@ def test_one_xclbin_serves_every_clamp_bound():
     xclbin = None
     for clamp in bounds:
         operator = GEMM(M=M, K=K, N=N, **finished(M, N, NONE, clamp))
-        errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE)).errors
+        errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE))
         assert not errors, f"clamp={clamp} produced wrong output"
 
         # A cache hit: the image run_test built and ran.
@@ -636,7 +632,7 @@ def test_shipped_overlay(M, K, N, epilogue, clamp, record_property):
         output_buffers,
         tolerance=Tolerance.relative(0.04, abs_tol),
         record=record_property,
-    ).errors
+    )
     assert not errors, "Test failed"
 
 

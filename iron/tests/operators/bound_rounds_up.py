@@ -12,12 +12,11 @@ every valid row is computed, whatever ``p`` is.
 
 import numpy as np
 import pytest
-from aie.utils.verify import Tolerance
+from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common.harness import verify_buffer
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.rms_norm import RMSNorm
 
@@ -45,11 +44,10 @@ def test_every_row_of_a_bound_is_computed():
     for p in (0, 4, 12, 40, ROWS - 1):
         out = np.asarray(net(x, y, p=p), dtype=np.float32).reshape(ROWS, COLS)
         expected = np.asarray(step.reference(x, y, p=p), dtype=np.float32)
-        verdict = verify_buffer(
+        verdict = compare(
             out[: p + 1],
-            "out",
             expected.reshape(p + 1, COLS),
-            tolerance=Tolerance.relative(0.04, 1e-2),
+            Tolerance.relative(0.04, 1e-2),
         )
         assert verdict, f"{p=}: the valid rows differ: {verdict.detail}"
 
@@ -69,10 +67,9 @@ def test_a_bound_past_a_wrap_of_tiles_per_lane():
     for n in (1, 777, rows):
         out = np.asarray(net(x, y, n=n), dtype=np.float32).reshape(rows, cols)
         expected = np.asarray(step.reference(x, y, n=n), dtype=np.float32)
-        verdict = verify_buffer(
+        verdict = compare(
             out[:n],
-            "out",
             expected.reshape(n, cols),
-            tolerance=Tolerance.relative(0.04, 1e-2),
+            Tolerance.relative(0.04, 1e-2),
         )
         assert verdict, f"{n=}: the valid rows differ: {verdict.detail}"

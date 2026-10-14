@@ -29,9 +29,9 @@ class DepthwiseConv1d(Operator):
 
     test = Testing(
         [
-            dict(rows=64, channels=64, num_aie_columns=1),
-            dict(rows=64, channels=256, num_aie_columns=2),
-            dict(rows=32, channels=96, num_aie_columns=8),
+            Case(dict(rows=64, channels=64, num_aie_columns=1)),
+            Case(dict(rows=64, channels=256, num_aie_columns=2)),
+            Case(dict(rows=32, channels=96, num_aie_columns=8)),
             # Benched: the audio tower's light conv at its longest bucket.
             Case(dict(rows=768, channels=1024, num_aie_columns=8), bench=True),
         ],

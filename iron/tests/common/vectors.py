@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``vectors()``, ``verify_buffer()`` and an operator's ``call_reference``/``judge``:
-the device test's halves, host-side."""
+"""``vectors()`` and an operator's ``call_reference``/``judge``: the device
+test's halves, host-side."""
 
 import numpy as np
 import pytest
@@ -10,7 +10,7 @@ from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common.harness import vectors, verify_buffer
+from iron.common.testing import vectors
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.relu import ReLU
 from iron.operators.rms_norm import RMSNorm
@@ -18,8 +18,6 @@ from iron.operators.rope import RoPE
 from iron.operators.sample import Sample
 
 pytestmark = pytest.mark.usefixtures("npu2")
-
-RELATIVE = Tolerance.relative(0.04, 1e-6)
 
 
 def test_vectors_draws_each_input_and_runs_the_reference_on_the_draw():
@@ -52,42 +50,6 @@ def test_tolerance_is_the_operators_own_else_its_kernels_contract():
     relu = ReLU(size=64, num_aie_columns=1, tile_size=64).resolved()
     contract = relu.kernel().contract_for(resolve_target_arch(relu.dev))
     assert relu.tolerance() == contract.tolerance is not None
-
-
-def test_verify_buffer_returns_the_verdict_of_compare():
-    ref = np.arange(8, dtype=np.float32)
-    assert verify_buffer(ref.copy(), "y", ref, RELATIVE)
-    out = ref.copy()
-    out[3] += 1.0
-    out[5] += 0.001
-    relative = verify_buffer(out, "y", ref, RELATIVE)
-    assert (relative.n_mismatch, relative.first_bad_index) == (1, 3)
-    exact = verify_buffer(out, "y", ref, Tolerance.exact())
-    assert (exact.n_mismatch, exact.first_bad_index) == (2, 3)
-    short = verify_buffer(ref[:6].copy(), "y", ref, RELATIVE)
-    assert not short and "shape mismatch" in short.detail
-
-
-def test_verify_buffer_fails_a_longer_output_rather_than_truncate_it():
-    ref = np.arange(8, dtype=np.float32)
-    padded = np.concatenate([ref, np.full(4, 99.0, np.float32)])
-    longer = verify_buffer(padded, "y", ref, RELATIVE)
-    assert not longer and "shape mismatch" in longer.detail
-
-
-def test_verify_buffer_judges_a_bound_tolerance_by_its_evaluated_limit():
-    ref = np.arange(8, dtype=np.float32)
-    out = ref + np.float32(0.25)
-
-    def eighth(x):
-        return np.abs(x) / 8
-
-    judge = Tolerance.bounded(eighth)
-    limit = eighth(ref)  # 0.25 from x = 2 on
-    verdict = verify_buffer(out, "y", ref, judge, bound=limit)
-    assert (verdict.n_mismatch, verdict.first_bad_index) == (2, 0)
-    with pytest.raises(ValueError, match="needs its bound evaluated"):
-        verify_buffer(out, "y", ref, judge)
 
 
 def _sample():

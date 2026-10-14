@@ -5,9 +5,9 @@
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-from aie.utils.benchmark import run_iters
 from ml_dtypes import bfloat16
 
+from iron.common.testing import time_call
 from iron.operators.flm.lm_head.op import LMHead
 from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE
 
@@ -60,10 +60,15 @@ def _check(dim, vocab, softcap, seed=0, tanh_error=True, record=None):
     op(*bufs)
     got = bufs[0].numpy().astype(np.float64)
     if record is not None:
-        latency_us = run_iters(op, *bufs, warmup=1, iters=1).npu.avg_us
-        record("Latency", latency_us)
-        record("Bandwidth", sum(b.numpy().nbytes for b in bufs) / latency_us / 1e3)
-        record("Throughput", op.ops() / latency_us / 1e3)
+        time_call(
+            op,
+            *bufs,
+            bytes_moved=sum(b.numpy().nbytes for b in bufs),
+            ops=op.ops(),
+            warmup=1,
+            iters=1,
+            record=record,
+        )
     expected = op.reference(w, x)
     # The logits before the softcap set the projection's error scale.
     uncapped = LMHead(dim=dim, vocab=vocab, softcap=1e30).reference(w, x)

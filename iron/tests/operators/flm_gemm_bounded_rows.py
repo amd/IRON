@@ -15,9 +15,9 @@ is Llama 3.2 1B's q projection at a prompt chunk's bounds.
 
 import numpy as np
 import pytest
+from aie.utils.verify import compare
 from ml_dtypes import bfloat16
 
-from iron.common.harness import verify_buffer
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 from iron.tests.common.graphs import ProjectAsStored
 
@@ -56,9 +56,8 @@ def test_the_units_a_bound_reaches_are_computed(full_elf, M, K, N, bounds):
         x = rng.standard_normal((M, K)).astype(bfloat16)
         w = rng.standard_normal((N, K)).astype(bfloat16)
         got = np.asarray(project(x, w, n=n)).reshape(M, N)
-        verdict = verify_buffer(
+        verdict = compare(
             got[:n],
-            "C",
             op.reference(x[:n], w),
             tolerance,
             bound=tolerance.bound(x[:n], w),

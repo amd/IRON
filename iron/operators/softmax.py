@@ -71,15 +71,15 @@ class Softmax(Operator):
     # Four cores, two columns of two: the fewest that exercise both splits.
     test = Testing(
         [
-            dict(rows=32, cols=1024, num_aie_columns=2, num_channels=2),
-            dict(rows=64, cols=512, num_aie_columns=2, num_channels=2),
-            dict(rows=16, cols=2048, num_aie_columns=2, num_channels=2),
+            Case(dict(rows=32, cols=1024, num_aie_columns=2, num_channels=2)),
+            Case(dict(rows=64, cols=512, num_aie_columns=2, num_channels=2)),
+            Case(dict(rows=16, cols=2048, num_aie_columns=2, num_channels=2)),
             Case(
                 dict(rows=16, cols=4096, block=1024, num_aie_columns=2, num_channels=2),
                 lower=True,
             ),
-            dict(rows=16, cols=4608, num_aie_columns=2, num_channels=2),
-            dict(rows=32, cols=32768, num_aie_columns=2, num_channels=2),
+            Case(dict(rows=16, cols=4608, num_aie_columns=2, num_channels=2)),
+            Case(dict(rows=32, cols=32768, num_aie_columns=2, num_channels=2)),
             # Benched: 2 Mi elements, well past the dispatch cost.
             Case(
                 dict(rows=4096, cols=512, num_aie_columns=2, num_channels=2),

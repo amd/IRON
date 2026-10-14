@@ -5,7 +5,8 @@
 
 from aie.iron.device import from_name
 
-from iron.common.testing import BENCH_ELEMENTS, Case, Sweep, Testing
+from iron.common.elementwise import BENCH_ELEMENTS, Sweep
+from iron.common.testing import Case, Testing
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gelu import GELU
 from iron.operators.rms_norm import RMSNorm
@@ -46,13 +47,13 @@ def test_the_binary_sweep_and_an_all_extensive_sweep():
     )
 
 
-def test_testing_resolves_lists_dicts_and_callables_of_the_class():
-    t = Testing([dict(size=8), Case(dict(size=16), extensive=True)])
+def test_testing_resolves_cases_and_callables_of_the_class():
+    t = Testing([Case(dict(size=8)), Case(dict(size=16), extensive=True)])
     assert [c.kwargs for c in t.resolve(GELU, NPU2)] == [{"size": 8}, {"size": 16}]
     assert [c.extensive for c in t.resolve(GELU, NPU2)] == [False, True]
-    by_class = Testing(lambda cls, dev: [dict(size=cls.tile_cap)])
+    by_class = Testing(lambda cls, dev: [Case(dict(size=cls.tile_cap))])
     assert by_class.resolve(GELU, NPU2)[0].kwargs == {"size": 8192}
-    mixed = Testing([Sweep(regular=None), dict(size=8)]).resolve(GELU, NPU2)
+    mixed = Testing([Sweep(regular=None), Case(dict(size=8))]).resolve(GELU, NPU2)
     assert mixed[:-1] == Sweep(regular=None)(GELU, NPU2) and mixed[-1] == Case(
         {"size": 8}
     )

@@ -14,7 +14,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common.harness import run_test, vectors
+from iron.common.testing import run_test, vectors
 from iron.lm.blocks import SwiGLU
 from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, SiLU
 
@@ -57,8 +57,8 @@ def test_a_residual_rides_the_matrix_into_a_folded_matvec(M, K):
 
 def test_each_batch_of_a_matvec_takes_its_own_residual():
     op = GEMV(M=256, K=128, num_batches=2).fold(ElementwiseAdd(size=2 * 256), 0)
-    run = run_test(op, vectors(op), tolerance=op.resolved().tolerance())
-    assert not run.errors, run.errors
+    errors = run_test(op, vectors(op), tolerance=op.resolved().tolerance())
+    assert not errors, errors
 
 
 def test_the_up_projection_rides_the_gate_into_its_product():

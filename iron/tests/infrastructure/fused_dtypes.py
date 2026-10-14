@@ -15,10 +15,9 @@ move them by half, and every row check below would miss.
 import numpy as np
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
-from aie.utils.verify import Tolerance
+from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
-from iron.common.harness import verify_buffer
 from iron.common.image import Fusion
 from iron.common.image.sequence import OperatorSequence
 from iron.operators.copy import Copy
@@ -105,7 +104,7 @@ def test_int32_step_at_nonzero_offsets():
     _check_gathers(run, gather, table)
 
     c = run.get_buffer("c").numpy()[:ADD_SIZE]
-    verdict = verify_buffer(c, "c", a + b, Tolerance.relative(0.04, 1e-6))
+    verdict = compare(c, a + b, Tolerance.relative(0.04, 1e-6))
     assert verdict, f"the bf16 step beside the int32 one: {verdict.detail}"
 
 

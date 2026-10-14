@@ -29,10 +29,9 @@ import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.iron.kernels.sample import draw_row
-from aie.utils.verify import Tolerance
+from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
-from iron.common.harness import verify_buffer
 from iron.common.image import Fusion
 from iron.common.image.sequence import OperatorSequence
 from iron.common.graph.handle import PerCall
@@ -135,7 +134,7 @@ def test_auto_dispatch_selects_platform_default(size):
     out = run.get_buffer("out").numpy()[:size].copy()
 
     expected = np.maximum(a + b, 0)
-    verdict = verify_buffer(out, "out", expected, RELATIVE)
+    verdict = compare(out, expected, RELATIVE)
     assert verdict, f"auto-dispatch sequence: {verdict.detail}"
 
 
@@ -331,9 +330,9 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch):
 
         temp = run.get_buffer("temp").numpy()[:_ADD_RELU_SIZE]
         out = run.get_buffer("out").numpy()[:_ADD_RELU_SIZE]
-        verdict = verify_buffer(temp, "temp", a + b, RELATIVE)
+        verdict = compare(temp, a + b, RELATIVE)
         assert verdict, f"rep {rep}: temp: {verdict.detail}"
-        verdict = verify_buffer(out, "out", np.maximum(a + b, 0), RELATIVE)
+        verdict = compare(out, np.maximum(a + b, 0), RELATIVE)
         assert verdict, f"rep {rep}: out: {verdict.detail}"
 
 
@@ -423,7 +422,7 @@ def test_one_design_is_configured_once():
         _set_input(run, "a", a)
         run()
         out = run.get_buffer("out").numpy()[:_ADD_RELU_SIZE]
-        verdict = verify_buffer(out, "out", np.maximum(a, 0), RELATIVE)
+        verdict = compare(out, np.maximum(a, 0), RELATIVE)
         assert verdict, f"rep {rep}: out: {verdict.detail}"
 
 
@@ -456,5 +455,5 @@ def test_one_design_reconfigures_after_another_image():
             run()
             out = run.get_buffer("out").numpy()[:_ADD_RELU_SIZE]
             expected = op.reference(a)
-            verdict = verify_buffer(out, "out", expected, op.resolved().tolerance())
+            verdict = compare(out, expected, op.resolved().tolerance())
             assert verdict, f"rep {rep}, {name}: out: {verdict.detail}"

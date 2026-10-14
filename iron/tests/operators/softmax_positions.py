@@ -15,11 +15,11 @@ wrote must still come back with exact zeros past the position.
 
 import numpy as np
 import pytest
+from aie.utils.verify import compare
 from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common.harness import verify_buffer
 from iron.operators.softmax import Softmax
 
 
@@ -84,5 +84,5 @@ def test_rows_are_masked_to_the_per_call_length(full_elf, rows, seq, block, posi
         tail = got[:, n:end].view(np.uint16)
         assert not tail.any(), f"n={n}: {np.count_nonzero(tail)} tail elements not +0"
         want = attend.reference(x, n=n)
-        verdict = verify_buffer(got[:, :n], "y", want, tolerance)
+        verdict = compare(got[:, :n], want, tolerance)
         assert verdict, f"n={n}: {verdict.detail}"

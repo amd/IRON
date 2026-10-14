@@ -8,7 +8,8 @@ from aie.iron.kernels import eltwise
 from ml_dtypes import bfloat16
 
 from iron.common import UnaryElementwise, Value, Param
-from iron.common.testing import Case, Sweep, Testing
+from iron.common.elementwise import Sweep
+from iron.common.testing import Case, Testing
 
 
 class Clamp(UnaryElementwise):

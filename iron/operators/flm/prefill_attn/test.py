@@ -5,10 +5,10 @@
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-from aie.utils.benchmark import run_iters
 from aie.utils.hostruntime.hostruntime import HostRuntimeError
 from ml_dtypes import bfloat16
 
+from iron.common.testing import time_call
 from iron.operators.flm.prefill_attn.op import (
     PrefillAttention,
     PrefillSlidingAttention,
@@ -84,12 +84,18 @@ def _record(op, bufs, L_begin, L_end, max_l, record):
         2 * dh * (2 * (L_end - L_begin) * NUM_HEADS + 2 * rows_read * op.num_kv_heads)
     )
     flops = 4 * NUM_HEADS * dh * int(keys.sum())
-    latency_us = run_iters(
-        op, *bufs, warmup=1, iters=1, L_begin=L_begin, L_end=L_end, max_l=max_l
-    ).npu.avg_us
-    record("Latency", latency_us)
-    record("Bandwidth", total_bytes / latency_us / 1e3)
-    record("Throughput", flops / latency_us / 1e3)
+    time_call(
+        op,
+        *bufs,
+        bytes_moved=total_bytes,
+        ops=flops,
+        warmup=1,
+        iters=1,
+        record=record,
+        L_begin=L_begin,
+        L_end=L_end,
+        max_l=max_l,
+    )
 
 
 def _check(op, L_begin, L_end, max_l, seed, record=None):

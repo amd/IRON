@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 import soundfile
 from aie.utils.benchmark import run_iters
+from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 from PIL import Image
 
@@ -49,7 +50,7 @@ from iron.applications.embedding_gemma2.oracle import (
 )
 from iron.applications.embedding_gemma2.vision import VisionTower
 from iron.lm import Checkpoint, prompt_text
-from iron.lm.testing import Download, cache_dir, require, weights_dir
+from iron.lm.testing import Download, cache_dir, check_embedding, require, weights_dir
 from iron.operators.copy import Copy
 
 DIRECTORY = weights_dir("embeddinggemma-2")
@@ -392,16 +393,17 @@ class TestAudio:
         wave = clip(name)
         x, values = audio.inputs(wave)
         frames = values["frames"]
-        got = Features(audio)(x, frames=frames).numpy().astype(np.float32)
-        got = got.reshape(-1, audio.config.mels)
+        got = Features(audio)(x, frames=frames).numpy().reshape(-1, audio.config.mels)
         host, valid = audio_oracle.features(wave)
         assert frames == valid
-        want = host[:frames].astype(bfloat16).astype(np.float32)
-        exact = float(np.mean(got[:frames] == want))
-        ulp = 2.0 ** (np.floor(np.log2(np.abs(want).clip(1e-30))) - 7)
+        want = host[:frames].astype(bfloat16)
+        exact = float(
+            np.mean(got[:frames].astype(np.float32) == want.astype(np.float32))
+        )
         record_property("Exact", exact)
         assert exact >= AUDIO_MIN_EXACT, exact
-        assert (np.abs(got[:frames] - want) <= np.maximum(ulp, AUDIO_ATOL)).all()
+        verdict = compare(got[:frames], want, Tolerance(ulps=1, atol=AUDIO_ATOL))
+        assert verdict, verdict.detail
         assert not got[frames].any()
 
     # Longest first: each clip runs over the rows a longer one left behind.
@@ -412,16 +414,9 @@ class TestAudio:
         c = audio.config
         assert got.shape == want.shape
         assert got.shape == (c.tokens(c.frames(wave.size)), c.text_dim)
-        cosines = (got * want).sum(-1) / (
-            np.linalg.norm(got, axis=-1) * np.linalg.norm(want, axis=-1)
+        check_embedding(
+            got, want, AUDIO_MIN_COSINE, AUDIO_MAX_ERROR, record=record_property
         )
-        error = float(np.linalg.norm(got - want) / np.linalg.norm(want))
-        percentile = float(np.percentile(cosines, 1))
-        record_property("Cosine", percentile)
-        record_property("Worst cosine", float(cosines.min()))
-        record_property("Relative error", error)
-        assert percentile >= AUDIO_MIN_COSINE, percentile
-        assert error <= AUDIO_MAX_ERROR, error
 
     @pytest.mark.bench
     @pytest.mark.parametrize("name", list(CLIPS))

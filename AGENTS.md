@@ -161,7 +161,7 @@ reuse lint
        `ir.Module` or its text) for a design another tool exports
        (stream-dse's SwiGLU groups) in place of the derived one.
      - The operator's `reference(*inputs)` is the CPU reference the tests
-       and the graph reference run; `vectors(op)` in `iron/common/harness`
+       and the graph reference run; `vectors(op)` in `iron/common/testing`
        draws random inputs for its declared buffers and takes the outputs
        from it. An `Elementwise` operator has none of its own: its kernel's
        contract is the reference. A composite builds its reference from its
@@ -227,18 +227,20 @@ reuse lint
      graph runs: `op(*tensors)` compiles it once and runs it,
      `op.compile()` builds it and returns its `Artifacts`), the runtime
      callables and the record of what a compiled image consists of
-   - `elementwise.py`: the shared elementwise array and its operand shapes (flat, binary, rowwise)
-   - `harness.py`: the device test harness (`vectors`; `run_test`, timed with
-     `aie.utils.benchmark.run_iters`, every buffer paired by name; and
-     `verify_buffer`, mlir-aie's `aie.utils.verify.compare` on one buffer
-     of the reference's size); a test's figures go to
+   - `elementwise.py`: the shared elementwise array and its operand shapes
+     (flat, binary, rowwise), and `Sweep`, the cases of an elementwise
+     operator
+   - `testing.py`: how an operator declares the shapes it is tested at
+     (`Testing`, `Case`), and the device test harness: `vectors` draws an
+     operator's inputs and its reference's outputs; `run_test` compiles,
+     dispatches, judges and times it, `time_call` the timing alone, for a
+     graph test that needs no judgement; a single buffer is judged with
+     mlir-aie's `aie.utils.verify.compare`. A test's figures go to
      pytest's `record_property`, which the root conftest writes to the CSV.
      The reference and the judgement are the operator's own:
      `op.call_reference(inputs, outputs, values)` runs `reference()` on
      buffers by name, `op.judge(inputs, written, tolerance)` returns a
      `Verdict` per written buffer
-   - `testing.py`: how an operator declares the shapes it is tested at
-     (`Testing`, `Case`, and `Sweep`, the elementwise sweep)
    - `tracing.py`: `dump_traces(run, trace_file)`, for a sequence holding an
      operator built with `trace=` (mlir-aie's `TraceConfig`); the workers
      traced are those its `array()` gives `Worker(trace=)`, else its first.
@@ -727,7 +729,7 @@ void my_kernel(bfloat16* in, bfloat16* out, int32_t size) {
 
 ```python
 from aie.utils.verify import Tolerance
-from iron.common.harness import run_test, vectors
+from iron.common.testing import run_test, vectors
 from iron.operators import Tanh
 
 op = Tanh(size=2048, num_aie_columns=1, num_channels=1, tile_size=2048)
@@ -735,15 +737,16 @@ op = Tanh(size=2048, num_aie_columns=1, num_channels=1, tile_size=2048)
 # Dispatch, and compare every output with op.reference() on the drawn inputs
 # under the tolerance contract of the kernel the operator runs; in a test,
 # record=record_property puts its latency and bandwidth in the CSV ...
-run = run_test(op, vectors(op), tolerance=op.resolved().tolerance())
-assert not run.errors, run.errors
+errors = run_test(op, vectors(op), tolerance=op.resolved().tolerance())
+assert not errors, errors
 
 # ... or under an explicit one.
-run = run_test(op, vectors(op), tolerance=Tolerance.relative(0.04, 1e-6))
+errors = run_test(op, vectors(op), tolerance=Tolerance.relative(0.04, 1e-6))
 ```
 
 `op.judge()` holds a step's buffers to its reference the same way, for
-tests that dispatch by hand, and `verify_buffer()` a single buffer.
+tests that dispatch by hand, and mlir-aie's `aie.utils.verify.compare` a
+single buffer.
 
 A test that dispatches is marked `@pytest.mark.supported_devices("npu1",
 "npu2")`, and nothing else: the mark skips it where no listed NPU is, and

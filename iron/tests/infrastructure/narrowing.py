@@ -17,6 +17,7 @@ import sys
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.utils.verify import compare
 from ml_dtypes import bfloat16
 
 import iron
@@ -49,7 +50,6 @@ from iron.common.graph.probe import (
     search,
     time_interleaved,
 )
-from iron.common.harness import verify_buffer
 from iron.common.image import Fusion
 from iron.lm.blocks import SwiGLU
 from iron.operators import (
@@ -575,9 +575,7 @@ def test_tuned_each_step_graph_is_bit_identical_and_narrowed(tmp_path):
     got = np.array(tuned(a, b).numpy()[:SIZE])
     assert want.view(np.uint16).tolist() == got.view(np.uint16).tolist()
     silu = plain.traced.steps[-1].op.resolved()
-    verdict = verify_buffer(
-        got, "out", Chain(SIZE, TILE).reference(a, b), silu.tolerance()
-    )
+    verdict = compare(got, Chain(SIZE, TILE).reference(a, b), silu.tolerance())
     assert verdict, verdict.detail
 
 

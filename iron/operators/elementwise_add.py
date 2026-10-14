@@ -7,7 +7,8 @@ from aie.iron.kernels import eltwise
 
 from iron import operators as catalog
 from iron.common import BinaryElementwise, Chain, In, Link, Out, Rowwise
-from iron.common.testing import Case, Sweep, Testing
+from iron.common.elementwise import Sweep
+from iron.common.testing import Case, Testing
 
 
 class ElementwiseAdd(BinaryElementwise):

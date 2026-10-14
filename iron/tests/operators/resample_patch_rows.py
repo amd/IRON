@@ -10,7 +10,7 @@ shape is the buffer's wherever the default sizes it.
 
 import pytest
 
-from iron.common.harness import vectors
+from iron.common.testing import vectors
 from iron.operators.resample.op import Resample
 
 

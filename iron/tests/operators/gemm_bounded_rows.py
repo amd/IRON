@@ -13,9 +13,9 @@ outlive the call, that is the runtime parameter the sequence writes.
 
 import numpy as np
 import pytest
+from aie.utils.verify import compare
 from ml_dtypes import bfloat16
 
-from iron.common.harness import verify_buffer
 from iron.operators.gemm import GEMM
 from iron.tests.common.graphs import Project
 
@@ -44,9 +44,8 @@ def test_the_rows_of_a_bound_are_computed(full_elf):
         x = rng.standard_normal((M, K)).astype(bfloat16)
         w = rng.standard_normal((N, K)).astype(bfloat16)
         got = np.asarray(project(x, w, n=n)).reshape(M, N)
-        verdict = verify_buffer(
+        verdict = compare(
             got[:n],
-            "C",
             op.reference(x[:n], w),
             tolerance,
             bound=tolerance.bound(x[:n], w),

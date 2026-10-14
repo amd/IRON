@@ -16,12 +16,11 @@ to near 0, where the loss hides under any absolute floor.
 
 import numpy as np
 import pytest
-from aie.utils.verify import Tolerance
+from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common.harness import verify_buffer
 from iron.operators.mha import MHA
 
 # Llama 3.2 1B's decode: its heads packed, over its default context.
@@ -57,7 +56,5 @@ def test_one_query_is_as_accurate_deep_in_the_cache_as_near_its_start():
         expected = np.asarray(expected, np.float32).reshape(o.shape)
         # 2.0% of the range measured at both positions, aie::exp2's error.
         peak = float(np.abs(expected).max())
-        verdict = verify_buffer(
-            o, "O", expected, tolerance=Tolerance(rtol=0, atol=0.04 * peak)
-        )
+        verdict = compare(o, expected, Tolerance(rtol=0, atol=0.04 * peak))
         assert verdict, f"{position=}: {verdict.detail}"

@@ -22,11 +22,11 @@ whether it lies before or after a query.
 
 import numpy as np
 import pytest
+from aie.utils.verify import compare
 from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common.harness import verify_buffer
 from iron.operators.mha import MHA
 
 # Llama 3.2 1B's heads, at half its context; eight pipelines as its profile.
@@ -103,11 +103,10 @@ def test_rows_past_the_valid_length_are_zero(
         assert not padding.any(), f"{rows=} {n=}: padding rows are not zero"
         expected = attend.reference(q, k, v, rows=rows, n=n)
         expected = np.asarray(expected, dtype=np.float32).reshape(-1, heads, d)
-        verdict = verify_buffer(
+        verdict = compare(
             o[:n],
-            "O",
             expected[:n],
-            tolerance=mha.resolved().tolerance(),
+            mha.resolved().tolerance(),
         )
         assert verdict, f"{rows=} {n=}: the valid elements differ: {verdict.detail}"
 
@@ -155,11 +154,10 @@ def test_a_chunk_attends_over_the_cache_before_it(full_elf):
         position = start + rows - 1
         o = net(q[start : start + CHUNK], k, v, rows=rows, position=position)
         o = np.asarray(o, dtype=np.float32).reshape(CHUNK, HEADS, D)
-        verdict = verify_buffer(
+        verdict = compare(
             o[:rows],
-            "O",
             whole[start : start + rows],
-            tolerance=mha.resolved().tolerance(),
+            mha.resolved().tolerance(),
         )
         assert verdict, f"{c=} {rows=}: the valid elements differ: {verdict.detail}"
 

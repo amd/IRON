@@ -12,11 +12,11 @@ pass.
 
 import numpy as np
 import pytest
+from aie.utils.verify import compare
 from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common.harness import verify_buffer
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemv import GEMV
@@ -96,9 +96,7 @@ def test_a_projection_written_into_a_state_is_the_one_copied(image):
         for fold, net in nets.items():
             net(x, pos=slot)
             got[fold] = _cache(net, graphs[fold])
-        verdict = verify_buffer(
-            got[True][slot], "GEMV", gemv.reference(w, x), tolerance
-        )
+        verdict = compare(got[True][slot], gemv.reference(w, x), tolerance)
         assert verdict, verdict.detail
         expected[slot] = got[True][slot]
         wrong = np.argwhere(got[True] != expected)

@@ -8,7 +8,8 @@ import numpy as np
 from aie.iron.kernels import datamovement
 
 from iron.common import In, UnaryElementwise, Unresolvable, Auto, Param
-from iron.common.testing import Sweep, Testing
+from iron.common.elementwise import Sweep
+from iron.common.testing import Testing
 
 
 class Dequant(UnaryElementwise):

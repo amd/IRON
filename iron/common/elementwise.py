@@ -26,7 +26,7 @@ import dataclasses
 import functools
 import math
 from contextlib import nullcontext
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import ClassVar, Self
 
 import aie.dialects.arith as arith
@@ -35,6 +35,7 @@ import numpy as np
 from aie.helpers.util import np_ndarray_type_to_memref_type
 from aie.iron import Buffer, ObjectFifo, Worker, WorkerRuntimeBarrier, ceildiv
 from aie.iron.controlflow import if_, range_
+from aie.iron.device import Device
 from aie.iron.kernel import ExternalFunction
 from aie.iron import kernels
 from aie.utils.compile.utils import resolve_target_arch
@@ -54,10 +55,16 @@ from .declare import (
     Auto,
     Param,
 )
-from .testing import Sweep, Testing
+from .testing import Case, Testing
 
 # Small enough to divide any extent a model has, at some DMA efficiency.
 DEFAULT_TILE = 256
+
+LENGTHS = (1024, 2048, 4096, 8192)
+
+# Takes the widest grid most of a millisecond, several times the dispatch cost.
+BENCH_ELEMENTS = 1 << 23
+BENCH_TILE = 4096
 
 _I32 = np.ndarray[(1,), np.dtype[np.int32]]
 
@@ -136,6 +143,91 @@ def _interval(
         lo.append(np.where(finite, low, v))
         hi.append(np.where(finite, high, v))
     return np.minimum.reduce(lo), np.maximum.reduce(hi)
+
+
+class Sweep:
+    """The cases of an elementwise operator: every column count its shim
+    budget allows by every channel count, at each length.
+
+    Args:
+        channels: None leaves the count to the operator (a binary one).
+        tile_cap: Else the class's ``tile_cap``.
+        regular: The one length in the default suite; None for all.
+        rows: A length is that many elements in rows of ``tile_size``
+            (a ``Rowwise`` operator).
+        bench: The length of one CI-tracked case at the widest grid; None
+            adds none.
+        lower: Flags its first default case ``Case.lower``.
+        **extra: Given to every case.
+    """
+
+    def __init__(
+        self,
+        lengths: Iterable[int] = LENGTHS,
+        *,
+        channels: Iterable[int] | None = (1, 2),
+        tile_cap: int | None = None,
+        regular: int | None = 2048,
+        rows: bool = False,
+        bench: int | None = BENCH_ELEMENTS,
+        lower: bool = False,
+        **extra,
+    ):
+        self.lengths = tuple(lengths)
+        self.bench = bench
+        self.lower = lower
+        self.channels = None if channels is None else tuple(channels)
+        self.tile_cap = tile_cap
+        self.regular = regular
+        self.rows = rows
+        self.extra = extra
+
+    def _kwargs(self, length: int, cols: int, chans: int, tile: int) -> dict:
+        kwargs = dict(rows=length // tile) if self.rows else dict(size=length)
+        kwargs["num_aie_columns"] = cols
+        if self.channels is not None:
+            kwargs["num_channels"] = chans
+        kwargs.update(tile_size=tile, **self.extra)
+        return kwargs
+
+    def __call__(self, cls, dev: Device) -> list[Case]:
+        cap = cls.tile_cap if self.tile_cap is None else self.tile_cap
+        out = []
+        for length in self.lengths:
+            for chans in self.channels or (1,):
+                for cols in range(
+                    1, cls.declaration.shim_columns(dev, chans, self.extra) + 1
+                ):
+                    cores = cols * chans
+                    tile = min(length // cores, cap)
+                    if tile * cores != length:
+                        continue
+                    out.append(
+                        Case(
+                            self._kwargs(length, cols, chans, tile),
+                            extensive=length != self.regular,
+                        )
+                    )
+        if self.lower:
+            i = next(i for i, c in enumerate(out) if not c.extensive)
+            out[i] = dataclasses.replace(out[i], lower=True)
+        if self.bench is not None:
+            chans = max(self.channels or (1,))
+            tile = min(BENCH_TILE, cap)
+            cols = next(
+                c
+                for c in range(
+                    cls.declaration.shim_columns(dev, chans, self.extra), 0, -1
+                )
+                if self.bench % (c * chans * tile) == 0
+            )
+            out.append(
+                Case(
+                    self._kwargs(self.bench, cols, chans, tile),
+                    bench=True,
+                )
+            )
+        return out
 
 
 @dataclasses.dataclass(frozen=True)

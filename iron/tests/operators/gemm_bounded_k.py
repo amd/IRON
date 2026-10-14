@@ -14,11 +14,11 @@ their runtime parameters.
 
 import numpy as np
 import pytest
+from aie.utils.verify import compare
 from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common.harness import verify_buffer
 from iron.lm.blocks import ACCURATE
 from iron.operators.gemm import GEMM
 from iron.operators.softmax import Softmax
@@ -74,7 +74,7 @@ def test_the_reduction_stops_at_the_per_call_length(mode, full_elf):
         a_k, b_k = np.zeros_like(a[:, :k]), np.zeros_like(b[:k])
         a_k[:, :n], b_k[:n] = a[:, :n], b[:n]
         bound = tolerance.bound(a_k, b_k.T if b_col_maj else b_k)
-        verdict = verify_buffer(got, "C", want, tolerance, bound=bound)
+        verdict = compare(got, want, tolerance, bound=bound)
         assert verdict, f"n={n}: {verdict.detail}"
 
 
@@ -109,5 +109,5 @@ def test_attention_reduces_over_the_valid_keys():
         tolerance = gemm.tolerance()
         bound = tolerance.bound(weights, v_k)
         want = gemm.reference(weights, v_k)
-        verdict = verify_buffer(got, "C", want, tolerance, bound=bound)
+        verdict = compare(got, want, tolerance, bound=bound)
         assert verdict, f"n={n}: {verdict.detail}"

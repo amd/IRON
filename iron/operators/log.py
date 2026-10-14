@@ -10,7 +10,8 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import In, UnaryElementwise, Param
-from iron.common.testing import Sweep, Testing
+from iron.common.elementwise import Sweep
+from iron.common.testing import Testing
 
 from .split3 import SPLIT
 

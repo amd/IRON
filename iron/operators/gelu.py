@@ -6,7 +6,8 @@ from typing import ClassVar
 from aie.iron.kernels import activation
 
 from iron.common import UnaryElementwise
-from iron.common.testing import Sweep, Testing
+from iron.common.elementwise import Sweep
+from iron.common.testing import Testing
 
 
 class GELU(UnaryElementwise):

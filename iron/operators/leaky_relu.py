@@ -4,7 +4,8 @@
 from aie.iron.kernels import activation
 
 from iron.common import UnaryElementwise, Param
-from iron.common.testing import Case, Sweep, Testing
+from iron.common.elementwise import Sweep
+from iron.common.testing import Case, Testing
 
 
 class LeakyReLU(UnaryElementwise):

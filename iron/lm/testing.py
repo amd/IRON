@@ -171,6 +171,39 @@ def check_accuracy(
         assert stats[stat] <= bound, f"{stat.lower()} KL {stats[stat]} > {bound}"
 
 
+def check_embedding(
+    got: np.ndarray,
+    want: np.ndarray,
+    min_cosine: float,
+    max_error: float,
+    *,
+    percentile: float = 1,
+    record,
+):
+    """``got``'s rows against ``want``'s embeddings: the token cosines' low
+    percentile (one bad token should not fail every other) and the
+    relative error of the whole array.
+
+    Args:
+        min_cosine: The percentile cosine must reach.
+        max_error: ``||got - want|| / ||want||`` must not exceed.
+        percentile: Which percentile of the per-row cosines is judged (1:
+            every row but the worst may miss ``min_cosine``).
+        record: A test's ``record_property``: the judged cosine, the worst
+            row's and the relative error.
+    """
+    cosines = (got * want).sum(-1) / (
+        np.linalg.norm(got, axis=-1) * np.linalg.norm(want, axis=-1)
+    )
+    error = float(np.linalg.norm(got - want) / np.linalg.norm(want))
+    judged = float(np.percentile(cosines, percentile))
+    record("Cosine", judged)
+    record("Worst cosine", float(cosines.min()))
+    record("Relative error", error)
+    assert judged >= min_cosine, judged
+    assert error <= max_error, error
+
+
 def check_determinism(
     runner,
     model,
