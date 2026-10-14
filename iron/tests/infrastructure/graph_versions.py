@@ -23,7 +23,6 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common.image import packaging
 from iron.operators import ElementwiseAdd
 
 E = 1024
