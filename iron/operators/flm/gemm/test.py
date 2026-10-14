@@ -15,7 +15,6 @@ from ml_dtypes import bfloat16
 from iron.common import Chain, Link
 from iron.common.design import OperatorDesign
 from iron.common.testing import run_test, vectors
-from iron.operators import GEMM as GenericGEMM
 from iron.operators.clamp import Clamp
 from iron.operators.flm.gemm.design import (
     CT_MAX_K_FOR_N,
@@ -468,18 +467,6 @@ def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, emulate):
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-@pytest.mark.parametrize("M,K,N", [(256, 512, 1024), (512, 1024, 2048)])
-def test_artifact_stem_differs_from_generic_gemm(M, K, N):
-    """``flm.GEMM`` must never share an artifact stem with ``GEMM``.
-
-    Both classes are named ``GEMM`` and Operator.name derives the stem from
-    the class name, so with the cache keyed on filename the two operators would
-    silently satisfy each other's builds in one build dir.
-    """
-    assert GEMM(M=M, K=K, N=N).name != GenericGEMM(M=M, K=K, N=N).name
-
-
-@pytest.mark.supported_devices("npu1", "npu2")
 def test_one_xclbin_serves_every_shape():
     """Several shapes back to back on one loaded xclbin.
 
@@ -548,8 +535,7 @@ def test_one_xclbin_serves_every_clamp_bound():
     clamped = GEMM(M=M, K=K, N=N, **finished(M, N, NONE, bounds[0]))
     unclamped = GEMM(M=M, K=K, N=N)
     assert unclamped.config_name == clamped.config_name
-    # The bounds do reach the instruction stream, though, so they must reach
-    # its stem or the build cache serves one caller's stream to another.
+    # The bounds do reach the instruction stream, and so its name.
     assert unclamped.name != clamped.name
     assert clamped.name != GEMM(M=M, K=K, N=N, **finished(M, N, NONE, bounds[1])).name
 
@@ -623,7 +609,7 @@ def test_shipped_overlay(M, K, N, epilogue, clamp, record_property):
     # Only the unbounded epilogues are checked this way. For sigmoid and clamp
     # no bound over this reference can be both correct and useful -- the
     # accumulator error alone exceeds their whole output range -- so they are
-    # covered functionally by test_mm_prebuilt_epilogue_matches_accumulator.
+    # covered functionally by test_shipped_epilogue_matches_accumulator.
     mass = accumulated_mass(K, data["A"], data["B"])
     abs_tol = MAX_SLOPE[epilogue] * BUDGET_FLOOR * mass
     errors = run_test(

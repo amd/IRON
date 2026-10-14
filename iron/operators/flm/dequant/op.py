@@ -39,12 +39,9 @@ from iron.operators.flm.q4nx import (
     GROUP,
     K_TILE,
     M_TILE,
-    bf16_to_f32,
     packed_bytes,
+    parts,
 )
-
-# Out-features one run of code bytes spans.
-PARALLEL = 16
 
 
 def _blocks(qw):
@@ -73,29 +70,11 @@ def _block_origins(n_blocks, K):
 
 def dequantize(qw, K, N):
     """q4nx blob to f32, shaped (N out-features, K in-features)."""
-    b = _blocks(qw)
-    n_blocks = len(b)
-
-    n_groups = K_TILE // GROUP
-    sm = n_groups * M_TILE * 2
-    scales = bf16_to_f32(b[:, :sm].view(np.uint16).reshape(n_blocks, n_groups, M_TILE))
-    mins = bf16_to_f32(
-        b[:, sm : 2 * sm].view(np.uint16).reshape(n_blocks, n_groups, M_TILE)
-    )
-
-    qs = b[:, 2 * sm :].reshape(n_blocks, M_TILE // PARALLEL, K_TILE, PARALLEL // 2)
-    q = np.empty((n_blocks, M_TILE // PARALLEL, K_TILE, PARALLEL), dtype=np.float32)
-    q[..., 0::2] = (qs & 0xF).astype(np.float32)
-    q[..., 1::2] = (qs >> 4).astype(np.float32)
-    q = q.transpose(0, 1, 3, 2).reshape(n_blocks, M_TILE, K_TILE)
-
+    codes, scales, mins = parts(_blocks(qw))
     grp = np.arange(K_TILE) // GROUP
-    s = scales[:, grp, :].transpose(0, 2, 1)
-    m = mins[:, grp, :].transpose(0, 2, 1)
-    vals = m + s * q
-
+    vals = mins[..., grp] + scales[..., grp] * codes
     out = np.empty((N, K), dtype=np.float32)
-    for i, (r0, c0) in enumerate(_block_origins(n_blocks, K)):
+    for i, (r0, c0) in enumerate(_block_origins(len(vals), K)):
         out[r0 : r0 + M_TILE, c0 : c0 + K_TILE] = vals[i]
     return out
 

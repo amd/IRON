@@ -101,9 +101,16 @@ def test_output_feeds_gemm_unchanged():
 
 
 @pytest.mark.supported_devices("npu2")
-def test_gate_up_interleaved_blob():
-    """Gate and up share one blob at 512 out-features in a 1024 period."""
-    K, N, run, period = 1024, 1024, 512, 1024
+@pytest.mark.parametrize(
+    "K, N, run, period",
+    [
+        (1024, 1024, 512, 1024),
+        # E4B's gate/up blob.
+        pytest.param(2560, 10240, 5120, 10240, marks=pytest.mark.extensive),
+    ],
+)
+def test_gate_up_interleaved_blob(K, N, run, period):
+    """Gate and up share one blob, ``run`` out-features each in a ``period``."""
     qw = random_q4nx(K, N, seed=12)
     blob = scatter_runs(qw, K, N, run, period, seed=12)
 
@@ -125,52 +132,19 @@ def test_gate_up_interleaved_blob():
         # Gemma 4 E2B's MLP down projection.
         pytest.param(6144, 1536, marks=pytest.mark.bench),
         pytest.param(12288, 1536, marks=pytest.mark.extensive),
+        # E4B's o, down and gate/up projections, as flm.GEMM's extensive set.
+        pytest.param(2560, 2560, marks=pytest.mark.extensive),
+        pytest.param(10240, 2560, marks=pytest.mark.extensive),
+        pytest.param(2560, 10240, marks=pytest.mark.extensive),
     ],
 )
 def test_large_k_shapes(K, N, record_property):
-    """E2B's tall projections, whose k-tiles outnumber a shim tile's buffer
+    """Gemma 4's tall projections, whose k-tiles outnumber a shim tile's buffer
     descriptors. K = 12288 is 24 k-tiles, the deepest E2B reaches.
     """
     qw = random_q4nx(K, N, seed=21)
     op = DequantBFP(K=K, N=N)
     _check(op, qw, op.reference(qw), f"K={K} N={N}", record_property)
-
-
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.extensive
-@pytest.mark.parametrize(
-    "K, N",
-    [
-        (2560, 2560),  # o-proj
-        (10240, 2560),  # down
-        (2560, 10240),  # gate/up
-    ],
-)
-def test_e4b_shapes(K, N):
-    """E4B's projections, as B is (K, N). These are the shapes flm.GEMM's own
-    extensive set covers, so the two operators are exercised on the same model.
-    """
-    qw = random_q4nx(K, N, seed=33)
-    op = DequantBFP(K=K, N=N)
-    _check(op, qw, op.reference(qw), f"K={K} N={N}")
-
-
-@pytest.mark.supported_devices("npu2")
-@pytest.mark.extensive
-def test_e4b_gate_up_interleaved():
-    """E4B's gate/up blob: 5120 out-features each in a 10240 period."""
-    K, N, run, period = 2560, 10240, 5120, 10240
-    qw = random_q4nx(K, N, seed=34)
-    blob = scatter_runs(qw, K, N, run, period, seed=34)
-
-    op = DequantBFP(
-        K=K,
-        N=N,
-        run_out_features=run,
-        run_period_out_features=period,
-    )
-    assert op.quantized_size() == blob.size
-    _check(op, blob, op.reference(qw), "E4B gate/up interleave")
 
 
 @pytest.mark.supported_devices("npu2")

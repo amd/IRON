@@ -23,8 +23,6 @@ from aie.iron.kernels.datamovement import limbs_f32_split
 from aie.utils import bfp, config
 from ml_dtypes import bfloat16
 
-from iron.operators.flm.q4nx import bf16_to_f32
-
 
 def f32_to_bf16_floor(x):
     """Round f32 to bf16 toward negative infinity, as the cores do."""
@@ -48,7 +46,7 @@ def to_bf16(x, rounding="floor"):
 
 def rb(x, rounding="floor"):
     """Round `x` to a bf16 value."""
-    return bf16_to_f32(to_bf16(x, rounding))
+    return to_bf16(x, rounding).view(bfloat16).astype(np.float32)
 
 
 def fmul(a, b):
@@ -128,9 +126,8 @@ def inv_kernel(denom):
     exponent = (bits & 0x7F800000) >> 23
     mantissa = (bits & 0x007FFFFF) >> 16
     inv_exp = (mantissa == 0).astype(np.uint64) + (253 - exponent)
-    return bf16_to_f32(
-        (((inv_exp << 7) + INV_MANTISSA[mantissa]) & 0xFFFF).astype(np.uint16)
-    )
+    bf16 = (((inv_exp << 7) + INV_MANTISSA[mantissa]) & 0xFFFF).astype(np.uint16)
+    return bf16.view(bfloat16).astype(np.float32)
 
 
 @cache

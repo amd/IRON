@@ -23,6 +23,7 @@ import dataclasses
 
 import numpy as np
 from aie.iron.kernels import bf16_exp_lut_ref
+from ml_dtypes import bfloat16
 
 from iron.operators.flm.aie2p_math_emulation import (
     bfp16,
@@ -46,8 +47,8 @@ from iron.operators.flm.q4nx import (
     GROUP,
     K_TILE,
     M_TILE,
-    bf16_to_f32,
     packed_bytes,
+    parts,
 )
 
 # The epsilon of aie_kernels/flm_gemma4/rms_norm.h.
@@ -185,33 +186,23 @@ _SM_BYTES = 2 * 2 * M_TILE * K_TILE // GROUP
 
 def parse_q4nx(proj_u8, offset, rows, cols):
     """A q4nx weight in natural order: (codes [rows, cols], scales and mins
-    [rows, cols / 32]). The weight is min + scale * code.
-
-    A block holds 32 rows by 256 columns in 5120 bytes: 256 bf16 scales, 256 bf16
-    minima at index g * 32 + r, then 8192 4-bit codes at nibble
-    (r // 16) * 4096 + c * 16 + r % 16, low nibble first. Blocks go by pairs of
-    32-row bands: column block c of band 2p, then of band 2p + 1.
+    [rows, cols / 32]) (``q4nx.parts``). Blocks go by pairs of 32-row bands:
+    column block c of band 2p, then of band 2p + 1.
     """
     nb_r, nb_c = rows // M_TILE, cols // K_TILE
     blk = proj_u8[offset : offset + nb_r * nb_c * BLOCK_BYTES]
     blk = blk.reshape(nb_r // 2, nb_c, 2, BLOCK_BYTES).transpose(0, 2, 1, 3)
-    blk = blk.reshape(nb_r, nb_c, BLOCK_BYTES)
-    sm = blk[..., :_SM_BYTES].copy().view("<u2")
-    sm = bf16_to_f32(sm.reshape(nb_r, nb_c, 2, K_TILE // GROUP, M_TILE))
-    sm = sm.transpose(2, 0, 4, 1, 3).reshape(2, rows, cols // GROUP)
-    qs = blk[..., _SM_BYTES:]
-    codes = np.empty(qs.shape[:-1] + (M_TILE * K_TILE,), np.uint8)
-    codes[..., 0::2] = qs & 0x0F
-    codes[..., 1::2] = qs >> 4
-    codes = codes.reshape(nb_r, nb_c, 2, K_TILE, 16).transpose(0, 2, 4, 1, 3)
-    return codes.reshape(rows, cols), sm[0], sm[1]
+    return tuple(
+        part.reshape(nb_r, nb_c, M_TILE, -1).transpose(0, 2, 1, 3).reshape(rows, -1)
+        for part in parts(blk)
+    )
 
 
 def parse_bf16_blocked(proj_u8, offset, rows, cols):
     """A bf16 weight in 32 x 256 blocks, row-block major. Element k * 32 + m of
     block (i, j) is W[32 i + m, 256 j + k].
     """
-    w = bf16_to_f32(proj_u8[offset : offset + 2 * rows * cols].view("<u2"))
+    w = proj_u8[offset : offset + 2 * rows * cols].view(bfloat16).astype(np.float32)
     w = w.reshape(rows // BF16_M, cols // BF16_K, BF16_K, BF16_M).transpose(0, 3, 1, 2)
     return w.reshape(rows, cols)
 
@@ -353,7 +344,7 @@ def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max
     lay = rope_rms_layout(geometry, layer_type)
 
     def vec(buf, off, n):
-        return bf16_to_f32(buf[off : off + n]).astype(np.float64)
+        return buf[off : off + n].view(bfloat16).astype(np.float64)
 
     def q4(name, v):
         off, _, rows, cols = W[name]
@@ -385,7 +376,7 @@ def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max
 
     # The attention reads the cache after this token's row lands in it.
     order, valid = _attention_rows(g, context_len)
-    cache = bf16_to_f32(kv_out[: 2 * v_off]).astype(np.float64)
+    cache = kv_out[: 2 * v_off].view(bfloat16).astype(np.float64)
     K = cache[:v_off].reshape(rows, n_kv, dh)[order]
     V = cache[v_off:].reshape(rows, n_kv, dh)[order]
     o = attention(q, K, V, valid, n_kv)
@@ -508,15 +499,18 @@ def _query(g, W, x, proj, rms, rope_rms, lay):
     """The rotated query heads [heads, dh] of the layer."""
     D, dh = g["model_dim"], g["dh"]
     off, _, rows, cols = W["q"]
-    xn = rms_norm(bf16_to_f32(x[:D]), bf16_to_f32(rms[:D]))
+    xn = rms_norm(
+        x[:D].view(bfloat16).astype(np.float32),
+        rms[:D].view(bfloat16).astype(np.float32),
+    )
     qp = q4_matvec(xn, *parse_q4nx(proj, off, rows, cols)).reshape(
         g["num_attn_heads"], dh
     )
-    cos = bf16_to_f32(rope_rms[lay["cos"] : lay["cos"] + dh // 2])
-    sin = bf16_to_f32(rope_rms[lay["sin"] : lay["sin"] + dh // 2])
-    return rope_head(
-        qp, bf16_to_f32(rope_rms[lay["q_norm"] : lay["q_norm"] + dh]), cos, sin
+    cos, sin, q_norm = (
+        rope_rms[lay[name] : lay[name] + n].view(bfloat16).astype(np.float32)
+        for name, n in (("cos", dh // 2), ("sin", dh // 2), ("q_norm", dh))
     )
+    return rope_head(qp, q_norm, cos, sin)
 
 
 NEEDLE_SCORE = 8.0
