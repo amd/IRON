@@ -16,11 +16,13 @@ Each tower's graph is built for the class that tests it and dropped after
 it, before the text encoder's graphs are built for the module's last tests.
 """
 
+import tarfile
 import time
 
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+import soundfile
 from aie.utils.benchmark import run_iters
 from ml_dtypes import bfloat16
 from PIL import Image
@@ -74,17 +76,21 @@ MIN_COSINE_MIXED = 0.9995
 # reaches it.
 NORM_RTOL = 2**-8
 
-# Measured: 0.99925, 0.99953, 0.99931 and 0.99941 of the features are the
-# host extractor's rounded to bf16.
+# Measured on chirps: 0.99925, 0.99953, 0.99931 and 0.99941 of the features
+# are the host extractor's rounded to bf16.
 AUDIO_MIN_EXACT = 0.999
 # The rest are within one bf16 ulp, bar a log near 0, where the energy's
 # relative error is the feature's absolute one: measured 1.9e-6 at most.
 AUDIO_ATOL = 4e-6
-# Measured: 0.983, 0.779, 0.565 and 0.622 at the worst token (mean 0.996 or
-# more), where HF's own bf16 tower reaches 0.861, 0.795, 0.902 and 0.689.
-AUDIO_MIN_COSINE = 0.55
-# Measured: 0.042, 0.084, 0.072 and 0.074; the tower without its clamps is 0.88.
-AUDIO_MAX_ERROR = 0.09
+# The 1st percentile of the token cosines, not the worst token: the last layer
+# is ill-conditioned at a few tokens, where HF's own float32 model turns the
+# NPU's 11-layer state, within 0.9995 of its own there, into 0.74. Measured
+# on npu2 over CLIPS: 0.9991, 0.9929, 0.9994, 0.9984 and 0.9982, relative
+# error 0.021, 0.038, 0.018, 0.047 and 0.037; HF's own bf16 tower against its
+# float32 one: 0.9992, 0.9933, 0.9958, 0.9996 and 0.9990, and 0.015, 0.027,
+# 0.043, 0.013 and 0.016. vtanh's Tanh, in the soft cap, reached 0.082.
+AUDIO_MIN_COSINE = 0.99
+AUDIO_MAX_ERROR = 0.06
 
 # Measured on npu2 at the worst token of IMAGES: min cosine 0.9745, 0.9633
 # and 0.9801, relative error 4.4e-2, 4.8e-2 and 5.3e-2. bf16 error grows
@@ -93,16 +99,25 @@ AUDIO_MAX_ERROR = 0.09
 VISION_MIN_COSINE = 0.95
 VISION_MAX_ERROR = 0.06
 
-# Seconds of audio, by the soft tokens they give.
+# LibriSpeech's test-clean (CC BY 4.0, V. Panayotov et al., 2015), as openslr
+# publishes it, fetched once beside the checkpoint.
+LIBRISPEECH = Download(
+    "https://www.openslr.org/resources/12/test-clean.tar.gz",
+    "39fde525e59672dc6d1551919b1478f724438a95aa55f874b576be21967e6c23",
+)
+
+# Utterances of it, 16 kHz mono, by the soft tokens they give.
 CLIPS = {
-    # 50 tokens.
-    "short": 2.0,
-    # 183 tokens.
-    "medium": 7.3,
-    # 450 tokens.
-    "extended": 18.0,
-    # 750 tokens: the extractor's 30 s cap.
-    "long": 30.0,
+    # 2.0 s, 50 tokens: "Won't you tell Douglas".
+    "short": "121-127105-0021",
+    # 7.3 s, 183 tokens.
+    "medium": "4446-2275-0016",
+    # 13.0 s, 325 tokens.
+    "passage": "2094-142345-0014",
+    # 18.0 s, 450 tokens.
+    "extended": "3729-6852-0017",
+    # 35.0 s, 750 tokens: past the extractor's 30 s cap, which truncates it.
+    "long": "4507-16021-0047",
 }
 
 I, V = VisionConfig().image_tokens, VisionConfig().video_tokens
@@ -168,21 +183,26 @@ def cosine(a, b):
     return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
-def chirp(seconds: float, sweep: float = 900.0, over: float = 1.0) -> np.ndarray:
-    """A chirp from 200 Hz under noise, its phase `sweep * t ** 2 / over`
-    cycles past a steady tone's, mono at the extractor's sample rate.
-    """
-    rng = np.random.default_rng(0)
-    rate = AudioConfig().sample_rate
-    t = np.arange(int(seconds * rate)) / rate
-    wave = 0.5 * np.sin(2 * np.pi * (200 * t + sweep * t**2 / over))
-    return (wave + 0.05 * rng.standard_normal(t.size)).astype(np.float32)
-
-
 def clip(name: str) -> np.ndarray:
-    """The tower's clip `name`, rising 3600 Hz over its length."""
-    seconds = CLIPS[name]
-    return chirp(seconds, 1800, max(seconds, 1))
+    """The utterance `CLIPS[name]`, its FLAC member taken from the archive
+    beside the checkpoint the first time, decoded: float32 samples in
+    [-1, 1) at the extractor's sample rate.
+    """
+    speaker, chapter, _ = CLIPS[name].split("-")
+    member = f"LibriSpeech/test-clean/{speaker}/{chapter}/{CLIPS[name]}.flac"
+    path = DIRECTORY / member
+    if not path.exists():
+        with tarfile.open(LIBRISPEECH.fetch(DIRECTORY)) as archive:
+            data = archive.extractfile(member).read()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Renamed into place, so an interrupted extraction leaves no clip.
+        partial = path.with_suffix(".part")
+        partial.write_bytes(data)
+        partial.replace(path)
+    samples, rate = soundfile.read(path, dtype="float32")
+    if samples.ndim != 1 or rate != AudioConfig().sample_rate:
+        raise ValueError(f"{name}: not mono at the extractor's rate")
+    return samples
 
 
 def photo(name: str) -> np.ndarray:
@@ -199,19 +219,16 @@ def tiled(image: np.ndarray, height: int, width: int) -> np.ndarray:
     return np.tile(image, reps)[:height, :width]
 
 
-# 50 soft tokens.
-CLIP = chirp(2.0)
-
 # Text with a clip and the baseball photo (16 x 16 tokens) at its
 # placeholders, each a mixed call's text, clip and photo.
 MIXED = {
-    "audio": ("<|audio|> a bird singing", CLIP, None),
+    "audio": ("<|audio|> someone reading aloud", "short", None),
     "image": ("<|image|> a baseball game", None, "baseball"),
-    "both": ("<|image|> the picture, then the sound: <|audio|>", CLIP, "baseball"),
+    "both": ("<|image|> the picture, then the speech: <|audio|>", "short", "baseball"),
     # 325 soft tokens of audio and an image's.
     "long_clip_and_image": (
-        "<|image|> the picture, then the sound: <|audio|>",
-        chirp(13.0),
+        "<|image|> the picture, then the speech: <|audio|>",
+        "passage",
         "baseball",
     ),
 }
@@ -221,12 +238,12 @@ MIXED = {
 HUGGING_FACE = {
     "query": (QUERY, "query", None, None),
     "past_the_window": (LONGER, "document", None, None),
-    "audio": ("<|audio|> a bird singing", "query", CLIP, None),
+    "audio": ("<|audio|> someone reading aloud", "query", "short", None),
     "image": ("<|image|> a baseball game", "query", None, "baseball"),
     "both": (
-        "<|image|> the picture, then the sound: <|audio|>",
+        "<|image|> the picture, then the speech: <|audio|>",
         "query",
-        CLIP,
+        "short",
         "baseball",
     ),
 }
@@ -293,7 +310,8 @@ def check_mixed(graph, oracle, audio_oracle, vision_oracle, case, record_propert
     """The embedding of `MIXED[case]` against the oracle fed its own towers'
     soft tokens.
     """
-    text, audio, name = MIXED[case]
+    text, speech, name = MIXED[case]
+    audio = None if speech is None else clip(speech)
     image = None if name is None else photo(name)
     c = graph.config
     got = graph.embed(text, "query", audio=audio, image=image)
@@ -400,9 +418,11 @@ class TestAudio:
             np.linalg.norm(got, axis=-1) * np.linalg.norm(want, axis=-1)
         )
         error = float(np.linalg.norm(got - want) / np.linalg.norm(want))
-        record_property("Cosine", float(cosines.min()))
+        percentile = float(np.percentile(cosines, 1))
+        record_property("Cosine", percentile)
+        record_property("Worst cosine", float(cosines.min()))
         record_property("Relative error", error)
-        assert cosines.min() >= AUDIO_MIN_COSINE, cosines.min()
+        assert percentile >= AUDIO_MIN_COSINE, percentile
         assert error <= AUDIO_MAX_ERROR, error
 
     @pytest.mark.bench
@@ -567,8 +587,12 @@ def test_embeddinggemma_2_determinism(multimodal):
     # Interleaved, so that a version reading what another left in the shared
     # arena or state differs from its first call.
     calls = [
-        (t, a, None if name is None else photo(name))
-        for t, a, name in [(LONG, None, None), *MIXED.values()]
+        (
+            t,
+            None if speech is None else clip(speech),
+            None if name is None else photo(name),
+        )
+        for t, speech, name in [(LONG, None, None), *MIXED.values()]
     ]
     first = [multimodal.embed(t, "query", audio=a, image=i) for t, a, i in calls]
     for _ in range(4):
@@ -654,7 +678,8 @@ def test_vision_oracle_matches_hugging_face(hugging_face, vision_oracle):
 def test_embeddinggemma_2_oracle_matches_hugging_face(
     hugging_face, tokenizer, oracle, audio_oracle, vision_oracle, case
 ):
-    text, task, wave, name = HUGGING_FACE[case]
+    text, task, speech, name = HUGGING_FACE[case]
+    wave = None if speech is None else clip(speech)
     image = None if name is None else photo(name)
     c = oracle.config
     soft = {}

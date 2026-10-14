@@ -72,8 +72,10 @@ patches against the host's, and the latency of each, on NPU1 and NPU2. On
 NPU1 each step is its own dispatch of an xclbin; `TestEachStep` checks that
 form on NPU2.
 
-The vision tests run on four COCO val2017 photos, fetched from COCO's own
-host by their sha256 into the checkpoint's directory the first time.
+The vision tests run on four COCO val2017 photos, and the audio tests on
+five LibriSpeech test-clean utterances (CC BY 4.0), each fetched from where
+it is published (COCO's host, openslr's archive) by its sha256 into the
+checkpoint's directory the first time.
 
 The float32 oracles are checked against Hugging Face's own processors and
 model (`hugging_face.py`), computed as the tests run. They need torch,
