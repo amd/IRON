@@ -46,26 +46,23 @@ from iron.applications.embedding_gemma2.oracle import (
 )
 from iron.applications.embedding_gemma2.vision import VisionTower
 from iron.applications.embedding_gemma2.weights import Weights
+from iron.lm import prompt_text
 from iron.lm.testing import require, weights_dir
 from iron.operators.copy import Copy
 
 DIRECTORY = weights_dir("embeddinggemma-2")
+
 QUERY = "What causes the northern lights?"
 DOCUMENTS = [
     "The northern lights are caused by charged particles from the sun.",
     "Photosynthesis converts light energy into chemical energy in plants.",
 ]
-PARAGRAPHS = [
-    f"Paragraph {i}: the aurora borealis appears when solar wind particles collide "
-    "with oxygen and nitrogen atoms in the upper atmosphere, emitting green and red light."
-    for i in range(60)
-]
-# About 370 tokens.
-LONG = " ".join(PARAGRAPHS[:12])
-# About 920 tokens, past the sliding window.
-LONGER = " ".join(PARAGRAPHS[:30])
-# About 1840 tokens, near the encoder's 2048.
-LONGEST = " ".join(PARAGRAPHS)
+# The library's shared text: 357 tokens as a document.
+LONG = prompt_text(1200)
+# 984 tokens, past the sliding window.
+LONGER = prompt_text(3500)
+# 1960 tokens, near the encoder's 2048.
+LONGEST = prompt_text(7000)
 
 # Measured: 0.99986 at the least, where HF's own bf16 model is 0.99997.
 MIN_COSINE = 0.9995

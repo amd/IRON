@@ -122,6 +122,13 @@ class Config:
         return angles
 
 
+def prompt_text(chars: int, skip: int = 0) -> str:
+    """``chars`` characters of ``prompt.txt``, from ``skip`` on: the text every
+    model's long inputs are drawn from.
+    """
+    return Path(__file__).with_name("prompt.txt").read_text()[skip : skip + chars]
+
+
 #: Each weight's path in the tree -> its checkpoint name and shape.
 Layout = dict[str, tuple[str, tuple[int, ...]]]
 
@@ -563,8 +570,7 @@ class Runner:
             rng = np.random.default_rng((self.seed, skip))
             draw = rng.integers(0, self.config.vocab_size, chars // 3 - 1)
             return [self.bos, *draw]
-        text = Path(__file__).with_name("prompt.txt").read_text()
-        return self.encode(text[skip : skip + chars])
+        return self.encode(prompt_text(chars, skip))
 
 
 def main(runner: type[Runner], description: str):
