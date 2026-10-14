@@ -18,8 +18,8 @@ SwiGLU block), `iron/applications/llama/`:
   command line below
 - [`profiles/`](profiles): its tunables, one file per device
 
-`python -m iron.lm.tune llama` measures the cost table its designs can be
-narrowed and packed by (below).
+`python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors`
+measures the cost table its designs can be narrowed and packed by (below).
 
 ## Weights and tokenizer
 
@@ -54,9 +54,10 @@ The NPU draws every token and writes the next decode step's values itself;
 the host only restarts each step and reads the tokens back at the end. The
 top-k must be at most 64.
 
-- `--random-weights SEED`: in place of the two files, weights drawn at
-  `SEED` and prompts of random tokens, for the speed, accuracy against the
-  oracle and determinism of the real checkpoint's shape on a host without it
+- `--random-weights SEED`: in place of the checkpoint's weights and the
+  tokenizer, weights drawn at `SEED` in the checkpoint's shapes (only its
+  header is read) and prompts of random tokens, for the speed, accuracy
+  against the oracle and determinism of the real checkpoint's shape
 - `--prompt-len`, `--num-tokens`: characters of `iron/lm/prompt.txt` to use
   as the prompt (default 2048) and tokens to generate (default 40)
 - `--max-seq-len`: the rows the key and value caches hold, a multiple of
@@ -102,7 +103,7 @@ by what each design costs on the device
 the NPU it is used on.
 
 ```bash
-python -m iron.lm.tune llama
+python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors
 python -m iron.applications.llama.model /path/to/model.safetensors /path/to/tokenizer.model \
     --cost-table iron/applications/llama/costs_npu2.json
 ```

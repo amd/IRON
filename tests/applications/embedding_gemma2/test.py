@@ -48,8 +48,7 @@ from iron.applications.embedding_gemma2.oracle import (
     VisionOracle,
 )
 from iron.applications.embedding_gemma2.vision import VisionTower
-from iron.applications.embedding_gemma2.weights import Weights
-from iron.lm import prompt_text
+from iron.lm import Checkpoint, prompt_text
 from iron.lm.testing import Download, cache_dir, require, weights_dir
 from iron.operators.copy import Copy
 
@@ -253,7 +252,7 @@ HUGGING_FACE = {
 @pytest.fixture(scope="module")
 def weights():
     require(DIRECTORY / "model.safetensors")
-    return Weights.read(DIRECTORY)
+    return Checkpoint(DIRECTORY / "model.safetensors").tree()
 
 
 @pytest.fixture(scope="module")
@@ -623,7 +622,10 @@ def test_embeddinggemma_2_latency(encoder, text, record_property):
     ],
 )
 def test_image_processor_refuses(npu2, shape, tokens, refusal):
-    vision = VisionTower(VisionConfig(), Weights.unread())
+    require(DIRECTORY / "model.safetensors")
+    vision = VisionTower(
+        VisionConfig(), Checkpoint(DIRECTORY / "model.safetensors").tree("unread")
+    )
     with pytest.raises(ValueError, match=refusal):
         vision.inputs(np.zeros((*shape, 3), np.uint8), tokens)
 
@@ -631,7 +633,10 @@ def test_image_processor_refuses(npu2, shape, tokens, refusal):
 def test_image_processor_refuses_on_npu1(npu1):
     # 2016 pixels wide at image_tokens: 16 patch columns a core on npu1's
     # eight cores, over the eight Resample's default holds there.
-    vision = VisionTower(VisionConfig(), Weights.unread())
+    require(DIRECTORY / "model.safetensors")
+    vision = VisionTower(
+        VisionConfig(), Checkpoint(DIRECTORY / "model.safetensors").tree("unread")
+    )
     with pytest.raises(ValueError, match="patch columns"):
         vision.inputs(np.zeros((97, 640, 3), np.uint8), I)
 

@@ -772,9 +772,14 @@ def sandwich(x, block: Callable, pre, post, epsilon: float):
 
 def attention(
     h,
-    w,
     angles,
     *,
+    q_proj,
+    k_proj,
+    v_proj,
+    o_proj,
+    q_norm,
+    k_norm,
     heads: int,
     groups: int,
     head_dim: int,
@@ -782,19 +787,20 @@ def attention(
     window: int | None = None,
     **gemm,
 ):
-    """Bidirectional attention over the rows of ``h``, unscaled: ``w.q``,
-    ``w.k`` and ``w.v`` project them (GEMMs with ``gemm``'s keywords), the
-    queries and keys are RMS-normed by ``w.q_norm`` and ``w.k_norm`` and
+    """Bidirectional attention over the rows of ``h``, unscaled: ``q_proj``,
+    ``k_proj`` and ``v_proj`` project them (GEMMs with ``gemm``'s keywords),
+    the queries and keys are RMS-normed by ``q_norm`` and ``k_norm`` and
     rotated by ``angles``, a row each, and the values RMS-normed; ``MHA``
     attends within ``window`` positions if given, over the pipelines the
-    profile gives it, and ``w.o`` projects the heads back.
+    profile gives it, and ``o_proj`` projects the heads back. Each weight
+    is a checkpoint's ``(out, in)``.
     """
     T, H, G, D = h.shape[0], heads, groups, head_dim
-    q = GEMM(h, w.q, b_col_maj=True, **gemm).reshape(T * H, D)
-    k = GEMM(h, w.k, b_col_maj=True, **gemm).reshape(T * G, D)
-    v = GEMM(h, w.v, b_col_maj=True, **gemm).reshape(T * G, D)
-    q = RoPE(RMSNorm(q, weight=w.q_norm, epsilon=epsilon), angles)
-    k = RoPE(RMSNorm(k, weight=w.k_norm, epsilon=epsilon), angles)
+    q = GEMM(h, q_proj, b_col_maj=True, **gemm).reshape(T * H, D)
+    k = GEMM(h, k_proj, b_col_maj=True, **gemm).reshape(T * G, D)
+    v = GEMM(h, v_proj, b_col_maj=True, **gemm).reshape(T * G, D)
+    q = RoPE(RMSNorm(q, weight=q_norm, epsilon=epsilon), angles)
+    k = RoPE(RMSNorm(k, weight=k_norm, epsilon=epsilon), angles)
     v = RMSNorm(v, epsilon=epsilon)
     o = MHA(
         q.reshape(T, H, D),
@@ -807,7 +813,7 @@ def attention(
         window=window,
         scale=1.0,
     )
-    return GEMM(o.reshape(T, H * D), w.o, b_col_maj=True, **gemm)
+    return GEMM(o.reshape(T, H * D), o_proj, b_col_maj=True, **gemm)
 
 
 #: RMSNorm's epsilon, shared by every model on ``Block``.
@@ -828,16 +834,21 @@ class Block:
     def layer(self, step: Step, i: int, w, x):
         c, n = self.config, x.shape[0]
         H, G, D = c.n_heads, c.n_kv_groups, c.head_dim
-        h = RMSNorm(x, weight=w.norm1)
+        a, mlp = w.self_attn, w.mlp
+        h = RMSNorm(x, weight=w.input_layernorm.weight)
         # Half a head per tile for one row; q's shape is o's when H * D is
         # the width, so it is given here rather than by the profile.
-        q, k, v = (project(h, p, tile_size_output=D // 2) for p in (w.q, w.k, w.v))
+        q, k, v = (
+            project(h, p.weight, tile_size_output=D // 2)
+            for p in (a.q_proj, a.k_proj, a.v_proj)
+        )
         # One angle row per position, applied to that position's heads.
         q = RoPE(q.reshape(n * H, D), step.angles)
         k = RoPE(k.reshape(n * G, D), step.angles)
-        x = ElementwiseAdd(x, project(self.attend(step, i, q, k, v), w.o))
-        h = RMSNorm(x, weight=w.norm2)
-        return ElementwiseAdd(x, swiglu(h, w.gate, w.up, w.down))
+        x = ElementwiseAdd(x, project(self.attend(step, i, q, k, v), a.o_proj.weight))
+        h = RMSNorm(x, weight=w.post_attention_layernorm.weight)
+        ff = swiglu(h, mlp.gate_proj.weight, mlp.up_proj.weight, mlp.down_proj.weight)
+        return ElementwiseAdd(x, ff)
 
 
 class BlockOracle:
@@ -848,18 +859,19 @@ class BlockOracle:
     def layer(self, angles, w, x):
         c, n = self.config, x.shape[0]
         H, G, D = c.n_heads, c.n_kv_groups, c.head_dim
-        h = rms_norm(x, w.norm1)
-        q = self.rotate((h @ w.q.T).reshape(n, H, D), angles)
-        k = self.rotate((h @ w.k.T).reshape(n, G, D), angles)
-        v = (h @ w.v.T).reshape(n, G, D)
-        x = x + self.attend(q, k, v) @ w.o.T
-        h = rms_norm(x, w.norm2)
-        F = w.gate.shape[0]
-        half = np.matmul(h, w.gate.T, out=self.buffer("gate", (n, F)))
+        a, mlp = w.self_attn, w.mlp
+        h = rms_norm(x, w.input_layernorm.weight)
+        q = self.rotate((h @ a.q_proj.weight.T).reshape(n, H, D), angles)
+        k = self.rotate((h @ a.k_proj.weight.T).reshape(n, G, D), angles)
+        v = (h @ a.v_proj.weight.T).reshape(n, G, D)
+        x = x + self.attend(q, k, v) @ a.o_proj.weight.T
+        h = rms_norm(x, w.post_attention_layernorm.weight)
+        F = mlp.gate_proj.weight.shape[0]
+        half = np.matmul(h, mlp.gate_proj.weight.T, out=self.buffer("gate", (n, F)))
         half *= np.float32(0.5)
         # SiLU, with the sigmoid as a tanh, which does not overflow.
         silu = np.tanh(half, out=self.buffer("silu", (n, F)))
         silu += 1
         silu *= half
-        silu *= np.matmul(h, w.up.T, out=self.buffer("up", (n, F)))
-        return x + silu @ w.down.T
+        silu *= np.matmul(h, mlp.up_proj.weight.T, out=self.buffer("up", (n, F)))
+        return x + silu @ mlp.down_proj.weight.T

@@ -18,6 +18,7 @@ import math
 import time
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 
 import aie.utils as aie_utils
@@ -30,8 +31,9 @@ from iron import lm
 from iron.common import Scratchpad
 from iron.common.graph.narrowing import CostTable, JointNarrowing
 from iron.common.graph.probe import Call
-from iron.lm import Encoder, attention, rope_angles, sandwich_layer
+from iron.lm import Checkpoint, Encoder, attention, rope_angles, sandwich_layer
 from iron.lm.blocks import ACCURATE
+from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul
@@ -45,7 +47,6 @@ from iron.operators.rms_norm import RMSNorm
 from .audio import AudioTower
 from .config import PROFILES, AudioConfig, Config, VisionConfig
 from .vision import VisionTower
-from .weights import Weights
 
 
 class Tokenizer:
@@ -125,22 +126,28 @@ class EmbeddingGemma(Encoder):
     profile = PROFILES
 
     def __init__(
-        self, config: Config, weights: Weights, tokenizer: Tokenizer | None = None
+        self,
+        config: Config,
+        weights: SimpleNamespace,
+        tokenizer: Tokenizer | None = None,
     ):
         c = config
         super().__init__(config, c.max_tokens)
         self.tokenizer = tokenizer
-        w = weights.text
+        w = weights.language_model
         table = np.zeros((c.vocab_size + 1, c.emb_dim), bfloat16)
-        table[:-1] = w.embedding.astype(np.float32) * np.sqrt(np.float32(c.emb_dim))
+        table[:-1] = w.embed_tokens.weight.astype(np.float32) * np.sqrt(
+            np.float32(c.emb_dim)
+        )
         self.embedding = iron.weight(table)
-        self.norm = w.norm
+        self.norm = w.norm.weight
         P = c.ple_dim
-        self.ple = [w.ple[i * P : (i + 1) * P] for i in range(c.n_layers)]
-        self.ple_norm = w.ple_norm
+        ple = w.ple.per_layer_model_projection.weight
+        self.ple = [ple[i * P : (i + 1) * P] for i in range(c.n_layers)]
+        self.ple_norm = w.ple.per_layer_projection_norm.weight
         self.layers = w.layers
         self.scales = [
-            np.full(c.emb_dim, layer.scalar[0], bfloat16) for layer in w.layers
+            np.full(c.emb_dim, layer.layer_scalar[0], bfloat16) for layer in w.layers
         ]
         self.angles = {
             D: iron.weight(rope_angles(D, c.max_tokens, base).astype(bfloat16))
@@ -151,7 +158,7 @@ class EmbeddingGemma(Encoder):
         width = 4 ** math.ceil(math.log(c.out_dim, 4))
         self.projection = np.zeros((len(c.mrl_dims), width, c.emb_dim), bfloat16)
         for j, d in enumerate(c.mrl_dims):
-            self.projection[j, :d] = w.projection[:d]
+            self.projection[j, :d] = w.embedding_projection.weight[:d]
         self.projection = self.projection.reshape(-1, c.emb_dim)
         self.unit = np.full(width, 1 / np.sqrt(width), bfloat16)
 
@@ -189,10 +196,16 @@ class EmbeddingGemma(Encoder):
     def layer(self, i, w, x, embeddings, n):
         c = self.config
         G, D, _ = c.heads(i)
+        a = w.self_attn
         attend = partial(
             attention,
-            w=w,
             angles=self.angles[D][:n],
+            q_proj=a.q_proj.weight,
+            k_proj=a.k_proj.weight,
+            v_proj=a.v_proj.weight,
+            o_proj=a.o_proj.weight,
+            q_norm=a.q_norm.weight,
+            k_norm=a.k_norm.weight,
             heads=c.n_heads,
             groups=G,
             head_dim=D,
@@ -200,14 +213,31 @@ class EmbeddingGemma(Encoder):
             window=None if i in c.global_layers else c.sliding_window,
             **ACCURATE,
         )
-        x = sandwich_layer(x, w, attend, c.eps, **ACCURATE)
+        x = sandwich_layer(
+            x,
+            attend,
+            norms=(
+                w.input_layernorm.weight,
+                w.post_attention_layernorm.weight,
+                w.pre_feedforward_layernorm.weight,
+                w.post_feedforward_layernorm.weight,
+            ),
+            gate=w.mlp.gate_proj.weight,
+            up=w.mlp.up_proj.weight,
+            down=w.mlp.down_proj.weight,
+            epsilon=c.eps,
+            **ACCURATE,
+        )
         # The projection's E ** -0.5 scale folded into the norm's epsilon:
         # RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
         ple = GEMM(embeddings, self.ple[i], b_col_maj=True, **ACCURATE)
         ple = RMSNorm(ple, weight=self.ple_norm, epsilon=c.eps * c.emb_dim)
-        g = GELU(GEMM(x, w.ple_gate, b_col_maj=True, **ACCURATE))
-        g = GEMM(ElementwiseMul(g, ple), w.ple_proj, b_col_maj=True, **ACCURATE)
-        x = ElementwiseAdd(x, RMSNorm(g, weight=w.ple_norm, epsilon=c.eps))
+        b = w.ple_block
+        g = GEMM(x, b.per_layer_input_gate.weight, b_col_maj=True, **ACCURATE)
+        g = ElementwiseMul(GELU(g), ple)
+        g = GEMM(g, b.per_layer_projection.weight, b_col_maj=True, **ACCURATE)
+        norm = b.post_per_layer_input_norm.weight
+        x = ElementwiseAdd(x, RMSNorm(g, weight=norm, epsilon=c.eps))
         return RowwiseMul(x, self.scales[i])
 
     # -- on the host -----------------------------------------------------------
@@ -256,7 +286,7 @@ class Multimodal(EmbeddingGemma):
     def __init__(
         self,
         config: Config,
-        weights: Weights,
+        weights: SimpleNamespace,
         tokenizer: Tokenizer | None = None,
         audio_config: AudioConfig = AudioConfig(),
         vision_config: VisionConfig = VisionConfig(),
@@ -427,8 +457,9 @@ class Multimodal(EmbeddingGemma):
 class Runner(lm.Runner):
     """EmbeddingGemma 2 as ``iron.lm.tune`` measures it: every version of
     ``Multimodal`` (the text encoder, each tower and the merge) at its
-    longest call, on weights it never reads, the table in ``profiles/``. The
-    towers' graphs alone run designs these hold, so one table serves them.
+    longest call, on weights it never reads, unread from the shapes the
+    checkpoint's header gives, the table in ``profiles/``. The towers'
+    graphs alone run designs these hold, so one table serves them.
     """
 
     config = Config()
@@ -437,14 +468,24 @@ class Runner(lm.Runner):
 
     @classmethod
     def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
-        """No flag: every version is measured at its longest call."""
+        """The checkpoint whose header gives the weights' shapes; every
+        version is measured at its longest call.
+        """
+        parser.add_argument(
+            "--checkpoint",
+            type=Path,
+            default=weights_dir("embeddinggemma-2"),
+            help="the checkpoint directory, of whose model.safetensors only "
+            "the header is read (default: %(default)s)",
+        )
 
     @classmethod
     def tune_calls(
         cls, parser: argparse.ArgumentParser, args: argparse.Namespace
     ) -> list[Call]:
         dev = aie_utils.ensure_current_device()
-        graph = cls.model(cls.config, Weights.unread())
+        weights = Checkpoint(args.checkpoint / "model.safetensors").tree("unread")
+        graph = cls.model(cls.config, weights)
         return [
             call
             for shapes in graph.shapes()
@@ -476,7 +517,7 @@ def main():
     args = parser.parse_args()
     tokenizer = Tokenizer(args.directory / "tokenizer.json", config)
     tuner = None if args.costs is None else JointNarrowing(CostTable(args.costs))
-    weights = Weights.read(args.directory, config)
+    weights = Checkpoint(args.directory / "model.safetensors").tree()
     encoder = EmbeddingGemma(config, weights, tokenizer).load(tuner)
     try:
         t = time.perf_counter()

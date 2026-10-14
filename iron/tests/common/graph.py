@@ -933,8 +933,9 @@ def test_llama_decode_traces_and_tunes():
     assert by_op[id(angles)].expression == Affine(position, cfg.head_dim)
     draw = {b.member.name: b.expression for b in t.bindings if b.op is t.steps[-1].op}
     assert draw == {"row": Affine(position, 4), "at": Affine(position)}
-    # The weights are named from the model; the caches are pinned state.
-    assert "layers.1.q" in t.pinned and "keys.0" in t.pinned
+    # The weights are named by the checkpoint; the caches are pinned state.
+    assert "weights.model.layers.1.self_attn.q_proj.weight" in t.pinned
+    assert "keys.0" in t.pinned
     assert t.pinned["keys.0"] == cfg.n_kv_groups * L * cfg.head_dim * 2
     # Every MHA attends over the keys up to the position, its one query
     # packed by its heads.

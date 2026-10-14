@@ -74,6 +74,12 @@ class CausalLM(iron.Graph):
     The caches are ``(max_seq_len, n_kv_groups, head_dim)`` so no descriptor
     steps by ``max_seq_len``. A decode step attends with ``MHA`` of one
     query, which costs the context, not the cache.
+
+    Args:
+        config: The decoder's shape.
+        weights: The checkpoint's tree (``Checkpoint.tree``): its
+            ``model.embed_tokens`` and ``model.layers`` are read here, the
+            rest by the subclass.
     """
 
     embedding: Weight
@@ -82,8 +88,14 @@ class CausalLM(iron.Graph):
 
     def __init__(self, config: Config, weights):
         self.config = config
-        vars(self).update(vars(weights))
-        self.embedding = iron.weight(weights.embedding)
+        self.weights = weights
+        self.layers = weights.model.layers
+        if len(self.layers) != config.n_layers:
+            raise ValueError(
+                f"the checkpoint has {len(self.layers)} layers, the config "
+                f"{config.n_layers}"
+            )
+        self.embedding = iron.weight(weights.model.embed_tokens.weight)
         G, L, D = config.n_kv_groups, config.max_seq_len, config.head_dim
         self.keys = [iron.state((L, G, D)) for _ in self.layers]
         self.values = [iron.state((L, G, D)) for _ in self.layers]

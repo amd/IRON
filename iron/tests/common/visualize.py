@@ -17,8 +17,9 @@ from iron.common.graph.fold import folded
 from iron.common.graph.visualize import Dataflow, render, side_by_side
 from iron.applications.embedding_gemma2.config import Config
 from iron.applications.embedding_gemma2.model import Multimodal
-from iron.applications.embedding_gemma2.weights import Weights
+from iron.lm import Checkpoint
 from iron.lm.blocks import SwiGLU
+from iron.lm.testing import require, weights_dir
 from iron.tests.common.llama_model import small
 
 E, H = 2048, 8192
@@ -85,16 +86,20 @@ def test_a_layer_drawn_alone_keeps_its_steps_and_marks_what_flows_in():
 
 
 def test_a_towers_layers_are_found_under_its_prefix():
-    graph = Multimodal(Config(), Weights.unread())
-    _, _, rgb, _ = graph.shapes()
-    t = graph.trace(**rgb)
+    path = weights_dir("embeddinggemma-2") / "model.safetensors"
+    require(path)
+    graph = Multimodal(Config(), Checkpoint(path).tree("unread"))
+    _, _, shapes, _ = graph.shapes()
+    t = graph.trace(**shapes)
     drawn = set(Dataflow(t, layers={1}).drawn())
+    found = set()
     for i, s in enumerate(t.steps):
         names = [Dataflow.root(h).name for h in s.inputs]
         if any(n.startswith("vision.layers.1.") for n in names):
-            assert i in drawn
+            found.add(i)
         if any(n.startswith(("vision.layers.0.", "vision.layers.2.")) for n in names):
             assert i not in drawn
+    assert found and found <= drawn
 
 
 def test_a_folded_step_names_what_it_folded(npu2):

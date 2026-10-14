@@ -8,8 +8,9 @@ two, a chat turn, and a prompt chunk and a step at the end of the caches.
 The model is compiled and loaded once for the module and every test calls
 it in-process.
 
-``--random-weights SEED`` runs it on drawn weights and random prompts, on
-a host without the checkpoint, and ``--max-seq-len`` at another context.
+``--random-weights SEED`` runs it on weights drawn in the checkpoint's
+shapes (only its header is read) and random prompts, on a host without the
+tokenizer, and ``--max-seq-len`` at another context.
 """
 
 import dataclasses
@@ -45,7 +46,8 @@ def runner(request):
         config = dataclasses.replace(config, max_seq_len=max_seq_len)
     seed = request.config.getoption("--random-weights")
     if seed is not None:
-        return Runner(config=config, seed=seed)
+        require(WEIGHTS)
+        return Runner(WEIGHTS, config=config, seed=seed)
     require(WEIGHTS, TOKENIZER)
     return Runner(WEIGHTS, TOKENIZER, config)
 

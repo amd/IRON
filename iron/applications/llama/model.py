@@ -6,8 +6,8 @@
 """Llama 3 over the shared decoder and block (``iron.lm``): its
 head on the NPU (``Llama``) and on the CPU in float32
 (``LlamaOracle``, the reference it is judged by; its layer is
-``iron.lm.blocks``', shared with Granite 4.2 3B), where its
-checkpoint keeps each weight, its tokenizer, and Llama 3.2 1B's shape.
+``iron.lm.blocks``', shared with Granite 4.2 3B), its tokenizer, and Llama
+3.2 1B's shape.
 Run it with ``python -m iron.applications.llama.model``.
 
 The operators' tunables are the graph's profile, ``profiles/<device>.json``,
@@ -25,7 +25,7 @@ import tiktoken
 import tiktoken.load
 
 from iron import lm
-from iron.lm import Block, BlockOracle, CausalLM, Config, Layout, Oracle, rms_norm
+from iron.lm import Block, BlockOracle, CausalLM, Config, Oracle, rms_norm, widen
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
 
@@ -93,48 +93,24 @@ LLAMA_3_2_1B = Config(
 class LlamaOracle(BlockOracle, Oracle):
     """Llama 3's forward pass in float32, on the host."""
 
-    norm: np.ndarray
-
     def head(self, x):
-        return rms_norm(x, self.norm) @ self.embedding.T
+        norm = widen(self.weights.model.norm.weight)
+        return rms_norm(x, norm) @ self.embedding.T
 
 
 class Llama(Block, CausalLM):
-    """Llama 3 on ``config``'s shape and ``weights`` (``embedding``, which is
-    the output head too, ``norm`` and ``layers``). Every matrix is read
+    """Llama 3 on ``config``'s shape and a checkpoint's ``weights``, by its
+    names. The embedding is the output head too. Every matrix is read
     ``(out, in)``, as the checkpoint ships it: GEMV's ``(M, K)`` and GEMM's
     column-major B.
     """
 
     profile = Path(__file__).with_name("profiles")
     oracle = LlamaOracle
-    norm: np.ndarray
 
     def head(self, x):
-        return GEMV(self.embedding, RMSNorm(x, weight=self.norm))
-
-
-def layout(config: Config) -> Layout:
-    """Each weight's place in ``Llama``, its name in a Hugging Face
-    checkpoint and its shape. The output head is the embedding, tied.
-    """
-    c = config
-    E, F, V = c.emb_dim, c.hidden_dim, c.vocab_size
-    Q, KV = c.n_heads * c.head_dim, c.n_kv_groups * c.head_dim
-    layer = "model.layers.{i}"
-    return {
-        "embedding": ("model.embed_tokens.weight", (V, E)),
-        "norm": ("model.norm.weight", (E,)),
-        "layers.{i}.norm1": (f"{layer}.input_layernorm.weight", (E,)),
-        "layers.{i}.q": (f"{layer}.self_attn.q_proj.weight", (Q, E)),
-        "layers.{i}.k": (f"{layer}.self_attn.k_proj.weight", (KV, E)),
-        "layers.{i}.v": (f"{layer}.self_attn.v_proj.weight", (KV, E)),
-        "layers.{i}.o": (f"{layer}.self_attn.o_proj.weight", (E, Q)),
-        "layers.{i}.norm2": (f"{layer}.post_attention_layernorm.weight", (E,)),
-        "layers.{i}.gate": (f"{layer}.mlp.gate_proj.weight", (F, E)),
-        "layers.{i}.up": (f"{layer}.mlp.up_proj.weight", (F, E)),
-        "layers.{i}.down": (f"{layer}.mlp.down_proj.weight", (E, F)),
-    }
+        norm = self.weights.model.norm.weight
+        return GEMV(self.embedding, RMSNorm(x, weight=norm))
 
 
 SPECIAL_TOKENS = {
@@ -179,7 +155,6 @@ class Runner(lm.Runner):
     """Llama 3.2 1B, from its checkpoint and ``tokenizer.model``."""
 
     config = LLAMA_3_2_1B
-    layout = staticmethod(layout)
     model = Llama
     open_tokenizer = staticmethod(tokenizer)
     bos = SPECIAL_TOKENS["<|begin_of_text|>"]

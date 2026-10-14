@@ -17,8 +17,6 @@ The application is one package over `iron.lm`:
 
 - `config.py`: each part's shape (`Config`, `AudioConfig`, `VisionConfig`)
   and the largest call each graph is compiled for
-- `weights.py`: where the checkpoint keeps each weight, a layout per part,
-  and `Weights`, the trees of a checkpoint directory
 - `model.py`: the text encoder and `Multimodal` on the NPU, the
   `Tokenizer` (each task's prefix, the placeholders), the command line, and
   `Runner`, what `python -m iron.lm.tune embedding_gemma2` measures: every
@@ -33,6 +31,10 @@ The application is one package over `iron.lm`:
 ## Weights and tokenizer
 
 The checkpoint directory holds `model.safetensors` and `tokenizer.json`.
+Every graph and oracle reads the weights by the checkpoint's own names
+(`iron.lm.Checkpoint.tree`: `language_model`, `audio_tower`,
+`vision_tower`, ...); tracing and tuning read only the header, for the
+shapes.
 The tests look for it at `$IRON_EXAMPLE_WEIGHTS_DIR/embeddinggemma-2/`
 (`IRON_EXAMPLE_WEIGHTS_DIR` defaults to `/srv`); on the command line it can
 be anywhere.

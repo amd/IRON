@@ -23,7 +23,6 @@ from iron.operators.gemm import GEMM
 from iron.operators.rms_norm import RMSNorm
 
 from .config import PROFILES, VisionConfig
-from .weights import Weights
 
 
 class VisionTower(Model):
@@ -54,9 +53,9 @@ class VisionTower(Model):
 
     profile = PROFILES
 
-    def __init__(self, config: VisionConfig, weights: Weights):
+    def __init__(self, config: VisionConfig, weights: SimpleNamespace):
         c = config
-        tree = weights.vision
+        tree = weights.vision_tower
         self.config = config
         self.processor = ImagePatches(
             c.patches,
@@ -66,29 +65,32 @@ class VisionTower(Model):
             patch_columns=c.patch_columns,
             chunk=c.chunk,
         )
-        self.patch = tree.patch
+        self.patch = tree.patch_embedder.input_proj.weight
         position = np.zeros((2 * c.positions + 1, c.emb_dim), bfloat16)
-        position[:-1] = tree.position.reshape(-1, c.emb_dim)
+        table = tree.patch_embedder.position_embedding_table
+        position[:-1] = table.reshape(-1, c.emb_dim)
         self.position = iron.weight(position)
-        self.projection = tree.projection
+        self.projection = weights.embed_vision.embedding_projection.weight
         half = c.head_dim // 2
         quarter = np.arange(half // 2)
         # The x half's first and second quarters, then the y half's.
         order = np.concatenate(
             [quarter, quarter + half, quarter + half // 2, quarter + 3 * half // 2]
         )
-        self.layers = [
+        self.layers = tree.encoder.layers
+        # Each layer's query and key weights, each head's channels in `order`.
+        self.reordered = [
             SimpleNamespace(
-                **vars(w)
-                | {
-                    name: vars(w)[name]
-                    .reshape(c.n_heads, c.head_dim, c.emb_dim)[:, order]
-                    .reshape(c.emb_dim, c.emb_dim)
-                    for name in ("q", "k")
-                }
-                | {name: vars(w)[name][order] for name in ("q_norm", "k_norm")}
+                q_proj=w.self_attn.q_proj.linear.weight.reshape(
+                    c.n_heads, c.head_dim, c.emb_dim
+                )[:, order].reshape(c.emb_dim, c.emb_dim),
+                k_proj=w.self_attn.k_proj.linear.weight.reshape(
+                    c.n_heads, c.head_dim, c.emb_dim
+                )[:, order].reshape(c.emb_dim, c.emb_dim),
+                q_norm=w.self_attn.q_norm.weight[order],
+                k_norm=w.self_attn.k_norm.weight[order],
             )
-            for w in tree.layers
+            for w in self.layers
         ]
         angles = np.zeros((c.positions + 1, half), bfloat16)
         angles[:-1] = rope_angles(half, c.positions, c.rope_base)
@@ -132,18 +134,37 @@ class VisionTower(Model):
         position = Copy(self.position[position_ids]).reshape(2, T, c.emb_dim)
         h = ElementwiseAdd(ElementwiseAdd(h, position[0, :n]), position[1, :n])
         angles = Copy(self.angles[xy]).reshape(T, c.head_dim)[:n]
-        for w in self.layers:
+        for w, r in zip(self.layers, self.reordered):
             attend = partial(
                 attention,
-                w=w,
                 angles=angles,
+                q_proj=r.q_proj,
+                k_proj=r.k_proj,
+                v_proj=w.self_attn.v_proj.linear.weight,
+                o_proj=w.self_attn.o_proj.linear.weight,
+                q_norm=r.q_norm,
+                k_norm=r.k_norm,
                 heads=c.n_heads,
                 groups=c.n_heads,
                 head_dim=c.head_dim,
                 epsilon=c.eps,
                 **ACCURATE,
             )
-            h = sandwich_layer(h, w, attend, c.eps, **ACCURATE)
+            h = sandwich_layer(
+                h,
+                attend,
+                norms=(
+                    w.input_layernorm.weight,
+                    w.post_attention_layernorm.weight,
+                    w.pre_feedforward_layernorm.weight,
+                    w.post_feedforward_layernorm.weight,
+                ),
+                gate=w.mlp.gate_proj.linear.weight,
+                up=w.mlp.up_proj.linear.weight,
+                down=w.mlp.down_proj.linear.weight,
+                epsilon=c.eps,
+                **ACCURATE,
+            )
         pooled = GEMM(self.pool[:, :n], h, **ACCURATE)
         # The mean's 1 / pool ** 2 and the sqrt(emb_dim) scale folded into
         # the norm's epsilon: RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).

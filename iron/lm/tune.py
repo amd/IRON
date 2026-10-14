@@ -4,8 +4,8 @@
 """Measure the cost table a model's versions are tuned by, on this NPU:
 
 ```bash
-python -m iron.lm.tune llama
-python -m iron.lm.tune llama --dispatch separate
+python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors
+python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors --dispatch separate
 python -m iron.lm.tune embedding_gemma2
 ```
 
@@ -39,7 +39,9 @@ their weighted mean, the contexts a generation of that length runs at
 equally often.
 
 A design's time follows its shapes, per-call values and Sample's draw
-rows, not the weights, so the model is built on weights it never reads. Run with XRT sourced and the NPU otherwise idle.
+rows, not the weights, so the model is built on weights it never reads,
+in the shapes its checkpoint's header gives. Run with XRT sourced and the
+NPU otherwise idle.
 """
 
 import argparse

@@ -31,7 +31,6 @@ from iron.operators.softmax import Softmax
 from iron.operators.tanh import Tanh
 
 from .config import PROFILES, AudioConfig
-from .weights import Weights
 
 
 class AudioTower(Model):
@@ -65,9 +64,10 @@ class AudioTower(Model):
 
     profile = PROFILES
 
-    def __init__(self, config: AudioConfig, weights: Weights):
+    def __init__(self, config: AudioConfig, weights: SimpleNamespace):
         c = config
-        tree = weights.audio
+        tree = weights.audio_tower
+        sub = tree.subsample_conv_projection
         if c.frame != 2 * c.hop:
             raise ValueError(f"a frame of {c.frame} samples is not two hops")
         self.config = config
@@ -78,16 +78,19 @@ class AudioTower(Model):
         # The first convolution's output row: each frequency's channels in a
         # slot of their own, with a zero slot either side, the second's padding.
         self.slots = (F0 + 2) * C0
-        w0, w1 = (np.asarray(w, np.float32) for w in (tree.conv0, tree.conv1))
+        w0, w1 = (
+            np.asarray(layer.conv.weight, np.float32)
+            for layer in (sub.layer0, sub.layer1)
+        )
         self.conv0 = blocks.Conv2d(
             w0 - w0.mean(axis=0), c.mels, stride=2, padding=1, border=1
         )
         self.conv1 = blocks.Conv2d(w1 - w1.mean(axis=0), F0 + 2, stride=2)
-        self.norm0, self.norm1 = tree.norm0, tree.norm1
-        self.input_proj = tree.input_proj
-        self.output_proj = tree.output_proj
-        self.output_bias = iron.weight(np.tile(tree.output_bias, (T, 1)))
-        self.projection = tree.projection
+        self.norm0, self.norm1 = sub.layer0.norm.weight, sub.layer1.norm.weight
+        self.input_proj = sub.input_proj_linear.weight
+        self.output_proj = tree.output_proj.weight
+        self.output_bias = iron.weight(np.tile(tree.output_proj.bias, (T, 1)))
+        self.projection = weights.embed_audio.embedding_projection.weight
         self.log_mel = blocks.LogMel(
             frame=c.frame,
             hop=c.hop,
@@ -124,10 +127,11 @@ class AudioTower(Model):
         residual = bfloat16(c.residual_weight)
         self.layers = []
         for w in tree.layers:
-            a = w.attn
+            a, conv = w.self_attn, w.lconv1d
+            ff1, ff2 = w.feed_forward1, w.feed_forward2
             clipped = {
                 name: SimpleNamespace(
-                    weight=linear.weight,
+                    weight=linear.linear.weight,
                     input=dict(
                         low=float(linear.input_min), high=float(linear.input_max)
                     ),
@@ -136,22 +140,23 @@ class AudioTower(Model):
                     ),
                 )
                 for name, linear in dict(
-                    q=a.q,
-                    k=a.k,
-                    v=a.v,
+                    q=a.q_proj,
+                    k=a.k_proj,
+                    v=a.v_proj,
                     post=a.post,
-                    start=w.conv.start,
-                    end=w.conv.end,
-                    up1=w.ff1.up,
-                    down1=w.ff1.down,
-                    up2=w.ff2.up,
-                    down2=w.ff2.down,
+                    start=conv.linear_start,
+                    end=conv.linear_end,
+                    up1=ff1.ffw_layer_1,
+                    down1=ff1.ffw_layer_2,
+                    up2=ff2.ffw_layer_1,
+                    down2=ff2.ffw_layer_2,
                 ).items()
             }
             if not clipped["q"].input == clipped["k"].input == clipped["v"].input:
                 raise ValueError("q, k and v are clamped to different input bounds")
             softplus = np.logaddexp(0, np.asarray(a.per_dim_scale, np.float32))
-            relative = (timing @ np.asarray(a.relative, np.float32).T).reshape(W, H, D)
+            relative = timing @ np.asarray(a.relative_k_proj.weight, np.float32).T
+            relative = relative.reshape(W, H, D)
             # Distance W - 1 - j at band column j, then at j + 1.
             band = np.zeros((H, 2 * B, D), np.float32)
             band[:, :W] = relative[::-1].transpose(1, 0, 2) / k_scale
@@ -160,16 +165,16 @@ class AudioTower(Model):
                 SimpleNamespace(
                     ff=[
                         SimpleNamespace(
-                            pre=f.pre,
-                            post=f.post * residual,
+                            pre=f.pre_layer_norm.weight,
+                            post=f.post_layer_norm.weight * residual,
                             up=clipped[f"up{j}"],
                             down=clipped[f"down{j}"],
                         )
-                        for j, f in ((1, w.ff1), (2, w.ff2))
+                        for j, f in ((1, ff1), (2, ff2))
                     ],
-                    norm_pre_attn=w.norm_pre_attn,
-                    norm_post_attn=w.norm_post_attn,
-                    norm_out=w.norm_out,
+                    norm_pre_attn=w.norm_pre_attn.weight,
+                    norm_post_attn=w.norm_post_attn.weight,
+                    norm_out=w.norm_out.weight,
                     attn=SimpleNamespace(
                         q=clipped["q"],
                         k=clipped["k"],
@@ -183,11 +188,13 @@ class AudioTower(Model):
                         relative=band.astype(bfloat16),
                     ),
                     conv=SimpleNamespace(
-                        pre=w.conv.pre,
+                        pre=conv.pre_layer_norm.weight,
                         start=clipped["start"],
-                        glu=(w.conv.start.weight[:E], w.conv.start.weight[E:]),
-                        planes=np.ascontiguousarray(w.conv.depthwise[:, 0].T),
-                        norm=w.conv.norm,
+                        glu=(clipped["start"].weight[:E], clipped["start"].weight[E:]),
+                        planes=np.ascontiguousarray(
+                            conv.depthwise_conv1d.weight[:, 0].T
+                        ),
+                        norm=conv.conv_norm.weight,
                         end=clipped["end"],
                     ),
                 )

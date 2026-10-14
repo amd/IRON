@@ -54,8 +54,9 @@ def pytest_addoption(parser):
         type=int,
         default=None,
         metavar="SEED",
-        help="Run a language model's tests on weights drawn at SEED and random "
-        "prompts, in place of its checkpoint and tokenizer",
+        help="Run a language model's tests on weights drawn at SEED in its "
+        "checkpoint's shapes and random prompts, in place of its weights and "
+        "tokenizer",
     )
     parser.addoption(
         "--max-seq-len",

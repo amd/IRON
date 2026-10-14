@@ -5,9 +5,8 @@
 themselves are applications over it, each a package of
 ``iron/applications/`` (``llama``, ``embedding_gemma2``).
 
-* ``base``: a model's ``Config``, its checkpoint ``Layout`` (each weight's
-  place in the model, its name in the ``.safetensors`` file and its shape)
-  and the ``Checkpoint`` it is read from; ``Oracle``, the float32 forward
+* ``base``: a model's ``Config`` and the ``Checkpoint`` it is read from,
+  whose ``tree()`` is its weights by their own names; ``Oracle``, the float32 forward
   pass on the host a model is judged by; ``Model``, a graph whose versions
   ``load()`` compiles up front; and ``Runner``, which opens a decoder's
   checkpoint and tokenizer and builds it and its oracle (``main`` is its
@@ -33,18 +32,13 @@ on its own.
 from .base import (
     Checkpoint,
     Config,
-    Layout,
     Model,
     Oracle,
     RopeScaling,
     Runner,
-    checkpoint_shapes,
-    load_weights,
     main,
     prompt_text,
-    random_weights,
     rope_angles,
-    unread_weights,
     widen,
 )
 from .blocks import (
@@ -81,7 +75,6 @@ __all__ = [
     "Conv2d",
     "Encoder",
     "ImagePatches",
-    "Layout",
     "LogMel",
     "MaxPool2d",
     "Model",
@@ -93,22 +86,18 @@ __all__ = [
     "SwiGLU",
     "accuracy",
     "attention",
-    "checkpoint_shapes",
     "determinism",
     "filterbank",
     "geglu",
     "generate",
     "greedy",
-    "load_weights",
     "main",
     "project",
     "prompt_text",
-    "random_weights",
     "rms_norm",
     "rope_angles",
     "sandwich",
     "sandwich_layer",
     "swiglu",
-    "unread_weights",
     "widen",
 ]

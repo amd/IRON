@@ -10,6 +10,7 @@ processor), each an ``Oracle``.
 
 import math
 from collections.abc import Mapping
+from types import SimpleNamespace
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -18,7 +19,6 @@ from iron.lm import LogMel, Oracle as DecoderOracle, rope_angles, widen
 from iron.operators.resample.reference import resize
 
 from .config import AudioConfig, Config, VisionConfig
-from .weights import Weights
 
 
 class Oracle:
@@ -74,23 +74,40 @@ class Oracle:
         )
 
     def sandwich_layer(
-        self, w, x, tables: list[np.ndarray], groups: int, head_dim: int, window=None
+        self,
+        x,
+        tables: list[np.ndarray],
+        *,
+        q_proj,
+        k_proj,
+        v_proj,
+        o_proj,
+        q_norm,
+        k_norm,
+        norms: tuple,
+        gate,
+        up,
+        down,
+        groups: int,
+        head_dim: int,
+        window: int | None = None,
     ):
         """The layer the text encoder and the vision tower share, on `x`
         `(n, emb_dim)`: attention, its queries and keys normed and turned by
         `tables` (`rotate`), then the GELU-gated feed-forward, each between
-        sandwich norms with its residual.
+        sandwich norms (`norms`, the attention's pre and post, then the
+        feed-forward's) with its residual.
         """
         n, H, G, D = x.shape[0], self.config.n_heads, groups, head_dim
-        h = self.rms_norm(x, w.norm1)
-        q = self.rotate(self.rms_norm((h @ w.q.T).reshape(n, H, D), w.q_norm), tables)
-        k = self.rotate(self.rms_norm((h @ w.k.T).reshape(n, G, D), w.k_norm), tables)
-        v = self.rms_norm((h @ w.v.T).reshape(n, G, D))
-        a = self.attend(q, k, v, window) @ w.o.T
-        x = x + self.rms_norm(a, w.norm2)
-        h = self.rms_norm(x, w.norm3)
-        f = (self.gelu_tanh(h @ w.gate.T) * (h @ w.up.T)) @ w.down.T
-        return x + self.rms_norm(f, w.norm4)
+        h = self.rms_norm(x, norms[0])
+        q = self.rotate(self.rms_norm((h @ q_proj.T).reshape(n, H, D), q_norm), tables)
+        k = self.rotate(self.rms_norm((h @ k_proj.T).reshape(n, G, D), k_norm), tables)
+        v = self.rms_norm((h @ v_proj.T).reshape(n, G, D))
+        a = self.attend(q, k, v, window) @ o_proj.T
+        x = x + self.rms_norm(a, norms[1])
+        h = self.rms_norm(x, norms[2])
+        f = (self.gelu_tanh(h @ gate.T) * (h @ up.T)) @ down.T
+        return x + self.rms_norm(f, norms[3])
 
 
 class EmbeddingGemmaOracle(Oracle):
@@ -101,13 +118,19 @@ class EmbeddingGemmaOracle(Oracle):
         weights: The checkpoint's; the text encoder's tree is read.
     """
 
-    def __init__(self, config: Config, weights: Weights):
+    def __init__(self, config: Config, weights: SimpleNamespace):
         super().__init__(config)
-        w = weights.text
+        w = weights.language_model
         # Widened by the rows a call looks up: the whole table in float32 is 512 MB.
-        self.embedding = w.embedding
+        self.embedding = w.embed_tokens.weight
         self.norm, self.projection, self.ple, self.ple_norm, self.layers = widen(
-            [w.norm, w.projection, w.ple, w.ple_norm, w.layers]
+            [
+                w.norm.weight,
+                w.embedding_projection.weight,
+                w.ple.per_layer_model_projection.weight,
+                w.ple.per_layer_projection_norm.weight,
+                w.layers,
+            ]
         )
 
     def layer(self, i: int, angles: np.ndarray, w, x, ple):
@@ -117,9 +140,33 @@ class EmbeddingGemmaOracle(Oracle):
         c = self.config
         G, D, _ = c.heads(i)
         window = None if i in c.global_layers else c.sliding_window
-        x = self.sandwich_layer(w, x, [angles], G, D, window)
-        p = (self.gelu_tanh(x @ w.ple_gate.T) * ple) @ w.ple_proj.T
-        return (x + self.rms_norm(p, w.ple_norm)) * w.scalar
+        a, b = w.self_attn, w.ple_block
+        x = self.sandwich_layer(
+            x,
+            [angles],
+            q_proj=a.q_proj.weight,
+            k_proj=a.k_proj.weight,
+            v_proj=a.v_proj.weight,
+            o_proj=a.o_proj.weight,
+            q_norm=a.q_norm.weight,
+            k_norm=a.k_norm.weight,
+            norms=(
+                w.input_layernorm.weight,
+                w.post_attention_layernorm.weight,
+                w.pre_feedforward_layernorm.weight,
+                w.post_feedforward_layernorm.weight,
+            ),
+            gate=w.mlp.gate_proj.weight,
+            up=w.mlp.up_proj.weight,
+            down=w.mlp.down_proj.weight,
+            groups=G,
+            head_dim=D,
+            window=window,
+        )
+        gate = self.gelu_tanh(x @ b.per_layer_input_gate.weight.T)
+        p = (gate * ple) @ b.per_layer_projection.weight.T
+        norm = b.post_per_layer_input_norm.weight
+        return (x + self.rms_norm(p, norm)) * w.layer_scalar
 
     def token_states(self, tokens, soft: Mapping[int, np.ndarray] = {}) -> np.ndarray:
         """Each token's `(n, out_dim)` output, before pooling.
@@ -175,10 +222,11 @@ class AudioOracle(Oracle):
         weights: The checkpoint's; the audio tower's tree is read.
     """
 
-    def __init__(self, config: AudioConfig, weights: Weights):
+    def __init__(self, config: AudioConfig, weights: SimpleNamespace):
         super().__init__(config)
         c = config
-        self.weights = widen(weights.audio)
+        self.weights = widen(weights.audio_tower)
+        self.projection = widen(weights.embed_audio.embedding_projection.weight)
         self.timing = c.timing()
         self.log_mel = LogMel(
             frame=c.frame,
@@ -212,7 +260,7 @@ class AudioOracle(Oracle):
         """`x` through the clipped linear `w`: clamped to its input bounds,
         projected, and clamped to its output bounds.
         """
-        y = np.clip(x, w.input_min, w.input_max) @ w.weight.T
+        y = np.clip(x, w.input_min, w.input_max) @ w.linear.weight.T
         return np.clip(y, w.output_min, w.output_max)
 
     @staticmethod
@@ -239,20 +287,21 @@ class AudioOracle(Oracle):
         valid, each masking the rows its input's mask says are padding, and
         the input projection: `(ceil(F / 4), emb_dim)`.
         """
-        w = self.weights
+        sub = self.weights.subsample_conv_projection
         mask = np.arange(features.shape[0]) < frames
         x = features[:, :, None]
-        for kernel, norm in ((w.conv0, w.norm0), (w.conv1, w.norm1)):
-            x = self.conv(x * mask[:, None, None], kernel)
+        for layer in (sub.layer0, sub.layer1):
+            x = self.conv(x * mask[:, None, None], layer.conv.weight)
             x = x - x.mean(axis=-1, keepdims=True)
-            x = np.maximum(self.rms_norm(x, norm), 0)
+            x = np.maximum(self.rms_norm(x, layer.norm.weight), 0)
             mask = mask[::2]
-        return x.reshape(x.shape[0], -1) @ w.input_proj.T
+        return x.reshape(x.shape[0], -1) @ sub.input_proj_linear.weight.T
 
     def feed_forward(self, w, x):
-        h = self.clipped(w.up, self.rms_norm(x, w.pre))
-        h = self.clipped(w.down, h * (0.5 * (1 + np.tanh(0.5 * h))))
-        return x + self.rms_norm(h, w.post) * np.float32(self.config.residual_weight)
+        h = self.clipped(w.ffw_layer_1, self.rms_norm(x, w.pre_layer_norm.weight))
+        h = self.clipped(w.ffw_layer_2, h * (0.5 * (1 + np.tanh(0.5 * h))))
+        post = self.rms_norm(h, w.post_layer_norm.weight)
+        return x + post * np.float32(self.config.residual_weight)
 
     def attention(self, w, x):
         """The attention of each position over itself and the `window - 1`
@@ -263,11 +312,12 @@ class AudioOracle(Oracle):
         T, H, D = x.shape[0], c.n_heads, c.head_dim
         q_scale = np.float32(D**-0.5 / math.log(2))
         k_scale = np.float32(math.log(1 + math.e) / math.log(2))
-        q = self.clipped(w.q, x).reshape(T, H, D) * q_scale
+        q = self.clipped(w.q_proj, x).reshape(T, H, D) * q_scale
         q = q * np.logaddexp(np.float32(0), w.per_dim_scale)
-        k = self.clipped(w.k, x).reshape(T, H, D) * k_scale
-        v = self.clipped(w.v, x).reshape(T, H, D)
-        relative = (self.timing @ w.relative.T).reshape(c.window, H, D)
+        k = self.clipped(w.k_proj, x).reshape(T, H, D) * k_scale
+        v = self.clipped(w.v_proj, x).reshape(T, H, D)
+        relative = self.timing @ w.relative_k_proj.weight.T
+        relative = relative.reshape(c.window, H, D)
         logits = q.transpose(1, 0, 2) @ k.transpose(1, 2, 0)
         d = np.arange(T)[:, None] - np.arange(T)[None, :]
         band = (d >= 0) & (d < c.window)
@@ -286,19 +336,19 @@ class AudioOracle(Oracle):
         """The gated linear unit, then a causal depthwise convolution in time."""
         c = self.config
         E, K, T = c.emb_dim, c.conv_kernel, x.shape[0]
-        h = self.clipped(w.start, self.rms_norm(x, w.pre))
+        h = self.clipped(w.linear_start, self.rms_norm(x, w.pre_layer_norm.weight))
         h = h[:, :E] * (0.5 * (1 + np.tanh(0.5 * h[:, E:])))
         h = np.pad(h, ((K - 1, 0), (0, 0)))
-        h = sum(h[j : j + T] * w.depthwise[:, 0, j] for j in range(K))
-        h = self.rms_norm(h, w.norm)
-        return x + self.clipped(w.end, h * (0.5 * (1 + np.tanh(0.5 * h))))
+        h = sum(h[j : j + T] * w.depthwise_conv1d.weight[:, 0, j] for j in range(K))
+        h = self.rms_norm(h, w.conv_norm.weight)
+        return x + self.clipped(w.linear_end, h * (0.5 * (1 + np.tanh(0.5 * h))))
 
     def layer(self, w, x):
-        x = self.feed_forward(w.ff1, x)
-        a = self.attention(w.attn, self.rms_norm(x, w.norm_pre_attn))
-        x = x + self.rms_norm(a, w.norm_post_attn)
-        x = self.feed_forward(w.ff2, self.light_conv(w.conv, x))
-        return self.rms_norm(x, w.norm_out)
+        x = self.feed_forward(w.feed_forward1, x)
+        a = self.attention(w.self_attn, self.rms_norm(x, w.norm_pre_attn.weight))
+        x = x + self.rms_norm(a, w.norm_post_attn.weight)
+        x = self.feed_forward(w.feed_forward2, self.light_conv(w.lconv1d, x))
+        return self.rms_norm(x, w.norm_out.weight)
 
     def tower(self, features, frames: int) -> np.ndarray:
         """The soft tokens of `features` `(F, mels)`, `frames` of them valid,
@@ -308,8 +358,8 @@ class AudioOracle(Oracle):
         x = self.subsample(np.asarray(features, np.float32), frames)
         for layer in w.layers:
             x = self.layer(layer, x)
-        x = x[: c.tokens(frames)] @ w.output_proj.T + w.output_bias
-        return self.rms_norm(x) @ w.projection.T
+        x = x[: c.tokens(frames)] @ w.output_proj.weight.T + w.output_proj.bias
+        return self.rms_norm(x) @ self.projection.T
 
     def embed(self, waveform) -> np.ndarray:
         """The soft tokens of one mono clip at `sample_rate`."""
@@ -325,11 +375,16 @@ class VisionOracle(Oracle):
         weights: The checkpoint's; the vision tower's tree is read.
     """
 
-    def __init__(self, config: VisionConfig, weights: Weights):
+    def __init__(self, config: VisionConfig, weights: SimpleNamespace):
         super().__init__(config)
-        w = weights.vision
+        w = weights.vision_tower
         self.patch, self.position, self.projection, self.layers = widen(
-            [w.patch, w.position, w.projection, w.layers]
+            [
+                w.patch_embedder.input_proj.weight,
+                w.patch_embedder.position_embedding_table,
+                weights.embed_vision.embedding_projection.weight,
+                w.encoder.layers,
+            ]
         )
         self.angles = rope_angles(
             config.head_dim // 2, config.positions, config.rope_base
@@ -410,7 +465,28 @@ class VisionOracle(Oracle):
         # Each head's first half turned by the patch's x, its second by its y.
         tables = [self.angles[x], self.angles[y]]
         for w in self.layers:
-            h = self.sandwich_layer(w, h, tables, c.n_heads, D)
+            a = w.self_attn
+            h = self.sandwich_layer(
+                h,
+                tables,
+                q_proj=a.q_proj.linear.weight,
+                k_proj=a.k_proj.linear.weight,
+                v_proj=a.v_proj.linear.weight,
+                o_proj=a.o_proj.linear.weight,
+                q_norm=a.q_norm.weight,
+                k_norm=a.k_norm.weight,
+                norms=(
+                    w.input_layernorm.weight,
+                    w.post_attention_layernorm.weight,
+                    w.pre_feedforward_layernorm.weight,
+                    w.post_feedforward_layernorm.weight,
+                ),
+                gate=w.mlp.gate_proj.linear.weight,
+                up=w.mlp.up_proj.linear.weight,
+                down=w.mlp.down_proj.linear.weight,
+                groups=c.n_heads,
+                head_dim=D,
+            )
         # Each soft token is the mean of a pool x pool block of patches,
         # numbered row-major over the blocks.
         k = c.pool

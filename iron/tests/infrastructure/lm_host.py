@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A language model's host side: the checkpoint, the weight tree a layout
-places it in and sampling (``iron.lm``'s ``Checkpoint``,
-``load_weights`` and ``Sampler``), at Llama's layout.
+"""A language model's host side: the checkpoint, its tree by its own names
+and sampling (``iron.lm``'s ``Checkpoint``, ``Checkpoint.tree`` and
+``Sampler``), on a checkpoint of Llama's names.
 
 The oracle is the safetensors library itself: tier 1 writes small
 checkpoints with ``safetensors.numpy`` to ``tmp_path`` and compares every
@@ -28,14 +28,8 @@ import pytest
 from ml_dtypes import bfloat16
 from safetensors.numpy import load_file, save_file
 
-from iron import lm
 from iron.lm import Checkpoint, Sampler
-from iron.applications.llama.model import (
-    LLAMA_3_2_1B,
-    SPECIAL_TOKENS,
-    layout,
-    tokenizer,
-)
+from iron.applications.llama.model import LLAMA_3_2_1B, SPECIAL_TOKENS, tokenizer
 from iron.lm.testing import weights_dir
 from iron.operators import sample
 
@@ -63,49 +57,34 @@ TOY = dataclasses.replace(
 )
 
 
-def load_weights(tensors, config=TOY):
-    """``tensors`` in the tree of Llama's layout at ``config``."""
-    return lm.load_weights(tensors, layout(config), config.n_layers)
-
-
-# Each layer field under its Hugging Face name, spelled out here rather
-# than read from the runner.
-LAYER_NAMES = {
-    "norm1": "input_layernorm.weight",
-    "q": "self_attn.q_proj.weight",
-    "k": "self_attn.k_proj.weight",
-    "v": "self_attn.v_proj.weight",
-    "o": "self_attn.o_proj.weight",
-    "norm2": "post_attention_layernorm.weight",
-    "gate": "mlp.gate_proj.weight",
-    "up": "mlp.up_proj.weight",
-    "down": "mlp.down_proj.weight",
-}
+# Each layer's tensors under its Hugging Face name, spelled out here rather
+# than read from the model.
+def layer_shapes(cfg) -> dict[str, tuple[int, ...]]:
+    head, kv = cfg.n_heads * cfg.head_dim, cfg.n_kv_groups * cfg.head_dim
+    E, F = cfg.emb_dim, cfg.hidden_dim
+    return {
+        "input_layernorm.weight": (E,),
+        "self_attn.q_proj.weight": (head, E),
+        "self_attn.k_proj.weight": (kv, E),
+        "self_attn.v_proj.weight": (kv, E),
+        "self_attn.o_proj.weight": (E, head),
+        "post_attention_layernorm.weight": (E,),
+        "mlp.gate_proj.weight": (F, E),
+        "mlp.up_proj.weight": (F, E),
+        "mlp.down_proj.weight": (E, F),
+    }
 
 
 def toy_checkpoint(cfg=TOY):
     """A Hugging Face state_dict for ``cfg``, every tensor distinct, bf16."""
-    head, kv = cfg.n_heads * cfg.head_dim, cfg.n_kv_groups * cfg.head_dim
-    E, F = cfg.emb_dim, cfg.hidden_dim
-    shapes = {
-        "norm1": (E,),
-        "q": (head, E),
-        "k": (kv, E),
-        "v": (kv, E),
-        "o": (E, head),
-        "norm2": (E,),
-        "gate": (F, E),
-        "up": (F, E),
-        "down": (E, F),
-    }
     rng = np.random.default_rng(0)
     ckpt = {
-        "model.embed_tokens.weight": rng.normal(size=(cfg.vocab_size, E)),
-        "model.norm.weight": rng.normal(size=E),
+        "model.embed_tokens.weight": rng.normal(size=(cfg.vocab_size, cfg.emb_dim)),
+        "model.norm.weight": rng.normal(size=cfg.emb_dim),
     }
     for i in range(cfg.n_layers):
-        for f, shape in shapes.items():
-            ckpt[f"model.layers.{i}.{LAYER_NAMES[f]}"] = rng.normal(size=shape)
+        for name, shape in layer_shapes(cfg).items():
+            ckpt[f"model.layers.{i}.{name}"] = rng.normal(size=shape)
     return {k: v.astype(bfloat16) for k, v in ckpt.items()}
 
 
@@ -116,12 +95,11 @@ def toy_path(tmp_path):
     return path
 
 
-def arrays(weights):
-    """Every array of the tree, by a name for it."""
-    out = {"embedding": weights.embedding, "norm": weights.norm}
-    for i, layer in enumerate(weights.layers):
-        out.update({f"layers.{i}.{f}": a for f, a in vars(layer).items()})
-    return out
+def at(tree, name: str):
+    """The node of ``tree`` at the dotted checkpoint ``name``."""
+    for key in name.split("."):
+        tree = tree[int(key)] if isinstance(tree, list) else vars(tree)[key]
+    return tree
 
 
 # Tier 1 -- the checkpoint, on files safetensors itself wrote
@@ -169,7 +147,8 @@ def _resident_bytes(path: Path) -> int:
 
 def test_release_drops_the_pages_and_keeps_the_bytes(toy_path):
     checkpoint = Checkpoint(toy_path)
-    weights = arrays(load_weights(checkpoint.tensors))
+    tree = checkpoint.tree()
+    weights = {name: at(tree, name) for name in checkpoint.tensors}
     before = {name: np.array(a) for name, a in weights.items()}
     assert _resident_bytes(toy_path) > 0
     for a in weights.values():
@@ -289,7 +268,8 @@ def test_checkpoint_release_drops_the_right_shard(sharded_toy_path):
     first_shard = sharded_toy_path.parent / "model-00001-of-00002.safetensors"
     second_shard = sharded_toy_path.parent / "model-00002-of-00002.safetensors"
     checkpoint = Checkpoint(sharded_toy_path)
-    weights = arrays(load_weights(checkpoint.tensors))
+    tree = checkpoint.tree()
+    weights = {name: at(tree, name) for name in checkpoint.tensors}
     assert _resident_bytes(first_shard) > 0 and _resident_bytes(second_shard) > 0
     for a in weights.values():
         checkpoint.release(a)
@@ -301,63 +281,75 @@ def test_checkpoint_release_drops_the_right_shard(sharded_toy_path):
 # ##########################################################################
 
 
-def test_each_checkpoint_tensor_lands_on_its_field_bitwise(toy_path):
+def test_each_checkpoint_tensor_lands_on_its_name_bitwise(toy_path):
     """Every tensor is distinct, so a mapping that crosses two same-shaped
     weights over (k and v, gate and up) is caught.
     """
-    weights = load_weights(Checkpoint(toy_path).tensors)
+    tree = Checkpoint(toy_path).tree()
     ckpt = load_file(toy_path)
-    assert len(weights.layers) == TOY.n_layers
-    assert bitwise_equal(weights.embedding, ckpt["model.embed_tokens.weight"])
-    assert bitwise_equal(weights.norm, ckpt["model.norm.weight"])
-    for i, layer in enumerate(weights.layers):
-        assert list(vars(layer)) == list(LAYER_NAMES)
-        for f, hf in LAYER_NAMES.items():
-            expected = ckpt[f"model.layers.{i}.{hf}"]
-            assert bitwise_equal(getattr(layer, f), expected), (i, f)
+    assert len(tree.model.layers) == TOY.n_layers
+    assert list(vars(tree)) == ["model"]
+    for name, expected in ckpt.items():
+        assert bitwise_equal(at(tree, name), expected), name
 
 
 def test_tree_arrays_are_the_checkpoints(toy_path):
     """The tracer names a weight by id(), so each is one array, as read."""
-    tensors = Checkpoint(toy_path).tensors
-    weights = load_weights(tensors)
-    assert weights.layers[1].v is tensors["model.layers.1.self_attn.v_proj.weight"]
-    ids = [id(a) for a in arrays(weights).values()]
+    checkpoint = Checkpoint(toy_path)
+    tree = checkpoint.tree()
+    name = "model.layers.1.self_attn.v_proj.weight"
+    assert tree.model.layers[1].self_attn.v_proj.weight is checkpoint.tensors[name]
+    ids = [id(at(tree, name)) for name in checkpoint.tensors]
     assert len(set(ids)) == len(ids)
 
 
-def test_tree_rejects_a_missing_key():
-    ckpt = toy_checkpoint()
-    del ckpt["model.layers.1.mlp.up_proj.weight"]
-    with pytest.raises(ValueError, match=r"model\.layers\.1\.mlp\.up_proj\.weight"):
-        load_weights(ckpt)
-
-
-def test_tree_rejects_a_missing_layer():
-    """Layer 0 gone and layer 1 whole: the tree is still two layers, one
-    of them missing, not one layer renumbered.
-    """
+def test_tree_rejects_a_skipped_layer(tmp_path):
+    """Layer 0 gone and layer 1 whole: refused, not one layer renumbered."""
     ckpt = {
         k: v for k, v in toy_checkpoint().items() if not k.startswith("model.layers.0.")
     }
-    with pytest.raises(ValueError, match=r"model\.layers\.0\.input_layernorm\.weight"):
-        load_weights(ckpt)
+    save_file(ckpt, tmp_path / "skipped.safetensors")
+    with pytest.raises(ValueError, match=re.escape("[1] skip [0]")):
+        Checkpoint(tmp_path / "skipped.safetensors").tree()
 
 
-def test_tree_rejects_an_untied_head():
-    ckpt = toy_checkpoint()
-    ckpt["lm_head.weight"] = ckpt["model.embed_tokens.weight"].copy()
-    with pytest.raises(ValueError, match="lm_head.weight"):
-        load_weights(ckpt)
+@pytest.mark.parametrize("fill", ["random", "unread"])
+def test_a_filled_tree_has_the_checkpoints_names_shapes_and_dtypes(toy_path, fill):
+    """Neither reads a tensor: each array is the process's own."""
+    checkpoint = Checkpoint(toy_path)
+    tree = checkpoint.tree(fill)
+    for name, tensor in checkpoint.tensors.items():
+        a = at(tree, name)
+        assert (a.shape, a.dtype) == (tensor.shape, tensor.dtype), name
+        assert a.flags.owndata and a is not tensor, name
 
 
-def test_tree_rejects_a_misshapen_layer():
-    ckpt = toy_checkpoint()
-    name = "model.layers.1.self_attn.k_proj.weight"
-    good = ckpt[name]
-    ckpt[name] = np.zeros((good.shape[0], good.shape[1] + 1), dtype=bfloat16)
-    with pytest.raises(ValueError, match=re.escape(f"{name} is (16, 65)")):
-        load_weights(ckpt)
+def test_random_fill_draws_at_its_seed(toy_path):
+    """Each matrix at a deviation of 1/sqrt(in), every norm one."""
+    checkpoint = Checkpoint(toy_path)
+    a, b, c = (checkpoint.tree("random", seed) for seed in (3, 3, 4))
+    for name in checkpoint.tensors:
+        assert bitwise_equal(at(a, name), at(b, name)), name
+    q = "model.layers.0.self_attn.q_proj.weight"
+    assert not np.array_equal(at(a, q), at(c, q))
+    for name, tensor in checkpoint.tensors.items():
+        x = at(a, name).astype(np.float32)
+        if tensor.ndim == 1:
+            assert (x == 1).all(), name
+        else:
+            assert abs(x.std() * np.sqrt(tensor.shape[1]) - 1) < 0.1, name
+
+
+def test_unread_fill_zeroes_a_scalar(tmp_path):
+    """A graph may read a scalar as it is built: a clamp's bounds."""
+    save_file({"bound": np.array(3.5, dtype=np.float32)}, tmp_path / "s.safetensors")
+    tree = Checkpoint(tmp_path / "s.safetensors").tree("unread")
+    assert tree.bound.shape == () and tree.bound == 0
+
+
+def test_tree_refuses_an_unknown_fill(toy_path):
+    with pytest.raises(ValueError, match="'zeros'"):
+        Checkpoint(toy_path).tree("zeros")
 
 
 # Tier 1 -- sampling
@@ -468,9 +460,15 @@ def test_real_checkpoint_is_llama_3_2_1b():
     """The real key spelling and shapes are the default config's, and
     nothing is left over.
     """
-    weights = load_weights(Checkpoint(real_checkpoint).tensors, LLAMA_3_2_1B)
-    assert weights.embedding.dtype == bfloat16
-    assert len(weights.layers) == LLAMA_3_2_1B.n_layers
+    c = LLAMA_3_2_1B
+    model = Checkpoint(real_checkpoint).tree().model
+    assert model.embed_tokens.weight.shape == (c.vocab_size, c.emb_dim)
+    assert model.embed_tokens.weight.dtype == bfloat16
+    assert len(model.layers) == c.n_layers
+    for layer in model.layers:
+        for name, shape in layer_shapes(c).items():
+            assert at(layer, name).shape == shape, name
+    assert sorted(vars(Checkpoint(real_checkpoint).tree())) == ["model"]
 
 
 # Tier 2 -- Qwen3's real, sharded checkpoint (no NPU), gated on its presence

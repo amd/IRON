@@ -59,12 +59,21 @@ class Encoder(Model):
         return ids, n
 
 
-def sandwich_layer(x, w, attend: Callable, epsilon: float, **gemm):
-    """A layer on ``x``: ``attend`` between ``w.norm1`` and ``w.norm2``, then
-    the GELU-gated feed-forward (``w.gate``, ``w.up``, ``w.down``, GEMMs
-    with ``gemm``'s keywords) between ``w.norm3`` and ``w.norm4``, each with
-    its residual.
+def sandwich_layer(
+    x,
+    attend: Callable,
+    norms: tuple,
+    gate,
+    up,
+    down,
+    epsilon: float,
+    **gemm,
+):
+    """A layer on ``x``: ``attend`` between ``norms``' first two RMS norm
+    weights, then the GELU-gated feed-forward (``gate``, ``up``, ``down``,
+    GEMMs with ``gemm``'s keywords) between its last two, each with its
+    residual.
     """
-    x = sandwich(x, attend, w.norm1, w.norm2, epsilon)
-    feed_forward = partial(geglu, w_gate=w.gate, w_up=w.up, w_down=w.down, **gemm)
-    return sandwich(x, feed_forward, w.norm3, w.norm4, epsilon)
+    x = sandwich(x, attend, norms[0], norms[1], epsilon)
+    feed_forward = partial(geglu, w_gate=gate, w_up=up, w_down=down, **gemm)
+    return sandwich(x, feed_forward, norms[2], norms[3], epsilon)

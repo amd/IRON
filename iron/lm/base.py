@@ -8,20 +8,10 @@ compiles up front in the packaging asked for, and ``Runner`` and ``main``,
 a decoder's checkpoint, tokenizer and command line.
 
 ``Checkpoint`` maps a ``.safetensors`` file, or, given its
-``.safetensors.index.json``, every shard a sharded checkpoint splits across.
-``load_weights`` places its tensors in a tree by a model's *layout*: each
-weight's path in the tree, its name in the checkpoint and its shape,
-``{i}`` standing for a layer's index in both:
-
-```python
-{
-    "embedding": ("model.embed_tokens.weight", (V, E)),
-    "layers.{i}.q": ("model.layers.{i}.self_attn.q_proj.weight", (Q, E)),
-    ...
-}
-```
-
-makes ``weights.embedding`` and ``weights.layers[3].q``.
+``.safetensors.index.json``, every shard a sharded checkpoint splits across,
+and ``tree()`` is its tensors by their own names, read, drawn or unread:
+``model.layers.3.self_attn.q_proj.weight`` is
+``weights.model.layers[3].self_attn.q_proj.weight``.
 """
 
 import argparse
@@ -33,7 +23,7 @@ import struct
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -131,10 +121,6 @@ def prompt_text(chars: int, skip: int = 0) -> str:
     return Path(__file__).with_name("prompt.txt").read_text()[skip : skip + chars]
 
 
-#: Each weight's path in the tree -> its checkpoint name and shape.
-Layout = dict[str, tuple[str, tuple[int, ...]]]
-
-
 class _Shard:
     """One ``.safetensors`` file, mapped: ``tensors`` are read-only views of
     it, read only when touched. The format is an 8-byte header length, a
@@ -227,92 +213,78 @@ class Checkpoint:
             if shard.release(array):
                 return
 
+    def tree(
+        self, fill: Literal["read", "random", "unread"] = "read", seed: int = 0
+    ) -> SimpleNamespace:
+        """The checkpoint as a tree of its tensors' names, each split at its
+        dots: ``model.layers.3.self_attn.q_proj.weight`` is
+        ``tree.model.layers[3].self_attn.q_proj.weight``, a run of indices a
+        list.
 
-def checkpoint_shapes(layout: Layout, n_layers: int) -> dict[str, tuple[int, ...]]:
-    """Every tensor a checkpoint of ``layout`` over ``n_layers`` holds, by name."""
-    return {name: shape for name, (_, shape) in _expand(layout, n_layers).items()}
+        Args:
+            fill: What the arrays hold. ``"read"``: the tensors, views of the
+                mapped file read only when touched. ``"random"``: drawn at
+                ``seed`` in the file's order, each matrix normal with
+                deviation ``1/sqrt(in)`` (an embedding's ``in`` its width),
+                anything of fewer than two axes one. ``"unread"``: allocated
+                and never written, for tracing, building and measuring a
+                model, none of which reads a weight; the pages are reserved,
+                not touched, and a scalar is zero, since a graph may read one
+                as it is built (a clamp's bounds). Only ``"read"`` reads past
+                the header.
+            seed: The seed ``"random"`` draws at.
 
-
-def random_weights(layout: Layout, n_layers: int, seed: int = 0) -> SimpleNamespace:
-    """The tree of ``layout`` over ``n_layers``, drawn at ``seed`` in place of
-    a checkpoint: each matrix normal with deviation ``1/sqrt(in)`` (an
-    embedding's ``in`` its width), each norm weight one.
-    """
-    rng = np.random.default_rng(seed)
-    tensors = {
-        name: (
-            np.ones(shape, dtype=bfloat16)
-            if len(shape) == 1
-            else (
-                rng.standard_normal(shape, dtype=np.float32) / np.sqrt(shape[1])
-            ).astype(bfloat16)
-        )
-        for name, shape in checkpoint_shapes(layout, n_layers).items()
-    }
-    return load_weights(tensors, layout, n_layers)
-
-
-def unread_weights(layout: Layout, n_layers: int) -> SimpleNamespace:
-    """The tree of ``layout`` over ``n_layers``, its arrays allocated and
-    never written: for tracing, building and measuring a model, none of
-    which reads a weight. The pages are reserved, not touched. A scalar is
-    zero: a graph may read one as it is built (a clamp's bounds).
-    """
-    tensors = {
-        name: np.zeros(shape, bfloat16) if not shape else np.empty(shape, bfloat16)
-        for name, shape in checkpoint_shapes(layout, n_layers).items()
-    }
-    return load_weights(tensors, layout, n_layers)
-
-
-def load_weights(tensors: dict, layout: Layout, n_layers: int) -> SimpleNamespace:
-    """The tree of ``layout`` over ``n_layers``, from ``tensors`` by
-    checkpoint name. The arrays are used as they are. Strict: a missing
-    name, one with no place in the layout (an untied ``lm_head.weight``, say)
-    and a shape other than the layout's all raise.
-    """
-    expected = _expand(layout, n_layers)
-    missing = sorted(expected.keys() - tensors.keys())
-    unknown = sorted(tensors.keys() - expected.keys())
-    wrong = [
-        f"{name} is {tensors[name].shape}, expected {shape}"
-        for name, (_, shape) in expected.items()
-        if name in tensors and tuple(tensors[name].shape) != shape
-    ]
-    if missing or unknown or wrong:
-        raise ValueError(
-            f"the checkpoint is not the model's: missing {missing}, "
-            f"no place for {unknown}, {wrong}"
-        )
-    nested: dict = {}
-    for name, (path, _) in expected.items():
-        *parents, leaf = path.split(".")
-        node = nested
-        for key in parents:
-            node = node.setdefault(key, {})
-        node[leaf] = tensors[name]
-    return _tree(nested)
-
-
-def _expand(layout: Layout, n_layers: int) -> dict[str, tuple[str, tuple]]:
-    """Checkpoint name -> (path, shape), ``{i}`` expanded over the layers:
-    the model's own tensors, then each layer's, in the layout's order.
-    """
-    each = [entry for entry in layout.items() if "{i}" not in entry[0]]
-    per_layer = [entry for entry in layout.items() if "{i}" in entry[0]]
-    out = {name: (path, tuple(shape)) for path, (name, shape) in each}
-    for i in range(n_layers):
-        for path, (name, shape) in per_layer:
-            out[name.format(i=i)] = (path.format(i=i), tuple(shape))
-    return out
+        Raises:
+            ValueError: ``fill`` is none of these, or a run of indices skips
+                one.
+        """
+        if fill == "read":
+            tensors = self.tensors
+        elif fill == "random":
+            rng = np.random.default_rng(seed)
+            tensors = {
+                name: (
+                    np.ones(t.shape, t.dtype)
+                    if t.ndim < 2
+                    else (
+                        rng.standard_normal(t.shape, dtype=np.float32)
+                        / np.sqrt(math.prod(t.shape[1:]))
+                    ).astype(t.dtype)
+                )
+                for name, t in self.tensors.items()
+            }
+        elif fill == "unread":
+            tensors = {
+                name: (
+                    np.zeros((), t.dtype) if t.ndim == 0 else np.empty(t.shape, t.dtype)
+                )
+                for name, t in self.tensors.items()
+            }
+        else:
+            raise ValueError(f"fill is read, random or unread, not {fill!r}")
+        nested: dict = {}
+        for name, tensor in tensors.items():
+            *parents, leaf = name.split(".")
+            node = nested
+            for key in parents:
+                node = node.setdefault(key, {})
+            node[leaf] = tensor
+        return _tree(nested)
 
 
 def _tree(node) -> Any:
-    """Nested dicts as namespaces, those keyed ``0..n-1`` as lists."""
+    """Nested dicts as namespaces, those keyed ``0..n-1`` as lists.
+
+    Raises:
+        ValueError: A run of indices skips one.
+    """
     if not isinstance(node, dict):
         return node
     items = {key: _tree(child) for key, child in node.items()}
     if all(key.isdigit() for key in items):
+        missing = sorted(set(range(len(items))) - {int(key) for key in items})
+        if missing:
+            raise ValueError(f"indices {sorted(map(int, items))} skip {missing}")
         return [items[str(i)] for i in range(len(items))]
     return SimpleNamespace(**items)
 
@@ -323,18 +295,21 @@ class Oracle:
     It is numpy, not composed from the operators' references, so it catches
     a wiring mistake the graph's own reference would repeat. A layer's
     weights are widened to float32 as the pass reaches it, so beside the
-    checkpoint it holds in float32 one layer's and the model's own (the
-    embedding, the final norm), not all of them.
-    """
+    checkpoint it holds in float32 one layer's and the embedding, not all
+    of them.
 
-    embedding: np.ndarray
-    layers: list
+    Args:
+        config: The decoder's shape.
+        weights: The checkpoint's tree (``Checkpoint.tree``): its
+            ``model.embed_tokens`` and ``model.layers`` are read here, the
+            rest by the subclass.
+    """
 
     def __init__(self, config: Config, weights):
         self.config = config
-        vars(self).update(
-            {k: v if k == "layers" else widen(v) for k, v in vars(weights).items()}
-        )
+        self.weights = weights
+        self.embedding = widen(weights.model.embed_tokens.weight)
+        self.layers = weights.model.layers
         self.angles = config.angles()
         self.buffers: dict[str, np.ndarray] = {}
 
@@ -440,9 +415,9 @@ class Model(iron.Graph):
 class Runner:
     """A checkpoint, its tokenizer and ``config``, and the models on them.
 
-    A subclass names the model: its ``config``; ``layout(config)``, where
-    each weight is in the checkpoint; ``model``, the ``CausalLM`` on the
-    NPU, whose ``oracle`` is the CPU model it is checked against;
+    A subclass names the model: its ``config``; ``model``, the ``CausalLM``
+    on the NPU, which reads the checkpoint's tree by its names, and whose
+    ``oracle`` is the CPU model it is checked against;
     ``open_tokenizer(path)``, with ``encode`` and ``decode``; and ``bos``,
     the token every prompt starts with. A model that comes in several sizes
     names them in ``sizes``, ``config`` among them, and ``--size`` picks one.
@@ -456,10 +431,11 @@ class Runner:
     The checkpoint is mapped, not read: ``npu`` uploads it a piece at a
     time and drops each piece's host pages once it is on the device.
 
-    With no checkpoint the weights are drawn at ``seed``
-    (``random_weights``), and with no tokenizer a prompt is random tokens:
-    the model's speed, its accuracy against its oracle and its determinism
-    are then measured on a host without the files.
+    Given a ``seed`` the weights are drawn at it in the checkpoint's shapes
+    (``Checkpoint.tree("random")``, which reads only its header), and with
+    no tokenizer a prompt is random tokens: the model's speed, its accuracy
+    against its oracle and its determinism are then measured without the
+    real weights or the tokenizer.
     """
 
     config: Config
@@ -473,19 +449,23 @@ class Runner:
     tables: Path | None = None
 
     @staticmethod
-    def layout(config: Config) -> Layout:
-        raise NotImplementedError
-
-    @staticmethod
     def open_tokenizer(path):
         raise NotImplementedError
 
     @classmethod
     def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
-        """The flags ``tune_calls`` follows from: the decode step's position
-        and token, the contexts attention over the cache is priced at, and
-        the sampling Sample is measured at.
+        """The flags ``tune_calls`` follows from: the checkpoint whose header
+        gives the weights' shapes, the decode step's position and token, the
+        contexts attention over the cache is priced at, and the sampling
+        Sample is measured at.
         """
+        parser.add_argument(
+            "--checkpoint",
+            type=Path,
+            required=True,
+            help="the .safetensors checkpoint, or a sharded one's "
+            "model.safetensors.index.json, of which only the header is read",
+        )
         parser.add_argument(
             "--position",
             type=int,
@@ -528,7 +508,7 @@ class Runner:
             parser.error(
                 f"--context {args.context} is past max_seq_len {config.max_seq_len}"
             )
-        model = cls.model(config, unread_weights(cls.layout(config), config.n_layers))
+        model = cls.model(config, Checkpoint(args.checkpoint).tree("unread"))
         sample = Sampler(args.temperature, args.top_k, np.random.default_rng(SEED))
         return model.tune_calls(
             sample, args.position, args.token, args.context, args.points
@@ -536,32 +516,28 @@ class Runner:
 
     def __init__(
         self,
-        weights_path=None,
+        weights_path,
         tokenizer_path=None,
         config: Config | None = None,
-        seed: int = 0,
+        seed: int | None = None,
     ):
         self.config = config or type(self).config
         self.seed = seed
-        layout = self.layout(self.config)
-        if weights_path is None:
-            self.checkpoint = None
-            self.weights = random_weights(layout, self.config.n_layers, seed)
-        else:
-            self.checkpoint = Checkpoint(weights_path)
-            self.weights = load_weights(
-                self.checkpoint.tensors, layout, self.config.n_layers
-            )
+        self.checkpoint = Checkpoint(weights_path)
+        self.weights = (
+            self.checkpoint.tree()
+            if seed is None
+            else self.checkpoint.tree("random", seed)
+        )
         self.tokenizer = (
             None if tokenizer_path is None else self.open_tokenizer(tokenizer_path)
         )
 
     @staticmethod
     def add_arguments(parser: argparse.ArgumentParser) -> None:
-        """The checkpoint and tokenizer arguments, or ``--random-weights``."""
+        """The checkpoint and tokenizer arguments, and ``--random-weights``."""
         parser.add_argument(
             "weights_path",
-            nargs="?",
             help="the .safetensors checkpoint, or a sharded one's "
             "model.safetensors.index.json",
         )
@@ -570,8 +546,9 @@ class Runner:
             "--random-weights",
             type=int,
             metavar="SEED",
-            help="in place of the checkpoint and the tokenizer, weights drawn "
-            "at SEED and prompts of random tokens",
+            help="in place of the checkpoint's weights and the tokenizer, "
+            "weights drawn at SEED in its shapes (only its header is read) "
+            "and prompts of random tokens",
         )
 
     @classmethod
@@ -582,14 +559,11 @@ class Runner:
         config: Config | None = None,
     ) -> "Runner":
         """The runner ``add_arguments``'s arguments name."""
-        given = [args.weights_path is not None, args.tokenizer_path is not None]
-        if args.random_weights is None and not all(given):
-            parser.error("give the checkpoint and the tokenizer, or --random-weights")
-        if args.random_weights is not None and any(given):
-            parser.error("--random-weights takes neither checkpoint nor tokenizer")
-        if args.random_weights is None:
-            return cls(args.weights_path, args.tokenizer_path, config)
-        return cls(config=config, seed=args.random_weights)
+        if args.random_weights is None and args.tokenizer_path is None:
+            parser.error("give the tokenizer, or --random-weights")
+        if args.random_weights is not None and args.tokenizer_path is not None:
+            parser.error("--random-weights takes no tokenizer")
+        return cls(args.weights_path, args.tokenizer_path, config, args.random_weights)
 
     def npu(
         self,
@@ -609,8 +583,7 @@ class Runner:
             if cost_table is None
             else JointNarrowing(CostTable(cost_table), kinds=kinds or NarrowingKinds())
         )
-        release = None if self.checkpoint is None else self.checkpoint.release
-        return model.load(release, tuner, boundaries)
+        return model.load(self.checkpoint.release, tuner, boundaries)
 
     def cpu(self) -> Oracle:
         """The model's oracle over the same weights, widened a layer at a time."""

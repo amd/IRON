@@ -869,11 +869,14 @@ application over it, a package of its own under `iron/applications/`
 profiles. The library is four modules:
 
 - `base.py`: what any model is over it. `Config`, the shape, and
-  `rope_angles`, the RoPE table a `Config` names the base and scaling of; a
-  checkpoint `Layout`, each weight's place in the model, its name in the
-  checkpoint and its shape, which `load_weights` checks strictly against the
-  mapped `.safetensors` (`Checkpoint`, which also maps a sharded checkpoint
-  by its `.safetensors.index.json`, every shard the index names); `Oracle`,
+  `rope_angles`, the RoPE table a `Config` names the base and scaling of;
+  `Checkpoint`, the mapped `.safetensors` (or a sharded checkpoint, by its
+  `.safetensors.index.json`, every shard the index names), whose
+  `tree(fill=)` is the weights by the checkpoint's own names
+  (`weights.model.layers[3].self_attn.q_proj.weight`), which the graphs and
+  oracles read: `"read"`, views of the file; `"random"`, drawn at a seed;
+  `"unread"`, allocated and never written, for tracing, building and
+  tuning, which read only the header; `Oracle`,
   a model's float32 forward pass on the host, the reference it is judged
   by, as an operator's is its `reference()` (not composed from the
   operators' references, so it catches a wiring mistake the graph's own
@@ -883,12 +886,13 @@ profiles. The library is four modules:
   whose versions `load(tuner, boundaries)` compiles before the first call,
   in the packaging asked for; and `Runner` and `main`, a decoder's
   checkpoint, tokenizer, model and oracle, and the command line. A model's
-  runner names its `config`, `layout`, `model`, `open_tokenizer` and `bos`,
+  runner names its `config`, `model`, `open_tokenizer` and `bos`,
   and, for a model that comes in several sizes, `sizes`, of which `--size`
   picks one.
   With `--random-weights SEED` (and pytest's option of that name) the
-  weights are drawn (`random_weights`) and the prompts random: speed,
-  accuracy against the oracle and determinism on a host without the files
+  weights are drawn in the checkpoint's shapes (`tree("random")`) and the
+  prompts random: speed, accuracy against the oracle and determinism
+  without the real weights or the tokenizer
 - `causal.py`: `CausalLM`, a decoder as one graph, a prompt chunk and a
   decode step, the key and value caches, attention over them (`attend`) and
   `logits(tokens)`. A model subclasses it with `layer(step, i, weights,
@@ -933,8 +937,8 @@ Their dependencies (safetensors, tiktoken, ...) are in
 ### Llama 3.2 1B Inference
 
 Full LLM inference example at `iron/applications/llama/`: `model.py`
-(Llama 3's layer and head on the NPU and in numpy, Llama 3.2 1B's shape, the
-layout, the tokenizer), `profiles/` (tunables), its test and README:
+(Llama 3's layer and head on the NPU and in numpy, Llama 3.2 1B's shape,
+the tokenizer), `profiles/` (tunables), its test and README:
 
 - **Required files**: `model.safetensors`, `tokenizer.model` from Hugging Face
 - **Default location**: `/srv/llama3.2-1b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)

@@ -37,10 +37,9 @@ from iron.lm import (
     determinism,
     generate,
     greedy,
-    random_weights,
 )
-from iron.applications.llama.model import Llama, layout
-from iron.tests.common.llama_model import PROFILE, SMALL
+from iron.applications.llama.model import Llama
+from iron.tests.common.llama_model import PROFILE, SMALL, checkpoint
 
 pytestmark = pytest.mark.usefixtures("npu2")  # MHA decode on any host
 
@@ -83,7 +82,7 @@ def cpu():
     for it and six greedy tokens' logits.
     """
     config = SMALL
-    weights = random_weights(layout(config), config.n_layers)
+    weights = checkpoint(config).tree("random")
     oracle = Llama.oracle(config, weights)
     # No greedy step of this prompt has a top-2 gap within bf16's resolution.
     prompt = np.random.default_rng(7).integers(0, config.vocab_size, 8)
@@ -232,7 +231,7 @@ def test_a_short_prompt_runs_at_its_own_rows():
     continues from the caches it wrote.
     """
     config = dataclasses.replace(SMALL, max_seq_len=1024)
-    weights = random_weights(layout(config), config.n_layers)
+    weights = checkpoint(config).tree("random")
     model, oracle = OnHost(config, weights), Llama.oracle(config, weights)
     prompt = np.random.default_rng(2).integers(0, config.vocab_size, 8)
     first = oracle.logits(prompt)

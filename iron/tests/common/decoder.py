@@ -15,11 +15,11 @@ import pytest
 from ml_dtypes import bfloat16
 
 from iron.common.graph.handle import Affine
-from iron.lm import project, random_weights, rope_angles
-from iron.applications.llama.model import Llama, layout
+from iron.lm import project, rope_angles
+from iron.applications.llama.model import Llama
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
-from iron.tests.common.llama_model import PROFILE, SMALL, small
+from iron.tests.common.llama_model import PROFILE, SMALL, checkpoint, small
 
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
@@ -35,8 +35,9 @@ class _PartialRotaryLlama(Llama):
     def layer(self, step, i, w, x):
         c, n = self.config, x.shape[0]
         H, D, A = c.n_heads, c.head_dim, c.rope_width
-        h = RMSNorm(x, weight=w.norm1)
-        q_rot_weight = w.q.reshape(H, D, c.emb_dim)[:, :A, :].reshape(H * A, c.emb_dim)
+        h = RMSNorm(x, weight=w.input_layernorm.weight)
+        q = w.self_attn.q_proj.weight
+        q_rot_weight = q.reshape(H, D, c.emb_dim)[:, :A, :].reshape(H * A, c.emb_dim)
         q_rot = project(h, q_rot_weight)
         RoPE(q_rot.reshape(n * H, A), step.angles)
         return x
@@ -44,7 +45,7 @@ class _PartialRotaryLlama(Llama):
 
 def _partial_rotary_small(**config):
     cfg = dataclasses.replace(SMALL, **config)
-    model = _PartialRotaryLlama(cfg, random_weights(layout(cfg), cfg.n_layers))
+    model = _PartialRotaryLlama(cfg, checkpoint(cfg).tree("random"))
     model.profile = PROFILE
     return model
 
@@ -62,7 +63,8 @@ def test_rope_width_is_the_rotary_dim_when_given():
     assert cfg.rope_width == 32
     assert cfg.angles().shape == (cfg.max_seq_len, 32)
     # Every other weight keeps the full head_dim: only the angle table narrows.
-    assert model.layers[0].q.shape == (cfg.n_heads * cfg.head_dim, cfg.emb_dim)
+    q = model.layers[0].self_attn.q_proj.weight
+    assert q.shape == (cfg.n_heads * cfg.head_dim, cfg.emb_dim)
 
 
 def test_angles_are_the_unscaled_table_at_rope_width():
