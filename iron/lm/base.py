@@ -32,7 +32,6 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common.graph import CompiledGraph
 from iron.common.graph.narrowing import CostTable, JointNarrowing, NarrowingKinds
 from iron.common.graph.probe import Call
 from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
@@ -506,11 +505,9 @@ class Model(iron.Graph):
     """A model's graph, every version ``shapes()`` names compiled and
     loaded by ``load()`` before the first call, so the arena is made once:
     a version after the first feeds off the one before it, a full ELF's
-    Emit starting there. ``versions``, in ``shapes()``'s order, is every
-    version ``load()`` compiled.
+    Emit starting there. ``versions`` (``Graph``'s own), in ``shapes()``'s
+    order, is every version ``load()`` compiled.
     """
-
-    versions: list[CompiledGraph]
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version."""
@@ -534,16 +531,41 @@ class Model(iron.Graph):
         """
         if dev is None:
             dev = aie_utils.ensure_current_device()
-        self.versions = []
         feeds = None
         for shapes in self.shapes():
             version = self.compile(
                 dev=dev, feeds=feeds, coresident=tuner, full_elf=full_elf, **shapes
             )
             version.load(release=release)
-            self.versions.append(version)
             feeds = version if version.emit is not None else None
         return self
+
+
+#: The flags a runner's CLI and pytest's fixtures read alike
+#: (``Runner.add_arguments``, ``Runner.from_options``), each a tuple of
+#: ``add_argument``'s own flag strings and keywords.
+FLAGS = (
+    (
+        ("--random-weights",),
+        dict(
+            type=int,
+            default=None,
+            metavar="SEED",
+            help="in place of the checkpoint's weights and the tokenizer, "
+            "weights drawn at SEED in its shapes (only its header is read) "
+            "and prompts of random tokens",
+        ),
+    ),
+    (
+        ("--max-seq-len",),
+        dict(
+            type=int,
+            default=None,
+            help="rows the caches hold, prompt and generated tokens together, "
+            "a multiple of the size's own prefill_chunk (default: the size's own)",
+        ),
+    ),
+)
 
 
 class Runner:
@@ -680,23 +702,27 @@ class Runner:
             None if tokenizer_path is None else self.open_tokenizer(tokenizer_path)
         )
 
-    @staticmethod
-    def add_arguments(parser: argparse.ArgumentParser) -> None:
-        """The checkpoint and tokenizer arguments, and ``--random-weights``."""
+    @classmethod
+    def add_arguments(cls, parser: argparse.ArgumentParser) -> None:
+        """The checkpoint and tokenizer, a model with several ``sizes``'
+        ``--size``, and ``FLAGS``: the same flags ``main()``'s CLI and the
+        pytest fixtures read a runner's options by (``from_options``).
+        """
         parser.add_argument(
             "weights_path",
             help="the .safetensors checkpoint, or a sharded one's "
             "model.safetensors.index.json",
         )
         parser.add_argument("tokenizer_path", nargs="?", help="the tokenizer's file")
-        parser.add_argument(
-            "--random-weights",
-            type=int,
-            metavar="SEED",
-            help="in place of the checkpoint's weights and the tokenizer, "
-            "weights drawn at SEED in its shapes (only its header is read) "
-            "and prompts of random tokens",
-        )
+        if cls.sizes:
+            parser.add_argument(
+                "--size",
+                choices=cls.sizes,
+                default=next(n for n, c in cls.sizes.items() if c == cls.config),
+                help="the model's size (default: %(default)s)",
+            )
+        for flags, kwargs in FLAGS:
+            parser.add_argument(*flags, **kwargs)
 
     @classmethod
     def from_arguments(
@@ -711,6 +737,41 @@ class Runner:
         if args.random_weights is not None and args.tokenizer_path is not None:
             parser.error("--random-weights takes no tokenizer")
         return cls(args.weights_path, args.tokenizer_path, config, args.random_weights)
+
+    @classmethod
+    def from_options(
+        cls,
+        args: "list[str] | argparse.Namespace | None" = None,
+        parser: argparse.ArgumentParser | None = None,
+    ) -> "Runner":
+        """A runner from ``args``: an already-parsed ``argparse.Namespace``
+        (``main()``'s own, its further flags already read), or option
+        strings (a test's own, ``add_arguments``'s flags alone), parsed
+        here against a fresh parser. Either way, ``args.weights_path``'s
+        config.json gives the shape, narrowed by ``--size`` or
+        ``--max-seq-len`` if either is given, and ``from_arguments`` builds
+        the runner.
+
+        Args:
+            args: The parsed namespace, or the option strings to parse
+                (``sys.argv[1:]`` if ``None``).
+            parser: The namespace's own parser, for ``from_arguments``'s
+                errors; built here (and ``args`` parsed against it) when
+                ``args`` is not already one.
+        """
+        if not isinstance(args, argparse.Namespace):
+            parser = argparse.ArgumentParser()
+            cls.add_arguments(parser)
+            args = parser.parse_args(args)
+        config = (
+            cls.sizes[args.size] if cls.sizes else cls.default_config(args.weights_path)
+        )
+        if args.max_seq_len is not None:
+            try:
+                config = dataclasses.replace(config, max_seq_len=args.max_seq_len)
+            except ValueError as e:
+                parser.error(str(e))
+        return cls.from_arguments(parser, args, config)
 
     def npu(
         self,
@@ -766,13 +827,6 @@ def main(runner: type[Runner], description: str):
     """The command line of ``runner``'s model: sample, or check it."""
     parser = argparse.ArgumentParser(description=description)
     runner.add_arguments(parser)
-    if runner.sizes:
-        parser.add_argument(
-            "--size",
-            choices=runner.sizes,
-            default=next(n for n, c in runner.sizes.items() if c == runner.config),
-            help="the model's size (default: %(default)s)",
-        )
     parser.add_argument(
         "--prompt-len",
         type=int,
@@ -782,13 +836,6 @@ def main(runner: type[Runner], description: str):
     )
     parser.add_argument(
         "--num-tokens", type=int, default=40, help="tokens to generate (default: 40)"
-    )
-    parser.add_argument(
-        "--max-seq-len",
-        type=int,
-        help="rows the caches hold, prompt and generated tokens together, a "
-        f"multiple of {runner.config.prefill_chunk} "
-        "(default: the size's own)",
     )
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-k", type=int, default=50)
@@ -827,18 +874,7 @@ def main(runner: type[Runner], description: str):
         "(default: a full ELF where the device runs one)",
     )
     args = parser.parse_args()
-
-    config = (
-        runner.sizes[args.size]
-        if runner.sizes
-        else runner.default_config(args.weights_path)
-    )
-    if args.max_seq_len is not None:
-        try:
-            config = dataclasses.replace(config, max_seq_len=args.max_seq_len)
-        except ValueError as e:
-            parser.error(str(e))
-    run = runner.from_arguments(parser, args, config)
+    run = runner.from_options(args, parser)
     tokens = run.prompt(args.prompt_len)
     if len(tokens) + args.num_tokens > run.config.max_seq_len:
         parser.error(

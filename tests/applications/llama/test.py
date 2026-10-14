@@ -13,8 +13,6 @@ shapes (only its header is read) and random prompts, on a host without the
 tokenizer, and ``--max-seq-len`` at another context.
 """
 
-import dataclasses
-
 import aie.utils as aie_utils
 import pytest
 
@@ -40,17 +38,22 @@ pytestmark = pytest.mark.supported_devices("npu2")
 
 @pytest.fixture(scope="module")
 def runner(request):
+    """``Runner.from_options``, the same way the CLI builds one: the
+    options pytest's own ``--random-weights``/``--max-seq-len`` flags
+    (``conftest.py``'s, ``Runner.FLAGS``) were given, as option strings.
+    """
     seed = request.config.getoption("--random-weights")
+    max_seq_len = request.config.getoption("--max-seq-len")
+    options = [str(WEIGHTS)]
     if seed is not None:
         require(WEIGHTS, CONFIG)
-        run = Runner(WEIGHTS, seed=seed)
+        options += ["--random-weights", str(seed)]
     else:
         require(WEIGHTS, TOKENIZER, CONFIG)
-        run = Runner(WEIGHTS, TOKENIZER)
-    max_seq_len = request.config.getoption("--max-seq-len")
+        options.append(str(TOKENIZER))
     if max_seq_len is not None:
-        run.config = dataclasses.replace(run.config, max_seq_len=max_seq_len)
-    return run
+        options += ["--max-seq-len", str(max_seq_len)]
+    return Runner.from_options(options)
 
 
 @pytest.fixture(scope="module")

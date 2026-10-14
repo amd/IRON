@@ -15,6 +15,8 @@ from aie.iron.device import from_name
 from aie.utils.benchmark import preflight, provenance
 from aie.utils.probe import npu_unavailable_reason
 
+from iron.lm.base import FLAGS
+
 
 def _bound_device(name: str, n_cols: int):
     """A fixture binding an ``n_cols``-column ``name`` NPU as the current
@@ -49,21 +51,8 @@ def pytest_addoption(parser):
         help="Fold, narrow and pack a language model's versions by this "
         "measured cost table (iron.lm.tune)",
     )
-    parser.addoption(
-        "--random-weights",
-        type=int,
-        default=None,
-        metavar="SEED",
-        help="Run a language model's tests on weights drawn at SEED in its "
-        "checkpoint's shapes and random prompts, in place of its weights and "
-        "tokenizer",
-    )
-    parser.addoption(
-        "--max-seq-len",
-        type=int,
-        default=None,
-        help="The rows a language model's caches hold, in place of its config's",
-    )
+    for flags, kwargs in FLAGS:
+        parser.addoption(*flags, **kwargs)
 
 
 def get_git_commit():

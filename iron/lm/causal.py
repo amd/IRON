@@ -206,7 +206,7 @@ class CausalLM(Model):
                 one.
         """
         super().load(release=release, tuner=tuner, full_elf=full_elf, dev=dev)
-        self._decode, self._prompt = self.versions
+        self._decode, self._prompt = self.versions.values()
         if not self._decode.plan.full_elf:
             logger.info("%s", self._decode.plan.report("decode"))
         return self
