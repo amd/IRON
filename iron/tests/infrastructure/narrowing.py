@@ -370,6 +370,54 @@ def test_timing_waits_for_another_process_to_leave_the_npu():
     assert any(f"in use by pid [{child.pid}]" in line for line in logged), logged
 
 
+STARVE = """
+import os
+import subprocess
+import sys
+
+import aie.utils as aie_utils
+from iron.common.graph.probe import Awake, Standalone, Timing, time_interleaved
+from iron.operators import SiLU
+
+SPIN = (
+    "import os, sys\\n"
+    "os.sched_setaffinity(0, {int(sys.argv[1])})\\n"
+    "print('spinning', flush=True)\\n"
+    "while True: pass\\n"
+)
+
+aie_utils.ensure_current_device()
+run = Standalone("starved", [SiLU(size=8192, tile_size=256)])
+before = Awake.interrupts()
+run.callable()
+spinners = [
+    subprocess.Popen([sys.executable, "-c", SPIN, str(cpu)], stdout=subprocess.PIPE, text=True)
+    for cpu in sorted(Awake(before).cpus)
+]
+try:
+    assert spinners and all(s.stdout.readline().strip() == "spinning" for s in spinners)
+    os.setpriority(os.PRIO_PROCESS, 0, 19)
+    time_interleaved([run.callable], Timing(rounds=4, calls=5))
+finally:
+    for s in spinners:
+        s.kill()
+        s.wait()
+"""
+
+
+def test_timing_refuses_a_figure_its_calls_waited_for_a_cpu_through():
+    # A process on the cores the completions interrupt held the timing
+    # thread off them until each core's tick, 970 us for a 190 us run. At
+    # nice 19 beside nice-0 spinners of its own session, as an autogroup
+    # weighs them, the thread waits every call: 1.6-5.7 ms in ten of ten
+    # runs on Strix Halo, where at nice 0 it waited in two of five.
+    starved = subprocess.run(
+        [sys.executable, "-c", STARVE], capture_output=True, text=True
+    )
+    assert starved.returncode != 0
+    assert re.search(r"waited \d+ us for a CPU", starved.stderr), starved.stderr
+
+
 def test_a_step_costs_alike_however_long_the_run():
     # A host core woken from deep idle by a long run's completion, and not
     # by a short one's, would price a step above a short run's.

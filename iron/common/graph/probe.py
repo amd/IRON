@@ -42,7 +42,8 @@ Figures are medians of per-round medians, interleaved, of the run alone (the
 callable's ``last_elapsed``), a setting far behind the fastest over fewer
 rounds (``Timing``). Nothing else may dispatch meanwhile: a round starts
 once no other process holds the NPU, and is timed again if one holds it
-when the round ends.
+when the round ends. A figure whose calls waited for a CPU (``CPU_WAIT_US``)
+is refused.
 """
 
 from __future__ import annotations
@@ -183,6 +184,11 @@ def others() -> set[int]:
 IDLE_POLL = 5.0
 IDLE_WAIT = 1800.0
 
+# Kernel work holds the timing thread's core for tens of microseconds, mostly
+# outside the timed window; another process, under lazy preemption, until the
+# core's next tick, hundreds of microseconds on.
+CPU_WAIT_US = 100.0
+
 
 def wait_idle(log: Callable[[str], None] = print) -> None:
     """Return once no other process holds a context on the NPU (``others``).
@@ -216,7 +222,8 @@ class Awake:
     the idle governor to choose it: a probe's long runs would carry it and
     its short ones not. A busy sibling holds the core shallow without
     delaying the completion work on it, and the waiting thread is woken on
-    that core.
+    that core. Another process on that core, under lazy preemption, holds
+    the woken thread off it until the core's next tick (``waited_us``).
     """
 
     IRQ = "xdna_mailbox"
@@ -246,6 +253,12 @@ class Awake:
                     int(f) for f in fields[1:] if f.isdigit()
                 )
         return counts
+
+    @staticmethod
+    def waited_us() -> float:
+        """How long the calling thread has waited, runnable, for a CPU,
+        microseconds in all (``/proc/thread-self/schedstat``)."""
+        return int(Path("/proc/thread-self/schedstat").read_text().split()[1]) / 1e3
 
     @staticmethod
     def _cpus(path: str) -> set[int]:
@@ -526,6 +539,11 @@ def time_interleaved(
             run is timed every round if not given.
         fastest: The slowest run of the fastest setting timed before these.
         log: Where waiting for the NPU, or a round timed again, is reported.
+
+    Raises:
+        RuntimeError: A run's middle call waited for a CPU past
+            ``CPU_WAIT_US`` (``Awake.waited_us``) in its median round: the
+            host was busy enough to hold completions off a core.
     """
     for run in runs:
         run()  # warm: first-run setup lands on nobody's figure
@@ -534,6 +552,7 @@ def time_interleaved(
     for run in runs:
         run()
     medians: list[list[float]] = [[] for _ in runs]
+    waited: list[list[float]] = [[] for _ in runs]
     live = set(range(len(runs)))
     wait_idle(log)
     r = 0
@@ -543,11 +562,13 @@ def time_interleaved(
             for i, run in enumerate(runs):
                 if i not in live:
                     continue
-                times = []
+                times, waits = [], []
                 for _ in range(timing.calls):
+                    start = Awake.waited_us()
                     run()
                     times.append(run.last_elapsed)
-                timed[i] = statistics.median(times) * 1e6
+                    waits.append(Awake.waited_us() - start)
+                timed[i] = (statistics.median(times) * 1e6, statistics.median(waits))
             held = others()
             if held:
                 log(
@@ -555,8 +576,9 @@ def time_interleaved(
                 )
                 wait_idle(log)
                 continue
-            for i, us in timed.items():
+            for i, (us, wait) in timed.items():
                 medians[i].append(us)
+                waited[i].append(wait)
             r += 1
             if not groups or r < timing.settle:
                 continue
@@ -566,6 +588,12 @@ def time_interleaved(
                 slowest[groups[i]] = max(slowest.get(groups[i], 0.0), us)
             bar = timing.cutoff * min([fastest, *slowest.values()])
             live = {i for i in live if groups[i] is None or slowest[groups[i]] <= bar}
+    late = max(statistics.median(w) for w in waited)
+    if late > CPU_WAIT_US:
+        raise RuntimeError(
+            f"a run's middle call waited {late:.0f} us for a CPU in its median "
+            f"round; measure with the host otherwise idle"
+        )
     return [Timed(tuple(m)) for m in medians]
 
 
