@@ -8,17 +8,15 @@ oracle's, their norm, a query ranking two documents, every call
 bit-identical to the first), each tower's soft tokens and, over text with
 a clip and an image, the whole model's. The audio tower's features and the
 image processor's patches are checked against the host's, which the
-oracles take. The oracles are checked once against Hugging Face's
-processors and model, their outputs saved by hugging_face.py. On NPU1 each
-step is its own dispatch of an xclbin; on NPU2 that form is checked too.
+oracles take. The oracles are checked against Hugging Face's processors
+and model (hugging_face.py), where torch is installed. On NPU1 each step is
+its own dispatch of an xclbin; on NPU2 that form is checked too.
 
 Each tower's graph is built for the class that tests it and dropped after
 it, before the text encoder's graphs are built for the module's last tests.
 """
 
-import hashlib
 import time
-from pathlib import Path
 
 import aie.utils as aie_utils
 import numpy as np
@@ -52,13 +50,6 @@ from iron.lm.testing import require, weights_dir
 from iron.operators.copy import Copy
 
 DIRECTORY = weights_dir("embeddinggemma-2")
-# Hugging Face's outputs on these tests' inputs, by part, as hugging_face.py
-# saved them.
-REFERENCES = {
-    part: Path(__file__).with_name(f"hugging_face{suffix}.npz")
-    for part, suffix in (("text", ""), ("audio", "_audio"), ("vision", "_vision"))
-}
-
 QUERY = "What causes the northern lights?"
 DOCUMENTS = [
     "The northern lights are caused by charged particles from the sun.",
@@ -210,10 +201,9 @@ MIXED = {
     ),
 }
 
-# The cases hugging_face.py saved the processor's ids and the model's
-# embedding for: text, and text with a clip and an image at the size the
-# processor's resize picks, so that its pixels are ours (14 x 20 tokens, the
-# whole budget).
+# The cases the oracle's ids and embedding are checked against Hugging
+# Face's processor and model on: text, and text with a clip and an image at
+# the size the processor's resize picks (14 x 20 tokens, the whole budget).
 HUGGING_FACE = {
     "query": (QUERY, "query", None, None),
     "past_the_window": (LONGER, "document", None, None),
@@ -264,14 +254,18 @@ def vision_oracle(weights):
     return VisionOracle(VisionConfig(), weights)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def hugging_face():
-    """Hugging Face's outputs on the tests' inputs, each part's under its name."""
-    out = {}
-    for part, path in REFERENCES.items():
-        with np.load(path) as saved:
-            out |= {f"{part}/{k}": v for k, v in saved.items() if k != "metadata"}
-    return out
+    """Hugging Face's own EmbeddingGemma 2, which the oracles are checked
+    against: optional dependencies, so its tests skip without them.
+    """
+    for module in ("torch", "torchvision", "transformers"):
+        pytest.importorskip(module)
+    require(DIRECTORY / "model.safetensors", DIRECTORY / "processor_config.json")
+    # Imported here, once the optional dependencies are known to be present.
+    from iron.applications.embedding_gemma2.hugging_face import HuggingFace
+
+    return HuggingFace(DIRECTORY)
 
 
 def loaded(graph, tuner, boundaries=None):
@@ -605,25 +599,20 @@ def test_resize_matches_hugging_face(
     hugging_face, vision_oracle, shape, tokens, refusal
 ):
     image = np.random.default_rng(0).integers(0, 256, (*shape, 3), dtype=np.uint8)
-    values, positions = vision_oracle.patches(image, tokens)
-    key = f"vision/resize/{shape[0]}x{shape[1]}_{tokens}"
-    got = [
-        hashlib.sha256(np.ascontiguousarray(values, np.float32)).hexdigest(),
-        hashlib.sha256(np.ascontiguousarray(positions, np.int64)).hexdigest(),
-    ]
-    want = [str(hugging_face[f"{key}/{name}"]) for name in ("pixels", "positions")]
-    assert got == want
+    got_values, got_positions = vision_oracle.patches(image, tokens)
+    want_values, want_positions = hugging_face.patches(image, tokens)
+    np.testing.assert_array_equal(got_values, want_values)
+    np.testing.assert_array_equal(got_positions, want_positions)
 
 
 def test_audio_oracle_matches_hugging_face(hugging_face, audio_oracle):
-    got_features, frames = audio_oracle.features(clip("medium"))
-    mask = hugging_face["audio/medium/mask"]
+    wave = clip("medium")
+    got_features, frames = audio_oracle.features(wave)
+    want_features, mask = hugging_face.features(wave)
     assert frames == int(mask.sum()) and mask[:frames].all()
     # Measured: identical.
-    np.testing.assert_allclose(
-        got_features, hugging_face["audio/medium/features"], atol=1e-5
-    )
-    want = hugging_face["audio/medium/soft_tokens"]
+    np.testing.assert_allclose(got_features, want_features, atol=1e-5)
+    want = hugging_face.audio_tower(want_features, mask)
     got = audio_oracle.tower(got_features, frames)
     assert got.shape == want.shape
     # Measured: 2.1e-5, float32's own reordering.
@@ -633,9 +622,12 @@ def test_audio_oracle_matches_hugging_face(hugging_face, audio_oracle):
 
 
 def test_vision_oracle_matches_hugging_face(hugging_face, vision_oracle):
-    want = hugging_face["vision/portrait/soft_tokens"]
     (height, width), tokens = IMAGES["portrait"]
-    got = vision_oracle.embed(synthetic_image(height, width), tokens)
+    pixel_values, positions = vision_oracle.patches(
+        synthetic_image(height, width), tokens
+    )
+    want = hugging_face.vision_tower(pixel_values, positions)
+    got = vision_oracle.tower(pixel_values, positions)
     # Measured: 2.4e-6, float32's own reordering.
     np.testing.assert_allclose(
         np.linalg.norm(got - want) / np.linalg.norm(want), 0, atol=1e-5
@@ -659,8 +651,8 @@ def test_embeddinggemma_2_oracle_matches_hugging_face(
         len(soft.get(c.audio_token, ())),
         len(soft.get(c.image_token, ())),
     )
-    assert ids == hugging_face[f"text/{case}/input_ids"].tolist()
-    want = hugging_face[f"text/{case}/embedding"]
+    want_ids, want = hugging_face.encode(Tokenizer.TASKS[task] + text, wave, image)
+    assert ids == want_ids
     got = oracle.encode(ids, soft=soft)
     # Measured: 1.4e-6 at the most, float32's own reordering.
     np.testing.assert_allclose(np.linalg.norm(got - want), 0, atol=1e-5)

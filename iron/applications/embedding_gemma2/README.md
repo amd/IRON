@@ -72,12 +72,7 @@ patches against the host's, and the latency of each, on NPU1 and NPU2. On
 NPU1 each step is its own dispatch of an xclbin; `TestEachStep` checks that
 form on NPU2.
 
-The float32 oracles are checked against Hugging Face's processors and model
-through their outputs on the tests' inputs, saved as `hugging_face*.npz`, so
-the tests need no torch. `hugging_face.py` makes them in an environment with
-torch, torchvision and transformers (not IRON's requirements), and with
-`--check` compares a fresh run with them:
-
-```bash
-python -m iron.applications.embedding_gemma2.hugging_face /path/to/embeddinggemma-2
-```
+The float32 oracles are checked against Hugging Face's own processors and
+model (`hugging_face.py`), computed as the tests run. They need torch,
+torchvision and transformers, which are not IRON's requirements; without
+them those tests skip.

@@ -1,25 +1,12 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hugging Face's outputs on the EmbeddingGemma 2 tests' fixed inputs, which
-the tests check the float32 oracles against without torch.
-
-Run where torch, torchvision and transformers are installed (they are not
-IRON's requirements), over the checkpoint directory:
-
-    python -m iron.applications.embedding_gemma2.hugging_face <directory>
-
-It writes the test's `REFERENCES` beside it, the text encoder's, the audio
-tower's and the vision tower's, each with the versions that made it and the
-checkpoint's sha256 in its `metadata`. With `--check` it compares a fresh
-run with the saved files instead.
+"""Hugging Face's own EmbeddingGemma 2, in float32, which the tests check
+the float32 oracles against: its processors, its model and each tower
+alone. It needs torch, torchvision and transformers, which are not IRON's
+requirements, so the tests that use it skip where they are not installed.
 """
 
-import argparse
-import hashlib
-import json
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -28,204 +15,108 @@ import transformers
 from transformers.models.embedding_gemma2 import modeling_embedding_gemma2
 from transformers.models.gemma4 import image_processing_gemma4, modeling_gemma4
 
-from iron.applications.embedding_gemma2 import test
-from iron.applications.embedding_gemma2.config import VisionConfig
-from iron.applications.embedding_gemma2.model import Tokenizer
-from iron.applications.embedding_gemma2.oracle import VisionOracle
-from iron.applications.embedding_gemma2.weights import Weights
 from iron.lm import Checkpoint
 
-# A fresh run against the saved files, in relative norm: float32's own
-# reordering across hosts and thread counts.
-CHECK_RTOL = 1e-5
 
-CHECKPOINT_FILES = [
-    "model.safetensors",
-    "config.json",
-    "tokenizer.json",
-    "processor_config.json",
-]
+class HuggingFace:
+    """Hugging Face's processors and model over the checkpoint in
+    `directory`, in float32, and each tower alone with its projection into
+    the text model's space.
 
-
-def load(module: torch.nn.Module, tensors: dict, prefix: str):
-    """Load the checkpoint's `prefix` weights into `module`, in float32."""
-    module.load_state_dict(
-        {
-            k.removeprefix(prefix): torch.from_numpy(v.astype(np.float32))
-            for k, v in tensors.items()
-            if k.startswith(prefix)
-        }
-    )
-
-
-def text_references(directory: Path) -> dict:
-    """The ids Hugging Face's processor gives each of the test's
-    `HUGGING_FACE` cases, and its model's unit-length mean-pooled embedding.
+    Args:
+        directory: The checkpoint directory, as Hugging Face loads it.
     """
-    processor = transformers.AutoProcessor.from_pretrained(directory)
-    # Not eager: there Gemma4AudioAttention inverts the additive float mask
-    # create_bidirectional_mask gives it.
-    model = transformers.AutoModel.from_pretrained(
-        directory, dtype=torch.float32, attn_implementation="sdpa"
-    ).eval()
-    out = {}
-    for case, (text, task, wave, image) in test.HUGGING_FACE.items():
+
+    def __init__(self, directory):
+        directory = Path(directory)
+        self.processor = transformers.AutoProcessor.from_pretrained(directory)
+        # Not eager: there Gemma4AudioAttention inverts the additive float mask
+        # create_bidirectional_mask gives it.
+        self.model = transformers.AutoModel.from_pretrained(
+            directory, dtype=torch.float32, attn_implementation="sdpa"
+        ).eval()
+        self.image_processor = image_processing_gemma4.Gemma4ImageProcessor()
+        self.extractor = transformers.AutoFeatureExtractor.from_pretrained(directory)
+        config = transformers.AutoConfig.from_pretrained(directory)
+        config.vision_config._attn_implementation = "eager"
+        config.audio_config._attn_implementation = "sdpa"
+        tensors = Checkpoint(directory / "model.safetensors").tensors
+        self.vision = modeling_gemma4.Gemma4VisionModel(config.vision_config).eval()
+        self.audio = modeling_gemma4.Gemma4AudioModel(config.audio_config).eval()
+        self.embed_vision, self.embed_audio = (
+            modeling_embedding_gemma2.EmbeddingGemma2MultimodalEmbedder(
+                tower, config.text_config
+            ).eval()
+            for tower in (config.vision_config, config.audio_config)
+        )
+        for module, prefix in (
+            (self.vision, "vision_tower."),
+            (self.embed_vision, "embed_vision."),
+            (self.audio, "audio_tower."),
+            (self.embed_audio, "embed_audio."),
+        ):
+            module.load_state_dict(
+                {
+                    k.removeprefix(prefix): torch.from_numpy(v.astype(np.float32))
+                    for k, v in tensors.items()
+                    if k.startswith(prefix)
+                }
+            )
+
+    def encode(self, text: str, audio=None, image=None) -> tuple[list[int], np.ndarray]:
+        """The ids the processor gives `text`, with one mono clip `audio`
+        and one decoded image `image` at its placeholders, and the model's
+        unit-length mean-pooled embedding of them.
+        """
         media = {}
-        if wave is not None:
-            media["audio"] = [wave]
+        if audio is not None:
+            media["audio"] = [audio]
         if image is not None:
             media["images"] = [image]
-        inputs = processor(
-            text=Tokenizer.TASKS[task] + text, return_tensors="pt", **media
-        )
+        inputs = self.processor(text=text, return_tensors="pt", **media)
         with torch.no_grad():
-            want = model(**inputs).last_hidden_state[0].numpy().mean(axis=0)
-        out[f"text/{case}/input_ids"] = inputs["input_ids"][0].numpy()
-        out[f"text/{case}/embedding"] = want / np.linalg.norm(want)
-    return out
+            states = self.model(**inputs).last_hidden_state[0].numpy()
+        embedding = states.mean(axis=0)
+        return inputs["input_ids"][0].tolist(), embedding / np.linalg.norm(embedding)
 
-
-def vision_references(directory: Path) -> dict:
-    """The vision tower's soft tokens for the test's portrait, and the
-    sha256 of the image processor's float32 pixels and int64 positions for
-    each of its `RESIZES`.
-    """
-    config = transformers.AutoConfig.from_pretrained(directory)
-    config.vision_config._attn_implementation = "eager"
-    tower = modeling_gemma4.Gemma4VisionModel(config.vision_config).eval()
-    embedder = modeling_embedding_gemma2.EmbeddingGemma2MultimodalEmbedder(
-        config.vision_config, config.text_config
-    ).eval()
-    tensors = Checkpoint(directory / "model.safetensors").tensors
-    load(tower, tensors, "vision_tower.")
-    load(embedder, tensors, "embed_vision.")
-    # The host processor's patches, which the resizes below check against
-    # Hugging Face's: the tower alone is compared.
-    (height, width), tokens = test.IMAGES["portrait"]
-    oracle = VisionOracle(VisionConfig(), Weights.read(directory))
-    values, positions = oracle.patches(test.synthetic_image(height, width), tokens)
-    with torch.no_grad():
-        hidden = tower(
-            pixel_values=torch.from_numpy(values)[None],
-            pixel_position_ids=torch.from_numpy(positions)[None],
-        ).last_hidden_state
-        soft = embedder(hidden).numpy().reshape(-1, VisionConfig().text_dim)
-    out = {"vision/portrait/soft_tokens": soft}
-    processor = image_processing_gemma4.Gemma4ImageProcessor()
-    for shape, tokens, _ in test.RESIZES:
-        image = np.random.default_rng(0).integers(0, 256, (*shape, 3), dtype=np.uint8)
-        want = processor(
+    def patches(self, image: np.ndarray, max_tokens: int):
+        """The image processor's `pixel_values`, float32, and
+        `image_position_ids`, int64, for a decoded `image` at `max_tokens`.
+        """
+        out = self.image_processor(
             torch.from_numpy(image).permute(2, 0, 1),
-            max_soft_tokens=tokens,
+            max_soft_tokens=max_tokens,
             return_tensors="pt",
         )
-        key = f"vision/resize/{shape[0]}x{shape[1]}_{tokens}"
-        for name, array, dtype in (
-            ("pixels", want["pixel_values"][0].numpy(), np.float32),
-            ("positions", want["image_position_ids"][0].numpy(), np.int64),
-        ):
-            digest = hashlib.sha256(np.ascontiguousarray(array, dtype)).hexdigest()
-            out[f"{key}/{name}"] = np.array(digest)
-    return out
+        return (
+            out["pixel_values"][0].numpy().astype(np.float32),
+            out["image_position_ids"][0].numpy().astype(np.int64),
+        )
 
+    def vision_tower(self, pixel_values, positions) -> np.ndarray:
+        """The vision tower's soft tokens in the text model's space, over the
+        processor's `pixel_values` and `positions`.
+        """
+        with torch.no_grad():
+            hidden = self.vision(
+                pixel_values=torch.from_numpy(pixel_values)[None],
+                pixel_position_ids=torch.from_numpy(positions)[None],
+            ).last_hidden_state
+            soft = self.embed_vision(hidden).numpy()
+        return soft.reshape(-1, soft.shape[-1])
 
-def audio_references(directory: Path) -> dict:
-    """The feature extractor's features and mask for the test's medium
-    clip, and the audio tower's soft tokens over those features.
-    """
-    config = transformers.AutoConfig.from_pretrained(directory)
-    # Not eager: there Gemma4AudioAttention inverts the additive float mask
-    # create_bidirectional_mask gives it.
-    config.audio_config._attn_implementation = "sdpa"
-    tower = modeling_gemma4.Gemma4AudioModel(config.audio_config).eval()
-    embedder = modeling_embedding_gemma2.EmbeddingGemma2MultimodalEmbedder(
-        config.audio_config, config.text_config
-    ).eval()
-    tensors = Checkpoint(directory / "model.safetensors").tensors
-    load(tower, tensors, "audio_tower.")
-    load(embedder, tensors, "embed_audio.")
-    extractor = transformers.AutoFeatureExtractor.from_pretrained(directory)
-    wave = test.clip("medium")
-    processed = extractor([wave], return_tensors="np")
-    features = processed["input_features"][0]
-    mask = processed["input_features_mask"][0]
-    with torch.no_grad():
-        out = tower(torch.from_numpy(features)[None], torch.from_numpy(mask)[None])
-        valid = torch.from_numpy(out.attention_mask[0].numpy())
-        soft = embedder(out.last_hidden_state)[0][valid].numpy()
-    return {
-        "audio/medium/features": features,
-        "audio/medium/mask": mask,
-        "audio/medium/soft_tokens": soft,
-    }
+    def features(self, waveform) -> tuple[np.ndarray, np.ndarray]:
+        """The feature extractor's features and their mask for one mono clip."""
+        out = self.extractor([waveform], return_tensors="np")
+        return out["input_features"][0], out["input_features_mask"][0]
 
-
-def mismatches(saved: dict, fresh: dict) -> list[str]:
-    """What of `fresh` the saved references do not hold: a missing or extra
-    name, a float array off by more than `CHECK_RTOL` in relative norm, any
-    other array not equal.
-    """
-    out = [f"{k}: missing" for k in sorted(fresh.keys() - saved.keys())]
-    out += [f"{k}: no longer made" for k in sorted(saved.keys() - fresh.keys())]
-    for k in sorted(fresh.keys() & saved.keys()):
-        want, got = saved[k], fresh[k]
-        if want.shape != got.shape:
-            out.append(f"{k}: shape {got.shape}, saved {want.shape}")
-        elif np.issubdtype(want.dtype, np.floating):
-            error = np.linalg.norm(got - want) / np.linalg.norm(want)
-            if error > CHECK_RTOL:
-                out.append(f"{k}: relative error {error:.2e}")
-        elif not np.array_equal(got, want):
-            out.append(f"{k}: differs")
-    return out
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("directory", type=Path, help="the checkpoint directory")
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="compare a fresh run with the saved files rather than write them",
-    )
-    args = parser.parse_args()
-    checkpoint = {}
-    for name in CHECKPOINT_FILES:
-        with open(args.directory / name, "rb") as f:
-            checkpoint[name] = hashlib.file_digest(f, "sha256").hexdigest()
-    metadata = {
-        "transformers": transformers.__version__,
-        "torch": torch.__version__,
-        "numpy": np.__version__,
-        "checkpoint_sha256": checkpoint,
-    }
-    fresh = {
-        **text_references(args.directory),
-        **vision_references(args.directory),
-        **audio_references(args.directory),
-    }
-    failed = False
-    for part, path in test.REFERENCES.items():
-        own = {
-            k.removeprefix(f"{part}/"): v
-            for k, v in fresh.items()
-            if k.startswith(f"{part}/")
-        }
-        if not args.check:
-            np.savez_compressed(path, metadata=np.array(json.dumps(metadata)), **own)
-            print(f"{path}: {path.stat().st_size} bytes")
-            continue
-        with np.load(path) as saved:
-            made = json.loads(str(saved["metadata"]))
-            problems = mismatches(
-                {k: v for k, v in saved.items() if k != "metadata"}, own
+    def audio_tower(self, features, mask) -> np.ndarray:
+        """The audio tower's valid soft tokens in the text model's space,
+        over the extractor's `features` and `mask`.
+        """
+        with torch.no_grad():
+            out = self.audio(
+                torch.from_numpy(features)[None], torch.from_numpy(mask)[None]
             )
-        print(f"{path}: saved with {made}")
-        for problem in problems:
-            print(f"  {problem}")
-        failed |= bool(problems)
-    sys.exit(1 if failed else 0)
-
-
-if __name__ == "__main__":
-    main()
+            valid = torch.from_numpy(out.attention_mask[0].numpy())
+            return self.embed_audio(out.last_hidden_state)[0][valid].numpy()
