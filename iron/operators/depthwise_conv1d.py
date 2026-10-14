@@ -42,9 +42,9 @@ class DepthwiseConv1d(Operator):
     channels: int = Param(array=True)
     num_aie_columns: int = Auto()
 
-    x = In(rows, channels, tile=(channels,), per=(num_aie_columns,), depth=TAPS + 1)
-    weight = In(TAPS, channels, tile=(channels,), broadcast=True, depth=TAPS)
-    y = Out(rows, channels, tile=(channels,), per=(num_aie_columns,))
+    x = In(rows, channels, obj_type=(channels,), per=(num_aie_columns,), depth=TAPS + 1)
+    weight = In(TAPS, channels, obj_type=(channels,), broadcast=True, depth=TAPS)
+    y = Out(rows, channels, obj_type=(channels,), per=(num_aie_columns,))
     # The rows, or fewer per call (``x[:n]``): every row is still computed,
     # as a row reads only those before it.
     valid = Extent(rows)
@@ -95,13 +95,11 @@ class DepthwiseConv1d(Operator):
 
     def array(self) -> list:
         cols, C = self.num_aie_columns, self.channels
-        plane = self.x.tile
+        plane = self.x.obj_type
         kernel = self.kernel()
-        of_ins = [
-            ObjectFifo(plane, name=f"in_{k}", depth=TAPS + 1) for k in range(cols)
-        ]
-        of_outs = [ObjectFifo(plane, name=f"out_{k}") for k in range(cols)]
-        of_w = ObjectFifo(plane, name="weight", depth=TAPS)
+        of_ins = [ObjectFifo(plane, depth=TAPS + 1) for k in range(cols)]
+        of_outs = [ObjectFifo(plane) for k in range(cols)]
+        of_w = ObjectFifo(plane, depth=TAPS)
         zero = Buffer(plane, initial_value=np.zeros(C, bfloat16))
         limit = np.ndarray[(1,), np.dtype[np.float32]]
         rtps = self.rtp([self.steps], cores=cols)

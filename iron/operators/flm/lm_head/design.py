@@ -89,12 +89,12 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0, *, lm_head_kernel):
     ]
     x_l3_ty = np.ndarray[(2 * dim,), bf16]
 
-    of_x = ObjectFifo(x_ty, name="x")
+    of_x = ObjectFifo(x_ty)
     x_prod = of_x.prod(tile=IT[0])
 
     workers, w_prods, y_conses, rtps = [], [], [], []
     for j in range(COLS):
-        of_w = ObjectFifo(w_col_ty, name=f"w{j}")
+        of_w = ObjectFifo(w_col_ty)
         w_prods.append(of_w.prod(tile=IT[j]))
         w_cores = of_w.cons().split(
             [w_blk * i for i in range(ROWS)],
@@ -102,7 +102,7 @@ def lm_head(dev, dim, vocab, softcap, trace_size=0, *, lm_head_kernel):
             names=[f"w{j}_{i}" for i in range(ROWS)],
         )
 
-        of_y = ObjectFifo(y_col_ty, name=f"y{j}")
+        of_y = ObjectFifo(y_col_ty)
         y_conses.append(of_y.cons(tile=IT[j]))
         y_cores = of_y.prod().join(
             [M_TILE * i for i in range(ROWS)],

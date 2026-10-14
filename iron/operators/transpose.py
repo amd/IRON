@@ -110,8 +110,8 @@ class Transpose(Operator):
     num_aie_columns: int = Auto()
     num_channels: int = Auto(default=1)
 
-    x = In(num_batches, M, N, tile=(m, n), per=(num_aie_columns, num_channels))
-    y = Out(num_batches, N, M, tile=(m, n), per=(num_aie_columns, num_channels))
+    x = In(num_batches, M, N, obj_type=(m, n), per=(num_aie_columns, num_channels))
+    y = Out(num_batches, N, M, obj_type=(m, n), per=(num_aie_columns, num_channels))
     batches = Value(derive=lambda op: op.num_batches or 1)
     col_tiles = Value(derive=lambda op: op.N // op.n // op.num_aie_columns)
     chan_tiles = Value(derive=lambda op: op.M // op.m // op.num_channels)
@@ -192,9 +192,7 @@ class Transpose(Operator):
 
         kernel = datamovement.transpose(m, n, s)
         of_l3l2 = [
-            ObjectFifo(tile_ty, name=f"of_in1s_L3L2_{i}_{j}", depth=depth)
-            for i in range(cols)
-            for j in range(chans)
+            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
         ]
         of_l2l1 = [
             of_l3l2[k]
@@ -207,9 +205,7 @@ class Transpose(Operator):
             for k in range(n_cores)
         ]
         of_outs = [
-            ObjectFifo(tile_ty, name=f"out_{i}_{j}", depth=depth)
-            for i in range(cols)
-            for j in range(chans)
+            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
         ]
         rtps = self.rtp([self.batches, self.col_tiles, self.chan_tiles], cores=n_cores)
 

@@ -37,7 +37,7 @@ class VectorAdd(BinaryElementwise):
     """y = a + b."""
 
     def kernel(self):
-        tiles = [self.a.tile, self.b.tile, self.y.tile, np.int32]
+        tiles = [self.a.obj_type, self.b.obj_type, self.y.obj_type, np.int32]
         contract = KernelContract(
             roles=(In, In, Out, Param),
             parameter_bindings=((3, self.tile_size),),

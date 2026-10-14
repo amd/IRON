@@ -61,12 +61,8 @@ class Clamp(UnaryElementwise):
         cores = self.cores
         kernel = self.kernel()
         depth = self.x.l1_depth
-        of_ins = [
-            ObjectFifo(self.x.tile, name=f"in_{k}", depth=depth) for k in range(cores)
-        ]
-        of_outs = [
-            ObjectFifo(self.y.tile, name=f"out_{k}", depth=depth) for k in range(cores)
-        ]
+        of_ins = [ObjectFifo(self.x.obj_type, depth=depth) for k in range(cores)]
+        of_outs = [ObjectFifo(self.y.obj_type, depth=depth) for k in range(cores)]
         rtps = self.rtp([self.count, self.low_bits, self.high_bits], cores=cores)
 
         def core_fn(of_in, of_out, kernel_fn, rtp):

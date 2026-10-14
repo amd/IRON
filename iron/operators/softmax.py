@@ -100,8 +100,8 @@ class Softmax(Operator):
 
     length = Extent(cols)  # cols, or fewer per call
 
-    x = In(rows, cols, tile=(block,), per=(num_aie_columns, num_channels))
-    y = Out(rows, cols, tile=(block,), per=(num_aie_columns, num_channels))
+    x = In(rows, cols, obj_type=(block,), per=(num_aie_columns, num_channels))
+    y = Out(rows, cols, obj_type=(block,), per=(num_aie_columns, num_channels))
     valid_cols = Value(derive=lambda op: op.length)
     # A row held whole is one block, which the bound does not change.
     blocks = Value(derive=lambda op: ceildiv(op.length, op.block) if op.streamed else 1)
@@ -175,7 +175,7 @@ class Softmax(Operator):
         return 0  # no tiles-per-lane word: the sequence bounds the blocks itself
 
     def array(self) -> list:
-        tile_ty = self.x.tile
+        tile_ty = self.x.obj_type
         n_cores = self.cores
         rows_per_core = self.rows // n_cores
         block = self.block
@@ -185,8 +185,8 @@ class Softmax(Operator):
         mask_k = obj.bind("mask_bf16", [tile_ty, np.int32, np.int32])
         zero_k = zero(block, ml_dtypes.bfloat16)
         state_ty = np.ndarray[(_STATE,), np.dtype[np.float32]]
-        of_ins = [ObjectFifo(tile_ty, name=f"in1_{k}") for k in range(n_cores)]
-        of_outs = [ObjectFifo(tile_ty, name=f"out_{k}") for k in range(n_cores)]
+        of_ins = [ObjectFifo(tile_ty) for k in range(n_cores)]
+        of_outs = [ObjectFifo(tile_ty) for k in range(n_cores)]
         counts = [self.valid_cols, self.blocks] if self.streamed else [self.valid_cols]
         rtps = self.rtp(counts, cores=n_cores)
 

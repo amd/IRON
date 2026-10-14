@@ -92,7 +92,7 @@ class Limbs(Rowwise):
         Rowwise.rows,
         line,
         dtype=np.float32,
-        tile=(line,),
+        obj_type=(line,),
         per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
 
@@ -116,6 +116,6 @@ class Limbs(Rowwise):
         return ExternalFunction(
             "limbs_f32",
             source_string=LIMBS,
-            arg_types=[self.x.tile, self.y.tile, np.int32],
+            arg_types=[self.x.obj_type, self.y.obj_type, np.int32],
             contract=contract,
         )

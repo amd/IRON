@@ -1739,8 +1739,8 @@ def decode_layer(
 
     rms_y_out = _build_rms(ctx, t["rms"])
     # q from RoPE to the qk core. The qk core's DMA reorders it.
-    q_of_g = ObjectFifo(np.ndarray[(G_DQ,), _BF16], name="q_in", depth=2)
-    q_of_swa = ObjectFifo(np.ndarray[(S_DQ,), _BF16], name="swa_q_in", depth=2)
+    q_of_g = ObjectFifo(np.ndarray[(G_DQ,), _BF16], depth=2)
+    q_of_swa = ObjectFifo(np.ndarray[(S_DQ,), _BF16], depth=2)
     _build_rope(ctx, t["rope"], "rope", "rope_skip_kv", g.dh, q_of_g)
     _build_rope(ctx, t["swa_rope"], "swa_rope", "swa_rope_skip_kv", g.swa_dh, q_of_swa)
     _build_pl_embedding(ctx, t["pl_embedding"])
@@ -1755,14 +1755,11 @@ def decode_layer(
     _build_proj_weight_mem(ctx, t["proj_weight"])
     _build_proj_x_mem(ctx, t["proj_x"])
 
-    of_g_s = ObjectFifo(
-        _scores_ty(ctx, "attn_kv"), name="attn_s", delegate_tile=t["attn_kv"]
-    )
+    of_g_s = ObjectFifo(_scores_ty(ctx, "attn_kv"), delegate_tile=t["attn_kv"])
     _build_attn_kv(ctx, t["attn_kv"], "attn_kv", "l_kv", g.dh, of_g_s, two_kv)
     _build_attn_qk(ctx, t["attn_qk"], "attn_qk", "l_qk", g.dh, of_g_s, q_of_g, two_kv)
     of_swa_s = ObjectFifo(
         _scores_ty(ctx, "swa_attn_kv"),
-        name="swa_attn_s",
         delegate_tile=t["swa_attn_kv"],
     )
     _build_attn_kv(

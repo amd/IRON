@@ -87,10 +87,10 @@ class Emit(Operator):
     carried: int = Param(array=True)
     rows: int = Param(derive=lambda op: op.slots + op.carried, repr=False)
 
-    program = In(rows, ROW, dtype=np.int32, tile=(rows, ROW), depth=1)
-    planes = In(2, carried, dtype=np.int32, tile=(2, carried), depth=1)
-    image = Out(slots, dtype=np.int32, tile=(slots,), depth=1)
-    state = Out(carried, dtype=np.int32, tile=(carried,), depth=1)
+    program = In(rows, ROW, dtype=np.int32, obj_type=(rows, ROW), depth=1)
+    planes = In(2, carried, dtype=np.int32, obj_type=(2, carried), depth=1)
+    image = Out(slots, dtype=np.int32, obj_type=(slots,), depth=1)
+    state = Out(carried, dtype=np.int32, obj_type=(carried,), depth=1)
 
     def validate(self) -> None:
         if self.rows != self.slots + self.carried:
@@ -101,10 +101,10 @@ class Emit(Operator):
 
     def array(self) -> list:
         slots, carried = self.slots, self.carried
-        of_program = ObjectFifo(self.program.tile, name="program", depth=1)
-        of_planes = ObjectFifo(self.planes.tile, name="planes", depth=1)
-        of_image = ObjectFifo(self.image.tile, name="image", depth=1)
-        of_state = ObjectFifo(self.state.tile, name="state", depth=1)
+        of_program = ObjectFifo(self.program.obj_type, depth=1)
+        of_planes = ObjectFifo(self.planes.obj_type, depth=1)
+        of_image = ObjectFifo(self.image.obj_type, depth=1)
+        of_state = ObjectFifo(self.state.obj_type, depth=1)
         self.program.bind(of_program.prod())
         self.planes.bind(of_planes.prod())
         self.image.bind(of_image.cons())

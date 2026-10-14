@@ -28,6 +28,7 @@ from iron.common import (
     Operator,
     Out,
     Prepare,
+    Unresolvable,
     Value,
     Auto,
     Param,
@@ -221,7 +222,7 @@ class GEMV(Operator):
         num_matrices,
         M,
         K,
-        tile=(tile_size_input, K),
+        obj_type=(tile_size_input, K),
         per=(num_aie_columns, num_channels),
         depth=2,
         feed=True,
@@ -230,7 +231,7 @@ class GEMV(Operator):
     C = Out(
         num_batches,
         M,
-        tile=(tile_size_output,),
+        obj_type=(tile_size_output,),
         per=(num_aie_columns, num_channels),
         depth=2,
         finish=True,
@@ -329,7 +330,17 @@ class GEMV(Operator):
         """
         # Two rows of A per acquire where two fit a bank's worth of L1.
         row_bytes = self.K * np.dtype(bfloat16).itemsize
-        rows = self.tile_size_input or (2 if row_bytes <= Operand.L1_BANK_BYTES else 1)
+        if dev is not None:
+            bank_bytes = Operand.L1_BANK_BYTES[dev.name]
+        else:
+            banks = set(Operand.L1_BANK_BYTES.values())
+            if len(banks) != 1:
+                raise Unresolvable(
+                    "GEMV.resolve(None): devices disagree on the L1 bank "
+                    "size; bind a device"
+                )
+            (bank_bytes,) = banks
+        rows = self.tile_size_input or (2 if row_bytes <= bank_bytes else 1)
         channels = self.num_channels or 1
         if self.tile_size_output is None and self.finish_inputs:
             # A finish input's tile, re-read to fill one of A's riding it,
@@ -431,7 +442,7 @@ class GEMV(Operator):
         vector = np.ndarray[(K,), np.dtype[bfloat16]]
         # A lossless copy of the head tile's first row, B, as 16-bit words.
         copy = eltwise.passthrough(K, np.int16).object_file.bind(
-            "passThroughLine", [self.A.tile, vector, np.int32]
+            "passThroughLine", [self.A.obj_type, vector, np.int32]
         )
         # The finish runs over the whole C tile, once the matvec calls have
         # filled it: one call's tile_size_input rows can be narrower than a
@@ -440,12 +451,10 @@ class GEMV(Operator):
         prepare = Prepare(self, lanes)
 
         A_fifos = [
-            ObjectFifo(self.A.tile, name=f"A_L3L1_{i}", depth=self.A.depth)
-            for i in range(lanes)
+            ObjectFifo(self.A.obj_type, depth=self.A.depth) for i in range(lanes)
         ]
         C_fifos = [
-            ObjectFifo(self.C.tile, name=f"C_L1L3_{i}", depth=self.C.depth)
-            for i in range(lanes)
+            ObjectFifo(self.C.obj_type, depth=self.C.depth) for i in range(lanes)
         ]
         vectors = [Buffer(vector) for _ in range(lanes)]
         # Per lane: the trip count and the batches of a call.

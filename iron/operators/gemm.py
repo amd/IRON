@@ -223,17 +223,17 @@ class GEMM(Operator):
     b_l2: int = Auto(repr=False, derived=True)
     c_l2: int = Auto(repr=False, derived=True)
 
-    A = In(M, K, dtype=dtype_in, tile=(a_l2,), per=(n_shim_mem_a,))
+    A = In(M, K, dtype=dtype_in, obj_type=(a_l2,), per=(n_shim_mem_a,))
     B = In(
         Select(b_col_maj, (N, K), (K, N)),
         dtype=dtype_in,
-        tile=(b_l2,),
+        obj_type=(b_l2,),
         per=(num_aie_columns,),
     )
     C = Out(
         Select(c_col_maj, (N, M), (M, N)),
         dtype=dtype_out,
-        tile=(c_l2,),
+        obj_type=(c_l2,),
         per=(num_aie_columns,),
         finish=(tile_m, tile_n),
     )
@@ -480,9 +480,9 @@ class GEMM(Operator):
         # a big performance cost.
         fifo_depth = FIFO_DEPTH
 
-        A_l2_ty = self.A.tile
-        B_l2_ty = self.B.tile
-        C_l2_ty = self.C.tile
+        A_l2_ty = self.A.obj_type
+        B_l2_ty = self.B.obj_type
+        C_l2_ty = self.C.obj_type
         A_l1_ty = np.ndarray[(m, k), np.dtype[dtype_in]]
         B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
         # Flat, as the finish's scratch is: a core selects between the two.
@@ -545,7 +545,7 @@ class GEMM(Operator):
 
         # Input A
         for i in range(n_shim_mem_A):
-            A_l3l2_fifos[i] = ObjectFifo(A_l2_ty, name=f"A_L3L2_{i}", depth=fifo_depth)
+            A_l3l2_fifos[i] = ObjectFifo(A_l2_ty, depth=fifo_depth)
             # If n_shim_mem_A == n_rows, n_A_tiles_per_shim is 1 and this simply
             # links a_l3l2_fifos[i] to a_l2l1_fifos[i] directly. If n_shim_mem_A
             # < n_rows, each column receives multiple rows of tiles; distribute
@@ -569,9 +569,7 @@ class GEMM(Operator):
 
         # Input B
         for col in range(n_aie_cols):
-            B_l3l2_fifos[col] = ObjectFifo(
-                B_l2_ty, name=f"B_L3L2_{col}", depth=fifo_depth
-            )
+            B_l3l2_fifos[col] = ObjectFifo(B_l2_ty, depth=fifo_depth)
             B_l2l1_fifos[col] = (
                 B_l3l2_fifos[col]
                 .cons()
@@ -585,7 +583,6 @@ class GEMM(Operator):
             # Output C
             C_l2l3_fifos[col] = ObjectFifo(
                 C_l2_ty,
-                name=f"C_L2L3_{col}",
                 depth=fifo_depth,
                 to_stream=streams.C,
             )

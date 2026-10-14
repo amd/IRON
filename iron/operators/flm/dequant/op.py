@@ -140,14 +140,14 @@ class DequantBFP(Operator):
     qw = In(
         quantized_bytes,
         dtype=np.uint8,
-        tile=(ROWS * BLOCK_BYTES,),
+        obj_type=(ROWS * BLOCK_BYTES,),
         per=(cols,),
         depth=2,
     )
     out = Out(
         packed_blocks,
         dtype=v8bfp16ebs8,
-        tile=(HALF_BLOCKS,),
+        obj_type=(HALF_BLOCKS,),
         per=(cols, halves),
         depth=2,
     )
@@ -223,7 +223,7 @@ class DequantBFP(Operator):
     def array(self) -> list:
 
         cols = self.cols
-        qw_col_ty, out_half_ty = self.qw.tile, self.out.tile
+        qw_col_ty, out_half_ty = self.qw.obj_type, self.out.obj_type
         qw_blk_ty = np.ndarray[(BLOCK_BYTES,), np.dtype[np.uint8]]
         out_blk_ty = np.ndarray[(CORE_BLOCKS,), np.dtype[v8bfp16ebs8]]
 
@@ -242,7 +242,7 @@ class DequantBFP(Operator):
 
         workers, qws, outs = [], [], []
         for c in range(cols):
-            of_qw = ObjectFifo(qw_col_ty, name=f"qw_{c}", depth=2)
+            of_qw = ObjectFifo(qw_col_ty, depth=2)
             qws.append(of_qw.prod())
             qw_cores = of_qw.cons().split(
                 [BLOCK_BYTES * r for r in range(ROWS)],
@@ -252,7 +252,7 @@ class DequantBFP(Operator):
 
             out_cores = []
             for h in range(HALVES):
-                of_out = ObjectFifo(out_half_ty, name=f"w_{c}_{h}", depth=2)
+                of_out = ObjectFifo(out_half_ty, depth=2)
                 outs.append(of_out.cons())
                 out_cores += of_out.prod().join(
                     CORE_JOIN_OFFSETS,

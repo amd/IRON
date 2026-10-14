@@ -40,14 +40,14 @@ class RMSNorm(Rowwise):
     x = In(
         Rowwise.rows,
         Rowwise.tile_size,
-        tile=(Rowwise.tile_size,),
+        obj_type=(Rowwise.tile_size,),
         per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
     # The weight row is one line, shared by every column of a channel; the
     # shim budget counts a replicate= stream once per channel.
     weight = In(
         Rowwise.tile_size,
-        tile=(Rowwise.tile_size,),
+        obj_type=(Rowwise.tile_size,),
         per=(Rowwise.num_channels,),
         replicate=True,
         when=weighted,
@@ -55,7 +55,7 @@ class RMSNorm(Rowwise):
     y = Out(
         Rowwise.rows,
         Rowwise.tile_size,
-        tile=(Rowwise.tile_size,),
+        obj_type=(Rowwise.tile_size,),
         per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
 
@@ -106,30 +106,21 @@ class RMSNorm(Rowwise):
     def array(self) -> list:
         if not self.weighted:
             return super().array()
-        tile_ty = self.x.tile
-        weights_ty = self.weight.tile
+        tile_ty = self.x.obj_type
+        weights_ty = self.weight.obj_type
         cols, chans = self.num_aie_columns, self.num_channels
         depth = self.x.l1_depth
         rms_norm = self.kernel()
         eltwise_mul = eltwise.mul_sized(self.tile_size)
         of_ins = [
-            ObjectFifo(tile_ty, name=f"in1_{i}_{j}", depth=depth)
-            for i in range(cols)
-            for j in range(chans)
+            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
         ]
-        of_ws = [
-            ObjectFifo(weights_ty, name=f"in2_weights_{j}", depth=depth)
-            for j in range(chans)
-        ]
+        of_ws = [ObjectFifo(weights_ty, depth=depth) for j in range(chans)]
         of_mid = [
-            ObjectFifo(tile_ty, name=f"out1_{i}_{j}", depth=depth)
-            for i in range(cols)
-            for j in range(chans)
+            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
         ]
         of_outs = [
-            ObjectFifo(tile_ty, name=f"out2_{i}_{j}", depth=depth)
-            for i in range(cols)
-            for j in range(chans)
+            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
         ]
         n_cores = cols * chans
         rtps = self.rtp([self.count], cores=2 * n_cores)

@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""An operator's operands: the host buffers it is called with, each with a
-``tile=`` its own stream into the array.
+"""An operator's operands: the host buffers it is called with, each with an
+``obj_type=`` its own stream into the array.
 """
 
 from __future__ import annotations
@@ -38,9 +38,11 @@ class Operand(Member["Operand"]):
     Args:
         dims: The host shape.
         dtype: The element type.
-        tile: What one fifo element holds, in the units a core reads. With
-            one the buffer is its own stream; without one it is an argument
-            of a hand-written `Operator.sequence`.
+        obj_type: What one fifo element holds, in the units a core reads
+            (upstream's `ObjectFifo.obj_type`, a shape here rather than an
+            `np.ndarray` type). With one the buffer is its own stream;
+            without one it is an argument of a hand-written
+            `Operator.sequence`.
         per: The field (or fields, multiplied) the stream is replicated over.
         depth: The fifo depth.
         replicate: Every `per=` lane gets the whole buffer, not a share.
@@ -70,14 +72,15 @@ class Operand(Member["Operand"]):
     fills: ClassVar[bool]
     drains: ClassVar[bool]
     # AIE2 and AIE2P both have eight 8 KB banks of core memory; the target
-    # model gives the total (Device.core_memory_bytes) but not the banking.
-    L1_BANK_BYTES: ClassVar[int] = 8192
+    # model gives the total (Device.core_memory_bytes) but not the banking,
+    # so this is interim, keyed by device name until it reads the model.
+    L1_BANK_BYTES: ClassVar[dict[str, int]] = {"npu1": 8192, "npu2": 8192}
 
     def __init__(
         self,
         *dims: _DimSpec,
         dtype: Any = bfloat16,
-        tile: Any = None,
+        obj_type: Any = None,
         per: _DimSpec | None = None,
         depth: int = 2,
         replicate: bool = False,
@@ -95,9 +98,9 @@ class Operand(Member["Operand"]):
             )
         # A step over a line sees a tile as a run of the output's elements.
         if finish and (
-            isinstance(tile, (tuple, list))
-            and len(tile) != 1
-            or tile is None
+            isinstance(obj_type, (tuple, list))
+            and len(obj_type) != 1
+            or obj_type is None
             or not self.drains
         ):
             raise TypeError(
@@ -105,21 +108,23 @@ class Operand(Member["Operand"]):
                 "which a core finishes"
             )
         if prepare and (
-            isinstance(tile, (tuple, list)) and len(tile) != 1 or self.drains
+            isinstance(obj_type, (tuple, list)) and len(obj_type) != 1 or self.drains
         ):
             raise TypeError(
                 "prepare=True names an input of one-dimensional tiles, or of "
                 "none, which a core prepares"
             )
-        if feed and (tile is None or self.drains):
+        if feed and (obj_type is None or self.drains):
             raise TypeError("feed=True names a streamed input, which a finish rides")
         self.dims = Shape(tuple(dims))
         self.declared_dtype = dtype
         self.when = when
-        self.tile_dims = (
+        self.obj_dims = (
             None
-            if tile is None
-            else Shape(tuple(tile) if isinstance(tile, (tuple, list)) else (tile,))
+            if obj_type is None
+            else Shape(
+                tuple(obj_type) if isinstance(obj_type, (tuple, list)) else (obj_type,)
+            )
         )
         self.per = (
             None if per is None else Shape(per if isinstance(per, tuple) else (per,))
@@ -214,38 +219,38 @@ class Operand(Member["Operand"]):
 
     @property
     def streamed(self) -> bool:
-        return self.tile_dims is not None
+        return self.obj_dims is not None
 
     @property
-    def tile_shape(self) -> tuple[int, ...]:
-        if self.tile_dims is None:
-            raise TypeError(f"{self.name} is declared without a tile=: no stream")
-        return self._resolve(self.tile_dims)
+    def obj_shape(self) -> tuple[int, ...]:
+        if self.obj_dims is None:
+            raise TypeError(f"{self.name} is declared without an obj_type=: no stream")
+        return self._resolve(self.obj_dims)
 
     @property
-    def tile(self):
+    def obj_type(self):
         """The fifo element type: ``np.ndarray[shape, dtype]``."""
-        return np.ndarray[self.tile_shape, np.dtype[self.dtype]]
+        return np.ndarray[self.obj_shape, np.dtype[self.dtype]]
 
     @property
     def l1_depth(self) -> int:
         """The depth a core-side fifo of this operand's tiles can have: two,
-        or one when a tile spans more than a bank.
+        or one when a tile spans more than an L1 bank of the bound device.
         """
-        tile_bytes = math.prod(self.tile_shape) * np.dtype(self.dtype).itemsize
-        return 1 if tile_bytes > self.L1_BANK_BYTES else 2
+        obj_bytes = math.prod(self.obj_shape) * np.dtype(self.dtype).itemsize
+        return 1 if obj_bytes > self.L1_BANK_BYTES[self.op.dev.name] else 2
 
     @property
     def finish_line(self) -> int:
         """The elements a core finishes at once: its block of a tile, or the tile."""
         block = self.finish_block
-        return math.prod(self.tile_shape if block is None else self._resolve(block))
+        return math.prod(self.obj_shape if block is None else self._resolve(block))
 
     @property
     def count(self) -> int:
         """The stream's lanes (fifos)."""
-        if self.tile_dims is None:
-            raise TypeError(f"{self.name} is declared without a tile=: no stream")
+        if self.obj_dims is None:
+            raise TypeError(f"{self.name} is declared without an obj_type=: no stream")
         return 1 if self.per is None else math.prod(self._resolve(self.per))
 
     def bind(self, handles) -> None:
@@ -440,9 +445,9 @@ class Operand(Member["Operand"]):
         unit = self.op.extent_unit(self.name)
         if unit is not None:
             return unit
-        tile_shape = self.tile_shape if self.streamed else ()
-        k = axis - (len(self.shape) - len(tile_shape))
-        return tile_shape[k] if k >= 0 else 1
+        obj_shape = self.obj_shape if self.streamed else ()
+        k = axis - (len(self.shape) - len(obj_shape))
+        return obj_shape[k] if k >= 0 else 1
 
     @property
     def bounded(self) -> tuple[Extent, int, Value] | None:
@@ -471,9 +476,9 @@ class Operand(Member["Operand"]):
         patches, counting tiles of ``length_unit`` elements.
 
         Raises:
-            ValueError: The operand has no tile, does not divide across its
-                lanes, or is bounded on an axis the split cannot bound or in
-                tiles no descriptor holds.
+            ValueError: The operand has no obj_type=, does not divide across
+                its lanes, or is bounded on an axis the split cannot bound or
+                in tiles no descriptor holds.
         """
         # design/ imports declare, so BdLimits is imported where it is used.
         from ..design.bd import BdLimits
@@ -481,8 +486,8 @@ class Operand(Member["Operand"]):
         name = f"{type(self.op).__name__}.{self.name}"
         if not self.streamed:
             raise ValueError(
-                f"{name} has no tile=, so its sequence cannot be derived; add "
-                f"tile= or override sequence(rt)"
+                f"{name} has no obj_type=, so its sequence cannot be derived; add "
+                f"obj_type= or override sequence(rt)"
             )
         count, shape = self.count, self.shape
         bounded = self.bounded

@@ -139,8 +139,8 @@ class Declaration:
                 continue  # inherited; already processed on its own class
             if isinstance(m, Operand):
                 m.dims.check(cls, m, "dimension", allow_tunable=False)
-                if m.tile_dims is not None:
-                    m.tile_dims.check(cls, m, "tile dimension", allow_tunable=True)
+                if m.obj_dims is not None:
+                    m.obj_dims.check(cls, m, "obj_type dimension", allow_tunable=True)
                 if m.finish_block is not None:
                     m.finish_block.check(
                         cls, m, "finish block dimension", allow_tunable=True
@@ -169,7 +169,7 @@ class Declaration:
                     f"{cls.__name__}.{m.name}: Extent({m.field!r}) must name a Param() "
                     f"field, the one a graph may bound per call"
                 )
-            if isinstance(m, Operand) and m.tile_dims is not None and m.per is not None:
+            if isinstance(m, Operand) and m.obj_dims is not None and m.per is not None:
                 for ref in m.per.dims:
                     if not isinstance(ref, Param):
                         raise TypeError(
@@ -224,8 +224,8 @@ class Declaration:
         # its replication or its presence names, and what declares itself array=True.
         named: set[str] = set()
         for m in members:
-            if isinstance(m, Operand) and m.tile_dims is not None:
-                named |= m.tile_dims.names()
+            if isinstance(m, Operand) and m.obj_dims is not None:
+                named |= m.obj_dims.names()
                 if m.finish_block is not None:
                     named |= m.finish_block.names()
                 if m.per is not None:
@@ -293,7 +293,7 @@ class Declaration:
             m
             for m in (*self.members, *operands)
             if isinstance(m, Operand)
-            and m.tile_dims is not None
+            and m.obj_dims is not None
             and m.present(flags or {})
         ]
         cols = dev.cols

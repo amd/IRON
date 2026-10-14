@@ -427,7 +427,7 @@ def prefill_attn(
     # 2*(m//2) and 2*(m//2)+1.
     o_shim, o_prod = [], {}
     for m in range(dev.cols):
-        of_o = ObjectFifo(o_col_ty, name=f"o{m}", depth=2)
+        of_o = ObjectFifo(o_col_ty, depth=2)
         o_shim.append(of_o.cons(tile=IT[m], channel=0))
         sub = of_o.prod().join(
             [g.lq * g.dh * i for i in range(4)],
@@ -448,7 +448,7 @@ def prefill_attn(
     for p in range(dev.cols // 2):
         mt_idx = v.q_memtile(p)
         for half, rows in ((0, (0, 1)), (1, (2, 3))):
-            of_q = ObjectFifo(q_half_ty, name=f"q{mt_idx}_{half}", depth=2)
+            of_q = ObjectFifo(q_half_ty, depth=2)
             q_shim[(p, half)] = of_q.prod(tile=IT[mt_idx], channel=half)
             slices = of_q.cons().split(
                 [lq_ct * g.dh * t for t in range(2)],

@@ -254,7 +254,7 @@ class ResampleTaps(Operator):
         chunks,
         words,
         dtype=np.int32,
-        tile=(words,),
+        obj_type=(words,),
         per=(num_aie_columns, num_channels),
     )
     in_samples = Extent(in_size)
@@ -393,21 +393,16 @@ class ResampleTaps(Operator):
         )
         join_k = peak_k.object_file.bind("resample_join", [peak_ty] * 3)
         quantize_k = peak_k.object_file.bind(
-            "resample_quantize", [peak_ty, self.table.tile] + [np.int32] * 5
+            "resample_quantize", [peak_ty, self.table.obj_type] + [np.int32] * 5
         )
-        of_tables = [
-            ObjectFifo(self.table.tile, name=f"table_{k}", depth=2)
-            for k in range(cores)
-        ]
+        of_tables = [ObjectFifo(self.table.obj_type, depth=2) for k in range(cores)]
         # Core k passes the peak so far to core k + 1; the last broadcasts it
         # from a memtile.
-        of_chain = [
-            ObjectFifo(peak_ty, name=f"peak_{k}", depth=1) for k in range(cores - 1)
-        ]
+        of_chain = [ObjectFifo(peak_ty, depth=1) for k in range(cores - 1)]
         of_peak = of_all = None
         if cores > 1:
-            of_peak = ObjectFifo(peak_ty, name="peak", depth=1)
-            of_all = of_peak.cons().forward(name="peak_all", depth=1)
+            of_peak = ObjectFifo(peak_ty, depth=1)
+            of_all = of_peak.cons().forward(depth=1)
         local = Buffer(peak_ty, initial_value=np.zeros(2, np.int32))
 
         counts = [self.count, self.in_length, self.out_length]
@@ -884,15 +879,15 @@ class Resample(Operator):
     out_rows = Extent(out_height)
     out_columns = Extent(out_width)
 
-    image = In(image_chunks, chunk, dtype=np.uint8, tile=(chunk,), broadcast=True)
-    taps_w = In(width_chunks, words, dtype=np.int32, tile=(words,), broadcast=True)
+    image = In(image_chunks, chunk, dtype=np.uint8, obj_type=(chunk,), broadcast=True)
+    taps_w = In(width_chunks, words, dtype=np.int32, obj_type=(words,), broadcast=True)
     # Through taps_w's stream, after it.
     taps_h = In(height_chunks, words, dtype=np.int32)
     patches = Out(
         patch_rows,
         SIDE * SIDE * 3,
         dtype=bfloat16,
-        tile=(SIDE * SIDE * 3,),
+        obj_type=(SIDE * SIDE * 3,),
         per=(num_aie_columns, num_channels),
     )
 
@@ -1111,9 +1106,9 @@ class Resample(Operator):
         cores = self.cores
         counts_ty = np.ndarray[(8,), np.dtype[np.int32]]
         taps_ty, image_ty, patch_ty = (
-            self.taps_w.tile,
-            self.image.tile,
-            self.patches.tile,
+            self.taps_w.obj_type,
+            self.image.obj_type,
+            self.patches.obj_type,
         )
         setup_k = ExternalFunction(
             "resize_setup",
@@ -1133,11 +1128,9 @@ class Resample(Operator):
         consume_k = lib.bind("resize_consume", [image_ty, taps_ty])
         emit_k = lib.bind("resize_emit", [patch_ty, np.int32])
         finish_k = lib.bind("resize_finish", [counts_ty])
-        of_image = ObjectFifo(image_ty, name="image", depth=2)
-        of_taps = ObjectFifo(taps_ty, name="taps", depth=2)
-        of_patches = [
-            ObjectFifo(patch_ty, name=f"patches_{k}", depth=2) for k in range(cores)
-        ]
+        of_image = ObjectFifo(image_ty, depth=2)
+        of_taps = ObjectFifo(taps_ty, depth=2)
+        of_patches = [ObjectFifo(patch_ty, depth=2) for k in range(cores)]
 
         sizes = [self.src_rows, self.src_columns, self.dst_rows, self.dst_columns]
         rtps = self.rtp(sizes, cores=cores)
@@ -1297,9 +1290,9 @@ class PatchPositions(Operator):
     out_rows = Extent(out_height)
     out_columns = Extent(out_width)
 
-    xy = Out(rows, 2, dtype=np.int32, tile=(block, 2))
-    position_ids = Out(2, rows, dtype=np.int32, tile=(2, block))
-    order = Out(rows, dtype=np.int32, tile=(block,))
+    xy = Out(rows, 2, dtype=np.int32, obj_type=(block, 2))
+    position_ids = Out(2, rows, dtype=np.int32, obj_type=(2, block))
+    order = Out(rows, dtype=np.int32, obj_type=(block,))
 
     count = Value(derive=lambda op: op.rows // op.block)
     dst_rows = Value(derive=lambda op: op.out_rows)
@@ -1385,10 +1378,10 @@ class PatchPositions(Operator):
         )
         outs = (self.xy, self.position_ids, self.order)
         # A core has two output channels: a memtile splits its record into three.
-        of_record = ObjectFifo(record_ty, name="positions", depth=2)
+        of_record = ObjectFifo(record_ty, depth=2)
         parts = of_record.cons().split(
             [0, 2 * B, 4 * B],
-            obj_types=[out.tile for out in outs],
+            obj_types=[out.obj_type for out in outs],
             names=["xy", "position_ids", "order"],
             depths=[2, 2, 2],
         )

@@ -20,7 +20,7 @@ import pytest
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
 from aie.dialects.aie import DMAChannelDir
-from aie.iron import DmaEndpoint, ObjectFifo, Worker
+from aie.iron import DmaEndpoint, ObjectFifo, Program, Worker
 from aie.iron.device import Tile, from_name
 from aie.utils import bfp
 from ml_dtypes import bfloat16
@@ -39,7 +39,7 @@ from iron.common import (
     Auto,
     Param,
 )
-from iron.common.design import OperatorDesign
+from iron.common.design import BuiltArray, OperatorDesign, OperatorRuntime
 from iron.common.graph.compiled import _words
 from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind
@@ -69,9 +69,9 @@ class MV(Operator):
     num_batches: int | None = Param(default=None)
     cols: int = Auto(default=2)
     tile_out: int = Auto(default=64)
-    A = In(num_batches, M, K, tile=(tile_out, K), per=(cols,))
-    B = In(num_batches, K, tile=(K,), broadcast=True)
-    C = Out(num_batches, M, tile=(tile_out,), per=(cols,))
+    A = In(num_batches, M, K, obj_type=(tile_out, K), per=(cols,))
+    B = In(num_batches, K, obj_type=(K,), broadcast=True)
+    C = Out(num_batches, M, obj_type=(tile_out,), per=(cols,))
     valid = Extent(M)
 
 
@@ -119,6 +119,25 @@ def generated_sequence(op, full_elf=True) -> tuple[str, list[Task]]:
     return text, tasks
 
 
+def built(op) -> tuple[str, list[Task], Operator]:
+    """``generated_sequence``'s full ELF build, alongside the resolved copy
+    of ``op`` whose operands' lanes were bound to build it: a task's
+    ``lane`` (an unnamed fifo's mlir-aie-assigned name) is matched back to
+    the handle that moved it through this copy.
+    """
+    array = BuiltArray(OperatorDesign(op))
+    prog = Program(
+        array.op.device(), OperatorRuntime(array.op, array.built), workers=array.workers
+    )
+    text = str(prog.resolve_program())
+    text = text[text.index("aie.runtime_sequence") :]
+    tasks = [
+        Task(int(ssa), lane, int(arg), int(offset), *rest)
+        for ssa, lane, arg, offset, *rest in _TASK.findall(text)
+    ]
+    return text, tasks, array.op
+
+
 # --------------------------------------------------------------------------
 # What the library derives: the split and the round-robin
 # --------------------------------------------------------------------------
@@ -145,10 +164,10 @@ def test_a_buffer_without_a_stream_has_no_derived_transfers():
         M: int = Param()
         K: int = Param()
         A = In(M, K)
-        C = Out(M, tile=(64,))
+        C = Out(M, obj_type=(64,))
 
     op = NoStream(M=256, K=128)
-    with pytest.raises(ValueError, match="NoStream.A has no tile="):
+    with pytest.raises(ValueError, match="NoStream.A has no obj_type="):
         op.A.transfers()
 
 
@@ -225,14 +244,14 @@ class Words(Operator):
 
     n: int = Param()
     tile: int = Auto(default=64)
-    A = In(n, tile=(tile,))
+    A = In(n, obj_type=(tile,))
     first = Value(derive=lambda op: 7)
     block = Value(derive=lambda op: [11, 12, 13], words=3)
     last = Value(derive=lambda op: op.n // op.tile)
     pos = Value()
 
     def array(self):
-        fifo = ObjectFifo(self.A.tile, name="a")
+        fifo = ObjectFifo(self.A.obj_type)
         self.A.bind(fifo.prod())
         (rtp,) = self.rtp([self.first, self.block, self.last, self.pos])
 
@@ -322,7 +341,11 @@ def test_a_bounded_gemv_moves_a_and_c_in_output_tiles_round_robin():
     assert [v.name for v in op.values] == ["valid", "tiles", "valid_A", "valid_C"]
     assert op.derived_at("tiles", valid=64) == 64 // (2 * 8)
     assert op.derived_at("valid_A", valid=64) == 64 // (2 * 8)  # unit: output tiles
-    text, tasks = generated_sequence(op)
+    text, tasks, op = built(op)
+    # The fifos are unnamed (mlir-aie's DeviceConfiguration names them), so a
+    # task is identified by the handle it was built from, not a literal name.
+    c0, c1 = (h.name for h in op.C.handles)
+    a0, a1 = (h.name for h in op.A.handles)
     assert [
         (
             t.lane,
@@ -333,12 +356,12 @@ def test_a_bounded_gemv_moves_a_and_c_in_output_tiles_round_robin():
         )
         for t in tasks
     ] == [
-        ("C_L1L3_0", 0, "1, 16, 1, 8", "0, 16, 8, 1", True),
-        ("C_L1L3_1", 8, "1, 16, 1, 8", "0, 16, 8, 1", True),
-        ("A_L3L1_0", 0, "2, 1, 1, 64", "0, 0, 0, 1", False),
-        ("A_L3L1_0", 0, "1, 16, 1, 512", "0, 1024, 512, 1", True),
-        ("A_L3L1_1", 0, "2, 1, 1, 64", "0, 0, 0, 1", False),
-        ("A_L3L1_1", 512, "1, 16, 1, 512", "0, 1024, 512, 1", True),
+        (c0, 0, "1, 16, 1, 8", "0, 16, 8, 1", True),
+        (c1, 8, "1, 16, 1, 8", "0, 16, 8, 1", True),
+        (a0, 0, "2, 1, 1, 64", "0, 0, 0, 1", False),
+        (a0, 0, "1, 16, 1, 512", "0, 1024, 512, 1", True),
+        (a1, 0, "2, 1, 1, 64", "0, 0, 0, 1", False),
+        (a1, 512, "1, 16, 1, 512", "0, 1024, 512, 1", True),
     ]
     assert {t.length_parameter[-7:] for t in tasks if t.length_parameter} == {
         "valid_A",
@@ -352,13 +375,15 @@ def test_on_an_xclbin_the_size_is_the_dispatch_scalar():
     # per-call scalar standing in for the size itself.
     text, tasks = generated_sequence(_bounded_gemv(), full_elf=False)
     assert "scratchpad_parameter" not in text
-    # %arg1 is B, the head of each A stream, whose size no call bounds.
+    # %arg1 is B, the head of each A stream, whose size no call bounds; the
+    # fifos are unnamed (mlir-aie's DeviceConfiguration names them), so a
+    # lane is identified by its argument and offset, not a literal name.
     bounded = [t for t in tasks if t.arg != 1]
-    assert [(t.lane, t.offset, t.length_parameter) for t in bounded] == [
-        ("C_L1L3_0", 0, ""),
-        ("C_L1L3_1", 8, ""),
-        ("A_L3L1_0", 0, ""),
-        ("A_L3L1_1", 512, ""),
+    assert [(t.arg, t.offset, t.length_parameter) for t in bounded] == [
+        (2, 0, ""),
+        (2, 8, ""),
+        (0, 0, ""),
+        (0, 512, ""),
     ]
     for t, run in zip(bounded, (8, 8, 512, 512), strict=True):
         assert re.fullmatch(rf"1, %\w+, 1, {run}", t.sizes), t.sizes
@@ -406,10 +431,12 @@ def test_a_bounded_repeat_patches_the_stack_axis():
     # The stack axis is on D2 with its patched count, rows and repeats around it.
     op = Repeat(rows=4, cols=8, seq=32, repeat=2).resolved(NPU2_4COL)
     op.use_value("valid_seq", PerCall("c", Kind.SCRATCHPAD, np.int32).affine())
-    _, tasks = generated_sequence(op)
+    _, tasks, op = built(op)
+    (in_name,) = (h.name for h in op.x.handles)
+    (out_name,) = (h.name for h in op.y.handles)
     assert [(t.lane, t.sizes, t.strides, t.length_parameter[-11:]) for t in tasks] == [
-        ("fifo_in", "2, 32, 4, 8", "0, 8, 256, 1", "valid_seq_x"),
-        ("fifo_out", "2, 32, 4, 8", "256, 8, 512, 1", "valid_seq_y"),
+        (in_name, "2, 32, 4, 8", "0, 8, 256, 1", "valid_seq_x"),
+        (out_name, "2, 32, 4, 8", "256, 8, 512, 1", "valid_seq_y"),
     ]
 
 
@@ -633,7 +660,7 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
 
         class Unbuilt(Operator, image=image):
             n: int = Param()
-            x = In(n, tile=(64,))
+            x = In(n, obj_type=(64,))
             count = Value()
 
 
@@ -641,8 +668,8 @@ def test_a_lane_pins_to_a_channel_moving_its_way():
     class Pinned(Operator):
         n: int = Param()
         c: int = Auto(default=2)
-        x = In(n, tile=(n,))
-        y = Out(n, tile=(n,), per=(c,))
+        x = In(n, obj_type=(n,))
+        y = Out(n, obj_type=(n,), per=(c,))
 
     op = Pinned(n=2)
     shims = [Tile(c, 0) for c in range(2)]

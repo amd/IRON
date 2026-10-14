@@ -442,10 +442,7 @@ class Finish(_Chains):
         self.streamed = [e for e in op.finish_inputs if e.streamed]
         self.riding = len(op.finish_inputs) - len(self.streamed)
         self.fifos = [
-            [
-                ObjectFifo(e.tile, name=f"{e.name}_{k}", depth=e.depth)
-                for k in range(cores)
-            ]
+            [ObjectFifo(e.obj_type, depth=e.depth) for k in range(cores)]
             for e in self.streamed
         ]
 
@@ -538,7 +535,7 @@ class Prepare(_Chains):
             op,
             op.prepare.chains,
             (
-                math.prod(self.into.tile_shape)
+                math.prod(self.into.obj_shape)
                 if self.into.streamed
                 else self.into.shape[-1]
             ),
@@ -890,14 +887,10 @@ class Elementwise(Operator):
             # the cores of its lane share.
             if stream.replicate:
                 return [
-                    ObjectFifo(stream.tile, name=f"{name}_held_{j}", depth=1)
-                    for j in range(stream.count)
+                    ObjectFifo(stream.obj_type, depth=1) for j in range(stream.count)
                 ]
             depth = stream.l1_depth
-            return [
-                ObjectFifo(stream.tile, name=f"{name}_{slot(k)}", depth=depth)
-                for k in range(cores)
-            ]
+            return [ObjectFifo(stream.obj_type, depth=depth) for k in range(cores)]
 
         of_ins = [fifos(s, f"in{i}") for i, s in enumerate(ins)]
         of_outs = [
@@ -960,12 +953,12 @@ class UnaryElementwise(Elementwise):
 
     x = In(
         size,
-        tile=(Elementwise.tile_size,),
+        obj_type=(Elementwise.tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     y = Out(
         size,
-        tile=(Elementwise.tile_size,),
+        obj_type=(Elementwise.tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
         finish=True,
     )
@@ -994,17 +987,17 @@ class BinaryElementwise(Elementwise):
 
     a = In(
         size,
-        tile=(Elementwise.tile_size,),
+        obj_type=(Elementwise.tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     b = In(
         size,
-        tile=(Elementwise.tile_size,),
+        obj_type=(Elementwise.tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     y = Out(
         size,
-        tile=(Elementwise.tile_size,),
+        obj_type=(Elementwise.tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
         finish=True,
     )
@@ -1033,13 +1026,13 @@ class Rowwise(Elementwise):
     x = In(
         rows,
         tile_size,
-        tile=(tile_size,),
+        obj_type=(tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     y = Out(
         rows,
         tile_size,
-        tile=(tile_size,),
+        obj_type=(tile_size,),
         per=(Elementwise.num_aie_columns, Elementwise.num_channels),
         finish=True,
     )

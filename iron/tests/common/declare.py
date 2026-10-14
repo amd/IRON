@@ -54,9 +54,9 @@ class MV(Operator):
     vec: int | None = Auto(repr=False)
     epilogue: str = Param(default="none", array=True)
 
-    A = In(num_batches, M, K, tile=(tile_out, K), per=columns)
-    B = In(num_batches, K, tile=(K,), broadcast=True)
-    C = Out(num_batches, M, tile=(tile_out,), per=columns)
+    A = In(num_batches, M, K, obj_type=(tile_out, K), per=columns)
+    B = In(num_batches, K, obj_type=(K,), broadcast=True)
+    C = Out(num_batches, M, obj_type=(tile_out,), per=columns)
     count = Value(derive=lambda op: op.M // (op.columns * op.tile_out))
     start = Value(derive=lambda op: 0)  # per call when a graph binds it
 
@@ -101,7 +101,7 @@ def test_shapes_captured_bare_names_resolve_to_refs():
     dims = MV.A.dims.dims
     assert dims[0].name == "num_batches"
     assert dims[1] is MV.M and dims[2] is MV.K
-    assert MV.A.tile_dims.dims == (MV.tile_out, MV.K)
+    assert MV.A.obj_dims.dims == (MV.tile_out, MV.K)
     assert MV.A.per.dims == (MV.columns,)
 
 
@@ -131,7 +131,7 @@ def test_dataclass_constructor_is_typed_by_real_fields():
 
 
 def test_a_tunable_may_name_a_tile_but_not_a_buffer_shape():
-    assert MV.A.tile_dims.dims[0] is MV.tile_out
+    assert MV.A.obj_dims.dims[0] is MV.tile_out
     with pytest.raises(TypeError, match="host shape may not depend on tuning"):
 
         class Bad(Operator):
@@ -146,7 +146,7 @@ def test_plain_defaulted_field_in_a_shape_is_its_literal():
     # field. This is why anything a shape names must be declared with Param().
     class Plain(Operator):
         n: int = 4
-        x = In(n, tile=(n,))
+        x = In(n, obj_type=(n,))
 
     assert Plain.x.dims.dims == (4,)
     assert Plain(n=8).x.shape == (4,)
@@ -229,7 +229,7 @@ def test_per_and_broadcast_are_exclusive():
         class Bad(Operator):
             n: int = Param()
             c: int = Auto(default=2)
-            x = In(n, tile=(4,), per=(c,), broadcast=True)
+            x = In(n, obj_type=(4,), per=(c,), broadcast=True)
 
 
 def test_a_probe_may_not_be_on_a_field_the_array_reads():
@@ -245,7 +245,7 @@ def test_a_probe_may_not_be_on_a_field_the_array_reads():
         class Tiled(Operator):
             n: int = Param()
             t: int = Param(probe=16)
-            x = In(n, tile=(t,))
+            x = In(n, obj_type=(t,))
 
 
 def test_a_probe_may_not_be_on_a_field_the_transfers_follow():
@@ -369,18 +369,18 @@ def test_a_stream_binds_a_handle_per_lane():
     with pytest.raises(ValueError, match="has 2 lanes"):
         MV(M=1024, K=256, columns=2).A.bind("h")
 
-    class NoTile(Operator):
+    class NoObjType(Operator):
         n: int = Param()
         x = In(n)
 
-    with pytest.raises(TypeError, match="without a tile"):
-        NoTile(n=4).x.tile
+    with pytest.raises(TypeError, match="without an obj_type"):
+        NoObjType(n=4).x.obj_type
 
 
 def test_per_call_values_bind_on_the_operator():
     class Copy(Operator):
         n: int = Param()
-        src = In(n, tile=(n,))
+        src = In(n, obj_type=(n,))
         off = Value()
         live = DispatchTime()
 
@@ -448,12 +448,14 @@ def test_swiglu_stream_groups_are_chosen_by_their_ports():
 
 def test_an_operand_with_a_tile_is_its_own_stream():
     op = MV(M=1024, K=128).resolved(NPU2)
-    assert {b.name: (b.count, b.tile_shape) for b in op.buffers} == {
+    assert {b.name: (b.count, b.obj_shape) for b in op.buffers} == {
         "A": (8, (64, 128)),
         "B": (1, (128,)),
         "C": (8, (64,)),
     }
-    assert op.A.count == 8 and op.A.tile == np.ndarray[(64, 128), np.dtype[op.A.dtype]]
+    assert (
+        op.A.count == 8 and op.A.obj_type == np.ndarray[(64, 128), np.dtype[op.A.dtype]]
+    )
     assert op.A.shape == (1024, 128) and op.C.shape == (1024,)
     op.A.bind([f"h{k}" for k in range(8)])
     assert op.A.handles[3] == "h3"
@@ -467,9 +469,9 @@ class Scaled(Operator):
     N: int = Param()
     scaled: bool = Param(default=False)
 
-    x = In(N, tile=(N,))
-    s = In(N, tile=(N,), when=scaled)
-    y = Out(N, tile=(N,))
+    x = In(N, obj_type=(N,))
+    s = In(N, obj_type=(N,), when=scaled)
+    y = Out(N, obj_type=(N,))
 
     def array(self):
         return [self.scaled]
@@ -707,7 +709,7 @@ def test_resolve_columns_is_the_count_given_or_the_most_that_fit():
 
 def test_a_stream_with_no_lanes_is_paid_once_in_the_shim_budget():
     class Scaled(MV):
-        scale = In(MV.M, tile=(MV.tile_out,), per=MV.columns)
+        scale = In(MV.M, obj_type=(MV.tile_out,), per=MV.columns)
 
     # 16 input channels: A's and scale's lanes per column, B once.
     assert MV.declaration.shim_columns(NPU2) == 8
@@ -824,8 +826,8 @@ class Rows(Operator):
     valid = Extent(rows)
     count = Value(derive=lambda op: op.valid // op.lanes)  # reads the extent
     width = Value(derive=lambda op: op.cols)  # does not
-    x = In(rows, cols, tile=(1, cols), per=(lanes,))
-    y = Out(rows, cols, tile=(1, cols), per=(lanes,))
+    x = In(rows, cols, obj_type=(1, cols), per=(lanes,))
+    y = Out(rows, cols, obj_type=(1, cols), per=(lanes,))
 
     def resolve(self, dev):
         return dataclasses.replace(self)

@@ -26,19 +26,19 @@ class RowwiseMul(Rowwise):
     x = In(
         Rowwise.rows,
         Rowwise.tile_size,
-        tile=(Rowwise.tile_size,),
+        obj_type=(Rowwise.tile_size,),
         per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
     row = In(
         Rowwise.tile_size,
-        tile=(Rowwise.tile_size,),
+        obj_type=(Rowwise.tile_size,),
         per=(Rowwise.num_channels,),
         replicate=True,
     )
     y = Out(
         Rowwise.rows,
         Rowwise.tile_size,
-        tile=(Rowwise.tile_size,),
+        obj_type=(Rowwise.tile_size,),
         per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
 

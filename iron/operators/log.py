@@ -106,7 +106,7 @@ class Log(UnaryElementwise):
     x = In(
         UnaryElementwise.size,
         dtype=np.float32,
-        tile=(UnaryElementwise.tile_size,),
+        obj_type=(UnaryElementwise.tile_size,),
         per=(UnaryElementwise.num_aie_columns, UnaryElementwise.num_channels),
     )
 
@@ -122,7 +122,7 @@ class Log(UnaryElementwise):
         return ExternalFunction(
             "log_f32_bf16",
             source_string=LOG,
-            arg_types=[self.x.tile, self.y.tile, np.int32, np.float32],
+            arg_types=[self.x.obj_type, self.y.obj_type, np.int32, np.float32],
             contract=contract,
         )
 

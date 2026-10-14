@@ -803,7 +803,7 @@ class Operator(metaclass=_OperatorMeta):
             )
         self.finish = finish
         self._bind()
-        reads = sum(m.fills and m.tile_dims is not None for m in self._members_io())
+        reads = sum(m.fills and m.obj_dims is not None for m in self._members_io())
         if reads > dev.core_dma_channels_in:
             raise Unresolvable(
                 f"{name}: its cores read {reads} streams with the finish's "
@@ -815,7 +815,7 @@ class Operator(metaclass=_OperatorMeta):
         if not riding:
             return
         feed = next(b for b in self.inputs if b.feed)
-        carried, line = math.prod(feed.tile_shape), math.prod(out.tile_shape)
+        carried, line = math.prod(feed.obj_shape), math.prod(out.obj_shape)
         # The rest of the tile re-reads the input's: a shim descriptor's iterations.
         repeats = carried // line
         if feed.bounded is not None or out.bounded is not None:
@@ -883,7 +883,7 @@ class Operator(metaclass=_OperatorMeta):
                 f"applies no prologue"
             )
         name = type(self).__name__
-        line = math.prod(into.tile_shape) if into.streamed else into.shape[-1]
+        line = math.prod(into.obj_shape) if into.streamed else into.shape[-1]
         for link in self.prepare:
             for k, b in enumerate(link.op.inputs):
                 if k != link.at and b.elements != line:
@@ -903,7 +903,7 @@ class Operator(metaclass=_OperatorMeta):
             )
         if riding and not into.streamed:
             feed = next(b for b in self.inputs if b.feed)
-            if feed.dtype != into.dtype or math.prod(feed.tile_shape) < line:
+            if feed.dtype != into.dtype or math.prod(feed.obj_shape) < line:
                 raise Unresolvable(
                     f"{name}: the prologue's inputs ride {feed.name}, whose "
                     f"tiles do not hold a {line}-element line of {into.name}'s type"
@@ -1196,7 +1196,7 @@ class Operator(metaclass=_OperatorMeta):
         prepared = next((m for m in self._members_io() if m.prepare), None)
         extras = []
         for i, link in enumerate(self.prepare if prepared is not None else ()):
-            line = (prepared.tile_dims or prepared.dims).dims[-1:]
+            line = (prepared.obj_dims or prepared.dims).dims[-1:]
             for k, b in enumerate(link.op.inputs):
                 if k == link.at:
                     continue
@@ -1217,7 +1217,7 @@ class Operator(metaclass=_OperatorMeta):
                     extra = In(
                         *out.dims.dims,
                         dtype=out.declared_dtype,
-                        tile=None if fed else out.tile_dims.dims,
+                        obj_type=None if fed else out.obj_dims.dims,
                         per=None if fed or out.per is None else out.per.dims,
                         depth=out.depth,
                     )
@@ -1237,7 +1237,7 @@ class Operator(metaclass=_OperatorMeta):
                 continue
             for b in self._members_io():
                 # Asked first: an unshortened shape may Select on an Auto() field.
-                if b.tile_dims is not None and self.extent_unit(b.name) != 0:
+                if b.obj_dims is not None and self.extent_unit(b.name) != 0:
                     axis = bound[b.name].extent_axis(e)
                     if axis is not None:
                         word = ExtentWord(type(self), e, b.name, axis)

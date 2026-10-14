@@ -72,8 +72,8 @@ class Merge(Operator):
     vision_at: int = Param(array=True)
     block: int = Param(default=64, array=True)
 
-    ids = In(rows, dtype=np.int32, tile=(block,))
-    merge = Out(rows, dtype=np.int32, tile=(block,))
+    ids = In(rows, dtype=np.int32, obj_type=(block,))
+    merge = Out(rows, dtype=np.int32, obj_type=(block,))
 
     count = Value(derive=lambda op: op.rows // op.block)
 
@@ -103,7 +103,7 @@ class Merge(Operator):
         kernel = ExternalFunction(
             "merge_rows",
             source_string=MERGE,
-            arg_types=[self.ids.tile, self.merge.tile, np.int32],
+            arg_types=[self.ids.obj_type, self.merge.obj_type, np.int32],
             compile_flags=[
                 f"-DAUDIO_TOKEN={self.audio_token}",
                 f"-DIMAGE_TOKEN={self.image_token}",
@@ -116,8 +116,8 @@ class Merge(Operator):
                 f"{self.vision_at}_{self.block}"
             ),
         )
-        of_ids = ObjectFifo(self.ids.tile, name="ids", depth=2)
-        of_merge = ObjectFifo(self.merge.tile, name="merge", depth=2)
+        of_ids = ObjectFifo(self.ids.obj_type, depth=2)
+        of_merge = ObjectFifo(self.merge.obj_type, depth=2)
         (rtp,) = self.rtp([self.count])
 
         def core_fn(of_in, of_out, kernel_fn, rtp):

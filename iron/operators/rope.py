@@ -105,9 +105,9 @@ class RoPE(Operator):
     num_aie_columns: int = Auto()
     method_type: int = Param(default=0, array=True)
 
-    x = In(rows, cols, tile=(1, cols), per=(num_aie_columns,))
-    angles = In(angle_rows, cols, tile=(1, cols), per=(num_aie_columns,))
-    y = Out(rows, cols, tile=(1, cols), per=(num_aie_columns,))
+    x = In(rows, cols, obj_type=(1, cols), per=(num_aie_columns,))
+    angles = In(angle_rows, cols, obj_type=(1, cols), per=(num_aie_columns,))
+    y = Out(rows, cols, obj_type=(1, cols), per=(num_aie_columns,))
     # Either row count may be bounded per call: x[:n] and angles[:m].
     valid = Extent(rows)
     valid_angles = Extent(angle_rows)
@@ -151,13 +151,13 @@ class RoPE(Operator):
 
     def array(self) -> list:
 
-        tile = self.x.tile
+        tile = self.x.obj_type
         n = self.num_aie_columns
         # method_type 0 = two-halves (HF), 1 = interleaved (Llama paper).
         kernel = kernels.datamovement.rope(self.cols, two_halves=self.method_type == 0)
-        of_in = [ObjectFifo(tile, name=f"in_{i}") for i in range(n)]
-        of_lut = [ObjectFifo(self.angles.tile, name=f"lut_{i}") for i in range(n)]
-        of_out = [ObjectFifo(tile, name=f"out_{i}") for i in range(n)]
+        of_in = [ObjectFifo(tile) for i in range(n)]
+        of_lut = [ObjectFifo(self.angles.obj_type) for i in range(n)]
+        of_out = [ObjectFifo(tile) for i in range(n)]
         rtps = self.rtp([self.lut_rows, self.rows_per_lut], cores=n)
 
         def core_body(of_in, of_lut, of_out, rope_kernel, rtp):

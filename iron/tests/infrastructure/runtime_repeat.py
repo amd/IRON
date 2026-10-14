@@ -44,15 +44,15 @@ class RepeatTile(Operator):
     valid = Extent(max_k)
     reps = Value(derive=lambda op: op.valid - 1)
 
-    x = In(width, dtype=np.int32, tile=(width,))
-    y = Out(max_k, width, dtype=np.int32, tile=(width,))
+    x = In(width, dtype=np.int32, obj_type=(width,))
+    y = Out(max_k, width, dtype=np.int32, obj_type=(width,))
 
     def resolve(self, dev):
         return dataclasses.replace(self)
 
     def array(self) -> list:
-        fifo_in = ObjectFifo(self.x.tile, name="fifo_in", depth=2)
-        fifo_out = fifo_in.cons().forward(name="fifo_out", depth=2)
+        fifo_in = ObjectFifo(self.x.obj_type, depth=2)
+        fifo_out = fifo_in.cons().forward(depth=2)
         self.x.bind(fifo_in.prod())
         self.y.bind(fifo_out.cons())
         return []

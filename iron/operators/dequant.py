@@ -50,7 +50,7 @@ class Dequant(UnaryElementwise):
     x = In(
         packed,
         dtype=np.uint8,
-        tile=(in_tile,),
+        obj_type=(in_tile,),
         per=(UnaryElementwise.num_aie_columns, UnaryElementwise.num_channels),
     )
 

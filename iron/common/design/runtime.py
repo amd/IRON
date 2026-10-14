@@ -201,10 +201,10 @@ class OperatorRuntime(Runtime):
                     f"time, so a fill of lane {lane} is its whole share"
                 )
             (out,) = self.op.outputs
-            line = prod(out.tile_shape)
+            line = prod(out.obj_shape)
             share = finishing or out.transfers()[lane][1]
             tiles = prod(share.sizes) // line
-            reads = prod(buffer.tile_shape) // line
+            reads = prod(buffer.obj_shape) // line
             task = None
             for held, finished in zip(
                 self._chunks(tap, tiles), self._chunks(share, tiles)

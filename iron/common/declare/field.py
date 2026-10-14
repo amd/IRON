@@ -26,7 +26,7 @@ class Param(dataclasses.Field):
     """A compile-time parameter: given by the caller or inferred from the
     operands.
 
-    A field named in an operand's ``tile=``/``per=``/``depth=``, or marked
+    A field named in an operand's ``obj_type=``/``per=``/``depth=``, or marked
     ``array=True``, configures the array; any other rebuilds only the
     instruction stream.
 
@@ -37,7 +37,7 @@ class Param(dataclasses.Field):
             the caller nor an operand gives it
             (``derive=lambda op: op.rows * op.repeat``); a value the caller
             gives must agree with it. `default` and `derive` are exclusive.
-        array: The array reads the field though no tile names it.
+        array: The array reads the field though no obj_type= names it.
         probe: The field reaches the device only as the words of `Value`s
             the cores read: no transfer, trip count, branch or core follows
             it, so every value of it costs the same. The tuner measures the

@@ -45,7 +45,7 @@ class ElementwiseMax(BinaryElementwise):
         return ExternalFunction(
             "eltwise_max_bf16",
             source_string=MAX,
-            arg_types=[self.a.tile, self.b.tile, self.y.tile, np.int32],
+            arg_types=[self.a.obj_type, self.b.obj_type, self.y.obj_type, np.int32],
             contract=KernelContract(
                 roles=(markers.In, markers.In, markers.Out, Param),
                 parameter_bindings=((3, self.tile_size),),

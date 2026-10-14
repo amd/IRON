@@ -125,7 +125,7 @@ class Gather(Operator):
     table = In(table_rows, row, dtype=dtype)
     control = In(words, dtype=np.uint32)
     # Each feed's span drains through its drain shim's S2MM 0, pinned.
-    y = Out(rows, row, dtype=dtype, tile=(row,), per=(feeds,))
+    y = Out(rows, row, dtype=dtype, obj_type=(row,), per=(feeds,))
     valid_rows = Extent(rows)
     # Per feed, the 16-byte units it drains under a bound.
     drained0 = Value(derive=lambda op: op.drained(0))
@@ -432,13 +432,13 @@ class GatherWords(Operator):
     pairs: int = Param(derive=lambda op: 2 * op.rows, array=True, repr=False)
     static_base: bool = Param(default=False, array=True)
 
-    ids = In(rows, dtype=np.int32, tile=(rows,), depth=1)
-    control = Out(words, dtype=np.uint32, tile=(pairs,), depth=1)
+    ids = In(rows, dtype=np.int32, obj_type=(rows,), depth=1)
+    control = Out(words, dtype=np.uint32, obj_type=(pairs,), depth=1)
     base_lo = Value()
     base_hi = Value()
     # 2 words, not 1: base_lo and base_hi packed together, the order
     # address_words() itself returns them in.
-    base = In(2, dtype=np.int32, tile=(2,), depth=1, when=static_base)
+    base = In(2, dtype=np.int32, obj_type=(2,), depth=1, when=static_base)
 
     def ops(self) -> int:
         return 0
@@ -458,15 +458,15 @@ class GatherWords(Operator):
             low_bits=self.low_bits,
             aperture=APERTURE,
         )
-        ids = ObjectFifo(self.ids.tile, name="gather_ids", depth=1)
-        addresses = ObjectFifo(self.control.tile, name="gather_addresses", depth=1)
+        ids = ObjectFifo(self.ids.obj_type, name="gather_ids", depth=1)
+        addresses = ObjectFifo(self.control.obj_type, name="gather_addresses", depth=1)
         self.ids.bind(ids.prod())
         self.control.bind(addresses.cons())
         base_stream = None
         # The core reads the address once a call, unless static_base, where
         # it is an ordinary resident operand instead (no per-call value).
         if self.static_base:
-            base_stream = ObjectFifo(self.base.tile, name="gather_base", depth=1)
+            base_stream = ObjectFifo(self.base.obj_type, name="gather_base", depth=1)
             self.base.bind(base_stream.prod())
         (rtp,) = self.rtp([] if self.static_base else [self.base_lo, self.base_hi])
 
@@ -666,14 +666,14 @@ class Copy(Operator):
     x = In(
         input_buffer_size,
         dtype=dtype,
-        tile=(tile_size,),
+        obj_type=(tile_size,),
         per=(num_channels,),
         depth=1,
     )
     y = Out(
         output_buffer_size,
         dtype=dtype,
-        tile=(tile_size,),
+        obj_type=(tile_size,),
         per=(num_channels,),
         depth=1,
     )
@@ -772,8 +772,8 @@ class Copy(Operator):
 
         ins, outs = [], []
         for c in range(self.num_channels):
-            fifo_in = ObjectFifo(self.x.tile, name=f"fifo_in_{c}", depth=1)
-            fifo_out = fifo_in.cons().forward(name=f"fifo_out_{c}", depth=1)
+            fifo_in = ObjectFifo(self.x.obj_type, depth=1)
+            fifo_out = fifo_in.cons().forward(depth=1)
             ins.append(fifo_in.prod())
             outs.append(fifo_out.cons())
         self.x.bind(ins)

@@ -106,14 +106,14 @@ class Magnitude(Rowwise):
         Rowwise.rows,
         width,
         dtype=np.float32,
-        tile=(width,),
+        obj_type=(width,),
         per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
     y = Out(
         Rowwise.rows,
         tile_size,
         dtype=np.float32,
-        tile=(tile_size,),
+        obj_type=(tile_size,),
         per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
 
@@ -137,6 +137,6 @@ class Magnitude(Rowwise):
         return ExternalFunction(
             "magnitude_f32",
             source_string=MAGNITUDE,
-            arg_types=[self.x.tile, self.y.tile, np.int32],
+            arg_types=[self.x.obj_type, self.y.obj_type, np.int32],
             contract=contract,
         )

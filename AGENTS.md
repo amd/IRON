@@ -145,14 +145,14 @@ reuse lint
        extents (a tunable is an `Auto()` field: the caller or a profile may
        give it, and the library resolves it when neither does), `In`/`Out`
        operands (mlir-aie's `aie.iron.In`/`Out`/`InOut` markers, with a
-       declared shape) whose `tile=` makes each its own stream into the
+       declared shape) whose `obj_type=` makes each its own stream into the
        array (`per=` a column count), `Value`
        members the cores read (trip counts, derived from the extents so the
        array never depends on them), `array()`, which builds
        ObjectFIFOs and Workers and binds each operand's lane to a fifo's
        shim end, and optionally `sequence(rt)` when the runtime sequence is
-       not the derived one. The array tier is what a tile names plus what
-       says `array=True`; one array serves every extent. A shipped binary
+       not the derived one. The array tier is what an `obj_type=` names plus
+       what says `array=True`; one array serves every extent. A shipped binary
        is a subclass declared with `image=Xclbin(...)`, its operands pinned
        by its `array()` (`operand.pin([DmaEndpoint(...), ...])`, each lane on a shim channel of the image). Two hooks change what is built: `configuration()`, the
        operator whose xclbin this one runs (itself by default; flm's GEMM
@@ -370,9 +370,9 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 2. Declare the operator (`class X(Operator)`):
    - `Param()` fields for what a host shape names; `Auto()` tunables, filled
      by `resolve(dev)` from the device and the extents
-   - `In`/`Out` operands by shape, each with its `tile=` in the units a
-     core reads (`per=` a column count): an operand with a tile is its own
-     stream of `op.x.count` lanes, `op.x.tile` the fifo type;
+   - `In`/`Out` operands by shape, each with its `obj_type=` in the units a
+     core reads (`per=` a column count): an operand with an `obj_type=` is
+     its own stream of `op.x.count` lanes, `op.x.obj_type` the fifo type;
      `when=flag`, a bool `Param()`, makes an operand (and its stream) exist
      only where the flag is true; a call gives it by keyword, its name,
      which sets the flag (`RMSNorm(x, weight=w)` is `weighted=True`)
@@ -629,7 +629,7 @@ code before relying on a line here; it is the authority.
 ### Rationale
 
 - **One class per operator, tiers by declaration.** The array tier is
-  what a `tile=`/`per=` names plus what says `array=True`; `array()` sees
+  what an `obj_type=`/`per=` names plus what says `array=True`; `array()` sees
   that tier alone, so an extent cannot leak into a core program. Trip
   counts are `Value`s the sequence writes, so one array serves every
   extent and one build serves many shapes.

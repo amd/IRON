@@ -225,7 +225,7 @@ class GEMM(Operator):
     # issued after it (see sequence()'s emit_slab).
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
-    A = In(M, K, tile=(a_l2,), per=(rows,), depth=A_DEPTH)
+    A = In(M, K, obj_type=(a_l2,), per=(rows,), depth=A_DEPTH)
     # Packed for bfp16 macs, B is quantized to bfp16ebs8, so it is declared
     # as a count of those blocks, the unit the array, the core and every
     # descriptor into B count in. Declared in bytes, the sequence's offsets
@@ -236,12 +236,12 @@ class GEMM(Operator):
     B = In(
         Select(bfp16_b, (packed_blocks,), (Select(b_col_maj, (N, K), (K, N)),)),
         dtype=b_dtype,
-        tile=(b_l2,),
+        obj_type=(b_l2,),
         per=(cols,),
     )
     # The cores finish C a CT_OUT_LEN chunk of their block at a time, in the
     # mmul's order: the epilogue applies the finish (finish_step).
-    C = Out(M, N, tile=(c_l2,), per=(cols,), depth=C_DEPTH, finish=(CT_OUT_LEN,))
+    C = Out(M, N, obj_type=(c_l2,), per=(cols,), depth=C_DEPTH, finish=(CT_OUT_LEN,))
     # M, or fewer rows per call (``A[:n]`` in a graph). A and C move, and the
     # cores compute, only the units (rows * M_TILE rows each) the bound
     # reaches; past them the cores drain each column-block's B replay
@@ -600,8 +600,8 @@ class GEMM(Operator):
         ct_out_ty = np.ndarray[(CT_OUT_LEN,), bf16_ty]
         ct_acc_ty = np.ndarray[(M_TILE * N_TILE,), f32]
         # L2 (per memtile): the declared stream tiles.
-        mt_a_ty = self.A.tile
-        mt_out_ty = self.C.tile
+        mt_a_ty = self.A.obj_type
+        mt_out_ty = self.C.obj_type
 
         # Every field that changes the object reaches the factory, so its
         # object name keys the build. The activation is absent: the cores
@@ -667,7 +667,7 @@ class GEMM(Operator):
         # its own offset in a single memtile buffer.
         c_l2l3_fifos, c_prod = [], {}
         for c in range(COLS):
-            of_c = ObjectFifo(mt_out_ty, name=f"C_L2L3_{c}", depth=C_DEPTH)
+            of_c = ObjectFifo(mt_out_ty, depth=C_DEPTH)
             c_l2l3_fifos.append(of_c)
             sub = of_c.prod().join(
                 [C_SLICE_LEN * r for r in range(ROWS)],
@@ -684,7 +684,7 @@ class GEMM(Operator):
         # want a third core input DMA channel, and a tile has two.
         a_l3l2_fifos, a_cons = [], {}
         for r in range(ROWS):
-            of_a_in = ObjectFifo(mt_a_ty, name=f"A_L3L2_{r}", depth=A_DEPTH)
+            of_a_in = ObjectFifo(mt_a_ty, depth=A_DEPTH)
             a_l3l2_fifos.append(of_a_in)
             of_a = of_a_in.cons(from_stream=a_recv_dims).forward(
                 tile=mt_tiles[r * COLS // ROWS],

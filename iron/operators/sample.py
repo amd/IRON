@@ -119,12 +119,12 @@ class Sample(Operator):
         domain=Divisors(of=lambda op, dev: op.slice_size, step=2, cap=_CHUNK_LIMIT)
     )
 
-    logits = In(vocab, tile=(chunk,), per=(cores,), depth=2)
+    logits = In(vocab, obj_type=(chunk,), per=(cores,), depth=2)
     draws = In(
-        steps, kernels.ROW_WORDS, dtype=np.int32, tile=(kernels.ROW_WORDS,), depth=1
+        steps, kernels.ROW_WORDS, dtype=np.int32, obj_type=(kernels.ROW_WORDS,), depth=1
     )
-    tokens = InOut(steps, dtype=np.int32, tile=(1,), depth=1)
-    token = Out(1, dtype=np.int32, tile=(1,), depth=1)
+    tokens = InOut(steps, dtype=np.int32, obj_type=(1,), depth=1)
+    token = Out(1, dtype=np.int32, obj_type=(1,), depth=1)
     # Element offsets of this position's draw row and record: per call where
     # a graph binds them.
     row = Value(derive=lambda op: 0)
@@ -186,16 +186,15 @@ class Sample(Operator):
         calls = self.select_streams * self.slice_size // self.chunk
         # Every core reads the draw row: the select cores their top-k, the
         # combine core the rest.
-        of_draw = ObjectFifo(self.draws.tile, name="draw", depth=1)
+        of_draw = ObjectFifo(self.draws.obj_type, depth=1)
         self.draws.bind(of_draw.prod())
-        of_token = ObjectFifo(self.token.tile, name="token", depth=1)
+        of_token = ObjectFifo(self.token.obj_type, depth=1)
         self.token.bind(of_token.cons())
-        of_record = ObjectFifo(self.tokens.tile, name="record", depth=1)
+        of_record = ObjectFifo(self.tokens.obj_type, depth=1)
         self.tokens.bind(of_record.cons())
         # The summaries meet in a memtile, column 0 first.
         of_summaries = ObjectFifo(
             np.ndarray[(self.cores * words,), np.dtype[np.int32]],
-            name="summaries",
             depth=1,
         )
         of_summary = of_summaries.prod().join(
@@ -228,7 +227,7 @@ class Sample(Operator):
 
         workers, logits = [], []
         for c in range(self.cores):
-            of_x = ObjectFifo(self.logits.tile, name=f"logits_{c}", depth=2)
+            of_x = ObjectFifo(self.logits.obj_type, depth=2)
             logits.append(of_x.prod())
             state = Buffer(
                 np.ndarray[(kernels.SELECT_STATE_WORDS,), np.dtype[np.int32]],

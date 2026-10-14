@@ -126,7 +126,7 @@ class Shipped(
     A = In(
         GEMM.M,
         GEMM.K,
-        tile=(M_TILE, K_TILE),
+        obj_type=(M_TILE, K_TILE),
         per=(GEMM.rows,),
         depth=QUEUE_DEPTH,
     )
@@ -134,7 +134,7 @@ class Shipped(
     B = In(
         Select(GEMM.bfp16_b, (GEMM.packed_blocks,), (GEMM.K, GEMM.N)),
         dtype=GEMM.b_dtype,
-        tile=(K_TILE, N_TILE),
+        obj_type=(K_TILE, N_TILE),
         per=(GEMM.cols,),
         depth=QUEUE_DEPTH,
     )
@@ -143,7 +143,7 @@ class Shipped(
     C = Out(
         GEMM.M,
         GEMM.N,
-        tile=(ROWS * M_TILE * N_TILE,),
+        obj_type=(ROWS * M_TILE * N_TILE,),
         per=(GEMM.cols,),
         depth=QUEUE_DEPTH,
         finish=(CT_OUT_LEN,),

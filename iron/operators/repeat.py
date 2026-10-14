@@ -74,8 +74,8 @@ class Repeat(Operator):
     valid_rows = Extent(rows)
     valid_seq = Extent(seq)
 
-    x = In(rows, seq, cols, dtype=dtype, tile=(tile_size,))
-    y = Out(out_rows, seq, cols, dtype=dtype, tile=(tile_size,))
+    x = In(rows, seq, cols, dtype=dtype, obj_type=(tile_size,))
+    y = Out(out_rows, seq, cols, dtype=dtype, obj_type=(tile_size,))
 
     def validate(self) -> None:
         self.check_derived("out_rows")
@@ -93,8 +93,8 @@ class Repeat(Operator):
         return dataclasses.replace(self, tile_size=self.tile_size or self.cols)
 
     def array(self) -> list:
-        fifo_in = ObjectFifo(self.x.tile, name="fifo_in", depth=2)
-        fifo_out = fifo_in.cons().forward(name="fifo_out", depth=2)
+        fifo_in = ObjectFifo(self.x.obj_type, depth=2)
+        fifo_out = fifo_in.cons().forward(depth=2)
         self.x.bind(fifo_in.prod())
         self.y.bind(fifo_out.cons())
         return []

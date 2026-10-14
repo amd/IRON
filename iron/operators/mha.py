@@ -348,22 +348,22 @@ class MHA(Operator):
 
     Q = In(
         Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
-        tile=(join_rows, d),
+        obj_type=(join_rows, d),
         per=(q_shims,),
     )
     K = In(
         Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
-        tile=(d, B_kv),
+        obj_type=(d, B_kv),
         per=(kv_lanes,),
     )
     V = In(
         Select(kv_interleaved, (kv_len, num_KV_heads, d), (num_KV_heads, kv_len, d)),
-        tile=(B_kv, pv_width),
+        obj_type=(B_kv, pv_width),
         per=(kv_lanes, pv_cores),
     )
     O = Out(
         Select(heads_interleaved, (seq_pad, num_heads, d), (num_heads, seq_pad, d)),
-        tile=(join_rows, pv_width),
+        obj_type=(join_rows, pv_width),
         per=(q_shims, pv_cores),
     )
     # The query rows, or fewer per call (``Q[:n]`` in a graph): Q and O
@@ -694,7 +694,7 @@ class MHA(Operator):
         qk_ty = np.ndarray[(B_q, B_kv), np.dtype[dtype]]
         s_ty = np.ndarray[(4 * B_q,), np.dtype[np.float32]]
         acc_ty = np.ndarray[(B_q, pv_width), np.dtype[np.float32]]
-        joined_ty = self.Q.tile  # (n_join * B_q, d)
+        joined_ty = self.Q.obj_type  # (n_join * B_q, d)
 
         # Every one of these comes out of mha.cc, which #includes mm.cc and
         # softmax.cc: matmul_QK is its QK^T product, and the rest of its
@@ -798,7 +798,7 @@ class MHA(Operator):
         outO = [[] for _ in range(pv_cores)]
         for shim in range(self.q_shims):
             suffix = "" if shim == 0 else "2"
-            in_q = ObjectFifo(joined_ty, name=f"inQ{suffix}")
+            in_q = ObjectFifo(joined_ty)
             inQ.append(in_q)
             memQ += in_q.cons().split(
                 offsets=[B_q * d * i for i in range(n_join)],
@@ -814,9 +814,7 @@ class MHA(Operator):
             )
             for h in range(pv_cores):
                 half = "" if h == 0 else f"_{h}"
-                mem_o = ObjectFifo(
-                    self.O.tile, name=f"memO{suffix}{half}", to_stream=o_dims
-                )
+                mem_o = ObjectFifo(self.O.obj_type, to_stream=o_dims)
                 memO.append(mem_o)
                 outO[h] += mem_o.prod().join(
                     offsets=[B_q * pv_width * i for i in range(n_join)],
@@ -840,7 +838,7 @@ class MHA(Operator):
         for lane in range(kv_lanes):
             suffix = "" if lane == 0 else str(lane)
             shared = kv_lanes == 1
-            inK.append(ObjectFifo(k_ty, name=f"inK{suffix}", depth=of_depth))
+            inK.append(ObjectFifo(k_ty, depth=of_depth))
             memK.append(
                 inK[lane]
                 .cons()
@@ -859,7 +857,7 @@ class MHA(Operator):
             )
             for h in range(pv_cores):
                 half = "" if h == 0 else f"_{h}"
-                inV.append(ObjectFifo(v_ty, name=f"inV{suffix}{half}", depth=of_depth))
+                inV.append(ObjectFifo(v_ty, depth=of_depth))
                 memV.append(
                     inV[-1]
                     .cons()
@@ -885,7 +883,7 @@ class MHA(Operator):
         # Per-pipeline fifos between the three stages.
         memA, outA, memP, outP, scaleOF = [], [], [], [], []
         for i in range(num_pipelines):
-            memA.append(ObjectFifo(qk_ty, depth=of_depth, name=f"memA{i}"))
+            memA.append(ObjectFifo(qk_ty, depth=of_depth))
             outA.append(
                 memA[i]
                 .cons()
@@ -896,7 +894,7 @@ class MHA(Operator):
                     tile=Tile(i, 1) if split else AnyMemTile,
                 )
             )
-            memP.append(ObjectFifo(qk_ty, depth=of_depth, name=f"memP{i}"))
+            memP.append(ObjectFifo(qk_ty, depth=of_depth))
             outP.append(
                 memP[i]
                 .cons()
@@ -908,16 +906,7 @@ class MHA(Operator):
                 )
             )
             # A copy of the row state for each P*V core, which rescales its own.
-            scaleOF.append(
-                [
-                    ObjectFifo(
-                        s_ty,
-                        depth=of_depth,
-                        name=f"scaleOF{i}" + (f"_{h}" if h else ""),
-                    )
-                    for h in range(pv_cores)
-                ]
-            )
+            scaleOF.append([ObjectFifo(s_ty, depth=of_depth) for h in range(pv_cores)])
 
         # Each core computes, per head, the Q blocks the call's rows cover,
         # over the KV blocks its keys cover, and passes the Q blocks past
