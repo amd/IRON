@@ -217,7 +217,6 @@ class DequantBFP(Operator):
             qw_cores = of_qw.cons().split(
                 [BLOCK_BYTES * r for r in range(ROWS)],
                 obj_types=[qw_blk_ty] * ROWS,
-                names=[f"qw_{c}_{r}" for r in range(ROWS)],
             )
 
             out_cores = []
@@ -227,7 +226,6 @@ class DequantBFP(Operator):
                 out_cores += of_out.prod().join(
                     CORE_JOIN_OFFSETS,
                     obj_types=[out_blk_ty] * (ROWS // HALVES),
-                    names=[f"w_{c}_{h}_{r}" for r in range(ROWS // HALVES)],
                 )
 
             # aiecc measures 1216 bytes against the 1024-byte device default.

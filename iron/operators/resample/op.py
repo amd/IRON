@@ -1341,7 +1341,6 @@ class PatchPositions(Operator):
         parts = of_record.cons().split(
             [0, 2 * B, 4 * B],
             obj_types=[out.obj_type for out in outs],
-            names=["xy", "position_ids", "order"],
             depths=[2, 2, 2],
         )
         counts = [self.count, self.dst_rows, self.dst_columns]

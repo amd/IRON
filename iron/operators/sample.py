@@ -172,7 +172,6 @@ class Sample(Operator):
         of_summary = of_summaries.prod().join(
             [words * c for c in range(self.cores)],
             obj_types=[np.ndarray[(words,), np.dtype[np.int32]]] * self.cores,
-            names=[f"summary_{c}" for c in range(self.cores)],
             depths=[1] * self.cores,
         )
 
