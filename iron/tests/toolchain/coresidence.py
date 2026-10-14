@@ -31,13 +31,9 @@ from aie.utils.compile.jit._hash import _python_identity
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common.image import (
-    AdjacentPacking,
-    Fusion,
-    Packing,
-    coresidence,
-    fusion,
-)
+from iron.common.image import AdjacentPacking, coresidence, fusion
+from iron.common.image.coresidence import Packing
+from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
 from iron.common.graph.fold import folded
 from iron.common.image.coresidence import CoResidenceError, conflicts, fits, places

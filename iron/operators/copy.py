@@ -37,7 +37,6 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
-    CopyRun,
     Divisors,
     Extent,
     In,
@@ -48,6 +47,7 @@ from iron.common import (
     Auto,
     Param,
 )
+from iron.common.declare.operator import CopyRun
 from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 

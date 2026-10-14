@@ -13,14 +13,13 @@ from .field import Auto, Param, Unresolvable
 from .shape import Select
 from .operand import In, InOut, Operand, Out
 from .chain import Chain, Link
-from .operator import CopyRun, Operator
+from .operator import Operator
 from .profile import Profile
 from .value import DispatchTime, Extent, Value
 from .xclbin import Xclbin
 
 __all__ = [
     "Chain",
-    "CopyRun",
     "Divisors",
     "DispatchTime",
     "Extent",

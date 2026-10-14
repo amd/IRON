@@ -8,7 +8,7 @@ import pytest
 from aie.iron.device import NPU1, NPU2, NPU1Col1, NPU2Col1, from_name
 
 import iron
-from iron.common.graph import TracedGraph
+from iron.common.graph.trace import TracedGraph
 from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind, dispatches_full_elf, plan
 from iron.operators.flm.gemm.shipped import Shipped

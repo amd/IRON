@@ -20,14 +20,13 @@ from aie.utils.trace import TraceConfig
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Scratchpad
+from iron import Profile, Scratchpad
 from iron.common import (
     DispatchTime,
     Extent,
     In,
     Operator,
     Out,
-    Profile,
     Select,
     Unresolvable,
     Value,

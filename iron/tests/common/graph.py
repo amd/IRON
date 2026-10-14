@@ -20,9 +20,10 @@ from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Carried, Scratchpad
-from iron.common import Chain, Profile
-from iron.common.graph import Handle, TracedGraph, Tracer
+from iron import Carried, Profile, Scratchpad
+from iron.common import Chain
+from iron.common.graph import Handle
+from iron.common.graph.trace import TracedGraph, Tracer
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import _words
 from iron.common.declare import Unresolvable

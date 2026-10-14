@@ -492,6 +492,32 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    module go in `_FLM_OPERATOR_MODULES` beside it, the one place both its
    package and the dotted catalog entry read)
 
+### What an operator overrides
+
+| Hook | Required | Runs |
+|---|---|---|
+| `array()` | yes, unless an `Elementwise` base builds it from `kernel()`/`chain()` | once per build, to generate the array |
+| `reference(*inputs)` | yes, unless a kernel's contract already is one | by `run_test`/the graph's own reference, on host tensors |
+| `resolve(dev)` | yes, if the class declares an `Auto()` tunable | once, the first time the operator meets a device |
+| `validate()` | no (a no-op) | at construction, before `array_key`/`design_key` can be taken |
+| `compatible()` | no (a no-op) | once every tunable is resolved, device-free |
+| `sequence(rt)` | no (the derived one serves most operators) | building the array's runtime sequence |
+| `tolerance()` | no (the kernel's contract, or `None` through a finish/prologue) | judging a device run or a check-mode step |
+| `ops()` | no (one op per output element) | a device test's throughput figure |
+| `extent_unit(buffer)` | no (`None`: the stream tile's own rows) | splitting a bounded call's rows across a round-robin stream |
+| `device()` | no (the bound device) | building the array, when it covers only part of the bound device (GEMM's row subset) |
+| `configuration()` | no (itself) | locating the xclbin a shipped subclass runs (flm's GEMM, one image for every shape) |
+| `exported_design()` | no (`None`: the derived module) | compiling, in place of the generated MLIR (stream-dse's SwiGLU groups) |
+
+A class body's own call, `GEMV(w, h)` inside a graph's `body()`, goes
+through `Operator`'s metaclass: with a traced handle argument it records a
+step and returns another handle, never an instance; outside a graph (or
+given only keywords) the same call constructs the operator as written
+above. A `with profile:` scope is ambient: every operator construction
+inside it reads `Profile.current()` first, so a graph's body never passes
+one explicitly, and a tunable the call still leaves open takes the
+profile's entry for its shape.
+
 ## Graphs
 
 Operators compose into a graph: a subclass of `iron.Graph` whose `body()`

@@ -24,7 +24,8 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common.image import AdjacentPacking, Fusion
+from iron.common.image import AdjacentPacking
+from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.fused import XclbinChain
 from iron.operators import (

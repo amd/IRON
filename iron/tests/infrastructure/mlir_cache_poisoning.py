@@ -34,7 +34,7 @@ import re
 import pytest
 
 from iron.common.design import OperatorDesign
-from iron.common.image import Fusion
+from iron.common.image.fusion import Fusion
 from iron.operators import ElementwiseAdd
 from iron.tests.common.graphs import Adds
 

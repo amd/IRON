@@ -32,7 +32,7 @@ from aie.iron.kernels.sample import draw_row
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
-from iron.common.image import Fusion
+from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
 from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind, dispatches_full_elf

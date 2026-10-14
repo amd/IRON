@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron.common import Profile
+from iron import Profile
 from iron.lm import Checkpoint, DecoderConfig
 from iron.applications.llama.model import Llama, Llama3RopeScaling, LlamaConfig
 

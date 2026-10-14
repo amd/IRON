@@ -50,7 +50,7 @@ from iron.common.graph.probe import (
     search,
     time_interleaved,
 )
-from iron.common.image import Fusion
+from iron.common.image.fusion import Fusion
 from iron.lm.blocks import SwiGLU
 from iron.operators import (
     GEMM,

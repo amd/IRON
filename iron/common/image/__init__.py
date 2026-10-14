@@ -16,13 +16,8 @@ a caller finally invokes. ``standalone`` is the one-operator case: an
 operator called on its own, outside a graph (``Operator.compile``).
 """
 
-from .allocator import ArenaPlan
-from .coresidence import AdjacentPacking, Packing
-from .fusion import Fusion
+from .coresidence import AdjacentPacking
 
 __all__ = [
     "AdjacentPacking",
-    "ArenaPlan",
-    "Fusion",
-    "Packing",
 ]

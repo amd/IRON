@@ -22,9 +22,9 @@ from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
-from iron import Scratchpad
-from iron.common import Profile
-from iron.common.image import AdjacentPacking, Fusion
+from iron import Profile, Scratchpad
+from iron.common.image import AdjacentPacking
+from iron.common.image.fusion import Fusion
 from iron.operators import ElementwiseAdd
 from iron.operators.copy import Copy, Gather
 

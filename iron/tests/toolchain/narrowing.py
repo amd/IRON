@@ -44,7 +44,7 @@ from iron.common.graph.narrowing import (
 )
 from iron.common.graph.probe import Call, Designs, Point, judge, line
 from iron.common.testing import vectors
-from iron.common.image import Fusion
+from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
 from iron.lm.blocks import SwiGLU
 from iron.operators import (
