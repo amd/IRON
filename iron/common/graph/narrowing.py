@@ -88,7 +88,7 @@ import numpy as np
 from aie.utils.compile import NPU_CACHE_HOME
 
 from ..declare import Operator
-from ..design import OperatorDesign, runtime
+from ..design import OperatorDesign
 from ..image.coresidence import Packing, fits
 from ..image.fusion import Fusion, generate, parameters_preamble
 from .fold import FOLD_RUNS, Folding, Made, folded, foldings
@@ -181,7 +181,7 @@ def variants(op: Operator, dev, pinned: frozenset[str] = frozenset()) -> list[Va
             resolved = variant.resolved
             if not resolved.has_sequence_override():
                 for buf in resolved.buffers:
-                    runtime.OperatorRuntime.plan(buf)
+                    buf.transfers()
         except ValueError as e:  # unresolvable, incompatible or untransferable here
             logger.debug("%s at %s dropped: %s", type(op).__name__, tunables, e)
             dropped += 1

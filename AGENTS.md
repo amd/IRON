@@ -193,7 +193,7 @@ reuse lint
    - Compiled to `.o` files and linked into operator `.xclbin`
 
 3. **Common Infrastructure** (`iron/common/`)
-   - `declare/`: the declaration layer (`Operator`, its `Param`/`Auto` fields (`dataclasses.Field`s),
+   - `declare/`: the declaration layer (`Operator`, its `Param`/`Auto` fields (`dataclasses.Field`s, each its own dimension reference),
      operands (`Operand`: `op.x` is the declared operand bound to the
      instance, its shape and lanes resolved), the `Value` member and its
      `DispatchTime`/`Extent` specializations (`op.value(name)` is the value
@@ -210,8 +210,8 @@ reuse lint
      whose `module()` is the MLIR module for one operator and which
      mlir-aie's `CompilableDesign` compiles and caches; `OperatorRuntime`,
      the operator's sequence as an aie.iron `Runtime` subclass (what
-     `sequence(rt)` receives; the derived sequence, its
-     `plan`/`split`/`round_robin`); `ShippedRuntime`, its subclass against
+     `sequence(rt)` receives; the derived sequence, each operand's
+     `transfers()`); `ShippedRuntime`, its subclass against
      a shipped image (`Lock.set` releases its parameter block)
    - `graph/`: graphs (`iron.Graph`, `iron.state`) and
      `compile(dev=, full_elf=)`

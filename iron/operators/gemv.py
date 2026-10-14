@@ -542,9 +542,9 @@ class GEMV(Operator):
         M, K, tsi = self.M, self.K, self.tile_size_input
         drains = [
             rt.drain(slot, (self.C, tap), wait=True, size_by=size_by, managed=False)
-            for slot, tap, size_by in rt.plan(self.C)
+            for slot, tap, size_by in self.C.transfers()
         ]
-        rows = rt.plan(self.A)
+        rows = self.A.transfers()
         if self.num_matrices > 1 and self.A.bounded is None:
             parts = TensorAccessPattern.full((M, K)).partition(len(rows), 0)
             rows = [

@@ -347,6 +347,91 @@ class Operand(Member["Operand"]):
                 return extent, axis, op.value(f"{name}_{self.name}")
         return None
 
+    def transfers(self) -> list[tuple[Lane, TensorAccessPattern, dict | None]]:
+        """The derived ``(lane, tap, size_by)`` transfers of this operand.
+
+        Unbounded, the whole buffer for a one-lane or replicated stream,
+        else the first non-batch axis in one block per lane. Under a bound,
+        round-robin by tile: lane ``k`` takes tiles ``k, k + lanes, ...``,
+        so each lane has a fixed offset and stride and one count a call
+        patches, ``size_by``'s descriptor dimension.
+
+        Raises:
+            ValueError: The operand has no tile, does not divide across its
+                lanes, or is bounded on an axis the split cannot bound or in
+                tiles no descriptor holds.
+        """
+        # design/ imports declare, so BdLimits is imported where it is used.
+        from ..design.bd import BdLimits
+
+        name = f"{type(self.op).__name__}.{self.name}"
+        if not self.streamed:
+            raise ValueError(
+                f"{name} has no tile=, so its sequence cannot be derived; add "
+                f"tile= or override sequence(rt)"
+            )
+        count, shape = self.count, self.shape
+        bounded = self.bounded
+        if bounded is None:
+            if count == 1:
+                return [(self.lane(0), self.tap, None)]
+            if self.replicate:
+                return [(self.lane(i), self.tap, None) for i in range(count)]
+            axis = self.batch_axes
+            if axis >= len(shape) or shape[axis] % count:
+                raise ValueError(
+                    f"{self.name} {shape} does not divide across its {count} lanes "
+                    f"on axis {axis}. Check {type(self.op).__name__}.compatible()"
+                )
+            parts = TensorAccessPattern.full(shape).partition(count, axis)
+            return [(self.lane(i), parts[i], None) for i in range(count)]
+        extent, axis, word = bounded
+        if axis != self.batch_axes:
+            raise ValueError(
+                f"{name}: {extent.name} bounds axis {axis}, but the derived "
+                f"sequence splits axis {self.batch_axes}; override sequence(rt) "
+                f"to bound another axis"
+            )
+        lanes = 1 if self.replicate else count
+        inner = math.prod(shape[axis + 1 :])
+        tile_rows = self.extent_unit(axis)
+        if shape[axis] % (lanes * tile_rows):
+            raise ValueError(
+                f"{self.name} {shape}: axis {axis} does not divide into "
+                f"{tile_rows}-row tiles over {lanes} lanes"
+            )
+        if axis > 1:
+            raise ValueError(
+                f"{self.name} {shape}: bounding axis {axis} needs {axis + 3} "
+                f"descriptor dimensions; a descriptor has four"
+            )
+        tiles = shape[axis] // (lanes * tile_rows)
+        run = tile_rows * inner
+        shim = BdLimits.of(self.op.dev, 0, 0)
+        granule = shim.granule(self.dtype)
+        halves = shim.factor(run, granule)
+        if halves is None:
+            raise ValueError(
+                f"{self.name}: a {run}-element tile does not fit one descriptor"
+            )
+        # A unit D1 is stripped, which would drop the tile count into D1's
+        # wrap; past it, a tile split in two keeps the count on D2, which has none.
+        if halves[0] == 1 and tiles > shim.wrap and run % (2 * granule) == 0:
+            halves = (2, run // 2)
+        iterations = shape[0] if axis else 1
+        tiled = TensorAccessPattern.full((iterations, tiles, lanes, run))
+        out = []
+        for lane in range(lanes):
+            tap = tiled[:, :, lane].split(2, halves[1])
+            if not shim.fits(tap, self.dtype):
+                raise ValueError(
+                    f"{self.name} {shape}: the round-robin split over {lanes} "
+                    f"lanes does not fit one descriptor per lane"
+                )
+            for k in range(count) if self.replicate else [lane]:
+                out.append((self.lane(k), tap, {1: word}))
+        return out
+
     def __getitem__(self, index) -> BufferView:
         """A basic slice for ``rt.fill``/``rt.drain``; a ``Scratchpad`` start
         patches the base address per call.

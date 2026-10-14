@@ -16,7 +16,7 @@ compiles it, keyed on what the module is built from.
 """
 
 from .bd import BdLimits
-from .build import OperatorDesign
+from .design import OperatorDesign
 from .runtime import OperatorRuntime, ShimChannel
 from .shipped import ShippedRuntime
 

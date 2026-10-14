@@ -28,6 +28,7 @@ import iron.operators.flm.gemm.op as flm_gemm
 from iron.operators.flm.packing import packed_b_size
 from iron.common import (
     Chain,
+    Extent,
     In,
     Link,
     Operator,
@@ -38,7 +39,7 @@ from iron.common import (
     OptionalDim,
     Param,
 )
-from iron.common.design import OperatorDesign, OperatorRuntime
+from iron.common.design import OperatorDesign
 from iron.common.graph.compiled import _words
 from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind
@@ -71,6 +72,7 @@ class MV(Operator):
     A = In(OptionalDim(num_batches), M, K, tile=(tile_out, K), per=(cols,))
     B = In(OptionalDim(num_batches), K, tile=(K,), broadcast=True)
     C = Out(OptionalDim(num_batches), M, tile=(tile_out,), per=(cols,))
+    valid = Extent(M)
 
 
 class Task(NamedTuple):
@@ -124,13 +126,16 @@ def generated_sequence(op, full_elf=True) -> tuple[str, list[Task]]:
 
 def test_split_takes_every_batch_and_broadcasts():
     op = MV(M=256, K=128, num_batches=100)
-    a_transfers = OperatorRuntime.split(op.A)
-    assert [slot.index for slot, _ in a_transfers] == [0, 1]
+    a_transfers = op.A.transfers()
+    assert [(slot.index, size_by) for slot, _, size_by in a_transfers] == [
+        (0, None),
+        (1, None),
+    ]
     # Each lane's rows out of every batch: one pattern, however many batches.
     assert a_transfers[1][1] == TensorAccessPattern(
         (100, 256, 128), 128 * 128, [100, 128, 128], [256 * 128, 128, 1]
     )
-    ((b_slot, b_tap),) = OperatorRuntime.split(op.B)
+    ((b_slot, b_tap, _),) = op.B.transfers()
     assert b_slot == op.B.lane(0)
     assert b_tap == TensorAccessPattern((100 * 128,), 0, [100 * 128], [1])
 
@@ -144,7 +149,7 @@ def test_a_buffer_without_a_stream_has_no_derived_transfers():
 
     op = NoStream(M=256, K=128)
     with pytest.raises(ValueError, match="NoStream.A has no tile="):
-        OperatorRuntime.plan(op.A)
+        op.A.transfers()
 
 
 def test_a_bounded_operand_goes_round_robin_over_the_lanes():
@@ -152,15 +157,27 @@ def test_a_bounded_operand_goes_round_robin_over_the_lanes():
     offset, so one patched count serves every lane; the pattern is built
     for the full extent.
     """
-    op = Rows(rows=64, cols=8).resolved(NPU2_4COL)
-    plan = OperatorRuntime.round_robin(op.x, 0)
-    assert [(slot.index, tap, dim) for slot, tap, dim in plan] == [
-        (0, TensorAccessPattern((1, 32, 2, 8), 0, [1, 32, 1, 8], [0, 16, 8, 1]), 1),
-        (1, TensorAccessPattern((1, 32, 2, 8), 8, [1, 32, 1, 8], [0, 16, 8, 1]), 1),
+    op = Rows(rows=64, cols=8)
+    op.use_value("valid", N)
+    op = op.resolved(NPU2_4COL)
+    word = op.value("valid_x")
+    assert [(slot.index, tap, size_by) for slot, tap, size_by in op.x.transfers()] == [
+        (
+            0,
+            TensorAccessPattern((1, 32, 2, 8), 0, [1, 32, 1, 8], [0, 16, 8, 1]),
+            {1: word},
+        ),
+        (
+            1,
+            TensorAccessPattern((1, 32, 2, 8), 8, [1, 32, 1, 8], [0, 16, 8, 1]),
+            {1: word},
+        ),
     ]
     # A leading batch axis is the outer repeat; the tile count keeps its slot.
-    batched = MV(M=256, K=128, num_batches=3).resolved(NPU2_4COL)
-    (slot, tap, dim), *_ = OperatorRuntime.round_robin(batched.A, 1)
+    batched = MV(M=256, K=128, num_batches=3)
+    batched.use_value("valid", N)
+    batched = batched.resolved(NPU2_4COL)
+    (slot, tap, size_by), *_ = batched.A.transfers()
     # The 64 x 128 tile is a run past one wrap, so it takes the two inner
     # slots as 8 x 1024; the tile count sits above them.
     assert tap == TensorAccessPattern(
@@ -169,7 +186,8 @@ def test_a_bounded_operand_goes_round_robin_over_the_lanes():
         [3, 2, 8, 1024],
         [256 * 128, 2 * 64 * 128, 1024, 1],
     )
-    assert dim == 1 and (batched.M // (2 * 64)) == 2
+    assert size_by == {1: batched.value("valid_A")}
+    assert batched.M // (2 * 64) == 2
 
 
 def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles():
@@ -181,10 +199,12 @@ def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles():
     op = RoPE(
         rows=heads * positions, cols=cols, angle_rows=positions, num_aie_columns=4
     )
+    op.use_value("valid", N)
+    op.use_value("valid_angles", PerCall("m", Kind.SCRATCHPAD, np.int32).affine())
     op = op.resolved(from_name("npu2", n_cols=8))
     lanes = op.num_aie_columns
-    x = OperatorRuntime.round_robin(op.x, 0)
-    angles = OperatorRuntime.round_robin(op.angles, 0)
+    x = op.x.transfers()
+    angles = op.angles.transfers()
     for (xs, xa, _), (as_, aa, _) in zip(x, angles, strict=True):
         assert xs.index == as_.index
         rows = xa.gather(np.arange(prod(xa.tensor_dims)))[::cols] // cols

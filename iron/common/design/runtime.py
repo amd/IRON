@@ -143,109 +143,12 @@ class OperatorRuntime(Runtime):
         for buf in self.op.inputs:
             if buf.name in riders:
                 continue  # filled into the stream it prepares or rides (fill)
-            for slot, tap, size_by in self.plan(buf):
+            for slot, tap, size_by in buf.transfers():
                 self.fill(slot, (buf, tap), group=tg, size_by=size_by)
         for buf in self.op.outputs:
-            for slot, tap, size_by in self.plan(buf):
+            for slot, tap, size_by in buf.transfers():
                 self.drain(slot, (buf, tap), group=tg, wait=True, size_by=size_by)
         tg.finish()
-
-    @staticmethod
-    def plan(buf: Operand) -> list[tuple[Any, TensorAccessPattern, dict | None]]:
-        """The derived ``(slot, tap, size_by)`` transfers of one operand:
-        ``split``, or ``round_robin`` under a bound.
-        """
-        if not buf.streamed:
-            raise ValueError(
-                f"{type(buf.op).__name__}.{buf.name} has no tile=, so its "
-                f"sequence cannot be derived; add tile= or override sequence(rt)"
-            )
-        bounded = buf.bounded
-        if bounded is None:
-            return [(slot, tap, None) for slot, tap in OperatorRuntime.split(buf)]
-        extent, axis, word = bounded
-        if axis != buf.batch_axes:
-            raise ValueError(
-                f"{type(buf.op).__name__}.{buf.name}: {extent.name} bounds axis "
-                f"{axis}, but the derived sequence splits axis {buf.batch_axes}; "
-                f"override sequence(rt) to bound another axis"
-            )
-        return [
-            (slot, tap, {dim: word})
-            for slot, tap, dim in OperatorRuntime.round_robin(buf, axis)
-        ]
-
-    @staticmethod
-    def split(buffer: Operand) -> list[tuple[Lane, TensorAccessPattern]]:
-        """``[(lane, tap), ...]``: the whole buffer for a one-lane or broadcast
-        stream, else the first non-batch axis in one block per lane.
-        """
-        count = buffer.count
-        if count == 1:
-            return [(buffer.lane(0), buffer.tap)]
-        if buffer.replicate:
-            return [(buffer.lane(i), buffer.tap) for i in range(count)]
-        shape, axis = buffer.shape, buffer.batch_axes
-        if axis >= len(shape) or shape[axis] % count:
-            raise ValueError(
-                f"{buffer.name} {shape} does not divide across its {count} lanes "
-                f"on axis {axis}. Check {type(buffer.op).__name__}.compatible()"
-            )
-        parts = TensorAccessPattern.full(shape).partition(count, axis)
-        return [(buffer.lane(i), parts[i]) for i in range(count)]
-
-    @staticmethod
-    def round_robin(
-        buffer: Operand, axis: int
-    ) -> list[tuple[Lane, TensorAccessPattern, int]]:
-        """``[(lane, tap, dim), ...]`` with ``axis`` bounded per call, ``dim``
-        the descriptor dimension a call patches.
-
-        Lane ``k`` takes tiles ``k, k + lanes, ...``, so each lane has a fixed
-        offset and stride and one patched count.
-        """
-        shape, dtype = buffer.shape, buffer.dtype
-        count = buffer.count
-        lanes = 1 if buffer.replicate else count
-        inner = prod(shape[axis + 1 :])
-        tile_rows = buffer.extent_unit(axis)
-        if shape[axis] % (lanes * tile_rows):
-            raise ValueError(
-                f"{buffer.name} {shape}: axis {axis} does not divide into {tile_rows}-row "
-                f"tiles over {lanes} lanes"
-            )
-        if axis > 1:
-            raise ValueError(
-                f"{buffer.name} {shape}: bounding axis {axis} needs {axis + 3} "
-                f"descriptor dimensions; a descriptor has four"
-            )
-        tiles = shape[axis] // (lanes * tile_rows)
-        run = tile_rows * inner
-        shim = BdLimits.of(buffer.op.dev, 0, 0)
-        granule = shim.granule(dtype)
-        halves = shim.factor(run, granule)
-        if halves is None:
-            raise ValueError(
-                f"{buffer.name}: a {run}-element tile does not fit one descriptor"
-            )
-        # A unit D1 is stripped, which would drop the tile count into D1's
-        # wrap; past it, a tile split in two keeps the count on D2, which has none.
-        if halves[0] == 1 and tiles > shim.wrap and run % (2 * granule) == 0:
-            halves = (2, run // 2)
-        iterations = shape[0] if axis else 1
-        tiled = TensorAccessPattern.full((iterations, tiles, lanes, run))
-        out = []
-        for lane in range(lanes):
-            tap = tiled[:, :, lane].split(2, halves[1])
-            if not shim.fits(tap, dtype):
-                raise ValueError(
-                    f"{buffer.name} {shape}: the round-robin split over {lanes} lanes "
-                    f"does not fit one descriptor per lane"
-                )
-            slots = range(count) if buffer.replicate else [lane]
-            for s in slots:
-                out.append((buffer.lane(s), tap, 1))
-        return out
 
     def fill(
         self,
@@ -296,14 +199,14 @@ class OperatorRuntime(Runtime):
                     f"{name}: the finish's inputs ride it an output tile at a "
                     f"time, so it moves by no per-call offset or size"
                 )
-            if finishing is None and tap != self.split(buffer)[lane.index][1]:
+            if finishing is None and tap != buffer.transfers()[lane.index][1]:
                 raise ValueError(
                     f"{name}: the finish's inputs ride it an output tile at a "
                     f"time, so a fill of lane {lane.index} is its whole share"
                 )
             (out,) = self.op.outputs
             line = prod(out.tile_shape)
-            share = finishing or self.split(out)[lane.index][1]
+            share = finishing or out.transfers()[lane.index][1]
             tiles = prod(share.sizes) // line
             reads = prod(buffer.tile_shape) // line
             task = None
