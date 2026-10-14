@@ -23,7 +23,6 @@ from aie.iron import (
 )
 from aie.iron.device import Tile
 from aie.iron.kernels import datamovement
-from aie.iron.runtime.dmatask import emit_shim_transfer
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
@@ -53,6 +52,13 @@ def _control_header(beats: int, address: int) -> int:
     """A control packet writing ``beats + 1`` words from ``address``, odd parity."""
     header = (beats << 20) | address
     return header | ((1 ^ (bin(header).count("1") & 1)) << 31)
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class _GatherBuilt(Built):
+    """Gather's build, with the control routes ``sequence()`` fills."""
+
+    controls: list[PacketFlow]
 
 
 class Gather(Operator):
@@ -185,30 +191,36 @@ class Gather(Operator):
             shims = [(Tile(2 * k, 0), Tile(2 * k + 1, 0)) for k in range(self.feeds)]
             drains = [DmaEndpoint(drain, DMAChannelDir.S2MM, 0) for _, drain in shims]
             self.y.pin(drains)
-            routes = []
-            for k, (feed, drain) in enumerate(shims):
-                routes += [
-                    PacketFlow(
-                        Gather.control_id - k,
-                        drain,
-                        feed,
-                        dst_port=WireBundle.TileControl,
-                        # An explicit False drops the header TileControl reads: the run hangs.
-                        keep_pkt_header=True,
-                        shim_symbol=f"gather_ctrl{k}",
-                    ),
-                    Flow(
-                        feed,
-                        drain,
-                        src_channel=1,
-                        dst_channel=0,
-                        shim_symbol=f"gather_feed{k}",
-                    ),
-                ]
-            return Built([*routes, *drains])
+            # Per feed, the control packets from the drain shim into the feed
+            # shim's TileControl.
+            controls = [
+                PacketFlow(
+                    Gather.control_id - k,
+                    drain,
+                    feed,
+                    dst_port=WireBundle.TileControl,
+                    # An explicit False drops the header TileControl reads: the run hangs.
+                    keep_pkt_header=True,
+                )
+                for k, (feed, drain) in enumerate(shims)
+            ]
+            feeds = [
+                Flow(
+                    feed,
+                    drain,
+                    src_channel=1,
+                    dst_channel=0,
+                    # Nothing fills its source, the descriptors the packets push,
+                    # yet a shim channel routed by hand must be allocated.
+                    shim_symbol=f"gather_feed{k}",
+                )
+                for k, (feed, drain) in enumerate(shims)
+            ]
+            return _GatherBuilt([*controls, *feeds, *drains], controls=controls)
 
     def sequence(self, rt) -> None:
         words = rt.data(self.control)
+        controls = rt.built.controls
         chain, batches, runs = self.chain, self.batches, self.runs
         bounded = "valid_rows" in self.bound_extents
         unit = 16 // np.dtype(self.dtype).itemsize
@@ -231,13 +243,11 @@ class Gather(Operator):
             # Every feed's preamble writes the same descriptors, from one copy.
             pending.append(
                 [
-                    emit_shim_transfer(
-                        f"gather_ctrl{k}",
+                    controls[k].fill(
                         words,
                         tap=TensorAccessPattern(
                             (self.words,), 0, [4 * chain, 1, 1, 5], [5, 0, 0, 1]
                         ),
-                        packet=(0, self.control_id - k),
                         managed=False,
                     )
                 ]
@@ -256,8 +266,7 @@ class Gather(Operator):
                 # A row's two packets, the push, and on a short last batch its end.
                 packets = 2 * batches[j] + 1 + int(batches[j] < chain)
                 pending[k].append(
-                    emit_shim_transfer(
-                        f"gather_ctrl{k}",
+                    controls[k].fill(
                         words,
                         tap=TensorAccessPattern(
                             (self.words,),
@@ -265,7 +274,6 @@ class Gather(Operator):
                             [packets, 1, 1, 3],
                             [3, 0, 0, 1],
                         ),
-                        packet=(0, self.control_id - k),
                         managed=False,
                     )
                 )
@@ -426,17 +434,13 @@ class GatherWords(Operator):
                 low_bits=GatherWords.low_bits,
                 aperture=APERTURE,
             )
-            ids = ObjectFifo(self.ids.obj_type, name="gather_ids", depth=1)
-            addresses = ObjectFifo(
-                self.control.obj_type, name="gather_addresses", depth=1
-            )
+            ids = ObjectFifo(self.ids.obj_type, depth=1)
+            addresses = ObjectFifo(self.control.obj_type, depth=1)
             self.ids.bind(ids.prod())
             self.control.bind(addresses.cons())
             base_stream = None
             if self.static_base:
-                base_stream = ObjectFifo(
-                    self.base.obj_type, name="gather_base", depth=1
-                )
+                base_stream = ObjectFifo(self.base.obj_type, depth=1)
                 self.base.bind(base_stream.prod())
             rtp = Rtp([] if self.static_base else [self.base_lo, self.base_hi])
 
