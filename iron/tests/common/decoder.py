@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""``Config``'s partial rotary (``rotary_dim``) and global RoPE amplitude
+"""``DecoderConfig``'s partial rotary (``rotary_dim``) and global RoPE amplitude
 scale (``rope_attention_scaling``), device-free: the angle table's own
 shape and values, and that a traced decoder reads it at that width rather
 than ``head_dim`` -- Phi-4-mini-instruct's need, exercised here without a

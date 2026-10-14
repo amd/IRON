@@ -5,8 +5,10 @@
 themselves are applications over it, each a package of
 ``iron/applications/`` (``llama``, ``embedding_gemma2``).
 
-* ``base``: a model's ``Config`` and the ``Checkpoint`` it is read from,
-  whose ``tree()`` is its weights by their own names; ``Oracle``, the float32 forward
+* ``base``: a model's ``Config`` (``eps`` and ``from_checkpoint``, built from
+  a checkpoint's own ``config.json``) and the ``Checkpoint`` it is read from,
+  whose ``tree()`` is its weights by their own names; ``DecoderConfig``, a
+  decoder's own shape; ``Oracle``, the float32 forward
   pass on the host a model is judged by; ``Model``, a graph whose versions
   ``load()`` compiles up front; and ``Runner``, which opens a decoder's
   checkpoint and tokenizer and builds it and its oracle (``main`` is its
@@ -32,6 +34,7 @@ on its own.
 from .base import (
     Checkpoint,
     Config,
+    DecoderConfig,
     Model,
     Oracle,
     RopeScaling,
@@ -73,6 +76,7 @@ __all__ = [
     "Config",
     "Conv1d",
     "Conv2d",
+    "DecoderConfig",
     "Encoder",
     "ImagePatches",
     "LogMel",

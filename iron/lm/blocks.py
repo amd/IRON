@@ -816,12 +816,8 @@ def attention(
     return GEMM(o.reshape(T, H * D), o_proj, b_col_maj=True, **gemm)
 
 
-#: RMSNorm's epsilon, shared by every model on ``Block``.
-EPS = np.float32(1e-5)
-
-
-def rms_norm(x, w):
-    return x / np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + EPS) * w
+def rms_norm(x, w, eps):
+    return x / np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + eps) * w
 
 
 class Block:
@@ -835,7 +831,7 @@ class Block:
         c, n = self.config, x.shape[0]
         H, G, D = c.n_heads, c.n_kv_groups, c.head_dim
         a, mlp = w.self_attn, w.mlp
-        h = RMSNorm(x, weight=w.input_layernorm.weight)
+        h = RMSNorm(x, weight=w.input_layernorm.weight, epsilon=c.eps)
         # Half a head per tile for one row; q's shape is o's when H * D is
         # the width, so it is given here rather than by the profile.
         q, k, v = (
@@ -846,7 +842,7 @@ class Block:
         q = RoPE(q.reshape(n * H, D), step.angles)
         k = RoPE(k.reshape(n * G, D), step.angles)
         x = ElementwiseAdd(x, project(self.attend(step, i, q, k, v), a.o_proj.weight))
-        h = RMSNorm(x, weight=w.post_attention_layernorm.weight)
+        h = RMSNorm(x, weight=w.post_attention_layernorm.weight, epsilon=c.eps)
         ff = swiglu(h, mlp.gate_proj.weight, mlp.up_proj.weight, mlp.down_proj.weight)
         return ElementwiseAdd(x, ff)
 
@@ -860,12 +856,12 @@ class BlockOracle:
         c, n = self.config, x.shape[0]
         H, G, D = c.n_heads, c.n_kv_groups, c.head_dim
         a, mlp = w.self_attn, w.mlp
-        h = rms_norm(x, w.input_layernorm.weight)
+        h = rms_norm(x, w.input_layernorm.weight, c.eps)
         q = self.rotate((h @ a.q_proj.weight.T).reshape(n, H, D), angles)
         k = self.rotate((h @ a.k_proj.weight.T).reshape(n, G, D), angles)
         v = (h @ a.v_proj.weight.T).reshape(n, G, D)
         x = x + self.attend(q, k, v) @ a.o_proj.weight.T
-        h = rms_norm(x, w.post_attention_layernorm.weight)
+        h = rms_norm(x, w.post_attention_layernorm.weight, c.eps)
         F = mlp.gate_proj.weight.shape[0]
         half = np.matmul(h, mlp.gate_proj.weight.T, out=self.buffer("gate", (n, F)))
         half *= np.float32(0.5)

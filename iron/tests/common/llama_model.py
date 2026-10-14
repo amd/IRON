@@ -16,8 +16,8 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 from iron.common import Profile
-from iron.lm import Checkpoint, Config
-from iron.applications.llama.model import LLAMA_3_2_1B, Llama
+from iron.lm import Checkpoint, DecoderConfig
+from iron.applications.llama.model import Llama, Runner
 
 # The tunables the graph runs with at ``SMALL``'s shape on NPU2: decode
 # and the prompt at 256 rows. The application's own profiles are for Llama
@@ -26,7 +26,7 @@ PROFILE = Profile.load(Path(__file__).with_name("llama_small_profile.json"))
 
 #: Llama's shape, small, and its RoPE table unscaled.
 SMALL = dataclasses.replace(
-    LLAMA_3_2_1B,
+    Runner.config,
     vocab_size=1024,
     emb_dim=512,
     n_layers=2,
@@ -43,7 +43,7 @@ SMALL = dataclasses.replace(
 CHECKPOINTS = tempfile.TemporaryDirectory(prefix="iron-llama-")
 
 
-def shapes(config: Config) -> dict[str, tuple[int, ...]]:
+def shapes(config: DecoderConfig) -> dict[str, tuple[int, ...]]:
     """Each tensor of a Hugging Face Llama checkpoint of ``config``'s shape,
     by name: the model's own, then each layer's.
     """
@@ -67,7 +67,7 @@ def shapes(config: Config) -> dict[str, tuple[int, ...]]:
     return out
 
 
-def checkpoint(config: Config) -> Checkpoint:
+def checkpoint(config: DecoderConfig) -> Checkpoint:
     """A ``.safetensors`` checkpoint of ``config``'s shape, every tensor bf16
     zeros, written once a shape. The file is sparse: its header and a hole,
     which neither a random nor an unread tree reads.
@@ -109,5 +109,5 @@ def llama_1b(n_layers=16) -> Llama:
     ``n_layers`` below 16 builds a shallower model of the same layer: the
     designs are the same at any depth.
     """
-    config = dataclasses.replace(LLAMA_3_2_1B, n_layers=n_layers)
+    config = dataclasses.replace(Runner.config, n_layers=n_layers)
     return Llama(config, checkpoint(config).tree("unread"))

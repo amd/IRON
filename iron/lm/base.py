@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What every model on IRON's operators shares: its shape (``Config``, and
+"""What every model on IRON's operators shares: its shape (``Config``, the
+``eps`` every model has and ``from_checkpoint``, built from a checkpoint's
+own ``config.json``; ``DecoderConfig``, a decoder's own fields and
 ``rope_angles``, the RoPE table it names), its weights, the float32
 ``Oracle`` it is judged by, ``Model``, a graph whose versions ``load()``
 compiles up front in the packaging asked for, and ``Runner`` and ``main``,
@@ -71,17 +73,82 @@ def rope_angles(
     return angles
 
 
+_MISSING = object()
+
+
+def _dotted(data: dict, path: str):
+    """``data``'s value at ``path``'s dot-separated keys, or ``_MISSING`` if
+    one of them is not there.
+    """
+    node = data
+    for key in path.split("."):
+        if not isinstance(node, dict) or key not in node:
+            return _MISSING
+        node = node[key]
+    return node
+
+
 @dataclasses.dataclass(frozen=True)
 class Config:
-    vocab_size: int
-    emb_dim: int
-    n_layers: int
-    n_heads: int
-    n_kv_groups: int
-    head_dim: int
-    hidden_dim: int
-    max_seq_len: int
-    rope_base: float
+    """A model's shape: a decoder's (``DecoderConfig``) and EmbeddingGemma
+    2's own subclass it, for the one field every model judges its RMS norms
+    by and the one way every model is built from a checkpoint's own
+    ``config.json``.
+    """
+
+    eps: float = dataclasses.field(
+        default=1e-6, kw_only=True, metadata={"json": "rms_norm_eps"}
+    )
+
+    @classmethod
+    def from_checkpoint(cls, path) -> "Config":
+        """``cls``'s fields named in ``path``'s own ``config.json``: each
+        field's own ``metadata["json"]``, a dot-separated path from the
+        file's root, converted by its ``metadata["convert"]`` if it names
+        one; a field with no ``"json"`` entry is an IRON choice, not the
+        checkpoint's, and keeps its default.
+
+        Args:
+            path: A ``config.json``, or a checkpoint's directory or file
+                (its directory's ``config.json`` is read).
+
+        Raises:
+            FileNotFoundError: No ``config.json`` is there.
+        """
+        path = Path(path)
+        if path.name != "config.json":
+            path = (path if path.is_dir() else path.parent) / "config.json"
+        data = json.loads(path.read_text())
+        kwargs = {}
+        for f in dataclasses.fields(cls):
+            key = f.metadata.get("json")
+            if key is None:
+                continue
+            value = _dotted(data, key)
+            if value is _MISSING:
+                continue
+            convert = f.metadata.get("convert")
+            kwargs[f.name] = convert(value) if convert else value
+        return cls(**kwargs)
+
+
+@dataclasses.dataclass(frozen=True)
+class DecoderConfig(Config):
+    """A decoder's shape, named as a Hugging Face checkpoint's own
+    ``config.json`` does where it has one; ``max_seq_len`` and
+    ``prefill_chunk`` size IRON's own caches and prompt chunking, not the
+    checkpoint's business.
+    """
+
+    vocab_size: int = dataclasses.field(metadata={"json": "vocab_size"})
+    emb_dim: int = dataclasses.field(metadata={"json": "hidden_size"})
+    n_layers: int = dataclasses.field(metadata={"json": "num_hidden_layers"})
+    n_heads: int = dataclasses.field(metadata={"json": "num_attention_heads"})
+    n_kv_groups: int = dataclasses.field(metadata={"json": "num_key_value_heads"})
+    head_dim: int = dataclasses.field(metadata={"json": "head_dim"})
+    hidden_dim: int = dataclasses.field(metadata={"json": "intermediate_size"})
+    rope_base: float = dataclasses.field(metadata={"json": "rope_theta"})
+    max_seq_len: int = 32768
     rope_scaling: RopeScaling | None = None
     # The rotated prefix of head_dim (partial rotary, e.g. Phi's 0.75): None
     # rotates the whole head, as every full-rotary model does.
@@ -305,7 +372,7 @@ class Oracle:
             rest by the subclass.
     """
 
-    def __init__(self, config: Config, weights):
+    def __init__(self, config: DecoderConfig, weights):
         self.config = config
         self.weights = weights
         self.embedding = widen(weights.model.embed_tokens.weight)

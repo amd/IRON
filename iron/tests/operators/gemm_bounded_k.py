@@ -19,12 +19,12 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common import Scratchpad
 from iron.common.harness import verify_buffer
+from iron.lm.blocks import ACCURATE
 from iron.operators.gemm import GEMM
 from iron.operators.softmax import Softmax
 
 ROWS, SEQ, D = 128, 2048, 128
 POSITIONS = (SEQ, 300, 1, 63, 64, 65, 1024, 1025, 2047, 1000)
-ACCURATE = dict(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
 MODES = {
     "accurate": ACCURATE,
     "default": dict(),

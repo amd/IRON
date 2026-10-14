@@ -873,8 +873,12 @@ application over it, a package of its own under `iron/applications/`
 (`llama`, `embedding_gemma2`) holding its test, README, tokenizer and
 profiles. The library is four modules:
 
-- `base.py`: what any model is over it. `Config`, the shape, and
-  `rope_angles`, the RoPE table a `Config` names the base and scaling of;
+- `base.py`: what any model is over it. `Config`, the one field every
+  model judges its RMS norms by (`eps`) and `from_checkpoint(path)`, built
+  from a checkpoint's own `config.json` (a field with no `metadata={"json":
+  ...}` is an IRON choice, not the checkpoint's, and keeps its default);
+  `DecoderConfig`, a decoder's own shape, and
+  `rope_angles`, the RoPE table it names the base and scaling of;
   `Checkpoint`, the mapped `.safetensors` (or a sharded checkpoint, by its
   `.safetensors.index.json`, every shard the index names), whose
   `tree(fill=)` is the weights by the checkpoint's own names
@@ -905,9 +909,9 @@ profiles. The library is four modules:
   and `head(x)`, which it names as its `CausalLM`'s `oracle`; the pass,
   RoPE and attention are shared. `embed()` on both, the identity by
   default, is where a model scales or splices the rows the embedding gather
-  gives (a vision tower's features, by a call's `pixel_values`). A `Config`'s
-  `rotary_dim` rotates only that prefix of each head, and its
-  `rope_attention_scaling` scales the whole angle table once
+  gives (a vision tower's features, by a call's `pixel_values`). A
+  `DecoderConfig`'s `rotary_dim` rotates only that prefix of each head, and
+  its `rope_attention_scaling` scales the whole angle table once
 - `encoder.py`: `Encoder`, EmbeddingGemma 2's kind, a bidirectional
   encoder compiled once at `max_tokens` rows with the length bound per call,
   and `sandwich_layer`, the layer its text encoder and vision tower share

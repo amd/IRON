@@ -25,9 +25,14 @@ import tiktoken
 import tiktoken.load
 
 from iron import lm
-from iron.lm import Block, BlockOracle, CausalLM, Config, Oracle, rms_norm, widen
+from iron.lm import Block, BlockOracle, CausalLM, DecoderConfig, Oracle, rms_norm, widen
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
+
+#: The checkpoint's own config.json, checked in here as every Llama 3.2 1B
+#: checkpoint ships it (meta-llama/Llama-3.2-1B), which ``LlamaConfig``'s
+#: fields are built from.
+_CONFIG_JSON = Path(__file__).with_name("config.json")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -65,29 +70,22 @@ class Llama3RopeScaling:
             ),
         )
 
-
-#: Llama 3.2's scaling, as its checkpoints' ``rope_scaling`` gives it; every
-#: size shares it, so a size added beside 1B names it too.
-LLAMA_3_2_ROPE_SCALING = Llama3RopeScaling(
-    factor=32.0,
-    low_freq_factor=1.0,
-    high_freq_factor=4.0,
-    original_max_position_embeddings=8192,
-)
+    @classmethod
+    def from_dict(cls, data: dict) -> "Llama3RopeScaling":
+        """``data`` as the checkpoint's own ``rope_scaling``, its
+        ``rope_type`` (every size's is ``"llama3"``) dropped.
+        """
+        return cls(**{k: v for k, v in data.items() if k != "rope_type"})
 
 
-LLAMA_3_2_1B = Config(
-    vocab_size=128256,
-    emb_dim=2048,
-    n_layers=16,
-    n_heads=32,
-    n_kv_groups=8,
-    head_dim=64,
-    hidden_dim=8192,
-    max_seq_len=32768,
-    rope_base=500000.0,
-    rope_scaling=LLAMA_3_2_ROPE_SCALING,
-)
+@dataclasses.dataclass(frozen=True)
+class LlamaConfig(DecoderConfig):
+    """``DecoderConfig`` and Llama 3's own ``rope_scaling``."""
+
+    rope_scaling: Llama3RopeScaling | None = dataclasses.field(
+        default=None,
+        metadata={"json": "rope_scaling", "convert": Llama3RopeScaling.from_dict},
+    )
 
 
 class LlamaOracle(BlockOracle, Oracle):
@@ -95,7 +93,7 @@ class LlamaOracle(BlockOracle, Oracle):
 
     def head(self, x):
         norm = widen(self.weights.model.norm.weight)
-        return rms_norm(x, norm) @ self.embedding.T
+        return rms_norm(x, norm, self.config.eps) @ self.embedding.T
 
 
 class Llama(Block, CausalLM):
@@ -110,7 +108,7 @@ class Llama(Block, CausalLM):
 
     def head(self, x):
         norm = self.weights.model.norm.weight
-        return GEMV(self.embedding, RMSNorm(x, weight=norm))
+        return GEMV(self.embedding, RMSNorm(x, weight=norm, epsilon=self.config.eps))
 
 
 SPECIAL_TOKENS = {
@@ -154,7 +152,7 @@ def tokenizer(path) -> tiktoken.Encoding:
 class Runner(lm.Runner):
     """Llama 3.2 1B, from its checkpoint and ``tokenizer.model``."""
 
-    config = LLAMA_3_2_1B
+    config = LlamaConfig.from_checkpoint(_CONFIG_JSON)
     model = Llama
     open_tokenizer = staticmethod(tokenizer)
     bos = SPECIAL_TOKENS["<|begin_of_text|>"]

@@ -30,7 +30,7 @@ import numpy as np
 import pytest
 
 from iron.lm import (
-    Config,
+    DecoderConfig,
     Oracle,
     Sampler,
     accuracy,
@@ -68,7 +68,7 @@ class OnHost(Llama):
 
 @dataclasses.dataclass
 class Case:
-    config: Config
+    config: DecoderConfig
     weights: SimpleNamespace
     oracle: Oracle
     prompt: np.ndarray

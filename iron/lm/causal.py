@@ -34,7 +34,7 @@ from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.sample import Sample
 
-from .base import Config, Oracle
+from .base import DecoderConfig, Oracle
 from .generation import Sampler
 
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ class CausalLM(iron.Graph):
     layers: list
     oracle: "type[Oracle]"
 
-    def __init__(self, config: Config, weights):
+    def __init__(self, config: DecoderConfig, weights):
         self.config = config
         self.weights = weights
         self.layers = weights.model.layers
