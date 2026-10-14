@@ -500,12 +500,9 @@ def test_one_design_reconfigures_after_another_image(npu_runtime):
         num_channels=1,
         tile_size=_ADD_RELU_TILE,
     )
-    images = {
-        "relu": (_relu(), lambda x: np.maximum(x, 0)),
-        "tanh": (tanh, np.tanh),
-    }
+    images = {"relu": _relu(), "tanh": tanh}
     runs = {}
-    for name, (op, _) in images.items():
+    for name, op in images.items():
         seq = _build_one_design_sequence(op, f"infra_fused_{name}_turns").compile()
         assert not _expanded_pdis(seq), name
         runs[name] = seq.get_callable()
@@ -513,11 +510,11 @@ def test_one_design_reconfigures_after_another_image(npu_runtime):
     rng = np.random.default_rng(0)
     for rep in range(3):
         for name, run in runs.items():
-            op, reference = images[name]
+            op = images[name]
             a = _centered(rng, _ADD_RELU_SIZE)
             _set_input(run, "a", a)
             run()
             out = run.get_buffer("out").numpy()[:_ADD_RELU_SIZE]
-            expected = reference(a.astype(np.float32))
+            expected = op.reference(a)
             verdict = verify_buffer(out, "out", expected, op.gate())
             assert verdict, f"rep {rep}, {name}: out: {verdict.detail}"
