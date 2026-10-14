@@ -7,14 +7,14 @@ shipped image's sequence, and the swiglu graph functions' operators.
 Same gate as ``lowering.py``: aiecc to an instruction stream.
 """
 
-import dataclasses
-
 import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
 
 import iron.operators.flm.gemm.op as flm
+from iron.common import Chain, Link
+from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
 from iron.operators.flm.gemm.shipped import Shipped
 from iron.operators.gemm import GEMM
@@ -78,18 +78,8 @@ def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path)
     (tmp_path / "shape").mkdir()
     lower(op, tmp_path / "shape")
     tuned = op.resolved(aie_utils.get_current_device())
-    rM, rK, rN = tuned._reference_shape
-    reference = dataclasses.replace(
-        tuned,
-        M=rM,
-        K=rK,
-        N=rN,
-        epilogue=flm.Epilogue.NONE,
-        clamp=None,
-        packed_blocks=None,
-    )
     (tmp_path / "config").mkdir()
-    lower(reference, tmp_path / "config", name=op.config_name)
+    lower(tuned.configuration(), tmp_path / "config", name=op.config_name)
 
 
 def _shipped(**kwargs):
@@ -97,7 +87,11 @@ def _shipped(**kwargs):
 
 
 def test_shipped_external_sequence_lowers(tmp_path):
-    lower(_shipped(M=256, K=1024, N=1152, epilogue="gelu", clamp=(-2.0, 2.0)), tmp_path)
+    clamp = Clamp(size=256 * 1152, low=-2.0, high=2.0)
+    shipped = _shipped(
+        M=256, K=1024, N=1152, epilogue="gelu", finish=Chain((Link(clamp),))
+    )
+    lower(shipped, tmp_path)
 
 
 def test_instructions_compile_alone_against_an_external_image():

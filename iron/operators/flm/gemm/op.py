@@ -9,8 +9,10 @@ rounding mode. Everything the xclbin depends on, and nothing else; its
 ``config_name`` is the xclbin's stem. M, K, N, the activation and the
 clamp bounds are values written to the cores and reach only the
 instruction stream, so every shape sharing a configuration shares one
-xclbin. That split is the point of this operator; ``GEMM.configuration``
-names the half ``Operator.compile`` builds once.
+xclbin. A SiLU or Sigmoid and then a Clamp after the product are its
+finish (``finish=Chain(...)``, or a graph's fold), which the epilogue
+applies from those values. That split is the point of this operator;
+``GEMM.configuration`` names the half ``Operator.compile`` builds once.
 
 ``design.py`` keeps the fixed geometry and the L1 budget; README.md has the
 per-choice breakdown against the shipped FastFlowLM overlay
@@ -49,9 +51,11 @@ from aie.utils import bfp
 from ml_dtypes import bfloat16
 
 from iron.common import (
+    Chain,
     Divisors,
     Extent,
     In,
+    Link,
     Operator,
     Out,
     Unresolvable,
@@ -97,6 +101,9 @@ from iron.operators.flm.gemm.design import (
 from iron.operators.flm.packing import pack_b
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.silu import SiLU
+
+# The finish steps the epilogue applies as its activation.
+ACTIVATIONS = {SiLU: Epilogue.SILU, Sigmoid: Epilogue.SIGMOID}
 
 
 class _BPool(NamedTuple):
@@ -150,9 +157,11 @@ class GEMM(Operator):
     """AIE-accelerated bf16 GEMM on a 4-row grid, with a fused epilogue.
 
     64-row tiles over a k tile of ``k_tile`` (512 unless the caller asks), and
-    an activation plus optional clamp folded into the output stage. M, K, N, the activation and the clamp bounds are
-    values written to the cores: they change the instruction stream only, so
-    every shape on one configuration shares an xclbin.
+    an activation plus optional clamp applied in the output stage: its own
+    gelu (``epilogue``), or its finish, a SiLU or a Sigmoid and then a Clamp.
+    M, K, N, the activation and the clamp bounds are values written to the
+    cores: they change the instruction stream only, so every shape on one
+    configuration shares an xclbin.
 
     The grid is as wide as the device. ``tile_n`` defaults to 64 from the
     device alone (the general winner; 128 beats it by ~9% only on NPU2 at
@@ -163,11 +172,10 @@ class GEMM(Operator):
     M: int = Param()
     K: int = Param()
     N: int = Param()
-    # Activation fused into the C drain, selected at run time from the
-    # compiled-in modes.
+    # The epilogue's own activation, gelu (x * sigmoid(1.702x), which no
+    # operator computes), selected at run time from the compiled-in modes. A
+    # SiLU or a Sigmoid is a finish step.
     epilogue: Epilogue | str = Param(default=Epilogue.NONE)
-    # Optional (min, max) applied after the activation.
-    clamp: tuple | None = Param(default=None, probe=None)
     # B's packed block count on AIE2P: blocks, not bytes, since B's
     # declaration counts bfp16ebs8 blocks and bfp.itemsize turns that back
     # into the byte count pack_B returns.
@@ -185,9 +193,9 @@ class GEMM(Operator):
     m_chunk: int = Auto(
         array=True, domain=Divisors(of=lambda op, dev: op.M // (M_TILE * op.rows))
     )
-    # The activations the epilogue can select between at run time. Each one
-    # compiled in costs program memory, so a deployment that dispatches two
-    # should compile two.
+    # The activations the epilogue can select between at run time, beside
+    # those of the finishes its array applies. Each one compiled in costs
+    # program memory, so a deployment that dispatches two should compile two.
     epilogue_modes: tuple = Param(default=tuple(Epilogue), array=True)
     # Rounding for every f32->bf16 conversion; see Rounding in design.py.
     rounding: Rounding | str = Param(default=Rounding.CONV_EVEN, array=True)
@@ -237,7 +245,9 @@ class GEMM(Operator):
         tile=(b_l2,),
         per=(cols,),
     )
-    C = Out(M, N, tile=(c_l2,), per=(cols,), depth=C_DEPTH)
+    # The cores finish C a CT_OUT_LEN chunk of their block at a time, in the
+    # mmul's order: the epilogue applies the finish (finish_step).
+    C = Out(M, N, tile=(c_l2,), per=(cols,), depth=C_DEPTH, finish=(CT_OUT_LEN,))
     # M, or fewer rows per call (``A[:n]`` in a graph). A and C move, and the
     # cores compute, only the units (rows * M_TILE rows each) the bound
     # reaches; past them the cores drain each column-block's B replay
@@ -249,7 +259,7 @@ class GEMM(Operator):
     n_val = Value(derive=lambda op: op.N)
     m_row_blocks = Value(derive=lambda op: op._m_row_blocks)
     k_iters = Value(derive=lambda op: op._k_iters)
-    mode = Value(derive=lambda op: Epilogue(op.epilogue).mode)
+    mode = Value(derive=lambda op: op.activation.mode)
     clamp_min = Value(derive=lambda op: _clamp_bits(op.clamp)[0])
     clamp_max = Value(derive=lambda op: _clamp_bits(op.clamp)[1])
     n_chunks = Value(derive=lambda op: op._n_units, optional=True)
@@ -296,6 +306,11 @@ class GEMM(Operator):
             dict.fromkeys(Epilogue(m) for m in self.epilogue_modes)
         )
         self.epilogue = Epilogue(self.epilogue)
+        if self.epilogue in ACTIVATIONS.values():
+            raise ValueError(
+                f"flm.GEMM applies {self.epilogue} as a finish step: "
+                f"finish=Chain((Link(SiLU(...)),)), or a graph folding it"
+            )
         if self.K % self.k_tile:
             raise ValueError(
                 f"K ({self.K}) must be a multiple of k_tile ({self.k_tile})"
@@ -312,10 +327,6 @@ class GEMM(Operator):
                 f"{tuple(str(m) for m in self.epilogue_modes)}, so it would "
                 "not be compiled in and the kernel would silently apply none"
             )
-        if self.clamp is not None:
-            lo, hi = self.clamp
-            if lo > hi:
-                raise ValueError(f"clamp min ({lo}) must be <= max ({hi})")
 
     def resolve(self, dev):
         if dev is None:
@@ -336,7 +347,7 @@ class GEMM(Operator):
         tile_n = N_TILE_DEFAULT if self.tile_n is None else self.tile_n
         ct_k = CT_MAX_K_FOR_N[tile_n]
         m_chunk = M_CHUNK_FOR_N[tile_n] if self.m_chunk is None else self.m_chunk
-        l1 = l1_budget(dev, self.epilogue_modes)
+        l1 = l1_budget(dev, self.compiled_modes)
         if self.tile_ma is None:
             tile_ma, l1_b_depth = _default_l1(
                 tile_n, ct_k, b_elem_bytes, l1, m_chunk, self.k_tile
@@ -397,7 +408,87 @@ class GEMM(Operator):
             )
 
     def compatible(self) -> None:
+        """The shape against the resolved tiles, and each finish one the
+        epilogue applies: at most an activation, then at most a Clamp, and
+        no activation beside its own gelu.
+        """
         self._check_shape()
+        for chain in self.finish.chains:
+            kinds = [type(link.op) for link in chain]
+            if kinds not in (
+                [],
+                [Clamp],
+                *([a] for a in ACTIVATIONS),
+                *([a, Clamp] for a in ACTIVATIONS),
+            ):
+                raise ValueError(
+                    f"flm.GEMM's epilogue applies a SiLU or a Sigmoid, then a "
+                    f"Clamp; not {[k.__name__ for k in kinds]}"
+                )
+        if self.epilogue is not Epilogue.NONE and self.activation is not self.epilogue:
+            raise ValueError(
+                f"flm.GEMM applies one activation, its {self.epilogue} or its "
+                f"finish's {self.activation}"
+            )
+
+    def finish_step(self, link: Link, line: int, dtype, dev, ordered: bool) -> Link:
+        """``link`` as the epilogue applies it, from the cores' words: a
+        SiLU, a Sigmoid or a Clamp, finishing nothing of its own.
+        """
+        if (
+            type(link.op) not in (*ACTIVATIONS, Clamp)
+            or link.op.finish
+            or link.op.prepare
+        ):
+            raise ValueError(
+                f"flm.GEMM's epilogue applies a SiLU, a Sigmoid or a Clamp, "
+                f"not {link.op!r}"
+            )
+        return link
+
+    @property
+    def activation(self) -> Epilogue:
+        """The activation the epilogue applies: its finish's, or its own."""
+        return next(
+            (
+                ACTIVATIONS[type(link.op)]
+                for link in self.finish
+                if type(link.op) in ACTIVATIONS
+            ),
+            Epilogue(self.epilogue),
+        )
+
+    @property
+    def clamp(self) -> tuple[float, float] | None:
+        """The bounds of its finish's Clamp, rounded to bf16 as Clamp rounds
+        them, or None.
+        """
+        for link in self.finish:
+            if isinstance(link.op, Clamp):
+                bounds = np.array([link.op.low, link.op.high], bfloat16)
+                return tuple(bounds.astype(float).tolist())
+        return None
+
+    @property
+    def compiled_modes(self) -> tuple[Epilogue, ...]:
+        """The activations compiled into the epilogue: none, ``epilogue_modes``
+        and those of the finishes its array applies.
+        """
+        finishing = [
+            ACTIVATIONS[type(link.op)]
+            for chain in self.finish.chains
+            for link in chain
+            if type(link.op) in ACTIVATIONS
+        ]
+        return tuple(
+            dict.fromkeys(
+                [Epilogue.NONE, *map(Epilogue, self.epilogue_modes), *finishing]
+            )
+        )
+
+    def design_key(self):
+        # The finish's activation and bounds reach the cores as words.
+        return (*super().design_key(), ("epilogue", self.activation, self.clamp))
 
     # -- derived -----------------------------------------------------------------
 
@@ -427,8 +518,8 @@ class GEMM(Operator):
         present; the kernel falls back to it.
         """
         mask = 1
-        for m in self.epilogue_modes:
-            mask |= 1 << Epilogue(m).mode
+        for m in self.compiled_modes:
+            mask |= 1 << m.mode
         return mask
 
     @property
@@ -471,8 +562,8 @@ class GEMM(Operator):
         second. The clamp bounds go in as raw bit patterns.
         """
         base = f"{self.config_name}_M{self.M}_K{self.K}_N{self.N}"
-        if self.epilogue != Epilogue.NONE:
-            base = f"{base}_epi{self.epilogue}"
+        if self.activation is not Epilogue.NONE:
+            base = f"{base}_epi{self.activation}"
         if self.clamp is not None:
             lo, hi = (
                 int(np.float32(v).view(np.int32)) & 0xFFFFFFFF for v in self.clamp
@@ -523,7 +614,7 @@ class GEMM(Operator):
         # always compiled in, since the kernel falls back to it. Under
         # asymmetric tile buffering the k step takes the A band index, as the
         # core folds RHO A bands into one accumulator.
-        modes = dict.fromkeys([Epilogue.NONE, *self.epilogue_modes])
+        modes = self.compiled_modes
         kernel = fused_mm(
             dim_m=M_TILE,
             dim_k=K_TILE,
@@ -1239,30 +1330,14 @@ class GEMM(Operator):
         """
         M, K, N = self._reference_shape
         return dataclasses.replace(
-            self, M=M, K=K, N=N, epilogue=Epilogue.NONE, clamp=None, packed_blocks=None
-        )
-
-    # -- folding -----------------------------------------------------------------
-
-    def fold(self, consumer, at: int = 0) -> "GEMM | None":
-        """This GEMM applying ``consumer`` in its epilogue: SiLU or Sigmoid as
-        its activation, compiled in if `epilogue_modes` leaves it out, then
-        Clamp as its clamp, the bounds rounded to bf16 as Clamp rounds them.
-        The epilogue's gelu is ``x * sigmoid(1.702x)``, not the GELU
-        operator's, so GELU does not fold.
-        """
-        if consumer.finish or consumer.prepare or self.clamp is not None:
-            return None
-        if isinstance(consumer, Clamp):
-            bounds = np.array([consumer.low, consumer.high], bfloat16)
-            return dataclasses.replace(self, clamp=tuple(bounds.astype(float).tolist()))
-        mode = {SiLU: Epilogue.SILU, Sigmoid: Epilogue.SIGMOID}.get(type(consumer))
-        if mode is None or self.epilogue is not Epilogue.NONE:
-            return None
-        return dataclasses.replace(
             self,
-            epilogue=mode,
-            epilogue_modes=tuple(dict.fromkeys((*self.epilogue_modes, mode))),
+            M=M,
+            K=K,
+            N=N,
+            epilogue=Epilogue.NONE,
+            epilogue_modes=self.compiled_modes,
+            finish=Chain(),
+            packed_blocks=None,
         )
 
     # -- host-side helpers -------------------------------------------------------
@@ -1312,7 +1387,7 @@ class GEMM(Operator):
         """
         b = B.T if self.b_col_maj else B
         C = np.matmul(A.astype(np.float32), b.astype(np.float32)).astype(A.dtype)
-        return Epilogue(self.epilogue).apply(C, self.clamp)
+        return self.activation.apply(C, self.clamp)
 
     def tolerance(self) -> Tolerance | None:
         """Each element of C within the roundings the kernel makes, in units
@@ -1326,7 +1401,7 @@ class GEMM(Operator):
         npu2 over K = 512 to 8192, normal and all-positive inputs, no
         configuration's worst element came above 0.89 of it.
         """
-        if self.epilogue is not Epilogue.NONE:
+        if self.activation is not Epilogue.NONE:
             return None
         units = 2.0 + self.K * 2.0**-16
         if self.emulate_bf16_mmul_with_bfp16:

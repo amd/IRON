@@ -6,14 +6,19 @@ SPDX-License-Identifier: Apache-2.0
 # `iron.operators.flm.GEMM` — bf16 GEMM with a fused epilogue
 
 ```python
+from iron.common import Chain, Link
+from iron.operators import SiLU
 from iron.operators.flm import GEMM
-from iron.operators.flm.gemm.design import Epilogue
 
-op = GEMM(M=1024, K=1536, N=6144, epilogue=Epilogue.SILU)
+op = GEMM(M=1024, K=1536, N=6144, finish=Chain((Link(SiLU(size=1024 * 6144)),)))
 op(A, op.pack_B(B), C_out)  # compiles once, then runs
 ```
 
-`epilogue`, `rounding` and `gelu` are `StrEnum`s, so the bare strings `"silu"` /
+What follows the product is its finish, as for `iron.operators.GEMM`: a SiLU
+or a Sigmoid, then a Clamp, which the epilogue applies from its runtime
+parameters (and which a graph folds into it). Its own gelu,
+`x * sigmoid(1.702x)`, which no operator computes, is `epilogue="gelu"`.
+`epilogue`, `rounding` and `gelu` are `StrEnum`s, so the bare strings `"gelu"` /
 `"conv_even"` / `"bf16_steps"` are accepted too.
 
 A second GEMM implementation alongside [`iron.operators.GEMM`](../../gemm),
@@ -146,8 +151,8 @@ module emitted at a reference shape, whose runtime sequence is discarded.
 
 One thing stays build-time, because it costs program memory: which activations
 the epilogue can *select between* (`epilogue_modes`). It lands in the xclbin's
-name. The clamp does not -- every build compiles it, so `clamp=(-2, 2)`,
-`clamp=(-4, 4)` and no clamp at all share one xclbin.
+name. The clamp does not -- every build compiles it, so a Clamp finish of
+(-2, 2), one of (-4, 4) and no clamp at all share one xclbin.
 
 The core releases its barrier straight after reading the parameters.
 `wait_for_value` emits `LockAction.Acquire`, which does not leave the lock
@@ -575,9 +580,11 @@ unit. A bound needs `m_chunk = 1` and M in one slab.
 ## The shipped overlay
 
 ```python
-from iron.operators.flm import GEMM, Shipped
+from iron.common import Chain, Link
+from iron.operators import SiLU
+from iron.operators.flm import Shipped
 
-op = Shipped(M=1024, K=1536, N=6144, epilogue="silu")
+op = Shipped(M=1024, K=1536, N=6144, finish=Chain((Link(SiLU(size=1024 * 6144)),)))
 op(A, op.pack_B(B), C_out)
 ```
 

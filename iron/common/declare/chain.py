@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from .operator import Operator
@@ -80,25 +80,24 @@ class Chain:
             return Chain(steps)
         return Chain(steps, (*self.chains, steps))
 
-    def at_line(
-        self, line: int, dtype, dev, *, ordered: bool = True, owner: str, what: str
-    ) -> Chain:
-        """Each chain rebuilt at a ``line``-element tile, the array's unique
-        and in a fixed order (``Link.at_line``).
+    def rebuilt(self, step: Callable[[Link], Link], *, owner: str, what: str) -> Chain:
+        """Each chain with every step rebuilt by ``step`` (at the tile the
+        cores hold), the array's unique and in a fixed order.
 
         Args:
+            step: A step as the cores apply it.
             owner: The operator's name, in an error.
             what: The chain's name in an error, ``"finish"`` or ``"prologue"``.
 
         Raises:
-            ValueError: A step does not run at the tile, these steps are not
-                among the array's chains, or a step with inputs of its own
-                is in an array serving another chain.
+            ValueError: ``step`` refuses a step, these steps are not among
+                the array's chains, or a step with inputs of its own is in an
+                array serving another chain.
         """
-        own = tuple(link.at_line(line, dtype, dev, ordered) for link in self.steps)
+        own = tuple(step(link) for link in self.steps)
         chains: dict[tuple, tuple[Link, ...]] = {}
         for chain in self.chains:
-            at = tuple(link.at_line(line, dtype, dev, ordered) for link in chain)
+            at = tuple(step(link) for link in chain)
             chains.setdefault(tuple(link.array_key() for link in at), at)
         if tuple(link.array_key() for link in own) not in chains:
             raise ValueError(f"{owner}: its {what} is not one its array applies")

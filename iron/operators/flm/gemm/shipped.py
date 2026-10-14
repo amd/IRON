@@ -8,7 +8,7 @@ this is the binary it was ported from, downloaded and pinned by digest, and
 driven by the same declaration:
 
 ```python
-Shipped(M=1024, K=1536, N=6144, epilogue="silu")
+Shipped(M=1024, K=1536, N=6144, finish=Chain((Link(SiLU(size=1024 * 6144)),)))
 ```
 
 It exists so the port can be measured against what it was ported from, on
@@ -41,7 +41,7 @@ from aie.iron.device import Tile
 from ml_dtypes import bfloat16
 
 from iron.common import In, Out, Unresolvable, Value, Xclbin, Auto, Param, Select
-from iron.operators.flm.gemm.design import K_TILE, M_TILE, Epilogue
+from iron.operators.flm.gemm.design import CT_OUT_LEN, K_TILE, M_TILE
 from iron.operators.flm.gemm.op import GEMM
 
 # The FastFlowLM revision the overlay is taken from. A commit SHA rather than
@@ -83,7 +83,7 @@ def _parameter_words(op) -> list[int]:
         op.M,
         op.N,
         0,  # bias, which the operator does not expose
-        Epilogue(op.epilogue).mode,
+        op.activation.mode,
         1 if op.clamp is not None else 0,
         int(np.float32(clamp_min).view(np.int32)),
         int(np.float32(clamp_max).view(np.int32)),
@@ -117,9 +117,6 @@ class Shipped(
     b_l2: int = Auto(K_TILE * N_TILE, repr=False, init=False)
     c_l2: int = Auto(ROWS * M_TILE * N_TILE, repr=False, init=False)
     b_overlay_order: ClassVar[bool] = True
-    # No probe: the image's clamp-on word selects a branch, so its time may
-    # follow whether there is a clamp.
-    clamp: tuple | None = Param(default=None)
 
     # A: one (M_TILE x K_TILE) block per transfer element, broadcast along
     # each compute row from alternate shim columns on MM2S channel 0.
@@ -143,15 +140,16 @@ class Shipped(
         channel=1,
     )
     # C: the joined (ROWS*M_TILE x N_TILE) block, out of every column on
-    # S2MM channel 0.
+    # S2MM channel 0, which the image's epilogue finishes as the port's does.
     C = Out(
         GEMM.M,
         GEMM.N,
-        tile=(ROWS * M_TILE, N_TILE),
+        tile=(ROWS * M_TILE * N_TILE,),
         per=(GEMM.cols,),
         depth=QUEUE_DEPTH,
         via=[Tile(c, 0) for c in range(COLS)],
         channel=0,
+        finish=(CT_OUT_LEN,),
     )
     # The port's named values are not this image's: it reads one block of
     # eight words behind a lock.

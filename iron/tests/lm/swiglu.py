@@ -18,6 +18,7 @@ from aie.utils.benchmark import run_iters
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
+from iron.common import Chain
 from iron.lm.blocks import SwiGLU
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.design import Epilogue
@@ -51,8 +52,8 @@ def _verdict(net, step):
     op = step.op
     held = {b.name: _read(net, h) for b, h in zip(op.buffers, step.slots)}
     tolerance = op.resolved().tolerance()
-    if isinstance(op, FLMGEMM) and op.epilogue is Epilogue.SILU:
-        plain = dataclasses.replace(op, epilogue=Epilogue.NONE).resolved().tolerance()
+    if isinstance(op, FLMGEMM) and op.activation is Epilogue.SILU:
+        plain = dataclasses.replace(op, finish=Chain()).resolved().tolerance()
         tolerance = Tolerance.bounded(
             lambda A, B: SILU_SLOPE * plain.bound(A, B) + SILU_APPROX,
             note="the projection's bound through silu, and its approximation",
@@ -109,7 +110,7 @@ def test_swiglu(rows, embedding_dim, hidden_dim, fold, record_property):
             ElementwiseMul,
             FLMGEMM,
         ]
-        assert steps[0].op.epilogue is Epilogue.SILU
+        assert steps[0].op.activation is Epilogue.SILU
     # The gate's buffer is dead once SiLU has read it, so the planner may
     # reuse it; the product's inputs and the down projection's are intact.
     verdicts = {"down": _verdict(net, steps[-1])}

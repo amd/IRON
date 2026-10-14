@@ -377,7 +377,7 @@ class Finish(_Chains):
                 tiles hold the riding inputs' share of ``tile``, in order.
         """
         at = len(self.steps) + self.select
-        # Only a lone chain has extras (Chain.at_line).
+        # Only a lone chain has extras (Chain.rebuilt).
         fifos = args[at : at + len(self.fifos)]
         if not self.riding:
             self._run(args, mode, tile, [f.acquire(1) for f in fifos])

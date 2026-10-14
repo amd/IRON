@@ -430,17 +430,18 @@ def test_swiglu_folds_its_silu_and_its_product_into_the_gate(npu2):
 
 
 @pytest.mark.parametrize("device", ["npu1", "npu2"])
-def test_a_prompt_swiglu_compiles_its_silu_into_the_gate_alone(device, request):
+def test_a_prompt_swiglu_finishes_its_gate_with_its_silu(device, request):
     t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(256, E))
     f, count = folded(t, request.getfixturevalue(device))
     assert [(str(fold), n) for fold, n in count.items()] == [("SiLU into GEMM", 1)]
     gate, up, mul, down = (s.op for s in f.steps)
     assert (type(gate), type(mul)) == (FLMGEMM, ElementwiseMul)
-    assert (gate.epilogue, gate.epilogue_modes) == (
-        Epilogue.SILU,
-        (Epilogue.NONE, Epilogue.SILU),
-    )
-    assert up.epilogue_modes == down.epilogue_modes == (Epilogue.NONE,)
+    assert gate.activation is Epilogue.SILU
+    assert gate.compiled_modes == (Epilogue.NONE, Epilogue.SILU)
+    # The other projections run on the gate's array, without an activation.
+    for op in (up, down):
+        assert op.activation is Epilogue.NONE
+        assert op.finish.shared == gate.finish.shared
 
 
 def test_runs_sharing_what_they_made_fold_alike_with_the_same_operators(npu2):

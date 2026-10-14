@@ -12,6 +12,7 @@ from aie.utils.verify import Tolerance
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
+from iron.common import Chain, Link
 from iron.common.design import OperatorDesign
 from iron.common.harness import run_test, vectors
 from iron.operators import GEMM as GenericGEMM
@@ -30,6 +31,7 @@ from iron.operators.flm.gemm.design import (
 )
 from iron.operators.flm.gemm.op import GEMM
 from iron.operators.flm.gemm.shipped import Shipped
+from iron.operators.sigmoid import Sigmoid
 from iron.operators.silu import SiLU
 
 # Unpacked so the parameter tables below stay column-aligned.
@@ -143,6 +145,19 @@ def get_params():
     return params
 
 
+def finished(M, N, epilogue, clamp) -> dict:
+    """The keywords that apply ``epilogue`` then ``clamp`` to an (M, N)
+    product: the gelu as flm.GEMM's own, a SiLU, a Sigmoid and a Clamp as
+    its finish.
+    """
+    activation = {SILU: SiLU, SIGMOID: Sigmoid}.get(epilogue)
+    steps = [] if activation is None else [Link(activation(size=M * N))]
+    if clamp is not None:
+        steps.append(Link(Clamp(size=M * N, low=clamp[0], high=clamp[1])))
+    own = epilogue if epilogue is GELU else NONE
+    return dict(epilogue=own, finish=Chain(tuple(steps)))
+
+
 def flm_vectors(operator, scale=4.0):
     """Random A (signed) and B (non-negative) at ``scale``, and epilogue(A @ B).
 
@@ -207,9 +222,8 @@ def test_gemm(M, K, N, epilogue, clamp, rounding, record_property):
         M=M,
         K=K,
         N=N,
-        epilogue=epilogue,
-        clamp=clamp,
         rounding=rounding,
+        **finished(M, N, epilogue, clamp),
     )
 
     errors = check_on_device(
@@ -306,7 +320,7 @@ def test_folded_silu_and_clamp_compute_what_their_operators_do():
     silu = SiLU(size=M * N)
     clamp = Clamp(size=M * N, low=-0.25, high=1.5)
     operator = plain.fold(silu).fold(clamp)
-    assert (operator.epilogue, operator.clamp) == (SILU, (-0.25, 1.5))
+    assert (operator.activation, operator.clamp) == (SILU, (-0.25, 1.5))
     data = flm_vectors(plain, ACTIVATION_INPUT_SCALE)
     C = clamp.reference(silu.reference(data["C"].reshape(-1)))
     errors = check_on_device(operator, {"A": data["A"], "B": data["B"], "C": C}).errors
@@ -520,7 +534,7 @@ def test_one_xclbin_serves_every_clamp_bound():
     bounds = [(-2.0, 2.0), (-4.0, 4.0), (-0.5, 0.5)]
     xclbin = None
     for clamp in bounds:
-        operator = GEMM(M=M, K=K, N=N, clamp=clamp)
+        operator = GEMM(M=M, K=K, N=N, **finished(M, N, NONE, clamp))
         errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE)).errors
         assert not errors, f"clamp={clamp} produced wrong output"
 
@@ -535,13 +549,13 @@ def test_one_xclbin_serves_every_clamp_bound():
     # unclamped caller neutralises it with (-inf, +inf) rather than compiling
     # a second build. config_name rather than the image, which only exists
     # once compile() has run.
-    clamped = GEMM(M=M, K=K, N=N, clamp=bounds[0])
+    clamped = GEMM(M=M, K=K, N=N, **finished(M, N, NONE, bounds[0]))
     unclamped = GEMM(M=M, K=K, N=N)
     assert unclamped.config_name == clamped.config_name
     # The bounds do reach the instruction stream, though, so they must reach
     # its stem or the build cache serves one caller's stream to another.
     assert unclamped.name != clamped.name
-    assert clamped.name != GEMM(M=M, K=K, N=N, clamp=bounds[1]).name
+    assert clamped.name != GEMM(M=M, K=K, N=N, **finished(M, N, NONE, bounds[1])).name
 
 
 # The shipped overlay: the binary the port was ported from, as its second
@@ -596,7 +610,7 @@ BUDGET_FLOOR = 2e-2
 )
 def test_shipped_overlay(M, K, N, epilogue, clamp, record_property):
     """The shipped binary through the same operator: the second reference."""
-    operator = Shipped(M=M, K=K, N=N, epilogue=epilogue, clamp=clamp)
+    operator = Shipped(M=M, K=K, N=N, **finished(M, N, epilogue, clamp))
     # B drawn row-major (K, N); the operator consumes it packed (pack_B).
     data = vectors(operator, normal=("A",), B=(K, N))
 
@@ -662,7 +676,7 @@ def test_shipped_epilogue_matches_accumulator(epilogue, clamp):
     A, B = data["A"], data["B"]
 
     def run(epi, clm):
-        op = Shipped(M=M, K=K, N=N, epilogue=epi, clamp=clm)
+        op = Shipped(M=M, K=K, N=N, **finished(M, N, epi, clm))
         tensor = aie_utils.DEFAULT_TENSOR_CLASS
         out = tensor((M, N), dtype=np.dtype("bfloat16"))
         op(tensor(A.flatten()), tensor(op.pack_B(B)), out)

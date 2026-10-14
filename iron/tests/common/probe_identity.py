@@ -25,7 +25,6 @@ import iron.operators.flm as flm
 from iron.common.design import OperatorDesign
 from iron.common.image.fusion import generate
 from iron.operators.clamp import Clamp
-from iron.operators.flm.gemm.op import GEMM as FlmGEMM
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -33,7 +32,6 @@ pytestmark = pytest.mark.usefixtures("npu2")
 # away from its probe.
 AWAY = {
     Clamp: dict(size=65536, low=-0.75, high=1.25),
-    FlmGEMM: dict(M=256, K=512, N=1024, clamp=(-2.0, 2.0)),
 }
 
 # mlir-aie numbers an unnamed Flow from a process-wide counter, so two

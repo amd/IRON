@@ -402,6 +402,16 @@ class Operator(metaclass=_OperatorMeta):
         """
         raise ValueError(f"{type(self).__name__} runs on cores of its own")
 
+    def finish_step(self, link: Link, line: int, dtype, dev, ordered: bool) -> Link:
+        """``link`` as this operator's cores apply it to a ``line``-element
+        tile of its output: the step's own kernels, run at the tile
+        (``Link.at_line``), unless the operator applies its finish another way.
+
+        Raises:
+            ValueError: The cores do not apply the step at the tile.
+        """
+        return link.at_line(line, dtype, dev, ordered)
+
     def finish_line(self, dev, lines: Iterable[int]) -> int:
         """The first of ``lines`` each chain of this operator's array
         finishes a tile of, for a ``resolve`` choosing its output's tile.
@@ -738,7 +748,7 @@ class Operator(metaclass=_OperatorMeta):
 
         Raises:
             ValueError: No output is finished by the array that runs, or
-                the chain does not rebuild at the tile (``Chain.at_line``).
+                the chain does not rebuild at the tile (``Chain.rebuilt``).
             Unresolvable: Each core reads more streams, its own and the
                 finish's inputs, than a core tile has input channels, a
                 finish input would stream into a block held out of order,
@@ -755,8 +765,12 @@ class Operator(metaclass=_OperatorMeta):
             )
         name = type(self).__name__
         ordered = out.finish_block is None
-        finish = self.finish.at_line(
-            out.finish_line, out.dtype, dev, ordered=ordered, owner=name, what="finish"
+        finish = self.finish.rebuilt(
+            lambda link: self.finish_step(
+                link, out.finish_line, out.dtype, dev, ordered
+            ),
+            owner=name,
+            what="finish",
         )
         if not ordered and any(len(link.op.inputs) > 1 for link in finish):
             raise Unresolvable(
@@ -831,7 +845,7 @@ class Operator(metaclass=_OperatorMeta):
 
         Raises:
             ValueError: No input is prepared, or the chain does not rebuild
-                at the tile (``Chain.at_line``).
+                at the tile (``Chain.rebuilt``).
             Unresolvable: A step's other input is not one tile, the
                 prepared input brings a core more than one tile a call,
                 beside which no other input's tile streams, or, untiled,
@@ -875,8 +889,10 @@ class Operator(metaclass=_OperatorMeta):
                     f"{name}: the prologue's {riding} inputs ride {feed.name}, "
                     f"whose cores hold {feed.depth} tiles of it at once"
                 )
-        self.prepare = self.prepare.at_line(
-            line, into.dtype, dev, owner=name, what="prologue"
+        self.prepare = self.prepare.rebuilt(
+            lambda link: link.at_line(line, into.dtype, dev),
+            owner=name,
+            what="prologue",
         )
         self._bind()
 
