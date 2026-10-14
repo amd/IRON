@@ -19,7 +19,8 @@ import numpy as np
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
-from aie.iron import ObjectFifo, Worker
+from aie.dialects.aie import DMAChannelDir
+from aie.iron import DmaEndpoint, ObjectFifo, Worker
 from aie.iron.device import Tile, from_name
 from aie.utils import bfp
 from ml_dtypes import bfloat16
@@ -572,37 +573,47 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
 
     op = Shipped(M=256, K=1024, N=1152)
     assert op.external.filename == "flm_mm_f81eba71.xclbin"
-    pins = [(op.A.via[r], op.A.channel) for r in range(4)]
-    pins.append((op.B.via[3], op.B.channel))
-    assert [(tile.col, channel) for tile, channel in pins] == [
-        (0, 0),
-        (2, 0),
-        (4, 0),
-        (6, 0),
-        (3, 1),
-    ]
-    # Its array() places each core's parameter block and the lock that
-    # releases it, where the image's core programs read them.
+    # Its array() pins each lane to the image's shim channel, places each
+    # core's parameter block and the lock that releases it.
     text = str(OperatorDesign(op.resolved(), full_elf=False).module())
+    pins = re.findall(r"shim_dma_allocation @(\w+)\(%\w+, (\w+), (\d)\)", text)
+    assert pins[:5] == [
+        ("A_0", "MM2S", "0"),
+        ("A_1", "MM2S", "0"),
+        ("A_2", "MM2S", "0"),
+        ("A_3", "MM2S", "0"),
+        ("B_0", "MM2S", "1"),
+    ]
+    assert len(pins) == 4 + 8 + 8
     cores = 4 * 8
     assert text.count('{address = 4096 : i32, sym_name = "rtp_') == cores
     assert len(re.findall(r"aie\.lock\(%\w+, 10\)", text)) == cores
 
     image = Xclbin(url="u", sha256="s", filename="f")
-    # The declaration has to say where every stream enters, and a stream
-    # built once per shape takes no per-call value.
-    with pytest.raises(TypeError, match="pinned with via="):
-
-        class Unpinned(Operator, image=image):
-            n: int = Param()
-            x = In(n, tile=(64,))
-
+    # A stream built once per shape takes no per-call value.
     with pytest.raises(TypeError, match="takes no per-call value"):
 
         class Unbuilt(Operator, image=image):
             n: int = Param()
-            x = In(n, tile=(64,), via=Tile(0, 0))
+            x = In(n, tile=(64,))
             count = Value()
+
+
+def test_a_lane_pins_to_a_channel_moving_its_way():
+    class Pinned(Operator):
+        n: int = Param()
+        c: int = Auto(default=2)
+        x = In(n, tile=(n,))
+        y = Out(n, tile=(n,), per=(c,))
+
+    op = Pinned(n=2)
+    shims = [Tile(c, 0) for c in range(2)]
+    with pytest.raises(ValueError, match="moves"):
+        op.x.pin([DmaEndpoint(shims[0], DMAChannelDir.S2MM, 0)])
+    with pytest.raises(ValueError, match="2 lanes"):
+        op.y.pin([DmaEndpoint(shims[0], DMAChannelDir.S2MM, 0)])
+    op.y.pin([DmaEndpoint(tile, DMAChannelDir.S2MM, 0) for tile in shims])
+    assert [end.tile for end in op.y.handles] == shims
 
 
 def test_a_shipped_image_runs_only_with_instructions(tmp_path):

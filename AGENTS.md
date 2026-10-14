@@ -154,7 +154,7 @@ reuse lint
        not the derived one. The array tier is what a tile names plus what
        says `array=True`; one array serves every extent. A shipped binary
        is a subclass declared with `image=Xclbin(...)`, its operands pinned
-       with `via=` (each lane's shim, an mlir-aie `Tile`) and `channel=`. Two hooks change what is built: `configuration()`, the
+       by its `array()` (`operand.pin([DmaEndpoint(...), ...])`, each lane on a shim channel of the image). Two hooks change what is built: `configuration()`, the
        operator whose xclbin this one runs (itself by default; flm's GEMM
        returns its shape-free half, so one xclbin serves every shape), and
        `exported_design()`, a callable returning the module (an
@@ -213,8 +213,7 @@ reuse lint
      mlir-aie's `CompilableDesign` compiles and caches; `OperatorRuntime`,
      the operator's sequence as an aie.iron `Runtime` subclass (what
      `sequence(rt)` receives; the derived sequence, each operand's
-     `transfers()`); `ShippedRuntime`, its subclass against
-     a shipped image (`Lock.set` releases its parameter block)
+     `transfers()`, a pinned lane's shim DMA tasks)
    - `graph/`: graphs (`iron.Graph`, `iron.state`) and
      `compile(dev=, full_elf=)`
    - `image/`: what a graph lowers onto, all of it internal: the sequence
@@ -407,8 +406,9 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      `gemm.py` or `mha.py` for hand-written sequences
 3. A shipped binary is a subclass declared with the image, `class
    Shipped(X, image=Xclbin(url=, sha256=, filename=))`: it pins the tunables,
-   redeclares the operands with `via=` and `channel=`, and its `array()`
-   builds no cores: it places the image's parameter block in each core,
+   and its `array()` builds no cores: it pins each operand's lanes to the
+   image's shim channels (`operand.pin([DmaEndpoint(Tile(c, 0), MM2S, ch),
+   ...])`, returning the endpoints), places the image's parameter block in each core,
    `Buffer(address=)` bound to a derived `Value`, and returns the
    `Lock(lock_id=)` the sequence releases it with. It takes no per-call
    value. `Xclbin` is mlir-aie's `NPUKernel`, fetched on first read of
@@ -645,7 +645,8 @@ code before relying on a line here; it is the authority.
   patch lands in its length.
 - **Placement.** Operator order is the final tiebreak for shim tile and
   channel, so a per-column stream is not guaranteed to sit in physical
-  column `c`; pin it with `via=` where that matters. Where the tiles an
+  column `c`; where that matters, an `array()` pins its lanes
+  (`operand.pin`) to shim channels a route of its own reaches. Where the tiles an
   `array()` names are a choice, the choice is a tunable: an operator
   declares its own `Enum` of named placements (`GEMMPlacement`,
   `MHAPlacement`) and a field `placement: GEMMPlacement = Auto(GEMMPlacement.SHIMS,

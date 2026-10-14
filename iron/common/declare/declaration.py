@@ -33,8 +33,8 @@ class Declaration:
         cls: The subclass, its body just run.
         library: The class whose attributes the library reads; a field may
             not hide one of them, but may replace an operator base's own.
-        shipped: The class runs a shipped image (``image=``), so its streams
-            are pinned and it takes no per-call value.
+        shipped: The class runs a shipped image (``image=``), so it takes
+            no per-call value.
 
     Attributes:
         name: The class's name.
@@ -269,11 +269,6 @@ class Declaration:
         if not shipped:
             return
         for m in members:
-            if isinstance(m, Operand) and m.tile_dims is not None and m.via is None:
-                raise TypeError(
-                    f"{cls.__name__}.{m.name}: a stream into a shipped image must be "
-                    f"pinned with via=; nothing else says which shim it uses"
-                )
             if isinstance(m, Value) and m.derive is None:
                 raise TypeError(
                     f"{cls.__name__}.{m.name}: a shipped image takes no per-call "

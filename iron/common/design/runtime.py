@@ -5,46 +5,35 @@
 
 from __future__ import annotations
 
+import functools
 from math import prod
-from typing import Any, NamedTuple
+from typing import Any
 
 import numpy as np
-from aie.dialects.aie import AIETileType, DMAChannelDir, shim_dma_allocation
+from aie.dialects.aie import AIETileType, shim_dma_allocation
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.ir import IntegerType
 from aie.iron import (
     Buffer,
+    DmaEndpoint,
     Flow,
     Lock,
     PacketFlow,
     Runtime,
+    Task,
     TaskGroup,
     TileDma,
     Worker,
     WorkerRuntimeBarrier,
     sync_parameters,
 )
-from aie.iron.device import Tile
+from aie.iron.runtime.dmatask import emit_shim_transfer
 
 from ..declare import DispatchTime, Operator, Value
 from ..declare.operand import Operand
 from ..declare.value import PlaceWord
 from .bd import BdLimits
-
-
-class ShimChannel(NamedTuple):
-    """A shim DMA channel the runtime sequence reaches by ``symbol``.
-
-    aie.iron allocates the shim end of a route it fills or drains, one end
-    per route; an ``array()`` whose route joins two shims names the other
-    end with one of these.
-    """
-
-    symbol: str
-    tile: Tile
-    direction: DMAChannelDir
-    channel: int
 
 
 class OperatorRuntime(Runtime):
@@ -55,18 +44,22 @@ class OperatorRuntime(Runtime):
     It is what ``sequence(rt)`` receives, whose transfers are the
     operands' own ``fill``/``drain``, emitted here (``transfer``).
 
+    A pinned lane (``Operand.pin``) is a shim DMA task on its channel, at
+    most the operand's ``depth`` in flight when managed (a shipped image's
+    memtiles hold that many), every one awaited by the sequence's end; an
+    unmanaged one is the caller's.
+
     Args:
         op: The resolved operator, its array built and its operands' lanes
-            bound (a shipped image's has no array).
+            bound or pinned.
         built: What its ``array()`` returned: its workers and barriers, and
-            the flows, locks, tile DMAs and shim channels only the sequence
-            reaches.
+            the flows, locks, tile DMAs, pinned endpoints and buffers only
+            the sequence reaches.
         name: The sequence's symbol; the Program names it when None.
 
     Attributes:
         barriers: The barriers the preamble opens.
-        channels: The shim channels the sequence names beside the routes
-            aie.iron allocates.
+        pins: Each pinned lane this runtime declares, by its symbol.
         buffers: Buffers the sequence writes that no worker places: a
             shipped image's parameter block.
     """
@@ -74,15 +67,22 @@ class OperatorRuntime(Runtime):
     def __init__(self, op: Operator, built: list = (), name: str | None = None) -> None:
         self.op = op
         self.barriers = tuple(b for b in built if isinstance(b, WorkerRuntimeBarrier))
-        self.channels = [c for c in built if isinstance(c, ShimChannel)]
-        self.buffers: list[Buffer] = []
+        self.buffers = [b for b in built if isinstance(b, Buffer)]
         self._tensors: dict[str, Any] = {}
+        self._queues: dict[str, list[Task]] = {}
         # Raises if any stream of a built array is unbound.
-        handles = (
-            [h for b in op.buffers if b.streamed for h in b.handles]
-            if op.external is None
-            else []
-        )
+        lanes = [
+            (b, i, h) for b in op.buffers if b.streamed for i, h in enumerate(b.handles)
+        ]
+        # A shared array's pins are declared by the runtime of the array that built them.
+        ours = {id(e) for e in built if isinstance(e, DmaEndpoint)}
+        self.pins = {f"{b.name}_{i}": h for b, i, h in lanes if id(h) in ours}
+        if len(self.pins) != len(ours):
+            raise TypeError(
+                f"{type(op).__name__}.array() returns a DmaEndpoint no operand "
+                f"is pinned to"
+            )
+        handles = [h for _, _, h in lanes if not isinstance(h, DmaEndpoint)]
         super().__init__(
             self.body,
             [
@@ -100,11 +100,13 @@ class OperatorRuntime(Runtime):
                 self.add_lock(obj)
             elif isinstance(obj, TileDma):
                 self.add_tile_dma(obj)
-            elif not isinstance(obj, (Worker, WorkerRuntimeBarrier, ShimChannel)):
+            elif not isinstance(
+                obj, (Worker, WorkerRuntimeBarrier, DmaEndpoint, Buffer)
+            ):
                 raise TypeError(
                     f"{type(op).__name__}.array() returns Workers, "
-                    f"WorkerRuntimeBarriers, Flows, PacketFlows, Locks, TileDmas "
-                    f"and ShimChannels; got {obj!r}"
+                    f"WorkerRuntimeBarriers, Flows, PacketFlows, Locks, TileDmas, "
+                    f"the DmaEndpoints it pinned and Buffers; got {obj!r}"
                 )
 
     def body(self, *args) -> None:
@@ -122,14 +124,17 @@ class OperatorRuntime(Runtime):
         if not self.op.own_preamble:
             self.preamble()
         self.run()
+        for queue in self._queues.values():
+            for task in queue:
+                task.await_()
 
     def resolve(self, loc=None, ip=None, *, device=None, **options) -> None:
         # aie.iron names a shim channel through the route it starts or ends,
         # and places a buffer through the worker that reads it; these have
         # neither, so they are declared at device scope ahead of the sequence.
-        for symbol, tile, direction, channel in self.channels:
-            device.resolve_tile(tile)
-            shim_dma_allocation(symbol, tile.op, direction, channel)
+        for symbol, end in self.pins.items():
+            device.resolve_tile(end.tile)
+            shim_dma_allocation(symbol, end.tile.op, end.direction, end.channel)
         for buffer in self.buffers:
             device.resolve_tile(buffer.tile)
             buffer.resolve()
@@ -284,7 +289,14 @@ class OperatorRuntime(Runtime):
         scratchpad parameter on a full ELF, the pattern's sizes and offset
         on an xclbin.
         """
-        fn = getattr(operand.handles[lane], verb)
+        handle = operand.handles[lane]
+        pinned = isinstance(handle, DmaEndpoint)
+        symbol = f"{operand.name}_{lane}"
+        fn = (
+            functools.partial(emit_shim_transfer, symbol)
+            if pinned
+            else getattr(handle, verb)
+        )
         placed = next(
             (
                 v
@@ -324,7 +336,7 @@ class OperatorRuntime(Runtime):
                 f"length is a scratchpad word patched into the descriptor"
             )
         sizes, strides = BdLimits.slots(tap.sizes, tap.strides)
-        dim = None
+        dim = scale = None
         if length_parameter is not None:
             # The descriptor's length ends at its outermost dimension below the iteration.
             dim = next(
@@ -335,6 +347,9 @@ class OperatorRuntime(Runtime):
                 ),
                 None,
             )
+            if dim is None and prod(sizes[1:3]) == 1 and sizes[3] % length_unit == 0:
+                # One linear run, whose length counts its elements: units of them.
+                dim, scale = 3, length_unit
             if dim is None:
                 raise ValueError(
                     f"{type(self.op).__name__}.{buffer.name}: {tap} has no "
@@ -342,7 +357,13 @@ class OperatorRuntime(Runtime):
                     f"of {length_unit}-element units"
                 )
         data = self._tensors[buffer.name]
-        if managed:
+        if pinned and managed:
+            # The image's memtiles hold depth objects: past that, wait for the oldest.
+            queue = self._queues.setdefault(symbol, [])
+            if len(queue) == operand.depth:
+                queue.pop(0).await_()
+            common = dict(wait=True, managed=False)
+        elif managed:
             common = dict(wait=wait, group=group)
         else:
             if group is not None:
@@ -363,7 +384,7 @@ class OperatorRuntime(Runtime):
             for v in (offset_parameter, length_parameter, repeat_parameter)
         )
         if not dynamic:
-            return fn(
+            task = fn(
                 data,
                 tap=tap,
                 offset_parameter=(
@@ -378,6 +399,9 @@ class OperatorRuntime(Runtime):
                 ),
                 **common,
             )
+            if pinned and managed:
+                queue.append(task)
+            return task
         if dim is not None:
             # A unit dimension's stride is normalised to 0, which a dynamic
             # size may not have; its count never passes 1, so the stride the
@@ -386,6 +410,11 @@ class OperatorRuntime(Runtime):
                 inner = zip(sizes[dim + 1 :], strides[dim + 1 :])
                 strides[dim] = max(n * stride for n, stride in inner)
             sizes[dim] = length_parameter.ssa
+            if scale is not None:
+                sizes[dim] = arith.muli(
+                    length_parameter.ssa,
+                    arith.constant(scale, IntegerType.get_signless(32)),
+                )
         if repeat_parameter is not None:
             sizes[0] = repeat_parameter.ssa + arith.constant(
                 1, IntegerType.get_signless(32)
@@ -397,11 +426,14 @@ class OperatorRuntime(Runtime):
                 offset = offset + arith.constant(
                     int(tap.offset), IntegerType.get_signless(32)
                 )
-        return fn(
+        task = fn(
             data,
             tap=TensorAccessPattern(tap.tensor_dims, offset, sizes, strides),
             **common,
         )
+        if pinned and managed:
+            queue.append(task)
+        return task
 
     def data(self, buffer: Operand):
         return self._tensors[buffer.name]

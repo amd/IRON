@@ -101,7 +101,7 @@ def _shim_pinned(col: int, channel: int, name: str) -> Runtime:
 class _Allocated(Runtime):
     """Rows routed by hand from shim (0, 0) MM2S 1 into shim (1, 0) S2MM 0,
     and (1, 0) MM2S 0 held for packets, each channel allocated as
-    ``OperatorRuntime`` allocates a ``ShimChannel``.
+    ``OperatorRuntime`` allocates a pinned lane (``Operand.pin``).
     """
 
     CHANNELS = (

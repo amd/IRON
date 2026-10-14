@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 import aie.iron
 import numpy as np
-from aie.dialects.aie import AIETileType
+from aie.dialects.aie import AIETileType, DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron.device import Tile
+from aie.iron import DmaEndpoint
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
@@ -43,9 +43,6 @@ class Operand(Member["Operand"]):
             of a hand-written `Operator.sequence`.
         per: The field (or fields, multiplied) the stream is replicated over.
         depth: The fifo depth.
-        via: The shim tile of each lane, mlir-aie's `Tile` (one for a
-            one-lane stream): a stream into a shipped image is pinned.
-        channel: The shim DMA channel every lane of a pinned stream uses.
         replicate: Every `per=` lane gets the whole buffer, not a share.
         broadcast: One fifo every worker consumes.
         when: A bool `Param()`; the operand and its stream exist only where
@@ -83,8 +80,6 @@ class Operand(Member["Operand"]):
         tile: Any = None,
         per: _DimSpec | None = None,
         depth: int = 2,
-        via: Tile | list[Tile] | None = None,
-        channel: int | None = None,
         replicate: bool = False,
         broadcast: bool = False,
         when: _DimSpec | None = None,
@@ -130,8 +125,6 @@ class Operand(Member["Operand"]):
             None if per is None else Shape(per if isinstance(per, tuple) else (per,))
         )
         self.depth = depth
-        self.via = via
-        self.channel = channel
         self.replicate = replicate
         self.broadcast = broadcast
         self.finish = bool(finish)
@@ -275,6 +268,30 @@ class Operand(Member["Operand"]):
         if self.lane_handles:
             raise ValueError(f"{self.name} is already bound")
         self.lane_handles = handles
+
+    def pin(self, endpoints: list[DmaEndpoint]) -> None:
+        """Pin each lane to a shim DMA channel of routes built elsewhere (a
+        shipped image's, or two shims an ``array()`` joins): a transfer of
+        the lane is a shim DMA task on it. ``array()`` returns the endpoints
+        among what it built.
+
+        Args:
+            endpoints: One mlir-aie ``DmaEndpoint`` per lane, in lane order:
+                a shim tile, MM2S for an input or S2MM for an output, and a
+                channel.
+
+        Raises:
+            ValueError: An endpoint moves the other way or names no channel,
+                another number of endpoints than lanes, or the operand is
+                bound already.
+        """
+        moves = DMAChannelDir.S2MM if self.drains else DMAChannelDir.MM2S
+        for e in endpoints:
+            if e.direction != moves or e.channel is None:
+                raise ValueError(
+                    f"{self.name} moves {moves} on a channel it names, not {e}"
+                )
+        self.bind(endpoints)
 
     @property
     def handles(self) -> list[Any]:

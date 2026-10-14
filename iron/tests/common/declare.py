@@ -396,19 +396,6 @@ def test_per_call_values_bind_on_the_operator():
     assert isinstance(op.live, DispatchTime) and op.live is not Copy.live
 
 
-def test_shim_pins_declare():
-    class Pinned(Operator):
-        n: int = Param()
-        c: int = Auto(default=2)
-        x = In(n, tile=(n,), via=Tile(1, 0), channel=0)
-        y = Out(n, tile=(n,), via=[Tile(c, 0) for c in range(2)], channel=0, per=(c,))
-
-    op = Pinned(n=2)
-    pins = [op.x.via, *op.y.via]
-    assert op.y.count == 2
-    assert [p.col for p in pins if p is not None] == [1, 0, 1]
-
-
 # --------------------------------------------------------------------------
 # Inference
 # --------------------------------------------------------------------------

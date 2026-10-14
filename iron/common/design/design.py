@@ -34,7 +34,6 @@ from aie.utils.compile.jit.compilabledesign import CompilableDesign
 from .. import declare
 from ..declare import Operator
 from .runtime import OperatorRuntime
-from .shipped import ShippedRuntime
 
 
 class OperatorDesign:
@@ -85,11 +84,6 @@ class OperatorDesign:
             **dispatch: On an xclbin, which has no parameter scratchpad, each
                 per-call value's dispatch-time scalar, by device symbol.
         """
-        if self.op.external is not None:
-            dev = self.op.dev
-            op = self.op.resolved(dev).copy()  # a build binds streams
-            runtime = ShippedRuntime(op, dev, op.build_array())
-            return Program(dev, runtime).resolve_program()
         array = BuiltArray(self, dispatch=dispatch)
         prog = Program(
             array.op.device(),

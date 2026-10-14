@@ -19,10 +19,10 @@ from typing import Any, ClassVar
 import numpy as np
 from aie.dialects import aiex
 from aie.dialects.aie import AIETileType, DMAChannelDir, WireBundle
-from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
+    DmaEndpoint,
     Flow,
     ObjectFifo,
     PacketFlow,
@@ -33,7 +33,6 @@ from aie.iron import (
 from aie.iron.device import Tile
 from aie.iron.kernels import datamovement
 from aie.iron.runtime.dmatask import emit_shim_transfer
-from aie.ir import IntegerType
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
@@ -50,7 +49,6 @@ from iron.common import (
     Param,
 )
 from iron.common.design import BdLimits
-from iron.common.design.runtime import ShimChannel
 from iron.common.testing import Case, Testing
 
 # kDDRAIEAddrOffset (TxnEncoding.h)
@@ -128,7 +126,8 @@ class Gather(Operator):
 
     table = In(table_rows, row, dtype=dtype)
     control = In(words, dtype=np.uint32)
-    y = Out(rows, row, dtype=dtype)
+    # Each feed's span drains through its drain shim's S2MM 0, pinned.
+    y = Out(rows, row, dtype=dtype, tile=(row,), per=(feeds,))
     valid_rows = Extent(rows)
     # Per feed, the 16-byte units it drains under a bound.
     drained0 = Value(derive=lambda op: op.drained(0), optional=True)
@@ -209,10 +208,15 @@ class Gather(Operator):
     def ops(self) -> int:
         return 0  # a data mover: its figure is bandwidth
 
+    def extent_unit(self, buffer: str) -> int:
+        return 0  # a bound shortens y's drains by the drained words, not by tiles
+
     def array(self) -> list:
+        shims = [(Tile(2 * k, 0), Tile(2 * k + 1, 0)) for k in range(self.feeds)]
+        drains = [DmaEndpoint(drain, DMAChannelDir.S2MM, 0) for _, drain in shims]
+        self.y.pin(drains)
         routes = []
-        for k in range(self.feeds):
-            feed, drain = Tile(2 * k, 0), Tile(2 * k + 1, 0)
+        for k, (feed, drain) in enumerate(shims):
             routes += [
                 PacketFlow(
                     self.control_id - k,
@@ -230,41 +234,28 @@ class Gather(Operator):
                     dst_channel=0,
                     shim_symbol=f"gather_feed{k}",
                 ),
-                ShimChannel(f"gather_rows{k}", drain, DMAChannelDir.S2MM, 0),
             ]
-        return routes
+        return [*routes, *drains]
 
     def sequence(self, rt) -> None:
-        words, y = rt.data(self.control), rt.data(self.y)
+        words = rt.data(self.control)
         chain, batches, runs = self.chain, self.batches, self.runs
         bounded = "valid_rows" in self.bound_extents
         unit = 16 // np.dtype(self.dtype).itemsize
         drained, pending = [], []
         for k, run in enumerate(runs):
             first = run.start * chain * self.row
-            size: Any = min(run.stop * chain, self.rows) * self.row - first
-            length = {}
-            if bounded and self.value(f"drained{k}").scratchpad:
-                length = dict(
-                    length_parameter=self.value(f"drained{k}").param, length_unit=unit
-                )
-            elif bounded:
-                # An xclbin's stream is generated per call: the length is a
-                # dispatch-time scalar.
-                count = self.value(f"drained{k}").ssa
-                size = arith.muli(
-                    count, arith.constant(unit, IntegerType.get_signless(32))
-                )
+            size = min(run.stop * chain, self.rows) * self.row - first
             drained.append(
-                emit_shim_transfer(
-                    f"gather_rows{k}",
-                    y,
-                    tap=TensorAccessPattern(
+                self.y.drain(
+                    TensorAccessPattern(
                         (self.rows * self.row,), first, [1, 1, 1, size], [0, 0, 0, 1]
                     ),
+                    lane=k,
                     wait=True,
                     managed=False,
-                    **length,
+                    length_parameter=self.value(f"drained{k}") if bounded else None,
+                    length_unit=unit if bounded else None,
                 )
             )
             # Every feed's preamble writes the same descriptors, from one copy.

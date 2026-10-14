@@ -19,8 +19,9 @@ Nothing here is built. The class names what is baked into the xclbin and
 visible nowhere in it: the shim channel map (A on MM2S channel 0 of columns
 0, 2, 4 and 6; B on MM2S channel 1 of every column; C out of S2MM channel
 0 of every column), the address and lock of the eight parameter words every
-core reads, and the order the memtiles consume transfers in. The library
-emits the sequence against those pins (``iron.common.design.ShippedRuntime``).
+core reads, and the order the memtiles consume transfers in. Its
+``array()`` pins the operands' lanes to those channels and places the
+parameter blocks, and its sequence moves data against those pins.
 
 What differs from the port, and why the port is the default: the port
 selects its epilogue at build time (a branch-free inner loop, one build per
@@ -35,9 +36,9 @@ import dataclasses
 from typing import ClassVar
 
 import numpy as np
-from aie.dialects.aie import AIEArch
+from aie.dialects.aie import AIEArch, DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, Lock
+from aie.iron import Buffer, DmaEndpoint, Lock
 from aie.iron.device import Tile
 from ml_dtypes import bfloat16
 
@@ -128,8 +129,6 @@ class Shipped(
         tile=(M_TILE, K_TILE),
         per=(GEMM.rows,),
         depth=QUEUE_DEPTH,
-        via=[Tile(col, 0) for col in A_SOURCE_COL],
-        channel=0,
     )
     # B: one column's k-blocks, pre-packed, down each column on MM2S channel 1.
     B = In(
@@ -138,8 +137,6 @@ class Shipped(
         tile=(K_TILE, N_TILE),
         per=(GEMM.cols,),
         depth=QUEUE_DEPTH,
-        via=[Tile(c, 0) for c in range(COLS)],
-        channel=1,
     )
     # C: the joined (ROWS*M_TILE x N_TILE) block, out of every column on
     # S2MM channel 0, which the image's epilogue finishes as the port's does.
@@ -149,8 +146,6 @@ class Shipped(
         tile=(ROWS * M_TILE * N_TILE,),
         per=(GEMM.cols,),
         depth=QUEUE_DEPTH,
-        via=[Tile(c, 0) for c in range(COLS)],
-        channel=0,
         finish=(CT_OUT_LEN,),
     )
     # The port's named values are not this image's: it reads one block of
@@ -160,9 +155,20 @@ class Shipped(
     parameters = Value(derive=_parameter_words)
 
     def array(self) -> list:
-        """What the sequence reaches of the image: each core's parameter
-        block at the address its program reads, and the lock it waits on.
+        """What the sequence reaches of the image: the shim channels each
+        operand's lanes stream on, each core's parameter block at the
+        address its program reads, and the lock it waits on, which the
+        sequence releases (``parameter_locks``).
         """
+        mm2s, s2mm = DMAChannelDir.MM2S, DMAChannelDir.S2MM
+        shims = [Tile(c, 0) for c in range(COLS)]
+        pins = [
+            (self.A, [DmaEndpoint(shims[c], mm2s, 0) for c in A_SOURCE_COL]),
+            (self.B, [DmaEndpoint(shims[c], mm2s, 1) for c in range(COLS)]),
+            (self.C, [DmaEndpoint(shims[c], s2mm, 0) for c in range(COLS)]),
+        ]
+        for operand, ends in pins:
+            operand.pin(ends)
         dev = self.dev
         cores = [Tile(col, row) for row in dev.core_rows for col in range(dev.cols)]
         blocks = [
@@ -176,7 +182,9 @@ class Shipped(
             for tile in cores
         ]
         self.parameters.bind(blocks)
-        return [*blocks, *(Lock(tile, lock_id=RTP_LOCK_ID) for tile in cores)]
+        self.parameter_locks = [Lock(tile, lock_id=RTP_LOCK_ID) for tile in cores]
+        ends = [end for _, lane_ends in pins for end in lane_ends]
+        return [*ends, *blocks, *self.parameter_locks]
 
     def resolve(self, dev):
         if dev is not None and (dev.arch is not AIEArch.AIE2p or dev.cols < 8):
@@ -201,9 +209,15 @@ class Shipped(
         return f"FLM_MM_{FASTFLOWLM_COMMIT[:8]}_{dev.name}"
 
     def sequence(self, rt) -> None:
-        """One transfer per (column-block, row-block, leg), in the order the
-        memtiles consume: column-block outermost, then row-block, then column.
+        """The parameter blocks, then their release, then one transfer per
+        (column-block, row-block, leg), in the order the memtiles consume:
+        column-block outermost, then row-block, then column.
         """
+        # Every word precedes the first release, so no core reads a
+        # half-written block.
+        rt.preamble()
+        for lock in self.parameter_locks:
+            lock.set(1)
         M, K, N = self.M, self.K, self.N
         k_iters = K // K_TILE
         m_row_blocks = M // MIN_M
