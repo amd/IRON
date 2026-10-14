@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import inspect
 import math
-import typing
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -182,15 +182,13 @@ class Declaration:
         self.autos = tuple(f.name for f in autos)
         self.tunables = tuple(f.name for f in autos if f.init and not f.derived)
         # A tunable given no domain and annotated with an Enum is searched
-        # over that Enum's members. `get_type_hints` resolves the bare
-        # name `from __future__ import annotations` leaves as a string;
-        # Operator's own `bound_values` is annotated with graph.handle's
-        # Affine, which operator.py can only import under TYPE_CHECKING
-        # (graph.handle imports operator.py), so it is resolved here instead,
-        # the one place that needs it at runtime.
-        from ..graph.handle import Affine
-
-        hints = typing.get_type_hints(cls, localns={"Affine": Affine})
+        # over that Enum's members. The library base's own annotations name
+        # TYPE_CHECKING-only types, and an operator's fields are its
+        # subclasses', so only theirs are evaluated.
+        hints = {}
+        for klass in reversed(cls.__mro__):
+            if klass is not library and issubclass(klass, library):
+                hints |= inspect.get_annotations(klass, eval_str=True)
         self.domains = {}
         for f in autos:
             if f.name not in self.tunables:
