@@ -17,7 +17,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.operators.copy import Copy
-from iron.tests.common.build import generated_sequence
+from iron.tests.common.build import built, generated_sequence
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -57,45 +57,57 @@ LAST_ROW = dict(
 SLOT5 = dict(ROW_INTO_CACHE, dst=TensorAccessPattern.full((G, L, D))[:, 5])
 SLOT5_TWO_CHANNELS = dict(SLOT5, num_channels=2)
 
+# A task's lane, as (operand attribute, channel): the fifos are unnamed
+# (mlir-aie's DeviceConfiguration names them), so a case names a lane by
+# what it is, and a test resolves it to the real name through the built op.
 PINNED: dict[str, tuple[dict[str, Any], list]] = {
     "row_into_cache": (
         ROW_INTO_CACHE,
         [
-            ("fifo_in_0", 0, "1, 1, 8, 64", "0, 0, 64, 1"),
-            ("fifo_out_0", 0, "1, 1, 8, 64", "0, 0, 8192, 1"),
+            (("x", 0), 0, "1, 1, 8, 64", "0, 0, 64, 1"),
+            (("y", 0), 0, "1, 1, 8, 64", "0, 0, 8192, 1"),
         ],
     ),
     "rows_into_cache": (
         ROWS_INTO_CACHE,
         [
-            ("fifo_in_0", 0, "1, 8, 16, 64", "0, 64, 512, 1"),
-            ("fifo_out_0", 0, "1, 8, 16, 64", "0, 8192, 64, 1"),
+            (("x", 0), 0, "1, 8, 16, 64", "0, 64, 512, 1"),
+            (("y", 0), 0, "1, 8, 16, 64", "0, 8192, 64, 1"),
         ],
     ),
     "last_row": (
         LAST_ROW,
         [
-            ("fifo_in_0", 0, "1, 1, 1, 2048", "0, 0, 0, 1"),
-            ("fifo_out_0", 0, "1, 1, 1, 2048", "0, 0, 0, 1"),
+            (("x", 0), 0, "1, 1, 1, 2048", "0, 0, 0, 1"),
+            (("y", 0), 0, "1, 1, 1, 2048", "0, 0, 0, 1"),
         ],
     ),
     "slot5": (
         SLOT5,
         [
-            ("fifo_in_0", 0, "1, 1, 8, 64", "0, 0, 64, 1"),
-            ("fifo_out_0", 320, "1, 1, 8, 64", "0, 0, 8192, 1"),
+            (("x", 0), 0, "1, 1, 8, 64", "0, 0, 64, 1"),
+            (("y", 0), 320, "1, 1, 8, 64", "0, 0, 8192, 1"),
         ],
     ),
     "slot5_two_channels": (
         SLOT5_TWO_CHANNELS,
         [
-            ("fifo_in_0", 0, "1, 1, 8, 32", "0, 0, 64, 1"),
-            ("fifo_out_0", 320, "1, 1, 8, 32", "0, 0, 8192, 1"),
-            ("fifo_in_1", 32, "1, 1, 8, 32", "0, 0, 64, 1"),
-            ("fifo_out_1", 352, "1, 1, 8, 32", "0, 0, 8192, 1"),
+            (("x", 0), 0, "1, 1, 8, 32", "0, 0, 64, 1"),
+            (("y", 0), 320, "1, 1, 8, 32", "0, 0, 8192, 1"),
+            (("x", 1), 32, "1, 1, 8, 32", "0, 0, 64, 1"),
+            (("y", 1), 352, "1, 1, 8, 32", "0, 0, 8192, 1"),
         ],
     ),
 }
+
+
+def _lane_names(op: Copy) -> dict[tuple[str, int], str]:
+    """``op``'s lanes, named as mlir-aie assigned them, keyed as the
+    ``PINNED``/``GATHERS`` cases name a lane: ``(operand attribute, channel)``.
+    """
+    names = {("x", c): h.name for c, h in enumerate(op.x.handles)}
+    names.update({("y", c): h.name for c, h in enumerate(op.y.handles)})
+    return names
 
 
 def _bounded(op: Copy) -> Copy:
@@ -108,8 +120,11 @@ def _bounded(op: Copy) -> Copy:
 @pytest.mark.parametrize("name", sorted(PINNED))
 def test_copy_issues_these_descriptors(name):
     kwargs, tasks = PINNED[name]
-    _, issued = generated_sequence(Copy(**kwargs))
-    assert [(t.lane, t.offset, t.sizes, t.strides) for t in issued] == tasks
+    _, issued, op = built(Copy(**kwargs))
+    names = _lane_names(op)
+    assert [(t.lane, t.offset, t.sizes, t.strides) for t in issued] == [
+        (names[lane], offset, sizes, strides) for lane, offset, sizes, strides in tasks
+    ]
 
 
 def test_a_bounded_axis_lands_on_d2_and_names_it():
@@ -179,26 +194,26 @@ GATHERS = {
     "runs": (
         np.r_[5:9, 40:44],
         [
-            ("fifo_out_0", 0, "1, 1, 8, 32", "0, 0, 32, 1"),
-            ("fifo_in_0", 160, "1, 2, 4, 32", "0, 1120, 32, 1"),
+            (("y", 0), 0, "1, 1, 8, 32", "0, 0, 32, 1"),
+            (("x", 0), 160, "1, 2, 4, 32", "0, 1120, 32, 1"),
         ],
     ),
     # A row repeated: a stride-0 iteration.
     "repeat": (
         np.full(6, 7),
         [
-            ("fifo_out_0", 0, "1, 1, 6, 32", "0, 0, 32, 1"),
-            ("fifo_in_0", 224, "6, 1, 1, 32", "0, 0, 0, 1"),
+            (("y", 0), 0, "1, 1, 6, 32", "0, 0, 32, 1"),
+            (("x", 0), 224, "6, 1, 1, 32", "0, 0, 0, 1"),
         ],
     ),
     # Out of order: a run down cannot merge, so every row is its own fill.
     "descending": (
         np.array([9, 8, 2]),
         [
-            ("fifo_out_0", 0, "1, 1, 3, 32", "0, 0, 32, 1"),
-            ("fifo_in_0", 288, "1, 1, 1, 32", "0, 0, 0, 1"),
-            ("fifo_in_0", 256, "1, 1, 1, 32", "0, 0, 0, 1"),
-            ("fifo_in_0", 64, "1, 1, 1, 32", "0, 0, 0, 1"),
+            (("y", 0), 0, "1, 1, 3, 32", "0, 0, 32, 1"),
+            (("x", 0), 288, "1, 1, 1, 32", "0, 0, 0, 1"),
+            (("x", 0), 256, "1, 1, 1, 32", "0, 0, 0, 1"),
+            (("x", 0), 64, "1, 1, 1, 32", "0, 0, 0, 1"),
         ],
     ),
 }
@@ -207,9 +222,11 @@ GATHERS = {
 @pytest.mark.parametrize("name", sorted(GATHERS))
 def test_a_gather_merges_the_rows_it_can(name):
     ids, tasks = GATHERS[name]
-    op = _gather(ids)
-    text, issued = generated_sequence(op)
-    assert [(t.lane, t.offset, t.sizes, t.strides) for t in issued] == tasks
+    text, issued, op = built(_gather(ids))
+    names = _lane_names(op)
+    assert [(t.lane, t.offset, t.sizes, t.strides) for t in issued] == [
+        (names[lane], offset, sizes, strides) for lane, offset, sizes, strides in tasks
+    ]
     assert text.count("dma_await_task") == 1
     assert op.aiecc_flags == ("--reclaim-runtime-bds",)
     x = np.arange(V * W, dtype=np.float32).reshape(V, W)
@@ -218,14 +235,8 @@ def test_a_gather_merges_the_rows_it_can(name):
 
 def test_a_gathers_channels_split_each_row():
     ids = np.array([3, 3, 60, 1])
-    op = _gather(ids, num_channels=2)
-    text, issued = generated_sequence(op)
-    assert {t.lane for t in issued} == {
-        "fifo_in_0",
-        "fifo_in_1",
-        "fifo_out_0",
-        "fifo_out_1",
-    }
+    text, issued, op = built(_gather(ids, num_channels=2))
+    assert {t.lane for t in issued} == set(_lane_names(op).values())
     assert text.count("dma_await_task") == 2
     x = np.arange(V * W, dtype=np.float32).reshape(V, W)
     assert (op.reference(x).reshape(len(ids), W) == x[ids]).all()
@@ -334,17 +345,17 @@ def test_each_channel_drains_the_elements_it_fills(name):
     give the reference: a split whose two sides' shares do not line up
     lands elements in the wrong places only on a device otherwise.
     """
-    op = Copy(**CHANNEL_SPLITS[name]).resolved()
-    _, tasks = generated_sequence(op)
+    _, tasks, op = built(Copy(**CHANNEL_SPLITS[name]).resolved())
+    names = _lane_names(op)
     x = np.arange(1, op.input_buffer_size + 1, dtype=np.float32)
     want = op.reference(x)
     got = np.zeros_like(want)
     for c in range(op.num_channels):
         moved = {}
-        for side in ("in", "out"):
+        for side, attr in (("in", "x"), ("out", "y")):
             walks = []
             for t in tasks:
-                if t.lane != f"fifo_{side}_{c}":
+                if t.lane != names[(attr, c)]:
                     continue
                 sizes = [int(s) for s in t.sizes.split(",")]
                 strides = [int(s) for s in t.strides.split(",")]
