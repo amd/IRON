@@ -318,8 +318,6 @@ class AudioTower(Model):
         h = SiLU(RMSNorm(h, weight=w.norm, epsilon=c.eps))
         return ElementwiseAdd(x, self.linear(w.end, Clamp(h, **w.end.input)))
 
-    # -- on the host -----------------------------------------------------------
-
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, `max_tokens` soft tokens."""
         c = self.config

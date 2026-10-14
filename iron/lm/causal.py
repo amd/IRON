@@ -180,8 +180,6 @@ class CausalLM(Model):
         )
         return o.reshape(n, H * D)
 
-    # -- on the host -----------------------------------------------------------
-
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the decode step's (none), then
         the prompt chunk's token ids.
@@ -384,11 +382,6 @@ class CausalLM(Model):
         return [int(t) for t in drawn], first - start, later
 
     def _tokens(self, tokens) -> np.ndarray:
-        """``tokens`` as one row of ids, each checked against the vocabulary.
-
-        Raises:
-            IndexError: A token is outside ``[0, vocab_size)``.
-        """
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
         V = self.config.vocab_size
         if ((tokens < 0) | (tokens >= V)).any():

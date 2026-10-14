@@ -241,8 +241,6 @@ class EmbeddingGemma(Encoder):
         x = ElementwiseAdd(x, RMSNorm(g, weight=norm, epsilon=c.eps))
         return RowwiseMul(x, self.scales[i])
 
-    # -- on the host -----------------------------------------------------------
-
     def longest(self) -> dict:
         """The per-call values of the longest call: every row real."""
         return dict(n=self.max_tokens)
@@ -351,8 +349,6 @@ class Multimodal(EmbeddingGemma):
         )
         Copy(x, self.merged[: x.shape[0]])
         return self.encoder(Copy(self.merged[merge]), n)
-
-    # -- on the host -----------------------------------------------------------
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the text encoder's, each

@@ -92,7 +92,6 @@ def _resident(traced: TracedGraph, state: State) -> Handle:
 
 
 def _move(traced: TracedGraph, handle: Handle, parent: Handle, start: int) -> None:
-    """Make a computed element, and every view of it, a slice of ``parent``."""
     old = handle.name
     views = [handle] + [h for s in traced.steps for h in s.slots + s.inputs + s.outputs]
     for view in views:

@@ -783,7 +783,6 @@ class CompiledGraph:
 
 
 def _check_values(name: str, declared, values: Mapping[str, Any]) -> None:
-    """Refuse ``values`` unless they name every one of ``declared``, and no other."""
     missing, unknown = set(declared) - set(values), set(values) - set(declared)
     if missing or unknown:
         raise TypeError(

@@ -3,48 +3,19 @@
 
 """Measuring what ``narrowing`` trades, on the NPU.
 
-A full-ELF run costs ``D0`` (dispatch), a configure per device entered
-(``base`` plus each member's load), the reset configure ``R`` when the
-entries are odd, and each step's ``t_step``. An xclbin chain (a table
-whose ``full_elf`` is false) costs ``F`` per call, each step's ``c``, its own
-dispatch included, and the incoming design's load ``L`` at every switch,
-counted around the call: a chain of one design never switches.
-
-- ``measure_steps``: one run against ``repeats`` runs of a design gives
-  ``t_step`` and ``alone = D0 + base + load + R`` (on an xclbin chain ``c``
-  and ``F``). Any other setting of its
-  tunables is a candidate only if its output is bit-identical to the
-  default's, or ``judge`` finds it within the default's gate and its own.
-  A design the ``CostCache`` holds is taken from it, not run.
-- ``search``: which of a design's settings ``measure_steps`` runs: all of
-  them, or coordinate descent where there are more than ``EXHAUSTIVE``.
-- ``calibrate``, on designs A, B: ``A B A B ...`` against
-  ``A A ... B B ...`` gives ``(E(A) + E(B)) / 2``; each design repeated
-  against it once gives its step in the same rounds, the grouped run
-  ``D0``, the runs of one ``R``, and ``[A, B]`` packed gives ``base`` as
-  ``E(A) + E(B) - E(pack)``. On an xclbin chain ``E`` is ``L``, the grouped
-  run gives ``F``, and there is no reset or pack.
-- ``measure_loads``: ``[R, k]`` alternating against them grouped, as
-  ``calibrate`` does, gives ``E(R) + E(k)``, ``R`` a calibrated design.
-- ``measure_packs``: on a full ELF, designs sharing one device alternating
-  with ``R`` against them grouped gives the pack's entry, and each member
-  repeated on it its step there.
-- ``measure_points``: a design run at each of its call's operating points
-  (``Call.points``, where they write it different bound extents) against
-  as many steps at the call's own values, interleaved, gives its step at
-  each point (``StepCost.points``).
-- ``measure_graph``: every design of the versions it is given, each in a
-  ``Call`` of its version, then its operating points, then the
-  calibrations, then each design's entry.
-- ``check_model``: a tuned version timed against the untuned one, each
-  beside the model's prediction for it.
-
-Figures are medians of per-round medians, interleaved, of the run alone (the
-callable's ``last_elapsed``), a setting far behind the fastest over fewer
-rounds (``Timing``). Nothing else may dispatch meanwhile: a round starts
-once no other process holds the NPU, and is timed again if one holds it
-when the round ends. A figure whose calls waited for a CPU (``CPU_WAIT_US``)
-is refused.
+Each term of the model comes from runs timed against one another, so the
+dispatch and the steps cancel: a design run once against ``repeats`` times
+gives its step and its entry alone (``measure_steps``); ``A B A B ...``
+against ``A A ... B B ...`` gives the mean of two entries, and ``[A, B]``
+packed the base (``calibrate``); a setting alternating with a calibrated
+design gives its entry (``measure_loads``), a pack its entry and its
+members' steps on it (``measure_packs``), and a design at its call's
+operating points its step there (``measure_points``). On an xclbin chain
+the entry is the load ``L`` and there is no reset or pack. A setting other
+than the default is a candidate only if its output is bit-identical to the
+default's or within both their gates. Figures are medians of per-round
+medians, timed only while no other process holds the NPU; a figure whose
+calls waited for a CPU (``CPU_WAIT_US``) is refused.
 """
 
 from __future__ import annotations
@@ -162,11 +133,8 @@ def pmode() -> str:
 
 def others(holding: bool = False) -> set[int]:
     """The processes other than this one holding a context on the NPU, by
-    pid, as ``xrt-smi`` reports its partitions.
-
-    ``xrt-smi`` reports pids in the host's pid namespace, so in a container
-    ``os.getpid()`` is none of them and this process cannot tell which is
-    its own.
+    pid, as ``xrt-smi`` reports them: in the host's pid namespace, so in a
+    container this process cannot tell which is its own.
 
     Args:
         holding: Whether this process holds a context. Where its pid is not
@@ -230,15 +198,9 @@ def wait_idle(log: Callable[[str], None] = print, holding: bool = False) -> None
 class Awake:
     """While entered, the calling thread on the CPUs the NPU's completions
     interrupted since ``before`` (``interrupts``), and a spinner at nice 19
-    on each of their SMT siblings.
-
-    A core in deep idle when a completion arrives adds its exit latency to
-    the run, but only once the gap between completions is long enough for
-    the idle governor to choose it: a probe's long runs would carry it and
-    its short ones not. A busy sibling holds the core shallow without
-    delaying the completion work on it, and the waiting thread is woken on
-    that core. Another process on that core, under lazy preemption, holds
-    the woken thread off it until the core's next tick (``waited_us``).
+    on each of their SMT siblings: a busy sibling keeps the core out of deep
+    idle, whose exit latency would land only on the runs with long gaps
+    between completions.
     """
 
     IRQ = "xdna_mailbox"
@@ -311,7 +273,6 @@ def cost_cache() -> CostCache:
 
 
 def _sample(dtype, nbytes: int, rng: np.random.Generator) -> np.ndarray:
-    """``nbytes`` of normal floats or small integers, as bytes."""
     dtype = np.dtype(dtype)
     if dtype.kind == "f" or dtype.name == "bfloat16":
         n = nbytes // dtype.itemsize
@@ -540,11 +501,9 @@ def time_interleaved(
     fastest: float = math.inf,
     log: Callable[[str], None] = print,
 ) -> list[Timed]:
-    """Each loaded image's median of per-round medians, microseconds.
-
-    A round starts once no other process holds the NPU (``wait_idle``), and
-    one that ends with another holding it is timed again. The cores the
-    runs' completions interrupt are held ``Awake`` throughout.
+    """Each loaded image's median of per-round medians, microseconds, each
+    round timed while no other process holds the NPU (``wait_idle``) and the
+    completions' cores are held ``Awake``.
 
     Args:
         groups: Per run, the setting it measures, where the runs are
@@ -1547,13 +1506,10 @@ class Call:
 @dataclasses.dataclass(frozen=True)
 class Designs:
     """The designs of a set of calls as ``measure_graph`` measures them,
-    without a device: each design's first operator and the call it runs in,
-    its settings (``variants`` of it at its probe that the placer takes,
-    ``fitting``), and for a design a folded call has of its own, the design
-    whose step it took; one whose default the placer refuses is left out,
-    so its fold is never priced. ``versions`` are the graphs the calls are
-    of, as traced, and ``dev`` the device. ``points`` holds the operating points
-    of each design whose work its call's points change (``Call.op_points``).
+    without a device: each design's first operator and call, its settings
+    the placer takes (``fitting``), its operating points
+    (``Call.op_points``), and for a folded call's own design the one whose
+    step it took. A design whose default the placer refuses is left out.
     """
 
     first: dict[str, tuple[Operator, Call]]
@@ -1748,21 +1704,12 @@ def measure_graph(
     cache: CostCache | None = None,
 ) -> list[str]:
     """Measure every design of ``calls``' graphs into ``table``, saved as it
-    goes: each at the settings ``variants`` gives that ``search`` runs, in
-    the first call that runs it, then each accurate setting at its call's
-    operating points (``measure_points``), then the configure cost between
-    each pair of ``triangle``'s operator classes (``Designs.calibrated``),
-    which determines each one's entry, each other setting's entry beside
-    the first of those (``measure_loads``), and on a full ELF the packs the
-    versions' tunings take, each as one device (``measure_packs``), until
-    they take none the table lacks or ``PACK_ROUNDS`` have (logging those
-    still lacking). Designs, entries,
-    packs and calibrations already in the table or ``cache`` (this NPU's
-    ``cost_cache()`` if not given) are kept unless ``remeasure``; those the
-    graphs no longer have are dropped from the table. A design a folded
-    call has of its own is measured beside the one whose step it took, at
-    each setting both have that the other's ``search`` measured
-    (``measure_steps``' `twins`); the call it is folded from comes first.
+    goes: its settings (``search``), its operating points
+    (``measure_points``), the calibrations between ``triangle``'s classes,
+    each setting's entry (``measure_loads``) and, on a full ELF, the packs
+    the tunings take (``measure_packs``, up to ``PACK_ROUNDS``). What the
+    table or ``cache`` holds is kept unless ``remeasure``; a design a folded
+    call has of its own is measured beside the one whose step it took.
 
     Returns:
         The design keys, operating points (``"key@label"``), calibration

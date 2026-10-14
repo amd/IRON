@@ -21,9 +21,6 @@ PROFILES = Path(__file__).with_name("profiles")
 
 
 def _global_layers(layer_types: list[str]) -> tuple[int, ...]:
-    """The layers ``layer_types`` (the checkpoint's own ``text_config``) names
-    ``"full_attention"``; the rest are sliding.
-    """
     return tuple(i for i, kind in enumerate(layer_types) if kind == "full_attention")
 
 

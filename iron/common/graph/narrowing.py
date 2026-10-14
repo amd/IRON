@@ -1,69 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Joint narrowing: each design's tunables (``Operator.domains``: its width,
-narrower or wider than its default, and any other its operator searches)
-and which designs share a device, chosen together to minimise the modelled
-time of a full-ELF runlist:
+"""Joint narrowing: each design's tunables (``Operator.domains``) and which
+designs share a device, chosen together to minimise the modelled time of a
+full-ELF runlist:
 
     D0 + sum over steps of t_step
        + sum over device entries of (base + sum over its members of load)
        + R if the entries are odd
 
-A device is entered at a step whose design is in it when the step before is
-not; entering configures it. The designs of one array share a device
-(``Packing.sharing``) that loads the array once, so the search takes them
-as one, at one setting. ``R`` is the empty configure the parity rule
-adds (``Fusion.needs_reset``). ``t_step`` and ``load`` are measured per
-design and setting, ``D0``, ``base`` and ``R`` per device (``probe``, into a
-``CostTable``). A pack the table holds measured as one (``CostTable.packs``)
-is priced as measured instead: its entry, and each member's step on it.
-A full ELF of one design is configured by its first call alone
-(``Fusion.expanded``), so a call costs `D0` and its steps.
-
-Only a pack connected in the runlist's adjacency can save an entry, so the
-candidates are the connected sets of designs, and an exact search over
-partitions into them, carrying the parity, finds the cheapest. The placer
-(``fits``) is asked only about the packs a solution uses; a refused pack
-tries its next-cheapest settings, then is dropped, and the search reruns.
-What the search chose is recorded, keyed on the runlist, the table and the
-device, and a later tuning of the same runlist takes it while its packs
-still fit.
-
-A setting is a candidate only if it was measured accurate: its output
-bit-identical to the default's, or within the gate of the default and its
-own. A design the table does not hold stays at its default, alone in its
-device.
-
-A design whose work follows a per-call value (a bound extent: attention
-over the context so far) is priced at the calls' operating points where
-the table holds them (``StepCost.points``): ``t_step`` is their weighted
-mean, a pack's step moves with it, and a setting is a candidate only if
-accurate at each.
-
-An xclbin chain (a table with ``full_elf`` false) is a dispatch per step and a
-kernel per design, so nothing packs and the designs of one array are not
-tied:
-
-    F + sum over steps of c + sum over switches of L(incoming design)
-
-counting the switches cyclically, as a decode loop calls the version back
-to back. ``c`` is a step dispatched alone, ``L`` a design's load, ``F`` the
-rest of a call. The switches follow from the runlist alone, so each design
-takes the setting minimising its occurrences times ``c`` plus its arrivals
-times ``L``, independently of the others.
-
-A fold (``iron.common.graph.fold``) is another runlist: fewer steps, the
-producer's design in place of two. Each the graph admits is priced by the
-same search over its folded graph, and taken where the model's time drops,
-the cheapest first; a fold changing a design the table does not hold is
-not taken.
-
-``NarrowingKinds`` names which of these three the search takes, each
-independent of the others: widths, folds, packs. Every kind on
-(``JointNarrowing``'s default) is the search above, unchanged; a kind off
-leaves that decision at the graph's own default rather than searching it
-at all, so an ablation can measure one decision's gain at a time.
+A step whose design is in a device the step before is not in enters it,
+which configures it; the designs of one array are one device at one
+setting, and ``R`` is the parity rule's empty configure. The terms are
+measured into a ``CostTable`` (``probe``); a pack it measured as one is
+priced as measured, and a design bound by a per-call value at its calls'
+operating points. Only a pack connected in the runlist can save an entry,
+so an exact search over partitions into connected sets, carrying the
+parity, finds the cheapest; the placer (``fits``) is asked only about the
+packs it uses, and the choice is recorded per runlist, table and device.
+A setting is a candidate only if measured accurate; an unmeasured design
+stays at its default. On an xclbin chain (``F + sum of c + sum over
+switches of L``) nothing packs and each design's setting is chosen alone.
+A fold is another runlist, priced by the same search and taken where the
+time drops. ``NarrowingKinds`` turns widths, folds and packs off one at a
+time.
 """
 
 from __future__ import annotations
@@ -98,11 +58,9 @@ logger = logging.getLogger(__name__)
 
 
 def cost_key(op: Operator, dev=None) -> str:
-    """A design's class and identity, resolved for ``dev``, as the fused
-    image names it, at its probe (``Operator.probed``): the designs that
-    differ only in fields their cost cannot follow share one key. The key
-    leaves out the sources, so remeasure after editing how a design is
-    generated.
+    """A design's class and identity at its probe (``Operator.probed``),
+    resolved for ``dev``; it leaves out the sources, so remeasure after
+    editing how a design is generated.
     """
     design = OperatorDesign(op._probed().resolved(dev))
     return f"{type(op).__name__}_{design.identity}"
@@ -209,11 +167,8 @@ CONFIDENCE = 2.0
 def fit_verdict(
     designs: Mapping[str, OperatorDesign], fit_cache: Path = FIT_CACHE
 ) -> str | None:
-    """Why the placer refuses ``designs`` on one device, or None if they fit.
-
-    A design that cannot be generated is refused with the generator's error.
-    The verdict is kept under ``fit_cache``, keyed on the designs' recipes,
-    so it is reused exactly when the build would be.
+    """Why the placer refuses ``designs`` on one device, or None if they
+    fit; kept under ``fit_cache``, keyed on the designs' recipes.
 
     Args:
         designs: The designs, by the name each takes in the device.
@@ -239,7 +194,6 @@ def refuse(
 
 
 def _fit_record(designs: Mapping[str, OperatorDesign], fit_cache: Path) -> Path:
-    """The file holding the verdict on ``designs``, keyed on their recipes."""
     h = hashlib.sha256(
         repr(sorted(d.compilable().recipe_hash for d in designs.values())).encode()
     )
@@ -418,11 +372,7 @@ class PackCost(Measured):
 
 class CostTable:
     """Measured step and configure costs for one device and one packaging,
-    as JSON on disk.
-
-    ``steps`` is keyed by ``cost_key``, ``calibrations`` by the pair of keys
-    measured, ``packs`` by ``pack_name``; the model takes the median of each
-    calibrated figure.
+    as JSON on disk; the model takes the median of each calibrated figure.
 
     Args:
         path: The JSON file; read if it exists.
@@ -1063,9 +1013,7 @@ def _cheapest(
 @dataclasses.dataclass(frozen=True)
 class NarrowingKinds:
     """Which decisions ``JointNarrowing`` may take, each independent of the
-    others. Every kind on (the default) is the plan it always chose before
-    this: a kind off leaves that decision at the graph's own default,
-    instead of refusing to tune at all.
+    others; a kind off leaves that decision at the graph's own default.
 
     Attributes:
         widths: An alternate tunable setting per design
@@ -1103,9 +1051,7 @@ class JointNarrowing:
             (``CostTable.step_against``).
         tuning_cache: Where the packs search chose persist across
             processes, taken again while every pack still fits.
-        kinds: Which of widths, folds and packs this search may take;
-            every kind on (``NarrowingKinds()``, the default) is the plan
-            it has always chosen.
+        kinds: Which of widths, folds and packs this search may take.
     """
 
     table: CostTable = dataclasses.field(compare=False)
@@ -1222,9 +1168,6 @@ class JointNarrowing:
         return priced[taken]
 
     def _narrow(self, traced: TracedGraph, dev, keyed: dict[int, str]) -> Tuning:
-        """The tunables and packs of ``traced`` as it is; each operator's
-        cost key in ``keyed`` (``cost_keys``).
-        """
         table = self.table
         keys = cost_keys(traced, dev, keyed)
         first: dict[str, Operator] = {}
@@ -1462,11 +1405,8 @@ class JointNarrowing:
         expands: bool,
     ) -> Path:
         """The file holding what the packs search chose for the runlist
-        ``keys`` over the settings ``found``.
-
-        Keyed on everything the search reads bar the placer, whose verdicts
-        a recorded tuning is checked against when taken. The search takes
-        seconds to minutes on a graph of hundreds of designs.
+        ``keys`` over the settings ``found``: keyed on everything the search
+        reads bar the placer, whose verdicts are checked when it is taken.
         """
         h = hashlib.sha256(
             json.dumps(
@@ -1488,7 +1428,6 @@ class JointNarrowing:
 
     @staticmethod
     def _gain(pack: _Pack, alone: Sequence[tuple[float, Variant, int]]) -> float:
-        """What ``pack`` saves over its members each alone, bar the parity."""
         return sum(alone[i][0] for i in pack.members) - pack.cost
 
     def _candidates(
@@ -1561,7 +1500,6 @@ class JointNarrowing:
         alone: list[tuple[float, Variant, int]],
         packs: list[_Pack],
     ) -> list[_Pack]:
-        """The cheapest partition into ``packs`` and single designs."""
         n = len(runlist.order)
         reset = self.table.reset_us
         by_lowest: dict[int, list[_Pack]] = {}

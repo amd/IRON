@@ -2,14 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """What a model's device test checks: speed, accuracy against the
-CPU reference, and determinism, each over a ``Runner`` and
-the model it loaded; where it finds the model's files, and ``Download``,
-a test input fetched by URL and cached in IRON's own cache.
-
-A test module defines module-scoped ``runner`` and ``model`` fixtures, the
-model loaded from the runner once for the module, and each test calls one
-of these on the two, with its ``record_property``, through which the
-figures reach the CSV.
+CPU reference, and determinism, each over a ``Runner`` and the model it
+loaded, its figures through the test's ``record_property``; and where it
+finds the model's files.
 """
 
 import dataclasses
@@ -217,9 +212,7 @@ def check_determinism(
 
     Two prompts of ``chars`` characters, alternated: a host write that never
     reaches the device then reads the other prompt's data, so a missing
-    flush fails every run rather than some. (A prefill KV hand-off never
-    flushed made 12% of runs diverge; alternated, 38/38 in each of three
-    trials.)
+    flush fails every run rather than some.
     """
     prompts = [
         prompt(runner, chars, num_tokens),

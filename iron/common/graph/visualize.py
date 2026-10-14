@@ -1,22 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pictures of a graph: its trace, and what compile and the tuner made of it.
-
-A ``Dataflow`` reads the live objects (a ``TracedGraph``, and for a compiled
-version its ``Plan``, ``Artifacts`` and ``Tuning``) and draws one box per
-step, an edge per buffer between steps, weights as notes, states as
-cylinders and the graph's inputs and outputs as ovals. ``dot()`` is the
-Graphviz text, ``svg()`` runs Graphviz's ``dot`` on it, and ``html()`` is one
-self-contained page of that SVG that pans, zooms and shows a clicked step's
-operator, tunables and per-call values. ``TracedGraph.dot()`` and
-``CompiledGraph.dot()`` (and their ``svg()`` and ``html()``) are these.
-
-A compiled version's boxes name the design each step runs and the steps
-folded into it; a tuned one's, the tunables the tuner moved, and its packs
-are clusters. Given a ``CostTable``, each box shows the step time the table
-prices it at. ``side_by_side`` draws two in one picture: a graph as traced
-beside the same graph tuned.
+"""Pictures of a graph: its trace, and what compile and the tuner made of
+it, drawn from the live objects as Graphviz text (``dot()``), SVG
+(``svg()``) or one self-contained page (``html()``).
 """
 
 from __future__ import annotations
@@ -632,18 +619,10 @@ class ArenaPicture:
 
 
 class Floorplan:
-    """Where a compiled version runs one step on the array, as its built
-    image places it: the tiles of the device that step configures, which of
-    them run a core, hold buffers or move data to the host, and the stream
-    links the router laid between neighbouring tiles.
-
-    It reads the image's lowered module (``Artifacts.lowered_mlir``; on an
-    xclbin chain, the step's design's own): what aiecc placed and routed,
-    not a placement redone apart from the image. The links are mlir-aie's
-    own count of each switchbox's streams out to each side
-    (``aie-translate --aie-flows-to-json``); a shim's south side is the
-    host. A device several designs
-    share (a pack) names each tile by the design whose buffers it holds.
+    """Where a compiled version runs one step on the array: the tiles of
+    the device that step configures, what each does, and the stream links
+    between them, read from the image's lowered module (what aiecc placed
+    and routed) and ``aie-translate --aie-flows-to-json``.
 
     Args:
         version: The compiled version.

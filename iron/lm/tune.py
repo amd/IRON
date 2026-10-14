@@ -8,39 +8,16 @@ python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors
 python -m iron.lm.tune embedding_gemma2
 ```
 
-``<application>`` (``application_runner``), dotted under
-``iron.applications``, is read for a ``Runner`` in its ``model`` module;
-the table, ``costs_<device>.json``, lands in the Runner's ``tables``, else
-beside that module. What is measured is the Runner's plan: its
-``tune_calls`` on the flags its ``tune_arguments`` adds, and the configure
-cost between its ``calibration_triangle``. A decoder's is the base
-``Runner``'s, ``CausalLM.tune_calls``; a model of another kind gives its
-own (EmbeddingGemma 2's, every version of its multimodal graph).
-
-``--cost-table TABLE`` on a model's own command line folds the steps of the
-decode step and the prompt chunk into their producers, narrows their
-designs and packs them into shared device configurations by what each
-costs on the device (``JointNarrowing``). A table holds every design's step
-time at each width it tunes to, and the configure cost measured between a
-few pairs of designs. It is keyed by each design's identity -- its fields
--- so a design that has changed since is not in it, and the tuner leaves
-that design as the profile gives it, unfolded. ``main`` fills one for the
-versions the plan names, as the graph is now: every design, each setting,
-as traced and with each fold it admits. Designs already in the table are kept
-unless ``--remeasure``; entries for designs the graph no longer has are
-dropped. A design another graph has had measured on this NPU is taken from
-the cost cache (``iron.common.graph.costcache``) rather than run again.
-
-In a decoder's plan, a design whose work a per-call value changes
-(attention over the cache, by the position) is also measured at a ladder
-of contexts up to ``--context`` (``iron.lm.causal.contexts``) and priced at
-their weighted mean, the contexts a generation of that length runs at
-equally often.
-
-A design's time follows its shapes, per-call values and Sample's draw
-rows, not the weights, so the model is built on weights it never reads,
-in the shapes its checkpoint's header gives. Run with XRT sourced and the
-NPU otherwise idle.
+The application's ``Runner`` names what is measured (``tune_calls``,
+``calibration_triangle``) and where ``costs_<device>.json`` lands
+(``tables``, else beside its module); ``--cost-table`` on the model's own
+command line tunes by it (``JointNarrowing``). The table is keyed by each
+design's fields, so a design changed since is left as the profile gives
+it. Designs the table or the cost cache hold are kept unless
+``--remeasure``; a design a per-call value moves is also measured at
+contexts up to ``--context``. The model is built on weights it never
+reads, since a step's time does not follow them. Run with the NPU
+otherwise idle.
 """
 
 import argparse

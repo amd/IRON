@@ -1,19 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What every model on IRON's operators shares: its shape (``Config``, the
-``eps`` every model has and ``from_checkpoint``, built from a checkpoint's
-own ``config.json``; ``DecoderConfig``, a decoder's own fields and
-``rope_angles``, the RoPE table it names), its weights, the float32
-``Oracle`` it is judged by, ``Model``, a graph whose versions ``load()``
-compiles up front in the packaging asked for, and ``Runner`` and ``main``,
-a decoder's checkpoint, tokenizer and command line.
-
-``Checkpoint`` maps a ``.safetensors`` file, or, given its
-``.safetensors.index.json``, every shard a sharded checkpoint splits across,
-and ``tree()`` is its tensors by their own names, read, drawn or unread:
+"""What every model on IRON's operators shares: its shape, its weights
+(``Checkpoint.tree()``, the tensors by their own names:
 ``model.layers.3.self_attn.q_proj.weight`` is
-``weights.model.layers[3].self_attn.q_proj.weight``.
+``weights.model.layers[3].self_attn.q_proj.weight``), the float32
+``Oracle`` it is judged by, ``Model``, and ``Runner`` and ``main``.
 """
 
 import argparse
@@ -78,9 +70,6 @@ _MISSING = object()
 
 
 def _dotted(data: dict, path: str):
-    """``data``'s value at ``path``'s dot-separated keys, or ``_MISSING`` if
-    one of them is not there.
-    """
     node = data
     for key in path.split("."):
         if not isinstance(node, dict) or key not in node:
@@ -191,10 +180,8 @@ def prompt_text(chars: int, skip: int = 0) -> str:
 
 class _Shard:
     """One ``.safetensors`` file, mapped: ``tensors`` are read-only views of
-    it, read only when touched. The format is an 8-byte header length, a
-    JSON header giving each tensor's dtype, shape and byte range, and the
-    data. It is read here because safetensors' own numpy loader has no
-    bfloat16.
+    it, read only when touched. Parsed here: safetensors' own numpy loader
+    has no bfloat16.
     """
 
     DTYPES = {"BF16": bfloat16, "F16": np.float16, "F32": np.float32}
@@ -218,11 +205,9 @@ class _Shard:
             self.tensors[name] = view.reshape(t["shape"])
 
     def release(self, array: np.ndarray) -> bool:
-        """Drop the process's pages of ``array`` and report it was this
-        shard's, if it is a view of this file; leave anything else alone and
-        report so. It stays readable: a later read faults the bytes back in.
-        What it saves is a weight counted twice, on the host and on the
-        device.
+        """Drop the process's pages of ``array`` if it is a view of this
+        file, and report whether it was; it stays readable, a later read
+        faulting the bytes back in.
         """
         begin = array.ctypes.data - self._address
         if not (array.flags.c_contiguous and 0 <= begin < len(self._map)):
@@ -559,30 +544,14 @@ FLAGS = (
 class Runner:
     """A checkpoint, its tokenizer and ``config``, and the models on them.
 
-    A subclass names the model: its ``config``, a ``Config`` class, built
-    from the checkpoint's own ``config.json`` (``default_config``), or
-    already a shape of its own where the checkpoint names none it needs;
-    ``model``, the ``CausalLM`` on the NPU, which reads the checkpoint's
-    tree by its names, and whose ``oracle`` is the CPU model it is checked
-    against; ``open_tokenizer(path)``, with ``encode`` and ``decode``; and
-    ``bos``, the token every prompt starts with. A model that comes in
-    several sizes names them in ``sizes``, ``config`` among them, and
-    ``--size`` picks one.
-
-    It is also what ``iron.lm.tune`` measures the model's cost table by:
-    ``tune_arguments`` and ``tune_calls``, a decoder's decode step and prompt
-    chunk here, a model of another kind its own; ``calibration_triangle``,
-    the operator classes the configure cost is measured between; and
-    ``tables``, where the table lands (beside the model module if None).
-
-    The checkpoint is mapped, not read: ``npu`` uploads it a piece at a
-    time and drops each piece's host pages once it is on the device.
-
-    Given a ``seed`` the weights are drawn at it in the checkpoint's shapes
-    (``Checkpoint.tree("random")``, which reads only its header), and with
-    no tokenizer a prompt is random tokens: the model's speed, its accuracy
-    against its oracle and its determinism are then measured without the
-    real weights or the tokenizer.
+    A subclass names its ``config`` (a ``Config`` class read from the
+    checkpoint's ``config.json``), ``model`` (the ``CausalLM``, whose
+    ``oracle`` it is checked against), ``open_tokenizer`` and ``bos``, and
+    any ``sizes`` ``--size`` picks among; ``tune_arguments``,
+    ``tune_calls``, ``calibration_triangle`` and ``tables`` are what
+    ``iron.lm.tune`` measures it by. Given a ``seed``, the weights are drawn
+    in the checkpoint's shapes and a prompt with no tokenizer is random
+    tokens, so speed, accuracy and determinism need neither.
     """
 
     config: Config | type[Config]
@@ -732,13 +701,9 @@ class Runner:
         args: "list[str] | argparse.Namespace | None" = None,
         parser: argparse.ArgumentParser | None = None,
     ) -> "Runner":
-        """A runner from ``args``: an already-parsed ``argparse.Namespace``
-        (``main()``'s own, its further flags already read), or option
-        strings (a test's own, ``add_arguments``'s flags alone), parsed
-        here against a fresh parser. Either way, ``args.weights_path``'s
+        """A runner from ``args``, parsed or option strings: the checkpoint's
         config.json gives the shape, narrowed by ``--size`` or
-        ``--max-seq-len`` if either is given, and ``from_arguments`` builds
-        the runner.
+        ``--max-seq-len``, and ``from_arguments`` builds the runner.
 
         Args:
             args: The parsed namespace, or the option strings to parse
@@ -769,8 +734,7 @@ class Runner:
     ) -> "CausalLM":
         """The model compiled and loaded, weights uploaded. With a
         ``cost_table`` (``tune``) each version's designs are folded,
-        narrowed and packed by it, restricted to ``kinds`` if given
-        (``NarrowingKinds()``, every kind, if not: today's plan);
+        narrowed and packed by it, restricted to ``kinds`` if given;
         ``full_elf`` is both versions' packaging (``CausalLM.load``).
         """
         model = self.model(self.config, self.weights)

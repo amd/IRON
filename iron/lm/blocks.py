@@ -3,25 +3,11 @@
 
 """The blocks a model builds from operators, for a graph's body.
 
-``project`` is a weight's projection at either row count, and ``SwiGLU``
-is the SwiGLU feed-forward, ``W_down @ (SiLU(W_gate @ x) * (W_up @ x))``,
-as a graph of its own, holding the weights, so they are uploaded once.
-``Block`` is the attention + SwiGLU layer Llama 3 and Granite 4.2 3B
-share, on the NPU; a model's own oracle gives its numpy layer. ``LogMel``
-is an audio front end's log-mel spectrogram, ``Conv2d`` a convolution over
-rows of channels-last pixels, ``Conv1d`` one over rows of full-channel-depth
-input (an audio encoder's front end), ``MaxPool2d`` a max pooling of
-channels-last pixels, ``ConcatChannels`` their concatenation along the
-channels and ``ImagePatches`` a vision front end's resize into patches. A
-graph here is called in a model's body as it is on its own (``Graph``): its
-steps trace into the model's.
-
-The weights are a checkpoint's ``(out, in)``: SwiGLU's ``w_gate`` and
-``w_up`` are ``(hidden_dim, embedding_dim)`` and ``w_down`` is
-``(embedding_dim, hidden_dim)``. One row projects with GEMV, more with
-flm.GEMM reading the weight as stored. The gate and up projections share
-one array and one build. Nothing is padded: a row count the GEMM cannot tile
-is an error at trace time.
+A graph here is called in a model's body as it is on its own (``Graph``):
+its steps trace into the model's. Weights are a checkpoint's ``(out, in)``:
+one row projects with GEMV, more with flm.GEMM reading the weight as
+stored, and nothing is padded, so a row count the GEMM cannot tile is an
+error at trace time.
 """
 
 import dataclasses
@@ -63,19 +49,13 @@ def project(
     **gemv,
 ):
     """``x @ weight.T`` for a checkpoint's ``(out, in)`` weight, plus
-    ``bias`` if given, broadcast over every row (a linear layer's bias,
-    Qwen 2's q/k/v projections): a GEMV for one row (a GEMV's output is a
-    vector, batched into a row or not depending on its shape against the
-    weight's), else flm.GEMM reading it column-major, ``k_tile`` if K is not
-    a multiple of its default 512 (flm.GEMM's own ``k_tile``; Qwen 2.5's
-    hidden_dim is not). ``tile_n`` with ``k_tile``, where the default
-    ``tile_n``'s ``ct_max_k`` (128) does not divide a ``k_tile`` that does
-    divide K (SmolVLM's emb_dim, 576, is 2**6 * 3**2, under 128's own 2**7:
-    no multiple of 128 divides it, but ``tile_n=32``'s ``ct_max_k`` (32)
-    does, at ``k_tile=192``). ``emulate_bf16_mmul_with_bfp16=False`` asks
-    flm.GEMM for bf16 macs where its device's default is bfp16's (aie2p),
-    the more accurate of the two. ``gemv`` are the GEMV's tunables, where
-    the profile cannot tell it from another of its shape.
+    ``bias`` broadcast over every row if given: a GEMV for one row, else
+    flm.GEMM reading it column-major. ``k_tile`` and ``tile_n`` are
+    flm.GEMM's, for a K its defaults do not divide (``tile_n``'s
+    ``ct_max_k`` must divide ``k_tile``);
+    ``emulate_bf16_mmul_with_bfp16=False`` asks for bf16 macs where the
+    device defaults to bfp16's; ``gemv`` are the GEMV's tunables, where the
+    profile cannot tell it from another of its shape.
     """
     if len(x.shape) == 2 and x.shape[0] > 1:
         tiled = {}
@@ -232,30 +212,19 @@ GEMM_ROWS = 16
 
 class Conv2d(iron.Graph):
     """A 2-D convolution without bias of rows of ``width`` channels-last
-    pixels by a ``(out_channels, channels_per_group, kernel, kernel)``
-    ``weight`` at ``stride``. The width is padded with ``padding`` zero
-    columns either side; padding in rows is rows the input holds, so a
-    producer writes past them in place. Each output row is its pixels with
-    ``border`` zero pixels either side, the padding of a convolution that
-    reads it.
+    pixels, at ``stride``, the width padded with ``padding`` zero columns
+    and each output row with ``border`` zero pixels either side; padding in
+    rows is rows the input holds, so a producer writes past them in place.
 
-    A call takes the input ``(rows, width * channels)`` and the per-call
-    ``rows`` of output it computes, and writes the output ``(out_rows,
-    (out_width + 2 * border) * out_channels)`` where a caller gives it, else
-    returns it. One channel (or ``groups == out_channels``, depthwise: each
-    output channel its own input channel, ``channels_per_group == 1``) is a
-    GEMM of ``kernel`` consecutive input rows, gathered whole, by the weight
-    laid out as a band over the width (and, depthwise, block-diagonal over
-    the channels too, so the GEMM mixes none of them). Where ``out_rows`` is
-    not a whole number of ``GEMM_ROWS``-row blocks, the gather repeats its
-    first row up to the next block and the GEMM computes every row: the
-    output is those rows, bounded by ``rows`` (``rows`` rows where it is a
-    number), and a caller cannot give it. More channels, not
-    depthwise, are a GEMM of the gathered ``kernel * kernel * channels``
-    patches by the weight, the output channels as its rows, so that few of
-    them leave the patches to span every column (every row is then computed,
-    as a GEMM bounds no column, and the output bounded after). Each GEMM
-    sums its products in float32 and rounds once.
+    A call takes ``(rows, width * channels)`` and the per-call ``rows`` it
+    computes, and writes ``(out_rows, (out_width + 2 * border) *
+    out_channels)`` where a caller gives it, else returns it. One channel
+    (or depthwise) is a GEMM of ``kernel`` gathered rows by the weight laid
+    out as a band over the width; a ragged last block of ``GEMM_ROWS`` rows
+    repeats the first row, so its output cannot be given. More channels
+    are a GEMM of the output channels, as its rows, by the gathered
+    ``kernel * kernel * channels`` patches. Each GEMM sums in float32 and
+    rounds once.
 
     Args:
         weight: ``(out_channels, channels_per_group, kernel, kernel)``,
@@ -400,22 +369,12 @@ class Conv2d(iron.Graph):
 
 
 class Conv1d(iron.Graph):
-    """A 1-D convolution over rows (time) of a full-channel-depth input: at
-    each of ``kernel`` consecutive rows every input channel is contracted,
-    by ``weight``, ``(out_channels, channels, kernel)``, at ``stride``, its
-    ``bias``, ``(out_channels,)``, added once. Unlike ``Conv2d``, which
-    slides one square kernel over both rows and a spatial ``width`` of
-    channels-last pixels, there is no ``width`` axis here at all: a row
-    already holds the whole channel vector a time step contracts.
-
-    A call takes the input ``(rows, channels)`` and the per-call ``rows`` of
-    output it computes, and writes the output ``(out_rows, out_channels)``
-    where a caller gives it, else returns it. The ``kernel`` consecutive
-    input rows are gathered whole (``Conv2d``'s single-channel row gather,
-    which already does not touch ``width``) and projected by the weight
-    reshaped to ``(kernel * channels, out_channels)`` in one GEMM, its bias
-    folded on with ``RowwiseAdd``. Padding in rows is rows the input holds,
-    so a producer writes past them in place.
+    """A 1-D convolution over rows (time) of ``(rows, channels)``, at
+    ``stride``, plus ``bias``: the ``kernel`` consecutive rows gathered whole
+    and projected in one GEMM, the bias folded on with ``RowwiseAdd``. A
+    call computes the per-call ``rows`` and writes ``(out_rows,
+    out_channels)`` where a caller gives it, else returns it; padding in
+    rows is rows the input holds.
 
     Args:
         weight: ``(out_channels, channels, kernel)``.
@@ -472,12 +431,9 @@ class MaxPool2d(iron.Graph):
     channel on its own, by a ``kernel``-wide square window at stride 1,
     padded with ``-inf`` so the output is the input's shape.
 
-    A call takes the input ``(rows, width * channels)`` and returns the
-    pooled output of the same shape. The input is written into a held
-    border of ``kernel // 2`` pixels of ``-inf`` either side, in rows and
-    columns, and the ``kernel * kernel`` shifted views of it, each whole
-    rows of the input's shape, are combined by a running ``ElementwiseMax``:
-    a selection, so the output is the max pooling exactly.
+    The input is written into a held ``-inf`` border, and the ``kernel *
+    kernel`` shifted views of it are combined by a running
+    ``ElementwiseMax``, a selection, so exact.
 
     Args:
         rows: The input's rows.
@@ -545,9 +501,8 @@ class ConcatChannels(iron.Graph):
     """Two to four inputs of ``rows`` rows of ``width`` channels-last pixels
     concatenated along their channels, ``channels`` each input's a pixel.
 
-    A call takes each input ``(rows, width * channels[i])`` and returns
-    ``(rows, width * sum(channels))``: each input copied into its channels
-    of every pixel of a held buffer, which a last copy returns.
+    Each input is copied into its channels of a held buffer, which a last
+    copy returns.
 
     Args:
         rows: The inputs' rows.
@@ -596,18 +551,12 @@ class ImagePatches(iron.Graph):
     patches consecutive, row-major within its window, the tokens row-major
     over the image.
 
-    A call takes the image, ``(height, width, 3)`` uint8 with each row
-    padded to whole ``chunk``-byte chunks (``pack`` lays it out), and, per
-    call, its ``height`` and ``width`` and the ``out_height`` by
-    ``out_width`` it is resized to, whole ``pool * 16``-pixel windows. It
-    returns the pixels, ``(patches, 768)`` bf16, each patch's ``xy``, its x
-    and y side by side, and its ``position_ids``, every patch's x, then
-    every patch's y plus ``positions``, ``(2 * patches,)`` int32 each; rows
-    past the image are the zero patch at ``positions`` (and ``2 *
-    positions``), the padding row of a table of that many. ``ResampleTaps``
-    computes each axis's filter table, ``Resample`` resizes the image into a
-    raster of patches over two cores a column, and ``PatchPositions``
-    orders them, which a gathering ``Copy`` follows.
+    A call takes the image, ``(height, width, 3)`` uint8 laid out by
+    ``pack``, and per call its size and the ``pool * 16``-pixel windows it
+    is resized to. It returns the pixels, ``(patches, 768)`` bf16, each
+    patch's ``xy`` (x and y side by side) and ``position_ids`` (every x,
+    then every y plus ``positions``); rows past the image are the zero
+    patch at ``positions``, the padding row of a table of that many.
 
     Args:
         patches: The patch rows of a call.

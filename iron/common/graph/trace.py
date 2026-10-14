@@ -513,9 +513,6 @@ class Tracer:
         return {k: kwargs.pop(k) for k in list(kwargs) if k in names}
 
     def _construct(self, cls, inputs, outputs, kwargs) -> Operator:
-        """``cls`` on ``inputs`` (by name) and ``outputs``, its extents and
-        optional-input flags inferred from them.
-        """
         inferred = cls.declaration.infer(
             {name: h.shape for name, h in inputs.items()},
             [h.shape for h in outputs],
@@ -524,7 +521,6 @@ class Tracer:
         return cls(**{**kwargs, **inferred})
 
     def _output_bounds(self, op, buffer, rank: int) -> dict:
-        """An output sized by a bounded extent's field is bounded the same way."""
         bounds = {}
         for binding in self.bindings:
             if binding.op is not op or not isinstance(binding.member, Extent):

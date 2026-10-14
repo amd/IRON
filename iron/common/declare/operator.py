@@ -566,23 +566,10 @@ class Operator(metaclass=_OperatorMeta):
         outputs: Mapping[str, np.ndarray] | None = None,
         values: Mapping[str, Any] | None = None,
     ) -> dict[str, np.ndarray]:
-        """Run `reference` on buffers named as this operator declares them.
-
-        The inputs are its positional arguments, in declaration order; a
-        prologue and a finish run around it on the host, given their steps'
-        other inputs. An output it names a parameter after (Copy's `y`) is
-        given to it, to write in place what it touches.
-
-        Args:
-            inputs: Every input, an `inout` buffer among them, by buffer name.
-            outputs: Outputs by buffer name; the reference is given those it
-                names.
-            values: Per-call values by name; the reference is given those it
-                names that are not None.
-
-        Returns:
-            The reference's result for each buffer this operator writes, by
-            buffer name.
+        """Run `reference` on buffers by name, returning each written one's
+        result by name: the inputs positional, in declaration order, a
+        prologue and a finish around it on the host, and an output or a
+        per-call value it names a parameter after given to it.
 
         Raises:
             ValueError: `inputs` are not this operator's, `outputs` name a
@@ -930,12 +917,6 @@ class Operator(metaclass=_OperatorMeta):
         return new
 
     def _with_tunables(self, **tunables: Any) -> Self:
-        """This operator, unresolved, with the given ``Auto()`` fields set.
-
-        Raises:
-            TypeError: A name is not a settable tunable: not an ``Auto()``
-                field, fixed with ``init=False``, or ``derived``.
-        """
         unknown = [n for n in tunables if n not in self.declaration.tunables]
         if unknown:
             raise TypeError(f"{type(self).__name__} has no tunable {unknown}")

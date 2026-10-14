@@ -173,8 +173,6 @@ class VisionTower(Model):
         pooled = RMSNorm(pooled, epsilon=c.eps / s2)
         return GEMM(pooled, self.projection, b_col_maj=True, **ACCURATE)
 
-    # -- on the host -----------------------------------------------------------
-
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, the largest image's."""
         chunks = self.processor.resample.image_chunks
