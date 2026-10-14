@@ -98,42 +98,41 @@ def one_xclbin(built):
 
 
 def main(engine_xclbins, out):
-    aie_utils.set_current_device(NPU2())
+    with aie_utils.set_current_device(NPU2()):
+        dequants = [DequantBFP(K=k, N=n) for k, n in DEQUANT]
+        dequants += [
+            DequantBFP(
+                K=k,
+                N=n,
+                run_out_features=UPGATE_RUN,
+                run_period_out_features=2 * UPGATE_RUN,
+            )
+            for k, n in UPGATE
+        ]
+        gemms = [gemm(m, k, n, gelu) for m in WIDTHS for k, n, gelu in GEMMS]
 
-    dequants = [DequantBFP(K=k, N=n) for k, n in DEQUANT]
-    dequants += [
-        DequantBFP(
-            K=k,
-            N=n,
-            run_out_features=UPGATE_RUN,
-            run_period_out_features=2 * UPGATE_RUN,
-        )
-        for k, n in UPGATE
-    ]
-    gemms = [gemm(m, k, n, gelu) for m in WIDTHS for k, n, gelu in GEMMS]
+        built = compile_all([*dequants, *gemms])
 
-    built = compile_all([*dequants, *gemms])
+        # Stage the engine's xclbins with IRON's under the engine's file names.
+        stage = out / "xclbins" / MODEL
+        shutil.rmtree(stage, ignore_errors=True)
+        shutil.copytree(Path(engine_xclbins) / MODEL, stage, symlinks=True)
+        iron = stage / "iron"
+        iron.mkdir()
+        for name, xclbin in {
+            "mm": one_xclbin(built[op] for op in gemms),
+            "dequant": one_xclbin(built[op] for op in dequants),
+        }.items():
+            shutil.copyfile(xclbin, stage / f"{name}.xclbin")
 
-    # Stage the engine's xclbins with IRON's under the engine's file names.
-    stage = out / "xclbins" / MODEL
-    shutil.rmtree(stage, ignore_errors=True)
-    shutil.copytree(Path(engine_xclbins) / MODEL, stage, symlinks=True)
-    iron = stage / "iron"
-    iron.mkdir()
-    for name, xclbin in {
-        "mm": one_xclbin(built[op] for op in gemms),
-        "dequant": one_xclbin(built[op] for op in dequants),
-    }.items():
-        shutil.copyfile(xclbin, stage / f"{name}.xclbin")
-
-    for op in dequants:
-        shutil.copyfile(built[op].insts, iron / f"dequant_K{op.K}_N{op.N}.bin")
-    for op in gemms:
-        gelu = "_gelu" if op.epilogue == Epilogue.GELU else ""
-        shutil.copyfile(
-            built[op].insts, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin"
-        )
-    print(f"staged {stage}")
+        for op in dequants:
+            shutil.copyfile(built[op].insts, iron / f"dequant_K{op.K}_N{op.N}.bin")
+        for op in gemms:
+            gelu = "_gelu" if op.epilogue == Epilogue.GELU else ""
+            shutil.copyfile(
+                built[op].insts, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin"
+            )
+        print(f"staged {stage}")
 
 
 if __name__ == "__main__":

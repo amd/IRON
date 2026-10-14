@@ -11,31 +11,29 @@ import pytest
 import statistics
 
 import aie.utils as aie_utils
-from aie.iron.device import from_name
 from aie.utils.benchmark import preflight, provenance
 from aie.utils.probe import npu_unavailable_reason
 
 from iron.lm.base import FLAGS
+from iron.tests.toolchain.tools import DEVICES
 
 
-def _bound_device(name: str, n_cols: int):
-    """A fixture binding an ``n_cols``-column ``name`` NPU as the current
-    device, the previous one restored after: what a test that resolves or
-    compiles device-free needs.
+def _bound_device(name: str):
+    """A fixture binding the device ``DEVICES[name]`` builds as current, the
+    previous one restored after: what a test that resolves or compiles
+    device-free needs.
     """
 
     def bound():
-        previous = aie_utils.get_current_device()
-        device = from_name(name, n_cols=n_cols)
-        aie_utils.set_current_device(device)
-        yield device
-        aie_utils.set_current_device(previous)
+        device = DEVICES[name]()
+        with aie_utils.set_current_device(device):
+            yield device
 
     return pytest.fixture(bound, name=name)
 
 
-npu2 = _bound_device("npu2", 8)
-npu1 = _bound_device("npu1", 4)
+npu2 = _bound_device("npu2")
+npu1 = _bound_device("npu1")
 
 
 def pytest_addoption(parser):

@@ -1206,11 +1206,9 @@ def _resolved_fields(settings):
     A setting is ``(device, trace)``: ``trace`` builds the graph with that
     device current and traces it. The device is restored afterwards.
     """
-    previous = aie_utils.get_current_device()
-    try:
-        out = []
-        for dev, trace in settings:
-            aie_utils.set_current_device(dev)
+    out = []
+    for dev, trace in settings:
+        with aie_utils.set_current_device(dev):
             out.append(
                 [
                     tuple((f.name, vars(op)[f.name]) for f in dataclasses.fields(op))
@@ -1219,9 +1217,7 @@ def _resolved_fields(settings):
                     for op in [s.op.resolved(dev)]
                 ]
             )
-        return out
-    finally:
-        aie_utils.set_current_device(previous)
+    return out
 
 
 def _every_keyword_is_load_bearing(monkeypatch, settings):

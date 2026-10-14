@@ -24,9 +24,7 @@ def declared(dev):
         why `dev` cannot resolve it (more columns than it has, say), else
         None.
     """
-    previous = aie_utils.get_current_device(probe_runtime=False)
-    aie_utils.set_current_device(dev)
-    try:
+    with aie_utils.set_current_device(dev):
         cases = []
         for name in sorted(catalog._OPERATOR_MODULES):
             cls = getattr(catalog, name)
@@ -40,5 +38,3 @@ def declared(dev):
                     unresolvable = str(e)
                 cases.append((name, cls, case, unresolvable))
         return cases
-    finally:
-        aie_utils.set_current_device(previous)

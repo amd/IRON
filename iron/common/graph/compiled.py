@@ -10,6 +10,7 @@ scratch there, an xclbin its weights and states.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 import inspect
@@ -386,91 +387,91 @@ class Graph:
                 ``folds`` name them.
             **shapes: Each input's shape, or ``(shape, dtype)``.
         """
-        previous = aie_utils.get_current_device(probe_runtime=False)
-        if dev is not None:
+        with (
             aie_utils.set_current_device(dev)
-        previous_profile = self.profile
-        if profile is not None:
-            self.profile = profile
-        try:
-            traced = self.trace(**shapes)
-            if fold:
-                traced, count = folded(
-                    traced,
-                    aie_utils.ensure_current_device(),
-                    None if fold is True else fold,
-                )
-                if verbose:
-                    print(
-                        f"{self.name}: {count.total()} step(s) folded into their "
-                        f"readers or producers"
-                    )
-            current = aie_utils.ensure_current_device()
-            # Folding and narrowing change nothing the packaging follows from.
-            chosen = plan(current, traced, full_elf, check)
-            tuning = None
-            groups: AdjacentPacking | list[list[Operator]] | None = coresident
-            if tuner is not None:
-                if coresident is not None:
-                    raise TypeError(
-                        f"{self.name}: a tuner chooses the packs; give "
-                        f"coresident= or tuner=, not both"
-                    )
-                tuning = tuner.tune(traced, current, chosen.full_elf)
-                traced, groups = tuning.apply(traced, current)
-            if verbose:
-                print(chosen.report(self.name))
-            signature = self._signature(
-                {h.name: (h.shape, h.dtype) for h in traced.inputs}
-            )
-            emit = None
-            # The words an Emit feeding its own version was sized for.
-            sized: list[Word] | None = None
-            loops = feeds is not None or not traced.inputs
-            if chosen.full_elf and traced.carry and loops:
-                if feeds is None:
-                    sized = _words(traced, share=True, extents=False)[0]
-                    slots = len(sized)
-                elif feeds.emit is None or not any(
-                    feeds is v for v in self._versions.values()
-                ):
-                    raise ValueError(
-                        f"{self.name}: feeds= takes a full-ELF version of this "
-                        f"graph, got {feeds!r}"
-                    )
-                else:
-                    slots = len(feeds.parameters)
-                assert self._carry is not None
-                emit = attach_emit(traced, self._carried, self._carry, slots)
-            elif feeds is not None:
-                raise ValueError(
-                    f"{self.name}: only a full-ELF version with carried values "
-                    f"feeds another"
-                )
-            version = CompiledGraph(
-                traced,
-                chosen,
-                check=check,
-                arena=self._arena,
-                emit=emit,
-                coresident=groups,
-                tuning=tuning,
-            )
-            if sized is not None and len(version.parameters) != len(sized):
-                read = {p.name for p in version.parameters}
-                raise NotImplementedError(
-                    f"{self.name}: the image reads {len(version.parameters)} of the "
-                    f"{len(sized)} words its Emit was sized for; a word it reads only "
-                    f"through a derivation cannot be fed yet (sized for but not "
-                    f"read: {sorted(w.symbol for w in sized if w.symbol not in read)})"
-                )
-            self._versions[signature] = version
-            return version
-        finally:
-            if dev is not None:
-                aie_utils.set_current_device(previous)
+            if dev is not None
+            else contextlib.nullcontext()
+        ):
+            previous_profile = self.profile
             if profile is not None:
-                self.profile = previous_profile
+                self.profile = profile
+            try:
+                traced = self.trace(**shapes)
+                if fold:
+                    traced, count = folded(
+                        traced,
+                        aie_utils.ensure_current_device(),
+                        None if fold is True else fold,
+                    )
+                    if verbose:
+                        print(
+                            f"{self.name}: {count.total()} step(s) folded into their "
+                            f"readers or producers"
+                        )
+                current = aie_utils.ensure_current_device()
+                # Folding and narrowing change nothing the packaging follows from.
+                chosen = plan(current, traced, full_elf, check)
+                tuning = None
+                groups: AdjacentPacking | list[list[Operator]] | None = coresident
+                if tuner is not None:
+                    if coresident is not None:
+                        raise TypeError(
+                            f"{self.name}: a tuner chooses the packs; give "
+                            f"coresident= or tuner=, not both"
+                        )
+                    tuning = tuner.tune(traced, current, chosen.full_elf)
+                    traced, groups = tuning.apply(traced, current)
+                if verbose:
+                    print(chosen.report(self.name))
+                signature = self._signature(
+                    {h.name: (h.shape, h.dtype) for h in traced.inputs}
+                )
+                emit = None
+                # The words an Emit feeding its own version was sized for.
+                sized: list[Word] | None = None
+                loops = feeds is not None or not traced.inputs
+                if chosen.full_elf and traced.carry and loops:
+                    if feeds is None:
+                        sized = _words(traced, share=True, extents=False)[0]
+                        slots = len(sized)
+                    elif feeds.emit is None or not any(
+                        feeds is v for v in self._versions.values()
+                    ):
+                        raise ValueError(
+                            f"{self.name}: feeds= takes a full-ELF version of this "
+                            f"graph, got {feeds!r}"
+                        )
+                    else:
+                        slots = len(feeds.parameters)
+                    assert self._carry is not None
+                    emit = attach_emit(traced, self._carried, self._carry, slots)
+                elif feeds is not None:
+                    raise ValueError(
+                        f"{self.name}: only a full-ELF version with carried values "
+                        f"feeds another"
+                    )
+                version = CompiledGraph(
+                    traced,
+                    chosen,
+                    check=check,
+                    arena=self._arena,
+                    emit=emit,
+                    coresident=groups,
+                    tuning=tuning,
+                )
+                if sized is not None and len(version.parameters) != len(sized):
+                    read = {p.name for p in version.parameters}
+                    raise NotImplementedError(
+                        f"{self.name}: the image reads {len(version.parameters)} of the "
+                        f"{len(sized)} words its Emit was sized for; a word it reads only "
+                        f"through a derivation cannot be fed yet (sized for but not "
+                        f"read: {sorted(w.symbol for w in sized if w.symbol not in read)})"
+                    )
+                self._versions[signature] = version
+                return version
+            finally:
+                if profile is not None:
+                    self.profile = previous_profile
 
     def _given(self, tensors) -> dict[str, Any]:
         if len(tensors) > len(self._inputs):

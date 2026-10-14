@@ -126,84 +126,83 @@ def one_xclbin(built):
 def main(engine_xclbins, out):
     model_dir = Path(os.environ["FLM_MODEL_PATH"]) / "models" / MODEL
     config = json.loads((model_dir / "config.json").read_text())
-    aie_utils.set_current_device(NPU2())
-
-    layers = {
-        t: DecodeLayer(geometry=FLM_GEMMA4_E2B_DECODE, layer_type=t)
-        for t in ("global", "swa", "global_skip", "swa_skip")
-    }
-    heads = dict(
-        max_context=32768,  # bounds the KV cache rows; the stride is a dispatch parameter
-        num_heads=config["num_attention_heads"],
-        num_kv_heads=config["num_key_value_heads"],
-    )
-    attn = PrefillAttention(**heads)
-    swa = PrefillSlidingAttention(window=config["sliding_window"], **heads)
-    lm_head = LMHead(
-        dim=config["hidden_size"],
-        vocab=config["vocab_size"],
-        softcap=config["final_logit_softcapping"],
-    )
-    dequants = [DequantBFP(K=k, N=n) for k, n in DEQUANT]
-    dequants += [
-        DequantBFP(
-            K=k,
-            N=n,
-            run_out_features=UPGATE_RUN,
-            run_period_out_features=2 * UPGATE_RUN,
+    with aie_utils.set_current_device(NPU2()):
+        layers = {
+            t: DecodeLayer(geometry=FLM_GEMMA4_E2B_DECODE, layer_type=t)
+            for t in ("global", "swa", "global_skip", "swa_skip")
+        }
+        heads = dict(
+            max_context=32768,  # bounds the KV cache rows; the stride is a dispatch parameter
+            num_heads=config["num_attention_heads"],
+            num_kv_heads=config["num_key_value_heads"],
         )
-        for k, n in UPGATE
-    ]
-    gemms = [gemm(m, k, n, gelu) for m in WIDTHS for k, n, gelu in GEMMS]
-    d, pli_d = config["hidden_size"], config["hidden_size_per_layer_input"]
-    pli_shapes = [
-        (d, pli_d * config["num_hidden_layers"], False),
-        (d, pli_d, True),
-        (pli_d, d, False),
-    ]
-    gemms += [gemm(m, k, n, gelu) for m in PLI_WIDTHS for k, n, gelu in pli_shapes]
-
-    built = compile_all([*layers.values(), attn, swa, lm_head, *dequants, *gemms])
-
-    # Stage the engine's xclbins with IRON's under the engine's file names. The
-    # engine registers each xclbin by its path, and overrides.hpp registers the
-    # same paths, so IRON's operators take no hardware context of their own.
-    # The four layer types configure the array identically, so one xclbin
-    # serves all four.
-    stage = out / "xclbins" / MODEL
-    shutil.rmtree(stage, ignore_errors=True)
-    shutil.copytree(Path(engine_xclbins) / MODEL, stage, symlinks=True)
-    iron = stage / "iron"
-    iron.mkdir()
-    for name, xclbin in {
-        "layer": one_xclbin(built[op] for op in layers.values()),
-        "attn": built[attn].image,
-        "swa": built[swa].image,
-        "lm_head": built[lm_head].image,
-        "mm": one_xclbin(built[op] for op in gemms),
-        "dequant": one_xclbin(built[op] for op in dequants),
-    }.items():
-        shutil.copyfile(xclbin, stage / f"{name}.xclbin")
-
-    # Static instruction sequences, named by the shape the header looks them up by.
-    shutil.copyfile(built[lm_head].insts, iron / "lm_head.bin")
-    for op in dequants:
-        shutil.copyfile(built[op].insts, iron / f"dequant_K{op.K}_N{op.N}.bin")
-    for op in gemms:
-        gelu = "_gelu" if op.epilogue == Epilogue.GELU else ""
-        shutil.copyfile(
-            built[op].insts, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin"
+        attn = PrefillAttention(**heads)
+        swa = PrefillSlidingAttention(window=config["sliding_window"], **heads)
+        lm_head = LMHead(
+            dim=config["hidden_size"],
+            vocab=config["vocab_size"],
+            softcap=config["final_logit_softcapping"],
         )
-    pli_weights.write(model_dir, config, gemms[0], iron)
+        dequants = [DequantBFP(K=k, N=n) for k, n in DEQUANT]
+        dequants += [
+            DequantBFP(
+                K=k,
+                N=n,
+                run_out_features=UPGATE_RUN,
+                run_period_out_features=2 * UPGATE_RUN,
+            )
+            for k, n in UPGATE
+        ]
+        gemms = [gemm(m, k, n, gelu) for m in WIDTHS for k, n, gelu in GEMMS]
+        d, pli_d = config["hidden_size"], config["hidden_size_per_layer_input"]
+        pli_shapes = [
+            (d, pli_d * config["num_hidden_layers"], False),
+            (d, pli_d, True),
+            (pli_d, d, False),
+        ]
+        gemms += [gemm(m, k, n, gelu) for m in PLI_WIDTHS for k, n, gelu in pli_shapes]
 
-    # Dynamic instruction sequences.
-    gen = out / "gen"
-    gen.mkdir(exist_ok=True)
-    for t, op in layers.items():
-        write_generator(built[op], gen / f"layer_{t}.h", f"layer_{t}")
-    write_generator(built[attn], gen / "attn.h", "attn")
-    write_generator(built[swa], gen / "swa.h", "swa")
-    print(f"staged {stage}")
+        built = compile_all([*layers.values(), attn, swa, lm_head, *dequants, *gemms])
+
+        # Stage the engine's xclbins with IRON's under the engine's file names. The
+        # engine registers each xclbin by its path, and overrides.hpp registers the
+        # same paths, so IRON's operators take no hardware context of their own.
+        # The four layer types configure the array identically, so one xclbin
+        # serves all four.
+        stage = out / "xclbins" / MODEL
+        shutil.rmtree(stage, ignore_errors=True)
+        shutil.copytree(Path(engine_xclbins) / MODEL, stage, symlinks=True)
+        iron = stage / "iron"
+        iron.mkdir()
+        for name, xclbin in {
+            "layer": one_xclbin(built[op] for op in layers.values()),
+            "attn": built[attn].image,
+            "swa": built[swa].image,
+            "lm_head": built[lm_head].image,
+            "mm": one_xclbin(built[op] for op in gemms),
+            "dequant": one_xclbin(built[op] for op in dequants),
+        }.items():
+            shutil.copyfile(xclbin, stage / f"{name}.xclbin")
+
+        # Static instruction sequences, named by the shape the header looks them up by.
+        shutil.copyfile(built[lm_head].insts, iron / "lm_head.bin")
+        for op in dequants:
+            shutil.copyfile(built[op].insts, iron / f"dequant_K{op.K}_N{op.N}.bin")
+        for op in gemms:
+            gelu = "_gelu" if op.epilogue == Epilogue.GELU else ""
+            shutil.copyfile(
+                built[op].insts, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin"
+            )
+        pli_weights.write(model_dir, config, gemms[0], iron)
+
+        # Dynamic instruction sequences.
+        gen = out / "gen"
+        gen.mkdir(exist_ok=True)
+        for t, op in layers.items():
+            write_generator(built[op], gen / f"layer_{t}.h", f"layer_{t}")
+        write_generator(built[attn], gen / "attn.h", "attn")
+        write_generator(built[swa], gen / "swa.h", "swa")
+        print(f"staged {stage}")
 
 
 if __name__ == "__main__":
