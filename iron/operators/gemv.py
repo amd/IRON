@@ -30,7 +30,6 @@ from iron.common import (
     Out,
     Prepare,
     Rtp,
-    Unresolvable,
     Value,
     Auto,
     Param,
@@ -173,7 +172,7 @@ class GEMV(Operator):
     )
     num_aie_columns: int = Auto()
     num_channels: int = Auto()
-    # None: two rows, or one where two would span more than two L1 banks.
+    # None: two rows where they fit one L1 programmer bank, else one.
     tile_size_input: int = Auto(
         domain=Divisors(
             of=lambda op, dev: op.M,
@@ -276,18 +275,10 @@ class GEMV(Operator):
         return self.kernel_vector_size
 
     def resolve(self, dev):
-        row_bytes = self.K * np.dtype(bfloat16).itemsize
-        if dev is not None:
-            bank_bytes = Operand.L1_BANK_BYTES[dev.name]
-        else:
-            banks = set(Operand.L1_BANK_BYTES.values())
-            if len(banks) != 1:
-                raise Unresolvable(
-                    "GEMV.resolve(None): devices disagree on the L1 bank "
-                    "size; bind a device"
-                )
-            (bank_bytes,) = banks
-        rows = self.tile_size_input or (2 if row_bytes <= bank_bytes else 1)
+        # With no device bound, two rows, unchecked.
+        two_rows = 2 * self.K * np.dtype(bfloat16).itemsize
+        fits = dev is None or two_rows <= dev.core_memory_bank_bytes
+        rows = self.tile_size_input or (2 if fits else 1)
         channels = self.num_channels or 1
         if self.tile_size_output is None and self.finish_inputs:
             # A finish input's tile, re-read per A tile, is cheaper the more rows.

@@ -71,10 +71,6 @@ class Operand(Member["Operand"]):
 
     fills: ClassVar[bool]
     drains: ClassVar[bool]
-    # AIE2 and AIE2P both have eight 8 KB banks of core memory; the target
-    # model gives the total (Device.core_memory_bytes) but not the banking,
-    # so this is interim, keyed by device name until it reads the model.
-    L1_BANK_BYTES: ClassVar[dict[str, int]] = {"npu1": 8192, "npu2": 8192}
 
     def __init__(
         self,
@@ -235,10 +231,14 @@ class Operand(Member["Operand"]):
     @property
     def l1_depth(self) -> int:
         """The depth a core-side fifo of this operand's tiles can have: two,
-        or one when a tile spans more than an L1 bank of the bound device.
+        or one when a tile spans more than a hardware bank of the bound
+        device's core memory.
         """
+        dev = self.op.dev
+        # Half a programmer bank: at the whole one, two 16 KB streams no longer fit.
+        bank = dev.core_memory_bytes // (2 * dev.core_memory_banks)
         obj_bytes = math.prod(self.obj_shape) * np.dtype(self.dtype).itemsize
-        return 1 if obj_bytes > self.L1_BANK_BYTES[self.op.dev.name] else 2
+        return 1 if obj_bytes > bank else 2
 
     @property
     def finish_line(self) -> int:
