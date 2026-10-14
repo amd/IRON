@@ -21,7 +21,7 @@ pytestmark = pytest.mark.supported_devices("npu1", "npu2")
 # and conv2, padded from 1500 to the next 32-row block GEMM's tiling needs.
 SHAPES = {
     "conv1": ((1280, 128), 3, 1, 1058),  # 1056 out rows
-    "conv2": ((1280, 1280), 3, 2, 1059),  # 529 out rows -> pad to 544 by the caller
+    "conv2": ((1280, 1280), 3, 2, 1089),  # 544 out rows, 529 padded by the caller
 }
 
 
