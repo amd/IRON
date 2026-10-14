@@ -490,8 +490,11 @@ class OperatorRuntime(Runtime):
                 raise ValueError(
                     f"{type(op).__name__}.{name}: array() never bound this value"
                 )
+            words = values[name]
+            block = words if isinstance(words, (list, tuple)) else [words]
             for buf, index in res.targets:
-                writes.setdefault(id(buf), (buf, {}))[1][index] = values[name]
+                slots = writes.setdefault(id(buf), (buf, {}))[1]
+                slots.update({index + i: word for i, word in enumerate(block)})
         for buf, words in writes.values():
             for index in sorted(words):
                 buf[index] = words[index]

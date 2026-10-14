@@ -6,10 +6,10 @@
 An operator declared with ``image=`` (``Xclbin``) has no array to build:
 every core program, memtile buffer and stream-switch route comes from the
 downloaded image. What the sequence must supply is the other half of a
-dispatch, and the declaration carries everything it needs: each operand's
-shim tile and channel (``via=``, ``channel=``), each value's address in core
-data memory and the lock a core waits on before reading it. flm's shipped
-``mm`` binary is the one that does today.
+dispatch: each operand's shim tile and channel (``via=``, ``channel=``), and
+what the operator's ``array()`` places of the image, its parameter blocks
+(``Buffer(address=)``) and the locks its cores wait on before reading them
+(``Lock(lock_id=)``). flm's shipped ``mm`` binary is the one that does today.
 
 Transfers are emitted as shim DMA tasks on the pinned channels, at most
 ``depth`` outstanding per lane (the image's memtiles hold that many
@@ -20,7 +20,6 @@ groups have no meaning here and are accepted as no-ops, so an operator's
 
 from __future__ import annotations
 
-import numpy as np
 from aie.dialects.aie import DMAChannelDir
 from aie.iron import Buffer, Lock, Task
 from aie.iron.device import Tile
@@ -41,12 +40,11 @@ class ShippedRuntime(OperatorRuntime):
     Args:
         op: The resolved operator, declared with ``image=``.
         dev: The device the image runs on.
-
-    Attributes:
-        writes: Each parameter-block buffer and the words written to it.
+        built: What its ``array()`` placed: parameter blocks and the locks
+            that release them.
     """
 
-    def __init__(self, op: Operator, dev) -> None:
+    def __init__(self, op: Operator, dev, built: list) -> None:
         shims = {col: Tile(col, 0) for col in range(dev.cols)}
         channels: dict[tuple[str, int], ShimChannel] = {}
         for s in op.buffers:
@@ -66,37 +64,22 @@ class ShippedRuntime(OperatorRuntime):
                     s.channel,
                 )
 
-        cores = [Tile(col, row) for row in dev.core_rows for col in range(dev.cols)]
-        self.writes: list[tuple[Buffer, list[int]]] = []
-        for tile in cores:
-            for name, words in op.residents.items():
-                res = op.value(name)
-                assert res.address is not None, "a value written into a shipped image"
-                words = [int(w) for w in np.atleast_1d(words)]
-                buffer = Buffer(
-                    np.ndarray[(len(words),), np.dtype[np.int32]],
-                    name=f"{name}_{tile.col}_{tile.row}",
-                    tile=tile,
-                    use_write_rtp=True,
-                    address=res.address,
-                )
-                self.writes.append((buffer, words))
-        locks = [
-            Lock(tile, lock_id=lock_id)
-            for tile in cores
-            for lock_id in sorted({op.value(n).lock for n in op.residents} - {None})
-        ]
+        locks = [obj for obj in built if isinstance(obj, Lock)]
+        blocks = [obj for obj in built if isinstance(obj, Buffer)]
+        if len(locks) + len(blocks) != len(built):
+            raise TypeError(
+                f"{type(op).__name__}.array() places parameter blocks and locks "
+                f"of a shipped image, which builds nothing else"
+            )
         super().__init__(op, [*channels.values(), *locks])
-        self.buffers = [buffer for buffer, _ in self.writes]
+        self.buffers = blocks
         self._symbols = {key: channel.symbol for key, channel in channels.items()}
         self._queues: dict[tuple[str, int], list[Task]] = {}
 
     def body(self, *args) -> None:
         # Every word precedes the first release, so no core reads a
         # half-written block.
-        for buffer, words in self.writes:
-            for i, word in enumerate(words):
-                buffer[i] = word
+        self.preamble()
         for lock in self.locks:
             lock.set(1)
         self._tensors = {b.name: a for b, a in zip(self.op.buffers, args)}

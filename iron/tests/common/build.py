@@ -572,32 +572,38 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
         (6, 0),
         (3, 1),
     ]
-    assert (op.rtp.address, op.rtp.lock) == (4096, 10)
+    # Its array() places each core's parameter block and the lock that
+    # releases it, where the image's core programs read them.
+    text = str(OperatorDesign(op.resolved(), full_elf=False).module())
+    cores = 4 * 8
+    assert text.count('{address = 4096 : i32, sym_name = "rtp_') == cores
+    assert len(re.findall(r"aie\.lock\(%\w+, 10\)", text)) == cores
 
     image = Xclbin(url="u", sha256="s", filename="f")
-    # Nothing builds a shipped image's array, so the declaration has to say
-    # where every stream enters and every value lives, and may not build.
+    # The declaration has to say where every stream enters, and a stream
+    # built once per shape takes no per-call value.
     with pytest.raises(TypeError, match="pinned with via="):
 
         class Unpinned(Operator, image=image):
             n: int = Param()
             x = In(n, tile=(64,))
 
-    with pytest.raises(TypeError, match="needs an address"):
+    with pytest.raises(TypeError, match="takes no per-call value"):
 
-        class Unplaced(Operator, image=image):
+        class Unbuilt(Operator, image=image):
             n: int = Param()
             x = In(n, tile=(64,), via=Tile(0, 0))
-            count = Value(derive=lambda op: op.n)
+            count = Value()
 
-    with pytest.raises(TypeError, match="nothing builds its array"):
 
-        class Built(Operator, image=image):
-            n: int = Param()
-            x = In(n, tile=(64,), via=Tile(0, 0))
-
-            def array(self):
-                return []
+def test_a_shipped_image_runs_only_with_instructions(tmp_path):
+    insts = tmp_path / "insts.bin"
+    image = Xclbin(url="u", sha256="s", filename="f", kernel_name="K")
+    with pytest.raises(TypeError, match="no instructions"):
+        image()
+    run = image.with_instructions(insts, dispatch_params=None)
+    assert (run.insts_path, run.kernel_name, run.filename) == (insts, "K", "f")
+    assert run.with_instructions(insts, kernel_name="L").kernel_name == "L"
 
 
 def test_concurrent_fetches_of_a_shipped_image_each_get_the_whole_file(tmp_path):

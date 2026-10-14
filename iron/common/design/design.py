@@ -75,7 +75,8 @@ class OperatorDesign:
         dev = self.op.dev
         op = self.op.resolved(dev).copy()  # a build binds streams; each gets its own
         if op.external is not None:
-            return Program(dev, ShippedRuntime(op, dev)).resolve_program()
+            runtime = ShippedRuntime(op, dev, op.build_array())
+            return Program(dev, runtime).resolve_program()
         # Before array(), which may hand a core-read value to a worker.
         for value in op.values:
             if self.full_elf and not isinstance(value, declare.DispatchTime):

@@ -386,8 +386,12 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      `gemm.py` or `mha.py` for hand-written sequences
 3. A shipped binary is a subclass declared with the image, `class
    Shipped(X, image=Xclbin(url=, sha256=, filename=))`: it pins the tunables,
-   redeclares the operands with `via=` and `channel=` and lays the image's parameter block
-   out as a `Value(address=, lock=)`; nothing builds its array
+   redeclares the operands with `via=` and `channel=`, and its `array()`
+   builds no cores: it places the image's parameter block in each core,
+   `Buffer(address=)` bound to a derived `Value`, and returns the
+   `Lock(lock_id=)` the sequence releases it with. It takes no per-call
+   value. `Xclbin` is mlir-aie's `NPUKernel`, fetched on first read of
+   `xclbin_path`; a build runs its `with_instructions(insts)`
 4. Name the kernel with a factory from `aie.iron.kernels`
    (`eltwise.relu_sized(line)`, `norm.rms_norm_eps(tile)`, ...): it carries
    the symbol, the source, the argument types, aie2's LUT tables and the

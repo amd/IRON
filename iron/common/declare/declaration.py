@@ -34,7 +34,7 @@ class Declaration:
         library: The class whose attributes the library reads; a field may
             not hide one of them, but may replace an operator base's own.
         shipped: The class runs a shipped image (``image=``), so its streams
-            are pinned and its derived values placed.
+            are pinned and it takes no per-call value.
 
     Attributes:
         name: The class's name.
@@ -257,21 +257,16 @@ class Declaration:
                 )
         if not shipped:
             return
-        if "array" in vars(cls):
-            raise TypeError(
-                f"{cls.__name__} runs a shipped image, so nothing builds its array(); "
-                f"drop the override"
-            )
         for m in members:
             if isinstance(m, Operand) and m.tile_dims is not None and m.via is None:
                 raise TypeError(
                     f"{cls.__name__}.{m.name}: a stream into a shipped image must be "
                     f"pinned with via=; nothing else says which shim it uses"
                 )
-            if isinstance(m, Value) and m.derive is not None and m.address is None:
+            if isinstance(m, Value) and m.derive is None:
                 raise TypeError(
-                    f"{cls.__name__}.{m.name}: a value written into a shipped image "
-                    f"needs an address; the sequence writes it there"
+                    f"{cls.__name__}.{m.name}: a shipped image takes no per-call "
+                    f"value; its stream is built once per shape"
                 )
 
     def shim_columns(

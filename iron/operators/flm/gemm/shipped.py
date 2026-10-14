@@ -37,6 +37,7 @@ from typing import ClassVar
 import numpy as np
 from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
+from aie.iron import Buffer, Lock
 from aie.iron.device import Tile
 from ml_dtypes import bfloat16
 
@@ -66,6 +67,7 @@ A_SOURCE_COL = [2 * r for r in range(ROWS)]
 # on before it reads them. Both are baked into the overlay's core programs.
 RTP_ADDRESS = 4096
 RTP_LOCK_ID = 10
+PARAMETER_WORDS = 8
 # Outstanding transfers per shim channel. The memtiles hold two objects per
 # stream, so a third transfer would overwrite one still in use.
 QUEUE_DEPTH = 2
@@ -152,10 +154,29 @@ class Shipped(
         finish=(CT_OUT_LEN,),
     )
     # The port's named values are not this image's: it reads one block of
-    # eight words behind a lock.
+    # eight words behind a lock, written once per shape.
     n_val = m_row_blocks = k_iters = mode = clamp_min = clamp_max = None
-    n_chunks = n_units = units_valid = units_repeat = None
-    rtp = Value(address=RTP_ADDRESS, lock=RTP_LOCK_ID, derive=_parameter_words)
+    n_chunks = n_units = units_valid = units_repeat = valid = None
+    parameters = Value(derive=_parameter_words)
+
+    def array(self) -> list:
+        """What the sequence reaches of the image: each core's parameter
+        block at the address its program reads, and the lock it waits on.
+        """
+        dev = self.dev
+        cores = [Tile(col, row) for row in dev.core_rows for col in range(dev.cols)]
+        blocks = [
+            Buffer(
+                np.ndarray[(PARAMETER_WORDS,), np.dtype[np.int32]],
+                name=f"rtp_{tile.col}_{tile.row}",
+                tile=tile,
+                use_write_rtp=True,
+                address=RTP_ADDRESS,
+            )
+            for tile in cores
+        ]
+        self.parameters.bind(blocks)
+        return [*blocks, *(Lock(tile, lock_id=RTP_LOCK_ID) for tile in cores)]
 
     def resolve(self, dev):
         if dev is not None and (dev.arch is not AIEArch.AIE2p or dev.cols < 8):

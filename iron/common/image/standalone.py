@@ -56,10 +56,11 @@ class OperatorImage:
         if op.external is not None:
             # A shipped image: only the stream is built, against the download.
             config = op
-            image = op.external.fetch()
             own = OperatorDesign(op, full_elf=False).compile(insts_only=True)
-            entry = own.get_cache_entry()
-            kernel_name = op.external.kernel_name
+            entry = stream = own.get_cache_entry()
+            assert stream is not None and stream.insts is not None
+            self._kernel = op.external.with_instructions(stream.insts)
+            image = self._kernel.xclbin_path
         else:
             config = op.configuration()
             built = OperatorDesign(config, full_elf=False).compile()
@@ -74,17 +75,17 @@ class OperatorImage:
                 if config is op
                 else OperatorDesign(op, full_elf=False).compile(insts_only=not per_call)
             )
-            kernel_name = "MLIR_AIE"
-        stream = own.get_cache_entry()
-        # A design with DispatchTime values generates its stream per call.
-        assert stream is not None and (stream.insts is not None or own.dispatch_params)
-        self._kernel = NPUKernel(
-            image,
-            stream.insts,
-            kernel_name=kernel_name,
-            dispatch_params=own.dispatch_params,
-            dispatch_lib_path=own.get_dispatch_lib_path(),
-        )
+            stream = own.get_cache_entry()
+            # A design with DispatchTime values generates its stream per call.
+            assert stream is not None and (
+                stream.insts is not None or own.dispatch_params
+            )
+            self._kernel = NPUKernel(
+                image,
+                stream.insts,
+                dispatch_params=own.dispatch_params,
+                dispatch_lib_path=own.get_dispatch_lib_path(),
+            )
         buffers = op.buffers
         return Artifacts(
             full_elf=False,

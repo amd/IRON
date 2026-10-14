@@ -26,9 +26,8 @@ class Value(Member["Value"]):
 
     Args:
         dtype: An integer type: the scratchpad encoding has no floating point.
-        derive: The once-per-build value, from the operator.
-        address: Where a shipped image reads it.
-        lock: The lock a shipped image waits on for it.
+        derive: The once-per-build value, from the operator: a word, or
+            the words of a block written from its index on.
         optional: A build may allocate no buffer for it.
 
     Attributes:
@@ -44,8 +43,6 @@ class Value(Member["Value"]):
         *,
         dtype: Any = np.int32,
         derive: Callable[[Any], Any] | None = None,
-        address: int | None = None,
-        lock: int | None = None,
         optional: bool = False,
     ) -> None:
         if np.dtype(dtype).kind == "f":
@@ -55,8 +52,6 @@ class Value(Member["Value"]):
             )
         self.dtype = dtype
         self.derive = derive
-        self.address = address
-        self.lock = lock
         self.optional = optional
         self.op: Operator | None = None
         self.param: Any = None
