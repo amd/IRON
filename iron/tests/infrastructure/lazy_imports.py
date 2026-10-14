@@ -31,12 +31,20 @@ from iron.operators import _OPERATOR_MODULES
 
 
 def _modules_after_importing(name):
-    """Import `name` from the catalog in a fresh interpreter; list what came with it."""
+    """Import `name` from the catalog in a fresh interpreter; list what came with it.
+
+    `name` is a catalog key: a bare name (``"GEMM"``) or a dotted one
+    (``"flm.GEMM"``, ``iron.operators.flm``'s own catalog under its
+    prefix), which a real caller imports as ``from iron.operators.flm
+    import GEMM``, not as a single dotted import name (invalid syntax).
+    """
+    prefix, _, bare = name.rpartition(".")
+    package = f"iron.operators.{prefix}" if prefix else "iron.operators"
     program = (
         "import sys\n"
-        f"from iron.operators import {name}\n"
+        f"from {package} import {bare}\n"
         # Every export is a class carrying its own name.
-        f"assert {name}.__name__ == {name!r}, {name}.__name__\n"
+        f"assert {bare}.__name__ == {bare!r}, {bare}.__name__\n"
         # Only the operator modules, named as the catalog names them:
         # importing one necessarily creates the package around it, which says
         # nothing about laziness.
@@ -51,6 +59,12 @@ def _modules_after_importing(name):
     return set(result.stdout.split())
 
 
+#: flm's GEMM (and Shipped, which subclasses it) names Clamp, Sigmoid and
+#: SiLU directly, by module, to recognize a fused epilogue's consumer
+#: (isinstance checks): eager by design, not a lazy-catalog regression.
+_NAMES_OTHER_OPERATOR_TYPES = {"flm.GEMM", "flm.Shipped"}
+
+
 def _is_composite(name):
     """Whether `name` is built from other operators rather than from a kernel.
 
@@ -61,7 +75,9 @@ def _is_composite(name):
     """
     from iron import operators
 
-    return issubclass(getattr(operators, name), iron.Graph)
+    return issubclass(getattr(operators, name), iron.Graph) or (
+        name in _NAMES_OTHER_OPERATOR_TYPES
+    )
 
 
 @pytest.mark.parametrize("name", sorted(_OPERATOR_MODULES))

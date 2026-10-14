@@ -49,19 +49,33 @@ class Profile:
         """The profile applied in this scope, if any."""
         return cls._active.get()
 
+    @staticmethod
+    def schema(cls: type) -> dict[str, Param | Auto]:
+        """The fields an entry for ``cls`` may name: ``Param()`` s to match
+        and the ``Auto()`` s the class leaves free (one it resolves outright,
+        with no listed alternative, is not here: naming it is a stale key,
+        same as a field dropped from the class).
+        """
+        return {
+            f.name: f
+            for f in dataclasses.fields(cls)
+            if isinstance(f, Param) or f.name in cls.declaration.tunables
+        }
+
     def add(self, cls: type, **fields: Any) -> None:
         """Add an entry for ``cls``: ``Param()`` fields to match (one left out
         matches any value) and ``Auto()`` fields to give.
         """
         declared = {f.name: f for f in dataclasses.fields(cls)}
+        schema = self.schema(cls)
         dims, tunables, unknown, fixed = {}, {}, [], []
         for name, value in fields.items():
-            field = declared.get(name)
+            field = schema.get(name)
             if isinstance(field, Param):
                 dims[name] = value
-            elif name in cls.declaration.tunables:
+            elif field is not None:
                 tunables[name] = value
-            elif isinstance(field, Auto):
+            elif isinstance(declared.get(name), Auto):
                 fixed.append(name)
             else:
                 unknown.append(name)
@@ -135,9 +149,7 @@ class Profile:
         """Write the profile as JSON, one entry to a line."""
         lines = []
         for cls, dims, tunables in self._entries:
-            name = cls.__name__
-            if name not in operators.__all__ or getattr(operators, name) is not cls:
-                raise ValueError(f"{name} is not iron.operators.{name}")
+            name = operators.catalog_name(cls)
             lines.append(json.dumps({"operator": name, **dims, **tunables}))
         with open(path, "w") as f:
             f.write('{"entries": [\n  ' + ",\n  ".join(lines) + "\n]}\n")

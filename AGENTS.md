@@ -133,10 +133,12 @@ reuse lint
 1. **Operators** (`iron/operators/`)
    - One operator is one module: `relu.py` for a small one, a directory with
      `op.py` for one that also has a design, a reference, a README or a
-     device test of its own (`swiglu_prefill_stream/`). `flm/` is a catalog of its
-     own: the FastFlowLM ports (`flm.GEMM`, `flm.DequantBFP`), the binary they
-     are measured against and their weight packing; its GEMM is not
-     `iron.operators.GEMM`.
+     device test of its own (`swiglu_prefill_stream/`). `flm/` holds the
+     FastFlowLM ports (`flm.GEMM`, `flm.DequantBFP`), the binary they are
+     measured against and their weight packing, exported from its own
+     package (`from iron.operators.flm import GEMM`) as well as
+     `iron.operators`'s one catalog, dotted (`_OPERATOR_MODULES["flm.GEMM"]`,
+     what a `Profile` names it by); flm's GEMM is not `iron.operators.GEMM`.
    - An operator module holds:
      - the operator, one class (`iron/common/declare/`): `Param()` fields for what a host shape
        names, `Auto()` tunables `resolve(dev)` fills from the device and the
@@ -452,7 +454,9 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    - a shape the operator must *refuse* goes in
      `iron/tests/operators/rejected_shapes.py`, which needs no device
 7. Register operator in `iron/operators/__init__.py` (`_OPERATOR_MODULES`:
-   the name, and the module that defines it)
+   the name, and the module that defines it; an flm port's own name and
+   module go in `_FLM_OPERATOR_MODULES` beside it, the one place both its
+   package and the dotted catalog entry read)
 
 ## Graphs
 
@@ -517,7 +521,8 @@ constructed with, the call's keywords and the extents inferred from its
 operands: key MHA by `seq_pad`, which its shape gives, not `seq_len`, which
 follows from it later. A profile is a JSON file, `Profile.load(path)` and
 `profile.save(path)`, one entry to a line naming the class in
-`iron.operators`, then its dimensions and tunables:
+`iron.operators` (an flm port dotted, `"flm.GEMM"`), then its dimensions
+and tunables:
 
 ```json
 {"entries": [
