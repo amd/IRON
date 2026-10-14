@@ -318,9 +318,9 @@ def check_mixed(graph, oracle, audio_oracle, vision_oracle, case, record_propert
     got = graph.embed(text, "query", audio=audio, image=image)
     soft = {}
     if audio is not None:
-        soft[c.audio_token] = audio_oracle.embed(audio)
+        soft[c.audio_token] = audio_oracle.soft_tokens(audio)
     if image is not None:
-        soft[c.image_token] = vision_oracle.embed(image, I)
+        soft[c.image_token] = vision_oracle.soft_tokens(image, I)
     tokens = graph.tokenizer.encode(
         text,
         "query",
@@ -410,7 +410,7 @@ class TestAudio:
     @pytest.mark.parametrize("name", list(CLIPS)[::-1])
     def test_audio_accuracy(self, audio, audio_oracle, name, record_property):
         wave = clip(name)
-        got, want = audio.embed(wave), audio_oracle.embed(wave)
+        got, want = audio.soft_tokens(wave), audio_oracle.soft_tokens(wave)
         c = audio.config
         assert got.shape == want.shape
         assert got.shape == (c.tokens(c.frames(wave.size)), c.text_dim)
@@ -490,7 +490,9 @@ class TestVision:
     @pytest.mark.parametrize("name", list(IMAGES))
     def test_vision_accuracy(self, vision, vision_oracle, name, record_property):
         image, tokens = photo(name), IMAGES[name]
-        got, want = vision.embed(image, tokens), vision_oracle.embed(image, tokens)
+        got, want = vision.soft_tokens(image, tokens), vision_oracle.soft_tokens(
+            image, tokens
+        )
         assert got.shape == want.shape
         cosines = (got * want).sum(-1) / (
             np.linalg.norm(got, axis=-1) * np.linalg.norm(want, axis=-1)
@@ -683,9 +685,9 @@ def test_embeddinggemma_2_oracle_matches_hugging_face(
     c = oracle.config
     soft = {}
     if wave is not None:
-        soft[c.audio_token] = audio_oracle.embed(wave)
+        soft[c.audio_token] = audio_oracle.soft_tokens(wave)
     if image is not None:
-        soft[c.image_token] = vision_oracle.embed(image, I)
+        soft[c.image_token] = vision_oracle.soft_tokens(image, I)
     ids = tokenizer.encode(
         text,
         task,

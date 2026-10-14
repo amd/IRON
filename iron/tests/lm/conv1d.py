@@ -43,11 +43,11 @@ def test_conv1d(case, share):
     out_rows = (x.shape[0] - conv.kernel) // conv.stride + 1
     rows = max(1, int(out_rows * share))
     got = conv(x, rows=rows).numpy().reshape(out_rows, conv.out_channels)[:rows]
-    want = conv.exact(x, weight, bias)[:rows]
+    want = conv.oracle(x, weight, bias)[:rows]
     # Two roundings (the GEMM's, then RowwiseAdd's own): a looser bound than
     # Conv2d's single-rounding 2^-7, not yet measured on real hardware.
     bound = (
         2.0**-6
-        * conv.exact(np.abs(x.astype(np.float32)), np.abs(weight), np.abs(bias))[:rows]
+        * conv.oracle(np.abs(x.astype(np.float32)), np.abs(weight), np.abs(bias))[:rows]
     )
     assert (np.abs(got.astype(np.float32) - want) <= bound).all()

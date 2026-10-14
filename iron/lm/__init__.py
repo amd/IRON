@@ -17,13 +17,16 @@ themselves are applications over it, each a package of
   is its command line).
 * ``causal``: ``CausalLM``, a decoder on the NPU as one graph (prefill and
   decode, the caches, attention over them and ``logits(tokens)``), to
-  which a model gives its ``layer`` and ``head``.
+  which a model gives its ``layer`` and ``head``; ``DecodeStep``, a call's
+  per-call values.
 * ``encoder``: ``Encoder``, a bidirectional encoder compiled once for every
-  length, and the sandwich layer EmbeddingGemma 2's towers share.
+  length.
 * ``blocks``: what layers are built from: ``project``, a weight's
-  projection at either row count, the SwiGLU and GELU-gated feed-forwards,
-  sandwich norms and an encoder's attention; and ``Block``, the attention +
-  SwiGLU layer a Llama-style model mixes in on the NPU.
+  projection at either row count, and ``SwiGLU``, the feed-forward as a
+  graph of its own; and ``Block``, the attention + SwiGLU layer a
+  Llama-style model mixes in on the NPU. EmbeddingGemma 2's own Gemma-shaped
+  blocks (the GELU-gated feed-forward, sandwich norms and an encoder's
+  attention) are its application's, not the library's.
 
 Sampling and the generation, accuracy and determinism loops
 (``generation``), and what a model's device test checks
@@ -39,7 +42,6 @@ from .base import (
     DecoderConfig,
     Model,
     Oracle,
-    RopeScaling,
     Runner,
     main,
     prompt_text,
@@ -55,19 +57,14 @@ from .blocks import (
     LogMel,
     MaxPool2d,
     SwiGLU,
-    attention,
     filterbank,
-    geglu,
     project,
-    sandwich,
-    swiglu,
 )
-from .causal import CausalLM, Step
-from .encoder import Encoder, sandwich_layer
-from .generation import SEED, Sampler, accuracy, determinism, generate, greedy
+from .causal import CausalLM, DecodeStep
+from .encoder import Encoder
+from .generation import Sampler, accuracy, determinism, generate_on_host
 
 __all__ = [
-    "SEED",
     "Block",
     "CausalLM",
     "Checkpoint",
@@ -75,6 +72,7 @@ __all__ = [
     "Config",
     "Conv1d",
     "Conv2d",
+    "DecodeStep",
     "DecoderConfig",
     "Encoder",
     "ImagePatches",
@@ -82,24 +80,16 @@ __all__ = [
     "MaxPool2d",
     "Model",
     "Oracle",
-    "RopeScaling",
     "Runner",
     "Sampler",
-    "Step",
     "SwiGLU",
     "accuracy",
-    "attention",
     "determinism",
     "filterbank",
-    "geglu",
-    "generate",
-    "greedy",
+    "generate_on_host",
     "main",
     "project",
     "prompt_text",
     "rope_angles",
-    "sandwich",
-    "sandwich_layer",
-    "swiglu",
     "widen",
 ]

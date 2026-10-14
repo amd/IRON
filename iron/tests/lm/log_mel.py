@@ -41,7 +41,7 @@ def test_log_mel(log_mel, frames, record_property):
     wave += 0.05 * rng.standard_normal(n).astype(np.float32)
     got = log_mel(wave, frames=frames).numpy().reshape(FRAMES, log_mel.mels)
     got = got[:frames].astype(np.float32)
-    want = log_mel.exact(wave, frames).astype(bfloat16).astype(np.float32)
+    want = log_mel.oracle(wave, frames).astype(bfloat16).astype(np.float32)
     ulp = 2.0 ** (np.floor(np.log2(np.abs(want).clip(1e-30))) - 7)
     exact = float(np.mean(got == want))
     record_property("Exact", exact)

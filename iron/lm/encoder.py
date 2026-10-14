@@ -5,18 +5,12 @@
 rows in, attended bidirectionally, compiled once for every length.
 
 ``Encoder`` is the graph's host side, its one version and a call's inputs;
-a model subclasses it with its ``body``. ``sandwich_layer`` is the layer
-EmbeddingGemma 2's text encoder and its vision tower share: attention, then
-the GELU-gated feed-forward, each between sandwich norms.
+a model subclasses it with its ``body``.
 """
-
-from collections.abc import Callable
-from functools import partial
 
 import numpy as np
 
 from .base import Model
-from .blocks import geglu, sandwich
 
 
 class Encoder(Model):
@@ -57,23 +51,3 @@ class Encoder(Model):
         ids = np.full(self.max_tokens, V, np.int32)
         ids[:n] = tokens % V
         return ids, n
-
-
-def sandwich_layer(
-    x,
-    attend: Callable,
-    norms: tuple,
-    gate,
-    up,
-    down,
-    epsilon: float,
-    **gemm,
-):
-    """A layer on ``x``: ``attend`` between ``norms``' first two RMS norm
-    weights, then the GELU-gated feed-forward (``gate``, ``up``, ``down``,
-    GEMMs with ``gemm``'s keywords) between its last two, each with its
-    residual.
-    """
-    x = sandwich(x, attend, norms[0], norms[1], epsilon)
-    feed_forward = partial(geglu, w_gate=gate, w_up=up, w_down=down, **gemm)
-    return sandwich(x, feed_forward, norms[2], norms[3], epsilon)

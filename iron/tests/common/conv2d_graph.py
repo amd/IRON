@@ -46,7 +46,7 @@ def test_the_reference_is_the_convolution(case):
     rows = (x.shape[0] - 3) // 2 + 1
     got = np.asarray(conv.reference(x, rows=rows), np.float32)
     w = weight.astype(bfloat16).astype(np.float32)
-    want = conv.exact(x, w).astype(bfloat16).astype(np.float32)
+    want = conv.oracle(x, w).astype(bfloat16).astype(np.float32)
     ulp = 2.0 ** (np.floor(np.log2(np.abs(want).clip(1e-30))) - 7)
     assert (np.abs(got - want) <= ulp).all()
 

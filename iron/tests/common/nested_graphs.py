@@ -12,7 +12,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Carried, Scratchpad
-from iron.lm import LogMel, SwiGLU, swiglu
+from iron.lm import LogMel, SwiGLU
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs
@@ -49,8 +49,7 @@ class Inline(iron.Graph):
         self.ffn = ffn
 
     def body(self, x):
-        f = self.ffn
-        return ReLU(swiglu(x, f.w_gate, f.w_up, f.w_down))
+        return ReLU(self.ffn.body(x))
 
 
 class Features(iron.Graph):
@@ -153,7 +152,7 @@ def test_log_mel_holds_to_the_extractor():
     wave = (0.5 * np.sin(2 * np.pi * (200 * t + 300 * t**2))).astype(np.float32)
     wave += 0.05 * np.random.default_rng(0).standard_normal(n).astype(np.float32)
     got = np.asarray(log_mel.reference(wave, frames=frames), np.float32)
-    want = log_mel.exact(wave, frames).astype(bfloat16).astype(np.float32)
+    want = log_mel.oracle(wave, frames).astype(bfloat16).astype(np.float32)
     ulp = 2.0 ** (np.floor(np.log2(np.abs(want).clip(1e-30))) - 7)
     # Measured: 0.99966 exact.
     assert np.mean(got == want) >= 0.999

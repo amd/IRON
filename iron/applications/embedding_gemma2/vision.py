@@ -14,7 +14,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.lm import ImagePatches, Model, attention, rope_angles, sandwich_layer
+from iron.lm import ImagePatches, Model, rope_angles
 from iron.lm.blocks import ACCURATE
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
@@ -22,6 +22,7 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.operators.rms_norm import RMSNorm
 
+from .blocks import attention, sandwich_layer
 from .config import PROFILES, VisionConfig
 
 
@@ -204,7 +205,7 @@ class VisionTower(Model):
         rgb, values = self.processor.pack(image, out_height, out_width)
         return rgb, dict(n=out_height // c.patch * (out_width // c.patch), **values)
 
-    def embed(self, image, max_tokens: int) -> np.ndarray:
+    def soft_tokens(self, image, max_tokens: int) -> np.ndarray:
         """The soft tokens of one decoded image or video frame,
         `(tokens, text_dim)` float32, in the text model's space.
 

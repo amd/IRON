@@ -18,7 +18,8 @@ from iron.applications.llama import model as llama_model
 from iron.common.graph import tune as graph_tune
 from iron.common.graph.narrowing import CostTable
 from iron.common.graph.probe import Designs
-from iron.lm import SEED, Sampler
+from iron.lm import Sampler
+from iron.lm.generation import SEED
 from iron.lm.causal import contexts
 from iron.tests.common.llama_model import llama_1b
 

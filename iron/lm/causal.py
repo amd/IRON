@@ -59,7 +59,7 @@ def contexts(top: int, count: int, unit: int) -> list[tuple[float, int]]:
 
 
 @dataclasses.dataclass
-class Step:
+class DecodeStep:
     prompt: bool
     angles: Handle
     # A per-call value in a trace, its number in the reference.
@@ -108,7 +108,7 @@ class CausalLM(iron.Graph):
         self._decode: CompiledGraph | None = None
         self._loop: CarriedLoop | None = None
 
-    def layer(self, step: Step, i: int, weights, x):
+    def layer(self, step: DecodeStep, i: int, weights, x):
         raise NotImplementedError(f"{type(self).__name__} defines no layer()")
 
     def head(self, x):
@@ -137,7 +137,7 @@ class CausalLM(iron.Graph):
             x = Copy(self.embedding[token]).reshape(1, c.emb_dim)
             angles = Copy(self.rope[position]).reshape(1, A)
         x = self.embed(x, pixel_values, rows if prompt else None)
-        step = Step(prompt, angles, chunk, rows, position)
+        step = DecodeStep(prompt, angles, chunk, rows, position)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
         if prompt:
@@ -152,7 +152,7 @@ class CausalLM(iron.Graph):
         )
         return logits, iron.carry(token=drawn, position=position + 1)
 
-    def attend(self, step: Step, i: int, q, k, v):
+    def attend(self, step: DecodeStep, i: int, q, k, v):
         """Write ``k`` and ``v`` into layer ``i``'s caches and attend over them causally."""
         c = self.config
         H, G, D, L, C = (

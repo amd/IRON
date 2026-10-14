@@ -46,6 +46,6 @@ def test_conv2d(case, share):
     out_rows = (x.shape[0] - 3) // 2 + 1
     rows = int(out_rows * share)
     got = conv(x, rows=rows).numpy().reshape(-1, conv.out_line)[:rows]
-    want = conv.exact(x, weight)[:rows]
-    bound = 2.0**-7 * conv.exact(np.abs(x.astype(np.float32)), np.abs(weight))[:rows]
+    want = conv.oracle(x, weight)[:rows]
+    bound = 2.0**-7 * conv.oracle(np.abs(x.astype(np.float32)), np.abs(weight))[:rows]
     assert (np.abs(got.astype(np.float32) - want) <= bound).all()

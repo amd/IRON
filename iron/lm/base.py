@@ -40,7 +40,7 @@ from .generation import (
     Sampler,
     accuracy,
     determinism,
-    generate,
+    generate_on_host,
     kl_stats,
 )
 
@@ -883,7 +883,9 @@ def main(runner: type[Runner], description: str):
         report(first, later)
         if args.compare_host:
             print("\n[Host loop]\n" + run.decode(tokens[1:]), end="")
-            host, _, _ = generate(model, tokens, args.num_tokens, sampler(), show)
+            host, _, _ = generate_on_host(
+                model, tokens, args.num_tokens, sampler(), show
+            )
             print(run.decode(pending), end="")
             differ = sum(a != b for a, b in zip(drawn, host))
             print(

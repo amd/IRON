@@ -3,22 +3,17 @@
 
 """The blocks a model builds from operators, for a graph's body.
 
-``project`` is a weight's projection at either row count. ``swiglu``
+``project`` is a weight's projection at either row count, and ``SwiGLU``
 is the SwiGLU feed-forward, ``W_down @ (SiLU(W_gate @ x) * (W_up @ x))``,
-for one token or a sequence, and ``SwiGLU`` is it as a graph of its
-own, holding the weights, so they are uploaded once. ``geglu`` is the
-GELU-gated feed-forward over GEMMs, ``sandwich`` a block between two RMS
-norms with its residual (Gemma's sandwich norms), and ``attention`` an
-encoder's bidirectional attention over one sequence, its queries and keys
-RMS-normed and rotated. ``Block`` is the attention + SwiGLU layer Llama 3
-and Granite 4.2 3B share, on the NPU; a model's own oracle gives its
-numpy layer. ``LogMel`` is an audio front end's log-mel
-spectrogram, ``Conv2d`` a convolution over rows of channels-last pixels,
-``Conv1d`` one over rows of full-channel-depth input (an audio encoder's
-front end), ``MaxPool2d`` a max pooling of channels-last pixels,
-``ConcatChannels`` their concatenation along the channels and
-``ImagePatches`` a vision front end's resize into patches. A graph
-here is called in a model's body as it is on its own (``Graph``): its
+as a graph of its own, holding the weights, so they are uploaded once.
+``Block`` is the attention + SwiGLU layer Llama 3 and Granite 4.2 3B
+share, on the NPU; a model's own oracle gives its numpy layer. ``LogMel``
+is an audio front end's log-mel spectrogram, ``Conv2d`` a convolution over
+rows of channels-last pixels, ``Conv1d`` one over rows of full-channel-depth
+input (an audio encoder's front end), ``MaxPool2d`` a max pooling of
+channels-last pixels, ``ConcatChannels`` their concatenation along the
+channels and ``ImagePatches`` a vision front end's resize into patches. A
+graph here is called in a model's body as it is on its own (``Graph``): its
 steps trace into the model's.
 
 The weights are a checkpoint's ``(out, in)``: SwiGLU's ``w_gate`` and
@@ -31,7 +26,6 @@ is an error at trace time.
 
 import dataclasses
 import math
-from collections.abc import Callable
 
 import aie.utils as aie_utils
 import numpy as np
@@ -46,19 +40,17 @@ from iron.operators.elementwise_max import ElementwiseMax
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
-from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.limbs import Limbs, stacked
 from iron.operators.log import Log
 from iron.operators.magnitude import Magnitude
-from iron.operators.mha import MHA
 from iron.operators.resample.op import SIDE, PatchPositions, Resample, ResampleTaps
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
 
-from .causal import Step
+from .causal import DecodeStep
 
 
 def project(
@@ -108,13 +100,6 @@ def project(
     return RowwiseAdd(y.reshape(rows, bias.shape[0]), bias).reshape(y.shape)
 
 
-def swiglu(x, w_gate, w_up, w_down, k_tile=None, tile_n=None):
-    """The feed-forward of ``x``, ``(rows, embedding_dim)``."""
-    tiled = dict(k_tile=k_tile, tile_n=tile_n)
-    gate, up = project(x, w_gate, **tiled), project(x, w_up, **tiled)
-    return project(ElementwiseMul(SiLU(gate), up), w_down, **tiled)
-
-
 class SwiGLU(iron.Graph):
     """The feed-forward as a graph, over the ``(out, in)`` weights it holds."""
 
@@ -132,7 +117,8 @@ class SwiGLU(iron.Graph):
         self.w_gate, self.w_up, self.w_down = w_gate, w_up, w_down
 
     def body(self, x):
-        return swiglu(x, self.w_gate, self.w_up, self.w_down)
+        gate, up = project(x, self.w_gate), project(x, self.w_up)
+        return project(ElementwiseMul(SiLU(gate), up), self.w_down)
 
 
 def filterbank(fft: int, mels: int, sample_rate: int, max_hz: float) -> np.ndarray:
@@ -227,7 +213,7 @@ class LogMel(iron.Graph):
             return Log(energy, offset=self.mel_floor)
         return Log(energy, features, offset=self.mel_floor)
 
-    def exact(self, wave: np.ndarray, frames: int) -> np.ndarray:
+    def oracle(self, wave: np.ndarray, frames: int) -> np.ndarray:
         """The first ``frames`` features of ``wave`` in float64, rounded once
         to float32: the extractor's own computation, which the graph's
         reference, its operators', is held to.
@@ -385,7 +371,7 @@ class Conv2d(iron.Graph):
         h = h if y is not None else h[: rows * self.out_width]
         return None if y is not None else h.reshape(out_rows, self.out_line)
 
-    def exact(self, x: np.ndarray, weight: np.ndarray) -> np.ndarray:
+    def oracle(self, x: np.ndarray, weight: np.ndarray) -> np.ndarray:
         """The convolution of ``x`` ``(rows, width * channels)`` by
         ``weight`` in float32, bordered: what the graph's GEMMs compute
         before their one rounding.
@@ -464,7 +450,7 @@ class Conv1d(iron.Graph):
         h = RowwiseAdd(GEMM(a, self.matrix, **ACCURATE), self.bias)
         return Copy(h, y) if y is not None else h
 
-    def exact(self, x: np.ndarray, weight: np.ndarray, bias: np.ndarray) -> np.ndarray:
+    def oracle(self, x: np.ndarray, weight: np.ndarray, bias: np.ndarray) -> np.ndarray:
         """The convolution of ``x`` ``(rows, channels)`` by ``weight`` and
         ``bias`` in float32: what the graph's GEMM and bias add compute
         before their one rounding each.
@@ -753,70 +739,6 @@ class ImagePatches(iron.Graph):
         )
 
 
-def geglu(x, w_gate, w_up, w_down, **gemm):
-    """The GELU-gated feed-forward of ``x``, ``(rows, embedding_dim)``,
-    ``W_down @ (GELU(W_gate @ x) * (W_up @ x))``, each projection a GEMM
-    with ``gemm``'s keywords reading the weight as stored.
-    """
-    gate = GELU(GEMM(x, w_gate, b_col_maj=True, **gemm))
-    f = ElementwiseMul(gate, GEMM(x, w_up, b_col_maj=True, **gemm))
-    return GEMM(f, w_down, b_col_maj=True, **gemm)
-
-
-def sandwich(x, block: Callable, pre, post, epsilon: float):
-    """``x`` plus ``block`` of it between two RMS norms, weighted ``pre``
-    before the block and ``post`` after it.
-    """
-    h = RMSNorm(x, weight=pre, epsilon=epsilon)
-    return ElementwiseAdd(x, RMSNorm(block(h), weight=post, epsilon=epsilon))
-
-
-def attention(
-    h,
-    angles,
-    *,
-    q_proj,
-    k_proj,
-    v_proj,
-    o_proj,
-    q_norm,
-    k_norm,
-    heads: int,
-    groups: int,
-    head_dim: int,
-    epsilon: float,
-    window: int | None = None,
-    **gemm,
-):
-    """Bidirectional attention over the rows of ``h``, unscaled: ``q_proj``,
-    ``k_proj`` and ``v_proj`` project them (GEMMs with ``gemm``'s keywords),
-    the queries and keys are RMS-normed by ``q_norm`` and ``k_norm`` and
-    rotated by ``angles``, a row each, and the values RMS-normed; ``MHA``
-    attends within ``window`` positions if given, over the pipelines the
-    profile gives it, and ``o_proj`` projects the heads back. Each weight
-    is a checkpoint's ``(out, in)``.
-    """
-    T, H, G, D = h.shape[0], heads, groups, head_dim
-    q = GEMM(h, q_proj, b_col_maj=True, **gemm).reshape(T * H, D)
-    k = GEMM(h, k_proj, b_col_maj=True, **gemm).reshape(T * G, D)
-    v = GEMM(h, v_proj, b_col_maj=True, **gemm).reshape(T * G, D)
-    q = RoPE(RMSNorm(q, weight=q_norm, epsilon=epsilon), angles)
-    k = RoPE(RMSNorm(k, weight=k_norm, epsilon=epsilon), angles)
-    v = RMSNorm(v, epsilon=epsilon)
-    o = MHA(
-        q.reshape(T, H, D),
-        k.reshape(T, G, D),
-        v.reshape(T, G, D),
-        heads_interleaved=True,
-        kv_interleaved=True,
-        causal=False,
-        emulate_bf16_mmul_with_bfp16=False,
-        window=window,
-        scale=1.0,
-    )
-    return GEMM(o.reshape(T, H * D), o_proj, b_col_maj=True, **gemm)
-
-
 class Block:
     """The attention + SwiGLU layer Llama 3 and Granite 4.2 3B share, on the
     NPU: pre-norm attention, then pre-norm SwiGLU, both residual. A model
@@ -824,7 +746,7 @@ class Block:
     ``config``, and adds its own ``head``.
     """
 
-    def layer(self, step: Step, i: int, w, x):
+    def layer(self, step: DecodeStep, i: int, w, x):
         c, n = self.config, x.shape[0]
         H, G, D = c.n_heads, c.n_kv_groups, c.head_dim
         a, mlp = w.self_attn, w.mlp
@@ -840,5 +762,5 @@ class Block:
         k = RoPE(k.reshape(n * G, D), step.angles)
         x = ElementwiseAdd(x, project(self.attend(step, i, q, k, v), a.o_proj.weight))
         h = RMSNorm(x, weight=w.post_attention_layernorm.weight, epsilon=c.eps)
-        ff = swiglu(h, mlp.gate_proj.weight, mlp.up_proj.weight, mlp.down_proj.weight)
-        return ElementwiseAdd(x, ff)
+        ff = SwiGLU(mlp.gate_proj.weight, mlp.up_proj.weight, mlp.down_proj.weight)
+        return ElementwiseAdd(x, ff(h))

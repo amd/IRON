@@ -31,7 +31,7 @@ from iron import lm
 from iron import Scratchpad
 from iron.common.graph.narrowing import CostTable, JointNarrowing
 from iron.common.graph.probe import Call
-from iron.lm import Checkpoint, Encoder, attention, rope_angles, sandwich_layer
+from iron.lm import Checkpoint, Encoder, rope_angles
 from iron.lm.blocks import ACCURATE
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
@@ -45,6 +45,7 @@ from iron.operators.mha import MHA
 from iron.operators.rms_norm import RMSNorm
 
 from .audio import AudioTower
+from .blocks import attention, sandwich_layer
 from .config import PROFILES, AudioConfig, Config, VisionConfig
 from .vision import VisionTower
 

@@ -35,9 +35,9 @@ from iron.lm import (
     Sampler,
     accuracy,
     determinism,
-    generate,
-    greedy,
+    generate_on_host,
 )
+from iron.lm.generation import greedy
 from iron.applications.llama.model import Llama
 from iron.tests.common.llama_model import PROFILE, SMALL, checkpoint
 
@@ -242,13 +242,13 @@ def test_a_short_prompt_runs_at_its_own_rows():
 
 @pytest.mark.parametrize("temperature", [0.0, 0.7])
 def test_the_carried_draws_are_the_host_loop_s_tokens(cpu, temperature):
-    """What ``generate`` loops on the device, each call started from the
-    last one's carry: from the same seed, the host loop's tokens. Every draw
-    is the graph's own, from the rows the sampler gives it.
+    """What ``generate_on_host`` loops on the device, each call started from
+    the last one's carry: from the same seed, the host loop's tokens. Every
+    draw is the graph's own, from the rows the sampler gives it.
     """
     config, n, count = cpu.config, len(cpu.prompt), 6
     host = OnHost(config, cpu.weights)
-    expected, _, _ = generate(
+    expected, _, _ = generate_on_host(
         host, cpu.prompt, count, Sampler(temperature, 40, np.random.default_rng(5))
     )
     model = OnHost(config, cpu.weights)

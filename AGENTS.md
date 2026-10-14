@@ -921,7 +921,9 @@ profiles. The library is four modules:
   operators' references, so it catches a wiring mistake the graph's own
   reference repeats; it widens a layer's weights to float32 as the pass
   reaches them, and holds the embedding in float32, so it is built to check
-  with); `Model`, a graph
+  with; it also carries the primitives every model's own oracle shares:
+  `rms_norm`, `gelu_tanh`, `attend(causal=, window=)` and `rotate`);
+  `Model`, a graph
   whose versions `load(tuner, full_elf)` compiles before the first call,
   in the packaging asked for; and `Runner` and `main`, a decoder's
   checkpoint, tokenizer, model and oracle, and the command line. A model's
@@ -933,34 +935,37 @@ profiles. The library is four modules:
   prompts random: speed, accuracy against the oracle and determinism
   without the real weights or the tokenizer
 - `causal.py`: `CausalLM`, a decoder as one graph, a prompt chunk and a
-  decode step, the key and value caches, attention over them (`attend`) and
-  `logits(tokens)`. A model subclasses it with `layer(step, i, weights,
-  x)` and `head(x)`, and `Oracle` with a numpy `layer(angles, weights, x)`
-  and `head(x)`, which it names as its `CausalLM`'s `oracle`; the pass,
-  RoPE and attention are shared. `embed()` on both, the identity by
-  default, is where a model scales or splices the rows the embedding gather
-  gives (a vision tower's features, by a call's `pixel_values`). A
+  decode step (`DecodeStep`), the key and value caches, attention over them
+  (`attend`) and `logits(tokens)`. A model subclasses it with `layer(step,
+  i, weights, x)` and `head(x)`, and `Oracle` with a numpy `layer(angles,
+  weights, x)` and `head(x)`, which it names as its `CausalLM`'s `oracle`;
+  the pass, RoPE and attention are shared. `embed()` on both, the identity
+  by default, is where a model scales or splices the rows the embedding
+  gather gives (a vision tower's features, by a call's `pixel_values`). A
   `DecoderConfig`'s `rotary_dim` rotates only that prefix of each head, and
   its `rope_attention_scaling` scales the whole angle table once
 - `encoder.py`: `Encoder`, EmbeddingGemma 2's kind, a bidirectional
-  encoder compiled once at `max_tokens` rows with the length bound per call,
-  and `sandwich_layer`, the layer its text encoder and vision tower share
+  encoder compiled once at `max_tokens` rows with the length bound per call
 - `blocks.py`: what layers are built from: `project(x, w)`, a weight's
   projection at either row count (GEMV for one row, GEMM for more), with a
   `bias` folded on by `RowwiseAdd` where a checkpoint's projection carries
   one, and the GEMM's `k_tile` and `tile_n` where the weight's dimensions
   are not multiples of their defaults;
-  `swiglu`, the SwiGLU feed-forward (`SwiGLU` is it as a graph of its own,
-  called in a model's body or alone, device-tested by
-  `iron/tests/lm/swiglu.py`; `LogMel`, an audio front end's log-mel
-  spectrogram, and `Conv2d`, a channels-last convolution, are graphs too,
-  device-tested by `iron/tests/lm/log_mel.py` and
-  `iron/tests/lm/conv2d.py`, and `ImagePatches` resizes a vision
-  front end's image into patches, `iron/tests/lm/image_patches.py`);
-  `geglu`, the GELU-gated one; `sandwich`, a block between two RMS norms;
-  `attention`, an encoder's; and `Block` and `BlockOracle`, the attention +
-  SwiGLU layer a Llama-style model (Llama 3, Granite 4.2 3B) mixes in
-  alongside `CausalLM` and `Oracle`
+  `SwiGLU`, the SwiGLU feed-forward as a graph of its own, called in a
+  model's body or alone, device-tested by `iron/tests/lm/swiglu.py`;
+  `LogMel`, an audio front end's log-mel spectrogram, and `Conv2d`, a
+  channels-last convolution, are graphs too, device-tested by
+  `iron/tests/lm/log_mel.py` and `iron/tests/lm/conv2d.py` (each graph's
+  numpy reference is its `oracle()` method); `ImagePatches` resizes a vision
+  front end's image into patches, `iron/tests/lm/image_patches.py`; and
+  `Block`, the attention + SwiGLU layer a Llama-style model (Llama 3,
+  Granite 4.2 3B) mixes in alongside `CausalLM`, its own oracle's `layer()`
+  the same shape in numpy, built from `Oracle`'s shared primitives.
+  EmbeddingGemma 2's own Gemma-shaped blocks (`geglu`, the GELU-gated
+  feed-forward; `sandwich`, a block between two RMS norms; `attention`, an
+  encoder's bidirectional attention; `sandwich_layer`, the two together) are
+  its application's own, `iron/applications/embedding_gemma2/blocks.py`,
+  not the library's
 
 Nothing of a model's own is needed by `generation.py` (sampling, the
 generation loop and the accuracy and determinism checks over any model

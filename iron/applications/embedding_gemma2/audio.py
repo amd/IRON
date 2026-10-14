@@ -354,7 +354,7 @@ class AudioTower(Model):
         wave[c.hop : c.hop + held] = audio[:held]
         return wave, dict(n=-(-frames // 2), frames=frames, tokens=tokens)
 
-    def embed(self, waveform) -> np.ndarray:
+    def soft_tokens(self, waveform) -> np.ndarray:
         """The soft tokens of one mono clip at `sample_rate`:
         `(config.tokens(frames), text_dim)` float32, in the text model's
         space.

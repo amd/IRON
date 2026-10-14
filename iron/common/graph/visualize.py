@@ -509,7 +509,7 @@ class Dataflow:
         }
 
 
-class Arena:
+class ArenaPicture:
     """A compiled version's scratch buffers over its runlist: each a box
     from the first step touching it to the last, at its byte offset and
     size, so the bytes two buffers share are where their boxes stack in

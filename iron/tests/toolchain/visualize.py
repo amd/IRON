@@ -13,7 +13,7 @@ import re
 import iron
 from iron.common.graph import CompiledGraph
 from iron.common.graph.narrowing import Tuning
-from iron.common.graph.visualize import Arena, Dataflow, Floorplan
+from iron.common.graph.visualize import ArenaPicture, Dataflow, Floorplan
 from iron.common.image.allocator import LiveRange
 from iron.operators import ElementwiseAdd, SiLU
 from iron.tests.toolchain.tools import requires
@@ -50,7 +50,7 @@ def test_a_floorplan_holds_the_cores_and_streams_the_step_asks_for(device):
 
 def test_an_arena_draws_each_scratch_buffer_where_and_while_it_lives(device):
     version = TwoSteps().compile(a=(N,), b=(N,))
-    plan = Arena(version)
+    plan = ArenaPicture(version)
     [between] = [h.name for h in version.traced.steps[0].outputs]
     assert set(plan.boxes) == {between}
     assert plan.ranges[between] == LiveRange(0, 1)

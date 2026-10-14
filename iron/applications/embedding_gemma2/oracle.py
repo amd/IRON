@@ -161,7 +161,7 @@ class AudioOracle(Oracle):
         audio = np.asarray(waveform, np.float32).reshape(-1)[: c.max_samples]
         n = audio.size
         wave = np.pad(audio, (c.frame // 2, -(-n // c.pad_to) * c.pad_to - n))
-        features = self.log_mel.exact(wave, (wave.size - c.frame - 1) // c.hop + 1)
+        features = self.log_mel.oracle(wave, (wave.size - c.frame - 1) // c.hop + 1)
         valid = c.frames(n)
         features[valid:] = 0
         return features, valid
@@ -272,7 +272,7 @@ class AudioOracle(Oracle):
         x = x[: c.tokens(frames)] @ w.output_proj.weight.T + w.output_proj.bias
         return self.rms_norm(x) @ self.projection.T
 
-    def embed(self, waveform) -> np.ndarray:
+    def soft_tokens(self, waveform) -> np.ndarray:
         """The soft tokens of one mono clip at `sample_rate`."""
         return self.tower(*self.features(waveform))
 
@@ -407,7 +407,7 @@ class VisionOracle(Oracle):
         pooled *= np.float32(np.sqrt(c.emb_dim) / k**2)
         return self.rms_norm(pooled) @ self.projection.T
 
-    def embed(self, image, max_tokens: int) -> np.ndarray:
+    def soft_tokens(self, image, max_tokens: int) -> np.ndarray:
         """The soft tokens of one decoded image or video frame at the
         processor's `max_tokens`.
         """

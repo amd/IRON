@@ -31,7 +31,7 @@ from .generation import (
     determinism,
     differing_steps,
     divergence,
-    generate,
+    generate_on_host,
     greedy,
     greedy_logits,
     kl_stats,
@@ -140,7 +140,7 @@ def check_device_sampling(runner, model, prompt_len: int, num_tokens: int, *, re
     record("TTFT", first)
     if num_tokens > 1:
         record("TPS", 1 / later)
-    host, _, _ = generate(model, tokens, num_tokens, sampler())
+    host, _, _ = generate_on_host(model, tokens, num_tokens, sampler())
     differing = [i for i, (a, b) in enumerate(zip(drawn, host)) if a != b]
     record("DifferingTokens", len(differing))
     assert not differing, f"tokens {differing} of {num_tokens} differ from the host's"
