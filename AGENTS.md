@@ -166,8 +166,8 @@ reuse lint
        from it. An `Elementwise` operator has none of its own: its kernel's
        contract is the reference. A composite builds its reference from its
        kernels' contract references where it can, and says why where not.
-     - `tolerance()`, what every output is judged by, in tests, compare
-       mode and the tuner alike: the contract of the kernel it runs unless
+     - `tolerance()`, what every output is judged by, in tests, a graph's
+       check mode (`compile(check=True)`) and the tuner alike: the contract of the kernel it runs unless
        it overrides it (a data mover returns `Tolerance.exact()`: any other
        accepts a wrong permutation). A finish or a prologue carries it
        through its steps' own.
@@ -544,8 +544,10 @@ Operators with equal `array_key()` share one array; with equal
 `design_key()` they are one build. `compile(dev=, full_elf=, **shapes)`
 packages it as mlir-aie's `full_elf` says: one full ELF, or with `False`
 an xclbin per step; left `None`, a full ELF on NPU2 and xclbins on NPU1,
-and `verbose=True` prints why.
-It links the image (`version.image`) and stops
+and `verbose=True` prints why. `check=True` debugs a graph a step at a
+time: each step is its own dispatch, held to its reference on the inputs
+the NPU gave it by its `tolerance()`, and the first step outside it raises,
+naming the step and its buffers. It links the image (`version.image`) and stops
 there: the runtime that loads it is made on the first call, so a host with
 the toolchain and no NPU can compile ahead of time.
 `iron/applications/llama/model.py` is the worked example
@@ -576,9 +578,9 @@ code before relying on a line here; it is the authority.
   share a build.
 - **Packaging is one switch, mlir-aie's `full_elf`**, derived where it is
   left `None` (`iron/common/image/packaging.py`, reported with
-  `verbose=True`): a `DispatchTime` value or NPU1 forces xclbin; otherwise
-  the image is one full ELF. Full-ELF streams
-  have DDR address folding off, so a sequence cannot move between images.
+  `verbose=True`): a `DispatchTime` value, NPU1 or `check=True` forces
+  xclbin; otherwise the image is one full ELF. Full-ELF streams have DDR
+  address folding off, so a sequence cannot move between images.
 - **Length-free extents.** `Extent(field)` and `x[:n]` bounds are carried
   through reshape and transpose; under a bound a buffer is split
   round-robin by tile. GEMM bounds its compute (M, and on a full ELF K),

@@ -82,6 +82,14 @@ def test_an_xclbin_is_asked_for_where_a_full_elf_would_do():
     assert p.reasons == ["full_elf=False: asked for"]
 
 
+def test_check_takes_an_xclbin_per_step():
+    p = plan(NPU2(), _traced(), check=True)
+    assert not p.full_elf
+    assert p.reasons == ["check=True: each step its own dispatch, checked"]
+    with pytest.raises(ValueError, match="full_elf=True is not possible.*check"):
+        plan(NPU2(), _traced(), full_elf=True, check=True)
+
+
 def test_a_shipped_image_in_a_graph_is_refused(npu2):
     class Shipping(iron.Graph):
         def body(self, a, b):

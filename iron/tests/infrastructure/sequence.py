@@ -6,8 +6,8 @@
 
 This is the first test module under ``iron/tests/`` and exercises the
 sequencing infrastructure itself (dispatch-mode selection, fused-MLIR
-generation, cross-mode output parity and the compare-mode self-check) rather
-than any single operator.
+generation, cross-packaging output parity and the check mode's self-check)
+rather than any single operator.
 
 The ``OperatorSequence`` packagings and modes covered here are:
 
@@ -17,10 +17,8 @@ The ``OperatorSequence`` packagings and modes covered here are:
                           ``aiex.run``), NPU2 only.
 * ``full_elf=False``    – one xclbin per operator, chained (works on all
                           platforms).
-* ``dispatch="compare"``   – the xclbin chain plus a per-step CPU-reference
-                             check.
-* ``dispatch="reference"`` – pure-CPU evaluation via each operator's
-                             ``reference()``.
+* ``check=True``        – the xclbin chain plus a per-step CPU-reference
+                          check.
 """
 
 import logging
@@ -50,7 +48,7 @@ RELATIVE = Tolerance.relative(0.04, 1e-6)
 PACKAGINGS = {
     "separate": dict(full_elf=False),
     "fused": dict(full_elf=True),
-    "compare": dict(dispatch="compare"),
+    "compare": dict(check=True),
 }
 
 
@@ -65,7 +63,7 @@ def _set_input(run, name, data):
 
     The explicit push is redundant, since every callable flushes host writes
     at dispatch (see test_non_input_buffers_sync_without_explicit_flush), and
-    is a no-op sync for the reference callable.
+    is kept for the reader.
     """
     buf = run.get_buffer(name)
     buf.numpy_view()[: data.size] = data.reshape(-1)
@@ -223,84 +221,20 @@ def test_dispatch_modes_bit_identical(dispatch):
 
 
 # ---------------------------------------------------------------------------
-# 3b. dispatch="reference" resolves slice-notation buffers the same way the
-#     NPU dispatch paths do: via NpuTensor.subview() on the CPU backend,
-#     rather than a hand-rolled numpy view. Not covered by
-#     test_dispatch_modes_bit_identical above, since reference() is a CPU
-#     re-implementation and only expected to match the NPU output within
-#     tolerance, not bit-for-bit (see StepCallable's compare tolerance).
-# ---------------------------------------------------------------------------
-
-_SLICE_SIZE = 1024
-_SLICE_BYTES = _SLICE_SIZE * 2  # bf16
-
-
-def _build_packed_output_sequence(dispatch, name):
-    """Two independent adds writing into disjoint halves of one explicitly
-    sized buffer via slice notation ("packed[start:end]"). Unlike
-    _build_add_relu_sequence's "temp" hand-off (a whole-buffer alias), this
-    exercises slice_info/explicit_buffer_sizes resolution directly.
-    """
-    add0 = ElementwiseAdd(size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1)
-    add1 = ElementwiseAdd(size=_SLICE_SIZE, tile_size=_SLICE_SIZE, num_aie_columns=1)
-    return OperatorSequence(
-        name=name,
-        runlist=[
-            (add0, "a0", "b0", f"packed[0:{_SLICE_BYTES}]"),
-            (add1, "a1", "b1", f"packed[{_SLICE_BYTES}:{2 * _SLICE_BYTES}]"),
-        ],
-        input_args=["a0", "b0", "a1", "b1"],
-        output_args=["packed"],
-        buffer_sizes={"packed": 2 * _SLICE_BYTES},
-        dispatch=dispatch,
-    )
-
-
-@pytest.mark.supported_devices("npu1", "npu2")
-def test_reference_dispatch_resolves_sliced_buffer():
-    """dispatch="reference" must resolve slice-notation buffers via
-    subview() on the CPU backend, matching the xclbin chain's StepCallable,
-    and each slice's write must be visible through the parent buffer name.
-    """
-    rng = np.random.default_rng(0)
-    a0: Any = rng.random(_SLICE_SIZE).astype(bfloat16)
-    b0: Any = rng.random(_SLICE_SIZE).astype(bfloat16)
-    a1: Any = rng.random(_SLICE_SIZE).astype(bfloat16)
-    b1: Any = rng.random(_SLICE_SIZE).astype(bfloat16)
-
-    seq = _build_packed_output_sequence("reference", "infra_reference_sliced_packed")
-    seq.compile()
-    run = seq.get_callable()
-    _set_input(run, "a0", a0)
-    _set_input(run, "b0", b0)
-    _set_input(run, "a1", a1)
-    _set_input(run, "b1", b1)
-    run()
-    packed = run.get_buffer("packed").numpy()[: 2 * _SLICE_SIZE].copy()
-
-    expected = np.concatenate([a0 + b0, a1 + b1])
-    verdict = verify_buffer(packed, "packed", expected, RELATIVE)
-    assert verdict, f"reference-dispatch sliced buffer: {verdict.detail}"
-
-
-# ---------------------------------------------------------------------------
-# 4. Compare mode holds each step to its kernel's contract, and raises on a
-#    step that falls outside the tolerance it is judged by.
+# 4. Check mode holds each step to its one tolerance(). A step outside it
+#    raises; iron/tests/common/checking.py induces that device-free, from a
+#    real wrong weight.
 #
 #    Magnitude's kernel comes within 2e-7 of hypot, about a float32 ulp, on
-#    every device: within its contract, but not correctly rounded. So the
-#    same NPU output must pass under the default tolerance and fail under an
-#    exact one.
+#    every device: within its contract, but not correctly rounded.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-@pytest.mark.parametrize("exact", [False, True])
-def test_compare_mode_judges_each_step_by_its_tolerance(exact):
-    """dispatch="compare" runs the NPU pipeline and, per step, re-runs the
+def test_check_mode_judges_each_step_by_its_tolerance():
+    """check=True runs the NPU pipeline and, per step, re-runs the
     operator's ``reference()`` on the same NPU inputs. Under its kernel's
-    contract the step runs cleanly; held to exact equality it makes compare
-    mode raise.
+    contract the step runs cleanly.
     """
     rows, width = 8, 640
     rng = np.random.default_rng(0)
@@ -308,49 +242,41 @@ def test_compare_mode_judges_each_step_by_its_tolerance(exact):
 
     op = Magnitude(rows=rows, width=width, num_aie_columns=1)
     seq = OperatorSequence(
-        name="infra_compare_magnitude",
+        name="infra_check_magnitude",
         runlist=[(op, "x", "out")],
         input_args=["x"],
         output_args=["out"],
-        dispatch="compare",
+        check=True,
     )
     seq.compile()
-    assert seq.dispatch == "compare" and seq.full_elf is False
+    assert seq.check and seq.full_elf is False
 
     run: Any = seq.get_callable()
-    if exact:
-        run.tolerance = Tolerance.exact()
     _set_input(run, "x", x)
-
-    if exact:
-        with pytest.raises(RuntimeError, match="deviates from reference"):
-            run()
-    else:
-        run()  # must not raise
+    run()  # must not raise
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_compare_mode_judges_every_output_at_the_calls_values(caplog):
+def test_check_mode_judges_every_output_at_the_calls_values(caplog):
     """Sample writes two buffers, its record in place and the token, at a row
-    and slot that are per-call values. Compare mode runs its reference at
-    the values the step was dispatched with and judges both buffers, so a
-    draw from any row but ``position``'s, or a record in any other slot,
-    raises.
+    and slot that are per-call values. Check mode runs its reference at
+    the values the step was dispatched with and judges both buffers, exactly
+    (Sample's tolerance()), so a draw from any row but ``position``'s, or a
+    record in any other slot, raises.
     """
     steps, position = 4, 2
     op = Sample(vocab=4096, cores=4, steps=steps)
     op.use_value("row", PerCall("row", Kind.SCRATCHPAD, np.int32).affine())
     op.use_value("at", PerCall("position", Kind.SCRATCHPAD, np.int32).affine())
     seq = OperatorSequence(
-        name="infra_compare_sample",
+        name="infra_check_sample",
         runlist=[(op, "logits", "draws", "tokens", "token")],
         input_args=["logits", "draws", "tokens"],
         output_args=["token"],
-        dispatch="compare",
+        check=True,
     )
     seq.compile()
     run: Any = seq.get_callable()
-    run.tolerance = Tolerance.exact()
     rng = np.random.default_rng(3)
     _set_input(run, "logits", rng.normal(0, 3, op.vocab).astype(bfloat16))
     rows = [(0.0, 1), (0.0, 1), (1.0, 64), (0.0, 1)]

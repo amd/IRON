@@ -3,7 +3,7 @@
 
 """Every catalog case's judgement, device-free: its own oracle output passes
 its ``tolerance()``, and an output past it, a NaN or its halves swapped fail,
-as a device test, compare mode and the tuner judge them."""
+as a device test, check mode and the tuner judge them."""
 
 import numpy as np
 import pytest

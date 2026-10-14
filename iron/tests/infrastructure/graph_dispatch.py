@@ -14,6 +14,7 @@ change that quietly aliased two live buffers shows up here and nowhere
 else, because it produces wrong values rather than an error.
 """
 
+import logging
 import re
 
 import numpy as np
@@ -49,16 +50,16 @@ def _operator():
     return ElementwiseAdd(size=SIZE, tile_size=TILE)
 
 
-PACKAGINGS = {"reference": dict(dispatch="reference"), "fused": dict(full_elf=True)}
+PACKAGINGS = {"separate": dict(full_elf=False), "fused": dict(full_elf=True)}
 
 
-def _graph(name, packaging="reference"):
+def _graph(name, packaging="fused"):
     """X + w + w + w, traced from dataflow, as the sequence it lowers to."""
     traced = Adds(_operator(), 3).trace(x=(SIZE,), w=(SIZE,))
     return traced, traced.sequence(name, **PACKAGINGS[packaging])
 
 
-def _hand_written(name, packaging="reference"):
+def _hand_written(name, packaging="fused"):
     """The same computation, with the buffer names written out."""
     add = _operator()
     runlist = [
@@ -130,6 +131,27 @@ def test_a_graph_matches_the_hand_written_runlist_numerically(precompile, dispat
         "a graph must compute exactly what the hand-written runlist computes; "
         "a difference here means the traced wiring or the planned layout is wrong"
     )
+
+
+@pytest.mark.supported_devices("npu2")
+def test_check_mode_holds_each_step_to_its_reference(caplog):
+    """compile(check=True) dispatches each step on its own and holds what it
+    wrote to its reference on the NPU's inputs: a graph within its steps'
+    tolerances runs, judges every step, and computes what the full ELF does.
+    A step outside its tolerance raises (iron/tests/common/checking.py).
+    """
+    rng = np.random.default_rng(0)
+    a = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
+    b = (rng.random(SIZE) * 4 - 2).astype(bfloat16)
+    checked = Chain(SIZE, TILE).compile(check=True, a=(SIZE,), b=(SIZE,))
+    assert not checked.plan.full_elf
+    with caplog.at_level(logging.INFO, logger="iron.common.image.callable"):
+        got = np.array(checked(a, b).numpy()[:SIZE])
+    judged = sorted({int(i) for i in re.findall(r"\[check step (\d+)\]", caplog.text)})
+    assert judged == list(range(len(checked.traced.steps))), caplog.text
+    plain = Chain(SIZE, TILE).compile(full_elf=True, a=(SIZE,), b=(SIZE,))
+    want = np.array(plain(a, b).numpy()[:SIZE])
+    assert got.view(np.uint16).tolist() == want.view(np.uint16).tolist()
 
 
 @pytest.mark.supported_devices("npu2")

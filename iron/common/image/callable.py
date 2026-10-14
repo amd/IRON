@@ -15,10 +15,8 @@ from typing import TYPE_CHECKING
 import aie.utils as aie_utils
 import ml_dtypes
 import numpy as np
-from aie.utils.hostruntime.tensor_class import CPUOnlyTensor
 from aie.utils.npukernel import NPUKernel
 from aie.utils.trace import get_trace_buffer
-from aie.utils.verify import Tolerance
 
 from ..declare import Operator
 from .allocator import ALIGNMENT, BANK, ArenaPlan, Pool
@@ -36,7 +34,7 @@ else:
 
         from .xrt import ParameterBlock, loaded, unload
     except ImportError:
-        # Host stacks without XRT still compile and run the reference mode.
+        # Host stacks without XRT still compile, and trace graphs for reference().
         XRTTensor = None
 
 logger = logging.getLogger(__name__)
@@ -466,50 +464,43 @@ class FullELFCallable:
 
 
 class StepCallable:
-    """Runs a sequence one step at a time, its buffers shared by name: an
-    ``XclbinChain``'s dispatches, or with no image each ``reference()``.
+    """Runs an ``XclbinChain`` one step at a time, its buffers shared by name.
 
-    ``compare`` holds each dispatched step to its reference on the NPU's
-    inputs, so each comparison isolates one operator; ``tolerance``, when
-    set, replaces each step's own. On the NPU, the residents a sequence
-    placed in an arena plan are views of ``arena``'s buffer, so every
-    version of a graph reads one copy.
+    ``check`` holds each dispatched step to its reference on the NPU's
+    inputs, by the step's ``tolerance()`` (``check_step``), so each
+    comparison isolates one operator. The residents a sequence placed in an
+    arena plan are views of ``arena``'s buffer, so every version of a graph
+    reads one copy.
     """
 
-    def __init__(self, seq, compare: bool = False, arena: ScratchArena | None = None):
+    def __init__(self, seq, check: bool = False, arena: ScratchArena | None = None):
+        _require_xrt()
         chain = seq._image
-        if chain is not None:
-            _require_xrt()
         self.op = seq
-        self.compare = compare
-        self.tolerance: Tolerance | None = None
+        self.check = check
         self.last_elapsed = 0.0
         self.dispatch_values: dict[str, np.generic] = {}
-        self._on_npu = chain is not None
-        self.arena = arena if self._on_npu else None
+        self.arena = arena
         self._arena_generation: int | None = None
-        tensor = XRTTensor if self._on_npu else CPUOnlyTensor
         self._buffers = {}
         self._storage = {}
         for name, (_, _, length) in seq.subbuffer_layout.items():
             if self.arena is not None and name in seq.residents:
                 continue
             dtype = seq.buffer_dtype(name)
-            self._buffers[name] = tensor((_n_elements(length, dtype),), dtype=dtype)
+            self._buffers[name] = XRTTensor((_n_elements(length, dtype),), dtype=dtype)
         self._steps = []
         self._follow_arena()
-        kernels = {}
-        if chain is not None:
-            kernels = {
-                op_id: NPUKernel(
-                    chain.images[op_id],
-                    design.get_cache_entry().insts,
-                    kernel_name=chain.labels[op_id],
-                    dispatch_params=design.dispatch_params,
-                    dispatch_lib_path=design.get_dispatch_lib_path(),
-                )
-                for op_id, design in chain.designs.items()
-            }
+        kernels = {
+            op_id: NPUKernel(
+                chain.images[op_id],
+                design.get_cache_entry().insts,
+                kernel_name=chain.labels[op_id],
+                dispatch_params=design.dispatch_params,
+                dispatch_lib_path=design.get_dispatch_lib_path(),
+            )
+            for op_id, design in chain.designs.items()
+        }
         for step_op, *names in seq.runlist:
             if len(step_op.buffers) != len(names):
                 raise ValueError(
@@ -517,8 +508,7 @@ class StepCallable:
                     f"but the runlist names {len(names)}"
                 )
             args = [self.get_storage(name) for name in names]
-            kernel = kernels[id(step_op)] if self._on_npu else None
-            self._steps.append((step_op, kernel, names, args))
+            self._steps.append((step_op, kernels[id(step_op)], names, args))
 
     def _follow_arena(self) -> None:
         """View the residents in the arena's banks, again once it has grown."""
@@ -575,15 +565,12 @@ class StepCallable:
         return self.get_buffer(buffer_name)
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
-        if not self._on_npu:
-            raise NotImplementedError("the reference mode takes no per-call values")
         self.dispatch_values = dict(values)
 
     def __call__(self):
         self._follow_arena()
-        if self._on_npu:
-            for name in self.op.input_args:
-                self._buffers[name].to("npu")
+        for name in self.op.input_args:
+            self._buffers[name].to("npu")
         t0 = time.perf_counter()
         for index, (step_op, kernel, names, args) in enumerate(self._steps):
             # A placed buffer starts at its place in the tensor that holds it.
@@ -593,35 +580,33 @@ class StepCallable:
                 if f"{spec.name}_offset" in step_op.bound_values:
                     word = step_op.value(f"{spec.name}_offset")
                     at[spec.name] += int(self.dispatch_values[word.symbol])
-            checked = self.compare and not step_op.bound_extents
-            if self.compare and not checked:
+            checked = self.check and not step_op.bound_extents
+            if self.check and not checked:
                 logger.warning(
-                    "[compare step %d] %s not compared: %s bounded per call",
+                    "[check step %d] %s not checked: %s bounded per call",
                     index,
                     type(step_op).__name__,
                     sorted(step_op.bound_extents),
                 )
-            if kernel is None or checked:
+            if checked:
                 inputs, expected = self._reference(step_op, args, at)
-            if kernel is None:
-                for buf, spec in zip(args, step_op.buffers):
-                    if spec.drains:
-                        out = buf.numpy_view()[at[spec.name] :]
-                        result = expected[spec.name].reshape(-1)
-                        out[: spec.elements] = result.astype(out.dtype)
-                continue
             kernel(
                 *args,
                 **{name: self.dispatch_values[name] for name in kernel.dispatch_params},
             )
             if checked:
-                self._check(index, step_op, names, args, at, inputs, expected)
+                written = {
+                    spec.name: buf.numpy()[at[spec.name] :][: spec.elements]
+                    for buf, spec in zip(args, step_op.buffers)
+                    if spec.drains
+                }
+                held = {spec.name: name for name, spec in zip(names, step_op.buffers)}
+                check_step(index, step_op, held, inputs, written, expected)
         self.last_elapsed = time.perf_counter() - t0
-        if self._on_npu:
-            # Device-resident, so a read pulls what the steps wrote, and only then.
-            for name in self.op.subbuffer_layout:
-                if name not in self.op.input_args:
-                    self.get_storage(name).device = "npu"
+        # Device-resident, so a read pulls what the steps wrote, and only then.
+        for name in self.op.subbuffer_layout:
+            if name not in self.op.input_args:
+                self.get_storage(name).device = "npu"
 
     def _reference(
         self, step_op: Operator, args, at: Mapping[str, int]
@@ -651,41 +636,48 @@ class StepCallable:
             for b in step_op.outputs
         }
 
-    def _check(
-        self, index, step_op: Operator, names, args, at, inputs, expected
-    ) -> None:
-        """Hold step ``index``'s NPU outputs, each from element ``at`` its
-        name, to its reference on the same inputs.
 
-        Raises:
-            ValueError: Nothing bounds the step's output.
-            RuntimeError: An output is outside the step's tolerance.
-        """
-        tol = self.tolerance or step_op.resolved().tolerance()
-        if tol is None:
-            raise ValueError(
-                f"[compare step {index}] {type(step_op).__name__} declares no "
-                f"tolerance() to judge its output by"
+def check_step(
+    index: int,
+    step_op: Operator,
+    held: Mapping[str, str],
+    inputs: Mapping[str, np.ndarray],
+    written: Mapping[str, np.ndarray],
+    expected: Mapping[str, np.ndarray],
+) -> None:
+    """Hold what step ``index`` wrote to its reference on the same inputs,
+    by the step's ``tolerance()``.
+
+    Args:
+        held: Each of the step's buffers, by its declared name, as the
+            sequence names it.
+        inputs: The step's inputs as its buffers held them, by declared name.
+        written: Each output the step wrote, by declared name.
+        expected: Its reference on ``inputs``, by declared name.
+
+    Raises:
+        ValueError: Nothing bounds the step's output.
+        RuntimeError: An output is outside the step's tolerance.
+    """
+    tol = step_op.resolved().tolerance()
+    if tol is None:
+        raise ValueError(
+            f"[check step {index}] {type(step_op).__name__} declares no "
+            f"tolerance() to judge its output by"
+        )
+    for name, verdict in step_op.judge(inputs, written, tol, expected).items():
+        logger.info(
+            "[check step %d] %s -> %s: max_abs=%.4g",
+            index,
+            type(step_op).__name__,
+            held[name],
+            verdict.max_abs_err,
+        )
+        if not verdict:
+            raise RuntimeError(
+                f"[check step {index}] {type(step_op).__name__} "
+                f"(name={step_op.name}) -> {held[name]}: NPU output deviates "
+                f"from reference ({verdict.detail}; "
+                f"inputs={[held[b.name] for b in step_op.inputs]}; "
+                f"tolerance {tol})"
             )
-        held = {spec.name: name for name, spec in zip(names, step_op.buffers)}
-        written = {
-            spec.name: buf.numpy()[at[spec.name] :][: spec.elements]
-            for buf, spec in zip(args, step_op.buffers)
-            if spec.drains
-        }
-        for name, verdict in step_op.judge(inputs, written, tol, expected).items():
-            logger.info(
-                "[compare step %d] %s -> %s: max_abs=%.4g",
-                index,
-                type(step_op).__name__,
-                held[name],
-                verdict.max_abs_err,
-            )
-            if not verdict:
-                raise RuntimeError(
-                    f"[compare step {index}] {type(step_op).__name__} "
-                    f"(name={step_op.name}) -> {held[name]}: NPU output deviates "
-                    f"from reference ({verdict.detail}; "
-                    f"inputs={[held[b.name] for b in step_op.inputs]}; "
-                    f"tolerance {tol})"
-                )

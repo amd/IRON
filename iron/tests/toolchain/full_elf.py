@@ -18,7 +18,7 @@ through. The decode graph binds two, so its table must name both.
 
 The swiglu graph goes through ``GraphFunction.compile`` itself, so the one
 build also checks the packaging surface end to end: ``compile(dev=,
-image=)`` derives the dispatch, traces, builds and links the ELF, and the
+full_elf=True)`` traces, builds and links the ELF, and the
 runtime that would load it is not made until the first call. A build host
 with the toolchain and no device compiles ahead of time and hands the
 image on.
@@ -148,7 +148,7 @@ def test_no_scratch_buffer_crosses_a_bank():
         [(add, "x", "w", "t"), (add, "t", "w", "out")],
         input_args=["x"],
         output_args=["out"],
-        dispatch="reference",
+        full_elf=True,
     )
     seq.prepare()
     assert [seq.subbuffer_layout[n][1] for n in ("w", "t")] == [0, BANK]

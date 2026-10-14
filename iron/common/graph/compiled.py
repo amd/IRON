@@ -346,6 +346,7 @@ class Graph:
         *,
         dev=None,
         full_elf: bool | None = None,
+        check: bool = False,
         verbose=False,
         feeds: CompiledGraph | None = None,
         coresident: AdjacentPacking | JointNarrowing | None = None,
@@ -362,6 +363,9 @@ class Graph:
                 else the current one.
             full_elf: One full ELF, else an xclbin per step; ``None``
                 derives it (``iron.common.image.packaging``).
+            check: Run each step on its own dispatch and hold its outputs to
+                its reference on the same inputs, by its ``tolerance()``;
+                a step outside it raises, naming the step.
             verbose: Print why the packaging was chosen.
             feeds: The version a full ELF's Emit starts; by default itself
                 when it takes no tensor.
@@ -393,7 +397,7 @@ class Graph:
                     )
             current = aie_utils.ensure_current_device()
             # Folding and narrowing change nothing the packaging follows from.
-            chosen = plan(current, traced, full_elf)
+            chosen = plan(current, traced, full_elf, check)
             tuning = None
             groups: AdjacentPacking | list[list[Operator]] | None
             if isinstance(coresident, JointNarrowing):
@@ -433,6 +437,7 @@ class Graph:
             version = CompiledGraph(
                 traced,
                 chosen,
+                check=check,
                 arena=self._arena,
                 emit=emit,
                 coresident=groups,
@@ -534,6 +539,7 @@ class CompiledGraph:
         self,
         traced: TracedGraph,
         plan: Plan,
+        check: bool = False,
         arena: ScratchArena | None = None,
         emit: EmitSite | None = None,
         coresident: AdjacentPacking | list[list[Operator]] | None = None,
@@ -553,7 +559,7 @@ class CompiledGraph:
         if coresident:
             placement["coresident"] = coresident
         self.sequence = traced.sequence(
-            full_elf=plan.full_elf, shared_words=self.shared, **placement
+            full_elf=plan.full_elf, check=check, shared_words=self.shared, **placement
         ).compile()
         self.image = self.sequence.image
         self.artifacts = self.sequence.artifacts

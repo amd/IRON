@@ -4,8 +4,8 @@
 """How a traced graph is packaged: one full ELF, or an xclbin per step.
 
 ``full_elf`` is mlir-aie's choice of the same name. ``None`` derives it: a
-``DispatchTime`` value or NPU1 forces an xclbin, one dispatch per step;
-otherwise the image is one full ELF.
+``DispatchTime`` value, NPU1 or ``check`` forces an xclbin, one dispatch per
+step; otherwise the image is one full ELF.
 """
 
 from __future__ import annotations
@@ -49,12 +49,16 @@ def dispatches_full_elf(dev) -> bool:
     return dev.arch is AIEArch.AIE2p
 
 
-def plan(dev, traced, full_elf: bool | None = None) -> Plan:
+def plan(dev, traced, full_elf: bool | None = None, check: bool = False) -> Plan:
     """Derive the packaging for ``traced`` on the device.
 
+    Args:
+        check: Each step is checked against its reference on its own
+            dispatch, which an xclbin per step gives.
+
     Raises:
-        ValueError: ``full_elf`` is asked for where a value or the device
-            forbids it, or the graph runs a shipped image.
+        ValueError: ``full_elf`` is asked for where a value, the device or
+            ``check`` forbids it, or the graph runs a shipped image.
     """
     shipped = [op for op in traced.operators if op.external is not None]
     if shipped:
@@ -75,6 +79,8 @@ def plan(dev, traced, full_elf: bool | None = None) -> Plan:
         )
     if not dispatches_full_elf(dev):
         forced.append(f"{dev.name} ({dev.arch}) has no full-ELF dispatch")
+    if check:
+        forced.append("check=True: each step its own dispatch, checked")
     if full_elf and forced:
         raise ValueError(
             f"{traced.name}: full_elf=True is not possible here: " + "; ".join(forced)

@@ -185,7 +185,7 @@ def _two_step_sequence(buffer_offsets):
         runlist,
         input_args=["x"],
         output_args=["out"],
-        dispatch="reference",
+        full_elf=True,
         buffer_offsets=buffer_offsets,
     )
     layout, sizes, _ = seq.calculate_buffer_layout()
@@ -238,7 +238,7 @@ def _chain(n_intermediates, plan_scratch):
         runlist,
         input_args=["x", "w"],
         output_args=["out"],
-        dispatch="reference",
+        full_elf=True,
         plan_scratch=plan_scratch,
     )
     layout, sizes, _ = seq.calculate_buffer_layout()
@@ -288,7 +288,7 @@ def test_slices_are_never_pooled():
         input_args=["x", "w"],
         output_args=["out"],
         buffer_sizes={"big": 4096},
-        dispatch="reference",
+        full_elf=True,
         plan_scratch=True,
     )
     assert not any("[" in name for name in seq.infer_buffer_offsets()), (
@@ -503,7 +503,7 @@ def _add():
 
 
 def _arena_sequence(
-    name, runlist, arena, residents, buffer_sizes=None, dispatch="reference", **kwargs
+    name, runlist, arena, residents, buffer_sizes=None, full_elf=True, **kwargs
 ):
 
     return OperatorSequence(
@@ -512,7 +512,7 @@ def _arena_sequence(
         input_args=["x"],
         output_args=["out"],
         buffer_sizes=buffer_sizes or {n: 2048 for n in residents},
-        dispatch=dispatch,
+        full_elf=full_elf,
         arena=arena,
         residents=residents,
         **kwargs,
@@ -601,7 +601,6 @@ def test_a_step_at_a_time_places_only_its_residents_in_the_arena():
         [(add, "x", "w", "t"), (add, "t", "w", "out")],
         arena,
         {"w": "W"},
-        dispatch=None,
         full_elf=False,
     )
     layout, _, _ = seq.calculate_buffer_layout()
@@ -631,7 +630,7 @@ def test_back_to_back_buffers_start_aligned_whatever_their_sizes():
         input_args=["x", "w"],
         output_args=["out"],
         buffer_sizes={"big": 2048 + 18, "odd": 9},
-        dispatch="reference",
+        full_elf=True,
     )
     layout, _, _ = seq.calculate_buffer_layout()
     for name, (_, offset, _) in layout.items():

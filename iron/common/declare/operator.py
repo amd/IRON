@@ -307,7 +307,7 @@ class Operator(metaclass=_OperatorMeta):
 
     def tolerance(self) -> Tolerance | None:
         """What each output of the resolved operator is judged by; None where
-        nothing bounds it, which compare mode refuses.
+        nothing bounds it, which check mode refuses.
 
         An override returns the operator's own; this one carries it through a
         finish or a prologue, so an override that may have one returns

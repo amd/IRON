@@ -41,9 +41,8 @@ class OperatorSequence:
     Args:
         full_elf: One full ELF, else one xclbin per design, a step at a
             time; ``None`` is a full ELF where the device dispatches one.
-        dispatch: ``"reference"`` (each operator's ``reference()`` on the
-            host, nothing built) or ``"compare"`` (the xclbin chain, each
-            step checked against its reference on the NPU's inputs).
+        check: The xclbin chain, each step checked against its reference
+            on the NPU's inputs (``callable.check_step``).
         arena: A shared ``ArenaPlan`` to place the scratch buffers in. The
             full ELF places them all; a step at a time, each buffer is its
             own buffer object, so only the residents are placed there.
@@ -72,7 +71,7 @@ class OperatorSequence:
         buffer_offsets=None,
         plan_scratch=True,
         full_elf: bool | None = None,
-        dispatch: str | None = None,
+        check: bool = False,
         extra_flags=None,
         arena: ArenaPlan | None = None,
         residents: Mapping[str, Hashable] | None = None,
@@ -81,19 +80,13 @@ class OperatorSequence:
         coresident: Sequence[Sequence[Operator]] | AdjacentPacking = (),
         reconfigure: bool = False,
     ):
-        if dispatch not in (None, "reference", "compare"):
-            raise ValueError(
-                f"dispatch must be None, 'reference' or 'compare', got {dispatch!r}"
-            )
-        if dispatch == "reference" and full_elf is not None:
-            raise ValueError("the reference mode builds no image; give no full_elf")
-        if dispatch == "compare":
+        if check:
             if full_elf:
-                raise ValueError("compare checks each step of an xclbin chain")
+                raise ValueError("check=True checks each step of an xclbin chain")
             full_elf = False
         if residents and arena is None:
             raise ValueError("residents are placed in an arena; pass arena= too")
-        unbuilt = "dispatch='compare'" if dispatch == "compare" else "full_elf=False"
+        unbuilt = "check=True" if check else "full_elf=False"
         if feedback_args and full_elf is False:
             raise ValueError(
                 f"feedback arguments are an argument of the full ELF; "
@@ -153,7 +146,7 @@ class OperatorSequence:
         self.shared_words = dict(shared_words or {})
         self._arena_layout: dict[str, Allocation] | None = None
         self.full_elf = full_elf
-        self.dispatch = dispatch
+        self.check = check
         self.subbuffer_layout: dict[str, tuple[str, int, int]] | None = None
         self._image = None
         self._artifacts: Artifacts | None = None
@@ -410,9 +403,9 @@ class OperatorSequence:
         return np.dtype(np.uint8) if sliced else BF16
 
     def prepare(self):
-        """Settle the mode and lay the buffers out, before anything is built."""
+        """Settle the packaging and lay the buffers out, before anything is built."""
         dev = aie_utils.get_current_device()
-        if self.full_elf is None and self.dispatch is None:
+        if self.full_elf is None:
             self.full_elf = dev is not None and dispatches_full_elf(dev)
             if self.feedback_args and not self.full_elf:
                 raise ValueError(
@@ -435,15 +428,12 @@ class OperatorSequence:
             self.coresident = tuple(
                 tuple(resolved[id(op)] for op in group) for group in self.coresident
             )
-        # After the mode check: a sequence that cannot run in its arena must
+        # After the packaging check: a sequence that cannot run in its arena must
         # not place anything there.
         self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
             self.calculate_buffer_layout()
         )
-        if self.dispatch == "reference":
-            self._image = None
-        else:
-            self._image = FusedImage() if self.full_elf else XclbinChain()
+        self._image = FusedImage() if self.full_elf else XclbinChain()
 
     def compile(self):
         """Build the image ahead of time."""
@@ -452,12 +442,10 @@ class OperatorSequence:
         return self
 
     def link(self):
-        """Build this sequence's image, once; sets ``self.image`` (``None`` for
-        the reference mode) and ``artifacts``.
-        """
+        """Build this sequence's image, once; sets ``self.image`` and ``artifacts``."""
         if self.subbuffer_layout is None:
             self.prepare()
-        self.image = self._image.link(self) if self._image is not None else None
+        self.image = self._image.link(self)
         self._artifacts = self._record()
         return self.image
 
@@ -475,8 +463,6 @@ class OperatorSequence:
 
     def _record(self):
         """What this image consists of: its designs, its steps, its buffers."""
-        if self._image is None:
-            return None
         designs, design_of = self.unique_designs()
         operators = list(self.unique_operators())
         labels = [f"op{i}_{type(op).__name__}" for i, op in enumerate(designs)]
@@ -528,7 +514,7 @@ class OperatorSequence:
         )
 
     def get_callable(self, arena: ScratchArena | None = None):
-        """The runtime callable of this sequence's mode, compiling first if
+        """The runtime callable of this sequence's image, compiling first if
         needed. A sequence placed in an arena plan runs what it placed there
         in ``arena``, made here if not given.
         """
@@ -538,7 +524,7 @@ class OperatorSequence:
         if self.arena is not None and arena is None:
             arena = ScratchArena(self.arena)
         if not self.full_elf:
-            return StepCallable(self, compare=self.dispatch == "compare", arena=arena)
+            return StepCallable(self, check=self.check, arena=arena)
         return FullELFCallable(self, arena=arena)
 
     def get_layout_for_buffer(self, buffer_name):
