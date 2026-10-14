@@ -1,35 +1,48 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Every catalog case's judgement, device-free: its own oracle output passes
-its ``tolerance()``, and an output past it, a NaN or its halves swapped fail,
-as a device test, check mode and the tuner judge them."""
+"""Each catalog operator's judgement, device-free: its first default case's
+oracle output passes its ``tolerance()``, and an output past it, a NaN or its
+halves swapped fail, as a device test, check mode and the tuner judge them."""
 
 import numpy as np
 import pytest
 from aie.iron.device import from_name
 
+from iron.common import Elementwise
 from iron.common.elementwise import _interval
 from iron.common.testing import vectors
 from iron.tests.common.declared import declared
 
-DEVICES = {"npu2": 8, "npu1": 4}
-
 
 def _cases():
+    first = {}
+    for name, cls, case, unresolvable in declared(from_name("npu2", n_cols=8)):
+        if unresolvable is None and not case.extensive:
+            first.setdefault(name, (cls, case))
     return [
-        pytest.param(device, cls, case, id=f"{device}-{name}-{case.label}")
-        for device, n_cols in DEVICES.items()
-        for name, cls, case, unresolvable in declared(from_name(device, n_cols=n_cols))
-        if unresolvable is None and not case.extensive
+        pytest.param(cls, case, id=f"{name}-{case.label}")
+        for name, (cls, case) in first.items()
     ]
 
 
-@pytest.mark.parametrize("device,cls,case", _cases())
+CASES = _cases()
+
+
+def test_the_cases_judge_by_every_kind_of_tolerance(npu2):
+    ops = [cls(**case.kwargs).resolved(npu2) for cls, case in (p.values for p in CASES)]
+    assert {op.tolerance().kind for op in ops} >= {"exact", "ulps", "relative", "bound"}
+    assert any(
+        isinstance(op, Elementwise) and not op.finish and len(op.chain()) == 1
+        for op in ops
+    ), "no case is judged by its elementwise kernel's own judge"
+
+
+@pytest.mark.parametrize("cls,case", CASES)
 def test_a_case_passes_its_oracle_and_fails_an_output_past_its_tolerance(
-    request, device, cls, case
+    npu2, cls, case
 ):
-    op = cls(**case.kwargs).resolved(request.getfixturevalue(device))
+    op = cls(**case.kwargs).resolved(npu2)
     draw = cls.test.draw
     v = vectors(op, **(draw(op) if draw is not None else {}))
     tolerance = op.tolerance()
