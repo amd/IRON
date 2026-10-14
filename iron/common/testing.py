@@ -129,7 +129,9 @@ class Sweep:
         out = []
         for length in self.lengths:
             for chans in self.channels or (1,):
-                for cols in range(1, cls.shim_columns(dev, chans, self.extra) + 1):
+                for cols in range(
+                    1, cls.declaration.shim_columns(dev, chans, self.extra) + 1
+                ):
                     cores = cols * chans
                     tile = min(length // cores, cap)
                     if tile * cores != length:
@@ -148,7 +150,9 @@ class Sweep:
             tile = min(BENCH_TILE, cap)
             cols = next(
                 c
-                for c in range(cls.shim_columns(dev, chans, self.extra), 0, -1)
+                for c in range(
+                    cls.declaration.shim_columns(dev, chans, self.extra), 0, -1
+                )
                 if self.bench % (c * chans * tile) == 0
             )
             out.append(

@@ -329,10 +329,14 @@ def test_an_optional_dim_is_omitted_when_one_and_may_sit_anywhere():
         x = In(rows, OptionalDim(seq), cols)
         y = Out(rows, OptionalDim(seq), cols)
 
-    assert Stack.infer({"x": (8, 64)}) == {"rows": 8, "cols": 64, "seq": 1}
-    assert Stack.infer({"x": (8, 16, 64)}) == {"rows": 8, "cols": 64, "seq": 16}
+    assert Stack.declaration.infer({"x": (8, 64)}) == {"rows": 8, "cols": 64, "seq": 1}
+    assert Stack.declaration.infer({"x": (8, 16, 64)}) == {
+        "rows": 8,
+        "cols": 64,
+        "seq": 16,
+    }
     with pytest.raises(ValueError, match="rank 4"):
-        Stack.infer({"x": (8, 2, 16, 64)})
+        Stack.declaration.infer({"x": (8, 2, 16, 64)})
     assert Stack(rows=8, cols=64).x.shape == (8, 64)
     assert Stack(rows=8, cols=64, seq=16).y.shape == (8, 16, 64)
 
@@ -412,11 +416,11 @@ def test_infer_reports_conflicts_naming_both_operands():
     with pytest.raises(
         ValueError, match=r"K is 128 from B.shape\[0\] but 256 from A.shape\[1\]"
     ):
-        MV.infer({"A": (1024, 256), "B": (128,)})
+        MV.declaration.infer({"A": (1024, 256), "B": (128,)})
     with pytest.raises(ValueError, match="rank"):
-        MV.infer({"A": (1, 2, 3, 4), "B": (256,)})
+        MV.declaration.infer({"A": (1, 2, 3, 4), "B": (256,)})
     with pytest.raises(ValueError, match="K is 512 from A.shape"):
-        MV.infer({"A": (1024, 512), "B": (512,)}, K=256)
+        MV.declaration.infer({"A": (1024, 512), "B": (512,)}, K=256)
 
 
 def test_an_exported_design_replaces_the_derived_one():
@@ -723,13 +727,17 @@ def test_a_stream_with_no_lanes_is_paid_once_in_the_shim_budget():
         scale = In(MV.M, tile=(MV.tile_out,), per=MV.columns)
 
     # 16 input channels: A's and scale's lanes per column, B once.
-    assert MV.shim_columns(NPU2) == 8
-    assert Scaled.shim_columns(NPU2) == (NPU2.shim_dma_channels_in - 1) // 2 == 7
+    assert MV.declaration.shim_columns(NPU2) == 8
+    assert (
+        Scaled.declaration.shim_columns(NPU2)
+        == (NPU2.shim_dma_channels_in - 1) // 2
+        == 7
+    )
 
 
 def test_a_broadcast_stream_is_paid_once_in_the_shim_budget():
     # 16 input channels: B once, then A's two channels a column.
-    assert MV.shim_columns(NPU2, num_channels=2) == (16 - 1) // 2
+    assert MV.declaration.shim_columns(NPU2, num_channels=2) == (16 - 1) // 2
 
 
 def test_a_computed_default_is_inferred_from_a_shape_or_computed():
@@ -747,7 +755,7 @@ def test_a_computed_default_is_inferred_from_a_shape_or_computed():
     assert Rep(rows=2, repeat=3, out_rows=6).out_rows == 6  # given, agrees
     with pytest.raises(ValueError, match="out_rows=5 is not what its other fields"):
         Rep(rows=2, repeat=3, out_rows=5)
-    assert Rep.infer({"x": (2, 8)}, [(6, 8)]) == {"rows": 2, "out_rows": 6}
+    assert Rep.declaration.infer({"x": (2, 8)}, [(6, 8)]) == {"rows": 2, "out_rows": 6}
 
 
 def test_a_select_picks_a_layout_within_a_storage():
@@ -759,12 +767,12 @@ def test_a_select_picks_a_layout_within_a_storage():
         transposed: bool = Param(default=False)
         w = In(Select(packed, (blocks,), (Select(transposed, (N, K), (K, N)),)))
 
-    assert Weights.infer({"w": (64, 32)}, transposed=True) == {
+    assert Weights.declaration.infer({"w": (64, 32)}, transposed=True) == {
         "transposed": True,
         "N": 64,
         "K": 32,
     }
-    assert Weights.infer({"w": (64, 32)}) == {"K": 64, "N": 32}
+    assert Weights.declaration.infer({"w": (64, 32)}) == {"K": 64, "N": 32}
     assert Weights(K=32, N=64, transposed=True).buffers[0].shape == (64, 32)
     assert Weights(K=32, N=64, blocks=8, packed=True).buffers[0].shape == (8,)
 

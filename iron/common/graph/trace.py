@@ -403,7 +403,7 @@ class Tracer:
         construction arguments when ``target`` is a class.
         """
         cls = target if isinstance(target, type) else type(target)
-        inputs, outputs, kwargs = cls.call_operands(args, kwargs)
+        inputs, outputs, kwargs = cls.declaration.call_operands(args, kwargs)
         self.check_outputs(cls, outputs)
         names = list(inputs)
         operands = [self.operand(a) for a in [*inputs.values(), *outputs]]
@@ -516,7 +516,7 @@ class Tracer:
         """``cls`` on ``inputs`` (by name) and ``outputs``, its extents and
         optional-input flags inferred from them.
         """
-        inferred = cls.infer(
+        inferred = cls.declaration.infer(
             {name: h.shape for name, h in inputs.items()},
             [h.shape for h in outputs],
             **kwargs,
@@ -745,7 +745,7 @@ class _ReferenceTracer(Tracer):
 
     def call(self, target, args, kwargs):
         cls = target if isinstance(target, type) else type(target)
-        inputs, outputs, kwargs = cls.call_operands(args, kwargs)
+        inputs, outputs, kwargs = cls.declaration.call_operands(args, kwargs)
         self.check_outputs(cls, outputs)
         n_views = len(cls.accept_views)
         tensors, patterns = [], []
