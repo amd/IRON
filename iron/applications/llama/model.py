@@ -4,10 +4,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Llama 3 over the shared decoder and block (``iron.lm``): its
-head on the NPU (``Llama``) and on the CPU in float32
-(``LlamaOracle``, the reference it is judged by; its layer is
-``iron.lm.blocks``', shared with Granite 4.2 3B), its tokenizer, and Llama
-3.2 1B's shape.
+head on the NPU (``Llama``) and on the CPU in float32 (``LlamaOracle``,
+the reference it is judged by), its tokenizer, and Llama 3.2 1B's shape.
 Run it with ``python -m iron.applications.llama.model``.
 
 The operators' tunables are the graph's profile, ``profiles/<device>.json``,
@@ -25,7 +23,7 @@ import tiktoken
 import tiktoken.load
 
 from iron import lm
-from iron.lm import Block, BlockOracle, CausalLM, DecoderConfig, Oracle, rms_norm, widen
+from iron.lm import Block, CausalLM, DecoderConfig, Oracle, widen
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
 
@@ -88,12 +86,34 @@ class LlamaConfig(DecoderConfig):
     )
 
 
-class LlamaOracle(BlockOracle, Oracle):
-    """Llama 3's forward pass in float32, on the host."""
+class LlamaOracle(Oracle):
+    """Llama 3's forward pass in float32, on the host; its layer is
+    ``Block``'s shape, shared with Granite 4.2 3B, in numpy.
+    """
+
+    def layer(self, angles, w, x):
+        c, n = self.config, x.shape[0]
+        H, G, D = c.n_heads, c.n_kv_groups, c.head_dim
+        a, mlp = w.self_attn, w.mlp
+        h = self.rms_norm(x, w.input_layernorm.weight)
+        q = self.rotate((h @ a.q_proj.weight.T).reshape(n, H, D), angles)
+        k = self.rotate((h @ a.k_proj.weight.T).reshape(n, G, D), angles)
+        v = (h @ a.v_proj.weight.T).reshape(n, G, D)
+        x = x + self.attend(q, k, v, causal=True) @ a.o_proj.weight.T
+        h = self.rms_norm(x, w.post_attention_layernorm.weight)
+        F = mlp.gate_proj.weight.shape[0]
+        half = np.matmul(h, mlp.gate_proj.weight.T, out=self.buffer("gate", (n, F)))
+        half *= np.float32(0.5)
+        # SiLU, with the sigmoid as a tanh, which does not overflow.
+        silu = np.tanh(half, out=self.buffer("silu", (n, F)))
+        silu += 1
+        silu *= half
+        silu *= np.matmul(h, mlp.up_proj.weight.T, out=self.buffer("up", (n, F)))
+        return x + silu @ mlp.down_proj.weight.T
 
     def head(self, x):
         norm = widen(self.weights.model.norm.weight)
-        return rms_norm(x, norm, self.config.eps) @ self.embedding.T
+        return self.rms_norm(x, norm) @ self.embedding.T
 
 
 class Llama(Block, CausalLM):

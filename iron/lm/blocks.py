@@ -10,8 +10,9 @@ own, holding the weights, so they are uploaded once. ``geglu`` is the
 GELU-gated feed-forward over GEMMs, ``sandwich`` a block between two RMS
 norms with its residual (Gemma's sandwich norms), and ``attention`` an
 encoder's bidirectional attention over one sequence, its queries and keys
-RMS-normed and rotated. ``Block`` and ``BlockOracle`` are the attention +
-SwiGLU layer Llama 3 and Granite 4.2 3B share, on the NPU and in numpy. ``LogMel`` is an audio front end's log-mel
+RMS-normed and rotated. ``Block`` is the attention + SwiGLU layer Llama 3
+and Granite 4.2 3B share, on the NPU; a model's own oracle gives its
+numpy layer. ``LogMel`` is an audio front end's log-mel
 spectrogram, ``Conv2d`` a convolution over rows of channels-last pixels,
 ``Conv1d`` one over rows of full-channel-depth input (an audio encoder's
 front end), ``MaxPool2d`` a max pooling of channels-last pixels,
@@ -816,10 +817,6 @@ def attention(
     return GEMM(o.reshape(T, H * D), o_proj, b_col_maj=True, **gemm)
 
 
-def rms_norm(x, w, eps):
-    return x / np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + eps) * w
-
-
 class Block:
     """The attention + SwiGLU layer Llama 3 and Granite 4.2 3B share, on the
     NPU: pre-norm attention, then pre-norm SwiGLU, both residual. A model
@@ -845,29 +842,3 @@ class Block:
         h = RMSNorm(x, weight=w.post_attention_layernorm.weight, epsilon=c.eps)
         ff = swiglu(h, mlp.gate_proj.weight, mlp.up_proj.weight, mlp.down_proj.weight)
         return ElementwiseAdd(x, ff)
-
-
-class BlockOracle:
-    """``Block``'s layer in float32, on the host, mixed in alongside
-    ``Oracle``, which gives ``attend``, ``rotate``, ``buffer`` and ``config``.
-    """
-
-    def layer(self, angles, w, x):
-        c, n = self.config, x.shape[0]
-        H, G, D = c.n_heads, c.n_kv_groups, c.head_dim
-        a, mlp = w.self_attn, w.mlp
-        h = rms_norm(x, w.input_layernorm.weight, c.eps)
-        q = self.rotate((h @ a.q_proj.weight.T).reshape(n, H, D), angles)
-        k = self.rotate((h @ a.k_proj.weight.T).reshape(n, G, D), angles)
-        v = (h @ a.v_proj.weight.T).reshape(n, G, D)
-        x = x + self.attend(q, k, v) @ a.o_proj.weight.T
-        h = rms_norm(x, w.post_attention_layernorm.weight, c.eps)
-        F = mlp.gate_proj.weight.shape[0]
-        half = np.matmul(h, mlp.gate_proj.weight.T, out=self.buffer("gate", (n, F)))
-        half *= np.float32(0.5)
-        # SiLU, with the sigmoid as a tanh, which does not overflow.
-        silu = np.tanh(half, out=self.buffer("silu", (n, F)))
-        silu += 1
-        silu *= half
-        silu *= np.matmul(h, mlp.up_proj.weight.T, out=self.buffer("up", (n, F)))
-        return x + silu @ mlp.down_proj.weight.T

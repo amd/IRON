@@ -15,99 +15,10 @@ from types import SimpleNamespace
 import numpy as np
 from ml_dtypes import bfloat16
 
-from iron.lm import LogMel, Oracle as DecoderOracle, rope_angles, widen
+from iron.lm import LogMel, Oracle, rope_angles, widen
 from iron.operators.resample.reference import resize
 
 from .config import AudioConfig, Config, VisionConfig
-
-
-class Oracle:
-    """A part of EmbeddingGemma 2 in float32 on the host, and the numpy its
-    parts share. It is numpy, not composed from the operators' references,
-    which round to bf16 where the device does: it is the float32 model the
-    graph's rounding is measured against.
-
-    Args:
-        config: The part's shape; its `eps` is every RMS norm's.
-    """
-
-    def __init__(self, config):
-        self.config = config
-
-    def rms_norm(self, x, w=np.float32(1)):
-        """`x` over the RMS of its last axis, times `w`."""
-        eps = np.float32(self.config.eps)
-        mean = np.mean(x * x, axis=-1, keepdims=True)
-        return x * np.power(mean + eps, np.float32(-0.5)) * w
-
-    @staticmethod
-    def gelu_tanh(x):
-        c = np.float32(np.sqrt(2 / np.pi))
-        return (
-            np.float32(0.5) * x * (1 + np.tanh(c * (x + np.float32(0.044715) * x**3)))
-        )
-
-    @staticmethod
-    def attend(q, k, v, window: int | None = None):
-        """Bidirectional attention of `q` `(n, H, D)` over `k`, `v` `(n, G, D)`,
-        unscaled; with a `window`, a key at most `window` positions away.
-        """
-        n, H, D = q.shape
-        k, v = (np.repeat(a, H // a.shape[1], axis=1) for a in (k, v))
-        p = q.transpose(1, 0, 2) @ k.transpose(1, 2, 0)
-        if window is not None:
-            pos = np.arange(n)
-            p[:, np.abs(pos[:, None] - pos[None, :]) > window] = -np.inf
-        p -= p.max(axis=-1, keepdims=True)
-        np.exp(p, out=p)
-        p /= p.sum(axis=-1, keepdims=True)
-        return (p @ v.transpose(1, 0, 2)).transpose(1, 0, 2).reshape(n, H * D)
-
-    @staticmethod
-    def rotate(x, tables: list[np.ndarray]):
-        """`x` `(n, heads, D)` under RoPE, each head cut into as many equal
-        parts as `tables`, each part turned by its table, a row a position.
-        """
-        parts = np.split(x, len(tables), axis=-1)
-        return np.concatenate(
-            [DecoderOracle.rotate(p, a) for p, a in zip(parts, tables)], axis=-1
-        )
-
-    def sandwich_layer(
-        self,
-        x,
-        tables: list[np.ndarray],
-        *,
-        q_proj,
-        k_proj,
-        v_proj,
-        o_proj,
-        q_norm,
-        k_norm,
-        norms: tuple,
-        gate,
-        up,
-        down,
-        groups: int,
-        head_dim: int,
-        window: int | None = None,
-    ):
-        """The layer the text encoder and the vision tower share, on `x`
-        `(n, emb_dim)`: attention, its queries and keys normed and turned by
-        `tables` (`rotate`), then the GELU-gated feed-forward, each between
-        sandwich norms (`norms`, the attention's pre and post, then the
-        feed-forward's) with its residual.
-        """
-        n, H, G, D = x.shape[0], self.config.n_heads, groups, head_dim
-        h = self.rms_norm(x, norms[0])
-        q = self.rotate(self.rms_norm((h @ q_proj.T).reshape(n, H, D), q_norm), tables)
-        k = self.rotate(self.rms_norm((h @ k_proj.T).reshape(n, G, D), k_norm), tables)
-        v = self.rms_norm((h @ v_proj.T).reshape(n, G, D))
-        a = self.attend(q, k, v, window) @ o_proj.T
-        x = x + self.rms_norm(a, norms[1])
-        h = self.rms_norm(x, norms[2])
-        f = (self.gelu_tanh(h @ gate.T) * (h @ up.T)) @ down.T
-        return x + self.rms_norm(f, norms[3])
 
 
 class EmbeddingGemmaOracle(Oracle):

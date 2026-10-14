@@ -357,28 +357,33 @@ def _tree(node) -> Any:
 
 
 class Oracle:
-    """A decoder's float32 forward pass on the host, the oracle the model is judged by.
+    """A model's float32 forward pass on the host, the oracle it is judged
+    by: a decoder's (``weights`` given) or EmbeddingGemma 2's own (built
+    from its own weights tree by the subclass, ``weights`` left out).
 
     It is numpy, not composed from the operators' references, so it catches
-    a wiring mistake the graph's own reference would repeat. A layer's
-    weights are widened to float32 as the pass reaches it, so beside the
+    a wiring mistake the graph's own reference would repeat. A decoder's
+    weights are widened to float32 as the pass reaches them, so beside the
     checkpoint it holds in float32 one layer's and the embedding, not all
     of them.
 
     Args:
-        config: The decoder's shape.
-        weights: The checkpoint's tree (``Checkpoint.tree``): its
+        config: The model's shape; its ``eps`` is every RMS norm's.
+        weights: A decoder's checkpoint tree (``Checkpoint.tree``): its
             ``model.embed_tokens`` and ``model.layers`` are read here, the
-            rest by the subclass.
+            rest by the subclass. Left out, the subclass builds its own
+            state from its own weights tree.
     """
 
-    def __init__(self, config: DecoderConfig, weights):
+    def __init__(self, config: Config, weights=None):
         self.config = config
+        self.buffers: dict[str, np.ndarray] = {}
+        if weights is None:
+            return
         self.weights = weights
         self.embedding = widen(weights.model.embed_tokens.weight)
         self.layers = weights.model.layers
         self.angles = config.angles()
-        self.buffers: dict[str, np.ndarray] = {}
 
     def layer(self, angles, w, x):
         raise NotImplementedError(f"{type(self).__name__} defines no layer()")
@@ -397,8 +402,30 @@ class Oracle:
             x = self.layer(angles, widen(w), x)
         return self.head(x[-1])
 
+    def rms_norm(self, x, w=np.float32(1)):
+        """`x` over the RMS of its last axis, times `w`, by `config.eps`."""
+        eps = np.float32(self.config.eps)
+        mean = np.mean(x * x, axis=-1, keepdims=True)
+        return x * np.power(mean + eps, np.float32(-0.5)) * w
+
+    @staticmethod
+    def gelu_tanh(x):
+        c = np.float32(np.sqrt(2 / np.pi))
+        return (
+            np.float32(0.5) * x * (1 + np.tanh(c * (x + np.float32(0.044715) * x**3)))
+        )
+
     @staticmethod
     def rotate(x, angles):
+        """`x` `(n, heads, D)` under RoPE, one table (`angles`, a row a
+        position) or, a list of tables, `D` split evenly across them
+        (Gemma's partial multi-band rotation), each part its own table.
+        """
+        if isinstance(angles, list):
+            parts = np.split(x, len(angles), axis=-1)
+            return np.concatenate(
+                [Oracle.rotate(p, a) for p, a in zip(parts, angles)], axis=-1
+            )
         cos, sin = angles[:, None, ::2], angles[:, None, 1::2]
         x1, x2 = np.split(x, 2, axis=-1)
         return np.concatenate([x1 * cos - x2 * sin, x1 * sin + x2 * cos], axis=-1)
@@ -427,21 +454,75 @@ class Oracle:
             self.buffers[name] = held
         return held[:size].reshape(shape)
 
-    def attend(self, q, k, v):
+    def attend(self, q, k, v, *, causal: bool = False, window: int | None = None):
+        """Attention of `q` `(n, H, D)` over `k`, `v` `(n, G, D)`, each KV
+        group's rows repeated to its heads: unscaled and bidirectional by
+        default (EmbeddingGemma 2's), with `window` a key at most that many
+        positions away; `causal` scales by `1 / sqrt(D)`, masks a key past
+        its query and reuses one buffer for the growing decode length (a
+        decoder's).
+
+        Raises:
+            ValueError: both `causal` and `window` are given.
+        """
+        if causal and window is not None:
+            raise ValueError("attend: causal and window do not combine")
         n, H, D = q.shape
-        k, v = (np.repeat(a, H // self.config.n_kv_groups, axis=1) for a in (k, v))
-        # Batched matmuls, not einsum: BLAS is 10x faster at 3k.
-        p = np.matmul(
-            q.transpose(1, 0, 2),
-            k.transpose(1, 2, 0),
-            out=self.buffer("scores", (H, n, n)),
-        )
-        p *= np.float32(1 / np.sqrt(D))
-        p += np.triu(np.full((n, n), -np.inf, dtype=np.float32), k=1)
+        k, v = (np.repeat(a, H // a.shape[1], axis=1) for a in (k, v))
+        if causal:
+            # Batched matmuls, not einsum: BLAS is 10x faster at 3k.
+            p = np.matmul(
+                q.transpose(1, 0, 2),
+                k.transpose(1, 2, 0),
+                out=self.buffer("scores", (H, n, n)),
+            )
+            p *= np.float32(1 / np.sqrt(D))
+            p += np.triu(np.full((n, n), -np.inf, dtype=np.float32), k=1)
+        else:
+            p = q.transpose(1, 0, 2) @ k.transpose(1, 2, 0)
+            if window is not None:
+                pos = np.arange(n)
+                p[:, np.abs(pos[:, None] - pos[None, :]) > window] = -np.inf
         p -= p.max(axis=-1, keepdims=True)
         np.exp(p, out=p)
         p /= p.sum(axis=-1, keepdims=True)
         return (p @ v.transpose(1, 0, 2)).transpose(1, 0, 2).reshape(n, H * D)
+
+    def sandwich_layer(
+        self,
+        x,
+        tables: list[np.ndarray],
+        *,
+        q_proj,
+        k_proj,
+        v_proj,
+        o_proj,
+        q_norm,
+        k_norm,
+        norms: tuple,
+        gate,
+        up,
+        down,
+        groups: int,
+        head_dim: int,
+        window: int | None = None,
+    ):
+        """The layer EmbeddingGemma 2's text encoder and vision tower share,
+        on `x` `(n, emb_dim)`: attention, its queries and keys normed and
+        turned by `tables` (`rotate`), then the GELU-gated feed-forward,
+        each between sandwich norms (`norms`, the attention's pre and post,
+        then the feed-forward's) with its residual.
+        """
+        n, H, G, D = x.shape[0], self.config.n_heads, groups, head_dim
+        h = self.rms_norm(x, norms[0])
+        q = self.rotate(self.rms_norm((h @ q_proj.T).reshape(n, H, D), q_norm), tables)
+        k = self.rotate(self.rms_norm((h @ k_proj.T).reshape(n, G, D), k_norm), tables)
+        v = self.rms_norm((h @ v_proj.T).reshape(n, G, D))
+        a = self.attend(q, k, v, window=window) @ o_proj.T
+        x = x + self.rms_norm(a, norms[1])
+        h = self.rms_norm(x, norms[2])
+        f = (self.gelu_tanh(h @ gate.T) * (h @ up.T)) @ down.T
+        return x + self.rms_norm(f, norms[3])
 
 
 def widen(value):
