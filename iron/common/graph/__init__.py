@@ -10,18 +10,19 @@ compute it and loop (``CarriedLoop``).
 
 from .carried import CarriedLoop
 from .compiled import CompiledGraph, Graph
-from .handle import Carry, Handle, Value, carry, is_operand, state, weight
+from .handle import Carried, Carry, Handle, Scratchpad, carry, is_operand, state, weight
 from .trace import TracedGraph, Tracer
 
 __all__ = [
+    "Carried",
     "CarriedLoop",
     "Carry",
     "CompiledGraph",
     "Graph",
     "Handle",
+    "Scratchpad",
     "TracedGraph",
     "Tracer",
-    "Value",
     "carry",
     "is_operand",
     "state",

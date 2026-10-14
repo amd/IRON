@@ -23,9 +23,11 @@ from aie.utils.npukernel import NPUKernel
 from aie.utils.txn_trace import trace
 
 import iron
-from iron.common import Extent, In, Operator, Out, Param, Scratchpad, Value
+from iron import Scratchpad
+from iron.common import Extent, In, Operator, Out, Param, Value
 from iron.common.design import OperatorDesign
-from iron.common.graph import Value as GraphValue
+from iron.common.graph.handle import PerCall
+from iron.common.image.packaging import Kind
 
 WIDTH = 256
 MAX_K = 16
@@ -40,7 +42,7 @@ class RepeatTile(Operator):
     max_k: int = Param()
 
     valid = Extent(max_k)
-    reps = Value(np.int32, derive=lambda op: op.valid - 1)
+    reps = Value(derive=lambda op: op.valid - 1)
 
     x = In(width, dtype=np.int32, tile=(width,))
     y = Out(max_k, width, dtype=np.int32, tile=(width,))
@@ -90,7 +92,7 @@ class Repeated(iron.Graph):
 
 def _bound_op() -> RepeatTile:
     op = RepeatTile(width=WIDTH, max_k=MAX_K)
-    op.use_value("valid", GraphValue("k", Scratchpad, np.int32).affine())
+    op.use_value("valid", PerCall("k", Kind.SCRATCHPAD, np.int32).affine())
     return op
 
 

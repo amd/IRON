@@ -240,12 +240,11 @@ class GEMV(Operator):
     # written once per build, so the array does not depend on M; per call
     # under a bound, read by each core.
     tiles = Value(
-        np.int32,
         derive=lambda op: ceildiv(
             op.valid, op.num_aie_columns * op.num_channels * op.tile_size_output
         ),
     )
-    batches = Value(np.int32, derive=lambda op: op.num_batches)
+    batches = Value(derive=lambda op: op.num_batches)
 
     def extent_unit(self, buffer: str) -> int | None:
         # A lane takes A in output tiles (several input tiles each) so

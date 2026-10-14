@@ -253,21 +253,19 @@ class GEMM(Operator):
     # past n zeroed, and pass the rest through.
     valid_k = Extent(K)
     # Reduction steps per output tile, and output tiles per core.
-    k_div_k = Value(np.int32, derive=lambda op: op.K // op.tile_k)
+    k_div_k = Value(derive=lambda op: op.K // op.tile_k)
     n_tiles = Value(
-        np.int32,
         derive=lambda op: (op.M // op.mem_tile_m_c) * (op.N // op.mem_tile_n),
     )
     # Under a bound: the row blocks it covers, and the column tiles of each.
     row_blocks_valid = Value(
-        np.int32,
         derive=lambda op: ceildiv(op.valid, op.mem_tile_m_c),
         optional=True,  # nothing reads them unbounded
     )
-    col_tiles = Value(np.int32, derive=lambda op: op.N // op.mem_tile_n, optional=True)
+    col_tiles = Value(derive=lambda op: op.N // op.mem_tile_n, optional=True)
     # The cores derive their K tiles and the last one's columns from the bound
     # itself: each value a core reads is patched into every core per call.
-    k_valid = Value(np.int32, derive=lambda op: op.valid_k, optional=True)
+    k_valid = Value(derive=lambda op: op.valid_k, optional=True)
 
     def extent_unit(self, buffer: str) -> int:
         return 0  # nothing is shortened: the cores bound their compute

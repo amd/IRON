@@ -19,14 +19,13 @@ from collections.abc import Callable, Collection, Mapping
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Annotated, Any, get_args, get_origin, get_type_hints
 
 import aie.utils as aie_utils
 import numpy as np
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
-from .. import declare
 from ..declare import Operator
 from ..declare.operator import graph_tracer
 from ..declare.value import Extent, ExtentWord
@@ -35,11 +34,11 @@ from ..image.allocator import ArenaPlan
 from ..image.artifacts import Parameter
 from ..image.callable import FullELFRun, ScratchArena
 from ..image.coresidence import AdjacentPacking
-from ..image.packaging import Plan, plan
+from ..image.packaging import Kind, Plan, plan
 from ..image.sequence import ALIGNMENT
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .fold import Folding, folded
-from .handle import Affine, Carry, Handle, State, Value, is_operand
+from .handle import Affine, Carry, Handle, PerCall, State, is_operand
 from .narrowing import CostTable, JointNarrowing, Tuning
 from .trace import TracedGraph, Tracer, _ReferenceTracer
 from .visualize import Dataflow
@@ -101,7 +100,7 @@ class Graph:
     profile: Profile | Path | None = None
 
     _inputs: list[str] = []
-    _values: dict[str, declare.Value] = {}
+    _values: dict[str, tuple[Kind, Any]] = {}
     _optional: frozenset[str] = frozenset()
     _carried: list[str] = []
 
@@ -129,6 +128,7 @@ class Graph:
                 f"{cls.__name__}.body: inputs {taken} are named as compile()'s "
                 f"keywords, so no shape could be given them; rename them"
             )
+        hints = get_type_hints(cls.body, include_extras=True)
         cls._values = {}
         optional = set()
         for p in params:
@@ -141,22 +141,31 @@ class Graph:
                         f"{p.default!r}; an input may only default to None"
                     )
             elif p.kind is p.KEYWORD_ONLY:
-                ann = p.annotation
-                if isinstance(ann, type) and issubclass(ann, declare.Value):
-                    ann = ann(np.int32)
-                if not isinstance(ann, declare.Value):
+                ann = hints.get(p.name)
+                marks = ann.__metadata__ if get_origin(ann) is Annotated else ()
+                kinds = [k for k in Kind if k.value in marks]
+                if not kinds:
                     raise TypeError(
                         f"{cls.__name__}.body: keyword-only parameter {p.name!r} "
                         f"is a per-call value and must be annotated Scratchpad[T], "
-                        f"Carried[T] or DispatchTime[T]"
+                        f"Carried[T] or aie.iron.DispatchTime[T]"
                     )
-                cls._values[p.name] = ann
+                dtype = get_args(ann)[0]
+                if np.dtype(dtype).kind == "f":
+                    raise TypeError(
+                        f"{cls.__name__}.body: per-call value {p.name!r} cannot be "
+                        f"floating point: the scratchpad encoding zeroes the top "
+                        f"two bits of the value"
+                    )
+                cls._values[p.name] = (kinds[0], dtype)
             elif p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
                 raise TypeError(
                     f"{cls.__name__}.body: *args/**kwargs are not traceable"
                 )
         cls._optional = frozenset(optional)
-        cls._carried = [n for n, spec in cls._values.items() if spec.carried]
+        cls._carried = [
+            n for n, (kind, _) in cls._values.items() if kind is Kind.CARRIED
+        ]
 
     @property
     def name(self) -> str:
@@ -251,7 +260,7 @@ class Graph:
             shape, dtype = _shape_and_dtype(shapes[name])
             inputs.append(Handle(shape, dtype, name, "input"))
             args.append(inputs[-1])
-        values = [Value(n, type(spec), spec.dtype) for n, spec in self._values.items()]
+        values = [PerCall(n, kind, dtype) for n, (kind, dtype) in self._values.items()]
         with self._scope(), Tracer(self.name, self.names(), self._inputs) as tracer:
             result = self.body(*args, **{v.name: v for v in values})
         items, carry = self._split_carry(result)
@@ -282,7 +291,7 @@ class Graph:
         return items, carry
 
     def _traced_carry(
-        self, carry: Carry | None, values: list[Value], tracer: Tracer
+        self, carry: Carry | None, values: list[PerCall], tracer: Tracer
     ) -> dict[str, Handle | Affine]:
         """Each next value: an expression of the values, or one element the graph computed."""
         if carry is None:

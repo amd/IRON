@@ -10,7 +10,6 @@ that names only its kernel.
 """
 
 from .declare import (
-    Carried,
     Choices,
     CopyRun,
     Divisors,
@@ -26,7 +25,6 @@ from .declare import (
     Pins,
     Placement,
     Profile,
-    Scratchpad,
     Unresolvable,
     Value,
     Width,
@@ -48,7 +46,6 @@ from .elementwise import (
 
 __all__ = [
     "BinaryElementwise",
-    "Carried",
     "Choices",
     "CopyRun",
     "DispatchTime",
@@ -70,7 +67,6 @@ __all__ = [
     "Prepare",
     "Profile",
     "Rowwise",
-    "Scratchpad",
     "Select",
     "UnaryElementwise",
     "Unresolvable",

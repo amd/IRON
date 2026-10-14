@@ -8,6 +8,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Iterator, Mapping
 from math import prod
+from typing import Annotated, TypeVar
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
@@ -15,14 +16,30 @@ from aie.utils import bfp
 from ml_dtypes import bfloat16
 
 from ..declare.operator import graph_tracer
-from ..declare.value import Scratchpad
+from ..image.packaging import Kind
+
+T = TypeVar("T")
+
+Scratchpad = Annotated[T, Kind.SCRATCHPAD.value]
+"""A per-call value patched into a DMA descriptor or read by a core.
+
+Free per call (a few words and a sync), works under full ELF, cannot change a
+DMA size or stride. Values are limited to 30 bits.
+"""
+
+Carried = Annotated[T, Kind.CARRIED.value]
+"""A scratchpad value a graph computes for its own next call, returned last
+with ``iron.carry(name=...)``: an integer expression of its values
+(``position + 1``) or a one-element handle (a sampled token). The host writes
+it only to seed the first call.
+"""
 
 
 class Handle:
     """A traced tensor: a buffer of the graph, with a shape and a dtype.
 
     ``h[key]`` takes numpy's basic indexing, on one axis a per-call
-    ``Value`` (``keys[:, pos]``), and on the leading axis an integer array
+    value (``keys[:, pos]``), and on the leading axis an integer array
     of rows fixed when the graph is traced (``table[ids]``) or a 1-D integer
     handle naming the rows each call takes. A contiguous static region is a
     slice any operator takes; any other view, a gather included, is an
@@ -197,13 +214,13 @@ class Handle:
                 bounds[len(shape)] = self.bounds[axis]
                 static.append(entry)
                 shape.append(n)
-            elif isinstance(entry, slice) and isinstance(entry.stop, (Value, Affine)):
+            elif isinstance(entry, slice) and isinstance(entry.stop, (PerCall, Affine)):
                 stop = entry.stop.affine()
                 if entry.start not in (None, 0) or entry.step not in (None, 1):
                     raise ValueError(f"{stop} bounds an axis from its start: [:{stop}]")
-                if not issubclass(stop.value.kind, Scratchpad):
+                if stop.value.kind is Kind.DISPATCH_TIME:
                     raise ValueError(
-                        f"{stop} is {stop.value.kind.__name__}; only a Scratchpad value can "
+                        f"{stop} is a DispatchTime value; only a Scratchpad value can "
                         f"bound an axis, since it patches a transfer's size"
                     )
                 if tracer is not None:
@@ -212,13 +229,13 @@ class Handle:
                 bounds[len(shape)] = stop
                 static.append(slice(None))
                 shape.append(n)
-            elif isinstance(entry, (Value, Affine)):
+            elif isinstance(entry, (PerCall, Affine)):
                 entry = entry.affine()
                 if index_by is not None:
                     raise ValueError("one axis at most is indexed by a per-call value")
-                if not issubclass(entry.value.kind, Scratchpad):
+                if entry.value.kind is Kind.DISPATCH_TIME:
                     raise ValueError(
-                        f"{entry} is {entry.value.kind.__name__}; only a Scratchpad value can "
+                        f"{entry} is a DispatchTime value; only a Scratchpad value can "
                         f"index a view, since it moves a transfer's base address"
                     )
                 if tracer is not None:
@@ -359,19 +376,15 @@ def _rescale_bounds(h: Handle, shape) -> dict[int, Affine]:
     )
 
 
-class Value:
+class PerCall:
     """A per-call scalar parameter of a graph's body; integer arithmetic on
     one makes an ``Affine``.
     """
 
     __slots__ = ("name", "kind", "dtype")
 
-    def __init__(self, name: str, kind: type, dtype):
+    def __init__(self, name: str, kind: Kind, dtype):
         self.name, self.kind, self.dtype = name, kind, dtype
-
-    @property
-    def carried(self) -> bool:
-        return self.kind.carried
 
     def affine(self) -> Affine:
         return Affine(self)
@@ -397,7 +410,7 @@ class Value:
         return self.affine() // d
 
     def __eq__(self, other) -> bool:
-        if isinstance(other, (Value, Affine)):
+        if isinstance(other, (PerCall, Affine)):
             return self is other
         raise TypeError(f"{self} has no value to compare: it is given per call")
 
@@ -415,9 +428,7 @@ class Value:
     __int__ = __index__
 
     def __repr__(self) -> str:
-        return (
-            f"Value({self.name!r}, {self.kind.__name__}[{np.dtype(self.dtype).name}])"
-        )
+        return f"PerCall({self.name!r}, {self.kind.name}[{np.dtype(self.dtype).name}])"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -440,7 +451,7 @@ class Affine:
     ``TypeError``.
     """
 
-    value: Value
+    value: PerCall
     scale: int = 1
     bias: int = 0
     down: int = 0
@@ -580,9 +591,9 @@ class Carry(Mapping[str, "Handle | Affine | int"]):
 
     __slots__ = ("_next",)
 
-    def __init__(self, **next_values: Handle | Affine | Value | int):
+    def __init__(self, **next_values: Handle | Affine | PerCall | int):
         self._next: dict[str, Handle | Affine | int] = {
-            name: v.affine() if isinstance(v, (Value, Affine)) else v
+            name: v.affine() if isinstance(v, (PerCall, Affine)) else v
             for name, v in next_values.items()
         }
 
@@ -600,7 +611,7 @@ class Carry(Mapping[str, "Handle | Affine | int"]):
         return f"Carry({items})"
 
 
-def carry(**next_values: Handle | Affine | Value | int) -> Carry:
+def carry(**next_values: Handle | Affine | PerCall | int) -> Carry:
     """Return with a graph's outputs the next value of each carried value:
     ``return logits, iron.carry(token=sampled, position=position + 1)``.
     """

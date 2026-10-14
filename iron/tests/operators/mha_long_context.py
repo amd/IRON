@@ -20,7 +20,7 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Scratchpad
+from iron import Scratchpad
 from iron.common.harness import verify_buffer
 from iron.operators.mha import MHA
 

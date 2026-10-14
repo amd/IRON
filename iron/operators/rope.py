@@ -109,10 +109,8 @@ class RoPE(Operator):
     valid_angles = Extent(angle_rows)
     # Angle rows each core consumes, and input rows per angle row: the
     # core's trip counts, written once per build, or per call under a bound.
-    lut_rows = Value(
-        np.int32, derive=lambda op: ceildiv(op.valid_angles, op.num_aie_columns)
-    )
-    rows_per_lut = Value(np.int32, derive=lambda op: op.valid // op.valid_angles)
+    lut_rows = Value(derive=lambda op: ceildiv(op.valid_angles, op.num_aie_columns))
+    rows_per_lut = Value(derive=lambda op: op.valid // op.valid_angles)
 
     def validate(self) -> None:
         if not (self.cols % 32 == 0 and self.cols >= 32):

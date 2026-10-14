@@ -28,7 +28,7 @@ import tokenizers
 
 import iron
 from iron import lm
-from iron.common import Scratchpad
+from iron import Scratchpad
 from iron.common.graph.narrowing import CostTable, JointNarrowing
 from iron.common.graph.probe import Call
 from iron.lm import Checkpoint, Encoder, attention, rope_angles, sandwich_layer

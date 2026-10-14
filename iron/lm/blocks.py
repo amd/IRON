@@ -38,7 +38,7 @@ from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Scratchpad
+from iron import Scratchpad
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
 from iron.operators.elementwise_max import ElementwiseMax

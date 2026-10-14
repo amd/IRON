@@ -17,14 +17,15 @@ from aie.utils import bfp
 
 from .. import declare
 from ..declare import In, InOut, Operand, Operator, Out
-from ..declare.value import Extent, Scratchpad
+from ..declare.value import Extent
 from ..declare.operator import graph_tracer
+from ..image.packaging import Kind
 from ..image.sequence import OperatorSequence
 from .handle import (
     Affine,
     Handle,
+    PerCall,
     State,
-    Value,
     Weight,
     _HostView,
     _rescale_bounds,
@@ -409,7 +410,7 @@ class Tracer:
         values = {
             k: kwargs.pop(k)
             for k in list(kwargs)
-            if isinstance(kwargs[k], (Value, Affine))
+            if isinstance(kwargs[k], (PerCall, Affine))
         }
         if any(h.gather_by is not None for h in operands):
             return self._gather(target, operands, kwargs or values)
@@ -499,7 +500,7 @@ class Tracer:
                         f"address{len(self.addresses) // 2}_{member}",
                     )
                     self.addresses[name] = (table.name, source.address_words, member)
-                    self._bind(source, member, Value(name, Scratchpad, np.int32))
+                    self._bind(source, member, PerCall(name, Kind.SCRATCHPAD, np.int32))
                 self._record(source, [ids, control])
         out = self._record(op, [table, control])
         return out if out.shape == view.shape else out.reshape(view.shape)
@@ -534,7 +535,7 @@ class Tracer:
         return bounds
 
     def _bind(self, op, name, value) -> None:
-        if not isinstance(value, (Value, Affine)):
+        if not isinstance(value, (PerCall, Affine)):
             raise TypeError(
                 f"{type(op).__name__}.{name} takes a per-call value handle (a "
                 f"keyword-only parameter of the graph's body), got {value!r}"

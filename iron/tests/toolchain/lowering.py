@@ -33,8 +33,10 @@ from aie.utils.compile import (
 )
 
 import iron
-from iron.common import Scratchpad, graph
+from iron import Scratchpad
 from iron.common.design import OperatorDesign
+from iron.common.graph.handle import PerCall
+from iron.common.image.packaging import Kind
 from iron.lm import Conv2d, ImagePatches, LogMel
 from iron.operators.copy import Copy
 from iron.tests.common.declared import declared
@@ -147,7 +149,7 @@ def test_a_bounded_operator_lowers(device, module, cls_name, kwargs, bound, tmp_
     """
     cls = getattr(importlib.import_module(f"iron.operators.{module}"), cls_name)
     op = cls(**kwargs).resolved(device)
-    n = graph.Value("n", Scratchpad, np.int32)
+    n = PerCall("n", Kind.SCRATCHPAD, np.int32)
     op.use_value(bound, n.affine())  # what x[:n] in a graph does
     lower(op, tmp_path)
 

@@ -11,7 +11,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Scratchpad
+from iron import Scratchpad
 from iron.lm import Conv2d
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM

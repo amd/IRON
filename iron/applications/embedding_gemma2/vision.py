@@ -13,7 +13,7 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Scratchpad
+from iron import Scratchpad
 from iron.lm import ImagePatches, Model, attention, rope_angles, sandwich_layer
 from iron.lm.blocks import ACCURATE
 from iron.operators.axpy import AXPY

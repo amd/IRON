@@ -717,13 +717,6 @@ class Operator(metaclass=_OperatorMeta):
     def has_sequence_override(cls) -> bool:
         return cls.sequence is not Operator.sequence
 
-    def value_symbol(self, value: Value) -> str:
-        """The device symbol per-call value ``value`` is written through:
-        the instance's name, the value's, and the graph value bound to it.
-        """
-        bound = self.bound_values.get(value.name)
-        return f"{self.name}_{value.name}" + ("" if bound is None else f"_{bound.name}")
-
     def design_key(self):
         """Identity for sharing a build: equal keys generate byte-identical MLIR."""
         own = tuple(

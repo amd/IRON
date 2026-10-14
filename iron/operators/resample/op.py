@@ -264,11 +264,10 @@ class ResampleTaps(Operator):
 
     # Chunks per core.
     count = Value(
-        np.int32,
         derive=lambda op: -(-op.filled(op.in_samples, op.out_samples) // op.cores),
     )
-    in_length = Value(np.int32, derive=lambda op: op.in_samples)
-    out_length = Value(np.int32, derive=lambda op: op.out_samples)
+    in_length = Value(derive=lambda op: op.in_samples)
+    out_length = Value(derive=lambda op: op.out_samples)
 
     @property
     def cores(self) -> int:
@@ -917,22 +916,18 @@ class Resample(Operator):
         per=(num_aie_columns, num_channels),
     )
 
-    src_rows = Value(np.int32, derive=lambda op: op.rows)
-    src_columns = Value(np.int32, derive=lambda op: op.columns)
-    dst_rows = Value(np.int32, derive=lambda op: op.out_rows)
-    dst_columns = Value(np.int32, derive=lambda op: op.out_columns)
+    src_rows = Value(derive=lambda op: op.rows)
+    src_columns = Value(derive=lambda op: op.columns)
+    dst_rows = Value(derive=lambda op: op.out_rows)
+    dst_columns = Value(derive=lambda op: op.out_columns)
     image_count = Value(
-        np.int32,
         derive=lambda op: op.rows * -(-3 * op.columns // op.chunk),
         optional=True,
     )
-    width_count = Value(
-        np.int32, derive=lambda op: op.out_columns // SIDE, optional=True
-    )
-    height_count = Value(np.int32, derive=lambda op: op.out_rows // SIDE, optional=True)
+    width_count = Value(derive=lambda op: op.out_columns // SIDE, optional=True)
+    height_count = Value(derive=lambda op: op.out_rows // SIDE, optional=True)
     # Patches per core: every band's, padded past the cores.
     patch_count = Value(
-        np.int32,
         derive=lambda op: op.out_rows
         // SIDE
         * (op.out_columns // SIDE // op.cores + 1),
@@ -1342,9 +1337,9 @@ class PatchPositions(Operator):
     position_ids = Out(2, rows, dtype=np.int32, tile=(2, block))
     order = Out(rows, dtype=np.int32, tile=(block,))
 
-    count = Value(np.int32, derive=lambda op: op.rows // op.block)
-    dst_rows = Value(np.int32, derive=lambda op: op.out_rows)
-    dst_columns = Value(np.int32, derive=lambda op: op.out_columns)
+    count = Value(derive=lambda op: op.rows // op.block)
+    dst_rows = Value(derive=lambda op: op.out_rows)
+    dst_columns = Value(derive=lambda op: op.out_columns)
 
     def validate(self) -> None:
         side = SIDE * self.pool

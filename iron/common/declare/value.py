@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import copy
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, NoReturn, Self, overload
+from typing import TYPE_CHECKING, Any, Callable, Self, overload
 
 import numpy as np
 from aie.iron import ScratchpadParameter, ceildiv
@@ -23,7 +23,6 @@ class Value(Member["Value"]):
 
     Declared in an operator's body; on an instance, ``op.value(name)`` is the
     value bound to it (`of`), which a build gives its device parameter.
-    ``Scratchpad[np.int32]`` annotates a graph body's per-call parameter.
 
     Args:
         dtype: An integer type: the scratchpad encoding has no floating point.
@@ -40,12 +39,10 @@ class Value(Member["Value"]):
             the preamble writes it to (`bind`).
     """
 
-    carried: ClassVar[bool] = False
-
     def __init__(
         self,
-        dtype: Any = np.int32,
         *,
+        dtype: Any = np.int32,
         derive: Callable[[Any], Any] | None = None,
         address: int | None = None,
         lock: int | None = None,
@@ -66,9 +63,6 @@ class Value(Member["Value"]):
         self.ssa = None
         self.targets: list[tuple[Any, int]] = []
 
-    def __class_getitem__(cls, dtype) -> Self:
-        return cls(dtype)
-
     def of(self, op: Operator) -> Self:
         """This value on ``op``, with no parameter yet."""
         bound = copy.copy(self)
@@ -84,10 +78,16 @@ class Value(Member["Value"]):
 
     @property
     def symbol(self) -> str:
-        """The device symbol the host writes this value through
-        (``Operator.value_symbol``).
+        """The device symbol the host writes this value through: an exported
+        design's own parameter of its name, else the instance's name, the
+        value's and the graph value bound to it.
         """
-        return self.op.value_symbol(self)
+        if self.op.exported_design() is not None:
+            return self.name
+        bound = self.op.bound_values.get(self.name)
+        return f"{self.op.name}_{self.name}" + (
+            "" if bound is None else f"_{bound.name}"
+        )
 
     @property
     def scratchpad(self) -> bool:
@@ -96,43 +96,10 @@ class Value(Member["Value"]):
         """
         return isinstance(self.param, ScratchpadParameter)
 
-    if TYPE_CHECKING:
-        # Integer arithmetic on a graph body's per-call parameter.
-        def __add__(self, k: int) -> Any: ...
-        def __sub__(self, k: int) -> Any: ...
-        def __mul__(self, k: int) -> Any: ...
-        def __radd__(self, k: int) -> Any: ...
-        def __rmul__(self, k: int) -> Any: ...
-        def __rsub__(self, k: int) -> Any: ...
-        def __neg__(self) -> Any: ...
-        def __floordiv__(self, d: Any) -> Any: ...
-        def __bool__(self) -> NoReturn: ...
-
     def __repr__(self) -> str:
         if self.op is None:
             return f"{type(self).__name__}({np.dtype(self.dtype).name})"
         return f"<{type(self).__name__} {self.name} {np.dtype(self.dtype).name}>"
-
-
-class Scratchpad(Value):
-    """A per-call value patched into a DMA descriptor or read by a core.
-
-    Free per call (a few words and a sync), works under full ELF, cannot
-    change a DMA size or stride. Values are limited to 30 bits.
-    """
-
-    def __init__(self, dtype: Any = np.int32) -> None:
-        super().__init__(dtype)
-
-
-class Carried(Scratchpad):
-    """A scratchpad value a graph computes for its own next call, returned
-    last with ``iron.carry(name=...)``: an integer expression of its values
-    (``position + 1``) or a one-element handle (a sampled token). The host
-    writes it only to seed the first call.
-    """
-
-    carried = True
 
 
 class DispatchTime(Value):
@@ -142,8 +109,8 @@ class DispatchTime(Value):
     and a buffer allocation per call; cannot be packaged as a full ELF.
     """
 
-    def __init__(self, dtype: Any = np.int32) -> None:
-        super().__init__(dtype)
+    def __init__(self, *, dtype: Any = np.int32) -> None:
+        super().__init__(dtype=dtype)
 
 
 class Extent(Value):
@@ -154,8 +121,8 @@ class Extent(Value):
     ``derive`` reads it, is per call. The image is built for the full value.
     """
 
-    def __init__(self, field: Any, dtype: Any = np.int32) -> None:
-        super().__init__(dtype)
+    def __init__(self, field: Any, *, dtype: Any = np.int32) -> None:
+        super().__init__(dtype=dtype)
         self.field = field  # a Field in the class body; the DimRef once declared
 
     @overload
@@ -184,7 +151,7 @@ class ExtentWord(Value):
     """
 
     def __init__(self, owner: type, extent: Extent, buffer: str, axis: int) -> None:
-        super().__init__(np.int32, derive=self.tiles)
+        super().__init__(derive=self.tiles)
         self.owner = owner
         self.name = f"{extent.name}_{buffer}"
         self.extent, self.buffer, self.axis = extent, buffer, axis
@@ -210,7 +177,7 @@ class ChainWord(Value):
     """
 
     def __init__(self, owner: type, finish: bool) -> None:
-        super().__init__(np.int32, derive=self.index, optional=True)
+        super().__init__(derive=self.index, optional=True)
         self.owner = owner
         self.finish = finish
         self.name = "finish_chain" if finish else "prepare_chain"
@@ -227,13 +194,13 @@ class ChainWord(Value):
         return f"<the {self.name} a design selects>"
 
 
-class PlaceWord(Scratchpad):
+class PlaceWord(Value):
     """The per-call element offset of an operand placed in a larger buffer:
     every transfer of it moves by the word (``Operator.placed``).
     """
 
     def __init__(self, owner: type, buffer: str) -> None:
-        super().__init__(np.int32)
+        super().__init__()
         self.owner = owner
         self.buffer = buffer
         self.name = f"{buffer}_offset"

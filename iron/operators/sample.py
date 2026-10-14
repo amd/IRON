@@ -43,8 +43,8 @@ from iron.common import (
     InOut,
     Operator,
     Out,
-    Scratchpad,
     Unresolvable,
+    Value,
     Auto,
     Param,
 )
@@ -124,8 +124,8 @@ class Sample(Operator):
     tokens = InOut(steps, dtype=np.int32, tile=(1,), depth=1)
     token = Out(1, dtype=np.int32, tile=(1,), depth=1)
     # Element offsets of this position's draw row and record.
-    row = Scratchpad(np.int32)
-    at = Scratchpad(np.int32)
+    row = Value()
+    at = Value()
 
     @property
     def slice_size(self) -> int:

@@ -105,10 +105,9 @@ class Softmax(Operator):
 
     x = In(rows, cols, tile=(block,), per=(num_aie_columns, num_channels))
     y = Out(rows, cols, tile=(block,), per=(num_aie_columns, num_channels))
-    valid_cols = Value(np.int32, derive=lambda op: op.length)
+    valid_cols = Value(derive=lambda op: op.length)
     # A row held whole is one block, which the bound does not change.
     blocks = Value(
-        np.int32,
         derive=lambda op: ceildiv(op.length, op.block) if op.streamed else 1,
         optional=True,
     )

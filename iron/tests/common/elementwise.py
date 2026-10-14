@@ -12,7 +12,8 @@ from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Scratchpad, UnaryElementwise, Unresolvable
+from iron import Scratchpad
+from iron.common import UnaryElementwise, Unresolvable
 from iron.common.design import OperatorDesign
 from iron.common.elementwise import _interval
 from iron.common.graph.costcache import CostCache

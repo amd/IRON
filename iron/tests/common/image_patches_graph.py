@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 import iron
-from iron.common import Scratchpad
+from iron import Scratchpad
 from iron.lm import ImagePatches
 from iron.operators.copy import Gather, GatherWords
 from iron.operators.resample.op import PatchPositions, Resample, ResampleTaps

@@ -12,8 +12,17 @@ import importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # the same names, for a checker; the runtime loads them lazily
-    from .common.declare import Carried, DispatchTime, Profile, Scratchpad
-    from .common.graph import CarriedLoop, CompiledGraph, Graph, carry, state, weight
+    from .common.declare import Profile
+    from .common.graph import (
+        Carried,
+        CarriedLoop,
+        CompiledGraph,
+        Graph,
+        Scratchpad,
+        carry,
+        state,
+        weight,
+    )
 
 _LAZY = {
     "Graph": "iron.common.graph",
@@ -22,9 +31,8 @@ _LAZY = {
     "carry": "iron.common.graph",
     "CarriedLoop": "iron.common.graph",
     "CompiledGraph": "iron.common.graph",
-    "Scratchpad": "iron.common.declare",
-    "Carried": "iron.common.declare",
-    "DispatchTime": "iron.common.declare",
+    "Scratchpad": "iron.common.graph",
+    "Carried": "iron.common.graph",
     "Profile": "iron.common.declare",
 }
 
@@ -32,7 +40,6 @@ __all__ = [
     "Carried",
     "CarriedLoop",
     "CompiledGraph",
-    "DispatchTime",
     "Graph",
     "Profile",
     "Scratchpad",

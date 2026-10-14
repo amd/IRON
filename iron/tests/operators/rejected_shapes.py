@@ -21,7 +21,8 @@ from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Link, Scratchpad, Unresolvable
+from iron import Scratchpad
+from iron.common import Link, Unresolvable
 from iron.lm import project
 from iron.operators.copy import Copy, Gather
 from iron.operators.elementwise_add import ElementwiseAdd

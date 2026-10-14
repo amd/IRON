@@ -8,9 +8,9 @@ import pytest
 from aie.iron.device import NPU1, NPU2, NPU1Col1, NPU2Col1, from_name
 
 import iron
-from iron.common import DispatchTime, Scratchpad
-from iron.common.graph import TracedGraph, Value
-from iron.common.image.packaging import dispatches_full_elf, plan
+from iron.common.graph import TracedGraph
+from iron.common.graph.handle import PerCall
+from iron.common.image.packaging import Kind, dispatches_full_elf, plan
 from iron.operators.flm.gemm.shipped import Shipped
 
 
@@ -25,7 +25,7 @@ def test_default_is_a_full_elf_on_npu2():
 
 
 def test_a_dispatch_time_value_forces_xclbin_and_names_itself():
-    t = _traced(Value("n", DispatchTime, np.int32))
+    t = _traced(PerCall("n", Kind.DISPATCH_TIME, np.int32))
     with pytest.raises(
         ValueError, match="full_elf=True is not possible.*n: a DispatchTime"
     ):
@@ -33,12 +33,12 @@ def test_a_dispatch_time_value_forces_xclbin_and_names_itself():
     p = plan(NPU2(), t, full_elf=False)
     assert not p.full_elf
     assert p.values == [
-        ("n", "DispatchTime", "sizes, strides and offsets regenerated per call")
+        ("n", "aie.dispatch_time", "sizes, strides and offsets regenerated per call")
     ]
 
 
 def test_npu1_forces_xclbin_and_reports_the_scratchpad_lowering():
-    t = _traced(Value("pos", Scratchpad, np.int32))
+    t = _traced(PerCall("pos", Kind.SCRATCHPAD, np.int32))
     with pytest.raises(ValueError, match=r"npu1 \(AIE2\) has no full-ELF dispatch"):
         plan(NPU1(), t, full_elf=True)
     # An xclbin run has no parameter scratchpad: the value is a dispatch-
@@ -66,7 +66,9 @@ def test_a_forced_xclbin_is_derived_and_says_why():
     p = plan(NPU1(), _traced())
     assert not p.full_elf
     assert p.reasons == ["npu1 (AIE2) has no full-ELF dispatch"]
-    assert not plan(NPU2(), _traced(Value("n", DispatchTime, np.int32))).full_elf
+    assert not plan(
+        NPU2(), _traced(PerCall("n", Kind.DISPATCH_TIME, np.int32))
+    ).full_elf
     p = plan(NPU1(), _traced(), full_elf=False)
     assert p.reasons == [
         "full_elf=False: asked for",
@@ -92,9 +94,9 @@ def test_a_shipped_image_in_a_graph_is_refused(npu2):
 
 
 def test_report_reads_as_one_block():
-    p = plan(NPU2(), _traced(Value("pos", Scratchpad, np.int32)))
+    p = plan(NPU2(), _traced(PerCall("pos", Kind.SCRATCHPAD, np.int32)))
     assert p.report("decode").splitlines() == [
         "decode: one full ELF",
         "  one sequence, one configuration set: a full ELF",
-        "  pos: Scratchpad; patched through the parameter scratchpad",
+        "  pos: iron.scratchpad; patched through the parameter scratchpad",
     ]

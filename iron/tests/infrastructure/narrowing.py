@@ -20,7 +20,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Scratchpad
+from iron import Scratchpad
 from iron.common.graph.costcache import Accuracy, CostCache, Measurement
 from iron.common.graph.fold import replaced
 from iron.common.graph.narrowing import (

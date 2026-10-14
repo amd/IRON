@@ -28,13 +28,13 @@ if TYPE_CHECKING:
     from aie.utils.hostruntime.xrtruntime.hostruntime import XRTKernelHandle
     from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
-    from .xrt import Scratchpad, loaded, unload
+    from .xrt import ParameterBlock, loaded, unload
 else:
     try:
         import pyxrt
         from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
-        from .xrt import Scratchpad, loaded, unload
+        from .xrt import ParameterBlock, loaded, unload
     except ImportError:
         # Host stacks without XRT still compile and run the reference mode.
         XRTTensor = None
@@ -128,7 +128,7 @@ class FullELFRun:
             self.bind(index, tensor.buffer_object())
         self._feedback_arg = feedback_arg
         self._params_path = params_path
-        self._params: Scratchpad | None = None
+        self._params: ParameterBlock | None = None
         # Bound to or from another run's scratchpad: a loop holds it.
         self.wired = False
 
@@ -149,7 +149,7 @@ class FullELFRun:
         self.wired = True
 
     @property
-    def params(self) -> Scratchpad | None:
+    def params(self) -> ParameterBlock | None:
         """The run's parameter scratchpad; ``None`` when ``params.txt`` counts none."""
         if self._params is not None:
             return self._params
@@ -157,7 +157,7 @@ class FullELFRun:
             return None
         if self._params_path.read_text().split("\n", 1)[0].strip() == "0":
             return None
-        self._params = Scratchpad(self.handle, self._params_path)
+        self._params = ParameterBlock(self.handle, self._params_path)
         return self._params
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
@@ -351,7 +351,7 @@ class FullELFCallable:
         return made
 
     @property
-    def params(self) -> Scratchpad | None:
+    def params(self) -> ParameterBlock | None:
         return self.run.params
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:

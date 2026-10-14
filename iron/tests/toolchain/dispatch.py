@@ -19,7 +19,7 @@ import aie.utils as aie_utils
 import numpy as np
 
 import iron
-from iron.common import Scratchpad
+from iron import Scratchpad
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.softmax import Softmax

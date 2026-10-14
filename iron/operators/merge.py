@@ -74,7 +74,7 @@ class Merge(Operator):
     ids = In(rows, dtype=np.int32, tile=(block,))
     merge = Out(rows, dtype=np.int32, tile=(block,))
 
-    count = Value(np.int32, derive=lambda op: op.rows // op.block)
+    count = Value(derive=lambda op: op.rows // op.block)
 
     def compatible(self) -> None:
         if self.rows % self.block:

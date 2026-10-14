@@ -402,28 +402,26 @@ class MHA(Operator):
     # block past every key block (no causal skip, no diagonal) and every row
     # of it valid.
     heads = Value(
-        np.int32,
         derive=lambda op: (
             op.num_KV_heads // op.num_pipelines if op.packed else op.num_heads
         ),
     )
     q_blocks_per_pipeline = Value(
-        np.int32, derive=lambda op: ceildiv(op.seq_pad, op.B_q * op.num_pipelines)
+        derive=lambda op: ceildiv(op.seq_pad, op.B_q * op.num_pipelines)
     )
     q_blocks_valid = Value(
-        np.int32, derive=lambda op: ceildiv(op.q_tokens, op.B_q * op.num_pipelines)
+        derive=lambda op: ceildiv(op.q_tokens, op.B_q * op.num_pipelines)
     )
-    kv_blocks = Value(np.int32, derive=lambda op: ceildiv(op.kv_tokens, op.B_kv))
+    kv_blocks = Value(derive=lambda op: ceildiv(op.kv_tokens, op.B_kv))
     s_q = Value(
-        np.int32,
         derive=lambda op: (
             (op.first_query_block + op.num_pipelines) * op.B_q
             if op.packed
             else op.first_query_block * op.B_q + op.q_tokens
         ),
     )
-    s_kv = Value(np.int32, derive=lambda op: op.kv_tokens)
-    q_start = Value(np.int32, derive=lambda op: op.first_query_block)
+    s_kv = Value(derive=lambda op: op.kv_tokens)
+    q_start = Value(derive=lambda op: op.first_query_block)
 
     @property
     def packed(self) -> bool:

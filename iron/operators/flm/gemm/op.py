@@ -246,21 +246,19 @@ class GEMM(Operator):
     valid = Extent(M)
     # The parameter words every core reads once its barrier opens. The last
     # two exist only at m_chunk > 1 (rtp_layout); a word is not free.
-    n_val = Value(np.int32, derive=lambda op: op.N)
-    m_row_blocks = Value(np.int32, derive=lambda op: op._m_row_blocks)
-    k_iters = Value(np.int32, derive=lambda op: op._k_iters)
-    mode = Value(np.int32, derive=lambda op: Epilogue(op.epilogue).mode)
-    clamp_min = Value(np.int32, derive=lambda op: _clamp_bits(op.clamp)[0])
-    clamp_max = Value(np.int32, derive=lambda op: _clamp_bits(op.clamp)[1])
-    n_chunks = Value(np.int32, derive=lambda op: op._n_units, optional=True)
-    n_units = Value(np.int32, derive=lambda op: op._n_units, optional=True)
+    n_val = Value(derive=lambda op: op.N)
+    m_row_blocks = Value(derive=lambda op: op._m_row_blocks)
+    k_iters = Value(derive=lambda op: op._k_iters)
+    mode = Value(derive=lambda op: Epilogue(op.epilogue).mode)
+    clamp_min = Value(derive=lambda op: _clamp_bits(op.clamp)[0])
+    clamp_max = Value(derive=lambda op: _clamp_bits(op.clamp)[1])
+    n_chunks = Value(derive=lambda op: op._n_units, optional=True)
+    n_units = Value(derive=lambda op: op._n_units, optional=True)
     # Under a bound, the units it reaches: the cores' trip count and C's
     # length, in row blocks.
-    units_valid = Value(np.int32, derive=_units_valid, optional=True)
+    units_valid = Value(derive=_units_valid, optional=True)
     # A's repeat count on a full ELF: the units less one.
-    units_repeat = Value(
-        np.int32, derive=lambda op: _units_valid(op) - 1, optional=True
-    )
+    units_repeat = Value(derive=lambda op: _units_valid(op) - 1, optional=True)
 
     def extent_unit(self, buffer: str) -> int:
         return 0  # nothing is shortened

@@ -15,20 +15,22 @@ from typing import Any
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-from aie.iron import ceildiv
+from aie.iron import DispatchTime, ceildiv
 from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Carried, DispatchTime, Profile, Scratchpad
+from iron import Carried, Scratchpad
+from iron.common import Profile
 from iron.common.graph import Handle, TracedGraph, Tracer
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import _words
 from iron.common.declare import Unresolvable
 from iron.common.graph.fold import Made, Place, Prologue, folded, replaced
-from iron.common.graph.handle import Affine, Value
+from iron.common.graph.handle import Affine, PerCall
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.artifacts import Parameter
+from iron.common.image.packaging import Kind
 from iron.lm.blocks import SwiGLU, project
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
@@ -162,7 +164,7 @@ def test_per_call_values_bind_to_the_operator_and_enable_it():
     (binding,) = t.bindings
     op, value = binding.op, binding.expression.value
     assert type(op) is Copy and binding.member.name == "out_offset"
-    assert value.name == "pos" and value.kind is Scratchpad
+    assert value.name == "pos" and value.kind is Kind.SCRATCHPAD
     assert op.uses_value("out_offset") and not op.uses_value("in_offset")
     assert [v.name for v in op.values] == ["out_offset"]
 
@@ -358,7 +360,7 @@ def test_keyword_only_parameters_must_be_annotated_as_values():
     g = G()
 
     t = g.trace(x=(1024,))
-    assert [(v.name, v.kind) for v in t.values] == [("n", DispatchTime)]
+    assert [(v.name, v.kind) for v in t.values] == [("n", Kind.DISPATCH_TIME)]
 
 
 def test_returning_an_input_or_a_slice_is_refused():
@@ -1264,7 +1266,7 @@ def test_a_bound_value_survives_tuning():
 
 def test_a_bound_travels_through_reshape_and_transpose():
 
-    n = Value("n", Scratchpad, np.int32)
+    n = PerCall("n", Kind.SCRATCHPAD, np.int32)
     x = Handle((64, 8, 4), bfloat16, "x", "input")
     b = x[:n]
     assert b.shape == x.shape and b.bounds == {0: n.affine()} and b.tap is None
@@ -1288,7 +1290,7 @@ def test_per_call_values_are_integer_expressions():
     """Integer arithmetic on a per-call value is an ``Affine`` of it,
     which a binding writes and names its word by.
     """
-    p = Value("p", Scratchpad, np.int32)
+    p = PerCall("p", Kind.SCRATCHPAD, np.int32)
     assert (p + 1) * 64 == Affine(p, 64, 64) == 64 * (1 + p)
     assert (p - 1).evaluate({"p": 5}) == 4 and (p * 3 + 2).evaluate({"p": 5}) == 17
     assert [e.name for e in (p.affine(), p * 64, (p + 1) * 64, p - 1)] == [
@@ -1307,7 +1309,7 @@ def test_per_call_values_are_integer_expressions():
     assert (p * 4) // 2 == p // 1 * 2 and p // 2 == Affine(p, 1, 0, 1)
     arithmetic = {"__add__", "__sub__", "__mul__", "__radd__", "__rmul__"}
     arithmetic |= {"__rsub__", "__neg__", "__floordiv__"}
-    assert arithmetic <= set(vars(Affine)) and arithmetic <= set(vars(Value))
+    assert arithmetic <= set(vars(Affine)) and arithmetic <= set(vars(PerCall))
 
 
 def test_a_per_call_value_cannot_steer_the_trace():
@@ -1334,8 +1336,8 @@ def test_a_per_call_value_cannot_steer_the_trace():
     ):
         with pytest.raises(TypeError, match="per call"):
             Branches(test).trace(x=(64,))
-    p = Value("p", Scratchpad, np.int32)
-    assert p == p and p != Value("p", Scratchpad, np.int32) and p + 1 == p + 1
+    p = PerCall("p", Kind.SCRATCHPAD, np.int32)
+    assert p == p and p != PerCall("p", Kind.SCRATCHPAD, np.int32) and p + 1 == p + 1
     assert len({p, p}) == 1 and len({p + 1, 1 + p}) == 1
     with pytest.raises(TypeError, match="not a number"):
         int(p)
@@ -1346,8 +1348,8 @@ def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
     axis: the bound is on axis 1 of the view, and the index an offset of
     whole chunks.
     """
-    chunk = Value("chunk", Scratchpad, np.int32)
-    rows = Value("rows", Scratchpad, np.int32)
+    chunk = PerCall("chunk", Kind.SCRATCHPAD, np.int32)
+    rows = PerCall("rows", Kind.SCRATCHPAD, np.int32)
     G, L, C, D = 2, 64, 16, 8
     cache = Handle((G, L // C, C, D), bfloat16, "cache", "state")
     v = cache[:, chunk, : rows + 1]
@@ -1609,8 +1611,8 @@ def test_integer_arithmetic_on_an_expression_is_an_expression():
     of an expression are expressions that compute the same, and so are sums
     of two linear ones in its value; anything else is refused.
     """
-    x = Affine(Value("x", Scratchpad, np.int32), 3, -5)
-    y = Affine(Value("y", Scratchpad, np.int32))
+    x = Affine(PerCall("x", Kind.SCRATCHPAD, np.int32), 3, -5)
+    y = Affine(PerCall("y", Kind.SCRATCHPAD, np.int32))
     cases = [
         (lambda v: v + 7, None),
         (lambda v: 2 - v, None),
@@ -1927,9 +1929,9 @@ def test_a_graph_carries_its_next_values():
     successor = np.random.default_rng(0).permutation(16).astype(np.int32)
     walk = Walk(successor)
     t = walk.trace()
-    assert [(v.name, v.carried) for v in t.values] == [
-        ("node", True),
-        ("steps", True),
+    assert [(v.name, v.kind) for v in t.values] == [
+        ("node", Kind.CARRIED),
+        ("steps", Kind.CARRIED),
     ]
     assert t.input_args == [] and t.returned == []
     # The gathered node is an output buffer, so the host can read it back.

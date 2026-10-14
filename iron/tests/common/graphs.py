@@ -6,7 +6,7 @@
 import numpy as np
 
 import iron
-from iron.common import Carried, Scratchpad
+from iron import Carried, Scratchpad
 from iron.operators import GEMM, ElementwiseAdd, ElementwiseMul, RoPE, SiLU
 from iron.operators.copy import Copy
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM

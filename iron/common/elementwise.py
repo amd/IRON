@@ -558,7 +558,6 @@ class Elementwise(Operator):
     )
 
     count = Value(
-        np.int32,
         derive=lambda op: ceildiv(op.valid_elements, op.cores * op.tile_size),
     )
 

@@ -15,7 +15,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Scratchpad
+from iron import Scratchpad
 from iron.common.harness import verify_buffer
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd

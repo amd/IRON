@@ -45,7 +45,6 @@ from iron.common import (
     In,
     Operator,
     Out,
-    Scratchpad,
     Unresolvable,
     Value,
     Auto,
@@ -446,8 +445,8 @@ class GatherWords(Operator):
 
     ids = In(rows, dtype=np.int32, tile=(rows,), depth=1)
     control = Out(words, dtype=np.uint32, tile=(pairs,), depth=1)
-    base_lo = Scratchpad(np.int32)
-    base_hi = Scratchpad(np.int32)
+    base_lo = Value()
+    base_hi = Value()
     # 2 words, not 1: base_lo and base_hi packed together, the order
     # address_words() itself returns them in.
     base = In(2, dtype=np.int32, tile=(2,), depth=1, when=static_base)
@@ -717,11 +716,11 @@ class Copy(Operator):
         depth=1,
     )
     # Per-call addends on the two base addresses, in elements.
-    in_offset = Scratchpad(np.int32)
-    out_offset = Scratchpad(np.int32)
+    in_offset = Value()
+    out_offset = Value()
     # Per-call sizes of the bounded axis of each pattern, in that axis's units.
-    src_valid = Scratchpad(np.int32)
-    dst_valid = Scratchpad(np.int32)
+    src_valid = Value()
+    dst_valid = Value()
 
     def walks(self) -> list[tuple[TensorAccessPattern, ...]]:
         """The patterns each side walks in turn, ``[src, dst]``."""

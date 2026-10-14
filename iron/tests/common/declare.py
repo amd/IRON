@@ -12,6 +12,7 @@ toolchain.
 
 import dataclasses
 
+import aie.iron
 import numpy as np
 import pytest
 from aie.iron.device import Tile, from_name
@@ -19,6 +20,7 @@ from aie.utils.trace import TraceConfig
 from ml_dtypes import bfloat16
 
 import iron
+from iron import Scratchpad
 from iron.common import (
     DispatchTime,
     Extent,
@@ -26,7 +28,6 @@ from iron.common import (
     Operator,
     Out,
     Profile,
-    Scratchpad,
     Select,
     Unresolvable,
     Value,
@@ -59,8 +60,8 @@ class MV(Operator):
     A = In(OptionalDim(num_batches), M, K, tile=(tile_out, K), per=columns)
     B = In(OptionalDim(num_batches), K, tile=(K,), broadcast=True)
     C = Out(OptionalDim(num_batches), M, tile=(tile_out,), per=columns)
-    count = Value(np.int32, derive=lambda op: op.M // (op.columns * op.tile_out))
-    start = Value(np.int32)  # per-call when a graph binds it, else unused
+    count = Value(derive=lambda op: op.M // (op.columns * op.tile_out))
+    start = Value()  # per-call when a graph binds it, else unused
 
     def resolve(self, dev):
         cols = self.columns or dev.cols
@@ -220,9 +221,9 @@ def test_a_field_may_replace_an_operator_bases_own_attribute():
     assert Windowed().window == 512
 
 
-def test_float_scratchpad_is_rejected():
+def test_float_value_is_rejected():
     with pytest.raises(TypeError, match="floating point"):
-        Scratchpad(np.float32)
+        Value(dtype=np.float32)
 
 
 def test_float_scratchpad_annotation_is_rejected():
@@ -384,12 +385,12 @@ def test_per_call_values_bind_on_the_operator():
     class Copy(Operator):
         n: int = Param()
         src = In(n, tile=(n,))
-        off = Scratchpad(np.int32)
-        live = DispatchTime(np.int32)
+        off = Value()
+        live = DispatchTime()
 
     op = Copy(n=256)
     assert [v.name for v in op.values] == ["off", "live"]
-    assert isinstance(op.off, Scratchpad) and op.off.op is op
+    assert type(op.off) is Value and op.off.op is op
     assert isinstance(op.live, DispatchTime) and op.live is not Copy.live
 
 
@@ -834,8 +835,8 @@ class Rows(Operator):
     cols: int = Param()
     lanes: int = Auto(2)
     valid = Extent(rows)
-    count = Value(np.int32, derive=lambda op: op.valid // op.lanes)  # reads the extent
-    width = Value(np.int32, derive=lambda op: op.cols)  # does not
+    count = Value(derive=lambda op: op.valid // op.lanes)  # reads the extent
+    width = Value(derive=lambda op: op.cols)  # does not
     x = In(rows, cols, tile=(1, cols), per=(lanes,))
     y = Out(rows, cols, tile=(1, cols), per=(lanes,))
 
@@ -904,7 +905,7 @@ def test_a_bound_is_refused_where_no_extent_takes_it():
         g.trace(x=(64, 128))
 
     class H(iron.Graph):
-        def body(self, x, *, n: DispatchTime[np.int32]):
+        def body(self, x, *, n: aie.iron.DispatchTime[np.int32]):
             return Rows(x[:n])
 
     h = H()

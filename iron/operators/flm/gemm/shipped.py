@@ -157,9 +157,7 @@ class Shipped(
     # eight words behind a lock.
     n_val = m_row_blocks = k_iters = mode = clamp_min = clamp_max = None
     n_chunks = n_units = units_valid = units_repeat = None
-    rtp = Value(
-        np.int32, address=RTP_ADDRESS, lock=RTP_LOCK_ID, derive=_parameter_words
-    )
+    rtp = Value(address=RTP_ADDRESS, lock=RTP_LOCK_ID, derive=_parameter_words)
 
     def resolve(self, dev):
         if dev is not None and (dev.arch is not AIEArch.AIE2p or dev.cols < 8):

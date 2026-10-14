@@ -14,7 +14,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Carried
+from iron import Carried
 from iron.common.graph.narrowing import CostTable, cost_key
 from iron.common.graph.probe import Call, Standalone, Timing, measure_graph
 from iron.operators.copy import APERTURE, Copy, Gather, GatherWords

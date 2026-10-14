@@ -15,11 +15,10 @@ from .operand import In, InOut, Operand, Out
 from .operator import CopyRun, Link, Operator
 from .placement import Level, Pins, Placement
 from .profile import Profile
-from .value import Carried, DispatchTime, Extent, Scratchpad, Value
+from .value import DispatchTime, Extent, Value
 from .xclbin import Xclbin
 
 __all__ = [
-    "Carried",
     "Choices",
     "CopyRun",
     "Divisors",
@@ -35,7 +34,6 @@ __all__ = [
     "Pins",
     "Placement",
     "Profile",
-    "Scratchpad",
     "Unresolvable",
     "Value",
     "Width",

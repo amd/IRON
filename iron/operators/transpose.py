@@ -136,9 +136,9 @@ class Transpose(Operator):
     y = Out(
         OptionalDim(num_batches), N, M, tile=(m, n), per=(num_aie_columns, num_channels)
     )
-    batches = Value(np.int32, derive=lambda op: op.num_batches)
-    col_tiles = Value(np.int32, derive=lambda op: op.N // op.n // op.num_aie_columns)
-    chan_tiles = Value(np.int32, derive=lambda op: op.M // op.m // op.num_channels)
+    batches = Value(derive=lambda op: op.num_batches)
+    col_tiles = Value(derive=lambda op: op.N // op.n // op.num_aie_columns)
+    chan_tiles = Value(derive=lambda op: op.M // op.m // op.num_channels)
 
     def validate(self) -> None:
         if self.m % self.s != 0:

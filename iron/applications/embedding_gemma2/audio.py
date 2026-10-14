@@ -13,7 +13,7 @@ from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16, finfo
 
 import iron
-from iron.common import Scratchpad
+from iron import Scratchpad
 from iron.lm import Model, blocks
 from iron.lm.blocks import ACCURATE
 from iron.operators.axpy import AXPY

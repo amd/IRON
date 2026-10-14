@@ -28,7 +28,7 @@ from ml_dtypes import bfloat16
 from PIL import Image
 
 import iron
-from iron.common import Scratchpad
+from iron import Scratchpad
 from iron.common.graph.narrowing import CostTable, JointNarrowing
 from iron.applications.embedding_gemma2.audio import AudioTower
 from iron.applications.embedding_gemma2.config import (

@@ -31,16 +31,16 @@ from iron.common import (
     Link,
     Operator,
     Out,
-    Scratchpad,
     Value,
     Xclbin,
     Auto,
     OptionalDim,
     Param,
 )
-from iron.common import graph
 from iron.common.design import OperatorDesign, OperatorRuntime
 from iron.common.graph.compiled import _words
+from iron.common.graph.handle import PerCall
+from iron.common.image.packaging import Kind
 from iron.operators.clamp import Clamp
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.design import Epilogue
@@ -94,7 +94,7 @@ _TASK = re.compile(
     r"\s*aie\.end\s*\}(?: \{([^}]*)\})?"
 )
 # The graph value a test binds an extent to, as ``x[:n]`` does.
-N = graph.Value("n", Scratchpad, np.int32).affine()
+N = PerCall("n", Kind.SCRATCHPAD, np.int32).affine()
 
 
 def generated_sequence(op, full_elf=True) -> tuple[str, list[Task]]:
@@ -202,7 +202,7 @@ def test_preamble_rejects_a_resident_the_array_never_bound(npu2):
         n: int = Param()
         tile: int = Auto(64)
         A = In(n, tile=(tile,))
-        count = Value(np.int32, derive=lambda op: op.n // op.tile)
+        count = Value(derive=lambda op: op.n // op.tile)
 
         def array(self):
             fifo = ObjectFifo(self.A.tile, name="a")
@@ -336,7 +336,7 @@ def test_a_size_patch_names_a_dimension_and_a_word(size_by, error, match):
 def test_a_bounded_repeat_patches_the_stack_axis():
     # The stack axis is on D2 with its patched count, rows and repeats around it.
     op = Repeat(rows=4, cols=8, seq=32, repeat=2).resolved(NPU2_4COL)
-    op.use_value("valid_seq", graph.Value("c", Scratchpad, np.int32).affine())
+    op.use_value("valid_seq", PerCall("c", Kind.SCRATCHPAD, np.int32).affine())
     _, tasks = generated_sequence(op)
     assert [(t.lane, t.sizes, t.strides, t.length_parameter[-11:]) for t in tasks] == [
         ("fifo_in", "2, 32, 4, 8", "0, 8, 256, 1", "valid_seq_x"),
@@ -556,7 +556,7 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
         class Unplaced(Operator, image=image):
             n: int = Param()
             x = In(n, tile=(64,), via=Tile(0, 0))
-            count = Value(np.int32, derive=lambda op: op.n)
+            count = Value(derive=lambda op: op.n)
 
     with pytest.raises(TypeError, match="nothing builds its array"):
 

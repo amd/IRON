@@ -11,10 +11,17 @@ otherwise the image is one full ELF.
 from __future__ import annotations
 
 import dataclasses
+import enum
 
 from aie.dialects.aie import AIEArch
 
-from ..declare.value import DispatchTime, Scratchpad
+
+class Kind(enum.Enum):
+    """How a graph's per-call value reaches the device: its annotation's marker."""
+
+    SCRATCHPAD = "iron.scratchpad"
+    CARRIED = "iron.carried"
+    DISPATCH_TIME = "aie.dispatch_time"
 
 
 @dataclasses.dataclass
@@ -60,7 +67,7 @@ def plan(dev, traced, full_elf: bool | None = None) -> Plan:
         )
 
     forced: list[str] = []
-    dispatch_values = [v for v in traced.values if issubclass(v.kind, DispatchTime)]
+    dispatch_values = [v for v in traced.values if v.kind is Kind.DISPATCH_TIME]
     if dispatch_values:
         names = ", ".join(v.name for v in dispatch_values)
         forced.append(
@@ -81,15 +88,15 @@ def plan(dev, traced, full_elf: bool | None = None) -> Plan:
 
     values = []
     for v in traced.values:
-        if issubclass(v.kind, Scratchpad) and full_elf:
+        if v.kind is Kind.DISPATCH_TIME:
+            lowering = "sizes, strides and offsets regenerated per call"
+        elif full_elf:
             lowering = "patched through the parameter scratchpad"
-        elif issubclass(v.kind, Scratchpad):
+        else:
             lowering = (
                 "no scratchpad on an xclbin: a dispatch-time scalar; "
                 "an offset use regenerates the stream, a core-read use is "
                 "written into the array by the sequence"
             )
-        else:
-            lowering = "sizes, strides and offsets regenerated per call"
-        values.append((v.name, v.kind.__name__, lowering))
+        values.append((v.name, v.kind.value, lowering))
     return Plan(full_elf, reasons, values)

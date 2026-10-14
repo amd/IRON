@@ -56,16 +56,13 @@ class ChunkCopy(Operator):
 
     src = In(size, dtype=np.int32)
     dst = Out(size, dtype=np.int32)
-    n = DispatchTime(np.int32)
+    n = DispatchTime()
 
     def validate(self) -> None:
         self.check_derived("size")
 
     def resolve(self, dev):
         return dataclasses.replace(self)
-
-    def value_symbol(self, value) -> str:
-        return value.name
 
     def exported_design(self):
         return functools.partial(chunk_copy, self.dev, self.max_chunks)

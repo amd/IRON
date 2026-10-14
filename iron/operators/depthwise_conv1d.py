@@ -48,7 +48,7 @@ class DepthwiseConv1d(Operator):
     # The rows, or fewer per call (``x[:n]``): every row is still computed,
     # as a row reads only those before it.
     valid = Extent(rows)
-    steps = Value(np.int32, derive=lambda op: op.rows // op.num_aie_columns)
+    steps = Value(derive=lambda op: op.rows // op.num_aie_columns)
 
     def validate(self) -> None:
         if self.channels % 32:

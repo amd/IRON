@@ -34,11 +34,11 @@ from aie.iron.kernels.sample import draw_row
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import Scratchpad, graph
 from iron.common.harness import verify_buffer
 from iron.common.image import Fusion
 from iron.common.image.sequence import OperatorSequence
-from iron.common.image.packaging import dispatches_full_elf
+from iron.common.graph.handle import PerCall
+from iron.common.image.packaging import Kind, dispatches_full_elf
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.magnitude import Magnitude
 from iron.operators.relu import ReLU
@@ -339,8 +339,8 @@ def test_compare_mode_judges_every_output_at_the_calls_values(caplog):
     """
     steps, position = 4, 2
     op = Sample(vocab=4096, cores=4, steps=steps)
-    op.use_value("row", graph.Value("row", Scratchpad, np.int32).affine())
-    op.use_value("at", graph.Value("position", Scratchpad, np.int32).affine())
+    op.use_value("row", PerCall("row", Kind.SCRATCHPAD, np.int32).affine())
+    op.use_value("at", PerCall("position", Kind.SCRATCHPAD, np.int32).affine())
     seq = OperatorSequence(
         name="infra_compare_sample",
         runlist=[(op, "logits", "draws", "tokens", "token")],

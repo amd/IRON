@@ -42,8 +42,8 @@ class DecodeLayer(Operator):
     rms = In(rms_len, dtype=bfloat16)
     rope_rms = In(rope_rms_len, dtype=bfloat16)
     kv = InOut(kv_len, dtype=bfloat16)
-    context_len = DispatchTime(np.int32)
-    max_l = DispatchTime(np.int32)
+    context_len = DispatchTime()
+    max_l = DispatchTime()
 
     def validate(self) -> None:
         if self.geometry not in RTP_ADDRESSES:
@@ -65,10 +65,6 @@ class DecodeLayer(Operator):
     def configuration(self):
         # The four layer types share one array; they differ in their sequences.
         return dataclasses.replace(self, layer_type="global")
-
-    def value_symbol(self, value) -> str:
-        # The design's own DispatchTime parameters carry these names.
-        return value.name
 
     def exported_design(self):
         return functools.partial(

@@ -195,9 +195,9 @@ reuse lint
 3. **Common Infrastructure** (`iron/common/`)
    - `declare/`: the declaration layer (`Operator`, its `Param`/`Auto` fields (`dataclasses.Field`s),
      operands (`Operand`: `op.x` is the declared operand bound to the
-     instance, its shape and lanes resolved), the `Value` hierarchy
-     (`Scratchpad`/`Carried`/`DispatchTime`/`Extent`; `op.value(name)` is
-     the value bound to the instance, its device parameter once built),
+     instance, its shape and lanes resolved), the `Value` member and its
+     `DispatchTime`/`Extent` specializations (`op.value(name)` is the value
+     bound to the instance, its device parameter once built),
      `Xclbin` and its
      `fetch()`, inference; `cls.declaration`, a `Declaration`, is what a
      class declares, read once as its body finishes: its members and which
@@ -273,13 +273,14 @@ different order overrides `sequence(rt)`:
   mlir-aie's `TensorAccessPattern`s over one (`(self.A, tap)`); the
   compiler splits a constant pattern no one descriptor holds
 
-**Per-call values**: `Scratchpad(T)` members are patched into descriptors
-or read by cores without a rebuild; `DispatchTime(T)` regenerates the
-sequence per call (xclbin only). A graph binds them to keyword-only
-parameters. The parameter scratchpad exists on a full ELF only (XRT's
-`get_ctrl_scratchpad_bo` serves a module run), so on an xclbin image a
-`Scratchpad` value lowers to a dispatch-time scalar: an offset use
-regenerates the stream, a core-read use is an `rtp_write` of the scalar.
+**Per-call values**: `Value()` members (`dtype=np.int32` by default) are
+patched into descriptors or read by cores without a rebuild; `DispatchTime()`
+members regenerate the sequence per call (xclbin only). A graph binds them to
+keyword-only parameters annotated `iron.Scratchpad[T]`, `iron.Carried[T]` or
+`aie.iron.DispatchTime[T]`. The parameter scratchpad exists on a full ELF only
+(XRT's `get_ctrl_scratchpad_bo` serves a module run), so on an xclbin image a
+scratchpad value lowers to a dispatch-time scalar: an offset use regenerates
+the stream, a core-read use is an `rtp_write` of the scalar.
 
 **Compilation Flow**:
 
@@ -471,7 +472,7 @@ device-resident state what the instance holds, named by attribute path
 
 ```python
 import iron
-from iron.common import Scratchpad
+from iron import Scratchpad
 
 class Decode(iron.Graph):
     def __init__(self, weights, angles):

@@ -30,7 +30,7 @@ from aie.iron.kernels.sample import draw_row
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Scratchpad
+from iron import Scratchpad
 from iron.operators.sample import Sample, reference
 
 K_MAX = 64

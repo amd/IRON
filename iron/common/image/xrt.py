@@ -27,7 +27,7 @@ _pointer_capsule = ctypes.PYFUNCTYPE(
 )(("PyCapsule_New", ctypes.pythonapi))
 
 
-class Scratchpad(ParameterScratchpad):
+class ParameterBlock(ParameterScratchpad):
     """A run's parameter scratchpad, which a device transfer can also write."""
 
     def __init__(self, run: pyxrt.run, params_path: str | Path):

@@ -11,7 +11,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Carried, Scratchpad
+from iron import Carried, Scratchpad
 from iron.lm import LogMel, SwiGLU, swiglu
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM

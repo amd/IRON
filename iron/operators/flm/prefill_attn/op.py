@@ -52,9 +52,9 @@ class _PrefillAttentionBase(Operator):
     o = Out(qo_len, dtype=bfloat16)
     q = In(qo_len, dtype=bfloat16)
     kv = In(kv_len, dtype=bfloat16)
-    L_begin = DispatchTime(np.int32)
-    L_end = DispatchTime(np.int32)
-    max_l = DispatchTime(np.int32)
+    L_begin = DispatchTime()
+    L_end = DispatchTime()
+    max_l = DispatchTime()
 
     def kernel(self) -> ExternalFunction:
         """The variant's kernel, built with the k/v locks the design declares."""
@@ -90,10 +90,6 @@ class _PrefillAttentionBase(Operator):
                 f"the {self.variant.factory.__name__} kernel is AIE2P only"
             )
         return dataclasses.replace(self)
-
-    def value_symbol(self, value) -> str:
-        # The design's own DispatchTime parameters carry these names.
-        return value.name
 
     def exported_design(self):
         return functools.partial(

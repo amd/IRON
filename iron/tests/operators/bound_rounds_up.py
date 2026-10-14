@@ -16,7 +16,7 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Scratchpad
+from iron import Scratchpad
 from iron.common.harness import verify_buffer
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.rms_norm import RMSNorm

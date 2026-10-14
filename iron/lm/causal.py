@@ -25,7 +25,7 @@ from aie.iron.kernels.sample import ROW_WORDS
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Carried, Scratchpad
+from iron import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.handle import Weight
 from iron.common.graph.narrowing import JointNarrowing, Tuning

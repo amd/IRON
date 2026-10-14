@@ -33,8 +33,8 @@ class Clamp(UnaryElementwise):
     low: float = Param(probe=-np.inf)
     high: float = Param(probe=np.inf)
 
-    low_bits = Value(np.int32, derive=lambda op: op.scalars()[0])
-    high_bits = Value(np.int32, derive=lambda op: op.scalars()[1])
+    low_bits = Value(derive=lambda op: op.scalars()[0])
+    high_bits = Value(derive=lambda op: op.scalars()[1])
 
     def validate(self) -> None:
         if not np.float32(self.low) <= np.float32(self.high):
