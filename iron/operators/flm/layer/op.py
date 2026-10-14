@@ -28,13 +28,13 @@ class DecodeLayer(Operator):
 
     geometry: FlmGemma4DecodeGeometry = Param()
     layer_type: str = Param()
-    x_len: int = Param(default=lambda op: arg_sizes(op.geometry)["x"], repr=False)
-    proj_len: int = Param(default=lambda op: arg_sizes(op.geometry)["proj"], repr=False)
-    rms_len: int = Param(default=lambda op: arg_sizes(op.geometry)["rms"], repr=False)
+    x_len: int = Param(derive=lambda op: arg_sizes(op.geometry)["x"], repr=False)
+    proj_len: int = Param(derive=lambda op: arg_sizes(op.geometry)["proj"], repr=False)
+    rms_len: int = Param(derive=lambda op: arg_sizes(op.geometry)["rms"], repr=False)
     rope_rms_len: int = Param(
-        default=lambda op: arg_sizes(op.geometry)["rope_rms"], repr=False
+        derive=lambda op: arg_sizes(op.geometry)["rope_rms"], repr=False
     )
-    kv_len: int = Param(default=lambda op: arg_sizes(op.geometry)["kv"], repr=False)
+    kv_len: int = Param(derive=lambda op: arg_sizes(op.geometry)["kv"], repr=False)
 
     # The runtime sequence's argument order.
     x = InOut(x_len, dtype=bfloat16)

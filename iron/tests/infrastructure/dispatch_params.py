@@ -52,7 +52,7 @@ def chunk_copy(dev, max_chunks, *, n: aie.iron.DispatchTime[np.int32]):
 
 class ChunkCopy(Operator):
     max_chunks: int = Param()
-    size: int = Param(default=lambda op: op.max_chunks * CHUNK, repr=False)
+    size: int = Param(derive=lambda op: op.max_chunks * CHUNK, repr=False)
 
     src = In(size, dtype=np.int32)
     dst = Out(size, dtype=np.int32)

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import MISSING
-from typing import Any
+from typing import Any, Callable
 
 from .domain import Domain
 
@@ -31,10 +31,12 @@ class Param(dataclasses.Field):
     instruction stream.
 
     Args:
-        default: The value, or a callable of the operator computing it when
-            neither the caller nor an operand gives it
-            (``default=lambda op: op.rows * op.repeat``). Without one the
-            field is a required constructor argument.
+        default: The value. Without one, and without `derive`, the field is
+            a required constructor argument.
+        derive: A callable of the operator computing the field when neither
+            the caller nor an operand gives it
+            (``derive=lambda op: op.rows * op.repeat``); a value the caller
+            gives must agree with it. `default` and `derive` are exclusive.
         array: The array reads the field though no tile names it.
         probe: The field reaches the device only as the words of `Value`s
             the cores read: no transfer, trip count, branch or core follows
@@ -43,9 +45,6 @@ class Param(dataclasses.Field):
             the value that leaves the output most informative (the
             identity), since a setting judged exact there is taken as exact
             at every value. `None` is a probe like any other.
-
-    Attributes:
-        derive: The callable `default`, or None.
     """
 
     __slots__ = ("array", "derive", "probe")
@@ -54,12 +53,14 @@ class Param(dataclasses.Field):
         self,
         *,
         default: Any = MISSING,
+        derive: Callable[[Any], Any] | None = None,
         array: bool = False,
         repr: bool = True,
         init: bool = True,
         probe: Any = MISSING,
     ) -> None:
-        derive = default if callable(default) else None
+        if derive is not None and default is not MISSING:
+            raise TypeError("Param(default=, derive=): give one, not both")
         super().__init__(
             default=None if derive is not None else default,
             default_factory=MISSING,
@@ -111,9 +112,8 @@ class Auto(Param):
 
     def __init__(
         self,
-        default: Any = None,
-        /,
         *,
+        default: Any = None,
         array: bool = False,
         derived: bool = False,
         domain: Domain | tuple[Any, ...] | None = None,

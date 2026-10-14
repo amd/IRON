@@ -34,9 +34,9 @@ class LMHead(Operator):
     vocab: int = Param()
     softcap: float = Param()
     w_words: int = Param(
-        default=lambda op: packed_bytes(op.vocab * op.dim) // 4, repr=False
+        derive=lambda op: packed_bytes(op.vocab * op.dim) // 4, repr=False
     )
-    x_len: int = Param(default=lambda op: 2 * op.dim, repr=False)
+    x_len: int = Param(derive=lambda op: 2 * op.dim, repr=False)
     cols: int = Auto(repr=False)
     rows: int = Auto(repr=False)
 

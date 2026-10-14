@@ -27,7 +27,6 @@ from .declare import (
     Width,
     Xclbin,
     Auto,
-    OptionalDim,
     Param,
     Select,
 )
@@ -56,7 +55,6 @@ __all__ = [
     "Link",
     "Operand",
     "Operator",
-    "OptionalDim",
     "Out",
     "Prepare",
     "Profile",

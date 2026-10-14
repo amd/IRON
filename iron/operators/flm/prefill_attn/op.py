@@ -39,12 +39,12 @@ class _PrefillAttentionBase(Operator):
     max_context: int = Param()
     num_heads: int = Param()
     num_kv_heads: int = Param()
-    head_dim: int = Param(default=lambda op: Geometry.of(op.kernel()).dh, repr=False)
+    head_dim: int = Param(derive=lambda op: Geometry.of(op.kernel()).dh, repr=False)
     qo_len: int = Param(
-        default=lambda op: op.max_context * op.num_heads * op.head_dim, repr=False
+        derive=lambda op: op.max_context * op.num_heads * op.head_dim, repr=False
     )
     kv_len: int = Param(
-        default=lambda op: 2 * op.max_context * op.num_kv_heads * op.head_dim,
+        derive=lambda op: 2 * op.max_context * op.num_kv_heads * op.head_dim,
         repr=False,
     )
 

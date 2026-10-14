@@ -13,7 +13,6 @@ reaches the copy as ``in_offset``/``out_offset``, an element offset.
 import dataclasses
 import functools
 from collections.abc import Mapping
-from dataclasses import field
 from math import gcd, isqrt, prod
 from typing import Any, ClassVar
 
@@ -111,9 +110,9 @@ class Gather(Operator):
     rows: int = Param()
     table_rows: int = Param()
     row: int = Param()
-    dtype: Any = field(default=bfloat16, repr=False)
+    dtype: Any = Param(default=bfloat16, repr=False)
     words: int = Param(
-        default=lambda op: 20 * op.chain
+        derive=lambda op: 20 * op.chain
         + 6 * op.rows
         + 3 * len(op.batches)
         + (3 if op.rows % op.chain else 0),
@@ -441,7 +440,7 @@ class GatherWords(Operator):
     table_rows: int = Param(array=True)
     row_bytes: int = Param(array=True)
     words: int = Param()
-    pairs: int = Param(default=lambda op: 2 * op.rows, array=True, repr=False)
+    pairs: int = Param(derive=lambda op: 2 * op.rows, array=True, repr=False)
     static_base: bool = Param(default=False, array=True)
 
     ids = In(rows, dtype=np.int32, tile=(rows,), depth=1)
@@ -668,10 +667,10 @@ class Copy(Operator):
 
     input_buffer_size: int = Param(repr=False)
     src: TensorAccessPattern | tuple[TensorAccessPattern, ...] = Param(
-        default=lambda op: TensorAccessPattern.full((op.input_buffer_size,))
+        derive=lambda op: TensorAccessPattern.full((op.input_buffer_size,))
     )
     output_buffer_size: int = Param(
-        default=lambda op: sum(
+        derive=lambda op: sum(
             prod(p.sizes) for p in (op.src if isinstance(op.src, tuple) else (op.src,))
         ),
         repr=False,
@@ -679,7 +678,7 @@ class Copy(Operator):
     # The output is rows as wide as the source's innermost axis, so the
     # channels split both sides alike.
     dst: TensorAccessPattern | tuple[TensorAccessPattern, ...] = Param(
-        default=lambda op: TensorAccessPattern.full(
+        derive=lambda op: TensorAccessPattern.full(
             (op.output_buffer_size // op.src.sizes[-1], op.src.sizes[-1])
             if isinstance(op.src, TensorAccessPattern)
             else (op.output_buffer_size // op.src[0].sizes[-1], op.src[0].sizes[-1])
@@ -699,8 +698,8 @@ class Copy(Operator):
     )
     # A memtile holds 512 KiB; the cap leaves room for every channel placed on one.
     object_bytes: ClassVar[int] = 64 * 1024
-    num_channels: int = Auto(1)
-    dtype: Any = field(default=bfloat16, repr=False)
+    num_channels: int = Auto(default=1)
+    dtype: Any = Param(default=bfloat16, repr=False)
 
     x = In(
         input_buffer_size,

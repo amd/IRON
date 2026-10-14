@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
-from dataclasses import field
 from enum import StrEnum
 from typing import Any
 
@@ -201,25 +200,23 @@ class GEMM(Operator):
     # Without prio_accuracy C is rounded to bf16 once per K tile, so another
     # tile_k computes another result; with it C accumulates in f32.
     tile_k: int = Auto(
-        64,
+        default=64,
         array=True,
         domain=Divisors(
-            of=lambda op, dev: op.K,
+            of=K,
             step=lambda op, dev: op.mac_block(dev)[1],
             when=lambda op, dev: op.prio_accuracy,
         ),
     )
     tile_n: int = Auto(
-        64,
+        default=64,
         array=True,
-        domain=Divisors(
-            of=lambda op, dev: op.N, step=lambda op, dev: op.mac_block(dev)[2]
-        ),
+        domain=Divisors(of=N, step=lambda op, dev: op.mac_block(dev)[2]),
     )
     # None: the most columns the device's shim budget allows that split N
     # into whole tile_n-wide tiles.
     num_aie_columns: int = Auto()
-    placement: GEMMPlacement = Auto(GEMMPlacement.SHIMS, array=True)
+    placement: GEMMPlacement = Auto(default=GEMMPlacement.SHIMS, array=True)
     # A @ B = C, with either operand optionally stored column-major. The
     # layout flags transpose a declared shape rather than resize it.
     b_col_maj: bool = Param(default=False, array=True)
@@ -227,8 +224,8 @@ class GEMM(Operator):
     emulate_bf16_mmul_with_bfp16: bool = Param(default=True, repr=False, array=True)
     prio_accuracy: bool = Param(default=False, repr=False, array=True)
     round_conv_even: bool = Param(default=True, repr=False, array=True)
-    dtype_in: Any = field(default=bfloat16, repr=False)
-    dtype_out: Any = field(default=bfloat16, repr=False)
+    dtype_in: Any = Param(default=bfloat16, repr=False)
+    dtype_out: Any = Param(default=bfloat16, repr=False)
     use_scalar: bool = Param(default=False, repr=False, array=True)
     # Filled by resolve: the rows of cores, the device's or fewer where M is
     # too short for them, the L2 tile of each stream and how many shims

@@ -32,7 +32,6 @@ from iron.common import (
     Unresolvable,
     Value,
     Auto,
-    OptionalDim,
     Param,
 )
 from iron.common.design import OperatorDesign
@@ -50,15 +49,15 @@ NPU2 = from_name("npu2", n_cols=8)
 class MV(Operator):
     M: int = Param()
     K: int = Param()
-    num_batches: int = Param(default=1)
+    num_batches: int | None = Param(default=None)
     columns: int | None = Auto()
-    tile_out: int = Auto(64)
+    tile_out: int = Auto(default=64)
     vec: int | None = Auto(repr=False)
     epilogue: str = Param(default="none", array=True)
 
-    A = In(OptionalDim(num_batches), M, K, tile=(tile_out, K), per=columns)
-    B = In(OptionalDim(num_batches), K, tile=(K,), broadcast=True)
-    C = Out(OptionalDim(num_batches), M, tile=(tile_out,), per=columns)
+    A = In(num_batches, M, K, tile=(tile_out, K), per=columns)
+    B = In(num_batches, K, tile=(K,), broadcast=True)
+    C = Out(num_batches, M, tile=(tile_out,), per=columns)
     count = Value(derive=lambda op: op.M // (op.columns * op.tile_out))
     start = Value()  # per-call when a graph binds it, else unused
 
@@ -106,7 +105,7 @@ def test_members_keep_declaration_order_and_names():
 def test_shapes_captured_bare_names_resolve_to_refs():
     # ``M`` and ``num_batches`` were the fields themselves in the class body.
     dims = MV.A.dims.dims
-    assert dims[0].ref.name == "num_batches"
+    assert dims[0].name == "num_batches"
     assert dims[1] is MV.M and dims[2] is MV.K
     assert MV.A.tile_dims.dims == (MV.tile_out, MV.K)
     assert MV.A.per.dims == (MV.columns,)
@@ -143,7 +142,7 @@ def test_a_tunable_may_name_a_tile_but_not_a_buffer_shape():
 
         class Bad(Operator):
             M: int = Param()
-            t: int = Auto(64)
+            t: int = Auto(default=64)
             A = In(M, t)
 
 
@@ -235,7 +234,7 @@ def test_per_and_broadcast_are_exclusive():
 
         class Bad(Operator):
             n: int = Param()
-            c: int = Auto(2)
+            c: int = Auto(default=2)
             x = In(n, tile=(4,), per=(c,), broadcast=True)
 
 
@@ -318,18 +317,22 @@ def test_buffers_resolve_shape_dtype_and_direction():
     assert [b.name for b in op.outputs] == ["C"]
 
 
-def test_an_optional_dim_is_omitted_when_one_and_may_sit_anywhere():
+def test_a_t_or_none_dim_is_omitted_when_none_and_may_sit_anywhere():
     assert MV(M=64, K=256).A.shape == (64, 256)
     assert MV(M=64, K=256, num_batches=3).C.shape == (3, 64)
 
     class Stack(Operator):
         rows: int = Param()
         cols: int = Param()
-        seq: int = Param(default=1)
-        x = In(rows, OptionalDim(seq), cols)
-        y = Out(rows, OptionalDim(seq), cols)
+        seq: int | None = Param(default=None)
+        x = In(rows, seq, cols)
+        y = Out(rows, seq, cols)
 
-    assert Stack.declaration.infer({"x": (8, 64)}) == {"rows": 8, "cols": 64, "seq": 1}
+    assert Stack.declaration.infer({"x": (8, 64)}) == {
+        "rows": 8,
+        "cols": 64,
+        "seq": None,
+    }
     assert Stack.declaration.infer({"x": (8, 16, 64)}) == {
         "rows": 8,
         "cols": 64,
@@ -396,7 +399,7 @@ def test_per_call_values_bind_on_the_operator():
 def test_shim_pins_declare():
     class Pinned(Operator):
         n: int = Param()
-        c: int = Auto(2)
+        c: int = Auto(default=2)
         x = In(n, tile=(n,), via=Tile(1, 0), channel=0)
         y = Out(n, tile=(n,), via=[Tile(c, 0) for c in range(2)], channel=0, per=(c,))
 
@@ -537,7 +540,7 @@ def test_when_names_a_param():
 
         class Bad(Operator):
             N: int = Param()
-            flag: bool = Auto(False)
+            flag: bool = Auto(default=False)
             s = In(N, when=flag)
 
 
@@ -695,13 +698,13 @@ def test_resolve_must_return_a_copy():
 
 
 def test_overriding_an_inherited_field_needs_an_annotation():
-    with pytest.raises(TypeError, match="tile_out: int = Auto\\(32\\)"):
+    with pytest.raises(TypeError, match="tile_out: int = Auto\\(default=32\\)"):
 
         class Pinned(MV):
             tile_out = 32  # dataclass would keep the base's 64 in silence
 
     class Annotated(MV):
-        tile_out: int = Auto(32)
+        tile_out: int = Auto(default=32)
 
     assert Annotated(M=64, K=64).tile_out == 32
 
@@ -743,7 +746,7 @@ def test_a_computed_default_is_inferred_from_a_shape_or_computed():
     class Rep(Operator):
         rows: int = Param()
         repeat: int = Param()
-        out_rows: int = Param(default=lambda op: op.rows * op.repeat)
+        out_rows: int = Param(derive=lambda op: op.rows * op.repeat)
         x = In(rows, 8)
         y = Out(out_rows, 8)
 
@@ -792,7 +795,7 @@ def test_inference_binds_the_fields_from_the_operands():
     )
     assert (op.M, op.K, op.num_batches) == (1024, 128, 3)
     assert op.A.shape == (3, 1024, 128)
-    assert MV.from_operands((1024, 128), (128,)).num_batches == 1
+    assert MV.from_operands((1024, 128), (128,)).num_batches is None
 
 
 # --------------------------------------------------------------------------
@@ -836,7 +839,7 @@ class Rows(Operator):
 
     rows: int = Param()
     cols: int = Param()
-    lanes: int = Auto(2)
+    lanes: int = Auto(default=2)
     valid = Extent(rows)
     count = Value(derive=lambda op: op.valid // op.lanes)  # reads the extent
     width = Value(derive=lambda op: op.cols)  # does not
@@ -864,7 +867,7 @@ def test_an_extent_reads_as_its_field_until_a_graph_bounds_it():
     with pytest.raises(TypeError, match="must name a Param"):
 
         class Bad(Operator):
-            n: int = Auto(4)
+            n: int = Auto(default=4)
             valid = Extent(n)
             x = In(n)
 

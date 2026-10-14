@@ -96,7 +96,7 @@ class RoPE(Operator):
 
     rows: int = Param()
     cols: int = Param()
-    angle_rows: int = Param(default=lambda op: op.rows)  # one row per position
+    angle_rows: int = Param(derive=lambda op: op.rows)  # one row per position
     # None: every column the device's shim budget allows.
     num_aie_columns: int = Auto()
     method_type: int = Param(default=0, array=True)

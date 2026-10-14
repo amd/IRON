@@ -39,7 +39,7 @@ class Dequant(UnaryElementwise):
     # The packed input's length: two 4-bit values per byte plus a bf16 scale
     # per group.
     packed: int = Param(
-        default=lambda op: op.size // 2 + (op.size // op.group_size) * 2, repr=False
+        derive=lambda op: op.size // 2 + (op.size // op.group_size) * 2, repr=False
     )
     # The packed size of one line; filled by resolve from ``tile_size``.
     in_tile: int = Auto(repr=False, derived=True)

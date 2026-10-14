@@ -20,7 +20,6 @@ from iron.common import (
     Out,
     Value,
     Auto,
-    OptionalDim,
     Param,
 )
 from iron.common.testing import Case, Testing
@@ -47,7 +46,6 @@ def _cases(cls, dev: Device):
                                 m=m,
                                 n=n,
                                 s=8,
-                                num_batches=1,
                             ),
                             extensive=(M, N) != (2048, 64),
                         )
@@ -82,7 +80,6 @@ def _cases(cls, dev: Device):
                 m=m,
                 n=n,
                 s=8,
-                num_batches=1,
             ),
             bench=True,
         )
@@ -107,10 +104,11 @@ class Transpose(Operator):
 
     M: int = Param()
     N: int = Param()
-    num_batches: int = Param(default=1)
+    # None: a single batch, carrying no batch dimension at all.
+    num_batches: int | None = Param(default=None)
     # Defaults: 64 x 64 tiles of 8 x 8 sub-tiles, every column, one channel.
     m: int = Auto(
-        64,
+        default=64,
         domain=Divisors(
             of=lambda op, dev: op.M,
             step=lambda op, dev: op.s,
@@ -118,24 +116,20 @@ class Transpose(Operator):
         ),
     )
     n: int = Auto(
-        64,
+        default=64,
         domain=Divisors(
             of=lambda op, dev: op.N,
             step=lambda op, dev: op.s,
             cap=lambda op, dev: 8192 // op.m,
         ),
     )
-    s: int = Auto(8, array=True, domain=(8, 4))
+    s: int = Auto(default=8, array=True, domain=(8, 4))
     num_aie_columns: int = Auto()
-    num_channels: int = Auto(1)
+    num_channels: int = Auto(default=1)
 
-    x = In(
-        OptionalDim(num_batches), M, N, tile=(m, n), per=(num_aie_columns, num_channels)
-    )
-    y = Out(
-        OptionalDim(num_batches), N, M, tile=(m, n), per=(num_aie_columns, num_channels)
-    )
-    batches = Value(derive=lambda op: op.num_batches)
+    x = In(num_batches, M, N, tile=(m, n), per=(num_aie_columns, num_channels))
+    y = Out(num_batches, N, M, tile=(m, n), per=(num_aie_columns, num_channels))
+    batches = Value(derive=lambda op: op.num_batches or 1)
     col_tiles = Value(derive=lambda op: op.N // op.n // op.num_aie_columns)
     chan_tiles = Value(derive=lambda op: op.M // op.m // op.num_channels)
 
@@ -275,7 +269,7 @@ class Transpose(Operator):
         """One task group per batch (a parallel fill+drain over all cores), so the
         contiguous matrices stream through the same fifos in sequence.
         """
-        M, N, nb = self.M, self.N, self.num_batches
+        M, N, nb = self.M, self.N, self.num_batches or 1
         m, n, cols, chans = self.m, self.n, self.num_aie_columns, self.num_channels
         # Each core's block of a batch: chans row-bands, cols column-bands.
         x = TensorAccessPattern.full(

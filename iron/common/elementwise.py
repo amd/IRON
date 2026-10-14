@@ -635,7 +635,7 @@ class Elementwise(Operator):
     """
 
     num_aie_columns: int = Auto()
-    num_channels: int = Auto(1)
+    num_channels: int = Auto(default=1)
     tile_size: int = Auto(
         domain=Divisors(
             of=lambda op, dev: op.outputs[0].elements,

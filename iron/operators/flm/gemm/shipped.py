@@ -105,19 +105,19 @@ class Shipped(
 
     # The port's tunables, fixed by the binary. B is bf16 (no bfp16 on this
     # image), one row-block per B fetch, and the whole of K in one slice.
-    tile_n: int = Auto(N_TILE, repr=False, init=False)
+    tile_n: int = Auto(default=N_TILE, repr=False, init=False)
     k_tile: int = Param(default=K_TILE, repr=False, init=False)
-    tile_ma: int = Auto(M_TILE, repr=False, init=False)
-    m_chunk: int = Auto(1, repr=False, init=False)
-    rows: int = Auto(ROWS, repr=False, init=False)
-    cols: int = Auto(COLS, repr=False, init=False)
-    emulate_bf16_mmul_with_bfp16: bool = Auto(True, repr=False, init=False)
-    bfp16_b: bool = Auto(False, repr=False, init=False)
-    b_dtype: object = Auto(bfloat16, repr=False, init=False)
-    l1_b_depth: int = Auto(QUEUE_DEPTH, repr=False, init=False)
-    a_l2: int = Auto(M_TILE * K_TILE, repr=False, init=False)
-    b_l2: int = Auto(K_TILE * N_TILE, repr=False, init=False)
-    c_l2: int = Auto(ROWS * M_TILE * N_TILE, repr=False, init=False)
+    tile_ma: int = Auto(default=M_TILE, repr=False, init=False)
+    m_chunk: int = Auto(default=1, repr=False, init=False)
+    rows: int = Auto(default=ROWS, repr=False, init=False)
+    cols: int = Auto(default=COLS, repr=False, init=False)
+    emulate_bf16_mmul_with_bfp16: bool = Auto(default=True, repr=False, init=False)
+    bfp16_b: bool = Auto(default=False, repr=False, init=False)
+    b_dtype: object = Auto(default=bfloat16, repr=False, init=False)
+    l1_b_depth: int = Auto(default=QUEUE_DEPTH, repr=False, init=False)
+    a_l2: int = Auto(default=M_TILE * K_TILE, repr=False, init=False)
+    b_l2: int = Auto(default=K_TILE * N_TILE, repr=False, init=False)
+    c_l2: int = Auto(default=ROWS * M_TILE * N_TILE, repr=False, init=False)
     b_overlay_order: ClassVar[bool] = True
 
     # A: one (M_TILE x K_TILE) block per transfer element, broadcast along

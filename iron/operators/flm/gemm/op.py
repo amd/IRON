@@ -181,7 +181,7 @@ class GEMM(Operator):
     # B's packed block count on AIE2P: blocks, not bytes, since B's
     # declaration counts bfp16ebs8 blocks and bfp.itemsize turns that back
     # into the byte count pack_B returns.
-    packed_blocks: int = Param(default=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
+    packed_blocks: int = Param(derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
     # n tile width. 64 halves the mmul's accumulator traffic per mac; 128
     # halves A fetches instead. See README.md.
     tile_n: int = Auto(array=True)

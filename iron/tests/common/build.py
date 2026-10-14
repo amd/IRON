@@ -36,7 +36,6 @@ from iron.common import (
     Value,
     Xclbin,
     Auto,
-    OptionalDim,
     Param,
 )
 from iron.common.design import OperatorDesign
@@ -66,12 +65,12 @@ NPU2_4COL = from_name("npu2", n_cols=4)
 class MV(Operator):
     M: int = Param()
     K: int = Param()
-    num_batches: int = Param(default=1)
-    cols: int = Auto(2)
-    tile_out: int = Auto(64)
-    A = In(OptionalDim(num_batches), M, K, tile=(tile_out, K), per=(cols,))
-    B = In(OptionalDim(num_batches), K, tile=(K,), broadcast=True)
-    C = Out(OptionalDim(num_batches), M, tile=(tile_out,), per=(cols,))
+    num_batches: int | None = Param(default=None)
+    cols: int = Auto(default=2)
+    tile_out: int = Auto(default=64)
+    A = In(num_batches, M, K, tile=(tile_out, K), per=(cols,))
+    B = In(num_batches, K, tile=(K,), broadcast=True)
+    C = Out(num_batches, M, tile=(tile_out,), per=(cols,))
     valid = Extent(M)
 
 
@@ -223,7 +222,7 @@ def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles():
 def test_preamble_rejects_a_resident_the_array_never_bound(npu2):
     class Op(Operator):
         n: int = Param()
-        tile: int = Auto(64)
+        tile: int = Auto(default=64)
         A = In(n, tile=(tile,))
         count = Value(derive=lambda op: op.n // op.tile)
 

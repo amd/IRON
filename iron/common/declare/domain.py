@@ -21,8 +21,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable
 
-# An integer, or what a callable of the resolved operator and its device returns.
-Bound = int | Callable[[Any, Any], int] | None
+# An integer, a Param field read straight off the operator, or what a
+# callable of the resolved operator and its device returns.
+Bound = int | Callable[[Any, Any], int] | dataclasses.Field | None
 
 
 @dataclass(frozen=True)
@@ -68,9 +69,11 @@ class Divisors(Domain):
     `cap`.
 
     Attributes:
-        of: What the value must divide.
-        step: What the value must be a multiple of.
-        cap: The largest value, or None for no cap.
+        of: What the value must divide: an int, a `Param` field read
+            straight off the resolved operator (``of=K``), or a callable
+            of the operator and the device.
+        step: What the value must be a multiple of, in the same terms.
+        cap: The largest value, or None for no cap, in the same terms.
         span: The most octaves to go either side of the resolved value, or
             None for as far as the bounds allow.
     """
@@ -80,10 +83,15 @@ class Divisors(Domain):
     cap: Bound = None
     span: int | None = None
 
+    def _bound(self, bound: Bound, op: Any, dev: Any) -> int | None:
+        if isinstance(bound, dataclasses.Field):
+            return getattr(op, bound.name)
+        return bound(op, dev) if callable(bound) else bound
+
     def values(self, op: Any, dev: Any, start: Any) -> tuple[Any, ...]:
-        of = self.of(op, dev) if callable(self.of) else self.of
-        step = self.step(op, dev) if callable(self.step) else self.step
-        cap = self.cap(op, dev) if callable(self.cap) else self.cap
+        of = self._bound(self.of, op, dev)
+        step = self._bound(self.step, op, dev)
+        cap = self._bound(self.cap, op, dev)
         found = [start]
         value, octave = start * 2, 1
         while (

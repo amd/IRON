@@ -100,7 +100,7 @@ class Magnitude(Rowwise):
     )
 
     width: int = Param()
-    tile_size: int = Param(default=lambda op: op.width // 2)
+    tile_size: int = Param(derive=lambda op: op.width // 2)
 
     x = In(
         Rowwise.rows,

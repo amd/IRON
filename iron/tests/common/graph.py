@@ -75,7 +75,7 @@ def _ffn():
             )
             act = ElementwiseMul(SiLU(gate), up)
             Copy(
-                act[: 4 * 64].reshape(4, 64), cache[:, pos]
+                act[:, : 4 * 64].reshape(4, 64), cache[:, pos]
             )  # writes state; returns nothing
             return GEMV(w_down, act, num_aie_columns=8, tile_size_output=E // 8)
 

@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
-from dataclasses import field
 from typing import Any
 
 import numpy as np
@@ -19,7 +18,6 @@ from iron.common import (
     Out,
     Unresolvable,
     Auto,
-    OptionalDim,
     Param,
 )
 from iron.common.design import BdLimits
@@ -67,18 +65,18 @@ class Repeat(Operator):
     rows: int = Param()
     cols: int = Param()
     repeat: int = Param()
-    seq: int = Param(default=1)  # the stack's middle axis; absent when one
-    out_rows: int = Param(default=lambda op: op.rows * op.repeat, repr=False)
+    seq: int | None = Param(default=None)  # the stack's middle axis; absent when None
+    out_rows: int = Param(derive=lambda op: op.rows * op.repeat, repr=False)
     tile_size: int = Auto(repr=False)  # None: cols
-    dtype: Any = field(default=bfloat16, repr=False)
+    dtype: Any = Param(default=bfloat16, repr=False)
 
     # Either may be bounded per call: the rows of a matrix (``x[:n]``) or
     # the middle axis of a stack, a KV cache's context (``keys[:, :c]``).
     valid_rows = Extent(rows)
     valid_seq = Extent(seq)
 
-    x = In(rows, OptionalDim(seq), cols, dtype=dtype, tile=(tile_size,))
-    y = Out(out_rows, OptionalDim(seq), cols, dtype=dtype, tile=(tile_size,))
+    x = In(rows, seq, cols, dtype=dtype, tile=(tile_size,))
+    y = Out(out_rows, seq, cols, dtype=dtype, tile=(tile_size,))
 
     def validate(self) -> None:
         self.check_derived("out_rows")
@@ -86,7 +84,7 @@ class Repeat(Operator):
     def resolve(self, dev):
         # A row is one run over the descriptor's two innermost dimensions.
         shim = BdLimits.of(dev, AIETileType.ShimNOCTile)
-        row, gran = self.seq * self.cols, shim.granule(self.dtype)
+        row, gran = (self.seq or 1) * self.cols, shim.granule(self.dtype)
         if shim.factor(row, gran) is None:
             raise Unresolvable(
                 f"Cannot split cols={row} for one descriptor: a row must "
@@ -109,7 +107,7 @@ class Repeat(Operator):
         patched per call from its word: the rows' (the split row beneath
         them), or the stack's, ``(repeat, seq, rows, cols)``.
         """
-        rows, seq, cols, repeat = self.rows, self.seq, self.cols, self.repeat
+        rows, seq, cols, repeat = self.rows, self.seq or 1, self.cols, self.repeat
         shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
         row, gran = seq * cols, shim.granule(self.dtype)
         bound = self.bound_extents

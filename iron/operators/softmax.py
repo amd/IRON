@@ -92,7 +92,7 @@ class Softmax(Operator):
     cols: int = Param()
     # None: every column the device's shim budget allows.
     num_aie_columns: int = Auto()
-    num_channels: int = Auto(1)
+    num_channels: int = Auto(default=1)
     # None: the whole row, or where the row is streamed the longest
     # multiple of _VECTOR_STEP up to _BLOCK that divides it.
     block: int = Auto(

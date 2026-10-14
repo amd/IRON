@@ -379,6 +379,15 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    - a `Value(derive=...)` for every trip count the core reads, so the
      array never depends on the extent; what else the array bakes is
      `Param(..., array=True)`
+   - which of these computes a quantity from other fields depends on who
+     reads it:
+
+     | Reads it | Declare |
+     |---|---|
+     | Host Python, never a field itself | `@property` |
+     | A compile-time field a caller may still override (`check_derived` catches disagreement) | `Param(derive=lambda op: ...)` |
+     | A tunable `resolve(dev)` always fills, never a caller's | `Auto(derived=True)` |
+     | A core, as a trip count or scalar | `Value(derive=lambda op: ...)` |
    - `array()`: build ObjectFIFOs and Workers (`self.kernel()` or a
      factory's `ExternalFunction`, `Buffer(..., use_write_rtp=True)` for a
      runtime parameter, `WorkerRuntimeBarrier()`), `range_()` for loops, and

@@ -14,18 +14,6 @@ from .field import Auto, Param
 
 
 @dataclass(frozen=True)
-class OptionalDim:
-    """A dimension present only when greater than one.
-
-    ``In(OptionalDim(num_batches), M, K)`` is ``(M, K)`` for one batch and
-    ``(num_batches, M, K)`` otherwise. Inference tells them apart by rank, so
-    a shape has at most one.
-    """
-
-    ref: Any
-
-
-@dataclass(frozen=True)
 class Select:
     """A shape chosen by a flag the caller gives or defaults, never inferred:
     ``Select(b_col_maj, (N, K), (K, N))``.
@@ -47,14 +35,19 @@ class Select:
         return Shape(tuple(self.when_true if flag else self.when_false))
 
 
-_DimSpec = Any  # Param | int | OptionalDim | Select
+_DimSpec = Any  # Param | int | Select
 
 
 @dataclass(frozen=True)
 class Shape:
-    """A declared shape: integers, ``Param`` fields, at most one
-    ``OptionalDim`` and ``Select``s: a member's declared shape, or a
-    stream's ``per=``.
+    """A declared shape: integers, ``Param`` fields and ``Select``s: a
+    member's declared shape, or a stream's ``per=``.
+
+    A ``Param`` field annotated ``T | None`` is a dimension present only
+    where it resolves to something other than None (``In(num_batches, M, K)``
+    is ``(M, K)`` when ``num_batches`` is None and ``(num_batches, M, K)``
+    otherwise); inference tells the two ranks apart, so a shape has at most
+    one such field.
     """
 
     dims: tuple
@@ -70,9 +63,7 @@ class Shape:
             TypeError: A dimension breaks the rule.
         """
         for d in self.dims:
-            if isinstance(d, OptionalDim):
-                Shape((d.ref,)).check(cls, member, what, allow_tunable=allow_tunable)
-            elif isinstance(d, Select):
+            if isinstance(d, Select):
                 Shape(d.when_true + d.when_false).check(
                     cls, member, what, allow_tunable=allow_tunable
                 )
@@ -123,15 +114,14 @@ class Shape:
         raise TypeError(f"cannot resolve {spec!r} as a dimension")
 
     def resolve(self, op) -> tuple[int, ...]:
-        """The shape on ``op``: an ``OptionalDim`` of one left out, each
-        ``Select`` the branch its flag picks.
+        """The shape on ``op``: a ``None``-valued ``Param`` dimension left
+        out, each ``Select`` the branch its flag picks.
         """
         out: list[int] = []
         for d in self.dims:
-            if isinstance(d, OptionalDim):
-                if (n := Shape.dim(d.ref, op)) > 1:
-                    out.append(n)
-            elif isinstance(d, Select):
+            if isinstance(d, Param) and getattr(op, d.name) is None:
+                continue
+            if isinstance(d, Select):
                 out.extend(d.branch(op).resolve(op))
             else:
                 out.append(Shape.dim(d, op))
@@ -141,10 +131,8 @@ class Shape:
         """The axis of the resolved shape that ``field`` sizes, or None."""
         axis = 0
         for d in self.dims:
-            if isinstance(d, OptionalDim):
-                if Shape.dim(d.ref, op) <= 1:
-                    continue
-                d = d.ref
+            if isinstance(d, Param) and getattr(op, d.name) is None:
+                continue
             if isinstance(d, Select):
                 branch = d.branch(op)
                 inner = branch.axis_of(field, op)
@@ -158,13 +146,11 @@ class Shape:
         return None
 
     def names(self) -> set[str]:
-        """The fields this shape names, through ``OptionalDim`` and ``Select``."""
+        """The fields this shape names, through ``Select``."""
         out: set[str] = set()
         for d in self.dims:
             if isinstance(d, Param):
                 out.add(d.name)
-            elif isinstance(d, OptionalDim):
-                out |= Shape((d.ref,)).names()
             elif isinstance(d, Select):
                 out |= Shape((d.flag, *d.when_true, *d.when_false)).names()
         return out

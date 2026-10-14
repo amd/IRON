@@ -86,7 +86,7 @@ class Limbs(Rowwise):
     )
 
     line: int = Param()
-    tile_size: int = Param(default=lambda op: len(PLANES) * op.line)
+    tile_size: int = Param(derive=lambda op: len(PLANES) * op.line)
 
     x = In(
         Rowwise.rows,

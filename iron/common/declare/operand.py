@@ -20,7 +20,8 @@ from aie.iron.device import Tile
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
-from .shape import OptionalDim, Shape, _DimSpec
+from .field import Param
+from .shape import Shape, _DimSpec
 from .member import Member
 from .value import DispatchTime, Extent, Value
 
@@ -402,14 +403,15 @@ class Operand(Member["Operand"]):
 
     @property
     def batch_axes(self) -> int:
-        """Leading ``OptionalDim()`` dimensions that are present on this instance."""
-        n = 0
-        for d in self.dims.dims:
-            if not isinstance(d, OptionalDim):
-                break
-            if Shape.dim(d.ref, self.op) > 1:
-                n += 1
-        return n
+        """1 if a leading ``T | None`` dimension is present on this instance, else 0."""
+        dims = self.dims.dims
+        if (
+            dims
+            and isinstance(dims[0], Param)
+            and dims[0].name in self.op.declaration.nullable
+        ):
+            return 1 if getattr(self.op, dims[0].name) is not None else 0
+        return 0
 
     def extent_axis(self, extent: Extent) -> int | None:
         return self.dims.axis_of(extent.field.name, self.op)

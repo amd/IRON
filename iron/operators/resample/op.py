@@ -243,14 +243,14 @@ class ResampleTaps(Operator):
     slots: int | None = Param(default=None, array=True)
     # Enough for out_size, in a multiple of 16 so every core count up to it divides.
     chunks: int = Param(
-        default=lambda op: 16
+        derive=lambda op: 16
         * -(
             -op.out_size
             // (16 * max(1, per_chunk(op.in_size, op.out_size, op.words, op.slots)))
         )
     )
     num_aie_columns: int = Auto()
-    num_channels: int = Auto(2)
+    num_channels: int = Auto(default=2)
 
     table = Out(
         chunks,
@@ -891,17 +891,17 @@ class Resample(Operator):
     # old flat default is a floor, so two resizes of one image that each
     # need no more of it still resolve to the same array.
     patch_columns: int = Param(
-        default=lambda op: max(8, op.default_patch_columns()), array=True
+        derive=lambda op: max(8, op.default_patch_columns()), array=True
     )
     image_chunks: int = Param(
-        default=lambda op: op.height * -(-3 * op.width // op.chunk)
+        derive=lambda op: op.height * -(-3 * op.width // op.chunk)
     )
     # In multiples of 16, as ResampleTaps's are, so every core count up to it divides.
-    width_chunks: int = Param(default=lambda op: 16 * -(-op.out_width // (16 * SIDE)))
-    height_chunks: int = Param(default=lambda op: 16 * -(-op.out_height // (16 * SIDE)))
-    patch_rows: int = Param(default=lambda op: op.padded_rows())
+    width_chunks: int = Param(derive=lambda op: 16 * -(-op.out_width // (16 * SIDE)))
+    height_chunks: int = Param(derive=lambda op: 16 * -(-op.out_height // (16 * SIDE)))
+    patch_rows: int = Param(derive=lambda op: op.padded_rows())
     num_aie_columns: int = Auto()
-    num_channels: int = Auto(2)
+    num_channels: int = Auto(default=2)
 
     rows = Extent(height)
     columns = Extent(width)

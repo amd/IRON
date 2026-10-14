@@ -112,7 +112,7 @@ class Sample(Operator):
     k_max: int = Param(default=64, array=True)
     # Positions the draws and the record hold; the sequence picks one.
     steps: int = Param(default=1)
-    cores: int = Auto(4)
+    cores: int = Auto(default=4)
     # Logits per select call; the largest even divisor of the slice up to
     # 8192 unless given.
     chunk: int = Auto(

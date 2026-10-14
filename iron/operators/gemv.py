@@ -36,7 +36,6 @@ from iron.common import (
     Prepare,
     Value,
     Auto,
-    OptionalDim,
     Param,
 )
 from iron.common.testing import Case, Testing
@@ -179,13 +178,18 @@ class GEMV(Operator):
 
     M: int = Param()
     K: int = Param()
-    num_batches: int = Param(default=1)
+    # None: a single batch, carrying no batch dimension at all.
+    num_batches: int | None = Param(default=None)
     # Batches per matrix of A: batch ``b`` is multiplied by matrix
     # ``b // repeat``. Grouped-query attention's scores, where each group's
     # keys serve ``n_heads // n_kv_groups`` query heads: the matrix is read
     # once per batch it serves, so no repeated copy is ever materialized.
     repeat: int = Param(default=1)
-    num_matrices: int = Param(default=lambda op: op.num_batches // op.repeat)
+    num_matrices: int | None = Param(
+        derive=lambda op: (
+            None if op.num_batches is None else op.num_batches // op.repeat
+        )
+    )
     # None: every column the device's shim budget allows that leaves each
     # column a whole number of tiles of M.
     num_aie_columns: int = Auto()
@@ -219,7 +223,7 @@ class GEMV(Operator):
     # prologue's and a finish's inputs ride A: a tile of each after B's, or
     # after an output tile's rows.
     A = In(
-        OptionalDim(num_matrices),
+        num_matrices,
         M,
         K,
         tile=(tile_size_input, K),
@@ -227,9 +231,9 @@ class GEMV(Operator):
         depth=2,
         feed=True,
     )
-    B = In(OptionalDim(num_batches), K, prepare=True)
+    B = In(num_batches, K, prepare=True)
     C = Out(
-        OptionalDim(num_batches),
+        num_batches,
         M,
         tile=(tile_size_output,),
         per=(num_aie_columns, num_channels),
@@ -245,7 +249,7 @@ class GEMV(Operator):
             op.valid, op.num_aie_columns * op.num_channels * op.tile_size_output
         ),
     )
-    batches = Value(derive=lambda op: op.num_batches)
+    batches = Value(derive=lambda op: op.num_batches or 1)
 
     def extent_unit(self, buffer: str) -> int | None:
         # A lane takes A in output tiles (several input tiles each) so
@@ -265,7 +269,7 @@ class GEMV(Operator):
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
     def validate(self):
-        if self.repeat < 1 or self.num_batches % self.repeat:
+        if self.repeat < 1 or (self.num_batches or 1) % self.repeat:
             raise ValueError(
                 f"repeat={self.repeat} does not divide num_batches={self.num_batches}"
             )
@@ -584,7 +588,7 @@ class GEMV(Operator):
         # Each lane's share of a batch's C, which a finish's inputs ride A for.
         share = M // len(rows)
         output = TensorAccessPattern.full(self.C.shape)
-        for b in range(self.num_batches):
+        for b in range(self.num_batches or 1):
             # B's row repeated over a whole A tile, in the iteration
             # dimension, the one whose stride may be 0; so is each prologue
             # input's.
@@ -607,7 +611,7 @@ class GEMV(Operator):
                     lane_rows = slice(k * share, (k + 1) * share)
                     finishing = (
                         output[b, lane_rows]
-                        if self.num_batches > 1
+                        if self.num_batches is not None
                         else output[lane_rows]
                     )
                 self.A.fill(
@@ -622,7 +626,7 @@ class GEMV(Operator):
             task.await_()
 
     def ops(self) -> int:
-        return 2 * self.M * self.K * self.num_batches
+        return 2 * self.M * self.K * (self.num_batches or 1)
 
     def reference(self, A, B):
         """``C = A @ B``: one product per batch when ``A`` is

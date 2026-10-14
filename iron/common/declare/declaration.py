@@ -10,13 +10,13 @@ import enum
 import inspect
 import math
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, get_args
 
 from .domain import Domain
 from .field import Auto, Param
 from .member import Member
 from .operand import Operand
-from .shape import OptionalDim, Select
+from .shape import Select
 from .value import Extent, Value
 
 
@@ -86,13 +86,27 @@ class Declaration:
             ):
                 raise TypeError(
                     f"{cls.__name__}.{name} = {value!r} does not override the inherited "
-                    f"field: annotate it, `{name}: int = Auto({value!r})` (with "
+                    f"field: annotate it, `{name}: int = Auto(default={value!r})` (with "
                     f"init=False to pin it), or dataclass keeps the base's default"
                 )
 
         dataclasses.dataclass(cls, eq=False, repr=False, kw_only=True)  # in place
 
         fields = {f.name: f for f in dataclasses.fields(cls)}
+        # The bare name `from __future__ import annotations` leaves as a
+        # string, resolved per class rather than for the whole MRO at once:
+        # the library base's own annotations name TYPE_CHECKING-only types,
+        # and an operator's fields are its subclasses', so only theirs are
+        # evaluated.
+        hints = {}
+        for klass in reversed(cls.__mro__):
+            if klass is not library and issubclass(klass, library):
+                hints |= inspect.get_annotations(klass, eval_str=True)
+        # A field's type is `T | None`: a shape dimension of it is present
+        # only where it resolves to something other than None.
+        self.nullable = frozenset(
+            name for name, hint in hints.items() if type(None) in get_args(hint)
+        )
         for name in fields.keys() - inherited:
             base = next((b for b in library.__mro__ if name in vars(b)), None)
             if base is not None:
@@ -131,10 +145,15 @@ class Declaration:
                     m.finish_block.check(
                         cls, m, "finish block dimension", allow_tunable=True
                     )
-                if sum(isinstance(d, OptionalDim) for d in m.dims.dims) > 1:
+                optional = [
+                    d.name
+                    for d in m.dims.dims
+                    if isinstance(d, Param) and d.name in self.nullable
+                ]
+                if len(optional) > 1:
                     raise TypeError(
-                        f"{cls.__name__}.{m.name}: at most one OptionalDim() dimension, "
-                        f"since the rank tells whether it is present"
+                        f"{cls.__name__}.{m.name}: at most one T | None dimension "
+                        f"{optional}, since the rank tells whether it is present"
                     )
                 if m.when is not None and (
                     not isinstance(m.when, Param) or isinstance(m.when, Auto)
@@ -182,13 +201,7 @@ class Declaration:
         self.autos = tuple(f.name for f in autos)
         self.tunables = tuple(f.name for f in autos if f.init and not f.derived)
         # A tunable given no domain and annotated with an Enum is searched
-        # over that Enum's members. The library base's own annotations name
-        # TYPE_CHECKING-only types, and an operator's fields are its
-        # subclasses', so only theirs are evaluated.
-        hints = {}
-        for klass in reversed(cls.__mro__):
-            if klass is not library and issubclass(klass, library):
-                hints |= inspect.get_annotations(klass, eval_str=True)
+        # over that Enum's members.
         self.domains = {}
         for f in autos:
             if f.name not in self.tunables:
@@ -386,20 +399,25 @@ class Declaration:
         pairs = [(m, inputs[m.name]) for m in ins] + list(zip(outs, outputs))
         bound: dict[str, Any] = dict(given)
         # Each dimension an operand's shape gives: (field, value, where).
-        found: list[tuple[Param, int, str]] = []
+        found: list[tuple[Param, int | None, str]] = []
         for m, shape in pairs:
             shape = tuple(int(s) for s in shape)
             dims = list(m.dims.dims)
             at = next(
-                (i for i, d in enumerate(dims) if isinstance(d, OptionalDim)), None
+                (
+                    i
+                    for i, d in enumerate(dims)
+                    if isinstance(d, Param) and d.name in self.nullable
+                ),
+                None,
             )
             if at is not None:
                 optional = dims.pop(at)
                 if len(shape) == len(dims) + 1:
-                    found.append((optional.ref, shape[at], f"{m.name}.shape[{at}]"))
+                    found.append((optional, shape[at], f"{m.name}.shape[{at}]"))
                     shape = shape[:at] + shape[at + 1 :]
                 elif len(shape) == len(dims):
-                    found.append((optional.ref, 1, f"{m.name} (rank {len(shape)})"))
+                    found.append((optional, None, f"{m.name} (rank {len(shape)})"))
                 else:
                     raise ValueError(
                         f"{self.name}: operand {m.name} has rank {len(shape)}, "

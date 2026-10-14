@@ -43,7 +43,7 @@ class SiLU(UnaryElementwise):
     )
 
     # One channel per column: the LUT-based kernel is sized for it.
-    num_channels: int = Auto(1, repr=False, init=False)
+    num_channels: int = Auto(default=1, repr=False, init=False)
 
     def kernel(self):
         # vtanh's error, doubled through the sigmoid identity, is most of

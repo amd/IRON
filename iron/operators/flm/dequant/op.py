@@ -122,8 +122,8 @@ class DequantBFP(Operator):
     # because the drains index blocks; declared in its 9-byte equivalent,
     # every offset and length would address a ninth of what it names.
     # Filled by validate() from K, N and the interleave.
-    quantized_bytes: int = Param(default=lambda op: op.quantized_size(), repr=False)
-    packed_blocks: int = Param(default=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
+    quantized_bytes: int = Param(derive=lambda op: op.quantized_size(), repr=False)
+    packed_blocks: int = Param(derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
     # The n tile width the packed output is written for. It has to match the
     # tile_n flm.GEMM reads B at, or the GEMM reads the right bytes in the
     # wrong order.
@@ -132,7 +132,7 @@ class DequantBFP(Operator):
     # join, so it is not a field; halves is, because a stream's replication
     # count must be declared to be indexed, but the join bakes it too.
     cols: int = Auto(repr=False)
-    halves: int = Auto(HALVES, repr=False, init=False)
+    halves: int = Auto(default=HALVES, repr=False, init=False)
 
     # One q4nx block per core, delivered as one per-column object the cores
     # split; one packed half-tile out per (column, n-half), joined from the

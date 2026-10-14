@@ -310,14 +310,14 @@ class MHA(Operator):
     num_heads: int = Param()
     # The K/V head count: fewer than num_heads is grouped-query attention;
     # left out, plain MHA.
-    num_KV_heads: int = Param(default=lambda op: op.num_heads)
+    num_KV_heads: int = Param(derive=lambda op: op.num_heads)
     # seq_pad is seq_len rounded up to a multiple of 64; a shape gives
     # seq_pad, from which seq_len follows when it is not given.
-    seq_len: int = Param(default=lambda op: op.seq_pad)
-    seq_pad: int = Param(default=lambda op: op.seq_padding(op.seq_len), repr=False)
+    seq_len: int = Param(derive=lambda op: op.seq_pad)
+    seq_pad: int = Param(derive=lambda op: op.seq_padding(op.seq_len), repr=False)
     # The rows of K and V: a cache longer than the queries, whose last
     # rows the queries are; left out, as many as Q's.
-    kv_len: int = Param(default=lambda op: op.seq_pad)
+    kv_len: int = Param(derive=lambda op: op.seq_pad)
     # The layout a projection GEMM produces, ``(seq, heads, d)`` with the
     # heads interleaved per token, read and written as it is: a head's block
     # is then a strided slice, and no copy reorders the heads to the front.
@@ -330,12 +330,12 @@ class MHA(Operator):
     # Keys more than this many positions from a query are masked; None is
     # no window.
     window: int | None = Param(default=None, array=True)
-    scale: float = Param(default=lambda op: float(1 / np.sqrt(op.d)), array=True)
+    scale: float = Param(derive=lambda op: float(1 / np.sqrt(op.d)), array=True)
     # Left out, the largest block whose cores fit L1 at this d.
     B_q: int = Auto(array=True, domain=BLOCK_SIZES)
     # mha.cc's causal skip compares a KV block's index with a Q block's.
     B_kv: int = Auto(repr=False, derived=True)
-    num_pipelines: int = Auto(1, array=True, domain=Width())
+    num_pipelines: int = Auto(default=1, array=True, domain=Width())
     # Left out, MEMTILES, or TILES where P*V is split.
     placement: MHAPlacement = Auto(array=True)
     # bf16 macs: bfp16 shares one exponent over 8 keys of P*V, and the softmax

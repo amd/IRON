@@ -150,9 +150,7 @@ class CopyRun:
     offset: str | None = None
 
 
-# ``Auto`` is not a listed specifier: pyright reads a default only from
-# ``default=``, and ``Auto(2)`` passes it positionally.
-@dataclass_transform(kw_only_default=True, field_specifiers=(Param,))
+@dataclass_transform(kw_only_default=True, field_specifiers=(Param, Auto))
 @dataclasses.dataclass(eq=False, repr=True)
 class Operator(metaclass=_OperatorMeta):
     """An operator. Subclass it; every subclass is a dataclass checked as its body finishes."""
@@ -233,7 +231,10 @@ class Operator(metaclass=_OperatorMeta):
         for name, derive in self.declaration.derived.items():
             if getattr(self, name) is None:
                 value = derive(self)
-                if value is None:
+                # A T | None field's formula may answer None itself (GEMV's
+                # num_matrices, following num_batches): that is the computed
+                # value, not an unset one.
+                if value is None and name not in self.declaration.nullable:
                     raise ValueError(
                         f"{type(self).__name__}.{name}: not given, and nothing "
                         f"to compute it from"
@@ -241,7 +242,13 @@ class Operator(metaclass=_OperatorMeta):
                 setattr(self, name, value)
 
     def check_derived(self, *names: str) -> None:
-        """Raise ``ValueError`` if a given computed-default parameter disagrees with its rule."""
+        """Raise ``ValueError`` if a given computed-default parameter disagrees with its rule.
+
+        Only a `Param(derive=)` field an operator's own `validate()` names
+        here is held to its formula: a plain computed default (MHA's
+        ``num_KV_heads``, left to default to ``num_heads``) may be
+        overridden to something the formula disagrees with on purpose.
+        """
         for name in names:
             given, expected = getattr(self, name), self.declaration.derived[name](self)
             if given != expected:

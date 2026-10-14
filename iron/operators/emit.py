@@ -86,7 +86,7 @@ class Emit(Operator):
 
     slots: int = Param(array=True)
     carried: int = Param(array=True)
-    rows: int = Param(default=lambda op: op.slots + op.carried, repr=False)
+    rows: int = Param(derive=lambda op: op.slots + op.carried, repr=False)
 
     program = In(rows, ROW, dtype=np.int32, tile=(rows, ROW), depth=1)
     planes = In(2, carried, dtype=np.int32, tile=(2, carried), depth=1)
