@@ -16,7 +16,6 @@ import inspect
 import math
 from collections.abc import Iterable, Mapping
 from contextvars import ContextVar
-from types import FunctionType
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -95,40 +94,32 @@ class _OperatorMeta(type):
         return super().__call__(*args, **kwargs)
 
 
-class _ArrayView:
-    """The array tier of an operator: reading any other field raises."""
+class _Fenced:
+    """A field outside the array tier, as ``array()`` sees it: using it raises."""
 
-    __slots__ = ("_op",)
+    __slots__ = ("op", "name")
 
-    def __init__(self, op: "Operator") -> None:
-        object.__setattr__(self, "_op", op)
+    def __init__(self, op: str, name: str) -> None:
+        self.op = op
+        self.name = name
 
-    @property
-    def __class__(self):
-        # super() and isinstance() inside a hook see the operator's class.
-        return type(object.__getattribute__(self, "_op"))
+    def refuse(self, *args):
+        raise TypeError(
+            f"{self.op}.array() reads {self.name}, which no tile names: "
+            f"an array serves every extent. Declare it Param(..., array=True) "
+            f"if the array does read it, or move the dependence into the "
+            f"sequence or a Value"
+        )
 
-    def __getattr__(self, name: str):
-        op = object.__getattribute__(self, "_op")
-        fields = {
-            f.name for f in dataclasses.fields(op) if isinstance(f, (Param, Auto))
-        }
-        if name in fields and name not in op.declaration.array:
-            raise TypeError(
-                f"{type(op).__name__}.array() reads {name}, which no tile names: "
-                f"an array serves every extent. Declare it Param(..., array=True) "
-                f"if the array does read it, or move the dependence into the "
-                f"sequence or a Value"
-            )
-        attr = inspect.getattr_static(type(op), name, None)
-        if isinstance(attr, FunctionType):
-            return attr.__get__(self, type(op))
-        if isinstance(attr, property) and attr.fget is not None:
-            return attr.fget(self)
-        return getattr(op, name)
+    __bool__ = __index__ = __int__ = __float__ = __hash__ = __iter__ = refuse
+    __eq__ = __ne__ = __lt__ = __le__ = __gt__ = __ge__ = refuse
+    __add__ = __radd__ = __sub__ = __rsub__ = __mul__ = __rmul__ = refuse
+    __truediv__ = __rtruediv__ = __floordiv__ = __rfloordiv__ = refuse
+    __mod__ = __rmod__ = __pow__ = __rpow__ = __neg__ = __abs__ = refuse
+    __str__ = __format__ = __len__ = __getitem__ = __call__ = refuse
 
-    def __setattr__(self, name: str, value) -> None:
-        setattr(object.__getattribute__(self, "_op"), name, value)
+    def __repr__(self) -> str:
+        return f"<{self.op}.{self.name} outside the array tier>"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -268,7 +259,24 @@ class Operator(metaclass=_OperatorMeta):
         raise NotImplementedError(f"{type(self).__name__}.array() is not implemented")
 
     def build_array(self) -> list:
-        return type(self).array(_ArrayView(self))
+        """``array()`` on a copy whose fields outside the array tier are
+        placeholders that raise on use; what it sets lands on this operator.
+        """
+        fenced = copy.copy(self)
+        for f in dataclasses.fields(self):
+            if isinstance(f, Param) and f.name not in self.declaration.array:
+                vars(fenced)[f.name] = _Fenced(type(self).__name__, f.name)
+        vars(fenced)["_unfenced"] = self
+        before = dict(vars(fenced))
+        built = fenced.array()
+        vars(self).update(
+            {
+                k: v
+                for k, v in vars(fenced).items()
+                if k not in before or before[k] is not v
+            }
+        )
+        return built
 
     def tolerance(self) -> Tolerance | None:
         """What each output of the resolved operator is judged by; None where
@@ -1012,7 +1020,7 @@ class Operator(metaclass=_OperatorMeta):
         if not bound:
             return {}
         # From array(), derivations run on the operator: reading an extent here is not the array's.
-        op = object.__getattribute__(self, "_op") if type(self) is _ArrayView else self
+        op = vars(self).get("_unfenced", self)
         probe = copy.copy(op)
         forms = None if None in bound.values() else bound
         out: dict[str, int | None] = {}

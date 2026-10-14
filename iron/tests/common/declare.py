@@ -599,7 +599,7 @@ def test_a_traced_operator_is_not_the_untraced_ones_array():
 def test_array_sees_the_array_tier_alone():
     class Leaky(MV):
         def array(self):
-            return self.M
+            return self.M // self.tile_out
 
     op = MV(M=1024, K=128).resolved(NPU2)
     assert op.build_array() == [128, 8, 64, "none"]
