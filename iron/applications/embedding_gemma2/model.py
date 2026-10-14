@@ -519,7 +519,7 @@ def main():
     tokenizer = Tokenizer(args.directory / "tokenizer.json", config)
     tuner = None if args.costs is None else JointNarrowing(CostTable(args.costs))
     weights = Checkpoint(args.directory / "model.safetensors").tree()
-    encoder = EmbeddingGemma(config, weights, tokenizer).load(tuner)
+    encoder = EmbeddingGemma(config, weights, tokenizer).load(tuner=tuner)
     try:
         t = time.perf_counter()
         query = encoder.embed(args.query, "query", args.dims)

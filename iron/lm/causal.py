@@ -28,13 +28,13 @@ import iron
 from iron import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.handle import Weight
-from iron.common.graph.narrowing import JointNarrowing, Tuning
+from iron.common.graph.narrowing import Tuning
 from iron.common.graph.probe import Call, Point
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.sample import Sample
 
-from .base import DecoderConfig, Oracle
+from .base import DecoderConfig, Model, Oracle
 from .generation import Sampler
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ class DecodeStep:
     position: Any
 
 
-class CausalLM(iron.Graph):
+class CausalLM(Model):
     """A decoder on ``config``'s shape; a subclass gives ``layer``, ``head`` and ``oracle``.
 
     The caches are ``(max_seq_len, n_kv_groups, head_dim)`` so no descriptor
@@ -182,16 +182,17 @@ class CausalLM(iron.Graph):
 
     # -- on the host -----------------------------------------------------------
 
-    def shapes(self, rows: int) -> dict:
-        """The input shapes of the version of ``rows`` rows: a prompt chunk's
-        token ids, a decode step's none.
+    def shapes(self) -> list[dict]:
+        """The input shapes of each version: the decode step's (none), then
+        the prompt chunk's token ids.
         """
-        return dict(ids=((rows,), np.int32)) if rows > 1 else {}
+        return [{}, dict(ids=((self.config.prefill_chunk,), np.int32))]
 
     def load(
         self,
+        *,
         release=None,
-        tuner: JointNarrowing | None = None,
+        tuner=None,
         full_elf: bool | None = None,
         dev=None,
     ) -> "CausalLM":
@@ -204,24 +205,10 @@ class CausalLM(iron.Graph):
             dev: The device both versions are compiled for, else the current
                 one.
         """
-        if dev is None:
-            dev = aie_utils.ensure_current_device()
-        decode = self.compile(
-            dev=dev, coresident=tuner, full_elf=full_elf, **self.shapes(1)
-        )
-        if not decode.plan.full_elf:
-            logger.info("%s", decode.plan.report("decode"))
-        feeds = decode if decode.emit is not None else None
-        prompt = self.compile(
-            dev=dev,
-            feeds=feeds,
-            coresident=tuner,
-            full_elf=full_elf,
-            **self.shapes(self.config.prefill_chunk),
-        )
-        for version in (decode, prompt):
-            version.load(release=release)
-        self._prompt, self._decode = prompt, decode
+        super().load(release=release, tuner=tuner, full_elf=full_elf, dev=dev)
+        self._decode, self._prompt = self.versions
+        if not self._decode.plan.full_elf:
+            logger.info("%s", self._decode.plan.report("decode"))
         return self
 
     def __call__(self, ids=None, pixel_values=None, **values) -> Any:
@@ -278,9 +265,10 @@ class CausalLM(iron.Graph):
         """
         dev = aie_utils.ensure_current_device()
         C = self.config.prefill_chunk
+        decode_shapes, prompt_shapes = self.shapes()
         versions = [
             (
-                self.shapes(1),
+                decode_shapes,
                 dict(position=position, token=token),
                 [
                     Point(w, dict(position=c - 1, token=token))
@@ -288,7 +276,7 @@ class CausalLM(iron.Graph):
                 ],
             ),
             (
-                self.shapes(C),
+                prompt_shapes,
                 dict(position=C - 1, token=token, chunk=0, rows=C),
                 [
                     Point(

@@ -302,7 +302,7 @@ def hugging_face():
 
 def loaded(graph, tuner, full_elf=None):
     """`graph` compiled and loaded for a fixture's tests, then released."""
-    yield graph.load(tuner, full_elf)
+    yield graph.load(tuner=tuner, full_elf=full_elf)
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 

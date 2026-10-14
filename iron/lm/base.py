@@ -27,10 +27,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 
+import aie.utils as aie_utils
 import numpy as np
 from ml_dtypes import bfloat16
 
 import iron
+from iron.common.graph import CompiledGraph
 from iron.common.graph.narrowing import CostTable, JointNarrowing, NarrowingKinds
 from iron.common.graph.probe import Call
 from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
@@ -501,26 +503,46 @@ def widen(value):
 
 
 class Model(iron.Graph):
-    """A model's graph, every version ``shapes()`` names compiled by
-    ``load()`` before the first call, so the arena is made once. A
-    decoder's two versions feed one another, so ``CausalLM`` loads its own.
+    """A model's graph, every version ``shapes()`` names compiled and
+    loaded by ``load()`` before the first call, so the arena is made once:
+    a version after the first feeds off the one before it, a full ELF's
+    Emit starting there. ``versions``, in ``shapes()``'s order, is every
+    version ``load()`` compiled.
     """
+
+    versions: list[CompiledGraph]
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version."""
         raise NotImplementedError(f"{type(self).__name__} defines no shapes()")
 
     def load(
-        self, tuner: JointNarrowing | None = None, full_elf: bool | None = None
+        self,
+        *,
+        release: Callable[[np.ndarray], None] | None = None,
+        tuner: JointNarrowing | None = None,
+        full_elf: bool | None = None,
+        dev=None,
     ) -> "Model":
-        """Compile every version.
+        """Compile and load every version before the first call.
 
         Args:
-            tuner: Narrows and packs each version's designs by cost.
+            release: Given each piece of each weight once it is on the device.
+            tuner: Folds, narrows and packs each version's designs by cost.
             full_elf: Each version's packaging (``Graph.compile``).
+            dev: The device every version compiles for, else the current one.
         """
+        if dev is None:
+            dev = aie_utils.ensure_current_device()
+        self.versions = []
+        feeds = None
         for shapes in self.shapes():
-            self.compile(coresident=tuner, full_elf=full_elf, **shapes)
+            version = self.compile(
+                dev=dev, feeds=feeds, coresident=tuner, full_elf=full_elf, **shapes
+            )
+            version.load(release=release)
+            self.versions.append(version)
+            feeds = version if version.emit is not None else None
         return self
 
 
@@ -708,9 +730,11 @@ class Runner:
             if cost_table is None
             else JointNarrowing(CostTable(cost_table), kinds=kinds or NarrowingKinds())
         )
-        return model.load(self.checkpoint.release, tuner, full_elf)
+        return model.load(
+            release=self.checkpoint.release, tuner=tuner, full_elf=full_elf
+        )
 
-    def cpu(self) -> Oracle:
+    def oracle(self) -> Oracle:
         """The model's oracle over the same weights, widened a layer at a time."""
         return self.model.oracle(self.config, self.weights)
 
@@ -826,7 +850,7 @@ def main(runner: type[Runner], description: str):
         print(f"[Tuning] {name}:\n" + tuning.report(), flush=True)
 
     if args.check_accuracy:
-        results = accuracy(model, run.cpu(), tokens, args.num_tokens)
+        results = accuracy(model, run.oracle(), tokens, args.num_tokens)
         worst = int(np.argmax([kl for kl, _ in results]))
         for stat, value in kl_stats(results).items():
             where = f" (step {worst})" if stat == "Max" else ""

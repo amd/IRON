@@ -162,7 +162,7 @@ def check_accuracy(
     """
     tokens = prompt(runner, chars, num_tokens)
     # Built here alone: it holds the embedding in float32, twice the checkpoint's.
-    results = accuracy(model, runner.cpu(), tokens, num_tokens)
+    results = accuracy(model, runner.oracle(), tokens, num_tokens)
     stats = kl_stats(results)
     for stat, value in stats.items():
         record(f"{stat}KL", float(value))
