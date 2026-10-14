@@ -467,10 +467,10 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    from `iron.common.testing`
    - the cases are `Case(kwargs, extensive=...)`, plain kwarg dicts, and
      callables of the class returning them when they follow the device's
-     width: `Sweep(...)` is the elementwise one (every column and channel
-     count the shim budget allows at each length; `channels=None` for a
-     binary operator, `rows=True` for a rowwise one, further keywords given
-     to every case)
+     width: `Sweep(...)` is the elementwise one (at the regular length one
+     core and the widest grid the shim budget allows, at the others the
+     smallest and the largest tile; `channels=None` for a binary operator,
+     `rows=True` for a rowwise one, further keywords given to every case)
    - `extensive=True` keeps a case out of the default suite
    - `bench=True` marks the cases CI tracks over time (`pytest.mark.bench`).
      Every operator needs at least one, in the default suite. Pick an input

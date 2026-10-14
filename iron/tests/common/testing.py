@@ -36,7 +36,10 @@ def test_the_unary_sweep_reads_the_class_it_is_resolved_for():
 
 def test_the_binary_sweep_and_an_all_extensive_sweep():
     cases = Sweep(channels=None)(ElementwiseAdd, NPU2)
-    assert {c.kwargs["num_aie_columns"] for c in cases} == {1, 2, 4, 8}  # divide 2^n
+    # One core and the widest grid; the counts between run the same loop.
+    default = [c for c in cases if not c.extensive and not c.bench]
+    assert [c.kwargs["num_aie_columns"] for c in default] == [1, 8]
+    assert {c.kwargs["tile_size"] for c in cases if c.extensive} == {128, 4096}
     (bench,) = [c for c in cases if c.bench]
     assert bench.kwargs == dict(size=BENCH_ELEMENTS, num_aie_columns=8, tile_size=4096)
     extra = Sweep(channels=None, regular=None, bench=None, scalar_factor=10.0)(
