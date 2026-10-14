@@ -240,8 +240,12 @@ class Checkpoint:
 
     def __init__(self, path):
         self.path = Path(path)
-        weight_map = self._weight_map(self.path)
-        self._shards = [_Shard(p) for p in self._shard_paths(self.path, weight_map)]
+        weight_map = None
+        paths = [self.path]
+        if self.path.suffix == ".json":
+            weight_map = json.loads(self.path.read_text())["weight_map"]
+            paths = [self.path.parent / n for n in sorted(set(weight_map.values()))]
+        self._shards = [_Shard(p) for p in paths]
         self.tensors: dict[str, np.ndarray] = {}
         for shard in self._shards:
             if weight_map is not None:
@@ -256,22 +260,6 @@ class Checkpoint:
             if overlap:
                 raise ValueError(f"{self.path}: {overlap} is in more than one shard")
             self.tensors.update(shard.tensors)
-
-    @staticmethod
-    def _weight_map(path: Path) -> dict[str, str] | None:
-        """``path``'s own ``weight_map``, or ``None`` for a single file."""
-        if path.suffix != ".json":
-            return None
-        return json.loads(path.read_text())["weight_map"]
-
-    @staticmethod
-    def _shard_paths(path: Path, weight_map: dict[str, str] | None) -> list[Path]:
-        """``path`` itself, or, given its ``weight_map``, every shard it
-        names, resolved beside it.
-        """
-        if weight_map is None:
-            return [path]
-        return [path.parent / name for name in sorted(set(weight_map.values()))]
 
     def release(self, array: np.ndarray) -> None:
         """Drop the process's pages of ``array`` if it is a view of one of

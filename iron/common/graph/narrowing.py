@@ -1514,13 +1514,6 @@ class JointNarrowing:
             and (steps[v.key].points or {}).keys() == points
         ]
 
-    @staticmethod
-    def _within(combo: Sequence[Variant], budget: tuple[int, int]) -> bool:
-        return (
-            sum(v.mm2s for v in combo) <= budget[0]
-            and sum(v.s2mm for v in combo) <= budget[1]
-        )
-
     def _connected(
         self,
         runlist: Runlist,
@@ -1545,7 +1538,9 @@ class JointNarrowing:
                 w = frontier.pop()
                 banned.add(w)
                 grown = members + (w,)
-                if not self._within([narrowest[i] for i in grown], budget):
+                if sum(narrowest[i].mm2s for i in grown) > budget[0]:
+                    continue
+                if sum(narrowest[i].s2mm for i in grown) > budget[1]:
                     continue
                 reach = {
                     u
