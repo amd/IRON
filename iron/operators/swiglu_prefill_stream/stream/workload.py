@@ -1,13 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 KU Leuven (MICAS). All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build the ONNX workload stream-dse optimizes from an operator's layers.
-
-The layers are the ones the operator's reference evaluates, so the generated
-design cannot drift from the reference the operator is tested against. Every
-operator is emitted in the form stream-dse's parsers expect, through the registry
-in ``iron.operators.swiglu_prefill_stream.stream.ops``. Weights carry their shape
-and no values: stream-dse needs shapes, not values.
+"""Build the ONNX workload stream-dse optimizes from an operator's layers,
+the ones its reference evaluates, so the design cannot drift from it.
 """
 
 from __future__ import annotations
@@ -53,11 +48,7 @@ class StreamWorkload:
         return shapes
 
     def write(self, path) -> str:
-        """Write the ONNX model to ``path`` and return it.
-
-        stream-dse's parser loads the workload from a file, so the model is
-        materialized at build time (under the build directory, never in the tree).
-        """
+        """Write the ONNX model to ``path`` and return it."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         onnx.save(self.model, str(path))

@@ -1,34 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fused multi-head attention, in the declared form.
+"""Fused multi-head attention.
 
-The array is ``num_pipelines`` three-stage pipelines (QK matmul, partial
-softmax, PV matmul), one per column, fed by a Q stream split across the
-pipelines on a memtile and by K and V streams every pipeline consumes. The
-block sizes, the head dimension and the pipeline count configure it; the
-sequence length and the head counts do not. The cores run one call at a
-time, reading their trip counts from seven values the sequence writes.
-
-Where one core's memory holds no block of P*V at the head size (d=512),
-the PV stage splits over two cores by halves of the head, one on each row
-beside the softmax core, and V and O move a stream per half.
-
-The host ABI is Q and O as ``(num_heads, seq_pad, d)``, K and V as
-``(num_KV_heads, kv_len, d)`` with the sequence padded to a multiple of
-64, whatever the tunables; a pipeline count is legal where rounds of 64
-rows a pipeline fill it. The queries are the last rows of the keys: a
-prompt's chunk attends over the cache it extends. A query keeps the keys up
-to its own position (``causal``), those within ``window`` positions of it,
-or both; with neither, every key. The sequence is an
-override: one task group per KV group that fills Q for every shim, fills
-that group's K and V, and drains O.
-
-One query (``seq_len`` 1, a decode step) is not padded: its heads are
-packed. A block's rows are one KV group's query heads, repeated to fill
-it (a group whose size does not divide it as two overlapping runs that
-do), and each pipeline takes its own KV groups, so K and V have a lane per
-pipeline rather than one every pipeline reads.
+``num_pipelines`` three-stage pipelines (QK^T, partial softmax, P*V), one
+per column: Q split across them on a memtile, K and V forwarded to every
+one. Where a core holds no P*V block (d=512), P*V splits over two cores by
+halves of the head. The queries are the keys' last rows, padded to 64; one
+query (a decode step) is not padded but packs a KV group's heads into a
+block, and each pipeline takes its own K and V lanes.
 """
 
 import dataclasses
@@ -76,11 +56,7 @@ SOFTMAX_STACK_SIZE = 0x1000
 class MHAPlacement(StrEnum):
     """The tiles MHA's array pins; aiecc's placer takes the rest.
 
-    The hand-found memtiles of MHA.COLUMNS: K's and V's broadcasts on
-    k_mem and v_mem, or a lane per pipeline on its own column's, and Q's
-    splits and O's joins from qo_mem. Left to the placer (``COLUMNS``),
-    K's and V's share one memtile and Q's takes a pipeline's forward. A
-    pipeline's cores keep at least its column: placed freely, 8 pipelines
+    A pipeline's cores keep at least its column: placed freely, 8 pipelines
     pack into 6 columns that cannot be routed.
     """
 
@@ -115,19 +91,10 @@ class Columns:
 
 @dataclasses.dataclass(frozen=True)
 class SplitColumns:
-    """Where MHA's streams meet the array with P*V split over two cores by
-    halves of the head, each stream's shim beneath its memtile (on four
-    columns, all but K's).
+    """Where MHA's streams meet the array with P*V split over two cores.
 
-    Split, each column sends four streams to the memtiles (the scores, P
-    and both O halves) and takes six from them, every one its links carry,
-    so a pipeline's scores and P forward through its own column's memtile
-    and these columns are the only ones the router finds.
-
-    On four columns, Q's split then fills one memtile's six outputs and
-    each O join another's six inputs, so K and both V halves forward
-    through the fourth, whose shim's two channels carry V: K comes from
-    Q's shim.
+    Each column then carries every stream its links hold, so these columns
+    are the only ones the router finds.
 
     Attributes:
         q: Each Q shim's split.
@@ -144,8 +111,7 @@ class SplitColumns:
     v: tuple[int, ...]
 
 
-# B_q, which B_kv matches: whole in the 64-row unit seq_pad is padded by,
-# up to the largest whose cores fit L1 at this head size.
+# Whole in seq_pad's 64-row unit, up to the largest whose cores fit L1.
 BLOCK_SIZES = Divisors(
     of=lambda op, dev: op.kv_len,
     step=16,
@@ -192,8 +158,7 @@ _CASES = [
         ),
         lower=True,
     ),
-    # Groups whose heads do not divide a block: Granite 4.2-3B's decode, 5
-    # heads a group, and Llama 3.2 3B's, 3 at d=128.
+    # Groups that do not divide a block: Granite 4.2-3B's and Llama 3.2 3B's.
     *(
         Case(
             dict(
@@ -228,9 +193,7 @@ _CASES = [
         dict(num_heads=8, num_KV_heads=2, seq_len=1, kv_len=512, num_pipelines=2),
         extensive=True,
     ),
-    # EmbeddingGemma 2's sliding layer: bidirectional within 512 positions,
-    # d=256, over 2000 rows, the last block part padding, its products
-    # native bf16.
+    # EmbeddingGemma 2's sliding layer.
     Case(
         dict(
             num_heads=4,
@@ -243,8 +206,7 @@ _CASES = [
             emulate_bf16_mmul_with_bfp16=False,
         )
     ),
-    # Its global layer: bidirectional, d=512, P*V split over two cores, at
-    # each width's SPLIT_COLUMNS.
+    # Its global layer: P*V split over two cores.
     Case(
         dict(
             num_heads=4,
@@ -275,72 +237,50 @@ def _cases(cls, dev: Device):
 
 
 class MHA(Operator):
-    """AIE-accelerated Multi-Head Attention operator: fused attention over
-    ``(B_q, d)`` Q blocks, ``(d, B_kv)`` K blocks and ``(B_kv, d)`` V blocks.
+    """AIE-accelerated Multi-Head Attention: fused attention over ``(B_q, d)``
+    Q blocks, ``(d, B_kv)`` K blocks and ``(B_kv, d)`` V blocks.
 
-    More than six pipelines split the Q and O traffic over two shims (each
-    memtile split serves at most six pipelines), so the Q and O streams have
-    ``q_shims`` lanes, each carrying ``join_rows`` rows per block, ``B_q``
-    for each of its pipelines. Split, V and O have ``pv_cores`` times the
-    lanes, each ``pv_width`` columns of the head.
+    More than six pipelines split Q and O over two shims (a memtile split
+    serves at most six).
     """
 
     test = Testing(_cases)
 
     num_heads: int = Param()
-    # The K/V head count: fewer than num_heads is grouped-query attention;
-    # left out, plain MHA.
     num_KV_heads: int = Param(derive=lambda op: op.num_heads)
-    # seq_pad is seq_len rounded up to a multiple of 64; a shape gives
-    # seq_pad, from which seq_len follows when it is not given.
     seq_len: int = Param(derive=lambda op: op.seq_pad)
     seq_pad: int = Param(derive=lambda op: op.seq_padding(op.seq_len), repr=False)
-    # The rows of K and V: a cache longer than the queries, whose last
-    # rows the queries are; left out, as many as Q's.
+    # A cache longer than the queries, whose last rows the queries are.
     kv_len: int = Param(derive=lambda op: op.seq_pad)
-    # The layout a projection GEMM produces, ``(seq, heads, d)`` with the
-    # heads interleaved per token, read and written as it is: a head's block
-    # is then a strided slice, and no copy reorders the heads to the front.
-    # One flag for Q and O, one for K and V, which may come from a cache.
+    # ``(seq, heads, d)`` as a projection writes it, so no copy reorders the heads.
     heads_interleaved: bool = Param(default=False)
     kv_interleaved: bool = Param(default=False)
-    # The head dimension: the width of every tile and the kernel's DIM_K.
     d: int = Param(default=64)
     causal: bool = Param(default=True, array=True)
-    # Keys more than this many positions from a query are masked; None is
-    # no window.
+    # Keys more than this many positions from a query are masked.
     window: int | None = Param(default=None, array=True)
     scale: float = Param(derive=lambda op: float(1 / np.sqrt(op.d)), array=True)
-    # Left out, the largest block whose cores fit L1 at this d.
     B_q: int = Auto(array=True, domain=BLOCK_SIZES)
     # mha.cc's causal skip compares a KV block's index with a Q block's.
     B_kv: int = Auto(repr=False, derived=True)
     num_pipelines: int = Auto(default=1, array=True, domain=Width())
-    # Left out, MEMTILES, or TILES where P*V is split.
     placement: MHAPlacement = Auto(array=True)
-    # bf16 macs: bfp16 shares one exponent over 8 keys of P*V, and the softmax
-    # core, not the products, bounds MHA's time.
+    # bfp16 shares an exponent over 8 keys of P*V, and the softmax bounds the time.
     emulate_bf16_mmul_with_bfp16: bool = Param(default=False, array=True, repr=False)
-    # Filled by resolve: how the pipelines are split across shims, and K
-    # and V's lanes, one every pipeline reads or, one query packed, one each.
+    # Filled by resolve.
     q_shims: int = Auto(repr=False, derived=True)
     join_rows: int = Auto(repr=False, derived=True)
     kv_lanes: int = Auto(array=True, repr=False, derived=True)
-    # The width of the layout placed, a key of COLUMNS.
     width: int = Auto(array=True, repr=False, derived=True)
-    # The P*V cores per pipeline, one or, where one's L1 holds no block, two
-    # by halves of the head, and the width of the head each holds.
+    # Two P*V cores, by halves of the head, where one's L1 holds no block.
     pv_cores: int = Auto(array=True, repr=False, domain=(1, 2))
     pv_width: int = Auto(array=True, repr=False, derived=True)
 
-    # By array width, the coordinates the "memtiles" and "tiles" placements
-    # keep. One query packed puts pipeline p's K and V lanes on shim and
-    # memtile p, so its pipelines stop short of q.
+    # One query packed puts pipeline p's K and V on column p: pipelines stop short of q.
     COLUMNS: ClassVar[dict[int, Columns]] = {
         8: Columns(q=4, k=5, v=6, o=7, qo_mem=6, k_mem=3, v_mem=4),
         4: Columns(q=2, k=0, v=1, o=3, qo_mem=2, k_mem=0, v_mem=1),
     }
-    # By array width, the coordinates P*V split over two cores is placed at.
     SPLIT_COLUMNS: ClassVar[dict[int, SplitColumns]] = {
         8: SplitColumns(q=(1, 6), o=((0, 2), (5, 7)), k=3, k_shim=3, v=(3, 4)),
         4: SplitColumns(q=(0,), o=((1, 2),), k=3, k_shim=0, v=(3, 3)),
@@ -366,20 +306,11 @@ class MHA(Operator):
         obj_type=(join_rows, pv_width),
         per=(q_shims, pv_cores),
     )
-    # The query rows, or fewer per call (``Q[:n]`` in a graph): Q and O
-    # stream every row; the cores compute the blocks the bound covers and
-    # pass the rest through.
+    # A bound on the queries limits the compute; Q and O stream every row.
     valid = Extent(seq_pad)
-    # The keys, or fewer per call (``K[:, :n]``): K and V stream only the
-    # blocks the bound covers, so the work follows the context.
+    # A bound on the keys limits K's and V's blocks: the work follows the context.
     kv_valid = Extent(kv_len)
-    # The cores' trip counts, in the order of their runtime-parameter words:
-    # the heads, the Q blocks per pipeline of each streamed and computed,
-    # the KV blocks per Q block, the unpadded lengths for masking (positions,
-    # so the queries' end is the keys'), and the block index of the first
-    # query. One query packed, a pipeline's heads are its KV groups, its one
-    # block past every key block (no causal skip, no diagonal) and every row
-    # of it valid.
+    # One query packed sits past every key block: no causal skip, no diagonal.
     heads = Value(
         derive=lambda op: (
             op.num_KV_heads // op.num_pipelines if op.packed else op.num_heads
@@ -404,9 +335,7 @@ class MHA(Operator):
 
     @property
     def packed(self) -> bool:
-        """One query, its heads packed as a block's rows: a KV group's heads,
-        repeated to fill the block, a block per group.
-        """
+        """One query, a KV group's heads packed as a block's rows."""
         return self.seq_len == 1
 
     @property
@@ -417,9 +346,7 @@ class MHA(Operator):
 
     @property
     def kv_tokens(self) -> int:
-        """The keys attended over: the call's bound, else ``kv_len`` less the
-        padding Q has past its valid rows.
-        """
+        """The keys attended over: the call's bound, else kv_len less Q's padding."""
         kv_valid, q_tokens = self.kv_valid, self.q_tokens  # extents first
         if "kv_valid" in self.bound_extents:
             return kv_valid
@@ -427,11 +354,7 @@ class MHA(Operator):
 
     @property
     def first_query_block(self) -> int:
-        """The position of Q's first row, in blocks: the queries are the
-        keys' last rows, and a block's position is what mha.cc masks by.
-        One query packed is past every key block: it attends over them all.
-        With no band, nothing reads a position, and the queries start at 0.
-        """
+        """The position of Q's first row, in blocks, which mha.cc masks by."""
         if self.packed:
             return ceildiv(self.kv_tokens, self.B_kv)
         if not (self.causal or self.window):
@@ -446,8 +369,6 @@ class MHA(Operator):
 
     def extent_unit(self, buffer: str) -> int:
         return 0  # no tiles-per-lane word: the sequence patches K and V itself
-
-    # -- checks ----------------------------------------------------------------
 
     def validate(self) -> None:
         if self.d <= 0 or self.d % 64:
@@ -486,8 +407,6 @@ class MHA(Operator):
             raise ValueError(
                 f"B_q ({self.B_q}) must divide 64, the block seq_pad is whole of"
             )
-        # Each product's micro-tile must divide its operands: QK^T, (B_q, d)
-        # by (d, B_kv); P*V, (B_q, B_kv) by (B_kv, pv_width).
         if self.pv_cores not in (1, 2) or self.pv_width * self.pv_cores != self.d:
             raise ValueError(
                 f"P*V takes one core or two, each a pv_width ({self.pv_width}) "
@@ -563,8 +482,6 @@ class MHA(Operator):
                     f"one query packs a KV group's {group} heads into a block's "
                     f"B_q ({self.B_q}) rows, which must hold them"
                 )
-            # K and V take a lane per pipeline, forwarded through its column's
-            # memtile, and Q its own.
             q = self.COLUMNS[self.width].q
             if self.num_pipelines > q or self.num_KV_heads % self.num_pipelines:
                 raise ValueError(
@@ -606,7 +523,6 @@ class MHA(Operator):
                     f"MHA at d={self.d}: no block of 16 rows or more fits a "
                     f"core's {mem} bytes"
                 )
-            # A block given is taken as given.
             pv_cores, B_q = fit or (pv_cores or 1, B_q)
         if self.B_kv not in (None, B_q):
             raise ValueError(
@@ -637,22 +553,14 @@ class MHA(Operator):
             pv_width=self.d // pv_cores,
         )
 
-    # -- derived geometry ------------------------------------------------------
-
     def seq_padding(self, seq_len: int) -> int:
-        """``seq_len`` rounded up to a multiple of 64, whole blocks at every
-        block size ``resolve`` picks; one query, packed, is not padded.
-        """
+        """``seq_len`` rounded up to 64; one query, packed, is not padded."""
         if seq_len == 1:
             return 1
         return ceildiv(seq_len, 64) * 64
 
     def core_bytes(self, block: int, pv_cores: int) -> int:
         """The L1 bytes the fuller of a pipeline's QK^T and P*V cores holds.
-
-        The P*V core holds P and V two deep, one bf16 O block, the float32
-        O and two row-state buffers, of its share of the head; the QK^T core
-        Q (one deep where P*V is split), K two deep and the scores.
 
         Args:
             block: ``B_q``, which ``B_kv`` is.
@@ -666,16 +574,12 @@ class MHA(Operator):
         qk = (4 if pv_cores == 1 else 3) * 2 * d * b + 4 * b * b
         return max(pv, qk) + STACK_SIZE
 
-    # -- the array -------------------------------------------------------------
-
     def array(self) -> list:
         of_depth = 2
         dtype = bfloat16
         B_q, B_kv, d = self.B_q, self.B_kv, self.d
         num_pipelines = self.num_pipelines
         n_join = num_pipelines // self.q_shims  # the pipelines on one shim
-        # TILES pins every tile; the others keep a core's column alone, and
-        # COLUMNS leaves the memtiles and the shims to the placer.
         every = self.placement is MHAPlacement.TILES
         memtiles = self.placement is not MHAPlacement.COLUMNS
         pv_cores, pv_width = self.pv_cores, self.pv_width
@@ -685,10 +589,8 @@ class MHA(Operator):
         # AIE2P's exp2 instruction is up to 6% high; AIE2 has none to replace.
         accurate_exp2 = self.dev.arch is AIEArch.AIE2p
 
-        # Tensors living on the AIE-array
         q_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
         k_ty = np.ndarray[(d, B_kv), np.dtype[dtype]]
-        # A P*V core's share of the head: V's columns, O's and its float32 O's.
         v_ty = np.ndarray[(B_kv, pv_width), np.dtype[dtype]]
         o_ty = np.ndarray[(B_q, pv_width), np.dtype[dtype]]
         qk_ty = np.ndarray[(B_q, B_kv), np.dtype[dtype]]
@@ -696,13 +598,7 @@ class MHA(Operator):
         acc_ty = np.ndarray[(B_q, pv_width), np.dtype[np.float32]]
         joined_ty = self.Q.obj_type  # (n_join * B_q, d)
 
-        # Every one of these comes out of mha.cc, which #includes mm.cc and
-        # softmax.cc: matmul_QK is its QK^T product, and the rest of its
-        # symbols are bound from that object rather than declared
-        # separately, which would recompile the translation unit and
-        # redefine every symbol in it. Built at QK^T's (DIM_M, DIM_K, DIM_N),
-        # (B_q, d, B_kv), its matmul_PV takes P as (DIM_M, DIM_N) and V as
-        # (DIM_N, DIM_K), so P*V binds from the same object.
+        # The rest bind from mha.cc's object: declared apart, each would redefine it.
         matmul_QK = kernels.linalg.mha(
             B_q,
             d,
@@ -715,7 +611,6 @@ class MHA(Operator):
         )
         mha_object = matmul_QK.object_file
 
-        # Upstream's standalone zero over the (DIM_M, DIM_N) tile is the fill.
         zero_scores = kernels.zero(tile_size=(B_q, B_kv), dtype=dtype)
         # The 32-bit passThroughLine, bound to the float32 scale buffers.
         memcopy_kernel_scale = kernels.eltwise.passthrough(
@@ -770,12 +665,7 @@ class MHA(Operator):
             [acc_ty, o_ty, s_ty, np.int32, np.ndarray[(2,), np.dtype[np.int32]]],
         )
 
-        # AIE-array data movement with object fifos. Q arrives joined for
-        # n_join pipelines and is split between them on a memtile; K and V
-        # are forwarded through a memtile to every pipeline.
-        # Each stream is blocked as the product that reads or writes it takes
-        # it: Q, K (as stored) and the scores as QK^T's, P, V and O as P*V's
-        # (matmul_PV, on the micro-tile mha.cc's P*V product expands).
+        # Each stream is blocked as the product that reads or writes it takes it.
         qk = matmul_QK.stream_dims
         pv = mm_stream_dims(B_q, B_kv, pv_width, kernels.linalg.mha.mac_dims(pv=True))
         q_dims = qk.A
@@ -785,11 +675,7 @@ class MHA(Operator):
         v_dims = pv.B
         o_dims = pv.C
 
-        # The Q splits and O joins, one per shim, on the memtiles from qo_mem.
-        # Split, each column sends four streams to the memtiles (the scores,
-        # P and both O halves) and takes six from them, every one its links
-        # carry, so the layout is SPLIT_COLUMNS', and Q is one block deep: the
-        # QK core's L1 holds a d=512 one.
+        # Split, Q is one block deep: the QK core's L1 holds one d=512 block.
         split = pv_cores > 1
         q_depth = 1 if split else of_depth
         columns = self.COLUMNS[self.width]
@@ -829,10 +715,6 @@ class MHA(Operator):
                     ),
                 )
 
-        # K (stored column-major) and V are forwarded through a memtile: one
-        # stream each that every pipeline reads, through memtiles k_mem and
-        # v_mem, or a lane per pipeline through its own column's. Split, V is
-        # a stream per half of the head.
         kv_lanes = self.kv_lanes
         inK, inV, memK, memV = [], [], [], []
         for lane in range(kv_lanes):
@@ -880,7 +762,6 @@ class MHA(Operator):
                     )
                 )
 
-        # Per-pipeline fifos between the three stages.
         memA, outA, memP, outP, scaleOF = [], [], [], [], []
         for i in range(num_pipelines):
             memA.append(ObjectFifo(qk_ty, depth=of_depth))
@@ -908,12 +789,7 @@ class MHA(Operator):
             # A copy of the row state for each P*V core, which rescales its own.
             scaleOF.append([ObjectFifo(s_ty, depth=of_depth) for h in range(pv_cores)])
 
-        # Each core computes, per head, the Q blocks the call's rows cover,
-        # over the KV blocks its keys cover, and passes the Q blocks past
-        # them through: the same acquires and releases, no kernel call, since
-        # Q and O stream every block. Each core reads its counts once a
-        # call (Rtp.read); the sequence cannot open its barrier again before
-        # this call's O drains.
+        # Q blocks past the bound pass through: Q and O stream every block.
         blocks = [
             self.heads,
             self.q_blocks_per_pipeline,
@@ -971,8 +847,7 @@ class MHA(Operator):
             idx_buffer,
             scale_buffer,
         ):
-            # The index buffer counts how many Q and KV blocks this worker has
-            # processed; from it the kernel infers its position in A and P.
+            # The index buffer is the kernel's position in A and P.
             def q_block(compute: bool, kv_blocks, s_q, s_kv):
                 if compute:
                     init_scale_buffer(scale_buffer, B_q)
@@ -1035,8 +910,7 @@ class MHA(Operator):
                 idx_buffer[1] = q_start + q_block_bias
 
                 for _ in range_(q_valid):
-                    # matmul_PV starts the accumulator on the KV block it is
-                    # told is block 0.
+                    # matmul_PV starts the accumulator on KV block 0.
                     for kv in range_(loop_idx_kv - 1):
                         elem_in_p = of_p.acquire(1)
                         elem_in_v = of_v.acquire(1)
@@ -1173,10 +1047,6 @@ class MHA(Operator):
                     )
                 )
 
-        # The shim ends, on the width's columns. Split over two memtiles, Q's
-        # lanes share column 0's two channels, as O's do; K and V's lanes,
-        # one per pipeline, take their column's two. Split, every stream
-        # but K moves through the shim under its memtile.
         two_shims = self.q_shims > 1
         qs, outs, ks, vs = [], [], [], []
         for s in range(self.q_shims):
@@ -1208,10 +1078,7 @@ class MHA(Operator):
         return matmul_workers + softmax_workers + matmul_pv_workers
 
     def ops(self) -> int:
-        """Q K^T and its product with V per head, over the keys each query
-        keeps: the queries are the last ``seq_len`` of ``kv_len - seq_pad +
-        seq_len`` keys.
-        """
+        """Q K^T and its product with V per head, over the keys each query keeps."""
         keys = self.kv_len - self.seq_pad + self.seq_len
         position = keys - self.seq_len + np.arange(self.seq_len)
         ahead = 0 if self.causal else (self.window or keys)
@@ -1220,19 +1087,9 @@ class MHA(Operator):
         return 4 * self.num_heads * self.d * int((hi - lo + 1).sum())
 
     def reference(self, Q, K, V, s_q=None, s_kv=None):
-        """CPU reference: attention per head, K and V repeated over each query
-        group, the queries the keys' last rows: query row ``r`` is at position
-        ``len(K) - len(Q) + r`` and keeps the keys up to it if ``causal`` and
-        within ``window`` of it if given. ``s_q`` and ``s_kv`` are positions,
-        the per-call lengths when a graph binds them: query rows from ``s_q``
-        on (by default Q's padding past ``seq_len``) come out as zeros, and
-        keys from ``s_kv`` on (by default the keys past the last query) are
-        masked. With no band, nothing reads a position and the queries start
-        at 0, so ``s_q`` is a row count. In an interleaved layout the operands
-        are ``(seq, heads, d)``.
+        """Attention per head, the queries the keys' last rows; query rows from
+        ``s_q`` on are zeros and keys from ``s_kv`` on are masked.
         """
-        # Not the linalg.mha contracts: each is one tile of an online softmax,
-        # and the operator is whole attention.
         if self.heads_interleaved:
             Q = np.swapaxes(Q, 0, 1)
         if self.kv_interleaved:
@@ -1242,13 +1099,7 @@ class MHA(Operator):
         start = offset if self.causal or self.window else 0
         s_q = start + self.seq_len if s_q is None else int(s_q)
         s_kv = offset + self.seq_len if s_kv is None else int(s_kv)
-        # Keys from s_kv on are masked, so a cache is widened only as far as
-        # it is read.
         K, V = K[:, :s_kv], V[:, :s_kv]
-        # Scaled-dot-product attention, in float32 and rounded once.
-        # Against torch's FLASH backend this differs by under 1e-6, which is
-        # less than torch's own FLASH and MATH backends differ from each other.
-        # The rows from s_q on are zeros; a window may keep none of their keys.
         rows = max(s_q - start, 0)
         q = Q[:, :rows].astype(np.float32)
         k, v = (t.astype(np.float32) for t in (K, V))
@@ -1262,9 +1113,7 @@ class MHA(Operator):
         mask = np.where(masked, -np.inf, 0).astype(np.float32)
         scale = np.float32(self.scale)
         out = np.zeros(Q.shape, dtype=Q.dtype)
-        # A head at a time: at 16K rows one head's scores are 1 GiB of
-        # float32, and all of them at once more than a test host has.
-        # Each K and V head serves ``groups`` consecutive query heads.
+        # A head at a time: at 16K rows one head's scores are 1 GiB of float32.
         for h in range(q.shape[0]):
             scores = q[h] @ k[h // groups].T * scale + mask
             e = np.exp(scores - scores.max(axis=-1, keepdims=True))
@@ -1274,69 +1123,39 @@ class MHA(Operator):
         return out
 
     def tolerance(self) -> Tolerance:
-        # Several kernels and no one contract to judge by: 4% or 0.15, with
-        # 0.5% of the outputs allowed past it.
         return Tolerance(rtol=0.04, atol=0.15, max_mismatch_frac=0.005)
 
-    # -- the runtime sequence --------------------------------------------------
-
     def sequence(self, rt):
-        """One descriptor set per KV group.
-
-        The array consumes, per head and per Q block, the block's Q rows on
-        each shim and then all of that head's K and V; O comes back per
-        block. Issued as such, that is six descriptors per block, 768 a
-        call for 32 heads over 2048 rows on 8 pipelines, and the fused
-        sequence's size follows. Instead
-        each shim's Q (and O) is one pattern over the group's heads and
-        every block, and K and V are one pattern each, the head's rows
-        re-read once per (head, block) from the descriptor's iteration
-        slot: the same bytes in the same order, six descriptors a group.
-        Past the slot's count of re-reads (EmbeddingGemma 2's global layer
-        on four pipelines reads its KV head 128 times), K and V are a
-        pattern per count.
-
-        One query packed is a task group per step, each pipeline's block
-        that step one of its KV groups: the group's heads repeated from the
-        iteration slot at stride 0 into Q, and drained from O the same way,
-        the same rows written over themselves. Every row of a block is one
-        of the group's heads, so every row drained is that head's output.
+        """One descriptor set per KV group: K and V re-read per (head, block)
+        from the iteration slot, not six descriptors per block.
         """
         kv_heads = self.num_KV_heads
         group = self.num_heads // kv_heads
         rows = self.join_rows  # Q rows each shim carries per block
         blocks = ceildiv(self.seq_pad, rows * self.q_shims)  # per pipeline
         B_kv = self.B_kv
-        # K and V stream the blocks the keys cover, a call's by its bound.
         kv_blocks = ceildiv(self.kv_tokens, B_kv)
         kv_valid = self.kv_blocks if self.kv_blocks.per_call else None
 
         def by_head(buffer, interleaved):
-            # A (heads, seq, d) or, interleaved per token, (seq, heads, d)
-            # buffer, walked as (head, row, d).
             tap = TensorAccessPattern.full(buffer.shape)
             return tap.permute((1, 0, 2)) if interleaved else tap
 
         def q_rows(buffer, head0, shim):
-            # The group's heads, each block's `rows` rows for this shim.
             heads = by_head(buffer, self.heads_interleaved)[head0 : head0 + group]
             by_shim = heads.split(1, self.q_shims * rows)
             return by_shim[:, :, shim * rows : (shim + 1) * rows]
 
         def kv_rows(buffer, kv_head, reads):
-            # The head's blocks, read `reads` times; a call patches their count.
             head = by_head(buffer, self.kv_interleaved)[kv_head, : kv_blocks * B_kv]
             return head.split(0, B_kv).repeat(reads)
 
         if self.packed:
             steps = kv_heads // self.num_pipelines
-            # A block is the group's heads repeated or, where their count
-            # does not divide it, its first and its last `width` heads, the
-            # largest power of two in it: two overlapping runs that cover it.
+            # A group that does not divide a block is two overlapping runs.
             width = 1 << (group.bit_length() - 1)
 
             def packed_rows(buffer, kv_head):
-                # Contiguous in (1, heads, d) as in (heads, 1, d).
                 heads = by_head(buffer, self.heads_interleaved)
                 if width == group:
                     heads = heads[kv_head * group : (kv_head + 1) * group, 0]
@@ -1371,7 +1190,6 @@ class MHA(Operator):
                 tg.finish()
             return
 
-        # V and O move a stream per P*V core, its share of the head's columns.
         cores, pv_width = self.pv_cores, self.pv_width
         iterations = BdLimits.of(self.dev, AIETileType.ShimNOCTile).iterations
         for kv_head in range(kv_heads):
@@ -1379,8 +1197,7 @@ class MHA(Operator):
             tg = TaskGroup()
             for shim in range(self.q_shims):
                 self.Q.fill(q_rows(self.Q, head0, shim), lane=shim, group=tg)
-            # A bounded pattern is one descriptor, its re-reads at most the
-            # iteration slot's count.
+            # A bounded pattern is one descriptor: re-reads at most the slot's count.
             reads = group * blocks
             for first in range(0, reads, iterations):
                 count = min(iterations, reads - first)

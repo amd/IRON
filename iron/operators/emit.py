@@ -3,24 +3,15 @@
 
 """Emit: the words the next call's scratchpad and carried state start from.
 
-A graph whose carried values are computed on the device ends each call here.
-The next call reads its per-call parameters from a scratchpad; this step
-writes that scratchpad's image (through the run's feedback argument), and the
-carried values the call after it starts from.
-
 Every output word is one row of a program the host writes once:
 
 ```text
 out[r] = (((planes[plane, index] * scale + bias) >> down) * mul + add) << shift
 ```
 
-``planes`` is ``(2, carried)``: plane 0 the values this call started from,
-plane 1 the ones it computed. ``shift`` is 2 for a core-read parameter (the
-scratchpad holds those shifted, see ``ParameterScratchpad.writeBits``) and 0
-for an address or a carried value; ``>> down`` floors, so a row computes a
-trip count rounded up from a bound as well
-(an ``Affine`` of the graph value). An all-zero row emits 0. The
-first ``slots`` rows are the image, the rest the next state.
+``planes`` is ``(2, carried)``: the values this call started from, then
+those it computed. ``shift`` is 2 for a core-read parameter (the scratchpad
+holds those shifted) and 0 otherwise; ``>> down`` floors.
 """
 
 import numpy as np
@@ -67,17 +58,13 @@ def _program(op: "Emit") -> dict:
 
 
 class Emit(Operator):
-    """Evaluate an emit program: the next call's scratchpad image and state.
-
-    One core, one pass over the program's rows.
-    """
+    """Evaluate an emit program: the next call's scratchpad image and state."""
 
     # Integer arithmetic; anything but exact is wrong.
     test = Testing(
         [
             Case(dict(slots=32, carried=1), id="one_carried"),
-            # Benched, though every case finishes near the dispatch cost: an
-            # operator no input takes past it is tracked on one of them.
+            # Benched though near the dispatch cost: no input takes it past.
             Case(dict(slots=32, carried=8), id="eight_carried", bench=True),
         ],
         draw=_program,
@@ -117,10 +104,7 @@ class Emit(Operator):
             state = of_s.acquire(1)
 
             def floor_shift(v, k):
-                # v >> k, floored. Not arith.shrsi: mlir-aie lowers a scalar
-                # one to a vector ups + srs, which rounds by the core's
-                # rounding mode. A logical shift of v, or of ~v where v is
-                # negative (~(~v >> k) is the floor then), rounds nothing.
+                # Not arith.shrsi, which lowers to a rounding ups + srs.
                 i32 = v.type
                 sign = arith.subi(
                     arith.constant(0, i32), arith.shrui(v, arith.constant(31, i32))

@@ -12,8 +12,7 @@ from iron.common.testing import Case, Testing
 class SiLU(UnaryElementwise):
     """AIE-accelerated SiLU activation function."""
 
-    # SwiGLU's product finished in silu's cores, its other factor streamed
-    # beside silu's input.
+    # SwiGLU's product finished in silu's cores.
     test = Testing(
         [
             Sweep(channels=None),
@@ -46,6 +45,5 @@ class SiLU(UnaryElementwise):
     num_channels: int = Auto(default=1, repr=False, init=False)
 
     def kernel(self):
-        # vtanh's error, doubled through the sigmoid identity, is most of
-        # Llama 3.2 3B's divergence; the table costs nothing measurable.
+        # vtanh's error was most of Llama 3.2 3B's divergence; the table costs nothing.
         return activation.silu_sized(self.tile_size, use_lut=True)

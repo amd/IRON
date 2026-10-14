@@ -51,8 +51,6 @@ def _cases(cls, dev: Device):
             extensive=True,
         ),
     ]
-    # Benched: 4 Mi elements, well past the dispatch cost. Each column takes a
-    # 64-wide slice of N and each channel a 64-row-aligned slice of M.
     out.append(
         Case(
             dict(
@@ -73,23 +71,16 @@ def _cases(cls, dev: Device):
 class Transpose(Operator):
     """AIE-accelerated shuffle transpose: one core per (column, channel).
 
-    The memtile partially transposes each m x n tile on the way in so a core
-    only transposes s x s sub-tiles. The three trip counts (batches, tiles
-    per column, tiles per channel) are values the sequence writes.
-
-    ``num_batches`` > 1 performs that many independent (M,N)->(N,M) transposes on
-    contiguous matrices laid back-to-back in memory (results concatenated),
-    mirroring GEMV's batching: the per-batch tile work rides the same
-    ObjectFifos, so B batched transposes cost ONE dispatch instead of B.
+    The memtile partially transposes each m x n tile on the way in, so a core
+    only transposes s x s sub-tiles; ``num_batches`` transposes ride one
+    dispatch.
     """
 
     test = Testing(_cases)
 
     M: int = Param()
     N: int = Param()
-    # None: a single batch, carrying no batch dimension at all.
     num_batches: int | None = Param(default=None)
-    # Defaults: 64 x 64 tiles of 8 x 8 sub-tiles, every column, one channel.
     m: int = Auto(
         default=64,
         domain=Divisors(
@@ -137,9 +128,6 @@ class Transpose(Operator):
             )
 
     def resolve(self, dev):
-        """Columns default to the most the device's shim budget allows that
-        split N into whole n-wide tiles.
-        """
         cols = self.resolve_columns(
             dev,
             self.num_aie_columns,
@@ -156,11 +144,7 @@ class Transpose(Operator):
             raise ValueError(
                 f"Matrix columns ({self.N}) must be a multiple of {self.n}"
             )
-        # The design tiles each dimension separately, as
-        # [M // num_channels // m, N // num_columns // n, m, n]. A quotient
-        # that is not a whole number of tiles silently drops the remainder,
-        # and one that floors to zero reaches the transfer as a zero-length
-        # size, so each split is checked on its own, then the product.
+        # Each split on its own: a partial tile would be silently dropped.
         if (self.N // cols) % self.n:
             raise ValueError(
                 f"num_aie_columns ({cols}) does not split N={self.N} "
@@ -236,9 +220,7 @@ class Transpose(Operator):
         return workers
 
     def sequence(self, rt):
-        """One task group per batch (a parallel fill+drain over all cores), so the
-        contiguous matrices stream through the same fifos in sequence.
-        """
+        """One task group per batch through the same fifos."""
         M, N, nb = self.M, self.N, self.num_batches or 1
         m, n, cols, chans = self.m, self.n, self.num_aie_columns, self.num_channels
         # Each core's block of a batch: chans row-bands, cols column-bands.
@@ -253,8 +235,6 @@ class Transpose(Operator):
             for i in range(cols):
                 for j in range(chans):
                     k = i * chans + j
-                    # Partially transposes the input on the way in so the
-                    # kernel only transposes s x s sub-tiles.
                     tap_in = x[batch, j, :, :, i].permute((0, 2, 1, 3))
                     self.x.fill(tap_in, lane=k, group=tg)
             for i in range(cols):
@@ -269,11 +249,8 @@ class Transpose(Operator):
 
     def reference(self, x):
         """Each (M, N) matrix transposed."""
-        # Not datamovement.transpose's contract: the kernel transposes each
-        # subtile in place, and the DMA places the subtiles.
+        # Not the kernel's contract: the DMA places the subtiles.
         return np.swapaxes(x, -2, -1)
 
     def tolerance(self) -> Tolerance:
-        # A transpose is a permutation. Any tolerance here also accepts some class
-        # of wrong permutation, so gate it exactly.
         return Tolerance.exact()

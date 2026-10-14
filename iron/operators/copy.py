@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A copy between two views: ``Copy(k, keys[i][:, pos])``.
-
-Each side is an access pattern over its buffer (offset, sizes, strides), the
-form a DMA takes, or patterns walked in turn (a gather, ``table[ids]``); the
-shim channels split the innermost run every pattern shares, and the compiler
-splits a share no one descriptor holds. A per-call value indexing a view
-reaches the copy as ``in_offset``/``out_offset``, an element offset.
-"""
+"""A copy between two views: ``Copy(k, keys[i][:, pos])``."""
 
 import dataclasses
 import functools
@@ -62,31 +55,12 @@ def _control_header(beats: int, address: int) -> int:
 class Gather(Operator):
     """``Copy(table[ids])`` with ``ids`` per call: the rows a call names.
 
-    For ids a graph input the host turns each call's ids into control
-    packets (``control_words``); for ids the device made, a
-    ``GatherWords`` step writes them into the template (``word_source``).
-    The rows go out over ``feeds`` pairs of shims. For feed ``k``, shim
-    (2k + 1, 0) streams the packets to shim (2k, 0)'s TileControl: each
-    writes a buffer descriptor of (2k, 0), its address the table's on the
-    device plus the row's offset, and each batch of ``chain`` descriptors
-    is pushed onto (2k, 0)'s MM2S 1 queue. That channel streams the rows to
-    (2k + 1, 0)'s S2MM 0, which drains them into ``y``. Each feed streams a
-    run of whole pairs of batches, and batch ``j`` runs on set ``j % 2`` of
-    its feed's descriptors, so the control words are one layout for every
-    feed count and a feed drains one span of ``y``. A set is rewritten only
-    after the sequence syncs on the token of the batch that last ran it.
-    The descriptors' addresses are the table's device address, which the
-    host reads from its buffer each call, in a full ELF or an xclbin.
-
-    Each control packet is one iteration of its transfer, so a transfer's
-    packets are alike: the preamble's write four words, the rest two. A
-    row's two packets write its descriptor's length and address, so a
-    gather bounded per call (``table[ids[:n]]``, ``valid_rows``) moves the
-    first ``n`` rows and, for each row past them, ``pad_bytes`` from the
-    table's first row: a feed's drain is a whole number of 16-byte units
-    long, and a descriptor moves one at least. Each feed drains what its
-    rows moved (``drained0`` ...), the valid ones first: a full ELF patches
-    the drain's length, an xclbin generates it per call.
+    Over each of ``feeds`` pairs of shims, shim (2k + 1, 0) streams control
+    packets to shim (2k, 0)'s TileControl, each writing a buffer descriptor
+    whose address is a row's; batches of ``chain`` alternate between two
+    descriptor sets, and (2k, 0)'s MM2S 1 streams the rows back to
+    (2k + 1, 0)'s S2MM 0. Under a bound each row past it moves
+    ``pad_bytes``: a descriptor moves one 16-byte unit at least.
     """
 
     chain: ClassVar[int] = 8
@@ -115,16 +89,11 @@ class Gather(Operator):
         repr=False,
     )
     feeds: int = Auto(array=True)
-    # True when the table a device-made ids' word source reads is the same
-    # buffer at every call (known at this op's own construction, not picked
-    # at runtime): its address then reaches GatherWords as an ordinary
-    # resident operand instead of through base_lo/base_hi, costing this
-    # design no full-ELF scratchpad parameter at all (see GatherWords).
+    # The table is one buffer at every call: its address is a resident operand.
     static_base: bool = Param(default=False, array=True)
 
     table = In(table_rows, row, dtype=dtype)
     control = In(words, dtype=np.uint32)
-    # Each feed's span drains through its drain shim's S2MM 0, pinned.
     y = Out(rows, row, dtype=dtype, obj_type=(row,), per=(feeds,))
     valid_rows = Extent(rows)
     # Per feed, the 16-byte units it drains under a bound.
@@ -140,18 +109,14 @@ class Gather(Operator):
 
     @property
     def runs(self) -> list[range]:
-        """Per feed, the batches it streams: a run of whole pairs, the last
-        feed's ending where the rows do.
-        """
+        """Per feed, the batches it streams: a run of whole pairs."""
         n = len(self.batches)
         pairs = -(-n // 2)
         bounds = [2 * (k * pairs // self.feeds) for k in range(self.feeds + 1)]
         return [range(a, min(b, n)) for a, b in zip(bounds, bounds[1:])]
 
     def drained(self, feed: int) -> int:
-        """The 16-byte units feed ``feed`` drains with ``valid_rows`` rows
-        valid: its valid rows whole, ``pad_bytes`` for each other row.
-        """
+        """The 16-byte units feed ``feed`` drains with ``valid_rows`` rows valid."""
         valid = self.valid_rows
         if feed >= self.feeds:
             return 0
@@ -172,9 +137,6 @@ class Gather(Operator):
             )
 
     def resolve(self, dev):
-        """As many feeds as the device's shim columns pair into, up to
-        ``max_feeds`` and to one per two batches.
-        """
         pairs = -(-len(self.batches) // 2)
         feeds = self.feeds
         if feeds is None:
@@ -306,9 +268,7 @@ class Gather(Operator):
             task.await_()
 
     def word_source(self) -> "GatherWords":
-        """The step writing this gather's row addresses into its template on
-        a core, for ids the device made.
-        """
+        """The step writing row addresses into the template, for ids the device made."""
         return GatherWords(
             rows=self.rows,
             table_rows=self.table_rows,
@@ -320,8 +280,7 @@ class Gather(Operator):
     @functools.cached_property
     def template(self) -> tuple[np.ndarray, np.ndarray]:
         """The control words with every row's address zero, and where each
-        row's address-low word is: its length word is the one before, its
-        address-high word two after.
+        row's address-low word is (its length one before, its high word two after).
         """
         chain, words, slots = self.chain, [], []
         for b in range(2 * chain):
@@ -404,23 +363,11 @@ class Gather(Operator):
 class GatherWords(Operator):
     """A ``Gather``'s control words for ids the device made, in a graph.
 
-    A core turns each id into its row's address words, which drain into
-    their slots of ``control``, a buffer holding the gather's template;
-    the gather that follows streams it. The table's address reaches the
-    core as ``base_lo`` and ``base_hi``, split at ``low_bits`` since a core
-    reads 30 bits of a value. An id past the table is clipped to its first
-    or last row, ``table[np.clip(ids, -n, n - 1)]``, so every id reads a
-    row of it.
-
-    Unless ``static_base``, ``base_lo``/``base_hi`` are per-call values the
-    graph fills in (a full ELF's scratchpad, an xclbin's runtime
-    parameters) -- the table a call reads may differ call to call. A
-    caller whose table is the same buffer at every call (known at this
-    op's own construction) sets ``static_base``: the address then arrives
-    as ``base``, an ordinary resident operand like any other weight, not a
-    per-call value -- a full ELF's fixed 32-word scratchpad has no room
-    for one entry per distinct table a design holds, where an ordinary
-    operand has no such ceiling.
+    A core turns each id, clipped to the table, into its row's address
+    words in their slots of ``control``. The table's address is split at
+    ``low_bits`` (a core reads 30 bits of a value); with ``static_base`` it
+    is a resident operand, since a full ELF's 32-word scratchpad has no room
+    for one entry per table.
     """
 
     low_bits: ClassVar[int] = 29
@@ -436,8 +383,7 @@ class GatherWords(Operator):
     control = Out(words, dtype=np.uint32, obj_type=(pairs,), depth=1)
     base_lo = Value()
     base_hi = Value()
-    # 2 words, not 1: base_lo and base_hi packed together, the order
-    # address_words() itself returns them in.
+    # base_lo and base_hi, in address_words()'s order.
     base = In(2, dtype=np.int32, obj_type=(2,), depth=1, when=static_base)
 
     def ops(self) -> int:
@@ -463,8 +409,6 @@ class GatherWords(Operator):
         self.ids.bind(ids.prod())
         self.control.bind(addresses.cons())
         base_stream = None
-        # The core reads the address once a call, unless static_base, where
-        # it is an ordinary resident operand instead (no per-call value).
         if self.static_base:
             base_stream = ObjectFifo(self.base.obj_type, name="gather_base", depth=1)
             self.base.bind(base_stream.prod())
@@ -504,12 +448,7 @@ class GatherWords(Operator):
         tg.finish()
 
     def taps(self) -> list[TensorAccessPattern]:
-        """Where the rows' address words go in ``control``, in row order.
-
-        A row's low word follows its first packet's header and length, its
-        high word its second packet's header: six words to a row, and a
-        three-word push after every batch of ``chain``.
-        """
+        """Where the rows' address words go in ``control``, in row order."""
         chain, at = Gather.chain, 20 * Gather.chain + 2
         full, short = divmod(self.rows, chain)
         taps = []
@@ -538,9 +477,7 @@ class GatherWords(Operator):
 
 
 def _into_slot(slot, seq=128, num_channels=1) -> dict[str, Any]:
-    """Kwargs scattering an (8, 64) block into slot ``slot`` of an (8, seq, 64)
-    buffer: each of its rows lands ``seq * 64`` elements after the last.
-    """
+    """Kwargs scattering an (8, 64) block into slot ``slot`` of an (8, seq, 64) one."""
     return dict(
         src=TensorAccessPattern.full((8, 64)),
         dst=TensorAccessPattern.full((8, seq, 64))[:, slot],
@@ -563,40 +500,13 @@ def _by_head(num_channels: int) -> dict[str, Any]:
 class Copy(Operator):
     """AIE-accelerated copy between two views of two buffers.
 
-    Gathers by ``src`` and scatters by ``dst``, split across
-    ``num_channels`` memtile pass-throughs (no cores) on the innermost
-    run every pattern holds a whole number of (the greatest common divisor
-    of their innermost sizes), so each channel reads what it writes. In a
-    graph the patterns come from the operands: ``Copy(k,
-    keys[i][:, pos])``, ``Copy(x.transpose(1, 0, 2), y[:, :n])``; a per-call
-    index on a view binds ``in_offset`` or ``out_offset``, and a per-call
-    bound ``src_bound``/``dst_bound`` with its size. Standalone,
-    ``src``/``dst`` are given, or default to the whole of each buffer.
-
-    With ``ids`` a 1-D integer handle (a graph input, a state, an output
-    of a step), ``Copy(table[ids])`` is a ``Gather``, the rows each call
-    names.
-
-    A side that is a tuple of patterns walks them in turn: ``Copy(table[ids])``
-    with ``ids`` an array gathers the rows it names, fixed when the graph is
-    traced. Each is
-    its own transfer, with runs of pieces whose offsets step evenly made one
-    (consecutive rows, a repeated row, a grid's rows), more than a task group
-    holds descriptors for; so they are unmanaged, the compiler metering each
-    channel's queue, and the two sides go out in stream order, so that no
-    transfer waits on one not yet issued.
-
-    Each channel's descriptor carries 1/num_channels of the pattern, so the
-    fifo object is sized against the per-channel share (``tile_size``). A
-    descriptor shorter than the object starves the memtile's S2MM: it never
-    completes an object, never releases the lock, and the drain never returns
-    (ERT_CMD_STATE_TIMEOUT). An integer multiple is fine; it cycles the buffer.
-    Under a bound a call moves any whole number of the bounded axis's rows,
-    so the object divides one row's share.
+    Gathers by ``src`` and scatters by ``dst`` through ``num_channels``
+    memtile pass-throughs, split on the innermost run every pattern holds
+    whole, so each channel reads what it writes. ``tile_size`` divides each
+    channel's share: a descriptor shorter than the object never completes
+    it, and the drain hangs (ERT_CMD_STATE_TIMEOUT).
     """
 
-    # The params that take an operand's view, and the value its per-call
-    # index binds, in operand order.
     accept_views = (("src", "in_offset"), ("dst", "out_offset"))
     per_call_gather: ClassVar[type[Operator] | None] = Gather
 
@@ -612,13 +522,10 @@ class Copy(Operator):
             Case(dict(input_buffer_size=1 << 19), id="past_one_memtile"),
             Case(_into_slot(5), id="slot5", lower=True),
             Case(_into_slot(127), id="slot_last"),
-            # The flat cases split a stride-1 run across the channels; these
-            # split the rows of a strided scatter.
+            # The rows of a strided scatter split across the channels.
             Case(_into_slot(5, num_channels=2), id="slot5_two_channels"),
-            # The sides' innermost axes differ: (16, 4, 64) read by head into
-            # a flat buffer, every channel's share of one in step with the other's.
+            # The sides' innermost axes differ.
             Case(_by_head(num_channels=2), id="by_head_two_channels", lower=True),
-            # Benched: 4 Mi elements, well past the dispatch cost.
             Case(
                 dict(input_buffer_size=1 << 22, num_channels=4, tile_size=4096),
                 id="bench_flat_4mi",
@@ -637,8 +544,7 @@ class Copy(Operator):
         ),
         repr=False,
     )
-    # The output is rows as wide as the source's innermost axis, so the
-    # channels split both sides alike.
+    # Rows as wide as the source's innermost axis: the channels split both alike.
     dst: TensorAccessPattern | tuple[TensorAccessPattern, ...] = Param(
         derive=lambda op: TensorAccessPattern.full(
             (op.output_buffer_size // op.src.sizes[-1], op.src.sizes[-1])
@@ -646,11 +552,9 @@ class Copy(Operator):
             else (op.output_buffer_size // op.src[0].sizes[-1], op.src[0].sizes[-1])
         )
     )
-    # The axis of each pattern a graph bounds per call (``x[:n]`` on a view):
-    # its size is the full extent in the pattern and patched to the call's.
+    # The axis of each pattern a graph bounds per call.
     src_bound: int | None = Param(default=None)
     dst_bound: int | None = Param(default=None)
-    # None: the per-channel share, cut to object_bytes.
     tile_size: int = Auto(
         domain=Divisors(
             of=lambda op, dev: op.channel_share,
@@ -677,12 +581,9 @@ class Copy(Operator):
         per=(num_channels,),
         depth=1,
     )
-    # Addends on the two base addresses, in elements: per call where a
-    # graph binds them.
+    # In elements.
     in_offset = Value(derive=lambda op: 0)
     out_offset = Value(derive=lambda op: 0)
-    # Sizes of the bounded axis of each pattern, in that axis's units: per
-    # call where a graph binds them.
     src_valid = Value(derive=lambda op: op.src_bound)
     dst_valid = Value(derive=lambda op: op.dst_bound)
 
@@ -710,10 +611,6 @@ class Copy(Operator):
                 )
 
     def resolve(self, dev):
-        """The transfer size, unless given, is the largest divisor of the
-        per-channel share (under a bound, of one bounded row's share; of a
-        gather, of every piece's) whose object fits ``object_bytes``.
-        """
         whole = self.channel_share
         cap = self.object_bytes // np.dtype(self.dtype).itemsize
         tile_size = self.tile_size or max(
@@ -727,16 +624,12 @@ class Copy(Operator):
 
     @property
     def channel_share(self) -> int:
-        """What each channel's transfers split into: of every pattern's
-        share, and of one bounded row's.
-        """
+        """What each channel's transfers split into."""
         pieces = [prod(p.sizes) // self.num_channels for w in self.walks() for p in w]
         return gcd(*pieces, *self._row_shares())
 
     def copies_to(self) -> CopyRun | None:
-        """The run ``dst`` writes, where ``src`` reads the whole input in
-        order and ``dst`` is one contiguous run, neither bounded.
-        """
+        """The run ``dst`` writes, where the copy is a plain contiguous one."""
         src, dst = self.src, self.dst
         # A bounded copy stays: a producer drains whole tiles past the bound.
         if (
@@ -806,9 +699,7 @@ class Copy(Operator):
                 )
 
     def _row_shares(self) -> list[int]:
-        """Per bounded pattern, the elements per channel one row of its
-        bounded axis moves.
-        """
+        """Per bounded pattern, the elements per channel one bounded row moves."""
         return [
             int(prod(tap.sizes) // tap.sizes[bound]) // self.num_channels
             for tap, bound in ((self.src, self.src_bound), (self.dst, self.dst_bound))
@@ -816,11 +707,7 @@ class Copy(Operator):
         ]
 
     def _shares(self, tap: TensorAccessPattern) -> list[TensorAccessPattern]:
-        """``tap``'s share per channel, in order: every run of the elements
-        all patterns' innermost axes, both sides', hold a whole number of,
-        split among the channels, so the k-th element a channel reads is the
-        k-th it writes.
-        """
+        """``tap``'s share per channel, in order."""
         step = gcd(*(p.sizes[-1] for walk in self.walks() for p in walk))
         if tap.sizes[-1] != step:
             tap = tap.split(tap.rank - 1, step)
@@ -831,14 +718,8 @@ class Copy(Operator):
         self, tap: TensorAccessPattern, bound: int | None, dtype
     ) -> list[tuple[TensorAccessPattern, int | None]]:
         """Per channel, its share of ``tap`` and the elements of one unit of
-        the dimension a bound patches.
-
-        An unbounded share is issued as it is: the compiler splits one no
-        descriptor holds. A bounded one must be one descriptor, since its
-        size is patched in place, so it is placed exactly, its bounded axis
-        on D2 (dimension 1) where the pattern allows: D2 has no wrap, since a
-        shim descriptor's length ends it. A bound on the innermost axis, the
-        one the channels split, takes one channel.
+        the dimension a bound patches. A bounded share is one descriptor, its
+        bounded axis on D2 where it fits: D2 has no wrap.
         """
         shares = self._shares(tap)
         if bound is None:
@@ -850,8 +731,6 @@ class Copy(Operator):
             )
         rank = shares[0].rank
         dim = 4 - rank + bound
-        # At most one axis outside the bound (the iteration slot) and one or
-        # two inside it (D1, D0) put the bound on D2.
         on_d2 = bound <= 1 and 1 <= rank - bound - 1 <= 2
         shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
         out = []
@@ -886,19 +765,9 @@ class Copy(Operator):
     def reference(
         self, x, y=None, *, in_offset=0, out_offset=0, src_valid=None, dst_valid=None
     ):
-        """CPU reference: gather by ``src``, scatter by ``dst``.
+        """Gather by ``src``, scatter by ``dst``, into ``y`` in place if given."""
 
-        ``x`` is the whole input buffer and ``y`` the whole output buffer,
-        written in place when given (a cache the graph passes as an output
-        keeps everything the copy does not touch); otherwise a zeroed buffer
-        of ``output_buffer_size``. The offsets are the per-call values, in
-        elements.
-        """
-        # A DMA pattern: no kernel, so no contract to take it from. The
-        # offsets are element counts, not bytes: the firmware multiplies the
-        # scratchpad word by the element size before adding it into the BD
-        # address register.
-
+        # Offsets count elements: the firmware scales the word by the element size.
         def at(tap, bound, valid):
             if valid is None:
                 return tap
@@ -930,16 +799,14 @@ class Copy(Operator):
         return out if y is None else y
 
     def tolerance(self) -> Tolerance:
-        # Copy moves data and computes nothing, so the gate is exact.
         return Tolerance.exact()
 
     @staticmethod
     def _stacked(
         pieces: list[TensorAccessPattern], shim: BdLimits, dtype
     ) -> list[TensorAccessPattern]:
-        """``pieces`` with each run of alike ones whose offsets step evenly
-        made one pattern with an outer axis, as far as one descriptor holds
-        it: twice, so rows make runs and runs make a grid.
+        """``pieces`` with each evenly stepped run made one pattern: twice, so
+        rows make runs and runs make a grid.
         """
         for _ in range(2):
             runs: list[tuple[TensorAccessPattern, int, int]] = []  # first, count, step
@@ -984,8 +851,7 @@ class Copy(Operator):
         out_off = self.out_offset if self.out_offset.per_call else None
         if isinstance(self.src, tuple) or isinstance(self.dst, tuple):
             shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
-            # (stream position, channel, is a fill, tap): a drain goes out
-            # before the fills that feed it.
+            # A drain goes out before the fills that feed it.
             issued = []
             for side, walk in enumerate(self.walks()):
                 dtype = (self.x, self.y)[side].dtype

@@ -19,12 +19,8 @@ TAPS = 5
 class DepthwiseConv1d(Operator):
     """A causal depthwise convolution over time, five taps, channels last.
 
-    ``y[t, c] = sum_j weight[j, c] * x[t + j - 4, c]``, with the rows before
-    the first zero. One core per column takes a contiguous run of rows; its
-    input fifo is the sliding window (``dwconv1d_channels_last`` takes the
-    five taps oldest first), and every run but the first is filled from four
-    rows before it, so the cores need nothing from each other. The first
-    core reads a zero plane for the taps before row 0.
+    One core per column takes a run of rows, its input fifo the sliding
+    window; every run but the first is filled from four rows before it.
     """
 
     test = Testing(
@@ -45,8 +41,7 @@ class DepthwiseConv1d(Operator):
     x = In(rows, channels, obj_type=(channels,), per=(num_aie_columns,), depth=TAPS + 1)
     weight = In(TAPS, channels, obj_type=(channels,), broadcast=True, depth=TAPS)
     y = Out(rows, channels, obj_type=(channels,), per=(num_aie_columns,))
-    # The rows, or fewer per call (``x[:n]``): every row is still computed,
-    # as a row reads only those before it.
+    # Every row is still computed under a bound: a row reads only those before it.
     valid = Extent(rows)
     steps = Value(derive=lambda op: op.rows // op.num_aie_columns)
 
@@ -58,9 +53,6 @@ class DepthwiseConv1d(Operator):
             )
 
     def resolve(self, dev):
-        """Columns default to the most the shim budget allows that leave
-        every core a whole run of at least the window's rows.
-        """
         cols = self.resolve_columns(
             dev,
             self.num_aie_columns,
@@ -148,9 +140,7 @@ class DepthwiseConv1d(Operator):
         return workers
 
     def sequence(self, rt):
-        """The weights once to every core, then each core's run of rows, the
-        four before it with it but for the first.
-        """
+        """The weights to every core, then each run with the four rows before it."""
         run = self.rows // self.num_aie_columns
         weights = TaskGroup()
         self.weight.fill(group=weights)

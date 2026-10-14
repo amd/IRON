@@ -25,24 +25,11 @@ from iron.common.testing import Case, Testing
 
 
 class Repeat(Operator):
-    """AIE-accelerated repeat-interleave operator: a memtile pass-through of
-    ``tile_size`` elements, no cores.
-
-    The repeat is entirely in the runtime sequence's descriptors: the input
-    is re-read ``repeat`` times and the output interleaved. The input is
-    ``(rows, cols)`` or a stack ``(rows, seq, cols)``, repeated along its
-    first axis either way; a row is ``seq * cols`` elements.
+    """AIE-accelerated repeat-interleave: a memtile pass-through, no cores; the
+    repeat is all in the runtime sequence's descriptors.
     """
 
-    # rows, cols, repeat, tile_size. A row is one run the sequence splits
-    # for the descriptor's two innermost slots, so rows either side of one
-    # slot's reach (2046 bf16 elements) take different splits and both need
-    # covering; the last is a row of 2048 * 64, a long context of 64-wide
-    # heads, far past it.
-    #
-    # Repeat moves data and computes nothing, so the gate is exact equality.
-    # A tolerance would accept a permutation that reads the wrong row, which
-    # is the failure mode here: a misrouted row is numerically plausible.
+    # Rows either side of one BD slot's reach (2046 elements) split differently.
     test = Testing(
         [
             Case(dict(rows=8, cols=64, repeat=4, tile_size=None)),
@@ -69,8 +56,6 @@ class Repeat(Operator):
     tile_size: int = Auto(repr=False)  # None: cols
     dtype: Any = Param(default=bfloat16, repr=False)
 
-    # Either may be bounded per call: the rows of a matrix (``x[:n]``) or
-    # the middle axis of a stack, a KV cache's context (``keys[:, :c]``).
     valid_rows = Extent(rows)
     valid_seq = Extent(seq)
 
@@ -100,11 +85,8 @@ class Repeat(Operator):
         return []
 
     def sequence(self, rt):
-        """The input re-read ``repeat`` times by the iteration slot's zero
-        stride, the output interleaved, one descriptor each way. A row is
-        one run split over the two innermost slots; a bounded axis is D2,
-        patched per call from its word: the rows' (the split row beneath
-        them), or the stack's, ``(repeat, seq, rows, cols)``.
+        """The input re-read ``repeat`` times by the iteration slot's zero stride,
+        the output interleaved, one descriptor each way.
         """
         rows, seq, cols, repeat = self.rows, self.seq or 1, self.cols, self.repeat
         shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
@@ -115,9 +97,7 @@ class Repeat(Operator):
         if "valid_seq" in bound:
             if "valid_rows" in bound:
                 raise ValueError("Repeat takes one bounded axis, not rows and seq")
-            # A patched length bounds D2 (the dimension inside the
-            # iteration), so the stack axis goes there and the rows inside
-            # it: the same bytes both ways, in (copy, seq, row) order.
+            # A patched length bounds D2, so the stack axis goes there.
             taps = (x.permute((1, 0, 2)).repeat(repeat), y.permute((1, 2, 0, 3)))
             unit, word = rows * cols, "valid_seq"
         else:
@@ -150,7 +130,6 @@ class Repeat(Operator):
 
     def reference(self, x):
         """Each row of the leading dimension repeated ``repeat`` times in place."""
-        # A DMA pattern: no kernel, so no contract to take it from.
         return np.repeat(x, self.repeat, axis=0)
 
     def tolerance(self) -> Tolerance:

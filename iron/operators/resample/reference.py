@@ -14,10 +14,7 @@ import numpy as np
 
 @dataclass(frozen=True)
 class Taps:
-    """One axis's resampling filter: output `i` is the `count[i]` input
-    samples from `start[i]` on, weighted by `weights[i]`, a fixed-point
-    fraction of `precision` bits.
-    """
+    """One axis's resampling filter, `precision`-bit fixed-point weights."""
 
     start: np.ndarray
     count: np.ndarray

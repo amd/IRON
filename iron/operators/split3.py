@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Three bf16 limbs summing to `a` exactly: each residual is taken in the
-# accumulator, where a bf16 product is exact. aie2's accumulator add drops
-# an addend's bits below the larger addend's 24-bit significand, so `hi`,
-# which may round up a binade past `a`, is taken off in two halves.
+# aie2's accumulator add drops bits below 24: `hi` is taken off in two halves.
 SPLIT = """
 #include <aie_api/aie.hpp>
 #include <stdint.h>

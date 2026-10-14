@@ -13,17 +13,10 @@ from iron.common.testing import Testing
 
 
 class Dequant(UnaryElementwise):
-    """AIE-accelerated int4 -> bf16 dequantization: the elementwise design
-    over a packed input.
-
-    A core takes ``tile_size`` values as ``in_tile`` packed bytes (two 4-bit
-    values per byte plus a bf16 scale per ``group_size``; no zero point) and
-    produces ``tile_size`` bf16 values, so its two streams carry different
-    tiles.
+    """AIE-accelerated int4 -> bf16 dequantization over a packed input: two
+    4-bit values per byte plus a bf16 scale per ``group_size``.
     """
 
-    # The kernel's contract draws what it reads: packed int4 lines, each
-    # followed by its scales.
     test = Testing(
         Sweep(group_size=32),
         draw=lambda op: dict(
@@ -36,12 +29,9 @@ class Dequant(UnaryElementwise):
     )
 
     group_size: int = Param(default=32, repr=False, array=True)
-    # The packed input's length: two 4-bit values per byte plus a bf16 scale
-    # per group.
     packed: int = Param(
         derive=lambda op: op.size // 2 + (op.size // op.group_size) * 2, repr=False
     )
-    # The packed size of one line; filled by resolve from ``tile_size``.
     in_tile: int = Auto(repr=False, derived=True)
 
     default_tile: ClassVar[int] = 4096

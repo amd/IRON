@@ -33,13 +33,9 @@ extern "C" void merge_rows(int32_t *ids, int32_t *merge, int32_t b) {
 
 
 class Merge(Operator):
-    """The row each position of a sequence of token `ids` takes from a table
-    of the text's embeddings followed by two towers' soft tokens.
-
-    A position holds its own row, except that the j-th `audio_token` takes
-    row `audio_at + j` and the j-th `image_token` row `vision_at + j`. That
-    the placeholders are as many as the soft tokens is the caller's check.
-    One core reads `block` ids at a time, its counts running over the blocks.
+    """The row each position of `ids` takes from the text's embeddings and two
+    towers' soft tokens: the j-th `audio_token` row `audio_at + j`, the j-th
+    `image_token` row `vision_at + j`.
     """
 
     test = Testing(

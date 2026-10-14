@@ -3,17 +3,8 @@
 
 """Registry binding ONNX operators to their AIE kernel.
 
-One ``StreamOp`` entry per supported ONNX operator is all a stream-dse-backed
-operator needs: the operator's domain, which stream-dse kernel implements it,
-which ``aie_kernels`` source that kernel is compiled from, and what operand
-layouts the generated DMAs must use.
-
-Ops stream-dse implements with a fused kernel but ONNX has no operator for live
-in ``CUSTOM_DOMAIN``, so the workload holds them as a single node.
-
-Supporting a new op is one ``StreamKernel`` plus one ``STREAM_OPS`` entry --
-the kernel source is mlir-aie's ``aie_kernels/<family>/<name>.cc``, exactly as the
-hand-written operators use it.
+A new op is one ``StreamKernel`` plus one ``STREAM_OPS`` entry; ops ONNX
+has no operator for live in ``CUSTOM_DOMAIN``.
 """
 
 from __future__ import annotations
@@ -25,11 +16,7 @@ from aie.iron import ExternalFunction
 
 from iron.operators.swiglu_prefill_stream.layout import TiledStridedLayout, tiled_2d
 
-# Intrinsic MAC tile dimensions of the aie2p kernels stream-dse targets. The
-# operand layouts are the contract the generated DMAs and the compiled kernel
-# objects agree on.
-# mm.cc takes an 8-row MAC tile when bf16 matmuls run on the bfp16 MACs and a
-# 4-row one when they do not.
+# mm.cc's MAC tile rows: 8 on the bfp16 MACs, 4 otherwise.
 R, S, T = 4, 8, 8
 MAC_ROWS_BFP16 = 8
 
@@ -63,27 +50,14 @@ def elementwise_layouts(
 def _gemm_declare(kernels_dir, m: int, k: int, n: int):
     """Compile ``mm.cc`` for one tile shape, and say what its symbols became.
 
-    stream-dse emits dimension-suffixed symbols so GEMMs of different tile
-    shapes coexist in one design (``GemmKernel.function_name``/``zero_name``),
-    while mm.cc defines them unsuffixed. ExternalFunction can only *prefix*, so
-    the two are reconciled the other way round: the object is prefixed, and the
-    generated MLIR is rewritten to match through the returned map.
-
-    stream-dse also sets one ``link_with`` per core, naming
-    ``GemmKernel.linkwith_name``, so everything a core calls has to be in this
-    one object. mm.cc no longer carries the zero entry point, so one
-    translation unit includes both mm.cc and zero.cc rather than leaving zero
-    in an object nothing would link. ``symbol_prefix`` renames every symbol an
-    object defines, so prefixing once covers ``zero`` as well.
+    stream-dse suffixes the symbols with the tile shape, and ExternalFunction
+    can only prefix, so the generated MLIR is rewritten through the returned
+    map. One object holds mm.cc and zero.cc: a core links one object.
     """
     suffix = f"{m}_{k}_{n}"
     prefix = f"mm{suffix}"
     ExternalFunction(
-        # Unused as a declaration: stream-dse emits the func.func this design
-        # links against, so ExternalFunction is here only to compile the source
-        # with these flags into this object. The generated MLIR names the
-        # object and, through the map returned below, the symbols: both must
-        # be exactly as given, so no digest prefix.
+        # Only compiles the object: stream-dse emits the func.func, so no digest prefix.
         "matmul_bf16_bf16",
         source_string="".join(
             f'#include "{kernels_dir / source}"\n'
@@ -97,8 +71,7 @@ def _gemm_declare(kernels_dir, m: int, k: int, n: int):
             f"-DDIM_K={k}",
             f"-DDIM_N={n}",
             "-Dbf16_bf16_ONLY",
-            # Emulating the matmul on the bfp16 MACs is what makes the 8-row
-            # MAC tile available, so it and the layouts move together.
+            # The bfp16 MACs give the 8-row tile: it and the layouts move together.
             "-DAIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16",
             "-DROUND_CONV_EVEN",
             # zero.cc's entry point, over the m x n output tile.
@@ -114,12 +87,8 @@ def _gemm_declare(kernels_dir, m: int, k: int, n: int):
 
 @dataclass(frozen=True)
 class StreamKernel:
-    """An AIE kernel: its stream-dse identity, its source, and its operand layouts.
-
-    ``source``/``subdir`` name the file in mlir-aie's ``aie_kernels`` library the same
-    way the hand-written operators do (``subdir`` is the family directory, e.g.
-    ``activation``). The object name must equal the kernel's ``linkwith_name`` in
-    stream-dse, since the generated MLIR links against it.
+    """An AIE kernel: its stream-dse identity, its source, and its operand
+    layouts. The object name is the kernel's ``linkwith_name`` in stream-dse.
     """
 
     key: str  # stream-dse AIEKernels key
@@ -131,16 +100,13 @@ class StreamKernel:
     def declare_kernels(self, kernels_dir, **kwargs) -> dict:
         """Compile this kernel, and return any symbol renames it forces.
 
-        Called from inside the design, not the operator: an ExternalFunction
-        registers into a process-global set that CompilableDesign clears when
-        it starts generating, so one built earlier is discarded and its object
-        never compiled.
+        Called inside the design: CompilableDesign clears ExternalFunctions built
+        before it starts generating.
         """
         if self.declare is not None:
             return self.declare(kernels_dir, **kwargs)
         assert self.source is not None and self.subdir is not None, self.key
-        # No prefix: stream-dse's generated MLIR already calls these by the
-        # names the source defines, so renaming them would break the link.
+        # No prefix: the generated MLIR calls these by the source's names.
         ExternalFunction(
             self.source,
             source_file=str(kernels_dir / self.subdir / f"{self.source}.cc"),
@@ -167,11 +133,7 @@ ELTWISE_MUL = StreamKernel(
 
 @dataclass(frozen=True)
 class StreamOp:
-    """One ONNX operator, and which kernel runs it.
-
-    ``domain`` is empty for a standard ONNX operator and ``CUSTOM_DOMAIN`` for one
-    ONNX does not have; ``attributes`` are written on every node of it.
-    """
+    """One ONNX operator, and which kernel runs it."""
 
     onnx_type: str
     kernel: StreamKernel
@@ -179,8 +141,7 @@ class StreamOp:
     attributes: dict = field(default_factory=dict)
 
 
-# Gemm rather than MatMul because stream-dse's Gemm parser iterates (m, k, n),
-# which is the order the mappings address as D0/D1/D2.
+# Gemm, not MatMul: its parser iterates (m, k, n), the mappings' D0/D1/D2.
 STREAM_OPS = {
     op.onnx_type: op
     for op in (

@@ -13,11 +13,7 @@ from iron.common.testing import Case, Testing
 
 
 class Clamp(UnaryElementwise):
-    """`x` clamped to `[low, high]`, elementwise, the bounds rounded to bf16.
-
-    The bounds are `Value`s each core reads from its runtime parameters, not
-    part of the array, so one array serves every pair of bounds.
-    """
+    """`x` clamped to `[low, high]`, elementwise, the bounds rounded to bf16."""
 
     test = Testing(
         [

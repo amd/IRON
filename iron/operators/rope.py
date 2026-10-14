@@ -1,16 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""RoPE, rotary position embedding, over the mlir-aie ``datamovement.rope``
-kernel. The angle table is the caller's: ``(positions, cols)``, cos and sin
-of each rotation interleaved (a decoder's is ``iron.lm.rope_angles``).
+"""RoPE, rotary position embedding, over mlir-aie's ``datamovement.rope``.
 
-The kernel rotates in one of two conventions, ``method_type``: the two
-halves of each row (0, the default) or interleaved pairs (1). Hugging
-Face's ``transformers`` uses the halves and Meta's own repository the
-pairs; Llama weights converted to Hugging Face have some layers re-permuted
-for the halves, so with those weights it must be the halves
-(huggingface/transformers#25199).
+``method_type`` rotates the two halves of each row (0, Hugging Face's) or
+interleaved pairs (1, Meta's); Llama weights converted to Hugging Face are
+re-permuted for the halves (huggingface/transformers#25199).
 """
 
 import dataclasses
@@ -36,8 +31,7 @@ from iron.common.testing import Case, Testing
 
 
 def _cases(cls, dev: Device):
-    # One column, four (npu1's widest) and eight; the angle table repeated
-    # four times and once.
+    # One column, four (npu1's widest) and eight.
     out = [
         Case(
             dict(
@@ -66,16 +60,12 @@ def _cases(cls, dev: Device):
             extensive=True,
         ),
     ]
-    # Benched: 4096 rows over every column, well past the dispatch cost.
     out.append(Case(dict(rows=4096, cols=512, angle_rows=8, method_type=0), bench=True))
     return out
 
 
 def _angles(op):
-    """An angle table of random rotations: one row per position, applied to
-    ``rows // angle_rows`` consecutive rows of x (the heads of one position,
-    in the design's layout), cos and sin of each angle interleaved.
-    """
+    """A random angle table, cos and sin interleaved, a row per position."""
     rng = np.random.default_rng(0)
     theta = rng.uniform(-np.pi, np.pi, (op.angle_rows, op.cols // 2))
     table = np.empty((op.angle_rows, op.cols), dtype=np.float32)
@@ -84,16 +74,8 @@ def _angles(op):
 
 
 class RoPE(Operator):
-    """AIE-accelerated RoPE (Rotary Position Embedding) operator: one core per
-    column, each rotating rows of ``cols``.
-
-    Applies RoPE to each row of the input against a row of precomputed
-    angles. The angle table may have fewer rows than the input; each angle
-    row is then reused for ``rows / angle_rows`` consecutive input rows,
-    which is the layout of a tensor holding several heads per token.
-
-    - cols: the head dimension; rope.cc processes two 16-element vectors at a time
-    - method_type: 0 = two-halves (HF), 1 = interleaved/Llama
+    """AIE-accelerated RoPE: one core per column, each rotating rows of
+    ``cols``; each angle row serves ``rows / angle_rows`` consecutive rows.
     """
 
     test = Testing(_cases, draw=_angles)
@@ -101,7 +83,6 @@ class RoPE(Operator):
     rows: int = Param()
     cols: int = Param()
     angle_rows: int = Param(derive=lambda op: op.rows)  # one row per position
-    # None: every column the device's shim budget allows.
     num_aie_columns: int = Auto()
     method_type: int = Param(default=0, array=True)
 
@@ -111,8 +92,6 @@ class RoPE(Operator):
     # Either row count may be bounded per call: x[:n] and angles[:m].
     valid = Extent(rows)
     valid_angles = Extent(angle_rows)
-    # Angle rows each core consumes, and input rows per angle row: the
-    # core's trip counts, written once per build, or per call under a bound.
     lut_rows = Value(derive=lambda op: ceildiv(op.valid_angles, op.num_aie_columns))
     rows_per_lut = Value(derive=lambda op: op.valid // op.valid_angles)
 
@@ -125,9 +104,6 @@ class RoPE(Operator):
             raise ValueError("angle_rows must divide rows")
 
     def resolve(self, dev):
-        """Columns default to the most the device's shim budget allows that
-        divide both the rows and the angle rows.
-        """
         cols = self.resolve_columns(
             dev,
             self.num_aie_columns,
@@ -143,17 +119,13 @@ class RoPE(Operator):
             raise ValueError("angle_rows must be divisible by num_aie_columns")
 
     def extent_unit(self, buffer: str) -> int | None:
-        """Under a bound the rows go round-robin over the columns, the input
-        and output a position at a time (the rows one angle row serves), so
-        each core gets the angle row of every position it rotates.
-        """
+        """A position's rows at a time, so each core gets its angle row."""
         return self.rows // self.angle_rows if buffer in ("x", "y") else None
 
     def array(self) -> list:
 
         tile = self.x.obj_type
         n = self.num_aie_columns
-        # method_type 0 = two-halves (HF), 1 = interleaved (Llama paper).
         kernel = kernels.datamovement.rope(self.cols, two_halves=self.method_type == 0)
         of_in = [ObjectFifo(tile) for i in range(n)]
         of_lut = [ObjectFifo(self.angles.obj_type) for i in range(n)]
@@ -196,25 +168,13 @@ class RoPE(Operator):
         return kernel.contract.ops_per_call * self.rows
 
     def reference(self, x, angles):
-        """CPU reference for RoPE from the operator's packed ``angles`` buffer.
-
-        ``angles`` holds interleaved [cos, sin, cos, sin, ...] pairs along the
-        last dim, the bf16 table the device reads. ``method_type`` 0 rotates
-        the two halves of each row (HF transformers); 1 rotates its
-        interleaved even/odd pairs (the Llama paper). It is the rope kernel's
-        contract reference, ``datamovement.rope_ref``: computed in fp32 and
-        rounded once.
-
-        ``angles`` may have fewer rows than ``x``; each angle row then applies
-        to ``rows / angles.shape[0]`` *consecutive* rows of ``x``, matching
-        the device kernel (``core_body`` acquires one angle row and applies it
-        to that many consecutive input rows before moving on).
+        """``datamovement.rope_ref`` on the packed ``angles`` buffer, each angle row
+        serving ``rows / angles.shape[0]`` consecutive rows of ``x``.
         """
         rows, cols, lut_rows = x.shape[0], x.shape[-1], angles.shape[0]
         if rows % lut_rows != 0:
             raise ValueError(f"{rows} rows cannot share {lut_rows} angle rows evenly")
-        # x viewed as (angle row, the rows it serves, cols) and the table
-        # broadcast over the middle axis: no copy of either.
+        # The table broadcast over the rows each angle row serves: no copy.
         y = datamovement.rope_ref(
             x.reshape(lut_rows, -1, cols, copy=False),
             angles.reshape(lut_rows, 1, cols, copy=False),

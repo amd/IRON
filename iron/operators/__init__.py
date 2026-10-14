@@ -1,47 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The IRON operator library.
+"""The IRON operator library, re-exported lazily (PEP 562).
 
-Operators are re-exported lazily (PEP 562):
-
-    from iron.operators import GEMM  # imports iron.operators.gemm, nothing else
-
-The FastFlowLM ports, and the binary they are measured against, are
-``iron.operators.flm``'s own package (``from iron.operators.flm import
-GEMM, Shipped``; its GEMM is not this one), named here with a dotted key
-(``"flm.GEMM"``) so a profile can name either catalog's operator the same
-way (``Profile.load``). Static names for both are in this package's and
-``flm``'s ``.pyi`` stubs, not here: the runtime loads lazily.
+flm's operators are named here with a dotted key (``"flm.GEMM"``), so a
+profile names either catalog's the same way.
 """
 
 import importlib
 
 #: ``flm``'s operators, by their own bare name, relative to ``iron.operators.flm``.
 _FLM_OPERATOR_MODULES = {
-    # The port, built from source for the current device.
     "GEMM": "gemm.op",
-    # q4nx weights to the bfp16 B that GEMM reads, without a host-side pack.
     "DequantBFP": "dequant.op",
-    # Gemma 4's fused decode layer, as FastFlowLM's engine drives it.
     "DecodeLayer": "layer.op",
-    # Causal prefill attention, one build for every token range.
     "PrefillAttention": "prefill_attn.op",
-    # Sliding-window causal prefill attention, one build for every token range.
     "PrefillSlidingAttention": "prefill_attn.op",
-    # Softcapped logits straight from the q4nx vocabulary.
     "LMHead": "lm_head.op",
-    # The shipped binary itself, downloaded and pinned, as a second form of
-    # GEMM: Shipped(...). NPU2 only; exists so the port can be measured
-    # against what it was ported from.
     "Shipped": "gemm.shipped",
 }
 
-# Operator name -> the module that defines it, relative to this package: one
-# file (``relu``), or ``<directory>.op`` for one that keeps a design, a
-# reference or a test of its own beside it. ``flm``'s operators are here too,
-# dotted (``"flm.GEMM"``), so one catalog answers for both: a profile names
-# either, and the lazy_imports/declared tests walk both without a second table.
+# Operator name -> its module, relative to this package; flm's dotted.
 _OPERATOR_MODULES = {
     "AXPY": "axpy",
     "Clamp": "clamp",
@@ -86,14 +65,7 @@ __all__ = sorted(_OPERATOR_MODULES)
 
 
 def __getattr__(name):
-    """Import the operator that defines `name`, on first access.
-
-    `name` is a bare name (``"GEMM"``) for normal attribute access, or a
-    dotted catalog key (``"flm.GEMM"``, which Python's `getattr` passes
-    through whole: it is one string, not two attribute lookups) for a
-    caller that has the name from `_OPERATOR_MODULES` itself, as
-    `iron.common.declare.Profile` does.
-    """
+    """Import the operator that defines `name`: a bare or a dotted catalog key."""
     module = _OPERATOR_MODULES.get(name)
     if module is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -106,9 +78,7 @@ def __dir__():
 
 
 def catalog_name(cls: type) -> str:
-    """The catalog key ``cls`` is exported under (``"GEMM"``, ``"flm.GEMM"``),
-    from its module and class name alone, so finding it imports nothing
-    beyond what defining ``cls`` already did.
+    """The catalog key ``cls`` is exported under, importing nothing more.
 
     Raises:
         ValueError: no catalog entry's module and bare name both match ``cls``.

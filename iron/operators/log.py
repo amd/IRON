@@ -15,8 +15,7 @@ from iron.common.testing import Testing
 
 from .split3 import SPLIT
 
-# log(m) for m in [sqrt(1/2), sqrt(2)) is f q(f), f = m - 1, with q
-# log1p(f) / f interpolated at Chebyshev nodes: 7.5e-9 off in float32.
+# log(m) = f q(f), f = m - 1, q at Chebyshev nodes: 7.5e-9 off in float32.
 DEGREE = 9
 LOW, HIGH = np.sqrt(0.5) - 1, np.sqrt(2.0) - 1
 NODES = (LOW + HIGH) / 2 + (HIGH - LOW) / 2 * np.cos(

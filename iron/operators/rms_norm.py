@@ -9,8 +9,7 @@ from iron.common import In, KernelCall, Out, Rowwise, Param
 from iron.common.elementwise import Sweep
 from iron.common.testing import Testing
 
-# The longest weighted row: the multiplying core holds the weight row beside
-# each line, which halves the line a core holds.
+# The longest weighted row: the weight row beside each line halves it.
 WEIGHTED_TILE_CAP = 4096
 
 
@@ -18,12 +17,8 @@ class RMSNorm(Rowwise):
     """AIE-accelerated RMS Normalization of each row, optionally times a
     learned weight row.
 
-    Unweighted, one core per (column, channel) runs the norm, as any
-    elementwise operator. Weighted (``RMSNorm(x, weight=w)`` in a graph,
-    or ``weighted=True``), two cores per (column, channel) are pipelined: one
-    normalizes, the next multiplies by the weight. The weight fifo is one
-    per channel, shared by every column in that channel, and each receives
-    the whole weight row, which halves the line a core holds.
+    Weighted, two cores per (column, channel) are pipelined: one normalizes,
+    the next multiplies by the weight row, which halves the line a core holds.
     """
 
     test = Testing(
@@ -43,8 +38,7 @@ class RMSNorm(Rowwise):
         obj_type=(Rowwise.tile_size,),
         per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
-    # The weight row is one line, shared by every column of a channel; the
-    # shim budget counts a replicate= stream once per channel.
+    # Shared by every column of a channel: counted once per channel.
     weight = In(
         Rowwise.tile_size,
         obj_type=(Rowwise.tile_size,),
@@ -82,9 +76,7 @@ class RMSNorm(Rowwise):
         )
 
     def reference(self, x, weight=None):
-        """The kernels' references in turn: the normalized row rounded to
-        bf16, as the first core stores it, then times the weight.
-        """
+        """The kernels' references in turn, the normalized row rounded to bf16."""
         normed = super().reference(x)
         if weight is None:
             return normed
@@ -94,8 +86,7 @@ class RMSNorm(Rowwise):
     def tolerance(self) -> Tolerance | None:
         if not self.weighted:
             return super().tolerance()
-        # Each kernel is within one ulp of its reference; the product of a
-        # row one ulp off is itself up to one ulp off before its own rounding.
+        # Each kernel's ulp, and the product's of a row one ulp off.
         return Tolerance.bf16_ulps(
             2,
             atol=2.0**-126,

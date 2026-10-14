@@ -16,11 +16,8 @@ class ElementwiseMul(BinaryElementwise):
 
 
 class RowwiseMul(Rowwise):
-    """Each row times one row, ``x * row``: the row is a line every core
-    holds for the call, one per channel shared by its columns.
-    """
+    """Each row times one row, ``x * row``."""
 
-    # A core holds the row beside each line in and out.
     tile_cap: ClassVar[int] = 4096
 
     x = In(

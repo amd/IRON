@@ -14,8 +14,7 @@ from iron.common.testing import Case, Testing
 
 from .split3 import SPLIT
 
-# The limbs of each plane, in order: against a second operand split
-# [hi, hi, mid, hi, mid, lo], the six products a float32 product keeps.
+# Against [hi, hi, mid, hi, mid, lo], the six products a float32 product keeps.
 PLANES = (0, 1, 0, 2, 1, 0)
 WEIGHT_PLANES = (0, 0, 1, 0, 1, 2)
 
@@ -42,10 +41,7 @@ extern "C" void limbs_f32(float *restrict x, bfloat16 *restrict y, int32_t n) {
 
 
 def split(x):
-    """The bf16 limbs `hi`, `mid` and `lo` of `x`, each rounded to nearest
-    even from the residual of those before it: they sum to a float32 `x`
-    exactly, and to a float64 one to about float32's precision.
-    """
+    """The bf16 limbs of `x`, each rounded from the residual before it."""
     x = np.asarray(x)
     x = x if x.dtype == np.float64 else x.astype(np.float32)
     hi = x.astype(bfloat16)
@@ -62,18 +58,14 @@ def planes(x):
 
 
 def stacked(w):
-    """The `(6 * K, N)` operand a GEMM by `Limbs`' planes takes for `w`
-    `(K, N)`: its limbs stacked `[hi, hi, mid, hi, mid, lo]`.
-    """
+    """`w` `(K, N)` as its limbs stacked `[hi, hi, mid, hi, mid, lo]`."""
     limbs = split(w)
     return np.concatenate([limbs[p] for p in WEIGHT_PLANES])
 
 
 class Limbs(Rowwise):
     """Each row of float32 as six planes of its bf16 limbs, `[hi, mid, hi,
-    lo, mid, hi]`: a GEMM of them against a second operand split `[hi, hi,
-    mid, hi, mid, lo]` is a float32 product to within the three smallest of
-    its nine limb products.
+    lo, mid, hi]`, for a float32 product by GEMM.
     """
 
     test = Testing(

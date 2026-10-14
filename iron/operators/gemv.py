@@ -47,7 +47,7 @@ def _cases(cls, dev: Device):
         (2048, 8192, 8, 1, 256),
         (8192, 2048, 8, 4, 1024),
     ]
-    # ... and num_batches: each batch's B, then its rows, on every lane.
+    # ... and num_batches.
     batched = [
         (256, 128, 1, 1, 256, 4),  # tiny
         (256, 128, 8, 1, 32, 100),  # large num_batches: the size-uncapped dim
@@ -64,7 +64,7 @@ def _cases(cls, dev: Device):
         (1024, 1024, 1, 1, 64, 4, 2),  # matrix stride > 2**20
         (2048, 64, 8, 4, 256, 32, 4),  # Llama decode's scores: 32 heads, 8 groups
     ]
-    # ... and two lanes a column, so both of its input channels carry A.
+    # ... and two lanes a column.
     laned = [
         (2048, 8192, 1, 1, 1024),
         (8192, 2048, 4, 4, 1024),
@@ -88,7 +88,7 @@ def _cases(cls, dev: Device):
         return Case(dict(plain.kwargs, finish=Chain(steps[0], shared)), id=label)
 
     def prepared(M, K, cols, tsi, tso, *chains, **extra):
-        # Each chain names its steps; the first is the case's own, more share one array.
+        # The first chain is the case's own; more share one array.
         steps = [tuple(Link(op) for _, op in c) for c in chains]
         plain = case(M, K, cols, tsi, tso, **extra)
         shared = tuple(steps) if len(steps) > 1 else ()
@@ -102,8 +102,6 @@ def _cases(cls, dev: Device):
         name = "RMSNormWeighted" if weighted else "RMSNorm"
         return name, catalog.RMSNorm(rows=1, tile_size=K, weighted=weighted)
 
-    # Benched: the large matrices across the whole device, which run well
-    # past the dispatch cost.
     widest = dev.cols
 
     def bench(M, K, cols, *_):
@@ -121,28 +119,24 @@ def _cases(cls, dev: Device):
             case(256, 128, 2, 1, 32, num_channels=2, num_batches=8),
             case(2048, 64, 4, 4, 256, num_channels=2, num_batches=32, repeat=4),
         ]
-        # Each core finishing its output tiles, K = 8192's at the 1024-row
-        # tile a core holds beside an AIE2 finish's LUT tables.
+        # K = 8192: the 1024-row tile a core holds beside an AIE2 finish's LUTs.
         + [
             finished(2048, 8192, 1, 1, 1024, (step,))
             for step in (catalog.GELU, catalog.SiLU)
         ]
         + [finished(*laned[1], (catalog.SiLU,), num_channels=2)]
-        # One array serving both, each design selecting its own.
+        # One array serving both.
         + [
             finished(*plain[2], (), (catalog.SiLU,)),
             finished(*plain[2], (catalog.SiLU,), ()),
         ]
-        # Each core preparing B, the step producing it folded in: a K of
-        # 8192 leaves no room in L1 for the prepared line, 4096 weighted the
-        # least.
+        # K = 8192 leaves no L1 for the prepared line; 4096 weighted the least.
         + [
             prepared(*p, (norm(p[1], weighted),))
             for p in (plain[2], (2048, 4096, 8, 2, 256))
             for weighted in (False, True)
         ]
         + [prepared(*plain[0], (norm(plain[0][1]),))]
-        + []
         + [
             prepared(*laned[1], (norm(2048, weighted),), num_channels=2)
             for weighted in (False, True)
@@ -155,45 +149,29 @@ def _cases(cls, dev: Device):
 
 
 class GEMV(Operator):
-    """AIE-accelerated General Matrix-Vector/Vector-Matrix Multiplication layer.
+    """AIE-accelerated General Matrix-Vector Multiplication layer.
 
-    ``C = A @ B`` as row-blocks of A per lane, each lane's core calling
-    the mv.cc kernel over ``tile_size_input`` rows at a time. ``K`` is
-    compiled into the kernel (``-DDIM_K``) and the tiles name it, so it is
-    array-tier; the number of rows ``M`` is not, and reaches the core as
-    the ``tiles`` value. B rides each lane's A stream ahead of its rows, so
-    every input channel of a column can carry A.
-
-    - num_aie_columns: columns to split the rows of A across
-    - num_channels: lanes per column, each its own A stream and core
-    - tile_size_input: rows of A stored on each core per acquire (chunk size of A)
-    - tile_size_output: rows of C stored on each core per acquire (chunk size of C)
+    ``C = A @ B`` as row-blocks of A per lane, ``tile_size_input`` rows per
+    mv.cc call. B rides each lane's A stream ahead of its rows, so every
+    input channel of a column can carry A.
     """
 
     test = Testing(_cases, draw=lambda op: dict(normal=(op.A, op.B)))
 
     M: int = Param()
     K: int = Param()
-    # None: a single batch, carrying no batch dimension at all.
+    # None: a single batch, with no batch dimension.
     num_batches: int | None = Param(default=None)
-    # Batches per matrix of A: batch ``b`` is multiplied by matrix
-    # ``b // repeat``. Grouped-query attention's scores, where each group's
-    # keys serve ``n_heads // n_kv_groups`` query heads: the matrix is read
-    # once per batch it serves, so no repeated copy is ever materialized.
+    # Batches per matrix of A (grouped-query scores): no repeated copy.
     repeat: int = Param(default=1)
     num_matrices: int | None = Param(
         derive=lambda op: (
             None if op.num_batches is None else op.num_batches // op.repeat
         )
     )
-    # None: every column the device's shim budget allows that leaves each
-    # column a whole number of tiles of M.
     num_aie_columns: int = Auto()
-    # None: one.
     num_channels: int = Auto()
-    # None: two rows, or one where two would span more than two banks: A is
-    # double-buffered beside the whole of B, and at K = 8192 two rows each
-    # way would be all of a core's memory.
+    # None: two rows, or one where two would span more than two L1 banks.
     tile_size_input: int = Auto(
         domain=Divisors(
             of=lambda op, dev: op.M,
@@ -201,23 +179,15 @@ class GEMV(Operator):
             // (op.A.depth * op.K * np.dtype(bfloat16).itemsize),
         )
     )
-    # None: tile_size_input, and at least two rows: the shim moves C in
-    # 4-byte granules. Not a column's rows, which M would set: one array
-    # serves every M.
+    # At least two rows: the shim moves C in 4-byte granules.
     tile_size_output: int = Auto(
         domain=Divisors(
             of=lambda op, dev: op.M, step=lambda op, dev: op.tile_size_input, span=3
         )
     )
-    # None picks the widest legal size for K (see validate).
     kernel_vector_size: int = Auto(repr=False, array=True)
 
-    # A single batch carries no batch dimension at all, rather than one of
-    # extent 1, so an unbatched operator has 2-D shapes. One fifo per lane
-    # for each of A and C; B has no stream of its own (see sequence). Each
-    # core prepares B, so the step producing it folds into them. The
-    # prologue's and a finish's inputs ride A: a tile of each after B's, or
-    # after an output tile's rows.
+    # B, a prologue's and a finish's inputs ride A's stream.
     A = In(
         num_matrices,
         M,
@@ -236,10 +206,7 @@ class GEMV(Operator):
         depth=2,
         finish=True,
     )
-    valid = Extent(M)  # M, or fewer rows per call (``A[:n]`` in a graph)
-    # Output tiles each lane produces per batch: the core's trip count,
-    # written once per build, so the array does not depend on M; per call
-    # under a bound, read by each core.
+    valid = Extent(M)
     tiles = Value(
         derive=lambda op: ceildiv(
             op.valid, op.num_aie_columns * op.num_channels * op.tile_size_output
@@ -248,20 +215,14 @@ class GEMV(Operator):
     batches = Value(derive=lambda op: op.num_batches or 1)
 
     def extent_unit(self, buffer: str) -> int | None:
-        # A lane takes A in output tiles (several input tiles each) so
-        # its rows and C's line up under the round-robin split.
+        # A in output tiles, so its rows and C's line up under the round-robin split.
         return self.tile_size_output if buffer == "A" else None
 
-    # Vector widths mv.cc's matvec_vectorized is instantiated at, widest first.
-    # Each is a legal aie::vector<bfloat16, r> width; anything narrower than 16
-    # is not worth a kernel launch, so a K below 32 is rejected rather than
-    # silently run at a width nothing has been tested at.
+    # mv.cc's widths, widest first; narrower than 16 is untested, so refused.
     _KERNEL_VECTOR_SIZES: ClassVar[tuple[int, ...]] = (64, 32, 16)
     # bf16 elements in one of eltwise.passthrough's 64-byte vectors.
     _COPY_ELEMENTS: ClassVar[int] = 32
-    # A batched sequence's tasks outnumber a shim's BD ids, so the compiler
-    # recycles finished tasks' ids. Safe: C's drains go out before the fills
-    # feeding them, so no task waits on a push issued after it.
+    # Safe: C's drains go out before the fills feeding them.
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
     def validate(self):
@@ -282,18 +243,8 @@ class GEMV(Operator):
             )
 
     def _legal_kernel_vector_size(self) -> int:
-        """The vector width the matvec kernel is compiled at.
-
-        mv.cc requires ``DIM_K % VEC_SIZE == 0`` and ``DIM_K >= 2 * VEC_SIZE``:
-        its inner loop carries a pipelining pragma that assumes at least two
-        iterations. Both are static_asserts, so getting this wrong is a C++
-        error from inside a kernel build rather than a message a caller can
-        read. The second condition is easy to miss: K == VEC_SIZE divides
-        evenly and still does not build.
-
-        Left unset, the widest legal width for this K is chosen, so callers do
-        not have to know the rule. Set explicitly, the value is checked and the
-        reason reported here instead of in Peano's output.
+        """The vector width the matvec kernel is compiled at: mv.cc's
+        static_asserts, ``K % w == 0`` and ``K >= 2 * w``, checked here.
         """
         legal = [
             size
@@ -323,12 +274,6 @@ class GEMV(Operator):
         return self.kernel_vector_size
 
     def resolve(self, dev):
-        """Columns default to the most the device's shim budget allows that
-        leave each lane a whole number of tiles of M, at one lane per column
-        unless ``num_channels`` says more; the tiles follow from K, and from
-        the line each finish of the array runs at.
-        """
-        # Two rows of A per acquire where two fit a bank's worth of L1.
         row_bytes = self.K * np.dtype(bfloat16).itemsize
         if dev is not None:
             bank_bytes = Operand.L1_BANK_BYTES[dev.name]
@@ -343,9 +288,7 @@ class GEMV(Operator):
         rows = self.tile_size_input or (2 if row_bytes <= bank_bytes else 1)
         channels = self.num_channels or 1
         if self.tile_size_output is None and self.finish_inputs:
-            # A finish input's tile, re-read to fill one of A's riding it,
-            # costs A's stream the less the more rows it is: a lane's
-            # share, or the most that fits a descriptor's re-reads.
+            # A finish input's tile, re-read per A tile, is cheaper the more rows.
             cols = self.resolve_columns(
                 dev,
                 self.num_aie_columns,
@@ -381,10 +324,6 @@ class GEMV(Operator):
             tile_size_output=tile,
             kernel_vector_size=self._legal_kernel_vector_size(),
         )
-        # A core holds A's tiles (which carry B and each prologue and finish
-        # input), B's line, C's tiles, a scratch line per kind of chain it
-        # applies, its finish's LUT tables, and the default stack, which no
-        # elementwise kernel exceeds.
         if dev is None:
             return new
         item = np.dtype(bfloat16).itemsize
@@ -410,8 +349,6 @@ class GEMV(Operator):
         rows = self.M // lanes
         if self.M % lanes:
             raise ValueError(f"M={self.M} does not divide across {lanes} lanes")
-        # We first acquire output rows from the C FIFO, then fill those rows
-        # from the A input, so both tiles must divide each lane's share.
         for name, tile in (
             ("tile_size_output", self.tile_size_output),
             ("tile_size_input", self.tile_size_input),
@@ -425,11 +362,7 @@ class GEMV(Operator):
         K, lanes = self.K, self.num_aie_columns * self.num_channels
         tile_size_input, tile_size_output = self.tile_size_input, self.tile_size_output
 
-        # The kernels are declared and built by one object each. They must be
-        # constructed here rather than at import: an ExternalFunction
-        # registers itself into a process-global set that CompilableDesign
-        # clears when it starts generating, so anything built before that is
-        # discarded.
+        # Built here, not at import: CompilableDesign clears earlier ExternalFunctions.
         matvec = linalg.mv(
             tile_size_input,
             K,
@@ -444,9 +377,7 @@ class GEMV(Operator):
         copy = eltwise.passthrough(K, np.int16).object_file.bind(
             "passThroughLine", [self.A.obj_type, vector, np.int32]
         )
-        # The finish runs over the whole C tile, once the matvec calls have
-        # filled it: one call's tile_size_input rows can be narrower than a
-        # step's vector.
+        # Over the whole C tile: one call's rows can be narrower than a vector.
         finish = Finish(self, lanes)
         prepare = Prepare(self, lanes)
 
@@ -457,7 +388,6 @@ class GEMV(Operator):
             ObjectFifo(self.C.obj_type, depth=self.C.depth) for i in range(lanes)
         ]
         vectors = [Buffer(vector) for _ in range(lanes)]
-        # Per lane: the trip count and the batches of a call.
         rtps = self.rtp(
             [self.tiles, self.batches, *prepare.values, *finish.values], cores=lanes
         )
@@ -470,14 +400,11 @@ class GEMV(Operator):
             mode_p = prepare.mode(words)
             mode = finish.mode(words)
             for _ in range_(batches):
-                # The batch's head tile carries B; the prologue's inputs,
-                # then the rows of A follow it.
+                # The batch's head tile carries B.
                 head = A_fifo.acquire(1)
                 copy(head, b, K)
                 A_fifo.release(1)
                 line = prepare.apply(prepared, mode_p, b, A_fifo)
-                # Each lane produces tiles output tiles of tile_size_output
-                # rows per batch, tile_size_input rows per kernel call.
                 for _ in range_(n):
                     c = C_fifo.acquire(1)
                     out = finish.target(rest, mode, c)
@@ -512,15 +439,8 @@ class GEMV(Operator):
         return workers
 
     def sequence(self, rt):
-        """The runtime sequence: each lane's stream carries, per batch, B's
-        head tile, a tile of each prologue input, and then the batch's rows
-        of A, as derived (each lane's rows, or, under a bound, output tiles
-        round-robin over the lanes) and narrowed to matrix ``b // repeat``,
-        a tile of each finish input after each output tile's rows. C drains
-        as derived, issued first: a core whose C could not drain would stop
-        taking A while its queue waits on it. Every transfer is unmanaged,
-        so the compiler meters each queue and recycles descriptors however
-        many batches.
+        """Per batch and lane: B's head tile, each prologue input's, then A's
+        rows. C drains are issued first: an undrained C would stop A.
         """
         if self.repeat > 1:
             for buf in (self.A, self.C):
@@ -555,8 +475,6 @@ class GEMV(Operator):
                 for (k, _, _, _), part in zip(rows, parts, strict=True)
             ]
         elif (self.num_matrices or 1) > 1:
-            # The round-robin pattern walks every matrix in its outermost
-            # dimension.
             rows = [
                 (
                     k,
@@ -571,13 +489,10 @@ class GEMV(Operator):
                 )
                 for k, tap, word, unit in rows
             ]
-        # Each lane's share of a batch's C, which a finish's inputs ride A for.
         share = M // len(rows)
         output = TensorAccessPattern.full(self.C.shape)
         for b in range(self.num_batches or 1):
-            # B's row repeated over a whole A tile, in the iteration
-            # dimension, the one whose stride may be 0; so is each prologue
-            # input's.
+            # B's row repeated over an A tile in the iteration dim (stride 0).
             head = TensorAccessPattern(
                 self.B.shape, b * K, [tsi, 1, 1, K], [0, 0, 0, 1]
             )
@@ -615,17 +530,10 @@ class GEMV(Operator):
         return 2 * self.M * self.K * (self.num_batches or 1)
 
     def reference(self, A, B):
-        """``C = A @ B``: one product per batch when ``A`` is
-        ``(batches, M, K)`` and ``B`` ``(batches, K)``, each matrix of ``A``
-        serving ``repeat`` consecutive batches.
-        """
+        """``C = A @ B``, one product per batch."""
         if self.repeat > 1:
             A = np.repeat(A.reshape(-1, *A.shape[-2:]), self.repeat, axis=0)
-        # Not linalg.mv's contract: that is one tile's product, and mv_ref's
-        # float64 would double the host copy of the LM head's weight. In
-        # float32 and rounded once: numpy's matmul would otherwise accumulate
-        # in bfloat16, where the AIE kernel's accumulator is f32. einsum has
-        # no bfloat16 loop at all, so the batched case reshapes into a matmul.
+        # float32: numpy's bf16 matmul accumulates in bf16, the kernel in f32.
         a, b = A.astype(np.float32), B.astype(np.float32)
         if A.ndim == 3:
             b = b.reshape(A.shape[0], A.shape[2], 1)
@@ -633,12 +541,7 @@ class GEMV(Operator):
         return (a @ b.reshape(A.shape[-1])).astype(A.dtype)
 
     def tolerance(self) -> Tolerance:
-        """The gate GEMV's sweeps hold: C accumulates in f32 and rounds
-        once, a prologue widens that by its steps' gates carried through
-        the product, and a finish carries it through its steps' own gates.
-        Tighter than linalg.mv's contract, the C++ matmul harness's 0.05
-        and 0.5.
-        """
+        """C accumulates in f32 and rounds once; tighter than linalg.mv's contract."""
         if self.finish or self.prepare:
             return super().tolerance()
         return Tolerance.relative(0.04, 1e-3, note="f32 accumulation, rounded once")

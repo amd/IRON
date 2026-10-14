@@ -31,8 +31,7 @@ from iron.common import (
 )
 from iron.common.testing import Case, Testing
 
-# softmax_bf16's vector step on both targets (activation.softmax holds a row
-# to a multiple of it). Its loops cover only whole steps.
+# softmax_bf16's vector step: its loops cover only whole steps.
 _VECTOR_STEP = 32
 # The longest row a core holds whole: its input and output, double-buffered.
 _ROW_CAP = 4096
@@ -40,8 +39,7 @@ _ROW_CAP = 4096
 _BLOCK = 1024
 # The floats a streamed row carries between blocks: the lanes' sums and the maximum.
 _STATE = 64
-# A streamed core unrolls its rows, each with its own state: 48 fit its
-# program memory on AIE2P, 64 overflow it.
+# A streamed core unrolls its rows: 48 fit AIE2P's program memory, 64 do not.
 _STREAMED_ROWS = 48
 
 
@@ -49,22 +47,9 @@ class Softmax(Operator):
     """AIE-accelerated Softmax over each row: one core per (column, channel),
     each taking a contiguous run of rows.
 
-    A graph may bound the rows' length per call, ``Softmax(x[:, :n])``
-    (attention over a context that grows each call); the elements past
-    ``n`` up to the end of its block come out as zeros, and ``n`` must be
-    at least 1.
-
-    A core holds a row whole, or, ``streamed``, reads it as ``block``-element
-    blocks three times: for its maximum, for its lanes' sums of exponentials
-    and for the output, the kernel's three passes split at block boundaries
-    with every lane summing in the same order. A call bounded to ``n`` moves
-    only the blocks ``n`` covers. Rows are streamed when a call bounds them
-    or they are longer than a core holds.
-
-    The kernels only run over the span: the valid elements rounded up to the
-    softmax's 32-element vector step. Past it the masked elements' exponents
-    are exact zeros, so leaving them out of the lanes' sums changes no bit;
-    the output past the span is zero-filled instead of computed.
+    A core holds a row whole or, ``streamed``, reads it in ``block``-element
+    blocks three times (maximum, sums, output). Under a per-call bound the
+    elements past it come out as zeros, and only the blocks it covers move.
     """
 
     # Four cores, two columns of two: the fewest that exercise both splits.
@@ -78,7 +63,6 @@ class Softmax(Operator):
             ),
             Case(dict(rows=16, cols=4608, num_aie_columns=2, num_channels=2)),
             Case(dict(rows=32, cols=32768, num_aie_columns=2, num_channels=2)),
-            # Benched: 2 Mi elements, well past the dispatch cost.
             Case(
                 dict(rows=4096, cols=512, num_aie_columns=2, num_channels=2),
                 bench=True,
@@ -88,11 +72,8 @@ class Softmax(Operator):
 
     rows: int = Param(array=True)
     cols: int = Param()
-    # None: every column the device's shim budget allows.
     num_aie_columns: int = Auto()
     num_channels: int = Auto(default=1)
-    # None: the whole row, or where the row is streamed the longest
-    # multiple of _VECTOR_STEP up to _BLOCK that divides it.
     block: int = Auto(
         domain=Divisors(of=lambda op, dev: op.cols, step=_VECTOR_STEP, cap=_ROW_CAP)
     )
@@ -113,11 +94,6 @@ class Softmax(Operator):
             raise ValueError(f"cols ({self.cols}) must be a multiple of 16")
 
     def resolve(self, dev):
-        """Columns default to the most the device's shim budget allows that
-        leave every core a whole number of rows. A row is streamed when it
-        is longer than ``_ROW_CAP``, or when a call bounds it and a core's
-        rows fit a streamed core (``_STREAMED_ROWS``).
-        """
         cols = self.resolve_columns(
             dev,
             self.num_aie_columns,
@@ -208,8 +184,7 @@ class Softmax(Operator):
         def streamed(
             of_in, of_out, row_max, row_sum, row_scale, mask, zero, rtp, *states
         ):
-            # Blocks arrive block by block across the core's rows, so each
-            # row carries its own state.
+            # Blocks arrive across the core's rows: each row carries its own state.
             words = rtp.read()
             valid, blocks = words[self.valid_cols], words[self.blocks]
             i32 = valid.type
@@ -272,10 +247,7 @@ class Softmax(Operator):
         return workers
 
     def sequence(self, rt):
-        """Each lane's rows as ``(block, row, element)``: every block of the
-        call's length, across the lane's rows, read three times if streamed.
-        A bounded call patches the block count.
-        """
+        """Each lane's rows as ``(block, row, element)``, thrice if streamed."""
         lanes = self.cores
         rows = self.rows // lanes
         blocks = ceildiv(self.length, self.block)
@@ -313,7 +285,5 @@ class Softmax(Operator):
         return activation.softmax(self.cols).contract.tolerance
 
     def reference(self, x):
-        """The softmax kernel's contract reference, a row at a time. A
-        graph's reference constructs a bounded call at its valid columns.
-        """
+        """The softmax kernel's contract reference, a row at a time."""
         return activation.softmax_ref(x, tile_size=self.cols)

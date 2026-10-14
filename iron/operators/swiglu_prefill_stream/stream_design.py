@@ -3,19 +3,8 @@
 
 """Generate the SwiGLU-prefill design with stream-dse.
 
-Both inputs stream-dse needs are produced here, from IRON:
-
-* the **workload**, built from ``iron.operators.swiglu_prefill_stream.reference``'s
-  layers, the same ones the test checks the result against;
-* the **mapping**, from the placement below.
-
-Both are written into the experiment's output directory at build time, never into
-the source tree, and the mapping's node names come from the workload, so
-the two cannot disagree. stream-dse then solves the allocation and emits the MLIR.
-
-The operator imports this module where ``stream-dse`` is installed and
-reports it missing only when built, so importing the operator does not
-require it.
+The workload comes from ``reference``'s layers and the mapping from the
+placement below; both are written at build time, never into the tree.
 """
 
 import hashlib
@@ -41,8 +30,7 @@ from iron.operators.swiglu_prefill_stream.stream.mapping import (
 )
 from iron.operators.swiglu_prefill_stream.stream.workload import build_workload
 
-# Hardware description for the whole-array Strix (npu2) target, shipped as package
-# data inside the installed stream package.
+# The whole-array Strix (npu2) description, shipped inside the stream package.
 ACCELERATOR = os.path.join(
     os.path.dirname(stream.__file__),
     "inputs",
@@ -54,28 +42,18 @@ ACCELERATOR = os.path.join(
 BACKEND = "ortools_gscip"  # license-free OR-Tools GSCIP, no Gurobi needed
 OUTPUT_ROOT = "outputs"
 
-# Names for the workload's computation nodes, one per ``reference.LAYERS`` entry.
-# They name the roles, and they are what the mapping and the generated design are
-# read by.
+# One per ``reference.LAYERS`` entry: the mapping and the design read these.
 GATE, UP, SILU, MUL, DOWN = "Gemm_Left", "Gemm_Right", "Silu", "Elt_Mul", "Gemm_Down"
 NODE_NAMES = [GATE, UP, SILU, MUL, DOWN]
 
-# The kernel tile each layer is compiled and mapped for, as (sequence, embedding,
-# hidden). A core holds the operands of every layer in its group, so the tile a group
-# can afford shrinks as more layers fuse onto it. Carrying the tile and no absolute
-# dimension is what lets one mapping hold across problem sizes.
+# (sequence, embedding, hidden); a core holds its whole group, so fused tiles shrink.
 FUSED_TILES = (32, 32, 64)  # k=1, k=2: several layers share a core
 LAYER_TILES = (64, 64, 64)  # k=5: one layer per core
 
-# Sequence positions an elementwise layer works at a time when it reads from and
-# writes to memory. Its tile is then this many whole rows, which is contiguous in
-# a row-major tensor, so each transfer runs the length of the rows rather than one
-# MAC tile at a time.
+# Whole rows per elementwise tile, so each transfer is contiguous.
 ELEMENTWISE_ROWS = 1
 
-# Which layers each fused group contains, per number of groups ``k``. Splitting
-# makes stream-dse emit one design per group; the tensor handed from one group to
-# the next comes from the exported graph.
+# The layers of each fused group, per number of groups ``k``.
 LAYER_BY_LAYER = 5
 GROUP_LAYERS = {
     1: [[GATE, UP, SILU, MUL, DOWN]],
@@ -110,15 +88,9 @@ def array() -> ComputeArray:
 def _placements(k, hidden_dim):
     """Where each layer runs.
 
-    Fused (k=1, k=2): the layers sit on disjoint columns, two per GEMM and one per
-    elementwise layer, so they pipeline across steady-state iterations. Each splits
-    over the array's rows (D0, the sequence dimension) and a GEMM over its two
-    columns as well (D2, the output dimension).
-
-    Layer by layer (k=5): the layers run in turn, so each takes the whole array.
-    The GEMMs use every row; the elementwise layers take one core per column and
-    split the sequence across them, the shape IRON's channeled operators use. They
-    also read whole rows, so their transfers to and from memory are contiguous.
+    Fused (k=1, k=2): layers on disjoint columns, so they pipeline. Layer by
+    layer (k=5): each takes the whole array in turn, the elementwise layers a
+    core per column reading whole rows.
     """
     grid = array()
     sequence_tile, _, hidden_tile = tiles_for(k)
@@ -178,12 +150,7 @@ def _layer_tiling(layer, hidden_dim, k):
 
 
 def _groups(k, hidden_dim):
-    """The fused groups, each with the intra-core tiling of its leading GEMM.
-
-    Splitting makes stream-dse emit one design per group, which IRON then deploys
-    as a single full ELF. D0 is the sequence dimension, D1 the contraction and D2
-    the output dimension.
-    """
+    """The fused groups, each with the intra-core tiling of its leading GEMM."""
     sequence_tile, embedding_tile, hidden_tile = tiles_for(k)
     if k == LAYER_BY_LAYER:
         tiling = [_layer_tiling(layers[0], hidden_dim, k) for layers in GROUP_LAYERS[k]]
@@ -245,11 +212,7 @@ def workload_for(seq_len, embedding_dim, hidden_dim):
 
 
 def group_ports(seq_len, embedding_dim, hidden_dim, k=1):
-    """Per fused group, the tensor names it takes in and hands on.
-
-    These are the operator's runtime arguments, including the tensors a split
-    design passes from one group to the next.
-    """
+    """Per fused group, the tensor names it takes in and hands on."""
     return group_boundaries(
         workload_for(seq_len, embedding_dim, hidden_dim), GROUP_LAYERS[k]
     )
@@ -284,17 +247,12 @@ def _experiment_id(seq_len, embedding_dim, hidden_dim, k, trace_size):
     )
 
 
-# How many tiles a traced design traces. Routing capacity sets the practical
-# limit.
+# Routing capacity sets the practical limit.
 TRACE_TILES = 4
 
 
 def _design_paths(seq_len, embedding_dim, hidden_dim, k, trace_size):
-    """Where stream-dse writes each group's MLIR.
-
-    A single fused group goes through stream-dse's single-design pipeline and lands
-    in ``codegen/``; several groups each land in their own ``group_i/codegen/``.
-    """
+    """Where stream-dse writes each group's MLIR."""
     output_dir = os.path.join(
         OUTPUT_ROOT, _experiment_id(seq_len, embedding_dim, hidden_dim, k, trace_size)
     )
@@ -307,10 +265,9 @@ def _design_paths(seq_len, embedding_dim, hidden_dim, k, trace_size):
 
 
 def _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k, trace_size):
-    """Run stream-dse's constraint optimization and code generation once.
+    """Run stream-dse's optimization and code generation once.
 
-    ``trace_size`` is the DDR trace buffer in bytes, 0 for an untraced design:
-    tracing adds a runtime-sequence argument, so it changes the ABI.
+    ``trace_size`` changes the ABI: tracing adds a runtime-sequence argument.
     """
     grid = array()
     experiment_id = _experiment_id(seq_len, embedding_dim, hidden_dim, k, trace_size)
@@ -338,26 +295,13 @@ def _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k, trace_size):
 
 
 def region_module(mlir_text: str, renames: dict | None = None):
-    """Parse a group's MLIR text into an ``aie`` module for fusion.
-
-    A graph's fused image consumes ``aie.DeviceOp`` objects, so the
-    xDSL-emitted group text is re-parsed with the mlir-aie bindings.
-
-    Fused, groups keep the names they were generated with: every object name
-    here already carries what distinguishes its recipe (``mm_<m>_<k>_<n>.o``),
-    and groups that name one object build it identically, so they share it.
-    """
+    """Parse a group's MLIR text into an ``aie`` module for fusion."""
     with ir.Context():
         return ir.Module.parse(_renamed(mlir_text, renames))
 
 
 def _renamed(mlir_text: str, renames: dict | None) -> str:
-    """Point the generated design at the symbols the objects actually define.
-
-    stream-dse suffixes a GEMM's symbols with its tile shape so several shapes
-    coexist in one design. ExternalFunction can only prefix, so the objects end
-    up prefixed instead and the text is rewritten to agree.
-    """
+    """Point the generated design at the symbols the objects actually define."""
     if not renames:
         return mlir_text
     for old, new in sorted(renames.items(), key=lambda kv: len(kv[0]), reverse=True):
@@ -392,16 +336,9 @@ def load_group(
 ):
     """Generate the ``k``-group design once and return one group's aie module.
 
-    ``group_index`` selects the group, in the order ``GROUP_LAYERS`` lists
-    them, and is keyword-only like the rest: the compile cache keys on a
-    design's parameters by name, so a positional one would not reach the key.
-    Every group loader calls this; the first generates the design and the rest
-    reuse the files on disk.
-
-    The kernels are declared here rather than by the operator because an
-    ExternalFunction registers into a process-global set that CompilableDesign
-    clears when it begins generating; one built earlier is discarded and its
-    object never compiled.
+    ``group_index`` is keyword-only: the compile cache keys on parameters by
+    name. The kernels are declared here because CompilableDesign clears
+    ExternalFunctions built before it starts generating.
     """
     renames = declare_group_kernels(group_index, k=k)
     text = _group_text(
@@ -417,11 +354,7 @@ def load_group(
 
 
 def declare_group_kernels(group_index, *, k) -> dict:
-    """Compile every kernel this group runs; return the symbol renames forced.
-
-    The registry is the single place a kernel's source, compile flags and
-    symbol names are declared, so the object and the generated design agree.
-    """
+    """Compile every kernel this group runs; return the symbol renames forced."""
     from iron.operators.swiglu_prefill_stream.stream.ops import ELTWISE_MUL, GEMM, SILU
 
     tiles = gemm_tiles(k)

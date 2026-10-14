@@ -9,12 +9,9 @@ from iron.common.testing import Case, Testing
 
 
 class AXPY(BinaryElementwise):
-    """AIE-accelerated aX + Y operator: the elementwise design with the
-    scalar passed to the kernel.
-    """
+    """AIE-accelerated aX + Y operator."""
 
-    # The splits at the default scalar, then a non-integer one that bf16
-    # rounds on one shape, so the scalar is seen to reach the kernel.
+    # A second scalar on one shape, so it is seen to reach the kernel.
     test = Testing(
         [
             Sweep(channels=None, scalar_factor=3.0),

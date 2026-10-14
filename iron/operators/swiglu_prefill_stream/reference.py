@@ -3,14 +3,9 @@
 
 """Reference SwiGLU-prefill block: ``(SiLU(x @ gate) * (x @ up)) @ down``.
 
-``LAYERS`` is the block. Evaluating it produces the golden output; building
-the ONNX graph from it produces the workload stream-dse generates the design
-from.
-
-The names below are the block's vocabulary, and they are the keys
-``generate_golden_reference`` gives the same tensors. Everything
-downstream is named from here: the ONNX tensors, the mapping's layers and runtime arguments, the runtime
-buffers, and the tensor handed between fusion groups.
+``LAYERS`` is the block: evaluated, the golden output; as ONNX, the
+workload stream-dse generates the design from. Everything downstream is
+named from the names below.
 """
 
 import numpy as np

@@ -36,12 +36,8 @@ class ElementwiseAdd(BinaryElementwise):
 
 
 class RowwiseAdd(Rowwise):
-    """Each row plus one row, ``x + row``: the row is a line every core
-    holds for the call, one per channel shared by its columns. A linear
-    projection's bias, added once per output column across every row.
-    """
+    """Each row plus one row, ``x + row``: a projection's bias."""
 
-    # A core holds the row beside each line in and out.
     tile_cap: ClassVar[int] = 4096
 
     x = In(

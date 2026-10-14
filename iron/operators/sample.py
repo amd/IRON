@@ -3,27 +3,10 @@
 
 """Sample: the next token, drawn on the device from a row of bf16 logits.
 
-Temperature and top-k sampling as ``aie.iron.kernels.sample.sample_ref``
-specifies it, bit for bit, so a device draw and a host draw of the same
-logits and the same uniform agree exactly. A draw is a four-word row of
-``draws`` (temperature, top-k, and the 53-bit uniform, see
-``aie.iron.kernels.sample.draw_row``) written by the host ahead of time, one
-per position; the token is written to ``token`` (what the next step embeds)
-and recorded at its position in ``tokens``.
-
-The logits are split over ``cores`` columns. Each column's core passes its
-slice twice through ``sample_select`` (a threshold pass, a collecting pass)
-into a summary of its top k -- streamed twice, or once when a chunk is the
-whole slice; the summaries join in a memtile into one ``sample_combine``
-core, which draws the token.
-
-In a graph, the position is two per-call values: ``row`` is the element
-offset of its draw (``4 * position``) and ``at`` the element offset of its
-record (``position``):
-
-```python
-tokens, token = Sample(logits, draws, tokens, row=position * 4, at=position)
-```
+Temperature and top-k sampling bit for bit as
+``aie.iron.kernels.sample.sample_ref``, from a four-word draw row the host
+writes ahead of time per position. Each column's core reduces its slice of
+the logits to a top-k summary; one combine core draws the token from them.
 """
 
 import dataclasses
@@ -56,11 +39,7 @@ _CHUNK_LIMIT = 8192
 
 
 def reference(logits, draw_row, k_max: int | None = None) -> int:
-    """The token the device draws from ``logits`` for one four-word draw row.
-
-    The kernels take a top-k below 1 as 1 and one above ``k_max`` as
-    ``k_max``: a row of zeros, a buffer the host never wrote, is greedy.
-    """
+    """The token the device draws for one draw row; an all-zero row is greedy."""
     words = np.asarray(draw_row, dtype=np.int32)
     row = words.view(np.uint32)
     temperature = row[0:1].view(np.float32)[0]
@@ -92,10 +71,7 @@ def _logits(op: "Sample") -> dict:
 
 
 class Sample(Operator):
-    """Draw the next token from a row of logits (exact temperature/top-k).
-
-    ``cores`` select cores, one slice of the row each, and one combine core.
-    """
+    """Draw the next token from a row of logits (exact temperature/top-k)."""
 
     # A token id; anything but exact is wrong.
     test = Testing(
@@ -107,14 +83,12 @@ class Sample(Operator):
         draw=_logits,
     )
 
-    # The array reads both: the slice each core takes, the summary's size.
     vocab: int = Param(array=True)
     k_max: int = Param(default=64, array=True)
     # Positions the draws and the record hold; the sequence picks one.
     steps: int = Param(default=1)
     cores: int = Auto(default=4)
-    # Logits per select call; the largest even divisor of the slice up to
-    # 8192 unless given.
+    # Logits per select call.
     chunk: int = Auto(
         domain=Divisors(of=lambda op, dev: op.slice_size, step=2, cap=_CHUNK_LIMIT)
     )
@@ -125,8 +99,7 @@ class Sample(Operator):
     )
     tokens = InOut(steps, dtype=np.int32, obj_type=(1,), depth=1)
     token = Out(1, dtype=np.int32, obj_type=(1,), depth=1)
-    # Element offsets of this position's draw row and record: per call where
-    # a graph binds them.
+    # Element offsets of this position's draw row and record.
     row = Value(derive=lambda op: 0)
     at = Value(derive=lambda op: 0)
 
@@ -184,8 +157,7 @@ class Sample(Operator):
         select, combine = self._select(), self._combine()
         words = kernels.summary_words(self.slice_size, self.k_max)
         calls = self.select_streams * self.slice_size // self.chunk
-        # Every core reads the draw row: the select cores their top-k, the
-        # combine core the rest.
+        # Every core reads the draw row.
         of_draw = ObjectFifo(self.draws.obj_type, depth=1)
         self.draws.bind(of_draw.prod())
         of_token = ObjectFifo(self.token.obj_type, depth=1)
@@ -255,10 +227,7 @@ class Sample(Operator):
         return workers
 
     def _slice_taps(self, core: int) -> list[TensorAccessPattern]:
-        """Core ``core``'s slice, once per select stream: one descriptor that
-        re-reads it (stride 0 in the iteration slot) where the run factors
-        into one, else one per stream.
-        """
+        """Core ``core``'s slice, once per select stream."""
         run, streams = self.slice_size, self.select_streams
         piece = TensorAccessPattern.full((self.vocab,))[core * run : (core + 1) * run]
         shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)

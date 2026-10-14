@@ -211,12 +211,9 @@ class ResampleTaps(Operator):
     """The int16 filter table and precision torch resamples one axis with,
     `in_samples` samples to `out_samples`.
 
-    Each core takes chunks `k, k + cores, ...` and computes its outputs'
-    weights in float64 twice: once for the largest normalized weight, which
-    a chain through the cores reduces and the last core broadcasts, and once
-    to quantize at the precision that weight sets. `in_samples` and
-    `out_samples` may be bound per call, and so then are the chunks the
-    cores write, so one build serves every size the table holds.
+    Each core takes chunks `k, k + cores, ...` and computes their weights in
+    float64 twice: once for the largest weight, which a chain through the
+    cores reduces, and once to quantize at the precision it sets.
     """
 
     test = Testing(
@@ -239,7 +236,7 @@ class ResampleTaps(Operator):
     words: int = Param(default=256)
     # The slots of a chunk, or None for as many as the window lets fit.
     slots: int | None = Param(default=None, array=True)
-    # Enough for out_size, in a multiple of 16 so every core count up to it divides.
+    # A multiple of 16, so every core count up to it divides.
     chunks: int = Param(
         derive=lambda op: 16
         * -(
@@ -260,7 +257,6 @@ class ResampleTaps(Operator):
     in_samples = Extent(in_size)
     out_samples = Extent(out_size)
 
-    # Chunks per core.
     count = Value(
         derive=lambda op: -(-op.filled(op.in_samples, op.out_samples) // op.cores),
     )
@@ -353,9 +349,7 @@ class ResampleTaps(Operator):
         return Tolerance.exact()
 
     def sequence(self, rt):
-        """Chunk `c` from core `c % cores`, the round-robin order the cores
-        compute them in: the chunks filled per call, or at the build's sizes.
-        """
+        """Chunk `c` from core `c % cores`, the order the cores compute them in."""
         per_call = self.count.per_call
         n, words = self.table.shape
         count = n // self.cores if per_call else self.residents["count"]
@@ -396,8 +390,7 @@ class ResampleTaps(Operator):
             "resample_quantize", [peak_ty, self.table.obj_type] + [np.int32] * 5
         )
         of_tables = [ObjectFifo(self.table.obj_type, depth=2) for k in range(cores)]
-        # Core k passes the peak so far to core k + 1; the last broadcasts it
-        # from a memtile.
+        # The peak passes core to core; the last broadcasts it from a memtile.
         of_chain = [ObjectFifo(peak_ty, depth=1) for k in range(cores - 1)]
         of_peak = of_all = None
         if cores > 1:
@@ -478,8 +471,7 @@ class ResampleTaps(Operator):
 
 SIDE = 16  # a patch's pixels on each axis, and the outputs of a taps chunk
 
-# The bf16 bits of u8 / 255 as the image processor rounds them: in float32,
-# then to bf16 once.
+# u8 / 255 as the image processor rounds it: in float32, then to bf16 once.
 PIXELS = (np.arange(256, dtype=np.float32) * np.float32(1 / 255)).astype(bfloat16)
 
 RESIZE = """
@@ -788,25 +780,15 @@ class Resample(Operator):
     """An image resized as torchvision's antialiased bicubic resize does it
     on the CPU, written as the vision tower's patches.
 
-    `image` is the `(height, width, 3)` uint8 image, each row padded to
-    whole `chunk`-byte chunks, which every core receives. `taps_w` and
-    `taps_h` are `ResampleTaps` tables with a patch's 16 outputs to a
-    chunk (`slots=16`), `width -> out_width` and `height -> out_height`.
-    Core `k` owns patch columns `k, k + cores, ...`: it takes their width
-    chunks, resamples each image row across them, and each band of 16
-    output rows down them once its input rows have come. Patch `(py, px)`
-    is row `py * pad + px` of `patches`, 16x16 pixels row-major, channels
-    last, `u8 / 255` in bf16; `pad` is `(columns // cores + 1) * cores`
-    for `columns` patch columns, its extra columns zeros: row `pad - 1` is
-    always a zero patch, which padding past the image gathers.
-
-    `rows`, `columns`, `out_rows` and `out_columns` may be bound per call,
-    so one build serves every size the buffers hold.
+    Every core receives the image in `chunk`-byte chunks; core `k` owns
+    patch columns `k, k + cores, ...`, resamples each row across them, then
+    each band of 16 rows down them. Patch `(py, px)` is row `py * pad + px`
+    of `patches`, `pad` the patch columns padded past the cores with zeros:
+    row `pad - 1` is the zero patch padding gathers.
     """
 
     test = Testing(
         [
-            # A phone photo to the image budget's 42x57 patches.
             Case(
                 dict(height=3024, width=4032, out_height=672, out_width=912),
                 bench=True,
@@ -854,20 +836,18 @@ class Resample(Operator):
     width: int = Param()
     out_height: int = Param()
     out_width: int = Param()
-    # Every chunk is a buffer handshake with every core: few and large ones.
+    # Every chunk is a handshake with every core: few and large ones.
     chunk: int = Param(default=4096, array=True)
     # A 39-tap window: a scale of up to 9.5.
     words: int = Param(default=356, array=True)
-    # The patch columns a core holds, so cores * patch_columns across. The
-    # old flat default is a floor, so two resizes of one image that each
-    # need no more of it still resolve to the same array.
+    # A floor of 8, so two resizes of one image that need no more share an array.
     patch_columns: int = Param(
         derive=lambda op: max(8, op.default_patch_columns()), array=True
     )
     image_chunks: int = Param(
         derive=lambda op: op.height * -(-3 * op.width // op.chunk)
     )
-    # In multiples of 16, as ResampleTaps's are, so every core count up to it divides.
+    # Multiples of 16, as ResampleTaps's are.
     width_chunks: int = Param(derive=lambda op: 16 * -(-op.out_width // (16 * SIDE)))
     height_chunks: int = Param(derive=lambda op: 16 * -(-op.out_height // (16 * SIDE)))
     patch_rows: int = Param(derive=lambda op: op.padded_rows())
@@ -898,7 +878,6 @@ class Resample(Operator):
     image_count = Value(derive=lambda op: op.rows * -(-3 * op.columns // op.chunk))
     width_count = Value(derive=lambda op: op.out_columns // SIDE)
     height_count = Value(derive=lambda op: op.out_rows // SIDE)
-    # Patches per core: every band's, padded past the cores.
     patch_count = Value(
         derive=lambda op: op.out_rows // SIDE * (op.out_columns // SIDE // op.cores + 1)
     )
@@ -908,20 +887,14 @@ class Resample(Operator):
         return self.num_aie_columns * self.num_channels
 
     def default_patch_columns(self) -> int:
-        """Patch columns a core holds, at the given columns' or the bound
-        device's every column (NPU2's eight with none bound), two channels
-        each: `out_width`'s patch columns split over them.
-        """
+        """Patch columns a core holds: `out_width`'s split over the cores."""
         dev = self.dev
         cols = self.num_aie_columns or (dev.cols if dev is not None else 8)
         cores = cols * self.num_channels
         return self.out_width // SIDE // cores + 1
 
     def padded_rows(self) -> int:
-        """Every band's patch columns, padded past the cores: the given
-        columns' or the bound device's every column (NPU2's eight with none
-        bound), two channels each.
-        """
+        """Every band's patch columns, padded past the cores."""
         dev = self.dev
         cols = self.num_aie_columns or (dev.cols if dev is not None else 8)
         cores = cols * self.num_channels
@@ -933,11 +906,7 @@ class Resample(Operator):
         return 2 * ((self.words - HEADER) // SIDE - 2) - 1
 
     def held(self, dev) -> int:
-        """Core memory a core of `dev` holds at `patch_columns`: the resize
-        kernel's per-column tables and row bands (`hweight`'s two taps
-        vectors a slot, `line`/`mid`/`hold`'s pixel bands, `hstart` and
-        `span`), its image, taps and patches buffers, and the stack.
-        """
+        """Core memory a core of `dev` holds at `patch_columns`."""
         cols, win = self.patch_columns, self.window_cap
         plane = (5 * win + 8 + 64 + 63) // 64 * 64
         kernel = (
@@ -1061,10 +1030,7 @@ class Resample(Operator):
         return Tolerance.exact()
 
     def sequence(self, rt):
-        """The image, then both tables down one stream, and each core's
-        patches: every transfer sized at its buffer, shortened per call, or
-        at the build's sizes.
-        """
+        """The image, then both tables down one stream, and each core's patches."""
         tg = TaskGroup()
         moves = [
             (self.image, None, self.image, "image_count", 0, 1),
@@ -1255,20 +1221,13 @@ class PatchPositions(Operator):
     """Where each of `rows` patch rows of the vision tower comes from, for
     an image resized to `out_rows` by `out_columns` pixels.
 
-    The patches are in pooling-window order: each soft token's `pool ** 2`
-    patches consecutive and row-major within the window, the tokens
-    row-major over the image. `xy` is each patch's x and y side by side,
-    `position_ids` every patch's x, then every patch's y plus `positions`,
-    and `order` its row of `Resample`'s raster over `cores` cores. Rows
-    past the image hold `positions`, `2 * positions` and the raster's zero
-    patch, the rows each gather pads with. One core writes `block` rows at
-    a time, reading `out_rows` and `out_columns`, so one build serves every
-    size `rows` holds.
+    The patches are in pooling-window order; `order` is each one's row of
+    `Resample`'s raster. Rows past the image hold `positions`,
+    `2 * positions` and the raster's zero patch, which each gather pads with.
     """
 
     test = Testing(
         [
-            # The image budget's 42x57 patches.
             Case(dict(rows=2560, out_height=672, out_width=912), bench=True),
             # Whole: no padding, and 48 patch columns on 16 cores.
             Case(dict(rows=2304, out_height=768, out_width=768)),

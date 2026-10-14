@@ -13,8 +13,7 @@ from iron.common.testing import Case, Testing
 
 from .split3 import SPLIT
 
-# aie2p has no float32 vector multiply: every product here is of bf16 limbs,
-# exact in the float32 accumulator.
+# aie2p has no float32 vector multiply: products of bf16 limbs, exact in f32.
 MAGNITUDE = SPLIT + """
 extern "C" void magnitude_f32(float *restrict x, float *restrict out, int32_t n) {
     event0();
@@ -77,9 +76,7 @@ def magnitude(x):
 
 
 class Magnitude(Rowwise):
-    """The magnitude of each row of complex float32, held as `[re | im]`:
-    a row of `width` floats in, `width / 2` out.
-    """
+    """The magnitude of each row of complex float32 held as `[re | im]`."""
 
     test = Testing(
         [

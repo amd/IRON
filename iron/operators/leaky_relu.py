@@ -9,13 +9,10 @@ from iron.common.testing import Case, Testing
 
 
 class LeakyReLU(UnaryElementwise):
-    """AIE-accelerated Leaky ReLU operator: the elementwise design with
-    ``alpha`` passed to the kernel.
-    """
+    """AIE-accelerated Leaky ReLU operator."""
 
     test = Testing(
-        # The shape sweep at the default alpha, then another alpha on one
-        # small shape, so alpha is seen to reach the kernel.
+        # Another alpha on one shape, so alpha is seen to reach the kernel.
         [
             Sweep(alpha=0.01),
             Case(
@@ -34,8 +31,6 @@ class LeakyReLU(UnaryElementwise):
     alpha: float = Param(default=0.01, array=True)
 
     def kernel(self):
-        # The factory holds what the line length must satisfy: a whole
-        # number of the architecture's vectors (16 on aie2, 32 on aie2p).
         return activation.leaky_relu(self.tile_size)
 
     def scalars(self) -> tuple:

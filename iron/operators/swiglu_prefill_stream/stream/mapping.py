@@ -3,17 +3,8 @@
 
 """Emit the stream-dse mapping for an exported workload.
 
-An operator declares *where* each node runs (``Placement``) and how nodes
-are fused (``FusedGroup``); this module turns that into the mapping YAML
-stream-dse consumes. Node names are taken from the
-``StreamWorkload`` the ONNX was generated from,
-and every placement is checked against it, so a mapping can never refer to a node
-the workload does not contain.
-
-The placement is deliberately explicit -- which compute tiles a layer occupies is
-a hardware decision worth reading in one place -- while the repetitive YAML
-plumbing is generated. Placements carry no absolute tensor dimensions, only tile
-sizes and core sets, so they hold across problem sizes.
+Node names are taken from the ``StreamWorkload`` and every placement is
+checked against it, so a mapping cannot name a node the workload lacks.
 """
 
 from __future__ import annotations
@@ -28,13 +19,8 @@ from iron.operators.swiglu_prefill_stream.stream.workload import StreamWorkload
 
 @dataclass(frozen=True)
 class Placement:
-    """Where one workload node runs.
-
-    ``columns`` are the array columns it occupies, resolved to core ids against
-    the ``ComputeArray``; ``rows`` narrows that
-    to some rows of each column (all of them by default); ``splits`` is the
-    inter-core tiling as ``(dim, split)`` pairs; ``kernel_kwargs`` are the
-    arguments of the node's stream-dse kernel (e.g. a GEMM's tile shape).
+    """Where one workload node runs: its columns (some ``rows`` of each), its
+    inter-core ``splits`` and its stream-dse kernel's ``kernel_kwargs``.
     """
 
     columns: Sequence[int]
@@ -45,11 +31,7 @@ class Placement:
 
 @dataclass(frozen=True)
 class FusedGroup:
-    """A set of nodes fused into one design, with its layer-fusion tiling.
-
-    ``intra_core_tiling`` entries are ``(node_name, dim, tile)``. Splitting a
-    workload into several groups makes stream-dse emit one design per group.
-    """
+    """A set of nodes fused into one design, with its layer-fusion tiling."""
 
     name: str
     layers: Sequence[str]
@@ -59,12 +41,8 @@ class FusedGroup:
 def group_boundaries(
     workload: StreamWorkload, group_layers: Sequence[Sequence[str]]
 ) -> list[tuple[tuple[str, ...], tuple[str, ...]]]:
-    """Per group, the tensors it consumes from outside and produces for outside.
-
-    These are the group's runtime arguments: what an operator built from several
-    fused groups has to hand from one to the next. Both sequences follow the order
-    the group's nodes use them, which is the order stream-dse gives the generated
-    design its arguments in.
+    """Per group, the tensors it consumes from and produces for outside,
+    in the order stream-dse gives the generated design its arguments.
     """
     graph = workload.model.graph
     produced_by = {out: node.name for node in graph.node for out in node.output}
