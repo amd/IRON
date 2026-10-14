@@ -160,9 +160,18 @@ def pmode() -> str:
     return platform()["Power Mode"]
 
 
-def others() -> set[int]:
+def others(holding: bool = False) -> set[int]:
     """The processes other than this one holding a context on the NPU, by
     pid, as ``xrt-smi`` reports its partitions.
+
+    ``xrt-smi`` reports pids in the host's pid namespace, so in a container
+    ``os.getpid()`` is none of them and this process cannot tell which is
+    its own.
+
+    Args:
+        holding: Whether this process holds a context. Where its pid is not
+            reported, it is then the one pid when one is reported, and
+            somewhere among them, all returned, when more are.
     """
     with tempfile.TemporaryDirectory() as d:
         report = Path(d) / "partitions.json"
@@ -172,12 +181,15 @@ def others() -> set[int]:
             check=True,
         )
         devices = json.loads(report.read_text())["devices"]
-    return {
+    pids = {
         int(context["pid"])
         for device in devices
         for partition in device["aie_partitions"].get("partitions", [])
         for context in partition.get("hw_contexts", [])
-    } - {os.getpid()}
+    }
+    if os.getpid() in pids or not holding:
+        return pids - {os.getpid()}
+    return pids if len(pids) > 1 else set()
 
 
 # Seconds between looks at an NPU another process holds, and the most waited.
@@ -190,14 +202,17 @@ IDLE_WAIT = 1800.0
 CPU_WAIT_US = 100.0
 
 
-def wait_idle(log: Callable[[str], None] = print) -> None:
+def wait_idle(log: Callable[[str], None] = print, holding: bool = False) -> None:
     """Return once no other process holds a context on the NPU (``others``).
+
+    Args:
+        holding: Whether this process holds a context (``others``).
 
     Raises:
         TimeoutError: Another has held one for ``IDLE_WAIT`` seconds. Two
             processes measuring at once would each wait for the other.
     """
-    held, told = others(), set()
+    held, told = others(holding), set()
     start = time.monotonic()
     while held:
         if held != told:
@@ -209,7 +224,7 @@ def wait_idle(log: Callable[[str], None] = print) -> None:
                 f"measure once it is idle"
             )
         time.sleep(IDLE_POLL)
-        held = others()
+        held = others(holding)
 
 
 class Awake:
@@ -551,7 +566,7 @@ def time_interleaved(
     medians: list[list[float]] = [[] for _ in runs]
     waited: list[list[float]] = [[] for _ in runs]
     live = set(range(len(runs)))
-    wait_idle(log)
+    wait_idle(log, holding=True)
     r = 0
     with Awake(before):
         while r < timing.rounds:
@@ -566,12 +581,12 @@ def time_interleaved(
                     times.append(run.last_elapsed)
                     waits.append(Awake.waited_us() - start)
                 timed[i] = (statistics.median(times) * 1e6, statistics.median(waits))
-            held = others()
+            held = others(holding=True)
             if held:
                 log(
                     f"    pid {sorted(held)} used the NPU during a round: timing it again"
                 )
-                wait_idle(log)
+                wait_idle(log, holding=True)
                 continue
             for i, (us, wait) in timed.items():
                 medians[i].append(us)
