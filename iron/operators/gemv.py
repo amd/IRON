@@ -9,13 +9,7 @@ import aie.dialects.index as index
 import numpy as np
 from aie.dialects.aie import T
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import (
-    Buffer,
-    ObjectFifo,
-    Worker,
-    WorkerRuntimeBarrier,
-    ceildiv,
-)
+from aie.iron import Buffer, ObjectFifo, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import eltwise, linalg
@@ -454,30 +448,18 @@ class GEMV(Operator):
             for i in range(lanes)
         ]
         vectors = [Buffer(vector) for _ in range(lanes)]
-        # Per lane: the trip count (unless a graph bounds M, when each core
-        # reads it from the scratchpad) and the batches of a call.
-        dynamic = self.value("tiles").scratchpad
-        rtps = [
-            Buffer(
-                np.ndarray[(2,), np.dtype[np.int32]],
-                name=f"rtp_{i}",
-                use_write_rtp=True,
-            )
-            for i in range(lanes)
-        ]
-        barriers = [WorkerRuntimeBarrier() for _ in range(lanes)]
+        # Per lane: the trip count and the batches of a call.
+        rtps = self.rtp(
+            [self.tiles, self.batches, *prepare.values, *finish.values], cores=lanes
+        )
 
-        def core_body(A_fifo, C_fifo, b, matvec, copy, rtp, barrier, *rest):
-            barrier.wait_for_value(1)
-            n = rest[0].read() if dynamic else rtp[0]
-            rest = rest[1:] if dynamic else rest
+        def core_body(A_fifo, C_fifo, b, matvec, copy, rtp, *rest):
+            words = rtp.read()
+            n = words[self.tiles]
             prepared, rest = rest[: prepare.arity], rest[prepare.arity :]
-            batches = rtp[1]
-            mode_p = prepare.read(prepared)
-            mode = finish.read(rest)
-            # The wait leaves the barrier set: release it, or a design sharing
-            # this array runs on these values.
-            barrier.release_with_value(1)
+            batches = words[self.batches]
+            mode_p = prepare.mode(words)
+            mode = finish.mode(words)
             for _ in range_(batches):
                 # The batch's head tile carries B; the prologue's inputs,
                 # then the rows of A follow it.
@@ -509,8 +491,6 @@ class GEMV(Operator):
                     matvec,
                     copy,
                     rtps[i],
-                    barriers[i],
-                    *([self.tiles.param] if dynamic else []),
                     *prepare.args(i),
                     *finish.args(i),
                 ],
@@ -519,12 +499,8 @@ class GEMV(Operator):
         ]
         self.A.bind([f.prod() for f in A_fifos])
         self.C.bind([f.cons() for f in C_fifos])
-        if not dynamic:
-            self.tiles.bind(rtps, 0)
-        self.batches.bind(rtps, 1)
-        prepare.bind()
         finish.bind()
-        return workers + barriers
+        return workers
 
     def sequence(self, rt):
         """The runtime sequence: each lane's stream carries, per batch, B's

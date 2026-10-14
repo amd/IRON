@@ -6,7 +6,7 @@ import dataclasses
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker, WorkerRuntimeBarrier
+from aie.iron import ObjectFifo, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import datamovement
@@ -211,19 +211,13 @@ class Transpose(Operator):
             for i in range(cols)
             for j in range(chans)
         ]
-        i32x3 = np.ndarray[(3,), np.dtype[np.int32]]
-        counts = [
-            Buffer(i32x3, name=f"counts_{k}", use_write_rtp=True)
-            for k in range(n_cores)
-        ]
-        barriers = [WorkerRuntimeBarrier() for _ in range(n_cores)]
+        rtps = self.rtp([self.batches, self.col_tiles, self.chan_tiles], cores=n_cores)
 
-        def core_body(of_in, of_out, transpose, counts, barrier):
-            barrier.wait_for_value(1)
-            batches = counts[0]
-            col_tiles = counts[1]
-            chan_tiles = counts[2]
-            barrier.release_with_value(1)
+        def core_body(of_in, of_out, transpose, rtp):
+            words = rtp.read()
+            batches = words[self.batches]
+            col_tiles = words[self.col_tiles]
+            chan_tiles = words[self.chan_tiles]
             # The kernel only ever sees s*s sub-tiles, so it is batch-agnostic.
             for _ in range_(batches):
                 for _ in range_(col_tiles):
@@ -237,16 +231,13 @@ class Transpose(Operator):
         workers = [
             Worker(
                 core_body,
-                [of_l2l1[k].cons(), of_outs[k].prod(), kernel, counts[k], barriers[k]],
+                [of_l2l1[k].cons(), of_outs[k].prod(), kernel, rtps[k]],
             )
             for k in range(n_cores)
         ]
         self.x.bind([f.prod() for f in of_l3l2])
         self.y.bind([f.cons() for f in of_outs])
-        self.batches.bind(counts, 0)
-        self.col_tiles.bind(counts, 1)
-        self.chan_tiles.bind(counts, 2)
-        return workers + barriers
+        return workers
 
     def sequence(self, rt):
         """One task group per batch (a parallel fill+drain over all cores), so the

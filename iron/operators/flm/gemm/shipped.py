@@ -152,7 +152,7 @@ class Shipped(
     # eight words behind a lock, written once per shape.
     n_val = m_row_blocks = k_iters = mode = clamp_min = clamp_max = None
     n_chunks = n_units = units_valid = units_repeat = valid = None
-    parameters = Value(derive=_parameter_words)
+    parameters = Value(derive=_parameter_words, words=PARAMETER_WORDS)
 
     def array(self) -> list:
         """What the sequence reaches of the image: the shim channels each
@@ -181,7 +181,6 @@ class Shipped(
             )
             for tile in cores
         ]
-        self.parameters.bind(blocks)
         self.parameter_locks = [Lock(tile, lock_id=RTP_LOCK_ID) for tile in cores]
         ends = [end for _, lane_ends in pins for end in lane_ends]
         return [*ends, *blocks, *self.parameter_locks]

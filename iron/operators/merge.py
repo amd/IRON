@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.iron import Buffer, ExternalFunction, ObjectFifo, Worker, WorkerRuntimeBarrier
+from aie.iron import ExternalFunction, ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 
@@ -118,27 +118,16 @@ class Merge(Operator):
         )
         of_ids = ObjectFifo(self.ids.tile, name="ids", depth=2)
         of_merge = ObjectFifo(self.merge.tile, name="merge", depth=2)
-        dynamic = self.value("count").scratchpad
-        rtp = Buffer(
-            np.ndarray[(1,), np.dtype[np.int32]], name="rtp", use_write_rtp=True
-        )
-        barrier = WorkerRuntimeBarrier()
-        params = [self.count.param] if dynamic else []
+        (rtp,) = self.rtp([self.count])
 
-        def core_fn(of_in, of_out, kernel_fn, rtp, barrier, *count):
-            barrier.wait_for_value(1)
-            n = count[0].read() if dynamic else rtp[0]
-            barrier.release_with_value(1)
+        def core_fn(of_in, of_out, kernel_fn, rtp):
+            n = rtp.read()[self.count]
             for b in range_(n):
                 kernel_fn(of_in.acquire(1), of_out.acquire(1), b)
                 of_in.release(1)
                 of_out.release(1)
 
-        worker = Worker(
-            core_fn, [of_ids.cons(), of_merge.prod(), kernel, rtp, barrier] + params
-        )
+        worker = Worker(core_fn, [of_ids.cons(), of_merge.prod(), kernel, rtp])
         self.ids.bind(of_ids.prod())
         self.merge.bind(of_merge.cons())
-        if not dynamic:
-            self.count.bind([rtp], 0)
-        return [worker, barrier]
+        return [worker]

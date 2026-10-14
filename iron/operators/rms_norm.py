@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-import numpy as np
-from aie.iron import Buffer, ObjectFifo, Worker, WorkerRuntimeBarrier
+from aie.iron import ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise, norm
 from aie.utils.verify import Tolerance
@@ -133,25 +132,10 @@ class RMSNorm(Rowwise):
             for j in range(chans)
         ]
         n_cores = cols * chans
-        dynamic = self.value("count").scratchpad
-        counts = (
-            [self.count.param] * (2 * n_cores)
-            if dynamic
-            else [
-                Buffer(
-                    np.ndarray[(1,), np.dtype[np.int32]],
-                    name=f"count_{k}",
-                    use_write_rtp=True,
-                )
-                for k in range(2 * n_cores)
-            ]
-        )
-        barriers = [WorkerRuntimeBarrier() for _ in range(2 * n_cores)]
+        rtps = self.rtp([self.count], cores=2 * n_cores)
 
-        def core_norm(of_in, of_out, rms, count, barrier):
-            barrier.wait_for_value(1)
-            n = count.read() if dynamic else count[0]
-            barrier.release_with_value(1)
+        def core_norm(of_in, of_out, rms, rtp):
+            n = rtp.read()[self.count]
             for _ in range_(n):
                 elem_in = of_in.acquire(1)
                 elem_out = of_out.acquire(1)
@@ -159,10 +143,8 @@ class RMSNorm(Rowwise):
                 of_in.release(1)
                 of_out.release(1)
 
-        def core_mul(of_in, of_w, of_out, mul, count, barrier):
-            barrier.wait_for_value(1)
-            n = count.read() if dynamic else count[0]
-            barrier.release_with_value(1)
+        def core_mul(of_in, of_w, of_out, mul, rtp):
+            n = rtp.read()[self.count]
             elem_w = of_w.acquire(1)
             for _ in range_(n):
                 elem_in = of_in.acquire(1)
@@ -183,8 +165,7 @@ class RMSNorm(Rowwise):
                             of_ins[k].cons(),
                             of_mid[k].prod(),
                             rms_norm,
-                            counts[k],
-                            barriers[k],
+                            rtps[k],
                         ],
                     )
                 )
@@ -199,14 +180,11 @@ class RMSNorm(Rowwise):
                             of_ws[j].cons(),
                             of_outs[k].prod(),
                             eltwise_mul,
-                            counts[n_cores + k],
-                            barriers[n_cores + k],
+                            rtps[n_cores + k],
                         ],
                     )
                 )
         self.x.bind([f.prod() for f in of_ins])
         self.y.bind([f.cons() for f in of_outs])
         self.weight.bind([f.prod() for f in of_ws])
-        if not dynamic:
-            self.count.bind(counts)
-        return workers + barriers
+        return workers

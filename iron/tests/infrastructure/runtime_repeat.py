@@ -59,12 +59,12 @@ class RepeatTile(Operator):
 
     def sequence(self, rt):
         width, max_k = self.width, self.max_k
-        bound = self.uses_value("reps")
+        bound = self.reps.per_call
         tg = TaskGroup()
         self.x.fill(
             TensorAccessPattern((width,), 0, [max_k, 1, 1, width], [0, 0, 0, 1]),
             group=tg,
-            repeat_parameter=self.value("reps") if bound else None,
+            repeat_parameter=self.reps if bound else None,
         )
         self.y.drain(
             TensorAccessPattern(

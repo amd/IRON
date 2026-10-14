@@ -97,9 +97,9 @@ read by the core once its barrier opens:
 A word is not free: each costs ~66 ns per core and the sequence writes
 `ROWS * COLS` = 32 of them, so **every word is ~2 us of dispatch latency**
 (measured by padding the buffer at a fixed core count). Against a ~107 us
-floor that is most of a short-prefill dispatch, so `rtp_layout()` in design.py
-sizes the buffer per configuration rather than sending words a build cannot
-use. Two groups are therefore conditional or gone:
+floor that is most of a short-prefill dispatch, so `array()` lists only the
+words a configuration's cores read (`self.rtp(...)`), and the buffer is sized
+to them. Two groups are therefore conditional or gone:
 
 * `n_chunks` / `n_units` are sent **only when `m_chunk > 1`**. They are
   `m_row_blocks // M_CHUNK` and each other, so at the shipped `M_CHUNK = 1`

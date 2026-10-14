@@ -5,7 +5,7 @@ import dataclasses
 
 import numpy as np
 from aie.extras.dialects import arith
-from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker, WorkerRuntimeBarrier
+from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import conv
 from ml_dtypes import bfloat16
@@ -104,20 +104,10 @@ class DepthwiseConv1d(Operator):
         of_w = ObjectFifo(plane, name="weight", depth=TAPS)
         zero = Buffer(plane, initial_value=np.zeros(C, bfloat16))
         limit = np.ndarray[(1,), np.dtype[np.float32]]
-        rtps = [
-            Buffer(
-                np.ndarray[(1,), np.dtype[np.int32]],
-                name=f"rtp_{k}",
-                use_write_rtp=True,
-            )
-            for k in range(cols)
-        ]
-        barriers = [WorkerRuntimeBarrier() for _ in range(cols)]
+        rtps = self.rtp([self.steps], cores=cols)
 
-        def core_fn(of_in, of_w, of_out, conv_fn, zero, lo, hi, rtp, barrier):
-            barrier.wait_for_value(1)
-            n = rtp[0]
-            barrier.release_with_value(1)
+        def core_fn(of_in, of_w, of_out, conv_fn, zero, lo, hi, rtp):
+            n = rtp.read()[self.steps]
             w = of_w.acquire(TAPS)
             taps = [w[j] for j in range(TAPS)]
             if zero is not None:
@@ -150,7 +140,6 @@ class DepthwiseConv1d(Operator):
                     Buffer(limit, initial_value=np.zeros(1, np.float32)),
                     Buffer(limit, initial_value=np.zeros(1, np.float32)),
                     rtps[k],
-                    barriers[k],
                 ],
             )
             for k in range(cols)
@@ -158,8 +147,7 @@ class DepthwiseConv1d(Operator):
         self.x.bind([f.prod() for f in of_ins])
         self.y.bind([f.cons() for f in of_outs])
         self.weight.bind(of_w.prod())
-        self.steps.bind(rtps, 0)
-        return workers + barriers
+        return workers
 
     def sequence(self, rt):
         """The weights once to every core, then each core's run of rows, the

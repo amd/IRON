@@ -33,7 +33,7 @@ import aie.dialects.arith as arith
 import aie.dialects.memref as memref
 import numpy as np
 from aie.helpers.util import np_ndarray_type_to_memref_type
-from aie.iron import Buffer, ObjectFifo, Worker, WorkerRuntimeBarrier, ceildiv
+from aie.iron import Buffer, ObjectFifo, Worker, ceildiv
 from aie.iron.controlflow import if_, range_
 from aie.iron.device import Device
 from aie.iron.kernel import ExternalFunction
@@ -65,8 +65,6 @@ LENGTHS = (1024, 2048, 4096, 8192)
 # Takes the widest grid most of a millisecond, several times the dispatch cost.
 BENCH_ELEMENTS = 1 << 23
 BENCH_TILE = 4096
-
-_I32 = np.ndarray[(1,), np.dtype[np.int32]]
 
 
 def _rounded(t: np.ndarray, dtype, toward: float, strict: bool) -> np.ndarray:
@@ -255,7 +253,8 @@ class KernelCall:
 class _Chains:
     """The chains of steps a core applies to a line it holds (``Finish``,
     ``Prepare``): the chain of each design its array serves, a design's
-    selected by its ``{kind}_chain`` word.
+    selected by its ``{kind}_chain`` word (``values``), which the core
+    reads with its own.
 
     A kernel reads and writes through restrict pointers, so the calls of a
     chain alternate between the line and a scratch line of the core's own.
@@ -293,10 +292,6 @@ class _Chains:
                             ),
                         ),
                     )
-        self.rtps = [
-            Buffer(_I32, name=f"{self.kind}_{k}", use_write_rtp=True)
-            for k in range(cores if self.select else 0)
-        ]
         self.scratch = [
             Buffer(np.ndarray[(line,), np.dtype[dtype]])
             for _ in range(cores if any(chains) else 0)
@@ -306,24 +301,24 @@ class _Chains:
     @property
     def arity(self) -> int:
         """How many arguments ``args`` gives a core."""
-        return len(self.steps) + self.select + len(self.fifos) + bool(self.scratch)
+        return len(self.steps) + len(self.fifos) + bool(self.scratch)
 
     def args(self, core: int) -> list:
         """What core ``core``'s function is given for the chains, together."""
         return [
             *(k for k, _, _ in self.steps.values()),
-            *self.rtps[core : core + 1],
             *(of[core].cons() for of in self.fifos),
             *self.scratch[core : core + 1],
         ]
 
-    def bind(self) -> None:
-        if self.select:
-            self.op.value(f"{self.kind}_chain").bind(self.rtps)
+    @property
+    def values(self) -> list[Value]:
+        """The word a core reads to select its chain, where there is a choice."""
+        return [self.op.value(f"{self.kind}_chain")] if self.select else []
 
-    def read(self, args):
-        """The chain a core applies, read between its barrier's wait and release."""
-        return args[len(self.steps)][0] if self.select else None
+    def mode(self, words):
+        """The chain a core applies, from the words its ``Rtp`` read."""
+        return words[self.op.value(f"{self.kind}_chain")] if self.select else None
 
     def _odd(self, args, mode, tile):
         """``args``' scratch line where the selected chain makes an odd
@@ -455,7 +450,6 @@ class Finish(_Chains):
         ]
 
     def bind(self) -> None:
-        super().bind()
         for e, of in zip(self.streamed, self.fifos):
             e.bind([fifo.prod() for fifo in of])
 
@@ -470,7 +464,7 @@ class Finish(_Chains):
             feed: The consumer end of the producer's fed input, whose next
                 tiles hold the riding inputs' share of ``tile``, in order.
         """
-        at = len(self.steps) + self.select
+        at = len(self.steps)
         # Only a lone chain has extras (Chain.rebuilt).
         fifos = args[at : at + len(self.fifos)]
         if not self.riding:
@@ -909,28 +903,17 @@ class Elementwise(Operator):
         of_outs = [
             fifos(s, f"out{i}" if len(outs) > 1 else "out") for i, s in enumerate(outs)
         ]
-        # A bounded extent makes the trip count a per-call scratchpad word.
-        dynamic = self.value("count").scratchpad
-        counts = (
-            [self.count.param] * cores
-            if dynamic
-            else [
-                Buffer(_I32, name=f"count_{slot(k)}", use_write_rtp=True)
-                for k in range(cores)
-            ]
-        )
-        barriers = [WorkerRuntimeBarrier() for _ in range(cores)]
+        rtps = self.rtp([self.count, *finish.values], cores=cores)
         n_fifos = n_in + len(outs)
         held = [s.replicate for s in ins] + [False] * len(outs)
 
         def core_fn(*args):
             fifos = args[:n_fifos]
-            kernel_fn, count, barrier = args[n_fifos : n_fifos + 3]
-            rest = args[n_fifos + 3 :]
-            barrier.wait_for_value(1)
-            n = count.read() if dynamic else count[0]
-            mode = finish.read(rest)
-            barrier.release_with_value(1)
+            kernel_fn, rtp = args[n_fifos : n_fifos + 2]
+            rest = args[n_fifos + 2 :]
+            words = rtp.read()
+            n = words[self.count]
+            mode = finish.mode(words)
             kept = {j: f.acquire(1) for j, f in enumerate(fifos) if held[j]}
             for _ in range_(n):
                 elements = [
@@ -956,7 +939,7 @@ class Elementwise(Operator):
                 core_fn,
                 [of[k % len(of)].cons() for of in of_ins]
                 + [of[k].prod() for of in of_outs]
-                + [kernel, counts[k], barriers[k], *finish.args(k)],
+                + [kernel, rtps[k], *finish.args(k)],
             )
             for k in range(cores)
         ]
@@ -964,10 +947,8 @@ class Elementwise(Operator):
             stream.bind([f.prod() for f in of])
         for stream, of in zip(outs, of_outs):
             stream.bind([f.cons() for f in of])
-        if not dynamic:
-            self.count.bind(counts)
         finish.bind()
-        return workers + barriers
+        return workers
 
 
 class UnaryElementwise(Elementwise):

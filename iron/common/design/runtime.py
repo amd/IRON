@@ -25,7 +25,6 @@ from aie.iron import (
     TaskGroup,
     TileDma,
     Worker,
-    WorkerRuntimeBarrier,
     sync_parameters,
 )
 from aie.iron.runtime.dmatask import emit_shim_transfer
@@ -52,13 +51,12 @@ class OperatorRuntime(Runtime):
     Args:
         op: The resolved operator, its array built and its operands' lanes
             bound or pinned.
-        built: What its ``array()`` returned: its workers and barriers, and
-            the flows, locks, tile DMAs, pinned endpoints and buffers only
-            the sequence reaches.
+        built: What its ``array()`` returned: its workers, and the flows,
+            locks, tile DMAs, pinned endpoints and buffers only the sequence
+            reaches.
         name: The sequence's symbol; the Program names it when None.
 
     Attributes:
-        barriers: The barriers the preamble opens.
         pins: Each pinned lane this runtime declares, by its symbol.
         buffers: Buffers the sequence writes that no worker places: a
             shipped image's parameter block.
@@ -66,7 +64,6 @@ class OperatorRuntime(Runtime):
 
     def __init__(self, op: Operator, built: list = (), name: str | None = None) -> None:
         self.op = op
-        self.barriers = tuple(b for b in built if isinstance(b, WorkerRuntimeBarrier))
         self.buffers = [b for b in built if isinstance(b, Buffer)]
         self._tensors: dict[str, Any] = {}
         self._queues: dict[str, list[Task]] = {}
@@ -100,13 +97,11 @@ class OperatorRuntime(Runtime):
                 self.add_lock(obj)
             elif isinstance(obj, TileDma):
                 self.add_tile_dma(obj)
-            elif not isinstance(
-                obj, (Worker, WorkerRuntimeBarrier, DmaEndpoint, Buffer)
-            ):
+            elif not isinstance(obj, (Worker, DmaEndpoint, Buffer)):
                 raise TypeError(
-                    f"{type(op).__name__}.array() returns Workers, "
-                    f"WorkerRuntimeBarriers, Flows, PacketFlows, Locks, TileDmas, "
-                    f"the DmaEndpoints it pinned and Buffers; got {obj!r}"
+                    f"{type(op).__name__}.array() returns Workers, Flows, "
+                    f"PacketFlows, Locks, TileDmas, the DmaEndpoints it pinned "
+                    f"and Buffers; got {obj!r}"
                 )
 
     def body(self, *args) -> None:
@@ -119,7 +114,7 @@ class OperatorRuntime(Runtime):
         for b in buffers:
             b.runtime = self
         for value, arg in zip(self.op.values, args[len(buffers) + 1 :]):
-            if not value.scratchpad:
+            if not value.in_scratchpad:
                 value.ssa = arg
         if not self.op.own_preamble:
             self.preamble()
@@ -322,13 +317,13 @@ class OperatorRuntime(Runtime):
                 continue
             if not isinstance(value, Value):
                 raise TypeError(
-                    f"a per-call parameter is a value member (op.value(name)), "
+                    f"a per-call parameter is a value member (self.count), "
                     f"got {value!r}"
                 )
             if value.param is None:
                 raise ValueError(
-                    f"{value.name} has no device parameter: the operator does "
-                    f"not use it (uses_value) or the build has not created it yet"
+                    f"{value.name} has no device parameter: it is not per call "
+                    f"here (Value.per_call), or the build has not created it yet"
                 )
         if isinstance(length_parameter, DispatchTime):
             raise ValueError(
@@ -439,10 +434,17 @@ class OperatorRuntime(Runtime):
         return self._tensors[buffer.name]
 
     def preamble(self, **values) -> None:
-        """Residents, then the parameter sync, then barriers, before any DMA.
+        """Each core's runtime parameters, then the parameter sync, then each
+        core's barrier, before any DMA. A shipped image's parameter blocks
+        (``buffers``) each hold the residents' words in declaration order;
+        its sequence releases them.
 
         An ``own_preamble`` operator's sequence calls it itself, ``values``
         overriding residents by name.
+
+        Raises:
+            ValueError: ``values`` names no resident of the operator, or a
+                parameter block holds another number of words.
         """
         op = self.op
         residents = op.residents
@@ -451,36 +453,23 @@ class OperatorRuntime(Runtime):
             raise ValueError(
                 f"{type(op).__name__} has no resident {sorted(unknown)} to override"
             )
-        values = {**residents, **values}
-        writes: dict[int, tuple] = {}  # id(buffer) -> (buffer, {index: value})
-        for name in residents:
-            res = op.value(name)
-            if res.optional and not res.targets:
-                continue  # this configuration does not allocate it
-            if not res.targets:
+        # Without a scratchpad, a per-call word a core reads is the dispatch-time scalar.
+        words = {v.name: v.ssa for v in op.values if not v.in_scratchpad}
+        words.update(residents, **values)
+        for rtp in op.rtps:
+            rtp.write(words)
+        block = []
+        for word in (words[name] for name in residents):
+            block += word if isinstance(word, (list, tuple)) else [word]
+        for buffer in self.buffers:
+            if len(block) != prod(buffer.shape):
                 raise ValueError(
-                    f"{type(op).__name__}.{name}: array() never bound this value"
+                    f"{type(op).__name__}'s parameter block holds "
+                    f"{prod(buffer.shape)} words; its residents are {len(block)}"
                 )
-            words = values[name]
-            block = words if isinstance(words, (list, tuple)) else [words]
-            for buf, index in res.targets:
-                slots = writes.setdefault(id(buf), (buf, {}))[1]
-                slots.update({index + i: word for i, word in enumerate(block)})
-        for buf, words in writes.values():
-            for index in sorted(words):
-                buf[index] = words[index]
-        # Without a scratchpad, a core-read value is written from the per-call scalar.
-        for value in op.values:
-            for buf, index in value.targets:
-                if value.ssa is None:
-                    raise ValueError(
-                        f"{value.name} is bound to a runtime-parameter buffer but is "
-                        f"not a dispatch-time scalar here; bind only under an image "
-                        f"without a scratchpad (an xclbin image)"
-                    )
-                buf[index] = value.ssa
-        # A barrier opens its core, which reads its per-call words at once.
-        if any(value.scratchpad for value in op.values):
+            for i, word in enumerate(block):
+                buffer[i] = word
+        if any(value.in_scratchpad for value in op.values):
             sync_parameters()
-        for b in self.barriers:
-            b.set(1)
+        for rtp in op.rtps:
+            rtp.barrier.set(1)

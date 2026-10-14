@@ -27,7 +27,6 @@ from aie.iron import (
     ObjectFifo,
     TaskGroup,
     Worker,
-    WorkerRuntimeBarrier,
 )
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
@@ -357,7 +356,7 @@ class ResampleTaps(Operator):
         """Chunk `c` from core `c % cores`, the round-robin order the cores
         compute them in: the chunks filled per call, or at the build's sizes.
         """
-        per_call = self.uses_value("count")
+        per_call = self.count.per_call
         n, words = self.table.shape
         count = n // self.cores if per_call else self.residents["count"]
         tg = TaskGroup()
@@ -373,7 +372,7 @@ class ResampleTaps(Operator):
                 lane=k,
                 group=tg,
                 wait=True,
-                length_parameter=self.value("count") if per_call else None,
+                length_parameter=self.count if per_call else None,
                 length_unit=words,
             )
         tg.finish()
@@ -411,19 +410,8 @@ class ResampleTaps(Operator):
             of_all = of_peak.cons().forward(name="peak_all", depth=1)
         local = Buffer(peak_ty, initial_value=np.zeros(2, np.int32))
 
-        names = ["count", "in_length", "out_length"]
-        dynamic = {n: self.value(n).scratchpad for n in names}
-        static = [n for n in names if not dynamic[n]]
-        rtps = [
-            Buffer(
-                np.ndarray[(max(1, len(static)),), np.dtype[np.int32]],
-                name=f"rtp_{k}",
-                use_write_rtp=True,
-            )
-            for k in range(cores)
-        ]
-        barriers = [WorkerRuntimeBarrier() for _ in range(cores)]
-        params = [self.value(n).param for n in names if dynamic[n]]
+        counts = [self.count, self.in_length, self.out_length]
+        rtps = self.rtp(counts, cores=cores)
 
         def core_fn(
             core,
@@ -436,16 +424,9 @@ class ResampleTaps(Operator):
             join_fn,
             quantize_fn,
             rtp,
-            barrier,
-            *words,
         ):
-            barrier.wait_for_value(1)
-            words = list(words)
-            n, n_in, n_out = (
-                words.pop(0).read() if dynamic[name] else rtp[static.index(name)]
-                for name in names
-            )
-            barrier.release_with_value(1)
+            words = rtp.read()
+            n, n_in, n_out = (words[v] for v in counts)
             if passed is not None:
                 mine = passed.acquire(1)
                 peak_fn(mine, n_in, n_out, core, n)
@@ -492,16 +473,12 @@ class ResampleTaps(Operator):
                         join_k,
                         quantize_k,
                         rtps[k],
-                        barriers[k],
-                    ]
-                    + params,
+                    ],
                     stack_size=4096,
                 )
             )
         self.table.bind([f.cons() for f in of_tables])
-        for name in static:
-            self.value(name).bind(rtps, static.index(name))
-        return workers + barriers
+        return workers
 
 
 SIDE = 16  # a patch's pixels on each axis, and the outputs of a taps chunk
@@ -923,18 +900,12 @@ class Resample(Operator):
     src_columns = Value(derive=lambda op: op.columns)
     dst_rows = Value(derive=lambda op: op.out_rows)
     dst_columns = Value(derive=lambda op: op.out_columns)
-    image_count = Value(
-        derive=lambda op: op.rows * -(-3 * op.columns // op.chunk),
-        optional=True,
-    )
-    width_count = Value(derive=lambda op: op.out_columns // SIDE, optional=True)
-    height_count = Value(derive=lambda op: op.out_rows // SIDE, optional=True)
+    image_count = Value(derive=lambda op: op.rows * -(-3 * op.columns // op.chunk))
+    width_count = Value(derive=lambda op: op.out_columns // SIDE)
+    height_count = Value(derive=lambda op: op.out_rows // SIDE)
     # Patches per core: every band's, padded past the cores.
     patch_count = Value(
-        derive=lambda op: op.out_rows
-        // SIDE
-        * (op.out_columns // SIDE // op.cores + 1),
-        optional=True,
+        derive=lambda op: op.out_rows // SIDE * (op.out_columns // SIDE // op.cores + 1)
     )
 
     @property
@@ -1109,7 +1080,7 @@ class Resample(Operator):
             for k in range(self.cores)
         ]
         for operand, lane, buffer, name, first, step in moves:
-            per_call = self.uses_value(name)
+            per_call = self.value(name).per_call
             n, width = buffer.shape
             count = n // step if per_call else self.residents[name]
             tap = TensorAccessPattern(
@@ -1168,19 +1139,8 @@ class Resample(Operator):
             ObjectFifo(patch_ty, name=f"patches_{k}", depth=2) for k in range(cores)
         ]
 
-        names = ["src_rows", "src_columns", "dst_rows", "dst_columns"]
-        dynamic = {n: self.value(n).scratchpad for n in names}
-        static = [n for n in names if not dynamic[n]]
-        rtps = [
-            Buffer(
-                np.ndarray[(max(1, len(static)),), np.dtype[np.int32]],
-                name=f"rtp_{k}",
-                use_write_rtp=True,
-            )
-            for k in range(cores)
-        ]
-        barriers = [WorkerRuntimeBarrier() for _ in range(cores)]
-        params = [self.value(n).param for n in names if dynamic[n]]
+        sizes = [self.src_rows, self.src_columns, self.dst_rows, self.dst_columns]
+        rtps = self.rtp(sizes, cores=cores)
 
         def core_fn(
             core,
@@ -1195,16 +1155,9 @@ class Resample(Operator):
             emit_fn,
             finish_fn,
             rtp,
-            barrier,
-            *words,
         ):
-            barrier.wait_for_value(1)
-            words = list(words)
-            h, w, ho, wo = (
-                words.pop(0).read() if dynamic[name] else rtp[static.index(name)]
-                for name in names
-            )
-            barrier.release_with_value(1)
+            words = rtp.read()
+            h, w, ho, wo = (words[v] for v in sizes)
             setup_fn(counts, h, w, ho, wo, core)
             for k in range_(counts[0]):
                 chunk = taps.acquire(1)
@@ -1243,18 +1196,14 @@ class Resample(Operator):
                     emit_k,
                     finish_k,
                     rtps[k],
-                    barriers[k],
-                ]
-                + params,
+                ],
             )
             for k in range(cores)
         ]
         self.patches.bind([f.cons() for f in of_patches])
         self.image.bind(of_image.prod())
         self.taps_w.bind(of_taps.prod())
-        for name in static:
-            self.value(name).bind(rtps, static.index(name))
-        return workers + barriers
+        return workers
 
 
 POSITIONS = """
@@ -1443,32 +1392,17 @@ class PatchPositions(Operator):
             names=["xy", "position_ids", "order"],
             depths=[2, 2, 2],
         )
-        names = ["count", "dst_rows", "dst_columns"]
-        dynamic = {n: self.value(n).scratchpad for n in names}
-        static = [n for n in names if not dynamic[n]]
-        rtp = Buffer(
-            np.ndarray[(max(1, len(static)),), np.dtype[np.int32]],
-            name="rtp",
-            use_write_rtp=True,
-        )
-        barrier = WorkerRuntimeBarrier()
-        params = [self.value(n).param for n in names if dynamic[n]]
+        counts = [self.count, self.dst_rows, self.dst_columns]
+        (rtp,) = self.rtp(counts)
 
-        def core_fn(record, kernel_fn, rtp, barrier, *words):
-            barrier.wait_for_value(1)
-            words = list(words)
-            n, ho, wo = (
-                words.pop(0).read() if dynamic[name] else rtp[static.index(name)]
-                for name in names
-            )
-            barrier.release_with_value(1)
+        def core_fn(record, kernel_fn, rtp):
+            words = rtp.read()
+            n, ho, wo = (words[v] for v in counts)
             for b in range_(n):
                 kernel_fn(record.acquire(1), b, n, ho, wo)
                 record.release(1)
 
-        worker = Worker(core_fn, [of_record.prod(), kernel, rtp, barrier] + params)
+        worker = Worker(core_fn, [of_record.prod(), kernel, rtp])
         for out, part in zip(outs, parts):
             out.bind(part.cons())
-        for name in static:
-            self.value(name).bind([rtp], static.index(name))
-        return [worker, barrier]
+        return [worker]

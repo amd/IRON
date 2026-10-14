@@ -21,14 +21,12 @@ from aie.dialects import aiex
 from aie.dialects.aie import AIETileType, DMAChannelDir, WireBundle
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
-    Buffer,
     DmaEndpoint,
     Flow,
     ObjectFifo,
     PacketFlow,
     TaskGroup,
     Worker,
-    WorkerRuntimeBarrier,
 )
 from aie.iron.device import Tile
 from aie.iron.kernels import datamovement
@@ -130,10 +128,10 @@ class Gather(Operator):
     y = Out(rows, row, dtype=dtype, tile=(row,), per=(feeds,))
     valid_rows = Extent(rows)
     # Per feed, the 16-byte units it drains under a bound.
-    drained0 = Value(derive=lambda op: op.drained(0), optional=True)
-    drained1 = Value(derive=lambda op: op.drained(1), optional=True)
-    drained2 = Value(derive=lambda op: op.drained(2), optional=True)
-    drained3 = Value(derive=lambda op: op.drained(3), optional=True)
+    drained0 = Value(derive=lambda op: op.drained(0))
+    drained1 = Value(derive=lambda op: op.drained(1))
+    drained2 = Value(derive=lambda op: op.drained(2))
+    drained3 = Value(derive=lambda op: op.drained(3))
 
     @property
     def batches(self) -> list[int]:
@@ -464,39 +462,23 @@ class GatherWords(Operator):
         addresses = ObjectFifo(self.control.tile, name="gather_addresses", depth=1)
         self.ids.bind(ids.prod())
         self.control.bind(addresses.cons())
-        barrier = WorkerRuntimeBarrier()
         base_stream = None
-        # A full ELF's core reads the address from the scratchpad, an
-        # xclbin's from its runtime parameters, which the sequence writes
-        # -- unless static_base, where it is an ordinary resident operand
-        # instead (no per-call value, no scratchpad entry at all).
+        # The core reads the address once a call, unless static_base, where
+        # it is an ordinary resident operand instead (no per-call value).
         if self.static_base:
-            lo = hi = None
             base_stream = ObjectFifo(self.base.tile, name="gather_base", depth=1)
             self.base.bind(base_stream.prod())
-        elif self.base_lo.scratchpad:
-            lo, hi = self.base_lo.param, self.base_hi.param
-        else:
-            lo = Buffer(
-                np.ndarray[(2,), np.dtype[np.int32]],
-                name="gather_base",
-                use_write_rtp=True,
-            )
-            hi = None
-            self.base_lo.bind(lo, 0)
-            self.base_hi.bind(lo, 1)
+        (rtp,) = self.rtp([] if self.static_base else [self.base_lo, self.base_hi])
 
-        def core(ids, addresses, kernel, lo, hi, base_stream, barrier):
-            barrier.wait_for_value(1)
+        def core(ids, addresses, kernel, rtp, base_stream):
+            words = rtp.read()
             i, a = ids.acquire(1), addresses.acquire(1)
             if base_stream is not None:
                 base = base_stream.acquire(1)
                 kernel(i, a, base[0], base[1])
                 base_stream.release(1)
-            elif hi is None:
-                kernel(i, a, lo[0], lo[1])
             else:
-                kernel(i, a, lo.read(), hi.read())
+                kernel(i, a, words[self.base_lo], words[self.base_hi])
             ids.release(1)
             addresses.release(1)
 
@@ -506,13 +488,11 @@ class GatherWords(Operator):
                 ids.cons(),
                 addresses.prod(),
                 kernel,
-                lo,
-                hi,
+                rtp,
                 None if base_stream is None else base_stream.cons(),
-                barrier,
             ],
         )
-        return [worker, barrier]
+        return [worker]
 
     def sequence(self, rt) -> None:
         tg = TaskGroup()
@@ -697,12 +677,14 @@ class Copy(Operator):
         per=(num_channels,),
         depth=1,
     )
-    # Per-call addends on the two base addresses, in elements.
-    in_offset = Value()
-    out_offset = Value()
-    # Per-call sizes of the bounded axis of each pattern, in that axis's units.
-    src_valid = Value()
-    dst_valid = Value()
+    # Addends on the two base addresses, in elements: per call where a
+    # graph binds them.
+    in_offset = Value(derive=lambda op: 0)
+    out_offset = Value(derive=lambda op: 0)
+    # Sizes of the bounded axis of each pattern, in that axis's units: per
+    # call where a graph binds them.
+    src_valid = Value(derive=lambda op: op.src_bound)
+    dst_valid = Value(derive=lambda op: op.dst_bound)
 
     def walks(self) -> list[tuple[TensorAccessPattern, ...]]:
         """The patterns each side walks in turn, ``[src, dst]``."""
@@ -750,10 +732,6 @@ class Copy(Operator):
         """
         pieces = [prod(p.sizes) // self.num_channels for w in self.walks() for p in w]
         return gcd(*pieces, *self._row_shares())
-
-    def uses_value(self, name: str) -> bool:
-        # An offset or a size is patched only when a graph binds a handle to it.
-        return name in self.bound_values
 
     def copies_to(self) -> CopyRun | None:
         """The run ``dst`` writes, where ``src`` reads the whole input in
@@ -1002,8 +980,8 @@ class Copy(Operator):
         return pieces
 
     def sequence(self, rt):
-        in_off = self.in_offset if self.uses_value("in_offset") else None
-        out_off = self.out_offset if self.uses_value("out_offset") else None
+        in_off = self.in_offset if self.in_offset.per_call else None
+        out_off = self.out_offset if self.out_offset.per_call else None
         if isinstance(self.src, tuple) or isinstance(self.dst, tuple):
             shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
             # (stream position, channel, is a fill, tap): a drain goes out
@@ -1048,7 +1026,7 @@ class Copy(Operator):
                 lane=c,
                 group=tg,
                 offset_parameter=in_off,
-                length_parameter=None if unit is None else self.value("src_valid"),
+                length_parameter=None if unit is None else self.src_valid,
                 length_unit=unit,
             )
             tap, unit = outs[c]
@@ -1058,7 +1036,7 @@ class Copy(Operator):
                 group=tg,
                 wait=True,
                 offset_parameter=out_off,
-                length_parameter=None if unit is None else self.value("dst_valid"),
+                length_parameter=None if unit is None else self.dst_valid,
                 length_unit=unit,
             )
         tg.finish()

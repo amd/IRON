@@ -220,25 +220,63 @@ def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles():
 # --------------------------------------------------------------------------
 
 
-def test_preamble_rejects_a_resident_the_array_never_bound(npu2):
-    class Op(Operator):
-        n: int = Param()
-        tile: int = Auto(default=64)
-        A = In(n, tile=(tile,))
-        count = Value(derive=lambda op: op.n // op.tile)
+class Words(Operator):
+    """A core reading a word, a block of three, a word, and one per call."""
 
-        def array(self):
-            fifo = ObjectFifo(self.A.tile, name="a")
-            self.A.bind(fifo.prod())
+    n: int = Param()
+    tile: int = Auto(default=64)
+    A = In(n, tile=(tile,))
+    first = Value(derive=lambda op: 7)
+    block = Value(derive=lambda op: [11, 12, 13], words=3)
+    last = Value(derive=lambda op: op.n // op.tile)
+    pos = Value()
 
-            def core(of):
-                of.acquire(1)
-                of.release(1)
+    def array(self):
+        fifo = ObjectFifo(self.A.tile, name="a")
+        self.A.bind(fifo.prod())
+        (rtp,) = self.rtp([self.first, self.block, self.last, self.pos])
 
-            return [Worker(core, [fifo.cons()])]
+        def core(of, rtp):
+            rtp.read()
+            of.acquire(1)
+            of.release(1)
 
-    with pytest.raises(ValueError, match="never bound this value"):
-        OperatorDesign(Op(n=64)).module()
+        return [Worker(core, [fifo.cons(), rtp])]
+
+
+def rtp_writes(text: str) -> list[tuple[int, int | str]]:
+    """Each ``aiex.npu.rtp_write`` of a module's sequence: its slot, and the
+    constant it writes or the sequence argument.
+    """
+    sequence = text[text.index("aie.runtime_sequence") :]
+    constants = dict(re.findall(r"(%\w+) = arith.constant (-?\d+) : i32", sequence))
+    return [
+        (int(slot), int(constants[word]) if word in constants else word)
+        for slot, word in re.findall(
+            r"aiex.npu.rtp_write\(@\w+, (\d+), (%\w+)\)", sequence
+        )
+    ]
+
+
+def test_a_value_only_a_core_reads_is_declared_on_a_full_elf(npu2):
+    text = str(OperatorDesign(Words(n=64)).module())
+    (symbol,) = re.findall(r"aiex.scratchpad_parameter @(\w+)", text)
+    core = text[text.index("aie.core(") : text.index("aie.runtime_sequence")]
+    assert f"aiex.read_scratchpad_parameter @{symbol}" in core
+
+
+def test_the_slots_after_a_multi_word_value_follow_its_words(npu2):
+    """The block takes slots 1 to 3, so ``last`` is slot 4; on an xclbin the
+    per-call word is the dispatch argument, in slot 5.
+    """
+    text = str(OperatorDesign(Words(n=64)).module())
+    assert "memref<5xi32>" in text
+    assert rtp_writes(text) == [(0, 7), (1, 11), (2, 12), (3, 13), (4, 1)]
+    xclbin = str(
+        OperatorDesign(Words(n=64), full_elf=False).compilable().generate_mlir()
+    )
+    assert "memref<6xi32>" in xclbin
+    assert rtp_writes(xclbin)[-2:] == [(4, 1), (5, "%arg1")]
 
 
 def test_mha_infers_the_padded_length_and_the_kv_head_count():

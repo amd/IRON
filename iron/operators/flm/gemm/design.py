@@ -169,48 +169,6 @@ def _sigmoid(x):
     return (1 / (1 + np.exp(-f))).astype(x.dtype)
 
 
-# The parameter buffer each core reads once its barrier opens. These six are
-# always present; conditional words follow at offsets rtp_layout() computes,
-# so a word a build cannot use is never allocated.
-#
-# The clamp bounds are unconditional even though most callers do not clamp,
-# because the alternative is a second xclbin: the kernel's clamp is not
-# compiled out, it is neutralised by sending (-inf, +inf). Two words is the
-# price of that, and a clamping caller now pays one word less than it did.
-(
-    RTP_N_VAL,
-    RTP_M_ROW_BLOCKS,
-    RTP_K_ITERS,
-    RTP_EPILOGUE,
-    RTP_CLAMP_MIN,
-    RTP_CLAMP_MAX,
-) = range(6)
-
-
-def rtp_layout(m_chunk, units_valid=False):
-    """Slot index for each optional parameter, and the total word count.
-
-    A word is not free: the sequence writes one per core, costing ~2 us of
-    dispatch latency against a ~107 us floor. So optional groups are omitted
-    rather than defaulted.
-
-    Args:
-        m_chunk: Row blocks per unit; past 1, the unit counts get words.
-        units_valid: A slot for the units a row bound reaches, where the
-            cores read it from this buffer rather than the scratchpad.
-    """
-    slots = {}
-    n = 6
-    if m_chunk > 1:
-        slots["n_chunks"] = n
-        slots["n_units"] = n + 1
-        n += 2
-    if units_valid:
-        slots["units_valid"] = n
-        n += 1
-    return slots, n
-
-
 class Rounding(StrEnum):
     """Rounding for every f32->bf16 conversion.
 

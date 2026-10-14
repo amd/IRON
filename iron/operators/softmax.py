@@ -13,7 +13,6 @@ from aie.iron import (
     ObjectFifo,
     TaskGroup,
     Worker,
-    WorkerRuntimeBarrier,
     ceildiv,
 )
 from aie.iron.controlflow import range_
@@ -105,10 +104,7 @@ class Softmax(Operator):
     y = Out(rows, cols, tile=(block,), per=(num_aie_columns, num_channels))
     valid_cols = Value(derive=lambda op: op.length)
     # A row held whole is one block, which the bound does not change.
-    blocks = Value(
-        derive=lambda op: ceildiv(op.length, op.block) if op.streamed else 1,
-        optional=True,
-    )
+    blocks = Value(derive=lambda op: ceildiv(op.length, op.block) if op.streamed else 1)
 
     def validate(self) -> None:
         if self.rows % 16 != 0:
@@ -191,34 +187,11 @@ class Softmax(Operator):
         state_ty = np.ndarray[(_STATE,), np.dtype[np.float32]]
         of_ins = [ObjectFifo(tile_ty, name=f"in1_{k}") for k in range(n_cores)]
         of_outs = [ObjectFifo(tile_ty, name=f"out_{k}") for k in range(n_cores)]
-        # A count a call sets is read from its scratchpad word on a full ELF;
-        # else it is in the core's runtime-parameter buffer, which the sequence
-        # writes. A core re-arms its barrier once it has read them: an xclbin's
-        # cores outlive the call, and would else start the next on these counts.
-        counts = ("valid_cols", "blocks") if self.streamed else ("valid_cols",)
-        per_call = [n for n in counts if self.value(n).scratchpad]
-        static = [n for n in counts if n not in per_call]
-        rtp_ty = np.ndarray[(max(1, len(static)),), np.dtype[np.int32]]
-        rtps = [
-            Buffer(rtp_ty, name=f"rtp_{k}", use_write_rtp=True) for k in range(n_cores)
-        ]
-        barriers = [WorkerRuntimeBarrier() for _ in range(n_cores)]
-        params = [self.value(n).param for n in per_call]
+        counts = [self.valid_cols, self.blocks] if self.streamed else [self.valid_cols]
+        rtps = self.rtp(counts, cores=n_cores)
 
-        def read(rtp, words):
-            return [
-                (
-                    words[per_call.index(n)].read()
-                    if n in per_call
-                    else rtp[static.index(n)]
-                )
-                for n in counts
-            ]
-
-        def whole(of_in, of_out, softmax, mask, zero, rtp, barrier, *words):
-            barrier.wait_for_value(1)
-            (valid,) = read(rtp, words)
-            barrier.release_with_value(1)
+        def whole(of_in, of_out, softmax, mask, zero, rtp):
+            valid = rtp.read()[self.valid_cols]
             span = arith.minsi(
                 (valid + (_VECTOR_STEP - 1)) & -_VECTOR_STEP,
                 arith.constant(block, valid.type),
@@ -233,14 +206,12 @@ class Softmax(Operator):
                 of_out.release(1)
 
         def streamed(
-            of_in, of_out, row_max, row_sum, row_scale, mask, zero, rtp, barrier, *rest
+            of_in, of_out, row_max, row_sum, row_scale, mask, zero, rtp, *states
         ):
             # Blocks arrive block by block across the core's rows, so each
             # row carries its own state.
-            words, states = rest[: len(per_call)], rest[len(per_call) :]
-            barrier.wait_for_value(1)
-            valid, blocks = read(rtp, words)
-            barrier.release_with_value(1)
+            words = rtp.read()
+            valid, blocks = words[self.valid_cols], words[self.blocks]
             i32 = valid.type
             for step in range(3):
                 for b in range_(blocks):
@@ -276,8 +247,7 @@ class Softmax(Operator):
                 Worker(
                     streamed,
                     [of_ins[k].cons(), of_outs[k].prod(), *kernels, mask_k, zero_k]
-                    + [rtps[k], barriers[k]]
-                    + params
+                    + [rtps[k]]
                     + [Buffer(state_ty) for r in range(rows_per_core)],
                 )
                 for k in range(n_cores)
@@ -286,17 +256,20 @@ class Softmax(Operator):
             workers = [
                 Worker(
                     whole,
-                    [of_ins[k].cons(), of_outs[k].prod(), softmax_k, mask_k, zero_k]
-                    + [rtps[k], barriers[k]]
-                    + params,
+                    [
+                        of_ins[k].cons(),
+                        of_outs[k].prod(),
+                        softmax_k,
+                        mask_k,
+                        zero_k,
+                        rtps[k],
+                    ],
                 )
                 for k in range(n_cores)
             ]
         self.x.bind([f.prod() for f in of_ins])
         self.y.bind([f.cons() for f in of_outs])
-        for n in static:
-            self.value(n).bind(rtps, static.index(n))
-        return workers + barriers
+        return workers
 
     def sequence(self, rt):
         """Each lane's rows as ``(block, row, element)``: every block of the
@@ -306,8 +279,8 @@ class Softmax(Operator):
         lanes = self.cores
         rows = self.rows // lanes
         blocks = ceildiv(self.length, self.block)
-        bounded = self.streamed and self.uses_value("blocks")
-        blocks_valid = self.value("blocks") if bounded else None
+        bounded = self.streamed and self.blocks.per_call
+        blocks_valid = self.blocks if bounded else None
         full = TensorAccessPattern.full((self.rows, self.cols))
         taps = [
             full[k * rows : (k + 1) * rows, : blocks * self.block]

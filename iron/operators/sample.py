@@ -125,9 +125,10 @@ class Sample(Operator):
     )
     tokens = InOut(steps, dtype=np.int32, tile=(1,), depth=1)
     token = Out(1, dtype=np.int32, tile=(1,), depth=1)
-    # Element offsets of this position's draw row and record.
-    row = Value()
-    at = Value()
+    # Element offsets of this position's draw row and record: per call where
+    # a graph binds them.
+    row = Value(derive=lambda op: 0)
+    at = Value(derive=lambda op: 0)
 
     @property
     def slice_size(self) -> int:
@@ -178,10 +179,6 @@ class Sample(Operator):
         return kernels.sample_combine(
             columns=self.cores, slice_size=self.slice_size, k_max=self.k_max
         )
-
-    def uses_value(self, name: str) -> bool:
-        # A position is patched only when a graph binds a handle to it.
-        return name in self.bound_values
 
     def array(self) -> list:
         select, combine = self._select(), self._combine()
@@ -275,8 +272,8 @@ class Sample(Operator):
 
     def sequence(self, rt):
         """One group: the draw and the logits in, then the record and the token."""
-        row = self.row if self.uses_value("row") else None
-        at = self.at if self.uses_value("at") else None
+        row = self.row if self.row.per_call else None
+        at = self.at if self.at.per_call else None
         tg = TaskGroup()
         self.draws.fill(self.draws[0], group=tg, offset_parameter=row)
         for c in range(self.cores):

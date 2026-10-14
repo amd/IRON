@@ -58,7 +58,7 @@ class MV(Operator):
     B = In(num_batches, K, tile=(K,), broadcast=True)
     C = Out(num_batches, M, tile=(tile_out,), per=columns)
     count = Value(derive=lambda op: op.M // (op.columns * op.tile_out))
-    start = Value()  # per-call when a graph binds it, else unused
+    start = Value(derive=lambda op: 0)  # per call when a graph binds it
 
     def resolve(self, dev):
         cols = self.columns or dev.cols
@@ -72,11 +72,6 @@ class MV(Operator):
         unit = self.columns * self.tile_out
         if self.M % unit:
             raise ValueError(f"M={self.M} is not a multiple of {unit}")
-
-    def uses_value(self, name):
-        return (
-            name in self.bound_values if name == "start" else super().uses_value(name)
-        )
 
     def array(self):
         return [self.K, self.columns, self.tile_out, self.epilogue]
@@ -532,7 +527,7 @@ def test_when_names_a_param():
 
 def test_a_derived_value_is_written_once_per_build():
     op = MV(M=1024, K=128).resolved(NPU2)
-    assert op.residents == {"count": 2} and op.values == []
+    assert op.residents == {"count": 2, "start": 0} and op.values == []
 
 
 def test_a_value_a_graph_binds_is_per_call_and_no_longer_a_resident():
@@ -544,7 +539,7 @@ def test_a_value_a_graph_binds_is_per_call_and_no_longer_a_resident():
 
     t = g.trace(a=(1024, 128), b=(128,))
     (op,) = t.operators
-    assert op.uses_value("start") and op.uses_value("count")
+    assert op.value("start").per_call and op.value("count").per_call
     assert [v.name for v in op.values] == ["count", "start"]
     assert [b.member.name for b in t.bindings] == ["start", "count"]  # call order
     assert op.residents == {}  # the preamble writes nothing for count
@@ -845,7 +840,7 @@ class Rows(Operator):
 def test_an_extent_reads_as_its_field_until_a_graph_bounds_it():
     op = Rows(rows=64, cols=8)
     assert op.valid == 64 and Rows.valid.field is Rows.rows
-    assert not op.uses_value("valid") and not op.uses_value("count")
+    assert not op.value("valid").per_call and not op.value("count").per_call
     assert op.residents == {"count": 32, "width": 8}
     assert op.derived_at("count", valid=16) == 8 and op.valid == 64  # unchanged
     with pytest.raises(TypeError, match="no Extent \\['n'\\]"):
@@ -870,8 +865,8 @@ def test_a_bounded_operand_binds_the_extent_and_what_derives_from_it(npu2):
     a, b = t.operators
     for op in (a, b):
         assert {k: e.name for k, e in op.bound_extents.items()} == {"valid": "n"}
-        assert op.uses_value("valid") and op.uses_value("count")
-        assert not op.uses_value("width")  # still written once per build
+        assert op.value("valid").per_call and op.value("count").per_call
+        assert not op.value("width").per_call  # still written once per build
         assert set(op.residents) == {"width"}
         # The extent, what derives from it, and one word of tiles per lane
         # for each operand it sizes.

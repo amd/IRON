@@ -43,6 +43,7 @@ from .domain import Domain, Width
 from .field import Auto, Param, Unresolvable
 from .operand import In, Operand
 from .profile import Profile
+from .rtp import Rtp
 from .value import ChainWord, Extent, ExtentWord, PlaceWord, Value
 
 if TYPE_CHECKING:
@@ -274,9 +275,8 @@ class Operator(metaclass=_OperatorMeta):
     def array(self) -> list:
         """Build the array for the bound device and return its workers.
 
-        Bind every operand's lane to a fifo's shim end and every ``Value`` to
-        the buffer a core reads it from; a value the build gave a scratchpad
-        word (``Value.scratchpad``) a core reads per call instead.
+        Bind every operand's lanes to fifos' shim ends, and give each core
+        reading ``Value``s its runtime parameters (``rtp``).
         """
         raise NotImplementedError(f"{type(self).__name__}.array() is not implemented")
 
@@ -1024,9 +1024,9 @@ class Operator(metaclass=_OperatorMeta):
 
     @property
     def values(self) -> list[Value]:
-        return [
-            self._bound[m.name] for m in self._value_members if self.uses_value(m.name)
-        ]
+        """The per-call values: each gets a device parameter."""
+        values = [self._bound[m.name] for m in self._value_members]
+        return [v for v in values if v.per_call]
 
     @property
     def residents(self) -> dict[str, Any]:
@@ -1037,17 +1037,31 @@ class Operator(metaclass=_OperatorMeta):
             for m in (*self.declaration.members, *self._chain_words)
             if isinstance(m, Value)
             and m.derive is not None
-            and not self.uses_value(m.name)
+            and not self._bound[m.name].per_call
         }
 
-    def uses_value(self, name: str) -> bool:
-        """Whether this instance drives the per-call value ``name``; unused ones get no parameter."""
-        member = next((m for m in self._value_members if m.name == name), None)
-        if isinstance(member, (Extent, PlaceWord)):
-            return name in self.bound_values
-        if isinstance(member, Value) and member.derive is not None:
-            return name in self.bound_values or name in self._per_call_derived()
-        return True
+    def rtp(self, values: list[Value], cores: int = 1) -> list[Rtp]:
+        """The runtime parameters of ``cores`` cores, each reading ``values``.
+
+        Each is a Worker argument whose core reads its words once a call
+        with ``Rtp.read``, keyed by value; the preamble writes them, syncs
+        the scratchpad and opens each, before any DMA.
+
+        Args:
+            values: Values of this operator, in the order the core reads them.
+            cores: How many cores read them, each its own block.
+
+        Returns:
+            One ``Rtp`` per core.
+        """
+        rtps = [Rtp(values) for _ in range(cores)]
+        vars(self)["_rtps"] = [*self.rtps, *rtps]
+        return rtps
+
+    @property
+    def rtps(self) -> list[Rtp]:
+        """Every core's runtime parameters ``array()`` made (``rtp``)."""
+        return vars(self).get("_rtps", [])
 
     @property
     def bound_extents(self) -> dict[str, Affine | None]:

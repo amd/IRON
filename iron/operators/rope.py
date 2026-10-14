@@ -16,7 +16,7 @@ for the halves, so with those weights it must be the halves
 import dataclasses
 
 import numpy as np
-from aie.iron import Buffer, ObjectFifo, Worker, WorkerRuntimeBarrier, ceildiv, kernels
+from aie.iron import ObjectFifo, Worker, ceildiv, kernels
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import datamovement
@@ -158,39 +158,11 @@ class RoPE(Operator):
         of_in = [ObjectFifo(tile, name=f"in_{i}") for i in range(n)]
         of_lut = [ObjectFifo(self.angles.tile, name=f"lut_{i}") for i in range(n)]
         of_out = [ObjectFifo(tile, name=f"out_{i}") for i in range(n)]
-        # The two trip counts in an RTP, less any a graph bounds, which each
-        # core reads from the scratchpad per call.
-        dyn_lut = self.value("lut_rows").scratchpad
-        dyn_rows = self.value("rows_per_lut").scratchpad
-        static = [
-            nm for nm, d in (("lut_rows", dyn_lut), ("rows_per_lut", dyn_rows)) if not d
-        ]
-        rtp_ty = np.ndarray[(max(1, len(static)),), np.dtype[np.int32]]
-        counts = [
-            Buffer(rtp_ty, name=f"counts_{i}", use_write_rtp=True) for i in range(n)
-        ]
-        params = [
-            p
-            for p, d in (
-                (self.lut_rows.param, dyn_lut),
-                (self.rows_per_lut.param, dyn_rows),
-            )
-            if d
-        ]
-        barriers = [WorkerRuntimeBarrier() for _ in range(n)]
+        rtps = self.rtp([self.lut_rows, self.rows_per_lut], cores=n)
 
-        def core_body(of_in, of_lut, of_out, rope_kernel, counts, barrier, *words):
-            barrier.wait_for_value(1)
-            words = list(words)
-            lut_rows = (
-                words.pop(0).read() if dyn_lut else counts[static.index("lut_rows")]
-            )
-            rows_per_lut = (
-                words.pop(0).read()
-                if dyn_rows
-                else counts[static.index("rows_per_lut")]
-            )
-            barrier.release_with_value(1)
+        def core_body(of_in, of_lut, of_out, rope_kernel, rtp):
+            words = rtp.read()
+            lut_rows, rows_per_lut = words[self.lut_rows], words[self.rows_per_lut]
             for _ in range_(lut_rows):
                 elem_lut = of_lut.acquire(1)
                 for _ in range_(rows_per_lut):
@@ -209,21 +181,15 @@ class RoPE(Operator):
                     of_lut[i].cons(),
                     of_out[i].prod(),
                     kernel,
-                    counts[i],
-                    barriers[i],
-                ]
-                + params,
+                    rtps[i],
+                ],
             )
             for i in range(n)
         ]
         self.x.bind([f.prod() for f in of_in])
         self.angles.bind([f.prod() for f in of_lut])
         self.y.bind([f.cons() for f in of_out])
-        if not dyn_lut:
-            self.lut_rows.bind(counts, static.index("lut_rows"))
-        if not dyn_rows:
-            self.rows_per_lut.bind(counts, static.index("rows_per_lut"))
-        return workers + barriers
+        return workers
 
     def ops(self) -> int:
         kernel = kernels.datamovement.rope(self.cols, two_halves=self.method_type == 0)

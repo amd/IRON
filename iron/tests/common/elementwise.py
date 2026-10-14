@@ -50,7 +50,7 @@ def test_the_trip_count_is_a_resident_the_build_writes():
     assert op.residents == {"count": 1}
     # The preamble writes it into each core's runtime-parameter buffer.
     one_core = ReLU(size=2560, num_aie_columns=1, tile_size=256)
-    assert "aiex.npu.rtp_write(@count_0, 0, %c10_i32)" in str(
+    assert "aiex.npu.rtp_write(@rtp0, 0, %c10_i32)" in str(
         OperatorDesign(one_core).module()
     )
 

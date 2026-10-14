@@ -292,7 +292,8 @@ keyword-only parameters annotated `iron.Scratchpad[T]`, `iron.Carried[T]` or
 `aie.iron.DispatchTime[T]`. The parameter scratchpad exists on a full ELF only
 (XRT's `get_ctrl_scratchpad_bo` serves a module run), so on an xclbin image a
 scratchpad value lowers to a dispatch-time scalar: an offset use regenerates
-the stream, a core-read use is an `rtp_write` of the scalar.
+the stream, a core-read use is a write of the scalar into the core's
+runtime parameters.
 
 **Compilation Flow**:
 
@@ -388,17 +389,20 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      | A tunable `resolve(dev)` always fills, never a caller's | `Auto(derived=True)` |
      | A core, as a trip count or scalar | `Value(derive=lambda op: ...)` |
    - `array()`: build ObjectFIFOs and Workers (`self.kernel()` or a
-     factory's `ExternalFunction`, `Buffer(..., use_write_rtp=True)` for a
-     runtime parameter, `WorkerRuntimeBarrier()`), `range_()` for loops, and
-     `self.x.bind([f.prod() for f in fifos])` (a handle per lane) /
-     `self.count.bind(rtps)` for every
-     member; a value the build made a scratchpad word
-     (`self.value("count").scratchpad`, a per-call value on a full ELF) a
-     core reads per call from `.param` instead, and `self.x.l1_depth` is the
-     depth a core-side fifo of `x`'s tiles can have. The device is
-     `self.dev`. It returns what it built: its Workers, its barriers and any
-     `Flow`, `Lock` or `TileDma` only the sequence reaches. It sees the
-     array tier alone: reading an extent raises
+     factory's `ExternalFunction`), `range_()` for loops, and
+     `self.x.bind([f.prod() for f in fifos])` (a handle per lane) for every
+     streamed operand. The values the cores read are their runtime
+     parameters, `rtps = self.rtp([self.count, ...], cores=n)`, one per
+     core given as a Worker argument; in the core, `words = rtp.read()`
+     waits for the sequence and returns each word keyed by its value
+     (`words[self.count]`), whether the build wrote it into the core's
+     buffer or made it a scratchpad word (`self.count.in_scratchpad`, a
+     per-call value on a full ELF). `self.count.per_call` says whether a
+     call gives it, and `self.x.l1_depth` is the depth a core-side fifo of
+     `x`'s tiles can have. The device is `self.dev`. It returns what it
+     built: its Workers and any `Flow`, `Lock` or `TileDma` only the
+     sequence reaches. It sees the array tier alone: reading an extent
+     raises
    - `compatible()` for divisibility against the resolved tunables
    - `sequence(rt)` only if the derived sequence is not the one you want:
      `self.A.fill(tap, lane=i)`, `self.C.drain(tap, lane=i, wait=True)`
@@ -409,8 +413,9 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    and its `array()` builds no cores: it pins each operand's lanes to the
    image's shim channels (`operand.pin([DmaEndpoint(Tile(c, 0), MM2S, ch),
    ...])`, returning the endpoints), places the image's parameter block in each core,
-   `Buffer(address=)` bound to a derived `Value`, and returns the
-   `Lock(lock_id=)` the sequence releases it with. It takes no per-call
+   `Buffer(address=)`, which holds its derived `Value`s' words in
+   declaration order (`Value(words=)` for a block of several), and returns
+   the `Lock(lock_id=)` the sequence releases it with. It takes no per-call
    value. `Xclbin` is mlir-aie's `NPUKernel`, fetched on first read of
    `xclbin_path`; a build runs its `with_instructions(insts)`
 4. Name the kernel with a factory from `aie.iron.kernels`

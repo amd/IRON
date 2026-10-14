@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
-from aie.iron import Buffer, ObjectFifo, Worker, WorkerRuntimeBarrier
+from aie.iron import ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise
 from ml_dtypes import bfloat16
@@ -67,28 +67,12 @@ class Clamp(UnaryElementwise):
         of_outs = [
             ObjectFifo(self.y.tile, name=f"out_{k}", depth=depth) for k in range(cores)
         ]
-        # [count, low, high] per core; the count is a scratchpad word instead
-        # when a graph bounds the extent.
-        dynamic = self.value("count").scratchpad
-        words = (
-            ["low_bits", "high_bits"] if dynamic else ["count", "low_bits", "high_bits"]
-        )
-        rtps = [
-            Buffer(
-                np.ndarray[(len(words),), np.dtype[np.int32]],
-                name=f"rtp_{k}",
-                use_write_rtp=True,
-            )
-            for k in range(cores)
-        ]
-        barriers = [WorkerRuntimeBarrier() for _ in range(cores)]
-        params = [self.count.param] if dynamic else []
+        rtps = self.rtp([self.count, self.low_bits, self.high_bits], cores=cores)
 
-        def core_fn(of_in, of_out, kernel_fn, rtp, barrier, *count):
-            barrier.wait_for_value(1)
-            n = count[0].read() if dynamic else rtp[words.index("count")]
-            low, high = rtp[words.index("low_bits")], rtp[words.index("high_bits")]
-            barrier.release_with_value(1)
+        def core_fn(of_in, of_out, kernel_fn, rtp):
+            words = rtp.read()
+            n = words[self.count]
+            low, high = words[self.low_bits], words[self.high_bits]
             for _ in range_(n):
                 x, y = of_in.acquire(1), of_out.acquire(1)
                 kernel_fn(x, y, self.tile_size, low, high)
@@ -98,13 +82,10 @@ class Clamp(UnaryElementwise):
         workers = [
             Worker(
                 core_fn,
-                [of_ins[k].cons(), of_outs[k].prod(), kernel, rtps[k], barriers[k]]
-                + params,
+                [of_ins[k].cons(), of_outs[k].prod(), kernel, rtps[k]],
             )
             for k in range(cores)
         ]
         self.x.bind([f.prod() for f in of_ins])
         self.y.bind([f.cons() for f in of_outs])
-        for name in words:
-            self.value(name).bind(rtps, words.index(name))
-        return workers + barriers
+        return workers

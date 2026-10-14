@@ -26,7 +26,6 @@ from aie.iron import (
     ScratchpadParameter,
     TileDma,
     Worker,
-    WorkerRuntimeBarrier,
 )
 from aie.iron.dataflow.objectfifo import ObjectFifoHandle, ObjectFifoLink
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
@@ -290,12 +289,11 @@ class BuiltArray:
         op = other.op
         for mine, theirs in zip(op.buffers, self.op.buffers):
             mine.lane_handles = theirs.lane_handles
-        for value in [*op.residents, *(v.name for v in op.values)]:
-            op.value(value).targets = self.op.value(value).targets
+        # The owner's runtime parameters among them, which this sequence writes.
         vars(op).update(self._kept)
         # A sequence fills only flows it registers, which the configuration
         # keeps once; tile DMAs and shim channels are the owner's to declare.
-        reached = (WorkerRuntimeBarrier, Flow, PacketFlow, Lock)
+        reached = (Flow, PacketFlow, Lock)
         return OperatorRuntime(
             op, [b for b in self.built if isinstance(b, reached)], name=name
         )

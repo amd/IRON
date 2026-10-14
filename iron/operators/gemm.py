@@ -14,7 +14,6 @@ from aie.iron import (
     ObjectFifo,
     TaskGroup,
     Worker,
-    WorkerRuntimeBarrier,
     ceildiv,
     kernels,
 )
@@ -253,14 +252,11 @@ class GEMM(Operator):
         derive=lambda op: (op.M // op.mem_tile_m_c) * (op.N // op.mem_tile_n),
     )
     # Under a bound: the row blocks it covers, and the column tiles of each.
-    row_blocks_valid = Value(
-        derive=lambda op: ceildiv(op.valid, op.mem_tile_m_c),
-        optional=True,  # nothing reads them unbounded
-    )
-    col_tiles = Value(derive=lambda op: op.N // op.mem_tile_n, optional=True)
+    row_blocks_valid = Value(derive=lambda op: ceildiv(op.valid, op.mem_tile_m_c))
+    col_tiles = Value(derive=lambda op: op.N // op.mem_tile_n)
     # The cores derive their K tiles and the last one's columns from the bound
     # itself: each value a core reads is patched into every core per call.
-    k_valid = Value(derive=lambda op: op.valid_k, optional=True)
+    k_valid = Value(derive=lambda op: op.valid_k)
 
     def extent_unit(self, buffer: str) -> int:
         return 0  # nothing is shortened: the cores bound their compute
@@ -538,31 +534,14 @@ class GEMM(Operator):
         # Under a bound on M each core computes the tiles the bound covers
         # and passes the rest through, and under one on K it reduces over
         # the K tiles the bound covers: the DMAs still move all of A and B.
-        bounded = self.value("valid").scratchpad
-        # A full ELF's cores read the bound on K from the scratchpad, an
-        # xclbin's from their runtime parameters, which the sequence writes.
-        k_bounded = "valid_k" in self.bound_extents
-        k_word = k_bounded and not self.value("valid_k").scratchpad
-        n_rtp = (3 if bounded else 2) + k_word
-
-        # Runtime parameters: [K_div_k, n_tiles_per_core, col_tiles if
-        # bounded, the bound on K if an xclbin's] per core
-        rtps = [
-            [
-                Buffer(
-                    np.ndarray[(n_rtp,), np.dtype[np.int32]],
-                    name=f"rtp{row}_{col}",
-                    initial_value=np.zeros(n_rtp, dtype=np.int32),
-                    use_write_rtp=True,
-                )
-                for col in range(n_aie_cols)
-            ]
-            for row in range(n_aie_rows)
-        ]
-        workerBarriers = [
-            [WorkerRuntimeBarrier() for col in range(n_aie_cols)]
-            for row in range(n_aie_rows)
-        ]
+        bounded = self.value("valid").in_scratchpad
+        k_bounded = self.value("valid_k").per_call
+        read = [self.k_div_k, self.n_tiles]
+        if bounded:
+            read += [self.row_blocks_valid, self.col_tiles]
+        if k_bounded:
+            read.append(self.k_valid)
+        rtps = self.rtp([*read, *finish.values], cores=n_aie_rows * n_aie_cols)
 
         # Input A
         for i in range(n_shim_mem_A):
@@ -626,9 +605,6 @@ class GEMM(Operator):
             for j in range(n_aie_rows):
                 C_l1l2_fifos[j][col] = c_tmp_fifos[j]
 
-        n_valid_param = self.row_blocks_valid.param if bounded else None
-        k_valid_param = self.k_valid.param if k_bounded and not k_word else None
-
         # Tasks for each worker to perform
         def core_fn(
             in_a,
@@ -638,31 +614,25 @@ class GEMM(Operator):
             matmul,
             convert_copy,
             k_tail_zero,
-            my_rtp,
-            barrier,
+            rtp,
             elem_out_internal,
-            n_valid,
-            k_valid,
             *rest,
         ):
-            barrier.wait_for_value(1)
-            rtp_K_div_k = my_rtp[0]
-            rtp_n_tiles_per_core = my_rtp[1]
+            words = rtp.read()
+            rtp_K_div_k = words[self.k_div_k]
+            rtp_n_tiles_per_core = words[self.n_tiles]
             if bounded:
-                row_blocks = n_valid.read()
-                col_tiles = my_rtp[2]
+                row_blocks = words[self.row_blocks_valid]
+                col_tiles = words[self.col_tiles]
             # (K tiles, whether they are multiplied), in the order they arrive.
             spans = [(rtp_K_div_k, True)]
             if k_bounded:
-                k_bound = my_rtp[n_rtp - 1] if k_word else k_valid.read()
+                k_bound = words[self.k_valid]
                 k_compute = (k_bound + (k - 1)) // k
                 last = k_compute - 1
                 kept = k_bound - last * k
                 spans = [(k_compute, True), (rtp_K_div_k - k_compute, False)]
-            mode = finish.read(rest)
-            # The wait leaves the barrier set: release it, or a design sharing
-            # this array runs on these values.
-            barrier.release_with_value(1)
+            mode = finish.mode(words)
 
             def tile(compute: bool):
                 if use_larger_internal_buffer:
@@ -722,11 +692,8 @@ class GEMM(Operator):
                             matmul_kernel,
                             convert_copy_kernel if use_larger_internal_buffer else None,
                             matmul_kernel.k_tail if k_bounded else None,
-                            rtps[row][col],
-                            workerBarriers[row][col],
+                            rtps[row * n_aie_cols + col],
                             acc_buffer,
-                            n_valid_param,
-                            k_valid_param,
                             *finish.args(row * n_aie_cols + col),
                         ],
                         stack_size=STACK_BYTES,
@@ -739,17 +706,8 @@ class GEMM(Operator):
         )
         self.B.bind([f.prod(tile=Tile(c, 0)) for c, f in enumerate(B_l3l2_fifos)])
         self.C.bind([f.cons(tile=Tile(c, 0)) for c, f in enumerate(C_l2l3_fifos)])
-        flat_rtps = [
-            rtps[row][col] for row in range(n_aie_rows) for col in range(n_aie_cols)
-        ]
-        self.k_div_k.bind(flat_rtps, 0)
-        self.n_tiles.bind(flat_rtps, 1)
-        if bounded:
-            self.col_tiles.bind(flat_rtps, 2)
-        if k_word:
-            self.k_valid.bind(flat_rtps, n_rtp - 1)
         finish.bind()
-        return workers + [b for row in workerBarriers for b in row]
+        return workers
 
     # -- the runtime sequence --------------------------------------------------
 

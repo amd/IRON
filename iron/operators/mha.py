@@ -43,7 +43,6 @@ from aie.iron import (
     ObjectFifo,
     TaskGroup,
     Worker,
-    WorkerRuntimeBarrier,
     ceildiv,
     kernels,
 )
@@ -923,31 +922,15 @@ class MHA(Operator):
         # Each core computes, per head, the Q blocks the call's rows cover,
         # over the KV blocks its keys cover, and passes the Q blocks past
         # them through: the same acquires and releases, no kernel call, since
-        # Q and O stream every block. Its counts are the seven values below;
-        # a count the call sets is read from its scratchpad word on a full
-        # ELF, and else written into the core's runtime-parameter buffer.
-        # A worker's body is one call: it waits for the sequence to write
-        # the counts, reads them, and re-arms the barrier, which a wait does
-        # not consume; an xclbin's cores outlive the call, and would else
-        # start the next on these counts. The sequence cannot set it again
-        # before this call's O drains.
-        counts = (
-            "heads",
-            "q_blocks_per_pipeline",
-            "q_blocks_valid",
-            "kv_blocks",
-            "s_q",
-            "s_kv",
-            "q_start",
-        )
-        per_call = [n for n in counts if self.value(n).scratchpad]
-        params = [getattr(self, n).param for n in per_call]
-
-        def read(rtps, words):
-            return [
-                words[per_call.index(n)].read() if n in per_call else rtps[i]
-                for i, n in enumerate(counts)
-            ]
+        # Q and O stream every block. Each core reads its counts once a
+        # call (Rtp.read); the sequence cannot open its barrier again before
+        # this call's O drains.
+        blocks = [
+            self.heads,
+            self.q_blocks_per_pipeline,
+            self.q_blocks_valid,
+            self.kv_blocks,
+        ]
 
         def batched_matmul_qk(
             of_q,
@@ -956,10 +939,8 @@ class MHA(Operator):
             zero,
             matmul_QK,
             q_block_bias,
-            mha_rtps,
-            barrier,
+            rtp,
             idx_buffer,
-            *words,
         ):
             def q_block(compute: bool, kv_blocks):
                 elem_in_q = of_q.acquire(1)
@@ -978,9 +959,9 @@ class MHA(Operator):
                     idx_buffer[1] += num_pipelines
                 of_q.release(1)
 
-            barrier.wait_for_value(1)
-            heads, q_blocks, q_valid, kv_blocks, _, _, q_start = read(mha_rtps, words)
-            barrier.release_with_value(1)
+            words = rtp.read()
+            heads, q_blocks, q_valid, kv_blocks = (words[v] for v in blocks)
+            q_start = words[self.q_start]
             for _ in range_(heads):
                 idx_buffer[0] = 0
                 idx_buffer[1] = q_start + q_block_bias
@@ -997,11 +978,9 @@ class MHA(Operator):
             init_scale_buffer,
             memcopy_kernel_scale,
             q_block_bias,
-            mha_rtps,
-            barrier,
+            rtp,
             idx_buffer,
             scale_buffer,
-            *words,
         ):
             # The index buffer counts how many Q and KV blocks this worker has
             # processed; from it the kernel infers its position in A and P.
@@ -1036,11 +1015,9 @@ class MHA(Operator):
                     idx_buffer[0] = 0
                     idx_buffer[1] += num_pipelines
 
-            barrier.wait_for_value(1)
-            heads, q_blocks, q_valid, kv_blocks, s_q, s_kv, q_start = read(
-                mha_rtps, words
-            )
-            barrier.release_with_value(1)
+            words = rtp.read()
+            heads, q_blocks, q_valid, kv_blocks = (words[v] for v in blocks)
+            s_q, s_kv, q_start = words[self.s_q], words[self.s_kv], words[self.q_start]
             for _ in range_(heads):
                 idx_buffer[0] = 0
                 idx_buffer[1] = q_start + q_block_bias
@@ -1057,17 +1034,13 @@ class MHA(Operator):
             matmul_PV,
             rescale_O,
             q_block_bias,
-            mha_rtps,
-            barrier,
+            rtp,
             idx_buffer,
             acc,
-            *words,
         ):
-            barrier.wait_for_value(1)
-            heads, q_blocks, q_valid, loop_idx_kv, _, s_kv, q_start = read(
-                mha_rtps, words
-            )
-            barrier.release_with_value(1)
+            words = rtp.read()
+            heads, q_blocks, q_valid, loop_idx_kv = (words[v] for v in blocks)
+            s_kv, q_start = words[self.s_kv], words[self.q_start]
             for _ in range_(heads):
                 idx_buffer[0] = 0
                 idx_buffer[1] = q_start + q_block_bias
@@ -1129,23 +1102,13 @@ class MHA(Operator):
                         of_scale.release(1)
                     of_o_out.release(1)
 
-        # One runtime-parameter buffer and one barrier per worker, since each
-        # is placed with its core. The preamble writes the counts no call sets
-        # into every buffer and sets every barrier.
-        mha_rtps_list = [
-            [
-                Buffer(
-                    np.ndarray[(len(counts),), np.dtype[np.int32]],
-                    name=f"mha_rtpss_{i}_stage{j}",
-                    use_write_rtp=True,
-                )
-                for i in range(num_pipelines)
-            ]
-            for j in range(2 + pv_cores)
-        ]
-        worker_barrier_list = [
-            [WorkerRuntimeBarrier() for _ in range(num_pipelines)]
-            for _ in range(2 + pv_cores)
+        qk_rtps = self.rtp([*blocks, self.q_start], cores=num_pipelines)
+        softmax_rtps = self.rtp(
+            [*blocks, self.s_q, self.s_kv, self.q_start], cores=num_pipelines
+        )
+        pv_rtps = [
+            self.rtp([*blocks, self.s_kv, self.q_start], cores=num_pipelines)
+            for _ in range(pv_cores)
         ]
 
         matmul_workers, softmax_workers, matmul_pv_workers = [], [], []
@@ -1163,11 +1126,9 @@ class MHA(Operator):
                         zero_scores,
                         matmul_QK,
                         i,
-                        mha_rtps_list[0][i],
-                        worker_barrier_list[0][i],
+                        qk_rtps[i],
                         idx_buffer_qk,
-                    ]
-                    + params,
+                    ],
                     stack_size=STACK_SIZE,
                     tile=Tile(i, 2) if every else Tile(col=i),
                 )
@@ -1189,12 +1150,10 @@ class MHA(Operator):
                         scale_buffer_init_kernel,
                         memcopy_kernel_scale,
                         i,
-                        mha_rtps_list[1][i],
-                        worker_barrier_list[1][i],
+                        softmax_rtps[i],
                         idx_buffer_softmax,
                         scale_buffer_softmax,
-                    ]
-                    + params,
+                    ],
                     stack_size=SOFTMAX_STACK_SIZE,
                     tile=Tile(i, 3 if pv_cores == 1 else 4) if every else Tile(col=i),
                 )
@@ -1216,12 +1175,10 @@ class MHA(Operator):
                             matmul_PV,
                             rescale_O,
                             i,
-                            mha_rtps_list[2 + h][i],
-                            worker_barrier_list[2 + h][i],
+                            pv_rtps[h][i],
                             idx_buffer_pv,
                             Buffer(acc_ty),
-                        ]
-                        + params,
+                        ],
                         stack_size=STACK_SIZE,
                         tile=Tile(i, row) if every else Tile(col=i),
                     )
@@ -1259,13 +1216,7 @@ class MHA(Operator):
         self.K.bind(ks)
         self.V.bind(vs)
 
-        flat_rtps = [b for stage in mha_rtps_list for b in stage]
-        for i, name in enumerate(counts):
-            if name not in per_call:
-                getattr(self, name).bind(flat_rtps, i)
-
-        workers = matmul_workers + softmax_workers + matmul_pv_workers
-        return workers + [b for stage in worker_barrier_list for b in stage]
+        return matmul_workers + softmax_workers + matmul_pv_workers
 
     def ops(self) -> int:
         """Q K^T and its product with V per head, over the keys each query
@@ -1369,7 +1320,7 @@ class MHA(Operator):
         B_kv = self.B_kv
         # K and V stream the blocks the keys cover, a call's by its bound.
         kv_blocks = ceildiv(self.kv_tokens, B_kv)
-        kv_valid = self.value("kv_blocks") if self.uses_value("kv_blocks") else None
+        kv_valid = self.kv_blocks if self.kv_blocks.per_call else None
 
         def by_head(buffer, interleaved):
             # A (heads, seq, d) or, interleaved per token, (seq, heads, d)

@@ -40,7 +40,6 @@ from aie.iron import (
     Release,
     TileDma,
     Worker,
-    WorkerRuntimeBarrier,
     ceildiv,
 )
 from aie.iron.controlflow import range_
@@ -77,12 +76,6 @@ from iron.operators.flm.gemm.design import (
     M_CHUNK_FOR_N,
     M_TILE,
     N_TILE_DEFAULT,
-    RTP_CLAMP_MAX,
-    RTP_CLAMP_MIN,
-    RTP_EPILOGUE,
-    RTP_K_ITERS,
-    RTP_M_ROW_BLOCKS,
-    RTP_N_VAL,
     STACK_SIZE,
     Epilogue,
     Gelu,
@@ -96,7 +89,6 @@ from iron.operators.flm.gemm.design import (
     _Slab,
     compute_rows,
     l1_budget,
-    rtp_layout,
 )
 from iron.operators.flm.packing import pack_b
 from iron.operators.sigmoid import Sigmoid
@@ -256,21 +248,24 @@ class GEMM(Operator):
     # uncomputed, since its count is in the memtile's lock values, which no
     # per-call word reaches. B moves as it does unbounded.
     valid = Extent(M)
-    # The parameter words every core reads once its barrier opens. The last
-    # two exist only at m_chunk > 1 (rtp_layout); a word is not free.
+    # The parameter words every core reads once a call. The unit counts are
+    # read only at m_chunk > 1: the sequence writes a word per core, ~2 us of
+    # dispatch latency against a ~107 us floor. The clamp bounds are read
+    # always: the kernel's clamp is neutralised by (-inf, +inf), not compiled
+    # out, which would take a second xclbin.
     n_val = Value(derive=lambda op: op.N)
     m_row_blocks = Value(derive=lambda op: op._m_row_blocks)
     k_iters = Value(derive=lambda op: op._k_iters)
     mode = Value(derive=lambda op: op.activation.mode)
     clamp_min = Value(derive=lambda op: _clamp_bits(op.clamp)[0])
     clamp_max = Value(derive=lambda op: _clamp_bits(op.clamp)[1])
-    n_chunks = Value(derive=lambda op: op._n_units, optional=True)
-    n_units = Value(derive=lambda op: op._n_units, optional=True)
+    n_chunks = Value(derive=lambda op: op._n_units)
+    n_units = Value(derive=lambda op: op._n_units)
     # Under a bound, the units it reaches: the cores' trip count and C's
     # length, in row blocks.
-    units_valid = Value(derive=_units_valid, optional=True)
+    units_valid = Value(derive=_units_valid)
     # A's repeat count on a full ELF: the units less one.
-    units_repeat = Value(derive=lambda op: _units_valid(op) - 1, optional=True)
+    units_repeat = Value(derive=lambda op: _units_valid(op) - 1)
 
     def extent_unit(self, buffer: str) -> int:
         return 0  # nothing is shortened
@@ -594,8 +589,6 @@ class GEMM(Operator):
         # Under a row bound the cores read the units it reaches: from the
         # scratchpad on a full ELF, else from their parameter buffer.
         bounded = "valid" in self.bound_extents
-        per_call = bounded and self.value("valid").scratchpad
-        rtp_slots, rtp_words = rtp_layout(M_CHUNK, bounded and not per_call)
         tm = get_target_model(self.dev.resolve())
 
         bf16_ty = np.dtype[bfloat16]
@@ -811,19 +804,19 @@ class GEMM(Operator):
             ]
             for r in range(ROWS)
         ]
-        rtps = [
-            [
-                Buffer(
-                    np.ndarray[(rtp_words,), np.dtype[np.int32]],
-                    name=f"rtp_{r}_{c}",
-                    initial_value=np.zeros(rtp_words, dtype=np.int32),
-                    use_write_rtp=True,
-                )
-                for c in range(COLS)
-            ]
-            for r in range(ROWS)
+        read = [
+            self.n_val,
+            self.m_row_blocks,
+            self.k_iters,
+            self.mode,
+            self.clamp_min,
+            self.clamp_max,
         ]
-        barriers = [[WorkerRuntimeBarrier() for _ in range(COLS)] for _ in range(ROWS)]
+        if M_CHUNK > 1:
+            read += [self.n_chunks, self.n_units]
+        if bounded:
+            read.append(self.units_valid)
+        rtps = self.rtp(read, cores=ROWS * COLS)
 
         # --- Compute ------------------------------------------------------
         def core_fn(
@@ -836,43 +829,34 @@ class GEMM(Operator):
             init_k,
             kstep_k,
             epi_k,
-            my_rtp,
+            rtp,
             my_col,
-            barrier,
-            *words,
         ):
             """Core body. Every trip count and the activation come from the
-            runtime parameter buffer, so one core program serves every shape.
+            runtime parameters, so one core program serves every shape.
             """
-            barrier.wait_for_value(1)
+            # Safe to re-arm before the work: the sequence cannot open the
+            # barrier again until this dispatch's C drains.
+            words = rtp.read()
             # Derived rather than sent, saving an RTP word: column c has work
             # in block j iff (j*COLS + c)*N_TILE < N. Both divisors are powers
             # of two, so this must leave no __divsi3; check the .o.
-            n_tiles = my_rtp[RTP_N_VAL] // N_TILE
+            n_tiles = words[self.n_val] // N_TILE
             n_work = (n_tiles - my_col[0] + COLS - 1) // COLS
             n_drain = ((n_tiles + COLS - 1) // COLS) - n_work
-            n_row_blocks = my_rtp[RTP_M_ROW_BLOCKS]
-            n_k_iters = my_rtp[RTP_K_ITERS]
-            epi_mode = my_rtp[RTP_EPILOGUE]
-            clamp_min_bits = my_rtp[RTP_CLAMP_MIN]
-            clamp_max_bits = my_rtp[RTP_CLAMP_MAX]
-            if "n_chunks" in rtp_slots:
-                n_chunks = my_rtp[rtp_slots["n_chunks"]]
-                n_units_rt = my_rtp[rtp_slots["n_units"]]
+            n_row_blocks = words[self.m_row_blocks]
+            n_k_iters = words[self.k_iters]
+            epi_mode = words[self.mode]
+            clamp_min_bits = words[self.clamp_min]
+            clamp_max_bits = words[self.clamp_max]
+            if M_CHUNK > 1:
+                n_chunks = words[self.n_chunks]
+                n_units_rt = words[self.n_units]
             else:
                 n_chunks = n_row_blocks
                 n_units_rt = n_row_blocks
             # Bounded, m_chunk is 1: a unit is a chunk.
-            n_live = n_units_rt
-            if per_call:
-                n_live = words[0].read()
-            elif bounded:
-                n_live = my_rtp[rtp_slots["units_valid"]]
-            # Acquire does not consume the barrier, so take it back to zero or
-            # the next dispatch re-reads these instead of waiting. Safe before
-            # the work: the sequence cannot re-set it until this dispatch's C
-            # drains.
-            barrier.release_with_value(1)
+            n_live = words[self.units_valid] if bounded else n_units_rt
 
             def sweep(group):
                 """One k reduction feeding ``group`` accumulators off a shared B."""
@@ -954,10 +938,8 @@ class GEMM(Operator):
                             acc_init,
                             k_step,
                             epilogue_chunk,
-                            rtps[r][c],
+                            rtps[r * COLS + c],
                             my_cols[r][c],
-                            barriers[r][c],
-                            *([self.units_valid.param] if per_call else []),
                         ],
                         tile=ct_tiles[r][c],
                         stack_size=STACK_SIZE,
@@ -967,19 +949,7 @@ class GEMM(Operator):
         self.A.bind([f.prod() for f in a_l3l2_fifos])
         self.B.bind(b_shim_flows)
         self.C.bind([f.cons() for f in c_l2l3_fifos])
-        flat = [b for row in rtps for b in row]
-        self.n_val.bind(flat, RTP_N_VAL)
-        self.m_row_blocks.bind(flat, RTP_M_ROW_BLOCKS)
-        self.k_iters.bind(flat, RTP_K_ITERS)
-        self.mode.bind(flat, RTP_EPILOGUE)
-        self.clamp_min.bind(flat, RTP_CLAMP_MIN)
-        self.clamp_max.bind(flat, RTP_CLAMP_MAX)
-        if "n_chunks" in rtp_slots:
-            self.n_chunks.bind(flat, rtp_slots["n_chunks"])
-            self.n_units.bind(flat, rtp_slots["n_units"])
-        if "units_valid" in rtp_slots:
-            self.units_valid.bind(flat, rtp_slots["units_valid"])
-        return workers + unrouted + [b for row in barriers for b in row]
+        return workers + unrouted
 
     # -- geometry of one dispatch ------------------------------------------------
 

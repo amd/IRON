@@ -166,7 +166,7 @@ def test_per_call_values_bind_to_the_operator_and_enable_it():
     op, value = binding.op, binding.expression.value
     assert type(op) is Copy and binding.member.name == "out_offset"
     assert value.name == "pos" and value.kind is Kind.SCRATCHPAD
-    assert op.uses_value("out_offset") and not op.uses_value("in_offset")
+    assert op.value("out_offset").per_call and not op.value("in_offset").per_call
     assert [v.name for v in op.values] == ["out_offset"]
 
 
@@ -1835,7 +1835,7 @@ def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
     assert mha.derived_at("q_start", **at) == 0
     assert mha.derived_at("q_start", valid=64, kv_valid=192) == 2  # a later chunk
     # Bound alike, the queries start at 0 on every call: written once.
-    assert mha.residents["q_start"] == 0 and mha.uses_value("s_q")
+    assert mha.residents["q_start"] == 0 and mha.value("s_q").per_call
     (out,) = t.outputs
     assert out.bounds == {0: t.values[0].affine()}  # O is bounded like Q
 

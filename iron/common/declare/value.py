@@ -21,21 +21,21 @@ class Value(Member["Value"]):
     """A value the array reads: per call when a graph binds it, else written
     once per build before the first DMA.
 
-    Declared in an operator's body; on an instance, ``op.value(name)`` is the
-    value bound to it (`of`), which a build gives its device parameter.
+    Declared in an operator's body; on an instance, ``self.count`` is the
+    value bound to it (`of`), which a build gives its device parameter and
+    a core reads through ``Operator.rtp``.
 
     Args:
         dtype: An integer type: the scratchpad encoding has no floating point.
         derive: The once-per-build value, from the operator: a word, or
-            the words of a block written from its index on.
-        optional: A build may allocate no buffer for it.
+            ``words`` of them.
+        words: The words it holds in a core's runtime parameters; a block
+            of several is written once per build.
 
     Attributes:
         param: The build's parameter: on a full ELF the ``ScratchpadParameter``,
             on an xclbin (no scratchpad) a dispatch-time scalar.
         ssa: Its value in the sequence body, on an xclbin.
-        targets: The runtime-parameter buffers, and the index in each, that
-            the preamble writes it to (`bind`).
     """
 
     def __init__(
@@ -43,7 +43,7 @@ class Value(Member["Value"]):
         *,
         dtype: Any = np.int32,
         derive: Callable[[Any], Any] | None = None,
-        optional: bool = False,
+        words: int = 1,
     ) -> None:
         if np.dtype(dtype).kind == "f":
             raise TypeError(
@@ -52,24 +52,26 @@ class Value(Member["Value"]):
             )
         self.dtype = dtype
         self.derive = derive
-        self.optional = optional
+        self.words = words
         self.op: Operator | None = None
         self.param: Any = None
         self.ssa = None
-        self.targets: list[tuple[Any, int]] = []
 
     def of(self, op: Operator) -> Self:
         """This value on ``op``, with no parameter yet."""
         bound = copy.copy(self)
         bound.op = op
-        bound.targets = []
         return bound
 
-    def bind(self, buffers, index: int = 0) -> None:
-        """Bind to runtime-parameter buffers whose ``[index]`` the preamble writes."""
-        if not isinstance(buffers, (list, tuple)):
-            buffers = [buffers]
-        self.targets.extend((b, index) for b in buffers)
+    @property
+    def per_call(self) -> bool:
+        """A call gives this value: a graph binds it, or its ``derive``
+        reads an extent a graph bounds. A value with no ``derive`` always is.
+        """
+        if self.derive is None:
+            return True
+        op = self.op
+        return self.name in op.bound_values or self.name in op._per_call_derived()
 
     @property
     def symbol(self) -> str:
@@ -85,7 +87,7 @@ class Value(Member["Value"]):
         )
 
     @property
-    def scratchpad(self) -> bool:
+    def in_scratchpad(self) -> bool:
         """The cores read this value from the parameter scratchpad: a build
         gave it a ``ScratchpadParameter`` (a per-call value on a full ELF).
         """
@@ -119,6 +121,10 @@ class Extent(Value):
     def __init__(self, field: Any, *, dtype: Any = np.int32) -> None:
         super().__init__(dtype=dtype)
         self.field = field  # the Param field
+
+    @property
+    def per_call(self) -> bool:
+        return self.name in self.op.bound_values
 
     @overload
     def __get__(self, instance: None, owner: type | None = None) -> Self: ...
@@ -171,7 +177,7 @@ class ChainWord(Value):
     """
 
     def __init__(self, owner: type, finish: bool) -> None:
-        super().__init__(derive=self.index, optional=True)
+        super().__init__(derive=self.index)
         self.owner = owner
         self.finish = finish
         self.name = "finish_chain" if finish else "prepare_chain"
@@ -195,6 +201,10 @@ class PlaceWord(Value):
         self.owner = owner
         self.buffer = buffer
         self.name = f"{buffer}_offset"
+
+    @property
+    def per_call(self) -> bool:
+        return self.name in self.op.bound_values
 
     def __repr__(self) -> str:
         return f"<the offset {self.buffer} is placed at>"
