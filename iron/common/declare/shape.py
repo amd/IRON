@@ -94,8 +94,8 @@ class Shape:
         return Shape(tuple(out))
 
     def check(self, cls: type, member: Any, what: str, *, allow_tunable: bool) -> None:
-        """Check each dimension is a ``param()`` field or an integer, or with
-        ``allow_tunable`` (a stream's tile) also an ``auto()``.
+        """Check each dimension is a ``Param()`` field or an integer, or with
+        ``allow_tunable`` (a stream's tile) also an ``Auto()``.
 
         Raises:
             TypeError: A dimension breaks the rule.
@@ -119,11 +119,11 @@ class Shape:
                     )
                     raise TypeError(
                         f"{cls.__name__}.{member.name}: {what} {d!r} is {why}. A "
-                        f"shape dimension is a param() field or an integer literal"
+                        f"shape dimension is a Param() field or an integer literal"
                     )
             elif not isinstance(d, (int, np.integer)):
                 raise TypeError(
-                    f"{cls.__name__}.{member.name}: {what} {d!r} is not a param() "
+                    f"{cls.__name__}.{member.name}: {what} {d!r} is not a Param() "
                     f"field or an integer. Expressions are not allowed in shapes; "
                     f"declare the result as a field"
                 )
