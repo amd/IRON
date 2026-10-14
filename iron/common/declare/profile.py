@@ -21,26 +21,16 @@ from ... import operators
 from .field import Auto, Param
 
 
-@dataclasses.dataclass(frozen=True)
-class Entry:
-    """One line of a profile: the tunables for the operators ``dims`` selects."""
-
-    cls: type
-    dims: dict[str, Any]  # Param() values to match; a dimension left out matches any
-    tunables: dict[str, Any]  # Auto() values to give
-
-    def matches(self, cls: type, dims: Mapping[str, Any]) -> bool:
-        return issubclass(cls, self.cls) and all(
-            name in dims and dims[name] == value for name, value in self.dims.items()
-        )
-
-
 class Profile:
     """Tunable values for operators, keyed by their shape.
 
     Within ``with profile:``, a tunable a call leaves open comes from the
     most specific entry naming it; entries of equal specificity that
     disagree raise. A subclass matches its base's entries.
+
+    Each entry is ``(cls, dims, tunables)``: the ``Param()`` values it
+    matches (a dimension left out matches any) and the ``Auto()`` values it
+    gives, one line of the JSON file ``load`` reads and ``save`` writes.
     """
 
     _active: ClassVar[contextvars.ContextVar[Profile | None]] = contextvars.ContextVar(
@@ -52,7 +42,7 @@ class Profile:
     )
 
     def __init__(self) -> None:
-        self._entries: list[Entry] = []
+        self._entries: list[tuple[type, dict[str, Any], dict[str, Any]]] = []
 
     @classmethod
     def current(cls) -> Profile | None:
@@ -84,7 +74,7 @@ class Profile:
             )
         if not tunables:
             raise TypeError(f"an entry for {cls.__name__} must give a tunable")
-        self._entries.append(Entry(cls, dims, tunables))
+        self._entries.append((cls, dims, tunables))
 
     def tunables_for(self, cls: type, given: Mapping[str, Any]) -> dict[str, Any]:
         """The tunables for the ``cls`` a call with ``given`` keywords makes,
@@ -101,11 +91,14 @@ class Profile:
             elif f.default_factory is not dataclasses.MISSING:
                 dims[f.name] = f.default_factory()
         chosen: dict[str, tuple[int, Any]] = {}
-        for entry in self._entries:
-            if not entry.matches(cls, dims):
+        for base, matched, tunables in self._entries:
+            if not issubclass(cls, base) or any(
+                name not in dims or dims[name] != value
+                for name, value in matched.items()
+            ):
                 continue
-            rank = len(entry.dims)
-            for name, value in entry.tunables.items():
+            rank = len(matched)
+            for name, value in tunables.items():
                 if name not in chosen or rank > chosen[name][0]:
                     chosen[name] = (rank, value)
                 elif rank == chosen[name][0] and chosen[name][1] != value:
@@ -141,18 +134,15 @@ class Profile:
     def save(self, path: str | Path) -> None:
         """Write the profile as JSON, one entry to a line."""
         lines = []
-        for entry in self._entries:
-            name = entry.cls.__name__
-            if (
-                name not in operators.__all__
-                or getattr(operators, name) is not entry.cls
-            ):
+        for cls, dims, tunables in self._entries:
+            name = cls.__name__
+            if name not in operators.__all__ or getattr(operators, name) is not cls:
                 raise ValueError(f"{name} is not iron.operators.{name}")
-            lines.append(json.dumps({"operator": name, **entry.dims, **entry.tunables}))
+            lines.append(json.dumps({"operator": name, **dims, **tunables}))
         with open(path, "w") as f:
             f.write('{"entries": [\n  ' + ",\n  ".join(lines) + "\n]}\n")
 
-    def __iter__(self) -> Iterator[Entry]:
+    def __iter__(self) -> Iterator[tuple[type, dict[str, Any], dict[str, Any]]]:
         return iter(self._entries)
 
     def __len__(self) -> int:
