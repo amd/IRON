@@ -10,11 +10,10 @@ themselves are applications over it, each a package of
   whose ``tree()`` is its weights by their own names; ``DecoderConfig``, a
   decoder's own shape; ``Oracle``, the float32 forward pass on the host a
   model is judged by (``rms_norm``, ``gelu_tanh``, ``attend(causal=,
-  window=)``, ``rotate`` and ``sandwich_layer``, EmbeddingGemma 2's towers'
-  layer, shared with every model's own oracle); ``Model``, a graph whose
-  versions ``load()`` compiles up front; and ``Runner``, which opens a
-  decoder's checkpoint and tokenizer and builds it and its oracle (``main``
-  is its command line).
+  window=)`` and ``rotate``, shared with every model's own oracle);
+  ``Model``, a graph whose versions ``load()`` compiles up front; and
+  ``Runner``, which opens a decoder's checkpoint and tokenizer and builds
+  it and its oracle (``main`` is its command line).
 * ``causal``: ``CausalLM``, a decoder on the NPU as one graph (prefill and
   decode, the caches, attention over them and ``logits(tokens)``), to
   which a model gives its ``layer`` and ``head``; ``DecodeStep``, a call's

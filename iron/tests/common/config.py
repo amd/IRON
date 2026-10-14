@@ -2,43 +2,34 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """``Config.from_checkpoint``: the dotted-path lookup and ``convert`` hooks
-against a real ``config.json`` (device-free), and that Llama's and
-EmbeddingGemma 2's own give today's hand-written values.
+against a real checkpoint's own ``config.json`` (device-free; skipped
+outside CI where the checkpoint is not there, failed in CI), and that
+``DecoderConfig`` adds the decoder-only fields to ``Config``'s ``eps``.
 """
 
 import dataclasses
-from pathlib import Path
 
 import pytest
 
-from iron.applications import llama
 from iron.applications.embedding_gemma2.config import (
     AudioConfig,
     Config as EmbeddingGemmaConfig,
     VisionConfig,
 )
-from iron.applications.embedding_gemma2 import model as embedding_gemma2_model
-from iron.applications.llama.model import Llama3RopeScaling, LlamaConfig, Runner
+from iron.applications.llama.model import Llama3RopeScaling, LlamaConfig
 from iron.lm import Config, DecoderConfig
+from iron.lm.testing import require, weights_dir
 
-LLAMA_CONFIG_JSON = Path(llama.__file__).with_name("config.json")
-EMBEDDING_GEMMA2_CONFIG_JSON = Path(embedding_gemma2_model.__file__).with_name(
-    "config.json"
-)
-
-
-def test_llama_1b_from_checkpoint_is_runners_config():
-    """``Runner.config`` is built from the checkpoint's ``config.json``;
-    rebuilding it gives the same instance.
-    """
-    assert LlamaConfig.from_checkpoint(LLAMA_CONFIG_JSON) == Runner.config
+LLAMA_DIR = weights_dir("llama3.2-1b")
+EMBEDDING_GEMMA2_DIR = weights_dir("embeddinggemma-2")
 
 
-def test_llama_1b_values_are_todays_hand_written_ones():
-    c = Runner.config
+def test_llama_1b_from_checkpoint_is_its_published_shape():
+    require(LLAMA_DIR / "config.json")
+    c = LlamaConfig.from_checkpoint(LLAMA_DIR)
     assert (c.vocab_size, c.emb_dim, c.n_layers) == (128256, 2048, 16)
     assert (c.n_heads, c.n_kv_groups, c.head_dim) == (32, 8, 64)
-    assert (c.hidden_dim, c.max_seq_len, c.rope_base) == (8192, 32768, 500000.0)
+    assert (c.hidden_dim, c.rope_base) == (8192, 500000.0)
     assert c.eps == 1e-5
     assert c.rope_scaling == Llama3RopeScaling(
         factor=32.0,
@@ -49,14 +40,16 @@ def test_llama_1b_values_are_todays_hand_written_ones():
 
 
 def test_from_checkpoint_takes_either_the_file_or_its_directory():
-    assert LlamaConfig.from_checkpoint(
-        LLAMA_CONFIG_JSON.parent
-    ) == LlamaConfig.from_checkpoint(LLAMA_CONFIG_JSON)
+    require(LLAMA_DIR / "config.json")
+    assert LlamaConfig.from_checkpoint(LLAMA_DIR) == LlamaConfig.from_checkpoint(
+        LLAMA_DIR / "config.json"
+    )
 
 
 def test_from_checkpoint_leaves_an_unnamed_field_at_its_default():
+    require(LLAMA_DIR / "config.json")
     # prefill_chunk names no config.json key: an IRON choice.
-    assert LlamaConfig.from_checkpoint(LLAMA_CONFIG_JSON).prefill_chunk == 2048
+    assert LlamaConfig.from_checkpoint(LLAMA_DIR).prefill_chunk == 2048
 
 
 def test_from_checkpoint_raises_with_no_config_json_beside_the_path(tmp_path):
@@ -77,11 +70,13 @@ def test_embedding_gemma2_from_checkpoint_is_the_default_instance(cls, instance)
     or a top-level token id) gives today's hand-written default; a field it
     does not name (an audio or vision front end's own choice) keeps it too.
     """
-    assert cls.from_checkpoint(EMBEDDING_GEMMA2_CONFIG_JSON) == instance
+    require(EMBEDDING_GEMMA2_DIR / "config.json")
+    assert cls.from_checkpoint(EMBEDDING_GEMMA2_DIR) == instance
 
 
 def test_embedding_gemma2_global_layers_are_the_checkpoints_full_attention_ones():
-    config = EmbeddingGemmaConfig.from_checkpoint(EMBEDDING_GEMMA2_CONFIG_JSON)
+    require(EMBEDDING_GEMMA2_DIR / "config.json")
+    config = EmbeddingGemmaConfig.from_checkpoint(EMBEDDING_GEMMA2_DIR)
     assert config.global_layers == (5, 11, 17, 23)
 
 

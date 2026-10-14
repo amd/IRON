@@ -5,7 +5,10 @@
 the oracles its graphs are judged by, the text encoder's
 (``EmbeddingGemmaOracle``), the audio tower's (``AudioOracle``, with the
 feature extractor) and the vision tower's (``VisionOracle``, with the image
-processor), each an ``Oracle``.
+processor), each an ``Oracle``. ``sandwich_layer`` is the layer the text
+encoder and the vision tower share, EmbeddingGemma 2's own Gemma-shaped
+layer, as ``iron.applications.embedding_gemma2.blocks.sandwich_layer`` is
+its NPU side.
 """
 
 import math
@@ -19,6 +22,43 @@ from iron.lm import LogMel, Oracle, rope_angles, widen
 from iron.operators.resample.reference import resize
 
 from .config import AudioConfig, Config, VisionConfig
+
+
+def sandwich_layer(
+    oracle: Oracle,
+    x,
+    tables: list[np.ndarray],
+    *,
+    q_proj,
+    k_proj,
+    v_proj,
+    o_proj,
+    q_norm,
+    k_norm,
+    norms: tuple,
+    gate,
+    up,
+    down,
+    groups: int,
+    head_dim: int,
+    window: int | None = None,
+):
+    """The layer the text encoder and the vision tower share, on ``x``
+    ``(n, emb_dim)``: attention, its queries and keys normed and turned by
+    ``tables`` (``oracle.rotate``), then the GELU-gated feed-forward, each
+    between sandwich norms (``norms``, the attention's pre and post, then
+    the feed-forward's) with its residual.
+    """
+    n, H, G, D = x.shape[0], oracle.config.n_heads, groups, head_dim
+    h = oracle.rms_norm(x, norms[0])
+    q = oracle.rotate(oracle.rms_norm((h @ q_proj.T).reshape(n, H, D), q_norm), tables)
+    k = oracle.rotate(oracle.rms_norm((h @ k_proj.T).reshape(n, G, D), k_norm), tables)
+    v = oracle.rms_norm((h @ v_proj.T).reshape(n, G, D))
+    a = oracle.attend(q, k, v, window=window) @ o_proj.T
+    x = x + oracle.rms_norm(a, norms[1])
+    h = oracle.rms_norm(x, norms[2])
+    f = (oracle.gelu_tanh(h @ gate.T) * (h @ up.T)) @ down.T
+    return x + oracle.rms_norm(f, norms[3])
 
 
 class EmbeddingGemmaOracle(Oracle):
@@ -52,7 +92,8 @@ class EmbeddingGemmaOracle(Oracle):
         G, D, _ = c.heads(i)
         window = None if i in c.global_layers else c.sliding_window
         a, b = w.self_attn, w.ple_block
-        x = self.sandwich_layer(
+        x = sandwich_layer(
+            self,
             x,
             [angles],
             q_proj=a.q_proj.weight,
@@ -377,7 +418,8 @@ class VisionOracle(Oracle):
         tables = [self.angles[x], self.angles[y]]
         for w in self.layers:
             a = w.self_attn
-            h = self.sandwich_layer(
+            h = sandwich_layer(
+                self,
                 h,
                 tables,
                 q_proj=a.q_proj.linear.weight,

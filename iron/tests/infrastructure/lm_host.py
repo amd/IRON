@@ -29,9 +29,10 @@ from ml_dtypes import bfloat16
 from safetensors.numpy import load_file, save_file
 
 from iron.lm import Checkpoint, Sampler
-from iron.applications.llama.model import SPECIAL_TOKENS, Runner, tokenizer
-from iron.lm.testing import weights_dir
+from iron.applications.llama.model import SPECIAL_TOKENS, LlamaConfig, tokenizer
+from iron.lm.testing import require, weights_dir
 from iron.operators import sample
+from iron.tests.common.llama_model import REAL_1B
 
 
 def bitwise_equal(a: np.ndarray, b: np.ndarray) -> bool:
@@ -44,7 +45,7 @@ def bitwise_equal(a: np.ndarray, b: np.ndarray) -> bool:
 
 #: Llama-3.2-1B's proportions at toy size: GQA, a wider FFN, a tied head.
 TOY = dataclasses.replace(
-    Runner.config,
+    REAL_1B,
     vocab_size=32,
     emb_dim=64,
     n_layers=2,
@@ -457,10 +458,11 @@ def test_real_checkpoint_every_tensor_bitwise():
 
 @requires_checkpoint
 def test_real_checkpoint_is_llama_3_2_1b():
-    """The real key spelling and shapes are the default config's, and
-    nothing is left over.
+    """The real key spelling and shapes are the checkpoint's own config.json
+    (``LlamaConfig.from_checkpoint``), and nothing is left over.
     """
-    c = Runner.config
+    require(real_checkpoint.parent / "config.json")
+    c = LlamaConfig.from_checkpoint(real_checkpoint)
     model = Checkpoint(real_checkpoint).tree().model
     assert model.embed_tokens.weight.shape == (c.vocab_size, c.emb_dim)
     assert model.embed_tokens.weight.dtype == bfloat16

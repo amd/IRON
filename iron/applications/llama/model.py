@@ -27,11 +27,6 @@ from iron.lm import Block, CausalLM, DecoderConfig, Oracle, widen
 from iron.operators.gemv import GEMV
 from iron.operators.rms_norm import RMSNorm
 
-#: The checkpoint's own config.json, checked in here as every Llama 3.2 1B
-#: checkpoint ships it (meta-llama/Llama-3.2-1B), which ``LlamaConfig``'s
-#: fields are built from.
-_CONFIG_JSON = Path(__file__).with_name("config.json")
-
 
 @dataclasses.dataclass(frozen=True)
 class Llama3RopeScaling:
@@ -172,7 +167,7 @@ def tokenizer(path) -> tiktoken.Encoding:
 class Runner(lm.Runner):
     """Llama 3.2 1B, from its checkpoint and ``tokenizer.model``."""
 
-    config = LlamaConfig.from_checkpoint(_CONFIG_JSON)
+    config = LlamaConfig
     model = Llama
     open_tokenizer = staticmethod(tokenizer)
     bos = SPECIAL_TOKENS["<|begin_of_text|>"]

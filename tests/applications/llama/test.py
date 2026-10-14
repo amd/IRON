@@ -33,22 +33,24 @@ from iron.lm.testing import (
 
 WEIGHTS = weights_dir("llama3.2-1b") / "model.safetensors"
 TOKENIZER = weights_dir("llama3.2-1b") / "tokenizer.model"
+CONFIG = weights_dir("llama3.2-1b") / "config.json"
 
 pytestmark = pytest.mark.supported_devices("npu2")
 
 
 @pytest.fixture(scope="module")
 def runner(request):
-    config = Runner.config
-    max_seq_len = request.config.getoption("--max-seq-len")
-    if max_seq_len is not None:
-        config = dataclasses.replace(config, max_seq_len=max_seq_len)
     seed = request.config.getoption("--random-weights")
     if seed is not None:
-        require(WEIGHTS)
-        return Runner(WEIGHTS, config=config, seed=seed)
-    require(WEIGHTS, TOKENIZER)
-    return Runner(WEIGHTS, TOKENIZER, config)
+        require(WEIGHTS, CONFIG)
+        run = Runner(WEIGHTS, seed=seed)
+    else:
+        require(WEIGHTS, TOKENIZER, CONFIG)
+        run = Runner(WEIGHTS, TOKENIZER)
+    max_seq_len = request.config.getoption("--max-seq-len")
+    if max_seq_len is not None:
+        run.config = dataclasses.replace(run.config, max_seq_len=max_seq_len)
+    return run
 
 
 @pytest.fixture(scope="module")

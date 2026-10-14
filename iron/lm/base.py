@@ -488,42 +488,6 @@ class Oracle:
         p /= p.sum(axis=-1, keepdims=True)
         return (p @ v.transpose(1, 0, 2)).transpose(1, 0, 2).reshape(n, H * D)
 
-    def sandwich_layer(
-        self,
-        x,
-        tables: list[np.ndarray],
-        *,
-        q_proj,
-        k_proj,
-        v_proj,
-        o_proj,
-        q_norm,
-        k_norm,
-        norms: tuple,
-        gate,
-        up,
-        down,
-        groups: int,
-        head_dim: int,
-        window: int | None = None,
-    ):
-        """The layer EmbeddingGemma 2's text encoder and vision tower share,
-        on `x` `(n, emb_dim)`: attention, its queries and keys normed and
-        turned by `tables` (`rotate`), then the GELU-gated feed-forward,
-        each between sandwich norms (`norms`, the attention's pre and post,
-        then the feed-forward's) with its residual.
-        """
-        n, H, G, D = x.shape[0], self.config.n_heads, groups, head_dim
-        h = self.rms_norm(x, norms[0])
-        q = self.rotate(self.rms_norm((h @ q_proj.T).reshape(n, H, D), q_norm), tables)
-        k = self.rotate(self.rms_norm((h @ k_proj.T).reshape(n, G, D), k_norm), tables)
-        v = self.rms_norm((h @ v_proj.T).reshape(n, G, D))
-        a = self.attend(q, k, v, window=window) @ o_proj.T
-        x = x + self.rms_norm(a, norms[1])
-        h = self.rms_norm(x, norms[2])
-        f = (self.gelu_tanh(h @ gate.T) * (h @ up.T)) @ down.T
-        return x + self.rms_norm(f, norms[3])
-
 
 def widen(value):
     """``value``, an array or a weight tree of namespaces and lists, in float32."""
@@ -563,12 +527,15 @@ class Model(iron.Graph):
 class Runner:
     """A checkpoint, its tokenizer and ``config``, and the models on them.
 
-    A subclass names the model: its ``config``; ``model``, the ``CausalLM``
-    on the NPU, which reads the checkpoint's tree by its names, and whose
-    ``oracle`` is the CPU model it is checked against;
-    ``open_tokenizer(path)``, with ``encode`` and ``decode``; and ``bos``,
-    the token every prompt starts with. A model that comes in several sizes
-    names them in ``sizes``, ``config`` among them, and ``--size`` picks one.
+    A subclass names the model: its ``config``, a ``Config`` class, built
+    from the checkpoint's own ``config.json`` (``default_config``), or
+    already a shape of its own where the checkpoint names none it needs;
+    ``model``, the ``CausalLM`` on the NPU, which reads the checkpoint's
+    tree by its names, and whose ``oracle`` is the CPU model it is checked
+    against; ``open_tokenizer(path)``, with ``encode`` and ``decode``; and
+    ``bos``, the token every prompt starts with. A model that comes in
+    several sizes names them in ``sizes``, ``config`` among them, and
+    ``--size`` picks one.
 
     It is also what ``iron.lm.tune`` measures the model's cost table by:
     ``tune_arguments`` and ``tune_calls``, a decoder's decode step and prompt
@@ -586,7 +553,7 @@ class Runner:
     real weights or the tokenizer.
     """
 
-    config: Config
+    config: Config | type[Config]
     sizes: dict[str, Config] = {}
     model: "type[CausalLM]"
     bos: int
@@ -599,6 +566,16 @@ class Runner:
     @staticmethod
     def open_tokenizer(path):
         raise NotImplementedError
+
+    @classmethod
+    def default_config(cls, weights_path) -> Config:
+        """``cls.config`` itself, if it is already one shape; else that
+        class's own, built from ``weights_path``'s checkpoint directory
+        (``Config.from_checkpoint``).
+        """
+        if isinstance(cls.config, type):
+            return cls.config.from_checkpoint(weights_path)
+        return cls.config
 
     @classmethod
     def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
@@ -651,7 +628,7 @@ class Runner:
         """The calls the model's designs are measured in (``CausalLM.tune_calls``),
         on weights it never reads.
         """
-        config = cls.config
+        config = cls.default_config(args.checkpoint)
         if args.context > config.max_seq_len:
             parser.error(
                 f"--context {args.context} is past max_seq_len {config.max_seq_len}"
@@ -669,7 +646,7 @@ class Runner:
         config: Config | None = None,
         seed: int | None = None,
     ):
-        self.config = config or type(self).config
+        self.config = config or type(self).default_config(weights_path)
         self.seed = seed
         self.checkpoint = Checkpoint(weights_path)
         self.weights = (
@@ -827,7 +804,11 @@ def main(runner: type[Runner], description: str):
     )
     args = parser.parse_args()
 
-    config = runner.sizes[args.size] if runner.sizes else runner.config
+    config = (
+        runner.sizes[args.size]
+        if runner.sizes
+        else runner.default_config(args.weights_path)
+    )
     if args.max_seq_len is not None:
         try:
             config = dataclasses.replace(config, max_seq_len=args.max_seq_len)

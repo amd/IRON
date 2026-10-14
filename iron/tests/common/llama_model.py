@@ -17,16 +17,41 @@ from ml_dtypes import bfloat16
 
 from iron.common import Profile
 from iron.lm import Checkpoint, DecoderConfig
-from iron.applications.llama.model import Llama, Runner
+from iron.applications.llama.model import Llama, Llama3RopeScaling, LlamaConfig
 
 # The tunables the graph runs with at ``SMALL``'s shape on NPU2: decode
 # and the prompt at 256 rows. The application's own profiles are for Llama
 # 1B's shape, which ``llama_1b`` runs under.
 PROFILE = Profile.load(Path(__file__).with_name("llama_small_profile.json"))
 
+#: Llama 3.2 1B's own rope_base and eps (meta-llama/Llama-3.2-1B's published
+#: config.json): not the checkpoint, which these tests never read, but the
+#: two numbers ``SMALL`` and ``llama_1b`` keep to be Llama 3.2's own shape.
+_ROPE_BASE, _EPS = 500000.0, 1e-5
+
+#: Llama 3.2 1B's real shape, for builds the real checkpoint's config.json
+#: would otherwise give (``llama_1b``, and ``SMALL``'s inherited fields).
+REAL_1B = LlamaConfig(
+    vocab_size=128256,
+    emb_dim=2048,
+    n_layers=16,
+    n_heads=32,
+    n_kv_groups=8,
+    head_dim=64,
+    hidden_dim=8192,
+    rope_base=_ROPE_BASE,
+    eps=_EPS,
+    rope_scaling=Llama3RopeScaling(
+        factor=32.0,
+        low_freq_factor=1.0,
+        high_freq_factor=4.0,
+        original_max_position_embeddings=8192,
+    ),
+)
+
 #: Llama's shape, small, and its RoPE table unscaled.
 SMALL = dataclasses.replace(
-    Runner.config,
+    REAL_1B,
     vocab_size=1024,
     emb_dim=512,
     n_layers=2,
@@ -109,5 +134,5 @@ def llama_1b(n_layers=16) -> Llama:
     ``n_layers`` below 16 builds a shallower model of the same layer: the
     designs are the same at any depth.
     """
-    config = dataclasses.replace(Runner.config, n_layers=n_layers)
+    config = dataclasses.replace(REAL_1B, n_layers=n_layers)
     return Llama(config, checkpoint(config).tree("unread"))
