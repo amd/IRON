@@ -30,14 +30,17 @@ The application is one package over `iron.lm`:
 
 ## Weights and tokenizer
 
-The checkpoint directory holds `model.safetensors` and `tokenizer.json`.
+The checkpoint directory holds `model.safetensors`, `tokenizer.json` and
+`config.json` (each part's shape: `Config.from_checkpoint`,
+`AudioConfig.from_checkpoint`, `VisionConfig.from_checkpoint`, checked
+against it in `iron/tests/common/config.py`).
 Every graph and oracle reads the weights by the checkpoint's own names
 (`iron.lm.Checkpoint.tree`: `language_model`, `audio_tower`,
 `vision_tower`, ...); tracing and tuning read only the header, for the
 shapes.
-The tests look for it at `$IRON_EXAMPLE_WEIGHTS_DIR/embeddinggemma-2/`
-(`IRON_EXAMPLE_WEIGHTS_DIR` defaults to `/srv`); on the command line it can
-be anywhere.
+The tests look for them at `$IRON_EXAMPLE_WEIGHTS_DIR/embeddinggemma-2/`
+(`IRON_EXAMPLE_WEIGHTS_DIR` defaults to `/srv`); on the command line they
+can be anywhere.
 
 ## Setup
 

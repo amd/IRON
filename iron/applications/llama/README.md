@@ -27,10 +27,14 @@ From Hugging Face:
 
 - [`model.safetensors`](https://huggingface.co/meta-llama/Llama-3.2-1B/tree/main)
 - [`tokenizer.model`](https://huggingface.co/meta-llama/Llama-3.2-1B/tree/main/original)
+- [`config.json`](https://huggingface.co/meta-llama/Llama-3.2-1B/blob/main/config.json):
+  the model's shape (`LlamaConfig.from_checkpoint`), read from beside the
+  checkpoint rather than hand-copied
 
-The tests look for them in `$IRON_EXAMPLE_WEIGHTS_DIR/llama3.2-1b/`
-(`IRON_EXAMPLE_WEIGHTS_DIR` defaults to `/srv`); on the command line they
-can be anywhere.
+The tests look for all three in `$IRON_EXAMPLE_WEIGHTS_DIR/llama3.2-1b/`
+(`IRON_EXAMPLE_WEIGHTS_DIR` defaults to `/srv`); on the command line the
+checkpoint and tokenizer can be anywhere, with `config.json` beside the
+checkpoint.
 
 ## Setup
 
