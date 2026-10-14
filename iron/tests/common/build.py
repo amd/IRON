@@ -25,7 +25,9 @@ from aie.iron.device import Tile, from_name
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
+import iron
 import iron.operators.flm.gemm.op as flm_gemm
+from iron import Scratchpad
 from iron.operators.flm.packing import packed_b_size
 from iron.common import (
     Chain,
@@ -44,6 +46,7 @@ from iron.common.graph.compiled import _words
 from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind
 from iron.operators.clamp import Clamp
+from iron.operators.copy import Copy
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.shipped import Shipped
@@ -54,6 +57,7 @@ from iron.operators.repeat import Repeat
 from iron.operators.rope import RoPE
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.silu import SiLU
+from iron.operators.softmax import Softmax
 from iron.tests.common.graphs import ProjectAsStored
 from iron.tests.common.declare import Rows
 
@@ -387,6 +391,27 @@ def test_on_an_xclbin_the_size_is_the_dispatch_scalar():
     ]
     for t, run in zip(bounded, (8, 8, 512, 512), strict=True):
         assert re.fullmatch(rf"1, %\w+, 1, {run}", t.sizes), t.sizes
+
+
+def test_on_an_xclbin_a_copy_bounded_on_its_innermost_axis_sizes_it(npu2):
+    """A regenerated stream sizes any dimension per call, not only the
+    outermost below the iteration a patched descriptor's length ends at:
+    here the rows' length, the innermost.
+    """
+    cache = iron.state((16, 4, 256), name="cache")
+
+    class G(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32], pos: Scratchpad[np.int32]):
+            Copy(Softmax(x[:, :n]), cache[:, pos])
+
+    t = G().trace(x=(16, 256))
+    (op,) = [o for o in t.operators if isinstance(o, Copy)]
+    text, _ = generated_sequence(op.resolved(), full_elf=False)
+    bds = re.findall(r"aie\.dma_bd\(%arg(\d) .*sizes = \[([^\]]*)\]", text)
+    assert [(int(arg), re.sub(r"%\d+", "n", sizes)) for arg, sizes in bds] == [
+        (0, "1, 1, 16, n"),
+        (1, "1, 1, 16, n"),
+    ]
 
 
 def test_a_stack_and_its_flat_spelling_move_the_same_descriptors():

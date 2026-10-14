@@ -330,12 +330,16 @@ class OperatorRuntime(Runtime):
         sizes, strides = BdLimits.slots(tap.sizes, tap.strides)
         dim = scale = None
         if length_parameter is not None:
-            # The descriptor's length ends at its outermost dimension below the iteration.
+            # A patched descriptor's length ends at its outermost dimension
+            # below the iteration; an xclbin's stream, regenerated per call,
+            # sizes any dimension of length_unit-element units.
+            patched = length_parameter.ssa is None
             dim = next(
                 (
                     d
                     for d in range(1, 4)
-                    if prod(sizes[1:d]) == 1 and prod(sizes[d + 1 :]) == length_unit
+                    if (prod(sizes[1:d]) == 1 or not patched)
+                    and prod(sizes[d + 1 :]) == length_unit
                 ),
                 None,
             )
@@ -345,8 +349,8 @@ class OperatorRuntime(Runtime):
             if dim is None:
                 raise ValueError(
                     f"{type(self.op).__name__}.{buffer.name}: {tap} has no "
-                    f"descriptor dimension below the iteration, outermost, "
-                    f"of {length_unit}-element units"
+                    f"descriptor dimension of {length_unit}-element units"
+                    + (" below the iteration, outermost" if patched else "")
                 )
         data = self._tensors[buffer.name]
         if pinned and managed:

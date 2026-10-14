@@ -17,6 +17,9 @@ from pathlib import Path
 
 import aie.utils as aie_utils
 import numpy as np
+import pytest
+from aie.utils.verify import compare
+from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
@@ -43,11 +46,11 @@ def _graph():
 
     g = G()
 
-    return g, (R, C)
+    return g, cache, (R, C)
 
 
 def test_values_become_dispatch_time_kernels_at_each_step(device):
-    g, shape = _graph()
+    g, _, shape = _graph()
     net = g.compile(
         dev=device,
         full_elf=False,
@@ -74,6 +77,37 @@ def test_values_become_dispatch_time_kernels_at_each_step(device):
     assert symbols == {p for d in designs.values() for p in d.dispatch_params}
     assert net.image is not None and Path(net.image).stat().st_size > 0
     assert net._callable is None
+
+
+@pytest.mark.supported_devices("npu2")
+def test_each_call_softmaxes_its_columns_and_copies_them_into_its_slot():
+    """The xclbin form run: each call's row length sizes both steps' streams,
+    the copy's down to its innermost dimension, and its slot moves the copy.
+    """
+    g, cache, shape = _graph()
+    net = g.compile(full_elf=False, x=shape)
+    assert not net.plan.full_elf
+    (softmax,) = [s.op for s in net.traced.steps if isinstance(s.op, Softmax)]
+    tolerance = softmax.resolved().tolerance()
+    rows, cols = shape
+    slots = np.asarray(net.read(cache)).size // (rows * cols)
+    rng = np.random.default_rng(0)
+    for n, pos in ((cols, 0), (100, 2), (16, slots - 1)):
+        before = rng.standard_normal((rows, slots, cols)).astype(bfloat16)
+        net.write(cache, before)
+        x = rng.standard_normal(shape).astype(bfloat16)
+        y = np.asarray(net(x, n=n, pos=pos).numpy()).reshape(shape)[:, :n]
+        f = x[:, :n].astype(np.float32)
+        e = np.exp(f - f.max(axis=1, keepdims=True))
+        verdict = compare(
+            y, (e / e.sum(axis=1, keepdims=True)).astype(bfloat16), tolerance
+        )
+        assert verdict, f"{n=}: {verdict.detail}"
+        want = before.copy()
+        want[:, pos, :n] = y
+        got = np.asarray(net.read(cache)).reshape(want.shape)
+        wrong = np.argwhere(got.view(np.uint16) != want.view(np.uint16))
+        assert wrong.size == 0, f"{n=} {pos=}: {len(wrong)} differ, first {wrong[:4]}"
 
 
 def test_a_per_call_size_over_one_block_builds_at_each_step(npu2):
@@ -108,7 +142,7 @@ def test_npu1_compiles_each_step_unasked():
     """NPU1 has no full-ELF dispatch, so a plain ``compile()`` there takes
     the xclbin form that is built, one dispatch per step.
     """
-    g, shape = _graph()
+    g, _, shape = _graph()
     previous = aie_utils.get_current_device(probe_runtime=False)
     net = g.compile(dev=DEVICES["npu1"](), x=shape)
     assert aie_utils.get_current_device(probe_runtime=False) is previous
