@@ -555,7 +555,7 @@ class GEMV(Operator):
             for k, tap, word, unit in self.C.transfers()
         ]
         rows = self.A.transfers()
-        if self.num_matrices > 1 and self.A.bounded is None:
+        if (self.num_matrices or 1) > 1 and self.A.bounded is None:
             parts = TensorAccessPattern.full((M, K)).partition(len(rows), 0)
             rows = [
                 (
@@ -568,7 +568,7 @@ class GEMV(Operator):
                 )
                 for (k, _, _, _), part in zip(rows, parts, strict=True)
             ]
-        elif self.num_matrices > 1:
+        elif (self.num_matrices or 1) > 1:
             # The round-robin pattern walks every matrix in its outermost
             # dimension.
             rows = [
