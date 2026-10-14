@@ -477,7 +477,6 @@ class GEMM(Operator):
                 .split(
                     of_offsets,
                     obj_types=[A_l1_ty] * (stop_row - start_row),
-                    names=[f"A_L2L1_{row}" for row in range(start_row, stop_row)],
                     to_stream=[streams.A] * (stop_row - start_row),
                     tile=Tile(a_cols[i], 1) if pinned else AnyMemTile,
                 )
@@ -492,7 +491,6 @@ class GEMM(Operator):
                 .cons()
                 .forward(
                     obj_type=B_l1_ty,
-                    name=f"B_L2L1_{col}",
                     to_stream=streams.B,
                     tile=Tile(col, 1) if pinned else AnyMemTile,
                 )
@@ -509,7 +507,6 @@ class GEMM(Operator):
                 .join(
                     of_offsets,
                     obj_types=[C_l1_ty] * n_aie_rows,
-                    names=[f"C_L1L2_{col}_{row}" for row in range(n_aie_rows)],
                     depths=[fifo_depth_out] * n_aie_rows,
                     tile=Tile(col, 1) if pinned else AnyMemTile,
                 )

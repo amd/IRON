@@ -183,7 +183,6 @@ class Transpose(Operator):
             .cons(from_stream=l2l1)
             .forward(
                 obj_type=tile_ty,
-                name=f"of_in1s_L2L1_{k // chans}_{k % chans}",
                 depth=depth,
             )
             for k in range(n_cores)

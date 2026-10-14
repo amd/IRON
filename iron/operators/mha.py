@@ -689,7 +689,6 @@ class MHA(Operator):
             memQ += in_q.cons().split(
                 offsets=[B_q * d * i for i in range(n_join)],
                 obj_types=[q_ty] * n_join,
-                names=[f"memQ{suffix}{i}" for i in range(n_join)],
                 to_stream=None if q_dims is None else [q_dims] * n_join,
                 depths=[q_depth] * n_join,
                 tile=(
@@ -705,7 +704,6 @@ class MHA(Operator):
                 outO[h] += mem_o.prod().join(
                     offsets=[B_q * pv_width * i for i in range(n_join)],
                     obj_types=[o_ty] * n_join,
-                    names=[f"outO{suffix}{half}{i}" for i in range(n_join)],
                     # One O block: the PV core's L1 also holds its float32 O.
                     depths=[1] * n_join,
                     tile=(
@@ -725,7 +723,6 @@ class MHA(Operator):
                 inK[lane]
                 .cons()
                 .forward(
-                    name=f"memK{suffix}",
                     to_stream=k_dims,
                     tile=(
                         Tile(
@@ -744,7 +741,6 @@ class MHA(Operator):
                     inV[-1]
                     .cons()
                     .forward(
-                        name=f"memV{suffix}{half}",
                         to_stream=v_dims,
                         tile=(
                             Tile(
@@ -769,7 +765,6 @@ class MHA(Operator):
                 memA[i]
                 .cons()
                 .forward(
-                    name=f"outA{i}",
                     to_stream=a_dims,
                     depth=of_depth,
                     tile=Tile(i, 1) if split else AnyMemTile,
@@ -780,7 +775,6 @@ class MHA(Operator):
                 memP[i]
                 .cons()
                 .forward(
-                    name=f"outP{i}",
                     to_stream=p_dims,
                     depth=of_depth,
                     tile=Tile(i, 1) if split else AnyMemTile,
