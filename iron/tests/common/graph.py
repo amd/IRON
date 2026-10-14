@@ -47,6 +47,7 @@ from iron.operators.relu import ReLU
 from iron.operators.repeat import Repeat
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.silu import SiLU
+from iron.operators.softmax import Softmax
 from iron.tests.common.declare import Rows
 from iron.tests.common.graphs import Trail, Walk
 from iron.tests.common.llama_model import llama_1b, small
@@ -1793,6 +1794,30 @@ def test_a_bound_on_one_side_of_a_copy_holds_the_other(npu2):
 
     with pytest.raises(ValueError, match="bound it alike"):
         Flat().trace(x=(L, G * D))
+
+
+def test_the_reference_copies_a_bounded_call_into_the_rows_it_covers(npu2):
+    """The trace bounds a given view alike (above); the reference, which runs
+    a bounded call on the rows it covers, writes those of the view and
+    leaves the rest.
+    """
+    R, L, C = 16, 4, 256
+    cache = iron.state((R, L, C), name="cache")
+
+    class G(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32], pos: Scratchpad[np.int32]):
+            y = Softmax(x[:, :n])
+            Copy(y, cache[:, pos])
+            return y
+
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((R, C)).astype(bfloat16)
+    cache.host = rng.standard_normal((R, L, C)).astype(bfloat16)
+    want = cache.host.copy()
+    y = np.asarray(G().reference(x, n=100, pos=2))
+    want[:, 2, :100] = y
+    assert y.shape == (R, 100)
+    assert np.array_equal(cache.host.view(np.uint16), want.view(np.uint16))
 
 
 def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):

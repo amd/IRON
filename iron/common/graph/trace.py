@@ -768,6 +768,28 @@ class _ReferenceTracer(Tracer):
                 Handle(t.shape, np.dtype(t.dtype).type, "", "input") if p is None else p
                 for t, p in zip(tensors, patterns)
             ]
+            # The reference runs a bounded call on the rows it covers, so a
+            # view one axis longer than the operand it copies is narrowed to
+            # it there, as the trace bounds the view alike.
+            given = [t.shape for t, p in zip(tensors[:n_views], patterns) if p is None]
+            for i, p in enumerate(patterns[:n_views]):
+                for shape in given if p is not None else ():
+                    axes = [a for a, (m, n) in enumerate(zip(p.shape, shape)) if m != n]
+                    if len(shape) != len(p.shape) or len(axes) != 1:
+                        continue
+                    (axis,) = axes
+                    if shape[axis] < p.shape[axis]:
+                        key = [slice(None)] * len(shape)
+                        key[axis] = slice(shape[axis])
+                        shapes[i] = Handle(
+                            shape,
+                            p.dtype,
+                            p.name,
+                            p.role,
+                            p.parent,
+                            p.start,
+                            p.tap[tuple(key)],
+                        )
             shapes = _take_views(cls, shapes, kwargs, {})
             op = self._construct(cls, dict(zip(inputs, shapes)), shapes[n_in:], kwargs)
         else:
