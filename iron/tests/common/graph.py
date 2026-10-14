@@ -21,7 +21,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Carried, Scratchpad
-from iron.common import Profile
+from iron.common import Chain, Profile
 from iron.common.graph import Handle, TracedGraph, Tracer
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import _words
@@ -418,7 +418,7 @@ def test_swiglu_folds_its_silu_and_its_product_into_the_gate(npu2):
     assert [type(op).__name__ for op, *_ in f.runlist] == ["GEMV", "GEMV", "GEMV"]
     up, gate, down = f.steps
     assert [type(link.op) for link in gate.op.finish] == [SiLU, ElementwiseMul]
-    assert (up.op.finish, down.op.finish, down.op.finishes) == ((), (), ())
+    assert up.op.finish == down.op.finish == Chain()
     # The up projection rides the gate's matrix beside B, so the gate has an
     # array of its own.
     assert [b.name for b in gate.op.inputs if not b.streamed] == ["B", "finish1_b"]
@@ -517,7 +517,7 @@ def test_an_elementwise_step_finishes_its_consumer_in_its_own_cores(npu2):
     assert finished.array_key() == plain.array_key()
     assert finished.design_key() != plain.design_key()
     assert finished.name != plain.name
-    chains = [tuple(type(link.op) for link in c) for c in finished.finishes]
+    chains = [tuple(type(link.op) for link in c) for c in finished.finish.shared]
     assert chains[finished.residents["finish_chain"]] == (SiLU,)
     assert chains[plain.residents["finish_chain"]] == ()
     rng = np.random.default_rng(0)
@@ -568,7 +568,7 @@ def test_a_step_folds_with_its_other_input_streamed_beside(at, npu2):
         (ElementwiseMul, at),
     ]
     # A chain streaming an input of its own has an array of its own.
-    assert fused.finishes == ()
+    assert fused.finish.shared == ()
     assert [b.name for b in fused.inputs] == ["x", f"finish1_{'ab'[1 - at]}"]
     assert [h.name for h in step.inputs] == ["a", "c"]
     assert replaced(t, f) == [(t.steps[0].op, step.op)]

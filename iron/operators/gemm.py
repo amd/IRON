@@ -25,6 +25,7 @@ from ml_dtypes import bfloat16
 
 from iron import operators as catalog
 from iron.common import (
+    Chain,
     Divisors,
     Extent,
     Finish,
@@ -125,7 +126,7 @@ def _cases(cls, dev: Device):
             f"-shares_{n}" for n in names[1:]
         )
         shared = tuple(steps) if len(steps) > 1 else ()
-        return Case(dict(kwargs, finish=steps[0], finishes=shared), id=label)
+        return Case(dict(kwargs, finish=Chain(steps[0], shared)), id=label)
 
     # Each core finishing its C tiles: a graph's projection, the f32
     # accumulator, and one array serving a finished design and a plain one.

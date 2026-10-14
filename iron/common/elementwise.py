@@ -42,6 +42,7 @@ from aie.utils.verify import Tolerance, Verdict, round_to
 from ml_dtypes import bfloat16
 
 from .declare import (
+    Chain,
     Divisors,
     Extent,
     In,
@@ -344,7 +345,7 @@ class Finish(_Chains):
         # The one output, where a chain has steps (Operator.resolved checks).
         self.out = op.outputs[-1]
         super().__init__(
-            op, op.finishes or (op.finish,), self.out.finish_line, self.out.dtype, cores
+            op, op.finish.chains, self.out.finish_line, self.out.dtype, cores
         )
         # Each step's other inputs, streamed per core as the output is, or
         # riding the producer's fed input.
@@ -376,7 +377,7 @@ class Finish(_Chains):
                 tiles hold the riding inputs' share of ``tile``, in order.
         """
         at = len(self.steps) + self.select
-        # Only a lone chain has extras (Operator._finish_at).
+        # Only a lone chain has extras (Chain.at_line).
         fifos = args[at : at + len(self.fifos)]
         if not self.riding:
             self._run(args, mode, tile, [f.acquire(1) for f in fifos])
@@ -401,7 +402,7 @@ class Finish(_Chains):
         is anywhere the gate before it admits, and its output anywhere its
         own gate admits around what it makes of that.
         """
-        plain = dataclasses.replace(self.op, finish=(), finishes=())
+        plain = dataclasses.replace(self.op, finish=Chain())
         n = len(plain.inputs)
         own = plain.resolved().tolerance() or Tolerance.default_for(self.out.dtype)
         dtype = self.out.dtype
@@ -448,7 +449,7 @@ class Prepare(_Chains):
         self.into = next(b for b in op.inputs if b.prepare)
         super().__init__(
             op,
-            op.prepares or (op.prepare,),
+            op.prepare.chains,
             (
                 math.prod(self.into.tile_shape)
                 if self.into.streamed
@@ -499,7 +500,7 @@ class Prepare(_Chains):
         of the interval's radius and the magnitudes of its other inputs, in
         float32 and unrounded. For a consumer without a finish.
         """
-        plain = dataclasses.replace(self.op, prepare=(), prepares=())
+        plain = dataclasses.replace(self.op, prepare=Chain())
         (out,) = plain.outputs
         own = plain.resolved().tolerance() or Tolerance.default_for(out.dtype)
         n = len(plain.inputs)

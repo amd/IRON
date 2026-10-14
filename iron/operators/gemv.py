@@ -24,6 +24,7 @@ from ml_dtypes import bfloat16
 
 from iron import operators as catalog
 from iron.common import (
+    Chain,
     Divisors,
     Extent,
     Finish,
@@ -93,7 +94,7 @@ def _cases(cls, dev: Device):
         label = f"{plain.label}-finish_{names[0]}" + "".join(
             f"-shares_{n}" for n in names[1:]
         )
-        return Case(dict(plain.kwargs, finish=steps[0], finishes=shared), id=label)
+        return Case(dict(plain.kwargs, finish=Chain(steps[0], shared)), id=label)
 
     def prepared(M, K, cols, tsi, tso, *chains, **extra):
         # Each chain names its steps; the first is the case's own, more share one array.
@@ -104,7 +105,7 @@ def _cases(cls, dev: Device):
         label = f"{plain.label}-prepare_{names[0]}" + "".join(
             f"-shares_{n}" for n in names[1:]
         )
-        return Case(dict(plain.kwargs, prepare=steps[0], prepares=shared), id=label)
+        return Case(dict(plain.kwargs, prepare=Chain(steps[0], shared)), id=label)
 
     def norm(K, weighted=False):
         name = "RMSNormWeighted" if weighted else "RMSNorm"
@@ -382,7 +383,7 @@ class GEMV(Operator):
             new.A.depth * new.tile_size_input * line
             + line
             + new.C.depth * out
-            + line * any(new.prepares or (new.prepare,))
+            + line * any(new.prepare.chains)
             + new.finish_bytes(dev, new.tile_size_output)
             + dev.default_core_stack_bytes
         )

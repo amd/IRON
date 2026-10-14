@@ -12,13 +12,15 @@ from .domain import Choices, Divisors, Width
 from .field import Auto, Param, Unresolvable
 from .shape import OptionalDim, Select
 from .operand import In, InOut, Operand, Out
-from .operator import CopyRun, Link, Operator
+from .chain import Chain, Link
+from .operator import CopyRun, Operator
 from .placement import Level, Pins, Placement
 from .profile import Profile
 from .value import DispatchTime, Extent, Value
 from .xclbin import Xclbin
 
 __all__ = [
+    "Chain",
     "Choices",
     "CopyRun",
     "Divisors",

@@ -27,6 +27,7 @@ from ml_dtypes import bfloat16
 import iron.operators.flm.gemm.op as flm_gemm
 from iron.operators.flm.packing import packed_b_size
 from iron.common import (
+    Chain,
     In,
     Link,
     Operator,
@@ -421,7 +422,7 @@ def test_flm_gemm_folds_an_activation_then_a_clamp_into_its_epilogue():
     compiled_in = plain.fold(SiLU(size=size))
     assert compiled_in.epilogue_modes == (Epilogue.NONE, Epilogue.SILU)
     assert plain.epilogue_modes == (Epilogue.NONE,)
-    finished = SiLU(size=size, finish=(Link(ElementwiseMul(size=size)),))
+    finished = SiLU(size=size, finish=Chain((Link(ElementwiseMul(size=size)),)))
     assert op.fold(finished) is None
 
 

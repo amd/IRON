@@ -37,6 +37,7 @@ from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance, Verdict, compare
 
 from ..testing import Testing
+from .chain import Chain, Link
 from .declaration import Declaration
 from .domain import Width
 from .field import Auto, Param, Unresolvable
@@ -144,32 +145,6 @@ class CopyRun:
     offset: str | None = None
 
 
-@dataclasses.dataclass(frozen=True)
-class Link:
-    """One step of a finish or a prologue: ``op`` applied to a tile of the
-    producer's output, which enters as its input ``at``, or to a tile of the
-    consumer's prepared input, which ``op`` produced from its input ``at``.
-    Its other inputs stream into the cores beside it, their
-    ``finish_inputs`` or ``prepare_inputs``.
-    """
-
-    op: Operator
-    at: int = 0
-
-    def array_key(self):
-        return (self.op.array_key(), self.at)
-
-    def at_line(self, line: int, dtype, dev, ordered: bool = True) -> Link:
-        """This step resolved at one tile (``Operator.at_line``)."""
-        return Link(self.op.at_line(line, dtype, dev, ordered, self.at), self.at)
-
-    def operands(self, tile, extras) -> list:
-        """``tile`` at input ``at`` among this step's ``extras``."""
-        operands = list(extras)
-        operands.insert(self.at, tile)
-        return operands
-
-
 # ``Auto`` is not a listed specifier: pyright reads a default only from
 # ``default=``, and ``Auto(2)`` passes it positionally.
 @dataclass_transform(kw_only_default=True, field_specifiers=(Param,))
@@ -209,26 +184,17 @@ class Operator(metaclass=_OperatorMeta):
     pinned: frozenset[str] = dataclasses.field(
         default=frozenset(), repr=False, compare=False, kw_only=True
     )
-    # The steps each core applies, in order, to a tile of the output
-    # declared Out(finish=True) before releasing it; resolved, each one at
-    # that tile (``at_line``). The keys add them, since operators compare by
-    # identity.
-    finish: tuple[Link, ...] = dataclasses.field(
-        default=(), repr=False, compare=False, kw_only=True
+    # The steps each core applies to a tile of the output declared
+    # Out(finish=True) before releasing it, and the finishes its array
+    # applies; resolved, each step at that tile. The keys add them, since
+    # operators compare by identity.
+    finish: Chain = dataclasses.field(
+        default=Chain(), repr=False, compare=False, kw_only=True
     )
-    # The finishes the array applies, each design selecting its own; empty
-    # for the array of ``finish`` alone.
-    finishes: tuple[tuple[Link, ...], ...] = dataclasses.field(
-        default=(), repr=False, compare=False, kw_only=True
-    )
-    # The steps each core applies, in order, to a tile of the input declared
-    # In(prepare=True) after acquiring it, and the prologues its array
-    # applies; as ``finish`` and ``finishes``.
-    prepare: tuple[Link, ...] = dataclasses.field(
-        default=(), repr=False, compare=False, kw_only=True
-    )
-    prepares: tuple[tuple[Link, ...], ...] = dataclasses.field(
-        default=(), repr=False, compare=False, kw_only=True
+    # The steps each core applies to a tile of the input declared
+    # In(prepare=True) after acquiring it, and the prologues its array applies.
+    prepare: Chain = dataclasses.field(
+        default=Chain(), repr=False, compare=False, kw_only=True
     )
     # Per output a graph placed in a larger buffer (``placed``): its name,
     # that buffer's elements and the one it starts at; design_key adds them.
@@ -344,11 +310,8 @@ class Operator(metaclass=_OperatorMeta):
         """
         if len(self.outputs) != 1 or not self.outputs[0].finish:
             return None
-        chain = (*self.finish, Link(consumer, at))
-        if any(len(link.op.inputs) > 1 for link in chain):
-            return dataclasses.replace(self, finish=chain, finishes=())
         return dataclasses.replace(
-            self, finish=chain, finishes=(*(self.finishes or (self.finish,)), chain)
+            self, finish=self.finish.extended((*self.finish, Link(consumer, at)))
         )
 
     def prefold(self, producer: Operator, at: int = 0) -> Self | None:
@@ -369,11 +332,8 @@ class Operator(metaclass=_OperatorMeta):
         """
         if not any(m.prepare for m in self._members_io()):
             return None
-        chain = (Link(producer, at), *self.prepare)
-        if any(len(link.op.inputs) > 1 for link in chain):
-            return dataclasses.replace(self, prepare=chain, prepares=())
         return dataclasses.replace(
-            self, prepare=chain, prepares=(*(self.prepares or (self.prepare,)), chain)
+            self, prepare=self.prepare.extended((Link(producer, at), *self.prepare))
         )
 
     def on_array(self, other: Operator) -> Self | None:
@@ -383,10 +343,14 @@ class Operator(metaclass=_OperatorMeta):
         A graph's fold calls it after folding ``other``; the replacement is
         taken only where it resolves to ``other``'s array.
         """
-        if type(other) is not type(self) or not (other.finishes or other.prepares):
+        if type(other) is not type(self) or not (
+            other.finish.shared or other.prepare.shared
+        ):
             return None
         return dataclasses.replace(
-            self, finishes=other.finishes, prepares=other.prepares
+            self,
+            finish=Chain(self.finish.steps, other.finish.shared),
+            prepare=Chain(self.prepare.steps, other.prepare.shared),
         )
 
     def copies_to(self) -> CopyRun | None:
@@ -438,7 +402,7 @@ class Operator(metaclass=_OperatorMeta):
         Raises:
             Unresolvable: None of them.
         """
-        links = [link for c in self.finishes or (self.finish,) for link in c]
+        links = [link for c in self.finish.chains for link in c]
         out = self.outputs[0]
         ordered = out.finish_block is None
         tried = []
@@ -464,7 +428,7 @@ class Operator(metaclass=_OperatorMeta):
         Raises:
             ValueError: A step does not run at the line.
         """
-        chains = self.finishes or (self.finish,)
+        chains = self.finish.chains
         if not any(chains):
             return 0
         out = self.outputs[0]
@@ -732,13 +696,13 @@ class Operator(metaclass=_OperatorMeta):
         if self.placements:
             own += (("placements", self.placements),)
         if self.finish:
-            own += (("finish", tuple(link.array_key() for link in self.finish)),)
-        if any(self.finishes):
-            own += (("finishes", self._finish_keys()),)
+            own += (("finish", self.finish.array_key()),)
+        if any(self.finish.shared):
+            own += (("finishes", self.finish.keys()),)
         if self.prepare:
-            own += (("prepare", tuple(link.array_key() for link in self.prepare)),)
-        if any(self.prepares):
-            own += (("prepares", self._prepare_keys()),)
+            own += (("prepare", self.prepare.array_key()),)
+        if any(self.prepare.shared):
+            own += (("prepares", self.prepare.keys()),)
         return (type(self), own)
 
     def probed(self) -> Self:
@@ -756,23 +720,11 @@ class Operator(metaclass=_OperatorMeta):
         )
         if self.trace is not None:
             key += (("trace", self.trace),)
-        if any(self.finishes or (self.finish,)):
-            key += (("finishes", self._finish_keys()),)
-        if any(self.prepares or (self.prepare,)):
-            key += (("prepares", self._prepare_keys()),)
+        if any(self.finish.chains):
+            key += (("finishes", self.finish.keys()),)
+        if any(self.prepare.chains):
+            key += (("prepares", self.prepare.keys()),)
         return key
-
-    def _finish_keys(self) -> tuple:
-        return tuple(
-            tuple(link.array_key() for link in c)
-            for c in self.finishes or (self.finish,)
-        )
-
-    def _prepare_keys(self) -> tuple:
-        return tuple(
-            tuple(link.array_key() for link in c)
-            for c in self.prepares or (self.prepare,)
-        )
 
     def resolved(self, dev=None) -> Self:
         """This operator resolved for ``dev`` (the bound device unless given), checked."""
@@ -793,9 +745,9 @@ class Operator(metaclass=_OperatorMeta):
             raise Unresolvable(
                 f"{type(self).__name__}.resolve() left {missing} unset for {dev}"
             )
-        if any(new.prepares or (new.prepare,)):
+        if any(new.prepare.chains):
             new._prepare_at(dev if dev is not None else self.dev)
-        if any(new.finishes or (new.finish,)):
+        if any(new.finish.chains):
             new._finish_at(dev if dev is not None else self.dev)
         new.validate()
         new.compatible()
@@ -810,9 +762,8 @@ class Operator(metaclass=_OperatorMeta):
         a fixed order.
 
         Raises:
-            ValueError: No output is finished by the array that runs, a step
-                does not run at the tile, or ``finish`` is not among
-                ``finishes``.
+            ValueError: No output is finished by the array that runs, or
+                the chain does not rebuild at the tile (``Chain.at_line``).
             Unresolvable: Each core reads more streams, its own and the
                 finish's inputs, than a core tile has input channels, a
                 finish input would stream into a block held out of order,
@@ -827,37 +778,18 @@ class Operator(metaclass=_OperatorMeta):
                 f"{type(self).__name__}: its cores finish no output, so it "
                 f"applies no finish"
             )
-        line = out.finish_line
-        ordered = out.finish_block is None
-        own = tuple(link.at_line(line, out.dtype, dev, ordered) for link in self.finish)
-        chains: dict[tuple, tuple[Link, ...]] = {}
-        for chain in self.finishes or (self.finish,):
-            at = tuple(link.at_line(line, out.dtype, dev, ordered) for link in chain)
-            chains.setdefault(tuple(link.array_key() for link in at), at)
-        if not ordered and any(len(link.op.inputs) > 1 for link in own):
-            raise Unresolvable(
-                f"{type(self).__name__}: its cores hold each block of the output "
-                f"in an order of their own, which a finish input does not stream in"
-            )
-        if tuple(link.array_key() for link in own) not in chains:
-            raise ValueError(
-                f"{type(self).__name__}: its finish is not one its array applies"
-            )
-        if len(chains) > 1 and any(
-            len(link.op.inputs) > 1 for c in chains.values() for link in c
-        ):
-            raise ValueError(
-                f"{type(self).__name__}: a finish step with inputs of its own "
-                f"streams them into an array serving no other finish"
-            )
-        self.finish = own
-        self.finishes = (
-            ()
-            if len(chains) == 1
-            else tuple(chains[k] for k in sorted(chains, key=repr))
-        )
-        self._bind()
         name = type(self).__name__
+        ordered = out.finish_block is None
+        finish = self.finish.at_line(
+            out.finish_line, out.dtype, dev, ordered=ordered, owner=name, what="finish"
+        )
+        if not ordered and any(len(link.op.inputs) > 1 for link in finish):
+            raise Unresolvable(
+                f"{name}: its cores hold each block of the output in an order "
+                f"of their own, which a finish input does not stream in"
+            )
+        self.finish = finish
+        self._bind()
         reads = sum(m.fills and m.tile_dims is not None for m in self._members_io())
         if reads > dev.core_dma_channels_in:
             raise Unresolvable(
@@ -923,10 +855,8 @@ class Operator(metaclass=_OperatorMeta):
         unique and in a fixed order.
 
         Raises:
-            ValueError: No input is prepared, a step does not run at the
-                tile, ``prepare`` is not among ``prepares``, or a step
-                with inputs of its own is in an array serving another
-                prologue.
+            ValueError: No input is prepared, or the chain does not rebuild
+                at the tile (``Chain.at_line``).
             Unresolvable: A step's other input is not one tile, the
                 prepared input brings a core more than one tile a call,
                 beside which no other input's tile streams, or, untiled,
@@ -970,27 +900,8 @@ class Operator(metaclass=_OperatorMeta):
                     f"{name}: the prologue's {riding} inputs ride {feed.name}, "
                     f"whose cores hold {feed.depth} tiles of it at once"
                 )
-        own = tuple(link.at_line(line, into.dtype, dev) for link in self.prepare)
-        chains: dict[tuple, tuple[Link, ...]] = {}
-        for chain in self.prepares or (self.prepare,):
-            at = tuple(link.at_line(line, into.dtype, dev) for link in chain)
-            chains.setdefault(tuple(link.array_key() for link in at), at)
-        if tuple(link.array_key() for link in own) not in chains:
-            raise ValueError(
-                f"{type(self).__name__}: its prologue is not one its array applies"
-            )
-        if len(chains) > 1 and any(
-            len(link.op.inputs) > 1 for c in chains.values() for link in c
-        ):
-            raise ValueError(
-                f"{type(self).__name__}: a prologue step with inputs of its own "
-                f"streams them into an array serving no other prologue"
-            )
-        self.prepare = own
-        self.prepares = (
-            ()
-            if len(chains) == 1
-            else tuple(chains[k] for k in sorted(chains, key=repr))
+        self.prepare = self.prepare.at_line(
+            line, into.dtype, dev, owner=name, what="prologue"
         )
         self._bind()
 
@@ -1295,8 +1206,8 @@ class Operator(metaclass=_OperatorMeta):
                         words.append(word)
         self._extent_words = tuple(words)
         self._chain_words: tuple[ChainWord, ...] = ()
-        for finish, chains in ((False, self.prepares), (True, self.finishes)):
-            if len(chains) > 1:
+        for finish, chain in ((False, self.prepare), (True, self.finish)):
+            if len(chain.shared) > 1:
                 word = ChainWord(type(self), finish)
                 bound[word.name] = word.of(self)
                 self._chain_words += (word,)
@@ -1503,14 +1414,14 @@ class Operator(metaclass=_OperatorMeta):
                     f"t{'x'.join(map(str, v.strides))}"
                 )
             own.append(f"{f.name}{v}")
-        if any(op.finishes or (op.finish,)):
+        if any(op.finish.chains):
             # A step's scalars and the array's other finishes change the build too.
-            keys = (tuple(link.array_key() for link in op.finish), op._finish_keys())
+            keys = (op.finish.array_key(), op.finish.keys())
             digest = hashlib.sha256(repr(keys).encode()).hexdigest()[:8]
             names = "".join(type(link.op).__name__ for link in op.finish)
             own.append(f"finish{names}{digest}")
-        if any(op.prepares or (op.prepare,)):
-            keys = (tuple(link.array_key() for link in op.prepare), op._prepare_keys())
+        if any(op.prepare.chains):
+            keys = (op.prepare.array_key(), op.prepare.keys())
             digest = hashlib.sha256(repr(keys).encode()).hexdigest()[:8]
             names = "".join(type(link.op).__name__ for link in op.prepare)
             own.append(f"prepare{names}{digest}")

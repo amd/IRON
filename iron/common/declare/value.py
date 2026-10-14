@@ -171,9 +171,8 @@ class ExtentWord(Value):
 
 
 class ChainWord(Value):
-    """Which of its array's chains, ``finishes`` or ``prepares``, an
-    operator's cores apply: a value the library adds where an array serves
-    more than one.
+    """Which of its array's finishes or prologues an operator's cores
+    apply: a value the library adds where an array serves more than one.
     """
 
     def __init__(self, owner: type, finish: bool) -> None:
@@ -184,11 +183,8 @@ class ChainWord(Value):
 
     def index(self, op) -> int:
         """The word on ``op``: its own chain's place among its array's."""
-        own, chains = (
-            (op.finish, op.finishes) if self.finish else (op.prepare, op.prepares)
-        )
-        keys = [tuple(link.array_key() for link in c) for c in chains]
-        return keys.index(tuple(link.array_key() for link in own))
+        chain = op.finish if self.finish else op.prepare
+        return chain.keys().index(chain.array_key())
 
     def __repr__(self) -> str:
         return f"<the {self.name} a design selects>"
