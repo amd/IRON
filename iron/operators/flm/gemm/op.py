@@ -159,6 +159,8 @@ class GEMM(Operator):
     64-row tiles over a k tile of ``k_tile`` (512 unless the caller asks), and
     an activation plus optional clamp applied in the output stage: its own
     gelu (``epilogue``), or its finish, a SiLU or a Sigmoid and then a Clamp.
+    The gelu stays an epilogue because it is the port's own arithmetic,
+    FastFlowLM's ``x * sigmoid(1.702x)``, which no IRON operator computes.
     M, K, N, the activation and the clamp bounds are values written to the
     cores: they change the instruction stream only, so every shape on one
     configuration shares an xclbin.

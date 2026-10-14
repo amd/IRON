@@ -16,8 +16,9 @@ op(A, op.pack_B(B), C_out)  # compiles once, then runs
 
 What follows the product is its finish, as for `iron.operators.GEMM`: a SiLU
 or a Sigmoid, then a Clamp, which the epilogue applies from its runtime
-parameters (and which a graph folds into it). Its own gelu,
-`x * sigmoid(1.702x)`, which no operator computes, is `epilogue="gelu"`.
+parameters (and which a graph folds into it). The gelu stays
+`epilogue="gelu"`: it is the port's own arithmetic, FastFlowLM's
+`x * sigmoid(1.702x)`, which no IRON operator computes.
 `epilogue`, `rounding` and `gelu` are `StrEnum`s, so the bare strings `"gelu"` /
 `"conv_even"` / `"bf16_steps"` are accepted too.
 
