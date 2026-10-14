@@ -10,7 +10,7 @@ from math import gcd, isqrt, prod
 from typing import Any, ClassVar
 
 import numpy as np
-from aie.dialects.aie import AIETileType, DMAChannelDir, WireBundle
+from aie.dialects.aie import DMAChannelDir, WireBundle
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     DmaEndpoint,
@@ -40,8 +40,8 @@ from iron.common import (
     Operand,
     Rtp,
 )
+from iron.common.declare.operand import slots
 from iron.common.declare.operator import CopyRun
-from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
 # kDDRAIEAddrOffset (TxnEncoding.h)
@@ -750,7 +750,7 @@ class Copy(Operator):
         return [tap[..., c * share : (c + 1) * share] for c in range(self.num_channels)]
 
     def _taps(
-        self, tap: TensorAccessPattern, bound: int | None, dtype
+        self, tap: TensorAccessPattern, bound: int | None, operand: Operand
     ) -> list[tuple[TensorAccessPattern, int | None]]:
         """Per channel, its share of ``tap`` and the elements of one unit of
         the dimension a bound patches. A bounded share is one descriptor, its
@@ -767,7 +767,6 @@ class Copy(Operator):
         rank = shares[0].rank
         dim = 4 - rank + bound
         on_d2 = bound <= 1 and 1 <= rank - bound - 1 <= 2
-        shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
         out = []
         for share in shares:
             dims = list(share.transformation_dims)
@@ -785,12 +784,12 @@ class Copy(Operator):
                 [n for n, _ in dims],
                 [s for _, s in dims],
             )
-            if not shim.fits(placed, dtype):
+            if not operand.fits(placed):
                 raise ValueError(
                     f"{tap} does not fit one descriptor per channel, which a "
                     f"bounded axis needs (its size is patched in place)"
                 )
-            sizes, _ = BdLimits.slots(placed.sizes, placed.strides)
+            sizes, _ = slots(placed.sizes, placed.strides)
             out.append((placed, prod(sizes[(1 if on_d2 else dim) + 1 :])))
         return out
 
@@ -838,7 +837,7 @@ class Copy(Operator):
 
     @staticmethod
     def _stacked(
-        pieces: list[TensorAccessPattern], shim: BdLimits, dtype
+        pieces: list[TensorAccessPattern], operand: Operand
     ) -> list[TensorAccessPattern]:
         """``pieces`` with each evenly stepped run made one pattern: twice, so
         rows make runs and runs make a grid.
@@ -853,14 +852,13 @@ class Copy(Operator):
                         (p.sizes, p.strides) == (first.sizes, first.strides)
                         and step >= 0
                         and p.offset == first.offset + n * step
-                        and shim.fits(
+                        and operand.fits(
                             TensorAccessPattern(
                                 first.tensor_dims,
                                 first.offset,
                                 [n + 1, *first.sizes],
                                 [step, *first.strides],
-                            ),
-                            dtype,
+                            )
                         )
                     ):
                         runs[-1] = (first, n + 1, step)
@@ -885,15 +883,14 @@ class Copy(Operator):
         in_off = self.in_offset if self.in_offset.per_call else None
         out_off = self.out_offset if self.out_offset.per_call else None
         if isinstance(self.src, tuple) or isinstance(self.dst, tuple):
-            shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
             # A drain goes out before the fills that feed it.
             issued = []
             for side, walk in enumerate(self.walks()):
-                dtype = (self.x, self.y)[side].dtype
+                operand = (self.x, self.y)[side]
                 for c in range(self.num_channels):
                     at = 0
                     shares = [self._shares(p)[c] for p in walk]
-                    for tap in self._stacked(shares, shim, dtype):
+                    for tap in self._stacked(shares, operand):
                         issued.append((at, c, side == 0, tap))
                         at += prod(tap.sizes)
             issued.sort(key=lambda t: t[:3])
@@ -917,8 +914,8 @@ class Copy(Operator):
                 task.await_()
             return
 
-        ins = self._taps(self.src, self.src_bound, self.x.dtype)
-        outs = self._taps(self.dst, self.dst_bound, self.y.dtype)
+        ins = self._taps(self.src, self.src_bound, self.x)
+        outs = self._taps(self.dst, self.dst_bound, self.y)
         tg = TaskGroup()
         for c in range(self.num_channels):
             tap, unit = ins[c]

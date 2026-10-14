@@ -16,7 +16,7 @@ from enum import StrEnum
 from typing import ClassVar
 
 import numpy as np
-from aie.dialects.aie import AIEArch, AIETileType
+from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
@@ -48,7 +48,6 @@ from iron.common import (
     Operand,
     Rtp,
 )
-from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
 STACK_SIZE = 0xD00
@@ -1238,7 +1237,8 @@ class MHA(Operator):
             return
 
         cores, pv_width = self.pv_cores, self.pv_width
-        iterations = BdLimits.of(self.dev, AIETileType.ShimNOCTile).iterations
+        # A shim descriptor's iteration count.
+        iterations = 1 << self.dev.get_dma_bd_iter_bits(0, 0)
         for kv_head in range(kv_heads):
             head0 = kv_head * group
             tg = TaskGroup()

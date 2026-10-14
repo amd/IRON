@@ -5,7 +5,6 @@ import dataclasses
 from typing import Any
 
 import numpy as np
-from aie.dialects.aie import AIETileType
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import ObjectFifo, TaskGroup
 from aie.utils.verify import Tolerance
@@ -22,7 +21,6 @@ from iron.common import (
     Built,
     Operand,
 )
-from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
 
@@ -69,13 +67,12 @@ class Repeat(Operator):
 
     def resolve(self, dev):
         # A row is one run over the descriptor's two innermost dimensions.
-        shim = BdLimits.of(dev, AIETileType.ShimNOCTile)
-        row, gran = (self.seq or 1) * self.cols, shim.granule(self.dtype)
-        if shim.factor(row, gran) is None:
+        row = (self.seq or 1) * self.cols
+        if self.x.split(row) is None:
             raise Unresolvable(
                 f"Cannot split cols={row} for one descriptor: a row must "
-                f"factor into at most {shim.wrap} runs of at most "
-                f"{shim.wrap} {gran}-element words each"
+                f"factor into a run count and a run of whole 32-bit words, "
+                f"each within a shim descriptor's wrap"
             )
         return dataclasses.replace(self, tile_size=self.tile_size or self.cols)
 
@@ -97,8 +94,7 @@ class Repeat(Operator):
         the output interleaved, one descriptor each way.
         """
         rows, seq, cols, repeat = self.rows, self.seq or 1, self.cols, self.repeat
-        shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
-        row, gran = seq * cols, shim.granule(self.dtype)
+        row = seq * cols
         bound = self.bound_extents
         x = TensorAccessPattern.full((rows, seq, cols))
         y = TensorAccessPattern.full((rows, repeat, seq, cols))
@@ -109,7 +105,7 @@ class Repeat(Operator):
             taps = (x.permute((1, 0, 2)).repeat(repeat), y.permute((1, 2, 0, 3)))
             unit, word = rows * cols, "valid_seq"
         else:
-            halves = shim.factor(row, gran)
+            halves = self.x.split(row)
             assert halves is not None  # resolve() refused a row without one
             chunk = halves[1]
             taps = (

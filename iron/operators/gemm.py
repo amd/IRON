@@ -6,7 +6,7 @@ from enum import StrEnum
 from typing import Any
 
 import numpy as np
-from aie.dialects.aie import AIEArch, AIETileType
+from aie.dialects.aie import AIEArch
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
@@ -50,7 +50,6 @@ from iron.common import (
     Operand,
     Rtp,
 )
-from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
 # fmt: off
@@ -670,11 +669,8 @@ class GEMM(Operator):
             self.mem_tile_n,
         )
         c_col_maj, b_col_maj = self.c_col_maj, self.b_col_maj
-        dtype_out = self.dtype_out
 
         # The transfer blocks count descriptors, so B and C are checked against one.
-        shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
-
         n_c_col_tiles_per_core = N // mem_tile_n
         n_c_row_tiles_per_core = M // mem_tile_m_C
 
@@ -693,7 +689,7 @@ class GEMM(Operator):
             ]
 
         # A B fill the compiler splits is not overlapped: 12 of 16 BDs assumes one.
-        b_unrolled = not all(shim.fits(tap, self.B.dtype) for tap in B_tiles)
+        b_unrolled = not all(self.B.fits(tap) for tap in B_tiles)
 
         def fill(col, c_row, tg):
             tile_offset = (c_row * n_shim_mem_A + col) % (M // mem_tile_m_A)
@@ -726,7 +722,7 @@ class GEMM(Operator):
                 for col in range(n_aie_cols):
                     # A row stride past the BD's 20-bit step: a drain per row-block.
                     C_tiles = [c_tile(col, row_base, current_tb_n_rows)]
-                    if not c_col_maj and not shim.fits(C_tiles[0], dtype_out):
+                    if not c_col_maj and not self.C.fits(C_tiles[0]):
                         C_tiles = [
                             c_tile(col, row_base + r, 1)
                             for r in range(current_tb_n_rows)

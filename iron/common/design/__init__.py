@@ -10,12 +10,10 @@ then the sequence derived from the operands or the operator's own
 and their sequences into one ``DeviceConfiguration`` for ``Program.compose``.
 """
 
-from .bd import BdLimits
 from .design import BuiltArray, OperatorDesign, configuration, identities
 from .runtime import OperatorRuntime
 
 __all__ = [
-    "BdLimits",
     "BuiltArray",
     "OperatorDesign",
     "OperatorRuntime",

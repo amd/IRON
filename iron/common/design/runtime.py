@@ -10,7 +10,7 @@ from math import prod
 from typing import Any
 
 import numpy as np
-from aie.dialects.aie import AIETileType, shim_dma_allocation
+from aie.dialects.aie import shim_dma_allocation
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.ir import IntegerType
@@ -30,9 +30,8 @@ from aie.iron import (
 from aie.iron.runtime.dmatask import emit_shim_transfer
 
 from ..declare import Built, DispatchTime, Operator, Value
-from ..declare.operand import Operand
+from ..declare.operand import Operand, slots
 from ..declare.value import PlaceWord
-from .bd import BdLimits
 
 
 class OperatorRuntime(Runtime):
@@ -330,7 +329,7 @@ class OperatorRuntime(Runtime):
                 f"{length_parameter.name} is a DispatchTime value; a per-call "
                 f"length is a scratchpad word patched into the descriptor"
             )
-        sizes, strides = BdLimits.slots(tap.sizes, tap.strides)
+        sizes, strides = slots(tap.sizes, tap.strides)
         dim = scale = None
         if length_parameter is not None:
             # A patched descriptor's length ends at its outermost dimension
@@ -371,9 +370,7 @@ class OperatorRuntime(Runtime):
         # A per-call size lands in one descriptor's length, a repeat count in
         # its push; an offset patches every split piece.
         per_call = length_parameter is not None or repeat_parameter is not None
-        if per_call and not BdLimits.of(self.op.dev, AIETileType.ShimNOCTile).fits(
-            tap, buffer.dtype
-        ):
+        if per_call and not buffer.fits(tap):
             raise ValueError(
                 f"{type(self.op).__name__}.{buffer.name}: {tap} moves by a per-call "
                 f"size, so it must fit one buffer descriptor, and does not"

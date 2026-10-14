@@ -54,7 +54,6 @@ from iron.common import (
     Operand,
     Rtp,
 )
-from iron.common.design import BdLimits
 from iron.operators.clamp import Clamp
 from iron.operators.flm.gemm.design import (
     _VERIFIED_CT_K,
@@ -648,9 +647,9 @@ class GEMM(Operator):
             # Emits (b_iter, mc, band): the order the core acquires A in while
             # holding a B chunk across the group.
             # A mem tile's run is bounded in elements; one past the wrap splits.
-            a_split = BdLimits.of(self.dev, AIETileType.MemTile).factor(R * CT_MAX_K)
-            assert a_split is not None
-            a_hi, a_lo = a_split
+            run, wrap = R * CT_MAX_K, (1 << self.dev.get_dma_bd_wrap_bits(0, 1)) - 1
+            a_lo = max(d for d in range(1, min(run, wrap) + 1) if run % d == 0)
+            a_hi = run // a_lo
             a_send_dims = TensorAccessPattern.full(
                 (a_bands, K_DIV_CT_K_MAX, R * CT_MAX_K)
             ).permute((1, 0, 2))

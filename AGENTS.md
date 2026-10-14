@@ -711,8 +711,9 @@ code before relying on a line here; it is the authority.
   2^20-granule stride from 32768 rows on.
   `test_llama_does_not_grow_with_the_context` checks that no activation
   or array follows `max_seq_len`.
-- **DMA descriptors** (mlir-aie's `verifyStridesWraps`, restated over a
-  pattern by `BdLimits.fits`, `BdLimits.of(dev, col, row)`): the innermost
+- **DMA descriptors** (mlir-aie's `verifyStridesWraps`, asked of a pattern
+  by `dev.dma_bd_fits(col, row, tap, dtype)`, and of an operand's lane by
+  `operand.fits(tap)` and `operand.split(elements)`): the innermost
   dimension holds at most 1023 granules unless the transfer is linear, the
   next at most 1023 elements, the third has no wrap field, and the
   outermost is the iteration count (at most 64) and the only one whose

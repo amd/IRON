@@ -12,7 +12,7 @@ the logits to a top-k summary; one combine core draws the token from them.
 import dataclasses
 
 import numpy as np
-from aie.dialects.aie import AIETileType, WireBundle, get_target_model
+from aie.dialects.aie import WireBundle, get_target_model
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker
 from aie.iron.controlflow import range_
@@ -33,7 +33,6 @@ from iron.common import (
     Built,
     Operand,
 )
-from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
 
 # A select core's logits object: no more than this, and even (4-byte DMA).
@@ -257,11 +256,10 @@ class Sample(Operator):
         """Core ``core``'s slice, once per select stream."""
         run, streams = self.slice_size, self.select_streams
         piece = TensorAccessPattern.full((self.vocab,))[core * run : (core + 1) * run]
-        shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
-        halves = shim.factor(run, shim.granule(bfloat16))
+        halves = self.logits.split(run)
         if halves is not None:
             tap = piece.split(0, halves[1]).repeat(streams)
-            if shim.fits(tap, bfloat16):
+            if self.logits.fits(tap):
                 return [tap]
         return [piece] * streams
 

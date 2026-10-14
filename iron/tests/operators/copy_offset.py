@@ -15,13 +15,11 @@ undetected.
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-from aie.dialects.aie import AIETileType
 from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common.design import BdLimits
 from iron.operators.copy import Copy
 
 # Llama's KV-cache write, shrunk: (n_kv_groups, seq, head_dim), one token's
@@ -109,8 +107,8 @@ def test_the_offset_moves_every_piece_of_a_split_pattern():
     write = Write()
     net = write.compile(x=(GROUPS, BLOCKS, ROWS, KEEP))
     view = TensorAccessPattern.full((GROUPS, SLOTS, BLOCKS, ROWS, WIDE))
-    shim = BdLimits.of(aie_utils.get_current_device(), AIETileType.ShimNOCTile)
-    assert not shim.fits(view[:, 0, :, :, :KEEP], bfloat16)
+    dev = aie_utils.get_current_device()
+    assert not dev.dma_bd_fits(0, 0, view[:, 0, :, :, :KEEP], bfloat16)
 
     expected = np.zeros((GROUPS, SLOTS, BLOCKS, ROWS, WIDE), dtype=np.float32)
     net.write(cache, expected)

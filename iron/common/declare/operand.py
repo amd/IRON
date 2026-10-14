@@ -10,11 +10,12 @@ from __future__ import annotations
 import copy
 import math
 from dataclasses import Field
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 import aie.iron
 import numpy as np
-from aie.dialects.aie import AIETileType, DMAChannelDir
+from aie.dialects.aie import DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import DmaEndpoint
 from aie.utils import bfp
@@ -27,6 +28,31 @@ from .value import DispatchTime, Extent, Value
 
 if TYPE_CHECKING:
     from .operator import Operator
+
+
+def slots(sizes: Sequence[Any], strides: Sequence[Any]) -> tuple[list, list]:
+    """``sizes`` and ``strides`` padded to a shim descriptor's four
+    dimensions, as the shim lowering pads them.
+
+    Unit dimensions go in front, except after a leading re-read: a stride
+    of 0 is only encodable in the iteration dimension.
+
+    Returns:
+        The sizes and strides, outermost first.
+    """
+    sizes, strides = list(sizes), list(strides)
+    reread = (
+        2 <= len(sizes) < 4
+        and isinstance(sizes[0], (int, np.integer))
+        and sizes[0] > 1
+        and isinstance(strides[0], (int, np.integer))
+        and strides[0] == 0
+    )
+    at = 1 if reread else 0
+    while len(sizes) < 4:
+        sizes.insert(at, 1)
+        strides.insert(at, 0)
+    return sizes, strides
 
 
 class Operand(Member["Operand"]):
@@ -438,6 +464,36 @@ class Operand(Member["Operand"]):
     def extent_axis(self, extent: Extent) -> int | None:
         return self.dims.axis_of(extent.field.name, self.op)
 
+    def fits(self, tap: TensorAccessPattern) -> bool:
+        """Whether one buffer descriptor of a lane's shim tile holds
+        ``tap``, a pattern over this operand, padded as the shim lowering
+        pads it (``slots``).
+        """
+        sizes, strides = slots(tap.sizes, tap.strides)
+        padded = TensorAccessPattern(tap.tensor_dims, tap.offset, sizes, strides)
+        # Every shim tile's descriptor is alike; column 0's stands for a lane's.
+        return self.op.dev.dma_bd_fits(0, 0, padded, self.dtype)
+
+    def split(self, elements: int) -> tuple[int, int] | None:
+        """A contiguous run of ``elements`` of this operand as ``(d1, d0)``:
+        the largest ``d0`` a lane's shim descriptor holds as its innermost
+        dimension with ``d1`` beside it, or None where no ``d0`` does.
+        """
+        for d0 in range(elements, 0, -1):
+            if elements % d0:
+                continue
+            # The run inside a strided walk, so neither dimension is exempt
+            # from its wrap as a linear transfer is.
+            probe = TensorAccessPattern(
+                (8 * elements,),
+                0,
+                [1, 2, elements // d0, d0],
+                [0, 4 * elements, d0, 1],
+            )
+            if self.op.dev.dma_bd_fits(0, 0, probe, self.dtype):
+                return elements // d0, d0
+        return None
+
     def extent_unit(self, axis: int) -> int:
         """The rows along ``axis`` of one round-robin unit under a bound:
         ``Operator.extent_unit``, else the stream tile's.
@@ -480,9 +536,6 @@ class Operand(Member["Operand"]):
                 its lanes, or is bounded on an axis the split cannot bound or
                 in tiles no descriptor holds.
         """
-        # design/ imports declare, so BdLimits is imported where it is used.
-        from ..design.bd import BdLimits
-
         name = f"{type(self.op).__name__}.{self.name}"
         if not self.streamed:
             raise ValueError(
@@ -526,23 +579,23 @@ class Operand(Member["Operand"]):
             )
         tiles = shape[axis] // (lanes * tile_rows)
         run = tile_rows * inner
-        shim = BdLimits.of(self.op.dev, AIETileType.ShimNOCTile)
-        granule = shim.granule(self.dtype)
-        halves = shim.factor(run, granule)
+        halves = self.split(run)
         if halves is None:
             raise ValueError(
                 f"{self.name}: a {run}-element tile does not fit one descriptor"
             )
         # A unit D1 is stripped, which would drop the tile count into D1's
-        # wrap; past it, a tile split in two keeps the count on D2, which has none.
-        if halves[0] == 1 and tiles > shim.wrap and run % (2 * granule) == 0:
+        # wrap; past it, a tile split in two keeps the count on D2, which has
+        # none (and a half of no whole granules fits no descriptor below).
+        wrap = (1 << self.op.dev.get_dma_bd_wrap_bits(0, 0)) - 1
+        if halves[0] == 1 and tiles > wrap and run % 2 == 0:
             halves = (2, run // 2)
         iterations = shape[0] if axis else 1
         tiled = TensorAccessPattern.full((iterations, tiles, lanes, run))
         out = []
         for lane in range(lanes):
             tap = tiled[:, :, lane].split(2, halves[1])
-            if not shim.fits(tap, self.dtype):
+            if not self.fits(tap):
                 raise ValueError(
                     f"{self.name} {shape}: the round-robin split over {lanes} "
                     f"lanes does not fit one descriptor per lane"
