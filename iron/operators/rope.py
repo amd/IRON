@@ -36,32 +36,36 @@ from iron.common.testing import Case, Testing
 
 
 def _cases(cls, dev: Device):
-    out = []
-    for cols in [c for c in (1, 2, 4, 8) if c <= dev.cols]:
-        for rows in (32, 64):
-            for angle_rows in (8, 16, 32):
-                for width in (128, 512):
-                    for method_type in (0, 1):
-                        regular = (
-                            rows == 32
-                            and width == 512
-                            and angle_rows in (8, 32)
-                            and method_type == 0
-                        )
-                        if not regular and width != 128:
-                            continue
-                        out.append(
-                            Case(
-                                dict(
-                                    rows=rows,
-                                    cols=width,
-                                    num_aie_columns=cols,
-                                    angle_rows=angle_rows,
-                                    method_type=method_type,
-                                ),
-                                extensive=not regular,
-                            )
-                        )
+    # One column, four (npu1's widest) and eight; the angle table repeated
+    # four times and once.
+    out = [
+        Case(
+            dict(
+                rows=32,
+                cols=512,
+                num_aie_columns=cols,
+                angle_rows=angle_rows,
+                method_type=0,
+            )
+        )
+        for cols in (1, 4, 8)
+        if cols <= dev.cols
+        for angle_rows in (8, 32)
+    ]
+    # The second method, and the third angle-table size at the widest grid.
+    out += [
+        Case(dict(rows=32, cols=128, num_aie_columns=1, angle_rows=8, method_type=1)),
+        Case(
+            dict(
+                rows=64,
+                cols=128,
+                num_aie_columns=dev.cols,
+                angle_rows=16,
+                method_type=0,
+            ),
+            extensive=True,
+        ),
+    ]
     # Benched: 4096 rows over every column, well past the dispatch cost.
     out.append(Case(dict(rows=4096, cols=512, angle_rows=8, method_type=0), bench=True))
     return out

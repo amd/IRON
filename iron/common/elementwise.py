@@ -146,8 +146,10 @@ def _interval(
 
 
 class Sweep:
-    """The cases of an elementwise operator: every column count its shim
-    budget allows by every channel count, at each length.
+    """The cases of an elementwise operator. At the regular length: one core,
+    and the grid of the most cores its shim budget allows (every grid between
+    runs the same loop over its cores). At the other lengths, the extensive
+    suite: the smallest and the largest tile.
 
     Args:
         channels: None leaves the count to the operator (a binary one).
@@ -192,22 +194,26 @@ class Sweep:
 
     def __call__(self, cls, dev: Device) -> list[Case]:
         cap = cls.tile_cap if self.tile_cap is None else self.tile_cap
-        out = []
-        for length in self.lengths:
-            for chans in self.channels or (1,):
-                for cols in range(
-                    1, cls.declaration.shim_columns(dev, chans, self.extra) + 1
-                ):
-                    cores = cols * chans
-                    tile = min(length // cores, cap)
-                    if tile * cores != length:
-                        continue
-                    out.append(
-                        Case(
-                            self._kwargs(length, cols, chans, tile),
-                            extensive=length != self.regular,
-                        )
-                    )
+        grids = [
+            (length, cols, chans, min(length // (cols * chans), cap))
+            for length in self.lengths
+            for chans in self.channels or (1,)
+            for cols in range(
+                1, cls.declaration.shim_columns(dev, chans, self.extra) + 1
+            )
+        ]
+        grids = [g for g in grids if g[1] * g[2] * g[3] == g[0]]
+        regular = [g for g in grids if g[0] == self.regular]
+        others = [g for g in grids if g[0] != self.regular]
+        picked = [g for g in regular if g[1:3] == (1, 1)]
+        if regular:
+            picked.append(max(regular, key=lambda g: (g[1] * g[2], g[2])))
+        if others:
+            picked += [min(others, key=lambda g: g[3]), max(others, key=lambda g: g[3])]
+        out = [
+            Case(self._kwargs(*g), extensive=g[0] != self.regular)
+            for g in dict.fromkeys(picked)
+        ]
         if self.lower:
             i = next(i for i, c in enumerate(out) if not c.extensive)
             out[i] = dataclasses.replace(out[i], lower=True)

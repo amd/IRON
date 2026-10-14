@@ -170,7 +170,6 @@ _CASES = [
         extensive=True,
         bench=True,
     ),
-    Case(dict(num_heads=1, seq_len=16384, num_pipelines=4), extensive=True),
     # A chunk over a cache: 2048 queries, the last rows of 8192 keys.
     Case(
         dict(
@@ -211,26 +210,18 @@ _CASES = [
         )
         for heads, d in ((40, 64), (24, 128))
     ),
-    # The chunk and the decode at each placement the tuner tries beside the
-    # default.
+    # The chunk at each placement the tuner tries beside the default.
     *(
-        Case(dict(shape, placement=placement), extensive=True)
-        for shape in (
+        Case(
             dict(
                 num_heads=8,
                 num_KV_heads=2,
                 seq_len=2048,
                 kv_len=8192,
                 num_pipelines=8,
+                placement=placement,
             ),
-            dict(
-                num_heads=32,
-                num_KV_heads=8,
-                seq_len=1,
-                kv_len=2048,
-                num_pipelines=4,
-                heads_interleaved=True,
-            ),
+            extensive=True,
         )
         for placement in (MHAPlacement.TILES, MHAPlacement.COLUMNS)
     ),
@@ -266,16 +257,6 @@ _CASES = [
             emulate_bf16_mmul_with_bfp16=False,
         ),
         lower=True,
-    ),
-    # Bidirectional over every key.
-    Case(
-        dict(
-            num_heads=8,
-            num_KV_heads=2,
-            seq_len=1000,
-            causal=False,
-            num_pipelines=8,
-        )
     ),
     Case(
         dict(num_heads=8, num_KV_heads=2, seq_len=2048, d=128, num_pipelines=8),

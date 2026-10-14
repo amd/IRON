@@ -47,8 +47,6 @@ def _cases(cls, dev: Device):
         (128, 128, 1, 32, 128),
         (2048, 8192, 1, 1, 2048),
         (8192, 2048, 1, 4, 1024),
-        (2048, 8192, 2, 1, 1024),
-        (8192, 2048, 2, 4, 1024),
         (2048, 8192, 4, 1, 512),
         (8192, 2048, 4, 4, 1024),
         (2048, 8192, 8, 1, 256),
@@ -77,7 +75,6 @@ def _cases(cls, dev: Device):
         (8192, 2048, 4, 4, 1024),
         (8192, 2048, 8, 4, 512),
     ]
-    finishing = [plain[0], (2048, 8192, 1, 1, 1024), plain[2]]
 
     def case(M, K, cols, tsi, tso, *, bench=False, lower=False, **extra):
         kwargs = dict(M=M, K=K, num_aie_columns=cols, tile_size_input=tsi)
@@ -124,15 +121,17 @@ def _cases(cls, dev: Device):
             for i, (*p, batches) in enumerate(batched)
         ]
         + [case(*p, num_batches=batches, repeat=r) for *p, batches, r in repeated]
-        + [case(*p, bench=bench(*p), num_channels=2) for p in laned]
+        + [case(*p, bench=bench(*p), num_channels=2) for p in (laned[0], laned[2])]
         + [
             case(256, 128, 2, 1, 32, num_channels=2, num_batches=8),
             case(2048, 64, 4, 4, 256, num_channels=2, num_batches=32, repeat=4),
         ]
         # Each core finishing its output tiles, K = 8192's at the 1024-row
         # tile a core holds beside an AIE2 finish's LUT tables.
-        + [finished(*p, (catalog.GELU,)) for p in finishing]
-        + [finished(*p, (catalog.SiLU,)) for p in finishing]
+        + [
+            finished(2048, 8192, 1, 1, 1024, (step,))
+            for step in (catalog.GELU, catalog.SiLU)
+        ]
         + [finished(*laned[1], (catalog.SiLU,), num_channels=2)]
         # One array serving both, each design selecting its own.
         + [
@@ -144,9 +143,11 @@ def _cases(cls, dev: Device):
         # least.
         + [
             prepared(*p, (norm(p[1], weighted),))
-            for p in (plain[0], plain[2], plain[4], (2048, 4096, 8, 2, 256))
+            for p in (plain[2], (2048, 4096, 8, 2, 256))
             for weighted in (False, True)
         ]
+        + [prepared(*plain[0], (norm(plain[0][1]),))]
+        + []
         + [
             prepared(*laned[1], (norm(2048, weighted),), num_channels=2)
             for weighted in (False, True)

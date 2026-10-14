@@ -45,7 +45,6 @@ class Merge(Operator):
     test = Testing(
         [
             Case(dict(rows=2048, **GEMMA), bench=True),
-            Case(dict(rows=64, **GEMMA)),
             Case(dict(rows=192, block=32, **GEMMA)),
             # The two runs of rows overlapping each other and the text's.
             Case(

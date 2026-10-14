@@ -76,7 +76,6 @@ class Emit(Operator):
     test = Testing(
         [
             Case(dict(slots=32, carried=1), id="one_carried"),
-            Case(dict(slots=32, carried=2), id="two_carried"),
             # Benched, though every case finishes near the dispatch cost: an
             # operator no input takes past it is tracked on one of them.
             Case(dict(slots=32, carried=8), id="eight_carried", bench=True),

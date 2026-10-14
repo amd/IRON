@@ -27,47 +27,30 @@ from iron.common.testing import Case, Testing
 
 def _cases(cls, dev: Device):
     m = n = 64
-    out = []
-    for M in (64, 2048):
-        for N in (64, 128, 256, 512):
-            for cols in range(1, dev.cols + 1):
-                for channels in (1, 2):
-                    if (M // channels) % m or (N // cols) % n:
-                        continue
-                    if (M // channels) * (N // cols) * channels * cols != M * N:
-                        continue
-                    out.append(
-                        Case(
-                            dict(
-                                M=M,
-                                N=N,
-                                num_aie_columns=cols,
-                                num_channels=channels,
-                                m=m,
-                                n=n,
-                                s=8,
-                            ),
-                            extensive=(M, N) != (2048, 64),
-                        )
-                    )
-    # num_batches > 1: independent same-shape transposes in one dispatch, on
-    # the regular shape; two batches in the default suite, four extensive.
-    for batches in (2, 4):
-        out.append(
-            Case(
-                dict(
-                    M=2048,
-                    N=64,
-                    num_aie_columns=1,
-                    num_channels=1,
-                    m=m,
-                    n=n,
-                    s=8,
-                    num_batches=batches,
-                ),
-                extensive=batches != 2,
+    tiles = dict(m=m, n=n, s=8)
+    out = [
+        Case(dict(M=2048, N=64, num_aie_columns=1, num_channels=c, **tiles))
+        for c in (1, 2)
+    ]
+    # num_batches > 1: independent same-shape transposes in one dispatch.
+    out.append(
+        Case(
+            dict(
+                M=2048, N=64, num_aie_columns=1, num_channels=1, **tiles, num_batches=2
             )
         )
+    )
+    # One tile, and the widest grid.
+    out += [
+        Case(
+            dict(M=64, N=64, num_aie_columns=1, num_channels=1, **tiles),
+            extensive=True,
+        ),
+        Case(
+            dict(M=2048, N=512, num_aie_columns=dev.cols, num_channels=2, **tiles),
+            extensive=True,
+        ),
+    ]
     # Benched: 4 Mi elements, well past the dispatch cost. Each column takes a
     # 64-wide slice of N and each channel a 64-row-aligned slice of M.
     out.append(

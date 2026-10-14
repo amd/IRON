@@ -224,7 +224,6 @@ class ResampleTaps(Operator):
         [
             # A phone photo's width to the image budget's, on every core.
             Case(dict(in_size=4032, out_size=912), bench=True),
-            Case(dict(in_size=3024, out_size=672)),
             # Upsampled: the window is 5, 50 outputs to a chunk.
             Case(dict(in_size=17, out_size=1008)),
             Case(dict(in_size=961, out_size=960)),

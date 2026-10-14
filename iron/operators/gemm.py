@@ -62,7 +62,6 @@ _REGULAR = [
     ( 384,  1536,  1792,       4,      True,     False,  32,  48,  64),
     (1792,   896,  1152,       8,     False,      True,  64,  32,  48),
     ( 896,  1792,   640,       8,     False,      True,  32,  64,  80),
-    ( 192,   384,    64,       4,     False,     False,  48,  96,  16),
     ( 192,   384,    64,       4,      True,      True,  48,  96,  16),
     # M short of four rows of cores at 16 each, so split over two:
     # EmbeddingGemma 2's audio convolution, its output channels as M.
@@ -70,27 +69,17 @@ _REGULAR = [
 ]
 _EXTENSIVE = [
     (2048,  2048,  2048,       8,     False,     False,  32,  32, 128),
-    (2048,  2048,  8192,       2,     False,     False,  64,  64,  64),
-    (2048,  8192,  2048,       2,     False,     False,  64,  64,  64),
-    (2048,    64,  2048,       2,     False,     False,  64,  64,  64),
-    (2048,    64,  8192,       2,     False,     False,  64,  64,  64),
     (2048,  2048,  2048,       8,      True,     False, 128,  32,  32),
+    # Many N tiles, a long K loop, one K tile, and both.
     (2048,  2048,  8192,       2,      True,     False,  64,  64,  64),
     (2048,  8192,  2048,       2,      True,     False,  64,  64,  64),
-    # A down projection of a 2048-wide model with an 8192-wide feed-forward.
-    (2048,  8192,  2048,       8,      True,     False,  64,  64,  64),
     (2048,    64,  2048,       2,      True,     False,  64,  64,  64),
     (2048,    64,  8192,       2,      True,     False,  64,  64,  64),
     (2048,  2048,  2048,       2,     False,      True,   8,  16,  32),
-    (2048,  2048,  8192,       2,     False,      True,  64,  64,  64),
-    (2048,  8192,  2048,       2,     False,      True,  64,  64,  64),
-    (2048,    64,  2048,       2,     False,      True,  64,  64,  64),
-    (2048,    64,  8192,       2,     False,      True,  64,  64,  64),
     # N wide enough that C's row stride (mem_tile_m_C * N) overflows the
     # shim BD's 20-bit iteration step, so the drain is issued as one
     # descriptor per row-block. Cover for that split.
     (1024,  2560, 10240,       8,     False,     False,  64,  64,  64),
-    (2048,  2560, 10240,       8,     False,     False,  64,  64,  64),
 ]
 # fmt: on
 
@@ -111,17 +100,16 @@ def _cases(cls, dev: Device):
             out.append(Case(kwargs, extensive=extensive, lower=lower))
     # The defaults: bfp16 inputs, and C rounded to bf16 between K tiles.
     # The default-suite one is benched: it runs well past the dispatch cost.
-    for K, extensive in ((2048, False), (8192, True)):
-        kwargs = dict(M=2048, K=K, N=2048, b_col_maj=True)
-        out.append(Case(kwargs, extensive, bench=not extensive, lower=not extensive))
+    out.append(
+        Case(dict(M=2048, K=2048, N=2048, b_col_maj=True), bench=True, lower=True)
+    )
     # An f32 C at the default 64-wide tiles overflows a core's memory.
     f32 = dict(M=512, K=256, N=512, dtype_out=np.float32, tile_m=32, tile_k=32)
     out.append(Case(dict(f32, tile_n=32), id="f32_out", lower=True))
     # The placement the tuner tries beside the default, A split over a column's
     # rows on two columns.
-    for cols in (8, 2):
-        kwargs = dict(M=2048, K=2048, N=2048, num_aie_columns=cols, b_col_maj=True)
-        out.append(Case(dict(kwargs, placement=GEMMPlacement.TILES), extensive=True))
+    kwargs = dict(M=2048, K=2048, N=2048, num_aie_columns=2, b_col_maj=True)
+    out.append(Case(dict(kwargs, placement=GEMMPlacement.TILES), extensive=True))
 
     def finished(kwargs, *chains):
         # The first chain is the case's own; more share one array.

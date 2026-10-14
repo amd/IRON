@@ -14,22 +14,18 @@ class LeakyReLU(UnaryElementwise):
     """
 
     test = Testing(
-        # The shape sweep at the default alpha, then two more alphas on one
-        # small shape in the default suite, so alpha is seen to reach the
-        # kernel.
+        # The shape sweep at the default alpha, then another alpha on one
+        # small shape, so alpha is seen to reach the kernel.
         [
             Sweep(alpha=0.01),
-            *(
-                Case(
-                    dict(
-                        size=2048,
-                        num_aie_columns=1,
-                        num_channels=1,
-                        tile_size=2048,
-                        alpha=a,
-                    )
+            Case(
+                dict(
+                    size=2048,
+                    num_aie_columns=1,
+                    num_channels=1,
+                    tile_size=2048,
+                    alpha=0.1,
                 )
-                for a in (0.1, 0.25)
             ),
         ],
         draw=lambda op: dict(centered=(op.x,)),

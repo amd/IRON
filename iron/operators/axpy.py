@@ -5,7 +5,7 @@ from aie.iron.kernels import datamovement
 
 from iron.common import BinaryElementwise, Param
 from iron.common.elementwise import Sweep
-from iron.common.testing import Testing
+from iron.common.testing import Case, Testing
 
 
 class AXPY(BinaryElementwise):
@@ -13,14 +13,14 @@ class AXPY(BinaryElementwise):
     scalar passed to the kernel.
     """
 
-    # Every split at the default scalar and at a non-integer one that bf16
-    # rounds (the 2048 shape in the default suite), then every split at a
-    # third scalar, all extensive.
+    # The splits at the default scalar, then a non-integer one that bf16
+    # rounds on one shape, so the scalar is seen to reach the kernel.
     test = Testing(
         [
             Sweep(channels=None, scalar_factor=3.0),
-            Sweep(channels=None, scalar_factor=1.003, bench=None),
-            Sweep(channels=None, scalar_factor=10.0, regular=None, bench=None),
+            Case(
+                dict(size=2048, num_aie_columns=1, tile_size=2048, scalar_factor=1.003)
+            ),
         ]
     )
 

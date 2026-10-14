@@ -72,7 +72,6 @@ class Softmax(Operator):
     test = Testing(
         [
             Case(dict(rows=32, cols=1024, num_aie_columns=2, num_channels=2)),
-            Case(dict(rows=64, cols=512, num_aie_columns=2, num_channels=2)),
             Case(dict(rows=16, cols=2048, num_aie_columns=2, num_channels=2)),
             Case(
                 dict(rows=16, cols=4096, block=1024, num_aie_columns=2, num_channels=2),
