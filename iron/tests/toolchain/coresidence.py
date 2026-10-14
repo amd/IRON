@@ -296,9 +296,8 @@ def test_a_folded_gate_shares_its_device_with_the_up_projection(npu2):
     assert re.findall(r"aiex\.run @(\w+)", text)[:2] == [gate, up]
 
 
-def test_arrays_naming_their_symbols_alike_pack():
-    # Two GEMV arrays each name their fifos A_L3L1_0 on: in one pack each
-    # keeps its own, under its design's name.
+def test_two_arrays_of_one_class_pack():
+    # Two GEMV arrays in one pack: each fifo keeps a symbol of its own.
     gemvs = [
         GEMV(M=512, K=512, num_aie_columns=2, tile_size_output=tile)
         for tile in (32, 16)
@@ -315,8 +314,8 @@ def test_arrays_naming_their_symbols_alike_pack():
     seq.prepare()
     fused = Fusion(seq)
     assert fits(fused.designs) is None
-    fifos = set(re.findall(r"aie\.objectfifo @(\w+)\(", fused.text()))
-    assert {f"{name}__A_L3L1_0" for name in fused.designs} <= fifos
+    fifos = re.findall(r"aie\.objectfifo @(\w+)\(", fused.text())
+    assert fifos and len(fifos) == len(set(fifos))
 
 
 def test_a_pack_refuses_two_cores_on_one_tile():
