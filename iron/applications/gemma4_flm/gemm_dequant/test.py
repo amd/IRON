@@ -26,13 +26,16 @@ OUTPUT = BUILD / "gemm_dequant"
 FLM_ROOT = BUILD / "FastFlowLM"
 FLM = FLM_ROOT / "src"
 FLM_TAG = "v1.0.8"
-FLM_MODEL_PATH = Path(
+SOURCE_FLM_MODEL_PATH = Path(
     os.environ.get(
         "FLM_MODEL_PATH",
         Path(os.environ.get("IRON_EXAMPLE_WEIGHTS_DIR", "/srv")) / "fastflowlm",
     )
 )
-MODEL = FLM_MODEL_PATH / "models" / "Gemma4-E2B-IT-NPU2"
+SOURCE_MODEL = SOURCE_FLM_MODEL_PATH / "models" / "Gemma4-E2B-IT-NPU2"
+FLM_MODEL_PATH = OUTPUT / "weights"
+MODEL = FLM_MODEL_PATH / "models" / SOURCE_MODEL.name
+SIDECARS = {"model.dq_bf16", "model.dq_bfp", "model.dq_bfp_attn"}
 PORT = 18099
 URL = f"http://127.0.0.1:{PORT}"
 MEASURED_RUNS = 12
@@ -168,31 +171,61 @@ def configure(directory, mode=None):
     run(command)
 
 
+def prepare_model(source_model=SOURCE_MODEL, model=MODEL):
+    model.mkdir(parents=True, exist_ok=True)
+    for source in source_model.iterdir():
+        if source.name in SIDECARS:
+            continue
+        destination = model / source.name
+        if not destination.exists():
+            destination.symlink_to(source.resolve())
+
+
+def test_prepare_model_links_inputs_and_owns_sidecars(tmp_path):
+    source_model = tmp_path / "source"
+    source_model.mkdir()
+    (source_model / "model.q4nx").write_bytes(b"weights")
+    (source_model / "model.dq_bf16").write_bytes(b"source sidecar")
+    model = tmp_path / "local" / "models" / source_model.name
+
+    prepare_model(source_model, model)
+
+    assert (model / "model.q4nx").is_symlink()
+    assert (model / "model.q4nx").read_bytes() == b"weights"
+    assert not (model / "model.dq_bf16").exists()
+    (model / "model.dq_bf16").write_bytes(b"local sidecar")
+    assert (model / "model.dq_bf16").read_bytes() == b"local sidecar"
+
+
 def build_sidecars():
     commands = {
         "model.dq_bf16": ["--mode", "bf16"],
         "model.dq_bfp": ["--mode", "bfp", "--only", "mlp."],
-        "model.dq_bfp_attn": [
-            "--mode",
-            "bfp",
-            "--only",
-            "self_attn.",
-            "--out",
-            "model.dq_bfp_attn",
-        ],
+        "model.dq_bfp_attn": ["--mode", "bfp", "--only", "self_attn."],
     }
     for output, arguments in commands.items():
-        if (MODEL / output).exists():
+        output_path = MODEL / output
+        if output_path.exists():
             continue
+        temporary_path = MODEL / f".{output}.tmp"
         run(
-            [sys.executable, str(APP / "dequantize.py"), str(MODEL), *arguments],
+            [
+                sys.executable,
+                str(APP / "dequantize.py"),
+                str(MODEL),
+                *arguments,
+                "--out",
+                temporary_path.name,
+            ],
             env=dict(os.environ, IRON_PATH=str(APP.parents[2])),
         )
+        temporary_path.replace(output_path)
 
 
 @pytest.fixture(scope="module")
 def build_engines():
     checkout_fastflowlm()
+    prepare_model()
     build_sidecars()
     configure(BUILD / "stock")
     run(["cmake", "--build", str(BUILD / "stock"), "--parallel", "2"])
@@ -287,7 +320,8 @@ def generate(engine, xclbins, measured_runs=1):
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.skipif(
-    not MODEL.exists(), reason="needs $FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2"
+    not SOURCE_MODEL.exists(),
+    reason="needs $FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2",
 )
 @pytest.mark.metrics(TTFT=r"\[Prefill\] Time to first token: (?P<value>[\d\.e\+-]+) s")
 @pytest.mark.bench
