@@ -58,7 +58,7 @@ def test_a_call_gives_the_address_a_word_step_reads(table):
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("rows", [15, 256])
-def test_a_gather_alone_reads_the_rows_its_words_name(npu_runtime, table, rows):
+def test_a_gather_alone_reads_the_rows_its_words_name(table, rows):
     traced = DeviceIds(table).trace(ids=((rows,), np.int32))
     gather = next(s.op for s in traced.steps if isinstance(s.op, Gather))
     alone = Standalone(f"probe_gather{rows}", [gather])
@@ -79,7 +79,7 @@ def test_a_gather_alone_reads_the_rows_its_words_name(npu_runtime, table, rows):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_a_graph_gathering_by_device_ids_is_measured(npu_runtime, table, tmp_path):
+def test_a_graph_gathering_by_device_ids_is_measured(table, tmp_path):
     traced = DeviceIds(table).trace(ids=((15,), np.int32))
     costs = CostTable(tmp_path / "costs.json", "npu2", "fused")
     log = []
@@ -92,7 +92,7 @@ def test_a_graph_gathering_by_device_ids_is_measured(npu_runtime, table, tmp_pat
 
 
 @pytest.mark.supported_devices("npu2")
-def test_an_emit_cannot_start_a_gather_by_device_ids(table, npu_runtime):
+def test_an_emit_cannot_start_a_gather_by_device_ids(table):
     walk = Walk(table, 15)
     body = walk.compile()
     with pytest.raises(ValueError, match=r"an Emit cannot start it.*\['table'\]"):

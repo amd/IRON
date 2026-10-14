@@ -69,10 +69,7 @@ SIZE = 8192
 TILE = 256
 TRIANGLE = (ElementwiseAdd, SiLU, ElementwiseMul)
 
-pytestmark = [
-    pytest.mark.usefixtures("npu_runtime"),
-    pytest.mark.supported_devices("npu2"),
-]
+pytestmark = pytest.mark.supported_devices("npu2")
 
 
 class Calls(iron.Graph):

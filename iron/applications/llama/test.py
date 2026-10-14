@@ -51,10 +51,9 @@ def runner(request):
 
 
 @pytest.fixture(scope="module")
-def model(runner, request, module_npu_runtime):
+def model(runner, request):
     """The model, compiled and loaded once, its versions tuned by
-    ``--cost-table`` if given; the runtime is released after the module's
-    last test, as ``npu_runtime`` does after each of the others.
+    ``--cost-table`` if given.
     """
     yield runner.npu(request.config.getoption("--cost-table"))
 

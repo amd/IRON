@@ -188,9 +188,7 @@ SYNTHETIC = [
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("geometry, layer_type, context_len", SYNTHETIC, ids=str)
-def test_matches_reference(
-    geometry, layer_type, context_len, npu_runtime, record_property
-):
+def test_matches_reference(geometry, layer_type, context_len, record_property):
     image = _image(geometry, layer_type)
     inputs = generate_inputs(geometry, layer_type, context_len, MAX_L, seed=context_len)
     bufs = _tensors(image.op, inputs)
@@ -213,9 +211,7 @@ def test_matches_reference(
         ("swa", 37, 2 * MAX_CONTEXT, f"max_l exceeds {MAX_CONTEXT}"),
     ],
 )
-def test_refuses_unservable_contexts(
-    layer_type, context_len, max_l, match, npu_runtime
-):
+def test_refuses_unservable_contexts(layer_type, context_len, max_l, match):
     """The dispatch checks the context before the array runs."""
     image = _image(FLM_GEMMA4_E2B_DECODE, layer_type)
     tensor = aie_utils.DEFAULT_TENSOR_CLASS
@@ -239,7 +235,7 @@ def _captured_cases():
 @pytest.mark.parametrize(
     "case", _captured_cases(), ids=lambda p: p and f"{p.parent.name}/{p.name}"
 )
-def test_captured_case(case, npu_runtime, record_property):
+def test_captured_case(case, record_property):
     """A dispatch captured from the engine by an FLM_PLUGIN that hooks
     decode.layer. The output must also equal the engine's bit for bit.
     """

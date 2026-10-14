@@ -70,7 +70,7 @@ pytestmark = [
     ids=["causal", "sliding", "global"],
 )
 def test_rows_past_the_valid_length_are_zero(
-    npu_runtime, heads, kv_heads, d, seq, scales, attention, calls
+    heads, kv_heads, d, seq, scales, attention, calls
 ):
     class Attend(iron.Graph):
         def body(self, q, k, v, *, rows: Scratchpad[np.int32], n: Scratchpad[np.int32]):
@@ -136,7 +136,7 @@ class Chunk(iron.Graph):
 @pytest.mark.parametrize(
     "boundaries", [None, iron.each_step], ids=["full_elf", "xclbin"]
 )
-def test_a_chunk_attends_over_the_cache_before_it(npu_runtime, boundaries):
+def test_a_chunk_attends_over_the_cache_before_it(boundaries):
     chunk = Chunk()
 
     rng = np.random.default_rng(0)
@@ -166,7 +166,7 @@ def test_a_chunk_attends_over_the_cache_before_it(npu_runtime, boundaries):
         assert verdict, f"{c=} {rows=}: the valid elements differ: {verdict.detail}"
 
 
-def test_what_lies_past_the_bound_does_not_reach_the_output(npu_runtime):
+def test_what_lies_past_the_bound_does_not_reach_the_output():
     """Q past a chunk's rows holds whatever the step before left there, and
     the cache past its last position whatever an earlier prompt did; the
     last block's DMA reads both. The valid rows are bit for bit the same

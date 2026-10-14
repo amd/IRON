@@ -58,7 +58,7 @@ from iron.operators.flm import Shipped
 
 # Opt-in only: this module downloads the overlay, so keep it out of the default
 # run. See the note in the module docstring.
-pytestmark = pytest.mark.extensive
+pytestmark = [pytest.mark.extensive, pytest.mark.supported_devices("npu1", "npu2")]
 
 _dev = aie_utils.ensure_current_device()
 if _dev is None:
@@ -136,7 +136,7 @@ class Candidate:
     timed section contains nothing but the dispatch.
     """
 
-    def __init__(self, name, op, A, B, M, N, budget, ctx):
+    def __init__(self, name, op, A, B, M, N, budget):
         self.name = name
         self.budget = budget
         self.round_medians = []
@@ -174,7 +174,7 @@ class Candidate:
 
 
 @pytest.mark.parametrize("model,proj,M,K,N", get_params())
-def test_gemm_vs_prebuilt(model, proj, M, K, N, npu_runtime, record_property):
+def test_gemm_vs_prebuilt(model, proj, M, K, N, record_property):
     A, B, expected, mass = make_inputs(M, K, N)
 
     # Build everything before timing anything. Comparing frozen binaries is the
@@ -188,7 +188,6 @@ def test_gemm_vs_prebuilt(model, proj, M, K, N, npu_runtime, record_property):
             M,
             N,
             BUDGET_CONV_EVEN,
-            npu_runtime,
         ),
         Candidate(
             "gemm",
@@ -198,7 +197,6 @@ def test_gemm_vs_prebuilt(model, proj, M, K, N, npu_runtime, record_property):
             M,
             N,
             BUDGET_CONV_EVEN,
-            npu_runtime,
         ),
     ]
     if HAVE_PREBUILT:
@@ -211,7 +209,6 @@ def test_gemm_vs_prebuilt(model, proj, M, K, N, npu_runtime, record_property):
                 M,
                 N,
                 BUDGET_FLOOR,
-                npu_runtime,
             )
         )
 

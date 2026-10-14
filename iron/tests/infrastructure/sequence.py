@@ -103,7 +103,7 @@ def _build_add_relu_sequence(dispatch, name, input_args=("a", "b")):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("size", [_ADD_RELU_SIZE])
-def test_auto_dispatch_selects_platform_default(size, npu_runtime):
+def test_auto_dispatch_selects_platform_default(size):
     """``dispatch="auto"`` must resolve to the full-ELF mode on Strix and to
     the separate-xclbin mode on Phoenix, and produce the correct result on
     whichever platform the test runs on.
@@ -190,7 +190,7 @@ def _run_add_relu(dispatch, a, b, name):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("dispatch", ["separate", "fused", "compare"])
-def test_dispatch_modes_bit_identical(dispatch, npu_runtime):
+def test_dispatch_modes_bit_identical(dispatch):
     """Add -> relu must yield byte-for-byte identical output across every NPU
     dispatch mode: the compiled kernels are the same, so only the dispatch
     mechanism differs. The ``separate`` mode is the baseline (it runs on every
@@ -245,7 +245,8 @@ def _build_packed_output_sequence(dispatch, name):
     )
 
 
-def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
+@pytest.mark.supported_devices("npu1", "npu2")
+def test_reference_dispatch_resolves_sliced_buffer():
     """dispatch="reference" must resolve slice-notation buffers via
     subview() on the CPU backend, matching the xclbin chain's StepCallable,
     and each slice's write must be visible through the parent buffer name.
@@ -284,7 +285,7 @@ def test_reference_dispatch_resolves_sliced_buffer(npu_runtime):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("exact", [False, True])
-def test_compare_mode_judges_each_step_by_its_tolerance(exact, npu_runtime):
+def test_compare_mode_judges_each_step_by_its_tolerance(exact):
     """dispatch="compare" runs the NPU pipeline and, per step, re-runs the
     operator's ``reference()`` on the same NPU inputs. Under its kernel's
     contract the step runs cleanly; held to exact equality it makes compare
@@ -318,7 +319,7 @@ def test_compare_mode_judges_each_step_by_its_tolerance(exact, npu_runtime):
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_compare_mode_judges_every_output_at_the_calls_values(npu_runtime, caplog):
+def test_compare_mode_judges_every_output_at_the_calls_values(caplog):
     """Sample writes two buffers, its record in place and the token, at a row
     and slot that are per-call values. Compare mode runs its reference at
     the values the step was dispatched with and judges both buffers, so a
@@ -368,7 +369,7 @@ def test_compare_mode_judges_every_output_at_the_calls_values(npu_runtime, caplo
 
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("dispatch", ["separate", "fused"])
-def test_non_input_buffers_sync_without_explicit_flush(dispatch, npu_runtime):
+def test_non_input_buffers_sync_without_explicit_flush(dispatch):
     """Host writes through get_buffer() to a non-input buffer reach the NPU at
     the next dispatch, and reads of a non-output buffer after a dispatch see
     what the NPU wrote there, with no explicit ``to()`` from the caller.
@@ -466,7 +467,7 @@ def test_reconfigure_needs_a_full_elf():
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_one_design_is_configured_once(npu_runtime):
+def test_one_design_is_configured_once():
     """A fused sequence of one design builds no expanded load, and every
     dispatch after the first still computes on its new inputs.
     """
@@ -487,7 +488,7 @@ def test_one_design_is_configured_once(npu_runtime):
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_one_design_reconfigures_after_another_image(npu_runtime):
+def test_one_design_reconfigures_after_another_image():
     """Two one-design images dispatched in turn each configure the array
     again after the other ran, so each still computes its own operator.
     """

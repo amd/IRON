@@ -43,7 +43,7 @@ class Decode(iron.Graph):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_one_query_is_as_accurate_deep_in_the_cache_as_near_its_start(npu_runtime):
+def test_one_query_is_as_accurate_deep_in_the_cache_as_near_its_start():
     rng = np.random.default_rng(0)
     rows = (DISTINCT, KV_HEADS, D)
     k = np.resize(rng.standard_normal(rows) * 2, (CACHE, KV_HEADS, D)).astype(bfloat16)

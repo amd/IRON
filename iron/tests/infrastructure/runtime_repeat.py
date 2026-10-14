@@ -99,7 +99,7 @@ def _bound_op() -> RepeatTile:
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("image", IMAGES)
-def test_one_image_repeats_a_tile_k_times(image, npu_runtime, npu2):
+def test_one_image_repeats_a_tile_k_times(image, npu2):
     graph = Repeated()
     net = graph.compile(x=((WIDTH,), np.int32), **IMAGES[image])
     assert net.plan.image == image

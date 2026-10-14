@@ -20,7 +20,7 @@ SHAPES = {"square": (13, 13, 128, 5), "wide": (6, 10, 32, 3)}
 
 
 @pytest.mark.parametrize("shape", list(SHAPES))
-def test_max_pool2d(shape, module_npu_runtime):
+def test_max_pool2d(shape):
     rows, width, channels, kernel = SHAPES[shape]
     rng = np.random.default_rng(0)
     x = rng.standard_normal((rows, width * channels)).astype(bfloat16)

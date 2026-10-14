@@ -263,7 +263,7 @@ def tokenizer():
 
 
 @pytest.fixture(scope="module")
-def tuner(module_npu_runtime):
+def tuner():
     """The designs narrowed and packed by the cost table `iron.lm.tune`
     measured on this device, or as they resolve where it has measured none.
     """

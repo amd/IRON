@@ -79,7 +79,7 @@ def _check(dim, vocab, softcap, seed=0, tanh_error=True, record=None):
 
 
 @pytest.mark.parametrize("dim", [1536, 2560])
-def test_projection_matches_reference(dim, npu_runtime):
+def test_projection_matches_reference(dim):
     """A softcap of 1000 keeps each tanh argument near zero.
 
     The test therefore checks the projection alone.
@@ -90,11 +90,11 @@ def test_projection_matches_reference(dim, npu_runtime):
 
 
 @pytest.mark.parametrize("dim", [1536, 2560])
-def test_gemma4_softcap(dim, npu_runtime):
+def test_gemma4_softcap(dim):
     _check(dim, 4096, GEMMA4_SOFTCAP, seed=1)
 
 
-def test_softcap_bounds_the_logits(npu_runtime):
+def test_softcap_bounds_the_logits():
     """A softcap of 5 saturates most logits. No logit may exceed the softcap."""
     got = _check(1536, 1024, 5.0, seed=2)
     assert np.abs(got).max() <= 5.0
@@ -102,6 +102,6 @@ def test_softcap_bounds_the_logits(npu_runtime):
 
 @pytest.mark.extensive
 @pytest.mark.parametrize("dim", [pytest.param(1536, marks=pytest.mark.bench), 2560])
-def test_gemma4_vocabulary(dim, npu_runtime, record_property):
+def test_gemma4_vocabulary(dim, record_property):
     """Gemma 4's whole vocabulary of 262144 logits."""
     _check(dim, 262144, GEMMA4_SOFTCAP, seed=3, record=record_property)

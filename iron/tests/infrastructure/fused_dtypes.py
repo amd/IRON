@@ -75,7 +75,7 @@ def _check_gathers(run, gather, table):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_int32_step_at_nonzero_offsets(npu_runtime):
+def test_int32_step_at_nonzero_offsets():
     add = ElementwiseAdd(size=ADD_SIZE, tile_size=1024, num_aie_columns=4)
     gather = _gather()
     seq = OperatorSequence(
@@ -109,7 +109,7 @@ def test_int32_step_at_nonzero_offsets(npu_runtime):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_int32_slice_at_word_offset(npu_runtime):
+def test_int32_slice_at_word_offset():
     """A slice starting 36 bytes into its parent: a whole number of int32
     words, and not on the 64-byte granule an arena buffer is placed at.
     """

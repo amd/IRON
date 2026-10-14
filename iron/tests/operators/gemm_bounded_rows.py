@@ -35,7 +35,7 @@ BOUNDS = (M, 1, 300, 64, 65, M, 17, 128, 3)
         ),
     ],
 )
-def test_the_rows_of_a_bound_are_computed(npu_runtime, boundaries):
+def test_the_rows_of_a_bound_are_computed(boundaries):
     project = Project().compile(x=(M, K), w=(N, K), boundaries=boundaries)
     op = GEMM(M=M, K=K, N=N, b_col_maj=True)
     tolerance = op.resolved().tolerance()

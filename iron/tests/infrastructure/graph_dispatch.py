@@ -109,9 +109,7 @@ def _run(sequence, inputs):
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("dispatch", ["reference", "fused"])
 @pytest.mark.parametrize("precompile", [True, False], ids=["aot", "jit"])
-def test_a_graph_matches_the_hand_written_runlist_numerically(
-    precompile, dispatch, npu_runtime
-):
+def test_a_graph_matches_the_hand_written_runlist_numerically(precompile, dispatch):
     """The load-bearing claim, both ahead-of-time and just-in-time."""
     rng = np.random.default_rng(0)
     x = rng.random(SIZE, dtype=np.float32)
@@ -132,7 +130,7 @@ def test_a_graph_matches_the_hand_written_runlist_numerically(
 
 
 @pytest.mark.supported_devices("npu2")
-def test_a_packed_graph_computes_what_the_temporal_one_does(npu_runtime):
+def test_a_packed_graph_computes_what_the_temporal_one_does():
     """compile(coresident=...) changes which device each step runs in, and
     nothing it computes.
     """
@@ -165,7 +163,7 @@ class TwoExtents(iron.Graph):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_designs_of_one_array_run_on_one_configure(npu_runtime):
+def test_designs_of_one_array_run_on_one_configure():
     rng = np.random.default_rng(0)
     a, b = ((rng.random(SIZE) * 4 - 2).astype(bfloat16) for _ in range(2))
     c, d = ((rng.random(2 * SIZE) * 4 - 2).astype(bfloat16) for _ in range(2))
@@ -202,7 +200,7 @@ class TwoProjections(iron.Graph):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_each_design_of_one_array_runs_on_its_own_values(npu_runtime):
+def test_each_design_of_one_array_runs_on_its_own_values():
     """The second design's cores read its trip count, not the first's.
 
     The cores of a shared device are not reset between its sequences, so a
@@ -240,7 +238,7 @@ class TwoMerges(iron.Graph):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_each_merge_of_one_array_runs_on_its_own_count(npu_runtime):
+def test_each_merge_of_one_array_runs_on_its_own_count():
     rng = np.random.default_rng(0)
     graph = TwoMerges()
     net = graph.compile(image=iron.ELF, ids=((64,), np.int32), more=((192,), np.int32))
@@ -274,7 +272,7 @@ class TwoTables(iron.Graph):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_each_table_of_one_array_runs_on_its_own_sizes(npu_runtime):
+def test_each_table_of_one_array_runs_on_its_own_sizes():
     graph = TwoTables()
     net = graph.compile(image=iron.ELF)
     text = Fusion(net.sequence).text()
@@ -308,7 +306,7 @@ class TwoPositions(iron.Graph):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_each_position_table_of_one_array_runs_on_its_own_rows(npu_runtime):
+def test_each_position_table_of_one_array_runs_on_its_own_rows():
     graph = TwoPositions()
     net = graph.compile(image=iron.ELF)
     text = Fusion(net.sequence).text()
@@ -341,7 +339,7 @@ class TwoResizes(iron.Graph):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_each_resize_of_one_array_runs_on_its_own_sizes(npu_runtime):
+def test_each_resize_of_one_array_runs_on_its_own_sizes():
     graph = TwoResizes()
     taps = [
         ResampleTaps(
@@ -370,7 +368,7 @@ def test_each_resize_of_one_array_runs_on_its_own_sizes(npu_runtime):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_a_chain_of_more_designs_than_a_context_configures_runs(npu_runtime):
+def test_a_chain_of_more_designs_than_a_context_configures_runs():
     """Past the kernels one hardware context configures, the steps' designs
     go into a second xclbin, and every step still runs.
     """

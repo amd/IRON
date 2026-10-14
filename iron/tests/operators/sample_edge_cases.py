@@ -154,7 +154,7 @@ def _logits(kind: str, vocab: int, slice_size: int, chunk: int, rng) -> np.ndarr
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("kwargs", DESIGNS)
-def test_adversarial_logits_draw_the_reference_token(npu_runtime, kwargs):
+def test_adversarial_logits_draw_the_reference_token(kwargs):
     steps = len(ROWS)
     rng = np.random.default_rng(kwargs["vocab"] + kwargs.get("chunk", 0))
     draws = iron.state((steps, 4), np.int32, name="draws")

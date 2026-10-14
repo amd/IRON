@@ -62,7 +62,7 @@ def _cache(net, graph):
 
 
 @pytest.mark.parametrize("image", IMAGES)
-def test_a_sum_written_into_a_state_lands_in_its_slot(image, npu_runtime):
+def test_a_sum_written_into_a_state_lands_in_its_slot(image):
     graph = _Sum()
     net = _compiled(graph, True, image, a=(ROWS,), b=(ROWS,))
     assert [type(s.op) for s in net.traced.steps] == [ElementwiseAdd]
@@ -80,7 +80,7 @@ def test_a_sum_written_into_a_state_lands_in_its_slot(image, npu_runtime):
 
 
 @pytest.mark.parametrize("image", IMAGES)
-def test_a_projection_written_into_a_state_is_the_one_copied(image, npu_runtime):
+def test_a_projection_written_into_a_state_is_the_one_copied(image):
     rng = np.random.default_rng(1)
     w = (rng.standard_normal((ROWS, K)) / np.sqrt(K)).astype(bfloat16)
     graphs = {fold: _Projection(w) for fold in (True, False)}

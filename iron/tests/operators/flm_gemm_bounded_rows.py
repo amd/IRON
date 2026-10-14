@@ -47,9 +47,7 @@ CHUNK = (2048, 1, 15, 512, 2048, 15)
         ),
     ],
 )
-def test_the_units_a_bound_reaches_are_computed(
-    npu_runtime, boundaries, M, K, N, bounds
-):
+def test_the_units_a_bound_reaches_are_computed(boundaries, M, K, N, bounds):
     project = ProjectAsStored().compile(x=(M, K), w=(N, K), boundaries=boundaries)
     op = FLMGEMM(M=M, K=K, N=N, b_col_maj=True)
     tolerance = op.resolved().tolerance()

@@ -34,7 +34,7 @@ pytestmark = [
 ]
 
 
-def test_the_cache_offset_is_applied_per_call(npu_runtime):
+def test_the_cache_offset_is_applied_per_call():
     cache = iron.state((N_KV, SEQ, HEAD_DIM), name="cache")
 
     class Write(iron.Graph):
@@ -66,7 +66,7 @@ def test_the_cache_offset_is_applied_per_call(npu_runtime):
 CHUNK, CHUNKS = 64, 4
 
 
-def test_a_chunk_lands_in_its_rows_of_the_cache(npu_runtime):
+def test_a_chunk_lands_in_its_rows_of_the_cache():
     cache = iron.state((N_KV, CHUNKS * CHUNK, HEAD_DIM), name="cache")
 
     class Write(iron.Graph):
@@ -98,7 +98,7 @@ def test_a_chunk_lands_in_its_rows_of_the_cache(npu_runtime):
 GROUPS, SLOTS, BLOCKS, ROWS, WIDE, KEEP = 3, 4, 2, 1031, 6, 4
 
 
-def test_the_offset_moves_every_piece_of_a_split_pattern(npu_runtime):
+def test_the_offset_moves_every_piece_of_a_split_pattern():
     cache = iron.state((GROUPS, SLOTS, BLOCKS, ROWS, WIDE), name="cache")
 
     class Write(iron.Graph):

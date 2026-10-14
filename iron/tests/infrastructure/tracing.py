@@ -48,7 +48,7 @@ def _layer_norm_run(name, trace):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_dump_writes_raw_words_and_perfetto_json(npu_runtime, tmp_path):
+def test_dump_writes_raw_words_and_perfetto_json(tmp_path):
     run, traced = _layer_norm_run("infra_trace_layer_norm", TraceConfig(8192))
     _, untraced = _layer_norm_run("infra_trace_layer_norm_off", None)
     assert np.array_equal(

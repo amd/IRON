@@ -22,7 +22,7 @@ N = 64
 
 
 @pytest.mark.supported_devices("npu2")
-def test_a_graph_walks_a_linked_list_through_its_carried_values(npu_runtime):
+def test_a_graph_walks_a_linked_list_through_its_carried_values():
     successor = np.random.default_rng(0).permutation(N).astype(np.int32)
     walk = Walk(successor)
     net = walk.compile()

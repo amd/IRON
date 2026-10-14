@@ -76,7 +76,7 @@ def _check(op, blob, expected, label, record=None):
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("K, N", SHAPES)
-def test_matches_reference(K, N, npu_runtime, record_property):
+def test_matches_reference(K, N, record_property):
     """Byte-exact. Every rounding on the device is reproducible on the host, so
     a tolerance would hide a value landing in the wrong block.
     """
@@ -86,7 +86,7 @@ def test_matches_reference(K, N, npu_runtime, record_property):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_output_feeds_gemm_unchanged(npu_runtime):
+def test_output_feeds_gemm_unchanged():
     """The output must equal what GEMM.pack_B produces, which is the contract
     that makes it a drop-in. Comparing against pack_B catches a drift in either
     operator's tiling that a self-consistent reference would not.
@@ -102,7 +102,7 @@ def test_output_feeds_gemm_unchanged(npu_runtime):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_gate_up_interleaved_blob(npu_runtime):
+def test_gate_up_interleaved_blob():
     """Gate and up share one blob at 512 out-features in a 1024 period."""
     K, N, run, period = 1024, 1024, 512, 1024
     qw = random_q4nx(K, N, seed=12)
@@ -128,7 +128,7 @@ def test_gate_up_interleaved_blob(npu_runtime):
         pytest.param(12288, 1536, marks=pytest.mark.extensive),
     ],
 )
-def test_large_k_shapes(K, N, npu_runtime, record_property):
+def test_large_k_shapes(K, N, record_property):
     """E2B's tall projections, whose k-tiles outnumber a shim tile's buffer
     descriptors. K = 12288 is 24 k-tiles, the deepest E2B reaches.
     """
@@ -147,7 +147,7 @@ def test_large_k_shapes(K, N, npu_runtime, record_property):
         (2560, 10240),  # gate/up
     ],
 )
-def test_e4b_shapes(K, N, npu_runtime):
+def test_e4b_shapes(K, N):
     """E4B's projections, as B is (K, N). These are the shapes flm.GEMM's own
     extensive set covers, so the two operators are exercised on the same model.
     """
@@ -158,7 +158,7 @@ def test_e4b_shapes(K, N, npu_runtime):
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.extensive
-def test_e4b_gate_up_interleaved(npu_runtime):
+def test_e4b_gate_up_interleaved():
     """E4B's gate/up blob: 5120 out-features each in a 10240 period."""
     K, N, run, period = 2560, 10240, 5120, 10240
     qw = random_q4nx(K, N, seed=34)
@@ -175,7 +175,7 @@ def test_e4b_gate_up_interleaved(npu_runtime):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_one_xclbin_serves_every_shape(npu_runtime):
+def test_one_xclbin_serves_every_shape():
     """Several shapes and parameter sets back to back on one loaded xclbin.
 
     A model dispatches ten weight shapes against a budget of 16 hardware

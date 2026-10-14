@@ -26,7 +26,7 @@ ATOL = 4e-6
 
 
 @pytest.fixture(scope="module")
-def log_mel(module_npu_runtime):
+def log_mel():
     graph = LogMel()
     graph.compile(wave=(((FRAMES + 1) * graph.hop,), np.float32))
     yield graph

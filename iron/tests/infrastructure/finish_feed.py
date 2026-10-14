@@ -18,10 +18,7 @@ from iron.common.harness import run_test, vectors
 from iron.lm.blocks import SwiGLU
 from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, SiLU
 
-pytestmark = [
-    pytest.mark.usefixtures("npu_runtime"),
-    pytest.mark.supported_devices("npu2"),
-]
+pytestmark = pytest.mark.supported_devices("npu2")
 
 
 class Residual(iron.Graph):

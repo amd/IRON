@@ -109,7 +109,7 @@ def _fed(run):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_feedback_into_plain_buffers(npu_runtime):
+def test_feedback_into_plain_buffers():
     """Unbound, the argument is the callable's own buffer; bound, the caller's."""
     table, successor = _chain_table()
     seq, gather = _feedback_sequence("infra_feedback_plain")
@@ -138,7 +138,7 @@ def test_feedback_into_plain_buffers(npu_runtime):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_feedback_ping_pong(npu_runtime):
+def test_feedback_ping_pong():
     """Two runs feeding each other, dispatched one at a time: the host seeds
     the first run once, and every later offset comes from the device.
     """
@@ -161,7 +161,7 @@ def test_feedback_ping_pong(npu_runtime):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_feedback_chain_queued(npu_runtime):
+def test_feedback_chain_queued():
     """Every run started before any is waited on: each reads the offset the
     one before it drained, with no host step between them.
     """
@@ -190,7 +190,7 @@ def test_feedback_chain_queued(npu_runtime):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_feedback_with_trace(npu_runtime):
+def test_feedback_with_trace():
     """The trace argument moves after the feedback one, and both still work."""
     layer_norm = LayerNorm(
         rows=1,

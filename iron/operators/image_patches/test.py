@@ -22,7 +22,7 @@ IMAGES = {
 
 
 @pytest.fixture(scope="module")
-def patches(module_npu_runtime):
+def patches():
     graph = ImagePatches(2560, (480, 640))
     graph.compile(rgb=((graph.resample.image_chunks, graph.chunk), np.uint8))
     yield graph

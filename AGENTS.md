@@ -300,8 +300,10 @@ no xchesscc path, and a kernel that needs one asks the `aie.iron.kernels`
 factory for it (`use_chess=True`) rather than IRON carrying a global flag.
 
 **Runtime**: `aie.utils.DefaultNPURuntime` loads an image and runs it,
-shared across operators. A test that ran on hardware takes the
-`npu_runtime` fixture, which releases it afterwards.
+shared across operators. A device test is one marked
+`@pytest.mark.supported_devices(...)`; conftest.py releases the runtime
+after it (`aie.utils.cleanup_npu_runtime()`), or after its module's last
+test when a module- or class-scoped fixture may hold an image its tests share.
 
 ## Hardware Constraints
 
@@ -714,6 +716,10 @@ run = run_test(op, vectors(op), tolerance=Tolerance.relative(0.04, 1e-6))
 
 `op.judge()` holds a step's buffers to its reference the same way, for
 tests that dispatch by hand, and `verify_buffer()` a single buffer.
+
+A test that dispatches is marked `@pytest.mark.supported_devices("npu1",
+"npu2")`, and nothing else: the mark skips it where no listed NPU is, and
+conftest.py releases the runtime after it.
 
 ### bfloat16 and runtime tensors
 

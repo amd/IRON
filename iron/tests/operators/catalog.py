@@ -23,13 +23,6 @@ from iron.common.testing import Case, Testing
 from iron.tests.common.declared import declared
 
 DEVICE = aie_utils.get_current_device()
-if DEVICE is None:
-    # Every case is sized from the device's width, so there is nothing to
-    # parametrize over without one.
-    pytest.skip(
-        "the operator cases are sized from the bound device; none is bound",
-        allow_module_level=True,
-    )
 
 
 def _declared():
@@ -46,13 +39,16 @@ def _declared():
                 *([pytest.mark.skip(reason=unresolvable)] if unresolvable else []),
             ],
         )
-        for name, cls, case, unresolvable in declared(DEVICE)
+        for name, cls, case, unresolvable in (
+            declared(DEVICE) if DEVICE is not None else []
+        )
     ]
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("cls,declaration,case", _declared())
 def test_operator(
-    cls: type[Operator], declaration: Testing, case: Case, npu_runtime, record_property
+    cls: type[Operator], declaration: Testing, case: Case, record_property
 ):
     op = cls(**case.kwargs).resolved(DEVICE)
     draw = declaration.draw

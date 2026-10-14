@@ -29,7 +29,7 @@ SHAPES = {
 
 
 @pytest.fixture(scope="module", params=list(SHAPES))
-def case(request, module_npu_runtime):
+def case(request):
     (out, channels_per_group), rows, width, kwargs = SHAPES[request.param]
     in_channels = kwargs.get("groups", channels_per_group)
     rng = np.random.default_rng(0)

@@ -19,7 +19,7 @@ class Ids(iron.Graph):
 
 
 @pytest.mark.supported_devices("npu2")
-def test_repeats_on_buffers_off_the_coherence_line_are_read_back(npu_runtime):
+def test_repeats_on_buffers_off_the_coherence_line_are_read_back():
     # 15 ids are 60 bytes: slot 0's end inside a 64-byte line slot 1's share.
     op = Ids().trace(ids=((15,), np.int32)).steps[0].op
     alone = Standalone("probe_ids15x2", [op, op], distinct=True)

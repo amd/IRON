@@ -18,7 +18,7 @@ ROWS, WIDTH = 13, 13
 
 
 @pytest.mark.parametrize("channels", [(128, 128), (64, 32, 64), (4, 4, 4, 4)])
-def test_concat_channels(channels, module_npu_runtime):
+def test_concat_channels(channels):
     rng = np.random.default_rng(0)
     xs = [rng.standard_normal((ROWS, WIDTH * c)).astype(bfloat16) for c in channels]
     cat = ConcatChannels(rows=ROWS, width=WIDTH, channels=channels)

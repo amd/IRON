@@ -87,7 +87,7 @@ def test_the_stream_is_generated_per_call():
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_one_image_serves_every_parameter(npu_runtime):
+def test_one_image_serves_every_parameter():
     """Each n must copy exactly n chunks: a stream generated for another n
     leaves a different number of sentinels behind.
     """
@@ -101,7 +101,7 @@ def test_one_image_serves_every_parameter(npu_runtime):
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_refuses_an_n_past_the_buffers(npu_runtime):
+def test_refuses_an_n_past_the_buffers():
     image = OperatorImage(ChunkCopy(max_chunks=MAX_CHUNKS))
     with pytest.raises(HostRuntimeError, match=f"n exceeds {MAX_CHUNKS}"):
         image(*_buffers(), n=MAX_CHUNKS + 1)
@@ -116,7 +116,7 @@ def test_refuses_an_n_past_the_buffers(npu_runtime):
         ({"n": 1, "m": 1}, TypeError, r"unexpected keyword argument\(s\): \['m'\]"),
     ],
 )
-def test_a_call_takes_exactly_the_declared_scalars(scalars, error, match, npu_runtime):
+def test_a_call_takes_exactly_the_declared_scalars(scalars, error, match):
     image = OperatorImage(ChunkCopy(max_chunks=MAX_CHUNKS))
     with pytest.raises(error, match=match):
         image(*_buffers(), **scalars)

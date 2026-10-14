@@ -42,7 +42,7 @@ pytestmark = [
     "boundaries", [None, iron.each_step], ids=["full_elf", "xclbin"]
 )
 @pytest.mark.parametrize("mode", MODES)
-def test_the_reduction_stops_at_the_per_call_length(npu_runtime, mode, boundaries):
+def test_the_reduction_stops_at_the_per_call_length(mode, boundaries):
     """A and B are NaN past ``n``: a column or row past the bound that were
     multiplied, in the last K tile or past it, would bring a NaN into every
     element. Each micro-tile layout the cores zero it in is covered: A's,
@@ -80,7 +80,7 @@ def test_the_reduction_stops_at_the_per_call_length(npu_runtime, mode, boundarie
         assert verdict, f"n={n}: {verdict.detail}"
 
 
-def test_attention_reduces_over_the_valid_keys(npu_runtime):
+def test_attention_reduces_over_the_valid_keys():
     """The Softmax writes only the blocks ``n`` covers, so the calls run
     long before short: a block a longer call wrote holds its weights, and a
     GEMM that reduced over it would add them in. ``v`` is NaN past ``n``,

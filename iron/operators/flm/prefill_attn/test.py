@@ -136,9 +136,7 @@ BENCH = {("attn", 0, 512, 1024, 1), ("swa", 512, 1024, 2048, 1)}
         for r in ranges
     ],
 )
-def test_matches_reference(
-    kind, L_begin, L_end, max_l, num_kv_heads, npu_runtime, record_property
-):
+def test_matches_reference(kind, L_begin, L_end, max_l, num_kv_heads, record_property):
     op = _build(kind, num_kv_heads=num_kv_heads)
     _check(
         op, OperatorImage(op), L_begin, L_end, max_l, seed=L_end, record=record_property
@@ -146,7 +144,7 @@ def test_matches_reference(
 
 
 @pytest.mark.parametrize("kind", OPERATORS)
-def test_one_image_serves_every_range(kind, npu_runtime):
+def test_one_image_serves_every_range(kind):
     """Check that each dispatch runs its own token range.
 
     The ranges run back to back on one loaded xclbin: growing, shrinking and
@@ -170,7 +168,7 @@ def test_one_image_serves_every_range(kind, npu_runtime):
         (0, 512, 256, "slice stop exceeds the dimension"),
     ],
 )
-def test_refuses_unservable_ranges(L_begin, L_end, max_l, match, npu_runtime):
+def test_refuses_unservable_ranges(L_begin, L_end, max_l, match):
     """The dispatch checks the token range before the array runs."""
     op = _build("attn", num_kv_heads=1)
     tensor = aie_utils.DEFAULT_TENSOR_CLASS
@@ -184,7 +182,7 @@ def test_refuses_unservable_ranges(L_begin, L_end, max_l, match, npu_runtime):
 @pytest.mark.extensive
 @pytest.mark.parametrize("num_kv_heads", [1, 2])
 @pytest.mark.parametrize("kind", OPERATORS)
-def test_gemma4_cache_bound(kind, num_kv_heads, npu_runtime):
+def test_gemma4_cache_bound(kind, num_kv_heads):
     """Check the cache bound of Gemma 4's engine: 32768 rows."""
     op = _build(kind, num_kv_heads=num_kv_heads, max_context=32768)
     image = OperatorImage(op)

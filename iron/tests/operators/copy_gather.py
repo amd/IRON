@@ -152,7 +152,7 @@ def table():
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("n_ids", [256, 512])
-def test_rows_of_a_weight_are_gathered(npu_runtime, table, n_ids):
+def test_rows_of_a_weight_are_gathered(table, n_ids):
     ids = gathered_ids(VOCAB, n_ids)
     graph = FromWeight(table, ids)
     net = graph.compile(x=(n_ids, WIDTH))
@@ -167,7 +167,7 @@ def test_rows_of_a_weight_are_gathered(npu_runtime, table, n_ids):
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("n_ids", [256, 512])
-def test_rows_of_an_intermediate_are_gathered(npu_runtime, n_ids):
+def test_rows_of_an_intermediate_are_gathered(n_ids):
     n_rows = 4096
     ids = gathered_ids(n_rows, n_ids)
     table = np.random.default_rng(2).standard_normal((n_rows, WIDTH)).astype(bfloat16)
@@ -182,7 +182,7 @@ FEEDS = [(None, 15), (None, 256), (1, 71), (4, 71), (1, 512), (4, 512)]
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("feeds,n_ids", FEEDS)
-def test_rows_each_call_names_are_gathered(npu_runtime, table, feeds, n_ids):
+def test_rows_each_call_names_are_gathered(table, feeds, n_ids):
     graph = PerCall(table, feeds)
     net = graph.compile(ids=((n_ids,), np.int32))
     assert net.plan.image == "elf"
@@ -199,7 +199,7 @@ def test_rows_each_call_names_are_gathered(npu_runtime, table, feeds, n_ids):
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("feeds,n_ids", FEEDS)
-def test_the_rows_a_call_bounds_are_gathered(npu_runtime, table, feeds, n_ids):
+def test_the_rows_a_call_bounds_are_gathered(table, feeds, n_ids):
     graph = Bounded(table, feeds)
     net = graph.compile(ids=((n_ids,), np.int32))
     assert net.plan.image == "elf"
@@ -215,7 +215,7 @@ def test_the_rows_a_call_bounds_are_gathered(npu_runtime, table, feeds, n_ids):
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("feeds,n_ids", [(None, 1), *FEEDS])
-def test_rows_ids_the_device_made_name_are_gathered(npu_runtime, table, feeds, n_ids):
+def test_rows_ids_the_device_made_name_are_gathered(table, feeds, n_ids):
     other = np.random.default_rng(4).standard_normal((3000, 256)).astype(bfloat16)
     graph = FromDeviceIds(table, other, feeds)
     net = graph.compile(ids=((n_ids,), np.int32))
@@ -239,9 +239,7 @@ def test_rows_ids_the_device_made_name_are_gathered(npu_runtime, table, feeds, n
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("n_ids", [1, 15, 71])
-def test_a_static_table_s_address_is_an_ordinary_resident_operand(
-    npu_runtime, table, n_ids
-):
+def test_a_static_table_s_address_is_an_ordinary_resident_operand(table, n_ids):
     """``static_base=True``: the table's address costs no scratchpad entry.
 
     GatherWords's base_lo/base_hi otherwise cost one full-ELF scratchpad
@@ -270,7 +268,7 @@ def test_a_static_table_s_address_is_an_ordinary_resident_operand(
 
 
 @pytest.mark.supported_devices("npu2")
-def test_packed_word_steps_of_one_array_each_read_their_own_table(npu_runtime):
+def test_packed_word_steps_of_one_array_each_read_their_own_table():
     """Both tables' word steps run on one configure, the second reading its
     own table's address, not the first's.
     """
@@ -292,7 +290,7 @@ def test_packed_word_steps_of_one_array_each_read_their_own_table(npu_runtime):
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("n_ids", [1, 256])
-def test_rows_a_state_names_are_gathered(npu_runtime, table, n_ids):
+def test_rows_a_state_names_are_gathered(table, n_ids):
     graph = FromState(table, n_ids)
     net = graph.compile()
     rng = np.random.default_rng(n_ids)
@@ -306,7 +304,7 @@ def test_rows_a_state_names_are_gathered(npu_runtime, table, n_ids):
 @pytest.mark.parametrize(
     "boundaries", [None, iron.each_step], ids=["full_elf", "xclbin"]
 )
-def test_a_graph_gathers_twice_from_a_weight_and_a_state(npu_runtime, boundaries):
+def test_a_graph_gathers_twice_from_a_weight_and_a_state(boundaries):
     n_rows, rows, soft = 4096, 64, 64
     rng = np.random.default_rng(3)
     table = rng.standard_normal((n_rows, WIDTH)).astype(bfloat16)
@@ -332,7 +330,7 @@ def test_a_graph_gathers_twice_from_a_weight_and_a_state(npu_runtime, boundaries
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("outside", [VOCAB, -VOCAB - 1])
-def test_ids_past_the_table_are_refused(npu_runtime, table, outside):
+def test_ids_past_the_table_are_refused(table, outside):
     graph = PerCall(table)
     ids = np.arange(15, dtype=np.int32)
     ids[7] = outside
@@ -343,7 +341,7 @@ def test_ids_past_the_table_are_refused(npu_runtime, table, outside):
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-def test_each_step_gathers_the_rows_an_input_names(npu_runtime, table):
+def test_each_step_gathers_the_rows_an_input_names(table):
     """Each step its own xclbin, as NPU1 runs: the host encodes the ids
     against the table's address as a full ELF's do, and the step after reads
     the rows.
@@ -366,7 +364,7 @@ def test_each_step_gathers_the_rows_an_input_names(npu_runtime, table):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("n_ids", [15, 256])
-def test_each_step_gathers_the_rows_a_call_bounds(npu_runtime, table, n_ids):
+def test_each_step_gathers_the_rows_a_call_bounds(table, n_ids):
     """Each step its own xclbin, as NPU1 runs a prompt chunk's embedding
     rows: the first ``n`` rows a call's ids name, the drains' lengths
     generated per call.
@@ -386,7 +384,7 @@ def test_each_step_gathers_the_rows_a_call_bounds(npu_runtime, table, n_ids):
 
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("n_ids", [15, 512])
-def test_each_step_gathers_by_ids_the_device_made(npu_runtime, table, n_ids):
+def test_each_step_gathers_by_ids_the_device_made(table, n_ids):
     """An xclbin's word step reads the table's address from its runtime
     parameters, which the sequence writes each call.
     """

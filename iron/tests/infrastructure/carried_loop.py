@@ -34,7 +34,7 @@ def _expected(successor, start):
 
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("depth", [1, 2, 3])
-def test_a_carried_loop_walks_a_linked_list_on_the_device(npu_runtime, depth):
+def test_a_carried_loop_walks_a_linked_list_on_the_device(depth):
     rng = np.random.default_rng(depth)
     successor = rng.permutation(N).astype(np.int32)
     jump = rng.permutation(N).astype(np.int32)

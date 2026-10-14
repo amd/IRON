@@ -29,7 +29,7 @@ pytestmark = [
 ]
 
 
-def test_every_row_of_a_bound_is_computed(npu_runtime):
+def test_every_row_of_a_bound_is_computed():
     class Step(iron.Graph):
         def body(self, x, y, *, p: Scratchpad[np.int32]):
             return RMSNorm(ElementwiseAdd(x[: p + 1], y[: p + 1]))
@@ -54,7 +54,7 @@ def test_every_row_of_a_bound_is_computed(npu_runtime):
         assert verdict, f"{p=}: the valid rows differ: {verdict.detail}"
 
 
-def test_a_bound_past_a_wrap_of_tiles_per_lane(npu_runtime):
+def test_a_bound_past_a_wrap_of_tiles_per_lane():
     class Step(iron.Graph):
         def body(self, x, y, *, n: Scratchpad[np.int32]):
             return ElementwiseAdd(x[:n], y[:n])

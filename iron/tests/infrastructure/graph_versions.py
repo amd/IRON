@@ -30,10 +30,7 @@ E = 1024
 TILE = 128
 
 
-pytestmark = [
-    pytest.mark.usefixtures("npu_runtime"),
-    pytest.mark.supported_devices("npu1", "npu2"),
-]
+pytestmark = pytest.mark.supported_devices("npu1", "npu2")
 
 
 def _numbers(n, seed):

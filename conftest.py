@@ -18,29 +18,6 @@ from aie.utils.probe import npu_unavailable_reason
 from aie.utils.trace import TraceConfig
 
 
-@pytest.fixture
-def npu_runtime():
-    """Release the loaded NPU runtime after a test that ran on hardware.
-
-    ``DefaultNPURuntime`` is None until something loads an image, so a test
-    that only compiled has nothing to release, and must not be reported as
-    an error for it.
-    """
-    yield
-    if aie_utils.DefaultNPURuntime is not None:
-        aie_utils.DefaultNPURuntime.cleanup()
-
-
-@pytest.fixture(scope="module")
-def module_npu_runtime():
-    """``npu_runtime`` for a module-scoped fixture: the runtime is released
-    after the module's last test.
-    """
-    yield
-    if aie_utils.DefaultNPURuntime is not None:
-        aie_utils.DefaultNPURuntime.cleanup()
-
-
 def _bound_device(name: str, n_cols: int):
     """A fixture binding an ``n_cols``-column ``name`` NPU as the current
     device, the previous one restored after: what a test that resolves or
@@ -301,14 +278,38 @@ def pytest_sessionfinish(session, exitstatus):
 def pytest_generate_tests(metafunc):
     """Repeat each device test ``--iterations`` times for statistics.
 
-    A test that measures takes the ``npu_runtime`` fixture; the rest of the
-    tree runs once, since a repeat of a device-free test records nothing.
+    A device test is one marked ``supported_devices``; the rest of the tree
+    runs once, since a repeat of a device-free test records nothing.
     """
     iterations = metafunc.config.getoption("--iterations")
 
-    if iterations > 1 and "npu_runtime" in metafunc.fixturenames:
+    marked = metafunc.definition.get_closest_marker("supported_devices")
+    if iterations > 1 and marked is not None:
         metafunc.fixturenames.append("_iteration")
         metafunc.parametrize("_iteration", range(iterations), ids=lambda i: f"iter{i}")
+
+
+SHARING_MODULES = pytest.StashKey[set]()
+
+
+def pytest_fixture_setup(fixturedef, request):
+    if fixturedef.scope in ("class", "module"):
+        request.config.stash.setdefault(SHARING_MODULES, set()).add(request.module)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    """Release the NPU runtime after a device test, or, in a module whose
+    class- or module-scoped fixtures may hold an image its tests share, after
+    its last.
+    """
+    try:
+        return (yield)
+    finally:
+        shared = item.module in item.config.stash.get(SHARING_MODULES, set())
+        last = nextitem is None or nextitem.module is not item.module
+        if item.get_closest_marker("supported_devices") and (last or not shared):
+            aie_utils.cleanup_npu_runtime()
 
 
 def pytest_make_parametrize_id(config, val, argname):

@@ -64,7 +64,7 @@ from iron.operators.softmax import Softmax
     ],
 )
 def test_rows_are_masked_to_the_per_call_length(
-    npu_runtime, boundaries, rows, seq, block, positions
+    boundaries, rows, seq, block, positions
 ):
     class Attend(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):

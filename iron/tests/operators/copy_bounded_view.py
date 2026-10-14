@@ -24,7 +24,7 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 
 @pytest.mark.supported_devices("npu2")
-def test_a_copy_moves_the_valid_rows_of_each_head(npu_runtime):
+def test_a_copy_moves_the_valid_rows_of_each_head():
     cache = iron.state((H, T, D), name="cache")
 
     class ByHead(iron.Graph):

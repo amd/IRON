@@ -26,7 +26,7 @@ SHAPES = {
 
 
 @pytest.fixture(scope="module", params=list(SHAPES))
-def case(request, module_npu_runtime):
+def case(request):
     (out, channels), kernel, stride, rows = SHAPES[request.param]
     rng = np.random.default_rng(0)
     weight = (rng.standard_normal((out, channels, kernel)) * 0.1).astype(bfloat16)
