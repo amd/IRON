@@ -340,10 +340,14 @@ class GEMM(Operator):
         m_chunk = M_CHUNK_FOR_N[tile_n] if self.m_chunk is None else self.m_chunk
         l1 = l1_budget(dev, self.epilogue_modes)
         if self.tile_ma is None:
-            tile_ma, l1_b_depth = _default_l1(tile_n, ct_k, b_elem_bytes, l1, m_chunk)
+            tile_ma, l1_b_depth = _default_l1(
+                tile_n, ct_k, b_elem_bytes, l1, m_chunk, self.k_tile
+            )
         else:
             tile_ma = self.tile_ma
-            l1_b_depth = _b_depth_for(tile_ma, tile_n, ct_k, b_elem_bytes, l1, m_chunk)
+            l1_b_depth = _b_depth_for(
+                tile_ma, tile_n, ct_k, b_elem_bytes, l1, m_chunk, self.k_tile
+            )
         b_dtype = v8bfp16ebs8 if bfp16_b else bfloat16
         return dataclasses.replace(
             self,

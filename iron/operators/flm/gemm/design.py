@@ -245,12 +245,14 @@ def _b_bytes(elems, bfp16_b):
     return elems // bfp.BLOCK * bfp.BLOCK_BYTES
 
 
-def _default_l1(n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1):
+def _default_l1(n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1, k_tile=K_TILE):
     """Pick the largest working set that fits: (A-tile height, L1 B depth).
 
     Deeper B first, then the tallest A that still fits, since colA is worth
     far more than B's L1 prefetch. ``budget`` is the whole local memory; the
-    stack comes off it here so callers can keep passing the raw size.
+    stack comes off it here so callers can keep passing the raw size. A depth
+    divides the ``k_tile // ct_max_k`` B chunks a k step consumes, since the
+    core walks the ring that many at a time.
     """
     budget -= STACK_SIZE
     # m_chunk accumulators, since the core holds a B chunk across that many
@@ -258,6 +260,8 @@ def _default_l1(n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1):
     acc = m_chunk * M_TILE * n_tile * 4
     cout = CT_OUT_LEN * 2 * C_DEPTH
     for b_depth in (B_DEPTH, 1):
+        if (k_tile // ct_max_k) % b_depth:
+            continue
         b = int(ct_max_k * n_tile * b_elem_bytes) * b_depth
         for t_ma in (M_TILE, M_TILE // 2, M_TILE // 4):
             if t_ma < 2 * R:
@@ -268,8 +272,11 @@ def _default_l1(n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1):
     raise ValueError(f"nothing fits L1 for tile_n={n_tile}, ct_max_k={ct_max_k}")
 
 
-def _b_depth_for(t_ma, n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1):
-    """Deepest B fifo depth that fits L1 alongside an explicit A-tile height.
+def _b_depth_for(
+    t_ma, n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1, k_tile=K_TILE
+):
+    """Deepest B fifo depth that fits L1 alongside an explicit A-tile height,
+    and divides the ``k_tile // ct_max_k`` B chunks a k step consumes.
 
     ``_default_l1``'s depth is chosen with its own t_ma, which need not fit a
     caller-overridden one. Raise rather than reuse a depth that does not fit.
@@ -280,6 +287,8 @@ def _b_depth_for(t_ma, n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1):
     cout = CT_OUT_LEN * 2 * C_DEPTH
     a = (2 * R * ct_max_k) * (t_ma // R // 2) * 2 * A_DEPTH
     for b_depth in (B_DEPTH, 1):
+        if (k_tile // ct_max_k) % b_depth:
+            continue
         b = int(ct_max_k * n_tile * b_elem_bytes) * b_depth
         if acc + a + b + cout <= budget:
             return b_depth

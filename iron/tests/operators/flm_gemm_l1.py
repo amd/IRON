@@ -56,6 +56,16 @@ def test_explicit_aie2_tile_falls_back_to_single_buffered_b():
         _b_depth_for(64, 64, 128, 2, l1_budget(NPU1, ACTIVATED))
 
 
+@pytest.mark.parametrize("chunks", [1, 3])
+@pytest.mark.parametrize("tile_n", CT_MAX_K_FOR_N)
+def test_b_ring_divides_the_chunks_a_k_step_consumes(tile_n, chunks):
+    ct_k = CT_MAX_K_FOR_N[tile_n]
+    budget = l1_budget(from_name("npu2", n_cols=8), ACTIVATED)
+    _, b_depth = _default_l1(tile_n, ct_k, 2, budget, k_tile=chunks * ct_k)
+    assert b_depth == 1
+    assert _b_depth_for(16, tile_n, ct_k, 2, budget, k_tile=chunks * ct_k) == 1
+
+
 @pytest.mark.parametrize("tile_n", CT_MAX_K_FOR_N)
 @pytest.mark.parametrize("tile_ma", [16, 32, 64])
 @pytest.mark.parametrize("m_chunk", [1, 2])

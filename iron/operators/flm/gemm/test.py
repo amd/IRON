@@ -10,6 +10,7 @@ import pytest
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.utils.verify import Tolerance
 from aie.utils import bfp
+from ml_dtypes import bfloat16
 
 from iron.common.design.build import build_design
 from iron.common.harness import run_test, vectors
@@ -420,6 +421,43 @@ def test_gemm_k_tile(K, npu_runtime):
     operator = GEMM(M=256, K=K, N=64 * dev.cols, tile_n=64, k_tile=256)
     errors = check_on_device(operator, flm_vectors(operator, INPUT_SCALE)).errors
     assert not errors, "Test failed"
+
+
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize("emulate", [None, False], ids=["default_macs", "bf16_macs"])
+@pytest.mark.parametrize(
+    "K,tile_n,k_tile", [(512, 64, 128), (16, 16, 16), (64, 32, 64), (96, 32, 96)]
+)
+def test_gemm_k_tile_of_few_chunks(K, tile_n, k_tile, emulate, npu_runtime):
+    """A k step of one B chunk (k_tile the compute tile's k slice), or of an
+    odd number of them, walks every chunk: small integers, exact in bfp16
+    and bf16 and in every sum, give the product exactly. check_on_device's
+    bound, a fraction of the accumulated mass, is fitted at K of 256 and
+    more; bfp16's error shrinks against the mass only as sqrt(K). Both the
+    device's default macs and bf16 macs (a small CNN's 1x1 convolutions).
+    """
+    dev = aie_utils.get_current_device()
+    assert dev is not None
+    N = tile_n * dev.cols
+    operator = GEMM(
+        M=256,
+        K=K,
+        N=N,
+        tile_n=tile_n,
+        k_tile=k_tile,
+        emulate_bf16_mmul_with_bfp16=emulate,
+    )
+    rng = np.random.default_rng(0)
+    A = rng.integers(-3, 4, (256, K)).astype(bfloat16)
+    B = rng.integers(0, 4, (K, N)).astype(bfloat16)
+    C = (A.astype(np.float32) @ B.astype(np.float32)).astype(bfloat16)
+    errors = run_test(
+        operator,
+        {"A": A.flatten(), "B": operator.pack_B(B)},
+        {"C": C.flatten()},
+        tolerance=Tolerance.exact(note="integers, exact in every sum"),
+    ).errors
+    assert not errors, errors
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
