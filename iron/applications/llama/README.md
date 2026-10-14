@@ -17,8 +17,9 @@ SwiGLU block), `iron/applications/llama/`:
   shape, where its checkpoint keeps each weight, its tokenizer, and the
   command line below
 - [`profiles/`](profiles): its tunables, one file per device
-- [`tune.py`](tune.py): measures the cost table its designs can be
-  narrowed and packed by
+
+`python -m iron.lm.tune llama` measures the cost table its designs can be
+narrowed and packed by (below).
 
 ## Weights and tokenizer
 
@@ -101,7 +102,7 @@ by what each design costs on the device
 the NPU it is used on.
 
 ```bash
-python -m iron.applications.llama.tune
+python -m iron.lm.tune llama
 python -m iron.applications.llama.model /path/to/model.safetensors /path/to/tokenizer.model \
     --cost-table iron/applications/llama/costs_npu2.json
 ```

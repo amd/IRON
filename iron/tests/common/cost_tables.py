@@ -14,11 +14,11 @@ import pytest
 from aie.iron.device import from_name
 
 import iron
+from iron.applications.llama import model as llama_model
 from iron.common.graph import tune as graph_tune
 from iron.common.graph.narrowing import CostTable
 from iron.common.graph.probe import Designs
 from iron.lm import SEED, Sampler
-from iron.applications.llama import tune as llama_tune
 from iron.lm.tune import CALIBRATION_TRIANGLE, calls, contexts
 from iron.tests.common.llama_model import llama_1b
 
@@ -34,7 +34,7 @@ def test_a_checked_in_table_loads_every_entry_it_holds(path):
 
 
 @pytest.mark.parametrize(
-    "path", sorted(Path(llama_tune.__file__).parent.glob("costs_npu2*.json")), ids=str
+    "path", sorted(Path(llama_model.__file__).parent.glob("costs_npu2*.json")), ids=str
 )
 def test_llamas_table_holds_every_design_it_tunes(npu2, path):
     sample = Sampler(0.7, 50, np.random.default_rng(SEED))
@@ -62,7 +62,7 @@ def test_llamas_table_holds_every_design_it_tunes(npu2, path):
             + (f", moved to {moved}" if moved else ", its default")
         )
     assert not stale and not missing, (
-        f"{table.path} is out of date; run `python -m iron.applications.llama.tune "
+        f"{table.path} is out of date; run `python -m iron.lm.tune llama "
         f"--dispatch {table.dispatch}` on an idle NPU2. {len(missing)} to measure:\n"
         + "\n".join(unmeasured)
         + f"\n{len(stale)} the graph no longer has: {stale}"

@@ -3,12 +3,13 @@
 
 """Measuring costs on this NPU from the command line.
 
-A graph's cost table is filled by a module of its own (``iron.applications.llama.tune``):
-it takes ``parser``, adds the arguments its calls follow from, builds each
-version's calls (``probe.Call.admitted``) and passes them to ``measure``
-with the directory its tables are in: one per device, ``costs_<device>.json``
-for the packaging the device runs, ``costs_<device>_<dispatch>.json`` for
-another.
+A graph's cost table is filled by a module built on this one: it takes
+``parser``, adds the arguments its calls follow from, builds each version's
+calls (``probe.Call.admitted``) and passes them to ``measure`` with the
+directory its tables are in: one per device, ``costs_<device>.json`` for
+the packaging the device runs, ``costs_<device>_<dispatch>.json`` for
+another. A CausalLM model's is ``iron.lm.tune`` (``python -m iron.lm.tune
+<application>``).
 
 One operator is measured at every setting it tunes to by this module's own
 command line, its fields as a profile entry names them:

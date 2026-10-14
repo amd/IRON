@@ -1,22 +1,31 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Measure the cost table a model's versions are tuned by, on this NPU.
+"""Measure the cost table a model's versions are tuned by, on this NPU:
 
-``--cost-table TABLE`` on a model's command line (``main``)
-folds the steps of the decode step and the prompt chunk into their
-producers, narrows their designs and packs them into shared device
-configurations by what each costs on the device (``JointNarrowing``). A
-table holds every design's step time at each width it tunes to, and the
-configure cost measured between a few pairs of designs. It is keyed by
-each design's identity -- its fields -- so a design that has changed since
-is not in it, and the tuner leaves that design as the profile gives it,
-unfolded. ``main`` fills one for both versions as the graph is now
-(``calls``): every design, each setting, as traced and with each fold it admits.
-Designs already in the table are kept unless ``--remeasure``; entries for
-designs the graph no longer has are dropped. A design another graph has
-had measured on this NPU is taken from the cost cache
-(``iron.common.graph.costcache``) rather than run again.
+```bash
+python -m iron.lm.tune llama
+python -m iron.lm.tune llama --dispatch separate
+```
+
+``<application>`` (``application_runner``), dotted under
+``iron.applications`` (a tower names its own sub-package, e.g.
+``embedding_gemma2.audio``), is read for a ``Runner`` in its ``model``
+module; the table lands beside it, ``costs_<device>.json``.
+
+``--cost-table TABLE`` on a model's own command line folds the steps of the
+decode step and the prompt chunk into their producers, narrows their
+designs and packs them into shared device configurations by what each
+costs on the device (``JointNarrowing``). A table holds every design's step
+time at each width it tunes to, and the configure cost measured between a
+few pairs of designs. It is keyed by each design's identity -- its fields
+-- so a design that has changed since is not in it, and the tuner leaves
+that design as the profile gives it, unfolded. ``main`` fills one for both
+versions as the graph is now (``calls``): every design, each setting, as
+traced and with each fold it admits. Designs already in the table are kept
+unless ``--remeasure``; entries for designs the graph no longer has are
+dropped. A design another graph has had measured on this NPU is taken from
+the cost cache (``iron.common.graph.costcache``) rather than run again.
 
 A design whose work a per-call value changes (attention over the cache,
 by the position) is also measured at a ladder of contexts up to
@@ -25,10 +34,12 @@ contexts a generation of that length runs at equally often.
 
 A design's time follows its shapes, per-call values and Sample's draw
 rows, not the weights, so no checkpoint is read: the model is built on
-weights it never touches. A model's ``tune`` module calls ``main`` with
-its runner; run it with XRT sourced and the NPU otherwise idle.
+weights it never touches. Run with XRT sourced and the NPU otherwise idle.
 """
 
+import argparse
+import importlib
+from collections.abc import Sequence
 from pathlib import Path
 
 import aie.utils as aie_utils
@@ -114,12 +125,35 @@ def calls(
     return out
 
 
-def main(runner: type[Runner], description: str, tables: Path) -> None:
-    """The command line that measures ``runner``'s model's cost table in
-    ``tables`` (``graph_tune.table``): its ``calls``, and the configure cost
-    between each pair of ``CALIBRATION_TRIANGLE``.
+def application_runner(name: str) -> tuple[type[Runner], Path]:
+    """``name``'s ``Runner``, read from its ``model`` module, and the
+    directory its cost table lands in (that module's own): ``name`` dotted
+    under ``iron.applications``, a tower naming its own sub-package
+    (``embedding_gemma2.audio``).
+
+    Raises:
+        ValueError: ``name`` names no such application, or its ``model``
+            module exports no ``Runner``.
     """
-    parser = graph_tune.parser(description, tables)
+    try:
+        module = importlib.import_module(f"iron.applications.{name}.model")
+    except ImportError as e:
+        raise ValueError(f"no application {name!r}: {e}") from e
+    if "Runner" not in vars(module):
+        raise ValueError(f"iron.applications.{name}.model exports no Runner")
+    return vars(module)["Runner"], Path(module.__file__).parent
+
+
+def main(
+    name: str, runner: type[Runner], tables: Path, argv: Sequence[str] | None = None
+) -> None:
+    """The command line that measures ``name``'s ``runner``'s model's cost
+    table in ``tables`` (``graph_tune.table``): its ``calls``, and the
+    configure cost between each pair of ``CALIBRATION_TRIANGLE``.
+    """
+    parser = graph_tune.parser(
+        f"Measure {name}'s cost table, its decode step and prompt chunk", tables
+    )
     parser.add_argument(
         "--position",
         type=int,
@@ -146,7 +180,7 @@ def main(runner: type[Runner], description: str, tables: Path) -> None:
     )
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--top-k", type=int, default=50)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     config = runner.config
     model = runner.model(config, unread_weights(runner.layout(config), config.n_layers))
@@ -168,3 +202,30 @@ def main(runner: type[Runner], description: str, tables: Path) -> None:
         CALIBRATION_TRIANGLE,
         tables,
     )
+
+
+def cli() -> None:
+    """``python -m iron.lm.tune <application>``: measure ``<application>``'s
+    cost table (``main``), its ``Runner`` found by ``application_runner``.
+    ``--help`` after ``<application>`` lists the rest of its flags; without
+    one, only ``application`` is required, since the flags follow from it.
+    """
+    # No -h here: an unresolved --help passes through to main's parser,
+    # which knows application's own flags.
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "application",
+        help="dotted under iron.applications, a tower naming its own "
+        "sub-package (e.g. embedding_gemma2.audio); its model module's "
+        "Runner is tuned",
+    )
+    args, rest = parser.parse_known_args()
+    try:
+        runner, tables = application_runner(args.application)
+    except ValueError as e:
+        parser.error(str(e))
+    main(args.application, runner, tables, rest)
+
+
+if __name__ == "__main__":
+    cli()
