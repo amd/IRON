@@ -16,20 +16,13 @@ import iron.operators.flm.gemm.op as flm
 from iron.common import Chain, Link
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
-from iron.operators.flm.gemm.shipped import Shipped
 from iron.operators.gemm import GEMM
 from iron.operators.mha import MHA
 from iron.tests.common.llama_model import small
-from iron.tests.toolchain.lowering import lower
-from iron.tests.toolchain.tools import requires, swiglu
+from iron.tests.toolchain.lowering import _lower_all, lower
+from iron.tests.toolchain.tools import requires, shipped, swiglu
 
 pytestmark = [*requires("aiecc", "peano"), pytest.mark.usefixtures("npu2")]
-
-
-def _lower_all(traced, tmp_path):
-    for i, op in enumerate(traced.operators):
-        (tmp_path / str(i)).mkdir()
-        lower(op, tmp_path / str(i), name=f"{i}_{type(op).__name__}")
 
 
 def test_decode_graph_operators_lower_with_their_values(tmp_path):
@@ -81,16 +74,10 @@ def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path)
     lower(tuned.configuration(), tmp_path / "config", name=op.config_name)
 
 
-def _shipped(**kwargs):
-    return Shipped(**kwargs)
-
-
 def test_shipped_external_sequence_lowers(tmp_path):
     clamp = Clamp(size=256 * 1152, low=-2.0, high=2.0)
-    shipped = _shipped(
-        M=256, K=1024, N=1152, epilogue="gelu", finish=Chain((Link(clamp),))
-    )
-    lower(shipped, tmp_path)
+    op = shipped(M=256, K=1024, N=1152, epilogue="gelu", finish=Chain((Link(clamp),)))
+    lower(op, tmp_path)
 
 
 def test_instructions_compile_alone_against_an_external_image():
@@ -98,7 +85,7 @@ def test_instructions_compile_alone_against_an_external_image():
     so its link step lowers only the sequence. No kernel, no Peano, and the
     second request is a cache hit.
     """
-    op = _shipped(M=256, K=1024, N=1152)
+    op = shipped(M=256, K=1024, N=1152)
     artifacts = op.compile()
     insts = artifacts.insts
     assert insts is not None and insts.stat().st_size > 0
@@ -106,7 +93,7 @@ def test_instructions_compile_alone_against_an_external_image():
     assert artifacts.entry.xclbin is None
     assert artifacts.image.suffix == ".xclbin"
     first = insts.stat().st_mtime_ns
-    again = _shipped(M=256, K=1024, N=1152).compile()
+    again = shipped(M=256, K=1024, N=1152).compile()
     assert again.insts == insts
     assert insts.stat().st_mtime_ns == first, "the same sequence recompiled"
 

@@ -32,7 +32,7 @@ from iron.operators.clamp import Clamp
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.tests.common.llama_model import llama_1b
-from iron.tests.toolchain.tools import requires, swiglu
+from iron.tests.toolchain.tools import requires, shipped, swiglu
 
 pytestmark = requires("xclbinutil", "peano")
 
@@ -101,14 +101,8 @@ def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(npu2):
         assert entry.directory.is_relative_to(NPU_CACHE_HOME)
 
 
-def _shipped(**kwargs):
-    from iron.operators.flm.gemm.shipped import Shipped
-
-    return Shipped(**kwargs)
-
-
 def test_shipped_builds_its_instructions_for_the_external_image(npu2):
-    op = _shipped(
+    op = shipped(
         M=256,
         K=1024,
         N=1152,
@@ -120,7 +114,7 @@ def test_shipped_builds_its_instructions_for_the_external_image(npu2):
 
 
 def test_shipped_fetches_its_image(npu2):
-    op = _shipped(M=256, K=1024, N=1152)
+    op = shipped(M=256, K=1024, N=1152)
     try:
         image = Path(op.compile().image)
     except (urllib.error.URLError, OSError) as e:  # no network here

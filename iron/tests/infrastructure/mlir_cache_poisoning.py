@@ -35,18 +35,10 @@ import pytest
 
 from iron.common.design import OperatorDesign
 from iron.common.image.fusion import Fusion
-from iron.operators import ElementwiseAdd
 from iron.tests.common.graphs import Adds
-
-SIZE = 1024
-TILE = 128
-
+from iron.tests.infrastructure.graph_dispatch import SIZE, _operator
 
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
-
-
-def _operator():
-    return ElementwiseAdd(size=SIZE, tile_size=TILE)
 
 
 def _linked_objects(operator):

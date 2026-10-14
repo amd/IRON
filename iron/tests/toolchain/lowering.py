@@ -69,6 +69,14 @@ def lower(op, tmp_path, name=None):
     return src, insts
 
 
+def _lower_all(traced, tmp_path, device=None):
+    for i, op in enumerate(traced.operators):
+        (tmp_path / str(i)).mkdir()
+        if device is not None:
+            op = op.resolved(device)
+        lower(op, tmp_path / str(i), name=f"{i}_{type(op).__name__}")
+
+
 def _cases():
     """Each device's first default case of every operator and the cases
     declared to lower, one it cannot resolve skipped with the reason.
@@ -173,9 +181,7 @@ def test_a_graph_called_in_a_graph_lowers(device, tmp_path):
     per-call value, lower with the values they read.
     """
     traced = _Features(3072).trace(wave=((3073 * 160,), np.float32))
-    for i, op in enumerate(traced.operators):
-        (tmp_path / str(i)).mkdir()
-        lower(op.resolved(device), tmp_path / str(i), name=f"{i}_{type(op).__name__}")
+    _lower_all(traced, tmp_path, device)
 
 
 class _Subsample(iron.Graph):
@@ -202,9 +208,7 @@ def test_convolutions_called_in_a_graph_lower(device, tmp_path):
         x=((2 * 256 + 2, mels), bfloat16),
         y=((256 + 2, (mels // 2 + 2) * 64), bfloat16),
     )
-    for i, op in enumerate(traced.operators):
-        (tmp_path / str(i)).mkdir()
-        lower(op.resolved(device), tmp_path / str(i), name=f"{i}_{type(op).__name__}")
+    _lower_all(traced, tmp_path, device)
 
 
 class _Pixels(iron.Graph):
@@ -231,6 +235,4 @@ def test_image_patches_called_in_a_graph_lower(device, tmp_path):
     graph = _Pixels()
     rgb = graph.processor.resample.image_chunks, graph.processor.chunk
     traced = graph.trace(rgb=(rgb, np.uint8))
-    for i, op in enumerate(traced.operators):
-        (tmp_path / str(i)).mkdir()
-        lower(op.resolved(device), tmp_path / str(i), name=f"{i}_{type(op).__name__}")
+    _lower_all(traced, tmp_path, device)

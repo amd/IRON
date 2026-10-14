@@ -54,3 +54,9 @@ def swiglu():
     z = lambda *s: np.zeros(s, dtype=bfloat16)
     E, H = 2048, 8192
     return SwiGLU(z(H, E), z(H, E), z(E, H)), E
+
+
+def shipped(**kwargs):
+    from iron.operators.flm.gemm.shipped import Shipped
+
+    return Shipped(**kwargs)
