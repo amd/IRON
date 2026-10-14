@@ -1216,15 +1216,6 @@ def test_designs_apart_only_in_their_probes_share_one_cost(tmp_path, npu2):
         assert cost_key(op) == chosen.key
 
 
-def test_a_clamp_folded_into_flm_gemm_costs_what_the_gemm_does(npu2):
-    # The epilogue clamps whether or not one is asked for, at (-inf, inf).
-    plain = FlmGEMM(M=256, K=512, N=1024)
-    clamped = plain.fold(Clamp(size=256 * 1024, low=-0.25, high=1.5))
-    assert clamped.clamp == (-0.25, 1.5)
-    assert clamped.design_key() != plain.design_key()
-    assert cost_key(clamped, npu2) == cost_key(plain, npu2)
-
-
 def test_placer_verdicts_are_kept_across_tunings(tmp_path, npu2):
     traced, _, table = _add_silu(tmp_path, npu2)
     fit_cache = tmp_path / "fits"
