@@ -15,8 +15,9 @@ from ml_dtypes import bfloat16
 
 from iron.common.graph.fold import folded
 from iron.common.graph.visualize import Dataflow, render, side_by_side
-from iron.lm import unread_weights
-from iron.applications.embedding_gemma2.vision import model as vision
+from iron.applications.embedding_gemma2.config import Config
+from iron.applications.embedding_gemma2.model import Multimodal
+from iron.applications.embedding_gemma2.weights import Weights
 from iron.lm.blocks import SwiGLU
 from iron.tests.common.llama_model import small
 
@@ -84,10 +85,9 @@ def test_a_layer_drawn_alone_keeps_its_steps_and_marks_what_flows_in():
 
 
 def test_a_towers_layers_are_found_under_its_prefix():
-    c = vision.VISION
-    graph = vision.Vision(c, unread_weights(vision.layout(c), c.n_layers))
-    (shapes,) = graph.shapes()
-    t = graph.trace(**shapes)
+    graph = Multimodal(Config(), Weights.unread())
+    _, _, rgb, _ = graph.shapes()
+    t = graph.trace(**rgb)
     drawn = set(Dataflow(t, layers={1}).drawn())
     for i, s in enumerate(t.steps):
         names = [Dataflow.root(h).name for h in s.inputs]
