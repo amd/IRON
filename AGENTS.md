@@ -495,7 +495,8 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 7. Register operator in `iron/operators/__init__.py` (`_OPERATOR_MODULES`:
    the name, and the module that defines it; an flm port's own name and
    module go in `_FLM_OPERATOR_MODULES` beside it, the one place both its
-   package and the dotted catalog entry read)
+   package and the dotted catalog entry read) and in `__init__.pyi`, so a
+   type checker sees the lazily-loaded name too
 
 ### What an operator overrides
 
