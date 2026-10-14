@@ -524,7 +524,7 @@ def judge(
     for extent in op.bound_extents:
         if values.get(extent) != getattr(op, op.value(extent).field.name):
             return None
-    want = op.call_reference(inputs, values=values)
+    want = op._call_reference(inputs, values=values)
     for which, gate in gates.items():
         for name, verdict in op.judge(inputs, written, gate, want).items():
             if not verdict:
@@ -1594,7 +1594,7 @@ class Designs:
         # one moves no tunable any of them pins (``JointNarrowing``).
         settings, refused = {}, {}
         for key, (op, _) in list(first.items()):
-            found = variants(op.probed(), dev, pinned[key])
+            found = variants(op._probed(), dev, pinned[key])
             # A fold's design has no traced build vouching for its default;
             # where the placer refuses it, the fold stays unpriced.
             if key in twin_of:
@@ -1658,7 +1658,7 @@ class Designs:
         for key, (op, _) in self.first.items():
             default = self.settings[key][0]
             fixed = {
-                n: x for n, x in default.tunables if n not in default.resolved.widths
+                n: x for n, x in default.tunables if n not in default.resolved._widths
             }
             narrowest = min(
                 (

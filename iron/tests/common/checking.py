@@ -41,12 +41,12 @@ def _run(traced, x, wrong: dict[int, np.ndarray]):
         op = op.resolved()
         by_name = dict(zip((b.name for b in op.buffers), names))
         inputs = {b.name: held[by_name[b.name]] for b in op.inputs}
-        expected = op.call_reference(inputs)
+        expected = op._call_reference(inputs)
         computed = {
             name: wrong[index] if by_name[name] in weights and index in wrong else t
             for name, t in inputs.items()
         }
-        written = op.call_reference(computed)
+        written = op._call_reference(computed)
         check_step(index, op, by_name, inputs, written, expected)
         held |= {by_name[b.name]: written[b.name] for b in op.outputs}
 

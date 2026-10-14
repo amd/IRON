@@ -237,7 +237,7 @@ reuse lint
      mlir-aie's `aie.utils.verify.compare`. A test's figures go to
      pytest's `record_property`, which the root conftest writes to the CSV.
      The reference and the judgement are the operator's own:
-     `op.call_reference(inputs, outputs, values)` runs `reference()` on
+     `op._call_reference(inputs, outputs, values)` runs `reference()` on
      buffers by name, `op.judge(inputs, written, tolerance)` returns a
      `Verdict` per written buffer
    - `tracing.py`: `dump_traces(run, trace_file)`, for a sequence holding an

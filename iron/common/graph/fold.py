@@ -344,7 +344,7 @@ def folded(
                 continue
             new = made.resolved(fused)
             if new is None or any(
-                new.widths[n] < w for n, w in made.resolved(current).widths.items()
+                new._widths[n] < w for n, w in made.resolved(current)._widths.items()
             ):
                 continue
             written = {
@@ -528,7 +528,7 @@ def _prefolded(
             return None
         resolved = made.resolved(new)
         if resolved is None or any(
-            resolved.widths[n] < w for n, w in made.resolved(op).widths.items()
+            resolved._widths[n] < w for n, w in made.resolved(op)._widths.items()
         ):
             return None
         fused[k] = new

@@ -287,15 +287,15 @@ def test_probed_sets_each_probe_field_and_nothing_else():
 
     assert Bounded.declaration.probes == {"low": -np.inf, "cap": None}
     at = Bounded(n=64, low=-np.inf)
-    assert at.probed() is at
+    assert at._probed() is at
     off = Bounded(n=64, low=0.5, cap=(0.0, 1.0))
-    probe = off.probed()
+    probe = off._probed()
     assert (probe.n, probe.low, probe.cap) == (64, -np.inf, None)
     assert (off.low, off.cap) == (0.5, (0.0, 1.0))
     assert probe.design_key() == at.design_key() != off.design_key()
     assert MV.declaration.probes == {}
     plain = MV(M=64, K=256)
-    assert plain.probed() is plain
+    assert plain._probed() is plain
 
 
 # --------------------------------------------------------------------------
@@ -590,9 +590,9 @@ def test_array_sees_the_array_tier_alone():
             return self.M // self.tile_out
 
     op = MV(M=1024, K=128).resolved(NPU2)
-    assert op.build_array() == [128, 8, 64, "none"]
+    assert op._build_array() == [128, 8, 64, "none"]
     with pytest.raises(TypeError, match="reads M, which no tile names"):
-        Leaky(M=1024, K=128).resolved(NPU2).build_array()
+        Leaky(M=1024, K=128).resolved(NPU2)._build_array()
 
 
 def test_resolution_fills_every_tunable_or_says_which_it_left():

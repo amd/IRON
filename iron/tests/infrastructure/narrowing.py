@@ -499,7 +499,7 @@ def test_a_setting_that_does_not_build_is_left_out(tmp_path):
     dev = aie_utils.ensure_current_device()
     gemm = GEMM(M=2048, K=2048, N=2048)
     with pytest.raises(ValueError, match="a core holds"):
-        Variant.of(gemm.with_tunables(tile_k=128, tile_n=128), dev)
+        Variant.of(gemm._with_tunables(tile_k=128, tile_n=128), dev)
     found = [Variant.of(gemm, dev)]
     table = CostTable(tmp_path / "costs.json", "npu2", True)
     costs = search(
@@ -678,7 +678,7 @@ def test_an_inexact_width_within_its_gates_is_accurate_and_cached(tmp_path):
     # tile_k=16 rounds C's bf16 accumulator after every 16 of K, the default every 64.
     dev = aie_utils.ensure_current_device()
     default = GEMM(M=256, K=256, N=256)
-    found = [Variant.of(op, dev) for op in (default, default.with_tunables(tile_k=16))]
+    found = [Variant.of(op, dev) for op in (default, default._with_tunables(tile_k=16))]
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     timing = Timing(rounds=1, calls=5)

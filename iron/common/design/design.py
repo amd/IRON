@@ -190,7 +190,7 @@ class BuiltArray:
             else:
                 value.param = dispatch[value.symbol]
         before = set(vars(op))
-        self.built = op.build_array() or []
+        self.built = op._build_array() or []
         # What array() kept on the operator for its sequence to program.
         self._kept = {name: vars(op)[name] for name in vars(op).keys() - before}
         self.design = design

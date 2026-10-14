@@ -831,7 +831,7 @@ class Elementwise(Operator):
         if op.finish or len(op.chain()) > 1:
             return super().judge(inputs, written, tolerance, expected)
         if expected is None:
-            expected = self.call_reference(inputs)
+            expected = self._call_reference(inputs)
         _, lines, scalars = self._kernel_arguments([inputs[b.name] for b in op.inputs])
         (out,) = op.outputs
         verdict = op.kernel().judge(

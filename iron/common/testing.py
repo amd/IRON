@@ -140,7 +140,7 @@ def vectors(
             if b.name in centered:
                 t = (t.astype(np.float32) - scale / 2).astype(dtype)
         inputs[b.name] = t
-    return Vectors(inputs, op.call_reference(inputs))
+    return Vectors(inputs, op._call_reference(inputs))
 
 
 def _report(buf_name: str, verdict: Verdict, tolerance: Tolerance) -> None:

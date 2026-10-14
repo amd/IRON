@@ -104,7 +104,7 @@ def cost_key(op: Operator, dev=None) -> str:
     leaves out the sources, so remeasure after editing how a design is
     generated.
     """
-    design = OperatorDesign(op.probed().resolved(dev))
+    design = OperatorDesign(op._probed().resolved(dev))
     return f"{type(op).__name__}_{design.identity}"
 
 
@@ -140,7 +140,7 @@ class Variant:
             op=op,
             resolved=resolved,
             tunables=tuple(
-                (name, getattr(resolved, name)) for name in resolved.domains(dev)
+                (name, getattr(resolved, name)) for name in resolved._domains(dev)
             ),
             key=cost_key(resolved, dev),
             array=resolved.array_key(),
@@ -170,14 +170,14 @@ def variants(op: Operator, dev, pinned: frozenset[str] = frozenset()) -> list[Va
     default = Variant.of(op, dev)
     defaults = dict(default.tunables)
     out = {default.key: default}
-    domains = default.resolved.domains(dev)
+    domains = default.resolved._domains(dev)
     dropped = 0
     for combo in itertools.product(*domains.values()):
         tunables = dict(zip(domains, combo))
         if tunables == defaults:
             continue
         try:
-            variant = Variant.of(op.with_tunables(**tunables), dev)
+            variant = Variant.of(op._with_tunables(**tunables), dev)
             resolved = variant.resolved
             if not resolved.has_sequence_override():
                 for buf in resolved.buffers:
@@ -960,7 +960,7 @@ class Tuning:
             variant = self.chosen.get(key)
             if variant is not None and variant.key != key:
                 held = variant.op.pinned - op.pinned
-                replace[id(op)] = op.with_tunables(
+                replace[id(op)] = op._with_tunables(
                     **dict(variant.tunables),
                     **{name: getattr(variant.resolved, name) for name in held},
                 )

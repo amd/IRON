@@ -643,7 +643,7 @@ class StepCallable:
             for name, symbol in symbols.items()
             if symbol in self.dispatch_values
         }
-        expected = step_op.call_reference(inputs, outputs, values)
+        expected = step_op._call_reference(inputs, outputs, values)
         return inputs, {
             b.name: np.asarray(expected[b.name]).reshape(b.shape)
             for b in step_op.outputs

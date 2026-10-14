@@ -779,7 +779,7 @@ class _ReferenceTracer(Tracer):
             values = self._split_values(cls, kwargs)
         outs = [b for b in op.buffers if isinstance(b, Out)]
         given = dict(zip((b.name for b in outs), tensors[n_in:]))
-        results = op.call_reference(dict(zip(inputs, tensors[:n_in])), given, values)
+        results = op._call_reference(dict(zip(inputs, tensors[:n_in])), given, values)
         for name, out in given.items():
             if results[name] is not out:
                 out[...] = np.asarray(results[name]).reshape(out.shape)

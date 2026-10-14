@@ -111,8 +111,8 @@ class TwoClamps(iron.Graph):
 
 def test_widths_are_the_settable_per_tunables(npu2):
     # SiLU fixes its channel count (init=False), so only its columns narrow.
-    assert SiLU(size=SIZE, tile_size=TILE).widths == {"num_aie_columns": None}
-    assert ElementwiseAdd(size=SIZE, tile_size=TILE).resolved(npu2).widths == {
+    assert SiLU(size=SIZE, tile_size=TILE)._widths == {"num_aie_columns": None}
+    assert ElementwiseAdd(size=SIZE, tile_size=TILE).resolved(npu2)._widths == {
         "num_aie_columns": 8,
         "num_channels": 1,
     }
@@ -223,31 +223,31 @@ def test_derived_fields_are_not_widths(npu2):
     # whatever it is given, so a width there would be measured once per
     # value and built alike.
     gemm = GEMM(M=512, K=512, N=512)
-    assert gemm.resolved(npu2).widths == {"num_aie_columns": 8}
+    assert gemm.resolved(npu2)._widths == {"num_aie_columns": 8}
     found = variants(gemm, npu2)
     assert len({v.key for v in found}) == len(found)
     mha = MHA(num_heads=8, seq_pad=256).resolved(npu2)
-    assert mha.widths == {"num_pipelines": 1}
-    assert mha.domains(npu2) == {
+    assert mha._widths == {"num_pipelines": 1}
+    assert mha._domains(npu2) == {
         "num_pipelines": (8, 4, 2, 1),
         "B_q": (64, 32, 16),
         "placement": ("memtiles", "tiles", "columns"),
         "pv_cores": (1, 2),
     }
     with pytest.raises(TypeError, match="no tunable"):
-        gemm.with_tunables(n_shim_mem_a=1)
+        gemm._with_tunables(n_shim_mem_a=1)
 
 
 def test_gemm_searches_tile_k_only_where_c_accumulates_in_f32(npu2):
     plain = GEMM(M=2048, K=2048, N=2048).resolved(npu2)
-    assert set(plain.domains(npu2)) == {
+    assert set(plain._domains(npu2)) == {
         "num_aie_columns",
         "tile_m",
         "tile_n",
         "placement",
     }
     exact = GEMM(M=2048, K=2048, N=2048, prio_accuracy=True).resolved(npu2)
-    assert set(exact.domains(npu2)) == {
+    assert set(exact._domains(npu2)) == {
         "num_aie_columns",
         "tile_m",
         "tile_k",
@@ -264,14 +264,14 @@ def test_gemm_tiles_are_whole_kernel_blocks(name):
     ).resolved(dev)
     # aie2's kernel blocks m by four of its r = 4, aie2p's by two.
     assert gemm.mac_block(dev)[0] == (16 if name == "npu1" else 8)
-    domains = gemm.domains(dev)
+    domains = gemm._domains(dev)
     for field, block in zip(("tile_m", "tile_k", "tile_n"), gemm.mac_block(dev)):
         assert all(tile % block == 0 for tile in domains[field]), (field, block)
 
 
 def test_a_baked_replication_is_not_searched(npu2):
     # The join bakes DequantBFP's two n-halves, though a per= names them.
-    assert DequantBFP(K=2048, N=2048).resolved(npu2).domains(npu2) == {
+    assert DequantBFP(K=2048, N=2048).resolved(npu2)._domains(npu2) == {
         "cols": (8, 4, 2, 1)
     }
 
@@ -296,21 +296,21 @@ def test_a_ladder_runs_through_the_resolved_value(npu2):
     # The default chunk, 8016, is the slice's largest even divisor to 8192,
     # which no power of two from the step reaches.
     sample = Sample(vocab=128256).resolved(npu2)
-    assert sample.domains(npu2)["chunk"] == (8016, 4008, 2004, 1002)
+    assert sample._domains(npu2)["chunk"] == (8016, 4008, 2004, 1002)
     # Three octaves either side of 256, kept to multiples of 64.
     add = ElementwiseAdd(size=1 << 16, num_aie_columns=8).resolved(npu2)
-    assert add.domains(npu2)["tile_size"] == (2048, 1024, 512, 256, 128, 64)
+    assert add._domains(npu2)["tile_size"] == (2048, 1024, 512, 256, 128, 64)
 
 
 def test_a_block_is_no_larger_than_a_core_holds(npu2):
     # Uncapped, a 32768-row prefill's ladder runs to kv_len, and generating
     # MHA at a 32768 x 32768 score tile to ask the placer takes 8 GiB.
     mha = MHA(num_heads=8, seq_pad=32768).resolved(npu2)
-    assert mha.domains(npu2)["B_q"] == (64, 32, 16)
+    assert mha._domains(npu2)["B_q"] == (64, 32, 16)
     wide = MHA(num_heads=4, seq_pad=2048, d=256, causal=False).resolved(npu2)
-    assert wide.domains(npu2)["B_q"] == (16,)
+    assert wide._domains(npu2)["B_q"] == (16,)
     softmax = Softmax(rows=32, cols=32768).resolved(npu2)
-    assert max(softmax.domains(npu2)["block"]) == 4096
+    assert max(softmax._domains(npu2)["block"]) == 4096
 
 
 def test_descent_reaches_every_mha_setting_one_tunable_a_move(npu2):
@@ -344,12 +344,12 @@ def test_a_row_a_core_holds_whole_is_one_block(npu2):
 
 def test_flm_gemm_searches_its_a_tile_and_row_blocks(npu2):
     gemm = FlmGEMM(M=2048, K=2048, N=2048).resolved(npu2)
-    assert gemm.domains(npu2) == {"tile_ma": (64, 32, 16), "m_chunk": (8, 4, 2, 1)}
+    assert gemm._domains(npu2) == {"tile_ma": (64, 32, 16), "m_chunk": (8, 4, 2, 1)}
 
 
 def test_a_placement_is_searched_by_name_and_keys_the_array(tmp_path, npu2):
     chunk = MHA(num_heads=8, num_KV_heads=2, seq_len=2048, kv_len=8192)
-    chunk = chunk.with_tunables(num_pipelines=8, B_q=64)
+    chunk = chunk._with_tunables(num_pipelines=8, B_q=64)
     fixed = frozenset({"num_pipelines", "B_q", "pv_cores"})
     found = variants(chunk, npu2, fixed)
     assert [v.tunables for v in found] == [
@@ -363,7 +363,7 @@ def test_a_placement_is_searched_by_name_and_keys_the_array(tmp_path, npu2):
     profile.add(MHA, placement=MHAPlacement.COLUMNS)
     with profile:
         held = MHA(num_heads=8, seq_pad=256)
-    assert held.resolved(npu2).domains(npu2)["placement"] == (
+    assert held.resolved(npu2)._domains(npu2)["placement"] == (
         "columns",
         "memtiles",
         "tiles",
@@ -392,10 +392,10 @@ def test_variants_of_a_column_major_gemm_give_each_design_once(npu2):
 
 def test_a_narrowed_operator_keeps_its_fixed_fields():
     add = ElementwiseAdd(size=SIZE, tile_size=TILE)
-    narrow = add.with_tunables(num_aie_columns=2)
+    narrow = add._with_tunables(num_aie_columns=2)
     assert (narrow.size, narrow.tile_size, narrow.num_aie_columns) == (SIZE, TILE, 2)
     with pytest.raises(TypeError, match="no tunable"):
-        add.with_tunables(size=SIZE // 2)
+        add._with_tunables(size=SIZE // 2)
 
 
 def test_entries_count_arrivals_into_a_device():
@@ -1504,7 +1504,7 @@ def test_kinds_folds_off_takes_no_fold(tmp_path, npu2):
 
 def test_cache_keys_follow_the_build_the_values_and_the_inputs(npu2):
     add = ElementwiseAdd(size=SIZE, tile_size=TILE)
-    narrow = add.with_tunables(num_aie_columns=2)
+    narrow = add._with_tunables(num_aie_columns=2)
     x = np.arange(SIZE, dtype=np.float32)
     key = CostCache.key(add)
     assert CostCache.key(ElementwiseAdd(size=SIZE, tile_size=TILE)) == key
@@ -1548,7 +1548,7 @@ def test_cache_entries_round_trip_per_platform_and_mode(tmp_path, npu2):
     )
     verdict = Accuracy(False, "C under the default's gate: 1 mismatch", "2026-10-07")
     gemm = GEMM(M=256, K=256, N=256)
-    judged = CostCache.judged_key("k", "w", gemm, gemm.with_tunables(tile_k=16))
+    judged = CostCache.judged_key("k", "w", gemm, gemm._with_tunables(tile_k=16))
     assert judged not in {CostCache.beside_key("k", "w"), CostCache.pair_key("k", "w")}
     cache.put(judged, verdict)
     assert again.get(judged, Accuracy) == verdict
@@ -1556,12 +1556,12 @@ def test_cache_entries_round_trip_per_platform_and_mode(tmp_path, npu2):
 
 def test_a_verdict_is_keyed_by_its_gates_and_reference(npu2):
     gemm = GEMM(M=256, K=256, N=256)
-    narrow = gemm.with_tunables(tile_k=16)
+    narrow = gemm._with_tunables(tile_k=16)
     judged = CostCache.judged_key("k", "w", gemm, narrow)
     # A bound gate is named by its function, so another instance keys alike.
     assert gemm.resolved().tolerance().kind == "bound"
     again = GEMM(M=256, K=256, N=256)
-    assert CostCache.judged_key("k", "w", again, again.with_tunables(tile_k=16)) == (
+    assert CostCache.judged_key("k", "w", again, again._with_tunables(tile_k=16)) == (
         judged
     )
     emulated = GEMM(M=256, K=256, N=256, emulate_bf16_mmul_with_bfp16=False)
@@ -1613,7 +1613,7 @@ def _gemm_judged(npu2):
     output, and each width's bound on C.
     """
     default = GEMM(M=256, K=256, N=256)
-    narrow = default.with_tunables(tile_k=16)
+    narrow = default._with_tunables(tile_k=16)
     v = vectors(default)
     bounds = [
         op.resolved().tolerance().bound(*v.inputs.values()) for op in (default, narrow)

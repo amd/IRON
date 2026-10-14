@@ -280,7 +280,7 @@ class Operator(metaclass=_OperatorMeta):
         """
         raise NotImplementedError(f"{type(self).__name__}.array() is not implemented")
 
-    def build_array(self) -> list:
+    def _build_array(self) -> list:
         """``array()`` on a copy whose fields outside the array tier are
         placeholders that raise on use; what it sets lands on this operator.
         """
@@ -560,7 +560,7 @@ class Operator(metaclass=_OperatorMeta):
             f"{type(self).__name__}.reference() is not implemented"
         )
 
-    def call_reference(
+    def _call_reference(
         self,
         inputs: Mapping[str, np.ndarray],
         outputs: Mapping[str, np.ndarray] | None = None,
@@ -656,7 +656,7 @@ class Operator(metaclass=_OperatorMeta):
                 result.
         """
         if expected is None:
-            expected = self.call_reference(inputs)
+            expected = self._call_reference(inputs)
         names = [b.name for b in self.outputs]
         for given, what in ((written, "written"), (expected, "expected")):
             if sorted(given) != sorted(names):
@@ -716,7 +716,7 @@ class Operator(metaclass=_OperatorMeta):
             own += (("prepares", self.prepare.keys()),)
         return (type(self), own)
 
-    def probed(self) -> Self:
+    def _probed(self) -> Self:
         """This operator with each ``Param(probe=)`` field at its probe: the
         one its step time is measured as, for every value of those fields.
         Itself when they are there already, unresolved otherwise.
@@ -929,7 +929,7 @@ class Operator(metaclass=_OperatorMeta):
             new.compatible()
         return new
 
-    def with_tunables(self, **tunables: Any) -> Self:
+    def _with_tunables(self, **tunables: Any) -> Self:
         """This operator, unresolved, with the given ``Auto()`` fields set.
 
         Raises:
@@ -942,7 +942,7 @@ class Operator(metaclass=_OperatorMeta):
         return dataclasses.replace(self, **tunables)
 
     @property
-    def widths(self) -> dict[str, int | None]:
+    def _widths(self) -> dict[str, int | None]:
         """The tunables searched as a `Width`, and their values: those that
         declare one, and those a streamed ``per=`` names that declare no
         other domain.
@@ -962,7 +962,7 @@ class Operator(metaclass=_OperatorMeta):
                     found.setdefault(ref.name, getattr(self, ref.name))
         return found
 
-    def domains(self, dev) -> dict[str, tuple[Any, ...]]:
+    def _domains(self, dev) -> dict[str, tuple[Any, ...]]:
         """The values the tuner tries for each tunable it searches, asked of
         the resolved operator: the field's declared domain where its
         ``when`` flag holds, a `Width` for one of `widths`, and nothing for
@@ -974,7 +974,7 @@ class Operator(metaclass=_OperatorMeta):
         searched over that `Enum`'s members, the resolved one first (GEMM's
         and MHA's placements: a hand-found default tried before the rest).
         """
-        widths = self.widths
+        widths = self._widths
         found = {}
         for name in dict.fromkeys([*widths, *self.declaration.tunables]):
             domain = self.declaration.domains.get(

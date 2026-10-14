@@ -524,7 +524,7 @@ def test_an_elementwise_step_finishes_its_consumer_in_its_own_cores(npu2):
     assert chains[plain.residents["finish_chain"]] == ()
     rng = np.random.default_rng(0)
     a, b = (rng.standard_normal(E).astype(bfloat16) for _ in range(2))
-    (got,) = finished.call_reference({"a": a, "b": b}).values()
+    (got,) = finished._call_reference({"a": a, "b": b}).values()
     np.testing.assert_array_equal(
         got, SiLU(size=E).reference(ElementwiseAdd(size=E).reference(a, b))
     )
@@ -578,7 +578,7 @@ def test_a_step_folds_with_its_other_input_streamed_beside(at, npu2):
     a, c = (rng.standard_normal(E).astype(bfloat16) for _ in range(2))
     s = SiLU(size=E).reference(ReLU(size=E).reference(a))
     want = ElementwiseMul(size=E).reference(*((s, c) if at == 0 else (c, s)))
-    (got,) = fused.call_reference(
+    (got,) = fused._call_reference(
         dict(zip([i.name for i in fused.inputs], (a, c)))
     ).values()
     np.testing.assert_array_equal(got, want)
@@ -818,7 +818,7 @@ def test_a_norm_folds_into_the_matvecs_that_read_it(npu2):
     norm = RMSNorm(rows=1, tile_size=E, weighted=True)
     want = GEMV(M=512, K=E).reference(A, norm.reference(x.reshape(1, E), w).reshape(E))
     op = f.steps[0].op
-    (got,) = op.call_reference({"A": A, "B": x, "prepare0_weight": w}).values()
+    (got,) = op._call_reference({"A": A, "B": x, "prepare0_weight": w}).values()
     np.testing.assert_array_equal(got, want)
 
 
@@ -859,7 +859,7 @@ def test_a_prologue_chains_through_the_step_before_it(npu2):
     h = RMSNorm(rows=1, tile_size=E, weighted=True).reference(s.reshape(1, E), w)
     want = GEMV(M=512, K=E).reference(A, h.reshape(E))
     op = step.op
-    (got,) = op.call_reference(
+    (got,) = op._call_reference(
         dict(zip([i.name for i in op.inputs], (A, x, r, w)))
     ).values()
     np.testing.assert_array_equal(got, want)
