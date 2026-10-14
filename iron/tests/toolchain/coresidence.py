@@ -330,7 +330,7 @@ def test_a_folded_gate_shares_its_device_with_the_up_projection(npu2):
 
 
 def test_two_arrays_of_one_class_pack():
-    # Two GEMV arrays in one pack: each fifo keeps a symbol of its own.
+    # aie.iron names the two GEMV arrays' fifos in one symbol table.
     gemvs = [
         GEMV(M=512, K=512, num_aie_columns=2, tile_size_output=tile)
         for tile in (32, 16)

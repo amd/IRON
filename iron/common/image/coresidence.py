@@ -7,11 +7,9 @@ Each member keeps its runtime sequence under its own name, so the main
 sequence configures the pack once and runs any member's sequence against it.
 Members of one array (``identities``) build it once. A member's
 cores idle on the lock its own sequence sets while another runs; dataflow
-between members still goes through DDR. Each array's symbols take a prefix
-of its own (``BuiltArray.namespace``), bar a shim channel's, which a
-sequence may name: two arrays naming one shim channel alike do not fit.
-Two members may
-share a pinned tile unless both program its core or its DMA, which a route
+between members still goes through DDR. Members share the device's symbol
+table, which aie.iron names their unnamed fifos and buffers into. Two
+members may share a pinned tile unless both program its core or its DMA, which a route
 into its TileControl does too (``conflicts``); a logical tile given its
 column and row is pinned. The fifo lowering allocates shim channels around
 ``aie.shim_dma_allocation`` ops alone, so a member routing a pinned shim

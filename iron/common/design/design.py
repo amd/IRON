@@ -16,7 +16,6 @@ import aie.utils as aie_utils
 from aie import ir
 from aie.dialects import aie
 from aie.iron import (
-    Buffer,
     CompileTime,
     DeviceConfiguration,
     DispatchTime,
@@ -25,10 +24,8 @@ from aie.iron import (
     PacketFlow,
     Program,
     ScratchpadParameter,
-    TileDma,
     Worker,
 )
-from aie.iron.dataflow.objectfifo import ObjectFifoHandle, ObjectFifoLink
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from .. import declare
@@ -231,49 +228,6 @@ class BuiltArray:
                         op.operation.walk(read)
         return frozenset(words)
 
-    def namespace(self, prefix: str) -> None:
-        """Prefix each symbol this array names with ``prefix``, so it keeps
-        its own beside another array's in one device configuration.
-
-        A shim channel's symbol keeps its name: a sequence may address the
-        channel by it, and two arrays pinning one channel do not pack anyway.
-        """
-        # aie.iron scopes a symbol by its DeviceConfiguration alone and has no
-        # rename, so each name is set where the configuration's resolve reads it.
-        handles = [h for w in self.workers for h in w.fifos]
-        handles += [
-            h
-            for b in self.op.buffers
-            for h in b.lane_handles
-            if isinstance(h, ObjectFifoHandle)
-        ]
-        fifos = {}
-        while handles:
-            fifo = handles.pop()._object_fifo
-            if id(fifo) in fifos:
-                continue
-            fifos[id(fifo)] = fifo
-            for end in [fifo._prod, *fifo._cons]:
-                if end is not None and isinstance(end.endpoint, ObjectFifoLink):
-                    handles += [*end.endpoint._srcs, *end.endpoint._dsts]
-        for fifo in fifos.values():
-            if fifo.name is not None:
-                fifo.name = prefix + fifo.name
-        reached = [
-            *(a for w in self.workers for a in w.flat_fn_args),
-            *self.built.objects,
-        ]
-        reached += [h for b in self.op.buffers for h in b.lane_handles]
-        for tile_dma in [r for r in reached if isinstance(r, TileDma)]:
-            buffers, locks = tile_dma.all_buffers_and_locks()
-            reached += [*buffers, *locks]
-        named = {
-            id(r): r for r in reached if isinstance(r, (Buffer, Lock, Flow, PacketFlow))
-        }
-        for resource in named.values():
-            if resource._name is not None:
-                resource._name = prefix + resource._name
-
     def runtime(self, other: BuiltArray, name: str) -> OperatorRuntime:
         """``other``'s runtime sequence over this array, named ``name``.
 
@@ -320,22 +274,15 @@ def identities(arrays: Mapping[str, BuiltArray]) -> dict[str, Hashable]:
 def configuration(name: str, arrays: Mapping[str, BuiltArray]) -> DeviceConfiguration:
     """``arrays`` as one device configuration named ``name``: one array per
     identity, and each entry's runtime sequence over it, named
-    ``sequence`` where there is one, else for its key. Where there are
-    several arrays, each one's symbols take its first entry's key as a
-    prefix.
+    ``sequence`` where there is one, else for its key.
 
     Raises:
         ValueError: The arrays are built for different devices.
     """
     of = identities(arrays)
     owners: dict[Hashable, BuiltArray] = {}
-    firsts: dict[Hashable, str] = {}
     for key, array in arrays.items():
         owners.setdefault(of[key], array)
-        firsts.setdefault(of[key], key)
-    if len(owners) > 1:
-        for identity, owner in owners.items():
-            owner.namespace(f"{firsts[identity]}__")
     kinds = {type(a.op.device()).__name__ for a in owners.values()}
     if len(kinds) != 1:
         raise ValueError(f"{list(arrays)} are built for different devices {kinds}")
