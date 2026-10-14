@@ -34,7 +34,7 @@ def _lower_all(traced, tmp_path):
 
 def test_decode_graph_operators_lower_with_their_values(tmp_path):
     model = small(max_seq_len=256)
-    traced = model.trace(**model.shapes(1))
+    traced = model.trace(**model.shapes()[0])
     bound = {id(b.op) for b in traced.bindings}
     assert bound, "the decode graph binds values"
     _lower_all(traced, tmp_path)
@@ -42,7 +42,7 @@ def test_decode_graph_operators_lower_with_their_values(tmp_path):
 
 def test_prefill_graph_operators_lower_with_their_value(tmp_path):
     model = small()
-    traced = model.trace(**model.shapes(model.config.prefill_chunk))
+    traced = model.trace(**model.shapes()[1])
     # Every block is bound by the rows the call runs, the cache writes and the
     # RoPE rows by the chunk, and MHA's keys and the draw by the position.
     named = {b.expression.value.name for b in traced.bindings}
@@ -58,8 +58,7 @@ def test_attention_over_a_128k_cache_lowers(rows, tmp_path):
     cache's writes would step past a descriptor's reach, they still lower.
     """
     model = small(max_seq_len=131072)
-    step = 1 if rows == "decode" else model.config.prefill_chunk
-    traced = model.trace(**model.shapes(step))
+    traced = model.trace(**model.shapes()[0 if rows == "decode" else 1])
     attention = {
         op.design_key(): op for op in traced.operators if type(op) in (Copy, MHA)
     }

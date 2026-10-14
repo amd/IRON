@@ -93,7 +93,7 @@ def test_attention_scaling_of_one_leaves_llama_unchanged():
 def test_decode_step_reads_the_rope_table_at_its_own_width():
     model = _partial_rotary_small(rotary_dim=32)
     cfg = model.config
-    t = model.trace(**model.shapes(1))
+    t = model.trace(**model.shapes()[0])
     by_op = {id(b.op): b for b in t.bindings}
     angles = t.steps[1].op
     assert by_op[id(angles)].expression == Affine(t.values[1], 32)
@@ -102,7 +102,7 @@ def test_decode_step_reads_the_rope_table_at_its_own_width():
 
 def test_prompt_chunk_reads_the_rope_table_at_its_own_width():
     model = _partial_rotary_small(rotary_dim=32, max_seq_len=256, prefill_chunk=256)
-    t = model.trace(**model.shapes(256))
+    t = model.trace(**model.shapes()[1])
     copies = [s.op for s in t.steps if type(s.op).__name__ == "Copy"]
     angle_copy = next(c for c in copies if c.dst.sizes[-1] == 32)
     assert list(angle_copy.dst.sizes) == [256, 32]

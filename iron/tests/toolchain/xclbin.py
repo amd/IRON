@@ -137,8 +137,7 @@ def test_llama_builds_xclbins_at_its_size_on_npu1(npu1, chunk, pipelines):
     sixteen.
     """
     model = llama_1b(n_layers=1)
-    rows = model.config.prefill_chunk if chunk else 1
-    version = model.compile(full_elf=False, **model.shapes(rows))
+    version = model.compile(full_elf=False, **model.shapes()[1 if chunk else 0])
     assert not version.plan.full_elf
     assert Path(version.image).stat().st_size > 0
     (mha,) = [op for op in version.sequence.unique_operators() if type(op) is MHA]

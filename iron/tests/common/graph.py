@@ -931,7 +931,7 @@ def test_llama_decode_traces_and_tunes():
     L = 256
     model = small(max_seq_len=L)
     cfg = model.config
-    t = model.trace(**model.shapes(1))
+    t = model.trace(**model.shapes()[0])
     # A token takes no tensor. It returns the logits and carries the token
     # it draws and the position after it.
     assert t.input_args == [] and t.output_args == ["out", "carry_token"]
@@ -995,7 +995,7 @@ def test_llama_decode_traces_and_tunes():
 
 def test_llama_decode_folds_its_norms_into_the_projections(npu2):
     model = small(max_seq_len=256)
-    t = model.trace(**model.shapes(1))
+    t = model.trace(**model.shapes()[0])
     f, count = folded(t, npu2)
     # Per layer: the attention norm into q, k and v, the feed-forward's into
     # gate and up, its product into down and the attention's residual into
@@ -1036,7 +1036,7 @@ def test_llama_decode_folds_its_norms_into_the_projections(npu2):
 
 def test_llama_prompt_keeps_its_bounded_cache_writes(npu2):
     model = small(max_seq_len=256)
-    t = model.trace(**model.shapes(model.config.prefill_chunk))
+    t = model.trace(**model.shapes()[1])
     f, count = folded(t, npu2)
     assert not any(isinstance(fold, Place) for fold in count)
     assert sum(type(s.op) is Copy for s in f.steps) == sum(
@@ -1048,7 +1048,7 @@ def test_llama_prompt_traces_over_the_same_caches():
 
     g = small()
     cfg = g.config
-    t = g.trace(**g.shapes(cfg.prefill_chunk))
+    t = g.trace(**g.shapes()[1])
     assert t.input_args == ["ids"] and t.output_args == ["out", "carry_token"]
     assert [v.name for v in t.values] == ["token", "position", "chunk", "rows"]
     # MHA attends over the caches up to the chunk's last token.
@@ -1059,7 +1059,7 @@ def test_llama_prompt_traces_over_the_same_caches():
     }
     # The caches are the states a token's version reads: the same objects,
     # so one arena holds them once for both.
-    token = g.trace(**g.shapes(1))
+    token = g.trace(**g.shapes()[0])
     assert set(t.states) == set(token.states)
     assert t.residents["keys.0"] == token.residents["keys.0"]
     assert set(t.weights) == set(token.weights)
@@ -1077,7 +1077,7 @@ def test_llama_prompt_traces_over_the_same_caches():
 def test_llama_prompt_projects_with_flm_gemm(device, request):
     dev = request.getfixturevalue(device)
     g = llama_1b(n_layers=1)
-    t = g.trace(**g.shapes(g.config.prefill_chunk))
+    t = g.trace(**g.shapes()[1])
     ops = [op for op, *_ in t.runlist]
     assert not any(type(op) is GEMM for op in ops)
     gemms = [op for op in ops if type(op) is FLMGEMM]
@@ -1114,7 +1114,7 @@ def test_llama_prompt_bounds_every_flm_gemm_by_its_rows(npu2):
     and every projection shares them.
     """
     g = llama_1b(n_layers=2)
-    t = g.trace(**g.shapes(g.config.prefill_chunk))
+    t = g.trace(**g.shapes()[1])
     words, shared = _words(t, share=True)
     assert len(words) <= 32
     gemms = [op.resolved(npu2) for op in t.operators if type(op) is FLMGEMM]
@@ -1143,8 +1143,7 @@ def test_llama_does_not_grow_with_the_context(step):
 
     def trace(max_seq_len):
         g = small(max_seq_len=max_seq_len)
-        rows = 1 if step == "decode" else g.config.prefill_chunk
-        return g.trace(**g.shapes(rows))
+        return g.trace(**g.shapes()[0 if step == "decode" else 1])
 
     short, long = trace(256), trace(1024)
     assert short.input_args == long.input_args == ([] if step == "decode" else ["ids"])
@@ -1237,11 +1236,10 @@ def test_llama_names_only_the_tunables_that_matter(monkeypatch):
     """
     npu2 = from_name("npu2", n_cols=8)
     real, scaled = llama_1b(n_layers=1), small()
-    C, S = real.config.prefill_chunk, scaled.config.prefill_chunk
     settings = [
-        (npu2, lambda: real.trace(**real.shapes(1))),
-        (npu2, lambda: real.trace(**real.shapes(C))),
-        (npu2, lambda: scaled.trace(**scaled.shapes(S))),
+        (npu2, lambda: real.trace(**real.shapes()[0])),
+        (npu2, lambda: real.trace(**real.shapes()[1])),
+        (npu2, lambda: scaled.trace(**scaled.shapes()[1])),
     ]
     _every_keyword_is_load_bearing(monkeypatch, settings)
 
