@@ -13,14 +13,11 @@ SPDX-License-Identifier = "CC0-1.0"
 path = [
     "iron/applications/llama/profiles/*.json",
     "iron/applications/llama/costs_*.json",
-    "iron/applications/embedding_gemma2/vision/profiles/*.json",
-    "iron/applications/embedding_gemma2/costs_*.json",
-    "iron/applications/embedding_gemma2/vision/costs_*.json",
-    "iron/applications/embedding_gemma2/audio/costs_*.json",
+    "iron/applications/embedding_gemma2/profiles/*.json",
     "iron/tests/common/*.json",
     "iron/applications/embedding_gemma2/hugging_face.npz",
-    "iron/applications/embedding_gemma2/vision/hugging_face.npz",
-    "iron/applications/embedding_gemma2/audio/hugging_face.npz",
+    "iron/applications/embedding_gemma2/hugging_face_audio.npz",
+    "iron/applications/embedding_gemma2/hugging_face_vision.npz",
 ]
 precedence = "closest"
 SPDX-FileCopyrightText = "Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved."

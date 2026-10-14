@@ -10,9 +10,10 @@ IRON's requirements), over the checkpoint directory:
 
     python -m iron.applications.embedding_gemma2.hugging_face <directory>
 
-It writes the `hugging_face.npz` beside each test, with the versions that
-made it and the checkpoint's sha256 in its `metadata`. With `--check` it
-compares a fresh run with the saved files instead.
+It writes the test's `REFERENCES` beside it, the text encoder's, the audio
+tower's and the vision tower's, each with the versions that made it and the
+checkpoint's sha256 in its `metadata`. With `--check` it compares a fresh
+run with the saved files instead.
 """
 
 import argparse
@@ -27,13 +28,12 @@ import transformers
 from transformers.models.embedding_gemma2 import modeling_embedding_gemma2
 from transformers.models.gemma4 import image_processing_gemma4, modeling_gemma4
 
-from iron.applications.embedding_gemma2 import test as text_test
+from iron.applications.embedding_gemma2 import test
+from iron.applications.embedding_gemma2.config import VisionConfig
+from iron.applications.embedding_gemma2.model import Tokenizer
+from iron.applications.embedding_gemma2.oracle import VisionOracle
+from iron.applications.embedding_gemma2.weights import Weights
 from iron.lm import Checkpoint
-from iron.applications.embedding_gemma2.audio import test as audio_test
-from iron.applications.embedding_gemma2.audio.model import audio_tensors
-from iron.applications.embedding_gemma2.oracle import PROMPTS
-from iron.applications.embedding_gemma2.vision import test as vision_test
-from iron.applications.embedding_gemma2.vision.model import VISION, vision_tensors
 
 # A fresh run against the saved files, in relative norm: float32's own
 # reordering across hosts and thread counts.
@@ -59,7 +59,7 @@ def load(module: torch.nn.Module, tensors: dict, prefix: str):
 
 
 def text_references(directory: Path) -> dict:
-    """The ids Hugging Face's processor gives each of the text test's
+    """The ids Hugging Face's processor gives each of the test's
     `HUGGING_FACE` cases, and its model's unit-length mean-pooled embedding.
     """
     processor = transformers.AutoProcessor.from_pretrained(directory)
@@ -69,22 +69,24 @@ def text_references(directory: Path) -> dict:
         directory, dtype=torch.float32, attn_implementation="sdpa"
     ).eval()
     out = {}
-    for case, (text, task, wave, image) in text_test.HUGGING_FACE.items():
+    for case, (text, task, wave, image) in test.HUGGING_FACE.items():
         media = {}
         if wave is not None:
             media["audio"] = [wave]
         if image is not None:
             media["images"] = [image]
-        inputs = processor(text=PROMPTS[task] + text, return_tensors="pt", **media)
+        inputs = processor(
+            text=Tokenizer.TASKS[task] + text, return_tensors="pt", **media
+        )
         with torch.no_grad():
             want = model(**inputs).last_hidden_state[0].numpy().mean(axis=0)
-        out[f"{case}/input_ids"] = inputs["input_ids"][0].numpy()
-        out[f"{case}/embedding"] = want / np.linalg.norm(want)
+        out[f"text/{case}/input_ids"] = inputs["input_ids"][0].numpy()
+        out[f"text/{case}/embedding"] = want / np.linalg.norm(want)
     return out
 
 
 def vision_references(directory: Path) -> dict:
-    """The vision tower's soft tokens for the vision test's portrait, and the
+    """The vision tower's soft tokens for the test's portrait, and the
     sha256 of the image processor's float32 pixels and int64 positions for
     each of its `RESIZES`.
     """
@@ -94,26 +96,30 @@ def vision_references(directory: Path) -> dict:
     embedder = modeling_embedding_gemma2.EmbeddingGemma2MultimodalEmbedder(
         config.vision_config, config.text_config
     ).eval()
-    tensors = vision_tensors(Checkpoint(directory / "model.safetensors").tensors)
+    tensors = Checkpoint(directory / "model.safetensors").tensors
     load(tower, tensors, "vision_tower.")
     load(embedder, tensors, "embed_vision.")
-    values, positions = vision_test.processed("portrait")
+    # The host processor's patches, which the resizes below check against
+    # Hugging Face's: the tower alone is compared.
+    (height, width), tokens = test.IMAGES["portrait"]
+    oracle = VisionOracle(VisionConfig(), Weights.read(directory))
+    values, positions = oracle.patches(test.synthetic_image(height, width), tokens)
     with torch.no_grad():
         hidden = tower(
             pixel_values=torch.from_numpy(values)[None],
             pixel_position_ids=torch.from_numpy(positions)[None],
         ).last_hidden_state
-        soft = embedder(hidden).numpy().reshape(-1, VISION.text_dim)
-    out = {"portrait/soft_tokens": soft}
+        soft = embedder(hidden).numpy().reshape(-1, VisionConfig().text_dim)
+    out = {"vision/portrait/soft_tokens": soft}
     processor = image_processing_gemma4.Gemma4ImageProcessor()
-    for shape, tokens in vision_test.RESIZES:
+    for shape, tokens, _ in test.RESIZES:
         image = np.random.default_rng(0).integers(0, 256, (*shape, 3), dtype=np.uint8)
         want = processor(
             torch.from_numpy(image).permute(2, 0, 1),
             max_soft_tokens=tokens,
             return_tensors="pt",
         )
-        key = f"resize/{shape[0]}x{shape[1]}_{tokens}"
+        key = f"vision/resize/{shape[0]}x{shape[1]}_{tokens}"
         for name, array, dtype in (
             ("pixels", want["pixel_values"][0].numpy(), np.float32),
             ("positions", want["image_position_ids"][0].numpy(), np.int64),
@@ -124,7 +130,7 @@ def vision_references(directory: Path) -> dict:
 
 
 def audio_references(directory: Path) -> dict:
-    """The feature extractor's features and mask for the audio test's medium
+    """The feature extractor's features and mask for the test's medium
     clip, and the audio tower's soft tokens over those features.
     """
     config = transformers.AutoConfig.from_pretrained(directory)
@@ -135,11 +141,11 @@ def audio_references(directory: Path) -> dict:
     embedder = modeling_embedding_gemma2.EmbeddingGemma2MultimodalEmbedder(
         config.audio_config, config.text_config
     ).eval()
-    tensors = audio_tensors(Checkpoint(directory / "model.safetensors").tensors)
+    tensors = Checkpoint(directory / "model.safetensors").tensors
     load(tower, tensors, "audio_tower.")
     load(embedder, tensors, "embed_audio.")
     extractor = transformers.AutoFeatureExtractor.from_pretrained(directory)
-    wave = audio_test.chirp(audio_test.CLIPS["medium"])
+    wave = test.clip("medium")
     processed = extractor([wave], return_tensors="np")
     features = processed["input_features"][0]
     mask = processed["input_features_mask"][0]
@@ -148,9 +154,9 @@ def audio_references(directory: Path) -> dict:
         valid = torch.from_numpy(out.attention_mask[0].numpy())
         soft = embedder(out.last_hidden_state)[0][valid].numpy()
     return {
-        "medium/features": features,
-        "medium/mask": mask,
-        "medium/soft_tokens": soft,
+        "audio/medium/features": features,
+        "audio/medium/mask": mask,
+        "audio/medium/soft_tokens": soft,
     }
 
 
@@ -193,26 +199,31 @@ def main():
         "numpy": np.__version__,
         "checkpoint_sha256": checkpoint,
     }
+    fresh = {
+        **text_references(args.directory),
+        **vision_references(args.directory),
+        **audio_references(args.directory),
+    }
     failed = False
-    for path, references in (
-        (text_test.REFERENCES, text_references),
-        (vision_test.REFERENCES, vision_references),
-        (audio_test.REFERENCES, audio_references),
-    ):
-        fresh = references(args.directory)
-        if args.check:
-            with np.load(path) as saved:
-                made = json.loads(str(saved["metadata"]))
-                problems = mismatches(
-                    {k: v for k, v in saved.items() if k != "metadata"}, fresh
-                )
-            print(f"{path}: saved with {made}")
-            for problem in problems:
-                print(f"  {problem}")
-            failed |= bool(problems)
+    for part, path in test.REFERENCES.items():
+        own = {
+            k.removeprefix(f"{part}/"): v
+            for k, v in fresh.items()
+            if k.startswith(f"{part}/")
+        }
+        if not args.check:
+            np.savez_compressed(path, metadata=np.array(json.dumps(metadata)), **own)
+            print(f"{path}: {path.stat().st_size} bytes")
             continue
-        np.savez_compressed(path, metadata=np.array(json.dumps(metadata)), **fresh)
-        print(f"{path}: {path.stat().st_size} bytes")
+        with np.load(path) as saved:
+            made = json.loads(str(saved["metadata"]))
+            problems = mismatches(
+                {k: v for k, v in saved.items() if k != "metadata"}, own
+            )
+        print(f"{path}: saved with {made}")
+        for problem in problems:
+            print(f"  {problem}")
+        failed |= bool(problems)
     sys.exit(1 if failed else 0)
 
 

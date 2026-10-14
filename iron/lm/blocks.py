@@ -779,7 +779,6 @@ def attention(
     groups: int,
     head_dim: int,
     epsilon: float,
-    pipelines: int,
     window: int | None = None,
     **gemm,
 ):
@@ -787,8 +786,8 @@ def attention(
     ``w.k`` and ``w.v`` project them (GEMMs with ``gemm``'s keywords), the
     queries and keys are RMS-normed by ``w.q_norm`` and ``w.k_norm`` and
     rotated by ``angles``, a row each, and the values RMS-normed; ``MHA``
-    over ``pipelines`` attends within ``window`` positions if given, and
-    ``w.o`` projects the heads back.
+    attends within ``window`` positions if given, over the pipelines the
+    profile gives it, and ``w.o`` projects the heads back.
     """
     T, H, G, D = h.shape[0], heads, groups, head_dim
     q = GEMM(h, w.q, b_col_maj=True, **gemm).reshape(T * H, D)
@@ -807,7 +806,6 @@ def attention(
         emulate_bf16_mmul_with_bfp16=False,
         window=window,
         scale=1.0,
-        num_pipelines=pipelines,
     )
     return GEMM(o.reshape(T, H * D), w.o, b_col_maj=True, **gemm)
 

@@ -7,20 +7,28 @@ SPDX-License-Identifier: Apache-2.0
 
 EmbeddingGemma 2's text encoder as one IRON graph, `EmbeddingGemma`,
 compiled once at `max_tokens` rows (2048 by default) with the prompt's
-length bound per call, and the float32
-numpy encoder it is checked against, `EmbeddingGemmaOracle`. Text goes in
-behind its task's prompt and a unit-length embedding of 768 comes out, or
-its first 512, 256 or 128 renormalized.
+length bound per call, and its audio and vision towers, whose soft tokens
+take their placeholders' places in the text (`Multimodal`). Text goes in
+behind its task's prefix and a unit-length embedding of 768 comes out, or
+its first 512, 256 or 128 renormalized. Each graph is checked against a
+float32 numpy oracle of the same part.
 
-The model is a package of `iron.lm`, `iron/applications/embedding_gemma2/`:
+The application is one package over `iron.lm`:
 
-- `model.py`: its shape (`Config`), where its checkpoint keeps each weight
-  (`layout`) and the graph
-- `oracle.py`: the float32 encoder on the host, and the tokenizer
-- `encoder.py`: `Encoder`, the tokenizer, the weights and the graph of a
-  checkpoint directory, and the command line below
-- `tune.py`: measures the cost table its designs can be narrowed and packed
-  by
+- `config.py`: each part's shape (`Config`, `AudioConfig`, `VisionConfig`)
+  and the largest call each graph is compiled for
+- `weights.py`: where the checkpoint keeps each weight, a layout per part,
+  and `Weights`, the trees of a checkpoint directory
+- `model.py`: the text encoder and `Multimodal` on the NPU, the
+  `Tokenizer` (each task's prefix, the placeholders), and the command line
+- `audio.py`, `vision.py`: the towers, each a graph of its own that
+  `Multimodal` calls in its body
+- `oracle.py`: the float32 oracles, with the host feature extractor and
+  image processor
+- `tune.py`: measures the cost table every graph's designs can be narrowed
+  and packed by
+- `profiles/`: the tunables per device, where an operator's own resolution
+  falls short, and the cost tables `tune.py` writes
 
 ## Weights and tokenizer
 
@@ -42,15 +50,14 @@ python3 -m pip install -r requirements_examples.txt
 From the repository root, a query ranked against documents:
 
 ```bash
-python -m iron.applications.embedding_gemma2.encoder /path/to/embeddinggemma-2 \
+python -m iron.applications.embedding_gemma2.model /path/to/embeddinggemma-2 \
     --query "What causes the northern lights?" \
     --document "Charged particles from the sun." "Photosynthesis in plants."
 ```
 
 `--dims` truncates the embeddings, and `--costs` narrows and packs the
-designs by the tables `python -m iron.applications.embedding_gemma2.tune` (the text)
-and `python -m iron.applications.embedding_gemma2.vision.tune` (the vision tower)
-measured, merged.
+designs by the table `python -m iron.applications.embedding_gemma2.tune`
+measured.
 
 ## Testing
 
@@ -58,17 +65,18 @@ measured, merged.
 pytest iron/applications/embedding_gemma2/
 ```
 
-Each embedding against the oracle's (its cosine and its norm), the
-truncations, a query ranking two documents, and the latency of a query,
-a long document and one past the sliding window, and text with a clip and
-an image, on NPU1 and NPU2. On NPU1 each step is its own dispatch of an
-xclbin; `TestEachStep` checks that form on NPU2.
+The text encoder's embeddings against the oracle's (their cosine and
+norm), the truncations, a query ranking two documents, text with a clip
+and an image, each tower's soft tokens, the audio features and image
+patches against the host's, and the latency of each, on NPU1 and NPU2. On
+NPU1 each step is its own dispatch of an xclbin; `TestEachStep` checks that
+form on NPU2.
 
-The float32 oracles are checked against Hugging Face's processor and model
-through their outputs on the tests' inputs, saved as `hugging_face.npz`
-beside each test, so the tests need no torch. `hugging_face.py` makes them
-in an environment with torch, torchvision and transformers (not IRON's
-requirements), and with `--check` compares a fresh run with them:
+The float32 oracles are checked against Hugging Face's processors and model
+through their outputs on the tests' inputs, saved as `hugging_face*.npz`, so
+the tests need no torch. `hugging_face.py` makes them in an environment with
+torch, torchvision and transformers (not IRON's requirements), and with
+`--check` compares a fresh run with them:
 
 ```bash
 python -m iron.applications.embedding_gemma2.hugging_face /path/to/embeddinggemma-2

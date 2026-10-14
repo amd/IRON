@@ -930,15 +930,16 @@ layout, the tokenizer), `profiles/` (tunables), its test and README:
 ### EmbeddingGemma 2
 
 Its text encoder, audio and vision towers at
-`iron/applications/embedding_gemma2/`, each with its test, an `Encoder`
-rather than a `CausalLM`: one graph compiled once at `max_tokens` rows (2048
-by default), the prompt's length bound per call, and `EmbeddingGemmaOracle`,
-its float32 encoder on the host:
+`iron/applications/embedding_gemma2/`, one package and one test, an
+`Encoder` rather than a `CausalLM`: one graph compiled once at `max_tokens`
+rows (2048 by default), the prompt's length bound per call, each tower a
+graph the multimodal one calls in its body, and an oracle per part, its
+float32 forward pass on the host:
 
 - **Required files**: `model.safetensors`, `tokenizer.json`
 - **Default location**: `/srv/embeddinggemma-2/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
 - **Run**: `pytest iron/applications/embedding_gemma2/`, or
-  `python -m iron.applications.embedding_gemma2.encoder <dir> --query ... --document ...`
+  `python -m iron.applications.embedding_gemma2.model <dir> --query ... --document ...`
 
 A model's device test goes in `iron/applications/<name>/test.py`: CI's
 example suite runs `iron/applications/`, and the benchmark history names a
