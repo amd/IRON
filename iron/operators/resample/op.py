@@ -408,7 +408,7 @@ class ResampleTaps(Operator):
         if cores > 1:
             of_peak = ObjectFifo(peak_ty, name="peak", depth=1)
             of_all = of_peak.cons().forward(name="peak_all", depth=1)
-        local = Buffer(peak_ty, initial_value=np.zeros(2, np.int32), name="peak_last")
+        local = Buffer(peak_ty, initial_value=np.zeros(2, np.int32))
 
         names = ["count", "in_length", "out_length"]
         dynamic = {n: self.value(n).scratchpad for n in names}
@@ -1221,7 +1221,7 @@ class Resample(Operator):
                     of_image.cons(),
                     of_taps.cons(),
                     of_patches[k].prod(),
-                    Buffer(counts_ty, name=f"counts_{k}"),
+                    Buffer(counts_ty),
                     setup_k,
                     take_k,
                     band_k,

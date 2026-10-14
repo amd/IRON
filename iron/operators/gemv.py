@@ -448,7 +448,7 @@ class GEMV(Operator):
             ObjectFifo(self.C.tile, name=f"C_L1L3_{i}", depth=self.C.depth)
             for i in range(lanes)
         ]
-        vectors = [Buffer(vector, name=f"B_{i}") for i in range(lanes)]
+        vectors = [Buffer(vector) for _ in range(lanes)]
         # Per lane: the trip count (unless a graph bounds M, when each core
         # reads it from the scratchpad) and the batches of a call.
         dynamic = self.value("tiles").scratchpad

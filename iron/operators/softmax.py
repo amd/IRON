@@ -279,10 +279,7 @@ class Softmax(Operator):
                     [of_ins[k].cons(), of_outs[k].prod(), *kernels, mask_k, zero_k]
                     + [rtps[k], barriers[k]]
                     + params
-                    + [
-                        Buffer(state_ty, name=f"state_{k}_{r}")
-                        for r in range(rows_per_core)
-                    ],
+                    + [Buffer(state_ty) for r in range(rows_per_core)],
                 )
                 for k in range(n_cores)
             ]

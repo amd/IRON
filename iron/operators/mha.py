@@ -1171,7 +1171,6 @@ class MHA(Operator):
         for i in range(num_pipelines):
             idx_buffer_qk = Buffer(
                 initial_value=np.zeros(shape=(2,), dtype=np.int32),
-                name=f"idx_buffer_qk_{i}",
             )
             matmul_workers.append(
                 Worker(
@@ -1194,11 +1193,9 @@ class MHA(Operator):
             )
             idx_buffer_softmax = Buffer(
                 initial_value=np.zeros(shape=(2,), dtype=np.int32),
-                name=f"idx_buffer_softmax_{i}",
             )
             scale_buffer_softmax = Buffer(
                 initial_value=np.zeros(shape=(4 * B_q,), dtype=np.float32),
-                name=f"scale_buffer_softmax_{i}",
             )
             softmax_workers.append(
                 Worker(
@@ -1224,10 +1221,8 @@ class MHA(Operator):
             # Split, the halves sit either side of the softmax, whose row
             # state each reads from shared memory.
             for h, row in enumerate([4] if pv_cores == 1 else [3, 5]):
-                half = "" if h == 0 else f"_{h}"
                 idx_buffer_pv = Buffer(
                     initial_value=np.zeros(shape=(2,), dtype=np.int32),
-                    name=f"idx_buffer_pv_{i}{half}",
                 )
                 matmul_pv_workers.append(
                     Worker(
@@ -1243,7 +1238,7 @@ class MHA(Operator):
                             mha_rtps_list[2 + h][i],
                             worker_barrier_list[2 + h][i],
                             idx_buffer_pv,
-                            Buffer(acc_ty, name=f"acc_pv_{i}{half}"),
+                            Buffer(acc_ty),
                         ]
                         + params,
                         stack_size=STACK_SIZE,

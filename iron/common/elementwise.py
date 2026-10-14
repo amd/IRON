@@ -256,7 +256,6 @@ class _Chains:
     """
 
     kind: ClassVar[str] = ""
-    scratch_name: ClassVar[str] = ""
 
     def __init__(self, op: Operator, chains, line: int, dtype, cores: int) -> None:
         self.op = op
@@ -293,10 +292,8 @@ class _Chains:
             for k in range(cores if self.select else 0)
         ]
         self.scratch = [
-            Buffer(
-                np.ndarray[(line,), np.dtype[dtype]], name=f"{self.scratch_name}_{k}"
-            )
-            for k in range(cores if any(chains) else 0)
+            Buffer(np.ndarray[(line,), np.dtype[dtype]])
+            for _ in range(cores if any(chains) else 0)
         ]
         self.fifos: list[list[ObjectFifo]] = []
 
@@ -432,7 +429,6 @@ class Finish(_Chains):
     """
 
     kind = "finish"
-    scratch_name = "finished"
 
     def __init__(self, op: Operator, cores: int = 0) -> None:
         # The one output, where a chain has steps (Operator.resolved checks).
@@ -536,7 +532,6 @@ class Prepare(_Chains):
     """
 
     kind = "prepare"
-    scratch_name = "prepared"
 
     def __init__(self, op: Operator, cores: int = 0) -> None:
         self.into = next(b for b in op.inputs if b.prepare)

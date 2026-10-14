@@ -729,9 +729,7 @@ class GEMM(Operator):
                 f"tile_n={N_TILE}; {mt_free} bytes remain after A and C"
             )
         b_mt_ty = np.ndarray[(B_SLOTS * b_slot_elems,), b_elem_ty]
-        b_mt_bufs = [
-            Buffer(b_mt_ty, name=f"b_mt_{c}", tile=mt_tiles[c]) for c in range(COLS)
-        ]
+        b_mt_bufs = [Buffer(b_mt_ty, tile=mt_tiles[c]) for c in range(COLS)]
         # One lock pair per slot, not per pool: a resident slot is consumed
         # once per unit and refilled only when all of them have, independently
         # of the other slots, so the next column-block's refill trails the
@@ -740,17 +738,11 @@ class GEMM(Operator):
         unrouted: list = []
         b_mt_prod, b_mt_cons = [], []
         for c in range(COLS):
-            for locks, side in ((b_mt_prod, "prod"), (b_mt_cons, "cons")):
-                slots = [
-                    Lock(mt_tiles[c], init=0, name=f"b_mt_{side}_{c}_{i}")
-                    for i in range(B_SLOTS)
-                ]
+            for locks in (b_mt_prod, b_mt_cons):
+                slots = [Lock(mt_tiles[c], init=0) for _ in range(B_SLOTS)]
                 locks.append(slots)
                 unrouted += slots
-        b_shim_flows = [
-            Flow(shim_tiles[c], mt_tiles[c], shim_symbol=f"B_L3L2_{c}")
-            for c in range(COLS)
-        ]
+        b_shim_flows = [Flow(shim_tiles[c], mt_tiles[c]) for c in range(COLS)]
         unrouted += b_shim_flows
         # One source, ROWS destinations: a circuit-switched broadcast.
         b_bcast_flows = [
@@ -766,12 +758,9 @@ class GEMM(Operator):
         for r in range(ROWS):
             for c in range(COLS):
                 tile = ct_tiles[r][c]
-                bufs = [
-                    Buffer(ct_b_ty, name=f"b_l1_{r}_{c}_{d}", tile=tile)
-                    for d in range(L1_B_DEPTH)
-                ]
-                prod = Lock(tile, init=L1_B_DEPTH, name=f"b_l1_prod_{r}_{c}")
-                cons = Lock(tile, init=0, name=f"b_l1_cons_{r}_{c}")
+                bufs = [Buffer(ct_b_ty, tile=tile) for _ in range(L1_B_DEPTH)]
+                prod = Lock(tile, init=L1_B_DEPTH)
+                cons = Lock(tile, init=0)
                 b_l1[(r, c)] = (bufs, prod, cons)
                 unrouted += [prod, cons]
                 unrouted.append(
@@ -816,7 +805,6 @@ class GEMM(Operator):
             [
                 Buffer(
                     np.ndarray[(1,), np.dtype[np.int32]],
-                    name=f"my_col_{r}_{c}",
                     initial_value=np.array([c], dtype=np.int32),
                 )
                 for c in range(COLS)
@@ -951,10 +939,7 @@ class GEMM(Operator):
         workers = []
         for r in range(ROWS):
             for c in range(COLS):
-                accs = [
-                    Buffer(type=ct_acc_ty, name=f"c_acc_{r}_{c}_{mc}")
-                    for mc in range(M_CHUNK)
-                ]
+                accs = [Buffer(type=ct_acc_ty) for _ in range(M_CHUNK)]
                 b_bufs, b_prod, b_cons = b_l1[(r, c)]
                 workers.append(
                     Worker(

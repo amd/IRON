@@ -102,7 +102,7 @@ class DepthwiseConv1d(Operator):
         ]
         of_outs = [ObjectFifo(plane, name=f"out_{k}") for k in range(cols)]
         of_w = ObjectFifo(plane, name="weight", depth=TAPS)
-        zero = Buffer(plane, initial_value=np.zeros(C, bfloat16), name="zero")
+        zero = Buffer(plane, initial_value=np.zeros(C, bfloat16))
         limit = np.ndarray[(1,), np.dtype[np.float32]]
         rtps = [
             Buffer(
@@ -147,12 +147,8 @@ class DepthwiseConv1d(Operator):
                     of_outs[k].prod(),
                     kernel,
                     zero if k == 0 else None,
-                    Buffer(
-                        limit, initial_value=np.zeros(1, np.float32), name=f"lo_{k}"
-                    ),
-                    Buffer(
-                        limit, initial_value=np.zeros(1, np.float32), name=f"hi_{k}"
-                    ),
+                    Buffer(limit, initial_value=np.zeros(1, np.float32)),
+                    Buffer(limit, initial_value=np.zeros(1, np.float32)),
                     rtps[k],
                     barriers[k],
                 ],

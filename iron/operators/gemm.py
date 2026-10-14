@@ -725,9 +725,7 @@ class GEMM(Operator):
             for col in range(n_aie_cols):
                 acc_buffer = None
                 if use_larger_internal_buffer:
-                    acc_buffer = Buffer(
-                        type=C_l1_ty_internal, name=f"acc_buffer_{row}_{col}"
-                    )
+                    acc_buffer = Buffer(type=C_l1_ty_internal)
                 workers.append(
                     Worker(
                         core_fn,

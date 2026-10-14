@@ -236,7 +236,6 @@ class Sample(Operator):
             state = Buffer(
                 np.ndarray[(kernels.SELECT_STATE_WORDS,), np.dtype[np.int32]],
                 initial_value=np.zeros(kernels.SELECT_STATE_WORDS, dtype=np.int32),
-                name=f"select_state_{c}",
             )
             workers.append(
                 Worker(
