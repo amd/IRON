@@ -23,7 +23,8 @@ measures the cost table its designs can be narrowed and packed by (below).
 
 ## Weights and tokenizer
 
-From Hugging Face:
+From Hugging Face (meta-llama's repository is gated: accept its license
+and pass a Hugging Face token to download any of these):
 
 - [`model.safetensors`](https://huggingface.co/meta-llama/Llama-3.2-1B/tree/main)
 - [`tokenizer.model`](https://huggingface.co/meta-llama/Llama-3.2-1B/tree/main/original)
