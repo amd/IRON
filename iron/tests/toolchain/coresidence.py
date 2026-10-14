@@ -22,8 +22,10 @@ import re
 
 import numpy as np
 import pytest
+from aie import ir
 from aie.dialects import aie as aie_dialect
-from aie.iron import ObjectFifo, Program, Runtime
+from aie.dialects.aie import DMAChannelDir, shim_dma_allocation
+from aie.iron import DeviceConfiguration, Flow, ObjectFifo, Program, Runtime
 from aie.iron.device import NPU2, AnyShimTile, Tile
 from aie.utils.compile.jit._hash import _python_identity
 from ml_dtypes import bfloat16
@@ -38,9 +40,9 @@ from iron.common.image import (
 )
 from iron.common.image.sequence import OperatorSequence
 from iron.common.graph.fold import folded
-from iron.common.image.coresidence import fits
+from iron.common.image.coresidence import CoResidenceError, conflicts, fits, places
 from iron.lm.blocks import SwiGLU
-from iron.operators import ElementwiseAdd, SiLU
+from iron.operators import GEMV, ElementwiseAdd, SiLU
 from iron.tests.common.graphs import Chain
 from iron.tests.toolchain.tools import requires
 
@@ -57,8 +59,8 @@ def _builds_elf(test):
     return test
 
 
-# Two cores pinned to one tile: a conflict no placer can resolve, which the
-# merge itself must refuse before placement is asked.
+# A core pinned to a tile: two such arrays are a conflict no placer can
+# resolve, which a pack must refuse before placement is asked.
 _PINNED = """
 aie.device(npu2) {
   %t = aie.tile(0, 2)
@@ -71,21 +73,21 @@ aie.device(npu2) {
 """
 
 
-def _shim_pinned(col: int, channel: int, depth: int = 2) -> str:
-    """A pass-through design whose input enters on shim ``(col, 0)``, MM2S
-    ``channel``, through a fifo ``depth`` deep: the device text, as a
-    generator would hand it to the merge.
+def _shim_pinned(col: int, channel: int, name: str) -> Runtime:
+    """A pass-through whose input enters on shim ``(col, 0)``, MM2S
+    ``channel``, through a fifo named ``name``: its runtime sequence, which
+    reaches the rest.
     """
     vec = np.ndarray[(1024,), np.dtype[np.int32]]
     line = np.ndarray[(256,), np.dtype[np.int32]]
-    of_in = ObjectFifo(line, depth=depth, name="in")
+    of_in = ObjectFifo(line, depth=2, name=name)
     of_out = of_in.cons().forward()
 
     def sequence(a, c, in_h, out_h):
         in_h.fill(a)
         out_h.drain(c, wait=True)
 
-    rt = Runtime(
+    return Runtime(
         sequence,
         [
             vec,
@@ -94,11 +96,58 @@ def _shim_pinned(col: int, channel: int, depth: int = 2) -> str:
             of_out.cons(tile=AnyShimTile),
         ],
     )
-    module = Program(NPU2(), rt).resolve_program()
-    [device] = [
-        str(op) for op in module.body.operations if isinstance(op, aie_dialect.DeviceOp)
-    ]
-    return device
+
+
+class _Allocated(Runtime):
+    """Rows routed by hand from shim (0, 0) MM2S 1 into shim (1, 0) S2MM 0,
+    and (1, 0) MM2S 0 held for packets, each channel allocated as
+    ``OperatorRuntime`` allocates a ``ShimChannel``.
+    """
+
+    CHANNELS = (
+        ("ctrl", 1, DMAChannelDir.MM2S, 0),
+        ("rows_src", 0, DMAChannelDir.MM2S, 1),
+        ("rows", 1, DMAChannelDir.S2MM, 0),
+    )
+
+    def __init__(self):
+        self.tiles = (Tile(0, 0), Tile(1, 0))
+        super().__init__(lambda: None, [])
+        self.add_flow(Flow(*self.tiles, src_channel=1, dst_channel=0))
+
+    def resolve(self, loc=None, ip=None, *, device=None, **options):
+        for symbol, col, direction, channel in self.CHANNELS:
+            device.resolve_tile(self.tiles[col])
+            shim_dma_allocation(symbol, self.tiles[col].op, direction, channel)
+        super().resolve(loc, ip, device=device, **options)
+
+
+def _places(*runtimes: Runtime) -> str | None:
+    """``places``'s verdict on ``runtimes`` in one device configuration."""
+    configured = DeviceConfiguration("pack", NPU2(), runtimes=list(runtimes))
+    module = Program.compose([configured], entry=runtimes[0]).resolve_program()
+    return places(module)
+
+
+def _conflict(**texts: str) -> str | None:
+    """The conflict ``conflicts`` finds among the devices ``texts``, by
+    member, or None.
+    """
+    with ir.Context():
+        modules = {member: ir.Module.parse(text) for member, text in texts.items()}
+        devices = {
+            member: next(
+                op
+                for op in module.body.operations
+                if isinstance(op, aie_dialect.DeviceOp)
+            )
+            for member, module in modules.items()
+        }
+        try:
+            conflicts(devices)
+        except CoResidenceError as e:
+            return str(e)
+    return None
 
 
 def _routed(allocated: bool, logical: bool = False) -> str:
@@ -106,7 +155,8 @@ def _routed(allocated: bool, logical: bool = False) -> str:
     (0, 0)'s BDs written through its TileControl by packets from (1, 0)
     MM2S 0: a per-call gather's routes, with or without the allocations
     that tell the fifo lowering its channels are taken, on physical tiles
-    or on logical ones pinned to them (as a ``Gather`` builds them).
+    or on logical ones pinned to them (as a ``Gather`` builds them). The
+    device text, for ``conflicts``.
     """
     allocations = (
         """
@@ -177,8 +227,8 @@ def test_manual_pack_shares_one_configure():
     assert fused.packing == Packing((tuple(fused.designs),))
     # The pack, and the reset the parity rule adds for one configure point
     # (main is left unnamed).
-    assert _devices(text) == [pack, Fusion.RESET_DEVICE]
-    assert re.findall(r"aiex\.configure @(\w+)", text) == [pack, Fusion.RESET_DEVICE]
+    assert _devices(text) == [pack, Fusion.EMPTY]
+    assert re.findall(r"aiex\.configure @(\w+)", text) == [pack, Fusion.EMPTY]
     assert re.findall(r"aiex\.run @(\w+)", text) == list(fused.designs)
 
 
@@ -190,17 +240,11 @@ def test_policy_finds_the_manual_pack():
 
 def test_policy_declines_what_does_not_fit():
     fused = Fusion(_sequence(8, lambda add, silu: []))
-    text = fused.text()
-    bodies = {}
-    for name in fused.designs:
-        body = re.search(
-            rf"^  aie\.device\(\w+\) @{name} \{{$.*?^  \}}$", text, re.M | re.S
-        )
-        assert body is not None, f"no device @{name}"
-        bodies[name] = body.group(0)
-    for body in bodies.values():
-        assert fits({"alone": body}) is None
-    packing, stopped = AdjacentPacking().pack([n for n, *_ in fused.runlist], bodies)
+    for name, design in fused.designs.items():
+        assert fits({name: design}) is None
+    packing, stopped = AdjacentPacking().pack(
+        [n for n, *_ in fused.runlist], fused.designs
+    )
     assert packing == Packing()
     [reason] = stopped.values()
     assert "ShimNOCTile" in reason
@@ -226,15 +270,11 @@ def test_designs_of_one_array_share_its_device():
     fused = Fusion(seq)
     text = fused.text()
     pack = Packing.device_name(list(fused.designs))
-    assert _devices(text) == [pack, Fusion.RESET_DEVICE]
-    assert re.findall(r"aiex\.configure @(\w+)", text) == [pack, Fusion.RESET_DEVICE]
+    assert _devices(text) == [pack, Fusion.EMPTY]
+    assert re.findall(r"aiex\.configure @(\w+)", text) == [pack, Fusion.EMPTY]
     assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, *_ in fused.runlist]
     assert text.count("aie.core(") == 8
-    texts = {}
-    for name, design in fused.designs.items():
-        generated = fusion.generate(design)
-        texts[name] = str(generated.device)
-    assert fits(texts) is None
+    assert fits(fused.designs) is None
 
 
 def test_a_folded_gate_shares_its_device_with_the_up_projection(npu2):
@@ -255,16 +295,39 @@ def test_a_folded_gate_shares_its_device_with_the_up_projection(npu2):
     gate, up, mul, down = (name for name, *_ in fused.runlist)
     assert gate != up
     pack = Packing.device_name([gate, up])
-    assert _devices(text) == [pack, mul, down, Fusion.RESET_DEVICE]
+    assert _devices(text) == [pack, mul, down, Fusion.EMPTY]
     assert re.findall(r"aiex\.configure @(\w+)", text) == _devices(text)
     assert re.findall(r"aiex\.run @(\w+)", text)[:2] == [gate, up]
 
 
-def test_merge_refuses_two_cores_on_one_tile():
-    # A buffer makes the arrays differ, so the cores do not merge as one.
+def test_arrays_naming_their_symbols_alike_pack():
+    # Two GEMV arrays each name their fifos A_L3L1_0 on: in one pack each
+    # keeps its own, under its design's name.
+    gemvs = [
+        GEMV(M=512, K=512, num_aie_columns=2, tile_size_output=tile)
+        for tile in (32, 16)
+    ]
+    assert gemvs[0].resolved().array_key() != gemvs[1].resolved().array_key()
+    seq = OperatorSequence(
+        name="gemv_pack",
+        runlist=[(gemvs[0], "wa", "x", "ya"), (gemvs[1], "wb", "x", "yb")],
+        input_args=["wa", "wb", "x"],
+        output_args=["ya", "yb"],
+        full_elf=True,
+        coresident=[gemvs],
+    )
+    seq.prepare()
+    fused = Fusion(seq)
+    assert fits(fused.designs) is None
+    fifos = set(re.findall(r"aie\.objectfifo @(\w+)\(", fused.text()))
+    assert {f"{name}__A_L3L1_0" for name in fused.designs} <= fifos
+
+
+def test_a_pack_refuses_two_cores_on_one_tile():
+    # A buffer makes the arrays differ, so the cores are not one array's.
     other = _PINNED.replace("%c =", "%b = aie.buffer(%t) : memref<4xi32>\n  %c =")
-    assert fits({"x": _PINNED, "y": _PINNED}) is None
-    reason = fits({"x": _PINNED, "y": other})
+    assert _conflict(x=_PINNED) is None
+    reason = _conflict(x=_PINNED, y=other)
     assert reason is not None and "aie.core" in reason and "(0, 2)" in reason
 
 
@@ -294,25 +357,23 @@ def test_sequence_refuses_a_packing_without_a_full_elf():
 
 def test_two_pins_on_one_shim_channel_do_not_fit():
     # Both members' logical shim tiles pinned to (0, 0), MM2S channel 1: the
-    # fifo lowering must refuse the second, not the merge (neither pins a
-    # physical aie.tile, so the merge sees nothing to share). Equal designs
-    # are one array, so the second differs in its fifo's depth.
-    assert fits({"x": _shim_pinned(0, 1), "y": _shim_pinned(0, 1)}) is None
-    reason = fits({"x": _shim_pinned(0, 1), "y": _shim_pinned(0, 1, depth=3)})
+    # fifo lowering must refuse the second (neither pins a physical
+    # aie.tile, so no claim is seen before placement).
+    assert _places(_shim_pinned(0, 1, "x")) is None
+    reason = _places(_shim_pinned(0, 1, "x"), _shim_pinned(0, 1, "y"))
     assert reason is not None and "already in use" in reason
 
 
 @pytest.mark.parametrize("col, channel", [(0, 0), (1, 1)], ids=["channel", "column"])
 def test_pins_on_distinct_shim_channels_fit(col, channel):
-    assert fits({"x": _shim_pinned(0, 1), "y": _shim_pinned(col, channel)}) is None
+    assert _places(_shim_pinned(0, 1, "x"), _shim_pinned(col, channel, "y")) is None
 
 
 @pytest.mark.parametrize("logical", [False, True], ids=["physical", "logical"])
 def test_a_hand_routed_shim_channel_needs_its_allocation(logical):
-    # Unallocated, (0, 0) MM2S 1 is free to the fifo lowering, which gives
-    # it to the pinned fifo too: one port feeding both routes.
-    routed = _routed(allocated=False, logical=logical)
-    reason = fits({"x": routed, "y": _shim_pinned(0, 1)})
+    # Unallocated, (0, 0) MM2S 1 is free to the fifo lowering, which would
+    # give it to another member's pinned fifo too: one port feeding both.
+    reason = _conflict(x=_routed(allocated=False, logical=logical))
     assert reason is not None and "shim_dma_allocation" in reason
     assert "(0, 0) MM2S channel 1" in reason
 
@@ -323,8 +384,8 @@ def test_a_hand_routed_shim_channel_needs_its_allocation(logical):
     ids=["routed", "packets", "same_tile", "elsewhere"],
 )
 def test_an_allocated_route_holds_its_channels(col, channel, taken):
-    assert fits({"x": _routed(allocated=True)}) is None
-    reason = fits({"x": _routed(allocated=True), "y": _shim_pinned(col, channel)})
+    assert _places(_Allocated()) is None
+    reason = _places(_Allocated(), _shim_pinned(col, channel, "y"))
     if taken:
         assert reason is not None and "already in use" in reason
     else:
@@ -333,13 +394,13 @@ def test_an_allocated_route_holds_its_channels(col, channel, taken):
 
 @pytest.mark.parametrize("logical", [False, True], ids=["physical", "logical"])
 def test_a_tile_control_route_claims_the_dma_program(logical):
-    reason = fits({"x": _routed(allocated=True, logical=logical), "y": _SHIM_PROGRAM})
+    reason = _conflict(x=_routed(allocated=True, logical=logical), y=_SHIM_PROGRAM)
     assert reason is not None and "TileControl" in reason and "(0, 0)" in reason
 
 
 def test_packing_is_in_the_fused_identity():
     # The fused generator closes over its Fusion, so the key follows the
-    # modules a pack is merged and chosen in; and the packing itself is part
+    # modules a pack is built and chosen in; and the packing itself is part
     # of the identity.
     temporal = Fusion(_sequence(4, lambda add, silu: []))
     packed = Fusion(_sequence(4, lambda add, silu: [[add, silu]]))
@@ -368,7 +429,7 @@ def test_traced_graph_packs():
     text = fused.text()
     assert re.findall(r"aiex\.configure @(\w+)", text) == [
         Packing.device_name(list(fused.designs)),
-        Fusion.RESET_DEVICE,
+        Fusion.EMPTY,
     ]
     assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, *_ in fused.runlist]
 
@@ -398,5 +459,5 @@ def test_graph_compile_forwards_the_packing():
     fused = Fusion(version.sequence)
     assert re.findall(r"aiex\.configure @(\w+)", fused.text()) == [
         Packing.device_name(list(fused.designs)),
-        Fusion.RESET_DEVICE,
+        Fusion.EMPTY,
     ]

@@ -339,7 +339,8 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch):
 
 # ---------------------------------------------------------------------------
 # 6. A full ELF of one design is configured by its first dispatch alone: its
-#    load stays unexpanded, so it builds no empty PDIs and no reset device.
+#    load stays unexpanded, so it builds no empty PDIs and no empty
+#    configuration.
 # ---------------------------------------------------------------------------
 
 
@@ -366,18 +367,20 @@ def _relu():
 
 
 def _expanded_pdis(seq):
-    """The PDIs only an expanded load builds: its empty ones and the reset."""
+    """The PDIs only an expanded load builds: its empty ones and the empty
+    configuration's.
+    """
     return [
         p.name
         for p in seq.artifacts.entry.pdis
-        if p.stem.startswith("empty_") or p.stem == Fusion.RESET_DEVICE
+        if p.stem.startswith("empty_") or p.stem == Fusion.EMPTY
     ]
 
 
 @pytest.mark.parametrize("reconfigure", [False, True])
 def test_one_design_expands_only_to_reconfigure(reconfigure, npu2):
-    """One design's fusion leaves its load unexpanded and adds no reset
-    device, unless the sequence asks to reconfigure at every call, as a
+    """One design's fusion leaves its load unexpanded and adds no empty
+    configuration, unless the sequence asks to reconfigure at every call, as a
     probe timing a design's entry does.
     """
     seq = _build_one_design_sequence(
@@ -387,7 +390,7 @@ def test_one_design_expands_only_to_reconfigure(reconfigure, npu2):
     fusion = Fusion(seq)
     assert fusion.expands == reconfigure
     devices = re.findall(r"aie\.device\(\w+\) @(\w+)", fusion.text())
-    assert (Fusion.RESET_DEVICE in devices) == reconfigure, devices
+    assert (Fusion.EMPTY in devices) == reconfigure, devices
 
 
 def test_reconfigure_needs_a_full_elf():

@@ -12,18 +12,24 @@ parameter sync, barriers) and then either the fill/drain sequence derived
 from the operands' tiles or the operator's ``sequence(rt)`` override, which
 receives it. Against a shipped image the runtime is a ``ShippedRuntime``.
 ``OperatorDesign`` is that generator as mlir-aie's ``CompilableDesign``
-compiles it, keyed on what the module is built from.
+compiles it, keyed on what the module is built from. For a fused image,
+``BuiltArray`` is one design's array and ``configuration`` puts arrays and
+their sequences into one aie.iron ``DeviceConfiguration``, which
+``Program.compose`` composes.
 """
 
 from .bd import BdLimits
-from .design import OperatorDesign
+from .design import BuiltArray, OperatorDesign, configuration, identities
 from .runtime import OperatorRuntime, ShimChannel
 from .shipped import ShippedRuntime
 
 __all__ = [
     "BdLimits",
+    "BuiltArray",
     "OperatorDesign",
     "OperatorRuntime",
     "ShimChannel",
     "ShippedRuntime",
+    "configuration",
+    "identities",
 ]

@@ -1,19 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Co-residence: several designs' arrays merged into one ``aie.device``.
+"""Co-residence: several designs' arrays in one aie.iron ``DeviceConfiguration``.
 
 Each member keeps its runtime sequence under its own name, so the main
 sequence configures the pack once and runs any member's sequence against it.
-Members whose devices are one array (``array_text``) keep one copy of it.
-A member's cores idle on the lock its own sequence sets while another runs;
-dataflow between members still goes through DDR. Two members may share a
-pinned tile unless both program its core or its DMA, which a route into its
-TileControl does too; a logical tile given its column and row is pinned. The
-fifo lowering allocates shim channels around ``aie.shim_dma_allocation`` ops
-alone, so a member routing a pinned shim channel by hand must allocate it.
-Whether the union fits is for aiecc's placer, fifo lowering and router to
-say (``fits``).
+Members of one array (``identities``) build it once. A member's
+cores idle on the lock its own sequence sets while another runs; dataflow
+between members still goes through DDR. Each array's symbols take a prefix
+of its own (``BuiltArray.namespace``), bar a shim channel's, which a
+sequence may name: two arrays naming one shim channel alike do not fit.
+Two members may
+share a pinned tile unless both program its core or its DMA, which a route
+into its TileControl does too (``conflicts``); a logical tile given its
+column and row is pinned. The fifo lowering allocates shim channels around
+``aie.shim_dma_allocation`` ops alone, so a member routing a pinned shim
+channel by hand must allocate it. Whether the union fits is for aiecc's
+placer, fifo lowering and router to say (``fits``).
 """
 
 from __future__ import annotations
@@ -23,10 +26,11 @@ import hashlib
 from collections.abc import Hashable, Iterable, Mapping, Sequence
 
 from aie import ir
-from aie.dialects import aie, func
+from aie.dialects import aie
+from aie.iron import DeviceConfiguration, Program
 from aie.passmanager import PassManager
 
-DEFAULT_SEQUENCE = "sequence"
+from ..design import BuiltArray, OperatorDesign, configuration, identities
 
 _EXCLUSIVE_PER_TILE = ("aie.core", "aie.mem", "aie.memtile_dma", "aie.shim_dma")
 
@@ -78,9 +82,6 @@ class Packing:
         group = self._group_of(design)
         return design if len(group) == 1 else self.device_name(group)
 
-    def sequence_of(self, design: str) -> str:
-        return DEFAULT_SEQUENCE if len(self._group_of(design)) == 1 else design
-
     def devices(self, designs: Iterable[str]) -> dict[str, tuple[str, ...]]:
         """Each device symbol and the designs it carries, in first-use order."""
         out: dict[str, tuple[str, ...]] = {}
@@ -93,7 +94,7 @@ class Packing:
 
         Args:
             arrays: Every design, in first-use order, and its array: its
-                `array_text`, or what stands for it.
+                `design.identities`, or what stands for it.
         """
         order = list(arrays)
         by_text: dict[Hashable, list[str]] = {}
@@ -115,17 +116,6 @@ class Packing:
         """A pack's symbol, independent of its members' order."""
         digest = hashlib.sha256("|".join(sorted(group)).encode()).hexdigest()[:8]
         return f"pack{len(group)}_{digest}"
-
-
-def _symbol(op: ir.OpView) -> str | None:
-    attrs = op.operation.attributes
-    if "sym_name" not in attrs:
-        return None
-    return ir.StringAttr(attrs["sym_name"]).value
-
-
-def _is_kernel_declaration(op: ir.OpView) -> bool:
-    return isinstance(op, func.FuncOp) and op.is_external
 
 
 def _body(device: aie.DeviceOp) -> list[ir.OpView]:
@@ -188,119 +178,21 @@ def _route_ends(op: ir.OpView):
     ]
 
 
-def array_text(device: aie.DeviceOp) -> str:
-    """``device`` as text without its name or runtime sequences: equal for two
-    designs whose sequences can run on one configured array.
-    """
-    clone = device.operation.clone(ip=False)
-    if "sym_name" in clone.attributes:
-        del clone.attributes["sym_name"]
-    for op in list(clone.regions[0].blocks[0].operations):
-        if isinstance(op, aie.RuntimeSequenceOp):
-            op.operation.erase()
-    text = str(clone)
-    clone.erase()
-    return text
-
-
-def _namespace(device: aie.DeviceOp, member: str) -> None:
-    """Prefix every symbol but a runtime sequence or a kernel declaration,
-    which members share, with ``member``.
-    """
-    for op in _body(device):
-        old = _symbol(op)
-        if (
-            old is None
-            or _is_kernel_declaration(op)
-            or isinstance(op, aie.RuntimeSequenceOp)
-        ):
-            continue
-        new = f"{member}__{old}"
-        ir.SymbolTable.replace_all_symbol_uses(old, new, device.operation)
-        op.operation.attributes["sym_name"] = ir.StringAttr.get(new)
-
-
-def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceOp:
-    """Merge ``members`` (design name -> device op, one module) into the first,
-    renamed ``name``, each member's runtime sequence named for it.
+def conflicts(devices: Mapping[str, aie.DeviceOp]) -> None:
+    """Refuse ``devices`` (design name -> its own device, each another
+    array) co-resident where two program one pinned tile or one leaves a
+    hand-routed shim channel to the fifo lowering.
 
     Raises:
-        CoResidenceError: The members target different devices, declare one
-            kernel differently, or put an exclusive op on one pinned tile.
+        CoResidenceError: Two put an exclusive op on one pinned tile, or one
+            routes a shim DMA channel by hand with no
+            ``aie.shim_dma_allocation`` for it.
     """
-    if len(members) < 2:
-        raise ValueError(f"a pack needs two or more designs, got {list(members)}")
-    kinds = {str(d.device) for d in members.values()}
-    if len(kinds) != 1:
-        raise CoResidenceError(
-            f"{list(members)} are built for different devices ({sorted(kinds)})"
-        )
-
-    held: dict[str, aie.DeviceOp] = {}  # array text -> the device keeping it
-    arrays: dict[str, aie.DeviceOp] = {}  # member -> the array it keeps
-    for member, device in members.items():
-        [sequence] = [
-            op for op in _body(device) if isinstance(op, aie.RuntimeSequenceOp)
-        ]
-        old = _symbol(sequence)
-        assert old is not None, "a runtime sequence has a symbol"
-        ir.SymbolTable.replace_all_symbol_uses(old, member, device.operation)
-        sequence.operation.attributes["sym_name"] = ir.StringAttr.get(member)
-        text = array_text(device)
-        holder = held.get(text)
-        if holder is None:
-            held[text] = arrays[member] = device
-            continue
-        # Equal text, so the arrays' ops correspond in order.
-        kept = [op for op in _body(holder) if not isinstance(op, aie.RuntimeSequenceOp)]
-        ours = [op for op in _body(device) if not isinstance(op, aie.RuntimeSequenceOp)]
-        for mine, theirs in zip(ours, kept):
-            for a, b in zip(mine.results, theirs.results):
-                a.replace_all_uses_with(b)
-        ops = holder.body_region.blocks[0].operations
-        sequence.operation.move_before(ops[len(ops) - 1])
-        device.operation.erase()
-
-    pack = next(iter(arrays.values()))
-    if len(arrays) == 1:
-        pack.operation.attributes["sym_name"] = ir.StringAttr.get(name)
-        return pack
-    for member, device in arrays.items():
-        _namespace(device, member)
-
-    end = pack.body_region.blocks[0].operations[
-        len(pack.body_region.blocks[0].operations) - 1
-    ]
-    kernels: dict[str, str] = {}
-    tiles: dict[tuple[int, int], ir.Value] = {}
     exclusive: dict[tuple[str, tuple[int, int]], tuple[str, str]] = {}
-
-    for member, device in arrays.items():
+    for member, device in devices.items():
         routed: set[tuple[tuple[int, int], aie.DMAChannelDir, int]] = set()
         allocated: set[tuple[tuple[int, int], aie.DMAChannelDir, int]] = set()
         for op in _body(device):
-            if _is_kernel_declaration(op):
-                symbol = _symbol(op)
-                assert symbol is not None, "a func.func has a symbol"
-                # Mid-merge the module need not verify, and a printer that
-                # verifies first falls back to the generic form.
-                text = op.operation.get_asm(assume_verified=True)
-                seen = kernels.get(symbol)
-                if seen is not None:
-                    if seen != text:
-                        raise CoResidenceError(
-                            f"kernel {symbol} is declared differently by two designs"
-                        )
-                    op.operation.erase()
-                    continue
-                kernels[symbol] = text
-            coords = _pinned_tile(op)
-            if coords is not None and isinstance(op, aie.TileOp):
-                if coords in tiles:
-                    op.result.replace_all_uses_with(tiles[coords])
-                    op.operation.erase()
-                    continue
-                tiles[coords] = op.result
             claims: list[tuple[str, tuple[int, int], str]] = []
             if op.operation.name in _EXCLUSIVE_PER_TILE:
                 placed = _pinned_tile(op.operation.operands[0].owner)
@@ -340,8 +232,6 @@ def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceO
                         f"on tile {placed}, which carries one {kind}"
                     )
                 exclusive[key] = (member, what)
-            if device is not pack:
-                op.operation.move_before(end)
         if routed - allocated:
             placed, direction, channel = min(routed - allocated)
             raise CoResidenceError(
@@ -349,47 +239,91 @@ def merge_devices(name: str, members: Mapping[str, aie.DeviceOp]) -> aie.DeviceO
                 f"{channel} by hand with no aie.shim_dma_allocation for it, "
                 "so another member's fifo could be given it"
             )
-        if device is not pack:
-            device.operation.erase()
-
-    pack.operation.attributes["sym_name"] = ir.StringAttr.get(name)
-    return pack
 
 
-def fits(device_texts: Mapping[str, str], params_preamble: str = "") -> str | None:
-    """``None`` if ``device_texts`` (design name -> ``aie.device`` text),
-    merged, places and allocates, else the diagnostic.
+def pack(name: str, arrays: Mapping[str, BuiltArray]) -> DeviceConfiguration:
+    """``arrays`` co-resident in one device configuration named ``name``
+    (``design.configuration``).
+
+    Raises:
+        CoResidenceError: Two of its arrays program one pinned tile
+            (``conflicts``).
     """
-    with ir.Context() as ctx, ir.Location.unknown():
-        diagnostics: list[str] = []
+    distinct: dict[Hashable, BuiltArray] = {}
+    of = identities(arrays)
+    for key, array in arrays.items():
+        distinct.setdefault(of[key], array)
+    if len(distinct) > 1:
+        # Each array alone, so a claim names the design that makes it.
+        modules = {a.design.name: a.design.module() for a in distinct.values()}
+        conflicts(
+            {
+                member: next(
+                    op for op in m.body.operations if isinstance(op, aie.DeviceOp)
+                )
+                for member, m in modules.items()
+            }
+        )
+    return configuration(name, arrays)
 
-        def collect(d: ir.Diagnostic) -> bool:
-            if d.severity == ir.DiagnosticSeverity.ERROR:
-                diagnostics.append(f"{d.location}: {d.message}")
-            return True
 
-        handler = ctx.attach_diagnostic_handler(collect)
-        try:
-            module = ir.Module.parse(f"module {{\n{params_preamble}\n}}")
-            devices: dict[str, aie.DeviceOp] = {}
-            # Parsed alone and named first: two unnamed devices are one symbol twice.
-            for design, text in device_texts.items():
-                alone = ir.Module.parse(f"module {{\n{params_preamble}\n{text}\n}}")
-                for op in alone.body.operations:
-                    if isinstance(op, aie.DeviceOp):
-                        op.operation.attributes["sym_name"] = ir.StringAttr.get(design)
-                        module.body.append(op)
-                        devices[design] = op
-            if len(devices) > 1:
-                merge_devices(Packing.device_name(list(devices)), devices)
-            PassManager.parse(_FIT_PIPELINE).run(module.operation)
-        except CoResidenceError as e:
-            return str(e)
-        except ir.MLIRError as e:
-            return "\n".join(diagnostics) or str(e)
-        finally:
-            handler.detach()
-        return "\n".join(diagnostics) if diagnostics else None
+def places(module: ir.Module) -> str | None:
+    """``None`` if ``module``'s devices place and allocate, else the
+    diagnostic.
+    """
+    diagnostics: list[str] = []
+
+    def collect(d: ir.Diagnostic) -> bool:
+        if d.severity == ir.DiagnosticSeverity.ERROR:
+            diagnostics.append(f"{d.location}: {d.message}")
+        return True
+
+    handler = module.context.attach_diagnostic_handler(collect)
+    try:
+        PassManager.parse(_FIT_PIPELINE, module.context).run(module.operation)
+    except ir.MLIRError as e:
+        return "\n".join(diagnostics) or str(e)
+    finally:
+        handler.detach()
+    return "\n".join(diagnostics) if diagnostics else None
+
+
+def fits(
+    designs: Mapping[str, OperatorDesign], words: Mapping[str, str] | None = None
+) -> str | None:
+    """``None`` if ``designs`` place and allocate as one pack, else the
+    diagnostic.
+
+    Args:
+        designs: The designs, by the name each takes in the device; one
+            another tool exports is a device of its own.
+        words: Design symbol -> the scratchpad word it shares with others.
+    """
+    exported = [n for n, d in designs.items() if d.op.exported_design() is not None]
+    try:
+        if exported and len(designs) > 1:
+            raise CoResidenceError(
+                f"{exported[0]} is exported by another tool, a device of its own"
+            )
+        if exported:
+            (design,) = designs.values()
+            module = ir.Module.parse(str(design.build()), ir.Context())
+        else:
+            arrays = {n: BuiltArray(d, words) for n, d in designs.items()}
+            configured = pack(
+                (
+                    next(iter(arrays))
+                    if len(arrays) == 1
+                    else Packing.device_name(list(arrays))
+                ),
+                arrays,
+            )
+            module = Program.compose(
+                [configured], entry=configured.runtimes[0]
+            ).resolve_program()
+    except (ValueError, RuntimeError, ir.MLIRError) as e:
+        return str(e)
+    return places(module)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -404,11 +338,11 @@ class AdjacentPacking:
     def pack(
         self,
         order: Sequence[str],
-        device_texts: Mapping[str, str],
-        params_preamble: str = "",
+        designs: Mapping[str, OperatorDesign],
+        words: Mapping[str, str] | None = None,
     ) -> tuple[Packing, dict[tuple[str, ...], str]]:
-        """The packing for runlist ``order``, and the diagnostic that stopped
-        each pack growing.
+        """The packing for runlist ``order`` of ``designs``, and the
+        diagnostic that stopped each pack growing.
         """
         groups: list[tuple[str, ...]] = []
         stopped: dict[tuple[str, ...], str] = {}
@@ -426,9 +360,7 @@ class AdjacentPacking:
                 "max_members"
                 if full
                 else (
-                    fits({d: device_texts[d] for d in candidate}, params_preamble)
-                    if current
-                    else None
+                    fits({d: designs[d] for d in candidate}, words) if current else None
                 )
             )
             if verdict is None:

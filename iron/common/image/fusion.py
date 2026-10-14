@@ -1,30 +1,34 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Temporal fusion: a sequence's designs as one module, one device per array
-(designs whose devices differ only in their runtime sequences share one) or
-per pack of arrays (``coresidence``), and a main runtime sequence that
-configures and runs them in turn.
+"""Temporal fusion: a sequence's designs as one module, mlir-aie's
+``Program.compose``: a ``DeviceConfiguration`` per array (designs of one
+array each run their own sequence over it) or per pack of arrays
+(``coresidence``), and a main one whose runtime sequence configures and
+runs them in turn.
 """
 
 from __future__ import annotations
 
 import hashlib
+import itertools
 import logging
-import re
-from collections.abc import Collection, Hashable, Mapping
-from typing import Any, NamedTuple
+import math
+from collections.abc import Collection, Hashable
+from typing import NamedTuple
 
 import numpy as np
 from aie import ir
-from aie.dialects import aie, aiex, arith, memref
-from aie.helpers.util import mlir_type_to_np_dtype
+from aie.dialects import aie, arith, memref
+from aie.helpers.npdtypes import np_ndarray_type_get_dtype, np_ndarray_type_get_shape
+from aie.helpers.util import mlir_type_to_np_dtype, np_ndarray_type_to_memref_type
+from aie.iron import DeviceConfiguration, Program, Runtime, ScratchpadParameter
 from aie.utils import bfp
 from aie.utils.compile.jit.compilabledesign import compile_context
 
-from ..design import OperatorDesign
+from ..design import BuiltArray, OperatorDesign, identities
 from .allocator import BANK
-from .coresidence import AdjacentPacking, Packing, array_text, merge_devices
+from .coresidence import AdjacentPacking, CoResidenceError, Packing, pack
 
 logger = logging.getLogger(__name__)
 
@@ -81,56 +85,6 @@ class ArgumentSizes(NamedTuple):
         return self.bank_kinds[k], offset - k * BANK
 
 
-def _memref_bytes(memref_type: ir.MemRefType) -> int:
-    """Bytes a runtime-sequence argument of ``memref_type`` spans."""
-    dtype = mlir_type_to_np_dtype(memref_type.element_type)
-    if dtype is None:
-        raise TypeError(f"no host dtype for the elements of {memref_type}")
-    return int(np.prod(memref_type.shape)) * bfp.itemsize(dtype)
-
-
-class GeneratedDesign(NamedTuple):
-    """A design's module taken apart: its one device and its module-scope
-    scratchpad parameters (symbol -> type). The module keeps the ops alive.
-    """
-
-    module: ir.Module
-    device: Any  # aie.DeviceOp
-    parameters: dict[str, ir.Type]
-
-
-def generate(design: OperatorDesign) -> GeneratedDesign:
-    """``design``'s module, generated as a child of a fusion, taken apart."""
-    # The fusion drives PDI loading itself; a child that also loads its own
-    # links fine and hangs at dispatch (ERT_CMD_STATE_TIMEOUT).
-    with compile_context(_iron_full_elf=False):
-        module = design.build()
-    if isinstance(module, str):
-        module = ir.Module.parse(module, ir.Context())
-    devices = []
-    parameters: dict[str, ir.Type] = {}
-    for op in module.body.operations:
-        if isinstance(op, aie.DeviceOp):
-            devices.append(op)
-        elif op.operation.name == "aiex.scratchpad_parameter":
-            sym_name = ir.StringAttr(op.operation.attributes["sym_name"]).value
-            parameters[sym_name] = ir.TypeAttr(op.operation.attributes["type"]).value
-    if len(devices) != 1:
-        raise ValueError(
-            f"expected exactly one device operation in the module of "
-            f"'{design.name}', got {len(devices)}"
-        )
-    return GeneratedDesign(module, devices[0], parameters)
-
-
-def parameters_preamble(parameters: Mapping[str, ir.Type]) -> str:
-    """Module-scope declarations of ``parameters``, as text."""
-    return "\n".join(
-        f"  aiex.scratchpad_parameter @{name} : {param_type}"
-        for name, param_type in parameters.items()
-    )
-
-
 class Fusion:
     """An operator sequence's designs, fused into one module.
 
@@ -140,7 +94,9 @@ class Fusion:
     be set.
     """
 
-    RESET_DEVICE = "reset_device"
+    # The device configuration a sequence ends on to keep the configure
+    # points of an expanded load even (``needs_reset``).
+    EMPTY = "empty_configuration"
 
     def __init__(self, seq):
         designs, design_of = seq.unique_designs()
@@ -229,228 +185,222 @@ class Fusion:
         return points % 2 == 1
 
     def text(self) -> str:
-        """The fused module: every design's device, and a main device whose
-        runtime sequence runs them in runlist order.
+        """The fused module: a device configuration per array or pack, and a
+        main one whose runtime sequence configures each in runlist order and
+        runs its steps there.
+
+        Raises:
+            CoResidenceError: A pack holds a design another tool exports, or
+                two of its arrays program one pinned tile.
+            ValueError: A buffer's layout disagrees with the sequence it is
+                handed to, or a shared word names an exported design's own.
         """
-        runlist = self.runlist
-        subbuffer_layout = self.subbuffer_layout
-        slice_info = self.slice_info
-        shared = self.shared_words
-        shared_ref = (
-            re.compile(
-                "@("
-                + "|".join(re.escape(s) for s in sorted(shared, key=len, reverse=True))
-                + r")(?![\w$.])"
+        words = self.shared_words
+        arrays: dict[str, BuiltArray] = {}
+        exported: dict[str, str] = {}
+        for name, design in self.designs.items():
+            if design.op.exported_design() is None:
+                arrays[name] = BuiltArray(design, words)
+                continue
+            # The fusion configures each device; a child that also loads its
+            # own links fine and hangs at dispatch (ERT_CMD_STATE_TIMEOUT).
+            with compile_context(_iron_full_elf=False):
+                exported[name] = str(design.build())
+        of = identities(arrays)
+        split: dict[Hashable, dict[Hashable, str]] = {}
+        for name, array in arrays.items():
+            split.setdefault(array.op.array_key(), {}).setdefault(of[name], name)
+        for shared in split.values():
+            if len(shared) > 1:
+                logger.info(
+                    "%s have one array_key, but their cores read other scratchpad "
+                    "words, so they do not share an array",
+                    list(shared.values()),
+                )
+
+        packing = self.packing
+        if isinstance(packing, AdjacentPacking):
+            packing, _ = packing.pack(
+                [name for name, *_ in self.runlist], self.designs, words
             )
-            if shared
+        packing = packing.sharing(
+            {n: of[n] if n in arrays else n for n in self.designs}
+        )
+        device = next(iter(self.designs.values())).op.device()
+        configurations: dict[str, DeviceConfiguration] = {}
+        runtimes: dict[str, Runtime] = {}
+        types: dict[str, list] = {}
+        for symbol, members in packing.devices(self.designs).items():
+            outside = [m for m in members if m in exported]
+            if outside and len(members) > 1:
+                raise CoResidenceError(
+                    f"{outside[0]} is exported by another tool, a device of its "
+                    f"own, so it packs with none of {list(members)}"
+                )
+            if outside:
+                (name,) = outside
+                stub, types[name] = self._exported_sequence(name, exported[name])
+                configured = DeviceConfiguration(
+                    symbol, self.designs[name].op.device(), runtimes=[stub]
+                )
+            else:
+                configured = pack(symbol, {m: arrays[m] for m in members})
+                for m in members:
+                    types[m] = [b.flat_type for b in arrays[m].op.buffers]
+            configurations[symbol] = configured
+            runtimes.update(zip(members, configured.runtimes))
+
+        empty = (
+            DeviceConfiguration(self.EMPTY, device)
+            if self.needs_reset(packing)
             else None
         )
+        calls = [
+            (
+                configurations[packing.device_of(name)],
+                runtimes[name],
+                self._views(name, buffers, types[name]),
+            )
+            for name, *buffers in self.runlist
+        ]
         arguments = self.buffer_sizes.arguments()
 
-        device_mlir_strings = {}
-        arrays: dict[str, str] = {}
-        operator_param_decls: dict[str, dict[str, ir.Type]] = {}
-        device_ty = None
-        sequence_arg_types = {}
-        for op_name, design in self.designs.items():
-            generated = generate(design)
-            device_op = generated.device
-            params_here = {
-                shared.get(sym_name) or sym_name: param_type
-                for sym_name, param_type in generated.parameters.items()
-            }
-            if device_ty is None:
-                device_ty = device_op.device
-            texts = [str(device_op), array_text(device_op)]
-            if shared_ref is not None:
-                texts = [
-                    shared_ref.sub(lambda m: "@" + shared[m.group(1)], t) for t in texts
-                ]
-            device_mlir_strings[op_name], arrays[op_name] = texts
-            operator_param_decls[op_name] = params_here
-            sequence_arg_types[op_name] = self._sequence_arg_types(device_op)
-        by_key: dict[Any, list[str]] = {}
-        for op_name, design in self.designs.items():
-            by_key.setdefault(design.op.array_key(), []).append(op_name)
-        for names in by_key.values():
-            if len({arrays[n] for n in names}) > 1:
-                logger.info(
-                    "%s have one array_key, but their devices differ beyond "
-                    "the runtime sequence, so they do not share an array",
-                    names,
-                )
-
-        # Deduplicate parameter decls across operators (same name must have the
-        # same type; otherwise indices would collide in the global state table).
-        hoisted_params: dict[str, ir.Type] = {}
-        for op_name, params_here in operator_param_decls.items():
-            for sym_name, param_type in params_here.items():
-                existing = hoisted_params.get(sym_name)
-                if existing is not None and str(existing) != str(param_type):
-                    raise ValueError(
-                        f"ScratchpadParameter '{sym_name}' is declared with conflicting "
-                        f"types across operators: {existing} vs {param_type}"
-                    )
-                hoisted_params[sym_name] = param_type
-
-        # Build fused MLIR module
-        loc = ir.Location.unknown(ir.Context())
-        module = ir.Module.create(loc)
-        with loc.context, loc, ir.InsertionPoint(module.body):
-            # Emit hoisted parameters first.
-            with ir.InsertionPoint.at_block_begin(module.body):
-                for sym_name, param_type in hoisted_params.items():
-                    aiex.scratchpad_parameter(sym_name, param_type)
-
-            # Concatenate aie.device ops, merging each pack's into one.
-            params_preamble = parameters_preamble(hoisted_params)
-            packing = self.packing
-            if isinstance(packing, AdjacentPacking):
-                packing, _ = packing.pack(
-                    [op_name for op_name, *_ in runlist],
-                    device_mlir_strings,
-                    params_preamble,
-                )
-            packing = packing.sharing(arrays)
-            for device_name, members in packing.devices(device_mlir_strings).items():
-                member_ops = {}
-                for op_name in members:
-                    wrapped = f"module {{\n{params_preamble}\n{device_mlir_strings[op_name]}\n}}"
-                    wrapper_module = ir.Module.parse(wrapped)
-                    # Find the (sole) DeviceOp in the wrapper module.
-                    dev_op = None
-                    for op in wrapper_module.body.operations:
-                        if isinstance(op, aie.DeviceOp):
-                            dev_op = op
-                            break
-                    assert (
-                        dev_op is not None
-                    ), f"DeviceOp missing after re-parse for operator '{op_name}'"
-                    dev_op.sym_name = ir.StringAttr.get(op_name)
-                    module.body.append(dev_op)
-                    member_ops[op_name] = dev_op
-                if len(member_ops) > 1:
-                    merge_devices(device_name, member_ops)
-
-            needs_reset = self.needs_reset(packing)
-            if needs_reset:
-
-                @aie.device(device_ty)
-                def reset():
-                    @aiex.runtime_sequence()
-                    def sequence():
-                        pass
-
-                reset_op: Any = reset  # a DeviceOp; region_op types it as the function
-                reset_op.operation.attributes["sym_name"] = ir.StringAttr.get(
-                    self.RESET_DEVICE
-                )
-
-            # Create the main device -- this contains the runtime sequence calling into the other devices
-            @aie.device(device_ty)
-            def main():
-                # Flat bytes; each buffer is a typed view at its byte offset.
-                arg_types: list[Any] = [
-                    np.ndarray[(nbytes,), np.dtype[np.int8]]
-                    for nbytes in arguments.values()
-                ]
-
-                @aiex.runtime_sequence(*arg_types)
-                def sequence(*buffers):
-                    consolidated_buffers = dict(zip(arguments, buffers))
-
-                    # Execute operations in runlist order
-                    configure_op = None
-                    configure_body = None
-                    last_device = None
-                    for op_name, *buffer_names in runlist:
-                        expected_arg_types = sequence_arg_types[op_name]
-                        device_name = packing.device_of(op_name)
-
-                        # Consecutive steps in one device share its configure point
-                        if configure_op is None or device_name != last_device:
-                            configure_op = aiex.ConfigureOp(
-                                ir.FlatSymbolRefAttr.get(device_name)
-                            )
-                            configure_body = configure_op.body.blocks.append()
-                            last_device = device_name
-
-                        assert configure_body is not None
-                        with ir.InsertionPoint(configure_body):
-                            # For each buffer, view its bytes as the argument type
-                            # the sub-design declares
-                            buffer_ssa_values = []
-                            for idx, buf_name in enumerate(buffer_names):
-                                # Check if this is a sliced buffer
-                                if buf_name in slice_info:
-                                    base_name, start, end = slice_info[buf_name]
-                                    # Get parent buffer info
-                                    buf_type, parent_offset, parent_length = (
-                                        subbuffer_layout[base_name]
-                                    )
-                                    # Calculate actual offset and length for slice
-                                    offset = parent_offset + start
-                                    length = end - start
-                                else:
-                                    # Regular buffer
-                                    buf_type, offset, length = subbuffer_layout[
-                                        buf_name
-                                    ]
-
-                                # Parsed anew: the sub-design's type may
-                                # belong to the context it was generated in.
-                                target_type = ir.MemRefType(
-                                    ir.Type.parse(str(expected_arg_types[idx]))
+        def sequence(*tensors):
+            held = dict(zip(arguments, tensors))
+            # Consecutive steps in one device share its configure point.
+            for configured, steps in itertools.groupby(calls, key=lambda c: c[0]):
+                with configured.configure():
+                    for _, runtime, views in steps:
+                        runtime.call(
+                            *(
+                                memref.view(
+                                    np_ndarray_type_to_memref_type(view_type),
+                                    held[kind].op,
+                                    arith.constant(ir.IndexType.get(), offset),
+                                    [],
                                 )
-                                expected_bytes = _memref_bytes(target_type)
-                                if expected_bytes != length:
-                                    raise ValueError(
-                                        f"Size mismatch for buffer '{buf_name}': the "
-                                        f"runtime sequence of '{op_name}' takes "
-                                        f"{target_type} ({expected_bytes} bytes), the "
-                                        f"layout gives it {length} bytes"
-                                    )
-                                # Low address bits are dropped: it would move.
-                                if offset % SHIM_ADDRESS_ALIGNMENT:
-                                    raise ValueError(
-                                        f"Buffer '{buf_name}' of '{op_name}' starts at "
-                                        f"byte {offset} of the {buf_type} argument, "
-                                        f"which is not a multiple of "
-                                        f"{SHIM_ADDRESS_ALIGNMENT}"
-                                    )
-                                if buf_type == "scratch":
-                                    buf_type, offset = (
-                                        self.buffer_sizes.scratch_argument(
-                                            offset, length
-                                        )
-                                    )
-                                buffer_ssa_values.append(
-                                    memref.view(
-                                        target_type,
-                                        consolidated_buffers[buf_type],
-                                        arith.constant(ir.IndexType.get(), offset),
-                                        [],
-                                    )
-                                )
-
-                            # Run Op
-                            sequence_sym_ref_attr = ir.FlatSymbolRefAttr.get(
-                                packing.sequence_of(op_name)
+                                for kind, offset, view_type in views
                             )
-                            aiex.RunOp(sequence_sym_ref_attr, buffer_ssa_values)
-
-                    if needs_reset:
-                        reset_op = aiex.ConfigureOp(
-                            ir.FlatSymbolRefAttr.get(self.RESET_DEVICE)
                         )
-                        reset_op.body.blocks.append()
+            if empty is not None:
+                with empty.configure():
+                    pass
 
+        # Flat bytes; each buffer is a typed view at its byte offset.
+        entry = Runtime(
+            sequence,
+            [np.ndarray[(nbytes,), np.dtype[np.int8]] for nbytes in arguments.values()],
+            name="sequence",
+        )
+        main = DeviceConfiguration("main", device, runtimes=[entry])
+        module = Program.compose(
+            [*configurations.values(), *([empty] if empty is not None else []), main],
+            entry=entry,
+        ).resolve_program()
+
+        # Each exported device takes the place its stub configuration held.
+        with module.context, ir.Location.unknown():
+            stubs = {
+                ir.StringAttr(op.operation.attributes["sym_name"]).value: op
+                for op in module.body.operations
+                if isinstance(op, aie.DeviceOp)
+            }
+            for name, text in exported.items():
+                foreign = ir.Module.parse(text)
+                (device_op,) = [
+                    op for op in foreign.body.operations if isinstance(op, aie.DeviceOp)
+                ]
+                stub = stubs[packing.device_of(name)]
+                device_op.operation.attributes["sym_name"] = ir.StringAttr.get(
+                    packing.device_of(name)
+                )
+                device_op.operation.move_before(stub.operation)
+                stub.operation.erase()
             return str(module)
 
-    @staticmethod
-    def _sequence_arg_types(dev_op: Any) -> list[Any]:
-        """The argument types of a device's runtime sequence."""
-        for nested_op in dev_op.body_region.blocks[0].operations:
-            if nested_op.operation.name == "aie.runtime_sequence":
-                return [arg.type for arg in nested_op.body.blocks[0].arguments]
-        raise RuntimeError("Could not find runtime sequence in device operation")
+    def _exported_sequence(self, name: str, text: str) -> tuple[Runtime, list]:
+        """A stub of exported design ``name``'s runtime sequence, which
+        declares its scratchpad parameters, and its argument types.
+
+        Raises:
+            ValueError: A shared word names one of its parameters.
+        """
+        with ir.Context(), ir.Location.unknown():
+            foreign = ir.Module.parse(text)
+            (device_op,) = [
+                op for op in foreign.body.operations if isinstance(op, aie.DeviceOp)
+            ]
+            (sequence_op,) = [
+                op
+                for op in device_op.body_region.blocks[0].operations
+                if isinstance(op, aie.RuntimeSequenceOp)
+            ]
+            types = []
+            for arg in sequence_op.body.blocks[0].arguments:
+                memref_type = ir.MemRefType(arg.type)
+                dtype = mlir_type_to_np_dtype(memref_type.element_type)
+                if dtype is None:
+                    raise TypeError(f"no host dtype for the elements of {memref_type}")
+                types.append(np.ndarray[tuple(memref_type.shape), np.dtype[dtype]])
+            parameters = {
+                ir.StringAttr(op.operation.attributes["sym_name"]).value: (
+                    mlir_type_to_np_dtype(
+                        ir.TypeAttr(op.operation.attributes["type"]).value
+                    )
+                )
+                for op in foreign.body.operations
+                if op.operation.name == "aiex.scratchpad_parameter"
+            }
+            sequence_name = ir.StringAttr(
+                sequence_op.operation.attributes["sym_name"]
+            ).value
+        renamed = sorted(set(parameters) & set(self.shared_words))
+        if renamed:
+            raise ValueError(
+                f"{name} is exported by another tool, so its scratchpad words "
+                f"{renamed} are its own to name; none is shared"
+            )
+        stub = Runtime(
+            lambda *_: None, types, name=sequence_name, implicit_configure=False
+        )
+        for symbol, dtype in parameters.items():
+            stub.register_parameter(ScratchpadParameter(symbol, dtype))
+        return stub, types
+
+    def _views(self, name: str, buffers, types) -> list[tuple[str, int, type]]:
+        """Where step ``name``'s buffers are in the fused image's arguments:
+        ``(argument, byte offset, type)`` each, ``type`` that of its
+        sequence's argument.
+
+        Raises:
+            ValueError: A buffer's bytes differ from its argument's, or it
+                starts off a shim address.
+        """
+        views = []
+        for buffer, view_type in zip(buffers, types):
+            if buffer in self.slice_info:
+                base, start, end = self.slice_info[buffer]
+                kind, parent, _ = self.subbuffer_layout[base]
+                offset, length = parent + start, end - start
+            else:
+                kind, offset, length = self.subbuffer_layout[buffer]
+            nbytes = math.prod(np_ndarray_type_get_shape(view_type)) * bfp.itemsize(
+                np_ndarray_type_get_dtype(view_type)
+            )
+            if nbytes != length:
+                raise ValueError(
+                    f"Size mismatch for buffer '{buffer}': the runtime sequence of "
+                    f"'{name}' takes {view_type} ({nbytes} bytes), the layout "
+                    f"gives it {length} bytes"
+                )
+            # Low address bits are dropped: it would move.
+            if offset % SHIM_ADDRESS_ALIGNMENT:
+                raise ValueError(
+                    f"Buffer '{buffer}' of '{name}' starts at byte {offset} of the "
+                    f"{kind} argument, which is not a multiple of "
+                    f"{SHIM_ADDRESS_ALIGNMENT}"
+                )
+            if kind == "scratch":
+                kind, offset = self.buffer_sizes.scratch_argument(offset, length)
+            views.append((kind, offset, view_type))
+        return views

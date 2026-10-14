@@ -219,7 +219,9 @@ reuse lint
      `compile(dev=, full_elf=)`
    - `image/`: what a graph lowers onto, all of it internal: the sequence
      a traced graph becomes, the buffer allocator (`LiveRange`, `Pool`,
-     `ArenaPlan`), `Fusion` (the designs of a sequence as one module),
+     `ArenaPlan`), `Fusion` (the designs of a sequence as one module, a
+     `DeviceConfiguration` per array or pack composed by mlir-aie's
+     `Program.compose`),
      `FusedImage`/`XclbinChain` (the full ELF or the chain of xclbins it
      links), an operator's own image (what an operator called outside a
      graph runs: `op(*tensors)` compiles it once and runs it,
@@ -664,8 +666,7 @@ code before relying on a line here; it is the authority.
   not fold into flm.GEMM's gate, whose cores read A and B. Pinning a
   weighted RMSNorm's two cores adjacent, so the line between them is
   shared memory, would free the first.
-- Open upstream asks in mlir-aie: a builder for `aiex.configure` /
-  `aiex.run`; an accessor for L1 banking. aiecc's split memory (a whole-module clone per split item) is
+- Open upstream asks in mlir-aie: an accessor for L1 banking. aiecc's split memory (a whole-module clone per split item) is
   mlir-aie #3689's, which shares one clone per split.
 
 ## Common Patterns

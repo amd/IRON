@@ -23,7 +23,6 @@ import pytest
 import iron.operators as ops
 import iron.operators.flm as flm
 from iron.common.design import OperatorDesign
-from iron.common.image.fusion import generate
 from iron.operators.clamp import Clamp
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -72,7 +71,7 @@ def test_a_probe_field_moves_only_runtime_parameter_words(cls):
     away = cls(**AWAY[cls])
     probe = away.probed()
     assert all(getattr(away, n) != v for n, v in cls.declaration.probes.items())
-    modules = [generate(OperatorDesign(op.resolved())).module for op in (away, probe)]
+    modules = [OperatorDesign(op.resolved()).module() for op in (away, probe)]
     flows = ({}, {})
     moved = 0
     for a, b in itertools.zip_longest(*(_operations(m.operation) for m in modules)):

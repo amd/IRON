@@ -62,6 +62,7 @@ class OperatorRuntime(Runtime):
         built: What its ``array()`` returned: its workers and barriers, and
             the flows, locks, tile DMAs and shim channels only the sequence
             reaches.
+        name: The sequence's symbol; the Program names it when None.
 
     Attributes:
         barriers: The barriers the preamble opens.
@@ -71,7 +72,7 @@ class OperatorRuntime(Runtime):
             shipped image's parameter block.
     """
 
-    def __init__(self, op: Operator, built: list = ()) -> None:
+    def __init__(self, op: Operator, built: list = (), name: str | None = None) -> None:
         self.op = op
         self.barriers = tuple(b for b in built if isinstance(b, WorkerRuntimeBarrier))
         self.channels = [c for c in built if isinstance(c, ShimChannel)]
@@ -90,6 +91,7 @@ class OperatorRuntime(Runtime):
                 handles,
                 *(v.param for v in op.values),
             ],
+            name=name,
         )
         # Before resolving: the sequence body, generated last, may address any of it.
         for obj in built:

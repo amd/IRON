@@ -90,7 +90,7 @@ from aie.utils.compile import NPU_CACHE_HOME
 from ..declare import Operator
 from ..design import OperatorDesign
 from ..image.coresidence import Packing, fits
-from ..image.fusion import Fusion, generate, parameters_preamble
+from ..image.fusion import Fusion
 from .fold import FOLD_RUNS, Folding, Made, folded, foldings
 from .trace import TracedGraph
 
@@ -223,15 +223,7 @@ def fit_verdict(
     if record.exists():
         verdict = record.read_text()
     else:
-        texts, params = {}, {}
-        try:
-            for name, design in designs.items():
-                generated = generate(design)
-                texts[name] = str(generated.device)
-                params.update(generated.parameters)
-            diagnostic = fits(texts, parameters_preamble(params))
-        except ValueError as e:
-            diagnostic = str(e)
+        diagnostic = fits(designs)
         verdict = "fits" if diagnostic is None else f"refused: {diagnostic}"
         _write(record, verdict)
     return None if verdict == "fits" else verdict.removeprefix("refused: ")

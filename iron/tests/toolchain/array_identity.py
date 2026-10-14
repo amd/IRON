@@ -119,4 +119,4 @@ def test_the_extents_share_one_device(npu2, module, cls_name, tunables, extent):
     fused = Fusion(seq)
     pack = Packing.device_name(list(fused.designs))
     devices = re.findall(r"^  aie\.device\(\w+\) @(\w+) \{$", fused.text(), re.M)
-    assert devices == [pack, Fusion.RESET_DEVICE]
+    assert devices == [pack, Fusion.EMPTY]
