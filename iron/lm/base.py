@@ -40,6 +40,8 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common.graph.narrowing import CostTable, JointNarrowing, NarrowingKinds
+from iron.common.graph.probe import Call
+from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 
 from .generation import (
     SEED,
@@ -445,6 +447,12 @@ class Runner:
     the token every prompt starts with. A model that comes in several sizes
     names them in ``sizes``, ``config`` among them, and ``--size`` picks one.
 
+    It is also what ``iron.lm.tune`` measures the model's cost table by:
+    ``tune_arguments`` and ``tune_calls``, a decoder's decode step and prompt
+    chunk here, a model of another kind its own; ``calibration_triangle``,
+    the operator classes the configure cost is measured between; and
+    ``tables``, where the table lands (beside the model module if None).
+
     The checkpoint is mapped, not read: ``npu`` uploads it a piece at a
     time and drops each piece's host pages once it is on the device.
 
@@ -458,6 +466,11 @@ class Runner:
     sizes: dict[str, Config] = {}
     model: "type[CausalLM]"
     bos: int
+    # The configure cost is measured between small single-column designs, at
+    # their narrowest: one design's configure then costs least beside the
+    # fixed part the calibration isolates.
+    calibration_triangle: tuple[type, ...] = (ElementwiseAdd, SiLU, ElementwiseMul)
+    tables: Path | None = None
 
     @staticmethod
     def layout(config: Config) -> Layout:
@@ -466,6 +479,60 @@ class Runner:
     @staticmethod
     def open_tokenizer(path):
         raise NotImplementedError
+
+    @classmethod
+    def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
+        """The flags ``tune_calls`` follows from: the decode step's position
+        and token, the contexts attention over the cache is priced at, and
+        the sampling Sample is measured at.
+        """
+        parser.add_argument(
+            "--position",
+            type=int,
+            default=256,
+            help="the decode position the decode step's designs are measured at: "
+            "what their per-call values follow from (default: 256)",
+        )
+        parser.add_argument(
+            "--token",
+            type=int,
+            default=0,
+            help="the token the step embeds (default: 0)",
+        )
+        parser.add_argument(
+            "--context",
+            type=int,
+            default=8192,
+            help="the longest context a design whose work follows it is priced "
+            "at, a multiple of the prompt chunk (default: 8192)",
+        )
+        parser.add_argument(
+            "--points",
+            type=int,
+            default=6,
+            help="how many contexts up to --context it is priced at, each "
+            "measured per setting: their cost grows with it (default: 6)",
+        )
+        parser.add_argument("--temperature", type=float, default=0.7)
+        parser.add_argument("--top-k", type=int, default=50)
+
+    @classmethod
+    def tune_calls(
+        cls, parser: argparse.ArgumentParser, args: argparse.Namespace
+    ) -> list[Call]:
+        """The calls the model's designs are measured in (``CausalLM.tune_calls``),
+        on weights it never reads.
+        """
+        config = cls.config
+        if args.context > config.max_seq_len:
+            parser.error(
+                f"--context {args.context} is past max_seq_len {config.max_seq_len}"
+            )
+        model = cls.model(config, unread_weights(cls.layout(config), config.n_layers))
+        sample = Sampler(args.temperature, args.top_k, np.random.default_rng(SEED))
+        return model.tune_calls(
+            sample, args.position, args.token, args.context, args.points
+        )
 
     def __init__(
         self,

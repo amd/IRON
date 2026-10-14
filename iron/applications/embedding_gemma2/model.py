@@ -26,8 +26,10 @@ from ml_dtypes import bfloat16
 import tokenizers
 
 import iron
+from iron import lm
 from iron.common import Scratchpad
 from iron.common.graph.narrowing import CostTable, JointNarrowing
+from iron.common.graph.probe import Call
 from iron.lm import Encoder, attention, rope_angles, sandwich_layer
 from iron.lm.blocks import ACCURATE
 from iron.operators.copy import Copy
@@ -422,6 +424,34 @@ class Multimodal(EmbeddingGemma):
         return self.encode(tokens, dims, audio, image)
 
 
+class Runner(lm.Runner):
+    """EmbeddingGemma 2 as ``iron.lm.tune`` measures it: every version of
+    ``Multimodal`` (the text encoder, each tower and the merge) at its
+    longest call, on weights it never reads, the table in ``profiles/``. The
+    towers' graphs alone run designs these hold, so one table serves them.
+    """
+
+    config = Config()
+    model = Multimodal
+    tables = PROFILES
+
+    @classmethod
+    def tune_arguments(cls, parser: argparse.ArgumentParser) -> None:
+        """No flag: every version is measured at its longest call."""
+
+    @classmethod
+    def tune_calls(
+        cls, parser: argparse.ArgumentParser, args: argparse.Namespace
+    ) -> list[Call]:
+        dev = aie_utils.ensure_current_device()
+        graph = cls.model(cls.config, Weights.unread())
+        return [
+            call
+            for shapes in graph.shapes()
+            for call in Call.admitted(graph.trace(**shapes), dev, graph.longest())
+        ]
+
+
 def main():
     config = Config()
     parser = argparse.ArgumentParser(
@@ -439,9 +469,9 @@ def main():
     parser.add_argument(
         "--costs",
         type=Path,
-        help="the cost table the designs are narrowed and packed by (tune "
-        f"writes costs_<device>.json in {PROFILES}); default: as the profile "
-        "gives them",
+        help="the cost table the designs are narrowed and packed by "
+        "(`python -m iron.lm.tune embedding_gemma2` writes costs_<device>.json "
+        f"in {PROFILES}); default: as the profile gives them",
     )
     args = parser.parse_args()
     tokenizer = Tokenizer(args.directory / "tokenizer.json", config)

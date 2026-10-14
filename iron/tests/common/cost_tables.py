@@ -19,7 +19,7 @@ from iron.common.graph import tune as graph_tune
 from iron.common.graph.narrowing import CostTable
 from iron.common.graph.probe import Designs
 from iron.lm import SEED, Sampler
-from iron.lm.tune import CALIBRATION_TRIANGLE, calls, contexts
+from iron.lm.causal import contexts
 from iron.tests.common.llama_model import llama_1b
 
 TABLES = sorted(Path(iron.__file__).parent.rglob("costs_*.json"))
@@ -38,10 +38,10 @@ def test_a_checked_in_table_loads_every_entry_it_holds(path):
 )
 def test_llamas_table_holds_every_design_it_tunes(npu2, path):
     sample = Sampler(0.7, 50, np.random.default_rng(SEED))
-    designs = Designs.of(calls(llama_1b(), sample, 256, 0, 8192, 6), npu2)
+    designs = Designs.of(llama_1b().tune_calls(sample, 256, 0, 8192, 6), npu2)
     table = CostTable(path)
     stale = designs.stale(table)
-    missing = designs.missing(table, CALIBRATION_TRIANGLE)
+    missing = designs.missing(table, llama_model.Runner.calibration_triangle)
     settings = {v.key: (vs[0], v) for vs in designs.settings.values() for v in vs}
     unmeasured = []
     for key in missing:
@@ -83,7 +83,7 @@ def test_a_ladder_of_contexts_halves_down_and_weighs_each_by_its_share():
 
 def test_llama_prices_only_attention_at_its_contexts(npu2):
     sample = Sampler(0.7, 50, np.random.default_rng(SEED))
-    designs = Designs.of(calls(llama_1b(1), sample, 256, 0, 8192, 6), npu2)
+    designs = Designs.of(llama_1b(1).tune_calls(sample, 256, 0, 8192, 6), npu2)
     priced = {k: designs.first[k][0] for k in designs.points}
     assert {type(op).__name__ for op in priced.values()} == {"MHA"}
     assert sorted(len(designs.points[k]) for k in priced) == [3, 6]

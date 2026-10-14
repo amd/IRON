@@ -263,8 +263,8 @@ def tokenizer():
 
 @pytest.fixture(scope="module")
 def tuner(module_npu_runtime):
-    """The designs narrowed and packed by the cost table `tune` measured on
-    this device, or as they resolve where it has measured none.
+    """The designs narrowed and packed by the cost table `iron.lm.tune`
+    measured on this device, or as they resolve where it has measured none.
     """
     table = PROFILES / f"costs_{aie_utils.ensure_current_device().name}.json"
     return JointNarrowing(CostTable(table)) if table.exists() else None

@@ -20,15 +20,15 @@ The application is one package over `iron.lm`:
 - `weights.py`: where the checkpoint keeps each weight, a layout per part,
   and `Weights`, the trees of a checkpoint directory
 - `model.py`: the text encoder and `Multimodal` on the NPU, the
-  `Tokenizer` (each task's prefix, the placeholders), and the command line
+  `Tokenizer` (each task's prefix, the placeholders), the command line, and
+  `Runner`, what `python -m iron.lm.tune embedding_gemma2` measures: every
+  version of `Multimodal`, so every graph's designs, in one cost table
 - `audio.py`, `vision.py`: the towers, each a graph of its own that
   `Multimodal` calls in its body
 - `oracle.py`: the float32 oracles, with the host feature extractor and
   image processor
-- `tune.py`: measures the cost table every graph's designs can be narrowed
-  and packed by
 - `profiles/`: the tunables per device, where an operator's own resolution
-  falls short, and the cost tables `tune.py` writes
+  falls short, and the cost tables `iron.lm.tune` writes
 
 ## Weights and tokenizer
 
@@ -56,8 +56,7 @@ python -m iron.applications.embedding_gemma2.model /path/to/embeddinggemma-2 \
 ```
 
 `--dims` truncates the embeddings, and `--costs` narrows and packs the
-designs by the table `python -m iron.applications.embedding_gemma2.tune`
-measured.
+designs by the table `python -m iron.lm.tune embedding_gemma2` measured.
 
 ## Testing
 

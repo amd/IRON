@@ -29,6 +29,7 @@ from iron.common import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.handle import Weight
 from iron.common.graph.narrowing import JointNarrowing, Tuning
+from iron.common.graph.probe import Call, Point
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.sample import Sample
@@ -37,6 +38,24 @@ from .base import Config, Oracle
 from .generation import Sampler
 
 logger = logging.getLogger(__name__)
+
+
+def contexts(top: int, count: int, unit: int) -> list[tuple[float, int]]:
+    """At most ``count`` contexts halving down from ``top``, multiples of
+    ``unit``, ascending, each weighted by the share of a uniform context in
+    ``(0, top]`` nearest it (the trapezoid rule): the weights sum to 1.
+
+    Raises:
+        ValueError: ``top`` is not a positive multiple of ``unit``.
+    """
+    if top < unit or top % unit:
+        raise ValueError(f"the context {top} is not a multiple of {unit}")
+    found = [top]
+    while len(found) < count and found[-1] // 2 >= unit and found[-1] // 2 % unit == 0:
+        found.append(found[-1] // 2)
+    found.reverse()
+    edges = [0] + [(a + b) / 2 for a, b in zip(found, found[1:])] + [top]
+    return [((hi - lo) / top, c) for lo, hi, c in zip(edges, edges[1:], found)]
 
 
 @dataclasses.dataclass
@@ -229,6 +248,54 @@ class CausalLM(iron.Graph):
             for name, v in versions.items()
             if v is not None and v.tuning is not None
         }
+
+    def tune_calls(
+        self,
+        sample: Sampler,
+        position: int,
+        token: int,
+        context: int,
+        count: int,
+    ) -> list[Call]:
+        """The calls the model's designs are measured in on the current device:
+        the decode step at ``position`` and ``token``, and the prompt chunk at
+        a whole first chunk, each as traced and with each fold it admits, Sample
+        on the draw rows ``sample`` gives. Each is priced over ``contexts`` up to
+        ``context``, ``count`` of them: the decode step at their last position,
+        the prompt chunk as the whole chunk ending there.
+        """
+        dev = aie_utils.ensure_current_device()
+        C = self.config.prefill_chunk
+        versions = [
+            (
+                self.shapes(1),
+                dict(position=position, token=token),
+                [
+                    Point(w, dict(position=c - 1, token=token))
+                    for w, c in contexts(context, count, 1)
+                ],
+            ),
+            (
+                self.shapes(C),
+                dict(position=C - 1, token=token, chunk=0, rows=C),
+                [
+                    Point(
+                        w, dict(position=c - 1, token=token, chunk=c // C - 1, rows=C)
+                    )
+                    for w, c in contexts(context, count, C)
+                ],
+            ),
+        ]
+        out = []
+        for shapes, values, points in versions:
+            traced = self.trace(**shapes)
+            # Sample's work follows its draw row's temperature and top-k: measure
+            # it at the rows generation writes, not at random words.
+            [k_max] = {s.op.k_max for s in traced.steps if isinstance(s.op, Sample)}
+            _, draws = traced.states[id(self.draws)]
+            rows = sample.rows(self.config.max_seq_len, k_max)
+            out += Call.admitted(traced, dev, values, {draws.name: rows}, points)
+        return out
 
     def logits(self, tokens) -> np.ndarray:
         """The logits after the last of ``tokens``, the whole history.

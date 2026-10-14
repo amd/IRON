@@ -8,8 +8,8 @@ A graph's cost table is filled by a module built on this one: it takes
 calls (``probe.Call.admitted``) and passes them to ``measure`` with the
 directory its tables are in: one per device, ``costs_<device>.json`` for
 the packaging the device runs, ``costs_<device>_<dispatch>.json`` for
-another. A CausalLM model's is ``iron.lm.tune`` (``python -m iron.lm.tune
-<application>``).
+another. A model's is ``iron.lm.tune`` (``python -m iron.lm.tune
+<application>``), by the plan its ``Runner`` gives.
 
 One operator is measured at every setting it tunes to by this module's own
 command line, its fields as a profile entry names them:
