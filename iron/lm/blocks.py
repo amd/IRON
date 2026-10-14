@@ -57,7 +57,15 @@ from iron.operators.silu import SiLU
 from .causal import Step
 
 
-def project(x, weight, bias=None, k_tile=None, tile_n=None, **gemv):
+def project(
+    x,
+    weight,
+    bias=None,
+    k_tile=None,
+    tile_n=None,
+    emulate_bf16_mmul_with_bfp16=None,
+    **gemv,
+):
     """``x @ weight.T`` for a checkpoint's ``(out, in)`` weight, plus
     ``bias`` if given, broadcast over every row (a linear layer's bias,
     Qwen 2's q/k/v projections): a GEMV for one row (a GEMV's output is a
@@ -68,8 +76,10 @@ def project(x, weight, bias=None, k_tile=None, tile_n=None, **gemv):
     ``tile_n``'s ``ct_max_k`` (128) does not divide a ``k_tile`` that does
     divide K (SmolVLM's emb_dim, 576, is 2**6 * 3**2, under 128's own 2**7:
     no multiple of 128 divides it, but ``tile_n=32``'s ``ct_max_k`` (32)
-    does, at ``k_tile=192``). ``gemv`` are the GEMV's tunables, where the
-    profile cannot tell it from another of its shape.
+    does, at ``k_tile=192``). ``emulate_bf16_mmul_with_bfp16=False`` asks
+    flm.GEMM for bf16 macs where its device's default is bfp16's (aie2p),
+    the more accurate of the two. ``gemv`` are the GEMV's tunables, where
+    the profile cannot tell it from another of its shape.
     """
     if len(x.shape) == 2 and x.shape[0] > 1:
         tiled = {}
@@ -77,6 +87,8 @@ def project(x, weight, bias=None, k_tile=None, tile_n=None, **gemv):
             tiled["k_tile"] = k_tile
         if tile_n is not None:
             tiled["tile_n"] = tile_n
+        if emulate_bf16_mmul_with_bfp16 is not None:
+            tiled["emulate_bf16_mmul_with_bfp16"] = emulate_bf16_mmul_with_bfp16
         y = FLMGEMM(x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled)
     else:
         y = GEMV(weight, x, **gemv)

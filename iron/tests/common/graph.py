@@ -30,7 +30,7 @@ from iron.common.graph.fold import Made, Place, Prologue, folded, replaced
 from iron.common.graph.handle import Affine, Value
 from iron.common.image import OperatorSequence
 from iron.common.image.artifacts import Parameter
-from iron.lm.blocks import SwiGLU
+from iron.lm.blocks import SwiGLU, project
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -1074,6 +1074,25 @@ def test_llama_prompt_projects_with_flm_gemm(device, request):
         assert {k: e.name for k, e in op.bound_values.items()} == {"valid": "rows"}
         resolved = op.resolved(dev)
         assert resolved.B.shape == (op.N, op.K) and not resolved.bfp16_b
+
+
+class Pointwise(iron.Graph):
+    """A 1x1 convolution's pixels projected, K and N of 16."""
+
+    def __init__(self, emulate: bool | None):
+        self.emulate = emulate
+
+    def body(self, x, w):
+        return project(
+            x, w, k_tile=16, tile_n=16, emulate_bf16_mmul_with_bfp16=self.emulate
+        )
+
+
+@pytest.mark.parametrize("emulate,macs", [(None, True), (False, False)])
+def test_project_asks_flm_gemm_for_bf16_macs(emulate, macs, npu2):
+    t = Pointwise(emulate).trace(x=((256, 16), bfloat16), w=((16, 16), bfloat16))
+    (op,) = [op for op in t.operators if type(op) is FLMGEMM]
+    assert op.resolved(npu2).emulate_bf16_mmul_with_bfp16 is macs
 
 
 def test_llama_prompt_bounds_every_flm_gemm_by_its_rows(npu2):
