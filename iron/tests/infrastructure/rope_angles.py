@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """RoPE's angle table (``rope_angles``) and Llama 3's frequency scaling
-(``LLAMA_3_2_ROPE_SCALING``) against their formulas and Meta's published reference.
-No NPU.
+(``Runner.config.rope_scaling``) against their formulas and Meta's published
+reference. No NPU.
 """
 
 import math
@@ -12,7 +12,9 @@ import math
 import numpy as np
 
 from iron.lm import rope_angles
-from iron.applications.llama.model import LLAMA_3_2_ROPE_SCALING
+from iron.applications.llama.model import Runner
+
+LLAMA_3_2_ROPE_SCALING = Runner.config.rope_scaling
 
 
 def test_rope_is_the_formula_rounded_once():
