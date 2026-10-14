@@ -522,7 +522,7 @@ def judge(
         return None
     values = values or {}
     for extent in op.bound_extents:
-        if values.get(extent) != op.value(extent).field.of(op):
+        if values.get(extent) != getattr(op, op.value(extent).field.name):
             return None
     want = op.call_reference(inputs, values=values)
     for which, gate in gates.items():

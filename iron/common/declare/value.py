@@ -123,7 +123,7 @@ class Extent(Value):
 
     def __init__(self, field: Any, *, dtype: Any = np.int32) -> None:
         super().__init__(dtype=dtype)
-        self.field = field  # a Field in the class body; the DimRef once declared
+        self.field = field  # the Param field
 
     @overload
     def __get__(self, instance: None, owner: type | None = None) -> Self: ...
@@ -139,7 +139,7 @@ class Extent(Value):
         bound = instance.__dict__.get("_extents", {}).get(self.name)
         if bound is not None:
             return bound
-        return self.field.of(instance)
+        return getattr(instance, self.field.name)
 
     def __repr__(self) -> str:
         return f"Extent({self.field!r})"

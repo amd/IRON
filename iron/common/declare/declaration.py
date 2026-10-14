@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import dataclasses
 
-from .field import Auto, DimRef, Param
+from .field import Auto, Param
 from .member import Member
 from .operand import Operand
-from .shape import OptionalDim, Shape
+from .shape import OptionalDim
 from .value import Extent, Value
 
 
@@ -19,9 +19,8 @@ class Declaration:
 
     ``Operator.__init_subclass__`` makes one for every subclass, so none can
     forget to be checked. Making it applies ``dataclass`` to the class,
-    re-attaches every field as a ``DimRef`` (resolving the field objects the
-    body captured in its shapes), checks the shape rules and records what
-    the library reads. Checking extents against resolved tunables needs an
+    re-attaches every field to the class (the field objects its shapes
+    captured), checks the shape rules and records what the library reads. Checking extents against resolved tunables needs an
     instance, so that is ``Operator.compatible``'s.
 
     Args:
@@ -94,10 +93,9 @@ class Declaration:
                     f"the library reads; name the field otherwise"
                 )
 
-        # dataclass names the Field objects the class body bound to bare names,
-        # so a shape that captured one is rewritten by name (Shape.rewrite).
+        # dataclass replaced each with its default; a field is its own reference.
         for f in fields.values():
-            setattr(cls, f.name, DimRef(cls, f))
+            setattr(cls, f.name, f)
 
         # The most derived body's order wins for the members it declares;
         # inherited members it does not redeclare follow, in their own order.
@@ -118,14 +116,10 @@ class Declaration:
             if m.owner is not cls:
                 continue  # inherited; already processed on its own class
             if isinstance(m, Operand):
-                m.dims = m.dims.rewrite(cls)
-                (m.declared_dtype,) = Shape((m.declared_dtype,)).rewrite(cls).dims
                 m.dims.check(cls, m, "dimension", allow_tunable=False)
                 if m.tile_dims is not None:
-                    m.tile_dims = m.tile_dims.rewrite(cls)
                     m.tile_dims.check(cls, m, "tile dimension", allow_tunable=True)
                 if m.finish_block is not None:
-                    m.finish_block = m.finish_block.rewrite(cls)
                     m.finish_block.check(
                         cls, m, "finish block dimension", allow_tunable=True
                     )
@@ -134,29 +128,23 @@ class Declaration:
                         f"{cls.__name__}.{m.name}: at most one OptionalDim() dimension, "
                         f"since the rank tells whether it is present"
                     )
-                if m.when is not None:
-                    (m.when,) = Shape((m.when,)).rewrite(cls).dims
-                    if not isinstance(m.when, DimRef) or not isinstance(
-                        m.when.field, Param
-                    ):
-                        raise TypeError(
-                            f"{cls.__name__}.{m.name}: when={m.when!r} must be a "
-                            f"Param() field, the flag the operand exists under"
-                        )
-            if isinstance(m, Extent):
-                (ref,) = Shape((m.field,)).rewrite(cls).dims
-                if not isinstance(ref, DimRef) or not isinstance(ref.field, Param):
+                if m.when is not None and (
+                    not isinstance(m.when, Param) or isinstance(m.when, Auto)
+                ):
                     raise TypeError(
-                        f"{cls.__name__}.{m.name}: Extent({ref!r}) must name a Param() "
-                        f"field, the one a graph may bound per call"
+                        f"{cls.__name__}.{m.name}: when={m.when!r} must be a "
+                        f"Param() field, the flag the operand exists under"
                     )
-                m.field = ref
+            if isinstance(m, Extent) and (
+                not isinstance(m.field, Param) or isinstance(m.field, Auto)
+            ):
+                raise TypeError(
+                    f"{cls.__name__}.{m.name}: Extent({m.field!r}) must name a Param() "
+                    f"field, the one a graph may bound per call"
+                )
             if isinstance(m, Operand) and m.tile_dims is not None and m.per is not None:
-                m.per = m.per.rewrite(cls)
                 for ref in m.per.dims:
-                    if not isinstance(ref, DimRef) or not isinstance(
-                        ref.field, (Param, Auto)
-                    ):
+                    if not isinstance(ref, Param):
                         raise TypeError(
                             f"{cls.__name__}.{m.name}: per={ref!r} must be a Param() or Auto() field"
                         )
@@ -175,7 +163,11 @@ class Declaration:
             )
         self.members = tuple(members)
 
-        params = [f for f in fields.values() if isinstance(f, Param)]
+        params = [
+            f
+            for f in fields.values()
+            if isinstance(f, Param) and not isinstance(f, Auto)
+        ]
         autos = [f for f in fields.values() if isinstance(f, Auto)]
         self.params = tuple(f.name for f in params)
         self.derived = {f.name: f.derive for f in params if f.derive is not None}
@@ -202,14 +194,14 @@ class Declaration:
                     named |= m.finish_block.names()
                 if m.per is not None:
                     named |= m.per.names()
-                if isinstance(m.declared_dtype, DimRef):
+                if isinstance(m.declared_dtype, dataclasses.Field):
                     named.add(m.declared_dtype.name)
                 if m.when is not None:
                     named.add(m.when.name)
         self.array = tuple(
             n
             for n, f in fields.items()
-            if n in named or (isinstance(f, (Param, Auto)) and f.array)
+            if n in named or (isinstance(f, Param) and f.array)
         )
         self.probes = {
             f.name: f.probe for f in params if f.probe is not dataclasses.MISSING

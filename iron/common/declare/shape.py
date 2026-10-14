@@ -5,13 +5,12 @@
 
 from __future__ import annotations
 
-import dataclasses
 from dataclasses import Field, dataclass
 from typing import Any
 
 import numpy as np
 
-from .field import Auto, DimRef, Param
+from .field import Auto, Param
 
 
 @dataclass(frozen=True)
@@ -39,8 +38,8 @@ class Select:
     def branch(self, op) -> Shape:
         """The shape the flag picks on ``op``."""
         flag = self.flag
-        if isinstance(flag, DimRef):
-            flag = flag.of(op)
+        if isinstance(flag, Param):
+            flag = getattr(op, flag.name)
             if flag is None:
                 raise ValueError(
                     f"{self.flag!r} is None; a Select() on it needs a resolved operator"
@@ -48,54 +47,24 @@ class Select:
         return Shape(tuple(self.when_true if flag else self.when_false))
 
 
-_DimSpec = Any  # Field (own class, pre-processing) | DimRef | int | OptionalDim
+_DimSpec = Any  # Param | int | OptionalDim | Select
 
 
 @dataclass(frozen=True)
 class Shape:
-    """A declared shape: integers, ``DimRef``s, at most one ``OptionalDim`` and
-    ``Select``s: a member's declared shape, or a stream's ``per=``.
+    """A declared shape: integers, ``Param`` fields, at most one
+    ``OptionalDim`` and ``Select``s: a member's declared shape, or a
+    stream's ``per=``.
     """
 
     dims: tuple
 
     def __str__(self) -> str:
-        return ", ".join(
-            (d.name or "<field>") if isinstance(d, Field) else repr(d)
-            for d in self.dims
-        )
-
-    def rewrite(self, cls: type) -> Shape:
-        """This shape with each field the class body captured as ``cls``'s
-        ``DimRef``.
-
-        Raises:
-            TypeError: A captured field is not one of ``cls``'s.
-        """
-        fields = {f.name: f for f in dataclasses.fields(cls)}
-        out = []
-        for d in self.dims:
-            if isinstance(d, OptionalDim):
-                d = OptionalDim(*Shape((d.ref,)).rewrite(cls).dims)
-            elif isinstance(d, Select):
-                d = Select(
-                    *Shape((d.flag,)).rewrite(cls).dims,
-                    Shape(d.when_true).rewrite(cls).dims,
-                    Shape(d.when_false).rewrite(cls).dims,
-                )
-            elif isinstance(d, Field):
-                if fields.get(d.name) is not d:
-                    raise TypeError(
-                        f"{cls.__name__}: a shape references a field object that "
-                        f"is not one of this class's fields"
-                    )
-                d = vars(cls)[d.name]
-            out.append(d)
-        return Shape(tuple(out))
+        return ", ".join(repr(d) for d in self.dims)
 
     def check(self, cls: type, member: Any, what: str, *, allow_tunable: bool) -> None:
-        """Check each dimension is a ``Param()`` field or an integer, or with
-        ``allow_tunable`` (a stream's tile) also an ``Auto()``.
+        """Check each dimension is a ``Param()`` field of ``cls`` or an
+        integer, or with ``allow_tunable`` (a stream's tile) also an ``Auto()``.
 
         Raises:
             TypeError: A dimension breaks the rule.
@@ -109,12 +78,21 @@ class Shape:
                 )
             elif isinstance(d, bool):
                 raise TypeError(f"{cls.__name__}.{member.name}: {d!r} is not a {what}")
-            elif isinstance(d, DimRef):
-                allowed = (Param, Auto) if allow_tunable else Param
-                if not isinstance(d.field, allowed):
+            elif isinstance(d, Field):
+                if not any(
+                    vars(b).get("__dataclass_fields__", {}).get(d.name) is d
+                    for b in cls.__mro__
+                ):
+                    raise TypeError(
+                        f"{cls.__name__}: a shape references a field object that "
+                        f"is not one of this class's fields"
+                    )
+                if not isinstance(d, Param) or (
+                    isinstance(d, Auto) and not allow_tunable
+                ):
                     why = (
                         "an Auto(); a host shape may not depend on tuning"
-                        if isinstance(d.field, Auto)
+                        if isinstance(d, Auto)
                         else "not declared with Param()"
                     )
                     raise TypeError(
@@ -135,8 +113,8 @@ class Shape:
             raise TypeError(f"{spec!r} is not a dimension")
         if isinstance(spec, (int, np.integer)):
             return int(spec)
-        if isinstance(spec, DimRef):
-            value = spec.of(op)
+        if isinstance(spec, Param):
+            value = getattr(op, spec.name)
             if value is None:
                 raise ValueError(
                     f"{spec!r} is None; it must be set before the shape can be resolved"
@@ -174,7 +152,7 @@ class Shape:
                     return axis + inner
                 axis += len(branch.resolve(op))
                 continue
-            if isinstance(d, DimRef) and d.name == field:
+            if isinstance(d, Param) and d.name == field:
                 return axis
             axis += 1
         return None
@@ -183,7 +161,7 @@ class Shape:
         """The fields this shape names, through ``OptionalDim`` and ``Select``."""
         out: set[str] = set()
         for d in self.dims:
-            if isinstance(d, DimRef):
+            if isinstance(d, Param):
                 out.add(d.name)
             elif isinstance(d, OptionalDim):
                 out |= Shape((d.ref,)).names()

@@ -39,7 +39,7 @@ from aie.utils.verify import Tolerance, Verdict, compare
 from ..testing import Testing
 from .declaration import Declaration
 from .domain import Width
-from .field import Auto, DimRef, Param, Unresolvable
+from .field import Auto, Param, Unresolvable
 from .operand import In, Operand
 from .placement import Placement
 from .profile import Profile
@@ -1029,7 +1029,7 @@ class Operator(metaclass=_OperatorMeta):
         for b in self.buffers:
             for ref in b.per.dims if b.streamed and b.per else ():
                 if (
-                    isinstance(ref, DimRef)
+                    isinstance(ref, Param)
                     and ref.name in self.declaration.tunables
                     and ref.name not in self.declaration.domains
                 ):
@@ -1404,7 +1404,7 @@ class Operator(metaclass=_OperatorMeta):
         pairs = [(m, inputs[m.name]) for m in ins] + list(zip(outs, outputs))
         bound: dict[str, Any] = dict(given)
         # Each dimension an operand's shape gives: (field, value, where).
-        found: list[tuple[DimRef, int, str]] = []
+        found: list[tuple[Param, int, str]] = []
         for m, shape in pairs:
             shape = tuple(int(s) for s in shape)
             dims = list(m.dims.dims)
@@ -1448,7 +1448,7 @@ class Operator(metaclass=_OperatorMeta):
                     f"{shape}, declared rank {len(dims)} {m!r}"
                 )
             for i, (d, n) in enumerate(zip(dims, shape)):
-                if isinstance(d, DimRef):
+                if isinstance(d, Param):
                     found.append((d, n, f"{m.name}.shape[{i}]"))
                 elif int(d) != n:
                     raise ValueError(
@@ -1520,7 +1520,7 @@ class Operator(metaclass=_OperatorMeta):
         return [
             m
             for m in self.declaration.members
-            if isinstance(m, Operand) and (m.when is None or m.when.of(self))
+            if isinstance(m, Operand) and (m.when is None or getattr(self, m.when.name))
         ] + [*self._prepare_inputs, *self._finish_inputs]
 
     def __repr__(self) -> str:

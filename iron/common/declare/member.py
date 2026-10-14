@@ -35,7 +35,7 @@ class Member(Generic[B]):
         try:
             return instance._bound[self.name]
         except (AttributeError, KeyError):
-            if self.when is not None and not self.when.of(instance):
+            if self.when is not None and not getattr(instance, self.when.name):
                 raise AttributeError(
                     f"{type(instance).__name__}.{self.name} is declared when="
                     f"{self.when.name}, which is False on this instance"

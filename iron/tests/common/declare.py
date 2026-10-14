@@ -35,7 +35,6 @@ from iron.common import (
     OptionalDim,
     Param,
 )
-from iron.common.declare.field import DimRef
 from iron.common.design import OperatorDesign
 from iron.operators import ReLU as LibraryReLU
 from iron.operators import Tanh
@@ -93,10 +92,10 @@ class MV(Operator):
 # --------------------------------------------------------------------------
 
 
-def test_fields_are_reattached_as_dim_refs():
-    assert isinstance(MV.K, DimRef) and MV.K.owner is MV
-    assert MV.K.name == "K" and isinstance(MV.K.field, Param)
-    assert isinstance(MV.tile_out, DimRef) and isinstance(MV.tile_out.field, Auto)
+def test_fields_are_their_own_references():
+    fields = {f.name: f for f in dataclasses.fields(MV)}
+    assert MV.K is fields["K"] and MV.K.name == "K" and isinstance(MV.K, Param)
+    assert MV.tile_out is fields["tile_out"] and isinstance(MV.tile_out, Auto)
 
 
 def test_members_keep_declaration_order_and_names():
@@ -105,11 +104,10 @@ def test_members_keep_declaration_order_and_names():
 
 
 def test_shapes_captured_bare_names_resolve_to_refs():
-    # ``M`` and ``num_batches`` were Field objects in the class body; class
-    # creation rewrote them to DimRefs on the class.
+    # ``M`` and ``num_batches`` were the fields themselves in the class body.
     dims = MV.A.dims.dims
     assert dims[0].ref.name == "num_batches"
-    assert dims[1] == MV.M and dims[2] is MV.K
+    assert dims[1] is MV.M and dims[2] is MV.K
     assert MV.A.tile_dims.dims == (MV.tile_out, MV.K)
     assert MV.A.per.dims == (MV.columns,)
 
@@ -353,10 +351,10 @@ def test_buffers_carry_the_declared_dtype_and_size(npu2):
     assert y.nbytes == 8 * 64 * 4 * 4
 
 
-def test_instance_values_shadow_dim_refs():
+def test_instance_values_shadow_the_fields():
     op = MV(M=64, K=256, columns=2)
     assert op.K == 256 and op.columns == 2
-    assert isinstance(MV.K, DimRef) and MV.K.name == "K"
+    assert isinstance(MV.K, Param) and MV.K.name == "K"
 
 
 def test_a_stream_is_bound_lane_by_lane():

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 import math
-from dataclasses import dataclass
+from dataclasses import Field, dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 import aie.iron
@@ -19,7 +19,6 @@ from aie.iron.device import Tile
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
-from .field import DimRef
 from .shape import OptionalDim, Shape, _DimSpec
 from .member import Member
 from .value import DispatchTime, Extent, Value
@@ -201,7 +200,7 @@ class Operand(Member["Operand"]):
     @property
     def dtype(self):
         dtype = self.declared_dtype
-        return dtype.of(self.op) if isinstance(dtype, DimRef) else dtype
+        return getattr(self.op, dtype.name) if isinstance(dtype, Field) else dtype
 
     @property
     def elements(self) -> int:

@@ -59,7 +59,8 @@ class Profile:
         return {
             f.name: f
             for f in dataclasses.fields(cls)
-            if isinstance(f, Param) or f.name in cls.declaration.tunables
+            if (isinstance(f, Param) and not isinstance(f, Auto))
+            or f.name in cls.declaration.tunables
         }
 
     def add(self, cls: type, **fields: Any) -> None:
@@ -71,12 +72,12 @@ class Profile:
         dims, tunables, unknown, fixed = {}, {}, [], []
         for name, value in fields.items():
             field = schema.get(name)
-            if isinstance(field, Param):
-                dims[name] = value
-            elif field is not None:
+            if name in cls.declaration.tunables:
                 tunables[name] = value
             elif isinstance(declared.get(name), Auto):
                 fixed.append(name)
+            elif isinstance(field, Param):
+                dims[name] = value
             else:
                 unknown.append(name)
         if unknown:
@@ -96,7 +97,7 @@ class Profile:
         """
         dims = {}
         for f in dataclasses.fields(cls):
-            if not isinstance(f, Param):
+            if not isinstance(f, Param) or isinstance(f, Auto):
                 continue
             if f.name in given:
                 dims[f.name] = given[f.name]
