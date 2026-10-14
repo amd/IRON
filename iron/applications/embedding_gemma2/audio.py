@@ -16,7 +16,6 @@ import iron
 from iron import Scratchpad
 from iron.lm import Model, blocks
 from iron.lm.blocks import ACCURATE
-from iron.operators.axpy import AXPY
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
 from iron.operators.depthwise_conv1d import DepthwiseConv1d
@@ -28,7 +27,6 @@ from iron.operators.rms_norm import RMSNorm
 from iron.operators.sigmoid import Sigmoid
 from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
-from iron.operators.tanh import Tanh
 
 from .config import PROFILES, AudioConfig
 
@@ -109,7 +107,9 @@ class AudioTower(Model):
         self.width = K = -(-(T + W + 2 * B) // 128) * 128
         self.keys = iron.state((H, K, D))
         self.values = iron.state((H, K, D))
-        self.scores = iron.state((H, T, K))
+        # f32: the scores' chain into Softmax keeps them off bf16's 0.25 ulp
+        # at |logit| >= 32 (eg2-audio-bug.md).
+        self.scores = iron.state((H, T, K), dtype=np.float32)
         self.probs = iron.state((H, T, K))
         q, j = np.arange(T)[:, None], np.arange(B)
         # An odd query's band starts a column early, at an even column.
@@ -118,10 +118,10 @@ class AudioTower(Model):
             (d >= 0) & (d < W) & (q - (W - 1) + d >= 0), 0, finfo(bfloat16).min
         )
         self.mask = np.tile(mask.astype(bfloat16), (H, 1))
-        # The logits scaled by 1 / logit_cap, the key scale moved to the queries.
+        # The key scale moved to the queries; the soft cap is Softmax's own.
         q_scale = D**-0.5 / math.log(2)
         k_scale = math.log(1 + math.e) / math.log(2)
-        scale = q_scale * k_scale / c.logit_cap
+        scale = q_scale * k_scale
         timing = c.timing()
         # A feed-forward's residual weight in its post norm's, exact at 0.5.
         residual = bfloat16(c.residual_weight)
@@ -301,18 +301,29 @@ class AudioTower(Model):
         # Over every key: those past the valid ones are stale but finite, as
         # only bounded copies write them.
         for i in range(H):
-            GEMM.step(q[i], keys[i], scores[i], b_col_maj=True, **ACCURATE)
+            GEMM.step(
+                q[i],
+                keys[i],
+                scores[i],
+                b_col_maj=True,
+                dtype_out=np.float32,
+                **ACCURATE,
+            )
         # Query t's band starts at the even column of t and t - 1, its
-        # relative terms at R or R + band: a DMA moves 4-byte words.
+        # relative terms at R or R + band.
         pairs = [H, T // 2, 2, B]
         band = TensorAccessPattern((H, T, K), 0, pairs, [T * K, 2 * K + 2, K, 1])
         relative = TensorAccessPattern((H, T, K), R, pairs, [T * K, 2 * K, K + B, 1])
-        logits = ElementwiseAdd.step(
-            Copy.step(scores, src=band).reshape(H * T, B),
-            Copy.step(scores, src=relative).reshape(H * T, B),
+        logits = Copy.step(scores, src=band).reshape(H * T, B)
+        position = Copy.step(scores, src=relative).reshape(H * T, B)
+        probabilities = Softmax.step(
+            logits,
+            addend=position,
+            mask=self.mask,
+            soft_cap=c.logit_cap,
+            input_dtype=np.float32,
         )
-        logits = AXPY.step(Tanh.step(logits), self.mask, scalar_factor=c.logit_cap)
-        Copy.step(Softmax.step(logits), probs, dst=band)
+        Copy.step(probabilities, probs, dst=band)
         for i in range(H):
             GEMM.step(probs[i, :tokens], values[i], q[i], **ACCURATE)
         o = Copy.step(q.transpose(1, 0, 2)).reshape(T, H * D)
