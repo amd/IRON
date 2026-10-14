@@ -4,7 +4,7 @@
 """What a model's device test checks: speed, accuracy against the
 CPU reference, and determinism, each over a ``Runner`` and
 the model it loaded; where it finds the model's files, and ``Download``,
-a test input fetched by URL and kept beside them.
+a test input fetched by URL and cached in IRON's own cache.
 
 A test module defines module-scoped ``runner`` and ``model`` fixtures, the
 model loaded from the runner once for the module, and each test calls one
@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from aie.utils.compile import NPU_CACHE_HOME
 
 from .generation import (
     SEED,
@@ -42,6 +43,14 @@ def weights_dir(name: str) -> Path:
     return Path(os.environ.get("IRON_EXAMPLE_WEIGHTS_DIR", "/srv")) / name
 
 
+def cache_dir() -> Path:
+    """Where a ``Download`` is cached: IRON's own writable cache
+    (``NPU_CACHE_HOME``), not the weights directory, which CI mounts
+    read-only.
+    """
+    return Path(NPU_CACHE_HOME) / "data"
+
+
 @dataclasses.dataclass(frozen=True)
 class Download:
     """A file a test reads that the repository does not hold, fetched from
@@ -51,15 +60,15 @@ class Download:
     url: str
     sha256: str
 
-    def fetch(self, directory: Path) -> Path:
-        """The file in ``directory``, by digest: fetched unless a file of the
-        pinned content is already there.
+    def fetch(self) -> Path:
+        """The file in ``cache_dir()``, by digest: fetched unless a file of
+        the pinned content is already there.
 
         Raises:
             ValueError: ``url`` is not https.
             RuntimeError: What ``url`` serves is not the pinned content.
         """
-        target = Path(directory) / self.url.rsplit("/", 1)[-1]
+        target = cache_dir() / self.url.rsplit("/", 1)[-1]
         if target.exists():
             with open(target, "rb") as f:
                 if hashlib.file_digest(f, "sha256").hexdigest() == self.sha256:

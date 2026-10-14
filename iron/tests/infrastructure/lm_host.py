@@ -14,9 +14,13 @@ file and skips when it is absent. No NPU.
 
 import base64
 import dataclasses
+import hashlib
 import json
+import os
 import re
 import struct
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -494,3 +498,57 @@ def test_real_qwen3_checkpoint_every_tensor_bitwise():
         expected = load_file(real_qwen3_index.parent / filename)
         for name in names:
             assert bitwise_equal(tensors[name], expected[name]), name
+
+
+# Tier 1 -- Download, a test input cached in NPU_CACHE_HOME
+# ##########################################################################
+
+# A small, stable public file over real HTTPS: no IRON asset of its own, so
+# this gate costs one tiny download rather than a checkpoint-sized one.
+PINNED_URL = "https://raw.githubusercontent.com/octocat/Hello-World/master/README"
+PINNED_SHA256 = "03ba204e50d126e4674c005e04d82e84c21366780af1f43bd54a37816b6ab340"
+
+
+def fetch_in(cache_home: Path, weights_home: Path, url: str, sha256: str):
+    """``Download(url, sha256).fetch()``, in a subprocess with
+    ``NPU_CACHE_HOME`` and ``IRON_EXAMPLE_WEIGHTS_DIR`` set to `cache_home`
+    and `weights_home`: both constants are read once at import, which an
+    in-process ``os.environ`` write would not reach.
+    """
+    script = f"from iron.lm.testing import Download; print(Download({url!r}, {sha256!r}).fetch())"
+    return subprocess.run(
+        [sys.executable, "-c", script],
+        env=os.environ
+        | {
+            "NPU_CACHE_HOME": str(cache_home),
+            "IRON_EXAMPLE_WEIGHTS_DIR": str(weights_home),
+        },
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_download_fetches_into_the_cache_not_the_read_only_weights_dir(tmp_path):
+    """A `Download` never touches the weights directory (CI mounts it
+    read-only), and a repeat of the same pin is served from the cache
+    without a second trip over the network.
+    """
+    cache_home, weights = tmp_path / "cache", tmp_path / "weights"
+    weights.mkdir()
+    weights.chmod(0o555)
+    try:
+        first = fetch_in(cache_home, weights, PINNED_URL, PINNED_SHA256)
+        assert first.returncode == 0, first.stderr
+        fetched = Path(first.stdout.strip())
+        assert fetched.is_relative_to(cache_home)
+        assert not fetched.is_relative_to(weights)
+        assert hashlib.sha256(fetched.read_bytes()).hexdigest() == PINNED_SHA256
+
+        # The same pin, its host now unreachable (a reserved, never-resolving
+        # TLD, RFC 2606): this succeeds only by reading the cached file.
+        unreachable = "https://host.invalid/README"
+        second = fetch_in(cache_home, weights, unreachable, PINNED_SHA256)
+        assert second.returncode == 0, second.stderr
+        assert Path(second.stdout.strip()) == fetched
+    finally:
+        weights.chmod(0o755)

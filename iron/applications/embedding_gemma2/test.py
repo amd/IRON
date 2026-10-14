@@ -50,10 +50,11 @@ from iron.applications.embedding_gemma2.oracle import (
 from iron.applications.embedding_gemma2.vision import VisionTower
 from iron.applications.embedding_gemma2.weights import Weights
 from iron.lm import prompt_text
-from iron.lm.testing import Download, require, weights_dir
+from iron.lm.testing import Download, cache_dir, require, weights_dir
 from iron.operators.copy import Copy
 
 DIRECTORY = weights_dir("embeddinggemma-2")
+CACHE = cache_dir()
 
 QUERY = "What causes the northern lights?"
 DOCUMENTS = [
@@ -100,7 +101,7 @@ VISION_MIN_COSINE = 0.95
 VISION_MAX_ERROR = 0.06
 
 # LibriSpeech's test-clean (CC BY 4.0, V. Panayotov et al., 2015), as openslr
-# publishes it, fetched once beside the checkpoint.
+# publishes it, fetched once into IRON's cache.
 LIBRISPEECH = Download(
     "https://www.openslr.org/resources/12/test-clean.tar.gz",
     "39fde525e59672dc6d1551919b1478f724438a95aa55f874b576be21967e6c23",
@@ -124,7 +125,7 @@ I, V = VisionConfig().image_tokens, VisionConfig().video_tokens
 
 VAL2017 = "https://s3.amazonaws.com/images.cocodataset.org/val2017"
 
-# COCO val2017 photos, fetched beside the checkpoint.
+# COCO val2017 photos, fetched into IRON's cache.
 COCO = {
     # 640x480.
     "cats": Download(
@@ -185,14 +186,14 @@ def cosine(a, b):
 
 def clip(name: str) -> np.ndarray:
     """The utterance `CLIPS[name]`, its FLAC member taken from the archive
-    beside the checkpoint the first time, decoded: float32 samples in
+    in IRON's cache the first time, decoded: float32 samples in
     [-1, 1) at the extractor's sample rate.
     """
     speaker, chapter, _ = CLIPS[name].split("-")
     member = f"LibriSpeech/test-clean/{speaker}/{chapter}/{CLIPS[name]}.flac"
-    path = DIRECTORY / member
+    path = CACHE / member
     if not path.exists():
-        with tarfile.open(LIBRISPEECH.fetch(DIRECTORY)) as archive:
+        with tarfile.open(LIBRISPEECH.fetch()) as archive:
             data = archive.extractfile(member).read()
         path.parent.mkdir(parents=True, exist_ok=True)
         # Renamed into place, so an interrupted extraction leaves no clip.
@@ -206,10 +207,10 @@ def clip(name: str) -> np.ndarray:
 
 
 def photo(name: str) -> np.ndarray:
-    """`COCO[name]`, fetched beside the checkpoint and decoded:
+    """`COCO[name]`, fetched into IRON's cache and decoded:
     `(height, width, 3)` uint8.
     """
-    with Image.open(COCO[name].fetch(DIRECTORY)) as image:
+    with Image.open(COCO[name].fetch()) as image:
         return np.array(image.convert("RGB"))
 
 
