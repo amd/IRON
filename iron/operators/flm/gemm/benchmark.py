@@ -15,9 +15,9 @@ Up to three implementations run per shape, on identical inputs:
            fixed 8-column overlay; elsewhere it is dropped and the flm-vs-gemm
            comparison still runs.
 
-The overlay is a ``RemoteFileArtifact`` pinned by SHA-256 against an immutable
-FastFlowLM commit and fetched into the gitignored build dir, so nothing here
-needs an external install or a host-specific path.
+The overlay is an ``Xclbin`` pinned by SHA-256 against an immutable
+FastFlowLM commit and fetched into ``NPU_CACHE_HOME``, so nothing here needs
+an external install or a host-specific path.
 
 pytest never collects this: ``pytest.ini`` sets ``python_files = test.py``. It
 is a timing comparison meant to be invoked directly, not a correctness gate;
@@ -34,9 +34,6 @@ Usage:
 pytest iron/operators/flm/gemm/benchmark.py
 pytest iron/operators/flm/gemm/benchmark.py -k E2B --csv-output flm.csv
 ```
-
-Do not pass ``-s`` when you want the CSV: conftest's reporter parses the
-captured stdout, so disabling capture yields a CSV with no metric columns.
 """
 
 import statistics

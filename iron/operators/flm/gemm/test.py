@@ -540,9 +540,8 @@ def test_one_xclbin_serves_every_clamp_bound():
     assert clamped.name != GEMM(M=M, K=K, N=N, **finished(M, N, NONE, bounds[1])).name
 
 
-# The shipped overlay: the binary the port was ported from, as its second
-# reference. Extensive (a download) and NPU2 only.
-# ##########################################################################
+# The shipped overlay, the port's second reference: extensive (a download)
+# and NPU2 only.
 
 # Largest |d/dx| of each epilogue, used to carry the accumulator's error bound
 # through to the output. sigmoid's is exactly 1/4; silu and gelu both peak at
@@ -669,22 +668,11 @@ def test_shipped_epilogue_matches_accumulator(epilogue, clamp):
     expected = Epilogue(epilogue).apply(acc, clamp)
 
     # Both sides see the same accumulator, so what is left is the epilogue.
-    # Two terms, and they are different in kind.
-    #
-    # The bf16 term is per element rather than one global number: the
-    # accumulator read back is bf16, good to ~2^-8 RELATIVELY, and clamp is only
-    # sensitive near its boundary, so a tolerance taken from the accumulator's
-    # largest magnitude would be wider there than the clamp range itself -- i.e.
-    # vacuous.
-    #
-    # The activation term covers what bf16 rounding does NOT explain. Checked by
-    # bounding the true accumulator to its bf16 rounding interval and evaluating
-    # the epilogue across it: clamp lands inside for all 262144 elements, but
-    # sigmoid, silu and gelu land outside for about half, by up to 0.018. That
-    # residual is the overlay's own activation approximation -- a LUT or native
-    # instruction, not exact math -- which no exact-sigmoid reference can
-    # reproduce. 0.05 is ~3x the measured worst case and still ~20x below
-    # where the bound would go vacuous; the assertion at the end pins that down.
+    # The bf16 term is per element (the read-back accumulator is good to 2^-8
+    # relatively; one global bound would be wider than a clamp's range). The
+    # activation term is the overlay's own approximation, a LUT or native
+    # instruction: up to 0.018 past the bf16 interval, so 0.05, ~20x below
+    # where the bound would go vacuous (the last assertion).
     approx = 0.0 if epilogue is NONE else 0.05
     tol = MAX_SLOPE[epilogue] * np.abs(acc) * 2.0**-8 + 2.0**-8 + approx
     err = np.abs(got - expected)

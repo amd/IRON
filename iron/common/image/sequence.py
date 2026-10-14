@@ -35,8 +35,7 @@ def _signature(op):
 
 
 class OperatorSequence:
-    """Operator that concatenates a runlist of operators into a
-    single dispatch.
+    """A runlist of operators, built and dispatched as one image.
 
     Args:
         full_elf: One full ELF, else one xclbin per design, a step at a
@@ -255,13 +254,11 @@ class OperatorSequence:
             for i, buf_name in enumerate(bufs):
                 args_spec = declared[i]
 
-                # Parse slice notation: "buffer_name[start:end]"
                 if "[" in buf_name and buf_name.endswith("]"):
                     base_name = buf_name[: buf_name.index("[")]
                     slice_part = buf_name[buf_name.index("[") + 1 : -1]
                     start, end = map(int, slice_part.split(":"))
                     sliced_buffers[buf_name] = (base_name, start, end, args_spec)
-                    # Track that base buffer exists (size will be set later)
                     if (
                         base_name not in args
                         and base_name not in self.explicit_buffer_sizes
@@ -280,7 +277,6 @@ class OperatorSequence:
                                 f"vs {args_spec.shape} {bfp.dtype_name(args_spec.dtype)}"
                             )
 
-        # Verify all input/output args are present (either as regular or sliced buffers)
         all_buffer_names = set(args.keys()) | set(sliced_buffers.keys())
         for arg in self.input_args:
             if arg not in all_buffer_names and arg not in self.explicit_buffer_sizes:
@@ -304,7 +300,6 @@ class OperatorSequence:
         def add_buffers(buffer_type, args_list):
             def length_of(arg):
                 if arg in self.explicit_buffer_sizes:
-                    # Explicit size specified - this is a parent buffer for slices
                     return self.explicit_buffer_sizes[arg]
                 if arg in args:
                     return args[arg].held_nbytes
@@ -361,7 +356,6 @@ class OperatorSequence:
                 end = max(end, at + length)
             return end  # arena size
 
-        # Add sliced buffer entries to layout (they reference parent buffers)
         for buf_name, (base_name, start, end, args_spec) in sliced_buffers.items():
             slice_info[buf_name] = (base_name, start, end)
 
@@ -369,7 +363,6 @@ class OperatorSequence:
         output_buffer_size = add_buffers("output", self.output_args)
         host_args = {*self.input_args, *self.output_args, *self.feedback_args}
         scratch_args = [arg for arg in args if arg not in host_args]
-        # Also include explicit buffers that are only used for slicing
         for explicit_buf in self.explicit_buffer_sizes:
             if explicit_buf not in host_args and explicit_buf not in scratch_args:
                 scratch_args.append(explicit_buf)
@@ -528,16 +521,8 @@ class OperatorSequence:
         return FullELFCallable(self, arena=arena)
 
     def get_layout_for_buffer(self, buffer_name):
-        """Return the (buffer_type, offset, length) layout for a named buffer.
-
-        Sliced buffers are resolved recursively to their parent's absolute
-        offset.
-
-        Args:
-            buffer_name: Name of the buffer, optionally with slice notation.
-
-        Returns:
-            Tuple of (buf_type, offset_bytes, length_bytes).
+        """A named buffer's ``(buffer type, byte offset, byte length)``, a
+        slice's at its parent's offset.
         """
         if buffer_name in self.slice_info:
             buf_name, start, end = self.slice_info[buffer_name]

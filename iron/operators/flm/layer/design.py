@@ -127,7 +127,6 @@ PROJ_COLS = (0, 1, 6, 7)
 # The tile of each stage, as (column, row). Row 0 holds the shim tiles, row 1
 # the memtiles and rows 2 to 5 the cores.
 PLACEMENT = {
-    # Cores.
     "attn_qk": (2, 2),
     "attn_kv": (2, 3),
     "swa_attn_qk": (2, 4),
@@ -140,13 +139,11 @@ PLACEMENT = {
     "pl_embedding": (4, 3),
     "pl_up": (5, 2),
     "pl_merge": (5, 3),
-    # Memtiles.
     "proj_gather_0": (0, 1),
     "proj_x": (1, 1),
     "attn_mem": (2, 1),
     "proj_gather_1": (6, 1),
     "proj_weight": (7, 1),
-    # Shim tiles.
     "kv_shim": (2, 0),
     "x_shim": (3, 0),
     "pl_shim_0": (4, 0),
@@ -401,11 +398,7 @@ def _call_kernel(*args):
 def _connect(
     rt, src, src_ch, dst, dst_ch, pkt_id=None, keep_pkt_header=False, name=None
 ):
-    """Add a circuit-switched flow, or a packet flow when pkt_id is set.
-
-    Returns:
-        The flow.
-    """
+    """Add a circuit-switched flow, or a packet flow when pkt_id is set."""
     ends = dict(src_channel=src_ch, dst_channel=dst_ch, name=name)
     if pkt_id is None:
         flow = Flow(src, dst, **ends)
@@ -635,11 +628,7 @@ def _sequence(
 
 
 def _build_rms(ctx, rms_tile):
-    """RMS norm and residual. Returns y_out, the layer output the gate tile reads.
-
-    x arrives on S2MM 0, the norm weights on S2MM 1. y leaves on MM2S 0
-    behind its packet header.
-    """
+    """RMS norm and residual. Returns y_out, the layer output the gate tile reads."""
     rms_k = ctx.entry("rms_residual", "rms_residual")
     rms_y_pkt_ty, rms_x_ty, _, _, rms_w_ty, rms_x_buf_ty, _, _ = rms_k.arg_types()
     rms_name = f"{rms_tile.row}_{rms_tile.col}"
@@ -723,11 +712,7 @@ def _build_rms(ctx, rms_tile):
 
 
 def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
-    """RoPE, global or sliding-window.
-
-    qkv arrives on S2MM 0, the RoPE weights on S2MM 1. q leaves through
-    q_fifo to the qk core, k and v on MM2S 1.
-    """
+    """RoPE, global or sliding-window."""
     kern = ctx.entry(name, "rope")
     q_ty, kv_ty, _, qkv_ty, _, rope_ty, _ = kern.arg_types()
 
@@ -807,11 +792,7 @@ def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
 
 
 def _build_pl_embedding(ctx, ple_tile):
-    """Per-layer-input embedding.
-
-    x0_per_layer, the norm weights and x0 arrive on S2MM 0 as a 4-BD cycle,
-    the weights on S2MM 1. y leaves on MM2S 1.
-    """
+    """Per-layer-input embedding."""
     PLI_D = ctx.g.pli_d
     ple_name = f"{ple_tile.row}_{ple_tile.col}"
     ple_k = ctx.entry("proj_layer_embedding", "proj_layer_embedding")
@@ -904,11 +885,7 @@ def _build_pl_embedding(ctx, ple_tile):
 
 
 def _build_pl_gate(ctx, gle_tile, x):
-    """Per-layer-input gate.
-
-    x is the RMS tile's y_out. The weights arrive on S2MM 1. y leaves on
-    MM2S 1.
-    """
+    """Per-layer-input gate."""
     gle_name = f"{gle_tile.row}_{gle_tile.col}"
     gle_k = ctx.entry("gate_layer_embedding", "gate_layer_embedding")
     _, w_ty, _, gle_y_ty = gle_k.arg_types()
@@ -999,11 +976,7 @@ def _build_pl_merge(ctx, plm_tile):
 
 
 def _build_pl_up(ctx, plu_tile):
-    """Per-layer-input up projection.
-
-    x arrives on S2MM 0, the weights on S2MM 1. The layer output leaves on
-    MM2S 0.
-    """
+    """Per-layer-input up projection."""
     plu_name = f"{plu_tile.row}_{plu_tile.col}"
     plu_k = ctx.entry("per_layer_up", "per_layer_up")
     plu_dual_x_ty, w_ty, _, plu_y_ty = plu_k.arg_types()
@@ -1058,11 +1031,7 @@ def _build_pl_up(ctx, plu_tile):
 
 
 def _build_glu(ctx, glu_tile):
-    """GLU.
-
-    gate and up arrive on S2MM 0. The activations leave on MM2S 0 with a
-    packet header to the projection engine.
-    """
+    """GLU."""
     glu_name = f"{glu_tile.row}_{glu_tile.col}"
     glu_k = ctx.entry("glu", "glu")
     glu_hid_ty, glu_up_gate_ty, _, glu_y_ty, _, _ = glu_k.arg_types()
@@ -1223,11 +1192,7 @@ _PROJ_MEM_W_LOCKS = [(5, 2), (6, 0), (7, 0), (8, 2), (9, 0), (10, 0)]
 
 
 def _proj_weight_channels(w0, w1, wp0, wp0c0, wp0c1, wp1, wp1c0, wp1c1):
-    """A projection memtile's weight channels.
-
-    Each weight half arrives on S2MM 4 or 5 and leaves as two blocks, one to
-    each of two cores.
-    """
+    """A projection memtile's weight channels."""
     w = TensorAccessPattern.full(w0.shape)
     return {
         "in0": DmaChannel(
@@ -1375,13 +1340,8 @@ def _scores_ty(ctx, name):
 
 
 def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
-    """An attention kv core.
-
-    The core takes the scores from of_s and v on S2MM 1. It sends o to the
-    projection engine on MM2S 0.
-
-    A round of the two-KV-head kernels covers one KV head. A round of the
-    other kernels covers every KV head.
+    """An attention kv core. A round of the two-KV-head kernels covers one KV
+    head; a round of the other kernels covers every KV head.
     """
     g = ctx.g
     D = g.model_dim
@@ -1459,10 +1419,7 @@ def _build_attn_kv(ctx, kv_tile, name, rtp_key, dh, of_s, two_kv_heads):
 
 
 def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
-    """An attention qk core.
-
-    The core takes q from q_fifo and k on S2MM 1. It sends the scores to of_s.
-    """
+    """An attention qk core."""
     r, c = qk_tile.row, qk_tile.col
     # Every qk kernel names its entry points attn_qk_*.
     k_begin = ctx.entry(name, "attn_qk_begin")
@@ -1537,11 +1494,7 @@ def _build_attn_qk(ctx, qk_tile, name, rtp_key, dh, of_s, q_fifo, two_kv_heads):
 
 
 def _build_attn_mem(ctx, amt):
-    """The attention memtile.
-
-    It takes k, v, swa_k and swa_v in whole rows. It sends each to its core in
-    the order the core's kernel reads.
-    """
+    """The attention memtile."""
     g = ctx.g
     NUM_KV, two_kv = g.num_kv_heads, g.num_kv_heads == 2
     amt_name = f"{amt.row}_{amt.col}"
@@ -1610,16 +1563,13 @@ def _route(rt, grid, t, proj_send_tiles):
         shim[name] = _connect(rt, x_shim, ch, dst, dst_ch, pkt_id=pkt, name=name)
     _connect(rt, t["rms"], 0, proj_x, 3, pkt_id=_X_FROM_RMS)
 
-    # The weights from the shim into each memtile.
     for col in PROJ_COLS:
         for ch in (0, 1):
             name = f"proj_w{ch}_{col}"
             shim[name] = _connect(rt, grid[col, 0], ch, grid[col, 1], 4 + ch, name=name)
-    # The weights from each memtile to its column's cores.
     for col in PROJ_COLS:
         for j in range(4):
             _connect(rt, grid[col, 1], j, grid[col, 2 + j], 1)
-    # x to every projection core.
     for col in PROJ_COLS:
         for j in range(4):
             _connect(rt, proj_x, 4, grid[col, 2 + j], 0)
@@ -1643,14 +1593,12 @@ def _route(rt, grid, t, proj_send_tiles):
     ):
         _connect(rt, proj_x, 5, t[dst], 0, pkt_id=pk)
 
-    # This token's k and v, out to the KV cache.
     shim["recv_k"] = _connect(rt, t["rope"], 1, kv_shim, 0, name="recv_k")
     shim["recv_v"] = _connect(rt, t["swa_rope"], 1, kv_shim, 1, name="recv_v")
     _connect(rt, t["attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
     _connect(rt, t["swa_attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
     _connect(rt, t["glu"], 0, proj_x, 3, pkt_id=_X_FROM_GLU)
 
-    # The KV cache into the attention memtile.
     amt = t["attn_mem"]
     for name, ch, amt_ch, pkt in (
         ("move_k", 0, 0, _KV_PKT_GLOBAL),
@@ -1664,7 +1612,6 @@ def _route(rt, grid, t, proj_send_tiles):
     _connect(rt, amt, 2, t["swa_attn_qk"], 1)
     _connect(rt, amt, 3, t["swa_attn_kv"], 1)
 
-    # The per-layer-input path.
     pl_shim_0, pl_shim_1 = t["pl_shim_0"], t["pl_shim_1"]
     shim["pli_rope_rms"] = _connect(
         rt, pl_shim_0, 0, t["pl_embedding"], 0, name="pli_rope_rms"
@@ -1675,7 +1622,6 @@ def _route(rt, grid, t, proj_send_tiles):
     _connect(rt, t["pl_gate"], 1, t["pl_merge"], 1)
     _connect(rt, t["pl_merge"], 0, t["pl_up"], 0)
     shim["pli_up"] = _connect(rt, pl_shim_1, 1, t["pl_up"], 1, name="pli_up")
-    # The layer output, out to x.
     shim["recv_y"] = _connect(rt, t["pl_up"], 0, x_shim, 0, name="recv_y")
     return shim
 

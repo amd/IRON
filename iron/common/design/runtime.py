@@ -41,12 +41,9 @@ class OperatorRuntime(Runtime):
     sequence derived from its declaration.
 
     It is what ``sequence(rt)`` receives, whose transfers are the
-    operands' own ``fill``/``drain``, emitted here (``transfer``).
-
-    A pinned lane (``Operand.pin``) is a shim DMA task on its channel, at
-    most the operand's ``depth`` in flight when managed (a shipped image's
-    memtiles hold that many), every one awaited by the sequence's end; an
-    unmanaged one is the caller's.
+    operands' own ``fill``/``drain``, emitted here (``transfer``). A managed
+    transfer on a pinned lane (``Operand.pin``) keeps at most the operand's
+    ``depth`` in flight, and the sequence's end awaits them.
 
     Args:
         op: The resolved operator, its array built and its operands' lanes

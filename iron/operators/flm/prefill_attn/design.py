@@ -300,7 +300,6 @@ def prefill_attn(
     g = Geometry.of(kernel)
     group_cols = dev.cols // v.num_cu
     gqa = num_heads // num_kv_heads
-    # Elements per token in Q and O, and in each of k and v.
     qo_row = g.dh * num_heads
     kv_row = g.dh * num_kv_heads
     # Query rows in a core's q object: the rows of both columns of a pair.
@@ -308,7 +307,6 @@ def prefill_attn(
     # Query rows per memtile fifo half.
     lq_mt = 4 * g.lq
 
-    # The core's buffers take the kernel's argument types.
     s_ty, q_ty, in_ty, _, m_ty, L_ty = kernel.attn_qk_step.arg_types()[:6]
     mv_ty, _, cv_ty, _, y_ty = kernel.attn_round_begin.arg_types()
     o_ty, l_bf16_ty, _, _ = kernel.attn_epilogue.arg_types()
@@ -419,7 +417,6 @@ def prefill_attn(
     # The sequence sets go to the number of passes after it writes the RTPs.
     # A core acquires one count before each pass.
     go = {}
-    # The shim flows of k, then v.
     kv_flows = []
 
     # o: one fifo per memtile m. Memtile m joins the output of four cores:

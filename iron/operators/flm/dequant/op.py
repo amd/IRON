@@ -131,8 +131,6 @@ class DequantBFP(Operator):
         depth=2,
     )
 
-    # -- checks ----------------------------------------------------------------
-
     def validate(self) -> None:
         if self.tile_n is not None and self.tile_n != N_TILE:
             raise ValueError(
@@ -172,8 +170,6 @@ class DequantBFP(Operator):
     def compatible(self) -> None:
         self._check_extents(self.K, self.N, ValueError)
 
-    # -- names -----------------------------------------------------------------
-
     @property
     def config_name(self) -> str:
         """Stem of the artifacts that do not depend on the shape: the xclbin's."""
@@ -187,20 +183,15 @@ class DequantBFP(Operator):
 
     @property
     def name(self) -> str:
-        """Stem of the instruction stream, which does depend on the shape.
-
-        The build cache keys on filename, and ``iron.operators.Dequant`` would
-        otherwise share this stem.
+        """The configuration's stem, then the shape: two instruction streams
+        never share a name.
         """
         base = f"{self.config_name}_K{self.K}_N{self.N}"
         if self.run_out_features is not None:
             base = f"{base}_run{self.run_out_features}p{self.run_period_out_features}"
         return base
 
-    # -- the array -------------------------------------------------------------
-
     def array(self) -> list:
-
         cols = self.cols
         qw_col_ty, out_half_ty = self.qw.obj_type, self.out.obj_type
         qw_blk_ty = np.ndarray[(BLOCK_BYTES,), np.dtype[np.uint8]]
@@ -252,15 +243,11 @@ class DequantBFP(Operator):
         self.out.bind(outs)
         return workers
 
-    # -- host-side sizes ---------------------------------------------------------
-
     def quantized_size(self) -> int:
         """Bytes of q4nx input, counting any interleave gap it strides over."""
         return qw_bytes_for(
             self.K, self.N, self.run_out_features, self.run_period_out_features
         )
-
-    # -- the runtime sequence --------------------------------------------------
 
     def sequence(self, rt):
         cols = self.cols
@@ -303,8 +290,6 @@ class DequantBFP(Operator):
             # output a drain takes, so a completed drain implies a completed
             # fill.
             tg_fill.finish()
-
-    # -- packaging: one xclbin per configuration ----------------------------------
 
     @property
     def _reference_shape(self) -> tuple[int, int]:

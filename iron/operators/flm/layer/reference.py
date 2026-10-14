@@ -78,11 +78,6 @@ def layer_dims(geometry, layer_type):
     return g
 
 
-# ---------------------------------------------------------------------------
-# Buffer layout
-# ---------------------------------------------------------------------------
-
-
 def proj_layout(geometry, layer_type):
     """Weight name -> (byte offset, format, rows, cols) in proj.
 
@@ -158,11 +153,6 @@ def _attention_rows(g, context_len):
     return np.arange(-(-L // LK) * LK), L
 
 
-# ---------------------------------------------------------------------------
-# RMS norm
-# ---------------------------------------------------------------------------
-
-
 def rms_norm(x, w):
     """rms_norm.h: bf16(x * w * rsqrt(mean(x^2) + eps)). w is None for the v
     norm.
@@ -173,11 +163,6 @@ def rms_norm(x, w):
         + np.float32(RMS_EPS)
     )
     return rb(fmul(x if w is None else f32(x * w), fast_rsqrt(s)))
-
-
-# ---------------------------------------------------------------------------
-# Weights and projections
-# ---------------------------------------------------------------------------
 
 
 # The bytes of a q4nx block's bf16 scales and minima.
@@ -241,11 +226,6 @@ def bf16_matvec(x, w):
     for k in range(w.shape[1]):
         acc = f32(acc + w[:, k].astype(np.float64) * x[k])
     return rb(acc)
-
-
-# ---------------------------------------------------------------------------
-# Layer stages
-# ---------------------------------------------------------------------------
 
 
 def rope_head(x, w_norm, cos, sin):
@@ -399,11 +379,6 @@ def reference(geometry, layer_type, x, proj, rms, rope_rms, kv, context_len, max
     x_out = x16.copy()
     x_out[:D] = to_bf16(out)
     return x_out, kv_out
-
-
-# ---------------------------------------------------------------------------
-# Synthetic inputs
-# ---------------------------------------------------------------------------
 
 
 def pack_q4nx(codes, scales, mins):

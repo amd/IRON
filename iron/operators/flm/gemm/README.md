@@ -145,10 +145,9 @@ release an A object until every consumer has taken it.
 The two artifacts therefore carry different stems: the xclbin's `config_name`
 covers tile_n, ct_max_k, tile_ma, the compiled activation set, rounding and the
 device, while `name` adds every runtime parameter -- M, K, N, the activation
-and the clamp bounds. It has to: the sequence writes those as immediates and
-the build cache keys on filename and mtime, so a stem that omits one serves the
-first caller's instruction stream to the second. The xclbin is built from a
-module emitted at a reference shape, whose runtime sequence is discarded.
+and the clamp bounds -- so two instruction streams never share a name. The
+xclbin is built from a module emitted at a reference shape, whose runtime
+sequence is discarded.
 
 One thing stays build-time, because it costs program memory: which activations
 the epilogue can *select between* (`epilogue_modes`). It lands in the xclbin's
@@ -601,10 +600,9 @@ anything else raises.
 
 ### How it is obtained
 
-The xclbin is not checked in. It is a `RemoteFileArtifact`: downloaded on demand
-into the (gitignored) build directory and pinned by SHA-256 against an immutable
-FastFlowLM commit, so the fetch is reproducible and a substituted file is
-rejected.
+The xclbin is not checked in. It is an `Xclbin`: downloaded on first use into
+`NPU_CACHE_HOME` and pinned by SHA-256 against an immutable FastFlowLM commit,
+so the fetch is reproducible and a substituted file is rejected.
 
 Because this is the only thing in the tree that touches the network, the
 benchmark that uses it is marked `extensive` and is not reached by the default

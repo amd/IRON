@@ -15,13 +15,9 @@ It exists so the port can be measured against what it was ported from, on
 identical inputs and through the same host path. NPU2 only: the image is
 an 8-column binary.
 
-Nothing here is built. The class names what is baked into the xclbin and
-visible nowhere in it: the shim channel map (A on MM2S channel 0 of columns
-0, 2, 4 and 6; B on MM2S channel 1 of every column; C out of S2MM channel
-0 of every column), the address and lock of the eight parameter words every
-core reads, and the order the memtiles consume transfers in. Its
-``array()`` pins the operands' lanes to those channels and places the
-parameter blocks, and its sequence moves data against those pins.
+Its cores and routes are the image's: ``array()`` pins the operands to the
+image's shim channels and places its parameter blocks, and ``sequence()``
+moves data in the order the memtiles consume it.
 
 What differs from the port, and why the port is the default: the port
 selects its epilogue at build time (a branch-free inner loop, one build per
@@ -121,8 +117,7 @@ class Shipped(
     c_l2: int = Auto(default=ROWS * M_TILE * N_TILE, repr=False, init=False)
     b_overlay_order: ClassVar[bool] = True
 
-    # A: one (M_TILE x K_TILE) block per transfer element, broadcast along
-    # each compute row from alternate shim columns on MM2S channel 0.
+    # One (M_TILE x K_TILE) block per object, broadcast along a compute row.
     A = In(
         GEMM.M,
         GEMM.K,
@@ -130,7 +125,6 @@ class Shipped(
         per=(GEMM.rows,),
         depth=QUEUE_DEPTH,
     )
-    # B: one column's k-blocks, pre-packed, down each column on MM2S channel 1.
     B = In(
         Select(GEMM.bfp16_b, (GEMM.packed_blocks,), (GEMM.K, GEMM.N)),
         dtype=GEMM.b_dtype,
@@ -138,8 +132,8 @@ class Shipped(
         per=(GEMM.cols,),
         depth=QUEUE_DEPTH,
     )
-    # C: the joined (ROWS*M_TILE x N_TILE) block, out of every column on
-    # S2MM channel 0, which the image's epilogue finishes as the port's does.
+    # The joined (ROWS*M_TILE x N_TILE) block, which the image's epilogue
+    # finishes as the port's does.
     C = Out(
         GEMM.M,
         GEMM.N,

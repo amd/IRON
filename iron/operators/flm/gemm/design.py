@@ -32,25 +32,21 @@ from aie.dialects.aie import (
 )
 from aie.utils import bfp
 
-# --- Fixed geometry -------------------------------------------------------
 # GEMM tiling per compute tile, and the register tiling inside it. K_TILE is
 # the default for GEMM's k_tile field.
 M_TILE, K_TILE = 64, 512
-# Default n tile. 64 doubles A fetches but gives the mmul colA=8 instead of 4,
-# which wins when compute is the critical path. op.py picks per shape.
+# 64 doubles A fetches but gives the mmul colA=8 instead of 4.
 N_TILE_DEFAULT = 64
 # How much of K one compute tile holds at a time, per n width. It is a fixed
 # L1 budget split two ways, passed to the kernel as its ``chunk_k``. n=256 is
 # absent because its f32 accumulator alone (M_TILE*256*4) fills all of L1.
 CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 128, 128: 32}
-# (tile_n, ct_max_k) pairs verified on hardware. The table above looks tunable
-# but is not, and a wrong value fails SILENTLY: ct_k=64 at tile_n=64 gives
-# err/mass 3.45e-02 against 2.42e-04, and tile_n=128 NaNs. Cause unknown, so
-# refuse rather than miscompute.
+# (tile_n, ct_max_k) pairs verified on hardware: another pair computes a
+# wrong answer silently, for a reason not yet known, so it is refused.
 _VERIFIED_CT_K = {(16, 16), (32, 32), (64, 128), (128, 32)}
 # Register tiling, shared by both architectures. pack_B, the stream-dimension
 # lists and gather_dims all key off these; changing one alone is silently
-# wrong. AIE2's native 4x8x4 shape measured 22-30% slower (load-port bound).
+# wrong.
 R, S, T = 8, 8, 8
 
 
@@ -64,20 +60,13 @@ CT_OUT_LEN = 512  # the core's C slice, streamed out in chunks this size
 C_DEPTH = 2  # C fifo depth; also the core-body unroll
 B_DEPTH = 2  # the deepest L1 B ring the budget below tries
 A_DEPTH = 2
-# L1 bytes reserved for the core's stack, which the buffer budget below must
-# not hand out. The device default is 1024 and aiecc measures what a build
-# actually needs: 1088 on NPU1, which is the activation LUT path plus the
-# epilogue's clamp vectors, so the default fails the build outright; 2304 for
-# AIE2P's bf16 B^T kernel at tile_n 16, 32 and 128. 2560 leaves headroom, and
-# no default tile choice changes up to 3072; aiecc names the exact
-# requirement if a change outgrows it.
+# L1 bytes reserved for the core's stack: past the device default of 1024,
+# the most aiecc measures a build needing is 2304 (AIE2P's bf16 B^T kernel).
 STACK_SIZE = 2560
 # L1 bytes the activation LUT tables occupy, which the buffer budget must not
 # hand out either. On AIE2 the activations come from lut_based_ops, whose
 # tables are bank-pinned in local memory; AIE2P computes its activations and
-# links no tables, so it reserves nothing. The tables grew past the slack the
-# budget happened to leave when mlir-aie reorganized the kernel library, which
-# is why this is reserved explicitly rather than left to chance.
+# links no tables, so it reserves nothing.
 LUT_STATIC_SIZE = 5248
 
 
@@ -95,14 +84,11 @@ def l1_budget(dev, epilogue_modes):
 
 
 # Row-blocks a core folds into one B fetch, cutting B's DDR reads by M_CHUNK
-# at the cost of that many L1 accumulators. Off everywhere
-# for a contractual reason: it must divide m_row_blocks (M % 512 == 0) while
-# the overlay this replaces takes any multiple of 256, so a shape that cannot
-# use it forks config_name. See README.md.
+# at the cost of that many L1 accumulators. Off everywhere: it must divide
+# m_row_blocks (M % 512 == 0), and a shape that cannot use it would fork
+# config_name. See README.md.
 M_CHUNK_FOR_N = {16: 1, 32: 1, 64: 1, 128: 1}
 
-# --- B's explicit memtile path ---------------------------------------------
-#
 # B does not go through an ObjectFifo. A fifo's memtile BDs are part of the
 # device configuration, so holding a column-block there would put K (the buffer
 # size) and M (the replay count) into the one xclbin every shape shares.

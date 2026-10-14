@@ -3,20 +3,8 @@
 
 """bf16 GEMM over a 4-row compute-tile grid, in the declared form.
 
-The array is one configuration of the grid: the n tile, the A-tile height,
-the row-block chunk, the activations compiled into the epilogue and the
-rounding mode. Everything the xclbin depends on, and nothing else; its
-``config_name`` is the xclbin's stem. M, K, N, the activation and the
-clamp bounds are values written to the cores and reach only the
-instruction stream, so every shape sharing a configuration shares one
-xclbin. A SiLU or Sigmoid and then a Clamp after the product are its
-finish (``finish=Chain(...)``, or a graph's fold), which the epilogue
-applies from those values. That split is the point of this operator;
-``GEMM.configuration`` names the half ``Operator.compile`` builds once.
-
 ``design.py`` keeps the fixed geometry and the L1 budget; README.md has the
-per-choice breakdown against the shipped FastFlowLM overlay
-(``shipped``).
+per-choice breakdown against the shipped FastFlowLM overlay (``shipped``).
 """
 
 import dataclasses
@@ -155,12 +143,10 @@ class GEMM(Operator):
     FastFlowLM's ``x * sigmoid(1.702x)``, which no IRON operator computes.
     M, K, N, the activation and the clamp bounds are values written to the
     cores: they change the instruction stream only, so every shape on one
-    configuration shares an xclbin.
+    configuration (the array fields, ``config_name``) shares an xclbin.
 
-    The grid is as wide as the device. ``tile_n`` defaults to 64 from the
-    device alone (the general winner; 128 beats it by ~9% only on NPU2 at
-    K = 512, where the caller asks for it). ``tile_ma`` and ``m_chunk`` are
-    filled from the device's L1 and the tuning tables.
+    The grid is as wide as the device. ``tile_n`` defaults to 64;
+    ``tile_ma`` and ``m_chunk`` are filled from the device's L1.
     """
 
     M: int = Param()
@@ -174,8 +160,7 @@ class GEMM(Operator):
     # declaration counts bfp16ebs8 blocks and bfp.itemsize turns that back
     # into the byte count pack_B returns.
     packed_blocks: int = Param(derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
-    # n tile width. 64 halves the mmul's accumulator traffic per mac; 128
-    # halves A fetches instead. See README.md.
+    # 64 halves the mmul's accumulator traffic per mac; 128 halves A fetches.
     tile_n: int = Auto(array=True)
     # k tile. K must be a multiple of it, and it of the compute tile's k slice.
     # 256 is what Gemma 4's per-layer-input projection needs, its K being 256.
@@ -183,7 +168,7 @@ class GEMM(Operator):
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). None resolves to whatever L1 affords.
     tile_ma: int = Auto(array=True, domain=Divisors(of=M_TILE, step=2 * R))
-    # Row-blocks folded into one B fetch. None resolves from tile_n.
+    # Row-blocks folded into one B fetch.
     m_chunk: int = Auto(
         array=True, domain=Divisors(of=lambda op, dev: op.M // (M_TILE * op.rows))
     )
@@ -191,10 +176,7 @@ class GEMM(Operator):
     # those of the finishes its array applies. Each one compiled in costs
     # program memory, so a deployment that dispatches two should compile two.
     epilogue_modes: tuple = Param(default=tuple(Epilogue), array=True)
-    # Rounding for every f32->bf16 conversion; see Rounding in design.py.
     rounding: Rounding | str = Param(default=Rounding.CONV_EVEN, array=True)
-    # Arithmetic of the gelu epilogue; see Gelu in design.py. Only the gelu
-    # mode reads it.
     gelu: Gelu | str = Param(default=Gelu.FP32, array=True)
     # B as stored (N, K), a checkpoint's layout, read as is: the memtile lays
     # out the k panels the kernel reads as B^T blocks, so no packed copy.
@@ -269,8 +251,6 @@ class GEMM(Operator):
 
     def extent_unit(self, buffer: str) -> int:
         return 0  # nothing is shortened
-
-    # -- checks ----------------------------------------------------------------
 
     def validate(self) -> None:
         if self.tile_n is not None:
@@ -487,8 +467,6 @@ class GEMM(Operator):
         # The finish's activation and bounds reach the cores as words.
         return (*super().design_key(), ("epilogue", self.activation, self.clamp))
 
-    # -- derived -----------------------------------------------------------------
-
     @property
     def _tuned(self) -> "GEMM":
         """This operator resolved for the current device, when construction
@@ -521,13 +499,7 @@ class GEMM(Operator):
 
     @property
     def config_name(self) -> str:
-        """Stem of the artifacts that do not depend on the shape: the xclbin's.
-
-        ``kt`` names the k tile, which the kernel is compiled for. ``ck`` is
-        named separately because retuning CT_MAX_K_FOR_N moves it
-        while tn stays, and tile_ma is caller-overridable. Without it, an
-        xclbin built at one ck could serve a request for another.
-        """
+        """Stem of the artifacts that do not depend on the shape: the xclbin's."""
         t = self._tuned
         dev = self.dev
         if dev is None:
@@ -550,13 +522,8 @@ class GEMM(Operator):
 
     @property
     def name(self) -> str:
-        """Artifact stem for the instruction stream, which does depend on it.
-
-        The configuration it runs on, then the runtime parameters on top.
-        Every runtime parameter has to appear, because the sequence writes
-        them as immediates and the build cache keys on filename: a stem that
-        omits one serves the first caller's instruction stream to the
-        second. The clamp bounds go in as raw bit patterns.
+        """The configuration's stem, then every runtime parameter (the clamp
+        bounds as bit patterns): two instruction streams never share a name.
         """
         base = f"{self.config_name}_M{self.M}_K{self.K}_N{self.N}"
         if self.activation is not Epilogue.NONE:
@@ -567,8 +534,6 @@ class GEMM(Operator):
             )
             base = f"{base}_cl{lo:08x}{hi:08x}"
         return base
-
-    # -- the array -------------------------------------------------------------
 
     def array(self) -> list:
         COLS, ROWS = self.cols, self.rows
@@ -632,7 +597,6 @@ class GEMM(Operator):
         k_step = kernel.mm_fused_k_step
         epilogue_chunk = kernel.mm_fused_epilogue_chunk
 
-        # --- Data movement ------------------------------------------------
         # These turn a row-major DDR tile into the blocked layout the mmul
         # indexes. A mismatch is silently wrong, not a build error.
         gather_dims = TensorAccessPattern.full((M_TILE, N_TILE)).tile((R, T))
@@ -818,7 +782,6 @@ class GEMM(Operator):
             read.append(self.units_valid)
         rtps = self.rtp(read, cores=ROWS * COLS)
 
-        # --- Compute ------------------------------------------------------
         def core_fn(
             accs,
             o_h,
@@ -951,8 +914,6 @@ class GEMM(Operator):
         self.C.bind([f.cons() for f in c_l2l3_fifos])
         return workers + unrouted
 
-    # -- geometry of one dispatch ------------------------------------------------
-
     @property
     def _m_row_blocks(self) -> int:
         return self.M // (M_TILE * self.rows)
@@ -965,8 +926,6 @@ class GEMM(Operator):
     def _n_units(self) -> int:
         """Groups of m_chunk row-blocks; every leg is issued per unit."""
         return self._m_row_blocks // self.m_chunk
-
-    # -- the runtime sequence --------------------------------------------------
 
     def sequence(self, rt):
         M, K, N = self.M, self.K, self.N
@@ -1149,19 +1108,12 @@ class GEMM(Operator):
             blocks.append((n_full, rem_blocks))
 
         def emit_slab(slab):
-            # Per-slab setup: arming B's memtile channels and the cores'
-            # parameters. Neither is free -- together tens of microseconds of
-            # command-processor time -- so it goes out *behind* the first
-            # block's A and B fills, overlapping their DDR latency. A fill
-            # running ahead of it is harmless: A only lands in fifo buffers,
-            # and B backs up in the stream until its memtile channel has a
-            # task. Measured on the benchmark shapes, arming first cost up to
-            # +30 us (+9%) at M=256.
-            #
-            # Nothing ahead of it may wait on the cores, which are not
-            # released yet. The only waits are the compiler's, for a queue
-            # slot or a buffer descriptor, and here everything they can wait
-            # on is an earlier slab's.
+            # Arming B's memtile channels and the cores' parameters costs tens
+            # of microseconds, so it goes out behind the first block's A and B
+            # fills, overlapping their DDR latency: A only lands in fifo
+            # buffers, and B backs up until its memtile channel has a task.
+            # Nothing ahead of it may wait on the cores, which are not released
+            # yet; the compiler's waits ahead of it are all an earlier slab's.
             b_mt_tasks = {}
 
             def push_b_mt(bi):
@@ -1258,8 +1210,6 @@ class GEMM(Operator):
         for slab in slabs:
             emit_slab(slab)
 
-    # -- packaging: one xclbin per configuration ----------------------------------
-
     @property
     def _reference_shape(self) -> tuple[int, int, int]:
         """The shape the configuration-only module is emitted at: the smallest
@@ -1268,12 +1218,8 @@ class GEMM(Operator):
         return (M_TILE * self.rows * self.m_chunk, self.k_tile, self.tile_n * self.cols)
 
     def configuration(self):
-        """This configuration at its reference shape and activation.
-
-        Its xclbin is built once and serves every shape sharing the
-        configuration: the cache keys on content, and the reference shape is
-        what that content is. Only the instruction stream is per shape, an
-        instructions-only compile with no kernel built twice.
+        """This configuration at its reference shape and activation: the
+        xclbin every shape sharing it runs, each with its own instruction stream.
         """
         M, K, N = self._reference_shape
         return dataclasses.replace(
@@ -1286,8 +1232,6 @@ class GEMM(Operator):
             finish=Chain(),
             packed_blocks=None,
         )
-
-    # -- host-side helpers -------------------------------------------------------
 
     def pack_B(self, B):
         """Reorder a row-major ``(K, N)`` weight matrix into consumption order.
@@ -1323,10 +1267,7 @@ class GEMM(Operator):
         The product accumulates in float32, as the kernel's f32 accumulator
         does, and is rounded to the output dtype before the epilogue and the
         clamp, because ``mm_fused_epilogue_chunk`` converts the accumulator
-        to bf16 and applies the activation to that. End to end the order is
-        second order (at M=256 K=512 N=1024 it moves mean |err| by under
-        2e-4), but against the device's own accumulator on the shipped
-        overlay it moves silu's worst-case disagreement from 0.043 to 0.031.
+        to bf16 and applies the activation to that.
 
         Not bit-exact, and cannot be: the hardware's activation is a LUT on
         aie2 and a native instruction on aie2p, worth up to ~0.02 absolute,
@@ -1344,9 +1285,7 @@ class GEMM(Operator):
         truncating.
 
         A clamp moves no element further from its reference; an activation's
-        approximation is not bounded here, so an activated GEMM has none. On
-        npu2 over K = 512 to 8192, normal and all-positive inputs, no
-        configuration's worst element came above 0.89 of it.
+        approximation is not bounded here, so an activated GEMM has none.
         """
         if self.activation is not Epilogue.NONE:
             return None
