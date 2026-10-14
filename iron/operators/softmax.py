@@ -21,7 +21,6 @@ from aie.iron.kernels import activation, zero
 from aie.utils.verify import Tolerance
 
 from iron.common import (
-    Choices,
     Divisors,
     Extent,
     In,
@@ -99,7 +98,7 @@ class Softmax(Operator):
     block: int = Auto(
         domain=Divisors(of=lambda op, dev: op.cols, step=_VECTOR_STEP, cap=_ROW_CAP)
     )
-    streamed: bool = Auto(array=True, domain=Choices((False, True)))
+    streamed: bool = Auto(array=True, domain=(False, True))
 
     length = Extent(cols)  # cols, or fewer per call
 

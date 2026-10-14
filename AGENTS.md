@@ -202,8 +202,10 @@ reuse lint
      `fetch()`, inference; `cls.declaration`, a `Declaration`, is what a
      class declares, read once as its body finishes: its members and which
      fields are parameters, tunables, array-tier or probed). A domain's
-     bound (`Divisors(of=, step=, cap=)`, `Choices(options)`) is an integer
-     or a callable of the operator and the device. An operator's shim budget, `shim_columns`, is
+     bound (`Divisors(of=, step=, cap=)`) is an integer or a callable of the
+     operator and the device, as is `when=`; a fixed tuple is a domain too,
+     and an `Auto` field annotated with an `Enum` and given no domain is
+     searched over that `Enum`'s members. An operator's shim budget, `shim_columns`, is
      the bound device's `shim_dma_channels_in`/`out`; its `residents` the
      derived values the preamble writes once per build
    - `design/`: the library-owned build: `OperatorDesign(op, image)`,
@@ -619,12 +621,15 @@ code before relying on a line here; it is the authority.
 - **Placement.** Operator order is the final tiebreak for shim tile and
   channel, so a per-column stream is not guaranteed to sit in physical
   column `c`; pin it with `via=` where that matters. Where the tiles an
-  `array()` names are a choice, the choice is a tunable:
-  `placement: str = Auto("...", array=True, domain=Placement({...}))`, each
-  name a `Pins` holding cores, memtiles and shims at a `Level` (the tile,
-  its column, or the placer's), the hand-found one the default
-  (`iron/common/declare/placement.py`; MHA and GEMM). The tuner measures
-  each name the placer takes, like any other tunable.
+  `array()` names are a choice, the choice is a tunable: an operator
+  declares its own `Enum` of named placements (`GEMMPlacement`,
+  `MHAPlacement`) and a field `placement: GEMMPlacement = Auto(GEMMPlacement.SHIMS,
+  array=True)`, left out of a domain since an `Enum`-annotated tunable is
+  searched over its own members. `array()` writes mlir-aie's `Tile(c, r)`,
+  `Tile(col=c)` or `Any*Tile` (`AnyComputeTile`, `AnyMemTile`,
+  `AnyShimTile`) by the resolved member, the hand-found one the default
+  (`iron/operators/gemm.py`, `mha.py`). The tuner measures each member the
+  placer takes, like any other tunable.
 - **`Elementwise` is not upstream's `transform_parallel`.** They differ in
   the trip count (a `Value` here, folded into the core there), in who
   owns the sequence (the library here, so operators fuse into one image),

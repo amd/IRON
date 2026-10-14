@@ -32,6 +32,7 @@ pipeline rather than one every pipeline reads.
 """
 
 import dataclasses
+from enum import StrEnum
 from typing import ClassVar
 
 import numpy as np
@@ -47,21 +48,17 @@ from aie.iron import (
     kernels,
 )
 from aie.iron.controlflow import range_
-from aie.iron.device import Device
+from aie.iron.device import AnyMemTile, AnyShimTile, Device, Tile
 from aie.iron.kernels.linalg import mm_stream_dims
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
-    Choices,
     Divisors,
     Extent,
     In,
-    Level,
     Operator,
     Out,
-    Pins,
-    Placement,
     Unresolvable,
     Value,
     Width,
@@ -76,19 +73,21 @@ STACK_SIZE = 0xD00
 # The softmax core's accurate exp2 polynomial needs 4 KiB, as aiecc measures it.
 SOFTMAX_STACK_SIZE = 0x1000
 
-# The hand-found memtiles of MHA.COLUMNS: K's and V's broadcasts on k_mem and
-# v_mem, or a lane per pipeline on its own column's, and Q's splits and O's
-# joins from qo_mem. Left to the placer ("columns"), K's and V's share one
-# memtile and Q's takes a pipeline's forward. A pipeline's cores keep at
-# least its column: placed freely, 8 pipelines pack into 6 columns that
-# cannot be routed.
-PLACEMENT = Placement(
-    {
-        "memtiles": Pins(cores=Level.COLUMN, shims=Level.FREE),
-        "tiles": Pins(),
-        "columns": Pins(cores=Level.COLUMN, memtiles=Level.FREE, shims=Level.FREE),
-    }
-)
+
+class MHAPlacement(StrEnum):
+    """The tiles MHA's array pins; aiecc's placer takes the rest.
+
+    The hand-found memtiles of MHA.COLUMNS: K's and V's broadcasts on
+    k_mem and v_mem, or a lane per pipeline on its own column's, and Q's
+    splits and O's joins from qo_mem. Left to the placer (``COLUMNS``),
+    K's and V's share one memtile and Q's takes a pipeline's forward. A
+    pipeline's cores keep at least its column: placed freely, 8 pipelines
+    pack into 6 columns that cannot be routed.
+    """
+
+    MEMTILES = "memtiles"
+    TILES = "tiles"
+    COLUMNS = "columns"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -233,7 +232,7 @@ _CASES = [
                 heads_interleaved=True,
             ),
         )
-        for placement in ("tiles", "columns")
+        for placement in (MHAPlacement.TILES, MHAPlacement.COLUMNS)
     ),
     Case(
         dict(num_heads=8, num_KV_heads=2, seq_len=1, kv_len=512, num_pipelines=2),
@@ -337,8 +336,8 @@ class MHA(Operator):
     # mha.cc's causal skip compares a KV block's index with a Q block's.
     B_kv: int = Auto(repr=False, derived=True)
     num_pipelines: int = Auto(1, array=True, domain=Width())
-    # Left out, "memtiles", or "tiles" where P*V is split.
-    placement: str = Auto(array=True, domain=PLACEMENT)
+    # Left out, MEMTILES, or TILES where P*V is split.
+    placement: MHAPlacement = Auto(array=True)
     # bf16 macs: bfp16 shares one exponent over 8 keys of P*V, and the softmax
     # core, not the products, bounds MHA's time.
     emulate_bf16_mmul_with_bfp16: bool = Param(default=False, array=True, repr=False)
@@ -351,7 +350,7 @@ class MHA(Operator):
     width: int = Auto(array=True, repr=False, derived=True)
     # The P*V cores per pipeline, one or, where one's L1 holds no block, two
     # by halves of the head, and the width of the head each holds.
-    pv_cores: int = Auto(array=True, repr=False, domain=Choices((1, 2)))
+    pv_cores: int = Auto(array=True, repr=False, domain=(1, 2))
     pv_width: int = Auto(array=True, repr=False, derived=True)
 
     # By array width, the coordinates the "memtiles" and "tiles" placements
@@ -561,7 +560,7 @@ class MHA(Operator):
                 f"{self.num_pipelines // self.q_shims}: its memtile also forwards "
                 f"a pipeline's scores and P"
             )
-        if self.pv_cores > 1 and PLACEMENT.pins(self.placement) != Pins():
+        if self.pv_cores > 1 and self.placement is not MHAPlacement.TILES:
             raise ValueError(
                 f"with P*V split, placement {self.placement!r} leaves tiles to "
                 f"the placer, but a column's links carry no stream past "
@@ -648,7 +647,8 @@ class MHA(Operator):
             self,
             B_q=B_q,
             B_kv=B_q,
-            placement=self.placement or ("tiles" if pv_cores > 1 else "memtiles"),
+            placement=self.placement
+            or (MHAPlacement.TILES if pv_cores > 1 else MHAPlacement.MEMTILES),
             q_shims=q_shims,
             join_rows=B_q * (self.num_pipelines // q_shims),
             kv_lanes=self.num_pipelines if self.packed else 1,
@@ -694,7 +694,10 @@ class MHA(Operator):
         B_q, B_kv, d = self.B_q, self.B_kv, self.d
         num_pipelines = self.num_pipelines
         n_join = num_pipelines // self.q_shims  # the pipelines on one shim
-        pins = PLACEMENT.pins(self.placement)
+        # TILES pins every tile; the others keep a core's column alone, and
+        # COLUMNS leaves the memtiles and the shims to the placer.
+        every = self.placement is MHAPlacement.TILES
+        memtiles = self.placement is not MHAPlacement.COLUMNS
         pv_cores, pv_width = self.pv_cores, self.pv_width
 
         # partial_softmax takes exp2, so the scale is in the log2 domain.
@@ -823,8 +826,10 @@ class MHA(Operator):
                 names=[f"memQ{suffix}{i}" for i in range(n_join)],
                 to_stream=None if q_dims is None else [q_dims] * n_join,
                 depths=[q_depth] * n_join,
-                tile=pins.memtiles.tile(
-                    layout.q[shim] if split else columns.qo_mem + shim, 1
+                tile=(
+                    Tile(layout.q[shim] if split else columns.qo_mem + shim, 1)
+                    if memtiles
+                    else AnyMemTile
                 ),
             )
             for h in range(pv_cores):
@@ -839,8 +844,10 @@ class MHA(Operator):
                     names=[f"outO{suffix}{half}{i}" for i in range(n_join)],
                     # One O block: the PV core's L1 also holds its float32 O.
                     depths=[1] * n_join,
-                    tile=pins.memtiles.tile(
-                        layout.o[shim][h] if split else columns.qo_mem + shim, 1
+                    tile=(
+                        Tile(layout.o[shim][h] if split else columns.qo_mem + shim, 1)
+                        if memtiles
+                        else AnyMemTile
                     ),
                 )
 
@@ -860,8 +867,12 @@ class MHA(Operator):
                 .forward(
                     name=f"memK{suffix}",
                     to_stream=k_dims,
-                    tile=pins.memtiles.tile(
-                        layout.k if split else columns.k_mem if shared else lane, 1
+                    tile=(
+                        Tile(
+                            layout.k if split else columns.k_mem if shared else lane, 1
+                        )
+                        if memtiles
+                        else AnyMemTile
                     ),
                     depth=of_depth,
                 )
@@ -875,13 +886,17 @@ class MHA(Operator):
                     .forward(
                         name=f"memV{suffix}{half}",
                         to_stream=v_dims,
-                        tile=pins.memtiles.tile(
-                            (
-                                layout.v[h]
-                                if split
-                                else columns.v_mem if shared else lane
-                            ),
-                            1,
+                        tile=(
+                            Tile(
+                                (
+                                    layout.v[h]
+                                    if split
+                                    else columns.v_mem if shared else lane
+                                ),
+                                1,
+                            )
+                            if memtiles
+                            else AnyMemTile
                         ),
                         depth=of_depth,
                     )
@@ -898,7 +913,7 @@ class MHA(Operator):
                     name=f"outA{i}",
                     to_stream=a_dims,
                     depth=of_depth,
-                    tile=pins.memtiles.tile(i, 1) if split else None,
+                    tile=Tile(i, 1) if split else AnyMemTile,
                 )
             )
             memP.append(ObjectFifo(qk_ty, depth=of_depth, name=f"memP{i}"))
@@ -909,7 +924,7 @@ class MHA(Operator):
                     name=f"outP{i}",
                     to_stream=p_dims,
                     depth=of_depth,
-                    tile=pins.memtiles.tile(i, 1) if split else None,
+                    tile=Tile(i, 1) if split else AnyMemTile,
                 )
             )
             # A copy of the row state for each P*V core, which rescales its own.
@@ -1174,7 +1189,7 @@ class MHA(Operator):
                     ]
                     + params,
                     stack_size=STACK_SIZE,
-                    tile=pins.cores.tile(i, 2),
+                    tile=Tile(i, 2) if every else Tile(col=i),
                 )
             )
             idx_buffer_softmax = Buffer(
@@ -1203,7 +1218,7 @@ class MHA(Operator):
                     ]
                     + params,
                     stack_size=SOFTMAX_STACK_SIZE,
-                    tile=pins.cores.tile(i, 3 if pv_cores == 1 else 4),
+                    tile=Tile(i, 3 if pv_cores == 1 else 4) if every else Tile(col=i),
                 )
             )
             # Split, the halves sit either side of the softmax, whose row
@@ -1232,7 +1247,7 @@ class MHA(Operator):
                         ]
                         + params,
                         stack_size=STACK_SIZE,
-                        tile=pins.cores.tile(i, row),
+                        tile=Tile(i, row) if every else Tile(col=i),
                     )
                 )
 
@@ -1243,20 +1258,28 @@ class MHA(Operator):
         two_shims = self.q_shims > 1
         for s in range(self.q_shims):
             q_col = layout.q[s] if split else 0 if two_shims else columns.q
-            self.Q.lane(s).bind(inQ[s].prod(tile=pins.shims.tile(q_col, 0)))
+            self.Q.lane(s).bind(
+                inQ[s].prod(tile=Tile(q_col, 0) if every else AnyShimTile)
+            )
             for h in range(pv_cores):
                 o_col = layout.o[s][h] if split else 0 if two_shims else columns.o
                 self.O.lane(s * pv_cores + h).bind(
-                    memO[s * pv_cores + h].cons(tile=pins.shims.tile(o_col, 0))
+                    memO[s * pv_cores + h].cons(
+                        tile=Tile(o_col, 0) if every else AnyShimTile
+                    )
                 )
         for lane in range(kv_lanes):
             shared = kv_lanes == 1
             k_col = layout.k_shim if split else columns.k if shared else lane
-            self.K.lane(lane).bind(inK[lane].prod(tile=pins.shims.tile(k_col, 0)))
+            self.K.lane(lane).bind(
+                inK[lane].prod(tile=Tile(k_col, 0) if every else AnyShimTile)
+            )
             for h in range(pv_cores):
                 v_col = layout.v[h] if split else columns.v if shared else lane
                 self.V.lane(lane * pv_cores + h).bind(
-                    inV[lane * pv_cores + h].prod(tile=pins.shims.tile(v_col, 0))
+                    inV[lane * pv_cores + h].prod(
+                        tile=Tile(v_col, 0) if every else AnyShimTile
+                    )
                 )
 
         flat_rtps = [b for stage in mha_rtps_list for b in stage]

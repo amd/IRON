@@ -7,6 +7,11 @@ Each kind is asked of the resolved operator, so its ladder runs through the
 value the library would choose and the default is always among them. A
 value the operator cannot resolve or build at is left out by the tuner, not
 here.
+
+A domain need not be one of the classes below: a plain tuple is a fixed set
+of values (the resolved one included, first if it is not already there),
+and an ``Auto`` field annotated with an ``Enum`` and given no domain is
+searched over that ``Enum``'s members, the resolved one first.
 """
 
 from __future__ import annotations
@@ -25,11 +30,13 @@ class Domain(ABC):
     """The values a tunable is searched over.
 
     Attributes:
-        when: A bool field of the operator; the tunable is searched only
-            where it is true.
+        when: A callable of the resolved operator and its device; the
+            tunable is searched only where it returns true.
     """
 
-    when: str | None = dataclasses.field(default=None, kw_only=True)
+    when: Callable[[Any, Any], bool] | None = dataclasses.field(
+        default=None, kw_only=True
+    )
 
     @abstractmethod
     def values(self, op: Any, dev: Any, start: Any) -> tuple[Any, ...]:
@@ -96,22 +103,3 @@ class Divisors(Domain):
             if of % value == 0 and (cap is None or value <= cap):
                 found.append(value)
         return tuple(found)
-
-
-@dataclass(frozen=True)
-class Choices(Domain):
-    """A fixed set of values, the resolved one first if it is not among
-    them.
-
-    Attributes:
-        options: The values, or a callable of the operator and the device
-            returning them.
-    """
-
-    options: Any
-
-    def values(self, op: Any, dev: Any, start: Any) -> tuple[Any, ...]:
-        options = tuple(
-            self.options(op, dev) if callable(self.options) else self.options
-        )
-        return options if start in options else (start, *options)

@@ -16,6 +16,7 @@ import inspect
 import math
 from collections.abc import Iterable, Mapping
 from contextvars import ContextVar
+from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -38,10 +39,9 @@ from aie.utils.verify import Tolerance, Verdict, compare
 from ..testing import Testing
 from .chain import Chain, Link
 from .declaration import Declaration
-from .domain import Width
+from .domain import Domain, Width
 from .field import Auto, Param, Unresolvable
 from .operand import In, Operand
-from .placement import Placement
 from .profile import Profile
 from .value import ChainWord, Extent, ExtentWord, PlaceWord, Value
 
@@ -91,6 +91,21 @@ class _OperatorMeta(type):
         profile = Profile.current()
         if profile is not None:
             kwargs = {**profile.tunables_for(cls, kwargs), **kwargs}
+        # An Enum-domain tunable (GEMM's and MHA's placements) takes its own
+        # Enum alone, or None (left for resolve() to fill): a string names
+        # one in a profile's JSON, which Profile.load converts before it
+        # reaches here.
+        for name, domain in cls.declaration.domains.items():
+            if (
+                name in kwargs
+                and isinstance(domain, type)
+                and issubclass(domain, Enum)
+                and kwargs[name] is not None
+                and not isinstance(kwargs[name], domain)
+            ):
+                raise TypeError(
+                    f"{cls.__name__}.{name} is a {domain.__name__}, not {kwargs[name]!r}"
+                )
         return super().__call__(*args, **kwargs)
 
 
@@ -667,9 +682,13 @@ class Operator(metaclass=_OperatorMeta):
         return cls.sequence is not Operator.sequence
 
     def design_key(self):
-        """Identity for sharing a build: equal keys generate byte-identical MLIR."""
+        """Identity for sharing a build: equal keys generate byte-identical MLIR.
+
+        An Enum field (GEMM's and MHA's placements) is its own value, not
+        the member: a rename must not move a design's key.
+        """
         own = tuple(
-            (f.name, getattr(self, f.name))
+            (f.name, v.value if isinstance(v := getattr(self, f.name), Enum) else v)
             for f in dataclasses.fields(self)
             if f.compare
         )
@@ -701,7 +720,8 @@ class Operator(metaclass=_OperatorMeta):
 
     def array_key(self):
         key = (type(self),) + tuple(
-            (name, getattr(self, name)) for name in self.declaration.array
+            (name, v.value if isinstance(v := getattr(self, name), Enum) else v)
+            for name in self.declaration.array
         )
         if self.trace is not None:
             key += (("trace", self.trace),)
@@ -736,9 +756,6 @@ class Operator(metaclass=_OperatorMeta):
             new._finish_at(dev if dev is not None else self.dev)
         new.validate()
         new.compatible()
-        for name, domain in new.declaration.domains.items():
-            if isinstance(domain, Placement):
-                domain.pins(getattr(new, name))
         new._resolved = True
         return new
 
@@ -944,6 +961,11 @@ class Operator(metaclass=_OperatorMeta):
         ``when`` flag holds, a `Width` for one of `widths`, and nothing for
         any other. A combination the operator cannot resolve at is left
         out by the tuner. A ``pinned`` tunable is not searched.
+
+        A fixed tuple is the resolved value's own, the resolved one first if
+        it is not already there; an `Enum`-annotated field with no domain is
+        searched over that `Enum`'s members, the resolved one first (GEMM's
+        and MHA's placements: a hand-found default tried before the rest).
         """
         widths = self.widths
         found = {}
@@ -951,13 +973,18 @@ class Operator(metaclass=_OperatorMeta):
             domain = self.declaration.domains.get(
                 name, Width() if name in widths else None
             )
-            if (
-                name in self.pinned
-                or domain is None
-                or (domain.when is not None and not getattr(self, domain.when))
-            ):
+            if name in self.pinned or domain is None:
                 continue
-            found[name] = domain.values(self, dev, vars(self)[name])
+            when = domain.when if isinstance(domain, Domain) else None
+            if when is not None and not when(self, dev):
+                continue
+            start = vars(self)[name]
+            if isinstance(domain, tuple):
+                found[name] = domain if start in domain else (start, *domain)
+            elif isinstance(domain, type):  # an Enum, auto-detected
+                found[name] = (start, *(m for m in domain if m != start))
+            else:
+                found[name] = domain.values(self, dev, start)
         return found
 
     @property

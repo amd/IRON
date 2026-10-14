@@ -100,9 +100,11 @@ class Auto(Param):
         derived: `resolve` computes the field from the device and the other
             fields whatever it was given, so it is not a tunable a caller,
             a profile or a tuner sets.
-        domain: The values a tuner searches the field over (`Width`,
-            `Divisors`, `Choices`). Left out, a tunable a streamed ``per=``
-            names is searched as a `Width` and any other is not searched.
+        domain: The values a tuner searches the field over: a `Width`, a
+            `Divisors`, a fixed tuple, or (left out, on an `Enum`-annotated
+            field) that `Enum`'s members. Left out otherwise, a tunable a
+            streamed ``per=`` names is searched as a `Width` and any other
+            is not searched.
     """
 
     __slots__ = ("derived", "domain")
@@ -114,7 +116,7 @@ class Auto(Param):
         *,
         array: bool = False,
         derived: bool = False,
-        domain: Domain | None = None,
+        domain: Domain | tuple[Any, ...] | None = None,
         repr: bool = True,
         init: bool = True,
     ) -> None:

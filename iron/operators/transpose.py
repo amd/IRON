@@ -14,7 +14,6 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import (
-    Choices,
     Divisors,
     In,
     Operator,
@@ -126,7 +125,7 @@ class Transpose(Operator):
             cap=lambda op, dev: 8192 // op.m,
         ),
     )
-    s: int = Auto(8, array=True, domain=Choices((8, 4)))
+    s: int = Auto(8, array=True, domain=(8, 4))
     num_aie_columns: int = Auto()
     num_channels: int = Auto(1)
 

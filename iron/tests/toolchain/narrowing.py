@@ -23,7 +23,6 @@ from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common import Level
 from iron.common.declare import Profile
 from iron.common.design import OperatorDesign
 from iron.common.graph.costcache import Accuracy, CostCache, Measurement
@@ -64,6 +63,7 @@ from iron.operators import (
 )
 from iron.operators.flm import GEMM as FlmGEMM
 from iron.operators.flm import DequantBFP
+from iron.operators.mha import MHAPlacement
 from iron.tests.common.graphs import Rotate
 from iron.tests.common.llama_model import llama_1b
 
@@ -360,7 +360,7 @@ def test_a_placement_is_searched_by_name_and_keys_the_array(tmp_path, npu2):
     assert kept == found and not refused
     # A profile's placement starts the search, the declared ones after it.
     profile = Profile()
-    profile.add(MHA, placement="columns")
+    profile.add(MHA, placement=MHAPlacement.COLUMNS)
     with profile:
         held = MHA(num_heads=8, seq_pad=256)
     assert held.resolved(npu2).domains(npu2)["placement"] == (
@@ -370,17 +370,11 @@ def test_a_placement_is_searched_by_name_and_keys_the_array(tmp_path, npu2):
     )
 
 
-def test_a_placement_holds_each_kind_of_tile_at_its_level():
-    assert Level.FREE.tile(3, 1) is None
-    column = Level.COLUMN.tile(3, 1)
-    assert (column.col, column.row) == (3, None)
-    tile = Level.TILE.tile(3, 1)
-    assert (tile.col, tile.row) == (3, 1)
-
-
-def test_a_placement_no_operator_declares_is_refused(npu2):
-    with pytest.raises(ValueError, match="'diagonal' is none of 'memtiles'"):
-        MHA(num_heads=8, seq_pad=256, placement="diagonal").resolved(npu2)
+def test_a_placement_takes_its_own_enum_alone():
+    with pytest.raises(
+        TypeError, match="MHA.placement is a MHAPlacement, not 'diagonal'"
+    ):
+        MHA(num_heads=8, seq_pad=256, placement="diagonal")
 
 
 def test_a_profile_refuses_a_derived_field():

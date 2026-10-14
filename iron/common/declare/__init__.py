@@ -8,33 +8,28 @@ inference stays a lookup (``Operator.infer``); a tile's may also be a
 tunable, since inference never reads one.
 """
 
-from .domain import Choices, Divisors, Width
+from .domain import Divisors, Width
 from .field import Auto, Param, Unresolvable
 from .shape import OptionalDim, Select
 from .operand import In, InOut, Operand, Out
 from .chain import Chain, Link
 from .operator import CopyRun, Operator
-from .placement import Level, Pins, Placement
 from .profile import Profile
 from .value import DispatchTime, Extent, Value
 from .xclbin import Xclbin
 
 __all__ = [
     "Chain",
-    "Choices",
     "CopyRun",
     "Divisors",
     "DispatchTime",
     "Extent",
     "In",
     "InOut",
-    "Level",
     "Link",
     "Operand",
     "Operator",
     "Out",
-    "Pins",
-    "Placement",
     "Profile",
     "Unresolvable",
     "Value",

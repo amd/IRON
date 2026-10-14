@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import dataclasses
+import enum
 import math
+import typing
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from .domain import Domain
 from .field import Auto, Param
 from .member import Member
 from .operand import Operand
@@ -178,16 +181,33 @@ class Declaration:
         self.derived = {f.name: f.derive for f in params if f.derive is not None}
         self.autos = tuple(f.name for f in autos)
         self.tunables = tuple(f.name for f in autos if f.init and not f.derived)
-        self.domains = {
-            f.name: f.domain
-            for f in autos
-            if f.name in self.tunables and f.domain is not None
-        }
+        # A tunable given no domain and annotated with an Enum is searched
+        # over that Enum's members. `get_type_hints` resolves the bare
+        # name `from __future__ import annotations` leaves as a string;
+        # Operator's own `bound_values` is annotated with graph.handle's
+        # Affine, which operator.py can only import under TYPE_CHECKING
+        # (graph.handle imports operator.py), so it is resolved here instead,
+        # the one place that needs it at runtime.
+        from ..graph.handle import Affine
+
+        hints = typing.get_type_hints(cls, localns={"Affine": Affine})
+        self.domains = {}
+        for f in autos:
+            if f.name not in self.tunables:
+                continue
+            domain = f.domain
+            if domain is None:
+                hint = hints.get(f.name)
+                if isinstance(hint, type) and issubclass(hint, enum.Enum):
+                    domain = hint
+            if domain is not None:
+                self.domains[f.name] = domain
         for n, domain in self.domains.items():
-            if domain.when is not None and domain.when not in fields:
+            when = domain.when if isinstance(domain, Domain) else None
+            if when is not None and not callable(when):
                 raise TypeError(
-                    f"{cls.__name__}.{n}: when={domain.when!r} must name a bool field, "
-                    f"the flag the tunable is searched under"
+                    f"{cls.__name__}.{n}: when={when!r} must be a callable of "
+                    f"(op, dev), the flag the tunable is searched under"
                 )
         # The array tier: what a stream's tile, a core's block of it, its dtype,
         # its replication or its presence names, and what declares itself array=True.

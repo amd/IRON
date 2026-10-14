@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextvars
 import dataclasses
 import json
+from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar, Iterator, Mapping
 
@@ -143,7 +144,17 @@ class Profile:
             name = fields.pop("operator")
             if name not in operators.__all__:
                 raise ValueError(f"{path}: no operator {name!r} in iron.operators")
-            profile.add(getattr(operators, name), **fields)
+            op_cls = getattr(operators, name)
+            # An Enum-domain tunable is JSON's string, its member's value
+            # (should 1: a Pinned member's own value, not its ordinal).
+            for key, domain in op_cls.declaration.domains.items():
+                if (
+                    key in fields
+                    and isinstance(domain, type)
+                    and issubclass(domain, Enum)
+                ):
+                    fields[key] = domain(fields[key])
+            profile.add(op_cls, **fields)
         return profile
 
     def save(self, path: str | Path) -> None:
