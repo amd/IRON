@@ -49,7 +49,7 @@ def _pytest(tmp_path, test_source, without_xrt=False):
         env["PYTHONPATH"] = os.pathsep.join(p for p in entries if p != hidden)
     return subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider"]
-        + ["--iterations", "1", "-v", "-rs", "test_gated.py"],
+        + ["-v", "-rs", "test_gated.py"],
         cwd=tmp_path,
         env=env,
         capture_output=True,

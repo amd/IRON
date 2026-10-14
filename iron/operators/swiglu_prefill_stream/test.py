@@ -4,6 +4,7 @@
 
 import pytest
 from aie.utils.benchmark import run_iters
+from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance
 
 from iron.common.tracing import dump_traces
@@ -42,6 +43,7 @@ FUSION_GROUPS = [1, 2, 5]
 
 # Timed dispatches per test; the reported latency is the fastest of them.
 TIMED_RUNS = 3
+TRACE_SIZE = 8192
 
 
 def _staged(operator, golden_ref):
@@ -61,7 +63,8 @@ def _staged(operator, golden_ref):
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.bench
 @pytest.mark.parametrize("k", FUSION_GROUPS)
-def test_swiglu_prefill_stream(k, trace, record_property):
+def test_swiglu_prefill_stream(k, tmp_path, record_property):
+    trace = TraceConfig(TRACE_SIZE, trace_file=str(tmp_path / f"k{k}.txt"))
     golden_ref = generate_golden_reference(M=SEQ_LEN, K=EMBEDDING_DIM, N=HIDDEN_DIM)
     operator = SwiGLUPrefillStream(
         seq_len=SEQ_LEN,
@@ -78,8 +81,7 @@ def test_swiglu_prefill_stream(k, trace, record_property):
     # up to 25%. Tolerances are local to this test.
     run = _staged(operator, golden_ref)
     run()
-    if trace is not None:
-        dump_traces(run, trace.trace_file)
+    dump_traces(run, trace.trace_file)
     output = run.get_buffer(OUTPUT).numpy().reshape((SEQ_LEN, EMBEDDING_DIM))
     verdict = verify_buffer(
         output,

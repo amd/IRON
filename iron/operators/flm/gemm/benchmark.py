@@ -26,15 +26,13 @@ the correctness half lives in ``iron/operators/flm/gemm/test.py``.
 Timing is the runtime's device-side ``npu_time`` rather than a host wall clock,
 so it compares the designs rather than the driver.
 
-Pass ``--iterations 1``. Each test already averages ``ITERS`` dispatches over
-``ROUNDS`` interleaved rounds, so conftest's default of 5 repeats the whole
-matrix five times for nothing.
+Each test averages ``ITERS`` dispatches over ``ROUNDS`` interleaved rounds.
 
 Usage:
 
 ```bash
-pytest iron/operators/flm/gemm/benchmark.py --iterations 1
-pytest iron/operators/flm/gemm/benchmark.py --iterations 1 -k E2B --csv-output flm.csv
+pytest iron/operators/flm/gemm/benchmark.py
+pytest iron/operators/flm/gemm/benchmark.py -k E2B --csv-output flm.csv
 ```
 
 Do not pass ``-s`` when you want the CSV: conftest's reporter parses the

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Checks that the IRON engine generates the same tokens as FastFlowLM's own engine.
 
-    FLM_MODEL_PATH=<dir> pytest --iterations 1 tests/applications/gemma4_flm
+    FLM_MODEL_PATH=<dir> pytest tests/applications/gemma4_flm
 
 The tests run `make engine` first, which builds everything. Each prompt reports
 the IRON engine's time to first token and decode rate.

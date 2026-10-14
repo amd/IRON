@@ -58,7 +58,7 @@ in the cache.
 ### Run All Operators (non-extensive tests)
 
 ```bash
-pytest iron/operators/ iron/tests/ -m "not extensive" --iterations 1
+pytest iron/operators/ iron/tests/ -m "not extensive"
 ```
 
 ### Run Extensive Test Suite
@@ -233,8 +233,7 @@ reuse lint
    - `tracing.py`: `dump_traces(run, trace_file)`, for a sequence holding an
      operator built with `trace=` (mlir-aie's `TraceConfig`); the workers
      traced are those its `array()` gives `Worker(trace=)`, else its first.
-     The root conftest's `trace` fixture is the one reader of
-     `IRON_TRACE_SIZE`/`IRON_TRACE_DIR`
+     A test that traces builds its own `TraceConfig`
 
 ### Key Concepts
 

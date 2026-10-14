@@ -3,7 +3,6 @@
 
 import csv
 import numbers
-import os
 import re
 import subprocess
 from datetime import datetime
@@ -15,7 +14,6 @@ import aie.utils as aie_utils
 from aie.iron.device import from_name
 from aie.utils.benchmark import preflight, provenance
 from aie.utils.probe import npu_unavailable_reason
-from aie.utils.trace import TraceConfig
 
 
 def _bound_device(name: str, n_cols: int):
@@ -38,31 +36,11 @@ npu2 = _bound_device("npu2", 8)
 npu1 = _bound_device("npu1", 4)
 
 
-@pytest.fixture
-def trace(request, tmp_path):
-    """The trace a run asks for, or None: ``IRON_TRACE_SIZE`` bytes of trace
-    buffer, written to a file named after the test in ``IRON_TRACE_DIR``
-    (the test's ``tmp_path`` unless set).
-    """
-    size = int(os.environ.get("IRON_TRACE_SIZE", "0"))
-    if not size:
-        return None
-    directory = Path(os.environ.get("IRON_TRACE_DIR", tmp_path))
-    name = re.sub(r"[^\w.-]", "_", request.node.name)
-    return TraceConfig(size, trace_file=str(directory / f"{name}.txt"))
-
-
 def pytest_addoption(parser):
     parser.addoption(
         "--csv-output",
         default="tests_latest.csv",
         help="Output CSV file for test metrics",
-    )
-    parser.addoption(
-        "--iterations",
-        type=int,
-        default=5,
-        help="Number of iterations to run each test for statistics",
     )
     parser.addoption(
         "--cost-table",
@@ -192,16 +170,14 @@ def pytest_runtest_makereport(item, call):
         csv_reporter = item.session.config._csv_reporter
         if csv_reporter:
             # The pytest nodeid looks like this:
-            # iron/operators/dequant/test.py::test_dequant[iter0-dequant_8_cols_2_channels_2048_tile_128]
+            # iron/operators/flm/gemm/test.py::test_gemm[M_2048-K_2048-N_2048]
             # Split into:
-            #   test_path: iron/operators/dequant/test.py::test_dequant
-            #   test_name: just the parametrize id (without iter prefix)
-            nodeid_components = re.match(
-                r"^(.+?::[^\[]+)\[(iter\d+-)?(.+?)\]$", item.nodeid
-            )
+            #   test_path: iron/operators/flm/gemm/test.py::test_gemm
+            #   test_name: just the parametrize id
+            nodeid_components = re.match(r"^(.+?::[^\[]+)\[(.+?)\]$", item.nodeid)
             if nodeid_components:
                 test_path = nodeid_components.group(1)
-                test_name = nodeid_components.group(3)
+                test_name = nodeid_components.group(2)
             else:
                 # A test with no parameters carries no [...] suffix, so won't
                 # match the regex above.
@@ -210,7 +186,7 @@ def pytest_runtest_makereport(item, call):
 
             passed = report.outcome == "passed"
             # The figures the test gave record_property (run_test's latency,
-            # bandwidth and throughput; a test's own, e.g. TTFT).
+            # its spread, bandwidth and throughput; a test's own, e.g. TTFT).
             metrics = [
                 (name, float(value))
                 for name, value in item.user_properties
@@ -273,20 +249,6 @@ def pytest_sessionfinish(session, exitstatus):
                 "\nBenched tests passed without recording a metric:\n  "
                 + "\n  ".join(unmeasured)
             )
-
-
-def pytest_generate_tests(metafunc):
-    """Repeat each device test ``--iterations`` times for statistics.
-
-    A device test is one marked ``supported_devices``; the rest of the tree
-    runs once, since a repeat of a device-free test records nothing.
-    """
-    iterations = metafunc.config.getoption("--iterations")
-
-    marked = metafunc.definition.get_closest_marker("supported_devices")
-    if iterations > 1 and marked is not None:
-        metafunc.fixturenames.append("_iteration")
-        metafunc.parametrize("_iteration", range(iterations), ids=lambda i: f"iter{i}")
 
 
 SHARING_MODULES = pytest.StashKey[set]()

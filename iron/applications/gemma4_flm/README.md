@@ -91,7 +91,7 @@ checks that the token ids match, and reports the IRON engine's time to first
 token and decode rate for each prompt. Run it from the repository root:
 
 ```bash
-pytest --iterations 1 tests/applications/gemma4_flm
+pytest tests/applications/gemma4_flm
 ```
 
 The `Makefile` clones FastFlowLM at the merge of

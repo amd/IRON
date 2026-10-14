@@ -151,7 +151,8 @@ def run_test(
             name; ``operator.call_reference`` on ``inputs`` where None.
         timed_iters: The runs timed after the checked one; latency is
             their median.
-        record: A test's ``record_property``: latency, bandwidth and, from
+        record: A test's ``record_property``: latency, its median absolute
+            deviation over the timed runs, bandwidth and, from
             ``Operator.ops``, throughput.
 
     Raises:
@@ -201,6 +202,7 @@ def run_test(
     bandwidth_gbps = total_bytes / (latency_us * 1e-6) / 1e9
     if record is not None:
         record("Latency", latency_us)
+        record("Latency MAD", benchmark.npu.mad_us)
         record("Bandwidth", bandwidth_gbps)
         ops = operator.resolved().ops()
         if ops:
