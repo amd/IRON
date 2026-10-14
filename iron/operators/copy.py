@@ -10,12 +10,12 @@ from math import gcd, isqrt, prod
 from typing import Any, ClassVar
 
 import numpy as np
-from aie.dialects import aiex
 from aie.dialects.aie import AIETileType, DMAChannelDir, WireBundle
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     DmaEndpoint,
     Flow,
+    FlowEndpoint,
     ObjectFifo,
     PacketFlow,
     TaskGroup,
@@ -56,9 +56,11 @@ def _control_header(beats: int, address: int) -> int:
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class _GatherBuilt(Built):
-    """Gather's build, with the control routes ``sequence()`` fills."""
+    """Gather's build, with the control routes ``sequence()`` fills and the
+    feed endpoints it waits on."""
 
     controls: list[PacketFlow]
+    pushes: list[FlowEndpoint]
 
 
 class Gather(Operator):
@@ -205,22 +207,18 @@ class Gather(Operator):
                 for k, (feed, drain) in enumerate(shims)
             ]
             feeds = [
-                Flow(
-                    feed,
-                    drain,
-                    src_channel=1,
-                    dst_channel=0,
-                    # Nothing fills its source, the descriptors the packets push,
-                    # yet a shim channel routed by hand must be allocated.
-                    shim_symbol=f"gather_feed{k}",
-                )
-                for k, (feed, drain) in enumerate(shims)
+                Flow(feed, drain, src_channel=1, dst_channel=0) for feed, drain in shims
             ]
-            return _GatherBuilt([*controls, *feeds, *drains], controls=controls)
+            return _GatherBuilt(
+                [*controls, *feeds, *drains],
+                controls=controls,
+                # The feed shim's MM2S 1, which runs the descriptors the packets push.
+                pushes=[flow.endpoint(feed) for flow, (feed, _) in zip(feeds, shims)],
+            )
 
     def sequence(self, rt) -> None:
         words = rt.data(self.control)
-        controls = rt.built.controls
+        controls, pushes = rt.built.controls, rt.built.pushes
         chain, batches, runs = self.chain, self.batches, self.runs
         bounded = "valid_rows" in self.bound_extents
         unit = 16 // np.dtype(self.dtype).itemsize
@@ -259,7 +257,7 @@ class Gather(Operator):
                 j = run[i]
                 if i >= 2:
                     # MM2S 1 finished the feed's batch i - 2: its set and packets are free.
-                    aiex.npu_sync(2 * k, 0, DMAChannelDir.MM2S.value, 1)
+                    pushes[k].sync()
                     for task in pending[k][:-1]:
                         task.free()
                     pending[k] = pending[k][-1:]
@@ -279,7 +277,7 @@ class Gather(Operator):
                 )
         for k, run in enumerate(runs):
             for _ in run[-2:]:
-                aiex.npu_sync(2 * k, 0, DMAChannelDir.MM2S.value, 1)
+                pushes[k].sync()
             for task in pending[k]:
                 task.free()
         for task in drained:
