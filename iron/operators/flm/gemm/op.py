@@ -1260,11 +1260,13 @@ class GEMM(Operator):
         return 2 * self.M * self.K * self.N
 
     def reference(self, A, B):
-        """``C = clamp(epilogue(A @ B))``, in the kernel's order of operations.
+        """``C = epilogue(A @ B)``, in the kernel's order of operations; a
+        finish (a SiLU, a Sigmoid, a Clamp) is applied after it by the finish
+        chain's own references, as for any operator.
 
         The product accumulates in float32, as the kernel's f32 accumulator
         does, and is rounded to the output dtype before the epilogue and the
-        clamp, because ``mm_fused_epilogue_chunk`` converts the accumulator
+        finish, because ``mm_fused_epilogue_chunk`` converts the accumulator
         to bf16 and applies the activation to that.
 
         Not bit-exact, and cannot be: the hardware's activation is a LUT on
@@ -1273,7 +1275,7 @@ class GEMM(Operator):
         """
         b = B.T if self.b_col_maj else B
         C = np.matmul(A.astype(np.float32), b.astype(np.float32)).astype(A.dtype)
-        return self.activation.apply(C, self.clamp)
+        return Epilogue(self.epilogue).apply(C)
 
     def tolerance(self) -> Tolerance | None:
         """Each element of C within the roundings the kernel makes, in units
