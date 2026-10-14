@@ -138,8 +138,8 @@ class Merge(Operator):
         worker = Worker(
             core_fn, [of_ids.cons(), of_merge.prod(), kernel, rtp, barrier] + params
         )
-        self.ids.lane(0).bind(of_ids.prod())
-        self.merge.lane(0).bind(of_merge.cons())
+        self.ids.bind(of_ids.prod())
+        self.merge.bind(of_merge.cons())
         if not dynamic:
             self.count.bind([rtp], 0)
         return [worker, barrier]

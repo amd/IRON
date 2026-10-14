@@ -127,7 +127,7 @@ def generated_sequence(op, full_elf=True) -> tuple[str, list[Task]]:
 def test_split_takes_every_batch_and_broadcasts():
     op = MV(M=256, K=128, num_batches=100)
     a_transfers = op.A.transfers()
-    assert [(slot.index, size_by) for slot, _, size_by in a_transfers] == [
+    assert [(lane, word) for lane, _, word, _ in a_transfers] == [
         (0, None),
         (1, None),
     ]
@@ -135,8 +135,8 @@ def test_split_takes_every_batch_and_broadcasts():
     assert a_transfers[1][1] == TensorAccessPattern(
         (100, 256, 128), 128 * 128, [100, 128, 128], [256 * 128, 128, 1]
     )
-    ((b_slot, b_tap, _),) = op.B.transfers()
-    assert b_slot == op.B.lane(0)
+    ((b_lane, b_tap, _, _),) = op.B.transfers()
+    assert b_lane == 0
     assert b_tap == TensorAccessPattern((100 * 128,), 0, [100 * 128], [1])
 
 
@@ -161,23 +161,25 @@ def test_a_bounded_operand_goes_round_robin_over_the_lanes():
     op.use_value("valid", N)
     op = op.resolved(NPU2_4COL)
     word = op.value("valid_x")
-    assert [(slot.index, tap, size_by) for slot, tap, size_by in op.x.transfers()] == [
+    assert op.x.transfers() == [
         (
             0,
             TensorAccessPattern((1, 32, 2, 8), 0, [1, 32, 1, 8], [0, 16, 8, 1]),
-            {1: word},
+            word,
+            8,
         ),
         (
             1,
             TensorAccessPattern((1, 32, 2, 8), 8, [1, 32, 1, 8], [0, 16, 8, 1]),
-            {1: word},
+            word,
+            8,
         ),
     ]
     # A leading batch axis is the outer repeat; the tile count keeps its slot.
     batched = MV(M=256, K=128, num_batches=3)
     batched.use_value("valid", N)
     batched = batched.resolved(NPU2_4COL)
-    (slot, tap, size_by), *_ = batched.A.transfers()
+    (_, tap, word, unit), *_ = batched.A.transfers()
     # The 64 x 128 tile is a run past one wrap, so it takes the two inner
     # slots as 8 x 1024; the tile count sits above them.
     assert tap == TensorAccessPattern(
@@ -186,8 +188,8 @@ def test_a_bounded_operand_goes_round_robin_over_the_lanes():
         [3, 2, 8, 1024],
         [256 * 128, 2 * 64 * 128, 1024, 1],
     )
-    assert size_by == {1: batched.value("valid_A")}
-    assert batched.M // (2 * 64) == 2
+    assert word is batched.value("valid_A")
+    assert unit == 64 * 128 and batched.M // (2 * 64) == 2
 
 
 def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles():
@@ -205,11 +207,11 @@ def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles():
     lanes = op.num_aie_columns
     x = op.x.transfers()
     angles = op.angles.transfers()
-    for (xs, xa, _), (as_, aa, _) in zip(x, angles, strict=True):
-        assert xs.index == as_.index
+    for (xs, xa, _, _), (as_, aa, _, _) in zip(x, angles, strict=True):
+        assert xs == as_
         rows = xa.gather(np.arange(prod(xa.tensor_dims)))[::cols] // cols
         angle_rows = aa.gather(np.arange(prod(aa.tensor_dims)))[::cols] // cols
-        assert list(angle_rows) == list(range(xs.index, positions, lanes))
+        assert list(angle_rows) == list(range(xs, positions, lanes))
         assert list(rows // heads) == list(np.repeat(angle_rows, heads))
 
 
@@ -227,7 +229,7 @@ def test_preamble_rejects_a_resident_the_array_never_bound(npu2):
 
         def array(self):
             fifo = ObjectFifo(self.A.tile, name="a")
-            self.A.lane(0).bind(fifo.prod())
+            self.A.bind(fifo.prod())
 
             def core(of):
                 of.acquire(1)
@@ -336,17 +338,25 @@ def test_a_stack_and_its_flat_spelling_move_the_same_descriptors():
 
 
 @pytest.mark.parametrize(
-    "size_by, error, match",
+    "length, error, match",
     [
-        (lambda op: {4: op.value("valid_A")}, ValueError, "dimensions 0..3"),
-        (lambda op: {1: 32}, TypeError, "value member's word"),  # not a word
+        (
+            lambda op: dict(length_parameter=op.value("valid_A"), length_unit=3),
+            ValueError,
+            "no descriptor dimension",
+        ),
+        (
+            lambda op: dict(length_parameter=32, length_unit=64),
+            TypeError,
+            "value member",
+        ),  # not a word
     ],
-    ids=["past_the_dimensions", "not_a_word"],
+    ids=["no_dimension_of_the_unit", "not_a_word"],
 )
-def test_a_size_patch_names_a_dimension_and_a_word(size_by, error, match):
+def test_a_per_call_length_counts_a_dimension_by_a_word(length, error, match):
     class Patched(GEMV):
         def sequence(self, rt):
-            rt.fill(self.A.lane(0), self.A, size_by=size_by(self))
+            self.A.fill(lane=0, **length(self))
 
     op = Patched(M=256, K=64, num_aie_columns=2, tile_size_input=2, tile_size_output=4)
     op.use_value("valid", N)
@@ -563,8 +573,8 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
 
     op = Shipped(M=256, K=1024, N=1152)
     assert op.external.filename == "flm_mm_f81eba71.xclbin"
-    pins = [(op.A.lane(r).shim, op.A.channel) for r in range(4)]
-    pins.append((op.B.lane(3).shim, op.B.channel))
+    pins = [(op.A.via[r], op.A.channel) for r in range(4)]
+    pins.append((op.B.via[3], op.B.channel))
     assert [(tile.col, channel) for tile, channel in pins] == [
         (0, 0),
         (2, 0),

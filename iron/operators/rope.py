@@ -212,10 +212,9 @@ class RoPE(Operator):
             )
             for i in range(n)
         ]
-        for i in range(n):
-            self.x.lane(i).bind(of_in[i].prod())
-            self.angles.lane(i).bind(of_lut[i].prod())
-            self.y.lane(i).bind(of_out[i].cons())
+        self.x.bind([f.prod() for f in of_in])
+        self.angles.bind([f.prod() for f in of_lut])
+        self.y.bind([f.cons() for f in of_out])
         if not dyn_lut:
             self.lut_rows.bind(counts, static.index("lut_rows"))
         if not dyn_rows:

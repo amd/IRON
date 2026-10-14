@@ -512,9 +512,8 @@ class GEMV(Operator):
             )
             for i in range(lanes)
         ]
-        for i in range(lanes):
-            self.A.lane(i).bind(A_fifos[i].prod())
-            self.C.lane(i).bind(C_fifos[i].cons())
+        self.A.bind([f.prod() for f in A_fifos])
+        self.C.bind([f.cons() for f in C_fifos])
         if not dynamic:
             self.tiles.bind(rtps, 0)
         self.batches.bind(rtps, 1)
@@ -541,37 +540,46 @@ class GEMV(Operator):
                     )
         M, K, tsi = self.M, self.K, self.tile_size_input
         drains = [
-            rt.drain(slot, (self.C, tap), wait=True, size_by=size_by, managed=False)
-            for slot, tap, size_by in self.C.transfers()
+            self.C.drain(
+                tap,
+                lane=k,
+                wait=True,
+                length_parameter=word,
+                length_unit=unit,
+                managed=False,
+            )
+            for k, tap, word, unit in self.C.transfers()
         ]
         rows = self.A.transfers()
         if self.num_matrices > 1 and self.A.bounded is None:
             parts = TensorAccessPattern.full((M, K)).partition(len(rows), 0)
             rows = [
                 (
-                    slot,
+                    k,
                     TensorAccessPattern(
                         self.A.shape, part.offset, part.sizes, part.strides
                     ),
                     None,
+                    None,
                 )
-                for (slot, _, _), part in zip(rows, parts, strict=True)
+                for (k, _, _, _), part in zip(rows, parts, strict=True)
             ]
         elif self.num_matrices > 1:
             # The round-robin pattern walks every matrix in its outermost
             # dimension.
             rows = [
                 (
-                    slot,
+                    k,
                     TensorAccessPattern(
                         tap.tensor_dims,
                         tap.offset,
                         [1, *tap.sizes[1:]],
                         [0, *tap.strides[1:]],
                     ),
-                    size_by,
+                    word,
+                    unit,
                 )
-                for slot, tap, size_by in rows
+                for k, tap, word, unit in rows
             ]
         # Each lane's share of a batch's C, which a finish's inputs ride A for.
         share = M // len(rows)
@@ -584,10 +592,10 @@ class GEMV(Operator):
                 self.B.shape, b * K, [tsi, 1, 1, K], [0, 0, 0, 1]
             )
             line = TensorAccessPattern((K,), 0, [tsi, 1, 1, K], [0, 0, 0, 1])
-            for slot, tap, size_by in rows:
-                rt.fill(slot, (self.B, head), managed=False)
+            for k, tap, word, unit in rows:
+                self.A.fill(head, lane=k, source=self.B, managed=False)
                 for extra in self.prepare_inputs:
-                    rt.fill(slot, (extra, line), managed=False)
+                    self.A.fill(line, lane=k, source=extra, managed=False)
                 matrix = TensorAccessPattern(
                     tap.tensor_dims,
                     tap.offset + b // self.repeat * M * K,
@@ -596,16 +604,17 @@ class GEMV(Operator):
                 )
                 finishing = None
                 if self.finish_inputs:
-                    lane_rows = slice(slot.index * share, (slot.index + 1) * share)
+                    lane_rows = slice(k * share, (k + 1) * share)
                     finishing = (
                         output[b, lane_rows]
                         if self.num_batches > 1
                         else output[lane_rows]
                     )
-                rt.fill(
-                    slot,
-                    (self.A, matrix),
-                    size_by=size_by,
+                self.A.fill(
+                    matrix,
+                    lane=k,
+                    length_parameter=word,
+                    length_unit=unit,
                     managed=False,
                     finishing=finishing,
                 )

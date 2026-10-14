@@ -103,9 +103,8 @@ class Clamp(UnaryElementwise):
             )
             for k in range(cores)
         ]
-        for k in range(cores):
-            self.x.lane(k).bind(of_ins[k].prod())
-            self.y.lane(k).bind(of_outs[k].cons())
+        self.x.bind([f.prod() for f in of_ins])
+        self.y.bind([f.cons() for f in of_outs])
         for name in words:
             self.value(name).bind(rtps, words.index(name))
         return workers + barriers

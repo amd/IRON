@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any
 
 import numpy as np
-from aie.dialects.aie import AIEArch
+from aie.dialects.aie import AIEArch, AIETileType
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
@@ -749,12 +749,11 @@ class GEMM(Operator):
                     )
                 )
 
-        for c, f in enumerate(A_l3l2_fifos):
-            self.A.lane(c).bind(f.prod(tile=Tile(a_cols[c], 0)))
-        for c, f in enumerate(B_l3l2_fifos):
-            self.B.lane(c).bind(f.prod(tile=Tile(c, 0)))
-        for c, f in enumerate(C_l2l3_fifos):
-            self.C.lane(c).bind(f.cons(tile=Tile(c, 0)))
+        self.A.bind(
+            [f.prod(tile=Tile(a_cols[c], 0)) for c, f in enumerate(A_l3l2_fifos)]
+        )
+        self.B.bind([f.prod(tile=Tile(c, 0)) for c, f in enumerate(B_l3l2_fifos)])
+        self.C.bind([f.cons(tile=Tile(c, 0)) for c, f in enumerate(C_l2l3_fifos)])
         flat_rtps = [
             rtps[row][col] for row in range(n_aie_rows) for col in range(n_aie_cols)
         ]
@@ -785,7 +784,7 @@ class GEMM(Operator):
         # What one shim descriptor holds. The compiler splits a constant
         # pattern that does not fit, but the transfer blocks below count
         # descriptors, so B and C are checked here and shaped to fit.
-        shim = BdLimits.of(self.dev, 0, 0)
+        shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
 
         n_c_col_tiles_per_core = N // mem_tile_n
         n_c_row_tiles_per_core = M // mem_tile_m_C
@@ -829,11 +828,11 @@ class GEMM(Operator):
             # always equal to n_aie_rows since we have n_aie_rows row tiles for matrix A
             if col < n_aie_rows:
                 A_tile = A_rows[tile_offset].repeat(n_c_col_tiles_per_core)
-                rt.fill(self.A.lane(col), A_tile, group=tg)
+                self.A.fill(A_tile, lane=col, group=tg)
             # B input transfer: the first (n)-wide block of columns
             # of B, then the (n_aie_columns)-th such block, and so
             # on; each shim starts at a different column offset.
-            rt.fill(self.B.lane(col), B_tiles[col], group=tg)
+            self.B.fill(B_tiles[col], lane=col, group=tg)
 
         # C: (n_aie_rows * m)-by-n tiles, every n_aie_cols-th column block, for
         # c_n_rows row-blocks from c_row_base. Column-major, one row-block
@@ -893,7 +892,7 @@ class GEMM(Operator):
                             for r in range(current_tb_n_rows)
                         ]
                     for C_tile in C_tiles:
-                        rt.drain(self.C.lane(col), C_tile, group=tg, wait=True)
+                        self.C.drain(C_tile, lane=col, group=tg, wait=True)
                     if not b_unrolled:
                         for tile_row in range(current_tb_n_rows):
                             fill(col, row_base + tile_row, tg)

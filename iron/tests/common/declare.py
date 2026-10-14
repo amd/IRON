@@ -359,19 +359,18 @@ def test_instance_values_shadow_the_fields():
     assert isinstance(MV.K, Param) and MV.K.name == "K"
 
 
-def test_a_stream_is_bound_lane_by_lane():
+def test_a_stream_binds_a_handle_per_lane():
     op = MV(M=1024, K=256, columns=2)
-    op.A.lane(0).bind("h0")
-    op.A.lane(1).bind("h1")
+    op.A.bind(["h0", "h1"])
     op.B.bind("hb")
     assert op.A.handles == ["h0", "h1"]
-    assert op.B.handle == "hb"
+    assert op.B.handles == ["hb"]
     with pytest.raises(ValueError, match="already bound"):
-        op.A.lane(0).bind("again")
+        op.A.bind(["again", "again"])
     with pytest.raises(ValueError, match="never bound"):
         op.C.handles
-    with pytest.raises(ValueError, match="name a lane"):
-        op.A.handle
+    with pytest.raises(ValueError, match="has 2 lanes"):
+        MV(M=1024, K=256, columns=2).A.bind("h")
 
     class NoTile(Operator):
         n: int = Param()
@@ -402,7 +401,7 @@ def test_shim_pins_declare():
         y = Out(n, tile=(n,), via=[Tile(c, 0) for c in range(2)], channel=0, per=(c,))
 
     op = Pinned(n=2)
-    pins = [op.x.lane().shim] + [op.y.lane(i).shim for i in range(2)]
+    pins = [op.x.via, *op.y.via]
     assert op.y.count == 2
     assert [p.col for p in pins if p is not None] == [1, 0, 1]
 
@@ -472,10 +471,10 @@ def test_an_operand_with_a_tile_is_its_own_stream():
     }
     assert op.A.count == 8 and op.A.tile == np.ndarray[(64, 128), np.dtype[op.A.dtype]]
     assert op.A.shape == (1024, 128) and op.C.shape == (1024,)
-    op.A.lane(3).bind("h3")
-    assert op.A.lane(3).handle == "h3"
+    op.A.bind([f"h{k}" for k in range(8)])
+    assert op.A.handles[3] == "h3"
     op.B.bind("hb")
-    assert op.B.handle == "hb"
+    assert op.B.handles == ["hb"]
 
 
 class Scaled(Operator):

@@ -37,13 +37,22 @@ class BdLimits:
     linear: bool
 
     @classmethod
-    def of(cls, dev, col: int, row: int) -> BdLimits:
+    def of(cls, dev, tile_type: AIETileType) -> BdLimits:
+        """A descriptor of ``dev``'s tiles of ``tile_type``: a shim tile's for
+        a lane's host transfers.
+        """
+        col, row = next(
+            (c, r)
+            for r in range(dev.rows)
+            for c in range(dev.cols)
+            if dev.get_tile_type(c, r) is tile_type
+        )
         return cls(
             wrap=(1 << dev.get_dma_bd_wrap_bits(col, row)) - 1,
             step=1 << dev.get_dma_bd_step_bits(col, row),
             iterations=1 << dev.get_dma_bd_iter_bits(col, row),
             granule_bytes=dev.address_gen_granularity // 8,
-            linear=dev.get_tile_type(col, row) is AIETileType.ShimNOCTile,
+            linear=tile_type is AIETileType.ShimNOCTile,
         )
 
     @staticmethod

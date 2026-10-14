@@ -240,10 +240,10 @@ class DequantBFP(Operator):
             qw_in.release(1)
             out_of.release(1)
 
-        workers = []
+        workers, qws, outs = [], [], []
         for c in range(cols):
             of_qw = ObjectFifo(qw_col_ty, name=f"qw_{c}", depth=2)
-            self.qw.lane(c).bind(of_qw.prod())
+            qws.append(of_qw.prod())
             qw_cores = of_qw.cons().split(
                 [BLOCK_BYTES * r for r in range(ROWS)],
                 obj_types=[qw_blk_ty] * ROWS,
@@ -253,7 +253,7 @@ class DequantBFP(Operator):
             out_cores = []
             for h in range(HALVES):
                 of_out = ObjectFifo(out_half_ty, name=f"w_{c}_{h}", depth=2)
-                self.out.lane(c * HALVES + h).bind(of_out.cons())
+                outs.append(of_out.cons())
                 out_cores += of_out.prod().join(
                     CORE_JOIN_OFFSETS,
                     obj_types=[out_blk_ty] * (ROWS // HALVES),
@@ -269,6 +269,8 @@ class DequantBFP(Operator):
                 )
                 for r in range(ROWS)
             ]
+        self.qw.bind(qws)
+        self.out.bind(outs)
         return workers
 
     # -- host-side sizes ---------------------------------------------------------
@@ -306,15 +308,15 @@ class DequantBFP(Operator):
             tg_fill = TaskGroup()
             for c, cb in columns:
                 at = (cb // run_blocks) * period_blocks + cb % run_blocks
-                rt.fill(self.qw.lane(c), qw[at], group=tg_fill)
+                self.qw.fill(qw[at], lane=c, group=tg_fill)
 
             # Each k-tile's drains are awaited while the next one's run.
             for kb, tg in TaskGroup.pipelined(k_tiles, depth=2):
                 for c, cb in columns:
                     for h in range(HALVES):
-                        rt.drain(
-                            self.out.lane(c * HALVES + h),
+                        self.out.drain(
                             out[(cb * k_tiles + kb) * HALVES + h],
+                            lane=c * HALVES + h,
                             wait=True,
                             group=tg,
                         )

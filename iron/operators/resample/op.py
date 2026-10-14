@@ -369,11 +369,13 @@ class ResampleTaps(Operator):
                 [1, count, 1, words],
                 [0, self.cores * words, 0, 1],
             )
-            rt.drain(
-                self.table.lane(k),
-                (self.table, tap),
+            self.table.drain(
+                tap,
+                lane=k,
                 group=tg,
-                size_by={1: self.value("count")} if per_call else None,
+                wait=True,
+                length_parameter=self.value("count") if per_call else None,
+                length_unit=words,
             )
         tg.finish()
 
@@ -497,7 +499,7 @@ class ResampleTaps(Operator):
                     stack_size=4096,
                 )
             )
-            self.table.lane(k).bind(of_tables[k].cons())
+        self.table.bind([f.cons() for f in of_tables])
         for name in static:
             self.value(name).bind(rtps, static.index(name))
         return workers + barriers
@@ -1100,26 +1102,39 @@ class Resample(Operator):
         """
         tg = TaskGroup()
         moves = [
-            (rt.fill, self.image, self.image, "image_count", 0, 1),
-            (rt.fill, self.taps_w, self.taps_w, "width_count", 0, 1),
-            (rt.fill, self.taps_w, self.taps_h, "height_count", 0, 1),
+            (self.image, None, self.image, "image_count", 0, 1),
+            (self.taps_w, None, self.taps_w, "width_count", 0, 1),
+            (self.taps_w, None, self.taps_h, "height_count", 0, 1),
         ] + [
-            (rt.drain, self.patches.lane(k), self.patches, "patch_count", k, self.cores)
+            (self.patches, k, self.patches, "patch_count", k, self.cores)
             for k in range(self.cores)
         ]
-        for move, stream, buffer, name, first, step in moves:
+        for operand, lane, buffer, name, first, step in moves:
             per_call = self.uses_value(name)
             n, width = buffer.shape
             count = n // step if per_call else self.residents[name]
             tap = TensorAccessPattern(
                 (n, width), first * width, [1, count, 1, width], [0, step * width, 0, 1]
             )
-            move(
-                stream,
-                (buffer, tap),
-                group=tg,
-                size_by={1: self.value(name)} if per_call else None,
-            )
+            length = self.value(name) if per_call else None
+            if operand.drains:
+                operand.drain(
+                    tap,
+                    lane=lane,
+                    group=tg,
+                    wait=True,
+                    length_parameter=length,
+                    length_unit=width,
+                )
+            else:
+                operand.fill(
+                    tap,
+                    lane=lane,
+                    group=tg,
+                    source=buffer,
+                    length_parameter=length,
+                    length_unit=width,
+                )
         tg.finish()
 
     def array(self) -> list:
@@ -1235,10 +1250,9 @@ class Resample(Operator):
             )
             for k in range(cores)
         ]
-        for k in range(cores):
-            self.patches.lane(k).bind(of_patches[k].cons())
-        self.image.lane(0).bind(of_image.prod())
-        self.taps_w.lane(0).bind(of_taps.prod())
+        self.patches.bind([f.cons() for f in of_patches])
+        self.image.bind(of_image.prod())
+        self.taps_w.bind(of_taps.prod())
         for name in static:
             self.value(name).bind(rtps, static.index(name))
         return workers + barriers
@@ -1394,16 +1408,13 @@ class PatchPositions(Operator):
         """
         T, B = self.rows, self.block
         tg = TaskGroup()
-        rt.drain(self.xy.lane(0), self.xy, group=tg)
-        rt.drain(
-            self.position_ids.lane(0),
-            (
-                self.position_ids,
-                TensorAccessPattern((2, T), 0, [1, T // B, 2, B], [0, B, T, 1]),
-            ),
+        self.xy.drain(group=tg, wait=True)
+        self.position_ids.drain(
+            TensorAccessPattern((2, T), 0, [1, T // B, 2, B], [0, B, T, 1]),
             group=tg,
+            wait=True,
         )
-        rt.drain(self.order.lane(0), self.order, group=tg)
+        self.order.drain(group=tg, wait=True)
         tg.finish()
 
     def array(self) -> list:
@@ -1458,7 +1469,7 @@ class PatchPositions(Operator):
 
         worker = Worker(core_fn, [of_record.prod(), kernel, rtp, barrier] + params)
         for out, part in zip(outs, parts):
-            out.lane(0).bind(part.cons())
+            out.bind(part.cons())
         for name in static:
             self.value(name).bind([rtp], static.index(name))
         return [worker, barrier]

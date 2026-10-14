@@ -451,8 +451,7 @@ class Finish(_Chains):
     def bind(self) -> None:
         super().bind()
         for e, of in zip(self.streamed, self.fifos):
-            for k, fifo in enumerate(of):
-                e.lane(k).bind(fifo.prod())
+            e.bind([fifo.prod() for fifo in of])
 
     def target(self, args, mode, tile):
         """Where the producer writes ``tile``: where the chain's first call reads."""
@@ -955,12 +954,10 @@ class Elementwise(Operator):
             )
             for k in range(cores)
         ]
-        for k in range(cores):
-            for stream, of in zip(ins, of_ins):
-                if k < len(of):
-                    stream.lane(k).bind(of[k].prod())
-            for stream, of in zip(outs, of_outs):
-                stream.lane(k).bind(of[k].cons())
+        for stream, of in zip(ins, of_ins):
+            stream.bind([f.prod() for f in of])
+        for stream, of in zip(outs, of_outs):
+            stream.bind([f.cons() for f in of])
         if not dynamic:
             self.count.bind(counts)
         finish.bind()

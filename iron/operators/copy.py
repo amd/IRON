@@ -19,7 +19,7 @@ from typing import Any, ClassVar
 
 import numpy as np
 from aie.dialects import aiex
-from aie.dialects.aie import DMAChannelDir, WireBundle
+from aie.dialects.aie import AIETileType, DMAChannelDir, WireBundle
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
@@ -50,7 +50,8 @@ from iron.common import (
     Auto,
     Param,
 )
-from iron.common.design import BdLimits, ShimChannel
+from iron.common.design import BdLimits
+from iron.common.design.runtime import ShimChannel
 from iron.common.testing import Case, Testing
 
 # kDDRAIEAddrOffset (TxnEncoding.h)
@@ -471,8 +472,8 @@ class GatherWords(Operator):
         )
         ids = ObjectFifo(self.ids.tile, name="gather_ids", depth=1)
         addresses = ObjectFifo(self.control.tile, name="gather_addresses", depth=1)
-        self.ids.lane(0).bind(ids.prod())
-        self.control.lane(0).bind(addresses.cons())
+        self.ids.bind(ids.prod())
+        self.control.bind(addresses.cons())
         barrier = WorkerRuntimeBarrier()
         base_stream = None
         # A full ELF's core reads the address from the scratchpad, an
@@ -482,7 +483,7 @@ class GatherWords(Operator):
         if self.static_base:
             lo = hi = None
             base_stream = ObjectFifo(self.base.tile, name="gather_base", depth=1)
-            self.base.lane(0).bind(base_stream.prod())
+            self.base.bind(base_stream.prod())
         elif self.base_lo.scratchpad:
             lo, hi = self.base_lo.param, self.base_hi.param
         else:
@@ -525,11 +526,11 @@ class GatherWords(Operator):
 
     def sequence(self, rt) -> None:
         tg = TaskGroup()
-        rt.fill(self.ids.lane(0), self.ids, group=tg)
+        self.ids.fill(group=tg)
         if self.static_base:
-            rt.fill(self.base.lane(0), self.base, group=tg)
+            self.base.fill(group=tg)
         for tap in self.taps():
-            rt.drain(self.control.lane(0), (self.control, tap), group=tg, wait=True)
+            self.control.drain(tap, group=tg, wait=True)
         tg.finish()
 
     def taps(self) -> list[TensorAccessPattern]:
@@ -810,11 +811,14 @@ class Copy(Operator):
 
     def array(self) -> list:
 
+        ins, outs = [], []
         for c in range(self.num_channels):
             fifo_in = ObjectFifo(self.x.tile, name=f"fifo_in_{c}", depth=1)
             fifo_out = fifo_in.cons().forward(name=f"fifo_out_{c}", depth=1)
-            self.x.lane(c).bind(fifo_in.prod())
-            self.y.lane(c).bind(fifo_out.cons())
+            ins.append(fifo_in.prod())
+            outs.append(fifo_out.cons())
+        self.x.bind(ins)
+        self.y.bind(outs)
         return []
 
     def compatible(self) -> None:
@@ -867,7 +871,8 @@ class Copy(Operator):
     def _taps(
         self, tap: TensorAccessPattern, bound: int | None, dtype
     ) -> list[tuple[TensorAccessPattern, int | None]]:
-        """Per channel, its share of ``tap`` and the dimension a bound patches.
+        """Per channel, its share of ``tap`` and the elements of one unit of
+        the dimension a bound patches.
 
         An unbounded share is issued as it is: the compiler splits one no
         descriptor holds. A bounded one must be one descriptor, since its
@@ -889,7 +894,7 @@ class Copy(Operator):
         # At most one axis outside the bound (the iteration slot) and one or
         # two inside it (D1, D0) put the bound on D2.
         on_d2 = bound <= 1 and 1 <= rank - bound - 1 <= 2
-        shim = BdLimits.of(self.dev, 0, 0)
+        shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
         out = []
         for share in shares:
             dims = list(share.transformation_dims)
@@ -912,7 +917,8 @@ class Copy(Operator):
                     f"{tap} does not fit one descriptor per channel, which a "
                     f"bounded axis needs (its size is patched in place)"
                 )
-            out.append((placed, 1 if on_d2 else dim))
+            sizes, _ = BdLimits.slots(placed.sizes, placed.strides)
+            out.append((placed, prod(sizes[(1 if on_d2 else dim) + 1 :])))
         return out
 
     def ops(self) -> int:
@@ -1018,7 +1024,7 @@ class Copy(Operator):
         in_off = self.in_offset if self.uses_value("in_offset") else None
         out_off = self.out_offset if self.uses_value("out_offset") else None
         if isinstance(self.src, tuple) or isinstance(self.dst, tuple):
-            shim = BdLimits.of(self.dev, 0, 0)
+            shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
             # (stream position, channel, is a fill, tap): a drain goes out
             # before the fills that feed it.
             issued = []
@@ -1036,12 +1042,12 @@ class Copy(Operator):
             tokens = []
             for i, (_, c, fill, tap) in enumerate(issued):
                 if fill:
-                    rt.fill(self.x.lane(c), tap, offset_by=in_off, managed=False)
+                    self.x.fill(tap, lane=c, offset_parameter=in_off, managed=False)
                     continue
-                task = rt.drain(
-                    self.y.lane(c),
+                task = self.y.drain(
                     tap,
-                    offset_by=out_off,
+                    lane=c,
+                    offset_parameter=out_off,
                     wait=last[c] == i,
                     managed=False,
                 )
@@ -1055,21 +1061,23 @@ class Copy(Operator):
         outs = self._taps(self.dst, self.dst_bound, self.y.dtype)
         tg = TaskGroup()
         for c in range(self.num_channels):
-            tap, dim = ins[c]
-            rt.fill(
-                self.x.lane(c),
+            tap, unit = ins[c]
+            self.x.fill(
                 tap,
+                lane=c,
                 group=tg,
-                offset_by=in_off,
-                size_by=None if dim is None else {dim: self.value("src_valid")},
+                offset_parameter=in_off,
+                length_parameter=None if unit is None else self.value("src_valid"),
+                length_unit=unit,
             )
-            tap, dim = outs[c]
-            rt.drain(
-                self.y.lane(c),
+            tap, unit = outs[c]
+            self.y.drain(
                 tap,
+                lane=c,
                 group=tg,
                 wait=True,
-                offset_by=out_off,
-                size_by=None if dim is None else {dim: self.value("dst_valid")},
+                offset_parameter=out_off,
+                length_parameter=None if unit is None else self.value("dst_valid"),
+                length_unit=unit,
             )
         tg.finish()

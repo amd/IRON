@@ -650,7 +650,7 @@ class GEMM(Operator):
         # Emits (b_iter, mc, band): the order the core acquires A in while
         # holding a B chunk across the group.
         # A mem tile's run is bounded in elements; one past the wrap splits.
-        a_split = BdLimits.of(self.dev, 0, 1).factor(R * CT_MAX_K)
+        a_split = BdLimits.of(self.dev, AIETileType.MemTile).factor(R * CT_MAX_K)
         assert a_split is not None
         a_hi, a_lo = a_split
         a_send_dims = TensorAccessPattern.full(
@@ -964,11 +964,9 @@ class GEMM(Operator):
                     )
                 )
 
-        for r in range(ROWS):
-            self.A.lane(r).bind(a_l3l2_fifos[r].prod())
-        for c in range(COLS):
-            self.B.lane(c).bind(b_shim_flows[c])
-            self.C.lane(c).bind(c_l2l3_fifos[c].cons())
+        self.A.bind([f.prod() for f in a_l3l2_fifos])
+        self.B.bind(b_shim_flows)
+        self.C.bind([f.cons() for f in c_l2l3_fifos])
         flat = [b for row in rtps for b in row]
         self.n_val.bind(flat, RTP_N_VAL)
         self.m_row_blocks.bind(flat, RTP_M_ROW_BLOCKS)
@@ -1263,30 +1261,22 @@ class GEMM(Operator):
             # task queue holds, the compiler cuts into pieces and interleaves
             # with the other legs'.
             for bi, (mega_col, active_cols) in enumerate(blocks):
-                for r, (tap, repeat_by) in enumerate(a_legs):
-                    rt.fill(
-                        self.A.lane(r),
-                        (self.A, tap),
-                        repeat_by=repeat_by,
-                        managed=False,
-                    )
+                for r, (tap, repeats) in enumerate(a_legs):
+                    self.A.fill(tap, lane=r, repeat_parameter=repeats, managed=False)
                 for c in range(active_cols):
-                    rt.fill(
-                        self.B.lane(c),
-                        (self.B, b_tap(mega_col, c, slab)),
-                        managed=False,
-                    )
+                    self.B.fill(b_tap(mega_col, c, slab), lane=c, managed=False)
                 if bi == 0:
                     set_up()
                 else:
                     push_b_mt(bi)
                 for c in range(active_cols):
                     last = bi == n_work(c) - 1
-                    task = rt.drain(
-                        self.C.lane(c),
-                        (self.C, c_tap(mega_col, c, slab)),
+                    task = self.C.drain(
+                        c_tap(mega_col, c, slab),
+                        lane=c,
                         wait=last,
-                        size_by={1: self.units_valid} if bounded else None,
+                        length_parameter=self.units_valid if bounded else None,
+                        length_unit=ROWS * M_TILE * N_TILE,
                         managed=False,
                     )
                     if last:

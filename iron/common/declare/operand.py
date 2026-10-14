@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import copy
 import math
-from dataclasses import Field, dataclass
+from dataclasses import Field
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
 import aie.iron
 import numpy as np
+from aie.dialects.aie import AIETileType
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron.device import Tile
 from aie.utils import bfp
@@ -25,44 +26,6 @@ from .value import DispatchTime, Extent, Value
 
 if TYPE_CHECKING:
     from .operator import Operator
-
-
-@dataclass(frozen=True)
-class Lane:
-    """One fifo of an operand's stream: what ``array()`` binds a shim end to
-    and a sequence fills or drains.
-    """
-
-    buffer: Operand
-    index: int = 0
-
-    def bind(self, handle) -> None:
-        handles = self.buffer.lane_handles
-        if handles[self.index] is not None:
-            raise ValueError(f"{self.buffer.name}[{self.index}] is already bound")
-        handles[self.index] = handle
-
-    @property
-    def handle(self):
-        h = self.buffer.lane_handles[self.index]
-        if h is None:
-            raise ValueError(
-                f"{self.buffer.name}[{self.index}] was never bound: array() must "
-                f"call .bind() on every operand's lane"
-            )
-        return h
-
-    @property
-    def name(self) -> str:
-        return f"{self.buffer.name}{self.index}"
-
-    @property
-    def shim(self) -> Tile | None:
-        """The shim tile this lane is pinned to (``via=``), if any."""
-        via = self.buffer.via
-        if isinstance(via, Tile):
-            return via if self.buffer.count == 1 else None
-        return None if via is None else via[self.index]
 
 
 class Operand(Member["Operand"]):
@@ -176,12 +139,15 @@ class Operand(Member["Operand"]):
         self.feed = feed
         self.op: Operator | None = None
         self.lane_handles: list[Any] = []
+        # The OperatorRuntime whose sequence body is running, which fill/drain emit through.
+        self.runtime = None
 
     def of(self, op: Operator) -> Self:
         """This operand on ``op``: its shape resolved there, its lanes unbound."""
         bound = copy.copy(self)
         bound.op = op
         bound.lane_handles = []
+        bound.runtime = None
         return bound
 
     def _resolve(self, shape: Shape) -> tuple[int, ...]:
@@ -288,25 +254,151 @@ class Operand(Member["Operand"]):
             raise TypeError(f"{self.name} is declared without a tile=: no stream")
         return 1 if self.per is None else math.prod(self._resolve(self.per))
 
-    def lane(self, index: int = 0) -> Lane:
-        if not 0 <= index < self.count:
-            raise IndexError(f"{self.name} has {self.count} lanes")
-        if not self.lane_handles:
-            self.lane_handles = [None] * self.count
-        return Lane(self, index)
+    def bind(self, handles) -> None:
+        """Bind each lane to the fifo end ``array()`` built for it.
 
-    def bind(self, handle, index: int = 0) -> None:
-        self.lane(index).bind(handle)
+        Args:
+            handles: One handle per lane, in lane order, or the handle of a
+                one-lane operand.
 
-    @property
-    def handle(self):
-        if self.count != 1:
-            raise ValueError(f"{self.name} is per-{self.count}; name a lane")
-        return self.lane(0).handle
+        Raises:
+            ValueError: Another number of handles than lanes, or the operand
+                is bound already.
+        """
+        handles = list(handles) if isinstance(handles, (list, tuple)) else [handles]
+        if len(handles) != self.count:
+            raise ValueError(
+                f"{self.name} has {self.count} lanes; bind() was given "
+                f"{len(handles)} handles"
+            )
+        if self.lane_handles:
+            raise ValueError(f"{self.name} is already bound")
+        self.lane_handles = handles
 
     @property
     def handles(self) -> list[Any]:
-        return [self.lane(i).handle for i in range(self.count)]
+        if not self.lane_handles:
+            raise ValueError(
+                f"{self.name} was never bound: array() must bind() every "
+                f"streamed operand"
+            )
+        return self.lane_handles
+
+    def fill(
+        self,
+        tap: TensorAccessPattern | None = None,
+        *,
+        lane: int | None = None,
+        group=None,
+        wait: bool = False,
+        source: Operand | None = None,
+        offset_parameter: Value | None = None,
+        length_parameter: Value | None = None,
+        length_unit: int | None = None,
+        repeat_parameter: Value | None = None,
+        managed: bool = True,
+        finishing: TensorAccessPattern | None = None,
+    ):
+        """Fill lane ``lane`` of this operand's stream from the host, in a
+        ``sequence(rt)``: mlir-aie's ``ObjectFifoHandle.fill`` on the lane's
+        fifo, or a shim DMA task on a pinned lane.
+
+        A prepared input's lane is then filled with each of the operator's
+        ``prepare_inputs``, which its cores acquire with the tile. A fill of
+        a fed input's lane from that input takes its whole share, an output
+        tile's worth at a time, each followed by that output tile of each
+        finish input riding it.
+
+        A per-call parameter is a ``Value`` of the operator: on a full ELF its
+        scratchpad word, patched into the descriptor; on an xclbin a
+        dispatch-time scalar, which regenerates the instruction stream per
+        call.
+
+        Args:
+            tap: The walk over ``source``; all of it where None.
+            lane: The lane; may be left out of a one-lane operand only.
+            group: The ``TaskGroup`` the transfer joins.
+            wait: The transfer concludes with an await rather than a free.
+            source: The operand whose data moves through this one's lane,
+                where it is not this one (a prologue input riding it).
+            offset_parameter: A per-call element offset of ``tap``.
+            length_parameter: A per-call count of ``length_unit`` elements:
+                one descriptor's length, its outermost dimension below the
+                iteration, in whole 16-byte units; the pattern must fit one
+                descriptor.
+            length_unit: The elements one unit of ``length_parameter`` is.
+            repeat_parameter: A per-call count of extra runs of ``tap``, at
+                most its outermost size less one.
+            managed: False hands the queue slot and descriptors to the
+                compiler, which frees them after a later wait; joins no
+                group.
+            finishing: For a fill of a fed input, the part of the lane's
+                share of the output it computes (a pattern over the
+                output), where it is not the whole: a hand-written sequence
+                filling a lane in pieces.
+
+        Returns:
+            The transfer's ``Task``.
+
+        Raises:
+            ValueError: ``lane`` is left out of a multi-lane operand, a fed
+                input's lane is filled with a per-call parameter or with other
+                than its share and no ``finishing``, or a per-call length's
+                pattern does not fit one descriptor.
+        """
+        return self._runtime().transfer(
+            "fill",
+            self,
+            tap,
+            lane=lane,
+            group=group,
+            wait=wait,
+            source=source,
+            offset_parameter=offset_parameter,
+            length_parameter=length_parameter,
+            length_unit=length_unit,
+            repeat_parameter=repeat_parameter,
+            managed=managed,
+            finishing=finishing,
+        )
+
+    def drain(
+        self,
+        tap: TensorAccessPattern | None = None,
+        *,
+        lane: int | None = None,
+        group=None,
+        wait: bool = False,
+        offset_parameter: Value | None = None,
+        length_parameter: Value | None = None,
+        length_unit: int | None = None,
+        repeat_parameter: Value | None = None,
+        managed: bool = True,
+    ):
+        """Drain lane ``lane`` of this operand's stream to the host; the
+        arguments are ``fill``'s, and a drain the sequence must see finish
+        before it ends passes ``wait=True``.
+        """
+        return self._runtime().transfer(
+            "drain",
+            self,
+            tap,
+            lane=lane,
+            group=group,
+            wait=wait,
+            offset_parameter=offset_parameter,
+            length_parameter=length_parameter,
+            length_unit=length_unit,
+            repeat_parameter=repeat_parameter,
+            managed=managed,
+        )
+
+    def _runtime(self):
+        if self.runtime is None:
+            raise ValueError(
+                f"{self.name}.fill/drain run in the operator's sequence(rt)"
+            )
+        return self.runtime
 
     @property
     def batch_axes(self) -> int:
@@ -347,14 +439,17 @@ class Operand(Member["Operand"]):
                 return extent, axis, op.value(f"{name}_{self.name}")
         return None
 
-    def transfers(self) -> list[tuple[Lane, TensorAccessPattern, dict | None]]:
-        """The derived ``(lane, tap, size_by)`` transfers of this operand.
+    def transfers(
+        self,
+    ) -> list[tuple[int, TensorAccessPattern, Value | None, int | None]]:
+        """The derived ``(lane, tap, length_parameter, length_unit)``
+        transfers of this operand.
 
         Unbounded, the whole buffer for a one-lane or replicated stream,
         else the first non-batch axis in one block per lane. Under a bound,
         round-robin by tile: lane ``k`` takes tiles ``k, k + lanes, ...``,
-        so each lane has a fixed offset and stride and one count a call
-        patches, ``size_by``'s descriptor dimension.
+        so each lane has a fixed offset and stride and one length a call
+        patches, counting tiles of ``length_unit`` elements.
 
         Raises:
             ValueError: The operand has no tile, does not divide across its
@@ -374,9 +469,9 @@ class Operand(Member["Operand"]):
         bounded = self.bounded
         if bounded is None:
             if count == 1:
-                return [(self.lane(0), self.tap, None)]
+                return [(0, self.tap, None, None)]
             if self.replicate:
-                return [(self.lane(i), self.tap, None) for i in range(count)]
+                return [(i, self.tap, None, None) for i in range(count)]
             axis = self.batch_axes
             if axis >= len(shape) or shape[axis] % count:
                 raise ValueError(
@@ -384,7 +479,7 @@ class Operand(Member["Operand"]):
                     f"on axis {axis}. Check {type(self.op).__name__}.compatible()"
                 )
             parts = TensorAccessPattern.full(shape).partition(count, axis)
-            return [(self.lane(i), parts[i], None) for i in range(count)]
+            return [(i, parts[i], None, None) for i in range(count)]
         extent, axis, word = bounded
         if axis != self.batch_axes:
             raise ValueError(
@@ -407,7 +502,7 @@ class Operand(Member["Operand"]):
             )
         tiles = shape[axis] // (lanes * tile_rows)
         run = tile_rows * inner
-        shim = BdLimits.of(self.op.dev, 0, 0)
+        shim = BdLimits.of(self.op.dev, AIETileType.ShimNOCTile)
         granule = shim.granule(self.dtype)
         halves = shim.factor(run, granule)
         if halves is None:
@@ -429,14 +524,12 @@ class Operand(Member["Operand"]):
                     f"lanes does not fit one descriptor per lane"
                 )
             for k in range(count) if self.replicate else [lane]:
-                out.append((self.lane(k), tap, {1: word}))
+                out.append((k, tap, word, run))
         return out
 
-    def __getitem__(self, index) -> BufferView:
-        """A basic slice for ``rt.fill``/``rt.drain``; a ``Scratchpad`` start
-        patches the base address per call.
-        """
-        return BufferView(self, index)
+    def __getitem__(self, index) -> TensorAccessPattern:
+        """A basic slice of this operand, as the pattern ``fill``/``drain`` take."""
+        return TensorAccessPattern.full(self.shape)[index]
 
     def __repr__(self) -> str:
         if self.op is None:
@@ -466,40 +559,3 @@ class InOut(Operand, aie.iron.InOut):  # pyright: ignore[reportGeneralTypeIssues
 
     fills = True
     drains = True
-
-
-class BufferView:
-    """``buffer[index]``: a slice of an operand, resolved to a transfer by the build."""
-
-    def __init__(self, buffer: Operand, index) -> None:
-        self.buffer = buffer
-        self.index = index if isinstance(index, tuple) else (index,)
-        self.offset_by: Value | None = None
-        static = []
-        for idx in self.index:
-            if isinstance(idx, slice) and isinstance(idx.start, Value):
-                if idx.stop is not None or idx.step is not None:
-                    raise ValueError(
-                        f"{buffer.name}[{idx}]: a per-call start takes the whole axis"
-                    )
-                if self.offset_by is not None:
-                    raise ValueError(
-                        f"{buffer.name}: only one axis may start at a per-call value"
-                    )
-                if isinstance(idx.start, DispatchTime):
-                    raise ValueError(
-                        f"{buffer.name}: {idx.start.name} is a DispatchTime value; "
-                        f"only a Scratchpad value can move a transfer's base address"
-                    )
-                self.offset_by = idx.start
-                static.append(slice(None))
-            else:
-                static.append(idx)
-        self.static_index = tuple(static)
-
-    @property
-    def tap(self) -> TensorAccessPattern:
-        return TensorAccessPattern.full(self.buffer.shape)[self.static_index]
-
-    def __repr__(self) -> str:
-        return f"{self.buffer.name}[{self.index}]"

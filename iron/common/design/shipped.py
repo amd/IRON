@@ -50,8 +50,9 @@ class ShippedRuntime(OperatorRuntime):
         for s in op.buffers:
             if not s.streamed:
                 continue
+            pins = [s.via] if isinstance(s.via, Tile) else s.via
             for i in range(s.count):
-                pin = s.lane(i).shim
+                pin = None if pins is None or len(pins) != s.count else pins[i]
                 if pin is None or s.channel is None:
                     raise ValueError(
                         f"{type(op).__name__}.{s.name}[{i}] has no shim tile and "
@@ -83,32 +84,35 @@ class ShippedRuntime(OperatorRuntime):
         for lock in self.locks:
             lock.set(1)
         self._tensors = {b.name: a for b, a in zip(self.op.buffers, args)}
+        for b in self.op.buffers:
+            b.runtime = self
         self.run()
         self.finish()
 
-    def _transfer(
+    def _emit(
         self,
         verb: str,
-        stream,
-        what,
+        operand,
+        lane: int,
+        buffer,
+        tap,
         group,
         wait: bool,
-        offset_by=None,
-        size_by=None,
-        managed=True,
-        repeat_by=None,
+        managed: bool,
+        offset_parameter=None,
+        length_parameter=None,
+        length_unit=None,
+        repeat_parameter=None,
     ) -> None:
-        buffer, tap, sliced_by = self._resolve(what, stream)
-        per_call = (offset_by, sliced_by, size_by, repeat_by)
+        per_call = (offset_parameter, length_parameter, repeat_parameter)
         if any(v is not None for v in per_call):
             raise NotImplementedError(
                 "per-call offsets, sizes and repeat counts are not supported on a "
                 "shipped image"
             )
-        lane = self._lane(stream)
-        key = (lane.buffer.name, lane.index)
+        key = (operand.name, lane)
         queue = self._queues.setdefault(key, [])
-        if len(queue) == lane.buffer.depth:
+        if len(queue) == operand.depth:
             queue.pop(0).await_()
         queue.append(
             emit_shim_transfer(

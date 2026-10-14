@@ -204,11 +204,9 @@ class RMSNorm(Rowwise):
                         ],
                     )
                 )
-        for k in range(n_cores):
-            self.x.lane(k).bind(of_ins[k].prod())
-            self.y.lane(k).bind(of_outs[k].cons())
-        for j in range(chans):
-            self.weight.lane(j).bind(of_ws[j].prod())
+        self.x.bind([f.prod() for f in of_ins])
+        self.y.bind([f.cons() for f in of_outs])
+        self.weight.bind([f.prod() for f in of_ws])
         if not dynamic:
             self.count.bind(counts)
         return workers + barriers

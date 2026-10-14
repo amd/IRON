@@ -222,10 +222,10 @@ class Shipped(
                 for c in range(COLS):
                     if c in A_SOURCE_COL:
                         r = A_SOURCE_COL.index(c)
-                        rt.fill(self.A.lane(r), A[mega_row, r].permute((1, 0, 2)))
+                        self.A.fill(A[mega_row, r].permute((1, 0, 2)), lane=r)
                     if c >= active:
                         continue
                     # One contiguous run: pack_B has already put this
                     # column's k-blocks in the order the memtile writes them.
-                    rt.fill(self.B.lane(c), B[mega_col * COLS + c])
-                    rt.drain(self.C.lane(c), C[mega_row, :, mega_col * COLS + c])
+                    self.B.fill(B[mega_col * COLS + c], lane=c)
+                    self.C.drain(C[mega_row, :, mega_col * COLS + c], lane=c)

@@ -264,9 +264,8 @@ class Transpose(Operator):
             )
             for k in range(n_cores)
         ]
-        for k in range(n_cores):
-            self.x.lane(k).bind(of_l3l2[k].prod())
-            self.y.lane(k).bind(of_outs[k].cons())
+        self.x.bind([f.prod() for f in of_l3l2])
+        self.y.bind([f.cons() for f in of_outs])
         self.batches.bind(counts, 0)
         self.col_tiles.bind(counts, 1)
         self.chan_tiles.bind(counts, 2)
@@ -293,12 +292,12 @@ class Transpose(Operator):
                     # Partially transposes the input on the way in so the
                     # kernel only transposes s x s sub-tiles.
                     tap_in = x[batch, j, :, :, i].permute((0, 2, 1, 3))
-                    rt.fill(self.x.lane(k), tap_in, group=tg)
+                    self.x.fill(tap_in, lane=k, group=tg)
             for i in range(cols):
                 for j in range(chans):
                     k = i * chans + j
                     tap_out = y[batch, i, :, :, j].permute((2, 0, 1, 3))
-                    rt.drain(self.y.lane(k), tap_out, group=tg, wait=True)
+                    self.y.drain(tap_out, lane=k, group=tg, wait=True)
             tg.finish()
 
     def ops(self) -> int:

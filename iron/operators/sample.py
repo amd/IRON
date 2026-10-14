@@ -29,7 +29,7 @@ tokens, token = Sample(logits, draws, tokens, row=position * 4, at=position)
 import dataclasses
 
 import numpy as np
-from aie.dialects.aie import WireBundle, get_target_model
+from aie.dialects.aie import AIETileType, WireBundle, get_target_model
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker
 from aie.iron.controlflow import range_
@@ -229,10 +229,10 @@ class Sample(Operator):
             of_tok.release(1)
             of_rec.release(1)
 
-        workers = []
+        workers, logits = [], []
         for c in range(self.cores):
             of_x = ObjectFifo(self.logits.tile, name=f"logits_{c}", depth=2)
-            self.logits.lane(c).bind(of_x.prod())
+            logits.append(of_x.prod())
             state = Buffer(
                 np.ndarray[(kernels.SELECT_STATE_WORDS,), np.dtype[np.int32]],
                 initial_value=np.zeros(kernels.SELECT_STATE_WORDS, dtype=np.int32),
@@ -243,6 +243,7 @@ class Sample(Operator):
                     [of_x.cons(), of_draw.cons(), of_summary[c].prod(), select, state],
                 )
             )
+        self.logits.bind(logits)
         workers.append(
             Worker(
                 combine_body,
@@ -264,7 +265,7 @@ class Sample(Operator):
         """
         run, streams = self.slice_size, self.select_streams
         piece = TensorAccessPattern.full((self.vocab,))[core * run : (core + 1) * run]
-        shim = BdLimits.of(self.dev, 0, 0)
+        shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
         halves = shim.factor(run, shim.granule(bfloat16))
         if halves is not None:
             tap = piece.split(0, halves[1]).repeat(streams)
@@ -277,23 +278,12 @@ class Sample(Operator):
         row = self.row if self.uses_value("row") else None
         at = self.at if self.uses_value("at") else None
         tg = TaskGroup()
-        rt.fill(
-            self.draws.lane(),
-            TensorAccessPattern.full(self.draws.shape)[0],
-            group=tg,
-            offset_by=row,
-        )
+        self.draws.fill(self.draws[0], group=tg, offset_parameter=row)
         for c in range(self.cores):
             for tap in self._slice_taps(c):
-                rt.fill(self.logits.lane(c), tap, group=tg)
-        rt.drain(
-            self.tokens.lane(),
-            TensorAccessPattern.full(self.tokens.shape)[:1],
-            group=tg,
-            wait=True,
-            offset_by=at,
-        )
-        rt.drain(self.token.lane(), self.token, group=tg, wait=True)
+                self.logits.fill(tap, lane=c, group=tg)
+        self.tokens.drain(self.tokens[:1], group=tg, wait=True, offset_parameter=at)
+        self.token.drain(group=tg, wait=True)
         tg.finish()
 
     def ops(self) -> int:

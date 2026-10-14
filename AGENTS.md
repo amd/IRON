@@ -270,14 +270,21 @@ reuse lint
 (each buffer split over its stream's slots); an operator that needs a
 different order overrides `sequence(rt)`:
 
-- `rt.fill(slot, view, group=tg)`: DMA data from host → NPU (shim → L2/L1)
-- `rt.drain(slot, view, group=tg)`: DMA data from NPU → host
+- `self.A.fill(tap, lane=i, group=tg)`: DMA data from host → NPU (shim →
+  L2/L1), mlir-aie's `ObjectFifoHandle.fill` on the operand's lane `i`
+  (left out of a one-lane operand only); `source=` moves another operand's
+  data through this one's lane
+- `self.C.drain(tap, lane=i, group=tg, wait=True)`: DMA data from NPU →
+  host; `wait=False` is the default, as upstream's
 - `tg = TaskGroup()` ... `tg.finish()` (mlir-aie's): awaits and frees a
   group's transfers; `TaskGroup.pipelined(n)` keeps a step's in flight
   while the next is issued
-- views are slices of the declared buffers (`self.A[:, r0:r1, :]`) or
-  mlir-aie's `TensorAccessPattern`s over one (`(self.A, tap)`); the
-  compiler splits a constant pattern no one descriptor holds
+- `tap` is a slice of the operand (`self.A[:, r0:r1, :]`) or any
+  `TensorAccessPattern` over it, all of it when left out; the compiler
+  splits a constant pattern no one descriptor holds
+- per-call words are a `Value` of the operator, under upstream's names:
+  `offset_parameter=`, `length_parameter=` (with `length_unit=`, the
+  elements one unit counts) and `repeat_parameter=`
 
 **Per-call values**: `Value()` members (`dtype=np.int32` by default) are
 patched into descriptors or read by cores without a rebuild; `DispatchTime()`
@@ -365,7 +372,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      by `resolve(dev)` from the device and the extents
    - `In`/`Out` operands by shape, each with its `tile=` in the units a
      core reads (`per=` a column count): an operand with a tile is its own
-     stream, `op.x.lane(i)` a shim endpoint, `op.x.tile` the fifo type;
+     stream of `op.x.count` lanes, `op.x.tile` the fifo type;
      `when=flag`, a bool `Param()`, makes an operand (and its stream) exist
      only where the flag is true; a call gives it by keyword, its name,
      which sets the flag (`RMSNorm(x, weight=w)` is `weighted=True`)
@@ -375,7 +382,8 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    - `array()`: build ObjectFIFOs and Workers (`self.kernel()` or a
      factory's `ExternalFunction`, `Buffer(..., use_write_rtp=True)` for a
      runtime parameter, `WorkerRuntimeBarrier()`), `range_()` for loops, and
-     `self.x.lane(i).bind(fifo.prod())` / `self.count.bind(rtps)` for every
+     `self.x.bind([f.prod() for f in fifos])` (a handle per lane) /
+     `self.count.bind(rtps)` for every
      member; a value the build made a scratchpad word
      (`self.value("count").scratchpad`, a per-call value on a full ELF) a
      core reads per call from `.param` instead, and `self.x.l1_depth` is the
@@ -385,7 +393,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      array tier alone: reading an extent raises
    - `compatible()` for divisibility against the resolved tunables
    - `sequence(rt)` only if the derived sequence is not the one you want:
-     `rt.fill(self.A.lane(i), access)`, `rt.drain(self.C.lane(i), access)`
+     `self.A.fill(tap, lane=i)`, `self.C.drain(tap, lane=i, wait=True)`
    - see `iron/common/elementwise.py` for the elementwise families, and
      `gemm.py` or `mha.py` for hand-written sequences
 3. A shipped binary is a subclass declared with the image, `class

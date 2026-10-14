@@ -20,7 +20,7 @@ their sequences into one aie.iron ``DeviceConfiguration``, which
 
 from .bd import BdLimits
 from .design import BuiltArray, OperatorDesign, configuration, identities
-from .runtime import OperatorRuntime, ShimChannel
+from .runtime import OperatorRuntime
 from .shipped import ShippedRuntime
 
 __all__ = [
@@ -28,7 +28,6 @@ __all__ = [
     "BuiltArray",
     "OperatorDesign",
     "OperatorRuntime",
-    "ShimChannel",
     "ShippedRuntime",
     "configuration",
     "identities",

@@ -36,7 +36,7 @@ from enum import StrEnum
 from typing import ClassVar
 
 import numpy as np
-from aie.dialects.aie import AIEArch
+from aie.dialects.aie import AIEArch, AIETileType
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
@@ -1251,14 +1251,13 @@ class MHA(Operator):
         # one per pipeline, take their column's two. Split, every stream
         # but K moves through the shim under its memtile.
         two_shims = self.q_shims > 1
+        qs, outs, ks, vs = [], [], [], []
         for s in range(self.q_shims):
             q_col = layout.q[s] if split else 0 if two_shims else columns.q
-            self.Q.lane(s).bind(
-                inQ[s].prod(tile=Tile(q_col, 0) if every else AnyShimTile)
-            )
+            qs.append(inQ[s].prod(tile=Tile(q_col, 0) if every else AnyShimTile))
             for h in range(pv_cores):
                 o_col = layout.o[s][h] if split else 0 if two_shims else columns.o
-                self.O.lane(s * pv_cores + h).bind(
+                outs.append(
                     memO[s * pv_cores + h].cons(
                         tile=Tile(o_col, 0) if every else AnyShimTile
                     )
@@ -1266,16 +1265,18 @@ class MHA(Operator):
         for lane in range(kv_lanes):
             shared = kv_lanes == 1
             k_col = layout.k_shim if split else columns.k if shared else lane
-            self.K.lane(lane).bind(
-                inK[lane].prod(tile=Tile(k_col, 0) if every else AnyShimTile)
-            )
+            ks.append(inK[lane].prod(tile=Tile(k_col, 0) if every else AnyShimTile))
             for h in range(pv_cores):
                 v_col = layout.v[h] if split else columns.v if shared else lane
-                self.V.lane(lane * pv_cores + h).bind(
+                vs.append(
                     inV[lane * pv_cores + h].prod(
                         tile=Tile(v_col, 0) if every else AnyShimTile
                     )
                 )
+        self.Q.bind(qs)
+        self.O.bind(outs)
+        self.K.bind(ks)
+        self.V.bind(vs)
 
         flat_rtps = [b for stage in mha_rtps_list for b in stage]
         for i, name in enumerate(counts):
@@ -1387,7 +1388,7 @@ class MHA(Operator):
         B_kv = self.B_kv
         # K and V stream the blocks the keys cover, a call's by its bound.
         kv_blocks = ceildiv(self.kv_tokens, B_kv)
-        kv_by = {1: self.value("kv_blocks")} if self.uses_value("kv_blocks") else None
+        kv_valid = self.value("kv_blocks") if self.uses_value("kv_blocks") else None
 
         def by_head(buffer, interleaved):
             # A (heads, seq, d) or, interleaved per token, (seq, heads, d)
@@ -1432,49 +1433,60 @@ class MHA(Operator):
                 owned = [p * steps + step for p in range(self.num_pipelines)]
                 tg = TaskGroup()
                 for kv_head in owned:
-                    rt.fill(self.Q.lane(0), packed_rows(self.Q, kv_head), group=tg)
+                    self.Q.fill(packed_rows(self.Q, kv_head), lane=0, group=tg)
                 for p, kv_head in enumerate(owned):
                     for x in (self.K, self.V):
-                        rt.fill(
-                            x.lane(p), kv_rows(x, kv_head, 1), group=tg, size_by=kv_by
+                        x.fill(
+                            kv_rows(x, kv_head, 1),
+                            lane=p,
+                            group=tg,
+                            length_parameter=kv_valid,
+                            length_unit=B_kv * x.shape[-1],
                         )
                 for kv_head in owned:
-                    rt.drain(self.O.lane(0), packed_rows(self.O, kv_head), group=tg)
+                    self.O.drain(
+                        packed_rows(self.O, kv_head), lane=0, group=tg, wait=True
+                    )
                 tg.finish()
             return
 
         # V and O move a stream per P*V core, its share of the head's columns.
         cores, pv_width = self.pv_cores, self.pv_width
-        iterations = BdLimits.of(self.dev, 0, 0).iterations
+        iterations = BdLimits.of(self.dev, AIETileType.ShimNOCTile).iterations
         for kv_head in range(kv_heads):
             head0 = kv_head * group
             tg = TaskGroup()
             for shim in range(self.q_shims):
-                rt.fill(self.Q.lane(shim), q_rows(self.Q, head0, shim), group=tg)
+                self.Q.fill(q_rows(self.Q, head0, shim), lane=shim, group=tg)
             # A bounded pattern is one descriptor, its re-reads at most the
             # iteration slot's count.
             reads = group * blocks
             for first in range(0, reads, iterations):
                 count = min(iterations, reads - first)
-                rt.fill(
-                    self.K, kv_rows(self.K, kv_head, count), group=tg, size_by=kv_by
+                self.K.fill(
+                    kv_rows(self.K, kv_head, count),
+                    group=tg,
+                    length_parameter=kv_valid,
+                    length_unit=B_kv * self.K.shape[-1],
                 )
                 for h in range(cores):
-                    rt.fill(
-                        self.V.lane(h),
+                    self.V.fill(
                         kv_rows(self.V, kv_head, count)[
                             ..., h * pv_width : (h + 1) * pv_width
                         ],
+                        lane=h,
                         group=tg,
-                        size_by=kv_by,
+                        length_parameter=kv_valid,
+                        length_unit=B_kv * pv_width,
                     )
             for shim in range(self.q_shims):
                 for h in range(cores):
-                    rt.drain(
-                        self.O.lane(shim * cores + h),
+                    self.O.drain(
                         q_rows(self.O, head0, shim)[
                             ..., h * pv_width : (h + 1) * pv_width
                         ],
+                        lane=shim * cores + h,
                         group=tg,
+                        wait=True,
                     )
             tg.finish()

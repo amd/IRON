@@ -155,10 +155,9 @@ class DepthwiseConv1d(Operator):
             )
             for k in range(cols)
         ]
-        for k in range(cols):
-            self.x.lane(k).bind(of_ins[k].prod())
-            self.y.lane(k).bind(of_outs[k].cons())
-        self.weight.lane(0).bind(of_w.prod())
+        self.x.bind([f.prod() for f in of_ins])
+        self.y.bind([f.cons() for f in of_outs])
+        self.weight.bind(of_w.prod())
         self.steps.bind(rtps, 0)
         return workers + barriers
 
@@ -168,14 +167,12 @@ class DepthwiseConv1d(Operator):
         """
         run = self.rows // self.num_aie_columns
         weights = TaskGroup()
-        rt.fill(self.weight.lane(0), self.weight, group=weights)
+        self.weight.fill(group=weights)
         tg = TaskGroup()
         for k in range(self.num_aie_columns):
             start = max(0, k * run - (TAPS - 1))
-            rt.fill(self.x.lane(k), self.x[start : (k + 1) * run], group=tg)
+            self.x.fill(self.x[start : (k + 1) * run], lane=k, group=tg)
         for k in range(self.num_aie_columns):
-            rt.drain(
-                self.y.lane(k), self.y[k * run : (k + 1) * run], group=tg, wait=True
-            )
+            self.y.drain(self.y[k * run : (k + 1) * run], lane=k, group=tg, wait=True)
         tg.finish()
         weights.finish()

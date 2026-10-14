@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A shim task's repeat count set per call (``repeat_by``).
+"""A shim task's repeat count set per call (``repeat_parameter``).
 
 The operator under test sends one tile `k` times through a memtile, `k` the
 bound of its output's rows: the fill's iteration slot (stride 0) runs
@@ -61,20 +61,19 @@ class RepeatTile(Operator):
         width, max_k = self.width, self.max_k
         bound = self.uses_value("reps")
         tg = TaskGroup()
-        rt.fill(
-            self.x,
+        self.x.fill(
             TensorAccessPattern((width,), 0, [max_k, 1, 1, width], [0, 0, 0, 1]),
             group=tg,
-            repeat_by=self.value("reps") if bound else None,
+            repeat_parameter=self.value("reps") if bound else None,
         )
-        rt.drain(
-            self.y,
+        self.y.drain(
             TensorAccessPattern(
                 (max_k, width), 0, [1, 1, max_k, width], [0, 0, width, 1]
             ),
             group=tg,
             wait=True,
-            size_by={2: self.value("valid_y")} if bound else None,
+            length_parameter=self.value("valid_y") if bound else None,
+            length_unit=width,
         )
         tg.finish()
 

@@ -6,6 +6,7 @@ from dataclasses import field
 from typing import Any
 
 import numpy as np
+from aie.dialects.aie import AIETileType
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import ObjectFifo, TaskGroup
 from aie.utils.verify import Tolerance
@@ -84,7 +85,7 @@ class Repeat(Operator):
 
     def resolve(self, dev):
         # A row is one run over the descriptor's two innermost dimensions.
-        shim = BdLimits.of(dev, 0, 0)
+        shim = BdLimits.of(dev, AIETileType.ShimNOCTile)
         row, gran = self.seq * self.cols, shim.granule(self.dtype)
         if shim.factor(row, gran) is None:
             raise Unresolvable(
@@ -109,7 +110,7 @@ class Repeat(Operator):
         them), or the stack's, ``(repeat, seq, rows, cols)``.
         """
         rows, seq, cols, repeat = self.rows, self.seq, self.cols, self.repeat
-        shim = BdLimits.of(self.dev, 0, 0)
+        shim = BdLimits.of(self.dev, AIETileType.ShimNOCTile)
         row, gran = seq * cols, shim.granule(self.dtype)
         bound = self.bound_extents
         x = TensorAccessPattern.full((rows, seq, cols))
@@ -121,7 +122,7 @@ class Repeat(Operator):
             # iteration), so the stack axis goes there and the rows inside
             # it: the same bytes both ways, in (copy, seq, row) order.
             taps = (x.permute((1, 0, 2)).repeat(repeat), y.permute((1, 2, 0, 3)))
-            dim, word = 1, "valid_seq"
+            unit, word = rows * cols, "valid_seq"
         else:
             halves = shim.factor(row, gran)
             assert halves is not None  # resolve() refused a row without one
@@ -130,20 +131,20 @@ class Repeat(Operator):
                 x.merge(1).split(1, chunk).repeat(repeat),
                 y.merge(2).permute((1, 0, 2)).split(2, chunk),
             )
-            dim, word = 1, "valid_rows"
+            unit, word = row, "valid_rows"
         tg = TaskGroup()
-        rt.fill(
-            self.x,
+        self.x.fill(
             taps[0],
             group=tg,
-            size_by={dim: self.value(f"{word}_x")} if bound else None,
+            length_parameter=self.value(f"{word}_x") if bound else None,
+            length_unit=unit,
         )
-        rt.drain(
-            self.y,
+        self.y.drain(
             taps[1],
             group=tg,
             wait=True,
-            size_by={dim: self.value(f"{word}_y")} if bound else None,
+            length_parameter=self.value(f"{word}_y") if bound else None,
+            length_unit=unit,
         )
         tg.finish()
 

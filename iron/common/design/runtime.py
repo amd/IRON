@@ -9,7 +9,7 @@ from math import prod
 from typing import Any, NamedTuple
 
 import numpy as np
-from aie.dialects.aie import DMAChannelDir, shim_dma_allocation
+from aie.dialects.aie import AIETileType, DMAChannelDir, shim_dma_allocation
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.ir import IntegerType
@@ -28,7 +28,7 @@ from aie.iron import (
 from aie.iron.device import Tile
 
 from ..declare import DispatchTime, Operator, Value
-from ..declare.operand import BufferView, Lane, Operand
+from ..declare.operand import Operand
 from ..declare.value import PlaceWord
 from .bd import BdLimits
 
@@ -52,9 +52,8 @@ class OperatorRuntime(Runtime):
     body runs the preamble and then the operator's ``sequence(rt)``, or the
     sequence derived from its declaration.
 
-    It is what ``sequence(rt)`` receives: ``fill``/``drain`` take an
-    operand's lane (or a one-lane operand) and a buffer, a slice of one or
-    ``(buffer, TensorAccessPattern)``.
+    It is what ``sequence(rt)`` receives, whose transfers are the
+    operands' own ``fill``/``drain``, emitted here (``transfer``).
 
     Args:
         op: The resolved operator, its array built and its operands' lanes
@@ -115,6 +114,8 @@ class OperatorRuntime(Runtime):
         """
         buffers = self.op.buffers
         self._tensors = {b.name: a for b, a in zip(buffers, args)}
+        for b in buffers:
+            b.runtime = self
         for value, arg in zip(self.op.values, args[len(buffers) + 1 :]):
             if not value.scratchpad:
                 value.ssa = arg
@@ -144,101 +145,102 @@ class OperatorRuntime(Runtime):
         }
         for buf in self.op.inputs:
             if buf.name in riders:
-                continue  # filled into the stream it prepares or rides (fill)
-            for slot, tap, size_by in buf.transfers():
-                self.fill(slot, (buf, tap), group=tg, size_by=size_by)
+                continue  # filled into the stream it prepares or rides (transfer)
+            for lane, tap, word, unit in buf.transfers():
+                buf.fill(
+                    tap, lane=lane, group=tg, length_parameter=word, length_unit=unit
+                )
         for buf in self.op.outputs:
-            for slot, tap, size_by in buf.transfers():
-                self.drain(slot, (buf, tap), group=tg, wait=True, size_by=size_by)
+            for lane, tap, word, unit in buf.transfers():
+                buf.drain(
+                    tap,
+                    lane=lane,
+                    group=tg,
+                    wait=True,
+                    length_parameter=word,
+                    length_unit=unit,
+                )
         tg.finish()
 
-    def fill(
+    def transfer(
         self,
-        stream,
-        source,
+        verb: str,
+        operand: Operand,
+        tap: TensorAccessPattern | None,
         *,
-        group=None,
-        wait=False,
-        offset_by=None,
-        size_by=None,
-        managed=True,
-        finishing=None,
-        repeat_by=None,
+        lane: int | None,
+        group,
+        wait: bool,
+        source: Operand | None = None,
+        offset_parameter: Value | None = None,
+        length_parameter: Value | None = None,
+        length_unit: int | None = None,
+        repeat_parameter: Value | None = None,
+        managed: bool = True,
+        finishing: TensorAccessPattern | None = None,
     ):
-        """Fill ``stream`` from ``source``; a prepared input's lane is then
-        filled with each of the operator's ``prepare_inputs``, which its
-        cores acquire with the tile. A fill of a fed input's lane from that
-        input takes its whole share, an output tile's worth at a time, each
-        followed by that output tile of each finish input riding it,
-        re-read to fill a tile.
-
-        Args:
-            offset_by: A per-call value moving the base address.
-            size_by: ``{dim: value}``, a per-call size of one descriptor
-                dimension (0 the outermost).
-            repeat_by: A per-call value, the task's repeat count: the
-                pattern runs it plus one times, at most the pattern's
-                outermost size, its iteration stopping early. A full ELF
-                writes it to the queue push from the scratchpad.
-            managed: False hands the queue slot and descriptors to the
-                compiler, which frees them after a later wait; joins no group.
-            finishing: For a fill of a fed input, the part of the lane's
-                share of the output it computes (a pattern over the
-                output), where it is not the whole: a hand-written
-                sequence filling a lane in pieces.
-
-        Raises:
-            ValueError: A fed input's lane is filled with a per-call offset
-                or size, or with other than its share and no ``finishing``.
-        """
-        lane = self._lane(stream)
+        """``operand.fill``/``operand.drain`` (``verb``): see ``Operand.fill``."""
+        if lane is None:
+            if operand.count != 1:
+                raise ValueError(f"{operand.name} is per-{operand.count}; name a lane")
+            lane = 0
+        buffer = operand if source is None else source
+        tap = buffer.tap if tap is None else tap
+        per_call = (offset_parameter, length_parameter, repeat_parameter)
         riding = [e for e in self.op.finish_inputs if not e.streamed]
-        buffer, tap, sliced_by = self._resolve(source, stream)
-        if lane.buffer.feed and riding and buffer.name == lane.buffer.name:
+        if verb == "fill" and operand.feed and riding and buffer is operand:
             name = f"{type(self.op).__name__}.{buffer.name}"
-            if offset_by or size_by or sliced_by or repeat_by:
+            if any(v is not None for v in per_call):
                 raise ValueError(
                     f"{name}: the finish's inputs ride it an output tile at a "
                     f"time, so it moves by no per-call offset or size"
                 )
-            if finishing is None and tap != buffer.transfers()[lane.index][1]:
+            if finishing is None and tap != buffer.transfers()[lane][1]:
                 raise ValueError(
                     f"{name}: the finish's inputs ride it an output tile at a "
-                    f"time, so a fill of lane {lane.index} is its whole share"
+                    f"time, so a fill of lane {lane} is its whole share"
                 )
             (out,) = self.op.outputs
             line = prod(out.tile_shape)
-            share = finishing or out.transfers()[lane.index][1]
+            share = finishing or out.transfers()[lane][1]
             tiles = prod(share.sizes) // line
             reads = prod(buffer.tile_shape) // line
             task = None
             for held, finished in zip(
                 self._chunks(tap, tiles), self._chunks(share, tiles)
             ):
-                task = self._transfer(
-                    "fill", lane, (buffer, held), group, wait, None, None, managed
+                task = self._emit(
+                    verb, operand, lane, buffer, held, group, wait, managed
                 )
                 for e in riding:
-                    self._transfer(
-                        "fill",
+                    self._emit(
+                        verb,
+                        operand,
                         lane,
-                        (e, finished.repeat(reads)),
+                        e,
+                        finished.repeat(reads),
                         group,
                         wait,
-                        None,
-                        None,
                         managed,
                     )
             return task
-        task = self._transfer(
-            "fill", stream, source, group, wait, offset_by, size_by, managed, repeat_by
+        task = self._emit(
+            verb,
+            operand,
+            lane,
+            buffer,
+            tap,
+            group,
+            wait,
+            managed,
+            offset_parameter,
+            length_parameter,
+            length_unit,
+            repeat_parameter,
         )
-        if not lane.buffer.prepare:
-            return task
-        for extra in self.op.prepare_inputs:
-            self._transfer(
-                "fill", stream, (extra, extra.tap), group, wait, None, None, managed
-            )
+        if verb == "fill" and operand.prepare:
+            for extra in self.op.prepare_inputs:
+                self._emit(verb, operand, lane, extra, extra.tap, group, wait, managed)
         return task
 
     @staticmethod
@@ -262,37 +264,27 @@ class OperatorRuntime(Runtime):
                 ]
         raise ValueError(f"{tap} does not split into {n} walks of {size} elements")
 
-    def drain(
-        self,
-        stream,
-        dest,
-        *,
-        group=None,
-        wait=True,
-        offset_by=None,
-        size_by=None,
-        managed=True,
-        repeat_by=None,
-    ):
-        """Drain ``stream`` into ``dest``; see ``fill`` for the other forms."""
-        return self._transfer(
-            "drain", stream, dest, group, wait, offset_by, size_by, managed, repeat_by
-        )
-
-    def _transfer(
+    def _emit(
         self,
         verb: str,
-        stream,
-        what,
+        operand: Operand,
+        lane: int,
+        buffer: Operand,
+        tap: TensorAccessPattern,
         group,
         wait: bool,
-        offset_by=None,
-        size_by=None,
-        managed=True,
-        repeat_by=None,
+        managed: bool,
+        offset_parameter: Value | None = None,
+        length_parameter: Value | None = None,
+        length_unit: int | None = None,
+        repeat_parameter: Value | None = None,
     ):
-        fn = getattr(self._lane(stream).handle, verb)
-        buffer, tap, sliced_by = self._resolve(what, stream)
+        """One transfer of ``buffer``'s ``tap`` through lane ``lane`` of
+        ``operand``'s stream, its per-call words lowered for the image: a
+        scratchpad parameter on a full ELF, the pattern's sizes and offset
+        on an xclbin.
+        """
+        fn = getattr(operand.handles[lane], verb)
         placed = next(
             (
                 v
@@ -301,40 +293,53 @@ class OperatorRuntime(Runtime):
             ),
             None,
         )
-        if placed is not None and (offset_by is not None or sliced_by is not None):
+        if placed is not None and offset_parameter is not None:
             raise ValueError(
                 f"{type(self.op).__name__}.{buffer.name} is placed in a larger "
                 f"buffer, {placed.name} moving its transfers; a transfer of it "
                 f"takes no per-call offset of its own"
             )
-        offset_by = placed or offset_by or sliced_by
+        offset_parameter = placed or offset_parameter
         into, start = buffer.placement
         if (into, start) != (buffer.elements, 0):
             tap = TensorAccessPattern(
                 (into,), tap.offset + start, tap.sizes, tap.strides
             )
-        if offset_by is not None and offset_by.param is None:
-            raise ValueError(
-                f"{offset_by.name} has no device parameter: the operator does not use "
-                f"it (uses_value) or the build has not created it yet"
-            )
-        sizes_by = self._sizes_by(size_by)
-        if repeat_by is not None:
-            if not isinstance(repeat_by, Value):
+        for value in (offset_parameter, length_parameter, repeat_parameter):
+            if value is None:
+                continue
+            if not isinstance(value, Value):
                 raise TypeError(
-                    f"repeat_by takes a value member's word (op.value(name)), "
-                    f"got {repeat_by!r}"
+                    f"a per-call parameter is a value member (op.value(name)), "
+                    f"got {value!r}"
                 )
-            if repeat_by.param is None:
+            if value.param is None:
                 raise ValueError(
-                    f"{repeat_by.name} has no device parameter: the operator does "
+                    f"{value.name} has no device parameter: the operator does "
                     f"not use it (uses_value) or the build has not created it yet"
                 )
-            if 0 in sizes_by:
+        if isinstance(length_parameter, DispatchTime):
+            raise ValueError(
+                f"{length_parameter.name} is a DispatchTime value; a per-call "
+                f"length is a scratchpad word patched into the descriptor"
+            )
+        sizes, strides = BdLimits.slots(tap.sizes, tap.strides)
+        dim = None
+        if length_parameter is not None:
+            # The descriptor's length ends at its outermost dimension below the iteration.
+            dim = next(
+                (
+                    d
+                    for d in range(1, 4)
+                    if prod(sizes[1:d]) == 1 and prod(sizes[d + 1 :]) == length_unit
+                ),
+                None,
+            )
+            if dim is None:
                 raise ValueError(
-                    f"{type(self.op).__name__}.{buffer.name}: a per-call repeat "
-                    f"count is the outermost dimension's size, which size_by "
-                    f"also sets"
+                    f"{type(self.op).__name__}.{buffer.name}: {tap} has no "
+                    f"descriptor dimension below the iteration, outermost, "
+                    f"of {length_unit}-element units"
                 )
         data = self._tensors[buffer.name]
         if managed:
@@ -345,52 +350,49 @@ class OperatorRuntime(Runtime):
             common = dict(wait=wait, managed=False)
         # A per-call size lands in one descriptor's length, a repeat count in
         # its push; an offset patches every split piece.
-        per_call = sizes_by or repeat_by is not None
-        if per_call and not BdLimits.of(self.op.dev, 0, 0).fits(tap, buffer.dtype):
+        per_call = length_parameter is not None or repeat_parameter is not None
+        if per_call and not BdLimits.of(self.op.dev, AIETileType.ShimNOCTile).fits(
+            tap, buffer.dtype
+        ):
             raise ValueError(
                 f"{type(self.op).__name__}.{buffer.name}: {tap} moves by a per-call "
                 f"size, so it must fit one buffer descriptor, and does not"
             )
-        dynamic = offset_by is not None and offset_by.ssa is not None
-        dynamic = dynamic or any(v.ssa is not None for v in sizes_by.values())
-        dynamic = dynamic or (repeat_by is not None and repeat_by.ssa is not None)
+        dynamic = any(
+            v is not None and v.ssa is not None
+            for v in (offset_parameter, length_parameter, repeat_parameter)
+        )
         if not dynamic:
-            length = {}
-            if sizes_by:
-                ((dim, value),) = sizes_by.items()
-                sizes, _ = BdLimits.slots(tap.sizes, tap.strides)
-                if dim == 0 or prod(sizes[1:dim]) != 1:
-                    raise ValueError(
-                        f"{type(self.op).__name__}.{buffer.name}: {tap} is bounded "
-                        f"on dimension {dim}, which is not the outermost a "
-                        f"descriptor's length ends"
-                    )
-                length = dict(
-                    length_parameter=value.param, length_unit=prod(sizes[dim + 1 :])
-                )
-            if repeat_by is not None:
-                length["repeat_parameter"] = repeat_by.param
             return fn(
                 data,
                 tap=tap,
-                offset_parameter=offset_by.param if offset_by is not None else None,
-                **length,
+                offset_parameter=(
+                    None if offset_parameter is None else offset_parameter.param
+                ),
+                length_parameter=(
+                    None if length_parameter is None else length_parameter.param
+                ),
+                length_unit=None if length_parameter is None else length_unit,
+                repeat_parameter=(
+                    None if repeat_parameter is None else repeat_parameter.param
+                ),
                 **common,
             )
-        sizes, strides = BdLimits.slots(tap.sizes, tap.strides)
-        for dim, value in sizes_by.items():
+        if dim is not None:
             # A unit dimension's stride is normalised to 0, which a dynamic
             # size may not have; its count never passes 1, so the stride the
             # next block would have moves the same bytes.
             if sizes[dim] == 1 and strides[dim] == 0:
                 inner = zip(sizes[dim + 1 :], strides[dim + 1 :])
                 strides[dim] = max(n * stride for n, stride in inner)
-            sizes[dim] = value.ssa
-        if repeat_by is not None:
-            sizes[0] = repeat_by.ssa + arith.constant(1, IntegerType.get_signless(32))
+            sizes[dim] = length_parameter.ssa
+        if repeat_parameter is not None:
+            sizes[0] = repeat_parameter.ssa + arith.constant(
+                1, IntegerType.get_signless(32)
+            )
         offset: Any = tap.offset
-        if offset_by is not None and offset_by.ssa is not None:
-            offset = offset_by.ssa
+        if offset_parameter is not None and offset_parameter.ssa is not None:
+            offset = offset_parameter.ssa
             if tap.offset:
                 offset = offset + arith.constant(
                     int(tap.offset), IntegerType.get_signless(32)
@@ -399,71 +401,6 @@ class OperatorRuntime(Runtime):
             data,
             tap=TensorAccessPattern(tap.tensor_dims, offset, sizes, strides),
             **common,
-        )
-
-    def _sizes_by(self, size_by) -> dict[int, Value]:
-        if not size_by:
-            return {}
-        if len(size_by) > 1:
-            raise ValueError(
-                f"a per-call size bounds one dimension, the descriptor's length; "
-                f"got dimensions {sorted(size_by)}"
-            )
-        out = {}
-        for dim, value in size_by.items():
-            if not isinstance(value, Value):
-                raise TypeError(
-                    f"size_by takes a value member's word (op.value(name)), got "
-                    f"{value!r} for dimension {dim}"
-                )
-            if isinstance(value, DispatchTime):
-                raise ValueError(
-                    f"{value.name} is a DispatchTime value; a per-call size is a "
-                    f"scratchpad word patched into the descriptor"
-                )
-            if value.param is None:
-                raise ValueError(
-                    f"{value.name} has no device parameter: the operator does not "
-                    f"use it (uses_value) or the build has not created it yet"
-                )
-            if not 0 <= int(dim) < 4:
-                raise ValueError(f"a descriptor has dimensions 0..3, not {dim}")
-            out[int(dim)] = value
-        return out
-
-    @staticmethod
-    def _lane(stream) -> Lane:
-        if isinstance(stream, Operand):
-            if stream.count != 1:
-                raise ValueError(f"{stream.name} is per-{stream.count}; name a lane")
-            return stream.lane(0)
-        if isinstance(stream, Lane):
-            return stream
-        raise TypeError(
-            f"fill/drain take an operand's lane, or an operand that is its own "
-            f"one-lane stream, got {stream!r}"
-        )
-
-    def _resolve(
-        self, what, stream
-    ) -> tuple[Operand, TensorAccessPattern, Value | None]:
-        """``(buffer, tap, offset_by)`` of what a transfer moves."""
-        if isinstance(what, TensorAccessPattern):
-            return self._lane(stream).buffer, what, None
-        if isinstance(what, Operand):
-            return what, what.tap, None
-        if isinstance(what, BufferView):
-            return what.buffer, what.tap, what.offset_by
-        if (
-            isinstance(what, tuple)
-            and len(what) == 2
-            and isinstance(what[0], Operand)
-            and isinstance(what[1], TensorAccessPattern)
-        ):
-            return what[0], what[1], None
-        raise TypeError(
-            f"fill/drain take a buffer, a slice of one, a TensorAccessPattern or "
-            f"(buffer, TensorAccessPattern); got {what!r}"
         )
 
     def data(self, buffer: Operand):

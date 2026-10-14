@@ -293,9 +293,8 @@ class Softmax(Operator):
                 )
                 for k in range(n_cores)
             ]
-        for k in range(n_cores):
-            self.x.lane(k).bind(of_ins[k].prod())
-            self.y.lane(k).bind(of_outs[k].cons())
+        self.x.bind([f.prod() for f in of_ins])
+        self.y.bind([f.cons() for f in of_outs])
         for n in static:
             self.value(n).bind(rtps, static.index(n))
         return workers + barriers
@@ -309,7 +308,7 @@ class Softmax(Operator):
         rows = self.rows // lanes
         blocks = ceildiv(self.length, self.block)
         bounded = self.streamed and self.uses_value("blocks")
-        size_by = {1: self.value("blocks")} if bounded else None
+        blocks_valid = self.value("blocks") if bounded else None
         full = TensorAccessPattern.full((self.rows, self.cols))
         taps = [
             full[k * rows : (k + 1) * rows, : blocks * self.block]
@@ -320,10 +319,21 @@ class Softmax(Operator):
         reads = 3 if self.streamed else 1
         tg = TaskGroup()
         for k, tap in enumerate(taps):
-            rt.fill(self.x.lane(k), tap.repeat(reads), group=tg, size_by=size_by)
+            self.x.fill(
+                tap.repeat(reads),
+                lane=k,
+                group=tg,
+                length_parameter=blocks_valid,
+                length_unit=rows * self.block,
+            )
         for k, tap in enumerate(taps):
-            rt.drain(
-                self.y.lane(k), tap.repeat(1), group=tg, wait=True, size_by=size_by
+            self.y.drain(
+                tap.repeat(1),
+                lane=k,
+                group=tg,
+                wait=True,
+                length_parameter=blocks_valid,
+                length_unit=rows * self.block,
             )
         tg.finish()
 
