@@ -19,14 +19,12 @@ FastFlowLM's prefill attention overlays for Gemma 4:
 | `PrefillSlidingAttention` | sliding-window attention | 256 | `p - window + 1` to `p` |
 
 ```python
-from iron.common.image import OperatorImage
 from iron.operators.flm import PrefillAttention, PrefillSlidingAttention
 
 op = PrefillAttention(max_context=32768, num_heads=8, num_kv_heads=1)
 # or
 op = PrefillSlidingAttention(max_context=32768, num_heads=8, num_kv_heads=1, window=512)
-image = OperatorImage(op)
-image(o, q, kv, L_begin=0, L_end=2048, max_l=4096)
+op(o, q, kv, L_begin=0, L_end=2048, max_l=4096)
 ```
 
 `max_context` and `window` must be multiples of 128.

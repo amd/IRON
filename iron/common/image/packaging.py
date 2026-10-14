@@ -56,7 +56,7 @@ def plan(dev, traced, full_elf: bool | None = None) -> Plan:
         )
         raise ValueError(
             f"{traced.name}: {names} runs a shipped image, which no graph image "
-            f"builds; run it on its own with OperatorImage(op)"
+            f"builds; call it on its own, outside a graph"
         )
 
     forced: list[str] = []

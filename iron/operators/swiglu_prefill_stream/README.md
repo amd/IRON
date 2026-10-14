@@ -80,13 +80,16 @@ Medians from one machine, so treat them as orders of magnitude rather than exact
 Accuracy tracks the hand-written operator: 0.139 of output elements more than 8 percent
 from the golden reference, against 0.139 to 0.144 here.
 
-## Runtime buffers
+## Inputs and output
 
-Named by the reference: `input`, `w_gate`, `w_up`, `w_down`, `output`.
+`SwiGLUPrefillStream` is a graph whose inputs are named by the reference:
+`input`, `w_gate`, `w_up`, `w_down`; it returns `output`.
 
 ```python
-run = operator.get_callable()
-run.get_buffer("w_gate").numpy_view()[:] = weights.reshape(-1)
+block = SwiGLUPrefillStream(seq_len=256, embedding_dim=512, hidden_dim=2048, k=1)
+net = block.compile(input=((256, 512), bfloat16), w_gate=((512, 2048), bfloat16),
+                    w_up=((512, 2048), bfloat16), w_down=((2048, 512), bfloat16))
+output = net(x, w_gate, w_up, w_down)
 ```
 
 ## Installing

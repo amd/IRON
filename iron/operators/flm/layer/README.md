@@ -16,11 +16,10 @@ The kernels come from mlir-aie's `flm_gemma4_decode_*` factories.
 
 ```python
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
-from iron.common.image import OperatorImage
 from iron.operators.flm import DecodeLayer
 
-image = OperatorImage(DecodeLayer(geometry=FLM_GEMMA4_E2B_DECODE, layer_type="swa"))
-image(x, proj, rms, rope_rms, kv, context_len=37, max_l=4096)
+layer = DecodeLayer(geometry=FLM_GEMMA4_E2B_DECODE, layer_type="swa")
+layer(x, proj, rms, rope_rms, kv, context_len=37, max_l=4096)
 ```
 
 `geometry` is `FLM_GEMMA4_E2B_DECODE` or `FLM_GEMMA4_E4B_DECODE` from

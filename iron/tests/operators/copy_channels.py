@@ -16,7 +16,6 @@ from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common.image import OperatorImage
 from iron.operators.copy import Copy
 
 N, G, D = 64, 8, 64
@@ -61,7 +60,7 @@ def test_a_transpose_into_wider_rows_on_any_channel_count(channels, rows):
     tensor = aie_utils.DEFAULT_TENSOR_CLASS
     x = np.arange(T * H * W, dtype=np.uint16).reshape(T, H, W)
     y = tensor(np.full(T * H * W, 0xFFFF, dtype=np.uint16).view(bfloat16))
-    OperatorImage(op)(tensor(x.reshape(-1).view(bfloat16)), y)
+    op(tensor(x.reshape(-1).view(bfloat16)), y)
     got = y.numpy().view(np.uint16).reshape(H, T, W)
     wrong = np.argwhere(got != x.transpose(1, 0, 2))
     assert not len(wrong), f"{len(wrong)} elements differ, first {wrong[:4]}"

@@ -9,10 +9,9 @@ Gemma 4's softcapped logits from a q4nx vocabulary, with the RMS norm folded
 in.
 
 ```python
-from iron.common.image import OperatorImage
 from iron.operators.flm import LMHead
 
-OperatorImage(LMHead(dim=1536, vocab=262144, softcap=30.0))(y, w, x)
+LMHead(dim=1536, vocab=262144, softcap=30.0)(y, w, x)
 ```
 
 `x` holds the token, then its RMS weight: `2 * dim` bf16. `w` is the

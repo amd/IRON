@@ -15,9 +15,8 @@ from .artifacts import Artifacts, Design, Step
 
 
 class OperatorImage:
-    """An operator's own xclbin and instruction stream, and a call of them.
-
-    ``OperatorImage(op).compile()`` builds once; the image is then called
+    """An operator's own xclbin and instruction stream, and a call of them:
+    what ``Operator.compile`` builds once and a call outside a graph runs,
     with the operator's buffers as device tensors, in declaration order.
     The xclbin is the operator's ``Operator.configuration``'s, so an
     operator whose array serves every shape (flm's GEMM) compiles only an

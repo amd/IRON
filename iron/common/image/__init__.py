@@ -13,20 +13,16 @@ each design, chained into xclbins) through mlir-aie's ``CompilableDesign``,
 and ``artifacts`` records what came out.
 ``sequence`` drives all of that for one run, and ``callable`` is what
 a caller finally invokes. ``standalone`` is the one-operator case: an
-operator built and called on its own, outside a graph.
+operator called on its own, outside a graph (``Operator.compile``).
 """
 
 from .allocator import ArenaPlan
 from .coresidence import AdjacentPacking, Packing
 from .fusion import Fusion
-from .sequence import OperatorSequence
-from .standalone import OperatorImage
 
 __all__ = [
     "AdjacentPacking",
     "ArenaPlan",
     "Fusion",
-    "OperatorImage",
-    "OperatorSequence",
     "Packing",
 ]

@@ -15,7 +15,6 @@ import pytest
 from aie.helpers.taplib import TensorAccessPattern
 
 import iron.operators.flm.gemm.op as flm
-from iron.common.image import OperatorImage
 from iron.operators.copy import Copy
 from iron.operators.flm.gemm.shipped import Shipped
 from iron.operators.gemm import GEMM
@@ -107,15 +106,15 @@ def test_instructions_compile_alone_against_an_external_image():
     second request is a cache hit.
     """
     op = _shipped(M=256, K=1024, N=1152)
-    artifacts = OperatorImage(op).compile().artifacts
+    artifacts = op.compile()
     insts = artifacts.insts
     assert insts is not None and insts.stat().st_size > 0
     # The image is the download, so nothing was built beside the stream.
     assert artifacts.entry.xclbin is None
     assert artifacts.image.suffix == ".xclbin"
     first = insts.stat().st_mtime_ns
-    again = OperatorImage(_shipped(M=256, K=1024, N=1152)).compile()
-    assert again.artifacts.insts == insts
+    again = _shipped(M=256, K=1024, N=1152).compile()
+    assert again.insts == insts
     assert insts.stat().st_mtime_ns == first, "the same sequence recompiled"
 
 

@@ -23,7 +23,8 @@ import pytest
 from aie.iron.device import from_name
 
 from iron.common.design import OperatorDesign
-from iron.common.image import Fusion, OperatorSequence
+from iron.common.image import Fusion
+from iron.common.image.sequence import OperatorSequence
 from iron.operators import ReLU
 from iron.operators.gemv import GEMV
 

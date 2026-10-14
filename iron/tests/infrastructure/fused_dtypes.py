@@ -19,7 +19,8 @@ from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common.harness import verify_buffer
-from iron.common.image import Fusion, OperatorSequence
+from iron.common.image import Fusion
+from iron.common.image.sequence import OperatorSequence
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 

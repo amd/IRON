@@ -25,7 +25,6 @@ from aie.utils.trace import TraceConfig
 
 from iron.common import In, Operator, Out, Param
 from iron.common.design import OperatorDesign, runtime
-from iron.common.image import OperatorImage
 from iron.operators import GEMM, MHA, ElementwiseAdd
 from iron.tests.common.graphs import Adds
 
@@ -93,13 +92,22 @@ def test_identical_operators_reuse_the_compiled_xclbin():
 
     def build():
         op = ElementwiseAdd(size=1024, tile_size=128)
-        return OperatorImage(op).compile().artifacts
+        return op.compile()
 
     first = build()
     mtime = first.image.stat().st_mtime_ns
     second = build()
     assert (second.image, second.insts) == (first.image, first.insts)
     assert second.image.stat().st_mtime_ns == mtime
+
+
+def test_an_operator_builds_its_own_image_once():
+    """An operator called outside a graph keeps the image it built; an equal
+    operator builds its own, from the cache.
+    """
+    op = ElementwiseAdd(size=1024, tile_size=128)
+    assert op.compile() is op.compile()
+    assert ElementwiseAdd(size=1024, tile_size=128).compile() is not op.compile()
 
 
 def test_a_traced_build_carries_the_lowered_module():

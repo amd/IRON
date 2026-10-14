@@ -15,7 +15,7 @@ import random
 
 import pytest
 
-from iron.common.image import OperatorSequence
+from iron.common.image.sequence import OperatorSequence
 from iron.common.image.allocator import (
     Allocation,
     ArenaPlan,

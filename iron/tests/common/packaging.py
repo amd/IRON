@@ -87,7 +87,7 @@ def test_a_shipped_image_in_a_graph_is_refused(npu2):
 
     traced = Shipping().trace(a=(256, 1024), b=(1024, 1152))
     for full_elf in (None, False):
-        with pytest.raises(ValueError, match=r"Shipped \(flm_mm_.*OperatorImage"):
+        with pytest.raises(ValueError, match=r"Shipped \(flm_mm_.*outside a graph"):
             plan(npu2, traced, full_elf=full_elf)
 
 

@@ -19,7 +19,8 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.utils.trace import TraceConfig, get_trace_buffer
 from ml_dtypes import bfloat16
 
-from iron.common.image import Fusion, OperatorSequence
+from iron.common.image import Fusion
+from iron.common.image.sequence import OperatorSequence
 from iron.operators import LayerNorm
 from iron.operators.copy import Copy
 

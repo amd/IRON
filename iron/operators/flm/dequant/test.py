@@ -11,7 +11,6 @@ from aie.utils.verify import Tolerance
 
 
 from iron.common.harness import run_test
-from iron.common.image import OperatorImage
 from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor, rb
 from iron.operators.flm.dequant.design import N_TILE, qw_bytes_for
 from iron.operators.flm.dequant.op import DequantBFP, dequantize
@@ -208,7 +207,7 @@ def test_one_xclbin_serves_every_shape():
         _check(op, blob, op.reference(qw), str(case))
 
         # A cache hit: the image _check built and ran.
-        image = OperatorImage(op).compile().artifacts.image
+        image = op.compile().image
         stamp = (str(image), os.path.getmtime(image))
         if xclbin is None:
             xclbin = stamp

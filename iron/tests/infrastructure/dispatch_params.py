@@ -23,7 +23,6 @@ from aie.utils.hostruntime.hostruntime import HostRuntimeError
 
 from iron.common import DispatchTime, In, Operator, Out, Param
 from iron.common.design import OperatorDesign
-from iron.common.image import OperatorImage
 
 CHUNK = 1024
 SENTINEL = -1
@@ -81,7 +80,7 @@ def _buffers():
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_the_stream_is_generated_per_call():
-    artifacts = OperatorImage(ChunkCopy(max_chunks=MAX_CHUNKS)).compile().artifacts
+    artifacts = ChunkCopy(max_chunks=MAX_CHUNKS).compile()
     assert artifacts.insts is None
     assert artifacts.entry.dispatch_library.is_file()
 
@@ -91,10 +90,10 @@ def test_one_image_serves_every_parameter():
     """Each n must copy exactly n chunks: a stream generated for another n
     leaves a different number of sentinels behind.
     """
-    image = OperatorImage(ChunkCopy(max_chunks=MAX_CHUNKS))
+    op = ChunkCopy(max_chunks=MAX_CHUNKS)
     for n in (3, 1, MAX_CHUNKS, 3):
         src, dst = _buffers()
-        image(src, dst, n=n)
+        op(src, dst, n=n)
         got, want = dst.numpy(), src.numpy()
         np.testing.assert_array_equal(got[: n * CHUNK], want[: n * CHUNK])
         assert np.all(got[n * CHUNK :] == SENTINEL), f"n={n} copied too much"
@@ -102,9 +101,9 @@ def test_one_image_serves_every_parameter():
 
 @pytest.mark.supported_devices("npu1", "npu2")
 def test_refuses_an_n_past_the_buffers():
-    image = OperatorImage(ChunkCopy(max_chunks=MAX_CHUNKS))
+    op = ChunkCopy(max_chunks=MAX_CHUNKS)
     with pytest.raises(HostRuntimeError, match=f"n exceeds {MAX_CHUNKS}"):
-        image(*_buffers(), n=MAX_CHUNKS + 1)
+        op(*_buffers(), n=MAX_CHUNKS + 1)
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
@@ -117,9 +116,9 @@ def test_refuses_an_n_past_the_buffers():
     ],
 )
 def test_a_call_takes_exactly_the_declared_scalars(scalars, error, match):
-    image = OperatorImage(ChunkCopy(max_chunks=MAX_CHUNKS))
+    op = ChunkCopy(max_chunks=MAX_CHUNKS)
     with pytest.raises(error, match=match):
-        image(*_buffers(), **scalars)
+        op(*_buffers(), **scalars)
 
 
 def test_a_full_elf_refuses_a_dispatch_value():

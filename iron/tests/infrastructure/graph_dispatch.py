@@ -23,7 +23,8 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common import Scratchpad
 from iron.common.harness import verify_buffer
-from iron.common.image import AdjacentPacking, Fusion, OperatorSequence
+from iron.common.image import AdjacentPacking, Fusion
+from iron.common.image.sequence import OperatorSequence
 from iron.common.image.fused import XclbinChain
 from iron.operators import (
     GEMV,

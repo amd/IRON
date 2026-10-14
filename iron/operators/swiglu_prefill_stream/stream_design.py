@@ -340,8 +340,8 @@ def _run_codegen(seq_len, embedding_dim, hidden_dim, npu, k, trace_size):
 def region_module(mlir_text: str, renames: dict | None = None):
     """Parse a group's MLIR text into an ``aie`` module for fusion.
 
-    ``OperatorSequence`` consumes ``aie.DeviceOp`` objects, so the xDSL-emitted
-    group text is re-parsed with the mlir-aie bindings.
+    A graph's fused image consumes ``aie.DeviceOp`` objects, so the
+    xDSL-emitted group text is re-parsed with the mlir-aie bindings.
 
     Fused, groups keep the names they were generated with: every object name
     here already carries what distinguishes its recipe (``mm_<m>_<k>_<n>.o``),

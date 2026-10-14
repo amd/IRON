@@ -23,7 +23,6 @@ import pli_weights
 from aie.iron.device import NPU2
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 
-from iron.common.image import OperatorImage
 from iron.operators.flm import (
     GEMM,
     DecodeLayer,
@@ -98,9 +97,9 @@ def gemm(M, K, N, gelu):
     )
 
 
-def write_generator(image, path, namespace):
-    """Writes the C++ that generates `image`'s instruction sequence, for the engine to compile in."""
-    cpp = (image.artifacts.entry.directory / "dispatch_gen.cpp").read_text()
+def write_generator(artifacts, path, namespace):
+    """Writes the C++ that generates `artifacts`' instruction sequence, for the engine to compile in."""
+    cpp = (artifacts.entry.directory / "dispatch_gen.cpp").read_text()
     # mlir-aie emits a dlopen shim after the generator. The engine links several
     # generators, so drop the shim and give each generator a namespace.
     includes, body = cpp[: cpp.index('extern "C"')].split("\ninline ", 1)
@@ -110,16 +109,16 @@ def write_generator(image, path, namespace):
 
 
 def compile_all(ops):
-    images = {}
+    built = {}
     for i, op in enumerate(ops, 1):
         print(f"[{i}/{len(ops)}] {op.name}", flush=True)
-        images[op] = OperatorImage(op).compile()
-    return images
+        built[op] = op.compile()
+    return built
 
 
-def one_xclbin(images):
-    """The xclbin all `images` share. The engine registers one xclbin per operator."""
-    xclbins = {image.artifacts.image for image in images}
+def one_xclbin(built):
+    """The xclbin all of `built` share. The engine registers one xclbin per operator."""
+    xclbins = {artifacts.image for artifacts in built}
     assert len(xclbins) == 1, f"expected one configuration, got {sorted(xclbins)}"
     return xclbins.pop()
 
@@ -164,7 +163,7 @@ def main(engine_xclbins, out):
     ]
     gemms += [gemm(m, k, n, gelu) for m in PLI_WIDTHS for k, n, gelu in pli_shapes]
 
-    images = compile_all([*layers.values(), attn, swa, lm_head, *dequants, *gemms])
+    built = compile_all([*layers.values(), attn, swa, lm_head, *dequants, *gemms])
 
     # Stage the engine's xclbins with IRON's under the engine's file names. The
     # engine registers each xclbin by its path, and overrides.hpp registers the
@@ -177,25 +176,23 @@ def main(engine_xclbins, out):
     iron = stage / "iron"
     iron.mkdir()
     for name, xclbin in {
-        "layer": one_xclbin(images[op] for op in layers.values()),
-        "attn": images[attn].artifacts.image,
-        "swa": images[swa].artifacts.image,
-        "lm_head": images[lm_head].artifacts.image,
-        "mm": one_xclbin(images[op] for op in gemms),
-        "dequant": one_xclbin(images[op] for op in dequants),
+        "layer": one_xclbin(built[op] for op in layers.values()),
+        "attn": built[attn].image,
+        "swa": built[swa].image,
+        "lm_head": built[lm_head].image,
+        "mm": one_xclbin(built[op] for op in gemms),
+        "dequant": one_xclbin(built[op] for op in dequants),
     }.items():
         shutil.copyfile(xclbin, stage / f"{name}.xclbin")
 
     # Static instruction sequences, named by the shape the header looks them up by.
-    shutil.copyfile(images[lm_head].artifacts.insts, iron / "lm_head.bin")
+    shutil.copyfile(built[lm_head].insts, iron / "lm_head.bin")
     for op in dequants:
-        shutil.copyfile(
-            images[op].artifacts.insts, iron / f"dequant_K{op.K}_N{op.N}.bin"
-        )
+        shutil.copyfile(built[op].insts, iron / f"dequant_K{op.K}_N{op.N}.bin")
     for op in gemms:
         gelu = "_gelu" if op.epilogue == Epilogue.GELU else ""
         shutil.copyfile(
-            images[op].artifacts.insts, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin"
+            built[op].insts, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin"
         )
     pli_weights.write(model_dir, config, gemms[0], iron)
 
@@ -203,9 +200,9 @@ def main(engine_xclbins, out):
     gen = out / "gen"
     gen.mkdir(exist_ok=True)
     for t, op in layers.items():
-        write_generator(images[op], gen / f"layer_{t}.h", f"layer_{t}")
-    write_generator(images[attn], gen / "attn.h", "attn")
-    write_generator(images[swa], gen / "swa.h", "swa")
+        write_generator(built[op], gen / f"layer_{t}.h", f"layer_{t}")
+    write_generator(built[attn], gen / "attn.h", "attn")
+    write_generator(built[swa], gen / "swa.h", "swa")
     print(f"staged {stage}")
 
 

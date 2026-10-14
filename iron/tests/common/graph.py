@@ -27,7 +27,7 @@ from iron.common.graph.compiled import _words
 from iron.common.declare import Unresolvable
 from iron.common.graph.fold import Made, Place, Prologue, folded, replaced
 from iron.common.graph.handle import Affine, Value
-from iron.common.image import OperatorSequence
+from iron.common.image.sequence import OperatorSequence
 from iron.common.image.artifacts import Parameter
 from iron.lm.blocks import SwiGLU, project
 from iron.operators.clamp import Clamp
@@ -317,7 +317,7 @@ def test_an_explicit_instance_is_applied_like_the_class():
 
     t = step.trace(x=(E,))
     assert t.runlist[0][0] is q and t.output_args == ["out"]
-    with pytest.raises(TypeError, match="inside a graph's body"):
+    with pytest.raises(TypeError, match="outside a graph's body on device tensors"):
         q(w, z(E))
 
 

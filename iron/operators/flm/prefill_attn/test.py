@@ -9,7 +9,6 @@ from aie.utils.benchmark import run_iters
 from aie.utils.hostruntime.hostruntime import HostRuntimeError
 from ml_dtypes import bfloat16
 
-from iron.common.image import OperatorImage
 from iron.operators.flm.prefill_attn.op import (
     PrefillAttention,
     PrefillSlidingAttention,
@@ -70,7 +69,7 @@ def _inputs(op, max_l, seed):
     return q, kv
 
 
-def _record(op, image, bufs, L_begin, L_end, max_l, record):
+def _record(op, bufs, L_begin, L_end, max_l, record):
     """Time one more dispatch and record its latency, bandwidth and throughput.
 
     The bytes count the query and output rows of the range and the K and V rows
@@ -86,18 +85,18 @@ def _record(op, image, bufs, L_begin, L_end, max_l, record):
     )
     flops = 4 * NUM_HEADS * dh * int(keys.sum())
     latency_us = run_iters(
-        image, *bufs, warmup=1, iters=1, L_begin=L_begin, L_end=L_end, max_l=max_l
+        op, *bufs, warmup=1, iters=1, L_begin=L_begin, L_end=L_end, max_l=max_l
     ).npu.avg_us
     record("Latency", latency_us)
     record("Bandwidth", total_bytes / latency_us / 1e3)
     record("Throughput", flops / latency_us / 1e3)
 
 
-def _check(op, image, L_begin, L_end, max_l, seed, record=None):
+def _check(op, L_begin, L_end, max_l, seed, record=None):
     q, kv = _inputs(op, max_l, seed)
     tensor = aie_utils.DEFAULT_TENSOR_CLASS
     bufs = (tensor(np.full(q.size, SENTINEL, dtype=bfloat16)), tensor(q), tensor(kv))
-    image(*bufs, L_begin=L_begin, L_end=L_end, max_l=max_l)
+    op(*bufs, L_begin=L_begin, L_end=L_end, max_l=max_l)
 
     o = bufs[0].numpy().astype(np.float32)
     n = (L_end - L_begin) * NUM_HEADS * op.head_dim
@@ -109,7 +108,7 @@ def _check(op, image, L_begin, L_end, max_l, seed, record=None):
     assert error.mean() <= MEAN_ERROR, f"{label}: mean |error| {error.mean():.4f}"
     assert np.all(o[n:] == SENTINEL), f"{label}: wrote past its rows"
     if record is not None:
-        _record(op, image, bufs, L_begin, L_end, max_l, record)
+        _record(op, bufs, L_begin, L_end, max_l, record)
 
 
 def _build(kind, **overrides):
@@ -138,9 +137,7 @@ BENCH = {("attn", 0, 512, 1024, 1), ("swa", 512, 1024, 2048, 1)}
 )
 def test_matches_reference(kind, L_begin, L_end, max_l, num_kv_heads, record_property):
     op = _build(kind, num_kv_heads=num_kv_heads)
-    _check(
-        op, OperatorImage(op), L_begin, L_end, max_l, seed=L_end, record=record_property
-    )
+    _check(op, L_begin, L_end, max_l, seed=L_end, record=record_property)
 
 
 @pytest.mark.parametrize("kind", OPERATORS)
@@ -151,11 +148,10 @@ def test_one_image_serves_every_range(kind):
     repeated. A stale range appears only from the second dispatch after a load.
     """
     op = _build(kind, num_kv_heads=1)
-    image = OperatorImage(op)
     ranges = OPERATORS[kind][2]
     for seed, i in enumerate((0, 1, 1, 2, 4, 3, 0)):
         L_begin, L_end, max_l = ranges[i]
-        _check(op, image, L_begin, L_end, max_l, seed)
+        _check(op, L_begin, L_end, max_l, seed)
 
 
 @pytest.mark.parametrize(
@@ -176,7 +172,7 @@ def test_refuses_unservable_ranges(L_begin, L_end, max_l, match):
         tensor(np.zeros(n, dtype=bfloat16)) for n in (op.qo_len, op.qo_len, op.kv_len)
     ]
     with pytest.raises(HostRuntimeError, match=match):
-        OperatorImage(op)(*bufs, L_begin=L_begin, L_end=L_end, max_l=max_l)
+        op(*bufs, L_begin=L_begin, L_end=L_end, max_l=max_l)
 
 
 @pytest.mark.extensive
@@ -185,8 +181,7 @@ def test_refuses_unservable_ranges(L_begin, L_end, max_l, match):
 def test_gemma4_cache_bound(kind, num_kv_heads):
     """Check the cache bound of Gemma 4's engine: 32768 rows."""
     op = _build(kind, num_kv_heads=num_kv_heads, max_context=32768)
-    image = OperatorImage(op)
     for seed, (L_begin, L_end, max_l) in enumerate(
         [(0, 2048, 4096), (2048, 2304, 4096), (0, 1024, 32768)]
     ):
-        _check(op, image, L_begin, L_end, max_l, seed)
+        _check(op, L_begin, L_end, max_l, seed)

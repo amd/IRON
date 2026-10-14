@@ -215,13 +215,14 @@ reuse lint
      a shipped image (`Lock.set` releases its parameter block)
    - `graph/`: graphs (`iron.Graph`, `iron.state`) and
      `compile(dev=, full_elf=)`
-   - `image/`: what a graph lowers onto: `OperatorSequence`, the buffer
-     allocator (`LiveRange`, `Pool`, `ArenaPlan`), `Fusion` (the designs of
-     a sequence as one module), `FusedImage`/`XclbinChain` (the full ELF
-     or the chain of xclbins it links), `OperatorImage` (one operator built
-     and called on its own, outside a graph: `OperatorImage(op).compile()`,
-     then `image(*tensors)`, `image.artifacts`), the runtime callables and
-     the record of what a compiled image consists of
+   - `image/`: what a graph lowers onto, all of it internal: the sequence
+     a traced graph becomes, the buffer allocator (`LiveRange`, `Pool`,
+     `ArenaPlan`), `Fusion` (the designs of a sequence as one module),
+     `FusedImage`/`XclbinChain` (the full ELF or the chain of xclbins it
+     links), an operator's own image (what an operator called outside a
+     graph runs: `op(*tensors)` compiles it once and runs it,
+     `op.compile()` builds it and returns its `Artifacts`), the runtime
+     callables and the record of what a compiled image consists of
    - `elementwise.py`: the shared elementwise array and its operand shapes (flat, binary, rowwise)
    - `harness.py`: the device test harness (`vectors`; `run_test`, timed with
      `aie.utils.benchmark.run_iters`, every buffer paired by name; and
@@ -746,12 +747,15 @@ y = (x.astype(np.float32) @ w.astype(np.float32)).astype(bfloat16)
 
 Runtime tensors (`aie.utils.DEFAULT_TENSOR_CLASS`) are built from a numpy
 array, written through `numpy_view()` (no device sync; the buffer is
-marked for upload) and read with `numpy()` (synced from the device first):
+marked for upload) and read with `numpy()` (synced from the device first).
+An operator called outside a graph takes one per declared buffer, in
+declaration order:
 
 ```python
-run.get_buffer("x").numpy_view()[:] = x.reshape(-1)
-run()
-out = run.get_buffer("out").numpy()
+tensor = aie_utils.DEFAULT_TENSOR_CLASS
+x_t, out_t = tensor(x.reshape(-1)), tensor(np.zeros(size, dtype=bfloat16))
+op(x_t, out_t)          # compiles once, then runs
+out = out_t.numpy()
 ```
 
 ## Debugging and Performance

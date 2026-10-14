@@ -16,7 +16,6 @@ from aie.utils.verify import Tolerance, Verdict, compare
 from ml_dtypes import bfloat16
 
 from .declare import Operator
-from .image import OperatorImage
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +168,7 @@ def run_test(
             f"{type(operator).__name__} takes the inputs {declared}, "
             f"not {sorted(inputs)}"
         )
-    fn = OperatorImage(operator).compile()
+    operator.compile()
     # The device tensor type of whichever host runtime is selected (IRON_RUNTIME):
     # XRTTensor under XRT, HRXTensor under HRX. Both implement the Tensor interface
     # this function uses, and the operator dispatches through DefaultNPURuntime, which
@@ -186,14 +185,14 @@ def run_test(
         args.append(buf)
         total_bytes += _nbytes(buf)
 
-    fn(*args)
+    operator(*args)
     written = {name: buf.numpy() for name, buf in produced.items()}
     verdicts = operator.judge(inputs, written, tolerance, outputs)
     for name, verdict in verdicts.items():
         _report(name, verdict, tolerance)
     errors = {name: verdict for name, verdict in verdicts.items() if not verdict}
 
-    benchmark = run_iters(fn, *args, iters=timed_iters)
+    benchmark = run_iters(operator, *args, iters=timed_iters)
     if benchmark.npu is None:
         raise RuntimeError("Operator callable did not report NPU execution time")
     latency_us = benchmark.npu.median_us

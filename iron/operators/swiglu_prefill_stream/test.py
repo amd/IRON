@@ -4,6 +4,7 @@
 
 import pytest
 from aie.utils.benchmark import run_iters
+from ml_dtypes import bfloat16
 from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance
 
@@ -46,43 +47,36 @@ TIMED_RUNS = 3
 TRACE_SIZE = 8192
 
 
-def _staged(operator, golden_ref):
-    """A callable with its inputs staged.
-
-    Inputs are named by the golden reference, and the design consumes the weights in
-    their natural (K, N) layout.
-    """
-    run = operator.get_callable()
-    for name in (INPUT, *WEIGHTS):
-        buffer = run.get_buffer(name)
-        buffer.numpy_view()[:] = golden_ref[name].reshape(-1)
-        buffer.to("npu")
-    return run
-
-
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.bench
 @pytest.mark.parametrize("k", FUSION_GROUPS)
 def test_swiglu_prefill_stream(k, tmp_path, record_property):
     trace = TraceConfig(TRACE_SIZE, trace_file=str(tmp_path / f"k{k}.txt"))
     golden_ref = generate_golden_reference(M=SEQ_LEN, K=EMBEDDING_DIM, N=HIDDEN_DIM)
-    operator = SwiGLUPrefillStream(
+    graph = SwiGLUPrefillStream(
         seq_len=SEQ_LEN,
         embedding_dim=EMBEDDING_DIM,
         hidden_dim=HIDDEN_DIM,
         k=k,
         trace=trace,
     )
-    operator.compile()
+    # Inputs are named by the golden reference, and the design consumes the
+    # weights in their natural (K, N) layout.
+    inputs = [golden_ref[name].astype(bfloat16) for name in (INPUT, *WEIGHTS)]
+    net = graph.compile(
+        **{
+            name: (t.shape, bfloat16)
+            for name, t in zip((INPUT, *WEIGHTS), inputs, strict=True)
+        }
+    )
 
     # The whole block is computed in bf16, so rounding accumulates and reorders
     # across the chain and the K=hidden_dim down-projection sum (near-cancellation
     # amplifies relative error): ~20% of elements drift past the 8% bound, so allow
     # up to 25%. Tolerances are local to this test.
-    run = _staged(operator, golden_ref)
-    run()
-    dump_traces(run, trace.trace_file)
-    output = run.get_buffer(OUTPUT).numpy().reshape((SEQ_LEN, EMBEDDING_DIM))
+    out = net(*inputs)
+    dump_traces(net.callable, trace.trace_file)
+    output = out.numpy()[: SEQ_LEN * EMBEDDING_DIM].reshape((SEQ_LEN, EMBEDDING_DIM))
     verdict = verify_buffer(
         output,
         OUTPUT,
@@ -92,8 +86,8 @@ def test_swiglu_prefill_stream(k, tmp_path, record_property):
     assert verdict, verdict.detail
 
     # The first dispatch on a callable pays for its hardware context, so time the
-    # ones after it.
-    latency = run_iters(run, iters=TIMED_RUNS).e2e
+    # ones after it, on the inputs already staged.
+    latency = run_iters(net.callable, iters=TIMED_RUNS).e2e
     elapsed_us = latency.min_us
     total_bytes = 4 * SEQ_LEN * EMBEDDING_DIM  # bf16 in + out
     print(
@@ -102,5 +96,5 @@ def test_swiglu_prefill_stream(k, tmp_path, record_property):
     )
     record_property("Latency", elapsed_us)
     record_property("Bandwidth", total_bytes / (elapsed_us * 1e-6) / 1e9)
-    ops = sum(op.resolved().ops() for op, *_ in operator.runlist)
+    ops = sum(step.op.resolved().ops() for step in net.traced.steps)
     record_property("Throughput", ops / (elapsed_us * 1e-6) / 1e9)

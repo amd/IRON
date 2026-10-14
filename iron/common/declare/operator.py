@@ -32,6 +32,7 @@ import aie.utils as aie_utils
 import numpy as np
 from aie.dialects.aie import AIEArch, AIETileType
 from aie.helpers.taplib import TensorAccessPattern
+from aie.utils.hostruntime.tensor_class import NpuTensor
 from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance, Verdict, compare
 
@@ -47,6 +48,8 @@ from .value import ChainWord, Extent, ExtentWord, PlaceWord, Value
 
 if TYPE_CHECKING:
     from ..graph.handle import Affine, Handle
+    from ..image.artifacts import Artifacts
+    from ..image.standalone import OperatorImage
 
 _T = TypeVar("_T")
 
@@ -241,6 +244,7 @@ class Operator(metaclass=_OperatorMeta):
 
     def __post_init__(self) -> None:
         self._resolved = False
+        self._image: OperatorImage | None = None
         self._derive_params()
         # A graph's reference constructs at a bounded call's valid rows, a
         # shape no device runs, for reference() alone: it is not checked.
@@ -1210,14 +1214,38 @@ class Operator(metaclass=_OperatorMeta):
         # Rebound, not updated: replace() hands a copy the same dict.
         self.bound_values = {**self.bound_values, name: bound_to}
 
+    def compile(self) -> Artifacts:
+        """Build the image this operator runs on outside a graph, once.
+
+        Returns:
+            What the build produced: the xclbin, the instruction stream and
+            the cache entry holding them.
+        """
+        if self._image is None:
+            # The image layer builds on this one: imported here to break the cycle.
+            from ..image.standalone import OperatorImage
+
+            self._image = OperatorImage(self)
+        return self._image.compile().artifacts
+
     def __call__(self, *args, **kwargs):
+        """Inside a graph's body, a step on its handles; outside one, a run
+        of this operator's own image (``compile``) on device tensors, one per
+        declared buffer in declaration order, ``kwargs`` its ``DispatchTime``
+        values by device symbol.
+        """
         tracer = graph_tracer.get()
-        if tracer is None:
+        if tracer is not None:
+            return tracer.call(self, args, kwargs)
+        names = [b.name for b in self.buffers]
+        if len(args) != len(names) or not all(isinstance(a, NpuTensor) for a in args):
             raise TypeError(
-                f"{type(self).__name__} instances are called on graph handles inside "
-                f"a graph's body; outside one, run it as an OperatorImage"
+                f"{type(self).__name__} runs outside a graph's body on device "
+                f"tensors, one per declared buffer {names}; got "
+                f"{[type(a).__name__ for a in args]}"
             )
-        return tracer.call(self, args, kwargs)
+        self.compile()
+        return self._image(*args, **kwargs)
 
     def _bind(self) -> None:
         self._prepare_inputs = ()

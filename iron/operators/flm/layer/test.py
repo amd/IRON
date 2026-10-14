@@ -24,7 +24,6 @@ from aie.utils.hostruntime.hostruntime import HostRuntimeError
 from ml_dtypes import bfloat16
 
 from iron.common.design import OperatorDesign
-from iron.common.image import OperatorImage
 from iron.operators.flm.layer.design import (
     LAYER_TYPES,
     MAX_CONTEXT,
@@ -47,12 +46,11 @@ from iron.operators.flm.layer.reference import (
 GEOMETRIES = (FLM_GEMMA4_E2B_DECODE, FLM_GEMMA4_E4B_DECODE)
 
 
-def _check_rtps(image, geometry):
-    """Assert that aiecc placed each RTP buffer of every build of image at its
-    RTP_ADDRESSES address.
+def _check_rtps(artifacts, geometry):
+    """Assert that aiecc placed each RTP buffer of every build in `artifacts`
+    at its RTP_ADDRESSES address.
     """
     want = {RTP_SYMBOLS[k]: RTP_ADDRESSES[geometry][k] for k in RTP_SYMBOLS}
-    artifacts = image.artifacts
     for entry in {artifacts.designs[0].entry.directory, artifacts.entry.directory}:
         text = (entry / "input_with_addresses.mlir").read_text()
         placed = {
@@ -86,16 +84,16 @@ CONTEXT_LENS = {
 }
 
 
-def _image(geometry, layer_type):
-    """layer_type's image. It runs on the global layer's xclbin, as the engine
-    does: one xclbin serves all four layer types.
+def _layer(geometry, layer_type):
+    """layer_type's layer, compiled. It runs on the global layer's xclbin, as
+    the engine does: one xclbin serves all four layer types.
     """
-    image = OperatorImage(DecodeLayer(geometry=geometry, layer_type=layer_type))
-    _check_rtps(image.compile(), geometry)
-    return image
+    op = DecodeLayer(geometry=geometry, layer_type=layer_type)
+    _check_rtps(op.compile(), geometry)
+    return op
 
 
-def _record_metrics(record, image, bufs, geometry, layer_type, context_len, max_l):
+def _record_metrics(record, op, bufs, geometry, layer_type, context_len, max_l):
     """Time one more dispatch and record its latency, bandwidth and throughput.
 
     The bytes count the weights and the K and V rows that the layer reads. The
@@ -108,7 +106,7 @@ def _record_metrics(record, image, bufs, geometry, layer_type, context_len, max_
     flops = 2 * sum(w.dout * w.din for w in blob)
     flops += 4 * g["num_attn_heads"] * g["dh"] * keys
     latency_us = run_iters(
-        image, *bufs, warmup=1, iters=1, context_len=context_len, max_l=max_l
+        op, *bufs, warmup=1, iters=1, context_len=context_len, max_l=max_l
     ).npu.avg_us
     record("Latency", latency_us)
     record("Bandwidth", total_bytes / latency_us / 1e3)
@@ -189,17 +187,15 @@ SYNTHETIC = [
 @pytest.mark.supported_devices("npu2")
 @pytest.mark.parametrize("geometry, layer_type, context_len", SYNTHETIC, ids=str)
 def test_matches_reference(geometry, layer_type, context_len, record_property):
-    image = _image(geometry, layer_type)
+    op = _layer(geometry, layer_type)
     inputs = generate_inputs(geometry, layer_type, context_len, MAX_L, seed=context_len)
-    bufs = _tensors(image.op, inputs)
+    bufs = _tensors(op, inputs)
     full = [b.numpy().copy() for b in bufs]
-    image(*bufs, context_len=context_len, max_l=MAX_L)
+    op(*bufs, context_len=context_len, max_l=MAX_L)
     check_outputs(
         geometry, layer_type, context_len, MAX_L, full, bufs[0].numpy(), bufs[4].numpy()
     )
-    _record_metrics(
-        record_property, image, bufs, geometry, layer_type, context_len, MAX_L
-    )
+    _record_metrics(record_property, op, bufs, geometry, layer_type, context_len, MAX_L)
 
 
 @pytest.mark.supported_devices("npu2")
@@ -213,11 +209,11 @@ def test_matches_reference(geometry, layer_type, context_len, record_property):
 )
 def test_refuses_unservable_contexts(layer_type, context_len, max_l, match):
     """The dispatch checks the context before the array runs."""
-    image = _image(FLM_GEMMA4_E2B_DECODE, layer_type)
+    op = _layer(FLM_GEMMA4_E2B_DECODE, layer_type)
     tensor = aie_utils.DEFAULT_TENSOR_CLASS
-    bufs = [tensor(b.shape, dtype=bfloat16) for b in image.op.buffers]
+    bufs = [tensor(b.shape, dtype=bfloat16) for b in op.buffers]
     with pytest.raises(HostRuntimeError, match=match):
-        image(*bufs, context_len=context_len, max_l=max_l)
+        op(*bufs, context_len=context_len, max_l=max_l)
 
 
 def _captured_cases():
@@ -250,10 +246,10 @@ def test_captured_case(case, record_property):
         for k in names + ("x_out", "kv_cache_out")
         if k in man["files"]
     }
-    image = _image(geometry, layer_type)
-    bufs = _tensors(image.op, [np.fromfile(files[k], np.uint8) for k in names])
+    op = _layer(geometry, layer_type)
+    bufs = _tensors(op, [np.fromfile(files[k], np.uint8) for k in names])
     full = [b.numpy().copy() for b in bufs]
-    image(*bufs, context_len=ctx, max_l=max_l)
+    op(*bufs, context_len=ctx, max_l=max_l)
     check_outputs(
         geometry, layer_type, ctx, max_l, full, bufs[0].numpy(), bufs[4].numpy()
     )
@@ -263,7 +259,7 @@ def test_captured_case(case, record_property):
             got = buf.numpy().reshape(-1).view(np.uint8)
             n = min(want.size, got.size)
             assert np.array_equal(got[:n], want[:n]), f"{key} differs from the engine's"
-    _record_metrics(record_property, image, bufs, geometry, layer_type, ctx, max_l)
+    _record_metrics(record_property, op, bufs, geometry, layer_type, ctx, max_l)
 
 
 def _ops(op):

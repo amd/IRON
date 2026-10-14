@@ -49,7 +49,6 @@ from aie.dialects.aie import AIEArch
 from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 from ml_dtypes import bfloat16
 
-from iron.common.image import OperatorImage
 from iron.operators import GEMM as IronGEMM
 from iron.operators.flm import GEMM as FLMGEMM
 from iron.operators.flm import Shipped
@@ -139,14 +138,13 @@ class Candidate:
         self.budget = budget
         self.round_medians = []
 
-        image = OperatorImage(op).compile()
-        self.xclbin = Path(image.artifacts.image)
+        self.xclbin = Path(op.compile().image)
         self.c_bo = XRTTensor((M, N), dtype=np.dtype("bfloat16"))
         # Only the flm operators take B pre-packed. iron.operators.GEMM
         # reorders in the descriptor, so it wants plain row-major (K, N).
         packed = op.pack_B(B) if isinstance(op, FLMGEMM) else B
         args = [XRTTensor(A.reshape(-1)), XRTTensor(packed.reshape(-1)), self.c_bo]
-        self.run = lambda: image(*args)
+        self.run = lambda: op(*args)
 
     def verify(self, M, N, expected, mass):
         self.run()

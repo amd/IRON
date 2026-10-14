@@ -36,7 +36,8 @@ from ml_dtypes import bfloat16
 
 from iron.common import Scratchpad, graph
 from iron.common.harness import verify_buffer
-from iron.common.image import Fusion, OperatorSequence
+from iron.common.image import Fusion
+from iron.common.image.sequence import OperatorSequence
 from iron.common.image.packaging import dispatches_full_elf
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.magnitude import Magnitude

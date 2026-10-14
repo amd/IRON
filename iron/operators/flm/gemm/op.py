@@ -10,7 +10,7 @@ rounding mode. Everything the xclbin depends on, and nothing else; its
 clamp bounds are values written to the cores and reach only the
 instruction stream, so every shape sharing a configuration shares one
 xclbin. That split is the point of this operator; ``GEMM.configuration``
-names the half an ``OperatorImage`` compiles once.
+names the half ``Operator.compile`` builds once.
 
 ``design.py`` keeps the fixed geometry and the L1 budget; README.md has the
 per-choice breakdown against the shipped FastFlowLM overlay

@@ -15,7 +15,7 @@ gate runs aiecc's xclbin pipeline (kernels with Peano, the PDI, then
   shape and this shape's instruction stream;
 * the shipped flm image's instruction stream against its pins (the xclbin
   itself is downloaded, not built, and is tried separately);
-* one plain declared operator's ``OperatorImage`` on NPU1.
+* one plain declared operator's own image (``Operator.compile``) on NPU1.
 
 Needs Peano and ``xclbinutil`` on the PATH (mlir-aie vendors a Boost-free
 one under ``tools/hrx-xclbinutil``); no device.
@@ -27,7 +27,6 @@ from pathlib import Path
 import pytest
 
 import iron
-from iron.common.image import OperatorImage
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
 from iron.tests.common.llama_model import llama_1b
@@ -75,7 +74,7 @@ def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(npu2):
     import iron.operators.flm.gemm.op as flm
 
     op = flm.GEMM(M=256, K=512, N=512)
-    artifacts = OperatorImage(op).compile().artifacts
+    artifacts = op.compile()
     assert artifacts.image.stat().st_size > 0
     assert artifacts.insts is not None and artifacts.insts.stat().st_size > 0
     # The configuration's image is its own entry, named for the configuration;
@@ -114,14 +113,14 @@ def test_shipped_builds_its_instructions_for_the_external_image(npu2):
         epilogue="gelu",
         clamp=(-2.0, 2.0),
     )
-    insts = OperatorImage(op).compile().artifacts.insts
+    insts = op.compile().insts
     assert insts is not None and insts.stat().st_size > 0
 
 
 def test_shipped_fetches_its_image(npu2):
     op = _shipped(M=256, K=1024, N=1152)
     try:
-        image = Path(OperatorImage(op).compile().artifacts.image)
+        image = Path(op.compile().image)
     except (urllib.error.URLError, OSError) as e:  # no network here
         pytest.skip(f"the prebuilt xclbin could not be fetched: {e}")
     assert image.exists() and image.stat().st_size > 0
@@ -146,7 +145,7 @@ def test_llama_builds_xclbins_at_its_size_on_npu1(npu1, chunk, pipelines):
 
 def test_a_declared_operator_compiles_to_an_xclbin_on_npu1(npu1):
     op = GEMV(M=512, K=1024)
-    artifacts = OperatorImage(op).compile().artifacts
+    artifacts = op.compile()
     assert artifacts.image.stat().st_size > 0
     insts = artifacts.insts
     assert insts is not None and insts.stat().st_size > 0

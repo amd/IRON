@@ -32,11 +32,11 @@ import iron
 from iron.common.image import (
     AdjacentPacking,
     Fusion,
-    OperatorSequence,
     Packing,
     coresidence,
     fusion,
 )
+from iron.common.image.sequence import OperatorSequence
 from iron.common.graph.fold import folded
 from iron.common.image.coresidence import fits
 from iron.lm.blocks import SwiGLU

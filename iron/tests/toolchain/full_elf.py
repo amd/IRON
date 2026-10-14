@@ -33,7 +33,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common.declare import Extent
-from iron.common.image import OperatorSequence
+from iron.common.image.sequence import OperatorSequence
 from iron.common.image.allocator import BANK
 from iron.operators import ElementwiseAdd
 from iron.operators.gemm import GEMM

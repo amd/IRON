@@ -6,12 +6,11 @@ SPDX-License-Identifier: Apache-2.0
 # `iron.operators.flm.GEMM` — bf16 GEMM with a fused epilogue
 
 ```python
-from iron.common.image import OperatorImage
 from iron.operators.flm import GEMM
 from iron.operators.flm.gemm.design import Epilogue
 
 op = GEMM(M=1024, K=1536, N=6144, epilogue=Epilogue.SILU)
-OperatorImage(op)(A, op.pack_B(B), C_out)
+op(A, op.pack_B(B), C_out)  # compiles once, then runs
 ```
 
 `epilogue`, `rounding` and `gelu` are `StrEnum`s, so the bare strings `"silu"` /
@@ -178,7 +177,7 @@ multiple of the full stride.
 
 ```python
 op = GEMM(M=M, K=K, N=N)
-OperatorImage(op)(A, op.pack_B(B), C_out)
+op(A, op.pack_B(B), C_out)
 ```
 
 `pack_B` reorders a row-major `(K, N)` matrix into the order the compute tiles
@@ -202,7 +201,7 @@ cost belongs at the caller.
 
 ```python
 op = GEMM(M=M, K=K, N=N, b_col_maj=True)
-OperatorImage(op)(A, W, C_out)  # W is (N, K), a checkpoint's layout
+op(A, W, C_out)  # W is (N, K), a checkpoint's layout
 ```
 
 `b_col_maj=True` takes B as a checkpoint stores a projection, `(N, K)`, in
@@ -576,11 +575,10 @@ unit. A bound needs `m_chunk = 1` and M in one slab.
 ## The shipped overlay
 
 ```python
-from iron.common.image import OperatorImage
 from iron.operators.flm import GEMM, Shipped
 
 op = Shipped(M=1024, K=1536, N=6144, epilogue="silu")
-OperatorImage(op)(A, op.pack_B(B), C_out)
+op(A, op.pack_B(B), C_out)
 ```
 
 `Shipped` (`shipped.py`) is FastFlowLM's `mm.xclbin` **unmodified**, as a

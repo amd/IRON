@@ -21,7 +21,8 @@ import pytest
 from iron.common import Unresolvable
 from iron.common.declare import Out
 from iron.common.design import OperatorDesign
-from iron.common.image import Fusion, OperatorSequence, Packing
+from iron.common.image import Fusion, Packing
+from iron.common.image.sequence import OperatorSequence
 from iron.tests.toolchain.tools import requires
 
 pytestmark = requires("aiecc")

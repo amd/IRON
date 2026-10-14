@@ -52,9 +52,10 @@ def _n_elements(nbytes, dtype=BF16):
 def _require_xrt() -> None:
     if XRTTensor is None:
         raise RuntimeError(
-            "this OperatorSequence mode needs the XRT host runtime (pyxrt), which is "
-            "not installed. Use the reference mode, or run a single operator, which "
-            "dispatches through aie.utils.DefaultNPURuntime and works on any backend."
+            "a graph's image needs the XRT host runtime (pyxrt), which is not "
+            "installed. Use graph.reference(), or call a single operator on its "
+            "own, which dispatches through aie.utils.DefaultNPURuntime and works "
+            "on any backend."
         )
 
 
