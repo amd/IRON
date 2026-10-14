@@ -19,6 +19,7 @@ import re
 
 import numpy as np
 import pytest
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 import iron
@@ -36,6 +37,7 @@ from iron.operators import (
     Resample,
     ResampleTaps,
 )
+from iron.operators.magnitude import Magnitude
 from iron.operators.merge import GEMMA
 from iron.tests.common.graphs import Adds, Chain
 
@@ -152,6 +154,43 @@ def test_check_mode_holds_each_step_to_its_reference(caplog):
     plain = Chain(SIZE, TILE).compile(full_elf=True, a=(SIZE,), b=(SIZE,))
     want = np.array(plain(a, b).numpy()[:SIZE])
     assert got.view(np.uint16).tolist() == want.view(np.uint16).tolist()
+
+
+class RoundedMagnitude(Magnitude):
+    """Magnitude declared to round correctly, which its kernel does not: it
+    comes within 2e-7 of hypot, about a float32 ulp.
+    """
+
+    def tolerance(self) -> Tolerance:
+        return Tolerance.exact()
+
+
+class Magnitudes(iron.Graph):
+    """Two magnitudes in turn, the second held to a bound its kernel misses."""
+
+    def body(self, x):
+        return RoundedMagnitude(Magnitude(x, num_aie_columns=1), num_aie_columns=1)
+
+
+@pytest.mark.supported_devices("npu2")
+def test_check_mode_catches_a_step_outside_its_tolerance_at_that_step():
+    """A step whose kernel misses its declared bound on the device is caught
+    at that step, after the step before it passed.
+
+    A wrong weight cannot stand in here: check mode judges each step against
+    its reference on the inputs the NPU gave it, so a wrong weight in a
+    device buffer is what both read. What a step catches is a kernel outside
+    its operator's tolerance(), as iron/tests/common/checking.py induces on
+    the host.
+    """
+    rows, width = 8, 640
+    rng = np.random.default_rng(0)
+    x = (rng.standard_normal((rows, width)) * 10.0).astype(np.float32)
+    net = Magnitudes().compile(check=True, x=((rows, width), np.float32))
+    with pytest.raises(
+        RuntimeError, match=r"\[check step 1\] RoundedMagnitude .*deviates"
+    ):
+        net(x)
 
 
 @pytest.mark.supported_devices("npu2")
