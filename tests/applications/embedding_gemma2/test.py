@@ -421,7 +421,7 @@ class TestAudio:
     @pytest.mark.bench
     @pytest.mark.parametrize("name", list(CLIPS))
     def test_audio_latency(self, audio, name, record_property):
-        latency = run_iters(audio.embed, clip(name), warmup=1, iters=10).e2e
+        latency = run_iters(audio.soft_tokens, clip(name), warmup=1, iters=10).e2e
         record_property("Latency", latency.median_us)
 
 
@@ -507,7 +507,7 @@ class TestVision:
     @pytest.mark.parametrize("name", ["cats", "living_room"])
     def test_vision_latency(self, vision, name, record_property):
         image, tokens = photo(name), IMAGES[name]
-        latency = run_iters(vision.embed, image, tokens, warmup=1, iters=10).e2e
+        latency = run_iters(vision.soft_tokens, image, tokens, warmup=1, iters=10).e2e
         record_property("Latency", latency.median_us)
 
 
