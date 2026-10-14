@@ -27,7 +27,7 @@ class Clamp(UnaryElementwise):
                 dict(size=2048, num_aie_columns=2, tile_size=1024, low=-3e4, high=3e4)
             ),
         ],
-        draw=dict(centered=("x",)),
+        draw=lambda op: dict(centered=(op.x,)),
     )
 
     low: float = Param(probe=-np.inf)

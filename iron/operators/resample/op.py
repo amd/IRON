@@ -855,23 +855,25 @@ class Resample(Operator):
             Case(dict(height=6000, width=500, out_height=672, out_width=432)),
         ],
         draw=lambda op: dict(
-            image=np.random.default_rng(42).integers(
-                0, 256, (op.image_chunks, op.chunk), dtype=np.uint8
-            ),
-            taps_w=ResampleTaps(
-                in_size=op.width,
-                out_size=op.out_width,
-                words=op.words,
-                slots=SIDE,
-                chunks=op.width_chunks,
-            ).reference(),
-            taps_h=ResampleTaps(
-                in_size=op.height,
-                out_size=op.out_height,
-                words=op.words,
-                slots=SIDE,
-                chunks=op.height_chunks,
-            ).reference(),
+            given={
+                op.image: np.random.default_rng(42).integers(
+                    0, 256, (op.image_chunks, op.chunk), dtype=np.uint8
+                ),
+                op.taps_w: ResampleTaps(
+                    in_size=op.width,
+                    out_size=op.out_width,
+                    words=op.words,
+                    slots=SIDE,
+                    chunks=op.width_chunks,
+                ).reference(),
+                op.taps_h: ResampleTaps(
+                    in_size=op.height,
+                    out_size=op.out_height,
+                    words=op.words,
+                    slots=SIDE,
+                    chunks=op.height_chunks,
+                ).reference(),
+            }
         ),
     )
 

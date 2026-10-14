@@ -63,7 +63,7 @@ def _program(op: "Emit") -> dict:
     ).astype(np.int32)
     program[rng.random(op.rows) < 0.25] = 0
     planes = rng.integers(-(1 << 20), 1 << 20, (2, op.carried)).astype(np.int32)
-    return dict(program=program, planes=planes)
+    return dict(given={op.program: program, op.planes: planes})
 
 
 class Emit(Operator):

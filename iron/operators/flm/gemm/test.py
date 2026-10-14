@@ -171,7 +171,7 @@ def flm_vectors(operator, scale=4.0):
     """
     K, N = operator.K, operator.N
     B = (N, K) if operator.b_col_maj else (K, N)
-    return vectors(operator, normal=("A",), scale=scale, B=B)
+    return vectors(operator, normal=(operator.A,), scale=scale, given={operator.B: B})
 
 
 def accumulated_mass(K, A, B):
@@ -612,7 +612,7 @@ def test_shipped_overlay(M, K, N, epilogue, clamp, record_property):
     """The shipped binary through the same operator: the second reference."""
     operator = Shipped(M=M, K=K, N=N, **finished(M, N, epilogue, clamp))
     # B drawn row-major (K, N); the operator consumes it packed (pack_B).
-    data = vectors(operator, normal=("A",), B=(K, N))
+    data = vectors(operator, normal=(operator.A,), given={operator.B: (K, N)})
 
     input_buffers = {"A": data["A"].flatten(), "B": operator.pack_B(data["B"])}
     output_buffers = {"C": data["C"].flatten()}
@@ -672,7 +672,7 @@ def test_shipped_epilogue_matches_accumulator(epilogue, clamp):
     # are actually curved; at the default scale the product lands around +-900,
     # where gelu and silu are indistinguishable from the identity.
     probe = Shipped(M=M, K=K, N=N)
-    data = vectors(probe, normal=("A",), scale=0.5, B=(K, N))
+    data = vectors(probe, normal=(probe.A,), scale=0.5, given={probe.B: (K, N)})
     A, B = data["A"], data["B"]
 
     def run(epi, clm):
@@ -732,7 +732,9 @@ def test_gemm_gelu_bf16_steps_matches_overlay(M, K, N):
     gelu bit for bit, on identical inputs.
     """
     probe = Shipped(M=M, K=K, N=N)
-    data = vectors(probe, normal=("A",), scale=ACTIVATION_INPUT_SCALE, B=(K, N))
+    data = vectors(
+        probe, normal=(probe.A,), scale=ACTIVATION_INPUT_SCALE, given={probe.B: (K, N)}
+    )
     A, B = data["A"], data["B"]
 
     def run(op):

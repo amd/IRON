@@ -77,8 +77,8 @@ class RMSNorm(Rowwise):
         if not self.weighted:
             return super().chain()
         return (
-            KernelCall(self.kernel(), self.scalars(), ("x",)),
-            KernelCall(eltwise.mul_sized(self.tile_size), (), (None, "weight")),
+            KernelCall(self.kernel(), self.scalars(), (self.x,)),
+            KernelCall(eltwise.mul_sized(self.tile_size), (), (None, self.weight)),
         )
 
     def reference(self, x, weight=None):

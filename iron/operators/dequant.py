@@ -26,9 +26,11 @@ class Dequant(UnaryElementwise):
     test = Testing(
         Sweep(group_size=32),
         draw=lambda op: dict(
-            x=datamovement.expand(op.tile_size, op.group_size)
-            .contract.sample(np.random.default_rng(42), op.size // op.tile_size)[0]
-            .reshape(-1)
+            given={
+                op.x: datamovement.expand(op.tile_size, op.group_size)
+                .contract.sample(np.random.default_rng(42), op.size // op.tile_size)[0]
+                .reshape(-1)
+            }
         ),
     )
 

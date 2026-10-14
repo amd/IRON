@@ -35,7 +35,7 @@ class DepthwiseConv1d(Operator):
             # Benched: the audio tower's light conv at its longest bucket.
             Case(dict(rows=768, channels=1024, num_aie_columns=8), bench=True),
         ],
-        draw=dict(centered=("x", "weight")),
+        draw=lambda op: dict(centered=(op.x, op.weight)),
     )
 
     rows: int = Param()

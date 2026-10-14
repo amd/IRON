@@ -83,9 +83,11 @@ def _logits(op: "Sample") -> dict:
         ]
     )
     return dict(
-        logits=logits,
-        draws=draws,
-        tokens=np.full(op.steps, -1, dtype=np.int32),
+        given={
+            op.logits: logits,
+            op.draws: draws,
+            op.tokens: np.full(op.steps, -1, dtype=np.int32),
+        }
     )
 
 

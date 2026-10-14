@@ -51,8 +51,7 @@ def test_operator(
     cls: type[Operator], declaration: Testing, case: Case, record_property
 ):
     op = cls(**case.kwargs).resolved(DEVICE)
-    draw = declaration.draw
-    extra = draw(op) if callable(draw) else (draw or {})
+    extra = declaration.draw(op) if declaration.draw is not None else {}
     tolerance = op.tolerance()
     if tolerance is None:
         raise ValueError(

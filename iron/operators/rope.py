@@ -76,7 +76,7 @@ def _angles(op):
     theta = rng.uniform(-np.pi, np.pi, (op.angle_rows, op.cols // 2))
     table = np.empty((op.angle_rows, op.cols), dtype=np.float32)
     table[:, ::2], table[:, 1::2] = np.cos(theta), np.sin(theta)
-    return dict(angles=table.astype(bfloat16))
+    return dict(given={op.angles: table.astype(bfloat16)})
 
 
 class RoPE(Operator):

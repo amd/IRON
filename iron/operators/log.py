@@ -92,9 +92,11 @@ class Log(UnaryElementwise):
         Sweep(),
         # Mel energies: positive, over eleven decades.
         draw=lambda op: dict(
-            x=(10.0 ** np.random.default_rng(42).uniform(-6, 5, op.size)).astype(
-                np.float32
-            )
+            given={
+                op.x: (
+                    10.0 ** np.random.default_rng(42).uniform(-6, 5, op.size)
+                ).astype(np.float32)
+            }
         ),
     )
 

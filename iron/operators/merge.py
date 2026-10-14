@@ -54,13 +54,15 @@ class Merge(Operator):
         ],
         # A third placeholders, scattered: each id's rank is its own.
         draw=lambda op: dict(
-            ids=np.where(
-                np.random.default_rng(42).random(op.rows) < 1 / 3,
-                np.random.default_rng(43).choice(
-                    [op.audio_token, op.image_token], op.rows
-                ),
-                np.random.default_rng(44).integers(0, 2**20, op.rows),
-            ).astype(np.int32)
+            given={
+                op.ids: np.where(
+                    np.random.default_rng(42).random(op.rows) < 1 / 3,
+                    np.random.default_rng(43).choice(
+                        [op.audio_token, op.image_token], op.rows
+                    ),
+                    np.random.default_rng(44).integers(0, 2**20, op.rows),
+                ).astype(np.int32)
+            }
         ),
     )
 

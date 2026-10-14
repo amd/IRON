@@ -89,11 +89,13 @@ class Magnitude(Rowwise):
         ],
         # Spectra span many decades and pad with zero bins.
         draw=lambda op: dict(
-            x=(
-                np.random.default_rng(42).standard_normal((op.rows, op.width))
-                * 10.0 ** np.random.default_rng(43).uniform(-8, 3, (op.rows, 1))
-                * (np.arange(op.width) % op.tile_size < op.tile_size - 32)
-            ).astype(np.float32)
+            given={
+                op.x: (
+                    np.random.default_rng(42).standard_normal((op.rows, op.width))
+                    * 10.0 ** np.random.default_rng(43).uniform(-8, 3, (op.rows, 1))
+                    * (np.arange(op.width) % op.tile_size < op.tile_size - 32)
+                ).astype(np.float32)
+            }
         ),
     )
 

@@ -31,7 +31,7 @@ class LeakyReLU(UnaryElementwise):
                 for a in (0.1, 0.25)
             ),
         ],
-        draw=dict(centered=("x",)),
+        draw=lambda op: dict(centered=(op.x,)),
     )
 
     alpha: float = Param(default=0.01, array=True)

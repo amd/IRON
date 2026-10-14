@@ -175,7 +175,7 @@ class GEMV(Operator):
     - tile_size_output: rows of C stored on each core per acquire (chunk size of C)
     """
 
-    test = Testing(_cases, draw=dict(normal=("A", "B")))
+    test = Testing(_cases, draw=lambda op: dict(normal=(op.A, op.B)))
 
     M: int = Param()
     K: int = Param()

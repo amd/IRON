@@ -10,7 +10,7 @@ from iron.common.testing import Sweep, Testing
 class ReLU(UnaryElementwise):
     """AIE-accelerated ReLU activation function."""
 
-    test = Testing(Sweep(), draw=dict(centered=("x",)))  # both signs
+    test = Testing(Sweep(), draw=lambda op: dict(centered=(op.x,)))  # both signs
 
     def kernel(self):
         return eltwise.relu_sized(self.tile_size)

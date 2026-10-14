@@ -390,11 +390,15 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    (`eltwise.relu_sized(line)`, `norm.rms_norm_eps(tile)`, ...): it carries
    the symbol, the source, the argument types, aie2's LUT tables and the
    contract: the reference, the tolerance and the scalar bindings. The
-   factory binds the line length and any scalar the operator gives it
-   (`activation.leaky_relu(tile, alpha=)`, `datamovement.axpy(tile, a=)`,
-   `norm.rms_norm_eps(tile, epsilon=)`), so a core calls the kernel with
-   its elements alone and the operator declares no `kernel_call` or
-   `reference` of its own; a field it passes is `Param(..., array=True)`.
+   factory binds the line length; a scalar the kernel takes at run time is
+   the operator's `scalars()`, in the kernel's order (`LeakyReLU` returns
+   `(self.alpha,)`, `AXPY` `(self.scalar_factor,)`, `RMSNorm`
+   `(self.epsilon,)`; the factories take no `alpha=`, `a=` or `epsilon=`),
+   so the operator declares no `kernel_call` or `reference` of its own; a
+   field it passes is `Param(..., array=True)`. An elementwise operator
+   whose core makes more than one call over a line lists them in `chain()`,
+   each a `KernelCall(kernel, scalars, operands)` naming its input tiles by
+   operand (`(self.x,)`, or `None` for the line the call before it wrote).
    Bind a further symbol of the same object with
    `fn.object_file.bind(symbol, arg_types)`. A kernel the factories do not
    cover is an `ExternalFunction` of mlir-aie's whose `symbol_prefix=`
@@ -446,9 +450,10 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      (`iron/tests/toolchain/lowering.py`), which lowers each operator's
      first default case on every device: flag one for each layout or dtype
      that case does not reach (`Sweep(lower=True)` flags its first)
-   - `draw=` passes `vectors()` its arguments (`normal=`, `centered=`, a given
-     tensor or shape per input), or a callable of the operator for an input
-     with preconditions (a packed quantization, an angle table)
+   - `draw=`, a callable of the operator, returns `vectors()`'s arguments
+     keyed by its operands: `normal=(op.A,)`, `centered=(op.x,)`, and
+     `given={op.angles: table}` for a tensor or a shape an input with
+     preconditions needs (a packed quantization, an angle table)
    - `iron/tests/operators/catalog.py` runs it; a test with a body of its own goes
      beside the operator and calls `run_test(op, vectors(op), ...,
      record=record_property)`, and gives pytest's `record_property` any

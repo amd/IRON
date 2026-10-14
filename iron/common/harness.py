@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from collections.abc import Iterable, Mapping
 from typing import Callable
 
 import aie.utils as aie_utils
@@ -15,7 +16,7 @@ from aie.utils.benchmark import run_iters
 from aie.utils.verify import Tolerance, Verdict, compare
 from ml_dtypes import bfloat16
 
-from .declare import Operator
+from .declare import Operand, Operator
 
 logger = logging.getLogger(__name__)
 
@@ -31,17 +32,31 @@ class Vectors:
         return self.inputs[name] if name in self.inputs else self.outputs[name]
 
 
-def vectors(op, *, seed=42, scale=4.0, normal=(), centered=(), **given) -> Vectors:
+def vectors(
+    op,
+    *,
+    seed: int = 42,
+    scale: float = 4.0,
+    normal: Iterable[Operand] = (),
+    centered: Iterable[Operand] = (),
+    given: Mapping[Operand, np.ndarray | tuple[int, ...]] | None = None,
+) -> Vectors:
     """Random inputs for ``op``'s declared buffers, and ``op.reference()``'s outputs.
 
     Args:
         scale: A uniform draw's scale; an integer buffer draws on ``[0, scale]``.
-        normal: Names drawn normal instead.
-        centered: Names shifted to centre on zero.
-        **given: An array as it is, or a shape to draw in place of the
-            declared one (an operand the sequence packs).
+        normal: Inputs drawn normal instead (``op.A``).
+        centered: Inputs shifted to centre on zero.
+        given: Per input, an array as it is, or a shape to draw in place of
+            the declared one (an operand the sequence packs).
+
+    Raises:
+        ValueError: An operand named is not one of ``op``'s inputs.
     """
-    unknown = set(given) - {b.name for b in op.inputs}
+    given = {o.name: v for o, v in (given or {}).items()}
+    normal = {o.name for o in normal}
+    centered = {o.name for o in centered}
+    unknown = (given.keys() | normal | centered) - {b.name for b in op.inputs}
     if unknown:
         raise ValueError(f"{type(op).__name__} has no input {sorted(unknown)}")
     rng = np.random.default_rng(seed)

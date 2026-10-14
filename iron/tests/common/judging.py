@@ -31,7 +31,7 @@ def test_a_case_passes_its_oracle_and_fails_an_output_past_its_tolerance(
 ):
     op = cls(**case.kwargs).resolved(request.getfixturevalue(device))
     draw = cls.test.draw
-    v = vectors(op, **(draw(op) if callable(draw) else draw or {}))
+    v = vectors(op, **(draw(op) if draw is not None else {}))
     tolerance = op.tolerance()
     verdicts = op.judge(v.inputs, v.outputs, tolerance)
     assert all(verdicts.values()), {n: x.detail for n, x in verdicts.items() if not x}

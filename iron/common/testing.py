@@ -52,14 +52,15 @@ class Testing:
     Attributes:
         cases: ``Case``s, keyword dicts, or callables of the class and the
             device returning them (a ``Sweep``).
-        draw: Extra ``vectors`` arguments, or a callable of the operator
-            returning them, for inputs with preconditions.
+        draw: A callable of the operator returning extra ``vectors``
+            arguments, keyed by its operands (``dict(normal=(op.A,))``,
+            ``dict(given={op.x: table})``), for inputs with preconditions.
     """
 
     __test__ = False  # pytest: a declaration, not a test class
 
     cases: Iterable[Case | dict | _Cases] | _Cases
-    draw: dict[str, Any] | Callable[[Any], dict[str, Any]] | None = None
+    draw: Callable[[Any], dict[str, Any]] | None = None
 
     def resolve(self, cls: type, dev: Device) -> list[Case]:
         """The cases for ``cls`` on ``dev``, so an inherited sweep reads the

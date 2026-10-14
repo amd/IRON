@@ -46,6 +46,7 @@ from .declare import (
     Divisors,
     Extent,
     In,
+    Operand,
     Operator,
     Out,
     Unresolvable,
@@ -145,12 +146,12 @@ class KernelCall:
         kernel: The kernel called.
         scalars: The scalar arguments its contract leaves unbound, in order.
         operands: Each input tile, in the kernel's order: an input of the
-            operator by name, or None, the line the call before it wrote.
+            operator (``self.x``), or None, the line the call before it wrote.
     """
 
     kernel: ExternalFunction
     scalars: tuple = ()
-    operands: tuple[str | None, ...] = ()
+    operands: tuple[Operand | None, ...] = ()
 
 
 class _Chains:
@@ -283,7 +284,7 @@ class _Chains:
                         }
                     dst = other if n % 2 == 0 else start
                     _, positions, scalars = self.steps[(link.array_key(), j)]
-                    ins = [src if o is None else values[o] for o in operands]
+                    ins = [src if o is None else values[o.name] for o in operands]
                     tiles = dict(zip(positions, [*ins, dst]))
                     fns[(link.array_key(), j)](
                         *(
@@ -623,8 +624,8 @@ class Elementwise(Operator):
         own makes more.
         """
         extra = {b.name for b in self.finish_inputs}
-        names = tuple(b.name for b in self.inputs if b.name not in extra)
-        return (KernelCall(self.kernel(), self.scalars(), names),)
+        operands = tuple(b for b in self.inputs if b.name not in extra)
+        return (KernelCall(self.kernel(), self.scalars(), operands),)
 
     def _arguments(
         self, kernel: ExternalFunction, given: tuple, n_in: int, n_out: int
@@ -691,7 +692,7 @@ class Elementwise(Operator):
         op = self.over(line, line).resolved(dev)
         tile = op.inputs[at].name
         for j, call in enumerate(op.chain()):
-            if j and tile in call.operands:
+            if j and tile in {o.name for o in call.operands if o is not None}:
                 raise ValueError(
                     f"{type(self).__name__}: a call after its first names "
                     f"{tile}, the line the first overwrites"

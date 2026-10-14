@@ -35,14 +35,16 @@ def test_vectors_draws_each_input_and_runs_the_reference_on_the_draw():
 def test_vectors_takes_a_given_array_a_shape_or_a_centred_draw():
     op = ReLU(size=64, num_aie_columns=1, tile_size=64)
     given = np.arange(64, dtype=bfloat16)
-    assert vectors(op, x=given)["x"] is given
-    assert vectors(op, x=(2, 32))["x"].shape == (2, 32)  # the declared 64, as given
-    plain, centred = vectors(op)["x"], vectors(op, centered=("x",))["x"]
+    assert vectors(op, given={op.x: given})["x"] is given
+    # The declared 64, as given; the class's declared operand keys it too.
+    assert vectors(op, given={ReLU.x: (2, 32)})["x"].shape == (2, 32)
+    plain, centred = vectors(op)["x"], vectors(op, centered=(op.x,))["x"]
     assert plain.dtype == centred.dtype == bfloat16
     assert 0 <= plain.min() and plain.max() < 4.0 and not (plain == plain.round()).all()
     assert (centred < 0).any() and (centred > 0).any()  # both signs, as ReLU asks
-    with pytest.raises(ValueError, match=r"has no input \['z'\]"):
-        vectors(op, z=given)
+    other = ElementwiseAdd(size=64, num_aie_columns=1, tile_size=64)
+    with pytest.raises(ValueError, match=r"has no input \['a'\]"):
+        vectors(op, given={other.a: given})
 
 
 def test_tolerance_is_the_operators_own_else_its_kernels_contract():

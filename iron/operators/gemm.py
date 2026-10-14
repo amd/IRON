@@ -175,7 +175,7 @@ class GEMM(Operator):
     does not depend on the extents.
     """
 
-    test = Testing(_cases, draw=dict(normal=("A",)))
+    test = Testing(_cases, draw=lambda op: dict(normal=(op.A,)))
 
     M: int = Param()
     K: int = Param()

@@ -82,7 +82,7 @@ class Limbs(Rowwise):
             Case(dict(rows=512, line=320, num_aie_columns=4)),
             Case(dict(rows=4096, line=320, num_aie_columns=8), bench=True),
         ],
-        draw=dict(normal=("x",)),
+        draw=lambda op: dict(normal=(op.x,)),
     )
 
     line: int = Param()
