@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
-from collections.abc import Hashable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 
 from aie import ir
 from aie.dialects import aie
@@ -89,27 +89,40 @@ class Packing:
             out.setdefault(self.device_of(design), self._group_of(design))
         return out
 
-    def sharing(self, arrays: Mapping[str, Hashable]) -> Packing:
+    def sharing(
+        self,
+        arrays: Mapping[str, Hashable],
+        fits: Callable[[tuple[str, ...]], str | None] | None = None,
+    ) -> Packing:
         """This packing with the designs of one array in one device.
+
+        An array's designs in two or more packs join them only where
+        ``fits`` takes the union; otherwise each pack builds the array, and
+        its designs in no pack join the first.
 
         Args:
             arrays: Every design, in first-use order, and its array: its
                 `design.identities`, or what stands for it.
+            fits: Why the placer refuses a union of packs, or None where it
+                takes it; every union is taken where not given.
         """
         order = list(arrays)
-        by_text: dict[Hashable, list[str]] = {}
-        for design, text in arrays.items():
-            by_text.setdefault(text, []).append(design)
-        merged: list[set[str]] = []
-        for group in [
-            *map(set, self.groups),
-            *(set(c) for c in by_text.values() if len(c) > 1),
-        ]:
-            for other in [m for m in merged if m & group]:
-                merged.remove(other)
-                group |= other
-            merged.append(group)
-        return Packing(tuple(tuple(sorted(g, key=order.index)) for g in merged))
+        by_array: dict[Hashable, set[str]] = {}
+        for design, array in arrays.items():
+            by_array.setdefault(array, set()).add(design)
+        devices = [set(group) for group in self.groups]
+        for mates in by_array.values():
+            if len(mates) < 2:
+                continue
+            touched = [d for d in devices if d & mates]
+            union = mates.union(*touched)
+            if len(touched) > 1 and fits is not None:
+                refused = fits(tuple(sorted(union, key=order.index)))
+                if refused is not None:
+                    touched[0] |= mates - set().union(*touched)
+                    continue
+            devices = [d for d in devices if not d & mates] + [union]
+        return Packing(tuple(tuple(sorted(g, key=order.index)) for g in devices))
 
     @staticmethod
     def device_name(group: Sequence[str]) -> str:

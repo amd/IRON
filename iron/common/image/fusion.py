@@ -28,7 +28,7 @@ from aie.utils.compile.jit.compilabledesign import compile_context
 
 from ..design import BuiltArray, OperatorDesign, identities
 from .allocator import BANK
-from .coresidence import AdjacentPacking, CoResidenceError, Packing, pack
+from .coresidence import AdjacentPacking, CoResidenceError, Packing, fits, pack
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +224,8 @@ class Fusion:
                 [name for name, *_ in self.runlist], self.designs, words
             )
         packing = packing.sharing(
-            {n: of[n] if n in arrays else n for n in self.designs}
+            {n: of[n] if n in arrays else n for n in self.designs},
+            lambda members: fits({m: self.designs[m] for m in members}, words),
         )
         device = next(iter(self.designs.values())).op.device()
         configurations: dict[str, DeviceConfiguration] = {}

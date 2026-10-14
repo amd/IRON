@@ -38,7 +38,7 @@ from iron.common.image.sequence import OperatorSequence
 from iron.common.graph.fold import folded
 from iron.common.image.coresidence import CoResidenceError, conflicts, fits, places
 from iron.lm.blocks import SwiGLU
-from iron.operators import GEMV, ElementwiseAdd, SiLU
+from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, SiLU
 from iron.tests.common.graphs import Chain
 from iron.tests.toolchain.tools import requires
 
@@ -244,6 +244,37 @@ def test_policy_declines_what_does_not_fit():
     assert packing == Packing()
     [reason] = stopped.values()
     assert "ShimNOCTile" in reason
+
+
+def test_one_array_joins_two_packs_only_where_their_union_fits():
+    # SiLU at two sizes is one array, packed with an add and with a mul:
+    # each pack of two four-column arrays fits, the three together do not,
+    # so the array is built in each pack rather than joining them.
+    add = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=4)
+    silu = SiLU(size=SIZE, tile_size=TILE, num_aie_columns=4)
+    wider = SiLU(size=2 * SIZE, tile_size=TILE, num_aie_columns=4)
+    mul = ElementwiseMul(size=2 * SIZE, tile_size=TILE, num_aie_columns=4)
+    seq = OperatorSequence(
+        name="joined_packs",
+        runlist=[
+            (add, "a", "b", "t"),
+            (silu, "t", "y"),
+            (wider, "c", "u"),
+            (mul, "u", "d", "z"),
+        ],
+        input_args=["a", "b", "c", "d"],
+        output_args=["y", "z"],
+        full_elf=True,
+        coresident=[[add, silu], [wider, mul]],
+    )
+    seq.prepare()
+    fused = Fusion(seq)
+    a, s, w, m = (name for name, *_ in fused.runlist)
+    assert fits({n: fused.designs[n] for n in (a, s)}) is None
+    assert fits({n: fused.designs[n] for n in (w, m)}) is None
+    assert fits(fused.designs) is not None
+    devices = _devices(fused.text())
+    assert devices[:2] == [Packing.device_name([a, s]), Packing.device_name([w, m])]
 
 
 def test_designs_of_one_array_share_its_device():
