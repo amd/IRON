@@ -15,6 +15,7 @@ import numpy as np
 from aie.iron import ExternalFunction
 from aie.iron.kernels import KernelContract, Param
 from aie.utils.compile.jit.markers import In, Out
+from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
 from iron.common import BinaryElementwise
@@ -42,6 +43,7 @@ class VectorAdd(BinaryElementwise):
             roles=(In, In, Out, Param),
             parameter_bindings=((3, self.tile_size),),
             reference=lambda a, b: a + b,
+            tolerance=Tolerance.bf16_ulps(1, atol=2**-126),
         )
         return ExternalFunction(
             "vadd",

@@ -441,8 +441,14 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    operator's own file (the hello-world in
    `iron/tests/toolchain/inline_kernel.py`: a `vadd` in C++ text, the
    argument types the operands' tiles). Give such a kernel its
-   `contract=KernelContract(roles=, parameter_bindings=, reference=)` and
-   it is used like a factory's. An operator running one kernel
+   `contract=KernelContract(roles=, parameter_bindings=, reference=,
+   tolerance=)` and it is used like a factory's: `KernelContract` and the
+   `Param` role come from `aie.iron.kernels`, the `In`/`Out` roles from
+   `aie.utils.compile.jit.markers` (not `iron.common`'s operand
+   declarators of the same names), and `tolerance=` is what its output is
+   judged by on the device (`Tolerance.bf16_ulps(1, atol=2**-126)` for a
+   bf16 result rounded once, as `eltwise`'s factories give); without it
+   the catalog refuses to judge the operator. An operator running one kernel
    reports its contract from `tolerance()` (`Elementwise` does this
    from `kernel()`); both, like `ops()`, are asked of the resolved
    operator, `op.resolved().tolerance()`. If a new C++ compute kernel is needed, add it
@@ -1034,7 +1040,7 @@ Full LLM inference example at `iron/applications/llama/`: `model.py`
 (Llama 3's layer and head on the NPU and in numpy, Llama 3.2 1B's shape,
 the tokenizer), `profiles/` (tunables), its test and README:
 
-- **Required files**: `model.safetensors`, `tokenizer.model` from Hugging Face
+- **Required files**: `config.json`, `model.safetensors`, `tokenizer.model` from Hugging Face
 - **Default location**: `/srv/llama3.2-1b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
 - **Additional deps**: `pip install -r requirements_examples.txt`
 - **Run**: `pytest tests/applications/llama/`, or
