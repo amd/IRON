@@ -140,7 +140,7 @@ def test_an_activation_is_judged_by_its_devices_row(request, device, cls):
     op = cls(size=2048).resolved(dev)
     kernel = op.kernel()
     row = kernel.contract_for(resolve_target_arch(dev))
-    assert op.gate() == row.tolerance
+    assert op.tolerance() == row.tolerance
     v = vectors(op)
     (x,), (y,) = v.inputs.values(), v.outputs.values()
     lines = x.reshape(-1, kernel.arg_shape(0)[0])

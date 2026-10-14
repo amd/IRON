@@ -164,10 +164,14 @@ reuse lint
        from it. An `Elementwise` operator has none of its own: its kernel's
        contract is the reference. A composite builds its reference from its
        kernels' contract references where it can, and says why where not.
+     - `tolerance()`, what every output is judged by, in tests, compare
+       mode and the tuner alike: the contract of the kernel it runs unless
+       it overrides it (a data mover returns `Tolerance.exact()`: any other
+       accepts a wrong permutation). A finish or a prologue carries it
+       through its steps' own.
      - `test = Testing(cases, ...)` on the operator class
-       (`iron/common/testing.py`): the shapes it is checked at on a device,
-       any `draw=` its inputs need, and a `tolerance=` where the contract
-       of the kernel it runs is not the gate. One module,
+       (`iron/common/testing.py`): the shapes it is checked at on a device
+       and any `draw=` its inputs need. One module,
        `iron/tests/operators/catalog.py`, runs every declaration against
        `reference()`. An operator whose device test is more than that (a
        composite compared step by step, a shipped binary against its own
@@ -414,12 +418,13 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    compute, round once; from the contract references of the kernels it
    runs where it can), and an `ops()` where one operation per output
    element is not its count (`2 * M * K * N` for GEMM, 0 for a data mover):
-   `run_test(..., record=record_property)` records throughput from it
-6. Declare how it is tested: `test = Testing(cases, tolerance=)` on the
-   operator class, from `iron.common.testing`
-   - leave `tolerance` out to be judged by the contract of the kernel the
-     operator runs (`Operator.tolerance()`); give an
-     `aie.utils.verify.Tolerance` where that is not the right gate
+   `run_test(..., record=record_property)` records throughput from it.
+   Override `tolerance()` where the contract of the kernel it runs is not
+   what its output is held to, returning an `aie.utils.verify.Tolerance`
+   (`Tolerance.exact()` for a data mover); an override that may have a
+   finish returns `super().tolerance()` there
+6. Declare how it is tested: `test = Testing(cases)` on the operator class,
+   from `iron.common.testing`
    - the cases are `Case(kwargs, extensive=...)`, plain kwarg dicts, and
      callables of the class returning them when they follow the device's
      width: `Sweep(...)` is the elementwise one (every column and channel

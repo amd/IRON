@@ -53,11 +53,11 @@ def test_operator(
     op = cls(**case.kwargs).resolved(DEVICE)
     draw = declaration.draw
     extra = draw(op) if callable(draw) else (draw or {})
-    tolerance = op.gate()
+    tolerance = op.tolerance()
     if tolerance is None:
         raise ValueError(
             f"{cls.__name__} runs no kernel with a tolerance contract; "
-            "declare Testing(tolerance=...)"
+            "override tolerance()"
         )
     run = run_test(
         op, vectors(op, **extra), tolerance=tolerance, record=record_property

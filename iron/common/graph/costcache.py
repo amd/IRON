@@ -238,7 +238,7 @@ class CostCache:
                     for k, v in dataclasses.asdict(g).items()
                 }
             )
-            for g in (default_op.gate(), op.gate())
+            for g in (default_op.resolved().tolerance(), op.resolved().tolerance())
         ]
         references = [type(op).reference]
         if references[0] is Elementwise.reference:

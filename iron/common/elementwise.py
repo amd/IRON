@@ -26,6 +26,7 @@ import dataclasses
 import functools
 import math
 from contextlib import nullcontext
+from collections.abc import Mapping
 from typing import ClassVar, Self
 
 import aie.dialects.arith as arith
@@ -37,7 +38,7 @@ from aie.iron.controlflow import if_, range_
 from aie.iron.kernel import ExternalFunction
 from aie.iron import kernels
 from aie.utils.compile.utils import resolve_target_arch
-from aie.utils.verify import Tolerance, round_to
+from aie.utils.verify import Tolerance, Verdict, round_to
 from ml_dtypes import bfloat16
 
 from .declare import (
@@ -402,10 +403,12 @@ class Finish(_Chains):
         """
         plain = dataclasses.replace(self.op, finish=(), finishes=())
         n = len(plain.inputs)
-        own = plain.gate() or Tolerance.default_for(self.out.dtype)
+        own = plain.resolved().tolerance() or Tolerance.default_for(self.out.dtype)
         dtype = self.out.dtype
         steps = [link.op.over(self.out.elements, self.line) for link in self.op.finish]
-        gates = [s.gate() or Tolerance.default_for(dtype) for s in steps]
+        gates = [
+            s.resolved().tolerance() or Tolerance.default_for(dtype) for s in steps
+        ]
 
         def bound(*inputs):
             x = np.asarray(plain.reference(*inputs[:n]))
@@ -498,14 +501,16 @@ class Prepare(_Chains):
         """
         plain = dataclasses.replace(self.op, prepare=(), prepares=())
         (out,) = plain.outputs
-        own = plain.gate() or Tolerance.default_for(out.dtype)
+        own = plain.resolved().tolerance() or Tolerance.default_for(out.dtype)
         n = len(plain.inputs)
         at = [b.name for b in plain.inputs].index(self.into.name)
         dtype = self.into.dtype
         steps = [
             link.op.over(self.into.elements, self.line) for link in self.op.prepare
         ]
-        gates = [s.gate() or Tolerance.default_for(dtype) for s in steps]
+        gates = [
+            s.resolved().tolerance() or Tolerance.default_for(dtype) for s in steps
+        ]
 
         def bound(*inputs):
             x = np.asarray(inputs[at])
@@ -697,7 +702,7 @@ class Elementwise(Operator):
 
     def tolerance(self) -> Tolerance | None:
         if self.finish:
-            return Finish(self).tolerance()
+            return super().tolerance()
         kernel = self.kernel()
         if kernel.contract is None:
             return None
@@ -710,6 +715,50 @@ class Elementwise(Operator):
 
     def reference(self, *inputs):
         """The kernel contract's reference, line by line: what the cores compute."""
+        op, lines, scalars = self._kernel_arguments(inputs)
+        (out,) = op.outputs
+        y = op.kernel().expected(
+            lines, scalars=scalars, arch=resolve_target_arch(op.dev)
+        )
+        y = np.asarray(y).astype(out.host_dtype, copy=False)
+        return y.reshape(out.host_shape, copy=False)
+
+    def judge(
+        self,
+        inputs: Mapping[str, np.ndarray],
+        written: Mapping[str, np.ndarray],
+        tolerance: Tolerance,
+        expected: Mapping[str, np.ndarray] | None = None,
+    ) -> dict[str, Verdict]:
+        """Its output held to its reference by its kernel's ``judge``, line
+        by line, where a core makes the one kernel call; as any operator's
+        where it applies a finish or a chain of its own.
+        """
+        op = self.resolved()
+        if op.finish or len(op.chain()) > 1:
+            return super().judge(inputs, written, tolerance, expected)
+        if expected is None:
+            expected = self.call_reference(inputs)
+        _, lines, scalars = self._kernel_arguments([inputs[b.name] for b in op.inputs])
+        (out,) = op.outputs
+        verdict = op.kernel().judge(
+            written[out.name],
+            expected[out.name],
+            calls=op.lines,
+            tolerance=tolerance,
+            inputs=lines,
+            scalars=scalars,
+            arch=resolve_target_arch(op.dev),
+        )
+        return {out.name: verdict}
+
+    def _kernel_arguments(self, inputs) -> tuple[Self, list[np.ndarray], tuple]:
+        """The resolved operator, ``inputs`` as the lines its cores take and
+        the scalars, as its kernel's contract takes them.
+
+        Raises:
+            NotImplementedError: The kernel declares no reference.
+        """
         op = self.resolved()
         kernel = op.kernel()
         arch = resolve_target_arch(op.dev)
@@ -719,24 +768,17 @@ class Elementwise(Operator):
                 f"{type(self).__name__}: its kernel declares no reference; "
                 f"define reference()"
             )
-        (out,) = op.outputs
-        n = len(inputs) - len(op.finish_inputs)
-        _, scalars = op._arguments(kernel, op.scalars(), n, 1)
+        _, scalars = op._arguments(kernel, op.scalars(), len(inputs), 1)
         # A held line is one row every call broadcasts against.
         lines = [
             x.reshape(1 if b.replicate else op.lines, -1, copy=False)
-            for b, x in zip(op.inputs, inputs[:n])
+            for b, x in zip(op.inputs, inputs)
         ]
-        y = kernel.expected(
+        return (
+            op,
             lines,
-            scalars=tuple(
-                scalars[i] for i in contract.reference_indices() if i in scalars
-            ),
-            arch=arch,
+            tuple(scalars[i] for i in contract.reference_indices() if i in scalars),
         )
-        y = np.asarray(y).astype(out.host_dtype, copy=False)
-        y = y.reshape(out.host_shape, copy=False)
-        return Finish(op).reference(y, *inputs[n:]) if op.finish else y
 
     def array(self) -> list:
         finish = Finish(self, self.cores)

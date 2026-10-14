@@ -409,6 +409,9 @@ class Gather(Operator):
         ids = rng.integers(0, self.table_rows, self.rows)
         return {"control": self.control_words(ids, addresses["table"])}
 
+    def tolerance(self) -> Tolerance:
+        return Tolerance.exact()
+
 
 class GatherWords(Operator):
     """A ``Gather``'s control words for ids the device made, in a graph.
@@ -560,6 +563,9 @@ class GatherWords(Operator):
             )
         return taps
 
+    def tolerance(self) -> Tolerance:
+        return Tolerance.exact()
+
 
 def _into_slot(slot, seq=128, num_channels=1) -> dict[str, Any]:
     """Kwargs scattering an (8, 64) block into slot ``slot`` of an (8, seq, 64)
@@ -624,7 +630,6 @@ class Copy(Operator):
     accept_views = (("src", "in_offset"), ("dst", "out_offset"))
     per_call_gather: ClassVar[type[Operator] | None] = Gather
 
-    # Copy moves data and computes nothing, so the gate is exact.
     test = Testing(
         [
             Case(dict(input_buffer_size=1024), id="contiguous"),
@@ -659,7 +664,6 @@ class Copy(Operator):
                 bench=True,
             ),
         ],
-        tolerance=Tolerance.exact(),
     )
 
     input_buffer_size: int = Param(repr=False)
@@ -960,6 +964,10 @@ class Copy(Operator):
         )
         out[scatter] = x.reshape(-1)[gather]
         return out if y is None else y
+
+    def tolerance(self) -> Tolerance:
+        # Copy moves data and computes nothing, so the gate is exact.
+        return Tolerance.exact()
 
     @staticmethod
     def _stacked(

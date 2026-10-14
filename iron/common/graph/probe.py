@@ -514,7 +514,10 @@ def judge(
         None where a gate is missing or exact, or `values` bound an extent
         short of its length: there only a bit-identical width is admitted.
     """
-    gates = {"the default's": default.gate(), "its own": op.gate()}
+    gates = {
+        "the default's": default.resolved().tolerance(),
+        "its own": op.resolved().tolerance(),
+    }
     if any(g is None or g.kind == "exact" for g in gates.values()):
         return None
     values = values or {}

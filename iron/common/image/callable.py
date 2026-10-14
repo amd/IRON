@@ -475,9 +475,6 @@ class StepCallable:
     version of a graph reads one copy.
     """
 
-    # compare cannot judge a range-relative tolerance element by element.
-    FALLBACK_TOLERANCE = Tolerance.relative(0.025, 1e-2)
-
     def __init__(self, seq, compare: bool = False, arena: ScratchArena | None = None):
         chain = seq._image
         if chain is not None:
@@ -660,13 +657,15 @@ class StepCallable:
         name, to its reference on the same inputs.
 
         Raises:
+            ValueError: Nothing bounds the step's output.
             RuntimeError: An output is outside the step's tolerance.
         """
-        tol = self.tolerance
+        tol = self.tolerance or step_op.resolved().tolerance()
         if tol is None:
-            tol = step_op.resolved().tolerance()
-            if tol is None or tol.range_frac is not None:
-                tol = self.FALLBACK_TOLERANCE
+            raise ValueError(
+                f"[compare step {index}] {type(step_op).__name__} declares no "
+                f"tolerance() to judge its output by"
+            )
         held = {spec.name: name for name, spec in zip(names, step_op.buffers)}
         written = {
             spec.name: buf.numpy()[at[spec.name] :][: spec.elements]

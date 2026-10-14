@@ -61,7 +61,6 @@ class Repeat(Operator):
                 bench=True,
             ),
         ],
-        tolerance=Tolerance.exact(),
     )
 
     rows: int = Param()
@@ -155,3 +154,6 @@ class Repeat(Operator):
         """Each row of the leading dimension repeated ``repeat`` times in place."""
         # A DMA pattern: no kernel, so no contract to take it from.
         return np.repeat(x, self.repeat, axis=0)
+
+    def tolerance(self) -> Tolerance:
+        return Tolerance.exact()

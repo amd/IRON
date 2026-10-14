@@ -81,7 +81,6 @@ class Emit(Operator):
             # operator no input takes past it is tracked on one of them.
             Case(dict(slots=32, carried=8), id="eight_carried", bench=True),
         ],
-        tolerance=Tolerance.exact(),
         draw=_program,
     )
 
@@ -157,3 +156,6 @@ class Emit(Operator):
 
     def reference(self, program, planes):
         return reference(program, planes, self.slots)
+
+    def tolerance(self) -> Tolerance:
+        return Tolerance.exact()

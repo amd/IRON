@@ -1573,19 +1573,19 @@ def test_a_verdict_is_keyed_by_its_gates_and_reference(npu2):
     narrow = gemm.with_tunables(tile_k=16)
     judged = CostCache.judged_key("k", "w", gemm, narrow)
     # A bound gate is named by its function, so another instance keys alike.
-    assert gemm.gate().kind == "bound"
+    assert gemm.resolved().tolerance().kind == "bound"
     again = GEMM(M=256, K=256, N=256)
     assert CostCache.judged_key("k", "w", again, again.with_tunables(tile_k=16)) == (
         judged
     )
     emulated = GEMM(M=256, K=256, N=256, emulate_bf16_mmul_with_bfp16=False)
-    assert emulated.gate() != gemm.gate()
+    assert emulated.resolved().tolerance() != gemm.resolved().tolerance()
     assert CostCache.judged_key("k", "w", emulated, narrow) != judged
     add = ElementwiseAdd(size=SIZE, tile_size=TILE)
     assert CostCache.judged_key("k", "w", gemm, add) != judged
     # Elementwise operators share one reference(), their kernel contracts' own.
     mul = ElementwiseMul(size=SIZE, tile_size=TILE)
-    assert add.gate() == mul.gate()
+    assert add.resolved().tolerance() == mul.resolved().tolerance()
     assert CostCache.judged_key("k", "w", add, add) != CostCache.judged_key(
         "k", "w", mul, mul
     )
@@ -1629,7 +1629,9 @@ def _gemm_judged(npu2):
     default = GEMM(M=256, K=256, N=256)
     narrow = default.with_tunables(tile_k=16)
     v = vectors(default)
-    bounds = [op.gate().bound(*v.inputs.values()) for op in (default, narrow)]
+    bounds = [
+        op.resolved().tolerance().bound(*v.inputs.values()) for op in (default, narrow)
+    ]
     return default, narrow, v, bounds
 
 

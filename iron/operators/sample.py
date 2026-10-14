@@ -102,7 +102,6 @@ class Sample(Operator):
             Case(dict(vocab=4096, cores=2, chunk=256), id="two_cores"),
             Case(dict(vocab=128256, cores=4), id="llama", bench=True),
         ],
-        tolerance=Tolerance.exact(),
         draw=_logits,
     )
 
@@ -309,3 +308,6 @@ class Sample(Operator):
         tokens = np.array(tokens, dtype=np.int32).reshape(-1)
         tokens[at] = token
         return tokens, np.array([token], dtype=np.int32)
+
+    def tolerance(self) -> Tolerance:
+        return Tolerance.exact()

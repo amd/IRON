@@ -48,7 +48,7 @@ def test_a_residual_rides_the_matrix_into_a_folded_matvec(M, K):
     (verdict,) = step.op.judge(
         {b.name: t for b, t in zip(step.op.inputs, (w, x, r))},
         {out: got},
-        step.op.gate(),
+        step.op.resolved().tolerance(),
     ).values()
     assert verdict, verdict.detail
     unfolded = np.array(plain(x, r).numpy()[:M])
@@ -57,7 +57,7 @@ def test_a_residual_rides_the_matrix_into_a_folded_matvec(M, K):
 
 def test_each_batch_of_a_matvec_takes_its_own_residual():
     op = GEMV(M=256, K=128, num_batches=2).fold(ElementwiseAdd(size=2 * 256), 0)
-    run = run_test(op, vectors(op), tolerance=op.gate())
+    run = run_test(op, vectors(op), tolerance=op.resolved().tolerance())
     assert not run.errors, run.errors
 
 

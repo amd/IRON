@@ -92,7 +92,7 @@ class RoPE(Operator):
     - method_type: 0 = two-halves (HF), 1 = interleaved/Llama
     """
 
-    test = Testing(_cases, tolerance=Tolerance.relative(0.05), draw=_angles)
+    test = Testing(_cases, draw=_angles)
 
     rows: int = Param()
     cols: int = Param()
@@ -254,3 +254,6 @@ class RoPE(Operator):
             two_halves=self.method_type == 0,
         )
         return y.reshape(x.shape, copy=False)
+
+    def tolerance(self) -> Tolerance:
+        return Tolerance.relative(0.05)

@@ -234,7 +234,6 @@ class ResampleTaps(Operator):
             # A patch's 16 outputs to a chunk, as Resample reads them.
             Case(dict(in_size=3024, out_size=672, words=356, slots=16)),
         ],
-        tolerance=Tolerance.exact(),
     )
 
     in_size: int = Param()
@@ -352,6 +351,9 @@ class ResampleTaps(Operator):
             weights[:, :taps_window] = t.weights[first : first + n]
             slots[:n, 2:] = weights.view(np.int32)
         return table
+
+    def tolerance(self) -> Tolerance:
+        return Tolerance.exact()
 
     def sequence(self, rt):
         """Chunk `c` from core `c % cores`, the round-robin order the cores
@@ -872,7 +874,6 @@ class Resample(Operator):
                 chunks=op.height_chunks,
             ).reference(),
         ),
-        tolerance=Tolerance.exact(),
     )
 
     height: int = Param()
@@ -1091,6 +1092,9 @@ class Resample(Operator):
             return written
         patches[: bands * pad] = written
         return patches
+
+    def tolerance(self) -> Tolerance:
+        return Tolerance.exact()
 
     def sequence(self, rt):
         """The image, then both tables down one stream, and each core's
@@ -1319,7 +1323,6 @@ class PatchPositions(Operator):
             Case(dict(rows=256, out_height=48, out_width=48)),
             Case(dict(rows=2048, out_height=480, out_width=1056, cores=8)),
         ],
-        tolerance=Tolerance.exact(),
     )
 
     rows: int = Param()
@@ -1384,6 +1387,9 @@ class PatchPositions(Operator):
             position_ids[0, : o.size], position_ids[1, : o.size] = x, P + y
             order[: o.size] = y * pad + x
         return xy, position_ids, order
+
+    def tolerance(self) -> Tolerance:
+        return Tolerance.exact()
 
     def sequence(self, rt):
         """`xy` and `order` as the core writes them; `position_ids` a block's

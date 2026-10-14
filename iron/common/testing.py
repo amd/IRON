@@ -14,7 +14,6 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable
 
 from aie.iron.device import Device
-from aie.utils.verify import Tolerance
 
 __all__ = ["Case", "Sweep", "Testing"]
 
@@ -53,8 +52,6 @@ class Testing:
     Attributes:
         cases: ``Case``s, keyword dicts, or callables of the class and the
             device returning them (a ``Sweep``).
-        tolerance: The gate, else the kernel's contract. A data mover states
-            ``Tolerance.exact``: any other accepts a wrong permutation.
         draw: Extra ``vectors`` arguments, or a callable of the operator
             returning them, for inputs with preconditions.
     """
@@ -62,7 +59,6 @@ class Testing:
     __test__ = False  # pytest: a declaration, not a test class
 
     cases: Iterable[Case | dict | _Cases] | _Cases
-    tolerance: Tolerance | None = None
     draw: dict[str, Any] | Callable[[Any], dict[str, Any]] | None = None
 
     def resolve(self, cls: type, dev: Device) -> list[Case]:

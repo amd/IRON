@@ -914,8 +914,8 @@ class GEMM(Operator):
         return 2 * self.M * self.K * self.N
 
     def reference(self, A, B):
-        """``C = A @ B`` from the stored inputs, then its finish: ``B`` is
-        ``(N, K)`` when ``b_col_maj``, and ``C`` ``(N, M)`` when ``c_col_maj``.
+        """``C = A @ B`` from the stored inputs: ``B`` is ``(N, K)`` when
+        ``b_col_maj``, and ``C`` ``(N, M)`` when ``c_col_maj``.
         """
         # Not linalg.mm's contract: that is one tile's product, and mm_ref's
         # float64 would double the host copy of the largest weight a graph
@@ -926,8 +926,7 @@ class GEMM(Operator):
         b = (B.T if self.b_col_maj else B).astype(np.float32)
         # C in its stored order, contiguous: a consumer reads it as laid out.
         C = np.matmul(b.T, a.T) if self.c_col_maj else np.matmul(a, b)
-        C = C.astype(self.dtype_out)
-        return Finish(self.resolved()).reference(C) if self.finish else C
+        return C.astype(self.dtype_out)
 
     def tolerance(self) -> Tolerance:
         """Each element of C within the roundings the design makes, in
@@ -945,7 +944,7 @@ class GEMM(Operator):
         steps' own gates.
         """
         if self.finish:
-            return Finish(self).tolerance()
+            return super().tolerance()
         if np.issubdtype(np.dtype(self.dtype_in), np.integer):
             return Tolerance.exact(note="integer matmul")
         units = 4.0 if self.emulate_bf16_mmul_with_bfp16 else 2.0

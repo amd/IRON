@@ -526,5 +526,5 @@ def test_one_design_reconfigures_after_another_image():
             run()
             out = run.get_buffer("out").numpy()[:_ADD_RELU_SIZE]
             expected = op.reference(a)
-            verdict = verify_buffer(out, "out", expected, op.gate())
+            verdict = verify_buffer(out, "out", expected, op.resolved().tolerance())
             assert verdict, f"rep {rep}, {name}: out: {verdict.detail}"

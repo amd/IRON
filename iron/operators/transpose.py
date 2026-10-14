@@ -104,9 +104,7 @@ class Transpose(Operator):
     ObjectFifos, so B batched transposes cost ONE dispatch instead of B.
     """
 
-    # A transpose is a permutation. Any tolerance here also accepts some class
-    # of wrong permutation, so gate it exactly.
-    test = Testing(_cases, tolerance=Tolerance.exact())
+    test = Testing(_cases)
 
     M: int = Param()
     N: int = Param()
@@ -312,3 +310,8 @@ class Transpose(Operator):
         # Not datamovement.transpose's contract: the kernel transposes each
         # subtile in place, and the DMA places the subtiles.
         return np.swapaxes(x, -2, -1)
+
+    def tolerance(self) -> Tolerance:
+        # A transpose is a permutation. Any tolerance here also accepts some class
+        # of wrong permutation, so gate it exactly.
+        return Tolerance.exact()

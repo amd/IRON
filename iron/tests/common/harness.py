@@ -6,6 +6,7 @@ the device test's halves, host-side."""
 
 import numpy as np
 import pytest
+from aie.utils.compile.utils import resolve_target_arch
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
@@ -44,11 +45,11 @@ def test_vectors_takes_a_given_array_a_shape_or_a_centred_draw():
         vectors(op, z=given)
 
 
-def test_gate_is_the_declared_tolerance_else_the_contract():
-    rope = RoPE(rows=8, cols=64)
-    assert rope.gate() is RoPE.test.tolerance
-    relu = ReLU(size=64, num_aie_columns=1, tile_size=64)
-    assert relu.gate() == relu.resolved().tolerance() is not None
+def test_tolerance_is_the_operators_own_else_its_kernels_contract():
+    assert RoPE(rows=8, cols=64).resolved().tolerance() == Tolerance.relative(0.05)
+    relu = ReLU(size=64, num_aie_columns=1, tile_size=64).resolved()
+    contract = relu.kernel().contract_for(resolve_target_arch(relu.dev))
+    assert relu.tolerance() == contract.tolerance is not None
 
 
 def test_verify_buffer_returns_the_verdict_of_compare():

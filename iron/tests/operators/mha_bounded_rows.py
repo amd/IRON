@@ -94,6 +94,7 @@ def test_rows_past_the_valid_length_are_zero(
     )
     attend = Attend()
     net = attend.compile(q=q.shape, k=k.shape, v=v.shape)
+    (mha,) = (s.op for s in net.traced.steps if isinstance(s.op, MHA))
     for rows, n in calls:
         o = np.asarray(net(q, k, v, rows=rows, n=n), dtype=np.float32)
         o = o.reshape(seq, heads, d)
@@ -106,7 +107,7 @@ def test_rows_past_the_valid_length_are_zero(
             o[:n],
             "O",
             expected[:n],
-            tolerance=MHA.test.tolerance,
+            tolerance=mha.resolved().tolerance(),
         )
         assert verdict, f"{rows=} {n=}: the valid elements differ: {verdict.detail}"
 
@@ -144,9 +145,10 @@ def test_a_chunk_attends_over_the_cache_before_it(full_elf):
     net = chunk.compile(q=(CHUNK, HEADS, D), k=k.shape, v=v.shape, full_elf=full_elf)
     # The whole prompt at once: each chunk's rows of it are what the chunk
     # computes.
-    whole = MHA(
+    mha = MHA(
         num_heads=HEADS, num_KV_heads=KV_HEADS, seq_len=CACHE, heads_interleaved=True
-    ).reference(q, k, v)
+    )
+    whole = mha.reference(q, k, v)
     whole = np.asarray(whole, dtype=np.float32).reshape(CACHE, HEADS, D)
     for c, rows in ((0, 13), (1, CHUNK), (2, 100), (3, CHUNK)):
         start = c * CHUNK
@@ -157,7 +159,7 @@ def test_a_chunk_attends_over_the_cache_before_it(full_elf):
             o[:rows],
             "O",
             whole[start : start + rows],
-            tolerance=MHA.test.tolerance,
+            tolerance=mha.resolved().tolerance(),
         )
         assert verdict, f"{c=} {rows=}: the valid elements differ: {verdict.detail}"
 

@@ -62,7 +62,6 @@ class Merge(Operator):
                 np.random.default_rng(44).integers(0, 2**20, op.rows),
             ).astype(np.int32)
         ),
-        tolerance=Tolerance.exact(),
     )
 
     rows: int = Param()
@@ -95,6 +94,9 @@ class Merge(Operator):
             places = np.flatnonzero(ids == token)
             merge[places] = at + np.arange(places.size)
         return merge
+
+    def tolerance(self) -> Tolerance:
+        return Tolerance.exact()
 
     def array(self) -> list:
         kernel = ExternalFunction(

@@ -615,16 +615,11 @@ class GEMV(Operator):
     def ops(self) -> int:
         return 2 * self.M * self.K * self.num_batches
 
-    def reference(self, A, B, *extras):
-        """``C = A @ B``, B through its prologue and C through its finish,
-        ``extras`` their steps' other inputs in turn: one product per batch
-        when ``A`` is ``(batches, M, K)`` and ``B`` ``(batches, K)``, each
-        matrix of ``A`` serving ``repeat`` consecutive batches.
+    def reference(self, A, B):
+        """``C = A @ B``: one product per batch when ``A`` is
+        ``(batches, M, K)`` and ``B`` ``(batches, K)``, each matrix of ``A``
+        serving ``repeat`` consecutive batches.
         """
-        op = self.resolved()
-        prologue = len(op.prepare_inputs)
-        if op.prepare:
-            B = Prepare(op).reference(B, *extras[:prologue])
         if self.repeat > 1:
             A = np.repeat(A.reshape(-1, *A.shape[-2:]), self.repeat, axis=0)
         # Not linalg.mv's contract: that is one tile's product, and mv_ref's
@@ -635,12 +630,8 @@ class GEMV(Operator):
         a, b = A.astype(np.float32), B.astype(np.float32)
         if A.ndim == 3:
             b = b.reshape(A.shape[0], A.shape[2], 1)
-            C = np.matmul(a, b).reshape(A.shape[0], A.shape[1]).astype(A.dtype)
-        else:
-            C = (a @ b.reshape(A.shape[-1])).astype(A.dtype)
-        if op.finish:
-            return Finish(op).reference(C, *extras[prologue:])
-        return C
+            return np.matmul(a, b).reshape(A.shape[0], A.shape[1]).astype(A.dtype)
+        return (a @ b.reshape(A.shape[-1])).astype(A.dtype)
 
     def tolerance(self) -> Tolerance:
         """The gate GEMV's sweeps hold: C accumulates in f32 and rounds
@@ -649,8 +640,6 @@ class GEMV(Operator):
         Tighter than linalg.mv's contract, the C++ matmul harness's 0.05
         and 0.5.
         """
-        if self.finish:
-            return Finish(self).tolerance()
-        if self.prepare:
-            return Prepare(self).tolerance()
+        if self.finish or self.prepare:
+            return super().tolerance()
         return Tolerance.relative(0.04, 1e-3, note="f32 accumulation, rounded once")

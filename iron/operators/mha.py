@@ -306,11 +306,7 @@ class MHA(Operator):
     lanes, each ``pv_width`` columns of the head.
     """
 
-    # Several kernels and no one contract to judge by: 4% or 0.15, with
-    # 0.5% of the outputs allowed past it.
-    test = Testing(
-        _cases, tolerance=Tolerance(rtol=0.04, atol=0.15, max_mismatch_frac=0.005)
-    )
+    test = Testing(_cases)
 
     num_heads: int = Param()
     # The K/V head count: fewer than num_heads is grouped-query attention;
@@ -1338,6 +1334,11 @@ class MHA(Operator):
         if self.heads_interleaved:
             return np.ascontiguousarray(np.swapaxes(out, 0, 1))
         return out
+
+    def tolerance(self) -> Tolerance:
+        # Several kernels and no one contract to judge by: 4% or 0.15, with
+        # 0.5% of the outputs allowed past it.
+        return Tolerance(rtol=0.04, atol=0.15, max_mismatch_frac=0.005)
 
     # -- the runtime sequence --------------------------------------------------
 

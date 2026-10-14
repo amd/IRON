@@ -302,23 +302,21 @@ class Operator(metaclass=_OperatorMeta):
         return type(self).array(_ArrayView(self))
 
     def tolerance(self) -> Tolerance | None:
-        """The contract tolerance of the kernel this array runs; ``None`` if none applies."""
-        return None
+        """What each output of the resolved operator is judged by; None where
+        nothing bounds it, which compare mode refuses.
 
-    def gate(self) -> Tolerance | None:
-        """What this operator's output is judged by: its ``Testing``
-        tolerance where it declares one, else its resolved contract's. A
-        declared tolerance is the plain operator's, so a finish or a
-        prologue is judged by ``tolerance()``, which composes it.
+        An override returns the operator's own; this one carries it through a
+        finish or a prologue, so an override that may have one returns
+        ``super().tolerance()`` there.
         """
-        declared = type(self).test
-        if (
-            declared is not None
-            and declared.tolerance is not None
-            and not (self.finish or self.prepare)
-        ):
-            return declared.tolerance
-        return self.resolved().tolerance()
+        # elementwise.py builds on this module.
+        from ..elementwise import Finish, Prepare
+
+        if self.finish:
+            return Finish(self).tolerance()
+        if self.prepare:
+            return Prepare(self).tolerance()
+        return None
 
     def ops(self) -> int:
         """The arithmetic operations one call performs, for its throughput."""
@@ -595,9 +593,10 @@ class Operator(metaclass=_OperatorMeta):
     ) -> dict[str, np.ndarray]:
         """Run `reference` on buffers named as this operator declares them.
 
-        The inputs are its positional arguments, in declaration order. An
-        output it names a parameter after (Copy's `y`) is given to it, to
-        write in place what it touches.
+        The inputs are its positional arguments, in declaration order; a
+        prologue and a finish run around it on the host, given their steps'
+        other inputs. An output it names a parameter after (Copy's `y`) is
+        given to it, to write in place what it touches.
 
         Args:
             inputs: Every input, an `inout` buffer among them, by buffer name.
@@ -626,12 +625,25 @@ class Operator(metaclass=_OperatorMeta):
         unknown = set(outputs) - {b.name for b in self.outputs}
         if unknown:
             raise ValueError(f"{name} has no output {sorted(unknown)}")
+        # elementwise.py builds on this module.
+        from ..elementwise import Finish, Prepare
+
+        args = [inputs[n] for n in declared]
+        own = len(args) - len(self.prepare_inputs) - len(self.finish_inputs)
+        prologue = args[own : own + len(self.prepare_inputs)]
+        finishing = args[own + len(self.prepare_inputs) :]
+        args = args[:own]
+        if self.prepare:
+            at = next(i for i, b in enumerate(self.inputs) if b.prepare)
+            args[at] = Prepare(self.resolved()).reference(args[at], *prologue)
         named = inspect.signature(self.reference).parameters
         result = self.reference(
-            *(inputs[n] for n in declared),
+            *args,
             **{k: v for k, v in outputs.items() if k in named},
             **{k: v for k, v in (values or {}).items() if k in named and v is not None},
         )
+        if self.finish:
+            result = Finish(self.resolved()).reference(result, *finishing)
         results = result if isinstance(result, tuple) else (result,)
         written = [b.name for b in self.outputs]
         if len(results) != len(written) or any(r is None for r in results):
