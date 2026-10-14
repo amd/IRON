@@ -298,7 +298,7 @@ def test_weight_reads_fit_proj(geometry, layer_type, npu2):
     """
     g = geometry
     op = DecodeLayer(geometry=g, layer_type=layer_type).resolved()
-    module = OperatorDesign(op, "xclbin").compilable().generate_mlir()
+    module = OperatorDesign(op, full_elf=False).compilable().generate_mlir()
     end = 0
     for offset, length in sorted(_proj_reads(module)):
         assert offset == end, f"the reads skip or reread proj at {offset}"

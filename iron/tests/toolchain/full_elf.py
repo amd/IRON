@@ -46,18 +46,18 @@ def build_elf(graph, **shapes):
     """Build ``graph``'s full ELF at ``shapes``, as the application does;
     return the version.
     """
-    version = graph.compile(image=iron.ELF, **shapes)
+    version = graph.compile(full_elf=True, **shapes)
     artifacts = version.artifacts
     elf = Path(artifacts.image)
     assert elf.exists() and elf.stat().st_size > 0, f"no ELF at {elf}"
-    assert artifacts.kind == "elf"
+    assert artifacts.full_elf
     return version
 
 
 def test_swiglu_graph_compiles_to_a_full_elf():
     fn, E = swiglu()
-    net = fn.compile(dev=DEVICES["npu2"](), image=iron.ELF, x=(1, E))
-    assert net.plan.image == "elf" and net.plan.dispatch == "fused"
+    net = fn.compile(dev=DEVICES["npu2"](), full_elf=True, x=(1, E))
+    assert net.plan.full_elf
     assert net.image is not None
     elf = Path(net.image)
     assert elf.suffix == ".elf" and elf.stat().st_size > 0
@@ -126,7 +126,7 @@ def test_a_scratch_arena_past_a_bank_links_as_its_banks():
         [(add, "x", "w", "t"), (add, "t", "w", "out")],
         input_args=["x"],
         output_args=["out"],
-        dispatch="fused",
+        full_elf=True,
         # Rebased past the weight, at the next bank: the third.
         buffer_offsets={"t": BANK + 64},
     )
@@ -202,7 +202,7 @@ def test_a_cached_build_leaves_no_kernel_for_the_next_graph_to_collide_with():
 
     def build(b_col_maj):
         return Project(b_col_maj).compile(
-            dev=DEVICES["npu2"](), image=iron.ELF, x=(M, K)
+            dev=DEVICES["npu2"](), full_elf=True, x=(M, K)
         )
 
     build(False)

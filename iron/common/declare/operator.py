@@ -491,7 +491,7 @@ class Operator(metaclass=_OperatorMeta):
         """The operator whose xclbin this one runs when it runs alone."""
         return self
 
-    def exported_design(self, image: str):
+    def exported_design(self):
         """The design another tool exports for this operator; ``None`` derives it."""
         return None
 

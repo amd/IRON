@@ -9,7 +9,7 @@ embedding table gathered on the device, in a full ELF or an xclbin. Both
 draw the next token on the device and carry it and ``position + 1`` into
 the next call.
 Both attend with ``MHA``. Where the decode step is not a full ELF (NPU1, or
-``boundaries=each_step``) there is no device loop: the host starts each step
+``full_elf=False``) there is no device loop: the host starts each step
 on the token the last one drew.
 """
 
@@ -192,7 +192,7 @@ class CausalLM(iron.Graph):
         self,
         release=None,
         tuner: JointNarrowing | None = None,
-        boundaries: str | None = None,
+        full_elf: bool | None = None,
         dev=None,
     ) -> "CausalLM":
         """Compile and load both versions before the first call, so the arena is made once.
@@ -200,23 +200,23 @@ class CausalLM(iron.Graph):
         Args:
             release: Given each piece of each weight once it is on the device.
             tuner: Folds, narrows and packs each version's designs by cost.
-            boundaries: Both versions' packaging.
+            full_elf: Both versions' packaging (``Graph.compile``).
             dev: The device both versions are compiled for, else the current
                 one.
         """
         if dev is None:
             dev = aie_utils.ensure_current_device()
         decode = self.compile(
-            dev=dev, coresident=tuner, boundaries=boundaries, **self.shapes(1)
+            dev=dev, coresident=tuner, full_elf=full_elf, **self.shapes(1)
         )
-        if decode.plan.image != iron.ELF:
+        if not decode.plan.full_elf:
             logger.info("%s", decode.plan.report("decode"))
         feeds = decode if decode.emit is not None else None
         prompt = self.compile(
             dev=dev,
             feeds=feeds,
             coresident=tuner,
-            boundaries=boundaries,
+            full_elf=full_elf,
             **self.shapes(self.config.prefill_chunk),
         )
         for version in (decode, prompt):

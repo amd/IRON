@@ -45,9 +45,7 @@ kernel library (`aie_kernels/`) and finds the Peano wheel by itself.
 Compiled artifacts (`.xclbin`, `.bin`, `.o`, the full ELF) live in
 mlir-aie's JIT cache, keyed on the content that produced them:
 `~/.npu/cache/<hash>/`, or wherever `NPU_CACHE_HOME` points. Nothing is
-written to the working directory, and `compile(record="disk")` (on a graph
-or an `OperatorImage`) writes the `Artifacts` record of an image beside it
-in the cache.
+written to the working directory.
 
 ### Environment Variables
 
@@ -157,7 +155,7 @@ reuse lint
        with `via=` (each lane's shim, an mlir-aie `Tile`) and `channel=`. Two hooks change what is built: `configuration()`, the
        operator whose xclbin this one runs (itself by default; flm's GEMM
        returns its shape-free half, so one xclbin serves every shape), and
-       `exported_design(image)`, a callable returning the module (an
+       `exported_design()`, a callable returning the module (an
        `ir.Module` or its text) for a design another tool exports
        (stream-dse's SwiGLU groups) in place of the derived one.
      - The operator's `reference(*inputs)` is the CPU reference the tests
@@ -210,7 +208,7 @@ reuse lint
      `plan`/`split`/`round_robin`); `ShippedRuntime`, its subclass against
      a shipped image (`Lock.set` releases its parameter block)
    - `graph/`: graphs (`iron.Graph`, `iron.state`) and
-     `compile(dev=, boundaries=, image=)`
+     `compile(dev=, full_elf=)`
    - `image/`: what a graph lowers onto: `OperatorSequence`, the buffer
      allocator (`LiveRange`, `Pool`, `ArenaPlan`), `Fusion` (the designs of
      a sequence as one module), `FusedImage`/`XclbinChain` (the full ELF
@@ -291,7 +289,7 @@ xclbin (NPU binary) + insts.bin (instruction sequence)
 **No build context.** An operator takes the device that is current and
 nothing else. Everything else is a fixed path (`aie.utils.config.aie_kernels_dir()`), an
 environment choice (`MLIR_AIE_KERNEL_SOURCES`), or a keyword on the build
-itself (`compile(record="disk")`). On a host without an NPU, bind one to
+itself (`compile(full_elf=False)`). On a host without an NPU, bind one to
 resolve and compile against: `aie_utils.set_current_device(from_name("npu2",
 n_cols=8))` (`aie.iron.device.from_name`); the test tree's `npu2` fixture
 does that and restores the previous device. Kernels are built with Peano; IRON has
@@ -531,9 +529,10 @@ example (a test at the small shape loads
 graph still passes is one the profile could not have given.
 
 Operators with equal `array_key()` share one array; with equal
-`design_key()` they are one build. `compile(dev=, boundaries=,
-image=, **shapes)` derives the image (a fused ELF on NPU2, per-step
-xclbins with `boundaries=iron.each_step`) and `verbose=True` prints why.
+`design_key()` they are one build. `compile(dev=, full_elf=, **shapes)`
+packages it as mlir-aie's `full_elf` says: one full ELF, or with `False`
+an xclbin per step; left `None`, a full ELF on NPU2 and xclbins on NPU1,
+and `verbose=True` prints why.
 It links the image (`version.image`) and stops
 there: the runtime that loads it is made on the first call, so a host with
 the toolchain and no NPU can compile ahead of time.
@@ -563,9 +562,10 @@ code before relying on a line here; it is the authority.
   `resolve(dev)`, then the `Auto()` default. Identity (`array_key`,
   `design_key`) is taken after resolution, so two calls that resolve alike
   share a build.
-- **Packaging is derived** (`iron/common/image/packaging.py`, reported with
-  `verbose=True`): a `DispatchTime` value, NPU1, or more than one boundary
-  each force xclbin; otherwise the image is one full ELF. Full-ELF streams
+- **Packaging is one switch, mlir-aie's `full_elf`**, derived where it is
+  left `None` (`iron/common/image/packaging.py`, reported with
+  `verbose=True`): a `DispatchTime` value or NPU1 forces xclbin; otherwise
+  the image is one full ELF. Full-ELF streams
   have DDR address folding off, so a sequence cannot move between images.
 - **Length-free extents.** `Extent(field)` and `x[:n]` bounds are carried
   through reshape and transpose; under a bound a buffer is split
@@ -615,7 +615,7 @@ code before relying on a line here; it is the authority.
 ### Not built, or limited
 
 - A fused sequence in an xclbin (several steps in one dispatch) is refused;
-  so are modules. NPU1 therefore needs `boundaries=iron.each_step`.
+  so are modules. An xclbin image is therefore one dispatch per step.
 - A prompt chunk is one dispatch, and its attention grows with the
   context (about 1.2 s plus 0.12 s per 2048 rows before it; MHA streams
   every K and V block for each Q block, valid or not). amdxdna's watchdog
@@ -883,7 +883,7 @@ profiles. The library is four modules:
   reference repeats; it widens a layer's weights to float32 as the pass
   reaches them, and holds the embedding in float32, so it is built to check
   with); `Model`, a graph
-  whose versions `load(tuner, boundaries)` compiles before the first call,
+  whose versions `load(tuner, full_elf)` compiles before the first call,
   in the packaging asked for; and `Runner` and `main`, a decoder's
   checkpoint, tokenizer, model and oracle, and the command line. A model's
   runner names its `config`, `model`, `open_tokenizer` and `bos`,

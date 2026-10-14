@@ -70,7 +70,7 @@ def test_fused_build_does_not_poison_the_standalone_mlir():
     seq = (
         Adds(_operator(), 1)
         .trace(x=(SIZE,), w=(SIZE,))
-        .sequence("poisoning_probe", dispatch="fused")
+        .sequence("poisoning_probe", full_elf=True)
     )
     seq.compile()
     fused = set(re.findall(r'link_with\s*=\s*"([^"]+)"', Fusion(seq).text()))

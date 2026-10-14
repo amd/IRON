@@ -5,8 +5,8 @@
 
 A full-ELF run costs ``D0`` (dispatch), a configure per device entered
 (``base`` plus each member's load), the reset configure ``R`` when the
-entries are odd, and each step's ``t_step``. An xclbin chain (a table's
-dispatch ``"separate"``) costs ``F`` per call, each step's ``c``, its own
+entries are odd, and each step's ``t_step``. An xclbin chain (a table
+whose ``full_elf`` is false) costs ``F`` per call, each step's ``c``, its own
 dispatch included, and the incoming design's load ``L`` at every switch,
 counted around the call: a chain of one design never switches.
 
@@ -324,8 +324,8 @@ class Standalone:
     seeded random data.
 
     Args:
-        dispatch: How the runlist is packaged (``narrowing.DISPATCHES``): one
-            full ELF, or an xclbin per design dispatched step by step.
+        full_elf: How the runlist is packaged: one full ELF, else an xclbin
+            per design dispatched step by step.
         distinct: Every step runs on buffers of its own, as a graph's do, so
             no step finds its inputs in a SoC cache.
         values: Per operator, each per-call value by name: the tuner cannot
@@ -346,7 +346,7 @@ class Standalone:
         seed: int = 0,
         distinct: bool = True,
         inputs: Mapping[Operator, Mapping[str, np.ndarray]] | None = None,
-        dispatch: str = "fused",
+        full_elf: bool = True,
         load: bool = True,
     ):
         self.steps = list(runlist)
@@ -369,10 +369,10 @@ class Standalone:
             [(op, *self._names(self._slot[k], op)) for k, op in enumerate(self.steps)],
             in_names,
             out_names,
-            dispatch=dispatch,
+            full_elf=full_elf,
             coresident=coresident,
             # A design run alone must still pay its entry: alone = D0 + base + load + R.
-            reconfigure=dispatch == "fused",
+            reconfigure=full_elf,
         ).compile()
         self.callable = self.sequence.get_callable()
         rng = np.random.default_rng(seed)
@@ -401,7 +401,7 @@ class Standalone:
             v.symbol: np.int32(self._value(op, self._values[op], v))
             for op in ops
             for v in op.values
-            if artifacts.kind == "xclbin" or v.symbol in artifacts.parameters
+            if not artifacts.full_elf or v.symbol in artifacts.parameters
         }
         if load:
             self.load()
@@ -741,7 +741,7 @@ def measure_steps(
     default = found[0]
     partners = [twins[0]] + [default if t is None else t for t in twins[1:]]
     entries = [
-        None if cache is None else cache.key(v.resolved, values, inputs, table.dispatch)
+        None if cache is None else cache.key(v.resolved, values, inputs, table.full_elf)
         for v in found
     ]
     besides = [
@@ -752,7 +752,7 @@ def measure_steps(
                 (
                     entries[0]
                     if p is default
-                    else cache.key(p.resolved, values, inputs, table.dispatch)
+                    else cache.key(p.resolved, values, inputs, table.full_elf)
                 ),
                 e,
             )
@@ -808,7 +808,7 @@ def measure_steps(
                     [d.resolved],
                     values={d.resolved: values or {}},
                     inputs={d.resolved: inputs or {}},
-                    dispatch=table.dispatch,
+                    full_elf=table.full_elf,
                     load=False,
                 )
                 many = Standalone(
@@ -817,7 +817,7 @@ def measure_steps(
                     values={d.resolved: values or {}},
                     distinct=distinct,
                     inputs={d.resolved: inputs or {}},
-                    dispatch=table.dispatch,
+                    full_elf=table.full_elf,
                     load=False,
                 )
             except RuntimeError as e:
@@ -888,7 +888,7 @@ def measure_steps(
         for v, e in zip(found, entries)
         if v is default or known[v.key].output != reference
     ]
-    accurate = judged(*zip(*judging), table.dispatch, values, inputs, cache, remeasure)
+    accurate = judged(*zip(*judging), table.full_elf, values, inputs, cache, remeasure)
     # A width is priced at its partner's figure plus their difference in the
     # run that timed both, so a drift between that run and the partner's own
     # does not reach it.
@@ -927,14 +927,14 @@ def measure_steps(
 def judged(
     found: Sequence[Variant],
     entries: Sequence[str | None],
-    dispatch: str,
+    full_elf: bool,
     values: Mapping[str, int] | None = None,
     inputs: Mapping[str, np.ndarray] | None = None,
     cache: CostCache | None = None,
     remeasure: bool = False,
 ) -> set[str]:
     """The settings of ``found`` that ``judge`` finds within their gates,
-    each run once at ``values`` on ``inputs``, packaged as ``dispatch``:
+    each run once at ``values`` on ``inputs``, packaged as ``full_elf`` says:
     ``found[0]`` the default, each other one whose output is not the
     default's; none where the default's own gate refuses it.
 
@@ -959,7 +959,7 @@ def judged(
                 [v.resolved],
                 values={v.resolved: values or {}},
                 inputs={v.resolved: inputs or {}},
-                dispatch=dispatch,
+                full_elf=full_elf,
             )
             run.digest()
             verdict = judge(
@@ -1037,10 +1037,10 @@ def measure_points(
                 entries[v.key, label] = kept[v.key, label] = None
                 continue
             entries[v.key, label] = cache.key(
-                v.resolved, points[label][1], inputs, table.dispatch
+                v.resolved, points[label][1], inputs, table.full_elf
             )
             kept[v.key, label] = cache.point_key(
-                cache.key(v.resolved, values, inputs, table.dispatch),
+                cache.key(v.resolved, values, inputs, table.full_elf),
                 entries[v.key, label],
             )
             held = None if remeasure else cache.get(kept[v.key, label], Shift)
@@ -1060,7 +1060,7 @@ def measure_points(
                 values={v.resolved: at},
                 distinct=distinct,
                 inputs={v.resolved: inputs or {}},
-                dispatch=table.dispatch,
+                full_elf=table.full_elf,
             )
             for v in batch
             for at in [values or {}] + [points[label][1] for label in labels]
@@ -1103,7 +1103,7 @@ def measure_points(
         accurate = judged(
             judging,
             [entries[v.key, label] for v in judging],
-            table.dispatch,
+            table.full_elf,
             at,
             inputs,
             cache,
@@ -1246,21 +1246,20 @@ def calibrate(
     """
     ka, kb = cost_key(a), cost_key(b)
     tag = f"{ka}_{kb}"
-    fused = table.dispatch == "fused"
     runlists = {
         f"alt{pairs}": [a, b] * pairs,
         f"grp{pairs}": [a] * pairs + [b] * pairs,
         "a": [a],
         "b": [b],
     }
-    if fused:
+    if table.full_elf:
         runlists |= {"pack": [a, b], f"a{pairs}": [a] * pairs, f"b{pairs}": [b] * pairs}
     runs = [
         Standalone(
             f"cal_{name}_{tag}",
             runlist,
             coresident=[[a, b]] if name == "pack" else (),
-            dispatch=table.dispatch,
+            full_elf=table.full_elf,
             values=values,
         )
         for name, runlist in runlists.items()
@@ -1272,7 +1271,7 @@ def calibrate(
     alt, grp, alone_a, alone_b = times[:4]
     switch = (alt - grp) / (2 * pairs - 2)  # (E(a) + E(b)) / 2
     reset = base = 0.0
-    if fused:
+    if table.full_elf:
         pack, many_a, many_b = times[4:]
         ta = (many_a - alone_a) / (pairs - 1)
         tb = (many_b - alone_b) / (pairs - 1)
@@ -1359,10 +1358,10 @@ def measure_loads(
     table.measures_at(mode)
     entries = [None] * len(found)
     if cache is not None:
-        after = cache.key(reference.resolved, dispatch=table.dispatch)
+        after = cache.key(reference.resolved, full_elf=table.full_elf)
         entries = [
             cache.paired_key(
-                after, cache.key(v.resolved, values, inputs, table.dispatch)
+                after, cache.key(v.resolved, values, inputs, table.full_elf)
             )
             for v in found
         ]
@@ -1393,7 +1392,7 @@ def measure_loads(
                         values={v.resolved: values or {}},
                         distinct=nbytes <= DISTINCT_BYTES,
                         inputs={v.resolved: inputs or {}},
-                        dispatch=table.dispatch,
+                        full_elf=table.full_elf,
                     )
                 )
         times = time_interleaved([r.callable for r in runs], timing, log=log)
@@ -1695,13 +1694,13 @@ class Designs:
         """The packs a full ELF's ``versions`` tuned by ``table`` take that
         it lacks, each the setting keys of one device.
         """
-        if table.dispatch != "fused":
+        if not table.full_elf:
             return []
         tuner = JointNarrowing(table)
         taken = {
             table.pack_name(device): device
             for traced in self.versions
-            for device in tuner.tune(traced, self.dev, table.dispatch).devices
+            for device in tuner.tune(traced, self.dev, table.full_elf).devices
         }
         return [device for name, device in taken.items() if name not in table.packs]
 
@@ -1906,8 +1905,8 @@ def measure_graph(
             log(f"calibration {names}: in the table")
             continue
         entry = cache.pair_key(
-            cache.key(a.resolved, op_values[a.key], dispatch=table.dispatch),
-            cache.key(b.resolved, op_values[b.key], dispatch=table.dispatch),
+            cache.key(a.resolved, op_values[a.key], full_elf=table.full_elf),
+            cache.key(b.resolved, op_values[b.key], full_elf=table.full_elf),
         )
         cal = None if remeasure else cache.get(entry, Calibration)
         if cal is None:
@@ -2032,7 +2031,7 @@ def measure_packs(
         RuntimeError: A pack's entry is measured below zero by more than its
             noise.
     """
-    if table.dispatch != "fused":
+    if not table.full_elf:
         raise ValueError(f"{table.path} prices an xclbin chain: it packs no designs")
     mode = pmode()
     if cache is not None and cache.mode != mode:
@@ -2076,14 +2075,14 @@ def measure_packs(
                     reference.resolved,
                     values.get(reference.resolved),
                     inputs.get(reference.resolved),
-                    table.dispatch,
+                    table.full_elf,
                 ),
                 [
                     cache.key(
                         v.resolved,
                         values[v.resolved],
                         inputs[v.resolved],
-                        table.dispatch,
+                        table.full_elf,
                     )
                     for v, _, _ in members
                 ],
@@ -2108,7 +2107,7 @@ def measure_packs(
                     values=values,
                     distinct=nbytes <= DISTINCT_BYTES,
                     inputs=inputs,
-                    dispatch=table.dispatch,
+                    full_elf=table.full_elf,
                 )
                 for n, runlist in enumerate(runlists)
             ]

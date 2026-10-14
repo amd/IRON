@@ -191,11 +191,7 @@ class Dataflow:
         """
         tuning = None if self.version is None else self.version.tuning
         # An xclbin chain loads each design alone: it has no shared device.
-        if (
-            tuning is None
-            or not tuning.devices
-            or self.version.plan.dispatch != "fused"
-        ):
+        if tuning is None or not tuning.devices or not self.version.plan.full_elf:
             return {}
         keys = self.keys()
         return {
@@ -332,9 +328,10 @@ class Dataflow:
         lines = [html.escape(self.title)]
         if self.version is not None:
             plan = self.version.plan
+            image = "one full ELF" if plan.full_elf else "an xclbin per step"
             lines.append(
-                f'<font point-size="11" color="{INK_2}">image {plan.image}, '
-                f"dispatch {plan.dispatch}: {html.escape('; '.join(plan.reasons))}</font>"
+                f'<font point-size="11" color="{INK_2}">{image}: '
+                f"{html.escape('; '.join(plan.reasons))}</font>"
             )
             tuning = self.version.tuning
             if tuning is not None:
@@ -660,7 +657,7 @@ class Floorplan:
         op = version.traced.steps[step].op
         self.title = title or f"{type(op).__name__} (step {step})"
         self.color = FAMILIES[FAMILY.get(type(op).__name__, "other")]
-        if artifacts.kind == "elf":
+        if artifacts.full_elf:
             path = artifacts.lowered_mlir
             name = OperatorDesign(op.resolved()).name
         else:

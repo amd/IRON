@@ -85,7 +85,7 @@ def _feedback_sequence(name, layer_norm=None):
         input_args=input_args,
         output_args=output_args,
         feedback_args=["next"],
-        dispatch="fused",
+        full_elf=True,
     )
     return seq, gather
 
@@ -228,7 +228,7 @@ def test_feedback_argument_only_when_declared():
             input_args=["a"],
             output_args=["b"] if feedback else ["b", "next"],
             feedback_args=feedback,
-            dispatch="fused",
+            full_elf=True,
         )
         seq.prepare()
         # The main device's runtime sequence is the last one in the module.

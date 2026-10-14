@@ -399,16 +399,16 @@ class Model(iron.Graph):
         raise NotImplementedError(f"{type(self).__name__} defines no shapes()")
 
     def load(
-        self, tuner: JointNarrowing | None = None, boundaries: str | None = None
+        self, tuner: JointNarrowing | None = None, full_elf: bool | None = None
     ) -> "Model":
         """Compile every version.
 
         Args:
             tuner: Narrows and packs each version's designs by cost.
-            boundaries: Each version's packaging; NPU1 derives its own.
+            full_elf: Each version's packaging (``Graph.compile``).
         """
         for shapes in self.shapes():
-            self.compile(coresident=tuner, boundaries=boundaries, **shapes)
+            self.compile(coresident=tuner, full_elf=full_elf, **shapes)
         return self
 
 
@@ -568,14 +568,14 @@ class Runner:
     def npu(
         self,
         cost_table: Path | None = None,
-        boundaries: str | None = None,
+        full_elf: bool | None = None,
         kinds: NarrowingKinds | None = None,
     ) -> "CausalLM":
         """The model compiled and loaded, weights uploaded. With a
         ``cost_table`` (``tune``) each version's designs are folded,
         narrowed and packed by it, restricted to ``kinds`` if given
         (``NarrowingKinds()``, every kind, if not: today's plan);
-        ``boundaries`` are its decode step's (``CausalLM.load``).
+        ``full_elf`` is both versions' packaging (``CausalLM.load``).
         """
         model = self.model(self.config, self.weights)
         tuner = (
@@ -583,7 +583,7 @@ class Runner:
             if cost_table is None
             else JointNarrowing(CostTable(cost_table), kinds=kinds or NarrowingKinds())
         )
-        return model.load(self.checkpoint.release, tuner, boundaries)
+        return model.load(self.checkpoint.release, tuner, full_elf)
 
     def cpu(self) -> Oracle:
         """The model's oracle over the same weights, widened a layer at a time."""
@@ -671,10 +671,11 @@ def main(runner: type[Runner], description: str):
         "the profile gives them",
     )
     parser.add_argument(
-        "--each-step",
-        action="store_true",
-        help="dispatch every step of each version on its own from one xclbin, "
-        "as NPU1 does",
+        "--full-elf",
+        action=argparse.BooleanOptionalAction,
+        help="package each version as one full ELF, or with --no-full-elf "
+        "dispatch every step on its own from one xclbin, as NPU1 does "
+        "(default: a full ELF where the device runs one)",
     )
     args = parser.parse_args()
 
@@ -691,7 +692,7 @@ def main(runner: type[Runner], description: str):
             f"a {len(tokens)}-token prompt and {args.num_tokens} more exceed "
             f"{run.config.max_seq_len} rows"
         )
-    model = run.npu(args.cost_table, iron.each_step if args.each_step else None)
+    model = run.npu(args.cost_table, args.full_elf)
     for name, tuning in model.tunings.items():
         print(f"[Tuning] {name}:\n" + tuning.report(), flush=True)
 

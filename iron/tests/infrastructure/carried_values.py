@@ -26,7 +26,7 @@ def test_a_graph_walks_a_linked_list_through_its_carried_values():
     successor = np.random.default_rng(0).permutation(N).astype(np.int32)
     walk = Walk(successor)
     net = walk.compile()
-    assert net.plan.image == "elf", "only the full ELF carries a scratchpad"
+    assert net.plan.full_elf, "only the full ELF carries a scratchpad"
 
     node, steps = 0, 0
     for step in range(2 * N):

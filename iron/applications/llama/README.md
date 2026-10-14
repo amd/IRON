@@ -79,10 +79,10 @@ top-k must be at most 64.
   text is the same, token for token)
 - `--cost-table TABLE`: narrow and pack the decode step's and prompt
   chunk's designs by a measured cost table (below)
-- `--each-step`: dispatch every step of a decode step on its own from one
-  xclbin, the form NPU1 runs (below)
+- `--no-full-elf`: dispatch every step of each version on its own from one
+  xclbin, the form NPU1 runs (below); `--full-elf` asks for one full ELF
 
-## NPU1, and `--each-step`
+## NPU1, and `--no-full-elf`
 
 NPU1 has no full-ELF dispatch, so there both versions are xclbins whose
 steps are dispatched one at a time: there is no device loop. Each step
@@ -90,7 +90,7 @@ still draws its token on the NPU, and the host reads that token alone and
 dispatches the next step on it. A prompt chunk gathers its tokens' rows of
 the embedding table on the NPU too, and attends with MHA placed on NPU1's
 four columns as on NPU2's eight (`MHA.COLUMNS`), so a prompt runs a chunk
-at a time there too. `--each-step` builds the same form on NPU2, which is
+at a time there too. `--no-full-elf` builds the same form on NPU2, which is
 how `test_llama_3_2_1b_each_step_accuracy` checks it there.
 
 ## Tuning

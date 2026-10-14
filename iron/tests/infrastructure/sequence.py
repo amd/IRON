@@ -9,15 +9,18 @@ sequencing infrastructure itself (dispatch-mode selection, fused-MLIR
 generation, cross-mode output parity and the compare-mode self-check) rather
 than any single operator.
 
-The ``OperatorSequence`` dispatch modes covered here are:
+The ``OperatorSequence`` packagings and modes covered here are:
 
-* ``"auto"``     – picks ``"fused"`` on NPU2 (Strix) and ``"separate"`` on
-                   NPU1 (Phoenix).
-* ``"fused"``    – single-ELF dispatch (``aiex.configure`` / ``aiex.run``),
-                   NPU2 only.
-* ``"separate"`` – one xclbin per operator, chained (works on all platforms).
-* ``"compare"``  – ``"separate"`` NPU path plus a per-step CPU-reference check.
-* ``"reference"``– pure-CPU evaluation via each operator's ``reference()``.
+* ``full_elf=None``     – a full ELF on NPU2 (Strix), an xclbin chain on
+                          NPU1 (Phoenix).
+* ``full_elf=True``     – single-ELF dispatch (``aiex.configure`` /
+                          ``aiex.run``), NPU2 only.
+* ``full_elf=False``    – one xclbin per operator, chained (works on all
+                          platforms).
+* ``dispatch="compare"``   – the xclbin chain plus a per-step CPU-reference
+                             check.
+* ``dispatch="reference"`` – pure-CPU evaluation via each operator's
+                             ``reference()``.
 """
 
 import logging
@@ -34,7 +37,7 @@ from ml_dtypes import bfloat16
 from iron.common import Scratchpad, graph
 from iron.common.harness import verify_buffer
 from iron.common.image import Fusion, OperatorSequence
-from iron.common.image.packaging import full_elf
+from iron.common.image.packaging import dispatches_full_elf
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.magnitude import Magnitude
 from iron.operators.relu import ReLU
@@ -42,6 +45,12 @@ from iron.operators.sample import Sample
 from iron.operators.tanh import Tanh
 
 RELATIVE = Tolerance.relative(0.04, 1e-6)
+
+PACKAGINGS = {
+    "separate": dict(full_elf=False),
+    "fused": dict(full_elf=True),
+    "compare": dict(dispatch="compare"),
+}
 
 
 def _centered(rng, n) -> Any:
@@ -71,7 +80,7 @@ _ADD_RELU_TILE = 1024
 _ADD_RELU_COLS = 4
 
 
-def _build_add_relu_sequence(dispatch, name, input_args=("a", "b")):
+def _build_add_relu_sequence(name, input_args=("a", "b"), **packaging):
     """Out = relu(a + b), as a 2-step OperatorSequence."""
     add = ElementwiseAdd(
         size=_ADD_RELU_SIZE,
@@ -92,34 +101,33 @@ def _build_add_relu_sequence(dispatch, name, input_args=("a", "b")):
         ],
         input_args=list(input_args),
         output_args=["out"],
-        dispatch=dispatch,
+        **packaging,
     )
 
 
 # ---------------------------------------------------------------------------
-# 1. Auto dispatch selects the platform default and runs correctly.
+# 1. The derived packaging is the platform default and runs correctly.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
 @pytest.mark.parametrize("size", [_ADD_RELU_SIZE])
 def test_auto_dispatch_selects_platform_default(size):
-    """``dispatch="auto"`` must resolve to the full-ELF mode on Strix and to
-    the separate-xclbin mode on Phoenix, and produce the correct result on
-    whichever platform the test runs on.
+    """``full_elf=None`` must resolve to a full ELF on Strix and to the
+    xclbin chain on Phoenix, and produce the correct result on whichever
+    platform the test runs on.
     """
     rng = np.random.default_rng(0)
     a = _centered(rng, size)
     b = _centered(rng, size)
 
-    seq = _build_add_relu_sequence("auto", "infra_auto_add_relu")
+    seq = _build_add_relu_sequence("infra_auto_add_relu")
     seq.compile()
 
-    expected_mode = "fused" if full_elf(aie_utils.get_current_device()) else "separate"
-    assert seq.mode == expected_mode, (
-        f"auto dispatch resolved to {seq.mode!r}, expected {expected_mode!r} "
-        "on this device"
-    )
+    expected = dispatches_full_elf(aie_utils.get_current_device())
+    assert (
+        seq.full_elf == expected
+    ), f"full_elf resolved to {seq.full_elf}, expected {expected} on this device"
 
     run = seq.get_callable()
     _set_input(run, "a", a)
@@ -147,7 +155,7 @@ def test_fused_mlir_contains_reconfiguration(sequence, npu2):
     so it needs no device: it builds for NPU2, which the full fused dispatch
     itself requires.
     """
-    seq = _build_add_relu_sequence("fused", "infra_fused_mlir")
+    seq = _build_add_relu_sequence("infra_fused_mlir", full_elf=True)
 
     # Generate the fused MLIR directly, bypassing the ELF backend (which is
     # NPU2-only). This mirrors what FusedImage.link() feeds to the compiler.
@@ -177,9 +185,9 @@ def test_fused_mlir_contains_reconfiguration(sequence, npu2):
 # ---------------------------------------------------------------------------
 
 
-def _run_add_relu(dispatch, a, b, name):
+def _run_add_relu(a, b, name, **packaging):
     """Out = relu(a + b), returned as a host bf16 tensor."""
-    seq = _build_add_relu_sequence(dispatch, name)
+    seq = _build_add_relu_sequence(name, **packaging)
     seq.compile()
     run = seq.get_callable()
     _set_input(run, "a", a)
@@ -189,26 +197,28 @@ def _run_add_relu(dispatch, a, b, name):
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-@pytest.mark.parametrize("dispatch", ["separate", "fused", "compare"])
+@pytest.mark.parametrize("dispatch", PACKAGINGS)
 def test_dispatch_modes_bit_identical(dispatch):
     """Add -> relu must yield byte-for-byte identical output across every NPU
     dispatch mode: the compiled kernels are the same, so only the dispatch
     mechanism differs. The ``separate`` mode is the baseline (it runs on every
     platform).
     """
-    if dispatch == "fused" and not full_elf(aie_utils.get_current_device()):
+    if dispatch == "fused" and not dispatches_full_elf(aie_utils.get_current_device()):
         pytest.skip("fused dispatch needs a full ELF, which this device lacks")
 
     rng = np.random.default_rng(0)
     a = _centered(rng, _ADD_RELU_SIZE)
     b = _centered(rng, _ADD_RELU_SIZE)
 
-    baseline = _run_add_relu("separate", a, b, "infra_addrelu_parity_separate")
-    out = _run_add_relu(dispatch, a, b, f"infra_addrelu_parity_{dispatch}")
+    baseline = _run_add_relu(a, b, "infra_addrelu_parity_separate", full_elf=False)
+    out = _run_add_relu(
+        a, b, f"infra_addrelu_parity_{dispatch}", **PACKAGINGS[dispatch]
+    )
 
     assert np.array_equal(
         out, baseline
-    ), f"dispatch={dispatch!r} output is not bit-identical to the separate baseline"
+    ), f"{PACKAGINGS[dispatch]} output is not bit-identical to the separate baseline"
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +314,7 @@ def test_compare_mode_judges_each_step_by_its_tolerance(exact):
         dispatch="compare",
     )
     seq.compile()
-    assert seq.mode == "compare"
+    assert seq.dispatch == "compare" and seq.full_elf is False
 
     run: Any = seq.get_callable()
     if exact:
@@ -374,12 +384,12 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch):
     the next dispatch, and reads of a non-output buffer after a dispatch see
     what the NPU wrote there, with no explicit ``to()`` from the caller.
     """
-    if dispatch == "fused" and not full_elf(aie_utils.get_current_device()):
+    if dispatch == "fused" and not dispatches_full_elf(aie_utils.get_current_device()):
         pytest.skip("fused dispatch needs a full ELF, which this device lacks")
 
     # b is not an input, so it is held like a weight (in scratch, when fused).
     seq = _build_add_relu_sequence(
-        dispatch, f"infra_add_weight_relu_{dispatch}", input_args=["a"]
+        f"infra_add_weight_relu_{dispatch}", input_args=["a"], **PACKAGINGS[dispatch]
     )
     seq.compile()
     run = seq.get_callable()
@@ -413,7 +423,7 @@ def _build_one_design_sequence(op, name, reconfigure=False):
         runlist=[(op, "a", "out")],
         input_args=["a"],
         output_args=["out"],
-        dispatch="fused",
+        full_elf=True,
         reconfigure=reconfigure,
     )
 
@@ -461,7 +471,7 @@ def test_reconfigure_needs_a_full_elf():
             runlist=[(_relu(), "a", "out")],
             input_args=["a"],
             output_args=["out"],
-            dispatch="separate",
+            full_elf=False,
             reconfigure=True,
         )
 
@@ -471,7 +481,7 @@ def test_one_design_is_configured_once():
     """A fused sequence of one design builds no expanded load, and every
     dispatch after the first still computes on its new inputs.
     """
-    if not full_elf(aie_utils.get_current_device()):
+    if not dispatches_full_elf(aie_utils.get_current_device()):
         pytest.skip("fused dispatch needs a full ELF, which this device lacks")
     seq = _build_one_design_sequence(_relu(), "infra_fused_relu_once").compile()
     assert not _expanded_pdis(seq)
@@ -492,7 +502,7 @@ def test_one_design_reconfigures_after_another_image():
     """Two one-design images dispatched in turn each configure the array
     again after the other ran, so each still computes its own operator.
     """
-    if not full_elf(aie_utils.get_current_device()):
+    if not dispatches_full_elf(aie_utils.get_current_device()):
         pytest.skip("fused dispatch needs a full ELF, which this device lacks")
     tanh = Tanh(
         size=_ADD_RELU_SIZE,

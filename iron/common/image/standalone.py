@@ -30,14 +30,10 @@ class OperatorImage:
         self._artifacts: Artifacts | None = None
         self._kernel: NPUKernel | None = None
 
-    def compile(self, record: str = "memory") -> Self:
-        """Build the image, once. ``record="disk"`` also writes its
-        ``Artifacts`` record beside it; by default it is kept in memory.
-        """
+    def compile(self) -> Self:
+        """Build the image, once."""
         if self._artifacts is None:
             self._artifacts = self._build()
-            if record == "disk":
-                self._artifacts.dump()
         return self
 
     @property
@@ -62,12 +58,12 @@ class OperatorImage:
             # A shipped image: only the stream is built, against the download.
             config = op
             image = op.external.fetch()
-            own = OperatorDesign(op, "xclbin").compile(insts_only=True)
+            own = OperatorDesign(op, full_elf=False).compile(insts_only=True)
             entry = own.get_cache_entry()
             kernel_name = op.external.kernel_name
         else:
             config = op.configuration()
-            built = OperatorDesign(config, "xclbin").compile()
+            built = OperatorDesign(config, full_elf=False).compile()
             entry = built.get_cache_entry()
             assert entry is not None and entry.xclbin is not None
             image = entry.xclbin
@@ -77,7 +73,7 @@ class OperatorImage:
             own = (
                 built
                 if config is op
-                else OperatorDesign(op, "xclbin").compile(insts_only=not per_call)
+                else OperatorDesign(op, full_elf=False).compile(insts_only=not per_call)
             )
             kernel_name = "MLIR_AIE"
         stream = own.get_cache_entry()
@@ -92,7 +88,7 @@ class OperatorImage:
         )
         buffers = op.buffers
         return Artifacts(
-            kind="xclbin",
+            full_elf=False,
             image=image,
             insts=stream.insts,
             entry=stream,

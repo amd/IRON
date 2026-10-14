@@ -48,14 +48,16 @@ def _operator():
     return ElementwiseAdd(size=SIZE, tile_size=TILE)
 
 
-def _graph(name, **kwargs):
+PACKAGINGS = {"reference": dict(dispatch="reference"), "fused": dict(full_elf=True)}
+
+
+def _graph(name, packaging="reference"):
     """X + w + w + w, traced from dataflow, as the sequence it lowers to."""
     traced = Adds(_operator(), 3).trace(x=(SIZE,), w=(SIZE,))
-    kwargs.setdefault("dispatch", "reference")
-    return traced, traced.sequence(name, **kwargs)
+    return traced, traced.sequence(name, **PACKAGINGS[packaging])
 
 
-def _hand_written(name, **kwargs):
+def _hand_written(name, packaging="reference"):
     """The same computation, with the buffer names written out."""
     add = _operator()
     runlist = [
@@ -68,7 +70,7 @@ def _hand_written(name, **kwargs):
         runlist,
         input_args=["x", "w"],
         output_args=["out"],
-        **{"dispatch": "reference", **kwargs},
+        **PACKAGINGS[packaging],
     )
 
 
@@ -107,7 +109,7 @@ def _run(sequence, inputs):
 
 
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize("dispatch", ["reference", "fused"])
+@pytest.mark.parametrize("dispatch", PACKAGINGS)
 @pytest.mark.parametrize("precompile", [True, False], ids=["aot", "jit"])
 def test_a_graph_matches_the_hand_written_runlist_numerically(precompile, dispatch):
     """The load-bearing claim, both ahead-of-time and just-in-time."""
@@ -115,8 +117,8 @@ def test_a_graph_matches_the_hand_written_runlist_numerically(precompile, dispat
     x = rng.random(SIZE, dtype=np.float32)
     w = rng.random(SIZE, dtype=np.float32)
 
-    _, graph_seq = _graph(f"graph_num_{precompile}_{dispatch}", dispatch=dispatch)
-    hand = _hand_written(f"hand_num_{precompile}_{dispatch}", dispatch=dispatch)
+    _, graph_seq = _graph(f"graph_num_{precompile}_{dispatch}", dispatch)
+    hand = _hand_written(f"hand_num_{precompile}_{dispatch}", dispatch)
     if precompile:
         graph_seq.compile()
         hand.compile()
@@ -140,7 +142,7 @@ def test_a_packed_graph_computes_what_the_temporal_one_does():
     outputs, configures = [], []
     for coresident in (None, AdjacentPacking()):
         version = Chain(SIZE, TILE, columns=2).compile(
-            image=iron.ELF, coresident=coresident, a=(SIZE,), b=(SIZE,)
+            full_elf=True, coresident=coresident, a=(SIZE,), b=(SIZE,)
         )
         text = Fusion(version.sequence).text()
         configures.append(len(re.findall(r"aiex\.configure", text)))
@@ -168,13 +170,13 @@ def test_designs_of_one_array_run_on_one_configure():
     a, b = ((rng.random(SIZE) * 4 - 2).astype(bfloat16) for _ in range(2))
     c, d = ((rng.random(2 * SIZE) * 4 - 2).astype(bfloat16) for _ in range(2))
     shapes = dict(a=(SIZE,), b=(SIZE,), c=(2 * SIZE,), d=(2 * SIZE,))
-    shared = TwoExtents().compile(image=iron.ELF, **shapes)
+    shared = TwoExtents().compile(full_elf=True, **shapes)
     text = Fusion(shared.sequence).text()
     # Against small, large, small and the reset, were each design its own device.
     assert len(re.findall(r"aiex\.configure", text)) == 2
     assert len(re.findall(r"aiex\.run", text)) == 3
 
-    alone = TwoExtents().compile(image=iron.XCLBIN, boundaries=iron.each_step, **shapes)
+    alone = TwoExtents().compile(full_elf=False, **shapes)
     tolerance = shared.sequence.runlist[0][0].resolved().tolerance()
     want = TwoExtents().reference(a, b, c, d)
     runs = [
@@ -213,7 +215,7 @@ def test_each_design_of_one_array_runs_on_its_own_values():
         (rng.standard_normal((m, K)) / np.sqrt(K)).astype(bfloat16) for m in (512, 2048)
     )
     graph = TwoProjections(narrow, wide)
-    net = graph.compile(image=iron.ELF, x=(K,), y=(K,))
+    net = graph.compile(full_elf=True, x=(K,), y=(K,))
     text = Fusion(net.sequence).text()
     assert (
         len(re.findall(r"aiex\.configure", text)) == 2
@@ -241,7 +243,7 @@ class TwoMerges(iron.Graph):
 def test_each_merge_of_one_array_runs_on_its_own_count():
     rng = np.random.default_rng(0)
     graph = TwoMerges()
-    net = graph.compile(image=iron.ELF, ids=((64,), np.int32), more=((192,), np.int32))
+    net = graph.compile(full_elf=True, ids=((64,), np.int32), more=((192,), np.int32))
     text = Fusion(net.sequence).text()
     assert re.findall(r"aiex\.configure @(\w+)", text)[1:] == ["reset_device"]
     assert len(re.findall(r"aiex\.run", text)) == 2
@@ -274,7 +276,7 @@ class TwoTables(iron.Graph):
 @pytest.mark.supported_devices("npu2")
 def test_each_table_of_one_array_runs_on_its_own_sizes():
     graph = TwoTables()
-    net = graph.compile(image=iron.ELF)
+    net = graph.compile(full_elf=True)
     text = Fusion(net.sequence).text()
     assert re.findall(r"aiex\.configure @(\w+)", text)[1:] == ["reset_device"]
     assert len(re.findall(r"aiex\.run", text)) == 2
@@ -308,7 +310,7 @@ class TwoPositions(iron.Graph):
 @pytest.mark.supported_devices("npu2")
 def test_each_position_table_of_one_array_runs_on_its_own_rows():
     graph = TwoPositions()
-    net = graph.compile(image=iron.ELF)
+    net = graph.compile(full_elf=True)
     text = Fusion(net.sequence).text()
     assert re.findall(r"aiex\.configure @(\w+)", text)[1:] == ["reset_device"]
     assert len(re.findall(r"aiex\.run", text)) == 2
@@ -349,7 +351,7 @@ def test_each_resize_of_one_array_runs_on_its_own_sizes():
     ]
     rgb = np.random.default_rng(0).integers(0, 256, (37, 4096), dtype=np.uint8)
     net = graph.compile(
-        image=iron.ELF,
+        full_elf=True,
         **{
             name: (t.shape, t.dtype.type)
             for name, t in zip(("rgb", "taps_w", "taps_h", "wide_w"), (rgb, *taps))
@@ -379,7 +381,7 @@ def test_a_chain_of_more_designs_than_a_context_configures_runs():
             return tuple(Copy(x[: SIZE * (i + 1)]) for i in range(n))
 
     graph = Prefixes()
-    graph.compile(x=(SIZE * n,), boundaries=iron.each_step)
+    graph.compile(x=(SIZE * n,), full_elf=False)
     x = np.arange(SIZE * n).astype(bfloat16)
     for i, got in enumerate(graph(x)):
         np.testing.assert_array_equal(np.asarray(got), x[: SIZE * (i + 1)])

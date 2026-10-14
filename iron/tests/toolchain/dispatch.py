@@ -9,7 +9,7 @@ scalars of the kernels that use them: an offset use adds the scalar to the trans
 the kernel's stream is regenerated per call by the host library aiecc's
 ``--get-npu-cpp`` output compiles to; a core-read use is a resident the
 sequence writes from the scalar before the barrier (the dialect takes the
-RTP write's value as an operand). Both are built here at ``each_step`` on
+RTP write's value as an operand). Both are built here as xclbins on
 both devices; running them on a device is the other half.
 """
 
@@ -50,11 +50,10 @@ def test_values_become_dispatch_time_kernels_at_each_step(device):
     g, shape = _graph()
     net = g.compile(
         dev=device,
-        boundaries=iron.each_step,
-        image=iron.XCLBIN,
+        full_elf=False,
         x=shape,
     )
-    assert net.plan.image == "xclbin" and net.plan.dispatch == "separate"
+    assert not net.plan.full_elf
     kinds = {name: text for name, _, text in net.plan.values}
     assert (
         "dispatch-time scalar" in kinds["n"] and "dispatch-time scalar" in kinds["pos"]
@@ -96,12 +95,12 @@ def test_a_per_call_size_over_one_block_builds_at_each_step(npu2):
 
     net = Decode().compile(
         dev=npu2,
-        boundaries=iron.each_step,
+        full_elf=False,
         q=(1, heads, d),
         k=(kv_heads, cache, d),
         v=(kv_heads, cache, d),
     )
-    assert net.plan.image == "xclbin"
+    assert not net.plan.full_elf
     assert net.image is not None and Path(net.image).stat().st_size > 0
 
 
@@ -113,6 +112,6 @@ def test_npu1_compiles_each_step_unasked():
     previous = aie_utils.get_current_device(probe_runtime=False)
     net = g.compile(dev=DEVICES["npu1"](), x=shape)
     assert aie_utils.get_current_device(probe_runtime=False) is previous
-    assert net.plan.image == "xclbin" and net.plan.dispatch == "separate"
-    assert net.plan.reasons[-1] == "boundaries=each_step: the xclbin form that is built"
+    assert not net.plan.full_elf
+    assert net.plan.reasons == ["npu1 (AIE2) has no full-ELF dispatch"]
     assert net.image is not None and Path(net.image).stat().st_size > 0

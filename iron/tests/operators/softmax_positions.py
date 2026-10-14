@@ -53,25 +53,23 @@ from iron.operators.softmax import Softmax
     ],
 )
 @pytest.mark.parametrize(
-    "boundaries",
+    "full_elf",
     [
         pytest.param(None, id="full_elf", marks=pytest.mark.supported_devices("npu2")),
         pytest.param(
-            iron.each_step,
+            False,
             id="xclbin",
             marks=pytest.mark.supported_devices("npu1", "npu2"),
         ),
     ],
 )
-def test_rows_are_masked_to_the_per_call_length(
-    boundaries, rows, seq, block, positions
-):
+def test_rows_are_masked_to_the_per_call_length(full_elf, rows, seq, block, positions):
     class Attend(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
             return Softmax(x[:, :n])
 
     attend = Attend()
-    net = attend.compile(x=(rows, seq), boundaries=boundaries)
+    net = attend.compile(x=(rows, seq), full_elf=full_elf)
     (step,) = net.traced.steps
     assert step.op.resolved().block == block
     op = Softmax(rows=rows, cols=seq, block=block)

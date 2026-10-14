@@ -19,7 +19,7 @@ from aie.utils.compile.jit.compilabledesign import CompilableDesign
 
 from ..design import OperatorDesign
 from .fusion import Fusion
-from .packaging import full_elf
+from .packaging import dispatches_full_elf
 
 
 class FusedImage:
@@ -49,11 +49,10 @@ class FusedImage:
         if design is None:
             dev = aie_utils.ensure_current_device()
             if dev is None:
-                raise RuntimeError("dispatch='fused' links for a device; none is bound")
-            if not full_elf(dev):
+                raise RuntimeError("a full ELF links for a device; none is bound")
+            if not dispatches_full_elf(dev):
                 raise RuntimeError(
-                    f"dispatch='fused' needs a full ELF, which {dev.name} "
-                    f"({dev.arch}) does not dispatch"
+                    f"{dev.name} ({dev.arch}) does not dispatch a full ELF"
                 )
             fusion = self.fusion = Fusion(seq)
             flags = [
@@ -134,7 +133,7 @@ class XclbinChain:
                 # The predecessor is part of what this image is, and reaches
                 # the key through the flags.
                 flags.append(f"--xclbin-input={self.image.resolve()}")
-            design = OperatorDesign(op, "xclbin").compile(aiecc_flags=flags)
+            design = OperatorDesign(op, full_elf=False).compile(aiecc_flags=flags)
             entry = design.get_cache_entry()
             assert entry is not None and entry.xclbin is not None
             self.image = Path(entry.xclbin)

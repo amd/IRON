@@ -6,9 +6,8 @@
 A graph's cost table is filled by a module built on this one: it takes
 ``parser``, adds the arguments its calls follow from, builds each version's
 calls (``probe.Call.admitted``) and passes them to ``measure`` with the
-directory its tables are in: one per device, ``costs_<device>.json`` for
-the packaging the device runs, ``costs_<device>_<dispatch>.json`` for
-another. A model's is ``iron.lm.tune`` (``python -m iron.lm.tune
+directory its tables are in: one per device, ``costs_<device>.json``,
+measured under the packaging the device runs. A model's is ``iron.lm.tune`` (``python -m iron.lm.tune
 <application>``), by the plan its ``Runner`` gives.
 
 One operator is measured at every setting it tunes to by this module's own
@@ -33,8 +32,8 @@ import aie.utils as aie_utils
 
 from ... import operators
 from ..declare import Operator
-from ..image.packaging import full_elf
-from .narrowing import DISPATCHES, CostTable, fitting, variants
+from ..image.packaging import dispatches_full_elf
+from .narrowing import CostTable, fitting, variants
 from .probe import Call, Timing, cost_cache, measure_graph, pmode, search
 
 
@@ -48,19 +47,8 @@ def parser(description: str, tables: Path | None) -> argparse.ArgumentParser:
         "--table",
         type=Path,
         help="the table to fill (default: "
-        + (
-            f"costs_<device>[_<dispatch>].json in {tables}"
-            if tables
-            else "a scratch table"
-        )
+        + (f"costs_<device>.json in {tables}" if tables else "a scratch table")
         + ")",
-    )
-    p.add_argument(
-        "--dispatch",
-        choices=DISPATCHES,
-        help="the packaging measured under: fused (one full ELF) or separate "
-        "(an xclbin dispatch per step); default: fused where the device runs "
-        "a full ELF",
     )
     p.add_argument("--rounds", type=int, default=8)
     p.add_argument("--calls", type=int, default=50)
@@ -89,25 +77,13 @@ def parser(description: str, tables: Path | None) -> argparse.ArgumentParser:
     return p
 
 
-def dispatch(args: argparse.Namespace, dev) -> str:
-    """The packaging ``args`` measures under on ``dev``."""
-    if args.dispatch is not None:
-        return args.dispatch
-    return "fused" if full_elf(dev) else "separate"
-
-
 def table(args: argparse.Namespace, dev, tables: Path) -> Path:
-    """The table ``args`` fills on ``dev``: ``args.table``, else in
-    ``tables`` ``costs_<device>.json``, or ``costs_<device>_<dispatch>.json``
-    where ``args`` measures under a packaging other than the device's.
+    """The table ``args`` fills on ``dev``: ``args.table``, else
+    ``costs_<device>.json`` in ``tables``.
     """
     if args.table is not None:
         return args.table
-    chosen = dispatch(args, dev)
-    own = "fused" if full_elf(dev) else "separate"
-    return tables / (
-        f"costs_{dev.name}.json" if chosen == own else f"costs_{dev.name}_{chosen}.json"
-    )
+    return tables / f"costs_{dev.name}.json"
 
 
 def measure(
@@ -127,7 +103,7 @@ def measure(
         CostTable(
             table(args, dev, tables),
             dev.name,
-            dispatch(args, dev),
+            dispatches_full_elf(dev),
             remeasure_stale=True,
         ),
         calls,
@@ -181,7 +157,7 @@ def main() -> None:
         costs = CostTable(
             args.table or Path(scratch) / "costs.json",
             dev.name,
-            dispatch(args, dev),
+            dispatches_full_elf(dev),
             remeasure_stale=True,
         )
         search(

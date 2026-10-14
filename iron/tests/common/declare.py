@@ -430,7 +430,7 @@ def test_an_exported_design_replaces_the_derived_one():
         x = In(n)
         y = Out(n)
 
-        def exported_design(self, image):
+        def exported_design(self):
             return lambda: "module {}"
 
     op = Exported(n=64)

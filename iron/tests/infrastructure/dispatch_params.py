@@ -68,7 +68,7 @@ class ChunkCopy(Operator):
     def value_symbol(self, value) -> str:
         return value.name
 
-    def exported_design(self, image: str):
+    def exported_design(self):
         return functools.partial(chunk_copy, self.dev, self.max_chunks)
 
 

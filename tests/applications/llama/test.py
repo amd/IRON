@@ -18,7 +18,6 @@ import dataclasses
 import aie.utils as aie_utils
 import pytest
 
-import iron
 from iron.applications.llama.model import Runner
 from iron.lm.testing import (
     check_accuracy,
@@ -90,7 +89,7 @@ class TestEachStep:
 
     @pytest.fixture(scope="class")
     def model(self, runner):
-        model = runner.npu(boundaries=iron.each_step)
+        model = runner.npu(full_elf=False)
         assert not model.device_loop
         yield model
         if aie_utils.DefaultNPURuntime is not None:

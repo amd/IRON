@@ -109,7 +109,7 @@ def test_a_value_derived_from_a_bound_extent_follows_the_call(tmp_path):
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     t_step = {}
     for n in (64, 2048):
-        table = CostTable(tmp_path / f"costs{n}.json", "npu2", "fused")
+        table = CostTable(tmp_path / f"costs{n}.json", "npu2", True)
         call = Call(traced, dict(n=n))
         measure_graph(table, [call], None, Timing(rounds=2, calls=10), cache=cache)
         [key] = {cost_key(s.op) for s in traced.steps}
@@ -128,7 +128,7 @@ def test_a_design_following_the_context_is_priced_and_tuned_over_its_points(
     [key] = {cost_key(s.op) for s in traced.steps}
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
-    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    table = CostTable(tmp_path / "costs.json", "npu2", True)
     points = [Point(0.5, dict(n=64)), Point(0.5, dict(n=2048))]
     calls = [
         Call(traced, dict(n=64), points=points),
@@ -158,14 +158,14 @@ def test_a_design_following_the_context_is_priced_and_tuned_over_its_points(
                 for label, p in cost.points.items()
             }
             table.record_step(k, dataclasses.replace(cost, points=weighted))
-        chosen[share] = tuner.tune(traced, dev, "fused").chosen[key]
+        chosen[share] = tuner.tune(traced, dev, True).chosen[key]
         assert chosen[share].key == min(
             priced, key=lambda k: model_us(table, [key], chosen={key: k})[0]
         )
     columns = {s: v.resolved.num_aie_columns for s, v in chosen.items()}
     assert columns[0.0] < columns[1.0], columns
 
-    again = CostTable(tmp_path / "again.json", "npu2", "fused")
+    again = CostTable(tmp_path / "again.json", "npu2", True)
     assert measure_graph(again, calls, TRIANGLE, timing, cache=cache) == []
     assert {k: c.points for k, c in again.steps.items()} == {
         k: c.points for k, c in CostTable(table.path).steps.items()
@@ -176,7 +176,7 @@ def test_a_pack_runs_beside_a_reference_its_call_gives_values(tmp_path):
     dev = aie_utils.ensure_current_device()
     rotate = Call(Rotate().trace(x=(2048, 64), angles=(2048, 64)), dict(n=64))
     calls = [rotate, Call(Chain(SIZE, TILE).trace(a=(SIZE,), b=(SIZE,)))]
-    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    table = CostTable(tmp_path / "costs.json", "npu2", True)
     # Rounds enough to judge a calibration figure near zero by its noise.
     timing = Timing(rounds=3, calls=5)
     measure_graph(table, calls, TRIANGLE, timing)
@@ -196,7 +196,7 @@ def test_a_value_derived_from_a_tunable_is_measured_at_its_resolution(tmp_path):
     traced = Project().trace(x=(2048, 2048), w=(2048, 2048))
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
-    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    table = CostTable(tmp_path / "costs.json", "npu2", True)
     call = Call(traced, dict(n=256))
     measure_graph(table, [call], None, Timing(rounds=2, calls=10), cache=cache)
     [key] = {cost_key(s.op) for s in traced.steps}
@@ -210,7 +210,7 @@ def test_widths_are_compared_on_the_rows_under_the_bound(tmp_path):
     found = variants(step.op, aie_utils.ensure_current_device())
     assert len(found) > 1
     costs = measure_steps(
-        CostTable(tmp_path / "costs.json", "npu2", "fused"),
+        CostTable(tmp_path / "costs.json", "npu2", True),
         found,
         Timing(rounds=1, calls=5),
         values=Call(traced, dict(n=256)).op_values(step.op),
@@ -223,7 +223,7 @@ def test_an_operator_whose_resolution_shapes_a_buffer_is_measured(tmp_path):
     op = FlmGEMM(M=256, K=512, N=1024, b_col_maj=True)
     found = variants(op, aie_utils.ensure_current_device())
     costs = measure_steps(
-        CostTable(tmp_path / "costs.json", "npu2", "fused"),
+        CostTable(tmp_path / "costs.json", "npu2", True),
         found,
         Timing(rounds=1, calls=5),
     )
@@ -236,7 +236,7 @@ def test_measures_more_widths_than_one_batch_of_contexts(tmp_path):
     found = variants(op, aie_utils.ensure_current_device())
     assert len(found) > CONTEXTS // 2
     costs = measure_steps(
-        CostTable(tmp_path / "costs.json", "npu2", "fused"),
+        CostTable(tmp_path / "costs.json", "npu2", True),
         found,
         Timing(rounds=1, calls=5),
         values={"length": 200, "valid_cols": 200},
@@ -247,7 +247,7 @@ def test_measures_more_widths_than_one_batch_of_contexts(tmp_path):
 def test_a_calibration_takes_its_steps_from_its_own_rounds(tmp_path):
     # Host memory traffic moved a 2048x2048 GEMV's step from 600 to 645 us;
     # four of them priced at a step from another session put D0 at -31 us.
-    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    table = CostTable(tmp_path / "costs.json", "npu2", True)
     traced = Chain(SIZE, TILE).trace(a=(SIZE,), b=(SIZE,))
     dev = aie_utils.ensure_current_device()
     add, silu = (variants(s.op, dev)[-1] for s in traced.steps[:2])
@@ -267,9 +267,9 @@ def test_a_setting_far_behind_the_fastest_is_timed_no_further(tmp_path):
     # GEMV at one column is several times its widest's step.
     found = variants(GEMV(M=2048, K=2048), aie_utils.ensure_current_device())
     timing = Timing(rounds=4, calls=10, settle=1)
-    cut = CostTable(tmp_path / "cut.json", "npu2", "fused")
+    cut = CostTable(tmp_path / "cut.json", "npu2", True)
     measure_steps(cut, found, timing)
-    full = CostTable(tmp_path / "full.json", "npu2", "fused")
+    full = CostTable(tmp_path / "full.json", "npu2", True)
     measure_steps(full, found, dataclasses.replace(timing, cutoff=math.inf))
     assert all(full.steps[v.key].rounds == timing.rounds for v in found)
     stopped = {v.key for v in found if cut.steps[v.key].rounds < timing.rounds}
@@ -285,7 +285,7 @@ def test_a_batch_whose_every_setting_is_stopped_is_measured(tmp_path):
     found = variants(op, aie_utils.ensure_current_device())
     assert len(found) > CONTEXTS // 2
     timing = Timing(rounds=2, calls=5, settle=1, cutoff=0.0)
-    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    table = CostTable(tmp_path / "costs.json", "npu2", True)
     measure_steps(table, found, timing, values={"length": 200, "valid_cols": 200})
     rounds = [table.steps[v.key].rounds for v in found]
     assert rounds == [timing.rounds] + [timing.settle] * (len(found) - 1)
@@ -300,13 +300,13 @@ def test_a_setting_is_priced_beside_the_default_its_batch_times(tmp_path):
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     timing = Timing(rounds=3, calls=5, cutoff=math.inf)
-    first = CostTable(tmp_path / "first.json", "npu2", "fused")
+    first = CostTable(tmp_path / "first.json", "npu2", True)
     logged = []
     measure_steps(first, found, timing, cache=cache, log=logged.append)
     assert f"    batch 2/2: timing {len(found) - size + 1} runs" in logged, logged
     assert all(first.steps[v.key].noise_us is not None for v in found)
     # The cache holds each width beside its default, so it prices them alike.
-    again = CostTable(tmp_path / "again.json", "npu2", "fused")
+    again = CostTable(tmp_path / "again.json", "npu2", True)
     assert measure_steps(again, found, timing, cache=cache) == {}
     assert again.steps == first.steps
 
@@ -441,7 +441,7 @@ def test_a_table_at_another_power_mode_is_measured_again_whole(tmp_path):
     timing = Timing(rounds=1, calls=5)
     call = Call(Gather().trace(x=(2048,), rows=(16, 2048)), dict(pos=5))
     path = tmp_path / "costs.json"
-    measure_graph(CostTable(path, "npu2", "fused"), [call], None, timing, cache=cache)
+    measure_graph(CostTable(path, "npu2", True), [call], None, timing, cache=cache)
     mode = f'"pmode": "{report["Power Mode"]}"'
     path.write_text(path.read_text().replace(mode, '"pmode": "elsewhere"'))
     with pytest.raises(ValueError, match="at power mode elsewhere, not"):
@@ -457,7 +457,7 @@ def test_descent_measures_every_line_through_the_default(tmp_path):
     )
     default = dict(found[0].tunables)
     costs = search(
-        CostTable(tmp_path / "costs.json", "npu2", "fused"),
+        CostTable(tmp_path / "costs.json", "npu2", True),
         found,
         Timing(rounds=1, calls=5),
         exhaustive=1,
@@ -484,9 +484,9 @@ def test_remeasured_descent_runs_every_line_again(tmp_path):
         if dict(v.tunables)["num_aie_columns"] == 4
     ]
     timing = Timing(rounds=1, calls=5)
-    every = CostTable(tmp_path / "every.json", "npu2", "fused")
+    every = CostTable(tmp_path / "every.json", "npu2", True)
     search(every, found, timing, cache=cache, exhaustive=len(found))
-    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    table = CostTable(tmp_path / "costs.json", "npu2", True)
     ran = search(table, found, timing, cache=cache, remeasure=True, exhaustive=1)
     assert ran.keys() == table.steps.keys()
 
@@ -501,7 +501,7 @@ def test_a_setting_that_does_not_build_is_left_out(tmp_path):
     with pytest.raises(ValueError, match="a core holds"):
         Variant.of(gemm.with_tunables(tile_k=128, tile_n=128), dev)
     found = [Variant.of(gemm, dev)]
-    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    table = CostTable(tmp_path / "costs.json", "npu2", True)
     costs = search(
         table,
         found,
@@ -517,21 +517,21 @@ def test_a_setting_that_does_not_build_is_left_out(tmp_path):
 def test_tuned_graph_is_bit_identical_and_packed(tmp_path):
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
-    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    table = CostTable(tmp_path / "costs.json", "npu2", True)
     traced = Chain(SIZE, TILE).trace(a=(SIZE,), b=(SIZE,))
     timing = Timing(rounds=2, calls=10)
     measure_graph(table, [Call(traced)], TRIANGLE, timing, cache=cache)
     assert all(c.exact for c in table.steps.values())
 
     tuned = Chain(SIZE, TILE).compile(
-        image=iron.ELF,
+        full_elf=True,
         coresident=JointNarrowing(
             table, fit_cache=tmp_path / "fits", tuning_cache=tmp_path / "tunings"
         ),
         a=(SIZE,),
         b=(SIZE,),
     )
-    plain = Chain(SIZE, TILE).compile(image=iron.ELF, a=(SIZE,), b=(SIZE,))
+    plain = Chain(SIZE, TILE).compile(full_elf=True, a=(SIZE,), b=(SIZE,))
     assert tuned.tuning is not None and plain.tuning is None
     assert [len(g) for g in tuned.tuning.groups] == [3]
     text = Fusion(tuned.sequence).text()
@@ -551,7 +551,7 @@ def test_tuned_each_step_graph_is_bit_identical_and_narrowed(tmp_path):
     # xclbin chain's model, and nothing is packed.
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
-    table = CostTable(tmp_path / "costs.json", "npu1", "separate")
+    table = CostTable(tmp_path / "costs.json", "npu1", False)
     shapes = dict(a=(SIZE,), b=(SIZE,))
     timing = Timing(rounds=2, calls=10)
     measure_graph(
@@ -560,11 +560,11 @@ def test_tuned_each_step_graph_is_bit_identical_and_narrowed(tmp_path):
     assert all(c.reset_us == c.base_us == 0 for c in table.calibrations.values())
 
     tuned = Chain(SIZE, TILE).compile(
-        boundaries=iron.each_step,
+        full_elf=False,
         coresident=JointNarrowing(table, fit_cache=tmp_path / "fits"),
         **shapes,
     )
-    plain = Chain(SIZE, TILE).compile(boundaries=iron.each_step, **shapes)
+    plain = Chain(SIZE, TILE).compile(full_elf=False, **shapes)
     assert tuned.tuning is not None and not tuned.tuning.groups
     assert tuned.tuning.predicted_us < tuned.tuning.baseline_us
 
@@ -586,7 +586,7 @@ def test_the_model_predicts_the_tuned_graph_and_the_graph_as_traced(tmp_path):
     # the model held 618-634 us while runs measured 626-738 us.
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
-    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    table = CostTable(tmp_path / "costs.json", "npu2", True)
     shapes = dict(a=(SIZE,), b=(SIZE,))
     timing = Timing(rounds=8, calls=50)
     calls = Call.admitted(
@@ -595,12 +595,12 @@ def test_the_model_predicts_the_tuned_graph_and_the_graph_as_traced(tmp_path):
     measure_graph(table, calls, TRIANGLE, timing, cache=cache)
 
     tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
-    tuned = Chain(SIZE, TILE).compile(image=iron.ELF, coresident=tuner, **shapes)
+    tuned = Chain(SIZE, TILE).compile(full_elf=True, coresident=tuner, **shapes)
     # Every device the tuning packs is priced as measured, as one device.
     assert tuned.tuning.devices
     assert all(table.pack_name(d) in table.packs for d in tuned.tuning.devices)
     assert all(p.beside not in n.split("|") for n, p in table.packs.items())
-    untuned = Chain(SIZE, TILE).compile(image=iron.ELF, **shapes)
+    untuned = Chain(SIZE, TILE).compile(full_elf=True, **shapes)
     rng = np.random.default_rng(0)
     tensors = [(rng.random(SIZE) * 4 - 2).astype(bfloat16) for _ in range(2)]
     check = check_model(tuned, untuned, tensors, timing=timing)
@@ -627,7 +627,7 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
     calls = Call.admitted(traced, dev)
     folds = calls[1].traced
     report = platform()
-    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    table = CostTable(tmp_path / "costs.json", "npu2", True)
     measure_graph(
         table,
         calls,
@@ -639,9 +639,9 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
     assert {cost_key(s.op) for s in traced.steps + folds.steps} <= table.steps.keys()
 
     tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
-    tuned = SwiGLU(*weights).compile(image=iron.ELF, coresident=tuner, x=(1, E))
+    tuned = SwiGLU(*weights).compile(full_elf=True, coresident=tuner, x=(1, E))
     folds = tuned.tuning.folds
-    plain = SwiGLU(*weights).compile(image=iron.ELF, fold=folds, x=(1, E))
+    plain = SwiGLU(*weights).compile(full_elf=True, fold=folds, x=(1, E))
     assert len(tuned.traced.steps) < len(traced.steps) or not folds
     assert [type(s.op) for s in tuned.traced.steps] == [
         type(s.op) for s in plain.traced.steps
@@ -661,7 +661,7 @@ def test_a_folded_design_is_priced_beside_the_one_it_replaces(tmp_path):
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     timing = Timing(rounds=1, calls=5)
-    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    table = CostTable(tmp_path / "costs.json", "npu2", True)
     measure_graph(table, calls, None, timing, cache=cache)
 
     gate, fused = replaced(traced, folds)[0]
@@ -671,7 +671,7 @@ def test_a_folded_design_is_priced_beside_the_one_it_replaces(tmp_path):
     paired = table.steps[cost_key(gate)].t_step_us + raw.t_step_us - near.t_step_us
     assert table.steps[cost_key(fused)].t_step_us == pytest.approx(paired)
 
-    again = CostTable(tmp_path / "again.json", "npu2", "fused")
+    again = CostTable(tmp_path / "again.json", "npu2", True)
     assert measure_graph(again, calls, None, timing, cache=cache) == []
     assert again.steps == table.steps
 
@@ -684,7 +684,7 @@ def test_an_inexact_width_within_its_gates_is_accurate_and_cached(tmp_path):
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
     timing = Timing(rounds=1, calls=5)
-    table = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    table = CostTable(tmp_path / "costs.json", "npu2", True)
     measure_steps(table, found, timing, cache=cache)
     narrow = table.steps[found[1].key]
     assert not narrow.exact and narrow.accurate, narrow
@@ -694,7 +694,7 @@ def test_an_inexact_width_within_its_gates_is_accurate_and_cached(tmp_path):
         assert cache.get(judged, Accuracy).within
 
     stamps = {p: p.stat().st_mtime_ns for p in cache.directory.iterdir()}
-    again = CostTable(tmp_path / "again.json", "npu2", "fused")
+    again = CostTable(tmp_path / "again.json", "npu2", True)
     assert measure_steps(again, found, timing, cache=cache) == {}
     assert again.steps == table.steps
     assert {p: p.stat().st_mtime_ns for p in cache.directory.iterdir()} == stamps
@@ -705,7 +705,7 @@ def test_a_graph_sharing_measured_designs_measures_nothing(tmp_path):
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "costs")
     # Rounds enough to judge a calibration figure near zero by its noise.
     timing = Timing(rounds=3, calls=5)
-    chain = CostTable(tmp_path / "chain.json", "npu2", "fused")
+    chain = CostTable(tmp_path / "chain.json", "npu2", True)
     shapes = dict(a=(SIZE,), b=(SIZE,))
     ran = measure_graph(
         chain, [Call(Chain(SIZE, TILE).trace(**shapes))], TRIANGLE, timing, cache=cache
@@ -716,7 +716,7 @@ def test_a_graph_sharing_measured_designs_measures_nothing(tmp_path):
     assert len(ran) == 2 * len(chain.steps) + len(chain.packs)
     assert len(list(cache.directory.iterdir())) == len(ran) + len(chain.steps) - 3
 
-    table = CostTable(tmp_path / "calls.json", "npu2", "fused")
+    table = CostTable(tmp_path / "calls.json", "npu2", True)
     ran = measure_graph(
         table, [Call(Calls().trace(**shapes))], TRIANGLE, timing, cache=cache
     )
@@ -729,7 +729,7 @@ def test_an_xclbin_chain_is_measured_and_tuned_by_its_own_model(tmp_path):
     # Strix Halo: a 1-column add loads in ~84 us, an 8-column one in ~626 us.
     report = platform()
     cache = CostCache(report["Name"], report["Power Mode"], root=tmp_path / "c")
-    table = CostTable(tmp_path / "costs.json", "npu2", "separate")
+    table = CostTable(tmp_path / "costs.json", "npu2", False)
     shapes = dict(a=(SIZE,), b=(SIZE,))
     timing = Timing(rounds=4, calls=20)
     traced = Chain(SIZE, TILE).trace(**shapes)
@@ -748,15 +748,13 @@ def test_an_xclbin_chain_is_measured_and_tuned_by_its_own_model(tmp_path):
     add = variants(traced.steps[0].op, dev)
     narrow, wide = (min(add, key=lambda v: v.mm2s), max(add, key=lambda v: v.mm2s))
     assert table.load(wide.key) > 2 * table.load(narrow.key) > 0
-    again = CostTable(tmp_path / "again.json", "npu2", "separate")
+    again = CostTable(tmp_path / "again.json", "npu2", False)
     assert measure_graph(again, [Call(traced)], TRIANGLE, timing, cache=cache) == []
     assert again.steps == table.steps
 
     tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
-    tuned = Chain(SIZE, TILE).compile(
-        boundaries=iron.each_step, coresident=tuner, **shapes
-    )
-    untuned = Chain(SIZE, TILE).compile(boundaries=iron.each_step, **shapes)
+    tuned = Chain(SIZE, TILE).compile(full_elf=False, coresident=tuner, **shapes)
+    untuned = Chain(SIZE, TILE).compile(full_elf=False, **shapes)
     assert tuned.tuning.groups == () and tuned.tuning.configures == 5
     rng = np.random.default_rng(0)
     tensors = [(rng.random(SIZE) * 4 - 2).astype(bfloat16) for _ in range(2)]
@@ -775,13 +773,13 @@ def test_an_xclbin_chain_measures_a_design_its_call_gives_values(tmp_path):
     # An xclbin has no parameter table: its per-call values are dispatch-time.
     shapes = dict(x=(2048,), rows=(16, 2048))
     traced = Gather().trace(**shapes)
-    table = CostTable(tmp_path / "costs.json", "npu2", "separate")
+    table = CostTable(tmp_path / "costs.json", "npu2", False)
     measure_graph(table, [Call(traced, dict(pos=5))], None, Timing(rounds=2, calls=10))
     keys = {cost_key(s.op) for s in traced.steps}
     assert keys <= table.steps.keys()
     assert all(c.exact for c in table.steps.values())
 
-    version = Gather().compile(boundaries=iron.each_step, **shapes)
+    version = Gather().compile(full_elf=False, **shapes)
     rng = np.random.default_rng(0)
     x = (rng.random(2048) * 4 - 2).astype(bfloat16)
     rows = (rng.random((16, 2048)) * 4 - 2).astype(bfloat16)

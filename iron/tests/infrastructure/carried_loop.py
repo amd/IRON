@@ -41,7 +41,7 @@ def test_a_carried_loop_walks_a_linked_list_on_the_device(depth):
     walk = Trail(successor, STEPS)
     body = walk.compile()
     first = walk.compile(jump=((N,), np.int32), feeds=body)
-    assert body.plan.image == first.plan.image == "elf"
+    assert body.plan.full_elf and first.plan.full_elf
     assert [p.kind for p in body.parameters] == ["addr", "addr"]
 
     loop = iron.CarriedLoop(first, body, depth=depth)

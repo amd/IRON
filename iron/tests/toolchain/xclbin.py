@@ -4,11 +4,11 @@
 """The other image: operators and separate-dispatch graphs build to xclbins.
 
 The full ELF is NPU2's image; the xclbin is NPU1's, and what a graph
-compiled at ``each_step`` boundaries chains one operator at a time. This
+compiled with ``full_elf=False`` chains one operator at a time. This
 gate runs aiecc's xclbin pipeline (kernels with Peano, the PDI, then
 ``xclbinutil`` packaging) on each path the model lowers that way:
 
-* a graph compiled at ``each_step`` boundaries, one xclbin per unique
+* a graph compiled with ``full_elf=False``, one xclbin per unique
   operator linked onto the previous one (``--xclbin-input``), on both
   device widths, with no runtime made until the first call;
 * flm/gemm's two compiles, the configuration's xclbin at the reference
@@ -40,11 +40,10 @@ def test_a_graph_compiles_to_one_xclbin_per_operator_chained(device):
     fn, E = swiglu()
     net = fn.compile(
         dev=device,
-        boundaries=iron.each_step,
-        image=iron.XCLBIN,
+        full_elf=False,
         x=(1, E),
     )
-    assert net.plan.image == "xclbin" and net.plan.dispatch == "separate"
+    assert not net.plan.full_elf
     assert net.image is not None
     assert Path(net.image).suffix == ".xclbin" and Path(net.image).stat().st_size > 0
     assert net._callable is None, "the runtime is made on first call, not at compile"
@@ -138,8 +137,8 @@ def test_llama_builds_xclbins_at_its_size_on_npu1(npu1, chunk, pipelines):
     """
     model = llama_1b(n_layers=1)
     rows = model.config.prefill_chunk if chunk else 1
-    version = model.compile(boundaries=iron.each_step, **model.shapes(rows))
-    assert version.plan.image == "xclbin"
+    version = model.compile(full_elf=False, **model.shapes(rows))
+    assert not version.plan.full_elf
     assert Path(version.image).stat().st_size > 0
     (mha,) = [op for op in version.sequence.unique_operators() if type(op) is MHA]
     assert mha.width == 4 and mha.num_pipelines == pipelines

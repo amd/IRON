@@ -299,9 +299,9 @@ def hugging_face():
     return HuggingFace(DIRECTORY)
 
 
-def loaded(graph, tuner, boundaries=None):
+def loaded(graph, tuner, full_elf=None):
     """`graph` compiled and loaded for a fixture's tests, then released."""
-    yield graph.load(tuner, boundaries)
+    yield graph.load(tuner, full_elf)
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 
@@ -341,9 +341,7 @@ class TestEachStep:
 
     @pytest.fixture(scope="class")
     def each_step(self, weights, tokenizer):
-        yield from loaded(
-            Multimodal(Config(), weights, tokenizer), None, iron.each_step
-        )
+        yield from loaded(Multimodal(Config(), weights, tokenizer), None, False)
 
     @pytest.mark.parametrize(
         "text,task",

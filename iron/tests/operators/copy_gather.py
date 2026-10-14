@@ -156,7 +156,7 @@ def test_rows_of_a_weight_are_gathered(table, n_ids):
     ids = gathered_ids(VOCAB, n_ids)
     graph = FromWeight(table, ids)
     net = graph.compile(x=(n_ids, WIDTH))
-    assert net.plan.image == "elf"
+    assert net.plan.full_elf
     x = np.random.default_rng(1).standard_normal((n_ids, WIDTH)).astype(bfloat16)
     rows, total = graph(x)
     assert_equal(rows, table[ids], "gathered")
@@ -185,7 +185,7 @@ FEEDS = [(None, 15), (None, 256), (1, 71), (4, 71), (1, 512), (4, 512)]
 def test_rows_each_call_names_are_gathered(table, feeds, n_ids):
     graph = PerCall(table, feeds)
     net = graph.compile(ids=((n_ids,), np.int32))
-    assert net.plan.image == "elf"
+    assert net.plan.full_elf
     (gather,) = [s.op for s in net.traced.steps if isinstance(s.op, Gather)]
     assert gather.resolved().feeds == (feeds or (1 if n_ids <= 16 else 4))
     rng = np.random.default_rng(n_ids)
@@ -202,7 +202,7 @@ def test_rows_each_call_names_are_gathered(table, feeds, n_ids):
 def test_the_rows_a_call_bounds_are_gathered(table, feeds, n_ids):
     graph = Bounded(table, feeds)
     net = graph.compile(ids=((n_ids,), np.int32))
-    assert net.plan.image == "elf"
+    assert net.plan.full_elf
     rng = np.random.default_rng(n_ids)
     for n in sorted({1, 9, n_ids // 2, n_ids - 1, n_ids} - {0}):
         ids = rng.integers(-VOCAB, VOCAB, n_ids).astype(np.int32)
@@ -219,7 +219,7 @@ def test_rows_ids_the_device_made_name_are_gathered(table, feeds, n_ids):
     other = np.random.default_rng(4).standard_normal((3000, 256)).astype(bfloat16)
     graph = FromDeviceIds(table, other, feeds)
     net = graph.compile(ids=((n_ids,), np.int32))
-    assert net.plan.image == "elf"
+    assert net.plan.full_elf
     assert not net.traced.encoders
     resolved = {
         s.op.resolved().feeds for s in net.traced.steps if isinstance(s.op, Gather)
@@ -252,7 +252,7 @@ def test_a_static_table_s_address_is_an_ordinary_resident_operand(table, n_ids):
     other = np.random.default_rng(6).standard_normal((3000, 256)).astype(bfloat16)
     graph = FromDeviceIds(table, other, static_base=True)
     net = graph.compile(ids=((n_ids,), np.int32))
-    assert net.plan.image == "elf"
+    assert net.plan.full_elf
     assert not net.traced.encoders
     assert not net.traced.addresses, "static_base must not use the scratchpad path"
     assert len(net.traced.static_addresses) == 2, "one resident address per table"
@@ -301,10 +301,8 @@ def test_rows_a_state_names_are_gathered(table, n_ids):
 
 
 @pytest.mark.supported_devices("npu2")
-@pytest.mark.parametrize(
-    "boundaries", [None, iron.each_step], ids=["full_elf", "xclbin"]
-)
-def test_a_graph_gathers_twice_from_a_weight_and_a_state(boundaries):
+@pytest.mark.parametrize("full_elf", [None, False], ids=["full_elf", "xclbin"])
+def test_a_graph_gathers_twice_from_a_weight_and_a_state(full_elf):
     n_rows, rows, soft = 4096, 64, 64
     rng = np.random.default_rng(3)
     table = rng.standard_normal((n_rows, WIDTH)).astype(bfloat16)
@@ -313,9 +311,9 @@ def test_a_graph_gathers_twice_from_a_weight_and_a_state(boundaries):
         ids=((rows,), np.int32),
         soft=((soft, WIDTH), bfloat16),
         merge=((rows,), np.int32),
-        boundaries=boundaries,
+        full_elf=full_elf,
     )
-    assert net.plan.image == ("elf" if boundaries is None else "xclbin")
+    assert net.plan.full_elf == (full_elf is None)
     for call in range(3):
         ids = rng.integers(0, n_rows, rows).astype(np.int32)
         x = rng.standard_normal((soft, WIDTH)).astype(bfloat16)
@@ -347,10 +345,8 @@ def test_each_step_gathers_the_rows_an_input_names(table):
     the rows.
     """
     graph = Embedded(table)
-    net = graph.compile(
-        ids=((256,), np.int32), x=(256, WIDTH), boundaries=iron.each_step
-    )
-    assert net.plan.image == "xclbin"
+    net = graph.compile(ids=((256,), np.int32), x=(256, WIDTH), full_elf=False)
+    assert not net.plan.full_elf
     steps = [type(s.op).__name__ for s in net.traced.steps]
     assert steps == ["Gather", "ElementwiseAdd"]
     x = np.zeros((256, WIDTH), bfloat16)
@@ -370,8 +366,8 @@ def test_each_step_gathers_the_rows_a_call_bounds(table, n_ids):
     generated per call.
     """
     graph = Bounded(table)
-    net = graph.compile(ids=((n_ids,), np.int32), boundaries=iron.each_step)
-    assert net.plan.image == "xclbin"
+    net = graph.compile(ids=((n_ids,), np.int32), full_elf=False)
+    assert not net.plan.full_elf
     rng = np.random.default_rng(n_ids)
     for n in sorted({1, 9, n_ids // 2, n_ids}):
         ids = rng.integers(-VOCAB, VOCAB, n_ids).astype(np.int32)
@@ -390,8 +386,8 @@ def test_each_step_gathers_by_ids_the_device_made(table, n_ids):
     """
     other = np.random.default_rng(4).standard_normal((3000, 256)).astype(bfloat16)
     graph = FromDeviceIds(table, other)
-    net = graph.compile(ids=((n_ids,), np.int32), boundaries=iron.each_step)
-    assert net.plan.image == "xclbin"
+    net = graph.compile(ids=((n_ids,), np.int32), full_elf=False)
+    assert not net.plan.full_elf
     rng = np.random.default_rng(n_ids)
     for call in range(3):
         ids = rng.integers(-len(other), len(other), n_ids).astype(np.int32)

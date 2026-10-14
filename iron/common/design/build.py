@@ -31,11 +31,11 @@ class OperatorDesign:
     # An object address in the key would re-key the cache every process.
     _ADDRESS = re.compile(r"0x[0-9a-f]{6,}")
 
-    def __init__(self, op: Operator, image: str = "elf"):
+    def __init__(self, op: Operator, full_elf: bool = True):
         self.op = op
-        self.image = image
+        self.full_elf = full_elf
         P = inspect.Parameter
-        build = op.exported_design(image)
+        build = op.exported_design()
         if build is None:
             build = self.module
             params = [
@@ -45,7 +45,7 @@ class OperatorDesign:
                     annotation=DispatchTime[v.dtype],
                 )
                 for v in op.values
-                if image != "elf"
+                if not full_elf
             ]
         else:
             params = list(inspect.signature(build).parameters.values())
@@ -78,13 +78,13 @@ class OperatorDesign:
             return Program(dev, ShippedRuntime(op, dev)).resolve_program()
         # Before array(), which may hand a core-read value to a worker.
         for value in op.values:
-            if self.image == "elf" and not isinstance(value, declare.DispatchTime):
+            if self.full_elf and not isinstance(value, declare.DispatchTime):
                 value.param = ScratchpadParameter(value.symbol, value.dtype)
-            elif self.image == "elf":
+            elif self.full_elf:
                 raise ValueError(
                     f"{type(op).__name__}.{value.name} is a DispatchTime value, "
                     f"which a full ELF cannot carry (its stream is fixed at build "
-                    f"time); package as xclbin"
+                    f"time); compile with full_elf=False"
                 )
             elif value.symbol not in dispatch:
                 raise ValueError(
@@ -109,7 +109,9 @@ class OperatorDesign:
     @functools.cached_property
     def identity(self) -> str:
         """What the module is built from, sources aside."""
-        text = repr((self.op.design_key(), self.image))
+        # Part of every compile-cache key: a new spelling rebuilds every design.
+        image = "elf" if self.full_elf else "xclbin"
+        text = repr((self.op.design_key(), image))
         if self._ADDRESS.search(text):
             raise ValueError(
                 f"{type(self.op).__name__}'s design key {text!r} embeds an object "

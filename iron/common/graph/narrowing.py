@@ -41,7 +41,7 @@ the table holds them (``StepCost.points``): ``t_step`` is their weighted
 mean, a pack's step moves with it, and a setting is a candidate only if
 accurate at each.
 
-An xclbin chain (a ``"separate"`` table) is a dispatch per step and a
+An xclbin chain (a table with ``full_elf`` false) is a dispatch per step and a
 kernel per design, so nothing packs and the designs of one array are not
 tied:
 
@@ -204,9 +204,6 @@ SEARCH_DIGEST = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 # Standard errors a setting's step must beat its default's by to be taken.
 CONFIDENCE = 2.0
-
-# The packagings a table is measured under (``packaging.plan``'s dispatch).
-DISPATCHES = ("fused", "separate")
 
 
 def fit_verdict(
@@ -438,8 +435,8 @@ class CostTable:
     Args:
         path: The JSON file; read if it exists.
         device: The device's name (``dev.name``) it is measured on.
-        dispatch: The packaging it is measured under: ``"fused"`` (one full
-            ELF) or ``"separate"`` (an xclbin dispatch per step).
+        full_elf: The packaging it is measured under: one full ELF, else an
+            xclbin dispatch per step.
         remeasure_stale: Leave out an entry recorded without a field its
             kind now requires, so it is measured again; else such an entry
             refuses the table.
@@ -454,15 +451,13 @@ class CostTable:
         self,
         path: Path | str,
         device: str | None = None,
-        dispatch: str | None = None,
+        full_elf: bool | None = None,
         *,
         remeasure_stale: bool = False,
     ):
-        if dispatch not in (None, *DISPATCHES):
-            raise ValueError(f"dispatch must be one of {DISPATCHES}, got {dispatch!r}")
         self.path = Path(path)
         self.device = device
-        self.dispatch = dispatch
+        self.full_elf = full_elf
         self.steps: dict[str, StepCost] = {}
         self.calibrations: dict[str, Calibration] = {}
         self.packs: dict[str, PackCost] = {}
@@ -471,14 +466,18 @@ class CostTable:
         self._entry_weights: np.ndarray | None = None
         if self.path.exists():
             data = json.loads(self.path.read_text())
-            for name in ("device", "dispatch"):
+            if "full_elf" not in data:
+                raise ValueError(
+                    f"{self.path} names no full_elf packaging; measure it again"
+                )
+            for name in ("device", "full_elf"):
                 given = vars(self)[name]
                 if given is not None and given != data[name]:
                     raise ValueError(
                         f"{self.path} is measured for {name} {data[name]!r}, "
                         f"not {given!r}"
                     )
-            self.device, self.dispatch = data["device"], data["dispatch"]
+            self.device, self.full_elf = data["device"], data["full_elf"]
             for name, kind in (
                 ("steps", StepCost),
                 ("calibrations", Calibration),
@@ -517,20 +516,20 @@ class CostTable:
         Raises:
             ValueError: It is for another device, or names none.
         """
-        if self.device is None or self.dispatch is None:
-            raise ValueError(f"{self.path}: give the table its device and dispatch")
+        if self.device is None or self.full_elf is None:
+            raise ValueError(f"{self.path}: give the table its device and full_elf")
         if self.device != dev.name:
             raise ValueError(
                 f"{self.path} is measured on {self.device}, not {dev.name}"
             )
 
     def save(self) -> None:
-        if self.device is None or self.dispatch is None:
-            raise ValueError(f"{self.path}: give the table its device and dispatch")
+        if self.device is None or self.full_elf is None:
+            raise ValueError(f"{self.path}: give the table its device and full_elf")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         sections = [
             f'"device": {json.dumps(self.device)}',
-            f'"dispatch": {json.dumps(self.dispatch)}',
+            f'"full_elf": {json.dumps(self.full_elf)}',
         ]
         sectioned = [("steps", self.steps), ("calibrations", self.calibrations)]
         if self.packs:
@@ -587,7 +586,7 @@ class CostTable:
             ValueError: ``other`` is measured for another device, packaging
                 or power mode.
         """
-        for name in ("device", "dispatch"):
+        for name in ("device", "full_elf"):
             if vars(other)[name] != vars(self)[name]:
                 raise ValueError(
                     f"{other.path} is measured for {name} {vars(other)[name]!r}, "
@@ -637,7 +636,7 @@ class CostTable:
                 ("packs", self.packs),
             )
         }
-        entries["measured"] = [self.device, self.dispatch]
+        entries["measured"] = [self.device, self.full_elf]
         return hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest()
 
     def _calibrated(self, figure: str) -> float:
@@ -874,7 +873,7 @@ def model_us(
     """
     chosen = chosen or {}
     arrays = arrays or {}
-    if table.dispatch == "separate":
+    if not table.full_elf:
         if groups:
             raise ValueError("an xclbin chain loads each design alone; it packs none")
         runlist = Runlist(keys)
@@ -1126,9 +1125,9 @@ class JointNarrowing:
     tuning_cache: Path = dataclasses.field(default=TUNING_CACHE, compare=False)
     kinds: NarrowingKinds = NarrowingKinds()
 
-    def tune(self, traced: TracedGraph, dev, dispatch: str) -> Tuning:
+    def tune(self, traced: TracedGraph, dev, full_elf: bool) -> Tuning:
         """Choose the folds, tunables and packs of ``traced`` for ``dev``,
-        packaged as ``dispatch`` (``packaging.plan``'s).
+        packaged as one full ELF or not (``packaging.plan``'s).
 
         Each way the graph folds (``foldings``) is priced and the cheapest
         taken. Where ``fold_runs`` do not find every way, each fold found is
@@ -1141,10 +1140,10 @@ class JointNarrowing:
                 another packaging.
         """
         self.table.measures(dev)
-        if self.table.dispatch != dispatch:
+        if self.table.full_elf != full_elf:
             raise ValueError(
-                f"{self.table.path} prices dispatch {self.table.dispatch!r}; "
-                f"this version is packaged {dispatch!r}"
+                f"{self.table.path} prices full_elf={self.table.full_elf}; "
+                f"this version is packaged full_elf={full_elf}"
             )
         # Each operator's cost key by ``id``: every one is traced's or made's,
         # held throughout, so its id stays its own.
@@ -1255,7 +1254,7 @@ class JointNarrowing:
         # Designs apart only in their probes share a key, not a design.
         operators = {id(s.op): s.op for s in traced.steps}.values()
         expands = Fusion.expanded({op.resolved(dev).design_key() for op in operators})
-        if table.dispatch == "separate":
+        if not table.full_elf:
             chosen, groups = self._separate(keys, found, steps), ()
         else:
             chosen, groups = self._packed(keys, found, steps, dev, expands)

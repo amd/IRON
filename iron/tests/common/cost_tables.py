@@ -62,8 +62,8 @@ def test_llamas_table_holds_every_design_it_tunes(npu2, path):
             + (f", moved to {moved}" if moved else ", its default")
         )
     assert not stale and not missing, (
-        f"{table.path} is out of date; run `python -m iron.lm.tune llama "
-        f"--dispatch {table.dispatch}` on an idle NPU2. {len(missing)} to measure:\n"
+        f"{table.path} is out of date; run `python -m iron.lm.tune llama` "
+        f"on an idle NPU2. {len(missing)} to measure:\n"
         + "\n".join(unmeasured)
         + f"\n{len(stale)} the graph no longer has: {stale}"
     )
@@ -95,19 +95,7 @@ def test_llama_prices_only_attention_at_its_contexts(npu2):
     "device, argv, name",
     [
         ({"name": "npu2", "n_cols": 8}, [], "costs_npu2.json"),
-        ({"name": "npu2", "n_cols": 8}, ["--dispatch", "fused"], "costs_npu2.json"),
-        (
-            {"name": "npu2", "n_cols": 8},
-            ["--dispatch", "separate"],
-            "costs_npu2_separate.json",
-        ),
         ({"name": "npu1", "n_cols": 4}, [], "costs_npu1.json"),
-        ({"name": "npu1", "n_cols": 4}, ["--dispatch", "separate"], "costs_npu1.json"),
-        (
-            {"name": "npu1", "n_cols": 4},
-            ["--dispatch", "fused"],
-            "costs_npu1_fused.json",
-        ),
         (
             {"name": "npu2", "n_cols": 8},
             ["--table", "elsewhere.json"],
@@ -115,9 +103,7 @@ def test_llama_prices_only_attention_at_its_contexts(npu2):
         ),
     ],
 )
-def test_a_table_is_named_for_its_device_and_a_packaging_not_its_own(
-    tmp_path, device, argv, name
-):
+def test_a_table_is_named_for_its_device(tmp_path, device, argv, name):
     args = graph_tune.parser("", tmp_path).parse_args(argv)
     found = graph_tune.table(args, from_name(**device), tmp_path)
     assert found == (Path(name) if "--table" in argv else tmp_path / name)

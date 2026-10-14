@@ -44,7 +44,7 @@ def test_the_cache_offset_is_applied_per_call():
     write = Write()
 
     net = write.compile(x=(N_KV, HEAD_DIM))
-    assert net.plan.image == "elf", "only the full ELF carries a scratchpad"
+    assert net.plan.full_elf, "only the full ELF carries a scratchpad"
 
     expected = np.zeros((N_KV, SEQ, HEAD_DIM), dtype=np.float32)
     net.write(cache, expected)

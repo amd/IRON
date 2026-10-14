@@ -97,17 +97,16 @@ _TASK = re.compile(
 N = graph.Value("n", Scratchpad, np.int32).affine()
 
 
-def generated_sequence(op, image="elf") -> tuple[str, list[Task]]:
+def generated_sequence(op, full_elf=True) -> tuple[str, list[Task]]:
     """The runtime sequence ``op`` builds to, and its shim tasks in order.
 
     An xclbin's per-call values are its dispatch parameters, which only the
     design's generator declares, so it is generated as it would be compiled.
     """
-    if image == "elf":
+    if full_elf:
         module = OperatorDesign(op).module()
     else:
-        design = OperatorDesign(op, image)
-        module = design.compilable().generate_mlir()
+        module = OperatorDesign(op, full_elf=False).compilable().generate_mlir()
     text = str(module)
     text = text[text.index("aie.runtime_sequence") :]
     tasks = [
@@ -290,7 +289,7 @@ def test_a_bounded_gemv_moves_a_and_c_in_output_tiles_round_robin():
 def test_on_an_xclbin_the_size_is_the_dispatch_scalar():
     # No scratchpad to patch: the sequence is regenerated per call, the
     # per-call scalar standing in for the size itself.
-    text, tasks = generated_sequence(_bounded_gemv(), "xclbin")
+    text, tasks = generated_sequence(_bounded_gemv(), full_elf=False)
     assert "scratchpad_parameter" not in text
     # %arg1 is B, the head of each A stream, whose size no call bounds.
     bounded = [t for t in tasks if t.arg != 1]
@@ -426,7 +425,7 @@ def test_flm_gemm_folds_an_activation_then_a_clamp_into_its_epilogue():
     assert op.fold(finished) is None
 
 
-def _flm_gemm_moves(op, image, rows):
+def _flm_gemm_moves(op, full_elf, rows):
     """Bytes each operand of ``op``'s sequence moves in a call whose row bound
     is ``rows``: each shim task's elements, a patched length its word's value
     in its units, times its runs, a repeat parameter's word plus one. On an
@@ -439,7 +438,7 @@ def _flm_gemm_moves(op, image, rows):
         if v.name != "valid"
     }
     units = words.get(op.value("units_valid").symbol)
-    text, tasks = generated_sequence(op, image)
+    text, tasks = generated_sequence(op, full_elf)
     repeats = dict(
         re.findall(
             r"aiex\.dma_start_task\(%(\d+)\) \{repeat_parameter = @(\w+)\}", text
@@ -479,14 +478,15 @@ def test_a_bounded_flm_gemm_moves_a_and_c_for_the_units_its_bound_reaches(
     op.use_value("valid", N)
     op = op.resolved(dev)
     blocks = width // (op.tile_n * op.cols)
-    whole = _flm_gemm_moves(unbounded, image, M)
+    full_elf = image == "elf"
+    whole = _flm_gemm_moves(unbounded, full_elf, M)
     for rows, units in ((15, 1), (256, 1), (257, 2), (2048, 8)):
-        assert _flm_gemm_moves(op, image, rows) == {
+        assert _flm_gemm_moves(op, full_elf, rows) == {
             "A": units * 256 * K * 2 * blocks,
             "B": whole["B"],
             "C": units * 256 * width * 2,
         }, rows
-    assert _flm_gemm_moves(op, image, M) == whole
+    assert _flm_gemm_moves(op, full_elf, M) == whole
 
 
 def test_on_an_xclbin_a_bounded_flm_gemm_repeats_a_by_the_dispatch_scalar(npu1):
@@ -494,7 +494,7 @@ def test_on_an_xclbin_a_bounded_flm_gemm_repeats_a_by_the_dispatch_scalar(npu1):
     # column block, C's row blocks its D2, both the per-call scalar.
     op = flm_gemm.GEMM(M=512, K=1024, N=512, b_col_maj=True)
     op.use_value("valid", N)
-    _, tasks = generated_sequence(op.resolved(npu1), "xclbin")
+    _, tasks = generated_sequence(op.resolved(npu1), full_elf=False)
     a = [t.sizes for t in tasks if t.arg == 0]
     c = [t.sizes for t in tasks if t.arg == 2]
     assert len(a) == 2 * 4 and len(c) == 2 * 4  # two column blocks

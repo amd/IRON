@@ -30,10 +30,7 @@ from iron.common.graph import Value as GraphValue
 WIDTH = 256
 MAX_K = 16
 SENTINEL = -1
-IMAGES = {
-    "elf": {"image": iron.ELF},
-    "xclbin": {"image": iron.XCLBIN, "boundaries": iron.each_step},
-}
+IMAGES = {"elf": True, "xclbin": False}
 
 
 class RepeatTile(Operator):
@@ -101,8 +98,8 @@ def _bound_op() -> RepeatTile:
 @pytest.mark.parametrize("image", IMAGES)
 def test_one_image_repeats_a_tile_k_times(image, npu2):
     graph = Repeated()
-    net = graph.compile(x=((WIDTH,), np.int32), **IMAGES[image])
-    assert net.plan.image == image
+    net = graph.compile(x=((WIDTH,), np.int32), full_elf=IMAGES[image])
+    assert net.plan.full_elf == IMAGES[image]
     x = np.arange(1, WIDTH + 1, dtype=np.int32)
     for k in (3, MAX_K, 1, 7):
         net.write(graph.out, np.full((MAX_K, WIDTH), SENTINEL, dtype=np.int32))
@@ -116,7 +113,7 @@ def test_one_image_repeats_a_tile_k_times(image, npu2):
 
 def test_npu1_xclbin_pushes_the_call_s_repeat_count(npu1):
     op = _bound_op().resolved()
-    design = OperatorDesign(op, "xclbin").compile()
+    design = OperatorDesign(op, full_elf=False).compile()
     kernel = NPUKernel(
         design.get_cache_entry().xclbin,
         None,

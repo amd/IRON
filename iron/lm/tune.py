@@ -5,7 +5,6 @@
 
 ```bash
 python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors
-python -m iron.lm.tune llama --checkpoint /path/to/model.safetensors --dispatch separate
 python -m iron.lm.tune embedding_gemma2
 ```
 

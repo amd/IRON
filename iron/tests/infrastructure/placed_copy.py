@@ -22,10 +22,7 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemv import GEMV
 
 ROWS, K, SLOTS = 512, 2048, 8
-IMAGES = {
-    "elf": {"image": iron.ELF},
-    "xclbin": {"image": iron.XCLBIN, "boundaries": iron.each_step},
-}
+IMAGES = {"elf": True, "xclbin": False}
 
 
 pytestmark = [
@@ -52,8 +49,8 @@ class _Projection(iron.Graph):
 
 
 def _compiled(graph, fold, image, **shapes):
-    net = graph.compile(fold=fold, **IMAGES[image], **shapes)
-    assert net.plan.image == image
+    net = graph.compile(fold=fold, full_elf=IMAGES[image], **shapes)
+    assert net.plan.full_elf == IMAGES[image]
     return net
 
 

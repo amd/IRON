@@ -15,7 +15,6 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-import iron
 from iron.common.harness import verify_buffer
 from iron.operators.gemm import GEMM
 from iron.tests.common.graphs import Project
@@ -25,18 +24,18 @@ BOUNDS = (M, 1, 300, 64, 65, M, 17, 128, 3)
 
 
 @pytest.mark.parametrize(
-    "boundaries",
+    "full_elf",
     [
         pytest.param(None, id="full_elf", marks=pytest.mark.supported_devices("npu2")),
         pytest.param(
-            iron.each_step,
+            False,
             id="xclbin",
             marks=pytest.mark.supported_devices("npu1", "npu2"),
         ),
     ],
 )
-def test_the_rows_of_a_bound_are_computed(boundaries):
-    project = Project().compile(x=(M, K), w=(N, K), boundaries=boundaries)
+def test_the_rows_of_a_bound_are_computed(full_elf):
+    project = Project().compile(x=(M, K), w=(N, K), full_elf=full_elf)
     op = GEMM(M=M, K=K, N=N, b_col_maj=True)
     tolerance = op.resolved().tolerance()
 

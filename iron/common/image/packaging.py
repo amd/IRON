@@ -1,11 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""How a traced graph is packaged: the image and the boundaries.
+"""How a traced graph is packaged: one full ELF, or an xclbin per step.
 
-A ``DispatchTime`` value, NPU1, or more than one boundary forces ``xclbin``,
-one per step; otherwise the image is one full ELF. A fused sequence in an
-xclbin has no proven construction and is refused.
+``full_elf`` is mlir-aie's choice of the same name. ``None`` derives it: a
+``DispatchTime`` value or NPU1 forces an xclbin, one dispatch per step;
+otherwise the image is one full ELF.
 """
 
 from __future__ import annotations
@@ -16,30 +16,25 @@ from aie.dialects.aie import AIEArch
 
 from ..declare.value import DispatchTime, Scratchpad
 
-ELF = "elf"
-XCLBIN = "xclbin"
-
-each_step = "each_step"
-
 
 @dataclasses.dataclass
 class Plan:
     """What ``compile`` decided, and why."""
 
-    image: str
-    dispatch: str
+    full_elf: bool
     reasons: list
     values: list  # (name, kind, lowering)
 
     def report(self, name: str) -> str:
-        lines = [f"{name}: image {self.image}, dispatch {self.dispatch!r}"]
+        image = "one full ELF" if self.full_elf else "an xclbin per step"
+        lines = [f"{name}: {image}"]
         lines += [f"  {r}" for r in self.reasons]
         for vname, kind, lowering in self.values:
             lines.append(f"  {vname}: {kind}; {lowering}")
         return "\n".join(lines)
 
 
-def full_elf(dev) -> bool:
+def dispatches_full_elf(dev) -> bool:
     """Whether ``dev``'s architecture dispatches a full ELF."""
     # Inferred from source, untested on npu1: XRT sends an ELF with .pdi
     # sections as ERT_START_NPU_PREEMPT_ELF (XRT 2.25 xrt_elf.cpp:1031), which
@@ -47,12 +42,13 @@ def full_elf(dev) -> bool:
     return dev.arch is AIEArch.AIE2p
 
 
-def plan(dev, traced, boundaries=None, image: str | None = None) -> Plan:
-    """Derive the image and the dispatch policy for ``traced`` on the device."""
-    if image not in (None, ELF, XCLBIN):
-        raise ValueError(f"image must be {ELF!r} or {XCLBIN!r}, got {image!r}")
-    if boundaries not in (None, each_step):
-        raise ValueError(f"boundaries must be None or each_step, got {boundaries!r}")
+def plan(dev, traced, full_elf: bool | None = None) -> Plan:
+    """Derive the packaging for ``traced`` on the device.
+
+    Raises:
+        ValueError: ``full_elf`` is asked for where a value or the device
+            forbids it, or the graph runs a shipped image.
+    """
     shipped = [op for op in traced.operators if op.external is not None]
     if shipped:
         names = ", ".join(
@@ -70,39 +66,22 @@ def plan(dev, traced, boundaries=None, image: str | None = None) -> Plan:
         forced.append(
             f"{names}: a DispatchTime value; the sequence is generated per call"
         )
-    if not full_elf(dev):
+    if not dispatches_full_elf(dev):
         forced.append(f"{dev.name} ({dev.arch}) has no full-ELF dispatch")
-    if boundaries is not None:
-        forced.append(f"boundaries={boundaries}: more than one dispatch")
-
-    chosen = XCLBIN if forced else ELF
-    if image == ELF and forced:
+    if full_elf and forced:
         raise ValueError(
-            f"{traced.name}: image=elf is not possible here: " + "; ".join(forced)
+            f"{traced.name}: full_elf=True is not possible here: " + "; ".join(forced)
         )
-    if image is not None:
-        chosen = image
-    reasons = forced or ["one sequence, one configuration set: a full ELF"]
 
-    # A forced xclbin takes the one xclbin form that is built.
-    if chosen == XCLBIN and boundaries is None and forced:
-        boundaries = each_step
-        reasons = forced + [f"boundaries={each_step}: the xclbin form that is built"]
-
-    if chosen == ELF:
-        dispatch = "fused"
-    elif boundaries == each_step:
-        dispatch = "separate"
+    if full_elf is None:
+        full_elf = not forced
+        reasons = forced or ["one sequence, one configuration set: a full ELF"]
     else:
-        raise NotImplementedError(
-            f"{traced.name}: one fused sequence in an xclbin has no proven "
-            f"construction yet; pass "
-            f"boundaries=each_step, or package for NPU2 as an ELF"
-        )
+        reasons = [f"full_elf={full_elf}: asked for", *forced]
 
     values = []
     for v in traced.values:
-        if issubclass(v.kind, Scratchpad) and chosen == ELF:
+        if issubclass(v.kind, Scratchpad) and full_elf:
             lowering = "patched through the parameter scratchpad"
         elif issubclass(v.kind, Scratchpad):
             lowering = (
@@ -113,4 +92,4 @@ def plan(dev, traced, boundaries=None, image: str | None = None) -> Plan:
         else:
             lowering = "sizes, strides and offsets regenerated per call"
         values.append((v.name, v.kind.__name__, lowering))
-    return Plan(chosen, dispatch, reasons, values)
+    return Plan(full_elf, reasons, values)

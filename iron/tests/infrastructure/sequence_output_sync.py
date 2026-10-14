@@ -34,8 +34,8 @@ def test_every_dispatch_returns_its_own_output(calls):
 
     f = F()
 
-    net = f.compile(boundaries=iron.each_step, image=iron.XCLBIN, x=(SIZE,))
-    assert net.plan.dispatch == "separate"
+    net = f.compile(full_elf=False, x=(SIZE,))
+    assert not net.plan.full_elf
     for call in range(calls):
         x = np.full(SIZE, call, dtype=bfloat16)
         got = net(x).numpy().astype(np.float32)

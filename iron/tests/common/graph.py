@@ -1877,10 +1877,10 @@ def test_only_none_may_default_an_input():
 
 
 def test_an_input_named_as_a_compile_keyword_is_refused():
-    with pytest.raises(TypeError, match=r"inputs \['image'\] are named as compile"):
+    with pytest.raises(TypeError, match=r"inputs \['full_elf'\] are named as compile"):
 
         class _Bad(iron.Graph):
-            def body(self, x, image):
+            def body(self, x, full_elf):
                 return x
 
 

@@ -39,7 +39,7 @@ def _layer_norm_run(name, trace):
     f = F()
 
     traced = f.trace(x=(1, SIZE))
-    seq = traced.sequence(name, dispatch="fused").compile()
+    seq = traced.sequence(name, full_elf=True).compile()
     run = seq.get_callable()
     x = run.get_buffer("x")
     x.numpy_view()[:] = np.random.default_rng(0).standard_normal(SIZE).astype(bfloat16)

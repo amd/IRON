@@ -157,7 +157,7 @@ def _sequence(cols: int, coresident) -> OperatorSequence:
         runlist=[(add, "a", "b", "t"), (silu, "t", "y")],
         input_args=["a", "b"],
         output_args=["y"],
-        dispatch="fused",
+        full_elf=True,
         coresident=coresident(add, silu),
     )
     seq.prepare()
@@ -220,7 +220,7 @@ def test_designs_of_one_array_share_its_device():
         ],
         input_args=["a", "b", "c", "d"],
         output_args=["y", "u"],
-        dispatch="fused",
+        full_elf=True,
     )
     seq.prepare()
     fused = Fusion(seq)
@@ -248,7 +248,7 @@ def test_a_folded_gate_shares_its_device_with_the_up_projection(npu2):
     silu = [fold for fold in every if str(fold) == "SiLU into GEMV"]
     traced, count = folded(ffn.trace(x=(1, embedding)), npu2, only=silu)
     assert count.total() == 1
-    seq = traced.sequence(dispatch="fused")
+    seq = traced.sequence(full_elf=True)
     seq.prepare()
     fused = Fusion(seq)
     text = fused.text()
@@ -287,7 +287,7 @@ def test_sequence_refuses_a_packing_without_a_full_elf():
             runlist=[(add, "a", "b", "y")],
             input_args=["a", "b"],
             output_args=["y"],
-            dispatch="separate",
+            full_elf=False,
             coresident=AdjacentPacking(),
         )
 
@@ -353,9 +353,9 @@ def test_traced_graph_packs():
     # Three designs, add and silu recurring: the policy packs all three, so
     # the whole graph is one configure.
     traced = Chain(SIZE, TILE, columns=2).trace(a=(SIZE,), b=(SIZE,))
-    temporal = traced.sequence("graph_temporal", dispatch="fused")
+    temporal = traced.sequence("graph_temporal", full_elf=True)
     packed = traced.sequence(
-        "graph_packed", dispatch="fused", coresident=AdjacentPacking()
+        "graph_packed", full_elf=True, coresident=AdjacentPacking()
     )
     temporal.prepare()
     packed.prepare()
@@ -392,7 +392,7 @@ def test_pack_compiles_to_a_full_elf():
 @_builds_elf
 def test_graph_compile_forwards_the_packing():
     version = Chain(SIZE, TILE, columns=2).compile(
-        image=iron.ELF, coresident=AdjacentPacking(), a=(SIZE,), b=(SIZE,)
+        full_elf=True, coresident=AdjacentPacking(), a=(SIZE,), b=(SIZE,)
     )
     assert version.sequence.coresident == AdjacentPacking()
     fused = Fusion(version.sequence)

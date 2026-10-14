@@ -83,7 +83,7 @@ def test_int32_step_at_nonzero_offsets():
         runlist=[(add, "a", "b", "c"), (gather, "table", "rows")],
         input_args=["a", "b", "table"],
         output_args=["c", "rows"],
-        dispatch="fused",
+        full_elf=True,
     ).compile()
     kinds = {name: seq.subbuffer_layout[name][:2] for name in ("table", "rows")}
     assert kinds["table"][0] == "input" and kinds["table"][1] > 0, kinds
@@ -121,7 +121,7 @@ def test_int32_slice_at_word_offset():
         input_args=["packed"],
         output_args=["rows"],
         buffer_sizes={"packed": TABLE_BYTES + 64},
-        dispatch="fused",
+        full_elf=True,
     ).compile()
     run = seq.get_callable()
     packed = run.get_buffer("packed")
@@ -144,7 +144,7 @@ def test_misaligned_buffer_is_rejected():
         input_args=["packed"],
         output_args=["rows"],
         buffer_sizes={"packed": TABLE_BYTES + 64},
-        dispatch="fused",
+        full_elf=True,
     )
     seq.prepare()
     with pytest.raises(ValueError, match="not a multiple of 4"):

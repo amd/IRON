@@ -161,11 +161,11 @@ class CostCache:
         op: Operator,
         values: Mapping[str, int] | None = None,
         inputs: Mapping[str, np.ndarray] | None = None,
-        dispatch: str = "fused",
+        full_elf: bool = True,
     ) -> str:
         """The entry ``op`` is measured into, resolved for the current
         device and run at ``values`` on ``inputs`` (random where not given),
-        packaged as ``dispatch`` says (``narrowing.DISPATCHES``).
+        packaged as one full ELF or not.
         """
         design = OperatorDesign(op.resolved()).compilable()
         given = sorted(
@@ -178,9 +178,9 @@ class CostCache:
             sorted((values or {}).items()),
             given,
         )
-        # A full ELF keeps the key its cached entries were measured under.
-        if dispatch != "fused":
-            key += (dispatch,)
+        # A full ELF adds nothing, so its entries keep the keys they have.
+        if not full_elf:
+            key += (full_elf,)
         return hashlib.sha256(repr(key).encode()).hexdigest()[:32]
 
     @staticmethod

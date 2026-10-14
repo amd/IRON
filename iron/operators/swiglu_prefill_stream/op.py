@@ -62,7 +62,7 @@ class SwiGLUStreamGroup(Operator):
     def design_key(self):
         return _stream_design().group_digest(**self._dims())
 
-    def exported_design(self, image: str):
+    def exported_design(self):
         return functools.partial(_stream_design().load_group, **self._dims())
 
     @classmethod

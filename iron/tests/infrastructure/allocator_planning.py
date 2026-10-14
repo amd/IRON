@@ -601,7 +601,8 @@ def test_a_step_at_a_time_places_only_its_residents_in_the_arena():
         [(add, "x", "w", "t"), (add, "t", "w", "out")],
         arena,
         {"w": "W"},
-        dispatch="separate",
+        dispatch=None,
+        full_elf=False,
     )
     layout, _, _ = seq.calculate_buffer_layout()
     assert layout["w"] == ("scratch", 0, 2048)

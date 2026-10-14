@@ -133,19 +133,15 @@ class Chunk(iron.Graph):
         )
 
 
-@pytest.mark.parametrize(
-    "boundaries", [None, iron.each_step], ids=["full_elf", "xclbin"]
-)
-def test_a_chunk_attends_over_the_cache_before_it(boundaries):
+@pytest.mark.parametrize("full_elf", [None, False], ids=["full_elf", "xclbin"])
+def test_a_chunk_attends_over_the_cache_before_it(full_elf):
     chunk = Chunk()
 
     rng = np.random.default_rng(0)
     q = rng.standard_normal((CACHE, HEADS, D)).astype(bfloat16)
     k = rng.standard_normal((KV_HEADS, CACHE, D)).astype(bfloat16)
     v = rng.standard_normal((KV_HEADS, CACHE, D)).astype(bfloat16)
-    net = chunk.compile(
-        q=(CHUNK, HEADS, D), k=k.shape, v=v.shape, boundaries=boundaries
-    )
+    net = chunk.compile(q=(CHUNK, HEADS, D), k=k.shape, v=v.shape, full_elf=full_elf)
     # The whole prompt at once: each chunk's rows of it are what the chunk
     # computes.
     whole = MHA(

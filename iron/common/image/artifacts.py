@@ -7,8 +7,6 @@ which, and where each buffer lands, over ``CompilableDesign``'s cache entries.
 
 from __future__ import annotations
 
-import dataclasses
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,13 +55,13 @@ class Artifacts:
     """The record of one image.
 
     Attributes:
-        kind: ``"elf"`` (one fused image) or ``"xclbin"`` (one per design,
-            chained; ``image`` is the last link).
+        full_elf: One fused image, else an xclbin per design, chained
+            (``image`` is the last link).
         entry: The cache entry holding the parameter table and lowered module.
         buffers: Each buffer name to ``(arena, offset, nbytes)``.
     """
 
-    kind: str
+    full_elf: bool
     image: Path
     insts: Path | None
     entry: CacheEntry | None
@@ -101,57 +99,11 @@ class Artifacts:
         return self.entry.directory if self.entry is not None else None
 
     def report(self, name: str = "") -> str:
-        lines = [f"{name or 'image'}: {self.kind} {self.image}"]
+        kind = "full ELF" if self.full_elf else "xclbin"
+        lines = [f"{name or 'image'}: {kind} {self.image}"]
         for d in self.designs:
             shared = f" (x{len(d.operators)})" if len(d.operators) > 1 else ""
             lines.append(f"  design {d.name}{shared}: {', '.join(d.operators)}")
         for s in self.steps:
             lines.append(f"  step {s.index}: {s.operator} on {s.design}")
         return "\n".join(lines)
-
-    def to_dict(self) -> dict:
-        def path(p):
-            return None if p is None else str(p)
-
-        def entry(e):
-            if e is None:
-                return None
-            return {
-                f.name: (
-                    [str(x) for x in v]
-                    if isinstance(v, tuple)
-                    else path(v) if isinstance(v, Path) else v
-                )
-                for f in dataclasses.fields(e)
-                for v in [getattr(e, f.name)]
-            }
-
-        return {
-            "kind": self.kind,
-            "image": str(self.image),
-            "insts": path(self.insts),
-            "entry": entry(self.entry),
-            "designs": [
-                {
-                    "name": d.name,
-                    "operators": list(d.operators),
-                    "entry": entry(d.entry),
-                    "image": path(d.image),
-                    "insts": path(d.insts),
-                }
-                for d in self.designs
-            ],
-            "steps": [dataclasses.asdict(s) for s in self.steps],
-            "buffers": {k: list(v) for k, v in self.buffers.items()},
-        }
-
-    def dump(self, path: Path | None = None) -> Path:
-        """Write the record as JSON; beside the image by default."""
-        path = Path(path) if path else Path(self.image).parent / "artifacts.json"
-        path.write_text(json.dumps(self.to_dict(), indent=2))
-        return path
-
-    @staticmethod
-    def load(path) -> dict:
-        """A dumped record, as data; paths are strings."""
-        return json.loads(Path(path).read_text())

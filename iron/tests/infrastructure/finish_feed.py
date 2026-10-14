@@ -36,11 +36,11 @@ def test_a_residual_rides_the_matrix_into_a_folded_matvec(M, K):
     x = rng.standard_normal((1, K)).astype(bfloat16)
     r = rng.standard_normal((1, M)).astype(bfloat16)
 
-    folded = Residual(w).compile(image=iron.ELF, fold=True, x=(1, K), r=(1, M))
+    folded = Residual(w).compile(full_elf=True, fold=True, x=(1, K), r=(1, M))
     (step,) = folded.traced.steps
     assert [b.name for b in step.op.inputs] == ["A", "B", "finish0_b"]
     assert not any(b.streamed for b in step.op.finish_inputs)
-    plain = Residual(w).compile(image=iron.ELF, x=(1, K), r=(1, M))
+    plain = Residual(w).compile(full_elf=True, x=(1, K), r=(1, M))
     assert len(plain.traced.steps) == 2
 
     got = np.array(folded(x, r).numpy()[:M])
@@ -70,10 +70,10 @@ def test_the_up_projection_rides_the_gate_into_its_product():
     ]
     x = rng.standard_normal((1, E)).astype(bfloat16)
 
-    folded = SwiGLU(*weights).compile(image=iron.ELF, fold=True, x=(1, E))
+    folded = SwiGLU(*weights).compile(full_elf=True, fold=True, x=(1, E))
     up, gate, down = folded.traced.steps
     assert [type(link.op) for link in gate.op.finish] == [SiLU, ElementwiseMul]
-    plain = SwiGLU(*weights).compile(image=iron.ELF, x=(1, E))
+    plain = SwiGLU(*weights).compile(full_elf=True, x=(1, E))
 
     got = np.array(folded(x).numpy()[:E])
     op = gate.op.resolved()

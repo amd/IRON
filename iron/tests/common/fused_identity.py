@@ -45,7 +45,7 @@ def _sequence(shapes):
         runlist=runlist,
         input_args=[b for _, w, x, _ in runlist for b in (w, x)],
         output_args=[y for *_, y in runlist],
-        dispatch="fused",
+        full_elf=True,
     )
     seq.prepare()
     return seq
@@ -119,7 +119,7 @@ def test_two_designs_whose_device_names_collide_are_refused():
         runlist=[(seen[name], "x0", "y0"), (op, "x1", "y1")],
         input_args=["x0", "x1"],
         output_args=["y0", "y1"],
-        dispatch="fused",
+        full_elf=True,
     )
     seq.prepare()
     with pytest.raises(ValueError, match=f"device names collide, {name}"):

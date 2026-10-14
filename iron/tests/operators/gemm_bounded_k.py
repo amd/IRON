@@ -38,11 +38,9 @@ pytestmark = [
 ]
 
 
-@pytest.mark.parametrize(
-    "boundaries", [None, iron.each_step], ids=["full_elf", "xclbin"]
-)
+@pytest.mark.parametrize("full_elf", [None, False], ids=["full_elf", "xclbin"])
 @pytest.mark.parametrize("mode", MODES)
-def test_the_reduction_stops_at_the_per_call_length(mode, boundaries):
+def test_the_reduction_stops_at_the_per_call_length(mode, full_elf):
     """A and B are NaN past ``n``: a column or row past the bound that were
     multiplied, in the last K tile or past it, would bring a NaN into every
     element. Each micro-tile layout the cores zero it in is covered: A's,
@@ -56,7 +54,7 @@ def test_the_reduction_stops_at_the_per_call_length(mode, boundaries):
 
     product = Product()
     net = product.compile(
-        a=(ROWS, SEQ), b=(D, SEQ) if b_col_maj else (SEQ, D), boundaries=boundaries
+        a=(ROWS, SEQ), b=(D, SEQ) if b_col_maj else (SEQ, D), full_elf=full_elf
     )
     tile_k = GEMM(M=ROWS, K=SEQ, N=D, **MODES[mode]).tile_k
 

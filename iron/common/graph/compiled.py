@@ -35,7 +35,7 @@ from ..image.allocator import ArenaPlan
 from ..image.artifacts import Parameter
 from ..image.callable import FullELFRun, ScratchArena
 from ..image.coresidence import AdjacentPacking
-from ..image.packaging import ELF, Plan, plan
+from ..image.packaging import Plan, plan
 from ..image.sequence import ALIGNMENT
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .fold import Folding, folded
@@ -336,10 +336,8 @@ class Graph:
         self,
         *,
         dev=None,
-        boundaries=None,
-        image=None,
+        full_elf: bool | None = None,
         verbose=False,
-        record="memory",
         feeds: CompiledGraph | None = None,
         coresident: AdjacentPacking | JointNarrowing | None = None,
         fold: bool | Collection[Folding] = False,
@@ -353,10 +351,9 @@ class Graph:
         Args:
             dev: The device to compile for, bound for this compile alone;
                 else the current one.
-            boundaries: Packaging choice (``iron.common.image.packaging``).
-            image: Packaging choice (``iron.common.image.packaging``).
+            full_elf: One full ELF, else an xclbin per step; ``None``
+                derives it (``iron.common.image.packaging``).
             verbose: Print why the packaging was chosen.
-            record: ``"disk"`` writes the image's ``Artifacts`` beside it.
             feeds: The version a full ELF's Emit starts; by default itself
                 when it takes no tensor.
             coresident: Packs designs into shared configurations; a
@@ -387,11 +384,11 @@ class Graph:
                     )
             current = aie_utils.ensure_current_device()
             # Folding and narrowing change nothing the packaging follows from.
-            chosen = plan(current, traced, boundaries, image)
+            chosen = plan(current, traced, full_elf)
             tuning = None
             groups: AdjacentPacking | list[list[Operator]] | None
             if isinstance(coresident, JointNarrowing):
-                tuning = coresident.tune(traced, current, chosen.dispatch)
+                tuning = coresident.tune(traced, current, chosen.full_elf)
                 traced, groups = tuning.apply(traced, current)
             else:
                 groups = coresident
@@ -400,14 +397,13 @@ class Graph:
             signature = self._signature(
                 {h.name: (h.shape, h.dtype) for h in traced.inputs}
             )
-            shared = chosen.dispatch == "fused"
             emit = None
             # The words an Emit feeding its own version was sized for.
             sized: list[Word] | None = None
             loops = feeds is not None or not traced.inputs
-            if chosen.image == ELF and traced.carry and loops:
+            if chosen.full_elf and traced.carry and loops:
                 if feeds is None:
-                    sized = _words(traced, share=shared, extents=False)[0]
+                    sized = _words(traced, share=True, extents=False)[0]
                     slots = len(sized)
                 elif feeds.emit is None or not any(
                     feeds is v for v in self._versions.values()
@@ -428,7 +424,6 @@ class Graph:
             version = CompiledGraph(
                 traced,
                 chosen,
-                record=record,
                 arena=self._arena,
                 emit=emit,
                 coresident=groups,
@@ -530,7 +525,6 @@ class CompiledGraph:
         self,
         traced: TracedGraph,
         plan: Plan,
-        record="memory",
         arena: ScratchArena | None = None,
         emit: EmitSite | None = None,
         coresident: AdjacentPacking | list[list[Operator]] | None = None,
@@ -542,7 +536,7 @@ class CompiledGraph:
         self.tuning = tuning
         self.emit = emit
         self.words, self.shared = _words(
-            traced, share=plan.dispatch == "fused", extents=plan.image != ELF
+            traced, share=plan.full_elf, extents=not plan.full_elf
         )
         placement: dict[str, Any] = (
             {} if arena is None else dict(arena=arena.plan, residents=traced.residents)
@@ -550,11 +544,11 @@ class CompiledGraph:
         if coresident:
             placement["coresident"] = coresident
         self.sequence = traced.sequence(
-            dispatch=plan.dispatch, shared_words=self.shared, **placement
-        ).compile(record=record)
+            full_elf=plan.full_elf, shared_words=self.shared, **placement
+        ).compile()
         self.image = self.sequence.image
         self.artifacts = self.sequence.artifacts
-        if self.artifacts.kind == "elf":
+        if plan.full_elf:
             # An extent read only through its derivations has no word.
             self.words = [
                 w for w in self.words if w.symbol in self.artifacts.parameters

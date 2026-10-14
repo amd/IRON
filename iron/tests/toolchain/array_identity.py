@@ -66,7 +66,7 @@ def _core_elfs(op) -> dict[str, bytes]:
     Built past the cache: a cached build shares each device's compiled cores
     across designs, and an entry that reused them holds no core ELF.
     """
-    design = OperatorDesign(op.configuration(), "xclbin").compile(use_cache=False)
+    design = OperatorDesign(op.configuration(), full_elf=False).compile(use_cache=False)
     entry = design.get_cache_entry()
     assert entry is not None
     elfs = {
@@ -113,7 +113,7 @@ def test_the_extents_share_one_device(npu2, module, cls_name, tunables, extent):
         runlist.append((op, *names))
         for b, buf in zip(op.buffers, names):
             (outputs if isinstance(b, Out) else inputs).append(buf)
-    seq = OperatorSequence(cls_name, runlist, inputs, outputs, dispatch="fused")
+    seq = OperatorSequence(cls_name, runlist, inputs, outputs, full_elf=True)
     seq.prepare()
     fused = Fusion(seq)
     pack = Packing.device_name(list(fused.designs))

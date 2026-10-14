@@ -81,7 +81,7 @@ def test_a_gather_alone_reads_the_rows_its_words_name(table, rows):
 @pytest.mark.supported_devices("npu2")
 def test_a_graph_gathering_by_device_ids_is_measured(table, tmp_path):
     traced = DeviceIds(table).trace(ids=((15,), np.int32))
-    costs = CostTable(tmp_path / "costs.json", "npu2", "fused")
+    costs = CostTable(tmp_path / "costs.json", "npu2", True)
     log = []
     measure_graph(
         costs, [Call(traced)], None, Timing(rounds=1, calls=5), 2, log=log.append

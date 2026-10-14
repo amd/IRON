@@ -77,7 +77,7 @@ def test_a_chain_tuned_with_array_mates_draws_no_shared_device(npu1):
         unmeasured=(),
     )
     version = CompiledGraph(built.traced, built.plan, tuning=tuning)
-    assert version.plan.dispatch == "separate"
+    assert not version.plan.full_elf
     dot = version.dot()
     assert "one device" not in dot
     assert {"s0", "s1"} <= set(re.findall(r'^\s*"(s\d+)" \[', dot, re.M))

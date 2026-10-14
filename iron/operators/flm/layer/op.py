@@ -70,7 +70,7 @@ class DecodeLayer(Operator):
         # The design's own DispatchTime parameters carry these names.
         return value.name
 
-    def exported_design(self, image: str):
+    def exported_design(self):
         return functools.partial(
             decode_layer,
             self.dev,

@@ -76,7 +76,7 @@ class LMHead(Operator):
     def ops(self) -> int:
         return 2 * self.vocab * self.dim
 
-    def exported_design(self, image: str):
+    def exported_design(self):
         kernel = flm_gemma4.flm_gemma4_q4nx_lm_head(
             dim=self.dim, m_tile=M_TILE, k_tile=K_TILE, group=GROUP
         )

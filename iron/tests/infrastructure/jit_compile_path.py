@@ -35,9 +35,7 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 def _captured(name, adds=2, **declared):
     """X + w + w (or as many adds of w) as a graph function, fused and compiled."""
     add = ElementwiseAdd(size=1024, tile_size=128, **declared)
-    sequence = (
-        Adds(add, adds).trace(x=(1024,), w=(1024,)).sequence(name, dispatch="fused")
-    )
+    sequence = Adds(add, adds).trace(x=(1024,), w=(1024,)).sequence(name, full_elf=True)
     return sequence.compile()
 
 
@@ -45,7 +43,7 @@ def test_captured_graph_compiles_to_an_elf():
     """The load-bearing claim: it links, and the ELF is real."""
     artifacts = _captured("jitpath_elf").artifacts
     elf = artifacts.image
-    assert artifacts.kind == "elf" and elf.exists(), "no ELF produced"
+    assert artifacts.full_elf and elf.exists(), "no ELF produced"
     assert elf.stat().st_size > 1024, f"ELF suspiciously small: {elf.stat().st_size}"
     assert elf.read_bytes()[:4] == b"\x7fELF", "not an ELF"
     # It sits in the cache entry, alongside the sidecars a host reads.

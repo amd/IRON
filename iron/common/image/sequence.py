@@ -17,7 +17,7 @@ from .callable import BF16, FullELFCallable, ScratchArena, StepCallable
 from .coresidence import AdjacentPacking
 from .fused import FusedImage, XclbinChain
 from .fusion import ArgumentSizes
-from .packaging import full_elf
+from .packaging import dispatches_full_elf
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +39,10 @@ class OperatorSequence:
     single dispatch.
 
     Args:
-        dispatch: ``"auto"`` (``"fused"`` on NPU2, else ``"separate"``),
-            ``"fused"`` (one full ELF), ``"separate"`` (one xclbin per
-            design, a step at a time), ``"reference"`` (each operator's
-            ``reference()`` on the host) or ``"compare"`` (the chain, each
+        full_elf: One full ELF, else one xclbin per design, a step at a
+            time; ``None`` is a full ELF where the device dispatches one.
+        dispatch: ``"reference"`` (each operator's ``reference()`` on the
+            host, nothing built) or ``"compare"`` (the xclbin chain, each
             step checked against its reference on the NPU's inputs).
         arena: A shared ``ArenaPlan`` to place the scratch buffers in. The
             full ELF places them all; a step at a time, each buffer is its
@@ -71,7 +71,8 @@ class OperatorSequence:
         buffer_sizes=None,
         buffer_offsets=None,
         plan_scratch=True,
-        dispatch="auto",
+        full_elf: bool | None = None,
+        dispatch: str | None = None,
         extra_flags=None,
         arena: ArenaPlan | None = None,
         residents: Mapping[str, Hashable] | None = None,
@@ -80,23 +81,33 @@ class OperatorSequence:
         coresident: Sequence[Sequence[Operator]] | AdjacentPacking = (),
         reconfigure: bool = False,
     ):
-        mode = self._coerce_dispatch(dispatch)
+        if dispatch not in (None, "reference", "compare"):
+            raise ValueError(
+                f"dispatch must be None, 'reference' or 'compare', got {dispatch!r}"
+            )
+        if dispatch == "reference" and full_elf is not None:
+            raise ValueError("the reference mode builds no image; give no full_elf")
+        if dispatch == "compare":
+            if full_elf:
+                raise ValueError("compare checks each step of an xclbin chain")
+            full_elf = False
         if residents and arena is None:
             raise ValueError("residents are placed in an arena; pass arena= too")
-        if feedback_args and mode not in (None, "fused", "reference"):
+        unbuilt = "dispatch='compare'" if dispatch == "compare" else "full_elf=False"
+        if feedback_args and full_elf is False:
             raise ValueError(
                 f"feedback arguments are an argument of the full ELF; "
-                f"dispatch={dispatch!r} has none"
+                f"{unbuilt} has none"
             )
-        if coresident and mode not in (None, "fused", "reference"):
+        if coresident and full_elf is False:
             raise ValueError(
                 f"co-residence packs designs into one full-ELF device; "
-                f"dispatch={dispatch!r} builds none"
+                f"{unbuilt} builds none"
             )
-        if reconfigure and mode not in (None, "fused", "reference"):
+        if reconfigure and full_elf is False:
             raise ValueError(
                 f"reconfigure configures the full ELF at every call; "
-                f"dispatch={dispatch!r} builds none"
+                f"{unbuilt} builds none"
             )
         if not all(
             isinstance(op, Operator) and all(isinstance(buf, str) for buf in bufs)
@@ -141,20 +152,11 @@ class OperatorSequence:
         self.residents = dict(residents or {})
         self.shared_words = dict(shared_words or {})
         self._arena_layout: dict[str, Allocation] | None = None
-        self.mode = mode
+        self.full_elf = full_elf
+        self.dispatch = dispatch
         self.subbuffer_layout: dict[str, tuple[str, int, int]] | None = None
         self._image = None
         self._artifacts: Artifacts | None = None
-
-    @staticmethod
-    def _coerce_dispatch(dispatch):
-        if dispatch == "auto" or dispatch is None:
-            return None
-        if isinstance(dispatch, str) and dispatch in _MODES:
-            return dispatch
-        raise TypeError(
-            f"dispatch {dispatch!r} is not one of {sorted(_MODES)} or 'auto'"
-        )
 
     @property
     def traced(self) -> bool:
@@ -316,7 +318,7 @@ class OperatorSequence:
                 return None  # sliced buffers are handled separately
 
             if buffer_type == "scratch" and self.arena is not None:
-                stepwise = self.mode in ("separate", "compare")
+                stepwise = self.full_elf is False
                 lengths = {
                     a: length_of(a)
                     for a in args_list
@@ -410,15 +412,14 @@ class OperatorSequence:
     def prepare(self):
         """Settle the mode and lay the buffers out, before anything is built."""
         dev = aie_utils.get_current_device()
-        if self.mode is None:
-            elf = dev is not None and full_elf(dev)
-            self.mode = "fused" if elf else "separate"
-            if self.feedback_args and not elf:
+        if self.full_elf is None and self.dispatch is None:
+            self.full_elf = dev is not None and dispatches_full_elf(dev)
+            if self.feedback_args and not self.full_elf:
                 raise ValueError(
                     f"{self.name}: feedback arguments need the full ELF, which "
                     f"this device does not dispatch"
                 )
-            if self.coresident and not elf:
+            if self.coresident and not self.full_elf:
                 raise ValueError(
                     f"{self.name}: co-residence packs designs into one full-ELF "
                     f"device, which this device does not dispatch"
@@ -439,17 +440,15 @@ class OperatorSequence:
         self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
             self.calculate_buffer_layout()
         )
-        image = _MODES[self.mode]
-        self._image = image() if image is not None else None
+        if self.dispatch == "reference":
+            self._image = None
+        else:
+            self._image = FusedImage() if self.full_elf else XclbinChain()
 
-    def compile(self, record: str = "memory"):
-        """Build the image ahead of time; ``record="disk"`` also writes its
-        ``Artifacts`` record beside it.
-        """
+    def compile(self):
+        """Build the image ahead of time."""
         self.prepare()
         self.link()
-        if record == "disk":
-            self.artifacts.dump()
         return self
 
     def link(self):
@@ -492,7 +491,7 @@ class OperatorSequence:
                 Design(name=labels[i], operators=sharing[i])
                 for i in range(len(designs))
             )
-            kind, image = "elf", self.image
+            image = self.image
             by_design = {id(op): labels[design_of[id(op)]] for op in operators}
         else:
             chain = self._image
@@ -511,7 +510,7 @@ class OperatorSequence:
                     )
                 )
             records = tuple(records)
-            kind, image = "xclbin", chain.image
+            image = chain.image
             by_design = {id(op): chain.labels[id(op)] for op in operators}
         assert image is not None, "the image has been built"
         steps = tuple(
@@ -519,7 +518,7 @@ class OperatorSequence:
             for i, (op, *names) in enumerate(self.runlist)
         )
         return Artifacts(
-            kind=kind,
+            full_elf=self.full_elf,
             image=image,
             insts=None,
             entry=entry,
@@ -536,11 +535,10 @@ class OperatorSequence:
         if self.subbuffer_layout is None:
             self.compile()
         self.link()
-        assert self.mode is not None, "link() chose the mode"
         if self.arena is not None and arena is None:
             arena = ScratchArena(self.arena)
-        if self.mode != "fused":
-            return StepCallable(self, compare=self.mode == "compare", arena=arena)
+        if not self.full_elf:
+            return StepCallable(self, compare=self.dispatch == "compare", arena=arena)
         return FullELFCallable(self, arena=arena)
 
     def get_layout_for_buffer(self, buffer_name):
@@ -562,11 +560,3 @@ class OperatorSequence:
 
         buf_type, offset, length = self.subbuffer_layout[buffer_name]
         return buf_type, offset, length
-
-
-_MODES = {
-    "fused": FusedImage,
-    "separate": XclbinChain,
-    "reference": None,
-    "compare": XclbinChain,
-}

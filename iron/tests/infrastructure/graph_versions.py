@@ -88,7 +88,7 @@ def test_two_shapes_share_weights_and_state_through_one_arena():
     two = f.compile(x=(2 * E,))
     assert len(f.versions) == 2
     assert one.arena is two.arena is f.arena
-    assert one.plan.dispatch == two.plan.dispatch == "fused"
+    assert one.plan.full_elf and two.plan.full_elf
     _run_both(f, w, w2)
     assert f.arena.generation == 1
     # One buffer holds both images: their residents, and the larger of
@@ -190,21 +190,21 @@ def test_each_step_versions_share_weights_and_state_through_one_arena():
     weights and the state are views of the arena's, and nothing else is.
     """
     f, w, w2, s = _function()
-    one = f.compile(x=(E,), boundaries=packaging.each_step)
-    two = f.compile(x=(2 * E,), boundaries=packaging.each_step)
+    one = f.compile(x=(E,), full_elf=False)
+    two = f.compile(x=(2 * E,), full_elf=False)
     assert one.arena is two.arena is f.arena
-    assert one.plan.dispatch == two.plan.dispatch == "separate"
+    assert not one.plan.full_elf and not two.plan.full_elf
     _run_both(f, w, w2)
     assert f.arena.plan.size == w.nbytes + w2.nbytes + E * 2
 
 
 @pytest.mark.supported_devices("npu2")
 def test_an_each_step_version_and_a_full_elf_share_one_arena():
-    """``--each-step``'s decode step beside a full-ELF prompt."""
+    """``--no-full-elf``'s decode step beside a full-ELF prompt."""
     f, w, w2, s = _function()
-    one = f.compile(x=(E,), boundaries=packaging.each_step)
+    one = f.compile(x=(E,), full_elf=False)
     two = f.compile(x=(2 * E,))
-    assert (one.plan.dispatch, two.plan.dispatch) == ("separate", "fused")
+    assert (one.plan.full_elf, two.plan.full_elf) == (False, True)
     _run_both(f, w, w2)
 
 
