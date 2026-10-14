@@ -247,22 +247,23 @@ def test_measures_more_widths_than_one_batch_of_contexts(tmp_path):
     assert len(costs) == len(found) and all(c.exact for c in costs.values())
 
 
-def test_a_calibration_against_another_sessions_steps_is_refused(tmp_path):
+def test_a_calibration_takes_its_steps_from_its_own_rounds(tmp_path):
+    # Host memory traffic moved a 2048x2048 GEMV's step from 600 to 645 us;
+    # four of them priced at a step from another session put D0 at -31 us.
     table = CostTable(tmp_path / "costs.json", "npu2", "fused")
     traced = Chain(SIZE, TILE).trace(a=(SIZE,), b=(SIZE,))
     dev = aie_utils.ensure_current_device()
     add, silu = (variants(s.op, dev)[-1] for s in traced.steps[:2])
-    timing = Timing(rounds=2, calls=10)
+    timing = Timing(rounds=3, calls=10)
     for v in (add, silu):
         measure_steps(table, [v], timing)
-    # A step measured slower than it runs here leaves the dispatch negative.
     slow = table.steps[add.key]
     table.record_step(
         add.key, dataclasses.replace(slow, t_step_us=slow.t_step_us + 1000)
     )
-    with pytest.raises(RuntimeError, match="negative"):
-        calibrate(table, add.op, silu.op, timing)
-    assert not table.calibrations
+    cal = calibrate(table, add.op, silu.op, timing)
+    assert table.calibrations
+    assert 0 < cal.dispatch_us < slow.alone_us
 
 
 def test_a_setting_far_behind_the_fastest_is_timed_no_further(tmp_path):

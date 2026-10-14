@@ -18,9 +18,10 @@ counted around the call: a chain of one design never switches.
   A design the ``CostCache`` holds is taken from it, not run.
 - ``search``: which of a design's settings ``measure_steps`` runs: all of
   them, or coordinate descent where there are more than ``EXHAUSTIVE``.
-- ``calibrate``, on measured designs A, B: ``A B A B ...`` against
-  ``A A ... B B ...`` gives ``(E(A) + E(B)) / 2``; the grouped run gives
-  ``D0``, the ``alone`` figures ``R``, and ``[A, B]`` packed gives ``base`` as
+- ``calibrate``, on designs A, B: ``A B A B ...`` against
+  ``A A ... B B ...`` gives ``(E(A) + E(B)) / 2``; each design repeated
+  against it once gives its step in the same rounds, the grouped run
+  ``D0``, the runs of one ``R``, and ``[A, B]`` packed gives ``base`` as
   ``E(A) + E(B) - E(pack)``. On an xclbin chain ``E`` is ``L``, the grouped
   run gives ``F``, and there is no reset or pack.
 - ``measure_loads``: ``[R, k]`` alternating against them grouped, as
@@ -1220,9 +1221,12 @@ def calibrate(
     log: Callable[[str], None] = print,
     values: Mapping[Operator, Mapping[str, int]] | None = None,
 ) -> Calibration:
-    """Split a configure's cost over measured designs ``a`` and ``b`` into
-    ``table``: on an xclbin chain, the mean of their loads and the dispatch,
-    which the runs of one design alone give with the grouped run.
+    """Split a configure's cost over designs ``a`` and ``b`` into ``table``:
+    on an xclbin chain, the mean of their loads and the dispatch, which the
+    runs of one design alone give with the grouped run. On a full ELF each
+    design's step is the one it takes in these rounds, ``pairs`` of it
+    against one, as host memory traffic moves a DDR-bound step between
+    sessions.
 
     Args:
         log: Where waiting for the NPU is reported (``time_interleaved``).
@@ -1230,7 +1234,6 @@ def calibrate(
             were measured at (``Standalone``).
     """
     ka, kb = cost_key(a), cost_key(b)
-    ta, tb = table.steps[ka].t_step_us, table.steps[kb].t_step_us
     tag = f"{ka}_{kb}"
     fused = table.dispatch == "fused"
     runlists = {
@@ -1240,7 +1243,7 @@ def calibrate(
         "b": [b],
     }
     if fused:
-        runlists["pack"] = [a, b]
+        runlists |= {"pack": [a, b], f"a{pairs}": [a] * pairs, f"b{pairs}": [b] * pairs}
     runs = [
         Standalone(
             f"cal_{name}_{tag}",
@@ -1259,9 +1262,12 @@ def calibrate(
     switch = (alt - grp) / (2 * pairs - 2)  # (E(a) + E(b)) / 2
     reset = base = 0.0
     if fused:
+        pack, many_a, many_b = times[4:]
+        ta = (many_a - alone_a) / (pairs - 1)
+        tb = (many_b - alone_b) / (pairs - 1)
         dispatch = grp - pairs * (ta + tb) - 2 * switch
         reset = ((alone_a - ta) + (alone_b - tb) - 2 * switch) / 2 - dispatch
-        base = 2 * switch - (times[4] - ta - tb - reset - dispatch)
+        base = 2 * switch - (pack - ta - tb - reset - dispatch)
     else:
         # alone = F + c: the step times of this batch, not of the table's.
         dispatch = (pairs * (alone_a + alone_b) + 2 * switch - grp) / (2 * pairs - 1)
@@ -1280,7 +1286,7 @@ def calibrate(
     if negative:
         raise RuntimeError(
             f"calibration {ka}/{kb}: negative {negative} us; measure it with the "
-            f"NPU otherwise idle, in the session that measured both steps"
+            f"NPU and the host otherwise idle"
         )
     # A figure within its noise of zero is zero: no load is priced below it.
     figures = {name: max(float(us[0]), 0.0) for name, us in figures.items()}
