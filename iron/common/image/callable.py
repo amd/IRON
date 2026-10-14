@@ -26,13 +26,13 @@ if TYPE_CHECKING:
     from aie.utils.hostruntime.xrtruntime.hostruntime import XRTKernelHandle
     from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
-    from .xrt import ParameterBlock, loaded, unload
+    from .xrt import ParameterBlock
 else:
     try:
         import pyxrt
         from aie.utils.hostruntime.xrtruntime.tensor import XRTTensor
 
-        from .xrt import ParameterBlock, loaded, unload
+        from .xrt import ParameterBlock
     except ImportError:
         # Host stacks without XRT still compile, and trace graphs for reference().
         XRTTensor = None
@@ -107,20 +107,25 @@ class FullELFRun:
     """One run of a full ELF, with its own ctrl scratchpad of per-call values.
 
     Binding one run's feedback argument to another's ``scratchpad_alias``
-    makes what the first drains there the second's per-call values.
+    makes what the first drains there the second's per-call values. The run
+    is made on ``image``'s kernel as the shared runtime loaded it; once the
+    runtime evicts the image, loading it again gives another kernel, and
+    the run has ended.
     """
 
     def __init__(
         self,
         name: str,
-        handle: XRTKernelHandle,
+        image: NPUKernel,
+        kernel: pyxrt.kernel,
         run: pyxrt.run,
         arguments: Mapping[int, XRTTensor],
         feedback_arg: int | None,
         params_path: Path | None,
     ):
         self.name = name
-        self._handle = handle
+        self._image = image
+        self._kernel = kernel
         self.handle = run
         for index, tensor in arguments.items():
             self.bind(index, tensor.buffer_object())
@@ -185,7 +190,7 @@ class FullELFRun:
         return params.alias()
 
     def start(self) -> None:
-        if not loaded(self._handle):
+        if aie_utils.DefaultNPURuntime.load(self._image).kernel is not self._kernel:
             raise RuntimeError(
                 f"{self.name}: the runtime evicted the image this run was made on"
             )
@@ -241,7 +246,8 @@ class FullELFCallable:
         self.kernel = NPUKernel(
             elf_path=str(seq.image), kernel_name=f"{device_name}:{sequence_name}"
         )
-        self._handle = None
+        # The kernel the runs are made on, which outlives an evicted handle's.
+        self._xrt_kernel: pyxrt.kernel | None = None
         self._run: FullELFRun | None = None
         self._runs: list[FullELFRun] = []
         self._buffer_cache = {}
@@ -276,17 +282,21 @@ class FullELFCallable:
 
     @property
     def handle(self) -> XRTKernelHandle:
-        """The ELF in the shared runtime, reloaded (ending every run) if evicted."""
-        if self._handle is None or not loaded(self._handle):
-            self._handle = aie_utils.DefaultNPURuntime.load(self.kernel)
+        """The ELF as the shared runtime holds it: loaded again, ending every
+        run, where the runtime evicted it.
+        """
+        handle = aie_utils.DefaultNPURuntime.load(self.kernel)
+        if handle.kernel is not self._xrt_kernel:
+            self._xrt_kernel = handle.kernel
             self._run = None
             self._runs = []
-        return self._handle
+        return handle
 
     @property
     def run(self) -> FullELFRun:
         """The run a call dispatches, one for the image's life."""
-        if self._run is None or not loaded(self._handle):
+        self.handle  # ends the run where the runtime evicted the image
+        if self._run is None:
             self._run = self._make_run()
         FullELFCallable._holding.pop(id(self), None)
         FullELFCallable._holding[id(self)] = self
@@ -311,9 +321,11 @@ class FullELFCallable:
             return False
         self._run = None
         self._runs = []
-        self._handle = None
+        self._xrt_kernel = None
         FullELFCallable._holding.pop(id(self), None)
-        unload(image)
+        # Its hw_context holds some of the device heap, placed after the runs
+        # made before it: while it lives, the freed runs are holes.
+        aie_utils.DefaultNPURuntime.evict_context(Path(image))
         return True
 
     def _make_run(self) -> FullELFRun:
@@ -339,7 +351,8 @@ class FullELFCallable:
             arguments[self._trace_arg] = self.trace_buffer
         made = FullELFRun(
             self.op.name,
-            self.handle,
+            self.kernel,
+            handle.kernel,
             run,
             arguments,
             self._argument_index.get("feedback"),
