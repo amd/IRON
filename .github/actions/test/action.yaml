@@ -34,7 +34,7 @@ runs:
             TEST_PATH="iron/operators/ iron/tests/"
             ;;
           applications)
-            TEST_PATH="iron/applications/"
+            TEST_PATH="tests/applications/"
             ;;
           *)
             echo "Invalid test_suite: ${{ inputs.test_suite }}"

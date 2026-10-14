@@ -77,7 +77,7 @@ pytest iron/operators/flm/              # an operator with a test of its own
 ### Run Application Tests
 
 ```bash
-pytest iron/applications/
+pytest tests/applications/
 ```
 
 ### Run Specific Test Function
@@ -910,11 +910,11 @@ profiles. The library is four modules:
   are not multiples of their defaults;
   `swiglu`, the SwiGLU feed-forward (`SwiGLU` is it as a graph of its own,
   called in a model's body or alone, device-tested by
-  `iron/operators/swiglu/test.py`; `LogMel`, an audio front end's log-mel
+  `iron/tests/lm/swiglu.py`; `LogMel`, an audio front end's log-mel
   spectrogram, and `Conv2d`, a channels-last convolution, are graphs too,
-  device-tested by `iron/operators/log_mel/test.py` and
-  `iron/operators/conv2d/test.py`, and `ImagePatches` resizes a vision
-  front end's image into patches, `iron/operators/image_patches/test.py`);
+  device-tested by `iron/tests/lm/log_mel.py` and
+  `iron/tests/lm/conv2d.py`, and `ImagePatches` resizes a vision
+  front end's image into patches, `iron/tests/lm/image_patches.py`);
   `geglu`, the GELU-gated one; `sandwich`, a block between two RMS norms;
   `attention`, an encoder's; and `Block` and `BlockOracle`, the attention +
   SwiGLU layer a Llama-style model (Llama 3, Granite 4.2 3B) mixes in
@@ -940,7 +940,7 @@ layout, the tokenizer), `profiles/` (tunables), its test and README:
 - **Required files**: `model.safetensors`, `tokenizer.model` from Hugging Face
 - **Default location**: `/srv/llama3.2-1b/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
 - **Additional deps**: `pip install -r requirements_examples.txt`
-- **Run**: `pytest iron/applications/llama/`, or
+- **Run**: `pytest tests/applications/llama/`, or
   `python -m iron.applications.llama.model model.safetensors tokenizer.model`
   (`--max-seq-len`, a multiple of 2048, sizes the caches: 32768 by default,
   1 GB of them; one compile serves every context up to it). XRT maps
@@ -959,12 +959,13 @@ float32 forward pass on the host:
 
 - **Required files**: `model.safetensors`, `tokenizer.json`
 - **Default location**: `/srv/embeddinggemma-2/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
-- **Run**: `pytest iron/applications/embedding_gemma2/`, or
+- **Run**: `pytest tests/applications/embedding_gemma2/`, or
   `python -m iron.applications.embedding_gemma2.model <dir> --query ... --document ...`
 
-A model's device test goes in `iron/applications/<name>/test.py`: CI's
-example suite runs `iron/applications/`, and the benchmark history names a
-row by that directory.
+A model's device test goes in `tests/applications/<name>/test.py`, and
+imports its application as `iron.applications.<name>`: CI's example suite
+runs `tests/applications/`, and the benchmark history names a row by that
+directory.
 
 ### AIE Kernel Reference
 

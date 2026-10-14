@@ -61,7 +61,7 @@ designs by the table `python -m iron.lm.tune embedding_gemma2` measured.
 ## Testing
 
 ```bash
-pytest iron/applications/embedding_gemma2/
+pytest tests/applications/embedding_gemma2/
 ```
 
 The text encoder's embeddings against the oracle's (their cosine and

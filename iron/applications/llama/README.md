@@ -118,7 +118,7 @@ default caches, a token went from 362 to 338 ms (20 tokens after a
 ## Testing
 
 ```bash
-pytest iron/applications/llama/
+pytest tests/applications/llama/
 ```
 
 Loads the model once and runs the accuracy, determinism and throughput

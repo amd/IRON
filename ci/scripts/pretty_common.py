@@ -97,13 +97,58 @@ def status_emoji(passed: int, total: int, partial: bool = True) -> str:
     return "🟠" if partial else "❌"
 
 
-# Test directories renamed since the results branch began, each old name
-# straight to the newest: row_key maps a path once, so no entry chains.
-RENAMED_DIRECTORIES = {
-    "iron/applications/llama_3.2_1b/": "iron/applications/llama/",
-    "iron/applications/llama3/": "iron/applications/llama/",
-    "iron/applications/embeddinggemma_2/": "iron/applications/embedding_gemma2/",
-    "iron/applications/embeddinggemma2/": "iron/applications/embedding_gemma2/",
+EMBEDDING_GEMMA2 = "tests/applications/embedding_gemma2/test.py::"
+# The towers' tests that moved into a class of EmbeddingGemma 2's one test.py.
+TOWER_CLASSES = {
+    "audio": (
+        "TestAudio",
+        ("test_audio_features", "test_audio_accuracy", "test_audio_latency"),
+    ),
+    "vision": (
+        "TestVision",
+        (
+            "test_image_processor",
+            "test_image_processor_npu2_only",
+            "test_vision_accuracy",
+            "test_vision_latency",
+        ),
+    ),
+}
+
+# Test paths renamed since the results branch began, each old prefix straight
+# to the newest: row_key maps a path by the first prefix it starts with, so
+# a test's own entry goes before its directory's, and no entry chains.
+RENAMED_PATHS = {
+    **{
+        f"iron/applications/{old}/{tower}/test.py::{test}": f"{EMBEDDING_GEMMA2}{cls}::{test}"
+        for old in ("embeddinggemma_2", "embeddinggemma2", "embedding_gemma2")
+        for tower, (cls, tests) in TOWER_CLASSES.items()
+        for test in tests
+    },
+    **{
+        f"iron/applications/{old}/{tower}/test.py::": EMBEDDING_GEMMA2
+        for old in ("embeddinggemma_2", "embeddinggemma2", "embedding_gemma2")
+        for tower in TOWER_CLASSES
+    },
+    "iron/applications/embeddinggemma_2/": "tests/applications/embedding_gemma2/",
+    "iron/applications/embeddinggemma2/": "tests/applications/embedding_gemma2/",
+    "iron/applications/embedding_gemma2/": "tests/applications/embedding_gemma2/",
+    "iron/applications/llama_3.2_1b/": "tests/applications/llama/",
+    "iron/applications/llama3/": "tests/applications/llama/",
+    "iron/applications/llama/": "tests/applications/llama/",
+    "iron/applications/gemma4_flm/": "tests/applications/gemma4_flm/",
+    **{
+        f"iron/operators/{block}/test.py::": f"iron/tests/lm/{block}.py::"
+        for block in (
+            "concat_channels",
+            "conv1d",
+            "conv2d",
+            "image_patches",
+            "log_mel",
+            "max_pool2d",
+            "swiglu",
+        )
+    },
 }
 
 # The module that runs every operator declaring its cases. Its parametrize ids
@@ -115,8 +160,8 @@ def operator_name(test_path: str, test_name: str = "") -> str:
     """Name the operator a row of 'Test Path' and 'Test' belongs to.
 
     'iron/operators/flm/gemm/test.py::test_gemm' names 'flm/gemm', and
-    'iron/applications/llama_3.2_1b/test.py::test_llama' names
-    'llama_3.2_1b'. A catalog row is named by its test's leading id:
+    'tests/applications/llama/test.py::test_llama' names 'llama'. A
+    catalog row is named by its test's leading id:
     'iron/tests/operators/catalog.py::test_operator' with test
     'GEMV-cols_4' names 'GEMV'. Any other test is named by its module.
     """
@@ -124,7 +169,7 @@ def operator_name(test_path: str, test_name: str = "") -> str:
     if file_part == CATALOG_TEST_FILE:
         return test_name.split("-", 1)[0] or UNKNOWN_OPERATOR
     directory, _ = split_test_path(test_path)
-    for prefix in ("iron/operators/", "iron/applications/"):
+    for prefix in ("iron/operators/", "tests/applications/"):
         if directory.startswith(prefix):
             return directory[len(prefix) :] or UNKNOWN_OPERATOR
     stem = os.path.splitext(os.path.basename(file_part))[0]
@@ -145,12 +190,13 @@ def try_parse_float(value: Any) -> Optional[float]:
 
 def row_key(row: Dict[str, str]) -> Tuple[str, str]:
     """Identify the parametrization a row measures, by its test's path now:
-    a row recorded under a renamed directory continues its history.
+    a row recorded under a renamed path continues its history.
     """
     test_path = (row.get("Test Path") or "").strip()
-    for old, new in RENAMED_DIRECTORIES.items():
+    for old, new in RENAMED_PATHS.items():
         if test_path.startswith(old):
             test_path = new + test_path[len(old) :]
+            break
     return test_path, (row.get("Test") or "").strip()
 
 
