@@ -804,7 +804,12 @@ def _build_dispatch_lib(work_dir: Path, artifact: DispatchLibArtifact) -> None:
     # loaded first.
     link = Path(artifact.filename)
     link.unlink(missing_ok=True)
-    link.symlink_to(library)
+    try:
+        link.symlink_to(library)
+    except OSError:
+        # Windows rejects unprivileged symlinks (WinError 1314). A copy is a
+        # loadable library for this build; the digest path remains the source.
+        shutil.copy2(library, link)
     # compile_dispatch_bridge() keeps an existing library of the same content.
     # Its mtime can predate the MLIR. The build then marks the link out of date
     # on every run.
