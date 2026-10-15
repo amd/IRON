@@ -8,7 +8,7 @@ from aie.iron.kernels import KernelContract
 from aie.utils.compile.jit import markers
 from aie.utils.verify import Tolerance
 
-from iron.common import In, Out, Rowwise, Param
+from iron.common import In, Operand, Out, Rowwise, Param
 from iron.common.testing import Case, Testing
 
 from .split3 import SPLIT
@@ -122,18 +122,23 @@ class Magnitude(Rowwise):
                 f"32-element vectors"
             )
 
-    def kernel(self):
-        contract = KernelContract(
-            roles=(markers.In, markers.Out, kernels.Param),
-            parameter_bindings=((2, self.tile_size),),
-            reference=magnitude,
-            tolerance=Tolerance.relative(
-                2e-7, note="measured 1.43e-7 for magnitudes 1e-15 to 1e15"
-            ),
-        )
-        return ExternalFunction(
-            "magnitude_f32",
-            source_string=MAGNITUDE,
-            arg_types=[self.x.obj_type, self.y.obj_type, np.int32],
-            contract=contract,
-        )
+    class Array(Rowwise.Array):
+        width: int
+        x: Operand
+        y: Operand
+
+        def kernel(self):
+            contract = KernelContract(
+                roles=(markers.In, markers.Out, kernels.Param),
+                parameter_bindings=((2, self.tile_size),),
+                reference=magnitude,
+                tolerance=Tolerance.relative(
+                    2e-7, note="measured 1.43e-7 for magnitudes 1e-15 to 1e15"
+                ),
+            )
+            return ExternalFunction(
+                "magnitude_f32",
+                source_string=MAGNITUDE,
+                arg_types=[self.x.obj_type, self.y.obj_type, np.int32],
+                contract=contract,
+            )

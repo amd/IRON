@@ -15,7 +15,7 @@ It exists so the port can be measured against what it was ported from, on
 identical inputs and through the same host path. NPU2 only: the image is
 an 8-column binary.
 
-Its cores and routes are the image's: ``array()`` pins the operands to the
+Its cores and routes are the image's: ``Array.build()`` pins the operands to the
 image's shim channels and places its parameter blocks, and ``sequence()``
 moves data in the order the memtiles consume it.
 
@@ -35,11 +35,23 @@ import numpy as np
 from aie.dialects.aie import AIEArch, DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import Buffer, DmaEndpoint, Lock
-from aie.iron.device import Tile
+from aie.iron.device import Device, Tile
 from ml_dtypes import bfloat16
 
-from iron.common import In, Out, Unresolvable, Value, Xclbin, Auto, Param, Select
-from iron.operators.flm.gemm.design import CT_OUT_LEN, K_TILE, M_TILE
+from iron.common import (
+    In,
+    Out,
+    Unresolvable,
+    Value,
+    Xclbin,
+    Auto,
+    Param,
+    Select,
+    Built,
+    Operand,
+    Operator,
+)
+from iron.operators.flm.gemm.design import CT_OUT_LEN, K_TILE, M_TILE, Gelu, Rounding
 from iron.operators.flm.gemm.op import GEMM
 
 # The FastFlowLM revision the overlay is taken from. A commit SHA rather than
@@ -87,6 +99,13 @@ def _parameter_words(op) -> list[int]:
         int(np.float32(clamp_min).view(np.int32)),
         int(np.float32(clamp_max).view(np.int32)),
     ]
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class _Built(Built):
+    """The image's build, with the locks the sequence releases."""
+
+    parameter_locks: list[Lock]
 
 
 class Shipped(
@@ -148,36 +167,49 @@ class Shipped(
     n_chunks = n_units = units_valid = units_repeat = valid = None
     parameters = Value(derive=_parameter_words, words=PARAMETER_WORDS)
 
-    def array(self) -> list:
-        """What the sequence reaches of the image: the shim channels each
-        operand's lanes stream on, each core's parameter block at the
-        address its program reads, and the lock it waits on, which the
-        sequence releases (``parameter_locks``).
-        """
-        mm2s, s2mm = DMAChannelDir.MM2S, DMAChannelDir.S2MM
-        shims = [Tile(c, 0) for c in range(COLS)]
-        pins = [
-            (self.A, [DmaEndpoint(shims[c], mm2s, 0) for c in A_SOURCE_COL]),
-            (self.B, [DmaEndpoint(shims[c], mm2s, 1) for c in range(COLS)]),
-            (self.C, [DmaEndpoint(shims[c], s2mm, 0) for c in range(COLS)]),
-        ]
-        for operand, ends in pins:
-            operand.pin(ends)
-        dev = self.dev
-        cores = [Tile(col, row) for row in dev.core_rows for col in range(dev.cols)]
-        blocks = [
-            Buffer(
-                np.ndarray[(PARAMETER_WORDS,), np.dtype[np.int32]],
-                name=f"rtp_{tile.col}_{tile.row}",
-                tile=tile,
-                use_write_rtp=True,
-                address=RTP_ADDRESS,
-            )
-            for tile in cores
-        ]
-        self.parameter_locks = [Lock(tile, lock_id=RTP_LOCK_ID) for tile in cores]
-        ends = [end for _, lane_ends in pins for end in lane_ends]
-        return [*ends, *blocks, *self.parameter_locks]
+    class Array(Operator.Array):
+        rows: int
+        cols: int
+        b_dtype: object
+        b_col_maj: bool
+        epilogue_modes: tuple
+        rounding: Rounding | str
+        gelu: Gelu | str
+        A: Operand
+        B: Operand
+        C: Operand
+        dev: Device
+
+        def build(self) -> Built:
+            """What the sequence reaches of the image: the shim channels each
+            operand's lanes stream on, each core's parameter block at the
+            address its program reads, and the lock it waits on, which the
+            sequence releases (``parameter_locks``).
+            """
+            mm2s, s2mm = DMAChannelDir.MM2S, DMAChannelDir.S2MM
+            shims = [Tile(c, 0) for c in range(COLS)]
+            pins = [
+                (self.A, [DmaEndpoint(shims[c], mm2s, 0) for c in A_SOURCE_COL]),
+                (self.B, [DmaEndpoint(shims[c], mm2s, 1) for c in range(COLS)]),
+                (self.C, [DmaEndpoint(shims[c], s2mm, 0) for c in range(COLS)]),
+            ]
+            for operand, ends in pins:
+                operand.pin(ends)
+            dev = self.dev
+            cores = [Tile(col, row) for row in dev.core_rows for col in range(dev.cols)]
+            blocks = [
+                Buffer(
+                    np.ndarray[(PARAMETER_WORDS,), np.dtype[np.int32]],
+                    name=f"rtp_{tile.col}_{tile.row}",
+                    tile=tile,
+                    use_write_rtp=True,
+                    address=RTP_ADDRESS,
+                )
+                for tile in cores
+            ]
+            locks = [Lock(tile, lock_id=RTP_LOCK_ID) for tile in cores]
+            ends = [end for _, lane_ends in pins for end in lane_ends]
+            return _Built([*ends, *blocks, *locks], parameter_locks=locks)
 
     def resolve(self, dev):
         if dev is not None and (dev.arch is not AIEArch.AIE2p or dev.cols < 8):
@@ -209,7 +241,7 @@ class Shipped(
         # Every word precedes the first release, so no core reads a
         # half-written block.
         rt.preamble()
-        for lock in self.parameter_locks:
+        for lock in rt.built.parameter_locks:
             lock.set(1)
         M, K, N = self.M, self.K, self.N
         k_iters = K // K_TILE

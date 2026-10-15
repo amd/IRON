@@ -17,5 +17,6 @@ class GELU(UnaryElementwise):
 
     tile_cap: ClassVar[int] = 8192
 
-    def kernel(self):
-        return activation.gelu_sized(self.tile_size)
+    class Array(UnaryElementwise.Array):
+        def kernel(self):
+            return activation.gelu_sized(self.tile_size)

@@ -7,17 +7,19 @@ streaming fixed-size lines of every declared operand through its kernel.
 A ``replicate=True`` input is one line each core holds for the whole call
 and every line meets (``RowwiseMul``'s row).
 
-A concrete operator is one small subclass naming the kernel:
+A concrete operator is one small subclass naming the kernel on its
+``Array``:
 
 ```python
 class ReLU(UnaryElementwise):
-    def kernel(self):
-        return eltwise.relu_sized(self.tile_size)
+    class Array(UnaryElementwise.Array):
+        def kernel(self):
+            return eltwise.relu_sized(self.tile_size)
 ```
 
 A core calls the kernel in its contract's argument order, with the scalars
 the factory binds and those ``scalars()`` supplies. A field either reads is
-``Param(..., array=True)``.
+one the ``Array`` lists.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from aie.utils.verify import Tolerance, Verdict, round_to
 from ml_dtypes import bfloat16
 
 from .declare import (
+    Built,
     Chain,
     Divisors,
     Extent,
@@ -50,6 +53,7 @@ from .declare import (
     Operand,
     Operator,
     Out,
+    Rtp,
     Unresolvable,
     Value,
     Auto,
@@ -281,13 +285,14 @@ class _Chains:
                     )
                 if not cores:
                     continue
+                config = link.op.array_config()
                 for j, call in enumerate(link.op.chain()):
                     calls.append((link, j, call.operands))
                     self.steps.setdefault(
                         (link.array_key(), j),
                         (
                             call.kernel,
-                            *link.op._arguments(
+                            *config.arguments(
                                 call.kernel, call.scalars, len(call.operands), 1
                             ),
                         ),
@@ -297,6 +302,12 @@ class _Chains:
             for _ in range(cores if any(chains) else 0)
         ]
         self.fifos: list[list[ObjectFifo]] = []
+
+    def on(self, cores: int) -> Self:
+        """These chains as ``cores`` cores apply them: each core's kernels,
+        scratch line and the steps' input streams.
+        """
+        return type(self)(self.op, cores)
 
     @property
     def arity(self) -> int:
@@ -692,14 +703,6 @@ class Elementwise(Operator):
         (out,) = self.outputs
         return out.elements
 
-    def kernel(self) -> ExternalFunction:
-        """The ``ExternalFunction`` each core calls over one line."""
-        raise NotImplementedError(f"{type(self).__name__} declares no kernel()")
-
-    def scalars(self) -> tuple:
-        """The kernel's scalar arguments its contract leaves unbound, in order."""
-        return ()
-
     def chain(self) -> tuple[KernelCall, ...]:
         """The kernel calls a core makes over one line, in order, when
         another operator's core applies this one (``Finish``, ``Prepare``):
@@ -708,50 +711,8 @@ class Elementwise(Operator):
         """
         extra = {b.name for b in self.finish_inputs}
         operands = tuple(b for b in self.inputs if b.name not in extra)
-        return (KernelCall(self.kernel(), self.scalars(), operands),)
-
-    def _arguments(
-        self, kernel: ExternalFunction, given: tuple, n_in: int, n_out: int
-    ) -> tuple[list[int], dict]:
-        """Where each tile goes in a call, and the scalar arguments.
-
-        Args:
-            kernel: The kernel called.
-            given: The scalars its contract leaves unbound, in order.
-            n_in: The input tiles a call is given.
-            n_out: The output tiles a call is given.
-
-        Returns:
-            The argument positions of the inputs then the outputs, in the
-            order a core acquires them, and the scalar values by position.
-        """
-        contract = kernel.contract
-        if contract is None:
-            return list(range(n_in + n_out)), {}
-        if contract.accumulates:
-            raise ValueError(
-                f"{type(self).__name__}: an elementwise kernel writes its output; "
-                f"{kernel.name} accumulates into one"
-            )
-        roles = contract.roles
-        scalars = dict(contract.parameter_bindings)
-        free = [
-            i for i, r in enumerate(roles) if r is kernels.Param and i not in scalars
-        ]
-        if len(free) != len(given):
-            raise ValueError(
-                f"{type(self).__name__}: {kernel.name} leaves {len(free)} scalar(s) "
-                f"unbound; {len(given)} given"
-            )
-        scalars.update(zip(free, given))
-        outs = list(contract.out_indices)
-        ins = [i for i in range(len(roles)) if i not in scalars and i not in outs]
-        if (len(ins), len(outs)) != (n_in, n_out):
-            raise ValueError(
-                f"{type(self).__name__}: {kernel.name} takes {len(ins)} input and "
-                f"{len(outs)} output tile(s); it is given {n_in} and {n_out}"
-            )
-        return ins + outs, scalars
+        config = self.array_config()
+        return (KernelCall(config.kernel(), config.scalars(), operands),)
 
     def over(self, elements: int, line: int) -> Self:
         """This operator over ``elements`` elements in lines of ``line``, on
@@ -763,7 +724,7 @@ class Elementwise(Operator):
         raise ValueError(f"{type(self).__name__} is not a run of lines")
 
     def at_line(self, line: int, dtype, dev, ordered: bool = True, at: int = 0) -> Self:
-        own = type(self).array is not Elementwise.array
+        own = type(self).Array.build is not Elementwise.Array.build
         if own and type(self).chain is Elementwise.chain:
             raise ValueError(f"{type(self).__name__}'s cores run an array of their own")
         streamed = [np.dtype(b.dtype) for b in self.buffers if b.streamed]
@@ -774,6 +735,7 @@ class Elementwise(Operator):
             )
         op = self.over(line, line).resolved(dev)
         tile = op.inputs[at].name
+        config = op.array_config()
         for j, call in enumerate(op.chain()):
             if j and tile in {o.name for o in call.operands if o is not None}:
                 raise ValueError(
@@ -781,19 +743,19 @@ class Elementwise(Operator):
                     f"{tile}, the line the first overwrites"
                 )
             # A factory refuses a line it does not run at.
-            op._arguments(call.kernel, call.scalars, len(call.operands), 1)
+            config.arguments(call.kernel, call.scalars, len(call.operands), 1)
         return op
 
     def tolerance(self) -> Tolerance | None:
         if self.finish:
             return super().tolerance()
-        kernel = self.kernel()
+        kernel = self.array_config().kernel()
         if kernel.contract is None:
             return None
         return kernel.contract_for(resolve_target_arch(self.dev)).tolerance
 
     def ops(self) -> int:
-        contract = self.kernel().contract
+        contract = self.array_config().kernel().contract
         per_call = None if contract is None else contract.ops_per_call
         return super().ops() if per_call is None else per_call * self.lines
 
@@ -801,8 +763,10 @@ class Elementwise(Operator):
         """The kernel contract's reference, line by line: what the cores compute."""
         op, lines, scalars = self._kernel_arguments(inputs)
         (out,) = op.outputs
-        y = op.kernel().expected(
-            lines, scalars=scalars, arch=resolve_target_arch(op.dev)
+        y = (
+            op.array_config()
+            .kernel()
+            .expected(lines, scalars=scalars, arch=resolve_target_arch(op.dev))
         )
         y = np.asarray(y).astype(out.host_dtype, copy=False)
         return y.reshape(out.host_shape, copy=False)
@@ -825,14 +789,18 @@ class Elementwise(Operator):
             expected = self._call_reference(inputs)
         _, lines, scalars = self._kernel_arguments([inputs[b.name] for b in op.inputs])
         (out,) = op.outputs
-        verdict = op.kernel().judge(
-            written[out.name],
-            expected[out.name],
-            calls=op.lines,
-            tolerance=tolerance,
-            inputs=lines,
-            scalars=scalars,
-            arch=resolve_target_arch(op.dev),
+        verdict = (
+            op.array_config()
+            .kernel()
+            .judge(
+                written[out.name],
+                expected[out.name],
+                calls=op.lines,
+                tolerance=tolerance,
+                inputs=lines,
+                scalars=scalars,
+                arch=resolve_target_arch(op.dev),
+            )
         )
         return {out.name: verdict}
 
@@ -844,7 +812,8 @@ class Elementwise(Operator):
             NotImplementedError: The kernel declares no reference.
         """
         op = self.resolved()
-        kernel = op.kernel()
+        config = op.array_config()
+        kernel = config.kernel()
         arch = resolve_target_arch(op.dev)
         contract = None if kernel.contract is None else kernel.contract_for(arch)
         if contract is None or contract.reference is None:
@@ -852,7 +821,7 @@ class Elementwise(Operator):
                 f"{type(self).__name__}: its kernel declares no reference; "
                 f"define reference()"
             )
-        _, scalars = op._arguments(kernel, op.scalars(), len(inputs), 1)
+        _, scalars = config.arguments(kernel, op.chain()[0].scalars, len(inputs), 1)
         # A held line is one row every call broadcasts against.
         lines = [
             x.reshape(1 if b.replicate else op.lines, -1, copy=False)
@@ -864,84 +833,153 @@ class Elementwise(Operator):
             tuple(scalars[i] for i in contract.reference_indices() if i in scalars),
         )
 
-    def array(self) -> list:
-        finish = Finish(self, self.cores)
-        streams = [
-            b for b in self.buffers if b.streamed and b not in self.finish_inputs
-        ]
-        ins = [b for b in streams if isinstance(b, In)]
-        outs = [b for b in streams if b.drains]
-        n_in = len(ins)
-        cores = self.cores
-        kernel = self.kernel()
-        positions, scalars = self._arguments(kernel, self.scalars(), n_in, len(outs))
-        order = {i: k for k, i in enumerate(positions)}
-        n_args = len(positions) + len(scalars)
+    class Array(Operator.Array):
+        num_aie_columns: int
+        num_channels: int
+        tile_size: int
+        count: Value
+        buffers: list[Operand]
+        finish_inputs: list[Operand]
+        finishing: Finish
 
-        def slot(k: int) -> str:
-            col, chan = divmod(k, self.num_channels)
-            return f"{col}" if self.num_channels == 1 else f"{col}_{chan}"
+        @property
+        def cores(self) -> int:
+            return self.num_aie_columns * self.num_channels
 
-        def fifos(stream, name):
-            # A held line, acquired once per call, is one fifo per lane that
-            # the cores of its lane share.
-            if stream.replicate:
-                return [
-                    ObjectFifo(stream.obj_type, depth=1) for j in range(stream.count)
-                ]
-            depth = stream.l1_depth
-            return [ObjectFifo(stream.obj_type, depth=depth) for k in range(cores)]
+        def kernel(self) -> ExternalFunction:
+            """The ``ExternalFunction`` each core calls over one line."""
+            raise NotImplementedError(f"{type(self).__qualname__} declares no kernel()")
 
-        of_ins = [fifos(s, f"in{i}") for i, s in enumerate(ins)]
-        of_outs = [
-            fifos(s, f"out{i}" if len(outs) > 1 else "out") for i, s in enumerate(outs)
-        ]
-        rtps = self.rtp([self.count, *finish.values], cores=cores)
-        n_fifos = n_in + len(outs)
-        held = [s.replicate for s in ins] + [False] * len(outs)
+        def scalars(self) -> tuple:
+            """The kernel's scalar arguments its contract leaves unbound, in order."""
+            return ()
 
-        def core_fn(*args):
-            fifos = args[:n_fifos]
-            kernel_fn, rtp = args[n_fifos : n_fifos + 2]
-            rest = args[n_fifos + 2 :]
-            words = rtp.read()
-            n = words[self.count]
-            mode = finish.mode(words)
-            kept = {j: f.acquire(1) for j, f in enumerate(fifos) if held[j]}
-            for _ in range_(n):
-                elements = [
-                    kept[j] if held[j] else f.acquire(1) for j, f in enumerate(fifos)
-                ]
-                tile = elements[-1]
-                elements[-1] = finish.target(rest, mode, tile)
-                kernel_fn(
-                    *(
-                        elements[order[i]] if i in order else scalars[i]
-                        for i in range(n_args)
-                    )
+        def arguments(
+            self, kernel: ExternalFunction, given: tuple, n_in: int, n_out: int
+        ) -> tuple[list[int], dict]:
+            """Where each tile goes in a call, and the scalar arguments.
+
+            Args:
+                kernel: The kernel called.
+                given: The scalars its contract leaves unbound, in order.
+                n_in: The input tiles a call is given.
+                n_out: The output tiles a call is given.
+
+            Returns:
+                The argument positions of the inputs then the outputs, in the
+                order a core acquires them, and the scalar values by position.
+            """
+            contract = kernel.contract
+            if contract is None:
+                return list(range(n_in + n_out)), {}
+            if contract.accumulates:
+                raise ValueError(
+                    f"{type(self).__qualname__}: an elementwise kernel writes its output; "
+                    f"{kernel.name} accumulates into one"
                 )
-                finish.apply(rest, mode, tile)
-                for j, f in enumerate(fifos):
-                    if not held[j]:
-                        f.release(1)
-            for j in kept:
-                fifos[j].release(1)
+            roles = contract.roles
+            scalars = dict(contract.parameter_bindings)
+            free = [
+                i
+                for i, r in enumerate(roles)
+                if r is kernels.Param and i not in scalars
+            ]
+            if len(free) != len(given):
+                raise ValueError(
+                    f"{type(self).__qualname__}: {kernel.name} leaves {len(free)} scalar(s) "
+                    f"unbound; {len(given)} given"
+                )
+            scalars.update(zip(free, given))
+            outs = list(contract.out_indices)
+            ins = [i for i in range(len(roles)) if i not in scalars and i not in outs]
+            if (len(ins), len(outs)) != (n_in, n_out):
+                raise ValueError(
+                    f"{type(self).__qualname__}: {kernel.name} takes {len(ins)} input and "
+                    f"{len(outs)} output tile(s); it is given {n_in} and {n_out}"
+                )
+            return ins + outs, scalars
 
-        workers = [
-            Worker(
-                core_fn,
-                [of[k % len(of)].cons() for of in of_ins]
-                + [of[k].prod() for of in of_outs]
-                + [kernel, rtps[k], *finish.args(k)],
-            )
-            for k in range(cores)
-        ]
-        for stream, of in zip(ins, of_ins):
-            stream.bind([f.prod() for f in of])
-        for stream, of in zip(outs, of_outs):
-            stream.bind([f.cons() for f in of])
-        finish.bind()
-        return workers
+        def build(self) -> Built:
+            finish = self.finishing.on(self.cores)
+            streams = [
+                b for b in self.buffers if b.streamed and b not in self.finish_inputs
+            ]
+            ins = [b for b in streams if isinstance(b, In)]
+            outs = [b for b in streams if b.drains]
+            n_in = len(ins)
+            cores = self.cores
+            kernel = self.kernel()
+            positions, scalars = self.arguments(kernel, self.scalars(), n_in, len(outs))
+            order = {i: k for k, i in enumerate(positions)}
+            n_args = len(positions) + len(scalars)
+
+            def slot(k: int) -> str:
+                col, chan = divmod(k, self.num_channels)
+                return f"{col}" if self.num_channels == 1 else f"{col}_{chan}"
+
+            def fifos(stream, name):
+                # A held line, acquired once per call, is one fifo per lane that
+                # the cores of its lane share.
+                if stream.replicate:
+                    return [
+                        ObjectFifo(stream.obj_type, depth=1)
+                        for j in range(stream.count)
+                    ]
+                depth = stream.l1_depth
+                return [ObjectFifo(stream.obj_type, depth=depth) for k in range(cores)]
+
+            of_ins = [fifos(s, f"in{i}") for i, s in enumerate(ins)]
+            of_outs = [
+                fifos(s, f"out{i}" if len(outs) > 1 else "out")
+                for i, s in enumerate(outs)
+            ]
+            rtps = [Rtp([self.count, *finish.values]) for _ in range(cores)]
+            n_fifos = n_in + len(outs)
+            held = [s.replicate for s in ins] + [False] * len(outs)
+
+            def core_fn(*args):
+                fifos = args[:n_fifos]
+                kernel_fn, rtp = args[n_fifos : n_fifos + 2]
+                rest = args[n_fifos + 2 :]
+                words = rtp.read()
+                n = words[self.count]
+                mode = finish.mode(words)
+                kept = {j: f.acquire(1) for j, f in enumerate(fifos) if held[j]}
+                for _ in range_(n):
+                    elements = [
+                        kept[j] if held[j] else f.acquire(1)
+                        for j, f in enumerate(fifos)
+                    ]
+                    tile = elements[-1]
+                    elements[-1] = finish.target(rest, mode, tile)
+                    kernel_fn(
+                        *(
+                            elements[order[i]] if i in order else scalars[i]
+                            for i in range(n_args)
+                        )
+                    )
+                    finish.apply(rest, mode, tile)
+                    for j, f in enumerate(fifos):
+                        if not held[j]:
+                            f.release(1)
+                for j in kept:
+                    fifos[j].release(1)
+
+            workers = [
+                Worker(
+                    core_fn,
+                    [of[k % len(of)].cons() for of in of_ins]
+                    + [of[k].prod() for of in of_outs]
+                    + [kernel, rtps[k], *finish.args(k)],
+                )
+                for k in range(cores)
+            ]
+            for stream, of in zip(ins, of_ins):
+                stream.bind([f.prod() for f in of])
+            for stream, of in zip(outs, of_outs):
+                stream.bind([f.cons() for f in of])
+            finish.bind()
+            return Built(workers, rtps)
 
 
 class UnaryElementwise(Elementwise):

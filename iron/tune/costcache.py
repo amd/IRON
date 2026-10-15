@@ -244,7 +244,9 @@ class CostCache:
         if references[0] is Elementwise.reference:
             resolved = op.resolved()
             arch = resolve_target_arch(resolved.dev)
-            references.append(resolved.kernel().contract_for(arch).reference)
+            references.append(
+                resolved.array_config().kernel().contract_for(arch).reference
+            )
         judgement = (gates, [f"{r.__module__}.{r.__qualname__}" for r in references])
         return hashlib.sha256(
             repr(("judged", default, entry, judgement)).encode()

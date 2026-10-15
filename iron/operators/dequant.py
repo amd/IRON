@@ -28,7 +28,7 @@ class Dequant(UnaryElementwise):
         ),
     )
 
-    group_size: int = Param(default=32, repr=False, array=True)
+    group_size: int = Param(default=32, repr=False)
     packed: int = Param(
         derive=lambda op: op.size // 2 + (op.size // op.group_size) * 2, repr=False
     )
@@ -60,5 +60,9 @@ class Dequant(UnaryElementwise):
         packed = (op.tile_size // 2) + (op.tile_size // self.group_size) * 2
         return dataclasses.replace(op, in_tile=packed)
 
-    def kernel(self):
-        return datamovement.expand(self.tile_size, self.group_size)
+    class Array(UnaryElementwise.Array):
+        group_size: int
+        in_tile: int
+
+        def kernel(self):
+            return datamovement.expand(self.tile_size, self.group_size)

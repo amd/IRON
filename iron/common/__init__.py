@@ -10,6 +10,7 @@ that names only its kernel.
 """
 
 from .declare import (
+    Built,
     Chain,
     Divisors,
     DispatchTime,
@@ -20,6 +21,7 @@ from .declare import (
     Operand,
     Operator,
     Out,
+    Rtp,
     Unresolvable,
     Value,
     Width,
@@ -42,6 +44,7 @@ from .elementwise import (
 
 __all__ = [
     "BinaryElementwise",
+    "Built",
     "Chain",
     "DispatchTime",
     "Divisors",
@@ -56,6 +59,7 @@ __all__ = [
     "Operator",
     "Out",
     "Prepare",
+    "Rtp",
     "Rowwise",
     "Select",
     "UnaryElementwise",

@@ -19,6 +19,21 @@ from .operand import Operand
 from .shape import Select, Shape
 from .value import Extent, Value
 
+# What an Array may list besides the operator's fields and members: its
+# operands, the chains as its cores apply them, and the device.
+LIBRARY_VIEWS = frozenset(
+    {
+        "buffers",
+        "inputs",
+        "outputs",
+        "finish_inputs",
+        "prepare_inputs",
+        "finishing",
+        "preparing",
+        "dev",
+    }
+)
+
 
 class Declaration:
     """What an operator class declares: its members and the kind of each field.
@@ -44,9 +59,9 @@ class Declaration:
         autos: The `Auto` fields.
         tunables: The `Auto` fields a caller, a profile or the tuner sets.
         domains: Each tunable's declared `Domain`, by name.
-        array: The fields the array reads: what a stream's tile, a core's
-            block of it, its dtype, its replication or its presence names,
-            and what declares itself ``array=True``.
+        array: The fields the array reads, which its ``Array`` lists: at
+            least what a stream's tile, a core's block of it, its dtype, its
+            replication or its presence names.
         probes: Each `Param(probe=)` field's probe, by name.
     """
 
@@ -224,8 +239,8 @@ class Declaration:
                     f"{cls.__name__}.{n}: when={when!r} must be a callable of "
                     f"(op, dev), the flag the tunable is searched under"
                 )
-        # The array tier: what a stream's tile, a core's block of it, its dtype,
-        # its replication or its presence names, and what declares itself array=True.
+        # The array tier: what the Array lists, which must hold what a stream's
+        # tile, a core's block of it, its dtype, its replication or its presence names.
         named: set[str] = set()
         for m in members:
             if isinstance(m, Operand) and m.obj_dims is not None:
@@ -238,9 +253,28 @@ class Declaration:
                     named.add(m.declared_dtype.name)
                 if m.when is not None:
                     named.add(m.when.name)
-        self.array = tuple(
-            n for n in fields if n in named or (n in specs and specs[n].array)
+        listed = (
+            {f.name for f in dataclasses.fields(cls.Array)}
+            if dataclasses.is_dataclass(cls.Array)
+            else set()
         )
+        stray = sorted(
+            listed - fields.keys() - {m.name for m in members} - LIBRARY_VIEWS
+        )
+        if stray:
+            raise TypeError(
+                f"{cls.__name__}.Array lists {stray}, which are neither fields nor "
+                f"members of {cls.__name__}; compute them in the Array"
+            )
+        unlisted = sorted(named - listed)
+        if unlisted:
+            raise TypeError(
+                f"{cls.__name__}: {unlisted} configure the array (a stream's tile, "
+                f"lanes, dtype or presence names them), but {cls.__name__}.Array "
+                f"does not list them"
+            )
+        own = fields.keys() - {f.name for f in dataclasses.fields(library)}
+        self.array = tuple(n for n in fields if n in listed and n in own)
         self.probes = {
             n: s.probe for n, s in params.items() if s.probe is not dataclasses.MISSING
         }

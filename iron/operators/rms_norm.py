@@ -5,7 +5,7 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise, norm
 from aie.utils.verify import Tolerance
 
-from iron.common import In, KernelCall, Out, Rowwise, Param
+from iron.common import Built, In, KernelCall, Operand, Out, Rowwise, Rtp, Param
 from iron.common.elementwise import Sweep
 from iron.common.testing import Testing
 
@@ -29,8 +29,8 @@ class RMSNorm(Rowwise):
     )
 
     # The epsilon under the root: 1e-5 by default; a model states its own.
-    epsilon: float = Param(default=1e-5, array=True)
-    weighted: bool = Param(default=False, array=True)
+    epsilon: float = Param(default=1e-5)
+    weighted: bool = Param(default=False)
 
     x = In(
         Rowwise.rows,
@@ -61,17 +61,12 @@ class RMSNorm(Rowwise):
                 f"the weight row beside each line"
             )
 
-    def kernel(self):
-        return norm.rms_norm_eps(self.tile_size)
-
-    def scalars(self) -> tuple:
-        return (self.epsilon,)
-
     def chain(self) -> tuple[KernelCall, ...]:
         if not self.weighted:
             return super().chain()
+        config = self.array_config()
         return (
-            KernelCall(self.kernel(), self.scalars(), (self.x,)),
+            KernelCall(config.kernel(), config.scalars(), (self.x,)),
             KernelCall(eltwise.mul_sized(self.tile_size), (), (None, self.weight)),
         )
 
@@ -94,79 +89,98 @@ class RMSNorm(Rowwise):
             "smallest normal bf16",
         )
 
-    def array(self) -> list:
-        if not self.weighted:
-            return super().array()
-        tile_ty = self.x.obj_type
-        weights_ty = self.weight.obj_type
-        cols, chans = self.num_aie_columns, self.num_channels
-        depth = self.x.l1_depth
-        rms_norm = self.kernel()
-        eltwise_mul = eltwise.mul_sized(self.tile_size)
-        of_ins = [
-            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
-        ]
-        of_ws = [ObjectFifo(weights_ty, depth=depth) for j in range(chans)]
-        of_mid = [
-            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
-        ]
-        of_outs = [
-            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
-        ]
-        n_cores = cols * chans
-        rtps = self.rtp([self.count], cores=2 * n_cores)
+    class Array(Rowwise.Array):
+        epsilon: float
+        weighted: bool
+        x: Operand
+        weight: Operand | None
+        y: Operand
 
-        def core_norm(of_in, of_out, rms, rtp):
-            n = rtp.read()[self.count]
-            for _ in range_(n):
-                elem_in = of_in.acquire(1)
-                elem_out = of_out.acquire(1)
-                rms(elem_in, elem_out, self.tile_size, self.epsilon)
-                of_in.release(1)
-                of_out.release(1)
+        def kernel(self):
+            return norm.rms_norm_eps(self.tile_size)
 
-        def core_mul(of_in, of_w, of_out, mul, rtp):
-            n = rtp.read()[self.count]
-            elem_w = of_w.acquire(1)
-            for _ in range_(n):
-                elem_in = of_in.acquire(1)
-                elem_out = of_out.acquire(1)
-                mul(elem_in, elem_w, elem_out, self.tile_size)
-                of_in.release(1)
-                of_out.release(1)
-            of_w.release(1)
+        def scalars(self) -> tuple:
+            return (self.epsilon,)
 
-        workers = []
-        for i in range(cols):
-            for j in range(chans):
-                k = i * chans + j
-                workers.append(
-                    Worker(
-                        core_norm,
-                        [
-                            of_ins[k].cons(),
-                            of_mid[k].prod(),
-                            rms_norm,
-                            rtps[k],
-                        ],
+        def build(self) -> Built:
+            if not self.weighted:
+                return super().build()
+            tile_ty = self.x.obj_type
+            weights_ty = self.weight.obj_type
+            cols, chans = self.num_aie_columns, self.num_channels
+            depth = self.x.l1_depth
+            rms_norm = self.kernel()
+            eltwise_mul = eltwise.mul_sized(self.tile_size)
+            of_ins = [
+                ObjectFifo(tile_ty, depth=depth)
+                for i in range(cols)
+                for j in range(chans)
+            ]
+            of_ws = [ObjectFifo(weights_ty, depth=depth) for j in range(chans)]
+            of_mid = [
+                ObjectFifo(tile_ty, depth=depth)
+                for i in range(cols)
+                for j in range(chans)
+            ]
+            of_outs = [
+                ObjectFifo(tile_ty, depth=depth)
+                for i in range(cols)
+                for j in range(chans)
+            ]
+            n_cores = cols * chans
+            rtps = [Rtp([self.count]) for _ in range(2 * n_cores)]
+
+            def core_norm(of_in, of_out, rms, rtp):
+                n = rtp.read()[self.count]
+                for _ in range_(n):
+                    elem_in = of_in.acquire(1)
+                    elem_out = of_out.acquire(1)
+                    rms(elem_in, elem_out, self.tile_size, self.epsilon)
+                    of_in.release(1)
+                    of_out.release(1)
+
+            def core_mul(of_in, of_w, of_out, mul, rtp):
+                n = rtp.read()[self.count]
+                elem_w = of_w.acquire(1)
+                for _ in range_(n):
+                    elem_in = of_in.acquire(1)
+                    elem_out = of_out.acquire(1)
+                    mul(elem_in, elem_w, elem_out, self.tile_size)
+                    of_in.release(1)
+                    of_out.release(1)
+                of_w.release(1)
+
+            workers = []
+            for i in range(cols):
+                for j in range(chans):
+                    k = i * chans + j
+                    workers.append(
+                        Worker(
+                            core_norm,
+                            [
+                                of_ins[k].cons(),
+                                of_mid[k].prod(),
+                                rms_norm,
+                                rtps[k],
+                            ],
+                        )
                     )
-                )
-        for i in range(cols):
-            for j in range(chans):
-                k = i * chans + j
-                workers.append(
-                    Worker(
-                        core_mul,
-                        [
-                            of_mid[k].cons(),
-                            of_ws[j].cons(),
-                            of_outs[k].prod(),
-                            eltwise_mul,
-                            rtps[n_cores + k],
-                        ],
+            for i in range(cols):
+                for j in range(chans):
+                    k = i * chans + j
+                    workers.append(
+                        Worker(
+                            core_mul,
+                            [
+                                of_mid[k].cons(),
+                                of_ws[j].cons(),
+                                of_outs[k].prod(),
+                                eltwise_mul,
+                                rtps[n_cores + k],
+                            ],
+                        )
                     )
-                )
-        self.x.bind([f.prod() for f in of_ins])
-        self.y.bind([f.cons() for f in of_outs])
-        self.weight.bind([f.prod() for f in of_ws])
-        return workers
+            self.x.bind([f.prod() for f in of_ins])
+            self.y.bind([f.cons() for f in of_outs])
+            self.weight.bind([f.prod() for f in of_ws])
+            return Built(workers, rtps)

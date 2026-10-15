@@ -18,7 +18,7 @@ from aie.utils.compile.jit.markers import In, Out
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import BinaryElementwise
+from iron.common import BinaryElementwise, Operand
 from iron.tests.toolchain.lowering import lower
 from iron.tests.toolchain.tools import requires
 
@@ -37,20 +37,25 @@ extern "C" void vadd(bfloat16 *a, bfloat16 *b, bfloat16 *y, int n) {
 class VectorAdd(BinaryElementwise):
     """y = a + b."""
 
-    def kernel(self):
-        tiles = [self.a.obj_type, self.b.obj_type, self.y.obj_type, np.int32]
-        contract = KernelContract(
-            roles=(In, In, Out, Param),
-            parameter_bindings=((3, self.tile_size),),
-            reference=lambda a, b: a + b,
-            tolerance=Tolerance.bf16_ulps(1, atol=2**-126),
-        )
-        return ExternalFunction(
-            "vadd",
-            source_string=VADD,
-            arg_types=tiles,
-            contract=contract,
-        )
+    class Array(BinaryElementwise.Array):
+        a: Operand
+        b: Operand
+        y: Operand
+
+        def kernel(self):
+            tiles = [self.a.obj_type, self.b.obj_type, self.y.obj_type, np.int32]
+            contract = KernelContract(
+                roles=(In, In, Out, Param),
+                parameter_bindings=((3, self.tile_size),),
+                reference=lambda a, b: a + b,
+                tolerance=Tolerance.bf16_ulps(1, atol=2**-126),
+            )
+            return ExternalFunction(
+                "vadd",
+                source_string=VADD,
+                arg_types=tiles,
+                contract=contract,
+            )
 
 
 def test_an_inline_kernel_lowers(device, tmp_path):

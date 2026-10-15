@@ -3,7 +3,7 @@
 
 """The operator: one class declaring the array, the buffers and the sequence.
 
-The fields a tile names, plus those marked ``array=True``, configure the
+The fields its ``Array`` lists, which hold those a tile names, configure the
 array, which serves every extent; the rest reach only the runtime sequence.
 """
 
@@ -46,6 +46,7 @@ from .rtp import Rtp
 from .value import ChainWord, Extent, ExtentWord, PlaceWord, Value
 
 if TYPE_CHECKING:
+    from ..elementwise import Finish, Prepare
     from ..graph.handle import Affine, Handle
     from ..image.artifacts import Artifacts
     from ..image.standalone import OperatorImage
@@ -109,32 +110,52 @@ class _OperatorMeta(type):
         return super().__call__(*args, **kwargs)
 
 
-class _Fenced:
-    """A field outside the array tier, as ``array()`` sees it: using it raises."""
+@dataclasses.dataclass(frozen=True)
+class Built:
+    """What an operator's ``Array.build`` made: what the array declares,
+    and the runtime parameters its cores read, which the sequence writes.
 
-    __slots__ = ("op", "name")
+    An array whose sequence programs more of what it built keeps that on a
+    subclass of its own, which ``sequence`` reads through ``rt.built``.
 
-    def __init__(self, op: str, name: str) -> None:
-        self.op = op
-        self.name = name
+    Attributes:
+        objects: The Workers, Flows, PacketFlows, Locks, TileDmas, Buffers
+            and pinned DmaEndpoints the array declares.
+        rtps: Every core's runtime parameters, one ``Rtp`` each.
+    """
 
-    def refuse(self, *args):
-        raise TypeError(
-            f"{self.op}.array() reads {self.name}, which no tile names: "
-            f"an array serves every extent. Declare it Param(..., array=True) "
-            f"if the array does read it, or move the dependence into the "
-            f"sequence or a Value"
+    objects: list
+    rtps: list[Rtp] = dataclasses.field(default_factory=list)
+
+
+@dataclass_transform(kw_only_default=True, frozen_default=True)
+class Array:
+    """The array tier of an operator, which its array is built from alone:
+    an operator's ``Array`` names the fields, operands, values and chains
+    its ``build`` reads. Each subclass is a frozen dataclass, made so as
+    its body finishes.
+
+    Besides the operator's own fields and members, an ``Array`` may name
+    its ``finish`` and ``prepare`` chains, its operands (``buffers``,
+    ``inputs``, ``outputs``, ``finish_inputs``, ``prepare_inputs``), the
+    chains as its cores apply them (``finishing``, ``preparing``) and
+    ``dev``; a property of the operator it may not, since what it reads
+    would be outside the array's identity.
+    """
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        dataclasses.dataclass(cls, frozen=True, kw_only=True)  # in place
+
+    def build(self) -> Built:
+        """Build the array for the bound device.
+
+        Bind every operand's lanes to fifos' shim ends, and give each core
+        reading ``Value``s its runtime parameters (``Rtp``).
+        """
+        raise NotImplementedError(
+            f"{type(self).__qualname__}.build() is not implemented"
         )
-
-    __bool__ = __index__ = __int__ = __float__ = __hash__ = __iter__ = refuse
-    __eq__ = __ne__ = __lt__ = __le__ = __gt__ = __ge__ = refuse
-    __add__ = __radd__ = __sub__ = __rsub__ = __mul__ = __rmul__ = refuse
-    __truediv__ = __rtruediv__ = __floordiv__ = __rfloordiv__ = refuse
-    __mod__ = __rmod__ = __pow__ = __rpow__ = __neg__ = __abs__ = refuse
-    __str__ = __format__ = __len__ = __getitem__ = __call__ = refuse
-
-    def __repr__(self) -> str:
-        return f"<{self.op}.{self.name} outside the array tier>"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -156,6 +177,7 @@ class Operator(metaclass=_OperatorMeta):
     """An operator. Subclass it; every subclass is a dataclass checked as its body finishes."""
 
     declaration: ClassVar[Declaration]
+    Array: ClassVar[type[Array]] = Array
     _external: ClassVar[Any] = None
     test: ClassVar[Testing | None] = None
     # True when sequence() calls rt.preamble() itself, behind its first fills.
@@ -273,33 +295,39 @@ class Operator(metaclass=_OperatorMeta):
         """
         return dataclasses.replace(self)
 
-    def array(self) -> list:
-        """Build the array for the bound device and return its workers.
-
-        Bind every operand's lanes to fifos' shim ends, and give each core
-        reading ``Value``s its runtime parameters (``rtp``).
+    def array_config(self) -> Array:
+        """This operator's ``Array``: what its array is built from, read off
+        the operator by the names the ``Array`` declares. A member absent
+        on this instance (``when=`` False) is None.
         """
-        raise NotImplementedError(f"{type(self).__name__}.array() is not implemented")
-
-    def _build_array(self) -> list:
-        """``array()`` on a copy whose fields outside the array tier are
-        placeholders that raise on use; what it sets lands on this operator.
-        """
-        fenced = copy.copy(self)
-        for f in dataclasses.fields(self):
-            if ParamSpec.of(f) is not None and f.name not in self.declaration.array:
-                vars(fenced)[f.name] = _Fenced(type(self).__name__, f.name)
-        vars(fenced)["_unfenced"] = self
-        before = dict(vars(fenced))
-        built = fenced.array()
-        vars(self).update(
-            {
-                k: v
-                for k, v in vars(fenced).items()
-                if k not in before or before[k] is not v
+        array = type(self).Array
+        members = {m.name for m in self.declaration.members}
+        return array(
+            **{
+                f.name: (
+                    self._bound.get(f.name)
+                    if f.name in members
+                    else getattr(self, f.name)
+                )
+                for f in dataclasses.fields(array)
             }
         )
-        return built
+
+    @property
+    def finishing(self) -> Finish:
+        """The finish as this operator's cores apply it (``Finish.on``)."""
+        # elementwise.py builds on this module.
+        from ..elementwise import Finish
+
+        return Finish(self)
+
+    @property
+    def preparing(self) -> Prepare:
+        """The prologue as this operator's cores apply it (``Prepare.on``)."""
+        # elementwise.py builds on this module.
+        from ..elementwise import Prepare
+
+        return Prepare(self)
 
     def tolerance(self) -> Tolerance | None:
         """What each output of the resolved operator is judged by; None where
@@ -876,29 +904,6 @@ class Operator(metaclass=_OperatorMeta):
             and not self._bound[m.name].per_call
         }
 
-    def rtp(self, values: list[Value], cores: int = 1) -> list[Rtp]:
-        """The runtime parameters of ``cores`` cores, each reading ``values``.
-
-        Each is a Worker argument whose core reads its words once a call
-        with ``Rtp.read``, keyed by value; the preamble writes them, syncs
-        the scratchpad and opens each, before any DMA.
-
-        Args:
-            values: Values of this operator, in the order the core reads them.
-            cores: How many cores read them, each its own block.
-
-        Returns:
-            One ``Rtp`` per core.
-        """
-        rtps = [Rtp(values) for _ in range(cores)]
-        vars(self)["_rtps"] = [*self.rtps, *rtps]
-        return rtps
-
-    @property
-    def rtps(self) -> list[Rtp]:
-        """Every core's runtime parameters ``array()`` made (``rtp``)."""
-        return vars(self).get("_rtps", [])
-
     @property
     def bound_extents(self) -> dict[str, Affine | None]:
         bound = self.bound_values
@@ -919,8 +924,7 @@ class Operator(metaclass=_OperatorMeta):
         bound = self.bound_extents
         if not bound:
             return {}
-        # From array(), derivations run on the operator: reading an extent here is not the array's.
-        op = vars(self).get("_unfenced", self)
+        op = self
         probe = copy.copy(op)
         forms = None if None in bound.values() else bound
         out: dict[str, int | None] = {}

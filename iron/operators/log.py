@@ -9,7 +9,7 @@ from aie.utils.compile.jit import markers
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import In, UnaryElementwise, Param
+from iron.common import In, Operand, UnaryElementwise, Param
 from iron.common.elementwise import Sweep
 from iron.common.testing import Testing
 
@@ -100,7 +100,7 @@ class Log(UnaryElementwise):
         ),
     )
 
-    offset: float = Param(default=0.0, array=True)
+    offset: float = Param(default=0.0)
 
     x = In(
         UnaryElementwise.size,
@@ -109,21 +109,26 @@ class Log(UnaryElementwise):
         per=(UnaryElementwise.num_aie_columns, UnaryElementwise.num_channels),
     )
 
-    def kernel(self):
-        contract = KernelContract(
-            roles=(markers.In, markers.Out, kernels.Param, kernels.Param),
-            parameter_bindings=((2, self.tile_size),),
-            reference=log,
-            tolerance=Tolerance.bf16_ulps(
-                1, note="float32 to 7.5e-9, then rounded once to bf16"
-            ),
-        )
-        return ExternalFunction(
-            "log_f32_bf16",
-            source_string=LOG,
-            arg_types=[self.x.obj_type, self.y.obj_type, np.int32, np.float32],
-            contract=contract,
-        )
+    class Array(UnaryElementwise.Array):
+        offset: float
+        x: Operand
+        y: Operand
 
-    def scalars(self) -> tuple:
-        return (self.offset,)
+        def kernel(self):
+            contract = KernelContract(
+                roles=(markers.In, markers.Out, kernels.Param, kernels.Param),
+                parameter_bindings=((2, self.tile_size),),
+                reference=log,
+                tolerance=Tolerance.bf16_ulps(
+                    1, note="float32 to 7.5e-9, then rounded once to bf16"
+                ),
+            )
+            return ExternalFunction(
+                "log_f32_bf16",
+                source_string=LOG,
+                arg_types=[self.x.obj_type, self.y.obj_type, np.int32, np.float32],
+                contract=contract,
+            )
+
+        def scalars(self) -> tuple:
+            return (self.offset,)

@@ -19,6 +19,8 @@ from iron.common import (
     Unresolvable,
     Auto,
     Param,
+    Built,
+    Operand,
 )
 from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
@@ -77,12 +79,18 @@ class Repeat(Operator):
             )
         return dataclasses.replace(self, tile_size=self.tile_size or self.cols)
 
-    def array(self) -> list:
-        fifo_in = ObjectFifo(self.x.obj_type, depth=2)
-        fifo_out = fifo_in.cons().forward(depth=2)
-        self.x.bind(fifo_in.prod())
-        self.y.bind(fifo_out.cons())
-        return []
+    class Array(Operator.Array):
+        dtype: Any
+        tile_size: int
+        x: Operand
+        y: Operand
+
+        def build(self) -> Built:
+            fifo_in = ObjectFifo(self.x.obj_type, depth=2)
+            fifo_out = fifo_in.cons().forward(depth=2)
+            self.x.bind(fifo_in.prod())
+            self.y.bind(fifo_out.cons())
+            return Built([])
 
     def sequence(self, rt):
         """The input re-read ``repeat`` times by the iteration slot's zero stride,

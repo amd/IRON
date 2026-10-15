@@ -6,7 +6,7 @@ from aie.iron import ExternalFunction, ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 
-from iron.common import In, Operator, Out, Value, Param
+from iron.common import In, Operator, Out, Value, Param, Built, Operand, Rtp
 from iron.common.testing import Case, Testing
 
 # EmbeddingGemma 2's placeholder ids, the towers' rows past 2048 text rows.
@@ -62,11 +62,11 @@ class Merge(Operator):
     )
 
     rows: int = Param()
-    audio_token: int = Param(array=True)
-    image_token: int = Param(array=True)
-    audio_at: int = Param(array=True)
-    vision_at: int = Param(array=True)
-    block: int = Param(default=64, array=True)
+    audio_token: int = Param()
+    image_token: int = Param()
+    audio_at: int = Param()
+    vision_at: int = Param()
+    block: int = Param(default=64)
 
     ids = In(rows, dtype=np.int32, obj_type=(block,))
     merge = Out(rows, dtype=np.int32, obj_type=(block,))
@@ -95,35 +95,45 @@ class Merge(Operator):
     def tolerance(self) -> Tolerance:
         return Tolerance.exact()
 
-    def array(self) -> list:
-        kernel = ExternalFunction(
-            "merge_rows",
-            source_string=MERGE,
-            arg_types=[self.ids.obj_type, self.merge.obj_type, np.int32],
-            compile_flags=[
-                f"-DAUDIO_TOKEN={self.audio_token}",
-                f"-DIMAGE_TOKEN={self.image_token}",
-                f"-DAUDIO_AT={self.audio_at}",
-                f"-DVISION_AT={self.vision_at}",
-                f"-DBLOCK={self.block}",
-            ],
-            symbol_prefix=(
-                f"merge_{self.audio_token}_{self.image_token}_{self.audio_at}_"
-                f"{self.vision_at}_{self.block}"
-            ),
-        )
-        of_ids = ObjectFifo(self.ids.obj_type, depth=2)
-        of_merge = ObjectFifo(self.merge.obj_type, depth=2)
-        (rtp,) = self.rtp([self.count])
+    class Array(Operator.Array):
+        audio_at: int
+        audio_token: int
+        block: int
+        image_token: int
+        vision_at: int
+        count: Value
+        ids: Operand
+        merge: Operand
 
-        def core_fn(of_in, of_out, kernel_fn, rtp):
-            n = rtp.read()[self.count]
-            for b in range_(n):
-                kernel_fn(of_in.acquire(1), of_out.acquire(1), b)
-                of_in.release(1)
-                of_out.release(1)
+        def build(self) -> Built:
+            kernel = ExternalFunction(
+                "merge_rows",
+                source_string=MERGE,
+                arg_types=[self.ids.obj_type, self.merge.obj_type, np.int32],
+                compile_flags=[
+                    f"-DAUDIO_TOKEN={self.audio_token}",
+                    f"-DIMAGE_TOKEN={self.image_token}",
+                    f"-DAUDIO_AT={self.audio_at}",
+                    f"-DVISION_AT={self.vision_at}",
+                    f"-DBLOCK={self.block}",
+                ],
+                symbol_prefix=(
+                    f"merge_{self.audio_token}_{self.image_token}_{self.audio_at}_"
+                    f"{self.vision_at}_{self.block}"
+                ),
+            )
+            of_ids = ObjectFifo(self.ids.obj_type, depth=2)
+            of_merge = ObjectFifo(self.merge.obj_type, depth=2)
+            rtp = Rtp([self.count])
 
-        worker = Worker(core_fn, [of_ids.cons(), of_merge.prod(), kernel, rtp])
-        self.ids.bind(of_ids.prod())
-        self.merge.bind(of_merge.cons())
-        return [worker]
+            def core_fn(of_in, of_out, kernel_fn, rtp):
+                n = rtp.read()[self.count]
+                for b in range_(n):
+                    kernel_fn(of_in.acquire(1), of_out.acquire(1), b)
+                    of_in.release(1)
+                    of_out.release(1)
+
+            worker = Worker(core_fn, [of_ids.cons(), of_merge.prod(), kernel, rtp])
+            self.ids.bind(of_ids.prod())
+            self.merge.bind(of_merge.cons())
+            return Built([worker], [rtp])

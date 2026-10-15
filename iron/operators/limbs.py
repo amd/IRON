@@ -9,7 +9,7 @@ from aie.utils.compile.jit import markers
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import In, Rowwise, Param
+from iron.common import In, Operand, Rowwise, Param
 from iron.common.testing import Case, Testing
 
 from .split3 import SPLIT
@@ -96,18 +96,23 @@ class Limbs(Rowwise):
                 f"vectors"
             )
 
-    def kernel(self):
-        contract = KernelContract(
-            roles=(markers.In, markers.Out, kernels.Param),
-            parameter_bindings=((2, self.line),),
-            reference=planes,
-            tolerance=Tolerance.exact(
-                note="each residual is exact, and so is each limb of it"
-            ),
-        )
-        return ExternalFunction(
-            "limbs_f32",
-            source_string=LIMBS,
-            arg_types=[self.x.obj_type, self.y.obj_type, np.int32],
-            contract=contract,
-        )
+    class Array(Rowwise.Array):
+        line: int
+        x: Operand
+        y: Operand
+
+        def kernel(self):
+            contract = KernelContract(
+                roles=(markers.In, markers.Out, kernels.Param),
+                parameter_bindings=((2, self.line),),
+                reference=planes,
+                tolerance=Tolerance.exact(
+                    note="each residual is exact, and so is each limb of it"
+                ),
+            )
+            return ExternalFunction(
+                "limbs_f32",
+                source_string=LIMBS,
+                arg_types=[self.x.obj_type, self.y.obj_type, np.int32],
+                contract=contract,
+            )

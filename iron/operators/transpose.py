@@ -21,6 +21,9 @@ from iron.common import (
     Value,
     Auto,
     Param,
+    Built,
+    Operand,
+    Rtp,
 )
 from iron.common.testing import Case, Testing
 
@@ -97,7 +100,7 @@ class Transpose(Operator):
             cap=lambda op, dev: 8192 // op.m,
         ),
     )
-    s: int = Auto(default=8, array=True, domain=(8, 4))
+    s: int = Auto(default=8, domain=(8, 4))
     num_aie_columns: int = Auto()
     num_channels: int = Auto(default=1)
 
@@ -165,58 +168,79 @@ class Transpose(Operator):
                 f"over {cols} columns x {chans} channels"
             )
 
-    def array(self) -> list:
+    class Array(Operator.Array):
+        m: int
+        n: int
+        num_aie_columns: int
+        num_channels: int
+        s: int
+        batches: Value
+        chan_tiles: Value
+        col_tiles: Value
+        x: Operand
+        y: Operand
 
-        m, n, s = self.m, self.n, self.s
-        cols, chans = self.num_aie_columns, self.num_channels
-        n_cores = cols * chans
-        tile_ty = np.ndarray[(m * n,), np.dtype[bfloat16]]
-        depth = self.x.l1_depth
-        l2l1 = TensorAccessPattern.full((n // s, s, m // s, s)).permute((2, 1, 0, 3))
+        def build(self) -> Built:
 
-        kernel = datamovement.transpose(m, n, s)
-        of_l3l2 = [
-            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
-        ]
-        of_l2l1 = [
-            of_l3l2[k]
-            .cons(from_stream=l2l1)
-            .forward(
-                obj_type=tile_ty,
-                depth=depth,
+            m, n, s = self.m, self.n, self.s
+            cols, chans = self.num_aie_columns, self.num_channels
+            n_cores = cols * chans
+            tile_ty = np.ndarray[(m * n,), np.dtype[bfloat16]]
+            depth = self.x.l1_depth
+            l2l1 = TensorAccessPattern.full((n // s, s, m // s, s)).permute(
+                (2, 1, 0, 3)
             )
-            for k in range(n_cores)
-        ]
-        of_outs = [
-            ObjectFifo(tile_ty, depth=depth) for i in range(cols) for j in range(chans)
-        ]
-        rtps = self.rtp([self.batches, self.col_tiles, self.chan_tiles], cores=n_cores)
 
-        def core_body(of_in, of_out, transpose, rtp):
-            words = rtp.read()
-            batches = words[self.batches]
-            col_tiles = words[self.col_tiles]
-            chan_tiles = words[self.chan_tiles]
-            # The kernel only ever sees s*s sub-tiles, so it is batch-agnostic.
-            for _ in range_(batches):
-                for _ in range_(col_tiles):
-                    for _ in range_(chan_tiles):
-                        elem_in = of_in.acquire(1)
-                        elem_out = of_out.acquire(1)
-                        transpose(elem_in, elem_out)
-                        of_out.release(1)
-                        of_in.release(1)
+            kernel = datamovement.transpose(m, n, s)
+            of_l3l2 = [
+                ObjectFifo(tile_ty, depth=depth)
+                for i in range(cols)
+                for j in range(chans)
+            ]
+            of_l2l1 = [
+                of_l3l2[k]
+                .cons(from_stream=l2l1)
+                .forward(
+                    obj_type=tile_ty,
+                    depth=depth,
+                )
+                for k in range(n_cores)
+            ]
+            of_outs = [
+                ObjectFifo(tile_ty, depth=depth)
+                for i in range(cols)
+                for j in range(chans)
+            ]
+            rtps = [
+                Rtp([self.batches, self.col_tiles, self.chan_tiles])
+                for _ in range(n_cores)
+            ]
 
-        workers = [
-            Worker(
-                core_body,
-                [of_l2l1[k].cons(), of_outs[k].prod(), kernel, rtps[k]],
-            )
-            for k in range(n_cores)
-        ]
-        self.x.bind([f.prod() for f in of_l3l2])
-        self.y.bind([f.cons() for f in of_outs])
-        return workers
+            def core_body(of_in, of_out, transpose, rtp):
+                words = rtp.read()
+                batches = words[self.batches]
+                col_tiles = words[self.col_tiles]
+                chan_tiles = words[self.chan_tiles]
+                # The kernel only ever sees s*s sub-tiles, so it is batch-agnostic.
+                for _ in range_(batches):
+                    for _ in range_(col_tiles):
+                        for _ in range_(chan_tiles):
+                            elem_in = of_in.acquire(1)
+                            elem_out = of_out.acquire(1)
+                            transpose(elem_in, elem_out)
+                            of_out.release(1)
+                            of_in.release(1)
+
+            workers = [
+                Worker(
+                    core_body,
+                    [of_l2l1[k].cons(), of_outs[k].prod(), kernel, rtps[k]],
+                )
+                for k in range(n_cores)
+            ]
+            self.x.bind([f.prod() for f in of_l3l2])
+            self.y.bind([f.cons() for f in of_outs])
+            return Built(workers, rtps)
 
     def sequence(self, rt):
         """One task group per batch through the same fifos."""

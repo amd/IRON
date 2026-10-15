@@ -13,12 +13,14 @@ from .field import Auto, AutoSpec, Param, ParamSpec, Unresolvable
 from .shape import Select
 from .operand import In, InOut, Operand, Out
 from .chain import Chain, Link
-from .operator import Operator
+from .operator import Built, Operator
 from .profile import Profile
+from .rtp import Rtp
 from .value import DispatchTime, Extent, Value
 from .xclbin import Xclbin
 
 __all__ = [
+    "Built",
     "Chain",
     "Divisors",
     "DispatchTime",
@@ -30,6 +32,7 @@ __all__ = [
     "Operator",
     "Out",
     "Profile",
+    "Rtp",
     "Unresolvable",
     "Value",
     "Width",

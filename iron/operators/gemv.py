@@ -18,6 +18,7 @@ from ml_dtypes import bfloat16
 
 from iron import operators as catalog
 from iron.common import (
+    Built,
     Chain,
     Divisors,
     Extent,
@@ -28,6 +29,7 @@ from iron.common import (
     Operator,
     Out,
     Prepare,
+    Rtp,
     Unresolvable,
     Value,
     Auto,
@@ -185,7 +187,7 @@ class GEMV(Operator):
             of=lambda op, dev: op.M, step=lambda op, dev: op.tile_size_input, span=3
         )
     )
-    kernel_vector_size: int = Auto(repr=False, array=True)
+    kernel_vector_size: int = Auto(repr=False)
 
     # B, a prologue's and a finish's inputs ride A's stream.
     A = In(
@@ -358,85 +360,103 @@ class GEMV(Operator):
             if rows % tile:
                 raise ValueError(f"{name}={tile} does not evenly divide M/lanes={rows}")
 
-    def array(self):
-        K, lanes = self.K, self.num_aie_columns * self.num_channels
-        tile_size_input, tile_size_output = self.tile_size_input, self.tile_size_output
+    class Array(Operator.Array):
+        K: int
+        num_aie_columns: int
+        num_channels: int
+        tile_size_input: int
+        tile_size_output: int
+        kernel_vector_size: int
+        A: Operand
+        C: Operand
+        tiles: Value
+        batches: Value
+        finishing: Finish
+        preparing: Prepare
 
-        # Built here, not at import: CompilableDesign clears earlier ExternalFunctions.
-        matvec = linalg.mv(
-            tile_size_input,
-            K,
-            bfloat16,
-            bfloat16,
-            vectorized=True,
-            vec_size=self.kernel_vector_size,
-            output_rows=tile_size_output,
-        )
-        vector = np.ndarray[(K,), np.dtype[bfloat16]]
-        # A lossless copy of the head tile's first row, B, as 16-bit words.
-        copy = eltwise.passthrough(K, np.int16).object_file.bind(
-            "passThroughLine", [self.A.obj_type, vector, np.int32]
-        )
-        # Over the whole C tile: one call's rows can be narrower than a vector.
-        finish = Finish(self, lanes)
-        prepare = Prepare(self, lanes)
-
-        A_fifos = [
-            ObjectFifo(self.A.obj_type, depth=self.A.depth) for i in range(lanes)
-        ]
-        C_fifos = [
-            ObjectFifo(self.C.obj_type, depth=self.C.depth) for i in range(lanes)
-        ]
-        vectors = [Buffer(vector) for _ in range(lanes)]
-        rtps = self.rtp(
-            [self.tiles, self.batches, *prepare.values, *finish.values], cores=lanes
-        )
-
-        def core_body(A_fifo, C_fifo, b, matvec, copy, rtp, *rest):
-            words = rtp.read()
-            n = words[self.tiles]
-            prepared, rest = rest[: prepare.arity], rest[prepare.arity :]
-            batches = words[self.batches]
-            mode_p = prepare.mode(words)
-            mode = finish.mode(words)
-            for _ in range_(batches):
-                # The batch's head tile carries B.
-                head = A_fifo.acquire(1)
-                copy(head, b, K)
-                A_fifo.release(1)
-                line = prepare.apply(prepared, mode_p, b, A_fifo)
-                for _ in range_(n):
-                    c = C_fifo.acquire(1)
-                    out = finish.target(rest, mode, c)
-                    for j_idx in range_(tile_size_output // tile_size_input):
-                        j_i32: Any = index.casts(T.i32(), j_idx)
-                        output_row_offset = j_i32 * tile_size_input
-                        a = A_fifo.acquire(1)
-                        matvec(tile_size_input, output_row_offset, a, line, out)
-                        A_fifo.release(1)
-                    finish.apply(rest, mode, c, A_fifo)
-                    C_fifo.release(1)
-
-        workers = [
-            Worker(
-                core_body,
-                [
-                    A_fifos[i].cons(),
-                    C_fifos[i].prod(),
-                    vectors[i],
-                    matvec,
-                    copy,
-                    rtps[i],
-                    *prepare.args(i),
-                    *finish.args(i),
-                ],
+        def build(self) -> Built:
+            K, lanes = self.K, self.num_aie_columns * self.num_channels
+            tile_size_input, tile_size_output = (
+                self.tile_size_input,
+                self.tile_size_output,
             )
-            for i in range(lanes)
-        ]
-        self.A.bind([f.prod() for f in A_fifos])
-        self.C.bind([f.cons() for f in C_fifos])
-        finish.bind()
-        return workers
+
+            # Built here, not at import: CompilableDesign clears earlier ExternalFunctions.
+            matvec = linalg.mv(
+                tile_size_input,
+                K,
+                bfloat16,
+                bfloat16,
+                vectorized=True,
+                vec_size=self.kernel_vector_size,
+                output_rows=tile_size_output,
+            )
+            vector = np.ndarray[(K,), np.dtype[bfloat16]]
+            # A lossless copy of the head tile's first row, B, as 16-bit words.
+            copy = eltwise.passthrough(K, np.int16).object_file.bind(
+                "passThroughLine", [self.A.obj_type, vector, np.int32]
+            )
+            # Over the whole C tile: one call's rows can be narrower than a vector.
+            finish = self.finishing.on(lanes)
+            prepare = self.preparing.on(lanes)
+
+            A_fifos = [
+                ObjectFifo(self.A.obj_type, depth=self.A.depth) for i in range(lanes)
+            ]
+            C_fifos = [
+                ObjectFifo(self.C.obj_type, depth=self.C.depth) for i in range(lanes)
+            ]
+            vectors = [Buffer(vector) for _ in range(lanes)]
+            rtps = [
+                Rtp([self.tiles, self.batches, *prepare.values, *finish.values])
+                for _ in range(lanes)
+            ]
+
+            def core_body(A_fifo, C_fifo, b, matvec, copy, rtp, *rest):
+                words = rtp.read()
+                n = words[self.tiles]
+                prepared, rest = rest[: prepare.arity], rest[prepare.arity :]
+                batches = words[self.batches]
+                mode_p = prepare.mode(words)
+                mode = finish.mode(words)
+                for _ in range_(batches):
+                    # The batch's head tile carries B.
+                    head = A_fifo.acquire(1)
+                    copy(head, b, K)
+                    A_fifo.release(1)
+                    line = prepare.apply(prepared, mode_p, b, A_fifo)
+                    for _ in range_(n):
+                        c = C_fifo.acquire(1)
+                        out = finish.target(rest, mode, c)
+                        for j_idx in range_(tile_size_output // tile_size_input):
+                            j_i32: Any = index.casts(T.i32(), j_idx)
+                            output_row_offset = j_i32 * tile_size_input
+                            a = A_fifo.acquire(1)
+                            matvec(tile_size_input, output_row_offset, a, line, out)
+                            A_fifo.release(1)
+                        finish.apply(rest, mode, c, A_fifo)
+                        C_fifo.release(1)
+
+            workers = [
+                Worker(
+                    core_body,
+                    [
+                        A_fifos[i].cons(),
+                        C_fifos[i].prod(),
+                        vectors[i],
+                        matvec,
+                        copy,
+                        rtps[i],
+                        *prepare.args(i),
+                        *finish.args(i),
+                    ],
+                )
+                for i in range(lanes)
+            ]
+            self.A.bind([f.prod() for f in A_fifos])
+            self.C.bind([f.cons() for f in C_fifos])
+            finish.bind()
+            return Built(workers, rtps)
 
     def sequence(self, rt):
         """Per batch and lane: B's head tile, each prologue input's, then A's

@@ -9,6 +9,7 @@ from iron.common import UnaryElementwise
 class Sigmoid(UnaryElementwise):
     """AIE-accelerated Sigmoid activation function."""
 
-    def kernel(self):
-        # On aie2p, vtanh is up to 0.020 off sigmoid and the table 0.0044 (npu2).
-        return activation.sigmoid(self.tile_size, use_lut=True)
+    class Array(UnaryElementwise.Array):
+        def kernel(self):
+            # On aie2p, vtanh is up to 0.020 off sigmoid and the table 0.0044 (npu2).
+            return activation.sigmoid(self.tile_size, use_lut=True)

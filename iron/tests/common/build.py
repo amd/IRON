@@ -39,6 +39,9 @@ from iron.common import (
     Xclbin,
     Auto,
     Param,
+    Built,
+    Operand,
+    Rtp,
 )
 from iron.common.design import BuiltArray, OperatorDesign, OperatorRuntime
 from iron.common.graph.compiled import _words
@@ -76,6 +79,11 @@ class MV(Operator):
     B = In(num_batches, K, obj_type=(K,), broadcast=True)
     C = Out(num_batches, M, obj_type=(tile_out,), per=(cols,))
     valid = Extent(M)
+
+    class Array(Operator.Array):
+        K: int
+        cols: int
+        tile_out: int
 
 
 class Task(NamedTuple):
@@ -253,17 +261,25 @@ class Words(Operator):
     last = Value(derive=lambda op: op.n // op.tile)
     pos = Value()
 
-    def array(self):
-        fifo = ObjectFifo(self.A.obj_type)
-        self.A.bind(fifo.prod())
-        (rtp,) = self.rtp([self.first, self.block, self.last, self.pos])
+    class Array(Operator.Array):
+        tile: int
+        A: Operand
+        first: Value
+        block: Value
+        last: Value
+        pos: Value
 
-        def core(of, rtp):
-            rtp.read()
-            of.acquire(1)
-            of.release(1)
+        def build(self) -> Built:
+            fifo = ObjectFifo(self.A.obj_type)
+            self.A.bind(fifo.prod())
+            rtp = Rtp([self.first, self.block, self.last, self.pos])
 
-        return [Worker(core, [fifo.cons(), rtp])]
+            def core(of, rtp):
+                rtp.read()
+                of.acquire(1)
+                of.release(1)
+
+            return Built([Worker(core, [fifo.cons(), rtp])], [rtp])
 
 
 def rtp_writes(text: str) -> list[tuple[int, int | str]]:
@@ -682,7 +698,7 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
 
     op = Shipped(M=256, K=1024, N=1152)
     assert op.external.filename == "flm_mm_f81eba71.xclbin"
-    # Its array() pins each lane to the image's shim channel, places each
+    # Its Array.build() pins each lane to the image's shim channel, places each
     # core's parameter block and the lock that releases it.
     text = str(OperatorDesign(op.resolved(), full_elf=False).module())
     pins = re.findall(r"shim_dma_allocation @(\w+)\(%\w+, (\w+), (\d)\)", text)
@@ -714,6 +730,10 @@ def test_a_lane_pins_to_a_channel_moving_its_way():
         c: int = Auto(default=2)
         x = In(n, obj_type=(n,))
         y = Out(n, obj_type=(n,), per=(c,))
+
+        class Array(Operator.Array):
+            n: int
+            c: int
 
     op = Pinned(n=2)
     shims = [Tile(c, 0) for c in range(2)]

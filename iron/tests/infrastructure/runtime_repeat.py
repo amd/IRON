@@ -24,7 +24,7 @@ from aie.utils.txn_trace import trace
 
 import iron
 from iron import Scratchpad
-from iron.common import Extent, In, Operator, Out, Param, Value
+from iron.common import Built, Extent, In, Operand, Operator, Out, Param, Value
 from iron.common.design import OperatorDesign
 from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind
@@ -50,12 +50,17 @@ class RepeatTile(Operator):
     def resolve(self, dev):
         return dataclasses.replace(self)
 
-    def array(self) -> list:
-        fifo_in = ObjectFifo(self.x.obj_type, depth=2)
-        fifo_out = fifo_in.cons().forward(depth=2)
-        self.x.bind(fifo_in.prod())
-        self.y.bind(fifo_out.cons())
-        return []
+    class Array(Operator.Array):
+        width: int
+        x: Operand
+        y: Operand
+
+        def build(self) -> Built:
+            fifo_in = ObjectFifo(self.x.obj_type, depth=2)
+            fifo_out = fifo_in.cons().forward(depth=2)
+            self.x.bind(fifo_in.prod())
+            self.y.bind(fifo_out.cons())
+            return Built([])
 
     def sequence(self, rt):
         width, max_k = self.width, self.max_k

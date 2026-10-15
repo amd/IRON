@@ -184,8 +184,12 @@ class Chain:
 
     def _at_finish(self, owner: Operator, dev) -> Chain:
         out = owner.outputs[0] if len(owner.outputs) == 1 else None
-        # A subclass replacing array() does not apply what its base's output declares.
-        runs = next(k for k in type(owner).__mro__ if "array" in vars(k))
+        # A subclass whose Array builds anew does not apply what its base's output declares.
+        runs = next(
+            k
+            for k in type(owner).__mro__
+            if "Array" in vars(k) and "build" in vars(vars(k)["Array"])
+        )
         if out is None or not out.finish or runs not in out.owner.__mro__:
             raise ValueError(
                 f"{type(owner).__name__}: its cores finish no output, so it "

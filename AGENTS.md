@@ -148,13 +148,14 @@ reuse lint
        declared shape) whose `obj_type=` makes each its own stream into the
        array (`per=` a column count), `Value`
        members the cores read (trip counts, derived from the extents so the
-       array never depends on them), `array()`, which builds
-       ObjectFIFOs and Workers and binds each operand's lane to a fifo's
-       shim end, and optionally `sequence(rt)` when the runtime sequence is
-       not the derived one. The array tier is what an `obj_type=` names plus
-       what says `array=True`; one array serves every extent. A shipped binary
+       array never depends on them), a nested `class Array(Operator.Array)`
+       whose `build()` builds ObjectFIFOs and Workers and binds each
+       operand's lane to a fifo's shim end, and optionally `sequence(rt)`
+       when the runtime sequence is not the derived one. The array tier is
+       the fields the `Array` lists, which must include what an `obj_type=`
+       names; one array serves every extent. A shipped binary
        is a subclass declared with `image=Xclbin(...)`, its operands pinned
-       by its `array()` (`operand.pin([DmaEndpoint(...), ...])`, each lane on a shim channel of the image). Two hooks change what is built: `configuration()`, the
+       by its `Array.build()` (`operand.pin([DmaEndpoint(...), ...])`, each lane on a shim channel of the image). Two hooks change what is built: `configuration()`, the
        operator whose xclbin this one runs (itself by default; flm's GEMM
        returns its shape-free half, so one xclbin serves every shape), and
        `exported_design()`, a callable returning the module (an
@@ -251,7 +252,7 @@ reuse lint
      `Verdict` per written buffer
    - `tracing.py`: `dump_traces(run, trace_file)`, for a sequence holding an
      operator built with `trace=` (mlir-aie's `TraceConfig`); the workers
-     traced are those its `array()` gives `Worker(trace=)`, else its first.
+     traced are those its `Array.build()` gives `Worker(trace=)`, else its first.
      A test that traces builds its own `TraceConfig`
 
 4. **Tuning** (`iron/tune/`), at the edge: it depends on the graph core
@@ -398,8 +399,8 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      only where the flag is true; a call gives it by keyword, its name,
      which sets the flag (`RMSNorm(x, weight=w)` is `weighted=True`)
    - a `Value(derive=...)` for every trip count the core reads, so the
-     array never depends on the extent; what else the array bakes is
-     `Param(..., array=True)`
+     array never depends on the extent; what else the array bakes is a
+     field its `Array` lists
    - which of these computes a quantity from other fields depends on who
      reads it:
 
@@ -409,22 +410,29 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      | A compile-time field a caller may still override (`check_derived` catches disagreement) | `Param(derive=lambda op: ...)` |
      | A tunable `resolve(dev)` always fills, never a caller's | `Auto(derived=True)` |
      | A core, as a trip count or scalar | `Value(derive=lambda op: ...)` |
-   - `array()`: build ObjectFIFOs and Workers (`self.kernel()` or a
-     factory's `ExternalFunction`), `range_()` for loops, and
-     `self.x.bind([f.prod() for f in fifos])` (a handle per lane) for every
-     streamed operand. The values the cores read are their runtime
-     parameters, `rtps = self.rtp([self.count, ...], cores=n)`, one per
-     core given as a Worker argument; in the core, `words = rtp.read()`
+   - `class Array(Operator.Array)`: a frozen dataclass naming, as
+     annotated fields, the operator's fields, operands (`x: Operand`) and
+     values (`count: Value`) its `build()` reads, plus `dev`, `finish`,
+     `finishing` and the like where it reads them; `op.array_config()` makes
+     it from the operator. `build() -> Built` builds ObjectFIFOs and Workers
+     (`self.kernel()` or a factory's `ExternalFunction`), `range_()` for
+     loops, and `self.x.bind([f.prod() for f in fifos])` (a handle per lane)
+     for every streamed operand. The values the cores read are their
+     runtime parameters, `rtps = [Rtp([self.count, ...]) for _ in
+     range(n)]`, one per core given as a Worker argument; in the core,
+     `words = rtp.read()`
      waits for the sequence and returns each word keyed by its value
      (`words[self.count]`), whether the build wrote it into the core's
      buffer or made it a scratchpad word (`self.count.in_scratchpad`, a
      per-call value on a full ELF). `self.count.per_call` says whether a
      call gives it, and `self.x.l1_depth` is the depth a core-side fifo of
-     `x`'s tiles can have. The device is `self.dev`. It returns what it
-     built: its Workers and any `Flow`, `Lock`, `TileDma` or `Buffer` only
-     the sequence reaches, so each is in the design whatever a shape's
-     sequence touches. It sees the array tier alone: reading an extent
-     raises
+     `x`'s tiles can have. The device is `self.dev`. It returns
+     `Built(objects, rtps)`: its Workers and any `Flow`, `Lock`, `TileDma`
+     or `Buffer` only the sequence reaches, so each is in the design
+     whatever a shape's sequence touches, and every core's `Rtp`. What the
+     sequence programs beyond those rides a `Built` subclass of its own,
+     read back as `rt.built`. It sees the array tier alone: an extent is no
+     field of it
    - `compatible()` for divisibility against the resolved tunables
    - `sequence(rt)` only if the derived sequence is not the one you want:
      `self.A.fill(tap, lane=i)`, `self.C.drain(tap, lane=i, wait=True)`
@@ -432,12 +440,13 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      `gemm.py` or `mha.py` for hand-written sequences
 3. A shipped binary is a subclass declared with the image, `class
    Shipped(X, image=Xclbin(url=, sha256=, filename=))`: it pins the tunables,
-   and its `array()` builds no cores: it pins each operand's lanes to the
+   and its `Array.build()` builds no cores: it pins each operand's lanes to the
    image's shim channels (`operand.pin([DmaEndpoint(Tile(c, 0), MM2S, ch),
    ...])`, returning the endpoints), places the image's parameter block in each core,
    `Buffer(address=)`, which holds its derived `Value`s' words in
    declaration order (`Value(words=)` for a block of several), and returns
-   the `Lock(lock_id=)` the sequence releases it with. It takes no per-call
+   the `Lock(lock_id=)` the sequence releases it with, on its own `Built`
+   (`rt.built`). It takes no per-call
    value. `Xclbin` is mlir-aie's `NPUKernel`, fetched on first read of
    `xclbin_path`; a build runs its `with_instructions(insts)`
 4. Name the kernel with a factory from `aie.iron.kernels`
@@ -445,11 +454,11 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
    the symbol, the source, the argument types, aie2's LUT tables and the
    contract: the reference, the tolerance and the scalar bindings. The
    factory binds the line length; a scalar the kernel takes at run time is
-   the operator's `scalars()`, in the kernel's order (`LeakyReLU` returns
+   its `Array`'s `scalars()`, in the kernel's order (`LeakyReLU` returns
    `(self.alpha,)`, `AXPY` `(self.scalar_factor,)`, `RMSNorm`
    `(self.epsilon,)`; the factories take no `alpha=`, `a=` or `epsilon=`),
    so the operator declares no `kernel_call` or `reference` of its own; a
-   field it passes is `Param(..., array=True)`. An elementwise operator
+   field it passes is one its `Array` lists. An elementwise operator
    whose core makes more than one call over a line lists them in `chain()`,
    each a `KernelCall(kernel, scalars, operands)` naming its input tiles by
    operand (`(self.x,)`, or `None` for the line the call before it wrote).
@@ -530,7 +539,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 
 | Hook | Required | Runs |
 |---|---|---|
-| `array()` | yes, unless an `Elementwise` base builds it from `kernel()`/`chain()` | once per build, to generate the array |
+| `Array.build()` | yes, unless an `Elementwise` base builds it from `kernel()`/`chain()` | once per build, to generate the array |
 | `reference(*inputs)` | yes, unless a kernel's contract already is one | by `run_test`/the graph's own reference, on host tensors |
 | `resolve(dev)` | yes, if the class declares an `Auto()` tunable | once, the first time the operator meets a device |
 | `validate()` | no (a no-op) | at construction, before `array_key`/`design_key` can be taken |
@@ -661,8 +670,9 @@ code before relying on a line here; it is the authority.
 ### Rationale
 
 - **One class per operator, tiers by declaration.** The array tier is
-  what an `obj_type=`/`per=` names plus what says `array=True`; `array()` sees
-  that tier alone, so an extent cannot leak into a core program. Trip
+  the fields the operator's `Array` lists, which must hold what an
+  `obj_type=`/`per=` names; `Array.build()` sees that tier alone, so an
+  extent cannot leak into a core program. Trip
   counts are `Value`s the sequence writes, so one array serves every
   extent and one build serves many shapes.
   `iron/tests/toolchain/array_identity.py` compiles operators at two
@@ -708,13 +718,13 @@ code before relying on a line here; it is the authority.
   patch lands in its length.
 - **Placement.** Operator order is the final tiebreak for shim tile and
   channel, so a per-column stream is not guaranteed to sit in physical
-  column `c`; where that matters, an `array()` pins its lanes
+  column `c`; where that matters, an `Array.build()` pins its lanes
   (`operand.pin`) to shim channels a route of its own reaches. Where the tiles an
-  `array()` names are a choice, the choice is a tunable: an operator
+  `Array.build()` names are a choice, the choice is a tunable: an operator
   declares its own `Enum` of named placements (`GEMMPlacement`,
-  `MHAPlacement`) and a field `placement: GEMMPlacement = Auto(GEMMPlacement.SHIMS,
-  array=True)`, left out of a domain since an `Enum`-annotated tunable is
-  searched over its own members. `array()` writes mlir-aie's `Tile(c, r)`,
+  `MHAPlacement`) and a field `placement: GEMMPlacement =
+  Auto(default=GEMMPlacement.SHIMS)` its `Array` lists, left out of a domain since an
+  `Enum`-annotated tunable is searched over its own members. `Array.build()` writes mlir-aie's `Tile(c, r)`,
   `Tile(col=c)` or `Any*Tile` (`AnyComputeTile`, `AnyMemTile`,
   `AnyShimTile`) by the resolved member, the hand-found one the default
   (`iron/operators/gemm.py`, `mha.py`). The tuner measures each member the
@@ -940,13 +950,13 @@ of its own that carries the mark.
   overridden by `MLIR_AIE_KERNEL_SOURCES`)
 - Ensure the kernel's C++ signature matches the factory from
   `aie.iron.kernels` (or `bind()`'s argument types), or the
-  `ExternalFunction` declaration, that the operator's `array()` names
+  `ExternalFunction` declaration, that the operator's `Array.build()` names
 
 **Compilation hangs or fails**
 
 - Check MLIR-AIE is installed: `python -c "import aie.iron"`
 - Verify `llvm-aie` is available: `which aie-opt`
-- Look for errors in the operator's `array()` (common: using `range` instead of `range_()`)
+- Look for errors in the operator's `Array.build()` (common: using `range` instead of `range_()`)
 
 **Test failures with numerical differences**
 

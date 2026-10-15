@@ -26,6 +26,9 @@ from iron.common import (
     Value,
     Auto,
     Param,
+    Built,
+    Operand,
+    Rtp,
 )
 from iron.common.testing import Case, Testing
 
@@ -84,7 +87,7 @@ class RoPE(Operator):
     cols: int = Param()
     angle_rows: int = Param(derive=lambda op: op.rows)  # one row per position
     num_aie_columns: int = Auto()
-    method_type: int = Param(default=0, array=True)
+    method_type: int = Param(default=0)
 
     x = In(rows, cols, obj_type=(1, cols), per=(num_aie_columns,))
     angles = In(angle_rows, cols, obj_type=(1, cols), per=(num_aie_columns,))
@@ -122,46 +125,58 @@ class RoPE(Operator):
         """A position's rows at a time, so each core gets its angle row."""
         return self.rows // self.angle_rows if buffer in ("x", "y") else None
 
-    def array(self) -> list:
+    class Array(Operator.Array):
+        cols: int
+        method_type: int
+        num_aie_columns: int
+        angles: Operand
+        lut_rows: Value
+        rows_per_lut: Value
+        x: Operand
+        y: Operand
 
-        tile = self.x.obj_type
-        n = self.num_aie_columns
-        kernel = kernels.datamovement.rope(self.cols, two_halves=self.method_type == 0)
-        of_in = [ObjectFifo(tile) for i in range(n)]
-        of_lut = [ObjectFifo(self.angles.obj_type) for i in range(n)]
-        of_out = [ObjectFifo(tile) for i in range(n)]
-        rtps = self.rtp([self.lut_rows, self.rows_per_lut], cores=n)
+        def build(self) -> Built:
 
-        def core_body(of_in, of_lut, of_out, rope_kernel, rtp):
-            words = rtp.read()
-            lut_rows, rows_per_lut = words[self.lut_rows], words[self.rows_per_lut]
-            for _ in range_(lut_rows):
-                elem_lut = of_lut.acquire(1)
-                for _ in range_(rows_per_lut):
-                    elem_in = of_in.acquire(1)
-                    elem_out = of_out.acquire(1)
-                    rope_kernel(elem_in, elem_lut, elem_out, self.cols)
-                    of_in.release(1)
-                    of_out.release(1)
-                of_lut.release(1)
-
-        workers = [
-            Worker(
-                core_body,
-                [
-                    of_in[i].cons(),
-                    of_lut[i].cons(),
-                    of_out[i].prod(),
-                    kernel,
-                    rtps[i],
-                ],
+            tile = self.x.obj_type
+            n = self.num_aie_columns
+            kernel = kernels.datamovement.rope(
+                self.cols, two_halves=self.method_type == 0
             )
-            for i in range(n)
-        ]
-        self.x.bind([f.prod() for f in of_in])
-        self.angles.bind([f.prod() for f in of_lut])
-        self.y.bind([f.cons() for f in of_out])
-        return workers
+            of_in = [ObjectFifo(tile) for i in range(n)]
+            of_lut = [ObjectFifo(self.angles.obj_type) for i in range(n)]
+            of_out = [ObjectFifo(tile) for i in range(n)]
+            rtps = [Rtp([self.lut_rows, self.rows_per_lut]) for _ in range(n)]
+
+            def core_body(of_in, of_lut, of_out, rope_kernel, rtp):
+                words = rtp.read()
+                lut_rows, rows_per_lut = words[self.lut_rows], words[self.rows_per_lut]
+                for _ in range_(lut_rows):
+                    elem_lut = of_lut.acquire(1)
+                    for _ in range_(rows_per_lut):
+                        elem_in = of_in.acquire(1)
+                        elem_out = of_out.acquire(1)
+                        rope_kernel(elem_in, elem_lut, elem_out, self.cols)
+                        of_in.release(1)
+                        of_out.release(1)
+                    of_lut.release(1)
+
+            workers = [
+                Worker(
+                    core_body,
+                    [
+                        of_in[i].cons(),
+                        of_lut[i].cons(),
+                        of_out[i].prod(),
+                        kernel,
+                        rtps[i],
+                    ],
+                )
+                for i in range(n)
+            ]
+            self.x.bind([f.prod() for f in of_in])
+            self.angles.bind([f.prod() for f in of_lut])
+            self.y.bind([f.cons() for f in of_out])
+            return Built(workers, rtps)
 
     def ops(self) -> int:
         kernel = kernels.datamovement.rope(self.cols, two_halves=self.method_type == 0)

@@ -46,6 +46,9 @@ from iron.common import (
     Auto,
     Param,
     Select,
+    Built,
+    Operand,
+    Rtp,
 )
 from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
@@ -160,7 +163,6 @@ class GEMM(Operator):
     N: int = Param()
     # None: the widest of 64, 32, 16, 8 that splits M and the m block divides.
     tile_m: int = Auto(
-        array=True,
         domain=Divisors(
             of=lambda op, dev: op.M // op.n_aie_rows,
             step=lambda op, dev: op.mac_block(dev)[0],
@@ -169,7 +171,6 @@ class GEMM(Operator):
     # Without prio_accuracy C rounds to bf16 per K tile: tile_k changes it.
     tile_k: int = Auto(
         default=64,
-        array=True,
         domain=Divisors(
             of=K,
             step=lambda op, dev: op.mac_block(dev)[1],
@@ -178,22 +179,21 @@ class GEMM(Operator):
     )
     tile_n: int = Auto(
         default=64,
-        array=True,
         domain=Divisors(of=N, step=lambda op, dev: op.mac_block(dev)[2]),
     )
     # None: the most columns the shim budget allows that split N into tiles.
     num_aie_columns: int = Auto()
-    placement: GEMMPlacement = Auto(default=GEMMPlacement.SHIMS, array=True)
-    b_col_maj: bool = Param(default=False, array=True)
-    c_col_maj: bool = Param(default=False, array=True)
-    emulate_bf16_mmul_with_bfp16: bool = Param(default=True, repr=False, array=True)
-    prio_accuracy: bool = Param(default=False, repr=False, array=True)
-    round_conv_even: bool = Param(default=True, repr=False, array=True)
+    placement: GEMMPlacement = Auto(default=GEMMPlacement.SHIMS)
+    b_col_maj: bool = Param(default=False)
+    c_col_maj: bool = Param(default=False)
+    emulate_bf16_mmul_with_bfp16: bool = Param(default=True, repr=False)
+    prio_accuracy: bool = Param(default=False, repr=False)
+    round_conv_even: bool = Param(default=True, repr=False)
     dtype_in: Any = Param(default=bfloat16, repr=False)
     dtype_out: Any = Param(default=bfloat16, repr=False)
-    use_scalar: bool = Param(default=False, repr=False, array=True)
+    use_scalar: bool = Param(default=False, repr=False)
     # Filled by resolve.
-    n_aie_rows: int = Auto(repr=False, array=True, derived=True)
+    n_aie_rows: int = Auto(repr=False, derived=True)
     n_shim_mem_a: int = Auto(repr=False, derived=True)
     a_l2: int = Auto(repr=False, derived=True)
     b_l2: int = Auto(repr=False, derived=True)
@@ -399,222 +399,265 @@ class GEMM(Operator):
             return {1: NPU1Col1, 2: NPU1Col2, 4: NPU1}[self.num_aie_columns]()
         return NPU2()
 
-    def array(self) -> list:
-        m, k, n = self.tile_m, self.tile_k, self.tile_n
-        n_aie_cols = self.num_aie_columns
-        n_aie_rows = self.n_aie_rows
-        pinned = self.placement is GEMMPlacement.TILES
-        a_cols = [2 * i if n_aie_cols == 8 else i for i in range(self.n_shim_mem_a)]
-        n_shim_mem_A = self.n_shim_mem_a
-        n_A_tiles_per_shim = self.n_a_tiles_per_shim
-        b_col_maj, c_col_maj = self.b_col_maj, self.c_col_maj
-        use_scalar = self.use_scalar
-        dtype_in, dtype_out = self.dtype_in, self.dtype_out
-        use_larger_internal_buffer = self.prio_accuracy
-        dtype_out_internal = np.float32
-        fifo_depth = FIFO_DEPTH
+    class Array(Operator.Array):
+        tile_m: int
+        tile_k: int
+        tile_n: int
+        num_aie_columns: int
+        n_aie_rows: int
+        n_shim_mem_a: int
+        placement: GEMMPlacement
+        b_col_maj: bool
+        c_col_maj: bool
+        emulate_bf16_mmul_with_bfp16: bool
+        prio_accuracy: bool
+        round_conv_even: bool
+        dtype_in: Any
+        dtype_out: Any
+        use_scalar: bool
+        a_l2: int
+        b_l2: int
+        c_l2: int
+        A: Operand
+        B: Operand
+        C: Operand
+        valid: Extent
+        valid_k: Extent
+        k_div_k: Value
+        n_tiles: Value
+        row_blocks_valid: Value
+        col_tiles: Value
+        k_valid: Value
+        finishing: Finish
 
-        A_l2_ty = self.A.obj_type
-        B_l2_ty = self.B.obj_type
-        C_l2_ty = self.C.obj_type
-        A_l1_ty = np.ndarray[(m, k), np.dtype[dtype_in]]
-        B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
-        # Flat, as the finish's scratch is: a core selects between them.
-        C_l1_ty = np.ndarray[(m * n,), np.dtype[dtype_out]]
-
-        # prio_accuracy accumulates in f32 in L1, so the matmul's C is f32.
-        dtype_acc = dtype_out_internal if use_larger_internal_buffer else dtype_out
-        matmul_kernel = kernels.linalg.mm(
-            m,
-            k,
-            n,
-            input_dtype=dtype_in,
-            output_dtype=dtype_acc,
-            vectorized=not use_scalar,
-            b_col_maj=b_col_maj,
-            c_col_maj=c_col_maj,
-            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
-            round_conv_even=self.round_conv_even,
-        )
-        r, s, t = matmul_kernel.mac_dims
-        assert m % r == 0 and k % s == 0 and n % t == 0
-        streams = matmul_kernel.stream_dims
-        zero_kernel = kernels.zero(m * n, dtype_acc, vectorized=not use_scalar)
-        convert_copy_kernel = None
-        C_l1_ty_internal = np.ndarray[(m * n,), np.dtype[dtype_out_internal]]
-        if use_larger_internal_buffer:
-            fifo_depth_out = 1  # the f32 accumulator is the other buffer
-            convert_copy_kernel = kernels.datamovement.convert_copy(m * n)
-        else:
-            fifo_depth_out = fifo_depth
-        finish = Finish(self, n_aie_rows * n_aie_cols)
-
-        A_l3l2_fifos: list[Any] = [None] * n_shim_mem_A
-        A_l2l1_fifos: list[Any] = [None] * n_aie_rows
-        B_l3l2_fifos: list[Any] = [None] * n_aie_cols
-        B_l2l1_fifos: list[Any] = [None] * n_aie_cols
-        C_l1l2_fifos: list[list[Any]] = [[None] * n_aie_cols for _ in range(n_aie_rows)]
-        C_l2l3_fifos: list[Any] = [None] * n_aie_cols
-
-        bounded = self.value("valid").in_scratchpad
-        k_bounded = self.value("valid_k").per_call
-        read = [self.k_div_k, self.n_tiles]
-        if bounded:
-            read += [self.row_blocks_valid, self.col_tiles]
-        if k_bounded:
-            read.append(self.k_valid)
-        rtps = self.rtp([*read, *finish.values], cores=n_aie_rows * n_aie_cols)
-
-        for i in range(n_shim_mem_A):
-            A_l3l2_fifos[i] = ObjectFifo(A_l2_ty, depth=fifo_depth)
-            # Fewer A shims than rows: a shim's tiles split over several rows.
-            start_row = i * n_A_tiles_per_shim
-            stop_row = start_row + n_A_tiles_per_shim
-            of_offsets = [m * k * j for j in range(stop_row - start_row)]
-            a_tmp_fifos = (
-                A_l3l2_fifos[i]
-                .cons()
-                .split(
-                    of_offsets,
-                    obj_types=[A_l1_ty] * (stop_row - start_row),
-                    to_stream=[streams.A] * (stop_row - start_row),
-                    tile=Tile(a_cols[i], 1) if pinned else AnyMemTile,
-                )
+        def build(self) -> Built:
+            m, k, n = self.tile_m, self.tile_k, self.tile_n
+            n_aie_cols = self.num_aie_columns
+            n_aie_rows = self.n_aie_rows
+            pinned = self.placement is GEMMPlacement.TILES
+            a_cols = [2 * i if n_aie_cols == 8 else i for i in range(self.n_shim_mem_a)]
+            n_shim_mem_A = self.n_shim_mem_a
+            n_A_tiles_per_shim = (
+                n_aie_rows // n_aie_cols if n_aie_cols < n_aie_rows else 1
             )
-            for j in range(stop_row - start_row):
-                A_l2l1_fifos[j + start_row] = a_tmp_fifos[j]
+            b_col_maj, c_col_maj = self.b_col_maj, self.c_col_maj
+            use_scalar = self.use_scalar
+            dtype_in, dtype_out = self.dtype_in, self.dtype_out
+            use_larger_internal_buffer = self.prio_accuracy
+            dtype_out_internal = np.float32
+            fifo_depth = FIFO_DEPTH
 
-        for col in range(n_aie_cols):
-            B_l3l2_fifos[col] = ObjectFifo(B_l2_ty, depth=fifo_depth)
-            B_l2l1_fifos[col] = (
-                B_l3l2_fifos[col]
-                .cons()
-                .forward(
-                    obj_type=B_l1_ty,
-                    to_stream=streams.B,
-                    tile=Tile(col, 1) if pinned else AnyMemTile,
-                )
-            )
-            C_l2l3_fifos[col] = ObjectFifo(
-                C_l2_ty,
-                depth=fifo_depth,
-                to_stream=streams.C,
-            )
-            of_offsets = [m * n * i for i in range(n_aie_rows)]
-            c_tmp_fifos = (
-                C_l2l3_fifos[col]
-                .prod()
-                .join(
-                    of_offsets,
-                    obj_types=[C_l1_ty] * n_aie_rows,
-                    depths=[fifo_depth_out] * n_aie_rows,
-                    tile=Tile(col, 1) if pinned else AnyMemTile,
-                )
-            )
-            for j in range(n_aie_rows):
-                C_l1l2_fifos[j][col] = c_tmp_fifos[j]
+            A_l2_ty = self.A.obj_type
+            B_l2_ty = self.B.obj_type
+            C_l2_ty = self.C.obj_type
+            A_l1_ty = np.ndarray[(m, k), np.dtype[dtype_in]]
+            B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
+            # Flat, as the finish's scratch is: a core selects between them.
+            C_l1_ty = np.ndarray[(m * n,), np.dtype[dtype_out]]
 
-        def core_fn(
-            in_a,
-            in_b,
-            out_c,
-            zero,
-            matmul,
-            convert_copy,
-            k_tail_zero,
-            rtp,
-            elem_out_internal,
-            *rest,
-        ):
-            words = rtp.read()
-            rtp_K_div_k = words[self.k_div_k]
-            rtp_n_tiles_per_core = words[self.n_tiles]
+            # prio_accuracy accumulates in f32 in L1, so the matmul's C is f32.
+            dtype_acc = dtype_out_internal if use_larger_internal_buffer else dtype_out
+            matmul_kernel = kernels.linalg.mm(
+                m,
+                k,
+                n,
+                input_dtype=dtype_in,
+                output_dtype=dtype_acc,
+                vectorized=not use_scalar,
+                b_col_maj=b_col_maj,
+                c_col_maj=c_col_maj,
+                emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
+                round_conv_even=self.round_conv_even,
+            )
+            r, s, t = matmul_kernel.mac_dims
+            assert m % r == 0 and k % s == 0 and n % t == 0
+            streams = matmul_kernel.stream_dims
+            zero_kernel = kernels.zero(m * n, dtype_acc, vectorized=not use_scalar)
+            convert_copy_kernel = None
+            C_l1_ty_internal = np.ndarray[(m * n,), np.dtype[dtype_out_internal]]
+            if use_larger_internal_buffer:
+                fifo_depth_out = 1  # the f32 accumulator is the other buffer
+                convert_copy_kernel = kernels.datamovement.convert_copy(m * n)
+            else:
+                fifo_depth_out = fifo_depth
+            finish = self.finishing.on(n_aie_rows * n_aie_cols)
+
+            A_l3l2_fifos: list[Any] = [None] * n_shim_mem_A
+            A_l2l1_fifos: list[Any] = [None] * n_aie_rows
+            B_l3l2_fifos: list[Any] = [None] * n_aie_cols
+            B_l2l1_fifos: list[Any] = [None] * n_aie_cols
+            C_l1l2_fifos: list[list[Any]] = [
+                [None] * n_aie_cols for _ in range(n_aie_rows)
+            ]
+            C_l2l3_fifos: list[Any] = [None] * n_aie_cols
+
+            bounded = self.valid.in_scratchpad
+            k_bounded = self.valid_k.per_call
+            read = [self.k_div_k, self.n_tiles]
             if bounded:
-                row_blocks = words[self.row_blocks_valid]
-                col_tiles = words[self.col_tiles]
-            # (K tiles, whether they are multiplied), in the order they arrive.
-            spans = [(rtp_K_div_k, True)]
+                read += [self.row_blocks_valid, self.col_tiles]
             if k_bounded:
-                k_bound = words[self.k_valid]
-                k_compute = (k_bound + (k - 1)) // k
-                last = k_compute - 1
-                kept = k_bound - last * k
-                spans = [(k_compute, True), (rtp_K_div_k - k_compute, False)]
-            mode = finish.mode(words)
+                read.append(self.k_valid)
+            rtps = [
+                Rtp([*read, *finish.values]) for _ in range(n_aie_rows * n_aie_cols)
+            ]
 
-            def tile(compute: bool):
-                if use_larger_internal_buffer:
-                    acc = elem_out_internal
-                else:
-                    c = out_c.acquire(1)
-                    acc = finish.target(rest, mode, c)
-                if compute:
-                    zero(acc)
-                for count, multiply in spans:
-                    for kk in range_(count):
-                        elem_in_a = in_a.acquire(1)
-                        elem_in_b = in_b.acquire(1)
-                        if compute and multiply:
-                            if k_bounded:
-                                with if_(arith.index_cast(kk, to=last.type) == last):
-                                    k_tail_zero(elem_in_a, elem_in_b, kept)
-                            matmul(elem_in_a, elem_in_b, acc)
-                        in_a.release(1)
-                        in_b.release(1)
-                if use_larger_internal_buffer:
-                    c = out_c.acquire(1)
-                    if compute:
-                        convert_copy(acc, finish.target(rest, mode, c), m * n)
-                if compute:
-                    finish.apply(rest, mode, c)
-                out_c.release(1)
-
-            if bounded:
-                for _ in range_(row_blocks):
-                    for _ in range_(col_tiles):
-                        tile(compute=True)
-                for _ in range_(rtp_n_tiles_per_core - row_blocks * col_tiles):
-                    tile(compute=False)  # a padding tile: passed through
-                return
-            loop = range(1)  # Workaround for issue #1547
-            if rtp_n_tiles_per_core > 1:
-                loop = range_(rtp_n_tiles_per_core)
-            for _ in loop:
-                tile(compute=True)
-
-        workers = []
-        for row in range(n_aie_rows):
-            for col in range(n_aie_cols):
-                acc_buffer = None
-                if use_larger_internal_buffer:
-                    acc_buffer = Buffer(type=C_l1_ty_internal)
-                workers.append(
-                    Worker(
-                        core_fn,
-                        [
-                            A_l2l1_fifos[row].cons(),
-                            B_l2l1_fifos[col].cons(),
-                            C_l1l2_fifos[row][col].prod(),
-                            zero_kernel,
-                            matmul_kernel,
-                            convert_copy_kernel if use_larger_internal_buffer else None,
-                            matmul_kernel.k_tail if k_bounded else None,
-                            rtps[row * n_aie_cols + col],
-                            acc_buffer,
-                            *finish.args(row * n_aie_cols + col),
-                        ],
-                        stack_size=STACK_BYTES,
-                        tile=Tile(col, 2 + row) if pinned else AnyComputeTile,
+            for i in range(n_shim_mem_A):
+                A_l3l2_fifos[i] = ObjectFifo(A_l2_ty, depth=fifo_depth)
+                # Fewer A shims than rows: a shim's tiles split over several rows.
+                start_row = i * n_A_tiles_per_shim
+                stop_row = start_row + n_A_tiles_per_shim
+                of_offsets = [m * k * j for j in range(stop_row - start_row)]
+                a_tmp_fifos = (
+                    A_l3l2_fifos[i]
+                    .cons()
+                    .split(
+                        of_offsets,
+                        obj_types=[A_l1_ty] * (stop_row - start_row),
+                        to_stream=[streams.A] * (stop_row - start_row),
+                        tile=Tile(a_cols[i], 1) if pinned else AnyMemTile,
                     )
                 )
+                for j in range(stop_row - start_row):
+                    A_l2l1_fifos[j + start_row] = a_tmp_fifos[j]
 
-        self.A.bind(
-            [f.prod(tile=Tile(a_cols[c], 0)) for c, f in enumerate(A_l3l2_fifos)]
-        )
-        self.B.bind([f.prod(tile=Tile(c, 0)) for c, f in enumerate(B_l3l2_fifos)])
-        self.C.bind([f.cons(tile=Tile(c, 0)) for c, f in enumerate(C_l2l3_fifos)])
-        finish.bind()
-        return workers
+            for col in range(n_aie_cols):
+                B_l3l2_fifos[col] = ObjectFifo(B_l2_ty, depth=fifo_depth)
+                B_l2l1_fifos[col] = (
+                    B_l3l2_fifos[col]
+                    .cons()
+                    .forward(
+                        obj_type=B_l1_ty,
+                        to_stream=streams.B,
+                        tile=Tile(col, 1) if pinned else AnyMemTile,
+                    )
+                )
+                C_l2l3_fifos[col] = ObjectFifo(
+                    C_l2_ty,
+                    depth=fifo_depth,
+                    to_stream=streams.C,
+                )
+                of_offsets = [m * n * i for i in range(n_aie_rows)]
+                c_tmp_fifos = (
+                    C_l2l3_fifos[col]
+                    .prod()
+                    .join(
+                        of_offsets,
+                        obj_types=[C_l1_ty] * n_aie_rows,
+                        depths=[fifo_depth_out] * n_aie_rows,
+                        tile=Tile(col, 1) if pinned else AnyMemTile,
+                    )
+                )
+                for j in range(n_aie_rows):
+                    C_l1l2_fifos[j][col] = c_tmp_fifos[j]
+
+            def core_fn(
+                in_a,
+                in_b,
+                out_c,
+                zero,
+                matmul,
+                convert_copy,
+                k_tail_zero,
+                rtp,
+                elem_out_internal,
+                *rest,
+            ):
+                words = rtp.read()
+                rtp_K_div_k = words[self.k_div_k]
+                rtp_n_tiles_per_core = words[self.n_tiles]
+                if bounded:
+                    row_blocks = words[self.row_blocks_valid]
+                    col_tiles = words[self.col_tiles]
+                # (K tiles, whether they are multiplied), in the order they arrive.
+                spans = [(rtp_K_div_k, True)]
+                if k_bounded:
+                    k_bound = words[self.k_valid]
+                    k_compute = (k_bound + (k - 1)) // k
+                    last = k_compute - 1
+                    kept = k_bound - last * k
+                    spans = [(k_compute, True), (rtp_K_div_k - k_compute, False)]
+                mode = finish.mode(words)
+
+                def tile(compute: bool):
+                    if use_larger_internal_buffer:
+                        acc = elem_out_internal
+                    else:
+                        c = out_c.acquire(1)
+                        acc = finish.target(rest, mode, c)
+                    if compute:
+                        zero(acc)
+                    for count, multiply in spans:
+                        for kk in range_(count):
+                            elem_in_a = in_a.acquire(1)
+                            elem_in_b = in_b.acquire(1)
+                            if compute and multiply:
+                                if k_bounded:
+                                    with if_(
+                                        arith.index_cast(kk, to=last.type) == last
+                                    ):
+                                        k_tail_zero(elem_in_a, elem_in_b, kept)
+                                matmul(elem_in_a, elem_in_b, acc)
+                            in_a.release(1)
+                            in_b.release(1)
+                    if use_larger_internal_buffer:
+                        c = out_c.acquire(1)
+                        if compute:
+                            convert_copy(acc, finish.target(rest, mode, c), m * n)
+                    if compute:
+                        finish.apply(rest, mode, c)
+                    out_c.release(1)
+
+                if bounded:
+                    for _ in range_(row_blocks):
+                        for _ in range_(col_tiles):
+                            tile(compute=True)
+                    for _ in range_(rtp_n_tiles_per_core - row_blocks * col_tiles):
+                        tile(compute=False)  # a padding tile: passed through
+                    return
+                loop = range(1)  # Workaround for issue #1547
+                if rtp_n_tiles_per_core > 1:
+                    loop = range_(rtp_n_tiles_per_core)
+                for _ in loop:
+                    tile(compute=True)
+
+            workers = []
+            for row in range(n_aie_rows):
+                for col in range(n_aie_cols):
+                    acc_buffer = None
+                    if use_larger_internal_buffer:
+                        acc_buffer = Buffer(type=C_l1_ty_internal)
+                    workers.append(
+                        Worker(
+                            core_fn,
+                            [
+                                A_l2l1_fifos[row].cons(),
+                                B_l2l1_fifos[col].cons(),
+                                C_l1l2_fifos[row][col].prod(),
+                                zero_kernel,
+                                matmul_kernel,
+                                (
+                                    convert_copy_kernel
+                                    if use_larger_internal_buffer
+                                    else None
+                                ),
+                                matmul_kernel.k_tail if k_bounded else None,
+                                rtps[row * n_aie_cols + col],
+                                acc_buffer,
+                                *finish.args(row * n_aie_cols + col),
+                            ],
+                            stack_size=STACK_BYTES,
+                            tile=Tile(col, 2 + row) if pinned else AnyComputeTile,
+                        )
+                    )
+
+            self.A.bind(
+                [f.prod(tile=Tile(a_cols[c], 0)) for c, f in enumerate(A_l3l2_fifos)]
+            )
+            self.B.bind([f.prod(tile=Tile(c, 0)) for c, f in enumerate(B_l3l2_fifos)])
+            self.C.bind([f.cons(tile=Tile(c, 0)) for c, f in enumerate(C_l2l3_fifos)])
+            finish.bind()
+            return Built(workers, rtps)
 
     def sequence(self, rt):
         M, K, N = self.M, self.K, self.N

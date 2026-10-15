@@ -34,6 +34,7 @@ from iron.common import (
     AutoSpec,
     Param,
     ParamSpec,
+    Built,
 )
 from iron.common.design import OperatorDesign
 from iron.operators import ReLU as LibraryReLU
@@ -54,7 +55,7 @@ class MV(Operator):
     columns: int | None = Auto()
     tile_out: int = Auto(default=64)
     vec: int | None = Auto(repr=False)
-    epilogue: str = Param(default="none", array=True)
+    epilogue: str = Param(default="none")
 
     A = In(num_batches, M, K, obj_type=(tile_out, K), per=columns)
     B = In(num_batches, K, obj_type=(K,), broadcast=True)
@@ -75,8 +76,14 @@ class MV(Operator):
         if self.M % unit:
             raise ValueError(f"M={self.M} is not a multiple of {unit}")
 
-    def array(self):
-        return [self.K, self.columns, self.tile_out, self.epilogue]
+    class Array(Operator.Array):
+        K: int
+        columns: int
+        tile_out: int
+        epilogue: str
+
+        def build(self) -> Built:
+            return Built([self.K, self.columns, self.tile_out, self.epilogue])
 
     def reference(self, A, B):
         return A @ B
@@ -241,8 +248,11 @@ def test_a_probe_may_not_be_on_a_field_the_array_reads():
 
         class Baked(Operator):
             n: int = Param()
-            alpha: float = Param(array=True, probe=1.0)
+            alpha: float = Param(probe=1.0)
             x = In(n)
+
+            class Array(Operator.Array):
+                alpha: float
 
     with pytest.raises(TypeError, match="probe= on an array field"):
 
@@ -250,6 +260,9 @@ def test_a_probe_may_not_be_on_a_field_the_array_reads():
             n: int = Param()
             t: int = Param(probe=16)
             x = In(n, obj_type=(t,))
+
+            class Array(Operator.Array):
+                t: int
 
 
 def test_a_probe_may_not_be_on_a_field_the_transfers_follow():
@@ -388,6 +401,9 @@ def test_per_call_values_bind_on_the_operator():
         off = Value()
         live = DispatchTime()
 
+        class Array(Operator.Array):
+            n: int
+
     op = Copy(n=256)
     assert [v.name for v in op.values] == ["off", "live"]
     assert type(op.off) is Value and op.off.op is op
@@ -477,8 +493,12 @@ class Scaled(Operator):
     s = In(N, obj_type=(N,), when=scaled)
     y = Out(N, obj_type=(N,))
 
-    def array(self):
-        return [self.scaled]
+    class Array(Operator.Array):
+        N: int
+        scaled: bool
+
+        def build(self) -> Built:
+            return Built([self.scaled])
 
 
 def test_an_operand_declared_when_a_flag_exists_only_where_it_is_true():
@@ -587,13 +607,30 @@ def test_a_traced_operator_is_not_the_untraced_ones_array():
 
 def test_array_sees_the_array_tier_alone():
     class Leaky(MV):
-        def array(self):
-            return self.M // self.tile_out
+        class Array(MV.Array):
+            def build(self) -> Built:
+                return Built([self.M // self.tile_out])
 
     op = MV(M=1024, K=128).resolved(NPU2)
-    assert op._build_array() == [128, 8, 64, "none"]
-    with pytest.raises(TypeError, match="reads M, which no tile names"):
-        Leaky(M=1024, K=128).resolved(NPU2)._build_array()
+    assert MV.declaration.array == ("K", "columns", "tile_out", "epilogue")
+    assert op.array_config().build() == Built([128, 8, 64, "none"])
+    with pytest.raises(AttributeError, match="'M'"):
+        Leaky(M=1024, K=128).resolved(NPU2).array_config().build()
+
+
+def test_an_array_lists_what_names_its_streams_and_nothing_else():
+    with pytest.raises(TypeError, match=r"\['tile_out'\] configure the array"):
+
+        class Untiled(MV):
+            class Array(Operator.Array):
+                K: int
+                columns: int
+
+    with pytest.raises(TypeError, match=r"lists \['work'\], which are neither"):
+
+        class Stray(MV):
+            class Array(MV.Array):
+                work: int
 
 
 def test_resolution_fills_every_tunable_or_says_which_it_left():
@@ -836,8 +873,12 @@ class Rows(Operator):
     def resolve(self, dev):
         return dataclasses.replace(self)
 
-    def array(self):
-        return []
+    class Array(Operator.Array):
+        cols: int
+        lanes: int
+
+        def build(self) -> Built:
+            return Built([])
 
     def reference(self, x):
         return x

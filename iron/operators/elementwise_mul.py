@@ -11,8 +11,9 @@ from iron.common import BinaryElementwise, In, Out, Rowwise
 class ElementwiseMul(BinaryElementwise):
     """AIE-accelerated element-wise multiplication."""
 
-    def kernel(self):
-        return eltwise.mul_sized(self.tile_size)
+    class Array(BinaryElementwise.Array):
+        def kernel(self):
+            return eltwise.mul_sized(self.tile_size)
 
 
 class RowwiseMul(Rowwise):
@@ -39,5 +40,6 @@ class RowwiseMul(Rowwise):
         per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
 
-    def kernel(self):
-        return eltwise.mul_sized(self.tile_size)
+    class Array(Rowwise.Array):
+        def kernel(self):
+            return eltwise.mul_sized(self.tile_size)

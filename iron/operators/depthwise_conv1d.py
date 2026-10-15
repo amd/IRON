@@ -10,7 +10,18 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import conv
 from ml_dtypes import bfloat16
 
-from iron.common import Extent, In, Operator, Out, Value, Auto, Param
+from iron.common import (
+    Extent,
+    In,
+    Operator,
+    Out,
+    Value,
+    Auto,
+    Param,
+    Built,
+    Operand,
+    Rtp,
+)
 from iron.common.testing import Case, Testing
 
 TAPS = 5
@@ -35,7 +46,7 @@ class DepthwiseConv1d(Operator):
     )
 
     rows: int = Param()
-    channels: int = Param(array=True)
+    channels: int = Param()
     num_aie_columns: int = Auto()
 
     x = In(rows, channels, obj_type=(channels,), per=(num_aie_columns,), depth=TAPS + 1)
@@ -68,11 +79,73 @@ class DepthwiseConv1d(Operator):
                 f"{cols} runs of at least {TAPS - 1} rows"
             )
 
-    def kernel(self):
-        return conv.dwconv1d_channels_last(self.channels, clamp=False)
+    class Array(Operator.Array):
+        channels: int
+        num_aie_columns: int
+        steps: Value
+        weight: Operand
+        x: Operand
+        y: Operand
+
+        def kernel(self):
+            return conv.dwconv1d_channels_last(self.channels, clamp=False)
+
+        def build(self) -> Built:
+            cols, C = self.num_aie_columns, self.channels
+            plane = self.x.obj_type
+            kernel = self.kernel()
+            of_ins = [ObjectFifo(plane, depth=TAPS + 1) for k in range(cols)]
+            of_outs = [ObjectFifo(plane) for k in range(cols)]
+            of_w = ObjectFifo(plane, depth=TAPS)
+            zero = Buffer(plane, initial_value=np.zeros(C, bfloat16))
+            limit = np.ndarray[(1,), np.dtype[np.float32]]
+            rtps = [Rtp([self.steps]) for _ in range(cols)]
+
+            def core_fn(of_in, of_w, of_out, conv_fn, zero, lo, hi, rtp):
+                n = rtp.read()[self.steps]
+                w = of_w.acquire(TAPS)
+                taps = [w[j] for j in range(TAPS)]
+                if zero is not None:
+                    # The rows before the first are zeros: a window that grows to five.
+                    for held in range(1, TAPS):
+                        got = of_in.acquire(held)
+                        window = [got] if held == 1 else [got[j] for j in range(held)]
+                        y = of_out.acquire(1)
+                        conv_fn(*taps, *[zero] * (TAPS - held), *window, y, lo, hi)
+                        of_out.release(1)
+                    n = arith.subi(n, arith.constant(TAPS - 1, n.type))
+                for _ in range_(n):
+                    window = of_in.acquire(TAPS)
+                    y = of_out.acquire(1)
+                    conv_fn(*taps, *[window[j] for j in range(TAPS)], y, lo, hi)
+                    of_in.release(1)
+                    of_out.release(1)
+                of_in.release(TAPS - 1)
+                of_w.release(TAPS)
+
+            workers = [
+                Worker(
+                    core_fn,
+                    [
+                        of_ins[k].cons(),
+                        of_w.cons(),
+                        of_outs[k].prod(),
+                        kernel,
+                        zero if k == 0 else None,
+                        Buffer(limit, initial_value=np.zeros(1, np.float32)),
+                        Buffer(limit, initial_value=np.zeros(1, np.float32)),
+                        rtps[k],
+                    ],
+                )
+                for k in range(cols)
+            ]
+            self.x.bind([f.prod() for f in of_ins])
+            self.y.bind([f.cons() for f in of_outs])
+            self.weight.bind(of_w.prod())
+            return Built(workers, rtps)
 
     def tolerance(self):
-        return self.kernel().contract.tolerance
+        return self.array_config().kernel().contract.tolerance
 
     def ops(self) -> int:
         return 2 * TAPS * self.rows * self.channels
@@ -84,60 +157,6 @@ class DepthwiseConv1d(Operator):
         w = weight.astype(np.float32)
         y = sum(w[j] * padded[j : j + self.rows] for j in range(TAPS))
         return y.astype(bfloat16)
-
-    def array(self) -> list:
-        cols, C = self.num_aie_columns, self.channels
-        plane = self.x.obj_type
-        kernel = self.kernel()
-        of_ins = [ObjectFifo(plane, depth=TAPS + 1) for k in range(cols)]
-        of_outs = [ObjectFifo(plane) for k in range(cols)]
-        of_w = ObjectFifo(plane, depth=TAPS)
-        zero = Buffer(plane, initial_value=np.zeros(C, bfloat16))
-        limit = np.ndarray[(1,), np.dtype[np.float32]]
-        rtps = self.rtp([self.steps], cores=cols)
-
-        def core_fn(of_in, of_w, of_out, conv_fn, zero, lo, hi, rtp):
-            n = rtp.read()[self.steps]
-            w = of_w.acquire(TAPS)
-            taps = [w[j] for j in range(TAPS)]
-            if zero is not None:
-                # The rows before the first are zeros: a window that grows to five.
-                for held in range(1, TAPS):
-                    got = of_in.acquire(held)
-                    window = [got] if held == 1 else [got[j] for j in range(held)]
-                    y = of_out.acquire(1)
-                    conv_fn(*taps, *[zero] * (TAPS - held), *window, y, lo, hi)
-                    of_out.release(1)
-                n = arith.subi(n, arith.constant(TAPS - 1, n.type))
-            for _ in range_(n):
-                window = of_in.acquire(TAPS)
-                y = of_out.acquire(1)
-                conv_fn(*taps, *[window[j] for j in range(TAPS)], y, lo, hi)
-                of_in.release(1)
-                of_out.release(1)
-            of_in.release(TAPS - 1)
-            of_w.release(TAPS)
-
-        workers = [
-            Worker(
-                core_fn,
-                [
-                    of_ins[k].cons(),
-                    of_w.cons(),
-                    of_outs[k].prod(),
-                    kernel,
-                    zero if k == 0 else None,
-                    Buffer(limit, initial_value=np.zeros(1, np.float32)),
-                    Buffer(limit, initial_value=np.zeros(1, np.float32)),
-                    rtps[k],
-                ],
-            )
-            for k in range(cols)
-        ]
-        self.x.bind([f.prod() for f in of_ins])
-        self.y.bind([f.cons() for f in of_outs])
-        self.weight.bind(of_w.prod())
-        return workers
 
     def sequence(self, rt):
         """The weights to every core, then each run with the four rows before it."""

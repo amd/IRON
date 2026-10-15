@@ -28,6 +28,9 @@ from iron.common import (
     Value,
     Auto,
     Param,
+    Built,
+    Operand,
+    Rtp,
 )
 from iron.common.testing import Case, Testing
 
@@ -70,14 +73,14 @@ class Softmax(Operator):
         ]
     )
 
-    rows: int = Param(array=True)
+    rows: int = Param()
     cols: int = Param()
     num_aie_columns: int = Auto()
     num_channels: int = Auto(default=1)
     block: int = Auto(
         domain=Divisors(of=lambda op, dev: op.cols, step=_VECTOR_STEP, cap=_ROW_CAP)
     )
-    streamed: bool = Auto(array=True, domain=(False, True))
+    streamed: bool = Auto(domain=(False, True))
 
     length = Extent(cols)  # cols, or fewer per call
 
@@ -150,101 +153,120 @@ class Softmax(Operator):
     def extent_unit(self, buffer: str) -> int:
         return 0  # no tiles-per-lane word: the sequence bounds the blocks itself
 
-    def array(self) -> list:
-        tile_ty = self.x.obj_type
-        n_cores = self.cores
-        rows_per_core = self.rows // n_cores
-        block = self.block
-        softmax_k = activation.softmax(block)
-        # The blocked passes and mask_bf16 are exported by the same softmax.cc.
-        obj = softmax_k.object_file
-        mask_k = obj.bind("mask_bf16", [tile_ty, np.int32, np.int32])
-        zero_k = zero(block, ml_dtypes.bfloat16)
-        state_ty = np.ndarray[(_STATE,), np.dtype[np.float32]]
-        of_ins = [ObjectFifo(tile_ty) for k in range(n_cores)]
-        of_outs = [ObjectFifo(tile_ty) for k in range(n_cores)]
-        counts = [self.valid_cols, self.blocks] if self.streamed else [self.valid_cols]
-        rtps = self.rtp(counts, cores=n_cores)
+    class Array(Operator.Array):
+        block: int
+        num_aie_columns: int
+        num_channels: int
+        rows: int
+        streamed: bool
+        blocks: Value
+        valid_cols: Value
+        x: Operand
+        y: Operand
 
-        def whole(of_in, of_out, softmax, mask, zero, rtp):
-            valid = rtp.read()[self.valid_cols]
-            span = arith.minsi(
-                (valid + (_VECTOR_STEP - 1)) & -_VECTOR_STEP,
-                arith.constant(block, valid.type),
+        def build(self) -> Built:
+            tile_ty = self.x.obj_type
+            n_cores = self.num_aie_columns * self.num_channels
+            rows_per_core = self.rows // n_cores
+            block = self.block
+            softmax_k = activation.softmax(block)
+            # The blocked passes and mask_bf16 are exported by the same softmax.cc.
+            obj = softmax_k.object_file
+            mask_k = obj.bind("mask_bf16", [tile_ty, np.int32, np.int32])
+            zero_k = zero(block, ml_dtypes.bfloat16)
+            state_ty = np.ndarray[(_STATE,), np.dtype[np.float32]]
+            of_ins = [ObjectFifo(tile_ty) for k in range(n_cores)]
+            of_outs = [ObjectFifo(tile_ty) for k in range(n_cores)]
+            counts = (
+                [self.valid_cols, self.blocks] if self.streamed else [self.valid_cols]
             )
-            for _ in range_(rows_per_core):
-                elem_in = of_in.acquire(1)
-                elem_out = of_out.acquire(1)
-                zero(elem_out)
-                mask(elem_in, valid, span)
-                softmax(elem_in, elem_out, span)
-                of_in.release(1)
-                of_out.release(1)
+            rtps = [Rtp(counts) for _ in range(n_cores)]
 
-        def streamed(
-            of_in, of_out, row_max, row_sum, row_scale, mask, zero, rtp, *states
-        ):
-            # Blocks arrive across the core's rows: each row carries its own state.
-            words = rtp.read()
-            valid, blocks = words[self.valid_cols], words[self.blocks]
-            i32 = valid.type
-            for step in range(3):
-                for b in range_(blocks):
-                    b32 = arith.index_cast(b, to=i32)
-                    in_block = arith.minsi(
-                        valid - b32 * block, arith.constant(block, i32)
-                    )
-                    span = arith.minsi(
-                        (in_block + (_VECTOR_STEP - 1)) & -_VECTOR_STEP,
-                        arith.constant(block, i32),
-                    )
-                    for state in states:
-                        elem_in = of_in.acquire(1)
-                        mask(elem_in, in_block, span)
-                        if step == 0:
-                            row_max(elem_in, state, arith.extui(i32, b32 == 0), span)
-                        elif step == 1:
-                            row_sum(elem_in, state, span)
-                        else:
-                            elem_out = of_out.acquire(1)
-                            zero(elem_out)
-                            row_scale(elem_in, elem_out, state, span)
-                            of_out.release(1)
-                        of_in.release(1)
+            def whole(of_in, of_out, softmax, mask, zero, rtp):
+                valid = rtp.read()[self.valid_cols]
+                span = arith.minsi(
+                    (valid + (_VECTOR_STEP - 1)) & -_VECTOR_STEP,
+                    arith.constant(block, valid.type),
+                )
+                for _ in range_(rows_per_core):
+                    elem_in = of_in.acquire(1)
+                    elem_out = of_out.acquire(1)
+                    zero(elem_out)
+                    mask(elem_in, valid, span)
+                    softmax(elem_in, elem_out, span)
+                    of_in.release(1)
+                    of_out.release(1)
 
-        if self.streamed:
-            kernels = [
-                obj.bind("softmax_max_bf16", [tile_ty, state_ty, np.int32, np.int32]),
-                obj.bind("softmax_sum_bf16", [tile_ty, state_ty, np.int32]),
-                obj.bind("softmax_scale_bf16", [tile_ty, tile_ty, state_ty, np.int32]),
-            ]
-            workers = [
-                Worker(
-                    streamed,
-                    [of_ins[k].cons(), of_outs[k].prod(), *kernels, mask_k, zero_k]
-                    + [rtps[k]]
-                    + [Buffer(state_ty) for r in range(rows_per_core)],
-                )
-                for k in range(n_cores)
-            ]
-        else:
-            workers = [
-                Worker(
-                    whole,
-                    [
-                        of_ins[k].cons(),
-                        of_outs[k].prod(),
-                        softmax_k,
-                        mask_k,
-                        zero_k,
-                        rtps[k],
-                    ],
-                )
-                for k in range(n_cores)
-            ]
-        self.x.bind([f.prod() for f in of_ins])
-        self.y.bind([f.cons() for f in of_outs])
-        return workers
+            def streamed(
+                of_in, of_out, row_max, row_sum, row_scale, mask, zero, rtp, *states
+            ):
+                # Blocks arrive across the core's rows: each row carries its own state.
+                words = rtp.read()
+                valid, blocks = words[self.valid_cols], words[self.blocks]
+                i32 = valid.type
+                for step in range(3):
+                    for b in range_(blocks):
+                        b32 = arith.index_cast(b, to=i32)
+                        in_block = arith.minsi(
+                            valid - b32 * block, arith.constant(block, i32)
+                        )
+                        span = arith.minsi(
+                            (in_block + (_VECTOR_STEP - 1)) & -_VECTOR_STEP,
+                            arith.constant(block, i32),
+                        )
+                        for state in states:
+                            elem_in = of_in.acquire(1)
+                            mask(elem_in, in_block, span)
+                            if step == 0:
+                                row_max(
+                                    elem_in, state, arith.extui(i32, b32 == 0), span
+                                )
+                            elif step == 1:
+                                row_sum(elem_in, state, span)
+                            else:
+                                elem_out = of_out.acquire(1)
+                                zero(elem_out)
+                                row_scale(elem_in, elem_out, state, span)
+                                of_out.release(1)
+                            of_in.release(1)
+
+            if self.streamed:
+                kernels = [
+                    obj.bind(
+                        "softmax_max_bf16", [tile_ty, state_ty, np.int32, np.int32]
+                    ),
+                    obj.bind("softmax_sum_bf16", [tile_ty, state_ty, np.int32]),
+                    obj.bind(
+                        "softmax_scale_bf16", [tile_ty, tile_ty, state_ty, np.int32]
+                    ),
+                ]
+                workers = [
+                    Worker(
+                        streamed,
+                        [of_ins[k].cons(), of_outs[k].prod(), *kernels, mask_k, zero_k]
+                        + [rtps[k]]
+                        + [Buffer(state_ty) for r in range(rows_per_core)],
+                    )
+                    for k in range(n_cores)
+                ]
+            else:
+                workers = [
+                    Worker(
+                        whole,
+                        [
+                            of_ins[k].cons(),
+                            of_outs[k].prod(),
+                            softmax_k,
+                            mask_k,
+                            zero_k,
+                            rtps[k],
+                        ],
+                    )
+                    for k in range(n_cores)
+                ]
+            self.x.bind([f.prod() for f in of_ins])
+            self.y.bind([f.cons() for f in of_outs])
+            return Built(workers, rtps)
 
     def sequence(self, rt):
         """Each lane's rows as ``(block, row, element)``, thrice if streamed."""

@@ -28,10 +28,13 @@ class LeakyReLU(UnaryElementwise):
         draw=lambda op: dict(centered=(op.x,)),
     )
 
-    alpha: float = Param(default=0.01, array=True)
+    alpha: float = Param(default=0.01)
 
-    def kernel(self):
-        return activation.leaky_relu(self.tile_size)
+    class Array(UnaryElementwise.Array):
+        alpha: float
 
-    def scalars(self) -> tuple:
-        return (self.alpha,)
+        def kernel(self):
+            return activation.leaky_relu(self.tile_size)
+
+        def scalars(self) -> tuple:
+            return (self.alpha,)

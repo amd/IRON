@@ -3,7 +3,7 @@
 
 """The library-owned build of a declared operator.
 
-``OperatorDesign.module`` resolves the operator, runs its ``array()`` and
+``OperatorDesign.module`` resolves the operator, runs its ``Array.build()`` and
 builds aie.iron's ``Program`` around an ``OperatorRuntime``: the preamble,
 then the sequence derived from the operands or the operator's own
 ``sequence(rt)``. For a fused image, ``configuration`` puts ``BuiltArray`` s

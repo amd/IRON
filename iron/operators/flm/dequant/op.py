@@ -11,14 +11,7 @@ from aie.iron import ObjectFifo, TaskGroup, Worker
 from aie.iron.kernels import quant
 from aie.utils import bfp
 
-from iron.common import (
-    In,
-    Operator,
-    Out,
-    Unresolvable,
-    Auto,
-    Param,
-)
+from iron.common import In, Operator, Out, Unresolvable, Auto, Param, Built, Operand
 from iron.operators.flm.dequant.design import (
     CORE_BLOCKS,
     CORE_JOIN_OFFSETS,
@@ -191,55 +184,61 @@ class DequantBFP(Operator):
             base = f"{base}_run{self.run_out_features}p{self.run_period_out_features}"
         return base
 
-    def array(self) -> list:
-        cols = self.cols
-        qw_col_ty, out_half_ty = self.qw.obj_type, self.out.obj_type
-        qw_blk_ty = np.ndarray[(BLOCK_BYTES,), np.dtype[np.uint8]]
-        out_blk_ty = np.ndarray[(CORE_BLOCKS,), np.dtype[v8bfp16ebs8]]
+    class Array(Operator.Array):
+        cols: int
+        halves: int
+        qw: Operand
+        out: Operand
 
-        # The factory declares both operands in bytes; the output FIFO carries
-        # bfp16ebs8 blocks.
-        kernel = quant.q4nx_dequant(
-            m_tile=M_TILE, k_tile=K_TILE, group=GROUP, ct_k=CT_K, s=S, t=T
-        ).object_file.bind("q4nx_dequant_bfp", [qw_blk_ty, out_blk_ty])
+        def build(self) -> Built:
+            cols = self.cols
+            qw_col_ty, out_half_ty = self.qw.obj_type, self.out.obj_type
+            qw_blk_ty = np.ndarray[(BLOCK_BYTES,), np.dtype[np.uint8]]
+            out_blk_ty = np.ndarray[(CORE_BLOCKS,), np.dtype[v8bfp16ebs8]]
 
-        def core_body(qw_in, out_of, k):
-            qw = qw_in.acquire(1)
-            out = out_of.acquire(1)
-            k(qw, out)
-            qw_in.release(1)
-            out_of.release(1)
+            # The factory declares both operands in bytes; the output FIFO carries
+            # bfp16ebs8 blocks.
+            kernel = quant.q4nx_dequant(
+                m_tile=M_TILE, k_tile=K_TILE, group=GROUP, ct_k=CT_K, s=S, t=T
+            ).object_file.bind("q4nx_dequant_bfp", [qw_blk_ty, out_blk_ty])
 
-        workers, qws, outs = [], [], []
-        for c in range(cols):
-            of_qw = ObjectFifo(qw_col_ty, depth=2)
-            qws.append(of_qw.prod())
-            qw_cores = of_qw.cons().split(
-                [BLOCK_BYTES * r for r in range(ROWS)],
-                obj_types=[qw_blk_ty] * ROWS,
-            )
+            def core_body(qw_in, out_of, k):
+                qw = qw_in.acquire(1)
+                out = out_of.acquire(1)
+                k(qw, out)
+                qw_in.release(1)
+                out_of.release(1)
 
-            out_cores = []
-            for h in range(HALVES):
-                of_out = ObjectFifo(out_half_ty, depth=2)
-                outs.append(of_out.cons())
-                out_cores += of_out.prod().join(
-                    CORE_JOIN_OFFSETS,
-                    obj_types=[out_blk_ty] * (ROWS // HALVES),
+            workers, qws, outs = [], [], []
+            for c in range(cols):
+                of_qw = ObjectFifo(qw_col_ty, depth=2)
+                qws.append(of_qw.prod())
+                qw_cores = of_qw.cons().split(
+                    [BLOCK_BYTES * r for r in range(ROWS)],
+                    obj_types=[qw_blk_ty] * ROWS,
                 )
 
-            # aiecc measures 1216 bytes against the 1024-byte device default.
-            workers += [
-                Worker(
-                    core_body,
-                    [qw_cores[r].cons(), out_cores[r].prod(), kernel],
-                    stack_size=2048,
-                )
-                for r in range(ROWS)
-            ]
-        self.qw.bind(qws)
-        self.out.bind(outs)
-        return workers
+                out_cores = []
+                for h in range(HALVES):
+                    of_out = ObjectFifo(out_half_ty, depth=2)
+                    outs.append(of_out.cons())
+                    out_cores += of_out.prod().join(
+                        CORE_JOIN_OFFSETS,
+                        obj_types=[out_blk_ty] * (ROWS // HALVES),
+                    )
+
+                # aiecc measures 1216 bytes against the 1024-byte device default.
+                workers += [
+                    Worker(
+                        core_body,
+                        [qw_cores[r].cons(), out_cores[r].prod(), kernel],
+                        stack_size=2048,
+                    )
+                    for r in range(ROWS)
+                ]
+            self.qw.bind(qws)
+            self.out.bind(outs)
+            return Built(workers)
 
     def quantized_size(self) -> int:
         """Bytes of q4nx input, counting any interleave gap it strides over."""

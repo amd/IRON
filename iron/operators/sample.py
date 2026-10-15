@@ -30,6 +30,8 @@ from iron.common import (
     Value,
     Auto,
     Param,
+    Built,
+    Operand,
 )
 from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
@@ -83,8 +85,8 @@ class Sample(Operator):
         draw=_logits,
     )
 
-    vocab: int = Param(array=True)
-    k_max: int = Param(default=64, array=True)
+    vocab: int = Param()
+    k_max: int = Param(default=64)
     # Positions the draws and the record hold; the sequence picks one.
     steps: int = Param(default=1)
     cores: int = Auto(default=4)
@@ -138,92 +140,118 @@ class Sample(Operator):
     def compatible(self) -> None:
         # The factories' own checks: chunk divides the slice, k_max fits.
         try:
-            self._select()
-            self._combine()
+            config = self.array_config()
+            config.select()
+            config.combine()
         except ValueError as e:
             raise ValueError(str(e)) from e
 
-    def _select(self):
-        return kernels.sample_select(
-            slice_size=self.slice_size, chunk=self.chunk, k_max=self.k_max
-        )
+    class Array(Operator.Array):
+        vocab: int
+        k_max: int
+        cores: int
+        chunk: int
+        logits: Operand
+        draws: Operand
+        tokens: Operand
+        token: Operand
 
-    def _combine(self):
-        return kernels.sample_combine(
-            columns=self.cores, slice_size=self.slice_size, k_max=self.k_max
-        )
+        @property
+        def slice_size(self) -> int:
+            return self.vocab // self.cores
 
-    def array(self) -> list:
-        select, combine = self._select(), self._combine()
-        words = kernels.summary_words(self.slice_size, self.k_max)
-        calls = self.select_streams * self.slice_size // self.chunk
-        # Every core reads the draw row.
-        of_draw = ObjectFifo(self.draws.obj_type, depth=1)
-        self.draws.bind(of_draw.prod())
-        of_token = ObjectFifo(self.token.obj_type, depth=1)
-        self.token.bind(of_token.cons())
-        of_record = ObjectFifo(self.tokens.obj_type, depth=1)
-        self.tokens.bind(of_record.cons())
-        # The summaries meet in a memtile, column 0 first.
-        of_summaries = ObjectFifo(
-            np.ndarray[(self.cores * words,), np.dtype[np.int32]],
-            depth=1,
-        )
-        of_summary = of_summaries.prod().join(
-            [words * c for c in range(self.cores)],
-            obj_types=[np.ndarray[(words,), np.dtype[np.int32]]] * self.cores,
-            depths=[1] * self.cores,
-        )
+        @property
+        def select_streams(self) -> int:
+            """How often each select core takes its slice per position."""
+            return kernels.select_streams(self.slice_size, self.chunk)
 
-        def select_body(of_x, of_row, of_sum, kernel, state):
-            row = of_row.acquire(1)
-            summary = of_sum.acquire(1)
-            for _ in range_(calls):
-                x = of_x.acquire(1)
-                kernel(x, row, state, summary)
-                of_x.release(1)
-            of_sum.release(1)
-            of_row.release(1)
-
-        def combine_body(of_sums, of_row, of_tok, of_rec, kernel):
-            summaries = of_sums.acquire(1)
-            row = of_row.acquire(1)
-            token = of_tok.acquire(1)
-            record = of_rec.acquire(1)
-            kernel(summaries, row, token, record)
-            of_sums.release(1)
-            of_row.release(1)
-            of_tok.release(1)
-            of_rec.release(1)
-
-        workers, logits = [], []
-        for c in range(self.cores):
-            of_x = ObjectFifo(self.logits.obj_type, depth=2)
-            logits.append(of_x.prod())
-            state = Buffer(
-                np.ndarray[(kernels.SELECT_STATE_WORDS,), np.dtype[np.int32]],
-                initial_value=np.zeros(kernels.SELECT_STATE_WORDS, dtype=np.int32),
+        def select(self):
+            return kernels.sample_select(
+                slice_size=self.slice_size, chunk=self.chunk, k_max=self.k_max
             )
+
+        def combine(self):
+            return kernels.sample_combine(
+                columns=self.cores, slice_size=self.slice_size, k_max=self.k_max
+            )
+
+        def build(self) -> Built:
+            select, combine = self.select(), self.combine()
+            words = kernels.summary_words(self.slice_size, self.k_max)
+            calls = self.select_streams * self.slice_size // self.chunk
+            # Every core reads the draw row.
+            of_draw = ObjectFifo(self.draws.obj_type, depth=1)
+            self.draws.bind(of_draw.prod())
+            of_token = ObjectFifo(self.token.obj_type, depth=1)
+            self.token.bind(of_token.cons())
+            of_record = ObjectFifo(self.tokens.obj_type, depth=1)
+            self.tokens.bind(of_record.cons())
+            # The summaries meet in a memtile, column 0 first.
+            of_summaries = ObjectFifo(
+                np.ndarray[(self.cores * words,), np.dtype[np.int32]],
+                depth=1,
+            )
+            of_summary = of_summaries.prod().join(
+                [words * c for c in range(self.cores)],
+                obj_types=[np.ndarray[(words,), np.dtype[np.int32]]] * self.cores,
+                depths=[1] * self.cores,
+            )
+
+            def select_body(of_x, of_row, of_sum, kernel, state):
+                row = of_row.acquire(1)
+                summary = of_sum.acquire(1)
+                for _ in range_(calls):
+                    x = of_x.acquire(1)
+                    kernel(x, row, state, summary)
+                    of_x.release(1)
+                of_sum.release(1)
+                of_row.release(1)
+
+            def combine_body(of_sums, of_row, of_tok, of_rec, kernel):
+                summaries = of_sums.acquire(1)
+                row = of_row.acquire(1)
+                token = of_tok.acquire(1)
+                record = of_rec.acquire(1)
+                kernel(summaries, row, token, record)
+                of_sums.release(1)
+                of_row.release(1)
+                of_tok.release(1)
+                of_rec.release(1)
+
+            workers, logits = [], []
+            for c in range(self.cores):
+                of_x = ObjectFifo(self.logits.obj_type, depth=2)
+                logits.append(of_x.prod())
+                state = Buffer(
+                    np.ndarray[(kernels.SELECT_STATE_WORDS,), np.dtype[np.int32]],
+                    initial_value=np.zeros(kernels.SELECT_STATE_WORDS, dtype=np.int32),
+                )
+                workers.append(
+                    Worker(
+                        select_body,
+                        [
+                            of_x.cons(),
+                            of_draw.cons(),
+                            of_summary[c].prod(),
+                            select,
+                            state,
+                        ],
+                    )
+                )
+            self.logits.bind(logits)
             workers.append(
                 Worker(
-                    select_body,
-                    [of_x.cons(), of_draw.cons(), of_summary[c].prod(), select, state],
+                    combine_body,
+                    [
+                        of_summaries.cons(),
+                        of_draw.cons(),
+                        of_token.prod(),
+                        of_record.prod(),
+                        combine,
+                    ],
                 )
             )
-        self.logits.bind(logits)
-        workers.append(
-            Worker(
-                combine_body,
-                [
-                    of_summaries.cons(),
-                    of_draw.cons(),
-                    of_token.prod(),
-                    of_record.prod(),
-                    combine,
-                ],
-            )
-        )
-        return workers
+            return Built(workers)
 
     def _slice_taps(self, core: int) -> list[TensorAccessPattern]:
         """Core ``core``'s slice, once per select stream."""

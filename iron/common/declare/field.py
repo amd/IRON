@@ -32,12 +32,10 @@ class ParamSpec:
 
     Attributes:
         derive: The field's computing default, or None.
-        array: The array reads the field though no obj_type= names it.
         probe: The value the tuner measures the field at, or ``MISSING``.
     """
 
     derive: Callable[[Any], Any] | None
-    array: bool
     probe: Any
 
     @staticmethod
@@ -68,7 +66,6 @@ def Param(
     *,
     default: Any = MISSING,
     derive: Callable[[Any], Any] | None = None,
-    array: bool = False,
     repr: bool = True,
     init: bool = True,
     probe: Any = MISSING,
@@ -76,9 +73,8 @@ def Param(
     """A compile-time parameter: given by the caller or inferred from the
     operands.
 
-    A field named in an operand's ``obj_type=``/``per=``/``depth=``, or marked
-    ``array=True``, configures the array; any other rebuilds only the
-    instruction stream.
+    A field the operator's ``Array`` lists configures the array; any other
+    rebuilds only the instruction stream.
 
     Args:
         default: The value. Without one, and without `derive`, the field is
@@ -87,7 +83,6 @@ def Param(
             the caller nor an operand gives it
             (``derive=lambda op: op.rows * op.repeat``); a value the caller
             gives must agree with it. `default` and `derive` are exclusive.
-        array: The array reads the field though no obj_type= names it.
         repr: The field is in the operator's repr.
         init: The field is a constructor argument.
         probe: The field reaches the device only as the words of `Value`s
@@ -111,14 +106,13 @@ def Param(
         init=init,
         repr=repr,
         kw_only=True,
-        metadata={SPEC: ParamSpec(derive=derive, array=array, probe=probe)},
+        metadata={SPEC: ParamSpec(derive=derive, probe=probe)},
     )
 
 
 def Auto(
     *,
     default: Any = None,
-    array: bool = False,
     derived: bool = False,
     domain: Domain | tuple[Any, ...] | None = None,
     repr: bool = True,
@@ -134,7 +128,6 @@ def Auto(
     Args:
         default: The starting value; `None` means `resolve` must fill it.
             Always a value, never a derive: a tunable may default to a dtype.
-        array: The array reads the field though no tile names it.
         derived: `resolve` computes the field from the device and the other
             fields whatever it was given, so it is not a tunable a caller,
             a profile or a tuner sets.
@@ -157,7 +150,6 @@ def Auto(
         metadata={
             SPEC: AutoSpec(
                 derive=None,
-                array=array,
                 probe=MISSING,
                 derived=derived,
                 domain=domain,

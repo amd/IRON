@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import hashlib
 import inspect
@@ -149,7 +150,7 @@ class BuiltArray:
     Attributes:
         design: The design built.
         op: The copy, its array built and its operands' lanes bound.
-        built: What its ``array()`` returned.
+        built: What its ``Array.build`` made.
         workers: The workers among them.
         traced: The workers a traced operator traces, else none.
 
@@ -169,7 +170,7 @@ class BuiltArray:
         dispatch = dispatch or {}
         self._words, self._dispatch = words, dispatch
         op = design.op.resolved(design.op.dev).copy()  # a build binds streams
-        # Before array(), which may hand a core-read value to a worker.
+        # Before Array.build(), which may hand a core-read value to a worker.
         for value in op.values:
             if design.full_elf and not isinstance(value, declare.DispatchTime):
                 value.param = ScratchpadParameter(
@@ -188,13 +189,10 @@ class BuiltArray:
                 )
             else:
                 value.param = dispatch[value.symbol]
-        before = set(vars(op))
-        self.built = op._build_array() or []
-        # What array() kept on the operator for its sequence to program.
-        self._kept = {name: vars(op)[name] for name in vars(op).keys() - before}
+        self.built = op.array_config().build()
         self.design = design
         self.op = op
-        self.workers = [w for w in self.built if isinstance(w, Worker)]
+        self.workers = [w for w in self.built.objects if isinstance(w, Worker)]
         self.traced: list[Worker] = []
         if op.trace is not None:
             if op.trace.reuse_output_buffer:
@@ -261,7 +259,10 @@ class BuiltArray:
         for fifo in fifos.values():
             if fifo.name is not None:
                 fifo.name = prefix + fifo.name
-        reached = [*(a for w in self.workers for a in w.flat_fn_args), *self.built]
+        reached = [
+            *(a for w in self.workers for a in w.flat_fn_args),
+            *self.built.objects,
+        ]
         reached += [h for b in self.op.buffers for h in b.lane_handles]
         for tile_dma in [r for r in reached if isinstance(r, TileDma)]:
             buffers, locks = tile_dma.all_buffers_and_locks()
@@ -289,13 +290,18 @@ class BuiltArray:
         op = other.op
         for mine, theirs in zip(op.buffers, self.op.buffers):
             mine.lane_handles = theirs.lane_handles
-        # The owner's runtime parameters among them, which this sequence writes.
-        vars(op).update(self._kept)
         # A sequence fills only flows it registers, which the configuration
         # keeps once; tile DMAs and shim channels are the owner's to declare.
+        # It writes the owner's runtime parameters, and reads what else the
+        # owner's build kept.
         reached = (Flow, PacketFlow, Lock)
         return OperatorRuntime(
-            op, [b for b in self.built if isinstance(b, reached)], name=name
+            op,
+            dataclasses.replace(
+                self.built,
+                objects=[b for b in self.built.objects if isinstance(b, reached)],
+            ),
+            name=name,
         )
 
 

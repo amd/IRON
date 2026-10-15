@@ -31,8 +31,9 @@ class ElementwiseAdd(BinaryElementwise):
         ]
     )
 
-    def kernel(self):
-        return eltwise.add_sized(self.tile_size)
+    class Array(BinaryElementwise.Array):
+        def kernel(self):
+            return eltwise.add_sized(self.tile_size)
 
 
 class RowwiseAdd(Rowwise):
@@ -59,5 +60,6 @@ class RowwiseAdd(Rowwise):
         per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
 
-    def kernel(self):
-        return eltwise.add_sized(self.tile_size)
+    class Array(Rowwise.Array):
+        def kernel(self):
+            return eltwise.add_sized(self.tile_size)

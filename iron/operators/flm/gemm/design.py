@@ -97,7 +97,7 @@ M_CHUNK_FOR_N = {16: 1, 32: 1, 64: 1, 128: 1}
 #
 # Slots in the pool, each one k-block. Bounded by the BDs a memtile channel's
 # parity half has left after the static objectfifo BDs, and, below that, by
-# what the memtile has left after A and C; see GEMM.array().
+# what the memtile has left after A and C; see GEMM.Array.build().
 B_MAX_SLOTS = 8
 
 

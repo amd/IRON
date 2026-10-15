@@ -48,7 +48,7 @@ def test_vectors_takes_a_given_array_a_shape_or_a_centred_draw():
 def test_tolerance_is_the_operators_own_else_its_kernels_contract():
     assert RoPE(rows=8, cols=64).resolved().tolerance() == Tolerance.relative(0.05)
     relu = ReLU(size=64, num_aie_columns=1, tile_size=64).resolved()
-    contract = relu.kernel().contract_for(resolve_target_arch(relu.dev))
+    contract = relu.array_config().kernel().contract_for(resolve_target_arch(relu.dev))
     assert relu.tolerance() == contract.tolerance is not None
 
 

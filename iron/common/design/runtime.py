@@ -29,7 +29,7 @@ from aie.iron import (
 )
 from aie.iron.runtime.dmatask import emit_shim_transfer
 
-from ..declare import DispatchTime, Operator, Value
+from ..declare import Built, DispatchTime, Operator, Value
 from ..declare.operand import Operand
 from ..declare.value import PlaceWord
 from .bd import BdLimits
@@ -48,21 +48,23 @@ class OperatorRuntime(Runtime):
     Args:
         op: The resolved operator, its array built and its operands' lanes
             bound or pinned.
-        built: What its ``array()`` returned: its workers, and the flows,
+        built: What its ``Array.build`` made: its workers, and the flows,
             locks, tile DMAs, pinned endpoints and buffers only the sequence
-            reaches.
+            reaches, and its cores' runtime parameters.
         name: The sequence's symbol; the Program names it when None.
 
     Attributes:
+        built: What the build made, which ``sequence`` may read.
         pins: Each pinned lane this runtime declares, by its symbol.
         buffers: Buffers no worker places, declared whatever a shape's
             sequence reaches: a shipped image's parameter blocks, or a
             pool only descriptors address.
     """
 
-    def __init__(self, op: Operator, built: list = (), name: str | None = None) -> None:
+    def __init__(self, op: Operator, built: Built, name: str | None = None) -> None:
         self.op = op
-        self.buffers = [b for b in built if isinstance(b, Buffer)]
+        self.built = built
+        self.buffers = [b for b in built.objects if isinstance(b, Buffer)]
         self._tensors: dict[str, Any] = {}
         self._queues: dict[str, list[Task]] = {}
         # Raises if any stream of a built array is unbound.
@@ -70,11 +72,11 @@ class OperatorRuntime(Runtime):
             (b, i, h) for b in op.buffers if b.streamed for i, h in enumerate(b.handles)
         ]
         # A shared array's pins are declared by the runtime of the array that built them.
-        ours = {id(e) for e in built if isinstance(e, DmaEndpoint)}
+        ours = {id(e) for e in built.objects if isinstance(e, DmaEndpoint)}
         self.pins = {f"{b.name}_{i}": h for b, i, h in lanes if id(h) in ours}
         if len(self.pins) != len(ours):
             raise TypeError(
-                f"{type(op).__name__}.array() returns a DmaEndpoint no operand "
+                f"{type(op).__name__}.Array.build() makes a DmaEndpoint no operand "
                 f"is pinned to"
             )
         handles = [h for _, _, h in lanes if not isinstance(h, DmaEndpoint)]
@@ -88,7 +90,7 @@ class OperatorRuntime(Runtime):
             name=name,
         )
         # Before resolving: the sequence body, generated last, may address any of it.
-        for obj in built:
+        for obj in built.objects:
             if isinstance(obj, (Flow, PacketFlow)):
                 self.add_flow(obj)
             elif isinstance(obj, Lock):
@@ -97,7 +99,7 @@ class OperatorRuntime(Runtime):
                 self.add_tile_dma(obj)
             elif not isinstance(obj, (Worker, DmaEndpoint, Buffer)):
                 raise TypeError(
-                    f"{type(op).__name__}.array() returns Workers, Flows, "
+                    f"{type(op).__name__}.Array.build() makes Workers, Flows, "
                     f"PacketFlows, Locks, TileDmas, the DmaEndpoints it pinned "
                     f"and Buffers; got {obj!r}"
                 )
@@ -458,7 +460,7 @@ class OperatorRuntime(Runtime):
         # Without a scratchpad, a per-call word a core reads is the dispatch-time scalar.
         words = {v.name: v.ssa for v in op.values if not v.in_scratchpad}
         words.update(residents, **values)
-        for rtp in op.rtps:
+        for rtp in self.built.rtps:
             rtp.write(words)
         block = []
         for word in (words[name] for name in residents):
@@ -473,5 +475,5 @@ class OperatorRuntime(Runtime):
                 buffer[i] = word
         if any(value.in_scratchpad for value in op.values):
             sync_parameters()
-        for rtp in op.rtps:
+        for rtp in self.built.rtps:
             rtp.barrier.set(1)

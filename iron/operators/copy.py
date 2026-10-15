@@ -37,6 +37,9 @@ from iron.common import (
     Value,
     Auto,
     Param,
+    Built,
+    Operand,
+    Rtp,
 )
 from iron.common.declare.operator import CopyRun
 from iron.common.design import BdLimits
@@ -88,9 +91,9 @@ class Gather(Operator):
         + (3 if op.rows % op.chain else 0),
         repr=False,
     )
-    feeds: int = Auto(array=True)
+    feeds: int = Auto()
     # The table is one buffer at every call: its address is a resident operand.
-    static_base: bool = Param(default=False, array=True)
+    static_base: bool = Param(default=False)
 
     table = In(table_rows, row, dtype=dtype)
     control = In(words, dtype=np.uint32)
@@ -171,31 +174,38 @@ class Gather(Operator):
     def extent_unit(self, buffer: str) -> int:
         return 0  # a bound shortens y's drains by the drained words, not by tiles
 
-    def array(self) -> list:
-        shims = [(Tile(2 * k, 0), Tile(2 * k + 1, 0)) for k in range(self.feeds)]
-        drains = [DmaEndpoint(drain, DMAChannelDir.S2MM, 0) for _, drain in shims]
-        self.y.pin(drains)
-        routes = []
-        for k, (feed, drain) in enumerate(shims):
-            routes += [
-                PacketFlow(
-                    self.control_id - k,
-                    drain,
-                    feed,
-                    dst_port=WireBundle.TileControl,
-                    # An explicit False drops the header TileControl reads: the run hangs.
-                    keep_pkt_header=True,
-                    shim_symbol=f"gather_ctrl{k}",
-                ),
-                Flow(
-                    feed,
-                    drain,
-                    src_channel=1,
-                    dst_channel=0,
-                    shim_symbol=f"gather_feed{k}",
-                ),
-            ]
-        return [*routes, *drains]
+    class Array(Operator.Array):
+        dtype: Any
+        feeds: int
+        row: int
+        static_base: bool
+        y: Operand
+
+        def build(self) -> Built:
+            shims = [(Tile(2 * k, 0), Tile(2 * k + 1, 0)) for k in range(self.feeds)]
+            drains = [DmaEndpoint(drain, DMAChannelDir.S2MM, 0) for _, drain in shims]
+            self.y.pin(drains)
+            routes = []
+            for k, (feed, drain) in enumerate(shims):
+                routes += [
+                    PacketFlow(
+                        Gather.control_id - k,
+                        drain,
+                        feed,
+                        dst_port=WireBundle.TileControl,
+                        # An explicit False drops the header TileControl reads: the run hangs.
+                        keep_pkt_header=True,
+                        shim_symbol=f"gather_ctrl{k}",
+                    ),
+                    Flow(
+                        feed,
+                        drain,
+                        src_channel=1,
+                        dst_channel=0,
+                        shim_symbol=f"gather_feed{k}",
+                    ),
+                ]
+            return Built([*routes, *drains])
 
     def sequence(self, rt) -> None:
         words = rt.data(self.control)
@@ -372,12 +382,12 @@ class GatherWords(Operator):
 
     low_bits: ClassVar[int] = 29
 
-    rows: int = Param(array=True)
-    table_rows: int = Param(array=True)
-    row_bytes: int = Param(array=True)
+    rows: int = Param()
+    table_rows: int = Param()
+    row_bytes: int = Param()
     words: int = Param()
-    pairs: int = Param(derive=lambda op: 2 * op.rows, array=True, repr=False)
-    static_base: bool = Param(default=False, array=True)
+    pairs: int = Param(derive=lambda op: 2 * op.rows, repr=False)
+    static_base: bool = Param(default=False)
 
     ids = In(rows, dtype=np.int32, obj_type=(rows,), depth=1)
     control = Out(words, dtype=np.uint32, obj_type=(pairs,), depth=1)
@@ -396,47 +406,63 @@ class GatherWords(Operator):
             base_hi=address >> self.low_bits,
         )
 
-    def array(self) -> list:
-        kernel = datamovement.row_addresses(
-            self.rows,
-            self.table_rows,
-            self.row_bytes,
-            low_bits=self.low_bits,
-            aperture=APERTURE,
-        )
-        ids = ObjectFifo(self.ids.obj_type, name="gather_ids", depth=1)
-        addresses = ObjectFifo(self.control.obj_type, name="gather_addresses", depth=1)
-        self.ids.bind(ids.prod())
-        self.control.bind(addresses.cons())
-        base_stream = None
-        if self.static_base:
-            base_stream = ObjectFifo(self.base.obj_type, name="gather_base", depth=1)
-            self.base.bind(base_stream.prod())
-        (rtp,) = self.rtp([] if self.static_base else [self.base_lo, self.base_hi])
+    class Array(Operator.Array):
+        rows: int
+        table_rows: int
+        row_bytes: int
+        pairs: int
+        static_base: bool
+        ids: Operand
+        control: Operand
+        base: Operand | None
+        base_lo: Value
+        base_hi: Value
 
-        def core(ids, addresses, kernel, rtp, base_stream):
-            words = rtp.read()
-            i, a = ids.acquire(1), addresses.acquire(1)
-            if base_stream is not None:
-                base = base_stream.acquire(1)
-                kernel(i, a, base[0], base[1])
-                base_stream.release(1)
-            else:
-                kernel(i, a, words[self.base_lo], words[self.base_hi])
-            ids.release(1)
-            addresses.release(1)
+        def build(self) -> Built:
+            kernel = datamovement.row_addresses(
+                self.rows,
+                self.table_rows,
+                self.row_bytes,
+                low_bits=GatherWords.low_bits,
+                aperture=APERTURE,
+            )
+            ids = ObjectFifo(self.ids.obj_type, name="gather_ids", depth=1)
+            addresses = ObjectFifo(
+                self.control.obj_type, name="gather_addresses", depth=1
+            )
+            self.ids.bind(ids.prod())
+            self.control.bind(addresses.cons())
+            base_stream = None
+            if self.static_base:
+                base_stream = ObjectFifo(
+                    self.base.obj_type, name="gather_base", depth=1
+                )
+                self.base.bind(base_stream.prod())
+            rtp = Rtp([] if self.static_base else [self.base_lo, self.base_hi])
 
-        worker = Worker(
-            core,
-            [
-                ids.cons(),
-                addresses.prod(),
-                kernel,
-                rtp,
-                None if base_stream is None else base_stream.cons(),
-            ],
-        )
-        return [worker]
+            def core(ids, addresses, kernel, rtp, base_stream):
+                words = rtp.read()
+                i, a = ids.acquire(1), addresses.acquire(1)
+                if base_stream is not None:
+                    base = base_stream.acquire(1)
+                    kernel(i, a, base[0], base[1])
+                    base_stream.release(1)
+                else:
+                    kernel(i, a, words[self.base_lo], words[self.base_hi])
+                ids.release(1)
+                addresses.release(1)
+
+            worker = Worker(
+                core,
+                [
+                    ids.cons(),
+                    addresses.prod(),
+                    kernel,
+                    rtp,
+                    None if base_stream is None else base_stream.cons(),
+                ],
+            )
+            return Built([worker], [rtp])
 
     def sequence(self, rt) -> None:
         tg = TaskGroup()
@@ -661,17 +687,24 @@ class Copy(Operator):
         """Never: a copy's sequence moves its transfers itself."""
         return None
 
-    def array(self) -> list:
+    class Array(Operator.Array):
+        dtype: Any
+        num_channels: int
+        tile_size: int
+        x: Operand
+        y: Operand
 
-        ins, outs = [], []
-        for c in range(self.num_channels):
-            fifo_in = ObjectFifo(self.x.obj_type, depth=1)
-            fifo_out = fifo_in.cons().forward(depth=1)
-            ins.append(fifo_in.prod())
-            outs.append(fifo_out.cons())
-        self.x.bind(ins)
-        self.y.bind(outs)
-        return []
+        def build(self) -> Built:
+
+            ins, outs = [], []
+            for c in range(self.num_channels):
+                fifo_in = ObjectFifo(self.x.obj_type, depth=1)
+                fifo_out = fifo_in.cons().forward(depth=1)
+                ins.append(fifo_in.prod())
+                outs.append(fifo_out.cons())
+            self.x.bind(ins)
+            self.y.bind(outs)
+            return Built([])
 
     def compatible(self) -> None:
         channels = self.num_channels

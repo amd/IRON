@@ -9,5 +9,6 @@ from iron.common import Rowwise
 class LayerNorm(Rowwise):
     """AIE-accelerated Layer Normalization of each row (gamma 1, beta 0)."""
 
-    def kernel(self):
-        return norm.layer_norm(self.tile_size)
+    class Array(Rowwise.Array):
+        def kernel(self):
+            return norm.layer_norm(self.tile_size)

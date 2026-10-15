@@ -20,7 +20,7 @@ from aie.iron import ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 
-from iron.common import In, Operator, Out, Param
+from iron.common import In, Operator, Out, Param, Built, Operand, Rtp, Value
 from iron.common.testing import Case, Testing
 
 # A program row: (plane, index, scale, bias, down, mul, add, shift).
@@ -70,8 +70,8 @@ class Emit(Operator):
         draw=_program,
     )
 
-    slots: int = Param(array=True)
-    carried: int = Param(array=True)
+    slots: int = Param()
+    carried: int = Param()
     rows: int = Param(derive=lambda op: op.slots + op.carried, repr=False)
 
     program = In(rows, ROW, dtype=np.int32, obj_type=(rows, ROW), depth=1)
@@ -86,53 +86,69 @@ class Emit(Operator):
                 f"({self.slots} + {self.carried})"
             )
 
-    def array(self) -> list:
-        slots, carried = self.slots, self.carried
-        of_program = ObjectFifo(self.program.obj_type, depth=1)
-        of_planes = ObjectFifo(self.planes.obj_type, depth=1)
-        of_image = ObjectFifo(self.image.obj_type, depth=1)
-        of_state = ObjectFifo(self.state.obj_type, depth=1)
-        self.program.bind(of_program.prod())
-        self.planes.bind(of_planes.prod())
-        self.image.bind(of_image.cons())
-        self.state.bind(of_state.cons())
+    class Array(Operator.Array):
+        carried: int
+        rows: int
+        slots: int
+        image: Operand
+        planes: Operand
+        program: Operand
+        state: Operand
 
-        def core_body(of_p, of_v, of_i, of_s):
-            program = of_p.acquire(1)
-            planes = of_v.acquire(1)
-            image = of_i.acquire(1)
-            state = of_s.acquire(1)
+        def build(self) -> Built:
+            slots, carried = self.slots, self.carried
+            of_program = ObjectFifo(self.program.obj_type, depth=1)
+            of_planes = ObjectFifo(self.planes.obj_type, depth=1)
+            of_image = ObjectFifo(self.image.obj_type, depth=1)
+            of_state = ObjectFifo(self.state.obj_type, depth=1)
+            self.program.bind(of_program.prod())
+            self.planes.bind(of_planes.prod())
+            self.image.bind(of_image.cons())
+            self.state.bind(of_state.cons())
 
-            def floor_shift(v, k):
-                # Not arith.shrsi, which lowers to a rounding ups + srs.
-                i32 = v.type
-                sign = arith.subi(
-                    arith.constant(0, i32), arith.shrui(v, arith.constant(31, i32))
-                )
-                return arith.xori(arith.shrui(arith.xori(v, sign), k), sign)
+            def core_body(of_p, of_v, of_i, of_s):
+                program = of_p.acquire(1)
+                planes = of_v.acquire(1)
+                image = of_i.acquire(1)
+                state = of_s.acquire(1)
 
-            def row(r):
-                plane = arith.index_cast(program[r, 0])
-                index = arith.index_cast(program[r, 1])
-                v = planes[plane, index] * program[r, 2] + program[r, 3]
-                v = floor_shift(v, program[r, 4]) * program[r, 5] + program[r, 6]
-                return arith.shli(v, program[r, 7])
+                def floor_shift(v, k):
+                    # Not arith.shrsi, which lowers to a rounding ups + srs.
+                    i32 = v.type
+                    sign = arith.subi(
+                        arith.constant(0, i32), arith.shrui(v, arith.constant(31, i32))
+                    )
+                    return arith.xori(arith.shrui(arith.xori(v, sign), k), sign)
 
-            for r in range_(slots):
-                image[r] = row(r)
-            for r in range_(carried):
-                state[r] = row(r + slots)
-            of_p.release(1)
-            of_v.release(1)
-            of_i.release(1)
-            of_s.release(1)
+                def row(r):
+                    plane = arith.index_cast(program[r, 0])
+                    index = arith.index_cast(program[r, 1])
+                    v = planes[plane, index] * program[r, 2] + program[r, 3]
+                    v = floor_shift(v, program[r, 4]) * program[r, 5] + program[r, 6]
+                    return arith.shli(v, program[r, 7])
 
-        return [
-            Worker(
-                core_body,
-                [of_program.cons(), of_planes.cons(), of_image.prod(), of_state.prod()],
+                for r in range_(slots):
+                    image[r] = row(r)
+                for r in range_(carried):
+                    state[r] = row(r + slots)
+                of_p.release(1)
+                of_v.release(1)
+                of_i.release(1)
+                of_s.release(1)
+
+            return Built(
+                [
+                    Worker(
+                        core_body,
+                        [
+                            of_program.cons(),
+                            of_planes.cons(),
+                            of_image.prod(),
+                            of_state.prod(),
+                        ],
+                    )
+                ]
             )
-        ]
 
     def ops(self) -> int:
         return 0  # a handful of words: its figure is latency

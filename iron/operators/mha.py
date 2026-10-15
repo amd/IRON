@@ -44,6 +44,9 @@ from iron.common import (
     Auto,
     Param,
     Select,
+    Built,
+    Operand,
+    Rtp,
 )
 from iron.common.design import BdLimits
 from iron.common.testing import Case, Testing
@@ -256,25 +259,25 @@ class MHA(Operator):
     heads_interleaved: bool = Param(default=False)
     kv_interleaved: bool = Param(default=False)
     d: int = Param(default=64)
-    causal: bool = Param(default=True, array=True)
+    causal: bool = Param(default=True)
     # Keys more than this many positions from a query are masked.
-    window: int | None = Param(default=None, array=True)
-    scale: float = Param(derive=lambda op: float(1 / np.sqrt(op.d)), array=True)
-    B_q: int = Auto(array=True, domain=BLOCK_SIZES)
+    window: int | None = Param(default=None)
+    scale: float = Param(derive=lambda op: float(1 / np.sqrt(op.d)))
+    B_q: int = Auto(domain=BLOCK_SIZES)
     # mha.cc's causal skip compares a KV block's index with a Q block's.
     B_kv: int = Auto(repr=False, derived=True)
-    num_pipelines: int = Auto(default=1, array=True, domain=Width())
-    placement: MHAPlacement = Auto(array=True)
+    num_pipelines: int = Auto(default=1, domain=Width())
+    placement: MHAPlacement = Auto()
     # bfp16 shares an exponent over 8 keys of P*V, and the softmax bounds the time.
-    emulate_bf16_mmul_with_bfp16: bool = Param(default=False, array=True, repr=False)
+    emulate_bf16_mmul_with_bfp16: bool = Param(default=False, repr=False)
     # Filled by resolve.
     q_shims: int = Auto(repr=False, derived=True)
     join_rows: int = Auto(repr=False, derived=True)
-    kv_lanes: int = Auto(array=True, repr=False, derived=True)
-    width: int = Auto(array=True, repr=False, derived=True)
+    kv_lanes: int = Auto(repr=False, derived=True)
+    width: int = Auto(repr=False, derived=True)
     # Two P*V cores, by halves of the head, where one's L1 holds no block.
-    pv_cores: int = Auto(array=True, repr=False, domain=(1, 2))
-    pv_width: int = Auto(array=True, repr=False, derived=True)
+    pv_cores: int = Auto(repr=False, domain=(1, 2))
+    pv_width: int = Auto(repr=False, derived=True)
 
     # One query packed puts pipeline p's K and V on column p: pipelines stop short of q.
     COLUMNS: ClassVar[dict[int, Columns]] = {
@@ -574,180 +577,195 @@ class MHA(Operator):
         qk = (4 if pv_cores == 1 else 3) * 2 * d * b + 4 * b * b
         return max(pv, qk) + STACK_SIZE
 
-    def array(self) -> list:
-        of_depth = 2
-        dtype = bfloat16
-        B_q, B_kv, d = self.B_q, self.B_kv, self.d
-        num_pipelines = self.num_pipelines
-        n_join = num_pipelines // self.q_shims  # the pipelines on one shim
-        every = self.placement is MHAPlacement.TILES
-        memtiles = self.placement is not MHAPlacement.COLUMNS
-        pv_cores, pv_width = self.pv_cores, self.pv_width
+    class Array(Operator.Array):
+        B_q: int
+        B_kv: int
+        d: int
+        causal: bool
+        window: int | None
+        scale: float
+        num_pipelines: int
+        placement: MHAPlacement
+        emulate_bf16_mmul_with_bfp16: bool
+        kv_lanes: int
+        width: int
+        pv_cores: int
+        pv_width: int
+        q_shims: int
+        join_rows: int
+        Q: Operand
+        K: Operand
+        V: Operand
+        O: Operand
+        heads: Value
+        kv_blocks: Value
+        q_blocks_per_pipeline: Value
+        q_blocks_valid: Value
+        q_start: Value
+        s_q: Value
+        s_kv: Value
+        dev: Device
 
-        # partial_softmax takes exp2, so the scale is in the log2 domain.
-        inv_scale = float(bfloat16(self.scale * np.log2(np.e)))
-        # AIE2P's exp2 instruction is up to 6% high; AIE2 has none to replace.
-        accurate_exp2 = self.dev.arch is AIEArch.AIE2p
+        def build(self) -> Built:
+            of_depth = 2
+            dtype = bfloat16
+            B_q, B_kv, d = self.B_q, self.B_kv, self.d
+            num_pipelines = self.num_pipelines
+            n_join = num_pipelines // self.q_shims  # the pipelines on one shim
+            every = self.placement is MHAPlacement.TILES
+            memtiles = self.placement is not MHAPlacement.COLUMNS
+            pv_cores, pv_width = self.pv_cores, self.pv_width
 
-        q_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
-        k_ty = np.ndarray[(d, B_kv), np.dtype[dtype]]
-        v_ty = np.ndarray[(B_kv, pv_width), np.dtype[dtype]]
-        o_ty = np.ndarray[(B_q, pv_width), np.dtype[dtype]]
-        qk_ty = np.ndarray[(B_q, B_kv), np.dtype[dtype]]
-        s_ty = np.ndarray[(4 * B_q,), np.dtype[np.float32]]
-        acc_ty = np.ndarray[(B_q, pv_width), np.dtype[np.float32]]
-        joined_ty = self.Q.obj_type  # (n_join * B_q, d)
+            # partial_softmax takes exp2, so the scale is in the log2 domain.
+            inv_scale = float(bfloat16(self.scale * np.log2(np.e)))
+            # AIE2P's exp2 instruction is up to 6% high; AIE2 has none to replace.
+            accurate_exp2 = self.dev.arch is AIEArch.AIE2p
 
-        # The rest bind from mha.cc's object: declared apart, each would redefine it.
-        matmul_QK = kernels.linalg.mha(
-            B_q,
-            d,
-            B_kv,
-            b_col_maj=True,
-            emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
-            accurate_exp2=accurate_exp2,
-            causal=self.causal,
-            window=self.window or 0,
-        )
-        mha_object = matmul_QK.object_file
+            q_ty = np.ndarray[(B_q, d), np.dtype[dtype]]
+            k_ty = np.ndarray[(d, B_kv), np.dtype[dtype]]
+            v_ty = np.ndarray[(B_kv, pv_width), np.dtype[dtype]]
+            o_ty = np.ndarray[(B_q, pv_width), np.dtype[dtype]]
+            qk_ty = np.ndarray[(B_q, B_kv), np.dtype[dtype]]
+            s_ty = np.ndarray[(4 * B_q,), np.dtype[np.float32]]
+            acc_ty = np.ndarray[(B_q, pv_width), np.dtype[np.float32]]
+            joined_ty = self.Q.obj_type  # (n_join * B_q, d)
 
-        zero_scores = kernels.zero(tile_size=(B_q, B_kv), dtype=dtype)
-        # The 32-bit passThroughLine, bound to the float32 scale buffers.
-        memcopy_kernel_scale = kernels.eltwise.passthrough(
-            4 * B_q, np.int32
-        ).object_file.bind("passThroughLine", [s_ty, s_ty, np.int32])
-        scale_buffer_init_kernel = mha_object.bind(
-            "init_scale_buffer", [s_ty, np.int32]
-        )
-        partial_softmax_kernel = mha_object.bind(
-            "partial_softmax",
-            [
-                qk_ty,
-                qk_ty,
-                s_ty,
-                np.ndarray[(2,), np.dtype[np.int32]],
-                dtype,
-                np.int32,
-                np.int32,
-                np.int32,
-                np.int32,
-            ],
-        )
-        # Split, a P*V core's product is mha.cc compiled at its share's width.
-        pv_object = (
-            mha_object
-            if pv_cores == 1
-            else kernels.linalg.mha(
+            # The rest bind from mha.cc's object: declared apart, each would redefine it.
+            matmul_QK = kernels.linalg.mha(
                 B_q,
-                pv_width,
+                d,
                 B_kv,
                 b_col_maj=True,
                 emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
+                accurate_exp2=accurate_exp2,
                 causal=self.causal,
                 window=self.window or 0,
-            ).object_file
-        )
-        matmul_PV = pv_object.bind(
-            "matmul_PV",
-            [
-                qk_ty,
-                v_ty,
-                acc_ty,
-                s_ty,
-                np.int32,
-                np.int32,
-                np.ndarray[(2,), np.dtype[np.int32]],
-                np.int32,
-            ],
-        )
-        rescale_O = pv_object.bind(
-            "rescale_O",
-            [acc_ty, o_ty, s_ty, np.int32, np.ndarray[(2,), np.dtype[np.int32]]],
-        )
-
-        # Each stream is blocked as the product that reads or writes it takes it.
-        qk = matmul_QK.stream_dims
-        pv = mm_stream_dims(B_q, B_kv, pv_width, kernels.linalg.mha.mac_dims(pv=True))
-        q_dims = qk.A
-        k_dims = qk.B
-        a_dims = qk.C
-        p_dims = pv.A
-        v_dims = pv.B
-        o_dims = pv.C
-
-        # Split, Q is one block deep: the QK core's L1 holds one d=512 block.
-        split = pv_cores > 1
-        q_depth = 1 if split else of_depth
-        columns = self.COLUMNS[self.width]
-        layout = self.SPLIT_COLUMNS[self.width] if split else None
-        inQ, memQ, memO = [], [], []
-        outO = [[] for _ in range(pv_cores)]
-        for shim in range(self.q_shims):
-            suffix = "" if shim == 0 else "2"
-            in_q = ObjectFifo(joined_ty)
-            inQ.append(in_q)
-            memQ += in_q.cons().split(
-                offsets=[B_q * d * i for i in range(n_join)],
-                obj_types=[q_ty] * n_join,
-                to_stream=None if q_dims is None else [q_dims] * n_join,
-                depths=[q_depth] * n_join,
-                tile=(
-                    Tile(layout.q[shim] if split else columns.qo_mem + shim, 1)
-                    if memtiles
-                    else AnyMemTile
-                ),
             )
-            for h in range(pv_cores):
-                half = "" if h == 0 else f"_{h}"
-                mem_o = ObjectFifo(self.O.obj_type, to_stream=o_dims)
-                memO.append(mem_o)
-                outO[h] += mem_o.prod().join(
-                    offsets=[B_q * pv_width * i for i in range(n_join)],
-                    obj_types=[o_ty] * n_join,
-                    # One O block: the PV core's L1 also holds its float32 O.
-                    depths=[1] * n_join,
+            mha_object = matmul_QK.object_file
+
+            zero_scores = kernels.zero(tile_size=(B_q, B_kv), dtype=dtype)
+            # The 32-bit passThroughLine, bound to the float32 scale buffers.
+            memcopy_kernel_scale = kernels.eltwise.passthrough(
+                4 * B_q, np.int32
+            ).object_file.bind("passThroughLine", [s_ty, s_ty, np.int32])
+            scale_buffer_init_kernel = mha_object.bind(
+                "init_scale_buffer", [s_ty, np.int32]
+            )
+            partial_softmax_kernel = mha_object.bind(
+                "partial_softmax",
+                [
+                    qk_ty,
+                    qk_ty,
+                    s_ty,
+                    np.ndarray[(2,), np.dtype[np.int32]],
+                    dtype,
+                    np.int32,
+                    np.int32,
+                    np.int32,
+                    np.int32,
+                ],
+            )
+            # Split, a P*V core's product is mha.cc compiled at its share's width.
+            pv_object = (
+                mha_object
+                if pv_cores == 1
+                else kernels.linalg.mha(
+                    B_q,
+                    pv_width,
+                    B_kv,
+                    b_col_maj=True,
+                    emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
+                    causal=self.causal,
+                    window=self.window or 0,
+                ).object_file
+            )
+            matmul_PV = pv_object.bind(
+                "matmul_PV",
+                [
+                    qk_ty,
+                    v_ty,
+                    acc_ty,
+                    s_ty,
+                    np.int32,
+                    np.int32,
+                    np.ndarray[(2,), np.dtype[np.int32]],
+                    np.int32,
+                ],
+            )
+            rescale_O = pv_object.bind(
+                "rescale_O",
+                [acc_ty, o_ty, s_ty, np.int32, np.ndarray[(2,), np.dtype[np.int32]]],
+            )
+
+            # Each stream is blocked as the product that reads or writes it takes it.
+            qk = matmul_QK.stream_dims
+            pv = mm_stream_dims(
+                B_q, B_kv, pv_width, kernels.linalg.mha.mac_dims(pv=True)
+            )
+            q_dims = qk.A
+            k_dims = qk.B
+            a_dims = qk.C
+            p_dims = pv.A
+            v_dims = pv.B
+            o_dims = pv.C
+
+            # Split, Q is one block deep: the QK core's L1 holds one d=512 block.
+            split = pv_cores > 1
+            q_depth = 1 if split else of_depth
+            columns = MHA.COLUMNS[self.width]
+            layout = MHA.SPLIT_COLUMNS[self.width] if split else None
+            inQ, memQ, memO = [], [], []
+            outO = [[] for _ in range(pv_cores)]
+            for shim in range(self.q_shims):
+                suffix = "" if shim == 0 else "2"
+                in_q = ObjectFifo(joined_ty)
+                inQ.append(in_q)
+                memQ += in_q.cons().split(
+                    offsets=[B_q * d * i for i in range(n_join)],
+                    obj_types=[q_ty] * n_join,
+                    to_stream=None if q_dims is None else [q_dims] * n_join,
+                    depths=[q_depth] * n_join,
                     tile=(
-                        Tile(layout.o[shim][h] if split else columns.qo_mem + shim, 1)
+                        Tile(layout.q[shim] if split else columns.qo_mem + shim, 1)
                         if memtiles
                         else AnyMemTile
                     ),
                 )
+                for h in range(pv_cores):
+                    half = "" if h == 0 else f"_{h}"
+                    mem_o = ObjectFifo(self.O.obj_type, to_stream=o_dims)
+                    memO.append(mem_o)
+                    outO[h] += mem_o.prod().join(
+                        offsets=[B_q * pv_width * i for i in range(n_join)],
+                        obj_types=[o_ty] * n_join,
+                        # One O block: the PV core's L1 also holds its float32 O.
+                        depths=[1] * n_join,
+                        tile=(
+                            Tile(
+                                layout.o[shim][h] if split else columns.qo_mem + shim, 1
+                            )
+                            if memtiles
+                            else AnyMemTile
+                        ),
+                    )
 
-        kv_lanes = self.kv_lanes
-        inK, inV, memK, memV = [], [], [], []
-        for lane in range(kv_lanes):
-            suffix = "" if lane == 0 else str(lane)
-            shared = kv_lanes == 1
-            inK.append(ObjectFifo(k_ty, depth=of_depth))
-            memK.append(
-                inK[lane]
-                .cons()
-                .forward(
-                    to_stream=k_dims,
-                    tile=(
-                        Tile(
-                            layout.k if split else columns.k_mem if shared else lane, 1
-                        )
-                        if memtiles
-                        else AnyMemTile
-                    ),
-                    depth=of_depth,
-                )
-            )
-            for h in range(pv_cores):
-                half = "" if h == 0 else f"_{h}"
-                inV.append(ObjectFifo(v_ty, depth=of_depth))
-                memV.append(
-                    inV[-1]
+            kv_lanes = self.kv_lanes
+            inK, inV, memK, memV = [], [], [], []
+            for lane in range(kv_lanes):
+                suffix = "" if lane == 0 else str(lane)
+                shared = kv_lanes == 1
+                inK.append(ObjectFifo(k_ty, depth=of_depth))
+                memK.append(
+                    inK[lane]
                     .cons()
                     .forward(
-                        to_stream=v_dims,
+                        to_stream=k_dims,
                         tile=(
                             Tile(
                                 (
-                                    layout.v[h]
+                                    layout.k
                                     if split
-                                    else columns.v_mem if shared else lane
+                                    else columns.k_mem if shared else lane
                                 ),
                                 1,
                             )
@@ -757,155 +775,203 @@ class MHA(Operator):
                         depth=of_depth,
                     )
                 )
-
-        memA, outA, memP, outP, scaleOF = [], [], [], [], []
-        for i in range(num_pipelines):
-            memA.append(ObjectFifo(qk_ty, depth=of_depth))
-            outA.append(
-                memA[i]
-                .cons()
-                .forward(
-                    to_stream=a_dims,
-                    depth=of_depth,
-                    tile=Tile(i, 1) if split else AnyMemTile,
-                )
-            )
-            memP.append(ObjectFifo(qk_ty, depth=of_depth))
-            outP.append(
-                memP[i]
-                .cons()
-                .forward(
-                    to_stream=p_dims,
-                    depth=of_depth,
-                    tile=Tile(i, 1) if split else AnyMemTile,
-                )
-            )
-            # A copy of the row state for each P*V core, which rescales its own.
-            scaleOF.append([ObjectFifo(s_ty, depth=of_depth) for h in range(pv_cores)])
-
-        # Q blocks past the bound pass through: Q and O stream every block.
-        blocks = [
-            self.heads,
-            self.q_blocks_per_pipeline,
-            self.q_blocks_valid,
-            self.kv_blocks,
-        ]
-
-        def batched_matmul_qk(
-            of_q,
-            of_k,
-            of_a_out,
-            zero,
-            matmul_QK,
-            q_block_bias,
-            rtp,
-            idx_buffer,
-        ):
-            def q_block(compute: bool, kv_blocks):
-                elem_in_q = of_q.acquire(1)
-                for _ in range_(kv_blocks):
-                    elem_in_k = of_k.acquire(1)
-                    elem_a_out = of_a_out.acquire(1)
-                    if compute:
-                        zero(elem_a_out)
-                        matmul_QK(elem_in_q, elem_in_k, elem_a_out, idx_buffer)
-                    of_k.release(1)
-                    of_a_out.release(1)
-                    if compute:
-                        idx_buffer[0] += 1
-                if compute:
-                    idx_buffer[0] = 0
-                    idx_buffer[1] += num_pipelines
-                of_q.release(1)
-
-            words = rtp.read()
-            heads, q_blocks, q_valid, kv_blocks = (words[v] for v in blocks)
-            q_start = words[self.q_start]
-            for _ in range_(heads):
-                idx_buffer[0] = 0
-                idx_buffer[1] = q_start + q_block_bias
-                for _ in range_(q_valid):
-                    q_block(True, kv_blocks)
-                for _ in range_(q_blocks - q_valid):
-                    q_block(False, kv_blocks)
-
-        def softmax(
-            of_in_a,
-            of_out_p,
-            of_out_scale,
-            partial_softmax,
-            init_scale_buffer,
-            memcopy_kernel_scale,
-            q_block_bias,
-            rtp,
-            idx_buffer,
-            scale_buffer,
-        ):
-            # The index buffer is the kernel's position in A and P.
-            def q_block(compute: bool, kv_blocks, s_q, s_kv):
-                if compute:
-                    init_scale_buffer(scale_buffer, B_q)
-                for _ in range_(kv_blocks):
-                    elt_of_out_p = of_out_p.acquire(1)
-                    elt_of_in_a = of_in_a.acquire(1)
-                    elts_of_out_scale = [of.acquire(1) for of in of_out_scale]
-                    if compute:
-                        partial_softmax(
-                            elt_of_in_a,
-                            elt_of_out_p,
-                            scale_buffer,
-                            idx_buffer,
-                            inv_scale,
-                            B_q,
-                            B_kv,
-                            s_q,
-                            s_kv,
+                for h in range(pv_cores):
+                    half = "" if h == 0 else f"_{h}"
+                    inV.append(ObjectFifo(v_ty, depth=of_depth))
+                    memV.append(
+                        inV[-1]
+                        .cons()
+                        .forward(
+                            to_stream=v_dims,
+                            tile=(
+                                Tile(
+                                    (
+                                        layout.v[h]
+                                        if split
+                                        else columns.v_mem if shared else lane
+                                    ),
+                                    1,
+                                )
+                                if memtiles
+                                else AnyMemTile
+                            ),
+                            depth=of_depth,
                         )
-                        for elt in elts_of_out_scale:
-                            memcopy_kernel_scale(scale_buffer, elt, 4 * B_q)
-                    of_in_a.release(1)
-                    of_out_p.release(1)
-                    for of in of_out_scale:
-                        of.release(1)
+                    )
+
+            memA, outA, memP, outP, scaleOF = [], [], [], [], []
+            for i in range(num_pipelines):
+                memA.append(ObjectFifo(qk_ty, depth=of_depth))
+                outA.append(
+                    memA[i]
+                    .cons()
+                    .forward(
+                        to_stream=a_dims,
+                        depth=of_depth,
+                        tile=Tile(i, 1) if split else AnyMemTile,
+                    )
+                )
+                memP.append(ObjectFifo(qk_ty, depth=of_depth))
+                outP.append(
+                    memP[i]
+                    .cons()
+                    .forward(
+                        to_stream=p_dims,
+                        depth=of_depth,
+                        tile=Tile(i, 1) if split else AnyMemTile,
+                    )
+                )
+                # A copy of the row state for each P*V core, which rescales its own.
+                scaleOF.append(
+                    [ObjectFifo(s_ty, depth=of_depth) for h in range(pv_cores)]
+                )
+
+            # Q blocks past the bound pass through: Q and O stream every block.
+            blocks = [
+                self.heads,
+                self.q_blocks_per_pipeline,
+                self.q_blocks_valid,
+                self.kv_blocks,
+            ]
+
+            def batched_matmul_qk(
+                of_q,
+                of_k,
+                of_a_out,
+                zero,
+                matmul_QK,
+                q_block_bias,
+                rtp,
+                idx_buffer,
+            ):
+                def q_block(compute: bool, kv_blocks):
+                    elem_in_q = of_q.acquire(1)
+                    for _ in range_(kv_blocks):
+                        elem_in_k = of_k.acquire(1)
+                        elem_a_out = of_a_out.acquire(1)
+                        if compute:
+                            zero(elem_a_out)
+                            matmul_QK(elem_in_q, elem_in_k, elem_a_out, idx_buffer)
+                        of_k.release(1)
+                        of_a_out.release(1)
+                        if compute:
+                            idx_buffer[0] += 1
                     if compute:
-                        idx_buffer[0] += 1
-                if compute:
+                        idx_buffer[0] = 0
+                        idx_buffer[1] += num_pipelines
+                    of_q.release(1)
+
+                words = rtp.read()
+                heads, q_blocks, q_valid, kv_blocks = (words[v] for v in blocks)
+                q_start = words[self.q_start]
+                for _ in range_(heads):
                     idx_buffer[0] = 0
-                    idx_buffer[1] += num_pipelines
+                    idx_buffer[1] = q_start + q_block_bias
+                    for _ in range_(q_valid):
+                        q_block(True, kv_blocks)
+                    for _ in range_(q_blocks - q_valid):
+                        q_block(False, kv_blocks)
 
-            words = rtp.read()
-            heads, q_blocks, q_valid, kv_blocks = (words[v] for v in blocks)
-            s_q, s_kv, q_start = words[self.s_q], words[self.s_kv], words[self.q_start]
-            for _ in range_(heads):
-                idx_buffer[0] = 0
-                idx_buffer[1] = q_start + q_block_bias
-                for _ in range_(q_valid):
-                    q_block(True, kv_blocks, s_q, s_kv)
-                for _ in range_(q_blocks - q_valid):
-                    q_block(False, kv_blocks, s_q, s_kv)
+            def softmax(
+                of_in_a,
+                of_out_p,
+                of_out_scale,
+                partial_softmax,
+                init_scale_buffer,
+                memcopy_kernel_scale,
+                q_block_bias,
+                rtp,
+                idx_buffer,
+                scale_buffer,
+            ):
+                # The index buffer is the kernel's position in A and P.
+                def q_block(compute: bool, kv_blocks, s_q, s_kv):
+                    if compute:
+                        init_scale_buffer(scale_buffer, B_q)
+                    for _ in range_(kv_blocks):
+                        elt_of_out_p = of_out_p.acquire(1)
+                        elt_of_in_a = of_in_a.acquire(1)
+                        elts_of_out_scale = [of.acquire(1) for of in of_out_scale]
+                        if compute:
+                            partial_softmax(
+                                elt_of_in_a,
+                                elt_of_out_p,
+                                scale_buffer,
+                                idx_buffer,
+                                inv_scale,
+                                B_q,
+                                B_kv,
+                                s_q,
+                                s_kv,
+                            )
+                            for elt in elts_of_out_scale:
+                                memcopy_kernel_scale(scale_buffer, elt, 4 * B_q)
+                        of_in_a.release(1)
+                        of_out_p.release(1)
+                        for of in of_out_scale:
+                            of.release(1)
+                        if compute:
+                            idx_buffer[0] += 1
+                    if compute:
+                        idx_buffer[0] = 0
+                        idx_buffer[1] += num_pipelines
 
-        def batched_matmul_pv(
-            of_p,
-            of_v,
-            of_scale,
-            of_o_out,
-            matmul_PV,
-            rescale_O,
-            q_block_bias,
-            rtp,
-            idx_buffer,
-            acc,
-        ):
-            words = rtp.read()
-            heads, q_blocks, q_valid, loop_idx_kv = (words[v] for v in blocks)
-            s_kv, q_start = words[self.s_kv], words[self.q_start]
-            for _ in range_(heads):
-                idx_buffer[0] = 0
-                idx_buffer[1] = q_start + q_block_bias
+                words = rtp.read()
+                heads, q_blocks, q_valid, kv_blocks = (words[v] for v in blocks)
+                s_q, s_kv, q_start = (
+                    words[self.s_q],
+                    words[self.s_kv],
+                    words[self.q_start],
+                )
+                for _ in range_(heads):
+                    idx_buffer[0] = 0
+                    idx_buffer[1] = q_start + q_block_bias
+                    for _ in range_(q_valid):
+                        q_block(True, kv_blocks, s_q, s_kv)
+                    for _ in range_(q_blocks - q_valid):
+                        q_block(False, kv_blocks, s_q, s_kv)
 
-                for _ in range_(q_valid):
-                    # matmul_PV starts the accumulator on KV block 0.
-                    for kv in range_(loop_idx_kv - 1):
+            def batched_matmul_pv(
+                of_p,
+                of_v,
+                of_scale,
+                of_o_out,
+                matmul_PV,
+                rescale_O,
+                q_block_bias,
+                rtp,
+                idx_buffer,
+                acc,
+            ):
+                words = rtp.read()
+                heads, q_blocks, q_valid, loop_idx_kv = (words[v] for v in blocks)
+                s_kv, q_start = words[self.s_kv], words[self.q_start]
+                for _ in range_(heads):
+                    idx_buffer[0] = 0
+                    idx_buffer[1] = q_start + q_block_bias
+
+                    for _ in range_(q_valid):
+                        # matmul_PV starts the accumulator on KV block 0.
+                        for kv in range_(loop_idx_kv - 1):
+                            elem_in_p = of_p.acquire(1)
+                            elem_in_v = of_v.acquire(1)
+                            elt_of_out_scale = of_scale.acquire(1)
+                            matmul_PV(
+                                elem_in_p,
+                                elem_in_v,
+                                acc,
+                                elt_of_out_scale,
+                                B_q,
+                                kv,
+                                idx_buffer,
+                                s_kv,
+                            )
+                            of_p.release(1)
+                            of_v.release(1)
+                            of_scale.release(1)
+                            idx_buffer[0] += 1
+
+                        # The last block's scale holds the row sums rescale_O reads.
                         elem_in_p = of_p.acquire(1)
                         elem_in_v = of_v.acquire(1)
                         elt_of_out_scale = of_scale.acquire(1)
@@ -915,161 +981,148 @@ class MHA(Operator):
                             acc,
                             elt_of_out_scale,
                             B_q,
-                            kv,
+                            loop_idx_kv - 1,
                             idx_buffer,
                             s_kv,
                         )
                         of_p.release(1)
                         of_v.release(1)
+                        elem_o_out = of_o_out.acquire(1)
+                        rescale_O(acc, elem_o_out, elt_of_out_scale, B_q, idx_buffer)
                         of_scale.release(1)
-                        idx_buffer[0] += 1
+                        of_o_out.release(1)
 
-                    # The last block's scale holds the row sums rescale_O reads.
-                    elem_in_p = of_p.acquire(1)
-                    elem_in_v = of_v.acquire(1)
-                    elt_of_out_scale = of_scale.acquire(1)
-                    matmul_PV(
-                        elem_in_p,
-                        elem_in_v,
-                        acc,
-                        elt_of_out_scale,
-                        B_q,
-                        loop_idx_kv - 1,
-                        idx_buffer,
-                        s_kv,
-                    )
-                    of_p.release(1)
-                    of_v.release(1)
-                    elem_o_out = of_o_out.acquire(1)
-                    rescale_O(acc, elem_o_out, elt_of_out_scale, B_q, idx_buffer)
-                    of_scale.release(1)
-                    of_o_out.release(1)
+                        idx_buffer[0] = 0
+                        idx_buffer[1] += num_pipelines
 
-                    idx_buffer[0] = 0
-                    idx_buffer[1] += num_pipelines
+                    for _ in range_(q_blocks - q_valid):
+                        of_o_out.acquire(1)  # a padding block of O: left as is
+                        for _ in range_(loop_idx_kv):
+                            of_p.acquire(1)
+                            of_v.acquire(1)
+                            of_scale.acquire(1)
+                            of_p.release(1)
+                            of_v.release(1)
+                            of_scale.release(1)
+                        of_o_out.release(1)
 
-                for _ in range_(q_blocks - q_valid):
-                    of_o_out.acquire(1)  # a padding block of O: left as is
-                    for _ in range_(loop_idx_kv):
-                        of_p.acquire(1)
-                        of_v.acquire(1)
-                        of_scale.acquire(1)
-                        of_p.release(1)
-                        of_v.release(1)
-                        of_scale.release(1)
-                    of_o_out.release(1)
+            qk_rtps = [Rtp([*blocks, self.q_start]) for _ in range(num_pipelines)]
+            softmax_rtps = [
+                Rtp([*blocks, self.s_q, self.s_kv, self.q_start])
+                for _ in range(num_pipelines)
+            ]
+            pv_rtps = [
+                [Rtp([*blocks, self.s_kv, self.q_start]) for _ in range(num_pipelines)]
+                for _ in range(pv_cores)
+            ]
 
-        qk_rtps = self.rtp([*blocks, self.q_start], cores=num_pipelines)
-        softmax_rtps = self.rtp(
-            [*blocks, self.s_q, self.s_kv, self.q_start], cores=num_pipelines
-        )
-        pv_rtps = [
-            self.rtp([*blocks, self.s_kv, self.q_start], cores=num_pipelines)
-            for _ in range(pv_cores)
-        ]
-
-        matmul_workers, softmax_workers, matmul_pv_workers = [], [], []
-        for i in range(num_pipelines):
-            idx_buffer_qk = Buffer(
-                initial_value=np.zeros(shape=(2,), dtype=np.int32),
-            )
-            matmul_workers.append(
-                Worker(
-                    batched_matmul_qk,
-                    fn_args=[
-                        memQ[i].cons(),
-                        memK[i % kv_lanes].cons(),
-                        memA[i].prod(),
-                        zero_scores,
-                        matmul_QK,
-                        i,
-                        qk_rtps[i],
-                        idx_buffer_qk,
-                    ],
-                    stack_size=STACK_SIZE,
-                    tile=Tile(i, 2) if every else Tile(col=i),
-                )
-            )
-            idx_buffer_softmax = Buffer(
-                initial_value=np.zeros(shape=(2,), dtype=np.int32),
-            )
-            scale_buffer_softmax = Buffer(
-                initial_value=np.zeros(shape=(4 * B_q,), dtype=np.float32),
-            )
-            softmax_workers.append(
-                Worker(
-                    softmax,
-                    fn_args=[
-                        outA[i].cons(),
-                        memP[i].prod(),
-                        [of.prod() for of in scaleOF[i]],
-                        partial_softmax_kernel,
-                        scale_buffer_init_kernel,
-                        memcopy_kernel_scale,
-                        i,
-                        softmax_rtps[i],
-                        idx_buffer_softmax,
-                        scale_buffer_softmax,
-                    ],
-                    stack_size=SOFTMAX_STACK_SIZE,
-                    tile=Tile(i, 3 if pv_cores == 1 else 4) if every else Tile(col=i),
-                )
-            )
-            # Split, the halves sit either side of the softmax, whose row
-            # state each reads from shared memory.
-            for h, row in enumerate([4] if pv_cores == 1 else [3, 5]):
-                idx_buffer_pv = Buffer(
+            matmul_workers, softmax_workers, matmul_pv_workers = [], [], []
+            for i in range(num_pipelines):
+                idx_buffer_qk = Buffer(
                     initial_value=np.zeros(shape=(2,), dtype=np.int32),
                 )
-                matmul_pv_workers.append(
+                matmul_workers.append(
                     Worker(
-                        batched_matmul_pv,
+                        batched_matmul_qk,
                         fn_args=[
-                            outP[i].cons(),
-                            memV[(i % kv_lanes) * pv_cores + h].cons(),
-                            scaleOF[i][h].cons(),
-                            outO[h][i].prod(),
-                            matmul_PV,
-                            rescale_O,
+                            memQ[i].cons(),
+                            memK[i % kv_lanes].cons(),
+                            memA[i].prod(),
+                            zero_scores,
+                            matmul_QK,
                             i,
-                            pv_rtps[h][i],
-                            idx_buffer_pv,
-                            Buffer(acc_ty),
+                            qk_rtps[i],
+                            idx_buffer_qk,
                         ],
                         stack_size=STACK_SIZE,
-                        tile=Tile(i, row) if every else Tile(col=i),
+                        tile=Tile(i, 2) if every else Tile(col=i),
                     )
                 )
+                idx_buffer_softmax = Buffer(
+                    initial_value=np.zeros(shape=(2,), dtype=np.int32),
+                )
+                scale_buffer_softmax = Buffer(
+                    initial_value=np.zeros(shape=(4 * B_q,), dtype=np.float32),
+                )
+                softmax_workers.append(
+                    Worker(
+                        softmax,
+                        fn_args=[
+                            outA[i].cons(),
+                            memP[i].prod(),
+                            [of.prod() for of in scaleOF[i]],
+                            partial_softmax_kernel,
+                            scale_buffer_init_kernel,
+                            memcopy_kernel_scale,
+                            i,
+                            softmax_rtps[i],
+                            idx_buffer_softmax,
+                            scale_buffer_softmax,
+                        ],
+                        stack_size=SOFTMAX_STACK_SIZE,
+                        tile=(
+                            Tile(i, 3 if pv_cores == 1 else 4) if every else Tile(col=i)
+                        ),
+                    )
+                )
+                # Split, the halves sit either side of the softmax, whose row
+                # state each reads from shared memory.
+                for h, row in enumerate([4] if pv_cores == 1 else [3, 5]):
+                    idx_buffer_pv = Buffer(
+                        initial_value=np.zeros(shape=(2,), dtype=np.int32),
+                    )
+                    matmul_pv_workers.append(
+                        Worker(
+                            batched_matmul_pv,
+                            fn_args=[
+                                outP[i].cons(),
+                                memV[(i % kv_lanes) * pv_cores + h].cons(),
+                                scaleOF[i][h].cons(),
+                                outO[h][i].prod(),
+                                matmul_PV,
+                                rescale_O,
+                                i,
+                                pv_rtps[h][i],
+                                idx_buffer_pv,
+                                Buffer(acc_ty),
+                            ],
+                            stack_size=STACK_SIZE,
+                            tile=Tile(i, row) if every else Tile(col=i),
+                        )
+                    )
 
-        two_shims = self.q_shims > 1
-        qs, outs, ks, vs = [], [], [], []
-        for s in range(self.q_shims):
-            q_col = layout.q[s] if split else 0 if two_shims else columns.q
-            qs.append(inQ[s].prod(tile=Tile(q_col, 0) if every else AnyShimTile))
-            for h in range(pv_cores):
-                o_col = layout.o[s][h] if split else 0 if two_shims else columns.o
-                outs.append(
-                    memO[s * pv_cores + h].cons(
-                        tile=Tile(o_col, 0) if every else AnyShimTile
+            two_shims = self.q_shims > 1
+            qs, outs, ks, vs = [], [], [], []
+            for s in range(self.q_shims):
+                q_col = layout.q[s] if split else 0 if two_shims else columns.q
+                qs.append(inQ[s].prod(tile=Tile(q_col, 0) if every else AnyShimTile))
+                for h in range(pv_cores):
+                    o_col = layout.o[s][h] if split else 0 if two_shims else columns.o
+                    outs.append(
+                        memO[s * pv_cores + h].cons(
+                            tile=Tile(o_col, 0) if every else AnyShimTile
+                        )
                     )
-                )
-        for lane in range(kv_lanes):
-            shared = kv_lanes == 1
-            k_col = layout.k_shim if split else columns.k if shared else lane
-            ks.append(inK[lane].prod(tile=Tile(k_col, 0) if every else AnyShimTile))
-            for h in range(pv_cores):
-                v_col = layout.v[h] if split else columns.v if shared else lane
-                vs.append(
-                    inV[lane * pv_cores + h].prod(
-                        tile=Tile(v_col, 0) if every else AnyShimTile
+            for lane in range(kv_lanes):
+                shared = kv_lanes == 1
+                k_col = layout.k_shim if split else columns.k if shared else lane
+                ks.append(inK[lane].prod(tile=Tile(k_col, 0) if every else AnyShimTile))
+                for h in range(pv_cores):
+                    v_col = layout.v[h] if split else columns.v if shared else lane
+                    vs.append(
+                        inV[lane * pv_cores + h].prod(
+                            tile=Tile(v_col, 0) if every else AnyShimTile
+                        )
                     )
-                )
-        self.Q.bind(qs)
-        self.O.bind(outs)
-        self.K.bind(ks)
-        self.V.bind(vs)
+            self.Q.bind(qs)
+            self.O.bind(outs)
+            self.K.bind(ks)
+            self.V.bind(vs)
 
-        return matmul_workers + softmax_workers + matmul_pv_workers
+            return Built(
+                matmul_workers + softmax_workers + matmul_pv_workers,
+                [*qk_rtps, *softmax_rtps, *(r for rtps in pv_rtps for r in rtps)],
+            )
 
     def ops(self) -> int:
         """Q K^T and its product with V per head, over the keys each query keeps."""
