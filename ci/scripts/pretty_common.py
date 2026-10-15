@@ -115,6 +115,8 @@ TOWER_CLASSES = {
     ),
 }
 
+LM_HEAD = "iron/operators/flm/lm_head/test.py::"
+
 # Test paths renamed since the results branch began, each old prefix straight
 # to the newest: row_key maps a path by the first prefix it starts with, so
 # a test's own entry goes before its directory's, and no entry chains.
@@ -149,6 +151,17 @@ RENAMED_PATHS = {
             "swiglu",
         )
     },
+}
+
+# Parametrizations renamed since the results branch began, by their key after
+# RENAMED_PATHS: flm's LMHead whole-vocabulary bench became a case of its softcap
+# test over (dim, vocab).
+RENAMED_TESTS = {
+    (f"{LM_HEAD}test_gemma4_vocabulary", f"dim_{dim}"): (
+        f"{LM_HEAD}test_gemma4_softcap",
+        f"dim_{dim}-vocab_262144",
+    )
+    for dim in (1536, 2560)
 }
 
 # The module that runs every operator declaring its cases. Its parametrize ids
@@ -189,15 +202,17 @@ def try_parse_float(value: Any) -> Optional[float]:
 
 
 def row_key(row: Dict[str, str]) -> Tuple[str, str]:
-    """Identify the parametrization a row measures, by its test's path now:
-    a row recorded under a renamed path continues its history.
+    """Identify the parametrization a row measures, by its test's path and id
+    now: a row recorded under a renamed path or parametrization continues its
+    history.
     """
     test_path = (row.get("Test Path") or "").strip()
     for old, new in RENAMED_PATHS.items():
         if test_path.startswith(old):
             test_path = new + test_path[len(old) :]
             break
-    return test_path, (row.get("Test") or "").strip()
+    key = (test_path, (row.get("Test") or "").strip())
+    return RENAMED_TESTS.get(key, key)
 
 
 def select_bench_rows(rows: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:
