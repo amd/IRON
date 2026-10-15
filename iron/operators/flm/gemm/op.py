@@ -637,7 +637,6 @@ class GEMM(Operator):
                 [C_SLICE_LEN * r for r in range(ROWS)],
                 tile=mt_tiles[c],
                 obj_types=[ct_out_ty] * ROWS,
-                names=[f"C_L1L2_{c}_{r}" for r in range(ROWS)],
                 from_stream=[gather_dims] * ROWS,
             )
             for r in range(ROWS):
@@ -654,7 +653,6 @@ class GEMM(Operator):
                 tile=mt_tiles[r * COLS // ROWS],
                 obj_type=ct_a_obj_ty,
                 depth=A_DEPTH,
-                name=f"A_L2L1_{r}",
                 to_stream=a_send_dims,
             )
             for c in range(COLS):
