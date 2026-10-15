@@ -83,6 +83,7 @@ def test_a_gather_alone_reads_the_rows_its_words_name(table, rows):
     np.testing.assert_array_equal(got, expected)
 
 
+@pytest.mark.extensive
 @pytest.mark.supported_devices("npu2")
 def test_a_graph_gathering_by_device_ids_is_measured(table, tmp_path):
     traced = DeviceIds(table).trace(ids=((15,), np.int32))
