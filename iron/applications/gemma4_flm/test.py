@@ -13,6 +13,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -117,7 +118,7 @@ def replies(engine, xclbins, prompts):
 def build_engines():
     """Builds the stock engine and the IRON engine."""
     subprocess.run(
-        ["make", "engine"],
+        ["make", "engine", f"PYTHON={sys.executable}"],
         cwd=APP,
         env=dict(os.environ, FLM_MODEL_PATH=str(FLM_MODEL_PATH)),
         check=True,
