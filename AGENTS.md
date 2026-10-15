@@ -724,16 +724,22 @@ code before relying on a line here; it is the authority.
 - **Placement.** Operator order is the final tiebreak for shim tile and
   channel, so a per-column stream is not guaranteed to sit in physical
   column `c`; where that matters, an `Array.build()` pins its lanes
-  (`operand.pin`) to shim channels a route of its own reaches. Where the tiles an
-  `Array.build()` names are a choice, the choice is a tunable: an operator
-  declares its own `Enum` of named placements (`GEMMPlacement`,
-  `MHAPlacement`) and a field `placement: GEMMPlacement =
-  Auto(default=GEMMPlacement.SHIMS)` its `Array` lists, left out of a domain since an
-  `Enum`-annotated tunable is searched over its own members. `Array.build()` writes mlir-aie's `Tile(c, r)`,
-  `Tile(col=c)` or `Any*Tile` (`AnyComputeTile`, `AnyMemTile`,
-  `AnyShimTile`) by the resolved member, the hand-found one the default
-  (`iron/operators/gemm.py`, `mha.py`). The tuner measures each member the
-  placer takes, like any other tunable.
+  (`operand.pin`) to shim channels a route of its own reaches. Where the
+  tiles an `Array.build()` names are a choice, the choice can be a tunable:
+  `gemm.py` declares its own `Enum` of named placements (`GEMMPlacement`)
+  and a field `placement: GEMMPlacement = Auto(default=GEMMPlacement.SHIMS)`
+  its `Array` lists, left out of a domain since an `Enum`-annotated tunable
+  is searched over its own members. `Array.build()` writes mlir-aie's
+  `Tile(c, r)`, `Tile(col=c)` or `Any*Tile` (`AnyComputeTile`, `AnyMemTile`,
+  `AnyShimTile`) by the resolved member, the hand-found one the default.
+  The tuner measures each member the placer takes, like any other tunable.
+  GEMM's shim tiles stay pinned regardless of the member: unpinned, a wide
+  b_col_maj shape still piles more buffer descriptors onto one shim tile
+  than it holds, checked against mlir-aie #3921's placer fixes (533e0c121).
+  `mha.py` pins nothing but the two P*V cores a split head shares L1
+  between (`pv_cores > 1`, a physical invariant no placer can infer); every
+  other MHA tile is left to the placer, checked the same way across its
+  catalog, Llama's and EmbeddingGemma 2's shapes.
 - **`Elementwise` is not upstream's `transform_parallel`.** They differ in
   the trip count (a `Value` here, folded into the core there), in who
   owns the sequence (the library here, so operators fuse into one image),

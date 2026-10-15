@@ -63,7 +63,7 @@ from iron.operators import (
 )
 from iron.operators.flm import GEMM as FlmGEMM
 from iron.operators.flm import DequantBFP
-from iron.operators.mha import MHAPlacement
+from iron.operators.gemm import GEMMPlacement
 from iron.tests.common import sequences
 from iron.tests.common.graphs import Rotate
 from iron.tests.common.llama_model import llama_1b
@@ -231,7 +231,6 @@ def test_derived_fields_are_not_widths(npu2):
     assert mha._domains(npu2) == {
         "num_pipelines": (8, 4, 2, 1),
         "B_q": (64, 32, 16),
-        "placement": ("memtiles", "tiles", "columns"),
         "pv_cores": (1, 2),
     }
     with pytest.raises(TypeError, match="no tunable"):
@@ -347,32 +346,31 @@ def test_flm_gemm_searches_its_a_tile_and_row_blocks(npu2):
 
 
 def test_a_placement_is_searched_by_name_and_keys_the_array(tmp_path, npu2):
-    chunk = MHA(num_heads=8, num_KV_heads=2, seq_len=2048, kv_len=8192)
-    chunk = chunk._with_tunables(num_pipelines=8, B_q=64)
-    fixed = frozenset({"num_pipelines", "B_q", "pv_cores"})
-    found = variants(chunk, npu2, fixed)
+    gemm = GEMM(M=2048, K=2048, N=2048, num_aie_columns=2, b_col_maj=True)
+    gemm = gemm._with_tunables(tile_m=64, tile_n=64)
+    fixed = frozenset({"tile_m", "tile_n"})
+    found = variants(gemm, npu2, fixed)
     assert [v.tunables for v in found] == [
-        (("placement", p),) for p in ("memtiles", "tiles", "columns")
+        (("placement", p),) for p in (GEMMPlacement.SHIMS, GEMMPlacement.TILES)
     ]
-    assert len({v.array for v in found}) == len({v.key for v in found}) == 3
+    assert len({v.array for v in found}) == len({v.key for v in found}) == 2
     kept, refused = fitting(found, tmp_path / "fits")
     assert kept == found and not refused
     # A profile's placement starts the search, the declared ones after it.
     profile = Profile()
-    profile.add(MHA, placement=MHAPlacement.COLUMNS)
-    held = profile.make(MHA, num_heads=8, seq_pad=256)
+    profile.add(GEMM, placement=GEMMPlacement.TILES)
+    held = profile.make(GEMM, M=512, K=512, N=512)
     assert held.resolved(npu2)._domains(npu2)["placement"] == (
-        "columns",
-        "memtiles",
-        "tiles",
+        GEMMPlacement.TILES,
+        GEMMPlacement.SHIMS,
     )
 
 
 def test_a_placement_takes_its_own_enum_alone():
     with pytest.raises(
-        TypeError, match="MHA.placement is a MHAPlacement, not 'diagonal'"
+        TypeError, match="GEMM.placement is a GEMMPlacement, not 'diagonal'"
     ):
-        MHA(num_heads=8, seq_pad=256, placement="diagonal")
+        GEMM(M=512, K=512, N=512, placement="diagonal")
 
 
 def test_a_profile_refuses_a_derived_field():

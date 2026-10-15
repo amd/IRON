@@ -12,7 +12,6 @@ block, and each pipeline takes its own K and V lanes.
 """
 
 import dataclasses
-from enum import StrEnum
 from typing import ClassVar
 
 import numpy as np
@@ -27,7 +26,7 @@ from aie.iron import (
     kernels,
 )
 from aie.iron.controlflow import range_
-from aie.iron.device import AnyMemTile, AnyShimTile, Device, Tile
+from aie.iron.device import AnyComputeTile, AnyMemTile, AnyShimTile, Device, Tile
 from aie.iron.kernels.linalg import mm_stream_dims
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
@@ -53,27 +52,6 @@ from iron.common.testing import Case, Testing
 STACK_SIZE = 0xD00
 # The softmax core's accurate exp2 polynomial needs 4 KiB, as aiecc measures it.
 SOFTMAX_STACK_SIZE = 0x1000
-
-
-class MHAPlacement(StrEnum):
-    """The tiles MHA's array pins; aiecc's placer takes the rest.
-
-    A pipeline's cores keep at least its column: placed freely, 8 pipelines
-    pack into 6 columns that cannot be routed. Checked against mlir-aie
-    #3921's placer fixes (533e0c121): at the num_pipelines=8 default
-    (pv_cores=1), placing every tile freely (no column pin at all) still
-    compiles, is numpy-correct and is within noise of the MEMTILES default
-    on npu2 (median 42946 vs 42916 us, MAD 31 vs 23 us over 20 runs) -- a
-    lead for dropping the pin on this path, not done here since the rest of
-    the catalog, Llama and EG2 are unchecked. With P*V split (pv_cores > 1)
-    placement must stay TILES regardless (``validate()`` raises otherwise):
-    the two P*V cores share SPLIT_COLUMNS' own adjacent tiles so the line
-    between them is shared memory, a physical invariant no placer can infer.
-    """
-
-    MEMTILES = "memtiles"
-    TILES = "tiles"
-    COLUMNS = "columns"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -185,21 +163,6 @@ _CASES = [
         )
         for heads, d in ((40, 64), (24, 128))
     ),
-    # The chunk at each placement the tuner tries beside the default.
-    *(
-        Case(
-            dict(
-                num_heads=8,
-                num_KV_heads=2,
-                seq_len=2048,
-                kv_len=8192,
-                num_pipelines=8,
-                placement=placement,
-            ),
-            extensive=True,
-        )
-        for placement in (MHAPlacement.TILES, MHAPlacement.COLUMNS)
-    ),
     Case(
         dict(num_heads=8, num_KV_heads=2, seq_len=1, kv_len=512, num_pipelines=2),
         extensive=True,
@@ -275,7 +238,6 @@ class MHA(Operator):
     # mha.cc's causal skip compares a KV block's index with a Q block's.
     B_kv: int = Auto(repr=False, derived=True)
     num_pipelines: int = Auto(default=1, domain=Width())
-    placement: MHAPlacement = Auto()
     # bfp16 shares an exponent over 8 keys of P*V, and the softmax bounds the time.
     emulate_bf16_mmul_with_bfp16: bool = Param(default=False, repr=False)
     # Filled by resolve.
@@ -470,12 +432,6 @@ class MHA(Operator):
                 f"{self.num_pipelines // self.q_shims}: its memtile also forwards "
                 f"a pipeline's scores and P"
             )
-        if self.pv_cores > 1 and self.placement is not MHAPlacement.TILES:
-            raise ValueError(
-                f"with P*V split, placement {self.placement!r} leaves tiles to "
-                f"the placer, but a column's links carry no stream past "
-                f"SPLIT_COLUMNS' own: only one pinning every tile holds"
-            )
         if self.packed:
             if self.window:
                 raise ValueError(
@@ -554,8 +510,6 @@ class MHA(Operator):
             self,
             B_q=B_q,
             B_kv=B_q,
-            placement=self.placement
-            or (MHAPlacement.TILES if pv_cores > 1 else MHAPlacement.MEMTILES),
             q_shims=q_shims,
             join_rows=B_q * (self.num_pipelines // q_shims),
             kv_lanes=self.num_pipelines if self.packed else 1,
@@ -593,7 +547,6 @@ class MHA(Operator):
         window: int | None
         scale: float
         num_pipelines: int
-        placement: MHAPlacement
         emulate_bf16_mmul_with_bfp16: bool
         kv_lanes: int
         width: int
@@ -620,9 +573,18 @@ class MHA(Operator):
             B_q, B_kv, d = self.B_q, self.B_kv, self.d
             num_pipelines = self.num_pipelines
             n_join = num_pipelines // self.q_shims  # the pipelines on one shim
-            every = self.placement is MHAPlacement.TILES
-            memtiles = self.placement is not MHAPlacement.COLUMNS
+            # With P*V split, the two P*V cores share SPLIT_COLUMNS' own adjacent
+            # tiles, the line between them shared L1, a physical invariant no
+            # placer can infer; aiecc's placer takes every other tile (checked
+            # against mlir-aie #3921's placer fixes, 533e0c121: the full catalog,
+            # Llama and EG2's MHA shapes placed freely are numpy-correct on npu2,
+            # and within noise of the old hand pins on every shape but one, a
+            # 16384-token prefill chunk, where the gap (~0.1%, 338246 vs 338409 us
+            # median over repeats) is small enough next to the pin's own run-to-
+            # run spread not to keep it).
             pv_cores, pv_width = self.pv_cores, self.pv_width
+            every = pv_cores > 1
+            memtiles = every
 
             # partial_softmax takes exp2, so the scale is in the log2 domain.
             inv_scale = float(bfloat16(self.scale * np.log2(np.e)))
@@ -1043,7 +1005,7 @@ class MHA(Operator):
                             idx_buffer_qk,
                         ],
                         stack_size=STACK_SIZE,
-                        tile=Tile(i, 2) if every else Tile(col=i),
+                        tile=Tile(i, 2) if every else AnyComputeTile,
                     )
                 )
                 idx_buffer_softmax = Buffer(
@@ -1069,7 +1031,9 @@ class MHA(Operator):
                         ],
                         stack_size=SOFTMAX_STACK_SIZE,
                         tile=(
-                            Tile(i, 3 if pv_cores == 1 else 4) if every else Tile(col=i)
+                            Tile(i, 3 if pv_cores == 1 else 4)
+                            if every
+                            else AnyComputeTile
                         ),
                     )
                 )
@@ -1095,7 +1059,7 @@ class MHA(Operator):
                                 Buffer(acc_ty),
                             ],
                             stack_size=STACK_SIZE,
-                            tile=Tile(i, row) if every else Tile(col=i),
+                            tile=Tile(i, row) if every else AnyComputeTile,
                         )
                     )
 

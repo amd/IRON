@@ -212,9 +212,9 @@ class Operator:
                 vars(self).setdefault(f.name, f.default)
         self._resolved = False
         self._image: OperatorImage | None = None
-        # An Enum-domain tunable (GEMM's and MHA's placements) takes its own
-        # Enum alone, or None (left for resolve() to fill): a string names
-        # one in a profile's JSON, which Profile.load converts before it
+        # An Enum-domain tunable (GEMM's placement) takes its own Enum
+        # alone, or None (left for resolve() to fill): a string names one
+        # in a profile's JSON, which Profile.load converts before it
         # reaches here.
         for name, domain in self.declaration.domains.items():
             value = vars(self)[name]
@@ -701,8 +701,8 @@ class Operator:
     def design_key(self):
         """Identity for sharing a build: equal keys generate byte-identical MLIR.
 
-        An Enum field (GEMM's and MHA's placements) is its own value, not
-        the member: a rename must not move a design's key.
+        An Enum field (GEMM's placement) is its own value, not the member:
+        a rename must not move a design's key.
         """
         own = tuple(
             (f.name, v.value if isinstance(v := vars(self)[f.name], Enum) else v)
@@ -834,7 +834,7 @@ class Operator:
         A fixed tuple is the resolved value's own, the resolved one first if
         it is not already there; an `Enum`-annotated field with no domain is
         searched over that `Enum`'s members, the resolved one first (GEMM's
-        and MHA's placements: a hand-found default tried before the rest).
+        placement: a hand-found default tried before the rest).
         """
         widths = self._widths
         found = {}
