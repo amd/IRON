@@ -87,8 +87,8 @@ def test_swiglu(rows, embedding_dim, hidden_dim, fold, record_property):
     record_property("Throughput", ops / (elapsed_us * 1e-6) / 1e9)
 
     # Folded, the down matvec applies silu and the product to each line of
-    # its input as it reads it. A sequence's gate GEMM takes silu as its
-    # epilogue, and the product stays a step of its own.
+    # its input as it reads it. A sequence's gate GEMM applies silu as its
+    # finish, and the product stays a step of its own.
     steps = net.traced.steps
     folds = [
         (
@@ -101,6 +101,8 @@ def test_swiglu(rows, embedding_dim, hidden_dim, fold, record_property):
     ]
     if fold and rows == 1:
         assert folds == [(GEMV, [SiLU, ElementwiseMul], [])]
+    elif fold:
+        assert folds == [(FLMGEMM, [], [SiLU])]
     else:
         assert folds == []
     if fold and rows > 1:
@@ -114,7 +116,7 @@ def test_swiglu(rows, embedding_dim, hidden_dim, fold, record_property):
     # The gate's buffer is dead once SiLU has read it, so the planner may
     # reuse it; the product's inputs and the down projection's are intact.
     verdicts = {"down": _verdict(net, steps[-1])}
-    products = [s for s in steps if isinstance(s.op, ElementwiseMul) or s.op.finish]
+    products = [s for s in steps if isinstance(s.op, ElementwiseMul)]
     if products:
         verdicts["product"] = _verdict(net, products[0])
     if fold:
