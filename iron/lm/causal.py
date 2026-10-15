@@ -114,13 +114,12 @@ class CausalLM(Model):
     def head(self, x):
         raise NotImplementedError(f"{type(self).__name__} defines no head()")
 
-    def embed(self, x, pixel_values=None, rows=None):
+    def embed(self, x):
         return x
 
     def body(
         self,
         ids=None,
-        pixel_values=None,
         *,
         token: Carried[np.int32],
         position: Carried[np.int32],
@@ -136,7 +135,7 @@ class CausalLM(Model):
         else:
             x = Copy.step(self.embedding[token]).reshape(1, c.emb_dim)
             angles = Copy.step(self.rope[position]).reshape(1, A)
-        x = self.embed(x, pixel_values, rows if prompt else None)
+        x = self.embed(x)
         step = DecodeStep(prompt, angles, chunk, rows, position)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
@@ -211,9 +210,8 @@ class CausalLM(Model):
             logger.info("%s", self._decode.plan.report("decode"))
         return self
 
-    def __call__(self, ids=None, pixel_values=None, **values) -> Any:
-        """One call of the loaded prompt version on ``ids``
-        (``prompt_ids``) and, where the model takes one, ``pixel_values``,
+    def __call__(self, ids=None, **values) -> Any:
+        """One call of the loaded prompt version on ``ids`` (``prompt_ids``),
         else of the decode step.
 
         Raises:
@@ -225,9 +223,7 @@ class CausalLM(Model):
         if ids is None:
             return self._decode(**values)
         assert self._prompt is not None
-        if pixel_values is None:
-            return self._prompt(ids, **values)
-        return self._prompt(ids, pixel_values, **values)
+        return self._prompt(ids, **values)
 
     @property
     def device_loop(self) -> bool:

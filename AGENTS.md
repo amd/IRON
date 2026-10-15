@@ -1035,8 +1035,8 @@ profiles. The library is four modules:
   i, weights, x)` and `head(x)`, and `Oracle` with a numpy `layer(angles,
   weights, x)` and `head(x)`, which it names as its `CausalLM`'s `oracle`;
   the pass, RoPE and attention are shared. `embed()` on both, the identity
-  by default, is where a model scales or splices the rows the embedding
-  gather gives (a vision tower's features, by a call's `pixel_values`). A
+  by default, is where a model scales the rows the embedding gather
+  gives. A
   `DecoderConfig`'s `rotary_dim` rotates only that prefix of each head, and
   its `rope_attention_scaling` scales the whole angle table once
 - `encoder.py`: `Encoder`, EmbeddingGemma 2's kind, a bidirectional
