@@ -1,3 +1,4 @@
 # Performance trends
 
-_No results._
+**Operators added:** `gemma4_flm/gemm_dequant`
+

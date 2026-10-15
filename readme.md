@@ -13,6 +13,44 @@
 </details>
 
 <details>
+<summary>iron/applications/gemma4_flm/gemm_dequant</summary>
+
+| Test | Krackan Status | Krackan | Phoenix Status | Phoenix |
+|---|---|---|---|---|
+| test_example_overrides_only_gemm_and_dequant[iter0] | - | - | ✅ | - |
+| test_example_overrides_only_gemm_and_dequant[iter1] | - | - | ✅ | - |
+| test_example_overrides_only_gemm_and_dequant[iter2] | - | - | ✅ | - |
+| test_example_overrides_only_gemm_and_dequant[iter3] | - | - | ✅ | - |
+| test_example_overrides_only_gemm_and_dequant[iter4] | - | - | ✅ | - |
+| test_offline_dequant_layout_is_a_permutation[iter0] | - | - | ✅ | - |
+| test_offline_dequant_layout_is_a_permutation[iter1] | - | - | ✅ | - |
+| test_offline_dequant_layout_is_a_permutation[iter2] | - | - | ✅ | - |
+| test_offline_dequant_layout_is_a_permutation[iter3] | - | - | ✅ | - |
+| test_offline_dequant_layout_is_a_permutation[iter4] | - | - | ✅ | - |
+| test_offline_dequant_uses_floor_rounding[iter0] | - | - | ✅ | - |
+| test_offline_dequant_uses_floor_rounding[iter1] | - | - | ✅ | - |
+| test_offline_dequant_uses_floor_rounding[iter2] | - | - | ✅ | - |
+| test_offline_dequant_uses_floor_rounding[iter3] | - | - | ✅ | - |
+| test_offline_dequant_uses_floor_rounding[iter4] | - | - | ✅ | - |
+| test_offline_dequant_writes_a_sidecar[iter0] | - | - | ✅ | - |
+| test_offline_dequant_writes_a_sidecar[iter1] | - | - | ✅ | - |
+| test_offline_dequant_writes_a_sidecar[iter2] | - | - | ✅ | - |
+| test_offline_dequant_writes_a_sidecar[iter3] | - | - | ✅ | - |
+| test_offline_dequant_writes_a_sidecar[iter4] | - | - | ✅ | - |
+| test_plot_contains_all_selections[iter0] | - | - | ✅ | - |
+| test_plot_contains_all_selections[iter1] | - | - | ✅ | - |
+| test_plot_contains_all_selections[iter2] | - | - | ✅ | - |
+| test_plot_contains_all_selections[iter3] | - | - | ✅ | - |
+| test_plot_contains_all_selections[iter4] | - | - | ✅ | - |
+| test_prepare_model_links_inputs_and_owns_sidecars[iter0] | - | - | ✅ | - |
+| test_prepare_model_links_inputs_and_owns_sidecars[iter1] | - | - | ✅ | - |
+| test_prepare_model_links_inputs_and_owns_sidecars[iter2] | - | - | ✅ | - |
+| test_prepare_model_links_inputs_and_owns_sidecars[iter3] | - | - | ✅ | - |
+| test_prepare_model_links_inputs_and_owns_sidecars[iter4] | - | - | ✅ | - |
+
+</details>
+
+<details>
 <summary>iron/applications/llama_3.2_1b</summary>
 
 | Test | Krackan Status | Krackan | Phoenix Status | Phoenix |
