@@ -10,7 +10,7 @@ from typing import Any
 
 import numpy as np
 
-from .field import Auto, Param
+from .field import AutoSpec, ParamSpec
 
 
 @dataclass(frozen=True)
@@ -26,13 +26,19 @@ class Select:
     def branch(self, op) -> Shape:
         """The shape the flag picks on ``op``."""
         flag = self.flag
-        if isinstance(flag, Param):
-            flag = getattr(op, flag.name)
+        if ParamSpec.of(flag) is not None:
+            flag = vars(op)[flag.name]
             if flag is None:
                 raise ValueError(
-                    f"{self.flag!r} is None; a Select() on it needs a resolved operator"
+                    f"{self.flag.name} is None; a Select() on it needs a resolved operator"
                 )
         return Shape(tuple(self.when_true if flag else self.when_false))
+
+    def __repr__(self) -> str:
+        return (
+            f"Select({Shape((self.flag,))}, ({Shape(self.when_true)}), "
+            f"({Shape(self.when_false)}))"
+        )
 
 
 _DimSpec = Any  # Param | int | Select
@@ -53,7 +59,7 @@ class Shape:
     dims: tuple
 
     def __str__(self) -> str:
-        return ", ".join(repr(d) for d in self.dims)
+        return ", ".join(d.name if isinstance(d, Field) else repr(d) for d in self.dims)
 
     def check(self, cls: type, member: Any, what: str, *, allow_tunable: bool) -> None:
         """Check each dimension is a ``Param()`` field of ``cls`` or an
@@ -78,16 +84,15 @@ class Shape:
                         f"{cls.__name__}: a shape references a field object that "
                         f"is not one of this class's fields"
                     )
-                if not isinstance(d, Param) or (
-                    isinstance(d, Auto) and not allow_tunable
-                ):
+                spec = ParamSpec.of(d)
+                if spec is None or (isinstance(spec, AutoSpec) and not allow_tunable):
                     why = (
                         "an Auto(); a host shape may not depend on tuning"
-                        if isinstance(d, Auto)
+                        if isinstance(spec, AutoSpec)
                         else "not declared with Param()"
                     )
                     raise TypeError(
-                        f"{cls.__name__}.{member.name}: {what} {d!r} is {why}. A "
+                        f"{cls.__name__}.{member.name}: {what} {d.name} is {why}. A "
                         f"shape dimension is a Param() field or an integer literal"
                     )
             elif not isinstance(d, (int, np.integer)):
@@ -104,11 +109,11 @@ class Shape:
             raise TypeError(f"{spec!r} is not a dimension")
         if isinstance(spec, (int, np.integer)):
             return int(spec)
-        if isinstance(spec, Param):
-            value = getattr(op, spec.name)
+        if ParamSpec.of(spec) is not None:
+            value = vars(op)[spec.name]
             if value is None:
                 raise ValueError(
-                    f"{spec!r} is None; it must be set before the shape can be resolved"
+                    f"{spec.name} is None; it must be set before the shape can be resolved"
                 )
             return int(value)
         raise TypeError(f"cannot resolve {spec!r} as a dimension")
@@ -119,7 +124,7 @@ class Shape:
         """
         out: list[int] = []
         for d in self.dims:
-            if isinstance(d, Param) and getattr(op, d.name) is None:
+            if ParamSpec.of(d) is not None and vars(op)[d.name] is None:
                 continue
             if isinstance(d, Select):
                 out.extend(d.branch(op).resolve(op))
@@ -131,7 +136,7 @@ class Shape:
         """The axis of the resolved shape that ``field`` sizes, or None."""
         axis = 0
         for d in self.dims:
-            if isinstance(d, Param) and getattr(op, d.name) is None:
+            if ParamSpec.of(d) is not None and vars(op)[d.name] is None:
                 continue
             if isinstance(d, Select):
                 branch = d.branch(op)
@@ -140,7 +145,7 @@ class Shape:
                     return axis + inner
                 axis += len(branch.resolve(op))
                 continue
-            if isinstance(d, Param) and d.name == field:
+            if ParamSpec.of(d) is not None and d.name == field:
                 return axis
             axis += 1
         return None
@@ -149,7 +154,7 @@ class Shape:
         """The fields this shape names, through ``Select``."""
         out: set[str] = set()
         for d in self.dims:
-            if isinstance(d, Param):
+            if ParamSpec.of(d) is not None:
                 out.add(d.name)
             elif isinstance(d, Select):
                 out |= Shape((d.flag, *d.when_true, *d.when_false)).names()

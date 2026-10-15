@@ -99,7 +99,7 @@ class Variant:
             op=op,
             resolved=resolved,
             tunables=tuple(
-                (name, getattr(resolved, name)) for name in resolved._domains(dev)
+                (name, vars(resolved)[name]) for name in resolved._domains(dev)
             ),
             key=cost_key(resolved, dev),
             array=resolved.array_key(),
@@ -124,7 +124,7 @@ def variants(op: Operator, dev, pinned: frozenset[str] = frozenset()) -> list[Va
         op = dataclasses.replace(
             op,
             pinned=op.pinned | pinned,
-            **{name: getattr(resolved, name) for name in pinned - op.pinned},
+            **{name: vars(resolved)[name] for name in pinned - op.pinned},
         )
     default = Variant.of(op, dev)
     defaults = dict(default.tunables)
@@ -919,7 +919,7 @@ class JointTuning(Tuning):
                 held = variant.op.pinned - op.pinned
                 replace[id(op)] = op._with_tunables(
                     **dict(variant.tunables),
-                    **{name: getattr(variant.resolved, name) for name in held},
+                    **{name: vars(variant.resolved)[name] for name in held},
                 )
         narrowed = traced.with_operators(replace)
         members: dict[str, list[Operator]] = {}

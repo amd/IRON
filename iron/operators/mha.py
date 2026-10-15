@@ -422,9 +422,9 @@ class MHA(Operator):
                 emulate_bf16_mmul_with_bfp16=self.emulate_bf16_mmul_with_bfp16,
             )
             for name, m in zip(dims, mac):
-                if getattr(self, name) % m:
+                if vars(self)[name] % m:
                     raise ValueError(
-                        f"{name}={getattr(self, name)} must be a multiple of "
+                        f"{name}={vars(self)[name]} must be a multiple of "
                         f"{'P*V' if pv else 'QK^T'}'s micro-tile {mac}"
                     )
         # A row whose window misses a key block another row of its query

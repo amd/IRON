@@ -554,7 +554,7 @@ class Tracer:
         called = operands if called is None else called
         # A shape that Selects on an Auto() field is the device's: resolve()
         # gives it, unchecked, so a profile may still tune the op.
-        unset = {n for n in type(op).declaration.autos if getattr(op, n) is None}
+        unset = {n for n in type(op).declaration.autos if vars(op)[n] is None}
         shaped = op
         if any(unset & m.dims.names() for m in op._members_io()):
             shaped = op.resolve(op.dev)

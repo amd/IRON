@@ -9,7 +9,7 @@ tunable, since inference never reads one.
 """
 
 from .domain import Divisors, Width
-from .field import Auto, Param, Unresolvable
+from .field import Auto, AutoSpec, Param, ParamSpec, Unresolvable
 from .shape import Select
 from .operand import In, InOut, Operand, Out
 from .chain import Chain, Link
@@ -35,6 +35,8 @@ __all__ = [
     "Width",
     "Xclbin",
     "Auto",
+    "AutoSpec",
     "Param",
+    "ParamSpec",
     "Select",
 ]

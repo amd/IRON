@@ -85,7 +85,7 @@ class Divisors(Domain):
 
     def _bound(self, bound: Bound, op: Any, dev: Any) -> int | None:
         if isinstance(bound, dataclasses.Field):
-            return getattr(op, bound.name)
+            return vars(op)[bound.name]
         return bound(op, dev) if callable(bound) else bound
 
     def values(self, op: Any, dev: Any, start: Any) -> tuple[Any, ...]:

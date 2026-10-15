@@ -70,7 +70,7 @@ def test_every_operator_declaring_a_probe_is_checked():
 def test_a_probe_field_moves_only_runtime_parameter_words(cls):
     away = cls(**AWAY[cls])
     probe = away._probed()
-    assert all(getattr(away, n) != v for n, v in cls.declaration.probes.items())
+    assert all(vars(away)[n] != v for n, v in cls.declaration.probes.items())
     modules = [OperatorDesign(op.resolved()).module() for op in (away, probe)]
     flows = ({}, {})
     moved = 0

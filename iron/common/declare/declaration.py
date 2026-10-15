@@ -13,10 +13,10 @@ from collections.abc import Iterable, Mapping
 from typing import Any, get_args
 
 from .domain import Domain
-from .field import Auto, Param
+from .field import AutoSpec, ParamSpec
 from .member import Member
 from .operand import Operand
-from .shape import Select
+from .shape import Select, Shape
 from .value import Extent, Value
 
 
@@ -148,32 +148,33 @@ class Declaration:
                 optional = [
                     d.name
                     for d in m.dims.dims
-                    if isinstance(d, Param) and d.name in self.nullable
+                    if ParamSpec.of(d) is not None and d.name in self.nullable
                 ]
                 if len(optional) > 1:
                     raise TypeError(
                         f"{cls.__name__}.{m.name}: at most one T | None dimension "
                         f"{optional}, since the rank tells whether it is present"
                     )
-                if m.when is not None and (
-                    not isinstance(m.when, Param) or isinstance(m.when, Auto)
-                ):
+                if m.when is not None:
+                    when = ParamSpec.of(m.when)
+                    if when is None or isinstance(when, AutoSpec):
+                        raise TypeError(
+                            f"{cls.__name__}.{m.name}: when={Shape((m.when,))} must "
+                            f"be a Param() field, the flag the operand exists under"
+                        )
+            if isinstance(m, Extent):
+                extent = ParamSpec.of(m.field)
+                if extent is None or isinstance(extent, AutoSpec):
                     raise TypeError(
-                        f"{cls.__name__}.{m.name}: when={m.when!r} must be a "
-                        f"Param() field, the flag the operand exists under"
+                        f"{cls.__name__}.{m.name}: Extent({Shape((m.field,))}) must "
+                        f"name a Param() field, the one a graph may bound per call"
                     )
-            if isinstance(m, Extent) and (
-                not isinstance(m.field, Param) or isinstance(m.field, Auto)
-            ):
-                raise TypeError(
-                    f"{cls.__name__}.{m.name}: Extent({m.field!r}) must name a Param() "
-                    f"field, the one a graph may bound per call"
-                )
             if isinstance(m, Operand) and m.obj_dims is not None and m.per is not None:
                 for ref in m.per.dims:
-                    if not isinstance(ref, Param):
+                    if ParamSpec.of(ref) is None:
                         raise TypeError(
-                            f"{cls.__name__}.{m.name}: per={ref!r} must be a Param() or Auto() field"
+                            f"{cls.__name__}.{m.name}: per={Shape((ref,))} must be "
+                            f"a Param() or Auto() field"
                         )
 
         prepared = [m.name for m in members if isinstance(m, Operand) and m.prepare]
@@ -190,29 +191,32 @@ class Declaration:
             )
         self.members = tuple(members)
 
-        params = [
-            f
-            for f in fields.values()
-            if isinstance(f, Param) and not isinstance(f, Auto)
-        ]
-        autos = [f for f in fields.values() if isinstance(f, Auto)]
-        self.params = tuple(f.name for f in params)
-        self.derived = {f.name: f.derive for f in params if f.derive is not None}
-        self.autos = tuple(f.name for f in autos)
-        self.tunables = tuple(f.name for f in autos if f.init and not f.derived)
+        specs = {
+            name: spec
+            for name, f in fields.items()
+            if (spec := ParamSpec.of(f)) is not None
+        }
+        params = {n: s for n, s in specs.items() if not isinstance(s, AutoSpec)}
+        autos = {n: s for n, s in specs.items() if isinstance(s, AutoSpec)}
+        self.params = tuple(params)
+        self.derived = {n: s.derive for n, s in params.items() if s.derive is not None}
+        self.autos = tuple(autos)
+        self.tunables = tuple(
+            n for n, s in autos.items() if fields[n].init and not s.derived
+        )
         # A tunable given no domain and annotated with an Enum is searched
         # over that Enum's members.
         self.domains = {}
-        for f in autos:
-            if f.name not in self.tunables:
+        for n, s in autos.items():
+            if n not in self.tunables:
                 continue
-            domain = f.domain
+            domain = s.domain
             if domain is None:
-                hint = hints.get(f.name)
+                hint = hints.get(n)
                 if isinstance(hint, type) and issubclass(hint, enum.Enum):
                     domain = hint
             if domain is not None:
-                self.domains[f.name] = domain
+                self.domains[n] = domain
         for n, domain in self.domains.items():
             when = domain.when if isinstance(domain, Domain) else None
             if when is not None and not callable(when):
@@ -235,12 +239,10 @@ class Declaration:
                 if m.when is not None:
                     named.add(m.when.name)
         self.array = tuple(
-            n
-            for n, f in fields.items()
-            if n in named or (isinstance(f, Param) and f.array)
+            n for n in fields if n in named or (n in specs and specs[n].array)
         )
         self.probes = {
-            f.name: f.probe for f in params if f.probe is not dataclasses.MISSING
+            n: s.probe for n, s in params.items() if s.probe is not dataclasses.MISSING
         }
         shaped: set[str] = set()
         for m in members:
@@ -394,7 +396,7 @@ class Declaration:
         pairs = [(m, inputs[m.name]) for m in ins] + list(zip(outs, outputs))
         bound: dict[str, Any] = dict(given)
         # Each dimension an operand's shape gives: (field, value, where).
-        found: list[tuple[Param, int | None, str]] = []
+        found: list[tuple[dataclasses.Field, int | None, str]] = []
         for m, shape in pairs:
             shape = tuple(int(s) for s in shape)
             dims = list(m.dims.dims)
@@ -402,7 +404,7 @@ class Declaration:
                 (
                     i
                     for i, d in enumerate(dims)
-                    if isinstance(d, Param) and d.name in self.nullable
+                    if ParamSpec.of(d) is not None and d.name in self.nullable
                 ),
                 None,
             )
@@ -428,7 +430,7 @@ class Declaration:
                 value = bound.get(flag.name, flag.default)
                 if value is dataclasses.MISSING:
                     raise ValueError(
-                        f"{self.name}: {flag!r} selects {m.name}'s shape and "
+                        f"{self.name}: {flag.name} selects {m.name}'s shape and "
                         f"has no default; pass it explicitly"
                     )
                 dims[:0] = d.when_true if value else d.when_false
@@ -443,7 +445,7 @@ class Declaration:
                     f"{shape}, declared rank {len(dims)} {m!r}"
                 )
             for i, (d, n) in enumerate(zip(dims, shape)):
-                if isinstance(d, Param):
+                if ParamSpec.of(d) is not None:
                     found.append((d, n, f"{m.name}.shape[{i}]"))
                 elif int(d) != n:
                     raise ValueError(
@@ -454,7 +456,7 @@ class Declaration:
         for ref, value, where in found:
             if ref.name in bound and bound[ref.name] != value:
                 raise ValueError(
-                    f"{self.name}: {ref!r} is {value} from {where} but "
+                    f"{self.name}: {ref.name} is {value} from {where} but "
                     f"{bound[ref.name]} from {origin[ref.name]}"
                 )
             bound[ref.name] = value

@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any, ClassVar, Iterator, Mapping
 
 from ... import operators
-from .field import Auto, Param
 
 
 class Profile:
@@ -50,34 +49,17 @@ class Profile:
         """The profile applied in this scope, if any."""
         return cls._active.get()
 
-    @staticmethod
-    def schema(cls: type) -> dict[str, Param | Auto]:
-        """The fields an entry for ``cls`` may name: ``Param()`` s to match
-        and the ``Auto()`` s the class leaves free (one it resolves outright,
-        with no listed alternative, is not here: naming it is a stale key,
-        same as a field dropped from the class).
-        """
-        return {
-            f.name: f
-            for f in dataclasses.fields(cls)
-            if (isinstance(f, Param) and not isinstance(f, Auto))
-            or f.name in cls.declaration.tunables
-        }
-
     def add(self, cls: type, **fields: Any) -> None:
         """Add an entry for ``cls``: ``Param()`` fields to match (one left out
         matches any value) and ``Auto()`` fields to give.
         """
-        declared = {f.name: f for f in dataclasses.fields(cls)}
-        schema = self.schema(cls)
         dims, tunables, unknown, fixed = {}, {}, [], []
         for name, value in fields.items():
-            field = schema.get(name)
             if name in cls.declaration.tunables:
                 tunables[name] = value
-            elif isinstance(declared.get(name), Auto):
+            elif name in cls.declaration.autos:
                 fixed.append(name)
-            elif isinstance(field, Param):
+            elif name in cls.declaration.params:
                 dims[name] = value
             else:
                 unknown.append(name)
@@ -98,7 +80,7 @@ class Profile:
         """
         dims = {}
         for f in dataclasses.fields(cls):
-            if not isinstance(f, Param) or isinstance(f, Auto):
+            if f.name not in cls.declaration.params:
                 continue
             if f.name in given:
                 dims[f.name] = given[f.name]
@@ -128,7 +110,7 @@ class Profile:
     def lookup(self, op) -> dict[str, Any]:
         """The tunables the profile gives an operator of ``op``'s class and shape."""
         return self.tunables_for(
-            type(op), {f.name: getattr(op, f.name) for f in dataclasses.fields(op)}
+            type(op), {f.name: vars(op)[f.name] for f in dataclasses.fields(op)}
         )
 
     @classmethod

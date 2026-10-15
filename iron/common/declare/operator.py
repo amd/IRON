@@ -40,7 +40,7 @@ from ..testing import Testing
 from .chain import Chain, Link
 from .declaration import Declaration
 from .domain import Domain, Width
-from .field import Auto, Param, Unresolvable
+from .field import Auto, Param, ParamSpec, Unresolvable
 from .operand import In, Operand
 from .profile import Profile
 from .rtp import Rtp
@@ -213,6 +213,10 @@ class Operator(metaclass=_OperatorMeta):
         cls.declaration = Declaration(cls, Operator, shipped=image is not None)
 
     def __post_init__(self) -> None:
+        # dataclass reads an init=False default through the class, where the field is.
+        for f in dataclasses.fields(self):
+            if not f.init and f.default is not dataclasses.MISSING:
+                vars(self).setdefault(f.name, f.default)
         self._resolved = False
         self._image: OperatorImage | None = None
         self._derive_params()
@@ -223,14 +227,12 @@ class Operator(metaclass=_OperatorMeta):
         if checked:
             self.validate()
         self._bind()
-        if checked and not any(
-            getattr(self, n) is None for n in self.declaration.autos
-        ):
+        if checked and not any(vars(self)[n] is None for n in self.declaration.autos):
             self.compatible()
 
     def _derive_params(self) -> None:
         for name, derive in self.declaration.derived.items():
-            if getattr(self, name) is None:
+            if vars(self)[name] is None:
                 value = derive(self)
                 # A T | None field's formula may answer None itself (GEMV's
                 # num_matrices, following num_batches): that is the computed
@@ -251,7 +253,7 @@ class Operator(metaclass=_OperatorMeta):
         overridden to something the formula disagrees with on purpose.
         """
         for name in names:
-            given, expected = getattr(self, name), self.declaration.derived[name](self)
+            given, expected = vars(self)[name], self.declaration.derived[name](self)
             if given != expected:
                 raise ValueError(
                     f"{type(self).__name__}.{name}={given!r} is not what its "
@@ -286,7 +288,7 @@ class Operator(metaclass=_OperatorMeta):
         """
         fenced = copy.copy(self)
         for f in dataclasses.fields(self):
-            if isinstance(f, Param) and f.name not in self.declaration.array:
+            if ParamSpec.of(f) is not None and f.name not in self.declaration.array:
                 vars(fenced)[f.name] = _Fenced(type(self).__name__, f.name)
         vars(fenced)["_unfenced"] = self
         before = dict(vars(fenced))
@@ -682,7 +684,7 @@ class Operator(metaclass=_OperatorMeta):
         the member: a rename must not move a design's key.
         """
         own = tuple(
-            (f.name, v.value if isinstance(v := getattr(self, f.name), Enum) else v)
+            (f.name, v.value if isinstance(v := vars(self)[f.name], Enum) else v)
             for f in dataclasses.fields(self)
             if f.compare
         )
@@ -708,13 +710,13 @@ class Operator(metaclass=_OperatorMeta):
         one its step time is measured as, for every value of those fields.
         Itself when they are there already, unresolved otherwise.
         """
-        if all(getattr(self, n) == v for n, v in self.declaration.probes.items()):
+        if all(vars(self)[n] == v for n, v in self.declaration.probes.items()):
             return self
         return dataclasses.replace(self, **self.declaration.probes)
 
     def array_key(self):
         key = (type(self),) + tuple(
-            (name, v.value if isinstance(v := getattr(self, name), Enum) else v)
+            (name, v.value if isinstance(v := vars(self)[name], Enum) else v)
             for name in self.declaration.array
         )
         if self.trace is not None:
@@ -739,7 +741,7 @@ class Operator(metaclass=_OperatorMeta):
             raise TypeError(
                 f"{type(self).__name__}.resolve() must return a {type(self).__name__}"
             )
-        missing = [n for n in self.declaration.autos if getattr(new, n) is None]
+        missing = [n for n in self.declaration.autos if vars(new)[n] is None]
         if missing:
             raise Unresolvable(
                 f"{type(self).__name__}.resolve() left {missing} unset for {dev}"
@@ -929,18 +931,18 @@ class Operator(metaclass=_OperatorMeta):
         other domain.
         """
         found = {
-            n: getattr(self, n)
+            n: vars(self)[n]
             for n, domain in self.declaration.domains.items()
             if isinstance(domain, Width)
         }
         for b in self.buffers:
             for ref in b.per.dims if b.streamed and b.per else ():
                 if (
-                    isinstance(ref, Param)
+                    ParamSpec.of(ref) is not None
                     and ref.name in self.declaration.tunables
                     and ref.name not in self.declaration.domains
                 ):
-                    found.setdefault(ref.name, getattr(self, ref.name))
+                    found.setdefault(ref.name, vars(self)[ref.name])
         return found
 
     def _domains(self, dev) -> dict[str, tuple[Any, ...]]:
@@ -1270,7 +1272,7 @@ class Operator(metaclass=_OperatorMeta):
         op = self.resolved(dev)
         own = []
         for f in dataclasses.fields(op):
-            v = getattr(op, f.name)
+            v = vars(op)[f.name]
             if not f.repr or v is None:
                 continue
             if isinstance(v, bool):
@@ -1309,12 +1311,12 @@ class Operator(metaclass=_OperatorMeta):
         return [
             m
             for m in self.declaration.members
-            if isinstance(m, Operand) and (m.when is None or getattr(self, m.when.name))
+            if isinstance(m, Operand) and (m.when is None or vars(self)[m.when.name])
         ] + [*self._prepare_inputs, *self._finish_inputs]
 
     def __repr__(self) -> str:
         own = ", ".join(
-            f"{f.name}={getattr(self, f.name)!r}"
+            f"{f.name}={vars(self)[f.name]!r}"
             for f in dataclasses.fields(self)
             if f.repr
         )

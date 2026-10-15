@@ -285,7 +285,7 @@ class Dataflow:
         except (Unresolvable, ValueError) as e:
             return f"{type(op).__name__}: {e}"
         tunables = ", ".join(
-            f"{n}={getattr(resolved, n)}" for n in type(op).declaration.autos
+            f"{n}={vars(resolved)[n]}" for n in type(op).declaration.autos
         )
         return f"{resolved.name}\n{tunables}"
 

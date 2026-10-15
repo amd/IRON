@@ -193,7 +193,7 @@ reuse lint
    - Compiled to `.o` files and linked into operator `.xclbin`
 
 3. **Common Infrastructure** (`iron/common/`)
-   - `declare/`: the declaration layer (`Operator`, its `Param`/`Auto` fields (`dataclasses.Field`s, each its own dimension reference),
+   - `declare/`: the declaration layer (`Operator`, its `Param`/`Auto` fields (`Param()`/`Auto()` return the plain `dataclasses.Field`, its `ParamSpec`/`AutoSpec` in the field's metadata and read back with `ParamSpec.of(f)`; each field is its own dimension reference, `GEMV.K` in a shape and `vars(op)["K"]` on an instance),
      operands (`Operand`: `op.x` is the declared operand bound to the
      instance, its shape and lanes resolved), the `Value` member and its
      `DispatchTime`/`Extent` specializations (`op.value(name)` is the value

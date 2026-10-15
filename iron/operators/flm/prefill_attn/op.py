@@ -66,8 +66,8 @@ class _PrefillAttentionBase(Operator):
 
     def validate(self) -> None:
         for name in ("max_context", "num_heads", "num_kv_heads"):
-            if getattr(self, name) <= 0:
-                raise ValueError(f"{name} ({getattr(self, name)}) must be positive")
+            if vars(self)[name] <= 0:
+                raise ValueError(f"{name} ({vars(self)[name]}) must be positive")
         if self.num_heads % self.num_kv_heads:
             raise ValueError(
                 f"num_heads ({self.num_heads}) must be a multiple of "
@@ -79,7 +79,7 @@ class _PrefillAttentionBase(Operator):
                 f"each KV head must serve a multiple of {num_cu} query heads"
             )
         for name in ("max_context", "window"):
-            value = getattr(self, name)
+            value = vars(self)[name]
             if value is not None and value % 128:
                 raise ValueError(f"{name} ({value}) must be a multiple of 128")
         self.check_derived("head_dim", "qo_len", "kv_len")

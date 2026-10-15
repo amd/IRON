@@ -20,7 +20,7 @@ from aie.iron import DmaEndpoint
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
-from .field import Param
+from .field import ParamSpec
 from .shape import Shape, _DimSpec
 from .member import Member
 from .value import DispatchTime, Extent, Value
@@ -165,7 +165,7 @@ class Operand(Member["Operand"]):
     @property
     def dtype(self):
         dtype = self.declared_dtype
-        return getattr(self.op, dtype.name) if isinstance(dtype, Field) else dtype
+        return vars(self.op)[dtype.name] if isinstance(dtype, Field) else dtype
 
     @property
     def elements(self) -> int:
@@ -429,10 +429,10 @@ class Operand(Member["Operand"]):
         dims = self.dims.dims
         if (
             dims
-            and isinstance(dims[0], Param)
+            and ParamSpec.of(dims[0]) is not None
             and dims[0].name in self.op.declaration.nullable
         ):
-            return 1 if getattr(self.op, dims[0].name) is not None else 0
+            return 1 if vars(self.op)[dims[0].name] is not None else 0
         return 0
 
     def extent_axis(self, extent: Extent) -> int | None:

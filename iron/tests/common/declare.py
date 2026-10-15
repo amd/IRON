@@ -31,7 +31,9 @@ from iron.common import (
     Unresolvable,
     Value,
     Auto,
+    AutoSpec,
     Param,
+    ParamSpec,
 )
 from iron.common.design import OperatorDesign
 from iron.operators import ReLU as LibraryReLU
@@ -87,8 +89,10 @@ class MV(Operator):
 
 def test_fields_are_their_own_references():
     fields = {f.name: f for f in dataclasses.fields(MV)}
-    assert MV.K is fields["K"] and MV.K.name == "K" and isinstance(MV.K, Param)
-    assert MV.tile_out is fields["tile_out"] and isinstance(MV.tile_out, Auto)
+    assert MV.K is fields["K"] and MV.K.name == "K"
+    assert type(ParamSpec.of(MV.K)) is ParamSpec
+    assert MV.tile_out is fields["tile_out"]
+    assert isinstance(ParamSpec.of(MV.tile_out), AutoSpec)
 
 
 def test_members_keep_declaration_order_and_names():
@@ -353,7 +357,7 @@ def test_buffers_carry_the_declared_dtype_and_size(npu2):
 def test_instance_values_shadow_the_fields():
     op = MV(M=64, K=256, columns=2)
     assert op.K == 256 and op.columns == 2
-    assert isinstance(MV.K, Param) and MV.K.name == "K"
+    assert ParamSpec.of(MV.K) is not None and MV.K.name == "K"
 
 
 def test_a_stream_binds_a_handle_per_lane():

@@ -140,10 +140,10 @@ class Extent(Value):
         bound = instance.__dict__.get("_extents", {}).get(self.name)
         if bound is not None:
             return bound
-        return getattr(instance, self.field.name)
+        return vars(instance)[self.field.name]
 
     def __repr__(self) -> str:
-        return f"Extent({self.field!r})"
+        return f"Extent({self.field.name})"
 
 
 class ExtentWord(Value):

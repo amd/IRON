@@ -1185,7 +1185,7 @@ def _resolved_fields(settings):
             aie_utils.set_current_device(dev)
             out.append(
                 [
-                    tuple((f.name, getattr(op, f.name)) for f in dataclasses.fields(op))
+                    tuple((f.name, vars(op)[f.name]) for f in dataclasses.fields(op))
                     + (op.design_key(),)
                     for op, *_ in trace().runlist
                     for op in [op.resolved(dev)]
