@@ -20,6 +20,7 @@ from aie.utils.trace import get_trace_buffer
 
 from ..declare import Operator
 from .allocator import ALIGNMENT, BANK, ArenaPlan, Pool
+from .step import BufferRef
 
 if TYPE_CHECKING:
     import pyxrt
@@ -387,37 +388,36 @@ class FullELFCallable:
             )
         return path
 
-    def get_buffer(self, buffer_name):
+    def get_buffer(self, ref: BufferRef):
+        """The bytes ``ref`` names, as its dtype."""
         self._follow_arena()
-        if buffer_name not in self._buffer_cache:
-            buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
-            if buf_type == "scratch":
-                buf_type, offset = self.op.buffer_sizes.scratch_argument(offset, length)
-            dtype = self.op.buffer_dtype(buffer_name)
-            self._buffer_cache[buffer_name] = self._arguments()[buf_type].subview(
+        if ref not in self._buffer_cache:
+            kind, offset, length = ref.place(self.op.layout)
+            if kind == "scratch":
+                kind, offset = self.op.buffer_sizes.scratch_argument(offset, length)
+            dtype = self.op.buffer_dtype(ref)
+            self._buffer_cache[ref] = self._arguments()[kind].subview(
                 offset, (length // dtype.itemsize,), dtype
             )
-        return self._buffer_cache[buffer_name]
+        return self._buffer_cache[ref]
 
-    def get_storage(self, buffer_name):
+    def get_storage(self, root: str):
         """The buffer and the rest of its last coherence line, which no other buffer holds.
 
         An exact view of a buffer that does not end on a line cannot be synchronized.
         """
         self._follow_arena()
-        if buffer_name in self.op.slice_info:
-            raise ValueError(f"{buffer_name} is a slice; its parent has the storage")
-        if buffer_name not in self._storage_cache:
-            buf_type, offset, length = self.op.get_layout_for_buffer(buffer_name)
-            if buf_type == "scratch":
-                buf_type, offset = self.op.buffer_sizes.scratch_argument(offset, length)
-            dtype = self.op.buffer_dtype(buffer_name)
-            parent = self._arguments()[buf_type]
+        if root not in self._storage_cache:
+            kind, offset, length = self.op.layout[root]
+            if kind == "scratch":
+                kind, offset = self.op.buffer_sizes.scratch_argument(offset, length)
+            dtype = self.op.buffer_dtype(BufferRef(root))
+            parent = self._arguments()[kind]
             stop = min(Pool(ALIGNMENT).align(offset + length), parent.nbytes)
-            self._storage_cache[buffer_name] = parent.subview(
+            self._storage_cache[root] = parent.subview(
                 offset, ((stop - offset) // dtype.itemsize,), dtype
             )
-        return self._storage_cache[buffer_name]
+        return self._storage_cache[root]
 
     def _follow_arena(self) -> None:
         if self.arena is None or self.arena.generation == self._arena_generation:
@@ -488,40 +488,39 @@ class StepCallable:
 
     def __init__(self, seq, check: bool = False, arena: ScratchArena | None = None):
         _require_xrt()
-        chain = seq._image
         self.op = seq
         self.check = check
         self.last_elapsed = 0.0
         self.dispatch_values: dict[str, np.generic] = {}
         self.arena = arena
         self._arena_generation: int | None = None
-        self._buffers = {}
-        self._storage = {}
-        for name, (_, _, length) in seq.subbuffer_layout.items():
-            if self.arena is not None and name in seq.residents:
+        self._buffers: dict[BufferRef, XRTTensor] = {}
+        self._storage: dict[str, XRTTensor] = {}
+        for root, (_, _, length) in seq.layout.items():
+            if self.arena is not None and root in seq.residents:
                 continue
-            dtype = seq.buffer_dtype(name)
-            self._buffers[name] = XRTTensor((_n_elements(length, dtype),), dtype=dtype)
-        self._steps = []
+            ref = BufferRef(root)
+            dtype = seq.buffer_dtype(ref)
+            self._storage[root] = XRTTensor((_n_elements(length, dtype),), dtype=dtype)
+            self._buffers[ref] = self._storage[root]
+        self._steps = [(s.op, seq.kernel(s.op), s.buffers, []) for s in seq.steps]
         self._follow_arena()
-        kernels = {
-            op_id: NPUKernel(
-                chain.images[op_id],
-                design.get_cache_entry().insts,
-                kernel_name=chain.labels[op_id],
-                dispatch_params=design.dispatch_params,
-                dispatch_lib_path=design.get_dispatch_lib_path(),
+        self._bind_steps()
+
+    def _bind_steps(self) -> None:
+        """Each step's arguments: a whole buffer's storage, else its part."""
+        self._steps = [
+            (
+                step_op,
+                kernel,
+                refs,
+                [
+                    self._storage[r.root] if r.nbytes is None else self.get_buffer(r)
+                    for r in refs
+                ],
             )
-            for op_id, design in chain.designs.items()
-        }
-        for step_op, *names in seq.runlist:
-            if len(step_op.buffers) != len(names):
-                raise ValueError(
-                    f"Operator {step_op!r} declares {len(step_op.buffers)} buffers "
-                    f"but the runlist names {len(names)}"
-                )
-            args = [self.get_storage(name) for name in names]
-            self._steps.append((step_op, kernels[id(step_op)], names, args))
+            for step_op, kernel, refs, _ in self._steps
+        ]
 
     def _follow_arena(self) -> None:
         """View the residents in the arena's banks, again once it has grown."""
@@ -529,63 +528,53 @@ class StepCallable:
             return
         banks = self.arena.banks
         self._arena_generation = self.arena.generation
-        for name in self.op.residents:
-            _, offset, length = self.op.subbuffer_layout[name]
+        for root in self.op.residents:
+            _, offset, length = self.op.layout[root]
             bank, offset = divmod(offset, BANK)
             parent = banks[bank]
-            dtype = self.op.buffer_dtype(name)
+            dtype = self.op.buffer_dtype(BufferRef(root))
             stop = min(Pool(ALIGNMENT).align(offset + length), parent.nbytes)
             # A step takes the storage: an exact view of a resident whose
             # bytes are not whole coherence lines cannot be made.
-            self._buffers.pop(name, None)
-            self._storage[name] = parent.subview(
+            self._storage[root] = parent.subview(
                 offset, ((stop - offset) // dtype.itemsize,), dtype
             )
-        for name, (base_name, _, _) in self.op.slice_info.items():
-            if base_name in self.op.residents:
-                self._buffers.pop(name, None)
-        self._steps = [
-            (step_op, kernel, names, [self.get_storage(name) for name in names])
-            for step_op, kernel, names, _ in self._steps
-        ]
+        self._buffers = {
+            ref: view
+            for ref, view in self._buffers.items()
+            if ref.root not in self.op.residents
+        }
+        self._bind_steps()
 
-    def get_buffer(self, buffer_name):
+    def get_buffer(self, ref: BufferRef):
+        """The bytes ``ref`` names, as its dtype."""
         self._follow_arena()
-        if buffer_name in self._buffers:
-            return self._buffers[buffer_name]
-        dtype = self.op.buffer_dtype(buffer_name)
-        if buffer_name in self._storage:
-            _, _, length = self.op.subbuffer_layout[buffer_name]
-            self._buffers[buffer_name] = self._storage[buffer_name].subview(
-                0, (length // dtype.itemsize,), dtype
+        if ref not in self._buffers:
+            if ref.root not in self._storage:
+                raise ValueError(f"{ref} is no buffer of {self.op.name}")
+            _, _, length = ref.place(self.op.layout)
+            dtype = self.op.buffer_dtype(ref)
+            self._buffers[ref] = self._storage[ref.root].subview(
+                ref.start, (length // dtype.itemsize,), dtype
             )
-        elif buffer_name in self.op.slice_info:
-            base_name, start, end = self.op.slice_info[buffer_name]
-            self._buffers[buffer_name] = self.get_storage(base_name).subview(
-                start, ((end - start) // dtype.itemsize,), dtype
-            )
-        else:
-            raise ValueError(f"Unknown buffer '{buffer_name}' in the runlist")
-        return self._buffers[buffer_name]
+        return self._buffers[ref]
 
-    def get_storage(self, buffer_name):
+    def get_storage(self, root: str):
         """The buffer, and for a resident in the arena the rest of its last
         coherence line, which no other buffer holds.
         """
         self._follow_arena()
-        if buffer_name in self._storage:
-            return self._storage[buffer_name]
-        return self.get_buffer(buffer_name)
+        return self._storage[root]
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
         self.dispatch_values = dict(values)
 
     def __call__(self):
         self._follow_arena()
-        for name in self.op.input_args:
-            self._buffers[name].to("npu")
+        for root in self.op.inputs:
+            self._storage[root].to("npu")
         t0 = time.perf_counter()
-        for index, (step_op, kernel, names, args) in enumerate(self._steps):
+        for index, (step_op, kernel, refs, args) in enumerate(self._steps):
             # A placed buffer starts at its place in the tensor that holds it.
             at = {}
             for spec in step_op.buffers:
@@ -613,13 +602,13 @@ class StepCallable:
                     for buf, spec in zip(args, step_op.buffers)
                     if spec.drains
                 }
-                held = {spec.name: name for name, spec in zip(names, step_op.buffers)}
+                held = dict(zip((spec.name for spec in step_op.buffers), refs))
                 check_step(index, step_op, held, inputs, written, expected)
         self.last_elapsed = time.perf_counter() - t0
         # Device-resident, so a read pulls what the steps wrote, and only then.
-        for name in self.op.subbuffer_layout:
-            if name not in self.op.input_args:
-                self.get_storage(name).device = "npu"
+        for root in self.op.layout:
+            if root not in self.op.inputs:
+                self._storage[root].device = "npu"
 
     def _reference(
         self, step_op: Operator, args, at: Mapping[str, int]
@@ -653,7 +642,7 @@ class StepCallable:
 def check_step(
     index: int,
     step_op: Operator,
-    held: Mapping[str, str],
+    held: Mapping[str, BufferRef],
     inputs: Mapping[str, np.ndarray],
     written: Mapping[str, np.ndarray],
     expected: Mapping[str, np.ndarray],

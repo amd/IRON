@@ -194,7 +194,7 @@ class CarriedLoop:
         if body.traced.inputs:
             raise ValueError(
                 f"{body.traced.name}: the looped version takes no tensor, got "
-                f"{body.traced.input_args}"
+                f"{[h.name for h in body.traced.inputs]}"
             )
         if depth < 1:
             raise ValueError(f"depth is at least 1, got {depth}")

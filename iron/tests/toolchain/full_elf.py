@@ -33,10 +33,12 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common.declare import Extent
-from iron.common.image.sequence import OperatorSequence
+from iron.common.graph.trace import TracedGraph
 from iron.common.image.allocator import BANK
+from iron.common.image.sequence import OperatorSequence
 from iron.operators import ElementwiseAdd
 from iron.operators.gemm import GEMM
+from iron.tests.common import sequences
 from iron.tests.toolchain.tools import DEVICES, requires, swiglu
 
 pytestmark = [*requires("aiebu", "peano"), pytest.mark.usefixtures("npu2")]
@@ -121,17 +123,19 @@ def test_a_scratch_arena_past_a_bank_links_as_its_banks():
     ``Invalid addend (0x266475800) > 32bit found``.
     """
     add = ElementwiseAdd(size=1024, tile_size=128)
-    seq = OperatorSequence(
+    w = 1024 * 2
+    traced = TracedGraph.of_steps(
         "past_a_bank",
-        [(add, "x", "w", "t"), (add, "t", "w", "out")],
-        input_args=["x"],
-        output_args=["out"],
-        full_elf=True,
-        # Rebased past the weight, at the next bank: the third.
-        buffer_offsets={"t": BANK + 64},
+        sequences.steps((add, "x", "w", "t"), (add, "t", "w", "out")),
+        ["x"],
+        ["out"],
+        # Buffers no step names, filling the first bank past the weight and
+        # most of the second, so t is rebased to the third.
+        pinned={"fill": BANK - w, "pad": BANK - 1024},
     )
+    seq = OperatorSequence(traced, full_elf=True)
     seq.compile()
-    _, offset, length = seq.subbuffer_layout["t"]
+    _, offset, length = seq.layout["t"]
     sizes = seq.buffer_sizes
     assert sizes.bank_kinds == ["scratch", "scratch_1", "scratch_2"]
     assert sizes.scratch_argument(offset, length) == ("scratch_2", offset - 2 * BANK)
@@ -143,15 +147,15 @@ def test_no_scratch_buffer_crosses_a_bank():
     buffers are the first bank's start and the second's.
     """
     add = ElementwiseAdd(size=1 << 30, tile_size=4096)
-    seq = OperatorSequence(
+    traced = TracedGraph.of_steps(
         "across_a_bank",
-        [(add, "x", "w", "t"), (add, "t", "w", "out")],
-        input_args=["x"],
-        output_args=["out"],
-        full_elf=True,
+        sequences.steps((add, "x", "w", "t"), (add, "t", "w", "out")),
+        ["x"],
+        ["out"],
     )
+    seq = OperatorSequence(traced, full_elf=True)
     seq.prepare()
-    assert [seq.subbuffer_layout[n][1] for n in ("w", "t")] == [0, BANK]
+    assert [seq.layout[n][1] for n in ("w", "t")] == [0, BANK]
 
 
 @pytest.mark.extensive
@@ -168,7 +172,7 @@ def test_prefill_graph_builds_a_full_elf_at_llama_size_for_one_layer():
     version = build_elf(model, **model.shapes()[1])
     # The chunk's embedding rows and RoPE rows, the block, the last row,
     # norm, head and draw.
-    assert len(version.traced.runlist) == 2 + 18 + 4
+    assert len(version.traced.steps) == 2 + 18 + 4
     _assert_values_in_table(version)
 
 

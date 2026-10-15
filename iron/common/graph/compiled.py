@@ -35,7 +35,8 @@ from ..image.artifacts import Parameter
 from ..image.callable import FullELFRun, ScratchArena
 from ..image.coresidence import AdjacentPacking
 from ..image.packaging import Kind, Plan, plan
-from ..image.sequence import ALIGNMENT
+from ..image.sequence import ALIGNMENT, OperatorSequence
+from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .fold import Folding, folded
 from .handle import Affine, Carry, Handle, PerCall, State, is_operand
@@ -563,8 +564,12 @@ class CompiledGraph:
         )
         if coresident:
             placement["coresident"] = coresident
-        self.sequence = traced.sequence(
-            full_elf=plan.full_elf, check=check, shared_words=self.shared, **placement
+        self.sequence = OperatorSequence(
+            traced,
+            full_elf=plan.full_elf,
+            check=check,
+            shared_words=self.shared,
+            **placement,
         ).compile()
         self.image = self.sequence.image
         self.artifacts = self.sequence.artifacts
@@ -622,23 +627,23 @@ class CompiledGraph:
     def is_loaded(self) -> bool:
         return self._callable is not None
 
-    def _buffer_name(self, x) -> str:
+    def _ref(self, x) -> BufferRef:
         if isinstance(x, State):
-            return self.traced.states[id(x)][1].name
+            return BufferRef(self.traced.states[id(x)][1].name)
         if isinstance(x, Handle):
-            return x.buffer_name
+            return x.ref()
         if id(x) in self.traced.weights:
-            return self.traced.weights[id(x)][1].name
+            return BufferRef(self.traced.weights[id(x)][1].name)
         raise KeyError(f"{x!r} is not a state, weight or handle of this graph")
 
     def buffer(self, x):
-        return self.callable.get_buffer(self._buffer_name(x))
+        return self.callable.get_buffer(self._ref(x))
 
     def _storage(self, x):
-        name = self._buffer_name(x)
-        if isinstance(x, Handle) and x.parent is not None:
-            return self.callable.get_buffer(name)
-        return self.callable.get_storage(name)
+        ref = self._ref(x)
+        if ref.nbytes is not None:
+            return self.callable.get_buffer(ref)
+        return self.callable.get_storage(ref.root)
 
     def write(self, x, tensor) -> None:
         buf = self._storage(x)
@@ -694,7 +699,7 @@ class CompiledGraph:
     def __call__(self, *tensors, **values) -> Any:
         self._stage(tensors, values)
         self.callable()
-        outputs = [self.callable.get_buffer(h.name) for h in self.traced.returned]
+        outputs = [self.callable.get_buffer(h.ref()) for h in self.traced.returned]
         if not self.traced.carry:
             return _results(outputs, None)
         return _results(outputs, self._next_values(values))
@@ -771,7 +776,7 @@ class CompiledGraph:
                 assert self.emit is not None
                 nxt[name] = int(planes[1, self.emit.carried.index(name)])
             else:
-                buf = self.callable.get_buffer(expression.name)
+                buf = self.callable.get_buffer(expression.ref())
                 nxt[name] = int(buf.numpy().reshape(-1)[0])
         return Carry(**nxt)
 

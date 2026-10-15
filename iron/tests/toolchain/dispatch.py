@@ -64,7 +64,7 @@ def test_values_become_dispatch_time_kernels_at_each_step(device):
     chain = net.sequence._image
     assert chain is not None
     designs = {
-        type(op).__name__: chain.designs[id(op)]
+        type(op).__name__: chain.links[id(op)].design
         for op in net.sequence.unique_operators()
     }
     assert set(designs) == {"Softmax", "Copy"}

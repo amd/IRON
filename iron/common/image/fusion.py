@@ -29,6 +29,7 @@ from aie.utils.compile.jit.compilabledesign import compile_context
 from ..design import BuiltArray, OperatorDesign, identities
 from .allocator import BANK
 from .coresidence import AdjacentPacking, CoResidenceError, Packing, fits, pack
+from .step import BufferRef
 
 logger = logging.getLogger(__name__)
 
@@ -110,15 +111,12 @@ class Fusion:
                     f"whose device names collide, {design.name}; a tunable given "
                     f"to either one (a tile size, a column count) separates them"
                 )
-        self.runlist = [
-            (own[design_of[id(op)]].name, *bufs) for op, *bufs in seq.runlist
-        ]
+        self.steps = [(own[design_of[id(s.op)]].name, s.buffers) for s in seq.steps]
         self.expands = self.expanded(
             self.designs, traced=seq.traced, reconfigure=seq.reconfigure
         )
-        self.subbuffer_layout = seq.subbuffer_layout
+        self.layout = seq.layout
         self.buffer_sizes = seq.buffer_sizes
-        self.slice_info = seq.slice_info or {}
         self.shared_words = dict(seq.shared_words or {})
         self.packing: Packing | AdjacentPacking = (
             seq.coresident
@@ -155,10 +153,9 @@ class Fusion:
         for name, design in self.designs.items():
             h.update(f"{name}={design.compilable().recipe_hash};".encode())
         state = (
-            self.runlist,
-            self.subbuffer_layout,
+            self.steps,
+            self.layout,
             self.buffer_sizes,
-            self.slice_info,
             sorted(self.shared_words.items()),
             self.packing,
         )
@@ -178,7 +175,7 @@ class Fusion:
         """
         if not self.expands:
             return False
-        names = [packing.device_of(name) for name, *_ in self.runlist]
+        names = [packing.device_of(name) for name, _ in self.steps]
         points = sum(
             1 for i, name in enumerate(names) if i == 0 or name != names[i - 1]
         )
@@ -221,7 +218,7 @@ class Fusion:
         packing = self.packing
         if isinstance(packing, AdjacentPacking):
             packing, _ = packing.pack(
-                [name for name, *_ in self.runlist], self.designs, words
+                [name for name, _ in self.steps], self.designs, words
             )
         packing = packing.sharing(
             {n: of[n] if n in arrays else n for n in self.designs},
@@ -262,7 +259,7 @@ class Fusion:
                 runtimes[name],
                 self._views(name, buffers, types[name]),
             )
-            for name, *buffers in self.runlist
+            for name, buffers in self.steps
         ]
         arguments = self.buffer_sizes.arguments()
 
@@ -368,7 +365,9 @@ class Fusion:
             stub.register_parameter(ScratchpadParameter(symbol, dtype))
         return stub, types
 
-    def _views(self, name: str, buffers, types) -> list[tuple[str, int, type]]:
+    def _views(
+        self, name: str, buffers: tuple[BufferRef, ...], types
+    ) -> list[tuple[str, int, type]]:
         """Where step ``name``'s buffers are in the fused image's arguments:
         ``(argument, byte offset, type)`` each, ``type`` that of its
         sequence's argument.
@@ -379,12 +378,7 @@ class Fusion:
         """
         views = []
         for buffer, view_type in zip(buffers, types):
-            if buffer in self.slice_info:
-                base, start, end = self.slice_info[buffer]
-                kind, parent, _ = self.subbuffer_layout[base]
-                offset, length = parent + start, end - start
-            else:
-                kind, offset, length = self.subbuffer_layout[buffer]
+            kind, offset, length = buffer.place(self.layout)
             nbytes = math.prod(np_ndarray_type_get_shape(view_type)) * bfp.itemsize(
                 np_ndarray_type_get_dtype(view_type)
             )

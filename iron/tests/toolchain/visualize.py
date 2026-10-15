@@ -54,7 +54,7 @@ def test_an_arena_draws_each_scratch_buffer_where_and_while_it_lives(device):
     [between] = [h.name for h in version.traced.steps[0].outputs]
     assert set(plan.boxes) == {between}
     assert plan.ranges[between] == LiveRange(0, 1)
-    _, offset, size = version.sequence.subbuffer_layout[between]
+    _, offset, size = version.sequence.layout[between]
     assert plan.boxes[between] == (offset, size) and size == 2 * N
     assert (
         f"<title>{between}: {size} bytes at {offset}, steps 0 to 1</title>"

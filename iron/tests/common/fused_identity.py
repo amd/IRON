@@ -23,8 +23,10 @@ import pytest
 from aie.iron.device import from_name
 
 from iron.common.design import OperatorDesign
+from iron.common.graph.trace import TracedGraph
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
+from iron.common.image.step import BufferRef, SequenceStep
 from iron.operators import ReLU
 from iron.operators.gemv import GEMV
 
@@ -38,14 +40,17 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 def _sequence(shapes):
     """One GEMV per ``(M, K)``, each on its own buffers."""
-    runlist = [
-        (GEMV(M=m, K=k), f"w{i}", f"x{i}", f"y{i}") for i, (m, k) in enumerate(shapes)
+    steps = [
+        SequenceStep(GEMV(M=m, K=k), tuple(map(BufferRef, (f"w{i}", f"x{i}", f"y{i}"))))
+        for i, (m, k) in enumerate(shapes)
     ]
     seq = OperatorSequence(
-        name="fused_identity_probe",
-        runlist=runlist,
-        input_args=[b for _, w, x, _ in runlist for b in (w, x)],
-        output_args=[y for *_, y in runlist],
+        TracedGraph.of_steps(
+            "fused_identity_probe",
+            steps,
+            [f"{b}{i}" for i in range(len(shapes)) for b in "wx"],
+            [f"y{i}" for i in range(len(shapes))],
+        ),
         full_elf=True,
     )
     seq.prepare()
@@ -74,7 +79,7 @@ def _objects_by_step(shapes):
                 *re.findall(r"runtime_sequence @(\w+)", body),
             ]:
                 linked[design] = objects
-    return [(name, linked[name]) for name, *_ in fusion.runlist]
+    return [(name, linked[name]) for name, _ in fusion.steps]
 
 
 def test_equal_kernel_recipes_share_one_object_across_designs():
@@ -116,10 +121,15 @@ def test_two_designs_whose_device_names_collide_are_refused():
     else:
         pytest.fail("no two ReLU sizes up to 200k tiles share a device name")
     seq = OperatorSequence(
-        name="colliding_names",
-        runlist=[(seen[name], "x0", "y0"), (op, "x1", "y1")],
-        input_args=["x0", "x1"],
-        output_args=["y0", "y1"],
+        TracedGraph.of_steps(
+            "colliding_names",
+            [
+                SequenceStep(seen[name], (BufferRef("x0"), BufferRef("y0"))),
+                SequenceStep(op, (BufferRef("x1"), BufferRef("y1"))),
+            ],
+            ["x0", "x1"],
+            ["y0", "y1"],
+        ),
         full_elf=True,
     )
     seq.prepare()

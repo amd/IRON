@@ -19,10 +19,13 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.utils.trace import TraceConfig, get_trace_buffer
 from ml_dtypes import bfloat16
 
+from iron.common.graph.trace import TracedGraph
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
+from iron.common.image.step import BufferRef
 from iron.operators import LayerNorm
 from iron.operators.copy import Copy
+from iron.tests.common import sequences
 
 ROWS, ROW = 8, 8
 # Where in a row the next row's offset is, and the word after it (zero): the
@@ -74,34 +77,30 @@ def _feedback_sequence(name, layer_norm=None):
     tail = _copy(2, 2, 2)
     runlist = [
         (gather, "table", "row"),
-        (tail, f"row[{NEXT * 4}:{ROW * 4}]", "next"),
+        (tail, BufferRef("row", NEXT * 4, (ROW - NEXT) * 4), "next"),
     ]
-    input_args, output_args = ["table"], ["row"]
+    inputs, outputs = ["table"], ["row"]
     if layer_norm is not None:
         runlist.insert(0, (layer_norm, "x", "y"))
-        input_args, output_args = ["x", *input_args], ["y", *output_args]
-    seq = OperatorSequence(
-        name=name,
-        runlist=runlist,
-        input_args=input_args,
-        output_args=output_args,
-        feedback_args=["next"],
-        full_elf=True,
+        inputs, outputs = ["x", *inputs], ["y", *outputs]
+    traced = TracedGraph.of_steps(
+        name, sequences.steps(*runlist), inputs, outputs, feedback=["next"]
     )
+    seq = OperatorSequence(traced, full_elf=True)
     return seq, gather
 
 
 def _setup(seq, table):
     seq.compile()
-    assert seq.subbuffer_layout["next"] == ("feedback", 0, 8)
+    assert seq.layout["next"] == ("feedback", 0, 8)
     assert seq.buffer_sizes.feedback == 8
     run = seq.get_callable()
-    run.get_buffer("table").numpy_view()[:] = table.reshape(-1)
+    run.get_buffer(BufferRef("table")).numpy_view()[:] = table.reshape(-1)
     return run
 
 
 def _row(run):
-    return run.get_buffer("row").numpy()[:ROW]
+    return run.get_buffer(BufferRef("row")).numpy()[:ROW]
 
 
 def _fed(run):
@@ -208,7 +207,7 @@ def test_feedback_with_trace():
     assert layout is not None and layout["arg_index"] == 4, layout
 
     x = np.random.default_rng(0).standard_normal(LN_SIZE).astype(bfloat16)
-    run.get_buffer("x").numpy_view()[:] = x
+    run.get_buffer(BufferRef("x")).numpy_view()[:] = x
     first, second = run.run, run.new_run()
     first.bind_feedback(second.scratchpad_alias())
     first.write_values({offset: np.int32(1 * ROW)})
@@ -223,14 +222,14 @@ def test_feedback_argument_only_when_declared():
     """An image without feedback takes the three arguments it always did."""
     tail = _copy(2, 2, 2)
     for feedback, arguments in (([], 3), (["next"], 4)):
-        seq = OperatorSequence(
-            name="infra_feedback_arguments",
-            runlist=[(tail, "a", "b"), (tail, "b", "next")],
-            input_args=["a"],
-            output_args=["b"] if feedback else ["b", "next"],
-            feedback_args=feedback,
-            full_elf=True,
+        traced = TracedGraph.of_steps(
+            "infra_feedback_arguments",
+            sequences.steps((tail, "a", "b"), (tail, "b", "next")),
+            ["a"],
+            ["b"] if feedback else ["b", "next"],
+            feedback=feedback,
         )
+        seq = OperatorSequence(traced, full_elf=True)
         seq.prepare()
         # The main device's runtime sequence is the last one in the module.
         header = [

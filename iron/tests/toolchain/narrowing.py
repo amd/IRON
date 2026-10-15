@@ -44,6 +44,7 @@ from iron.tune.narrowing import (
 from iron.tune.probe import Call, Designs, Point, judge, line
 from iron.common.testing import vectors
 from iron.common.image.fusion import Fusion
+from iron.common.graph.trace import TracedGraph
 from iron.common.image.sequence import OperatorSequence
 from iron.lm.blocks import SwiGLU
 from iron.operators import (
@@ -63,6 +64,7 @@ from iron.operators import (
 from iron.operators.flm import GEMM as FlmGEMM
 from iron.operators.flm import DequantBFP
 from iron.operators.mha import MHAPlacement
+from iron.tests.common import sequences
 from iron.tests.common.graphs import Rotate
 from iron.tests.common.llama_model import llama_1b
 
@@ -478,11 +480,14 @@ def test_a_full_elf_is_priced_at_the_configures_its_fusion_runs(
         for i, name in enumerate(names)
     ]
     steps = [op for op, *_ in runlist]
-    seq = OperatorSequence(
+    traced = TracedGraph.of_steps(
         f"model_configures_{'_'.join(names)}_{packed}",
-        runlist,
+        sequences.steps(*runlist),
         ["x0", "b"] if "add" in names else ["x0"],
         [f"x{len(names)}"],
+    )
+    seq = OperatorSequence(
+        traced,
         full_elf=True,
         coresident=[list({id(op): op for op in steps}.values())] if packed else (),
     )

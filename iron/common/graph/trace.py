@@ -20,7 +20,7 @@ from ..declare import In, InOut, Operand, Operator, Out
 from ..declare.value import Extent
 from ..declare.operator import graph_tracer
 from ..image.packaging import Kind
-from ..image.sequence import OperatorSequence
+from ..image.step import BufferRef, SequenceStep
 from .handle import (
     Affine,
     Handle,
@@ -44,9 +44,9 @@ class TracedStep:
     inputs: list
     outputs: list
 
-    @property
-    def names(self) -> list:
-        return [h.buffer_name for h in self.slots]
+    def refs(self) -> tuple[BufferRef, ...]:
+        """Where each declared buffer of the step is."""
+        return tuple(h.ref() for h in self.slots)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -187,9 +187,78 @@ class TracedGraph:
     )
     limits: list[Limit] = dataclasses.field(default_factory=list)
 
-    @property
-    def runlist(self) -> list:
-        return [(s.op, *s.names) for s in self.steps]
+    @classmethod
+    def of_steps(
+        cls,
+        name: str,
+        steps: Iterable[SequenceStep],
+        inputs: Iterable[str],
+        outputs: Iterable[str],
+        pinned: Mapping[str, int] | None = None,
+        feedback: Iterable[str] = (),
+    ) -> TracedGraph:
+        """A graph of ``steps`` over buffers known by name alone, as bytes.
+
+        Args:
+            name: The graph's name.
+            steps: Each step's operator and where its buffers are.
+            inputs: The buffers the host writes.
+            outputs: The buffers the host reads.
+            pinned: The bytes of each buffer a step names only in part, and
+                of any it should hold at a size of its own.
+            feedback: The buffers of the feedback argument.
+        """
+        pinned = dict(pinned or {})
+        roots: dict[str, Handle] = {}
+        traced = []
+        for step in steps:
+            slots = []
+            for ref in step.buffers:
+                root = roots.setdefault(
+                    ref.root,
+                    Handle(
+                        (pinned.get(ref.root, 0),), np.uint8, ref.root, "intermediate"
+                    ),
+                )
+                if ref.nbytes is None:
+                    slots.append(root)
+                    continue
+                slots.append(
+                    Handle((ref.nbytes,), np.uint8, ref.root, "slice", root, ref.start)
+                )
+            declared = list(zip(slots, step.op.buffers))
+            traced.append(
+                TracedStep(
+                    step.op,
+                    slots,
+                    [h for h, b in declared if b.fills],
+                    [h for h, b in declared if b.drains],
+                )
+            )
+        return cls(
+            name,
+            traced,
+            [Handle((), np.uint8, n, "input") for n in inputs],
+            [Handle((), np.uint8, n, "output") for n in outputs],
+            [],
+            pinned,
+            {},
+            {},
+            [],
+            feedback=list(feedback),
+        )
+
+    @classmethod
+    def of_step(cls, op: Operator) -> TracedGraph:
+        """``op`` alone, over its own buffers by their declared names: the
+        host writes what it reads and reads what it only writes.
+        """
+        return cls.of_steps(
+            op.name,
+            [SequenceStep(op, tuple(BufferRef(b.name) for b in op.buffers))],
+            [b.name for b in op.buffers if b.fills],
+            [b.name for b in op.buffers if b.drains and not b.fills],
+        )
 
     @property
     def residents(self) -> dict[str, Hashable]:
@@ -201,25 +270,6 @@ class TracedGraph:
         }
         found.update((h.name, key) for key, (_, h) in self.states.items())
         return found
-
-    @property
-    def input_args(self) -> list:
-        return [h.name for h in self.inputs]
-
-    @property
-    def output_args(self) -> list:
-        return [h.name for h in self.outputs]
-
-    def sequence(self, name=None, **kwargs):
-        kwargs.setdefault("buffer_sizes", dict(self.pinned))
-        kwargs.setdefault("feedback_args", list(self.feedback))
-        return OperatorSequence(
-            name or self.name,
-            self.runlist,
-            self.input_args,
-            self.output_args,
-            **kwargs,
-        )
 
     def with_operators(self, replace: Mapping[int, Operator]) -> TracedGraph:
         """This graph with operators swapped, keyed by ``id`` of the one each

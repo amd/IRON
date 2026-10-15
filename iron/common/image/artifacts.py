@@ -12,6 +12,8 @@ from pathlib import Path
 
 from aie.utils.compile.jit.compilabledesign import CacheEntry
 
+from .step import BufferRef
+
 
 @dataclass(frozen=True)
 class Design:
@@ -26,12 +28,12 @@ class Design:
 
 @dataclass(frozen=True)
 class Step:
-    """One runlist step: which operator, on which design, over which buffers."""
+    """One step: which operator, on which design, over which buffers."""
 
     index: int
     operator: str
     design: str
-    buffers: tuple[str, ...]
+    buffers: tuple[BufferRef, ...]
 
 
 @dataclass(frozen=True)
@@ -58,7 +60,7 @@ class Artifacts:
         full_elf: One fused image, else an xclbin per design, chained
             (``image`` is the last link).
         entry: The cache entry holding the parameter table and lowered module.
-        buffers: Each buffer name to ``(arena, offset, nbytes)``.
+        buffers: Each buffer to ``(argument kind, byte offset, bytes)``.
     """
 
     full_elf: bool

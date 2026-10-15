@@ -29,12 +29,14 @@ generate its own MLIR at all (device-specialized designs read the current
 device), not to compile anything.
 """
 
+import dataclasses
 import re
 
 import pytest
 
 from iron.common.design import OperatorDesign
 from iron.common.image.fusion import Fusion
+from iron.common.image.sequence import OperatorSequence
 from iron.tests.common.graphs import Adds
 from iron.tests.infrastructure.graph_dispatch import SIZE, _operator
 
@@ -59,10 +61,9 @@ def test_fused_build_does_not_poison_the_standalone_mlir():
     one reading what the fused build left behind. Doing it the other way round
     passes whatever happens.
     """
-    seq = (
-        Adds(_operator(), 1)
-        .trace(x=(SIZE,), w=(SIZE,))
-        .sequence("poisoning_probe", full_elf=True)
+    traced = Adds(_operator(), 1).trace(x=(SIZE,), w=(SIZE,))
+    seq = OperatorSequence(
+        dataclasses.replace(traced, name="poisoning_probe"), full_elf=True
     )
     seq.compile()
     fused = set(re.findall(r'link_with\s*=\s*"([^"]+)"', Fusion(seq).text()))

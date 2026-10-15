@@ -1,14 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""OperatorSequence: what one run of several operators builds and dispatches."""
+"""OperatorSequence: what one run of a traced graph builds and dispatches."""
+
+from __future__ import annotations
 
 import logging
 from collections.abc import Hashable, Mapping, Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import aie.utils as aie_utils
 import numpy as np
 from aie.utils import bfp
+from aie.utils.npukernel import NPUKernel
 
 from ..declare import Operator
 from .allocator import ALIGNMENT, BANK, Allocation, ArenaPlan, LiveRange, Pool
@@ -18,13 +23,12 @@ from .coresidence import AdjacentPacking
 from .fused import FusedImage, XclbinChain
 from .fusion import ArgumentSizes
 from .packaging import dispatches_full_elf
+from .step import BufferRef, SequenceStep
+
+if TYPE_CHECKING:
+    from ..graph.trace import TracedGraph
 
 logger = logging.getLogger(__name__)
-
-
-def _base_name(buf: str) -> str:
-    """The buffer a runlist name refers to: ``"kv[0:64]"`` is part of ``"kv"``."""
-    return buf[: buf.index("[")] if "[" in buf else buf
 
 
 def _signature(op):
@@ -35,9 +39,12 @@ def _signature(op):
 
 
 class OperatorSequence:
-    """A runlist of operators, built and dispatched as one image.
+    """A traced graph's steps, built and dispatched as one image.
 
     Args:
+        traced: The graph: its steps, inputs, outputs, the sizes of the
+            buffers a step names only in part (``pinned``) and the buffers
+            of its feedback argument.
         full_elf: One full ELF, else one xclbin per design, a step at a
             time; ``None`` is a full ELF where the device dispatches one.
         check: The xclbin chain, each step checked against its reference
@@ -49,9 +56,6 @@ class OperatorSequence:
             storage key.
         shared_words: On the full ELF, design symbol -> the scratchpad word
             it shares with others that always hold the same number.
-        feedback_args: Buffers of one more full-ELF argument, after scratch,
-            which a caller may bind per run to another run's ctrl scratchpad
-            (``FullELFRun.bind_feedback``); laid out back to back.
         coresident: Groups of operators whose designs share one device
             configuration in the full ELF, or an ``AdjacentPacking`` that
             chooses them.
@@ -62,20 +66,12 @@ class OperatorSequence:
 
     def __init__(
         self,
-        name,
-        runlist,
-        input_args,
-        output_args,
-        buffer_sizes=None,
-        buffer_offsets=None,
-        plan_scratch=True,
+        traced: TracedGraph,
         full_elf: bool | None = None,
         check: bool = False,
-        extra_flags=None,
         arena: ArenaPlan | None = None,
         residents: Mapping[str, Hashable] | None = None,
         shared_words: Mapping[str, str] | None = None,
-        feedback_args: Sequence[str] = (),
         coresident: Sequence[Sequence[Operator]] | AdjacentPacking = (),
         reconfigure: bool = False,
     ):
@@ -86,7 +82,7 @@ class OperatorSequence:
         if residents and arena is None:
             raise ValueError("residents are placed in an arena; pass arena= too")
         unbuilt = "check=True" if check else "full_elf=False"
-        if feedback_args and full_elf is False:
+        if traced.feedback and full_elf is False:
             raise ValueError(
                 f"feedback arguments are an argument of the full ELF; "
                 f"{unbuilt} has none"
@@ -101,65 +97,49 @@ class OperatorSequence:
                 f"reconfigure configures the full ELF at every call; "
                 f"{unbuilt} builds none"
             )
-        if not all(
-            isinstance(op, Operator) and all(isinstance(buf, str) for buf in bufs)
-            for op, *bufs in runlist
-        ):
-            raise TypeError(
-                "runlist entries must be (Operator, *str) tuples; "
-                "each operator must be an Operator and each buffer name must be a str"
-            )
-        self.runlist = runlist
+        self.steps = [SequenceStep(s.op, s.refs()) for s in traced.steps]
         if isinstance(coresident, AdjacentPacking):
             self.coresident: tuple[tuple[Operator, ...], ...] | AdjacentPacking = (
                 coresident
             )
         else:
-            in_runlist = {id(op) for op, *_ in runlist}
+            stepped = {id(s.op) for s in self.steps}
             strays = [
                 type(op).__name__
                 for group in coresident
                 for op in group
-                if id(op) not in in_runlist
+                if id(op) not in stepped
             ]
             if strays:
-                raise ValueError(
-                    f"coresident names operators not in the runlist: {strays}"
-                )
+                raise ValueError(f"coresident names operators no step runs: {strays}")
             self.coresident = tuple(tuple(group) for group in coresident)
         # The chain's kernel instances are named from this label.
-        self.name = name
-        self.input_args = input_args
-        self.output_args = output_args
-        self.feedback_args = list(feedback_args)
+        self.name = traced.name
+        self.inputs = [h.name for h in traced.inputs]
+        self.outputs = [h.name for h in traced.outputs]
+        self.feedback = list(traced.feedback)
+        self.pinned = dict(traced.pinned)
         self.reconfigure = reconfigure
-        self.buffer_offsets = buffer_offsets
-        self.plan_scratch = plan_scratch
-        self.explicit_buffer_sizes = (
-            buffer_sizes or {}
-        )  # Optional dict: buffer_name -> size_in_bytes
-        # Extra aiecc flags forwarded to the full-ELF build.
-        self.extra_flags = extra_flags or []
         self.arena = arena
         self.residents = dict(residents or {})
         self.shared_words = dict(shared_words or {})
         self._arena_layout: dict[str, Allocation] | None = None
         self.full_elf = full_elf
         self.check = check
-        self.subbuffer_layout: dict[str, tuple[str, int, int]] | None = None
+        self.layout: dict[str, tuple[str, int, int]] | None = None
         self._image = None
         self._artifacts: Artifacts | None = None
 
     @property
     def traced(self) -> bool:
         """Whether any step's operator is built with a ``trace``."""
-        return any(op.trace is not None for op, *_ in self.runlist)
+        return any(s.op.trace is not None for s in self.steps)
 
     def unique_operators(self):
-        """Operators in runlist order, de-duplicated by identity."""
+        """Operators in step order, de-duplicated by identity."""
         seen = {}
-        for op, *_ in self.runlist:
-            seen.setdefault(id(op), op)
+        for s in self.steps:
+            seen.setdefault(id(s.op), s.op)
         return list(seen.values())
 
     def unique_designs(self):
@@ -187,33 +167,36 @@ class OperatorSequence:
             designs.append(op)
         return designs, design_of
 
-    def infer_buffer_offsets(self):
-        """Byte offsets letting intermediates with disjoint lifetimes overlap;
-        a buffer the host addresses is never pooled.
+    def _uses(self, roots) -> list[tuple[list[str], list[str]]]:
+        """Each step's reads and writes among ``roots``, a part of a buffer
+        its use.
         """
-        sizes, steps = {}, []
-        for op, *bufs in self.runlist:
+        uses = []
+        for s in self.steps:
             reads, writes = [], []
-            for buf, b in zip(bufs, op.buffers):
-                sizes.setdefault(buf, b.held_nbytes)
+            for ref, b in zip(s.buffers, s.op.buffers):
+                if ref.root not in roots:
+                    continue
                 if b.fills:
-                    reads.append(buf)
+                    reads.append(ref.root)
                 if b.drains:
-                    writes.append(buf)
-            steps.append((reads, writes))
+                    writes.append(ref.root)
+            uses.append((reads, writes))
+        return uses
 
-        pinned = set(self.input_args) | set(self.output_args)
-        pinned |= set(self.feedback_args)
-        pinned |= set(self.explicit_buffer_sizes)
-        # A slice sits at its parent's offset plus its start.
-        pinned |= {name for name in sizes if "[" in name}
-        ranges = LiveRange.scan(steps, pinned=pinned)
+    def _pool_offsets(self, sizes: Mapping[str, int]) -> dict[str, int]:
+        """Byte offsets letting intermediates with disjoint lifetimes overlap;
+        a buffer the host addresses, or one a step names only in part, is
+        never pooled.
+        """
+        held = {*self.inputs, *self.outputs, *self.feedback, *self.pinned}
+        ranges = LiveRange.scan(self._uses(sizes), pinned=held)
         allocations, _ = Pool(ALIGNMENT).place(ranges, sizes)
         return {name: a.offset for name, a in allocations.items()}
 
     def _place_in_arena(self, sizes: Mapping[str, int]) -> dict[str, Allocation]:
         """This sequence's scratch buffers placed in the shared arena, once; a
-        slice's use is a use of its parent.
+        part's use is a use of its buffer.
         """
         if self._arena_layout is not None:
             return self._arena_layout
@@ -222,185 +205,134 @@ class OperatorSequence:
             raise ValueError(
                 f"residents {sorted(missing)} are not scratch buffers of {self.name}"
             )
-        steps = []
-        for op, *bufs in self.runlist:
-            reads, writes = [], []
-            for buf, b in zip(bufs, op.buffers):
-                name = _base_name(buf)
-                if name not in sizes:
-                    continue
-                if b.fills:
-                    reads.append(name)
-                if b.drains:
-                    writes.append(name)
-            steps.append((reads, writes))
         assert self.arena is not None, "placed in an arena plan"
-        self._arena_layout = self.arena.place_image(steps, sizes, self.residents)
+        self._arena_layout = self.arena.place_image(
+            self._uses(sizes), sizes, self.residents
+        )
         return self._arena_layout
 
-    def calculate_buffer_layout(self):
-        args = {}  # base_buffer_name -> the declared buffer
-        sliced_buffers = (
-            {}
-        )  # full_buffer_name (with slice) -> (base_name, start, end, buffer)
-
-        for op, *bufs in self.runlist:
-            declared = op.buffers
-            if len(declared) != len(bufs):
+    def _sizes(self) -> dict[str, int]:
+        """Each buffer's bytes: those steps name whole first, in first-use
+        order, by what they declare unless ``pinned`` sizes them, then the
+        rest of ``pinned``.
+        """
+        sizes: dict[str, int] = {}
+        declared: dict[str, object] = {}
+        parts = []
+        for s in self.steps:
+            if len(s.buffers) != len(s.op.buffers):
                 raise ValueError(
-                    f"Number of buffers ({len(bufs)}) must match the operator's "
-                    f"declared buffers ({len(declared)}) for operator {op!r}"
+                    f"{s.op!r} declares {len(s.op.buffers)} buffers, but its step "
+                    f"names {len(s.buffers)}"
                 )
-            for i, buf_name in enumerate(bufs):
-                args_spec = declared[i]
+            for ref, b in zip(s.buffers, s.op.buffers):
+                if ref.nbytes is not None:
+                    parts.append(ref)
+                    continue
+                seen = declared.setdefault(ref.root, b)
+                if seen.held_nbytes != b.held_nbytes:
+                    raise ValueError(
+                        f"Buffer {ref.root!r} has conflicting sizes between "
+                        f"operators: {seen.shape} {bfp.dtype_name(seen.dtype)} vs "
+                        f"{b.shape} {bfp.dtype_name(b.dtype)}"
+                    )
+                sizes.setdefault(ref.root, self.pinned.get(ref.root, b.held_nbytes))
+        for root, nbytes in self.pinned.items():
+            sizes.setdefault(root, nbytes)
+        for ref in parts:
+            if ref.root not in sizes:
+                raise ValueError(f"{ref} is part of {ref.root!r}, which has no size")
+        for kind, roots in (
+            ("Input", self.inputs),
+            ("Output", self.outputs),
+            ("Feedback", self.feedback),
+        ):
+            for root in roots:
+                if root not in sizes:
+                    raise ValueError(f"{kind} buffer {root!r} is no step's buffer")
+        both = set(self.feedback) & {*self.inputs, *self.outputs}
+        if both:
+            raise ValueError(f"Feedback buffers {sorted(both)} are inputs or outputs")
+        return sizes
 
-                if "[" in buf_name and buf_name.endswith("]"):
-                    base_name = buf_name[: buf_name.index("[")]
-                    slice_part = buf_name[buf_name.index("[") + 1 : -1]
-                    start, end = map(int, slice_part.split(":"))
-                    sliced_buffers[buf_name] = (base_name, start, end, args_spec)
-                    if (
-                        base_name not in args
-                        and base_name not in self.explicit_buffer_sizes
-                    ):
-                        raise ValueError(
-                            f"Sliced buffer '{buf_name}' requires explicit size for base buffer '{base_name}' in buffer_sizes parameter"
-                        )
-                else:
-                    if buf_name not in args:
-                        args[buf_name] = args_spec
-                    else:
-                        if args[buf_name].held_nbytes != args_spec.held_nbytes:
-                            raise ValueError(
-                                f"Buffer '{buf_name}' has conflicting sizes between operators: "
-                                f"{args[buf_name].shape} {bfp.dtype_name(args[buf_name].dtype)} "
-                                f"vs {args_spec.shape} {bfp.dtype_name(args_spec.dtype)}"
-                            )
+    def _layout(self) -> tuple[dict[str, tuple[str, int, int]], ArgumentSizes]:
+        """Each buffer's ``(argument kind, byte offset, bytes)``, and the
+        bytes of each argument.
+        """
+        sizes = self._sizes()
+        layout: dict[str, tuple[str, int, int]] = {}
 
-        all_buffer_names = set(args.keys()) | set(sliced_buffers.keys())
-        for arg in self.input_args:
-            if arg not in all_buffer_names and arg not in self.explicit_buffer_sizes:
-                raise ValueError(f"Input argument {arg} not found in runlist buffers")
-        for arg in self.output_args:
-            if arg not in all_buffer_names and arg not in self.explicit_buffer_sizes:
-                raise ValueError(f"Output argument {arg} not found in runlist buffers")
-        for arg in self.feedback_args:
-            if arg not in all_buffer_names and arg not in self.explicit_buffer_sizes:
-                raise ValueError(
-                    f"Feedback argument {arg} not found in runlist buffers"
-                )
-            if arg in self.input_args or arg in self.output_args:
-                raise ValueError(
-                    f"Feedback argument {arg} is also an input or output argument"
-                )
-
-        subbuffer_layout = {}
-        slice_info = {}  # full_buffer_name -> (base_name, start, end)
-
-        def add_buffers(buffer_type, args_list):
-            def length_of(arg):
-                if arg in self.explicit_buffer_sizes:
-                    return self.explicit_buffer_sizes[arg]
-                if arg in args:
-                    return args[arg].held_nbytes
-                return None  # sliced buffers are handled separately
-
-            if buffer_type == "scratch" and self.arena is not None:
+        def place(kind: str, roots: list[str]) -> int:
+            if kind == "scratch" and self.arena is not None:
                 stepwise = self.full_elf is False
-                lengths = {
-                    a: length_of(a)
-                    for a in args_list
-                    if not stepwise or a in self.residents
-                }
                 placed = self._place_in_arena(
-                    {a: n for a, n in lengths.items() if n is not None}
+                    {r: sizes[r] for r in roots if not stepwise or r in self.residents}
                 )
-                for arg, a in placed.items():
-                    subbuffer_layout[arg] = (buffer_type, a.offset, a.size)
+                for root, a in placed.items():
+                    layout[root] = (kind, a.offset, a.size)
                 if not stepwise:
                     return max((a.end for a in placed.values()), default=0)
-                args_list = [a for a in args_list if a not in placed]
-
-            offsets = self.buffer_offsets
-            if offsets is None and self.plan_scratch:
-                offsets = self.infer_buffer_offsets()
-            offsets = offsets or {}
-            if buffer_type == "feedback":
-                # The caller binds its own memory here: offsets are the contract.
-                offsets = {}
-
+                roots = [r for r in roots if r not in placed]
+            # The caller binds its own memory to the feedback argument: offsets are the contract.
+            offsets = (
+                self._pool_offsets({r: sizes[r] for r in roots})
+                if kind != "feedback"
+                else {}
+            )
             # A host-visible kind is one buffer object, not banks.
-            pool = Pool(ALIGNMENT, BANK if buffer_type == "scratch" else None)
+            pool = Pool(ALIGNMENT, BANK if kind == "scratch" else None)
             cursor = end = 0
-            planned = []
-            for arg in args_list:
-                length = length_of(arg)
-                if length is None:
+            pooled = []
+            for root in roots:
+                if root in offsets:
+                    pooled.append(root)
                     continue
-                if arg in offsets:
-                    planned.append((arg, length))
-                    continue
-                cursor = pool.fit(cursor, length)
-                subbuffer_layout[arg] = (buffer_type, cursor, length)
-                end = cursor + length
+                cursor = pool.fit(cursor, sizes[root])
+                layout[root] = (kind, cursor, sizes[root])
+                end = cursor + sizes[root]
                 cursor = pool.align(end)
-
-            # A plan starts at zero, so it is rebased past the unplanned
+            # The pool starts at zero, so it is rebased past the other
             # buffers, at a bank's start unless it fits the rest of this one.
-            span = max((offsets[arg] + length for arg, length in planned), default=0)
+            span = max((offsets[r] + sizes[r] for r in pooled), default=0)
             if pool.bank is not None and span > pool.bank - cursor % pool.bank:
                 cursor = -(-cursor // pool.bank) * pool.bank
-            for arg, length in planned:
-                at = cursor + offsets[arg]
-                subbuffer_layout[arg] = (buffer_type, at, length)
-                end = max(end, at + length)
-            return end  # arena size
+            for root in pooled:
+                at = cursor + offsets[root]
+                layout[root] = (kind, at, sizes[root])
+                end = max(end, at + sizes[root])
+            return end
 
-        for buf_name, (base_name, start, end, args_spec) in sliced_buffers.items():
-            slice_info[buf_name] = (base_name, start, end)
-
-        input_buffer_size = add_buffers("input", self.input_args)
-        output_buffer_size = add_buffers("output", self.output_args)
-        host_args = {*self.input_args, *self.output_args, *self.feedback_args}
-        scratch_args = [arg for arg in args if arg not in host_args]
-        for explicit_buf in self.explicit_buffer_sizes:
-            if explicit_buf not in host_args and explicit_buf not in scratch_args:
-                scratch_args.append(explicit_buf)
-        scratch_buffer_size = add_buffers("scratch", scratch_args)
-        feedback_buffer_size = (
-            add_buffers("feedback", self.feedback_args) if self.feedback_args else None
+        host = {*self.inputs, *self.outputs, *self.feedback}
+        argument_sizes = ArgumentSizes(
+            place("input", self.inputs),
+            place("output", self.outputs),
+            place("scratch", [r for r in sizes if r not in host]),
+            place("feedback", self.feedback) if self.feedback else None,
         )
+        return layout, argument_sizes
 
-        buffer_sizes = ArgumentSizes(
-            input_buffer_size,
-            output_buffer_size,
-            scratch_buffer_size,
-            feedback_buffer_size,
-        )
-        return subbuffer_layout, buffer_sizes, slice_info
-
-    def buffer_dtype(self, name: str) -> np.dtype:
-        """The host dtype a named buffer (or slice) is viewed as: what the first
-        step naming it declares, else its slices' dtype if they agree (bytes
-        if not), else bf16.
+    def buffer_dtype(self, ref: BufferRef) -> np.dtype:
+        """The host dtype ``ref`` is viewed as: what the first step naming it
+        declares, else, for a whole buffer, its parts' dtype if they agree
+        (bytes if not), else bf16.
         """
-        sliced = set()
-        for op, *bufs in self.runlist:
-            for buf, b in zip(bufs, op.buffers):
-                if buf == name:
+        parts = set()
+        for s in self.steps:
+            for r, b in zip(s.buffers, s.op.buffers):
+                if r == ref:
                     return np.dtype(b.host_dtype)
-                if _base_name(buf) == name:
-                    sliced.add(np.dtype(b.host_dtype))
-        if len(sliced) == 1:
-            return sliced.pop()
-        return np.dtype(np.uint8) if sliced else BF16
+                if ref.nbytes is None and r.root == ref.root:
+                    parts.add(np.dtype(b.host_dtype))
+        if len(parts) == 1:
+            return parts.pop()
+        return np.dtype(np.uint8) if parts else BF16
 
     def prepare(self):
         """Settle the packaging and lay the buffers out, before anything is built."""
         dev = aie_utils.get_current_device()
         if self.full_elf is None:
             self.full_elf = dev is not None and dispatches_full_elf(dev)
-            if self.feedback_args and not self.full_elf:
+            if self.feedback and not self.full_elf:
                 raise ValueError(
                     f"{self.name}: feedback arguments need the full ELF, which "
                     f"this device does not dispatch"
@@ -413,19 +345,17 @@ class OperatorSequence:
         # Resolved before unique_designs() takes identities, so operators that
         # resolve alike are one design.
         resolved: dict[int, Operator] = {}
-        for op, *_ in self.runlist:
-            if id(op) not in resolved:
-                resolved[id(op)] = op.resolved(dev)
-        self.runlist = [(resolved[id(op)], *bufs) for op, *bufs in self.runlist]
+        for s in self.steps:
+            if id(s.op) not in resolved:
+                resolved[id(s.op)] = s.op.resolved(dev)
+        self.steps = [SequenceStep(resolved[id(s.op)], s.buffers) for s in self.steps]
         if not isinstance(self.coresident, AdjacentPacking):
             self.coresident = tuple(
                 tuple(resolved[id(op)] for op in group) for group in self.coresident
             )
         # After the packaging check: a sequence that cannot run in its arena must
         # not place anything there.
-        self.subbuffer_layout, self.buffer_sizes, self.slice_info = (
-            self.calculate_buffer_layout()
-        )
+        self.layout, self.buffer_sizes = self._layout()
         self._image = FusedImage() if self.full_elf else XclbinChain()
 
     def compile(self):
@@ -436,11 +366,17 @@ class OperatorSequence:
 
     def link(self):
         """Build this sequence's image, once; sets ``self.image`` and ``artifacts``."""
-        if self.subbuffer_layout is None:
+        if self.layout is None:
             self.prepare()
         self.image = self._image.link(self)
         self._artifacts = self._record()
         return self.image
+
+    def kernel(self, op: Operator) -> NPUKernel:
+        """The kernel a step of ``op`` dispatches on the xclbin chain."""
+        if not isinstance(self._image, XclbinChain) or self._image.image is None:
+            raise RuntimeError(f"{self.name} is not linked as an xclbin chain")
+        return self._image.links[id(op)].kernel
 
     @property
     def elf_path(self):
@@ -458,52 +394,55 @@ class OperatorSequence:
         """What this image consists of: its designs, its steps, its buffers."""
         designs, design_of = self.unique_designs()
         operators = list(self.unique_operators())
-        labels = [f"op{i}_{type(op).__name__}" for i, op in enumerate(designs)]
         sharing = [
             tuple(op.name for op in operators if design_of[id(op)] == i)
             for i in range(len(designs))
         ]
+        insts = None
         if isinstance(self._image, FusedImage):
             assert self._image.design is not None, "link() built the image"
             entry = self._image.design.get_cache_entry()
+            labels = [f"op{i}_{type(op).__name__}" for i, op in enumerate(designs)]
             records = tuple(
                 Design(name=labels[i], operators=sharing[i])
                 for i in range(len(designs))
             )
             image = self.image
-            by_design = {id(op): labels[design_of[id(op)]] for op in operators}
         else:
-            chain = self._image
-            entry = None
-            records = []
-            for i, op in enumerate(designs):
-                own = chain.designs[id(op)].get_cache_entry()
-                entry = entry or own
-                records.append(
-                    Design(
-                        name=chain.labels[id(op)],
-                        operators=sharing[i],
-                        entry=own,
-                        image=own.xclbin,
-                        insts=own.insts,
-                    )
+            links = [self._image.links[id(op)] for op in designs]
+            labels = [link.name for link in links]
+            records = tuple(
+                Design(
+                    name=link.name,
+                    operators=sharing[i],
+                    entry=(
+                        link.design
+                        if link.configuration is None
+                        else link.configuration
+                    ).get_cache_entry(),
+                    image=Path(link.kernel.xclbin_path),
+                    insts=link.design.get_cache_entry().insts,
                 )
-            records = tuple(records)
-            image = chain.image
-            by_design = {id(op): chain.labels[id(op)] for op in operators}
+                for i, link in enumerate(links)
+            )
+            entry = links[0].design.get_cache_entry()
+            if len(links) == 1:
+                insts = entry.insts
+            image = self._image.image
+        by_design = {id(op): labels[design_of[id(op)]] for op in operators}
         assert image is not None, "the image has been built"
         steps = tuple(
-            Step(i, op.name, by_design[id(op)], tuple(names))
-            for i, (op, *names) in enumerate(self.runlist)
+            Step(i, s.op.name, by_design[id(s.op)], s.buffers)
+            for i, s in enumerate(self.steps)
         )
         return Artifacts(
             full_elf=self.full_elf,
             image=image,
-            insts=None,
+            insts=insts,
             entry=entry,
             designs=records,
             steps=steps,
-            buffers=dict(self.subbuffer_layout),
+            buffers=dict(self.layout),
         )
 
     def get_callable(self, arena: ScratchArena | None = None):
@@ -511,7 +450,7 @@ class OperatorSequence:
         needed. A sequence placed in an arena plan runs what it placed there
         in ``arena``, made here if not given.
         """
-        if self.subbuffer_layout is None:
+        if self.layout is None:
             self.compile()
         self.link()
         if self.arena is not None and arena is None:
@@ -519,15 +458,3 @@ class OperatorSequence:
         if not self.full_elf:
             return StepCallable(self, check=self.check, arena=arena)
         return FullELFCallable(self, arena=arena)
-
-    def get_layout_for_buffer(self, buffer_name):
-        """A named buffer's ``(buffer type, byte offset, byte length)``, a
-        slice's at its parent's offset.
-        """
-        if buffer_name in self.slice_info:
-            buf_name, start, end = self.slice_info[buffer_name]
-            buf_type, parent_start, _ = self.get_layout_for_buffer(buf_name)
-            return buf_type, parent_start + start, end - start
-
-        buf_type, offset, length = self.subbuffer_layout[buffer_name]
-        return buf_type, offset, length

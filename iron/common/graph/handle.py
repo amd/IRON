@@ -17,6 +17,7 @@ from ml_dtypes import bfloat16
 
 from ..declare.operator import graph_tracer
 from ..image.packaging import Kind
+from ..image.step import BufferRef
 
 T = TypeVar("T")
 
@@ -95,17 +96,17 @@ class Handle:
     def nbytes(self) -> int:
         return self.elements * bfp.itemsize(self.dtype)
 
-    @property
-    def buffer_name(self) -> str:
-        """The runlist's name: a slice is ``parent[start:stop]`` in bytes, a
-        view its parent's.
+    def ref(self) -> BufferRef:
+        """Where a step finds this handle: a slice is part of its parent's
+        buffer, a view all of it.
         """
         if self.parent is None:
-            return self.name
+            return BufferRef(self.name)
+        parent = self.parent.ref()
         if self.tap is not None:
-            return self.parent.buffer_name
-        item = bfp.itemsize(self.dtype)
-        return f"{self.parent.buffer_name}[{self.start * item}:{(self.start + self.elements) * item}]"
+            return parent
+        start = parent.start + self.start * bfp.itemsize(self.dtype)
+        return BufferRef(parent.root, start, self.nbytes)
 
     def reshape(self, *shape) -> "Handle":
         """The same buffer seen with another shape (no data moves)."""
@@ -276,7 +277,7 @@ class Handle:
         )
 
     def __repr__(self) -> str:
-        return f"Handle({self.buffer_name!r}, {list(self.shape)}, {bfp.dtype_name(self.dtype)})"
+        return f"Handle({str(self.ref())!r}, {list(self.shape)}, {bfp.dtype_name(self.dtype)})"
 
 
 class _Viewed:

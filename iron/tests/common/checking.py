@@ -14,6 +14,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common.image.callable import check_step
+from iron.common.image.step import BufferRef
 from iron.operators import GEMV, ElementwiseAdd, SiLU
 
 K, M = 2048, 256
@@ -34,12 +35,12 @@ def _run(traced, x, wrong: dict[int, np.ndarray]):
     hold them, what it wrote (its reference, or with ``wrong[i]`` in place of
     step ``i``'s weight, what that weight computes) and its reference.
     """
-    held = {traced.input_args[0]: x}
-    held |= {h.name: np.asarray(t) for t, h in traced.weights.values()}
-    weights = {h.name for _, h in traced.weights.values()}
-    for index, (op, *names) in enumerate(traced.runlist):
-        op = op.resolved()
-        by_name = dict(zip((b.name for b in op.buffers), names))
+    held = {BufferRef(traced.inputs[0].name): x}
+    held |= {h.ref(): np.asarray(t) for t, h in traced.weights.values()}
+    weights = {h.ref() for _, h in traced.weights.values()}
+    for index, step in enumerate(traced.steps):
+        op = step.op.resolved()
+        by_name = dict(zip((b.name for b in op.buffers), step.refs()))
         inputs = {b.name: held[by_name[b.name]] for b in op.inputs}
         expected = op._call_reference(inputs)
         computed = {
@@ -56,7 +57,7 @@ def test_the_oracles_steps_pass_and_a_wrong_weight_is_caught_at_its_step(npu2):
     w = (rng.standard_normal((M, K)) * 0.05).astype(bfloat16)
     x = (rng.random(K) * 2 - 1).astype(bfloat16)
     traced = Project(w).trace(x=(K,))
-    assert [type(op).__name__ for op, *_ in traced.runlist] == [
+    assert [type(s.op).__name__ for s in traced.steps] == [
         "ElementwiseAdd",
         "GEMV",
         "SiLU",

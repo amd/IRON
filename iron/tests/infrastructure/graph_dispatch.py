@@ -17,6 +17,8 @@ else, because it produces wrong values rather than an error.
 import logging
 import re
 
+import dataclasses
+
 import numpy as np
 import pytest
 from aie.utils.verify import Tolerance, compare
@@ -26,7 +28,9 @@ import iron
 from iron import Scratchpad
 from iron.common.image import AdjacentPacking
 from iron.common.image.fusion import Fusion
+from iron.common.graph.trace import TracedGraph
 from iron.common.image.sequence import OperatorSequence
+from iron.common.image.step import BufferRef
 from iron.common.image.fused import XclbinChain
 from iron.operators import (
     GEMV,
@@ -40,6 +44,7 @@ from iron.operators import (
 from iron.operators.magnitude import Magnitude
 from iron.operators.merge import GEMMA
 from iron.tests.common.graphs import Adds, Chain
+from iron.tests.common import sequences
 
 SIZE = 1024
 TILE = 128
@@ -58,7 +63,9 @@ PACKAGINGS = {"separate": dict(full_elf=False), "fused": dict(full_elf=True)}
 def _graph(name, packaging="fused"):
     """X + w + w + w, traced from dataflow, as the sequence it lowers to."""
     traced = Adds(_operator(), 3).trace(x=(SIZE,), w=(SIZE,))
-    return traced, traced.sequence(name, **PACKAGINGS[packaging])
+    return traced, OperatorSequence(
+        dataclasses.replace(traced, name=name), **PACKAGINGS[packaging]
+    )
 
 
 def _hand_written(name, packaging="fused"):
@@ -69,47 +76,43 @@ def _hand_written(name, packaging="fused"):
         (add, "t0", "w", "t1"),
         (add, "t1", "w", "out"),
     ]
-    return OperatorSequence(
-        name,
-        runlist,
-        input_args=["x", "w"],
-        output_args=["out"],
-        **PACKAGINGS[packaging],
-    )
+    traced = TracedGraph.of_steps(name, sequences.steps(*runlist), ["x", "w"], ["out"])
+    return OperatorSequence(traced, **PACKAGINGS[packaging])
 
 
 def test_a_graph_records_the_same_steps_as_a_hand_written_runlist():
     """Same operators, same order, same wiring -- only the names differ."""
-    traced, _ = _graph("graph_steps")
+    _, graph = _graph("graph_steps")
     hand = _hand_written("hand_steps")
 
-    def shape(runlist):
+    def shape(sequence):
         # Compare structure, not generated names: for each step, which earlier
         # step produced each of its inputs (None meaning a graph input).
-        produced, steps = {}, []
-        for index, (operator, *buffers) in enumerate(runlist):
-            *reads, write = buffers
-            steps.append((type(operator).__name__, [produced.get(r) for r in reads]))
+        produced, shaped = {}, []
+        for index, step in enumerate(sequence):
+            *reads, write = step.buffers
+            shaped.append((type(step.op).__name__, [produced.get(r) for r in reads]))
             produced[write] = index
-        return steps
+        return shaped
 
-    assert shape(traced.runlist) == shape(hand.runlist)
+    assert shape(graph.steps) == shape(hand.steps)
 
 
 def test_a_graph_names_its_io_from_the_function():
     traced, seq = _graph("graph_io")
-    assert traced.input_args == ["x", "w"] and traced.output_args == ["out"]
-    assert seq.plan_scratch, "the lowered sequence pools intermediates by default"
+    assert [h.name for h in traced.inputs] == ["x", "w"]
+    assert [h.name for h in traced.outputs] == ["out"]
+    assert seq.inputs == ["x", "w"] and seq.outputs == ["out"]
 
 
 def _run(sequence, inputs):
     """Fill the named inputs, dispatch, and read the output back."""
     run = sequence.get_callable()
-    names, (out_name,) = sequence.input_args, sequence.output_args
-    for name, data in zip(names, inputs):
-        run.get_buffer(name).numpy_view()[: data.size] = data.reshape(-1)
+    (out,) = sequence.outputs
+    for name, data in zip(sequence.inputs, inputs):
+        run.get_buffer(BufferRef(name)).numpy_view()[: data.size] = data.reshape(-1)
     run()
-    return run.get_buffer(out_name).numpy()[: inputs[0].size].copy()
+    return run.get_buffer(BufferRef(out)).numpy()[: inputs[0].size].copy()
 
 
 @pytest.mark.supported_devices("npu2")
@@ -239,7 +242,7 @@ def test_designs_of_one_array_run_on_one_configure():
     assert len(re.findall(r"aiex\.run", text)) == 3
 
     alone = TwoExtents().compile(full_elf=False, **shapes)
-    tolerance = shared.sequence.runlist[0][0].resolved().tolerance()
+    tolerance = shared.sequence.steps[0].op.resolved().tolerance()
     want = TwoExtents().reference(a, b, c, d)
     runs = [
         [np.array(t.numpy()[: len(w)]) for t, w in zip(v(a, b, c, d), want)]
@@ -283,7 +286,7 @@ def test_each_design_of_one_array_runs_on_its_own_values():
         len(re.findall(r"aiex\.configure", text)) == 2
     )  # the shared device, the reset
     assert len(re.findall(r"aiex\.run", text)) == 2
-    tolerance = net.sequence.runlist[0][0].resolved().tolerance()
+    tolerance = net.sequence.steps[0].op.resolved().tolerance()
     for _ in range(2):
         x, y = (rng.standard_normal(K).astype(bfloat16) for _ in range(2))
         for got, want in zip(net(x, y), graph.reference(x, y)):

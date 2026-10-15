@@ -15,15 +15,18 @@ import random
 
 import pytest
 
-from iron.common.image.sequence import OperatorSequence
+from iron.common.graph.trace import TracedGraph
 from iron.common.image.allocator import (
+    ALIGNMENT,
     Allocation,
     ArenaPlan,
     LiveRange,
     Pool,
 )
-from iron.common.image.sequence import ALIGNMENT
+from iron.common.image.sequence import OperatorSequence
+from iron.common.image.step import BufferRef
 from iron.operators import ElementwiseAdd, ReLU
+from iron.tests.common import sequences
 
 
 def steps_of(runlist):
@@ -176,20 +179,21 @@ def test_empty_graph():
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 
-def _two_step_sequence(buffer_offsets):
+def _laid_out(seq):
+    seq.prepare()
+    return seq.layout, seq.buffer_sizes
+
+
+def _two_step_sequence():
     """A tiny real sequence: one weight-like buffer plus one intermediate."""
     add = ElementwiseAdd(size=1024, tile_size=128)
-    runlist = [(add, "w", "x", "t0"), (add, "w", "t0", "out")]
-    seq = OperatorSequence(
+    traced = TracedGraph.of_steps(
         "alloc_layout_probe",
-        runlist,
-        input_args=["x"],
-        output_args=["out"],
-        full_elf=True,
-        buffer_offsets=buffer_offsets,
+        sequences.steps((add, "w", "x", "t0"), (add, "w", "t0", "out")),
+        ["x"],
+        ["out"],
     )
-    layout, sizes, _ = seq.calculate_buffer_layout()
-    return layout, sizes
+    return _laid_out(OperatorSequence(traced, full_elf=True))
 
 
 def test_planned_offsets_do_not_collide_with_unplanned():
@@ -199,7 +203,7 @@ def test_planned_offsets_do_not_collide_with_unplanned():
     on top of the weights. It showed up as an arena that did not grow at all
     when planned buffers were added -- the aliasing was silent.
     """
-    layout, _ = _two_step_sequence({"t0": 0})
+    layout, _ = _two_step_sequence()
     _, w_off, w_len = layout["w"]
     _, t_off, _ = layout["t0"]
     assert t_off >= w_off + w_len, (
@@ -208,13 +212,11 @@ def test_planned_offsets_do_not_collide_with_unplanned():
     )
 
 
-def test_layout_is_unchanged_without_offsets():
-    """The default path must lay out exactly as it did before.
-
-    Buffers are split across three arenas (input, output, scratch), each
-    starting at zero, so packing is checked per arena.
+def test_buffers_pack_back_to_back_in_each_argument():
+    """Buffers are split across three arguments (input, output, scratch),
+    each starting at zero, so packing is checked per argument.
     """
-    layout, _ = _two_step_sequence(None)
+    layout, _ = _two_step_sequence()
     arenas = {}
     for buf_type, off, ln in layout.values():
         arenas.setdefault(buf_type, []).append((off, ln))
@@ -225,7 +227,7 @@ def test_layout_is_unchanged_without_offsets():
             cursor += ln
 
 
-def _chain(n_intermediates, plan_scratch):
+def _chain(n_intermediates):
     """A chain where each intermediate dies as the next is produced."""
     add = ElementwiseAdd(size=1024, tile_size=128)
     names = [f"t{i}" for i in range(n_intermediates)]
@@ -233,23 +235,18 @@ def _chain(n_intermediates, plan_scratch):
     for prev, nxt in zip(names, names[1:]):
         runlist.append((add, prev, "w", nxt))
     runlist.append((add, names[-1], "w", "out"))
-    seq = OperatorSequence(
-        f"chain{n_intermediates}_{plan_scratch}",
-        runlist,
-        input_args=["x", "w"],
-        output_args=["out"],
-        full_elf=True,
-        plan_scratch=plan_scratch,
+    traced = TracedGraph.of_steps(
+        f"chain{n_intermediates}", sequences.steps(*runlist), ["x", "w"], ["out"]
     )
-    layout, sizes, _ = seq.calculate_buffer_layout()
-    return layout, sizes[2]
+    layout, sizes = _laid_out(OperatorSequence(traced, full_elf=True))
+    return layout, sizes.scratch
 
 
 def test_planning_reuses_addresses_of_dead_intermediates():
     """A chain of four holds at most two intermediates live at once."""
-    _, unplanned = _chain(4, plan_scratch=False)
-    _, planned = _chain(4, plan_scratch=True)
-    assert planned < unplanned, "planning should shrink the scratch arena"
+    layout, scratch = _chain(4)
+    held = sum(layout[f"t{i}"][2] for i in range(4))
+    assert scratch == held // 2, "planning should fold four intermediates to two"
 
 
 def test_planned_buffers_never_share_bytes_while_both_live():
@@ -258,7 +255,7 @@ def test_planned_buffers_never_share_bytes_while_both_live():
     This is the one failure mode in planning that does not announce itself:
     two buffers aliased while both are live produce wrong numbers, not a crash.
     """
-    layout, _ = _chain(4, plan_scratch=True)
+    layout, _ = _chain(4)
     scratch = {k: v for k, v in layout.items() if v[0] == "scratch"}
     # t_i is live from step i to step i+1, so consecutive ones overlap.
     for i in range(3):
@@ -274,27 +271,37 @@ def test_planned_buffers_never_share_bytes_while_both_live():
         )
 
 
-def test_slices_are_never_pooled():
-    """A slice has to sit at its parent's offset plus its start.
+def test_a_buffer_named_in_part_is_never_pooled():
+    """A part has to sit at its buffer's offset plus its start.
 
-    Pooling one hands it an address unrelated to its parent, and nothing
-    raises -- the slice simply reads the wrong memory. Found by probing the
-    written-slice case, which the whole-buffer tests above cannot reach.
+    Pooling the buffer could hand its bytes to an intermediate whose life
+    does not overlap the parts', and nothing raises -- a part simply reads
+    the wrong memory. Found by probing the written-slice case, which the
+    whole-buffer tests above cannot reach.
     """
     add = ElementwiseAdd(size=1024, tile_size=128)
-    seq = OperatorSequence(
+    half = BufferRef("big", 0, 2048)
+    traced = TracedGraph.of_steps(
         "slice_pooling_probe",
-        [(add, "x", "w", "big[0:1024]"), (add, "big[0:1024]", "w", "out")],
-        input_args=["x", "w"],
-        output_args=["out"],
-        buffer_sizes={"big": 4096},
-        full_elf=True,
-        plan_scratch=True,
+        sequences.steps(
+            (add, "x", "w", half),
+            (add, half, "w", "t"),
+            (add, "t", "w", "u"),
+            (add, "u", "w", "v"),
+            (add, "v", "w", "out"),
+        ),
+        ["x", "w"],
+        ["out"],
+        pinned={"big": 4096},
     )
-    assert not any("[" in name for name in seq.infer_buffer_offsets()), (
-        "a sliced buffer was given a pooled offset; its address must stay "
-        "derived from its parent"
-    )
+    layout, sizes = _laid_out(OperatorSequence(traced, full_elf=True))
+    _, big_at, big_len = layout["big"]
+    assert big_len == 4096 and half.place(layout) == ("scratch", big_at, 2048)
+    # u and v outlive every use of big, so a pooled big would lend them its bytes.
+    for name in ("t", "u", "v"):
+        _, at, length = layout[name]
+        assert at >= big_at + big_len or at + length <= big_at, f"{name} in big"
+    assert sizes.scratch == 4096 + 2 * 2048
 
 
 # --- touch ranges: the rule for arenas whose host-visible buffers live elsewhere
@@ -502,21 +509,16 @@ def _add():
     return ElementwiseAdd(size=1024, tile_size=128)
 
 
-def _arena_sequence(
-    name, runlist, arena, residents, buffer_sizes=None, full_elf=True, **kwargs
-):
+def _arena_sequence(name, runlist, arena, residents, pinned=None, full_elf=True):
 
-    return OperatorSequence(
+    traced = TracedGraph.of_steps(
         name,
-        runlist,
-        input_args=["x"],
-        output_args=["out"],
-        buffer_sizes=buffer_sizes or {n: 2048 for n in residents},
-        full_elf=full_elf,
-        arena=arena,
-        residents=residents,
-        **kwargs,
+        sequences.steps(*runlist),
+        ["x"],
+        ["out"],
+        pinned=pinned or {n: 2048 for n in residents},
     )
+    return OperatorSequence(traced, full_elf=full_elf, arena=arena, residents=residents)
 
 
 def test_two_sequences_in_one_arena_agree_on_residents_and_share_transients():
@@ -534,11 +536,11 @@ def test_two_sequences_in_one_arena_agree_on_residents_and_share_transients():
         arena,
         {"weight": "W"},
     )
-    one_layout, one_sizes, _ = one.calculate_buffer_layout()
-    two_layout, two_sizes, _ = two.calculate_buffer_layout()
+    one_layout, one_sizes = _laid_out(one)
+    two_layout, two_sizes = _laid_out(two)
     assert one_layout["w"][1] == two_layout["weight"][1]
     assert two_layout["u"][1] == one_layout["t0"][1], "transients reuse bytes"
-    assert max(one_sizes[2], two_sizes[2]) == arena.size
+    assert max(one_sizes.scratch, two_sizes.scratch) == arena.size
 
 
 def test_placing_is_done_once_per_sequence():
@@ -547,9 +549,9 @@ def test_placing_is_done_once_per_sequence():
     seq = _arena_sequence(
         "arena_once", [(add, "x", "w", "t"), (add, "t", "w", "out")], arena, {"w": "W"}
     )
-    first, _, _ = seq.calculate_buffer_layout()
+    first, _ = _laid_out(seq)
     size = arena.size
-    again, _, _ = seq.calculate_buffer_layout()
+    again, _ = _laid_out(seq)
     assert again == first and arena.size == size
 
 
@@ -559,29 +561,25 @@ def test_a_parent_reached_only_through_slices_lives_from_first_to_last_slice():
     """
     add = _add()
     arena = ArenaPlan(alignment=64)
+    first, second = BufferRef("big", 0, 2048), BufferRef("big", 2048, 2048)
     seq = _arena_sequence(
         "arena_slices",
         [
-            (add, "x", "w", "big[0:2048]"),  # 0: first half of big written
+            (add, "x", "w", first),  # 0: first half of big written
             (add, "x", "w", "side"),  # 1: side live alongside big
-            (add, "big[0:2048]", "side", "big[2048:4096]"),  # 2
-            (add, "big[2048:4096]", "w", "out"),  # 3: big's last use
+            (add, first, "side", second),  # 2
+            (add, second, "w", "out"),  # 3: big's last use
         ],
         arena,
         {"w": "W"},
-        buffer_sizes={"w": 2048, "big": 4096},
+        pinned={"w": 2048, "big": 4096},
     )
-    seq.prepare()
-    layout = seq.subbuffer_layout
+    layout, _ = _laid_out(seq)
     _, big_at, big_len = layout["big"]
     _, side_at, side_len = layout["side"]
     assert big_len == 4096
     assert big_at + big_len <= side_at or side_at + side_len <= big_at
-    assert seq.get_layout_for_buffer("big[2048:4096]") == (
-        "scratch",
-        big_at + 2048,
-        2048,  # a length, as a full-ELF view takes it
-    )
+    assert second.place(layout) == ("scratch", big_at + 2048, 2048)
 
 
 def test_residents_must_be_scratch_buffers():
@@ -590,7 +588,7 @@ def test_residents_must_be_scratch_buffers():
         "arena_bad_resident", [(add, "x", "w", "out")], ArenaPlan(), {"x": "X"}
     )
     with pytest.raises(ValueError, match="not scratch buffers"):
-        seq.calculate_buffer_layout()
+        seq.prepare()
 
 
 def test_a_step_at_a_time_places_only_its_residents_in_the_arena():
@@ -603,7 +601,7 @@ def test_a_step_at_a_time_places_only_its_residents_in_the_arena():
         {"w": "W"},
         full_elf=False,
     )
-    layout, _, _ = seq.calculate_buffer_layout()
+    layout, _ = _laid_out(seq)
     assert layout["w"] == ("scratch", 0, 2048)
     assert arena.size == 2048
 
@@ -611,10 +609,12 @@ def test_a_step_at_a_time_places_only_its_residents_in_the_arena():
 def test_residents_need_an_arena():
     with pytest.raises(ValueError, match="pass arena"):
         OperatorSequence(
-            "arena_missing",
-            [(_add(), "x", "w", "out")],
-            ["x", "w"],
-            ["out"],
+            TracedGraph.of_steps(
+                "arena_missing",
+                sequences.steps((_add(), "x", "w", "out")),
+                ["x", "w"],
+                ["out"],
+            ),
             residents={"w": "W"},
         )
 
@@ -624,14 +624,14 @@ def test_back_to_back_buffers_start_aligned_whatever_their_sizes():
     boundary a host view and a DMA burst can start at.
     """
     add = _add()
-    seq = OperatorSequence(
+    part = BufferRef("big", 0, 2048)
+    traced = TracedGraph.of_steps(
         "odd_pinned",
-        [(add, "x", "w", "big[0:2048]"), (add, "big[0:2048]", "w", "out")],
-        input_args=["x", "w"],
-        output_args=["out"],
-        buffer_sizes={"big": 2048 + 18, "odd": 9},
-        full_elf=True,
+        sequences.steps((add, "x", "w", part), (add, part, "w", "out")),
+        ["x", "w"],
+        ["out"],
+        pinned={"big": 2048 + 18, "odd": 9},
     )
-    layout, _, _ = seq.calculate_buffer_layout()
+    layout, _ = _laid_out(OperatorSequence(traced, full_elf=True))
     for name, (_, offset, _) in layout.items():
         assert offset % ALIGNMENT == 0, f"{name} at {offset}"

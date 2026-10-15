@@ -8,6 +8,7 @@ Trace insertion, the buffer layout and event decoding are mlir-aie's, and tested
 there.
 """
 
+import dataclasses
 import json
 
 import numpy as np
@@ -16,6 +17,8 @@ from aie.utils.trace import TraceConfig
 from ml_dtypes import bfloat16
 
 import iron
+from iron.common.image.sequence import OperatorSequence
+from iron.common.image.step import BufferRef
 from iron.common.tracing import dump_traces
 from iron.operators import LayerNorm
 
@@ -39,12 +42,14 @@ def _layer_norm_run(name, trace):
     f = F()
 
     traced = f.trace(x=(1, SIZE))
-    seq = traced.sequence(name, full_elf=True).compile()
+    seq = OperatorSequence(
+        dataclasses.replace(traced, name=name), full_elf=True
+    ).compile()
     run = seq.get_callable()
-    x = run.get_buffer("x")
+    x = run.get_buffer(BufferRef("x"))
     x.numpy_view()[:] = np.random.default_rng(0).standard_normal(SIZE).astype(bfloat16)
     run()
-    return run, run.get_buffer(traced.output_args[0]).numpy()[:SIZE].copy()
+    return run, run.get_buffer(traced.outputs[0].ref()).numpy()[:SIZE].copy()
 
 
 @pytest.mark.supported_devices("npu2")

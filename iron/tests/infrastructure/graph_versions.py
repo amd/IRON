@@ -66,8 +66,8 @@ def _run_both(f, w, w2):
     """
     one, two = f.versions.values()
     # The state is one resident: the same bytes in both images.
-    layout_one = one.sequence.get_layout_for_buffer("line")
-    assert layout_one == two.sequence.get_layout_for_buffer("line")
+    layout_one = one.sequence.layout["line"]
+    assert layout_one == two.sequence.layout["line"]
     assert layout_one[0] == "scratch"
 
     x1, x2 = _numbers(E, 3), _numbers(2 * E, 4)

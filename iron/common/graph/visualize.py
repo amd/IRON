@@ -494,22 +494,21 @@ class ArenaPicture:
     def __init__(self, version: CompiledGraph, title: str = ""):
         seq = version.sequence
         self.title = title or f"{version.traced.name}: scratch buffers over the runlist"
-        layout = seq.subbuffer_layout
+        layout = seq.layout
         names = [
             n
             for n, (kind, _, _) in layout.items()
-            if kind == "scratch" and n not in seq.residents and n not in seq.slice_info
+            if kind == "scratch" and n not in seq.residents
         ]
         steps, first_writer = [], {}
-        for i, (op, *bufs) in enumerate(seq.runlist):
+        for step in seq.steps:
             reads, writes = [], []
-            for buf, b in zip(bufs, op.buffers):
-                name = buf[: buf.index("[")] if "[" in buf else buf
+            for ref, b in zip(step.buffers, step.op.buffers):
                 if b.fills:
-                    reads.append(name)
+                    reads.append(ref.root)
                 if b.drains:
-                    writes.append(name)
-                    first_writer.setdefault(name, op)
+                    writes.append(ref.root)
+                    first_writer.setdefault(ref.root, step.op)
             steps.append((reads, writes))
         self.steps = len(steps)
         self.ranges = LiveRange.touching(steps, names)

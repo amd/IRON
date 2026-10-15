@@ -17,6 +17,7 @@ import iron
 from iron import Carried
 from iron.tune.narrowing import CostTable, cost_key
 from iron.tune.probe import Call, Standalone, Timing, measure_graph
+from iron.common.image.step import BufferRef
 from iron.operators.copy import APERTURE, Copy, Gather, GatherWords
 
 ROWS, WIDTH = 4096, 512
@@ -62,7 +63,9 @@ def test_a_gather_alone_reads_the_rows_its_words_name(table, rows):
     traced = DeviceIds(table).trace(ids=((rows,), np.int32))
     gather = next(s.op for s in traced.steps if isinstance(s.op, Gather))
     alone = Standalone(f"probe_gather{rows}", [gather])
-    words = alone.callable.get_buffer("s0_control").numpy_view().view(np.uint32)
+    words = (
+        alone.callable.get_buffer(BufferRef("s0_control")).numpy_view().view(np.uint32)
+    )
     _, slots = gather.template
     addresses = words[slots].astype(np.int64) | words[slots + 2].astype(np.int64) << 32
     offsets = addresses - (alone.address("s0_table") + APERTURE)
@@ -70,7 +73,9 @@ def test_a_gather_alone_reads_the_rows_its_words_name(table, rows):
     assert not (offsets % row_bytes).any()
     ids = offsets // row_bytes
     assert ((ids >= 0) & (ids < ROWS)).all()
-    stored = alone.callable.get_buffer("s0_table").numpy_view().view(np.uint16)
+    stored = (
+        alone.callable.get_buffer(BufferRef("s0_table")).numpy_view().view(np.uint16)
+    )
     expected = stored[: ROWS * WIDTH].reshape(ROWS, WIDTH)[ids]
     alone.callable()
     [got] = alone.written().values()

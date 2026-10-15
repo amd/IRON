@@ -32,15 +32,18 @@ from aie.iron.kernels.sample import draw_row
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
+from iron.common.graph.handle import PerCall
+from iron.common.graph.trace import TracedGraph
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
-from iron.common.graph.handle import PerCall
+from iron.common.image.step import BufferRef
 from iron.common.image.packaging import Kind, dispatches_full_elf
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.magnitude import Magnitude
 from iron.operators.relu import ReLU
 from iron.operators.sample import Sample
 from iron.operators.tanh import Tanh
+from iron.tests.common import sequences
 
 RELATIVE = Tolerance.relative(0.04, 1e-6)
 
@@ -64,7 +67,7 @@ def _set_input(run, name, data):
     at dispatch (see test_non_input_buffers_sync_without_explicit_flush), and
     is kept for the reader.
     """
-    buf = run.get_buffer(name)
+    buf = run.get_buffer(BufferRef(name))
     buf.numpy_view()[: data.size] = data.reshape(-1)
     buf.to("npu")
 
@@ -78,7 +81,7 @@ _ADD_RELU_TILE = 1024
 _ADD_RELU_COLS = 4
 
 
-def _build_add_relu_sequence(name, input_args=("a", "b"), **packaging):
+def _build_add_relu_sequence(name, inputs=("a", "b"), **packaging):
     """Out = relu(a + b), as a 2-step OperatorSequence."""
     add = ElementwiseAdd(
         size=_ADD_RELU_SIZE,
@@ -91,16 +94,13 @@ def _build_add_relu_sequence(name, input_args=("a", "b"), **packaging):
         num_channels=1,
         tile_size=_ADD_RELU_TILE,
     )
-    return OperatorSequence(
-        name=name,
-        runlist=[
-            (add, "a", "b", "temp"),
-            (relu, "temp", "out"),
-        ],
-        input_args=list(input_args),
-        output_args=["out"],
-        **packaging,
+    traced = TracedGraph.of_steps(
+        name,
+        sequences.steps((add, "a", "b", "temp"), (relu, "temp", "out")),
+        inputs,
+        ["out"],
     )
+    return OperatorSequence(traced, **packaging)
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +131,7 @@ def test_auto_dispatch_selects_platform_default(size):
     _set_input(run, "a", a)
     _set_input(run, "b", b)
     run()
-    out = run.get_buffer("out").numpy()[:size].copy()
+    out = run.get_buffer(BufferRef("out")).numpy()[:size].copy()
 
     expected = np.maximum(a + b, 0)
     verdict = compare(out, expected, RELATIVE)
@@ -191,7 +191,7 @@ def _run_add_relu(a, b, name, **packaging):
     _set_input(run, "a", a)
     _set_input(run, "b", b)
     run()
-    return run.get_buffer("out").numpy()[:_ADD_RELU_SIZE].copy()
+    return run.get_buffer(BufferRef("out")).numpy()[:_ADD_RELU_SIZE].copy()
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
@@ -241,10 +241,9 @@ def test_check_mode_judges_each_step_by_its_tolerance():
 
     op = Magnitude(rows=rows, width=width, num_aie_columns=1)
     seq = OperatorSequence(
-        name="infra_check_magnitude",
-        runlist=[(op, "x", "out")],
-        input_args=["x"],
-        output_args=["out"],
+        TracedGraph.of_steps(
+            "infra_check_magnitude", sequences.steps((op, "x", "out")), ["x"], ["out"]
+        ),
         check=True,
     )
     seq.compile()
@@ -268,10 +267,12 @@ def test_check_mode_judges_every_output_at_the_calls_values(caplog):
     op.use_value("row", PerCall("row", Kind.SCRATCHPAD, np.int32).affine())
     op.use_value("at", PerCall("position", Kind.SCRATCHPAD, np.int32).affine())
     seq = OperatorSequence(
-        name="infra_check_sample",
-        runlist=[(op, "logits", "draws", "tokens", "token")],
-        input_args=["logits", "draws", "tokens"],
-        output_args=["token"],
+        TracedGraph.of_steps(
+            "infra_check_sample",
+            sequences.steps((op, "logits", "draws", "tokens", "token")),
+            ["logits", "draws", "tokens"],
+            ["token"],
+        ),
         check=True,
     )
     seq.compile()
@@ -315,7 +316,7 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch):
 
     # b is not an input, so it is held like a weight (in scratch, when fused).
     seq = _build_add_relu_sequence(
-        f"infra_add_weight_relu_{dispatch}", input_args=["a"], **PACKAGINGS[dispatch]
+        f"infra_add_weight_relu_{dispatch}", inputs=["a"], **PACKAGINGS[dispatch]
     )
     seq.compile()
     run = seq.get_callable()
@@ -324,12 +325,12 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch):
     for rep in range(4):
         a = _centered(rng, _ADD_RELU_SIZE)
         b = _centered(rng, _ADD_RELU_SIZE)
-        run.get_buffer("a").numpy_view()[:] = a
-        run.get_buffer("b").numpy_view()[:] = b
+        run.get_buffer(BufferRef("a")).numpy_view()[:] = a
+        run.get_buffer(BufferRef("b")).numpy_view()[:] = b
         run()
 
-        temp = run.get_buffer("temp").numpy()[:_ADD_RELU_SIZE]
-        out = run.get_buffer("out").numpy()[:_ADD_RELU_SIZE]
+        temp = run.get_buffer(BufferRef("temp")).numpy()[:_ADD_RELU_SIZE]
+        out = run.get_buffer(BufferRef("out")).numpy()[:_ADD_RELU_SIZE]
         verdict = compare(temp, a + b, RELATIVE)
         assert verdict, f"rep {rep}: temp: {verdict.detail}"
         verdict = compare(out, np.maximum(a + b, 0), RELATIVE)
@@ -346,10 +347,7 @@ def test_non_input_buffers_sync_without_explicit_flush(dispatch):
 def _build_one_design_sequence(op, name, reconfigure=False):
     """Out = op(a), as a 1-step fused OperatorSequence."""
     return OperatorSequence(
-        name=name,
-        runlist=[(op, "a", "out")],
-        input_args=["a"],
-        output_args=["out"],
+        TracedGraph.of_steps(name, sequences.steps((op, "a", "out")), ["a"], ["out"]),
         full_elf=True,
         reconfigure=reconfigure,
     )
@@ -396,10 +394,12 @@ def test_reconfigure_needs_a_full_elf():
     """Only a full ELF has a configure to repeat."""
     with pytest.raises(ValueError, match="reconfigure"):
         OperatorSequence(
-            name="infra_separate_reconfigure",
-            runlist=[(_relu(), "a", "out")],
-            input_args=["a"],
-            output_args=["out"],
+            TracedGraph.of_steps(
+                "infra_separate_reconfigure",
+                sequences.steps((_relu(), "a", "out")),
+                ["a"],
+                ["out"],
+            ),
             full_elf=False,
             reconfigure=True,
         )
@@ -421,7 +421,7 @@ def test_one_design_is_configured_once():
         a = _centered(rng, _ADD_RELU_SIZE)
         _set_input(run, "a", a)
         run()
-        out = run.get_buffer("out").numpy()[:_ADD_RELU_SIZE]
+        out = run.get_buffer(BufferRef("out")).numpy()[:_ADD_RELU_SIZE]
         verdict = compare(out, np.maximum(a, 0), RELATIVE)
         assert verdict, f"rep {rep}: out: {verdict.detail}"
 
@@ -453,7 +453,7 @@ def test_one_design_reconfigures_after_another_image():
             a = _centered(rng, _ADD_RELU_SIZE)
             _set_input(run, "a", a)
             run()
-            out = run.get_buffer("out").numpy()[:_ADD_RELU_SIZE]
+            out = run.get_buffer(BufferRef("out")).numpy()[:_ADD_RELU_SIZE]
             expected = op.reference(a)
             verdict = compare(out, expected, op.resolved().tolerance())
             assert verdict, f"rep {rep}, {name}: out: {verdict.detail}"

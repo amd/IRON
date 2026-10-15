@@ -256,7 +256,7 @@ def test_a_graph_gathers_from_a_weight_and_an_intermediate():
     ids = np.array([4, 0, 4, 63, -1])
     graph = _Gathers(ids)
     t = graph.trace(x=(V, W))
-    gathers = [op for op, *_ in t.runlist if isinstance(op.src, tuple)]
+    gathers = [s.op for s in t.steps if isinstance(s.op.src, tuple)]
     assert len(gathers) == 2
     whole = TensorAccessPattern.full((V, W))
     assert all(op.src == tuple(whole[i % V] for i in ids) for op in gathers)

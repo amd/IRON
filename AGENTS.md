@@ -218,16 +218,23 @@ reuse lint
      `compile(dev=, full_elf=, coresident=, tuner=)`; `graph/tuner.py` is
      all the core knows of tuning: the `Tuner`, `Tuning` and `Prices`
      interfaces
-   - `image/`: what a graph lowers onto, all of it internal: the sequence
-     a traced graph becomes, the buffer allocator (`LiveRange`, `Pool`,
-     `ArenaPlan`), `Fusion` (the designs of a sequence as one module, a
-     `DeviceConfiguration` per array or pack composed by mlir-aie's
-     `Program.compose`),
+   - `image/`: what a graph lowers onto, all of it internal:
+     `OperatorSequence(traced)`, what a `TracedGraph` becomes (its steps
+     as `SequenceStep(op, buffers)`, each buffer a `BufferRef(root, start,
+     nbytes)` a handle's `ref()` gives: a whole buffer of the image, or
+     `nbytes` of it from byte `start`), the buffer allocator (`LiveRange`,
+     `Pool`, `ArenaPlan`), `Fusion` (the designs of a sequence as one
+     module, a `DeviceConfiguration` per array or pack composed by
+     mlir-aie's `Program.compose`),
      `FusedImage`/`XclbinChain` (the full ELF or the chain of xclbins it
-     links), an operator's own image (what an operator called outside a
-     graph runs: `op(*tensors)` compiles it once and runs it,
-     `op.compile()` builds it and returns its `Artifacts`), the runtime
-     callables and the record of what a compiled image consists of
+     links; a design whose `configuration()` is another operator, or a
+     shipped image, runs that xclbin rather than a link of its own), an
+     operator's own image (what an operator called outside a graph runs,
+     the one-step sequence `TracedGraph.of_step(op)` as an xclbin chain:
+     `op(*tensors)` compiles it once and runs it, `op.compile()` builds it
+     and returns its `Artifacts`), the runtime callables (a buffer read
+     back by its `BufferRef`) and the record of what a compiled image
+     consists of
    - `elementwise.py`: the shared elementwise array and its operand shapes
      (flat, binary, rowwise), and `Sweep`, the cases of an elementwise
      operator

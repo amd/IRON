@@ -43,6 +43,7 @@ from iron.common.declare.value import PlaceWord, Value
 from iron.common.design import OperatorDesign
 from iron.common.image.callable import FullELFCallable, StepCallable
 from iron.common.image.sequence import OperatorSequence
+from iron.common.image.step import BufferRef, SequenceStep
 from iron.common.graph.compiled import CompiledGraph
 from .costcache import Accuracy, CostCache, Measurement, Pairing, Shift
 from iron.common.graph.fold import Made, folded, foldings, replaced
@@ -329,11 +330,12 @@ class Standalone:
             op = self.steps[k]
             for buf, name_ in zip(op.buffers, self._names(k, op)):
                 (out_names if isinstance(buf, Out) else in_names).append(name_)
+        steps = [
+            SequenceStep(op, tuple(map(BufferRef, self._names(self._slot[k], op))))
+            for k, op in enumerate(self.steps)
+        ]
         self.sequence = OperatorSequence(
-            name,
-            [(op, *self._names(self._slot[k], op)) for k, op in enumerate(self.steps)],
-            in_names,
-            out_names,
+            TracedGraph.of_steps(name, steps, in_names, out_names),
             full_elf=full_elf,
             coresident=coresident,
             # A design run alone must still pay its entry: alone = D0 + base + load + R.
@@ -1499,11 +1501,11 @@ class Call:
     def op_inputs(self, op: Operator) -> dict[str, np.ndarray]:
         """What ``op``'s buffers hold in this call, by ``op``'s buffer name."""
         return {
-            buf.name: self.contents[name]
+            buf.name: self.contents[ref.root]
             for step in self.traced.steps
             if step.op is op
-            for buf, name in zip(op.buffers, step.names)
-            if name in self.contents
+            for buf, ref in zip(op.buffers, step.refs())
+            if ref.nbytes is None and ref.root in self.contents
         }
 
 

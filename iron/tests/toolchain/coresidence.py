@@ -36,10 +36,12 @@ from iron.common.image.coresidence import Packing
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
 from iron.common.graph.fold import folded
+from iron.common.graph.trace import TracedGraph
 from iron.common.image.coresidence import CoResidenceError, conflicts, fits, places
 from iron.lm.blocks import SwiGLU
 from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, SiLU
 from iron.tests.common.graphs import Chain
+from iron.tests.common import sequences
 from iron.tests.toolchain.tools import requires
 
 SIZE = 8192
@@ -198,14 +200,13 @@ aie.device(npu2) {
 def _sequence(cols: int, coresident) -> OperatorSequence:
     add = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=cols)
     silu = SiLU(size=SIZE, tile_size=TILE, num_aie_columns=cols)
-    seq = OperatorSequence(
-        name="coresidence",
-        runlist=[(add, "a", "b", "t"), (silu, "t", "y")],
-        input_args=["a", "b"],
-        output_args=["y"],
-        full_elf=True,
-        coresident=coresident(add, silu),
+    traced = TracedGraph.of_steps(
+        "coresidence",
+        sequences.steps((add, "a", "b", "t"), (silu, "t", "y")),
+        ["a", "b"],
+        ["y"],
     )
+    seq = OperatorSequence(traced, full_elf=True, coresident=coresident(add, silu))
     seq.prepare()
     return seq
 
@@ -239,7 +240,7 @@ def test_policy_declines_what_does_not_fit():
     for name, design in fused.designs.items():
         assert fits({name: design}) is None
     packing, stopped = AdjacentPacking().pack(
-        [n for n, *_ in fused.runlist], fused.designs
+        [n for n, _ in fused.steps], fused.designs
     )
     assert packing == Packing()
     [reason] = stopped.values()
@@ -254,22 +255,23 @@ def test_one_array_joins_two_packs_only_where_their_union_fits():
     silu = SiLU(size=SIZE, tile_size=TILE, num_aie_columns=4)
     wider = SiLU(size=2 * SIZE, tile_size=TILE, num_aie_columns=4)
     mul = ElementwiseMul(size=2 * SIZE, tile_size=TILE, num_aie_columns=4)
-    seq = OperatorSequence(
-        name="joined_packs",
-        runlist=[
+    traced = TracedGraph.of_steps(
+        "joined_packs",
+        sequences.steps(
             (add, "a", "b", "t"),
             (silu, "t", "y"),
             (wider, "c", "u"),
             (mul, "u", "d", "z"),
-        ],
-        input_args=["a", "b", "c", "d"],
-        output_args=["y", "z"],
-        full_elf=True,
-        coresident=[[add, silu], [wider, mul]],
+        ),
+        ["a", "b", "c", "d"],
+        ["y", "z"],
+    )
+    seq = OperatorSequence(
+        traced, full_elf=True, coresident=[[add, silu], [wider, mul]]
     )
     seq.prepare()
     fused = Fusion(seq)
-    a, s, w, m = (name for name, *_ in fused.runlist)
+    a, s, w, m = (name for name, _ in fused.steps)
     assert fits({n: fused.designs[n] for n in (a, s)}) is None
     assert fits({n: fused.designs[n] for n in (w, m)}) is None
     assert fits(fused.designs) is not None
@@ -282,24 +284,24 @@ def test_designs_of_one_array_share_its_device():
     # itself, and the steps run on one configure.
     small = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=8)
     large = ElementwiseAdd(size=2 * SIZE, tile_size=TILE, num_aie_columns=8)
-    seq = OperatorSequence(
-        name="shared_array",
-        runlist=[
+    traced = TracedGraph.of_steps(
+        "shared_array",
+        sequences.steps(
             (small, "a", "b", "t"),
             (large, "c", "d", "u"),
             (small, "t", "b", "y"),
-        ],
-        input_args=["a", "b", "c", "d"],
-        output_args=["y", "u"],
-        full_elf=True,
+        ),
+        ["a", "b", "c", "d"],
+        ["y", "u"],
     )
+    seq = OperatorSequence(traced, full_elf=True)
     seq.prepare()
     fused = Fusion(seq)
     text = fused.text()
     pack = Packing.device_name(list(fused.designs))
     assert _devices(text) == [pack, Fusion.EMPTY]
     assert re.findall(r"aiex\.configure @(\w+)", text) == [pack, Fusion.EMPTY]
-    assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, *_ in fused.runlist]
+    assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, _ in fused.steps]
     assert text.count("aie.core(") == 8
     assert fits(fused.designs) is None
 
@@ -315,11 +317,11 @@ def test_a_folded_gate_shares_its_device_with_the_up_projection(npu2):
     silu = [fold for fold in every if str(fold) == "SiLU into GEMV"]
     traced, count = folded(ffn.trace(x=(1, embedding)), npu2, only=silu)
     assert count.total() == 1
-    seq = traced.sequence(full_elf=True)
+    seq = OperatorSequence(traced, full_elf=True)
     seq.prepare()
     fused = Fusion(seq)
     text = fused.text()
-    gate, up, mul, down = (name for name, *_ in fused.runlist)
+    gate, up, mul, down = (name for name, _ in fused.steps)
     assert gate != up
     pack = Packing.device_name([gate, up])
     assert _devices(text) == [pack, mul, down, Fusion.EMPTY]
@@ -334,14 +336,13 @@ def test_two_arrays_of_one_class_pack():
         for tile in (32, 16)
     ]
     assert gemvs[0].resolved().array_key() != gemvs[1].resolved().array_key()
-    seq = OperatorSequence(
-        name="gemv_pack",
-        runlist=[(gemvs[0], "wa", "x", "ya"), (gemvs[1], "wb", "x", "yb")],
-        input_args=["wa", "wb", "x"],
-        output_args=["ya", "yb"],
-        full_elf=True,
-        coresident=[gemvs],
+    traced = TracedGraph.of_steps(
+        "gemv_pack",
+        sequences.steps((gemvs[0], "wa", "x", "ya"), (gemvs[1], "wb", "x", "yb")),
+        ["wa", "wb", "x"],
+        ["ya", "yb"],
     )
+    seq = OperatorSequence(traced, full_elf=True, coresident=[gemvs])
     seq.prepare()
     fused = Fusion(seq)
     assert fits(fused.designs) is None
@@ -364,7 +365,7 @@ def test_packing_rejects_a_design_in_two_groups():
 
 def test_sequence_rejects_a_stray_operator():
     stray = SiLU(size=SIZE, tile_size=TILE, num_aie_columns=4)
-    with pytest.raises(ValueError, match="not in the runlist"):
+    with pytest.raises(ValueError, match="no step runs"):
         _sequence(4, lambda add, silu: [[add, stray]])
 
 
@@ -372,10 +373,12 @@ def test_sequence_refuses_a_packing_without_a_full_elf():
     add = ElementwiseAdd(size=SIZE, tile_size=TILE, num_aie_columns=4)
     with pytest.raises(ValueError, match="one full-ELF device"):
         OperatorSequence(
-            name="coresidence_xclbin",
-            runlist=[(add, "a", "b", "y")],
-            input_args=["a", "b"],
-            output_args=["y"],
+            TracedGraph.of_steps(
+                "coresidence_xclbin",
+                sequences.steps((add, "a", "b", "y")),
+                ["a", "b"],
+                ["y"],
+            ),
             full_elf=False,
             coresident=AdjacentPacking(),
         )
@@ -440,14 +443,12 @@ def test_traced_graph_packs():
     # Three designs, add and silu recurring: the policy packs all three, so
     # the whole graph is one configure.
     traced = Chain(SIZE, TILE, columns=2).trace(a=(SIZE,), b=(SIZE,))
-    temporal = traced.sequence("graph_temporal", full_elf=True)
-    packed = traced.sequence(
-        "graph_packed", full_elf=True, coresident=AdjacentPacking()
-    )
+    temporal = OperatorSequence(traced, full_elf=True)
+    packed = OperatorSequence(traced, full_elf=True, coresident=AdjacentPacking())
     temporal.prepare()
     packed.prepare()
     fused = Fusion(packed)
-    assert len(fused.designs) == 3 and len(fused.runlist) == 5
+    assert len(fused.designs) == 3 and len(fused.steps) == 5
 
     # Temporal: a configure per step that changes design, and the reset.
     assert len(re.findall(r"aiex\.configure", Fusion(temporal).text())) == 6
@@ -457,7 +458,7 @@ def test_traced_graph_packs():
         Packing.device_name(list(fused.designs)),
         Fusion.EMPTY,
     ]
-    assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, *_ in fused.runlist]
+    assert re.findall(r"aiex\.run @(\w+)", text) == [n for n, _ in fused.steps]
 
 
 @_builds_elf

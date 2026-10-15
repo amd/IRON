@@ -15,6 +15,7 @@ Needs a device, since the fused path is NPU2-only and the ELF is genuinely
 built here rather than mocked.
 """
 
+import dataclasses
 import inspect
 
 import aie.utils as aie_utils
@@ -25,6 +26,7 @@ from aie.utils.trace import TraceConfig
 
 from iron.common import In, Operator, Out, Param
 from iron.common.design import OperatorDesign, runtime
+from iron.common.image.sequence import OperatorSequence
 from iron.operators import GEMM, MHA, ElementwiseAdd
 from iron.tests.common.graphs import Adds
 
@@ -34,8 +36,10 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 def _captured(name, adds=2, **declared):
     """X + w + w (or as many adds of w) as a graph function, fused and compiled."""
     add = ElementwiseAdd(size=1024, tile_size=128, **declared)
-    sequence = Adds(add, adds).trace(x=(1024,), w=(1024,)).sequence(name, full_elf=True)
-    return sequence.compile()
+    traced = Adds(add, adds).trace(x=(1024,), w=(1024,))
+    return OperatorSequence(
+        dataclasses.replace(traced, name=name), full_elf=True
+    ).compile()
 
 
 def test_captured_graph_compiles_to_an_elf():

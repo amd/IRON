@@ -52,12 +52,12 @@ def test_a_graph_compiles_to_one_xclbin_per_operator_chained(device):
     dispatch = seq._image
     assert dispatch is not None
     ops = list(seq.unique_operators())
-    assert len(ops) == 5 and len(seq.runlist) == 5
+    assert len(ops) == 5 and len(seq.steps) == 5
     # Five operators, four designs: the gate and up projections share one,
     # so they link one kernel instance and run one instruction stream.
-    kernels = {dispatch.labels[id(op)] for op in ops}
+    kernels = {dispatch.links[id(op)].kernel.kernel_name for op in ops}
     assert len(kernels) == 4, kernels
-    entries = {id(op): dispatch.designs[id(op)].get_cache_entry() for op in ops}
+    entries = {id(op): dispatch.links[id(op)].design.get_cache_entry() for op in ops}
     gate, up = ops[0], ops[1]
     assert type(gate).__name__ == type(up).__name__ == "GEMV"
     assert entries[id(gate)].insts == entries[id(up)].insts

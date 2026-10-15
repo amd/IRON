@@ -30,6 +30,7 @@ from iron.common.declare import Unresolvable
 from iron.common.graph.fold import Made, Place, Prologue, folded, replaced
 from iron.common.graph.handle import Affine, PerCall
 from iron.common.image.sequence import OperatorSequence
+from iron.common.image.step import BufferRef, SequenceStep
 from iron.common.image.artifacts import Parameter
 from iron.common.image.packaging import Kind
 from iron.lm.blocks import SwiGLU, project
@@ -93,7 +94,7 @@ def test_tracing_records_the_runlist_with_names_from_roles():
     ffn, refs = _ffn()
     t = ffn.trace(x=(1, E))
     assert isinstance(t, TracedGraph)
-    assert [(type(op).__name__, *names) for op, *names in t.runlist] == [
+    assert [(type(s.op).__name__, *map(str, s.refs())) for s in t.steps] == [
         ("RMSNorm", "x", "w0", "rmsnorm0"),
         ("GEMV", "w1", "rmsnorm0", "gemv1"),
         ("GEMV", "w2", "rmsnorm0", "gemv2"),
@@ -102,7 +103,9 @@ def test_tracing_records_the_runlist_with_names_from_roles():
         ("Copy", "elementwisemul4[0:512]", "state0"),
         ("GEMV", "w3", "elementwisemul4", "out"),
     ]
-    assert t.input_args == ["x"] and t.output_args == ["out"]
+    assert [h.name for h in t.inputs] == ["x"] and [h.name for h in t.outputs] == [
+        "out"
+    ]
     # Weights, the state and a sliced intermediate keep private addresses.
     assert t.pinned == {
         "w0": E * 2,
@@ -125,20 +128,25 @@ def test_a_name_the_tracer_makes_up_never_aliases_one_it_was_given():
             return ElementwiseAdd(SiLU(x), self.silu0)
 
     t = Held().trace(x=(E,))
-    assert [(type(op).__name__, *names) for op, *names in t.runlist] == [
+    assert [(type(s.op).__name__, *map(str, s.refs())) for s in t.steps] == [
         ("SiLU", "x", "silu0_1"),
         ("Copy", "silu0_1", "out"),
         ("SiLU", "x", "silu1"),
         ("ElementwiseAdd", "silu1", "silu0", "out_1"),
     ]
-    assert t.output_args == ["out_1"] and t.pinned == {"out": E * 2, "silu0": E * 2}
+    assert [h.name for h in t.outputs] == ["out_1"] and t.pinned == {
+        "out": E * 2,
+        "silu0": E * 2,
+    }
 
     class Given(iron.Graph):
         def body(self, out):
             return SiLU(out)
 
     t = Given().trace(out=(E,))
-    assert t.input_args == ["out"] and t.output_args == ["out_1"]
+    assert [h.name for h in t.inputs] == ["out"] and [h.name for h in t.outputs] == [
+        "out_1"
+    ]
 
 
 def test_arrays_are_shared_by_array_key_and_extents_are_not():
@@ -200,14 +208,14 @@ def test_a_state_written_by_one_step_is_pinned_and_readable():
 def test_slices_are_views_into_the_parent_in_bytes():
     h = Handle((8, 64), bfloat16, "acts", "intermediate")
     part = h[2:4]
-    assert part.shape == (2, 64) and part.buffer_name == "acts[256:512]"
-    assert h[3].shape == (64,) and h[3].buffer_name == "acts[384:512]"
+    assert part.shape == (2, 64) and part.ref() == BufferRef("acts", 256, 256)
+    assert h[3].shape == (64,) and h[3].ref() == BufferRef("acts", 384, 128)
     with pytest.raises(TypeError, match="slicing a slice"):
         part[0]
     with pytest.raises(ValueError, match="unit steps"):
         h[::2]
-    assert h.reshape(512).shape == (512,) and h.reshape(512).buffer_name == "acts"
-    assert part.reshape(128).buffer_name == "acts[256:512]"
+    assert h.reshape(512).shape == (512,) and h.reshape(512).ref() == BufferRef("acts")
+    assert part.reshape(128).ref() == BufferRef("acts", 256, 256)
     with pytest.raises(ValueError, match="cannot reshape"):
         h.reshape(3, 3)
 
@@ -219,13 +227,13 @@ def test_an_input_read_only_through_slices_is_laid_out_whole():
 
     t = Halves().trace(x=(E,))
     assert t.pinned == {"x": E * 2}
-    seq = t.sequence()
+    seq = OperatorSequence(t)
     seq.prepare()
-    assert seq.subbuffer_layout["x"] == ("input", 0, E * 2)
-    assert seq.slice_info == {
-        f"x[{E}:{2 * E}]": ("x", E, 2 * E),
-        f"x[0:{E}]": ("x", 0, E),
-    }
+    assert seq.layout["x"] == ("input", 0, E * 2)
+    assert [s.buffers[0] for s in seq.steps] == [
+        BufferRef("x", E, E),
+        BufferRef("x", 0, E),
+    ]
 
 
 def test_alike_instances_bound_to_different_values_are_different_designs():
@@ -320,7 +328,7 @@ def test_an_explicit_instance_is_applied_like_the_class():
     step = Step()
 
     t = step.trace(x=(E,))
-    assert t.runlist[0][0] is q and t.output_args == ["out"]
+    assert t.steps[0].op is q and [h.name for h in t.outputs] == ["out"]
     with pytest.raises(TypeError, match="outside a graph's body on device tensors"):
         q(w, z(E))
 
@@ -394,7 +402,7 @@ def test_swiglu_one_token_shares_one_array_and_one_build_for_gate_and_up():
 
     ffn = SwiGLU(z(H, E), z(H, E), z(E, H))
     t = ffn.trace(x=(1, E))
-    assert [type(op).__name__ for op, *_ in t.runlist] == [
+    assert [type(s.op).__name__ for s in t.steps] == [
         "GEMV",
         "GEMV",
         "SiLU",
@@ -405,7 +413,9 @@ def test_swiglu_one_token_shares_one_array_and_one_build_for_gate_and_up():
     assert gate.array_key() == up.array_key() and gate.design_key() == up.design_key()
     assert down.design_key() != gate.design_key()
     assert (gate.M, gate.K, down.M, down.K) == (H, E, E, H)
-    assert t.input_args == ["x"] and t.output_args == ["out"]
+    assert [h.name for h in t.inputs] == ["x"] and [h.name for h in t.outputs] == [
+        "out"
+    ]
     with pytest.raises(ValueError, match="do not agree"):
         SwiGLU(z(H, E), z(H, E), z(H, E))
 
@@ -417,7 +427,7 @@ def test_swiglu_folds_its_silu_and_its_product_into_the_gate(npu2):
         ("SiLU into GEMV", 1),
         ("SiLU, then ElementwiseMul into GEMV", 1),
     ]
-    assert [type(op).__name__ for op, *_ in f.runlist] == ["GEMV", "GEMV", "GEMV"]
+    assert [type(s.op).__name__ for s in f.steps] == ["GEMV", "GEMV", "GEMV"]
     up, gate, down = f.steps
     assert [type(link.op) for link in gate.op.finish] == [SiLU, ElementwiseMul]
     assert up.op.finish == down.op.finish == Chain()
@@ -428,7 +438,7 @@ def test_swiglu_folds_its_silu_and_its_product_into_the_gate(npu2):
     mul = next(s for s in t.steps if type(s.op) is ElementwiseMul)
     assert gate.inputs[2].name == up.outputs[0].name == mul.inputs[1].name
     assert gate.outputs[0].name == mul.outputs[0].name == down.inputs[1].name
-    assert f.input_args == t.input_args and f.output_args == t.output_args
+    assert f.inputs == t.inputs and f.outputs == t.outputs
 
 
 @pytest.mark.parametrize("device", ["npu1", "npu2"])
@@ -745,7 +755,7 @@ def test_a_copy_into_a_state_folds_into_its_producers_drain(npu2):
     assert [type(s.op).__name__ for s in f.steps] == ["GEMV", "SiLU"]
     (slot,) = f.steps[0].outputs
     # It drains into the whole cache, at the run the copy's offset moves.
-    assert slot.buffer_name == "cache"
+    assert slot.ref() == BufferRef("cache")
     assert f.steps[0].op.placements == (("C", 8 * 512, 0),)
     (binding,) = f.bindings
     assert binding.op is f.steps[0].op and binding.member.name == "C_offset"
@@ -776,7 +786,7 @@ class _Row(iron.Graph):
 def test_a_copy_to_a_fixed_run_folds_and_one_of_part_of_its_input_stays(npu2):
     f, count = folded(_Row("static").trace(x=(E,)), npu2)
     assert [str(fold) for fold in count] == ["Copy into the drain of GEMV"]
-    assert f.steps[0].outputs[0].buffer_name == "cache[1024:2048]"
+    assert f.steps[0].outputs[0].ref() == BufferRef("cache", 1024, 1024)
     assert f.steps[0].op.placements == (("C", 512, 0),)
     assert not f.bindings
     t = _Row("from pos").trace(x=(E,))
@@ -897,16 +907,21 @@ def test_two_spellings_of_one_array_are_one_design():
     b = GEMV(M=64, K=256, num_aie_columns=2, tile_size_input=2, tile_size_output=2)
     assert a.design_key() != b.design_key()  # as given
     seq = OperatorSequence(
-        "two_spellings",
-        [(a, "x", "w", "y"), (b, "x2", "w", "z")],
-        input_args=["x", "x2", "w"],
-        output_args=["z"],
+        TracedGraph.of_steps(
+            "two_spellings",
+            [
+                SequenceStep(a, (BufferRef("x"), BufferRef("w"), BufferRef("y"))),
+                SequenceStep(b, (BufferRef("x2"), BufferRef("w"), BufferRef("z"))),
+            ],
+            ["x", "x2", "w"],
+            ["z"],
+        )
     )
     seq.prepare()
     designs, _ = seq.unique_designs()
     assert len(designs) == 1 and designs[0].tile_size_output == 2
     ffn, _ = _ffn()
-    seq = ffn.trace(x=(1, E)).sequence()
+    seq = OperatorSequence(ffn.trace(x=(1, E)))
     seq.prepare()
     assert len(seq.unique_designs()[0]) == 6
 
@@ -935,7 +950,7 @@ def test_llama_decode_traces_and_tunes():
     t = model.trace(**model.shapes()[0])
     # A token takes no tensor. It returns the logits and carries the token
     # it draws and the position after it.
-    assert t.input_args == [] and t.output_args == ["out", "carry_token"]
+    assert t.inputs == [] and [h.name for h in t.outputs] == ["out", "carry_token"]
     # One function, so every version takes every value; a token binds two.
     assert [v.name for v in t.values] == ["token", "position", "chunk", "rows"]
     token, position = t.values[0], t.values[1]
@@ -1019,7 +1034,7 @@ def test_llama_decode_folds_its_norms_into_the_projections(npu2):
     assert not any(type(s.op) is RMSNorm for s in f.steps)
     row = model.config.n_kv_groups * model.config.head_dim
     placed = {
-        h.buffer_name: (
+        str(h.ref()): (
             s.op.placements,
             {k: e.name for k, e in s.op.bound_values.items()},
         )
@@ -1050,10 +1065,13 @@ def test_llama_prompt_traces_over_the_same_caches():
     g = small()
     cfg = g.config
     t = g.trace(**g.shapes()[1])
-    assert t.input_args == ["ids"] and t.output_args == ["out", "carry_token"]
+    assert [h.name for h in t.inputs] == ["ids"] and [h.name for h in t.outputs] == [
+        "out",
+        "carry_token",
+    ]
     assert [v.name for v in t.values] == ["token", "position", "chunk", "rows"]
     # MHA attends over the caches up to the chunk's last token.
-    mha = next(op for op, *_ in t.runlist if type(op).__name__ == "MHA")
+    mha = next(s.op for s in t.steps if type(s.op).__name__ == "MHA")
     assert {k: e.name for k, e in mha.bound_values.items()} == {
         "valid": "rows",
         "kv_valid": "position_p1",
@@ -1066,7 +1084,7 @@ def test_llama_prompt_traces_over_the_same_caches():
     assert set(t.weights) == set(token.weights)
     # Every projection reads the (out, in) checkpoint layout through the
     # column-major flag, which the trace carries into shape inference.
-    gemms = [op for op, *_ in t.runlist if type(op) is FLMGEMM]
+    gemms = [s.op for s in t.steps if type(s.op) is FLMGEMM]
     assert all(op.b_col_maj for op in gemms)
     K = {op.K for op in gemms}
     assert K == {cfg.emb_dim, cfg.hidden_dim, cfg.n_heads * cfg.head_dim}
@@ -1079,7 +1097,7 @@ def test_llama_prompt_projects_with_flm_gemm(device, request):
     dev = request.getfixturevalue(device)
     g = llama_1b(n_layers=1)
     t = g.trace(**g.shapes()[1])
-    ops = [op for op, *_ in t.runlist]
+    ops = [s.op for s in t.steps]
     assert not any(type(op) is GEMM for op in ops)
     gemms = [op for op in ops if type(op) is FLMGEMM]
     assert len(gemms) == 7
@@ -1147,14 +1165,18 @@ def test_llama_does_not_grow_with_the_context(step):
         return g.trace(**g.shapes()[0 if step == "decode" else 1])
 
     short, long = trace(256), trace(1024)
-    assert short.input_args == long.input_args == ([] if step == "decode" else ["ids"])
+    assert (
+        [h.name for h in short.inputs]
+        == [h.name for h in long.inputs]
+        == ([] if step == "decode" else ["ids"])
+    )
     grown = {name for name, n in long.pinned.items() if short.pinned[name] != n}
     caches = {"keys.0", "keys.1", "values.0", "values.1"}
     assert grown == {"rope", "draws", "drawn"} | caches
 
     def activations(t):
         return {
-            h.buffer_name: h.nbytes
+            h.ref(): h.nbytes
             for s in t.steps
             for h in s.inputs + s.outputs
             if h.role not in ("weight", "state")
@@ -1164,7 +1186,7 @@ def test_llama_does_not_grow_with_the_context(step):
     assert [op.array_key() for op in short.operators] == [
         op.array_key() for op in long.operators
     ]
-    kinds = [type(op).__name__ for op, *_ in long.runlist]
+    kinds = [type(s.op).__name__ for s in long.steps]
     rotations = [i for i, kind in enumerate(kinds) if kind == "RoPE"][1::2]
     mhas = [i for i, kind in enumerate(kinds) if kind == "MHA"]
     assert len(rotations) == len(mhas) == 2
@@ -1187,8 +1209,8 @@ def _resolved_fields(settings):
                 [
                     tuple((f.name, vars(op)[f.name]) for f in dataclasses.fields(op))
                     + (op.design_key(),)
-                    for op, *_ in trace().runlist
-                    for op in [op.resolved(dev)]
+                    for s in trace().steps
+                    for op in [s.op.resolved(dev)]
                 ]
             )
         return out
@@ -1885,8 +1907,8 @@ def test_an_optional_input_gives_a_version_without_it():
     table = np.arange(4 * 256, dtype=np.int32).astype(bfloat16).reshape(4, 256)
     g = _Gather(table)
     alone, added = g.trace(), g.trace(x=(256,))
-    assert alone.input_args == [] and added.input_args == ["x"]
-    assert g.trace(x=None).input_args == []
+    assert alone.inputs == [] and [h.name for h in added.inputs] == ["x"]
+    assert g.trace(x=None).inputs == []
     # The row is a view of the one table, indexed per call.
     (copy,) = alone.operators
     assert list(alone.weights) == [id(g.table)]
@@ -1958,10 +1980,12 @@ def test_a_graph_carries_its_next_values():
         ("node", Kind.CARRIED),
         ("steps", Kind.CARRIED),
     ]
-    assert t.input_args == [] and t.returned == []
+    assert t.inputs == [] and t.returned == []
     # The gathered node is an output buffer, so the host can read it back.
-    assert t.output_args == ["carry_node"] and t.carry["node"] is t.outputs[0]
-    assert t.runlist[0][-1] == "carry_node"
+    assert [h.name for h in t.outputs] == ["carry_node"] and t.carry[
+        "node"
+    ] is t.outputs[0]
+    assert t.steps[0].refs()[-1] == BufferRef("carry_node")
     assert t.carry["steps"] == Affine(t.values[1], 1, 1)
     node, steps = 3, 0
     for _ in range(5):
@@ -1979,7 +2003,7 @@ def test_a_carried_handle_may_also_be_returned():
             return nxt, iron.carry(node=nxt)
 
     t = Walk().trace()
-    assert t.output_args == ["out"] and t.carry["node"] is t.returned[0]
+    assert [h.name for h in t.outputs] == ["out"] and t.carry["node"] is t.returned[0]
     out, nxt = Walk().reference(node=7)
     assert out.reshape(-1)[0] == 0 and nxt["node"] == 0
 
@@ -2041,14 +2065,14 @@ def test_the_emit_program_follows_the_target_parameters():
     assert walk._carry is not None
     site = attach_emit(traced, walk._carried, walk._carry, slots=2)
     # The gathered node is computed into the carry's second plane.
-    assert traced.runlist[0][-1] == "carry[8:12]"
-    assert traced.runlist[-1][1:] == (
-        "emit_program",
-        "carry",
-        "emit_image",
-        "carry[0:8]",
+    assert traced.steps[0].refs()[-1] == BufferRef("carry", 8, 4)
+    assert traced.steps[-1].refs() == (
+        BufferRef("emit_program"),
+        BufferRef("carry"),
+        BufferRef("emit_image"),
+        BufferRef("carry", 0, 8),
     )
-    assert traced.feedback == ["emit_image"] and traced.output_args == []
+    assert traced.feedback == ["emit_image"] and traced.outputs == []
 
     words, _ = _words(traced)
     # A target laying the two out the other way, one as a core read.

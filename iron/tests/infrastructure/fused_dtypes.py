@@ -18,10 +18,13 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.utils.verify import Tolerance, compare
 from ml_dtypes import bfloat16
 
+from iron.common.graph.trace import TracedGraph
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
+from iron.common.image.step import BufferRef
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
+from iron.tests.common import sequences
 
 ROWS, ROW, SLOTS = 16, 32, 4
 TABLE_BYTES = ROWS * ROW * 4
@@ -54,7 +57,7 @@ def _check_gathers(run, gather, table):
     at a time, checking every slot each time.
     """
     symbols = _symbols(gather)
-    rows = run.get_buffer("rows")
+    rows = run.get_buffer(BufferRef("rows"))
     rows.numpy_view()[:] = -1
     rows.to("npu")
     expected = np.full((SLOTS, ROW), -1, dtype=np.int32)
@@ -67,7 +70,9 @@ def _check_gathers(run, gather, table):
         )
         run()
         expected[slot] = table[row]
-        got = run.get_buffer("rows").numpy()[: SLOTS * ROW].reshape(SLOTS, ROW)
+        got = (
+            run.get_buffer(BufferRef("rows")).numpy()[: SLOTS * ROW].reshape(SLOTS, ROW)
+        )
         assert np.array_equal(got, expected), (
             f"row {row} into slot {slot}: slots hold {got[:, 0].tolist()}, "
             f"expected {expected[:, 0].tolist()}"
@@ -78,32 +83,32 @@ def _check_gathers(run, gather, table):
 def test_int32_step_at_nonzero_offsets():
     add = ElementwiseAdd(size=ADD_SIZE, tile_size=1024, num_aie_columns=4)
     gather = _gather()
-    seq = OperatorSequence(
-        name="infra_fused_int32_gather",
-        runlist=[(add, "a", "b", "c"), (gather, "table", "rows")],
-        input_args=["a", "b", "table"],
-        output_args=["c", "rows"],
-        full_elf=True,
-    ).compile()
-    kinds = {name: seq.subbuffer_layout[name][:2] for name in ("table", "rows")}
+    traced = TracedGraph.of_steps(
+        "infra_fused_int32_gather",
+        sequences.steps((add, "a", "b", "c"), (gather, "table", "rows")),
+        ["a", "b", "table"],
+        ["c", "rows"],
+    )
+    seq = OperatorSequence(traced, full_elf=True).compile()
+    kinds = {name: seq.layout[name][:2] for name in ("table", "rows")}
     assert kinds["table"][0] == "input" and kinds["table"][1] > 0, kinds
     assert kinds["rows"][0] == "output" and kinds["rows"][1] > 0, kinds
 
     run = seq.get_callable()
-    assert run.get_buffer("table").dtype == np.int32
-    assert run.get_buffer("c").dtype == bfloat16
+    assert run.get_buffer(BufferRef("table")).dtype == np.int32
+    assert run.get_buffer(BufferRef("c")).dtype == bfloat16
 
     rng = np.random.default_rng(0)
     a = rng.standard_normal(ADD_SIZE).astype(bfloat16)
     b = rng.standard_normal(ADD_SIZE).astype(bfloat16)
-    run.get_buffer("a").numpy_view()[:] = a
-    run.get_buffer("b").numpy_view()[:] = b
+    run.get_buffer(BufferRef("a")).numpy_view()[:] = a
+    run.get_buffer(BufferRef("b")).numpy_view()[:] = b
     # Every value distinct, so a row landing anywhere else shows.
     table = np.arange(ROWS * ROW, dtype=np.int32).reshape(ROWS, ROW)
-    run.get_buffer("table").numpy_view()[:] = table.reshape(-1)
+    run.get_buffer(BufferRef("table")).numpy_view()[:] = table.reshape(-1)
     _check_gathers(run, gather, table)
 
-    c = run.get_buffer("c").numpy()[:ADD_SIZE]
+    c = run.get_buffer(BufferRef("c")).numpy()[:ADD_SIZE]
     verdict = compare(c, a + b, Tolerance.relative(0.04, 1e-6))
     assert verdict, f"the bf16 step beside the int32 one: {verdict.detail}"
 
@@ -115,16 +120,16 @@ def test_int32_slice_at_word_offset():
     """
     start = 36
     gather = _gather()
-    seq = OperatorSequence(
-        name="infra_fused_int32_slice",
-        runlist=[(gather, f"packed[{start}:{start + TABLE_BYTES}]", "rows")],
-        input_args=["packed"],
-        output_args=["rows"],
-        buffer_sizes={"packed": TABLE_BYTES + 64},
-        full_elf=True,
-    ).compile()
+    traced = TracedGraph.of_steps(
+        "infra_fused_int32_slice",
+        sequences.steps((gather, BufferRef("packed", start, TABLE_BYTES), "rows")),
+        ["packed"],
+        ["rows"],
+        pinned={"packed": TABLE_BYTES + 64},
+    )
+    seq = OperatorSequence(traced, full_elf=True).compile()
     run = seq.get_callable()
-    packed = run.get_buffer("packed")
+    packed = run.get_buffer(BufferRef("packed"))
     assert packed.dtype == np.int32, "a parent of int32 slices is viewed as int32"
     words = start // 4
     table = np.arange(ROWS * ROW, dtype=np.int32).reshape(ROWS, ROW)
@@ -138,14 +143,14 @@ def test_misaligned_buffer_is_rejected():
     the device (whose descriptor would drop the low address bits).
     """
     gather = _gather()
-    seq = OperatorSequence(
-        name="infra_fused_int32_misaligned",
-        runlist=[(gather, f"packed[34:{34 + TABLE_BYTES}]", "rows")],
-        input_args=["packed"],
-        output_args=["rows"],
-        buffer_sizes={"packed": TABLE_BYTES + 64},
-        full_elf=True,
+    traced = TracedGraph.of_steps(
+        "infra_fused_int32_misaligned",
+        sequences.steps((gather, BufferRef("packed", 34, TABLE_BYTES), "rows")),
+        ["packed"],
+        ["rows"],
+        pinned={"packed": TABLE_BYTES + 64},
     )
+    seq = OperatorSequence(traced, full_elf=True)
     seq.prepare()
     with pytest.raises(ValueError, match="not a multiple of 4"):
         Fusion(seq).text()
