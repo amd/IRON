@@ -11,6 +11,9 @@ Gemma 4 model from open source code. The FastFlowLM infrastructure loads the
 model, tokenizes the prompt and serves the API; this repository provides the
 operators that run on the NPU on the text path of Gemma 4 E2B.
 
+For a smaller example that replaces only GEMM and dequant, see
+[Replace Gemma 4 GEMM and dequant in FastFlowLM](README_gemm_dequant.md).
+
 ## Quick start
 
 You need an NPU2 device (Strix, Krackan) and the IRON environment, see the

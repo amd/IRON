@@ -8,3 +8,5 @@ blobfile
 packaging
 pillow==12.3.0
 soundfile==0.14.0
+matplotlib
+seaborn
