@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 
 import iron
-from iron.common import Chain, Link
+from iron.common import Chain
 from iron.operators.clamp import Clamp
 from iron.operators.gemv import GEMV
 from iron.operators.mha import MHA
@@ -107,7 +107,7 @@ def test_shipped_builds_its_instructions_for_the_external_image(npu2):
         K=1024,
         N=1152,
         epilogue="gelu",
-        finish=Chain((Link(Clamp(size=256 * 1152, low=-2.0, high=2.0)),)),
+        finish=Chain.of(Clamp(size=256 * 1152, low=-2.0, high=2.0)),
     )
     insts = op.compile().insts
     assert insts is not None and insts.stat().st_size > 0

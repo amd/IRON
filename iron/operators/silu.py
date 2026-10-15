@@ -4,7 +4,7 @@
 from aie.iron.kernels import activation
 
 from iron import operators as catalog
-from iron.common import Chain, Link, UnaryElementwise, Auto
+from iron.common import Chain, UnaryElementwise, Auto
 from iron.common.elementwise import Sweep
 from iron.common.testing import Case, Testing
 
@@ -21,19 +21,18 @@ class SiLU(UnaryElementwise):
                 for name, chain in [
                     (
                         "finish_ElementwiseMul",
-                        Chain((Link(catalog.ElementwiseMul(size=2048)),)),
+                        Chain.of(catalog.ElementwiseMul(size=2048)),
                     ),
                     (
                         "finish_ElementwiseMul_at1",
-                        Chain((Link(catalog.ElementwiseMul(size=2048), 1),)),
+                        Chain.of(catalog.ElementwiseMul(size=2048), at=1),
                     ),
                     (
                         "finish_ElementwiseMul_at1GELU",
-                        Chain(
-                            (
-                                Link(catalog.ElementwiseMul(size=2048), 1),
-                                Link(catalog.GELU(size=2048)),
-                            )
+                        Chain.of(
+                            catalog.ElementwiseMul(size=2048),
+                            catalog.GELU(size=2048),
+                            at=(1, 0),
                         ),
                     ),
                 ]

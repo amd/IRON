@@ -13,7 +13,7 @@ import pytest
 from aie.helpers.taplib import TensorAccessPattern
 
 import iron.operators.flm.gemm.op as flm
-from iron.common import Chain, Link
+from iron.common import Chain
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
@@ -76,7 +76,7 @@ def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path)
 
 def test_shipped_external_sequence_lowers(tmp_path):
     clamp = Clamp(size=256 * 1152, low=-2.0, high=2.0)
-    op = shipped(M=256, K=1024, N=1152, epilogue="gelu", finish=Chain((Link(clamp),)))
+    op = shipped(M=256, K=1024, N=1152, epilogue="gelu", finish=Chain.of(clamp))
     lower(op, tmp_path)
 
 

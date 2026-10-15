@@ -734,7 +734,7 @@ code before relying on a line here; it is the authority.
 - Tuning: there is no search over a tunable's legal values, and no
   per-kernel L1 budget.
 - A fold whose cores would read more streams than a core tile's two input
-  channels is refused (`Operator._finish_at`). So EmbeddingGemma 2's
+  channels is refused (`Chain.at_tile`, at `resolved()`). So EmbeddingGemma 2's
   residual `ElementwiseAdd` does not fold into a weighted `RMSNorm` (its
   multiplying core would read the normalized line, the weight and the
   residual), its layer scale (`RowwiseMul` by a held row) does not fold

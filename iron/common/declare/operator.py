@@ -13,7 +13,6 @@ import copy
 import dataclasses
 import hashlib
 import inspect
-import math
 from collections.abc import Iterable, Mapping
 from contextvars import ContextVar
 from enum import Enum
@@ -30,14 +29,14 @@ from typing import (
 
 import aie.utils as aie_utils
 import numpy as np
-from aie.dialects.aie import AIEArch, AIETileType
+from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
 from aie.utils.hostruntime.tensor_class import NpuTensor
 from aie.utils.trace import TraceConfig
 from aie.utils.verify import Tolerance, Verdict, compare
 
 from ..testing import Testing
-from .chain import Chain, Link
+from .chain import Chain, Link, Side
 from .declaration import Declaration
 from .domain import Domain, Width
 from .field import Auto, Param, ParamSpec, Unresolvable
@@ -341,9 +340,7 @@ class Operator(metaclass=_OperatorMeta):
         """
         if len(self.outputs) != 1 or not self.outputs[0].finish:
             return None
-        return dataclasses.replace(
-            self, finish=self.finish.extended((*self.finish, Link(consumer, at)))
-        )
+        return dataclasses.replace(self, finish=self.finish.then(consumer, at))
 
     def prefold(self, producer: Operator, at: int = 0) -> Self | None:
         """This operator applying ``producer`` to its prepared input in its
@@ -363,9 +360,7 @@ class Operator(metaclass=_OperatorMeta):
         """
         if not any(m.prepare for m in self._members_io()):
             return None
-        return dataclasses.replace(
-            self, prepare=self.prepare.extended((Link(producer, at), *self.prepare))
-        )
+        return dataclasses.replace(self, prepare=self.prepare.after(producer, at))
 
     def on_array(self, other: Operator) -> Self | None:
         """This operator declared to run on ``other``'s array, or None:
@@ -746,168 +741,26 @@ class Operator(metaclass=_OperatorMeta):
             raise Unresolvable(
                 f"{type(self).__name__}.resolve() left {missing} unset for {dev}"
             )
-        if any(new.prepare.chains):
-            new._prepare_at(dev if dev is not None else self.dev)
-        if any(new.finish.chains):
-            new._finish_at(dev if dev is not None else self.dev)
+        at_dev = dev if dev is not None else self.dev
+        if any(new.prepare.chains) or any(new.finish.chains):
+            new = dataclasses.replace(
+                new,
+                prepare=(
+                    new.prepare.at_tile(new, Side.PREPARE, at_dev)
+                    if any(new.prepare.chains)
+                    else new.prepare
+                ),
+                finish=(
+                    new.finish.at_tile(new, Side.FINISH, at_dev)
+                    if any(new.finish.chains)
+                    else new.finish
+                ),
+            )
+            new._bind()
         new.validate()
         new.compatible()
         new._resolved = True
         return new
-
-    def _finish_at(self, dev) -> None:
-        """Rebuild each finish at the output tile, the array's unique and in
-        a fixed order.
-
-        Raises:
-            ValueError: No output is finished by the array that runs, or
-                the chain does not rebuild at the tile (``Chain.rebuilt``).
-            Unresolvable: Each core reads more streams, its own and the
-                finish's inputs, than a core tile has input channels, a
-                finish input would stream into a block held out of order,
-                or the finish's inputs do not fit the tiles or the
-                descriptors of the input they ride (`feed=True`).
-        """
-        out = self.outputs[0] if len(self.outputs) == 1 else None
-        # A subclass replacing array() does not apply what its base's output declares.
-        runs = next(k for k in type(self).__mro__ if "array" in vars(k))
-        if out is None or not out.finish or runs not in out.owner.__mro__:
-            raise ValueError(
-                f"{type(self).__name__}: its cores finish no output, so it "
-                f"applies no finish"
-            )
-        name = type(self).__name__
-        ordered = out.finish_block is None
-        finish = self.finish.rebuilt(
-            lambda link: self.finish_step(
-                link, out.finish_line, out.dtype, dev, ordered
-            ),
-            owner=name,
-            what="finish",
-        )
-        if not ordered and any(len(link.op.inputs) > 1 for link in finish):
-            raise Unresolvable(
-                f"{name}: its cores hold each block of the output in an order "
-                f"of their own, which a finish input does not stream in"
-            )
-        self.finish = finish
-        self._bind()
-        reads = sum(m.fills and m.obj_dims is not None for m in self._members_io())
-        if reads > dev.core_dma_channels_in:
-            raise Unresolvable(
-                f"{name}: its cores read {reads} streams with the finish's "
-                f"inputs, past a core tile's {dev.core_dma_channels_in} input "
-                f"channels, and no input of its is declared feed=True for them "
-                f"to ride"
-            )
-        riding = [b for b in self.finish_inputs if not b.streamed]
-        if not riding:
-            return
-        feed = next(b for b in self.inputs if b.feed)
-        carried, line = math.prod(feed.obj_shape), math.prod(out.obj_shape)
-        # The rest of the tile re-reads the input's: a shim descriptor's iterations.
-        repeats = carried // line
-        if feed.bounded is not None or out.bounded is not None:
-            raise Unresolvable(
-                f"{name}: the finish's inputs ride {feed.name} an output tile at "
-                f"a time, which a per-call bound does not move by"
-            )
-        if feed.count != out.count:
-            raise Unresolvable(
-                f"{name}: the finish's inputs ride {feed.name}'s {feed.count} "
-                f"lanes, which are not {out.name}'s {out.count}"
-            )
-        if feed.dtype != out.dtype:
-            raise Unresolvable(
-                f"{name}: the finish's inputs, of {out.name}'s dtype, ride "
-                f"{feed.name}, whose tiles are of another"
-            )
-        if carried % line or repeats > 1 << dev.get_dma_bd_iter_bits(0, 0):
-            raise Unresolvable(
-                f"{name}: a {line}-element tile of the finish's inputs fills a "
-                f"{carried}-element tile of {feed.name} in at most "
-                f"{1 << dev.get_dma_bd_iter_bits(0, 0)} whole reads, and does not"
-            )
-        if len(riding) > feed.depth:
-            raise Unresolvable(
-                f"{name}: the finish's {len(riding)} inputs ride {feed.name}, "
-                f"whose cores hold {feed.depth} tiles of it at once"
-            )
-        # Every one is live until the drains: a shim tile's descriptors serve
-        # both directions of each of its channels, a lane its share of them.
-        transfers = (1 + len(riding)) * out.elements // (out.count * line)
-        shims = sum(
-            dev.get_tile_type(col, 0) is AIETileType.ShimNOCTile
-            for col in range(dev.cols)
-        )
-        held = (
-            dev.get_num_bds(AIETileType.ShimNOCTile)
-            * shims
-            // (dev.shim_dma_channels_in + dev.shim_dma_channels_out)
-        )
-        if transfers > held:
-            raise Unresolvable(
-                f"{name}: a lane of {feed.name} carrying the finish's inputs is "
-                f"{transfers} transfers, one per tile of each, past the {held} "
-                f"descriptors a lane of a shim tile holds"
-            )
-
-    def _prepare_at(self, dev) -> None:
-        """Rebuild each prologue at the prepared input's tile, the array's
-        unique and in a fixed order.
-
-        Raises:
-            ValueError: No input is prepared, or the chain does not rebuild
-                at the tile (``Chain.rebuilt``).
-            Unresolvable: A step's other input is not one tile, the
-                prepared input brings a core more than one tile a call,
-                beside which no other input's tile streams, or, untiled,
-                its steps' inputs do not fit the tiles of the input they
-                ride (`feed=True`).
-        """
-        into = next((b for b in self.inputs if b.prepare), None)
-        if into is None:
-            raise ValueError(
-                f"{type(self).__name__}: its cores prepare no input, so it "
-                f"applies no prologue"
-            )
-        name = type(self).__name__
-        line = math.prod(into.obj_shape) if into.streamed else into.shape[-1]
-        for link in self.prepare:
-            for k, b in enumerate(link.op.inputs):
-                if k != link.at and b.elements != line:
-                    raise Unresolvable(
-                        f"{name}: {type(link.op).__name__}.{b.name} "
-                        f"is {b.elements} elements, not the {line}-element tile "
-                        f"it streams in beside"
-                    )
-        riding = sum(len(link.op.inputs) - 1 for link in self.prepare)
-        tiles = into.elements // (
-            1 if not into.streamed or into.replicate else into.count
-        )
-        if riding and tiles != line:
-            raise Unresolvable(
-                f"{name}: each core takes {tiles // line} tiles of "
-                f"{into.name} a call, and a prologue's inputs stream in beside one"
-            )
-        if riding and not into.streamed:
-            feed = next(b for b in self.inputs if b.feed)
-            if feed.dtype != into.dtype or math.prod(feed.obj_shape) < line:
-                raise Unresolvable(
-                    f"{name}: the prologue's inputs ride {feed.name}, whose "
-                    f"tiles do not hold a {line}-element line of {into.name}'s type"
-                )
-            if riding > feed.depth:
-                raise Unresolvable(
-                    f"{name}: the prologue's {riding} inputs ride {feed.name}, "
-                    f"whose cores hold {feed.depth} tiles of it at once"
-                )
-        self.prepare = self.prepare.rebuilt(
-            lambda link: link.at_line(line, into.dtype, dev),
-            owner=name,
-            what="prologue",
-        )
-        self._bind()
 
     def copy(self) -> Self:
         """A fresh instance for one build, keeping resolution and bound values."""
@@ -1307,12 +1160,19 @@ class Operator(metaclass=_OperatorMeta):
             own.append(f"prepare{names}{digest}")
         return "_".join([type(self).__name__, *own, dev.name])
 
-    def _members_io(self) -> list[Operand]:
+    def _declared_io(self) -> list[Operand]:
+        """This operator's own declared operands, by its class: not a
+        bind's synthetic finish or prepare extras, which a resolve rebuilds
+        from the chain as it stands, not as a previous bind left it.
+        """
         return [
             m
             for m in self.declaration.members
             if isinstance(m, Operand) and (m.when is None or vars(self)[m.when.name])
-        ] + [*self._prepare_inputs, *self._finish_inputs]
+        ]
+
+    def _members_io(self) -> list[Operand]:
+        return self._declared_io() + [*self._prepare_inputs, *self._finish_inputs]
 
     def __repr__(self) -> str:
         own = ", ".join(

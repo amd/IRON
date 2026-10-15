@@ -6,7 +6,7 @@ from typing import ClassVar
 from aie.iron.kernels import eltwise
 
 from iron import operators as catalog
-from iron.common import BinaryElementwise, Chain, In, Link, Out, Rowwise
+from iron.common import BinaryElementwise, Chain, In, Out, Rowwise
 from iron.common.elementwise import Sweep
 from iron.common.testing import Case, Testing
 
@@ -23,7 +23,7 @@ class ElementwiseAdd(BinaryElementwise):
                     dict(
                         size=2048,
                         num_aie_columns=4,
-                        finish=Chain((Link(catalog.SiLU(size=2048)),)),
+                        finish=Chain.of(catalog.SiLU(size=2048)),
                     ),
                     id="finish_SiLU",
                 )

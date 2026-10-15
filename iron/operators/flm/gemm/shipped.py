@@ -8,7 +8,7 @@ this is the binary it was ported from, downloaded and pinned by digest, and
 driven by the same declaration:
 
 ```python
-Shipped(M=1024, K=1536, N=6144, finish=Chain((Link(SiLU(size=1024 * 6144)),)))
+Shipped(M=1024, K=1536, N=6144, finish=Chain.of(SiLU(size=1024 * 6144)))
 ```
 
 It exists so the port can be measured against what it was ported from, on

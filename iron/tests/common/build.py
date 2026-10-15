@@ -33,7 +33,6 @@ from iron.common import (
     Chain,
     Extent,
     In,
-    Link,
     Operator,
     Out,
     Value,
@@ -555,7 +554,7 @@ def test_flm_gemm_finishes_with_an_activation_then_a_clamp_in_its_epilogue():
     assert clamped.resolved().residents["mode"] == Epilogue.SILU.mode
     # Its gelu is not the GELU operator's, nothing follows its clamp, it
     # applies one activation, and a step finishes nothing of its own.
-    finished = SiLU(size=size, finish=Chain((Link(ElementwiseMul(size=size)),)))
+    finished = SiLU(size=size, finish=Chain.of(ElementwiseMul(size=size)))
     for refused in (
         op.fold(GELU(size=size)),
         clamped.fold(Clamp(size=size, low=0.0, high=1.0)),

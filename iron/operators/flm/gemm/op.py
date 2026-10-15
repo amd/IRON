@@ -286,7 +286,7 @@ class GEMM(Operator):
         if self.epilogue in ACTIVATIONS.values():
             raise ValueError(
                 f"flm.GEMM applies {self.epilogue} as a finish step: "
-                f"finish=Chain((Link(SiLU(...)),)), or a graph folding it"
+                f"finish=Chain.of(SiLU(...)), or a graph folding it"
             )
         if self.K % self.k_tile:
             raise ValueError(

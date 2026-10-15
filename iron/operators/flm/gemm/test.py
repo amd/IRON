@@ -12,7 +12,7 @@ from aie.utils.verify import Tolerance
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
-from iron.common import Chain, Link
+from iron.common import Chain
 from iron.common.design import OperatorDesign
 from iron.common.testing import run_test, vectors
 from iron.operators.clamp import Clamp
@@ -150,11 +150,11 @@ def finished(M, N, epilogue, clamp) -> dict:
     its finish.
     """
     activation = {SILU: SiLU, SIGMOID: Sigmoid}.get(epilogue)
-    steps = [] if activation is None else [Link(activation(size=M * N))]
+    ops = [] if activation is None else [activation(size=M * N)]
     if clamp is not None:
-        steps.append(Link(Clamp(size=M * N, low=clamp[0], high=clamp[1])))
+        ops.append(Clamp(size=M * N, low=clamp[0], high=clamp[1]))
     own = epilogue if epilogue is GELU else NONE
-    return dict(epilogue=own, finish=Chain(tuple(steps)))
+    return dict(epilogue=own, finish=Chain.of(*ops))
 
 
 def flm_vectors(operator, scale=4.0):

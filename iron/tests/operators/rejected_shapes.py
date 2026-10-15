@@ -22,7 +22,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common import Chain, Link, Unresolvable
+from iron.common import Chain, Unresolvable
 from iron.lm import project
 from iron.operators.copy import Copy, Gather
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -391,7 +391,7 @@ def test_a_finish_input_past_the_cores_input_channels_is_refused():
     core takes it, and so does a matvec's, on its matrix.
     """
     dev = from_name("npu2", n_cols=8)
-    finish = Chain((Link(ElementwiseMul(size=2048), 1),))
+    finish = Chain.of(ElementwiseMul(size=2048), at=1)
     with pytest.raises(Unresolvable, match="input channels"):
         ElementwiseAdd(size=2048, num_aie_columns=4, finish=finish).resolved(dev)
     SiLU(size=2048, num_aie_columns=4, finish=finish).resolved(dev)
@@ -407,14 +407,14 @@ def test_a_step_that_needs_the_order_of_a_gemm_block_is_refused():
     dev = from_name("npu2", n_cols=8)
     kwargs = dict(M=2048, K=2048, N=2048, b_col_maj=True)
     with pytest.raises(ValueError, match="reduces over rows"):
-        GEMM(
-            **kwargs, finish=Chain((Link(RMSNorm(rows=1024, tile_size=4096)),))
-        ).resolved(dev)
+        GEMM(**kwargs, finish=Chain.of(RMSNorm(rows=1024, tile_size=4096))).resolved(
+            dev
+        )
     with pytest.raises(Unresolvable, match="order of their own"):
         GEMM(
-            **kwargs, finish=Chain((Link(ElementwiseMul(size=2048 * 2048), 1),))
+            **kwargs, finish=Chain.of(ElementwiseMul(size=2048 * 2048), at=1)
         ).resolved(dev)
-    GEMM(**kwargs, finish=Chain((Link(SiLU(size=2048 * 2048)),))).resolved(dev)
+    GEMM(**kwargs, finish=Chain.of(SiLU(size=2048 * 2048))).resolved(dev)
 
 
 def test_a_finish_a_core_does_not_hold_beside_its_tiles_is_refused_or_narrowed():
@@ -425,14 +425,14 @@ def test_a_finish_a_core_does_not_hold_beside_its_tiles_is_refused_or_narrowed()
     """
     npu1, npu2 = from_name("npu1", n_cols=4), from_name("npu2", n_cols=8)
     kwargs = dict(M=2048, K=2048, N=2048, b_col_maj=True)
-    silu = Chain((Link(SiLU(size=2048 * 2048)),))
+    silu = Chain.of(SiLU(size=2048 * 2048))
     assert GEMM(**kwargs, finish=silu).resolved(npu1).tile_m == 32
     assert GEMM(**kwargs, finish=silu).resolved(npu2).tile_m == 64
     assert GEMM(**kwargs).resolved(npu1).tile_m == 64
     with pytest.raises(ValueError, match="a core holds 65920 bytes, past its 65536"):
         GEMM(**kwargs, tile_m=64, finish=silu).resolved(npu1)
     gemv = dict(M=2048, K=8192, num_aie_columns=1, tile_size_input=1)
-    silu = Chain((Link(SiLU(size=2048)),))
+    silu = Chain.of(SiLU(size=2048))
     GEMV(**gemv, tile_size_output=2048, finish=silu).resolved(npu2)
     GEMV(**gemv, tile_size_output=1024, finish=silu).resolved(npu1)
     with pytest.raises(ValueError, match="a core holds 67712 bytes, past its 65536"):
