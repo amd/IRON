@@ -156,7 +156,7 @@ def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
 
-    if report.when == "call":
+    if report.when == "call" and not report.skipped:
         csv_reporter = item.session.config._csv_reporter
         if csv_reporter:
             # The pytest nodeid looks like this:
