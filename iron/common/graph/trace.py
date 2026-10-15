@@ -509,13 +509,18 @@ class Tracer:
                 f"{view!r} takes the rows the input {ids.name!r} names each "
                 f"call; only a Copy of it alone does, Copy(table[ids])"
             )
-        op = target.per_call_gather(
+        given = dict(
             rows=ids.shape[0],
             table_rows=table.shape[0],
             row=math.prod(table.shape[1:]),
             dtype=table.dtype,
             static_base=static_base,
         )
+        gather = target.per_call_gather
+        if self.profile is None:
+            op = gather(**given)
+        else:
+            op = self.profile.make(gather, **given)
         bound = ids.bounds.get(0)
         if bound is not None:
             self._bind(op, "valid_rows", bound)
