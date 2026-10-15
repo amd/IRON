@@ -206,16 +206,20 @@ class Awake:
     IRQ = "xdna_mailbox"
 
     def __init__(self, before: Mapping[str, int]):
+        # A container's cpuset may leave out the cores the completions
+        # interrupt: only the ones it allows can be held.
+        allowed = os.sched_getaffinity(0)
         self.cpus: set[int] = set()
         for irq, count in self.interrupts().items():
             if count > before.get(irq, 0):
                 self.cpus |= self._cpus(f"/proc/irq/{irq}/effective_affinity_list")
+        self.cpus &= allowed
         self.siblings: set[int] = set()
         for cpu in self.cpus:
             self.siblings |= self._cpus(
                 f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list"
             )
-        self.siblings -= self.cpus
+        self.siblings = (self.siblings & allowed) - self.cpus
         self._affinity: set[int] | None = None
         self._spinners: list[subprocess.Popen] = []
 

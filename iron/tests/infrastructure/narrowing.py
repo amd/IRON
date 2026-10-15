@@ -389,12 +389,16 @@ aie_utils.ensure_current_device()
 run = Standalone("starved", [SiLU(size=8192, tile_size=256)])
 before = Awake.interrupts()
 run.callable()
+# The cores timing holds the thread on, or where no completion interrupt is
+# visible (/proc/interrupts in some containers) one core it is left on.
+cores = Awake(before).cpus or {min(os.sched_getaffinity(0))}
+os.sched_setaffinity(0, cores)
 spinners = [
     subprocess.Popen([sys.executable, "-c", SPIN, str(cpu)], stdout=subprocess.PIPE, text=True)
-    for cpu in sorted(Awake(before).cpus)
+    for cpu in sorted(cores)
 ]
 try:
-    assert spinners and all(s.stdout.readline().strip() == "spinning" for s in spinners)
+    assert all(s.stdout.readline().strip() == "spinning" for s in spinners), cores
     os.setpriority(os.PRIO_PROCESS, 0, 19)
     time_interleaved([run.callable], Timing(rounds=4, calls=5))
 finally:
@@ -409,7 +413,9 @@ def test_timing_refuses_a_figure_its_calls_waited_for_a_cpu_through():
     # thread off them until each core's tick, 970 us for a 190 us run. At
     # nice 19 beside nice-0 spinners of its own session, as an autogroup
     # weighs them, the thread waits every call: 1.6-5.7 ms in ten of ten
-    # runs on Strix Halo, where at nice 0 it waited in two of five.
+    # runs on Strix Halo, where at nice 0 it waited in two of five. Where
+    # no completion interrupt is visible, the spinners share the one core
+    # the thread is left on.
     starved = subprocess.run(
         [sys.executable, "-c", STARVE], capture_output=True, text=True
     )
