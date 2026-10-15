@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
-from ml_dtypes import bfloat16, finfo
+from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
@@ -111,14 +111,8 @@ class AudioTower(Model):
         # at |logit| >= 32 (eg2-audio-bug.md).
         self.scores = iron.state((H, T, K), dtype=np.float32)
         self.probs = iron.state((H, T, K))
-        q, j = np.arange(T)[:, None], np.arange(B)
-        # An odd query's band starts a column early, at an even column.
-        d = j - q % 2
-        mask = np.where(
-            (d >= 0) & (d < W) & (q - (W - 1) + d >= 0), 0, finfo(bfloat16).min
-        )
-        self.mask = np.tile(mask.astype(bfloat16), (H, 1))
-        # The key scale moved to the queries; the soft cap is Softmax's own.
+        # The key scale moved to the queries; the soft cap and the band
+        # (window, period) are Softmax's own.
         q_scale = D**-0.5 / math.log(2)
         k_scale = math.log(1 + math.e) / math.log(2)
         scale = q_scale * k_scale
@@ -319,9 +313,10 @@ class AudioTower(Model):
         probabilities = Softmax.step(
             logits,
             addend=position,
-            mask=self.mask,
             soft_cap=c.logit_cap,
             input_dtype=np.float32,
+            window=W,
+            period=T,
         )
         Copy.step(probabilities, probs, dst=band)
         for i in range(H):

@@ -9,6 +9,7 @@ import ml_dtypes
 import numpy as np
 from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
+from aie.helpers.util import np_dtype_to_mlir_type
 from aie.iron import (
     Buffer,
     ObjectFifo,
@@ -49,37 +50,49 @@ _STREAMED_ROWS = 48
 
 def _draw(op) -> dict:
     """``vectors()``'s keywords: the float32 path's logits and addend
-    centred. The bf16 path draws its default, ``[0, 1)``. ``mask`` is not an
-    operand: a caller gives it, real, at construction.
+    centred. The bf16 path draws its default, ``[0, 1)``.
     """
     if np.dtype(op.input_dtype) != np.dtype(np.float32):
         return {}
     return dict(centered=(op.x,) + ((op.addend,) if op.has_addend else ()))
 
 
-def _masked_case(cls, dev) -> list:
-    """EG2 audio's own combination: a soft cap, a real band mask (lowest or
-    0, a row keeping at least one) and a pre-cap addend.
+def _band_mask(window: int, period: int, rows: int, cols: int):
+    """EG2 audio attention's band, restated as the bf16 mask
+    ``activation.softmax_ref``/``softmax_f32_bound`` take: row ``i``'s
+    query position is ``i % period`` (the band wraps every ``period`` rows,
+    EG2 tiling one band over every attention head), and it keeps column
+    ``j`` where ``j >= max(q % 2, window - 1 - q + q % 2)`` and
+    ``j < window + q % 2`` (an odd query's band starts a column later).
     """
-    rows, cols = 64, 32
-    rng = np.random.default_rng(7)
-    keep = rng.random((rows, cols)) < 0.75
-    keep[:, 0] = True
+    q = np.arange(rows) % period
+    parity = q % 2
+    lo = np.maximum(parity, window - 1 - q + parity)
+    hi = window + parity
+    j = np.arange(cols)[None, :]
+    band = (j >= lo[:, None]) & (j < hi[:, None])
     lowest = ml_dtypes.finfo(ml_dtypes.bfloat16).min
-    mask = np.where(keep, ml_dtypes.bfloat16(0.0), lowest).astype(ml_dtypes.bfloat16)
+    return np.where(band, ml_dtypes.bfloat16(0.0), lowest)
+
+
+def _banded_case(cls, dev) -> list:
+    """EG2 audio's own combination: a soft cap, its own window and period,
+    and a pre-cap addend.
+    """
     return [
         Case(
             dict(
-                rows=rows,
-                cols=cols,
+                rows=64,
+                cols=32,
                 num_aie_columns=2,
                 num_channels=2,
                 input_dtype=np.float32,
                 soft_cap=50.0,
                 has_addend=True,
-                mask=mask,
+                window=12,
+                period=16,
             ),
-            id="f32_soft_cap_masked_addend",
+            id="f32_soft_cap_banded_addend",
         )
     ]
 
@@ -109,7 +122,7 @@ class Softmax(Operator):
                 bench=True,
             ),
             # The float32 input path: a plain row, then EG2 audio's own
-            # combination (a soft cap, a mask and a pre-cap addend).
+            # combination (a soft cap, a band and a pre-cap addend).
             Case(
                 dict(
                     rows=32,
@@ -120,7 +133,7 @@ class Softmax(Operator):
                 ),
                 lower=True,
             ),
-            _masked_case,
+            _banded_case,
         ],
         draw=_draw,
     )
@@ -134,15 +147,16 @@ class Softmax(Operator):
     )
     streamed: bool = Auto(domain=(False, True))
     input_dtype: Any = Param(default=ml_dtypes.bfloat16, repr=False)
-    # Float input only, mlir-aie's softmax_f32_bf16: a pre-cap addend, an
-    # additive mask and cap * tanh(x / cap).
+    # Float input only, mlir-aie's softmax_f32_bf16: a pre-cap addend and
+    # cap * tanh(x / cap).
     soft_cap: float | None = Param(default=None)
     has_addend: bool = Param(default=False)
-    # Not a stream: a core has two input DMA channels, and x and addend
-    # already take both. A real mask is instead a per-row constant resident
-    # in the core (``Array._build_f32``'s ``Buffer``s), so it is given whole
-    # at construction, not drawn or filled per call.
-    mask: Any = Param(default=None, repr=False)
+    # Float input only, softmax_rows_banded_f32_bf16: a band computed from
+    # these two in the core (window, and the row's own query position,
+    # wrapped every period rows), not a mask operand -- a core has two
+    # input DMA channels, and x and addend already take both.
+    window: int | None = Param(default=None)
+    period: int | None = Param(default=None)
 
     length = Extent(cols)  # cols, or fewer per call
 
@@ -173,34 +187,22 @@ class Softmax(Operator):
         if self.cols % 16 != 0:
             raise ValueError(f"cols ({self.cols}) must be a multiple of 16")
         if np.dtype(self.input_dtype) != np.dtype(np.float32) and (
-            self.soft_cap is not None or self.mask is not None or self.has_addend
+            self.soft_cap is not None
+            or self.has_addend
+            or self.window is not None
+            or self.period is not None
         ):
             raise ValueError(
-                "softmax: soft_cap, mask and addend are options of the "
-                "float32 input path; pass input_dtype=np.float32"
+                "softmax: soft_cap, addend, window and period are options "
+                "of the float32 input path; pass input_dtype=np.float32"
             )
-        if self.mask is not None and self.mask.shape != (self.rows, self.cols):
+        if (self.window is None) != (self.period is None):
+            raise ValueError("softmax: window and period are given together")
+        if self.window is not None and not self.has_addend:
             raise ValueError(
-                f"mask must be ({self.rows}, {self.cols}), not {self.mask.shape}"
+                "softmax: the banded path (window, period) always takes a "
+                "pre-cap addend; pass has_addend=True"
             )
-
-    def _mask_bytes(self, pairs: tuple) -> tuple:
-        """``pairs``, ``(name, value)`` tuples, with ``mask``'s raw array
-        (unhashable) swapped for its bytes.
-        """
-        return tuple(
-            (n, self.mask.tobytes()) if n == "mask" else (n, v) for n, v in pairs
-        )
-
-    def array_key(self):
-        key = super().array_key()
-        if self.mask is None:
-            return key
-        return (key[0],) + self._mask_bytes(key[1:])
-
-    def design_key(self):
-        cls, own = super().design_key()
-        return (cls, own if self.mask is None else self._mask_bytes(own))
 
     def resolve(self, dev):
         cols = self.resolve_columns(
@@ -274,7 +276,8 @@ class Softmax(Operator):
         input_dtype: Any
         soft_cap: float | None
         has_addend: bool
-        mask: Any
+        window: int | None
+        period: int | None
         blocks: Value
         valid_cols: Value
         x: Operand
@@ -286,6 +289,8 @@ class Softmax(Operator):
             rows_per_core = self.rows // n_cores
             block = self.block
             if np.dtype(self.input_dtype) == np.dtype(np.float32):
+                if self.window is not None:
+                    return self._build_f32_banded(n_cores, rows_per_core, block)
                 return self._build_f32(n_cores, rows_per_core, block)
             tile_ty = self.x.obj_type
             softmax_k = activation.softmax(block)
@@ -390,18 +395,11 @@ class Softmax(Operator):
         def _build_f32(self, n_cores: int, rows_per_core: int, block: int) -> Built:
             """The float32 input path: a row held whole, one call to
             ``softmax_f32_bf16`` a row, its ``n`` bound to ``block`` at build time.
-
-            ``x`` and ``addend`` are the two streams a core's input channels
-            hold; a real ``mask`` is instead ``rows_per_core`` per-core
-            ``Buffer``s, one a row, their content resident from this build (as
-            the streamed path's ``Buffer(state_ty)`` per row already is,
-            above), so the row loop is unrolled in Python to index them.
             """
             softmax_k = activation.softmax(
                 block,
                 input_dtype=self.input_dtype,
                 soft_cap=self.soft_cap,
-                masked=self.mask is not None,
                 addend=self.has_addend,
             )
             of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
@@ -411,34 +409,14 @@ class Softmax(Operator):
                 if self.has_addend
                 else None
             )
-            mask_row_ty = np.ndarray[(block,), np.dtype[ml_dtypes.bfloat16]]
-            masks = (
-                [
-                    [
-                        Buffer(
-                            mask_row_ty,
-                            initial_value=self.mask[k * rows_per_core + r],
-                        )
-                        for r in range(rows_per_core)
-                    ]
-                    for k in range(n_cores)
-                ]
-                if self.mask is not None
-                else None
-            )
 
             def whole(of_in, of_out, softmax, *rest):
                 of_addend = rest[0] if self.has_addend else None
-                mask_rows = (
-                    rest[1 if self.has_addend else 0 :] if masks is not None else ()
-                )
-                for r in range(rows_per_core):
+                for _ in range_(rows_per_core):
                     elem_in = of_in.acquire(1)
                     args = [elem_in]
                     if of_addend is not None:
                         args.append(of_addend.acquire(1))
-                    if mask_rows:
-                        args.append(mask_rows[r])
                     elem_out = of_out.acquire(1)
                     softmax(*args, elem_out, block)
                     of_in.release(1)
@@ -450,8 +428,7 @@ class Softmax(Operator):
                 Worker(
                     whole,
                     [of_ins[k].cons(), of_outs[k].prod(), softmax_k]
-                    + ([of_addends[k].cons()] if of_addends else [])
-                    + (masks[k] if masks else []),
+                    + ([of_addends[k].cons()] if of_addends else []),
                 )
                 for k in range(n_cores)
             ]
@@ -459,6 +436,78 @@ class Softmax(Operator):
             self.y.bind([f.cons() for f in of_outs])
             if of_addends is not None:
                 self.addend.bind([f.prod() for f in of_addends])
+            return Built(workers)
+
+        def _build_f32_banded(
+            self, n_cores: int, rows_per_core: int, block: int
+        ) -> Built:
+            """The float32 banded path: one row a call, a real device loop (its
+            row count does not grow the core's code, unlike a resident mask's
+            row-by-row ``Buffer``s would), to ``softmax_rows_banded_f32_bf16``.
+            The band comes from ``window``, ``period`` and the row's own
+            position (the core's ``row_offset`` plus the loop index) computed
+            in the kernel, so there is no mask operand.
+            """
+            softmax_k = activation.softmax(
+                block, input_dtype=self.input_dtype, soft_cap=self.soft_cap, addend=True
+            )
+            banded_k = softmax_k.object_file.bind(
+                "softmax_rows_banded_f32_bf16",
+                [
+                    self.x.obj_type,
+                    self.addend.obj_type,
+                    self.y.obj_type,
+                    np.int32,
+                    np.int32,
+                    np.int32,
+                    np.int32,
+                    np.int32,
+                ],
+            )
+            of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
+            of_addends = [ObjectFifo(self.addend.obj_type) for _ in range(n_cores)]
+            of_outs = [ObjectFifo(self.y.obj_type) for _ in range(n_cores)]
+
+            def _whole(core_offset):
+                def whole(of_in, of_addend, of_out, fn):
+                    for r in range_(rows_per_core):
+                        elem_in = of_in.acquire(1)
+                        elem_addend = of_addend.acquire(1)
+                        elem_out = of_out.acquire(1)
+                        i32 = np_dtype_to_mlir_type(np.int32)
+                        r32 = arith.index_cast(r, to=i32)
+                        row_offset = arith.addi(r32, arith.constant(core_offset, i32))
+                        fn(
+                            elem_in,
+                            elem_addend,
+                            elem_out,
+                            1,
+                            block,
+                            self.window,
+                            self.period,
+                            row_offset,
+                        )
+                        of_in.release(1)
+                        of_addend.release(1)
+                        of_out.release(1)
+
+                return whole
+
+            workers = [
+                Worker(
+                    _whole(k * rows_per_core),
+                    [
+                        of_ins[k].cons(),
+                        of_addends[k].cons(),
+                        of_outs[k].prod(),
+                        banded_k,
+                    ],
+                )
+                for k in range(n_cores)
+            ]
+            self.x.bind([f.prod() for f in of_ins])
+            self.addend.bind([f.prod() for f in of_addends])
+            self.y.bind([f.cons() for f in of_outs])
             return Built(workers)
 
     def sequence(self, rt):
@@ -506,22 +555,38 @@ class Softmax(Operator):
         tg.finish()
 
     def tolerance(self) -> Tolerance | None:
-        return activation.softmax(
+        base = activation.softmax(
             self.cols,
             input_dtype=self.input_dtype,
             soft_cap=self.soft_cap,
-            masked=self.mask is not None,
+            masked=self.window is not None,
             addend=self.has_addend,
         ).contract.tolerance
+        if self.window is None:
+            return base
+        # judge() calls bound() with this operator's own operands (x, addend):
+        # the band is not one, so it is closed over instead of taken positionally.
+        mask = _band_mask(self.window, self.period, self.rows, self.cols)
+        return Tolerance.bounded(
+            lambda x, addend: base.bound(x, addend, mask),
+            max_mismatch_frac=base.max_mismatch_frac,
+            note=base.note,
+        )
 
     def reference(self, x, *rest):
         """The softmax kernel's contract reference, a row at a time.
 
         ``rest`` is ``addend`` where ``has_addend``: ``_call_reference``
-        gives only the operands present, positional. ``mask`` is not an
-        operand; it is read from ``self``.
+        gives only the operands present, positional. The band, where given,
+        is derived from ``window``/``period`` (``_band_mask``), not a data
+        mask.
         """
         addend = rest[0] if self.has_addend else None
+        mask = (
+            _band_mask(self.window, self.period, self.rows, self.cols)
+            if self.window is not None
+            else None
+        )
         return activation.softmax_ref(
-            x, addend, self.mask, tile_size=self.cols, soft_cap=self.soft_cap
+            x, addend, mask, tile_size=self.cols, soft_cap=self.soft_cap
         )
