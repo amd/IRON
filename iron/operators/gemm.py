@@ -140,7 +140,12 @@ class GEMMPlacement(StrEnum):
     """The tiles GEMM's array pins; aiecc's placer takes the rest.
 
     The shim ends stay pinned in both: unpinned, 2048x8192x2048 b_col_maj
-    piles more than 16 descriptors onto one shim tile.
+    still piles too many simultaneously active buffer descriptors onto one
+    shim tile under mlir-aie #3921's placer fixes (533e0c121), the same
+    failure this pin was added for. TILES against the SHIMS default, at
+    M=K=N=2048, 2 columns, b_col_maj: both numpy-correct on npu2, but TILES
+    measurably faster under #3921 too (median 11348 vs 12074 us, MAD 58 vs
+    354 us over 20 runs, non-overlapping) -- not noise, so the tunable stays.
     """
 
     SHIMS = "shims"

@@ -59,7 +59,16 @@ class MHAPlacement(StrEnum):
     """The tiles MHA's array pins; aiecc's placer takes the rest.
 
     A pipeline's cores keep at least its column: placed freely, 8 pipelines
-    pack into 6 columns that cannot be routed.
+    pack into 6 columns that cannot be routed. Checked against mlir-aie
+    #3921's placer fixes (533e0c121): at the num_pipelines=8 default
+    (pv_cores=1), placing every tile freely (no column pin at all) still
+    compiles, is numpy-correct and is within noise of the MEMTILES default
+    on npu2 (median 42946 vs 42916 us, MAD 31 vs 23 us over 20 runs) -- a
+    lead for dropping the pin on this path, not done here since the rest of
+    the catalog, Llama and EG2 are unchecked. With P*V split (pv_cores > 1)
+    placement must stay TILES regardless (``validate()`` raises otherwise):
+    the two P*V cores share SPLIT_COLUMNS' own adjacent tiles so the line
+    between them is shared memory, a physical invariant no placer can infer.
     """
 
     MEMTILES = "memtiles"
