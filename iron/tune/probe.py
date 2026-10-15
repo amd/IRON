@@ -38,14 +38,14 @@ import numpy as np
 from aie.iron.device import Device
 from aie.utils import bfp
 
-from ..declare import Operand, Operator, Out
-from ..declare.value import PlaceWord, Value
-from ..design import OperatorDesign
-from ..image.callable import FullELFCallable, StepCallable
-from ..image.sequence import OperatorSequence
-from .compiled import CompiledGraph
+from iron.common.declare import Operand, Operator, Out
+from iron.common.declare.value import PlaceWord, Value
+from iron.common.design import OperatorDesign
+from iron.common.image.callable import FullELFCallable, StepCallable
+from iron.common.image.sequence import OperatorSequence
+from iron.common.graph.compiled import CompiledGraph
 from .costcache import Accuracy, CostCache, Measurement, Pairing, Shift
-from .fold import Made, folded, foldings, replaced
+from iron.common.graph.fold import Made, folded, foldings, replaced
 from .narrowing import (
     CONFIDENCE,
     FIT_CACHE,
@@ -64,7 +64,7 @@ from .narrowing import (
     refuse,
     variants,
 )
-from .trace import TracedGraph
+from iron.common.graph.trace import TracedGraph
 
 
 @dataclasses.dataclass(frozen=True)

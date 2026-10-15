@@ -28,8 +28,8 @@ import iron
 from iron import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
 from iron.common.graph.handle import Weight
-from iron.common.graph.narrowing import Tuning
-from iron.common.graph.probe import Call, Point
+from iron.common.graph.tuner import Tuning
+from iron.tune.probe import Call, Point
 from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.sample import Sample

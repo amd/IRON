@@ -128,7 +128,7 @@ reuse lint
 
 ## Architecture
 
-### Three-Layer Structure
+### Structure
 
 1. **Operators** (`iron/operators/`)
    - One operator is one module: `relu.py` for a small one, a directory with
@@ -215,7 +215,9 @@ reuse lint
      `sequence(rt)` receives; the derived sequence, each operand's
      `transfers()`, a pinned lane's shim DMA tasks)
    - `graph/`: graphs (`iron.Graph`, `iron.state`) and
-     `compile(dev=, full_elf=)`
+     `compile(dev=, full_elf=, coresident=, tuner=)`; `graph/tuner.py` is
+     all the core knows of tuning: the `Tuner`, `Tuning` and `Prices`
+     interfaces
    - `image/`: what a graph lowers onto, all of it internal: the sequence
      a traced graph becomes, the buffer allocator (`LiveRange`, `Pool`,
      `ArenaPlan`), `Fusion` (the designs of a sequence as one module, a
@@ -244,6 +246,18 @@ reuse lint
      operator built with `trace=` (mlir-aie's `TraceConfig`); the workers
      traced are those its `array()` gives `Worker(trace=)`, else its first.
      A test that traces builds its own `TraceConfig`
+
+4. **Tuning** (`iron/tune/`), at the edge: it depends on the graph core
+   and nothing in the core imports it
+   - `probe.py` and `costcache.py` measure designs on the NPU into a
+     `CostTable` (`narrowing.py`), which is the core's `Prices`
+   - `narrowing.py`'s `JointNarrowing` is a `Tuner`: given as
+     `compile(tuner=JointNarrowing(CostTable(path)))`, it chooses each
+     design's tunables, the folds and the packs from the table, its
+     `JointTuning` applied to the trace before packaging
+   - `cli.py` measures one operator at every setting it tunes to
+     (`python -m iron.tune.cli GEMV M=2048 K=8192`) and holds the parser a
+     model's tuner builds on (`python -m iron.lm.tune <application>`)
 
 ### Key Concepts
 
@@ -618,7 +632,10 @@ an xclbin per step; left `None`, a full ELF on NPU2 and xclbins on NPU1,
 and `verbose=True` prints why. `check=True` debugs a graph a step at a
 time: each step is its own dispatch, held to its reference on the inputs
 the NPU gave it by its `tolerance()`, and the first step outside it raises,
-naming the step and its buffers. It links the image (`version.image`) and stops
+naming the step and its buffers. `coresident=AdjacentPacking()` packs
+designs into shared device configurations; `tuner=` (a `Tuner` from
+`iron.tune`) chooses the tunables, folds and packs instead, and the two
+are exclusive. It links the image (`version.image`) and stops
 there: the runtime that loads it is made on the first call, so a host with
 the toolchain and no NPU can compile ahead of time.
 `iron/applications/llama/model.py` is the worked example

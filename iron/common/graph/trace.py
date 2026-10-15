@@ -31,10 +31,10 @@ from .handle import (
     _rescale_bounds,
     is_operand,
 )
+from .visualize import Dataflow
 
 if TYPE_CHECKING:
-    from .narrowing import CostTable
-    from .visualize import Dataflow
+    from .tuner import Prices
 
 
 @dataclasses.dataclass
@@ -243,7 +243,7 @@ class TracedGraph:
         title: str = "",
         layers: set[int] | None = None,
         weights: bool = True,
-        table: CostTable | None = None,
+        prices: Prices | None = None,
     ) -> Dataflow:
         """This graph drawn (``visualize.Dataflow``): its ``dot()``, ``svg()``
         and ``html()``.
@@ -252,12 +252,9 @@ class TracedGraph:
             title: The caption; the graph's name if empty.
             layers: The layers drawn, or None for every step.
             weights: Draw each weight as its own node.
-            table: Show the step time this table prices each design at.
+            prices: Show the time these prices give each design.
         """
-        # visualize prices steps through the tuner, which imports this module.
-        from .visualize import Dataflow
-
-        return Dataflow(self, title, layers, weights, table=table)
+        return Dataflow(self, title, layers, weights, prices=prices)
 
     def dot(self) -> str:
         """This graph drawn as Graphviz text (``picture``)."""

@@ -36,9 +36,9 @@ import numpy as np
 from aie.utils.compile import NPU_CACHE_HOME
 from aie.utils.compile.utils import resolve_target_arch
 
-from ..declare import Operator
-from ..design import OperatorDesign
-from ..elementwise import Elementwise
+from iron.common.declare import Operator
+from iron.common.design import OperatorDesign
+from iron.common.elementwise import Elementwise
 from .narrowing import Calibration, Measured, PackCost, StepCost, _write
 
 

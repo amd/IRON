@@ -24,9 +24,10 @@ import numpy as np
 from ml_dtypes import bfloat16
 
 import iron
-from iron.common.graph.narrowing import CostTable, JointNarrowing, NarrowingKinds
-from iron.common.graph.probe import Call
+from iron.common.graph.tuner import Tuner
 from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
+from iron.tune.narrowing import CostTable, JointNarrowing, NarrowingKinds
+from iron.tune.probe import Call
 
 from .generation import (
     SEED,
@@ -490,7 +491,7 @@ class Model(iron.Graph):
         self,
         *,
         release: Callable[[np.ndarray], None] | None = None,
-        tuner: JointNarrowing | None = None,
+        tuner: Tuner | None = None,
         full_elf: bool | None = None,
         dev=None,
     ) -> "Model":
@@ -507,7 +508,7 @@ class Model(iron.Graph):
         feeds = None
         for shapes in self.shapes():
             version = self.compile(
-                dev=dev, feeds=feeds, coresident=tuner, full_elf=full_elf, **shapes
+                dev=dev, feeds=feeds, tuner=tuner, full_elf=full_elf, **shapes
             )
             version.load(release=release)
             feeds = version if version.emit is not None else None

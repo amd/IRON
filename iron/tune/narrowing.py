@@ -47,12 +47,13 @@ from typing import Any
 import numpy as np
 from aie.utils.compile import NPU_CACHE_HOME
 
-from ..declare import Operator
-from ..design import OperatorDesign
-from ..image.coresidence import Packing, fits
-from ..image.fusion import Fusion
-from .fold import FOLD_RUNS, Folding, Made, folded, foldings
-from .trace import TracedGraph
+from iron.common.declare import Operator
+from iron.common.design import OperatorDesign
+from iron.common.image.coresidence import Packing, fits
+from iron.common.image.fusion import Fusion
+from iron.common.graph.fold import FOLD_RUNS, Folding, Made, folded, foldings
+from iron.common.graph.trace import TracedGraph
+from iron.common.graph.tuner import Prices, Tuner, Tuning
 
 logger = logging.getLogger(__name__)
 
@@ -370,7 +371,7 @@ class PackCost(Measured):
     rounds: int
 
 
-class CostTable:
+class CostTable(Prices):
     """Measured step and configure costs for one device and one packaging,
     as JSON on disk; the model takes the median of each calibrated figure.
 
@@ -638,6 +639,12 @@ class CostTable:
         cost = self.steps.get(key)
         return 0.0 if cost is None else cost.expected_us
 
+    def step_us(self, traced: TracedGraph, dev) -> dict[int, float | None]:
+        return {
+            i: self.t_step(key) if key in self.steps else None
+            for i, key in enumerate(cost_keys(traced, dev, {}))
+        }
+
     def pack_step(self, name: str, key: str) -> float:
         """A member's step on the device ``packs`` holds as ``name``, at the
         calls priced: its step there, measured at its call's values, moved
@@ -865,7 +872,7 @@ def model_us(
 
 
 @dataclasses.dataclass
-class Tuning:
+class JointTuning(Tuning):
     """What ``JointNarrowing`` chose, and the model's prediction for it and
     for the graph as traced (``baseline``). The predictions leave out the
     ``unmeasured`` designs, which stay as traced, and the ``unpriced`` folds,
@@ -896,7 +903,7 @@ class Tuning:
     ) -> tuple[TracedGraph, list[list[Operator]]]:
         """``traced`` with the chosen folds applied, every narrowed design's
         operators rebuilt at their setting, and the packs as operator groups
-        for ``coresident=``.
+        that share a device.
         """
         if self.folds:
             traced, _ = folded(traced, dev, self.folds)
@@ -922,6 +929,31 @@ class Tuning:
                 ops.append(new.op)
         groups = [[op for key in group for op in members[key]] for group in self.groups]
         return narrowed, groups
+
+    def summary(self) -> str:
+        return (
+            f"modelled {self.baseline_us:.1f} µs ({self.baseline_configures} "
+            f"configures) as traced, {self.predicted_us:.1f} µs "
+            f"({self.configures}) tuned"
+        )
+
+    def moved(self, traced: TracedGraph, dev) -> dict[int, dict[str, Any]]:
+        moved = {
+            v.key: dict(v.tunables) for key, v in self.chosen.items() if v.key != key
+        }
+        return {
+            i: moved[key]
+            for i, key in enumerate(cost_keys(traced, dev, {}))
+            if key in moved
+        }
+
+    def packs(self, traced: TracedGraph, dev) -> dict[int, int]:
+        return {
+            i: n
+            for i, key in enumerate(cost_keys(traced, dev, {}))
+            for n, device in enumerate(self.devices)
+            if key in device
+        }
 
     def report(self, names: Mapping[str, str] | None = None) -> str:
         """One line per fold and design that changed, the predictions, then
@@ -1033,8 +1065,8 @@ class NarrowingKinds:
 
 
 @dataclasses.dataclass(frozen=True)
-class JointNarrowing:
-    """Choose tunables and packs for a traced graph; pass as ``coresident=``
+class JointNarrowing(Tuner):
+    """Choose tunables and packs for a traced graph; pass as ``tuner=``
     to ``Graph.compile``.
 
     Attributes:
@@ -1063,7 +1095,7 @@ class JointNarrowing:
     tuning_cache: Path = dataclasses.field(default=TUNING_CACHE, compare=False)
     kinds: NarrowingKinds = NarrowingKinds()
 
-    def tune(self, traced: TracedGraph, dev, full_elf: bool) -> Tuning:
+    def tune(self, traced: TracedGraph, dev, full_elf: bool) -> JointTuning:
         """Choose the folds, tunables and packs of ``traced`` for ``dev``,
         packaged as one full ELF or not (``packaging.plan``'s).
 
@@ -1094,7 +1126,7 @@ class JointNarrowing:
         ways, every = foldings(traced, dev, self.fold_runs, made)
         candidates = list(dict.fromkeys(f for applied in ways for f in applied))
         # Ways folding alike are priced once.
-        priced: dict[frozenset[Folding], Tuning | None] = {}
+        priced: dict[frozenset[Folding], JointTuning | None] = {}
         best = plain
         if every:
             for trial, applied in ways.values():
@@ -1148,8 +1180,8 @@ class JointNarrowing:
         dev,
         keys: set[str],
         keyed: dict[int, str],
-        priced: dict[frozenset[Folding], Tuning | None],
-    ) -> Tuning | None:
+        priced: dict[frozenset[Folding], JointTuning | None],
+    ) -> JointTuning | None:
         """``trial``, the graph with the folds of ``applied`` applied, tuned;
         or None where a design the folds add or remove (beside ``keys``, the
         graph's) is unmeasured. Kept in ``priced`` by the folds, and taken
@@ -1167,7 +1199,7 @@ class JointNarrowing:
             )
         return priced[taken]
 
-    def _narrow(self, traced: TracedGraph, dev, keyed: dict[int, str]) -> Tuning:
+    def _narrow(self, traced: TracedGraph, dev, keyed: dict[int, str]) -> JointTuning:
         table = self.table
         keys = cost_keys(traced, dev, keyed)
         first: dict[str, Operator] = {}
@@ -1210,7 +1242,7 @@ class JointNarrowing:
             arrays={k: cands[0].array for k, cands in found.items()},
             expands=expands,
         )
-        return Tuning(
+        return JointTuning(
             chosen=chosen,
             groups=groups,
             devices=tuple(

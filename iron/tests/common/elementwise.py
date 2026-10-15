@@ -16,7 +16,7 @@ from iron import Scratchpad
 from iron.common import UnaryElementwise, Unresolvable
 from iron.common.design import OperatorDesign
 from iron.common.elementwise import _interval
-from iron.common.graph.costcache import CostCache
+from iron.tune.costcache import CostCache
 from iron.common.testing import vectors
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gelu import GELU

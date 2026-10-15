@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 import iron
-from iron.common.graph.probe import Standalone
+from iron.tune.probe import Standalone
 from iron.operators.copy import Copy
 
 pytestmark = pytest.mark.usefixtures("npu2")

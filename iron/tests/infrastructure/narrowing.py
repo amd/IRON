@@ -22,9 +22,9 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.common.graph.costcache import Accuracy, CostCache, Measurement
+from iron.tune.costcache import Accuracy, CostCache, Measurement
 from iron.common.graph.fold import replaced
-from iron.common.graph.narrowing import (
+from iron.tune.narrowing import (
     CostTable,
     JointNarrowing,
     Variant,
@@ -33,7 +33,7 @@ from iron.common.graph.narrowing import (
     model_us,
     variants,
 )
-from iron.common.graph.probe import (
+from iron.tune.probe import (
     CONTEXTS,
     Call,
     Designs,
@@ -317,7 +317,7 @@ def test_one_operator_is_measured_from_the_command_line(tmp_path):
         [
             sys.executable,
             "-m",
-            "iron.common.graph.tune",
+            "iron.tune.cli",
             "ElementwiseAdd",
             f"size={SIZE}",
             f"tile_size={TILE}",
@@ -344,7 +344,7 @@ import sys
 import time
 
 import aie.utils as aie_utils
-from iron.common.graph.probe import Standalone
+from iron.tune.probe import Standalone
 from iron.operators import ElementwiseAdd
 
 aie_utils.ensure_current_device()
@@ -375,7 +375,7 @@ import subprocess
 import sys
 
 import aie.utils as aie_utils
-from iron.common.graph.probe import Awake, Standalone, Timing, time_interleaved
+from iron.tune.probe import Awake, Standalone, Timing, time_interleaved
 from iron.operators import SiLU
 
 SPIN = (
@@ -531,7 +531,7 @@ def test_tuned_graph_is_bit_identical_and_packed(tmp_path):
 
     tuned = Chain(SIZE, TILE).compile(
         full_elf=True,
-        coresident=JointNarrowing(
+        tuner=JointNarrowing(
             table, fit_cache=tmp_path / "fits", tuning_cache=tmp_path / "tunings"
         ),
         a=(SIZE,),
@@ -567,7 +567,7 @@ def test_tuned_each_step_graph_is_bit_identical_and_narrowed(tmp_path):
 
     tuned = Chain(SIZE, TILE).compile(
         full_elf=False,
-        coresident=JointNarrowing(table, fit_cache=tmp_path / "fits"),
+        tuner=JointNarrowing(table, fit_cache=tmp_path / "fits"),
         **shapes,
     )
     plain = Chain(SIZE, TILE).compile(full_elf=False, **shapes)
@@ -599,7 +599,7 @@ def test_the_model_predicts_the_tuned_graph_and_the_graph_as_traced(tmp_path):
     measure_graph(table, calls, TRIANGLE, timing, cache=cache)
 
     tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
-    tuned = Chain(SIZE, TILE).compile(full_elf=True, coresident=tuner, **shapes)
+    tuned = Chain(SIZE, TILE).compile(full_elf=True, tuner=tuner, **shapes)
     # Every device the tuning packs is priced as measured, as one device.
     assert tuned.tuning.devices
     assert all(table.pack_name(d) in table.packs for d in tuned.tuning.devices)
@@ -643,7 +643,7 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
     assert {cost_key(s.op) for s in traced.steps + folds.steps} <= table.steps.keys()
 
     tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
-    tuned = SwiGLU(*weights).compile(full_elf=True, coresident=tuner, x=(1, E))
+    tuned = SwiGLU(*weights).compile(full_elf=True, tuner=tuner, x=(1, E))
     folds = tuned.tuning.folds
     plain = SwiGLU(*weights).compile(full_elf=True, fold=folds, x=(1, E))
     assert len(tuned.traced.steps) < len(traced.steps) or not folds
@@ -757,7 +757,7 @@ def test_an_xclbin_chain_is_measured_and_tuned_by_its_own_model(tmp_path):
     assert again.steps == table.steps
 
     tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
-    tuned = Chain(SIZE, TILE).compile(full_elf=False, coresident=tuner, **shapes)
+    tuned = Chain(SIZE, TILE).compile(full_elf=False, tuner=tuner, **shapes)
     untuned = Chain(SIZE, TILE).compile(full_elf=False, **shapes)
     assert tuned.tuning.groups == () and tuned.tuning.configures == 5
     rng = np.random.default_rng(0)

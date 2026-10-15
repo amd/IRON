@@ -25,7 +25,7 @@ import importlib
 from collections.abc import Sequence
 from pathlib import Path
 
-from iron.common.graph import tune as graph_tune
+from iron.tune import cli as tune_cli
 
 from .base import Runner
 
@@ -55,14 +55,14 @@ def main(
     name: str, runner: type[Runner], tables: Path, argv: Sequence[str] | None = None
 ) -> None:
     """The command line that measures ``name``'s cost table in ``tables``
-    (``graph_tune.table``): the calls ``runner`` plans (``Runner.tune_calls``,
+    (``tune_cli.table``): the calls ``runner`` plans (``Runner.tune_calls``,
     on the flags ``Runner.tune_arguments`` adds), and the configure cost
     between each pair of its ``calibration_triangle``.
     """
-    parser = graph_tune.parser(f"Measure {name}'s cost table", tables)
+    parser = tune_cli.parser(f"Measure {name}'s cost table", tables)
     runner.tune_arguments(parser)
     args = parser.parse_args(argv)
-    graph_tune.measure(
+    tune_cli.measure(
         args, runner.tune_calls(parser, args), runner.calibration_triangle, tables
     )
 

@@ -12,11 +12,11 @@ import re
 
 import iron
 from iron.common.graph import CompiledGraph
-from iron.common.graph.narrowing import Tuning
-from iron.common.graph.visualize import ArenaPicture, Dataflow, Floorplan
+from iron.common.graph.visualize import ArenaPicture, Floorplan
 from iron.common.image.allocator import LiveRange
 from iron.operators import ElementwiseAdd, SiLU
 from iron.tests.toolchain.tools import requires
+from iron.tune.narrowing import JointTuning, cost_key
 
 pytestmark = requires("aiebu", "xclbinutil", "peano")
 
@@ -64,12 +64,12 @@ def test_an_arena_draws_each_scratch_buffer_where_and_while_it_lives(device):
 
 def test_a_chain_tuned_with_array_mates_draws_no_shared_device(npu1):
     built = TwoSteps().compile(a=(N,), b=(N,))
-    keys = Dataflow(built.traced, version=built).keys()
+    keys = [cost_key(s.op) for s in built.traced.steps]
     # The tuner lists a chain's array mates as one device, as it does a pack's.
-    tuning = Tuning(
+    tuning = JointTuning(
         chosen={},
         groups=(),
-        devices=(tuple(keys.values()),),
+        devices=(tuple(keys),),
         configures=2,
         predicted_us=1.0,
         baseline_configures=2,

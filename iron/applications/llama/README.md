@@ -104,7 +104,7 @@ how `test_llama_3_2_1b_each_step_accuracy` checks it there.
 gate projection's SiLU into its GEMV), narrows the designs of the decode
 step and the prompt chunk and packs them into shared device configurations,
 by what each design costs on the device
-(`iron.common.graph.narrowing`). No table is checked in: one is measured on
+(`iron.tune.narrowing`). No table is checked in: one is measured on
 the NPU it is used on.
 
 ```bash

@@ -28,11 +28,10 @@ from ..declare import Operator, Unresolvable
 from ..design import OperatorDesign
 from ..image.allocator import LiveRange
 from .handle import Handle
-from .narrowing import cost_key
 
 if TYPE_CHECKING:
     from .compiled import CompiledGraph
-    from .narrowing import CostTable, Tuning
+    from .tuner import Prices
     from .trace import TracedGraph
 
 INK = "#0b0b0b"
@@ -112,7 +111,7 @@ class Dataflow:
         version: The compiled version ``traced`` is of: each box names its
             design and the steps folded into it, a tuned version's moved
             tunables and packs too.
-        table: Each box shows the step time this table prices its design at.
+        prices: Each box shows the time these prices give its design.
     """
 
     def __init__(
@@ -122,14 +121,14 @@ class Dataflow:
         layers: set[int] | None = None,
         weights: bool = True,
         version: CompiledGraph | None = None,
-        table: CostTable | None = None,
+        prices: Prices | None = None,
     ):
         self.traced = traced
         self.title = title or traced.name
         self.layers = layers
         self.weights = weights
         self.version = version
-        self.table = table
+        self.prices = prices
 
     @staticmethod
     def root(h: Handle) -> Handle:
@@ -178,19 +177,9 @@ class Dataflow:
         """
         tuning = None if self.version is None else self.version.tuning
         # An xclbin chain loads each design alone: it has no shared device.
-        if tuning is None or not tuning.devices or not self.version.plan.full_elf:
+        if tuning is None or not self.version.plan.full_elf:
             return {}
-        keys = self.keys()
-        return {
-            i: n
-            for i, key in keys.items()
-            for n, device in enumerate(tuning.devices)
-            if key in device
-        }
-
-    def keys(self) -> dict[int, str]:
-        """Each step's ``cost_key``, by step index, against the current device."""
-        return {i: cost_key(s.op) for i, s in enumerate(self.traced.steps)}
+        return tuning.packs(self.traced, None)
 
     def designs(self) -> dict[int, tuple[str, int]]:
         """Each step's design in the compiled image, a short label, and how
@@ -204,14 +193,10 @@ class Dataflow:
         }
         return {s.index: labels[s.design] for s in artifacts.steps}
 
-    def moved(self) -> dict[str, dict]:
-        """The tunables the tuner moved, by the setting key it chose."""
-        tuning: Tuning | None = None if self.version is None else self.version.tuning
-        if tuning is None:
-            return {}
-        return {
-            v.key: dict(v.tunables) for key, v in tuning.chosen.items() if v.key != key
-        }
+    def moved(self) -> dict[int, dict]:
+        """The tunables the tuner moved, by step index."""
+        tuning = None if self.version is None else self.version.tuning
+        return {} if tuning is None else tuning.moved(self.traced, None)
 
     def values(self) -> dict[int, list[str]]:
         """Each operator's per-call values as written, by the ``id`` of the
@@ -227,8 +212,8 @@ class Dataflow:
         i: int,
         values: Mapping[int, list[str]],
         designs: Mapping[int, tuple[str, int]],
-        keys: Mapping[int, str],
-        moved: Mapping[str, dict],
+        moved: Mapping[int, dict],
+        prices: Mapping[int, float | None],
     ) -> list[str]:
         """The lines of step ``i``'s box, as Graphviz HTML-like label text.
 
@@ -236,8 +221,8 @@ class Dataflow:
             i: The step's index.
             values: ``values()``.
             designs: ``designs()``.
-            keys: ``keys()``, or none where nothing is priced or tuned.
             moved: ``moved()``.
+            prices: Each step's time, None where it is not priced.
         """
         s = self.traced.steps[i]
         op = s.op
@@ -272,8 +257,7 @@ class Dataflow:
             lines.append(
                 f'<font point-size="9" color="{INK_2}"><i>{html.escape(v)}</i></font>'
             )
-        key = keys.get(i)
-        tuned = moved.get(key) if key is not None else None
+        tuned = moved.get(i)
         if tuned:
             text = ", ".join(f"{k}={v}" for k, v in tuned.items())
             lines.append(
@@ -285,11 +269,10 @@ class Dataflow:
             lines.append(
                 f'<font point-size="8" color="{MUTED}">design {label}{shared}</font>'
             )
-        if self.table is not None and key is not None:
-            if key in self.table.steps:
+        if i in prices:
+            if prices[i] is not None:
                 lines.append(
-                    f'<font point-size="9" color="{INK_2}">'
-                    f"{self.table.t_step(key):.1f} µs</font>"
+                    f'<font point-size="9" color="{INK_2}">{prices[i]:.1f} µs</font>'
                 )
             else:
                 lines.append(f'<font point-size="8" color="{MUTED}">unmeasured</font>')
@@ -323,10 +306,8 @@ class Dataflow:
             tuning = self.version.tuning
             if tuning is not None:
                 lines.append(
-                    f'<font point-size="11" color="{INK_2}">modelled '
-                    f"{tuning.baseline_us:.1f} µs ({tuning.baseline_configures} "
-                    f"configures) as traced, {tuning.predicted_us:.1f} µs "
-                    f"({tuning.configures}) tuned</font>"
+                    f'<font point-size="11" color="{INK_2}">'
+                    f"{html.escape(tuning.summary())}</font>"
                 )
         return "<br/>".join(lines)
 
@@ -344,7 +325,7 @@ class Dataflow:
                 if self.root(h).role in ("intermediate", "output"):
                     writer[self.root(h).name] = i
         values, designs, moved = self.values(), self.designs(), self.moved()
-        keys = {} if self.version is None and self.table is None else self.keys()
+        prices = {} if self.prices is None else self.prices.step_us(self.traced, None)
         packs = self.packs()
 
         nodes: dict[object, list[str]] = defaultdict(list)
@@ -389,7 +370,7 @@ class Dataflow:
             color = FAMILIES[FAMILY.get(type(s.op).__name__, "other")]
             tip = html.escape(self.tooltip(s.op), quote=True)
             at = ("pack", packs[i]) if i in packs else ("layer", layer[i])
-            label = "<br/>".join(self.box(i, values, designs, keys, moved))
+            label = "<br/>".join(self.box(i, values, designs, moved, prices))
             nodes[at].append(
                 f'  "{prefix}s{i}" [shape=box, style="rounded,filled", '
                 f'fillcolor="{color}33", color="{color}", penwidth=2, '

@@ -14,8 +14,8 @@ One operator is measured at every setting it tunes to by this module's own
 command line, its fields as a profile entry names them:
 
 ```bash
-python -m iron.common.graph.tune GEMV M=2048 K=8192
-python -m iron.common.graph.tune Softmax rows=32 cols=2048 --value valid_cols=1500
+python -m iron.tune.cli GEMV M=2048 K=8192
+python -m iron.tune.cli Softmax rows=32 cols=2048 --value valid_cols=1500
 ```
 
 Run with XRT sourced and the NPU otherwise idle.
@@ -30,9 +30,9 @@ from pathlib import Path
 
 import aie.utils as aie_utils
 
-from ... import operators
-from ..declare import Operator
-from ..image.packaging import dispatches_full_elf
+from iron import operators
+from iron.common.declare import Operator
+from iron.common.image.packaging import dispatches_full_elf
 from .narrowing import CostTable, fitting, variants
 from .probe import Call, Timing, cost_cache, measure_graph, pmode, search
 

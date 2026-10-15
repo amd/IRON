@@ -29,8 +29,8 @@ import tokenizers
 import iron
 from iron import lm
 from iron import Scratchpad
-from iron.common.graph.narrowing import CostTable, JointNarrowing
-from iron.common.graph.probe import Call
+from iron.tune.narrowing import CostTable, JointNarrowing
+from iron.tune.probe import Call
 from iron.lm import Checkpoint, Encoder, rope_angles
 from iron.lm.blocks import ACCURATE
 from iron.lm.testing import weights_dir

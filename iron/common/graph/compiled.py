@@ -39,8 +39,8 @@ from ..image.sequence import ALIGNMENT
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .fold import Folding, folded
 from .handle import Affine, Carry, Handle, PerCall, State, is_operand
-from .narrowing import CostTable, JointNarrowing, Tuning
 from .trace import TracedGraph, Tracer, _ReferenceTracer
+from .tuner import Prices, Tuner, Tuning
 from .visualize import Dataflow
 
 logger = logging.getLogger(__name__)
@@ -349,7 +349,8 @@ class Graph:
         check: bool = False,
         verbose=False,
         feeds: CompiledGraph | None = None,
-        coresident: AdjacentPacking | JointNarrowing | None = None,
+        coresident: AdjacentPacking | None = None,
+        tuner: Tuner | None = None,
         fold: bool | Collection[Folding] = False,
         **shapes,
     ) -> CompiledGraph:
@@ -369,9 +370,10 @@ class Graph:
             verbose: Print why the packaging was chosen.
             feeds: The version a full ELF's Emit starts; by default itself
                 when it takes no tensor.
-            coresident: Packs designs into shared configurations; a
-                ``JointNarrowing`` folds steps and narrows designs where its
-                cost table says they gain, then packs them.
+            coresident: Packs designs into shared configurations.
+            tuner: Chooses tunables, folds and packs for the trace
+                (``iron.tune.narrowing.JointNarrowing``); its packs take
+                ``coresident``'s place.
             fold: Fold every step its readers or its producer can apply
                 in their own cores into them, and every copy its producer
                 can write in its place (``iron.common.graph.fold``),
@@ -399,12 +401,15 @@ class Graph:
             # Folding and narrowing change nothing the packaging follows from.
             chosen = plan(current, traced, full_elf, check)
             tuning = None
-            groups: AdjacentPacking | list[list[Operator]] | None
-            if isinstance(coresident, JointNarrowing):
-                tuning = coresident.tune(traced, current, chosen.full_elf)
+            groups: AdjacentPacking | list[list[Operator]] | None = coresident
+            if tuner is not None:
+                if coresident is not None:
+                    raise TypeError(
+                        f"{self.name}: a tuner chooses the packs; give "
+                        f"coresident= or tuner=, not both"
+                    )
+                tuning = tuner.tune(traced, current, chosen.full_elf)
                 traced, groups = tuning.apply(traced, current)
-            else:
-                groups = coresident
             if verbose:
                 print(chosen.report(self.name))
             signature = self._signature(
@@ -585,7 +590,7 @@ class CompiledGraph:
         title: str = "",
         layers: set[int] | None = None,
         weights: bool = True,
-        table: CostTable | None = None,
+        prices: Prices | None = None,
     ) -> Dataflow:
         """This version drawn (``visualize.Dataflow``): each step's design and
         the steps folded into it, a tuned version's moved tunables and packs;
@@ -595,9 +600,11 @@ class CompiledGraph:
             title: The caption; the graph's name if empty.
             layers: The layers drawn, or None for every step.
             weights: Draw each weight as its own node.
-            table: Show the step time this table prices each design at.
+            prices: Show the time these prices give each design.
         """
-        return Dataflow(self.traced, title, layers, weights, version=self, table=table)
+        return Dataflow(
+            self.traced, title, layers, weights, version=self, prices=prices
+        )
 
     def dot(self) -> str:
         """This version drawn as Graphviz text (``picture``)."""

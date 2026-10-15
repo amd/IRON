@@ -15,9 +15,9 @@ from aie.iron.device import from_name
 
 import iron
 from iron.applications.llama import model as llama_model
-from iron.common.graph import tune as graph_tune
-from iron.common.graph.narrowing import CostTable
-from iron.common.graph.probe import Designs
+from iron.tune import cli as tune_cli
+from iron.tune.narrowing import CostTable
+from iron.tune.probe import Designs
 from iron.lm import Sampler
 from iron.lm.generation import SEED
 from iron.lm.causal import contexts
@@ -105,6 +105,6 @@ def test_llama_prices_only_attention_at_its_contexts(npu2):
     ],
 )
 def test_a_table_is_named_for_its_device(tmp_path, device, argv, name):
-    args = graph_tune.parser("", tmp_path).parse_args(argv)
-    found = graph_tune.table(args, from_name(**device), tmp_path)
+    args = tune_cli.parser("", tmp_path).parse_args(argv)
+    found = tune_cli.table(args, from_name(**device), tmp_path)
     assert found == (Path(name) if "--table" in argv else tmp_path / name)

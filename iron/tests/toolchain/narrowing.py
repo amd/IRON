@@ -14,7 +14,6 @@ import json
 import math
 import re
 from collections import Counter
-from pathlib import Path
 
 import aie.utils as aie_utils
 import numpy as np
@@ -25,9 +24,9 @@ from ml_dtypes import bfloat16
 import iron
 from iron.common.declare import Profile
 from iron.common.design import OperatorDesign
-from iron.common.graph.costcache import Accuracy, CostCache, Measurement
+from iron.tune.costcache import Accuracy, CostCache, Measurement
 from iron.common.graph.fold import FOLD_RUNS, folded, foldings
-from iron.common.graph.narrowing import (
+from iron.tune.narrowing import (
     Calibration,
     CostTable,
     JointNarrowing,
@@ -42,7 +41,7 @@ from iron.common.graph.narrowing import (
     refuse,
     variants,
 )
-from iron.common.graph.probe import Call, Designs, Point, judge, line
+from iron.tune.probe import Call, Designs, Point, judge, line
 from iron.common.testing import vectors
 from iron.common.image.fusion import Fusion
 from iron.common.image.sequence import OperatorSequence
@@ -920,7 +919,7 @@ def test_a_tuned_compile_takes_the_packaging_first(tmp_path, npu2):
         AddSilu().compile(
             dev=npu2,
             full_elf=False,
-            coresident=tuner,
+            tuner=tuner,
             a=(SIZE,),
             b=(SIZE,),
         )

@@ -30,7 +30,7 @@ from PIL import Image
 
 import iron
 from iron import Scratchpad
-from iron.common.graph.narrowing import CostTable, JointNarrowing
+from iron.tune.narrowing import CostTable, JointNarrowing
 from iron.applications.embedding_gemma2.audio import AudioTower
 from iron.applications.embedding_gemma2.config import (
     PROFILES,
