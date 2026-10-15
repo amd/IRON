@@ -164,7 +164,7 @@ class EmbeddingGemma(Encoder):
         self.unit = np.full(width, 1 / np.sqrt(width), bfloat16)
 
     def body(self, ids, *, n: Scratchpad[np.int32]):
-        return self.encoder(Copy(self.embedding[ids]), n)
+        return self.encoder(Copy.step(self.embedding[ids]), n)
 
     def encoder(self, x, n):
         """The encoder over the token embeddings ``x`` ``(T, emb_dim)``, of
@@ -175,10 +175,10 @@ class EmbeddingGemma(Encoder):
         x = embeddings = x[:n]
         for i, w in enumerate(self.layers):
             x = self.layer(i, w, x, embeddings, n)
-        h = RMSNorm(x, weight=self.norm, epsilon=c.eps).reshape(T, 1, E)
+        h = RMSNorm.step(x, weight=self.norm, epsilon=c.eps).reshape(T, 1, E)
         # The mean of the n rows: one zero query at scale 0 weighs each key
         # 1/n, and masks the rows past n rather than multiplying them by 0.
-        mean = MHA(
+        mean = MHA.step(
             self.query,
             h,
             h,
@@ -189,8 +189,8 @@ class EmbeddingGemma(Encoder):
             scale=0.0,
             num_pipelines=1,
         )
-        y = GEMV(self.projection, mean.reshape(c.block, E)[0])
-        return RMSNorm(
+        y = GEMV.step(self.projection, mean.reshape(c.block, E)[0])
+        return RMSNorm.step(
             y.reshape(len(c.mrl_dims), self.unit.size), weight=self.unit, epsilon=0.0
         )
 
@@ -231,15 +231,15 @@ class EmbeddingGemma(Encoder):
         )
         # The projection's E ** -0.5 scale folded into the norm's epsilon:
         # RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
-        ple = GEMM(embeddings, self.ple[i], b_col_maj=True, **ACCURATE)
-        ple = RMSNorm(ple, weight=self.ple_norm, epsilon=c.eps * c.emb_dim)
+        ple = GEMM.step(embeddings, self.ple[i], b_col_maj=True, **ACCURATE)
+        ple = RMSNorm.step(ple, weight=self.ple_norm, epsilon=c.eps * c.emb_dim)
         b = w.ple_block
-        g = GEMM(x, b.per_layer_input_gate.weight, b_col_maj=True, **ACCURATE)
-        g = ElementwiseMul(GELU(g), ple)
-        g = GEMM(g, b.per_layer_projection.weight, b_col_maj=True, **ACCURATE)
+        g = GEMM.step(x, b.per_layer_input_gate.weight, b_col_maj=True, **ACCURATE)
+        g = ElementwiseMul.step(GELU.step(g), ple)
+        g = GEMM.step(g, b.per_layer_projection.weight, b_col_maj=True, **ACCURATE)
         norm = b.post_per_layer_input_norm.weight
-        x = ElementwiseAdd(x, RMSNorm(g, weight=norm, epsilon=c.eps))
-        return RowwiseMul(x, self.scales[i])
+        x = ElementwiseAdd.step(x, RMSNorm.step(g, weight=norm, epsilon=c.eps))
+        return RowwiseMul.step(x, self.scales[i])
 
     def longest(self) -> dict:
         """The per-call values of the longest call: every row real."""
@@ -320,10 +320,10 @@ class Multimodal(EmbeddingGemma):
         if len(given) != 1:
             raise TypeError(f"a version takes one input, got {len(given)}")
         if ids is not None:
-            return self.encoder(Copy(self.embedding[ids]), n)
+            return self.encoder(Copy.step(self.embedding[ids]), n)
         if wave is not None:
             a = self.audio(wave, n=n_audio, frames=frames, tokens=audio_tokens)
-            Copy(a, self.merged[self.audio_at : self.audio_at + a.shape[0]])
+            Copy.step(a, self.merged[self.audio_at : self.audio_at + a.shape[0]])
             return None
         if rgb is not None:
             v = self.vision(
@@ -334,21 +334,21 @@ class Multimodal(EmbeddingGemma):
                 out_height=out_height,
                 out_width=out_width,
             )
-            Copy(v, self.merged[self.vision_at : self.vision_at + v.shape[0]])
+            Copy.step(v, self.merged[self.vision_at : self.vision_at + v.shape[0]])
             return None
         c = self.config
         # An input's gather is encoded on the host into its buffer, which Merge
         # reads as the ids: gather by the device's copy of them.
-        x = Copy(self.embedding[Copy(placed, dtype=np.int32)])
-        merge = Merge(
+        x = Copy.step(self.embedding[Copy.step(placed, dtype=np.int32)])
+        merge = Merge.step(
             placed,
             audio_token=c.audio_token,
             image_token=c.image_token,
             audio_at=self.audio_at,
             vision_at=self.vision_at,
         )
-        Copy(x, self.merged[: x.shape[0]])
-        return self.encoder(Copy(self.merged[merge]), n)
+        Copy.step(x, self.merged[: x.shape[0]])
+        return self.encoder(Copy.step(self.merged[merge]), n)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the text encoder's, each

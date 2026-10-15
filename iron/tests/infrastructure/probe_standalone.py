@@ -15,7 +15,7 @@ pytestmark = pytest.mark.usefixtures("npu2")
 
 class Ids(iron.Graph):
     def body(self, ids):
-        return Copy(ids, dtype=np.int32)
+        return Copy.step(ids, dtype=np.int32)
 
 
 @pytest.mark.supported_devices("npu2")

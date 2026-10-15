@@ -131,19 +131,21 @@ class CausalLM(Model):
         L, C, A = c.max_seq_len, c.prefill_chunk, c.rope_width
         prompt = ids is not None
         if prompt:
-            x = Copy(self.embedding[ids[:rows]])
-            angles = Copy(self.rope.reshape(L // C, C, A)[chunk, :rows])
+            x = Copy.step(self.embedding[ids[:rows]])
+            angles = Copy.step(self.rope.reshape(L // C, C, A)[chunk, :rows])
         else:
-            x = Copy(self.embedding[token]).reshape(1, c.emb_dim)
-            angles = Copy(self.rope[position]).reshape(1, A)
+            x = Copy.step(self.embedding[token]).reshape(1, c.emb_dim)
+            angles = Copy.step(self.rope[position]).reshape(1, A)
         x = self.embed(x, pixel_values, rows if prompt else None)
         step = DecodeStep(prompt, angles, chunk, rows, position)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
         if prompt:
-            x = Copy(x[rows - 1]).reshape(1, c.emb_dim)  # the last row's logits alone
+            x = Copy.step(x[rows - 1]).reshape(
+                1, c.emb_dim
+            )  # the last row's logits alone
         logits = self.head(x)
-        _, drawn = Sample(
+        _, drawn = Sample.step(
             logits.reshape(c.vocab_size),
             self.draws,
             self.drawn,
@@ -167,11 +169,11 @@ class CausalLM(Model):
         for x, cache in ((k, keys), (v, values)):
             if step.prompt:
                 rows = cache.reshape(L // C, C, G, D)[step.chunk, : step.rows]
-                Copy(x.reshape(n, G, D), rows)
+                Copy.step(x.reshape(n, G, D), rows)
             else:
-                Copy(x.reshape(G, D), cache[step.position])
+                Copy.step(x.reshape(G, D), cache[step.position])
         span = np.s_[: step.position + 1]
-        o = MHA(
+        o = MHA.step(
             q.reshape(n, H, D),
             keys[span],
             values[span],

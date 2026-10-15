@@ -377,7 +377,7 @@ class Features(iron.Graph):
     def body(self, wave, *, frames: Scratchpad[np.int32]):
         self.audio.logmel(wave, frames)
         hop = self.audio.config.hop
-        return Copy(self.audio.features[1 : wave.shape[0] // hop + 1])
+        return Copy.step(self.audio.features[1 : wave.shape[0] // hop + 1])
 
 
 @pytest.mark.supported_devices("npu1", "npu2")

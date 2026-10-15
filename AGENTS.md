@@ -397,7 +397,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      its own stream of `op.x.count` lanes, `op.x.obj_type` the fifo type;
      `when=flag`, a bool `Param()`, makes an operand (and its stream) exist
      only where the flag is true; a call gives it by keyword, its name,
-     which sets the flag (`RMSNorm(x, weight=w)` is `weighted=True`)
+     which sets the flag (`RMSNorm.step(x, weight=w)` is `weighted=True`)
    - a `Value(derive=...)` for every trip count the core reads, so the
      array never depends on the extent; what else the array bakes is a
      field its `Array` lists
@@ -552,14 +552,16 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 | `configuration()` | no (itself) | locating the xclbin a shipped subclass runs (flm's GEMM, one image for every shape) |
 | `exported_design()` | no (`None`: the derived module) | compiling, in place of the generated MLIR (stream-dse's SwiGLU groups) |
 
-A class body's own call, `GEMV(w, h)` inside a graph's `body()`, goes
-through `Operator`'s metaclass: with a traced handle argument it records a
-step and returns another handle, never an instance; outside a graph (or
-given only keywords) the same call constructs the operator as written
-above. A `with profile:` scope is ambient: every operator construction
-inside it reads `Profile.current()` first, so a graph's body never passes
-one explicitly, and a tunable the call still leaves open takes the
-profile's entry for its shape.
+Inside a graph's `body()`, a step is spelled `GEMV.step(w, h, **kw)`: a
+classmethod that records a step on the active tracer and returns a handle,
+never an instance; outside a body it raises. Calling an already-constructed
+instance inside a body is `op.apply(*operands, **values)`; `op(*npu_tensors)`
+still runs the operator on the device. Construction is keyword-only
+(`GEMV(M=..., K=...)`, as written above) and never traces, with or without a
+body around it. A graph's own `profile` reaches every step its tracer
+constructs without the body passing one explicitly (`Tracer(name, profile)`
+merges `profile.tunables_for(cls, given)`); standalone use of the same
+profile is `profile.make(Cls, **kw)`.
 
 ## Graphs
 
@@ -583,10 +585,12 @@ class Decode(iron.Graph):
 
     def body(self, x, *, pos: Scratchpad[np.int32]):
         w = self.weights
-        h = RMSNorm(x, weight=w.norm)            # class calls infer the extents
-        k = RoPE(GEMV(w.wk, h), Copy(self.rope[pos]).reshape(1, head_dim))  # gathered on the NPU
-        Copy(k, self.kv[:, pos])                 # a state passed as an output is written
-        return GEMV(w.wo, h)
+        h = RMSNorm.step(x, weight=w.norm)       # .step() infers the extents
+        k = RoPE.step(
+            GEMV.step(w.wk, h), Copy.step(self.rope[pos]).reshape(1, head_dim)
+        )  # gathered on the NPU
+        Copy.step(k, self.kv[:, pos])            # a state passed as an output is written
+        return GEMV.step(w.wo, h)
 
 graph = Decode(weights, angles)
 graph.compile(x=(1, emb))                        # or on the first call
@@ -616,8 +620,8 @@ version is placed in the graph's one scratch arena. `graph.reference(...)` runs 
 
 The tunables a graph's operators run with can be a `Profile` rather than
 keywords at every call: entries keyed by operator class and shape, the
-graph's `profile` attribute (or applied in a `with profile:` scope); a
-directory there holds one per device, `<device>.json`. A call
+graph's `profile` attribute (`compile(profile=)` overrides it for one
+compile); a directory there holds one per device, `<device>.json`. A call
 that leaves a tunable open takes the most specific entry's value; a call that
 gives one keeps it. An entry matches on the fields the operator is
 constructed with, the call's keywords and the extents inferred from its

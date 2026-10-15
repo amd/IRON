@@ -31,7 +31,7 @@ pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 class Decode(iron.Graph):
     def body(self, q, k, v, *, position: Scratchpad[np.int32]):
-        return MHA(
+        return MHA.step(
             q.reshape(1, HEADS, D),
             k[: position + 1],
             v[: position + 1],

@@ -93,7 +93,7 @@ def test_check_takes_an_xclbin_per_step():
 def test_a_shipped_image_in_a_graph_is_refused(npu2):
     class Shipping(iron.Graph):
         def body(self, a, b):
-            return Shipped(a, b)
+            return Shipped.step(a, b)
 
     traced = Shipping().trace(a=(256, 1024), b=(1024, 1152))
     for full_elf in (None, False):

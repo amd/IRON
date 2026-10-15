@@ -35,11 +35,11 @@ class _PartialRotaryLlama(Llama):
     def layer(self, step, i, w, x):
         c, n = self.config, x.shape[0]
         H, D, A = c.n_heads, c.head_dim, c.rope_width
-        h = RMSNorm(x, weight=w.input_layernorm.weight)
+        h = RMSNorm.step(x, weight=w.input_layernorm.weight)
         q = w.self_attn.q_proj.weight
         q_rot_weight = q.reshape(H, D, c.emb_dim)[:, :A, :].reshape(H * A, c.emb_dim)
         q_rot = project(h, q_rot_weight)
-        RoPE(q_rot.reshape(n * H, A), step.angles)
+        RoPE.step(q_rot.reshape(n * H, A), step.angles)
         return x
 
 

@@ -36,7 +36,7 @@ class _Sum(iron.Graph):
         self.cache = iron.state((SLOTS, ROWS))
 
     def body(self, a, b, *, pos: Scratchpad[np.int32]):
-        Copy(ElementwiseAdd(a, b), self.cache[pos])
+        Copy.step(ElementwiseAdd.step(a, b), self.cache[pos])
 
 
 class _Projection(iron.Graph):
@@ -45,7 +45,7 @@ class _Projection(iron.Graph):
         self.cache = iron.state((SLOTS, ROWS))
 
     def body(self, x, *, pos: Scratchpad[np.int32]):
-        Copy(GEMV(self.w, x), self.cache[pos])
+        Copy.step(GEMV.step(self.w, x), self.cache[pos])
 
 
 def _compiled(graph, fold, image, **shapes):

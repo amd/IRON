@@ -46,10 +46,10 @@ def _function():
     class F(iron.Graph):
         def body(self, x):
             if x.shape[0] == E:
-                ElementwiseAdd(x, w, s, tile_size=TILE)
-                return ElementwiseAdd(s, w, tile_size=TILE)
-            y = ElementwiseAdd(x, w2, tile_size=TILE)
-            return ElementwiseAdd(y[E:], s, tile_size=TILE)
+                ElementwiseAdd.step(x, w, s, tile_size=TILE)
+                return ElementwiseAdd.step(s, w, tile_size=TILE)
+            y = ElementwiseAdd.step(x, w2, tile_size=TILE)
+            return ElementwiseAdd.step(y[E:], s, tile_size=TILE)
 
     f = F()
 
@@ -138,10 +138,10 @@ def test_load_loads_a_version_whose_weights_are_already_uploaded():
     class F(iron.Graph):
         def body(self, x):
             if x.shape[0] == E:
-                return ElementwiseAdd(x, w, tile_size=TILE)
+                return ElementwiseAdd.step(x, w, tile_size=TILE)
             # An input is not sliced in place; an intermediate is.
-            y = ElementwiseAdd(x, x, tile_size=TILE)
-            return ElementwiseAdd(y[E:], w, tile_size=TILE)
+            y = ElementwiseAdd.step(x, x, tile_size=TILE)
+            return ElementwiseAdd.step(y[E:], w, tile_size=TILE)
 
     f = F()
 

@@ -172,7 +172,9 @@ class Magnitudes(iron.Graph):
     """Two magnitudes in turn, the second held to a bound its kernel misses."""
 
     def body(self, x):
-        return RoundedMagnitude(Magnitude(x, num_aie_columns=1), num_aie_columns=1)
+        return RoundedMagnitude.step(
+            Magnitude.step(x, num_aie_columns=1), num_aie_columns=1
+        )
 
 
 @pytest.mark.supported_devices("npu2")
@@ -224,9 +226,9 @@ class TwoExtents(iron.Graph):
 
     def body(self, a, b, c, d):
         wide = dict(tile_size=TILE, num_aie_columns=8)
-        t = ElementwiseAdd(a, b, **wide)
-        u = ElementwiseAdd(c, d, **wide)
-        return ElementwiseAdd(t, b, **wide), u
+        t = ElementwiseAdd.step(a, b, **wide)
+        u = ElementwiseAdd.step(c, d, **wide)
+        return ElementwiseAdd.step(t, b, **wide), u
 
 
 @pytest.mark.supported_devices("npu2")
@@ -263,7 +265,7 @@ class TwoProjections(iron.Graph):
 
     def body(self, x, y):
         tiles = dict(num_aie_columns=8, tile_size_input=4, tile_size_output=32)
-        return GEMV(self.narrow, x, **tiles), GEMV(self.wide, y, **tiles)
+        return GEMV.step(self.narrow, x, **tiles), GEMV.step(self.wide, y, **tiles)
 
 
 @pytest.mark.supported_devices("npu2")
@@ -299,7 +301,7 @@ class TwoMerges(iron.Graph):
     """Two Merges of one array, the shorter first, each on ids of its own."""
 
     def body(self, ids, more):
-        return Merge(ids, **GEMMA), Merge(more, **GEMMA)
+        return Merge.step(ids, **GEMMA), Merge.step(more, **GEMMA)
 
 
 @pytest.mark.supported_devices("npu2")
@@ -333,7 +335,7 @@ class TwoTables(iron.Graph):
         self.taps_w = ResampleTaps(in_size=4032, out_size=912, **taps)
 
     def body(self):
-        return self.taps_h(), self.taps_w()
+        return self.taps_h.apply(), self.taps_w.apply()
 
 
 @pytest.mark.supported_devices("npu2")
@@ -365,8 +367,8 @@ class TwoPositions(iron.Graph):
         out_width: Scratchpad[np.int32],
     ):
         return (
-            *self.few(out_rows=out_height, out_columns=out_width),
-            *self.many(out_rows=out_height, out_columns=out_width),
+            *self.few.apply(out_rows=out_height, out_columns=out_width),
+            *self.many.apply(out_rows=out_height, out_columns=out_width),
         )
 
 
@@ -398,8 +400,8 @@ class TwoResizes(iron.Graph):
 
     def body(self, rgb, taps_w, taps_h, wide_w):
         return (
-            Resample(rgb, taps_w, taps_h, **self.narrow),
-            Resample(rgb, wide_w, taps_h, **self.wide),
+            Resample.step(rgb, taps_w, taps_h, **self.narrow),
+            Resample.step(rgb, wide_w, taps_h, **self.wide),
         )
 
 
@@ -441,7 +443,7 @@ def test_a_chain_of_more_designs_than_a_context_configures_runs():
 
     class Prefixes(iron.Graph):
         def body(self, x):
-            return tuple(Copy(x[: SIZE * (i + 1)]) for i in range(n))
+            return tuple(Copy.step(x[: SIZE * (i + 1)]) for i in range(n))
 
     graph = Prefixes()
     graph.compile(x=(SIZE * n,), full_elf=False)

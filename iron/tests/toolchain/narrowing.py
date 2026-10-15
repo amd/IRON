@@ -87,9 +87,9 @@ class AddSilu(iron.Graph):
         self.silu = SiLU(**wide)
 
     def body(self, a, b):
-        x = self.gelu(self.add(a, b))
+        x = self.gelu.apply(self.add.apply(a, b))
         for _ in range(3):
-            x = self.add(self.silu(x), b)
+            x = self.add.apply(self.silu.apply(x), b)
         return x
 
 
@@ -97,17 +97,17 @@ class TwoExtents(iron.Graph):
     """An add at two extents, one array, with a silu between."""
 
     def body(self, a, b, c, d):
-        t = ElementwiseAdd(a, b, tile_size=TILE)
-        u = SiLU(ElementwiseAdd(c, d, tile_size=TILE), tile_size=TILE)
-        return ElementwiseAdd(t, b, tile_size=TILE), u
+        t = ElementwiseAdd.step(a, b, tile_size=TILE)
+        u = SiLU.step(ElementwiseAdd.step(c, d, tile_size=TILE), tile_size=TILE)
+        return ElementwiseAdd.step(t, b, tile_size=TILE), u
 
 
 class TwoClamps(iron.Graph):
     """Two clamps of one shape, apart only in their bounds."""
 
     def body(self, x):
-        y = Clamp(x, low=-0.75, high=1.25, tile_size=TILE)
-        return Clamp(y, low=-3e4, high=3e4, tile_size=TILE)
+        y = Clamp.step(x, low=-0.75, high=1.25, tile_size=TILE)
+        return Clamp.step(y, low=-3e4, high=3e4, tile_size=TILE)
 
 
 def test_widths_are_the_settable_per_tunables(npu2):
@@ -184,15 +184,15 @@ class Twice(iron.Graph):
     """One silu applied twice: one design."""
 
     def body(self, x):
-        return SiLU(SiLU(x, tile_size=TILE), tile_size=TILE)
+        return SiLU.step(SiLU.step(x, tile_size=TILE), tile_size=TILE)
 
 
 class PinnedTwin(iron.Graph):
     """Two adds of one design, the second's columns given by its call."""
 
     def body(self, a, b):
-        t = ElementwiseAdd(a, b, tile_size=TILE)
-        return ElementwiseAdd(t, b, tile_size=TILE, num_aie_columns=8)
+        t = ElementwiseAdd.step(a, b, tile_size=TILE)
+        return ElementwiseAdd.step(t, b, tile_size=TILE, num_aie_columns=8)
 
 
 def test_a_design_keeps_a_tunable_any_of_its_calls_pins(tmp_path, npu2):
@@ -757,10 +757,10 @@ class Apart(iron.Graph):
     def body(self, a, b, c, d):
         x = a
         for _ in range(3):
-            x = SiLU(ElementwiseAdd(x, b, tile_size=TILE), tile_size=TILE)
+            x = SiLU.step(ElementwiseAdd.step(x, b, tile_size=TILE), tile_size=TILE)
         y = c
         for _ in range(16):
-            y = ElementwiseAdd(y, d, tile_size=TILE)
+            y = ElementwiseAdd.step(y, d, tile_size=TILE)
         return x, y
 
 
@@ -1161,8 +1161,8 @@ class PinnedSibling(iron.Graph):
     """An add at two extents, one array, the larger's columns given by its call."""
 
     def body(self, a, b, c, d):
-        t = ElementwiseAdd(a, b, tile_size=TILE)
-        return t, ElementwiseAdd(c, d, tile_size=TILE, num_aie_columns=8)
+        t = ElementwiseAdd.step(a, b, tile_size=TILE)
+        return t, ElementwiseAdd.step(c, d, tile_size=TILE, num_aie_columns=8)
 
 
 def test_designs_of_one_array_may_search_different_tunables(tmp_path, npu2):
@@ -1257,8 +1257,8 @@ class AccurateGate(iron.Graph):
     """GELU of an f32-accumulating projection, as EmbeddingGemma 2's gate is."""
 
     def body(self, x, w):
-        return GELU(
-            GEMM(
+        return GELU.step(
+            GEMM.step(
                 x,
                 w,
                 b_col_maj=True,

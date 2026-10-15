@@ -30,7 +30,7 @@ class DeviceIds(iron.Graph):
         self.table = iron.weight(table)
 
     def body(self, ids):
-        return Copy(self.table[Copy(ids, dtype=np.int32)])
+        return Copy.step(self.table[Copy.step(ids, dtype=np.int32)])
 
 
 class Walk(iron.Graph):
@@ -40,7 +40,7 @@ class Walk(iron.Graph):
         self.rows = iron.state((rows, WIDTH))
 
     def body(self, *, steps: Carried[np.int32]):
-        Copy(Copy(self.table[self.ids]), self.rows)
+        Copy.step(Copy.step(self.table[self.ids]), self.rows)
         return iron.carry(steps=steps + 1)
 
 

@@ -200,7 +200,7 @@ def test_a_cached_build_leaves_no_kernel_for_the_next_graph_to_collide_with():
             self.w = np.zeros((N, K) if b_col_maj else (K, N), dtype=bfloat16)
 
         def body(self, x):
-            return GEMM(x, self.w, b_col_maj=self.b_col_maj)
+            return GEMM.step(x, self.w, b_col_maj=self.b_col_maj)
 
     def build(b_col_maj):
         return Project(b_col_maj).compile(

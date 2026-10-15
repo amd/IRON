@@ -211,7 +211,7 @@ class AudioTower(Model):
         """
         F = wave.shape[0] // self.config.hop - 1
         self.log_mel(wave, self.features[1 : F + 1], frames=frames)
-        Copy(self.zero_mel, self.features[frames + 1])
+        Copy.step(self.zero_mel, self.features[frames + 1])
 
     def body(
         self,
@@ -238,43 +238,51 @@ class AudioTower(Model):
         # The first row of each convolution's input is its zero padding in time.
         self.logmel(wave, frames)
         h = self.conv0(self.features, rows=n)
-        h = RMSNorm(
+        h = RMSNorm.step(
             h.reshape(2 * T * self.slots // C0, C0), weight=self.norm0, epsilon=c.eps
         )
-        ReLU(h.reshape(2 * T, self.slots), self.subsampled[1 : 2 * T + 1])
-        Copy(self.zero, self.subsampled[n + 1])
+        ReLU.step(h.reshape(2 * T, self.slots), self.subsampled[1 : 2 * T + 1])
+        Copy.step(self.zero, self.subsampled[n + 1])
         h = self.conv1(self.subsampled, rows=tokens)
-        h = ReLU(RMSNorm(h.reshape(T * F1, C1), weight=self.norm1, epsilon=c.eps))
-        x = GEMM(h.reshape(T, F1 * C1), self.input_proj, b_col_maj=True, **ACCURATE)
+        h = ReLU.step(
+            RMSNorm.step(h.reshape(T * F1, C1), weight=self.norm1, epsilon=c.eps)
+        )
+        x = GEMM.step(
+            h.reshape(T, F1 * C1), self.input_proj, b_col_maj=True, **ACCURATE
+        )
         for w in self.layers:
             x = self.layer(w, x, tokens)
-        x = GEMM(x, self.output_proj, b_col_maj=True, **ACCURATE)
-        x = RMSNorm(ElementwiseAdd(x, self.output_bias[:tokens]), epsilon=c.eps)
-        return GEMM(x, self.projection, b_col_maj=True, **ACCURATE)
+        x = GEMM.step(x, self.output_proj, b_col_maj=True, **ACCURATE)
+        x = RMSNorm.step(
+            ElementwiseAdd.step(x, self.output_bias[:tokens]), epsilon=c.eps
+        )
+        return GEMM.step(x, self.projection, b_col_maj=True, **ACCURATE)
 
     def linear(self, w, x, weight=None):
         """`x`, already clamped to the input bounds of `w`, projected by
         `weight` (`w`'s own by default) and clamped to its output bounds.
         """
         weight = w.weight if weight is None else weight
-        return Clamp(GEMM(x, weight, b_col_maj=True, **ACCURATE), **w.output)
+        return Clamp.step(GEMM.step(x, weight, b_col_maj=True, **ACCURATE), **w.output)
 
     def layer(self, w, x, tokens):
         c = self.config
         x = self.feed_forward(w.ff[0], x)
-        h = RMSNorm(x, weight=w.norm_pre_attn, epsilon=c.eps)
-        a = RMSNorm(
+        h = RMSNorm.step(x, weight=w.norm_pre_attn, epsilon=c.eps)
+        a = RMSNorm.step(
             self.attention(w.attn, h, tokens), weight=w.norm_post_attn, epsilon=c.eps
         )
-        x = self.feed_forward(w.ff[1], self.light_conv(w.conv, ElementwiseAdd(x, a)))
-        return RMSNorm(x, weight=w.norm_out, epsilon=c.eps)
+        x = self.feed_forward(
+            w.ff[1], self.light_conv(w.conv, ElementwiseAdd.step(x, a))
+        )
+        return RMSNorm.step(x, weight=w.norm_out, epsilon=c.eps)
 
     def feed_forward(self, w, x):
         c = self.config
-        h = Clamp(RMSNorm(x, weight=w.pre, epsilon=c.eps), **w.up.input)
+        h = Clamp.step(RMSNorm.step(x, weight=w.pre, epsilon=c.eps), **w.up.input)
         h = self.linear(w.up, h)
-        h = self.linear(w.down, Clamp(SiLU(h), **w.down.input))
-        return ElementwiseAdd(x, RMSNorm(h, weight=w.post, epsilon=c.eps))
+        h = self.linear(w.down, Clamp.step(SiLU.step(h), **w.down.input))
+        return ElementwiseAdd.step(x, RMSNorm.step(h, weight=w.post, epsilon=c.eps))
 
     def attention(self, w, h, tokens):
         c = self.config
@@ -282,41 +290,41 @@ class AudioTower(Model):
         K = self.width
         keys, values = self.keys, self.values
         scores, probs = self.scores, self.probs
-        h = Clamp(h, **w.q.input)
-        q = ElementwiseMul(self.linear(w.q, h), w.scale[:tokens])
+        h = Clamp.step(h, **w.q.input)
+        q = ElementwiseMul.step(self.linear(w.q, h), w.scale[:tokens])
         k, val = self.linear(w.k, h), self.linear(w.v, h)
-        Copy(k.reshape(T, H, D).transpose(1, 0, 2), keys[:, W - 1 : W - 1 + T])
+        Copy.step(k.reshape(T, H, D).transpose(1, 0, 2), keys[:, W - 1 : W - 1 + T])
         R = T + W - 1 + (T + W - 1) % 2
-        Copy(w.relative, keys[:, R : R + 2 * B])
-        Copy(val.reshape(T, H, D).transpose(1, 0, 2), values[:, W - 1 : W - 1 + T])
-        q = Copy(q.reshape(T, H, D).transpose(1, 0, 2))
+        Copy.step(w.relative, keys[:, R : R + 2 * B])
+        Copy.step(val.reshape(T, H, D).transpose(1, 0, 2), values[:, W - 1 : W - 1 + T])
+        q = Copy.step(q.reshape(T, H, D).transpose(1, 0, 2))
         # Over every key: those past the valid ones are stale but finite, as
         # only bounded copies write them.
         for i in range(H):
-            GEMM(q[i], keys[i], scores[i], b_col_maj=True, **ACCURATE)
+            GEMM.step(q[i], keys[i], scores[i], b_col_maj=True, **ACCURATE)
         # Query t's band starts at the even column of t and t - 1, its
         # relative terms at R or R + band: a DMA moves 4-byte words.
         pairs = [H, T // 2, 2, B]
         band = TensorAccessPattern((H, T, K), 0, pairs, [T * K, 2 * K + 2, K, 1])
         relative = TensorAccessPattern((H, T, K), R, pairs, [T * K, 2 * K, K + B, 1])
-        logits = ElementwiseAdd(
-            Copy(scores, src=band).reshape(H * T, B),
-            Copy(scores, src=relative).reshape(H * T, B),
+        logits = ElementwiseAdd.step(
+            Copy.step(scores, src=band).reshape(H * T, B),
+            Copy.step(scores, src=relative).reshape(H * T, B),
         )
-        logits = AXPY(Tanh(logits), self.mask, scalar_factor=c.logit_cap)
-        Copy(Softmax(logits), probs, dst=band)
+        logits = AXPY.step(Tanh.step(logits), self.mask, scalar_factor=c.logit_cap)
+        Copy.step(Softmax.step(logits), probs, dst=band)
         for i in range(H):
-            GEMM(probs[i, :tokens], values[i], q[i], **ACCURATE)
-        o = Copy(q.transpose(1, 0, 2)).reshape(T, H * D)
-        return self.linear(w.post, Clamp(o, **w.post.input))
+            GEMM.step(probs[i, :tokens], values[i], q[i], **ACCURATE)
+        o = Copy.step(q.transpose(1, 0, 2)).reshape(T, H * D)
+        return self.linear(w.post, Clamp.step(o, **w.post.input))
 
     def light_conv(self, w, x):
         c = self.config
-        h = Clamp(RMSNorm(x, weight=w.pre, epsilon=c.eps), **w.start.input)
+        h = Clamp.step(RMSNorm.step(x, weight=w.pre, epsilon=c.eps), **w.start.input)
         a, b = (self.linear(w.start, h, weight) for weight in w.glu)
-        h = DepthwiseConv1d(ElementwiseMul(a, Sigmoid(b)), w.planes)
-        h = SiLU(RMSNorm(h, weight=w.norm, epsilon=c.eps))
-        return ElementwiseAdd(x, self.linear(w.end, Clamp(h, **w.end.input)))
+        h = DepthwiseConv1d.step(ElementwiseMul.step(a, Sigmoid.step(b)), w.planes)
+        h = SiLU.step(RMSNorm.step(h, weight=w.norm, epsilon=c.eps))
+        return ElementwiseAdd.step(x, self.linear(w.end, Clamp.step(h, **w.end.input)))
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, `max_tokens` soft tokens."""

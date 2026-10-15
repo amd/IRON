@@ -39,7 +39,7 @@ class Block(iron.Graph):
         self.ffn = SwiGLU(weight(rng, H, E), weight(rng, H, E), weight(rng, E, H))
 
     def body(self, x):
-        return ReLU(self.ffn(x))
+        return ReLU.step(self.ffn(x))
 
 
 class Inline(iron.Graph):
@@ -49,7 +49,7 @@ class Inline(iron.Graph):
         self.ffn = ffn
 
     def body(self, x):
-        return ReLU(self.ffn.body(x))
+        return ReLU.step(self.ffn.body(x))
 
 
 class Features(iron.Graph):
@@ -61,7 +61,7 @@ class Features(iron.Graph):
 
     def body(self, wave, *, frames: Scratchpad[np.int32]):
         self.log_mel(wave, self.features[1:], frames=frames)
-        return Copy(self.features)
+        return Copy.step(self.features)
 
 
 def test_a_called_graph_traces_into_its_caller():
@@ -110,7 +110,7 @@ def test_the_callers_reference_runs_the_called_graph():
 
 class Counter(iron.Graph):
     def body(self, x, *, step: Carried[np.int32]):
-        return ReLU(x), iron.carry(step=step + 1)
+        return ReLU.step(x), iron.carry(step=step + 1)
 
 
 class CallsCounter(iron.Graph):
@@ -123,7 +123,7 @@ class CallsCounter(iron.Graph):
 
 class Rows(iron.Graph):
     def body(self, x, *, n: Scratchpad[np.int32]):
-        return ReLU(x[:n])
+        return ReLU.step(x[:n])
 
 
 class CallsWithoutValue(iron.Graph):

@@ -25,7 +25,7 @@ N = 4096
 
 class TwoSteps(iron.Graph):
     def body(self, a, b):
-        return SiLU(ElementwiseAdd(a, b))
+        return SiLU.step(ElementwiseAdd.step(a, b))
 
 
 def test_a_floorplan_holds_the_cores_and_streams_the_step_asks_for(device):

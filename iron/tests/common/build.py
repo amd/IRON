@@ -417,7 +417,7 @@ def test_on_an_xclbin_a_copy_bounded_on_its_innermost_axis_sizes_it(npu2):
 
     class G(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32], pos: Scratchpad[np.int32]):
-            Copy(Softmax(x[:, :n]), cache[:, pos])
+            Copy.step(Softmax.step(x[:, :n]), cache[:, pos])
 
     t = G().trace(x=(16, 256))
     (op,) = [o for o in t.operators if isinstance(o, Copy)]

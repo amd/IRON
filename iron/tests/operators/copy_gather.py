@@ -49,8 +49,8 @@ class FromWeight(iron.Graph):
         self.ids = ids
 
     def body(self, x):
-        rows = Copy(self.table[self.ids]).reshape(len(self.ids), WIDTH)
-        return rows, ElementwiseAdd(rows, x)
+        rows = Copy.step(self.table[self.ids]).reshape(len(self.ids), WIDTH)
+        return rows, ElementwiseAdd.step(rows, x)
 
 
 class FromIntermediate(iron.Graph):
@@ -58,8 +58,8 @@ class FromIntermediate(iron.Graph):
         self.ids = ids
 
     def body(self, table):
-        table = Copy(table).reshape(table.shape)
-        return Copy(table[self.ids]).reshape(len(self.ids), WIDTH)
+        table = Copy.step(table).reshape(table.shape)
+        return Copy.step(table[self.ids]).reshape(len(self.ids), WIDTH)
 
 
 class PerCall(iron.Graph):
@@ -70,7 +70,7 @@ class PerCall(iron.Graph):
             self.profile.add(Gather, feeds=feeds)
 
     def body(self, ids):
-        return Copy(self.table[ids])
+        return Copy.step(self.table[ids])
 
 
 class Embedded(iron.Graph):
@@ -80,7 +80,7 @@ class Embedded(iron.Graph):
         self.table = iron.weight(table)
 
     def body(self, ids, x):
-        return ElementwiseAdd(Copy(self.table[ids]), x)
+        return ElementwiseAdd.step(Copy.step(self.table[ids]), x)
 
 
 class Bounded(iron.Graph):
@@ -93,7 +93,7 @@ class Bounded(iron.Graph):
             self.profile.add(Gather, feeds=feeds)
 
     def body(self, ids, *, n: Scratchpad[np.int32]):
-        return Copy(self.table[ids[:n]])
+        return Copy.step(self.table[ids[:n]])
 
 
 class FromDeviceIds(iron.Graph):
@@ -110,10 +110,10 @@ class FromDeviceIds(iron.Graph):
             self.profile.add(Gather, feeds=feeds)
 
     def body(self, ids):
-        ids = Copy(ids, dtype=np.int32)
+        ids = Copy.step(ids, dtype=np.int32)
         return (
-            Copy(self.table[ids], static_base=self.static_base),
-            Copy(self.other[ids], static_base=self.static_base),
+            Copy.step(self.table[ids], static_base=self.static_base),
+            Copy.step(self.other[ids], static_base=self.static_base),
         )
 
 
@@ -123,7 +123,7 @@ class FromState(iron.Graph):
         self.ids = iron.state((rows,), np.int32)
 
     def body(self):
-        return Copy(self.table[self.ids])
+        return Copy.step(self.table[self.ids])
 
 
 class Merged(iron.Graph):
@@ -133,10 +133,10 @@ class Merged(iron.Graph):
         self.merged = iron.state((rows + soft, WIDTH))
 
     def body(self, ids, soft, merge):
-        x = Copy(self.table[ids])
-        Copy(x, self.merged[: x.shape[0]])
-        Copy(soft, self.merged[self.at : self.at + soft.shape[0]])
-        return Copy(self.merged[merge])
+        x = Copy.step(self.table[ids])
+        Copy.step(x, self.merged[: x.shape[0]])
+        Copy.step(soft, self.merged[self.at : self.at + soft.shape[0]])
+        return Copy.step(self.merged[merge])
 
 
 def assert_equal(got, expected, what):

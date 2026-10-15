@@ -56,7 +56,7 @@ class Subsample(iron.Graph):
         self.conv = conv
 
     def body(self, x, *, n: Scratchpad[np.int32]):
-        return ReLU(self.conv(x, rows=n))
+        return ReLU.step(self.conv(x, rows=n))
 
 
 @pytest.mark.parametrize("case", list(CASES))

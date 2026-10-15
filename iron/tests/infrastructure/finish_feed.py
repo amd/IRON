@@ -26,7 +26,7 @@ class Residual(iron.Graph):
         self.w = w
 
     def body(self, x, r):
-        return ElementwiseAdd(GEMV(self.w, x, num_aie_columns=8), r)
+        return ElementwiseAdd.step(GEMV.step(self.w, x, num_aie_columns=8), r)
 
 
 @pytest.mark.parametrize("M,K", [(2048, 2048), (2048, 8192), (512, 2048)])

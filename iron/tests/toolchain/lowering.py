@@ -173,7 +173,7 @@ class _Features(iron.Graph):
 
     def body(self, wave, *, frames: Scratchpad[np.int32]):
         self.log_mel(wave, self.features[1:], frames=frames)
-        return Copy(self.features)
+        return Copy.step(self.features)
 
 
 def test_a_graph_called_in_a_graph_lowers(device, tmp_path):

@@ -66,7 +66,7 @@ from iron.operators.softmax import Softmax
 def test_rows_are_masked_to_the_per_call_length(full_elf, rows, seq, block, positions):
     class Attend(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
-            return Softmax(x[:, :n])
+            return Softmax.step(x[:, :n])
 
     attend = Attend()
     net = attend.compile(x=(rows, seq), full_elf=full_elf)

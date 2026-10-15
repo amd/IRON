@@ -40,8 +40,8 @@ def _graph():
 
     class G(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32], pos: Scratchpad[np.int32]):
-            y = Softmax(x[:, :n])
-            Copy(y, cache[:, pos])
+            y = Softmax.step(x[:, :n])
+            Copy.step(y, cache[:, pos])
             return y
 
     g = G()
@@ -119,7 +119,7 @@ def test_a_per_call_size_over_one_block_builds_at_each_step(npu2):
 
     class Decode(iron.Graph):
         def body(self, q, k, v, *, position: Scratchpad[np.int32]):
-            return MHA(
+            return MHA.step(
                 q,
                 k[:, : position + 1],
                 v[:, : position + 1],

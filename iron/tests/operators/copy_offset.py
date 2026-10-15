@@ -40,7 +40,7 @@ def test_the_cache_offset_is_applied_per_call():
 
     class Write(iron.Graph):
         def body(self, x, *, pos: Scratchpad[np.int32]):
-            Copy(x, cache[:, pos])
+            Copy.step(x, cache[:, pos])
 
     write = Write()
 
@@ -73,7 +73,7 @@ def test_a_chunk_lands_in_its_rows_of_the_cache():
     class Write(iron.Graph):
         def body(self, x, *, chunk: Scratchpad[np.int32], rows: Scratchpad[np.int32]):
             x = x[:rows].reshape(CHUNK, N_KV, HEAD_DIM).transpose(1, 0, 2)
-            Copy(x, cache.reshape(N_KV, CHUNKS, CHUNK, HEAD_DIM)[:, chunk, :rows])
+            Copy.step(x, cache.reshape(N_KV, CHUNKS, CHUNK, HEAD_DIM)[:, chunk, :rows])
 
     write = Write()
     net = write.compile(x=(CHUNK, N_KV * HEAD_DIM))
@@ -104,7 +104,7 @@ def test_the_offset_moves_every_piece_of_a_split_pattern():
 
     class Write(iron.Graph):
         def body(self, x, *, pos: Scratchpad[np.int32]):
-            Copy(x, cache[:, pos, :, :, :KEEP])
+            Copy.step(x, cache[:, pos, :, :, :KEEP])
 
     write = Write()
     net = write.compile(x=(GROUPS, BLOCKS, ROWS, KEEP))

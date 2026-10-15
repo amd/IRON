@@ -1010,14 +1010,16 @@ class Operator:
         return self._image.compile().artifacts
 
     def __call__(self, *args, **kwargs):
-        """Inside a graph's body, a step on its handles; outside one, a run
-        of this operator's own image (``compile``) on device tensors, one per
-        declared buffer in declaration order, ``kwargs`` its ``DispatchTime``
-        values by device symbol.
+        """A run of this operator's own image (``compile``) on device
+        tensors, one per declared buffer in declaration order, ``kwargs``
+        its ``DispatchTime`` values by device symbol. Inside a graph's body,
+        call ``op.apply(*operands, **values)`` instead.
         """
-        tracer = graph_tracer.get()
-        if tracer is not None:
-            return tracer.call(self, args, kwargs)
+        if graph_tracer.get() is not None:
+            raise TypeError(
+                f"{type(self).__name__} instance called inside a graph's "
+                f"body; use op.apply(*operands, **values)"
+            )
         names = [b.name for b in self.buffers]
         if len(args) != len(names) or not all(isinstance(a, NpuTensor) for a in args):
             raise TypeError(

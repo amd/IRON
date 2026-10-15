@@ -76,30 +76,30 @@ class Calls(iron.Graph):
     """`Chain` by class calls: another graph over its designs."""
 
     def body(self, a, b):
-        x = ElementwiseAdd(a, b, tile_size=TILE)
-        x = ElementwiseMul(SiLU(x, tile_size=TILE), b, tile_size=TILE)
-        return SiLU(ElementwiseAdd(x, b, tile_size=TILE), tile_size=TILE)
+        x = ElementwiseAdd.step(a, b, tile_size=TILE)
+        x = ElementwiseMul.step(SiLU.step(x, tile_size=TILE), b, tile_size=TILE)
+        return SiLU.step(ElementwiseAdd.step(x, b, tile_size=TILE), tile_size=TILE)
 
 
 class Masked(iron.Graph):
     """A softmax over each row's first `n` entries, `n` given per call."""
 
     def body(self, x, *, n: Scratchpad[np.int32]):
-        return Softmax(x[:, :n])
+        return Softmax.step(x[:, :n])
 
 
 class Gather(iron.Graph):
     """Row `pos` of `rows`, gathered and added to `x`."""
 
     def body(self, x, rows, *, pos: Scratchpad[np.int32]):
-        return ElementwiseAdd(x, Copy(rows[pos]), tile_size=TILE)
+        return ElementwiseAdd.step(x, Copy.step(rows[pos]), tile_size=TILE)
 
 
 class Attend(iron.Graph):
     """One query's heads over the first `n` rows of a key and value cache."""
 
     def body(self, q, k, v, *, n: Scratchpad[np.int32]):
-        return MHA(q, k[:n], v[:n], heads_interleaved=True, kv_interleaved=True)
+        return MHA.step(q, k[:n], v[:n], heads_interleaved=True, kv_interleaved=True)
 
 
 def test_a_value_derived_from_a_bound_extent_follows_the_call(tmp_path):

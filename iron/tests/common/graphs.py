@@ -16,14 +16,14 @@ class Rotate(iron.Graph):
     """RoPE over the first `n` positions, `n` given per call."""
 
     def body(self, x, angles, *, n: Scratchpad[np.int32]):
-        return RoPE(x[:n], angles[:n])
+        return RoPE.step(x[:n], angles[:n])
 
 
 class Project(iron.Graph):
     """The first `n` rows of `x` projected by `w`."""
 
     def body(self, x, w, *, n: Scratchpad[np.int32]):
-        return GEMM(x[:n], w, b_col_maj=True)
+        return GEMM.step(x[:n], w, b_col_maj=True)
 
 
 class ProjectAsStored(iron.Graph):
@@ -32,7 +32,7 @@ class ProjectAsStored(iron.Graph):
     """
 
     def body(self, x, w, *, n: Scratchpad[np.int32]):
-        return FLMGEMM(x[:n], w, b_col_maj=True)
+        return FLMGEMM.step(x[:n], w, b_col_maj=True)
 
 
 class Walk(iron.Graph):
@@ -45,7 +45,7 @@ class Walk(iron.Graph):
         self.successor = iron.weight(successor)
 
     def body(self, *, node: Carried[np.int32], steps: Carried[np.int32]):
-        nxt = Copy(self.successor[node], dtype=np.int32)
+        nxt = Copy.step(self.successor[node], dtype=np.int32)
         return iron.carry(node=nxt, steps=steps + 1)
 
 
@@ -69,10 +69,10 @@ class Trail(iron.Graph):
         skip: Scratchpad[np.int32],
     ):
         if jump is None:
-            nxt = Copy(self.successor[node], dtype=np.int32)
+            nxt = Copy.step(self.successor[node], dtype=np.int32)
         else:
-            nxt = Copy(jump[skip], dtype=np.int32)
-        Copy(nxt, self.trail[steps], dtype=np.int32)
+            nxt = Copy.step(jump[skip], dtype=np.int32)
+        Copy.step(nxt, self.trail[steps], dtype=np.int32)
         return iron.carry(node=nxt, steps=steps + 1)
 
 
@@ -91,8 +91,8 @@ class Chain(iron.Graph):
         self.mul = ElementwiseMul(**shape)
 
     def body(self, a, b):
-        x = self.mul(self.silu(self.add(a, b)), b)
-        return self.silu(self.add(x, b))
+        x = self.mul.apply(self.silu.apply(self.add.apply(a, b)), b)
+        return self.silu.apply(self.add.apply(x, b))
 
 
 class Adds(iron.Graph):
@@ -104,5 +104,5 @@ class Adds(iron.Graph):
 
     def body(self, x, w):
         for _ in range(self.n):
-            x = self.add(x, w)
+            x = self.add.apply(x, w)
         return x

@@ -69,18 +69,18 @@ def _ffn():
 
     class Ffn(iron.Graph):
         def body(self, x, *, pos: Scratchpad[np.int32]):
-            h = RMSNorm(x, weight=norm_w)  # a bare tensor is a weight
-            gate = GEMV(
+            h = RMSNorm.step(x, weight=norm_w)  # a bare tensor is a weight
+            gate = GEMV.step(
                 w_gate, h, num_aie_columns=8, tile_size_input=4, tile_size_output=H // 8
             )
-            up = GEMV(
+            up = GEMV.step(
                 w_up, h, num_aie_columns=8, tile_size_input=4, tile_size_output=H // 8
             )
-            act = ElementwiseMul(SiLU(gate), up)
-            Copy(
+            act = ElementwiseMul.step(SiLU.step(gate), up)
+            Copy.step(
                 act[:, : 4 * 64].reshape(4, 64), cache[:, pos]
             )  # writes state; returns nothing
-            return GEMV(w_down, act, num_aie_columns=8, tile_size_output=E // 8)
+            return GEMV.step(w_down, act, num_aie_columns=8, tile_size_output=E // 8)
 
     ffn = Ffn()
 
@@ -124,8 +124,8 @@ def test_a_name_the_tracer_makes_up_never_aliases_one_it_was_given():
             self.silu0 = iron.weight(z(E))
 
         def body(self, x):
-            Copy(SiLU(x), self.out)
-            return ElementwiseAdd(SiLU(x), self.silu0)
+            Copy.step(SiLU.step(x), self.out)
+            return ElementwiseAdd.step(SiLU.step(x), self.silu0)
 
     t = Held().trace(x=(E,))
     assert [(type(s.op).__name__, *map(str, s.refs())) for s in t.steps] == [
@@ -141,7 +141,7 @@ def test_a_name_the_tracer_makes_up_never_aliases_one_it_was_given():
 
     class Given(iron.Graph):
         def body(self, out):
-            return SiLU(out)
+            return SiLU.step(out)
 
     t = Given().trace(out=(E,))
     assert [h.name for h in t.inputs] == ["out"] and [h.name for h in t.outputs] == [
@@ -223,7 +223,7 @@ def test_slices_are_views_into_the_parent_in_bytes():
 def test_an_input_read_only_through_slices_is_laid_out_whole():
     class Halves(iron.Graph):
         def body(self, x):
-            return SiLU(x[E // 2 :]), SiLU(x[: E // 2])
+            return SiLU.step(x[E // 2 :]), SiLU.step(x[: E // 2])
 
     t = Halves().trace(x=(E,))
     assert t.pinned == {"x": E * 2}
@@ -244,9 +244,9 @@ def test_alike_instances_bound_to_different_values_are_different_designs():
 
     class F(iron.Graph):
         def body(self, x, *, a: Scratchpad[np.int32], b: Scratchpad[np.int32]):
-            Copy(x, c1[:, a])
-            Copy(x, c2[:, b])
-            Copy(x, c3[:, a])
+            Copy.step(x, c1[:, a])
+            Copy.step(x, c2[:, b])
+            Copy.step(x, c3[:, a])
 
     f = F()
 
@@ -272,7 +272,7 @@ def test_an_explicit_instance_checks_its_operands_shapes():
 
     class Step(iron.Graph):
         def body(self, x):
-            return q(w_t, x)
+            return q.apply(w_t, x)
 
     step = Step()
 
@@ -285,8 +285,8 @@ def test_binding_two_handles_to_one_instance_is_an_error():
 
     class Two(iron.Graph):
         def body(self, x, *, a: Scratchpad[np.int32], b: Scratchpad[np.int32]):
-            y = copy(x, out_offset=a)
-            return copy(y, out_offset=b)
+            y = copy.apply(x, out_offset=a)
+            return copy.apply(y, out_offset=b)
 
     two = Two()
 
@@ -305,7 +305,7 @@ def test_a_graph_carries_its_profile():
 
     class Two(iron.Graph):
         def body(self, x):
-            return GEMV(w_b, GEMV(w_a, x, tile_size_output=32))
+            return GEMV.step(w_b, GEMV.step(w_a, x, tile_size_output=32))
 
     two = Two()
     two.profile = profile
@@ -323,7 +323,7 @@ def test_an_explicit_instance_is_applied_like_the_class():
 
     class Step(iron.Graph):
         def body(self, x):
-            return q(w, x)
+            return q.apply(w, x)
 
     step = Step()
 
@@ -338,7 +338,7 @@ def test_shape_mismatch_and_rank_rules():
 
     class Bad(iron.Graph):
         def body(self, x):
-            return GEMV(w, x)
+            return GEMV.step(w, x)
 
     bad = Bad()
 
@@ -348,7 +348,7 @@ def test_shape_mismatch_and_rank_rules():
 
     class Flat(iron.Graph):
         def body(self, x, y):
-            return add(x, y)  # a flat operator takes any rank
+            return add.step(x, y)  # a flat operator takes any rank
 
     flat = Flat()
 
@@ -365,7 +365,7 @@ def test_keyword_only_parameters_must_be_annotated_as_values():
 
     class G(iron.Graph):
         def body(self, x, *, n: DispatchTime[np.int32]):
-            return SiLU(x)
+            return SiLU.step(x)
 
     g = G()
 
@@ -385,7 +385,7 @@ def test_returning_an_input_or_a_slice_is_refused():
 
     class Part(iron.Graph):
         def body(self, x):
-            return SiLU(x)[:8]
+            return SiLU.step(x)[:8]
 
     part = Part()
 
@@ -482,12 +482,12 @@ class _Gate(iron.Graph):
         self.w, self.use, self.tile = z(rows, E), use, tile
 
     def body(self, x):
-        gate = GEMV(self.w, x, num_aie_columns=8, tile_size_output=self.tile)
-        act = SiLU(gate)
+        gate = GEMV.step(self.w, x, num_aie_columns=8, tile_size_output=self.tile)
+        act = SiLU.step(gate)
         if self.use == "returned":
             return act, gate
         if self.use == "read twice":
-            return ElementwiseAdd(act, gate)
+            return ElementwiseAdd.step(act, gate)
         return act
 
 
@@ -511,10 +511,10 @@ def test_a_fold_the_producer_cannot_resolve_is_left_alone(npu2):
 
 class _Sums(iron.Graph):
     def __init__(self, consumer=SiLU):
-        self.consumer = consumer
+        self.consumer = consumer.step if isinstance(consumer, type) else consumer
 
     def body(self, a, b):
-        return self.consumer(ElementwiseAdd(a, b)), ElementwiseAdd(b, a)
+        return self.consumer(ElementwiseAdd.step(a, b)), ElementwiseAdd.step(b, a)
 
 
 def test_an_elementwise_step_finishes_its_consumer_in_its_own_cores(npu2):
@@ -552,7 +552,7 @@ def test_an_operator_with_an_array_of_its_own_finishes_nothing(npu2):
         Clamp(size=E, low=0, high=1).fold(SiLU(size=E)).resolved(npu2)
     with pytest.raises(ValueError, match="array of their own"):
         ElementwiseAdd(size=E).fold(Clamp(size=E, low=0, high=1)).resolved(npu2)
-    t = _Sums(lambda y: Clamp(y, low=0.0, high=1.0)).trace(a=(E,), b=(E,))
+    t = _Sums(lambda y: Clamp.step(y, low=0.0, high=1.0)).trace(a=(E,), b=(E,))
     assert folded(t, npu2) == (t, {})
 
 
@@ -561,8 +561,10 @@ class _Chain(iron.Graph):
         self.at, self.cols, self.channels = at, cols, channels
 
     def body(self, a, c):
-        s = SiLU(ReLU(a, num_aie_columns=self.cols, num_channels=self.channels))
-        return ElementwiseMul(s, c) if self.at == 0 else ElementwiseMul(c, s)
+        s = SiLU.step(
+            ReLU.step(a, num_aie_columns=self.cols, num_channels=self.channels)
+        )
+        return ElementwiseMul.step(s, c) if self.at == 0 else ElementwiseMul.step(c, s)
 
 
 @pytest.mark.parametrize("at", [0, 1])
@@ -604,7 +606,7 @@ class _GemvAdd(iron.Graph):
         self.w = z(E, E)
 
     def body(self, x, r):
-        return ElementwiseAdd(GEMV(self.w, x, num_aie_columns=8), r)
+        return ElementwiseAdd.step(GEMV.step(self.w, x, num_aie_columns=8), r)
 
 
 def test_a_fold_that_narrows_its_producer_is_refused(npu2):
@@ -616,7 +618,9 @@ def test_a_fold_that_narrows_its_producer_is_refused(npu2):
 
 class _SumChain(iron.Graph):
     def body(self, a, b, c):
-        return ElementwiseMul(SiLU(ElementwiseAdd(a, b, num_aie_columns=4)), c)
+        return ElementwiseMul.step(
+            SiLU.step(ElementwiseAdd.step(a, b, num_aie_columns=4)), c
+        )
 
 
 def test_a_fold_past_its_cores_input_channels_is_refused(npu2):
@@ -670,9 +674,11 @@ class _Bounded(iron.Graph):
 
     def body(self, x, y, *, n: Scratchpad[np.int32]):
         if self.gemm:
-            return SiLU(GEMM(x[:n], self.w, b_col_maj=True))
+            return SiLU.step(GEMM.step(x[:n], self.w, b_col_maj=True))
         other = y[:n] if self.other_bounded else y
-        return ElementwiseMul(SiLU(ReLU(x[:n], num_aie_columns=4)), other)
+        return ElementwiseMul.step(
+            SiLU.step(ReLU.step(x[:n], num_aie_columns=4)), other
+        )
 
 
 def test_a_bounded_step_folds_under_its_producers_bound(npu2):
@@ -710,10 +716,10 @@ class _Late(iron.Graph):
         self.overwrite = overwrite
 
     def body(self, a, b):
-        s = SiLU(self.st)
+        s = SiLU.step(self.st)
         if self.overwrite:
-            Copy(a, self.st)
-        return ElementwiseMul(s, ReLU(b))
+            Copy.step(a, self.st)
+        return ElementwiseMul.step(s, ReLU.step(b))
 
 
 def test_a_fold_runs_where_what_it_reads_is_written(npu2):
@@ -737,15 +743,15 @@ class _Store(iron.Graph):
         self.cache = iron.state((length, rows))
 
     def body(self, x, *, pos: Scratchpad[np.int32]):
-        y = GEMV(self.w, x, num_aie_columns=8)
+        y = GEMV.step(self.w, x, num_aie_columns=8)
         if self.use == "read between":
-            out = ReLU(self.cache[0])
-        Copy(y, self.cache[pos])
+            out = ReLU.step(self.cache[0])
+        Copy.step(y, self.cache[pos])
         if self.use == "returned":
             return y
         if self.use == "read between":
             return out
-        return SiLU(x)
+        return SiLU.step(x)
 
 
 def test_a_copy_into_a_state_folds_into_its_producers_drain(npu2):
@@ -775,12 +781,12 @@ class _Row(iron.Graph):
         self.cache = iron.state((8, 256))
 
     def body(self, x, *, pos: Scratchpad[np.int32]):
-        y = GEMV(self.w, x, num_aie_columns=8)
+        y = GEMV.step(self.w, x, num_aie_columns=8)
         if self.at == "static":
-            Copy(y.reshape(2, 256), self.cache[2:4])
+            Copy.step(y.reshape(2, 256), self.cache[2:4])
         else:
-            Copy(y.reshape(2, 256)[pos], self.cache[3])
-        return SiLU(x)
+            Copy.step(y.reshape(2, 256)[pos], self.cache[3])
+        return SiLU.step(x)
 
 
 def test_a_copy_to_a_fixed_run_folds_and_one_of_part_of_its_input_stays(npu2):
@@ -800,10 +806,10 @@ class _Project(iron.Graph):
         self.residual, self.shared = residual, shared
 
     def body(self, x, r):
-        s = ElementwiseAdd(x, r) if self.residual else x
-        h = RMSNorm(s, weight=self.norm)
-        ys = [GEMV(w, h, num_aie_columns=8) for w in self.ws]
-        return (*ys, ElementwiseAdd(h, r)) if self.shared else tuple(ys)
+        s = ElementwiseAdd.step(x, r) if self.residual else x
+        h = RMSNorm.step(s, weight=self.norm)
+        ys = [GEMV.step(w, h, num_aie_columns=8) for w in self.ws]
+        return (*ys, ElementwiseAdd.step(h, r)) if self.shared else tuple(ys)
 
 
 def test_a_norm_folds_into_the_matvecs_that_read_it(npu2):
@@ -1272,7 +1278,7 @@ def test_a_bound_value_survives_tuning():
 
     class F(iron.Graph):
         def body(self, x, *, a: Scratchpad[np.int32]):
-            return copy(x, out_offset=a)
+            return copy.apply(x, out_offset=a)
 
     f = F()
 
@@ -1346,8 +1352,8 @@ def test_a_per_call_value_cannot_steer_the_trace():
 
         def body(self, x, *, pos: Scratchpad[np.int32]):
             if self.test(pos):
-                return ReLU(x)
-            return ElementwiseAdd(x, x)
+                return ReLU.step(x)
+            return ElementwiseAdd.step(x, x)
 
     for test in (
         lambda p: p == 0,
@@ -1384,7 +1390,7 @@ def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
     class Chunked(iron.Graph):
         def body(self, x, *, chunk: Scratchpad[np.int32], rows: Scratchpad[np.int32]):
             k = x[:rows].reshape(C, G, D).transpose(1, 0, 2)
-            Copy(k, keys.reshape(G, L // C, C, D)[:, chunk, :rows])
+            Copy.step(k, keys.reshape(G, L // C, C, D)[:, chunk, :rows])
 
     t = Chunked().trace(x=(C, G * D))
     (copy,) = t.operators
@@ -1415,8 +1421,8 @@ def test_the_trace_records_the_range_each_per_call_index_and_bound_holds():
             pos: Scratchpad[np.int32],
         ):
             k = x[:rows].reshape(C, G, D).transpose(1, 0, 2)
-            Copy(k, keys.reshape(G, L // C, C, D)[:, chunk, :rows])
-            return Copy(table[pos + 1]).reshape(1, D)
+            Copy.step(k, keys.reshape(G, L // C, C, D)[:, chunk, :rows])
+            return Copy.step(table[pos + 1]).reshape(1, D)
 
     t = Chunked().trace(x=(C, G * D))
     got = {(str(m.expression), m.lo, m.hi) for m in t.limits}
@@ -1435,7 +1441,7 @@ def test_a_bound_rounds_up_to_the_tiles_it_ends_in(npu2):
 
     class G(iron.Graph):
         def body(self, x, y, *, p: Scratchpad[np.int32]):
-            return ElementwiseAdd(x[: p + 1], y[: p + 1])
+            return ElementwiseAdd.step(x[: p + 1], y[: p + 1])
 
     t = G().trace(x=(64, 512), y=(64, 512))
     (op,) = t.operators
@@ -1458,7 +1464,9 @@ def test_words_with_an_offset_share_by_ratio_and_offset(npu2):
 
     class G(iron.Graph):
         def body(self, x, y, *, p: Scratchpad[np.int32]):
-            return ElementwiseMul(ElementwiseAdd(x[: p + 1], y[: p + 1]), y[: p + 1])
+            return ElementwiseMul.step(
+                ElementwiseAdd.step(x[: p + 1], y[: p + 1]), y[: p + 1]
+            )
 
     t = G().trace(x=(64, 512), y=(64, 512))
     alone, _ = _words(t)
@@ -1481,8 +1489,8 @@ def test_the_reference_writes_a_given_output_of_an_operator_that_returns_one(npu
 
     class Into(iron.Graph):
         def body(self, x, a, b):
-            y = ElementwiseAdd(x, x)
-            GEMM(a, b, y[:256])
+            y = ElementwiseAdd.step(x, x)
+            GEMM.step(a, b, y[:256])
             return y
 
     rng = np.random.default_rng(0)
@@ -1508,7 +1516,7 @@ def test_a_weight_given_where_an_optional_input_was_meant_is_refused(view):
             self.w = w
 
         def body(self, x):
-            return RMSNorm(x, self.w.reshape(1, E) if view else self.w)
+            return RMSNorm.step(x, self.w.reshape(1, E) if view else self.w)
 
     x = np.ones((1, E), dtype=bfloat16)
     kept = w.copy()
@@ -1522,7 +1530,7 @@ def test_a_weight_given_where_an_optional_input_was_meant_is_refused(view):
 def test_an_input_given_as_an_output_is_refused():
     class Over(iron.Graph):
         def body(self, x, y):
-            ReLU(x, y[1:])
+            ReLU.step(x, y[1:])
             return y
 
     with pytest.raises(TypeError, match="graph input or a view of one"):
@@ -1541,8 +1549,8 @@ def test_a_given_output_of_another_rank_is_refused_unless_declared_flat():
 
     class Flat(iron.Graph):
         def body(self, a, b):
-            y = ElementwiseAdd(a.reshape(256 * 256), a.reshape(256 * 256))
-            gemm(a, b, y)
+            y = ElementwiseAdd.step(a.reshape(256 * 256), a.reshape(256 * 256))
+            gemm.apply(a, b, y)
             return y
 
     with pytest.raises(ValueError, match=r"GEMM.C is \(256, 256\)"):
@@ -1556,7 +1564,7 @@ def test_a_column_major_product_is_read_as_stored_by_the_next_reference(npu2):
 
     class Transposed(iron.Graph):
         def body(self, a, b):
-            return ReLU(GEMM(a, b, b_col_maj=True, c_col_maj=True))
+            return ReLU.step(GEMM.step(a, b, b_col_maj=True, c_col_maj=True))
 
     rng = np.random.default_rng(0)
     a = rng.integers(-2, 2, (32, 256)).astype(bfloat16)
@@ -1569,7 +1577,7 @@ def test_a_column_major_product_is_read_as_stored_by_the_next_reference(npu2):
 def test_a_float32_product_is_not_rounded_to_its_inputs_dtype(npu2):
     class Wide(iron.Graph):
         def body(self, a, b):
-            return GEMM(a, b, dtype_out=np.float32, tile_m=32)
+            return GEMM.step(a, b, dtype_out=np.float32, tile_m=32)
 
     rng = np.random.default_rng(0)
     a = rng.standard_normal((256, 256)).astype(bfloat16)
@@ -1589,7 +1597,7 @@ def test_the_reference_computes_the_expressions(npu2):
 
     class Write(iron.Graph):
         def body(self, x, *, p: Scratchpad[np.int32]):
-            Copy(x, keys[:, p + 1])
+            Copy.step(x, keys[:, p + 1])
 
     g = Write()
     t = g.trace(x=(2, 4))
@@ -1608,7 +1616,7 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
 
     class G(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
-            return Rows(x[:n].reshape(64 * 8, 1))  # rows x 8 seen as rows*8 x 1
+            return Rows.step(x[:n].reshape(64 * 8, 1))  # rows x 8 seen as rows*8 x 1
 
     g = G()
 
@@ -1689,7 +1697,7 @@ def test_the_packed_decode_words_of_mha_have_emit_forms(npu2):
 
         def body(self, q, *, position: Scratchpad[np.int32]):
             span = np.s_[:, : position + 1]
-            o = MHA(
+            o = MHA.step(
                 q.reshape(1, 32, 64),
                 self.keys[span],
                 self.values[span],
@@ -1713,7 +1721,7 @@ def test_a_bound_on_rows_reaches_a_flat_buffer_in_elements(npu2):
 
     class G(iron.Graph):
         def body(self, x, y, *, n: Scratchpad[np.int32]):
-            return ElementwiseAdd(x[:n], y[:n])
+            return ElementwiseAdd.step(x[:n], y[:n])
 
     g = G()
 
@@ -1732,7 +1740,7 @@ def test_words_that_always_hold_one_number_share_it(npu2):
 
     class G(iron.Graph):
         def body(self, x, y, *, n: Scratchpad[np.int32]):
-            return ElementwiseMul(ElementwiseAdd(x[:n], y[:n]), y[:n])
+            return ElementwiseMul.step(ElementwiseAdd.step(x[:n], y[:n]), y[:n])
 
     g = G()
 
@@ -1758,8 +1766,8 @@ def test_a_bound_reaches_a_copy_and_a_repeat_through_their_views(npu2):
     class Cached(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32], c: Scratchpad[np.int32]):
             k = x[:n].reshape(L, G, D).transpose(1, 0, 2)
-            Copy(k, keys[:, :n])
-            return Repeat(keys[:, :c], repeat=2)
+            Copy.step(k, keys[:, :n])
+            return Repeat.step(keys[:, :c], repeat=2)
 
     g = Cached()
 
@@ -1795,8 +1803,8 @@ def test_a_bound_on_one_side_of_a_copy_holds_the_other(npu2):
     class ByHead(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
             k = x[:n].reshape(L, G, D).transpose(1, 0, 2)
-            Copy(k, keys)
-            return Copy(k)
+            Copy.step(k, keys)
+            return Copy.step(k)
 
     t = ByHead().trace(x=(L, G * D))
     (n,) = t.values
@@ -1812,7 +1820,7 @@ def test_a_bound_on_one_side_of_a_copy_holds_the_other(npu2):
 
     class Flat(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
-            Copy(x[:n].reshape(L, G, D).transpose(1, 0, 2), keys.reshape(G * L, D))
+            Copy.step(x[:n].reshape(L, G, D).transpose(1, 0, 2), keys.reshape(G * L, D))
 
     with pytest.raises(ValueError, match="bound it alike"):
         Flat().trace(x=(L, G * D))
@@ -1828,8 +1836,8 @@ def test_the_reference_copies_a_bounded_call_into_the_rows_it_covers(npu2):
 
     class G(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32], pos: Scratchpad[np.int32]):
-            y = Softmax(x[:, :n])
-            Copy(y, cache[:, pos])
+            y = Softmax.step(x[:, :n])
+            Copy.step(y, cache[:, pos])
             return y
 
     rng = np.random.default_rng(0)
@@ -1852,8 +1860,8 @@ def test_gemm_bounds_its_compute_and_mha_its_compute_and_kv_traffic(npu2):
 
     class G(iron.Graph):
         def body(self, x, w, *, n: Scratchpad[np.int32]):
-            h = GEMM(x[:n], w, b_col_maj=True)  # (512, 64) x (256, 64)^T
-            return MHA(
+            h = GEMM.step(x[:n], w, b_col_maj=True)  # (512, 64) x (256, 64)^T
+            return MHA.step(
                 h.reshape(512, 4, 64),
                 h.reshape(512, 4, 64),
                 h.reshape(512, 4, 64),
@@ -1899,8 +1907,8 @@ class _Gather(iron.Graph):
         self.table = iron.weight(table)
 
     def body(self, x=None, *, r: Scratchpad[np.int32]):
-        y = Copy(self.table[r])
-        return y if x is None else ElementwiseAdd(x, y)
+        y = Copy.step(self.table[r])
+        return y if x is None else ElementwiseAdd.step(x, y)
 
 
 def test_an_optional_input_gives_a_version_without_it():
@@ -1999,7 +2007,7 @@ def test_a_carried_handle_may_also_be_returned():
 
     class Walk(iron.Graph):
         def body(self, *, node: Carried[np.int32]):
-            nxt = Copy(successor[node], dtype=np.int32)
+            nxt = Copy.step(successor[node], dtype=np.int32)
             return nxt, iron.carry(node=nxt)
 
     t = Walk().trace()
@@ -2035,14 +2043,14 @@ def test_every_carried_value_is_carried_and_nothing_else():
 
     class CarriesARow(iron.Graph):
         def body(self, *, a: Carried[np.int32]):
-            return iron.carry(a=Copy(rows[a]))
+            return iron.carry(a=Copy.step(rows[a]))
 
     with pytest.raises(TypeError, match="one whole element"):
         CarriesARow().trace()
 
     class CarriesTheWrongDtype(iron.Graph):
         def body(self, *, a: Carried[np.int16]):
-            return iron.carry(a=Copy(table[a], dtype=np.int32))
+            return iron.carry(a=Copy.step(table[a], dtype=np.int32))
 
     with pytest.raises(TypeError, match="but a is int16"):
         CarriesTheWrongDtype().trace()

@@ -248,8 +248,8 @@ class _Gathers(iron.Graph):
         self.ids = ids
 
     def body(self, x):
-        rows = Copy(self.table[self.ids])
-        return Copy(Copy(x)[self.ids]), rows
+        rows = Copy.step(self.table[self.ids])
+        return Copy.step(Copy.step(x)[self.ids]), rows
 
 
 def test_a_graph_gathers_from_a_weight_and_an_intermediate():
@@ -280,7 +280,7 @@ def test_a_graph_gathers_from_a_weight_and_an_intermediate():
 def test_a_gather_refuses_what_it_cannot_lower(index, match):
     class Bad(iron.Graph):
         def body(self, x):
-            return Copy(Copy(x)[index])
+            return Copy.step(Copy.step(x)[index])
 
     with pytest.raises(IndexError, match=match):
         Bad().trace(x=(V, W))
@@ -371,7 +371,9 @@ class _Views(iron.Graph):
         self.cache = iron.state((G, L, D), dtype=bfloat16)
 
     def body(self, x):
-        return Copy(x.reshape(N, G, D).transpose(1, 0, 2)), Copy(self.cache[:, 0:N])
+        return Copy.step(x.reshape(N, G, D).transpose(1, 0, 2)), Copy.step(
+            self.cache[:, 0:N]
+        )
 
 
 def test_a_copy_of_a_view_has_the_view_s_shape():

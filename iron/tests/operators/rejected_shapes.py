@@ -148,7 +148,7 @@ class _BoundedGather(iron.Graph):
         self.table = iron.weight(table)
 
     def body(self, ids, *, n: Scratchpad[np.int32]):
-        return Copy(self.table[ids[:n]])
+        return Copy.step(self.table[ids[:n]])
 
 
 def test_a_bounded_gather_of_rows_not_whole_16_byte_units_is_refused():

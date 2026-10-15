@@ -65,9 +65,11 @@ def project(
             tiled["tile_n"] = tile_n
         if emulate_bf16_mmul_with_bfp16 is not None:
             tiled["emulate_bf16_mmul_with_bfp16"] = emulate_bf16_mmul_with_bfp16
-        y = FLMGEMM(x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled)
+        y = FLMGEMM.step(
+            x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled
+        )
     else:
-        y = GEMV(weight, x, **gemv)
+        y = GEMV.step(weight, x, **gemv)
     if bias is None:
         return y
     if bias.shape[0] > RowwiseAdd.tile_cap:
@@ -77,7 +79,7 @@ def project(
             "weight and bias once at load time instead of folding them here"
         )
     rows = math.prod(y.shape) // bias.shape[0]
-    return RowwiseAdd(y.reshape(rows, bias.shape[0]), bias).reshape(y.shape)
+    return RowwiseAdd.step(y.reshape(rows, bias.shape[0]), bias).reshape(y.shape)
 
 
 class SwiGLU(iron.Graph):
@@ -98,7 +100,7 @@ class SwiGLU(iron.Graph):
 
     def body(self, x):
         gate, up = project(x, self.w_gate), project(x, self.w_up)
-        return project(ElementwiseMul(SiLU(gate), up), self.w_down)
+        return project(ElementwiseMul.step(SiLU.step(gate), up), self.w_down)
 
 
 def filterbank(fft: int, mels: int, sample_rate: int, max_hz: float) -> np.ndarray:
@@ -183,15 +185,19 @@ class LogMel(iron.Graph):
         windows = TensorAccessPattern(
             wave.shape, 0, [F // 4, 4, self.frame], [4 * self.hop, self.hop, 1]
         )
-        a = Copy(wave, src=windows, dtype=np.float32).reshape(F, self.frame)[:frames]
+        a = Copy.step(wave, src=windows, dtype=np.float32).reshape(F, self.frame)[
+            :frames
+        ]
         exact = dict(
             tile_m=32, dtype_out=np.float32, emulate_bf16_mmul_with_bfp16=False
         )
-        spectrum = GEMM(Limbs(a), self.dft, **exact)
-        energy = GEMM(Limbs(Magnitude(spectrum)), self.filterbank, **exact)
+        spectrum = GEMM.step(Limbs.step(a), self.dft, **exact)
+        energy = GEMM.step(
+            Limbs.step(Magnitude.step(spectrum)), self.filterbank, **exact
+        )
         if features is None:
-            return Log(energy, offset=self.mel_floor)
-        return Log(energy, features, offset=self.mel_floor)
+            return Log.step(energy, offset=self.mel_floor)
+        return Log.step(energy, features, offset=self.mel_floor)
 
     def oracle(self, wave: np.ndarray, frames: int) -> np.ndarray:
         """The first ``frames`` features of ``wave`` in float64, rounded once
@@ -313,8 +319,10 @@ class Conv2d(iron.Graph):
             )
             spare = -out_rows % GEMM_ROWS
             if not spare:
-                a = Copy(x, src=gathered).reshape(out_rows, k * line)[:rows]
-                return GEMM(a, self.matrix, *([] if y is None else [y]), **ACCURATE)
+                a = Copy.step(x, src=gathered).reshape(out_rows, k * line)[:rows]
+                return GEMM.step(
+                    a, self.matrix, *([] if y is None else [y]), **ACCURATE
+                )
             if y is not None:
                 raise ValueError(
                     f"Conv2d: {out_rows} output rows are not whole {GEMM_ROWS}-row "
@@ -322,8 +330,10 @@ class Conv2d(iron.Graph):
                     f"output holds; take the returned output instead"
                 )
             first = TensorAccessPattern((R, line), 0, [1, k * line], [s * line, 1])
-            a = Copy(x, src=(gathered, *[first] * spare))
-            out = GEMM(a.reshape(out_rows + spare, k * line), self.matrix, **ACCURATE)
+            a = Copy.step(x, src=(gathered, *[first] * spare))
+            out = GEMM.step(
+                a.reshape(out_rows + spare, k * line), self.matrix, **ACCURATE
+            )
             return out[:rows]
         n = out_rows * self.out_width
         patches = TensorAccessPattern(
@@ -332,11 +342,11 @@ class Conv2d(iron.Graph):
             [out_rows, self.out_width, k, k * C],
             [s * line, s * C, line, 1],
         )
-        a = Copy(x, src=patches).reshape(n, k * k * C)
+        a = Copy.step(x, src=patches).reshape(n, k * k * C)
         # The few output channels as M, so that the patches span every
         # column; every row, as a GEMM bounds no N, and the output after.
         out = [] if y is None else [y.reshape(n, self.out_channels)]
-        h = GEMM(self.matrix, a, *out, b_col_maj=True, c_col_maj=True, **ACCURATE)
+        h = GEMM.step(self.matrix, a, *out, b_col_maj=True, c_col_maj=True, **ACCURATE)
         h = h if y is not None else h[: rows * self.out_width]
         return None if y is not None else h.reshape(out_rows, self.out_line)
 
@@ -405,9 +415,9 @@ class Conv1d(iron.Graph):
         R, line = x.shape
         out_rows = (R - k) // s + 1
         pattern = TensorAccessPattern((R, line), 0, [out_rows, k * line], [s * line, 1])
-        a = Copy(x, src=pattern).reshape(out_rows, k * line)[:rows]
-        h = RowwiseAdd(GEMM(a, self.matrix, **ACCURATE), self.bias)
-        return Copy(h, y) if y is not None else h
+        a = Copy.step(x, src=pattern).reshape(out_rows, k * line)[:rows]
+        h = RowwiseAdd.step(GEMM.step(a, self.matrix, **ACCURATE), self.bias)
+        return Copy.step(h, y) if y is not None else h
 
     def oracle(self, x: np.ndarray, weight: np.ndarray, bias: np.ndarray) -> np.ndarray:
         """The convolution of ``x`` ``(rows, channels)`` by ``weight`` and
@@ -462,23 +472,23 @@ class MaxPool2d(iron.Graph):
         k, C, pad = self.kernel, self.channels, self.kernel // 2
         shape = self.padded.shape
         line = shape[1]
-        Copy(self.border, self.padded)
+        Copy.step(self.border, self.padded)
         interior = TensorAccessPattern(
             shape, pad * line + pad * C, [self.rows, self.width * C], [line, 1]
         )
-        Copy(x, self.padded, dst=interior)
+        Copy.step(x, self.padded, dst=interior)
         pooled = None
         for a in range(k):
             for b in range(k):
                 view = TensorAccessPattern(
                     shape, a * line + b * C, [self.rows, self.width * C], [line, 1]
                 )
-                window = Copy(self.padded, src=view)
+                window = Copy.step(self.padded, src=view)
                 # A pixel's channels are a line any plane divides into.
                 pooled = (
                     window
                     if pooled is None
-                    else ElementwiseMax(pooled, window, tile_size=C)
+                    else ElementwiseMax.step(pooled, window, tile_size=C)
                 )
         return pooled.reshape(self.rows, self.width * C)
 
@@ -539,9 +549,9 @@ class ConcatChannels(iron.Graph):
                 [self.rows, self.width, c],
                 [self.width * total, total, 1],
             )
-            Copy(x, self.out, dst=dst)
+            Copy.step(x, self.out, dst=dst)
             offset += c
-        return Copy(self.out[:])
+        return Copy.step(self.out[:])
 
 
 class ImagePatches(iron.Graph):
@@ -631,9 +641,9 @@ class ImagePatches(iron.Graph):
         out_width: Scratchpad[np.int32],
     ):
         T = self.patches
-        taps_w = self.taps_w(in_samples=width, out_samples=out_width)
-        taps_h = self.taps_h(in_samples=height, out_samples=out_height)
-        self.resample(
+        taps_w = self.taps_w.apply(in_samples=width, out_samples=out_width)
+        taps_h = self.taps_h.apply(in_samples=height, out_samples=out_height)
+        self.resample.apply(
             rgb,
             taps_w,
             taps_h,
@@ -643,10 +653,14 @@ class ImagePatches(iron.Graph):
             out_rows=out_height,
             out_columns=out_width,
         )
-        xy, position_ids, order = self.patch_positions(
+        xy, position_ids, order = self.patch_positions.apply(
             out_rows=out_height, out_columns=out_width
         )
-        return Copy(self.raster[order]), xy.reshape(2 * T), position_ids.reshape(2 * T)
+        return (
+            Copy.step(self.raster[order]),
+            xy.reshape(2 * T),
+            position_ids.reshape(2 * T),
+        )
 
     def pack(self, image, out_height: int, out_width: int) -> tuple[np.ndarray, dict]:
         """A call's image buffer and per-call sizes for a decoded ``image``
@@ -699,7 +713,7 @@ class Block:
         c, n = self.config, x.shape[0]
         H, G, D = c.n_heads, c.n_kv_groups, c.head_dim
         a, mlp = w.self_attn, w.mlp
-        h = RMSNorm(x, weight=w.input_layernorm.weight, epsilon=c.eps)
+        h = RMSNorm.step(x, weight=w.input_layernorm.weight, epsilon=c.eps)
         # Half a head per tile for one row; q's shape is o's when H * D is
         # the width, so it is given here rather than by the profile.
         q, k, v = (
@@ -707,9 +721,11 @@ class Block:
             for p in (a.q_proj, a.k_proj, a.v_proj)
         )
         # One angle row per position, applied to that position's heads.
-        q = RoPE(q.reshape(n * H, D), step.angles)
-        k = RoPE(k.reshape(n * G, D), step.angles)
-        x = ElementwiseAdd(x, project(self.attend(step, i, q, k, v), a.o_proj.weight))
-        h = RMSNorm(x, weight=w.post_attention_layernorm.weight, epsilon=c.eps)
+        q = RoPE.step(q.reshape(n * H, D), step.angles)
+        k = RoPE.step(k.reshape(n * G, D), step.angles)
+        x = ElementwiseAdd.step(
+            x, project(self.attend(step, i, q, k, v), a.o_proj.weight)
+        )
+        h = RMSNorm.step(x, weight=w.post_attention_layernorm.weight, epsilon=c.eps)
         ff = SwiGLU(mlp.gate_proj.weight, mlp.up_proj.weight, mlp.down_proj.weight)
-        return ElementwiseAdd(x, ff(h))
+        return ElementwiseAdd.step(x, ff(h))

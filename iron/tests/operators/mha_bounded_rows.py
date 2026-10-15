@@ -75,7 +75,7 @@ def test_rows_past_the_valid_length_are_zero(
     class Attend(iron.Graph):
         def body(self, q, k, v, *, rows: Scratchpad[np.int32], n: Scratchpad[np.int32]):
             q, k, v = q[:rows], k[:rows], v[:rows]
-            return MHA(
+            return MHA.step(
                 q,
                 k,
                 v,
@@ -124,7 +124,7 @@ class Chunk(iron.Graph):
         rows: Scratchpad[np.int32],
         position: Scratchpad[np.int32],
     ):
-        return MHA(
+        return MHA.step(
             q[:rows],
             k[:, : position + 1],
             v[:, : position + 1],

@@ -527,7 +527,7 @@ def test_a_positional_operand_past_the_inputs_is_an_output_not_an_optional_one()
             self.y = iron.state((64,))
 
         def body(self, x):
-            Scaled(x, self.y)  # y is written: an output, never the scale
+            Scaled.step(x, self.y)  # y is written: an output, never the scale
 
     (step,) = G().trace(x=(64,)).steps
     assert not step.op.scaled
@@ -535,7 +535,7 @@ def test_a_positional_operand_past_the_inputs_is_an_output_not_an_optional_one()
 
     class H(G):
         def body(self, x, s):
-            Scaled(x, self.y, s=s)
+            Scaled.step(x, self.y, s=s)
 
     (step,) = H().trace(x=(64,), s=(64,)).steps
     assert step.op.scaled
@@ -559,7 +559,7 @@ def test_a_derived_value_is_written_once_per_build():
 def test_a_value_a_graph_binds_is_per_call_and_no_longer_a_resident():
     class G(iron.Graph):
         def body(self, a, b, *, pos: Scratchpad[np.int32], n: Scratchpad[np.int32]):
-            return MV(a, b, columns=8, start=pos, count=n)
+            return MV.step(a, b, columns=8, start=pos, count=n)
 
     g = G()
 
@@ -905,8 +905,8 @@ def test_an_extent_reads_as_its_field_until_a_graph_bounds_it():
 def test_a_bounded_operand_binds_the_extent_and_what_derives_from_it(npu2):
     class G(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
-            y = Rows(x[:n])  # bounds this instance
-            return Rows(y)  # and, through its output, the next
+            y = Rows.step(x[:n])  # bounds this instance
+            return Rows.step(y)  # and, through its output, the next
 
     g = G()
 
@@ -933,7 +933,7 @@ def test_a_bounded_operand_binds_the_extent_and_what_derives_from_it(npu2):
 def test_a_bound_is_refused_where_no_extent_takes_it():
     class G(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
-            return MV(x[:n], x[0])  # M is not an Extent of MV
+            return MV.step(x[:n], x[0])  # M is not an Extent of MV
 
     g = G()
 
@@ -942,7 +942,7 @@ def test_a_bound_is_refused_where_no_extent_takes_it():
 
     class H(iron.Graph):
         def body(self, x, *, n: aie.iron.DispatchTime[np.int32]):
-            return Rows(x[:n])
+            return Rows.step(x[:n])
 
     h = H()
 
@@ -951,7 +951,7 @@ def test_a_bound_is_refused_where_no_extent_takes_it():
 
     class K(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
-            return Rows(x[:, :n])  # cols is not an Extent
+            return Rows.step(x[:, :n])  # cols is not an Extent
 
     k = K()
 

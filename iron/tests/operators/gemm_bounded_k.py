@@ -50,7 +50,7 @@ def test_the_reduction_stops_at_the_per_call_length(mode, full_elf):
 
     class Product(iron.Graph):
         def body(self, a, b, *, n: Scratchpad[np.int32]):
-            return GEMM(a[:, :n], b[:, :n] if b_col_maj else b[:n], **MODES[mode])
+            return GEMM.step(a[:, :n], b[:, :n] if b_col_maj else b[:n], **MODES[mode])
 
     product = Product()
     net = product.compile(
@@ -88,8 +88,8 @@ def test_attention_reduces_over_the_valid_keys():
 
     class Attend(iron.Graph):
         def body(self, s, v, *, n: Scratchpad[np.int32]):
-            weights = Softmax(s[:, :n])
-            return weights, GEMM(weights, v[:n], **ACCURATE)
+            weights = Softmax.step(s[:, :n])
+            return weights, GEMM.step(weights, v[:n], **ACCURATE)
 
     net = Attend().compile(s=(ROWS, SEQ), v=(SEQ, D))
     tile_k = GEMM(M=ROWS, K=SEQ, N=D, **ACCURATE).tile_k

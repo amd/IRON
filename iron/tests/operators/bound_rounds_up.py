@@ -31,7 +31,7 @@ pytestmark = [
 def test_every_row_of_a_bound_is_computed():
     class Step(iron.Graph):
         def body(self, x, y, *, p: Scratchpad[np.int32]):
-            return RMSNorm(ElementwiseAdd(x[: p + 1], y[: p + 1]))
+            return RMSNorm.step(ElementwiseAdd.step(x[: p + 1], y[: p + 1]))
 
     step = Step()
 
@@ -55,7 +55,7 @@ def test_every_row_of_a_bound_is_computed():
 def test_a_bound_past_a_wrap_of_tiles_per_lane():
     class Step(iron.Graph):
         def body(self, x, y, *, n: Scratchpad[np.int32]):
-            return ElementwiseAdd(x[:n], y[:n])
+            return ElementwiseAdd.step(x[:n], y[:n])
 
     step = Step()
     # 8 lanes of 256-element tiles: 1024 tiles each, one past a D1 wrap.

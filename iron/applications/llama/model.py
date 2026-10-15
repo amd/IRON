@@ -123,7 +123,9 @@ class Llama(Block, CausalLM):
 
     def head(self, x):
         norm = self.weights.model.norm.weight
-        return GEMV(self.embedding, RMSNorm(x, weight=norm, epsilon=self.config.eps))
+        return GEMV.step(
+            self.embedding, RMSNorm.step(x, weight=norm, epsilon=self.config.eps)
+        )
 
 
 SPECIAL_TOKENS = {

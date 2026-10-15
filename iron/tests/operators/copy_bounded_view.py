@@ -29,9 +29,9 @@ def test_a_copy_moves_the_valid_rows_of_each_head():
 
     class ByHead(iron.Graph):
         def body(self, x, *, n: Scratchpad[np.int32]):
-            k = ReLU(x[:n]).reshape(T, H, D).transpose(1, 0, 2)
-            Copy(k, cache)
-            return Copy(k)
+            k = ReLU.step(x[:n]).reshape(T, H, D).transpose(1, 0, 2)
+            Copy.step(k, cache)
+            return Copy.step(k)
 
     step = ByHead()
     net = step.compile(x=(T, H * D))

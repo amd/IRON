@@ -27,7 +27,7 @@ class Project(iron.Graph):
         self.w = w
 
     def body(self, x):
-        return SiLU(GEMV(self.w, ElementwiseAdd(x, x)))
+        return SiLU.step(GEMV.step(self.w, ElementwiseAdd.step(x, x)))
 
 
 def _run(traced, x, wrong: dict[int, np.ndarray]):

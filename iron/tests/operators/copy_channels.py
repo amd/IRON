@@ -32,7 +32,9 @@ class _Permute(iron.Graph):
         self.channels = channels
 
     def body(self, x):
-        return Copy(x.reshape(N, G, D).transpose(1, 0, 2), num_channels=self.channels)
+        return Copy.step(
+            x.reshape(N, G, D).transpose(1, 0, 2), num_channels=self.channels
+        )
 
 
 @pytest.mark.parametrize("channels", [1, 2, 4])

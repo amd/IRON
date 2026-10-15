@@ -91,7 +91,7 @@ class Repeated(iron.Graph):
         self.out = iron.state((MAX_K, WIDTH), dtype=np.int32)
 
     def body(self, x, *, k: Scratchpad[np.int32]):
-        RepeatTile(x, self.out, valid=k)
+        RepeatTile.step(x, self.out, valid=k)
 
 
 def _bound_op() -> RepeatTile:

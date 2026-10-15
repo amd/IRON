@@ -167,7 +167,7 @@ def test_adversarial_logits_draw_the_reference_token(kwargs):
 
     class Step(iron.Graph):
         def body(self, logits, *, position: Scratchpad[np.int32]):
-            _, token = Sample(
+            _, token = Sample.step(
                 logits,
                 draws,
                 tokens,

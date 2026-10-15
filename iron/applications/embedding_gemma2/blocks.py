@@ -26,17 +26,17 @@ def geglu(x, w_gate, w_up, w_down, **gemm):
     ``W_down @ (GELU(W_gate @ x) * (W_up @ x))``, each projection a GEMM
     with ``gemm``'s keywords reading the weight as stored.
     """
-    gate = GELU(GEMM(x, w_gate, b_col_maj=True, **gemm))
-    f = ElementwiseMul(gate, GEMM(x, w_up, b_col_maj=True, **gemm))
-    return GEMM(f, w_down, b_col_maj=True, **gemm)
+    gate = GELU.step(GEMM.step(x, w_gate, b_col_maj=True, **gemm))
+    f = ElementwiseMul.step(gate, GEMM.step(x, w_up, b_col_maj=True, **gemm))
+    return GEMM.step(f, w_down, b_col_maj=True, **gemm)
 
 
 def sandwich(x, block: Callable, pre, post, epsilon: float):
     """``x`` plus ``block`` of it between two RMS norms, weighted ``pre``
     before the block and ``post`` after it.
     """
-    h = RMSNorm(x, weight=pre, epsilon=epsilon)
-    return ElementwiseAdd(x, RMSNorm(block(h), weight=post, epsilon=epsilon))
+    h = RMSNorm.step(x, weight=pre, epsilon=epsilon)
+    return ElementwiseAdd.step(x, RMSNorm.step(block(h), weight=post, epsilon=epsilon))
 
 
 def attention(
@@ -65,13 +65,13 @@ def attention(
     is a checkpoint's ``(out, in)``.
     """
     T, H, G, D = h.shape[0], heads, groups, head_dim
-    q = GEMM(h, q_proj, b_col_maj=True, **gemm).reshape(T * H, D)
-    k = GEMM(h, k_proj, b_col_maj=True, **gemm).reshape(T * G, D)
-    v = GEMM(h, v_proj, b_col_maj=True, **gemm).reshape(T * G, D)
-    q = RoPE(RMSNorm(q, weight=q_norm, epsilon=epsilon), angles)
-    k = RoPE(RMSNorm(k, weight=k_norm, epsilon=epsilon), angles)
-    v = RMSNorm(v, epsilon=epsilon)
-    o = MHA(
+    q = GEMM.step(h, q_proj, b_col_maj=True, **gemm).reshape(T * H, D)
+    k = GEMM.step(h, k_proj, b_col_maj=True, **gemm).reshape(T * G, D)
+    v = GEMM.step(h, v_proj, b_col_maj=True, **gemm).reshape(T * G, D)
+    q = RoPE.step(RMSNorm.step(q, weight=q_norm, epsilon=epsilon), angles)
+    k = RoPE.step(RMSNorm.step(k, weight=k_norm, epsilon=epsilon), angles)
+    v = RMSNorm.step(v, epsilon=epsilon)
+    o = MHA.step(
         q.reshape(T, H, D),
         k.reshape(T, G, D),
         v.reshape(T, G, D),
@@ -82,7 +82,7 @@ def attention(
         window=window,
         scale=1.0,
     )
-    return GEMM(o.reshape(T, H * D), o_proj, b_col_maj=True, **gemm)
+    return GEMM.step(o.reshape(T, H * D), o_proj, b_col_maj=True, **gemm)
 
 
 def sandwich_layer(

@@ -130,11 +130,13 @@ class VisionTower(Model):
             out_width=out_width,
         )
         T = pixels.shape[0]
-        x = AXPY(pixels[:n], self.minus_one[:n], scalar_factor=2.0)
-        h = GEMM(x, self.patch, b_col_maj=True, **ACCURATE)
-        position = Copy(self.position[position_ids]).reshape(2, T, c.emb_dim)
-        h = ElementwiseAdd(ElementwiseAdd(h, position[0, :n]), position[1, :n])
-        angles = Copy(self.angles[xy]).reshape(T, c.head_dim)[:n]
+        x = AXPY.step(pixels[:n], self.minus_one[:n], scalar_factor=2.0)
+        h = GEMM.step(x, self.patch, b_col_maj=True, **ACCURATE)
+        position = Copy.step(self.position[position_ids]).reshape(2, T, c.emb_dim)
+        h = ElementwiseAdd.step(
+            ElementwiseAdd.step(h, position[0, :n]), position[1, :n]
+        )
+        angles = Copy.step(self.angles[xy]).reshape(T, c.head_dim)[:n]
         for w, r in zip(self.layers, self.reordered):
             attend = partial(
                 attention,
@@ -166,12 +168,12 @@ class VisionTower(Model):
                 epsilon=c.eps,
                 **ACCURATE,
             )
-        pooled = GEMM(self.pool[:, :n], h, **ACCURATE)
+        pooled = GEMM.step(self.pool[:, :n], h, **ACCURATE)
         # The mean's 1 / pool ** 2 and the sqrt(emb_dim) scale folded into
         # the norm's epsilon: RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
         s2 = c.emb_dim / c.pool**4
-        pooled = RMSNorm(pooled, epsilon=c.eps / s2)
-        return GEMM(pooled, self.projection, b_col_maj=True, **ACCURATE)
+        pooled = RMSNorm.step(pooled, epsilon=c.eps / s2)
+        return GEMM.step(pooled, self.projection, b_col_maj=True, **ACCURATE)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, the largest image's."""
