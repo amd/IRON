@@ -78,8 +78,7 @@ class _PrefillAttentionBase(Operator):
             raise ValueError(
                 f"each KV head must serve a multiple of {num_cu} query heads"
             )
-        for name in ("max_context", "window"):
-            value = vars(self)[name]
+        for name, value in (("max_context", self.max_context), ("window", self.window)):
             if value is not None and value % 128:
                 raise ValueError(f"{name} ({value}) must be a multiple of 128")
         self.check_derived("head_dim", "qo_len", "kv_len")
