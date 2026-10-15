@@ -323,12 +323,6 @@ def test_folded_silu_and_clamp_compute_what_their_operators_do():
 
 
 @pytest.mark.supported_devices("npu1", "npu2")
-@pytest.mark.xfail(
-    "aie_utils.get_current_device().arch is AIEArch.AIE2p",
-    reason="hangs on npu2 when its memtile channels are assigned in the "
-    "unnamed fifos' order; root cause under investigation in mlir-aie",
-    strict=True,
-)
 def test_gemm_split_leg_bounds_runs():
     """K or N = 10240 overflows the shim BD's 20-bit mega_row step, so the
     compiler cuts that leg into pieces, bounded by its queue polls and BD

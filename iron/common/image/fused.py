@@ -194,7 +194,9 @@ class XclbinChain:
             image = OperatorDesign(config, full_elf=False).compile()
             # On an xclbin a per-call value is a dispatch-time scalar: the
             # stream is generated per call, by a library only a full build has.
-            own = OperatorDesign(op, full_elf=False).compile(insts_only=not op.values)
+            own = OperatorDesign(op, full_elf=False).compile(
+                image=None if op.values else image, insts_only=not op.values
+            )
             kernel = NPUKernel(
                 image.get_cache_entry().xclbin,
                 own.get_cache_entry().insts,

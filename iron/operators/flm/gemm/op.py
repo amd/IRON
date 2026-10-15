@@ -656,10 +656,11 @@ class GEMM(Operator):
             if a_hi > 1:
                 a_send_dims = a_send_dims.split(2, a_lo)
 
-            # No tile is pinned: column c and row r name logical tiles, and the
-            # placer decides where each lands. One object per logical tile, since
-            # tiles are told apart by identity. Typed up front: Flow reads
-            # tile_type to find its shim end, and nothing else stamps these.
+            # Column c and row r name logical tiles, and the placer decides
+            # where each lands; only C's shim ends are pinned (below). One object
+            # per logical tile, since tiles are told apart by identity. Typed up
+            # front: Flow reads tile_type to find its shim end, and nothing else
+            # stamps these.
             shim_tiles = [Tile(tile_type=AIETileType.ShimNOCTile) for _ in range(COLS)]
             mt_tiles = [Tile(tile_type=AIETileType.MemTile) for _ in range(COLS)]
             ct_tiles = [
@@ -950,7 +951,9 @@ class GEMM(Operator):
 
             self.A.bind([f.prod() for f in a_l3l2_fifos])
             self.B.bind(b_shim_flows)
-            self.C.bind([f.cons() for f in c_l2l3_fifos])
+            # C's drains on column c's shim, as the shared image has them: where
+            # the placer chose, a shape whose transfers differ would move them.
+            self.C.bind([f.cons(tile=Tile(c, 0)) for c, f in enumerate(c_l2l3_fifos)])
             return _Built(workers + unrouted, rtps, b_pool=b_pool)
 
     @property

@@ -122,12 +122,21 @@ class OperatorDesign:
             **options,
         )
 
-    def compile(self, **options) -> CompilableDesign:
-        """Compile the design, or find it in the cache."""
+    def compile(
+        self, image: CompilableDesign | None = None, **options
+    ) -> CompilableDesign:
+        """Compile the design, or find it in the cache.
+
+        Args:
+            image: For an insts_only stream, the design whose image it runs
+                on: the compile fails, naming each resource the stream lays
+                out otherwise than the image, rather than run against it.
+            **options: ``compilable``'s.
+        """
         # The key reads the current device: bound first, keys before and after agree.
         aie_utils.ensure_current_device()
         design = self.compilable(**options)
-        design.compile()
+        design.compile(image=image)
         return design
 
 
