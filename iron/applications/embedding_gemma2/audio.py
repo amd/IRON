@@ -308,8 +308,8 @@ class AudioTower(Model):
         pairs = [H, T // 2, 2, B]
         band = TensorAccessPattern((H, T, K), 0, pairs, [T * K, 2 * K + 2, K, 1])
         relative = TensorAccessPattern((H, T, K), R, pairs, [T * K, 2 * K, K + B, 1])
-        logits = Copy.step(scores, src=band).reshape(H * T, B)
-        position = Copy.step(scores, src=relative).reshape(H * T, B)
+        logits = Copy.step(scores, src=band, dtype=np.float32).reshape(H * T, B)
+        position = Copy.step(scores, src=relative, dtype=np.float32).reshape(H * T, B)
         probabilities = Softmax.step(
             logits,
             addend=position,
