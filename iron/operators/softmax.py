@@ -57,24 +57,6 @@ def _draw(op) -> dict:
     return dict(centered=(op.x,) + ((op.addend,) if op.has_addend else ()))
 
 
-def _band_mask(window: int, period: int, rows: int, cols: int):
-    """EG2 audio attention's band, restated as the bf16 mask
-    ``activation.softmax_ref``/``softmax_f32_bound`` take: row ``i``'s
-    query position is ``i % period`` (the band wraps every ``period`` rows,
-    EG2 tiling one band over every attention head), and it keeps column
-    ``j`` where ``j >= max(q % 2, window - 1 - q + q % 2)`` and
-    ``j < window + q % 2`` (an odd query's band starts a column later).
-    """
-    q = np.arange(rows) % period
-    parity = q % 2
-    lo = np.maximum(parity, window - 1 - q + parity)
-    hi = window + parity
-    j = np.arange(cols)[None, :]
-    band = (j >= lo[:, None]) & (j < hi[:, None])
-    lowest = ml_dtypes.finfo(ml_dtypes.bfloat16).min
-    return np.where(band, ml_dtypes.bfloat16(0.0), lowest)
-
-
 def _banded_case(cls, dev) -> list:
     """EG2 audio's own combination: a soft cap, its own window and period,
     and a pre-cap addend.
@@ -448,21 +430,12 @@ class Softmax(Operator):
             position (the core's ``row_offset`` plus the loop index) computed
             in the kernel, so there is no mask operand.
             """
-            softmax_k = activation.softmax(
-                block, input_dtype=self.input_dtype, soft_cap=self.soft_cap, addend=True
-            )
-            banded_k = softmax_k.object_file.bind(
-                "softmax_rows_banded_f32_bf16",
-                [
-                    self.x.obj_type,
-                    self.addend.obj_type,
-                    self.y.obj_type,
-                    np.int32,
-                    np.int32,
-                    np.int32,
-                    np.int32,
-                    np.int32,
-                ],
+            banded_k = activation.softmax(
+                block,
+                input_dtype=self.input_dtype,
+                soft_cap=self.soft_cap,
+                window=self.window,
+                period=self.period,
             )
             of_ins = [ObjectFifo(self.x.obj_type) for _ in range(n_cores)]
             of_addends = [ObjectFifo(self.addend.obj_type) for _ in range(n_cores)]
@@ -555,38 +528,48 @@ class Softmax(Operator):
         tg.finish()
 
     def tolerance(self) -> Tolerance | None:
-        base = activation.softmax(
+        if self.window is not None:
+            base = activation.softmax(
+                self.cols,
+                input_dtype=self.input_dtype,
+                soft_cap=self.soft_cap,
+                window=self.window,
+                period=self.period,
+            ).contract.tolerance
+            # judge() calls bound() with this operator's own operands (x,
+            # addend): row_offset is not one, so every row's own query
+            # position (its index) is closed over instead of taken
+            # positionally.
+            row_offset = np.arange(self.rows)
+            return Tolerance.bounded(
+                lambda x, addend: base.bound(x, addend, row_offset),
+                max_mismatch_frac=base.max_mismatch_frac,
+                note=base.note,
+            )
+        return activation.softmax(
             self.cols,
             input_dtype=self.input_dtype,
             soft_cap=self.soft_cap,
-            masked=self.window is not None,
             addend=self.has_addend,
         ).contract.tolerance
-        if self.window is None:
-            return base
-        # judge() calls bound() with this operator's own operands (x, addend):
-        # the band is not one, so it is closed over instead of taken positionally.
-        mask = _band_mask(self.window, self.period, self.rows, self.cols)
-        return Tolerance.bounded(
-            lambda x, addend: base.bound(x, addend, mask),
-            max_mismatch_frac=base.max_mismatch_frac,
-            note=base.note,
-        )
 
     def reference(self, x, *rest):
         """The softmax kernel's contract reference, a row at a time.
 
         ``rest`` is ``addend`` where ``has_addend``: ``_call_reference``
         gives only the operands present, positional. The band, where given,
-        is derived from ``window``/``period`` (``_band_mask``), not a data
-        mask.
+        comes from the factory's own banded contract, ``row_offset`` each
+        row's own index.
         """
         addend = rest[0] if self.has_addend else None
-        mask = (
-            _band_mask(self.window, self.period, self.rows, self.cols)
-            if self.window is not None
-            else None
-        )
+        if self.window is not None:
+            return activation.softmax(
+                self.cols,
+                input_dtype=self.input_dtype,
+                soft_cap=self.soft_cap,
+                window=self.window,
+                period=self.period,
+            ).contract.reference(x, addend, np.arange(self.rows))
         return activation.softmax_ref(
-            x, addend, mask, tile_size=self.cols, soft_cap=self.soft_cap
+            x, addend, None, tile_size=self.cols, soft_cap=self.soft_cap
         )
