@@ -162,8 +162,7 @@ def test_variants_give_each_design_once():
 def test_variants_widen_a_default_its_resolution_keeps_narrow(npu2):
     profile = Profile()
     profile.add(ElementwiseAdd, num_aie_columns=2)
-    with profile:
-        found = variants(ElementwiseAdd(size=SIZE, tile_size=TILE), npu2)
+    found = variants(profile.make(ElementwiseAdd, size=SIZE, tile_size=TILE), npu2)
     assert dict(found[0].tunables)["num_aie_columns"] == 2
     assert {dict(v.tunables)["num_aie_columns"] for v in found[1:]} == {8, 4, 2, 1}
 
@@ -286,8 +285,7 @@ def test_a_tile_the_call_gives_never_moves(npu2):
 def test_a_tile_a_profile_gives_is_searched(npu2):
     profile = Profile()
     profile.add(GEMV, tile_size_output=32)
-    with profile:
-        gemv = GEMV(M=2048, K=2048)
+    gemv = profile.make(GEMV, M=2048, K=2048)
     found = variants(gemv, npu2)
     assert found[0].resolved.tile_size_output == 32
     assert {v.resolved.tile_size_output for v in found} > {32}
@@ -362,8 +360,7 @@ def test_a_placement_is_searched_by_name_and_keys_the_array(tmp_path, npu2):
     # A profile's placement starts the search, the declared ones after it.
     profile = Profile()
     profile.add(MHA, placement=MHAPlacement.COLUMNS)
-    with profile:
-        held = MHA(num_heads=8, seq_pad=256)
+    held = profile.make(MHA, num_heads=8, seq_pad=256)
     assert held.resolved(npu2)._domains(npu2)["placement"] == (
         "columns",
         "memtiles",

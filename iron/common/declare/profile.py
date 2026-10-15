@@ -11,43 +11,48 @@ given (``seq_pad``).
 
 from __future__ import annotations
 
-import contextvars
 import dataclasses
 import json
 from enum import Enum
 from pathlib import Path
-from typing import Any, ClassVar, Iterator, Mapping
+from typing import TYPE_CHECKING, Any, Iterator, Mapping
 
 from ... import operators
+
+if TYPE_CHECKING:
+    from .operator import Operator
 
 
 class Profile:
     """Tunable values for operators, keyed by their shape.
 
-    Within ``with profile:``, a tunable a call leaves open comes from the
-    most specific entry naming it; entries of equal specificity that
-    disagree raise. A subclass matches its base's entries.
+    A graph's tracer applies one implicitly, merging ``tunables_for`` into
+    every step it constructs (``Tracer(name, profile)``); standalone
+    construction applies one explicitly, ``profile.make(Cls, **kw)``. A
+    tunable a call leaves open comes from the most specific entry naming it;
+    entries of equal specificity that disagree raise. A subclass matches its
+    base's entries.
 
     Each entry is ``(cls, dims, tunables)``: the ``Param()`` values it
     matches (a dimension left out matches any) and the ``Auto()`` values it
     gives, one line of the JSON file ``load`` reads and ``save`` writes.
     """
 
-    _active: ClassVar[contextvars.ContextVar[Profile | None]] = contextvars.ContextVar(
-        "iron.profile", default=None
-    )
-    # Per context rather than on the profile, which threads may share.
-    _entered: ClassVar[contextvars.ContextVar[tuple[contextvars.Token, ...]]] = (
-        contextvars.ContextVar("iron.profile.entered", default=())
-    )
-
     def __init__(self) -> None:
         self._entries: list[tuple[type, dict[str, Any], dict[str, Any]]] = []
 
-    @classmethod
-    def current(cls) -> Profile | None:
-        """The profile applied in this scope, if any."""
-        return cls._active.get()
+    def make(self, cls: type, **kwargs: Any) -> Operator:
+        """``cls(**kwargs)``, its open tunables filled from this profile's
+        entries: standalone use of what a graph's tracer applies implicitly
+        to every step it constructs.
+        """
+        pinned = frozenset(
+            name
+            for name, value in kwargs.items()
+            if name in cls.declaration.tunables and value is not None
+        )
+        given = {**self.tunables_for(cls, kwargs), **kwargs}
+        return cls(**given, pinned=pinned)
 
     def add(self, cls: type, **fields: Any) -> None:
         """Add an entry for ``cls``: ``Param()`` fields to match (one left out
@@ -153,12 +158,3 @@ class Profile:
 
     def __len__(self) -> int:
         return len(self._entries)
-
-    def __enter__(self) -> Profile:
-        Profile._entered.set(Profile._entered.get() + (Profile._active.set(self),))
-        return self
-
-    def __exit__(self, *exc) -> None:
-        *outer, token = Profile._entered.get()
-        Profile._active.reset(token)
-        Profile._entered.set(tuple(outer))

@@ -22,9 +22,7 @@ from typing import (
     Callable,
     ClassVar,
     Self,
-    TypeVar,
     dataclass_transform,
-    overload,
 )
 
 import aie.utils as aie_utils
@@ -41,7 +39,6 @@ from .declaration import Declaration
 from .domain import Domain, Width
 from .field import Auto, Param, ParamSpec, Unresolvable
 from .operand import In, Operand
-from .profile import Profile
 from .rtp import Rtp
 from .value import ChainWord, Extent, ExtentWord, PlaceWord, Value
 
@@ -51,63 +48,11 @@ if TYPE_CHECKING:
     from ..image.artifacts import Artifacts
     from ..image.standalone import OperatorImage
 
-_T = TypeVar("_T")
-
 # The tables an AIE2 kernel gathering through lut_based_ops links, pinned to
 # banks of core memory; AIE2P computes its activations and links none.
 LUT_BYTES = 5248
 
 graph_tracer: ContextVar[Any] = ContextVar("graph_tracer", default=None)
-
-
-class _OperatorMeta(type):
-    """``GEMV(w, h)`` inside a graph's body records a step; anything else constructs."""
-
-    if TYPE_CHECKING:
-
-        @overload
-        def __call__(
-            cls: type[_T], operand: Any, /, *operands: Any, **kwargs: Any
-        ) -> Handle: ...
-        @overload
-        def __call__(cls: type[_T], **kwargs: Any) -> _T: ...
-
-    def __call__(cls, *args, **kwargs):
-        tracer = graph_tracer.get()
-        if tracer is not None and args and tracer.accepts(args):
-            return tracer.call(cls, args, kwargs)
-        if args:
-            raise TypeError(
-                f"{cls.__name__} is constructed by keyword ({cls.__name__}(M=..., "
-                f"K=...)); operands are given inside a graph's body"
-            )
-        kwargs.setdefault(
-            "pinned",
-            frozenset(
-                k
-                for k, v in kwargs.items()
-                if k in cls.declaration.tunables and v is not None
-            ),
-        )
-        profile = Profile.current()
-        if profile is not None:
-            kwargs = {**profile.tunables_for(cls, kwargs), **kwargs}
-        # An Enum-domain tunable (GEMM's and MHA's placements) takes its own
-        # Enum alone, or None (left for resolve() to fill): a string names
-        # one in a profile's JSON, which Profile.load converts before it
-        # reaches here.
-        for name, domain in cls.declaration.domains.items():
-            if (
-                name in kwargs
-                and isinstance(domain, type)
-                and issubclass(domain, Enum)
-                and kwargs[name] is not None
-                and not isinstance(kwargs[name], domain)
-            ):
-                raise TypeError(
-                    f"{cls.__name__}.{name} is a {domain.__name__}, not {kwargs[name]!r}"
-                )
-        return super().__call__(*args, **kwargs)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -173,7 +118,7 @@ class CopyRun:
 
 @dataclass_transform(kw_only_default=True, field_specifiers=(Param, Auto))
 @dataclasses.dataclass(eq=False, repr=True)
-class Operator(metaclass=_OperatorMeta):
+class Operator:
     """An operator. Subclass it; every subclass is a dataclass checked as its body finishes."""
 
     declaration: ClassVar[Declaration]
@@ -205,9 +150,12 @@ class Operator(metaclass=_OperatorMeta):
         default_factory=dict, repr=False, compare=False, kw_only=True
     )
     # The tunables its caller gave, which the tuner holds; a profile's and
-    # resolve()'s are starting points it may move.
-    pinned: frozenset[str] = dataclasses.field(
-        default=frozenset(), repr=False, compare=False, kw_only=True
+    # resolve()'s are starting points it may move. None until __post_init__
+    # computes it from the Auto fields not None at construction, unless the
+    # profile path (Tracer._construct, Profile.make) already worked that out
+    # from its own pre-merge kwargs and passed it here itself.
+    pinned: frozenset[str] | None = dataclasses.field(
+        default=None, repr=False, compare=False, kw_only=True
     )
     # The steps each core applies to a tile of the output declared
     # Out(finish=True) before releasing it, and the finishes its array
@@ -233,6 +181,30 @@ class Operator(metaclass=_OperatorMeta):
             cls._external = image
         cls.declaration = Declaration(cls, Operator, shipped=image is not None)
 
+    @classmethod
+    def step(cls, *operands: Any, **kwargs: Any) -> Handle:
+        """Record a step inside a graph's body: ``GEMV.step(w, h, **kw)``.
+
+        Raises:
+            TypeError: Called outside a graph's body.
+        """
+        tracer = graph_tracer.get()
+        if tracer is None:
+            raise TypeError(f"{cls.__name__}.step() is for a graph's body")
+        return tracer.call(cls, operands, kwargs)
+
+    def apply(self, *operands: Any, **values: Any) -> Handle:
+        """Record a step applying this already-constructed instance, inside
+        a graph's body.
+
+        Raises:
+            TypeError: Called outside a graph's body.
+        """
+        tracer = graph_tracer.get()
+        if tracer is None:
+            raise TypeError(f"{type(self).__name__}.apply() is for a graph's body")
+        return tracer.call(self, operands, values)
+
     def __post_init__(self) -> None:
         # dataclass reads an init=False default through the class, where the field is.
         for f in dataclasses.fields(self):
@@ -240,6 +212,32 @@ class Operator(metaclass=_OperatorMeta):
                 vars(self).setdefault(f.name, f.default)
         self._resolved = False
         self._image: OperatorImage | None = None
+        # An Enum-domain tunable (GEMM's and MHA's placements) takes its own
+        # Enum alone, or None (left for resolve() to fill): a string names
+        # one in a profile's JSON, which Profile.load converts before it
+        # reaches here.
+        for name, domain in self.declaration.domains.items():
+            value = vars(self)[name]
+            if (
+                isinstance(domain, type)
+                and issubclass(domain, Enum)
+                and value is not None
+                and not isinstance(value, domain)
+            ):
+                raise TypeError(
+                    f"{type(self).__name__}.{name} is a {domain.__name__}, "
+                    f"not {value!r}"
+                )
+        if self.pinned is None:
+            self.pinned = frozenset(
+                name
+                for name in self.declaration.tunables
+                if vars(self)[name] is not None
+            )
+        for name in self.declaration.autos:
+            spec = ParamSpec.of(vars(type(self))[name])
+            if vars(self)[name] is None and spec.default is not None:
+                setattr(self, name, spec.default)
         self._derive_params()
         # A graph's reference constructs at a bounded call's valid rows, a
         # shape no device runs, for reference() alone: it is not checked.

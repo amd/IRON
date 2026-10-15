@@ -54,10 +54,17 @@ class AutoSpec(ParamSpec):
     """What an ``Auto()`` field declares beyond its dataclass field.
 
     Attributes:
+        default: The starting value a construction or a profile leaves open
+            takes. The dataclass's own default is always None (so
+            ``Operator.__post_init__`` can tell a caller's or a profile's
+            value from "left open" before it fills this in); this is the
+            one the caller gave ``Auto(default=...)``, or None itself when
+            ``resolve`` must fill the field.
         derived: ``resolve`` computes the field whatever it was given.
         domain: The values a tuner searches the field over, or None.
     """
 
+    default: Any
     derived: bool
     domain: Domain | tuple[Any, ...] | None
 
@@ -127,7 +134,10 @@ def Auto(
 
     Args:
         default: The starting value; `None` means `resolve` must fill it.
-            Always a value, never a derive: a tunable may default to a dtype.
+            Kept in the field's ``AutoSpec``, not the dataclass's own default
+            (always ``None``, whatever is given): a caller leaving the
+            tunable open must still read as "nothing given" in
+            ``Operator.__post_init__``, before it fills this in.
         derived: `resolve` computes the field from the device and the other
             fields whatever it was given, so it is not a tunable a caller,
             a profile or a tuner sets.
@@ -142,8 +152,12 @@ def Auto(
     Returns:
         The field.
     """
+    # The dataclass's own default is always None, whatever default= is
+    # given: Operator.__post_init__ tells a caller's or a profile's value
+    # from "left open" by whether the field is None, then fills an open one
+    # from the AutoSpec's own default itself.
     return dataclasses.field(
-        default=default,
+        default=None,
         init=init,
         repr=repr,
         kw_only=True,
@@ -151,6 +165,7 @@ def Auto(
             SPEC: AutoSpec(
                 derive=None,
                 probe=MISSING,
+                default=default,
                 derived=derived,
                 domain=domain,
             ),

@@ -10,7 +10,6 @@ scratch there, an xclbin its weights and states.
 
 from __future__ import annotations
 
-import contextlib
 import dataclasses
 import functools
 import inspect
@@ -90,7 +89,9 @@ class Graph:
     may be left out), its keyword-only ones the per-call values, and what it
     returns the outputs. Weights and states are what the instance holds,
     named by attribute path (``self.layers[3].q`` is ``layers.3.q``).
-    ``profile`` is a ``Profile`` or a directory of ``<device>.json`` ones.
+    ``profile`` is a ``Profile`` or a directory of ``<device>.json`` ones,
+    the one way a step's tunables come from one: ``compile(profile=)``
+    overrides it for one compile.
 
     Called in another graph's body, on its handles and per-call values, a
     graph's body traces into that graph: its steps are the caller's, its
@@ -262,7 +263,7 @@ class Graph:
             inputs.append(Handle(shape, dtype, name, "input"))
             args.append(inputs[-1])
         values = [PerCall(n, kind, dtype) for n, (kind, dtype) in self._values.items()]
-        with self._scope(), Tracer(self.name, self.names(), self._inputs) as tracer:
+        with Tracer(self.name, self._profile(), self.names(), self._inputs) as tracer:
             result = self.body(*args, **{v.name: v for v in values})
         items, carry = self._split_carry(result)
         outputs = self._outputs(items, tracer)
@@ -346,6 +347,7 @@ class Graph:
         self,
         *,
         dev=None,
+        profile: Profile | Path | None = None,
         full_elf: bool | None = None,
         check: bool = False,
         verbose=False,
@@ -363,6 +365,8 @@ class Graph:
         Args:
             dev: The device to compile for, bound for this compile alone;
                 else the current one.
+            profile: The profile to trace with, bound for this compile
+                alone; else ``self.profile``.
             full_elf: One full ELF, else an xclbin per step; ``None``
                 derives it (``iron.common.image.packaging``).
             check: Run each step on its own dispatch and hold its outputs to
@@ -385,6 +389,9 @@ class Graph:
         previous = aie_utils.get_current_device(probe_runtime=False)
         if dev is not None:
             aie_utils.set_current_device(dev)
+        previous_profile = self.profile
+        if profile is not None:
+            self.profile = profile
         try:
             traced = self.trace(**shapes)
             if fold:
@@ -462,6 +469,8 @@ class Graph:
         finally:
             if dev is not None:
                 aie_utils.set_current_device(previous)
+            if profile is not None:
+                self.profile = previous_profile
 
     def _given(self, tensors) -> dict[str, Any]:
         if len(tensors) > len(self._inputs):
@@ -479,14 +488,21 @@ class Graph:
     def __call__(self, *tensors, **values) -> Any:
         given = self._given(tensors)
         _check_values(self.name, self._values, values)
-        if graph_tracer.get() is not None:
+        tracer = graph_tracer.get()
+        if tracer is not None:
             if self._carried:
                 raise TypeError(
                     f"{self.name}: a graph called in another's body carries "
                     f"no values of its own; its caller carries them"
                 )
-            with self._scope():
+            own = self._profile()
+            if own is None:
                 return self.body(*(given.get(n) for n in self._inputs), **values)
+            previous, tracer.profile = tracer.profile, own
+            try:
+                return self.body(*(given.get(n) for n in self._inputs), **values)
+            finally:
+                tracer.profile = previous
         shapes = {
             name: (tuple(int(n) for n in t.shape), np.dtype(t.dtype).type)
             for name, t in given.items()
@@ -517,7 +533,7 @@ class Graph:
             ),
             *(("input", t) for t in args if isinstance(t, np.ndarray)),
         ]
-        with self._scope(), _ReferenceTracer(self.name, held):
+        with _ReferenceTracer(self.name, self._profile(), held):
             result = self.body(*args, **values)
         items, carry = self._split_carry(result)
         if carry is None:
@@ -525,7 +541,7 @@ class Graph:
         nxt = Carry(**{n: int(np.asarray(v).reshape(-1)[0]) for n, v in carry.items()})
         return _results(items, nxt)
 
-    def _scope(self):
+    def _profile(self) -> Profile | None:
         profile = self.profile
         if isinstance(profile, (str, Path)):
             dev = aie_utils.ensure_current_device()
@@ -535,7 +551,7 @@ class Graph:
             if not path.exists():
                 raise ValueError(f"{self.name}: no profile {path}")
             profile = Profile.load(path)
-        return profile if profile is not None else contextlib.nullcontext()
+        return profile
 
 
 class CompiledGraph:

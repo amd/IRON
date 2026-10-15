@@ -649,20 +649,27 @@ def test_a_profile_fills_the_tunables_a_call_leaves_open():
     p = Profile()
     p.add(MV, columns=4, tile_out=32)  # any MV: a declared default (64) counts as open
     p.add(MV, K=256, tile_out=16)  # more specific: its shape names K
-    with p:
-        assert (MV(M=1024, K=128).columns, MV(M=1024, K=128).tile_out) == (4, 32)
-        assert MV(M=1024, K=256).tile_out == 16 and MV(M=1024, K=256).columns == 4
-        assert MV(M=1024, K=256, tile_out=8).tile_out == 8  # what the call gives wins
-        r = MV(M=1024, K=128).resolved(NPU2)
-        assert (r.columns, r.tile_out, r.vec) == (4, 32, 64)  # resolve fills the rest
+    assert (p.make(MV, M=1024, K=128).columns, p.make(MV, M=1024, K=128).tile_out) == (
+        4,
+        32,
+    )
+    assert (
+        p.make(MV, M=1024, K=256).tile_out == 16
+        and p.make(MV, M=1024, K=256).columns == 4
+    )
+    # what the call gives wins
+    assert p.make(MV, M=1024, K=256, tile_out=8).tile_out == 8
+    r = p.make(MV, M=1024, K=128).resolved(NPU2)
+    assert (r.columns, r.tile_out, r.vec) == (4, 32, 64)  # resolve fills the rest
+    # plain construction reads no profile
     assert MV(M=1024, K=128).columns is None and MV(M=1024, K=128).tile_out == 64
     assert p.lookup(MV(M=1024, K=256)) == {"columns": 4, "tile_out": 16}
     assert len(p) == 2
 
 
-def test_a_profile_scope_is_per_thread():
-    """One profile entered from several threads at once: each thread's scope
-    is its own (the token lives in the context, not on the profile).
+def test_profile_make_has_no_shared_state():
+    """``profile.make()`` touches no global state, so concurrent calls from
+    different threads cannot see each other's tunables.
     """
     import threading
 
@@ -673,9 +680,7 @@ def test_a_profile_scope_is_per_thread():
     def work():
         try:
             for _ in range(50):
-                with p:
-                    seen.append(MV(M=64, K=64).columns)
-                seen.append(MV(M=64, K=64).columns)
+                seen.append(p.make(MV, M=64, K=64).columns)
         except Exception as e:
             errors.append(e)
 
@@ -684,11 +689,11 @@ def test_a_profile_scope_is_per_thread():
         t.start()
     for t in threads:
         t.join()
-    assert not errors and seen.count(2) == 200 and seen.count(None) == 200
+    assert not errors and seen.count(2) == 200
 
 
 def test_construction_is_by_keyword():
-    with pytest.raises(TypeError, match="constructed by keyword"):
+    with pytest.raises(TypeError, match="positional argument"):
         MV(3, M=64, K=64)
 
 
@@ -700,13 +705,10 @@ def test_a_profile_is_checked_as_it_is_written_and_as_it_is_read():
         p.add(MV, M=1024)
     p.add(MV, M=1024, columns=2)
     p.add(MV, K=128, columns=8)  # as specific as the first: a clash for (1024, 128)
-    with p:
-        assert MV(M=512, K=128).columns == 8
-        with pytest.raises(ValueError, match="ambiguous"):
-            MV(M=1024, K=128)
-        with Profile():  # an inner scope stands alone; the outer is back after
-            assert MV(M=512, K=128).columns is None
-        assert MV(M=512, K=128).columns == 8
+    assert p.make(MV, M=512, K=128).columns == 8
+    with pytest.raises(ValueError, match="ambiguous"):
+        p.make(MV, M=1024, K=128)
+    assert MV(M=512, K=128).columns is None  # plain construction reads no profile
 
 
 def test_resolve_must_return_a_copy():

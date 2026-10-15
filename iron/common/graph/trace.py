@@ -19,6 +19,7 @@ from .. import declare
 from ..declare import In, InOut, Operand, Operator, Out
 from ..declare.value import Extent
 from ..declare.operator import graph_tracer
+from ..declare.profile import Profile
 from ..image.packaging import Kind
 from ..image.step import BufferRef, SequenceStep
 from .handle import (
@@ -337,10 +338,12 @@ class Tracer:
     def __init__(
         self,
         name: str,
+        profile: Profile | None = None,
         names: dict[int, str] | None = None,
         inputs: Iterable[str] = (),
     ) -> None:
         self.name = name
+        self.profile = profile
         self.steps: list[TracedStep] = []
         self.weights: dict[int, tuple[object, Handle]] = {}
         self.states: dict[int, tuple[State, Handle]] = {}
@@ -375,9 +378,6 @@ class Tracer:
 
     def __exit__(self, *exc):
         graph_tracer.reset(self._token)
-
-    def accepts(self, args) -> bool:
-        return all(is_operand(a) for a in args)
 
     def viewed(self, x: State | Weight):
         return self.operand(x)
@@ -565,7 +565,15 @@ class Tracer:
             [h.shape for h in outputs],
             **kwargs,
         )
-        return cls(**{**kwargs, **inferred})
+        given = {**kwargs, **inferred}
+        if self.profile is not None:
+            return self.profile.make(cls, **given)
+        pinned = frozenset(
+            name
+            for name, value in given.items()
+            if name in cls.declaration.tunables and value is not None
+        )
+        return cls(**given, pinned=pinned)
 
     def _output_bounds(self, op, buffer, rank: int) -> dict:
         bounds = {}
@@ -763,8 +771,13 @@ class _ReferenceTracer(Tracer):
     # their reference() runs at.
     checks = False
 
-    def __init__(self, name: str, held: Iterable[tuple[str, np.ndarray]] = ()):
-        super().__init__(name)
+    def __init__(
+        self,
+        name: str,
+        profile: Profile | None = None,
+        held: Iterable[tuple[str, np.ndarray]] = (),
+    ):
+        super().__init__(name, profile)
         self.held = list(held)
 
     def operand(self, x):
