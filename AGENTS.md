@@ -400,8 +400,9 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      per-call value on a full ELF). `self.count.per_call` says whether a
      call gives it, and `self.x.l1_depth` is the depth a core-side fifo of
      `x`'s tiles can have. The device is `self.dev`. It returns what it
-     built: its Workers and any `Flow`, `Lock` or `TileDma` only the
-     sequence reaches. It sees the array tier alone: reading an extent
+     built: its Workers and any `Flow`, `Lock`, `TileDma` or `Buffer` only
+     the sequence reaches, so each is in the design whatever a shape's
+     sequence touches. It sees the array tier alone: reading an extent
      raises
    - `compatible()` for divisibility against the resolved tunables
    - `sequence(rt)` only if the derived sequence is not the one you want:

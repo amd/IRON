@@ -517,6 +517,26 @@ def test_flm_gemm_keyword_construction_tunes_from_the_device():
         flm_gemm.GEMM(M=256, K=1024, N=1024, epilogue="gelu", epilogue_modes=("none",))
 
 
+def test_flm_gemm_declares_every_b_pool_whichever_columns_a_shape_fills():
+    """At N=256 a shape's sequence fills B through columns 0-3 alone; the
+    pool of every column is still declared, so the shape's build lays out
+    the same static design as the configuration image it runs on, and its
+    descriptors address the image's memtile buffers.
+    """
+    name = re.compile(
+        r'@[\w$.]+|%[\w$.]+|sym_name = "[^"]*"|\^bb\d+|fifoName = "[^"]*"'
+    )
+
+    def static(op) -> list[str]:
+        text = str(OperatorDesign(op, full_elf=False).compilable().generate_mlir())
+        text = text[: text.index("aie.runtime_sequence")]
+        return sorted(name.sub("_", line).strip() for line in text.splitlines())
+
+    dev = from_name("npu2", n_cols=8)
+    op = flm_gemm.GEMM(M=512, K=1536, N=256, tile_n=64, k_tile=256).resolved(dev)
+    assert static(op) == static(op.configuration())
+
+
 def test_flm_gemm_layout_of_b_follows_the_device():
     untuned = flm_gemm.GEMM(M=256, K=512, N=512)
     with pytest.raises(ValueError):

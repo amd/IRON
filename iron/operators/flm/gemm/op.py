@@ -689,8 +689,9 @@ class GEMM(Operator):
         # once per unit and refilled only when all of them have, independently
         # of the other slots, so the next column-block's refill trails the
         # replay by one slot instead of waiting for the whole block.
-        # Flows, locks and DMAs only the sequence and descriptors reach.
-        unrouted: list = []
+        # Buffers, flows, locks and DMAs only the sequence and descriptors
+        # reach, declared whichever columns a shape's sequence uses.
+        unrouted: list = [*b_mt_bufs]
         b_mt_prod, b_mt_cons = [], []
         for c in range(COLS):
             for locks in (b_mt_prod, b_mt_cons):

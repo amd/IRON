@@ -55,8 +55,9 @@ class OperatorRuntime(Runtime):
 
     Attributes:
         pins: Each pinned lane this runtime declares, by its symbol.
-        buffers: Buffers the sequence writes that no worker places: a
-            shipped image's parameter block.
+        buffers: Buffers no worker places, declared whatever a shape's
+            sequence reaches: a shipped image's parameter blocks, or a
+            pool only descriptors address.
     """
 
     def __init__(self, op: Operator, built: list = (), name: str | None = None) -> None:
@@ -437,8 +438,8 @@ class OperatorRuntime(Runtime):
     def preamble(self, **values) -> None:
         """Each core's runtime parameters, then the parameter sync, then each
         core's barrier, before any DMA. A shipped image's parameter blocks
-        (``buffers``) each hold the residents' words in declaration order;
-        its sequence releases them.
+        (its ``buffers``) each hold the residents' words in declaration
+        order; its sequence releases them.
 
         An ``own_preamble`` operator's sequence calls it itself, ``values``
         overriding residents by name.
@@ -462,7 +463,7 @@ class OperatorRuntime(Runtime):
         block = []
         for word in (words[name] for name in residents):
             block += word if isinstance(word, (list, tuple)) else [word]
-        for buffer in self.buffers:
+        for buffer in self.buffers if op.external is not None else ():
             if len(block) != prod(buffer.shape):
                 raise ValueError(
                     f"{type(op).__name__}'s parameter block holds "
