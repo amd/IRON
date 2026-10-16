@@ -13,6 +13,7 @@ from aie.utils.benchmark import run_iters
 from aie.utils.verify import Tolerance, compare, nearly_equal
 from ml_dtypes import bfloat16
 from .base import AIEOperatorBase
+from .host_array import as_numpy
 
 
 def verify_buffer(
@@ -59,16 +60,8 @@ def verify_buffer(
             f"{tolerance.range_frac} depends on more than the element it judges"
         )
 
-    def _to_numpy(x):
-        if isinstance(x, torch.Tensor):
-            t = x.detach().cpu().contiguous()
-            if t.dtype == torch.bfloat16:
-                return t.view(torch.uint16).numpy().view(np.dtype("bfloat16"))
-            return t.numpy()
-        return np.asarray(x)
-
-    expected_np = _to_numpy(reference).reshape((-1,))
-    output = _to_numpy(output).reshape((-1,))
+    expected_np = as_numpy(reference).reshape((-1,))
+    output = as_numpy(output).reshape((-1,))
 
     if len(output) < len(expected_np):
         # Allow larger buffers - binning may have allocated more space than needed
@@ -130,10 +123,21 @@ def _nbytes(buf) -> int:
     return buf.data.nbytes
 
 
+def _as_device_tensor(tensor_class, data):
+    """Device tensor from a torch tensor or a NumPy array.
+
+    ``from_torch`` detaches a tensor. A packed weight is already an array, and
+    the device tensor is built from that array.
+    """
+    if isinstance(data, torch.Tensor):
+        return tensor_class.from_torch(data)
+    return tensor_class(np.ascontiguousarray(data))
+
+
 def run_test(
     operator: AIEOperatorBase,
-    input_buffers: dict[str, torch.Tensor],
-    output_buffers: dict[str, torch.Tensor | None],
+    input_buffers: dict[str, torch.Tensor | np.ndarray],
+    output_buffers: dict[str, torch.Tensor | np.ndarray | None],
     rel_tol: float = 0.04,
     abs_tol: float = 1e-6,
     max_error_rate: float = 0.0,
@@ -188,7 +192,7 @@ def run_test(
                 name, data = next(input_iter)
             except StopIteration:
                 raise ValueError("Not enough input buffers provided for arg spec")
-            buf = tensor_class.from_torch(data)
+            buf = _as_device_tensor(tensor_class, data)
             args.append(buf)
             total_bytes += _nbytes(buf)
         elif spec.direction == "out":
@@ -205,7 +209,7 @@ def run_test(
                 name, data = next(input_iter)
             except StopIteration:
                 raise ValueError("Not enough input buffers provided for inout arg spec")
-            buf = tensor_class.from_torch(data)
+            buf = _as_device_tensor(tensor_class, data)
             args.append(buf)
             output_map[name] = buf
             inout_names.append(name)

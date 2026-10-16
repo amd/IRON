@@ -60,7 +60,7 @@ def test_output_feeds_gemm_unchanged(aie_context):
     w = dequantize(qw, K, N)
     w = (f32_to_bf16_floor(w).astype(np.uint32) << 16).view(np.float32)
     gemm = GEMM(M=256, K=K, N=N, tile_n=64, rounding="floor", context=aie_context)
-    packed = gemm.pack_B(torch.from_numpy(np.ascontiguousarray(w.T))).numpy()
+    packed = np.ascontiguousarray(gemm.pack_B(np.ascontiguousarray(w.T)))
 
     _check(DequantBFP(K=K, N=N, context=aie_context), qw, packed, "vs pack_B")
 

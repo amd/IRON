@@ -144,7 +144,9 @@ def test_mm_prebuilt_epilogue_matches_accumulator(epilogue, clamp, aie_context):
         tensor = aie_utils.DEFAULT_TENSOR_CLASS
         out = tensor((M, N), dtype=np.dtype("bfloat16"))
         op.get_callable()(
-            tensor.from_torch(A.flatten()), tensor.from_torch(op.pack_B(B)), out
+            tensor.from_torch(A.flatten()),
+            tensor(np.ascontiguousarray(op.pack_B(B))),
+            out,
         )
         return out.to_torch().reshape(M, N).float()
 
