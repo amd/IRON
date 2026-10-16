@@ -899,7 +899,10 @@ class AieccXclbinInstsCompilationRule(AieccCompilationRule):
             dispatch_libs = mlir_sources_to_dispatch_libs.get(mlir_source, [])
             npu_cpp_path = None
             if dispatch_libs:
-                npu_cpp_path = work_dir / _DISPATCH_CPP
+                # Absolute: aiecc places a relative --npu-cpp-name under
+                # --output-dir, which is this work_dir, so a relative name
+                # would be written one directory too deep.
+                npu_cpp_path = (work_dir / _DISPATCH_CPP).resolve()
                 options.append("--get=npu_lowered.mlir")
 
             def _compile(
