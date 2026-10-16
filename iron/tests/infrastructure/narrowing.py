@@ -5,7 +5,8 @@
 table, the graph compiled through ``Graph.compile`` with the tuner, and the
 tuned image run against the untuned one, bit for bit. The model and the
 search are checked without a device (``iron/tests/toolchain/narrowing.py``).
-Every test that times the NPU is extensive: its figures need a quiet host.
+Every test that times the NPU is extensive: its figures need a quiet host,
+and starving the timing thread needs a host whose scheduler the test controls.
 """
 
 import dataclasses
@@ -421,6 +422,7 @@ finally:
 """
 
 
+@pytest.mark.extensive
 def test_timing_refuses_a_figure_its_calls_waited_for_a_cpu_through():
     # A process on the cores the completions interrupt held the timing
     # thread off them until each core's tick, 970 us for a 190 us run. At
