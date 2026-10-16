@@ -420,7 +420,9 @@ def test_gemm_gelu_bf16_steps_matches_overlay(M, K, N, aie_context):
         tensor = aie_utils.DEFAULT_TENSOR_CLASS
         out = tensor((M, N), dtype=np.dtype("bfloat16"))
         op.get_callable()(
-            tensor.from_torch(A.flatten()), tensor.from_torch(op.pack_B(B)), out
+            tensor.from_torch(A.flatten()),
+            tensor(np.ascontiguousarray(op.pack_B(B))),
+            out,
         )
         # A copy: to_torch() aliases the device buffer, which is freed with out.
         return out.to_torch().reshape(M, N).clone()
