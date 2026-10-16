@@ -261,6 +261,10 @@ class Handle:
                 self.start,
                 bounds=bounds,
             )
+        return self.at(tap, shape, index_by, bounds)
+
+    def at(self, tap: TensorAccessPattern, shape, index_by=None, bounds=None):
+        """What ``tap`` walks, as ``shape``: a slice if contiguous, else a view."""
         dense = tap.coalesce()
         offset = tap.offset
         if (
@@ -326,7 +330,9 @@ def state(shape, dtype=bfloat16, name=None) -> State:
 
 
 class Weight(_Viewed):
-    """A weight the graph's body views (``rope[position]``)."""
+    """A tensor the body indexes per call (``iron.weight(table)[ids]``),
+    one buffer with the array it wraps.
+    """
 
     __slots__ = ("array",)
 
@@ -349,7 +355,7 @@ class Weight(_Viewed):
 
 
 def weight(array) -> Weight:
-    """Declare a weight a graph's body views, not only passes whole."""
+    """A tensor a graph's body indexes per call (``iron.weight(table)[ids]``)."""
     return Weight(array)
 
 

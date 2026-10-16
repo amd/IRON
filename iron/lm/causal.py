@@ -27,7 +27,6 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
-from iron.common.graph.handle import Weight
 from iron.common.graph.tuner import Tuning
 from iron.tune.probe import Call, Point
 from iron.operators.copy import Copy
@@ -82,7 +81,6 @@ class CausalLM(Model):
             rest by the subclass.
     """
 
-    embedding: Weight
     layers: list
     oracle: "type[Oracle]"
 
@@ -95,7 +93,6 @@ class CausalLM(Model):
                 f"the checkpoint has {len(self.layers)} layers, the config "
                 f"{config.n_layers}"
             )
-        self.embedding = iron.weight(weights.model.embed_tokens.weight)
         G, L, D = config.n_kv_groups, config.max_seq_len, config.head_dim
         self.keys = [iron.state((L, G, D)) for _ in self.layers]
         self.values = [iron.state((L, G, D)) for _ in self.layers]
@@ -129,11 +126,12 @@ class CausalLM(Model):
         c = self.config
         L, C, A = c.max_seq_len, c.prefill_chunk, c.rope_width
         prompt = ids is not None
+        embedding = iron.weight(self.weights.model.embed_tokens.weight)
         if prompt:
-            x = Copy.step(self.embedding[ids[:rows]])
+            x = Copy.step(embedding[ids[:rows]])
             angles = Copy.step(self.rope.reshape(L // C, C, A)[chunk, :rows])
         else:
-            x = Copy.step(self.embedding[token]).reshape(1, c.emb_dim)
+            x = Copy.step(embedding[token]).reshape(1, c.emb_dim)
             angles = Copy.step(self.rope[position]).reshape(1, A)
         x = self.embed(x)
         step = DecodeStep(prompt, angles, chunk, rows, position)

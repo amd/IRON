@@ -10,6 +10,7 @@ hardware tests' job.
 """
 
 import dataclasses
+from types import SimpleNamespace
 from typing import Any
 
 import aie.utils as aie_utils
@@ -1915,7 +1916,7 @@ def test_an_optional_input_gives_a_version_without_it():
     assert g.trace(x=None).inputs == []
     # The row is a view of the one table, indexed per call.
     (copy,) = alone.operators
-    assert list(alone.weights) == [id(g.table)]
+    assert list(alone.weights) == [id(g.table.array)]
     assert [(b.member.name, b.expression) for b in alone.bindings] == [
         ("in_offset", alone.values[0] * 256)
     ]
@@ -1924,6 +1925,36 @@ def test_an_optional_input_gives_a_version_without_it():
     np.testing.assert_array_equal(g.reference(r=1), table[1])
     np.testing.assert_array_equal(g.reference(None, r=1), table[1])
     np.testing.assert_array_equal(g.reference(x, r=3), table[3] + x)
+
+
+class _Held(iron.Graph):
+    """A checkpoint-held table gathered, sliced and transposed in the body."""
+
+    def __init__(self, table):
+        self.weights = SimpleNamespace(embed=SimpleNamespace(weight=table))
+
+    def body(self, x, *, r: Scratchpad[np.int32]):
+        table = self.weights.embed.weight
+        row = Copy.step(iron.weight(table)[r])
+        half = ElementwiseAdd.step(x, table[2:4].reshape(512))
+        return row, half, Copy.step(table.T)
+
+
+def test_a_held_array_is_viewed_in_the_body_under_its_own_path():
+    table = np.arange(8 * 256, dtype=np.int32).astype(bfloat16).reshape(8, 256)
+    g = _Held(table)
+    t = g.trace(x=(512,))
+    assert [h.name for _, h in t.weights.values()] == ["weights.embed.weight"]
+    assert list(t.weights) == [id(table)]
+    whole = BufferRef("weights.embed.weight")
+    gather, add, transpose = t.steps
+    assert gather.refs()[0] == transpose.refs()[0] == whole
+    assert add.refs()[1] == BufferRef("weights.embed.weight", 1024, 1024)
+    x = np.full(512, 2, dtype=bfloat16)
+    row, half, flipped = g.reference(x, r=5)
+    np.testing.assert_array_equal(row, table[5])
+    np.testing.assert_array_equal(half, table[2:4].reshape(512) + x)
+    np.testing.assert_array_equal(flipped, table.T)
 
 
 def test_only_none_may_default_an_input():

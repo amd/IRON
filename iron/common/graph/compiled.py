@@ -39,7 +39,7 @@ from ..image.sequence import ALIGNMENT, OperatorSequence
 from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose
 from .fold import Folding, folded
-from .handle import Affine, Carry, Handle, PerCall, State, is_operand
+from .handle import Affine, Carry, Handle, PerCall, State, Weight, is_operand
 from .trace import TracedGraph, Tracer, _ReferenceTracer
 from .tuner import Prices, Tuner, Tuning
 from .visualize import Dataflow
@@ -203,10 +203,6 @@ class Graph:
             for name, (shape, dtype) in inputs.items()
         )
 
-    def names(self) -> dict[int, str]:
-        """The path name of each tensor and state the instance holds, by identity."""
-        return {key: path for key, (path, _) in self.held().items()}
-
     def held(self) -> dict[int, tuple[str, Any]]:
         """Each tensor and state the instance holds, by identity, with its
         path name.
@@ -264,7 +260,7 @@ class Graph:
             inputs.append(Handle(shape, dtype, name, "input"))
             args.append(inputs[-1])
         values = [PerCall(n, kind, dtype) for n, (kind, dtype) in self._values.items()]
-        with Tracer(self.name, self._profile(), self.names(), self._inputs) as tracer:
+        with Tracer(self.name, self._profile(), self.held(), self._inputs) as tracer:
             result = self.body(*args, **{v.name: v for v in values})
         items, carry = self._split_carry(result)
         outputs = self._outputs(items, tracer)
@@ -649,8 +645,9 @@ class CompiledGraph:
             return BufferRef(self.traced.states[id(x)][1].name)
         if isinstance(x, Handle):
             return x.ref()
-        if id(x) in self.traced.weights:
-            return BufferRef(self.traced.weights[id(x)][1].name)
+        key = id(x.array) if isinstance(x, Weight) else id(x)
+        if key in self.traced.weights:
+            return BufferRef(self.traced.weights[key][1].name)
         raise KeyError(f"{x!r} is not a state, weight or handle of this graph")
 
     def buffer(self, x):

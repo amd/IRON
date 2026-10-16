@@ -124,7 +124,8 @@ class Llama(Block, CausalLM):
     def head(self, x):
         norm = self.weights.model.norm.weight
         return GEMV.step(
-            self.embedding, RMSNorm.step(x, weight=norm, epsilon=self.config.eps)
+            self.weights.model.embed_tokens.weight,
+            RMSNorm.step(x, weight=norm, epsilon=self.config.eps),
         )
 
 

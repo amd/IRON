@@ -597,6 +597,11 @@ graph.compile(x=(1, emb))                        # or on the first call
 logits = graph(x_tok, pos=n)
 ```
 
+A body reads a held array where it is held, with no alias: a numpy slice,
+reshape or transpose of it (`w.wk[:E]`) is a view of its buffer, under its
+own path. A per-call gather wraps it where it gathers,
+`iron.weight(w.embed)[ids]`.
+
 A graph is also how operators compose into a reusable block. Called in
 another graph's body, on its handles and per-call values
 (`self.log_mel(wave, self.features[1:F + 1], frames=frames)`), a graph's

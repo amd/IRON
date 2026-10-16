@@ -339,11 +339,17 @@ class Tracer:
         self,
         name: str,
         profile: Profile | None = None,
-        names: dict[int, str] | None = None,
+        held: Mapping[int, tuple[str, object]] | None = None,
         inputs: Iterable[str] = (),
     ) -> None:
         self.name = name
         self.profile = profile
+        held = held or {}
+        self._held_arrays = [
+            x.array if isinstance(x, Weight) else x
+            for _, x in held.values()
+            if isinstance(x, (Weight, np.ndarray))
+        ]
         self.steps: list[TracedStep] = []
         self.weights: dict[int, tuple[object, Handle]] = {}
         self.states: dict[int, tuple[State, Handle]] = {}
@@ -357,7 +363,11 @@ class Tracer:
         # address_words). Filled in once, at upload, not a per-call value.
         self.static_addresses: dict[str, tuple[str, Callable]] = {}
         self._counter = itertools.count()
-        self._names = names or {}
+        self._names: dict[int, str] = {}
+        for key, (path, x) in held.items():
+            self._names.setdefault(key, path)
+            if isinstance(x, Weight):
+                self._names.setdefault(id(x.array), path)
         self._taken = {*self._names.values(), *inputs}
 
     def fresh(self, name: str) -> str:
@@ -397,15 +407,46 @@ class Tracer:
                 self.states[key] = (x, Handle(x.shape, x.dtype, x.name, "state"))
             return self.states[key][1]
         if is_operand(x):
-            key = id(x)
+            array = x.array if isinstance(x, Weight) else x
+            key = id(array)
             if key not in self.weights:
-                name = self._names.get(key) or self.fresh(f"w{len(self.weights)}")
+                name = self._names.get(id(x)) or self._names.get(key)
+                if name is None and isinstance(array, np.ndarray):
+                    view = self._held_view(array)
+                    if view is not None:
+                        return view
+                name = name or self.fresh(f"w{len(self.weights)}")
                 self.weights[key] = (
-                    x,
-                    Handle(x.shape, np.dtype(x.dtype).type, name, "weight"),
+                    array,
+                    Handle(array.shape, np.dtype(array.dtype).type, name, "weight"),
                 )
             return self.weights[key][1]
         raise TypeError(f"{x!r} is not a graph handle, a state, or a tensor")
+
+    def _held_view(self, x: np.ndarray) -> Handle | None:
+        """``x``, a numpy view of a held array, as a view of its buffer, or None."""
+        if not x.size or any(s < 0 for s in x.strides):
+            return None
+        address = x.__array_interface__["data"][0]
+        for held in self._held_arrays:
+            base = held.__array_interface__["data"][0]
+            offset, misaligned = divmod(address - base, x.itemsize)
+            if (
+                held.dtype != x.dtype
+                or not held.flags.c_contiguous
+                or misaligned
+                or not 0 <= offset < held.size
+                or any(s % x.itemsize for s in x.strides)
+            ):
+                continue
+            strides = [
+                s // x.itemsize if n > 1 else 0 for s, n in zip(x.strides, x.shape)
+            ]
+            if offset + sum((n - 1) * s for n, s in zip(x.shape, strides)) >= held.size:
+                continue
+            tap = TensorAccessPattern(held.shape, offset, list(x.shape), strides)
+            return self.operand(held).at(tap, x.shape)
+        return None
 
     def overwrites(self, given) -> str | None:
         """What an output a call gives would write over that no call may:
