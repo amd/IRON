@@ -12,3 +12,5 @@ torchao==0.13.0
 # sends it backtracking to tokenizers 0.13.3, a version with no cp312 wheel.
 # Building that sdist needs a Rust toolchain the CI image does not carry.
 datasets==5.0.1
+matplotlib
+seaborn
