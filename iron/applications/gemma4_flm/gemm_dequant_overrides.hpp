@@ -80,11 +80,25 @@ struct state {
     uint32_t mlp_i = 0;
 };
 
-inline state registered;
+inline std::unique_ptr<state> &state_storage()
+{
+    static std::unique_ptr<state> instance = std::make_unique<state>();
+    return instance;
+}
+
+inline state &S()
+{
+    return *state_storage();
+}
+
+inline void reset_state()
+{
+    state_storage() = std::make_unique<state>();
+}
 
 inline bytes &at_offset(bytes &parent, size_t offset)
 {
-    auto &result = registered.views[{parent.bo().get_handle().get(), offset}];
+    auto &result = S().views[{parent.bo().get_handle().get(), offset}];
     if (!result)
         result = std::make_unique<view>(parent, offset);
     return result->buf;
@@ -102,19 +116,19 @@ inline size_t bfp16_bytes(size_t k, size_t n)
 
 inline npu_app &operator_for(npu_app_manager *manager, const std::string &file)
 {
-    auto result = registered.apps.find(file);
-    if (result == registered.apps.end()) {
+    auto result = S().apps.find(file);
+    if (result == S().apps.end()) {
         npu_app app = manager->create_app();
-        load_sequence(app, registered.dir + "/" + file);
-        result = registered.apps.emplace(file, std::move(app)).first;
+        load_sequence(app, S().dir + "/" + file);
+        result = S().apps.emplace(file, std::move(app)).first;
     }
     return result->second;
 }
 
 inline bytes &resident(role matrix)
 {
-    require(registered.layer < registered.layers.size(), "resident layer is out of range");
-    bytes &weight = registered.layers[registered.layer].weights[matrix];
+    require(S().layer < S().layers.size(), "resident layer is out of range");
+    bytes &weight = S().layers[S().layer].weights[matrix];
     require(weight.size() != 0, std::string("resident weight is missing: ") + role_names[matrix]);
     return weight;
 }
@@ -146,9 +160,9 @@ inline void load_resident(npu_app_manager *manager, const std::string &model, bo
             resident_layer.weights[matrix].sync_to_device();
             total += bytes;
         }
-        registered.layers.push_back(std::move(resident_layer));
+        S().layers.push_back(std::move(resident_layer));
     }
-    require(!registered.layers.empty(), "no resident projection weights found");
+    require(!S().layers.empty(), "no resident projection weights found");
     header_print("info", "resident projection weights: " + std::to_string(total / (1024 * 1024)) + " MiB");
 }
 
@@ -158,17 +172,16 @@ inline npu_app &gemm(uint32_t m, uint32_t k, uint32_t n, bool gelu = false)
 {
     const std::string file = "gemm_M" + std::to_string(m) + "_K" + std::to_string(k) + "_N" + std::to_string(n) +
                              (gelu ? "_gelu" : "") + ".bin";
-    return operator_for(registered.mm, file);
+    return operator_for(S().mm, file);
 }
 
 inline npu_app &stock_gemm(uint32_t m, uint32_t k, uint32_t n, bool gelu = false)
 {
-    auto &entry = registered.stock_apps[{k, n, gelu}];
+    auto &entry = S().stock_apps[{k, n, gelu}];
     if (entry.m != m) {
         if (entry.m == 0)
-            entry.app = registered.mm->create_app();
-        registered.stock_gemm->generate_seq(
-            entry.app.seq(), m, k, n, 0, false, gelu ? Gemm::GeLU : Gemm::NO_Activation, 0);
+            entry.app = S().mm->create_app();
+        S().stock_gemm->generate_seq(entry.app.seq(), m, k, n, 0, false, gelu ? Gemm::GeLU : Gemm::NO_Activation, 0);
         entry.m = m;
     }
     return entry.app;
@@ -178,7 +191,7 @@ template <class Weight> ert_cmd_state dequant(bytes &quantized, const Weight &we
 {
     const std::string file =
         "dequant_K" + std::to_string(weight.shape[0]) + "_N" + std::to_string(weight.shape[1]) + ".bin";
-    return operator_for(registered.dequant, file)(at_offset(quantized, weight.offset + offset), out);
+    return operator_for(S().dequant, file)(at_offset(quantized, weight.offset + offset), out);
 }
 
 template <class Layer, class Shape, class Buffers>
@@ -213,22 +226,26 @@ ert_cmd_state o_proj(const Layer &weight, const Shape &shape, Buffers &buffers, 
 
 template <class Npu, class Config> void engine_init(Npu *npu, const Config &config)
 {
+    // FastFlowLM unloads engine objects without unloading this override DLL.
+    // Drop every app, buffer view, and resident weight from the previous model
+    // before registering the replacement engine.
+    reset_state();
     const auto xclbin = [&](const char *name) {
         return npu->register_xclbin(utils::path_join(config.exec_path, "xclbins", config.model_name, name));
     };
-    registered.dir = utils::path_join(config.exec_path, "xclbins", config.model_name, "iron");
-    registered.mm = xclbin("mm.xclbin");
+    S().dir = utils::path_join(config.exec_path, "xclbins", config.model_name, "iron");
+    S().mm = xclbin("mm.xclbin");
 #if defined(IRON_OFFLINE_BF16)
     auto stock_config = config;
-    registered.stock_gemm = std::make_unique<Gemm>(stock_config);
-    load_resident(registered.mm, config.model_path, false);
+    S().stock_gemm = std::make_unique<Gemm>(stock_config);
+    load_resident(S().mm, config.model_path, false);
     header_print("info", "FastFlowLM GEMM with offline BF16 weights");
 #elif defined(IRON_OFFLINE_BFP16)
-    load_resident(registered.mm, config.model_path, true);
+    load_resident(S().mm, config.model_path, true);
     header_print("info", "IRON GEMM with offline BFP16 weights");
 #else
-    registered.dequant = xclbin("dequant.xclbin");
-    header_print("info", "IRON GEMM and dequant from " + registered.dir);
+    S().dequant = xclbin("dequant.xclbin");
+    header_print("info", "IRON GEMM and dequant from " + S().dir);
 #endif
 }
 
@@ -269,9 +286,9 @@ template <class Npu, class Config> void engine_init(Npu *npu, const Config &conf
 
 #define FLM_OV_engine_init(expr, npu, config) ::iron::engine_init(npu, config)
 #define FLM_OV_prefill_layer_begin(expr, desc, layer_idx, type, prefill_shape)                                         \
-    (::iron::registered.layer = (layer_idx),                                                                           \
-     ::iron::registered.mlp_d = (desc)->weight_desc(type).ffn_gate.shape[0],                                           \
-     ::iron::registered.mlp_i = (desc)->weight_desc(type).ffn_gate.shape[1])
+    (::iron::S().layer = (layer_idx),                                                                                  \
+     ::iron::S().mlp_d = (desc)->weight_desc(type).ffn_gate.shape[0],                                                  \
+     ::iron::S().mlp_i = (desc)->weight_desc(type).ffn_gate.shape[1])
 
 #if defined(IRON_OFFLINE_BF16) || defined(IRON_OFFLINE_BFP16)
 #define FLM_OV_dequant_qkv(expr, desc, type) ERT_CMD_STATE_COMPLETED
@@ -314,13 +331,13 @@ template <class Npu, class Config> void engine_init(Npu *npu, const Config &conf
 #define FLM_OV_o_global_proj FLM_OV_o_swa_proj
 
 #define FLM_OV_gate_proj(expr, desc, double_wide, prefill)                                                             \
-    ::iron::stock_gemm((prefill).L_padded, ::iron::registered.mlp_d, ::iron::registered.mlp_i, true)(                  \
+    ::iron::stock_gemm((prefill).L_padded, ::iron::S().mlp_d, ::iron::S().mlp_i, true)(                                \
         bufs->gate_buffer, bufs->hidden_state_buffer, ::iron::resident(::iron::GATE))
 #define FLM_OV_up_proj(expr, desc, double_wide, prefill)                                                               \
-    ::iron::stock_gemm((prefill).L_padded, ::iron::registered.mlp_d, ::iron::registered.mlp_i)(                        \
+    ::iron::stock_gemm((prefill).L_padded, ::iron::S().mlp_d, ::iron::S().mlp_i)(                                      \
         bufs->up_buffer, bufs->hidden_state_buffer, ::iron::resident(::iron::UP))
 #define FLM_OV_down_proj(expr, desc, double_wide, prefill)                                                             \
-    ::iron::stock_gemm((prefill).L_padded, ::iron::registered.mlp_i, ::iron::registered.mlp_d)(                        \
+    ::iron::stock_gemm((prefill).L_padded, ::iron::S().mlp_i, ::iron::S().mlp_d)(                                      \
         bufs->hidden_state_buffer, bufs->hid_buffer, ::iron::resident(::iron::DOWN))
 #elif defined(IRON_OFFLINE_BFP16)
 #define FLM_OV_q_swa_proj(expr, desc, type, prefill)                                                                   \
@@ -346,13 +363,13 @@ template <class Npu, class Config> void engine_init(Npu *npu, const Config &conf
 #define FLM_OV_o_global_proj FLM_OV_o_swa_proj
 
 #define FLM_OV_gate_proj(expr, desc, double_wide, prefill)                                                             \
-    ::iron::gemm((prefill).L_padded, ::iron::registered.mlp_d, ::iron::registered.mlp_i, true)(                        \
+    ::iron::gemm((prefill).L_padded, ::iron::S().mlp_d, ::iron::S().mlp_i, true)(                                      \
         bufs->hidden_state_buffer, ::iron::resident(::iron::GATE), bufs->gate_buffer)
 #define FLM_OV_up_proj(expr, desc, double_wide, prefill)                                                               \
-    ::iron::gemm((prefill).L_padded, ::iron::registered.mlp_d, ::iron::registered.mlp_i)(                              \
+    ::iron::gemm((prefill).L_padded, ::iron::S().mlp_d, ::iron::S().mlp_i)(                                            \
         bufs->hidden_state_buffer, ::iron::resident(::iron::UP), bufs->up_buffer)
 #define FLM_OV_down_proj(expr, desc, double_wide, prefill)                                                             \
-    ::iron::gemm((prefill).L_padded, ::iron::registered.mlp_i, ::iron::registered.mlp_d)(                              \
+    ::iron::gemm((prefill).L_padded, ::iron::S().mlp_i, ::iron::S().mlp_d)(                                            \
         bufs->hid_buffer, ::iron::resident(::iron::DOWN), bufs->hidden_state_buffer)
 #else
 #define FLM_OV_q_swa_proj(expr, desc, type, shape) ::iron::q_proj((desc)->weight_desc(type), shape, bufs, qkv_weights)
@@ -365,13 +382,13 @@ template <class Npu, class Config> void engine_init(Npu *npu, const Config &conf
 #define FLM_OV_o_global_proj FLM_OV_o_swa_proj
 
 #define FLM_OV_gate_proj(expr, desc, double_wide, shape)                                                               \
-    ::iron::gemm((shape).L_padded, ::iron::registered.mlp_d, ::iron::registered.mlp_i, true)(                          \
+    ::iron::gemm((shape).L_padded, ::iron::S().mlp_d, ::iron::S().mlp_i, true)(                                        \
         bufs->hidden_state_buffer, gate_weights, bufs->gate_buffer)
 #define FLM_OV_up_proj(expr, desc, double_wide, shape)                                                                 \
-    ::iron::gemm((shape).L_padded, ::iron::registered.mlp_d, ::iron::registered.mlp_i)(                                \
+    ::iron::gemm((shape).L_padded, ::iron::S().mlp_d, ::iron::S().mlp_i)(                                              \
         bufs->hidden_state_buffer, up_weights, bufs->up_buffer)
 #define FLM_OV_down_proj(expr, desc, double_wide, shape)                                                               \
-    ::iron::gemm((shape).L_padded, ::iron::registered.mlp_i, ::iron::registered.mlp_d)(                                \
+    ::iron::gemm((shape).L_padded, ::iron::S().mlp_i, ::iron::S().mlp_d)(                                              \
         bufs->hid_buffer, down_weights, bufs->hidden_state_buffer)
 #endif
 
