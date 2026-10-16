@@ -31,7 +31,7 @@ from iron import lm
 from iron import Scratchpad
 from iron.tune.narrowing import CostTable, JointNarrowing
 from iron.tune.probe import Call
-from iron.lm import Checkpoint, Encoder, rope_angles
+from iron.lm import Checkpoint, Derived, Encoder, rope_angles
 from iron.lm.blocks import ACCURATE
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
@@ -135,21 +135,17 @@ class EmbeddingGemma(Encoder):
         c = config
         super().__init__(config, c.max_tokens)
         self.tokenizer = tokenizer
-        w = weights.language_model
+        w = self.language_model = weights.language_model
+        derived = Derived(weights)
         table = np.zeros((c.vocab_size + 1, c.emb_dim), bfloat16)
         table[:-1] = w.embed_tokens.weight.astype(np.float32) * np.sqrt(
             np.float32(c.emb_dim)
         )
-        self.embedding = iron.weight(table)
-        self.norm = w.norm.weight
-        P = c.ple_dim
-        ple = w.ple.per_layer_model_projection.weight
-        self.ple = [ple[i * P : (i + 1) * P] for i in range(c.n_layers)]
-        self.ple_norm = w.ple.per_layer_projection_norm.weight
-        self.layers = w.layers
-        self.scales = [
-            np.full(c.emb_dim, layer.layer_scalar[0], bfloat16) for layer in w.layers
-        ]
+        derived.put(w.embed_tokens, scaled=table)
+        for layer in w.layers:
+            derived.put(
+                layer, scale=np.full(c.emb_dim, layer.layer_scalar[0], bfloat16)
+            )
         self.angles = {
             D: iron.weight(rope_angles(D, c.max_tokens, base).astype(bfloat16))
             for _, D, base in {c.heads(i) for i in range(c.n_layers)}
@@ -157,14 +153,16 @@ class EmbeddingGemma(Encoder):
         self.query = np.zeros((c.block, 1, c.emb_dim), bfloat16)
         # A power of four: a row's RMS over it is its norm over a power of two.
         width = 4 ** math.ceil(math.log(c.out_dim, 4))
-        self.projection = np.zeros((len(c.mrl_dims), width, c.emb_dim), bfloat16)
+        mrl = np.zeros((len(c.mrl_dims), width, c.emb_dim), bfloat16)
         for j, d in enumerate(c.mrl_dims):
-            self.projection[j, :d] = w.embedding_projection.weight[:d]
-        self.projection = self.projection.reshape(-1, c.emb_dim)
+            mrl[j, :d] = w.embedding_projection.weight[:d]
+        derived.put(w.embedding_projection, mrl=mrl.reshape(-1, c.emb_dim))
+        self.derived = derived.tree()
         self.unit = np.full(width, 1 / np.sqrt(width), bfloat16)
 
     def body(self, ids, *, n: Scratchpad[np.int32]):
-        return self.encoder(Copy.step(self.embedding[ids]), n)
+        table = iron.weight(self.derived.language_model.embed_tokens.scaled)
+        return self.encoder(Copy.step(table[ids]), n)
 
     def encoder(self, x, n):
         """The encoder over the token embeddings ``x`` ``(T, emb_dim)``, of
@@ -172,10 +170,11 @@ class EmbeddingGemma(Encoder):
         """
         c = self.config
         T, E = x.shape[0], c.emb_dim
+        w, d = self.language_model, self.derived.language_model
         x = embeddings = x[:n]
-        for i, w in enumerate(self.layers):
-            x = self.layer(i, w, x, embeddings, n)
-        h = RMSNorm.step(x, weight=self.norm, epsilon=c.eps).reshape(T, 1, E)
+        for i, layer in enumerate(w.layers):
+            x = self.layer(i, layer, d.layers[i], x, embeddings, n)
+        h = RMSNorm.step(x, weight=w.norm.weight, epsilon=c.eps).reshape(T, 1, E)
         # The mean of the n rows: one zero query at scale 0 weighs each key
         # 1/n, and masks the rows past n rather than multiplying them by 0.
         mean = MHA.step(
@@ -189,12 +188,12 @@ class EmbeddingGemma(Encoder):
             scale=0.0,
             num_pipelines=1,
         )
-        y = GEMV.step(self.projection, mean.reshape(c.block, E)[0])
+        y = GEMV.step(d.embedding_projection.mrl, mean.reshape(c.block, E)[0])
         return RMSNorm.step(
             y.reshape(len(c.mrl_dims), self.unit.size), weight=self.unit, epsilon=0.0
         )
 
-    def layer(self, i, w, x, embeddings, n):
+    def layer(self, i, w, d, x, embeddings, n):
         c = self.config
         G, D, _ = c.heads(i)
         a = w.self_attn
@@ -231,15 +230,18 @@ class EmbeddingGemma(Encoder):
         )
         # The projection's E ** -0.5 scale folded into the norm's epsilon:
         # RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
-        ple = GEMM.step(embeddings, self.ple[i], b_col_maj=True, **ACCURATE)
-        ple = RMSNorm.step(ple, weight=self.ple_norm, epsilon=c.eps * c.emb_dim)
+        P, tree = c.ple_dim, self.language_model.ple
+        projection = tree.per_layer_model_projection.weight[i * P : (i + 1) * P]
+        ple = GEMM.step(embeddings, projection, b_col_maj=True, **ACCURATE)
+        norm = tree.per_layer_projection_norm.weight
+        ple = RMSNorm.step(ple, weight=norm, epsilon=c.eps * c.emb_dim)
         b = w.ple_block
         g = GEMM.step(x, b.per_layer_input_gate.weight, b_col_maj=True, **ACCURATE)
         g = ElementwiseMul.step(GELU.step(g), ple)
         g = GEMM.step(g, b.per_layer_projection.weight, b_col_maj=True, **ACCURATE)
         norm = b.post_per_layer_input_norm.weight
         x = ElementwiseAdd.step(x, RMSNorm.step(g, weight=norm, epsilon=c.eps))
-        return RowwiseMul.step(x, self.scales[i])
+        return RowwiseMul.step(x, d.scale)
 
     def longest(self) -> dict:
         """The per-call values of the longest call: every row real."""
@@ -319,8 +321,9 @@ class Multimodal(EmbeddingGemma):
         given = [t for t in (ids, wave, rgb, placed) if t is not None]
         if len(given) != 1:
             raise TypeError(f"a version takes one input, got {len(given)}")
+        table = iron.weight(self.derived.language_model.embed_tokens.scaled)
         if ids is not None:
-            return self.encoder(Copy.step(self.embedding[ids]), n)
+            return self.encoder(Copy.step(table[ids]), n)
         if wave is not None:
             a = self.audio(wave, n=n_audio, frames=frames, tokens=audio_tokens)
             Copy.step(a, self.merged[self.audio_at : self.audio_at + a.shape[0]])
@@ -339,7 +342,7 @@ class Multimodal(EmbeddingGemma):
         c = self.config
         # An input's gather is encoded on the host into its buffer, which Merge
         # reads as the ids: gather by the device's copy of them.
-        x = Copy.step(self.embedding[Copy.step(placed, dtype=np.int32)])
+        x = Copy.step(table[Copy.step(placed, dtype=np.int32)])
         merge = Merge.step(
             placed,
             audio_token=c.audio_token,

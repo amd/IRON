@@ -102,6 +102,24 @@ def test_a_towers_layers_are_found_under_its_prefix():
     assert found and found <= drawn
 
 
+def test_a_per_layer_slice_is_drawn_in_its_layer():
+    path = weights_dir("embeddinggemma-2") / "model.safetensors"
+    require(path)
+    graph = Multimodal(Config(), Checkpoint(path).tree("unread"))
+    text, *_ = graph.shapes()
+    t = graph.trace(**text)
+    drawn = set(Dataflow(t, layers={1}).drawn())
+    shared = "language_model.ple.per_layer_model_projection.weight"
+    sliced = [
+        i
+        for i, s in enumerate(t.steps)
+        if any(Dataflow.root(h).name == shared for h in s.inputs)
+    ]
+    projection, norm = sliced[1], sliced[1] + 1
+    assert {projection, norm} <= drawn
+    assert sliced[0] not in drawn and sliced[2] not in drawn
+
+
 def test_a_folded_step_names_what_it_folded(npu2):
     t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
     f, _ = folded(t, npu2)

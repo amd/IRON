@@ -91,7 +91,7 @@ FAMILY = {
 
 # A buffer of layer N: its weights, a tower's too (vision.layers.N.q), and a
 # decoder's caches.
-LAYERED = re.compile(r"(?:^|\.)(?:layers|keys|values|ple)\.(\d+)(?:\.|$)")
+LAYERED = re.compile(r"(?:^|\.)(?:layers|keys|values)\.(\d+)(?:\.|$)")
 
 
 class Dataflow:
@@ -103,7 +103,8 @@ class Dataflow:
         title: The caption.
         layers: The layers drawn, by index (``layers.3.q`` and
             ``vision.layers.3.q`` are layer 3), or None for every step. A step
-            reading no layer's buffer is in the layer of what it reads; before
+            reading no layer's buffer is in the layer of what it reads, else of
+            what reads it; before
             the first layer, and after the last where it holds a weight or
             state of no layer (a head), it is in none.
         weights: Draw each weight as its own node; else name it in the box
@@ -160,6 +161,17 @@ class Dataflow:
                 layer[i] = max((n for n in found if n is not None), default=None)
             for h in s.outputs:
                 made[self.root(h).name] = layer[i]
+        # One reading only a slice of a shared tensor and what came before
+        # the layers (a per-layer projection) is in the layer of its readers.
+        read: dict[str, int] = {}
+        for i in reversed(range(len(steps))):
+            s = steps[i]
+            if layer[i] is None and placed and placed[0] < i < placed[-1]:
+                found = [read.get(self.root(h).name) for h in s.outputs]
+                layer[i] = min((n for n in found if n is not None), default=None)
+            if layer[i] is not None:
+                for h in s.inputs:
+                    read[self.root(h).name] = layer[i]
         return layer
 
     def drawn(self) -> list[int]:
