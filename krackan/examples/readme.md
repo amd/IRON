@@ -1,7 +1,7 @@
 
 # IRON
 
-Tested on `2026_10_15_21_14_33` at commit `0e0a7c2`.
+Tested on `2026_10_16_19_22_12` at commit `15cc99e`.
 
 <details>
 <summary>iron/applications/gemma4_flm</summary>
@@ -11,8 +11,8 @@ Tested on `2026_10_15_21_14_33` at commit `0e0a7c2`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_iron_matches_engine[prompt_long_prompt]</td><td>✅ 5/5</td><td>2.31</td><td>26.59</td></tr>
-        <tr><td>test_iron_matches_engine[prompt_word_problem]</td><td>✅ 5/5</td><td>0.63</td><td>27.95</td></tr>
+        <tr><td>test_iron_matches_engine[prompt_long_prompt]</td><td>✅ 5/5</td><td>2.32</td><td>26.74</td></tr>
+        <tr><td>test_iron_matches_engine[prompt_word_problem]</td><td>✅ 5/5</td><td>0.64</td><td>27.83</td></tr>
     </tbody>
 </table>
 
@@ -26,10 +26,10 @@ Tested on `2026_10_15_21_14_33` at commit `0e0a7c2`.
         <tr><td>Test</td><td>Checks</td><td>TTFT (mean)</td><td>TPS (mean)</td></tr>
     </thead>
     <tbody>
-        <tr><td>test_all_gemm_dequant_selections[iter0]</td><td>✅ 1/1</td><td>0.88</td><td>n/a</td></tr>
-        <tr><td>test_all_gemm_dequant_selections[iter1]</td><td>✅ 1/1</td><td>0.85</td><td>n/a</td></tr>
+        <tr><td>test_all_gemm_dequant_selections[iter0]</td><td>✅ 1/1</td><td>0.87</td><td>n/a</td></tr>
+        <tr><td>test_all_gemm_dequant_selections[iter1]</td><td>✅ 1/1</td><td>0.86</td><td>n/a</td></tr>
         <tr><td>test_all_gemm_dequant_selections[iter2]</td><td>✅ 1/1</td><td>0.86</td><td>n/a</td></tr>
-        <tr><td>test_all_gemm_dequant_selections[iter3]</td><td>✅ 1/1</td><td>0.86</td><td>n/a</td></tr>
+        <tr><td>test_all_gemm_dequant_selections[iter3]</td><td>✅ 1/1</td><td>0.85</td><td>n/a</td></tr>
         <tr><td>test_all_gemm_dequant_selections[iter4]</td><td>✅ 1/1</td><td>0.87</td><td>n/a</td></tr>
         <tr><td>test_example_overrides_only_gemm_and_dequant[iter0]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_example_overrides_only_gemm_and_dequant[iter1]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td></tr>
@@ -75,8 +75,8 @@ Tested on `2026_10_15_21_14_33` at commit `0e0a7c2`.
     </thead>
     <tbody>
         <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_1024_tokens_1]</td><td>✅ 5/5</td><td>2.06</td><td>n/a</td></tr>
-        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_1024_tokens_40]</td><td>✅ 5/5</td><td>2.07</td><td>7.66</td></tr>
-        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_13_tokens_1]</td><td>✅ 5/5</td><td>2.01</td><td>n/a</td></tr>
+        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_1024_tokens_40]</td><td>✅ 5/5</td><td>2.08</td><td>7.65</td></tr>
+        <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_13_tokens_1]</td><td>✅ 5/5</td><td>2.02</td><td>n/a</td></tr>
         <tr><td>test_llama_3_2_1b[llama_3.2_1b_prompt_13_tokens_40]</td><td>✅ 5/5</td><td>2.02</td><td>7.59</td></tr>
         <tr><td>test_llama_3_2_1b_accuracy[iter0]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td></tr>
         <tr><td>test_llama_3_2_1b_accuracy[iter1]</td><td>✅ 1/1</td><td>n/a</td><td>n/a</td></tr>
