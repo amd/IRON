@@ -189,9 +189,9 @@ ROPE_LOCKS = _lock_ids(
     "v_prod_lock",
     "v_cons_lock",
 )
-PLE_LOCKS = _lock_ids("proj_w_prod_lock", "proj_w_cons_lock")
-GLE_LOCKS = _lock_ids("proj_w_prod_lock", "proj_w_cons_lock")
-PLU_LOCKS = _lock_ids("proj_w_prod_lock", "proj_w_cons_lock")
+PLE_LOCKS = {}
+GLE_LOCKS = {}
+PLU_LOCKS = {}
 GLU_LOCKS = _lock_ids("x_prod_lock", "x_cons_lock", "y_prod_lock", "y_cons_lock")
 PROJ_LOCKS = _lock_ids(
     "x_prod_lock",
@@ -376,6 +376,127 @@ def _wrapped_call(acquire=(), release=()):
             lock.release(value)
 
     return body
+
+
+def _bf16_proj_row(
+    y,
+    w0,
+    w1,
+    x,
+    y_acc,
+    w_prod,
+    w_cons,
+    k_blocks,
+    x_offset,
+    y_offset,
+    i,
+    zero,
+    mvm,
+    store,
+):
+    zero(y_acc)
+    if k_blocks >= 2:
+        for pair in range_(k_blocks // 2):
+            j = pair * 2
+            w_cons.acquire(1)
+            mvm(w0, x, y_acc, j, x_offset)
+            w_prod.release(1)
+            w_cons.acquire(1)
+            mvm(w1, x, y_acc, j + 1, x_offset)
+            w_prod.release(1)
+    if k_blocks % 2:
+        w_cons.acquire(1)
+        mvm(w0, x, y_acc, k_blocks - 1, x_offset)
+        w_prod.release(1)
+    store(y, y_acc, i, y_offset)
+
+
+def _bf16_proj(
+    y,
+    w0,
+    w1,
+    x,
+    y_acc,
+    w_prod,
+    w_cons,
+    m_blocks,
+    k_blocks,
+    x_offset,
+    y_offset,
+    zero,
+    mvm,
+    store,
+):
+    if k_blocks % 2 == 0:
+        for i in range_(m_blocks):
+            _bf16_proj_row(
+                y,
+                w0,
+                w1,
+                x,
+                y_acc,
+                w_prod,
+                w_cons,
+                k_blocks,
+                x_offset,
+                y_offset,
+                i,
+                zero,
+                mvm,
+                store,
+            )
+    else:
+        for pair in range_(m_blocks // 2):
+            i = pair * 2
+            _bf16_proj_row(
+                y,
+                w0,
+                w1,
+                x,
+                y_acc,
+                w_prod,
+                w_cons,
+                k_blocks,
+                x_offset,
+                y_offset,
+                i,
+                zero,
+                mvm,
+                store,
+            )
+            _bf16_proj_row(
+                y,
+                w1,
+                w0,
+                x,
+                y_acc,
+                w_prod,
+                w_cons,
+                k_blocks,
+                x_offset,
+                y_offset,
+                i + 1,
+                zero,
+                mvm,
+                store,
+            )
+        if m_blocks % 2:
+            _bf16_proj_row(
+                y,
+                w0,
+                w1,
+                x,
+                y_acc,
+                w_prod,
+                w_cons,
+                k_blocks,
+                x_offset,
+                y_offset,
+                m_blocks - 1,
+                zero,
+                mvm,
+                store,
+            )
 
 
 def _connect(
@@ -816,35 +937,81 @@ def _build_pl_embedding(ctx, ple_tile):
     """
     D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     ple_name = f"{ple_tile.row}_{ple_tile.col}"
-    ple_k = ctx.entry("proj_layer_embedding", "proj_layer_embedding")
-    ple_norm_w_ty, ple_x0_pl_ty, ple_x0_ty, _, ple_y_ty, w_ty, _ = ple_k.arg_types()
+    ple_finish = ctx.entry("proj_layer_embedding", "proj_layer_embedding_finish")
+    ple_zero = ctx.entry("proj_layer_embedding", "bf16_proj_zero")
+    ple_mvm = ctx.entry("proj_layer_embedding", "bf16_proj_mvm")
+    ple_store = ctx.entry("proj_layer_embedding", "bf16_proj_store")
+    ple_norm_w_ty, ple_x0_pl_ty, ple_x_proj_ty, ple_y_ty = ple_finish.arg_types()
+    w_ty, ple_x0_ty, ple_y_acc_ty, _, _ = ple_mvm.arg_types()
     ple_norm_w = Buffer(type=ple_norm_w_ty, name=f"norm_w_{ple_name}", tile=ple_tile)
     ple_x0_pl = Buffer(
         type=ple_x0_pl_ty, name=f"x0_per_layer_{ple_name}", tile=ple_tile
     )
     ple_x0 = Buffer(type=ple_x0_ty, name=f"x0_{ple_name}", tile=ple_tile)
-    ple_x_proj = Buffer(type=ple_x0_pl_ty, name=f"x_proj_{ple_name}", tile=ple_tile)
+    ple_x_proj = Buffer(type=ple_x_proj_ty, name=f"x_proj_{ple_name}", tile=ple_tile)
+    ple_y_acc = Buffer(type=ple_y_acc_ty, name=f"y_acc_{ple_name}", tile=ple_tile)
     ple_y = Buffer(type=ple_y_ty, name=f"y_{ple_name}", tile=ple_tile)
     ple_w0 = Buffer(type=w_ty, name=f"proj_w_0_{ple_name}", tile=ple_tile)
     ple_w1 = Buffer(type=w_ty, name=f"proj_w_1_{ple_name}", tile=ple_tile)
-    pl = ctx.locks(
-        ple_tile,
-        PLE_LOCKS,
-        dict(proj_w_prod_lock=2, proj_w_cons_lock=0),
-    )
-    # The kernel no longer takes these; the DMA chain and the Worker do.
+    ple_w_prod, ple_w_cons = ctx.add_locks(ple_tile, [2, 0])
     x0_per_layer_prod, xw_cons, ple_y_prod, ple_y_cons = ctx.add_locks(
         ple_tile, [1, 0, 1, 0]
     )
     ple_norm_w_prod, ple_norm_w_p2, ple_x0_prod = ctx.add_locks(ple_tile, [0, 0, 0])
 
+    def ple_body(
+        norm_w,
+        x0_per_layer,
+        x0,
+        x_proj,
+        y,
+        w0,
+        w1,
+        y_acc,
+        finish,
+        zero,
+        mvm,
+        store,
+    ):
+        xw_cons.acquire(1)
+        ple_y_prod.acquire(1)
+        _bf16_proj(
+            x_proj,
+            w0,
+            w1,
+            x0,
+            y_acc,
+            ple_w_prod,
+            ple_w_cons,
+            PLI_D // 32,
+            D // 256,
+            0,
+            0,
+            zero,
+            mvm,
+            store,
+        )
+        finish(norm_w, x0_per_layer, x_proj, y)
+        ple_y_cons.release(1)
+        x0_per_layer_prod.release(1)
+
     ctx.workers.append(
         Worker(
-            _wrapped_call(
-                acquire=[(xw_cons, 1), (ple_y_prod, 1)],
-                release=[(ple_y_cons, 1), (x0_per_layer_prod, 1)],
-            ),
-            [ple_norm_w, ple_x0_pl, ple_x0, ple_x_proj, ple_y, ple_w0, ple_w1, ple_k],
+            ple_body,
+            [
+                ple_norm_w,
+                ple_x0_pl,
+                ple_x0,
+                ple_x_proj,
+                ple_y,
+                ple_w0,
+                ple_w1,
+                ple_y_acc,
+                ple_finish,
+                ple_zero,
+                ple_mvm,
+                ple_store,
+            ],
             tile=ple_tile,
             stack_size=1024 * 4,
         )
@@ -893,8 +1060,8 @@ def _build_pl_embedding(ctx, ple_tile):
                     ping_pong(
                         ple_w0,
                         ple_w1,
-                        pl["proj_w_prod_lock"],
-                        pl["proj_w_cons_lock"],
+                        ple_w_prod,
+                        ple_w_cons,
                     ),
                 ),
                 _single_bd(DMAChannelDir.MM2S, 1, ple_y, ple_y_cons, ple_y_prod),
@@ -909,26 +1076,72 @@ def _build_pl_gate(ctx, gle_tile, x, x_prod, x_cons):
     x is the RMS tile's y_out, behind the x_prod/x_cons pair of that tile. The
     weights arrive on S2MM 1. y leaves on MM2S 1.
     """
+    D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     gle_name = f"{gle_tile.row}_{gle_tile.col}"
-    gle_k = ctx.entry("gate_layer_embedding", "gate_layer_embedding")
-    _, w_ty, _, gle_y_ty = gle_k.arg_types()
+    gle_begin = ctx.entry("gate_layer_embedding", "gate_layer_embedding_begin")
+    gle_finish = ctx.entry("gate_layer_embedding", "gate_layer_embedding_finish")
+    gle_zero = ctx.entry("gate_layer_embedding", "bf16_proj_zero")
+    gle_mvm = ctx.entry("gate_layer_embedding", "bf16_proj_mvm")
+    gle_store = ctx.entry("gate_layer_embedding", "bf16_proj_store")
+    _, gle_y_ty = gle_begin.arg_types()
+    w_ty, _, gle_y_acc_ty, _, _ = gle_mvm.arg_types()
     gle_w0 = Buffer(type=w_ty, name=f"proj_w_0_{gle_name}", tile=gle_tile)
     gle_w1 = Buffer(type=w_ty, name=f"proj_w_1_{gle_name}", tile=gle_tile)
     gle_y = Buffer(type=gle_y_ty, name=f"y_{gle_name}", tile=gle_tile)
-    gl = ctx.locks(
-        gle_tile,
-        GLE_LOCKS,
-        dict(proj_w_prod_lock=2, proj_w_cons_lock=0),
-    )
+    gle_y_acc = Buffer(type=gle_y_acc_ty, name=f"y_acc_{gle_name}", tile=gle_tile)
+    gle_w_prod, gle_w_cons = ctx.add_locks(gle_tile, [2, 0])
     gle_y_prod, gle_y_cons = ctx.add_locks(gle_tile, [1, 0])
+
+    def gle_body(
+        xx,
+        w0,
+        w1,
+        y,
+        y_acc,
+        begin,
+        finish,
+        zero,
+        mvm,
+        store,
+    ):
+        x_cons.acquire(1)
+        gle_y_prod.acquire(1)
+        begin(xx, y)
+        _bf16_proj(
+            y,
+            w0,
+            w1,
+            y,
+            y_acc,
+            gle_w_prod,
+            gle_w_cons,
+            PLI_D // 32,
+            D // 256,
+            0,
+            D,
+            zero,
+            mvm,
+            store,
+        )
+        finish(y)
+        gle_y_cons.release(1)
+        x_prod.release(1)
 
     ctx.workers.append(
         Worker(
-            _wrapped_call(
-                acquire=[(x_cons, 1), (gle_y_prod, 1)],
-                release=[(gle_y_cons, 1), (x_prod, 1)],
-            ),
-            [x, gle_w0, gle_w1, gle_y, gle_k],
+            gle_body,
+            [
+                x,
+                gle_w0,
+                gle_w1,
+                gle_y,
+                gle_y_acc,
+                gle_begin,
+                gle_finish,
+                gle_zero,
+                gle_mvm,
+                gle_store,
+            ],
             tile=gle_tile,
             stack_size=1024 * 4,
         )
@@ -943,8 +1156,8 @@ def _build_pl_gate(ctx, gle_tile, x, x_prod, x_cons):
                     ping_pong(
                         gle_w0,
                         gle_w1,
-                        gl["proj_w_prod_lock"],
-                        gl["proj_w_cons_lock"],
+                        gle_w_prod,
+                        gle_w_cons,
                     ),
                 ),
                 _single_bd(DMAChannelDir.MM2S, 1, gle_y, gle_y_cons, gle_y_prod),
@@ -999,29 +1212,76 @@ def _build_pl_up(ctx, plu_tile):
     x arrives on S2MM 0, the weights on S2MM 1. The layer output leaves on
     MM2S 0.
     """
+    D, PLI_D = ctx.g.model_dim, ctx.g.pli_d
     plu_name = f"{plu_tile.row}_{plu_tile.col}"
-    plu_k = ctx.entry("per_layer_up", "per_layer_up")
-    plu_dual_x_ty, w_ty, _, plu_y_ty = plu_k.arg_types()
+    plu_begin = ctx.entry("per_layer_up", "per_layer_up_begin")
+    plu_finish = ctx.entry("per_layer_up", "per_layer_up_finish")
+    plu_zero = ctx.entry("per_layer_up", "bf16_proj_zero")
+    plu_mvm = ctx.entry("per_layer_up", "bf16_proj_mvm")
+    plu_store = ctx.entry("per_layer_up", "bf16_proj_store")
+    (plu_dual_x_ty,) = plu_begin.arg_types()
+    _, plu_y_ty = plu_finish.arg_types()
+    w_ty, _, plu_y_acc_ty, _, _ = plu_mvm.arg_types()
     plu_x = Buffer(type=plu_dual_x_ty, name=f"x_{plu_name}", tile=plu_tile)
     plu_y = Buffer(type=plu_y_ty, name=f"y_{plu_name}", tile=plu_tile)
+    plu_y_acc = Buffer(type=plu_y_acc_ty, name=f"y_acc_{plu_name}", tile=plu_tile)
     plu_w0 = Buffer(type=w_ty, name=f"proj_w_0_{plu_name}", tile=plu_tile)
     plu_w1 = Buffer(type=w_ty, name=f"proj_w_1_{plu_name}", tile=plu_tile)
-    ul = ctx.locks(
-        plu_tile,
-        PLU_LOCKS,
-        dict(proj_w_prod_lock=2, proj_w_cons_lock=0),
-    )
+    plu_w_prod, plu_w_cons = ctx.add_locks(plu_tile, [2, 0])
     plu_x_prod, plu_x_cons, plu_y_prod, plu_y_cons = ctx.add_locks(
         plu_tile, [1, 0, 1, 0]
     )
 
+    def plu_body(
+        x,
+        w0,
+        w1,
+        y,
+        y_acc,
+        begin,
+        finish,
+        zero,
+        mvm,
+        store,
+    ):
+        plu_x_cons.acquire(1)
+        plu_y_prod.acquire(1)
+        begin(x)
+        _bf16_proj(
+            y,
+            w0,
+            w1,
+            x,
+            y_acc,
+            plu_w_prod,
+            plu_w_cons,
+            D // 32,
+            PLI_D // 256,
+            D + 32,
+            0,
+            zero,
+            mvm,
+            store,
+        )
+        finish(x, y)
+        plu_y_cons.release(1)
+        plu_x_prod.release(1)
+
     ctx.workers.append(
         Worker(
-            _wrapped_call(
-                acquire=[(plu_x_cons, 1), (plu_y_prod, 1)],
-                release=[(plu_y_cons, 1), (plu_x_prod, 1)],
-            ),
-            [plu_x, plu_w0, plu_w1, plu_y, plu_k],
+            plu_body,
+            [
+                plu_x,
+                plu_w0,
+                plu_w1,
+                plu_y,
+                plu_y_acc,
+                plu_begin,
+                plu_finish,
+                plu_zero,
+                plu_mvm,
+                plu_store,
+            ],
             tile=plu_tile,
             stack_size=1024 * 4,
         )
@@ -1037,8 +1297,8 @@ def _build_pl_up(ctx, plu_tile):
                     ping_pong(
                         plu_w0,
                         plu_w1,
-                        ul["proj_w_prod_lock"],
-                        ul["proj_w_cons_lock"],
+                        plu_w_prod,
+                        plu_w_cons,
                     ),
                 ),
                 _single_bd(DMAChannelDir.MM2S, 0, plu_y, plu_y_cons, plu_y_prod),
