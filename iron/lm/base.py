@@ -4,8 +4,9 @@
 """What every model on IRON's operators shares: its shape, its weights
 (``Checkpoint.tree()``, the tensors by their own names:
 ``model.layers.3.self_attn.q_proj.weight`` is
-``weights.model.layers[3].self_attn.q_proj.weight``), the float32
-``Oracle`` it is judged by, ``Model``, and ``Runner`` and ``main``.
+``weights.model.layers[3].self_attn.q_proj.weight``; ``Derived``, those
+computed from them), the float32 ``Oracle`` it is judged by, ``Model``,
+and ``Runner`` and ``main``.
 """
 
 import argparse
@@ -14,7 +15,7 @@ import json
 import math
 import mmap
 import struct
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
@@ -304,14 +305,66 @@ class Checkpoint:
             }
         else:
             raise ValueError(f"fill is read, random or unread, not {fill!r}")
-        nested: dict = {}
-        for name, tensor in tensors.items():
-            *parents, leaf = name.split(".")
-            node = nested
-            for key in parents:
-                node = node.setdefault(key, {})
-            node[leaf] = tensor
-        return _tree(nested)
+        return _nest(tensors)
+
+
+class Derived:
+    """Weights a model computes once from its checkpoint, each put on the
+    module it belongs to. Held as ``self.derived = derived.tree()``, a
+    leaf's graph path is ``derived.<module>.<leaf>``.
+
+    Args:
+        weights: The checkpoint tree (``Checkpoint.tree()``).
+    """
+
+    def __init__(self, weights: SimpleNamespace) -> None:
+        self._paths: dict[int, str] = {}
+        pending: list[tuple[Any, str]] = [(weights, "")]
+        while pending:
+            node, path = pending.pop()
+            if isinstance(node, SimpleNamespace):
+                self._paths[id(node)] = path
+                pending += [
+                    (child, f"{path}.{key}" if path else key)
+                    for key, child in vars(node).items()
+                ]
+            elif isinstance(node, list):
+                pending += [(child, f"{path}.{i}") for i, child in enumerate(node)]
+        self._tensors: dict[str, np.ndarray] = {}
+
+    def put(self, module: SimpleNamespace, **tensors: np.ndarray) -> None:
+        """Put ``tensors`` on ``module``, each under its keyword.
+
+        Raises:
+            ValueError: ``module`` is not in the tree, or a leaf is a
+                checkpoint name or already put.
+        """
+        path = self._paths.get(id(module))
+        if path is None:
+            raise ValueError("Derived.put: the module is not in the checkpoint tree")
+        for leaf, tensor in tensors.items():
+            name = f"{path}.{leaf}" if path else leaf
+            if leaf in vars(module) or name in self._tensors:
+                raise ValueError(
+                    f"Derived.put: {name} is a checkpoint name or derived already"
+                )
+            self._tensors[name] = tensor
+
+    def tree(self) -> SimpleNamespace:
+        """The derived weights, nested as the checkpoint tree is."""
+        return _nest(self._tensors)
+
+
+def _nest(named: Mapping[str, Any]) -> SimpleNamespace:
+    """Values by dotted name, nested as ``Checkpoint.tree()`` nests them."""
+    nested: dict = {}
+    for name, value in named.items():
+        *parents, leaf = name.split(".")
+        node = nested
+        for key in parents:
+            node = node.setdefault(key, {})
+        node[leaf] = value
+    return _tree(nested)
 
 
 def _tree(node) -> Any:

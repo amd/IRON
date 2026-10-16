@@ -1022,7 +1022,9 @@ profiles. The library is four modules:
   (`weights.model.layers[3].self_attn.q_proj.weight`), which the graphs and
   oracles read: `"read"`, views of the file; `"random"`, drawn at a seed;
   `"unread"`, allocated and never written, for tracing, building and
-  tuning, which read only the header; `Oracle`,
+  tuning, which read only the header; `Derived`, the weights a model
+  computes from that tree, `put(module, leaf=array)` and held as
+  `self.derived`, its paths `derived.<module>.<leaf>`; `Oracle`,
   a model's float32 forward pass on the host, the reference it is judged
   by, as an operator's is its `reference()` (not composed from the
   operators' references, so it catches a wiring mistake the graph's own
