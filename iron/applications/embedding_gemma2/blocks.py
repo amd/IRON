@@ -9,9 +9,15 @@ and rotated; and ``sandwich_layer``, attention then the feed-forward, each
 between sandwich norms.
 """
 
+import dataclasses
 from collections.abc import Callable
 from functools import partial
+from types import SimpleNamespace
 
+import numpy as np
+
+from iron.lm.blocks import ACCURATE
+from iron.operators.clamp import Clamp
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.gelu import GELU
@@ -19,6 +25,27 @@ from iron.operators.gemm import GEMM
 from iron.operators.mha import MHA
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
+
+
+@dataclasses.dataclass(frozen=True)
+class Clipped:
+    """A checkpoint's clipped linear: clamp, project by ``weight``, clamp."""
+
+    linear: SimpleNamespace
+
+    def clamp(self, x):
+        w = self.linear
+        return Clamp.step(x, low=float(w.input_min), high=float(w.input_max))
+
+    def project(self, x, weight: np.ndarray | None = None):
+        """``x``, already clamped, projected and clamped."""
+        w = self.linear
+        weight = w.linear.weight if weight is None else weight
+        y = GEMM.step(x, weight, b_col_maj=True, **ACCURATE)
+        return Clamp.step(y, low=float(w.output_min), high=float(w.output_max))
+
+    def __call__(self, x):
+        return self.project(self.clamp(x))
 
 
 def geglu(x, w_gate, w_up, w_down, **gemm):

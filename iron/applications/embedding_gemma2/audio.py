@@ -14,13 +14,12 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.lm import Model, blocks
+from iron.lm import Derived, Model, blocks
 from iron.lm.blocks import ACCURATE
-from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
 from iron.operators.depthwise_conv1d import DepthwiseConv1d
-from iron.operators.elementwise_add import ElementwiseAdd
-from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
+from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul
 from iron.operators.gemm import GEMM
 from iron.operators.relu import ReLU
 from iron.operators.rms_norm import RMSNorm
@@ -28,6 +27,7 @@ from iron.operators.sigmoid import Sigmoid
 from iron.operators.silu import SiLU
 from iron.operators.softmax import Softmax
 
+from .blocks import Clipped
 from .config import PROFILES, AudioConfig
 
 
@@ -64,13 +64,14 @@ class AudioTower(Model):
 
     def __init__(self, config: AudioConfig, weights: SimpleNamespace):
         c = config
-        tree = weights.audio_tower
+        tree = self.audio_tower = weights.audio_tower
+        self.embed_audio = weights.embed_audio
         sub = tree.subsample_conv_projection
         if c.frame != 2 * c.hop:
             raise ValueError(f"a frame of {c.frame} samples is not two hops")
         self.config = config
         T = c.max_tokens
-        E, H, D, W, B = c.emb_dim, c.n_heads, c.head_dim, c.window, c.band
+        H, D, W, B = c.n_heads, c.head_dim, c.window, c.band
         C0, C1 = c.channels
         F0 = c.mels // 2
         # The first convolution's output row: each frequency's channels in a
@@ -84,11 +85,6 @@ class AudioTower(Model):
             w0 - w0.mean(axis=0), c.mels, stride=2, padding=1, border=1
         )
         self.conv1 = blocks.Conv2d(w1 - w1.mean(axis=0), F0 + 2, stride=2)
-        self.norm0, self.norm1 = sub.layer0.norm.weight, sub.layer1.norm.weight
-        self.input_proj = sub.input_proj_linear.weight
-        self.output_proj = tree.output_proj.weight
-        self.output_bias = iron.weight(np.tile(tree.output_proj.bias, (T, 1)))
-        self.projection = weights.embed_audio.embedding_projection.weight
         self.log_mel = blocks.LogMel(
             frame=c.frame,
             hop=c.hop,
@@ -117,36 +113,15 @@ class AudioTower(Model):
         k_scale = math.log(1 + math.e) / math.log(2)
         scale = q_scale * k_scale
         timing = c.timing()
-        # A feed-forward's residual weight in its post norm's, exact at 0.5.
         residual = bfloat16(c.residual_weight)
-        self.layers = []
-        for w in tree.layers:
-            a, conv = w.self_attn, w.lconv1d
-            ff1, ff2 = w.feed_forward1, w.feed_forward2
-            clipped = {
-                name: SimpleNamespace(
-                    weight=linear.linear.weight,
-                    input=dict(
-                        low=float(linear.input_min), high=float(linear.input_max)
-                    ),
-                    output=dict(
-                        low=float(linear.output_min), high=float(linear.output_max)
-                    ),
-                )
-                for name, linear in dict(
-                    q=a.q_proj,
-                    k=a.k_proj,
-                    v=a.v_proj,
-                    post=a.post,
-                    start=conv.linear_start,
-                    end=conv.linear_end,
-                    up1=ff1.ffw_layer_1,
-                    down1=ff1.ffw_layer_2,
-                    up2=ff2.ffw_layer_1,
-                    down2=ff2.ffw_layer_2,
-                ).items()
-            }
-            if not clipped["q"].input == clipped["k"].input == clipped["v"].input:
+        derived = Derived(weights)
+        for layer in tree.layers:
+            a, conv = layer.self_attn, layer.lconv1d
+            if not (
+                (a.q_proj.input_min, a.q_proj.input_max)
+                == (a.k_proj.input_min, a.k_proj.input_max)
+                == (a.v_proj.input_min, a.v_proj.input_max)
+            ):
                 raise ValueError("q, k and v are clamped to different input bounds")
             softplus = np.logaddexp(0, np.asarray(a.per_dim_scale, np.float32))
             relative = timing @ np.asarray(a.relative_k_proj.weight, np.float32).T
@@ -155,44 +130,17 @@ class AudioTower(Model):
             band = np.zeros((H, 2 * B, D), np.float32)
             band[:, :W] = relative[::-1].transpose(1, 0, 2) / k_scale
             band[:, B + 1 : B + 1 + W] = band[:, :W]
-            self.layers.append(
-                SimpleNamespace(
-                    ff=[
-                        SimpleNamespace(
-                            pre=f.pre_layer_norm.weight,
-                            post=f.post_layer_norm.weight * residual,
-                            up=clipped[f"up{j}"],
-                            down=clipped[f"down{j}"],
-                        )
-                        for j, f in ((1, ff1), (2, ff2))
-                    ],
-                    norm_pre_attn=w.norm_pre_attn.weight,
-                    norm_post_attn=w.norm_post_attn.weight,
-                    norm_out=w.norm_out.weight,
-                    attn=SimpleNamespace(
-                        q=clipped["q"],
-                        k=clipped["k"],
-                        v=clipped["v"],
-                        post=clipped["post"],
-                        scale=iron.weight(
-                            np.tile(np.tile(softplus * scale, H), (T, 1)).astype(
-                                bfloat16
-                            )
-                        ),
-                        relative=band.astype(bfloat16),
-                    ),
-                    conv=SimpleNamespace(
-                        pre=conv.pre_layer_norm.weight,
-                        start=clipped["start"],
-                        glu=(clipped["start"].weight[:E], clipped["start"].weight[E:]),
-                        planes=np.ascontiguousarray(
-                            conv.depthwise_conv1d.weight[:, 0].T
-                        ),
-                        norm=conv.conv_norm.weight,
-                        end=clipped["end"],
-                    ),
-                )
+            derived.put(
+                a,
+                q_scale=np.tile(softplus * scale, H).astype(bfloat16),
+                relative=band.astype(bfloat16),
             )
+            for f in (layer.feed_forward1, layer.feed_forward2):
+                derived.put(f, post_norm=f.post_layer_norm.weight * residual)
+            derived.put(
+                conv, planes=np.ascontiguousarray(conv.depthwise_conv1d.weight[:, 0].T)
+            )
+        self.derived = derived.tree()
 
     def logmel(self, wave, frames):
         """Write the log-mel features of `wave`'s valid frames to
@@ -231,65 +179,71 @@ class AudioTower(Model):
         T = c.max_tokens
         # The first row of each convolution's input is its zero padding in time.
         self.logmel(wave, frames)
+        sub = self.audio_tower.subsample_conv_projection
         h = self.conv0(self.features, rows=n)
         h = RMSNorm.step(
-            h.reshape(2 * T * self.slots // C0, C0), weight=self.norm0, epsilon=c.eps
+            h.reshape(2 * T * self.slots // C0, C0),
+            weight=sub.layer0.norm.weight,
+            epsilon=c.eps,
         )
         ReLU.step(h.reshape(2 * T, self.slots), self.subsampled[1 : 2 * T + 1])
         Copy.step(self.zero, self.subsampled[n + 1])
         h = self.conv1(self.subsampled, rows=tokens)
         h = ReLU.step(
-            RMSNorm.step(h.reshape(T * F1, C1), weight=self.norm1, epsilon=c.eps)
+            RMSNorm.step(
+                h.reshape(T * F1, C1), weight=sub.layer1.norm.weight, epsilon=c.eps
+            )
         )
         x = GEMM.step(
-            h.reshape(T, F1 * C1), self.input_proj, b_col_maj=True, **ACCURATE
+            h.reshape(T, F1 * C1),
+            sub.input_proj_linear.weight,
+            b_col_maj=True,
+            **ACCURATE,
         )
-        for w in self.layers:
-            x = self.layer(w, x, tokens)
-        x = GEMM.step(x, self.output_proj, b_col_maj=True, **ACCURATE)
-        x = RMSNorm.step(
-            ElementwiseAdd.step(x, self.output_bias[:tokens]), epsilon=c.eps
-        )
-        return GEMM.step(x, self.projection, b_col_maj=True, **ACCURATE)
+        for w, d in zip(self.audio_tower.layers, self.derived.audio_tower.layers):
+            x = self.layer(w, d, x, tokens)
+        out = self.audio_tower.output_proj
+        x = GEMM.step(x, out.weight, b_col_maj=True, **ACCURATE)
+        x = RMSNorm.step(RowwiseAdd.step(x, out.bias), epsilon=c.eps)
+        projection = self.embed_audio.embedding_projection.weight
+        return GEMM.step(x, projection, b_col_maj=True, **ACCURATE)
 
-    def linear(self, w, x, weight=None):
-        """`x`, already clamped to the input bounds of `w`, projected by
-        `weight` (`w`'s own by default) and clamped to its output bounds.
-        """
-        weight = w.weight if weight is None else weight
-        return Clamp.step(GEMM.step(x, weight, b_col_maj=True, **ACCURATE), **w.output)
-
-    def layer(self, w, x, tokens):
+    def layer(self, w, d, x, tokens):
         c = self.config
-        x = self.feed_forward(w.ff[0], x)
-        h = RMSNorm.step(x, weight=w.norm_pre_attn, epsilon=c.eps)
+        x = self.feed_forward(w.feed_forward1, d.feed_forward1, x)
+        h = RMSNorm.step(x, weight=w.norm_pre_attn.weight, epsilon=c.eps)
         a = RMSNorm.step(
-            self.attention(w.attn, h, tokens), weight=w.norm_post_attn, epsilon=c.eps
+            self.attention(w.self_attn, d.self_attn, h, tokens),
+            weight=w.norm_post_attn.weight,
+            epsilon=c.eps,
         )
-        x = self.feed_forward(
-            w.ff[1], self.light_conv(w.conv, ElementwiseAdd.step(x, a))
-        )
-        return RMSNorm.step(x, weight=w.norm_out, epsilon=c.eps)
+        h = self.light_conv(w.lconv1d, d.lconv1d, ElementwiseAdd.step(x, a))
+        x = self.feed_forward(w.feed_forward2, d.feed_forward2, h)
+        return RMSNorm.step(x, weight=w.norm_out.weight, epsilon=c.eps)
 
-    def feed_forward(self, w, x):
+    def feed_forward(self, f, d, x):
         c = self.config
-        h = Clamp.step(RMSNorm.step(x, weight=w.pre, epsilon=c.eps), **w.up.input)
-        h = self.linear(w.up, h)
-        h = self.linear(w.down, Clamp.step(SiLU.step(h), **w.down.input))
-        return ElementwiseAdd.step(x, RMSNorm.step(h, weight=w.post, epsilon=c.eps))
+        h = Clipped(f.ffw_layer_1)(
+            RMSNorm.step(x, weight=f.pre_layer_norm.weight, epsilon=c.eps)
+        )
+        h = Clipped(f.ffw_layer_2)(SiLU.step(h))
+        return ElementwiseAdd.step(
+            x, RMSNorm.step(h, weight=d.post_norm, epsilon=c.eps)
+        )
 
-    def attention(self, w, h, tokens):
+    def attention(self, a, d, h, tokens):
         c = self.config
         T, H, D, W, B = h.shape[0], c.n_heads, c.head_dim, c.window, c.band
         K = self.width
         keys, values = self.keys, self.values
         scores, probs = self.scores, self.probs
-        h = Clamp.step(h, **w.q.input)
-        q = ElementwiseMul.step(self.linear(w.q, h), w.scale[:tokens])
-        k, val = self.linear(w.k, h), self.linear(w.v, h)
+        q_proj = Clipped(a.q_proj)
+        h = q_proj.clamp(h)
+        q = RowwiseMul.step(q_proj.project(h), d.q_scale)
+        k, val = Clipped(a.k_proj).project(h), Clipped(a.v_proj).project(h)
         Copy.step(k.reshape(T, H, D).transpose(1, 0, 2), keys[:, W - 1 : W - 1 + T])
         R = T + W - 1 + (T + W - 1) % 2
-        Copy.step(w.relative, keys[:, R : R + 2 * B])
+        Copy.step(d.relative, keys[:, R : R + 2 * B])
         Copy.step(val.reshape(T, H, D).transpose(1, 0, 2), values[:, W - 1 : W - 1 + T])
         q = Copy.step(q.reshape(T, H, D).transpose(1, 0, 2))
         # Over every key: those past the valid ones are stale but finite, as
@@ -322,15 +276,19 @@ class AudioTower(Model):
         for i in range(H):
             GEMM.step(probs[i, :tokens], values[i], q[i], **ACCURATE)
         o = Copy.step(q.transpose(1, 0, 2)).reshape(T, H * D)
-        return self.linear(w.post, Clamp.step(o, **w.post.input))
+        return Clipped(a.post)(o)
 
-    def light_conv(self, w, x):
+    def light_conv(self, conv, d, x):
         c = self.config
-        h = Clamp.step(RMSNorm.step(x, weight=w.pre, epsilon=c.eps), **w.start.input)
-        a, b = (self.linear(w.start, h, weight) for weight in w.glu)
-        h = DepthwiseConv1d.step(ElementwiseMul.step(a, Sigmoid.step(b)), w.planes)
-        h = SiLU.step(RMSNorm.step(h, weight=w.norm, epsilon=c.eps))
-        return ElementwiseAdd.step(x, self.linear(w.end, Clamp.step(h, **w.end.input)))
+        start = Clipped(conv.linear_start)
+        h = start.clamp(
+            RMSNorm.step(x, weight=conv.pre_layer_norm.weight, epsilon=c.eps)
+        )
+        glu, E = conv.linear_start.linear.weight, c.emb_dim
+        a, b = start.project(h, glu[:E]), start.project(h, glu[E:])
+        h = DepthwiseConv1d.step(ElementwiseMul.step(a, Sigmoid.step(b)), d.planes)
+        h = SiLU.step(RMSNorm.step(h, weight=conv.conv_norm.weight, epsilon=c.eps))
+        return ElementwiseAdd.step(x, Clipped(conv.linear_end)(h))
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, `max_tokens` soft tokens."""
