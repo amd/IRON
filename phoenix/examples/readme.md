@@ -1,7 +1,7 @@
 
 # IRON
 
-Tested on `2026_10_16_18_25_46` at commit `15cc99e`.
+Tested on `2026_10_16_20_30_37` at commit `f280ccf`.
 
 <details>
 <summary>iron/applications/gemma4_flm/gemm_dequant</summary>
