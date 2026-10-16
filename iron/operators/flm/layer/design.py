@@ -54,7 +54,7 @@ from aie.iron.kernels import (
     FlmGemma4DecodeGeometry,
     flm_gemma4,
 )
-from aie.iron.controlflow import range_
+from aie.iron.controlflow import range_, yield_
 from aie.iron.dataflow import Flow, PacketFlow
 from aie.iron.device import Tile
 
@@ -378,39 +378,6 @@ def _wrapped_call(acquire=(), release=()):
     return body
 
 
-def _bf16_proj_row(
-    y,
-    w0,
-    w1,
-    x,
-    y_acc,
-    w_prod,
-    w_cons,
-    k_blocks,
-    x_offset,
-    y_offset,
-    i,
-    zero,
-    mvm,
-    store,
-):
-    zero(y_acc)
-    if k_blocks >= 2:
-        for pair in range_(k_blocks // 2):
-            j = pair * 2
-            w_cons.acquire(1)
-            mvm(w0, x, y_acc, j, x_offset)
-            w_prod.release(1)
-            w_cons.acquire(1)
-            mvm(w1, x, y_acc, j + 1, x_offset)
-            w_prod.release(1)
-    if k_blocks % 2:
-        w_cons.acquire(1)
-        mvm(w0, x, y_acc, k_blocks - 1, x_offset)
-        w_prod.release(1)
-    store(y, y_acc, i, y_offset)
-
-
 def _bf16_proj(
     y,
     w0,
@@ -427,76 +394,19 @@ def _bf16_proj(
     mvm,
     store,
 ):
-    if k_blocks % 2 == 0:
-        for i in range_(m_blocks):
-            _bf16_proj_row(
-                y,
-                w0,
-                w1,
-                x,
-                y_acc,
-                w_prod,
-                w_cons,
-                k_blocks,
-                x_offset,
-                y_offset,
-                i,
-                zero,
-                mvm,
-                store,
-            )
-    else:
-        for pair in range_(m_blocks // 2):
-            i = pair * 2
-            _bf16_proj_row(
-                y,
-                w0,
-                w1,
-                x,
-                y_acc,
-                w_prod,
-                w_cons,
-                k_blocks,
-                x_offset,
-                y_offset,
-                i,
-                zero,
-                mvm,
-                store,
-            )
-            _bf16_proj_row(
-                y,
-                w1,
-                w0,
-                x,
-                y_acc,
-                w_prod,
-                w_cons,
-                k_blocks,
-                x_offset,
-                y_offset,
-                i + 1,
-                zero,
-                mvm,
-                store,
-            )
-        if m_blocks % 2:
-            _bf16_proj_row(
-                y,
-                w0,
-                w1,
-                x,
-                y_acc,
-                w_prod,
-                w_cons,
-                k_blocks,
-                x_offset,
-                y_offset,
-                m_blocks - 1,
-                zero,
-                mvm,
-                store,
-            )
+    false = constant(False, type=T.bool())
+    true = constant(True, type=T.bool())
+    for i, (row_is_ping,), row_results in range_(m_blocks, iter_args=[false]):
+        zero(y_acc)
+        for j, (is_ping,), block_results in range_(k_blocks, iter_args=[row_is_ping]):
+            next_is_ping = arith.xori(is_ping, true)
+            w = arith.select(next_is_ping, w0.op.buffer, w1.op.buffer)
+            w_cons.acquire(1)
+            mvm(w, x, y_acc, j, x_offset)
+            w_prod.release(1)
+            yield_([next_is_ping])
+        store(y, y_acc, i, y_offset)
+        yield_([block_results[0]])
 
 
 def _connect(
