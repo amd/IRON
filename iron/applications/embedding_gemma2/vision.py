@@ -14,7 +14,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.lm import ImagePatches, Model, rope_angles
+from iron.lm import Derived, ImagePatches, Model, rope_angles
 from iron.lm.blocks import ACCURATE
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
@@ -56,7 +56,9 @@ class VisionTower(Model):
 
     def __init__(self, config: VisionConfig, weights: SimpleNamespace):
         c = config
-        tree = weights.vision_tower
+        tree = self.vision_tower = weights.vision_tower
+        self.embed_vision = weights.embed_vision
+        derived = Derived(weights)
         self.config = config
         self.processor = ImagePatches(
             c.patches,
@@ -66,33 +68,31 @@ class VisionTower(Model):
             patch_columns=c.patch_columns,
             chunk=c.chunk,
         )
-        self.patch = tree.patch_embedder.input_proj.weight
         position = np.zeros((2 * c.positions + 1, c.emb_dim), bfloat16)
         table = tree.patch_embedder.position_embedding_table
         position[:-1] = table.reshape(-1, c.emb_dim)
-        self.position = iron.weight(position)
-        self.projection = weights.embed_vision.embedding_projection.weight
+        derived.put(tree.patch_embedder, position=position)
         half = c.head_dim // 2
         quarter = np.arange(half // 2)
         # The x half's first and second quarters, then the y half's.
         order = np.concatenate(
             [quarter, quarter + half, quarter + half // 2, quarter + 3 * half // 2]
         )
-        self.layers = tree.encoder.layers
-        # Each layer's query and key weights, each head's channels in `order`.
-        self.reordered = [
-            SimpleNamespace(
-                q_proj=w.self_attn.q_proj.linear.weight.reshape(
-                    c.n_heads, c.head_dim, c.emb_dim
-                )[:, order].reshape(c.emb_dim, c.emb_dim),
-                k_proj=w.self_attn.k_proj.linear.weight.reshape(
-                    c.n_heads, c.head_dim, c.emb_dim
-                )[:, order].reshape(c.emb_dim, c.emb_dim),
-                q_norm=w.self_attn.q_norm.weight[order],
-                k_norm=w.self_attn.k_norm.weight[order],
+        heads = (c.n_heads, c.head_dim, c.emb_dim)
+        for layer in tree.encoder.layers:
+            a = layer.self_attn
+            derived.put(
+                a,
+                q_reordered=a.q_proj.linear.weight.reshape(heads)[:, order].reshape(
+                    c.emb_dim, c.emb_dim
+                ),
+                k_reordered=a.k_proj.linear.weight.reshape(heads)[:, order].reshape(
+                    c.emb_dim, c.emb_dim
+                ),
+                q_norm_reordered=a.q_norm.weight[order],
+                k_norm_reordered=a.k_norm.weight[order],
             )
-            for w in self.layers
-        ]
+        self.derived = derived.tree()
         angles = np.zeros((c.positions + 1, half), bfloat16)
         angles[:-1] = rope_angles(half, c.positions, c.rope_base)
         self.angles = iron.weight(angles)
@@ -130,23 +130,26 @@ class VisionTower(Model):
             out_width=out_width,
         )
         T = pixels.shape[0]
+        v, d = self.vision_tower, self.derived.vision_tower
         x = AXPY.step(pixels[:n], self.minus_one[:n], scalar_factor=2.0)
-        h = GEMM.step(x, self.patch, b_col_maj=True, **ACCURATE)
-        position = Copy.step(self.position[position_ids]).reshape(2, T, c.emb_dim)
+        patch = v.patch_embedder.input_proj.weight
+        h = GEMM.step(x, patch, b_col_maj=True, **ACCURATE)
+        table = iron.weight(d.patch_embedder.position)
+        position = Copy.step(table[position_ids]).reshape(2, T, c.emb_dim)
         h = ElementwiseAdd.step(
             ElementwiseAdd.step(h, position[0, :n]), position[1, :n]
         )
         angles = Copy.step(self.angles[xy]).reshape(T, c.head_dim)[:n]
-        for w, r in zip(self.layers, self.reordered):
+        for w, r in zip(v.encoder.layers, d.encoder.layers):
             attend = partial(
                 attention,
                 angles=angles,
-                q_proj=r.q_proj,
-                k_proj=r.k_proj,
+                q_proj=r.self_attn.q_reordered,
+                k_proj=r.self_attn.k_reordered,
                 v_proj=w.self_attn.v_proj.linear.weight,
                 o_proj=w.self_attn.o_proj.linear.weight,
-                q_norm=r.q_norm,
-                k_norm=r.k_norm,
+                q_norm=r.self_attn.q_norm_reordered,
+                k_norm=r.self_attn.k_norm_reordered,
                 heads=c.n_heads,
                 groups=c.n_heads,
                 head_dim=c.head_dim,
@@ -173,7 +176,8 @@ class VisionTower(Model):
         # the norm's epsilon: RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
         s2 = c.emb_dim / c.pool**4
         pooled = RMSNorm.step(pooled, epsilon=c.eps / s2)
-        return GEMM.step(pooled, self.projection, b_col_maj=True, **ACCURATE)
+        projection = self.embed_vision.embedding_projection.weight
+        return GEMM.step(pooled, projection, b_col_maj=True, **ACCURATE)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, the largest image's."""

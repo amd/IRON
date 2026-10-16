@@ -95,9 +95,9 @@ def test_a_towers_layers_are_found_under_its_prefix():
     found = set()
     for i, s in enumerate(t.steps):
         names = [Dataflow.root(h).name for h in s.inputs]
-        if any(n.startswith("vision.layers.1.") for n in names):
+        if any(".encoder.layers.1." in n for n in names):
             found.add(i)
-        if any(n.startswith(("vision.layers.0.", "vision.layers.2.")) for n in names):
+        if any(".encoder.layers.0." in n or ".encoder.layers.2." in n for n in names):
             assert i not in drawn
     assert found and found <= drawn
 
