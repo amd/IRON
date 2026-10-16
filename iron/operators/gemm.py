@@ -251,13 +251,6 @@ class GEMM(Operator):
     def mem_tile_n(self) -> int:
         return self.tile_n * self.num_aie_columns
 
-    @property
-    def wider_accumulator(self) -> bool:
-        """Whether ``Array.build()``/``held()`` build ``prio_accuracy``'s
-        internal f32 buffer, beside C's own: moot where C is already f32.
-        """
-        return self.prio_accuracy and np.dtype(self.dtype_out) != np.dtype(np.float32)
-
     def mac_block(self, dev) -> tuple[int, int, int]:
         """What `tile_m`, `tile_k` and `tile_n` must each be a multiple of:
         mm.cc's r x s x t blocks, two in m and n (four in m on aie2).
@@ -345,7 +338,8 @@ class GEMM(Operator):
         m, k, n = tile_m, self.tile_k, self.tile_n
         din = np.dtype(self.dtype_in).itemsize
         dout = np.dtype(self.dtype_out).itemsize
-        c = m * n * (dout + 4 if self.wider_accumulator else FIFO_DEPTH * dout)
+        wider = self.array_config().wider_accumulator
+        c = m * n * (dout + 4 if wider else FIFO_DEPTH * dout)
         return (
             FIFO_DEPTH * (m * k + k * n) * din
             + c
@@ -445,6 +439,15 @@ class GEMM(Operator):
         k_valid: Value
         finishing: Finish
 
+        @property
+        def wider_accumulator(self) -> bool:
+            """Whether ``build()`` and ``GEMM.held()`` build ``prio_accuracy``'s
+            internal f32 buffer, beside C's own: moot where C is already f32.
+            """
+            return self.prio_accuracy and (
+                np.dtype(self.dtype_out) != np.dtype(np.float32)
+            )
+
         def build(self) -> Built:
             m, k, n = self.tile_m, self.tile_k, self.tile_n
             n_aie_cols = self.num_aie_columns
@@ -458,9 +461,7 @@ class GEMM(Operator):
             b_col_maj, c_col_maj = self.b_col_maj, self.c_col_maj
             use_scalar = self.use_scalar
             dtype_in, dtype_out = self.dtype_in, self.dtype_out
-            use_larger_internal_buffer = self.prio_accuracy and (
-                np.dtype(dtype_out) != np.dtype(np.float32)
-            )
+            use_larger_internal_buffer = self.wider_accumulator
             dtype_out_internal = np.float32
             fifo_depth = FIFO_DEPTH
 
