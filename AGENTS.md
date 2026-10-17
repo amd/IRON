@@ -720,7 +720,12 @@ code before relying on a line here; it is the authority.
   bytes.
 - **One compile, any context.** A decoder is two versions, a decode step
   and a `prefill_chunk`-row prompt chunk, both compiled once; `max_seq_len`
-  sizes the caches and the RoPE table alone. A prompt runs chunk by chunk
+  sizes the caches and the RoPE table alone, a row a position, a chunk a
+  run of them (`cache[s : s + C][:rows]`, which may pass the buffer's end
+  where each call's bound is checked to keep inside it). It is the
+  checkpoint's native context where the model fits the host (`Runner.fit`
+  logs what it chose), else the longest whole number of chunks that does,
+  and a caller may ask for any up to the native one. A prompt runs chunk by chunk
   against the caches, and decode is MHA of one query (a KV group's heads
   packed into a block, a pipeline's own K and V lanes; a group that does
   not divide a block is two overlapping runs of its first and last
@@ -1182,8 +1187,10 @@ the tokenizer), `profiles/` (tunables), its test and README:
 - **Additional deps**: `pip install -r requirements_examples.txt`
 - **Run**: `pytest tests/applications/llama/`, or
   `python -m iron.applications.llama.model model.safetensors tokenizer.model`
-  (`--max-seq-len`, a multiple of 2048, sizes the caches: 32768 by default,
-  1 GB of them; one compile serves every context up to it). XRT maps
+  (`--max-seq-len` sets the longest context served, up to the checkpoint's
+  `max_position_embeddings`, by default that where the model fits the host:
+  131072 for Llama 3.2 1B, 4 GiB of caches; one compile serves every
+  context up to it). XRT maps
   every device buffer locked and `ulimit -l` binds each mapping; the
   weights and the caches are banks of at most 3.76 GB, a buffer object
   each (`allocator.BANK`), so the limit must cover one bank

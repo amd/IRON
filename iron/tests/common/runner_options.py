@@ -10,6 +10,8 @@ instance so no config.json is read.
 """
 
 import argparse
+import dataclasses
+import logging
 
 import numpy as np
 import pytest
@@ -81,3 +83,49 @@ def test_from_options_refuses_neither():
     path = checkpoint(SMALL).path
     with pytest.raises(SystemExit):
         SmallRunner.from_options([str(path)])
+
+
+def test_from_options_lowers_the_context_and_refuses_to_raise_it():
+    path = checkpoint(SMALL).path
+    lowered = SmallRunner.from_options(
+        [str(path), "--random-weights", "1", "--max-seq-len", "128"]
+    )
+    assert lowered.config.max_seq_len == 128
+    with pytest.raises(SystemExit):
+        SmallRunner.from_options(
+            [str(path), "--random-weights", "1", "--max-seq-len", "512"]
+        )
+
+
+def _held(config, length: int) -> int:
+    """What the model holds at ``length`` positions: its arena, traced."""
+    config = dataclasses.replace(config, max_seq_len=length)
+    model = Llama(config, checkpoint(config).tree("unread"))
+    return sum(model.trace(**model.shapes()[0]).pinned.values())
+
+
+def test_fit_keeps_the_native_context_where_it_fits_else_whole_chunks():
+    """1024 native positions in 256-row chunks: a budget one byte short of
+    a context takes the next shorter whole chunks.
+    """
+    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    path = checkpoint(config).path
+    assert SmallRunner.fit(config, path, budget=_held(config, 1024)) == config
+    short = SmallRunner.fit(config, path, budget=_held(config, 1024) - 1)
+    assert short.max_seq_len == 768
+    assert SmallRunner.fit(config, path, budget=_held(config, 512)).max_seq_len == 512
+    with pytest.raises(ValueError, match="do not fit"):
+        SmallRunner.fit(config, path, budget=_held(config, 256) - 1)
+
+
+def test_fit_says_what_it_chose_and_how_to_ask_for_more(caplog):
+    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    path = checkpoint(config).path
+    with caplog.at_level(logging.INFO, logger="iron.lm.base"):
+        SmallRunner.fit(config, path, budget=_held(config, 1024))
+        SmallRunner.fit(config, path, budget=_held(config, 512))
+    native, short = caplog.records
+    assert native.levelno == logging.INFO and "native context" in native.message
+    assert short.levelno == logging.WARNING
+    assert "max_seq_len 512, not the native 1024" in short.message
+    assert "--max-seq-len asks for up to 1024" in short.message

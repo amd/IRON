@@ -280,22 +280,25 @@ def check_deep_decode(
 def check_deep_prompt(
     runner, model, rows: int, bound: float, chars: int = 1024, *, record
 ):
-    """The last prompt chunk the caches hold, ``rows`` rows of it, against
-    the graph's own reference within ``bound`` of its KL, every position
-    before it filled as ``check_deep_decode`` fills them: the chunk attends
-    over the whole context. Records its seconds, the longest a prompt
-    chunk takes, which the driver's watchdog bounds where a chunk is one
-    dispatch.
+    """The deepest prompt chunk, the one holding position ``max_seq_len -
+    1``, at most ``rows`` rows of it, against the graph's own reference
+    within ``bound`` of its KL, every position before it filled as
+    ``check_deep_decode`` fills them: the chunk attends over the whole
+    context. Records its seconds, the longest a prompt chunk takes, which
+    the driver's watchdog bounds where a chunk is one dispatch.
     """
     tokens = prompt(runner, chars, 1)
     model.logits(tokens)
     C, L = runner.config.prefill_chunk, runner.config.max_seq_len
+    deepest = (L - 1) // C
+    rows = min(rows, L - deepest * C)
     chunk = np.resize(tokens, rows)
     ids = model.prompt_ids(chunk)
+    begin = deepest * C
     values = dict(
-        token=int(chunk[-1]), position=L - C + rows - 1, chunk=L // C - 1, rows=rows
+        token=int(chunk[-1]), position=begin + rows - 1, chunk=deepest, rows=rows
     )
-    with _fill_caches(model, len(tokens), L - C):
+    with _fill_caches(model, len(tokens), begin):
         start = time.perf_counter()
         got, _ = model(ids, **values)
         record("DeepPromptSeconds", time.perf_counter() - start)
@@ -304,7 +307,7 @@ def check_deep_prompt(
     kl, top1 = divergence(expected, got)
     record("DeepPromptKL", kl)
     record("DeepPromptTop1", top1)
-    assert kl <= bound, f"the chunk at {L - C}: KL {kl} > {bound}"
+    assert kl <= bound, f"the chunk at {begin}: KL {kl} > {bound}"
 
 
 @contextmanager

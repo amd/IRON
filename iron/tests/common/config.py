@@ -32,6 +32,7 @@ def test_llama_1b_from_checkpoint_is_its_published_shape():
     assert (c.n_heads, c.n_kv_groups, c.head_dim) == (32, 8, 64)
     assert (c.hidden_dim, c.rope_base) == (8192, 500000.0)
     assert c.eps == 1e-5
+    assert c.max_seq_len == 131072
     assert c.rope_scaling == Llama3RopeScaling(
         factor=32.0,
         low_freq_factor=1.0,

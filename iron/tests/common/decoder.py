@@ -7,7 +7,8 @@ shape and values, and that a traced decoder reads it at that width rather
 than ``head_dim`` -- Phi-4-mini-instruct's need, exercised here without a
 model of its own. Also ``head_dim``'s own fallback (``emb_dim // n_heads``)
 for a checkpoint whose ``config.json`` has none (Qwen 2.5, Granite, LFM2,
-Phi-4-mini-instruct all omit it).
+Phi-4-mini-instruct all omit it), and ``max_seq_len``, the checkpoint's
+native context, served where no prompt chunk divides it.
 """
 
 import dataclasses
@@ -139,6 +140,7 @@ def test_head_dim_falls_back_to_emb_dim_over_n_heads_when_absent():
         num_key_value_heads=2,
         intermediate_size=64,
         rope_theta=1.0,
+        max_position_embeddings=4096,
     )
     cfg = DecoderConfig.from_checkpoint(path)
     assert cfg.head_dim == 1536 // 12
@@ -154,6 +156,55 @@ def test_head_dim_from_the_checkpoint_is_kept_as_given():
         head_dim=128,
         intermediate_size=64,
         rope_theta=1.0,
+        max_position_embeddings=4096,
     )
     cfg = DecoderConfig.from_checkpoint(path)
     assert cfg.head_dim == 128
+
+
+def test_max_seq_len_is_the_checkpoints_native_context():
+    path = _config_json(
+        vocab_size=32,
+        hidden_size=2048,
+        num_hidden_layers=1,
+        num_attention_heads=16,
+        num_key_value_heads=8,
+        intermediate_size=64,
+        rope_theta=1.0,
+        max_position_embeddings=40960,
+    )
+    cfg = DecoderConfig.from_checkpoint(path)
+    assert cfg.max_seq_len == 40960
+
+
+def test_a_context_no_chunk_divides_is_allocated_exactly():
+    """LFM2's 128000 positions in 2048-row chunks, small: the caches, the
+    angle table and the draws hold a row a position, and no call goes past
+    the last position.
+    """
+    model = small(max_seq_len=300)
+    cfg = model.config
+    assert cfg.angles().shape == (300, cfg.head_dim)
+    t = model.trace(**model.shapes()[1])
+    row = cfg.n_kv_groups * cfg.head_dim * np.dtype(bfloat16).itemsize
+    assert t.pinned["keys.0"] == t.pinned["values.1"] == 300 * row
+    assert t.pinned["drawn"] == 300 * np.dtype(np.int32).itemsize
+    with pytest.raises(ValueError, match="301 tokens do not fit 300 rows"):
+        model.logits(np.zeros(301, np.int64))
+
+
+@pytest.mark.parametrize(
+    "chunk,rows,inside", [(1, 44, True), (1, 45, False), (0, 256, True), (2, 1, False)]
+)
+def test_a_prompt_chunk_past_the_last_position_is_refused(chunk, rows, inside):
+    """Every limit a prompt chunk's trace records holds where its rows end
+    by position 300, and one fails where they pass it, so the call is
+    refused before it is dispatched.
+    """
+    model = small(max_seq_len=300)
+    t = model.trace(**model.shapes()[1])
+    values = dict(chunk=chunk, rows=rows, position=chunk * 256 + rows - 1, token=0)
+    held = [limit.lo <= limit.evaluate(values) < limit.hi for limit in t.limits]
+    assert all(held) == inside
+    joint = [str(limit) for limit in t.limits if limit.plus is not None]
+    assert joint and all(s == "chunk * 256 + rows" for s in joint)

@@ -40,6 +40,7 @@ REAL_1B = LlamaConfig(
     head_dim=64,
     hidden_dim=8192,
     rope_base=_ROPE_BASE,
+    max_seq_len=131072,
     eps=_EPS,
     rope_scaling=Llama3RopeScaling(
         factor=32.0,

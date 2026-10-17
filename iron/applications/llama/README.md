@@ -65,11 +65,13 @@ top-k must be at most 64.
   against the oracle and determinism of the real checkpoint's shape
 - `--prompt-len`, `--num-tokens`: characters of `iron/lm/prompt.txt` to use
   as the prompt (default 2048) and tokens to generate (default 40)
-- `--max-seq-len`: the rows the key and value caches hold, a multiple of
-  2048 (default 32768, 1 GB of caches); the compile is the same at any of
-  them. XRT maps every device buffer locked, and the weights and the
-  caches are banks of at most 3.76 GB (`iron.common.image.allocator.BANK`),
-  so `ulimit -l` must cover one bank at either size. A prompt past about
+- `--max-seq-len`: the longest context served, prompt and generated tokens
+  together, up to the checkpoint's own `max_position_embeddings` (131072,
+  4 GiB of caches, the default where it fits the host; a log line says
+  what was chosen); the compile is the same at any of them.
+  XRT maps every device buffer locked, and the weights and the caches are
+  banks of at most 3.76 GB (`iron.common.image.allocator.BANK`), so `ulimit
+  -l` must cover one bank. A prompt past about
   48k tokens runs chunks longer than the amdxdna driver's watchdog allows
   (`tdr_timeout_ms`, 4 to 6 s a dispatch by default); with `options amdxdna
   tdr_timeout_ms=10000` in `/etc/modprobe.d/` a 131008-token prompt runs

@@ -119,7 +119,9 @@ class CausalLM(Model):
     """A decoder on ``config``'s shape; a subclass gives ``head`` and ``oracle``.
 
     The caches are ``(max_seq_len, n_kv_groups, head_dim)`` so no descriptor
-    steps by ``max_seq_len``. A decode step attends with ``MHA`` of one
+    steps by the context; a prompt chunk is a run of them
+    (``cache[s : s + C][:rows]``), the last one short where the chunk does
+    not divide ``max_seq_len``. A decode step attends with ``MHA`` of one
     query, which costs the context, not the cache.
 
     Args:
@@ -231,11 +233,11 @@ class CausalLM(Model):
         step's (``DecodeStep``).
         """
         c = self.config
-        L, C, A = c.max_seq_len, c.prefill_chunk, c.rope_width
+        C, A = c.prefill_chunk, c.rope_width
         if self.rope is None:
             angles = None
         elif prompt:
-            angles = Copy.step(self.rope.reshape(L // C, C, A)[chunk, :rows])
+            angles = Copy.step(self.rope[chunk * C : chunk * C + C][:rows])
         else:
             angles = Copy.step(self.rope[position]).reshape(1, A)
         step = DecodeStep(prompt, angles, chunk, rows, position, source)
@@ -278,12 +280,13 @@ class CausalLM(Model):
         if window is not None:
             raise ValueError(f"CausalLM.attend: no {window}-position window")
         c = self.config
-        G, D, L, C = c.n_kv_groups, c.head_dim, c.max_seq_len, c.prefill_chunk
+        G, D, C = c.n_kv_groups, c.head_dim, c.prefill_chunk
         keys, values = self.keys[i], self.values[i]
         n, H, _ = q.shape
         for x, cache in ((k, keys), (v, values)):
             if step.prompt:
-                Copy.step(x, cache.reshape(L // C, C, G, D)[step.chunk, : step.rows])
+                start = step.chunk * C
+                Copy.step(x, cache[start : start + C][: step.rows])
             else:
                 Copy.step(x.reshape(G, D), cache[step.position])
         span = np.s_[: step.position + 1]

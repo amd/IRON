@@ -348,3 +348,18 @@ def test_a_decoder_nested_in_its_checkpoint_is_read_where_it_is(cpu):
     )
     oracle = LlamaOracle(cpu.config, nested, decoder)
     np.testing.assert_array_equal(oracle.logits(cpu.prompt), cpu.first)
+
+
+def test_a_context_no_chunk_divides_runs_to_its_last_position():
+    """300 positions in 256-row chunks: a prompt whose second chunk is 43
+    rows, then the decode step at the last position, 299, each the oracle's
+    logits; the caches are 300 rows, exactly.
+    """
+    config = dataclasses.replace(SMALL, max_seq_len=300)
+    weights = checkpoint(config).tree("random")
+    model, oracle = OnHost(config, weights), Llama.oracle(config, weights)
+    tokens = np.random.default_rng(8).integers(0, config.vocab_size, 300)
+    _assert_close([model.logits(tokens[:299])], [oracle.logits(tokens[:299])])
+    _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
+    with pytest.raises(IndexError, match="rows to 301 of 300"):
+        model(model.prompt_ids(tokens[256:]), token=0, position=300, chunk=1, rows=45)

@@ -12,8 +12,10 @@ and ``Runner`` and ``main``.
 import argparse
 import dataclasses
 import json
+import logging
 import math
 import mmap
+import os
 import struct
 from collections.abc import Callable, Mapping
 from functools import partial
@@ -46,6 +48,19 @@ if TYPE_CHECKING:
     from .causal import CausalLM
 
 RopeScaling = Callable[[np.ndarray], np.ndarray]
+
+logger = logging.getLogger(__name__)
+
+# What a host keeps beside a model's arena: the OS, Python and XRT, the
+# checkpoint's pages as they upload, a test's host copies.
+HOST_RESERVE = 8 << 30
+
+
+def host_budget() -> int:
+    """The bytes a model's arena may take here: physical memory, in which
+    the NPU's buffers live, less ``HOST_RESERVE``.
+    """
+    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") - HOST_RESERVE
 
 
 def rope_angles(
@@ -135,9 +150,10 @@ class Config:
 @dataclasses.dataclass(frozen=True)
 class DecoderConfig(Config):
     """A decoder's shape, named as a Hugging Face checkpoint's own
-    ``config.json`` does where it has one; ``max_seq_len`` and
-    ``prefill_chunk`` size IRON's own caches and prompt chunking, not the
-    checkpoint's business.
+    ``config.json`` does where it has one. ``max_seq_len``, the longest
+    context served, is the checkpoint's native ``max_position_embeddings``
+    unless a caller lowers it; ``prefill_chunk`` is IRON's own prompt
+    chunking.
     """
 
     vocab_size: int = dataclasses.field(metadata={"json": "vocab_size"})
@@ -153,7 +169,7 @@ class DecoderConfig(Config):
     hidden_dim: int = dataclasses.field(metadata={"json": "intermediate_size"})
     # None turns nothing: a decoder of absolute positions (``positions``).
     rope_base: float | None = dataclasses.field(metadata={"json": "rope_theta"})
-    max_seq_len: int = 32768
+    max_seq_len: int = dataclasses.field(metadata={"json": "max_position_embeddings"})
     rope_scaling: RopeScaling | None = None
     # The rotated prefix of head_dim (partial rotary, e.g. Phi's 0.75): None
     # rotates the whole head, as every full-rotary model does.
@@ -167,11 +183,6 @@ class DecoderConfig(Config):
     def __post_init__(self):
         if self.head_dim is None:
             object.__setattr__(self, "head_dim", self.emb_dim // self.n_heads)
-        if self.max_seq_len % self.prefill_chunk:
-            raise ValueError(
-                f"prefill_chunk ({self.prefill_chunk}) must divide max_seq_len "
-                f"({self.max_seq_len})"
-            )
 
     @property
     def rope_width(self) -> int:
@@ -735,8 +746,8 @@ FLAGS = (
         dict(
             type=int,
             default=None,
-            help="rows the caches hold, prompt and generated tokens together, "
-            "a multiple of the size's own prefill_chunk (default: the size's own)",
+            help="the longest context served, prompt and generated tokens "
+            "together (default: the checkpoint's max_position_embeddings)",
         ),
     ),
 )
@@ -848,7 +859,11 @@ class Runner:
         config: Config | None = None,
         seed: int | None = None,
     ):
-        self.config = config or type(self).default_config(weights_path)
+        if config is None:
+            config = type(self).fit(
+                type(self).default_config(weights_path), weights_path
+            )
+        self.config = config
         self.seed = seed
         self.checkpoint = Checkpoint(weights_path)
         self.weights = (
@@ -920,12 +935,69 @@ class Runner:
         config = (
             cls.sizes[args.size] if cls.sizes else cls.default_config(args.weights_path)
         )
-        if args.max_seq_len is not None:
-            try:
-                config = dataclasses.replace(config, max_seq_len=args.max_seq_len)
-            except ValueError as e:
-                parser.error(str(e))
+        if args.max_seq_len is None:
+            config = cls.fit(config, args.weights_path)
+        elif args.max_seq_len > config.max_seq_len:
+            parser.error(
+                f"--max-seq-len {args.max_seq_len} is past the model's "
+                f"{config.max_seq_len}"
+            )
+        else:
+            config = dataclasses.replace(config, max_seq_len=args.max_seq_len)
         return cls.from_arguments(parser, args, config)
+
+    @classmethod
+    def fit(cls, config: Config, weights_path, budget: int | None = None) -> Config:
+        """``config`` at its native context where the model's arena fits
+        ``budget`` (``host_budget()`` by default), else at the longest whole
+        number of prompt chunks that does, logged either way.
+
+        The arena is what the model holds, weights and states, measured by
+        tracing its decode step at one and two prompt chunks of context:
+        what grows holds a row a position (``tests/applications/
+        long_context``).
+        """
+        if not isinstance(config, DecoderConfig):
+            return config
+        native, C = config.max_seq_len, config.prefill_chunk
+        if native < 2 * C:
+            return config
+        tree = Checkpoint(weights_path).tree("unread")
+        held = []
+        for length in (C, 2 * C):
+            model = cls.model(dataclasses.replace(config, max_seq_len=length), tree)
+            held.append(sum(model.trace(**model.shapes()[0]).pinned.values()))
+        per_position = (held[1] - held[0]) / C
+        fixed = held[0] - per_position * C
+        budget = host_budget() if budget is None else budget
+        need = fixed + per_position * native
+        if need <= budget:
+            logger.info(
+                "max_seq_len %d, the model's native context: %.1f GiB of a %.1f GiB "
+                "budget",
+                native,
+                need / 2**30,
+                budget / 2**30,
+            )
+            return config
+        fits = int((budget - fixed) // per_position) // C * C
+        if fits < C:
+            raise ValueError(
+                f"{fixed / 2**30:.1f} GiB of weights and one {C}-position chunk "
+                f"do not fit a {budget / 2**30:.1f} GiB budget"
+            )
+        logger.warning(
+            "max_seq_len %d, not the native %d: the model would hold %.1f GiB "
+            "there, past this host's %.1f GiB budget (physical memory less %.0f "
+            "GiB); --max-seq-len asks for up to %d",
+            fits,
+            native,
+            need / 2**30,
+            budget / 2**30,
+            HOST_RESERVE / 2**30,
+            native,
+        )
+        return dataclasses.replace(config, max_seq_len=fits)
 
     def npu(
         self,
