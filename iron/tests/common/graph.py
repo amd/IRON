@@ -2436,6 +2436,23 @@ def test_a_walk_by_a_per_call_repeat_and_length_is_its_reference(band_stride):
         np.testing.assert_array_equal(got, want)
 
 
+@pytest.mark.parametrize("band_stride", [0, 1])
+def test_walks_in_turn_are_their_reference(band_stride):
+    walk = copy_bounded_view
+    table = np.arange(walk.HK * walk.WK * walk.K2 * walk.E, dtype=np.float32)
+    table = table.astype(bfloat16).reshape(-1, walk.E)
+    graph = walk.Walks(table, band_stride)
+    (step,) = graph.trace().steps
+    assert (len(step.op.src), step.op.src_repeat, step.op.src_bound) == (3, True, 1)
+    for hk, wk in ((3, 4), (walk.HK, walk.WK), (1, 1)):
+        values = walk.walks_values(hk, wk)
+        got = np.asarray(graph.reference(**values), dtype=np.float32)
+        want = walk.walks_walked(table, band_stride, hk, wk).astype(np.float32)
+        np.testing.assert_array_equal(got[: values["n"]], want)
+        real = walk.walked(table, band_stride, hk, wk).astype(np.float32)
+        np.testing.assert_array_equal(got[: real.shape[0]], real)
+
+
 class _BadWalk(iron.Graph):
     """A walk ``Handle.at`` refuses."""
 
@@ -2461,3 +2478,20 @@ class _BadWalk(iron.Graph):
 def test_a_walk_one_descriptor_cannot_hold_is_refused(sizes, strides, bounded, match):
     with pytest.raises(ValueError, match=match):
         _BadWalk(sizes, strides, bounded).trace()
+
+
+class _UnpairedWalks(iron.Graph):
+    """Two patterns walked in turn with one repeat between them."""
+
+    def __init__(self):
+        self.table = iron.weight(np.zeros((64, 64), dtype=bfloat16))
+
+    def body(self, *, k: Scratchpad[np.int32]):
+        tap = TensorAccessPattern(self.table.shape, 0, [4, 4, 4, 64], [0, 256, 64, 1])
+        rows = self.table.at((tap, tap), (128, 64), bounds={0: k}, repeat=k)
+        return Copy.step(rows)
+
+
+def test_walks_in_turn_take_a_repeat_each():
+    with pytest.raises(ValueError, match="take a repeat each"):
+        _UnpairedWalks().trace()

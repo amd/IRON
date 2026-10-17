@@ -153,7 +153,8 @@ def _take_views(cls, operands, kwargs, values):
                     values[f"{param}_valid"] = h.length
                 if h.repeat is not None:
                     kwargs.setdefault(f"{param}_repeat", True)
-                    values[f"{param}_repeats"] = h.repeat - 1
+                    for k, r in enumerate(h.repeat):
+                        values[f"{param}_repeats{k}"] = r - 1
             elif h.bounds:
                 (axis, count), *more = h.bounds.items()
                 if more:

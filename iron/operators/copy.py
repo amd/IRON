@@ -662,6 +662,8 @@ class Copy(Operator):
     )
     # A memtile holds 512 KiB; the cap leaves room for every channel placed on one.
     object_bytes: ClassVar[int] = 64 * 1024
+    # The patterns a repeated source walks in turn: a repeat word each.
+    max_walks: ClassVar[int] = 8
     num_channels: int = Auto(default=1)
     dtype: Any = Param(default=bfloat16, repr=False)
 
@@ -684,8 +686,15 @@ class Copy(Operator):
     out_offset = Value(derive=lambda op: 0)
     src_valid = Value(derive=lambda op: op.src_bound)
     dst_valid = Value(derive=lambda op: op.dst_bound)
-    # Runs past the first, as a task queue's repeat count counts them.
-    src_repeats = Value(derive=lambda op: 0)
+    # Each walk's runs past the first, as a task queue's repeat count counts them.
+    src_repeats0 = Value(derive=lambda op: 0)
+    src_repeats1 = Value(derive=lambda op: 0)
+    src_repeats2 = Value(derive=lambda op: 0)
+    src_repeats3 = Value(derive=lambda op: 0)
+    src_repeats4 = Value(derive=lambda op: 0)
+    src_repeats5 = Value(derive=lambda op: 0)
+    src_repeats6 = Value(derive=lambda op: 0)
+    src_repeats7 = Value(derive=lambda op: 0)
 
     def walks(self) -> list[tuple[TensorAccessPattern, ...]]:
         """The patterns each side walks in turn, ``[src, dst]``."""
@@ -694,11 +703,15 @@ class Copy(Operator):
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
     def validate(self) -> None:
+        walks = len(self.walks()[0])
         if self.src_repeat and (
-            isinstance(self.src, tuple) or self.num_channels not in (None, 1)
+            walks > self.max_walks
+            or self.num_channels not in (None, 1)
+            or isinstance(self.dst, tuple)
         ):
             raise ValueError(
-                "a repeated source is one pattern, one descriptor on one channel"
+                f"a repeated source walks at most {self.max_walks} patterns, a "
+                f"descriptor each, on one channel into one pattern; got {walks}"
             )
         src, dst = (sum(prod(p.sizes) for p in w) for w in self.walks())
         if src != dst and not self.src_repeat:
@@ -710,7 +723,7 @@ class Copy(Operator):
             ("src", self.src, self.src_bound),
             ("dst", self.dst, self.dst_bound),
         ):
-            if isinstance(tap, tuple) and bound is not None:
+            if isinstance(tap, tuple) and bound is not None and not self.src_repeat:
                 raise ValueError(
                     f"{side} walks {len(tap)} patterns in turn; a per-call bound "
                     f"takes one pattern"
@@ -813,6 +826,7 @@ class Copy(Operator):
 
     def _row_shares(self) -> list[int]:
         """Per bounded pattern, the elements per channel one bounded row moves."""
+        src, dst = self.walks()
         return [
             int(
                 prod(tap.sizes[bound + 1 :])
@@ -820,11 +834,12 @@ class Copy(Operator):
                 else prod(tap.sizes) // tap.sizes[bound]
             )
             // self.num_channels
-            for tap, bound, repeated in (
-                (self.src, self.src_bound, self.src_repeat),
-                (self.dst, self.dst_bound, False),
+            for walk, bound, repeated in (
+                (src, self.src_bound, self.src_repeat),
+                (dst, self.dst_bound, False),
             )
             if bound is not None
+            for tap in walk
         ]
 
     def _shares(self, tap: TensorAccessPattern) -> list[TensorAccessPattern]:
@@ -891,7 +906,14 @@ class Copy(Operator):
         out_offset=0,
         src_valid=None,
         dst_valid=None,
-        src_repeats=None,
+        src_repeats0=None,
+        src_repeats1=None,
+        src_repeats2=None,
+        src_repeats3=None,
+        src_repeats4=None,
+        src_repeats5=None,
+        src_repeats6=None,
+        src_repeats7=None,
     ):
         """Gather by ``src``, scatter by ``dst``, into ``y`` in place if given."""
 
@@ -901,11 +923,21 @@ class Copy(Operator):
                 return tap
             return tap[(*[slice(None)] * bound, slice(int(valid)))]
 
-        src = self.src
-        if self.src_repeat and src_repeats is not None:
-            src = src[: int(src_repeats) + 1]
-        src = at(src, self.src_bound, src_valid)
-        dst = at(self.dst, self.dst_bound, dst_valid)
+        src, dst = self.walks()
+        if self.src_repeat:
+            repeats = (
+                src_repeats0,
+                src_repeats1,
+                src_repeats2,
+                src_repeats3,
+                src_repeats4,
+                src_repeats5,
+                src_repeats6,
+                src_repeats7,
+            )
+            src = [w if r is None else w[: int(r) + 1] for w, r in zip(src, repeats)]
+        src = tuple(at(tap, self.src_bound, src_valid) for tap in src)
+        dst = tuple(at(tap, self.dst_bound, dst_valid) for tap in dst)
         gather, scatter = (
             np.concatenate(
                 [
@@ -983,6 +1015,30 @@ class Copy(Operator):
     def sequence(self, rt):
         in_off = self.in_offset if self.in_offset.per_call else None
         out_off = self.out_offset if self.out_offset.per_call else None
+        if self.src_repeat:
+            # The drain first, so the walks' fills queue behind a consumer.
+            tg = TaskGroup()
+            ((tap, unit),) = self._taps(self.dst, self.dst_bound, self.y)
+            self.y.drain(
+                tap,
+                group=tg,
+                wait=True,
+                offset_parameter=out_off,
+                length_parameter=None if unit is None else self.dst_valid,
+                length_unit=unit,
+            )
+            for k, walk in enumerate(self.walks()[0]):
+                ((tap, unit),) = self._taps(walk, self.src_bound, self.x)
+                self.x.fill(
+                    tap,
+                    group=tg,
+                    offset_parameter=in_off,
+                    length_parameter=None if unit is None else self.src_valid,
+                    length_unit=unit,
+                    repeat_parameter=self.value(f"src_repeats{k}"),
+                )
+            tg.finish()
+            return
         if isinstance(self.src, tuple) or isinstance(self.dst, tuple):
             # A drain goes out before the fills that feed it.
             issued = []
@@ -1027,7 +1083,6 @@ class Copy(Operator):
                 offset_parameter=in_off,
                 length_parameter=None if unit is None else self.src_valid,
                 length_unit=unit,
-                repeat_parameter=self.src_repeats if self.src_repeat else None,
             )
             tap, unit = outs[c]
             self.y.drain(

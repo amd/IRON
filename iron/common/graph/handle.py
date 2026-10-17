@@ -95,9 +95,9 @@ class Handle:
         self.bounds: dict[int, Affine] = dict(bounds or {})
         # The handle whose ids pick the rows each call, for a gather.
         self.gather_by: Handle | None = gather_by
-        # A view's runs of its tap's first dimension, and entries of its
+        # A view's runs of each walk's first dimension, and entries of its
         # second, each call (``at``).
-        self.repeat: Affine | None = repeat
+        self.repeat: tuple[Affine, ...] | None = repeat
         self.length: Affine | None = length
         # A run from a per-call start, ``x[s : s + W]``: its axis, s, W and
         # the axis's length, until a bound (``[:n]``) keeps it inside.
@@ -359,7 +359,7 @@ class Handle:
 
     def at(
         self,
-        tap: TensorAccessPattern,
+        tap: TensorAccessPattern | tuple[TensorAccessPattern, ...],
         shape,
         index_by=None,
         bounds=None,
@@ -371,40 +371,59 @@ class Handle:
 
         ``repeat`` runs ``tap``'s first dimension that many times a call, and
         ``length`` takes that many entries of its second, each a per-call
-        value; ``bounds`` then gives the rows the view moves a call.
+        value; ``bounds`` then gives the rows the view moves a call. A tuple
+        of patterns is walked in turn, each repeated by its entry of a tuple
+        ``repeat``, all cut to one ``length``.
 
         Raises:
-            ValueError: With ``repeat`` or ``length``, ``tap`` is not four
-                dimensions one shim descriptor holds, or no ``bounds``.
+            ValueError: With ``repeat`` or ``length``, a pattern is not four
+                dimensions one shim descriptor holds, the patterns and
+                repeats differ in number, or no ``bounds``.
         """
+        walks = tap if isinstance(tap, tuple) else (tap,)
+        if isinstance(tap, tuple) and (
+            not isinstance(repeat, tuple) or len(repeat) != len(tap)
+        ):
+            raise ValueError(
+                f"{len(tap)} patterns walked in turn take a repeat each, not {repeat}"
+            )
         if repeat is not None or length is not None:
-            sizes, strides = slots(tap.sizes, tap.strides)
-            padded = TensorAccessPattern(tap.tensor_dims, tap.offset, sizes, strides)
             dev = aie_utils.get_current_device()
-            if (
-                index_by is not None
-                or tap.rank != 4
-                or dev is None
-                or not dev.dma_bd_fits(0, 0, padded, self.dtype)
-            ):
-                raise ValueError(
-                    f"{tap} takes a per-call repeat or length as one shim "
-                    f"descriptor: four dimensions, the repeated first, within a "
-                    f"descriptor's limits"
+            for walk in walks:
+                sizes, strides = slots(walk.sizes, walk.strides)
+                padded = TensorAccessPattern(
+                    walk.tensor_dims, walk.offset, sizes, strides
                 )
+                if (
+                    index_by is not None
+                    or walk.rank != 4
+                    or dev is None
+                    or not dev.dma_bd_fits(0, 0, padded, self.dtype)
+                ):
+                    raise ValueError(
+                        f"{walk} takes a per-call repeat or length as one shim "
+                        f"descriptor: four dimensions, the repeated first, within "
+                        f"a descriptor's limits"
+                    )
             if not bounds:
                 raise ValueError(
                     f"a walk of {tap} by a per-call repeat or length bounds the "
                     f"rows it moves a call: give bounds"
                 )
-            repeat = None if repeat is None else repeat.affine()
+            repeats = None
+            if repeat is not None:
+                repeats = tuple(
+                    r.affine()
+                    for r in (repeat if isinstance(tap, tuple) else (repeat,))
+                )
             length = None if length is None else length.affine()
             tracer = graph_tracer.get()
             if tracer is not None:
-                if repeat is not None:
-                    tracer.limit(repeat, 1, tap.sizes[0] + 1, self)
+                for walk, r in zip(walks, repeats or ()):
+                    tracer.limit(r, 1, walk.sizes[0] + 1, self)
                 if length is not None:
-                    tracer.limit(length, 1, tap.sizes[1] + 1, self)
+                    hi = min(walk.sizes[1] for walk in walks)
+                    tracer.limit(length, 1, hi + 1, self)
             return Handle(
                 shape,
                 self.dtype,
@@ -414,7 +433,7 @@ class Handle:
                 0,
                 tap,
                 bounds=bounds,
-                repeat=repeat,
+                repeat=repeats,
                 length=length,
             )
         dense = tap.coalesce()
@@ -466,19 +485,22 @@ class _Viewed:
     def transpose(self, *axes):
         return self._as_operand().transpose(*axes)
 
-    def at(
-        self, tap: TensorAccessPattern, shape, bounds=None, *, repeat=None, length=None
-    ):
+    def at(self, tap, shape, bounds=None, *, repeat=None, length=None):
         """``Handle.at`` of the tensor as the tracer views it; in a reference,
         the rows ``tap`` walks this call.
         """
         operand = self._as_operand()
         if isinstance(operand, Handle):
             return operand.at(tap, shape, bounds=bounds, repeat=repeat, length=length)
-        walk = tap if repeat is None else tap[: int(repeat)]
-        walk = walk if length is None else walk[:, : int(length)]
+        walks = tap if isinstance(tap, tuple) else (tap,)
+        repeats = repeat if isinstance(tap, tuple) else (repeat,)
         flat = np.asarray(operand).reshape(-1)
-        return flat[walk.gather(np.arange(flat.size))].reshape(-1, *shape[1:])
+        rows = []
+        for walk, r in zip(walks, repeats):
+            walk = walk if r is None else walk[: int(r)]
+            walk = walk if length is None else walk[:, : int(length)]
+            rows.append(flat[walk.gather(np.arange(flat.size))])
+        return np.concatenate(rows).reshape(-1, *shape[1:])
 
 
 class _HostRun:

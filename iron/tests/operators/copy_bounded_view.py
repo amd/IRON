@@ -8,7 +8,8 @@
 rows of each head: into a fresh output and into a cache given whole, both
 bounded alike, so the drain ends where the fill does. A walk of a table by
 a per-call repeat and length (``Handle.at``) moves the bands and blocks a
-call names.
+call names, and cut into groups of bands, each group walked in turn by a
+repeat of its own.
 """
 
 import numpy as np
@@ -99,4 +100,71 @@ def test_a_walk_repeats_and_bounds_per_call(full_elf, band_stride):
         n = hk * wk * K2
         got = np.asarray(net(hk=hk, wk=wk, n=n), dtype=np.float32).reshape(-1, E)
         want = walked(table, band_stride, hk, wk).astype(np.float32)
+        assert np.array_equal(got[:n], want), f"{hk=} {wk=}"
+
+
+# `Walk`'s bands in groups, (first band, bands): each walked in turn.
+GROUPS = ((0, 2), (2, 2), (4, 4))
+
+
+class Walks(iron.Graph):
+    def __init__(self, table, band_stride: int):
+        self.table = iron.weight(table)
+        self.band_stride = band_stride
+
+    def body(
+        self,
+        *,
+        r0: Scratchpad[np.int32],
+        r1: Scratchpad[np.int32],
+        r2: Scratchpad[np.int32],
+        wk: Scratchpad[np.int32],
+        n: Scratchpad[np.int32],
+    ):
+        taps = tuple(
+            TensorAccessPattern(
+                self.table.shape,
+                first * self.band_stride * K2 * E,
+                [bands, WK, K2, E],
+                [self.band_stride * K2 * E, K2 * E, E, 1],
+            )
+            for first, bands in GROUPS
+        )
+        rows = self.table.at(
+            taps, (HK * WK * K2, E), bounds={0: n}, repeat=(r0, r1, r2), length=wk
+        )
+        return Copy.step(rows)
+
+
+def walks_values(hk: int, wk: int) -> dict:
+    """A call's values: each group's repeat, at least one, and the rows moved."""
+    repeats = [min(max(hk - first, 1), bands) for first, bands in GROUPS]
+    n = sum(repeats) * wk * K2
+    return dict(zip(("r0", "r1", "r2"), repeats), wk=wk, n=n)
+
+
+def walks_walked(table, band_stride: int, hk: int, wk: int) -> np.ndarray:
+    """The rows `Walks` moves: each group's bands, past the image a group's first."""
+    values = walks_values(hk, wk)
+    return np.concatenate(
+        [
+            walked(table[first * band_stride * K2 :], band_stride, values[r], wk)
+            for (first, _), r in zip(GROUPS, ("r0", "r1", "r2"))
+        ]
+    )
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("full_elf", [True, False], ids=["full_elf", "xclbin"])
+@pytest.mark.parametrize("band_stride", [0, 1])
+def test_walks_in_turn_repeat_each_per_call(full_elf, band_stride):
+    rng = np.random.default_rng(band_stride)
+    table = rng.standard_normal((HK * WK * K2, E)).astype(bfloat16)
+    net = Walks(table, band_stride).compile(full_elf=full_elf)
+    assert net.plan.full_elf == full_elf
+    for hk, wk in ((3, 4), (HK, WK), (1, 1), (5, 2)):
+        values = walks_values(hk, wk)
+        n = values["n"]
+        got = np.asarray(net(**values), dtype=np.float32).reshape(-1, E)
+        want = walks_walked(table, band_stride, hk, wk).astype(np.float32)
         assert np.array_equal(got[:n], want), f"{hk=} {wk=}"
