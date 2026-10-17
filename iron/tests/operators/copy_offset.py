@@ -122,3 +122,34 @@ def test_the_offset_moves_every_piece_of_a_split_pattern():
         assert not len(
             wrong
         ), f"slot {slot}: {len(wrong)} elements differ, first {wrong[:4]}"
+
+
+# A sequence of embeddings, a position its row on the leading axis.
+WIDTH = 256
+
+
+@pytest.mark.parametrize("full_elf", [True, False], ids=["full_elf", "xclbin"])
+def test_a_row_lands_at_its_index_on_the_leading_axis(full_elf):
+    rows = iron.state((SEQ, WIDTH), name="rows")
+
+    class Write(iron.Graph):
+        def body(self, x, *, pos: Scratchpad[np.int32]):
+            Copy.step(x, rows[pos])
+
+    write = Write()
+    net = write.compile(x=(WIDTH,), full_elf=full_elf)
+    assert net.plan.full_elf == full_elf
+
+    expected = np.zeros((SEQ, WIDTH), dtype=np.float32)
+    net.write(rows, expected)
+    rng = np.random.default_rng(0)
+    # The first not row 0, so a write landing there is caught.
+    for slot in (37, 0, 5, SEQ - 1):
+        x = rng.standard_normal(WIDTH).astype(bfloat16)
+        expected[slot] = x.astype(np.float32)
+        write(x, pos=slot)
+        got = np.asarray(net.read(rows), dtype=np.float32).reshape(expected.shape)
+        wrong = np.argwhere(got != expected)
+        assert not len(
+            wrong
+        ), f"slot {slot}: {len(wrong)} elements differ, first {wrong[:4]}"
