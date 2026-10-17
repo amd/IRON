@@ -215,3 +215,77 @@ def test_a_decoder_call_before_any_encode_is_refused(whisper):
     model, *_ = whisper
     with pytest.raises(RuntimeError, match=r"encode\(\) first"):
         model.call_values()
+
+
+class Attending(Features):
+    """A ``Features`` tower whose one layer attends its rows to themselves,
+    bounded to its ``n``."""
+
+    def __init__(self, width: int, rows: int):
+        super().__init__(width, rows)
+        self.layers = [None]
+
+    def layer(self, step, i, weights, x):
+        q = x.reshape(x.shape[0], CONFIG.n_heads, CONFIG.head_dim)
+        return self.attend(step, i, q, q, q)
+
+
+def attended(rows) -> np.ndarray:
+    """``rows`` attended to themselves per head in float32, as ``Attending``'s
+    layer does, rounded once to bf16.
+    """
+    H, D = CONFIG.n_heads, CONFIG.head_dim
+    h = np.asarray(rows, np.float32).reshape(-1, H, D).transpose(1, 0, 2)
+    p = h @ h.transpose(0, 2, 1) * np.float32(D**-0.5)
+    p = np.exp(p - p.max(-1, keepdims=True))
+    p /= p.sum(-1, keepdims=True)
+    out = (p @ h).transpose(1, 0, 2).reshape(rows.shape[0], H * D)
+    return out.astype(bfloat16)
+
+
+def run(model, buffer, n: int, source: int, tokens) -> np.ndarray:
+    """The encode version's reference on ``buffer``, ``n`` of its rows
+    valid, then the prompt chunks' over ``tokens`` reading ``source`` rows:
+    the last chunk's logits.
+    """
+    values = dict(token=0, position=0, chunk=0, rows=1, source=source)
+    model.reference(None, buffer, **values, encoder_n=n)
+    logits, _ = prompt(model, tokens, source)
+    return np.asarray(logits, np.float32).reshape(-1)
+
+
+def test_padded_encoder_rows_reach_neither_attention():
+    """A clip of 200 rows padded to 256 with rows far from any real one, and
+    a longer clip's rows left in the cross states past them: the encoder's
+    self-attention (bounded by its ``n``) and the decoder's cross attention
+    (by ``source``) read neither, so the logits are a zero-padded clip's on
+    a fresh model bit for bit, and the oracle's over the 200 rows. Bounded
+    to all 256 rows, they are not.
+    """
+    weights = tree(0)
+    rng = np.random.default_rng(2)
+    clip = (rng.standard_normal((200, CONFIG.emb_dim)) / 2).astype(bfloat16)
+    tokens = rng.integers(0, CONFIG.vocab_size, 300)
+    garbage = (rng.standard_normal((SOURCE, CONFIG.emb_dim)) * 4).astype(bfloat16)
+
+    def model():
+        return Whisper(
+            CONFIG, weights, Attending(CONFIG.emb_dim, SOURCE), weights.model.decoder
+        )
+
+    fresh = model()
+    buffer, own = fresh.encoder.inputs(clip)
+    n = fresh.encoder.soft(own)
+    clean = run(fresh, buffer, n, n, tokens)
+
+    stale = model()
+    run(stale, garbage, SOURCE, SOURCE, tokens)
+    padded = buffer.copy()
+    padded[n:] = garbage[n:]
+    np.testing.assert_array_equal(run(stale, padded, n, n, tokens), clean)
+
+    oracle = Whisper.oracle(CONFIG, weights, weights.model.decoder)
+    oracle.encode(attended(clip))
+    _assert_close([clean], [oracle.logits(tokens)])
+    leaked = run(model(), padded, SOURCE, SOURCE, tokens)
+    assert np.abs(leaked - clean).max() > np.abs(clean - oracle.logits(tokens)).max()
