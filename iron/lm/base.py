@@ -145,7 +145,8 @@ class DecoderConfig(Config):
     n_kv_groups: int = dataclasses.field(metadata={"json": "num_key_value_heads"})
     head_dim: int = dataclasses.field(metadata={"json": "head_dim"})
     hidden_dim: int = dataclasses.field(metadata={"json": "intermediate_size"})
-    rope_base: float = dataclasses.field(metadata={"json": "rope_theta"})
+    # None turns nothing: a decoder of absolute positions (``positions``).
+    rope_base: float | None = dataclasses.field(metadata={"json": "rope_theta"})
     max_seq_len: int = 32768
     rope_scaling: RopeScaling | None = None
     # The rotated prefix of head_dim (partial rotary, e.g. Phi's 0.75): None
@@ -171,7 +172,10 @@ class DecoderConfig(Config):
         """
         return self.rotary_dim or self.head_dim
 
-    def angles(self) -> np.ndarray:
+    def angles(self) -> np.ndarray | None:
+        """The RoPE table, a row per position; None with no ``rope_base``."""
+        if self.rope_base is None:
+            return None
         angles = rope_angles(
             self.rope_width, self.max_seq_len, self.rope_base, self.rope_scaling
         )
@@ -442,10 +446,16 @@ class Oracle:
     def embed(self, x):
         return x
 
+    def positions(self, x):
+        """``x``, its rows at positions from 0, with the model's absolute
+        positions placed; unchanged by default.
+        """
+        return x
+
     def logits(self, tokens) -> np.ndarray:
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
-        angles = self.angles[: tokens.size]
-        x = self.embed(self.embedding[tokens])
+        angles = None if self.angles is None else self.angles[: tokens.size]
+        x = self.positions(self.embed(self.embedding[tokens]))
         for i, w in enumerate(self.layers):
             x = self.layer(i, angles, widen(w), x)
         return self.head(x[-1])

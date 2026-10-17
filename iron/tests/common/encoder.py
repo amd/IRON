@@ -18,6 +18,7 @@ import iron
 from iron import Scratchpad
 from iron.lm import Encoder, Layer, Tower, rope_angles
 from iron.operators.copy import Copy, Gather
+from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.mha import MHA
 from iron.tests.common.layer import LLAMA, module, shapes
 
@@ -216,3 +217,30 @@ def test_the_default_layer_is_the_config_s_attending_both_ways(table):
     ]
     ids, values = graph.inputs(np.arange(9))
     assert np.shape(graph.reference(ids, **values)) == (9, HEADS * HEAD_DIM)
+
+
+class Positioned(SelfAttention):
+    """One layer of ``SelfAttention`` over rows placed by a held table of
+    absolute positions."""
+
+    def __init__(self, table, positions):
+        super().__init__(table, 1)
+        self.position_table = iron.weight(positions)
+
+    def positions(self, x, step):
+        return ElementwiseAdd.step(x, Copy.step(self.position_table[: step.n]))
+
+
+@pytest.mark.parametrize("n", [9, ROWS])
+def test_an_encoder_places_its_positions_through_the_hook(table, n):
+    rng = np.random.default_rng(n)
+    positions = (rng.standard_normal((ROWS, HEADS * HEAD_DIM)) / 4).astype(bfloat16)
+    graph = Positioned(table, positions)
+    tokens = rng.integers(0, VOCAB, n)
+    ids, values = graph.inputs(tokens)
+    got = graph.reference(ids, **values)
+    x = (table[tokens].astype(np.float32) + positions[:n]).astype(bfloat16)
+    verdict = compare(np.asarray(got), attention(x, 1.0), TOLERANCE)
+    assert verdict, verdict
+    unplaced = attention(table[tokens], 1.0)
+    assert not compare(np.asarray(got), unplaced, TOLERANCE)

@@ -61,7 +61,8 @@ def contexts(top: int, count: int, unit: int) -> list[tuple[float, int]]:
 @dataclasses.dataclass
 class DecodeStep:
     prompt: bool
-    angles: Handle
+    # None turns nothing.
+    angles: Handle | None
     # A per-call value in a trace, its number in the reference.
     chunk: Any
     rows: Any
@@ -99,7 +100,8 @@ class CausalLM(Model):
         G, L, D = config.n_kv_groups, config.max_seq_len, config.head_dim
         self.keys = [iron.state((L, G, D)) for _ in self.layers]
         self.values = [iron.state((L, G, D)) for _ in self.layers]
-        self.rope = iron.weight(config.angles().astype(bfloat16))
+        angles = config.angles()
+        self.rope = None if angles is None else iron.weight(angles.astype(bfloat16))
         # Zero until the host writes draws: a row of zeros is greedy.
         self.draws = iron.state((L, ROW_WORDS), np.int32)
         self.drawn = iron.state((L,), np.int32)
@@ -120,6 +122,12 @@ class CausalLM(Model):
         raise NotImplementedError(f"{type(self).__name__} defines no head()")
 
     def embed(self, x):
+        return x
+
+    def positions(self, x, step: DecodeStep):
+        """``x``, the rows ``step`` runs, with the model's absolute positions
+        placed; unchanged by default.
+        """
         return x
 
     def lookup(self, ids):
@@ -160,12 +168,14 @@ class CausalLM(Model):
         """
         c = self.config
         L, C, A = c.max_seq_len, c.prefill_chunk, c.rope_width
-        if prompt:
+        if self.rope is None:
+            angles = None
+        elif prompt:
             angles = Copy.step(self.rope.reshape(L // C, C, A)[chunk, :rows])
         else:
             angles = Copy.step(self.rope[position]).reshape(1, A)
-        x = self.embed(x)
         step = DecodeStep(prompt, angles, chunk, rows, position)
+        x = self.positions(self.embed(x), step)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
         if prompt:

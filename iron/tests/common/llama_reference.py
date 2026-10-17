@@ -28,7 +28,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from ml_dtypes import bfloat16
 
+import iron
 from iron.lm import (
     DecoderConfig,
     Oracle,
@@ -38,7 +40,10 @@ from iron.lm import (
     generate_on_host,
 )
 from iron.lm.generation import greedy
-from iron.applications.llama.model import Llama
+from iron.applications.llama.model import Llama, LlamaOracle
+from iron.operators.copy import Copy
+from iron.operators.elementwise_add import ElementwiseAdd
+from iron.operators.rope import RoPE
 from iron.tests.common.llama_model import PROFILE, SMALL, checkpoint
 
 pytestmark = pytest.mark.usefixtures("npu2")  # MHA decode on any host
@@ -263,3 +268,64 @@ def test_the_carried_draws_are_the_host_loop_s_tokens(cpu, temperature):
         _, carry = model(chunk=0, rows=1, **carry)
         drawn.append(carry["token"])
     assert drawn == expected
+
+
+class Placed(OnHost):
+    """``OnHost`` with no RoPE, its positions a held table's rows added to
+    the embedding's.
+    """
+
+    def __init__(self, config, weights, table):
+        super().__init__(config, weights)
+        self.table = iron.weight(table)
+
+    def positions(self, x, step):
+        c = self.config
+        L, C, E = c.max_seq_len, c.prefill_chunk, c.emb_dim
+        if step.prompt:
+            rows = Copy.step(self.table.reshape(L // C, C, E)[step.chunk, : step.rows])
+        else:
+            rows = Copy.step(self.table[step.position]).reshape(1, E)
+        return ElementwiseAdd.step(x, rows)
+
+
+class PlacedOracle(LlamaOracle):
+    """``Placed``'s oracle."""
+
+    def __init__(self, config, weights, table):
+        super().__init__(config, weights)
+        self.table = np.asarray(table, np.float32)
+
+    def positions(self, x):
+        return x + self.table[: x.shape[0]]
+
+
+def test_a_decoder_without_rope_places_its_positions_through_the_hook(cpu):
+    """No ``rope_base``: no table is held and nothing turns q and k; a
+    model's ``positions`` adds its own rows instead, in each prompt chunk at
+    the chunk's positions and in a decode step at its one, as its oracle's
+    ``positions`` does.
+    """
+    config = dataclasses.replace(
+        cpu.config, rope_base=None, max_seq_len=2 * cpu.config.prefill_chunk
+    )
+    assert config.angles() is None
+    table = np.random.default_rng(9).standard_normal(
+        (config.max_seq_len, config.emb_dim)
+    )
+    table = (table / 2).astype(bfloat16)
+    model = Placed(config, cpu.weights, table)
+    assert model.rope is None
+    for shapes in model.shapes():
+        steps = model.trace(**shapes).steps
+        assert not any(isinstance(s.op, RoPE) for s in steps)
+    oracle = PlacedOracle(config, cpu.weights, table)
+    tokens = np.random.default_rng(10).integers(0, config.vocab_size, 300)
+    first = oracle.logits(tokens)
+    _assert_close([model.logits(tokens)], [first])
+    tokens = np.append(tokens, first.argmax())
+    _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
+    with pytest.raises(AssertionError):
+        _assert_close(
+            [model.logits(tokens)], [LlamaOracle(config, cpu.weights).logits(tokens)]
+        )

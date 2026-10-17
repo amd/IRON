@@ -29,7 +29,7 @@ class EncodeStep:
     # The rows valid this call, a per-call value in a trace.
     n: Any
     angles: Any
-    # The rows the first layer took.
+    # The rows ``forward`` took, before any positions.
     embeddings: Any
 
 
@@ -67,6 +67,12 @@ class Encoder(Model):
         them; None rotates nothing.
         """
         return None
+
+    def positions(self, x, step: EncodeStep):
+        """``x``, the rows ``step`` runs, with the model's absolute positions
+        placed; unchanged by default.
+        """
+        return x
 
     def layer(self, step: EncodeStep, i: int, weights, x):
         """Layer ``i`` on ``x``: ``config.layer(i)``, attending bidirectionally."""
@@ -121,6 +127,7 @@ class Encoder(Model):
         ``x``, bounded to their first ``n``, rotated by ``angles``.
         """
         step = EncodeStep(n, angles, x)
+        x = self.positions(x, step)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
         return self.head(self.pool(self.norm(x), n))
