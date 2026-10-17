@@ -1020,7 +1020,7 @@ of its own that carries the mark.
 `iron/lm/` is what every language model shares; each model is an
 application over it, a package of its own under `iron/applications/`
 (`llama`, `embedding_gemma2`) holding its test, README, tokenizer and
-profiles. The library is five modules:
+profiles. The library is six modules:
 
 - `base.py`: what any model is over it. `Config`, the one field every
   model judges its RMS norms by (`eps`) and `from_checkpoint(path)`, built
@@ -1067,9 +1067,21 @@ profiles. The library is five modules:
   (`CausalLM.layer`) and in numpy (`Oracle.layer`), and the pass, RoPE and
   attention are shared. `embed()` on both, the identity
   by default, is where a model scales the rows the embedding gather
-  gives. A
+  gives, and `positions()` (`CausalLM.positions(x, step)`,
+  `Oracle.positions(x)`, `Encoder.positions(x, step)`), the identity by
+  default, where it adds an absolute position table's rows. A
   `DecoderConfig`'s `rotary_dim` rotates only that prefix of each head, and
-  its `rope_attention_scaling` scales the whole angle table once
+  its `rope_attention_scaling` scales the whole angle table once; with no
+  `rope_base` nothing rotates. `decoder=` names a decoder nested in its
+  checkpoint (`weights.model.decoder`), `weights.model` by default
+- `encoder_decoder.py`: `EncoderDecoder(config, weights, encoder,
+  decoder)`, a `CausalLM` whose layers also attend over an encoder's
+  output (a `Layer` holding `encoder_attn`). Its encode version (`encode()`
+  on the host) runs the encoder, its input and values named `encoder_<name>`,
+  and writes each layer's `cross_kv` into the states `cross_keys` and
+  `cross_values`; every version carries `source`, the encoder rows the
+  cross attention (`cross`) reads. `EncoderDecoderOracle.encode(memory)`
+  projects the twin's keys and values once a clip
 - `encoder.py`: `Encoder`, a bidirectional encoder compiled once at
   `max_tokens` rows with the length bound per call, with `CausalLM`'s
   hooks: its body is `lookup(ids[:n])`, then `forward`, which runs each

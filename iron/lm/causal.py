@@ -67,6 +67,8 @@ class DecodeStep:
     chunk: Any
     rows: Any
     position: Any
+    # The encoder's rows a cross attention reads (``EncoderDecoder``).
+    source: Any = None
 
 
 class CausalLM(Model):
@@ -164,9 +166,10 @@ class CausalLM(Model):
         """
         return self.forward(x, prompt=True, position=position, chunk=chunk, rows=rows)
 
-    def forward(self, x, *, prompt: bool, position, chunk, rows):
+    def forward(self, x, *, prompt: bool, position, chunk, rows, source=None):
         """The layers, the head and the draw over ``x``: a prompt chunk's
-        rows, else the decode step's one at ``position``.
+        rows, else the decode step's one at ``position``; ``source`` is the
+        step's (``DecodeStep``).
         """
         c = self.config
         L, C, A = c.max_seq_len, c.prefill_chunk, c.rope_width
@@ -176,7 +179,7 @@ class CausalLM(Model):
             angles = Copy.step(self.rope.reshape(L // C, C, A)[chunk, :rows])
         else:
             angles = Copy.step(self.rope[position]).reshape(1, A)
-        step = DecodeStep(prompt, angles, chunk, rows, position)
+        step = DecodeStep(prompt, angles, chunk, rows, position, source)
         x = self.positions(self.embed(x), step)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
