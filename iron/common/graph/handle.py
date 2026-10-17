@@ -62,6 +62,7 @@ class Handle:
         "gather_by",
         "repeat",
         "length",
+        "window",
     )
 
     def __init__(
@@ -78,6 +79,7 @@ class Handle:
         gather_by=None,
         repeat=None,
         length=None,
+        window=None,
     ):
         self.shape = tuple(int(s) for s in shape)
         self.dtype = dtype
@@ -97,6 +99,9 @@ class Handle:
         # second, each call (``at``).
         self.repeat: Affine | None = repeat
         self.length: Affine | None = length
+        # A run from a per-call start, ``x[s : s + W]``: its axis, s, W and
+        # the axis's length, until a bound (``[:n]``) keeps it inside.
+        self.window: tuple[int, Affine, int, int] | None = window
 
     @property
     def elements(self) -> int:
@@ -154,7 +159,49 @@ class Handle:
         bounds = {axes.index(axis): b for axis, b in self.bounds.items()}
         return Handle(shape, self.dtype, self.name, "view", self, 0, tap, bounds=bounds)
 
+    def _bound(self, key) -> "Handle":
+        """A run from a per-call start bounded per call, ``x[s : s + W][:n]``:
+        every call keeps ``s + n`` inside the axis, checked before it.
+        """
+        axis, start, width, n = self.window
+        entries = list(key) if isinstance(key, tuple) else [key]
+        entries += [slice(None)] * (len(self.shape) - len(entries))
+        run = entries[axis]
+        if (
+            any(
+                not isinstance(e, slice) or not e.start is e.stop is e.step is None
+                for i, e in enumerate(entries)
+                if i != axis
+            )
+            or not isinstance(run, slice)
+            or run.start not in (None, 0)
+            or run.step not in (None, 1)
+            or not isinstance(run.stop, (PerCall, Affine))
+        ):
+            raise IndexError(
+                f"{self!r} runs from a per-call start: bound its axis {axis} per "
+                f"call from its start, [:n], and take every other axis whole"
+            )
+        stop = run.stop.affine()
+        tracer = graph_tracer.get()
+        if tracer is not None:
+            tracer.limit(stop, 0, width + 1, self)
+            tracer.limit(start, 0, n + 1, self, stop)
+        return Handle(
+            self.shape,
+            self.dtype,
+            self.name,
+            self.role,
+            self.parent,
+            self.start,
+            self.tap,
+            self.index_by,
+            {**self.bounds, axis: stop},
+        )
+
     def __getitem__(self, key) -> "Handle":
+        if self.window is not None:
+            return self._bound(key)
         if self.tap is not None or self.parent is not None:
             raise TypeError("slicing a slice is not supported; slice the parent")
         entries = list(key) if isinstance(key, tuple) else [key]
@@ -217,16 +264,43 @@ class Handle:
                     f"{self!r} is bounded per call on axis {axis}; index it, take "
                     f"all of it, or slice what it bounds"
                 )
-        index_by = None
+        index_by = window = None
         static, shape, bounds = [], [], {}
         tracer = graph_tracer.get()
         for axis, (entry, n) in enumerate(zip(entries, self.shape)):
             if isinstance(entry, slice) and isinstance(entry.start, (PerCall, Affine)):
-                raise ValueError(
-                    f"a slice cannot start at a per-call value ({entry.start}) yet: "
-                    f"index one row, [{entry.start}], or bound an axis from its "
-                    f"start, [:n]"
-                )
+                # x[s : s + W]: a fixed width W from a per-call start s.
+                start = entry.start
+                start = start.affine() if isinstance(start, PerCall) else start
+                stop = entry.stop
+                stop = stop.affine() if isinstance(stop, PerCall) else stop
+                width = None
+                if isinstance(stop, Affine) and entry.step in (None, 1):
+                    width = (
+                        stop.add - start.add if start.down else stop.bias - start.bias
+                    )
+                    if stop != start + width:
+                        width = None
+                if width is None or not 0 < width <= n:
+                    raise IndexError(
+                        f"a run from a per-call start takes a fixed width, "
+                        f"[s : s + W] with 0 < W <= {n}, not [{entry.start}:"
+                        f"{entry.stop}]"
+                    )
+                if index_by is not None:
+                    raise ValueError("one axis at most is indexed by a per-call value")
+                if start.value.kind is Kind.DISPATCH_TIME:
+                    raise ValueError(
+                        f"{start} is a DispatchTime value; only a Scratchpad value can "
+                        f"start a run, since it moves a transfer's base address"
+                    )
+                if tracer is not None:
+                    tracer.limit(start, 0, n, self)
+                index_by = start * prod(self.shape[axis + 1 :])
+                window = (len(shape), start, width, n)
+                static.append(slice(0, width))
+                shape.append(width)
+                continue
             if axis in self.bounds and isinstance(entry, slice):
                 bounds[len(shape)] = self.bounds[axis]
                 static.append(entry)
@@ -279,7 +353,9 @@ class Handle:
                 self.start,
                 bounds=bounds,
             )
-        return self.at(tap, shape, index_by, bounds)
+        view = self.at(tap, shape, index_by, bounds)
+        view.window = window
+        return view
 
     def at(
         self,
@@ -374,7 +450,15 @@ class _Viewed:
     def __getitem__(self, key):
         if isinstance(key, _Viewed):  # a gather by the ids a state holds
             key = key._as_operand()
-        return self._as_operand()[key]
+        x = self._as_operand()
+        if not isinstance(x, np.ndarray):
+            return x[key]
+        # A reference's run past the axis's end, x[s : s + W], bounded after.
+        entries = key if isinstance(key, tuple) else (key,)
+        for axis, (e, n) in enumerate(zip(entries, x.shape)):
+            if isinstance(e, slice) and e.stop is not None and e.stop > n:
+                return _HostRun(x[key], axis, e.start or 0, n)
+        return x[key]
 
     def reshape(self, *shape):
         return self._as_operand().reshape(*shape)
@@ -395,6 +479,24 @@ class _Viewed:
         walk = walk if length is None else walk[:, : int(length)]
         flat = np.asarray(operand).reshape(-1)
         return flat[walk.gather(np.arange(flat.size))].reshape(-1, *shape[1:])
+
+
+class _HostRun:
+    """A reference's run from ``start`` past the end of its ``n``-long axis:
+    the rows there are, of which its bound may take no more.
+    """
+
+    def __init__(self, rows: np.ndarray, axis: int, start: int, n: int) -> None:
+        self.rows, self.axis, self.start, self.n = rows, axis, start, n
+
+    def __getitem__(self, key):
+        entries = key if isinstance(key, tuple) else (key,)
+        run = entries[self.axis] if self.axis < len(entries) else slice(None)
+        if run.stop is None:
+            raise IndexError(f"a run from {self.start} passes {self.n} rows: bound it")
+        if run.stop > self.rows.shape[self.axis]:
+            raise IndexError(f"rows to {self.start + run.stop} of {self.n}")
+        return self.rows[key]
 
 
 class State(_Viewed):
@@ -736,9 +838,25 @@ class _HostView:
         self.state, self.shape, self.key = state, tuple(shape), key
 
     def __getitem__(self, key):
-        if self.key is not None:
-            raise TypeError(f"a view of {self.state!r} is indexed once")
-        return _HostView(self.state, self.shape, key)
+        if self.key is None:
+            return _HostView(self.state, self.shape, key)
+        # A run then its bound, x[s : s + W][:n], as one slice of each axis.
+        first = self.key if isinstance(self.key, tuple) else (self.key,)
+        then = key if isinstance(key, tuple) else (key,)
+        if not all(isinstance(e, slice) for e in (*first, *then)):
+            raise TypeError(f"a view of {self.state!r} is sliced again by slices alone")
+        rank = len(self.shape)
+        first += (slice(None),) * (rank - len(first))
+        then += (slice(None),) * (rank - len(then))
+        runs = []
+        for n, a, b in zip(self.shape, first, then):
+            run = range(n)[a]
+            if b.stop is not None and b.stop > len(run):
+                raise IndexError(f"rows to {run.start + b.stop} of {n}")
+            runs.append(run[b])
+        return _HostView(
+            self.state, self.shape, tuple(slice(r.start, r.stop) for r in runs)
+        )
 
     def reshape(self, *shape):
         if self.key is not None:

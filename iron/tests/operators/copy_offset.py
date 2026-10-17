@@ -153,3 +153,39 @@ def test_a_row_lands_at_its_index_on_the_leading_axis(full_elf):
         assert not len(
             wrong
         ), f"slot {slot}: {len(wrong)} elements differ, first {wrong[:4]}"
+
+
+# A prompt's keys from any start, Llama's (positions, groups, head_dim)
+# cache: 200 rows, runs of 64, the last start's run past the end.
+LONG = 200
+
+
+@pytest.mark.parametrize("full_elf", [True, False], ids=["full_elf", "xclbin"])
+def test_a_run_lands_from_any_start_and_is_read_back(full_elf):
+    cache = iron.state((LONG, N_KV, HEAD_DIM), name="cache")
+
+    class Write(iron.Graph):
+        def body(self, x, *, start: Scratchpad[np.int32], rows: Scratchpad[np.int32]):
+            k = x[:rows].reshape(CHUNK, N_KV, HEAD_DIM)
+            Copy.step(k, cache[start : start + CHUNK][:rows])
+            return Copy.step(cache[start : start + CHUNK][:rows])
+
+    write = Write()
+    net = write.compile(x=(CHUNK, N_KV * HEAD_DIM), full_elf=full_elf)
+    expected = np.zeros((LONG, N_KV, HEAD_DIM), dtype=np.float32)
+    net.write(cache, expected)
+    rng = np.random.default_rng(0)
+    for start, rows in ((37, 64), (0, 13), (101, 1), (150, 50), (199, 1)):
+        x = rng.standard_normal((CHUNK, N_KV * HEAD_DIM)).astype(bfloat16)
+        rows_written = x[:rows].reshape(rows, N_KV, HEAD_DIM).astype(np.float32)
+        expected[start : start + rows] = rows_written
+        out = write(x, start=start, rows=rows)
+        got = np.asarray(net.read(cache), dtype=np.float32).reshape(expected.shape)
+        wrong = np.argwhere(got != expected)
+        assert not len(
+            wrong
+        ), f"{start=} {rows=}: {len(wrong)} elements differ, first {wrong[:4]}"
+        read = np.asarray(out.numpy(), dtype=np.float32).reshape(-1)
+        np.testing.assert_array_equal(
+            read[: rows * N_KV * HEAD_DIM], rows_written.reshape(-1)
+        )

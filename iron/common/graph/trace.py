@@ -85,12 +85,22 @@ class Binding:
 
 @dataclasses.dataclass(frozen=True)
 class Limit:
-    """A per-call ``expression`` a view of ``view`` holds in ``[lo, hi)``."""
+    """A per-call ``expression``, plus ``plus`` where given (a second
+    value's), that a view of ``view`` holds in ``[lo, hi)``.
+    """
 
     expression: Affine
     lo: int
     hi: int
     view: str
+    plus: Affine | None = None
+
+    def evaluate(self, values: Mapping[str, int]) -> int:
+        at = self.expression.evaluate(values)
+        return at if self.plus is None else at + self.plus.evaluate(values)
+
+    def __str__(self) -> str:
+        return str(self.expression) + ("" if self.plus is None else f" + {self.plus}")
 
 
 def _unbounded(h: Handle) -> Handle:
@@ -211,6 +221,7 @@ class TracedGraph:
         expressions = [
             *(b.expression for b in self.bindings),
             *(limit.expression for limit in self.limits),
+            *(limit.plus for limit in self.limits if limit.plus is not None),
             *(e for e in self.carry.values() if isinstance(e, Affine)),
             *(e.bound for e in self.encoders.values() if e.bound is not None),
         ]
@@ -424,6 +435,10 @@ class Tracer:
 
     def operand(self, x) -> Handle:
         if isinstance(x, Handle):
+            if x.window is not None:
+                # A run from a per-call start taken whole ends inside its axis.
+                _, start, width, n = x.window
+                self.limit(start + width, 0, n + 1, x)
             return x
         if isinstance(x, State):
             key = id(x)
@@ -836,11 +851,18 @@ class Tracer:
             limits=self.limits,
         )
 
-    def limit(self, expression: Affine, lo: int, hi: int, view: Handle) -> None:
-        """Record that a call's ``expression`` must lie in ``[lo, hi)`` for
-        ``view``, which it indexes or bounds.
+    def limit(
+        self,
+        expression: Affine,
+        lo: int,
+        hi: int,
+        view: Handle,
+        plus: Affine | None = None,
+    ) -> None:
+        """Record that a call's ``expression``, plus ``plus`` where given,
+        must lie in ``[lo, hi)`` for ``view``, which it indexes or bounds.
         """
-        self.limits.append(Limit(expression, lo, hi, repr(view)))
+        self.limits.append(Limit(expression, lo, hi, repr(view), plus))
 
 
 class _ReferenceTracer(Tracer):

@@ -820,10 +820,10 @@ class CompiledGraph:
                 f"{self.traced.name}: per-call values {sorted(unknown)} unknown"
             )
         for limit in self.traced.limits:
-            at = limit.expression.evaluate(values)
+            at = limit.evaluate(values)
             if not limit.lo <= at < limit.hi:
                 raise IndexError(
-                    f"{self.traced.name}: {limit.expression} is {at}, outside "
+                    f"{self.traced.name}: {limit} is {at}, outside "
                     f"[{limit.lo}, {limit.hi}) for {limit.view}"
                 )
         for handle, tensor in zip(self.traced.inputs, tensors):

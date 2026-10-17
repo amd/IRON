@@ -1404,6 +1404,124 @@ def test_an_index_before_a_bound_keeps_the_bound_on_its_axis():
     }
 
 
+def test_a_run_from_a_per_call_start_is_its_whole_chunk_s_view():
+    """``x[c * 16 : c * 16 + 16][:rows]`` is the view of block ``c`` of
+    ``x.reshape(4, 16, ...)[c, :rows]``: the same offset, pattern and bound.
+    """
+    chunk = PerCall("chunk", Kind.SCRATCHPAD, np.int32)
+    rows = PerCall("rows", Kind.SCRATCHPAD, np.int32)
+    cache = Handle((64, 2, 8), bfloat16, "cache", "state")
+    a = cache[chunk * 16 : chunk * 16 + 16][:rows]
+    b = cache.reshape(4, 16, 2, 8)[chunk, :rows]
+    assert (a.shape, a.bounds, a.index_by, a.ref()) == (
+        b.shape,
+        b.bounds,
+        b.index_by,
+        b.ref(),
+    )
+    assert (a.tap.offset, a.tap.sizes, a.tap.strides) == (
+        b.tap.offset,
+        b.tap.sizes,
+        b.tap.strides,
+    )
+
+
+def test_a_run_from_a_per_call_start_takes_any_start_on_any_axis():
+    """A start that is no block's (``pos``), floored (``pos // 64 * 64``), on
+    a leading or an inner axis: a view offset by the start's rows, its width
+    fixed, bounded on the same axis.
+    """
+    pos = PerCall("pos", Kind.SCRATCHPAD, np.int32)
+    rows = PerCall("rows", Kind.SCRATCHPAD, np.int32)
+    cache = Handle((100, 2, 8), bfloat16, "cache", "state")
+    v = cache[pos : pos + 16][:rows]
+    assert v.shape == (16, 2, 8) and v.bounds == {0: rows.affine()}
+    assert v.index_by == pos * 16
+    floored = pos // 64 * 64
+    assert cache[floored : floored + 64].index_by == floored * 16
+    keys = Handle((2, 100, 8), bfloat16, "keys", "state")
+    w = keys[:, pos : pos + 16][:, :rows]
+    assert w.shape == (2, 16, 8) and w.bounds == {1: rows.affine()}
+    assert w.index_by == pos * 8
+
+
+@pytest.mark.parametrize(
+    "key,error",
+    [
+        (lambda p, n: np.s_[p:], "fixed width"),
+        (lambda p, n: np.s_[p : p + 101], "fixed width"),
+        (lambda p, n: np.s_[p : n + 4], "fixed width"),
+        (lambda p, n: (p, np.s_[p : p + 4]), "one axis at most"),
+    ],
+    ids=["no_stop", "wider_than_the_axis", "another_value", "two_per_call"],
+)
+def test_a_run_from_a_per_call_start_has_a_fixed_width_and_one_start(key, error):
+    pos = PerCall("pos", Kind.SCRATCHPAD, np.int32)
+    n = PerCall("n", Kind.SCRATCHPAD, np.int32)
+    cache = Handle((100, 100), bfloat16, "cache", "state")
+    with pytest.raises((IndexError, ValueError), match=error):
+        cache[key(pos, n)]
+
+
+def test_a_run_is_bounded_from_its_start_on_its_own_axis():
+    pos = PerCall("pos", Kind.SCRATCHPAD, np.int32)
+    rows = PerCall("rows", Kind.SCRATCHPAD, np.int32)
+    run = Handle((100, 2, 8), bfloat16, "cache", "state")[pos : pos + 16]
+    for key in (np.s_[2:rows], np.s_[:4], np.s_[:, :rows]):
+        with pytest.raises(IndexError, match="bound its axis 0"):
+            run[key]
+
+
+def test_a_run_past_the_buffer_s_end_is_kept_inside_by_each_call():
+    """100 rows, runs of 16: a call's start plus its bound, or with no bound
+    the run's width, is checked to end within the buffer; so is the start.
+    """
+
+    class Bounded(iron.Graph):
+        def body(self, x, *, pos: Scratchpad[np.int32], rows: Scratchpad[np.int32]):
+            return Copy.step(x[pos : pos + 16][:rows])
+
+    class Whole(iron.Graph):
+        def body(self, x, *, pos: Scratchpad[np.int32]):
+            return Copy.step(x[pos : pos + 16])
+
+    def inside(t, **at):
+        return all(m.lo <= m.evaluate(at) < m.hi for m in t.limits)
+
+    t = Bounded().trace(x=(100, 16))
+    assert inside(t, pos=96, rows=4) and inside(t, pos=0, rows=16)
+    assert not inside(t, pos=96, rows=5) and not inside(t, pos=-1, rows=1)
+    assert not inside(t, pos=0, rows=17)
+    t = Whole().trace(x=(100, 16))
+    assert inside(t, pos=84) and not inside(t, pos=85)
+
+
+def test_a_run_from_a_per_call_start_is_written_and_read_as_numpy_does():
+    """The reference of a write of ``rows`` rows from ``start`` and a read of
+    them back, at starts no chunk's, one with its run past the end; and a
+    bound past the end refused.
+    """
+    L, C, W = 100, 16, 8
+    cache = iron.state((L, W), name="cache")
+
+    class Write(iron.Graph):
+        def body(self, x, *, start: Scratchpad[np.int32], rows: Scratchpad[np.int32]):
+            Copy.step(x[:rows], cache[start : start + C][:rows])
+            return Copy.step(cache[start : start + C][:rows])
+
+    write = Write()
+    expected = np.zeros((L, W), bfloat16)
+    rng = np.random.default_rng(0)
+    for start, rows in ((5, 16), (37, 3), (90, 10), (99, 1)):
+        x = rng.standard_normal((C, W)).astype(bfloat16)
+        expected[start : start + rows] = x[:rows]
+        got = write.reference(x, start=start, rows=rows)
+        np.testing.assert_array_equal(np.asarray(got), x[:rows])
+        np.testing.assert_array_equal(cache.host, expected)
+    with pytest.raises(IndexError, match="rows to 101 of 100"):
+        write.reference(x, start=90, rows=11)
+
+
 def test_the_trace_records_the_range_each_per_call_index_and_bound_holds():
     """A call checks these before it reaches the device, where an index past
     its view moves a transfer onto another buffer.
@@ -2289,24 +2407,6 @@ def test_a_version_reads_none_of_the_words_its_image_writes():
     traced = _DeviceIds(table).trace(ids=((64,), np.int32))
     assert traced.addresses, "the gather's table address is a word the image writes"
     assert traced.reads == {"n"}
-
-
-class _SliceFrom(iron.Graph):
-    """A slice starting at a per-call value, with and without a stop."""
-
-    def __init__(self, stop: int | None):
-        self.stop = stop
-        self.rows = iron.state((16, 256))
-
-    def body(self, *, pos: Scratchpad[np.int32]):
-        stop = None if self.stop is None else pos + self.stop
-        return Copy.step(self.rows[pos:stop])
-
-
-@pytest.mark.parametrize("stop", [None, 4])
-def test_a_slice_from_a_per_call_start_is_refused_by_name(stop):
-    with pytest.raises(ValueError, match="cannot start at a per-call value"):
-        _SliceFrom(stop).trace()
 
 
 @pytest.mark.parametrize("band_stride", [0, 1])

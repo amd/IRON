@@ -318,7 +318,10 @@ the stream, a core-read use is a write of the scalar into the core's
 runtime parameters. Arithmetic on a value is an expression of it; a view's
 index may floor by a power of two (`slots[position // 2048]`), which the
 host, the reference and a device loop's Emit all compute, while a bound
-(`x[:n]`), which patches a length, stays linear.
+(`x[:n]`), which patches a length, stays linear. A run of fixed width from
+a per-call start, `x[s : s + W]`, then bounded, `[:n]`, is a view any axis
+one descriptor walks takes; every call is checked to keep `s + n` (or, not
+bounded, `s + W`) inside the axis, so `W` may pass its end.
 
 **Compilation Flow**:
 
