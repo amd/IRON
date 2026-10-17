@@ -315,7 +315,9 @@ def _fill_caches(model, n: int, position: int):
     rows are left as it wrote them, so the model's record of what its
     caches hold stays true, and the step attends over a real prompt's
     scale of keys and values, the same ones on the device and in the
-    reference.
+    reference. A state checkpointed at each chunk boundary (``Checkpoints``)
+    holds, in the slot a call at ``position`` reads, the state the prompt
+    left.
     """
     version = next(iter(model.versions.values()))
     caches = []
@@ -327,8 +329,16 @@ def _fill_caches(model, n: int, position: int):
         rows[n:position] = np.resize(rows[:n], (position - n, *rows.shape[1:]))
         version.write(cache, rows)
         cache.host = rows  # the reference's, written in place as the device's
+    checkpoints = [c for states in model.recurrent.values() for c in states.values()]
+    for c in checkpoints:
+        slots = np.array(version.read(c.slots))
+        slots[c.slot(position)] = slots[c.slot(n)]
+        version.write(c.slots, slots)
+        c.slots.host = slots
     try:
         yield
     finally:
         for cache in caches:
             cache.host = None
+        for c in checkpoints:
+            c.slots.host = None

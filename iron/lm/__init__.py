@@ -31,7 +31,7 @@ from .blocks import (
     filterbank,
     project,
 )
-from .causal import CausalLM, DecodeStep
+from .causal import CausalLM, Checkpoints, DecodeStep
 from .encoder import EncodeStep, Encoder, Tower
 from .encoder_decoder import EncoderDecoder, EncoderDecoderOracle
 from .generation import Sampler, accuracy, determinism, generate_on_host
@@ -40,6 +40,7 @@ from .multimodal import Multimodal
 __all__ = [
     "CausalLM",
     "Checkpoint",
+    "Checkpoints",
     "ConcatChannels",
     "Config",
     "Conv1d",

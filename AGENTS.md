@@ -1076,7 +1076,13 @@ profiles. The library is six modules:
   `DecoderConfig`'s `rotary_dim` rotates only that prefix of each head, and
   its `rope_attention_scaling` scales the whole angle table once; with no
   `rope_base` nothing rotates. `decoder=` names a decoder nested in its
-  checkpoint (`weights.model.decoder`), `weights.model` by default
+  checkpoint (`weights.model.decoder`), `weights.model` by default.
+  `Checkpoints` is a state a decoder carries from position to position (a
+  recurrence, a convolution's last rows), a slot per prompt-chunk boundary
+  (`iron/tests/lm/checkpoints.py`): a prompt chunk reads its boundary's slot
+  and writes the next, a decode step its chunk's own, so a rerun from any
+  boundary (a chat turn's) is exact; a model holds its layers' in
+  `recurrent`
 - `encoder_decoder.py`: `EncoderDecoder(config, weights, encoder,
   decoder)`, a `CausalLM` whose layers also attend over an encoder's
   output (a `Layer` holding `encoder_attn`). Its encode version (`encode()`

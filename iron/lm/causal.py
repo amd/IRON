@@ -28,6 +28,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Carried, Scratchpad
 from iron.common.graph import CarriedLoop, CompiledGraph, Handle
+from iron.common.graph.handle import State
 from iron.common.graph.tuner import Tuning
 from iron.tune.probe import Call, Point
 from iron.operators.copy import Copy
@@ -71,6 +72,49 @@ class DecodeStep:
     source: Any = None
 
 
+@dataclasses.dataclass(frozen=True)
+class Checkpoints:
+    """A state a decoder carries from position to position, a slot per
+    prompt-chunk boundary: slot ``k`` holds it after the positions of chunk
+    ``k - 1`` run so far, slot 0 (never written) before the sequence.
+    """
+
+    slots: State
+    chunk: int
+
+    @classmethod
+    def of(
+        cls, shape: tuple[int, ...], max_seq_len: int, chunk: int, dtype=bfloat16
+    ) -> "Checkpoints":
+        """A state of ``shape``, a slot for every boundary of ``chunk``-position
+        prompt chunks up to ``max_seq_len`` positions.
+
+        Raises:
+            ValueError: ``chunk`` is not a power of two, which a decode step's
+                slot (``position // chunk``) needs.
+        """
+        if chunk < 1 or chunk & (chunk - 1):
+            raise ValueError(
+                f"Checkpoints: a {chunk}-position chunk is no power of two"
+            )
+        slots = (max_seq_len - 1) // chunk + 2
+        return cls(iron.state((slots, *shape), dtype), chunk)
+
+    def at(self, step: DecodeStep) -> tuple[Handle, Handle]:
+        """The slot ``step`` reads and the slot it writes, in a graph's body: a
+        prompt chunk's boundary and the next; a decode step's chunk's own, but
+        at the chunk's first position the boundary before it.
+        """
+        if step.prompt:
+            return self.slots[step.chunk], self.slots[step.chunk + 1]
+        p = step.position
+        return self.slots[(p - 1) // self.chunk + 1], self.slots[p // self.chunk + 1]
+
+    def slot(self, position: int) -> int:
+        """The slot holding the state after the first ``position`` positions."""
+        return 0 if position == 0 else (position - 1) // self.chunk + 1
+
+
 class CausalLM(Model):
     """A decoder on ``config``'s shape; a subclass gives ``head`` and ``oracle``.
 
@@ -104,6 +148,8 @@ class CausalLM(Model):
         G, L, D = config.n_kv_groups, config.max_seq_len, config.head_dim
         self.keys = [iron.state((L, G, D)) for _ in self.layers]
         self.values = [iron.state((L, G, D)) for _ in self.layers]
+        # Each layer's states carried position to position, by name.
+        self.recurrent: dict[int, dict[str, Checkpoints]] = {}
         angles = config.angles()
         self.rope = None if angles is None else iron.weight(angles.astype(bfloat16))
         # Zero until the host writes draws: a row of zeros is greedy.
