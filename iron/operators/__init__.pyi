@@ -23,6 +23,7 @@ from .magnitude import Magnitude
 from .merge import Merge
 from .mha import MHA
 from .relu import ReLU
+from .reduce_max import ReduceMax
 from .repeat import Repeat
 from .resample.op import PatchPositions, Resample, ResampleTaps
 from .rms_norm import RMSNorm

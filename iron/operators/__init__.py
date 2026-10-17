@@ -41,6 +41,7 @@ _OPERATOR_MODULES = {
     "Merge": "merge",
     "MHA": "mha",
     "PatchPositions": "resample.op",
+    "ReduceMax": "reduce_max",
     "ReLU": "relu",
     "RMSNorm": "rms_norm",
     "Repeat": "repeat",
