@@ -10,6 +10,7 @@ hardware tests' job.
 """
 
 import dataclasses
+import inspect
 from types import SimpleNamespace
 from typing import Any
 
@@ -2159,3 +2160,46 @@ def test_a_whole_reshape_of_a_held_array_is_gathered_under_its_own_path():
     assert gather.refs()[0] == BufferRef("weights.embed.weight")
     ids = np.array([15, 0, 8, 7], np.int32)
     np.testing.assert_array_equal(g.reference(ids), tables.reshape(16, 256)[ids])
+
+
+class _Summed(iron.Graph):
+    """The sum of the first ``n`` rows of as many inputs as it is made with."""
+
+    def __init__(self, count: int):
+        self.count = count
+
+    def signature(self) -> inspect.Signature:
+        P = inspect.Parameter
+        inputs = [P(f"x{i}", P.POSITIONAL_OR_KEYWORD) for i in range(self.count)]
+        n = P("n", P.KEYWORD_ONLY, annotation=Scratchpad[np.int32])
+        return inspect.Signature([*inputs, n])
+
+    def body(self, *inputs, **values):
+        n = values["n"]
+        total = inputs[0][:n]
+        for x in inputs[1:]:
+            total = ElementwiseAdd.step(total, x[:n])
+        return total
+
+
+@pytest.mark.parametrize("count", [2, 3])
+def test_a_graph_names_its_inputs_and_values_in_signature(count):
+    g = _Summed(count)
+    shapes = {f"x{i}": (8, 256) for i in range(count)}
+    t = g.trace(**shapes)
+    assert [h.name for h in t.inputs] == list(shapes)
+    assert [v.name for v in t.values] == ["n"]
+    assert len(t.steps) == count - 1
+    xs = [np.full((8, 256), i + 1, bfloat16) for i in range(count)]
+    got = g.reference(*xs, n=3)
+    np.testing.assert_array_equal(got, np.full((3, 256), sum(range(1, count + 1))))
+    with pytest.raises(TypeError, match="per-call value"):
+        g.reference(*xs)
+
+
+def test_a_body_of_args_with_no_signature_is_refused_as_its_class_is_made():
+    with pytest.raises(TypeError, match="not traceable"):
+
+        class _Bad(iron.Graph):
+            def body(self, *inputs):
+                return inputs

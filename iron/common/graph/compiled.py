@@ -19,7 +19,7 @@ from collections.abc import Callable, Collection, Mapping
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Annotated, Any, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, get_args, get_origin
 
 import aie.utils as aie_utils
 import numpy as np
@@ -83,16 +83,90 @@ def _store(
         release(piece)
 
 
+@dataclasses.dataclass(frozen=True)
+class _Parameters:
+    """A body's inputs, which of them may be left out, and its per-call
+    values, read from its signature."""
+
+    inputs: list[str]
+    values: dict[str, tuple[Kind, Any]]
+    optional: frozenset[str]
+
+    @property
+    def carried(self) -> list[str]:
+        return [n for n, (kind, _) in self.values.items() if kind is Kind.CARRIED]
+
+    @classmethod
+    def of(cls, owner: str, signature: inspect.Signature) -> _Parameters:
+        """``signature``'s parameters, ``self`` left out, as a graph reads them.
+
+        Raises:
+            TypeError: An input defaults to other than None or is named as a
+                ``compile()`` keyword, a per-call value is unannotated or
+                floating point, or a parameter is ``*args``/``**kwargs``.
+        """
+        params = list(signature.parameters.values())
+        inputs = [
+            p.name
+            for p in params
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+        keywords = inspect.signature(Graph.compile).parameters
+        taken = [
+            n
+            for n in inputs
+            if n in keywords and keywords[n].kind is not keywords[n].VAR_KEYWORD
+        ]
+        if taken:
+            raise TypeError(
+                f"{owner}.body: inputs {taken} are named as compile()'s "
+                f"keywords, so no shape could be given them; rename them"
+            )
+        values = {}
+        optional = set()
+        for p in params:
+            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
+                if p.default is None:
+                    optional.add(p.name)
+                elif p.default is not p.empty:
+                    raise TypeError(
+                        f"{owner}.body: input {p.name!r} defaults to "
+                        f"{p.default!r}; an input may only default to None"
+                    )
+            elif p.kind is p.KEYWORD_ONLY:
+                ann = p.annotation
+                marks = ann.__metadata__ if get_origin(ann) is Annotated else ()
+                kinds = [k for k in Kind if k.value in marks]
+                if not kinds:
+                    raise TypeError(
+                        f"{owner}.body: keyword-only parameter {p.name!r} "
+                        f"is a per-call value and must be annotated Scratchpad[T], "
+                        f"Carried[T] or aie.iron.DispatchTime[T]"
+                    )
+                dtype = get_args(ann)[0]
+                if np.dtype(dtype).kind == "f":
+                    raise TypeError(
+                        f"{owner}.body: per-call value {p.name!r} cannot be "
+                        f"floating point: the scratchpad encoding zeroes the top "
+                        f"two bits of the value"
+                    )
+                values[p.name] = (kinds[0], dtype)
+            elif p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+                raise TypeError(f"{owner}.body: *args/**kwargs are not traceable")
+        return cls(inputs, values, frozenset(optional))
+
+
 class Graph:
     """A graph: a subclass whose ``body`` is traced on handles.
 
     ``body``'s positional parameters are the inputs (one defaulting to None
     may be left out), its keyword-only ones the per-call values, and what it
-    returns the outputs. Weights and states are what the instance holds,
-    named by attribute path (``self.layers[3].q`` is ``layers.3.q``).
-    ``profile`` is a ``Profile`` or a directory of ``<device>.json`` ones,
-    the one way a step's tunables come from one: ``compile(profile=)``
-    overrides it for one compile.
+    returns the outputs; a graph whose inputs and values follow what it
+    holds names them in ``signature()`` instead. Weights and states are what
+    the instance holds, named by attribute path (``self.layers[3].q`` is
+    ``layers.3.q``). ``profile`` is a ``Profile`` or a directory of
+    ``<device>.json`` ones, the one way a step's tunables come from one:
+    ``compile(profile=)`` overrides it for one compile.
 
     Called in another graph's body, on its handles and per-call values, a
     graph's body traces into that graph: its steps are the caller's, its
@@ -102,73 +176,44 @@ class Graph:
 
     profile: Profile | Path | None = None
 
-    _inputs: list[str] = []
-    _values: dict[str, tuple[Kind, Any]] = {}
-    _optional: frozenset[str] = frozenset()
-    _carried: list[str] = []
-
     def body(self, *inputs: Any, **values: Any) -> Any:
         raise NotImplementedError(f"{type(self).__name__} defines no body()")
 
+    def signature(self) -> inspect.Signature:
+        """The inputs and per-call values ``body`` takes, ``self`` left out:
+        ``body``'s own parameters, unless a subclass names them here.
+        """
+        signature = inspect.signature(type(self).body, eval_str=True)
+        return signature.replace(parameters=list(signature.parameters.values())[1:])
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
-        if "body" not in cls.__dict__:
-            return
-        params = list(inspect.signature(cls.body).parameters.values())[1:]
-        cls._inputs = [
-            p.name
-            for p in params
-            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
-        ]
-        keywords = inspect.signature(Graph.compile).parameters
-        taken = [
-            n
-            for n in cls._inputs
-            if n in keywords and keywords[n].kind is not keywords[n].VAR_KEYWORD
-        ]
-        if taken:
-            raise TypeError(
-                f"{cls.__name__}.body: inputs {taken} are named as compile()'s "
-                f"keywords, so no shape could be given them; rename them"
-            )
-        hints = get_type_hints(cls.body, include_extras=True)
-        cls._values = {}
-        optional = set()
-        for p in params:
-            if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
-                if p.default is None:
-                    optional.add(p.name)
-                elif p.default is not p.empty:
-                    raise TypeError(
-                        f"{cls.__name__}.body: input {p.name!r} defaults to "
-                        f"{p.default!r}; an input may only default to None"
-                    )
-            elif p.kind is p.KEYWORD_ONLY:
-                ann = hints.get(p.name)
-                marks = ann.__metadata__ if get_origin(ann) is Annotated else ()
-                kinds = [k for k in Kind if k.value in marks]
-                if not kinds:
-                    raise TypeError(
-                        f"{cls.__name__}.body: keyword-only parameter {p.name!r} "
-                        f"is a per-call value and must be annotated Scratchpad[T], "
-                        f"Carried[T] or aie.iron.DispatchTime[T]"
-                    )
-                dtype = get_args(ann)[0]
-                if np.dtype(dtype).kind == "f":
-                    raise TypeError(
-                        f"{cls.__name__}.body: per-call value {p.name!r} cannot be "
-                        f"floating point: the scratchpad encoding zeroes the top "
-                        f"two bits of the value"
-                    )
-                cls._values[p.name] = (kinds[0], dtype)
-            elif p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
-                raise TypeError(
-                    f"{cls.__name__}.body: *args/**kwargs are not traceable"
-                )
-        cls._optional = frozenset(optional)
-        cls._carried = [
-            n for n, (kind, _) in cls._values.items() if kind is Kind.CARRIED
-        ]
+        # A body of its own is checked as its class is made, unless the
+        # class names its parameters in signature() instead.
+        if "body" in cls.__dict__ and cls.signature is Graph.signature:
+            signature = inspect.signature(cls.body, eval_str=True)
+            parameters = list(signature.parameters.values())[1:]
+            _Parameters.of(cls.__name__, signature.replace(parameters=parameters))
+
+    @functools.cached_property
+    def _parameters(self) -> _Parameters:
+        return _Parameters.of(type(self).__name__, self.signature())
+
+    @property
+    def _inputs(self) -> list[str]:
+        return self._parameters.inputs
+
+    @property
+    def _values(self) -> dict[str, tuple[Kind, Any]]:
+        return self._parameters.values
+
+    @property
+    def _optional(self) -> frozenset[str]:
+        return self._parameters.optional
+
+    @property
+    def _carried(self) -> list[str]:
+        return self._parameters.carried
 
     @property
     def name(self) -> str:
