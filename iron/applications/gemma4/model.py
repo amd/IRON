@@ -44,8 +44,9 @@ class Proportional:
 @dataclasses.dataclass(frozen=True)
 class Gemma4Config(DecoderConfig):
     """Gemma 4's text model, from its checkpoint's ``text_config``: the
-    shape of a sliding layer, and a global layer's own head size, RoPE and
-    key and value heads.
+    shape of a sliding layer, and a global layer's own head size and RoPE.
+    Its own key and value heads (``num_global_key_value_heads``) are read
+    only with ``attention_k_eq_v``, which is not built.
     """
 
     vocab_size: int = dataclasses.field(metadata={"json": "text_config.vocab_size"})
@@ -79,10 +80,6 @@ class Gemma4Config(DecoderConfig):
     )
     global_head_dim: int = dataclasses.field(
         default=512, metadata={"json": "text_config.global_head_dim"}
-    )
-    # None: a global layer has the sliding layers' key and value heads.
-    global_kv_groups: int | None = dataclasses.field(
-        default=None, metadata={"json": "text_config.num_global_key_value_heads"}
     )
     global_rope_base: float = dataclasses.field(
         default=1000000.0,
@@ -128,7 +125,7 @@ class Gemma4Config(DecoderConfig):
     def heads(self, i: int) -> tuple[int, int]:
         """Layer ``i``'s key and value heads and head size."""
         if i in self.global_layers:
-            return self.global_kv_groups or self.n_kv_groups, self.global_head_dim
+            return self.n_kv_groups, self.global_head_dim
         return self.n_kv_groups, self.head_dim
 
     def kv_source(self, i: int) -> int:
