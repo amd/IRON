@@ -11,9 +11,9 @@ against, `LlamaOracle`. Both are built from the same config and weights,
 Llama 3.2 1B's here; nothing here needs torch.
 
 The model is a package of `iron.lm` (its shared decoder, attention and
-SwiGLU block), `iron/applications/llama/`:
+layer, `Layer`), `iron/applications/llama/`:
 
-- [`model.py`](model.py): its layer and head on the NPU and in numpy, its
+- [`model.py`](model.py): its head on the NPU and in numpy, its
   shape, where its checkpoint keeps each weight, its tokenizer, and the
   command line below
 - [`profiles/`](profiles): its tunables, one file per device

@@ -67,7 +67,7 @@ def test_sandwich_layer_matches_hand_assembled_attention_and_geglu():
         rms((h @ weights["k_proj"].T).reshape(n, G, D), weights["k_norm"]), [angles]
     )
     v = rms((h @ weights["v_proj"].T).reshape(n, G, D), np.float32(1))
-    a = oracle.attend(q, k, v) @ weights["o_proj"].T
+    a = oracle.attend(q, k, v, scale=1.0) @ weights["o_proj"].T
     x2 = x + rms(a, norms[1])
     h2 = rms(x2, norms[2])
     gelu = Oracle.gelu_tanh(h2 @ weights["gate"].T)

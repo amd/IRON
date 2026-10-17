@@ -1034,7 +1034,8 @@ profiles. The library is four modules:
   reference repeats; it widens a layer's weights to float32 as the pass
   reaches them, and holds the embedding in float32, so it is built to check
   with; it also carries the primitives every model's own oracle shares:
-  `rms_norm`, `gelu_tanh`, `attend(causal=, window=)` and `rotate`);
+  `linear`, `rms_norm`, `silu`, `gelu_tanh`, `attend(causal=, window=,
+  scale=)` and `rotate`);
   `Model`, a graph
   whose versions `load(tuner, full_elf)` compiles before the first call,
   in the packaging asked for; and `Runner` and `main`, a decoder's
@@ -1048,10 +1049,11 @@ profiles. The library is four modules:
   without the real weights or the tokenizer
 - `causal.py`: `CausalLM`, a decoder as one graph, a prompt chunk and a
   decode step (`DecodeStep`), the key and value caches, attention over them
-  (`attend`) and `logits(tokens)`. A model subclasses it with `layer(step,
-  i, weights, x)` and `head(x)`, and `Oracle` with a numpy `layer(angles,
-  weights, x)` and `head(x)`, which it names as its `CausalLM`'s `oracle`;
-  the pass, RoPE and attention are shared. `embed()` on both, the identity
+  (`attend`) and `logits(tokens)`. A model subclasses it with `head(x)`,
+  and `Oracle` with a numpy `head(x)`, which it names as its `CausalLM`'s
+  `oracle`; each layer is its config's `layer(i)`, a `Layer`, on the NPU
+  (`CausalLM.layer`) and in numpy (`Oracle.layer`), and the pass, RoPE and
+  attention are shared. `embed()` on both, the identity
   by default, is where a model scales the rows the embedding gather
   gives. A
   `DecoderConfig`'s `rotary_dim` rotates only that prefix of each head, and
@@ -1061,8 +1063,9 @@ profiles. The library is four modules:
 - `blocks.py`: what layers are built from: `project(x, w)`, a weight's
   projection at either row count (GEMV for one row, GEMM for more), with a
   `bias` folded on by `RowwiseAdd` where a checkpoint's projection carries
-  one, and the GEMM's `k_tile` and `tile_n` where the weight's dimensions
-  are not multiples of their defaults;
+  one, the GEMM's `k_tile` and `tile_n` where the weight's dimensions
+  are not multiples of their defaults, and with `accurate=True` the GEMM
+  whose float32 sums round once;
   `SwiGLU`, the SwiGLU feed-forward as a graph of its own, called in a
   model's body or alone, device-tested by `iron/tests/lm/swiglu.py`;
   `LogMel`, an audio front end's log-mel spectrogram, and `Conv2d`, a
@@ -1070,9 +1073,16 @@ profiles. The library is four modules:
   `iron/tests/lm/log_mel.py` and `iron/tests/lm/conv2d.py` (each graph's
   numpy reference is its `oracle()` method); `ImagePatches` resizes a vision
   front end's image into patches, `iron/tests/lm/image_patches.py`; and
-  `Block`, the attention + SwiGLU layer a Llama-style model (Llama 3,
-  Granite 4.2 3B) mixes in alongside `CausalLM`, its own oracle's `layer()`
-  the same shape in numpy, built from `Oracle`'s shared primitives.
+  `Layer`, a transformer layer read from a checkpoint's layer module by its
+  Hugging Face names (`input_layernorm`, `self_attn.q_proj`, ...,
+  `mlp.down_proj`). The module decides its parts: sandwich norms, q and k
+  norms, biases, a `linear` wrapper, a fused `qkv_proj` or `gate_up_proj`
+  (cut by rows, views of the checkpoint's array), a per-layer input
+  (`ple_block`) and a `layer_scalar`. The config's `layer(i)` gives the
+  rest: heads, activation, attention scale and window, a value norm. Its
+  `step()` runs in a graph's body with the model kind's `attend` and RoPE
+  angles, and `oracle()` is its float32 twin, built from `Oracle`'s
+  primitives (`iron/tests/common/layer.py`).
   EmbeddingGemma 2's own Gemma-shaped blocks (`geglu`, the GELU-gated
   feed-forward; `sandwich`, a block between two RMS norms; `attention`, an
   encoder's bidirectional attention; `sandwich_layer`, the two together) are
@@ -1093,7 +1103,7 @@ Their dependencies (safetensors, tiktoken, ...) are in
 ### Llama 3.2 1B Inference
 
 Full LLM inference example at `iron/applications/llama/`: `model.py`
-(Llama 3's layer and head on the NPU and in numpy, Llama 3.2 1B's shape,
+(Llama 3's head on the NPU and in numpy, Llama 3.2 1B's shape,
 the tokenizer), `profiles/` (tunables), its test and README:
 
 - **Required files**: `config.json`, `model.safetensors`, `tokenizer.model` from Hugging Face

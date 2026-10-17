@@ -21,11 +21,11 @@ from .base import (
     widen,
 )
 from .blocks import (
-    Block,
     ConcatChannels,
     Conv1d,
     Conv2d,
     ImagePatches,
+    Layer,
     LogMel,
     MaxPool2d,
     SwiGLU,
@@ -37,7 +37,6 @@ from .encoder import Encoder
 from .generation import Sampler, accuracy, determinism, generate_on_host
 
 __all__ = [
-    "Block",
     "CausalLM",
     "Checkpoint",
     "ConcatChannels",
@@ -49,6 +48,7 @@ __all__ = [
     "Derived",
     "Encoder",
     "ImagePatches",
+    "Layer",
     "LogMel",
     "MaxPool2d",
     "Model",

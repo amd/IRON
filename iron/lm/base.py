@@ -16,6 +16,7 @@ import math
 import mmap
 import struct
 from collections.abc import Callable, Mapping
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
@@ -30,6 +31,7 @@ from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 from iron.tune.narrowing import CostTable, JointNarrowing, NarrowingKinds
 from iron.tune.probe import Call
 
+from .blocks import Layer
 from .generation import (
     SEED,
     Sampler,
@@ -123,6 +125,10 @@ class Config:
             kwargs[f.name] = convert(value) if convert else value
         return cls(**kwargs)
 
+    def layer(self, i: int) -> Layer:
+        """Layer ``i`` as the config describes it."""
+        raise NotImplementedError(f"{type(self).__name__} describes no layer")
+
 
 @dataclasses.dataclass(frozen=True)
 class DecoderConfig(Config):
@@ -149,6 +155,7 @@ class DecoderConfig(Config):
     # build time (LongRoPE/YaRN's "mscale"): 1.0 leaves cos/sin as rotations.
     rope_attention_scaling: float = 1.0
     prefill_chunk: int = 2048
+    hidden_act: str = dataclasses.field(default="silu", metadata={"json": "hidden_act"})
 
     def __post_init__(self):
         if self.max_seq_len % self.prefill_chunk:
@@ -171,6 +178,16 @@ class DecoderConfig(Config):
         if self.rope_attention_scaling != 1.0:
             angles = angles * np.float32(self.rope_attention_scaling)
         return angles
+
+    def layer(self, i: int) -> Layer:
+        """Layer ``i``: every layer of a decoder is alike."""
+        return Layer(
+            heads=self.n_heads,
+            groups=self.n_kv_groups,
+            head_dim=self.head_dim,
+            eps=self.eps,
+            activation=self.hidden_act,
+        )
 
 
 def prompt_text(chars: int, skip: int = 0) -> str:
@@ -413,8 +430,10 @@ class Oracle:
         self.layers = weights.model.layers
         self.angles = config.angles()
 
-    def layer(self, angles, w, x):
-        raise NotImplementedError(f"{type(self).__name__} defines no layer()")
+    def layer(self, i: int, angles, w, x):
+        """Layer ``i`` on ``x``, ``config.layer(i)``'s twin, attending causally."""
+        attend = partial(self.attend, causal=True)
+        return self.config.layer(i).oracle(self, w, x, attend, angles)
 
     def head(self, x):
         raise NotImplementedError(f"{type(self).__name__} defines no head()")
@@ -426,8 +445,8 @@ class Oracle:
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
         angles = self.angles[: tokens.size]
         x = self.embed(self.embedding[tokens])
-        for w in self.layers:
-            x = self.layer(angles, widen(w), x)
+        for i, w in enumerate(self.layers):
+            x = self.layer(i, angles, widen(w), x)
         return self.head(x[-1])
 
     def rms_norm(self, x, w=np.float32(1)):
@@ -435,6 +454,18 @@ class Oracle:
         eps = np.float32(self.config.eps)
         mean = np.mean(x * x, axis=-1, keepdims=True)
         return x * np.power(mean + eps, np.float32(-0.5)) * w
+
+    @staticmethod
+    def linear(x, weight, bias=None):
+        """``x @ weight.T``, plus ``bias`` if given."""
+        y = x @ weight.T
+        return y if bias is None else y + bias
+
+    @staticmethod
+    def silu(x):
+        """SiLU, with the sigmoid as a tanh, which does not overflow."""
+        half = x * np.float32(0.5)
+        return (np.tanh(half) + 1) * half
 
     @staticmethod
     def gelu_tanh(x):
@@ -482,13 +513,21 @@ class Oracle:
             self.buffers[name] = held
         return held[:size].reshape(shape)
 
-    def attend(self, q, k, v, *, causal: bool = False, window: int | None = None):
+    def attend(
+        self,
+        q,
+        k,
+        v,
+        *,
+        causal: bool = False,
+        window: int | None = None,
+        scale: float | None = None,
+    ):
         """Attention of `q` `(n, H, D)` over `k`, `v` `(n, G, D)`, each KV
-        group's rows repeated to its heads: unscaled and bidirectional by
-        default (EmbeddingGemma 2's), with `window` a key at most that many
-        positions away; `causal` scales by `1 / sqrt(D)`, masks a key past
-        its query and reuses one buffer for the growing decode length (a
-        decoder's).
+        group's rows repeated to its heads, the logits scaled by `scale`
+        (`1 / sqrt(D)` if None): bidirectional by default, with `window` a
+        key at most that many positions away; `causal` masks a key past its
+        query and reuses one buffer for the growing decode length.
 
         Raises:
             ValueError: both `causal` and `window` are given.
@@ -504,10 +543,11 @@ class Oracle:
                 k.transpose(1, 2, 0),
                 out=self.buffer("scores", (H, n, n)),
             )
-            p *= np.float32(1 / np.sqrt(D))
+            p *= np.float32(1 / np.sqrt(D) if scale is None else scale)
             p += np.triu(np.full((n, n), -np.inf, dtype=np.float32), k=1)
         else:
             p = q.transpose(1, 0, 2) @ k.transpose(1, 2, 0)
+            p *= np.float32(1 / np.sqrt(D) if scale is None else scale)
             if window is not None:
                 pos = np.arange(n)
                 p[:, np.abs(pos[:, None] - pos[None, :]) > window] = -np.inf

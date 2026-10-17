@@ -54,7 +54,7 @@ def sandwich_layer(
     q = oracle.rotate(oracle.rms_norm((h @ q_proj.T).reshape(n, H, D), q_norm), tables)
     k = oracle.rotate(oracle.rms_norm((h @ k_proj.T).reshape(n, G, D), k_norm), tables)
     v = oracle.rms_norm((h @ v_proj.T).reshape(n, G, D))
-    a = oracle.attend(q, k, v, window=window) @ o_proj.T
+    a = oracle.attend(q, k, v, window=window, scale=1.0) @ o_proj.T
     x = x + oracle.rms_norm(a, norms[1])
     h = oracle.rms_norm(x, norms[2])
     f = (oracle.gelu_tanh(h @ gate.T) * (h @ up.T)) @ down.T

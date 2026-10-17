@@ -23,9 +23,10 @@ from iron import Scratchpad
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
 from iron.operators.elementwise_max import ElementwiseMax
-from iron.operators.elementwise_mul import ElementwiseMul
+from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
+from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.limbs import Limbs, stacked
@@ -36,7 +37,8 @@ from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
 
-from .causal import DecodeStep
+# Each product's float32 sum rounded once.
+ACCURATE = dict(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
 
 
 def project(
@@ -46,16 +48,21 @@ def project(
     k_tile=None,
     tile_n=None,
     emulate_bf16_mmul_with_bfp16=None,
+    accurate: bool = False,
     **gemv,
 ):
     """``x @ weight.T`` for a checkpoint's ``(out, in)`` weight, plus
     ``bias`` broadcast over every row if given: a GEMV for one row, else
-    flm.GEMM reading it column-major. ``k_tile`` and ``tile_n`` are
+    flm.GEMM reading it column-major, or with ``accurate`` the GEMM whose
+    float32 sums round once (``ACCURATE``). ``k_tile`` and ``tile_n`` are
     flm.GEMM's, for a K its defaults do not divide (``tile_n``'s
     ``ct_max_k`` must divide ``k_tile``);
     ``emulate_bf16_mmul_with_bfp16=False`` asks for bf16 macs where the
     device defaults to bfp16's; ``gemv`` are the GEMV's tunables, where the
     profile cannot tell it from another of its shape.
+
+    Raises:
+        ValueError: ``accurate`` with one of flm.GEMM's keywords.
     """
     if len(x.shape) == 2 and x.shape[0] > 1:
         tiled = {}
@@ -65,9 +72,14 @@ def project(
             tiled["tile_n"] = tile_n
         if emulate_bf16_mmul_with_bfp16 is not None:
             tiled["emulate_bf16_mmul_with_bfp16"] = emulate_bf16_mmul_with_bfp16
-        y = FLMGEMM.step(
-            x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled
-        )
+        if accurate and tiled:
+            raise ValueError(f"project(): accurate takes no flm.GEMM {sorted(tiled)}")
+        if accurate:
+            y = GEMM.step(x, weight, b_col_maj=True, **ACCURATE)
+        else:
+            y = FLMGEMM.step(
+                x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled
+            )
     else:
         y = GEMV.step(weight, x, **gemv)
     if bias is None:
@@ -210,8 +222,6 @@ class LogMel(iron.Graph):
         return np.log(magnitude @ self.filters + self.mel_floor).astype(np.float32)
 
 
-# Each product's float32 sum rounded once.
-ACCURATE = dict(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
 # What every device's GEMM row block divides (aie2's 16 rows, aie2p's 8).
 GEMM_ROWS = 16
 
@@ -702,30 +712,233 @@ class ImagePatches(iron.Graph):
         )
 
 
-class Block:
-    """The attention + SwiGLU layer Llama 3 and Granite 4.2 3B share, on the
-    NPU: pre-norm attention, then pre-norm SwiGLU, both residual. A model
-    mixes it in alongside ``CausalLM``, which gives ``attend`` and
-    ``config``, and adds its own ``head``.
+@dataclasses.dataclass(frozen=True)
+class Layer:
+    """A transformer layer over a checkpoint's layer module, read by its
+    Hugging Face names: attention, then the gated feed-forward, each after
+    its pre-norm and with its residual.
+
+    The module decides the rest: sandwich norms where it holds
+    ``pre_feedforward_layernorm``; per-head q and k RMS norms where
+    ``self_attn`` holds ``q_norm`` and ``k_norm``; a projection's bias where
+    it holds one, its weight read through a ``linear`` wrapper; one fused
+    ``qkv_proj`` or ``gate_up_proj`` cut by rows; a per-layer input through
+    ``ple_block``; and a ``layer_scalar``. A model kind gives the attention
+    and the rotation: ``attend(q, k, v, scale=, window=)`` on ``(rows,
+    heads, head_dim)`` returns ``(rows, heads * head_dim)``, and ``angles``
+    turns q and k.
+
+    Args:
+        heads: The query heads.
+        groups: The key and value heads.
+        head_dim: A head's width.
+        eps: Every RMS norm's epsilon.
+        activation: The feed-forward's ``hidden_act``, ``"silu"`` or
+            ``"gelu_pytorch_tanh"``.
+        scale: The attention logits' scale; None is ``head_dim ** -0.5``.
+        window: The positions a query reaches either side; None is all.
+        v_norm: Whether the values are RMS-normed, unweighted.
+        accurate: Whether every projection sums in float32 and rounds once
+            (``project(accurate=True)``).
     """
 
-    def layer(self, step: DecodeStep, i: int, w, x):
-        c, n = self.config, x.shape[0]
-        H, G, D = c.n_heads, c.n_kv_groups, c.head_dim
+    heads: int
+    groups: int
+    head_dim: int
+    eps: float
+    activation: str = "silu"
+    scale: float | None = None
+    window: int | None = None
+    v_norm: bool = False
+    accurate: bool = False
+
+    def __post_init__(self):
+        if self.activation not in ("silu", "gelu_pytorch_tanh"):
+            raise ValueError(
+                f"Layer: no operator for hidden_act {self.activation!r}; "
+                "silu and gelu_pytorch_tanh have one"
+            )
+
+    @staticmethod
+    def linear(p) -> tuple:
+        """The linear module ``p``'s ``weight`` and ``bias`` (None if it has
+        none), through a ``linear`` wrapper.
+        """
+        p = vars(p).get("linear", p)
+        return p.weight, vars(p).get("bias")
+
+    def projections(self, w) -> tuple[tuple, ...]:
+        """``w``'s q, k, v, o, gate, up and down projections, each
+        ``(weight, bias)``; a fused ``qkv_proj`` or ``gate_up_proj`` cut by
+        rows, so each piece is a view of the checkpoint's own array.
+        """
         a, mlp = w.self_attn, w.mlp
-        h = RMSNorm.step(x, weight=w.input_layernorm.weight, epsilon=c.eps)
+        fused = []
+        if "qkv_proj" in vars(a):
+            Q, KV = self.heads * self.head_dim, self.groups * self.head_dim
+            fused.append((a.qkv_proj, (0, Q, Q + KV, Q + 2 * KV)))
+        else:
+            fused += [(p, None) for p in (a.q_proj, a.k_proj, a.v_proj)]
+        fused.append((a.o_proj, None))
+        if "gate_up_proj" in vars(mlp):
+            F = mlp.gate_up_proj.weight.shape[0] // 2
+            fused.append((mlp.gate_up_proj, (0, F, 2 * F)))
+        else:
+            fused += [(mlp.gate_proj, None), (mlp.up_proj, None)]
+        fused.append((mlp.down_proj, None))
+        out = []
+        for p, cuts in fused:
+            weight, bias = self.linear(p)
+            if cuts is None:
+                out.append((weight, bias))
+                continue
+            for lo, hi in zip(cuts, cuts[1:]):
+                out.append((weight[lo:hi], None if bias is None else bias[lo:hi]))
+        return tuple(out)
+
+    def derive(self, derived, w) -> None:
+        """Put on ``derived`` (``iron.lm.Derived``) what ``step`` reads of
+        ``w`` beyond the checkpoint: a ``layer_scalar`` as the row
+        ``RowwiseMul`` takes, ``scale``.
+        """
+        if "layer_scalar" in vars(w):
+            width = w.input_layernorm.weight.shape[0]
+            scalar = w.layer_scalar
+            derived.put(w, scale=np.full(width, scalar[0], scalar.dtype))
+
+    def step(self, w, x, attend, angles, *, ple=None, derived=None):
+        """The layer on ``x`` ``(rows, width)``, in a graph's body.
+
+        Args:
+            w: The checkpoint's layer module.
+            x: The layer's input.
+            attend: The model kind's attention.
+            angles: The RoPE angles, a row per position.
+            ple: The per-layer input ``ple_block`` gates, ``(rows, ple_dim)``.
+            derived: ``w``'s module of the model's derived tree (``derive``).
+
+        Raises:
+            TypeError: The module holds a ``ple_block`` and no ``ple`` is
+                given, or a ``layer_scalar`` and no ``derived``.
+        """
+        n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
+        a, eps = w.self_attn, self.eps
+        q_w, k_w, v_w, o_w, gate_w, up_w, down_w = self.projections(w)
+        sandwich = "pre_feedforward_layernorm" in vars(w)
+        act = SiLU if self.activation == "silu" else GELU
+        h = RMSNorm.step(x, weight=w.input_layernorm.weight, epsilon=eps)
         # Half a head per tile for one row; q's shape is o's when H * D is
         # the width, so it is given here rather than by the profile.
         q, k, v = (
-            project(h, p.weight, tile_size_output=D // 2)
-            for p in (a.q_proj, a.k_proj, a.v_proj)
+            project(h, *p, accurate=self.accurate, tile_size_output=D // 2)
+            for p in (q_w, k_w, v_w)
         )
+        q, k, v = q.reshape(n * H, D), k.reshape(n * G, D), v.reshape(n * G, D)
+        if "q_norm" in vars(a):
+            q = RMSNorm.step(q, weight=a.q_norm.weight, epsilon=eps)
         # One angle row per position, applied to that position's heads.
-        q = RoPE.step(q.reshape(n * H, D), step.angles)
-        k = RoPE.step(k.reshape(n * G, D), step.angles)
-        x = ElementwiseAdd.step(
-            x, project(self.attend(step, i, q, k, v), a.o_proj.weight)
+        q = RoPE.step(q, angles)
+        if "k_norm" in vars(a):
+            k = RMSNorm.step(k, weight=a.k_norm.weight, epsilon=eps)
+        k = RoPE.step(k, angles)
+        if self.v_norm:
+            v = RMSNorm.step(v, epsilon=eps)
+        o = attend(
+            q.reshape(n, H, D),
+            k.reshape(n, G, D),
+            v.reshape(n, G, D),
+            scale=self.scale,
+            window=self.window,
         )
-        h = RMSNorm.step(x, weight=w.post_attention_layernorm.weight, epsilon=c.eps)
-        ff = SwiGLU(mlp.gate_proj.weight, mlp.up_proj.weight, mlp.down_proj.weight)
-        return ElementwiseAdd.step(x, ff(h))
+        y = project(o, *o_w, accurate=self.accurate)
+        if sandwich:
+            y = RMSNorm.step(y, weight=w.post_attention_layernorm.weight, epsilon=eps)
+        x = ElementwiseAdd.step(x, y)
+        norm = w.pre_feedforward_layernorm if sandwich else w.post_attention_layernorm
+        h = RMSNorm.step(x, weight=norm.weight, epsilon=eps)
+        gate = project(h, *gate_w, accurate=self.accurate)
+        up = project(h, *up_w, accurate=self.accurate)
+        f = ElementwiseMul.step(act.step(gate), up)
+        f = project(f, *down_w, accurate=self.accurate)
+        if sandwich:
+            f = RMSNorm.step(f, weight=w.post_feedforward_layernorm.weight, epsilon=eps)
+        x = ElementwiseAdd.step(x, f)
+        if "ple_block" in vars(w):
+            if ple is None:
+                raise TypeError("Layer.step: the module's ple_block needs ple=")
+            b = w.ple_block
+            g = project(x, *self.linear(b.per_layer_input_gate), accurate=self.accurate)
+            g = ElementwiseMul.step(act.step(g), ple)
+            g = project(g, *self.linear(b.per_layer_projection), accurate=self.accurate)
+            norm = b.post_per_layer_input_norm.weight
+            x = ElementwiseAdd.step(x, RMSNorm.step(g, weight=norm, epsilon=eps))
+        if "layer_scalar" in vars(w):
+            if derived is None:
+                raise TypeError("Layer.step: the module's layer_scalar needs derived=")
+            x = RowwiseMul.step(x, derived.scale)
+        return x
+
+    def oracle(self, o, w, x, attend, angles, *, ple=None) -> np.ndarray:
+        """``step``'s twin in float32 on the host, from the ``Oracle`` ``o``'s
+        primitives.
+
+        Args:
+            o: The model's oracle.
+            w: The checkpoint's layer module, widened to float32.
+            x: The layer's input, ``(rows, width)``.
+            attend: The oracle's attention (``Oracle.attend``).
+            angles: The RoPE table, or tables (``Oracle.rotate``).
+            ple: The per-layer input ``ple_block`` gates.
+        """
+        n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
+        a = w.self_attn
+        q_w, k_w, v_w, o_w, gate_w, up_w, down_w = self.projections(w)
+        sandwich = "pre_feedforward_layernorm" in vars(w)
+        silu = self.activation == "silu"
+        h = o.rms_norm(x, w.input_layernorm.weight)
+        q = o.linear(h, *q_w).reshape(n, H, D)
+        k = o.linear(h, *k_w).reshape(n, G, D)
+        v = o.linear(h, *v_w).reshape(n, G, D)
+        if "q_norm" in vars(a):
+            q = o.rms_norm(q, a.q_norm.weight)
+        if "k_norm" in vars(a):
+            k = o.rms_norm(k, a.k_norm.weight)
+        if self.v_norm:
+            v = o.rms_norm(v)
+        q, k = o.rotate(q, angles), o.rotate(k, angles)
+        y = o.linear(attend(q, k, v, scale=self.scale, window=self.window), *o_w)
+        if sandwich:
+            y = o.rms_norm(y, w.post_attention_layernorm.weight)
+        x = x + y
+        norm = w.pre_feedforward_layernorm if sandwich else w.post_attention_layernorm
+        h = o.rms_norm(x, norm.weight)
+        (gate, gate_b), (up, up_b) = gate_w, up_w
+        F = gate.shape[0]
+        g = np.matmul(h, gate.T, out=o.buffer("gate", (n, F)))
+        if gate_b is not None:
+            g += gate_b
+        if silu:
+            g *= np.float32(0.5)
+            # SiLU, with the sigmoid as a tanh, which does not overflow.
+            f = np.tanh(g, out=o.buffer("silu", (n, F)))
+            f += 1
+            f *= g
+        else:
+            f = o.gelu_tanh(g)
+        u = np.matmul(h, up.T, out=o.buffer("up", (n, F)))
+        if up_b is not None:
+            u += up_b
+        f *= u
+        f = o.linear(f, *down_w)
+        if sandwich:
+            f = o.rms_norm(f, w.post_feedforward_layernorm.weight)
+        x = x + f
+        if "ple_block" in vars(w):
+            b = w.ple_block
+            g = o.linear(x, *self.linear(b.per_layer_input_gate))
+            g = o.silu(g) if silu else o.gelu_tanh(g)
+            p = o.linear(g * ple, *self.linear(b.per_layer_projection))
+            x = x + o.rms_norm(p, b.post_per_layer_input_norm.weight)
+        if "layer_scalar" in vars(w):
+            x = x * w.layer_scalar
+        return x

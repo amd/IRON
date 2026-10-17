@@ -90,7 +90,7 @@ def test_attend_causal_matches_scaled_masked_softmax():
     np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
 
 
-def test_attend_bidirectional_is_unscaled_and_windowed():
+def test_attend_bidirectional_at_scale_one_is_unscaled_and_windowed():
     rng = _rng(4)
     n, H, G, D = 6, 4, 2, 8
     q = rng.standard_normal((n, H, D)).astype(np.float32)
@@ -98,7 +98,7 @@ def test_attend_bidirectional_is_unscaled_and_windowed():
     v = rng.standard_normal((n, G, D)).astype(np.float32)
     window = 2
     o = Oracle(AudioConfig())
-    got = o.attend(q, k, v, window=window)
+    got = o.attend(q, k, v, window=window, scale=1.0)
 
     kr, vr = (np.repeat(a, H // G, axis=1) for a in (k, v))
     p = np.einsum("qhd,khd->hqk", q, kr)  # unscaled
@@ -120,8 +120,8 @@ def test_attend_refuses_causal_and_window_together():
 
 
 def test_llama_oracle_still_runs_and_is_deterministic():
-    """A regression smoke test for the Block/BlockOracle merge: two oracles
-    of the same weights give bitwise-identical logits.
+    """Two oracles of the same weights, each through ``Layer.oracle``, give
+    bitwise-identical logits.
     """
     config = SMALL
     weights = checkpoint(config).tree("random", seed=7)

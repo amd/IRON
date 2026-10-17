@@ -17,6 +17,7 @@ import dataclasses
 import logging
 import time
 from collections.abc import Iterator
+from functools import partial
 from typing import Any
 
 import aie.utils as aie_utils
@@ -68,7 +69,7 @@ class DecodeStep:
 
 
 class CausalLM(Model):
-    """A decoder on ``config``'s shape; a subclass gives ``layer``, ``head`` and ``oracle``.
+    """A decoder on ``config``'s shape; a subclass gives ``head`` and ``oracle``.
 
     The caches are ``(max_seq_len, n_kv_groups, head_dim)`` so no descriptor
     steps by ``max_seq_len``. A decode step attends with ``MHA`` of one
@@ -106,7 +107,9 @@ class CausalLM(Model):
         self._loop: CarriedLoop | None = None
 
     def layer(self, step: DecodeStep, i: int, weights, x):
-        raise NotImplementedError(f"{type(self).__name__} defines no layer()")
+        """Layer ``i`` on ``x``: ``config.layer(i)``, attending over the caches."""
+        attend = partial(self.attend, step, i)
+        return self.config.layer(i).step(weights, x, attend, step.angles)
 
     def head(self, x):
         raise NotImplementedError(f"{type(self).__name__} defines no head()")
@@ -151,31 +154,44 @@ class CausalLM(Model):
         )
         return logits, iron.carry(token=drawn, position=position + 1)
 
-    def attend(self, step: DecodeStep, i: int, q, k, v):
-        """Write ``k`` and ``v`` into layer ``i``'s caches and attend over them causally."""
+    def attend(
+        self,
+        step: DecodeStep,
+        i: int,
+        q,
+        k,
+        v,
+        *,
+        scale: float | None = None,
+        window: int | None = None,
+    ):
+        """Write ``k`` and ``v`` ``(rows, groups, head_dim)`` into layer
+        ``i``'s caches and attend ``q`` ``(rows, heads, head_dim)`` over them
+        causally, the logits scaled by ``scale`` (MHA's ``1 / sqrt(head_dim)``
+        if None).
+
+        Raises:
+            ValueError: A ``window`` is given: none is built over the caches.
+        """
+        if window is not None:
+            raise ValueError(f"CausalLM.attend: no {window}-position window")
         c = self.config
-        H, G, D, L, C = (
-            c.n_heads,
-            c.n_kv_groups,
-            c.head_dim,
-            c.max_seq_len,
-            c.prefill_chunk,
-        )
+        G, D, L, C = c.n_kv_groups, c.head_dim, c.max_seq_len, c.prefill_chunk
         keys, values = self.keys[i], self.values[i]
-        n = q.shape[0] // H
+        n, H, _ = q.shape
         for x, cache in ((k, keys), (v, values)):
             if step.prompt:
-                rows = cache.reshape(L // C, C, G, D)[step.chunk, : step.rows]
-                Copy.step(x.reshape(n, G, D), rows)
+                Copy.step(x, cache.reshape(L // C, C, G, D)[step.chunk, : step.rows])
             else:
                 Copy.step(x.reshape(G, D), cache[step.position])
         span = np.s_[: step.position + 1]
         o = MHA.step(
-            q.reshape(n, H, D),
+            q,
             keys[span],
             values[span],
             heads_interleaved=True,
             kv_interleaved=True,
+            scale=scale,
         )
         return o.reshape(n, H * D)
 
