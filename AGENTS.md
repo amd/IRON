@@ -1047,7 +1047,9 @@ profiles. The library is six modules:
   reaches them, and holds the embedding in float32, so it is built to check
   with; it also carries the primitives every model's own oracle shares:
   `linear`, `rms_norm`, `layer_norm`, `normed` (a norm module's),
-  `silu`, `gelu_tanh`, `attend(causal=, window=, scale=)` and `rotate`);
+  `silu`, `gelu_tanh`, `attend(causal=, window=, scale=)`, `rotate`,
+  `softplus`, `causal_conv` and `ssd`, Mamba-2's chunked scan as Hugging
+  Face computes it);
   `Model`, a graph
   whose versions `load(tuner, full_elf)` compiles before the first call,
   in the packaging asked for; and `Runner` and `main`, a decoder's
@@ -1082,7 +1084,9 @@ profiles. The library is six modules:
   (`iron/tests/lm/checkpoints.py`): a prompt chunk reads its boundary's slot
   and writes the next, a decode step its chunk's own, so a rerun from any
   boundary (a chat turn's) is exact; a model holds its layers' in
-  `recurrent`
+  `recurrent`, and its key and value caches in `keys` and `values`, each
+  by the index of a layer whose module attends (`self_attn`) or recurs
+  (`mamba`)
 - `encoder_decoder.py`: `EncoderDecoder(config, weights, encoder,
   decoder)`, a `CausalLM` whose layers also attend over an encoder's
   output (a `Layer` holding `encoder_attn`). Its encode version (`encode()`
@@ -1127,19 +1131,22 @@ profiles. The library is six modules:
   `mlp.down_proj`; a SigLIP layer's `layer_norm1`/`layer_norm2`, a
   Whisper layer's `self_attn_layer_norm`/`final_layer_norm` and `fc1`/`fc2`,
   an LFM2 layer's `operator_norm`/`ffn_norm`, `q_layernorm`/`k_layernorm`
-  and `feed_forward.w1`/`w3`/`w2`, any of their `out_proj`). The module
+  and `feed_forward.w1`/`w3`/`w2`, a Granite 4.0-H layer's
+  `shared_mlp.input_linear`/`output_linear`, any of their `out_proj`). The module
   decides its parts: sandwich norms, an
   affine LayerNorm where a norm holds a bias, q and k norms, biases, a
   `linear` wrapper, a fused `qkv_proj` or `gate_up_proj` (cut by rows,
   views of the checkpoint's array), a plain `fc1`/`fc2` feed-forward, a
-  per-layer input (`ple_block`), a `layer_scalar`, and a cross-attention
-  block where it holds `encoder_attn` (Whisper's decoder: its
-  `encoder_attn_layer_norm`, q, the model kind's `cross(q, scale=)` over
-  the keys and values `cross_kv(w, memory)` projects from the encoder's
-  output, `out_proj` and the residual). The config's
+  per-layer input (`ple_block`), a `layer_scalar`, a Mamba-2 mixer in
+  place of attention where it holds `mamba` (`Mamba2`, whose `states()` a
+  `CausalLM` checkpoints), and a cross-attention block where it holds
+  `encoder_attn` (Whisper's decoder: its `encoder_attn_layer_norm`, q, the
+  model kind's `cross(q, scale=)` over the keys and values
+  `cross_kv(w, memory)` projects from the encoder's output, `out_proj` and
+  the residual). The config's
   `layer(i)` gives the rest: heads, activation, attention scale and window,
   the rotated prefix of a head (`rotary_dim`), a value norm, a residual
-  scale. Its
+  scale, the Mamba-2 mixer's shape (`ssm`). Its
   `step()` runs in a graph's body with the model kind's `attend` and RoPE
   angles (None turns nothing), and `oracle()` is its float32 twin
   (`cross_kv_oracle()` the keys' and values'), built from `Oracle`'s

@@ -215,6 +215,10 @@ PRE_NORMS = (
 QK_NORMS = (("q_norm", "k_norm"), ("q_layernorm", "k_layernorm"))
 # A gated feed-forward's gate, up and down projections, by each family of names.
 GATED = (("gate_proj", "up_proj", "down_proj"), ("w1", "w3", "w2"))
+# A gated feed-forward's fused gate and up projection, and its down projection.
+FUSED_GATED = (("gate_up_proj", "down_proj"), ("input_linear", "output_linear"))
+# The modules a layer's feed-forward is held by, if not the layer itself.
+FEED_FORWARDS = ("mlp", "feed_forward", "shared_mlp")
 # The epsilon mlir-aie's layer_norm kernel fixes.
 LAYER_NORM_EPS = 1e-5
 # What every device's GEMM row block divides (aie2's 16 rows, aie2p's 8).
@@ -709,6 +713,75 @@ class ImagePatches(iron.Graph):
 
 
 @dataclasses.dataclass(frozen=True)
+class Mamba2:
+    """A Mamba-2 mixer over a checkpoint's ``mamba`` module, read by its
+    Hugging Face names: ``in_proj`` cut by rows into the gate, the
+    convolved ``x``, ``B`` and ``C``, and ``dt``; ``conv1d``, ``A_log``,
+    ``D``, ``dt_bias``, the gated ``norm`` and ``out_proj``.
+
+    Args:
+        heads: ``mamba_n_heads``.
+        head_dim: ``mamba_d_head``.
+        state: ``mamba_d_state``, a head row's state.
+        groups: ``mamba_n_groups``, each one ``B`` and ``C`` its heads share.
+        kernel: ``mamba_d_conv``, the convolution's taps.
+        block: ``mamba_chunk_size``, the positions of a block of the
+            oracle's chunked scan.
+        eps: The gated norm's epsilon.
+    """
+
+    heads: int
+    head_dim: int
+    state: int
+    groups: int
+    kernel: int
+    block: int
+    eps: float
+
+    @property
+    def inner(self) -> int:
+        """The width of ``x``, the gate and the output before ``out_proj``."""
+        return self.heads * self.head_dim
+
+    @property
+    def conv_width(self) -> int:
+        """The convolved channels: ``x``, ``B`` and ``C``."""
+        return self.inner + 2 * self.groups * self.state
+
+    def states(self) -> dict[str, tuple[tuple[int, ...], type]]:
+        """What a position carries to the next, by name: the convolution's
+        last inputs and the scan's state, each shape and dtype.
+        """
+        return dict(
+            conv=((self.kernel - 1, self.conv_width), bfloat16),
+            ssm=((self.heads, self.head_dim, self.state), np.float32),
+        )
+
+    def oracle(self, o, m, h) -> np.ndarray:
+        """The mixer on ``h`` ``(rows, width)`` from the state before the
+        sequence, in float32 on the host, from the ``Oracle`` ``o``'s
+        primitives; ``m`` is the module, widened to float32.
+        """
+        n, I, H, P = h.shape[0], self.inner, self.heads, self.head_dim
+        GN = self.groups * self.state
+        cuts = (0, I, I + self.conv_width, I + self.conv_width + H)
+        gate, xbc, dt = (o.linear(h, *p) for p in Layer.cut(m.in_proj, cuts))
+        weight, bias = Layer.linear(m.conv1d)
+        xbc = o.silu(o.causal_conv(xbc, weight[:, 0], bias))
+        x = xbc[:, :I].reshape(n, H, P)
+        B, C = (
+            xbc[:, I + k * GN : I + (k + 1) * GN].reshape(n, self.groups, -1)
+            for k in (0, 1)
+        )
+        dt = o.softplus(dt + m.dt_bias)
+        y, _ = o.ssd(x, dt, -np.exp(m.A_log), B, C, self.block)
+        y = (y + m.D[:, None] * x).reshape(n, I) * o.silu(gate)
+        mean = np.mean(y * y, axis=-1, keepdims=True)
+        y = y * np.power(mean + np.float32(self.eps), np.float32(-0.5)) * m.norm.weight
+        return o.linear(y, *Layer.linear(m.out_proj))
+
+
+@dataclasses.dataclass(frozen=True)
 class Layer:
     """A transformer layer over a checkpoint's layer module, read by its
     Hugging Face names: attention, then the feed-forward, each after its
@@ -720,10 +793,12 @@ class Layer:
     a bias, else its RMS norm; per-head q and k RMS norms where
     ``self_attn`` holds a family of ``QK_NORMS``; a projection's bias where
     it holds one, its weight read through a ``linear`` wrapper; one fused
-    ``qkv_proj`` or ``gate_up_proj`` cut by rows; the feed-forward held by
-    ``mlp``, ``feed_forward`` or the layer itself, plain where it holds
+    ``qkv_proj``, ``gate_up_proj`` or ``input_linear`` cut by rows; the
+    feed-forward held by a module ``FEED_FORWARDS`` names or the layer
+    itself, plain where it holds
     ``fc1`` and ``fc2``, else gated by a family of ``GATED``; a per-layer
-    input through ``ple_block``; a ``layer_scalar``; and where it holds
+    input through ``ple_block``; a ``layer_scalar``; a Mamba-2 mixer (``ssm``)
+    in place of attention where it holds ``mamba``; and where it holds
     ``encoder_attn``, a cross-attention block after attention, over an
     encoder's output (``cross_kv``). A model kind gives the attention and
     the rotation: ``attend(q, k, v, scale=, window=)`` on ``(rows, heads,
@@ -747,6 +822,7 @@ class Layer:
             (``residual_multiplier``).
         accurate: Whether every projection sums in float32 and rounds once
             (``project(accurate=True)``).
+        ssm: The mixer of a module holding ``mamba``.
     """
 
     heads: int
@@ -760,6 +836,7 @@ class Layer:
     v_norm: bool = False
     residual: float = 1.0
     accurate: bool = False
+    ssm: Mamba2 | None = None
 
     def __post_init__(self):
         if self.activation not in ("silu", "gelu_pytorch_tanh"):
@@ -831,22 +908,23 @@ class Layer:
             ValueError: ``w`` holds no feed-forward.
         """
         held = vars(w)
-        m = held.get("mlp", held.get("feed_forward", w))
+        m = next((held[n] for n in FEED_FORWARDS if n in held), w)
         parts = vars(m)
         if "fc1" in parts:
             return Layer.linear(m.fc1), Layer.linear(m.fc2)
-        if "gate_up_proj" in parts:
-            F = Layer.linear(m.gate_up_proj)[0].shape[0] // 2
-            return (
-                *Layer.cut(m.gate_up_proj, (0, F, 2 * F)),
-                Layer.linear(m.down_proj),
-            )
+        for fused, down in FUSED_GATED:
+            if fused in parts:
+                F = Layer.linear(parts[fused])[0].shape[0] // 2
+                return (
+                    *Layer.cut(parts[fused], (0, F, 2 * F)),
+                    Layer.linear(parts[down]),
+                )
         for names in GATED:
             if names[0] in parts:
                 return tuple(Layer.linear(parts[n]) for n in names)
         raise ValueError(
-            f"Layer: the module holds no feed-forward: fc1 and fc2, gate_up_proj "
-            f"or any of {GATED}"
+            f"Layer: the module holds no feed-forward: fc1 and fc2, any of "
+            f"{FUSED_GATED} or any of {GATED}"
         )
 
     @staticmethod
@@ -1040,34 +1118,24 @@ class Layer:
             cross: The oracle's attention over the encoder's keys and
                 values (``cross_kv_oracle``), for an ``encoder_attn``.
             ple: The per-layer input ``ple_block`` gates.
+
+        Raises:
+            ValueError: The module holds ``mamba`` and the layer no ``ssm``.
         """
-        n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
-        a = w.self_attn
-        q_w, k_w, v_w, o_w = self.projections(a)
-        q_norm, k_norm = self.qk_norms(a)
         before, after, _, _ = self.norms(w)
-        A = self.rotary or D
         h = o.normed(x, before)
-        q = o.linear(h, *q_w).reshape(n, H, D)
-        k = o.linear(h, *k_w).reshape(n, G, D)
-        v = o.linear(h, *v_w).reshape(n, G, D)
-        if q_norm is not None:
-            q = o.normed(q, q_norm)
-        if k_norm is not None:
-            k = o.normed(k, k_norm)
-        if self.v_norm:
-            v = o.rms_norm(v)
-        if angles is not None:
-            q, k = (
-                np.concatenate([o.rotate(t[..., :A], angles), t[..., A:]], axis=-1)
-                for t in (q, k)
-            )
-        y = o.linear(attend(q, k, v, scale=self.scale, window=self.window), *o_w)
+        if "mamba" in vars(w):
+            if self.ssm is None:
+                raise ValueError("Layer: the module holds mamba and the config no ssm")
+            y = self.ssm.oracle(o, w.mamba, h)
+        else:
+            y = self.attention_oracle(o, w.self_attn, h, attend, angles)
         if after is not None:
             y = o.normed(y, after)
         r = np.float32(self.residual)
         x = x + y * r
         if "encoder_attn" in vars(w):
+            n, H, D = x.shape[0], self.heads, self.head_dim
             q_w, _, _, o_w = self.projections(w.encoder_attn)
             q = o.linear(o.normed(x, w.encoder_attn_layer_norm), *q_w)
             y = o.linear(cross(q.reshape(n, H, D), scale=self.scale), *o_w)
@@ -1082,6 +1150,30 @@ class Layer:
         if "layer_scalar" in vars(w):
             x = x * w.layer_scalar
         return x
+
+    def attention_oracle(self, o, a, h, attend, angles) -> np.ndarray:
+        """The attention module ``a`` on the normed ``h`` in float32 on the
+        host, from the ``Oracle`` ``o``'s primitives.
+        """
+        n, H, G, D = h.shape[0], self.heads, self.groups, self.head_dim
+        q_w, k_w, v_w, o_w = self.projections(a)
+        q_norm, k_norm = self.qk_norms(a)
+        A = self.rotary or D
+        q = o.linear(h, *q_w).reshape(n, H, D)
+        k = o.linear(h, *k_w).reshape(n, G, D)
+        v = o.linear(h, *v_w).reshape(n, G, D)
+        if q_norm is not None:
+            q = o.normed(q, q_norm)
+        if k_norm is not None:
+            k = o.normed(k, k_norm)
+        if self.v_norm:
+            v = o.rms_norm(v)
+        if angles is not None:
+            q, k = (
+                np.concatenate([o.rotate(t[..., :A], angles), t[..., A:]], axis=-1)
+                for t in (q, k)
+            )
+        return o.linear(attend(q, k, v, scale=self.scale, window=self.window), *o_w)
 
     def feed_forward_oracle(self, o, w, x) -> np.ndarray:
         """``feed_forward``'s twin in float32 on the host, from the

@@ -146,10 +146,23 @@ class CausalLM(Model):
                 f"{config.n_layers}"
             )
         G, L, D = config.n_kv_groups, config.max_seq_len, config.head_dim
-        self.keys = [iron.state((L, G, D)) for _ in self.layers]
-        self.values = [iron.state((L, G, D)) for _ in self.layers]
-        # Each layer's states carried position to position, by name.
+        # By layer: the key and value caches of a module that attends, and the
+        # states a recurrent mixer carries position to position, by name.
+        self.keys: dict[int, State] = {}
+        self.values: dict[int, State] = {}
         self.recurrent: dict[int, dict[str, Checkpoints]] = {}
+        for i, w in enumerate(self.layers):
+            if "self_attn" in vars(w):
+                self.keys[i] = iron.state((L, G, D))
+                self.values[i] = iron.state((L, G, D))
+            if "mamba" in vars(w):
+                ssm = config.layer(i).ssm
+                if ssm is None:
+                    raise ValueError(f"layer {i} holds mamba and the config no ssm")
+                self.recurrent[i] = {
+                    name: Checkpoints.of(shape, L, config.prefill_chunk, dtype)
+                    for name, (shape, dtype) in ssm.states().items()
+                }
         angles = config.angles()
         self.rope = None if angles is None else iron.weight(angles.astype(bfloat16))
         # Zero until the host writes draws: a row of zeros is greedy.

@@ -502,6 +502,73 @@ class Oracle:
         )
 
     @staticmethod
+    def softplus(x):
+        """``log(1 + exp(x))``, which does not overflow."""
+        return np.logaddexp(np.float32(0), x)
+
+    @staticmethod
+    def causal_conv(x, weight, bias):
+        """Each channel of ``x`` ``(n, channels)`` convolved over its rows by
+        its own taps, ``weight`` ``(channels, taps)``, from zero rows before
+        the first, plus ``bias`` if given.
+        """
+        n, taps = x.shape[0], weight.shape[1]
+        padded = np.concatenate([np.zeros((taps - 1, x.shape[1]), np.float32), x])
+        out = np.zeros_like(x, dtype=np.float32)
+        if bias is not None:
+            out += bias
+        for k in range(taps):
+            out += weight[:, k] * padded[k : k + n]
+        return out
+
+    @staticmethod
+    def ssd(x, dt, A, B, C, block: int, state=None) -> tuple[np.ndarray, np.ndarray]:
+        """Mamba-2's chunked scan, as Hugging Face's ``mamba2_chunk_scan``
+        computes it: blocks of ``block`` positions, each a decay-masked
+        product within it and its incoming state's share, the state carried
+        block to block.
+
+        Args:
+            x: ``(n, heads, head_dim)``.
+            dt: ``(n, heads)``, after its softplus.
+            A: ``(heads,)``, negative.
+            B: ``(n, groups, state)``.
+            C: ``(n, groups, state)``.
+            block: The positions a block holds.
+            state: ``(heads, head_dim, state)`` before the first position;
+                None is zero.
+
+        Returns:
+            ``y`` ``(n, heads, head_dim)``, without the skip ``D * x``, and
+            the state after the last position.
+        """
+        n, H, P = x.shape
+        B, C = (np.repeat(t, H // t.shape[1], axis=1) for t in (B, C))
+        N = B.shape[-1]
+        S = np.zeros((H, P, N), np.float32) if state is None else state
+        y = np.empty((n, H, P), np.float32)
+        later = np.tril(np.ones((block, block), bool), -1)[..., None]
+        for start in range(0, n, block):
+            s = slice(start, min(start + block, n))
+            q = s.stop - start
+            xd = x[s] * dt[s][..., None]
+            a = A * dt[s]
+            acs = np.cumsum(a, axis=0)
+            # Each segment's sum from its own cumulative sum, as Hugging Face's
+            # segment_sum: the decay from s to l, for s <= l.
+            segments = np.cumsum(np.where(later[:q, :q], a[:, None], 0), axis=0)
+            segments[~np.tril(np.ones((q, q), bool))] = -np.inf
+            mask = np.exp(segments)
+            G = np.einsum("lhn,shn->lsh", C[s], B[s])
+            y[s] = np.einsum("lsh,shp->lhp", G * mask, xd)
+            y[s] += np.einsum("lhn,hpn->lhp", C[s], S) * np.exp(acs)[..., None]
+            decay = np.exp(acs[-1] - acs)
+            S = S * np.exp(acs[-1])[:, None, None] + np.einsum(
+                "lhn,lhp->hpn", B[s] * decay[..., None], xd
+            )
+        return y, S
+
+    @staticmethod
     def rotate(x, angles):
         """`x` `(n, heads, D)` under RoPE, one table (`angles`, a row a
         position) or, a list of tables, `D` split evenly across them
