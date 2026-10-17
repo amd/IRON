@@ -2558,6 +2558,26 @@ def test_walks_in_turn_are_their_reference(band_stride):
         np.testing.assert_array_equal(got[: real.shape[0]], real)
 
 
+class _StateRows(iron.Graph):
+    """A state's rows, bounded per call, added to an input's."""
+
+    def __init__(self):
+        self.rows = iron.state((64, 64))
+
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        Copy.step(x[:n], self.rows[:n])
+        rows = self.rows.at(TensorAccessPattern.full((64, 64)), (64, 64), {0: n})
+        return ElementwiseAdd.step(x[:n], rows)
+
+
+def test_a_bounded_view_of_a_state_is_its_rows_this_call():
+    """In a reference, a state viewed by ``at`` is its host rows to the bound."""
+    x = np.arange(64 * 64, dtype=np.float32).reshape(64, 64).astype(bfloat16)
+    got = np.asarray(_StateRows().reference(x, n=40), dtype=np.float32)
+    want = (2 * x[:40].astype(np.float32)).astype(bfloat16).astype(np.float32)
+    np.testing.assert_array_equal(got, want)
+
+
 class _BadWalk(iron.Graph):
     """A walk ``Handle.at`` refuses."""
 

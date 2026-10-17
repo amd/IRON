@@ -488,11 +488,13 @@ class _Viewed:
 
     def at(self, tap, shape, bounds=None, *, repeat=None, length=None):
         """``Handle.at`` of the tensor as the tracer views it; in a reference,
-        the rows ``tap`` walks this call.
+        the rows ``tap`` walks this call, to its ``bounds``.
         """
         operand = self._as_operand()
         if isinstance(operand, Handle):
             return operand.at(tap, shape, bounds=bounds, repeat=repeat, length=length)
+        if isinstance(operand, _HostView):
+            operand = operand.tensor()
         walks = tap if isinstance(tap, tuple) else (tap,)
         repeats = repeat if isinstance(tap, tuple) else (repeat,)
         flat = np.asarray(operand).reshape(-1)
@@ -501,7 +503,10 @@ class _Viewed:
             walk = walk if r is None else walk[: int(r)]
             walk = walk if length is None else walk[:, : int(length)]
             rows.append(flat[walk.gather(np.arange(flat.size))])
-        return np.concatenate(rows).reshape(-1, *shape[1:])
+        out = np.concatenate(rows).reshape(-1, *shape[1:])
+        for axis, count in (bounds or {}).items():
+            out = out[(slice(None),) * axis + (slice(int(count)),)]
+        return out
 
 
 class _HostRun:
