@@ -125,6 +125,25 @@ def checkpoint(
     return Checkpoint(path)
 
 
+def drawn(config, names: dict[str, tuple[int, ...]], seed: int):
+    """A random tree of the tensors ``names`` gives (``checkpoint``) whose
+    vectors are drawn too: a bias about zero and a norm's weight about one,
+    not ones, which a LayerNorm after a bias would cancel.
+    """
+    tree = checkpoint(config, names).tree("random", seed)
+    rng = np.random.default_rng(seed)
+    for name, shape in names.items():
+        if len(shape) == 1:
+            *path, leaf = name.split(".")
+            node = tree
+            for part in path:
+                node = node[int(part)] if part.isdigit() else vars(node)[part]
+            centre = 0 if leaf == "bias" else 1
+            value = centre + rng.standard_normal(shape) / 4
+            setattr(node, leaf, value.astype(bfloat16))
+    return tree
+
+
 def small(seed=0, **config) -> Llama:
     """The model at ``SMALL``'s shape, as changed by ``config``, under
     ``PROFILE``, its weights drawn at ``seed``.

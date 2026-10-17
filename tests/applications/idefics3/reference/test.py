@@ -23,7 +23,7 @@ from iron.applications.idefics3.vision.model import (
     VisionTower,
 )
 from iron.lm import Multimodal
-from iron.tests.common.llama_model import checkpoint, shapes
+from iron.tests.common.llama_model import drawn, shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -98,29 +98,13 @@ def text_names(c: SmolVLMTextConfig) -> dict[str, tuple[int, ...]]:
     return text | {"lm_head.weight": (c.vocab_size, c.emb_dim)}
 
 
-def drawn(names: dict[str, tuple[int, ...]], seed: int):
-    """A random tree of the tensors ``names`` gives, whose biases are drawn
-    too, not ones, which every LayerNorm after them would cancel.
-    """
-    tree = checkpoint(TEXT, names).tree("random", seed)
-    rng = np.random.default_rng(seed)
-    for name, shape in names.items():
-        if name.endswith(".bias"):
-            *path, leaf = name.split(".")
-            node = tree
-            for part in path:
-                node = node[int(part)] if part.isdigit() else vars(node)[part]
-            setattr(node, leaf, (rng.standard_normal(shape) / 4).astype(bfloat16))
-    return tree
-
-
 def test_the_vision_tower_s_soft_tokens_match_its_oracle():
     """The tower's reference against ``VisionOracle``: bf16 against float32,
     LayerNorm at the kernel's 1e-5 against the checkpoint's 1e-6, so within
     5% of the largest soft token's magnitude, as a decoder's logits are held
-    (three seeds measure 0.6-0.7%).
+    (three seeds measure 0.7-0.8%).
     """
-    weights = drawn(vision_names(VISION), 0)
+    weights = drawn(TEXT, vision_names(VISION), 0)
     tower = VisionTower(VISION, weights)
     rng = np.random.default_rng(1)
     image = rng.uniform(-1, 1, (VISION.image_size, VISION.image_size, 3))
@@ -148,7 +132,7 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk():
     placeholders that crosses their boundary, through ``placed``, then a
     decode step, against ``SmolVLMOracle``.
     """
-    weights = drawn(text_names(TEXT) | vision_names(VISION), 0)
+    weights = drawn(TEXT, text_names(TEXT) | vision_names(VISION), 0)
     model = Multimodal(
         SmolVLMText(TEXT, weights), {IMAGE: VisionTower(VISION, weights)}
     )

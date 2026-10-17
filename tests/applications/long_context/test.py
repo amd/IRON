@@ -31,7 +31,7 @@ from iron.applications.phi3.model import Runner as Phi4
 from iron.applications.qwen2.model import Runner as Qwen2
 from iron.applications.qwen3.model import Runner as Qwen3
 from iron.applications.smollm2.model import Runner as SmolLM2
-from iron.lm import CausalLM, Checkpoint, Runner
+from iron.lm import CausalLM, Checkpoint, EncoderDecoder, Runner
 from iron.lm.testing import (
     check_deep_decode,
     check_deep_prompt,
@@ -132,7 +132,8 @@ APPLICATIONS = {
 
 def test_every_decoder_application_is_held_to_its_context():
     """Each application whose ``Runner`` runs a ``CausalLM`` has a
-    checkpoint here.
+    checkpoint here; an encoder-decoder's context follows the clip it
+    encodes, not a text prompt's.
     """
     found = set()
     for package in pkgutil.iter_modules(iron.applications.__path__):
@@ -140,7 +141,11 @@ def test_every_decoder_application_is_held_to_its_context():
         if importlib.util.find_spec(name) is None:
             continue
         runner = vars(importlib.import_module(name)).get("Runner")
-        if isinstance(runner, type) and issubclass(runner.model, CausalLM):
+        if not isinstance(runner, type):
+            continue
+        if issubclass(runner.model, CausalLM) and not issubclass(
+            runner.model, EncoderDecoder
+        ):
             found.add(package.name)
     held = {a.runner.__module__.split(".")[2] for a in APPLICATIONS.values()}
     assert found == held
