@@ -204,7 +204,11 @@ def test_a_prompt_chunk_past_the_last_position_is_refused(chunk, rows, inside):
     model = small(max_seq_len=300)
     t = model.trace(**model.shapes()[1])
     values = dict(
-        start=chunk * 256, rows=rows, position=chunk * 256 + rows - 1, token=0
+        start=chunk * 256,
+        rope_start=chunk * 256,
+        rows=rows,
+        position=chunk * 256 + rows - 1,
+        token=0,
     )
     held = [limit.lo <= limit.evaluate(values) < limit.hi for limit in t.limits]
     assert all(held) == inside

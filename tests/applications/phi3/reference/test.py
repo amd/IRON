@@ -22,7 +22,7 @@ import pytest
 from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
-from iron.applications.phi3.model import Phi4, Phi4Config
+from iron.applications.phi3.model import LongRope, Phi4, Phi4Config
 from iron.lm import Checkpoint, accuracy, determinism
 
 
@@ -199,3 +199,39 @@ def test_the_determinism_check_finds_the_reference_deterministic(cpu):
     config, weights, oracle, prompt, first, expected = cpu
     model = OnHost(config, weights)
     assert determinism(model, [prompt, prompt[::-1]], 3, 3) == 0
+
+
+#: LongRoPE at toy size: a 128-position original context, served to 512.
+LONG = dataclasses.replace(
+    TOY,
+    max_seq_len=512,
+    prefill_chunk=128,
+    original_max_position_embeddings=128,
+    longrope_context=512,
+    longrope=LongRope(
+        short_factor=(1.0,) * 16,
+        long_factor=tuple(float(f) for f in np.geomspace(1, 32, 16)),
+    ),
+)
+
+
+def test_a_turn_past_the_original_context_rotates_only_its_own_rows_long():
+    """Decision 35 on decision 50: a prompt within 128 positions rotates
+    short; a second turn passing 128 runs from its first new token, its own
+    rows rotated long, the cached ones as they were written, as Hugging
+    Face's forward calls over a cache do; a decode step past 128 reads the
+    long rows; a first turn passing 128 is long throughout.
+    """
+    weights = _toy_weights(LONG)
+    model, oracle = OnHost(LONG, weights), Phi4.oracle(LONG, weights)
+    tokens = np.random.default_rng(5).integers(0, LONG.vocab_size, 300)
+    _assert_close([model.logits(tokens[:100])], [oracle.logits(tokens[:100])])
+    got = np.asarray(model.logits(tokens), np.float32)
+    want = oracle.logits(tokens, ends=(100, 300))
+    _assert_close([got], [want])
+    # Rotating the cached rows long instead moves the logits further.
+    assert np.abs(oracle.logits(tokens) - want).max() > np.abs(got - want).max()
+    tokens = np.append(tokens, want.argmax())
+    _assert_close([model.logits(tokens)], [oracle.logits(tokens, ends=(100, 300, 301))])
+    fresh = OnHost(LONG, weights)
+    _assert_close([fresh.logits(tokens)], [oracle.logits(tokens)])

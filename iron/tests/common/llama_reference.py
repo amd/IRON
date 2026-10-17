@@ -196,7 +196,7 @@ def test_a_model_runs_only_the_versions_it_loaded(cpu):
     with pytest.raises(RuntimeError, match=r"load\(\) first"):
         model.logits(cpu.prompt)
     with pytest.raises(RuntimeError, match=r"load\(\) first"):
-        model(start=0, rows=1, token=0, position=0)
+        model(start=0, rows=1, rope_start=0, token=0, position=0)
     assert not model._versions
 
 
@@ -267,7 +267,7 @@ def test_the_carried_draws_are_the_host_loop_s_tokens(cpu, temperature):
     _, carry = model(*inputs, **values)
     drawn = [carry["token"]]
     for _ in range(count - 1):
-        _, carry = model(start=0, rows=1, **carry)
+        _, carry = model(start=0, rows=1, rope_start=0, **carry)
         drawn.append(carry["token"])
     assert drawn == expected
 
@@ -383,4 +383,11 @@ def test_a_context_no_chunk_divides_runs_to_its_last_position():
     _assert_close([model.logits(tokens[:299])], [oracle.logits(tokens[:299])])
     _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
     with pytest.raises(IndexError, match="rows to 301 of 300"):
-        model(model.prompt_ids(tokens[256:]), token=0, position=300, start=256, rows=45)
+        model(
+            model.prompt_ids(tokens[256:]),
+            token=0,
+            position=300,
+            start=256,
+            rows=45,
+            rope_start=256,
+        )

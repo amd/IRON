@@ -133,7 +133,7 @@ def test_the_decoder_attends_over_the_encoded_clip(clip):
     model, oracle = Whisper(TOY, weights), Whisper.oracle(TOY, weights)
     buffer, own = model.encoder.inputs(features)
     source = model.encoder.soft(own)
-    values = dict(token=0, position=0, start=0, rows=1, source=source)
+    values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
     model.reference(None, buffer, **values, encoder_n=own["n"])
     oracle.encode(oracle.encoder.soft_tokens(features))
     tokens = np.random.default_rng(2).integers(0, TOY.vocab_size, 300)
@@ -144,6 +144,7 @@ def test_the_decoder_attends_over_the_encoded_clip(clip):
             token=int(chunk[-1]),
             position=begin + chunk.size - 1,
             start=begin,
+            rope_start=begin,
             rows=chunk.size,
             source=source,
             encoder_n=0,
@@ -151,7 +152,7 @@ def test_the_decoder_attends_over_the_encoded_clip(clip):
         logits, carry = model.reference(model.prompt_ids(chunk), **values)
     _assert_close(logits, oracle.logits(tokens), "the prompt's logits")
     tokens = np.append(tokens, carry["token"])
-    logits, _ = model.reference(start=0, rows=1, encoder_n=0, **carry)
+    logits, _ = model.reference(start=0, rows=1, rope_start=0, encoder_n=0, **carry)
     _assert_close(logits, oracle.logits(tokens), "a decode step's logits")
 
 

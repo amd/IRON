@@ -129,6 +129,7 @@ def test_its_signature_and_versions_are_the_decoder_s_and_the_encoder_s(whisper)
         "position",
         "start",
         "rows",
+        "rope_start",
         "source",
         "encoder_n",
     ]
@@ -168,7 +169,7 @@ def test_each_version_s_reference_in_turn_is_the_oracle(whisper):
     model, oracle, clip, tokens = whisper
     buffer, own = model.encoder.inputs(clip)
     source = model.encoder.soft(own)
-    values = dict(token=0, position=0, start=0, rows=1, source=source)
+    values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
     model.reference(None, buffer, **values, encoder_n=own["n"])
     logits, carry = prompt(model, tokens, source)
     assert carry["source"] == source
@@ -184,7 +185,7 @@ def test_each_version_s_reference_in_turn_is_the_oracle(whisper):
     )
     logits, carry = prompt(model, tokens, source)
     tokens = np.append(tokens, carry["token"])
-    logits, _ = model.reference(start=0, rows=1, encoder_n=0, **carry)
+    logits, _ = model.reference(start=0, rows=1, rope_start=0, encoder_n=0, **carry)
     _assert_close([np.asarray(logits).reshape(-1)], [oracle.logits(tokens)])
     oracle.encode(clip[: source // 2])
     with pytest.raises(AssertionError):
@@ -203,6 +204,7 @@ def prompt(model, tokens, source: int):
             token=int(chunk[-1]),
             position=begin + chunk.size - 1,
             start=begin,
+            rope_start=begin,
             rows=chunk.size,
             source=source,
             encoder_n=0,
@@ -248,7 +250,7 @@ def run(model, buffer, n: int, source: int, tokens) -> np.ndarray:
     valid, then the prompt chunks' over ``tokens`` reading ``source`` rows:
     the last chunk's logits.
     """
-    values = dict(token=0, position=0, start=0, rows=1, source=source)
+    values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
     model.reference(None, buffer, **values, encoder_n=n)
     logits, _ = prompt(model, tokens, source)
     return np.asarray(logits, np.float32).reshape(-1)

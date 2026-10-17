@@ -173,6 +173,11 @@ class CausalLM(Model):
                     for name, (shape, dtype) in ssm.states().items()
                 }
         angles = config.angles()
+        long = config.long_angles()
+        # LongRoPE's: a prompt passing it reads the second table, stacked after.
+        self.long_past = None if long is None else long[0]
+        if long is not None:
+            angles = np.concatenate([angles, long[1]])
         self.rope = None if angles is None else iron.weight(angles.astype(bfloat16))
         # Zero until the host writes draws: a row of zeros is greedy.
         self.draws = iron.state((L, ROW_WORDS), np.int32)
@@ -214,6 +219,7 @@ class CausalLM(Model):
         position: Carried[np.int32],
         start: Scratchpad[np.int32],
         rows: Scratchpad[np.int32],
+        rope_start: Scratchpad[np.int32],
     ):
         if ids is not None:
             return self.from_rows(
@@ -222,29 +228,48 @@ class CausalLM(Model):
                 position=position,
                 start=start,
                 rows=rows,
+                rope_start=rope_start,
             )
         embedding = iron.weight(self.decoder.embed_tokens.weight)
         x = Copy.step(embedding[token]).reshape(1, self.config.emb_dim)
-        return self.forward(x, prompt=False, position=position, start=start, rows=rows)
+        return self.forward(
+            x,
+            prompt=False,
+            position=position,
+            start=start,
+            rows=rows,
+            rope_start=rope_start,
+        )
 
-    def from_rows(self, x, *, token, position, start, rows):
+    def from_rows(self, x, *, token, position, start, rows, rope_start):
         """A prompt chunk's call on its embedding rows ``x``, bounded to
         ``rows``, in place of its ids' lookup; ``token`` is the decode
         step's, unread here.
         """
-        return self.forward(x, prompt=True, position=position, start=start, rows=rows)
+        return self.forward(
+            x,
+            prompt=True,
+            position=position,
+            start=start,
+            rows=rows,
+            rope_start=rope_start,
+        )
 
-    def forward(self, x, *, prompt: bool, position, start, rows, source=None):
+    def forward(
+        self, x, *, prompt: bool, position, start, rows, rope_start, source=None
+    ):
         """The layers, the head and the draw over ``x``: a prompt chunk's
-        rows from ``start``, else the decode step's one at ``position``;
-        ``source`` is the step's (``DecodeStep``).
+        rows from ``start``, their RoPE rows from ``rope_start`` where a
+        second table is stacked (``long_angles``), else the decode step's one
+        at ``position``; ``source`` is the step's (``DecodeStep``).
         """
         c = self.config
         C, A = c.prefill_chunk, c.rope_width
         if self.rope is None:
             angles = None
         elif prompt:
-            angles = Copy.step(self.rope[start : start + C][:rows])
+            begin = start if self.long_past is None else rope_start
+            angles = Copy.step(self.rope[begin : begin + C][:rows])
         else:
             angles = Copy.step(self.rope[position]).reshape(1, A)
         # A decode step's one position is its start.
@@ -363,7 +388,7 @@ class CausalLM(Model):
 
     def call_values(self) -> dict:
         """The per-call values every call gives beyond the token, position,
-        start and rows: none by default.
+        start, rows and rope_start: none by default.
         """
         return {}
 
@@ -435,9 +460,18 @@ class CausalLM(Model):
             ),
             (
                 prompt_shapes,
-                dict(position=C - 1, token=token, start=0, rows=C),
+                dict(position=C - 1, token=token, start=0, rows=C, rope_start=0),
                 [
-                    Point(w, dict(position=c - 1, token=token, start=c - C, rows=C))
+                    Point(
+                        w,
+                        dict(
+                            position=c - 1,
+                            token=token,
+                            start=c - C,
+                            rows=C,
+                            rope_start=c - C,
+                        ),
+                    )
                     for w, c in contexts(context, count, C)
                 ],
             ),
@@ -470,7 +504,9 @@ class CausalLM(Model):
             raise ValueError(f"{n} tokens do not fit {L} rows")
         held = self._held(tokens)
         if held == n - 1 == self._seen.size:
-            out, _ = self(token=int(tokens[-1]), position=n - 1, start=0, rows=1)
+            out, _ = self(
+                token=int(tokens[-1]), position=n - 1, start=0, rows=1, rope_start=0
+            )
         else:
             start = self.resume(held)
             self._seen = tokens[:start]
@@ -529,7 +565,7 @@ class CausalLM(Model):
         else:
             drawn = [carry["token"]]
             for _ in range(num_tokens - 1):
-                _, carry = self(start=0, rows=1, **carry)
+                _, carry = self(start=0, rows=1, rope_start=0, **carry)
                 drawn.append(carry["token"])
         later = (
             (time.perf_counter() - first) / (num_tokens - 1)
@@ -589,7 +625,9 @@ class CausalLM(Model):
         recurrent state a call ends at the next chunk boundary, the slot it
         writes.
         """
-        n, C = tokens.size, self.config.prefill_chunk
+        n, L, C = tokens.size, self.config.max_seq_len, self.config.prefill_chunk
+        # A sequence passing it takes the second table, L rows on.
+        table = L if self.long_past is not None and n > self.long_past else 0
         end = start
         while end < n:
             begin, end = end, min(end + C, n)
@@ -602,6 +640,7 @@ class CausalLM(Model):
                 position=end - 1,
                 start=begin,
                 rows=end - begin,
+                rope_start=table + begin,
             )
             placed = np.isin(tokens[begin:end], self._placeholders).any()
             if self._placed is None or not placed:

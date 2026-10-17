@@ -195,6 +195,12 @@ class DecoderConfig(Config):
         """
         return self.rotary_dim or self.head_dim
 
+    def long_angles(self) -> tuple[int, np.ndarray] | None:
+        """The position a prompt's sequence must pass to take a second RoPE
+        table, and that table (LongRoPE's long one); None by default.
+        """
+        return None
+
     def angles(self) -> np.ndarray | None:
         """The RoPE table, a row per position; None with no ``rope_base``."""
         if self.rope_base is None:
@@ -584,6 +590,7 @@ class Oracle:
         self.embedding = widen(self.decoder.embed_tokens.weight)
         self.layers = self.decoder.layers
         self.angles = config.angles()
+        self.long_angles = config.long_angles()
 
     def layer(self, i: int, angles, w, x):
         """Layer ``i`` on ``x``, ``config.layer(i)``'s twin, attending causally."""
@@ -602,9 +609,20 @@ class Oracle:
         """
         return x
 
-    def logits(self, tokens) -> np.ndarray:
+    def logits(self, tokens, ends=None) -> np.ndarray:
+        """The logits after the last of ``tokens``, run in turns ending at
+        each of ``ends`` (one by default), as cached forward calls are: a
+        turn passing ``long_angles``'s position takes its table.
+        """
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
         angles = None if self.angles is None else self.angles[: tokens.size]
+        if self.long_angles is not None:
+            past, table = self.long_angles
+            angles, begin = angles.copy(), 0
+            for end in ends or (tokens.size,):
+                if end > past:
+                    angles[begin:end] = table[begin:end]
+                begin = end
         x = self.positions(self.embed(self.embedding[tokens]))
         for i, w in enumerate(self.layers):
             x = self.layer(i, angles, widen(w), x)

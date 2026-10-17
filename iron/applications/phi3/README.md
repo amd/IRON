@@ -29,15 +29,16 @@ Three differences, none needing an operator of its own:
   of each head rotate; the rest pass through unrotated
   (`partial_rotary_factor` in `config.json`, from which
   `Phi4Config.__post_init__` derives `rotary_dim`, which `Layer` takes).
-- **LongRoPE.** This port runs at `max_seq_len=4096`, within the
-  checkpoint's `original_max_position_embeddings`: every position takes
-  the config's `short_factor` (every entry 1.0, so the frequencies are
-  plain `rope_theta=10000` unscaled) and the constant post-trig amplitude
-  scale LongRoPE always applies (`Phi4Config.__post_init__` derives it
-  from `original_max_position_embeddings` and the checkpoint's own full
-  `max_position_embeddings`). The `long_factor` regime, which the native
-  131072-position context needs, waits on how a compile-once model should
-  take it.
+- **LongRoPE.** It serves the native 131072 positions. Hugging Face
+  rotates a forward call by the `long_factor` frequencies when its
+  sequence passes `original_max_position_embeddings` (4096), else by the
+  `short_factor` ones (every entry 1.0), each with LongRoPE's constant
+  amplitude scale; rows a cache holds keep the rotation they were written
+  with. The model holds both tables (`Phi4Config.angles`, short below 4096
+  and long from it, which a decode step reads at its position, and
+  `long_angles`, stacked after it): a prompt whose sequence passes 4096
+  reads the long one through its per-call `rope_start`. A turn runs from
+  its first new token (decision 50), so no cached row is rotated again.
 
 Every other shape is Llama's: GQA, RMSNorm, a gated SiLU feed-forward, a
 tied output head.

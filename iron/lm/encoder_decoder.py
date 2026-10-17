@@ -102,6 +102,7 @@ class EncoderDecoder(CausalLM):
             prompt=prompt,
             position=values["position"],
             start=values["start"],
+            rope_start=values["rope_start"],
             rows=rows,
             source=source,
         )

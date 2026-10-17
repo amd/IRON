@@ -146,7 +146,9 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk():
     C = TEXT.prefill_chunk
     calls, towers = model.tower_calls(tokens, raw)
     for inputs in calls:
-        model.reference(*inputs, token=0, position=0, start=0, rows=1, **towers)
+        model.reference(
+            *inputs, token=0, position=0, start=0, rows=1, rope_start=0, **towers
+        )
     for begin in range(0, tokens.size, C):
         chunk = tokens[begin : begin + C]
         ids = model.text.prompt_ids(chunk)
@@ -154,6 +156,7 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk():
             token=int(chunk[-1]),
             position=begin + chunk.size - 1,
             start=begin,
+            rope_start=begin,
             rows=chunk.size,
             **towers,
         )
@@ -164,5 +167,5 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk():
             logits, carry = model.reference(ids, **values)
     _assert_close(logits, oracle.logits(tokens, raw))
     tokens = np.append(tokens, carry["token"])
-    logits, _ = model.reference(start=0, rows=1, **carry, **towers)
+    logits, _ = model.reference(start=0, rows=1, rope_start=0, **carry, **towers)
     _assert_close(logits, oracle.logits(tokens, raw))

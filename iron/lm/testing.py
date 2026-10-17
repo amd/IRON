@@ -283,7 +283,7 @@ def check_deep_decode(
     tokens = prompt(runner, chars, 1)
     token = greedy(model.logits(tokens))
     # A decode step takes the token; the device gathers its embedding row.
-    values = dict(token=token, position=position, start=0, rows=1)
+    values = dict(token=token, position=position, start=0, rows=1, rope_start=0)
     with _fill_caches(model, len(tokens), position):
         got, _ = model(**values)
         got = got.numpy()
@@ -312,8 +312,15 @@ def check_deep_prompt(
     chunk = np.resize(tokens, rows)
     ids = model.prompt_ids(chunk)
     begin = deepest * C
+    # A sequence past a second table's position takes it (``long_angles``).
+    past = model.long_past
+    table = L if past is not None and begin + rows > past else 0
     values = dict(
-        token=int(chunk[-1]), position=begin + rows - 1, start=begin, rows=rows
+        token=int(chunk[-1]),
+        position=begin + rows - 1,
+        start=begin,
+        rows=rows,
+        rope_start=table + begin,
     )
     with _fill_caches(model, len(tokens), begin):
         start = time.perf_counter()
