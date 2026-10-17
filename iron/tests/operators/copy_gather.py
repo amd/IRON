@@ -26,7 +26,7 @@ from iron import Profile, Scratchpad
 from iron.common.image import AdjacentPacking
 from iron.common.image.fusion import Fusion
 from iron.operators import ElementwiseAdd
-from iron.operators.copy import Copy, Gather
+from iron.operators.copy import Copy, Gather, GatherWords
 
 # EmbeddingGemma 2's per-layer embedding table.
 VOCAB, WIDTH = 262144, 512
@@ -115,6 +115,19 @@ class FromDeviceIds(iron.Graph):
             Copy.step(self.table[ids], static_base=self.static_base),
             Copy.step(self.other[ids], static_base=self.static_base),
         )
+
+
+class BoundedDeviceIds(iron.Graph):
+    """The first ``n`` rows ids a step made name, ``n`` per call."""
+
+    def __init__(self, table, feeds: int | None = None):
+        self.table = iron.weight(table)
+        self.profile = Profile()
+        if feeds is not None:
+            self.profile.add(Gather, feeds=feeds)
+
+    def body(self, ids, *, n: Scratchpad[np.int32]):
+        return Copy.step(self.table[Copy.step(ids, dtype=np.int32)[:n]])
 
 
 class FromState(iron.Graph):
@@ -236,6 +249,28 @@ def test_rows_ids_the_device_made_name_are_gathered(table, feeds, n_ids):
         # Past the table an id is clipped to its first or last row.
         clipped = np.clip(ids, -len(other), len(other) - 1)
         assert_equal(others, other[clipped], f"call {call}")
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("feeds,n_ids", FEEDS)
+def test_the_rows_a_call_bounds_by_ids_the_device_made_are_gathered(
+    table, feeds, n_ids
+):
+    """The word step writes each row's length too: a whole row for the
+    first ``n``, a unit for each other, as the bounded drains take them.
+    """
+    graph = BoundedDeviceIds(table, feeds)
+    net = graph.compile(ids=((n_ids,), np.int32))
+    assert net.plan.full_elf
+    assert not net.traced.encoders
+    rng = np.random.default_rng(n_ids)
+    for n in sorted({1, 9, n_ids // 2, n_ids - 1, n_ids} - {0}):
+        ids = rng.integers(-VOCAB, VOCAB, n_ids).astype(np.int32)
+        ids[n:] = VOCAB  # past the table: clipped, and a unit of it moved
+        expected = np.take(table, ids[:n], axis=0)
+        got = np.asarray(graph(ids, n=n), dtype=np.float32).reshape(-1, WIDTH)[:n]
+        assert_equal(got, expected, f"{n} of {n_ids}")
+        assert_equal(graph.reference(ids, n=n), expected, f"reference {n}")
 
 
 @pytest.mark.supported_devices("npu2")
@@ -397,6 +432,24 @@ def test_each_step_gathers_by_ids_the_device_made(table, n_ids):
         assert_equal(others, other[ids], f"call {call}")
 
 
+@pytest.mark.supported_devices("npu1", "npu2")
+@pytest.mark.parametrize("n_ids", [15, 256])
+def test_each_step_gathers_the_rows_a_call_bounds_by_ids_the_device_made(table, n_ids):
+    """An xclbin's word step reads the bound from its runtime parameters,
+    which the sequence writes each call.
+    """
+    graph = BoundedDeviceIds(table)
+    net = graph.compile(ids=((n_ids,), np.int32), full_elf=False)
+    assert not net.plan.full_elf
+    rng = np.random.default_rng(n_ids)
+    for n in sorted({1, 9, n_ids // 2, n_ids}):
+        ids = rng.integers(-VOCAB, VOCAB, n_ids).astype(np.int32)
+        ids[n:] = VOCAB
+        expected = np.take(table, ids[:n], axis=0)
+        got = np.asarray(graph(ids, n=n), dtype=np.float32).reshape(-1, WIDTH)[:n]
+        assert_equal(got, expected, f"{n} of {n_ids}")
+
+
 def test_the_control_words_are_counted():
     for rows in (1, 7, 8, 15, 256, 512):
         gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH)
@@ -436,6 +489,25 @@ def test_a_core_writes_the_words_the_host_would():
             [tap.gather(np.arange(gather.words)) for tap in gather.word_source().taps()]
         )
         np.testing.assert_array_equal(written, np.stack([slots, slots + 2], -1).ravel())
+
+
+def test_a_bounded_core_writes_the_addresses_then_the_lengths():
+    for rows in (1, 7, 8, 15, 256, 512):
+        gather = Gather(rows=rows, table_rows=VOCAB, row=WIDTH)
+        _, slots = gather.template
+        source = GatherWords(
+            rows=rows,
+            table_rows=VOCAB,
+            row_bytes=WIDTH * 2,
+            words=gather.words,
+            bounded=True,
+        )
+        written = np.concatenate(
+            [tap.gather(np.arange(gather.words)) for tap in source.taps()]
+        )
+        pairs = np.stack([slots, slots + 2], -1).ravel()
+        np.testing.assert_array_equal(written, np.concatenate([pairs, slots - 1]))
+        assert source.record == 3 * rows
 
 
 def _moved(gather: Gather, valid: int) -> np.ndarray:

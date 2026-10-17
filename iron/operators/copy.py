@@ -14,6 +14,7 @@ from aie.dialects.aie import DMAChannelDir, WireBundle
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     DmaEndpoint,
+    ExternalFunction,
     Flow,
     FlowEndpoint,
     ObjectFifo,
@@ -46,6 +47,15 @@ from iron.common.testing import Case, Testing
 
 # kDDRAIEAddrOffset (TxnEncoding.h)
 APERTURE = 0x80000000
+
+LENGTHS = """
+#include <stdint.h>
+
+extern "C" void gather_lengths(uint32_t *lengths, int32_t valid) {
+    for (int r = 0; r < ROWS; r++)
+        lengths[r] = r < valid ? ROW_WORDS : PAD_WORDS;
+}
+"""
 
 
 def _control_header(beats: int, address: int) -> int:
@@ -291,6 +301,7 @@ class Gather(Operator):
             row_bytes=self.row * np.dtype(self.dtype).itemsize,
             words=self.words,
             static_base=self.static_base,
+            bounded="valid_rows" in self.bound_extents,
         )
 
     @functools.cached_property
@@ -383,7 +394,10 @@ class GatherWords(Operator):
     words in their slots of ``control``. The table's address is split at
     ``low_bits`` (a core reads 30 bits of a value); with ``static_base`` it
     is a resident operand, since a full ELF's 32-word scratchpad has no room
-    for one entry per table.
+    for one entry per table. ``bounded``, the ids bounded per call to their
+    first ``valid_rows``, it also writes each row's length: a whole row's
+    for those, ``Gather.pad_bytes`` for the rest, as a bounded ``Gather``
+    drains them.
     """
 
     low_bits: ClassVar[int] = 29
@@ -394,11 +408,18 @@ class GatherWords(Operator):
     words: int = Param()
     pairs: int = Param(derive=lambda op: 2 * op.rows, repr=False)
     static_base: bool = Param(default=False)
+    bounded: bool = Param(default=False)
+    # The words a call writes: the address pairs, then if bounded the lengths.
+    record: int = Param(
+        derive=lambda op: op.pairs + (op.rows if op.bounded else 0), repr=False
+    )
 
     ids = In(rows, dtype=np.int32, obj_type=(rows,), depth=1)
-    control = Out(words, dtype=np.uint32, obj_type=(pairs,), depth=1)
+    control = Out(words, dtype=np.uint32, obj_type=(record,), depth=1)
     base_lo = Value()
     base_hi = Value()
+    valid_rows = Extent(rows)
+    valid = Value(derive=lambda op: op.valid_rows)
     # base_lo and base_hi, in address_words()'s order.
     base = In(2, dtype=np.int32, obj_type=(2,), depth=1, when=static_base)
 
@@ -417,12 +438,15 @@ class GatherWords(Operator):
         table_rows: int
         row_bytes: int
         pairs: int
+        record: int
         static_base: bool
+        bounded: bool
         ids: Operand
         control: Operand
         base: Operand | None
         base_lo: Value
         base_hi: Value
+        valid: Value
 
         def build(self) -> Built:
             kernel = datamovement.row_addresses(
@@ -433,16 +457,46 @@ class GatherWords(Operator):
                 aperture=APERTURE,
             )
             ids = ObjectFifo(self.ids.obj_type, depth=1)
-            addresses = ObjectFifo(self.control.obj_type, depth=1)
             self.ids.bind(ids.prod())
-            self.control.bind(addresses.cons())
+            lengths = lengths_kernel = None
+            if self.bounded:
+                lengths_ty = np.ndarray[(self.rows,), np.dtype[np.uint32]]
+                pad = Gather.pad_bytes // 4
+                lengths_kernel = ExternalFunction(
+                    "gather_lengths",
+                    source_string=LENGTHS,
+                    arg_types=[lengths_ty, np.int32],
+                    compile_flags=[
+                        f"-DROWS={self.rows}",
+                        f"-DROW_WORDS={self.row_bytes // 4}",
+                        f"-DPAD_WORDS={pad}",
+                    ],
+                    symbol_prefix=(
+                        f"gather_lengths_{self.rows}_{self.row_bytes // 4}_{pad}"
+                    ),
+                )
+                # A core has two output channels: a memtile joins its two records.
+                control = ObjectFifo(self.control.obj_type, depth=1)
+                addresses, lengths = control.prod().join(
+                    [0, self.pairs],
+                    obj_types=[
+                        np.ndarray[(self.pairs,), np.dtype[np.uint32]],
+                        lengths_ty,
+                    ],
+                    depths=[1, 1],
+                )
+                self.control.bind(control.cons())
+            else:
+                addresses = ObjectFifo(self.control.obj_type, depth=1)
+                self.control.bind(addresses.cons())
             base_stream = None
             if self.static_base:
                 base_stream = ObjectFifo(self.base.obj_type, depth=1)
                 self.base.bind(base_stream.prod())
-            rtp = Rtp([] if self.static_base else [self.base_lo, self.base_hi])
+            read = [] if self.static_base else [self.base_lo, self.base_hi]
+            rtp = Rtp(read + ([self.valid] if self.bounded else []))
 
-            def core(ids, addresses, kernel, rtp, base_stream):
+            def core(ids, addresses, kernel, rtp, base_stream, lengths, lengths_kernel):
                 words = rtp.read()
                 i, a = ids.acquire(1), addresses.acquire(1)
                 if base_stream is not None:
@@ -453,6 +507,9 @@ class GatherWords(Operator):
                     kernel(i, a, words[self.base_lo], words[self.base_hi])
                 ids.release(1)
                 addresses.release(1)
+                if lengths is not None:
+                    lengths_kernel(lengths.acquire(1), words[self.valid])
+                    lengths.release(1)
 
             worker = Worker(
                 core,
@@ -462,6 +519,8 @@ class GatherWords(Operator):
                     kernel,
                     rtp,
                     None if base_stream is None else base_stream.cons(),
+                    None if lengths is None else lengths.prod(),
+                    lengths_kernel,
                 ],
             )
             return Built([worker], [rtp])
@@ -476,28 +535,31 @@ class GatherWords(Operator):
         tg.finish()
 
     def taps(self) -> list[TensorAccessPattern]:
-        """Where the rows' address words go in ``control``, in row order."""
+        """Where the rows' address words go in ``control``, in row order,
+        then if ``bounded`` their lengths, the word before each address.
+        """
         chain, at = Gather.chain, 20 * Gather.chain + 2
         full, short = divmod(self.rows, chain)
         taps = []
-        if full:
-            taps.append(
-                TensorAccessPattern(
-                    (self.words,),
-                    at,
-                    [1, full, chain, 2],
-                    [0, 6 * chain + 3, 6, 2],
+        for start, width in [(at, 2)] + ([(at - 1, 1)] if self.bounded else []):
+            if full:
+                taps.append(
+                    TensorAccessPattern(
+                        (self.words,),
+                        start,
+                        [1, full, chain, width],
+                        [0, 6 * chain + 3, 6, 2],
+                    )
                 )
-            )
-        if short:
-            taps.append(
-                TensorAccessPattern(
-                    (self.words,),
-                    at + (6 * chain + 3) * full,
-                    [1, 1, short, 2],
-                    [0, 0, 6, 2],
+            if short:
+                taps.append(
+                    TensorAccessPattern(
+                        (self.words,),
+                        start + (6 * chain + 3) * full,
+                        [1, 1, short, width],
+                        [0, 0, 6, 2],
+                    )
                 )
-            )
         return taps
 
     def tolerance(self) -> Tolerance:
