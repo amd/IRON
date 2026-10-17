@@ -46,7 +46,7 @@ from iron.common.testing import vectors
 from iron.common.image.fusion import Fusion
 from iron.common.graph.trace import TracedGraph
 from iron.common.image.sequence import OperatorSequence
-from iron.lm.blocks import SwiGLU
+from iron.tests.common.graphs import FeedForward
 from iron.operators import (
     GELU,
     GEMM,
@@ -1293,7 +1293,7 @@ def test_a_fold_whose_default_does_not_build_is_not_measured(tmp_path, npu2):
 
 
 def _swiglu(tmp_path, dev, gate_us, step_us=10.0, table=_table, mul_us=None):
-    """SwiGLU at one row as traced, and a table (``_table`` or ``_separate``)
+    """A gated feed-forward at one row as traced, and a table (``_table`` or ``_separate``)
     holding every design it runs as traced, with SiLU folded into the gate
     and with the product folded into SiLU, at its default width,
     the gate with SiLU folded in taking ``gate_us`` a step, SiLU with the
@@ -1302,7 +1302,7 @@ def _swiglu(tmp_path, dev, gate_us, step_us=10.0, table=_table, mul_us=None):
     """
     E, H = 2048, 8192
     w = np.zeros((H, E), bfloat16)
-    traced = SwiGLU(w, w, np.zeros((E, H), bfloat16)).trace(x=(1, E))
+    traced = FeedForward(w, w, np.zeros((E, H), bfloat16)).trace(x=(1, E))
     ways, _ = foldings(traced, dev)
     by_name = {
         tuple(sorted(str(f) for f in applied)): trial

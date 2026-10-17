@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""SwiGLU does not pad: a row count its inner GEMM cannot tile is an error
+"""A gated feed-forward does not pad: a row count its inner GEMM cannot tile is an error
 at trace time, and an aligned one traces with the extents it was given.
 """
 
@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
-from iron.lm.blocks import SwiGLU
+from iron.tests.common.graphs import FeedForward
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -18,7 +18,7 @@ pytestmark = pytest.mark.usefixtures("npu2")
 
 def _trace(rows, embedding_dim=2048, hidden_dim=2048):
     z = lambda *s: np.zeros(s, dtype=bfloat16)
-    ffn = SwiGLU(
+    ffn = FeedForward(
         z(hidden_dim, embedding_dim),
         z(hidden_dim, embedding_dim),
         z(embedding_dim, hidden_dim),

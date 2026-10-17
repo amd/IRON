@@ -38,7 +38,7 @@ from iron.common.image.sequence import OperatorSequence
 from iron.common.graph.fold import folded
 from iron.common.graph.trace import TracedGraph
 from iron.common.image.coresidence import CoResidenceError, conflicts, fits, places
-from iron.lm.blocks import SwiGLU
+from iron.tests.common.graphs import FeedForward
 from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, SiLU
 from iron.tests.common.graphs import Chain
 from iron.tests.common import sequences
@@ -307,12 +307,12 @@ def test_designs_of_one_array_share_its_device():
 
 
 def test_a_folded_gate_shares_its_device_with_the_up_projection(npu2):
-    # SwiGLU's gate and up are one array before the fold; the SiLU fold
+    # The feed-forward's gate and up are one array before the fold; the SiLU fold
     # gives the up projection the gate's finishes, so they stay one. The
     # product riding the gate's matrix would make them two.
     hidden, embedding = 8192, 2048
     weights = (np.zeros((hidden, embedding), bfloat16),) * 2
-    ffn = SwiGLU(*weights, np.zeros((embedding, hidden), bfloat16))
+    ffn = FeedForward(*weights, np.zeros((embedding, hidden), bfloat16))
     _, every = folded(ffn.trace(x=(1, embedding)), npu2)
     silu = [fold for fold in every if str(fold) == "SiLU into GEMV"]
     traced, count = folded(ffn.trace(x=(1, embedding)), npu2, only=silu)

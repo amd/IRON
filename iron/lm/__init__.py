@@ -28,7 +28,6 @@ from .blocks import (
     Layer,
     LogMel,
     MaxPool2d,
-    SwiGLU,
     filterbank,
     project,
 )
@@ -55,7 +54,6 @@ __all__ = [
     "Oracle",
     "Runner",
     "Sampler",
-    "SwiGLU",
     "accuracy",
     "determinism",
     "filterbank",

@@ -53,7 +53,6 @@ The IRON Python API for Ryzen™ AI NPUs is described in the following paper:
 | [RoPE](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/rope.cc) | Rotary Positional Embedding kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rope.py](./iron/operators/rope.py) |
 | [SiLU](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/silu.cc) | Sigmoid Linear Unit activation kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/silu.py](./iron/operators/silu.py) |
 | [Softmax](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/activation/softmax.cc) | Softmax kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/softmax.py](./iron/operators/softmax.py) |
-| SwiGLU | The gated feed-forward block, a graph of GEMV or GEMM (by row count), SiLU and element-wise multiplication | bfloat16 | | ✓ | 🟢 | [iron/lm/blocks.py](./iron/lm/blocks.py) |
 | [Weighted RMSNorm](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/norm/rms_norm.cc) | Weighted RMSNorm kernel | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/rms_norm.py](./iron/operators/rms_norm.py) |
 | Copy | A copy between two views, moved by the DMAs alone (no kernel) | any | ✓ | ✓ | 🟢 | [iron/operators/copy.py](./iron/operators/copy.py) |
 | [Transpose](https://github.com/Xilinx/mlir-aie/blob/main/aie_kernels/datamovement/transpose.cc) | Transpose | bfloat16 | ✓ | ✓ | 🟢 | [iron/operators/transpose.py](./iron/operators/transpose.py) |

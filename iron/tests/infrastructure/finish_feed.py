@@ -15,7 +15,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron.common.testing import run_test, vectors
-from iron.lm.blocks import SwiGLU
+from iron.tests.common.graphs import FeedForward
 from iron.operators import GEMV, ElementwiseAdd, ElementwiseMul, SiLU
 
 pytestmark = pytest.mark.supported_devices("npu2")
@@ -70,10 +70,10 @@ def test_the_up_projection_rides_the_gate_into_its_product():
     ]
     x = rng.standard_normal((1, E)).astype(bfloat16)
 
-    folded = SwiGLU(*weights).compile(full_elf=True, fold=True, x=(1, E))
+    folded = FeedForward(*weights).compile(full_elf=True, fold=True, x=(1, E))
     up, gate, down = folded.traced.steps
     assert [type(link.op) for link in gate.op.finish] == [SiLU, ElementwiseMul]
-    plain = SwiGLU(*weights).compile(full_elf=True, x=(1, E))
+    plain = FeedForward(*weights).compile(full_elf=True, x=(1, E))
 
     got = np.array(folded(x).numpy()[:E])
     op = gate.op.resolved()

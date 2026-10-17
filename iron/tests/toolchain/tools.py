@@ -17,7 +17,7 @@ aie = pytest.importorskip("aie")
 import aie.utils.config as aie_config  # noqa: E402
 from aie.iron.device import NPU2, from_name  # noqa: E402
 
-from iron.lm.blocks import SwiGLU  # noqa: E402
+from iron.tests.common.graphs import FeedForward  # noqa: E402
 
 try:
     AIECC = Path(aie_config.aiecc_path())
@@ -50,10 +50,10 @@ DEVICES = {
 
 
 def swiglu():
-    """The SwiGLU graph at Llama 3.2 1B's width, and that width."""
+    """A gated feed-forward at Llama 3.2 1B's width, and that width."""
     z = lambda *s: np.zeros(s, dtype=bfloat16)
     E, H = 2048, 8192
-    return SwiGLU(z(H, E), z(H, E), z(E, H)), E
+    return FeedForward(z(H, E), z(H, E), z(E, H)), E
 
 
 def shipped(**kwargs):

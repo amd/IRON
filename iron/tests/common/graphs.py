@@ -8,8 +8,23 @@ import numpy as np
 import iron
 from iron import Carried, Scratchpad
 from iron.operators import GEMM, ElementwiseAdd, ElementwiseMul, RoPE, SiLU
+from iron.lm.blocks import project
 from iron.operators.copy import Copy
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
+
+
+class FeedForward(iron.Graph):
+    """A gated feed-forward, ``(SiLU(x @ w_gate.T) * (x @ w_up.T)) @
+    w_down.T``, over the ``(out, in)`` weights it holds: a GEMV each for one
+    row, flm.GEMM for more.
+    """
+
+    def __init__(self, w_gate, w_up, w_down):
+        self.w_gate, self.w_up, self.w_down = w_gate, w_up, w_down
+
+    def body(self, x):
+        gate, up = project(x, self.w_gate), project(x, self.w_up)
+        return project(ElementwiseMul.step(SiLU.step(gate), up), self.w_down)
 
 
 class Rotate(iron.Graph):

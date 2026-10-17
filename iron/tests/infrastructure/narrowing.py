@@ -53,7 +53,7 @@ from iron.tune.probe import (
     time_interleaved,
 )
 from iron.common.image.fusion import Fusion
-from iron.lm.blocks import SwiGLU
+from iron.tests.common.graphs import FeedForward
 from iron.operators import (
     GEMM,
     GEMV,
@@ -444,7 +444,7 @@ def test_a_step_costs_alike_however_long_the_run():
     # by a short one's, would price a step above a short run's.
     E = 2048
     weights = [np.zeros((E, E), bfloat16) for _ in range(3)]
-    traced = SwiGLU(*weights).trace(x=(1, E))
+    traced = FeedForward(*weights).trace(x=(1, E))
     gemv = next(s.op for s in traced.steps if isinstance(s.op, GEMV))
     runs = [Standalone(f"long{k}", [gemv] * k) for k in (1, 6, 12)]
     one, six, twelve = (
@@ -651,7 +651,7 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
         (rng.standard_normal((E, E)) / np.sqrt(E)).astype(bfloat16) for _ in range(3)
     ]
     dev = aie_utils.ensure_current_device()
-    traced = SwiGLU(*weights).trace(x=(1, E))
+    traced = FeedForward(*weights).trace(x=(1, E))
     calls = Call.admitted(traced, dev)
     folds = calls[1].traced
     report = platform()
@@ -667,9 +667,9 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
     assert {cost_key(s.op) for s in traced.steps + folds.steps} <= table.steps.keys()
 
     tuner = JointNarrowing(table, fit_cache=tmp_path / "fits")
-    tuned = SwiGLU(*weights).compile(full_elf=True, tuner=tuner, x=(1, E))
+    tuned = FeedForward(*weights).compile(full_elf=True, tuner=tuner, x=(1, E))
     folds = tuned.tuning.folds
-    plain = SwiGLU(*weights).compile(full_elf=True, fold=folds, x=(1, E))
+    plain = FeedForward(*weights).compile(full_elf=True, fold=folds, x=(1, E))
     assert len(tuned.traced.steps) < len(traced.steps) or not folds
     assert [type(s.op) for s in tuned.traced.steps] == [
         type(s.op) for s in plain.traced.steps
@@ -684,7 +684,7 @@ def test_a_fold_the_tuner_takes_runs_as_the_forced_fold_does(tmp_path):
 def test_a_folded_design_is_priced_beside_the_one_it_replaces(tmp_path):
     E = 2048
     weights = [np.zeros((E, E), bfloat16) for _ in range(3)]
-    traced = SwiGLU(*weights).trace(x=(1, E))
+    traced = FeedForward(*weights).trace(x=(1, E))
     calls = Call.admitted(traced, aie_utils.ensure_current_device())
     folds = calls[1].traced
     report = platform()

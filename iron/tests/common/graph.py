@@ -34,7 +34,8 @@ from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef, SequenceStep
 from iron.common.image.artifacts import Parameter
 from iron.common.image.packaging import Kind
-from iron.lm.blocks import SwiGLU, project
+from iron.lm.blocks import project
+from iron.tests.common.graphs import FeedForward
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -395,13 +396,13 @@ def test_returning_an_input_or_a_slice_is_refused():
 
 
 # --------------------------------------------------------------------------
-# SwiGLU, as a graph
+# A gated feed-forward, as a graph
 # --------------------------------------------------------------------------
 
 
 def test_swiglu_one_token_shares_one_array_and_one_build_for_gate_and_up():
 
-    ffn = SwiGLU(z(H, E), z(H, E), z(E, H))
+    ffn = FeedForward(z(H, E), z(H, E), z(E, H))
     t = ffn.trace(x=(1, E))
     assert [type(s.op).__name__ for s in t.steps] == [
         "GEMV",
@@ -417,12 +418,10 @@ def test_swiglu_one_token_shares_one_array_and_one_build_for_gate_and_up():
     assert [h.name for h in t.inputs] == ["x"] and [h.name for h in t.outputs] == [
         "out"
     ]
-    with pytest.raises(ValueError, match="do not agree"):
-        SwiGLU(z(H, E), z(H, E), z(H, E))
 
 
 def test_swiglu_folds_its_silu_and_its_product_into_the_gate(npu2):
-    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
+    t = FeedForward(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
     f, count = folded(t, npu2)
     assert [(str(fold), n) for fold, n in count.items()] == [
         ("SiLU into GEMV", 1),
@@ -444,7 +443,7 @@ def test_swiglu_folds_its_silu_and_its_product_into_the_gate(npu2):
 
 @pytest.mark.parametrize("device", ["npu1", "npu2"])
 def test_a_prompt_swiglu_finishes_its_gate_with_its_silu(device, request):
-    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(256, E))
+    t = FeedForward(z(H, E), z(H, E), z(E, H)).trace(x=(256, E))
     f, count = folded(t, request.getfixturevalue(device))
     assert [(str(fold), n) for fold, n in count.items()] == [("SiLU into GEMM", 1)]
     gate, up, mul, down = (s.op for s in f.steps)
@@ -458,7 +457,7 @@ def test_a_prompt_swiglu_finishes_its_gate_with_its_silu(device, request):
 
 
 def test_runs_sharing_what_they_made_fold_alike_with_the_same_operators(npu2):
-    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
+    t = FeedForward(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
     made = Made(npu2)
     first, count = folded(t, npu2, made=made)
     again, recount = folded(t, npu2, made=made)
@@ -472,7 +471,7 @@ def test_runs_sharing_what_they_made_fold_alike_with_the_same_operators(npu2):
 
 
 def test_each_folded_design_is_paired_with_the_one_whose_step_it_took(npu2):
-    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
+    t = FeedForward(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
     f, _ = folded(t, npu2)
     # The gate took on the silu and the product; up kept its own.
     assert replaced(t, f) == [(t.steps[0].op, f.steps[1].op)]
@@ -935,7 +934,7 @@ def test_two_spellings_of_one_array_are_one_design():
 
 def test_swiglu_over_a_sequence_reads_the_weights_column_major():
 
-    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(256, E))
+    t = FeedForward(z(H, E), z(H, E), z(E, H)).trace(x=(256, E))
     gemms = [s.op for s in t.steps if type(s.op) is FLMGEMM]
     assert [(g.M, g.K, g.N) for g in gemms] == [(256, E, H), (256, E, H), (256, H, E)]
     assert all(g.b_col_maj for g in gemms)

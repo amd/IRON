@@ -18,7 +18,7 @@ from iron.common.graph.visualize import Dataflow, render, side_by_side
 from iron.applications.embedding_gemma2.config import Config
 from iron.applications.embedding_gemma2.model import Multimodal
 from iron.lm import Checkpoint
-from iron.lm.blocks import SwiGLU
+from iron.tests.common.graphs import FeedForward
 from iron.lm.testing import require, weights_dir
 from iron.tests.common.llama_model import small
 
@@ -121,7 +121,7 @@ def test_a_per_layer_slice_is_drawn_in_its_layer():
 
 
 def test_a_folded_step_names_what_it_folded(npu2):
-    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
+    t = FeedForward(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
     f, _ = folded(t, npu2)
     dot = f.dot()
     assert "finishes SiLU, ElementwiseMul" in dot
@@ -141,8 +141,10 @@ def test_a_page_finds_each_step_it_describes():
 
 @needs_dot
 def test_two_pictures_side_by_side_keep_their_nodes_apart(npu2):
-    t = SwiGLU(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
+    t = FeedForward(z(H, E), z(H, E), z(E, H)).trace(x=(1, E))
     f, _ = folded(t, npu2)
-    dot = side_by_side([("traced", t.picture()), ("folded", f.picture())], "SwiGLU")
+    dot = side_by_side(
+        [("traced", t.picture()), ("folded", f.picture())], "FeedForward"
+    )
     assert {"p0_s3", "p1_s2"} <= nodes(dot) and "p1_s3" not in nodes(dot)
     assert render(dot, "png").startswith(b"\x89PNG")

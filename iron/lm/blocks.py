@@ -96,27 +96,6 @@ def project(
     return RowwiseAdd.step(y.reshape(rows, bias.shape[0]), bias).reshape(y.shape)
 
 
-class SwiGLU(iron.Graph):
-    """The feed-forward as a graph, over the ``(out, in)`` weights it holds."""
-
-    def __init__(self, w_gate, w_up, w_down):
-        hidden_dim, embedding_dim = w_gate.shape
-        if tuple(w_up.shape) != (hidden_dim, embedding_dim) or tuple(w_down.shape) != (
-            embedding_dim,
-            hidden_dim,
-        ):
-            raise ValueError(
-                f"SwiGLU: w_gate {tuple(w_gate.shape)}, w_up {tuple(w_up.shape)} "
-                f"and w_down {tuple(w_down.shape)} do not agree on (hidden, "
-                "embedding)"
-            )
-        self.w_gate, self.w_up, self.w_down = w_gate, w_up, w_down
-
-    def body(self, x):
-        gate, up = project(x, self.w_gate), project(x, self.w_up)
-        return project(ElementwiseMul.step(SiLU.step(gate), up), self.w_down)
-
-
 def filterbank(fft: int, mels: int, sample_rate: int, max_hz: float) -> np.ndarray:
     """The ``(fft // 2 + 1, mels)`` HTK mel triangles over the rfft's bins,
     from 0 Hz to ``max_hz``, unnormalized, float64.

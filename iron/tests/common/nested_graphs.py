@@ -12,7 +12,8 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Carried, Scratchpad
-from iron.lm import LogMel, SwiGLU
+from iron.lm import LogMel
+from iron.tests.common.graphs import FeedForward
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs
@@ -36,7 +37,7 @@ class Block(iron.Graph):
 
     def __init__(self):
         rng = np.random.default_rng(0)
-        self.ffn = SwiGLU(weight(rng, H, E), weight(rng, H, E), weight(rng, E, H))
+        self.ffn = FeedForward(weight(rng, H, E), weight(rng, H, E), weight(rng, E, H))
 
     def body(self, x):
         return ReLU.step(self.ffn(x))
@@ -45,7 +46,7 @@ class Block(iron.Graph):
 class Inline(iron.Graph):
     """The same feed-forward written into the body."""
 
-    def __init__(self, ffn: SwiGLU):
+    def __init__(self, ffn: FeedForward):
         self.ffn = ffn
 
     def body(self, x):

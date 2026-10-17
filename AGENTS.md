@@ -615,8 +615,8 @@ and runs like any graph, which is how its device test runs it.
 So a capability a model needs is an operator when it is new compute: a
 kernel, an array, a data movement no operator has (`iron/operators/`, as
 "Adding a New Operator" says). It is a graph when it composes operators
-the library has (`iron.lm.blocks`: `SwiGLU`, `LogMel`, `Conv2d`,
-`ImagePatches`); a model calls the graph rather than writing its
+the library has (`iron.lm.blocks`: `LogMel`, `Conv2d`, `ImagePatches`);
+a model calls the graph rather than writing its
 operators into its own body.
 
 The versions of one graph share its weights and states: a full ELF
@@ -1066,10 +1066,8 @@ profiles. The library is four modules:
   one, flm.GEMM's `k_tile` and `tile_n` where a call pins them (its
   `k_tile` is otherwise the largest legal tile up to 512 dividing K), and
   with `accurate=True` the GEMM whose float32 sums round once;
-  `SwiGLU`, the SwiGLU feed-forward as a graph of its own, called in a
-  model's body or alone, device-tested by `iron/tests/lm/swiglu.py`;
   `LogMel`, an audio front end's log-mel spectrogram, and `Conv2d`, a
-  channels-last convolution, are graphs too, device-tested by
+  channels-last convolution, are graphs, device-tested by
   `iron/tests/lm/log_mel.py` and `iron/tests/lm/conv2d.py` (each graph's
   numpy reference is its `oracle()` method); `ImagePatches` resizes a vision
   front end's image into patches, `iron/tests/lm/image_patches.py`; and
