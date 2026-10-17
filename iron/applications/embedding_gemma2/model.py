@@ -306,9 +306,8 @@ class Multimodal(EmbeddingGemma):
             return None
         c = self.config
         # An input's gather is encoded on the host into its buffer, which Merge
-        # reads as the ids: gather by the device's copy of them, whole, since
-        # a gather by ids the device made takes no per-call bound.
-        x = self.lookup(Copy.step(placed, dtype=np.int32))
+        # reads as the ids: gather by the device's copy of them.
+        x = self.lookup(Copy.step(placed, dtype=np.int32)[:n])
         merge = Merge.step(
             placed,
             audio_token=c.audio_token,

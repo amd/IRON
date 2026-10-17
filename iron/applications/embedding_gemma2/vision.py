@@ -44,7 +44,8 @@ class VisionTower(Tower):
     RoPE angles by `xy`, each patch's x and y side by side, so a patch's row
     is x's angles then y's; the position embeddings by `position_ids` from
     x's table and y's as one, every patch's x, then every patch's y plus
-    `positions`. Padding looks up each table's last row, zero.
+    `positions`. Each gather is bounded to the image's patches, so the
+    processor's padding ids are never read.
 
     Args:
         config: The tower's shape.
@@ -67,10 +68,6 @@ class VisionTower(Tower):
             patch_columns=c.patch_columns,
             chunk=c.chunk,
         )
-        position = np.zeros((2 * c.positions + 1, c.emb_dim), bfloat16)
-        table = tree.patch_embedder.position_embedding_table
-        position[:-1] = table.reshape(-1, c.emb_dim)
-        derived.put(tree.patch_embedder, position=position)
         half = c.head_dim // 2
         quarter = np.arange(half // 2)
         # The x half's first and second quarters, then the y half's.
@@ -92,9 +89,9 @@ class VisionTower(Tower):
                 k_norm_reordered=a.k_norm.weight[order],
             )
         self.derived = derived.tree()
-        angles = np.zeros((c.positions + 1, half), bfloat16)
-        angles[:-1] = rope_angles(half, c.positions, c.rope_base)
-        self.rope = iron.weight(angles)
+        self.rope = iron.weight(
+            rope_angles(half, c.positions, c.rope_base).astype(bfloat16)
+        )
         self.minus_one = iron.weight(np.full((c.patches, c.emb_dim), -1, bfloat16))
         # Soft token j sums rows j * pool ** 2 onwards; a token past the
         # image's sums none of its rows.
@@ -123,12 +120,12 @@ class VisionTower(Tower):
         x = AXPY.step(pixels[:n], self.minus_one[:n], scalar_factor=2.0)
         patch = v.patch_embedder.input_proj.weight
         h = GEMM.step(x, patch, b_col_maj=True, **ACCURATE)
-        table = iron.weight(d.patch_embedder.position)
-        position = Copy.step(table[position_ids]).reshape(2, T, c.emb_dim)
-        h = ElementwiseAdd.step(
-            ElementwiseAdd.step(h, position[0, :n]), position[1, :n]
-        )
-        angles = Copy.step(self.rope[xy]).reshape(T, c.head_dim)[:n]
+        table = v.patch_embedder.position_embedding_table.reshape(-1, c.emb_dim)
+        ids = position_ids.reshape(2, T)
+        x_side = Copy.step(iron.weight(table)[ids[0, :n]])
+        y_side = Copy.step(iron.weight(table)[ids[1, :n]])
+        h = ElementwiseAdd.step(ElementwiseAdd.step(h, x_side), y_side)
+        angles = Copy.step(self.rope[xy[: 2 * n]]).reshape(T, c.head_dim)
         return h, angles
 
     def layer(self, step, i, w, x):

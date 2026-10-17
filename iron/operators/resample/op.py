@@ -1256,7 +1256,8 @@ class PatchPositions(Operator):
 
     The patches are in pooling-window order; `order` is each one's row of
     `Resample`'s raster. Rows past the image hold `positions`,
-    `2 * positions` and the raster's zero patch, which each gather pads with.
+    `2 * positions`, past each table, which a gather bounded to the image's
+    patches never reads, and the raster's zero patch.
     """
 
     test = Testing(

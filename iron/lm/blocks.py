@@ -571,7 +571,8 @@ class ImagePatches(iron.Graph):
     is resized to. It returns the pixels, ``(patches, 768)`` bf16, each
     patch's ``xy`` (x and y side by side) and ``position_ids`` (every x,
     then every y plus ``positions``); rows past the image are the zero
-    patch at ``positions``, the padding row of a table of that many.
+    patch at ids ``positions`` and ``2 * positions``, past each table, which
+    a gather bounded to the image's patches never reads.
 
     Args:
         patches: The patch rows of a call.

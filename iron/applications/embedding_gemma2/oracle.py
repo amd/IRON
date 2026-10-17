@@ -309,8 +309,8 @@ class VisionOracle(Oracle):
         """The processor's patches (`patches`) as the NPU's
         `iron.lm.ImagePatches` gives them in `rows` rows: each soft token's
         `pool ** 2` patches together, row-major within their window, the
-        tokens row-major over the image, then padding, which looks up each
-        table's last row.
+        tokens row-major over the image, then padding, ids past each
+        table.
 
         Returns:
             `pixels` `(rows, 3 * patch ** 2)` bf16; `xy` `(2 * rows,)` int32,
