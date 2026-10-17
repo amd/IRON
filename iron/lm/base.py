@@ -143,7 +143,11 @@ class DecoderConfig(Config):
     n_layers: int = dataclasses.field(metadata={"json": "num_hidden_layers"})
     n_heads: int = dataclasses.field(metadata={"json": "num_attention_heads"})
     n_kv_groups: int = dataclasses.field(metadata={"json": "num_key_value_heads"})
-    head_dim: int = dataclasses.field(metadata={"json": "head_dim"})
+    # None where the checkpoint's own config.json has no head_dim (Qwen 2.5,
+    # Granite, LFM2, Phi-4-mini-instruct): __post_init__ derives it.
+    head_dim: int | None = dataclasses.field(
+        default=None, kw_only=True, metadata={"json": "head_dim"}
+    )
     hidden_dim: int = dataclasses.field(metadata={"json": "intermediate_size"})
     # None turns nothing: a decoder of absolute positions (``positions``).
     rope_base: float | None = dataclasses.field(metadata={"json": "rope_theta"})
@@ -159,6 +163,8 @@ class DecoderConfig(Config):
     hidden_act: str = dataclasses.field(default="silu", metadata={"json": "hidden_act"})
 
     def __post_init__(self):
+        if self.head_dim is None:
+            object.__setattr__(self, "head_dim", self.emb_dim // self.n_heads)
         if self.max_seq_len % self.prefill_chunk:
             raise ValueError(
                 f"prefill_chunk ({self.prefill_chunk}) must divide max_seq_len "

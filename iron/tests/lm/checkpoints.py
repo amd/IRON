@@ -256,7 +256,19 @@ def test_a_decoder_holds_caches_where_it_attends_and_checkpoints_where_it_recurs
         def layer(self, i: int) -> Layer:
             return dataclasses.replace(super().layer(i), ssm=ssm)
 
-    config = Hybrid(64, 8, 3, 2, 1, 4, 16, 1e4, max_seq_len=L, prefill_chunk=C)
+    shape = dict(
+        vocab_size=64,
+        emb_dim=8,
+        n_layers=3,
+        n_heads=2,
+        n_kv_groups=1,
+        head_dim=4,
+        hidden_dim=16,
+        rope_base=1e4,
+        max_seq_len=L,
+        prefill_chunk=C,
+    )
+    config = Hybrid(**shape)
     layers = [SimpleNamespace(mamba=None), SimpleNamespace(self_attn=None)] * 2
     weights = SimpleNamespace(
         model=SimpleNamespace(
@@ -275,6 +287,6 @@ def test_a_decoder_holds_caches_where_it_attends_and_checkpoints_where_it_recurs
         }
     with pytest.raises(ValueError, match="holds mamba and the config no ssm"):
         CausalLM(
-            DecoderConfig(64, 8, 3, 2, 1, 4, 16, 1e4, max_seq_len=L, prefill_chunk=C),
+            DecoderConfig(**shape),
             weights,
         )

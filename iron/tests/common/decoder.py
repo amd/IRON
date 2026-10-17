@@ -5,17 +5,23 @@
 scale (``rope_attention_scaling``), device-free: the angle table's own
 shape and values, and that a traced decoder reads it at that width rather
 than ``head_dim`` -- Phi-4-mini-instruct's need, exercised here without a
-model of its own.
+model of its own. Also ``head_dim``'s own fallback (``emb_dim // n_heads``)
+for a checkpoint whose ``config.json`` has none (Qwen 2.5, Granite, LFM2,
+Phi-4-mini-instruct all omit it).
 """
 
 import dataclasses
+import hashlib
+import json
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
 from iron.common.graph.handle import Affine
-from iron.lm import project, rope_angles
+from iron.lm import DecoderConfig, project, rope_angles
 from iron.applications.llama.model import Llama
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
@@ -107,3 +113,47 @@ def test_prompt_chunk_reads_the_rope_table_at_its_own_width():
     angle_copy = next(c for c in copies if c.dst.sizes[-1] == 32)
     assert list(angle_copy.dst.sizes) == [256, 32]
     assert t.pinned["rope"] == 256 * 32 * np.dtype(bfloat16).itemsize
+
+
+# A run's checkpoints' config.json files, removed when the process exits.
+_CONFIGS = tempfile.TemporaryDirectory(prefix="iron-decoder-config-")
+
+
+def _config_json(**fields) -> Path:
+    blob = json.dumps(fields)
+    digest = hashlib.sha256(blob.encode()).hexdigest()[:16]
+    directory = Path(_CONFIGS.name) / digest
+    directory.mkdir(exist_ok=True)
+    path = directory / "config.json"
+    path.write_text(blob)
+    return path
+
+
+def test_head_dim_falls_back_to_emb_dim_over_n_heads_when_absent():
+    # Qwen 2.5, Granite, LFM2 and Phi-4-mini-instruct's config.json alike.
+    path = _config_json(
+        vocab_size=32,
+        hidden_size=1536,
+        num_hidden_layers=1,
+        num_attention_heads=12,
+        num_key_value_heads=2,
+        intermediate_size=64,
+        rope_theta=1.0,
+    )
+    cfg = DecoderConfig.from_checkpoint(path)
+    assert cfg.head_dim == 1536 // 12
+
+
+def test_head_dim_from_the_checkpoint_is_kept_as_given():
+    path = _config_json(
+        vocab_size=32,
+        hidden_size=2048,
+        num_hidden_layers=1,
+        num_attention_heads=16,
+        num_key_value_heads=8,
+        head_dim=128,
+        intermediate_size=64,
+        rope_theta=1.0,
+    )
+    cfg = DecoderConfig.from_checkpoint(path)
+    assert cfg.head_dim == 128
