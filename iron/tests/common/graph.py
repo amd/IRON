@@ -2219,3 +2219,8 @@ def test_a_version_reads_only_the_values_its_steps_read():
     assert g.trace(x=(8, 256)).reads == {"n"}
     assert g.trace(y=(8, 256)).reads == {"m"}
     assert [v.name for v in g.trace(x=(8, 256)).values] == ["n", "m"]
+
+
+def test_inline_traces_only_into_a_body():
+    with pytest.raises(TypeError, match="traces into a graph's body"):
+        _Summed(2).inline(_Summed(2).body)

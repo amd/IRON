@@ -530,21 +530,15 @@ class Graph:
     def __call__(self, *tensors, **values) -> Any:
         given = self._given(tensors)
         _check_values(self.name, self._values, values)
-        tracer = graph_tracer.get()
-        if tracer is not None:
+        if graph_tracer.get() is not None:
             if self._carried:
                 raise TypeError(
                     f"{self.name}: a graph called in another's body carries "
                     f"no values of its own; its caller carries them"
                 )
-            own = self._profile()
-            if own is None:
-                return self.body(*(given.get(n) for n in self._inputs), **values)
-            previous, tracer.profile = tracer.profile, own
-            try:
-                return self.body(*(given.get(n) for n in self._inputs), **values)
-            finally:
-                tracer.profile = previous
+            return self.inline(
+                self.body, *(given.get(n) for n in self._inputs), **values
+            )
         shapes = {
             name: (tuple(int(n) for n in t.shape), np.dtype(t.dtype).type)
             for name, t in given.items()
@@ -554,6 +548,26 @@ class Graph:
             logger.info("%s: compiling for %s", self.name, shapes)
             version = self.compile(**shapes)
         return version(*given.values(), **values)
+
+    def inline(self, method: Callable, /, *args, **kwargs) -> Any:
+        """``method``, one of this graph's, traced into the body of the graph
+        being traced, under this graph's profile: its steps are that graph's.
+        That graph names the values ``method`` takes, carried ones included.
+
+        Raises:
+            TypeError: No graph's body is being traced.
+        """
+        tracer = graph_tracer.get()
+        if tracer is None:
+            raise TypeError(f"{self.name}: inline() traces into a graph's body")
+        own = self._profile()
+        if own is None:
+            return method(*args, **kwargs)
+        previous, tracer.profile = tracer.profile, own
+        try:
+            return method(*args, **kwargs)
+        finally:
+            tracer.profile = previous
 
     def reference(self, *tensors, **values) -> Any:
         """``body`` on host tensors, each operator run through its ``reference()``.
