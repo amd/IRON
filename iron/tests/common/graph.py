@@ -2224,3 +2224,20 @@ def test_a_version_reads_only_the_values_its_steps_read():
 def test_inline_traces_only_into_a_body():
     with pytest.raises(TypeError, match="traces into a graph's body"):
         _Summed(2).inline(_Summed(2).body)
+
+
+class _DeviceIds(iron.Graph):
+    """A gather by ids a step made, whose table address the image writes."""
+
+    def __init__(self, table):
+        self.table = iron.weight(table)
+
+    def body(self, ids, *, n: Scratchpad[np.int32], m: Scratchpad[np.int32]):
+        return Copy.step(self.table[Copy.step(ids, dtype=np.int32)[:n]])
+
+
+def test_a_version_reads_none_of_the_words_its_image_writes():
+    table = np.zeros((300, 64), dtype=bfloat16)
+    traced = _DeviceIds(table).trace(ids=((64,), np.int32))
+    assert traced.addresses, "the gather's table address is a word the image writes"
+    assert traced.reads == {"n"}
