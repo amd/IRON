@@ -42,6 +42,7 @@ class EncoderDecoder(CausalLM):
 
     Raises:
         TypeError: The encoder takes other than one input.
+        ValueError: The encoder's rows are fewer than a prompt chunk's.
     """
 
     oracle: "type[EncoderDecoderOracle]"
@@ -50,6 +51,12 @@ class EncoderDecoder(CausalLM):
         super().__init__(config, weights, decoder)
         self.encoder = encoder
         rows = encoder.soft_rows if isinstance(encoder, Tower) else encoder.max_tokens
+        if rows < config.prefill_chunk:
+            # A prompt chunk's queries are the last rows of what MHA attends.
+            raise ValueError(
+                f"EncoderDecoder: the encoder's {rows} rows are fewer than a "
+                f"{config.prefill_chunk}-row prompt chunk's queries"
+            )
         shapes = [
             (rows, config.layer(i).groups, config.layer(i).head_dim)
             for i in range(config.n_layers)

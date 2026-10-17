@@ -291,3 +291,12 @@ def test_padded_encoder_rows_reach_neither_attention():
     _assert_close([clean], [oracle.logits(tokens)])
     leaked = run(model(), padded, SOURCE, SOURCE, tokens)
     assert np.abs(leaked - clean).max() > np.abs(clean - oracle.logits(tokens)).max()
+
+
+def test_an_encoder_shorter_than_a_prompt_chunk_is_refused():
+    """MHA takes a chunk's queries as the last rows of the keys, so a cross
+    attention over fewer rows has none to compile.
+    """
+    weights = tree(0)
+    with pytest.raises(ValueError, match="fewer than a 256-row prompt chunk"):
+        Whisper(CONFIG, weights, Features(CONFIG.emb_dim, 128), weights.model.decoder)
