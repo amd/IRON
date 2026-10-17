@@ -50,6 +50,16 @@ def shapes(E, H, G, D, F) -> dict[str, tuple[int, ...]]:
         "mlp.down_proj": (E, F),
         "mlp.fc1": (F, E),
         "mlp.fc2": (E, F),
+        "self_attn_layer_norm": (E,),
+        "self_attn.out_proj": (E, H * D),
+        "encoder_attn_layer_norm": (E,),
+        "encoder_attn.q_proj": (H * D, E),
+        "encoder_attn.k_proj": (G * D, E),
+        "encoder_attn.v_proj": (G * D, E),
+        "encoder_attn.out_proj": (E, H * D),
+        "final_layer_norm": (E,),
+        "fc1": (F, E),
+        "fc2": (E, F),
     }
 
 
@@ -208,9 +218,9 @@ def test_a_layer_norm_at_another_epsilon_than_its_kernels_is_refused():
 T, WIDTH, HEADS, GROUPS, HEAD, HIDDEN = 256, 512, 8, 2, 64, 1024
 
 
-def traced(names, layer, **parts):
+def traced(names, layer, turned=True, **parts):
     """The steps of ``layer`` on a module of ``names`` and ``parts``,
-    traced at ``T`` rows.
+    traced at ``T`` rows, turned by RoPE if ``turned``.
     """
     rng = np.random.default_rng(3)
     shape = shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN)
@@ -235,7 +245,7 @@ def traced(names, layer, **parts):
             self.angles = iron.weight(np.zeros((T, HEAD), bfloat16))
 
         def body(self, x):
-            return layer.step(self.weights, x, attend, self.angles)
+            return layer.step(self.weights, x, attend, self.angles if turned else None)
 
     return Model().trace(x=(T, WIDTH))
 
@@ -537,3 +547,170 @@ def test_the_feed_forward_block_alone_is_its_oracle():
     # Seven steps, each rounded once to bf16 (2 ** -9 relative).
     error = np.linalg.norm(got - want) / np.linalg.norm(want)
     assert error < 7 * 2**-9
+
+
+WHISPER = (
+    "self_attn_layer_norm",
+    "self_attn.q_proj",
+    "self_attn.k_proj",
+    "self_attn.v_proj",
+    "self_attn.out_proj",
+    "encoder_attn_layer_norm",
+    "encoder_attn.q_proj",
+    "encoder_attn.k_proj",
+    "encoder_attn.v_proj",
+    "encoder_attn.out_proj",
+    "final_layer_norm",
+    "fc1",
+    "fc2",
+)
+
+
+def decoder(rng, shape, dtype=np.float32):
+    """A Whisper decoder layer module at ``shape``: affine LayerNorms about
+    one, every projection biased but the keys', as Whisper's.
+    """
+    w = module(rng, shape, WHISPER, dtype, bias=True, norm_bias=True)
+    for n in (w.self_attn_layer_norm, w.encoder_attn_layer_norm, w.final_layer_norm):
+        n.weight += dtype(1)
+    del w.self_attn.k_proj.bias, w.encoder_attn.k_proj.bias
+    return w
+
+
+def test_the_oracle_of_a_decoder_layer_attends_over_the_encoder():
+    rng = np.random.default_rng(11)
+    w = decoder(rng, shapes(E, H, H, D, F))
+    x = rng.standard_normal((N, E)).astype(np.float32)
+    memory = rng.standard_normal((N + 3, E)).astype(np.float32)
+    o = Oracle(AudioConfig(eps=1e-5))
+    layer = Layer(H, H, D, 1e-5, "gelu_pytorch_tanh")
+    k, v = layer.cross_kv_oracle(o, w, memory)
+    got = layer.oracle(
+        o, w, x, partial(o.attend, causal=True), None, cross=partial(o.attend, k=k, v=v)
+    )
+
+    def ln(x, n):
+        c = x - x.mean(-1, keepdims=True)
+        return c / np.sqrt(np.mean(c * c, -1, keepdims=True) + 1e-5) * n.weight + n.bias
+
+    def linear(x, p):
+        return x @ p.weight.T + vars(p).get("bias", 0)
+
+    a, c = w.self_attn, w.encoder_attn
+    h = ln(x, w.self_attn_layer_norm)
+    q, k, v = (linear(h, p).reshape(N, H, D) for p in (a.q_proj, a.k_proj, a.v_proj))
+    x = x + linear(o.attend(q, k, v, causal=True), a.out_proj)
+    q = linear(ln(x, w.encoder_attn_layer_norm), c.q_proj).reshape(N, H, D)
+    k, v = (linear(memory, p).reshape(N + 3, H, D) for p in (c.k_proj, c.v_proj))
+    x = x + linear(o.attend(q, k, v), c.out_proj)
+    want = x + linear(Oracle.gelu_tanh(linear(ln(x, w.final_layer_norm), w.fc1)), w.fc2)
+    np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.usefixtures("npu2")
+def test_no_angles_turn_nothing():
+    rng = np.random.default_rng(12)
+    w = module(rng, shapes(E, H, G, D, F), QK)
+    x = rng.standard_normal((N, E)).astype(np.float32)
+    identity = np.tile(np.float32([1, 0]), (N, D // 2))
+    o = oracle()
+    attend = partial(o.attend, causal=True)
+    layer = Layer(H, G, D, 1e-6)
+    np.testing.assert_array_equal(
+        layer.oracle(o, w, x, attend, None), layer.oracle(o, w, x, attend, identity)
+    )
+    layer = Layer(HEADS, GROUPS, HEAD, 1e-6, accurate=True)
+    turned, unturned = traced(LLAMA, layer), traced(LLAMA, layer, turned=False)
+    assert ops(turned) - ops(unturned) == Counter(RoPE=2)
+    assert not ops(unturned) - ops(turned)
+
+
+# The encoder's output rows a decoder layer's cross-attention reads.
+S = 512
+
+
+class Decoder(iron.Graph):
+    """``layer`` on the module ``w`` at ``T`` rows, attending over itself
+    and, with ``cross``, over the keys and values ``cross_kv`` projects
+    from ``memory``.
+    """
+
+    def __init__(self, layer, w, cross=True):
+        self.layer, self.weights, self.cross = layer, w, cross
+
+    def body(self, x, memory):
+        layer = self.layer
+        H, D = layer.heads, layer.head_dim
+
+        def attend(q, k, v, *, scale, window):
+            o = MHA.step(
+                q, k, v, heads_interleaved=True, kv_interleaved=True, causal=False
+            )
+            return o.reshape(T, H * D)
+
+        if not self.cross:
+            return layer.step(self.weights, x, attend, None)
+        keys, values = layer.cross_kv(self.weights, memory)
+
+        def cross(q, *, scale):
+            o = MHA.step(
+                q,
+                keys,
+                values,
+                heads_interleaved=True,
+                kv_interleaved=True,
+                causal=False,
+                scale=scale,
+            )
+            return o.reshape(T, H * D)
+
+        return layer.step(self.weights, x, attend, None, cross=cross)
+
+
+@pytest.mark.usefixtures("npu2")
+def test_a_decoder_layer_s_graph_through_its_operators_references_is_its_oracle():
+    """A Whisper decoder layer, its keys and values over the encoder's output
+    from ``cross_kv``, run through each operator's reference, is its oracle
+    within bf16's rounding of each of its steps; an oracle missing the cross
+    block is not.
+    """
+    rng = np.random.default_rng(13)
+    w = decoder(rng, shapes(WIDTH, HEADS, HEADS, HEAD, HIDDEN), bfloat16)
+    without = SimpleNamespace(**vars(w))
+    del without.encoder_attn, without.encoder_attn_layer_norm
+    layer = Layer(HEADS, HEADS, HEAD, 1e-5, "gelu_pytorch_tanh", accurate=True)
+    graph = Decoder(layer, w)
+    shape = dict(x=(T, WIDTH), memory=(S, WIDTH))
+    # The cross block: its affine LayerNorm, q, k, v and o projected with
+    # their biases but k's, the attention and the residual.
+    extra = Counter(
+        LayerNorm=1, RowwiseMul=1, RowwiseAdd=4, GEMM=4, MHA=1, ElementwiseAdd=1
+    )
+    plain = Decoder(layer, without, cross=False).trace(**shape)
+    assert ops(graph.trace(**shape)) - ops(plain) == extra
+    assert not ops(plain) - ops(graph.trace(**shape))
+
+    x = rng.standard_normal((T, WIDTH)).astype(bfloat16)
+    memory = rng.standard_normal((S, WIDTH)).astype(bfloat16)
+    got = np.asarray(graph.reference(x, memory), np.float32)
+    o = Oracle(AudioConfig(eps=1e-5))
+    xf, mf = np.asarray(x, np.float32), np.asarray(memory, np.float32)
+    k, v = layer.cross_kv_oracle(o, widen(w), mf)
+    cross = partial(o.attend, k=k, v=v)
+
+    def error(module):
+        want = layer.oracle(o, widen(module), xf, o.attend, None, cross=cross)
+        return np.linalg.norm(got - want) / np.linalg.norm(want)
+
+    # Its 33 steps, each rounded once to bf16 (2 ** -9 relative).
+    assert error(w) < 33 * 2**-9
+    assert error(without) > 33 * 2**-9
+
+
+@pytest.mark.usefixtures("npu2")
+def test_a_decoder_layer_needs_its_cross_attention():
+    shape = shapes(WIDTH, HEADS, HEADS, HEAD, HIDDEN)
+    w = decoder(np.random.default_rng(14), shape, bfloat16)
+    layer = Layer(HEADS, HEADS, HEAD, 1e-5, "gelu_pytorch_tanh")
+    with pytest.raises(TypeError, match="encoder_attn needs cross="):
+        Decoder(layer, w, cross=False).trace(x=(T, WIDTH), memory=(S, WIDTH))

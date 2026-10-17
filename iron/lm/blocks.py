@@ -723,10 +723,13 @@ class Layer:
     ``qkv_proj`` or ``gate_up_proj`` cut by rows; the feed-forward held by
     ``mlp``, ``feed_forward`` or the layer itself, plain where it holds
     ``fc1`` and ``fc2``, else gated by a family of ``GATED``; a per-layer
-    input through ``ple_block``; and a ``layer_scalar``. A model kind gives
-    the attention and the rotation: ``attend(q, k, v, scale=, window=)`` on
-    ``(rows, heads, head_dim)`` returns ``(rows, heads * head_dim)``, and
-    ``angles`` turns q and k.
+    input through ``ple_block``; a ``layer_scalar``; and where it holds
+    ``encoder_attn``, a cross-attention block after attention, over an
+    encoder's output (``cross_kv``). A model kind gives the attention and
+    the rotation: ``attend(q, k, v, scale=, window=)`` on ``(rows, heads,
+    head_dim)`` returns ``(rows, heads * head_dim)``, ``cross(q, scale=)``
+    likewise over the encoder's keys and values, and ``angles`` turns q
+    and k.
 
     Args:
         heads: The query heads.
@@ -902,20 +905,23 @@ class Layer:
             return ElementwiseAdd.step(x, y)
         return AXPY.step(y.reshape(x.shape), x, scalar_factor=r)
 
-    def step(self, w, x, attend, angles, *, ple=None, derived=None):
+    def step(self, w, x, attend, angles, *, cross=None, ple=None, derived=None):
         """The layer on ``x`` ``(rows, width)``, in a graph's body.
 
         Args:
             w: The checkpoint's layer module.
             x: The layer's input.
             attend: The model kind's attention.
-            angles: The RoPE angles, a row per position.
+            angles: The RoPE angles, a row per position; None turns nothing.
+            cross: The model kind's attention over the encoder's keys and
+                values, for an ``encoder_attn``.
             ple: The per-layer input ``ple_block`` gates, ``(rows, ple_dim)``.
             derived: ``w``'s module of the model's derived tree (``derive``).
 
         Raises:
-            TypeError: The module holds a ``ple_block`` and no ``ple`` is
-                given, or a ``layer_scalar`` and no ``derived``.
+            TypeError: The module holds an ``encoder_attn`` and no ``cross``
+                is given, a ``ple_block`` and no ``ple``, or a
+                ``layer_scalar`` and no ``derived``.
         """
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
         a = w.self_attn
@@ -934,10 +940,12 @@ class Layer:
         if q_norm is not None:
             q = self.norm(q, q_norm)
         # One angle row per position, applied to that position's heads.
-        q = self.rotate(q, angles)
+        if angles is not None:
+            q = self.rotate(q, angles)
         if k_norm is not None:
             k = self.norm(k, k_norm)
-        k = self.rotate(k, angles)
+        if angles is not None:
+            k = self.rotate(k, angles)
         if self.v_norm:
             v = RMSNorm.step(v, epsilon=self.eps)
         o = attend(
@@ -950,7 +958,16 @@ class Layer:
         y = project(o, *o_w, accurate=self.accurate)
         if after is not None:
             y = self.norm(y, after)
-        x = self.feed_forward(w, self.add(x, y))
+        x = self.add(x, y)
+        if "encoder_attn" in vars(w):
+            if cross is None:
+                raise TypeError("Layer.step: the module's encoder_attn needs cross=")
+            q_w, _, _, o_w = self.projections(w.encoder_attn)
+            h = self.norm(x, w.encoder_attn_layer_norm)
+            q = project(h, *q_w, accurate=self.accurate, tile_size_output=D // 2)
+            o = cross(q.reshape(n, H, D), scale=self.scale)
+            x = self.add(x, project(o, *o_w, accurate=self.accurate))
+        x = self.feed_forward(w, x)
         if "ple_block" in vars(w):
             if ple is None:
                 raise TypeError("Layer.step: the module's ple_block needs ple=")
@@ -964,6 +981,28 @@ class Layer:
                 raise TypeError("Layer.step: the module's layer_scalar needs derived=")
             x = RowwiseMul.step(x, derived.scale)
         return x
+
+    def cross_kv(self, w, memory) -> tuple:
+        """The keys and values the layer module ``w``'s ``encoder_attn``
+        projects from an encoder's output ``memory`` ``(rows, width)``, each
+        ``(rows, groups, head_dim)``, in a graph's body.
+        """
+        _, k_w, v_w, _ = self.projections(w.encoder_attn)
+        G, D = self.groups, self.head_dim
+        return tuple(
+            project(memory, *p, accurate=self.accurate).reshape(memory.shape[0], G, D)
+            for p in (k_w, v_w)
+        )
+
+    def cross_kv_oracle(self, o, w, memory) -> tuple:
+        """``cross_kv``'s twin in float32 on the host, ``w`` widened to
+        float32.
+        """
+        _, k_w, v_w, _ = self.projections(w.encoder_attn)
+        G, D = self.groups, self.head_dim
+        return tuple(
+            o.linear(memory, *p).reshape(memory.shape[0], G, D) for p in (k_w, v_w)
+        )
 
     def feed_forward(self, w, x):
         """The feed-forward block of the layer module ``w`` on ``x`` ``(rows,
@@ -987,7 +1026,7 @@ class Layer:
             f = self.norm(f, after)
         return self.add(x, f)
 
-    def oracle(self, o, w, x, attend, angles, *, ple=None) -> np.ndarray:
+    def oracle(self, o, w, x, attend, angles, *, cross=None, ple=None) -> np.ndarray:
         """``step``'s twin in float32 on the host, from the ``Oracle`` ``o``'s
         primitives.
 
@@ -996,7 +1035,10 @@ class Layer:
             w: The checkpoint's layer module, widened to float32.
             x: The layer's input, ``(rows, width)``.
             attend: The oracle's attention (``Oracle.attend``).
-            angles: The RoPE table, or tables (``Oracle.rotate``).
+            angles: The RoPE table, or tables (``Oracle.rotate``); None
+                turns nothing.
+            cross: The oracle's attention over the encoder's keys and
+                values (``cross_kv_oracle``), for an ``encoder_attn``.
             ple: The per-layer input ``ple_block`` gates.
         """
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
@@ -1015,14 +1057,22 @@ class Layer:
             k = o.normed(k, k_norm)
         if self.v_norm:
             v = o.rms_norm(v)
-        q, k = (
-            np.concatenate([o.rotate(t[..., :A], angles), t[..., A:]], axis=-1)
-            for t in (q, k)
-        )
+        if angles is not None:
+            q, k = (
+                np.concatenate([o.rotate(t[..., :A], angles), t[..., A:]], axis=-1)
+                for t in (q, k)
+            )
         y = o.linear(attend(q, k, v, scale=self.scale, window=self.window), *o_w)
         if after is not None:
             y = o.normed(y, after)
-        x = self.feed_forward_oracle(o, w, x + y * np.float32(self.residual))
+        r = np.float32(self.residual)
+        x = x + y * r
+        if "encoder_attn" in vars(w):
+            q_w, _, _, o_w = self.projections(w.encoder_attn)
+            q = o.linear(o.normed(x, w.encoder_attn_layer_norm), *q_w)
+            y = o.linear(cross(q.reshape(n, H, D), scale=self.scale), *o_w)
+            x = x + y * r
+        x = self.feed_forward_oracle(o, w, x)
         if "ple_block" in vars(w):
             b = w.ple_block
             g = o.linear(x, *self.linear(b.per_layer_input_gate))

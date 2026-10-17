@@ -1109,12 +1109,17 @@ profiles. The library is five modules:
   affine LayerNorm where a norm holds a bias, q and k norms, biases, a
   `linear` wrapper, a fused `qkv_proj` or `gate_up_proj` (cut by rows,
   views of the checkpoint's array), a plain `fc1`/`fc2` feed-forward, a
-  per-layer input (`ple_block`) and a `layer_scalar`. The config's
+  per-layer input (`ple_block`), a `layer_scalar`, and a cross-attention
+  block where it holds `encoder_attn` (Whisper's decoder: its
+  `encoder_attn_layer_norm`, q, the model kind's `cross(q, scale=)` over
+  the keys and values `cross_kv(w, memory)` projects from the encoder's
+  output, `out_proj` and the residual). The config's
   `layer(i)` gives the rest: heads, activation, attention scale and window,
   the rotated prefix of a head (`rotary_dim`), a value norm, a residual
   scale. Its
   `step()` runs in a graph's body with the model kind's `attend` and RoPE
-  angles, and `oracle()` is its float32 twin, built from `Oracle`'s
+  angles (None turns nothing), and `oracle()` is its float32 twin
+  (`cross_kv_oracle()` the keys' and values'), built from `Oracle`'s
   primitives (`iron/tests/common/layer.py`). `feed_forward()` and its twin
   `feed_forward_oracle()` are the feed-forward block alone (pre-norm,
   feed-forward, post-norm, residual), which `step()` runs and a layer
