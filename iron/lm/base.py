@@ -611,10 +611,10 @@ class Oracle:
         # The keys and values of each layer another attends over, by layer.
         self.shared: dict[int, tuple] = {}
 
-    def layer(self, i: int, angles, w, x):
+    def layer(self, i: int, angles, w, x, *, ple=None):
         """Layer ``i`` on ``x``, ``config.layer(i)``'s twin, attending
         causally; over an earlier layer's keys and values where it shares them
-        (``kv_source``).
+        (``kv_source``); ``ple`` is its per-layer input.
         """
         c = self.config
         source = c.kv_source(i)
@@ -627,7 +627,7 @@ class Oracle:
                 self.shared[i] = (k, v)
             return self.attend(q, k, v, causal=True, **kw)
 
-        return c.layer(i).oracle(self, w, x, attend, angles)
+        return c.layer(i).oracle(self, w, x, attend, angles, ple=ple)
 
     def head(self, x):
         raise NotImplementedError(f"{type(self).__name__} defines no head()")
