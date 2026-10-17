@@ -1080,7 +1080,9 @@ profiles. The library is six modules:
   on the host) runs the encoder, its input and values named `encoder_<name>`,
   and writes each layer's `cross_kv` into the states `cross_keys` and
   `cross_values`; every version carries `source`, the encoder rows the
-  cross attention (`cross`) reads. `EncoderDecoderOracle.encode(memory)`
+  cross attention (`cross`) reads, which each host call gives through
+  `call_values()`, `CausalLM`'s hook for the per-call values a subclass
+  adds to every call. `EncoderDecoderOracle.encode(memory)`
   projects the twin's keys and values once a clip
 - `encoder.py`: `Encoder`, a bidirectional encoder compiled once at
   `max_tokens` rows with the length bound per call, with `CausalLM`'s

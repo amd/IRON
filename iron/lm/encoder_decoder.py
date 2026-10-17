@@ -203,21 +203,15 @@ class EncoderDecoder(CausalLM):
         self._encode(*inputs, token=0, position=0, source=self._source, **named)
         self.forget(0)
 
-    def __call__(self, ids=None, before=None, **values):
-        """A decoder version's call (``CausalLM``), with the ``source`` the
-        last ``encode`` set unless ``values`` carry one.
+    def call_values(self) -> dict:
+        """The ``source`` the last ``encode`` set.
 
         Raises:
             RuntimeError: Nothing is encoded yet: ``encode()`` first.
         """
         if self._source is None:
             raise RuntimeError(f"{type(self).__name__}: encode() first")
-        values.setdefault("source", self._source)
-        return super().__call__(ids, before, **values)
-
-    def _chunks(self, tokens, held):
-        for inputs, values in super()._chunks(tokens, held):
-            yield inputs, dict(values, source=self._source)
+        return dict(source=self._source)
 
 
 class EncoderDecoderOracle(Oracle):

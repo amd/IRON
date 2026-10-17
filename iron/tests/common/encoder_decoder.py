@@ -209,3 +209,9 @@ def prompt(model, tokens, source: int):
         )
         out = model.reference(model.prompt_ids(chunk), **values)
     return out
+
+
+def test_a_decoder_call_before_any_encode_is_refused(whisper):
+    model, *_ = whisper
+    with pytest.raises(RuntimeError, match=r"encode\(\) first"):
+        model.call_values()

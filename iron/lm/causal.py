@@ -291,10 +291,16 @@ class CausalLM(Model):
         if not decode.plan.full_elf:
             logger.info("%s", decode.plan.report("decode"))
 
+    def call_values(self) -> dict:
+        """The per-call values every call gives beyond the token, position,
+        chunk and rows: none by default.
+        """
+        return {}
+
     def __call__(self, ids=None, before=None, **values) -> Any:
         """One call of the prompt version on ``ids`` (``prompt_ids``), of the
         placed one on ``ids`` and ``before`` (``use``), else of the decode
-        step.
+        step, with ``call_values`` where ``values`` give none of their own.
 
         Raises:
             RuntimeError: Neither version is loaded: ``load()`` first, which
@@ -302,6 +308,7 @@ class CausalLM(Model):
         """
         if self._decode is None:
             raise RuntimeError(f"{type(self).__name__}: load() first")
+        values = {**self.call_values(), **values}
         if ids is None:
             return self._decode(**values)
         if before is not None:
@@ -508,6 +515,7 @@ class CausalLM(Model):
             end = min(begin + C, n)
             ids = self.prompt_ids(tokens[begin:end])
             values = dict(
+                self.call_values(),
                 token=int(tokens[end - 1]),
                 position=end - 1,
                 chunk=begin // C,
