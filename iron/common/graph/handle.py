@@ -211,6 +211,12 @@ class Handle:
         static, shape, bounds = [], [], {}
         tracer = graph_tracer.get()
         for axis, (entry, n) in enumerate(zip(entries, self.shape)):
+            if isinstance(entry, slice) and isinstance(entry.start, (PerCall, Affine)):
+                raise ValueError(
+                    f"a slice cannot start at a per-call value ({entry.start}) yet: "
+                    f"index one row, [{entry.start}], or bound an axis from its "
+                    f"start, [:n]"
+                )
             if axis in self.bounds and isinstance(entry, slice):
                 bounds[len(shape)] = self.bounds[axis]
                 static.append(entry)

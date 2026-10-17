@@ -2287,3 +2287,21 @@ def test_a_version_reads_none_of_the_words_its_image_writes():
     traced = _DeviceIds(table).trace(ids=((64,), np.int32))
     assert traced.addresses, "the gather's table address is a word the image writes"
     assert traced.reads == {"n"}
+
+
+class _SliceFrom(iron.Graph):
+    """A slice starting at a per-call value, with and without a stop."""
+
+    def __init__(self, stop: int | None):
+        self.stop = stop
+        self.rows = iron.state((16, 256))
+
+    def body(self, *, pos: Scratchpad[np.int32]):
+        stop = None if self.stop is None else pos + self.stop
+        return Copy.step(self.rows[pos:stop])
+
+
+@pytest.mark.parametrize("stop", [None, 4])
+def test_a_slice_from_a_per_call_start_is_refused_by_name(stop):
+    with pytest.raises(ValueError, match="cannot start at a per-call value"):
+        _SliceFrom(stop).trace()
