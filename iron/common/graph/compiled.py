@@ -961,12 +961,14 @@ def _words(
         if not extents and isinstance(b.member, Extent):
             continue
         e = b.expression
-        linear = Linear(
-            e.value.name,
-            Fraction(e.scale),
-            Fraction(e.bias),
-            np.dtype(b.member.dtype).name,
-        )
+        linear = None
+        if not e.down:
+            linear = Linear(
+                e.value.name,
+                Fraction(e.scale),
+                Fraction(e.bias),
+                np.dtype(b.member.dtype).name,
+            )
         words.append(Word(b.symbol, e.dtype, lambda v, e=e: e.evaluate(v), linear, e))
     seen: set[int] = set()
     derived: set[str] = set()

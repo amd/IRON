@@ -315,7 +315,10 @@ keyword-only parameters annotated `iron.Scratchpad[T]`, `iron.Carried[T]` or
 (XRT's `get_ctrl_scratchpad_bo` serves a module run), so on an xclbin image a
 scratchpad value lowers to a dispatch-time scalar: an offset use regenerates
 the stream, a core-read use is a write of the scalar into the core's
-runtime parameters.
+runtime parameters. Arithmetic on a value is an expression of it; a view's
+index may floor by a power of two (`slots[position // 2048]`), which the
+host, the reference and a device loop's Emit all compute, while a bound
+(`x[:n]`), which patches a length, stays linear.
 
 **Compilation Flow**:
 

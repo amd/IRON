@@ -1329,8 +1329,10 @@ def test_per_call_values_are_integer_expressions():
     with pytest.raises(TypeError):
         _ = p * 0.5
     cache = Handle((8, 4), bfloat16, "cache", "state")
+    # An index may floor; a bound, which patches a length, may not.
+    assert cache[(p + 1) // 2].index_by == (p + 1) // 2 * 4
     with pytest.raises(TypeError, match="not linear"):
-        _ = cache[(p + 1) // 2]
+        _ = cache[: (p + 1) // 2]
     assert 10 - p == Affine(p, -1, 10) and -p == Affine(p, -1)
     assert (p * 4) // 2 == p // 1 * 2 and p // 2 == Affine(p, 1, 0, 1)
     arithmetic = {"__add__", "__sub__", "__mul__", "__radd__", "__rmul__"}
@@ -2136,6 +2138,50 @@ def test_the_emit_program_follows_the_target_parameters():
             jumped,
             [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(jumped)],
         )
+
+
+def test_a_state_is_indexed_by_a_floored_carried_value(npu2):
+    """``position // 4`` indexes a state's slot: its word floors on the host,
+    in the reference and in the Emit program the device runs between calls;
+    a bound, which patches a length, stays linear.
+    """
+
+    class Slots(iron.Graph):
+        def __init__(self):
+            self.slots = iron.state((8, 32), np.int32)
+
+        def body(self, *, position: Carried[np.int32]):
+            row = Copy.step(self.slots[position // 4], dtype=np.int32)
+            Copy.step(row, self.slots[(position + 1) // 4 + 1], dtype=np.int32)
+            return iron.carry(position=position + 1)
+
+    graph = Slots()
+    traced = graph.trace()
+    floored = [b.expression for b in traced.bindings]
+    assert [e.down for e in floored] == [2, 2]
+    assert len({e.name for e in floored}) == 2
+    words, _ = _words(traced)
+    assert all(w.linear is None for w in words)
+    site = attach_emit(traced, graph._carried, graph._carry, slots=len(words))
+    parameters = [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(words)]
+    program = compose(site, traced.carry, words, parameters)
+    for p in range(10):
+        image, state = emit_reference(program, np.array([[p], [0]]), slots=len(words))
+        want = [w(dict(position=p + 1)) for w in words]
+        assert image.tolist() == want == [(p + 1) // 4 * 32, ((p + 2) // 4 + 1) * 32]
+        assert state.tolist() == [p + 1]
+
+    slots = np.arange(8 * 32, dtype=np.int32).reshape(8, 32)
+    graph.slots.host = slots.copy()
+    graph.reference(position=6)
+    assert (graph.slots.host[2] == slots[1]).all()
+
+    class Bounded(iron.Graph):
+        def body(self, x, *, n: Scratchpad[np.int32]):
+            return Copy.step(x[: n // 4])
+
+    with pytest.raises(TypeError, match="not linear"):
+        Bounded().trace(x=((64, 32), bfloat16))
 
 
 class _HeldStack(iron.Graph):

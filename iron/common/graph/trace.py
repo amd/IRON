@@ -657,7 +657,9 @@ class Tracer:
                 f"{type(op).__name__}.{name} takes a per-call value handle (a "
                 f"keyword-only parameter of the graph's body), got {value!r}"
             )
-        value = value.affine()
+        # An offset may floor; an extent's derived words take a linear one.
+        if isinstance(value, PerCall) or isinstance(op.value(name), Extent):
+            value = value.affine()
         bound = self._bound.setdefault(id(op), {})
         if name in bound and bound[name] != value:
             raise ValueError(

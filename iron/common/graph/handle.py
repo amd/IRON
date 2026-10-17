@@ -231,7 +231,9 @@ class Handle:
                 static.append(slice(None))
                 shape.append(n)
             elif isinstance(entry, (PerCall, Affine)):
-                entry = entry.affine()
+                # An index may floor (a slot per chunk, ``position // C``).
+                if isinstance(entry, PerCall):
+                    entry = entry.affine()
                 if index_by is not None:
                     raise ValueError("one axis at most is indexed by a per-call value")
                 if entry.value.kind is Kind.DISPATCH_TIME:
@@ -572,6 +574,13 @@ class Affine:
         text = self.value.name + (f"_x{self.scale}" if self.scale != 1 else "")
         if self.bias:
             text += f"_{'p' if self.bias > 0 else 'm'}{abs(self.bias)}"
+        if self.down:
+            if self.mul != 1:
+                text += f"_d{self.down}_x{'m' if self.mul < 0 else ''}{abs(self.mul)}"
+            else:
+                text += f"_d{self.down}"
+            if self.add:
+                text += f"_{'p' if self.add > 0 else 'm'}{abs(self.add)}"
         return text
 
     def evaluate(self, values: Mapping[str, int]) -> int:
