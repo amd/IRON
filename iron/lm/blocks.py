@@ -594,6 +594,9 @@ class ImagePatches(iron.Graph):
         self.patches, self.image, self.pool, self.chunk = patches, image, pool, chunk
         k, side = pool, pool * SIDE
         cores = 2 * aie_utils.ensure_current_device().cols
+        # Pooling windows across at most: Resample's cores hold `patch_columns`
+        # patch columns each, a zero one past the image among them.
+        self.across = (patch_columns * cores - 1) // k
         # Every grid of whole pooling windows the rows hold; the fewest patch
         # columns give the most bands and padded raster rows.
         grids = [(patches // s // k * k, s) for s in range(k, patches // k + 1, k)]

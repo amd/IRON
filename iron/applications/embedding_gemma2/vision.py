@@ -10,6 +10,7 @@ from functools import partial
 from types import SimpleNamespace
 
 import numpy as np
+from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 import iron
@@ -40,12 +41,13 @@ class VisionTower(Tower):
     second, is one rotation of halves: a permutation within a head changes
     neither its norm nor a query's product with a key.
 
-    The rows a call looks up by patch position are gathered on the NPU: the
-    RoPE angles by `xy`, each patch's x and y side by side, so a patch's row
-    is x's angles then y's; the position embeddings by `position_ids` from
-    x's table and y's as one, every patch's x, then every patch's y plus
-    `positions`. Each gather is bounded to the image's patches, so the
-    processor's padding ids are never read.
+    The rows a call looks up by patch position, x's and y's position
+    embeddings and RoPE angles, are copied from tables of whole windows in
+    the same order: a window's x blocks by window column, its y blocks by
+    window row, repeated across the widest image that reaches the row. A
+    descriptor walks 64 window rows at most, so each copy walks `groups` in
+    turn, each its rows of the image or, past them, one more into rows no
+    later step reads.
 
     Args:
         config: The tower's shape.
@@ -90,10 +92,41 @@ class VisionTower(Tower):
                 q_norm_reordered=a.q_norm.weight[order],
                 k_norm_reordered=a.k_norm.weight[order],
             )
-        self.derived = derived.tree()
-        self.rope = iron.weight(
-            rope_angles(half, c.positions, c.rope_base).astype(bfloat16)
+        k, windows, across = c.pool, c.patches // window, self.processor.across
+        # Window rows in groups a descriptor walks, at most 64, doubling from
+        # 8 so each group's y blocks are about as wide as the widest image
+        # that reaches it: `pitch` blocks a window row from block `base`.
+        self.groups, blocks, first = [], [], 0
+        while first < windows:
+            rows = min(64, max(8, first), windows - first)
+            pitch = min(across, windows // (first + 1))
+            self.groups.append((first, rows, pitch, len(blocks)))
+            blocks += [first + r for r in range(rows) for _ in range(pitch)]
+            first += rows
+        # A walk past the image reads `across` blocks from its group's first row.
+        last = max(
+            base + (rows - 1) * pitch + across for _, rows, pitch, base in self.groups
         )
+        blocks += [0] * (last - len(blocks))
+        x_ids = [
+            k * tx + wx for tx in range(across) for _ in range(k) for wx in range(k)
+        ]
+        y_ids = [k * ty + wy for ty in blocks for wy in range(k) for _ in range(k)]
+        table = tree.patch_embedder.position_embedding_table
+        derived.put(
+            tree.patch_embedder, x_windows=table[0][x_ids], y_windows=table[1][y_ids]
+        )
+        self.derived = derived.tree()
+        rope = rope_angles(half, c.positions, c.rope_base).astype(bfloat16)
+        self.x_angles, self.y_angles = rope[x_ids], rope[y_ids]
+        self.capacity = max(
+            self.walked(hk, wk)
+            for hk in range(1, windows + 1)
+            for wk in range(1, min(across, windows // hk) + 1)
+        )
+        # What the walks write, past `patches` rows of the image's windows.
+        self.window_rows = iron.state((self.capacity, c.emb_dim))
+        self.angle_rows = iron.state((self.capacity, c.head_dim))
         self.minus_one = iron.weight(np.full((c.patches, c.emb_dim), -1, bfloat16))
         # Soft token j sums rows j * pool ** 2 onwards; a token past the
         # image's sums none of its rows.
@@ -102,31 +135,73 @@ class VisionTower(Tower):
             pool[j, j * window : (j + 1) * window] = 1
         self.pooling = iron.weight(pool)
 
-    def front(self, rgb, *, n, height, width, out_height, out_width):
+    def front(self, rgb, *, n, height, width, out_height, out_width, hk, wk, walked):
         """The rows of the image ``rgb``'s ``n`` patches, ``height`` by
-        ``width`` pixels resized to ``out_height`` by ``out_width``, with
-        their position embeddings, and each patch's angles.
+        ``width`` pixels resized to ``out_height`` by ``out_width``, ``hk``
+        by ``wk`` windows, with their position embeddings, and each patch's
+        angles; ``walked`` is the rows the walks of ``groups`` move.
         """
-        c = self.config
-        pixels, xy, position_ids = self.processor(
+        pixels, _, _ = self.processor(
             rgb,
             height=height,
             width=width,
             out_height=out_height,
             out_width=out_width,
         )
-        T = pixels.shape[0]
-        v, d = self.vision_tower, self.derived.vision_tower
+        v = self.vision_tower
         x = AXPY.step(pixels[:n], self.minus_one[:n], scalar_factor=2.0)
         patch = v.patch_embedder.input_proj.weight
         h = GEMM.step(x, patch, b_col_maj=True, **ACCURATE)
-        table = v.patch_embedder.position_embedding_table.reshape(-1, c.emb_dim)
-        ids = position_ids.reshape(2, T)
-        x_side = Copy.step(iron.weight(table)[ids[0, :n]])
-        y_side = Copy.step(iron.weight(table)[ids[1, :n]])
-        h = ElementwiseAdd.step(ElementwiseAdd.step(h, x_side), y_side)
-        angles = Copy.step(self.rope[xy[: 2 * n]]).reshape(T, c.head_dim)
-        return h, angles
+        return self.window_positions(h, n=n, hk=hk, wk=wk, walked=walked)
+
+    def window_positions(self, h, *, n, hk, wk, walked):
+        """``h`` plus each patch's x and y position embeddings, and its
+        angles, for an image of ``hk`` by ``wk`` windows, ``n`` patches.
+        """
+        c, d = self.config, self.derived.vision_tower
+        T = c.patches
+        repeat = tuple(
+            iron.clamp(hk - first, lo=1, hi=rows) for first, rows, *_ in self.groups
+        )
+        sides = d.patch_embedder.x_windows, d.patch_embedder.y_windows
+        for table, x_side in zip(sides, (True, False)):
+            walk = self.walk(table, x_side, repeat=repeat, wk=wk, walked=walked)
+            Copy.step(walk, self.window_rows[:walked])
+            side = TensorAccessPattern.full(self.window_rows.shape)[:T]
+            side = self.window_rows.at(side, (T, c.emb_dim), bounds={0: n})
+            h = ElementwiseAdd.step(h, side)
+        half = c.head_dim // 2
+        for table, x_side, cut in (
+            (self.x_angles, True, slice(None, half)),
+            (self.y_angles, False, slice(half, None)),
+        ):
+            walk = self.walk(table, x_side, repeat=repeat, wk=wk, walked=walked)
+            Copy.step(walk, self.angle_rows[:walked, cut])
+        angles = TensorAccessPattern.full(self.angle_rows.shape)[:T]
+        return h, self.angle_rows.at(angles, (T, c.head_dim), bounds={0: n})
+
+    def walk(self, table, x_side: bool, *, repeat, wk, walked):
+        """The window blocks of ``table``, x's by window column or y's by
+        window row, each group's ``repeat`` window rows of ``wk`` in turn.
+        """
+        k, across = self.config.pool, self.processor.across
+        width = table.shape[1]
+        block = k * k * width
+        return iron.weight(table).at(
+            tuple(
+                TensorAccessPattern(
+                    table.shape,
+                    0 if x_side else base * block,
+                    [rows, across, k * k, width],
+                    [0 if x_side else pitch * block, block, width, 1],
+                )
+                for _, rows, pitch, base in self.groups
+            ),
+            (self.capacity, width),
+            bounds={0: walked},
+            repeat=repeat,
+            length=wk,
+        )
 
     def layer(self, step, i, w, x):
         a = self.derived.vision_tower.encoder.layers[i].self_attn
@@ -163,11 +238,15 @@ class VisionTower(Tower):
         width: Scratchpad[np.int32],
         out_height: Scratchpad[np.int32],
         out_width: Scratchpad[np.int32],
+        hk: Scratchpad[np.int32],
+        wk: Scratchpad[np.int32],
+        walked: Scratchpad[np.int32],
     ):
         """The `(tokens, text_dim)` soft tokens of the image `rgb`, `height`
         by `width` pixels resized to `out_height` by `out_width`, its `n`
-        patches, `tokens` `patches // pool ** 2` rounded up to whole `rows`;
-        the first `n // pool ** 2` are the image's, the rest zero.
+        patches in `hk` by `wk` windows, `tokens` `patches // pool ** 2`
+        rounded up to whole `rows`; the first `n // pool ** 2` are the
+        image's, the rest zero. `walked` is the rows its windows' walks move.
         """
         x, angles = self.front(
             rgb,
@@ -176,6 +255,9 @@ class VisionTower(Tower):
             width=width,
             out_height=out_height,
             out_width=out_width,
+            hk=hk,
+            wk=wk,
+            walked=walked,
         )
         return self.forward(x, n, angles)
 
@@ -210,4 +292,19 @@ class VisionTower(Tower):
         c = self.config
         out_height, out_width = c.size(*np.shape(image)[:2], max_tokens)
         rgb, values = self.processor.pack(image, out_height, out_width)
-        return rgb, dict(n=out_height // c.patch * (out_width // c.patch), **values)
+        side = c.pool * c.patch
+        hk, wk = out_height // side, out_width // side
+        return rgb, dict(
+            n=out_height // c.patch * (out_width // c.patch),
+            hk=hk,
+            wk=wk,
+            walked=self.walked(hk, wk),
+            **values,
+        )
+
+    def walked(self, hk: int, wk: int) -> int:
+        """The rows the window walks move for an image of `hk` by `wk`
+        windows: each group's window rows of it, or past it one.
+        """
+        rows = sum(max(1, min(hk - first, r)) for first, r, *_ in self.groups)
+        return self.config.pool**2 * wk * rows

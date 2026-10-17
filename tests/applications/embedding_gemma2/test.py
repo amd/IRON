@@ -49,7 +49,7 @@ from iron.applications.embedding_gemma2.oracle import (
     VisionOracle,
 )
 from iron.applications.embedding_gemma2.vision import VisionTower
-from iron.lm import Checkpoint, prompt_text
+from iron.lm import Checkpoint, prompt_text, rope_angles
 from iron.lm.testing import Download, cache_dir, check_embedding, require, weights_dir
 from iron.operators.copy import Copy
 
@@ -631,6 +631,60 @@ def test_image_processor_refuses(npu2, shape, tokens, refusal):
     )
     with pytest.raises(ValueError, match=refusal):
         vision.inputs(np.zeros((*shape, 3), np.uint8), tokens)
+
+
+class WindowPositions(iron.Graph):
+    """`VisionTower.window_positions` alone, on given rows."""
+
+    def __init__(self, tower: VisionTower):
+        self.tower = tower
+
+    def body(
+        self,
+        h,
+        *,
+        n: Scratchpad[np.int32],
+        hk: Scratchpad[np.int32],
+        wk: Scratchpad[np.int32],
+        walked: Scratchpad[np.int32],
+    ):
+        tower = self.tower
+        return tower.inline(
+            tower.window_positions, h[:n], n=n, hk=hk, wk=wk, walked=walked
+        )
+
+
+@pytest.mark.parametrize(
+    "hk, wk", [(1, 1), (14, 19), (16, 16), (6, 42), (8, 35), (65, 4), (200, 1)]
+)
+def test_vision_window_positions_are_each_patch_rows(npu2, hk, wk):
+    """Each patch in window order gets its x and y position embeddings, each
+    add rounded as `ElementwiseAdd` rounds it, and its x and y angles.
+    """
+    require(DIRECTORY / "model.safetensors")
+    weights = Checkpoint(DIRECTORY / "model.safetensors").tree()
+    tower = VisionTower(VisionConfig(), weights)
+    c = tower.config
+    k, n = c.pool, c.pool**2 * hk * wk
+    rng = np.random.default_rng(hk * 100 + wk)
+    h = rng.standard_normal((c.patches, c.emb_dim)).astype(bfloat16)
+    got, angles = WindowPositions(tower).reference(
+        h, n=n, hk=hk, wk=wk, walked=tower.walked(hk, wk)
+    )
+    ty, tx, wy, wx = np.indices((hk, wk, k, k)).reshape(4, -1)
+    x, y = k * tx + wx, k * ty + wy
+    table = weights.vision_tower.patch_embedder.position_embedding_table
+    want = h[:n]
+    for side in (table[0][x], table[1][y]):
+        want = (want.astype(np.float32) + side.astype(np.float32)).astype(bfloat16)
+    np.testing.assert_array_equal(
+        np.asarray(got)[:n].view(np.uint16), want.view(np.uint16)
+    )
+    rope = rope_angles(c.head_dim // 2, c.positions, c.rope_base).astype(bfloat16)
+    np.testing.assert_array_equal(
+        np.asarray(angles)[:n].view(np.uint16),
+        np.concatenate([rope[x], rope[y]], axis=1).view(np.uint16),
+    )
 
 
 def test_image_processor_refuses_on_npu1(npu1):
