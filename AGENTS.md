@@ -1063,9 +1063,9 @@ profiles. The library is four modules:
 - `blocks.py`: what layers are built from: `project(x, w)`, a weight's
   projection at either row count (GEMV for one row, GEMM for more), with a
   `bias` folded on by `RowwiseAdd` where a checkpoint's projection carries
-  one, the GEMM's `k_tile` and `tile_n` where the weight's dimensions
-  are not multiples of their defaults, and with `accurate=True` the GEMM
-  whose float32 sums round once;
+  one, flm.GEMM's `k_tile` and `tile_n` where a call pins them (its
+  `k_tile` is otherwise the largest legal tile up to 512 dividing K), and
+  with `accurate=True` the GEMM whose float32 sums round once;
   `SwiGLU`, the SwiGLU feed-forward as a graph of its own, called in a
   model's body or alone, device-tested by `iron/tests/lm/swiglu.py`;
   `LogMel`, an audio front end's log-mel spectrogram, and `Conv2d`, a

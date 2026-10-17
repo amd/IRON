@@ -158,7 +158,8 @@ def _units_valid(op) -> Any:
 class GEMM(Operator):
     """AIE-accelerated bf16 GEMM on a 4-row grid, with a fused epilogue.
 
-    64-row tiles over a k tile of ``k_tile`` (512 unless the caller asks), and
+    64-row tiles over a k tile of ``k_tile`` (the largest legal one up to 512
+    dividing K, unless the caller or the profile asks), and
     an activation plus optional clamp applied in the output stage: its own
     gelu (``epilogue``), or its finish, a SiLU or a Sigmoid and then a Clamp.
     The gelu stays an epilogue because it is the port's own arithmetic,
@@ -185,8 +186,9 @@ class GEMM(Operator):
     # 64 halves the mmul's accumulator traffic per mac; 128 halves A fetches.
     tile_n: int = Auto()
     # k tile. K must be a multiple of it, and it of the compute tile's k slice.
-    # 256 is what Gemma 4's per-layer-input projection needs, its K being 256.
-    k_tile: int = Param(default=K_TILE)
+    k_tile: int = Auto(
+        domain=Divisors(of=K, step=lambda op, dev: op.ct_max_k, cap=K_TILE)
+    )
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). None resolves to whatever L1 affords.
     tile_ma: int = Auto(domain=Divisors(of=M_TILE, step=2 * R))
@@ -308,7 +310,7 @@ class GEMM(Operator):
                 f"flm.GEMM applies {self.epilogue} as a finish step: "
                 f"finish=Chain.of(SiLU(...)), or a graph folding it"
             )
-        if self.K % self.k_tile:
+        if self.k_tile is not None and self.K % self.k_tile:
             raise ValueError(
                 f"K ({self.K}) must be a multiple of k_tile ({self.k_tile})"
             )
@@ -344,20 +346,26 @@ class GEMM(Operator):
         tile_n = N_TILE_DEFAULT if self.tile_n is None else self.tile_n
         ct_k = CT_MAX_K_FOR_N[tile_n]
         m_chunk = M_CHUNK_FOR_N[tile_n] if self.m_chunk is None else self.m_chunk
+        k_tile = self.k_tile
+        if k_tile is None:
+            k_tile = K_TILE
+            while self.K % k_tile and (k_tile // 2) % ct_k == 0:
+                k_tile //= 2
         l1 = l1_budget(dev, self.compiled_modes)
         if self.tile_ma is None:
             tile_ma, l1_b_depth = _default_l1(
-                tile_n, ct_k, b_elem_bytes, l1, m_chunk, self.k_tile
+                tile_n, ct_k, b_elem_bytes, l1, m_chunk, k_tile
             )
         else:
             tile_ma = self.tile_ma
             l1_b_depth = _b_depth_for(
-                tile_ma, tile_n, ct_k, b_elem_bytes, l1, m_chunk, self.k_tile
+                tile_ma, tile_n, ct_k, b_elem_bytes, l1, m_chunk, k_tile
             )
         b_dtype = v8bfp16ebs8 if bfp16_b else bfloat16
         return dataclasses.replace(
             self,
             tile_n=tile_n,
+            k_tile=k_tile,
             tile_ma=tile_ma,
             m_chunk=m_chunk,
             rows=rows,
@@ -366,8 +374,8 @@ class GEMM(Operator):
             bfp16_b=bfp16_b,
             b_dtype=b_dtype,
             l1_b_depth=l1_b_depth,
-            a_l2=m_chunk * M_TILE * self.k_tile,
-            b_l2=self.k_tile * tile_n // b_group,
+            a_l2=m_chunk * M_TILE * k_tile,
+            b_l2=k_tile * tile_n // b_group,
             c_l2=M_TILE * tile_n * rows,
         )
 

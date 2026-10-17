@@ -57,8 +57,8 @@ def project(
     ``bias`` broadcast over every row if given: a GEMV for one row, else
     flm.GEMM reading it column-major, or with ``accurate`` the GEMM whose
     float32 sums round once (``ACCURATE``). ``k_tile`` and ``tile_n`` are
-    flm.GEMM's, for a K its defaults do not divide (``tile_n``'s
-    ``ct_max_k`` must divide ``k_tile``);
+    flm.GEMM's tunables, where the profile cannot tell it from another of
+    its shape (``tile_n``'s ``ct_max_k`` must divide ``k_tile``);
     ``emulate_bf16_mmul_with_bfp16=False`` asks for bf16 macs where the
     device defaults to bfp16's; ``gemv`` are the GEMV's tunables, where the
     profile cannot tell it from another of its shape.

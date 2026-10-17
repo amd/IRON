@@ -45,7 +45,6 @@ from iron.common import (
     Value,
     Xclbin,
     Auto,
-    Param,
     Select,
     Built,
     Operand,
@@ -122,7 +121,7 @@ class Shipped(
     # The port's tunables, fixed by the binary. B is bf16 (no bfp16 on this
     # image), one row-block per B fetch, and the whole of K in one slice.
     tile_n: int = Auto(default=N_TILE, repr=False, init=False)
-    k_tile: int = Param(default=K_TILE, repr=False, init=False)
+    k_tile: int = Auto(default=K_TILE, repr=False, init=False)
     tile_ma: int = Auto(default=M_TILE, repr=False, init=False)
     m_chunk: int = Auto(default=1, repr=False, init=False)
     rows: int = Auto(default=ROWS, repr=False, init=False)
