@@ -1208,7 +1208,8 @@ int n, pad, across, wx, wy, tx, ty;
 // Block `b` of the patches in pooling-window order: (x, y) side by side in
 // xy, x then POSITIONS + y in position, and the patch's row of Resample's
 // raster in order. Past the image, or for a size that is not whole windows,
-// the tables' padding rows and the raster's zero patch.
+// ids past each table, which a bounded gather never reads, and the raster's
+// zero patch.
 extern "C" void patch_positions(int32_t *out, int32_t b, int32_t count, int32_t ho,
                                 int32_t wo) {
     int32_t *xy = out, *position = out + 2 * BLOCK, *order = out + 4 * BLOCK;
