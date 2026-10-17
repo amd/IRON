@@ -30,6 +30,7 @@ from iron.applications.llama.model import Runner as Llama
 from iron.applications.phi3.model import Runner as Phi4
 from iron.applications.qwen2.model import Runner as Qwen2
 from iron.applications.qwen3.model import Runner as Qwen3
+from iron.applications.smollm2.model import Runner as SmolLM2
 from iron.lm import CausalLM, Checkpoint, Runner
 from iron.lm.testing import (
     check_deep_decode,
@@ -87,6 +88,16 @@ APPLICATIONS = {
         "model.safetensors",
         "tokenizer.model",
         each_step=("npu1", "npu2"),
+    ),
+    "smollm2_1.7b": Application(
+        SmolLM2,
+        "smollm2-1.7b-instruct",
+        "model.safetensors",
+        "tokenizer.json",
+        each_step=("npu1", "npu2"),
+        # Unmeasured deep in the caches: 24 layers, its shallow bounds above
+        # Llama's.
+        deep_kl=0.2,
     ),
     "qwen2.5_1.5b": Application(
         Qwen2,
