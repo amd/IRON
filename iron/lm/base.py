@@ -37,7 +37,7 @@ from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 from iron.tune.narrowing import CostTable, JointNarrowing, NarrowingKinds
 from iron.tune.probe import Call
 
-from .blocks import Layer
+from .blocks import Experts, Layer
 from .generation import (
     SEED,
     Sampler,
@@ -183,6 +183,13 @@ class DecoderConfig(Config):
     rope_attention_scaling: float = 1.0
     prefill_chunk: int = 2048
     hidden_act: str = dataclasses.field(default="silu", metadata={"json": "hidden_act"})
+    # A mixture of experts' routing: None where the model has none.
+    experts_per_token: int | None = dataclasses.field(
+        default=None, metadata={"json": "num_experts_per_tok"}
+    )
+    normalize_top_k: bool = dataclasses.field(
+        default=True, metadata={"json": "norm_topk_prob"}
+    )
 
     def __post_init__(self):
         if self.head_dim is None:
@@ -221,6 +228,11 @@ class DecoderConfig(Config):
             eps=self.eps,
             activation=self.hidden_act,
             rotary=self.rotary_dim,
+            experts=(
+                None
+                if self.experts_per_token is None
+                else Experts(self.experts_per_token, self.normalize_top_k)
+            ),
         )
 
 
