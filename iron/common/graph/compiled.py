@@ -931,7 +931,9 @@ class Linear:
 
 @dataclasses.dataclass(frozen=True)
 class Word:
-    """A scratchpad word a call writes; words with one ``linear`` form share a word."""
+    """A scratchpad word a call writes; words with one ``linear`` form, or one
+    clamped ``form``, share a word.
+    """
 
     symbol: str
     dtype: Any
@@ -1021,10 +1023,13 @@ def _words(
 
     shared: dict[str, str] = {}
     if share:
-        forms: dict[str, set[Linear | None]] = {}
+        forms: dict[str, set[Linear | str | None]] = {}
         for w in words:
             found, e = w.linear, w.form
-            if found is None and e is not None and e.mul in (1, -1) and not e.clamped:
+            if found is None and e is not None and e.clamped:
+                # A clamped expression has no Linear form; its name spells it whole.
+                found = f"{e.name}_{np.dtype(w.dtype).name}"
+            elif found is None and e is not None and e.mul in (1, -1):
                 # ((s v + b) >> k) * m + a as a Linear, which rounds up: a
                 # floor is the ceiling of (s v + b - 2^k + 1) / 2^k, and
                 # -floor(x) is ceil(-x).
@@ -1037,7 +1042,7 @@ def _words(
                     np.dtype(w.dtype).name,
                 )
             forms.setdefault(w.symbol, set()).add(found)
-        groups: dict[Linear, list[str]] = {}
+        groups: dict[Linear | str, list[str]] = {}
         for symbol, found in forms.items():
             if len(found) == 1 and None not in found:
                 groups.setdefault(next(iter(found)), []).append(symbol)
@@ -1048,7 +1053,9 @@ def _words(
             return f"{'m' if r < 0 else ''}{abs(r.numerator)}{den}"
 
         for form, symbols in groups.items():
-            if len(symbols) > 1:
+            if len(symbols) > 1 and isinstance(form, str):
+                shared.update(dict.fromkeys(symbols, f"graph_{form}"))
+            elif len(symbols) > 1:
                 name = f"graph_{form.value}_x{spell(form.ratio)}"
                 if form.offset:
                     name += (

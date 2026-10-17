@@ -412,8 +412,9 @@ class Handle:
                 )
             repeats = None
             if repeat is not None:
+                # A repeat count may be clamped; a length patches a size, linear.
                 repeats = tuple(
-                    r.affine()
+                    r if isinstance(r, Affine) else r.affine()
                     for r in (repeat if isinstance(tap, tuple) else (repeat,))
                 )
             length = None if length is None else length.affine()

@@ -1652,6 +1652,34 @@ def test_words_with_an_offset_share_by_ratio_and_offset(npu2):
             assert mine[shared.get(w.symbol, w.symbol)] == w({"p": p})
 
 
+def test_words_of_one_clamped_expression_share_it(npu2):
+    """Two designs indexed by one clamped expression of a value share its
+    word; rows of another width are another expression, their own word.
+    """
+
+    class G(iron.Graph):
+        def __init__(self):
+            self.a = iron.state((8, 32), np.int32)
+            self.c = iron.state((8, 64), np.int32)
+
+        def body(self, *, p: Scratchpad[np.int32]):
+            row = iron.clamp(p - 3, lo=0)
+            return tuple(
+                Copy.step(view, dtype=np.int32)
+                for view in (self.a[row], self.a[row, :16], self.c[row])
+            )
+
+    t = G().trace()
+    alone, _ = _words(t)
+    words, shared = _words(t, share=True)
+    assert (len(alone), len(words)) == (3, 2)
+    assert sorted(set(shared.values())) == ["graph_p_x32_m96_lo0_int32"]
+    for p in range(8):
+        mine = {w.symbol: w({"p": p}) for w in words}
+        for w in alone:
+            assert mine[shared.get(w.symbol, w.symbol)] == w({"p": p})
+
+
 def test_the_reference_writes_a_given_output_of_an_operator_that_returns_one(npu2):
     """GEMM's reference takes its inputs and returns its result; given an
     output, the graph's reference writes that result into it.
