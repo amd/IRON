@@ -17,9 +17,9 @@ class Encoder(Model):
     """An encoder over ``max_tokens`` rows at most, one compile for every
     length.
 
-    A call takes the token ids, padded to ``max_tokens`` with ``vocab_size``
-    (the model's id of a zero row), and ``n``, the real rows, which bound
-    every operator after the embedding gather.
+    A call takes the token ids, padded to ``max_tokens`` with 0, and ``n``,
+    the real rows, which bound the embedding gather and every operator
+    after it.
 
     Args:
         config: The model's shape; its ``vocab_size`` is read here.
@@ -48,6 +48,6 @@ class Encoder(Model):
         outside = tokens[(tokens < -V) | (tokens >= V)]
         if outside.size:
             raise IndexError(f"tokens {outside} are outside [-{V}, {V})")
-        ids = np.full(self.max_tokens, V, np.int32)
+        ids = np.zeros(self.max_tokens, np.int32)
         ids[:n] = tokens % V
         return ids, n

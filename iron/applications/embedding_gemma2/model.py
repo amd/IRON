@@ -106,10 +106,9 @@ class EmbeddingGemma(Encoder):
     """The text encoder over ``max_tokens`` rows at most, one compile for
     every length.
 
-    A call takes the token ids, padded to ``max_tokens`` with
-    ``vocab_size``, the id of a zero row past the scaled embedding table,
-    and ``n``, the real rows, which bound every operator after the gather.
-    The table's rows are gathered on the device. It returns one unit-length
+    A call takes the token ids, padded to ``max_tokens``, and ``n``, the
+    real rows, which bound the gather and every operator after it. The
+    scaled table's rows are gathered on the device. It returns one unit-length
     embedding per ``mrl_dims`` truncation, a row each, zero past its length.
     Attention is bidirectional and unscaled, a sliding layer's within
     ``sliding_window`` positions.
@@ -133,11 +132,11 @@ class EmbeddingGemma(Encoder):
         self.tokenizer = tokenizer
         w = self.language_model = weights.language_model
         derived = Derived(weights)
-        table = np.zeros((c.vocab_size + 1, c.emb_dim), bfloat16)
-        table[:-1] = w.embed_tokens.weight.astype(np.float32) * np.sqrt(
-            np.float32(c.emb_dim)
+        scale = np.sqrt(np.float32(c.emb_dim))
+        derived.put(
+            w.embed_tokens,
+            scaled=(w.embed_tokens.weight.astype(np.float32) * scale).astype(bfloat16),
         )
-        derived.put(w.embed_tokens, scaled=table)
         for i, layer in enumerate(w.layers):
             c.layer(i).derive(derived, layer)
         self.angles = {
@@ -156,16 +155,16 @@ class EmbeddingGemma(Encoder):
 
     def body(self, ids, *, n: Scratchpad[np.int32]):
         table = iron.weight(self.derived.language_model.embed_tokens.scaled)
-        return self.encoder(Copy.step(table[ids]), n)
+        return self.encoder(Copy.step(table[ids[:n]]), n)
 
     def encoder(self, x, n):
-        """The encoder over the token embeddings ``x`` ``(T, emb_dim)``, of
-        which the first ``n`` are real.
+        """The encoder over the token embeddings ``x`` ``(T, emb_dim)``,
+        bounded to its first ``n``.
         """
         c = self.config
         T, E = x.shape[0], c.emb_dim
         w, d = self.language_model, self.derived.language_model
-        x = embeddings = x[:n]
+        embeddings = x
         for i, layer in enumerate(w.layers):
             x = self.layer(i, layer, d.layers[i], x, embeddings, n)
         h = RMSNorm.step(x, weight=w.norm.weight, epsilon=c.eps).reshape(T, 1, E)
@@ -283,7 +282,7 @@ class Multimodal(EmbeddingGemma):
             raise TypeError(f"a version takes one input, got {len(given)}")
         table = iron.weight(self.derived.language_model.embed_tokens.scaled)
         if ids is not None:
-            return self.encoder(Copy.step(table[ids]), n)
+            return self.encoder(Copy.step(table[ids[:n]]), n)
         if wave is not None:
             a = self.audio(wave, n=n_audio, frames=frames, tokens=audio_tokens)
             Copy.step(a, self.merged[self.audio_at : self.audio_at + a.shape[0]])
@@ -301,7 +300,8 @@ class Multimodal(EmbeddingGemma):
             return None
         c = self.config
         # An input's gather is encoded on the host into its buffer, which Merge
-        # reads as the ids: gather by the device's copy of them.
+        # reads as the ids: gather by the device's copy of them, whole, since
+        # a gather by ids the device made takes no per-call bound.
         x = Copy.step(table[Copy.step(placed, dtype=np.int32)])
         merge = Merge.step(
             placed,
@@ -311,7 +311,7 @@ class Multimodal(EmbeddingGemma):
             vision_at=self.vision_at,
         )
         Copy.step(x, self.merged[: x.shape[0]])
-        return self.encoder(Copy.step(self.merged[merge]), n)
+        return self.encoder(Copy.step(self.merged[merge])[:n], n)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the text encoder's, each
