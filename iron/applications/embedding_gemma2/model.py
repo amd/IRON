@@ -128,9 +128,9 @@ class EmbeddingGemma(Encoder):
         tokenizer: Tokenizer | None = None,
     ):
         c = config
-        super().__init__(config, c.max_tokens)
         self.tokenizer = tokenizer
         w = self.language_model = weights.language_model
+        super().__init__(config, w.layers, c.max_tokens)
         derived = Derived(weights)
         scale = np.sqrt(np.float32(c.emb_dim))
         derived.put(
@@ -210,8 +210,8 @@ class EmbeddingGemma(Encoder):
         """The unit-length embedding of ``tokens`` truncated to ``dims``, one
         of ``mrl_dims``.
         """
-        ids, n = self.inputs(tokens)
-        rows = self(ids, n=n).numpy().reshape(len(self.config.mrl_dims), -1)
+        ids, values = self.inputs(tokens)
+        rows = self(ids, **values).numpy().reshape(len(self.config.mrl_dims), -1)
         return np.asarray(rows[self.config.mrl_dims.index(dims), :dims], np.float32)
 
     def embed(self, text: str, task: str, dims: int = 768) -> np.ndarray:
@@ -351,9 +351,9 @@ class Multimodal(EmbeddingGemma):
         """
         c = self.config
         tokens = np.asarray(tokens)
-        ids, n = self.inputs(tokens)
+        ids, values = self.inputs(tokens)
         values = dict(
-            n=n,
+            **values,
             n_audio=0,
             frames=0,
             audio_tokens=0,

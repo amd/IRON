@@ -32,7 +32,7 @@ from .blocks import (
     project,
 )
 from .causal import CausalLM, DecodeStep
-from .encoder import Encoder
+from .encoder import EncodeStep, Encoder, Tower
 from .generation import Sampler, accuracy, determinism, generate_on_host
 
 __all__ = [
@@ -45,6 +45,7 @@ __all__ = [
     "DecodeStep",
     "DecoderConfig",
     "Derived",
+    "EncodeStep",
     "Encoder",
     "ImagePatches",
     "Layer",
@@ -54,6 +55,7 @@ __all__ = [
     "Oracle",
     "Runner",
     "Sampler",
+    "Tower",
     "accuracy",
     "determinism",
     "filterbank",
