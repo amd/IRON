@@ -8,6 +8,7 @@ outside CI where the checkpoint is not there, failed in CI), and that
 """
 
 import dataclasses
+import json
 
 import pytest
 
@@ -50,6 +51,23 @@ def test_from_checkpoint_leaves_an_unnamed_field_at_its_default():
     require(LLAMA_DIR / "config.json")
     # prefill_chunk names no config.json key: an IRON choice.
     assert LlamaConfig.from_checkpoint(LLAMA_DIR).prefill_chunk == 2048
+
+
+def test_from_checkpoint_reads_null_as_the_fields_default(tmp_path):
+    """SmolLM2's config.json writes rope_scaling null: no scaling."""
+    fields = dict(
+        vocab_size=32,
+        hidden_size=64,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        intermediate_size=128,
+        rope_theta=130000.0,
+        max_position_embeddings=8192,
+        rope_scaling=None,
+    )
+    (tmp_path / "config.json").write_text(json.dumps(fields))
+    assert LlamaConfig.from_checkpoint(tmp_path).rope_scaling is None
 
 
 def test_from_checkpoint_raises_with_no_config_json_beside_the_path(tmp_path):

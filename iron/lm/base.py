@@ -100,7 +100,8 @@ class Config:
         field's own ``metadata["json"]``, a dot-separated path from the
         file's root, converted by its ``metadata["convert"]`` if it names
         one; a field with no ``"json"`` entry is an IRON choice, not the
-        checkpoint's, and keeps its default.
+        checkpoint's, and keeps its default, as does one the file leaves
+        null.
 
         Args:
             path: A ``config.json``, or a checkpoint's directory or file
@@ -119,7 +120,8 @@ class Config:
             if key is None:
                 continue
             value = _dotted(data, key)
-            if value is _MISSING:
+            # Hugging Face writes an unset option as null.
+            if value is _MISSING or value is None:
                 continue
             convert = f.metadata.get("convert")
             kwargs[f.name] = convert(value) if convert else value
