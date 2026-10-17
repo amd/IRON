@@ -971,7 +971,7 @@ def _words(
             continue
         e = b.expression
         linear = None
-        if not (e.down or e.clamped):
+        if not (e.down or e.clamped or e.mod is not None):
             linear = Linear(
                 e.value.name,
                 Fraction(e.scale),
@@ -1026,8 +1026,8 @@ def _words(
         forms: dict[str, set[Linear | str | None]] = {}
         for w in words:
             found, e = w.linear, w.form
-            if found is None and e is not None and e.clamped:
-                # A clamped expression has no Linear form; its name spells it whole.
+            if found is None and e is not None and (e.clamped or e.mod is not None):
+                # A clamped or wrapped expression has no Linear form; its name spells it whole.
                 found = f"{e.name}_{np.dtype(w.dtype).name}"
             elif found is None and e is not None and e.mul in (1, -1):
                 # ((s v + b) >> k) * m + a as a Linear, which rounds up: a

@@ -6,13 +6,15 @@
 Every output word is one row of a program the host writes once:
 
 ```text
-out[r] = clamp(((planes[plane, index] * scale + bias) >> down) * mul + add, lo, hi) << shift
+v = clamp(((planes[plane, index] * scale + bias) >> down) * mul + add, lo, hi)
+out[r] = (v & mask) << shift
 ```
 
 ``planes`` is ``(2, carried)``: the values this call started from, then
 those it computed. ``shift`` is 2 for a core-read parameter (the scratchpad
 holds those shifted) and 0 otherwise; ``>> down`` floors. A row that holds
-nothing to a range has ``lo``/``hi`` int32's own (``UNCLAMPED``).
+nothing to a range has ``lo``/``hi`` int32's own (``UNCLAMPED``), and one
+that does not wrap a ``mask`` of -1.
 """
 
 import numpy as np
@@ -24,8 +26,8 @@ from aie.utils.verify import Tolerance
 from iron.common import In, Operator, Out, Param, Built, Operand, Rtp, Value
 from iron.common.testing import Case, Testing
 
-# A program row: (plane, index, scale, bias, down, mul, add, lo, hi, shift).
-ROW = 10
+# A program row: (plane, index, scale, bias, down, mul, add, lo, hi, mask, shift).
+ROW = 11
 UNCLAMPED = (np.iinfo(np.int32).min, np.iinfo(np.int32).max)
 
 
@@ -33,9 +35,9 @@ def reference(program, planes, slots: int):
     """``(image, state)``: every row evaluated in wrapping int32, split at ``slots``."""
     program = np.asarray(program, dtype=np.int32).reshape(-1, ROW)
     planes = np.asarray(planes, dtype=np.int32).reshape(2, -1)
-    plane, index, scale, bias, down, mul, add, lo, hi, shift = program.T
+    plane, index, scale, bias, down, mul, add, lo, hi, mask, shift = program.T
     out = np.clip(((planes[plane, index] * scale + bias) >> down) * mul + add, lo, hi)
-    out = out << shift
+    out = (out & mask) << shift
     return out[:slots].astype(np.int32), out[slots:].astype(np.int32)
 
 
@@ -47,6 +49,8 @@ def _program(op: "Emit") -> dict:
     hi = lo + rng.integers(0, 1 << 23, op.rows)
     lo[rng.random(op.rows) < 0.3] = UNCLAMPED[0]
     hi[rng.random(op.rows) < 0.3] = UNCLAMPED[1]
+    mask = (1 << rng.integers(4, 21, op.rows)) - 1
+    mask[rng.random(op.rows) < 0.4] = -1
     program = np.stack(
         [
             rng.integers(0, 2, op.rows),
@@ -58,6 +62,7 @@ def _program(op: "Emit") -> dict:
             rng.integers(-1000, 1000, op.rows),
             lo,
             hi,
+            mask,
             rng.choice([0, 2], op.rows),
         ],
         axis=1,
@@ -136,7 +141,7 @@ class Emit(Operator):
                     v = planes[plane, index] * program[r, 2] + program[r, 3]
                     v = floor_shift(v, program[r, 4]) * program[r, 5] + program[r, 6]
                     v = arith.minsi(arith.maxsi(v, program[r, 7]), program[r, 8])
-                    return arith.shli(v, program[r, 9])
+                    return arith.shli(arith.andi(v, program[r, 9]), program[r, 10])
 
                 for r in range_(slots):
                     image[r] = row(r)

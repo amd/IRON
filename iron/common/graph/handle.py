@@ -636,6 +636,9 @@ class PerCall:
     def __floordiv__(self, d: int | Affine) -> Affine | int:
         return self.affine() // d
 
+    def __mod__(self, m: int) -> Affine:
+        return self.affine() % m
+
     def __eq__(self, other) -> bool:
         if isinstance(other, (PerCall, Affine)):
             return self is other
@@ -663,10 +666,11 @@ class Affine:
     """An integer expression in one graph value ``v``, evaluated per call:
 
     ```text
-    clamp(((v * scale + bias) >> down) * mul + add, lo, hi)
+    clamp(((v * scale + bias) >> down) * mul + add, lo, hi) % mod
     ```
 
-    where ``>>`` floors and a bound of None is none. A binding writes a
+    where ``>>`` floors, a bound of None is none and ``mod``, a power of
+    two, wraps (a ring's row) where it is not None. A binding writes a
     linear one (``down`` 0, kept in ``scale`` and ``bias``, so
     ``(p + 1) * 64`` is ``Affine(p, 64, 64)``).
     Sums, products and floor divisions by a power of two (and so
@@ -688,6 +692,7 @@ class Affine:
     add: int = 0
     lo: int | None = None
     hi: int | None = None
+    mod: int | None = None
 
     @property
     def clamped(self) -> bool:
@@ -695,6 +700,8 @@ class Affine:
 
     def clamp(self, lo: int | None = None, hi: int | None = None) -> Affine:
         """This expression held to ``[lo, hi]`` as well, a bound of None none."""
+        if self.mod is not None:
+            raise TypeError(f"no expression clamps ({self}) after it wraps")
         if lo is None or self.lo is not None and self.lo > lo:
             lo = self.lo
         if hi is None or self.hi is not None and self.hi < hi:
@@ -703,13 +710,23 @@ class Affine:
             raise ValueError(f"{self} held to [{lo}, {hi}] holds no value")
         return dataclasses.replace(self, lo=lo, hi=hi)
 
+    def __mod__(self, m: int) -> Affine:
+        if isinstance(m, bool) or not isinstance(m, (int, np.integer)):
+            return NotImplemented
+        m = int(m)
+        if m <= 0 or m & (m - 1):
+            raise TypeError(f"no expression for ({self}) % {m}: a ring is 2^k rows")
+        if self.mod is not None and self.mod % m:
+            raise TypeError(f"no expression for ({self}) % {m}")
+        return dataclasses.replace(self, mod=m)
+
     def affine(self) -> Affine:
         """This expression, as a binding takes it.
 
         Raises:
-            TypeError: It floors or is clamped.
+            TypeError: It floors, is clamped or wraps.
         """
-        if self.down or self.clamped:
+        if self.down or self.clamped or self.mod is not None:
             raise TypeError(f"{self} is not linear in {self.value.name}")
         return self
 
@@ -717,7 +734,7 @@ class Affine:
         if isinstance(k, Affine):
             if k.value is not self.value or self.down or k.down:
                 return NotImplemented
-            if self.clamped or k.clamped:
+            if self.clamped or k.clamped or (self.mod, k.mod) != (None, None):
                 return NotImplemented
             scale = self.scale + k.scale
             if not scale:
@@ -726,6 +743,8 @@ class Affine:
         if isinstance(k, bool) or not isinstance(k, (int, np.integer)):
             return NotImplemented
         k = int(k)
+        if self.mod is not None:
+            return NotImplemented
         if self.clamped:
             lo, hi = (None if b is None else b + k for b in (self.lo, self.hi))
             return (dataclasses.replace(self, lo=None, hi=None) + k).clamp(lo, hi)
@@ -746,6 +765,11 @@ class Affine:
         if isinstance(k, bool) or not isinstance(k, (int, np.integer)):
             return NotImplemented
         k = int(k)
+        if self.mod is not None:
+            # (x % m) * k is (x * k) % (m * k) for k > 0, a ring row's elements.
+            if k <= 0 or k & (k - 1):
+                raise TypeError(f"no expression for ({self}) * {k}")
+            return dataclasses.replace(self, mod=None) * k % (self.mod * k)
         if self.clamped:
             lo, hi = (None if b is None else b * k for b in (self.lo, self.hi))
             if k < 0:
@@ -758,6 +782,8 @@ class Affine:
     __radd__, __rmul__ = __add__, __mul__
 
     def __floordiv__(self, d: int | Affine) -> Affine | int:
+        if self.mod is not None:
+            raise TypeError(f"no expression for ({self}) // {d}")
         if self.clamped:
             # A floor division by a positive divisor keeps the bounds' order.
             if isinstance(d, bool) or not isinstance(d, (int, np.integer)) or d <= 0:
@@ -795,7 +821,12 @@ class Affine:
     def __eq__(self, other) -> bool:
         if isinstance(other, Affine):
             terms = (self.scale, self.bias, self.down, self.mul, self.add)
-            return self.value is other.value and (*terms, self.lo, self.hi) == (
+            return self.value is other.value and (
+                *terms,
+                self.lo,
+                self.hi,
+                self.mod,
+            ) == (
                 other.scale,
                 other.bias,
                 other.down,
@@ -803,6 +834,7 @@ class Affine:
                 other.add,
                 other.lo,
                 other.hi,
+                other.mod,
             )
         if isinstance(other, (int, float, np.integer, np.floating)):
             raise TypeError(f"{self} has no value to compare: it is computed per call")
@@ -839,6 +871,8 @@ class Affine:
         for tag, b in (("lo", self.lo), ("hi", self.hi)):
             if b is not None:
                 text += f"_{tag}{'m' if b < 0 else ''}{abs(b)}"
+        if self.mod is not None:
+            text += f"_mod{self.mod}"
         return text
 
     def evaluate(self, values: Mapping[str, int]) -> int:
@@ -846,7 +880,9 @@ class Affine:
         x = ((self.scale * v + self.bias) >> self.down) * self.mul + self.add
         if self.lo is not None:
             x = max(x, self.lo)
-        return x if self.hi is None else min(x, self.hi)
+        if self.hi is not None:
+            x = min(x, self.hi)
+        return x if self.mod is None else x % self.mod
 
     def __str__(self) -> str:
         text = self.value.name + (f" * {self.scale}" if self.scale != 1 else "")
@@ -860,6 +896,8 @@ class Affine:
                 text += f" {'+' if self.add > 0 else '-'} {abs(self.add)}"
         if self.clamped:
             text = f"clamp({text}, {self.lo}, {self.hi})"
+        if self.mod is not None:
+            text = f"({text}) % {self.mod}"
         return text
 
 

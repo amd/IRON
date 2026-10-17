@@ -165,10 +165,11 @@ def compose(
             form.add,
             UNCLAMPED[0] if form.lo is None else form.lo,
             UNCLAMPED[1] if form.hi is None else form.hi,
+            -1 if form.mod is None else form.mod - 1,
             p.shift,
         )
     for name, j in plane_of.items():
-        program[site.slots + j] = (*source(name), 0, 1, 0, *UNCLAMPED, 0)
+        program[site.slots + j] = (*source(name), 0, 1, 0, *UNCLAMPED, -1, 0)
     info = np.iinfo(np.int32)
     if program.min() < info.min or program.max() > info.max:
         raise OverflowError(f"an emit program word is outside int32:\n{program}")

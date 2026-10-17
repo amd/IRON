@@ -1836,9 +1836,9 @@ def test_the_words_a_call_writes_come_from_the_bound(npu2):
 
 
 def test_integer_arithmetic_on_an_expression_is_an_expression():
-    """Sums, products and floor divisions by powers of two (so ``ceildiv``)
-    of an expression are expressions that compute the same, and so are sums
-    of two linear ones in its value; anything else is refused.
+    """Sums, products, floor divisions and remainders by powers of two (so
+    ``ceildiv``) of an expression are expressions that compute the same, and
+    so are sums of two linear ones in its value; anything else is refused.
     """
     x = Affine(PerCall("x", Kind.SCRATCHPAD, np.int32), 3, -5)
     y = Affine(PerCall("y", Kind.SCRATCHPAD, np.int32))
@@ -1861,7 +1861,8 @@ def test_integer_arithmetic_on_an_expression_is_an_expression():
         (lambda v: v // 3, TypeError),
         (lambda v: (v // 4) * 3 // 2, TypeError),
         (lambda v: v // 1 if v else 0, TypeError),
-        (lambda v: v % 64, TypeError),
+        (lambda v: v % 64, None),  # a power of two: a ring's row
+        (lambda v: v % 48, TypeError),
         (lambda v: v < 0, TypeError),
         (lambda v: v + y, TypeError),
         (lambda v: v // 4 + v, TypeError),
@@ -2320,10 +2321,10 @@ def test_the_emit_program_follows_the_target_parameters():
     program = compose(site, traced.carry, words, parameters)
     lo, hi = UNCLAMPED
     assert program.tolist() == [
-        [0, 1, 1, 1, 0, 1, 0, lo, hi, 2],  # steps + 1, shifted for the core
-        [1, 0, 1, 0, 0, 1, 0, lo, hi, 0],  # the node the device gathered
-        [1, 0, 1, 0, 0, 1, 0, lo, hi, 0],  # the next node
-        [0, 1, 1, 1, 0, 1, 0, lo, hi, 0],  # the next step count
+        [0, 1, 1, 1, 0, 1, 0, lo, hi, -1, 2],  # steps + 1, shifted for the core
+        [1, 0, 1, 0, 0, 1, 0, lo, hi, -1, 0],  # the node the device gathered
+        [1, 0, 1, 0, 0, 1, 0, lo, hi, -1, 0],  # the next node
+        [0, 1, 1, 1, 0, 1, 0, lo, hi, -1, 0],  # the next step count
     ]
     image, state = emit_reference(program, np.array([[5, 9], [33, 0]]), slots=2)
     assert image.tolist() == [10 << 2, 33] and state.tolist() == [33, 10]
@@ -2382,6 +2383,72 @@ def test_a_state_is_indexed_by_a_floored_carried_value(npu2):
 
     with pytest.raises(TypeError, match="not linear"):
         Bounded().trace(x=((64, 32), bfloat16))
+
+
+def test_a_wrapped_expression_is_a_ring_row_and_its_elements():
+    """``% m`` (a power of two) wraps after the clamp, and a positive power of
+    two times a wrapped expression wraps its elements, at every value tried;
+    nothing else follows a wrap."""
+    p = PerCall("p", Kind.SCRATCHPAD, np.int32)
+    ring = p % 16
+    assert ring.name == "p_mod16" and str(ring) == "(p) % 16"
+    cases = {
+        ring: lambda v: v % 16,
+        ring * 64: lambda v: v % 16 * 64,
+        iron.clamp(p - 5, lo=0) % 8: lambda v: max(v - 5, 0) % 8,
+        iron.clamp(p - 5, lo=0) % 8 * 4: lambda v: max(v - 5, 0) % 8 * 4,
+        (p * 3 + 1) // 2 % 32: lambda v: (3 * v + 1) // 2 % 32,
+        ring % 4: lambda v: v % 4,
+    }
+    for e, want in cases.items():
+        assert [e.evaluate({"p": v}) for v in range(-40, 41)] == [
+            want(v) for v in range(-40, 41)
+        ], e
+    for bad in (lambda: p % 12, lambda: ring % 32, lambda: ring * 3, lambda: ring * -2):
+        with pytest.raises(TypeError):
+            bad()
+    for bad in (lambda: ring + 1, lambda: ring // 2, lambda: ring.clamp(lo=0)):
+        with pytest.raises(TypeError):
+            bad()
+    with pytest.raises(TypeError, match="not linear"):
+        ring.affine()
+
+
+def test_a_state_is_written_at_a_wrapped_carried_value(npu2):
+    """A ring of 8 rows written at ``position % 8`` and read from
+    ``max(0, position - 3) % 8``: each word wraps on the host and in the
+    Emit program the device runs between calls, past several wraps."""
+
+    class Ring(iron.Graph):
+        def __init__(self):
+            self.rows = iron.state((8, 32), np.int32)
+
+        def body(self, *, position: Carried[np.int32]):
+            row = Copy.step(
+                self.rows[iron.clamp(position - 3, lo=0) % 8], dtype=np.int32
+            )
+            Copy.step(row, self.rows[position % 8], dtype=np.int32)
+            return iron.carry(position=position + 1)
+
+    graph = Ring()
+    traced = graph.trace()
+    words, _ = _words(traced)
+    assert all(w.linear is None for w in words)
+    site = attach_emit(traced, graph._carried, graph._carry, slots=len(words))
+    parameters = [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(words)]
+    program = compose(site, traced.carry, words, parameters)
+    for p in range(40):
+        image, state = emit_reference(program, np.array([[p], [0]]), slots=len(words))
+        want = [w(dict(position=p + 1)) for w in words]
+        assert image.tolist() == want
+        assert want == [max(p - 2, 0) % 8 * 32, (p + 1) % 8 * 32]
+        assert state.tolist() == [p + 1]
+
+    rows = np.arange(8 * 32, dtype=np.int32).reshape(8, 32)
+    for position, read, written in ((1, 0, 1), (10, 7, 2), (21, 2, 5)):
+        graph.rows.host = rows.copy()
+        graph.reference(position=position)
+        assert (graph.rows.host[written] == rows[read]).all()
 
 
 def test_a_state_is_indexed_by_a_clamped_carried_value(npu2):
