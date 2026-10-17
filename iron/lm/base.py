@@ -787,12 +787,7 @@ class Oracle:
         (`1 / sqrt(D)` if None): bidirectional by default, with `window` a
         key at most that many positions away; `causal` masks a key past its
         query and reuses one buffer for the growing decode length.
-
-        Raises:
-            ValueError: both `causal` and `window` are given.
         """
-        if causal and window is not None:
-            raise ValueError("attend: causal and window do not combine")
         n, H, D = q.shape
         k, v = (np.repeat(a, H // a.shape[1], axis=1) for a in (k, v))
         if causal:
@@ -804,6 +799,8 @@ class Oracle:
             )
             p *= np.float32(1 / np.sqrt(D) if scale is None else scale)
             p += np.triu(np.full((n, n), -np.inf, dtype=np.float32), k=1)
+            if window is not None:
+                p += np.tril(np.full((n, n), -np.inf, dtype=np.float32), k=-window - 1)
         else:
             p = q.transpose(1, 0, 2) @ k.transpose(1, 2, 0)
             p *= np.float32(1 / np.sqrt(D) if scale is None else scale)

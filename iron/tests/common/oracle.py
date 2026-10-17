@@ -10,7 +10,6 @@ traces the same math through them. No NPU.
 import dataclasses
 
 import numpy as np
-import pytest
 
 from iron.lm import Oracle
 from iron.applications.embedding_gemma2.config import AudioConfig
@@ -110,13 +109,6 @@ def test_attend_bidirectional_at_scale_one_is_unscaled_and_windowed():
     p = p / p.sum(axis=-1, keepdims=True)
     want = np.einsum("hqk,khd->qhd", p, vr).reshape(n, H * D)
     np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
-
-
-def test_attend_refuses_causal_and_window_together():
-    o = Oracle(AudioConfig())
-    q = k = v = np.zeros((2, 2, 4), np.float32)
-    with pytest.raises(ValueError):
-        o.attend(q, k, v, causal=True, window=1)
 
 
 def test_llama_oracle_still_runs_and_is_deterministic():
