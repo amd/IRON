@@ -10,11 +10,8 @@ compiled and loaded once for the module and every test calls it in-process.
 shapes (only its header is read) and random prompts, on a host without the
 tokenizer, and ``--max-seq-len`` at another context.
 
-Not yet included: a deep-cache check (``check_deep_decode``/
-``check_deep_prompt``) and a chat-turn check, as Llama 3.2 1B's test has.
-Both need a measured KL bound at this model's shape, not borrowed from
-Llama's; add them once measured, at a smaller ``--max-seq-len`` if the
-real one (32768) is too slow to fill cheaply.
+Not yet included: a chat-turn check, as Llama 3.2 1B's test has; the end
+of the caches is ``long_context``'s.
 
 The decode step and the prompt chunk here compile much faster packaged
 ``--each-step`` than as a full ELF: the full-ELF link did not finish in

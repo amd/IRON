@@ -119,6 +119,23 @@ def check_generation(runner, model, prompt_len: int, num_tokens: int, *, record)
         record("TPS", 1 / later)
 
 
+def check_prompt_time(runner, model, length: int, runs: int = 3, *, record):
+    """Record the median seconds to the first token after a prompt of
+    ``length`` tokens over ``runs`` timed runs, each a fresh prompt (random
+    ids after BOS: a prompt's time does not follow its ids), so no run
+    reuses a chunk another wrote.
+    """
+    rng = np.random.default_rng(SEED)
+    seconds = []
+    for _ in range(runs):
+        tokens = [runner.bos, *rng.integers(0, runner.config.vocab_size, length - 1)]
+        sample = Sampler(0.7, 50, np.random.default_rng(SEED))
+        _, first, _ = model.generate(tokens, 1, sample)
+        seconds.append(first)
+    record("TTFT", float(np.median(seconds)))
+    record("Tokens", length)
+
+
 def check_device_sampling(runner, model, prompt_len: int, num_tokens: int, *, record):
     """Sample ``num_tokens`` on the device after a prompt of ``prompt_len``
     characters (``CausalLM.generate``); record its time to the first token

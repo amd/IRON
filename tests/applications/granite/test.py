@@ -4,8 +4,8 @@
 
 """Granite 4.2 3B on the NPU, from the real checkpoint: speed, accuracy
 against the float32 reference, determinism, the device loop, and past one
-chunk: a prompt of two, a chat turn, and a prompt chunk and a step at the
-end of the caches. The model is compiled and loaded once for the module
+chunk: a prompt of two and a chat turn (the end of the caches is
+``long_context``'s). The model is compiled and loaded once for the module
 and every test calls it in-process.
 
 ``--random-weights SEED`` runs it on drawn weights and random prompts, on
@@ -19,8 +19,6 @@ from iron.applications.granite.model import Runner
 from iron.lm.testing import (
     check_accuracy,
     check_chat_turn,
-    check_deep_decode,
-    check_deep_prompt,
     check_determinism,
     check_device_sampling,
     check_generation,
@@ -75,19 +73,6 @@ def model(runner, request):
 # bf16 error than Llama 3.2 1B's 16, so the bounds carry more headroom over
 # the measured values than Llama's test does.
 MAX_KL = {"Mean": 0.01, "P90": 0.02, "Max": 0.05}
-
-
-# KL(graph reference || NPU) of one decode step and one prompt chunk, deep
-# in the caches (max_seq_len - 1 and the last chunk). The graph's own
-# reference is O(context^2); at the real max_seq_len (32768) it did not
-# finish in 13 minutes on this host, so the measurement below is at
-# --max-seq-len 4096 instead (position 4095, 1/8 the real depth): decode
-# measured 0.0033, the prompt chunk 2.3e-6, both far under Llama's own
-# bound. Llama's own DEEP_KL grows noticeably with depth (0.002 to 0.015
-# near the prompt, 0.030 to 0.038 at its full 32768), so this bound keeps
-# Llama's full headroom rather than tightening it to the shallower number
-# actually measured here; the true value at 32768 is unmeasured.
-DEEP_KL = 0.1
 
 
 @pytest.mark.supported_devices("npu2")
@@ -156,15 +141,3 @@ def test_granite_4_2_3b_accuracy_across_chunks(runner, model, record_property):
 def test_granite_4_2_3b_chat_turn(runner, model, record_property):
     """A turn of 1000 tokens reruns the second chunk alone."""
     check_chat_turn(runner, model, LONG, 1000, record=record_property)
-
-
-def test_granite_4_2_3b_decode_deep_in_the_cache(runner, model, record_property):
-    """The deepest step the caches hold, at ``max_seq_len - 1``."""
-    position = runner.config.max_seq_len - 1
-    check_deep_decode(runner, model, position, DEEP_KL, record=record_property)
-
-
-def test_granite_4_2_3b_prompt_deep_in_the_cache(runner, model, record_property):
-    """The last chunk the caches hold."""
-    rows = runner.config.prefill_chunk
-    check_deep_prompt(runner, model, rows, DEEP_KL, record=record_property)

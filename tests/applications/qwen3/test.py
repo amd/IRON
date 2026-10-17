@@ -4,8 +4,7 @@
 
 """Qwen3 1.7B on the NPU, from the real checkpoint: speed, accuracy
 against the float32 reference, determinism, and past one chunk: a prompt of
-two, a chat turn, and a prompt chunk and a step at the end of the caches.
-The model is compiled and loaded once for the module and every test calls
+two and a chat turn (the end of the caches is ``long_context``'s). The model is compiled and loaded once for the module and every test calls
 it in-process.
 
 ``--random-weights SEED`` runs it on weights drawn in the checkpoint's
@@ -23,8 +22,6 @@ from iron.lm import Checkpoint
 from iron.lm.testing import (
     check_accuracy,
     check_chat_turn,
-    check_deep_decode,
-    check_deep_prompt,
     check_determinism,
     check_device_sampling,
     check_generation,
@@ -75,14 +72,6 @@ def model(runner, request):
 MAX_KL = {"Mean": 0.03, "P90": 0.08, "Max": 0.2}
 
 
-# KL(graph reference || NPU) of one decode step, deep in the cache. Measured
-# 0.0039 at position 32767 (max_seq_len - 1, the default config's full
-# depth) from a 256-char prompt, one sample. Llama's own bound spans
-# several depths and prompts (0.002 to 0.038); this one point doesn't yet
-# characterize Qwen3's spread the way Llama's does, so the bound keeps more
-# headroom than the single measurement would need.
-DEEP_KL = 0.1
-
 GENERATION = pytest.mark.parametrize(
     "prompt_len,num_tokens",
     [pytest.param(p, n, marks=pytest.mark.bench) for p in (1024, 13) for n in (40, 1)],
@@ -111,18 +100,6 @@ class TestEachStep:
 
     def test_qwen3_1_7b_each_step_determinism(self, runner, model, record_property):
         check_determinism(runner, model, 4, 3, 128, record=record_property)
-
-    def test_qwen3_1_7b_each_step_decode_deep_in_the_cache(
-        self, runner, model, record_property
-    ):
-        position = runner.config.max_seq_len - 1
-        check_deep_decode(runner, model, position, DEEP_KL, 256, record=record_property)
-
-    def test_qwen3_1_7b_each_step_prompt_deep_in_the_cache(
-        self, runner, model, record_property
-    ):
-        rows = runner.config.prefill_chunk
-        check_deep_prompt(runner, model, rows, DEEP_KL, 256, record=record_property)
 
 
 @GENERATION
@@ -163,20 +140,6 @@ def test_qwen3_1_7b_accuracy_across_chunks(runner, model, record_property):
 def test_qwen3_1_7b_chat_turn(runner, model, record_property):
     """A turn of 1000 tokens reruns the second chunk alone."""
     check_chat_turn(runner, model, LONG, 1000, record=record_property)
-
-
-def test_qwen3_1_7b_decode_deep_in_the_cache(runner, model, record_property):
-    """The deepest step the caches hold, at ``max_seq_len - 1``."""
-    position = runner.config.max_seq_len - 1
-    check_deep_decode(runner, model, position, DEEP_KL, record=record_property)
-
-
-def test_qwen3_1_7b_prompt_deep_in_the_cache(runner, model, record_property):
-    """The last chunk the caches hold, whole: the longest dispatch a prompt
-    makes, over the whole context.
-    """
-    rows = runner.config.prefill_chunk
-    check_deep_prompt(runner, model, rows, DEEP_KL, record=record_property)
 
 
 def test_qwen3_1_7b_lm_head_is_the_tied_embedding():

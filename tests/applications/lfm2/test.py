@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """LFM2-1.2B on the NPU, from the real checkpoint: speed, accuracy against
-the float32 reference, determinism, and past one chunk: a prompt of two, a
-chat turn, and a prompt chunk and a step at the end of the caches. The
+the float32 reference, determinism, and past one chunk: a prompt of two and a
+chat turn (the end of the caches is ``long_context``'s). The
 model is compiled and loaded once for the module and every test calls it
 in-process.
 
@@ -18,8 +18,6 @@ from iron.applications.lfm2.model import Runner
 from iron.lm.testing import (
     check_accuracy,
     check_chat_turn,
-    check_deep_decode,
-    check_deep_prompt,
     check_determinism,
     check_generation,
     require,
@@ -68,13 +66,6 @@ def model(runner, request):
 # not a tight bound.
 MAX_KL = {"Mean": 0.02, "P90": 0.03, "Max": 0.05}
 
-# KL(graph reference || NPU) of one decode step, deep in the context
-# (max_seq_len - 1): measured 0.0214 (decode) and 1.4e-6 (a whole prompt
-# chunk at the deepest the caches hold), one run each; Llama 3.2 1B's own
-# bound (0.1) has comfortable headroom over both and is kept as is rather
-# than tightened from a single sample.
-DEEP_KL = 0.1
-
 
 @pytest.mark.parametrize(
     "prompt_len,num_tokens",
@@ -110,20 +101,3 @@ def test_lfm2_1_2b_accuracy_across_chunks(runner, model, record_property):
 def test_lfm2_1_2b_chat_turn(runner, model, record_property):
     """A turn of 1000 tokens reruns the second chunk alone."""
     check_chat_turn(runner, model, LONG, 1000, record=record_property)
-
-
-def test_lfm2_1_2b_decode_deep_in_the_cache(runner, model, record_property):
-    """The deepest step the caches hold, at ``max_seq_len - 1``: the conv
-    layers' window cache and the attention layers' key/value caches both
-    read their oldest-written rows here.
-    """
-    position = runner.config.max_seq_len - 1
-    check_deep_decode(runner, model, position, DEEP_KL, record=record_property)
-
-
-def test_lfm2_1_2b_prompt_deep_in_the_cache(runner, model, record_property):
-    """The last chunk the caches hold, whole: the longest dispatch a prompt
-    makes, over the whole context.
-    """
-    rows = runner.config.prefill_chunk
-    check_deep_prompt(runner, model, rows, DEEP_KL, record=record_property)

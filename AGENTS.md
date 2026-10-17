@@ -735,7 +735,9 @@ code before relying on a line here; it is the authority.
   would step `max_seq_len * head_dim` between groups, past a descriptor's
   2^20-granule stride from 32768 rows on.
   `test_llama_does_not_grow_with_the_context` checks that no activation
-  or array follows `max_seq_len`.
+  or array follows `max_seq_len`, and `tests/applications/long_context/`
+  holds every decoder application to it, and to its deepest decode step
+  and prompt chunk on the NPU, at its native context.
 - **DMA descriptors** (mlir-aie's `verifyStridesWraps`, asked of a pattern
   by `dev.dma_bd_fits(col, row, tap, dtype)`, and of an operand's lane by
   `operand.fits(tap)` and `operand.split(elements)`): the innermost
