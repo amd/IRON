@@ -49,7 +49,12 @@ From Hugging Face ([`Qwen/Qwen3-1.7B`](https://huggingface.co/Qwen/Qwen3-1.7B), 
 
 The tests look for all of these in `$IRON_EXAMPLE_WEIGHTS_DIR/qwen3-1.7b/`
 (`IRON_EXAMPLE_WEIGHTS_DIR` defaults to `/srv`); on the command line they
-can be anywhere, with `config.json` beside the checkpoint. The tokenizer
+can be anywhere, with `config.json` beside the checkpoint.
+
+Qwen3 0.6B is the same model at another shape, read from its own
+`config.json`: its `model.safetensors`, `tokenizer.json` and `config.json`
+from [`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B), in
+`$IRON_EXAMPLE_WEIGHTS_DIR/qwen3-0.6b/`; the tests run each checkpoint. The tokenizer
 loads through the `tokenizers` package (already a dependency of
 `requirements_examples.txt`), not `transformers`: nothing here needs torch.
 

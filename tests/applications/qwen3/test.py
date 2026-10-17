@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Qwen3 1.7B on the NPU, from the real checkpoint: speed, accuracy
-against the float32 reference, determinism, and past one chunk: a prompt of
-two and a chat turn (the end of the caches is ``long_context``'s). The model is compiled and loaded once for the module and every test calls
-it in-process.
+"""Qwen3 on the NPU, 1.7B and 0.6B, from the real checkpoints: speed,
+accuracy against the float32 reference, determinism, and past one chunk: a
+prompt of two and a chat turn (the end of the caches is ``long_context``'s).
+Every test runs on each checkpoint, which its id names; each one's model is
+compiled and loaded once and every test calls it in-process.
 
 ``--random-weights SEED`` runs it on weights drawn in the checkpoint's
 shapes (only its header is read) and random prompts, on a host without the
@@ -29,14 +30,34 @@ from iron.lm.testing import (
     weights_dir,
 )
 
-WEIGHTS = weights_dir("qwen3-1.7b") / "model.safetensors.index.json"
-TOKENIZER = weights_dir("qwen3-1.7b") / "tokenizer.json"
-CONFIG = weights_dir("qwen3-1.7b") / "config.json"
+# Each checkpoint's directory under $IRON_EXAMPLE_WEIGHTS_DIR and its file.
+CHECKPOINTS = {
+    "qwen3_1.7b": ("qwen3-1.7b", "model.safetensors.index.json"),
+    "qwen3_0.6b": ("qwen3-0.6b", "model.safetensors"),
+}
+# The checkpoints CI holds, so one missing there fails, not skips.
+STAGED = {"qwen3_1.7b"}
 
 pytestmark = pytest.mark.supported_devices("npu2")
 
 
-@pytest.fixture(scope="module")
+def files(name: str, seed) -> tuple:
+    """The checkpoint ``name``'s files a run needs: with ``seed``, its
+    weights' header and config.json, else its tokenizer too. One missing
+    skips the checkpoint unless CI holds it (``STAGED``).
+    """
+    directory, checkpoint = CHECKPOINTS[name]
+    weights = weights_dir(directory) / checkpoint
+    tokenizer = weights.with_name("tokenizer.json")
+    config = weights.with_name("config.json")
+    needed = (weights, config) if seed is not None else (weights, tokenizer, config)
+    if name not in STAGED and not all(f.exists() for f in needed):
+        pytest.skip(f"{name}'s files are not in {weights.parent}")
+    require(*needed)
+    return weights, tokenizer
+
+
+@pytest.fixture(scope="module", params=list(CHECKPOINTS), ids=str)
 def runner(request):
     """``Runner.from_options``, the same way the CLI builds one: the
     options pytest's own ``--random-weights``/``--max-seq-len`` flags
@@ -44,13 +65,12 @@ def runner(request):
     """
     seed = request.config.getoption("--random-weights")
     max_seq_len = request.config.getoption("--max-seq-len")
-    options = [str(WEIGHTS)]
+    weights, tokenizer = files(request.param, seed)
+    options = [str(weights)]
     if seed is not None:
-        require(WEIGHTS, CONFIG)
         options += ["--random-weights", str(seed)]
     else:
-        require(WEIGHTS, TOKENIZER, CONFIG)
-        options.append(str(TOKENIZER))
+        options.append(str(tokenizer))
     if max_seq_len is not None:
         options += ["--max-seq-len", str(max_seq_len)]
     return Runner.from_options(options)
@@ -59,23 +79,26 @@ def runner(request):
 @pytest.fixture(scope="module")
 def model(runner, request):
     """The model, compiled and loaded once, its versions tuned by
-    ``--cost-table`` if given.
+    ``--cost-table`` if given; the runtime is released after its
+    checkpoint's last test.
     """
     yield runner.npu(request.config.getoption("--cost-table"))
+    if aie_utils.DefaultNPURuntime is not None:
+        aie_utils.DefaultNPURuntime.cleanup()
 
 
 # KL(fp32 CPU || NPU), teacher-forced. TestEachStep's 20-step, 256-char run
 # on npu1/Phoenix measured Mean 0.0110, P90 0.0331, Max 0.0553, 2/20 top-1
 # mismatches; these bounds give it about 2.5-3x headroom. Not yet measured
 # at the module-scoped tests' own 40-step/1024-char shape (full-ELF, npu2
-# only).
+# only). Measured on 1.7B; 0.6B's are 1.7B's until measured.
 MAX_KL = {"Mean": 0.03, "P90": 0.08, "Max": 0.2}
 
 
 GENERATION = pytest.mark.parametrize(
     "prompt_len,num_tokens",
     [pytest.param(p, n, marks=pytest.mark.bench) for p in (1024, 13) for n in (40, 1)],
-    ids=[f"qwen3_1_7b_prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
+    ids=[f"prompt_{p}_tokens_{n}" for p in (1024, 13) for n in (40, 1)],
 )
 
 
@@ -95,30 +118,30 @@ class TestEachStep:
         if aie_utils.DefaultNPURuntime is not None:
             aie_utils.DefaultNPURuntime.cleanup()
 
-    def test_qwen3_1_7b_each_step_accuracy(self, runner, model, record_property):
+    def test_qwen3_each_step_accuracy(self, runner, model, record_property):
         check_accuracy(runner, model, MAX_KL, 20, 256, record=record_property)
 
-    def test_qwen3_1_7b_each_step_determinism(self, runner, model, record_property):
+    def test_qwen3_each_step_determinism(self, runner, model, record_property):
         check_determinism(runner, model, 4, 3, 128, record=record_property)
 
 
 @GENERATION
-def test_qwen3_1_7b(runner, model, prompt_len, num_tokens, record_property):
+def test_qwen3(runner, model, prompt_len, num_tokens, record_property):
     check_generation(runner, model, prompt_len, num_tokens, record=record_property)
 
 
 # The device draws every token and starts every decode step itself; from the
 # same seed its text is the host loop's. The figures are the device loop's.
 @pytest.mark.bench
-def test_qwen3_1_7b_device_loop(runner, model, record_property):
+def test_qwen3_device_loop(runner, model, record_property):
     check_device_sampling(runner, model, 1024, 100, record=record_property)
 
 
-def test_qwen3_1_7b_accuracy(runner, model, record_property):
+def test_qwen3_accuracy(runner, model, record_property):
     check_accuracy(runner, model, MAX_KL, record=record_property)
 
 
-def test_qwen3_1_7b_determinism(runner, model, record_property):
+def test_qwen3_determinism(runner, model, record_property):
     check_determinism(runner, model, record=record_property)
 
 
@@ -128,7 +151,7 @@ def test_qwen3_1_7b_determinism(runner, model, record_property):
 LONG = 12000
 
 
-def test_qwen3_1_7b_accuracy_across_chunks(runner, model, record_property):
+def test_qwen3_accuracy_across_chunks(runner, model, record_property):
     """The prompt's two chunks and two decode steps after them, against the
     float32 reference over the whole prompt (each step a forward over 3k+
     tokens on the host, so only a few).
@@ -137,17 +160,18 @@ def test_qwen3_1_7b_accuracy_across_chunks(runner, model, record_property):
     check_accuracy(runner, model, MAX_KL, 3, LONG, record=record_property)
 
 
-def test_qwen3_1_7b_chat_turn(runner, model, record_property):
+def test_qwen3_chat_turn(runner, model, record_property):
     """A turn of 1000 tokens reruns the second chunk alone."""
     check_chat_turn(runner, model, LONG, 1000, record=record_property)
 
 
-def test_qwen3_1_7b_lm_head_is_the_tied_embedding():
+@pytest.mark.parametrize("name", list(CHECKPOINTS))
+def test_qwen3_lm_head_is_the_tied_embedding(name):
     """The real checkpoint's unread ``lm_head.weight`` is byte-identical to
-    ``model.embed_tokens.weight``, read from both shards by their index.
+    ``model.embed_tokens.weight``.
     """
-    require(WEIGHTS)
-    tree = Checkpoint(WEIGHTS).tree()
+    weights, _ = files(name, seed=0)
+    tree = Checkpoint(weights).tree()
     assert tree.lm_head.weight.dtype == bfloat16
     assert np.array_equal(
         tree.lm_head.weight.view(np.uint16),

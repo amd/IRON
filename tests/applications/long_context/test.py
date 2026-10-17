@@ -111,6 +111,9 @@ APPLICATIONS = {
     "qwen3_1.7b": Application(
         Qwen3, "qwen3-1.7b", INDEX, "tokenizer.json", each_step=("npu1", "npu2")
     ),
+    "qwen3_0.6b": Application(
+        Qwen3, "qwen3-0.6b", "model.safetensors", "tokenizer.json", staged=False
+    ),
     "granite_4.2_3b": Application(Granite, "granite-4.2-3b", INDEX, "tokenizer.json"),
     "phi4_mini": Application(
         Phi4,
