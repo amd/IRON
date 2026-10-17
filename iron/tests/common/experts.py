@@ -202,6 +202,7 @@ def test_the_config_json_routes_each_layer(tmp_path, fields, routed):
         head_dim=4,
         intermediate_size=6,
         rope_theta=10000.0,
+        max_position_embeddings=64,
     )
     (tmp_path / "config.json").write_text(json.dumps({**shape, **fields}))
     config = DecoderConfig.from_checkpoint(tmp_path)

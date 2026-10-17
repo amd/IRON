@@ -67,8 +67,10 @@ def test_a_case_passes_its_oracle_and_fails_an_output_past_its_tolerance(
             past[moved] = np.nextafter(hi[moved].astype(flat.dtype), up)
             wrong["a NaN"] = flat.copy()
             wrong["a NaN"][moved[0]] = np.nan
-        if flat.size > 1:
-            wrong["its halves swapped"] = np.roll(flat, flat.size // 2)
+        swapped = np.roll(flat, flat.size // 2)
+        # A swap that leaves the output as it was (a word of one repeated value) is no wrong output.
+        if not np.array_equal(swapped, flat, equal_nan=True):
+            wrong["its halves swapped"] = swapped
         for what, w in wrong.items():
             written = {**v.outputs, out.name: w.reshape(want.shape)}
             verdict = op.judge(v.inputs, written, tolerance)[out.name]
