@@ -80,7 +80,7 @@ FastFlowLM's xclbin directory under `$OUTPUT/xclbins`. It replaces only
 
 ```bash
 cd $APP
-python3 build_gemm_dequant.py $FLM/xclbins $OUTPUT
+python3 build_gemm_dequant.py --engine-xclbins $FLM/xclbins --out $OUTPUT
 ```
 
 The script builds the GEMM row counts needed by `--prefill-chunk-len 512`.
@@ -247,7 +247,7 @@ to each selection, and compares every generated token sequence.
 
 ```bash
 FLM_MODEL_PATH=/path/to/fastflowlm-models-dir \
-    pytest --iterations 1 iron/applications/gemma4_flm/gemm_dequant
+    pytest tests/applications/gemma4_flm/gemm_dequant
 ```
 
 The test writes `build/gemm_dequant/prefill_means.txt`. Generate the graph from

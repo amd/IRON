@@ -3,25 +3,110 @@
 
 """Importing one operator must not import the rest of the catalog.
 
-The check runs in a fresh interpreter: in this one, whatever the session
-collected before it has already imported the operators it looks for.
+``iron.operators`` re-exports lazily (PEP 562), so ``from iron.operators import
+GEMM`` should pull in ``iron.operators.gemm`` (or, for a small operator,
+its single file) and nothing else. What that
+saves is importing all fourteen operator modules and their designs, not the
+cost of any one of them -- MHA, long named here as a witness, actually imports
+slightly faster than ReLU.
+
+Two things this does differently from a direct ``sys.modules`` check:
+
+* It runs in a fresh interpreter. ``sys.modules`` records what the whole
+  *session* imported, so a sibling test importing an operator for its own
+  reasons fails this one while the catalog is still perfectly lazy -- and a
+  session that happens not to touch that operator passes even if the catalog
+  turned eager. Process history gives a false signal in both directions.
+* It reads the catalog's own table rather than naming witnesses, so an
+  operator added to ``_OPERATOR_MODULES`` is covered without touching a test.
 """
 
 import subprocess
 import sys
 
-_CHECK = """\
-import sys
-from iron.operators import ElementwiseAdd
-assert ElementwiseAdd.__name__ == "ElementwiseAdd"
-loaded = [m for m in ("iron.operators.mha.op", "iron.operators.swiglu_decode.op")
-          if m in sys.modules]
-assert not loaded, f"importing ElementwiseAdd also imported {loaded}"
-"""
+import pytest
+
+import iron
+from iron.operators import _OPERATOR_MODULES
 
 
-def test_lazy_catalog_does_not_import_mha():
+def _modules_after_importing(name):
+    """Import `name` from the catalog in a fresh interpreter; list what came with it.
+
+    `name` is a catalog key: a bare name (``"GEMM"``) or a dotted one
+    (``"flm.GEMM"``, ``iron.operators.flm``'s own catalog under its
+    prefix), which a real caller imports as ``from iron.operators.flm
+    import GEMM``, not as a single dotted import name (invalid syntax).
+    """
+    prefix, _, bare = name.rpartition(".")
+    package = f"iron.operators.{prefix}" if prefix else "iron.operators"
+    program = (
+        "import sys\n"
+        f"from {package} import {bare}\n"
+        # Every export is a class carrying its own name.
+        f"assert {bare}.__name__ == {bare!r}, {bare}.__name__\n"
+        # Only the operator modules, named as the catalog names them:
+        # importing one necessarily creates the package around it, which says
+        # nothing about laziness.
+        "from iron.operators import _OPERATOR_MODULES\n"
+        "known = {f'iron.operators.{m}' for m in _OPERATOR_MODULES.values()}\n"
+        "print('\\n'.join(sorted(known & set(sys.modules))))\n"
+    )
     result = subprocess.run(
-        [sys.executable, "-c", _CHECK], capture_output=True, text=True
+        [sys.executable, "-c", program], capture_output=True, text=True
     )
     assert result.returncode == 0, result.stderr
+    return set(result.stdout.split())
+
+
+#: flm's GEMM (and Shipped, which subclasses it) names Clamp, Sigmoid and
+#: SiLU directly, by module, to recognize a fused epilogue's consumer
+#: (isinstance checks): eager by design, not a lazy-catalog regression.
+_NAMES_OTHER_OPERATOR_TYPES = {"flm.GEMM", "flm.Shipped"}
+
+
+def _is_composite(name):
+    """Whether `name` is built from other operators rather than from a kernel.
+
+    A composite is a graph (an ``iron.Graph``, not an ``Operator``): its
+    body calls other operators, so importing it must import them. That
+    is composition, not an eager catalog, and the two need different
+    expectations.
+    """
+    from iron import operators
+
+    return issubclass(getattr(operators, name), iron.Graph) or (
+        name in _NAMES_OTHER_OPERATOR_TYPES
+    )
+
+
+@pytest.mark.parametrize("name", sorted(_OPERATOR_MODULES))
+def test_importing_one_operator_imports_no_unrelated_operator(name):
+    own = f"iron.operators.{_OPERATOR_MODULES[name]}"
+    imported = _modules_after_importing(name)
+    others = sorted(imported - {own})
+
+    if not _is_composite(name):
+        assert (
+            not others
+        ), f"importing {name} also imported {others}; the catalog is not lazy"
+    else:
+        # A composite may import its parts, but never the whole catalog --
+        # that is the regression this guards against.
+        catalog = {f"iron.operators.{m}" for m in _OPERATOR_MODULES.values()}
+        assert len(imported) < len(catalog), (
+            f"importing {name} imported the entire catalog ({sorted(imported)}); "
+            "a composite should pull in only the operators it is built from"
+        )
+
+
+def test_the_check_can_observe_an_import():
+    """Guard the guard.
+
+    Every assertion above is about a module being *absent*, so a subprocess
+    that silently imported nothing -- or a name typo -- would make them all
+    vacuously true. This pins that the probe does observe the module the
+    operator legitimately needs.
+    """
+    imported = _modules_after_importing("GEMM")
+    assert "iron.operators.gemm" in imported

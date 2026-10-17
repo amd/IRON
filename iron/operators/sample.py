@@ -1,0 +1,294 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Sample: the next token, drawn on the device from a row of bf16 logits.
+
+Temperature and top-k sampling bit for bit as
+``aie.iron.kernels.sample.sample_ref``, from a four-word draw row the host
+writes ahead of time per position. Each column's core reduces its slice of
+the logits to a top-k summary; one combine core draws the token from them.
+"""
+
+import dataclasses
+
+import numpy as np
+from aie.dialects.aie import WireBundle, get_target_model
+from aie.helpers.taplib import TensorAccessPattern
+from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker
+from aie.iron.controlflow import range_
+from aie.iron.kernels import sample as kernels
+from aie.utils.verify import Tolerance
+from ml_dtypes import bfloat16
+
+from iron.common import (
+    Divisors,
+    In,
+    InOut,
+    Operator,
+    Out,
+    Unresolvable,
+    Value,
+    Auto,
+    Param,
+    Built,
+    Operand,
+)
+from iron.common.testing import Case, Testing
+
+# A select core's logits object: no more than this, and even (4-byte DMA).
+_CHUNK_LIMIT = 8192
+
+
+def reference(logits, draw_row, k_max: int | None = None) -> int:
+    """The token the device draws for one draw row; an all-zero row is greedy."""
+    words = np.asarray(draw_row, dtype=np.int32)
+    row = words.view(np.uint32)
+    temperature = row[0:1].view(np.float32)[0]
+    n53 = int(row[2]) | int(row[3]) << 32
+    top_k = max(int(words[1]), 1)
+    return kernels.sample_ref(logits, temperature, top_k, n53, k_max=k_max)
+
+
+def _logits(op: "Sample") -> dict:
+    """Logits with a few ties at the top, and one draw row per position."""
+    rng = np.random.default_rng(11)
+    logits = rng.normal(0, 3, op.vocab).astype(bfloat16)
+    logits[rng.choice(op.vocab, 8, replace=False)] = logits.max()
+    draws = np.stack(
+        [
+            kernels.draw_row(t, k, int(rng.integers(0, 1 << 53)))
+            for t, k in zip(
+                rng.choice([0.0, 0.7, 1.0], op.steps), rng.integers(1, 51, op.steps)
+            )
+        ]
+    )
+    return dict(
+        given={
+            op.logits: logits,
+            op.draws: draws,
+            op.tokens: np.full(op.steps, -1, dtype=np.int32),
+        }
+    )
+
+
+class Sample(Operator):
+    """Draw the next token from a row of logits (exact temperature/top-k)."""
+
+    # A token id; anything but exact is wrong.
+    test = Testing(
+        [
+            Case(dict(vocab=4096, cores=4, steps=3), id="small"),
+            Case(dict(vocab=4096, cores=2, chunk=256), id="two_cores"),
+            Case(dict(vocab=128256, cores=4), id="llama", bench=True),
+        ],
+        draw=_logits,
+    )
+
+    vocab: int = Param()
+    k_max: int = Param(default=64)
+    # Positions the draws and the record hold; the sequence picks one.
+    steps: int = Param(default=1)
+    cores: int = Auto(default=4)
+    # Logits per select call.
+    chunk: int = Auto(
+        domain=Divisors(of=lambda op, dev: op.slice_size, step=2, cap=_CHUNK_LIMIT)
+    )
+
+    logits = In(vocab, obj_type=(chunk,), per=(cores,), depth=2)
+    draws = In(
+        steps, kernels.ROW_WORDS, dtype=np.int32, obj_type=(kernels.ROW_WORDS,), depth=1
+    )
+    tokens = InOut(steps, dtype=np.int32, obj_type=(1,), depth=1)
+    token = Out(1, dtype=np.int32, obj_type=(1,), depth=1)
+    # Element offsets of this position's draw row and record.
+    row = Value(derive=lambda op: 0)
+    at = Value(derive=lambda op: 0)
+
+    @property
+    def slice_size(self) -> int:
+        return self.vocab // self.cores
+
+    @property
+    def select_streams(self) -> int:
+        """How often each select core takes its slice per position."""
+        return kernels.select_streams(self.slice_size, self.chunk)
+
+    def validate(self) -> None:
+        if self.vocab % self.cores:
+            raise ValueError(
+                f"vocab ({self.vocab}) must split evenly over {self.cores} cores"
+            )
+
+    def resolve(self, dev):
+        self.check_shim_columns(dev, self.cores)
+        tm = get_target_model(dev.resolve())
+        row = next(r for r in range(tm.rows()) if tm.is_mem_tile(0, r))
+        joined = tm.get_num_dest_switchbox_connections(0, row, WireBundle.DMA)
+        if self.cores > joined:
+            raise Unresolvable(
+                f"Sample's {self.cores} summaries join in one memtile, which "
+                f"takes {joined}"
+            )
+        chunk = self.chunk or max(
+            c
+            for c in range(2, min(self.slice_size, _CHUNK_LIMIT) + 1, 2)
+            if self.slice_size % c == 0
+        )
+        return dataclasses.replace(self, chunk=chunk)
+
+    def compatible(self) -> None:
+        # The factories' own checks: chunk divides the slice, k_max fits.
+        try:
+            config = self.array_config()
+            config.select()
+            config.combine()
+        except ValueError as e:
+            raise ValueError(str(e)) from e
+
+    class Array(Operator.Array):
+        vocab: int
+        k_max: int
+        cores: int
+        chunk: int
+        logits: Operand
+        draws: Operand
+        tokens: Operand
+        token: Operand
+
+        @property
+        def slice_size(self) -> int:
+            return self.vocab // self.cores
+
+        @property
+        def select_streams(self) -> int:
+            """How often each select core takes its slice per position."""
+            return kernels.select_streams(self.slice_size, self.chunk)
+
+        def select(self):
+            return kernels.sample_select(
+                slice_size=self.slice_size, chunk=self.chunk, k_max=self.k_max
+            )
+
+        def combine(self):
+            return kernels.sample_combine(
+                columns=self.cores, slice_size=self.slice_size, k_max=self.k_max
+            )
+
+        def build(self) -> Built:
+            select, combine = self.select(), self.combine()
+            words = kernels.summary_words(self.slice_size, self.k_max)
+            calls = self.select_streams * self.slice_size // self.chunk
+            # Every core reads the draw row.
+            of_draw = ObjectFifo(self.draws.obj_type, depth=1)
+            self.draws.bind(of_draw.prod())
+            of_token = ObjectFifo(self.token.obj_type, depth=1)
+            self.token.bind(of_token.cons())
+            of_record = ObjectFifo(self.tokens.obj_type, depth=1)
+            self.tokens.bind(of_record.cons())
+            # The summaries meet in a memtile, column 0 first.
+            of_summaries = ObjectFifo(
+                np.ndarray[(self.cores * words,), np.dtype[np.int32]],
+                depth=1,
+            )
+            of_summary = of_summaries.prod().join(
+                [words * c for c in range(self.cores)],
+                obj_types=[np.ndarray[(words,), np.dtype[np.int32]]] * self.cores,
+                depths=[1] * self.cores,
+            )
+
+            def select_body(of_x, of_row, of_sum, kernel, state):
+                row = of_row.acquire(1)
+                summary = of_sum.acquire(1)
+                for _ in range_(calls):
+                    x = of_x.acquire(1)
+                    kernel(x, row, state, summary)
+                    of_x.release(1)
+                of_sum.release(1)
+                of_row.release(1)
+
+            def combine_body(of_sums, of_row, of_tok, of_rec, kernel):
+                summaries = of_sums.acquire(1)
+                row = of_row.acquire(1)
+                token = of_tok.acquire(1)
+                record = of_rec.acquire(1)
+                kernel(summaries, row, token, record)
+                of_sums.release(1)
+                of_row.release(1)
+                of_tok.release(1)
+                of_rec.release(1)
+
+            workers, logits = [], []
+            for c in range(self.cores):
+                of_x = ObjectFifo(self.logits.obj_type, depth=2)
+                logits.append(of_x.prod())
+                state = Buffer(
+                    np.ndarray[(kernels.SELECT_STATE_WORDS,), np.dtype[np.int32]],
+                    initial_value=np.zeros(kernels.SELECT_STATE_WORDS, dtype=np.int32),
+                )
+                workers.append(
+                    Worker(
+                        select_body,
+                        [
+                            of_x.cons(),
+                            of_draw.cons(),
+                            of_summary[c].prod(),
+                            select,
+                            state,
+                        ],
+                    )
+                )
+            self.logits.bind(logits)
+            workers.append(
+                Worker(
+                    combine_body,
+                    [
+                        of_summaries.cons(),
+                        of_draw.cons(),
+                        of_token.prod(),
+                        of_record.prod(),
+                        combine,
+                    ],
+                )
+            )
+            return Built(workers)
+
+    def _slice_taps(self, core: int) -> list[TensorAccessPattern]:
+        """Core ``core``'s slice, once per select stream."""
+        run, streams = self.slice_size, self.select_streams
+        piece = TensorAccessPattern.full((self.vocab,))[core * run : (core + 1) * run]
+        halves = self.logits.split(run)
+        if halves is not None:
+            tap = piece.split(0, halves[1]).repeat(streams)
+            if self.logits.fits(tap):
+                return [tap]
+        return [piece] * streams
+
+    def sequence(self, rt):
+        """One group: the draw and the logits in, then the record and the token."""
+        row = self.row if self.row.per_call else None
+        at = self.at if self.at.per_call else None
+        tg = TaskGroup()
+        self.draws.fill(self.draws[0], group=tg, offset_parameter=row)
+        for c in range(self.cores):
+            for tap in self._slice_taps(c):
+                self.logits.fill(tap, lane=c, group=tg)
+        self.tokens.drain(self.tokens[:1], group=tg, wait=True, offset_parameter=at)
+        self.token.drain(group=tg, wait=True)
+        tg.finish()
+
+    def ops(self) -> int:
+        return 0  # a draw, not arithmetic: its figure is latency
+
+    def reference(self, logits, draws, tokens, *, row=0, at=0):
+        """``(tokens, token)``: the draw at ``draws`` row ``row // 4``, recorded at ``at``."""
+        token = reference(
+            logits,
+            np.asarray(draws).reshape(-1)[row : row + kernels.ROW_WORDS],
+            self.k_max,
+        )
+        tokens = np.array(tokens, dtype=np.int32).reshape(-1)
+        tokens[at] = token
+        return tokens, np.array([token], dtype=np.int32)
+
+    def tolerance(self) -> Tolerance:
+        return Tolerance.exact()

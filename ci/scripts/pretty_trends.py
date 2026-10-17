@@ -168,7 +168,7 @@ def build_report(
         date = parse_date(row, date_fmt)
         if date is None:
             continue
-        operator = operator_name((row.get("Test Path") or "").strip())
+        operator = operator_name(*row_key(row))
         if date == run_date:
             operators_now.add(operator)
         elif date == previous_date:
@@ -191,7 +191,7 @@ def build_report(
         if parse_date(curr, date_fmt) != run_date:
             continue
 
-        operator = operator_name(test_path)
+        operator = operator_name(test_path, params)
         for column, metric in tracked_metrics([curr, prev], field_order):
             prev_v = try_parse_float(prev.get(column))
             curr_v = try_parse_float(curr.get(column))

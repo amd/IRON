@@ -11,7 +11,7 @@ import json
 import struct
 
 import numpy as np
-import torch
+from ml_dtypes import bfloat16
 
 # vision_mm.xclbin's B tiling.
 K_TILE, N_TILE, CT_K, S, T = 256, 64, 256, 8, 8
@@ -54,6 +54,4 @@ def write(model_dir, config, op, out_dir):
         with open(out_dir / f"pli_{stem}.weights", "wb") as out:
             for name, K, N in tensors:
                 B = unblock(read_bf16(model_dir / "model.q4nx", name), K, N)
-                out.write(
-                    op.pack_B(torch.from_numpy(B).to(torch.bfloat16)).numpy().tobytes()
-                )
+                out.write(op.pack_B(B.astype(bfloat16)).tobytes())

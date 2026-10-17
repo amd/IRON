@@ -5,28 +5,16 @@
 
 Operators are re-exported lazily (PEP 562):
 
-    from iron.operators.flm import GEMM  # imports iron.operators.flm.gemm.op
+    from iron.operators.flm import GEMM, Shipped  # imports iron.operators.flm.gemm.*
+
+The one catalog is ``iron.operators._OPERATOR_MODULES``, dotted
+(``"flm.GEMM"``); this package's own names, below, are that catalog's
+``flm.`` entries with the prefix dropped.
 """
 
 import importlib
 
-_OPERATOR_MODULES = {
-    # The port, built from source for the current device.
-    "GEMM": "gemm",
-    # q4nx weights to the bfp16 B that GEMM reads, without a host-side pack.
-    "DequantBFP": "dequant",
-    # Gemma 4's fused decode layer, as FastFlowLM's engine drives it.
-    "DecodeLayer": "layer",
-    # Causal prefill attention, one build for every token range.
-    "PrefillAttention": "prefill_attn",
-    # Sliding-window causal prefill attention, one build for every token range.
-    "PrefillSlidingAttention": "prefill_attn",
-    # Softcapped logits straight from the q4nx vocabulary.
-    "LMHead": "lm_head",
-    # The shipped overlay itself, downloaded as a pinned binary. NPU2 only;
-    # exists so the port can be measured against what it was ported from.
-    "MMPrebuilt": "mm_prebuilt",
-}
+from .. import _FLM_OPERATOR_MODULES as _OPERATOR_MODULES
 
 __all__ = sorted(_OPERATOR_MODULES)
 
@@ -36,7 +24,7 @@ def __getattr__(name):
     module = _OPERATOR_MODULES.get(name)
     if module is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    return getattr(importlib.import_module(f".{module}.op", __name__), name)
+    return getattr(importlib.import_module(f".{module}", __name__), name)
 
 
 def __dir__():

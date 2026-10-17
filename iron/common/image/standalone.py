@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""One operator built and run on its own, outside a graph."""
+
+from __future__ import annotations
+
+from typing import Self
+
+from ..declare import Operator
+from ..graph.trace import TracedGraph
+from .artifacts import Artifacts
+from .sequence import OperatorSequence
+
+
+class OperatorImage:
+    """An operator's own xclbin and instruction stream, and a call of them:
+    what ``Operator.compile`` builds once and a call outside a graph runs,
+    with the operator's buffers as device tensors, in declaration order.
+
+    It is the one-step sequence of the operator as an xclbin chain
+    (``XclbinChain``), so the xclbin is the operator's
+    ``Operator.configuration``'s: an operator whose array serves every
+    shape (flm's GEMM) compiles only an instruction stream per shape, and
+    on a shipped image (``image=``) it is the download.
+    """
+
+    def __init__(self, op: Operator) -> None:
+        self.op = op
+        self._sequence: OperatorSequence | None = None
+
+    def compile(self) -> Self:
+        """Build the image, once."""
+        if self._sequence is None:
+            self._sequence = OperatorSequence(
+                TracedGraph.of_step(self.op.resolved()), full_elf=False
+            ).compile()
+        return self
+
+    @property
+    def artifacts(self) -> Artifacts:
+        """The record of what ``compile`` produced."""
+        if self._sequence is None:
+            raise RuntimeError(f"{self.op!r} is not compiled; compile() first")
+        return self._sequence.artifacts
+
+    def __call__(self, *args, **scalars):
+        """Run the image on ``args``, loading it into the shared runtime
+        unless it is there already. ``scalars`` are the call's
+        ``DispatchTime`` values, by device symbol.
+        """
+        self.compile()
+        (step,) = self._sequence.steps
+        _, result = self._sequence.kernel(step.op)(*args, **scalars)
+        return result

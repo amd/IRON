@@ -19,3 +19,15 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 include = ["iron*"]
+
+[tool.setuptools.package-data]
+"iron.lm" = ["prompt.txt"]
+# In every package: what an application reads beside its code at run time.
+"*" = [
+    "profiles/*.json",
+    "profiles/*/*.json",
+    "*.json",
+    "*.npz",
+    "*.hpp",
+    "Makefile",
+]

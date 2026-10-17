@@ -1,23 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from dataclasses import dataclass, field
+import dataclasses
+import functools
 from typing import ClassVar
 
 import numpy as np
+from aie.dialects._aie_enum_gen import AIEArch
+from aie.iron import ExternalFunction
 from ml_dtypes import bfloat16
 
-import aie.utils as aie_utils
-from aie.dialects._aie_enum_gen import AIEArch
-
-from iron.common import (
-    AIERuntimeArgSpec,
-    DesignGenerator,
-    KernelObjectArtifact,
-    MLIROperator,
-    PythonGeneratedMLIRArtifact,
-)
-
+from iron.common import DispatchTime, In, Operator, Out, Unresolvable, Param
+from iron.operators.flm.prefill_attn import reference
 from iron.operators.flm.prefill_attn.design import (
     CAUSAL,
     IN_CONS_LOCK,
@@ -25,15 +19,16 @@ from iron.operators.flm.prefill_attn.design import (
     SLIDING,
     Geometry,
     Variant,
+    prefill_attn,
 )
 
 
-@dataclass
-class _PrefillAttentionBase(MLIROperator):
+class _PrefillAttentionBase(Operator):
     """Causal prefill attention from a KV cache.
 
     ``max_context`` bounds the rows of the KV cache. ``num_heads`` and
-    ``num_kv_heads`` count the query heads and the KV heads.
+    ``num_kv_heads`` count the query heads and the KV heads. The token range
+    and the cache's row count are set per call; see README.md.
     """
 
     variant: ClassVar[Variant]
@@ -41,20 +36,38 @@ class _PrefillAttentionBase(MLIROperator):
     # query.
     window = None
 
-    max_context: int
-    num_heads: int
-    num_kv_heads: int
-    context: object = field(default=None, repr=False)
+    max_context: int = Param()
+    num_heads: int = Param()
+    num_kv_heads: int = Param()
+    head_dim: int = Param(derive=lambda op: Geometry.of(op.kernel()).dh, repr=False)
+    qo_len: int = Param(
+        derive=lambda op: op.max_context * op.num_heads * op.head_dim, repr=False
+    )
+    kv_len: int = Param(
+        derive=lambda op: 2 * op.max_context * op.num_kv_heads * op.head_dim,
+        repr=False,
+    )
 
-    def __post_init__(self):
-        dev = aie_utils.get_current_device()
-        if dev.arch != AIEArch.AIE2p:
-            raise NotImplementedError(
-                f"the {self.variant.factory.__name__} kernel is AIE2P only"
-            )
+    # The runtime sequence's argument order.
+    o = Out(qo_len, dtype=bfloat16)
+    q = In(qo_len, dtype=bfloat16)
+    kv = In(kv_len, dtype=bfloat16)
+    L_begin = DispatchTime()
+    L_end = DispatchTime()
+    max_l = DispatchTime()
+
+    def kernel(self) -> ExternalFunction:
+        """The variant's kernel, built with the k/v locks the design declares."""
+        # The factory reads the architecture of the bound device.
+        self.dev
+        return self.variant.factory(
+            in_prod_lock=IN_PROD_LOCK, in_cons_lock=IN_CONS_LOCK
+        )
+
+    def validate(self) -> None:
         for name in ("max_context", "num_heads", "num_kv_heads"):
-            if getattr(self, name) <= 0:
-                raise ValueError(f"{name} ({getattr(self, name)}) must be positive")
+            if vars(self)[name] <= 0:
+                raise ValueError(f"{name} ({vars(self)[name]}) must be positive")
         if self.num_heads % self.num_kv_heads:
             raise ValueError(
                 f"num_heads ({self.num_heads}) must be a multiple of "
@@ -65,87 +78,54 @@ class _PrefillAttentionBase(MLIROperator):
             raise ValueError(
                 f"each KV head must serve a multiple of {num_cu} query heads"
             )
-        for name in ("max_context", "window"):
-            value = getattr(self, name)
+        for name, value in (("max_context", self.max_context), ("window", self.window)):
             if value is not None and value % 128:
                 raise ValueError(f"{name} ({value}) must be a multiple of 128")
-        MLIROperator.__init__(self, context=self.context)
+        self.check_derived("head_dim", "qo_len", "kv_len")
 
-    def reference_tolerance(self):
-        # The factory's tolerance covers attn_epilogue alone, one of the ten
-        # entry points that the operator runs.
-        return None
+    def resolve(self, dev):
+        if dev is None or dev.arch != AIEArch.AIE2p:
+            raise Unresolvable(
+                f"the {self.variant.factory.__name__} kernel is AIE2P only"
+            )
+        return dataclasses.replace(self)
 
-    @property
-    def head_dim(self) -> int:
-        return Geometry.of(
-            self.variant.factory(in_prod_lock=IN_PROD_LOCK, in_cons_lock=IN_CONS_LOCK)
-        ).dh
-
-    @property
-    def name(self) -> str:
-        dev = aie_utils.get_current_device().resolve().name
-        window = "" if self.window is None else f"_w{self.window}"
-        return (
-            f"FLM_{type(self).__name__}_ctx{self.max_context}_h{self.num_heads}"
-            f"_kv{self.num_kv_heads}{window}_{dev}"
+    def exported_design(self):
+        return functools.partial(
+            prefill_attn,
+            self.dev,
+            self.variant.name,
+            self.max_context,
+            self.num_heads,
+            self.num_kv_heads,
+            self.window,
+            0,
+            kernel=self.kernel(),
         )
 
-    def get_dispatch_params(self):
-        """The token range and the KV cache's row count, set per call.
-
-        The README describes each parameter.
-        """
-        return {"L_begin": np.int32, "L_end": np.int32, "max_l": np.int32}
-
-    def get_mlir_artifact(self):
-        return PythonGeneratedMLIRArtifact(
-            f"{self.name}.mlir",
-            DesignGenerator(
-                self.operator_dir / "design.py",
-                "prefill_attn",
-                (
-                    aie_utils.get_current_device(),
-                    self.variant.name,
-                    self.max_context,
-                    self.num_heads,
-                    self.num_kv_heads,
-                    self.window,
-                ),
-                {
-                    "kernel": self.variant.factory(
-                        in_prod_lock=IN_PROD_LOCK, in_cons_lock=IN_CONS_LOCK
-                    )
-                },
-            ),
-        )
-
-    def get_kernel_artifacts(self):
-        kernel = self.variant.factory(
-            in_prod_lock=IN_PROD_LOCK, in_cons_lock=IN_CONS_LOCK
-        )
-        return [KernelObjectArtifact.from_extern(kernel)]
-
-    def get_arg_spec(self):
-        # The runtime sequence's order: o, q, kv.
-        rows = self.max_context * self.head_dim
-        return [
-            AIERuntimeArgSpec("out", (rows * self.num_heads,), dtype=bfloat16),
-            AIERuntimeArgSpec("in", (rows * self.num_heads,), dtype=bfloat16),
-            AIERuntimeArgSpec("in", (2 * rows * self.num_kv_heads,), dtype=bfloat16),
-        ]
+    def reference(self, q, kv, L_begin, L_end, max_l):
+        """O's first ``L_end - L_begin`` token rows, flat, in float32."""
+        return reference.reference(
+            q,
+            kv,
+            L_begin,
+            L_end,
+            max_l,
+            self.num_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.window,
+        ).reshape(-1)
 
 
-@dataclass
 class PrefillAttention(_PrefillAttentionBase):
     """Causal prefill attention with a head dim of 512, from a KV cache."""
 
     variant = CAUSAL
 
 
-@dataclass
 class PrefillSlidingAttention(_PrefillAttentionBase):
     """Sliding-window causal prefill attention with a head dim of 256, from a KV cache."""
 
     variant = SLIDING
-    window: int = 512
+    window: int = Param(default=512)

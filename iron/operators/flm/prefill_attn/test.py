@@ -2,19 +2,19 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.utils.hostruntime.hostruntime import HostRuntimeError
 from ml_dtypes import bfloat16
 
-import aie.utils as aie_utils
-from aie.utils.benchmark import run_iters
-
+from iron.common.testing import time_call
 from iron.operators.flm.prefill_attn.op import (
     PrefillAttention,
     PrefillSlidingAttention,
 )
-from iron.operators.flm.prefill_attn.reference import reference
-from iron.operators.flm.testing import requires_aie2p
+
+pytestmark = pytest.mark.supported_devices("npu2")
 
 NUM_HEADS = 8
 # The operator cannot produce this value from the inputs below. The rows past
@@ -25,12 +25,6 @@ SENTINEL = 7.0
 # stale token range gives a mean error of 0.03 or more.
 MAX_ERROR = 0.25
 MEAN_ERROR = 0.02
-
-METRICS = dict(
-    Latency=r"Latency \(us\): (?P<value>[\d\.]+)",
-    Bandwidth=r"Effective Bandwidth: (?P<value>[\d\.e\+-]+) GB/s",
-    Throughput=r"Throughput: (?P<value>[\d\.e\+-]+) GFLOP/s",
-)
 
 # Per operator: its class, the arguments of the build under test, and token
 # ranges (L_begin, L_end, max_l).
@@ -64,7 +58,7 @@ OPERATORS = {
 
 
 def _inputs(op, max_l, seed):
-    """q and a KV cache whose scores stay in softmax's useful range."""
+    """Draw q and a KV cache whose scores stay in softmax's useful range."""
     rng = np.random.default_rng(seed)
     dh = op.head_dim
     q = (rng.standard_normal(op.max_context * NUM_HEADS * dh) * 0.2).astype(bfloat16)
@@ -75,8 +69,8 @@ def _inputs(op, max_l, seed):
     return q, kv
 
 
-def _print_metrics(op, run, bufs, L_begin, L_end):
-    """Time one more dispatch and print its latency, bandwidth and throughput.
+def _record(op, bufs, L_begin, L_end, max_l, record):
+    """Time one more dispatch and record its latency, bandwidth and throughput.
 
     The bytes count the query and output rows of the range and the K and V rows
     that its queries read. The FLOPs count the scores and the weighted sum of V.
@@ -90,42 +84,42 @@ def _print_metrics(op, run, bufs, L_begin, L_end):
         2 * dh * (2 * (L_end - L_begin) * NUM_HEADS + 2 * rows_read * op.num_kv_heads)
     )
     flops = 4 * NUM_HEADS * dh * int(keys.sum())
-    latency_us = run_iters(run, *bufs, warmup=1, iters=1).npu.avg_us
-    print(f"\nLatency (us): {latency_us:.1f}")
-    print(f"Effective Bandwidth: {total_bytes / latency_us / 1e3:.6e} GB/s")
-    print(f"Throughput: {flops / latency_us / 1e3:.6e} GFLOP/s\n")
+    time_call(
+        op,
+        *bufs,
+        bytes_moved=total_bytes,
+        ops=flops,
+        warmup=1,
+        iters=1,
+        record=record,
+        L_begin=L_begin,
+        L_end=L_end,
+        max_l=max_l,
+    )
 
 
-def _check(op, run, L_begin, L_end, max_l, seed, metrics=False):
+def _check(op, L_begin, L_end, max_l, seed, record=None):
     q, kv = _inputs(op, max_l, seed)
-    o_buf = aie_utils.full((q.size,), SENTINEL, dtype=bfloat16)
-    q_buf = aie_utils.tensor(q)
-    kv_buf = aie_utils.tensor(kv)
+    tensor = aie_utils.DEFAULT_TENSOR_CLASS
+    bufs = (tensor(np.full(q.size, SENTINEL, dtype=bfloat16)), tensor(q), tensor(kv))
+    op(*bufs, L_begin=L_begin, L_end=L_end, max_l=max_l)
 
-    run.set_parameters(L_begin=L_begin, L_end=L_end, max_l=max_l)
-    run(o_buf, q_buf, kv_buf)
-
-    o = o_buf.numpy().astype(np.float32)
-    dh = op.head_dim
-    n = (L_end - L_begin) * NUM_HEADS * dh
-    expected = reference(
-        q, kv, L_begin, L_end, max_l, NUM_HEADS, op.num_kv_heads, dh, op.window
-    ).reshape(-1)
+    o = bufs[0].numpy().astype(np.float32)
+    n = (L_end - L_begin) * NUM_HEADS * op.head_dim
+    expected = op.reference(q, kv, L_begin, L_end, max_l)
     error = np.abs(o[:n] - expected)
     label = f"L=[{L_begin},{L_end}) max_l={max_l}"
     assert not np.isnan(error).any(), f"{label}: NaN in the output"
     assert error.max() <= MAX_ERROR, f"{label}: max |error| {error.max():.3f}"
     assert error.mean() <= MEAN_ERROR, f"{label}: mean |error| {error.mean():.4f}"
     assert np.all(o[n:] == SENTINEL), f"{label}: wrote past its rows"
-    if metrics:
-        _print_metrics(op, run, (o_buf, q_buf, kv_buf), L_begin, L_end)
+    if record is not None:
+        _record(op, bufs, L_begin, L_end, max_l, record)
 
 
-def _build(kind, aie_context, **overrides):
+def _build(kind, **overrides):
     cls, kwargs, _ = OPERATORS[kind]
-    op = cls(num_heads=NUM_HEADS, context=aie_context, **{**kwargs, **overrides})
-    op.compile()
-    return op
+    return cls(num_heads=NUM_HEADS, **{**kwargs, **overrides})
 
 
 # One 512-token prompt chunk per operator, the chunk length of Gemma 4's engine.
@@ -133,8 +127,6 @@ def _build(kind, aie_context, **overrides):
 BENCH = {("attn", 0, 512, 1024, 1), ("swa", 512, 1024, 2048, 1)}
 
 
-@requires_aie2p
-@pytest.mark.metrics(**METRICS)
 @pytest.mark.parametrize(
     "kind, L_begin, L_end, max_l, num_kv_heads",
     [
@@ -149,66 +141,53 @@ BENCH = {("attn", 0, 512, 1024, 1), ("swa", 512, 1024, 2048, 1)}
         for r in ranges
     ],
 )
-def test_matches_reference(kind, L_begin, L_end, max_l, num_kv_heads, aie_context):
-    op = _build(kind, aie_context, num_kv_heads=num_kv_heads)
-    _check(op, op.get_callable(), L_begin, L_end, max_l, seed=L_end, metrics=True)
+def test_matches_reference(kind, L_begin, L_end, max_l, num_kv_heads, record_property):
+    op = _build(kind, num_kv_heads=num_kv_heads)
+    _check(op, L_begin, L_end, max_l, seed=L_end, record=record_property)
 
 
-@requires_aie2p
 @pytest.mark.parametrize("kind", OPERATORS)
-def test_one_callable_serves_every_range(kind, aie_context):
+def test_one_image_serves_every_range(kind):
     """Check that each dispatch runs its own token range.
 
     The ranges run back to back on one loaded xclbin: growing, shrinking and
     repeated. A stale range appears only from the second dispatch after a load.
     """
-    op = _build(kind, aie_context, num_kv_heads=1)
-    run = op.get_callable()
+    op = _build(kind, num_kv_heads=1)
     ranges = OPERATORS[kind][2]
     for seed, i in enumerate((0, 1, 1, 2, 4, 3, 0)):
-        _check(op, run, *ranges[i], seed)
-
-
-@requires_aie2p
-@pytest.mark.extensive
-@pytest.mark.parametrize("num_kv_heads", [1, 2])
-@pytest.mark.parametrize("kind", OPERATORS)
-def test_gemma4_cache_bound(kind, num_kv_heads, aie_context):
-    """Check the cache bound of Gemma 4's engine: 32768 rows."""
-    op = _build(kind, aie_context, num_kv_heads=num_kv_heads, max_context=32768)
-    run = op.get_callable()
-    for seed, (L_begin, L_end, max_l) in enumerate(
-        [(0, 2048, 4096), (2048, 2304, 4096), (0, 1024, 32768)]
-    ):
-        _check(op, run, L_begin, L_end, max_l, seed)
+        L_begin, L_end, max_l = ranges[i]
+        _check(op, L_begin, L_end, max_l, seed)
 
 
 @pytest.mark.parametrize(
-    "cls, kwargs, match",
+    "L_begin, L_end, max_l, match",
     [
-        (PrefillAttention, dict(num_kv_heads=3), "multiple of"),
-        (PrefillAttention, dict(num_kv_heads=0), "must be positive"),
-        (PrefillAttention, dict(num_kv_heads=8), "query heads"),
-        (PrefillSlidingAttention, dict(num_kv_heads=3), "multiple of"),
-        (PrefillSlidingAttention, dict(num_kv_heads=4), "query heads"),
-        (
-            PrefillAttention,
-            dict(max_context=1000, num_kv_heads=1),
-            "multiple of 128",
-        ),
-        (
-            PrefillSlidingAttention,
-            dict(max_context=1000, num_kv_heads=1),
-            "multiple of 128",
-        ),
-        (
-            PrefillSlidingAttention,
-            dict(num_kv_heads=1, window=500),
-            "multiple of 128",
-        ),
+        (0, 200, 1024, "L_end must be a multiple of 128"),
+        (64, 256, 1024, "L_begin must be a multiple of 128"),
+        (-128, 256, 1024, "L_begin must be >= 0"),
+        (0, 256, 2048, "max_l exceeds max_context"),
+        (0, 512, 256, "slice stop exceeds the dimension"),
     ],
 )
-@requires_aie2p
-def test_rejects_unservable_shapes(cls, kwargs, match, aie_context):
-    with pytest.raises(ValueError, match=match):
-        cls(**{"max_context": 1024, "num_heads": 8, **kwargs}, context=aie_context)
+def test_refuses_unservable_ranges(L_begin, L_end, max_l, match):
+    """The dispatch checks the token range before the array runs."""
+    op = _build("attn", num_kv_heads=1)
+    tensor = aie_utils.DEFAULT_TENSOR_CLASS
+    bufs = [
+        tensor(np.zeros(n, dtype=bfloat16)) for n in (op.qo_len, op.qo_len, op.kv_len)
+    ]
+    with pytest.raises(HostRuntimeError, match=match):
+        op(*bufs, L_begin=L_begin, L_end=L_end, max_l=max_l)
+
+
+@pytest.mark.extensive
+@pytest.mark.parametrize("num_kv_heads", [1, 2])
+@pytest.mark.parametrize("kind", OPERATORS)
+def test_gemma4_cache_bound(kind, num_kv_heads):
+    """Check the cache bound of Gemma 4's engine: 32768 rows."""
+    op = _build(kind, num_kv_heads=num_kv_heads, max_context=32768)
+    for seed, (L_begin, L_end, max_l) in enumerate(
+        [(0, 2048, 4096), (2048, 2304, 4096), (0, 1024, 32768)]
+    ):
+        _check(op, L_begin, L_end, max_l, seed)

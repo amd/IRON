@@ -11,9 +11,8 @@ as B, on the device.
 ```python
 from iron.operators.flm import DequantBFP
 
-op = DequantBFP(K=2048, N=2048, context=ctx)
-op.compile()
-op.get_callable()(q4nx_blob, packed_b)
+op = DequantBFP(K=2048, N=2048)
+op(q4nx_blob, packed_b)  # compiles once, then runs
 ```
 
 `K` is the in-feature count and `N` the out-feature count, so the result is B
@@ -112,7 +111,7 @@ right size that the GEMM reads wrongly.
 
 The cores never call `set_rounding`, so both conversions run in the power-up
 `floor` mode: f32 to bf16 rounds toward negative infinity, and bf16 to
-bfp16ebs8 truncates onto the shared exponent. `reference.py` reproduces both,
+bfp16ebs8 truncates onto the shared exponent. `DequantBFP.reference` reproduces both,
 so the tests compare bytes.
 
 ## Validation

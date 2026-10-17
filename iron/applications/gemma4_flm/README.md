@@ -94,7 +94,7 @@ checks that the token ids match, and reports the IRON engine's time to first
 token and decode rate for each prompt. Run it from the repository root:
 
 ```bash
-pytest --iterations 1 iron/applications/gemma4_flm
+pytest tests/applications/gemma4_flm
 ```
 
 The `Makefile` clones FastFlowLM at the merge of
@@ -108,7 +108,8 @@ that engine from source in place of FastFlowLM's prebuilt one.
 | `pli_weights.py` | Repacks the per-layer-input weights for IRON's GEMM. |
 | `overrides.hpp` | Redirects the engine's operator dispatches to the IRON operators. |
 | `Makefile` | Builds FastFlowLM's engine with `overrides.hpp` compiled in. |
-| `test.py` | Compares the IRON engine's tokens with the stock engine's. |
+
+`tests/applications/gemma4_flm/test.py` compares the IRON engine's tokens with the stock engine's.
 
 ## IRON operators
 
@@ -185,7 +186,8 @@ layer.
 
 `build.py` writes four things:
 
-- `build/ops/` holds IRON's build artifacts of every operator.
+- `build/cache/` is mlir-aie's compile cache (`NPU_CACHE_HOME`, unless set),
+  with the build artifacts of every operator.
 - `build/xclbins/Gemma4-E2B-IT-NPU2/` is the engine's xclbin directory, with
   six xclbins replaced by IRON's builds: `layer`, `attn`, `swa`, `lm_head`,
   `mm` and `dequant`. The server log line

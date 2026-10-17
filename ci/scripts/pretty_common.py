@@ -97,17 +97,96 @@ def status_emoji(passed: int, total: int, partial: bool = True) -> str:
     return "🟠" if partial else "❌"
 
 
-def operator_name(test_path: str) -> str:
-    """Name the operator a 'Test Path' belongs to.
+EMBEDDING_GEMMA2 = "tests/applications/embedding_gemma2/test.py::"
+# The towers' tests that moved into a class of EmbeddingGemma 2's one test.py.
+TOWER_CLASSES = {
+    "audio": (
+        "TestAudio",
+        ("test_audio_features", "test_audio_accuracy", "test_audio_latency"),
+    ),
+    "vision": (
+        "TestVision",
+        (
+            "test_image_processor",
+            "test_image_processor_npu2_only",
+            "test_vision_accuracy",
+            "test_vision_latency",
+        ),
+    ),
+}
+
+LM_HEAD = "iron/operators/flm/lm_head/test.py::"
+
+# Test paths renamed since the results branch began, each old prefix straight
+# to the newest: row_key maps a path by the first prefix it starts with, so
+# a test's own entry goes before its directory's, and no entry chains.
+RENAMED_PATHS = {
+    **{
+        f"iron/applications/{old}/{tower}/test.py::{test}": f"{EMBEDDING_GEMMA2}{cls}::{test}"
+        for old in ("embeddinggemma_2", "embeddinggemma2", "embedding_gemma2")
+        for tower, (cls, tests) in TOWER_CLASSES.items()
+        for test in tests
+    },
+    **{
+        f"iron/applications/{old}/{tower}/test.py::": EMBEDDING_GEMMA2
+        for old in ("embeddinggemma_2", "embeddinggemma2", "embedding_gemma2")
+        for tower in TOWER_CLASSES
+    },
+    "iron/applications/embeddinggemma_2/": "tests/applications/embedding_gemma2/",
+    "iron/applications/embeddinggemma2/": "tests/applications/embedding_gemma2/",
+    "iron/applications/embedding_gemma2/": "tests/applications/embedding_gemma2/",
+    "iron/applications/llama_3.2_1b/": "tests/applications/llama/",
+    "iron/applications/llama3/": "tests/applications/llama/",
+    "iron/applications/llama/": "tests/applications/llama/",
+    "iron/applications/gemma4_flm/": "tests/applications/gemma4_flm/",
+    **{
+        f"iron/operators/{block}/test.py::": f"iron/tests/lm/{block}.py::"
+        for block in (
+            "concat_channels",
+            "conv1d",
+            "conv2d",
+            "image_patches",
+            "log_mel",
+            "max_pool2d",
+            "swiglu",
+        )
+    },
+}
+
+# Parametrizations renamed since the results branch began, by their key after
+# RENAMED_PATHS: flm's LMHead whole-vocabulary bench became a case of its softcap
+# test over (dim, vocab).
+RENAMED_TESTS = {
+    (f"{LM_HEAD}test_gemma4_vocabulary", f"dim_{dim}"): (
+        f"{LM_HEAD}test_gemma4_softcap",
+        f"dim_{dim}-vocab_262144",
+    )
+    for dim in (1536, 2560)
+}
+
+# The module that runs every operator declaring its cases. Its parametrize ids
+# lead with the operator: 'GEMV-cols_4-...'.
+CATALOG_TEST_FILE = "iron/tests/operators/catalog.py"
+
+
+def operator_name(test_path: str, test_name: str = "") -> str:
+    """Name the operator a row of 'Test Path' and 'Test' belongs to.
 
     'iron/operators/flm/gemm/test.py::test_gemm' names 'flm/gemm', and
-    'iron/applications/llama_3.2_1b/test.py::test_llama' names 'llama_3.2_1b'.
+    'tests/applications/llama/test.py::test_llama' names 'llama'. A
+    catalog row is named by its test's leading id:
+    'iron/tests/operators/catalog.py::test_operator' with test
+    'GEMV-cols_4' names 'GEMV'. Any other test is named by its module.
     """
+    file_part = test_path.split("::", 1)[0]
+    if file_part == CATALOG_TEST_FILE:
+        return test_name.split("-", 1)[0] or UNKNOWN_OPERATOR
     directory, _ = split_test_path(test_path)
-    for prefix in ("iron/operators/", "iron/applications/"):
+    for prefix in ("iron/operators/", "tests/applications/"):
         if directory.startswith(prefix):
             return directory[len(prefix) :] or UNKNOWN_OPERATOR
-    return UNKNOWN_OPERATOR
+    stem = os.path.splitext(os.path.basename(file_part))[0]
+    return stem or UNKNOWN_OPERATOR
 
 
 def try_parse_float(value: Any) -> Optional[float]:
@@ -123,8 +202,17 @@ def try_parse_float(value: Any) -> Optional[float]:
 
 
 def row_key(row: Dict[str, str]) -> Tuple[str, str]:
-    """Identify the parametrization a row measures."""
-    return ((row.get("Test Path") or "").strip(), (row.get("Test") or "").strip())
+    """Identify the parametrization a row measures, by its test's path and id
+    now: a row recorded under a renamed path or parametrization continues its
+    history.
+    """
+    test_path = (row.get("Test Path") or "").strip()
+    for old, new in RENAMED_PATHS.items():
+        if test_path.startswith(old):
+            test_path = new + test_path[len(old) :]
+            break
+    key = (test_path, (row.get("Test") or "").strip())
+    return RENAMED_TESTS.get(key, key)
 
 
 def select_bench_rows(rows: Iterable[Dict[str, str]]) -> List[Dict[str, str]]:

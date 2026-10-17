@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Builds IRON GEMM and dequant operators and stages them for FastFlowLM.
 
-    python build_gemm_dequant.py <FastFlowLM's src/xclbins> <out dir>
+    python build_gemm_dequant.py --engine-xclbins <FastFlowLM's src/xclbins> --out <out dir>
 
 Writes:
 
@@ -11,14 +11,13 @@ Writes:
     <out>/xclbins/.../iron/             GEMM and dequant instruction sequences
 """
 
+import argparse
 import shutil
-import sys
 from pathlib import Path
 
 import aie.utils as aie_utils
 from aie.iron.device import NPU2
 
-from iron.common import AIEContext
 from iron.operators.flm import GEMM, DequantBFP
 from iron.operators.flm.gemm.design import Epilogue
 
@@ -64,7 +63,7 @@ UPGATE = [(1536, 6144), (1536, 12288)]
 UPGATE_RUN = 512
 
 
-def gemm(M, K, N, gelu, ctx):
+def gemm(M, K, N, gelu):
     """Every GEMM of the model.
 
     floor rounding and bf16_steps gelu reproduce the engine's arithmetic bit for
@@ -80,67 +79,69 @@ def gemm(M, K, N, gelu, ctx):
         k_tile=256,
         rounding="floor",
         gelu="bf16_steps",
-        context=ctx,
     )
 
 
 def compile_all(ops):
+    built = {}
     for i, op in enumerate(ops, 1):
         print(f"[{i}/{len(ops)}] {op.name}", flush=True)
-        op.compile()
+        built[op] = op.compile()
+    return built
 
 
-def one_xclbin(ops):
-    """The xclbin all `ops` share. The engine registers one xclbin per operator."""
-    xclbins = {op.xclbin_artifact.filename for op in ops}
+def one_xclbin(built):
+    """The xclbin all of `built` share. The engine registers one xclbin per operator."""
+    xclbins = {artifacts.image for artifacts in built}
     assert len(xclbins) == 1, f"expected one configuration, got {sorted(xclbins)}"
     return xclbins.pop()
 
 
 def main(engine_xclbins, out):
-    aie_utils.set_current_device(NPU2())
-    ctx = AIEContext(build_dir=out / "ops")
+    with aie_utils.set_current_device(NPU2()):
+        dequants = [DequantBFP(K=k, N=n) for k, n in DEQUANT]
+        dequants += [
+            DequantBFP(
+                K=k,
+                N=n,
+                run_out_features=UPGATE_RUN,
+                run_period_out_features=2 * UPGATE_RUN,
+            )
+            for k, n in UPGATE
+        ]
+        gemms = [gemm(m, k, n, gelu) for m in WIDTHS for k, n, gelu in GEMMS]
 
-    dequants = [DequantBFP(K=k, N=n, context=ctx) for k, n in DEQUANT]
-    dequants += [
-        DequantBFP(
-            K=k,
-            N=n,
-            run_out_features=UPGATE_RUN,
-            run_period_out_features=2 * UPGATE_RUN,
-            context=ctx,
-        )
-        for k, n in UPGATE
-    ]
-    gemms = [gemm(m, k, n, gelu, ctx) for m in WIDTHS for k, n, gelu in GEMMS]
+        built = compile_all([*dequants, *gemms])
 
-    compile_all([*dequants, *gemms])
+        # Stage the engine's xclbins with IRON's under the engine's file names.
+        stage = out / "xclbins" / MODEL
+        shutil.rmtree(stage, ignore_errors=True)
+        shutil.copytree(Path(engine_xclbins) / MODEL, stage, symlinks=True)
+        iron = stage / "iron"
+        iron.mkdir()
+        for name, xclbin in {
+            "mm": one_xclbin(built[op] for op in gemms),
+            "dequant": one_xclbin(built[op] for op in dequants),
+        }.items():
+            shutil.copyfile(xclbin, stage / f"{name}.xclbin")
 
-    # Stage the engine's xclbins with IRON's under the engine's file names.
-    stage = out / "xclbins" / MODEL
-    shutil.rmtree(stage, ignore_errors=True)
-    shutil.copytree(Path(engine_xclbins) / MODEL, stage, symlinks=True)
-    iron = stage / "iron"
-    iron.mkdir()
-    for name, xclbin in {
-        "mm": one_xclbin(gemms),
-        "dequant": one_xclbin(dequants),
-    }.items():
-        shutil.copyfile(xclbin, stage / f"{name}.xclbin")
-
-    for op in dequants:
-        shutil.copyfile(
-            op.insts_artifact.filename, iron / f"dequant_K{op.K}_N{op.N}.bin"
-        )
-    for op in gemms:
-        gelu = "_gelu" if op.epilogue == Epilogue.GELU else ""
-        shutil.copyfile(
-            op.insts_artifact.filename, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin"
-        )
-    print(f"staged {stage}")
+        for op in dequants:
+            shutil.copyfile(built[op].insts, iron / f"dequant_K{op.K}_N{op.N}.bin")
+        for op in gemms:
+            gelu = "_gelu" if op.epilogue == Epilogue.GELU else ""
+            shutil.copyfile(
+                built[op].insts, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin"
+            )
+        print(f"staged {stage}")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        raise SystemExit(f"usage: {sys.argv[0]} <FastFlowLM src/xclbins> <out dir>")
-    main(sys.argv[1], Path(sys.argv[2]).resolve())
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--engine-xclbins", type=Path, required=True, help="FastFlowLM's src/xclbins"
+    )
+    parser.add_argument("--out", type=Path, required=True, help="the staging directory")
+    args = parser.parse_args()
+    main(args.engine_xclbins, args.out.resolve())

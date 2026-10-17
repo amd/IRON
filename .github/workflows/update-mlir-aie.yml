@@ -5,6 +5,14 @@ name: Check for new mlir-aie release
 
 on:
   workflow_dispatch: # Allow manual triggering
+    inputs:
+      version:
+        description: >-
+          mlir-aie version to pin, a release ("1.4.5") or a nightly dev build
+          ("1.4.5.dev22+g35fa6b1"). Empty proposes the newest release, only
+          if it is ahead of the current pin.
+        required: false
+        default: ''
   schedule:
     - cron: '0 10 * * *' # Run every day at 10 AM UTC (3 AM Mountain)
 
@@ -36,34 +44,95 @@ jobs:
           echo "version=$version" >> $GITHUB_OUTPUT
           echo "raw_version=$raw_version" >> $GITHUB_OUTPUT
 
-      - name: Get latest mlir-aie release
-        id: latest_release
+      - name: Resolve the mlir-aie version to track
+        id: target
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          latest_tag_with_v=$(gh api repos/Xilinx/mlir-aie/releases/latest --jq .tag_name)
-          if [ -z "$latest_tag_with_v" ] || [ "$latest_tag_with_v" = "null" ]; then
-            echo "Failed to fetch latest release tag."
-            exit 1
-          fi
-          latest_tag="${latest_tag_with_v#v}"
-          echo "Latest tag: $latest_tag"
-          echo "tag_with_v=$latest_tag_with_v" >> $GITHUB_OUTPUT
-          echo "tag=$latest_tag" >> $GITHUB_OUTPUT
+          pip install packaging
+          requested="${{ github.event.inputs.version }}"
 
-      - name: Get the llvm-aie (Peano) version that release validated
+          if [ -z "$requested" ]; then
+            # No override: the newest tagged release, proposed only when it
+            # is actually ahead of the pin by PEP 440 order -- the pin may
+            # itself be a nightly dev build, which a plain string compare
+            # would never recognize as already ahead of an older release.
+            tag_with_v=$(gh api repos/Xilinx/mlir-aie/releases/latest --jq .tag_name)
+            if [ -z "$tag_with_v" ] || [ "$tag_with_v" = "null" ]; then
+              echo "Failed to fetch the latest release tag."
+              exit 1
+            fi
+            version="${tag_with_v#v}"
+            proceed=$(python -c 'import sys; from packaging.version import Version; print(str(Version(sys.argv[2]) > Version(sys.argv[1])).lower())' \
+                      "${{ steps.current_version.outputs.version }}" "$version")
+            echo "Latest release: $version (newer than the pin: $proceed)"
+            kind=release
+          elif echo "$requested" | grep -q '\.dev'; then
+            # An explicit nightly override: the wheels page keeps only a
+            # window of recent nightlies, so confirm this one is still on
+            # it (the extraction mirrors the no-input nightly lookup this
+            # workflow used before, just checking membership instead of the
+            # max); its commit comes straight from the version string.
+            kind=nightly
+            version="$requested"
+            available=$(curl -fsSL https://github.com/Xilinx/mlir-aie/releases/expanded_assets/latest-wheels-4 \
+                          | grep -o 'mlir_aie-[^"/]*manylinux[^"/]*x86_64\.whl' | sed 's/^mlir_aie-//; s/-.*//')
+            if ! printf '%s\n' "$available" | sort -u | grep -Fxq "$version"; then
+              echo "mlir_aie==$version is not on latest-wheels-4 (it may have aged off the page)."
+              exit 1
+            fi
+            tag_with_v="$version"
+            proceed=true
+          else
+            # An explicit release override: confirm the tag exists.
+            kind=release
+            version="${requested#v}"
+            tag_with_v="v${version}"
+            found=$(gh api "repos/Xilinx/mlir-aie/releases/tags/${tag_with_v}" --jq .tag_name 2>/dev/null || true)
+            if [ "$found" != "$tag_with_v" ]; then
+              echo "Release ${tag_with_v} was not found on Xilinx/mlir-aie."
+              exit 1
+            fi
+            proceed=true
+          fi
+
+          if [ "$kind" = release ]; then
+            raw_version="$tag_with_v"
+            find_links_target="$tag_with_v"
+            peano_ref="$tag_with_v"
+          else
+            raw_version="$version"
+            find_links_target="latest-wheels-4"
+            peano_ref="${version##*+g}"
+          fi
+
+          echo "version=$version" >> $GITHUB_OUTPUT
+          echo "raw_version=$raw_version" >> $GITHUB_OUTPUT
+          echo "find_links_target=$find_links_target" >> $GITHUB_OUTPUT
+          echo "peano_ref=$peano_ref" >> $GITHUB_OUTPUT
+          echo "kind=$kind" >> $GITHUB_OUTPUT
+          echo "proceed=$proceed" >> $GITHUB_OUTPUT
+
+      - name: Get the llvm-aie (Peano) version mlir-aie validated
         id: matched_peano
-        if: steps.current_version.outputs.version != steps.latest_release.outputs.tag
+        if: steps.target.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # mlir-aie pins the Peano nightly it validated in utils/peano-requirements.txt
-          # and bumps it from its own update-peano workflow, so reading it at the release
-          # tag gives a pair that has already been tested together.
-          pin=$(gh api "repos/Xilinx/mlir-aie/contents/utils/peano-requirements.txt?ref=${{ steps.latest_release.outputs.tag_with_v }}" \
-                  --jq '.content' | base64 -d | sed -n 's/^llvm-aie==//p')
+          # mlir-aie pins the Peano nightly it validated in
+          # utils/peano-requirements.txt and bumps it from its own
+          # update-peano workflow, so reading it at the release tag or
+          # nightly's commit gives a pair that has already been tested
+          # together.
+          if [ "${{ steps.target.outputs.kind }}" = "release" ]; then
+            pin=$(gh api "repos/Xilinx/mlir-aie/contents/utils/peano-requirements.txt?ref=${{ steps.target.outputs.peano_ref }}" \
+                    --jq '.content' | base64 -d | sed -n 's/^llvm-aie==//p')
+          else
+            pin=$(curl -fsSL "https://raw.githubusercontent.com/Xilinx/mlir-aie/${{ steps.target.outputs.peano_ref }}/utils/peano-requirements.txt" \
+                    | sed -n 's/^llvm-aie==//p')
+          fi
           if [ -z "$pin" ]; then
-            echo "No llvm-aie pin found in mlir-aie at ${{ steps.latest_release.outputs.tag_with_v }}."
+            echo "No llvm-aie pin found in mlir-aie at ${{ steps.target.outputs.peano_ref }}."
             exit 1
           fi
           echo "Matched llvm-aie version: $pin"
@@ -71,60 +140,62 @@ jobs:
 
       - name: Get current llvm-aie (Peano) version
         id: current_peano
-        if: steps.current_version.outputs.version != steps.latest_release.outputs.tag
+        if: steps.target.outputs.proceed == 'true'
         run: |
           raw_version=$(grep 'llvm-aie==' requirements.txt | cut -d'=' -f3)
           echo "Current llvm-aie version: $raw_version"
           echo "raw_version=$raw_version" >> $GITHUB_OUTPUT
 
       - name: Compare versions and create PR
-        if: steps.current_version.outputs.version != steps.latest_release.outputs.tag
+        if: steps.target.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "New version found: ${{ steps.latest_release.outputs.tag_with_v }}. Current version is v${{ steps.current_version.outputs.version }}."
-          
-          new_branch="update-mlir-aie-to-${{ steps.latest_release.outputs.tag_with_v }}"
-          
+          echo "New version found: ${{ steps.target.outputs.raw_version }}. Current version is v${{ steps.current_version.outputs.version }}."
+
+          new_branch="update-mlir-aie-to-${{ steps.target.outputs.raw_version }}"
+
           # Check if branch already exists
           if git ls-remote --exit-code origin "refs/heads/$new_branch"; then
             echo "Branch $new_branch already exists. Skipping update."
             exit 0
           fi
-          
+
           # Configure git
           git config --global user.name 'github-actions[bot]'
           git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          
+
           # Create new branch
           git checkout -b $new_branch
-          
+
           # Update requirements.txt
-          sed -i "s|==${{ steps.current_version.outputs.raw_version }}|==${{ steps.latest_release.outputs.tag_with_v }}|" requirements.txt
-          sed -i "s|mlir-aie/releases/expanded_assets/.*|mlir-aie/releases/expanded_assets/${{ steps.latest_release.outputs.tag_with_v }}|" requirements.txt
+          sed -i "s|==${{ steps.current_version.outputs.raw_version }}|==${{ steps.target.outputs.raw_version }}|" requirements.txt
+          sed -i "s|mlir-aie/releases/expanded_assets/.*|mlir-aie/releases/expanded_assets/${{ steps.target.outputs.find_links_target }}|" requirements.txt
           sed -i "s|^llvm-aie==.*|llvm-aie==${{ steps.matched_peano.outputs.raw_version }}|" requirements.txt
-          
+
           # Commit changes
           git add requirements.txt
-          git commit -m "Update mlir-aie to version ${{ steps.latest_release.outputs.tag_with_v }}"
-          
+          git commit -m "Update mlir-aie to version ${{ steps.target.outputs.raw_version }}"
+
           # Push changes
           git push --set-upstream origin $new_branch
-          
+
           # Create Pull Request
-          sed 's|Describe the intent of your PR here.|This PR updates the mlir-aie version from v${{ steps.current_version.outputs.version }} to the latest release, ${{ steps.latest_release.outputs.tag_with_v }}, and the llvm-aie (Peano) pin from ${{ steps.current_peano.outputs.raw_version }} to ${{ steps.matched_peano.outputs.raw_version }} -- the version that release validated.|' .github/PULL_REQUEST_TEMPLATE.md | \
+          sed 's|Describe the intent of your PR here.|This PR updates the mlir-aie version from v${{ steps.current_version.outputs.version }} to ${{ steps.target.outputs.raw_version }}, and the llvm-aie (Peano) pin from ${{ steps.current_peano.outputs.raw_version }} to ${{ steps.matched_peano.outputs.raw_version }} -- the version mlir-aie validated.|' .github/PULL_REQUEST_TEMPLATE.md | \
           gh pr create \
             --base devel \
             --head $new_branch \
-            --title "Update mlir-aie from v${{ steps.current_version.outputs.version }} to ${{ steps.latest_release.outputs.tag_with_v }}" \
+            --title "Update mlir-aie from v${{ steps.current_version.outputs.version }} to ${{ steps.target.outputs.raw_version }}" \
             --body-file -
 
           # Trigger CI workflows
           echo "Triggering CI workflows..."
           gh workflow run ci-lint.yml --ref $new_branch
-          gh workflow run small.yml --ref $new_branch
-          gh workflow run test-examples.yml --ref $new_branch
-          
+          gh workflow run phoenix-small.yml --ref $new_branch
+          gh workflow run krackan-small.yml --ref $new_branch
+          gh workflow run phoenix-test-examples.yml --ref $new_branch
+          gh workflow run krackan-examples.yml --ref $new_branch
+
       - name: No new version found
-        if: steps.current_version.outputs.version == steps.latest_release.outputs.tag
-        run: echo "mlir-aie is already at the latest version (${{ steps.current_version.outputs.version }})."
+        if: steps.target.outputs.proceed != 'true'
+        run: echo "mlir-aie's pin (${{ steps.current_version.outputs.version }}) is at or past the newest release (${{ steps.target.outputs.version }})."
