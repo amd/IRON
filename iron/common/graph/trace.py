@@ -52,7 +52,7 @@ class TracedStep:
 
 @dataclasses.dataclass(frozen=True)
 class Encoder:
-    """How the host turns an input into the words the device reads, from
+    """How the host turns an input into the ``words`` the device reads, from
     ``buffer``'s device address: ``encode(input, address, valid)``, with
     ``valid`` the call's ``bound`` on the input's rows, or None.
     """
@@ -60,6 +60,7 @@ class Encoder:
     buffer: str
     encode: Callable[[np.ndarray, int, int | None], np.ndarray]
     bound: Affine | None = None
+    words: int = 0
 
     def __call__(
         self, tensor: np.ndarray, address: int, values: Mapping[str, int]
@@ -196,8 +197,9 @@ class TracedGraph:
     carry: dict[str, Handle | Affine] = dataclasses.field(default_factory=dict)
     feedback: list[str] = dataclasses.field(default_factory=list)
     # An input the device reads as words the host encodes from it and a
-    # buffer's device address (a gather's ids).
-    encoders: dict[str, Encoder] = dataclasses.field(default_factory=dict)
+    # buffer's device address (a gather's ids): a table's after another's,
+    # each gathered from by the same input.
+    encoders: dict[str, list[Encoder]] = dataclasses.field(default_factory=dict)
     # A per-call value the graph fills in rather than the caller, from a
     # buffer's device address (a gather by ids the device made):
     # value -> (buffer, address -> words by name, its word's name).
@@ -224,7 +226,12 @@ class TracedGraph:
             *(limit.expression for limit in self.limits),
             *(limit.plus for limit in self.limits if limit.plus is not None),
             *(e for e in self.carry.values() if isinstance(e, Affine)),
-            *(e.bound for e in self.encoders.values() if e.bound is not None),
+            *(
+                e.bound
+                for held in self.encoders.values()
+                for e in held
+                if e.bound is not None
+            ),
         ]
         declared = {v.name for v in self.values}
         carried = {v.name for v in self.values if v.kind is Kind.CARRIED}
@@ -398,7 +405,10 @@ class Tracer:
         self.bindings: list[Binding] = []
         self.limits: list[Limit] = []
         self._bound: dict[int, dict] = {}
-        self.encoders: dict[str, Encoder] = {}
+        self.encoders: dict[str, list[Encoder]] = {}
+        # Each encoded input's first control words, whole until a second
+        # table's follow them.
+        self._controls: dict[str, Handle] = {}
         self.addresses: dict[str, tuple[str, Callable, str]] = {}
         # A weight whose bytes are not known until its own table buffer is
         # placed (GatherWords.static_base): handle name -> (table name,
@@ -615,10 +625,26 @@ class Tracer:
         if bound is not None:
             self._bind(op, "valid_rows", bound)
         if ids.role == "input":
-            if ids.name in self.encoders:
-                raise ValueError(f"the input {ids.name!r} gathers from one table once")
-            control = Handle((op.words,), np.uint32, ids.name, "input")
-            self.encoders[ids.name] = Encoder(table.name, op.control_words, bound)
+            held = self.encoders.setdefault(ids.name, [])
+            if any(e.buffer == table.name for e in held):
+                raise ValueError(
+                    f"the input {ids.name!r} gathers from {table.name!r} once"
+                )
+            # Each table's words follow the last's in the input's buffer, each
+            # then a part of it, the first's too.
+            start = sum(e.words for e in held)
+            control = Handle((start + op.words,), np.uint32, ids.name, "input")
+            if not held:
+                self._controls[ids.name] = control
+            else:
+                control = control[start:]
+            if len(held) == 1:
+                first = self._controls[ids.name]
+                part = first[:]
+                for step in self.steps:
+                    step.slots = [part if h is first else h for h in step.slots]
+                    step.inputs = [part if h is first else h for h in step.inputs]
+            held.append(Encoder(table.name, op.control_words, bound, op.words))
         else:
             source = op.word_source()
             template = op.template[0]
@@ -827,6 +853,9 @@ class Tracer:
         pinned = {}
         for _, h in self.weights.values():
             pinned[h.name] = h.nbytes
+        for name, held in self.encoders.items():
+            if len(held) > 1:
+                pinned[name] = sum(e.words for e in held) * np.dtype(np.uint32).itemsize
         for _, h in self.states.values():
             pinned[h.name] = h.nbytes
         # A slice's parent needs an explicit size: no step may name it whole.

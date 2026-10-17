@@ -845,9 +845,11 @@ class CompiledGraph:
                 )
         self.upload()
         for handle, tensor in zip(self.traced.inputs, tensors):
-            encoder = self.traced.encoders.get(handle.name)
-            if encoder is not None:
-                tensor = encoder(tensor, self._address(encoder.buffer), values)
+            held = self.traced.encoders.get(handle.name)
+            if held is not None:
+                tensor = np.concatenate(
+                    [e(tensor, self._address(e.buffer), values) for e in held]
+                )
             self._copy_in(handle.name, tensor)
         self._write_values(values, run)
 

@@ -25,6 +25,8 @@ import iron
 from iron import Profile, Scratchpad
 from iron.common.image import AdjacentPacking
 from iron.common.image.fusion import Fusion
+from iron.common.image.sequence import OperatorSequence
+from iron.common.image.step import BufferRef
 from iron.operators import ElementwiseAdd
 from iron.operators.copy import Copy, Gather, GatherWords
 
@@ -139,6 +141,29 @@ class FromState(iron.Graph):
         return Copy.step(self.table[self.ids])
 
 
+class ManyTables(iron.Graph):
+    """The first ``n`` rows a call's ids name, of each of three tables of
+    their own widths, as Gemma 4's prompt chunk gathers its embedding and
+    every layer's own table.
+    """
+
+    def __init__(self, *tables):
+        self.tables = [iron.weight(t) for t in tables]
+
+    def body(self, ids, *, n: Scratchpad[np.int32]):
+        return tuple(Copy.step(t[ids[:n]]) for t in self.tables)
+
+
+def many_tables(table) -> list[np.ndarray]:
+    """``table`` and two narrower ones, of other heights."""
+    rng = np.random.default_rng(3)
+    return [
+        table,
+        rng.standard_normal((4096, 256)).astype(bfloat16),
+        rng.standard_normal((1000, 128)).astype(bfloat16),
+    ]
+
+
 class Merged(iron.Graph):
     def __init__(self, table, rows: int, soft: int):
         self.table = iron.weight(table)
@@ -177,6 +202,25 @@ def test_rows_of_a_weight_are_gathered(table, n_ids):
     expected_rows, expected_total = graph.reference(x)
     assert_equal(expected_rows, table[ids], "reference")
     assert_equal(total, np.asarray(expected_total), "the step after")
+
+
+@pytest.mark.supported_devices("npu2")
+@pytest.mark.parametrize("full_elf", [True, False])
+def test_one_input_s_ids_gather_from_each_of_three_tables(table, full_elf):
+    """Each table's words follow the last's in the input's buffer, each
+    encoded per call from the same ids, bounded alike.
+    """
+    tables = many_tables(table)
+    graph = ManyTables(*tables)
+    graph.compile(ids=((256,), np.int32), full_elf=full_elf)
+    rng = np.random.default_rng(4)
+    for n in (1, 13, 256):
+        ids = rng.integers(0, 1000, 256).astype(np.int32)
+        ids[n:] = VOCAB  # past every table: a bounded call reads none of them
+        for k, got in enumerate(graph(ids, n=n)):
+            expected = np.take(tables[k], ids[:n], axis=0)
+            got = np.asarray(got, dtype=np.float32).reshape(256, -1)[:n]
+            assert_equal(got, expected, f"table {k}, {n} rows")
 
 
 @pytest.mark.supported_devices("npu2")
@@ -588,3 +632,45 @@ def test_ids_the_device_made_take_a_word_step(npu2, table):
         ("table", "base_hi"),
         ("table", "base_lo"),
     ]
+
+
+def test_an_input_s_words_for_each_table_follow_the_last_s(npu2, table):
+    """One input gathers from three tables: an encoder each, by table, and
+    each gather's words a part of the input's buffer, after the last's; its
+    reference is numpy's take of each table. One table's words stay the
+    whole buffer, as before.
+    """
+    tables = many_tables(table)
+    graph = ManyTables(*tables)
+    traced = graph.trace(ids=((256,), np.int32))
+    held = traced.encoders["ids"]
+    assert [e.buffer for e in held] == ["tables.0", "tables.1", "tables.2"]
+    words = [e.words for e in held]
+    gathers = [s for s in traced.steps if isinstance(s.op, Gather)]
+    assert [s.op.words for s in gathers] == words
+    assert traced.pinned["ids"] == 4 * sum(words)
+    sequence = OperatorSequence(traced)
+    sequence.prepare()
+    assert sequence.layout["ids"][2] == 4 * sum(words)
+    starts = [0, 4 * words[0], 4 * (words[0] + words[1])]
+    assert [s.refs()[1] for s in gathers] == [
+        BufferRef("ids", start, 4 * w) for start, w in zip(starts, words)
+    ]
+    one = ManyTables(table).trace(ids=((256,), np.int32))
+    (gather,) = [s for s in one.steps if isinstance(s.op, Gather)]
+    assert gather.refs()[1] == BufferRef("ids") and "ids" not in one.pinned
+    ids = np.random.default_rng(5).integers(0, 1000, 256).astype(np.int32)
+    for got, t in zip(graph.reference(ids, n=200), tables):
+        assert_equal(got[:200], np.take(t, ids[:200], axis=0), "reference")
+
+
+def test_an_input_gathers_from_a_table_once(npu2, table):
+    class Twice(iron.Graph):
+        def __init__(self):
+            self.table = iron.weight(table)
+
+        def body(self, ids):
+            return Copy.step(self.table[ids]), Copy.step(self.table[ids])
+
+    with pytest.raises(ValueError, match="gathers from 'table' once"):
+        Twice().trace(ids=((16,), np.int32))
