@@ -755,15 +755,18 @@ code before relying on a line here; it is the authority.
 
 - A fused sequence in an xclbin (several steps in one dispatch) is refused;
   so are modules. An xclbin image is therefore one dispatch per step.
-- A prompt chunk is one dispatch, and its attention grows with the
-  context (about 1.2 s plus 0.12 s per 2048 rows before it; MHA streams
-  every K and V block for each Q block, valid or not). amdxdna's watchdog
-  (`tdr_timeout_ms`, 2000 by default; a stall is two ticks with no job
-  run or completed) stops a dispatch between 4 and 6 s, so past about
-  48k tokens a prompt needs `tdr_timeout_ms` raised (`options amdxdna
-  tdr_timeout_ms=10000` in `/etc/modprobe.d/`, read at module load). At
-  10000 a 131008-token prompt runs, in 315 s, and decodes at 5.0 tok/s
-  (198 ms a step).
+- A prompt chunk's attention grows with the context: on npu2 (218, Strix
+  Halo) a 2048-row chunk takes about 0.83 s plus 0.606 s per 2048 rows
+  before it. amdxdna's watchdog stops a command that runs about 4 s past the
+  device's last progress (two `tdr_timeout_ms` periods of 2000 ms on kernels
+  from 6.17, xdna 2.25; 4 to 6 s on xdna 2.21's `timeout_in_sec` timer). As
+  one command a chunk crossed it at about 12.7k tokens, so a full ELF ends
+  a command after each step a carried value bounds (`Plan.commands`): a
+  prompt chunk is a command per attention layer, the longest one layer, 0.62
+  s at 32768 and 2.4 s at 131072. Each command still grows with the context;
+  a window of keys per command (attention with a log-sum-exp combine) would
+  bound it. At 131072 a decode step takes 0.674 s; the whole 131k prompt's
+  time to first token is unmeasured.
 - Tuning: there is no search over a tunable's legal values, and no
   per-kernel L1 budget.
 - A fold whose cores would read more streams than a core tile's two input
