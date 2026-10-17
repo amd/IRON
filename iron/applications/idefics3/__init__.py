@@ -1,0 +1,4 @@
+# SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""SmolVLM-256M-Instruct end to end, on the NPU and in numpy; see ``iron/applications/idefics3/README.md``."""

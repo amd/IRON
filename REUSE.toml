@@ -19,6 +19,8 @@ path = [
     "iron/applications/granite/profiles/*.json",
     "iron/applications/phi3/profiles/*.json",
     "iron/applications/lfm2/profiles/*.json",
+    "iron/applications/idefics3/profiles/*.json",
+    "iron/applications/idefics3/vision/profiles/*.json",
     "iron/tests/common/*.json",
 ]
 precedence = "closest"
