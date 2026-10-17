@@ -400,3 +400,34 @@ def test_a_family_s_names_read_as_their_llama_named_parts(family):
 def test_a_module_with_no_family_of_norms_is_refused():
     with pytest.raises(ValueError, match="holds none of the norms"):
         Layer.norms(SimpleNamespace(norm=None))
+
+
+@pytest.mark.usefixtures("npu2")
+@pytest.mark.parametrize("residual", [1.0, 0.25])
+def test_a_one_row_step_keeps_its_rows_through_the_residual(residual):
+    """One row projects by GEMV, whose reference output is flat: the
+    residual keeps the layer's input shape, scaled or not.
+    """
+    w = module(
+        np.random.default_rng(8),
+        shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN),
+        LLAMA,
+        bfloat16,
+    )
+    layer = Layer(HEADS, GROUPS, HEAD, 1e-6, residual=residual)
+
+    def attend(q, k, v, *, scale, window):
+        o = MHA.step(q, k, v, heads_interleaved=True, kv_interleaved=True, causal=False)
+        return o.reshape(1, HEADS * HEAD)
+
+    class Model(iron.Graph):
+        def __init__(self):
+            self.weights = w
+            self.angles = np.zeros((1, HEAD), bfloat16)
+
+        def body(self, x):
+            return layer.step(self.weights, x, attend, self.angles)
+
+    x = np.ones((1, WIDTH), bfloat16)
+    assert np.asarray(Model().reference(x)).shape == (1, WIDTH)
+    assert [tuple(h.shape) for h in Model().trace(x=(1, WIDTH)).outputs] == [(1, WIDTH)]

@@ -905,7 +905,11 @@ class Layer:
         if after is not None:
             y = self.norm(y, after)
         r = self.residual
-        x = ElementwiseAdd.step(x, y) if r == 1 else AXPY.step(y, x, scalar_factor=r)
+        x = (
+            ElementwiseAdd.step(x, y)
+            if r == 1
+            else AXPY.step(y.reshape(x.shape), x, scalar_factor=r)
+        )
         h = self.norm(x, before_mlp)
         if len(mlp) == 2:
             fc1, fc2 = mlp
@@ -918,7 +922,11 @@ class Layer:
         f = project(f, *fc2, accurate=self.accurate)
         if after_mlp is not None:
             f = self.norm(f, after_mlp)
-        x = ElementwiseAdd.step(x, f) if r == 1 else AXPY.step(f, x, scalar_factor=r)
+        x = (
+            ElementwiseAdd.step(x, f)
+            if r == 1
+            else AXPY.step(f.reshape(x.shape), x, scalar_factor=r)
+        )
         if "ple_block" in vars(w):
             if ple is None:
                 raise TypeError("Layer.step: the module's ple_block needs ple=")
