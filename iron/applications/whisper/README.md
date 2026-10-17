@@ -24,6 +24,8 @@ OpenAI's Whisper (large-v3-turbo's shape: a 32-layer audio encoder, a
 - `WhisperOracle`/`WhisperEncoderOracle`: the float32 twins.
 - `WhisperConfig`: both shapes, read from the checkpoint's own
   `config.json`.
+- `bf16()`: the checkpoint ships float16; the graphs hold each weight
+  rounded once to bf16, and the oracles read the float16 itself.
 
 Nothing rotates (`rope_base` None).
 
@@ -42,8 +44,6 @@ The real checkpoint waits on:
   and `WhisperEncoder` refuse it until mlir-aie's exact GELU arrives with
   the pin bump.
 - **`Sample` at a vocabulary of 51866.** It has no even slice per core.
-- **An fp16 checkpoint.** `Checkpoint` reads F16 tensors as float16, not
-  bf16.
 - **The log-mel features.** The encoder takes the feature extractor's
   `input_features`. Whisper's extractor clamps each clip's log-mel to its
   own maximum less 8 before the affine `(x + 4) / 4`. That needs a

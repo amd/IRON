@@ -65,6 +65,8 @@ SMALL = dataclasses.replace(
     rope_scaling=None,
 )
 
+# The dtypes a toy checkpoint holds, by their safetensors names.
+ITEMS = {"BF16": bfloat16, "F16": np.float16}
 # A run's checkpoints, one a shape, removed when the process exits.
 CHECKPOINTS = tempfile.TemporaryDirectory(prefix="iron-llama-")
 
@@ -94,25 +96,28 @@ def shapes(config: DecoderConfig) -> dict[str, tuple[int, ...]]:
 
 
 def checkpoint(
-    config: DecoderConfig, named: dict[str, tuple[int, ...]] | None = None
+    config: DecoderConfig,
+    named: dict[str, tuple[int, ...]] | None = None,
+    dtype: str = "BF16",
 ) -> Checkpoint:
-    """A ``.safetensors`` checkpoint of ``config``'s shape, every tensor bf16
+    """A ``.safetensors`` checkpoint of ``config``'s shape, every tensor
     zeros, written once a shape. The file is sparse: its header and a hole,
     which neither a random nor an unread tree reads.
 
     Args:
         config: The decoder's shape.
         named: Each tensor's shape by name; None is Llama's (``shapes``).
+        dtype: Every tensor's safetensors dtype, of ``ITEMS``.
     """
     named = shapes(config) if named is None else named
-    digest = hashlib.sha256(json.dumps(named).encode()).hexdigest()[:16]
+    digest = hashlib.sha256(json.dumps([named, dtype]).encode()).hexdigest()[:16]
     path = Path(CHECKPOINTS.name) / f"{digest}.safetensors"
     if not path.exists():
         header, end = {}, 0
         for name, shape in named.items():
-            size = math.prod(shape) * np.dtype(bfloat16).itemsize
+            size = math.prod(shape) * np.dtype(ITEMS[dtype]).itemsize
             header[name] = {
-                "dtype": "BF16",
+                "dtype": dtype,
                 "shape": shape,
                 "data_offsets": [end, end + size],
             }
@@ -125,12 +130,12 @@ def checkpoint(
     return Checkpoint(path)
 
 
-def drawn(config, names: dict[str, tuple[int, ...]], seed: int):
+def drawn(config, names: dict[str, tuple[int, ...]], seed: int, dtype: str = "BF16"):
     """A random tree of the tensors ``names`` gives (``checkpoint``) whose
     vectors are drawn too: a bias about zero and a norm's weight about one,
     not ones, which a LayerNorm after a bias would cancel.
     """
-    tree = checkpoint(config, names).tree("random", seed)
+    tree = checkpoint(config, names, dtype).tree("random", seed)
     rng = np.random.default_rng(seed)
     for name, shape in names.items():
         if len(shape) == 1:
@@ -140,7 +145,7 @@ def drawn(config, names: dict[str, tuple[int, ...]], seed: int):
                 node = node[int(part)] if part.isdigit() else vars(node)[part]
             centre = 0 if leaf == "bias" else 1
             value = centre + rng.standard_normal(shape) / 4
-            setattr(node, leaf, value.astype(bfloat16))
+            setattr(node, leaf, value.astype(vars(node)[leaf].dtype))
     return tree
 
 

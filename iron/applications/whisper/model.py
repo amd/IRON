@@ -16,6 +16,7 @@ a zero row before them, as its convolutions' padding.
 """
 
 import dataclasses
+from types import SimpleNamespace
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -42,6 +43,20 @@ from iron.operators.gemv import GEMV
 
 # The rows a GEMM's M and MHA's sequence come in whole blocks of.
 BLOCK = 64
+
+
+def bf16(weights):
+    """``weights``, an array or a tree of namespaces and lists, each float16
+    array rounded once to bf16, the device's copy of an fp16 checkpoint (the
+    oracle widens the float16 itself); any other array as it is.
+    """
+    if isinstance(weights, np.ndarray):
+        return weights.astype(bfloat16) if weights.dtype == np.float16 else weights
+    if isinstance(weights, list):
+        return [bf16(w) for w in weights]
+    if isinstance(weights, SimpleNamespace):
+        return SimpleNamespace(**{k: bf16(w) for k, w in vars(weights).items()})
+    return weights
 
 
 @dataclasses.dataclass(frozen=True)
@@ -146,7 +161,7 @@ class WhisperEncoder(Tower):
     """
 
     def __init__(self, config: WhisperEncoderConfig, weights):
-        c = config
+        c, weights = config, bf16(weights)
         self.whisper_encoder = e = weights.model.encoder
         super().__init__(c, e.layers, c.rows, c.rows)
         if c.hidden_act != "gelu_pytorch_tanh":
@@ -273,6 +288,7 @@ class Whisper(EncoderDecoder):
     oracle = WhisperOracle
 
     def __init__(self, config: WhisperConfig, weights):
+        weights = bf16(weights)
         encoder = WhisperEncoder(config.encoder(), weights)
         super().__init__(config, weights, encoder, weights.model.decoder)
 

@@ -178,3 +178,39 @@ def test_whisper_toy_on_the_device(clip):
         want = oracle.logits(tokens)
         _assert_close(model.logits(tokens), want, f"{len(tokens)} tokens")
         tokens.append(int(want.argmax()))
+
+
+def test_an_fp16_checkpoint_is_rounded_once_for_the_device():
+    """Whisper ships float16: the graph holds each weight rounded once to
+    bf16 (``bf16``), the oracle the float16 itself, and the prompt's logits
+    stay within the bound the bf16 checkpoint's are held to (0.64% of the
+    largest logit, against 0.54% from a bf16 checkpoint).
+    """
+    weights = drawn(TOY, names(TOY), 0, "F16")
+    assert weights.model.decoder.embed_tokens.weight.dtype == np.float16
+    model, oracle = Whisper(TOY, weights), Whisper.oracle(TOY, weights)
+    assert model.decoder.embed_tokens.weight.dtype == bfloat16
+    features = np.random.default_rng(1).uniform(
+        -1, 1, (TOY.mels, 2 * TOY.source_positions)
+    )
+    buffer, own = model.encoder.inputs(features.astype(bfloat16).astype(np.float32))
+    source = model.encoder.soft(own)
+    values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
+    model.reference(None, buffer, **values, encoder_n=own["n"])
+    oracle.encode(
+        oracle.encoder.soft_tokens(
+            buffer[1 : 2 * TOY.source_positions + 1].T.astype(np.float32)
+        )
+    )
+    tokens = np.random.default_rng(2).integers(0, TOY.vocab_size, 100)
+    logits, _ = model.reference(
+        model.prompt_ids(tokens),
+        token=int(tokens[-1]),
+        position=99,
+        start=0,
+        rows=100,
+        rope_start=0,
+        source=source,
+        encoder_n=0,
+    )
+    _assert_close(logits, oracle.logits(tokens), "the prompt's logits")
