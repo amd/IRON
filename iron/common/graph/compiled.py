@@ -730,8 +730,15 @@ class CompiledGraph:
         buf.to("npu")
 
     def read(self, x):
+        """``x``'s buffer as the device left it: a view of its host memory."""
         buf = self._storage(x)
         return buf.numpy()[: int(np.prod(x.shape))].reshape(tuple(x.shape))
+
+    def push(self, x) -> None:
+        """Send to the device what the host wrote into ``read(x)``'s view."""
+        buf = self._storage(x)
+        buf.numpy_view()
+        buf.to("npu")
 
     def _copy_in(
         self,
