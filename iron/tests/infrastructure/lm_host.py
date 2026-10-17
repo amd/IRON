@@ -18,10 +18,12 @@ import dataclasses
 import hashlib
 import json
 import os
+import pickle
 import re
 import struct
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -314,6 +316,146 @@ def test_tree_rejects_a_skipped_layer(tmp_path):
     save_file(ckpt, tmp_path / "skipped.safetensors")
     with pytest.raises(ValueError, match=re.escape("[1] skip [0]")):
         Checkpoint(tmp_path / "skipped.safetensors").tree()
+
+
+YOLOX = weights_dir("yolox-nano") / "yolox_nano.pth"
+
+
+def test_a_pytorch_checkpoint_reads_as_views_by_its_dotted_names():
+    """The real YOLOX-Nano release, a PyTorch zip, without torch: each
+    tensor a read-only view of its storage in the mapped file.
+    """
+    require(YOLOX)
+    checkpoint = Checkpoint(YOLOX)
+    stem = checkpoint.tensors["model.backbone.backbone.stem.conv.conv.weight"]
+    assert (stem.shape, stem.dtype) == ((16, 12, 3, 3), np.float32)
+    assert stem.flags.c_contiguous and not stem.flags.writeable
+    var = checkpoint.tree().model.backbone.backbone.stem.conv.bn.running_var
+    assert var.shape == (16,) and (var > 0).all()
+    count = checkpoint.tensors[
+        "model.backbone.backbone.stem.conv.bn.num_batches_tracked"
+    ]
+    assert (count.shape, count.dtype) == ((), np.int64)
+
+
+def _unicode(text: str) -> bytes:
+    return b"X" + struct.pack("<I", len(text)) + text.encode()
+
+
+def _global(module: str, name: str) -> bytes:
+    return f"c{module}\n{name}\n".encode()
+
+
+def _int(n: int) -> bytes:
+    return b"J" + struct.pack("<i", n)
+
+
+def _tensor(storage: str, numel: int, offset: int, size, stride, pid=None) -> bytes:
+    """The pickle opcodes ``torch.save`` writes for a float32 tensor of
+    storage ``0``: its rebuild called on its storage's persistent id, its
+    offset, size, stride, requires_grad and backward hooks.
+    """
+    if pid is None:
+        pid = (
+            b"("
+            + _unicode("storage")
+            + _global("torch", storage)
+            + _unicode("0")
+            + _unicode("cpu")
+            + _int(numel)
+            + b"t"
+        )
+    shape = b"(" + b"".join(_int(n) for n in size) + b"t"
+    steps = b"(" + b"".join(_int(n) for n in stride) + b"t"
+    hooks = _global("collections", "OrderedDict") + b")R"
+    return (
+        _global("torch._utils", "_rebuild_tensor_v2")
+        + b"("
+        + pid
+        + b"Q"
+        + _int(offset)
+        + shape
+        + steps
+        + b"\x89"
+        + hooks
+        + b"tR"
+    )
+
+
+def _pytorch_checkpoint(path, pickled: bytes, data: bytes = b"") -> Path:
+    """A PyTorch zip checkpoint whose pickle is ``pickled`` and whose
+    storage ``0`` is ``data``.
+    """
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("archive/data.pkl", b"\x80\x02" + pickled + b".")
+        archive.writestr("archive/data/0", data)
+        archive.writestr("archive/version", "3\n")
+    return path
+
+
+def _state(tensor: bytes) -> bytes:
+    return b"}" + _unicode("w") + tensor + b"s"
+
+
+def test_a_written_pytorch_tensor_reads_as_its_storage(tmp_path):
+    """The opcodes the hostile cases below vary, well formed: a transposed
+    view of six elements from the second on.
+    """
+    data = np.arange(8, dtype=np.float32)
+    path = _pytorch_checkpoint(
+        tmp_path / "ok.pth",
+        _state(_tensor("FloatStorage", 8, 1, (3, 2), (1, 3))),
+        data.tobytes(),
+    )
+    w = Checkpoint(path).tensors["w"]
+    np.testing.assert_array_equal(w, data[1:7].reshape(2, 3).T)
+    assert not w.flags.writeable
+
+
+@pytest.mark.parametrize(
+    "module,name",
+    [
+        ("builtins", "eval"),
+        ("builtins", "getattr"),
+        ("builtins", "__import__"),
+        ("os", "system"),
+        ("posix", "system"),
+        ("subprocess", "Popen"),
+        ("torch", "DoubleStorage"),
+        ("torch._utils", "_rebuild_parameter"),
+        ("collections", "defaultdict"),
+    ],
+)
+def test_a_pytorch_checkpoint_naming_another_global_is_refused(tmp_path, module, name):
+    """Its pickle may name a tensor's rebuild, a state dict's storage
+    types and ``OrderedDict``, nothing else: loading one runs no code of
+    its own.
+    """
+    path = _pytorch_checkpoint(tmp_path / "hostile.pth", _global(module, name))
+    with pytest.raises(pickle.UnpicklingError, match=f"may not load {module}.{name}"):
+        Checkpoint(path)
+
+
+@pytest.mark.parametrize(
+    "tensor,match",
+    [
+        # Six elements from the third reach the ninth of eight.
+        (_tensor("FloatStorage", 8, 3, (2, 3), (3, 1)), "reaches element 8"),
+        (_tensor("FloatStorage", 8, 0, (8,), (2,)), "reaches element 14"),
+        (_tensor("FloatStorage", 9, 0, (1,), (1,)), "holds 32 bytes, not 9"),
+        (
+            _tensor("FloatStorage", 8, 0, (1,), (1,), pid=_unicode("storage")),
+            "storage id is 'storage'",
+        ),
+    ],
+    ids=["past_the_end", "strided_past_the_end", "short_storage", "foreign_id"],
+)
+def test_a_pytorch_tensor_outside_its_storage_is_refused(tmp_path, tensor, match):
+    path = _pytorch_checkpoint(
+        tmp_path / "hostile.pth", _state(tensor), np.zeros(8, np.float32).tobytes()
+    )
+    with pytest.raises(pickle.UnpicklingError, match=match):
+        Checkpoint(path)
 
 
 def test_derived_weights_nest_beside_their_modules_names(toy_path):

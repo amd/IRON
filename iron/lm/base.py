@@ -11,12 +11,16 @@ and ``Runner`` and ``main``.
 
 import argparse
 import dataclasses
+import io
 import json
 import logging
 import math
 import mmap
 import os
+import pickle
 import struct
+import zipfile
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from functools import partial
 from pathlib import Path
@@ -222,9 +226,11 @@ def prompt_text(chars: int, skip: int = 0) -> str:
 
 
 class _Shard:
-    """One ``.safetensors`` file, mapped: ``tensors`` are read-only views of
-    it, read only when touched. Parsed here: safetensors' own numpy loader
-    has no bfloat16.
+    """One ``.safetensors`` file, or a PyTorch checkpoint (a ``.pth`` zip),
+    mapped: ``tensors`` are read-only views of it, read only when touched,
+    a PyTorch checkpoint's named by their dotted path from its root
+    (``model.backbone.stem.conv.weight``). Parsed here: safetensors' own
+    numpy loader has no bfloat16, and IRON reads PyTorch's without torch.
     """
 
     DTYPES = {"BF16": bfloat16, "F16": np.float16, "F32": np.float32}
@@ -236,6 +242,9 @@ class _Shard:
             self._map = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
         data = np.frombuffer(self._map, dtype=np.uint8)
         self._address = data.ctypes.data
+        if zipfile.is_zipfile(self.path):
+            self.tensors = self._torch(data)
+            return
         (length,) = struct.unpack("<Q", self._map[:8])
         header = json.loads(self._map[8 : 8 + length])
         header.pop("__metadata__", None)
@@ -246,6 +255,33 @@ class _Shard:
             begin, end = (8 + length + o for o in t["data_offsets"])
             view = data[begin:end].view(self.DTYPES[t["dtype"]])
             self.tensors[name] = view.reshape(t["shape"])
+
+    def _torch(self, data: np.ndarray) -> dict[str, np.ndarray]:
+        """A PyTorch checkpoint's tensors, each a view of its storage's
+        bytes, which PyTorch stores uncompressed.
+        """
+        archive = zipfile.ZipFile(self.path)
+        root = archive.namelist()[0].split("/")[0]
+
+        def storage(key: str) -> np.ndarray:
+            info = archive.getinfo(f"{root}/data/{key}")
+            if info.compress_type != zipfile.ZIP_STORED:
+                raise ValueError(f"{self.path}: storage {key} is compressed")
+            # The local header's name and extra field lengths, then the bytes.
+            names = self._map[info.header_offset + 26 : info.header_offset + 30]
+            begin = info.header_offset + 30 + sum(struct.unpack("<HH", names))
+            return data[begin : begin + info.file_size]
+
+        pickled = io.BytesIO(archive.read(f"{root}/data.pkl"))
+        tensors = {}
+        pending = [("", _TorchUnpickler(pickled, storage).load())]
+        while pending:
+            path, node = pending.pop()
+            if isinstance(node, np.ndarray):
+                tensors[path] = node
+            elif isinstance(node, dict):
+                pending += [(f"{path}.{k}" if path else k, v) for k, v in node.items()]
+        return tensors
 
     def release(self, array: np.ndarray) -> bool:
         """Drop the process's pages of ``array`` if it is a view of this
@@ -260,10 +296,97 @@ class _Shard:
         return True
 
 
+class _TorchUnpickler(pickle.Unpickler):
+    """A PyTorch checkpoint's pickle, read as data: each tensor a numpy view
+    of its storage, checked to lie inside it. ``GLOBALS`` is every global a
+    state dict's pickle names, and nothing else resolves, so loading one
+    runs no code of its own.
+    """
+
+    GLOBALS = {
+        ("collections", "OrderedDict"): OrderedDict,
+        ("torch._utils", "_rebuild_tensor_v2"): None,
+        ("torch", "BFloat16Storage"): bfloat16,
+        ("torch", "HalfStorage"): np.float16,
+        ("torch", "FloatStorage"): np.float32,
+        # A BatchNorm's num_batches_tracked.
+        ("torch", "LongStorage"): np.int64,
+    }
+
+    def __init__(self, file, storage: Callable[[str], np.ndarray]):
+        super().__init__(file)
+        self.storage = storage
+
+    def find_class(self, module: str, name: str):
+        if (module, name) not in self.GLOBALS:
+            raise pickle.UnpicklingError(f"a checkpoint may not load {module}.{name}")
+        if (module, name) == ("torch._utils", "_rebuild_tensor_v2"):
+            return self.rebuild
+        return self.GLOBALS[module, name]
+
+    def persistent_load(self, pid):
+        """A storage, by its key, as its dtype: ``("storage", dtype, key,
+        location, numel)``.
+
+        Raises:
+            pickle.UnpicklingError: Any other id, or a storage shorter
+                than its ``numel``.
+        """
+        dtypes = [
+            d for (_, name), d in self.GLOBALS.items() if name.endswith("Storage")
+        ]
+        if not (
+            isinstance(pid, tuple)
+            and len(pid) == 5
+            and pid[0] == "storage"
+            and any(pid[1] is d for d in dtypes)
+            and isinstance(pid[2], str)
+            and isinstance(pid[4], int)
+        ):
+            raise pickle.UnpicklingError(f"a checkpoint's storage id is {pid!r}")
+        _, dtype, key, _, numel = pid
+        data, size = self.storage(key), np.dtype(dtype).itemsize
+        if not 0 <= numel * size <= data.size:
+            raise pickle.UnpicklingError(
+                f"storage {key} holds {data.size} bytes, not {numel} {np.dtype(dtype)}"
+            )
+        return data[: numel * size].view(dtype)
+
+    @staticmethod
+    def rebuild(storage, offset, size, stride, *_):
+        """``torch._utils._rebuild_tensor_v2``'s tensor, a read-only view of
+        ``storage``.
+
+        Raises:
+            pickle.UnpicklingError: It is not one, or reaches outside
+                ``storage``.
+        """
+        if not (
+            isinstance(storage, np.ndarray)
+            and isinstance(size, tuple)
+            and isinstance(stride, tuple)
+            and len(size) == len(stride)
+            and all(isinstance(n, int) and n >= 0 for n in (offset, *size, *stride))
+        ):
+            raise pickle.UnpicklingError("a checkpoint's tensor is not one")
+        last = offset + sum((n - 1) * s for n, s in zip(size, stride) if n)
+        if math.prod(size) and last >= storage.size:
+            raise pickle.UnpicklingError(
+                f"a tensor reaches element {last} of a {storage.size}-element storage"
+            )
+        return np.lib.stride_tricks.as_strided(
+            storage[offset:],
+            size,
+            tuple(s * storage.itemsize for s in stride),
+            writeable=False,
+        )
+
+
 class Checkpoint:
-    """A ``.safetensors`` file, or, given its ``.safetensors.index.json``,
-    every shard a sharded checkpoint splits across (``weight_map``, next to
-    one another on disk), its tensors merged into one mapping, ``tensors``.
+    """A ``.safetensors`` file or a PyTorch checkpoint, or, given its
+    ``.safetensors.index.json``, every shard a sharded checkpoint splits
+    across (``weight_map``, next to one another on disk), its tensors merged
+    into one mapping, ``tensors``.
     """
 
     def __init__(self, path):

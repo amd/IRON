@@ -1040,7 +1040,8 @@ profiles. The library is six modules:
   `DecoderConfig`, a decoder's own shape, and
   `rope_angles`, the RoPE table it names the base and scaling of;
   `Checkpoint`, the mapped `.safetensors` (or a sharded checkpoint, by its
-  `.safetensors.index.json`, every shard the index names), whose
+  `.safetensors.index.json`, every shard the index names, or a PyTorch
+  checkpoint, read without torch, its pickle refused any code), whose
   `tree(fill=)` is the weights by the checkpoint's own names
   (`weights.model.layers[3].self_attn.q_proj.weight`), which the graphs and
   oracles read: `"read"`, views of the file; `"random"`, drawn at a seed;
