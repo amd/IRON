@@ -72,6 +72,10 @@ class DecodeStep:
     position: Any
     # The encoder's rows a cross attention reads (``EncoderDecoder``).
     source: Any = None
+    # The rows the embedding gave, and the ids (a prompt chunk's, bounded) or
+    # the token (a decode step's) they are of; None for rows given.
+    embeddings: Any = None
+    ids: Any = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -154,16 +158,18 @@ class CausalLM(Model):
                 f"the checkpoint has {len(self.layers)} layers, the config "
                 f"{config.n_layers}"
             )
-        G, L, D = config.n_kv_groups, config.max_seq_len, config.head_dim
-        # By layer: the key and value caches of a module that attends, and the
-        # states a recurrent mixer carries position to position, by name.
+        L = config.max_seq_len
+        # By layer: the key and value caches of a module that attends with its
+        # own, and the states a recurrent mixer carries position to position,
+        # by name.
         self.keys: dict[int, State] = {}
         self.values: dict[int, State] = {}
         self.recurrent: dict[int, dict[str, Checkpoints]] = {}
         for i, w in enumerate(self.layers):
-            if "self_attn" in vars(w):
-                self.keys[i] = iron.state((L, G, D))
-                self.values[i] = iron.state((L, G, D))
+            if "self_attn" in vars(w) and config.kv_source(i) == i:
+                layer = config.layer(i)
+                self.keys[i] = iron.state((L, layer.groups, layer.head_dim))
+                self.values[i] = iron.state((L, layer.groups, layer.head_dim))
             if "mamba" in vars(w):
                 ssm = config.layer(i).ssm
                 if ssm is None:
@@ -207,8 +213,25 @@ class CausalLM(Model):
         """
         return x
 
+    def angles(self, *, prompt: bool, position, start, rows, rope_start):
+        """The RoPE angles of a step's rows, a row a position, as ``layer``
+        reads them: a prompt call's from ``start``, or from ``rope_start``
+        where a second table is stacked (``long_angles``), else the decode
+        step's at ``position``; None turns nothing.
+        """
+        c = self.config
+        C, A = c.prefill_chunk, c.rope_width
+        if self.rope is None:
+            return None
+        if prompt:
+            begin = start if self.long_past is None else rope_start
+            return Copy.step(self.rope[begin : begin + C][:rows])
+        return Copy.step(self.rope[position]).reshape(1, A)
+
     def lookup(self, ids):
-        """The embedding rows of ``ids``, bounded as ``ids`` is."""
+        """The embedding rows of ``ids``, bounded as ``ids`` is, or of the
+        decode step's token.
+        """
         return Copy.step(iron.weight(self.decoder.embed_tokens.weight)[ids])
 
     def body(
@@ -222,16 +245,17 @@ class CausalLM(Model):
         rope_start: Scratchpad[np.int32],
     ):
         if ids is not None:
-            return self.from_rows(
-                self.lookup(ids[:rows]),
-                token=token,
+            bounded = ids[:rows]
+            return self.forward(
+                self.lookup(bounded),
+                prompt=True,
                 position=position,
                 start=start,
                 rows=rows,
                 rope_start=rope_start,
+                ids=bounded,
             )
-        embedding = iron.weight(self.decoder.embed_tokens.weight)
-        x = Copy.step(embedding[token]).reshape(1, self.config.emb_dim)
+        x = self.lookup(token).reshape(1, self.config.emb_dim)
         return self.forward(
             x,
             prompt=False,
@@ -239,6 +263,7 @@ class CausalLM(Model):
             start=start,
             rows=rows,
             rope_start=rope_start,
+            ids=token,
         )
 
     def from_rows(self, x, *, token, position, start, rows, rope_start):
@@ -256,26 +281,34 @@ class CausalLM(Model):
         )
 
     def forward(
-        self, x, *, prompt: bool, position, start, rows, rope_start, source=None
+        self,
+        x,
+        *,
+        prompt: bool,
+        position,
+        start,
+        rows,
+        rope_start,
+        source=None,
+        ids=None,
     ):
-        """The layers, the head and the draw over ``x``: a prompt chunk's
-        rows from ``start``, their RoPE rows from ``rope_start`` where a
-        second table is stacked (``long_angles``), else the decode step's one
-        at ``position``; ``source`` is the step's (``DecodeStep``).
+        """The layers, the head and the draw over ``x``: a prompt call's rows
+        from ``start``, else the decode step's one at ``position``; ``source``
+        and ``ids`` are the step's (``DecodeStep``).
         """
         c = self.config
-        C, A = c.prefill_chunk, c.rope_width
-        if self.rope is None:
-            angles = None
-        elif prompt:
-            begin = start if self.long_past is None else rope_start
-            angles = Copy.step(self.rope[begin : begin + C][:rows])
-        else:
-            angles = Copy.step(self.rope[position]).reshape(1, A)
+        angles = self.angles(
+            prompt=prompt,
+            position=position,
+            start=start,
+            rows=rows,
+            rope_start=rope_start,
+        )
+        x = self.embed(x)
         # A decode step's one position is its start.
         start = start if prompt else position
-        step = DecodeStep(prompt, angles, start, rows, position, source)
-        x = self.positions(self.embed(x), step)
+        step = DecodeStep(prompt, angles, start, rows, position, source, x, ids)
+        x = self.positions(x, step)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
         if prompt:
@@ -306,7 +339,8 @@ class CausalLM(Model):
         """Write ``k`` and ``v`` ``(rows, groups, head_dim)`` into layer
         ``i``'s caches and attend ``q`` ``(rows, heads, head_dim)`` over them
         causally, the logits scaled by ``scale`` (MHA's ``1 / sqrt(head_dim)``
-        if None).
+        if None); a layer sharing another's caches (``kv_source``) writes none,
+        its ``k`` and ``v`` None.
 
         Raises:
             ValueError: A ``window`` is given: none is built over the caches.
@@ -314,14 +348,17 @@ class CausalLM(Model):
         if window is not None:
             raise ValueError(f"CausalLM.attend: no {window}-position window")
         c = self.config
-        G, D, C = c.n_kv_groups, c.head_dim, c.prefill_chunk
-        keys, values = self.keys[i], self.values[i]
+        C = c.prefill_chunk
+        source = c.kv_source(i)
+        keys, values = self.keys[source], self.values[source]
+        _, G, D = keys.shape
         n, H, _ = q.shape
-        for x, cache in ((k, keys), (v, values)):
-            if step.prompt:
-                Copy.step(x, cache[step.start : step.start + C][: step.rows])
-            else:
-                Copy.step(x.reshape(G, D), cache[step.position])
+        if source == i:
+            for x, cache in ((k, keys), (v, values)):
+                if step.prompt:
+                    Copy.step(x, cache[step.start : step.start + C][: step.rows])
+                else:
+                    Copy.step(x.reshape(G, D), cache[step.position])
         span = np.s_[: step.position + 1]
         o = MHA.step(
             q,

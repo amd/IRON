@@ -22,7 +22,6 @@ import struct
 import zipfile
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
@@ -218,6 +217,12 @@ class DecoderConfig(Config):
         if self.rope_attention_scaling != 1.0:
             angles = angles * np.float32(self.rope_attention_scaling)
         return angles
+
+    def kv_source(self, i: int) -> int:
+        """The layer whose key and value caches layer ``i`` attends over: its
+        own.
+        """
+        return i
 
     def layer(self, i: int) -> Layer:
         """Layer ``i``: every layer of a decoder is alike."""
@@ -603,11 +608,26 @@ class Oracle:
         self.layers = self.decoder.layers
         self.angles = config.angles()
         self.long_angles = config.long_angles()
+        # The keys and values of each layer another attends over, by layer.
+        self.shared: dict[int, tuple] = {}
 
     def layer(self, i: int, angles, w, x):
-        """Layer ``i`` on ``x``, ``config.layer(i)``'s twin, attending causally."""
-        attend = partial(self.attend, causal=True)
-        return self.config.layer(i).oracle(self, w, x, attend, angles)
+        """Layer ``i`` on ``x``, ``config.layer(i)``'s twin, attending
+        causally; over an earlier layer's keys and values where it shares them
+        (``kv_source``).
+        """
+        c = self.config
+        source = c.kv_source(i)
+        readers = any(c.kv_source(j) == i != j for j in range(c.n_layers))
+
+        def attend(q, k, v, **kw):
+            if k is None:
+                k, v = self.shared[source]
+            elif readers:
+                self.shared[i] = (k, v)
+            return self.attend(q, k, v, causal=True, **kw)
+
+        return c.layer(i).oracle(self, w, x, attend, angles)
 
     def head(self, x):
         raise NotImplementedError(f"{type(self).__name__} defines no head()")

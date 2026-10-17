@@ -40,7 +40,7 @@ from iron.lm import (
     generate_on_host,
 )
 from iron.lm.generation import greedy
-from iron.applications.llama.model import Llama, LlamaOracle
+from iron.applications.llama.model import Llama, LlamaConfig, LlamaOracle
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.rope import RoPE
@@ -164,6 +164,40 @@ def test_a_prompt_longer_than_a_chunk_runs_in_chunks(cpu):
     _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
     tokens = np.append(tokens, np.random.default_rng(4).integers(0, 1024, 30))
     _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
+
+
+@dataclasses.dataclass(frozen=True)
+class SharingConfig(LlamaConfig):
+    """A Llama whose last layer attends over its first layer's keys and
+    values, projecting none of its own.
+    """
+
+    def kv_source(self, i: int) -> int:
+        return 0 if i == self.n_layers - 1 else i
+
+    def layer(self, i: int):
+        return dataclasses.replace(super().layer(i), shares_kv=self.kv_source(i) != i)
+
+
+def test_a_layer_sharing_an_earlier_layers_caches_matches_the_forward():
+    """The last of three layers attends over the first's caches: the graph
+    holds caches for the first two alone, and over chunks and decode steps
+    its logits are those of the oracle, which shares them alike, and not
+    those of the layers each attending over their own.
+    """
+    given = {f.name: vars(SMALL)[f.name] for f in dataclasses.fields(SMALL)}
+    given.update(n_layers=3, max_seq_len=4 * SMALL.prefill_chunk)
+    config = SharingConfig(**given)
+    weights = checkpoint(config).tree("random", 9)
+    model, oracle = OnHost(config, weights), Llama.oracle(config, weights)
+    assert sorted(model.keys) == sorted(model.values) == [0, 1]
+    tokens = np.random.default_rng(10).integers(0, config.vocab_size, 300)
+    first = oracle.logits(tokens)
+    _assert_close([model.logits(tokens)], [first])
+    tokens = np.append(tokens, first.argmax())
+    _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
+    own = Llama.oracle(LlamaConfig(**given), weights).logits(tokens)
+    assert np.abs(own - oracle.logits(tokens)).max() > 0.1 * np.abs(own).max()
 
 
 @pytest.mark.parametrize("outside", [-1, SMALL.vocab_size])

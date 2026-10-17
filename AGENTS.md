@@ -1106,7 +1106,11 @@ profiles. The library is six modules:
   exact; a model holds its layers' in
   `recurrent`, and its key and value caches in `keys` and `values`, each
   by the index of a layer whose module attends (`self_attn`) or recurs
-  (`mamba`)
+  (`mamba`); a layer attending over an earlier layer's keys and values
+  (the config's `kv_source(i)`, Gemma 4's shared layers) holds none of its
+  own. `angles()` is the RoPE angles a step's layers read, and a
+  `DecodeStep` carries the rows `embed()` gave and the ids (a prompt
+  chunk's) or the token (a decode step's) they are of
 - `encoder_decoder.py`: `EncoderDecoder(config, weights, encoder,
   decoder)`, a `CausalLM` whose layers also attend over an encoder's
   output (a `Layer` holding `encoder_attn`). Its encode version (`encode()`
