@@ -1075,17 +1075,22 @@ profiles. The library is four modules:
   Hugging Face names (`input_layernorm`, `self_attn.q_proj`, ...,
   `mlp.down_proj`; a SigLIP layer's `layer_norm1`/`layer_norm2`, a
   Whisper layer's `self_attn_layer_norm`/`final_layer_norm` and `fc1`/`fc2`,
-  either's `out_proj`). The module decides its parts: sandwich norms, an
+  an LFM2 layer's `operator_norm`/`ffn_norm`, `q_layernorm`/`k_layernorm`
+  and `feed_forward.w1`/`w3`/`w2`, any of their `out_proj`). The module
+  decides its parts: sandwich norms, an
   affine LayerNorm where a norm holds a bias, q and k norms, biases, a
   `linear` wrapper, a fused `qkv_proj` or `gate_up_proj` (cut by rows,
-  views of the checkpoint's array), a plain `mlp.fc1`/`fc2` feed-forward, a
+  views of the checkpoint's array), a plain `fc1`/`fc2` feed-forward, a
   per-layer input (`ple_block`) and a `layer_scalar`. The config's
   `layer(i)` gives the rest: heads, activation, attention scale and window,
   the rotated prefix of a head (`rotary_dim`), a value norm, a residual
   scale. Its
   `step()` runs in a graph's body with the model kind's `attend` and RoPE
   angles, and `oracle()` is its float32 twin, built from `Oracle`'s
-  primitives (`iron/tests/common/layer.py`).
+  primitives (`iron/tests/common/layer.py`). `feed_forward()` and its twin
+  `feed_forward_oracle()` are the feed-forward block alone (pre-norm,
+  feed-forward, post-norm, residual), which `step()` runs and a layer
+  whose mixer is not attention (LFM2's short convolutions) calls itself.
   EmbeddingGemma 2's text encoder and vision tower run `Layer` with their
   own bidirectional `attend`, `iron/applications/embedding_gemma2/blocks.py`
 

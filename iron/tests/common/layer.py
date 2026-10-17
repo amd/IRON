@@ -177,7 +177,11 @@ def test_fused_and_wrapped_projections_read_as_their_parts():
         ),
     )
     layer = Layer(H, G, D, 1e-6)
-    for (wa, ba), (wb, bb) in zip(layer.projections(w), layer.projections(fused)):
+    pairs = [
+        *zip(layer.projections(w.self_attn), layer.projections(fused.self_attn)),
+        *zip(Layer.mlp(w), Layer.mlp(fused)),
+    ]
+    for (wa, ba), (wb, bb) in pairs:
         np.testing.assert_array_equal(wa, wb)
         np.testing.assert_array_equal(ba, bb)
     x = rng.standard_normal((N, E)).astype(np.float32)
@@ -345,6 +349,23 @@ def test_the_graph_through_its_operators_references_is_the_oracle():
     assert error(dataclasses.replace(layer, rotary=None), whole) > 20 * 2**-9
 
 
+def same_parts(layer, w, other) -> bool:
+    """Whether ``layer`` reads the same arrays and norm modules of ``w`` and
+    ``other``, by identity.
+    """
+    parts = [
+        *zip(layer.projections(w.self_attn), layer.projections(other.self_attn)),
+        *zip(Layer.mlp(w), Layer.mlp(other)),
+    ]
+    return all(x is y for p, q in parts for x, y in zip(p, q)) and all(
+        x is y
+        for x, y in zip(
+            (*Layer.norms(w), *Layer.qk_norms(w.self_attn)),
+            (*Layer.norms(other), *Layer.qk_norms(other.self_attn)),
+        )
+    )
+
+
 def renamed(w, family: str) -> SimpleNamespace:
     """``w``, a pre-norm layer of ``PLAIN``'s names, under ``family``'s:
     the same arrays.
@@ -377,12 +398,7 @@ def test_a_family_s_names_read_as_their_llama_named_parts(family):
     layer = Layer(
         HEADS, GROUPS, HEAD, 1e-5, "gelu_pytorch_tanh", scale=1.0, accurate=True
     )
-    assert all(
-        x is y
-        for p, q in zip(layer.projections(w), layer.projections(other))
-        for x, y in zip(p, q)
-    )
-    assert all(x is y for x, y in zip(Layer.norms(w), Layer.norms(other)))
+    assert same_parts(layer, w, other)
     o = Oracle(AudioConfig(eps=1e-5))
     x = rng.standard_normal((T, WIDTH)).astype(np.float32)
     angles = rng.standard_normal((T, HEAD)).astype(np.float32)
@@ -431,3 +447,93 @@ def test_a_one_row_step_keeps_its_rows_through_the_residual(residual):
     x = np.ones((1, WIDTH), bfloat16)
     assert np.asarray(Model().reference(x)).shape == (1, WIDTH)
     assert [tuple(h.shape) for h in Model().trace(x=(1, WIDTH)).outputs] == [(1, WIDTH)]
+
+
+QK = (*LLAMA, "self_attn.q_norm", "self_attn.k_norm")
+
+
+def lfm2(w) -> SimpleNamespace:
+    """``w``, a pre-norm gated layer of ``QK``'s names, under LFM2's: the
+    same arrays.
+    """
+    a, m = w.self_attn, w.mlp
+    return SimpleNamespace(
+        operator_norm=w.input_layernorm,
+        ffn_norm=w.post_attention_layernorm,
+        self_attn=SimpleNamespace(
+            q_proj=a.q_proj,
+            k_proj=a.k_proj,
+            v_proj=a.v_proj,
+            out_proj=a.o_proj,
+            q_layernorm=a.q_norm,
+            k_layernorm=a.k_norm,
+        ),
+        feed_forward=SimpleNamespace(w1=m.gate_proj, w3=m.up_proj, w2=m.down_proj),
+    )
+
+
+@pytest.mark.usefixtures("npu2")
+def test_lfm2_s_names_read_as_their_llama_named_parts():
+    rng = np.random.default_rng(9)
+    w = module(rng, shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN), QK, bfloat16)
+    other = lfm2(w)
+    layer = Layer(HEADS, GROUPS, HEAD, 1e-5, accurate=True)
+    assert same_parts(layer, w, other)
+    o = Oracle(AudioConfig(eps=1e-5))
+    x = rng.standard_normal((T, WIDTH)).astype(np.float32)
+    angles = rng.standard_normal((T, HEAD)).astype(np.float32)
+    attend = partial(o.attend, causal=True)
+    np.testing.assert_array_equal(
+        layer.oracle(o, widen(w), x, attend, angles),
+        layer.oracle(o, widen(other), x, attend, angles),
+    )
+    steps = [
+        (type(s.op), s.op.design_key()) for s in traced((), layer, **vars(w)).steps
+    ]
+    traced_other = traced((), layer, **vars(other))
+    assert [(type(s.op), s.op.design_key()) for s in traced_other.steps] == steps
+
+
+def test_a_module_with_no_feed_forward_is_refused():
+    with pytest.raises(ValueError, match="holds no feed-forward"):
+        Layer.mlp(SimpleNamespace(mlp=SimpleNamespace(proj=None)))
+
+
+@pytest.mark.usefixtures("npu2")
+def test_the_feed_forward_block_alone_is_its_oracle():
+    """An LFM2 short-convolution layer's feed-forward, the module holding no
+    attention: its oracle twin is a pre-norm SwiGLU and its residual, and its
+    graph through its operators' references is that oracle within bf16's
+    rounding of each of its steps.
+    """
+    rng = np.random.default_rng(10)
+    w = lfm2(module(rng, shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN), QK, bfloat16))
+    del w.self_attn
+    w.ffn_norm.weight += bfloat16(1)
+    layer = Layer(HEADS, GROUPS, HEAD, 1e-5, accurate=True)
+    x = rng.standard_normal((T, WIDTH)).astype(bfloat16)
+    o = Oracle(AudioConfig(eps=1e-5))
+    wide, xf = widen(w), np.asarray(x, np.float32)
+    want = layer.feed_forward_oracle(o, wide, xf)
+
+    m = wide.feed_forward
+    h = xf / np.sqrt(np.mean(xf * xf, -1, keepdims=True) + 1e-5) * wide.ffn_norm.weight
+    gate = h @ m.w1.weight.T
+    hand = xf + (gate / (1 + np.exp(-gate)) * (h @ m.w3.weight.T)) @ m.w2.weight.T
+    np.testing.assert_allclose(want, hand, rtol=1e-4, atol=1e-5)
+
+    class Model(iron.Graph):
+        def __init__(self):
+            self.weights = w
+
+        def body(self, x):
+            return layer.feed_forward(self.weights, x)
+
+    graph = Model()
+    assert ops(graph.trace(x=(T, WIDTH))) == Counter(
+        RMSNorm=1, GEMM=3, SiLU=1, ElementwiseMul=1, ElementwiseAdd=1
+    )
+    got = np.asarray(graph.reference(x), np.float32)
+    # Seven steps, each rounded once to bf16 (2 ** -9 relative).
+    error = np.linalg.norm(got - want) / np.linalg.norm(want)
+    assert error < 7 * 2**-9

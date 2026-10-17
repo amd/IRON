@@ -203,13 +203,18 @@ class LogMel(iron.Graph):
         return np.log(magnitude @ self.filters + self.mel_floor).astype(np.float32)
 
 
-# A pre-norm layer's two norms, before attention and before the
-# feed-forward, by each family of Hugging Face names.
+# A pre-norm layer's two norms, before attention (or the layer's other
+# mixer) and before the feed-forward, by each family of Hugging Face names.
 PRE_NORMS = (
     ("input_layernorm", "post_attention_layernorm"),
     ("layer_norm1", "layer_norm2"),
     ("self_attn_layer_norm", "final_layer_norm"),
+    ("operator_norm", "ffn_norm"),
 )
+# Per-head q and k norms, by each family of names.
+QK_NORMS = (("q_norm", "k_norm"), ("q_layernorm", "k_layernorm"))
+# A gated feed-forward's gate, up and down projections, by each family of names.
+GATED = (("gate_proj", "up_proj", "down_proj"), ("w1", "w3", "w2"))
 # The epsilon mlir-aie's layer_norm kernel fixes.
 LAYER_NORM_EPS = 1e-5
 # What every device's GEMM row block divides (aie2's 16 rows, aie2p's 8).
@@ -712,11 +717,11 @@ class Layer:
     The module decides the rest: sandwich norms where it holds
     ``pre_feedforward_layernorm``; a norm's affine LayerNorm where it holds
     a bias, else its RMS norm; per-head q and k RMS norms where
-    ``self_attn`` holds ``q_norm`` and ``k_norm``; a projection's bias where
+    ``self_attn`` holds a family of ``QK_NORMS``; a projection's bias where
     it holds one, its weight read through a ``linear`` wrapper; one fused
-    ``qkv_proj`` or ``gate_up_proj`` cut by rows; a plain ``fc1``, ``fc2``
-    feed-forward where ``mlp``, or the layer itself, holds them, else the
-    gated one; a per-layer
+    ``qkv_proj`` or ``gate_up_proj`` cut by rows; the feed-forward held by
+    ``mlp``, ``feed_forward`` or the layer itself, plain where it holds
+    ``fc1`` and ``fc2``, else gated by a family of ``GATED``; a per-layer
     input through ``ple_block``; and a ``layer_scalar``. A model kind gives
     the attention and the rotation: ``attend(q, k, v, scale=, window=)`` on
     ``(rows, heads, head_dim)`` returns ``(rows, heads * head_dim)``, and
@@ -789,37 +794,67 @@ class Layer:
                 return held[before], None, held[after], None
         raise ValueError(f"Layer: the module holds none of the norms {PRE_NORMS}")
 
-    def projections(self, w) -> tuple[tuple, ...]:
-        """``w``'s q, k, v and o projections, then the feed-forward's (gate,
-        up and down, or fc1 and fc2), each ``(weight, bias)``; a fused
-        ``qkv_proj`` or ``gate_up_proj`` cut by rows, so each piece is a view
-        of the checkpoint's own array.
+    @staticmethod
+    def cut(p, cuts) -> list[tuple]:
+        """The linear module ``p``'s ``(weight, bias)`` cut into the rows
+        between each pair of ``cuts``, each piece a view of its array.
         """
-        a = w.self_attn
-        mlp = w.mlp if "mlp" in vars(w) else w
-        fused = []
-        if "qkv_proj" in vars(a):
+        weight, bias = Layer.linear(p)
+        return [
+            (weight[lo:hi], None if bias is None else bias[lo:hi])
+            for lo, hi in zip(cuts, cuts[1:])
+        ]
+
+    def projections(self, a) -> tuple[tuple, ...]:
+        """The attention module ``a``'s q, k, v and o projections, each
+        ``(weight, bias)``; a fused ``qkv_proj`` cut by rows.
+        """
+        held = vars(a)
+        if "qkv_proj" in held:
             Q, KV = self.heads * self.head_dim, self.groups * self.head_dim
-            fused.append((a.qkv_proj, (0, Q, Q + KV, Q + 2 * KV)))
+            qkv = self.cut(a.qkv_proj, (0, Q, Q + KV, Q + 2 * KV))
         else:
-            fused += [(p, None) for p in (a.q_proj, a.k_proj, a.v_proj)]
-        fused.append((a.o_proj if "o_proj" in vars(a) else a.out_proj, None))
-        if "fc1" in vars(mlp):
-            fused += [(mlp.fc1, None), (mlp.fc2, None)]
-        elif "gate_up_proj" in vars(mlp):
-            F = mlp.gate_up_proj.weight.shape[0] // 2
-            fused += [(mlp.gate_up_proj, (0, F, 2 * F)), (mlp.down_proj, None)]
-        else:
-            fused += [(mlp.gate_proj, None), (mlp.up_proj, None), (mlp.down_proj, None)]
-        out = []
-        for p, cuts in fused:
-            weight, bias = self.linear(p)
-            if cuts is None:
-                out.append((weight, bias))
-                continue
-            for lo, hi in zip(cuts, cuts[1:]):
-                out.append((weight[lo:hi], None if bias is None else bias[lo:hi]))
-        return tuple(out)
+            qkv = [self.linear(p) for p in (a.q_proj, a.k_proj, a.v_proj)]
+        return (*qkv, self.linear(a.o_proj if "o_proj" in held else a.out_proj))
+
+    @staticmethod
+    def mlp(w) -> tuple[tuple, ...]:
+        """``w``'s feed-forward projections, each ``(weight, bias)``: ``fc1``
+        and ``fc2``, else gate, up and down, a fused ``gate_up_proj`` cut by
+        rows.
+
+        Raises:
+            ValueError: ``w`` holds no feed-forward.
+        """
+        held = vars(w)
+        m = held.get("mlp", held.get("feed_forward", w))
+        parts = vars(m)
+        if "fc1" in parts:
+            return Layer.linear(m.fc1), Layer.linear(m.fc2)
+        if "gate_up_proj" in parts:
+            F = Layer.linear(m.gate_up_proj)[0].shape[0] // 2
+            return (
+                *Layer.cut(m.gate_up_proj, (0, F, 2 * F)),
+                Layer.linear(m.down_proj),
+            )
+        for names in GATED:
+            if names[0] in parts:
+                return tuple(Layer.linear(parts[n]) for n in names)
+        raise ValueError(
+            f"Layer: the module holds no feed-forward: fc1 and fc2, gate_up_proj "
+            f"or any of {GATED}"
+        )
+
+    @staticmethod
+    def qk_norms(a) -> tuple:
+        """The attention module ``a``'s per-head q and k norm modules, a
+        family of ``QK_NORMS``, else None and None.
+        """
+        held = vars(a)
+        for q, k in QK_NORMS:
+            if q in held:
+                return held[q], held[k]
+        return None, None
 
     def norm(self, x, n):
         """``x`` normed by the norm module ``n``: an affine LayerNorm where it
@@ -857,6 +892,15 @@ class Layer:
             scalar = w.layer_scalar
             derived.put(w, scale=np.full(width, scalar[0], scalar.dtype))
 
+    def add(self, x, y):
+        """``x`` plus a block's output ``y`` scaled by ``residual``, in a
+        graph's body, in ``x``'s shape.
+        """
+        r = self.residual
+        if r == 1:
+            return ElementwiseAdd.step(x, y)
+        return AXPY.step(y.reshape(x.shape), x, scalar_factor=r)
+
     def step(self, w, x, attend, angles, *, ple=None, derived=None):
         """The layer on ``x`` ``(rows, width)``, in a graph's body.
 
@@ -873,9 +917,10 @@ class Layer:
                 given, or a ``layer_scalar`` and no ``derived``.
         """
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
-        a, eps = w.self_attn, self.eps
-        q_w, k_w, v_w, o_w, *mlp = self.projections(w)
-        before, after, before_mlp, after_mlp = self.norms(w)
+        a = w.self_attn
+        q_w, k_w, v_w, o_w = self.projections(a)
+        q_norm, k_norm = self.qk_norms(a)
+        before, after, _, _ = self.norms(w)
         act = SiLU if self.activation == "silu" else GELU
         h = self.norm(x, before)
         # Half a head per tile for one row; q's shape is o's when H * D is
@@ -885,15 +930,15 @@ class Layer:
             for p in (q_w, k_w, v_w)
         )
         q, k, v = q.reshape(n * H, D), k.reshape(n * G, D), v.reshape(n * G, D)
-        if "q_norm" in vars(a):
-            q = self.norm(q, a.q_norm)
+        if q_norm is not None:
+            q = self.norm(q, q_norm)
         # One angle row per position, applied to that position's heads.
         q = self.rotate(q, angles)
-        if "k_norm" in vars(a):
-            k = self.norm(k, a.k_norm)
+        if k_norm is not None:
+            k = self.norm(k, k_norm)
         k = self.rotate(k, angles)
         if self.v_norm:
-            v = RMSNorm.step(v, epsilon=eps)
+            v = RMSNorm.step(v, epsilon=self.eps)
         o = attend(
             q.reshape(n, H, D),
             k.reshape(n, G, D),
@@ -904,29 +949,7 @@ class Layer:
         y = project(o, *o_w, accurate=self.accurate)
         if after is not None:
             y = self.norm(y, after)
-        r = self.residual
-        x = (
-            ElementwiseAdd.step(x, y)
-            if r == 1
-            else AXPY.step(y.reshape(x.shape), x, scalar_factor=r)
-        )
-        h = self.norm(x, before_mlp)
-        if len(mlp) == 2:
-            fc1, fc2 = mlp
-            f = act.step(project(h, *fc1, accurate=self.accurate))
-        else:
-            gate_w, up_w, fc2 = mlp
-            gate = project(h, *gate_w, accurate=self.accurate)
-            up = project(h, *up_w, accurate=self.accurate)
-            f = ElementwiseMul.step(act.step(gate), up)
-        f = project(f, *fc2, accurate=self.accurate)
-        if after_mlp is not None:
-            f = self.norm(f, after_mlp)
-        x = (
-            ElementwiseAdd.step(x, f)
-            if r == 1
-            else AXPY.step(f.reshape(x.shape), x, scalar_factor=r)
-        )
+        x = self.feed_forward(w, self.add(x, y))
         if "ple_block" in vars(w):
             if ple is None:
                 raise TypeError("Layer.step: the module's ple_block needs ple=")
@@ -940,6 +963,28 @@ class Layer:
                 raise TypeError("Layer.step: the module's layer_scalar needs derived=")
             x = RowwiseMul.step(x, derived.scale)
         return x
+
+    def feed_forward(self, w, x):
+        """The feed-forward block of the layer module ``w`` on ``x`` ``(rows,
+        width)``, in a graph's body: its pre-norm, the feed-forward, its
+        post-norm where ``w`` holds one, and the residual.
+        """
+        _, _, before, after = self.norms(w)
+        act = SiLU if self.activation == "silu" else GELU
+        h = self.norm(x, before)
+        mlp = self.mlp(w)
+        if len(mlp) == 2:
+            fc1, fc2 = mlp
+            f = act.step(project(h, *fc1, accurate=self.accurate))
+        else:
+            gate_w, up_w, fc2 = mlp
+            gate = project(h, *gate_w, accurate=self.accurate)
+            up = project(h, *up_w, accurate=self.accurate)
+            f = ElementwiseMul.step(act.step(gate), up)
+        f = project(f, *fc2, accurate=self.accurate)
+        if after is not None:
+            f = self.norm(f, after)
+        return self.add(x, f)
 
     def oracle(self, o, w, x, attend, angles, *, ple=None) -> np.ndarray:
         """``step``'s twin in float32 on the host, from the ``Oracle`` ``o``'s
@@ -955,18 +1000,18 @@ class Layer:
         """
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
         a = w.self_attn
-        q_w, k_w, v_w, o_w, *mlp = self.projections(w)
-        before, after, before_mlp, after_mlp = self.norms(w)
-        silu = self.activation == "silu"
+        q_w, k_w, v_w, o_w = self.projections(a)
+        q_norm, k_norm = self.qk_norms(a)
+        before, after, _, _ = self.norms(w)
         A = self.rotary or D
         h = o.normed(x, before)
         q = o.linear(h, *q_w).reshape(n, H, D)
         k = o.linear(h, *k_w).reshape(n, G, D)
         v = o.linear(h, *v_w).reshape(n, G, D)
-        if "q_norm" in vars(a):
-            q = o.normed(q, a.q_norm)
-        if "k_norm" in vars(a):
-            k = o.normed(k, a.k_norm)
+        if q_norm is not None:
+            q = o.normed(q, q_norm)
+        if k_norm is not None:
+            k = o.normed(k, k_norm)
         if self.v_norm:
             v = o.rms_norm(v)
         q, k = (
@@ -976,9 +1021,26 @@ class Layer:
         y = o.linear(attend(q, k, v, scale=self.scale, window=self.window), *o_w)
         if after is not None:
             y = o.normed(y, after)
-        r = np.float32(self.residual)
-        x = x + y * r
-        h = o.normed(x, before_mlp)
+        x = self.feed_forward_oracle(o, w, x + y * np.float32(self.residual))
+        if "ple_block" in vars(w):
+            b = w.ple_block
+            g = o.linear(x, *self.linear(b.per_layer_input_gate))
+            g = o.silu(g) if self.activation == "silu" else o.gelu_tanh(g)
+            p = o.linear(g * ple, *self.linear(b.per_layer_projection))
+            x = x + o.normed(p, b.post_per_layer_input_norm)
+        if "layer_scalar" in vars(w):
+            x = x * w.layer_scalar
+        return x
+
+    def feed_forward_oracle(self, o, w, x) -> np.ndarray:
+        """``feed_forward``'s twin in float32 on the host, from the
+        ``Oracle`` ``o``'s primitives, ``w`` widened to float32.
+        """
+        n = x.shape[0]
+        _, _, before, after = self.norms(w)
+        silu = self.activation == "silu"
+        h = o.normed(x, before)
+        mlp = self.mlp(w)
         if len(mlp) == 2:
             fc1, fc2 = mlp
             g = o.linear(h, *fc1)
@@ -1002,15 +1064,6 @@ class Layer:
                 u += up_b
             f *= u
         f = o.linear(f, *fc2)
-        if after_mlp is not None:
-            f = o.normed(f, after_mlp)
-        x = x + f * r
-        if "ple_block" in vars(w):
-            b = w.ple_block
-            g = o.linear(x, *self.linear(b.per_layer_input_gate))
-            g = o.silu(g) if silu else o.gelu_tanh(g)
-            p = o.linear(g * ple, *self.linear(b.per_layer_projection))
-            x = x + o.normed(p, b.post_per_layer_input_norm)
-        if "layer_scalar" in vars(w):
-            x = x * w.layer_scalar
-        return x
+        if after is not None:
+            f = o.normed(f, after)
+        return x + f * np.float32(self.residual)
