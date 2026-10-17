@@ -2135,3 +2135,27 @@ def test_the_emit_program_follows_the_target_parameters():
             jumped,
             [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(jumped)],
         )
+
+
+class _HeldStack(iron.Graph):
+    """A checkpoint-held stack of two tables gathered as one, by the ids an
+    input names."""
+
+    def __init__(self, tables):
+        self.weights = SimpleNamespace(embed=SimpleNamespace(weight=tables))
+
+    def body(self, ids):
+        tables = self.weights.embed.weight
+        return Copy.step(iron.weight(tables.reshape(-1, tables.shape[-1]))[ids])
+
+
+def test_a_whole_reshape_of_a_held_array_is_gathered_under_its_own_path():
+    tables = np.arange(2 * 8 * 256, dtype=np.int32).astype(bfloat16)
+    tables = tables.reshape(2, 8, 256)
+    g = _HeldStack(tables)
+    t = g.trace(ids=((4,), np.int32))
+    assert [h.name for _, h in t.weights.values()] == ["weights.embed.weight"]
+    (gather,) = t.steps
+    assert gather.refs()[0] == BufferRef("weights.embed.weight")
+    ids = np.array([15, 0, 8, 7], np.int32)
+    np.testing.assert_array_equal(g.reference(ids), tables.reshape(16, 256)[ids])

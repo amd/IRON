@@ -444,6 +444,9 @@ class Tracer:
             ]
             if offset + sum((n - 1) * s for n, s in zip(x.shape, strides)) >= held.size:
                 continue
+            if not offset and x.size == held.size and x.flags.c_contiguous:
+                # All of the buffer, as a reshape: the buffer itself, which a gather reads.
+                return self.operand(held).reshape(x.shape)
             tap = TensorAccessPattern(held.shape, offset, list(x.shape), strides)
             return self.operand(held).at(tap, x.shape)
         return None
