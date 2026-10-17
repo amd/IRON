@@ -187,6 +187,7 @@ class DecoderConfig(Config):
             head_dim=self.head_dim,
             eps=self.eps,
             activation=self.hidden_act,
+            rotary=self.rotary_dim,
         )
 
 
@@ -454,6 +455,19 @@ class Oracle:
         eps = np.float32(self.config.eps)
         mean = np.mean(x * x, axis=-1, keepdims=True)
         return x * np.power(mean + eps, np.float32(-0.5)) * w
+
+    def layer_norm(self, x, w, b):
+        """`x` less its mean over the RMS of that, by `config.eps`, times `w`, plus `b`."""
+        x = x - np.mean(x, axis=-1, keepdims=True)
+        return self.rms_norm(x, w) + b
+
+    def normed(self, x, n):
+        """`x` normed by the norm module `n`: an affine LayerNorm where it holds
+        a bias, else its RMS norm.
+        """
+        if "bias" in vars(n):
+            return self.layer_norm(x, n.weight, n.bias)
+        return self.rms_norm(x, n.weight)
 
     @staticmethod
     def linear(x, weight, bias=None):

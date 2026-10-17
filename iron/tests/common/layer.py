@@ -16,7 +16,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.lm import Layer, Oracle
+from iron.lm import Layer, Oracle, widen
 from iron.applications.embedding_gemma2.config import AudioConfig
 from iron.operators.mha import MHA
 from iron.tests.common.llama_model import small
@@ -48,19 +48,24 @@ def shapes(E, H, G, D, F) -> dict[str, tuple[int, ...]]:
         "mlp.gate_proj": (F, E),
         "mlp.up_proj": (F, E),
         "mlp.down_proj": (E, F),
+        "mlp.fc1": (F, E),
+        "mlp.fc2": (E, F),
     }
 
 
-def module(rng, shape, names, dtype=np.float32, bias=False, **parts):
-    """A layer module of ``names`` at ``shape`` drawn from ``rng``, each
-    projection with a bias if ``bias``, then ``parts`` by name.
+def module(rng, shape, names, dtype=np.float32, bias=False, norm_bias=False, **parts):
+    """A layer module of ``names`` at ``shape`` drawn from ``rng`` (a
+    matrix's deviation ``1/sqrt(in)``), each projection with a bias if
+    ``bias``, each norm if ``norm_bias``, then ``parts`` by name.
     """
     root = SimpleNamespace()
     drawn = {}
     for name in names:
-        part = SimpleNamespace(weight=rng.standard_normal(shape[name]).astype(dtype))
-        if bias and len(shape[name]) == 2:
-            part.bias = rng.standard_normal(shape[name][0]).astype(dtype)
+        size = shape[name]
+        weight = rng.standard_normal(size) / np.sqrt(size[-1] if len(size) == 2 else 1)
+        part = SimpleNamespace(weight=weight.astype(dtype))
+        if (bias and len(size) == 2) or (norm_bias and len(size) == 1):
+            part.bias = (rng.standard_normal(size[0]) * 0.1).astype(dtype)
         drawn[name] = part
     for name, part in {**drawn, **parts}.items():
         *parents, leaf = name.split(".")
@@ -189,6 +194,12 @@ def test_an_activation_with_no_operator_is_refused():
         Layer(H, G, D, 1e-6, "gelu")
 
 
+def test_a_layer_norm_at_another_epsilon_than_its_kernels_is_refused():
+    norm = SimpleNamespace(weight=np.ones(E, bfloat16), bias=np.zeros(E, bfloat16))
+    with pytest.raises(ValueError, match="LayerNorm's kernel takes no epsilon"):
+        Layer(H, G, D, 1e-6).norm(None, norm)
+
+
 # A layer at a shape every operator in it traces at.
 T, WIDTH, HEADS, GROUPS, HEAD, HIDDEN = 256, 512, 8, 2, 64, 1024
 
@@ -270,3 +281,65 @@ def test_a_fused_projection_is_read_as_views_of_the_checkpoints_array():
 def test_causal_attention_refuses_a_window():
     with pytest.raises(ValueError, match="window"):
         small().attend(None, 0, None, None, None, window=4)
+
+
+PLAIN = (
+    "input_layernorm",
+    "post_attention_layernorm",
+    "self_attn.q_proj",
+    "self_attn.k_proj",
+    "self_attn.v_proj",
+    "self_attn.o_proj",
+    "mlp.fc1",
+    "mlp.fc2",
+)
+
+
+@pytest.mark.usefixtures("npu2")
+def test_the_graph_through_its_operators_references_is_the_oracle():
+    """A layer of affine LayerNorms, biases, a plain GELU feed-forward and a
+    rotated prefix of each head, run through each operator's reference, is
+    its oracle within bf16's rounding of each of its steps; an oracle that
+    turns the whole head is not.
+    """
+    rng = np.random.default_rng(6)
+    shape = shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN)
+    w = module(rng, shape, PLAIN, bfloat16, bias=True, norm_bias=True)
+    w.input_layernorm.weight += bfloat16(1)
+    w.post_attention_layernorm.weight += bfloat16(1)
+    rotary = HEAD // 2
+    layer = Layer(
+        HEADS, GROUPS, HEAD, 1e-5, "gelu_pytorch_tanh", rotary=rotary, accurate=True
+    )
+    positions = np.arange(T)[:, None] * np.float32(0.05) * np.arange(1, rotary // 2 + 1)
+    angles = np.empty((T, rotary), np.float32)
+    angles[:, ::2], angles[:, 1::2] = np.cos(positions), np.sin(positions)
+
+    def attend(q, k, v, *, scale, window):
+        o = MHA.step(q, k, v, heads_interleaved=True, kv_interleaved=True, causal=False)
+        return o.reshape(T, HEADS * HEAD)
+
+    class Model(iron.Graph):
+        def __init__(self):
+            self.weights = w
+            self.angles = angles.astype(bfloat16)
+
+        def body(self, x):
+            return layer.step(self.weights, x, attend, self.angles)
+
+    x = rng.standard_normal((T, WIDTH)).astype(bfloat16)
+    got = np.asarray(Model().reference(x), np.float32)
+    o = Oracle(AudioConfig(eps=1e-5))
+    wide, xf = widen(w), np.asarray(x, np.float32)
+    turned = np.asarray(angles.astype(bfloat16), np.float32)
+
+    def error(oracle_layer, table):
+        want = oracle_layer.oracle(o, wide, xf, o.attend, table)
+        return np.linalg.norm(got - want) / np.linalg.norm(want)
+
+    # About 20 steps, each rounded once to bf16 (2 ** -9 relative).
+    assert error(layer, turned) < 20 * 2**-9
+    # The same frequencies over the whole head, the rest turned by nothing.
+    identity = np.tile(np.float32([1, 0]), (T, (HEAD - rotary) // 2))
+    whole = np.concatenate([turned, identity], axis=-1)
+    assert error(dataclasses.replace(layer, rotary=None), whole) > 20 * 2**-9

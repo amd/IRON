@@ -1034,8 +1034,8 @@ profiles. The library is four modules:
   reference repeats; it widens a layer's weights to float32 as the pass
   reaches them, and holds the embedding in float32, so it is built to check
   with; it also carries the primitives every model's own oracle shares:
-  `linear`, `rms_norm`, `silu`, `gelu_tanh`, `attend(causal=, window=,
-  scale=)` and `rotate`);
+  `linear`, `rms_norm`, `layer_norm`, `normed` (a norm module's),
+  `silu`, `gelu_tanh`, `attend(causal=, window=, scale=)` and `rotate`);
   `Model`, a graph
   whose versions `load(tuner, full_elf)` compiles before the first call,
   in the packaging asked for; and `Runner` and `main`, a decoder's
@@ -1075,12 +1075,14 @@ profiles. The library is four modules:
   front end's image into patches, `iron/tests/lm/image_patches.py`; and
   `Layer`, a transformer layer read from a checkpoint's layer module by its
   Hugging Face names (`input_layernorm`, `self_attn.q_proj`, ...,
-  `mlp.down_proj`). The module decides its parts: sandwich norms, q and k
-  norms, biases, a `linear` wrapper, a fused `qkv_proj` or `gate_up_proj`
-  (cut by rows, views of the checkpoint's array), a per-layer input
-  (`ple_block`) and a `layer_scalar`. The config's `layer(i)` gives the
-  rest: heads, activation, attention scale and window, a value norm, a
-  residual scale. Its
+  `mlp.down_proj`). The module decides its parts: sandwich norms, an
+  affine LayerNorm where a norm holds a bias, q and k norms, biases, a
+  `linear` wrapper, a fused `qkv_proj` or `gate_up_proj` (cut by rows,
+  views of the checkpoint's array), a plain `mlp.fc1`/`fc2` feed-forward, a
+  per-layer input (`ple_block`) and a `layer_scalar`. The config's
+  `layer(i)` gives the rest: heads, activation, attention scale and window,
+  the rotated prefix of a head (`rotary_dim`), a value norm, a residual
+  scale. Its
   `step()` runs in a graph's body with the model kind's `attend` and RoPE
   angles, and `oracle()` is its float32 twin, built from `Oracle`'s
   primitives (`iron/tests/common/layer.py`).

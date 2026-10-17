@@ -30,6 +30,7 @@ from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
+from iron.operators.layer_norm import LayerNorm
 from iron.operators.limbs import Limbs, stacked
 from iron.operators.log import Log
 from iron.operators.magnitude import Magnitude
@@ -223,6 +224,8 @@ class LogMel(iron.Graph):
         return np.log(magnitude @ self.filters + self.mel_floor).astype(np.float32)
 
 
+# The epsilon mlir-aie's layer_norm kernel fixes.
+LAYER_NORM_EPS = 1e-5
 # What every device's GEMM row block divides (aie2's 16 rows, aie2p's 8).
 GEMM_ROWS = 16
 
@@ -716,28 +719,32 @@ class ImagePatches(iron.Graph):
 @dataclasses.dataclass(frozen=True)
 class Layer:
     """A transformer layer over a checkpoint's layer module, read by its
-    Hugging Face names: attention, then the gated feed-forward, each after
-    its pre-norm and with its residual.
+    Hugging Face names: attention, then the feed-forward, each after its
+    pre-norm and with its residual.
 
     The module decides the rest: sandwich norms where it holds
-    ``pre_feedforward_layernorm``; per-head q and k RMS norms where
+    ``pre_feedforward_layernorm``; a norm's affine LayerNorm where it holds
+    a bias, else its RMS norm; per-head q and k RMS norms where
     ``self_attn`` holds ``q_norm`` and ``k_norm``; a projection's bias where
     it holds one, its weight read through a ``linear`` wrapper; one fused
-    ``qkv_proj`` or ``gate_up_proj`` cut by rows; a per-layer input through
-    ``ple_block``; and a ``layer_scalar``. A model kind gives the attention
-    and the rotation: ``attend(q, k, v, scale=, window=)`` on ``(rows,
-    heads, head_dim)`` returns ``(rows, heads * head_dim)``, and ``angles``
-    turns q and k.
+    ``qkv_proj`` or ``gate_up_proj`` cut by rows; a plain ``fc1``, ``fc2``
+    feed-forward where ``mlp`` holds them, else the gated one; a per-layer
+    input through ``ple_block``; and a ``layer_scalar``. A model kind gives
+    the attention and the rotation: ``attend(q, k, v, scale=, window=)`` on
+    ``(rows, heads, head_dim)`` returns ``(rows, heads * head_dim)``, and
+    ``angles`` turns q and k.
 
     Args:
         heads: The query heads.
         groups: The key and value heads.
         head_dim: A head's width.
-        eps: Every RMS norm's epsilon.
+        eps: Every norm's epsilon.
         activation: The feed-forward's ``hidden_act``, ``"silu"`` or
             ``"gelu_pytorch_tanh"``.
         scale: The attention logits' scale; None is ``head_dim ** -0.5``.
         window: The positions a query reaches either side; None is all.
+        rotary: The leading columns of a head RoPE turns, the rest passed
+            through; None is all.
         v_norm: Whether the values are RMS-normed, unweighted.
         residual: What each block's output is scaled by on its residual
             (``residual_multiplier``).
@@ -752,6 +759,7 @@ class Layer:
     activation: str = "silu"
     scale: float | None = None
     window: int | None = None
+    rotary: int | None = None
     v_norm: bool = False
     residual: float = 1.0
     accurate: bool = False
@@ -772,9 +780,10 @@ class Layer:
         return p.weight, vars(p).get("bias")
 
     def projections(self, w) -> tuple[tuple, ...]:
-        """``w``'s q, k, v, o, gate, up and down projections, each
-        ``(weight, bias)``; a fused ``qkv_proj`` or ``gate_up_proj`` cut by
-        rows, so each piece is a view of the checkpoint's own array.
+        """``w``'s q, k, v and o projections, then the feed-forward's (gate,
+        up and down, or fc1 and fc2), each ``(weight, bias)``; a fused
+        ``qkv_proj`` or ``gate_up_proj`` cut by rows, so each piece is a view
+        of the checkpoint's own array.
         """
         a, mlp = w.self_attn, w.mlp
         fused = []
@@ -784,12 +793,13 @@ class Layer:
         else:
             fused += [(p, None) for p in (a.q_proj, a.k_proj, a.v_proj)]
         fused.append((a.o_proj, None))
-        if "gate_up_proj" in vars(mlp):
+        if "fc1" in vars(mlp):
+            fused += [(mlp.fc1, None), (mlp.fc2, None)]
+        elif "gate_up_proj" in vars(mlp):
             F = mlp.gate_up_proj.weight.shape[0] // 2
-            fused.append((mlp.gate_up_proj, (0, F, 2 * F)))
+            fused += [(mlp.gate_up_proj, (0, F, 2 * F)), (mlp.down_proj, None)]
         else:
-            fused += [(mlp.gate_proj, None), (mlp.up_proj, None)]
-        fused.append((mlp.down_proj, None))
+            fused += [(mlp.gate_proj, None), (mlp.up_proj, None), (mlp.down_proj, None)]
         out = []
         for p, cuts in fused:
             weight, bias = self.linear(p)
@@ -799,6 +809,32 @@ class Layer:
             for lo, hi in zip(cuts, cuts[1:]):
                 out.append((weight[lo:hi], None if bias is None else bias[lo:hi]))
         return tuple(out)
+
+    def norm(self, x, n):
+        """``x`` normed by the norm module ``n``: an affine LayerNorm where it
+        holds a bias, else its RMS norm.
+
+        Raises:
+            ValueError: A LayerNorm at an epsilon but its kernel's.
+        """
+        if "bias" not in vars(n):
+            return RMSNorm.step(x, weight=n.weight, epsilon=self.eps)
+        if self.eps != LAYER_NORM_EPS:
+            raise ValueError(
+                f"Layer: LayerNorm's kernel takes no epsilon but {LAYER_NORM_EPS}, "
+                f"not {self.eps}"
+            )
+        return RowwiseAdd.step(RowwiseMul.step(LayerNorm.step(x), n.weight), n.bias)
+
+    def rotate(self, x, angles):
+        """``x`` ``(rows, head_dim)`` turned by RoPE, a row of ``angles`` per
+        position, only its first ``rotary`` columns where given.
+        """
+        if self.rotary is None:
+            return RoPE.step(x, angles)
+        prefix = x[:, : self.rotary]
+        Copy.step(RoPE.step(Copy.step(prefix), angles), prefix)
+        return x
 
     def derive(self, derived, w) -> None:
         """Put on ``derived`` (``iron.lm.Derived``) what ``step`` reads of
@@ -827,10 +863,10 @@ class Layer:
         """
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
         a, eps = w.self_attn, self.eps
-        q_w, k_w, v_w, o_w, gate_w, up_w, down_w = self.projections(w)
+        q_w, k_w, v_w, o_w, *mlp = self.projections(w)
         sandwich = "pre_feedforward_layernorm" in vars(w)
         act = SiLU if self.activation == "silu" else GELU
-        h = RMSNorm.step(x, weight=w.input_layernorm.weight, epsilon=eps)
+        h = self.norm(x, w.input_layernorm)
         # Half a head per tile for one row; q's shape is o's when H * D is
         # the width, so it is given here rather than by the profile.
         q, k, v = (
@@ -839,12 +875,12 @@ class Layer:
         )
         q, k, v = q.reshape(n * H, D), k.reshape(n * G, D), v.reshape(n * G, D)
         if "q_norm" in vars(a):
-            q = RMSNorm.step(q, weight=a.q_norm.weight, epsilon=eps)
+            q = self.norm(q, a.q_norm)
         # One angle row per position, applied to that position's heads.
-        q = RoPE.step(q, angles)
+        q = self.rotate(q, angles)
         if "k_norm" in vars(a):
-            k = RMSNorm.step(k, weight=a.k_norm.weight, epsilon=eps)
-        k = RoPE.step(k, angles)
+            k = self.norm(k, a.k_norm)
+        k = self.rotate(k, angles)
         if self.v_norm:
             v = RMSNorm.step(v, epsilon=eps)
         o = attend(
@@ -856,17 +892,22 @@ class Layer:
         )
         y = project(o, *o_w, accurate=self.accurate)
         if sandwich:
-            y = RMSNorm.step(y, weight=w.post_attention_layernorm.weight, epsilon=eps)
+            y = self.norm(y, w.post_attention_layernorm)
         r = self.residual
         x = ElementwiseAdd.step(x, y) if r == 1 else AXPY.step(y, x, scalar_factor=r)
         norm = w.pre_feedforward_layernorm if sandwich else w.post_attention_layernorm
-        h = RMSNorm.step(x, weight=norm.weight, epsilon=eps)
-        gate = project(h, *gate_w, accurate=self.accurate)
-        up = project(h, *up_w, accurate=self.accurate)
-        f = ElementwiseMul.step(act.step(gate), up)
-        f = project(f, *down_w, accurate=self.accurate)
+        h = self.norm(x, norm)
+        if len(mlp) == 2:
+            fc1, fc2 = mlp
+            f = act.step(project(h, *fc1, accurate=self.accurate))
+        else:
+            gate_w, up_w, fc2 = mlp
+            gate = project(h, *gate_w, accurate=self.accurate)
+            up = project(h, *up_w, accurate=self.accurate)
+            f = ElementwiseMul.step(act.step(gate), up)
+        f = project(f, *fc2, accurate=self.accurate)
         if sandwich:
-            f = RMSNorm.step(f, weight=w.post_feedforward_layernorm.weight, epsilon=eps)
+            f = self.norm(f, w.post_feedforward_layernorm)
         x = ElementwiseAdd.step(x, f) if r == 1 else AXPY.step(f, x, scalar_factor=r)
         if "ple_block" in vars(w):
             if ple is None:
@@ -875,8 +916,7 @@ class Layer:
             g = project(x, *self.linear(b.per_layer_input_gate), accurate=self.accurate)
             g = ElementwiseMul.step(act.step(g), ple)
             g = project(g, *self.linear(b.per_layer_projection), accurate=self.accurate)
-            norm = b.post_per_layer_input_norm.weight
-            x = ElementwiseAdd.step(x, RMSNorm.step(g, weight=norm, epsilon=eps))
+            x = ElementwiseAdd.step(x, self.norm(g, b.post_per_layer_input_norm))
         if "layer_scalar" in vars(w):
             if derived is None:
                 raise TypeError("Layer.step: the module's layer_scalar needs derived=")
@@ -897,54 +937,63 @@ class Layer:
         """
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
         a = w.self_attn
-        q_w, k_w, v_w, o_w, gate_w, up_w, down_w = self.projections(w)
+        q_w, k_w, v_w, o_w, *mlp = self.projections(w)
         sandwich = "pre_feedforward_layernorm" in vars(w)
         silu = self.activation == "silu"
-        h = o.rms_norm(x, w.input_layernorm.weight)
+        A = self.rotary or D
+        h = o.normed(x, w.input_layernorm)
         q = o.linear(h, *q_w).reshape(n, H, D)
         k = o.linear(h, *k_w).reshape(n, G, D)
         v = o.linear(h, *v_w).reshape(n, G, D)
         if "q_norm" in vars(a):
-            q = o.rms_norm(q, a.q_norm.weight)
+            q = o.normed(q, a.q_norm)
         if "k_norm" in vars(a):
-            k = o.rms_norm(k, a.k_norm.weight)
+            k = o.normed(k, a.k_norm)
         if self.v_norm:
             v = o.rms_norm(v)
-        q, k = o.rotate(q, angles), o.rotate(k, angles)
+        q, k = (
+            np.concatenate([o.rotate(t[..., :A], angles), t[..., A:]], axis=-1)
+            for t in (q, k)
+        )
         y = o.linear(attend(q, k, v, scale=self.scale, window=self.window), *o_w)
         if sandwich:
-            y = o.rms_norm(y, w.post_attention_layernorm.weight)
+            y = o.normed(y, w.post_attention_layernorm)
         r = np.float32(self.residual)
         x = x + y * r
         norm = w.pre_feedforward_layernorm if sandwich else w.post_attention_layernorm
-        h = o.rms_norm(x, norm.weight)
-        (gate, gate_b), (up, up_b) = gate_w, up_w
-        F = gate.shape[0]
-        g = np.matmul(h, gate.T, out=o.buffer("gate", (n, F)))
-        if gate_b is not None:
-            g += gate_b
-        if silu:
-            g *= np.float32(0.5)
-            # SiLU, with the sigmoid as a tanh, which does not overflow.
-            f = np.tanh(g, out=o.buffer("silu", (n, F)))
-            f += 1
-            f *= g
+        h = o.normed(x, norm)
+        if len(mlp) == 2:
+            fc1, fc2 = mlp
+            g = o.linear(h, *fc1)
+            f = o.silu(g) if silu else o.gelu_tanh(g)
         else:
-            f = o.gelu_tanh(g)
-        u = np.matmul(h, up.T, out=o.buffer("up", (n, F)))
-        if up_b is not None:
-            u += up_b
-        f *= u
-        f = o.linear(f, *down_w)
+            (gate, gate_b), (up, up_b), fc2 = mlp
+            F = gate.shape[0]
+            g = np.matmul(h, gate.T, out=o.buffer("gate", (n, F)))
+            if gate_b is not None:
+                g += gate_b
+            if silu:
+                g *= np.float32(0.5)
+                # SiLU, with the sigmoid as a tanh, which does not overflow.
+                f = np.tanh(g, out=o.buffer("silu", (n, F)))
+                f += 1
+                f *= g
+            else:
+                f = o.gelu_tanh(g)
+            u = np.matmul(h, up.T, out=o.buffer("up", (n, F)))
+            if up_b is not None:
+                u += up_b
+            f *= u
+        f = o.linear(f, *fc2)
         if sandwich:
-            f = o.rms_norm(f, w.post_feedforward_layernorm.weight)
+            f = o.normed(f, w.post_feedforward_layernorm)
         x = x + f * r
         if "ple_block" in vars(w):
             b = w.ple_block
             g = o.linear(x, *self.linear(b.per_layer_input_gate))
             g = o.silu(g) if silu else o.gelu_tanh(g)
             p = o.linear(g * ple, *self.linear(b.per_layer_projection))
-            x = x + o.rms_norm(p, b.post_per_layer_input_norm.weight)
+            x = x + o.normed(p, b.post_per_layer_input_norm)
         if "layer_scalar" in vars(w):
             x = x * w.layer_scalar
         return x
