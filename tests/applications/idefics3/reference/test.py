@@ -4,19 +4,26 @@
 
 """SmolVLM's graphs against their own float32 forward passes, device-free
 (no checkpoint, no NPU), at a toy shape: the vision tower on ``Layer``'s
-SigLIP names.
+SigLIP names, and the tower and the text model as one
+``iron.lm.Multimodal``, its soft tokens placed across a chunk boundary.
 """
 
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
+from iron.applications.idefics3.model import (
+    SmolVLMOracle,
+    SmolVLMText,
+    SmolVLMTextConfig,
+)
 from iron.applications.idefics3.vision.model import (
     VisionConfig,
     VisionOracle,
     VisionTower,
 )
-from iron.tests.common.llama_model import checkpoint
+from iron.lm import Multimodal
+from iron.tests.common.llama_model import checkpoint, shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -30,7 +37,22 @@ VISION = VisionConfig(
     image_size=128,
     scale_factor=2,
     text_dim=256,
+    image_token=511,
 )
+#: Its text model, Llama's layer under ``model.text_model``.
+TEXT = SmolVLMTextConfig(
+    vocab_size=512,
+    emb_dim=256,
+    n_layers=2,
+    n_heads=4,
+    n_kv_groups=2,
+    head_dim=64,
+    hidden_dim=512,
+    rope_base=1e5,
+    max_seq_len=1024,
+    prefill_chunk=256,
+)
+IMAGE = VISION.image_token
 
 
 def vision_names(c: VisionConfig) -> dict[str, tuple[int, ...]]:
@@ -68,12 +90,19 @@ def vision_names(c: VisionConfig) -> dict[str, tuple[int, ...]]:
     return out
 
 
-def drawn(c: VisionConfig, seed: int):
-    """A random tree of ``c``'s shape whose biases are drawn too, not ones,
-    which every LayerNorm after them would cancel.
+def text_names(c: SmolVLMTextConfig) -> dict[str, tuple[int, ...]]:
+    """The text model's tensors of a checkpoint of ``c``'s shape, by name."""
+    text = {
+        k.replace("model.", "model.text_model.", 1): v for k, v in shapes(c).items()
+    }
+    return text | {"lm_head.weight": (c.vocab_size, c.emb_dim)}
+
+
+def drawn(names: dict[str, tuple[int, ...]], seed: int):
+    """A random tree of the tensors ``names`` gives, whose biases are drawn
+    too, not ones, which every LayerNorm after them would cancel.
     """
-    names = vision_names(c)
-    tree = checkpoint(c, names).tree("random", seed)
+    tree = checkpoint(TEXT, names).tree("random", seed)
     rng = np.random.default_rng(seed)
     for name, shape in names.items():
         if name.endswith(".bias"):
@@ -91,7 +120,7 @@ def test_the_vision_tower_s_soft_tokens_match_its_oracle():
     5% of the largest soft token's magnitude, as a decoder's logits are held
     (three seeds measure 0.6-0.7%).
     """
-    weights = drawn(VISION, 0)
+    weights = drawn(vision_names(VISION), 0)
     tower = VisionTower(VISION, weights)
     rng = np.random.default_rng(1)
     image = rng.uniform(-1, 1, (VISION.image_size, VISION.image_size, 3))
@@ -101,3 +130,55 @@ def test_the_vision_tower_s_soft_tokens_match_its_oracle():
     assert got.shape == (tower.soft_rows, VISION.text_dim)
     err, scale = np.abs(got - want).max(), np.abs(want).max()
     assert err <= 0.05 * scale, f"|diff| {err:.4f} against |soft tokens| {scale:.3f}"
+
+
+def _assert_close(got, want):
+    """bf16 against float32, so within 5% of the largest logit, and the
+    same argmax.
+    """
+    got = np.asarray(got, np.float32).reshape(-1)
+    err, scale = np.abs(got - want).max(), np.abs(want).max()
+    assert err <= 0.05 * scale, f"|diff| {err:.4f} against |logits| {scale:.3f}"
+    assert got.argmax() == want.argmax()
+
+
+def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk():
+    """Each version's reference in turn, its states carried from one to the
+    next: the tower, then each chunk, both holding some of the run of
+    placeholders that crosses their boundary, through ``placed``, then a
+    decode step, against ``SmolVLMOracle``.
+    """
+    weights = drawn(text_names(TEXT) | vision_names(VISION), 0)
+    model = Multimodal(
+        SmolVLMText(TEXT, weights), {IMAGE: VisionTower(VISION, weights)}
+    )
+    oracle = SmolVLMOracle(TEXT, weights, VISION)
+    rng = np.random.default_rng(2)
+    tokens = rng.integers(0, IMAGE, 300)
+    tokens[250 : 250 + VISION.tokens] = IMAGE
+    image = rng.uniform(-1, 1, (VISION.image_size, VISION.image_size, 3))
+    image = image.astype(bfloat16).astype(np.float32)
+    raw = {IMAGE: (image,)}
+    C = TEXT.prefill_chunk
+    calls, towers = model.tower_calls(tokens, raw)
+    for inputs in calls:
+        model.reference(*inputs, token=0, position=0, chunk=0, rows=1, **towers)
+    for begin in range(0, tokens.size, C):
+        chunk = tokens[begin : begin + C]
+        ids = model.text.prompt_ids(chunk)
+        values = dict(
+            token=int(chunk[-1]),
+            position=begin + chunk.size - 1,
+            chunk=begin // C,
+            rows=chunk.size,
+            **towers,
+        )
+        if (chunk == IMAGE).any():
+            before = np.array([np.count_nonzero(tokens[:begin] == IMAGE)], np.int32)
+            logits, carry = model.reference(None, None, ids, before, **values)
+        else:
+            logits, carry = model.reference(ids, **values)
+    _assert_close(logits, oracle.logits(tokens, raw))
+    tokens = np.append(tokens, carry["token"])
+    logits, _ = model.reference(chunk=0, rows=1, **carry, **towers)
+    _assert_close(logits, oracle.logits(tokens, raw))

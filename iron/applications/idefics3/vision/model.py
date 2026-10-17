@@ -49,6 +49,7 @@ class VisionConfig(Config):
     image_size: int = dataclasses.field(metadata={"json": "vision_config.image_size"})
     scale_factor: int = dataclasses.field(metadata={"json": "scale_factor"})
     text_dim: int = dataclasses.field(metadata={"json": "text_config.hidden_size"})
+    image_token: int = dataclasses.field(metadata={"json": "image_token_id"})
     head_dim: int | None = dataclasses.field(default=None, kw_only=True)
     eps: float = dataclasses.field(
         default=1e-6, kw_only=True, metadata={"json": "vision_config.layer_norm_eps"}
@@ -67,6 +68,11 @@ class VisionConfig(Config):
     def side(self) -> int:
         """The patches along each side of the image."""
         return self.image_size // self.patch
+
+    @property
+    def tokens(self) -> int:
+        """The soft tokens an image gives."""
+        return (self.side // self.scale_factor) ** 2
 
     def layer(self, i: int) -> Layer:
         # TODO(pin group): LayerNorm at the checkpoint's eps (layer_norm_eps)
@@ -99,11 +105,10 @@ class VisionTower(Tower):
     profile = Path(__file__).with_name("profiles")
 
     def __init__(self, config: VisionConfig, weights):
-        c, side = config, config.side
+        c = config
         self.vision_model = weights.model.vision_model
         self.connector = weights.model.connector
-        soft = (side // c.scale_factor) ** 2
-        super().__init__(c, self.vision_model.encoder.layers, side * side, soft)
+        super().__init__(c, self.vision_model.encoder.layers, c.side**2, c.tokens)
         embeddings = self.vision_model.embeddings
         self.patch_embed = Conv2d(
             embeddings.patch_embedding.weight, c.image_size, stride=c.patch
