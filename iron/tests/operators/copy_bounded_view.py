@@ -168,3 +168,28 @@ def test_walks_in_turn_repeat_each_per_call(full_elf, band_stride):
         got = np.asarray(net(**values), dtype=np.float32).reshape(-1, E)
         want = walks_walked(table, band_stride, hk, wk).astype(np.float32)
         assert np.array_equal(got[:n], want), f"{hk=} {wk=}"
+
+
+# Rows past D1's 1023 wrap, bounded per call, into either half of a state's rows.
+ROWS, HALF = 2048, 32
+
+
+class Halves(iron.Graph):
+    def __init__(self):
+        self.rows = iron.state((ROWS, 2 * HALF), name="rows")
+
+    def body(self, x, y, *, n: Scratchpad[np.int32]):
+        Copy.step(x[:n], self.rows[:n, :HALF])
+        Copy.step(y[:n], self.rows[:n, HALF:])
+        return Copy.step(self.rows[:n])
+
+
+@pytest.mark.supported_devices("npu2")
+def test_bounded_rows_past_a_wrap_fill_either_half():
+    net = Halves().compile(x=(ROWS, HALF), y=(ROWS, HALF))
+    rng = np.random.default_rng(0)
+    for n in (1, 1024, ROWS):
+        x, y = (rng.standard_normal((ROWS, HALF)).astype(bfloat16) for _ in range(2))
+        got = np.asarray(net(x, y, n=n), dtype=np.float32).reshape(ROWS, 2 * HALF)
+        want = np.concatenate([x[:n], y[:n]], axis=1).astype(np.float32)
+        assert np.array_equal(got[:n], want), f"{n=}"

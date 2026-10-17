@@ -885,6 +885,18 @@ class Copy(Operator):
                 [n for n, _ in dims],
                 [s for _, s in dims],
             )
+            (run, step), half = dims[-1], dims[-1][0] // 2
+            if on_d2 and dims[-2][0] == 1 and step == 1 and run % 2 == 0:
+                # A size-1 D1 is dropped, so the bound would take D1's 1023
+                # wrap: past it, the run's halves fill D1 instead.
+                halves = TensorAccessPattern(
+                    share.tensor_dims,
+                    share.offset,
+                    [*placed.sizes[:2], 2, half],
+                    [*placed.strides[:2], half, 1],
+                )
+                if not operand.fits(placed) and operand.fits(halves):
+                    placed = halves
             if not operand.fits(placed):
                 raise ValueError(
                     f"{tap} does not fit one descriptor per channel, which a "

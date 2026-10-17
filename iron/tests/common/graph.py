@@ -2578,6 +2578,21 @@ def test_a_bounded_view_of_a_state_is_its_rows_this_call():
     np.testing.assert_array_equal(got, want)
 
 
+def test_bounded_rows_past_a_wrap_halve_the_run():
+    """A bound of more rows than D1 wraps takes D2, the run's halves D1."""
+    graph = copy_bounded_view.Halves()
+    traced = graph.trace(x=(copy_bounded_view.ROWS, 32), y=(copy_bounded_view.ROWS, 32))
+    into = [s.op for s in traced.steps][:2]
+    for op in into:
+        ((tap, unit),) = op._taps(op.dst, op.dst_bound, op.y)
+        assert (list(tap.sizes), unit) == ([1, copy_bounded_view.ROWS, 2, 16], 32)
+    x = np.arange(copy_bounded_view.ROWS * 32, dtype=np.float32).reshape(-1, 32)
+    x, y = x.astype(bfloat16), (x + 0.5).astype(bfloat16)
+    got = np.asarray(graph.reference(x, y, n=1500), dtype=np.float32)
+    want = np.concatenate([x[:1500], y[:1500]], axis=1).astype(np.float32)
+    np.testing.assert_array_equal(got[:1500], want)
+
+
 class _BadWalk(iron.Graph):
     """A walk ``Handle.at`` refuses."""
 
