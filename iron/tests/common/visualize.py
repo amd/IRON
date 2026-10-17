@@ -109,7 +109,7 @@ def test_a_per_layer_slice_is_drawn_in_its_layer():
     text, *_ = graph.shapes()
     t = graph.trace(**text)
     drawn = set(Dataflow(t, layers={1}).drawn())
-    shared = "language_model.ple.per_layer_model_projection.weight"
+    shared = "text.language_model.ple.per_layer_model_projection.weight"
     sliced = [
         i
         for i, s in enumerate(t.steps)

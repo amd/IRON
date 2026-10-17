@@ -161,7 +161,18 @@ class Tower(Encoder):
     A subclass gives ``front``, ``soft``, ``inputs`` and ``shapes``, and a
     ``body`` naming its input and per-call values that runs ``forward`` on
     what ``front`` gives.
+
+    Args:
+        config: The tower's shape; ``soft_tokens`` reads its ``text_dim``.
+        layers: As ``Encoder`` takes them.
+        max_tokens: The rows its layers take.
+        soft_rows: The rows of soft tokens a call returns, the first
+            ``soft`` of them valid.
     """
+
+    def __init__(self, config, layers: list, max_tokens: int, soft_rows: int):
+        super().__init__(config, layers, max_tokens)
+        self.soft_rows = soft_rows
 
     def front(self, *inputs, **values):
         """The rows the layers take, bounded, and the angles they rotate by."""

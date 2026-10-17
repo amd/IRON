@@ -28,7 +28,6 @@ import tokenizers
 
 import iron
 from iron import lm
-from iron import Scratchpad
 from iron.tune.narrowing import CostTable, JointNarrowing
 from iron.tune.probe import Call
 from iron.lm import Checkpoint, Derived, Encoder, rope_angles
@@ -37,7 +36,6 @@ from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
-from iron.operators.merge import Merge
 from iron.operators.mha import MHA
 from iron.operators.rms_norm import RMSNorm
 
@@ -226,21 +224,9 @@ class EmbeddingGemma(Encoder):
         return self.encode(self.tokenizer.encode(text, task), dims)
 
 
-class Multimodal(EmbeddingGemma):
-    """The text encoder over at most ``max_tokens`` rows, of which one
-    clip's and one image's placeholders take that clip's and that image's
-    soft tokens, as Hugging Face's ``masked_scatter`` places them: the j-th
-    placeholder the j-th soft token, unscaled.
-
-    Each version takes one input. ``ids`` alone is the text encoder's. A
-    mixed call is a version per tower and one over ``placed``, the ids
-    with their placeholders: ``wave``'s writes the clip's soft tokens to
-    the state ``merged`` from ``audio_at``, ``rgb``'s the image's from
-    ``vision_at``, and ``placed``'s the token embeddings from its first
-    row, then ``Merge`` gives each position its row of ``merged`` from the
-    ids, and those rows are the sequence the encoder runs over. A version
-    is one dispatch with its own scratchpad, which all three in one would
-    overrun.
+class Multimodal(lm.Multimodal):
+    """The text encoder with one clip's and one image's soft tokens in
+    their placeholders' places (``iron.lm.Multimodal``), unscaled.
 
     Args:
         config: The text encoder's shape.
@@ -250,6 +236,8 @@ class Multimodal(EmbeddingGemma):
         vision_config: The vision tower's shape.
     """
 
+    profile = PROFILES
+
     def __init__(
         self,
         config: Config,
@@ -258,150 +246,30 @@ class Multimodal(EmbeddingGemma):
         audio_config: AudioConfig = AudioConfig(),
         vision_config: VisionConfig = VisionConfig(),
     ):
-        super().__init__(config, weights, tokenizer)
-        self.audio = AudioTower(audio_config, weights)
-        self.vision = VisionTower(vision_config, weights)
-        self.audio_at = config.max_tokens
-        self.vision_at = config.max_tokens + audio_config.max_tokens
-        self.merged = iron.state(
-            (self.vision_at + self.vision.pooling.shape[0], config.emb_dim)
+        self.config = config
+        self.tokenizer = tokenizer
+        super().__init__(
+            EmbeddingGemma(config, weights, tokenizer),
+            {
+                config.audio_token: AudioTower(audio_config, weights),
+                config.image_token: VisionTower(vision_config, weights),
+            },
         )
-
-    def body(
-        self,
-        ids=None,
-        wave=None,
-        rgb=None,
-        placed=None,
-        *,
-        n: Scratchpad[np.int32],
-        n_audio: Scratchpad[np.int32],
-        frames: Scratchpad[np.int32],
-        audio_tokens: Scratchpad[np.int32],
-        n_patches: Scratchpad[np.int32],
-        height: Scratchpad[np.int32],
-        width: Scratchpad[np.int32],
-        out_height: Scratchpad[np.int32],
-        out_width: Scratchpad[np.int32],
-    ):
-        given = [t for t in (ids, wave, rgb, placed) if t is not None]
-        if len(given) != 1:
-            raise TypeError(f"a version takes one input, got {len(given)}")
-        if ids is not None:
-            return self.forward(self.lookup(ids[:n]), n, self.angles(n))
-        if wave is not None:
-            a = self.audio(wave, n=n_audio, frames=frames, tokens=audio_tokens)
-            Copy.step(a, self.merged[self.audio_at : self.audio_at + a.shape[0]])
-            return None
-        if rgb is not None:
-            v = self.vision(
-                rgb,
-                n=n_patches,
-                height=height,
-                width=width,
-                out_height=out_height,
-                out_width=out_width,
-            )
-            Copy.step(v, self.merged[self.vision_at : self.vision_at + v.shape[0]])
-            return None
-        c = self.config
-        # An input's gather is encoded on the host into its buffer, which Merge
-        # reads as the ids: gather by the device's copy of them.
-        x = self.lookup(Copy.step(placed, dtype=np.int32)[:n])
-        merge = Merge.step(
-            placed,
-            placeholders=(
-                (c.audio_token, self.audio_at),
-                (c.image_token, self.vision_at),
-            ),
-        )
-        Copy.step(x, self.merged[: x.shape[0]])
-        return self.forward(Copy.step(self.merged[merge])[:n], n, self.angles(n))
-
-    def shapes(self) -> list[dict]:
-        """The input shapes of each version: the text encoder's, each
-        tower's, and the ids with their placeholders.
-        """
-        (text,) = super().shapes()
-        (audio,) = self.audio.shapes()
-        (vision,) = self.vision.shapes()
-        return [text, audio, vision, dict(placed=text["ids"])]
-
-    def longest(self) -> dict:
-        """The per-call values of the longest call: every row real, the
-        clip its longest, the image the largest, its patches filled.
-        """
-        audio, vision = self.audio.longest(), self.vision.longest()
-        return dict(
-            n=self.max_tokens,
-            n_audio=audio["n"],
-            frames=audio["frames"],
-            audio_tokens=audio["tokens"],
-            n_patches=vision.pop("n"),
-            **vision,
-        )
-
-    def mixed(self, tokens, audio=None, image=None) -> tuple[list[tuple], dict]:
-        """The inputs of each version a call runs, in ``body``'s order and
-        the order they run in, and the call's per-call values.
-
-        Args:
-            tokens: The token ids, each placeholder run as long as its soft
-                tokens.
-            audio: One mono clip at the audio tower's ``sample_rate``.
-            image: One decoded image, ``(height, width, 3)`` uint8.
-
-        Raises:
-            ValueError: A placeholder's count is not its tower's soft tokens.
-        """
-        c = self.config
-        tokens = np.asarray(tokens)
-        ids, values = self.inputs(tokens)
-        values = dict(
-            **values,
-            n_audio=0,
-            frames=0,
-            audio_tokens=0,
-            n_patches=0,
-            height=0,
-            width=0,
-            out_height=0,
-            out_width=0,
-        )
-        calls = []
-        soft = {c.audio_token: 0, c.image_token: 0}
-        if audio is not None:
-            wave, sizes = self.audio.inputs(audio)
-            values.update(
-                n_audio=sizes["n"], frames=sizes["frames"], audio_tokens=sizes["tokens"]
-            )
-            soft[c.audio_token] = self.audio.soft(sizes)
-            calls.append((None, wave))
-        if image is not None:
-            vision = self.vision.config
-            rgb, sizes = self.vision.inputs(image, vision.image_tokens)
-            soft[c.image_token] = self.vision.soft(sizes)
-            values.update(sizes, n_patches=sizes.pop("n"))
-            calls.append((None, None, rgb))
-        for token, count in soft.items():
-            places = np.count_nonzero(tokens == token)
-            if places != count:
-                raise ValueError(
-                    f"{places} placeholders {token} for {count} soft tokens"
-                )
-        if not calls:
-            return [(ids,)], values
-        return [*calls, (None, None, None, ids)], values
 
     def encode(self, tokens, dims: int = 768, audio=None, image=None) -> np.ndarray:
-        """The unit-length embedding of ``tokens`` with ``audio`` and
-        ``image`` (as ``mixed`` takes them), truncated to ``dims``.
+        """The unit-length embedding of ``tokens`` with one mono clip
+        ``audio`` and one decoded image ``image`` at their placeholders,
+        truncated to ``dims``.
         """
-        calls, values = self.mixed(tokens, audio, image)
-        for inputs in calls:
-            out = self(*inputs, **values)
-        rows = out.numpy().reshape(len(self.config.mrl_dims), -1)
-        return np.asarray(rows[self.config.mrl_dims.index(dims), :dims], np.float32)
+        c = self.config
+        raw = {}
+        if audio is not None:
+            raw[c.audio_token] = (audio,)
+        if image is not None:
+            vision = self.towers[c.image_token].config
+            raw[c.image_token] = (image, vision.image_tokens)
+        rows = self.run(tokens, raw).numpy().reshape(len(c.mrl_dims), -1)
+        return np.asarray(rows[c.mrl_dims.index(dims), :dims], np.float32)
 
     def embed(
         self, text: str, task: str, dims: int = 768, audio=None, image=None
@@ -410,7 +278,9 @@ class Multimodal(EmbeddingGemma):
         with one mono clip `audio` at 16 kHz and one decoded image `image`,
         `(height, width, 3)` uint8, at their placeholders.
         """
-        a, v = self.audio.config, self.vision.config
+        c = self.config
+        a = self.towers[c.audio_token].config
+        v = self.towers[c.image_token].config
         audio_tokens = 0 if audio is None else a.tokens(a.frames(np.size(audio)))
         image_tokens = (
             0 if image is None else v.tokens(*np.shape(image)[:2], v.image_tokens)

@@ -69,7 +69,7 @@ class AudioTower(Tower):
         sub = tree.subsample_conv_projection
         if c.frame != 2 * c.hop:
             raise ValueError(f"a frame of {c.frame} samples is not two hops")
-        super().__init__(config, tree.layers, c.max_tokens)
+        super().__init__(config, tree.layers, c.max_tokens, c.max_tokens)
         T = c.max_tokens
         H, D, W, B = c.n_heads, c.head_dim, c.window, c.band
         C0, C1 = c.channels

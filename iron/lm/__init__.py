@@ -34,6 +34,7 @@ from .blocks import (
 from .causal import CausalLM, DecodeStep
 from .encoder import EncodeStep, Encoder, Tower
 from .generation import Sampler, accuracy, determinism, generate_on_host
+from .multimodal import Multimodal
 
 __all__ = [
     "CausalLM",
@@ -52,6 +53,7 @@ __all__ = [
     "LogMel",
     "MaxPool2d",
     "Model",
+    "Multimodal",
     "Oracle",
     "Runner",
     "Sampler",

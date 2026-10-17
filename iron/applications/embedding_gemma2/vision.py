@@ -58,7 +58,9 @@ class VisionTower(Tower):
         c = config
         tree = self.vision_tower = weights.vision_tower
         self.embed_vision = weights.embed_vision
-        super().__init__(config, tree.encoder.layers, c.patches)
+        window = c.pool**2
+        tokens = -(-(c.patches // window) // c.rows) * c.rows
+        super().__init__(config, tree.encoder.layers, c.patches, tokens)
         derived = Derived(weights)
         self.processor = ImagePatches(
             c.patches,
@@ -95,8 +97,6 @@ class VisionTower(Tower):
         self.minus_one = iron.weight(np.full((c.patches, c.emb_dim), -1, bfloat16))
         # Soft token j sums rows j * pool ** 2 onwards; a token past the
         # image's sums none of its rows.
-        window = c.pool**2
-        tokens = -(-(c.patches // window) // c.rows) * c.rows
         pool = np.zeros((tokens, c.patches), bfloat16)
         for j in range(c.patches // window):
             pool[j, j * window : (j + 1) * window] = 1
