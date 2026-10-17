@@ -143,3 +143,17 @@ def test_a_prompt_chunk_is_a_command_per_attention_and_decode_one(npu2):
     cuts = plan(npu2, prompt).commands
     attention = [i + 1 for i, s in enumerate(prompt.steps) if isinstance(s.op, MHA)]
     assert list(cuts) == attention and len(cuts) == model.config.n_layers
+
+
+class Shrinks(iron.Graph):
+    def body(self, x, *, n: Carried[np.int32]):
+        return ReLU.step(ReLU.step(ReLU.step(x)[:n])), iron.carry(n=n + 1)
+
+
+def test_a_call_skips_the_commands_its_values_leave_without_work(npu2):
+    traced = Shrinks().trace(x=(4096,))
+    p = plan(npu2, traced)
+    # The bounded step ends a command; the step after reads only its rows.
+    assert p.commands == (2,)
+    assert p.idle(traced.steps, dict(n=0)) == {1}
+    assert p.idle(traced.steps, dict(n=1)) == set()

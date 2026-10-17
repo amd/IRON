@@ -784,7 +784,10 @@ class CompiledGraph:
 
     def __call__(self, *tensors, **values) -> Any:
         self._stage(tensors, values)
-        self.callable()
+        if self.plan.commands:
+            self.callable(idle=self.plan.idle(self.traced.steps, values))
+        else:
+            self.callable()
         outputs = [self.callable.get_buffer(h.ref()) for h in self.traced.returned]
         if not self.traced.carry:
             return _results(outputs, None)
@@ -793,7 +796,7 @@ class CompiledGraph:
     def start(self, run: FullELFRun, /, *tensors, **values) -> None:
         """Start a call of this full ELF on ``run`` without waiting for it."""
         self._stage(tensors, values, run)
-        self.callable.start(run)
+        self.callable.start(run, idle=self.plan.idle(self.traced.steps, values))
 
     def emit_to(self, target: CompiledGraph) -> None:
         """Program this version's Emit to start a call of ``target``."""

@@ -35,6 +35,23 @@ class Plan:
     # The steps starting each command after the first, queued back to back.
     commands: tuple[int, ...] = ()
 
+    def idle(self, steps, values) -> frozenset[int]:
+        """The commands a call with ``values`` leaves without work: each of
+        their ``steps`` bounded to nothing, so the call need not start them.
+        """
+        edges = (0, *self.commands, len(steps))
+        return frozenset(
+            k
+            for k in range(len(edges) - 1)
+            if all(
+                any(
+                    b is not None and b.evaluate(values) <= 0
+                    for b in s.op.bound_extents.values()
+                )
+                for s in steps[edges[k] : edges[k + 1]]
+            )
+        )
+
     def report(self, name: str) -> str:
         image = "one full ELF" if self.full_elf else "an xclbin per step"
         if self.commands:

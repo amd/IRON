@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import time
 import weakref
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -130,6 +130,7 @@ class FullELFRun:
         self._image = image
         self._kernel = kernels[0]
         self.handles = runs
+        self._started = runs
         for index, tensor in arguments.items():
             self.bind(index, tensor.buffer_object())
         self._feedback_arg = feedback_arg
@@ -206,16 +207,18 @@ class FullELFRun:
         self.wired = True
         return params[0].alias()
 
-    def start(self) -> None:
+    def start(self, idle: Collection[int] = ()) -> None:
+        """Start each command's run back to back, but the ``idle`` ones'."""
         if aie_utils.DefaultNPURuntime.load(self._image).kernel is not self._kernel:
             raise RuntimeError(
                 f"{self.name}: the runtime evicted the image this run was made on"
             )
-        for handle in self.handles:
+        self._started = [h for k, h in enumerate(self.handles) if k not in idle]
+        for handle in self._started:
             handle.start()
 
     def wait(self) -> None:
-        for handle in self.handles:
+        for handle in self._started:
             # run.wait() returns the ert_cmd_state; run.wait2() returns None.
             state = handle.wait()
             if state != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
@@ -469,11 +472,13 @@ class FullELFCallable:
         if self.trace_buffer is not None:
             self.trace_buffer.to("npu")
 
-    def start(self, *runs: FullELFRun) -> None:
-        """Push what the host wrote, and start ``runs`` without waiting."""
+    def start(self, *runs: FullELFRun, idle: Collection[int] = ()) -> None:
+        """Push what the host wrote, and start ``runs`` without waiting, each
+        but its ``idle`` commands.
+        """
         self._sync_inputs()
         for run in runs:
-            run.start()
+            run.start(idle)
 
     def wait(self, *runs: FullELFRun) -> None:
         """Wait on ``runs``.
@@ -494,13 +499,15 @@ class FullELFCallable:
                 f"write between calls, or start the next run through start()"
             )
 
-    def __call__(self, *runs: FullELFRun):
-        """Dispatch ``run``, or ``runs`` queued back to back."""
+    def __call__(self, *runs: FullELFRun, idle: Collection[int] = ()):
+        """Dispatch ``run``, or ``runs`` queued back to back, each but its
+        ``idle`` commands.
+        """
         runs = runs or (self.run,)
         self._sync_inputs()
         t0 = time.perf_counter()
         for run in runs:
-            run.start()
+            run.start(idle)
         for run in runs:
             run.wait()
         self.last_elapsed = time.perf_counter() - t0
