@@ -2203,3 +2203,19 @@ def test_a_body_of_args_with_no_signature_is_refused_as_its_class_is_made():
         class _Bad(iron.Graph):
             def body(self, *inputs):
                 return inputs
+
+
+class _TwoBounds(iron.Graph):
+    """Two per-call values, of which a version reads one."""
+
+    def body(self, x=None, y=None, *, n: Scratchpad[np.int32], m: Scratchpad[np.int32]):
+        if x is not None:
+            return ElementwiseAdd.step(x[:n], x[:n])
+        return ElementwiseAdd.step(y[:m], y[:m])
+
+
+def test_a_version_reads_only_the_values_its_steps_read():
+    g = _TwoBounds()
+    assert g.trace(x=(8, 256)).reads == {"n"}
+    assert g.trace(y=(8, 256)).reads == {"m"}
+    assert [v.name for v in g.trace(x=(8, 256)).values] == ["n", "m"]

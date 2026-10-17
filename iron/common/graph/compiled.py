@@ -597,7 +597,12 @@ class Graph:
 
 
 class CompiledGraph:
-    """A traced graph built into an image, ready to call."""
+    """A traced graph built into an image, ready to call.
+
+    A call gives the per-call values this version reads (``TracedGraph.reads``)
+    and may give the graph's others, which another version reads; they go
+    unused.
+    """
 
     def __init__(
         self,
@@ -791,7 +796,15 @@ class CompiledGraph:
                 f"{self.traced.name} takes {len(self.traced.inputs)} input(s), "
                 f"got {len(tensors)}"
             )
-        _check_values(self.traced.name, [v.name for v in self.traced.values], values)
+        reads = self.traced.reads
+        _check_values(
+            self.traced.name, reads, {n: x for n, x in values.items() if n in reads}
+        )
+        unknown = set(values) - {v.name for v in self.traced.values}
+        if unknown:
+            raise TypeError(
+                f"{self.traced.name}: per-call values {sorted(unknown)} unknown"
+            )
         for limit in self.traced.limits:
             at = limit.expression.evaluate(values)
             if not limit.lo <= at < limit.hi:

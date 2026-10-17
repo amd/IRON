@@ -188,6 +188,20 @@ class TracedGraph:
     )
     limits: list[Limit] = dataclasses.field(default_factory=list)
 
+    @property
+    def reads(self) -> set[str]:
+        """The per-call values a call of this version must give: those its
+        steps, bounds, host encodings and carry read, and its carried ones.
+        """
+        expressions = [
+            *(b.expression for b in self.bindings),
+            *(limit.expression for limit in self.limits),
+            *(e for e in self.carry.values() if isinstance(e, Affine)),
+            *(e.bound for e in self.encoders.values() if e.bound is not None),
+        ]
+        carried = {v.name for v in self.values if v.kind is Kind.CARRIED}
+        return {e.value.name for e in expressions} | carried
+
     @classmethod
     def of_steps(
         cls,
