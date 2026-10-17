@@ -36,13 +36,9 @@ What is SmolVLM's own is in `iron/applications/idefics3/`:
   (pixel-shuffle, then a bias-free projection into the text model's
   space)
 
-The checkpoint nests the text backbone under `model.text_model`, not
-`model` (`CausalLM`'s own assumption): `SmolVLMText.__init__` re-roots
-the tree it hands the base class to a fresh namespace aliasing
-`model.text_model` as `model`, with no edit to the checkpoint's own
-tensors; the untied `lm_head` (a checkpoint sibling of `model`) is kept
-separately. That alias goes once `CausalLM` takes its decoder module
-explicitly (a library change under review). `SmolVLM.body()` is a full copy of `CausalLM.body()` with one
+The checkpoint nests the text backbone under `model.text_model`, which
+`CausalLM` and `Oracle` read through `decoder=`; the untied `lm_head` is a
+sibling of `model`. `SmolVLM.body()` is a full copy of `CausalLM.body()` with one
 line changed (`pixel_values` threaded to `embed()`): the base class's
 `embed(x)` takes no second argument today, since the generic
 `iron.lm.Multimodal` hook (the design's part 2) has not landed; this

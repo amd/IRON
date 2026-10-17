@@ -76,49 +76,36 @@ class SmolVLMTextConfig(DecoderConfig):
     )
 
 
-def _text_model(weights):
-    """``weights``, re-rooted so ``CausalLM``'s ``weights.model.layers``
-    reaches the checkpoint's ``model.text_model.layers``.
-
-    TODO(main, decoder subtree): CausalLM taking the decoder module
-    explicitly replaces this alias.
-    """
-    return SimpleNamespace(model=weights.model.text_model)
-
-
 class SmolVLMTextOracle(Oracle):
     """SmolVLM's text backbone's forward pass in float32, on the host."""
 
     def __init__(self, config, weights):
-        super().__init__(config, _text_model(weights))
+        super().__init__(config, weights, decoder=weights.model.text_model)
         self.lm_head = widen(weights.lm_head.weight)
 
     def head(self, x):
-        norm = widen(self.weights.model.norm.weight)
+        norm = widen(self.decoder.norm.weight)
         return self.rms_norm(x, norm) @ self.lm_head.T
 
 
 class SmolVLMText(CausalLM):
     """SmolVLM's text backbone on ``config``'s shape and a checkpoint's
-    ``weights``, by its names (the untied ``lm_head``, kept from the
-    checkpoint's own root since the text backbone's re-rooted view does
-    not reach it). Every matrix is read ``(out, in)``, as the checkpoint
-    ships it.
+    ``weights``, by its names: the decoder under ``model.text_model``, the
+    untied ``lm_head`` at the root. Every matrix is read ``(out, in)``, as
+    the checkpoint ships it.
     """
 
     profile = Path(__file__).with_name("profiles")
     oracle = SmolVLMTextOracle
 
     def __init__(self, config, weights):
-        super().__init__(config, _text_model(weights))
+        super().__init__(config, weights, decoder=weights.model.text_model)
         self.lm_head = weights.lm_head.weight
 
     def head(self, x):
         return GEMV.step(
             self.lm_head,
-            RMSNorm.step(
-                x, weight=self.weights.model.norm.weight, epsilon=self.config.eps
-            ),
+            RMSNorm.step(x, weight=self.decoder.norm.weight, epsilon=self.config.eps),
         )
 
 
@@ -233,7 +220,7 @@ class SmolVLM(SmolVLMText):
         c = self.config
         L, C, A = c.max_seq_len, c.prefill_chunk, c.rope_width
         prompt = ids is not None
-        embedding = iron.weight(self.weights.model.embed_tokens.weight)
+        embedding = iron.weight(self.decoder.embed_tokens.weight)
         if prompt:
             x = Copy.step(embedding[ids[:rows]])
             angles = Copy.step(self.rope.reshape(L // C, C, A)[chunk, :rows])
