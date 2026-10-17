@@ -1079,7 +1079,8 @@ profiles. The library is four modules:
   norms, biases, a `linear` wrapper, a fused `qkv_proj` or `gate_up_proj`
   (cut by rows, views of the checkpoint's array), a per-layer input
   (`ple_block`) and a `layer_scalar`. The config's `layer(i)` gives the
-  rest: heads, activation, attention scale and window, a value norm. Its
+  rest: heads, activation, attention scale and window, a value norm, a
+  residual scale. Its
   `step()` runs in a graph's body with the model kind's `attend` and RoPE
   angles, and `oracle()` is its float32 twin, built from `Oracle`'s
   primitives (`iron/tests/common/layer.py`).
