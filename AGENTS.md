@@ -610,7 +610,16 @@ and states are named by the caller's path to it (`log_mel.dft`), the
 values it is given bound its steps, and the caller's one compile covers
 it. It may take an output to write as an input defaulting to None (a
 state's rows), and carries no values of its own. On its own it compiles
-and runs like any graph, which is how its device test runs it.
+and runs like any graph, which is how its device test runs it. A caller
+that names a part's values itself, carried ones included, traces any of
+the part's methods into its body under the part's profile with
+`part.inline(part.method, ...)`.
+
+A graph's inputs and per-call values are its `body`'s parameters, checked
+as the class is made; a graph whose inputs follow what it holds names them
+in `signature()` instead (`iron.lm.Multimodal`'s are its parts'). A
+compiled version takes the values it reads (`TracedGraph.reads`) and
+ignores the graph's others.
 
 So a capability a model needs is an operator when it is new compute: a
 kernel, an array, a data movement no operator has (`iron/operators/`, as
@@ -1049,7 +1058,10 @@ profiles. The library is five modules:
   without the real weights or the tokenizer
 - `causal.py`: `CausalLM`, a decoder as one graph, a prompt chunk and a
   decode step (`DecodeStep`), the key and value caches, attention over them
-  (`attend`) and `logits(tokens)`. A model subclasses it with `head(x)`,
+  (`attend`) and `logits(tokens)`, its body `lookup(ids[:rows])` then
+  `forward` (`from_rows`, a prompt chunk from rows given). `use()` runs its
+  host loop on another graph's versions (a multimodal model's), a chunk
+  holding a placeholder through `placed`. A model subclasses it with `head(x)`,
   and `Oracle` with a numpy `head(x)`, which it names as its `CausalLM`'s
   `oracle`; each layer is its config's `layer(i)`, a `Layer`, on the NPU
   (`CausalLM.layer`) and in numpy (`Oracle.layer`), and the pass, RoPE and
@@ -1066,12 +1078,16 @@ profiles. The library is five modules:
   encoder whose rows come from a front end (`front`) and whose output is
   `soft_rows` of soft tokens in a text model's space (`soft`, `inputs`,
   `soft_tokens`)
-- `multimodal.py`: `Multimodal(text, towers)`, a text model and its
-  towers keyed by placeholder token as one graph: a version per tower
-  writing its soft tokens into a merged state, and `placed`, which `Merge`s
-  them in at the placeholders and runs the text model over the rows. Its
-  inputs and per-call values are its parts', named in `signature()`
-  (`Graph.signature`), a tower's values after its input (`rgb_n`)
+- `multimodal.py`: `Multimodal(text, towers)`, an encoder or a causal
+  text model and its towers keyed by placeholder token as one graph: the
+  text model's versions, a version per tower writing its soft tokens into
+  a merged state, and `placed`, which `Merge`s them in at the
+  placeholders and runs the text model over the rows (for a causal model a
+  prompt chunk, given `before`, each placeholder's count before it, so a
+  run may cross chunks). Its inputs and per-call values are its parts',
+  named in `signature()` (`Graph.signature`), a tower's values after its
+  input (`rgb_n`). `calls`/`run` are an encoder's call, `logits`/`generate`
+  a causal model's
 - `blocks.py`: what layers are built from: `project(x, w)`, a weight's
   projection at either row count (GEMV for one row, GEMM for more), with a
   `bias` folded on by `RowwiseAdd` where a checkpoint's projection carries
