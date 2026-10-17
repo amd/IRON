@@ -58,7 +58,7 @@ def model(runner, request):
 
 # KL(fp32 CPU || NPU), teacher-forced: test_lfm2_1_2b_accuracy measures a
 # mean of 0.0013, a P90 of 0.0026 and a max of 0.0032 (40 steps); across two
-# chunks (prompt + decode spanning the conv layers' window-cache carry, the
+# chunks (prompt + decode spanning the conv layers' checkpointed rows, the
 # part of this port least sure of itself) a mean of 0.0057, a P90 of 0.0068
 # and a max of 0.0071 -- lower than Llama 3.2 1B's own (a dense model,
 # every layer attending, accrues more bf16 error than LFM2's six attention

@@ -20,18 +20,16 @@ reads LFM2's own names (`operator_norm`/`ffn_norm`, `q_layernorm`/
 conv layer is its short conv in attention's place, then `Layer`'s
 feed-forward block (`Layer.feed_forward`). A conv layer's three per-channel taps, a row each derived
 once at load (`iron.lm.Derived`), read a window spanning the current call
-and the one before it. A prompt may resume from any chunk, after positions
-decode steps wrote, so each conv layer keeps its gated rows by position as
-attention keeps its keys and values (`(max_seq_len, conv_dim)`), with one
-extra leading block that is never written and so stays zero -- standing
-in for "before the sequence" -- and a small `(prefill_chunk + conv_kernel - 1, conv_dim)` scratch state a
-prompt chunk assembles its window in before three `RowwiseMul`s (one a
-tap) and two `ElementwiseAdd`s sum it (`Lfm2.conv`, parallel to the base
-class's `attend`). `Lfm2.__init__` keeps `self.keys`/`self.values` as
-dicts of only the attention layers' caches, by index, rather than
-`CausalLM`'s one-per-layer list, so the ten conv layers allocate no unused
-key/value cache; `iron/lm/testing.py`'s `_fill_caches` already reads
-either form.
+and the `conv_kernel - 1` gated rows before it. Those rows are the layer's
+`iron.lm.Checkpoints` state, a slot per prompt-chunk boundary: a prompt
+chunk reads its boundary's slot and writes the next, a decode step its
+chunk's own, so a prompt may resume from any chunk (a chat turn) after
+positions decode steps wrote. Slot 0, never written, is zero: "before the
+sequence". A call assembles its window in a `(2, prefill_chunk, conv_dim)`
+scratch state before three `RowwiseMul`s (one a tap) and two
+`ElementwiseAdd`s sum it (`Lfm2.conv`, parallel to the base class's
+`attend`). Only the six attention layers hold key and value caches
+(`CausalLM` allocates them where a layer holds `self_attn`).
 
 ## Weights and tokenizer
 
@@ -65,15 +63,16 @@ The options are `iron.applications.llama.model`'s own (see its README):
 `--temperature`, `--top-k`, `--check-accuracy`, `--check-determinism`,
 `--compare-host`, `--cost-table` and `--full-elf`/`--no-full-elf`.
 
-## The arena past 4 GiB
+## The arena past one bank
 
-LFM2-1.2B's prompt chunk (weights, six attention layers' key/value caches
-and ten conv layers' window and scratch caches) pushes the full-ELF
-scratch arena past 4 GiB, past what one buffer object can address within
-`aiebu`'s 32-bit relocation addend, the limit Granite 4.2 3B's port found.
-The arena is banks of at most 3.5 GiB, each its own buffer object and
-argument (`iron/common/image/allocator.py`'s `BANK`), so both the decode
-step and the prompt chunk link as a full ELF (device loop) on NPU2.
+At its native 128000 positions, LFM2-1.2B's weights, six attention
+layers' key/value caches and ten conv layers' checkpointed rows pin 3.68
+GiB before the activations. The arena is banks of at most 3.5 GiB, each
+its own buffer object and argument (`iron/common/image/allocator.py`'s
+`BANK`), inside what one buffer object can address within `aiebu`'s
+32-bit relocation addend, the limit Granite 4.2 3B's port found; so both
+the decode step and the prompt chunk link as a full ELF (device loop) on
+NPU2.
 
 ## Tuning
 

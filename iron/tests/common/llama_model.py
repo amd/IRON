@@ -93,12 +93,18 @@ def shapes(config: DecoderConfig) -> dict[str, tuple[int, ...]]:
     return out
 
 
-def checkpoint(config: DecoderConfig) -> Checkpoint:
+def checkpoint(
+    config: DecoderConfig, named: dict[str, tuple[int, ...]] | None = None
+) -> Checkpoint:
     """A ``.safetensors`` checkpoint of ``config``'s shape, every tensor bf16
     zeros, written once a shape. The file is sparse: its header and a hole,
     which neither a random nor an unread tree reads.
+
+    Args:
+        config: The decoder's shape.
+        named: Each tensor's shape by name; None is Llama's (``shapes``).
     """
-    named = shapes(config)
+    named = shapes(config) if named is None else named
     digest = hashlib.sha256(json.dumps(named).encode()).hexdigest()[:16]
     path = Path(CHECKPOINTS.name) / f"{digest}.safetensors"
     if not path.exists():
