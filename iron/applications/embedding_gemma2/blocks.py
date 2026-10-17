@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""What EmbeddingGemma 2's graphs share beyond ``iron.lm.Layer``: ``attend``,
-the bidirectional attention its text encoder and vision tower give their
-layers, and ``Clipped``, the audio tower's clipped linear.
-"""
+"""``Clipped``, EmbeddingGemma 2's audio tower's clipped linear."""
 
 import dataclasses
 from types import SimpleNamespace
@@ -14,7 +11,6 @@ import numpy as np
 from iron.lm.blocks import ACCURATE
 from iron.operators.clamp import Clamp
 from iron.operators.gemm import GEMM
-from iron.operators.mha import MHA
 
 
 @dataclasses.dataclass(frozen=True)
@@ -36,23 +32,3 @@ class Clipped:
 
     def __call__(self, x):
         return self.project(self.clamp(x))
-
-
-def attend(q, k, v, *, scale: float | None, window: int | None):
-    """Attention of ``q`` ``(rows, heads, head_dim)`` over ``k`` and ``v``
-    ``(rows, groups, head_dim)``, bidirectional, within ``window`` positions
-    if given; ``Layer``'s ``attend``.
-    """
-    n, H, D = q.shape
-    o = MHA.step(
-        q,
-        k,
-        v,
-        heads_interleaved=True,
-        kv_interleaved=True,
-        causal=False,
-        emulate_bf16_mmul_with_bfp16=False,
-        window=window,
-        scale=scale,
-    )
-    return o.reshape(n, H * D)

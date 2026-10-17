@@ -6,6 +6,7 @@ into patches, the tower and its projection into the text model's space, as
 one graph.
 """
 
+from functools import partial
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,7 +14,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.lm import Derived, ImagePatches, Model, rope_angles
+from iron.lm import Derived, ImagePatches, Tower, rope_angles
 from iron.lm.blocks import ACCURATE
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
@@ -21,11 +22,10 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.operators.rms_norm import RMSNorm
 
-from .blocks import attend
 from .config import PROFILES, VisionConfig
 
 
-class VisionTower(Model):
+class VisionTower(Tower):
     """The vision tower and `embed_vision` over at most `patches` patches,
     one compile for every image; called in another graph's body, its steps
     are that graph's.
@@ -57,8 +57,8 @@ class VisionTower(Model):
         c = config
         tree = self.vision_tower = weights.vision_tower
         self.embed_vision = weights.embed_vision
+        super().__init__(config, tree.encoder.layers, c.patches)
         derived = Derived(weights)
-        self.config = config
         self.processor = ImagePatches(
             c.patches,
             c.largest,
@@ -94,7 +94,7 @@ class VisionTower(Model):
         self.derived = derived.tree()
         angles = np.zeros((c.positions + 1, half), bfloat16)
         angles[:-1] = rope_angles(half, c.positions, c.rope_base)
-        self.angles = iron.weight(angles)
+        self.rope = iron.weight(angles)
         self.minus_one = iron.weight(np.full((c.patches, c.emb_dim), -1, bfloat16))
         # Soft token j sums rows j * pool ** 2 onwards; a token past the
         # image's sums none of its rows.
@@ -103,22 +103,12 @@ class VisionTower(Model):
         pool = np.zeros((tokens, c.patches), bfloat16)
         for j in range(c.patches // window):
             pool[j, j * window : (j + 1) * window] = 1
-        self.pool = iron.weight(pool)
+        self.pooling = iron.weight(pool)
 
-    def body(
-        self,
-        rgb,
-        *,
-        n: Scratchpad[np.int32],
-        height: Scratchpad[np.int32],
-        width: Scratchpad[np.int32],
-        out_height: Scratchpad[np.int32],
-        out_width: Scratchpad[np.int32],
-    ):
-        """The `(tokens, text_dim)` soft tokens of the image `rgb`, `height`
-        by `width` pixels resized to `out_height` by `out_width`, its `n`
-        patches, `tokens` `patches // pool ** 2` rounded up to whole `rows`;
-        the first `n // pool ** 2` are the image's, the rest zero.
+    def front(self, rgb, *, n, height, width, out_height, out_width):
+        """The rows of the image ``rgb``'s ``n`` patches, ``height`` by
+        ``width`` pixels resized to ``out_height`` by ``out_width``, with
+        their position embeddings, and each patch's angles.
         """
         c = self.config
         pixels, xy, position_ids = self.processor(
@@ -138,26 +128,62 @@ class VisionTower(Model):
         h = ElementwiseAdd.step(
             ElementwiseAdd.step(h, position[0, :n]), position[1, :n]
         )
-        angles = Copy.step(self.angles[xy]).reshape(T, c.head_dim)[:n]
-        for i, (w, r) in enumerate(zip(v.encoder.layers, d.encoder.layers)):
-            a = r.self_attn
-            # q and k reordered, until RoPE turns each half of a head itself.
-            reordered = {
-                "q_proj": SimpleNamespace(weight=a.q_reordered),
-                "k_proj": SimpleNamespace(weight=a.k_reordered),
-                "q_norm": SimpleNamespace(weight=a.q_norm_reordered),
-                "k_norm": SimpleNamespace(weight=a.k_norm_reordered),
-            }
-            self_attn = SimpleNamespace(**{**vars(w.self_attn), **reordered})
-            w = SimpleNamespace(**{**vars(w), "self_attn": self_attn})
-            h = c.layer(i).step(w, h, attend, angles)
-        pooled = GEMM.step(self.pool[:, :n], h, **ACCURATE)
+        angles = Copy.step(self.rope[xy]).reshape(T, c.head_dim)[:n]
+        return h, angles
+
+    def layer(self, step, i, w, x):
+        a = self.derived.vision_tower.encoder.layers[i].self_attn
+        # q and k reordered, until RoPE turns each half of a head itself.
+        reordered = {
+            "q_proj": SimpleNamespace(weight=a.q_reordered),
+            "k_proj": SimpleNamespace(weight=a.k_reordered),
+            "q_norm": SimpleNamespace(weight=a.q_norm_reordered),
+            "k_norm": SimpleNamespace(weight=a.k_norm_reordered),
+        }
+        self_attn = SimpleNamespace(**{**vars(w.self_attn), **reordered})
+        w = SimpleNamespace(**{**vars(w), "self_attn": self_attn})
+        attend = partial(self.attend, step, i)
+        return self.config.layer(i).step(w, x, attend, step.angles)
+
+    def pool(self, x, n):
+        return GEMM.step(self.pooling[:, :n], x, **ACCURATE)
+
+    def head(self, x):
+        c = self.config
         # The mean's 1 / pool ** 2 and the sqrt(emb_dim) scale folded into
         # the norm's epsilon: RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
         s2 = c.emb_dim / c.pool**4
-        pooled = RMSNorm.step(pooled, epsilon=c.eps / s2)
+        x = RMSNorm.step(x, epsilon=c.eps / s2)
         projection = self.embed_vision.embedding_projection.weight
-        return GEMM.step(pooled, projection, b_col_maj=True, **ACCURATE)
+        return GEMM.step(x, projection, b_col_maj=True, **ACCURATE)
+
+    def body(
+        self,
+        rgb,
+        *,
+        n: Scratchpad[np.int32],
+        height: Scratchpad[np.int32],
+        width: Scratchpad[np.int32],
+        out_height: Scratchpad[np.int32],
+        out_width: Scratchpad[np.int32],
+    ):
+        """The `(tokens, text_dim)` soft tokens of the image `rgb`, `height`
+        by `width` pixels resized to `out_height` by `out_width`, its `n`
+        patches, `tokens` `patches // pool ** 2` rounded up to whole `rows`;
+        the first `n // pool ** 2` are the image's, the rest zero.
+        """
+        x, angles = self.front(
+            rgb,
+            n=n,
+            height=height,
+            width=width,
+            out_height=out_height,
+            out_width=out_width,
+        )
+        return self.forward(x, n, angles)
+
+    def soft(self, values: dict) -> int:
+        return values["n"] // self.config.pool**2
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, the largest image's."""
@@ -188,17 +214,3 @@ class VisionTower(Model):
         out_height, out_width = c.size(*np.shape(image)[:2], max_tokens)
         rgb, values = self.processor.pack(image, out_height, out_width)
         return rgb, dict(n=out_height // c.patch * (out_width // c.patch), **values)
-
-    def soft_tokens(self, image, max_tokens: int) -> np.ndarray:
-        """The soft tokens of one decoded image or video frame,
-        `(tokens, text_dim)` float32, in the text model's space.
-
-        Args:
-            image: `(height, width, 3)` uint8.
-            max_tokens: The processor's `max_soft_tokens`: `image_tokens`
-                for an image, `video_tokens` for a frame.
-        """
-        c = self.config
-        rgb, values = self.inputs(image, max_tokens)
-        tokens = self(rgb, **values).numpy().reshape(-1, c.text_dim)
-        return np.asarray(tokens[: values["n"] // c.pool**2], np.float32)

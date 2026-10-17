@@ -14,7 +14,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.lm import Derived, Model, blocks
+from iron.lm import Derived, Tower, blocks
 from iron.lm.blocks import ACCURATE
 from iron.operators.copy import Copy
 from iron.operators.depthwise_conv1d import DepthwiseConv1d
@@ -31,7 +31,7 @@ from .blocks import Clipped
 from .config import PROFILES, AudioConfig
 
 
-class AudioTower(Model):
+class AudioTower(Tower):
     """The audio tower and `embed_audio` over at most `max_tokens` soft
     tokens, one compile for every clip; called in another graph's body, its
     steps are that graph's.
@@ -69,7 +69,7 @@ class AudioTower(Model):
         sub = tree.subsample_conv_projection
         if c.frame != 2 * c.hop:
             raise ValueError(f"a frame of {c.frame} samples is not two hops")
-        self.config = config
+        super().__init__(config, tree.layers, c.max_tokens)
         T = c.max_tokens
         H, D, W, B = c.n_heads, c.head_dim, c.window, c.band
         C0, C1 = c.channels
@@ -155,23 +155,9 @@ class AudioTower(Model):
         self.log_mel(wave, self.features[1 : F + 1], frames=frames)
         Copy.step(self.zero_mel, self.features[frames + 1])
 
-    def body(
-        self,
-        wave,
-        *,
-        n: Scratchpad[np.int32],
-        frames: Scratchpad[np.int32],
-        tokens: Scratchpad[np.int32],
-    ):
-        """The soft tokens of `wave`, `(max_tokens, text_dim)` bfloat16, the
-        first `tokens` of them valid.
-
-        Args:
-            wave: `((4 * max_tokens + 1) * hop,)` float32 samples, as
-                `logmel` takes them.
-            n: The per-call `ceil(frames / 2)`.
-            frames: The per-call valid frames.
-            tokens: The per-call `config.tokens(frames)`.
+    def front(self, wave, *, n, frames, tokens):
+        """The rows of `wave`'s `tokens` soft tokens before the first layer;
+        nothing rotates them.
         """
         c = self.config
         C0, C1 = c.channels
@@ -200,26 +186,56 @@ class AudioTower(Model):
             b_col_maj=True,
             **ACCURATE,
         )
-        for w, d in zip(self.audio_tower.layers, self.derived.audio_tower.layers):
-            x = self.layer(w, d, x, tokens)
+        return x, None
+
+    def head(self, x):
+        c = self.config
         out = self.audio_tower.output_proj
         x = GEMM.step(x, out.weight, b_col_maj=True, **ACCURATE)
         x = RMSNorm.step(RowwiseAdd.step(x, out.bias), epsilon=c.eps)
         projection = self.embed_audio.embedding_projection.weight
         return GEMM.step(x, projection, b_col_maj=True, **ACCURATE)
 
-    def layer(self, w, d, x, tokens):
+    def body(
+        self,
+        wave,
+        *,
+        n: Scratchpad[np.int32],
+        frames: Scratchpad[np.int32],
+        tokens: Scratchpad[np.int32],
+    ):
+        """The soft tokens of `wave`, `(max_tokens, text_dim)` bfloat16, the
+        first `tokens` of them valid.
+
+        Args:
+            wave: `((4 * max_tokens + 1) * hop,)` float32 samples, as
+                `logmel` takes them.
+            n: The per-call `ceil(frames / 2)`.
+            frames: The per-call valid frames.
+            tokens: The per-call `config.tokens(frames)`.
+        """
+        x, angles = self.front(wave, n=n, frames=frames, tokens=tokens)
+        return self.forward(x, tokens, angles)
+
+    def layer(self, step, i, w, x):
+        """The conformer layer `i`: a feed-forward half step, attention, the
+        light convolution and a second half step.
+        """
         c = self.config
+        d = self.derived.audio_tower.layers[i]
         x = self.feed_forward(w.feed_forward1, d.feed_forward1, x)
         h = RMSNorm.step(x, weight=w.norm_pre_attn.weight, epsilon=c.eps)
         a = RMSNorm.step(
-            self.attention(w.self_attn, d.self_attn, h, tokens),
+            self.attention(w.self_attn, d.self_attn, h, step.n),
             weight=w.norm_post_attn.weight,
             epsilon=c.eps,
         )
         h = self.light_conv(w.lconv1d, d.lconv1d, ElementwiseAdd.step(x, a))
         x = self.feed_forward(w.feed_forward2, d.feed_forward2, h)
         return RMSNorm.step(x, weight=w.norm_out.weight, epsilon=c.eps)
+
+    def soft(self, values: dict) -> int:
+        return values["tokens"]
 
     def feed_forward(self, f, d, x):
         c = self.config
@@ -323,12 +339,3 @@ class AudioTower(Model):
         held = min(audio.size, wave.size - c.hop)
         wave[c.hop : c.hop + held] = audio[:held]
         return wave, dict(n=-(-frames // 2), frames=frames, tokens=tokens)
-
-    def soft_tokens(self, waveform) -> np.ndarray:
-        """The soft tokens of one mono clip at `sample_rate`:
-        `(config.tokens(frames), text_dim)` float32, in the text model's
-        space.
-        """
-        wave, values = self.inputs(waveform)
-        tokens = self(wave, **values).numpy().reshape(-1, self.config.text_dim)
-        return np.asarray(tokens[: values["tokens"]], np.float32)
