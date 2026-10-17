@@ -28,6 +28,7 @@ from .repeat import Repeat
 from .resample.op import PatchPositions, Resample, ResampleTaps
 from .rms_norm import RMSNorm
 from .rope import RoPE
+from .router import TopKRouter
 from .sample import Sample
 from .sigmoid import Sigmoid
 from .silu import SiLU

@@ -48,6 +48,7 @@ _OPERATOR_MODULES = {
     "Resample": "resample.op",
     "ResampleTaps": "resample.op",
     "RoPE": "rope",
+    "TopKRouter": "router",
     "RowwiseAdd": "elementwise_add",
     "RowwiseMul": "elementwise_mul",
     "Sample": "sample",
