@@ -301,7 +301,7 @@ class TwoMerges(iron.Graph):
     """Two Merges of one array, the shorter first, each on ids of its own."""
 
     def body(self, ids, more):
-        return Merge.step(ids, **GEMMA), Merge.step(more, **GEMMA)
+        return Merge.step(ids, placeholders=GEMMA), Merge.step(more, placeholders=GEMMA)
 
 
 @pytest.mark.supported_devices("npu2")
@@ -316,7 +316,7 @@ def test_each_merge_of_one_array_runs_on_its_own_count():
         ids, more = (
             np.where(
                 rng.random(n) < 1 / 3,
-                rng.choice([GEMMA["audio_token"], GEMMA["image_token"]], n),
+                rng.choice([t for t, _ in GEMMA], n),
                 rng.integers(0, 2**20, n),
             ).astype(np.int32)
             for n in (64, 192)

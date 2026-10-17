@@ -477,9 +477,16 @@ def test_merge_of_part_of_a_block_is_refused():
     rows unwritten.
     """
     with pytest.raises(ValueError, match="64-row blocks"):
-        Merge(rows=100, audio_token=0, image_token=1, audio_at=0, vision_at=0).resolved(
+        Merge(rows=100, placeholders=((0, 0), (1, 0))).resolved(
             from_name("npu2", n_cols=8)
         )
+
+
+@pytest.mark.parametrize("placeholders", [(), ((7, 0), (7, 64))])
+def test_merge_of_no_or_repeated_placeholders_is_refused(placeholders):
+    """A token is one placeholder's: a repeat would merge it twice."""
+    with pytest.raises(ValueError, match="distinct tokens"):
+        Merge(rows=128, placeholders=placeholders)
 
 
 @pytest.mark.parametrize("device,n_cols", [("npu1", 4), ("npu2", 8)])

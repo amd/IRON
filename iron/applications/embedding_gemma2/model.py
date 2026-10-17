@@ -310,10 +310,10 @@ class Multimodal(EmbeddingGemma):
         x = self.lookup(Copy.step(placed, dtype=np.int32)[:n])
         merge = Merge.step(
             placed,
-            audio_token=c.audio_token,
-            image_token=c.image_token,
-            audio_at=self.audio_at,
-            vision_at=self.vision_at,
+            placeholders=(
+                (c.audio_token, self.audio_at),
+                (c.image_token, self.vision_at),
+            ),
         )
         Copy.step(x, self.merged[: x.shape[0]])
         return self.forward(Copy.step(self.merged[merge])[:n], n, self.angles(n))
