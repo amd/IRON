@@ -29,12 +29,15 @@ What is SmolVLM's own is in `iron/applications/idefics3/`:
   processor's own token layout at any question text
   (`IMAGE_PREAMBLE`/`IMAGE_TOKENS`, read off the real
   `Idefics3Processor`'s output, not guessed)
-- `vision/model.py`: the vision tower (`VisionTower`/`VisionTowerOracle`,
-  a 12-layer SigLIP-style ViT -- affine LayerNorm, a learned absolute
-  position embedding, bias'd attention, a GELU-tanh MLP, its shape read
-  from the checkpoint's nested `vision_config`) and the connector
-  (pixel-shuffle, then a bias-free projection into the text model's
-  space)
+- `vision/model.py`: the vision tower and connector, an `iron.lm.Tower`
+  (`VisionTower`) on `iron.lm.Layer`'s SigLIP names (`layer_norm1`/
+  `layer_norm2`, biased attention, a GELU-tanh `fc1`/`fc2`; nothing
+  rotates), and its float32 twin (`VisionOracle`): a 12-layer ViT with a
+  learned absolute position embedding, then the connector's pixel-shuffle
+  (`pool`, one `Copy`) and its bias-free projection into the text model's
+  space (`head`). Its LayerNorms run at the kernel's epsilon, 1e-5, until
+  the pinned mlir-aie takes the checkpoint's 1e-6 (`layer_norm_eps`); the
+  oracle uses 1e-6
 
 The checkpoint nests the text backbone under `model.text_model`, which
 `CausalLM` and `Oracle` read through `decoder=`; the untied `lm_head` is a

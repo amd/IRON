@@ -21,7 +21,6 @@ are its profile's: ``tile_n`` 32 and ``k_tile`` 192.
 
 import dataclasses
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 from ml_dtypes import bfloat16
@@ -34,8 +33,8 @@ from iron import Carried, Scratchpad, lm
 from iron.lm import CausalLM, DecodeStep, DecoderConfig, Oracle, widen
 from iron.applications.idefics3.vision.model import (
     VisionConfig,
+    VisionOracle,
     VisionTower,
-    VisionTowerOracle,
 )
 from iron.operators.copy import Copy
 from iron.operators.gemv import GEMV
@@ -179,10 +178,7 @@ class SmolVLM(SmolVLMText):
 
     def __init__(self, config, weights, vision_config: VisionConfig):
         super().__init__(config, weights)
-        vision_weights = SimpleNamespace(
-            vision_model=weights.model.vision_model, connector=weights.model.connector
-        )
-        self.vision = VisionTower(vision_config, vision_weights)
+        self.vision = VisionTower(vision_config, weights)
         self.combined = iron.state((config.prefill_chunk, config.emb_dim))
 
     def embed(self, x, pixel_values, rows):
@@ -260,15 +256,12 @@ class SmolVLMOracle(SmolVLMTextOracle):
 
     def __init__(self, config, weights, vision_config: VisionConfig):
         super().__init__(config, weights)
-        vision_weights = SimpleNamespace(
-            vision_model=weights.model.vision_model, connector=weights.model.connector
-        )
-        self.vision = VisionTowerOracle(vision_config, vision_weights)
+        self.vision = VisionOracle(vision_config, weights)
 
     def embed(self, x, pixel_values=None):
         if pixel_values is None:
             return x
-        features = self.vision(pixel_values)
+        features = self.vision.soft_tokens(pixel_values)
         x = x.copy()
         x[IMAGE_PREAMBLE : IMAGE_PREAMBLE + IMAGE_TOKENS] = features
         return x
