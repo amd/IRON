@@ -116,6 +116,14 @@ TOWER_CLASSES = {
 }
 
 LM_HEAD = "iron/operators/flm/lm_head/test.py::"
+LLAMA = "tests/applications/llama/test.py::"
+QWEN3 = "tests/applications/qwen3/test.py::"
+# The module that runs every operator declaring its cases. Its parametrize ids
+# lead with the operator: 'GEMV-cols_4-...'.
+CATALOG_TEST_FILE = "iron/tests/operators/catalog.py"
+CATALOG = f"{CATALOG_TEST_FILE}::test_operator"
+# The prompt lengths and token counts a decoder application benches.
+PROMPTS = [(p, n) for p in (1024, 13) for n in (40, 1)]
 
 # Test paths renamed since the results branch began, each old prefix straight
 # to the newest: row_key maps a path by the first prefix it starts with, so
@@ -139,6 +147,7 @@ RENAMED_PATHS = {
     "iron/applications/llama3/": "tests/applications/llama/",
     "iron/applications/llama/": "tests/applications/llama/",
     "iron/applications/gemma4_flm/": "tests/applications/gemma4_flm/",
+    "iron/applications/qwen3/": "tests/applications/qwen3/",
     **{
         f"iron/operators/{block}/test.py::": f"iron/tests/lm/{block}.py::"
         for block in (
@@ -154,19 +163,53 @@ RENAMED_PATHS = {
 }
 
 # Parametrizations renamed since the results branch began, by their key after
-# RENAMED_PATHS: flm's LMHead whole-vocabulary bench became a case of its softcap
-# test over (dim, vocab).
+# RENAMED_PATHS:
+# - flm's LMHead whole-vocabulary bench became a case of its softcap test over
+#   (dim, vocab);
+# - a decoder application's tests became one per family, its size the first id
+#   (Llama 3.2 1B, Qwen3 1.7B);
+# - Merge's placeholders became one parameter.
 RENAMED_TESTS = {
-    (f"{LM_HEAD}test_gemma4_vocabulary", f"dim_{dim}"): (
-        f"{LM_HEAD}test_gemma4_softcap",
-        f"dim_{dim}-vocab_262144",
-    )
-    for dim in (1536, 2560)
+    **{
+        (f"{LM_HEAD}test_gemma4_vocabulary", f"dim_{dim}"): (
+            f"{LM_HEAD}test_gemma4_softcap",
+            f"dim_{dim}-vocab_262144",
+        )
+        for dim in (1536, 2560)
+    },
+    **{
+        (f"{path}{test}{old}", f"{old_id}_prompt_{p}_tokens_{n}"): (
+            f"{path}{test}{new}",
+            f"{size}-prompt_{p}_tokens_{n}",
+        )
+        for path, test, old, new, old_id, size in (
+            (LLAMA, "test_llama_3_2", "_1b", "", "llama_3.2_1b", "llama_3.2_1b"),
+            (
+                LLAMA,
+                "TestEachStep::test_llama_3_2",
+                "_1b_each_step",
+                "_each_step",
+                "llama_3.2_1b",
+                "llama_3.2_1b",
+            ),
+            (QWEN3, "test_qwen3", "_1_7b", "", "qwen3_1_7b", "qwen3_1.7b"),
+        )
+        for p, n in PROMPTS
+    },
+    (f"{LLAMA}test_llama_3_2_1b_device_loop", "test_llama_3_2_1b_device_loop"): (
+        f"{LLAMA}test_llama_3_2_device_loop",
+        "llama_3.2_1b",
+    ),
+    (f"{QWEN3}test_qwen3_1_7b_device_loop", "test_qwen3_1_7b_device_loop"): (
+        f"{QWEN3}test_qwen3_device_loop",
+        "qwen3_1.7b",
+    ),
+    (
+        CATALOG,
+        "Merge-rows_2048-audio_token_258881-image_token_258880-audio_at_2048-"
+        "vision_at_2560",
+    ): (CATALOG, "Merge-rows_2048-placeholders_((258881, 2048), (258880, 2560))"),
 }
-
-# The module that runs every operator declaring its cases. Its parametrize ids
-# lead with the operator: 'GEMV-cols_4-...'.
-CATALOG_TEST_FILE = "iron/tests/operators/catalog.py"
 
 
 def operator_name(test_path: str, test_name: str = "") -> str:
