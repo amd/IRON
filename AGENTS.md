@@ -729,7 +729,9 @@ code before relying on a line here; it is the authority.
   logs what it chose), else the longest whole number of chunks that does,
   and a caller may ask for any up to the native one. A prompt runs chunk by chunk
   against the caches, and decode is MHA of one query (a KV group's heads
-  packed into a block, a pipeline's own K and V lanes; a group that does
+  packed into the narrowest query block that holds them, over 64-key
+  blocks, since the cores compute every row of it; a pipeline's own K and
+  V lanes; a group that does
   not divide a block is two overlapping runs of its first and last
   `width` heads, `width` the largest power of two in it). The caches are
   `(max_seq_len, n_kv_groups, head_dim)`, so a call's write is contiguous

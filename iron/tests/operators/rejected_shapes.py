@@ -293,6 +293,38 @@ def test_mha_blocks_follow_the_head_size():
         assert op.pv_width * pv_cores == d
 
 
+@pytest.mark.parametrize("dev", ["npu1", "npu2"])
+@pytest.mark.parametrize(
+    "heads,kv_heads,d,block",
+    [(32, 8, 64, 16), (40, 8, 64, 16), (24, 8, 128, 16), (32, 1, 64, 32)],
+    ids=["llama_1b", "group_of_5", "llama_3b", "group_of_32"],
+)
+def test_mha_one_query_packed_takes_the_narrowest_block_and_64_keys(
+    dev, heads, kv_heads, d, block
+):
+    """Every row of a packed block is computed, so one query takes the
+    narrowest block that holds its group, over 64-key blocks: mha.cc's
+    vectorized softmax reads 64-key rows."""
+    bound = from_name(dev, n_cols=8 if dev == "npu2" else 4)
+    op = MHA(
+        num_heads=heads,
+        num_KV_heads=kv_heads,
+        d=d,
+        seq_len=1,
+        kv_len=32768,
+        num_pipelines=1,
+        heads_interleaved=True,
+    ).resolved(bound)
+    assert (op.B_q, op.B_kv) == (block, 64)
+
+
+def test_mha_one_query_packed_refuses_a_key_block_it_does_not_take():
+    with pytest.raises(ValueError, match="widest key block"):
+        MHA(num_heads=32, num_KV_heads=8, seq_len=1, kv_len=2048, B_kv=16).resolved(
+            from_name("npu2", n_cols=8)
+        )
+
+
 @pytest.mark.parametrize(
     "kwargs,why",
     [

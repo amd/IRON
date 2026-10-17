@@ -108,7 +108,8 @@ BLOCK_SIZES = Divisors(
         (
             b
             for b in (16, 32, 64)
-            if op.core_bytes(b, op.pv_cores) <= dev.core_memory_bytes
+            if op.core_bytes(b, op.key_block(b, dev.core_memory_bytes), op.pv_cores)
+            <= dev.core_memory_bytes
         ),
         default=16,
     ),
@@ -235,7 +236,6 @@ class MHA(Operator):
     window: int | None = Param(default=None)
     scale: float = Param(derive=lambda op: float(1 / np.sqrt(op.d)))
     B_q: int = Auto(domain=BLOCK_SIZES)
-    # mha.cc's causal skip compares a KV block's index with a Q block's.
     B_kv: int = Auto(repr=False, derived=True)
     num_pipelines: int = Auto(default=1, domain=Width())
     # bfp16 shares an exponent over 8 keys of P*V, and the softmax bounds the time.
@@ -327,9 +327,9 @@ class MHA(Operator):
 
     @property
     def first_query_block(self) -> int:
-        """The position of Q's first row, in blocks, which mha.cc masks by."""
+        """The position of Q's first row, in Q blocks, which mha.cc masks by."""
         if self.packed:
-            return ceildiv(self.kv_tokens, self.B_kv)
+            return ceildiv(self.kv_tokens, self.B_q)
         if not (self.causal or self.window):
             return 0
         start = self.kv_tokens - self.q_tokens
@@ -469,19 +469,23 @@ class MHA(Operator):
                 f"{dev.name} ({dev.arch}) with {dev.cols}"
             )
         B_q, pv_cores = self.B_q, self.pv_cores
+        mem = None if dev is None else dev.core_memory_bytes
         if B_q is None or pv_cores is None:
             if dev is None:
                 raise Unresolvable(
                     "MHA's block size and P*V cores follow the cores' memory; "
                     "none is bound and not both were given"
                 )
-            mem = dev.core_memory_bytes
+            group = self.num_heads // self.num_KV_heads
+            # Every row of a packed block is computed: the narrowest holding the group.
+            blocks = (16, 32, 64) if self.packed else (64, 32, 16)
             fit = next(
                 (
                     (cores, b)
                     for cores in ((1, 2) if pv_cores is None else (pv_cores,))
-                    for b in ((64, 32, 16) if B_q is None else (B_q,))
-                    if self.core_bytes(b, cores) <= mem
+                    for b in (blocks if B_q is None else (B_q,))
+                    if self.core_bytes(b, self.key_block(b, mem), cores) <= mem
+                    and not (self.packed and B_q is None and group > b)
                 ),
                 None,
             )
@@ -491,10 +495,16 @@ class MHA(Operator):
                     f"core's {mem} bytes"
                 )
             pv_cores, B_q = fit or (pv_cores or 1, B_q)
-        if self.B_kv not in (None, B_q):
+        B_kv = self.key_block(B_q, mem)
+        if self.B_kv not in (None, B_kv):
             raise ValueError(
-                f"B_kv ({self.B_kv}) is B_q ({B_q}): mha.cc's causal skip "
-                f"compares a KV block's index with a Q block's"
+                f"B_kv ({self.B_kv}) is {B_kv}: "
+                + (
+                    "one query packed takes the widest key block that fits"
+                    if self.packed
+                    else f"B_q's, as mha.cc's causal skip compares a KV block's "
+                    f"index with a Q block's"
+                )
             )
         q_shims = 2 if self.num_pipelines > 6 else 1
         if dev is not None:
@@ -509,7 +519,7 @@ class MHA(Operator):
         return dataclasses.replace(
             self,
             B_q=B_q,
-            B_kv=B_q,
+            B_kv=B_kv,
             q_shims=q_shims,
             join_rows=B_q * (self.num_pipelines // q_shims),
             kv_lanes=self.num_pipelines if self.packed else 1,
@@ -524,19 +534,35 @@ class MHA(Operator):
             return 1
         return ceildiv(seq_len, 64) * 64
 
-    def core_bytes(self, block: int, pv_cores: int) -> int:
+    def key_block(self, B_q: int, mem: int | None) -> int:
+        """``B_kv`` for ``B_q``: ``B_q`` itself, which mha.cc's causal skip
+        compares by; packed, past every key, the widest that fits ``mem`` (any
+        where None), since mha.cc's vectorized softmax reads 64-key rows."""
+        if not self.packed:
+            return B_q
+        return next(
+            (
+                b
+                for b in (64, 32, 16)
+                if B_q <= b
+                and not self.kv_len % b
+                and (mem is None or self.core_bytes(B_q, b, 1) <= mem)
+            ),
+            B_q,
+        )
+
+    def core_bytes(self, B_q: int, B_kv: int, pv_cores: int) -> int:
         """The L1 bytes the fuller of a pipeline's QK^T and P*V cores holds.
 
         Args:
-            block: ``B_q``, which ``B_kv`` is.
             pv_cores: The P*V cores the head is split over.
 
         Returns:
             The larger core's bytes, its stack included.
         """
-        b, d = block, self.d
-        pv = 4 * b * b + 10 * (d // pv_cores) * b + 32 * b
-        qk = (4 if pv_cores == 1 else 3) * 2 * d * b + 4 * b * b
+        d, pv_width = self.d, self.d // pv_cores
+        pv = 4 * B_q * B_kv + 4 * pv_width * B_kv + 6 * pv_width * B_q + 32 * B_q
+        qk = (4 if pv_cores == 1 else 2) * d * B_q + 4 * d * B_kv + 4 * B_q * B_kv
         return max(pv, qk) + STACK_SIZE
 
     class Array(Operator.Array):
