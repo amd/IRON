@@ -379,11 +379,14 @@ class Derived:
             self._tensors[name] = tensor
 
     def tree(self) -> SimpleNamespace:
-        """The derived weights, nested as the checkpoint tree is."""
-        return _nest(self._tensors)
+        """The derived weights, nested as the checkpoint tree is; a list's
+        module that nothing was put on, as on a layer of a kind only some
+        layers are, is an empty namespace.
+        """
+        return _nest(self._tensors, sparse=True)
 
 
-def _nest(named: Mapping[str, Any]) -> SimpleNamespace:
+def _nest(named: Mapping[str, Any], sparse: bool = False) -> SimpleNamespace:
     """Values by dotted name, nested as ``Checkpoint.tree()`` nests them."""
     nested: dict = {}
     for name, value in named.items():
@@ -392,23 +395,25 @@ def _nest(named: Mapping[str, Any]) -> SimpleNamespace:
         for key in parents:
             node = node.setdefault(key, {})
         node[leaf] = value
-    return _tree(nested)
+    return _tree(nested, sparse)
 
 
-def _tree(node) -> Any:
-    """Nested dicts as namespaces, those keyed ``0..n-1`` as lists.
+def _tree(node, sparse: bool) -> Any:
+    """Nested dicts as namespaces, those keyed by indices as lists up to
+    the largest; with ``sparse`` an index none holds is an empty namespace.
 
     Raises:
-        ValueError: A run of indices skips one.
+        ValueError: A run of indices skips one, not ``sparse``.
     """
     if not isinstance(node, dict):
         return node
-    items = {key: _tree(child) for key, child in node.items()}
-    if all(key.isdigit() for key in items):
-        missing = sorted(set(range(len(items))) - {int(key) for key in items})
-        if missing:
+    items = {key: _tree(child, sparse) for key, child in node.items()}
+    if items and all(key.isdigit() for key in items):
+        indices = range(max(map(int, items)) + 1)
+        missing = sorted(set(indices) - {int(key) for key in items})
+        if missing and not sparse:
             raise ValueError(f"indices {sorted(map(int, items))} skip {missing}")
-        return [items[str(i)] for i in range(len(items))]
+        return [items.get(str(i), SimpleNamespace()) for i in indices]
     return SimpleNamespace(**items)
 
 

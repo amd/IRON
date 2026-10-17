@@ -23,6 +23,7 @@ import struct
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -329,6 +330,20 @@ def test_derived_weights_nest_beside_their_modules_names(toy_path):
     assert bitwise_equal(d.q_rows, a.q_proj.weight[:2])
     assert bitwise_equal(d.k_scaled, a.k_proj.weight * 2)
     assert list(vars(got.model)) == ["layers", "norm_half"]
+
+
+def test_derived_weights_on_some_layers_leave_the_others_empty(toy_path):
+    """A module only some layers hold (a hybrid model's convolution): the
+    layers before the last one put on are empty namespaces, kept in place.
+    """
+    tree = Checkpoint(toy_path).tree()
+    derived = Derived(tree)
+    assert derived.tree() == SimpleNamespace()
+    a = tree.model.layers[1].self_attn
+    derived.put(a, q_rows=a.q_proj.weight[:2])
+    got = derived.tree()
+    assert got.model.layers[0] == SimpleNamespace()
+    assert bitwise_equal(got.model.layers[1].self_attn.q_rows, a.q_proj.weight[:2])
 
 
 def test_derived_weights_refuse_a_checkpoint_name_and_a_foreign_module(toy_path):
