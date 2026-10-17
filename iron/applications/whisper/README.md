@@ -33,17 +33,14 @@ The model runs at a toy shape with tanh GELU on drawn weights
 (`tests/applications/whisper/test.py`). Device-free, each version's
 reference is checked against the oracle; on the NPU, the same checks run
 through the compiled versions. At large-v3-turbo's real shape, with tanh
-GELU, a feed-forward of 4096 and a vocabulary of 51872 standing in for
-the gaps below, every version's operators resolve on npu2 and npu1.
+GELU and a vocabulary of 51872 standing in for the gaps below, every
+version's operators resolve on npu2 and npu1.
 
 The real checkpoint waits on:
 
 - **Exact GELU.** Whisper's `activation_function` is `"gelu"`. `Layer`
   and `WhisperEncoder` refuse it until mlir-aie's exact GELU arrives with
   the pin bump.
-- **A bias wider than `RowwiseAdd`'s 4096-element line.** The
-  feed-forward's `fc1` bias holds 5120 elements, past what `project()`
-  folds.
 - **`Sample` at a vocabulary of 51866.** It has no even slice per core.
 - **An fp16 checkpoint.** `Checkpoint` reads F16 tensors as float16, not
   bf16.

@@ -6,7 +6,7 @@ from typing import ClassVar
 from aie.iron.kernels import eltwise
 
 from iron import operators as catalog
-from iron.common import BinaryElementwise, Chain, In, Out, Rowwise
+from iron.common import BinaryElementwise, Chain, RowBroadcast
 from iron.common.elementwise import Sweep
 from iron.common.testing import Case, Testing
 
@@ -36,30 +36,11 @@ class ElementwiseAdd(BinaryElementwise):
             return eltwise.add_sized(self.tile_size)
 
 
-class RowwiseAdd(Rowwise):
+class RowwiseAdd(RowBroadcast):
     """Each row plus one row, ``x + row``: a projection's bias."""
 
     tile_cap: ClassVar[int] = 4096
 
-    x = In(
-        Rowwise.rows,
-        Rowwise.tile_size,
-        obj_type=(Rowwise.tile_size,),
-        per=(Rowwise.num_aie_columns, Rowwise.num_channels),
-    )
-    row = In(
-        Rowwise.tile_size,
-        obj_type=(Rowwise.tile_size,),
-        per=(Rowwise.num_channels,),
-        replicate=True,
-    )
-    y = Out(
-        Rowwise.rows,
-        Rowwise.tile_size,
-        obj_type=(Rowwise.tile_size,),
-        per=(Rowwise.num_aie_columns, Rowwise.num_channels),
-    )
-
-    class Array(Rowwise.Array):
+    class Array(RowBroadcast.Array):
         def kernel(self):
-            return eltwise.add_sized(self.tile_size)
+            return eltwise.add_sized(self.line)

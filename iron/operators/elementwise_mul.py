@@ -5,7 +5,7 @@ from typing import ClassVar
 
 from aie.iron.kernels import eltwise
 
-from iron.common import BinaryElementwise, In, Out, Rowwise
+from iron.common import BinaryElementwise, RowBroadcast
 
 
 class ElementwiseMul(BinaryElementwise):
@@ -16,30 +16,11 @@ class ElementwiseMul(BinaryElementwise):
             return eltwise.mul_sized(self.tile_size)
 
 
-class RowwiseMul(Rowwise):
+class RowwiseMul(RowBroadcast):
     """Each row times one row, ``x * row``."""
 
     tile_cap: ClassVar[int] = 4096
 
-    x = In(
-        Rowwise.rows,
-        Rowwise.tile_size,
-        obj_type=(Rowwise.tile_size,),
-        per=(Rowwise.num_aie_columns, Rowwise.num_channels),
-    )
-    row = In(
-        Rowwise.tile_size,
-        obj_type=(Rowwise.tile_size,),
-        per=(Rowwise.num_channels,),
-        replicate=True,
-    )
-    y = Out(
-        Rowwise.rows,
-        Rowwise.tile_size,
-        obj_type=(Rowwise.tile_size,),
-        per=(Rowwise.num_aie_columns, Rowwise.num_channels),
-    )
-
-    class Array(Rowwise.Array):
+    class Array(RowBroadcast.Array):
         def kernel(self):
-            return eltwise.mul_sized(self.tile_size)
+            return eltwise.mul_sized(self.line)

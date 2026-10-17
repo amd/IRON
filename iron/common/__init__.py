@@ -38,6 +38,7 @@ from .elementwise import (
     Finish,
     KernelCall,
     Prepare,
+    RowBroadcast,
     Rowwise,
     UnaryElementwise,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "Out",
     "Prepare",
     "Rtp",
+    "RowBroadcast",
     "Rowwise",
     "Select",
     "UnaryElementwise",

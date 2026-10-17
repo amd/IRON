@@ -842,9 +842,15 @@ class Elementwise(Operator):
                 f"define reference()"
             )
         _, scalars = config.arguments(kernel, op.chain()[0].scalars, len(inputs), 1)
-        # A held line is one row every call broadcasts against.
+        # A held line is one row every call broadcasts against; cut into
+        # segments, each line meets its own.
+        segments = config.held_segments()
         lines = [
-            x.reshape(1 if b.replicate else op.lines, -1, copy=False)
+            (
+                np.tile(np.reshape(x, (segments, -1)), (op.lines // segments, 1))
+                if b.replicate and segments > 1
+                else x.reshape(1 if b.replicate else op.lines, -1, copy=False)
+            )
             for b, x in zip(op.inputs, inputs)
         ]
         return (
@@ -873,6 +879,12 @@ class Elementwise(Operator):
         def scalars(self) -> tuple:
             """The kernel's scalar arguments its contract leaves unbound, in order."""
             return ()
+
+        def held_segments(self) -> int:
+            """The lines each held input is cut into, which a core holds all of
+            and meets, in turn, with that many lines of every other input.
+            """
+            return 1
 
         def arguments(
             self, kernel: ExternalFunction, given: tuple, n_in: int, n_out: int
@@ -937,12 +949,14 @@ class Elementwise(Operator):
                 col, chan = divmod(k, self.num_channels)
                 return f"{col}" if self.num_channels == 1 else f"{col}_{chan}"
 
+            segments = self.held_segments()
+
             def fifos(stream, name):
                 # A held line, acquired once per call, is one fifo per lane that
                 # the cores of its lane share.
                 if stream.replicate:
                     return [
-                        ObjectFifo(stream.obj_type, depth=1)
+                        ObjectFifo(stream.obj_type, depth=segments)
                         for j in range(stream.count)
                     ]
                 depth = stream.l1_depth
@@ -964,26 +978,31 @@ class Elementwise(Operator):
                 words = rtp.read()
                 n = words[self.count]
                 mode = finish.mode(words)
-                kept = {j: f.acquire(1) for j, f in enumerate(fifos) if held[j]}
+                kept = {j: f.acquire(segments) for j, f in enumerate(fifos) if held[j]}
                 for _ in range_(n):
-                    elements = [
-                        kept[j] if held[j] else f.acquire(1)
-                        for j, f in enumerate(fifos)
-                    ]
-                    tile = elements[-1]
-                    elements[-1] = finish.target(rest, mode, tile)
-                    kernel_fn(
-                        *(
-                            elements[order[i]] if i in order else scalars[i]
-                            for i in range(n_args)
+                    for s in range(segments):
+                        elements = [
+                            (
+                                (kept[j] if segments == 1 else kept[j][s])
+                                if held[j]
+                                else f.acquire(1)
+                            )
+                            for j, f in enumerate(fifos)
+                        ]
+                        tile = elements[-1]
+                        elements[-1] = finish.target(rest, mode, tile)
+                        kernel_fn(
+                            *(
+                                elements[order[i]] if i in order else scalars[i]
+                                for i in range(n_args)
+                            )
                         )
-                    )
-                    finish.apply(rest, mode, tile)
-                    for j, f in enumerate(fifos):
-                        if not held[j]:
-                            f.release(1)
+                        finish.apply(rest, mode, tile)
+                        for j, f in enumerate(fifos):
+                            if not held[j]:
+                                f.release(1)
                 for j in kept:
-                    fifos[j].release(1)
+                    fifos[j].release(segments)
 
             workers = [
                 Worker(
@@ -1119,3 +1138,90 @@ class Rowwise(Elementwise):
                 f"its block in an order of its own does not hold"
             )
         return super().at_line(line, dtype, dev, ordered, at)
+
+
+class RowBroadcast(Rowwise):
+    """``rows`` rows of ``tile_size`` elements, each met elementwise by one
+    ``row``. A row wider than ``tile_cap`` is cut into ``segments`` lines of
+    ``line`` elements, each met by its own segment of ``row``, which a core
+    holds whole: the same sums, in more calls.
+    """
+
+    # Rows past the cap: cut in two (Whisper's 5120-wide bias) and in six.
+    test = Testing(
+        [
+            Sweep(rows=True),
+            Case(dict(rows=64, tile_size=5120), id="wide_row", lower=True),
+            Case(dict(rows=8, tile_size=12288), id="wider_row"),
+        ]
+    )
+
+    segments: int = Auto(derived=True)
+    line: int = Auto(derived=True)
+
+    x = In(
+        Rowwise.rows,
+        Rowwise.tile_size,
+        obj_type=(line,),
+        per=(Elementwise.num_aie_columns, Elementwise.num_channels),
+    )
+    row = In(
+        Rowwise.tile_size,
+        obj_type=(line,),
+        per=(Elementwise.num_channels,),
+        replicate=True,
+    )
+    y = Out(
+        Rowwise.rows,
+        Rowwise.tile_size,
+        obj_type=(line,),
+        per=(Elementwise.num_aie_columns, Elementwise.num_channels),
+    )
+
+    def resolve(self, dev) -> Self:
+        W = self.tile_size
+        # A core holds the row and two lines each of x and y: as much as a
+        # row at the cap takes.
+        segments = next(
+            (
+                s
+                for s in range(1, W + 1)
+                if W % s == 0 and W + 4 * (W // s) <= 5 * self.tile_cap
+            ),
+            None,
+        )
+        if segments is None:
+            raise Unresolvable(
+                f"{type(self).__name__}: a {W}-element row and its lines do not "
+                f"fit a core beside {4 * self.tile_cap} elements of x and y"
+            )
+        (out,) = self.outputs
+        cols = self.resolve_columns(
+            dev,
+            self.num_aie_columns,
+            self.num_channels,
+            fits=lambda c: out.elements % (c * self.num_channels * W) == 0,
+        )
+        return dataclasses.replace(
+            self, num_aie_columns=cols, segments=segments, line=W // segments
+        )
+
+    def compatible(self) -> None:
+        super().compatible()
+        if self.segments > 1 and (self.finish or self.prepare):
+            raise ValueError(
+                f"{type(self).__name__}: a row cut into {self.segments} segments "
+                f"takes no finish or prologue"
+            )
+
+    @property
+    def lines(self) -> int:
+        (out,) = self.outputs
+        return out.elements // self.line
+
+    class Array(Rowwise.Array):
+        segments: int
+        line: int
+
+        def held_segments(self) -> int:
+            return self.segments
