@@ -11,6 +11,7 @@ in a text model's space.
 """
 
 import dataclasses
+from functools import partial
 from typing import Any
 
 import numpy as np
@@ -34,14 +35,16 @@ class EncodeStep:
 
 class Encoder(Model):
     """An encoder over ``max_tokens`` rows at most, one compile for every
-    length; a subclass gives ``lookup``, ``layer`` and ``head``.
+    length; a subclass gives ``lookup`` and ``head``, and its config
+    ``layer(i)``.
 
     A call takes the token ids, padded to ``max_tokens`` with 0, and ``n``,
     the real rows, which bound the embedding gather and every operator
     after it.
 
     Args:
-        config: The model's shape; ``inputs`` reads its ``vocab_size``.
+        config: The model's shape: its ``layer(i)`` is each layer, and
+            ``inputs`` reads its ``vocab_size``.
         layers: The checkpoint's layers, which the subclass holds by their
             checkpoint path before this is called.
         max_tokens: The longest sequence a call takes.
@@ -63,7 +66,9 @@ class Encoder(Model):
         return None
 
     def layer(self, step: EncodeStep, i: int, weights, x):
-        raise NotImplementedError(f"{type(self).__name__} defines no layer()")
+        """Layer ``i`` on ``x``: ``config.layer(i)``, attending bidirectionally."""
+        attend = partial(self.attend, step, i)
+        return self.config.layer(i).step(weights, x, attend, step.angles)
 
     def attend(
         self,

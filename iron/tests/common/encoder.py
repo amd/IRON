@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """``iron.lm``'s ``Encoder`` and ``Tower``, device-free: a call's inputs, the
-bounded gather a body traces, and each kind's reference, the operators' own,
-against numpy attention over the valid rows.
+bounded gather a body traces, each kind's reference, the operators' own,
+against numpy attention over the valid rows, and the default layer, its
+config's ``Layer`` attending both ways.
 """
 
 import dataclasses
@@ -15,8 +16,10 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.lm import Encoder, Tower
+from iron.lm import Encoder, Layer, Tower, rope_angles
 from iron.operators.copy import Copy, Gather
+from iron.operators.mha import MHA
+from iron.tests.common.layer import LLAMA, module, shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -31,6 +34,45 @@ TOLERANCE = Tolerance.bf16_ulps(LAYERS)
 class Shape:
     vocab_size: int = VOCAB
     text_dim: int = HEADS * HEAD_DIM
+
+
+@dataclasses.dataclass(frozen=True)
+class Windowed(Shape):
+    """A Llama-shaped layer each, accurate, the first unscaled within 64
+    positions."""
+
+    def layer(self, i: int) -> Layer:
+        first = i == 0
+        return Layer(
+            heads=HEADS,
+            groups=1,
+            head_dim=HEAD_DIM,
+            eps=1e-6,
+            scale=1.0 if first else None,
+            window=64 if first else None,
+            accurate=True,
+        )
+
+
+class Layers(Encoder):
+    """The default layer over Llama-shaped modules, rotated from the first
+    position."""
+
+    def __init__(self, table, layers: list):
+        self.table = table
+        self.modules = layers
+        angles = rope_angles(HEAD_DIM, ROWS, 10000.0).astype(bfloat16)
+        self.rope = iron.weight(angles)
+        super().__init__(Windowed(), layers, ROWS)
+
+    def lookup(self, ids):
+        return Copy.step(iron.weight(self.table)[ids])
+
+    def angles(self, n):
+        return self.rope[:n]
+
+    def head(self, x):
+        return x
 
 
 class SelfAttention(Encoder):
@@ -159,3 +201,18 @@ def test_a_tower_runs_its_front_end_s_rows():
 def test_a_tower_takes_no_ids():
     with pytest.raises(NotImplementedError, match="Rows defines no lookup"):
         Rows().lookup(None)
+
+
+def test_the_default_layer_is_the_config_s_attending_both_ways(table):
+    rng = np.random.default_rng(2)
+    shape = shapes(HEADS * HEAD_DIM, HEADS, 1, HEAD_DIM, 256)
+    graph = Layers(table, [module(rng, shape, LLAMA, bfloat16) for _ in range(2)])
+    traced = graph.trace(**graph.shapes()[0])
+    attention = [s.op for s in traced.steps if isinstance(s.op, MHA)]
+    assert [(op.causal, op.window, op.scale) for op in attention] == [
+        (False, 64, 1.0),
+        (False, None, HEAD_DIM**-0.5),
+    ]
+    # Whole 256-element lines: an elementwise reference refuses a partial one.
+    ids, values = graph.inputs(np.arange(8))
+    assert np.shape(graph.reference(ids, **values)) == (8, HEADS * HEAD_DIM)
