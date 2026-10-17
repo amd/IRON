@@ -18,7 +18,7 @@ import logging
 import time
 from collections.abc import Iterator
 from functools import partial
-from typing import Any
+from typing import Any, ClassVar
 
 import aie.utils as aie_utils
 import numpy as np
@@ -84,6 +84,8 @@ class CausalLM(Model):
 
     layers: list
     oracle: "type[Oracle]"
+    # The per-call value bounding a prompt chunk's rows.
+    bound: ClassVar[str] = "rows"
 
     def __init__(self, config: DecoderConfig, weights):
         self.config = config
@@ -117,6 +119,10 @@ class CausalLM(Model):
     def embed(self, x):
         return x
 
+    def lookup(self, ids):
+        """The embedding rows of ``ids``, bounded as ``ids`` is."""
+        return Copy.step(iron.weight(self.weights.model.embed_tokens.weight)[ids])
+
     def body(
         self,
         ids=None,
@@ -126,15 +132,34 @@ class CausalLM(Model):
         chunk: Scratchpad[np.int32],
         rows: Scratchpad[np.int32],
     ):
+        if ids is not None:
+            return self.from_rows(
+                self.lookup(ids[:rows]),
+                token=token,
+                position=position,
+                chunk=chunk,
+                rows=rows,
+            )
+        embedding = iron.weight(self.weights.model.embed_tokens.weight)
+        x = Copy.step(embedding[token]).reshape(1, self.config.emb_dim)
+        return self.forward(x, prompt=False, position=position, chunk=chunk, rows=rows)
+
+    def from_rows(self, x, *, token, position, chunk, rows):
+        """A prompt chunk's call on its embedding rows ``x``, bounded to
+        ``rows``, in place of its ids' lookup; ``token`` is the decode
+        step's, unread here.
+        """
+        return self.forward(x, prompt=True, position=position, chunk=chunk, rows=rows)
+
+    def forward(self, x, *, prompt: bool, position, chunk, rows):
+        """The layers, the head and the draw over ``x``: a prompt chunk's
+        rows, else the decode step's one at ``position``.
+        """
         c = self.config
         L, C, A = c.max_seq_len, c.prefill_chunk, c.rope_width
-        prompt = ids is not None
-        embedding = iron.weight(self.weights.model.embed_tokens.weight)
         if prompt:
-            x = Copy.step(embedding[ids[:rows]])
             angles = Copy.step(self.rope.reshape(L // C, C, A)[chunk, :rows])
         else:
-            x = Copy.step(embedding[token]).reshape(1, c.emb_dim)
             angles = Copy.step(self.rope[position]).reshape(1, A)
         x = self.embed(x)
         step = DecodeStep(prompt, angles, chunk, rows, position)

@@ -100,14 +100,13 @@ class Multimodal(Model):
                 return None
         if "placed" not in given:
             return self.text(*(given.get(n) for n in self.text_inputs), **text)
-        placed, n = given["placed"], text["n"]
+        placed, n = given["placed"], text[self.text.bound]
         # An input's gather is encoded on the host into its buffer, which Merge
         # reads as the ids: gather by the device's copy of them.
         x = self.text.lookup(Copy.step(placed, dtype=np.int32)[:n])
         merge = Merge.step(placed, placeholders=tuple(self.at.items()))
         Copy.step(x, self.merged[: x.shape[0]])
-        rows = Copy.step(self.merged[merge])[:n]
-        return self.text.forward(rows, n, self.text.angles(n))
+        return self.text.from_rows(Copy.step(self.merged[merge])[:n], **text)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: the text model's, each tower's,

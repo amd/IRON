@@ -12,7 +12,7 @@ in a text model's space.
 
 import dataclasses
 from functools import partial
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -49,6 +49,9 @@ class Encoder(Model):
             checkpoint path before this is called.
         max_tokens: The longest sequence a call takes.
     """
+
+    # The per-call value bounding a call's rows.
+    bound: ClassVar[str] = "n"
 
     def __init__(self, config, layers: list, max_tokens: int):
         self.config = config
@@ -122,8 +125,14 @@ class Encoder(Model):
             x = self.layer(step, i, weights, x)
         return self.head(self.pool(self.norm(x), n))
 
+    def from_rows(self, x, *, n):
+        """A call on its embedding rows ``x``, bounded to ``n``, in place of
+        its ids' lookup.
+        """
+        return self.forward(x, n, self.angles(n))
+
     def body(self, ids, *, n: Scratchpad[np.int32]):
-        return self.forward(self.lookup(ids[:n]), n, self.angles(n))
+        return self.from_rows(self.lookup(ids[:n]), n=n)
 
     def shapes(self) -> list[dict]:
         """The input shapes of each version: one, ``max_tokens`` rows."""
