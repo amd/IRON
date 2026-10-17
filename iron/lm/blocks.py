@@ -203,6 +203,13 @@ class LogMel(iron.Graph):
         return np.log(magnitude @ self.filters + self.mel_floor).astype(np.float32)
 
 
+# A pre-norm layer's two norms, before attention and before the
+# feed-forward, by each family of Hugging Face names.
+PRE_NORMS = (
+    ("input_layernorm", "post_attention_layernorm"),
+    ("layer_norm1", "layer_norm2"),
+    ("self_attn_layer_norm", "final_layer_norm"),
+)
 # The epsilon mlir-aie's layer_norm kernel fixes.
 LAYER_NORM_EPS = 1e-5
 # What every device's GEMM row block divides (aie2's 16 rows, aie2p's 8).
@@ -699,7 +706,8 @@ class ImagePatches(iron.Graph):
 class Layer:
     """A transformer layer over a checkpoint's layer module, read by its
     Hugging Face names: attention, then the feed-forward, each after its
-    pre-norm and with its residual.
+    pre-norm and with its residual. Its norms are any family of
+    ``PRE_NORMS``, its output projection ``o_proj`` or ``out_proj``.
 
     The module decides the rest: sandwich norms where it holds
     ``pre_feedforward_layernorm``; a norm's affine LayerNorm where it holds
@@ -707,7 +715,8 @@ class Layer:
     ``self_attn`` holds ``q_norm`` and ``k_norm``; a projection's bias where
     it holds one, its weight read through a ``linear`` wrapper; one fused
     ``qkv_proj`` or ``gate_up_proj`` cut by rows; a plain ``fc1``, ``fc2``
-    feed-forward where ``mlp`` holds them, else the gated one; a per-layer
+    feed-forward where ``mlp``, or the layer itself, holds them, else the
+    gated one; a per-layer
     input through ``ple_block``; and a ``layer_scalar``. A model kind gives
     the attention and the rotation: ``attend(q, k, v, scale=, window=)`` on
     ``(rows, heads, head_dim)`` returns ``(rows, heads * head_dim)``, and
@@ -758,20 +767,43 @@ class Layer:
         p = vars(p).get("linear", p)
         return p.weight, vars(p).get("bias")
 
+    @staticmethod
+    def norms(w) -> tuple:
+        """``w``'s norm modules: before attention, after it, before the
+        feed-forward and after it, the second and fourth None but in a
+        sandwich.
+
+        Raises:
+            ValueError: ``w`` holds no family of norms ``PRE_NORMS`` names.
+        """
+        held = vars(w)
+        if "pre_feedforward_layernorm" in held:
+            return (
+                w.input_layernorm,
+                w.post_attention_layernorm,
+                w.pre_feedforward_layernorm,
+                w.post_feedforward_layernorm,
+            )
+        for before, after in PRE_NORMS:
+            if before in held:
+                return held[before], None, held[after], None
+        raise ValueError(f"Layer: the module holds none of the norms {PRE_NORMS}")
+
     def projections(self, w) -> tuple[tuple, ...]:
         """``w``'s q, k, v and o projections, then the feed-forward's (gate,
         up and down, or fc1 and fc2), each ``(weight, bias)``; a fused
         ``qkv_proj`` or ``gate_up_proj`` cut by rows, so each piece is a view
         of the checkpoint's own array.
         """
-        a, mlp = w.self_attn, w.mlp
+        a = w.self_attn
+        mlp = w.mlp if "mlp" in vars(w) else w
         fused = []
         if "qkv_proj" in vars(a):
             Q, KV = self.heads * self.head_dim, self.groups * self.head_dim
             fused.append((a.qkv_proj, (0, Q, Q + KV, Q + 2 * KV)))
         else:
             fused += [(p, None) for p in (a.q_proj, a.k_proj, a.v_proj)]
-        fused.append((a.o_proj, None))
+        fused.append((a.o_proj if "o_proj" in vars(a) else a.out_proj, None))
         if "fc1" in vars(mlp):
             fused += [(mlp.fc1, None), (mlp.fc2, None)]
         elif "gate_up_proj" in vars(mlp):
@@ -821,7 +853,7 @@ class Layer:
         ``RowwiseMul`` takes, ``scale``.
         """
         if "layer_scalar" in vars(w):
-            width = w.input_layernorm.weight.shape[0]
+            width = self.norms(w)[0].weight.shape[0]
             scalar = w.layer_scalar
             derived.put(w, scale=np.full(width, scalar[0], scalar.dtype))
 
@@ -843,9 +875,9 @@ class Layer:
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
         a, eps = w.self_attn, self.eps
         q_w, k_w, v_w, o_w, *mlp = self.projections(w)
-        sandwich = "pre_feedforward_layernorm" in vars(w)
+        before, after, before_mlp, after_mlp = self.norms(w)
         act = SiLU if self.activation == "silu" else GELU
-        h = self.norm(x, w.input_layernorm)
+        h = self.norm(x, before)
         # Half a head per tile for one row; q's shape is o's when H * D is
         # the width, so it is given here rather than by the profile.
         q, k, v = (
@@ -870,12 +902,11 @@ class Layer:
             window=self.window,
         )
         y = project(o, *o_w, accurate=self.accurate)
-        if sandwich:
-            y = self.norm(y, w.post_attention_layernorm)
+        if after is not None:
+            y = self.norm(y, after)
         r = self.residual
         x = ElementwiseAdd.step(x, y) if r == 1 else AXPY.step(y, x, scalar_factor=r)
-        norm = w.pre_feedforward_layernorm if sandwich else w.post_attention_layernorm
-        h = self.norm(x, norm)
+        h = self.norm(x, before_mlp)
         if len(mlp) == 2:
             fc1, fc2 = mlp
             f = act.step(project(h, *fc1, accurate=self.accurate))
@@ -885,8 +916,8 @@ class Layer:
             up = project(h, *up_w, accurate=self.accurate)
             f = ElementwiseMul.step(act.step(gate), up)
         f = project(f, *fc2, accurate=self.accurate)
-        if sandwich:
-            f = self.norm(f, w.post_feedforward_layernorm)
+        if after_mlp is not None:
+            f = self.norm(f, after_mlp)
         x = ElementwiseAdd.step(x, f) if r == 1 else AXPY.step(f, x, scalar_factor=r)
         if "ple_block" in vars(w):
             if ple is None:
@@ -917,10 +948,10 @@ class Layer:
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
         a = w.self_attn
         q_w, k_w, v_w, o_w, *mlp = self.projections(w)
-        sandwich = "pre_feedforward_layernorm" in vars(w)
+        before, after, before_mlp, after_mlp = self.norms(w)
         silu = self.activation == "silu"
         A = self.rotary or D
-        h = o.normed(x, w.input_layernorm)
+        h = o.normed(x, before)
         q = o.linear(h, *q_w).reshape(n, H, D)
         k = o.linear(h, *k_w).reshape(n, G, D)
         v = o.linear(h, *v_w).reshape(n, G, D)
@@ -935,12 +966,11 @@ class Layer:
             for t in (q, k)
         )
         y = o.linear(attend(q, k, v, scale=self.scale, window=self.window), *o_w)
-        if sandwich:
-            y = o.normed(y, w.post_attention_layernorm)
+        if after is not None:
+            y = o.normed(y, after)
         r = np.float32(self.residual)
         x = x + y * r
-        norm = w.pre_feedforward_layernorm if sandwich else w.post_attention_layernorm
-        h = o.normed(x, norm)
+        h = o.normed(x, before_mlp)
         if len(mlp) == 2:
             fc1, fc2 = mlp
             g = o.linear(h, *fc1)
@@ -964,8 +994,8 @@ class Layer:
                 u += up_b
             f *= u
         f = o.linear(f, *fc2)
-        if sandwich:
-            f = o.normed(f, w.post_feedforward_layernorm)
+        if after_mlp is not None:
+            f = o.normed(f, after_mlp)
         x = x + f * r
         if "ple_block" in vars(w):
             b = w.ple_block

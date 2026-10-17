@@ -343,3 +343,60 @@ def test_the_graph_through_its_operators_references_is_the_oracle():
     identity = np.tile(np.float32([1, 0]), (T, (HEAD - rotary) // 2))
     whole = np.concatenate([turned, identity], axis=-1)
     assert error(dataclasses.replace(layer, rotary=None), whole) > 20 * 2**-9
+
+
+def renamed(w, family: str) -> SimpleNamespace:
+    """``w``, a pre-norm layer of ``PLAIN``'s names, under ``family``'s:
+    the same arrays.
+    """
+    a = w.self_attn
+    attention = dict(q_proj=a.q_proj, k_proj=a.k_proj, v_proj=a.v_proj)
+    if family == "siglip":
+        return SimpleNamespace(
+            layer_norm1=w.input_layernorm,
+            layer_norm2=w.post_attention_layernorm,
+            self_attn=SimpleNamespace(**attention, out_proj=a.o_proj),
+            mlp=w.mlp,
+        )
+    return SimpleNamespace(
+        self_attn_layer_norm=w.input_layernorm,
+        final_layer_norm=w.post_attention_layernorm,
+        self_attn=SimpleNamespace(**attention, out_proj=a.o_proj),
+        fc1=w.mlp.fc1,
+        fc2=w.mlp.fc2,
+    )
+
+
+@pytest.mark.usefixtures("npu2")
+@pytest.mark.parametrize("family", ["siglip", "whisper"])
+def test_a_family_s_names_read_as_their_llama_named_parts(family):
+    rng = np.random.default_rng(7)
+    shape = shapes(WIDTH, HEADS, GROUPS, HEAD, HIDDEN)
+    w = module(rng, shape, PLAIN, bfloat16, bias=True, norm_bias=True)
+    other = renamed(w, family)
+    layer = Layer(
+        HEADS, GROUPS, HEAD, 1e-5, "gelu_pytorch_tanh", scale=1.0, accurate=True
+    )
+    assert all(
+        x is y
+        for p, q in zip(layer.projections(w), layer.projections(other))
+        for x, y in zip(p, q)
+    )
+    assert all(x is y for x, y in zip(Layer.norms(w), Layer.norms(other)))
+    o = Oracle(AudioConfig(eps=1e-5))
+    x = rng.standard_normal((T, WIDTH)).astype(np.float32)
+    angles = rng.standard_normal((T, HEAD)).astype(np.float32)
+    np.testing.assert_array_equal(
+        layer.oracle(o, widen(w), x, o.attend, angles),
+        layer.oracle(o, widen(other), x, o.attend, angles),
+    )
+    steps = [
+        (type(s.op), s.op.design_key()) for s in traced((), layer, **vars(w)).steps
+    ]
+    traced_other = traced((), layer, **vars(other))
+    assert [(type(s.op), s.op.design_key()) for s in traced_other.steps] == steps
+
+
+def test_a_module_with_no_family_of_norms_is_refused():
+    with pytest.raises(ValueError, match="holds none of the norms"):
+        Layer.norms(SimpleNamespace(norm=None))

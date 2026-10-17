@@ -1073,7 +1073,9 @@ profiles. The library is four modules:
   front end's image into patches, `iron/tests/lm/image_patches.py`; and
   `Layer`, a transformer layer read from a checkpoint's layer module by its
   Hugging Face names (`input_layernorm`, `self_attn.q_proj`, ...,
-  `mlp.down_proj`). The module decides its parts: sandwich norms, an
+  `mlp.down_proj`; a SigLIP layer's `layer_norm1`/`layer_norm2`, a
+  Whisper layer's `self_attn_layer_norm`/`final_layer_norm` and `fc1`/`fc2`,
+  either's `out_proj`). The module decides its parts: sandwich norms, an
   affine LayerNorm where a norm holds a bias, q and k norms, biases, a
   `linear` wrapper, a fused `qkv_proj` or `gate_up_proj` (cut by rows,
   views of the checkpoint's array), a plain `mlp.fc1`/`fc2` feed-forward, a
