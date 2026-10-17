@@ -1157,7 +1157,8 @@ profiles. The library is six modules:
   affine LayerNorm where a norm holds a bias, q and k norms, biases, a
   `linear` wrapper, a fused `qkv_proj` or `gate_up_proj` (cut by rows,
   views of the checkpoint's array), a plain `fc1`/`fc2` feed-forward, a
-  per-layer input (`ple_block`), a `layer_scalar`, a Mamba-2 mixer in
+  per-layer input (`per_layer_input_gate`, on the module or its
+  `ple_block`), a `layer_scalar`, a Mamba-2 mixer in
   place of attention where it holds `mamba` (`Mamba2`, whose `states()` a
   `CausalLM` checkpoints), and a cross-attention block where it holds
   `encoder_attn` (Whisper's decoder: its `encoder_attn_layer_norm`, q, the
@@ -1166,7 +1167,9 @@ profiles. The library is six modules:
   the residual). The config's
   `layer(i)` gives the rest: heads, activation, attention scale and window,
   the rotated prefix of a head (`rotary_dim`), a value norm, a residual
-  scale, the Mamba-2 mixer's shape (`ssm`). Its
+  scale, the Mamba-2 mixer's shape (`ssm`), whether it attends over an
+  earlier layer's keys and values, projecting none (`shares_kv`), and the
+  per-layer input's scale (`ple_scale`, folded into its norm's epsilon). Its
   `step()` runs in a graph's body with the model kind's `attend` and RoPE
   angles (None turns nothing), and `oracle()` is its float32 twin
   (`cross_kv_oracle()` the keys' and values'), built from `Oracle`'s

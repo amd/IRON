@@ -823,3 +823,173 @@ def test_the_chunked_scan_carries_its_state_from_call_to_call():
     second, after = Oracle.ssd(x[cut:], dt[cut:], A, B[cut:], C[cut:], SB, state)
     np.testing.assert_allclose(np.concatenate([first, second]), whole, rtol=1e-5)
     np.testing.assert_allclose(after, last, rtol=1e-5)
+
+
+# A per-layer input's width.
+P = 4
+# Gemma 4's per-layer input parts, held by its layer module itself.
+PER_LAYER = {
+    "per_layer_input_gate": (P, E),
+    "per_layer_projection": (E, P),
+    "post_per_layer_input_norm": (E,),
+}
+
+
+def gemma4(rng, width=E, heads=H, groups=G, head=D, hidden=F, ple=P, dtype=np.float32):
+    """A Gemma 4 layer module: sandwich norms, q and k norms and its
+    per-layer input's gate, projection and norm on the module itself.
+    """
+    shape = {
+        **shapes(width, heads, groups, head, hidden),
+        "per_layer_input_gate": (ple, width),
+        "per_layer_projection": (width, ple),
+        "post_per_layer_input_norm": (width,),
+    }
+    return module(rng, shape, (*GEMMA, *PER_LAYER), dtype)
+
+
+def test_a_per_layer_input_on_the_module_reads_as_a_ple_block():
+    """Gemma 4's per-layer input parts on the layer module are read as
+    EmbeddingGemma 2's under ``ple_block``, and the oracle adds the gated
+    input, scaled by ``ple_scale``, after the feed-forward.
+    """
+    rng = np.random.default_rng(15)
+    w = gemma4(rng)
+    block = SimpleNamespace(**{n: p for n, p in vars(w).items() if n not in PER_LAYER})
+    block.ple_block = SimpleNamespace(**{n: vars(w)[n] for n in PER_LAYER})
+    bare = SimpleNamespace(**{n: p for n, p in vars(w).items() if n not in PER_LAYER})
+    x = rng.standard_normal((N, E)).astype(np.float32)
+    ple = rng.standard_normal((N, P)).astype(np.float32)
+    angles = rng.standard_normal((N, D)).astype(np.float32)
+    o = oracle()
+    attend = partial(o.attend, causal=True)
+    c = 2**-0.5
+    layer = Layer(H, G, D, 1e-6, "gelu_pytorch_tanh", scale=1.0, v_norm=True)
+    layer = dataclasses.replace(layer, ple_scale=c)
+    got = layer.oracle(o, w, x, attend, angles, ple=ple)
+    np.testing.assert_array_equal(
+        got, layer.oracle(o, block, x, attend, angles, ple=ple)
+    )
+    y = layer.oracle(o, bare, x, attend, angles)
+    g = Oracle.gelu_tanh(y @ w.per_layer_input_gate.weight.T) * (ple * np.float32(c))
+    want = y + rms(
+        g @ w.per_layer_projection.weight.T, w.post_per_layer_input_norm.weight
+    )
+    np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
+
+
+def test_a_layer_sharing_keys_and_values_attends_over_the_earlier_layers():
+    """A layer sharing an earlier layer's keys and values hands its
+    attention none of its own; given the same keys and values, it is the
+    layer that projects them and attends over the earlier layer's anyway.
+    """
+    rng = np.random.default_rng(16)
+    w = module(rng, shapes(E, H, G, D, F), GEMMA)
+    x = rng.standard_normal((N, E)).astype(np.float32)
+    k, v = rng.standard_normal((2, N, G, D)).astype(np.float32)
+    angles = rng.standard_normal((N, D)).astype(np.float32)
+    o = oracle()
+    given = []
+
+    def earlier(q, keys, values, **kw):
+        given.append((keys, values))
+        return o.attend(q, k, v, causal=True, **kw)
+
+    layer = Layer(H, G, D, 1e-6, "gelu_pytorch_tanh", scale=1.0, v_norm=True)
+    shared = dataclasses.replace(layer, shares_kv=True)
+    got = shared.oracle(o, w, x, earlier, angles)
+    assert given == [(None, None)]
+    np.testing.assert_array_equal(got, layer.oracle(o, w, x, earlier, angles))
+
+
+class Sharing(iron.Graph):
+    """``layer`` on the Gemma 4 module ``w`` at ``T`` rows and its per-layer
+    input, turned by nothing, attending over a held cache where it shares an
+    earlier layer's.
+    """
+
+    def __init__(self, layer, w):
+        self.layer, self.weights = layer, w
+        self.keys = iron.state((T, layer.groups, layer.head_dim))
+        self.values = iron.state((T, layer.groups, layer.head_dim))
+        turn = np.tile(np.float32([1, 0]), (T, layer.head_dim // 2))
+        self.angles = iron.weight(turn.astype(bfloat16))
+
+    def body(self, x, ple):
+        layer = self.layer
+
+        def attend(q, k, v, *, scale, window):
+            o = MHA.step(
+                q,
+                self.keys if k is None else k,
+                self.values if v is None else v,
+                heads_interleaved=True,
+                kv_interleaved=True,
+                causal=False,
+                scale=scale,
+            )
+            return o.reshape(T, layer.heads * layer.head_dim)
+
+        return layer.step(self.weights, x, attend, self.angles, ple=ple)
+
+
+@pytest.mark.usefixtures("npu2")
+def test_a_layer_sharing_keys_and_values_projects_none():
+    w = gemma4(
+        np.random.default_rng(17), WIDTH, HEADS, GROUPS, HEAD, HIDDEN, 256, bfloat16
+    )
+    layer = Layer(
+        HEADS,
+        GROUPS,
+        HEAD,
+        1e-6,
+        "gelu_pytorch_tanh",
+        scale=1.0,
+        v_norm=True,
+        accurate=True,
+    )
+    shape = dict(x=(T, WIDTH), ple=(T, 256))
+    own = ops(Sharing(layer, w).trace(**shape))
+    shared = ops(Sharing(dataclasses.replace(layer, shares_kv=True), w).trace(**shape))
+    # Its k and v projections, k's and v's norms and k's rotation.
+    assert own - shared == Counter(GEMM=2, RMSNorm=2, RoPE=1)
+    assert not shared - own
+
+
+@pytest.mark.usefixtures("npu2")
+def test_a_per_layer_input_s_graph_through_its_operators_references_is_its_oracle():
+    """A Gemma 4 layer and its per-layer input over ``ple_scale``, folded
+    into the input's norm, run through each operator's reference, is its
+    oracle within bf16's rounding of each of its steps; an oracle without
+    the per-layer input is not.
+    """
+    rng = np.random.default_rng(18)
+    w = gemma4(rng, WIDTH, HEADS, GROUPS, HEAD, HIDDEN, 256, bfloat16)
+    for n in ("pre_feedforward_layernorm", "post_per_layer_input_norm"):
+        vars(w)[n].weight += bfloat16(1)
+    bare = SimpleNamespace(**{n: p for n, p in vars(w).items() if n not in PER_LAYER})
+    layer = Layer(
+        HEADS,
+        GROUPS,
+        HEAD,
+        1e-6,
+        "gelu_pytorch_tanh",
+        scale=1.0,
+        v_norm=True,
+        accurate=True,
+        ple_scale=2**-0.5,
+    )
+    x = rng.standard_normal((T, WIDTH)).astype(bfloat16)
+    ple = rng.standard_normal((T, 256)).astype(bfloat16)
+    got = np.asarray(Sharing(layer, w).reference(x, ple), np.float32)
+    o = oracle()
+    xf, pf = np.asarray(x, np.float32), np.asarray(ple, np.float32)
+    angles = np.tile(np.float32([1, 0]), (T, HEAD // 2))
+
+    def error(module):
+        want = layer.oracle(o, widen(module), xf, o.attend, angles, ple=pf)
+        return np.linalg.norm(got - want) / np.linalg.norm(want)
+
+    # About 30 steps, each rounded once to bf16 (2 ** -9 relative).
+    assert error(w) < 30 * 2**-9
+    assert error(bare) > 30 * 2**-9

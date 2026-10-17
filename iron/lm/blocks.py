@@ -794,8 +794,9 @@ class Layer:
     feed-forward held by a module ``FEED_FORWARDS`` names or the layer
     itself, plain where it holds
     ``fc1`` and ``fc2``, else gated by a family of ``GATED``, or a mixture
-    of experts (``Experts.mixture``); a per-layer
-    input through ``ple_block``; a ``layer_scalar``; a Mamba-2 mixer (``ssm``)
+    of experts (``Experts.mixture``); a per-layer input where it or its
+    ``ple_block`` holds ``per_layer_input_gate``; a ``layer_scalar``; a
+    Mamba-2 mixer (``ssm``)
     in place of attention where it holds ``mamba``; and where it holds
     ``encoder_attn``, a cross-attention block after attention, over an
     encoder's output (``cross_kv``). A model kind gives the attention and
@@ -823,6 +824,9 @@ class Layer:
         ssm: The mixer of a module holding ``mamba``.
         experts: How a mixture of experts the module holds routes its rows
             (``Experts``); None where the config routes none.
+        shares_kv: Whether the layer attends over an earlier layer's keys
+            and values (``num_kv_shared_layers``), projecting none of its own.
+        ple_scale: What the per-layer input is scaled by.
     """
 
     heads: int
@@ -838,6 +842,8 @@ class Layer:
     accurate: bool = False
     ssm: Mamba2 | None = None
     experts: "Experts | None" = None
+    shares_kv: bool = False
+    ple_scale: float = 1.0
 
     def __post_init__(self):
         if self.activation not in ("silu", "gelu_pytorch_tanh"):
@@ -939,6 +945,14 @@ class Layer:
                 return held[q], held[k]
         return None, None
 
+    @staticmethod
+    def per_layer_input(w):
+        """The module of ``w`` holding its per-layer input's gate, projection
+        and norm: ``ple_block``, else ``w`` itself, else None.
+        """
+        b = vars(w).get("ple_block", w)
+        return b if "per_layer_input_gate" in vars(b) else None
+
     def norm(self, x, n):
         """``x`` normed by the norm module ``n``: an affine LayerNorm where it
         holds a bias, else its RMS norm.
@@ -994,12 +1008,13 @@ class Layer:
             angles: The RoPE angles, a row per position; None turns nothing.
             cross: The model kind's attention over the encoder's keys and
                 values, for an ``encoder_attn``.
-            ple: The per-layer input ``ple_block`` gates, ``(rows, ple_dim)``.
+            ple: The per-layer input ``per_layer_input_gate`` gates,
+                ``(rows, ple_dim)``, over ``ple_scale``.
             derived: ``w``'s module of the model's derived tree (``derive``).
 
         Raises:
             TypeError: The module holds an ``encoder_attn`` and no ``cross``
-                is given, a ``ple_block`` and no ``ple``, or a
+                is given, a per-layer input and no ``ple``, or a
                 ``layer_scalar`` and no ``derived``.
         """
         n, H, G, D = x.shape[0], self.heads, self.groups, self.head_dim
@@ -1011,29 +1026,26 @@ class Layer:
         h = self.norm(x, before)
         # Half a head per tile for one row; q's shape is o's when H * D is
         # the width, so it is given here rather than by the profile.
-        q, k, v = (
+        q, *kv = (
             project(h, *p, accurate=self.accurate, tile_size_output=D // 2)
-            for p in (q_w, k_w, v_w)
+            for p in ((q_w,) if self.shares_kv else (q_w, k_w, v_w))
         )
-        q, k, v = q.reshape(n * H, D), k.reshape(n * G, D), v.reshape(n * G, D)
+        q, k, v = q.reshape(n * H, D), *(kv or (None, None))
         if q_norm is not None:
             q = self.norm(q, q_norm)
         # One angle row per position, applied to that position's heads.
         if angles is not None:
             q = self.rotate(q, angles)
-        if k_norm is not None:
-            k = self.norm(k, k_norm)
-        if angles is not None:
-            k = self.rotate(k, angles)
-        if self.v_norm:
-            v = RMSNorm.step(v, epsilon=self.eps)
-        o = attend(
-            q.reshape(n, H, D),
-            k.reshape(n, G, D),
-            v.reshape(n, G, D),
-            scale=self.scale,
-            window=self.window,
-        )
+        if not self.shares_kv:
+            k, v = k.reshape(n * G, D), v.reshape(n * G, D)
+            if k_norm is not None:
+                k = self.norm(k, k_norm)
+            if angles is not None:
+                k = self.rotate(k, angles)
+            if self.v_norm:
+                v = RMSNorm.step(v, epsilon=self.eps)
+            k, v = k.reshape(n, G, D), v.reshape(n, G, D)
+        o = attend(q.reshape(n, H, D), k, v, scale=self.scale, window=self.window)
         y = project(o, *o_w, accurate=self.accurate)
         if after is not None:
             y = self.norm(y, after)
@@ -1047,14 +1059,20 @@ class Layer:
             o = cross(q.reshape(n, H, D), scale=self.scale)
             x = self.add(x, project(o, *o_w, accurate=self.accurate))
         x = self.feed_forward(w, x)
-        if "ple_block" in vars(w):
+        b = self.per_layer_input(w)
+        if b is not None:
             if ple is None:
-                raise TypeError("Layer.step: the module's ple_block needs ple=")
-            b = w.ple_block
+                raise TypeError("Layer.step: the module's per-layer input needs ple=")
             g = project(x, *self.linear(b.per_layer_input_gate), accurate=self.accurate)
             g = ElementwiseMul.step(act.step(g), ple)
             g = project(g, *self.linear(b.per_layer_projection), accurate=self.accurate)
-            x = ElementwiseAdd.step(x, self.norm(g, b.post_per_layer_input_norm))
+            # RMSNorm(c * y, eps) is RMSNorm(y, eps / c ** 2): ple_scale, exactly.
+            g = RMSNorm.step(
+                g,
+                weight=b.post_per_layer_input_norm.weight,
+                epsilon=self.eps / self.ple_scale**2,
+            )
+            x = ElementwiseAdd.step(x, g)
         if "layer_scalar" in vars(w):
             if derived is None:
                 raise TypeError("Layer.step: the module's layer_scalar needs derived=")
@@ -1118,7 +1136,8 @@ class Layer:
                 turns nothing.
             cross: The oracle's attention over the encoder's keys and
                 values (``cross_kv_oracle``), for an ``encoder_attn``.
-            ple: The per-layer input ``ple_block`` gates.
+            ple: The per-layer input ``per_layer_input_gate`` gates, over
+                ``ple_scale``.
 
         Raises:
             ValueError: The module holds ``mamba`` and the layer no ``ssm``.
@@ -1142,11 +1161,12 @@ class Layer:
             y = o.linear(cross(q.reshape(n, H, D), scale=self.scale), *o_w)
             x = x + y * r
         x = self.feed_forward_oracle(o, w, x)
-        if "ple_block" in vars(w):
-            b = w.ple_block
+        b = self.per_layer_input(w)
+        if b is not None:
             g = o.linear(x, *self.linear(b.per_layer_input_gate))
             g = o.silu(g) if self.activation == "silu" else o.gelu_tanh(g)
-            p = o.linear(g * ple, *self.linear(b.per_layer_projection))
+            g = g * (ple * np.float32(self.ple_scale))
+            p = o.linear(g, *self.linear(b.per_layer_projection))
             x = x + o.normed(p, b.post_per_layer_input_norm)
         if "layer_scalar" in vars(w):
             x = x * w.layer_scalar
@@ -1161,17 +1181,23 @@ class Layer:
         q_norm, k_norm = self.qk_norms(a)
         A = self.rotary or D
         q = o.linear(h, *q_w).reshape(n, H, D)
-        k = o.linear(h, *k_w).reshape(n, G, D)
-        v = o.linear(h, *v_w).reshape(n, G, D)
         if q_norm is not None:
             q = o.normed(q, q_norm)
-        if k_norm is not None:
-            k = o.normed(k, k_norm)
-        if self.v_norm:
-            v = o.rms_norm(v)
+        k = v = None
+        if not self.shares_kv:
+            k = o.linear(h, *k_w).reshape(n, G, D)
+            v = o.linear(h, *v_w).reshape(n, G, D)
+            if k_norm is not None:
+                k = o.normed(k, k_norm)
+            if self.v_norm:
+                v = o.rms_norm(v)
         if angles is not None:
             q, k = (
-                np.concatenate([o.rotate(t[..., :A], angles), t[..., A:]], axis=-1)
+                (
+                    None
+                    if t is None
+                    else np.concatenate([o.rotate(t[..., :A], angles), t[..., A:]], -1)
+                )
                 for t in (q, k)
             )
         return o.linear(attend(q, k, v, scale=self.scale, window=self.window), *o_w)
