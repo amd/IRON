@@ -10,6 +10,7 @@ the logits to a top-k summary; one combine core draws the token from them.
 """
 
 import dataclasses
+from functools import cache
 
 import numpy as np
 from aie.dialects.aie import WireBundle, get_target_model
@@ -37,6 +38,42 @@ from iron.common.testing import Case, Testing
 
 # A select core's logits object: no more than this, and even (4-byte DMA).
 _CHUNK_LIMIT = 8192
+
+
+def _largest_chunk(run: int, calls: int) -> int | None:
+    """The largest legal chunk of `run` logits that takes at most `calls` calls."""
+    for n in range(-(-run // _CHUNK_LIMIT), calls + 1):
+        if run % n == 0 and run // n % 2 == 0:
+            return run // n
+    return None
+
+
+@cache
+def slices(vocab: int, cores: int, k_max: int) -> tuple[int, int]:
+    """`(slice, last)`: the logits each select core but the last reads, and the last's.
+
+    An even split where there is one, else the smallest slice of the fewest calls.
+    """
+    if vocab % cores == 0 and vocab // cores % 2 == 0 and vocab // cores >= k_max:
+        return vocab // cores, vocab // cores
+    least = -(-vocab // cores)
+    least += least % 2
+    best, fewest = None, -(-least // _CHUNK_LIMIT)
+    for size in range(least, (vocab - k_max) // max(cores - 1, 1) + 1, 2):
+        last = vocab - (cores - 1) * size
+        calls = best[0] - 1 if best else size // 2
+        chunk = _largest_chunk(size, calls)
+        tail = chunk and _largest_chunk(last, calls)
+        if tail:
+            best = (max(size // chunk, last // tail), size, last)
+            if best[0] == fewest:
+                break
+    if best is None:
+        raise ValueError(
+            f"Sample cannot split {vocab} logits over {cores} cores into even "
+            f"slices (4-byte DMA) of at least k_max ({k_max})"
+        )
+    return best[1], best[2]
 
 
 def reference(logits, draw_row, k_max: int | None = None) -> int:
@@ -80,6 +117,8 @@ class Sample(Operator):
             Case(dict(vocab=4096, cores=4, steps=3), id="small"),
             Case(dict(vocab=4096, cores=2, chunk=256), id="two_cores"),
             Case(dict(vocab=128256, cores=4), id="llama", bench=True),
+            # No even split: three slices of 14560, and 8186 left for the last.
+            Case(dict(vocab=51866, cores=4), id="uneven", lower=True),
         ],
         draw=_logits,
     )
@@ -106,17 +145,12 @@ class Sample(Operator):
 
     @property
     def slice_size(self) -> int:
-        return self.vocab // self.cores
-
-    @property
-    def select_streams(self) -> int:
-        """How often each select core takes its slice per position."""
-        return kernels.select_streams(self.slice_size, self.chunk)
+        return slices(self.vocab, self.cores, self.k_max)[0]
 
     def validate(self) -> None:
-        if self.vocab % self.cores:
+        if self.vocab % 2:
             raise ValueError(
-                f"vocab ({self.vocab}) must split evenly over {self.cores} cores"
+                f"vocab ({self.vocab}) must be even: the logits move in 4-byte words"
             )
 
     def resolve(self, dev):
@@ -129,18 +163,15 @@ class Sample(Operator):
                 f"Sample's {self.cores} summaries join in one memtile, which "
                 f"takes {joined}"
             )
-        chunk = self.chunk or max(
-            c
-            for c in range(2, min(self.slice_size, _CHUNK_LIMIT) + 1, 2)
-            if self.slice_size % c == 0
-        )
+        chunk = self.chunk or _largest_chunk(self.slice_size, self.slice_size // 2)
         return dataclasses.replace(self, chunk=chunk)
 
     def compatible(self) -> None:
         # The factories' own checks: chunk divides the slice, k_max fits.
         try:
             config = self.array_config()
-            config.select()
+            for run in config.runs:
+                config.select(*run)
             config.combine()
         except ValueError as e:
             raise ValueError(str(e)) from e
@@ -157,17 +188,17 @@ class Sample(Operator):
 
         @property
         def slice_size(self) -> int:
-            return self.vocab // self.cores
+            return slices(self.vocab, self.cores, self.k_max)[0]
 
         @property
-        def select_streams(self) -> int:
-            """How often each select core takes its slice per position."""
-            return kernels.select_streams(self.slice_size, self.chunk)
+        def runs(self) -> list[tuple[int, int]]:
+            """Each select core's `(logits, chunk)`: the last reads what is left."""
+            size, last = slices(self.vocab, self.cores, self.k_max)
+            tail = self.chunk if last == size else _largest_chunk(last, last // 2)
+            return [(size, self.chunk)] * (self.cores - 1) + [(last, tail)]
 
-        def select(self):
-            return kernels.sample_select(
-                slice_size=self.slice_size, chunk=self.chunk, k_max=self.k_max
-            )
+        def select(self, run: int, chunk: int):
+            return kernels.sample_select(slice_size=run, chunk=chunk, k_max=self.k_max)
 
         def combine(self):
             return kernels.sample_combine(
@@ -175,9 +206,9 @@ class Sample(Operator):
             )
 
         def build(self) -> Built:
-            select, combine = self.select(), self.combine()
+            runs, combine = self.runs, self.combine()
+            selects = {run: self.select(*run) for run in set(runs)}
             words = kernels.summary_words(self.slice_size, self.k_max)
-            calls = self.select_streams * self.slice_size // self.chunk
             # Every core reads the draw row.
             of_draw = ObjectFifo(self.draws.obj_type, depth=1)
             self.draws.bind(of_draw.prod())
@@ -185,18 +216,24 @@ class Sample(Operator):
             self.token.bind(of_token.cons())
             of_record = ObjectFifo(self.tokens.obj_type, depth=1)
             self.tokens.bind(of_record.cons())
-            # The summaries meet in a memtile, column 0 first.
+            # The summaries meet in a memtile, column 0 first; combine reads a
+            # shorter last one's ties no further than its count.
             of_summaries = ObjectFifo(
                 np.ndarray[(self.cores * words,), np.dtype[np.int32]],
                 depth=1,
             )
             of_summary = of_summaries.prod().join(
                 [words * c for c in range(self.cores)],
-                obj_types=[np.ndarray[(words,), np.dtype[np.int32]]] * self.cores,
+                obj_types=[
+                    np.ndarray[
+                        (kernels.summary_words(run, self.k_max),), np.dtype[np.int32]
+                    ]
+                    for run, _ in runs
+                ],
                 depths=[1] * self.cores,
             )
 
-            def select_body(of_x, of_row, of_sum, kernel, state):
+            def select_body(of_x, of_row, of_sum, kernel, state, calls):
                 row = of_row.acquire(1)
                 summary = of_sum.acquire(1)
                 for _ in range_(calls):
@@ -218,8 +255,10 @@ class Sample(Operator):
                 of_rec.release(1)
 
             workers, logits = [], []
-            for c in range(self.cores):
-                of_x = ObjectFifo(self.logits.obj_type, depth=2)
+            for c, (run, chunk) in enumerate(runs):
+                of_x = ObjectFifo(
+                    np.ndarray[(chunk,), np.dtype[self.logits.dtype]], depth=2
+                )
                 logits.append(of_x.prod())
                 state = Buffer(
                     np.ndarray[(kernels.SELECT_STATE_WORDS,), np.dtype[np.int32]],
@@ -232,8 +271,9 @@ class Sample(Operator):
                             of_x.cons(),
                             of_draw.cons(),
                             of_summary[c].prod(),
-                            select,
+                            selects[run, chunk],
                             state,
+                            kernels.select_streams(run, chunk) * run // chunk,
                         ],
                     )
                 )
@@ -252,25 +292,21 @@ class Sample(Operator):
             )
             return Built(workers)
 
-    def _slice_taps(self, core: int) -> list[TensorAccessPattern]:
-        """Core ``core``'s slice, once per select stream."""
-        run, streams = self.slice_size, self.select_streams
-        piece = TensorAccessPattern.full((self.vocab,))[core * run : (core + 1) * run]
-        halves = self.logits.split(run)
-        if halves is not None:
-            tap = piece.split(0, halves[1]).repeat(streams)
-            if self.logits.fits(tap):
-                return [tap]
-        return [piece] * streams
-
     def sequence(self, rt):
         """One group: the draw and the logits in, then the record and the token."""
         row = self.row if self.row.per_call else None
         at = self.at if self.at.per_call else None
         tg = TaskGroup()
         self.draws.fill(self.draws[0], group=tg, offset_parameter=row)
-        for c in range(self.cores):
-            for tap in self._slice_taps(c):
+        for c, (run, chunk) in enumerate(self.array_config().runs):
+            # Core c's slice, once per select stream.
+            streams = kernels.select_streams(run, chunk)
+            start = c * self.slice_size
+            piece = TensorAccessPattern.full((self.vocab,))[start : start + run]
+            halves = self.logits.split(run)
+            tap = halves and piece.split(0, halves[1]).repeat(streams)
+            taps = [tap] if tap and self.logits.fits(tap) else [piece] * streams
+            for tap in taps:
                 self.logits.fill(tap, lane=c, group=tg)
         self.tokens.drain(self.tokens[:1], group=tg, wait=True, offset_parameter=at)
         self.token.drain(group=tg, wait=True)

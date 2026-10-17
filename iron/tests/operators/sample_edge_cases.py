@@ -52,6 +52,10 @@ DESIGNS = [
     pytest.param(dict(vocab=128, cores=2), id="slice_is_k_max"),
     # chunk 8016 (four per slice, 8016 % 32 == 16).
     pytest.param(dict(vocab=128256, cores=4), id="llama"),
+    # No even split: three streamed slices of 14560 and a resident last of 8186.
+    pytest.param(dict(vocab=51866, cores=4), id="uneven"),
+    # A streamed last slice of 24570 (chunk 8190) after one of 27296 (6824).
+    pytest.param(dict(vocab=51866, cores=2), id="uneven_streamed"),
 ]
 
 KINDS = [
@@ -79,14 +83,17 @@ KINDS = [
 pytestmark = pytest.mark.usefixtures("npu2")  # a bound device, restored
 
 
-def _boundaries(vocab: int, slice_size: int, chunk: int) -> np.ndarray:
+def _boundaries(vocab: int, slice_size: int, chunk: int, last: int) -> np.ndarray:
     """Indices either side of 32-element words, chunks, columns and the end."""
-    edges = [32, 64, chunk, 2 * chunk, slice_size, slice_size + chunk, vocab - 32]
+    edges = [32, 64, chunk, 2 * chunk, slice_size, slice_size + chunk, vocab - last]
+    edges += [vocab - 32]
     near = [e + d for e in edges for d in (-1, 0, 1)] + [0, vocab - 1]
     return np.unique([i for i in near if 0 <= i < vocab])
 
 
-def _logits(kind: str, vocab: int, slice_size: int, chunk: int, rng) -> np.ndarray:
+def _logits(
+    kind: str, vocab: int, slice_size: int, chunk: int, last: int, rng
+) -> np.ndarray:
     x = rng.normal(0, 3, vocab).astype(np.float32)
     if kind == "ascending":
         x = np.sort(x)
@@ -104,7 +111,9 @@ def _logits(kind: str, vocab: int, slice_size: int, chunk: int, rng) -> np.ndarr
     elif kind == "zeros on top":
         # -0 first, then both signs, in every column: one key.
         x = -np.abs(x) - 0.5
-        at = np.unique(np.concatenate([_boundaries(vocab, slice_size, chunk), [5]]))
+        at = np.unique(
+            np.concatenate([_boundaries(vocab, slice_size, chunk, last), [5]])
+        )
         x[at] = np.where(np.arange(at.size) % 2, np.float32(0.0), np.float32(-0.0))
     elif kind == "mostly -inf":
         x[rng.random(vocab) < 0.95] = -np.inf
@@ -116,25 +125,24 @@ def _logits(kind: str, vocab: int, slice_size: int, chunk: int, rng) -> np.ndarr
         x[finite] = keep
     elif kind == "ties straddling below the max":
         x = np.clip(rng.normal(0, 1, vocab), -4, 4).astype(np.float32)
-        x[_boundaries(vocab, slice_size, chunk)] = 8.0
+        x[_boundaries(vocab, slice_size, chunk, last)] = 8.0
         x[rng.choice(vocab, 3, replace=False)] = [9.0, 9.5, 10.0]
     elif kind == "ties straddling at the max":
         x = np.clip(rng.normal(0, 1, vocab), -4, 4).astype(np.float32)
-        x[_boundaries(vocab, slice_size, chunk)] = 8.0
+        x[_boundaries(vocab, slice_size, chunk, last)] = 8.0
     elif kind == "max once over ties":
         x = np.clip(x, -10, 9)
         x[rng.choice(vocab, min(100, vocab // 2), replace=False)] = 10.0
         x[vocab - 3] = 20.0
     elif kind == "max tied across columns":
         x = np.clip(x, -10, 9)
-        x[[31, 32, slice_size - 1, slice_size, vocab - 1]] = 20.0
+        x[[31, 32, slice_size - 1, slice_size, vocab - last, vocab - 1]] = 20.0
     elif kind == "k distinct top values":
         x = np.clip(rng.normal(0, 1, vocab), -4, 4).astype(np.float32)
         x[rng.choice(vocab, K_MAX, replace=False)] = 10 + 0.125 * np.arange(K_MAX)
     elif kind == "k distinct top values in one column":
         x = np.clip(rng.normal(0, 1, vocab), -4, 4).astype(np.float32)
-        last = vocab - slice_size
-        at = last + rng.choice(slice_size, K_MAX, replace=False)
+        at = vocab - last + rng.choice(last, K_MAX, replace=False)
         x[at] = 10 + 0.125 * rng.permutation(K_MAX)
     elif kind == "k-th tied past k":
         # 63 distinct values above five copies of the 64th.
@@ -164,6 +172,7 @@ def test_adversarial_logits_draw_the_reference_token(kwargs):
         aie_utils.ensure_current_device()
     )
     vocab, slice_size, chunk = sample.vocab, sample.slice_size, sample.chunk
+    [*_, (last, _)] = sample.array_config().runs
 
     class Step(iron.Graph):
         def body(self, logits, *, position: Scratchpad[np.int32]):
@@ -190,11 +199,11 @@ def test_adversarial_logits_draw_the_reference_token(kwargs):
 
     failures = []
     for kind in KINDS:
-        logits = _logits(kind, vocab, slice_size, chunk, rng)
-        last = []
+        logits = _logits(kind, vocab, slice_size, chunk, last, rng)
+        drawn = []
         for position, (t, k, _) in enumerate(ROWS):
             want = reference(logits, rows[position])
-            last.append(want)
+            drawn.append(want)
             got = int(np.asarray(net(logits, position=position)).reshape(-1)[0])
             if got != want:
                 n53 = int(rows[position, 2].view(np.uint32))
@@ -207,4 +216,4 @@ def test_adversarial_logits_draw_the_reference_token(kwargs):
         f"{len(failures)} of {len(KINDS) * steps} draws differ "
         f"(slice {slice_size}, chunk {chunk}):\n" + "\n".join(failures)
     )
-    assert np.asarray(net.read(tokens)).reshape(-1).tolist() == last
+    assert np.asarray(net.read(tokens)).reshape(-1).tolist() == drawn

@@ -387,6 +387,12 @@ def test_sample_with_more_cores_than_a_memtile_joins_is_refused():
     assert Sample(vocab=4096, cores=4).resolved(dev).cores == 4
 
 
+def test_sample_over_an_odd_vocab_is_refused():
+    """The logits move in 4-byte words, so a slice ends on an even index."""
+    with pytest.raises(ValueError, match="must be even"):
+        Sample(vocab=51865)
+
+
 def test_a_streamed_softmax_core_with_more_rows_than_it_unrolls_is_refused():
     """A streamed core unrolls its rows, each with its own state: past 48
     its program overflows the core's memory.
