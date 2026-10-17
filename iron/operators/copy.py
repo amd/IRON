@@ -830,7 +830,11 @@ class Copy(Operator):
             else y.reshape(-1)
         )
         out[scatter] = x.reshape(-1)[gather]
-        return out if y is None else y
+        if y is None:
+            return out
+        # A strided y reshapes to a copy, so the result is written back through it.
+        y[...] = out.reshape(y.shape)
+        return y
 
     def tolerance(self) -> Tolerance:
         return Tolerance.exact()

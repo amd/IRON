@@ -384,3 +384,25 @@ def test_a_copy_of_a_view_has_the_view_s_shape():
     transposed, cached = graph.reference(x)
     assert transposed.shape == cached.shape == (G, N, D)
     assert (transposed == x.reshape(N, G, D).transpose(1, 0, 2)).all()
+
+
+class _IntoColumns(iron.Graph):
+    """A weight copied into the leading columns of an intermediate, a
+    strided view of it, the rest of its rows kept.
+    """
+
+    def __init__(self, columns):
+        self.columns = columns
+
+    def body(self, x):
+        h = Copy.step(x)
+        Copy.step(self.columns, h[:, : self.columns.shape[1]])
+        return Copy.step(h)
+
+
+def test_the_reference_writes_a_copy_into_a_strided_view_through_it():
+    columns = np.arange(N * D, dtype=np.float32).reshape(N, D).astype(bfloat16)
+    x = -np.arange(N * 2 * D, dtype=np.float32).reshape(N, 2 * D).astype(bfloat16)
+    got = np.asarray(_IntoColumns(columns).reference(x)).reshape(N, 2 * D)
+    assert (got[:, :D] == columns).all()
+    assert (got[:, D:] == x[:, D:]).all()
