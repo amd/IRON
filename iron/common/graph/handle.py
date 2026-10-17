@@ -10,11 +10,13 @@ from collections.abc import Iterator, Mapping
 from math import prod
 from typing import Annotated, TypeVar
 
+import aie.utils as aie_utils
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
+from ..declare.operand import slots
 from ..declare.operator import graph_tracer
 from ..image.packaging import Kind
 from ..image.step import BufferRef
@@ -58,6 +60,8 @@ class Handle:
         "index_by",
         "bounds",
         "gather_by",
+        "repeat",
+        "length",
     )
 
     def __init__(
@@ -72,6 +76,8 @@ class Handle:
         index_by=None,
         bounds=None,
         gather_by=None,
+        repeat=None,
+        length=None,
     ):
         self.shape = tuple(int(s) for s in shape)
         self.dtype = dtype
@@ -87,6 +93,10 @@ class Handle:
         self.bounds: dict[int, Affine] = dict(bounds or {})
         # The handle whose ids pick the rows each call, for a gather.
         self.gather_by: Handle | None = gather_by
+        # A view's runs of its tap's first dimension, and entries of its
+        # second, each call (``at``).
+        self.repeat: Affine | None = repeat
+        self.length: Affine | None = length
 
     @property
     def elements(self) -> int:
@@ -271,8 +281,66 @@ class Handle:
             )
         return self.at(tap, shape, index_by, bounds)
 
-    def at(self, tap: TensorAccessPattern, shape, index_by=None, bounds=None):
-        """What ``tap`` walks, as ``shape``: a slice if contiguous, else a view."""
+    def at(
+        self,
+        tap: TensorAccessPattern,
+        shape,
+        index_by=None,
+        bounds=None,
+        *,
+        repeat=None,
+        length=None,
+    ):
+        """What ``tap`` walks, as ``shape``: a slice if contiguous, else a view.
+
+        ``repeat`` runs ``tap``'s first dimension that many times a call, and
+        ``length`` takes that many entries of its second, each a per-call
+        value; ``bounds`` then gives the rows the view moves a call.
+
+        Raises:
+            ValueError: With ``repeat`` or ``length``, ``tap`` is not four
+                dimensions one shim descriptor holds, or no ``bounds``.
+        """
+        if repeat is not None or length is not None:
+            sizes, strides = slots(tap.sizes, tap.strides)
+            padded = TensorAccessPattern(tap.tensor_dims, tap.offset, sizes, strides)
+            dev = aie_utils.get_current_device()
+            if (
+                index_by is not None
+                or tap.rank != 4
+                or dev is None
+                or not dev.dma_bd_fits(0, 0, padded, self.dtype)
+            ):
+                raise ValueError(
+                    f"{tap} takes a per-call repeat or length as one shim "
+                    f"descriptor: four dimensions, the repeated first, within a "
+                    f"descriptor's limits"
+                )
+            if not bounds:
+                raise ValueError(
+                    f"a walk of {tap} by a per-call repeat or length bounds the "
+                    f"rows it moves a call: give bounds"
+                )
+            repeat = None if repeat is None else repeat.affine()
+            length = None if length is None else length.affine()
+            tracer = graph_tracer.get()
+            if tracer is not None:
+                if repeat is not None:
+                    tracer.limit(repeat, 1, tap.sizes[0] + 1, self)
+                if length is not None:
+                    tracer.limit(length, 1, tap.sizes[1] + 1, self)
+            return Handle(
+                shape,
+                self.dtype,
+                self.name,
+                "view",
+                self,
+                0,
+                tap,
+                bounds=bounds,
+                repeat=repeat,
+                length=length,
+            )
         dense = tap.coalesce()
         offset = tap.offset
         if (
@@ -313,6 +381,20 @@ class _Viewed:
 
     def transpose(self, *axes):
         return self._as_operand().transpose(*axes)
+
+    def at(
+        self, tap: TensorAccessPattern, shape, bounds=None, *, repeat=None, length=None
+    ):
+        """``Handle.at`` of the tensor as the tracer views it; in a reference,
+        the rows ``tap`` walks this call.
+        """
+        operand = self._as_operand()
+        if isinstance(operand, Handle):
+            return operand.at(tap, shape, bounds=bounds, repeat=repeat, length=length)
+        walk = tap if repeat is None else tap[: int(repeat)]
+        walk = walk if length is None else walk[:, : int(length)]
+        flat = np.asarray(operand).reshape(-1)
+        return flat[walk.gather(np.arange(flat.size))].reshape(-1, *shape[1:])
 
 
 class State(_Viewed):

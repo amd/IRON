@@ -108,6 +108,8 @@ def _take_views(cls, operands, kwargs, values):
     A bound on one view holds the others: each side moves the same rows. A
     side not given (a fresh output) is the bounded view's shape, bounded
     alike; a given one must be that shape, and is bounded on the same axis.
+    A source walked with a per-call repeat or length (``Handle.at``) takes
+    them itself, and its ``bounds`` hold the others.
     """
     given = operands[: len(cls.accept_views)]
     held = next((h for h in given if h.bounds), None)
@@ -131,7 +133,18 @@ def _take_views(cls, operands, kwargs, values):
             param, offset_member = cls.accept_views[i]
             tap = TensorAccessPattern.full(h.shape or (1,)) if h.tap is None else h.tap
             kwargs.setdefault(param, tap)
-            if h.bounds:
+            if h.repeat is not None or h.length is not None:
+                if i:
+                    raise ValueError(
+                        f"{h!r}: a per-call repeat or length is a source's"
+                    )
+                if h.length is not None:
+                    kwargs.setdefault(f"{param}_bound", 1)
+                    values[f"{param}_valid"] = h.length
+                if h.repeat is not None:
+                    kwargs.setdefault(f"{param}_repeat", True)
+                    values[f"{param}_repeats"] = h.repeat - 1
+            elif h.bounds:
                 (axis, count), *more = h.bounds.items()
                 if more:
                     raise ValueError(f"{h!r}: a copy takes one bounded axis")

@@ -18,6 +18,7 @@ import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.iron import DispatchTime, ceildiv
+from aie.helpers.taplib import TensorAccessPattern
 from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
@@ -39,6 +40,7 @@ from iron.lm.blocks import project
 from iron.tests.common.graphs import FeedForward
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
+from iron.tests.operators import copy_bounded_view
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
 from iron.operators.emit import reference as emit_reference
@@ -2305,3 +2307,45 @@ class _SliceFrom(iron.Graph):
 def test_a_slice_from_a_per_call_start_is_refused_by_name(stop):
     with pytest.raises(ValueError, match="cannot start at a per-call value"):
         _SliceFrom(stop).trace()
+
+
+@pytest.mark.parametrize("band_stride", [0, 1])
+def test_a_walk_by_a_per_call_repeat_and_length_is_its_reference(band_stride):
+    walk = copy_bounded_view
+    table = np.arange(walk.HK * walk.WK * walk.K2 * walk.E, dtype=np.float32)
+    table = table.astype(bfloat16).reshape(-1, walk.E)
+    graph = walk.Walk(table, band_stride)
+    (step,) = graph.trace().steps
+    assert (step.op.src_repeat, step.op.src_bound, step.op.dst_bound) == (True, 1, 0)
+    for hk, wk in ((3, 4), (1, 1)):
+        n = hk * wk * walk.K2
+        got = np.asarray(graph.reference(hk=hk, wk=wk, n=n), dtype=np.float32)
+        want = walk.walked(table, band_stride, hk, wk).astype(np.float32)
+        np.testing.assert_array_equal(got, want)
+
+
+class _BadWalk(iron.Graph):
+    """A walk ``Handle.at`` refuses."""
+
+    def __init__(self, sizes, strides, bounded: bool):
+        self.table = iron.weight(np.zeros((64, 4096), dtype=bfloat16))
+        self.sizes, self.strides, self.bounded = sizes, strides, bounded
+
+    def body(self, *, k: Scratchpad[np.int32]):
+        tap = TensorAccessPattern(self.table.shape, 0, self.sizes, self.strides)
+        bounds = {0: k} if self.bounded else None
+        return Copy.step(self.table.at(tap, (64, 4096), bounds=bounds, repeat=k))
+
+
+@pytest.mark.parametrize(
+    "sizes, strides, bounded, match",
+    [
+        ([64, 4096], [4096, 1], True, "one shim"),  # not four dimensions
+        # Rows of 1024 words, past a descriptor's innermost wrap, with gaps.
+        ([2, 2, 8, 2048], [0, 65536, 4096, 1], True, "one shim"),
+        ([4, 4, 4, 1024], [0, 4096, 1024, 1], False, "give bounds"),
+    ],
+)
+def test_a_walk_one_descriptor_cannot_hold_is_refused(sizes, strides, bounded, match):
+    with pytest.raises(ValueError, match=match):
+        _BadWalk(sizes, strides, bounded).trace()

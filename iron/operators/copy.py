@@ -628,9 +628,15 @@ class Copy(Operator):
     src: TensorAccessPattern | tuple[TensorAccessPattern, ...] = Param(
         derive=lambda op: TensorAccessPattern.full((op.input_buffer_size,))
     )
+    # A repeated source's walk is its capacity: the destination's rows are the copy's.
     output_buffer_size: int = Param(
         derive=lambda op: sum(
-            prod(p.sizes) for p in (op.src if isinstance(op.src, tuple) else (op.src,))
+            prod(p.sizes)
+            for p in (
+                (op.dst,)
+                if op.src_repeat
+                else op.src if isinstance(op.src, tuple) else (op.src,)
+            )
         ),
         repr=False,
     )
@@ -645,6 +651,8 @@ class Copy(Operator):
     # The axis of each pattern a graph bounds per call.
     src_bound: int | None = Param(default=None)
     dst_bound: int | None = Param(default=None)
+    # The source's first axis runs a per-call count of times (Handle.at's repeat).
+    src_repeat: bool = Param(default=False)
     tile_size: int = Auto(
         domain=Divisors(
             of=lambda op, dev: op.channel_share,
@@ -676,6 +684,8 @@ class Copy(Operator):
     out_offset = Value(derive=lambda op: 0)
     src_valid = Value(derive=lambda op: op.src_bound)
     dst_valid = Value(derive=lambda op: op.dst_bound)
+    # Runs past the first, as a task queue's repeat count counts them.
+    src_repeats = Value(derive=lambda op: 0)
 
     def walks(self) -> list[tuple[TensorAccessPattern, ...]]:
         """The patterns each side walks in turn, ``[src, dst]``."""
@@ -684,8 +694,14 @@ class Copy(Operator):
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
 
     def validate(self) -> None:
+        if self.src_repeat and (
+            isinstance(self.src, tuple) or self.num_channels not in (None, 1)
+        ):
+            raise ValueError(
+                "a repeated source is one pattern, one descriptor on one channel"
+            )
         src, dst = (sum(prod(p.sizes) for p in w) for w in self.walks())
-        if src != dst:
+        if src != dst and not self.src_repeat:
             raise ValueError(
                 f"a copy moves the same element count both ways: src has {src} "
                 f"elements, dst {dst}"
@@ -798,8 +814,16 @@ class Copy(Operator):
     def _row_shares(self) -> list[int]:
         """Per bounded pattern, the elements per channel one bounded row moves."""
         return [
-            int(prod(tap.sizes) // tap.sizes[bound]) // self.num_channels
-            for tap, bound in ((self.src, self.src_bound), (self.dst, self.dst_bound))
+            int(
+                prod(tap.sizes[bound + 1 :])
+                if repeated
+                else prod(tap.sizes) // tap.sizes[bound]
+            )
+            // self.num_channels
+            for tap, bound, repeated in (
+                (self.src, self.src_bound, self.src_repeat),
+                (self.dst, self.dst_bound, False),
+            )
             if bound is not None
         ]
 
@@ -859,7 +883,15 @@ class Copy(Operator):
         return 0  # a data mover: its figure is bandwidth
 
     def reference(
-        self, x, y=None, *, in_offset=0, out_offset=0, src_valid=None, dst_valid=None
+        self,
+        x,
+        y=None,
+        *,
+        in_offset=0,
+        out_offset=0,
+        src_valid=None,
+        dst_valid=None,
+        src_repeats=None,
     ):
         """Gather by ``src``, scatter by ``dst``, into ``y`` in place if given."""
 
@@ -869,7 +901,10 @@ class Copy(Operator):
                 return tap
             return tap[(*[slice(None)] * bound, slice(int(valid)))]
 
-        src = at(self.src, self.src_bound, src_valid)
+        src = self.src
+        if self.src_repeat and src_repeats is not None:
+            src = src[: int(src_repeats) + 1]
+        src = at(src, self.src_bound, src_valid)
         dst = at(self.dst, self.dst_bound, dst_valid)
         gather, scatter = (
             np.concatenate(
@@ -992,6 +1027,7 @@ class Copy(Operator):
                 offset_parameter=in_off,
                 length_parameter=None if unit is None else self.src_valid,
                 length_unit=unit,
+                repeat_parameter=self.src_repeats if self.src_repeat else None,
             )
             tap, unit = outs[c]
             self.y.drain(
