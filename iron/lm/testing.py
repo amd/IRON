@@ -245,8 +245,8 @@ def check_chat_turn(
     runner, model, chars: int, turn: int, num_tokens: int = 2, *, record
 ):
     """A prompt extended by a turn, as a chat's next message extends it:
-    the model reruns the chunks from the one holding the turn's first token
-    over the caches the prompt left, and its logits, and those of the greedy
+    the model runs from the turn's first token (``CausalLM.resume``) over
+    the caches the prompt left, and its logits, and those of the greedy
     steps after, are bit for bit those of the whole run from scratch.
 
     The prompt is ``chars`` characters, the turn its last ``turn`` tokens.
@@ -283,7 +283,7 @@ def check_deep_decode(
     tokens = prompt(runner, chars, 1)
     token = greedy(model.logits(tokens))
     # A decode step takes the token; the device gathers its embedding row.
-    values = dict(token=token, position=position, chunk=0, rows=1)
+    values = dict(token=token, position=position, start=0, rows=1)
     with _fill_caches(model, len(tokens), position):
         got, _ = model(**values)
         got = got.numpy()
@@ -313,7 +313,7 @@ def check_deep_prompt(
     ids = model.prompt_ids(chunk)
     begin = deepest * C
     values = dict(
-        token=int(chunk[-1]), position=begin + rows - 1, chunk=deepest, rows=rows
+        token=int(chunk[-1]), position=begin + rows - 1, start=begin, rows=rows
     )
     with _fill_caches(model, len(tokens), begin):
         start = time.perf_counter()

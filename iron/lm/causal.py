@@ -4,7 +4,8 @@
 """A decoder-only language model on the NPU, as one graph.
 
 A call with no tensor is a decode step; ``prefill_chunk`` token ``ids`` are
-a prompt chunk, of which a call runs the first ``rows``, their rows of the
+a prompt chunk from position ``start``, of which a call runs the first
+``rows``, their rows of the
 embedding table gathered on the device, in a full ELF or an xclbin. Both
 draw the next token on the device and carry it and ``position + 1`` into
 the next call.
@@ -64,8 +65,9 @@ class DecodeStep:
     prompt: bool
     # None turns nothing.
     angles: Handle | None
-    # A per-call value in a trace, its number in the reference.
-    chunk: Any
+    # The first position the call runs: a per-call value in a trace, its
+    # number in the reference.
+    start: Any
     rows: Any
     position: Any
     # The encoder's rows a cross attention reads (``EncoderDecoder``).
@@ -75,8 +77,8 @@ class DecodeStep:
 @dataclasses.dataclass(frozen=True)
 class Checkpoints:
     """A state a decoder carries from position to position, a slot per
-    prompt-chunk boundary: slot ``k`` holds it after the positions of chunk
-    ``k - 1`` run so far, slot 0 (never written) before the sequence.
+    prompt-chunk boundary: slot ``k`` holds it after the positions up to
+    ``k * chunk`` run so far, slot 0 (never written) before the sequence.
     """
 
     slots: State
@@ -101,14 +103,19 @@ class Checkpoints:
         return cls(iron.state((slots, *shape), dtype), chunk)
 
     def at(self, step: DecodeStep) -> tuple[Handle, Handle]:
-        """The slot ``step`` reads and the slot it writes, in a graph's body: a
-        prompt chunk's boundary and the next; a decode step's chunk's own, but
-        at the chunk's first position the boundary before it.
+        """The slot ``step`` reads, the state before its first position, and
+        the slot it writes, the state after its last, in a graph's body. A
+        call ends within the chunk it starts in (``CausalLM`` splits them).
         """
-        if step.prompt:
-            return self.slots[step.chunk], self.slots[step.chunk + 1]
-        p = step.position
-        return self.slots[(p - 1) // self.chunk + 1], self.slots[p // self.chunk + 1]
+        C = self.chunk
+        return self.slots[(step.start - 1) // C + 1], self.slots[step.position // C + 1]
+
+    def restart(self, held: int, ran: int) -> int:
+        """Where a call may start to change the positions from ``held`` on,
+        after ``ran`` positions ran: there where the last call ended, else at
+        the boundary before it.
+        """
+        return held if held == ran else held // self.chunk * self.chunk
 
     def slot(self, position: int) -> int:
         """The slot holding the state after the first ``position`` positions."""
@@ -205,7 +212,7 @@ class CausalLM(Model):
         *,
         token: Carried[np.int32],
         position: Carried[np.int32],
-        chunk: Scratchpad[np.int32],
+        start: Scratchpad[np.int32],
         rows: Scratchpad[np.int32],
     ):
         if ids is not None:
@@ -213,34 +220,36 @@ class CausalLM(Model):
                 self.lookup(ids[:rows]),
                 token=token,
                 position=position,
-                chunk=chunk,
+                start=start,
                 rows=rows,
             )
         embedding = iron.weight(self.decoder.embed_tokens.weight)
         x = Copy.step(embedding[token]).reshape(1, self.config.emb_dim)
-        return self.forward(x, prompt=False, position=position, chunk=chunk, rows=rows)
+        return self.forward(x, prompt=False, position=position, start=start, rows=rows)
 
-    def from_rows(self, x, *, token, position, chunk, rows):
+    def from_rows(self, x, *, token, position, start, rows):
         """A prompt chunk's call on its embedding rows ``x``, bounded to
         ``rows``, in place of its ids' lookup; ``token`` is the decode
         step's, unread here.
         """
-        return self.forward(x, prompt=True, position=position, chunk=chunk, rows=rows)
+        return self.forward(x, prompt=True, position=position, start=start, rows=rows)
 
-    def forward(self, x, *, prompt: bool, position, chunk, rows, source=None):
+    def forward(self, x, *, prompt: bool, position, start, rows, source=None):
         """The layers, the head and the draw over ``x``: a prompt chunk's
-        rows, else the decode step's one at ``position``; ``source`` is the
-        step's (``DecodeStep``).
+        rows from ``start``, else the decode step's one at ``position``;
+        ``source`` is the step's (``DecodeStep``).
         """
         c = self.config
         C, A = c.prefill_chunk, c.rope_width
         if self.rope is None:
             angles = None
         elif prompt:
-            angles = Copy.step(self.rope[chunk * C : chunk * C + C][:rows])
+            angles = Copy.step(self.rope[start : start + C][:rows])
         else:
             angles = Copy.step(self.rope[position]).reshape(1, A)
-        step = DecodeStep(prompt, angles, chunk, rows, position, source)
+        # A decode step's one position is its start.
+        start = start if prompt else position
+        step = DecodeStep(prompt, angles, start, rows, position, source)
         x = self.positions(self.embed(x), step)
         for i, weights in enumerate(self.layers):
             x = self.layer(step, i, weights, x)
@@ -285,8 +294,7 @@ class CausalLM(Model):
         n, H, _ = q.shape
         for x, cache in ((k, keys), (v, values)):
             if step.prompt:
-                start = step.chunk * C
-                Copy.step(x, cache[start : start + C][: step.rows])
+                Copy.step(x, cache[step.start : step.start + C][: step.rows])
             else:
                 Copy.step(x.reshape(G, D), cache[step.position])
         span = np.s_[: step.position + 1]
@@ -355,7 +363,7 @@ class CausalLM(Model):
 
     def call_values(self) -> dict:
         """The per-call values every call gives beyond the token, position,
-        chunk and rows: none by default.
+        start and rows: none by default.
         """
         return {}
 
@@ -427,11 +435,9 @@ class CausalLM(Model):
             ),
             (
                 prompt_shapes,
-                dict(position=C - 1, token=token, chunk=0, rows=C),
+                dict(position=C - 1, token=token, start=0, rows=C),
                 [
-                    Point(
-                        w, dict(position=c - 1, token=token, chunk=c // C - 1, rows=C)
-                    )
+                    Point(w, dict(position=c - 1, token=token, start=c - C, rows=C))
                     for w, c in contexts(context, count, C)
                 ],
             ),
@@ -451,7 +457,7 @@ class CausalLM(Model):
         """The logits after the last of ``tokens``, the whole history.
 
         One more token than the last call's is a decode step; anything else
-        runs from the first token the caches do not hold.
+        runs from the first token the caches do not hold (``resume``).
 
         Raises:
             ValueError: ``tokens`` is empty or longer than ``max_seq_len``.
@@ -464,10 +470,11 @@ class CausalLM(Model):
             raise ValueError(f"{n} tokens do not fit {L} rows")
         held = self._held(tokens)
         if held == n - 1 == self._seen.size:
-            out, _ = self(token=int(tokens[-1]), position=n - 1, chunk=0, rows=1)
+            out, _ = self(token=int(tokens[-1]), position=n - 1, start=0, rows=1)
         else:
-            self._seen = tokens[: held // C * C]
-            for inputs, values in self._chunks(tokens, held):
+            start = self.resume(held)
+            self._seen = tokens[:start]
+            for inputs, values in self._chunks(tokens, start):
                 out, _ = self(*inputs, **values)
         self._seen = tokens
         # A copy: the next call rewrites the output buffer.
@@ -504,9 +511,9 @@ class CausalLM(Model):
         draws = np.zeros((L, ROW_WORDS), dtype=np.int32)
         draws[n - 1 : n - 1 + num_tokens] = sample.rows(num_tokens, self._k_max())
         self._decode.write(self.draws, draws)
-        held = self._held(tokens)
-        self._seen = tokens[: held // C * C]
-        for inputs, values in self._chunks(tokens, held):
+        start = self.resume(self._held(tokens))
+        self._seen = tokens[:start]
+        for inputs, values in self._chunks(tokens, start):
             if not loop or values["position"] < n - 1:
                 _, carry = self(*inputs, **values)
             else:
@@ -522,7 +529,7 @@ class CausalLM(Model):
         else:
             drawn = [carry["token"]]
             for _ in range(num_tokens - 1):
-                _, carry = self(chunk=0, rows=1, **carry)
+                _, carry = self(start=0, rows=1, **carry)
                 drawn.append(carry["token"])
         later = (
             (time.perf_counter() - first) / (num_tokens - 1)
@@ -557,6 +564,15 @@ class CausalLM(Model):
         same = np.append(tokens[:held] == self._seen[:held], False)
         return int(np.argmin(same))
 
+    def resume(self, held: int) -> int:
+        """The position calls start from to run the tokens from ``held`` on:
+        ``held`` itself, or for a state that cannot restart there
+        (``Checkpoints.restart``), the earliest one of them can.
+        """
+        ran = self._seen.size
+        states = [c for layer in self.recurrent.values() for c in layer.values()]
+        return min([held, *(c.restart(held, ran) for c in states)])
+
     def prompt_ids(self, tokens) -> np.ndarray:
         """A prompt call's ``ids`` for a chunk of ``tokens``, padded to
         ``prefill_chunk`` with row 0, which the bound by ``rows`` leaves
@@ -567,20 +583,24 @@ class CausalLM(Model):
         ids[: tokens.size] = tokens
         return ids
 
-    def _chunks(self, tokens: np.ndarray, held: int) -> Iterator[tuple]:
-        """Each prompt chunk from the first the caches do not hold: its
-        inputs, ``ids`` and for a chunk holding a placeholder ``before``, and
-        its per-call values.
+    def _chunks(self, tokens: np.ndarray, start: int) -> Iterator[tuple]:
+        """Each prompt call from ``start``: its inputs, ``ids`` and for a call
+        holding a placeholder ``before``, and its per-call values. With
+        recurrent state a call ends at the next chunk boundary, the slot it
+        writes.
         """
         n, C = tokens.size, self.config.prefill_chunk
-        for begin in range(held // C * C, n, C):
-            end = min(begin + C, n)
+        end = start
+        while end < n:
+            begin, end = end, min(end + C, n)
+            if self.recurrent:
+                end = min(end, (begin // C + 1) * C)
             ids = self.prompt_ids(tokens[begin:end])
             values = dict(
                 self.call_values(),
                 token=int(tokens[end - 1]),
                 position=end - 1,
-                chunk=begin // C,
+                start=begin,
                 rows=end - begin,
             )
             placed = np.isin(tokens[begin:end], self._placeholders).any()

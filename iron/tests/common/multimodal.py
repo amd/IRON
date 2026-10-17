@@ -174,7 +174,7 @@ def test_a_causal_model_s_versions_and_signature(causal):
         "before",
         "token",
         "position",
-        "chunk",
+        "start",
         "rows",
         "features_n",
     ]
@@ -195,7 +195,7 @@ def test_a_run_of_soft_tokens_crossing_a_chunk_is_placed_on_both_sides(causal):
     model, oracle, tokens, soft = causal
     C = model.text.config.prefill_chunk
     calls, towers = model.tower_calls(tokens, {IMAGE: (soft,)})
-    zero = dict(token=0, position=0, chunk=0, rows=1)
+    zero = dict(token=0, position=0, start=0, rows=1)
     for inputs in calls:
         model.reference(*inputs, **zero, **towers)
     placed = []
@@ -205,7 +205,7 @@ def test_a_run_of_soft_tokens_crossing_a_chunk_is_placed_on_both_sides(causal):
         values = dict(
             token=int(chunk[-1]),
             position=begin + chunk.size - 1,
-            chunk=begin // C,
+            start=begin,
             rows=chunk.size,
             **towers,
         )
@@ -220,7 +220,7 @@ def test_a_run_of_soft_tokens_crossing_a_chunk_is_placed_on_both_sides(causal):
         [np.asarray(logits).reshape(-1)], [oracle_logits(oracle, tokens, soft)]
     )
     tokens = np.append(tokens, carry["token"])
-    logits, _ = model.reference(chunk=0, rows=1, **carry, **towers)
+    logits, _ = model.reference(start=0, rows=1, **carry, **towers)
     _assert_close(
         [np.asarray(logits).reshape(-1)], [oracle_logits(oracle, tokens, soft)]
     )

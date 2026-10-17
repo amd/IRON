@@ -138,3 +138,26 @@ def test_a_turn_resumes_from_a_boundary(ran):
         turn = tokens[:boundary] + [int(np.random.default_rng(boundary).integers(512))]
         turn.append(int(_assert_close(model, oracle, turn).argmax()))
         _assert_close(model, oracle, turn)
+
+
+def test_a_turn_resumes_where_its_state_is_held():
+    """Decision 50 with recurrent state: an appended turn resumes at its
+    first new token, the state where the last call ended; a turn changing
+    a token mid-chunk resumes at the boundary before it. A call never
+    crosses a boundary, so each writes its slot; every turn is the oracle's.
+    """
+    weights = checkpoint(TOY, names(TOY)).tree("random", 0)
+    model, oracle = OnHost(TOY, weights), Lfm2.oracle(TOY, weights)
+    rng = np.random.default_rng(3)
+    tokens = list(rng.integers(0, TOY.vocab_size, 500))
+    _assert_close(model, oracle, tokens)
+    for turn, start, calls in (
+        (tokens + list(rng.integers(0, 512, 30)), 500, [(500, 12), (512, 18)]),
+        (tokens[:280] + list(rng.integers(0, 512, 1)), 256, [(256, 25)]),
+        (tokens[:280] + list(rng.integers(0, 512, 300)), 256, [(256, 256), (512, 68)]),
+    ):
+        turn = np.array(turn)
+        assert model.resume(model._held(turn)) == start
+        got = [(v["start"], v["rows"]) for _, v in model._chunks(turn, start)]
+        assert got == calls
+        _assert_close(model, oracle, list(turn))

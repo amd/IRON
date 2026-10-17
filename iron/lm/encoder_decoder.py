@@ -101,7 +101,7 @@ class EncoderDecoder(CausalLM):
             x,
             prompt=prompt,
             position=values["position"],
-            chunk=values["chunk"],
+            start=values["start"],
             rows=rows,
             source=source,
         )

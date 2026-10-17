@@ -1075,7 +1075,11 @@ profiles. The library is six modules:
 - `causal.py`: `CausalLM`, a decoder as one graph, a prompt chunk and a
   decode step (`DecodeStep`), the key and value caches, attention over them
   (`attend`) and `logits(tokens)`, its body `lookup(ids[:rows])` then
-  `forward` (`from_rows`, a prompt chunk from rows given). `use()` runs its
+  `forward` (`from_rows`, a prompt chunk from rows given). A prompt call
+  runs `rows` positions from `start`, any position: a turn runs from its
+  first token the caches do not hold (`resume`), or for a model with
+  recurrent state from the boundary before it where it changes the
+  history. `use()` runs its
   host loop on another graph's versions (a multimodal model's), a chunk
   holding a placeholder through `placed`. A model subclasses it with `head(x)`,
   and `Oracle` with a numpy `head(x)`, which it names as its `CausalLM`'s
@@ -1092,9 +1096,10 @@ profiles. The library is six modules:
   checkpoint (`weights.model.decoder`), `weights.model` by default.
   `Checkpoints` is a state a decoder carries from position to position (a
   recurrence, a convolution's last rows), a slot per prompt-chunk boundary
-  (`iron/tests/lm/checkpoints.py`): a prompt chunk reads its boundary's slot
-  and writes the next, a decode step its chunk's own, so a rerun from any
-  boundary (a chat turn's) is exact; a model holds its layers' in
+  (`iron/tests/lm/checkpoints.py`): a call reads the slot holding the state
+  before its first position and writes the one after its last, a call
+  never crossing a boundary, so a rerun from any boundary (a chat turn's) is
+  exact; a model holds its layers' in
   `recurrent`, and its key and value caches in `keys` and `values`, each
   by the index of a layer whose module attends (`self_attn`) or recurs
   (`mamba`)

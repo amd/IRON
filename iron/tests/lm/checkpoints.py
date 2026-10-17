@@ -59,27 +59,27 @@ class Window(iron.Graph):
         x=None,
         *,
         position: Carried[np.int32],
-        chunk: Scratchpad[np.int32],
+        start: Scratchpad[np.int32],
         rows: Scratchpad[np.int32],
     ):
         C, K, W = self.chunk, self.kernel, self.width
         prompt = x is not None
-        start = C - (K - 1)
+        first = C - (K - 1)
         flat = self.window.reshape(2 * C, W)
-        read, write = self.tail.at(DecodeStep(prompt, None, chunk, rows, position))
-        Copy.step(read, flat[start:C])
+        step = DecodeStep(prompt, None, start if prompt else position, rows, position)
+        read, write = self.tail.at(step)
+        Copy.step(read, flat[first:C])
         if not prompt:
             Copy.step(self.sequence[position], flat[C])
-            Copy.step(flat[start : C + 1], self.seen[position])
-            Copy.step(flat[start + 1 : C + 1], write)
+            Copy.step(flat[first : C + 1], self.seen[position])
+            Copy.step(flat[first + 1 : C + 1], write)
             return iron.carry(position=position + 1)
         Copy.step(x[:rows], self.window[1, :rows])
-        every = TensorAccessPattern((2 * C, W), start * W, [C, K * W], [W, 1])
+        every = TensorAccessPattern((2 * C, W), first * W, [C, K * W], [W, 1])
         windows = Copy.step(self.window, src=every).reshape(C, K, W)[:rows]
-        seen = self.seen.reshape(self.seen.shape[0] // C, C, K, W)
-        Copy.step(windows, seen[chunk, :rows])
+        Copy.step(windows, self.seen[start : start + C][:rows])
         for j in range(K - 1):
-            Copy.step(flat[start + rows + j], self.staged[j])
+            Copy.step(flat[first + rows + j], self.staged[j])
         Copy.step(self.staged, write)
         return iron.carry(position=position + 1)
 
@@ -111,9 +111,9 @@ def calls(sequence: np.ndarray, begin: int, end: int, prompt_end: int):
         stop = min(start + C, prompt_end)
         x = np.zeros((C, W), sequence.dtype)
         x[: stop - start] = sequence[start:stop]
-        yield x, dict(position=stop - 1, chunk=start // C, rows=stop - start)
+        yield x, dict(position=stop - 1, start=start, rows=stop - start)
     for p in range(prompt_end, end):
-        yield None, dict(position=p, chunk=0, rows=1)
+        yield None, dict(position=p, start=0, rows=1)
 
 
 @pytest.fixture
@@ -225,7 +225,7 @@ def test_a_state_resumes_from_any_chunk_boundary_on_the_device(sequences, full_e
     else:
         carry = prompt(x, **values)
         for _ in range(steps):
-            carry = decode(chunk=0, rows=1, **carry)
+            carry = decode(start=0, rows=1, **carry)
         assert dict(carry) == {"position": LAST + 1}
 
     slots = window.tail.slots.shape[0]

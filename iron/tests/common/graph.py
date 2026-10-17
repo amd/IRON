@@ -961,7 +961,7 @@ def test_llama_decode_traces_and_tunes():
     # it draws and the position after it.
     assert t.inputs == [] and [h.name for h in t.outputs] == ["out", "carry_token"]
     # One function, so every version takes every value; a token binds two.
-    assert [v.name for v in t.values] == ["token", "position", "chunk", "rows"]
+    assert [v.name for v in t.values] == ["token", "position", "start", "rows"]
     token, position = t.values[0], t.values[1]
     assert t.carry["position"] == Affine(position, 1, 1)
     assert {b.expression.value.name for b in t.bindings} == {"token", "position"}
@@ -1078,7 +1078,7 @@ def test_llama_prompt_traces_over_the_same_caches():
         "out",
         "carry_token",
     ]
-    assert [v.name for v in t.values] == ["token", "position", "chunk", "rows"]
+    assert [v.name for v in t.values] == ["token", "position", "start", "rows"]
     # MHA attends over the caches up to the chunk's last token.
     mha = next(s.op for s in t.steps if type(s.op).__name__ == "MHA")
     assert {k: e.name for k, e in mha.bound_values.items()} == {

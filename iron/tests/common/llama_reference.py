@@ -182,8 +182,10 @@ def test_a_token_outside_the_vocabulary_is_refused_before_any_dispatch(cpu, outs
     with pytest.raises(IndexError, match=rf"\[{outside}\] are outside"):
         model.logits(broken)
     np.testing.assert_array_equal(model._seen, tokens)
-    fresh = OnHost(config, cpu.weights).logits(tokens)
-    np.testing.assert_array_equal(model.logits(tokens), fresh)
+    # The same calls on a model that refused nothing: its last token again.
+    fresh = OnHost(config, cpu.weights)
+    fresh.logits(tokens)
+    np.testing.assert_array_equal(model.logits(tokens), fresh.logits(tokens))
 
 
 def test_a_model_runs_only_the_versions_it_loaded(cpu):
@@ -194,7 +196,7 @@ def test_a_model_runs_only_the_versions_it_loaded(cpu):
     with pytest.raises(RuntimeError, match=r"load\(\) first"):
         model.logits(cpu.prompt)
     with pytest.raises(RuntimeError, match=r"load\(\) first"):
-        model(chunk=0, rows=1, token=0, position=0)
+        model(start=0, rows=1, token=0, position=0)
     assert not model._versions
 
 
@@ -265,7 +267,7 @@ def test_the_carried_draws_are_the_host_loop_s_tokens(cpu, temperature):
     _, carry = model(*inputs, **values)
     drawn = [carry["token"]]
     for _ in range(count - 1):
-        _, carry = model(chunk=0, rows=1, **carry)
+        _, carry = model(start=0, rows=1, **carry)
         drawn.append(carry["token"])
     assert drawn == expected
 
@@ -281,9 +283,9 @@ class Placed(OnHost):
 
     def positions(self, x, step):
         c = self.config
-        L, C, E = c.max_seq_len, c.prefill_chunk, c.emb_dim
+        C, E = c.prefill_chunk, c.emb_dim
         if step.prompt:
-            rows = Copy.step(self.table.reshape(L // C, C, E)[step.chunk, : step.rows])
+            rows = Copy.step(self.table[step.start : step.start + C][: step.rows])
         else:
             rows = Copy.step(self.table[step.position]).reshape(1, E)
         return ElementwiseAdd.step(x, rows)
@@ -350,6 +352,25 @@ def test_a_decoder_nested_in_its_checkpoint_is_read_where_it_is(cpu):
     np.testing.assert_array_equal(oracle.logits(cpu.prompt), cpu.first)
 
 
+def test_a_turn_runs_from_its_first_new_token():
+    """Decision 50: a turn changing the history at 270, past the boundary at
+    256, calls from 270 alone; the caches' rows before it are the first
+    prompt's, and its logits the oracle's.
+    """
+    config = dataclasses.replace(SMALL, max_seq_len=1024)
+    weights = checkpoint(config).tree("random")
+    model, oracle = OnHost(config, weights), Llama.oracle(config, weights)
+    rng = np.random.default_rng(9)
+    tokens = rng.integers(0, config.vocab_size, 300)
+    model.logits(tokens)
+    before = np.array(model.keys[0].host)
+    turn = np.concatenate([tokens[:270], rng.integers(0, config.vocab_size, 40)])
+    assert model.resume(model._held(turn)) == 270
+    assert [(v["start"], v["rows"]) for _, v in model._chunks(turn, 270)] == [(270, 40)]
+    _assert_close([model.logits(turn)], [oracle.logits(turn)])
+    np.testing.assert_array_equal(model.keys[0].host[:270], before[:270])
+
+
 def test_a_context_no_chunk_divides_runs_to_its_last_position():
     """300 positions in 256-row chunks: a prompt whose second chunk is 43
     rows, then the decode step at the last position, 299, each the oracle's
@@ -362,4 +383,4 @@ def test_a_context_no_chunk_divides_runs_to_its_last_position():
     _assert_close([model.logits(tokens[:299])], [oracle.logits(tokens[:299])])
     _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
     with pytest.raises(IndexError, match="rows to 301 of 300"):
-        model(model.prompt_ids(tokens[256:]), token=0, position=300, chunk=1, rows=45)
+        model(model.prompt_ids(tokens[256:]), token=0, position=300, start=256, rows=45)

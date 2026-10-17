@@ -281,7 +281,7 @@ class Whisper(EncoderDecoder):
         table = iron.weight(self.decoder.embed_positions.weight)
         if step.prompt:
             C = c.prefill_chunk
-            rows = Copy.step(table[step.chunk * C : step.chunk * C + C][: step.rows])
+            rows = Copy.step(table[step.start : step.start + C][: step.rows])
         else:
             rows = Copy.step(table[step.position]).reshape(1, c.emb_dim)
         return ElementwiseAdd.step(x, rows)
