@@ -91,25 +91,28 @@ GEMMA = (
 )
 
 
-def test_the_oracle_is_a_pre_norm_swiglu_layer_with_biases():
+@pytest.mark.parametrize("scale, residual", [(None, 1.0), (0.3, 0.25)])
+def test_the_oracle_is_a_pre_norm_swiglu_layer_with_biases(scale, residual):
     rng = np.random.default_rng(1)
     w = module(rng, shapes(E, H, G, D, F), LLAMA, bias=True)
     x = rng.standard_normal((N, E)).astype(np.float32)
     angles = rng.standard_normal((N, D)).astype(np.float32)
     o = oracle()
-    got = Layer(H, G, D, 1e-6).oracle(o, w, x, partial(o.attend, causal=True), angles)
+    layer = Layer(H, G, D, 1e-6, scale=scale, residual=residual)
+    got = layer.oracle(o, w, x, partial(o.attend, causal=True), angles)
 
     a, m = w.self_attn, w.mlp
     h = rms(x, w.input_layernorm.weight)
     q = Oracle.rotate((h @ a.q_proj.weight.T + a.q_proj.bias).reshape(N, H, D), angles)
     k = Oracle.rotate((h @ a.k_proj.weight.T + a.k_proj.bias).reshape(N, G, D), angles)
     v = (h @ a.v_proj.weight.T + a.v_proj.bias).reshape(N, G, D)
-    x = x + o.attend(q, k, v, causal=True) @ a.o_proj.weight.T + a.o_proj.bias
+    attended = o.attend(q, k, v, causal=True, scale=scale)
+    x = x + residual * (attended @ a.o_proj.weight.T + a.o_proj.bias)
     h = rms(x, w.post_attention_layernorm.weight)
     gate = h @ m.gate_proj.weight.T + m.gate_proj.bias
     up = h @ m.up_proj.weight.T + m.up_proj.bias
     f = gate / (1 + np.exp(-gate)) * up
-    want = x + f @ m.down_proj.weight.T + m.down_proj.bias
+    want = x + residual * (f @ m.down_proj.weight.T + m.down_proj.bias)
     np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
 
 
@@ -227,7 +230,7 @@ def ops(t) -> Counter:
 
 
 @pytest.mark.usefixtures("npu2")
-def test_the_module_decides_the_norms_and_the_biases():
+def test_the_module_and_the_config_decide_the_steps():
     layer = Layer(HEADS, GROUPS, HEAD, 1e-6, accurate=True)
     plain = traced(LLAMA, layer)
     assert ops(plain) == Counter(
@@ -242,6 +245,9 @@ def test_the_module_decides_the_norms_and_the_biases():
     )
     biased = traced(LLAMA, layer, **{"self_attn.q_proj": bias})
     assert ops(biased) - ops(plain) == Counter(RowwiseAdd=1)
+    scaled = traced(LLAMA, dataclasses.replace(layer, residual=0.25))
+    assert ops(plain) - ops(scaled) == Counter(ElementwiseAdd=2)
+    assert ops(scaled) - ops(plain) == Counter(AXPY=2)
 
 
 @pytest.mark.usefixtures("npu2")

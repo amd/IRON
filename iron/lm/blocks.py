@@ -20,6 +20,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
+from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
 from iron.operators.elementwise_max import ElementwiseMax
@@ -738,6 +739,8 @@ class Layer:
         scale: The attention logits' scale; None is ``head_dim ** -0.5``.
         window: The positions a query reaches either side; None is all.
         v_norm: Whether the values are RMS-normed, unweighted.
+        residual: What each block's output is scaled by on its residual
+            (``residual_multiplier``).
         accurate: Whether every projection sums in float32 and rounds once
             (``project(accurate=True)``).
     """
@@ -750,6 +753,7 @@ class Layer:
     scale: float | None = None
     window: int | None = None
     v_norm: bool = False
+    residual: float = 1.0
     accurate: bool = False
 
     def __post_init__(self):
@@ -853,7 +857,8 @@ class Layer:
         y = project(o, *o_w, accurate=self.accurate)
         if sandwich:
             y = RMSNorm.step(y, weight=w.post_attention_layernorm.weight, epsilon=eps)
-        x = ElementwiseAdd.step(x, y)
+        r = self.residual
+        x = ElementwiseAdd.step(x, y) if r == 1 else AXPY.step(y, x, scalar_factor=r)
         norm = w.pre_feedforward_layernorm if sandwich else w.post_attention_layernorm
         h = RMSNorm.step(x, weight=norm.weight, epsilon=eps)
         gate = project(h, *gate_w, accurate=self.accurate)
@@ -862,7 +867,7 @@ class Layer:
         f = project(f, *down_w, accurate=self.accurate)
         if sandwich:
             f = RMSNorm.step(f, weight=w.post_feedforward_layernorm.weight, epsilon=eps)
-        x = ElementwiseAdd.step(x, f)
+        x = ElementwiseAdd.step(x, f) if r == 1 else AXPY.step(f, x, scalar_factor=r)
         if "ple_block" in vars(w):
             if ple is None:
                 raise TypeError("Layer.step: the module's ple_block needs ple=")
@@ -909,7 +914,8 @@ class Layer:
         y = o.linear(attend(q, k, v, scale=self.scale, window=self.window), *o_w)
         if sandwich:
             y = o.rms_norm(y, w.post_attention_layernorm.weight)
-        x = x + y
+        r = np.float32(self.residual)
+        x = x + y * r
         norm = w.pre_feedforward_layernorm if sandwich else w.post_attention_layernorm
         h = o.rms_norm(x, norm.weight)
         (gate, gate_b), (up, up_b) = gate_w, up_w
@@ -932,7 +938,7 @@ class Layer:
         f = o.linear(f, *down_w)
         if sandwich:
             f = o.rms_norm(f, w.post_feedforward_layernorm.weight)
-        x = x + f
+        x = x + f * r
         if "ple_block" in vars(w):
             b = w.ple_block
             g = o.linear(x, *self.linear(b.per_layer_input_gate))
