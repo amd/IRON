@@ -969,7 +969,7 @@ def _words(
             continue
         e = b.expression
         linear = None
-        if not e.down:
+        if not (e.down or e.clamped):
             linear = Linear(
                 e.value.name,
                 Fraction(e.scale),
@@ -1024,7 +1024,7 @@ def _words(
         forms: dict[str, set[Linear | None]] = {}
         for w in words:
             found, e = w.linear, w.form
-            if found is None and e is not None and e.mul in (1, -1):
+            if found is None and e is not None and e.mul in (1, -1) and not e.clamped:
                 # ((s v + b) >> k) * m + a as a Linear, which rounds up: a
                 # floor is the ceiling of (s v + b - 2^k + 1) / 2^k, and
                 # -floor(x) is ceil(-x).

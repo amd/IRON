@@ -10,7 +10,16 @@ compute it and loop (``CarriedLoop``).
 
 from .carried import CarriedLoop
 from .compiled import CompiledGraph, Graph
-from .handle import Carried, Carry, Handle, Scratchpad, carry, state, weight
+from .handle import (
+    Carried,
+    Carry,
+    Handle,
+    Scratchpad,
+    carry,
+    clamp,
+    state,
+    weight,
+)
 
 __all__ = [
     "Carried",
@@ -21,6 +30,7 @@ __all__ = [
     "Handle",
     "Scratchpad",
     "carry",
+    "clamp",
     "state",
     "weight",
 ]

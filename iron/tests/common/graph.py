@@ -43,7 +43,7 @@ from iron.operators.copy import Copy
 from iron.tests.operators import copy_bounded_view
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.elementwise_mul import ElementwiseMul
-from iron.operators.emit import reference as emit_reference
+from iron.operators.emit import UNCLAMPED, reference as emit_reference
 from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 from iron.operators.gemm import GEMM
@@ -1354,6 +1354,45 @@ def test_per_call_values_are_integer_expressions():
     assert arithmetic <= set(vars(Affine)) and arithmetic <= set(vars(PerCall))
 
 
+def test_a_clamped_expression_carries_its_range_through_integer_arithmetic():
+    """``clamp`` holds an expression to a range; a sum, a product (a negative
+    one swapping the bounds) and a floor division by a power of two carry
+    it, each as numpy computes it at every value tried. An index may be
+    clamped; a bound, which patches a length, may not."""
+    p = PerCall("p", Kind.SCRATCHPAD, np.int32)
+    start = (p - 3).clamp(lo=0)
+    assert start.name == "p_m3_lo0" and str(start) == "clamp(p - 3, 0, None)"
+    cases = {
+        start: lambda v: max(v - 3, 0),
+        start + 5: lambda v: max(v - 3, 0) + 5,
+        start * -2: lambda v: -2 * max(v - 3, 0),
+        (p + 1).clamp(hi=9) // 4: lambda v: min(v + 1, 9) // 4,
+        ((p * 3 + 1) // 2).clamp(lo=-4, hi=20) * 3
+        + 1: lambda v: 3 * min(max((3 * v + 1) // 2, -4), 20)
+        + 1,
+        (p - 3).clamp(lo=0).clamp(lo=-5, hi=6): lambda v: min(max(v - 3, 0), 6),
+    }
+    for e, want in cases.items():
+        assert [e.evaluate({"p": v}) for v in range(-20, 21)] == [
+            want(v) for v in range(-20, 21)
+        ], e
+    with pytest.raises(TypeError, match="not linear"):
+        start.affine()
+    with pytest.raises(TypeError):
+        _ = start + start
+    with pytest.raises(TypeError):
+        _ = start // 3
+    with pytest.raises(ValueError, match="holds no value"):
+        (p + 0).clamp(lo=5, hi=2)
+    # A reference call gives the number itself.
+    assert [iron.clamp(v, lo=0, hi=4) for v in (-2, 3, 9)] == [0, 3, 4]
+    assert iron.clamp(p - 3, lo=0) == start
+    cache = Handle((8, 4), bfloat16, "cache", "state")
+    assert cache[start].index_by == start * 4
+    with pytest.raises(TypeError, match="not linear"):
+        _ = cache[: (p + 1).clamp(hi=8)]
+
+
 def test_a_per_call_value_cannot_steer_the_trace():
     """A body is traced once for every call, so a branch on a per-call value
     would take one side for all of them: a comparison or a truth test raises.
@@ -2251,11 +2290,12 @@ def test_the_emit_program_follows_the_target_parameters():
         Parameter(by_value["node"], 1, "i32", "addr"),
     ]
     program = compose(site, traced.carry, words, parameters)
+    lo, hi = UNCLAMPED
     assert program.tolist() == [
-        [0, 1, 1, 1, 0, 1, 0, 2],  # steps + 1, shifted for the core
-        [1, 0, 1, 0, 0, 1, 0, 0],  # the node the device gathered
-        [1, 0, 1, 0, 0, 1, 0, 0],  # the next node
-        [0, 1, 1, 1, 0, 1, 0, 0],  # the next step count
+        [0, 1, 1, 1, 0, 1, 0, lo, hi, 2],  # steps + 1, shifted for the core
+        [1, 0, 1, 0, 0, 1, 0, lo, hi, 0],  # the node the device gathered
+        [1, 0, 1, 0, 0, 1, 0, lo, hi, 0],  # the next node
+        [0, 1, 1, 1, 0, 1, 0, lo, hi, 0],  # the next step count
     ]
     image, state = emit_reference(program, np.array([[5, 9], [33, 0]]), slots=2)
     assert image.tolist() == [10 << 2, 33] and state.tolist() == [33, 10]
@@ -2314,6 +2354,43 @@ def test_a_state_is_indexed_by_a_floored_carried_value(npu2):
 
     with pytest.raises(TypeError, match="not linear"):
         Bounded().trace(x=((64, 32), bfloat16))
+
+
+def test_a_state_is_indexed_by_a_clamped_carried_value(npu2):
+    """``max(0, position - 3)`` and ``min((position + 1) // 2, 7)`` index a
+    state's rows: each word is clamped on the host and in the Emit program
+    the device runs between calls, at positions on both sides of a bound.
+    """
+
+    class Rows(iron.Graph):
+        def __init__(self):
+            self.rows = iron.state((8, 32), np.int32)
+
+        def body(self, *, position: Carried[np.int32]):
+            row = Copy.step(self.rows[iron.clamp(position - 3, lo=0)], dtype=np.int32)
+            later = iron.clamp((position + 1) // 2, hi=7)
+            Copy.step(row, self.rows[later], dtype=np.int32)
+            return iron.carry(position=position + 1)
+
+    graph = Rows()
+    traced = graph.trace()
+    words, _ = _words(traced)
+    assert all(w.linear is None for w in words)
+    site = attach_emit(traced, graph._carried, graph._carry, slots=len(words))
+    parameters = [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(words)]
+    program = compose(site, traced.carry, words, parameters)
+    for p in range(20):
+        image, state = emit_reference(program, np.array([[p], [0]]), slots=len(words))
+        want = [w(dict(position=p + 1)) for w in words]
+        assert image.tolist() == want
+        assert want == [max(p - 2, 0) * 32, min((p + 2) // 2, 7) * 32]
+        assert state.tolist() == [p + 1]
+
+    rows = np.arange(8 * 32, dtype=np.int32).reshape(8, 32)
+    for position, read, written in ((1, 0, 1), (9, 6, 5), (10, 7, 5)):
+        graph.rows.host = rows.copy()
+        graph.reference(position=position)
+        assert (graph.rows.host[written] == rows[read]).all()
 
 
 class _HeldStack(iron.Graph):

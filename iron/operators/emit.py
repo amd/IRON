@@ -6,12 +6,13 @@
 Every output word is one row of a program the host writes once:
 
 ```text
-out[r] = (((planes[plane, index] * scale + bias) >> down) * mul + add) << shift
+out[r] = clamp(((planes[plane, index] * scale + bias) >> down) * mul + add, lo, hi) << shift
 ```
 
 ``planes`` is ``(2, carried)``: the values this call started from, then
 those it computed. ``shift`` is 2 for a core-read parameter (the scratchpad
-holds those shifted) and 0 otherwise; ``>> down`` floors.
+holds those shifted) and 0 otherwise; ``>> down`` floors. A row that holds
+nothing to a range has ``lo``/``hi`` int32's own (``UNCLAMPED``).
 """
 
 import numpy as np
@@ -23,22 +24,29 @@ from aie.utils.verify import Tolerance
 from iron.common import In, Operator, Out, Param, Built, Operand, Rtp, Value
 from iron.common.testing import Case, Testing
 
-# A program row: (plane, index, scale, bias, down, mul, add, shift).
-ROW = 8
+# A program row: (plane, index, scale, bias, down, mul, add, lo, hi, shift).
+ROW = 10
+UNCLAMPED = (np.iinfo(np.int32).min, np.iinfo(np.int32).max)
 
 
 def reference(program, planes, slots: int):
     """``(image, state)``: every row evaluated in wrapping int32, split at ``slots``."""
     program = np.asarray(program, dtype=np.int32).reshape(-1, ROW)
     planes = np.asarray(planes, dtype=np.int32).reshape(2, -1)
-    plane, index, scale, bias, down, mul, add, shift = program.T
-    out = (((planes[plane, index] * scale + bias) >> down) * mul + add) << shift
+    plane, index, scale, bias, down, mul, add, lo, hi, shift = program.T
+    out = np.clip(((planes[plane, index] * scale + bias) >> down) * mul + add, lo, hi)
+    out = out << shift
     return out[:slots].astype(np.int32), out[slots:].astype(np.int32)
 
 
 def _program(op: "Emit") -> dict:
-    """A program whose rows each pick a real value, and some unused rows."""
+    """A program whose rows each pick a real value, most held to a range,
+    and some unused rows."""
     rng = np.random.default_rng(7)
+    lo = rng.integers(-(1 << 22), 1 << 22, op.rows)
+    hi = lo + rng.integers(0, 1 << 23, op.rows)
+    lo[rng.random(op.rows) < 0.3] = UNCLAMPED[0]
+    hi[rng.random(op.rows) < 0.3] = UNCLAMPED[1]
     program = np.stack(
         [
             rng.integers(0, 2, op.rows),
@@ -48,6 +56,8 @@ def _program(op: "Emit") -> dict:
             rng.integers(0, 7, op.rows),
             rng.integers(-3, 4, op.rows),
             rng.integers(-1000, 1000, op.rows),
+            lo,
+            hi,
             rng.choice([0, 2], op.rows),
         ],
         axis=1,
@@ -125,7 +135,8 @@ class Emit(Operator):
                     index = arith.index_cast(program[r, 1])
                     v = planes[plane, index] * program[r, 2] + program[r, 3]
                     v = floor_shift(v, program[r, 4]) * program[r, 5] + program[r, 6]
-                    return arith.shli(v, program[r, 7])
+                    v = arith.minsi(arith.maxsi(v, program[r, 7]), program[r, 8])
+                    return arith.shli(v, program[r, 9])
 
                 for r in range_(slots):
                     image[r] = row(r)

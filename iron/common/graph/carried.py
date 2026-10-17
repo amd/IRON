@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ...operators.emit import ROW, Emit
+from ...operators.emit import ROW, UNCLAMPED, Emit
 from ..image.artifacts import Parameter
 from .handle import Affine, Handle, State
 from .trace import TracedGraph, TracedStep
@@ -163,10 +163,12 @@ def compose(
             form.down,
             form.mul,
             form.add,
+            UNCLAMPED[0] if form.lo is None else form.lo,
+            UNCLAMPED[1] if form.hi is None else form.hi,
             p.shift,
         )
     for name, j in plane_of.items():
-        program[site.slots + j] = (*source(name), 0, 1, 0, 0)
+        program[site.slots + j] = (*source(name), 0, 1, 0, *UNCLAMPED, 0)
     info = np.iinfo(np.int32)
     if program.min() < info.min or program.max() > info.max:
         raise OverflowError(f"an emit program word is outside int32:\n{program}")

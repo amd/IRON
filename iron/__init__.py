@@ -3,7 +3,7 @@
 
 """IRON: operators for the NPU, and graphs over them.
 
-``iron.Graph``, ``iron.state``, ``iron.weight``, ``iron.carry``,
+``iron.Graph``, ``iron.state``, ``iron.weight``, ``iron.carry``, ``iron.clamp``,
 ``iron.CarriedLoop``, the per-call value annotations and ``Profile`` are
 imported on first use, so ``import iron`` stays light.
 """
@@ -20,6 +20,7 @@ if TYPE_CHECKING:  # the same names, for a checker; the runtime loads them lazil
         Graph,
         Scratchpad,
         carry,
+        clamp,
         state,
         weight,
     )
@@ -29,6 +30,7 @@ _LAZY = {
     "state": "iron.common.graph",
     "weight": "iron.common.graph",
     "carry": "iron.common.graph",
+    "clamp": "iron.common.graph",
     "CarriedLoop": "iron.common.graph",
     "CompiledGraph": "iron.common.graph",
     "Scratchpad": "iron.common.graph",
@@ -44,6 +46,7 @@ __all__ = [
     "Profile",
     "Scratchpad",
     "carry",
+    "clamp",
     "state",
     "weight",
 ]
