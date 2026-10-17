@@ -89,6 +89,7 @@ APPLICATIONS = {
         "tokenizer.model",
         each_step=("npu1", "npu2"),
     ),
+    "llama_3.2_3b": Application(Llama, "llama3.2-3b", INDEX, "tokenizer.model"),
     "smollm2_1.7b": Application(
         SmolLM2,
         "smollm2-1.7b-instruct",

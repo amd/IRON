@@ -8,7 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 Prefill and decode of Llama 3 as one IRON graph, `Llama`, a version
 compiled per input shape, and the float32 numpy forward pass it is checked
 against, `LlamaOracle`. Both are built from the same config and weights,
-Llama 3.2 1B's here; nothing here needs torch.
+read from a checkpoint's own `config.json`: Llama 3.2 1B's or 3B's here;
+nothing here needs torch.
 
 The model is a package of `iron.lm` (its shared decoder, attention and
 layer, `Layer`), `iron/applications/llama/`:
@@ -36,6 +37,13 @@ The tests look for all three in `$IRON_EXAMPLE_WEIGHTS_DIR/llama3.2-1b/`
 (`IRON_EXAMPLE_WEIGHTS_DIR` defaults to `/srv`); on the command line the
 checkpoint and tokenizer can be anywhere, with `config.json` beside the
 checkpoint.
+
+Llama 3.2 3B is the same model at another shape: its two shards, their
+`model.safetensors.index.json`, `config.json` and `tokenizer.model` from
+[`meta-llama/Llama-3.2-3B`](https://huggingface.co/meta-llama/Llama-3.2-3B),
+in `$IRON_EXAMPLE_WEIGHTS_DIR/llama3.2-3b/`. On NPU2 its projections take
+flm.GEMM's bf16 macs rather than bfp16's (its profile), which its accuracy
+needs: about 13 times the prompt chunk's GEMM cost, a path to optimise.
 
 ## Setup
 
@@ -129,5 +137,6 @@ default caches, a token went from 362 to 338 ms (20 tokens after a
 pytest tests/applications/llama/
 ```
 
-Loads the model once and runs the accuracy, determinism and throughput
+Loads each checkpoint's model once, 1B's and then 3B's (skipped where
+its files are not), and runs the accuracy, determinism and throughput
 checks above in-process through `model.Runner`.
