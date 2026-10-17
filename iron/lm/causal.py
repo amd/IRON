@@ -106,7 +106,10 @@ class CausalLM(Model):
         self._seen = np.empty(0, dtype=np.int64)  # the tokens in the caches
         self._prompt: CompiledGraph | None = None
         self._decode: CompiledGraph | None = None
-        self._loop: CarriedLoop | None = None
+        self._placed: CompiledGraph | None = None
+        self._placeholders: tuple[int, ...] = ()
+        # By the version a device loop starts from, its loop.
+        self._loops: dict[int, CarriedLoop] = {}
 
     def layer(self, step: DecodeStep, i: int, weights, x):
         """Layer ``i`` on ``x``: ``config.layer(i)``, attending over the caches."""
@@ -244,14 +247,39 @@ class CausalLM(Model):
                 one.
         """
         super().load(release=release, tuner=tuner, full_elf=full_elf, dev=dev)
-        self._decode, self._prompt = self.versions.values()
-        if not self._decode.plan.full_elf:
-            logger.info("%s", self._decode.plan.report("decode"))
+        self.use(*self.versions.values())
         return self
 
-    def __call__(self, ids=None, **values) -> Any:
-        """One call of the loaded prompt version on ``ids`` (``prompt_ids``),
-        else of the decode step.
+    def use(
+        self,
+        decode: CompiledGraph,
+        prompt: CompiledGraph,
+        placed: CompiledGraph | None = None,
+        placeholders: tuple[int, ...] = (),
+    ) -> None:
+        """Run ``logits`` and ``generate`` on these versions: this model's
+        own, or those of a graph tracing it in their bodies (a multimodal
+        model's), in one arena, each prompt version feeding ``decode``.
+
+        Args:
+            decode: The decode step.
+            prompt: A prompt chunk, on ``ids``.
+            placed: A prompt chunk holding any of ``placeholders``, on its
+                ``ids`` and ``before``, the count of each placeholder before
+                the chunk.
+            placeholders: The placeholder tokens, in ``before``'s order.
+        """
+        self._decode, self._prompt = decode, prompt
+        self._placed, self._placeholders = placed, tuple(placeholders)
+        self._loops = {}
+        self._seen = np.empty(0, dtype=np.int64)
+        if not decode.plan.full_elf:
+            logger.info("%s", decode.plan.report("decode"))
+
+    def __call__(self, ids=None, before=None, **values) -> Any:
+        """One call of the prompt version on ``ids`` (``prompt_ids``), of the
+        placed one on ``ids`` and ``before`` (``use``), else of the decode
+        step.
 
         Raises:
             RuntimeError: Neither version is loaded: ``load()`` first, which
@@ -261,6 +289,9 @@ class CausalLM(Model):
             raise RuntimeError(f"{type(self).__name__}: load() first")
         if ids is None:
             return self._decode(**values)
+        if before is not None:
+            assert self._placed is not None
+            return self._placed(ids, before, **values)
         assert self._prompt is not None
         return self._prompt(ids, **values)
 
@@ -352,8 +383,8 @@ class CausalLM(Model):
             out, _ = self(token=int(tokens[-1]), position=n - 1, chunk=0, rows=1)
         else:
             self._seen = tokens[: held // C * C]
-            for ids, values in self._chunks(tokens, held):
-                out, _ = self(ids, **values)
+            for inputs, values in self._chunks(tokens, held):
+                out, _ = self(*inputs, **values)
         self._seen = tokens
         # A copy: the next call rewrites the output buffer.
         logits = out.numpy()
@@ -384,8 +415,6 @@ class CausalLM(Model):
             )
         loop = self.device_loop
         assert self._prompt is not None and self._decode is not None
-        if loop and self._loop is None:
-            self._loop = CarriedLoop(self._prompt, self._decode, depth=2)
         start = time.perf_counter()
         # The prompt draws at its last position, n - 1; decode step k at n + k.
         draws = np.zeros((L, ROW_WORDS), dtype=np.int32)
@@ -393,14 +422,18 @@ class CausalLM(Model):
         self._decode.write(self.draws, draws)
         held = self._held(tokens)
         self._seen = tokens[: held // C * C]
-        for ids, values in self._chunks(tokens, held):
+        for inputs, values in self._chunks(tokens, held):
             if not loop or values["position"] < n - 1:
-                _, carry = self(ids, **values)
+                _, carry = self(*inputs, **values)
             else:
-                self._loop.start(ids, **values)
+                version = self._prompt if len(inputs) == 1 else self._placed
+                started = self._loops.setdefault(
+                    id(version), CarriedLoop(version, self._decode, depth=2)
+                )
+                started.start(*inputs, **values)
         first = time.perf_counter()
         if loop:
-            for _ in self._loop.steps(num_tokens - 1):
+            for _ in started.steps(num_tokens - 1):
                 pass
         else:
             drawn = [carry["token"]]
@@ -417,6 +450,13 @@ class CausalLM(Model):
         # The caches hold every token but the last drawn, which no step read.
         self._seen = np.concatenate([tokens, drawn[:-1]]).astype(np.int64)
         return [int(t) for t in drawn], first - start, later
+
+    def forget(self, position: int) -> None:
+        """Hold nothing the caches have from ``position`` on: the next call
+        runs from there, as a change before it (a placeholder's soft tokens)
+        would leave them stale.
+        """
+        self._seen = self._seen[:position]
 
     def _tokens(self, tokens) -> np.ndarray:
         tokens = np.asarray(tokens, dtype=np.int64).reshape(-1)
@@ -444,6 +484,10 @@ class CausalLM(Model):
         return ids
 
     def _chunks(self, tokens: np.ndarray, held: int) -> Iterator[tuple]:
+        """Each prompt chunk from the first the caches do not hold: its
+        inputs, ``ids`` and for a chunk holding a placeholder ``before``, and
+        its per-call values.
+        """
         n, C = tokens.size, self.config.prefill_chunk
         for begin in range(held // C * C, n, C):
             end = min(begin + C, n)
@@ -454,7 +498,15 @@ class CausalLM(Model):
                 chunk=begin // C,
                 rows=end - begin,
             )
-            yield ids, values
+            placed = np.isin(tokens[begin:end], self._placeholders).any()
+            if self._placed is None or not placed:
+                yield (ids,), values
+                continue
+            before = np.array(
+                [np.count_nonzero(tokens[:begin] == t) for t in self._placeholders],
+                np.int32,
+            )
+            yield (ids, before), values
 
     def _k_max(self) -> int:
         assert self._decode is not None

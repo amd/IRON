@@ -256,8 +256,8 @@ def test_the_carried_draws_are_the_host_loop_s_tokens(cpu, temperature):
     sampler = Sampler(temperature, 40, np.random.default_rng(5))
     draws[n - 1 : n - 1 + count] = sampler.rows(count, k_max=64)
     model.draws.host = draws
-    ((ids, values),) = model._chunks(np.asarray(cpu.prompt), 0)
-    _, carry = model(ids, **values)
+    ((inputs, values),) = model._chunks(np.asarray(cpu.prompt), 0)
+    _, carry = model(*inputs, **values)
     drawn = [carry["token"]]
     for _ in range(count - 1):
         _, carry = model(chunk=0, rows=1, **carry)
