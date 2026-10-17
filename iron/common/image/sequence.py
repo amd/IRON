@@ -62,6 +62,9 @@ class OperatorSequence:
         reconfigure: On the full ELF, configure the array at every call even
             where it runs one design, which the first call otherwise
             configures for all (``Fusion.expands``).
+        commands: On the full ELF, the steps that start a command of their
+            own after the first's, each command a runtime sequence a call
+            queues after the one before it.
     """
 
     def __init__(
@@ -74,6 +77,7 @@ class OperatorSequence:
         shared_words: Mapping[str, str] | None = None,
         coresident: Sequence[Sequence[Operator]] | AdjacentPacking = (),
         reconfigure: bool = False,
+        commands: Sequence[int] = (),
     ):
         if check:
             if full_elf:
@@ -96,6 +100,11 @@ class OperatorSequence:
             raise ValueError(
                 f"reconfigure configures the full ELF at every call; "
                 f"{unbuilt} builds none"
+            )
+        if commands and full_elf is False:
+            raise ValueError(
+                f"commands split the full ELF's sequence; {unbuilt} dispatches "
+                f"every step on its own"
             )
         self.steps = [SequenceStep(s.op, s.refs()) for s in traced.steps]
         if isinstance(coresident, AdjacentPacking):
@@ -120,6 +129,7 @@ class OperatorSequence:
         self.feedback = list(traced.feedback)
         self.pinned = dict(traced.pinned)
         self.reconfigure = reconfigure
+        self.commands = tuple(commands)
         self.arena = arena
         self.residents = dict(residents or {})
         self.shared_words = dict(shared_words or {})

@@ -117,6 +117,7 @@ class Fusion:
         )
         self.layout = seq.layout
         self.buffer_sizes = seq.buffer_sizes
+        self.commands = seq.commands
         self.shared_words = dict(seq.shared_words or {})
         self.packing: Packing | AdjacentPacking = (
             seq.coresident
@@ -158,12 +159,15 @@ class Fusion:
             self.buffer_sizes,
             sorted(self.shared_words.items()),
             self.packing,
+            # Absent when unsplit, so every one-command image keeps its key.
+            *([self.commands] if self.commands else []),
         )
         h.update(repr(state).encode())
         return h.hexdigest()[:24]
 
-    def needs_reset(self, packing: Packing) -> bool:
-        """Whether the sequence must configure one more device than the runlist asks for.
+    def needs_reset(self, packing: Packing, steps: list[str]) -> bool:
+        """Whether a command of ``steps`` must configure one more device than
+        the runlist asks for.
 
         ``aiecc --expand-load-pdis`` marks each configure point by loading one of two
         otherwise empty PDIs, alternating between them from a fixed start. A load of the
@@ -175,7 +179,7 @@ class Fusion:
         """
         if not self.expands:
             return False
-        names = [packing.device_of(name) for name, _ in self.steps]
+        names = [packing.device_of(name) for name in steps]
         points = sum(
             1 for i, name in enumerate(names) if i == 0 or name != names[i - 1]
         )
@@ -248,52 +252,63 @@ class Fusion:
             configurations[symbol] = configured
             runtimes.update(zip(members, configured.runtimes))
 
-        empty = (
-            DeviceConfiguration(self.EMPTY, device)
-            if self.needs_reset(packing)
-            else None
-        )
         calls = [
             (
                 configurations[packing.device_of(name)],
                 runtimes[name],
                 self._views(name, buffers, types[name]),
+                name,
             )
             for name, buffers in self.steps
         ]
+        commands = [
+            calls[a:b] for a, b in itertools.pairwise((0, *self.commands, len(calls)))
+        ]
+        resets = [self.needs_reset(packing, [c[3] for c in cs]) for cs in commands]
+        empty = DeviceConfiguration(self.EMPTY, device) if any(resets) else None
         arguments = self.buffer_sizes.arguments()
 
-        def sequence(*tensors):
-            held = dict(zip(arguments, tensors))
-            # Consecutive steps in one device share its configure point.
-            for configured, steps in itertools.groupby(calls, key=lambda c: c[0]):
-                with configured.configure():
-                    for _, runtime, views in steps:
-                        runtime.call(
-                            *(
-                                memref.view(
-                                    np_ndarray_type_to_memref_type(view_type),
-                                    held[kind].op,
-                                    arith.constant(ir.IndexType.get(), offset),
-                                    [],
+        def sequence_of(command, reset):
+            def sequence(*tensors):
+                held = dict(zip(arguments, tensors))
+                # Consecutive steps in one device share its configure point.
+                for configured, steps in itertools.groupby(command, key=lambda c: c[0]):
+                    with configured.configure():
+                        for _, runtime, views, _ in steps:
+                            runtime.call(
+                                *(
+                                    memref.view(
+                                        np_ndarray_type_to_memref_type(view_type),
+                                        held[kind].op,
+                                        arith.constant(ir.IndexType.get(), offset),
+                                        [],
+                                    )
+                                    for kind, offset, view_type in views
                                 )
-                                for kind, offset, view_type in views
                             )
-                        )
-            if empty is not None:
-                with empty.configure():
-                    pass
+                if reset:
+                    assert empty is not None
+                    with empty.configure():
+                        pass
+
+            return sequence
 
         # Flat bytes; each buffer is a typed view at its byte offset.
-        entry = Runtime(
-            sequence,
-            [np.ndarray[(nbytes,), np.dtype[np.int8]] for nbytes in arguments.values()],
-            name="sequence",
-        )
-        main = DeviceConfiguration("main", device, runtimes=[entry])
+        entries = [
+            Runtime(
+                sequence_of(command, reset),
+                [
+                    np.ndarray[(nbytes,), np.dtype[np.int8]]
+                    for nbytes in arguments.values()
+                ],
+                name=self.sequence_name(k),
+            )
+            for k, (command, reset) in enumerate(zip(commands, resets))
+        ]
+        main = DeviceConfiguration("main", device, runtimes=entries)
         module = Program.compose(
             [*configurations.values(), *([empty] if empty is not None else []), main],
-            entry=entry,
+            entry=entries[0],
         ).resolve_program()
 
         # Each exported device takes the place its stub configuration held.
@@ -315,6 +330,11 @@ class Fusion:
                 device_op.operation.move_before(stub.operation)
                 stub.operation.erase()
             return str(module)
+
+    @staticmethod
+    def sequence_name(command: int) -> str:
+        """The runtime sequence of the ``command``-th command in ``main``."""
+        return "sequence" if command == 0 else f"sequence_{command}"
 
     def _exported_sequence(self, name: str, text: str) -> tuple[Runtime, list]:
         """A stub of exported design ``name``'s runtime sequence, which

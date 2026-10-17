@@ -178,6 +178,44 @@ def test_fused_mlir_contains_reconfiguration(sequence, npu2):
     ), "expected two operator devices plus a top-level device"
 
 
+def test_commands_are_runtime_sequences_over_the_same_designs(npu2):
+    """A full ELF cut into commands runs each as a runtime sequence of
+    ``main``, each with an even number of configure points, over the uncut
+    image's designs, byte for byte; only the cut image's key moves.
+    """
+    fusions = {}
+    for commands in ((), (1,)):
+        seq = _build_add_relu_sequence(
+            "infra_fused_commands", full_elf=True, commands=commands
+        )
+        seq.prepare()
+        fusions[commands] = Fusion(seq)
+    whole, cut = (fusions[c].text() for c in ((), (1,)))
+    device = re.compile(r"^  aie\.device\(\w+\) @(\w+) \{$.*?^  \}$", re.M | re.S)
+    designs = {m.group(1): m.group(0) for m in device.finditer(whole)}
+    assert len(designs) == 2
+    assert {
+        m.group(1): m.group(0)
+        for m in device.finditer(cut)
+        if m.group(1) != Fusion.EMPTY
+    } == designs
+    # The printer leaves out the default symbols, @main and @sequence.
+    main = cut[cut.rindex("aie.device(") :]
+    commands = re.split(r"aie\.runtime_sequence", main)[1:]
+    names = [re.match(r" @(\w+)", text) for text in commands]
+    assert names[0] is None and names[1].group(1) == Fusion.sequence_name(1)
+    for text in commands:
+        assert len(re.findall(r"aiex\.configure @", text)) % 2 == 0, text
+    assert whole[whole.rindex("aie.device(") :].count("aie.runtime_sequence") == 1
+    assert fusions[()].identity != fusions[(1,)].identity
+
+
+def test_commands_need_a_full_elf():
+    """Only a full ELF has a sequence to cut."""
+    with pytest.raises(ValueError, match="commands"):
+        _build_add_relu_sequence("infra_commands_xclbin", full_elf=False, commands=(1,))
+
+
 # ---------------------------------------------------------------------------
 # 3. Every NPU dispatch mode produces bit-identical output.
 # ---------------------------------------------------------------------------

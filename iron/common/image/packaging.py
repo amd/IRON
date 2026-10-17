@@ -5,7 +5,8 @@
 
 ``full_elf`` is mlir-aie's choice of the same name. ``None`` derives it: a
 ``DispatchTime`` value, NPU1 or ``check`` forces an xclbin, one dispatch per
-step; otherwise the image is one full ELF.
+step; otherwise the image is one full ELF. A full ELF is one command unless a
+step's work grows with a carried value, which ends a command (``Plan.commands``).
 """
 
 from __future__ import annotations
@@ -31,9 +32,13 @@ class Plan:
     full_elf: bool
     reasons: list
     values: list  # (name, kind, lowering)
+    # The steps starting each command after the first, queued back to back.
+    commands: tuple[int, ...] = ()
 
     def report(self, name: str) -> str:
         image = "one full ELF" if self.full_elf else "an xclbin per step"
+        if self.commands:
+            image += f" in {len(self.commands) + 1} commands"
         lines = [f"{name}: {image}"]
         lines += [f"  {r}" for r in self.reasons]
         for vname, kind, lowering in self.values:
@@ -105,4 +110,16 @@ def plan(dev, traced, full_elf: bool | None = None, check: bool = False) -> Plan
                 "written into the array by the sequence"
             )
         values.append((v.name, v.kind.value, lowering))
-    return Plan(full_elf, reasons, values)
+    # A carried-bound step grows with every call; amdxdna stops a command past ~4 s.
+    # A version taking no tensor stays one: a loop drains its values into one.
+    commands = ()
+    if full_elf and traced.inputs:
+        commands = tuple(
+            i + 1
+            for i, step in enumerate(traced.steps[:-1])
+            if any(
+                b is not None and b.value.kind is Kind.CARRIED
+                for b in step.op.bound_extents.values()
+            )
+        )
+    return Plan(full_elf, reasons, values, commands)

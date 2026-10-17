@@ -8,10 +8,14 @@ import pytest
 from aie.iron.device import NPU1, NPU2, NPU1Col1, NPU2Col1, from_name
 
 import iron
+from iron import Carried, Scratchpad
 from iron.common.graph.trace import TracedGraph
 from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind, dispatches_full_elf, plan
 from iron.operators.flm.gemm.shipped import Shipped
+from iron.operators.mha import MHA
+from iron.operators.relu import ReLU
+from iron.tests.common.llama_model import small
 
 
 def _traced(*values):
@@ -108,3 +112,34 @@ def test_report_reads_as_one_block():
         "  one sequence, one configuration set: a full ELF",
         "  pos: iron.scratchpad; patched through the parameter scratchpad",
     ]
+
+
+class Grows(iron.Graph):
+    def body(self, x, *, n: Carried[np.int32]):
+        return ReLU.step(ReLU.step(x[: n + 1])), iron.carry(n=n + 1)
+
+
+class Bounded(iron.Graph):
+    def body(self, x, *, n: Scratchpad[np.int32]):
+        return ReLU.step(ReLU.step(x[: n + 1]))
+
+
+def test_a_step_a_carried_value_bounds_ends_a_command(npu2):
+    traced = Grows().trace(x=(4096,))
+    assert plan(npu2, traced).commands == (1,)
+    assert plan(npu2, traced).report("g").splitlines()[0] == (
+        "g: one full ELF in 2 commands"
+    )
+    # An xclbin is a dispatch per step already, and a scratchpad bound does
+    # not grow from call to call.
+    assert plan(npu2, traced, full_elf=False).commands == ()
+    assert plan(npu2, Bounded().trace(x=(4096,))).commands == ()
+
+
+def test_a_prompt_chunk_is_a_command_per_attention_and_decode_one(npu2):
+    model = small()
+    decode, prompt = (model.trace(**shapes) for shapes in model.shapes())
+    assert plan(npu2, decode).commands == ()
+    cuts = plan(npu2, prompt).commands
+    attention = [i + 1 for i, s in enumerate(prompt.steps) if isinstance(s.op, MHA)]
+    assert list(cuts) == attention and len(cuts) == model.config.n_layers

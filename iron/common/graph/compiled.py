@@ -582,6 +582,7 @@ class CompiledGraph:
             full_elf=plan.full_elf,
             check=check,
             shared_words=self.shared,
+            commands=plan.commands,
             **placement,
         ).compile()
         self.image = self.sequence.image

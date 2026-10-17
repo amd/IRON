@@ -20,6 +20,7 @@ from aie.utils.trace import get_trace_buffer
 
 from ..declare import Operator
 from .allocator import ALIGNMENT, BANK, ArenaPlan, Pool
+from .fusion import Fusion
 from .step import BufferRef
 
 if TYPE_CHECKING:
@@ -105,34 +106,35 @@ class ScratchArena:
 
 
 class FullELFRun:
-    """One run of a full ELF, with its own ctrl scratchpad of per-call values.
+    """One run of a full ELF, with its own ctrl scratchpad of per-call values:
+    a run of each of its commands, started back to back.
 
     Binding one run's feedback argument to another's ``scratchpad_alias``
     makes what the first drains there the second's per-call values. The run
-    is made on ``image``'s kernel as the shared runtime loaded it; once the
-    runtime evicts the image, loading it again gives another kernel, and
-    the run has ended.
+    is made on ``image``'s kernels as the shared runtime loaded them; once the
+    runtime evicts the image, loading it again gives others, and the run has
+    ended.
     """
 
     def __init__(
         self,
         name: str,
         image: NPUKernel,
-        kernel: pyxrt.kernel,
-        run: pyxrt.run,
+        kernels: list[pyxrt.kernel],
+        runs: list[pyxrt.run],
         arguments: Mapping[int, XRTTensor],
         feedback_arg: int | None,
         params_path: Path | None,
     ):
         self.name = name
         self._image = image
-        self._kernel = kernel
-        self.handle = run
+        self._kernel = kernels[0]
+        self.handles = runs
         for index, tensor in arguments.items():
             self.bind(index, tensor.buffer_object())
         self._feedback_arg = feedback_arg
         self._params_path = params_path
-        self._params: ParameterBlock | None = None
+        self._params: list[ParameterBlock] | None = None
         # Bound to or from another run's scratchpad: a loop holds it.
         self.wired = False
 
@@ -144,7 +146,8 @@ class FullELFRun:
         """
         if bo is None:
             raise ValueError(f"{self.name}: argument {index} has no buffer object")
-        self.handle.set_arg(index, bo)
+        for handle in self.handles:
+            handle.set_arg(index, bo)
 
     def bind_feedback(self, bo: pyxrt.bo) -> None:
         if self._feedback_arg is None:
@@ -153,15 +156,17 @@ class FullELFRun:
         self.wired = True
 
     @property
-    def params(self) -> ParameterBlock | None:
-        """The run's parameter scratchpad; ``None`` when ``params.txt`` counts none."""
+    def params(self) -> list[ParameterBlock] | None:
+        """Each command's parameter scratchpad; ``None`` when ``params.txt``
+        counts none.
+        """
         if self._params is not None:
             return self._params
         if self._params_path is None:
             return None
         if self._params_path.read_text().split("\n", 1)[0].strip() == "0":
             return None
-        self._params = ParameterBlock(self.handle, self._params_path)
+        self._params = [ParameterBlock(h, self._params_path) for h in self.handles]
         return self._params
 
     def write_values(self, values: Mapping[str, np.generic]) -> None:
@@ -171,37 +176,50 @@ class FullELFRun:
                 f"{self.name} was built without per-call values; got "
                 f"{sorted(values)}"
             )
-        for symbol, value in values.items():
-            params.write(symbol, value)
-        params.sync()
+        for block in params:
+            for symbol, value in values.items():
+                block.write(symbol, value)
+            block.sync()
 
     def read_value(self, symbol: str) -> int:
         params = self.params
         if params is None:
             raise ValueError(f"{self.name} was built without per-call values")
-        params.sync_from_device()
-        return params.read(symbol)
+        params[0].sync_from_device()
+        return params[0].read(symbol)
 
     def scratchpad_alias(self) -> pyxrt.bo:
-        """This run's ctrl scratchpad, for another run to drain its feedback into."""
+        """This run's ctrl scratchpad, for another run to drain its feedback into.
+
+        Raises:
+            ValueError: The run has no per-call values, or is several
+                commands, whose scratchpads one drain cannot all set.
+        """
         params = self.params
         if params is None:
             raise ValueError(f"{self.name} has no per-call values to feed back into")
+        if len(params) > 1:
+            raise ValueError(
+                f"{self.name} is {len(params)} commands; another run's feedback "
+                f"sets one scratchpad"
+            )
         self.wired = True
-        return params.alias()
+        return params[0].alias()
 
     def start(self) -> None:
         if aie_utils.DefaultNPURuntime.load(self._image).kernel is not self._kernel:
             raise RuntimeError(
                 f"{self.name}: the runtime evicted the image this run was made on"
             )
-        self.handle.start()
+        for handle in self.handles:
+            handle.start()
 
     def wait(self) -> None:
-        # run.wait() returns the ert_cmd_state; run.wait2() returns None.
-        state = self.handle.wait()
-        if state != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
-            raise RuntimeError(f"{self.name}: the run ended in {state}")
+        for handle in self.handles:
+            # run.wait() returns the ert_cmd_state; run.wait2() returns None.
+            state = handle.wait()
+            if state != pyxrt.ert_cmd_state.ERT_CMD_STATE_COMPLETED:
+                raise RuntimeError(f"{self.name}: the run ended in {state}")
 
 
 class FullELFCallable:
@@ -247,6 +265,14 @@ class FullELFCallable:
         self.kernel = NPUKernel(
             elf_path=str(seq.image), kernel_name=f"{device_name}:{sequence_name}"
         )
+        # Each later command's runtime sequence, on the same hw_context.
+        self.later = [
+            NPUKernel(
+                elf_path=str(seq.image),
+                kernel_name=f"{device_name}:{Fusion.sequence_name(k)}",
+            )
+            for k in range(1, len(seq.commands) + 1)
+        ]
         # The kernel the runs are made on, which outlives an evicted handle's.
         self._xrt_kernel: pyxrt.kernel | None = None
         self._run: FullELFRun | None = None
@@ -331,9 +357,13 @@ class FullELFCallable:
 
     def _make_run(self) -> FullELFRun:
         handle = self.handle
+        kernels = [
+            handle.kernel,
+            *(aie_utils.DefaultNPURuntime.load(k).kernel for k in self.later),
+        ]
         while True:
             try:
-                run = pyxrt.run(handle.kernel)
+                runs = [pyxrt.run(kernel) for kernel in kernels]
                 break
             except RuntimeError as e:
                 # ENOSPC: the device heap holds no more control code.
@@ -353,8 +383,8 @@ class FullELFCallable:
         made = FullELFRun(
             self.op.name,
             self.kernel,
-            handle.kernel,
-            run,
+            kernels,
+            runs,
             arguments,
             self._argument_index.get("feedback"),
             self.op.artifacts.params,
