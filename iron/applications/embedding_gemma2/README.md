@@ -8,7 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 EmbeddingGemma 2's text encoder as one IRON graph, `EmbeddingGemma`,
 compiled once at `max_tokens` rows (2048 by default) with the prompt's
 length bound per call, and its audio and vision towers, whose soft tokens
-take their placeholders' places in the text (`Multimodal`). Text goes in
+take their placeholders' places in the text (`Multimodal`, an
+`iron.lm.Multimodal`). Text goes in
 behind its task's prefix and a unit-length embedding of 768 comes out, or
 its first 512, 256 or 128 renormalized. Each graph is checked against a
 float32 numpy oracle of the same part.
@@ -21,8 +22,8 @@ The application is one package over `iron.lm`:
   `Tokenizer` (each task's prefix, the placeholders), the command line, and
   `Runner`, what `python -m iron.lm.tune embedding_gemma2` measures: every
   version of `Multimodal`, so every graph's designs, in one cost table
-- `audio.py`, `vision.py`: the towers, each a graph of its own that
-  `Multimodal` calls in its body
+- `audio.py`, `vision.py`: the towers, each an `iron.lm.Tower`, a graph
+  of its own that `Multimodal` calls in its body
 - `oracle.py`: the float32 oracles, with the host feature extractor and
   image processor
 - `profiles/`: the tunables per device, where an operator's own resolution

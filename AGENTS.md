@@ -1011,7 +1011,7 @@ of its own that carries the mark.
 `iron/lm/` is what every language model shares; each model is an
 application over it, a package of its own under `iron/applications/`
 (`llama`, `embedding_gemma2`) holding its test, README, tokenizer and
-profiles. The library is four modules:
+profiles. The library is five modules:
 
 - `base.py`: what any model is over it. `Config`, the one field every
   model judges its RMS norms by (`eps`) and `from_checkpoint(path)`, built
@@ -1058,8 +1058,20 @@ profiles. The library is four modules:
   gives. A
   `DecoderConfig`'s `rotary_dim` rotates only that prefix of each head, and
   its `rope_attention_scaling` scales the whole angle table once
-- `encoder.py`: `Encoder`, EmbeddingGemma 2's kind, a bidirectional
-  encoder compiled once at `max_tokens` rows with the length bound per call
+- `encoder.py`: `Encoder`, a bidirectional encoder compiled once at
+  `max_tokens` rows with the length bound per call, with `CausalLM`'s
+  hooks: its body is `lookup(ids[:n])`, then `forward`, which runs each
+  `layer` (`config.layer(i)`'s `Layer` by default, attending both ways
+  within its window), `norm`, `pool(x, n)` and `head`. `Tower` is an
+  encoder whose rows come from a front end (`front`) and whose output is
+  `soft_rows` of soft tokens in a text model's space (`soft`, `inputs`,
+  `soft_tokens`)
+- `multimodal.py`: `Multimodal(text, towers)`, a text model and its
+  towers keyed by placeholder token as one graph: a version per tower
+  writing its soft tokens into a merged state, and `placed`, which `Merge`s
+  them in at the placeholders and runs the text model over the rows. Its
+  inputs and per-call values are its parts', named in `signature()`
+  (`Graph.signature`), a tower's values after its input (`rgb_n`)
 - `blocks.py`: what layers are built from: `project(x, w)`, a weight's
   projection at either row count (GEMV for one row, GEMM for more), with a
   `bias` folded on by `RowwiseAdd` where a checkpoint's projection carries
@@ -1128,8 +1140,8 @@ Its text encoder, audio and vision towers at
 `iron/applications/embedding_gemma2/`, one package and one test, an
 `Encoder` rather than a `CausalLM`: one graph compiled once at `max_tokens`
 rows (2048 by default), the prompt's length bound per call, each tower a
-graph the multimodal one calls in its body, and an oracle per part, its
-float32 forward pass on the host:
+`Tower` and the multimodal model an `iron.lm.Multimodal`, and an oracle per
+part, its float32 forward pass on the host:
 
 - **Required files**: `model.safetensors`, `tokenizer.json`
 - **Default location**: `/srv/embeddinggemma-2/` (configurable via `IRON_EXAMPLE_WEIGHTS_DIR`)
