@@ -16,7 +16,6 @@ its task's prefix and a unit-length embedding comes out:
 import argparse
 import math
 import time
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
@@ -35,9 +34,6 @@ from iron.lm import Checkpoint, Derived, Encoder, rope_angles
 from iron.lm.blocks import ACCURATE
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
-from iron.operators.elementwise_add import ElementwiseAdd
-from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul
-from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM
 from iron.operators.gemv import GEMV
 from iron.operators.merge import Merge
@@ -45,7 +41,7 @@ from iron.operators.mha import MHA
 from iron.operators.rms_norm import RMSNorm
 
 from .audio import AudioTower
-from .blocks import attention, sandwich_layer
+from .blocks import attend
 from .config import PROFILES, AudioConfig, Config, VisionConfig
 from .vision import VisionTower
 
@@ -142,10 +138,8 @@ class EmbeddingGemma(Encoder):
             np.float32(c.emb_dim)
         )
         derived.put(w.embed_tokens, scaled=table)
-        for layer in w.layers:
-            derived.put(
-                layer, scale=np.full(c.emb_dim, layer.layer_scalar[0], bfloat16)
-            )
+        for i, layer in enumerate(w.layers):
+            c.layer(i).derive(derived, layer)
         self.angles = {
             D: iron.weight(rope_angles(D, c.max_tokens, base).astype(bfloat16))
             for _, D, base in {c.heads(i) for i in range(c.n_layers)}
@@ -194,40 +188,10 @@ class EmbeddingGemma(Encoder):
         )
 
     def layer(self, i, w, d, x, embeddings, n):
+        """Layer ``i`` on ``x``, its per-layer input projected from the
+        token ``embeddings``.
+        """
         c = self.config
-        G, D, _ = c.heads(i)
-        a = w.self_attn
-        attend = partial(
-            attention,
-            angles=self.angles[D][:n],
-            q_proj=a.q_proj.weight,
-            k_proj=a.k_proj.weight,
-            v_proj=a.v_proj.weight,
-            o_proj=a.o_proj.weight,
-            q_norm=a.q_norm.weight,
-            k_norm=a.k_norm.weight,
-            heads=c.n_heads,
-            groups=G,
-            head_dim=D,
-            epsilon=c.eps,
-            window=None if i in c.global_layers else c.sliding_window,
-            **ACCURATE,
-        )
-        x = sandwich_layer(
-            x,
-            attend,
-            norms=(
-                w.input_layernorm.weight,
-                w.post_attention_layernorm.weight,
-                w.pre_feedforward_layernorm.weight,
-                w.post_feedforward_layernorm.weight,
-            ),
-            gate=w.mlp.gate_proj.weight,
-            up=w.mlp.up_proj.weight,
-            down=w.mlp.down_proj.weight,
-            epsilon=c.eps,
-            **ACCURATE,
-        )
         # The projection's E ** -0.5 scale folded into the norm's epsilon:
         # RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).
         P, tree = c.ple_dim, self.language_model.ple
@@ -235,13 +199,9 @@ class EmbeddingGemma(Encoder):
         ple = GEMM.step(embeddings, projection, b_col_maj=True, **ACCURATE)
         norm = tree.per_layer_projection_norm.weight
         ple = RMSNorm.step(ple, weight=norm, epsilon=c.eps * c.emb_dim)
-        b = w.ple_block
-        g = GEMM.step(x, b.per_layer_input_gate.weight, b_col_maj=True, **ACCURATE)
-        g = ElementwiseMul.step(GELU.step(g), ple)
-        g = GEMM.step(g, b.per_layer_projection.weight, b_col_maj=True, **ACCURATE)
-        norm = b.post_per_layer_input_norm.weight
-        x = ElementwiseAdd.step(x, RMSNorm.step(g, weight=norm, epsilon=c.eps))
-        return RowwiseMul.step(x, d.scale)
+        layer = c.layer(i)
+        angles = self.angles[layer.head_dim][:n]
+        return layer.step(w, x, attend, angles, ple=ple, derived=d)
 
     def longest(self) -> dict:
         """The per-call values of the longest call: every row real."""

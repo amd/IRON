@@ -6,7 +6,6 @@ into patches, the tower and its projection into the text model's space, as
 one graph.
 """
 
-from functools import partial
 from types import SimpleNamespace
 
 import numpy as np
@@ -22,7 +21,7 @@ from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.gemm import GEMM
 from iron.operators.rms_norm import RMSNorm
 
-from .blocks import attention, sandwich_layer
+from .blocks import attend
 from .config import PROFILES, VisionConfig
 
 
@@ -140,37 +139,18 @@ class VisionTower(Model):
             ElementwiseAdd.step(h, position[0, :n]), position[1, :n]
         )
         angles = Copy.step(self.angles[xy]).reshape(T, c.head_dim)[:n]
-        for w, r in zip(v.encoder.layers, d.encoder.layers):
-            attend = partial(
-                attention,
-                angles=angles,
-                q_proj=r.self_attn.q_reordered,
-                k_proj=r.self_attn.k_reordered,
-                v_proj=w.self_attn.v_proj.linear.weight,
-                o_proj=w.self_attn.o_proj.linear.weight,
-                q_norm=r.self_attn.q_norm_reordered,
-                k_norm=r.self_attn.k_norm_reordered,
-                heads=c.n_heads,
-                groups=c.n_heads,
-                head_dim=c.head_dim,
-                epsilon=c.eps,
-                **ACCURATE,
-            )
-            h = sandwich_layer(
-                h,
-                attend,
-                norms=(
-                    w.input_layernorm.weight,
-                    w.post_attention_layernorm.weight,
-                    w.pre_feedforward_layernorm.weight,
-                    w.post_feedforward_layernorm.weight,
-                ),
-                gate=w.mlp.gate_proj.linear.weight,
-                up=w.mlp.up_proj.linear.weight,
-                down=w.mlp.down_proj.linear.weight,
-                epsilon=c.eps,
-                **ACCURATE,
-            )
+        for i, (w, r) in enumerate(zip(v.encoder.layers, d.encoder.layers)):
+            a = r.self_attn
+            # q and k reordered, until RoPE turns each half of a head itself.
+            reordered = {
+                "q_proj": SimpleNamespace(weight=a.q_reordered),
+                "k_proj": SimpleNamespace(weight=a.k_reordered),
+                "q_norm": SimpleNamespace(weight=a.q_norm_reordered),
+                "k_norm": SimpleNamespace(weight=a.k_norm_reordered),
+            }
+            self_attn = SimpleNamespace(**{**vars(w.self_attn), **reordered})
+            w = SimpleNamespace(**{**vars(w), "self_attn": self_attn})
+            h = c.layer(i).step(w, h, attend, angles)
         pooled = GEMM.step(self.pool[:, :n], h, **ACCURATE)
         # The mean's 1 / pool ** 2 and the sqrt(emb_dim) scale folded into
         # the norm's epsilon: RMSNorm(s * y, eps) is RMSNorm(y, eps / s ** 2).

@@ -5,10 +5,8 @@
 the oracles its graphs are judged by, the text encoder's
 (``EmbeddingGemmaOracle``), the audio tower's (``AudioOracle``, with the
 feature extractor) and the vision tower's (``VisionOracle``, with the image
-processor), each an ``Oracle``. ``sandwich_layer`` is the layer the text
-encoder and the vision tower share, EmbeddingGemma 2's own Gemma-shaped
-layer, as ``iron.applications.embedding_gemma2.blocks.sandwich_layer`` is
-its NPU side.
+processor), each an ``Oracle``; the text encoder's and the vision tower's
+layers are ``iron.lm.Layer.oracle``.
 """
 
 import math
@@ -22,43 +20,6 @@ from iron.lm import LogMel, Oracle, rope_angles, widen
 from iron.operators.resample.reference import resize
 
 from .config import AudioConfig, Config, VisionConfig
-
-
-def sandwich_layer(
-    oracle: Oracle,
-    x,
-    tables: list[np.ndarray],
-    *,
-    q_proj,
-    k_proj,
-    v_proj,
-    o_proj,
-    q_norm,
-    k_norm,
-    norms: tuple,
-    gate,
-    up,
-    down,
-    groups: int,
-    head_dim: int,
-    window: int | None = None,
-):
-    """The layer the text encoder and the vision tower share, on ``x``
-    ``(n, emb_dim)``: attention, its queries and keys normed and turned by
-    ``tables`` (``oracle.rotate``), then the GELU-gated feed-forward, each
-    between sandwich norms (``norms``, the attention's pre and post, then
-    the feed-forward's) with its residual.
-    """
-    n, H, G, D = x.shape[0], oracle.config.n_heads, groups, head_dim
-    h = oracle.rms_norm(x, norms[0])
-    q = oracle.rotate(oracle.rms_norm((h @ q_proj.T).reshape(n, H, D), q_norm), tables)
-    k = oracle.rotate(oracle.rms_norm((h @ k_proj.T).reshape(n, G, D), k_norm), tables)
-    v = oracle.rms_norm((h @ v_proj.T).reshape(n, G, D))
-    a = oracle.attend(q, k, v, window=window, scale=1.0) @ o_proj.T
-    x = x + oracle.rms_norm(a, norms[1])
-    h = oracle.rms_norm(x, norms[2])
-    f = (oracle.gelu_tanh(h @ gate.T) * (h @ up.T)) @ down.T
-    return x + oracle.rms_norm(f, norms[3])
 
 
 class EmbeddingGemmaOracle(Oracle):
@@ -88,37 +49,7 @@ class EmbeddingGemmaOracle(Oracle):
         """Layer `i` on `x` `(n, emb_dim)`, with its per-layer input `ple`
         `(n, ple_dim)` and the RoPE table `angles` of its head size.
         """
-        c = self.config
-        G, D, _ = c.heads(i)
-        window = None if i in c.global_layers else c.sliding_window
-        a, b = w.self_attn, w.ple_block
-        x = sandwich_layer(
-            self,
-            x,
-            [angles],
-            q_proj=a.q_proj.weight,
-            k_proj=a.k_proj.weight,
-            v_proj=a.v_proj.weight,
-            o_proj=a.o_proj.weight,
-            q_norm=a.q_norm.weight,
-            k_norm=a.k_norm.weight,
-            norms=(
-                w.input_layernorm.weight,
-                w.post_attention_layernorm.weight,
-                w.pre_feedforward_layernorm.weight,
-                w.post_feedforward_layernorm.weight,
-            ),
-            gate=w.mlp.gate_proj.weight,
-            up=w.mlp.up_proj.weight,
-            down=w.mlp.down_proj.weight,
-            groups=G,
-            head_dim=D,
-            window=window,
-        )
-        gate = self.gelu_tanh(x @ b.per_layer_input_gate.weight.T)
-        p = (gate * ple) @ b.per_layer_projection.weight.T
-        norm = b.post_per_layer_input_norm.weight
-        return (x + self.rms_norm(p, norm)) * w.layer_scalar
+        return self.config.layer(i).oracle(self, w, x, self.attend, angles, ple=ple)
 
     def token_states(self, tokens, soft: Mapping[int, np.ndarray] = {}) -> np.ndarray:
         """Each token's `(n, out_dim)` output, before pooling.
@@ -408,7 +339,6 @@ class VisionOracle(Oracle):
         Padding patches reach nothing but themselves, so they are dropped.
         """
         c = self.config
-        D = c.head_dim
         real = (positions >= 0).all(axis=-1)
         pixels = np.asarray(pixel_values, np.float32)[real]
         x, y = np.asarray(positions)[real].T
@@ -416,30 +346,8 @@ class VisionOracle(Oracle):
         h = h + self.position[0][x] + self.position[1][y]
         # Each head's first half turned by the patch's x, its second by its y.
         tables = [self.angles[x], self.angles[y]]
-        for w in self.layers:
-            a = w.self_attn
-            h = sandwich_layer(
-                self,
-                h,
-                tables,
-                q_proj=a.q_proj.linear.weight,
-                k_proj=a.k_proj.linear.weight,
-                v_proj=a.v_proj.linear.weight,
-                o_proj=a.o_proj.linear.weight,
-                q_norm=a.q_norm.weight,
-                k_norm=a.k_norm.weight,
-                norms=(
-                    w.input_layernorm.weight,
-                    w.post_attention_layernorm.weight,
-                    w.pre_feedforward_layernorm.weight,
-                    w.post_feedforward_layernorm.weight,
-                ),
-                gate=w.mlp.gate_proj.linear.weight,
-                up=w.mlp.up_proj.linear.weight,
-                down=w.mlp.down_proj.linear.weight,
-                groups=c.n_heads,
-                head_dim=D,
-            )
+        for i, w in enumerate(self.layers):
+            h = c.layer(i).oracle(self, w, h, self.attend, tables)
         # Each soft token is the mean of a pool x pool block of patches,
         # numbered row-major over the blocks.
         k = c.pool

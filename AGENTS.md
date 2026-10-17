@@ -1083,11 +1083,8 @@ profiles. The library is four modules:
   `step()` runs in a graph's body with the model kind's `attend` and RoPE
   angles, and `oracle()` is its float32 twin, built from `Oracle`'s
   primitives (`iron/tests/common/layer.py`).
-  EmbeddingGemma 2's own Gemma-shaped blocks (`geglu`, the GELU-gated
-  feed-forward; `sandwich`, a block between two RMS norms; `attention`, an
-  encoder's bidirectional attention; `sandwich_layer`, the two together) are
-  its application's own, `iron/applications/embedding_gemma2/blocks.py`,
-  not the library's
+  EmbeddingGemma 2's text encoder and vision tower run `Layer` with their
+  own bidirectional `attend`, `iron/applications/embedding_gemma2/blocks.py`
 
 Nothing of a model's own is needed by `generation.py` (sampling, the
 generation loop and the accuracy and determinism checks over any model

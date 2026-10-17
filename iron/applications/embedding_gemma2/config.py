@@ -77,6 +77,10 @@ class Config(lm.Config):
     out_dim: int = dataclasses.field(
         default=768, metadata={"json": "text_config.embedding_dim"}
     )
+    hidden_act: str = dataclasses.field(
+        default="gelu_pytorch_tanh",
+        metadata={"json": "text_config.hidden_activation"},
+    )
     # The Matryoshka truncations, each renormalized.
     mrl_dims: tuple[int, ...] = (768, 512, 256, 128)
     eps: float = dataclasses.field(
@@ -118,6 +122,23 @@ class Config(lm.Config):
         if i in self.global_layers:
             return self.global_kv_groups, self.global_head_dim, self.global_rope_base
         return self.n_kv_groups, self.head_dim, self.rope_base
+
+    def layer(self, i: int) -> lm.Layer:
+        """Layer ``i``: unscaled attention over RMS-normed values, a sliding
+        layer's within ``sliding_window`` positions.
+        """
+        G, D, _ = self.heads(i)
+        return lm.Layer(
+            heads=self.n_heads,
+            groups=G,
+            head_dim=D,
+            eps=self.eps,
+            activation=self.hidden_act,
+            scale=1.0,
+            window=None if i in self.global_layers else self.sliding_window,
+            v_norm=True,
+            accurate=True,
+        )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -233,6 +254,10 @@ class VisionConfig(lm.Config):
     rope_base: float = dataclasses.field(
         default=100.0, metadata={"json": "vision_config.rope_parameters.rope_theta"}
     )
+    hidden_act: str = dataclasses.field(
+        default="gelu_pytorch_tanh",
+        metadata={"json": "vision_config.hidden_activation"},
+    )
     text_dim: int = 512
     # The processor's soft-token budgets.
     image_tokens: int = dataclasses.field(
@@ -252,6 +277,19 @@ class VisionConfig(lm.Config):
     # patch columns, as many as its memory holds: 127 across on 16 cores.
     chunk: int = 4096
     patch_columns: int = 8
+
+    def layer(self, i: int) -> lm.Layer:
+        """Layer ``i``: unscaled attention over RMS-normed values."""
+        return lm.Layer(
+            heads=self.n_heads,
+            groups=self.n_heads,
+            head_dim=self.head_dim,
+            eps=self.eps,
+            activation=self.hidden_act,
+            scale=1.0,
+            v_norm=True,
+            accurate=True,
+        )
 
     def size(self, height: int, width: int, max_tokens: int) -> tuple[int, int]:
         """The `(height, width)` the processor resizes an image to: the
