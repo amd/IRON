@@ -329,3 +329,22 @@ def test_a_decoder_without_rope_places_its_positions_through_the_hook(cpu):
         _assert_close(
             [model.logits(tokens)], [LlamaOracle(config, cpu.weights).logits(tokens)]
         )
+
+
+def test_a_decoder_nested_in_its_checkpoint_is_read_where_it_is(cpu):
+    """A checkpoint holding its decoder's embedding and layers under
+    ``model.decoder``: ``decoder=`` reads them there, in the model and its
+    oracle, and both give the flat checkpoint's logits bit for bit.
+    """
+    m = cpu.weights.model
+    decoder = SimpleNamespace(embed_tokens=m.embed_tokens, layers=m.layers)
+    nested = SimpleNamespace(
+        model=SimpleNamespace(norm=m.norm, embed_tokens=m.embed_tokens, decoder=decoder)
+    )
+    model = OnHost(cpu.config, nested, decoder)
+    assert model.layers is m.layers and model.decoder is decoder
+    np.testing.assert_array_equal(
+        model.logits(cpu.prompt), OnHost(cpu.config, cpu.weights).logits(cpu.prompt)
+    )
+    oracle = LlamaOracle(cpu.config, nested, decoder)
+    np.testing.assert_array_equal(oracle.logits(cpu.prompt), cpu.first)

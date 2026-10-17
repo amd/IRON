@@ -419,20 +419,23 @@ class Oracle:
 
     Args:
         config: The model's shape; its ``eps`` is every RMS norm's.
-        weights: A decoder's checkpoint tree (``Checkpoint.tree``): its
-            ``model.embed_tokens`` and ``model.layers`` are read here, the
-            rest by the subclass. Left out, the subclass builds its own
-            state from its own weights tree.
+        weights: A decoder's checkpoint tree (``Checkpoint.tree``). Left
+            out, the subclass builds its own state from its own weights
+            tree.
+        decoder: The decoder's module of ``weights``, whose
+            ``embed_tokens`` and ``layers`` are read here, the rest by the
+            subclass; None is ``weights.model``.
     """
 
-    def __init__(self, config: Config, weights=None):
+    def __init__(self, config: Config, weights=None, decoder=None):
         self.config = config
         self.buffers: dict[str, np.ndarray] = {}
         if weights is None:
             return
         self.weights = weights
-        self.embedding = widen(weights.model.embed_tokens.weight)
-        self.layers = weights.model.layers
+        self.decoder = weights.model if decoder is None else decoder
+        self.embedding = widen(self.decoder.embed_tokens.weight)
+        self.layers = self.decoder.layers
         self.angles = config.angles()
 
     def layer(self, i: int, angles, w, x):

@@ -78,9 +78,10 @@ class CausalLM(Model):
 
     Args:
         config: The decoder's shape.
-        weights: The checkpoint's tree (``Checkpoint.tree``): its
-            ``model.embed_tokens`` and ``model.layers`` are read here, the
-            rest by the subclass.
+        weights: The checkpoint's tree (``Checkpoint.tree``).
+        decoder: The decoder's module of ``weights``, whose ``embed_tokens``
+            and ``layers`` are read here, the rest by the subclass; None is
+            ``weights.model``.
     """
 
     layers: list
@@ -88,10 +89,11 @@ class CausalLM(Model):
     # The per-call value bounding a prompt chunk's rows.
     bound: ClassVar[str] = "rows"
 
-    def __init__(self, config: DecoderConfig, weights):
+    def __init__(self, config: DecoderConfig, weights, decoder=None):
         self.config = config
         self.weights = weights
-        self.layers = weights.model.layers
+        self.decoder = weights.model if decoder is None else decoder
+        self.layers = self.decoder.layers
         if len(self.layers) != config.n_layers:
             raise ValueError(
                 f"the checkpoint has {len(self.layers)} layers, the config "
@@ -132,7 +134,7 @@ class CausalLM(Model):
 
     def lookup(self, ids):
         """The embedding rows of ``ids``, bounded as ``ids`` is."""
-        return Copy.step(iron.weight(self.weights.model.embed_tokens.weight)[ids])
+        return Copy.step(iron.weight(self.decoder.embed_tokens.weight)[ids])
 
     def body(
         self,
@@ -151,7 +153,7 @@ class CausalLM(Model):
                 chunk=chunk,
                 rows=rows,
             )
-        embedding = iron.weight(self.weights.model.embed_tokens.weight)
+        embedding = iron.weight(self.decoder.embed_tokens.weight)
         x = Copy.step(embedding[token]).reshape(1, self.config.emb_dim)
         return self.forward(x, prompt=False, position=position, chunk=chunk, rows=rows)
 
