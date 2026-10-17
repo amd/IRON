@@ -149,3 +149,20 @@ def test_an_activation_is_judged_by_its_devices_row(request, device, cls):
     want = np.asarray(row.reference(lines)).astype(y.dtype)
     np.testing.assert_array_equal(y.reshape(want.shape), want)
     assert CostCache.judged_key("default", "entry", op, op)
+
+
+class Bounded(iron.Graph):
+    """A binary and a unary step over the first ``n`` rows of 128."""
+
+    def body(self, x, y, *, n: Scratchpad[np.int32]):
+        return ReLU.step(ElementwiseAdd.step(x[:n], y[:n]))
+
+
+@pytest.mark.parametrize("n", [1, 9, 128])
+def test_a_reference_takes_valid_rows_short_of_a_whole_line(n):
+    rng = np.random.default_rng(n)
+    x, y = (rng.standard_normal((128, 128)).astype(bfloat16) for _ in range(2))
+    got = Bounded().reference(x, y, n=n)
+    added = (x[:n].astype(np.float32) + y[:n].astype(np.float32)).astype(bfloat16)
+    want = np.maximum(added, bfloat16(0))
+    np.testing.assert_array_equal(np.asarray(got).view(np.uint16), want.view(np.uint16))

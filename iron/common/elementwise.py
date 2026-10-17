@@ -760,7 +760,27 @@ class Elementwise(Operator):
         return super().ops() if per_call is None else per_call * self.lines
 
     def reference(self, *inputs):
-        """The kernel contract's reference, line by line: what the cores compute."""
+        """The kernel contract's reference, line by line: what the cores compute.
+
+        Elements short of a whole line, a bounded call's valid ones, are run
+        padded with zeros to whole lines, as the device runs whole tiles.
+        """
+        (out,) = self.outputs
+        line = self.default_tile if self.tile_size is None else self.tile_size
+        if out.elements % line:
+            whole = -(-out.elements // line) * line
+            padded = [
+                (
+                    x
+                    if b.replicate
+                    else np.concatenate(
+                        [np.ravel(x), np.zeros(whole - np.size(x), np.asarray(x).dtype)]
+                    )
+                )
+                for b, x in zip(self.inputs, inputs)
+            ]
+            y = np.asarray(self.over(whole, line).reference(*padded))
+            return y.reshape(-1)[: out.elements].reshape(out.host_shape)
         op, lines, scalars = self._kernel_arguments(inputs)
         (out,) = op.outputs
         y = (

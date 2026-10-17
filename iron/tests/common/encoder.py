@@ -213,6 +213,5 @@ def test_the_default_layer_is_the_config_s_attending_both_ways(table):
         (False, 64, 1.0),
         (False, None, HEAD_DIM**-0.5),
     ]
-    # Whole 256-element lines: an elementwise reference refuses a partial one.
-    ids, values = graph.inputs(np.arange(8))
-    assert np.shape(graph.reference(ids, **values)) == (8, HEADS * HEAD_DIM)
+    ids, values = graph.inputs(np.arange(9))
+    assert np.shape(graph.reference(ids, **values)) == (9, HEADS * HEAD_DIM)
