@@ -1005,18 +1005,18 @@ library imports a model. The modules:
   checkpoint's `config.json` (a field with no `metadata={"json": ...}` is
   IRON's choice and keeps its default), whose `attention(i)` and
   `layer(i)` give layer `i`'s parts; `rope_angles`
-- `checkpoint.py`: `Checkpoint`, the
-  mapped `.safetensors` (sharded, or a PyTorch checkpoint read without
-  torch), whose `tree(fill=)` is the weights by the checkpoint's own names
+- `checkpoint.py`: `Checkpoint`, the mapped `.safetensors` (sharded, or a
+  PyTorch checkpoint read without torch), whose `tree(fill=)` is the
+  weights by the checkpoint's own names
   (`weights.model.layers[3].self_attn.q_proj.weight`): `"read"`, views of
   the file; `"random"`, drawn at a seed; `"unread"`, allocated and never
   written, for tracing and building
-- `model.py`: `Model`, a graph whose versions `load_versions()` compiles before
-  the first call, with `sanitize(w)`, which renames one layer's modules to
-  the names the parts read; and `OnHost`, a model mixin that runs the graph's
-  own reference (`Graph.reference`) in place of the device
-- `runner.py`: `Runner`
-  and `main`, a checkpoint, tokenizer and model and the command line.
+- `model.py`: `Model`, a graph whose versions `load_versions()` compiles
+  before the first call, with `sanitize(w)`, which renames one layer's
+  modules to the names the parts read; and `OnHost`, a model mixin that
+  runs the graph's own reference (`Graph.reference`) in place of the device
+- `runner.py`: `Runner` and `main`, a checkpoint, tokenizer and model and
+  the command line.
   `Runner.reference()` is what a model is judged by: transformers' logits
   recorded beside the checkpoint, or with `--random-weights SEED` the
   graph's own reference over the drawn weights

@@ -30,8 +30,8 @@ public API adds its entry under Unreleased.
 - Goldens recorded from transformers, with a fingerprint of the config and
   weights they came from. `pytest --record-goldens` (or `IRON_RECORD_GOLDENS`)
   records them.
-- `iron.Precision` and a `precision` tunable on GEMM and flm.ProjectionGEMM, with
-  `torch.set_float32_matmul_precision`'s levels. `Graph.precision` and
+- `iron.Precision` and a `precision` tunable on GEMM and flm.ProjectionGEMM,
+  with `torch.set_float32_matmul_precision`'s levels. `Graph.precision` and
   `compile(precision=)` set a floor.
 - `python -m iron.lm.tune <application>`, which writes the fastest admissible
   setting of each operator shape to `profiles/<device>.json`.
@@ -80,6 +80,9 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `iron.lm.base` is split into `iron.lm.config`, `checkpoint`, `model` and
+  `runner`; `iron.lm`'s own names are unchanged.
+- A `Runner` subclass is its model's `runner`, which `CausalLM.load` builds.
 - `iron.operators.flm`'s GEMM is `ProjectionGEMM`, so it is not confused
   with `iron.operators.GEMM`; a profile names it `"flm.ProjectionGEMM"`.
 - An operand's element shape is `obj_shape=`, not `obj_type=`:
@@ -102,12 +105,11 @@ public API adds its entry under Unreleased.
   take torch's arguments in torch's order; `eps=None` is the input dtype's
   epsilon, as torch's. A `normalized_shape` other than the input's last
   axis is refused.
-- `F.linear(precision=)` is the one way to ask for an accurate projection:
-  at `Precision.HIGHEST` several rows run core GEMM, whose float32 sums
-  round once, where they ran flm.ProjectionGEMM before, whether asked for by the call
-  or by `Graph.precision`; one row, a GEMV that rounds once, takes any
-  precision.
-  `Attention` and `MLP` take `precision` in place of `accurate`.
+- `F.linear(precision=)` is the one way to ask for an accurate projection: at
+  `Precision.HIGHEST` several rows run core GEMM, whose float32 sums round
+  once, where they ran flm.ProjectionGEMM before, whether asked for by the
+  call or by `Graph.precision`; one row, a GEMV that rounds once, takes any
+  precision. `Attention` and `MLP` take `precision` in place of `accurate`.
 - `HuggingFaceWhisper` and `HuggingFaceVLM` move to their applications'
   `hugging_face.py`, as EmbeddingGemma 2's builders are, which only tests
   and golden recording import.
@@ -140,8 +142,8 @@ public API adds its entry under Unreleased.
   resolves and not recorded on the result, instead of probing for an NPU,
   and an unresolved `Auto()` tile raises instead of becoming a 0-d fifo.
 - RoPE's `method_type` is `two_halves`, a flag.
-- flm.ProjectionGEMM takes `epilogue="silu"` and `"sigmoid"`, which a SiLU or Sigmoid
-  finish applied before.
+- flm.ProjectionGEMM takes `epilogue="silu"` and `"sigmoid"`, which a SiLU or
+  Sigmoid finish applied before.
 - IRON requires Python 3.11.
 - An `Encoder`'s per-call row count is `rows`, as a causal model's is.
 - `Runner.bos` is read from the checkpoint's `config.json` unless a runner
@@ -173,8 +175,9 @@ public API adds its entry under Unreleased.
   judged by transformers' goldens or the graph's reference.
 - Mamba-2 and mixture-of-experts layers, which only the Oracle ran.
   `TopKRouter` stays.
-- GEMM's `emulate_bf16_mmul_with_bfp16` and `prio_accuracy`, and flm.ProjectionGEMM's
-  and MHA's `emulate_bf16_mmul_with_bfp16`, replaced by `precision`.
+- GEMM's `emulate_bf16_mmul_with_bfp16` and `prio_accuracy`, and
+  flm.ProjectionGEMM's and MHA's `emulate_bf16_mmul_with_bfp16`, replaced by
+  `precision`.
 - `compile(tuner=)`, `CompiledGraph.tuning`, `Model.load(tuner=)`,
   `Runner.tables`, `--cost-table`, and the `Tuner`, `Tuning` and `Prices`
   interfaces.

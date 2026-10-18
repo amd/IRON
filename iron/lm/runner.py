@@ -118,10 +118,11 @@ class Runner:
 
     A subclass names its ``config`` (a ``Config`` class read from the
     checkpoint's ``config.json``), ``model`` (the ``CausalLM``) and
-    ``open_tokenizer`` and its ``tokenizer_file``; ``tune_arguments`` and
-    ``tune_calls`` are what ``iron.lm.tune`` tunes its profile by. Given a ``seed``, the weights are drawn
-    in the checkpoint's shapes and a prompt with no tokenizer is random
-    tokens, so speed, accuracy and determinism need neither.
+    ``open_tokenizer`` and its ``tokenizer_file``, and becomes the model's
+    ``runner``; ``tune_arguments`` and ``tune_calls`` are what
+    ``iron.lm.tune`` tunes its profile by. Given a ``seed``, the weights are
+    drawn in the checkpoint's shapes and a prompt with no tokenizer is
+    random tokens, so speed, accuracy and determinism need neither.
     """
 
     config: Config | type[Config]
@@ -130,6 +131,12 @@ class Runner:
     hugging_face: type = HuggingFace
     # The tokenizer's file in the model's Hugging Face repository.
     tokenizer_file = "tokenizer.json"
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        # The first Runner naming a model is what ``CausalLM.load`` builds.
+        if "model" in vars(cls) and "runner" not in vars(cls.model):
+            cls.model.runner = cls
 
     @functools.cached_property
     def bos(self) -> int:

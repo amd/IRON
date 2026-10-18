@@ -16,8 +16,8 @@ the image preprocessing (upstream's letterbox to 416, padded with 114, BGR)
 and the box decode, both on the host; and the graph, built from
 `iron.lm`'s `Conv2d`, `MaxPool2d`, `ConcatChannels` and `project`:
 
-- every `BaseConv`'s BatchNorm folds into its weight and bias once, as
-  `iron.lm.Derived` (its epsilon is 1e-3, which upstream's
+- every `BaseConv`'s BatchNorm folds into its weight and bias once
+  (its epsilon is 1e-3, which upstream's
   `exp.get_model()` sets, not `nn.BatchNorm2d`'s default);
 - a 1x1 conv is a projection of its pixels (`Pointwise`), copied first into
   a held map of whole 256-row blocks where its pixel count is not one; a

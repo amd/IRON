@@ -87,7 +87,7 @@ class OnHost:
         logits, carry = self.reference(*tensors, **values)
         return _HostOutput(logits), carry
 
-    def load_versions(self, **_) -> "OnHost":
+    def load_versions(self, *, release=None, full_elf=None, dev=None) -> "OnHost":
         return self
 
     def generate(self, tokens, num_tokens: int, sample: Sampler):

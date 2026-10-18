@@ -102,7 +102,7 @@ that engine from source in place of FastFlowLM's prebuilt one.
 | File | Purpose |
 |---|---|
 | `build.py` | Builds the IRON operators and stages them for the engine. |
-| `pli_weights.py` | Repacks the per-layer-input weights for IRON's GEMM. |
+| `pli_weights.py` | Repacks the per-layer-input weights for flm's ProjectionGEMM. |
 | `overrides.hpp` | Redirects the engine's operator dispatches to the IRON operators. |
 | `Makefile` | Builds FastFlowLM's engine with `overrides.hpp` compiled in. |
 

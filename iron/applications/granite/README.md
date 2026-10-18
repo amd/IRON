@@ -18,7 +18,8 @@ so what is Granite's own is short, all of it in
   `DecoderLayer`'s residual scale
 - the embedding rows scaled by `embedding_multiplier` in `embed()`, and the
   logits divided by `logits_scaling` in `head()`, the divisor folded into
-  the final norm's weight as `iron.lm.Derived`; each is skipped at 1.0, as
+  the final norm's weight once, when the model is built; each is skipped
+  at 1.0, as
   this checkpoint's are
 - its own output head, untied from its embedding (`lm_head.weight`)
 - its tokenizer's lead token, `<s>`

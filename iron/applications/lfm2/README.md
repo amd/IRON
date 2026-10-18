@@ -18,8 +18,8 @@ At load, `Lfm2.renames` renames LFM2's modules (`operator_norm`/
 `feed_forward.w1`/`w3`/`w2`) to the names the shared parts read. A layer
 whose checkpoint holds `self_attn` is a `DecoderLayer`; a conv layer is its
 short conv in attention's place, then the same feed-forward. A conv
-layer's three per-channel taps, a row each derived once at load
-(`iron.lm.Derived`), read a window spanning the current call and the
+layer's three per-channel taps, a row each computed once in
+`sanitize`, read a window spanning the current call and the
 `conv_kernel - 1` gated rows before it. Those rows are the layer's
 `iron.lm.Checkpoints` state, a slot per prompt-chunk boundary: a prompt
 chunk reads its boundary's slot and writes the next, a decode step its

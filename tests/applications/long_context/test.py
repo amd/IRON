@@ -151,6 +151,17 @@ def test_every_decoder_application_is_held_to_its_context():
     assert found == held
 
 
+def test_every_application_s_model_loads_through_its_runner():
+    """``Model.load`` builds the ``Runner`` that names the model."""
+    for package in pkgutil.iter_modules(iron.applications.__path__):
+        name = f"iron.applications.{package.name}.model"
+        if importlib.util.find_spec(name) is None:
+            continue
+        runner = vars(importlib.import_module(name)).get("Runner")
+        if isinstance(runner, type):
+            assert runner.model.runner is runner, name
+
+
 @pytest.mark.parametrize("version", ["decode", "prompt"])
 @pytest.mark.parametrize("application", list(APPLICATIONS))
 def test_nothing_grows_with_the_context(application, version):

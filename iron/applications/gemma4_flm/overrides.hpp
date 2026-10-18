@@ -115,7 +115,7 @@ inline buffer<uint8_t> load_weights(const std::string &path)
     return b;
 }
 
-// q4nx stores 5 bits per weight. IRON's GEMM reads bfp16ebs8, 9 bytes per 8 weights.
+// q4nx stores 5 bits per weight. flm's ProjectionGEMM reads bfp16ebs8, 9 bytes per 8 weights.
 inline size_t q4nx_bytes(size_t k, size_t n)
 {
     return k * n * 5 / 8;
@@ -220,7 +220,7 @@ template <class Npu, class Config> void engine_init(Npu *npu, const Config &conf
     header_print("info", "IRON operators from " + s.dir);
 }
 
-/// Loads the per-layer-input projection weights that build.py repacked for IRON's GEMM.
+/// Loads the per-layer-input projection weights that build.py repacked for flm's ProjectionGEMM.
 inline void load_pli_weights()
 {
     S().pli_down = load_weights(S().dir + "/pli_down.weights");
