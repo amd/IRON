@@ -118,6 +118,9 @@ public API adds its entry under Unreleased.
   `flm.ProjectionGEMM` to `highest`, which it cannot reach, gets the GEMM that
   rounds once from `Operator.at_precision`. `F.linear` refuses an `x` that is
   neither `(in,)` nor `(rows, in)`.
+- `MHA.COLUMNS` and `iron.operators.mha.Columns` are `MHA.PACKED_PIPELINES`,
+  the most pipelines one query packed takes by array width: the build placed
+  nothing by the other columns.
 - `iron.lm.base` is split into `iron.lm.config`, `checkpoint`, `model` and
   `cli`.
 - An operator declares with aie.iron's markers: `In`, `Out` and `InOut`

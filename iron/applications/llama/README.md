@@ -90,7 +90,7 @@ steps are dispatched one at a time: there is no device loop. Each step
 still draws its token on the NPU, and the host reads that token alone and
 dispatches the next step on it. A prompt chunk gathers its tokens' rows of
 the embedding table on the NPU too, and attends with MHA placed on NPU1's
-four columns as on NPU2's eight (`MHA.COLUMNS`), so a prompt runs a chunk
+four columns as on NPU2's eight (`MHA.PACKED_PIPELINES`), so a prompt runs a chunk
 at a time there too. `--no-full-elf` builds the same form on NPU2, which is
 how `test_llama_3_2_each_step_accuracy` checks it there.
 

@@ -55,30 +55,6 @@ SOFTMAX_STACK_SIZE = 0x1000
 
 
 @dataclasses.dataclass(frozen=True)
-class Columns:
-    """Where MHA's streams meet the array on one array width.
-
-    Attributes:
-        q: Q's shim column.
-        k: K's shim column, when every pipeline reads one K stream.
-        v: V's shim column, likewise.
-        o: O's shim column.
-        qo_mem: The memtile column of the Q split and the O join, the
-            second shim's the next one.
-        k_mem: K's memtile column, when every pipeline reads one K stream.
-        v_mem: V's memtile column, likewise.
-    """
-
-    q: int
-    k: int
-    v: int
-    o: int
-    qo_mem: int
-    k_mem: int
-    v_mem: int
-
-
-@dataclasses.dataclass(frozen=True)
 class SplitColumns:
     """Where MHA's streams meet the array with P*V split over two cores.
 
@@ -200,7 +176,7 @@ _CASES = [
 
 
 def _cases(cls, dev: Device):
-    share = 1 if dev.cols >= max(cls.COLUMNS) else 2
+    share = 1 if dev.cols >= max(cls.PACKED_PIPELINES) else 2
     return [
         dataclasses.replace(
             c, kwargs={**c.kwargs, "num_pipelines": c.kwargs["num_pipelines"] // share}
@@ -249,11 +225,9 @@ class MHA(Operator):
     pv_cores: CompileTime[int] = Auto(repr=False, domain=(1, 2))
     pv_width: CompileTime[int] = Auto(repr=False, init=False)
 
-    # One query packed puts pipeline p's K and V on column p: pipelines stop short of q.
-    COLUMNS: ClassVar[dict[int, Columns]] = {
-        8: Columns(q=4, k=5, v=6, o=7, qo_mem=6, k_mem=3, v_mem=4),
-        4: Columns(q=2, k=0, v=1, o=3, qo_mem=2, k_mem=0, v_mem=1),
-    }
+    # The array widths MHA is placed on, each with the most pipelines one
+    # query packed takes, a K and a V lane each.
+    PACKED_PIPELINES: ClassVar[dict[int, int]] = {8: 4, 4: 2}
     SPLIT_COLUMNS: ClassVar[dict[int, SplitColumns]] = {
         8: SplitColumns(q=(1, 6), o=((0, 2), (5, 7)), k=3, k_shim=3, v=(3, 4)),
         4: SplitColumns(q=(0,), o=((1, 2),), k=3, k_shim=0, v=(3, 3)),
@@ -451,23 +425,23 @@ class MHA(Operator):
                     f"MHA: one query packs a KV group's {group} heads into a block's "
                     f"B_q ({self.B_q}) rows, which must hold them"
                 )
-            q = self.COLUMNS[self.width].q
-            if self.num_pipelines > q or self.num_KV_heads % self.num_pipelines:
+            most = self.PACKED_PIPELINES[self.width]
+            if self.num_pipelines > most or self.num_KV_heads % self.num_pipelines:
                 raise ValueError(
                     f"MHA: one query takes num_pipelines ({self.num_pipelines}) at most "
-                    f"{q} dividing num_KV_heads ({self.num_KV_heads}): each pipeline "
-                    f"has its own K and V lanes, through its own column's memtile"
+                    f"{most} dividing num_KV_heads ({self.num_KV_heads}): each pipeline "
+                    f"has its own K and V lanes"
                 )
 
     @classmethod
     def fits(cls, dev) -> bool:
         """Whether ``dev`` has the columns of a layout MHA is placed on."""
-        return dev.cols >= min(cls.COLUMNS)
+        return dev.cols >= min(cls.PACKED_PIPELINES)
 
     def resolve(self, dev):
         if dev is not None and not self.fits(dev):
             raise Unresolvable(
-                f"MHA is placed on {min(self.COLUMNS)} columns or more; got "
+                f"MHA is placed on {min(self.PACKED_PIPELINES)} columns or more; got "
                 f"{dev.name} ({dev.arch}) with {dev.cols}"
             )
         B_q, pv_cores = self.B_q, self.pv_cores
@@ -500,9 +474,9 @@ class MHA(Operator):
         B_kv = self.key_block(B_q, mem)
         q_shims = 2 if self.num_pipelines > 6 else 1
         if dev is not None:
-            width = max(w for w in self.COLUMNS if w <= dev.cols)
+            width = max(w for w in self.PACKED_PIPELINES if w <= dev.cols)
         else:
-            width = max(self.COLUMNS)
+            width = max(self.PACKED_PIPELINES)
         if pv_cores > 1 and width not in self.SPLIT_COLUMNS:
             raise Unresolvable(
                 f"MHA at d={self.d} splits P*V over two cores, which is placed "
@@ -744,6 +718,17 @@ class MHA(Operator):
                 self.kv_blocks,
             ]
 
+            def each_q_block(heads, q_blocks, q_valid, q_start, bias, idx, q_block):
+                """``q_block(compute)`` over every head's Q blocks, those past
+                the bound not computed; ``idx`` restarts at the head's first."""
+                for _ in range_(heads):
+                    idx[0] = 0
+                    idx[1] = q_start + bias
+                    for _ in range_(q_valid):
+                        q_block(True)
+                    for _ in range_(q_blocks - q_valid):
+                        q_block(False)
+
             def batched_matmul_qk(
                 of_q,
                 of_k,
@@ -754,7 +739,7 @@ class MHA(Operator):
                 rtp,
                 idx_buffer,
             ):
-                def q_block(compute: bool, kv_blocks):
+                def q_block(compute: bool):
                     elem_in_q = of_q.acquire(1)
                     for _ in range_(kv_blocks):
                         elem_in_k = of_k.acquire(1)
@@ -774,13 +759,9 @@ class MHA(Operator):
                 words = rtp.read()
                 heads, q_blocks, q_valid, kv_blocks = (words[v] for v in blocks)
                 q_start = words[self.q_start]
-                for _ in range_(heads):
-                    idx_buffer[0] = 0
-                    idx_buffer[1] = q_start + q_block_bias
-                    for _ in range_(q_valid):
-                        q_block(True, kv_blocks)
-                    for _ in range_(q_blocks - q_valid):
-                        q_block(False, kv_blocks)
+                each_q_block(
+                    heads, q_blocks, q_valid, q_start, q_block_bias, idx_buffer, q_block
+                )
 
             def softmax(
                 of_in_a,
@@ -795,7 +776,7 @@ class MHA(Operator):
                 scale_buffer,
             ):
                 # The index buffer is the kernel's position in A and P.
-                def q_block(compute: bool, kv_blocks, s_q, s_kv):
+                def q_block(compute: bool):
                     if compute:
                         init_scale_buffer(scale_buffer, B_q)
                     for _ in range_(kv_blocks):
@@ -833,13 +814,9 @@ class MHA(Operator):
                     words[self.s_kv],
                     words[self.q_start],
                 )
-                for _ in range_(heads):
-                    idx_buffer[0] = 0
-                    idx_buffer[1] = q_start + q_block_bias
-                    for _ in range_(q_valid):
-                        q_block(True, kv_blocks, s_q, s_kv)
-                    for _ in range_(q_blocks - q_valid):
-                        q_block(False, kv_blocks, s_q, s_kv)
+                each_q_block(
+                    heads, q_blocks, q_valid, q_start, q_block_bias, idx_buffer, q_block
+                )
 
             def batched_matmul_pv(
                 of_p,
@@ -853,59 +830,8 @@ class MHA(Operator):
                 idx_buffer,
                 acc,
             ):
-                words = rtp.read()
-                heads, q_blocks, q_valid, loop_idx_kv = (words[v] for v in blocks)
-                s_kv, q_start = words[self.s_kv], words[self.q_start]
-                for _ in range_(heads):
-                    idx_buffer[0] = 0
-                    idx_buffer[1] = q_start + q_block_bias
-
-                    for _ in range_(q_valid):
-                        # matmul_PV starts the accumulator on KV block 0.
-                        for kv in range_(loop_idx_kv - 1):
-                            elem_in_p = of_p.acquire(1)
-                            elem_in_v = of_v.acquire(1)
-                            elt_of_out_scale = of_scale.acquire(1)
-                            matmul_PV(
-                                elem_in_p,
-                                elem_in_v,
-                                acc,
-                                elt_of_out_scale,
-                                B_q,
-                                kv,
-                                idx_buffer,
-                                s_kv,
-                            )
-                            of_p.release(1)
-                            of_v.release(1)
-                            of_scale.release(1)
-                            idx_buffer[0] += 1
-
-                        # The last block's scale holds the row sums rescale_O reads.
-                        elem_in_p = of_p.acquire(1)
-                        elem_in_v = of_v.acquire(1)
-                        elt_of_out_scale = of_scale.acquire(1)
-                        matmul_PV(
-                            elem_in_p,
-                            elem_in_v,
-                            acc,
-                            elt_of_out_scale,
-                            B_q,
-                            loop_idx_kv - 1,
-                            idx_buffer,
-                            s_kv,
-                        )
-                        of_p.release(1)
-                        of_v.release(1)
-                        elem_o_out = of_o_out.acquire(1)
-                        rescale_O(acc, elem_o_out, elt_of_out_scale, B_q, idx_buffer)
-                        of_scale.release(1)
-                        of_o_out.release(1)
-
-                        idx_buffer[0] = 0
-                        idx_buffer[1] += num_pipelines
-
-                    for _ in range_(q_blocks - q_valid):
+                def q_block(compute: bool):
+                    if not compute:
                         of_o_out.acquire(1)  # a padding block of O: left as is
                         for _ in range_(loop_idx_kv):
                             of_p.acquire(1)
@@ -915,6 +841,57 @@ class MHA(Operator):
                             of_v.release(1)
                             of_scale.release(1)
                         of_o_out.release(1)
+                        return
+                    # matmul_PV starts the accumulator on KV block 0.
+                    for kv in range_(loop_idx_kv - 1):
+                        elem_in_p = of_p.acquire(1)
+                        elem_in_v = of_v.acquire(1)
+                        elt_of_out_scale = of_scale.acquire(1)
+                        matmul_PV(
+                            elem_in_p,
+                            elem_in_v,
+                            acc,
+                            elt_of_out_scale,
+                            B_q,
+                            kv,
+                            idx_buffer,
+                            s_kv,
+                        )
+                        of_p.release(1)
+                        of_v.release(1)
+                        of_scale.release(1)
+                        idx_buffer[0] += 1
+
+                    # The last block's scale holds the row sums rescale_O reads.
+                    elem_in_p = of_p.acquire(1)
+                    elem_in_v = of_v.acquire(1)
+                    elt_of_out_scale = of_scale.acquire(1)
+                    matmul_PV(
+                        elem_in_p,
+                        elem_in_v,
+                        acc,
+                        elt_of_out_scale,
+                        B_q,
+                        loop_idx_kv - 1,
+                        idx_buffer,
+                        s_kv,
+                    )
+                    of_p.release(1)
+                    of_v.release(1)
+                    elem_o_out = of_o_out.acquire(1)
+                    rescale_O(acc, elem_o_out, elt_of_out_scale, B_q, idx_buffer)
+                    of_scale.release(1)
+                    of_o_out.release(1)
+
+                    idx_buffer[0] = 0
+                    idx_buffer[1] += num_pipelines
+
+                words = rtp.read()
+                heads, q_blocks, q_valid, loop_idx_kv = (words[v] for v in blocks)
+                s_kv, q_start = words[self.s_kv], words[self.q_start]
+                each_q_block(
+                    heads, q_blocks, q_valid, q_start, q_block_bias, idx_buffer, q_block
+                )
 
             qk_rtps = [Rtp([*blocks, self.q_start]) for _ in range(num_pipelines)]
             softmax_rtps = [
@@ -970,16 +947,12 @@ class MHA(Operator):
                             scale_buffer_softmax,
                         ],
                         stack_size=SOFTMAX_STACK_SIZE,
-                        tile=(
-                            Tile(i, 3 if pv_cores == 1 else 4)
-                            if split
-                            else AnyComputeTile
-                        ),
+                        tile=Tile(i, 4) if split else AnyComputeTile,
                     )
                 )
                 # Split, the halves sit either side of the softmax, whose row
                 # state each reads from shared memory.
-                for h, row in enumerate([4] if pv_cores == 1 else [3, 5]):
+                for h in range(pv_cores):
                     idx_buffer_pv = Buffer(
                         initial_value=np.zeros(shape=(2,), dtype=np.int32),
                     )
@@ -999,7 +972,7 @@ class MHA(Operator):
                                 Buffer(acc_ty),
                             ],
                             stack_size=STACK_SIZE,
-                            tile=Tile(i, row) if split else AnyComputeTile,
+                            tile=Tile(i, 3 + 2 * h) if split else AnyComputeTile,
                         )
                     )
 
