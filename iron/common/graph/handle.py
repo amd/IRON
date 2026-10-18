@@ -592,6 +592,8 @@ class Handle:
         """``self - other``: one AXPY step for a handle of this shape."""
         from iron.operators.axpy import AXPY
 
+        if isinstance(other, _Viewed):
+            other = other._as_operand()
         if isinstance(other, Handle) and other.shape == self.shape:
             return AXPY.step(other, self, scalar_factor=-1.0)
         return self + (-other)

@@ -2884,6 +2884,22 @@ def test_a_difference_is_one_axpy_and_a_number_less_a_handle_two_steps():
     np.testing.assert_array_equal(r, 3 - x.astype(np.float32))
 
 
+def test_a_state_is_subtracted_as_it_is_added():
+    class LessState(iron.Graph):
+        def __init__(self):
+            self.s = iron.state((2, 64))
+
+        def body(self, x):
+            return x - self.s
+
+    graph = LessState()
+    assert _steps(graph.trace(x=(2, 64))) == ["AXPY"]
+    x = (np.arange(128) % 8).reshape(2, 64).astype(bfloat16)
+    graph.s.host = np.ones((2, 64), bfloat16)
+    got = np.asarray(graph.reference(x), np.float32)
+    np.testing.assert_array_equal(got, x.astype(np.float32) - 1)
+
+
 def test_a_handle_is_divided_by_a_number_alone():
     class Divide(iron.Graph):
         def body(self, x, y):
