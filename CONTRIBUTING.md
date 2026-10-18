@@ -71,7 +71,15 @@ Hugging Face decoders need a config, a model class and a runner; see
    `tests/applications/phi3/reference/test.py`. The device test goes in
    `tests/applications/<name>/test.py` and uses `iron.lm.testing`'s
    checks; `check_accuracy` judges the real checkpoint against the
-   `golden.npz` recorded beside it.
+   `golden.npz` recorded beside it. The host run uses each operator's
+   reference, which does not model aie2p's bfp16 rounding in flm.GEMM, so
+   only the device test measures that error.
+
+A Llama-shaped decoder (Mistral v0.3, Qwen, SmolLM) needs only these
+steps. A sliding window over the caches, Gemma's `(1 + w)` norms and
+sandwich norms, per-layer RoPE tables, or post-norm layers (OLMo 2) need
+new code in `iron/lm/` first; `iron/applications/embedding_gemma2/blocks.py`
+shows a sandwich-normed layer.
 
 ## Add an operator and kernel
 
@@ -88,17 +96,24 @@ class ReLU(UnaryElementwise):
 ```
 
 1. **Kernel.** If no factory in mlir-aie's `aie.iron.kernels` computes
-   it, add the C++ under `aie_kernels/<family>/` in mlir-aie and a factory
-   beside the others in `python/iron/kernels/<family>.py`. The factory's
-   `KernelContract` carries the numpy reference and the tolerance, so the
-   operator needs neither (see `relu_sized` in `eltwise.py`).
+   it, add the C++ under `aie_kernels/<family>/` in mlir-aie (architecture
+   specifics in `*_aie2.h` / `*_aie2p.h`) and a factory beside the others
+   in `python/iron/kernels/<family>.py`. The factory's `KernelContract`
+   carries the numpy reference and the tolerance, so the operator needs
+   neither (see `relu_sized` in `eltwise.py`), and it checks the vector
+   alignment its tile needs. IRON sees the factory once `requirements.txt`
+   pins an mlir-aie wheel that has it.
 2. **Operator.** Subclass the closest family (`UnaryElementwise`,
    `BinaryElementwise`, ... in `iron/common/elementwise.py`) and return the
    factory from `Array.kernel()`. A new data layout needs its own
    `Operator` with `In`/`Out` operands and `Array.build()`; `gemm.py` and
    `mha.py` are the worked examples.
 3. **Test.** Declare `test = Testing(...)` on the class;
-   `iron/tests/operators/catalog.py` runs every operator's cases.
+   `iron/tests/operators/catalog.py` runs every operator's cases. Every
+   operator needs a `bench=True` case and a `lower=True` case per layout
+   (`Sweep` adds both); a shape it must refuse goes in
+   `iron/tests/operators/rejected_shapes.py`. The size rules a tile must
+   meet are AGENTS.md's "Hardware Constraints".
 4. **Register.** Add the name to `_OPERATOR_MODULES` in
    `iron/operators/__init__.py` and to `__init__.pyi`.
 5. **Use it.** Inside a graph's `body()`, `ReLU.step(x)` records a step.
