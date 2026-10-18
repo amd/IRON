@@ -254,15 +254,16 @@ class Elementwise(Operator):
     implement ``kernel``. ``tile_cap`` is the largest line the kernel holds.
     """
 
-    num_aie_columns: int = Auto()
-    num_channels: int = Auto(default=1)
+    num_aie_columns: int = Auto(array=True)
+    num_channels: int = Auto(default=1, array=True)
     tile_size: int = Auto(
         domain=Divisors(
             of=lambda op, dev: op.outputs[0].elements,
             step=64,
             cap=lambda op, dev: op.tile_cap,
             span=3,
-        )
+        ),
+        array=True,
     )
 
     count = Value(
@@ -444,10 +445,6 @@ class Elementwise(Operator):
         )
 
     class Array(Operator.Array):
-        num_aie_columns: int
-        num_channels: int
-        tile_size: int
-        count: Value
         buffers: list[Operand]
 
         @property
@@ -666,7 +663,7 @@ class Rowwise(Elementwise):
 
     rows: int = Param()
     valid = Extent(rows)
-    tile_size: int = Param()
+    tile_size: int = Param(array=True)
 
     tile_cap: ClassVar[int] = 8192
 
@@ -717,7 +714,7 @@ class RowBroadcast(Rowwise):
         ]
     )
 
-    segments: int = Auto(init=False)
+    segments: int = Auto(init=False, array=True)
     line: int = Auto(init=False)
 
     x = In(
@@ -771,8 +768,5 @@ class RowBroadcast(Rowwise):
         return out.elements // self.line
 
     class Array(Rowwise.Array):
-        segments: int
-        line: int
-
         def held_segments(self) -> int:
             return self.segments

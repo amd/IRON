@@ -6,7 +6,7 @@ from aie.iron import ExternalFunction, ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 
-from iron.common import Built, In, Operand, Operator, Out, Param, Rtp, Value
+from iron.common import Built, In, Operator, Out, Param, Rtp, Value
 from iron.common.testing import Case, Testing
 
 # EmbeddingGemma 2's placeholders, (id, row), the towers' rows past 2048 text rows.
@@ -93,7 +93,7 @@ class Merge(Operator):
 
     rows: int = Param()
     # Each placeholder's (token id, first row of its soft tokens).
-    placeholders: tuple[tuple[int, int], ...] = Param()
+    placeholders: tuple[tuple[int, int], ...] = Param(array=True)
     block: int = Param(default=64)
     offset: bool = Param(default=False)
     kinds: int = Param(derive=lambda op: len(op.placeholders), repr=False)
@@ -133,15 +133,6 @@ class Merge(Operator):
         return Tolerance.exact()
 
     class Array(Operator.Array):
-        block: int
-        placeholders: tuple[tuple[int, int], ...]
-        offset: bool
-        kinds: int
-        count: Value
-        ids: Operand
-        before: Operand | None
-        merge: Operand
-
         def build(self) -> Built:
             tokens, at = zip(*self.placeholders)
             counted = [self.before.obj_type] if self.offset else []

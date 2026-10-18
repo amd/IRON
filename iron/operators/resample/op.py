@@ -37,7 +37,6 @@ from iron.common import (
     Built,
     Extent,
     In,
-    Operand,
     Operator,
     Out,
     Param,
@@ -246,7 +245,7 @@ class ResampleTaps(Operator):
     out_size: int = Param()
     words: int = Param(default=256)
     # The slots of a chunk, or None for as many as the window lets fit.
-    slots: int | None = Param(default=None)
+    slots: int | None = Param(default=None, array=True)
     # A multiple of 16, so every core count up to it divides.
     chunks: int = Param(
         derive=lambda op: 16
@@ -383,15 +382,6 @@ class ResampleTaps(Operator):
         tg.finish()
 
     class Array(Operator.Array):
-        num_aie_columns: int
-        num_channels: int
-        slots: int | None
-        words: int
-        count: Value
-        in_length: Value
-        out_length: Value
-        table: Operand
-
         def build(self) -> Built:
             cores = self.num_aie_columns * self.num_channels
             peak_ty = np.ndarray[(2,), np.dtype[np.int32]]
@@ -862,7 +852,9 @@ class Resample(Operator):
     # A 39-tap window: a scale of up to 9.5.
     words: int = Param(default=356)
     # A floor of 8, so two resizes of one image that need no more share an array.
-    patch_columns: int = Param(derive=lambda op: max(8, op.default_patch_columns()))
+    patch_columns: int = Param(
+        derive=lambda op: max(8, op.default_patch_columns()), array=True
+    )
     image_chunks: int = Param(
         derive=lambda op: op.height * -(-3 * op.width // op.chunk)
     )
@@ -1088,19 +1080,6 @@ class Resample(Operator):
         tg.finish()
 
     class Array(Operator.Array):
-        chunk: int
-        num_aie_columns: int
-        num_channels: int
-        patch_columns: int
-        words: int
-        src_rows: Value
-        src_columns: Value
-        dst_rows: Value
-        dst_columns: Value
-        image: Operand
-        patches: Operand
-        taps_w: Operand
-
         def build(self) -> Built:
             cores = self.num_aie_columns * self.num_channels
             counts_ty = np.ndarray[(8,), np.dtype[np.int32]]
@@ -1274,11 +1253,11 @@ class PatchPositions(Operator):
     rows: int = Param()
     out_height: int = Param()
     out_width: int = Param()
-    pool: int = Param(default=3)
+    pool: int = Param(default=3, array=True)
     # The rows of each axis's position-embedding table.
-    positions: int = Param(default=10240)
+    positions: int = Param(default=10240, array=True)
     # Resample's cores, which its raster's columns are padded past.
-    cores: int = Param(default=16)
+    cores: int = Param(default=16, array=True)
     block: int = Param(default=256)
 
     out_rows = Extent(out_height)
@@ -1353,17 +1332,6 @@ class PatchPositions(Operator):
         tg.finish()
 
     class Array(Operator.Array):
-        block: int
-        cores: int
-        pool: int
-        positions: int
-        count: Value
-        dst_rows: Value
-        dst_columns: Value
-        xy: Operand
-        position_ids: Operand
-        order: Operand
-
         def build(self) -> Built:
             B = self.block
             record_ty = np.ndarray[(5 * B,), np.dtype[np.int32]]

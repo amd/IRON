@@ -38,7 +38,6 @@ from iron.common import (
     Divisors,
     Extent,
     In,
-    Operand,
     Operator,
     Out,
     Param,
@@ -138,6 +137,7 @@ class GEMM(Operator):
             of=lambda op, dev: op.M // op.n_aie_rows,
             step=lambda op, dev: op.mac_block(dev)[0],
         ),
+        array=True,
     )
     # Below HIGHEST C rounds to bf16 per K tile: tile_k changes it.
     tile_k: int = Auto(
@@ -147,23 +147,25 @@ class GEMM(Operator):
             step=lambda op, dev: op.mac_block(dev)[1],
             when=lambda op, dev: op.precision == Precision.HIGHEST,
         ),
+        array=True,
     )
     tile_n: int = Auto(
         default=64,
         domain=Divisors(of=N, step=lambda op, dev: op.mac_block(dev)[2]),
+        array=True,
     )
     # None: the most columns the shim budget allows that split N into tiles.
     num_aie_columns: int = Auto()
-    placement: GEMMPlacement = Auto(default=GEMMPlacement.SHIMS)
-    b_col_maj: bool = Param(default=False)
-    c_col_maj: bool = Param(default=False)
+    placement: GEMMPlacement = Auto(default=GEMMPlacement.SHIMS, array=True)
+    b_col_maj: bool = Param(default=False, array=True)
+    c_col_maj: bool = Param(default=False, array=True)
     # MEDIUM multiplies on bfp16 macs; HIGHEST keeps a bf16 C's partial
     # sums f32 across K tiles.
-    precision: Precision = Auto(default=Precision.MEDIUM)
+    precision: Precision = Auto(default=Precision.MEDIUM, array=True)
     dtype_in: Any = Param(default=bfloat16, repr=False)
     dtype_out: Any = Param(default=bfloat16, repr=False)
     # Filled by resolve.
-    n_aie_rows: int = Auto(repr=False, init=False)
+    n_aie_rows: int = Auto(repr=False, init=False, array=True)
     n_shim_mem_a: int = Auto(repr=False, init=False)
     a_l2: int = Auto(repr=False, init=False)
     b_l2: int = Auto(repr=False, init=False)
@@ -359,32 +361,6 @@ class GEMM(Operator):
         return NPU2()
 
     class Array(Operator.Array):
-        tile_m: int
-        tile_k: int
-        tile_n: int
-        num_aie_columns: int
-        n_aie_rows: int
-        n_shim_mem_a: int
-        placement: GEMMPlacement
-        b_col_maj: bool
-        c_col_maj: bool
-        precision: Precision
-        dtype_in: Any
-        dtype_out: Any
-        a_l2: int
-        b_l2: int
-        c_l2: int
-        A: Operand
-        B: Operand
-        C: Operand
-        valid: Extent
-        valid_k: Extent
-        k_div_k: Value
-        n_tiles: Value
-        row_blocks_valid: Value
-        col_tiles: Value
-        k_valid: Value
-
         @property
         def wider_accumulator(self) -> bool:
             """Whether ``build()`` and ``GEMM.held()`` build HIGHEST's f32

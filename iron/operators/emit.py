@@ -23,7 +23,7 @@ from aie.iron import ObjectFifo, Worker
 from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 
-from iron.common import Built, In, Operand, Operator, Out, Param
+from iron.common import Built, In, Operator, Out, Param
 from iron.common.testing import Case, Testing
 
 # A program row: (plane, index, scale, bias, down, mul, add, lo, hi, mask, shift).
@@ -98,14 +98,6 @@ class Emit(Operator):
         self.check_derived("rows")
 
     class Array(Operator.Array):
-        carried: int
-        rows: int
-        slots: int
-        image: Operand
-        planes: Operand
-        program: Operand
-        state: Operand
-
         def build(self) -> Built:
             slots, carried = self.slots, self.carried
             of_program = ObjectFifo(self.program.obj_type, depth=self.program.depth)

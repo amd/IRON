@@ -18,7 +18,6 @@ from iron.common import (
     Built,
     Divisors,
     In,
-    Operand,
     Operator,
     Out,
     Param,
@@ -92,7 +91,7 @@ class Transpose(Operator):
             cap=lambda op, dev: 8192 // op.m,
         ),
     )
-    s: int = Auto(default=8, domain=(8, 4))
+    s: int = Auto(default=8, domain=(8, 4), array=True)
     num_aie_columns: int = Auto()
     num_channels: int = Auto(default=1)
 
@@ -166,17 +165,6 @@ class Transpose(Operator):
             )
 
     class Array(Operator.Array):
-        m: int
-        n: int
-        num_aie_columns: int
-        num_channels: int
-        s: int
-        batches: Value
-        chan_tiles: Value
-        col_tiles: Value
-        x: Operand
-        y: Operand
-
         def build(self) -> Built:
 
             m, n, s = self.m, self.n, self.s

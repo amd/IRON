@@ -27,7 +27,6 @@ from iron.common import (
     Divisors,
     Extent,
     In,
-    Operand,
     Operator,
     Out,
     Param,
@@ -130,25 +129,25 @@ class Softmax(Operator):
         draw=_draw,
     )
 
-    rows: int = Param()
+    rows: int = Param(array=True)
     cols: int = Param()
     num_aie_columns: int = Auto()
     num_channels: int = Auto(default=1)
     block: int = Auto(
         domain=Divisors(of=lambda op, dev: op.cols, step=_VECTOR_STEP, cap=_ROW_CAP)
     )
-    streamed: bool = Auto(domain=(False, True))
+    streamed: bool = Auto(domain=(False, True), array=True)
     input_dtype: Any = Param(default=ml_dtypes.bfloat16, repr=False)
     # Float input only, mlir-aie's softmax_f32_bf16: a pre-cap addend and
     # cap * tanh(x / cap).
-    soft_cap: float | None = Param(default=None)
+    soft_cap: float | None = Param(default=None, array=True)
     has_addend: bool = Param(default=False)
     # Float input only, softmax_rows_banded_f32_bf16: a band computed from
     # these two in the core (window, and the row's own query position,
     # wrapped every period rows), not a mask operand -- a core has two
     # input DMA channels, and x and addend already take both.
-    window: int | None = Param(default=None)
-    period: int | None = Param(default=None)
+    window: int | None = Param(default=None, array=True)
+    period: int | None = Param(default=None, array=True)
 
     length = Extent(cols)  # cols, or fewer per call
 
@@ -267,22 +266,6 @@ class Softmax(Operator):
         return 0  # no tiles-per-lane word: the sequence bounds the blocks itself
 
     class Array(Operator.Array):
-        block: int
-        num_aie_columns: int
-        num_channels: int
-        rows: int
-        streamed: bool
-        input_dtype: Any
-        soft_cap: float | None
-        has_addend: bool
-        window: int | None
-        period: int | None
-        blocks: Value
-        valid_cols: Value
-        x: Operand
-        addend: Operand | None
-        y: Operand
-
         def build(self) -> Built:
             n_cores = self.num_aie_columns * self.num_channels
             rows_per_core = self.rows // n_cores

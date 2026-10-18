@@ -7,7 +7,7 @@ from aie.iron.kernels import KernelContract, Param
 from aie.utils.compile.jit import markers
 from aie.utils.verify import Tolerance
 
-from iron.common import BinaryElementwise, Operand
+from iron.common import BinaryElementwise
 from iron.common.elementwise import Sweep
 from iron.common.testing import Case, Testing
 
@@ -42,10 +42,6 @@ class ElementwiseMax(BinaryElementwise):
     )
 
     class Array(BinaryElementwise.Array):
-        a: Operand
-        b: Operand
-        y: Operand
-
         def kernel(self):
             return ExternalFunction(
                 "eltwise_max_bf16",

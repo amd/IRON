@@ -190,11 +190,6 @@ class Gather(Operator):
         return 0  # a bound shortens y's drains by the drained words, not by tiles
 
     class Array(Operator.Array):
-        dtype: Any
-        feeds: int
-        row: int
-        y: Operand
-
         def build(self) -> Built:
             shims = [(Tile(2 * k, 0), Tile(2 * k + 1, 0)) for k in range(self.feeds)]
             drains = [DmaEndpoint(drain, DMAChannelDir.S2MM, 0) for _, drain in shims]
@@ -398,11 +393,11 @@ class GatherWords(Operator):
     low_bits: ClassVar[int] = 29
 
     rows: int = Param()
-    table_rows: int = Param()
-    row_bytes: int = Param()
+    table_rows: int = Param(array=True)
+    row_bytes: int = Param(array=True)
     words: int = Param()
-    pairs: int = Param(derive=lambda op: 2 * op.rows, repr=False)
-    bounded: bool = Param(default=False)
+    pairs: int = Param(derive=lambda op: 2 * op.rows, repr=False, array=True)
+    bounded: bool = Param(default=False, array=True)
     # The words a call writes: the address pairs, then if bounded the lengths.
     record: int = Param(
         derive=lambda op: op.pairs + (op.rows if op.bounded else 0), repr=False
@@ -426,18 +421,6 @@ class GatherWords(Operator):
         )
 
     class Array(Operator.Array):
-        rows: int
-        table_rows: int
-        row_bytes: int
-        pairs: int
-        record: int
-        bounded: bool
-        ids: Operand
-        control: Operand
-        base_lo: Value
-        base_hi: Value
-        valid: Value
-
         def build(self) -> Built:
             kernel = datamovement.row_addresses(
                 self.rows,
@@ -726,12 +709,6 @@ class Copy(Operator):
         return gcd(*pieces, *self._row_shares())
 
     class Array(Operator.Array):
-        dtype: Any
-        num_channels: int
-        tile_size: int
-        x: Operand
-        y: Operand
-
         def build(self) -> Built:
 
             ins, outs = [], []

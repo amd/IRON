@@ -15,7 +15,6 @@ from iron.common import (
     Built,
     Extent,
     In,
-    Operand,
     Operator,
     Out,
     Param,
@@ -80,13 +79,6 @@ class DepthwiseConv1d(Operator):
             )
 
     class Array(Operator.Array):
-        channels: int
-        num_aie_columns: int
-        steps: Value
-        weight: Operand
-        x: Operand
-        y: Operand
-
         def kernel(self):
             return conv.dwconv1d_channels_last(self.channels, clamp=False)
 

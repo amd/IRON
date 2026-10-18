@@ -23,7 +23,6 @@ from iron.common import (
     Built,
     Extent,
     In,
-    Operand,
     Operator,
     Out,
     Param,
@@ -87,7 +86,7 @@ class RoPE(Operator):
     cols: int = Param()
     angle_rows: int = Param(derive=lambda op: op.rows)  # one row per position
     num_aie_columns: int = Auto()
-    two_halves: bool = Param(default=True)
+    two_halves: bool = Param(default=True, array=True)
 
     x = In(rows, cols, obj_type=(1, cols), per=(num_aie_columns,))
     angles = In(angle_rows, cols, obj_type=(1, cols), per=(num_aie_columns,))
@@ -133,15 +132,6 @@ class RoPE(Operator):
         return self.rows // self.angle_rows if buffer in ("x", "y") else None
 
     class Array(Operator.Array):
-        cols: int
-        two_halves: bool
-        num_aie_columns: int
-        angles: Operand
-        lut_rows: Value
-        rows_per_lut: Value
-        x: Operand
-        y: Operand
-
         def build(self) -> Built:
 
             tile = self.x.obj_type

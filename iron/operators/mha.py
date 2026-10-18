@@ -37,7 +37,6 @@ from iron.common import (
     Divisors,
     Extent,
     In,
-    Operand,
     Operator,
     Out,
     Param,
@@ -229,18 +228,18 @@ class MHA(Operator):
     heads_interleaved: bool = Param(default=False)
     kv_interleaved: bool = Param(default=False)
     d: int = Param(default=64)
-    causal: bool = Param(default=True)
+    causal: bool = Param(default=True, array=True)
     # Keys more than this many positions from a query are masked.
-    window: int | None = Param(default=None)
-    scale: float = Param(derive=lambda op: float(1 / np.sqrt(op.d)))
-    B_q: int = Auto(domain=BLOCK_SIZES)
+    window: int | None = Param(default=None, array=True)
+    scale: float = Param(derive=lambda op: float(1 / np.sqrt(op.d)), array=True)
+    B_q: int = Auto(domain=BLOCK_SIZES, array=True)
     B_kv: int = Auto(repr=False, init=False)
-    num_pipelines: int = Auto(default=1, domain=Width())
+    num_pipelines: int = Auto(default=1, domain=Width(), array=True)
     # Filled by resolve.
     q_shims: int = Auto(repr=False, init=False)
     join_rows: int = Auto(repr=False, init=False)
     kv_lanes: int = Auto(repr=False, init=False)
-    width: int = Auto(repr=False, init=False)
+    width: int = Auto(repr=False, init=False, array=True)
     # Two P*V cores, by halves of the head, where one's L1 holds no block.
     pv_cores: int = Auto(repr=False, domain=(1, 2))
     pv_width: int = Auto(repr=False, init=False)
@@ -557,30 +556,6 @@ class MHA(Operator):
         return max(pv, qk) + STACK_SIZE
 
     class Array(Operator.Array):
-        B_q: int
-        B_kv: int
-        d: int
-        causal: bool
-        window: int | None
-        scale: float
-        num_pipelines: int
-        kv_lanes: int
-        width: int
-        pv_cores: int
-        pv_width: int
-        q_shims: int
-        join_rows: int
-        Q: Operand
-        K: Operand
-        V: Operand
-        O: Operand
-        heads: Value
-        kv_blocks: Value
-        q_blocks_per_pipeline: Value
-        q_blocks_valid: Value
-        q_start: Value
-        s_q: Value
-        s_kv: Value
         dev: Device
 
         def build(self) -> Built:

@@ -24,7 +24,6 @@ from iron.common import (
     Built,
     Extent,
     In,
-    Operand,
     Operator,
     Out,
     Param,
@@ -96,15 +95,6 @@ class TopKRouter(Operator):
         config.route()
 
     class Array(Operator.Array):
-        experts: int
-        top_k: int
-        weights_width: int
-        pairs: int
-        logits: Operand
-        ids: Operand
-        weights: Operand
-        count: Value
-
         def select(self):
             return sample.sample_select(
                 slice_size=self.experts, chunk=self.experts, k_max=self.top_k

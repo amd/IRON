@@ -7,7 +7,7 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise
 from ml_dtypes import bfloat16
 
-from iron.common import Built, KernelCall, Operand, Param, Rtp, UnaryElementwise, Value
+from iron.common import Built, KernelCall, Param, Rtp, UnaryElementwise, Value
 from iron.common.elementwise import Sweep
 from iron.common.testing import Case, Testing
 
@@ -56,11 +56,6 @@ class Clamp(UnaryElementwise):
         return (KernelCall(self.array_config().kernel(), self.bits(), (self.x,)),)
 
     class Array(UnaryElementwise.Array):
-        x: Operand
-        y: Operand
-        low_bits: Value
-        high_bits: Value
-
         def kernel(self):
             return eltwise.clamp(self.tile_size)
 

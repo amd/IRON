@@ -43,7 +43,6 @@ from iron.common import (
     Divisors,
     Extent,
     In,
-    Operand,
     Operator,
     Out,
     Param,
@@ -159,43 +158,45 @@ class GEMM(Operator):
     # into the byte count pack_B returns.
     packed_blocks: int = Param(derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
     # 64 halves the mmul's accumulator traffic per mac; 128 halves A fetches.
-    tile_n: int = Auto()
+    tile_n: int = Auto(array=True)
     # k tile. K must be a multiple of it, and it of the compute tile's k slice.
     k_tile: int = Auto(
-        domain=Divisors(of=K, step=lambda op, dev: op.ct_max_k, cap=K_TILE)
+        domain=Divisors(of=K, step=lambda op, dev: op.ct_max_k, cap=K_TILE), array=True
     )
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). None resolves to whatever L1 affords.
-    tile_ma: int = Auto(domain=Divisors(of=M_TILE, step=2 * R))
+    tile_ma: int = Auto(domain=Divisors(of=M_TILE, step=2 * R), array=True)
     # Row-blocks a core folds into one B fetch, cutting B's DDR reads by
     # m_chunk at the cost of that many L1 accumulators. 1 by default: it must
     # divide m_row_blocks (M % 512 == 0), and a shape that cannot use it would
     # fork config_name. See README.md.
     m_chunk: int = Auto(
-        default=1, domain=Divisors(of=lambda op, dev: op.M // (M_TILE * op.rows))
+        default=1,
+        domain=Divisors(of=lambda op, dev: op.M // (M_TILE * op.rows)),
+        array=True,
     )
     # The activations the epilogue can select between at run time. Each one
     # compiled in costs
     # program memory, so a deployment that dispatches two should compile two.
-    epilogue_modes: tuple = Param(default=tuple(Epilogue))
-    rounding: Rounding | str = Param(default=Rounding.CONV_EVEN)
-    gelu: Gelu | str = Param(default=Gelu.FP32)
+    epilogue_modes: tuple = Param(default=tuple(Epilogue), array=True)
+    rounding: Rounding | str = Param(default=Rounding.CONV_EVEN, array=True)
+    gelu: Gelu | str = Param(default=Gelu.FP32, array=True)
     # B as stored (N, K), a checkpoint's layout, read as is: the memtile lays
     # out the k panels the kernel reads as B^T blocks, so no packed copy.
-    b_col_maj: bool = Param(default=False)
+    b_col_maj: bool = Param(default=False, array=True)
     # MEDIUM multiplies on AIE2P's bfp16 macs, A and B rounded to bfp16ebs8
     # (the port's arithmetic); above it, or on AIE2, on bf16 macs.
     precision: Precision = Auto(default=Precision.MEDIUM)
     # Filled by resolve, from the device: the macs, the grid, B's storage,
     # the L2 tiles.
-    emulate_bf16_mmul_with_bfp16: bool = Auto(repr=False, init=False)
+    emulate_bf16_mmul_with_bfp16: bool = Auto(repr=False, init=False, array=True)
     rows: int = Auto(repr=False, init=False)
     cols: int = Auto(repr=False, init=False)
-    bfp16_b: bool = Auto(repr=False, init=False)
+    bfp16_b: bool = Auto(repr=False, init=False, array=True)
     # B's element type, on the array and in DDR alike; the host holds a
     # block-float B as bytes (Operand.host_dtype).
     b_dtype: Any = Auto(repr=False, init=False)
-    l1_b_depth: int = Auto(repr=False, init=False)
+    l1_b_depth: int = Auto(repr=False, init=False, array=True)
     a_l2: int = Auto(repr=False, init=False)
     b_l2: int = Auto(repr=False, init=False)
     c_l2: int = Auto(repr=False, init=False)
@@ -429,35 +430,6 @@ class GEMM(Operator):
         return base
 
     class Array(Operator.Array):
-        tile_n: int
-        k_tile: int
-        tile_ma: int
-        m_chunk: int
-        epilogue_modes: tuple
-        rounding: Rounding | str
-        gelu: Gelu | str
-        b_col_maj: bool
-        emulate_bf16_mmul_with_bfp16: bool
-        rows: int
-        cols: int
-        bfp16_b: bool
-        b_dtype: Any
-        l1_b_depth: int
-        a_l2: int
-        b_l2: int
-        c_l2: int
-        A: Operand
-        B: Operand
-        C: Operand
-        valid: Value
-        n_val: Value
-        m_row_blocks: Value
-        k_iters: Value
-        mode: Value
-        clamp_min: Value
-        clamp_max: Value
-        n_units: Value
-        units_valid: Value
         dev: Device
 
         def build(self) -> Built:

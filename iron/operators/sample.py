@@ -27,7 +27,6 @@ from iron.common import (
     Divisors,
     In,
     InOut,
-    Operand,
     Operator,
     Out,
     Param,
@@ -123,8 +122,8 @@ class Sample(Operator):
         draw=_logits,
     )
 
-    vocab: int = Param()
-    k_max: int = Param(default=64)
+    vocab: int = Param(array=True)
+    k_max: int = Param(default=64, array=True)
     # Positions the draws and the record hold; the sequence picks one.
     steps: int = Param(default=1)
     cores: int = Auto(default=4)
@@ -174,15 +173,6 @@ class Sample(Operator):
         config.combine()
 
     class Array(Operator.Array):
-        vocab: int
-        k_max: int
-        cores: int
-        chunk: int
-        logits: Operand
-        draws: Operand
-        tokens: Operand
-        token: Operand
-
         @property
         def slice_size(self) -> int:
             return slices(self.vocab, self.cores, self.k_max)[0]

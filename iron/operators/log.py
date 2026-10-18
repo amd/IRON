@@ -24,7 +24,7 @@ class Log(UnaryElementwise):
         ),
     )
 
-    offset: float = Param(default=0.0)
+    offset: float = Param(default=0.0, array=True)
 
     x = In(
         UnaryElementwise.size,
@@ -34,8 +34,6 @@ class Log(UnaryElementwise):
     )
 
     class Array(UnaryElementwise.Array):
-        offset: float
-
         def kernel(self):
             return activation.log_f32(self.tile_size)
 
