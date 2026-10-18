@@ -276,7 +276,7 @@ class Operand(Member["Operand"]):
         return math.prod(self.obj_shape if block is None else self._resolve(block))
 
     @property
-    def count(self) -> int:
+    def lanes(self) -> int:
         """The stream's lanes (fifos)."""
         if self.obj_dims is None:
             raise TypeError(f"{self.name} is declared without an obj_type=: no stream")
@@ -294,9 +294,9 @@ class Operand(Member["Operand"]):
                 is bound already.
         """
         handles = list(handles) if isinstance(handles, (list, tuple)) else [handles]
-        if len(handles) != self.count:
+        if len(handles) != self.lanes:
             raise ValueError(
-                f"{self.name} has {self.count} lanes; bind() was given "
+                f"{self.name} has {self.lanes} lanes; bind() was given "
                 f"{len(handles)} handles"
             )
         if self.lane_handles:
@@ -546,7 +546,7 @@ class Operand(Member["Operand"]):
                 f"{name} has no obj_type=, so its sequence cannot be derived; add "
                 f"obj_type= or override sequence(rt)"
             )
-        count, shape = self.count, self.shape
+        count, shape = self.lanes, self.shape
         bounded = self.bounded
         if bounded is None:
             if count == 1:

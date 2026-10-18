@@ -211,7 +211,9 @@ class BuiltArray:
     def program(self) -> Program:
         """This array alone with its operator's own sequence."""
         return Program(
-            self.op.device(), OperatorRuntime(self.op, self.built), workers=self.workers
+            self.op.array_device(),
+            OperatorRuntime(self.op, self.built),
+            workers=self.workers,
         )
 
     @functools.cached_property
@@ -294,7 +296,7 @@ def configuration(name: str, arrays: Mapping[str, BuiltArray]) -> DeviceConfigur
     owners: dict[Hashable, BuiltArray] = {}
     for key, array in arrays.items():
         owners.setdefault(of[key], array)
-    kinds = {type(a.op.device()).__name__ for a in owners.values()}
+    kinds = {type(a.op.array_device()).__name__ for a in owners.values()}
     if len(kinds) != 1:
         raise ValueError(f"{list(arrays)} are built for different devices {kinds}")
     traced = [owner for owner in owners.values() if owner.traced]
@@ -311,7 +313,7 @@ def configuration(name: str, arrays: Mapping[str, BuiltArray]) -> DeviceConfigur
     first = next(iter(owners.values()))
     configured = DeviceConfiguration(
         name,
-        first.op.device(),
+        first.op.array_device(),
         workers=[w for owner in owners.values() for w in owner.workers],
         runtimes=runtimes,
     )

@@ -397,7 +397,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
      by `resolve(dev)` from the device and the extents
    - `In`/`Out` operands by shape, each with its `obj_type=` in the units a
      core reads (`per=` a column count): an operand with an `obj_type=` is
-     its own stream of `op.x.count` lanes, `op.x.obj_type` the fifo type;
+     its own stream of `op.x.lanes` lanes, `op.x.obj_type` the fifo type;
      `when=flag`, a bool `Param()`, makes an operand (and its stream) exist
      only where the flag is true; a call gives it by keyword, its name,
      which sets the flag (`RMSNorm.step(x, weight=w)` is `weighted=True`)
@@ -553,8 +553,8 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 | `tolerance()` | no (the kernel's contract, or `None` through a finish/prologue) | judging a device run or a check-mode step |
 | `ops()` | no (one op per output element) | a device test's throughput figure |
 | `extent_unit(buffer)` | no (`None`: the stream tile's own rows) | splitting a bounded call's rows across a round-robin stream |
-| `device()` | no (the bound device) | building the array, when it covers only part of the bound device (GEMM's row subset) |
-| `configuration()` | no (itself) | locating the xclbin a shipped subclass runs (flm's GEMM, one image for every shape) |
+| `array_device()` | no (the bound device) | building the array, when it covers only part of the bound device (GEMM's row subset) |
+| `xclbin_operator()` | no (itself) | locating the xclbin a shipped subclass runs (flm's GEMM, one image for every shape) |
 | `exported_design()` | no (`None`: the derived module) | compiling, in place of the generated MLIR (flm's hand-placed designs) |
 
 Inside a graph's `body()`, a step is spelled `GEMV.step(w, h, **kw)`: a

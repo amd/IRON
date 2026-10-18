@@ -81,7 +81,7 @@ def test_flm_gemm_links_its_configuration_xclbin_and_its_own_instructions(npu2):
     # The configuration's image is its own entry, named for the configuration;
     # the stream is this shape's, in another.
     (design,) = artifacts.designs
-    assert design.name == op.resolved().configuration().name
+    assert design.name == op.resolved().xclbin_operator().name
     assert design.entry.directory != artifacts.entry.directory
     # The shape's own compile is instructions-only: no second xclbin. Its
     # placement reads the configuration's kernels, the same objects.

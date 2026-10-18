@@ -71,7 +71,7 @@ def test_flm_gemm_lowers_and_so_does_its_configuration_module(M, K, N, tmp_path)
     lower(op, tmp_path / "shape")
     tuned = op.resolved(aie_utils.get_current_device())
     (tmp_path / "config").mkdir()
-    lower(tuned.configuration(), tmp_path / "config", name=op.config_name)
+    lower(tuned.xclbin_operator(), tmp_path / "config", name=op.config_name)
 
 
 def test_shipped_external_sequence_lowers(tmp_path):

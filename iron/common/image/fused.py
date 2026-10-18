@@ -144,7 +144,7 @@ class XclbinChain:
         # xclbin and run one instruction stream.
         designs, design_of = seq.unique_designs()
         configs = [
-            op.configuration() if op.external is None else None for op in designs
+            op.xclbin_operator() if op.external is None else None for op in designs
         ]
         chained = [op for op, config in zip(designs, configs) if config is op]
         images, built = [], {}

@@ -182,8 +182,8 @@ class OperatorRuntime(Runtime):
     ):
         """``operand.fill``/``operand.drain`` (``verb``): see ``Operand.fill``."""
         if lane is None:
-            if operand.count != 1:
-                raise ValueError(f"{operand.name} is per-{operand.count}; name a lane")
+            if operand.lanes != 1:
+                raise ValueError(f"{operand.name} is per-{operand.lanes}; name a lane")
             lane = 0
         buffer = operand if source is None else source
         tap = buffer.tap if tap is None else tap

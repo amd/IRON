@@ -69,7 +69,9 @@ def _core_elfs(op) -> dict[str, bytes]:
     Built past the cache: a cached build shares each device's compiled cores
     across designs, and an entry that reused them holds no core ELF.
     """
-    design = OperatorDesign(op.configuration(), full_elf=False).compile(use_cache=False)
+    design = OperatorDesign(op.xclbin_operator(), full_elf=False).compile(
+        use_cache=False
+    )
     entry = design.get_cache_entry()
     assert entry is not None
     elfs = {

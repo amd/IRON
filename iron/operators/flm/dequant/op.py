@@ -339,7 +339,7 @@ class DequantBFP(Operator):
         """
         return 2 * K_TILE_B, N_TILE * self.cols
 
-    def configuration(self):
+    def xclbin_operator(self):
         """This configuration at its reference shape: its xclbin serves every
         shape sharing the configuration, and only the instruction stream is
         per shape, as flm.GEMM's.

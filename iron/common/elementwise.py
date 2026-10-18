@@ -957,7 +957,7 @@ class Elementwise(Operator):
                 if stream.replicate:
                     return [
                         ObjectFifo(stream.obj_type, depth=segments)
-                        for j in range(stream.count)
+                        for j in range(stream.lanes)
                     ]
                 depth = stream.l1_depth
                 return [ObjectFifo(stream.obj_type, depth=depth) for k in range(cores)]

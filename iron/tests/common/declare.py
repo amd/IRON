@@ -480,7 +480,7 @@ def test_an_exported_design_replaces_the_derived_one():
     op = Exported(n=64)
     assert [b.shape for b in op.buffers] == [(64,), (64,)]
     assert OperatorDesign(op).build() == "module {}"
-    assert op.configuration() is op
+    assert op.xclbin_operator() is op
 
 
 # --------------------------------------------------------------------------
@@ -490,13 +490,13 @@ def test_an_exported_design_replaces_the_derived_one():
 
 def test_an_operand_with_a_tile_is_its_own_stream():
     op = MV(M=1024, K=128).resolved(NPU2)
-    assert {b.name: (b.count, b.obj_shape) for b in op.buffers} == {
+    assert {b.name: (b.lanes, b.obj_shape) for b in op.buffers} == {
         "A": (8, (64, 128)),
         "B": (1, (128,)),
         "C": (8, (64,)),
     }
     assert (
-        op.A.count == 8 and op.A.obj_type == np.ndarray[(64, 128), np.dtype[op.A.dtype]]
+        op.A.lanes == 8 and op.A.obj_type == np.ndarray[(64, 128), np.dtype[op.A.dtype]]
     )
     assert op.A.shape == (1024, 128) and op.C.shape == (1024,)
     op.A.bind([f"h{k}" for k in range(8)])

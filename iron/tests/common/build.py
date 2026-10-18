@@ -142,7 +142,9 @@ def built(op) -> tuple[str, list[Task], Operator]:
     """
     array = BuiltArray(OperatorDesign(op))
     prog = Program(
-        array.op.device(), OperatorRuntime(array.op, array.built), workers=array.workers
+        array.op.array_device(),
+        OperatorRuntime(array.op, array.built),
+        workers=array.workers,
     )
     text = str(prog.resolve_program())
     text = text[text.index("aie.runtime_sequence") :]
@@ -530,7 +532,7 @@ def test_flm_gemm_declares_every_b_pool_whichever_columns_a_shape_fills():
 
     dev = from_name("npu2", n_cols=8)
     op = flm_gemm.GEMM(M=512, K=1536, N=256, tile_n=64, k_tile=256).resolved(dev)
-    assert static(op) == static(op.configuration())
+    assert static(op) == static(op.xclbin_operator())
 
 
 def test_flm_gemm_layout_of_b_follows_the_device():
@@ -569,7 +571,7 @@ def test_flm_gemm_finishes_with_an_activation_then_a_clamp_in_its_epilogue():
     assert compiled_in.compiled_modes == (Epilogue.NONE, Epilogue.SILU)
     assert plain.compiled_modes == (Epilogue.NONE,)
     # The xclbin is the configuration's, which compiles in what the finish needs.
-    config = compiled_in.resolved().configuration()
+    config = compiled_in.resolved().xclbin_operator()
     assert config.epilogue_modes == compiled_in.compiled_modes
 
 

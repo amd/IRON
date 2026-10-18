@@ -164,7 +164,7 @@ class ExtentWord(Value):
 
     def divisor(self, op) -> int:
         b = getattr(op, self.buffer)
-        lanes = 1 if b.replicate else b.count
+        lanes = 1 if b.replicate else b.lanes
         return lanes * b.extent_unit(self.axis)
 
     def __repr__(self) -> str:

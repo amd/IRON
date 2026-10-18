@@ -218,10 +218,10 @@ class Chain:
                 f"{name}: the finish's inputs ride {feed.name} an output tile at "
                 f"a time, which a per-call bound does not move by"
             )
-        if feed.count != out.count:
+        if feed.lanes != out.lanes:
             raise Unresolvable(
-                f"{name}: the finish's inputs ride {feed.name}'s {feed.count} "
-                f"lanes, which are not {out.name}'s {out.count}"
+                f"{name}: the finish's inputs ride {feed.name}'s {feed.lanes} "
+                f"lanes, which are not {out.name}'s {out.lanes}"
             )
         if feed.dtype != out.dtype:
             raise Unresolvable(
@@ -237,7 +237,7 @@ class Chain:
         self._riding_fits(feed, len(extra), name, "finish")
         # Every one is live until the drains: a shim tile's descriptors serve
         # both directions of each of its channels, a lane its share of them.
-        transfers = (1 + len(extra)) * out.elements // (out.count * line)
+        transfers = (1 + len(extra)) * out.elements // (out.lanes * line)
         shims = sum(
             dev.get_tile_type(col, 0) is AIETileType.ShimNOCTile
             for col in range(dev.cols)
@@ -283,7 +283,7 @@ class Chain:
                     )
         riding = sum(len(link.op.inputs) - 1 for link in self.steps)
         tiles = into.elements // (
-            1 if not into.streamed or into.replicate else into.count
+            1 if not into.streamed or into.replicate else into.lanes
         )
         if riding and tiles != line:
             raise Unresolvable(

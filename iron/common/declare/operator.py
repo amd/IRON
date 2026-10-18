@@ -509,7 +509,7 @@ class Operator:
         tables = LUT_BYTES * len(luts) if dev.arch is AIEArch.AIE2 else 0
         return line * bfp.itemsize(out.dtype) + tables
 
-    def device(self):
+    def array_device(self):
         """The device the array's Program is built for: the bound device
         unless the array takes a part of it.
         """
@@ -519,7 +519,7 @@ class Operator:
     def external(self):
         return type(self)._external
 
-    def configuration(self) -> Self:
+    def xclbin_operator(self) -> Self:
         """The operator whose xclbin this one runs when it runs alone."""
         return self
 

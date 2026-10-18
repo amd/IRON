@@ -390,7 +390,7 @@ class GEMM(Operator):
                 f"among them, each shim carrying A to as many"
             )
 
-    def device(self):
+    def array_device(self):
         if self.dev.arch is AIEArch.AIE2:
             return {1: NPU1Col1, 2: NPU1Col2, 4: NPU1}[self.num_aie_columns]()
         return NPU2()

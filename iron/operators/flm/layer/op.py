@@ -64,7 +64,7 @@ class DecodeLayer(Operator):
             )
         return dataclasses.replace(self)
 
-    def configuration(self):
+    def xclbin_operator(self):
         # The four layer types share one array; they differ in their sequences.
         return dataclasses.replace(self, layer_type=LayerType.GLOBAL)
 

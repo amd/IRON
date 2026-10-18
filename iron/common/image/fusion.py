@@ -228,7 +228,7 @@ class Fusion:
             {n: of[n] if n in arrays else n for n in self.designs},
             lambda members: fits({m: self.designs[m] for m in members}, words),
         )
-        device = next(iter(self.designs.values())).op.device()
+        device = next(iter(self.designs.values())).op.array_device()
         configurations: dict[str, DeviceConfiguration] = {}
         runtimes: dict[str, Runtime] = {}
         types: dict[str, list] = {}
@@ -243,7 +243,7 @@ class Fusion:
                 (name,) = outside
                 stub, types[name] = self._exported_sequence(name, exported[name])
                 configured = DeviceConfiguration(
-                    symbol, self.designs[name].op.device(), runtimes=[stub]
+                    symbol, self.designs[name].op.array_device(), runtimes=[stub]
                 )
             else:
                 configured = pack(symbol, {m: arrays[m] for m in members})

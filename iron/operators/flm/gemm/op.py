@@ -1239,7 +1239,7 @@ class GEMM(Operator):
         """
         return (M_TILE * self.rows * self.m_chunk, self.k_tile, self.tile_n * self.cols)
 
-    def configuration(self):
+    def xclbin_operator(self):
         """This configuration at its reference shape and activation: the
         xclbin every shape sharing it runs, each with its own instruction stream.
         """
