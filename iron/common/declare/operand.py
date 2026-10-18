@@ -14,7 +14,6 @@ from collections.abc import Sequence
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, ClassVar, Self
 
-import aie.iron
 import numpy as np
 from aie.dialects.aie import DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
@@ -619,22 +618,21 @@ class Operand(Member["Operand"]):
         return f"<{type(self).__name__} {self.name} {self.shape} {bfp.dtype_name(self.dtype)}>"
 
 
-# mlir-aie's markers type-check as `type[np.ndarray]`; at runtime they are classes.
-class In(Operand, aie.iron.In):  # pyright: ignore[reportGeneralTypeIssues]
+class In(Operand):
     """A buffer the host fills and the array reads."""
 
     fills = True
     drains = False
 
 
-class Out(Operand, aie.iron.Out):  # pyright: ignore[reportGeneralTypeIssues]
+class Out(Operand):
     """A buffer the array writes and the host reads."""
 
     fills = False
     drains = True
 
 
-class InOut(Operand, aie.iron.InOut):  # pyright: ignore[reportGeneralTypeIssues]
+class InOut(Operand):
     """A buffer the host fills and the array writes in place; what the
     stream does not drain stays as the host gave it.
     """
