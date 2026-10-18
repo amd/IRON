@@ -4,7 +4,7 @@
 """Write a dequantized weight sidecar next to model.q4nx.
 
     python3 dequantize.py <model_dir> --mode bf16 --only ""
-    IRON_PATH=<iron checkout> python3 dequantize.py <model_dir> --mode bfp --only ""
+    python3 dequantize.py <model_dir> --mode bfp --only ""
 
 The ``bf16`` mode writes the layout consumed by FastFlowLM GEMM. The ``bfp``
 mode writes the packed BFP16EBS8 layout consumed by IRON GEMM.
@@ -16,19 +16,16 @@ import os
 import struct
 import sys
 
+import aie.utils as aie_utils
 import numpy as np
+from aie.iron.device import NPU2
 
-IRON = os.environ.get("IRON_PATH", "")
-
-ROW_CHUNK, COL_CHUNK, GROUP, PARALLEL = 32, 256, 32, 16
-BLOCK_BYTES = ROW_CHUNK * COL_CHUNK * 5 // 8
-WEIGHTS_PER_BLOCK = ROW_CHUNK * COL_CHUNK
+from iron.applications.gemma4_flm.build import gemm
+from iron.operators.flm.aie2p_math_emulation import f32_to_bf16_floor
+from iron.operators.flm.q4nx import BLOCK_BYTES, GROUP, K_TILE, M_TILE, parts
 
 SUFFIX = {"bf16": ".dq_bf16", "bfp": ".dq_bfp"}
 DTYPE = {"bf16": "BF16", "bfp": "U8"}
-
-# These values must match build.gemm(), which takes tile_n=64.
-K_TILE, S, T, TILE_N, CT_K = 512, 8, 8, 64, 128
 
 
 def read_header(path):
@@ -49,55 +46,17 @@ def bf16_to_f32(values):
     return (values.astype(np.uint32) << 16).view(np.float32)
 
 
-def f32_to_bf16_floor(values):
-    """Convert f32 to bf16 with the dequant kernel's floor rounding."""
-    bits = values.view(np.uint32)
-    inexact = (bits & 0xFFFF) != 0
-    negative = (bits >> 31) != 0
-    return ((bits >> 16) + (inexact & negative)).astype(np.uint16)
-
-
 def dequantize(raw, cols):
     """Dequantize a q4nx tensor to f32 with shape (out_features, cols)."""
-    blocks_per_row = cols // COL_CHUNK
-    n_blocks = raw.size // BLOCK_BYTES
-    rows = n_blocks // blocks_per_row * ROW_CHUNK
-    blocks = raw.reshape(n_blocks, BLOCK_BYTES)
-
-    n_groups = COL_CHUNK // GROUP
-    scale_min_bytes = n_groups * ROW_CHUNK * 2
-    scales = bf16_to_f32(
-        blocks[:, :scale_min_bytes]
-        .view(np.uint16)
-        .reshape(n_blocks, n_groups, ROW_CHUNK)
-    )
-    mins = bf16_to_f32(
-        blocks[:, scale_min_bytes : 2 * scale_min_bytes]
-        .view(np.uint16)
-        .reshape(n_blocks, n_groups, ROW_CHUNK)
-    )
-    packed = blocks[:, 2 * scale_min_bytes :].reshape(
-        n_blocks, ROW_CHUNK // PARALLEL, COL_CHUNK, PARALLEL // 2
-    )
-
-    quantized = np.empty(
-        (n_blocks, ROW_CHUNK // PARALLEL, COL_CHUNK, PARALLEL),
-        dtype=np.float32,
-    )
-    quantized[..., 0::2] = (packed & 0xF).astype(np.float32)
-    quantized[..., 1::2] = (packed >> 4).astype(np.float32)
-    quantized = quantized.transpose(0, 1, 3, 2).reshape(n_blocks, ROW_CHUNK, COL_CHUNK)
-
-    groups = np.arange(COL_CHUNK) // GROUP
-    scale = scales[:, groups, :].transpose(0, 2, 1)
-    minimum = mins[:, groups, :].transpose(0, 2, 1)
-    values = minimum + scale * quantized
-
-    result = np.empty((rows, cols), dtype=np.float32)
-    for block in range(n_blocks):
-        row = (block // blocks_per_row) * ROW_CHUNK
-        col = (block % blocks_per_row) * COL_CHUNK
-        result[row : row + ROW_CHUNK, col : col + COL_CHUNK] = values[block]
+    codes, scales, mins = parts(raw)
+    grp = np.arange(K_TILE) // GROUP
+    values = mins[..., grp] + scales[..., grp] * codes
+    blocks_per_row = cols // K_TILE
+    result = np.empty((len(values) // blocks_per_row * M_TILE, cols), np.float32)
+    for block, value in enumerate(values):
+        row = (block // blocks_per_row) * M_TILE
+        col = (block % blocks_per_row) * K_TILE
+        result[row : row + M_TILE, col : col + K_TILE] = value
     return result
 
 
@@ -130,23 +89,10 @@ def through_bf16(weights):
 
 
 def to_bfp16ebs8(weights):
-    """Pack an (N, K) matrix for the B operand of IRON GEMM."""
-    if IRON and IRON not in sys.path:
-        sys.path.insert(0, IRON)
-    from iron.operators.flm.packing import pack_b
-
-    operand = np.ascontiguousarray(through_bf16(weights).T)
-    packed = pack_b(
-        operand,
-        k_tile=K_TILE,
-        n_tile=TILE_N,
-        s=S,
-        t=T,
-        ct_k=CT_K,
-        bfp16=True,
-        round_conv_even=False,
-    )
-    return packed.view(np.uint8)
+    """Pack an (N, K) matrix for the B operand of build.gemm()."""
+    n_dim, k_dim = weights.shape
+    op = gemm(M=256, K=k_dim, N=n_dim, gelu=False)
+    return op.pack_B(np.ascontiguousarray(through_bf16(weights).T)).view(np.uint8)
 
 
 def build(raw, cols, mode):
@@ -242,7 +188,7 @@ def main():
             cols = dims[dimension]
             meta = header[name]
             raw_bytes = meta["data_offsets"][1] - meta["data_offsets"][0]
-            n_values = raw_bytes // BLOCK_BYTES * WEIGHTS_PER_BLOCK
+            n_values = raw_bytes // BLOCK_BYTES * M_TILE * K_TILE
             n_bytes = n_values * 2 if args.mode == "bf16" else n_values // 8 * 9
             output_name = name + SUFFIX[args.mode]
 
@@ -267,9 +213,10 @@ def main():
         "mode": args.mode,
         "source": "model.q4nx",
     }
-    for index, name in enumerate(write_container(output_path, plan, note)):
-        if index % 10 == 0 or index == len(plan) - 1:
-            print(f"  [{index + 1:3d}/{len(plan)}] {name}")
+    with aie_utils.set_current_device(NPU2()):
+        for index, name in enumerate(write_container(output_path, plan, note)):
+            if index % 10 == 0 or index == len(plan) - 1:
+                print(f"  [{index + 1:3d}/{len(plan)}] {name}")
     print(f"done: {os.path.getsize(output_path) / 1024**3:.3f} GiB")
     return 0
 

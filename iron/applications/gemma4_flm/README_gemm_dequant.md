@@ -73,18 +73,18 @@ FLM_MODELINFO_PATH=$FLM/model_info.json \
 ## Build the replacement IRON operators
 
 Now build the NPU programs for the operators you want to replace.
-`build_gemm_dequant.py` compiles the Gemma 4 E2B shapes and creates a copy of
-FastFlowLM's xclbin directory under `$OUTPUT/xclbins`. It replaces only
+`build.py --only mm,dequant` compiles the Gemma 4 E2B shapes and creates a copy
+of FastFlowLM's xclbin directory under `$OUTPUT/xclbins`. It replaces only
 `mm.xclbin` and `dequant.xclbin`. The instruction streams go in the adjacent
 `iron/` directory.
 
 ```bash
 cd $APP
-python3 build_gemm_dequant.py --engine-xclbins $FLM/xclbins --out $OUTPUT
+python3 build.py --engine-xclbins $FLM/xclbins --out $OUTPUT --only mm,dequant
 ```
 
 The script builds the GEMM row counts needed by `--prefill-chunk-len 512`.
-Increase `CHUNK` in `build_gemm_dequant.py` to serve larger chunks.
+Increase `CHUNK` in `build.py` to serve larger chunks.
 
 ## Build offline weights
 
@@ -96,10 +96,8 @@ IRON's BFP16 packer.
 MODEL=$FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2
 
 python3 dequantize.py $MODEL --mode bf16
-IRON_PATH=$IRON python3 dequantize.py $MODEL \
-    --mode bfp --only "mlp."
-IRON_PATH=$IRON python3 dequantize.py $MODEL \
-    --mode bfp --only "self_attn." --out model.dq_bfp_attn
+python3 dequantize.py $MODEL --mode bfp --only "mlp."
+python3 dequantize.py $MODEL --mode bfp --only "self_attn." --out model.dq_bfp_attn
 ```
 
 This creates:

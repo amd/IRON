@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Builds the IRON operators of Gemma 4 E2B's text path and stages them for FastFlowLM.
 
-    python build.py --engine-xclbins <FastFlowLM's src/xclbins> --out <out dir>
+    python build.py --engine-xclbins <FastFlowLM's src/xclbins> --out <out dir> [--only mm,dequant]
 
 Reads the model from $FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2. Writes:
 
-    <out>/xclbins/Gemma4-E2B-IT-NPU2/   the engine's xclbins, six of them replaced by IRON's
+    <out>/xclbins/Gemma4-E2B-IT-NPU2/   the engine's xclbins, those --only names (all six by default) replaced by IRON's
     <out>/xclbins/.../iron/             instruction sequences and repacked weights
     <out>/gen/                          sequence generators the engine compiles in
 """
@@ -19,10 +19,10 @@ import shutil
 from pathlib import Path
 
 import aie.utils as aie_utils
-import pli_weights
 from aie.iron.device import NPU2
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 
+from iron.applications.gemma4_flm import pli_weights
 from iron.operators.flm import (
     GEMM,
     DecodeLayer,
@@ -34,6 +34,8 @@ from iron.operators.flm import (
 from iron.operators.flm.gemm.design import Epilogue
 
 MODEL = "Gemma4-E2B-IT-NPU2"
+# The engine's xclbins IRON replaces, by file stem.
+XCLBINS = ("layer", "attn", "swa", "lm_head", "mm", "dequant")
 
 # The longest prompt chunk, flm's --prefill-chunk-len. The engine starts a
 # chunk up to 127 tokens early and pads it to a multiple of 256 rows. Each row
@@ -123,7 +125,7 @@ def one_xclbin(built):
     return xclbins.pop()
 
 
-def main(engine_xclbins, out):
+def main(engine_xclbins, out, only):
     model_dir = Path(os.environ["FLM_MODEL_PATH"]) / "models" / MODEL
     config = json.loads((model_dir / "config.json").read_text())
     with aie_utils.set_current_device(NPU2()):
@@ -162,7 +164,16 @@ def main(engine_xclbins, out):
         ]
         gemms += [gemm(m, k, n, gelu) for m in PLI_WIDTHS for k, n, gelu in pli_shapes]
 
-        built = compile_all([*layers.values(), attn, swa, lm_head, *dequants, *gemms])
+        groups = {
+            "layer": list(layers.values()),
+            "attn": [attn],
+            "swa": [swa],
+            "lm_head": [lm_head],
+            "mm": gemms,
+            "dequant": dequants,
+        }
+        groups = {name: ops for name, ops in groups.items() if name in only}
+        built = compile_all([op for ops in groups.values() for op in ops])
 
         # Stage the engine's xclbins with IRON's under the engine's file names. The
         # engine registers each xclbin by its path, and overrides.hpp registers the
@@ -174,34 +185,33 @@ def main(engine_xclbins, out):
         shutil.copytree(Path(engine_xclbins) / MODEL, stage, symlinks=True)
         iron = stage / "iron"
         iron.mkdir()
-        for name, xclbin in {
-            "layer": one_xclbin(built[op] for op in layers.values()),
-            "attn": built[attn].image,
-            "swa": built[swa].image,
-            "lm_head": built[lm_head].image,
-            "mm": one_xclbin(built[op] for op in gemms),
-            "dequant": one_xclbin(built[op] for op in dequants),
-        }.items():
-            shutil.copyfile(xclbin, stage / f"{name}.xclbin")
+        for name, ops in groups.items():
+            shutil.copyfile(
+                one_xclbin(built[op] for op in ops), stage / f"{name}.xclbin"
+            )
 
         # Static instruction sequences, named by the shape the header looks them up by.
-        shutil.copyfile(built[lm_head].insts, iron / "lm_head.bin")
-        for op in dequants:
+        for op in groups.get("lm_head", ()):
+            shutil.copyfile(built[op].insts, iron / "lm_head.bin")
+        for op in groups.get("dequant", ()):
             shutil.copyfile(built[op].insts, iron / f"dequant_K{op.K}_N{op.N}.bin")
-        for op in gemms:
+        for op in groups.get("mm", ()):
             gelu = "_gelu" if op.epilogue == Epilogue.GELU else ""
             shutil.copyfile(
                 built[op].insts, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin"
             )
-        pli_weights.write(model_dir, config, gemms[0], iron)
+        if "mm" in groups:
+            pli_weights.write(model_dir, config, gemms[0], iron)
 
         # Dynamic instruction sequences.
         gen = out / "gen"
         gen.mkdir(exist_ok=True)
-        for t, op in layers.items():
+        for op in groups.get("layer", ()):
+            t = op.layer_type
             write_generator(built[op], gen / f"layer_{t}.h", f"layer_{t}")
-        write_generator(built[attn], gen / "attn.h", "attn")
-        write_generator(built[swa], gen / "swa.h", "swa")
+        for name in ("attn", "swa"):
+            for op in groups.get(name, ()):
+                write_generator(built[op], gen / f"{name}.h", name)
         print(f"staged {stage}")
 
 
@@ -213,5 +223,13 @@ if __name__ == "__main__":
         "--engine-xclbins", type=Path, required=True, help="FastFlowLM's src/xclbins"
     )
     parser.add_argument("--out", type=Path, required=True, help="the staging directory")
+    parser.add_argument(
+        "--only",
+        default=",".join(XCLBINS),
+        help=f"the xclbins to replace, comma-separated, of {','.join(XCLBINS)}",
+    )
     args = parser.parse_args()
-    main(args.engine_xclbins, args.out.resolve())
+    only = set(args.only.split(","))
+    if only - set(XCLBINS):
+        parser.error(f"--only: no xclbin {sorted(only - set(XCLBINS))}")
+    main(args.engine_xclbins, args.out.resolve(), only)

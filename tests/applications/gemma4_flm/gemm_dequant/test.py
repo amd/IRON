@@ -89,17 +89,6 @@ def test_example_overrides_only_gemm_and_dequant():
     assert overrides == OVERRIDDEN
     assert markers == OVERRIDDEN
 
-    build_source = (APP / "build_gemm_dequant.py").read_text()
-    assert "from iron.operators.flm import GEMM, DequantBFP" in build_source
-    for operator in ("DecodeLayer", "LMHead", "PrefillAttention"):
-        assert operator not in build_source
-
-
-def test_offline_dequant_uses_floor_rounding():
-    values = np.array([1.0, 1.00390625, -1.0, -1.00390625], dtype=np.float32)
-    expected = np.array([0x3F80, 0x3F80, 0xBF80, 0xBF81], dtype=np.uint16)
-    np.testing.assert_array_equal(dequantize.f32_to_bf16_floor(values), expected)
-
 
 def test_offline_dequant_layout_is_a_permutation():
     k_dim, n_dim = 512, 128
@@ -227,7 +216,6 @@ def build_sidecars():
                 "--out",
                 temporary_path.name,
             ],
-            env=dict(os.environ, IRON_PATH=str(APP.parents[2])),
         )
         temporary_path.replace(output_path)
 
@@ -242,11 +230,13 @@ def build_engines():
     run(
         [
             sys.executable,
-            str(APP / "build_gemm_dequant.py"),
+            str(APP / "build.py"),
             "--engine-xclbins",
             str(FLM / "xclbins"),
             "--out",
             str(OUTPUT),
+            "--only",
+            "mm,dequant",
         ],
         env=dict(os.environ, FLM_MODEL_PATH=str(FLM_MODEL_PATH)),
     )
