@@ -8,10 +8,10 @@ the first call, and ``OnHost``, the model with no device.
 from collections.abc import Callable
 from typing import ClassVar
 
-import aie.utils as aie_utils
 import numpy as np
 
 import iron
+from iron.common.image.packaging import require_device
 
 from .generation import Sampler, generate_on_host
 
@@ -56,7 +56,7 @@ class Model(iron.Graph):
             dev: The device every version compiles for, else the current one.
         """
         if dev is None:
-            dev = aie_utils.ensure_current_device()
+            dev = require_device()
         compiled, decode = [], None
         for shapes in self.shapes():
             prompt = "ids" in shapes or "placed" in shapes

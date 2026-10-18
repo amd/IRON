@@ -35,7 +35,7 @@ from ..image.allocator import ArenaPlan
 from ..image.artifacts import Parameter
 from ..image.callable import FullELFRun, ScratchArena
 from ..image.coresidence import AdjacentPacking
-from ..image.packaging import Kind, Plan, plan
+from ..image.packaging import Kind, Plan, plan, require_device
 from ..image.sequence import ALIGNMENT, OperatorSequence
 from ..image.step import BufferRef
 from .carried import CARRY, EmitSite, attach_emit, compose
@@ -419,8 +419,7 @@ class Graph:
                 self.precision = Precision(precision)
             try:
                 traced = self.trace(**shapes)
-                current = aie_utils.ensure_current_device()
-                chosen = plan(current, traced, full_elf, check)
+                chosen = plan(require_device(), traced, full_elf, check)
                 logger.info("%s", chosen.report(self.name))
                 signature = self._signature(
                     {h.name: (h.shape, h.dtype) for h in traced.inputs}
@@ -567,9 +566,7 @@ class Graph:
     def _profile(self) -> Profile | None:
         profile = self.profile
         if isinstance(profile, (str, Path)):
-            dev = aie_utils.ensure_current_device()
-            if dev is None:
-                raise ValueError(f"{self.name}: a profile is per device; none is bound")
+            dev = require_device()
             path = Path(profile) / f"{dev.name}.json"
             if not path.exists():
                 raise ValueError(f"{self.name}: no profile {path}")

@@ -33,7 +33,7 @@ from iron.common.graph.handle import Affine, PerCall
 from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef, SequenceStep
 from iron.common.image.artifacts import Parameter
-from iron.common.image.packaging import Kind
+from iron.common.image.packaging import Kind, require_device
 import iron.functional as F
 from iron.tests.common.graphs import FeedForward
 from iron.operators.copy import Copy
@@ -357,6 +357,24 @@ def test_shape_mismatch_and_rank_rules():
 
     t = flat.trace(x=(4, 512), y=(4, 512))
     assert t.steps[0].op.size == 2048 and t.outputs[0].shape == (4, 512)
+
+
+def test_linear_names_itself_in_a_step_s_error():
+    w = z(256, E)
+
+    class Bad(iron.Graph):
+        def body(self, x):
+            return F.linear(x, w)
+
+    with pytest.raises(ValueError, match=r"linear\(x, weight\): .*K is 1024 from"):
+        Bad().trace(x=(E // 2,))
+
+
+def test_no_npu_says_how_to_compile_without_one(monkeypatch):
+    monkeypatch.setattr(aie_utils, "ensure_current_device", lambda: None)
+    monkeypatch.delenv("NPU_RUNTIME", raising=False)
+    with pytest.raises(RuntimeError, match=r"no NPU found \(NPU_RUNTIME unset\)"):
+        require_device()
 
 
 def test_keyword_only_parameters_must_be_annotated_as_values():

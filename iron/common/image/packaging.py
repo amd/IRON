@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import os
 
+import aie.utils as aie_utils
 from aie.dialects.aie import AIEArch
 
 
@@ -61,6 +63,22 @@ class Plan:
         for vname, kind, lowering in self.values:
             lines.append(f"  {vname}: {kind}; {lowering}")
         return "\n".join(lines)
+
+
+def require_device():
+    """The current device, bound if the runtime found one.
+
+    Raises:
+        RuntimeError: There is none.
+    """
+    dev = aie_utils.ensure_current_device()
+    if dev is None:
+        runtime = os.environ.get("NPU_RUNTIME")
+        setting = f"NPU_RUNTIME={runtime}" if runtime else "NPU_RUNTIME unset"
+        raise RuntimeError(
+            f"no NPU found ({setting}); pass dev=NPU2() to compile without one"
+        )
+    return dev
 
 
 def dispatches_full_elf(dev) -> bool:

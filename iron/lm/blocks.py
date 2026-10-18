@@ -14,7 +14,6 @@ import dataclasses
 import math
 from functools import partial
 
-import aie.utils as aie_utils
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
@@ -22,6 +21,7 @@ from ml_dtypes import bfloat16
 import iron
 import iron.functional as F
 from iron import Precision, Scratchpad
+from iron.common.image.packaging import require_device
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
 from iron.operators.elementwise_max import ElementwiseMax
@@ -474,7 +474,7 @@ class ImagePatches(iron.Graph):
     ):
         self.patches, self.image, self.pool, self.chunk = patches, image, pool, chunk
         k, side = pool, pool * SIDE
-        cores = 2 * aie_utils.ensure_current_device().cols
+        cores = 2 * require_device().cols
         # Pooling windows across at most: Resample's cores hold `patch_columns`
         # patch columns each, a zero one past the image among them.
         self.across = (patch_columns * cores - 1) // k

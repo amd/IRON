@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar
 
-import aie.utils as aie_utils
 from aie import ir
 from aie.iron import CompileTime
 from aie.utils.compile.jit.compilabledesign import CompilableDesign
@@ -21,7 +20,7 @@ from aie.utils.npukernel import NPUKernel
 
 from ..design import OperatorDesign
 from .fusion import Fusion
-from .packaging import dispatches_full_elf
+from .packaging import dispatches_full_elf, require_device
 
 
 class FusedImage:
@@ -49,9 +48,7 @@ class FusedImage:
         """
         design = self.design
         if design is None:
-            dev = aie_utils.ensure_current_device()
-            if dev is None:
-                raise RuntimeError("a full ELF links for a device; none is bound")
+            dev = require_device()
             if not dispatches_full_elf(dev):
                 raise RuntimeError(
                     f"{dev.name} ({dev.arch}) does not dispatch a full ELF"
