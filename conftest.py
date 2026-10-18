@@ -15,6 +15,7 @@ from aie.utils.benchmark import preflight, provenance
 from aie.utils.probe import npu_unavailable_reason
 
 from iron.lm.base import FLAGS
+from iron.lm.golden import Golden
 from iron.tests.toolchain.tools import DEVICES
 
 
@@ -49,8 +50,29 @@ def pytest_addoption(parser):
         help="Fold, narrow and pack a language model's versions by this "
         "measured cost table (iron.lm.tune)",
     )
+    parser.addoption(
+        "--record-goldens",
+        action="store_true",
+        help="Record the Hugging Face logits a test's goldens lack (needs "
+        "torch and transformers)",
+    )
     for flags, kwargs in FLAGS:
         parser.addoption(*flags, **kwargs)
+
+
+@pytest.fixture(scope="module")
+def golden(request):
+    """``golden(name, reference)``: the ``Golden`` file ``goldens/<name>.npz``
+    beside the test, recording what it lacks from ``reference()`` (a
+    ``HuggingFace``) under ``--record-goldens``.
+    """
+    record = request.config.getoption("--record-goldens")
+
+    def open_golden(name, reference):
+        path = request.path.with_name("goldens") / f"{name}.npz"
+        return Golden(path, reference if record else None)
+
+    return open_golden
 
 
 def get_git_commit():

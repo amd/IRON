@@ -13,6 +13,7 @@ from .base import (
     DecoderConfig,
     Derived,
     Model,
+    OnHost,
     Oracle,
     Runner,
     Tokenizer,
@@ -36,6 +37,7 @@ from .blocks import (
 from .causal import CausalLM, Checkpoints, DecodeStep
 from .encoder import EncodeStep, Encoder, Tower
 from .encoder_decoder import EncoderDecoder, EncoderDecoderOracle
+from .golden import Golden, HuggingFace
 from .generation import Sampler, accuracy, determinism, generate_on_host
 from .multimodal import Multimodal
 
@@ -55,6 +57,8 @@ __all__ = [
     "EncoderDecoder",
     "EncoderDecoderOracle",
     "Experts",
+    "Golden",
+    "HuggingFace",
     "ImagePatches",
     "Layer",
     "LogMel",
@@ -62,6 +66,7 @@ __all__ = [
     "MaxPool2d",
     "Model",
     "Multimodal",
+    "OnHost",
     "Oracle",
     "Runner",
     "Sampler",

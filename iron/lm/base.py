@@ -37,6 +37,7 @@ from iron.tune.narrowing import CostTable, JointNarrowing, NarrowingKinds
 from iron.tune.probe import Call
 
 from .blocks import Experts, Layer
+from .golden import Golden, HuggingFace
 from .generation import (
     SEED,
     Sampler,
@@ -937,6 +938,27 @@ FLAGS = (
 )
 
 
+class OnHost:
+    """A model with its images stood in by its graph's reference
+    (``Graph.reference``), run at whatever shape it is called with: the
+    model with no device, mixed in before the model's own class.
+    """
+
+    def __call__(self, *tensors, **values):
+        logits, carry = self.reference(*tensors, **values)
+        return _HostOutput(logits), carry
+
+
+class _HostOutput:
+    """What an image returns: a buffer read with ``numpy()``."""
+
+    def __init__(self, array):
+        self.array = array
+
+    def numpy(self):
+        return self.array
+
+
 class Tokenizer:
     """A Hugging Face ``tokenizer.json``, over ``tokenizers`` (not
     ``transformers``): text to token ids without the special tokens its
@@ -1223,9 +1245,19 @@ class Runner:
             release=self.checkpoint.release, tuner=tuner, full_elf=full_elf
         )
 
-    def oracle(self) -> Oracle:
-        """The model's oracle over the same weights, widened a layer at a time."""
-        return self.model.oracle(self.config, self.weights)
+    def reference(self):
+        """What the model is judged by: with drawn weights, its own graph on
+        the host (``OnHost``); else Hugging Face's logits, recorded beside
+        the checkpoint (``golden.npz``) where transformers is installed.
+        """
+        if self.seed is not None:
+            return type("Host", (OnHost, self.model), {})(self.config, self.weights)
+        directory = Path(self.checkpoint.path).parent
+        try:
+            import transformers  # noqa: F401
+        except ImportError:
+            return Golden(directory / "golden.npz")
+        return Golden(directory / "golden.npz", lambda: HuggingFace.load(directory))
 
     def encode(self, text: str) -> list[int]:
         return [self.bos, *self.tokenizer.encode(text)]
@@ -1314,7 +1346,7 @@ def main(runner: type[Runner], description: str):
         print(f"[Tuning] {name}:\n" + tuning.report(), flush=True)
 
     if args.check_accuracy:
-        results = accuracy(model, run.oracle(), tokens, args.num_tokens)
+        results = accuracy(model, run.reference(), tokens, args.num_tokens)
         worst = int(np.argmax([kl for kl, _ in results]))
         for stat, value in kl_stats(results).items():
             where = f" (step {worst})" if stat == "Max" else ""

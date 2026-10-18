@@ -173,8 +173,10 @@ def check_accuracy(
     bound a drift across many steps, the max a single broken step.
     """
     tokens = prompt(runner, chars, num_tokens)
-    # Built here alone: it holds the embedding in float32, twice the checkpoint's.
-    results = accuracy(model, runner.oracle(), tokens, num_tokens)
+    try:
+        results = accuracy(model, runner.reference(), tokens, num_tokens)
+    except LookupError as e:
+        pytest.skip(str(e))
     stats = kl_stats(results)
     for stat, value in stats.items():
         record(f"{stat}KL", float(value))

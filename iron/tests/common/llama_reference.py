@@ -3,9 +3,9 @@
 
 """The graph's reference against the model's plain forward pass.
 
-``Llama.oracle`` (``Oracle``) is a stateless causal pass in float32
-numpy, the oracle the NPU application is judged against. ``Llama`` is the same
-computation as one graph, called at a prompt's shape and at one token's,
+Hugging Face's own Llama in float32 over the same random weights, its
+logits recorded in ``goldens/`` (``iron.lm.golden``), is what the NPU
+application is judged against. ``Llama`` is the same computation as one graph, called at a prompt's shape and at one token's,
 and ``Graph.reference`` runs it operator by operator through each
 ``reference()`` on host tensors, with the per-call values modelled (the
 chunk and the position move the cache writes and bound the attention, the
@@ -17,10 +17,10 @@ that checks the graph's wiring (layouts, reshapes, the head grouping,
 the transposes, the caches the prompt leaves for decode) against the model,
 leaving only the kernels' arithmetic for hardware.
 
-The oracle needs no cache: the logits at position ``t`` of a causal pass
+A causal pass needs no cache: the logits at position ``t`` of a pass
 over ``t + 1`` tokens are what a cached decode produces at step ``t``. The
-graph computes in bfloat16 and the oracle in float32, so the logits agree
-to bf16 tolerance and the argmax exactly.
+graph computes in bfloat16 and the reference in float32, so the logits
+agree to bf16 tolerance and the argmax exactly.
 """
 
 import dataclasses
@@ -33,13 +33,14 @@ from ml_dtypes import bfloat16
 import iron
 from iron.lm import (
     DecoderConfig,
-    Oracle,
+    OnHost as Host,
     Sampler,
     accuracy,
     determinism,
     generate_on_host,
 )
 from iron.lm.generation import greedy
+from iron.lm.golden import Golden, HuggingFace
 from iron.applications.llama.model import Llama, LlamaConfig
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
@@ -49,55 +50,37 @@ from iron.tests.common.llama_model import PROFILE, SMALL, checkpoint
 pytestmark = pytest.mark.usefixtures("npu2")  # MHA decode on any host
 
 
-class _Output:
-    """What an image returns: a buffer read with ``numpy()``."""
-
-    def __init__(self, array):
-        self.array = array
-
-    def numpy(self):
-        return self.array
-
-
-class OnHost(Llama):
-    """The model with its images stood in by its reference, which runs at
-    whatever shape it is called with.
-    """
-
+class OnHost(Host, Llama):
     profile = PROFILE
-
-    def __call__(self, *tensors, **values):
-        logits, carry = self.reference(*tensors, **values)
-        return _Output(logits), carry
 
 
 @dataclasses.dataclass
 class Case:
     config: DecoderConfig
     weights: SimpleNamespace
-    oracle: Oracle
+    golden: Golden
     prompt: np.ndarray
     first: np.ndarray
     expected: list
 
 
 @pytest.fixture(scope="module")
-def cpu():
-    """The config, its weights, the oracle, a prompt, the oracle's logits
-    for it and six greedy tokens' logits.
+def cpu(golden):
+    """The config, its weights, its golden logits, a prompt, the golden
+    logits for it and six greedy tokens' logits.
     """
     config = SMALL
     weights = checkpoint(config).tree("random")
-    oracle = Llama.oracle(config, weights)
+    reference = golden("small", lambda: HuggingFace.build("llama", config, weights))
     # No greedy step of this prompt has a top-2 gap within bf16's resolution.
     prompt = np.random.default_rng(7).integers(0, config.vocab_size, 8)
     tokens, expected = prompt, []
-    first = logits = oracle.logits(tokens)
+    first = logits = reference.logits(tokens)
     for _ in range(6):
         tokens = np.append(tokens, logits.argmax())
-        logits = oracle.logits(tokens)
+        logits = reference.logits(tokens)
         expected.append(logits)
-    return Case(config, weights, oracle, prompt, first, expected)
+    return Case(config, weights, reference, prompt, first, expected)
 
 
 def _greedy(model, tokens, logits, n):
@@ -155,15 +138,14 @@ def test_a_prompt_longer_than_a_chunk_runs_in_chunks(cpu):
     which reruns only the chunk holding its first token onwards.
     """
     config = dataclasses.replace(cpu.config, max_seq_len=4 * cpu.config.prefill_chunk)
-    model = OnHost(config, cpu.weights)
-    oracle = Llama.oracle(config, cpu.weights)
+    model, reference = OnHost(config, cpu.weights), cpu.golden
     tokens = np.random.default_rng(3).integers(0, config.vocab_size, 150)
-    first = oracle.logits(tokens)
+    first = reference.logits(tokens)
     _assert_close([model.logits(tokens)], [first])
     tokens = np.append(tokens, first.argmax())
-    _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
+    _assert_close([model.logits(tokens)], [reference.logits(tokens)])
     tokens = np.append(tokens, np.random.default_rng(4).integers(0, 1024, 30))
-    _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
+    _assert_close([model.logits(tokens)], [reference.logits(tokens)])
 
 
 @dataclasses.dataclass(frozen=True)
@@ -179,25 +161,34 @@ class SharingConfig(LlamaConfig):
         return dataclasses.replace(super().layer(i), shares_kv=self.kv_source(i) != i)
 
 
-def test_a_layer_sharing_an_earlier_layers_caches_matches_the_forward():
+def _decoded(model, tokens, steps):
+    """The logits after ``tokens``, its last ``steps`` tokens decoded one at
+    a time over the caches the prompt before them left.
+    """
+    model.logits(tokens[:-steps])
+    for n in range(len(tokens) - steps + 1, len(tokens) + 1):
+        logits = model.logits(tokens[:n])
+    return logits
+
+
+def test_a_layer_sharing_an_earlier_layers_caches_decodes_as_it_prompts():
     """The last of three layers attends over the first's caches: the graph
-    holds caches for the first two alone, and over chunks and decode steps
-    its logits are those of the oracle, which shares them alike, and not
-    those of the layers each attending over their own.
+    holds caches for the first two alone; a prompt over chunks and the same
+    tokens' last ones decoded over the caches give the same logits, and not
+    those of the layers each attending over their own. Hugging Face's Llama
+    shares no caches, so no golden judges it.
     """
     given = {f.name: vars(SMALL)[f.name] for f in dataclasses.fields(SMALL)}
     given.update(num_hidden_layers=3, max_seq_len=4 * SMALL.prefill_chunk)
     config = SharingConfig(**given)
     weights = checkpoint(config).tree("random", 9)
-    model, oracle = OnHost(config, weights), Llama.oracle(config, weights)
+    model = OnHost(config, weights)
     assert sorted(model.keys) == sorted(model.values) == [0, 1]
     tokens = np.random.default_rng(10).integers(0, config.vocab_size, 300)
-    first = oracle.logits(tokens)
-    _assert_close([model.logits(tokens)], [first])
-    tokens = np.append(tokens, first.argmax())
-    _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
-    own = Llama.oracle(LlamaConfig(**given), weights).logits(tokens)
-    assert np.abs(own - oracle.logits(tokens)).max() > 0.1 * np.abs(own).max()
+    prompted = model.logits(tokens)
+    _assert_close([_decoded(OnHost(config, weights), tokens, 4)], [prompted])
+    own = OnHost(LlamaConfig(**given), weights).logits(tokens)
+    assert np.abs(own - prompted).max() > 0.1 * np.abs(own).max()
 
 
 @pytest.mark.parametrize("outside", [-1, SMALL.vocab_size])
@@ -234,23 +225,13 @@ def test_a_model_runs_only_the_versions_it_loaded(cpu):
     assert not model._versions
 
 
-def test_the_oracle_carries_nothing_from_call_to_call(cpu):
-    """Its buffers outlive a call: a shorter prompt after a longer one, and
-    each longer one after, gives a fresh oracle's logits bit for bit.
-    """
-    tokens = np.random.default_rng(5).integers(0, cpu.config.vocab_size, 40)
-    for n in (20, 8, 21, 40):
-        fresh = Llama.oracle(cpu.config, cpu.weights).logits(tokens[:n])
-        assert np.array_equal(cpu.oracle.logits(tokens[:n]), fresh), n
-
-
 def test_the_accuracy_check_scores_the_model_against_the_reference(cpu):
     """What ``--check-accuracy`` runs, the images stood in by the graph's
-    reference: the model against the float32 reference, teacher-forced.
+    reference: the model against its golden logits, teacher-forced.
     """
     model = OnHost(cpu.config, cpu.weights)
     steps = len(cpu.expected) + 1
-    results = accuracy(model, cpu.oracle, cpu.prompt, steps)
+    results = accuracy(model, cpu.golden, cpu.prompt, steps)
     assert all(top1 for _, top1 in results), results
     # bf16 graphs against a float32 forward: close, not equal.
     assert all(0 <= kl < 0.05 for kl, _ in results), results
@@ -266,19 +247,18 @@ def test_the_determinism_check_finds_the_reference_deterministic(cpu):
     assert determinism(model, prompts, 3, 3) == 0
 
 
-def test_a_short_prompt_runs_at_its_own_rows():
+def test_a_short_prompt_runs_at_its_own_rows(cpu):
     """A context longer than a chunk: the prompt runs its own rows of one
-    chunk, not the context, and its logits are the oracle's; decode
+    chunk, not the context, and its logits are the golden ones; decode
     continues from the caches it wrote.
     """
     config = dataclasses.replace(SMALL, max_seq_len=1024)
-    weights = checkpoint(config).tree("random")
-    model, oracle = OnHost(config, weights), Llama.oracle(config, weights)
+    model, reference = OnHost(config, cpu.weights), cpu.golden
     prompt = np.random.default_rng(2).integers(0, config.vocab_size, 8)
-    first = oracle.logits(prompt)
+    first = reference.logits(prompt)
     _assert_close([model.logits(prompt)], [first])
     tokens = np.append(prompt, first.argmax())
-    _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
+    _assert_close([model.logits(tokens)], [reference.logits(tokens)])
 
 
 @pytest.mark.parametrize("temperature", [0.0, 0.7])
@@ -325,22 +305,13 @@ class Placed(OnHost):
         return ElementwiseAdd.step(x, rows)
 
 
-class PlacedOracle(Oracle):
-    """``Placed``'s oracle."""
-
-    def __init__(self, config, weights, table):
-        super().__init__(config, weights)
-        self.table = np.asarray(table, np.float32)
-
-    def positions(self, x):
-        return x + self.table[: x.shape[0]]
-
-
 def test_a_decoder_without_rope_places_its_positions_through_the_hook(cpu):
     """No ``rope_theta``: no table is held and nothing turns q and k; a
     model's ``positions`` adds its own rows instead, in each prompt chunk at
-    the chunk's positions and in a decode step at its one, as its oracle's
-    ``positions`` does.
+    the chunk's positions and in a decode step at its one: a prompt over
+    chunks and the same tokens' last ones decoded give the same logits, and
+    not those of RoPE. No Hugging Face model places a table so, so no
+    golden judges it.
     """
     config = dataclasses.replace(
         cpu.config, rope_theta=None, max_seq_len=2 * cpu.config.prefill_chunk
@@ -355,22 +326,18 @@ def test_a_decoder_without_rope_places_its_positions_through_the_hook(cpu):
     for shapes in model.shapes():
         steps = model.trace(**shapes).steps
         assert not any(isinstance(s.op, RoPE) for s in steps)
-    oracle = PlacedOracle(config, cpu.weights, table)
     tokens = np.random.default_rng(10).integers(0, config.vocab_size, 300)
-    first = oracle.logits(tokens)
-    _assert_close([model.logits(tokens)], [first])
-    tokens = np.append(tokens, first.argmax())
-    _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
+    prompted = model.logits(tokens)
+    decoded = _decoded(Placed(config, cpu.weights, table), tokens, 4)
+    _assert_close([decoded], [prompted])
     with pytest.raises(AssertionError):
-        _assert_close(
-            [model.logits(tokens)], [Oracle(config, cpu.weights).logits(tokens)]
-        )
+        _assert_close([prompted], [cpu.golden.logits(tokens)])
 
 
 def test_a_decoder_nested_in_its_checkpoint_is_read_where_it_is(cpu):
     """A checkpoint holding its decoder's embedding, layers and final norm
-    under ``model.decoder``: ``decoder=`` reads them there, in the model and its
-    oracle, and both give the flat checkpoint's logits bit for bit.
+    under ``model.decoder``: ``decoder=`` reads them there, and the model
+    gives the flat checkpoint's logits bit for bit.
     """
     m = cpu.weights.model
     decoder = SimpleNamespace(embed_tokens=m.embed_tokens, layers=m.layers, norm=m.norm)
@@ -380,18 +347,16 @@ def test_a_decoder_nested_in_its_checkpoint_is_read_where_it_is(cpu):
     np.testing.assert_array_equal(
         model.logits(cpu.prompt), OnHost(cpu.config, cpu.weights).logits(cpu.prompt)
     )
-    oracle = Oracle(cpu.config, nested, decoder)
-    np.testing.assert_array_equal(oracle.logits(cpu.prompt), cpu.first)
 
 
-def test_a_turn_runs_from_its_first_new_token():
+def test_a_turn_runs_from_its_first_new_token(cpu):
     """Decision 50: a turn changing the history at 270, past the boundary at
     256, calls from 270 alone; the caches' rows before it are the first
-    prompt's, and its logits the oracle's.
+    prompt's, and its logits the golden ones.
     """
     config = dataclasses.replace(SMALL, max_seq_len=1024)
-    weights = checkpoint(config).tree("random")
-    model, oracle = OnHost(config, weights), Llama.oracle(config, weights)
+    weights, reference = cpu.weights, cpu.golden
+    model = OnHost(config, weights)
     rng = np.random.default_rng(9)
     tokens = rng.integers(0, config.vocab_size, 300)
     model.logits(tokens)
@@ -399,21 +364,20 @@ def test_a_turn_runs_from_its_first_new_token():
     turn = np.concatenate([tokens[:270], rng.integers(0, config.vocab_size, 40)])
     assert model.resume(model._held(turn)) == 270
     assert [(v["start"], v["rows"]) for _, v in model._chunks(turn, 270)] == [(270, 40)]
-    _assert_close([model.logits(turn)], [oracle.logits(turn)])
+    _assert_close([model.logits(turn)], [reference.logits(turn)])
     np.testing.assert_array_equal(model.keys[0].host[:270], before[:270])
 
 
-def test_a_context_no_chunk_divides_runs_to_its_last_position():
+def test_a_context_no_chunk_divides_runs_to_its_last_position(cpu):
     """300 positions in 256-row chunks: a prompt whose second chunk is 43
-    rows, then the decode step at the last position, 299, each the oracle's
+    rows, then the decode step at the last position, 299, each the golden
     logits; the caches are 300 rows, exactly.
     """
     config = dataclasses.replace(SMALL, max_seq_len=300)
-    weights = checkpoint(config).tree("random")
-    model, oracle = OnHost(config, weights), Llama.oracle(config, weights)
+    model, reference = OnHost(config, cpu.weights), cpu.golden
     tokens = np.random.default_rng(8).integers(0, config.vocab_size, 300)
-    _assert_close([model.logits(tokens[:299])], [oracle.logits(tokens[:299])])
-    _assert_close([model.logits(tokens)], [oracle.logits(tokens)])
+    _assert_close([model.logits(tokens[:299])], [reference.logits(tokens[:299])])
+    _assert_close([model.logits(tokens)], [reference.logits(tokens)])
     with pytest.raises(IndexError, match="rows to 301 of 300"):
         model(
             model.prompt_ids(tokens[256:]),
