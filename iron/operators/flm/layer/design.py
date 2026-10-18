@@ -746,10 +746,10 @@ def _build_rms(ctx, rms_tile):
     return rms_y_out
 
 
-def _build_rope(ctx, rope_tile, name, rtp_key, dh, q_fifo):
+def _build_rope(ctx, rope_tile, name, rtp_key, q_fifo):
     """RoPE, global or sliding-window."""
     kern = ctx.entry(name, "rope")
-    q_ty, kv_ty, _, qkv_ty, _, rope_ty, _ = kern.arg_types()
+    _, kv_ty, _, qkv_ty, _, rope_ty, _ = kern.arg_types()
 
     r, c = rope_tile.row, rope_tile.col
     qkv_0 = Buffer(type=qkv_ty, name=f"qkv_buffer_0_{r}_{c}", tile=rope_tile)
@@ -1181,9 +1181,7 @@ def _build_proj_core(ctx, pt, kern, send_x_out, main_y0=None, main_y1=None):
                 [
                     Bd(
                         y,
-                        tap=TensorAccessPattern.full(np_ndarray_type_get_shape(y_ty))[
-                            14:
-                        ],
+                        tap=TensorAccessPattern.full(y.shape)[14:],
                         acquires=[Acquire(pk[f"y_cons_{half}_lock"], value=2)],
                         releases=[Release(pk[f"y_prod_{half}_lock"], value=2)],
                         next=nxt,
@@ -1713,8 +1711,8 @@ def decode_layer(
     # q from RoPE to the qk core. The qk core's DMA reorders it.
     q_of_g = ObjectFifo(np.ndarray[(G_DQ,), _BF16], depth=2)
     q_of_swa = ObjectFifo(np.ndarray[(S_DQ,), _BF16], depth=2)
-    _build_rope(ctx, t["rope"], "rope", "rope_skip_kv", g.dh, q_of_g)
-    _build_rope(ctx, t["swa_rope"], "swa_rope", "swa_rope_skip_kv", g.swa_dh, q_of_swa)
+    _build_rope(ctx, t["rope"], "rope", "rope_skip_kv", q_of_g)
+    _build_rope(ctx, t["swa_rope"], "swa_rope", "swa_rope_skip_kv", q_of_swa)
     _build_pl_embedding(ctx, t["pl_embedding"])
     _build_pl_gate(ctx, t["pl_gate"], rms_y_out)
     _build_pl_merge(ctx, t["pl_merge"])
