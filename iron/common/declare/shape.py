@@ -84,21 +84,16 @@ class Shape:
                         f"{cls.__name__}: a shape references a field object that "
                         f"is not one of this class's fields"
                     )
-                spec = ParamSpec.of(d)
-                if spec is None or (isinstance(spec, AutoSpec) and not allow_tunable):
-                    why = (
-                        "an Auto(); a host shape may not depend on tuning"
-                        if isinstance(spec, AutoSpec)
-                        else "not declared with Param()"
-                    )
+                if isinstance(ParamSpec.of(d), AutoSpec) and not allow_tunable:
                     raise TypeError(
-                        f"{cls.__name__}.{member.name}: {what} {d.name} is {why}. A "
-                        f"shape dimension is a Param() field or an integer literal"
+                        f"{cls.__name__}.{member.name}: {what} {d.name} is an "
+                        f"Auto(); a host shape may not depend on tuning. A shape "
+                        f"dimension is a field() or an integer literal"
                     )
             elif not isinstance(d, (int, np.integer)):
                 raise TypeError(
-                    f"{cls.__name__}.{member.name}: {what} {d!r} is not a Param() "
-                    f"field or an integer. Expressions are not allowed in shapes; "
+                    f"{cls.__name__}.{member.name}: {what} {d!r} is not a field() "
+                    f"or an integer. Expressions are not allowed in shapes; "
                     f"declare the result as a field"
                 )
 

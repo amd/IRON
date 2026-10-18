@@ -12,12 +12,12 @@ import math
 from dataclasses import Field
 from collections.abc import Sequence
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, ClassVar, Self
+from typing import TYPE_CHECKING, Any, Self
 
 import numpy as np
 from aie.dialects.aie import DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import DmaEndpoint
+from aie.iron import DmaEndpoint, In, Out
 from aie.utils import bfp
 from ml_dtypes import bfloat16
 
@@ -64,10 +64,15 @@ def slots(sizes: Sequence[Any], strides: Sequence[Any]) -> tuple[list, list]:
 class Operand(Member["Operand"]):
     """A host buffer: shape in extents, a dtype, and the stream it moves through.
 
-    Declared in an operator's body; on an instance, ``op.x`` is the operand
-    bound to it (`of`), its shape and tile resolved.
+    Declared in an operator's body by calling aie.iron's ``In``, ``Out`` or
+    ``InOut`` with these arguments after ``role``; on an instance, ``op.x``
+    is the operand bound to it (`of`), its shape and tile resolved.
 
     Args:
+        role: aie.iron's ``In`` (the host fills it, the array reads it),
+            ``Out`` (the array writes it, the host reads it) or ``InOut``
+            (the host fills it, the array writes it in place; what the
+            stream does not drain stays as the host gave it).
         dims: The host shape.
         dtype: The element type.
         obj_shape: What one fifo element holds, in the units a core reads
@@ -82,11 +87,9 @@ class Operand(Member["Operand"]):
             it is true, and a call giving the operand by keyword sets it.
     """
 
-    fills: ClassVar[bool]
-    drains: ClassVar[bool]
-
     def __init__(
         self,
+        role: type,
         *dims: _DimSpec,
         dtype: Any = bfloat16,
         obj_shape: Any = None,
@@ -96,6 +99,9 @@ class Operand(Member["Operand"]):
         broadcast: bool = False,
         when: _DimSpec | None = None,
     ) -> None:
+        self.role = role
+        self.fills = role is not Out
+        self.drains = role is not In
         if per is not None and broadcast:
             raise TypeError("a stream is either per=<dim> or broadcast, not both")
         if replicate and per is None:
@@ -529,28 +535,5 @@ class Operand(Member["Operand"]):
 
     def __repr__(self) -> str:
         if self.op is None:
-            return f"{type(self).__name__}({self.dims})"
-        return f"<{type(self).__name__} {self.name} {self.shape} {bfp.dtype_name(self.dtype)}>"
-
-
-class In(Operand):
-    """A buffer the host fills and the array reads."""
-
-    fills = True
-    drains = False
-
-
-class Out(Operand):
-    """A buffer the array writes and the host reads."""
-
-    fills = False
-    drains = True
-
-
-class InOut(Operand):
-    """A buffer the host fills and the array writes in place; what the
-    stream does not drain stays as the host gave it.
-    """
-
-    fills = True
-    drains = True
+            return f"{self.role.__name__}({self.dims})"
+        return f"<{self.role.__name__} {self.name} {self.shape} {bfp.dtype_name(self.dtype)}>"

@@ -83,6 +83,14 @@ public API adds its entry under Unreleased.
 - `iron.lm.base` is split into `iron.lm.config`, `checkpoint`, `model` and
   `runner`; `iron.lm`'s own names are unchanged.
 - A `Runner` subclass is its model's `runner`, which `CausalLM.load` builds.
+- An operator declares with aie.iron's markers: `In`, `Out` and `InOut`
+  come from `aie.iron` (`x = In(M, K, obj_shape=...)`), and every field is
+  annotated `CompileTime[T]` or `DispatchTime[T]` from `aie.iron`, which
+  the declaration reads: `M: CompileTime[int] = field()`,
+  `tile: CompileTime[int] = Auto()`,
+  `n: DispatchTime[np.int32] = field(init=False)`. A field annotated with
+  neither, or declared without `field()`/`Auto()`, is refused.
+- `Param(...)` is `field(...)`, with the same options.
 - `iron.operators.flm`'s GEMM is `ProjectionGEMM`, so it is not confused
   with `iron.operators.GEMM`; a profile names it `"flm.ProjectionGEMM"`.
 - An operand's element shape is `obj_shape=`, not `obj_type=`:
@@ -164,6 +172,8 @@ public API adds its entry under Unreleased.
 
 ### Removed
 
+- `iron.common`'s `In`, `Out`, `InOut`, `Param` and `DispatchTime`; import
+  the markers from `aie.iron` and use `field`.
 - `F.linear(accurate=)`, `Attention(accurate=)`, `MLP(accurate=)` and
   `iron.functional.ACCURATE`; pass `precision=Precision.HIGHEST`.
 - `Phi4Config.max_position_embeddings`: LongRoPE's amplitude scale is set

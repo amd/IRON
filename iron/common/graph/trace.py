@@ -838,7 +838,7 @@ class Tracer:
             shaped = op.resolve(op.dev)
         buffers = shaped.buffers
         ins = [b for b in buffers if b.fills]
-        outs = [b for b in buffers if isinstance(b, Out)]
+        outs = [b for b in buffers if b.role is Out]
         if len(operands) == len(ins):
             given_outs = []
         elif len(operands) == len(ins) + len(outs):
@@ -890,9 +890,9 @@ class Tracer:
                 self._bind(op, extent.name, count)
         slots, outputs, it, given = [], [], iter(operands[: len(ins)]), iter(given_outs)
         for b in buffers:
-            if isinstance(b, In):
+            if b.role is In:
                 slots.append(next(it))
-            elif isinstance(b, InOut):
+            elif b.role is InOut:
                 h = next(it)
                 slots.append(h)
                 outputs.append(h)

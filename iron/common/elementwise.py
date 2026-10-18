@@ -512,7 +512,7 @@ class Elementwise(Operator):
 
         def build(self) -> Built:
             streams = [b for b in self.buffers if b.streamed]
-            ins = [b for b in streams if isinstance(b, In)]
+            ins = [b for b in streams if b.role is In]
             outs = [b for b in streams if b.drains]
             n_in = len(ins)
             cores = self.cores

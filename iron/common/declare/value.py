@@ -99,19 +99,18 @@ class Value(Member["Value"]):
         return f"<{type(self).__name__} {self.name} {np.dtype(self.dtype).name}>"
 
 
-class DispatchTime(Value):
-    """A per-call value the instruction stream is regenerated around.
+class DispatchValue(Value):
+    """A per-call value the instruction stream is regenerated around:
+    declared ``name: DispatchTime[T] = field(init=False)`` (aie.iron's
+    marker), ``T`` its dtype.
 
     Can change DMA sizes, strides and offsets; costs a stream regeneration
     and a buffer allocation per call; cannot be packaged as a full ELF.
     """
 
-    def __init__(self, *, dtype: Any = np.int32) -> None:
-        super().__init__(dtype=dtype)
-
 
 class Extent(Value):
-    """A ``Param()`` shape field a graph may bound per call.
+    """A ``field()`` shape field a graph may bound per call.
 
     ``valid = Extent(size)`` reads as ``size`` until a graph bounds an
     operand the field sizes (``x[:n]``); then it, and every ``Value`` whose
@@ -120,7 +119,7 @@ class Extent(Value):
 
     def __init__(self, field: Any, *, dtype: Any = np.int32) -> None:
         super().__init__(dtype=dtype)
-        self.field = field  # the Param field
+        self.field = field  # the field()
 
     @property
     def per_call(self) -> bool:

@@ -301,7 +301,7 @@ class Standalone:
         for k in self._filled:
             op = self.steps[k]
             for buf, name_ in zip(op.buffers, self._names(k, op)):
-                (out_names if isinstance(buf, Out) else in_names).append(name_)
+                (out_names if buf.role is Out else in_names).append(name_)
         steps = [
             SequenceStep(op, tuple(map(BufferRef, self._names(self._slot[k], op))))
             for k, op in enumerate(self.steps)

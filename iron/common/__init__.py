@@ -12,13 +12,9 @@ that names only its kernel.
 from .declare import (
     Built,
     Divisors,
-    DispatchTime,
     Extent,
-    In,
-    InOut,
     Operand,
     Operator,
-    Out,
     Precision,
     Rtp,
     Unresolvable,
@@ -26,7 +22,7 @@ from .declare import (
     Width,
     Xclbin,
     Auto,
-    Param,
+    field,
     Select,
 )
 from .elementwise import (
@@ -41,16 +37,12 @@ from .elementwise import (
 __all__ = [
     "BinaryElementwise",
     "Built",
-    "DispatchTime",
     "Divisors",
     "Elementwise",
     "Extent",
-    "In",
-    "InOut",
     "KernelCall",
     "Operand",
     "Operator",
-    "Out",
     "Rtp",
     "RowBroadcast",
     "Rowwise",
@@ -62,5 +54,5 @@ __all__ = [
     "Width",
     "Xclbin",
     "Auto",
-    "Param",
+    "field",
 ]

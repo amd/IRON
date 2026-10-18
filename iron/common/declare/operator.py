@@ -37,7 +37,7 @@ from aie.utils.verify import Tolerance, Verdict, compare
 from ..testing import Testing
 from .declaration import Declaration
 from .domain import Domain, Width
-from .field import Auto, Param, ParamSpec, Unresolvable
+from .field import Auto, ParamSpec, Unresolvable, field
 from .operand import Operand
 from .precision import Precision
 from .rtp import Rtp
@@ -119,7 +119,7 @@ class Array:
         )
 
 
-@dataclass_transform(kw_only_default=True, field_specifiers=(Param, Auto))
+@dataclass_transform(kw_only_default=True, field_specifiers=(field, Auto))
 @dataclasses.dataclass(eq=False, repr=True)
 class Operator:
     """An operator. Subclass it; every subclass is a dataclass checked as its body finishes."""

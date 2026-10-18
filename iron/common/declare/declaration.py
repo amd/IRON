@@ -10,14 +10,17 @@ import enum
 import inspect
 import math
 from collections.abc import Mapping
-from typing import Any, get_args
+from typing import Any, ClassVar, get_args, get_origin
+
+from aie.iron import In, InOut, Out
+from aie.utils.compile.jit._introspect import _dispatch_param_type, _tagged_type
 
 from .domain import Domain
 from .field import AutoSpec, ParamSpec
 from .member import Member
 from .operand import Operand
 from .shape import Select, Shape
-from .value import Extent, Value
+from .value import DispatchValue, Extent, Value
 
 # What an Array annotates by hand, besides what it is given: its operands
 # and the device.
@@ -43,19 +46,25 @@ class Declaration:
     Attributes:
         name: The class's name.
         members: The members, the most derived body's order first.
-        params: The `Param` fields.
-        derived: Each `Param` field's computing default, by name.
+        params: The `field()` fields.
+        derived: Each `field()` field's computing default, by name.
         autos: The `Auto` fields.
         tunables: The `Auto` fields a caller, a profile or the tuner sets.
         domains: Each tunable's declared `Domain`, by name.
         array: The fields the array reads, which its generated ``Array``
             holds: what a stream's tile, its dtype, its replication or its
             presence names, and those declared ``array=True``.
-        probes: Each `Param(probe=)` field's probe, by name.
+        probes: Each `field(probe=)` field's probe, by name.
     """
 
     def __init__(self, cls: type, library: type, shipped: bool = False) -> None:
         self.name = cls.__name__
+        # aie.iron's In, Out and InOut, called in the body, become operands.
+        for name, value in list(vars(cls).items()):
+            if isinstance(value, (In, Out, InOut)):
+                member = Operand(type(value), *value.args, **value.kwargs)
+                setattr(cls, name, member)
+                member.__set_name__(cls, name)
         # Members must be unannotated, or dataclass would make them constructor args.
         annotations = cls.__dict__.get("__annotations__", {})
         for name, value in list(vars(cls).items()):
@@ -71,6 +80,33 @@ class Declaration:
                 raise TypeError(
                     f"{cls.__name__}.{name} hides {base.__name__}.{name}, which "
                     f"the library reads; name the member otherwise"
+                )
+        # A field is CompileTime[T] or DispatchTime[T]; a DispatchTime one
+        # is a member, its dtype T.
+        for name, hint in inspect.get_annotations(cls, eval_str=True).items():
+            if hint is ClassVar or get_origin(hint) is ClassVar:
+                continue
+            spec = ParamSpec.of(vars(cls).get(name))
+            dtype = _dispatch_param_type(hint)
+            if dtype is not None:
+                if spec is None or vars(cls)[name].init:
+                    raise TypeError(
+                        f"{cls.__name__}.{name}: declare a DispatchTime value "
+                        f"`{name}: DispatchTime[np.int32] = field(init=False)`"
+                    )
+                del annotations[name]
+                member = DispatchValue(dtype=dtype)
+                setattr(cls, name, member)
+                member.__set_name__(cls, name)
+            elif _tagged_type(hint, "aie.compile_time") is None:
+                raise TypeError(
+                    f"{cls.__name__}.{name}: annotated {hint!r}; a field is "
+                    f"annotated aie.iron's CompileTime[T] or DispatchTime[T]"
+                )
+            elif spec is None:
+                raise TypeError(
+                    f"{cls.__name__}.{name}: declare a CompileTime field with "
+                    f"field() or Auto(), `{name}: ... = field(default=...)`"
                 )
 
         inherited = {
@@ -90,7 +126,7 @@ class Declaration:
             ):
                 raise TypeError(
                     f"{cls.__name__}.{name} = {value!r} does not override the inherited "
-                    f"field: annotate it, `{name}: int = Auto(default={value!r})` (with "
+                    f"field: annotate it, `{name}: CompileTime[int] = Auto(default={value!r})` (with "
                     f"init=False to pin it), or dataclass keeps the base's default"
                 )
 
@@ -105,7 +141,10 @@ class Declaration:
         hints = {}
         for klass in reversed(cls.__mro__):
             if klass is not library and issubclass(klass, library):
-                hints |= inspect.get_annotations(klass, eval_str=True)
+                hints |= {
+                    n: _tagged_type(h, "aie.compile_time") or h
+                    for n, h in inspect.get_annotations(klass, eval_str=True).items()
+                }
         # A field's type is `T | None`: a shape dimension of it is present
         # only where it resolves to something other than None.
         self.nullable = frozenset(
@@ -162,14 +201,14 @@ class Declaration:
                     if when is None or isinstance(when, AutoSpec):
                         raise TypeError(
                             f"{cls.__name__}.{m.name}: when={Shape((m.when,))} must "
-                            f"be a Param() field, the flag the operand exists under"
+                            f"be a field(), the flag the operand exists under"
                         )
             if isinstance(m, Extent):
                 extent = ParamSpec.of(m.field)
                 if extent is None or isinstance(extent, AutoSpec):
                     raise TypeError(
                         f"{cls.__name__}.{m.name}: Extent({Shape((m.field,))}) must "
-                        f"name a Param() field, the one a graph may bound per call"
+                        f"name a field(), the one a graph may bound per call"
                     )
             if (
                 isinstance(m, Operand)
@@ -180,7 +219,7 @@ class Declaration:
                     if ParamSpec.of(ref) is None:
                         raise TypeError(
                             f"{cls.__name__}.{m.name}: per={Shape((ref,))} must be "
-                            f"a Param() or Auto() field"
+                            f"a field() or Auto() field"
                         )
 
         self.members = tuple(members)
@@ -238,7 +277,7 @@ class Declaration:
                     f"{cls.__name__}.Array annotates {hand}, but an Array annotates "
                     f"only {sorted(LIBRARY_VIEWS)}: it is given every member and "
                     f"every field a stream names; declare another field it reads "
-                    f"Param(array=True) or Auto(array=True), and compute anything "
+                    f"field(array=True) or Auto(array=True), and compute anything "
                     f"else in the Array"
                 )
         listed = (

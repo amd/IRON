@@ -3,10 +3,11 @@
 
 """The fields an operator declares.
 
-A compile-time parameter is a dataclass field declared with ``Param``, a
-tunable the library resolves one declared with ``Auto``. Each returns the
-`dataclasses.Field` itself, with its ``ParamSpec`` in the field's metadata,
-and each field is its own dimension reference: ``GEMV.K`` in a shape names
+Each is annotated ``CompileTime[T]`` (aie.iron's marker) and declared with
+``field``, a compile-time parameter, or ``Auto``, a tunable the library
+resolves. Each returns the `dataclasses.Field` itself, with its
+``ParamSpec`` in the field's metadata, and each field is its own dimension
+reference: ``GEMV.K`` in a shape names
 the field, while ``op.K`` on an instance is the integer.
 """
 
@@ -28,7 +29,7 @@ class Unresolvable(ValueError):
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class ParamSpec:
-    """What a ``Param()`` field declares beyond its dataclass field.
+    """What a ``field()`` field declares beyond its dataclass field.
 
     Attributes:
         derive: The field's computing default, or None.
@@ -44,7 +45,7 @@ class ParamSpec:
     @staticmethod
     def of(field: object) -> ParamSpec | None:
         """The spec ``field`` was declared with, or None where it is not a
-        field declared with ``Param()`` or ``Auto()``.
+        field declared with ``field()`` or ``Auto()``.
         """
         if not isinstance(field, dataclasses.Field):
             return None
@@ -67,7 +68,7 @@ class AutoSpec(ParamSpec):
     domain: Domain | tuple[Any, ...] | None
 
 
-def Param(
+def field(
     *,
     default: Any = MISSING,
     derive: Callable[[Any], Any] | None = None,
@@ -111,7 +112,7 @@ def Param(
         TypeError: Both `default` and `derive` are given.
     """
     if derive is not None and default is not MISSING:
-        raise TypeError("Param(default=, derive=): give one, not both")
+        raise TypeError("field(default=, derive=): give one, not both")
     return dataclasses.field(
         default=None if derive is not None else default,
         init=init,
@@ -132,8 +133,9 @@ def Auto(
     """A tunable ``Operator.resolve`` fills for the device when the caller
     does not.
 
-    Annotate it with the resolved type. It may name a stream tile but never
-    a host shape, since inference would cycle through resolution.
+    Annotate it ``CompileTime[T]``, ``T`` the resolved type. It may name a
+    stream tile but never a host shape, since inference would cycle through
+    resolution.
     ``init=False`` makes it no tunable: a subclass's fixed value of an
     inherited one (``default=``), or one ``resolve`` computes from the device
     and the other fields, giving it to the copy it returns
@@ -152,7 +154,7 @@ def Auto(
             is not searched.
         repr: The field is in the operator's repr.
         init: The field is a constructor argument.
-        array: As ``Param``'s.
+        array: As ``field``'s.
 
     Returns:
         The field.

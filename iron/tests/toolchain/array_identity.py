@@ -117,7 +117,7 @@ def test_the_extents_share_one_device(npu2, module, cls_name, tunables, extent):
         names = [f"s{k}_{b.name}" for b in op.buffers]
         runlist.append((op, *names))
         for b, buf in zip(op.buffers, names):
-            (outputs if isinstance(b, Out) else inputs).append(buf)
+            (outputs if b.role is Out else inputs).append(buf)
     traced = TracedGraph.of_steps(cls_name, sequences.steps(*runlist), inputs, outputs)
     seq = OperatorSequence(traced, full_elf=True)
     seq.prepare()

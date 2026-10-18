@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 def _signature(op):
     """The runtime arguments an operator takes: direction, shape and dtype each."""
     return [
-        (type(b).__name__, tuple(b.shape), bfp.dtype_name(b.dtype)) for b in op.buffers
+        (b.role.__name__, tuple(b.shape), bfp.dtype_name(b.dtype)) for b in op.buffers
     ]
 
 

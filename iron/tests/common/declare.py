@@ -43,6 +43,7 @@ from iron.common import (
 )
 from iron.common.declare.field import AutoSpec, ParamSpec
 from iron.common.declare.operand import active_runtime
+from iron.common.declare.value import DispatchValue
 from iron.common.design import OperatorDesign
 from iron.operators import ReLU as LibraryReLU
 from iron.operators import Tanh
@@ -114,7 +115,7 @@ def test_fields_are_their_own_references():
 
 def test_members_keep_declaration_order_and_names():
     assert [m.name for m in MV.declaration.members] == ["A", "B", "C", "count", "start"]
-    assert isinstance(MV.A, In) and isinstance(MV.C, Out)
+    assert MV.A.role is In and MV.C.role is Out
 
 
 def test_shapes_captured_bare_names_resolve_to_refs():
@@ -157,28 +158,28 @@ def test_a_tunable_may_name_a_tile_but_not_a_buffer_shape():
             A = In(M, t)
 
 
-def test_plain_defaulted_field_in_a_shape_is_its_literal():
-    # A plain field with a default is bound to that default in the class
-    # body, so a shape written against it captures the literal, not the
-    # field. This is why anything a shape names must be declared with Param().
-    class Plain(Operator):
-        n: int = 4
-        x = In(n, obj_shape=(n,))
+def test_a_field_without_a_marker_is_rejected():
+    with pytest.raises(
+        TypeError,
+        match=r"Bad\.n: annotated <class 'int'>; a field is annotated "
+        r"aie\.iron's CompileTime\[T\] or DispatchTime\[T\]",
+    ):
 
-    assert Plain.x.dims.dims == (4,)
-    assert Plain(n=8).x.shape == (4,)
+        class Bad(Operator):
+            n: int = field()
 
 
-def test_plain_field_reference_from_outside_is_rejected():
-    class Plain(Operator):
-        n: int = 4
-        x = In(4)
+def test_a_marked_field_not_declared_with_field_is_rejected():
+    # A plain default would be the literal a shape in the body captures.
+    with pytest.raises(TypeError, match="Bad.n: declare a CompileTime field"):
 
-    with pytest.raises(TypeError, match="not declared with Param"):
+        class Bad(Operator):
+            n: CompileTime[int] = 4
 
-        class Bad(Plain):
-            M: int = Param()
-            A = In(M, Plain.n)
+    with pytest.raises(TypeError, match="Unset.n: declare a DispatchTime value"):
+
+        class Unset(Operator):
+            n: DispatchTime[np.int32]
 
 
 def test_expression_in_a_shape_is_rejected():
@@ -317,7 +318,7 @@ def test_probed_sets_each_probe_field_and_nothing_else():
 
 def test_buffers_resolve_shape_dtype_and_direction():
     specs = MV(M=64, K=256, num_batches=2).buffers
-    assert [(type(s), s.shape) for s in specs] == [
+    assert [(s.role, s.shape) for s in specs] == [
         (In, (2, 64, 256)),
         (In, (2, 256)),
         (Out, (2, 64)),
@@ -382,7 +383,7 @@ def test_buffers_carry_the_declared_dtype_and_size(npu2):
 
     x, y = Copy(input_buffer_size=512, dtype=np.int32).buffers
     assert x.dtype == np.int32 and y.dtype == np.int32
-    assert (type(x), type(y)) == (In, Out)
+    assert (x.role, y.role) == (In, Out)
     assert y.nbytes == 512 * 4
 
 
@@ -436,7 +437,7 @@ def test_per_call_values_bind_on_the_operator():
     op = Copy(n=256)
     assert [v.name for v in op.values] == ["off", "live"]
     assert type(op.off) is Value and op.off.op is op
-    assert isinstance(op.live, DispatchTime) and op.live is not Copy.live
+    assert isinstance(op.live, DispatchValue) and op.live is not Copy.live
 
 
 # --------------------------------------------------------------------------
@@ -551,7 +552,7 @@ def test_a_positional_operand_past_the_inputs_is_an_output_not_an_optional_one()
 
 
 def test_when_names_a_param():
-    with pytest.raises(TypeError, match="must be a Param"):
+    with pytest.raises(TypeError, match=r"must be a field\(\)"):
 
         class Bad(Operator):
             N: int = Param()
@@ -779,7 +780,9 @@ def test_resolve_must_return_a_copy():
 
 
 def test_overriding_an_inherited_field_needs_an_annotation():
-    with pytest.raises(TypeError, match="tile_out: int = Auto\\(default=32\\)"):
+    with pytest.raises(
+        TypeError, match=r"tile_out: CompileTime\[int\] = Auto\(default=32\)"
+    ):
 
         class Pinned(MV):
             tile_out = 32  # dataclass would keep the base's 64 in silence
@@ -906,7 +909,7 @@ def test_mha_pads_the_sequence_and_groups_kv():
     # Grouped K/V are narrower than Q; plain K/V are exactly as wide.
     assert grouped[1].shape == (2, 128, 64)
     assert plain[1].shape == plain[0].shape
-    assert [type(spec) for spec in grouped] == [In] * 3 + [Out]
+    assert [spec.role for spec in grouped] == [In] * 3 + [Out]
 
 
 # --------------------------------------------------------------------------
@@ -945,7 +948,7 @@ def test_an_extent_reads_as_its_field_until_a_graph_bounds_it():
     assert op.derived_at("count", valid=16) == 8 and op.valid == 64  # unchanged
     with pytest.raises(TypeError, match="no Extent \\['n'\\]"):
         op.derived_at("count", n=1)
-    with pytest.raises(TypeError, match="must name a Param"):
+    with pytest.raises(TypeError, match=r"must name a field\(\)"):
 
         class Bad(Operator):
             n: int = Auto(default=4)
