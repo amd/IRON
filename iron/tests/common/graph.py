@@ -375,7 +375,14 @@ def test_shape_mismatch_and_rank_rules():
 def test_no_npu_says_how_to_compile_without_one(monkeypatch):
     monkeypatch.setattr(aie_utils, "ensure_current_device", lambda: None)
     monkeypatch.delenv("NPU_RUNTIME", raising=False)
-    with pytest.raises(RuntimeError, match=r"no NPU found \(NPU_RUNTIME unset\)"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"no NPU found \(NPU_RUNTIME unset; is the driver loaded\? .*"
+        r"pass dev=NPU2\(\) \(aie\.iron\.device\) or bind one",
+    ):
+        require_device()
+    monkeypatch.setenv("NPU_RUNTIME", "xrt")
+    with pytest.raises(RuntimeError, match=r"\(NPU_RUNTIME=xrt; "):
         require_device()
 
 

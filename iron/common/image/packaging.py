@@ -76,7 +76,9 @@ def require_device():
         runtime = os.environ.get("NPU_RUNTIME")
         setting = f"NPU_RUNTIME={runtime}" if runtime else "NPU_RUNTIME unset"
         raise RuntimeError(
-            f"no NPU found ({setting}); pass dev=NPU2() to compile without one"
+            f"no NPU found ({setting}; is the driver loaded? see `xrt-smi "
+            f"examine`); to compile without one, pass dev=NPU2() "
+            f"(aie.iron.device) or bind one with aie.utils.set_current_device"
         )
     return dev
 

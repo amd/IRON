@@ -107,9 +107,8 @@ public API adds its entry under Unreleased.
   its dotted path, the checkpoint file and what the module does have.
 - A compiled graph refuses an input numpy would not cast to its dtype
   (`same_kind`): float ids into an int32 input raise rather than truncate.
-- Compiling or loading with no NPU found raises `RuntimeError: no NPU found
-  (NPU_RUNTIME ...); pass dev=NPU2() to compile without one`, not an
-  `AttributeError` on `None`.
+- Compiling, loading or tuning with no NPU found raises a `RuntimeError`
+  saying how to compile without one, not an `AttributeError` on `None`.
 - `repr` of a graph names its traced shapes; of a compiled version, its
   inputs, packaging and build directory; of a `Profile`, its operators; of
   a model, its config, `max_seq_len` and whether it is loaded.
