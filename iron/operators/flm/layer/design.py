@@ -96,27 +96,36 @@ LK = 16
 # The padding in the engine's per-layer-input stream (gemma4e_npu_sequence.hpp).
 MIN_BF16_PAD = 32
 # The memtiles of the projection engine's four groups. Group i's memtile
-# feeds its cores proj_{i}_0 to proj_{i}_3 their weights, and proj_shim_{i}
-# feeds the memtile.
+# feeds its cores proj_{i}_0 to proj_{i}_3, in column PROJ_COLS[i] rows 2 to
+# 5, their weights, and proj_shim_{i} feeds the memtile.
 PROJ_MEMS = ("proj_gather_0", "proj_x", "proj_gather_1", "proj_weight")
+PROJ_COLS = (0, 1, 6, 7)
 
 _CORE, _MEM, _SHIM = AIETileType.CoreTile, AIETileType.MemTile, AIETileType.ShimNOCTile
-# The tile type of each stage. The placer chooses every tile, and keeps two
-# cores that share a buffer next to each other.
+# The tile of each stage: a tile type for the placer, or (column, row) for a
+# core the compiler cannot place yet. mlir-aie verifies the sequence's
+# set_lock only on a placed tile, which pins the cores with a sync lock;
+# the placer ignores an ObjectFifo's delegate tile, which pins the qk cores
+# beside their kv cores; and the gate and the projection cores that do not
+# send y share a neighbour's buffer and its locks.
 STAGES = {
-    "attn_qk": _CORE,
-    "attn_kv": _CORE,
-    "swa_attn_qk": _CORE,
-    "swa_attn_kv": _CORE,
-    "rms": _CORE,
-    "glu": _CORE,
+    "attn_qk": (2, 2),
+    "attn_kv": (2, 3),
+    "swa_attn_qk": (2, 4),
+    "swa_attn_kv": (2, 5),
+    "rms": (3, 2),
+    "glu": (3, 3),
     "rope": _CORE,
     "swa_rope": _CORE,
-    "pl_gate": _CORE,
+    "pl_gate": (4, 2),
     "pl_embedding": _CORE,
     "pl_up": _CORE,
     "pl_merge": _CORE,
-    **{f"proj_{i}_{j}": _CORE for i in range(len(PROJ_MEMS)) for j in range(4)},
+    **{
+        f"proj_{i}_{j}": (col, 2 + j)
+        for i, col in enumerate(PROJ_COLS)
+        for j in range(4)
+    },
     **dict.fromkeys(PROJ_MEMS, _MEM),
     "attn_mem": _MEM,
     **{f"proj_shim_{i}": _SHIM for i in range(len(PROJ_MEMS))},
@@ -455,7 +464,14 @@ class _Array:
     flows: dict[str, Flow] = field(init=False)
 
     def __post_init__(self) -> None:
-        self.t = {stage: Tile(tile_type=kind) for stage, kind in STAGES.items()}
+        self.t = {
+            stage: (
+                Tile(*at, tile_type=_CORE)
+                if isinstance(at, tuple)
+                else Tile(tile_type=at)
+            )
+            for stage, at in STAGES.items()
+        }
         # The circuit-switched flows. The compiler assigns their channels, and
         # each stage's DMA reaches them by endpoint.
         t = self.t
