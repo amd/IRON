@@ -29,6 +29,7 @@ TOY = Qwen3Config(
 
 class TestQwen3(Decoder):
     model, config, model_type, name = Qwen3, TOY, "qwen3", "toy"
+    seed = 3
 
     @classmethod
     def names(cls):

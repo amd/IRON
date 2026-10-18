@@ -163,7 +163,9 @@ LOGITS = 0.05
 def assert_close(got, want: np.ndarray, what: str = "the logits") -> None:
     """``got`` within ``LOGITS`` of ``want``, the reference's logits, at
     their largest magnitude; and where the reference's top two lie further
-    apart than that, the same argmax. A nearer pair may go either way.
+    apart than that bound, the same argmax. A nearer pair may go either
+    way. The gate is the bound, not twice the error: a pair further apart
+    than twice the error cannot swap, so that gate would check nothing.
     """
     got = np.asarray(got, np.float32).reshape(want.shape)
     scale = np.abs(want).max()

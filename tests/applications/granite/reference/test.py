@@ -35,6 +35,7 @@ TOY = GraniteConfig(
 
 class TestGranite(Decoder):
     model, config, model_type, name = Granite, TOY, "granite", "toy"
+    seed = 0
 
     @classmethod
     def names(cls):

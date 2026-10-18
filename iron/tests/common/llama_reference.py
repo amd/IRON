@@ -120,6 +120,8 @@ class Decoder:
     name: str
     # transformers' config keys beyond the config's own.
     json: dict = {}
+    # The prompt's seed: one whose greedy steps have no near-tie.
+    seed = 7
     profile = None
 
     @classmethod
@@ -140,14 +142,20 @@ class Decoder:
             config,
             weights,
         )
-        # No greedy step of this prompt has a top-2 gap within bf16's resolution.
-        prompt = np.random.default_rng(7).integers(0, config.vocab_size, 8)
+        prompt = np.random.default_rng(cls.seed).integers(0, config.vocab_size, 8)
         tokens, expected = prompt, []
         first = logits = reference.logits(tokens)
         for _ in range(6):
             tokens = np.append(tokens, logits.argmax())
             logits = reference.logits(tokens)
             expected.append(logits)
+        # Each step's top two lie further apart than bf16's resolution, 2^-8
+        # of the largest logit, so rounding alone cannot swap them.
+        for step, logits in enumerate([first, *expected]):
+            second, top = np.sort(logits)[-2:]
+            assert (
+                top - second > 2**-8 * np.abs(logits).max()
+            ), f"{cls.name}: step {step} of seed {cls.seed}'s prompt is a near-tie"
         return Case(config, weights, reference, prompt, first, expected)
 
     def host(self, config, weights):
