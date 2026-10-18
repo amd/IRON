@@ -1162,7 +1162,14 @@ class MHA(Operator):
         return out
 
     def tolerance(self) -> Tolerance:
-        return Tolerance(rtol=0.04, atol=0.15, max_mismatch_frac=0.005)
+        return Tolerance(
+            rtol=0.04,
+            atol=0.15,
+            max_mismatch_frac=0.005,
+            note="rtol about the softmax contract's aie::exp2 envelope (0.035 "
+            "of |a| + |b|); atol and the 0.5% left to mismatch are set by hand, "
+            "not derived",
+        )
 
     def sequence(self, rt):
         """One descriptor set per KV group: K and V re-read per (head, block)

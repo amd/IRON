@@ -178,9 +178,11 @@ class RoPE(Operator):
             self.y.bind([f.cons() for f in of_out])
             return Built(workers, rtps)
 
+    def _kernel(self):
+        return kernels.datamovement.rope(self.cols, two_halves=self.method_type == 0)
+
     def ops(self) -> int:
-        kernel = kernels.datamovement.rope(self.cols, two_halves=self.method_type == 0)
-        return kernel.contract.ops_per_call * self.rows
+        return self._kernel().contract.ops_per_call * self.rows
 
     def reference(self, x, angles):
         """``datamovement.rope_ref`` on the packed ``angles`` buffer, each angle row
@@ -198,4 +200,4 @@ class RoPE(Operator):
         return y.reshape(x.shape, copy=False)
 
     def tolerance(self) -> Tolerance:
-        return Tolerance.relative(0.05)
+        return self._kernel().contract.tolerance

@@ -5,6 +5,7 @@
 oracle output passes its ``tolerance()``, and an output past it, a NaN or its
 halves swapped fail, as a device test, check mode and the tuner judge them."""
 
+import aie.utils as aie_utils
 import numpy as np
 import pytest
 from aie.iron.device import from_name
@@ -75,3 +76,22 @@ def test_a_case_passes_its_oracle_and_fails_an_output_past_its_tolerance(
             written = {**v.outputs, out.name: w.reshape(want.shape)}
             verdict = op.judge(v.inputs, written, tolerance)[out.name]
             assert not verdict, f"{out.name} with {what} passed {tolerance}"
+
+
+@pytest.mark.parametrize("device", [("npu1", 4), ("npu2", 8)], ids=["npu1", "npu2"])
+def test_every_tolerance_says_where_its_numbers_come_from(device):
+    # An exact one has no number to explain; None is unbounded, and says so.
+    dev = from_name(device[0], n_cols=device[1])
+    unnoted = set()
+    with aie_utils.set_current_device(dev):
+        for name, cls, case, unresolvable in declared(dev):
+            if unresolvable is not None:
+                continue
+            tolerance = cls(**case.kwargs).resolved(dev).tolerance()
+            if (
+                tolerance is not None
+                and tolerance.kind != "exact"
+                and not tolerance.note
+            ):
+                unnoted.add(name)
+    assert not unnoted, sorted(unnoted)

@@ -171,7 +171,8 @@ reuse lint
        check mode (`compile(check=True)`) and autotuning alike: the contract of the kernel it runs unless
        it overrides it (a data mover returns `Tolerance.exact()`: any other
        accepts a wrong permutation). A finish or a prologue carries it
-       through its steps' own.
+       through its steps' own. A tolerance with a number names in its
+       `note` where the number comes from (`iron/tests/common/judging.py`).
      - `test = Testing(cases, ...)` on the operator class
        (`iron/common/testing.py`): the shapes it is checked at on a device
        and any `draw=` its inputs need. One module,

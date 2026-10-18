@@ -397,7 +397,7 @@ def test_a_setting_is_never_judged_by_its_looser_bound_alone(npu2):
     assert judge(default, narrow, v.inputs, {"C": c}) is not None
 
 
-def test_a_declared_gate_judges_before_the_contract(npu2):
+def test_a_gate_admits_an_output_within_it_and_refuses_one_past(npu2):
     rope = RoPE(rows=8, cols=64)
     v = vectors(rope, **RoPE.test.draw(rope))
     off = (v["y"].astype(np.float32) * 1.03).astype(bfloat16)

@@ -59,14 +59,19 @@ def test_swiglu_prefill_stream(k, tmp_path, record_property):
         }
     )
 
-    # All in bf16: ~20% of elements drift past 8% through the chain and down sum.
     out = net(*inputs)
     dump_traces(net.callable, trace.trace_file)
     output = out.numpy()[: SEQ_LEN * EMBEDDING_DIM].reshape((SEQ_LEN, EMBEDDING_DIM))
     verdict = compare(
         output,
         golden_ref[OUTPUT],
-        Tolerance.relative(0.08, 0.7, max_mismatch_frac=0.25),
+        Tolerance.relative(
+            0.08,
+            0.7,
+            max_mismatch_frac=0.25,
+            note="all in bf16: ~20% of elements drift past 8% through the "
+            "chain and down sum",
+        ),
     )
     assert verdict, verdict.detail
 
