@@ -881,6 +881,22 @@ def test_a_computed_default_is_inferred_from_a_shape_or_computed():
     # A function default is computed after the fields before it, or given.
     assert Rep(rows=2, repeat=3).cap == 6
     assert Rep(rows=2, repeat=3, cap=8).cap == 8
+    # replace computes a derived field again from the fields it changes.
+    assert Rep(rows=2, repeat=3).replace(repeat=4).out_rows == 8
+
+
+def test_a_computed_default_of_none_must_be_given():
+    class Unknown(Operator):
+        n: CompileTime[int] = field(lambda op: None)
+
+    with pytest.raises(ValueError, match=r"n \(None\) must be given"):
+        Unknown()
+    assert Unknown(n=2).n == 2
+
+
+def test_a_field_gives_a_default_or_a_derive_not_both():
+    with pytest.raises(TypeError, match="give one, not both"):
+        field(1, derive=lambda op: 1)
 
 
 def test_a_select_picks_a_layout_within_a_storage():

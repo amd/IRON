@@ -551,8 +551,10 @@ class Operator:
     def replace(self, **changes: Any) -> Self:
         """``dataclasses.replace`` that also takes and keeps the ``init=False``
         fields, which it would refuse and reset: what ``resolve`` returns,
-        ``self.replace(tile=..., derived=...)``.
+        ``self.replace(tile=..., derived=...)``. A ``field(derive=)`` field
+        not in ``changes`` is computed again from the new fields.
         """
+        changes = {n: None for n in self.declaration.held} | changes
         fixed = {
             f.name: changes.pop(f.name, vars(self)[f.name])
             for f in dataclasses.fields(self)
