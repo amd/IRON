@@ -223,7 +223,7 @@ def test_a_read_leaves_nothing_for_the_next_call_to_push():
         assert [t.device for t in arguments] == ["npu"] * 3
     run = one.callable.run
     one.start(run, _numbers(E, 16))
-    one.buffer(s).numpy_view()[:] = _numbers(E, 17)
+    one._storage(s).numpy_view()[:] = _numbers(E, 17)
     with pytest.raises(RuntimeError, match=r"wrote \['scratch'\] while a run"):
         one.callable.wait(run)
 

@@ -165,8 +165,8 @@ class Graph:
     holds names them in ``signature()`` instead. Weights and states are what
     the instance holds, named by attribute path (``self.layers[3].q`` is
     ``layers.3.q``). ``profile`` is a ``Profile`` or a directory of
-    ``<device>.json`` ones, the one way a step's tunables come from one:
-    ``compile(profile=)`` overrides it for one compile. ``precision`` is the
+    ``<device>.json`` ones, the one way a step's tunables come from one.
+    ``precision`` is the
     most any step may round (``Precision``): a step that would round more
     is raised to it, and ``compile(precision=)`` overrides it in turn.
 
@@ -203,22 +203,6 @@ class Graph:
         return _Parameters.of(type(self).__name__, self.signature())
 
     @property
-    def _inputs(self) -> list[str]:
-        return self._parameters.inputs
-
-    @property
-    def _values(self) -> dict[str, tuple[Kind, Any]]:
-        return self._parameters.values
-
-    @property
-    def _optional(self) -> frozenset[str]:
-        return self._parameters.optional
-
-    @property
-    def _carried(self) -> list[str]:
-        return self._parameters.carried
-
-    @property
     def name(self) -> str:
         return type(self).__name__
 
@@ -232,9 +216,9 @@ class Graph:
 
     @functools.cached_property
     def _carry(self) -> State | None:
-        if not self._carried:
+        if not self._parameters.carried:
             return None
-        return State((2, len(self._carried)), np.int32, CARRY)
+        return State((2, len(self._parameters.carried)), np.int32, CARRY)
 
     @property
     def versions(self) -> dict[Signature, CompiledGraph]:
@@ -289,10 +273,11 @@ class Graph:
     def trace(self, **shapes) -> TracedGraph:
         """Run ``body`` on handles of the given shapes; an optional input given none is None."""
         shapes = {k: v for k, v in shapes.items() if v is not None}
+        params = self._parameters
         missing = [
-            p for p in self._inputs if p not in shapes and p not in self._optional
+            p for p in params.inputs if p not in shapes and p not in params.optional
         ]
-        unknown = [k for k in shapes if k not in self._inputs]
+        unknown = [k for k in shapes if k not in params.inputs]
         if missing or unknown:
             raise TypeError(
                 f"{self.name}: shapes for {missing} missing"
@@ -300,16 +285,16 @@ class Graph:
             )
         inputs: list[Handle] = []
         args: list[Handle | None] = []
-        for name in self._inputs:
+        for name in params.inputs:
             if name not in shapes:
                 args.append(None)
                 continue
             shape, dtype = _shape_and_dtype(shapes[name])
             inputs.append(Handle(shape, dtype, name, "input"))
             args.append(inputs[-1])
-        values = [PerCall(n, kind, dtype) for n, (kind, dtype) in self._values.items()]
+        values = [PerCall(n, kind, dtype) for n, (kind, dtype) in params.values.items()]
         with Tracer(
-            self.name, self._profile(), self.held(), self._inputs, self.precision
+            self.name, self._profile(), self.held(), params.inputs, self.precision
         ) as tracer:
             result = self.body(*args, **{v.name: v for v in values})
         items, carry = self._split_carry(result)
@@ -329,12 +314,13 @@ class Graph:
         if any(isinstance(item, Carry) for item in items):
             raise TypeError(f"{self.name}: iron.carry(...) is returned last")
         names = [] if carry is None else list(carry)
-        missing = [n for n in self._carried if n not in names]
-        unknown = [n for n in names if n not in self._carried]
+        carried = self._parameters.carried
+        missing = [n for n in carried if n not in names]
+        unknown = [n for n in names if n not in carried]
         if missing or unknown:
             raise TypeError(
                 f"{self.name}: carries {names}, but its Carried values are "
-                f"{self._carried}"
+                f"{carried}"
                 + (f"; return iron.carry({missing[0]}=...)" if missing else "")
             )
         return items, carry
@@ -394,11 +380,9 @@ class Graph:
         self,
         *,
         dev=None,
-        profile: Profile | Path | None = None,
         precision: Precision | str | None = None,
         full_elf: bool | None = None,
         check: bool = False,
-        verbose=False,
         feeds: CompiledGraph | None = None,
         coresident: AdjacentPacking | None = None,
         fold: bool | Collection[Folding] = False,
@@ -412,8 +396,6 @@ class Graph:
         Args:
             dev: The device to compile for, bound for this compile alone;
                 else the current one.
-            profile: The profile to trace with, bound for this compile
-                alone; else ``self.profile``.
             precision: The most any step may round, bound for this
                 compile alone; else ``self.precision``.
             full_elf: One full ELF, else an xclbin per step; ``None``
@@ -421,7 +403,6 @@ class Graph:
             check: Run each step on its own dispatch and hold its outputs to
                 its reference on the same inputs, by its ``tolerance()``;
                 a step outside it raises, naming the step.
-            verbose: Print why the packaging was chosen.
             feeds: The version a full ELF's Emit starts; by default itself
                 when it takes no tensor.
             coresident: Packs designs into shared configurations.
@@ -436,9 +417,7 @@ class Graph:
             if dev is not None
             else contextlib.nullcontext()
         ):
-            previous = self.profile, self.precision
-            if profile is not None:
-                self.profile = profile
+            previous = self.precision
             if precision is not None:
                 self.precision = Precision(precision)
             try:
@@ -449,16 +428,15 @@ class Graph:
                         aie_utils.ensure_current_device(),
                         None if fold is True else fold,
                     )
-                    if verbose:
-                        print(
-                            f"{self.name}: {count.total()} step(s) folded into their "
-                            f"readers or producers"
-                        )
+                    logger.info(
+                        "%s: %d step(s) folded into their readers or producers",
+                        self.name,
+                        count.total(),
+                    )
                 current = aie_utils.ensure_current_device()
                 # Folding changes nothing the packaging follows from.
                 chosen = plan(current, traced, full_elf, check)
-                if verbose:
-                    print(chosen.report(self.name))
+                logger.info("%s", chosen.report(self.name))
                 signature = self._signature(
                     {h.name: (h.shape, h.dtype) for h in traced.inputs}
                 )
@@ -480,7 +458,9 @@ class Graph:
                     else:
                         slots = len(feeds.parameters)
                     assert self._carry is not None
-                    emit = attach_emit(traced, self._carried, self._carry, slots)
+                    emit = attach_emit(
+                        traced, self._parameters.carried, self._carry, slots
+                    )
                 elif feeds is not None:
                     raise ValueError(
                         f"{self.name}: only a full-ELF version with carried values "
@@ -505,16 +485,17 @@ class Graph:
                 self._versions[signature] = version
                 return version
             finally:
-                self.profile, self.precision = previous
+                self.precision = previous
 
     def _given(self, tensors) -> dict[str, Any]:
-        if len(tensors) > len(self._inputs):
+        params = self._parameters
+        if len(tensors) > len(params.inputs):
             raise TypeError(
-                f"{self.name} takes {len(self._inputs)} input(s), got {len(tensors)}"
+                f"{self.name} takes {len(params.inputs)} input(s), got {len(tensors)}"
             )
-        given = {n: t for n, t in zip(self._inputs, tensors) if t is not None}
+        given = {n: t for n, t in zip(params.inputs, tensors) if t is not None}
         missing = [
-            p for p in self._inputs if p not in given and p not in self._optional
+            p for p in params.inputs if p not in given and p not in params.optional
         ]
         if missing:
             raise TypeError(f"{self.name}: inputs {missing} missing")
@@ -522,15 +503,15 @@ class Graph:
 
     def __call__(self, *tensors, **values) -> Any:
         given = self._given(tensors)
-        _check_values(self.name, self._values, values)
+        _check_values(self.name, self._parameters.values, values)
         if graph_tracer.get() is not None:
-            if self._carried:
+            if self._parameters.carried:
                 raise TypeError(
                     f"{self.name}: a graph called in another's body carries "
                     f"no values of its own; its caller carries them"
                 )
             return self.inline(
-                self.body, *(given.get(n) for n in self._inputs), **values
+                self.body, *(given.get(n) for n in self._parameters.inputs), **values
             )
         shapes = {
             name: (tuple(int(n) for n in t.shape), np.dtype(t.dtype).type)
@@ -572,8 +553,8 @@ class Graph:
                 it.
         """
         given = self._given(tensors)
-        _check_values(self.name, self._values, values)
-        args = [given.get(name) for name in self._inputs]
+        _check_values(self.name, self._parameters.values, values)
+        args = [given.get(name) for name in self._parameters.inputs]
         held = [
             *(
                 ("weight", np.asarray(x))
@@ -700,9 +681,6 @@ class CompiledGraph:
         if key in self.traced.weights:
             return BufferRef(self.traced.weights[key][1].name)
         raise KeyError(f"{x!r} is not a state, weight or handle of this graph")
-
-    def buffer(self, x):
-        return self.callable.get_buffer(self._ref(x))
 
     def _storage(self, x):
         ref = self._ref(x)

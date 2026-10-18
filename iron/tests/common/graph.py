@@ -2355,7 +2355,7 @@ def test_the_emit_program_follows_the_target_parameters():
     traced = walk.trace()
     assert traced.feedback == []  # tracing alone adds no Emit
     assert walk._carry is not None
-    site = attach_emit(traced, walk._carried, walk._carry, slots=2)
+    site = attach_emit(traced, walk._parameters.carried, walk._carry, slots=2)
     # The gathered node is computed into the carry's second plane.
     assert traced.steps[0].refs()[-1] == BufferRef("carry", 8, 4)
     assert traced.steps[-1].refs() == (
@@ -2418,7 +2418,9 @@ def test_a_state_is_indexed_by_a_floored_carried_value(npu2):
     assert len({e.name for e in floored}) == 2
     words, _ = _words(traced)
     assert all(w.linear is None for w in words)
-    site = attach_emit(traced, graph._carried, graph._carry, slots=len(words))
+    site = attach_emit(
+        traced, graph._parameters.carried, graph._carry, slots=len(words)
+    )
     parameters = [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(words)]
     program = compose(site, traced.carry, words, parameters)
     for p in range(10):
@@ -2489,7 +2491,9 @@ def test_a_state_is_written_at_a_wrapped_carried_value(npu2):
     traced = graph.trace()
     words, _ = _words(traced)
     assert all(w.linear is None for w in words)
-    site = attach_emit(traced, graph._carried, graph._carry, slots=len(words))
+    site = attach_emit(
+        traced, graph._parameters.carried, graph._carry, slots=len(words)
+    )
     parameters = [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(words)]
     program = compose(site, traced.carry, words, parameters)
     for p in range(40):
@@ -2526,7 +2530,9 @@ def test_a_state_is_indexed_by_a_clamped_carried_value(npu2):
     traced = graph.trace()
     words, _ = _words(traced)
     assert all(w.linear is None for w in words)
-    site = attach_emit(traced, graph._carried, graph._carry, slots=len(words))
+    site = attach_emit(
+        traced, graph._parameters.carried, graph._carry, slots=len(words)
+    )
     parameters = [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(words)]
     program = compose(site, traced.carry, words, parameters)
     for p in range(20):

@@ -96,7 +96,7 @@ class Multimodal(Model):
         return inspect.Signature(parameters)
 
     def body(self, *inputs, **values):
-        given = {n: x for n, x in zip(self._inputs, inputs) if x is not None}
+        given = {n: x for n, x in zip(self._parameters.inputs, inputs) if x is not None}
         if len(set(given) - {"before"}) > 1:
             raise TypeError(f"a version takes one input, got {sorted(given)}")
         text = {v: values[v] for v in self.text_values}
@@ -108,8 +108,10 @@ class Multimodal(Model):
                 at = self.at[token]
                 Copy.step(soft, self.merged[at : at + soft.shape[0]])
                 # A text model's carried values pass through unchanged.
-                if self._carried:
-                    return iron.carry(**{n: values[n] for n in self._carried})
+                if self._parameters.carried:
+                    return iron.carry(
+                        **{n: values[n] for n in self._parameters.carried}
+                    )
                 return None
         if "placed" not in given:
             inputs = [given.get(n) for n in self.text_inputs]
@@ -197,7 +199,7 @@ class Multimodal(Model):
             ValueError: A placeholder's count is not its tower's soft tokens.
         """
         tokens = np.asarray(tokens)
-        names = list(self._inputs)
+        names = list(self._parameters.inputs)
         calls, values = [], {}
         for token, tower in self.towers.items():
             name = self.tower_inputs[token]
@@ -227,7 +229,7 @@ class Multimodal(Model):
         ids, values = self.text.inputs(tokens)
         calls, towers = self.tower_calls(tokens, raw)
         values |= towers
-        names = list(self._inputs)
+        names = list(self._parameters.inputs)
         if not calls:
             return [tuple(ids if n == "ids" else None for n in names)], values
         return [*calls, tuple(ids if n == "placed" else None for n in names)], values

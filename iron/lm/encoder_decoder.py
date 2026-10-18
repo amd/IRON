@@ -88,7 +88,7 @@ class EncoderDecoder(CausalLM):
         return inspect.Signature(inputs + values)
 
     def body(self, *inputs, **values):
-        given = dict(zip(self._inputs, inputs))
+        given = dict(zip(self._parameters.inputs, inputs))
         encoded = given[f"encoder_{self.encoder_input}"]
         if encoded is not None:
             own = {v: values[f"encoder_{v}"] for v in self.encoder_values}
@@ -97,7 +97,7 @@ class EncoderDecoder(CausalLM):
                 k, v = self.config.layer(i).keys_values(w, memory)
                 Copy.step(k, self.cross_keys[i][: k.shape[0]])
                 Copy.step(v, self.cross_values[i][: v.shape[0]])
-            return iron.carry(**{n: values[n] for n in self._carried})
+            return iron.carry(**{n: values[n] for n in self._parameters.carried})
         ids, rows, source = given["ids"], values["rows"], values["source"]
         prompt = ids is not None
         if prompt:
@@ -203,7 +203,7 @@ class EncoderDecoder(CausalLM):
             else values[self.encoder.bound]
         )
         name = f"encoder_{self.encoder_input}"
-        inputs = [buffer if n == name else None for n in self._inputs]
+        inputs = [buffer if n == name else None for n in self._parameters.inputs]
         named = {f"encoder_{v}": x for v, x in values.items()}
         self._encode(*inputs, token=0, position=0, source=self._source, **named)
         self.forget(0)

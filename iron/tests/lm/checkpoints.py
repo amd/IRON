@@ -150,7 +150,9 @@ def test_a_decode_step_names_its_slots_by_a_floored_position(npu2, sequences):
         assert offsets == sorted([((p - 1) // C + 1) * slot, (p // C + 1) * slot]), p
 
     words, _ = _words(traced)
-    site = attach_emit(traced, window._carried, window._carry, slots=len(words))
+    site = attach_emit(
+        traced, window._parameters.carried, window._carry, slots=len(words)
+    )
     parameters = [Parameter(w.symbol, k, "i32", "addr") for k, w in enumerate(words)]
     program = compose(site, traced.carry, words, parameters)
     for p in (C - 1, C, LAST):
