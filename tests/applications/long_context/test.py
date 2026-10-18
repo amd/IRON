@@ -26,11 +26,9 @@ from iron.applications.granite import Granite
 from iron.applications.idefics3 import SmolVLMText
 from iron.applications.lfm2 import Lfm2
 from iron.applications.llama import Llama
-from iron.applications.ministral3 import Ministral3
 from iron.applications.phi3 import Phi4
 from iron.applications.qwen2 import Qwen2
 from iron.applications.qwen3 import Qwen3
-from iron.applications.qwen3_moe import Qwen3Moe
 from iron.applications.smollm2 import SmolLM2
 from iron.applications.smollm3 import SmolLM3
 from iron.lm import CausalLM, Checkpoint, EncoderDecoder
@@ -127,15 +125,12 @@ APPLICATIONS = {
     "smollm3_3b": Application(
         SmolLM3, "smollm3-3b", INDEX, "tokenizer.json", staged=False
     ),
-    # Experts has no kernel yet: it compiles once one lands.
-    "qwen3_30b_a3b": Application(
-        Qwen3Moe, "qwen3-30b-a3b", INDEX, "tokenizer.json", staged=False
-    ),
-    # Its released checkpoints nest the text decoder, which it does not read
-    # yet: absent until one loads.
-    "ministral3_3b": Application(
-        Ministral3, "ministral3-3b", INDEX, "tokenizer.json", staged=False
-    ),
+}
+
+#: Decoder applications held to no context yet, and why.
+UNHELD = {
+    "qwen3_moe": "Experts has no kernel",
+    "ministral3": "its released checkpoints nest the text decoder, unread",
 }
 
 
@@ -152,7 +147,7 @@ def test_every_decoder_application_is_held_to_its_context():
             if issubclass(model, CausalLM) and not issubclass(model, EncoderDecoder):
                 found.add(package.name)
     held = {a.model.__module__.split(".")[2] for a in APPLICATIONS.values()}
-    assert found == held
+    assert found == held | UNHELD.keys()
 
 
 @pytest.mark.parametrize("version", ["decode", "prompt"])

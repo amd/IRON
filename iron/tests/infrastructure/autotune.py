@@ -185,6 +185,16 @@ def test_one_operator_is_timed_from_the_command_line(tmp_path):
     assert sum("(traced)" in line for line in printed) == 1
 
 
+def test_a_reference_only_operator_is_refused_before_any_device():
+    run = subprocess.run(
+        [sys.executable, "-m", "iron.tune.cli", "Experts"],
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 2
+    assert "Experts is reference-only" in run.stderr
+
+
 HOLD = """
 import sys
 import time

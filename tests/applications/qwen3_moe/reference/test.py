@@ -4,15 +4,14 @@
 
 """Qwen3-MoE's graph against Hugging Face's Qwen3MoE in float32 over the
 same random weights at a toy shape, its logits recorded in ``goldens/``,
-device-free: the shared decoder's tests (``Decoder``). The checkpoint names
-each expert's projections, which transformers stacks as it loads them
-(``HuggingFace.converted``).
+device-free: the shared decoder's tests (``Decoder``).
 """
+
+import dataclasses
 
 import pytest
 
 from iron.applications.qwen3_moe.model import Qwen3Moe, Qwen3MoeConfig
-from iron.lm.golden import HuggingFace
 from iron.tests.common.llama_model import shapes
 from iron.tests.common.llama_reference import Decoder
 
@@ -32,18 +31,8 @@ TOY = Qwen3MoeConfig(
     num_experts=8,
     num_experts_per_tok=2,
     moe_intermediate_size=256,
+    norm_topk_prob=True,
 )
-
-
-@pytest.fixture(scope="module")
-def golden(golden):
-    def recorded(name, reference, config, weights):
-        def build():
-            return HuggingFace.converted("qwen3_moe", config, weights)
-
-        return golden(name, build, config, weights)
-
-    return recorded
 
 
 class TestQwen3Moe(Decoder):
@@ -74,3 +63,16 @@ class TestQwen3Moe(Decoder):
                     f"{expert}.down_proj.weight": (E, M),
                 }
         return out
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        dict(norm_topk_prob=False),
+        dict(decoder_sparse_step=2),
+        dict(mlp_only_layers=(1,)),
+    ],
+)
+def test_unnormalized_weights_or_a_dense_layer_is_refused(change):
+    with pytest.raises(ValueError, match="Qwen3MoeConfig"):
+        dataclasses.replace(TOY, **change)

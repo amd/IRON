@@ -42,8 +42,8 @@ class YarnRopeScaling:
     original_max_position_embeddings: int
     beta_fast: float = 32.0
     beta_slow: float = 1.0
-    mscale: float = 1.0
-    mscale_all_dim: float = 0.0
+    mscale: float | None = None
+    mscale_all_dim: float | None = None
     attention_factor: float | None = None
 
     def __call__(self, inv_freq: np.ndarray) -> np.ndarray:
@@ -85,7 +85,8 @@ class YarnRopeScaling:
         return cls(**{k: v for k, v in data.items() if k in names})
 
     def to_json(self) -> dict:
-        return {"rope_type": "yarn", **dataclasses.asdict(self)}
+        given = {k: v for k, v in dataclasses.asdict(self).items() if v is not None}
+        return {"rope_type": "yarn", **given}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -133,12 +134,12 @@ class Ministral3Config(DecoderConfig):
 
 
 class QueryRope(Rope):
-    """``rope``, the model's, its table the config's, each row times its
-    position's query scale.
+    """The config's RoPE, each row of its table times its position's query
+    scale.
     """
 
-    def __init__(self, c: Ministral3Config, rope: Rope):
-        vars(self).update(vars(rope))
+    def __init__(self, c: Ministral3Config):
+        super().__init__(c)
         scaled = c.angles() * c.query_scale()[:, None]
         self.table = iron.weight(scaled.astype(bfloat16))
 
@@ -197,6 +198,6 @@ class Ministral3(CausalLM):
     def __init__(self, config: Ministral3Config, weights):
         super().__init__(config, weights)
         if config.llama_4_scaling_beta:
-            rope = QueryRope(config, self.rope)
+            rope = QueryRope(config)
             for layer in self.layers:
                 layer.self_attn.query_rope = rope

@@ -8,7 +8,11 @@ device-free: the shared decoder's tests (``Decoder``). The toy was trained
 at 64 positions, so YaRN stretches it and a query past 64 is scaled.
 """
 
+import dataclasses
+import math
+
 import numpy as np
+import pytest
 
 from iron.applications.ministral3.model import (
     Ministral3,
@@ -55,3 +59,14 @@ class TestMinistral3(Decoder):
         tokens = np.random.default_rng(5).integers(0, cpu.config.vocab_size, 65)
         for n in (64, 65):
             assert_close(model.logits(tokens[:n]), cpu.golden.logits(tokens[:n]))
+
+
+def test_yarn_scales_cos_and_sin_by_its_attention_factor_else_by_its_factor():
+    assert TOY.rope_attention_scaling == pytest.approx(0.1 * math.log(4) + 1)
+    yarn = dataclasses.replace(TOY.rope_scaling, attention_factor=1.5)
+    assert dataclasses.replace(TOY, rope_scaling=yarn).rope_attention_scaling == 1.5
+
+
+def test_a_query_temperature_without_yarn_is_refused():
+    with pytest.raises(ValueError, match="there is no YaRN"):
+        dataclasses.replace(TOY, rope_scaling=None)

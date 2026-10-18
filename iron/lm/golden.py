@@ -139,38 +139,13 @@ class HuggingFace:
     @classmethod
     def build(cls, model_type: str, config, weights, **json) -> "HuggingFace":
         """``model_type``'s model on ``config``'s fields as its
-        ``config.json`` names them, and ``json``'s, over ``weights``.
+        ``config.json`` names them, and ``json``'s, over ``weights`` named as
+        the model's checkpoints name them: written to a checkpoint and
+        loaded, so transformers renames (and stacks) them as it loads one.
 
         Raises:
             ValueError: ``weights`` lacks a parameter the model holds, other
                 than one tied to another, or holds one it does not.
-        """
-        import torch
-        import transformers
-
-        hf = transformers.AutoConfig.for_model(model_type, **(config.to_json() | json))
-        auto = getattr(transformers, cls.model_class)
-        model = auto.from_config(hf, dtype=torch.float32)
-        state = {k: torch.from_numpy(v) for k, v in flat(weights)}
-        missing, unexpected = model.load_state_dict(state, strict=False)
-        # A tied parameter is named once, by the first of its names.
-        named = dict(model.named_parameters())
-        missing = [k for k in missing if k in named]
-        if missing or unexpected:
-            raise ValueError(
-                f"{model_type}: the weights lack {missing} and hold {unexpected}, "
-                "which the model does not"
-            )
-        return cls(model)
-
-    @classmethod
-    def converted(cls, model_type: str, config, weights, **json) -> "HuggingFace":
-        """``build``'s model over ``weights`` named as the model's own
-        checkpoints name them, which transformers renames (and stacks) as it
-        loads them: written to a checkpoint and loaded.
-
-        Raises:
-            ValueError: As ``build``.
         """
         import tempfile
 

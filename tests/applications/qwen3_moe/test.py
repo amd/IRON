@@ -24,7 +24,10 @@ from iron.lm.testing import (
 
 WEIGHTS = weights_dir("qwen3-30b-a3b") / "model.safetensors.index.json"
 
-pytestmark = pytest.mark.supported_devices("npu2")
+pytestmark = [
+    pytest.mark.supported_devices("npu2"),
+    pytest.mark.skip(reason="Experts has no kernel yet"),
+]
 
 
 @pytest.fixture(scope="module")

@@ -4,8 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Qwen3-30B-A3B, a small mixture of experts, on the shared decoder
-(``iron.lm``), its shape read from its checkpoint's ``config.json``. Run it
-with ``python -m iron.applications.qwen3_moe.model``.
+(``iron.lm``), its shape read from its checkpoint's ``config.json``.
 
 Qwen3-MoE is Qwen3's layer with its feed-forward a mixture of experts
 (``SparseMoE``): a router picks each token's ``num_experts_per_tok``
@@ -20,7 +19,6 @@ import numpy as np
 
 import iron
 import iron.functional as F
-from iron import lm
 from iron.applications.qwen3.model import Qwen3Layer
 from iron.lm import CausalLM, DecoderConfig, Linear
 from iron.lm.blocks import GatedMLP
@@ -30,12 +28,19 @@ from iron.operators.router import TopKRouter
 
 @dataclasses.dataclass(frozen=True)
 class Qwen3MoeConfig(DecoderConfig):
-    """``DecoderConfig`` and its experts."""
+    """``DecoderConfig`` and its experts: every layer's feed-forward a
+    mixture, its chosen experts' weights normalized, as Qwen3-MoE's
+    checkpoints have them. ``Qwen3MoeConfig`` refuses any other.
+    """
 
     num_experts: int = dataclasses.field(kw_only=True)
     num_experts_per_tok: int = dataclasses.field(kw_only=True)
     moe_intermediate_size: int = dataclasses.field(kw_only=True)
-    norm_topk_prob: bool = dataclasses.field(default=True, kw_only=True)
+    norm_topk_prob: bool = dataclasses.field(default=False, kw_only=True)
+    decoder_sparse_step: int = dataclasses.field(default=1, kw_only=True)
+    mlp_only_layers: tuple[int, ...] = dataclasses.field(
+        default=(), kw_only=True, metadata={"convert": tuple}
+    )
     tie_word_embeddings: bool = False
 
     def __post_init__(self):
@@ -44,6 +49,12 @@ class Qwen3MoeConfig(DecoderConfig):
             raise ValueError(
                 "Qwen3MoeConfig: TopKRouter normalizes the chosen experts' "
                 "weights; no operator weighs them unnormalized"
+            )
+        if self.decoder_sparse_step != 1 or self.mlp_only_layers:
+            raise ValueError(
+                f"Qwen3MoeConfig: decoder_sparse_step {self.decoder_sparse_step} "
+                f"and mlp_only_layers {self.mlp_only_layers} make some layers "
+                "dense; here every layer's feed-forward is a mixture"
             )
 
 
@@ -92,7 +103,3 @@ class Qwen3Moe(CausalLM):
 
     config = Qwen3MoeConfig
     layer_class = Qwen3MoeLayer
-
-
-if __name__ == "__main__":
-    lm.main(Qwen3Moe)

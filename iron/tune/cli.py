@@ -125,8 +125,11 @@ def main() -> None:
         name: int(text) for name, _, text in (v.partition("=") for v in args.value)
     }
 
+    cls = getattr(operators, args.operator)
+    if cls.reference_only:
+        p.error(f"{args.operator} is reference-only: it has no kernel to time")
     dev = require_device()
-    op = getattr(operators, args.operator)(**fields)
+    op = cls(**fields)
     shape = Shape(op)
     shape.members.append((op, [(1.0, values)], {}))
     print(f"power mode: {pmode()}")
