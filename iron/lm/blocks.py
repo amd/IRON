@@ -24,7 +24,6 @@ import iron.functional as F
 from iron import Precision, Scratchpad
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
-from iron.operators.elementwise_add import RowwiseAdd
 from iron.operators.elementwise_max import ElementwiseMax
 from iron.operators.gemm import GEMM
 from iron.operators.limbs import Limbs, stacked
@@ -317,9 +316,7 @@ class Conv1d(iron.Graph):
         out_rows = (R - k) // s + 1
         pattern = TensorAccessPattern((R, line), 0, [out_rows, k * line], [s * line, 1])
         a = Copy.step(x, src=pattern).reshape(out_rows, k * line)[:rows]
-        h = RowwiseAdd.step(
-            GEMM.step(a, self.matrix, precision=Precision.HIGHEST), self.bias
-        )
+        h = GEMM.step(a, self.matrix, precision=Precision.HIGHEST) + self.bias
         return Copy.step(h, y) if y is not None else h
 
 
@@ -692,8 +689,7 @@ class Attention:
         """
         if self.rotary is None:
             return F.rope(x, angles)
-        prefix = x[:, : self.rotary]
-        Copy.step(F.rope(Copy.step(prefix), angles), prefix)
+        x[:, : self.rotary] = F.rope(Copy.step(x[:, : self.rotary]), angles)
         return x
 
     def keys_values(self, w, memory) -> tuple:
