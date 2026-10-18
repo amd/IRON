@@ -26,10 +26,13 @@ from iron.applications.granite import Granite
 from iron.applications.idefics3 import SmolVLMText
 from iron.applications.lfm2 import Lfm2
 from iron.applications.llama import Llama
+from iron.applications.ministral3 import Ministral3
 from iron.applications.phi3 import Phi4
 from iron.applications.qwen2 import Qwen2
 from iron.applications.qwen3 import Qwen3
+from iron.applications.qwen3_moe import Qwen3Moe
 from iron.applications.smollm2 import SmolLM2
+from iron.applications.smollm3 import SmolLM3
 from iron.lm import CausalLM, Checkpoint, EncoderDecoder
 from iron.lm.testing import (
     check_deep_decode,
@@ -120,6 +123,18 @@ APPLICATIONS = {
     "lfm2_1.2b": Application(Lfm2, "lfm2-1.2b", "model.safetensors", "tokenizer.json"),
     "smolvlm_256m": Application(
         SmolVLMText, "smolvlm-256m-instruct", "model.safetensors", "tokenizer.json"
+    ),
+    "smollm3_3b": Application(
+        SmolLM3, "smollm3-3b", INDEX, "tokenizer.json", staged=False
+    ),
+    # Experts has no kernel yet: it compiles once one lands.
+    "qwen3_30b_a3b": Application(
+        Qwen3Moe, "qwen3-30b-a3b", INDEX, "tokenizer.json", staged=False
+    ),
+    # Its released checkpoints nest the text decoder, which it does not read
+    # yet: absent until one loads.
+    "ministral3_3b": Application(
+        Ministral3, "ministral3-3b", INDEX, "tokenizer.json", staged=False
     ),
 }
 

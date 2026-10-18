@@ -118,6 +118,9 @@ Each model is a package under [iron/applications/](./iron/applications/) over [i
 | SmolLM2 1.7B Instruct | [smollm2](./iron/applications/smollm2/) | `smollm2-1.7b-instruct` |
 | Phi-4-mini-instruct | [phi3](./iron/applications/phi3/) | `phi-4-mini-instruct` |
 | Granite 4.2 3B | [granite](./iron/applications/granite/) | `granite-4.2-3b` |
+| SmolLM3 3B | [smollm3](./iron/applications/smollm3/) | `smollm3-3b` |
+| Qwen3-30B-A3B (reference only) | [qwen3_moe](./iron/applications/qwen3_moe/) | `qwen3-30b-a3b` |
+| Ministral 3 text decoder (drawn weights) | [ministral3](./iron/applications/ministral3/) | none yet |
 | LFM2-1.2B | [lfm2](./iron/applications/lfm2/) | `lfm2-1.2b` |
 | SmolVLM-256M-Instruct | [idefics3](./iron/applications/idefics3/) | `smolvlm-256m-instruct` |
 | EmbeddingGemma 2 | [embedding_gemma2](./iron/applications/embedding_gemma2/) | `embeddinggemma-2` |

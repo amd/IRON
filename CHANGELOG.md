@@ -17,6 +17,9 @@ public API adds its entry under Unreleased.
   compiling it raises, and the device catalog skips it.
 - `Experts`, reference only: each row through the gated feed-forwards of
   the experts `TopKRouter` chose for it, weighted.
+- Applications `smollm3` (SmolLM3 3B), `ministral3` (Ministral 3's text
+  decoder, on drawn weights) and `qwen3_moe` (Qwen3-30B-A3B, on the host),
+  each judged by a device-free toy golden.
 - `iron.param(*shape, dtype=bfloat16)`, a weight a graph declares by shape,
   and `Graph.load(tree, path="")`, which binds each one to the tensor at its
   dotted path, cast to its dtype, and raises once, naming every missing,

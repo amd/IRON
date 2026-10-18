@@ -7,6 +7,10 @@ random weights at a toy shape, its logits recorded in ``goldens/``,
 device-free: the shared decoder's tests (``Decoder``) with layer 3 NoPE.
 """
 
+import dataclasses
+
+import pytest
+
 from iron.applications.smollm3.model import SmolLM3, SmolLM3Config
 from iron.tests.common.llama_reference import Decoder
 
@@ -30,3 +34,8 @@ class TestSmolLM3(Decoder):
     model, config, model_type, name = SmolLM3, TOY, "smollm3", "toy"
     json = {"pad_token_id": None}
     seed = 0
+
+
+def test_a_no_rope_list_short_of_the_layers_is_refused():
+    with pytest.raises(ValueError, match="3 no_rope_layers for 4 layers"):
+        dataclasses.replace(TOY, no_rope_layers=(1, 1, 0))

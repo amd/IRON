@@ -8,7 +8,14 @@ device-free: the shared decoder's tests (``Decoder``). The toy was trained
 at 64 positions, so YaRN stretches it and a query past 64 is scaled.
 """
 
-from iron.applications.ministral3.model import Ministral3, Ministral3Config, Yarn
+import numpy as np
+
+from iron.applications.ministral3.model import (
+    Ministral3,
+    Ministral3Config,
+    YarnRopeScaling,
+)
+from iron.lm.testing import assert_close
 from iron.tests.common.llama_reference import Decoder
 
 #: Ministral 3's proportions at toy size: GQA, a head_dim of its own, YaRN
@@ -25,7 +32,7 @@ TOY = Ministral3Config(
     max_seq_len=256,
     prefill_chunk=256,
     eps=1e-5,
-    rope_scaling=Yarn(factor=4.0, original_max_position_embeddings=64),
+    rope_scaling=YarnRopeScaling(factor=4.0, original_max_position_embeddings=64),
     llama_4_scaling_beta=0.1,
 )
 
@@ -39,3 +46,12 @@ class TestMinistral3(Decoder):
     def names(cls):
         c = cls.config
         return super().names() | {"lm_head.weight": (c.vocab_size, c.hidden_size)}
+
+    def test_the_query_scale_steps_up_past_the_trained_context(self, cpu):
+        """The last of the toy's 64 trained positions, its query unscaled,
+        then a decode step at 64, the first scaled.
+        """
+        model = self.host(cpu.config, cpu.weights)
+        tokens = np.random.default_rng(5).integers(0, cpu.config.vocab_size, 65)
+        for n in (64, 65):
+            assert_close(model.logits(tokens[:n]), cpu.golden.logits(tokens[:n]))

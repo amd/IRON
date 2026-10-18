@@ -7,9 +7,9 @@
 checkpoint's ``config.json``. Run it with ``python -m
 iron.applications.smollm3.model``.
 
-SmolLM3 is Llama's layer, but every fourth layer turns nothing by RoPE
-(NoPE): ``no_rope_layers[i]`` is 0 where layer ``i`` attends without
-positions. Its output head is the input embedding, tied.
+SmolLM3 is Llama's layer, but it skips RoPE on every fourth layer (NoPE):
+``no_rope_layers[i]`` is 0 where layer ``i`` attends without positions.
+Its output head is the input embedding, tied.
 """
 
 import dataclasses
@@ -25,6 +25,14 @@ class SmolLM3Config(DecoderConfig):
     no_rope_layers: tuple[int, ...] = dataclasses.field(
         kw_only=True, metadata={"convert": tuple}
     )
+
+    def __post_init__(self):
+        super().__post_init__()
+        if len(self.no_rope_layers) != self.num_hidden_layers:
+            raise ValueError(
+                f"SmolLM3Config: {len(self.no_rope_layers)} no_rope_layers for "
+                f"{self.num_hidden_layers} layers"
+            )
 
 
 class SmolLM3(CausalLM):
