@@ -205,4 +205,8 @@ class RoPE(Operator):
         return y.reshape(x.shape, copy=False)
 
     def tolerance(self) -> Tolerance:
-        return self.array_config().kernel().contract.tolerance
+        return Tolerance.relative(
+            0.05,
+            note="measured within one bf16 ulp of the reference on the bf16 "
+            "tables it is given (#220); the contract's 0.128 is an example's default",
+        )
