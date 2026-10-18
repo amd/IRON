@@ -55,7 +55,6 @@ two lowering details differ.
 | grid | 4 x 8 | 4 x 4 |
 | A forwarded through | every other memtile | every memtile |
 | 8x8x8 mmul lowers to | 2 bfp16-emulated macs | 4 native 4x8x4 bf16 macs |
-| epilogue `tanh` | native `aie::tanh` | `getTanhBf16` LUT |
 
 The mmul shape is **not** specific to the bfp16 path, despite needing
 `AIE_API_EMULATE_BFLOAT16_MMUL_WITH_BFP16` to get the fast lowering on NPU2:

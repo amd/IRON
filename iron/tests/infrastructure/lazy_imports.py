@@ -47,9 +47,8 @@ def _modules_after_importing(name):
     return set(result.stdout.split())
 
 
-#: flm.ProjectionGEMM names Clamp, Sigmoid and
-#: SiLU directly, by module, to recognize a fused epilogue's consumer
-#: (isinstance checks): eager by design, not a lazy-catalog regression.
+#: flm.ProjectionGEMM hands Precision.HIGHEST over to GEMM
+#: (``at_precision``), so importing it imports GEMM by design.
 _NAMES_OTHER_OPERATOR_TYPES = {"flm.ProjectionGEMM"}
 
 
