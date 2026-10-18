@@ -419,15 +419,17 @@ def _call_kernel(*args):
     args[-1](*args[:-1])
 
 
-def _connect(
-    rt, src, src_ch, dst, dst_ch, pkt_id=None, keep_pkt_header=False, name=None
-):
-    """Add a circuit-switched flow, or a packet flow when pkt_id is set."""
-    ends = dict(src_channel=src_ch, dst_channel=dst_ch, name=name)
-    if pkt_id is None:
-        flow = Flow(src, dst, **ends)
-    else:
-        flow = PacketFlow(pkt_id, src, dst, keep_pkt_header=keep_pkt_header, **ends)
+def _connect(rt, src, src_ch, dst, dst_ch, pkt_id, keep_pkt_header=False, name=None):
+    """Add a packet flow. A packet flow's channels are always given."""
+    flow = PacketFlow(
+        pkt_id,
+        src,
+        dst,
+        src_channel=src_ch,
+        dst_channel=dst_ch,
+        keep_pkt_header=keep_pkt_header,
+        name=name,
+    )
     rt.add_flow(flow)
     return flow
 
@@ -438,7 +440,8 @@ class _Array:
     cores, locks and DMA channels to ``rt`` and ``workers``.
 
     ``grid`` holds every tile by (column, row), ``t`` the tile of each
-    PLACEMENT stage. ``rtps`` holds each RTP buffer by (key, column, row).
+    PLACEMENT stage, ``flows`` each circuit-switched flow by name. ``rtps``
+    holds each RTP buffer by (key, column, row).
     The RMS, GLU and projection cores acquire their ``sync_locks`` entry
     before they read their RTPs; the sequence sets it after it writes them.
     The RoPE and attention cores read their RTPs after data from the
@@ -454,6 +457,7 @@ class _Array:
     sync_locks: dict[tuple[int, int], Lock] = field(default_factory=dict, init=False)
     grid: dict[tuple[int, int], Tile] = field(init=False)
     t: dict[str, Tile] = field(init=False)
+    flows: dict[str, Flow] = field(init=False)
 
     def __post_init__(self, dev: Device) -> None:
         self.grid = {
@@ -462,6 +466,41 @@ class _Array:
             for c in range(dev.cols)
         }
         self.t = {stage: self.grid[at] for stage, at in PLACEMENT.items()}
+        self.flows = self.circuits()
+
+    def circuits(self) -> dict[str, Flow]:
+        """The circuit-switched flows, by name. The compiler assigns their
+        channels, and each stage's DMA reaches them by endpoint.
+        """
+        grid, t = self.grid, self.t
+        ends = {}
+        for col in PROJ_COLS:
+            for h in (0, 1):
+                ends[f"proj_w{h}_{col}"] = grid[col, 0], grid[col, 1]
+            for j in range(4):
+                ends[f"w{j}_{col}"] = grid[col, 1], grid[col, 2 + j]
+        proj = [grid[col, 2 + j] for col in PROJ_COLS for j in range(4)]
+        ends["proj_x"] = t["proj_x"], proj
+        ends["recv_k"] = t["rope"], t["kv_shim"]
+        ends["recv_v"] = t["swa_rope"], t["kv_shim"]
+        for dst in ("attn_qk", "attn_kv", "swa_attn_qk", "swa_attn_kv"):
+            ends[f"amt_{dst}"] = t["attn_mem"], t[dst]
+        for name, src, dst in (
+            ("pli_rope_rms", "pl_shim_0", "pl_embedding"),
+            ("pli_down", "pl_shim_0", "pl_embedding"),
+            ("ple_y", "pl_embedding", "pl_merge"),
+            ("pli_gate", "pl_shim_1", "pl_gate"),
+            ("plg_y", "pl_gate", "pl_merge"),
+            ("plm_y", "pl_merge", "pl_up"),
+            ("pli_up", "pl_shim_1", "pl_up"),
+            ("recv_y", "pl_up", "x_shim"),
+        ):
+            ends[name] = t[src], t[dst]
+        return {name: Flow(src, dst, name=name) for name, (src, dst) in ends.items()}
+
+    def end(self, flow: str, tile: Tile):
+        """The end of the circuit ``flow`` on ``tile``, for its DMA channel."""
+        return self.flows[flow].endpoint(tile)
 
     def build(self) -> dict[str, Flow | PacketFlow]:
         """Every stage, then every flow between them.
@@ -478,8 +517,8 @@ class _Array:
         # q from RoPE to the qk core. The qk core's DMA reorders it.
         q_of_g = ObjectFifo(np.ndarray[(G_DQ,), _BF16], depth=2)
         q_of_swa = ObjectFifo(np.ndarray[(S_DQ,), _BF16], depth=2)
-        self.rope(t["rope"], "rope", "rope_skip_kv", q_of_g)
-        self.rope(t["swa_rope"], "swa_rope", "swa_rope_skip_kv", q_of_swa)
+        self.rope(t["rope"], "rope", "rope_skip_kv", "recv_k", q_of_g)
+        self.rope(t["swa_rope"], "swa_rope", "swa_rope_skip_kv", "recv_v", q_of_swa)
         self.pl_embedding(t["pl_embedding"])
         self.pl_gate(t["pl_gate"], rms_y_out)
         self.pl_merge(t["pl_merge"])
@@ -614,9 +653,9 @@ class _Array:
         return rms_y_out
 
     def rope(
-        self, rope_tile: Tile, name: str, rtp_key: str, q_fifo: ObjectFifo
+        self, rope_tile: Tile, name: str, rtp_key: str, kv_out: str, q_fifo: ObjectFifo
     ) -> None:
-        """RoPE, global or sliding-window."""
+        """RoPE, global or sliding-window. k and v leave on the flow ``kv_out``."""
         kern = self.entry(name, "rope")
         _, kv_ty, _, qkv_ty, _, rope_ty, _ = kern.arg_types()
 
@@ -650,7 +689,7 @@ class _Array:
                 ),
                 DmaChannel(
                     DMAChannelDir.MM2S,
-                    1,
+                    self.end(kv_out, rope_tile),
                     [
                         Bd(
                             buf,
@@ -705,7 +744,7 @@ class _Array:
             [
                 DmaChannel(
                     DMAChannelDir.S2MM,
-                    0,
+                    self.end("pli_rope_rms", ple_tile),
                     [
                         Bd(
                             buf,
@@ -719,14 +758,18 @@ class _Array:
                 ),
                 _ping_pong(
                     DMAChannelDir.S2MM,
-                    1,
+                    self.end("pli_down", ple_tile),
                     ple_w0,
                     ple_w1,
                     pl["proj_w_prod_lock"],
                     pl["proj_w_cons_lock"],
                 ),
                 _single_bd(
-                    DMAChannelDir.MM2S, 1, ple_y, pl["y_cons_lock"], pl["y_prod_lock"]
+                    DMAChannelDir.MM2S,
+                    self.end("ple_y", ple_tile),
+                    ple_y,
+                    pl["y_cons_lock"],
+                    pl["y_prod_lock"],
                 ),
             ],
         )
@@ -747,14 +790,18 @@ class _Array:
             [
                 _ping_pong(
                     DMAChannelDir.S2MM,
-                    1,
+                    self.end("pli_gate", gle_tile),
                     gle_w0,
                     gle_w1,
                     gl["proj_w_prod_lock"],
                     gl["proj_w_cons_lock"],
                 ),
                 _single_bd(
-                    DMAChannelDir.MM2S, 1, gle_y, gl["y_cons_lock"], gl["y_prod_lock"]
+                    DMAChannelDir.MM2S,
+                    self.end("plg_y", gle_tile),
+                    gle_y,
+                    gl["y_cons_lock"],
+                    gl["y_prod_lock"],
                 ),
             ],
         )
@@ -777,7 +824,7 @@ class _Array:
                 [
                     _single_bd(
                         DMAChannelDir.S2MM,
-                        0,
+                        self.end("ple_y", plm_tile),
                         plm_y,
                         plm_norm_i_prod,
                         plm_res_gate_prod,
@@ -785,13 +832,19 @@ class _Array:
                     ),
                     _single_bd(
                         DMAChannelDir.S2MM,
-                        1,
+                        self.end("plg_y", plm_tile),
                         plm_y,
                         plm_res_gate_prod,
                         plm_cons,
                         tap=TensorAccessPattern.full(plm_y.shape)[D + PLI_D + 32 :],
                     ),
-                    _single_bd(DMAChannelDir.MM2S, 0, plm_y, plm_cons, plm_norm_i_prod),
+                    _single_bd(
+                        DMAChannelDir.MM2S,
+                        self.end("plm_y", plm_tile),
+                        plm_y,
+                        plm_cons,
+                        plm_norm_i_prod,
+                    ),
                 ],
             )
         )
@@ -812,18 +865,26 @@ class _Array:
             [plu_x, plu_w0, plu_w1, plu_y, plu_k],
             [
                 _single_bd(
-                    DMAChannelDir.S2MM, 0, plu_x, ul["x_prod_lock"], ul["x_cons_lock"]
+                    DMAChannelDir.S2MM,
+                    self.end("plm_y", plu_tile),
+                    plu_x,
+                    ul["x_prod_lock"],
+                    ul["x_cons_lock"],
                 ),
                 _ping_pong(
                     DMAChannelDir.S2MM,
-                    1,
+                    self.end("pli_up", plu_tile),
                     plu_w0,
                     plu_w1,
                     ul["proj_w_prod_lock"],
                     ul["proj_w_cons_lock"],
                 ),
                 _single_bd(
-                    DMAChannelDir.MM2S, 0, plu_y, ul["y_cons_lock"], ul["y_prod_lock"]
+                    DMAChannelDir.MM2S,
+                    self.end("recv_y", plu_tile),
+                    plu_y,
+                    ul["y_cons_lock"],
+                    ul["y_prod_lock"],
                 ),
             ],
         )
@@ -900,10 +961,20 @@ class _Array:
 
         chans = [
             _ping_pong(
-                DMAChannelDir.S2MM, 0, x0, x1, pk["x_prod_lock"], pk["x_cons_lock"]
+                DMAChannelDir.S2MM,
+                self.end("proj_x", pt),
+                x0,
+                x1,
+                pk["x_prod_lock"],
+                pk["x_cons_lock"],
             ),
             _ping_pong(
-                DMAChannelDir.S2MM, 1, w0, w1, pk["w_prod_lock"], pk["w_cons_lock"]
+                DMAChannelDir.S2MM,
+                self.end(f"w{r - 2}_{c}", pt),
+                w0,
+                w1,
+                pk["w_prod_lock"],
+                pk["w_cons_lock"],
             ),
         ]
         if send_x_out:
@@ -956,6 +1027,16 @@ class _Array:
             proj_send_tiles.append(group_send)
         return proj_send_tiles
 
+    def weight_channels(self, mt: Tile, w0: Buffer, w1: Buffer) -> dict:
+        """The weight channels of the projection memtile ``mt``."""
+        return _proj_weight_channels(
+            w0,
+            w1,
+            [self.end(f"proj_w{h}_{mt.col}", mt) for h in (0, 1)],
+            [self.end(f"w{j}_{mt.col}", mt) for j in range(4)],
+            *self.dma_locks(mt, *_PROJ_MEM_W_INITS),
+        )
+
     def proj_gather_mem(self, mt: Tile) -> None:
         """A projection memtile that also gathers y from its group's sending cores."""
         m = q4nx.M_TILE
@@ -970,7 +1051,7 @@ class _Array:
         y = TensorAccessPattern.full(y0.shape)
         # The first slot carries the packet header's 2 words.
         ends = [0] + [2 * m * (j + 1) + 2 for j in range(4)]
-        wc = _proj_weight_channels(w0, w1, *self.dma_locks(mt, *_PROJ_MEM_W_INITS))
+        wc = self.weight_channels(mt, w0, w1)
         self.rt.add_tile_dma(
             TileDma(
                 mt,
@@ -998,7 +1079,7 @@ class _Array:
     def proj_weight_mem(self, mt: Tile) -> None:
         """A projection memtile that carries weights only."""
         w0, w1 = _proj_weight_buffers(mt)
-        wc = _proj_weight_channels(w0, w1, *self.dma_locks(mt, *_PROJ_MEM_W_INITS))
+        wc = self.weight_channels(mt, w0, w1)
         self.rt.add_tile_dma(TileDma(mt, [wc["in0"], *wc["out"], wc["in1"]]))
 
     def proj_x_mem(self, mt: Tile) -> None:
@@ -1014,7 +1095,7 @@ class _Array:
         mp0, mp1, mc, xp, xc = self.dma_locks(mt, 2, 0, 0, 2, 0)
         y = TensorAccessPattern.full(y0.shape)
         w0, w1 = _proj_weight_buffers(mt)
-        wc = _proj_weight_channels(w0, w1, *self.dma_locks(mt, *_PROJ_MEM_W_INITS))
+        wc = self.weight_channels(mt, w0, w1)
         self.rt.add_tile_dma(
             TileDma(
                 mt,
@@ -1029,7 +1110,9 @@ class _Array:
                     wc["in0"],
                     wc["in1"],
                     _ping_pong(DMAChannelDir.MM2S, 5, y0, y1, mc, mp0),
-                    _ping_pong(DMAChannelDir.MM2S, 4, x0, x1, xc, xp),
+                    _ping_pong(
+                        DMAChannelDir.MM2S, self.end("proj_x", mt), x0, x1, xc, xp
+                    ),
                     *wc["out"],
                 ],
             )
@@ -1093,7 +1176,12 @@ class _Array:
             [of_s.cons(), v0, v1, y, lbuf, o, L, *kerns],
             [
                 _ping_pong(
-                    DMAChannelDir.S2MM, 1, v0, v1, kl["v_prod_lock"], kl["v_cons_lock"]
+                    DMAChannelDir.S2MM,
+                    self.end(f"amt_{name}", kv_tile),
+                    v0,
+                    v1,
+                    kl["v_prod_lock"],
+                    kl["v_cons_lock"],
                 ),
                 _single_bd(
                     DMAChannelDir.MM2S,
@@ -1171,7 +1259,12 @@ class _Array:
             ],
             [
                 _ping_pong(
-                    DMAChannelDir.S2MM, 1, k0, k1, ql["k_prod_lock"], ql["k_cons_lock"]
+                    DMAChannelDir.S2MM,
+                    self.end(f"amt_{name}", qk_tile),
+                    k0,
+                    k1,
+                    ql["k_prod_lock"],
+                    ql["k_cons_lock"],
                 )
             ],
         )
@@ -1190,12 +1283,12 @@ class _Array:
         k_order = k.tile((LK, 8))[0]
         v_order = k_order if two_kv else k.tile((8, 8))
         amt_chans = []
-        for ch, (key, row, order) in enumerate(
+        for ch, (key, dst, row, order) in enumerate(
             (
-                ("k", k_row, k_order),
-                ("v", k_row, v_order),
-                ("swa_k", sk_row, sk.tile((LK, 8))[0]),
-                ("swa_v", sk_row, sk.tile((8, 8))),
+                ("k", "attn_qk", k_row, k_order),
+                ("v", "attn_kv", k_row, v_order),
+                ("swa_k", "swa_attn_qk", sk_row, sk.tile((LK, 8))[0]),
+                ("swa_v", "swa_attn_kv", sk_row, sk.tile((8, 8))),
             )
         ):
             b0, b1 = (
@@ -1209,7 +1302,15 @@ class _Array:
             prod, cons = self.dma_locks(amt, 2, 0)
             amt_chans += [
                 _ping_pong(DMAChannelDir.S2MM, ch, b0, b1, prod, cons),
-                _ping_pong(DMAChannelDir.MM2S, ch, b0, b1, cons, prod, tap=order),
+                _ping_pong(
+                    DMAChannelDir.MM2S,
+                    self.end(f"amt_{dst}", amt),
+                    b0,
+                    b1,
+                    cons,
+                    prod,
+                    tap=order,
+                ),
             ]
         self.rt.add_tile_dma(TileDma(amt, amt_chans))
 
@@ -1220,10 +1321,16 @@ class _Array:
         go first.
 
         Returns:
-            The flows the runtime sequence fills and drains, by name.
+            Every flow by name; the runtime sequence fills and drains those
+            with a shim end.
         """
-        rt, grid, t = self.rt, self.grid, self.t
+        rt, t = self.rt, self.t
         x_shim, kv_shim = t["x_shim"], t["kv_shim"]
+
+        def add(*names):
+            for name in names:
+                rt.add_flow(self.flows[name])
+
         proj_x = t["proj_x"]
         shim = {}
         for name, ch, dst, dst_ch, pkt in (
@@ -1235,18 +1342,9 @@ class _Array:
             shim[name] = _connect(rt, x_shim, ch, dst, dst_ch, pkt_id=pkt, name=name)
         _connect(rt, t["rms"], 0, proj_x, 3, pkt_id=_X_FROM_RMS)
 
-        for col in PROJ_COLS:
-            for ch in (0, 1):
-                name = f"proj_w{ch}_{col}"
-                shim[name] = _connect(
-                    rt, grid[col, 0], ch, grid[col, 1], 4 + ch, name=name
-                )
-        for col in PROJ_COLS:
-            for j in range(4):
-                _connect(rt, grid[col, 1], j, grid[col, 2 + j], 1)
-        for col in PROJ_COLS:
-            for j in range(4):
-                _connect(rt, proj_x, 4, grid[col, 2 + j], 0)
+        add(*(f"proj_w{h}_{col}" for col in PROJ_COLS for h in (0, 1)))
+        add(*(f"w{j}_{col}" for col in PROJ_COLS for j in range(4)))
+        add("proj_x")
         # y from each group's sending cores to its memtile. The first keeps the
         # packet header, which carries the consumer's id to proj_x.
         pkts = [
@@ -1276,8 +1374,7 @@ class _Array:
         ):
             _connect(rt, proj_x, 5, t[dst], 0, pkt_id=pk)
 
-        shim["recv_k"] = _connect(rt, t["rope"], 1, kv_shim, 0, name="recv_k")
-        shim["recv_v"] = _connect(rt, t["swa_rope"], 1, kv_shim, 1, name="recv_v")
+        add("recv_k", "recv_v")
         _connect(rt, t["attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
         _connect(rt, t["swa_attn_kv"], 0, proj_x, 3, pkt_id=_X_FROM_ATTN)
         _connect(rt, t["glu"], 0, proj_x, 3, pkt_id=_X_FROM_GLU)
@@ -1290,25 +1387,10 @@ class _Array:
             ("move_v_swa", 1, 3, _KV_PKT_SWA),
         ):
             shim[name] = _connect(rt, kv_shim, ch, amt, amt_ch, pkt_id=pkt, name=name)
-        _connect(rt, amt, 0, t["attn_qk"], 1)
-        _connect(rt, amt, 1, t["attn_kv"], 1)
-        _connect(rt, amt, 2, t["swa_attn_qk"], 1)
-        _connect(rt, amt, 3, t["swa_attn_kv"], 1)
-
-        pl_shim_0, pl_shim_1 = t["pl_shim_0"], t["pl_shim_1"]
-        shim["pli_rope_rms"] = _connect(
-            rt, pl_shim_0, 0, t["pl_embedding"], 0, name="pli_rope_rms"
-        )
-        shim["pli_down"] = _connect(
-            rt, pl_shim_0, 1, t["pl_embedding"], 1, name="pli_down"
-        )
-        _connect(rt, t["pl_embedding"], 1, t["pl_merge"], 0)
-        shim["pli_gate"] = _connect(rt, pl_shim_1, 0, t["pl_gate"], 1, name="pli_gate")
-        _connect(rt, t["pl_gate"], 1, t["pl_merge"], 1)
-        _connect(rt, t["pl_merge"], 0, t["pl_up"], 0)
-        shim["pli_up"] = _connect(rt, pl_shim_1, 1, t["pl_up"], 1, name="pli_up")
-        shim["recv_y"] = _connect(rt, t["pl_up"], 0, x_shim, 0, name="recv_y")
-        return shim
+        add("amt_attn_qk", "amt_attn_kv", "amt_swa_attn_qk", "amt_swa_attn_kv")
+        add("pli_rope_rms", "pli_down", "ple_y", "pli_gate", "plg_y", "plm_y")
+        add("pli_up", "recv_y")
+        return shim | self.flows
 
 
 def _ceil_mul(v, chunk):
@@ -1498,8 +1580,8 @@ _LINEAR_4W_TY = np.ndarray[(4 * W_BLOCK,), _BF16]
 _PROJ_MEM_W_INITS = (2, 0, 0, 2, 0, 0)
 
 
-def _proj_weight_channels(w0, w1, *locks):
-    """A projection memtile's weight channels.
+def _proj_weight_channels(w0, w1, ins, outs, *locks):
+    """A projection memtile's weight channels, on the flow ends ``ins`` and ``outs``.
 
     Each of the two halves of a weight object comes in on its own channel
     and goes out a W_BLOCK at a time on two, behind a chain of three locks.
@@ -1511,7 +1593,7 @@ def _proj_weight_channels(w0, w1, *locks):
         ins.append(
             _ping_pong(
                 DMAChannelDir.S2MM,
-                4 + h,
+                ins[h],
                 w0,
                 w1,
                 prod,
@@ -1524,7 +1606,7 @@ def _proj_weight_channels(w0, w1, *locks):
             outs.append(
                 _ping_pong(
                     DMAChannelDir.MM2S,
-                    ch,
+                    outs[ch],
                     w0,
                     w1,
                     acq,
