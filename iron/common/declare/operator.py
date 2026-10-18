@@ -722,9 +722,13 @@ class Operator:
             raise TypeError(
                 f"{type(self).__name__} declares no Extent {sorted(unknown)}"
             )
+        return member.derive(self._at_extents(**extents))
+
+    def _at_extents(self, **extents: int) -> Self:
+        """A copy whose ``Extent`` attributes read as the given numbers."""
         at = copy.copy(self)
         vars(at)["_extents"] = {**self.__dict__.get("_extents", {}), **extents}
-        return member.derive(at)
+        return at
 
     def extent_unit(self, buffer: str) -> int | None:
         """The rows of ``buffer`` one lane takes at a time under a bound.

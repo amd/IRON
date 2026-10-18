@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import copy
 import dataclasses
 import itertools
 import math
@@ -397,8 +396,7 @@ class TracedGraph:
             extents = {n: given[n] for n in op.bound_extents}
             if extents:
                 # Each extent reads as this call's in the reference.
-                op = copy.copy(op)
-                vars(op)["_extents"] = extents
+                op = op._at_extents(**extents)
             declared = list(zip(op.buffers, step.slots))
             inputs = {b.name: view(h) for b, h in declared if b.fills}
             outputs = {b.name: view(h) for b, h in declared if not b.fills}
