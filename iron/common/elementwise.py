@@ -50,7 +50,6 @@ from .declare import (
     Value,
     field,
 )
-from .declare.shape import Shape
 from .testing import Case, Testing
 
 # Small enough to divide any extent a model has, at some DMA efficiency.
@@ -276,8 +275,10 @@ class Elementwise(Operator):
 
     def __init_subclass__(cls, **kwargs) -> None:
         for m in vars(cls).values():
-            if isinstance(m, Operand) and m.per is None:
-                m.per = Shape((Elementwise.num_aie_columns, Elementwise.num_channels))
+            if isinstance(m, (In, Out)) and not m.kwargs.get("broadcast"):
+                m.kwargs.setdefault(
+                    "per", (Elementwise.num_aie_columns, Elementwise.num_channels)
+                )
         super().__init_subclass__(**kwargs)
 
     def resolve(self, dev) -> Self:
