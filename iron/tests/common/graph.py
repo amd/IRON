@@ -372,17 +372,6 @@ def test_shape_mismatch_and_rank_rules():
     assert t.steps[0].op.size == 2048 and t.outputs[0].shape == (4, 512)
 
 
-def test_linear_names_itself_in_a_step_s_error():
-    w = z(256, E)
-
-    class Bad(iron.Graph):
-        def body(self, x):
-            return F.linear(x, w)
-
-    with pytest.raises(ValueError, match=r"linear\(x, weight\): .*K is 1024 from"):
-        Bad().trace(x=(E // 2,))
-
-
 def test_no_npu_says_how_to_compile_without_one(monkeypatch):
     monkeypatch.setattr(aie_utils, "ensure_current_device", lambda: None)
     monkeypatch.delenv("NPU_RUNTIME", raising=False)

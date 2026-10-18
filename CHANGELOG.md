@@ -107,7 +107,6 @@ public API adds its entry under Unreleased.
   its dotted path, the checkpoint file and what the module does have.
 - A compiled graph refuses an input numpy would not cast to its dtype
   (`same_kind`): float ids into an int32 input raise rather than truncate.
-- An error inside `iron.functional.linear` starts `linear(x, weight):`.
 - Compiling or loading with no NPU found raises `RuntimeError: no NPU found
   (NPU_RUNTIME ...); pass dev=NPU2() to compile without one`, not an
   `AttributeError` on `None`.

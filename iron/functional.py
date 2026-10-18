@@ -45,32 +45,27 @@ def linear(x, weight, bias=None, *, precision=None, **gemv):
     tunables, for a call the profile cannot tell from another of its shape.
 
     Raises:
-        ValueError: GEMV tunables for more than one row. This and a step's
-            own error are prefixed ``linear(x, weight):``.
+        ValueError: GEMV tunables for more than one row.
     """
-    try:
-        if len(x.shape) != 2 or x.shape[0] == 1:
-            y = GEMV.step(weight, x, **gemv)
-        elif gemv:
-            raise ValueError(f"{x.shape[0]} rows take no GEMV {sorted(gemv)}")
-        elif Precision.HIGHEST in (
-            precision,
-            getattr(graph_tracer.get(), "precision", None),
-        ):
-            y = GEMM.step(x, weight, b_col_maj=True, precision=Precision.HIGHEST)
-        else:
-            tiled = {} if precision is None else dict(precision=precision)
-            y = ProjectionGEMM.step(
-                x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled
-            )
-        if bias is None:
-            return y
-        # A row added to every row, also for GEMV's one-dimensional output.
-        rows = math.prod(y.shape) // bias.shape[0]
-        return (y.reshape(rows, bias.shape[0]) + bias).reshape(y.shape)
-    except (TypeError, ValueError) as e:
-        e.args = (f"linear(x, weight): {e}",)
-        raise
+    if len(x.shape) != 2 or x.shape[0] == 1:
+        y = GEMV.step(weight, x, **gemv)
+    elif gemv:
+        raise ValueError(f"linear(): {x.shape[0]} rows take no GEMV {sorted(gemv)}")
+    elif Precision.HIGHEST in (
+        precision,
+        getattr(graph_tracer.get(), "precision", None),
+    ):
+        y = GEMM.step(x, weight, b_col_maj=True, precision=Precision.HIGHEST)
+    else:
+        tiled = {} if precision is None else dict(precision=precision)
+        y = ProjectionGEMM.step(
+            x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled
+        )
+    if bias is None:
+        return y
+    # A row added to every row, also for GEMV's one-dimensional output.
+    rows = math.prod(y.shape) // bias.shape[0]
+    return (y.reshape(rows, bias.shape[0]) + bias).reshape(y.shape)
 
 
 def _last_axis(name: str, x, normalized_shape) -> None:
