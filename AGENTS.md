@@ -263,7 +263,10 @@ reuse lint
      setting's `tolerance()`
    - `autotune.py` times every setting of each operator shape a model's
      calls run (coordinate descent past 32) and writes the fastest that
-     beats the traced one by two standard errors as a `Profile` entry
+     beats the traced one by two standard errors as a `Profile` entry. It
+     does not build a GEMM setting whose matmul kernel alone, at the cycles
+     per call mlir-aie's nightly published for its `build_key` and the
+     core's clock (`CORE_MHZ`), is slower than the fastest setting timed
    - `cli.py` times one operator at every setting it tunes to
      (`python -m iron.tune.cli GEMV M=2048 K=8192`) and holds the parser
      `python -m iron.lm.tune <application>` builds on, which rewrites the
@@ -796,8 +799,10 @@ code before relying on a line here; it is the authority.
   a window of keys per command (attention with a log-sum-exp combine) would
   bound it. At 131072 a decode step takes 0.674 s; the whole 131k prompt's
   time to first token is unmeasured.
-- Tuning: there is no search over a tunable's legal values, and no
-  per-kernel L1 budget.
+- Tuning times each operator alone, not inside the fused image it runs
+  in. Kernel cycles skip only GEMM settings, since only GEMM's calls per
+  core are known here, and only on npu2, the one NPU whose core clock was
+  measured.
 - A fold whose cores would read more streams than a core tile's two input
   channels is refused (`Chain.at_tile`, at `resolved()`). So EmbeddingGemma 2's
   residual `ElementwiseAdd` does not fold into a weighted `RMSNorm` (its

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import Any
 
@@ -440,6 +441,22 @@ class GEMM(Operator):
                 np.dtype(self.dtype_out) == np.dtype(bfloat16)
             )
 
+        def matmul(self):
+            """The m x k x n kernel each core runs."""
+            return kernels.linalg.mm(
+                self.tile_m,
+                self.tile_k,
+                self.tile_n,
+                input_dtype=self.dtype_in,
+                # HIGHEST accumulates in f32 in L1, so the matmul's C is f32.
+                output_dtype=np.float32 if self.wider_accumulator else self.dtype_out,
+                vectorized=not self.use_scalar,
+                b_col_maj=self.b_col_maj,
+                c_col_maj=self.c_col_maj,
+                emulate_bf16_mmul_with_bfp16=self.precision == Precision.MEDIUM,
+                round_conv_even=self.round_conv_even,
+            )
+
         def build(self) -> Built:
             m, k, n = self.tile_m, self.tile_k, self.tile_n
             n_aie_cols = self.num_aie_columns
@@ -450,7 +467,6 @@ class GEMM(Operator):
             n_A_tiles_per_shim = (
                 n_aie_rows // n_aie_cols if n_aie_cols < n_aie_rows else 1
             )
-            b_col_maj, c_col_maj = self.b_col_maj, self.c_col_maj
             use_scalar = self.use_scalar
             dtype_in, dtype_out = self.dtype_in, self.dtype_out
             use_larger_internal_buffer = self.wider_accumulator
@@ -465,20 +481,8 @@ class GEMM(Operator):
             # Flat, as the finish's scratch is: a core selects between them.
             C_l1_ty = np.ndarray[(m * n,), np.dtype[dtype_out]]
 
-            # HIGHEST accumulates in f32 in L1, so the matmul's C is f32.
             dtype_acc = dtype_out_internal if use_larger_internal_buffer else dtype_out
-            matmul_kernel = kernels.linalg.mm(
-                m,
-                k,
-                n,
-                input_dtype=dtype_in,
-                output_dtype=dtype_acc,
-                vectorized=not use_scalar,
-                b_col_maj=b_col_maj,
-                c_col_maj=c_col_maj,
-                emulate_bf16_mmul_with_bfp16=self.precision == Precision.MEDIUM,
-                round_conv_even=self.round_conv_even,
-            )
+            matmul_kernel = self.matmul()
             r, s, t = matmul_kernel.mac_dims
             assert m % r == 0 and k % s == 0 and n % t == 0
             streams = matmul_kernel.stream_dims
@@ -755,6 +759,18 @@ class GEMM(Operator):
 
     def ops(self) -> int:
         return 2 * self.M * self.K * self.N
+
+    def matmul_calls(self, values: Mapping[str, int]) -> int:
+        """The fewest matmul kernel calls the busiest core makes in a step
+        at per-call ``values``: each output tile under the bound takes one
+        call per K tile under it.
+        """
+        calls = (
+            ceildiv(values.get("valid", self.M), self.tile_m)
+            * ceildiv(values.get("valid_k", self.K), self.tile_k)
+            * (self.N // self.tile_n)
+        )
+        return ceildiv(calls, self.n_aie_rows * self.num_aie_columns)
 
     def reference(self, A, B):
         # float32, not mm_ref's float64, which doubles the weight's host copy.

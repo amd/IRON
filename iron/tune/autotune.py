@@ -11,7 +11,9 @@ is taken only where it beats the traced one by ``CONFIDENCE`` standard
 errors at the calls' operating points, and only where its output is
 bit-identical to the traced one's or within both their tolerances
 (``measure.judge``). Steps sharing a shape share its entry, so they are
-timed together and their times summed.
+timed together and their times summed. A GEMM setting is not built when its
+matmul kernel alone, at the cycles mlir-aie's nightly timed it at
+(``kernel_cycles``), takes longer than the fastest setting timed so far.
 """
 
 from __future__ import annotations
@@ -19,8 +21,10 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import itertools
+import json
 import logging
 import math
+import urllib.request
 from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -32,6 +36,7 @@ from iron.common.declare import Operator, Profile
 from iron.common.design import OperatorDesign
 from iron.common.graph.trace import TracedGraph
 from iron.common.image.coresidence import fits
+from iron.operators.gemm import GEMM
 from .measure import Cache, Standalone, Timing, judge, measure, write
 
 logger = logging.getLogger(__name__)
@@ -43,6 +48,46 @@ CONFIDENCE = 2.0
 EXHAUSTIVE = 32
 
 FIT_CACHE = Path(NPU_CACHE_HOME) / "iron" / "fits"
+
+# A core's clock in cycles per us: what mlir-aie's programming guide measured
+# on npu2 (section-4d, "Two clocks"). npu1's has not been measured.
+CORE_MHZ = {"npu2": 1760.0}
+
+KERNEL_CHECKS = "https://xilinx.github.io/mlir-aie/kernel-checks/{npu}/latest.json"
+
+
+def kernel_cycles(dev, log: Callable[[str], None] = print) -> dict[str, int]:
+    """Each kernel's cycles per call as mlir-aie's nightly last timed it on
+    ``dev``'s NPU, by ``ExternalFunction.build_key``; empty where they
+    cannot be read.
+    """
+    url = KERNEL_CHECKS.format(npu=dev.name)
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response:
+            latest = json.load(response)
+    except (OSError, ValueError) as e:
+        log(f"no kernel timings from {url}: {e}")
+        return {}
+    rows = latest.get("rows", {})
+    return {
+        key: rows[case]["cycles"]["value"]
+        for case, key in latest.get("builds", {}).items()
+        if "cycles" in rows.get(case, {})
+    }
+
+
+def least_us(op: GEMM, values: Mapping[str, int], cycles, dev) -> float | None:
+    """A step time ``op`` cannot beat at per-call ``values``: its busiest
+    core's matmul calls at ``cycles`` per call. None where ``cycles`` does
+    not hold its matmul or ``dev``'s core clock is unknown.
+    """
+    mhz = CORE_MHZ.get(dev.name)
+    if mhz is None:
+        return None
+    per_call = cycles.get(op.array_config().matmul().build_key)
+    if per_call is None:
+        return None
+    return op.matmul_calls(values) * per_call / mhz
 
 
 @dataclasses.dataclass(frozen=True)
@@ -298,13 +343,15 @@ def time_shape(
     remeasure: bool = False,
     exhaustive: int = EXHAUSTIVE,
     fit_cache: Path = FIT_CACHE,
+    cycles: Mapping[str, int] | None = None,
     log: Callable[[str], None] = print,
 ) -> list[Trial]:
     """Each setting of ``shape`` timed, the traced one first: every setting
     its operators share and the placer takes where there are at most
     ``exhaustive``, else those a coordinate descent tries, each tunable's
     ``line`` through the fastest setting taken so far, until a pass over the
-    tunables moves it no further.
+    tunables moves it no further. A setting whose ``least_us`` at
+    ``cycles`` is no faster than the fastest taken so far is not timed.
     """
     found = settings(shape.members[0][0]._probed(), dev, shape.pinned)
     for op, _, _ in shape.members[1:]:
@@ -321,17 +368,38 @@ def time_shape(
     if len(found) == 1:
         return [Trial(found[0], 0.0, 0.0)]
     tried: dict[tuple, Trial] = {}
+    least = (
+        {_frozen(s): _least(shape, s, cycles, dev) for s in found[1:]}
+        if cycles and issubclass(shape.cls, GEMM)
+        else {}
+    )
+    traced_us: float | None = None
+
+    def slower(s: dict[str, Any]) -> bool:
+        bound = least.get(_frozen(s))
+        if bound is None or traced_us is None:
+            return False
+        best = min((t.delta_us for t in tried.values() if t.gains), default=0.0)
+        return bound >= traced_us + best
 
     def run(batch: list[dict[str, Any]]) -> None:
+        nonlocal traced_us
         todo = [found[0]] + [
-            s for s in batch if s is not found[0] and _frozen(s) not in tried
+            s
+            for s in batch
+            if s is not found[0] and _frozen(s) not in tried and not slower(s)
         ]
-        for s, t in zip(
-            todo, _time(shape, todo, full_elf, timing, repeats, cache, remeasure, log)
-        ):
+        if skipped := sum(1 for s in batch if slower(s) and _frozen(s) not in tried):
+            log(f"    {skipped} slower by their kernel alone, not timed")
+        trials, traced_us = _time(
+            shape, todo, full_elf, timing, repeats, cache, remeasure, log
+        )
+        for s, t in zip(todo, trials):
             tried[_frozen(s)] = t
 
     if len(found) <= exhaustive:
+        if any(b is not None for b in least.values()):
+            run([])  # the traced setting's own time, which a bound is held to
         run(found)
     else:
         best, moved = found[0], True
@@ -350,6 +418,21 @@ def _frozen(tunables: Mapping[str, Any]) -> tuple:
     return tuple(tunables.items())
 
 
+def _least(shape: Shape, s: dict[str, Any], cycles, dev) -> float | None:
+    """``least_us`` of ``shape`` at setting ``s``, weighted as ``_time``
+    weighs its operators' steps; None where any is unknown.
+    """
+    total = 0.0
+    for op, points, _ in shape.members:
+        moved = op._probed()._with_tunables(**s).resolved(dev)
+        for weight, values in points:
+            bound = least_us(moved, values, cycles, dev)
+            if bound is None:
+                return None
+            total += weight * bound
+    return total
+
+
 def _time(
     shape: Shape,
     found: list[dict[str, Any]],
@@ -359,11 +442,12 @@ def _time(
     cache: Cache | None,
     remeasure: bool,
     log: Callable[[str], None],
-) -> list[Trial]:
+) -> tuple[list[Trial], float]:
     """``found``'s settings (the traced one first) timed and judged at each
-    point of each of ``shape``'s operators; one that does not build is
-    refused.
+    point of each of ``shape``'s operators, and the traced one's weighted
+    step time; one that does not build is refused.
     """
+    traced_us = 0.0
     deltas = [0.0] * len(found)
     variances: list[float | None] = [0.0] * len(found)
     refused: list[str | None] = [None] * len(found)
@@ -382,6 +466,7 @@ def _time(
                 log=log,
             )
             default = ran[0]
+            traced_us += weight * default.t_step_us
             for i in range(1, len(found)):
                 if i not in ran:
                     refused[i] = refused[i] or "does not build"
@@ -398,7 +483,7 @@ def _time(
     return [
         Trial(s, d, 0.0 if i == 0 else (None if v is None else math.sqrt(v)), r)
         for i, (s, d, v, r) in enumerate(zip(found, deltas, variances, refused))
-    ]
+    ], traced_us
 
 
 def _judged(
@@ -430,6 +515,7 @@ def autotune(
     repeats: int = 9,
     cache: Cache | None = None,
     remeasure: bool = False,
+    cycles: Mapping[str, int] | None = None,
     log: Callable[[str], None] = print,
 ) -> Profile:
     """``profile`` with an entry for each shape of ``calls`` (``shapes``)
@@ -442,6 +528,7 @@ def autotune(
         full_elf: How the calls' graphs are packaged.
         cache: Where each time is kept across runs (``Cache.here()``).
         remeasure: Time again what ``cache`` holds.
+        cycles: Kernel cycles per call by build key (``kernel_cycles``).
     """
     found = shapes(calls, dev)
     covering: dict[Hashable, list[Mapping[str, Any]]] = {s.key: [] for s in found}
@@ -466,6 +553,7 @@ def autotune(
             repeats=repeats,
             cache=cache,
             remeasure=remeasure,
+            cycles=cycles,
             log=log,
         )
         gains = [t for t in tried if t.gains]

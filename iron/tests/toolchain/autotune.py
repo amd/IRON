@@ -511,3 +511,64 @@ def test_an_operator_is_timed_at_each_point_its_extents_move(monkeypatch, npu2):
     assert isinstance(shape, Shape)
     tuning.time_shape(shape, npu2, full_elf=True, log=lambda _: None)
     assert len({tuple(sorted(v.items())) for v in timed}) == 2
+
+
+def test_a_gemm_s_busiest_core_makes_a_call_per_k_tile_of_each_of_its_tiles(npu2):
+    op = GEMM(M=512, K=256, N=256, tile_m=32, tile_k=64, tile_n=64).resolved(npu2)
+    tiles = 512 // 32 * 256 // 64
+    cores = op.n_aie_rows * op.num_aie_columns
+    assert op.matmul_calls({}) == -(-tiles * 256 // 64 // cores)
+    # Under a bound only the rows and K it covers are computed.
+    assert op.matmul_calls({"valid": 32, "valid_k": 64}) == -(-256 // 64 // cores)
+
+
+def test_a_gemm_setting_slower_by_its_kernel_alone_is_never_timed(monkeypatch, npu2):
+    def key(array):
+        return f"{array.tile_m}x{array.tile_k}x{array.tile_n}"
+
+    monkeypatch.setattr(
+        GEMM.Array, "matmul", lambda self: type("K", (), {"build_key": key(self)})
+    )
+    timed = []
+
+    def measure(ops, **_):
+        timed.extend(key(op.array_config()) for op in ops)
+        return {
+            i: Measurement(100.0, (100.0,) * 3, "same", "run", "turbo", 50)
+            for i in range(len(ops))
+        }
+
+    monkeypatch.setattr(tuning, "measure", measure)
+    monkeypatch.setattr(tuning, "refusal", lambda op, fit_cache=None: None)
+    op = GEMM(M=256, K=256, N=256, precision=Precision.HIGH)
+    shape = Shape(op)
+    shape.members.append((op, [(1.0, {})], {}))
+    found = [op._with_tunables(**s).resolved(npu2) for s in settings(op, npu2)]
+    # Every tile but 16 rows by 16 columns runs at 1 cycle a call, that one
+    # at a cycle count no step under 100 us could hold.
+    cycles = {key(o.array_config()): 1 for o in found}
+    cycles["16x64x16"] = 10**9
+    tuning.time_shape(
+        shape,
+        npu2,
+        full_elf=True,
+        exhaustive=len(found),
+        cycles=cycles,
+        log=lambda _: None,
+    )
+    assert "16x64x16" not in timed
+    assert len(set(timed)) == len(set(cycles)) - 1
+
+
+def test_kernel_cycles_are_the_nightly_s_rows_by_their_build(
+    monkeypatch, tmp_path, npu2
+):
+    latest = {
+        "rows": {"mm/a": {"cycles": {"value": 900, "unit": "cycles"}}, "mm/b": {}},
+        "builds": {"mm/a": "matmul-1", "mm/b": "matmul-2"},
+    }
+    (tmp_path / "npu2.json").write_text(json.dumps(latest))
+    monkeypatch.setattr(tuning, "KERNEL_CHECKS", f"file://{tmp_path}/{{npu}}.json")
+    assert tuning.kernel_cycles(npu2) == {"matmul-1": 900}
+    monkeypatch.setattr(tuning, "KERNEL_CHECKS", f"file://{tmp_path}/none.json")
+    assert tuning.kernel_cycles(npu2, log=lambda _: None) == {}

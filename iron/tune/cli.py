@@ -31,7 +31,7 @@ import aie.utils as aie_utils
 from iron import operators
 from iron.common.declare import Profile
 from iron.common.image.packaging import dispatches_full_elf
-from .autotune import Call, Shape, autotune, time_shape
+from .autotune import Call, Shape, autotune, kernel_cycles, time_shape
 from .measure import Cache, Timing, pmode
 
 
@@ -84,7 +84,12 @@ def tune(args: argparse.Namespace, calls: Sequence[Call], profiles: Path) -> Pat
     path = profiles / f"{dev.name}.json"
     profile = Profile.load(path) if path.exists() else None
     tuned = autotune(
-        calls, dev, profile, full_elf=dispatches_full_elf(dev), **_timing(args)
+        calls,
+        dev,
+        profile,
+        full_elf=dispatches_full_elf(dev),
+        cycles=kernel_cycles(dev),
+        **_timing(args),
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     tuned.save(path)
@@ -127,7 +132,13 @@ def main() -> None:
     shape = Shape(op)
     shape.members.append((op, [(1.0, values)], {}))
     print(f"power mode: {pmode()}")
-    tried = time_shape(shape, dev, full_elf=dispatches_full_elf(dev), **_timing(args))
+    tried = time_shape(
+        shape,
+        dev,
+        full_elf=dispatches_full_elf(dev),
+        cycles=kernel_cycles(dev),
+        **_timing(args),
+    )
     for t in sorted(tried, key=lambda t: t.delta_us):
         noise = "" if t.noise_us is None else f" ± {t.noise_us:.2f}"
         why = "" if t.refused is None else f"  refused: {t.refused}"
