@@ -3,13 +3,15 @@
 
 """iron.lm.ConcatChannels device-free: its reference, its operators', is
 numpy's concatenation along the channels at each of its arities, and it
-refuses what it cannot join.
+refuses what it cannot join; and ``F.cat`` of feature maps.
 """
 
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
+import iron
+import iron.functional as F
 from iron.lm import ConcatChannels
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -43,3 +45,20 @@ def test_the_inputs_given_are_the_inputs_declared():
     cat = ConcatChannels(rows=ROWS, width=WIDTH, channels=(4, 4, 4))
     with pytest.raises(TypeError, match="2 inputs given, 3 declared"):
         cat.trace(x0=((ROWS, WIDTH * 4), bfloat16), x1=((ROWS, WIDTH * 4), bfloat16))
+
+
+def test_functional_cat_joins_feature_maps_along_their_channels_only():
+    rng = np.random.default_rng(0)
+    a, b = (rng.standard_normal((ROWS, WIDTH, c)).astype(bfloat16) for c in (8, 2))
+
+    class Cat(iron.Graph):
+        def __init__(self, dim):
+            self.dim = dim
+
+        def body(self, a, b):
+            return F.cat([a, b], self.dim)
+
+    got = np.asarray(Cat(-1).reference(a, b)).reshape(ROWS, WIDTH, 10)
+    assert np.array_equal(got, np.concatenate([a, b], -1))
+    with pytest.raises(ValueError, match="only the channels"):
+        Cat(0).trace(a=(a.shape, bfloat16), b=(b.shape, bfloat16))

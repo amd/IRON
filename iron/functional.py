@@ -12,15 +12,23 @@ Each records the operator steps that compute it and returns their handle::
 
 Weights are a checkpoint's ``(out, in)``, as ``torch.nn.Linear`` stores them.
 A handle's own ``+ - * /`` and ``@`` are steps too (``Handle``).
+
+A feature map is one image, channels last: ``(H, W, C)``, not torch's
+``(N, C, H, W)``. Its rows, ``(H, W * C)``, are what its steps read.
 """
 
 import math
 
 import ml_dtypes
+import numpy as np
+from aie.helpers.taplib import TensorAccessPattern
 
+import iron
+import iron.lm.blocks as blocks
 from iron.common import Precision
+from iron.common.image.packaging import require_device
 from iron.operators.copy import Copy
-from iron.operators.flm.gemm.design import Epilogue
+from iron.operators.flm.gemm.design import M_TILE, Epilogue, compute_rows
 from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.operators.gelu import GELU
 from iron.operators.gemm import GEMM
@@ -177,3 +185,143 @@ def causal_conv1d(x, taps, state):
         tail[j] = flat[first + rows + j]
     Copy.step(tail, write)
     return y
+
+
+def conv2d(x, weight, bias=None, stride=1, padding=0, groups=1):
+    """The feature map ``x`` convolved by ``weight`` ``(out, in / groups,
+    k, k)`` at ``stride``, inside ``padding`` zero pixels a side, plus
+    ``bias`` per output channel if given.
+
+    A 1x1 at stride 1 is ``linear`` of the pixels at ``Precision.HIGH``,
+    copied first into a held map of whole flm.ProjectionGEMM row blocks
+    if they are not, the rows past them computed and dropped. Any other is
+    ``Conv2d``, its input copied into a held zero border. ``groups`` is
+    ``1`` or depthwise, as ``Conv2d`` builds.
+    """
+    H, W, C = x.shape
+    out, per_group, k, _ = weight.shape
+    if k == 1 and stride == 1 and groups == 1 and not padding:
+        n = H * W
+        pixels = x.reshape(n, C)
+        unit = M_TILE * compute_rows(require_device())
+        if n % unit:
+            held = iron.state((-(-n // unit) * unit, C))
+            held[:n] = pixels
+            pixels = held
+        y = linear(
+            pixels,
+            weight[:, :, 0, 0].astype(ml_dtypes.bfloat16),
+            bias,
+            precision=Precision.HIGH,
+        )
+        return y[:n].reshape(H, W, out)
+    rows = x.reshape(H, W * C)
+    # One channel a group pads its width in the band; patches read it held.
+    banded = per_group == 1
+    if banded:
+        conv = blocks.Conv2d(weight, W, stride, padding=padding, groups=groups)
+    else:
+        conv = blocks.Conv2d(weight, W + 2 * padding, stride, groups=groups)
+    if padding:
+        line = (W if banded else W + 2 * padding) * C
+        shape = (H + 2 * padding, line)
+        held = iron.state(shape)
+        Copy.step(np.zeros(shape, ml_dtypes.bfloat16), held)
+        offset = padding * line + (0 if banded else padding * C)
+        interior = TensorAccessPattern(shape, offset, [H, W * C], [line, 1])
+        Copy.step(rows, held, dst=interior)
+        rows = held
+    out_rows = (H + 2 * padding - k) // stride + 1
+    y = conv(rows, rows=out_rows).reshape(out_rows * conv.out_width, out)
+    if bias is not None:
+        y = y + bias
+    return y.reshape(out_rows, conv.out_width, out)
+
+
+def max_pool2d(x, kernel_size, stride=None, padding=0):
+    """The feature map ``x``'s max over each ``kernel_size`` square window,
+    each channel its own: ``MaxPool2d``, which pools at stride 1 inside
+    ``-inf`` padding of half the window, so the map keeps its shape.
+
+    Raises:
+        ValueError: Another ``stride`` or ``padding``.
+    """
+    if stride != 1 or padding != kernel_size // 2:
+        raise ValueError(
+            f"max_pool2d(): only stride=1, padding={kernel_size // 2} has an "
+            f"operator, not stride={stride}, padding={padding}"
+        )
+    H, W, C = x.shape
+    y = blocks.MaxPool2d(H, W, C, kernel_size)(x.reshape(H, W * C))
+    return y.reshape(H, W, C)
+
+
+def interpolate(x, *, scale_factor, mode="nearest"):
+    """The feature map ``x`` upsampled 2x, each pixel a 2x2 block: each row
+    read twice into a held map, which is then written twice, into the even
+    and the odd pixels of another.
+
+    Raises:
+        ValueError: Another ``scale_factor`` or ``mode``.
+    """
+    if scale_factor != 2 or mode != "nearest":
+        raise ValueError(
+            f"interpolate(): only scale_factor=2, mode='nearest' has an "
+            f"operator, not {scale_factor}, {mode!r}"
+        )
+    H, W, C = x.shape
+    doubled, out = iron.state((2 * H, W * C)), iron.state((2 * H, 2 * W * C))
+    twice = TensorAccessPattern((H, W * C), 0, [H, 2, W * C], [W * C, 0, 1])
+    Copy.step(x.reshape(H, W * C), doubled, src=twice)
+    for column in (0, C):
+        dst = TensorAccessPattern(
+            out.shape, column, [2 * H, W, C], [2 * W * C, 2 * C, 1]
+        )
+        Copy.step(doubled[:], out, dst=dst)
+    return Copy.step(out[:]).reshape(2 * H, 2 * W, C)
+
+
+def cat(tensors, dim=-1):
+    """Two to four feature maps of one height and width joined along their
+    channels: ``ConcatChannels``.
+
+    Raises:
+        ValueError: ``dim`` is not the channels'.
+    """
+    if dim not in (-1, 2):
+        raise ValueError(f"cat(): only the channels, dim -1, are joined, not {dim}")
+    H, W, _ = tensors[0].shape
+    channels = tuple(t.shape[2] for t in tensors)
+    y = blocks.ConcatChannels(H, W, channels)(
+        *(t.reshape(H, W * t.shape[2]) for t in tensors)
+    )
+    return y.reshape(H, W, sum(channels))
+
+
+def adaptive_avg_pool2d(x, output_size):
+    """The feature map ``x``'s mean over its pixels, each channel its own,
+    ``(1, 1, C)``: one GEMM of rows of ``1 / (H * W)`` by the pixels,
+    copied first into a held map of whole 64-pixel blocks (the GEMM's
+    ``tile_k``) between zero rows if they are not.
+
+    Raises:
+        ValueError: An ``output_size`` other than 1.
+    """
+    if output_size not in (1, (1, 1)):
+        raise ValueError(
+            f"adaptive_avg_pool2d(): only output_size=1 has an operator, not "
+            f"{output_size}"
+        )
+    H, W, C = x.shape
+    n = H * W
+    k = -(-n // 64) * 64
+    pixels = x.reshape(n, C)
+    if k != n:
+        held = iron.state((k, C))
+        held[n:] = np.zeros((k - n, C), ml_dtypes.bfloat16)
+        held[:n] = pixels
+        pixels = held
+    mean = np.zeros((blocks.GEMM_ROWS, k), ml_dtypes.bfloat16)
+    mean[:, :n] = 1 / n
+    y = GEMM.step(mean, pixels, precision=Precision.HIGHEST)
+    return y[:1].reshape(1, 1, C)

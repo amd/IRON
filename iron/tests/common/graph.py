@@ -2301,6 +2301,42 @@ def test_causal_conv1d_carries_its_tail_from_a_prompt_chunk_to_decode_steps():
     np.testing.assert_array_equal(got, want)
 
 
+def test_interpolate_doubles_each_pixel_nearest_only():
+    class Upsample(iron.Graph):
+        def __init__(self, mode):
+            self.mode = mode
+
+        def body(self, x):
+            return F.interpolate(x, scale_factor=2, mode=self.mode)
+
+    x = (np.arange(3 * 5 * 4) % 11).reshape(3, 5, 4).astype(bfloat16)
+    got = np.asarray(Upsample("nearest").reference(x)).reshape(6, 10, 4)
+    np.testing.assert_array_equal(got, x.repeat(2, 0).repeat(2, 1))
+    with pytest.raises(ValueError, match="only scale_factor=2, mode='nearest'"):
+        Upsample("bilinear").trace(x=(x.shape, bfloat16))
+
+
+def test_adaptive_avg_pool2d_is_the_mean_of_the_pixels_to_one_only():
+    """Within 2 units of 2^-8 of the mean of |x|: the GEMM rounds once, and
+    so does its row of 1 / 49.
+    """
+
+    class Pool(iron.Graph):
+        def __init__(self, size):
+            self.size = size
+
+        def body(self, x):
+            return Copy.step(F.adaptive_avg_pool2d(x, self.size))
+
+    x = np.random.default_rng(0).standard_normal((7, 7, 64)).astype(bfloat16)
+    f = x.astype(np.float32)
+    got = np.asarray(Pool(1).reference(x), np.float32).reshape(1, 1, 64)
+    bound = 2.0**-7 * np.abs(f).mean((0, 1), keepdims=True)
+    assert (np.abs(got - f.mean((0, 1), keepdims=True)) <= bound).all()
+    with pytest.raises(ValueError, match="only output_size=1"):
+        Pool(2).trace(x=(x.shape, bfloat16))
+
+
 def _steps(t) -> list[str]:
     return [type(s.op).__name__ for s in t.steps]
 

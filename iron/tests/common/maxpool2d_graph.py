@@ -3,13 +3,15 @@
 
 """iron.lm.MaxPool2d device-free: its reference, its operators', is the max
 pooling exactly, as ``exact()`` and a window-by-window loop compute it, and
-it refuses an even window.
+it refuses an even window; and ``F.max_pool2d`` of a feature map.
 """
 
 import numpy as np
 import pytest
 from ml_dtypes import bfloat16
 
+import iron
+import iron.functional as F
 from iron.lm import MaxPool2d
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -48,3 +50,22 @@ def test_the_reference_is_the_max_pooling(case):
 def test_an_even_kernel_is_refused():
     with pytest.raises(ValueError, match="must be odd"):
         MaxPool2d(rows=13, width=13, channels=128, kernel=4)
+
+
+def test_functional_max_pool2d_is_the_max_pooling_at_stride_1_only():
+    rows, width, channels, kernel = CASES["wide"]
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((rows, width, channels)).astype(bfloat16)
+
+    class Pool(iron.Graph):
+        def __init__(self, stride):
+            self.stride = stride
+
+        def body(self, x):
+            return F.max_pool2d(x, kernel, self.stride, kernel // 2)
+
+    want = windowed(x, rows, width, channels, kernel)
+    got = np.asarray(Pool(1).reference(x), np.float32).reshape(want.shape)
+    assert np.array_equal(got, want)
+    with pytest.raises(ValueError, match="only stride=1"):
+        Pool(None).trace(x=(x.shape, bfloat16))

@@ -4,7 +4,7 @@
 """iron.lm.Conv2d device-free: its reference, its operators', is torch's
 convolution in each of its forms (recorded in ``goldens/conv2d.npz``), a
 caller's per-call rows bound it, and it refuses padding gathered patches do
-not hold.
+not hold; and ``F.conv2d`` of a feature map in each of its forms.
 """
 
 import numpy as np
@@ -12,6 +12,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
+import iron.functional as F
 from iron import Scratchpad
 from iron.lm import Conv2d
 from iron.operators.copy import Copy
@@ -123,3 +124,45 @@ def test_an_unaligned_gather_writes_no_callers_output():
 def test_gathered_patches_hold_no_padding():
     with pytest.raises(ValueError, match="hold no zero padding"):
         Conv2d(np.zeros((32, 128, 3, 3), np.float32), 18, stride=2, padding=1)
+
+
+# A 6 by 10 map: a 1x1 of pixels not whole row blocks, a depthwise 3x3 at
+# stride 2 and a dense one, each inside a zero pixel a side.
+MAPS = {
+    "pointwise": ((64, 128, 1, 1), 128, dict()),
+    "depthwise": ((32, 1, 3, 3), 32, dict(stride=2, padding=1, groups=32)),
+    "dense": ((16, 64, 3, 3), 64, dict(padding=1)),
+}
+
+
+@pytest.mark.parametrize("case", list(MAPS))
+def test_functional_conv2d_is_the_convolution(case):
+    """Within its GEMM's bound, 2 units of 2^-8 of the convolution of |x| by
+    |weight| plus |bias|.
+    """
+    shape, channels, kwargs = MAPS[case]
+    stride, padding = kwargs.get("stride", 1), kwargs.get("padding", 0)
+    groups = kwargs.get("groups", 1)
+    rng = np.random.default_rng(0)
+    weight = rng.standard_normal(shape).astype(bfloat16)
+    bias = rng.standard_normal(shape[0]).astype(bfloat16)
+    x = rng.standard_normal((6, 10, channels)).astype(bfloat16)
+
+    class Map(iron.Graph):
+        def body(self, x):
+            return Copy.step(F.conv2d(x, weight, bias, **kwargs))
+
+    def convolution(x, w, b):
+        k = w.shape[-1]
+        image = np.pad(x, ((padding, padding), (padding, padding), (0, 0)))
+        windows = np.lib.stride_tricks.sliding_window_view(image, (k, k), (0, 1))
+        windows = windows[::stride, ::stride]
+        if groups > 1:
+            return np.einsum("hwckl,ckl->hwc", windows, w[:, 0]) + b
+        return np.einsum("hwckl,ockl->hwo", windows, w) + b
+
+    f = [np.asarray(a, np.float32) for a in (x, weight, bias)]
+    want = convolution(*f)
+    bound = 2.0**-7 * convolution(*(np.abs(a) for a in f))
+    got = np.asarray(Map().reference(x), np.float32).reshape(want.shape)
+    assert (np.abs(got - want) <= bound).all()
