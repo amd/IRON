@@ -162,10 +162,10 @@ class EncoderDecoder(CausalLM):
         forgotten, since each attended over the encoder's last output.
 
         Raises:
-            RuntimeError: The versions are not loaded: ``load()`` first.
+            RuntimeError: The versions are not loaded: ``load_versions()`` first.
         """
         if self._encode is None:
-            raise RuntimeError(f"{type(self).__name__}: load() first")
+            raise RuntimeError(f"{type(self).__name__}: load_versions() first")
         buffer, values = self.encoder.inputs(*raw)
         self._source = self.encoder.soft(values)
         name = f"encoder_{self.encoder_input}"

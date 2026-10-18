@@ -590,11 +590,11 @@ def renamed(tree, renames: Mapping[str, str]):
 
 class Model(iron.Graph):
     """A model's graph, every version ``shapes()`` names compiled and
-    loaded by ``load()`` before the first call, so the arena is made once:
-    a version on token ids (``ids`` or ``placed``) feeds off the decode
-    step, the version with no input, where that is a full ELF, its Emit
-    starting there. ``versions`` (``Graph``'s own), in ``shapes()``'s
-    order, is every version ``load()`` compiled.
+    loaded by ``load_versions()`` before the first call, so the arena is
+    made once: a version on token ids (``ids`` or ``placed``) feeds off the
+    decode step, the version with no input, where that is a full ELF, its
+    Emit starting there. ``versions`` (``Graph``'s own), in ``shapes()``'s
+    order, is every version ``load_versions()`` compiled.
     """
 
     # Each checkpoint layer's dotted paths that its config's ``layer``
@@ -612,7 +612,7 @@ class Model(iron.Graph):
         """The input shapes of each version."""
         raise NotImplementedError(f"{type(self).__name__} defines no shapes()")
 
-    def load(
+    def load_versions(
         self,
         *,
         release: Callable[[np.ndarray], None] | None = None,
@@ -644,7 +644,7 @@ class Model(iron.Graph):
 
     def loaded(self, versions: list) -> None:
         """What runs on ``versions``, in ``shapes()``'s order, once
-        ``load`` has them: nothing by default.
+        ``load_versions`` has them: nothing by default.
         """
 
 
@@ -678,12 +678,19 @@ FLAGS = (
 class OnHost:
     """A model with its images stood in by its graph's reference
     (``Graph.reference``), run at whatever shape it is called with: the
-    model with no device, mixed in before the model's own class.
+    model with no device, mixed in before the model's own class. It
+    compiles nothing, and ``generate`` draws on the host.
     """
 
     def __call__(self, *tensors, **values):
         logits, carry = self.reference(*tensors, **values)
         return _HostOutput(logits), carry
+
+    def load_versions(self, **_) -> "OnHost":
+        return self
+
+    def generate(self, tokens, num_tokens: int, sample: Sampler):
+        return generate_on_host(self, tokens, num_tokens, sample)
 
 
 class _HostOutput:
@@ -697,9 +704,25 @@ class _HostOutput:
 
 
 class Tokenizer:
+    """Text to a prompt's token ids, ``bos`` first, and token ids back to
+    text, over ``encoding``: anything with ``encode`` and ``decode``, as
+    ``Runner.open_tokenizer`` gives.
+    """
+
+    def __init__(self, encoding, bos: int):
+        self.encoding, self.bos = encoding, bos
+
+    def __call__(self, text: str) -> list[int]:
+        return [self.bos, *self.encoding.encode(text)]
+
+    def decode(self, tokens) -> str:
+        return self.encoding.decode(list(tokens))
+
+
+class _TokenizerJson:
     """A Hugging Face ``tokenizer.json``, over ``tokenizers`` (not
     ``transformers``): text to token ids without the special tokens its
-    post-processor adds, since ``Runner.encode`` puts the BOS first, and back.
+    post-processor adds, since ``Tokenizer`` puts the BOS first, and back.
     """
 
     def __init__(self, path):
@@ -711,7 +734,7 @@ class Tokenizer:
         return self._tokenizer.encode(text, add_special_tokens=False).ids
 
     def decode(self, tokens) -> str:
-        return self._tokenizer.decode(list(tokens))
+        return self._tokenizer.decode(tokens)
 
 
 class Runner:
@@ -719,7 +742,7 @@ class Runner:
 
     A subclass names its ``config`` (a ``Config`` class read from the
     checkpoint's ``config.json``), ``model`` (the ``CausalLM``) and
-    ``open_tokenizer``; ``tune_arguments`` and
+    ``open_tokenizer`` and its ``tokenizer_file``; ``tune_arguments`` and
     ``tune_calls`` are what ``iron.lm.tune`` tunes its profile by. Given a ``seed``, the weights are drawn
     in the checkpoint's shapes and a prompt with no tokenizer is random
     tokens, so speed, accuracy and determinism need neither.
@@ -729,6 +752,8 @@ class Runner:
     model: "type[CausalLM]"
     # What loads the checkpoint into transformers to record its goldens.
     hugging_face: type = HuggingFace
+    # The tokenizer's file in the model's Hugging Face repository.
+    tokenizer_file = "tokenizer.json"
 
     @functools.cached_property
     def bos(self) -> int:
@@ -744,7 +769,7 @@ class Runner:
     @staticmethod
     def open_tokenizer(path):
         """The tokenizer at ``path``: a Hugging Face ``tokenizer.json``."""
-        return Tokenizer(path)
+        return _TokenizerJson(path)
 
     @classmethod
     def default_config(cls, weights_path) -> Config:
@@ -837,7 +862,9 @@ class Runner:
             else self.checkpoint.tree("random", seed)
         )
         self.tokenizer = (
-            None if tokenizer_path is None else self.open_tokenizer(tokenizer_path)
+            None
+            if tokenizer_path is None
+            else Tokenizer(self.open_tokenizer(tokenizer_path), self.bos)
         )
 
     @classmethod
@@ -961,9 +988,11 @@ class Runner:
 
     def npu(self, full_elf: bool | None = None) -> "Model":
         """``build()``'s model compiled and loaded, weights uploaded;
-        ``full_elf`` is every version's packaging (``Model.load``).
+        ``full_elf`` is every version's packaging (``Model.load_versions``).
         """
-        return self.build().load(release=self.checkpoint.release, full_elf=full_elf)
+        return self.build().load_versions(
+            release=self.checkpoint.release, full_elf=full_elf
+        )
 
     def reference(self):
         """What the model is judged by: with drawn weights, its own graph on
@@ -984,9 +1013,6 @@ class Runner:
             ((directory / "config.json").read_text(), self.checkpoint.fingerprint()),
         )
 
-    def encode(self, text: str) -> list[int]:
-        return [self.bos, *self.tokenizer.encode(text)]
-
     def decode(self, tokens: list[int]) -> str:
         """``tokens`` as text, or as their numbers with no tokenizer."""
         if self.tokenizer is None:
@@ -994,7 +1020,7 @@ class Runner:
         return self.tokenizer.decode(tokens)
 
     def prompt(self, chars: int, skip: int = 0) -> list[int]:
-        """``chars`` characters of ``prompt.txt`` from ``skip`` on, encoded.
+        """``chars`` characters of ``prompt.txt`` from ``skip`` on, tokenized.
 
         With no tokenizer, ``chars // 3`` tokens drawn at ``seed`` and
         ``skip``: a little more than the text encodes to (Llama 3's
@@ -1005,7 +1031,7 @@ class Runner:
             rng = np.random.default_rng((self.seed, skip))
             draw = rng.integers(0, self.config.vocab_size, chars // 3 - 1)
             return [self.bos, *draw]
-        return self.encode(prompt_text(chars, skip))
+        return self.tokenizer(prompt_text(chars, skip))
 
 
 def sampling_arguments(parser: argparse.ArgumentParser) -> None:

@@ -23,7 +23,10 @@ public API adds its entry under Unreleased.
   its weights first, as in `Norm(w, x)`.
 - `Model.sanitize(w)`, which renames a checkpoint's modules to the names the
   parts read, once at load.
-- `iron.lm.Tokenizer`, which reads `tokenizer.json` for every runner.
+- `iron.lm.Tokenizer(encoding, bos)`, a prompt's tokenizer: called on text
+  it gives the ids with `bos` first, and `decode` gives text back. Every
+  runner's `tokenizer` is one, over `tokenizer.json` unless the runner
+  opens another.
 - Goldens recorded from transformers, with a fingerprint of the config and
   weights they came from. `pytest --record-goldens` (or `IRON_RECORD_GOLDENS`)
   records them.
@@ -64,10 +67,16 @@ public API adds its entry under Unreleased.
 - `iron.lm.testing.assert_close`, the one check of a model's logits against
   its reference: within `LOGITS` (5%) of the largest, and the same argmax
   where the reference's top two lie further apart than that.
-- `Model.loaded()`, the hook `Model.load` hands the compiled versions to;
-  `Runner.build()` makes the model `npu()` loads.
+- `Model.loaded()`, the hook `Model.load_versions` hands the compiled
+  versions to; `Runner.build()` makes the model `npu()` loads.
 - `BuiltArray.program()`, a built array alone with its operator's own
   sequence, as a `Program`.
+- `CausalLM.load(path)`: the model of a Hugging Face repository's files, a
+  local directory or a repository id downloaded once, fitted, compiled and
+  loaded, its tokenizer as `model.tokenizer`; `Llama.load` is the first,
+  and `iron.applications.llama` exports `Llama`. `Runner.tokenizer_file`
+  names the tokenizer's file in the repository.
+- `OnHost.generate`, which draws on the host (`generate_on_host`).
 
 ### Changed
 
@@ -76,6 +85,12 @@ public API adds its entry under Unreleased.
 - An operand's element shape is `obj_shape=`, not `obj_type=`:
   `In(M, K, obj_shape=(tile, K))`. aie.iron's `ObjectFifo(obj_type=)` keeps
   its name, since there it is an `np.ndarray` type.
+- `Model.load(release=, full_elf=, dev=)`, which compiles and loads a
+  model's versions, is `Model.load_versions`: `CausalLM.load` is the
+  classmethod above.
+- `Sampler(temperature, top_k, rng=None)` is `Sampler(temperature, top_k,
+  seed=SEED)`.
+- `Runner.encode(text)` is `runner.tokenizer(text)`.
 - GEMM's `dtype_in` and `dtype_out` are `input_dtype` and `output_dtype`,
   the names its kernel factory (`aie.iron.kernels.linalg.mm`) takes.
 - An operator's nested `Array` annotates only the library's views it reads

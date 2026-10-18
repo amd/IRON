@@ -19,7 +19,8 @@ import logging
 import time
 from collections.abc import Iterator
 from functools import partial
-from typing import Any
+from pathlib import Path
+from typing import Any, ClassVar
 
 import numpy as np
 from aie.iron.kernels.sample import ROW_WORDS
@@ -35,7 +36,7 @@ from iron.operators.copy import Copy
 from iron.operators.mha import MHA
 from iron.operators.sample import Sample
 
-from .base import DecoderConfig, Model, renamed
+from .base import DecoderConfig, Model, Runner, Tokenizer, renamed
 from .generation import Sampler
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,36 @@ class CausalLM(Model):
     """
 
     layers: list
+    # What reads the model's checkpoint and tokenizer (``load``).
+    runner: ClassVar[type[Runner]]
+    # The checkpoint's tokenizer, where ``load`` read one.
+    tokenizer: Tokenizer | None = None
+
+    @classmethod
+    def load(cls, path) -> "CausalLM":
+        """The model of a Hugging Face repository's files, its context fitted
+        to this host (``Runner.fit``), compiled and loaded, and its
+        tokenizer.
+
+        Args:
+            path: A directory holding ``config.json``, ``model.safetensors``
+                or a sharded one's ``model.safetensors.index.json``, and
+                ``runner.tokenizer_file``; or a repository's id, those files
+                downloaded to Hugging Face's cache.
+        """
+        directory = Path(path)
+        if not directory.is_dir():
+            from huggingface_hub import snapshot_download
+
+            files = ["config.json", "model.safetensors*", cls.runner.tokenizer_file]
+            directory = Path(snapshot_download(str(path), allow_patterns=files))
+        weights = directory / "model.safetensors.index.json"
+        if not weights.exists():
+            weights = directory / "model.safetensors"
+        run = cls.runner(weights, directory / cls.runner.tokenizer_file)
+        model = cls(run.config, run.weights)
+        model.tokenizer = run.tokenizer
+        return model.load_versions(release=run.checkpoint.release)
 
     def __init__(self, config: DecoderConfig, weights, decoder=None):
         self.config = config
@@ -411,11 +442,11 @@ class CausalLM(Model):
         step, with ``call_values`` where ``values`` give none of their own.
 
         Raises:
-            RuntimeError: Neither version is loaded: ``load()`` first, which
-                compiles them with the packaging asked for.
+            RuntimeError: Neither version is loaded: ``load_versions()``
+                first, which compiles them with the packaging asked for.
         """
         if self._decode is None:
-            raise RuntimeError(f"{type(self).__name__}: load() first")
+            raise RuntimeError(f"{type(self).__name__}: load_versions() first")
         values = {**self.call_values(), **values}
         if ids is None:
             return self._decode(**values)
@@ -429,7 +460,7 @@ class CausalLM(Model):
     def device_loop(self) -> bool:
         """Whether ``generate`` can draw on the device: a full-ELF decode step."""
         if self._decode is None:
-            raise RuntimeError(f"{type(self).__name__}: load() first")
+            raise RuntimeError(f"{type(self).__name__}: load_versions() first")
         return self._decode.emit is not None
 
     def tune_calls(

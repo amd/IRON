@@ -29,7 +29,7 @@ def gapped(logits: np.ndarray) -> np.ndarray:
 @pytest.fixture(scope="module")
 def loaded(golden):
     model, reference, tokens, soft = small_causal(golden)
-    yield model.load(), reference, tokens, soft
+    yield model.load_versions(), reference, tokens, soft
 
 
 @pytest.mark.supported_devices("npu2")
@@ -58,6 +58,6 @@ def test_a_causal_model_draws_after_its_soft_tokens(loaded):
         token = int(gapped(reference(history, soft)).argmax())
         expected.append(token)
         history = np.append(history, token)
-    sample = Sampler(0.0, 40, np.random.default_rng(0))
+    sample = Sampler(0.0, 40, seed=0)
     drawn, _, _ = model.generate(tokens, 3, sample, {IMAGE: (soft,)})
     assert drawn == expected

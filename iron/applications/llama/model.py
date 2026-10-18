@@ -132,7 +132,10 @@ class Runner(lm.Runner):
     config = LlamaConfig
     model = Llama
     open_tokenizer = staticmethod(tokenizer)
+    tokenizer_file = "original/tokenizer.model"
 
+
+Llama.runner = Runner
 
 if __name__ == "__main__":
     lm.main(Runner, "Llama 3.2 1B on the NPU")

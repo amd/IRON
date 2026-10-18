@@ -84,7 +84,7 @@ def test_smolvlm_accuracy(runner, model, reference, seed, question, record_prope
     if runner.tokenizer is None:
         ids = [int(t) for t in rng.integers(0, vision.image_token, len(question) // 4)]
     else:
-        ids = runner.tokenizer.encode(question)
+        ids = runner.tokenizer.encoding.encode(question)
     tokens = build_prompt(ids, vision)
     raw = {vision.image_token: (image,)}
     results = []

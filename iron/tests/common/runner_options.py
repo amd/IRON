@@ -75,7 +75,7 @@ def test_from_options_with_a_tokenizer_matches_direct_construction():
     got = SmallRunner.from_options([str(path), str(TOKENIZER)])
     assert got.config == want.config == SMALL
     assert got.seed is want.seed is None
-    assert got.tokenizer.encode("hello") == want.tokenizer.encode("hello")
+    assert got.tokenizer("hello") == want.tokenizer("hello")
 
 
 def test_from_options_refuses_both_a_tokenizer_and_random_weights():

@@ -35,16 +35,16 @@ class Sampler:
     the whole row (the host only: the device's top-k is bounded). A
     temperature of 0 is greedy (the first largest).
 
-    Each draw takes one uniform from ``rng``, greedy or not, so a seeded
-    generator makes the draws reproducible, and ``rows`` hands the
-    device the same uniforms; None is one seeded at ``SEED``.
+    Each draw takes one uniform from a generator seeded at ``seed``, greedy
+    or not, so the draws are reproducible, and ``rows`` hands the device
+    the same uniforms.
     """
 
     def __init__(
         self,
         temperature: float = 0.7,
         top_k: int | None = 50,
-        rng: np.random.Generator | None = None,
+        seed: int = SEED,
     ):
         if temperature < 0:
             raise ValueError(f"temperature {temperature} is negative")
@@ -56,7 +56,7 @@ class Sampler:
             raise ValueError(f"top_k {top_k} keeps no token")
         self.temperature = np.float32(temperature)
         self.top_k = top_k
-        self.rng = np.random.default_rng(SEED) if rng is None else rng
+        self.rng = np.random.default_rng(seed)
 
     def _top_k(self, size: int) -> int:
         return size if self.top_k is None else self.top_k

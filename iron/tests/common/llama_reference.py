@@ -23,7 +23,11 @@ graph computes in bfloat16 and the reference in float32, so the logits
 agree to bf16 tolerance and the argmax exactly.
 """
 
+import base64
 import dataclasses
+import itertools
+import json
+import struct
 from types import SimpleNamespace
 
 import numpy as np
@@ -40,9 +44,10 @@ from iron.lm import (
     generate_on_host,
 )
 from iron.lm.generation import greedy
+from iron.lm.base import leaves
 from iron.lm.golden import Golden, HuggingFace
 from iron.lm.testing import assert_close
-from iron.applications.llama.model import Llama
+from iron.applications.llama import Llama
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.rope import RoPE
@@ -280,13 +285,13 @@ def test_a_token_outside_the_vocabulary_is_refused_before_any_dispatch(cpu, outs
 
 
 def test_a_model_runs_only_the_versions_it_loaded(cpu):
-    """Before ``load()`` a call compiles nothing on its own: that would build
-    an untuned version past the tuner and packaging ``load`` is given.
+    """Before ``load_versions()`` a call compiles nothing on its own: that would build
+    an untuned version past the tuner and packaging ``load_versions`` is given.
     """
     model = Llama(cpu.config, cpu.weights)
-    with pytest.raises(RuntimeError, match=r"load\(\) first"):
+    with pytest.raises(RuntimeError, match=r"load_versions\(\) first"):
         model.logits(cpu.prompt)
-    with pytest.raises(RuntimeError, match=r"load\(\) first"):
+    with pytest.raises(RuntimeError, match=r"load_versions\(\) first"):
         model(start=0, rows=1, rope_start=0, token=0, position=0)
     assert not model._versions
 
@@ -314,11 +319,11 @@ def test_the_carried_draws_are_the_host_loop_s_tokens(cpu, temperature):
     config, n, count = cpu.config, len(cpu.prompt), 6
     host = OnHost(config, cpu.weights)
     expected, _, _ = generate_on_host(
-        host, cpu.prompt, count, Sampler(temperature, 40, np.random.default_rng(5))
+        host, cpu.prompt, count, Sampler(temperature, 40, seed=5)
     )
     model = OnHost(config, cpu.weights)
     draws = np.zeros(model.draws.shape, dtype=np.int32)
-    sampler = Sampler(temperature, 40, np.random.default_rng(5))
+    sampler = Sampler(temperature, 40, seed=5)
     draws[n - 1 : n - 1 + count] = sampler.rows(count, k_max=64)
     model.draws.host = draws
     ((inputs, values),) = model._chunks(np.asarray(cpu.prompt), 0)
@@ -431,3 +436,48 @@ def test_a_context_no_chunk_divides_runs_to_its_last_position(cpu):
             rows=45,
             rope_start=256,
         )
+
+
+def _repository(directory, weights):
+    """A Hugging Face Llama repository's files at ``SMALL``'s shape: its
+    ``config.json``, of a context of two prompt chunks so that loading fits
+    it, ``weights``, and a tokenizer of every byte and enough two-byte
+    pieces to fill the vocabulary, its last id the BOS.
+    """
+    V = SMALL.vocab_size
+    config = SMALL.to_json() | {"max_position_embeddings": 4096, "bos_token_id": V - 1}
+    (directory / "config.json").write_text(json.dumps(config))
+    header, end = {}, 0
+    for name, t in leaves(weights):
+        header[name] = dict(
+            dtype="BF16", shape=t.shape, data_offsets=[end, end + t.nbytes]
+        )
+        end += t.nbytes
+    blob = json.dumps(header).encode()
+    with open(directory / "model.safetensors", "wb") as f:
+        f.write(struct.pack("<Q", len(blob)) + blob)
+        for _, t in leaves(weights):
+            f.write(t.tobytes())
+    pairs = itertools.product(range(ord("a"), ord("z") + 1), range(32, 127))
+    pieces = [bytes([b]) for b in range(256)] + [bytes(p) for p in pairs][: V - 256]
+    ranks = "".join(
+        f"{base64.b64encode(p).decode()} {i}\n" for i, p in enumerate(pieces)
+    )
+    (directory / "original").mkdir()
+    (directory / "original" / "tokenizer.model").write_text(ranks)
+
+
+def test_the_quick_start_script_runs_on_a_toy_repository(cpu, tmp_path):
+    """The quick start's calls on a toy repository, the host standing in for
+    the NPU: the BOS and the text's ids, and from seed 0 the tokens the
+    host loop draws from the model on the same weights.
+    """
+    _repository(tmp_path, cpu.weights)
+    model = OnHost.load(tmp_path)
+    tokens = model.tokenizer("The capital of France is")
+    out, ttft, per_token = model.generate(tokens, num_tokens=8, sample=Sampler(seed=0))
+    assert tokens[0] == SMALL.vocab_size - 1
+    assert model.tokenizer.decode(tokens[1:]) == "The capital of France is"
+    host = OnHost(cpu.config, cpu.weights)
+    want, _, _ = generate_on_host(host, tokens, 8, Sampler(seed=0))
+    assert out == want

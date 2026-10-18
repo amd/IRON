@@ -325,7 +325,7 @@ def windows(config, pixel_values, positions):
 
 def loaded(graph, full_elf=None):
     """`graph` compiled and loaded for a fixture's tests, then released."""
-    yield graph.load(full_elf=full_elf)
+    yield graph.load_versions(full_elf=full_elf)
     if aie_utils.DefaultNPURuntime is not None:
         aie_utils.DefaultNPURuntime.cleanup()
 

@@ -334,7 +334,7 @@ def main():
     args = parser.parse_args()
     tokenizer = Tokenizer(args.directory / "tokenizer.json", config)
     weights = Checkpoint(args.directory / "model.safetensors").tree()
-    encoder = EmbeddingGemma(config, weights, tokenizer).load()
+    encoder = EmbeddingGemma(config, weights, tokenizer).load_versions()
     try:
         t = time.perf_counter()
         query = encoder.embed(args.query, "query", args.dims)

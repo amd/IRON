@@ -1010,7 +1010,7 @@ library imports a model. The modules:
   (`weights.model.layers[3].self_attn.q_proj.weight`): `"read"`, views of
   the file; `"random"`, drawn at a seed; `"unread"`, allocated and never
   written, for tracing and building; `Derived`, weights a model computes
-  from that tree; `Model`, a graph whose versions `load()` compiles before
+  from that tree; `Model`, a graph whose versions `load_versions()` compiles before
   the first call, with `sanitize(w)`, which renames one layer's modules to
   the names the parts read; `OnHost`, a model mixin that runs the graph's
   own reference (`Graph.reference`) in place of the device; and `Runner`

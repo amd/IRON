@@ -525,7 +525,7 @@ def random_logits(n=1000, seed=0):
 
 def test_greedy_is_argmax():
     logits = random_logits()
-    sampler = Sampler(0.0, top_k=50, rng=np.random.default_rng(0))
+    sampler = Sampler(0.0, top_k=50, seed=0)
     assert sampler(logits) == int(np.argmax(logits.astype(np.float32)))
 
 
@@ -543,13 +543,13 @@ def test_top_k_never_leaves_the_top_k():
     k = 5
     x = logits.astype(np.float32)
     top = set(np.flatnonzero(x >= np.sort(x)[-k]).tolist())
-    sampler = Sampler(1.0, k, np.random.default_rng(3))
+    sampler = Sampler(1.0, k, seed=3)
     assert {sampler(logits) for _ in range(2000)} == top
 
 
 def test_top_k_keeps_ties_with_the_kth():
     logits = np.array([5.0, 3.0, 3.0, 3.0, 1.0], dtype=np.float32)
-    probs = Sampler(1.0, 2, np.random.default_rng(0)).probabilities(logits)
+    probs = Sampler(1.0, 2, seed=0).probabilities(logits)
     assert np.all(probs[:4] > 0) and probs[4] == 0
 
 
@@ -559,8 +559,8 @@ def test_device_rows_are_the_host_draws():
     """
     logits = random_logits(4096, seed=6)
     for temperature in (0.7, 0.0):
-        host = Sampler(temperature, 50, np.random.default_rng(9))
-        device = Sampler(temperature, 50, np.random.default_rng(9))
+        host = Sampler(temperature, 50, seed=9)
+        device = Sampler(temperature, 50, seed=9)
         rows = device.rows(8, k_max=64)
         want = [host(logits) for _ in range(8)]
         assert [sample.reference(logits, r) for r in rows] == want
@@ -568,16 +568,15 @@ def test_device_rows_are_the_host_draws():
 
 
 def test_device_rows_refuse_an_unbounded_top_k():
-    rng = np.random.default_rng(0)
     with pytest.raises(ValueError, match="device draws"):
-        Sampler(0.7, None, rng).rows(1, k_max=64)
+        Sampler(0.7, None).rows(1, k_max=64)
     with pytest.raises(ValueError, match="device draws"):
-        Sampler(0.7, 65, rng).rows(1, k_max=64)
+        Sampler(0.7, 65).rows(1, k_max=64)
 
 
 def test_draws_follow_the_distribution():
     logits = np.log(np.array([0.5, 0.3, 0.2], dtype=np.float32))
-    sampler = Sampler(1.0, None, np.random.default_rng(5))
+    sampler = Sampler(1.0, None, seed=5)
     counts = np.bincount([sampler(logits) for _ in range(20000)], minlength=3)
     np.testing.assert_allclose(counts / counts.sum(), [0.5, 0.3, 0.2], atol=0.015)
 

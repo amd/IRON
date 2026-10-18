@@ -191,7 +191,7 @@ def test_whisper_toy_on_the_device(clip, reference):
     each within 5% of Hugging Face's largest logit, as the references are.
     """
     weights, features = clip
-    model = Whisper(TOY, weights).load()
+    model = Whisper(TOY, weights).load_versions()
     model.encode(features)
     tokens = list(np.random.default_rng(2).integers(0, TOY.vocab_size, 300))
     for _ in range(3):
