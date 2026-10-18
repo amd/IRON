@@ -489,6 +489,13 @@ def test_random_fill_draws_at_its_seed(toy_path):
             assert abs(x.std() * np.sqrt(tensor.shape[1]) - 1) < 0.1, name
 
 
+def test_random_fill_draws_a_bias_about_zero(tmp_path):
+    vectors = {n: np.zeros(1000, np.float32) for n in ("norm.weight", "proj.bias")}
+    save_file(vectors, tmp_path / "v.safetensors")
+    tree = Checkpoint(tmp_path / "v.safetensors").tree("random")
+    assert abs(tree.norm.weight.mean() - 1) < 0.1 and abs(tree.proj.bias.mean()) < 0.1
+
+
 def test_renamed_is_a_copy_a_sanitize_may_change(toy_path):
     tree = Checkpoint(toy_path).tree("unread")
     layer = tree.model.layers[0]

@@ -17,7 +17,7 @@ from iron.applications.idefics3.hugging_face import HuggingFaceVLM
 from iron.applications.idefics3.model import SmolVLMText, SmolVLMTextConfig
 from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 from iron.lm import Multimodal
-from iron.tests.common.llama_model import drawn, shapes
+from iron.tests.common.llama_model import checkpoint, shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -94,7 +94,7 @@ def text_names(c: SmolVLMTextConfig) -> dict[str, tuple[int, ...]]:
 
 @pytest.fixture(scope="module")
 def weights():
-    return drawn(TEXT, text_names(TEXT) | vision_names(VISION), 0)
+    return checkpoint(TEXT, text_names(TEXT) | vision_names(VISION)).tree("random")
 
 
 class SoftTokens:

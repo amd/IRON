@@ -91,6 +91,7 @@ public API adds its entry under Unreleased.
 - A missing golden fails `check_accuracy` instead of skipping it, and a golden
   whose fingerprint no longer matches is refused.
 - `CausalLM.generate` times the first token from the call.
+- `Checkpoint.tree("random")` draws a bias about zero, not one.
 - `Runner.npu()` takes only `full_elf`.
 
 - `Operand.count`, `Operator.device()` and `Operator.configuration()` are

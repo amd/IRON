@@ -493,9 +493,9 @@ class Checkpoint:
                 mapped file read only when touched. ``"random"``: drawn at
                 ``seed`` in the file's order, each matrix normal with
                 deviation ``1/sqrt(in)`` (an embedding's ``in`` its width),
-                anything of fewer than two axes (a norm, a bias) normal about
-                one with deviation 0.1, so that swapping two changes the
-                output. ``"unread"``: allocated
+                anything of fewer than two axes normal with deviation 0.1,
+                about zero if it is a bias and about one otherwise (a norm),
+                so that swapping two changes the output. ``"unread"``: allocated
                 and never written, for tracing, building and measuring a
                 model, none of which reads a weight; the pages are reserved,
                 not touched, and a scalar is zero, since a graph may read one
@@ -511,19 +511,14 @@ class Checkpoint:
             tensors = self.tensors
         elif fill == "random":
             rng = np.random.default_rng(seed)
-            tensors = {
-                name: (
-                    (1 + rng.standard_normal(t.shape, dtype=np.float32) / 10).astype(
-                        t.dtype
-                    )
-                    if t.ndim < 2
-                    else (
-                        rng.standard_normal(t.shape, dtype=np.float32)
-                        / np.sqrt(math.prod(t.shape[1:]))
-                    ).astype(t.dtype)
-                )
-                for name, t in self.tensors.items()
-            }
+
+            def draw(name, t):
+                x = rng.standard_normal(t.shape, dtype=np.float32)
+                if t.ndim >= 2:
+                    return (x / np.sqrt(math.prod(t.shape[1:]))).astype(t.dtype)
+                return (x / 10 + (not name.endswith("bias"))).astype(t.dtype)
+
+            tensors = {name: draw(name, t) for name, t in self.tensors.items()}
         elif fill == "unread":
             tensors = {
                 name: (

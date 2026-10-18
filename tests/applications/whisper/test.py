@@ -19,7 +19,7 @@ from ml_dtypes import bfloat16
 
 from iron.applications.whisper.hugging_face import HuggingFaceWhisper
 from iron.applications.whisper.model import Whisper, WhisperConfig, WhisperEncoder
-from iron.tests.common.llama_model import drawn
+from iron.tests.common.llama_model import checkpoint
 
 #: Whisper's proportions at toy size: 200 source positions, padded to 256,
 #: as many as a prompt chunk's queries, the fewest its cross attention takes.
@@ -98,7 +98,7 @@ def _assert_close(got, want, what: str):
 @pytest.fixture(scope="module")
 def clip():
     """The toy's weights and a clip's features, ``(num_mel_bins, frames)``."""
-    weights = drawn(TOY, names(TOY), 0)
+    weights = checkpoint(TOY, names(TOY)).tree("random")
     encoder = TOY.encoder()
     rng = np.random.default_rng(1)
     features = rng.uniform(-1, 1, (encoder.num_mel_bins, encoder.frames))
@@ -199,7 +199,7 @@ def test_whisper_s_exact_gelu_is_refused_until_its_kernel():
     """The checkpoint's own ``gelu`` (exact): no operator yet."""
     exact = dataclasses.replace(TOY, hidden_act="gelu")
     with pytest.raises(ValueError, match="'gelu'"):
-        Whisper(exact, drawn(TOY, names(TOY), 0))
+        Whisper(exact, checkpoint(TOY, names(TOY)).tree("random"))
 
 
 @pytest.mark.supported_devices("npu2")
@@ -221,10 +221,10 @@ def test_whisper_toy_on_the_device(clip, reference):
 def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
     """Whisper ships float16: the graph holds each weight rounded once to
     bf16 (``bf16``), Hugging Face's model the float16 itself, and the prompt's logits
-    stay within the bound the bf16 checkpoint's are held to (0.64% of the
-    largest logit, against 0.54% from a bf16 checkpoint).
+    stay within the bound the bf16 checkpoint's are held to (0.66% of the
+    largest logit, against 0.62% from a bf16 checkpoint).
     """
-    weights = drawn(TOY, names(TOY), 0, "F16")
+    weights = checkpoint(TOY, names(TOY), "F16").tree("random")
     assert weights.model.decoder.embed_tokens.weight.dtype == np.float16
     model = Whisper(TOY, weights)
     reference = golden(
