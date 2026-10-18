@@ -26,7 +26,6 @@ from pathlib import Path
 
 import pytest
 
-import iron
 from iron.common import Chain
 from iron.operators.clamp import Clamp
 from iron.operators.gemv import GEMV

@@ -15,7 +15,7 @@ import dataclasses
 import aie.iron
 import numpy as np
 import pytest
-from aie.iron.device import Tile, from_name
+from aie.iron.device import from_name
 from aie.utils.trace import TraceConfig
 from ml_dtypes import bfloat16
 
@@ -718,8 +718,6 @@ def test_overriding_an_inherited_field_needs_an_annotation():
 
 
 def test_resolve_columns_is_the_count_given_or_the_most_that_fit():
-    from aie.iron.device import Tile, from_name
-
     op = MV(M=96, K=64)
     dev = from_name("npu2", n_cols=8)  # the shim budget is the device's
     assert op.resolve_columns(dev, 2) == 2  # given, within the budget

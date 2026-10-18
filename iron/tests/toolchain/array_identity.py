@@ -18,7 +18,6 @@ import re
 
 import pytest
 
-from iron.common import Unresolvable
 from iron.common.declare import Out
 from iron.common.design import OperatorDesign
 from iron.common.graph.trace import TracedGraph

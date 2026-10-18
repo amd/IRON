@@ -30,7 +30,6 @@ from aie.iron.device import NPU2, AnyShimTile, Tile
 from aie.utils.compile.jit._hash import _python_identity
 from ml_dtypes import bfloat16
 
-import iron
 from iron.common.image import AdjacentPacking, coresidence, fusion
 from iron.common.image.coresidence import Packing
 from iron.common.image.fusion import Fusion

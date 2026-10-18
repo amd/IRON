@@ -17,30 +17,15 @@ import struct
 import tempfile
 from pathlib import Path
 
-import aie.utils as aie_utils
 import numpy as np
 import pytest
-from aie.iron.device import from_name
 from ml_dtypes import bfloat16
 
 from iron.applications.phi3.model import LongRope, Phi4, Phi4Config
 from iron.lm import Checkpoint, OnHost as Host, accuracy, determinism
 from iron.lm.golden import HuggingFace
 
-
-@pytest.fixture(autouse=True)
-def _npu2():
-    """``npu2``, bound explicitly rather than through the shared fixture:
-    its ``get_current_device()`` falls back to probing the real runtime
-    when nothing is bound yet, which on a host with no live NPU retries
-    against hardware instead of just failing. ``probe_runtime=False``
-    here never does that.
-    """
-    previous = aie_utils.get_current_device(probe_runtime=False)
-    aie_utils.set_current_device(from_name("npu2", n_cols=8))
-    yield
-    aie_utils.set_current_device(previous)
-
+pytestmark = pytest.mark.usefixtures("npu2")
 
 #: Phi-4-mini-instruct's proportions at toy size: GQA, a fused qkv/gate_up,
 #: partial rotary (half of each head), LongRoPE's amplitude scale.
