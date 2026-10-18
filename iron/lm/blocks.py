@@ -657,75 +657,6 @@ class ImagePatches(iron.Graph):
 
 
 @dataclasses.dataclass(frozen=True)
-class Mamba2:
-    """A Mamba-2 mixer over a checkpoint's ``mamba`` module, read by its
-    Hugging Face names: ``in_proj`` cut by rows into the gate, the
-    convolved ``x``, ``B`` and ``C``, and ``dt``; ``conv1d``, ``A_log``,
-    ``D``, ``dt_bias``, the gated ``norm`` and ``out_proj``.
-
-    Args:
-        heads: ``mamba_n_heads``.
-        head_dim: ``mamba_d_head``.
-        state: ``mamba_d_state``, a head row's state.
-        groups: ``mamba_n_groups``, each one ``B`` and ``C`` its heads share.
-        kernel: ``mamba_d_conv``, the convolution's taps.
-        block: ``mamba_chunk_size``, the positions of a block of the
-            oracle's chunked scan.
-        eps: The gated norm's epsilon.
-    """
-
-    heads: int
-    head_dim: int
-    state: int
-    groups: int
-    kernel: int
-    block: int
-    eps: float
-
-    @property
-    def inner(self) -> int:
-        """The width of ``x``, the gate and the output before ``out_proj``."""
-        return self.heads * self.head_dim
-
-    @property
-    def conv_width(self) -> int:
-        """The convolved channels: ``x``, ``B`` and ``C``."""
-        return self.inner + 2 * self.groups * self.state
-
-    def states(self) -> dict[str, tuple[tuple[int, ...], type]]:
-        """What a position carries to the next, by name: the convolution's
-        last inputs and the scan's state, each shape and dtype.
-        """
-        return dict(
-            conv=((self.kernel - 1, self.conv_width), bfloat16),
-            ssm=((self.heads, self.head_dim, self.state), np.float32),
-        )
-
-    def oracle(self, o, m, h) -> np.ndarray:
-        """The mixer on ``h`` ``(rows, width)`` from the state before the
-        sequence, in float32 on the host, from the ``Oracle`` ``o``'s
-        primitives; ``m`` is the module, widened to float32.
-        """
-        n, I, H, P = h.shape[0], self.inner, self.heads, self.head_dim
-        GN = self.groups * self.state
-        cuts = (0, I, I + self.conv_width, I + self.conv_width + H)
-        gate, xbc, dt = (o.linear(h, *p) for p in Layer.cut(m.in_proj, cuts))
-        weight, bias = Layer.linear(m.conv1d)
-        xbc = o.silu(o.causal_conv(xbc, weight[:, 0], bias))
-        x = xbc[:, :I].reshape(n, H, P)
-        B, C = (
-            xbc[:, I + k * GN : I + (k + 1) * GN].reshape(n, self.groups, -1)
-            for k in (0, 1)
-        )
-        dt = o.softplus(dt + m.dt_bias)
-        y, _ = o.ssd(x, dt, -np.exp(m.A_log), B, C, self.block)
-        y = (y + m.D[:, None] * x).reshape(n, I) * o.silu(gate)
-        mean = np.mean(y * y, axis=-1, keepdims=True)
-        y = y * np.power(mean + np.float32(self.eps), np.float32(-0.5)) * m.norm.weight
-        return o.linear(y, *Layer.linear(m.out_proj))
-
-
-@dataclasses.dataclass(frozen=True)
 class Layer:
     """A transformer layer over a checkpoint's layer module, read by its
     Hugging Face names: attention, then the feed-forward, each after its
@@ -740,11 +671,9 @@ class Layer:
     ``qkv_proj``, ``gate_up_proj`` or ``input_linear`` cut by rows; the
     feed-forward held by a module ``FEED_FORWARDS`` names or the layer
     itself, plain where it holds
-    ``fc1`` and ``fc2``, else gated by a family of ``GATED``, or a mixture
-    of experts (``Experts.mixture``); a per-layer input where it or its
-    ``ple_block`` holds ``per_layer_input_gate``; a ``layer_scalar``; a
-    Mamba-2 mixer (``ssm``)
-    in place of attention where it holds ``mamba``; and where it holds
+    ``fc1`` and ``fc2``, else gated by a family of ``GATED``; a per-layer input where it or its
+    ``ple_block`` holds ``per_layer_input_gate``; a ``layer_scalar``; and
+    where it holds
     ``encoder_attn``, a cross-attention block after attention, over an
     encoder's output (``cross_kv``). A model kind gives the attention and
     the rotation: ``attend(q, k, v, scale=, window=)`` on ``(rows, heads,
@@ -768,9 +697,6 @@ class Layer:
             (``residual_multiplier``).
         accurate: Whether every projection sums in float32 and rounds once
             (``F.linear(accurate=True)``).
-        ssm: The mixer of a module holding ``mamba``.
-        experts: How a mixture of experts the module holds routes its rows
-            (``Experts``); None where the config routes none.
         shares_kv: Whether the layer attends over an earlier layer's keys
             and values (``num_kv_shared_layers``), projecting none of its own.
         ple_scale: What the per-layer input is scaled by.
@@ -787,8 +713,6 @@ class Layer:
     v_norm: bool = False
     residual: float = 1.0
     accurate: bool = False
-    ssm: Mamba2 | None = None
-    experts: "Experts | None" = None
     shares_kv: bool = False
     ple_scale: float = 1.0
 
@@ -1089,18 +1013,10 @@ class Layer:
                 values (``cross_kv_oracle``), for an ``encoder_attn``.
             ple: The per-layer input ``per_layer_input_gate`` gates, over
                 ``ple_scale``.
-
-        Raises:
-            ValueError: The module holds ``mamba`` and the layer no ``ssm``.
         """
         before, after, _, _ = self.norms(w)
         h = o.normed(x, before)
-        if "mamba" in vars(w):
-            if self.ssm is None:
-                raise ValueError("Layer: the module holds mamba and the config no ssm")
-            y = self.ssm.oracle(o, w.mamba, h)
-        else:
-            y = self.attention_oracle(o, w.self_attn, h, attend, angles)
+        y = self.attention_oracle(o, w.self_attn, h, attend, angles)
         if after is not None:
             y = o.normed(y, after)
         r = np.float32(self.residual)
@@ -1161,16 +1077,8 @@ class Layer:
         _, _, before, after = self.norms(w)
         silu = self.activation == "silu"
         h = o.normed(x, before)
-        mixture = Experts.mixture(w) is not None
-        if mixture and self.experts is None:
-            raise ValueError(
-                "Layer: the module holds a mixture of experts and the config "
-                "routes none (num_experts_per_tok)"
-            )
-        mlp = () if mixture else self.mlp(w)
-        if mixture:
-            f = self.experts.oracle(o, w, h, self.activation)
-        elif len(mlp) == 2:
+        mlp = self.mlp(w)
+        if len(mlp) == 2:
             fc1, fc2 = mlp
             g = o.linear(h, *fc1)
             f = o.linear(o.silu(g) if silu else o.gelu_tanh(g), *fc2)
@@ -1196,118 +1104,3 @@ class Layer:
         if after is not None:
             f = o.normed(f, after)
         return x + f * np.float32(self.residual)
-
-
-@dataclasses.dataclass(frozen=True)
-class Experts:
-    """How a mixture of experts routes each row: to its ``top_k`` experts,
-    their outputs summed by a softmax over the chosen logits, or without
-    ``normalize`` by the chosen experts' share of a softmax over every logit.
-
-    The checkpoint's layer module decides the rest, by its Hugging Face
-    names: the mixture is its ``block_sparse_moe``, or its ``mlp`` where that
-    holds ``experts``; the router ``router`` (through a ``layer`` wrapper) or
-    ``gate``; the experts gated feed-forwards, stacked (``input_linear`` and
-    ``output_linear``, or ``experts.gate_up_proj`` and ``experts.down_proj``,
-    gate rows first) or one module each (``experts[j]``, a family of
-    ``GATED``); and a shared expert, added, where the layer holds
-    ``shared_mlp`` or the mixture ``shared_expert``, scaled by the sigmoid of
-    ``shared_expert_gate`` where it holds one.
-
-    Args:
-        top_k: The experts a row is routed to (``num_experts_per_tok``).
-        normalize: Whether the weights are a softmax over the chosen logits
-            alone (``norm_topk_prob``).
-    """
-
-    top_k: int
-    normalize: bool = True
-
-    @staticmethod
-    def mixture(w):
-        """The layer module ``w``'s mixture of experts, else None."""
-        held = vars(w)
-        if "block_sparse_moe" in held:
-            return w.block_sparse_moe
-        m = held.get("mlp")
-        if m is not None and "experts" in vars(m):
-            return m
-        return None
-
-    @staticmethod
-    def router(m) -> np.ndarray:
-        """The mixture ``m``'s router weight, ``(experts, width)``."""
-        if "router" in vars(m):
-            return vars(m.router).get("layer", m.router).weight
-        return m.gate.weight
-
-    @staticmethod
-    def experts(m) -> tuple:
-        """The mixture ``m``'s experts' gate, up and down weights, each indexed
-        by expert: views of its stacked arrays, or each expert's own.
-
-        Raises:
-            ValueError: Its experts are modules of no family of ``GATED``.
-        """
-        if "input_linear" in vars(m):
-            gate_up, down = m.input_linear.weight, m.output_linear.weight
-        elif isinstance(m.experts, list):
-            for names in GATED:
-                if names[0] in vars(m.experts[0]):
-                    return tuple([vars(e)[n].weight for e in m.experts] for n in names)
-            raise ValueError(f"Experts: an expert holds none of {GATED}")
-        else:
-            gate_up, down = m.experts.gate_up_proj, m.experts.down_proj
-        F = gate_up.shape[1] // 2
-        return gate_up[:, :F], gate_up[:, F:], down
-
-    @staticmethod
-    def shared(w, m) -> tuple | None:
-        """The shared expert of the layer module ``w`` and its mixture ``m``:
-        its gate, up and down weights and its gate's weight, ``(1, width)``
-        or None; else None.
-        """
-        if "shared_mlp" in vars(w):
-            s = w.shared_mlp
-            F = s.input_linear.weight.shape[0] // 2
-            gate_up = s.input_linear.weight
-            return gate_up[:F], gate_up[F:], s.output_linear.weight, None
-        held = vars(m)
-        if "shared_expert" not in held:
-            return None
-        (gate, _), (up, _), (down, _) = Layer.mlp(m.shared_expert)
-        scale = held.get("shared_expert_gate")
-        return gate, up, down, None if scale is None else scale.weight
-
-    def oracle(self, o, w, h, activation: str) -> np.ndarray:
-        """The mixture of the layer module ``w``, widened to float32, on its
-        normed input ``h`` ``(rows, width)``, from the ``Oracle`` ``o``'s
-        primitives: each row's ``top_k`` by its logits, ties to the lower
-        index, each expert run on the rows routed to it.
-        """
-        m = self.mixture(w)
-        act = o.silu if activation == "silu" else o.gelu_tanh
-        logits = h @ self.router(m).T
-        ids = np.argsort(-logits, axis=-1, kind="stable")[:, : self.top_k]
-        chosen = np.take_along_axis(logits, ids, axis=-1)
-        if self.normalize:
-            p = np.exp(chosen - chosen[:, :1])
-            weights = p / p.sum(-1, keepdims=True)
-        else:
-            p = np.exp(logits - chosen[:, :1])
-            weights = np.take_along_axis(p, ids, axis=-1) / p.sum(-1, keepdims=True)
-        gate, up, down = self.experts(m)
-        out = np.zeros_like(h)
-        for e in np.unique(ids):
-            rows, ranks = np.nonzero(ids == e)
-            x = h[rows]
-            y = (act(x @ gate[e].T) * (x @ up[e].T)) @ down[e].T
-            out[rows] += weights[rows, ranks, None] * y
-        shared = self.shared(w, m)
-        if shared is not None:
-            gate, up, down, scale = shared
-            y = (act(h @ gate.T) * (h @ up.T)) @ down.T
-            if scale is not None:
-                y *= np.float32(1) / (np.float32(1) + np.exp(-(h @ scale.T)))
-            out += y
-        return out

@@ -171,14 +171,6 @@ class CausalLM(Model):
                 layer = config.layer(i)
                 self.keys[i] = iron.state((L, layer.groups, layer.head_dim))
                 self.values[i] = iron.state((L, layer.groups, layer.head_dim))
-            if "mamba" in vars(w):
-                ssm = config.layer(i).ssm
-                if ssm is None:
-                    raise ValueError(f"layer {i} holds mamba and the config no ssm")
-                self.recurrent[i] = {
-                    name: Checkpoints.of(shape, L, config.prefill_chunk, dtype)
-                    for name, (shape, dtype) in ssm.states().items()
-                }
         angles = config.angles()
         long = config.long_angles()
         # LongRoPE's: a prompt passing it reads the second table, stacked after.

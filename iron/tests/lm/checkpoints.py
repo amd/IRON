@@ -15,9 +15,6 @@ window and every slot is held to numpy exactly. A rerun from a boundary a
 decode step crossed sees the rows before it, as a chat turn's does.
 """
 
-import dataclasses
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
@@ -28,7 +25,7 @@ from iron import Carried, Scratchpad
 from iron.common.graph.carried import attach_emit, compose
 from iron.common.graph.compiled import _words
 from iron.common.image.artifacts import Parameter
-from iron.lm import CausalLM, Checkpoints, DecodeStep, DecoderConfig, Layer, Mamba2
+from iron.lm import Checkpoints, DecodeStep
 from iron.operators.copy import Copy
 from iron.operators.emit import reference as emit_reference
 
@@ -243,50 +240,3 @@ def test_a_state_resumes_from_any_chunk_boundary_on_the_device(sequences, full_e
     held = decode.read(window.tail.slots)
     np.testing.assert_array_equal(held[:4], tails(sequence[: LAST + 1], slots)[:4])
     np.testing.assert_array_equal(held[4], tails(rerun, slots)[4])
-
-
-def test_a_decoder_holds_caches_where_it_attends_and_checkpoints_where_it_recurs():
-    """A hybrid decoder's layers: key and value caches for a module that
-    attends, a ``Checkpoints`` state for each of a Mamba-2 mixer's.
-    """
-    ssm = Mamba2(heads=2, head_dim=4, state=8, groups=1, kernel=4, block=4, eps=1e-6)
-
-    @dataclasses.dataclass(frozen=True)
-    class Hybrid(DecoderConfig):
-        def layer(self, i: int) -> Layer:
-            return dataclasses.replace(super().layer(i), ssm=ssm)
-
-    shape = dict(
-        vocab_size=64,
-        hidden_size=8,
-        num_hidden_layers=3,
-        num_attention_heads=2,
-        num_key_value_heads=1,
-        head_dim=4,
-        intermediate_size=16,
-        rope_theta=1e4,
-        max_seq_len=L,
-        prefill_chunk=C,
-    )
-    config = Hybrid(**shape)
-    layers = [SimpleNamespace(mamba=None), SimpleNamespace(self_attn=None)] * 2
-    weights = SimpleNamespace(
-        model=SimpleNamespace(
-            embed_tokens=SimpleNamespace(weight=np.zeros((64, 8), bfloat16)),
-            layers=layers[:3],
-        )
-    )
-    model = CausalLM(config, weights)
-    assert list(model.keys) == list(model.values) == [1]
-    assert list(model.recurrent) == [0, 2]
-    slots = (L - 1) // C + 2
-    for states in model.recurrent.values():
-        assert {k: (v.slots.shape, v.slots.dtype) for k, v in states.items()} == {
-            "conv": ((slots, 3, 8 + 16), bfloat16),
-            "ssm": ((slots, 2, 4, 8), np.float32),
-        }
-    with pytest.raises(ValueError, match="holds mamba and the config no ssm"):
-        CausalLM(
-            DecoderConfig(**shape),
-            weights,
-        )

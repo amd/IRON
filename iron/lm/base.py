@@ -11,6 +11,7 @@ and ``Runner`` and ``main``.
 
 import argparse
 import dataclasses
+import importlib.util
 import io
 import json
 import logging
@@ -36,7 +37,7 @@ from iron.operators import ElementwiseAdd, ElementwiseMul, SiLU
 from iron.tune.narrowing import CostTable, JointNarrowing, NarrowingKinds
 from iron.tune.probe import Call
 
-from .blocks import Experts, Layer
+from .blocks import Layer
 from .golden import Golden, HuggingFace
 from .generation import (
     SEED,
@@ -187,13 +188,6 @@ class DecoderConfig(Config):
     rope_attention_scaling: float = 1.0
     prefill_chunk: int = 2048
     hidden_act: str = dataclasses.field(default="silu", metadata={"json": "hidden_act"})
-    # A mixture of experts' routing: None where the model has none.
-    num_experts_per_tok: int | None = dataclasses.field(
-        default=None, metadata={"json": "num_experts_per_tok"}
-    )
-    norm_topk_prob: bool = dataclasses.field(
-        default=True, metadata={"json": "norm_topk_prob"}
-    )
     # Whether the output head is the input embedding.
     tie_word_embeddings: bool = dataclasses.field(
         default=True, metadata={"json": "tie_word_embeddings"}
@@ -244,11 +238,6 @@ class DecoderConfig(Config):
             eps=self.eps,
             activation=self.hidden_act,
             rotary=self.rotary_dim,
-            experts=(
-                None
-                if self.num_experts_per_tok is None
-                else Experts(self.num_experts_per_tok, self.norm_topk_prob)
-            ),
         )
 
 
@@ -1253,9 +1242,7 @@ class Runner:
         if self.seed is not None:
             return type("Host", (OnHost, self.model), {})(self.config, self.weights)
         directory = Path(self.checkpoint.path).parent
-        try:
-            import transformers  # noqa: F401
-        except ImportError:
+        if importlib.util.find_spec("transformers") is None:
             return Golden(directory / "golden.npz")
         return Golden(directory / "golden.npz", lambda: HuggingFace.load(directory))
 

@@ -16,7 +16,7 @@ import pytest
 from ml_dtypes import bfloat16
 
 import iron
-from iron.lm import Layer, Mamba2, Oracle, widen
+from iron.lm import Layer, Oracle, widen
 from iron.applications.embedding_gemma2.config import AudioConfig
 from iron.operators.mha import MHA
 from iron.tests.common.llama_model import small
@@ -714,115 +714,6 @@ def test_a_decoder_layer_needs_its_cross_attention():
     layer = Layer(HEADS, HEADS, HEAD, 1e-5, "gelu_pytorch_tanh")
     with pytest.raises(TypeError, match="encoder_attn needs cross="):
         Decoder(layer, w, cross=False).trace(x=(T, WIDTH), memory=(S, WIDTH))
-
-
-# A Mamba-2 mixer's heads, head width, state, taps and the oracle's block.
-SH, SP, SN, SK, SB = 2, 4, 8, 4, 4
-
-
-def hybrid(rng, residual: float):
-    """A layer module holding a Mamba-2 mixer and a fused gated
-    feed-forward, by Granite 4.0-H's names, and its ``Layer``.
-    """
-    inner, width = SH * SP, SH * SP + 2 * SN
-    parts = {
-        "input_layernorm": (E,),
-        "post_attention_layernorm": (E,),
-        "mamba.in_proj": (inner + width + SH, E),
-        "mamba.norm": (inner,),
-        "mamba.out_proj": (E, inner),
-        "shared_mlp.input_linear": (2 * F, E),
-        "shared_mlp.output_linear": (E, F),
-    }
-    w = module(rng, parts, parts)
-    m = w.mamba
-    m.conv1d = SimpleNamespace(
-        weight=rng.standard_normal((width, 1, SK)).astype(np.float32) * 0.5,
-        bias=rng.standard_normal(width).astype(np.float32) * 0.1,
-    )
-    m.A_log = rng.standard_normal(SH).astype(np.float32)
-    m.D = rng.standard_normal(SH).astype(np.float32)
-    m.dt_bias = rng.standard_normal(SH).astype(np.float32)
-    ssm = Mamba2(SH, SP, SN, groups=1, kernel=SK, block=SB, eps=1e-6)
-    return w, Layer(H, G, D, 1e-6, residual=residual, ssm=ssm)
-
-
-@pytest.mark.parametrize("residual", [1.0, 0.22])
-def test_a_mamba_layer_s_oracle_is_its_recurrence_step_by_step(residual):
-    """The oracle's chunked scan, against the recurrence a position at a
-    time: the convolution from zero rows, the state from zero, the gated
-    norm and the fused feed-forward, each on its residual.
-    """
-    rng = np.random.default_rng(11)
-    w, layer = hybrid(rng, residual)
-    n = 3 * SB + 1
-    x = rng.standard_normal((n, E)).astype(np.float32)
-    got = layer.oracle(oracle(), w, x, None, None)
-
-    m, I = w.mamba, SH * SP
-    h = rms(x, w.input_layernorm.weight)
-    proj = h @ m.in_proj.weight.T
-    gate, xbc, dt = proj[:, :I], proj[:, I : I + I + 2 * SN], proj[:, -SH:]
-    padded = np.concatenate([np.zeros((SK - 1, xbc.shape[1]), np.float32), xbc])
-    taps = m.conv1d.weight[:, 0]
-    xbc = np.stack([(padded[t : t + SK].T * taps).sum(1) for t in range(n)])
-    xbc = xbc + m.conv1d.bias
-    xbc = xbc / (1 + np.exp(-xbc))
-    dt = np.log1p(np.exp(dt + m.dt_bias))
-    A = -np.exp(m.A_log)
-    S = np.zeros((SH, SP, SN), np.float32)
-    y = np.empty((n, SH, SP), np.float32)
-    for t in range(n):
-        u, B, C = xbc[t, :I].reshape(SH, SP), xbc[t, I : I + SN], xbc[t, I + SN :]
-        S = S * np.exp(dt[t] * A)[:, None, None] + (dt[t][:, None] * u)[..., None] * B
-        y[t] = S @ C + m.D[:, None] * u
-    y = y.reshape(n, I) * (gate / (1 + np.exp(-gate)))
-    y = rms(y, m.norm.weight)
-    x = x + residual * (y @ m.out_proj.weight.T)
-    h = rms(x, w.post_attention_layernorm.weight)
-    f = w.shared_mlp
-    up = h @ f.input_linear.weight.T
-    g = up[:, :F]
-    want = x + residual * (
-        (g / (1 + np.exp(-g)) * up[:, F:]) @ f.output_linear.weight.T
-    )
-    np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
-
-
-def test_a_fused_gated_feed_forward_reads_as_views_of_its_parts():
-    rng = np.random.default_rng(12)
-    w, _ = hybrid(rng, 1.0)
-    (gate, _), (up, _), (down, _) = Layer.mlp(w)
-    fused = w.shared_mlp.input_linear.weight
-    assert np.shares_memory(gate, fused) and np.shares_memory(up, fused)
-    np.testing.assert_array_equal(np.concatenate([gate, up]), fused)
-    assert down is w.shared_mlp.output_linear.weight
-
-
-def test_a_mamba_module_needs_the_config_s_mixer():
-    rng = np.random.default_rng(13)
-    w, layer = hybrid(rng, 1.0)
-    x = rng.standard_normal((2, E)).astype(np.float32)
-    with pytest.raises(ValueError, match="holds mamba and the config no ssm"):
-        dataclasses.replace(layer, ssm=None).oracle(oracle(), w, x, None, None)
-
-
-def test_the_chunked_scan_carries_its_state_from_call_to_call():
-    """Two calls, the second from the state the first left, are one call:
-    a prompt resumed from a chunk boundary, at blocks the calls do not
-    divide.
-    """
-    rng = np.random.default_rng(14)
-    n, cut = 23, 10
-    x = rng.standard_normal((n, SH, SP)).astype(np.float32)
-    dt = Oracle.softplus(rng.standard_normal((n, SH)).astype(np.float32))
-    A = -np.exp(rng.standard_normal(SH).astype(np.float32))
-    B, C = rng.standard_normal((2, n, 1, SN)).astype(np.float32)
-    whole, last = Oracle.ssd(x, dt, A, B, C, SB)
-    first, state = Oracle.ssd(x[:cut], dt[:cut], A, B[:cut], C[:cut], SB)
-    second, after = Oracle.ssd(x[cut:], dt[cut:], A, B[cut:], C[cut:], SB, state)
-    np.testing.assert_allclose(np.concatenate([first, second]), whole, rtol=1e-5)
-    np.testing.assert_allclose(after, last, rtol=1e-5)
 
 
 # A per-layer input's width.
