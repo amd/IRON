@@ -46,7 +46,7 @@ from iron.applications.llama.model import Llama
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd
 from iron.operators.rope import RoPE
-from iron.tests.common.llama_model import PROFILE, SMALL, checkpoint
+from iron.tests.common.llama_model import PROFILE, SMALL, checkpoint, shapes
 
 pytestmark = pytest.mark.usefixtures("npu2")  # MHA decode on any host
 
@@ -65,27 +65,6 @@ class Case:
     expected: list
 
 
-@pytest.fixture(scope="module")
-def cpu(golden):
-    """The config, its weights, its golden logits, a prompt, the golden
-    logits for it and six greedy tokens' logits.
-    """
-    config = SMALL
-    weights = checkpoint(config).tree("random")
-    reference = golden(
-        "small", lambda: HuggingFace.build("llama", config, weights), config, weights
-    )
-    # No greedy step of this prompt has a top-2 gap within bf16's resolution.
-    prompt = np.random.default_rng(7).integers(0, config.vocab_size, 8)
-    tokens, expected = prompt, []
-    first = logits = reference.logits(tokens)
-    for _ in range(6):
-        tokens = np.append(tokens, logits.argmax())
-        logits = reference.logits(tokens)
-        expected.append(logits)
-    return Case(config, weights, reference, prompt, first, expected)
-
-
 def _greedy(model, tokens, logits, n):
     """The logits of ``n`` greedy decode steps after ``tokens``, whose own
     are ``logits``.
@@ -98,46 +77,163 @@ def _greedy(model, tokens, logits, n):
     return out
 
 
-def test_decode_from_an_empty_cache_matches_the_forward_token_by_token(cpu):
-    """One token at a time only: the prompt fed a token at a time from an
-    empty cache, then the generated tokens.
+def prompt(model, tokens, **values):
+    """Each prompt chunk's reference over ``tokens`` in turn, its states
+    carried to the next and ``values`` given to each: the last chunk's
+    logits and carry. A ``Multimodal`` model's chunk holding a placeholder
+    runs ``placed``, given the count of each placeholder before it.
     """
-    model = OnHost(cpu.config, cpu.weights)
-    last = model.logits(cpu.prompt[:1])
-    for n in range(2, len(cpu.prompt) + 1):
-        last = model.logits(cpu.prompt[:n])
-    assert_close(last, cpu.first)
-    got = _greedy(model, cpu.prompt, last, len(cpu.expected))
-    for step, (a, b) in enumerate(zip(got, cpu.expected)):
-        assert_close(a, b, f"step {step}")
+    text = getattr(model, "text", model)
+    towers = list(getattr(model, "towers", {}))
+    C = text.config.prefill_chunk
+    for begin in range(0, tokens.size, C):
+        chunk = tokens[begin : begin + C]
+        inputs = (text.prompt_ids(chunk),)
+        if np.isin(chunk, towers).any():
+            before = [np.count_nonzero(tokens[:begin] == t) for t in towers]
+            unfed = (None,) * (len(model.text_inputs) + len(towers))
+            inputs = (*unfed, *inputs, np.array(before, np.int32))
+        out = model.reference(
+            *inputs,
+            token=int(chunk[-1]),
+            position=begin + chunk.size - 1,
+            start=begin,
+            rope_start=begin,
+            rows=chunk.size,
+            **values,
+        )
+    return out
 
 
-def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(cpu):
-    """The prompt at its own rows: the padding rows are masked and past the
-    prompt in the caches, and decode continues from the caches it wrote.
+class Decoder:
+    """What every decoder's graph does on the host as transformers' model
+    does over the same random weights. A subclass names the ``model``
+    class, its toy ``config``, transformers' ``model_type`` and the golden's
+    ``name`` (``goldens/<name>.npz`` beside the subclass); and ``names``,
+    ``json`` or ``profile`` where they are not Llama's or none.
     """
-    model = OnHost(cpu.config, cpu.weights)
-    first = model.logits(cpu.prompt)
-    assert_close(first, cpu.first)
-    got = _greedy(model, cpu.prompt, first, len(cpu.expected))
-    for step, (a, b) in enumerate(zip(got, cpu.expected)):
-        assert_close(a, b, f"step {step}")
+
+    pytestmark = pytest.mark.usefixtures("npu2")
+    model: type
+    config: DecoderConfig
+    model_type: str
+    name: str
+    # transformers' config keys beyond the config's own.
+    json: dict = {}
+    profile = None
+
+    @classmethod
+    def names(cls) -> dict[str, tuple[int, ...]]:
+        """Each tensor of the toy's checkpoint, by name: Llama's."""
+        return shapes(cls.config)
+
+    @classmethod
+    def case(cls, golden) -> Case:
+        """The config, its weights, its golden logits, a prompt, the golden
+        logits for it and six greedy tokens' logits.
+        """
+        config = cls.config
+        weights = checkpoint(config, cls.names()).tree("random")
+        reference = golden(
+            cls.name,
+            lambda: HuggingFace.build(cls.model_type, config, weights, **cls.json),
+            config,
+            weights,
+        )
+        # No greedy step of this prompt has a top-2 gap within bf16's resolution.
+        prompt = np.random.default_rng(7).integers(0, config.vocab_size, 8)
+        tokens, expected = prompt, []
+        first = logits = reference.logits(tokens)
+        for _ in range(6):
+            tokens = np.append(tokens, logits.argmax())
+            logits = reference.logits(tokens)
+            expected.append(logits)
+        return Case(config, weights, reference, prompt, first, expected)
+
+    def host(self, config, weights):
+        """The model on ``config`` and ``weights`` with its images stood in
+        by its graph's reference.
+        """
+        return type("OnHost", (Host, self.model), {"profile": self.profile})(
+            config, weights
+        )
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def cpu(cls, golden):
+        return cls.case(golden)
+
+    def test_decode_from_an_empty_cache_matches_the_forward_token_by_token(self, cpu):
+        """One token at a time only: the prompt fed a token at a time from an
+        empty cache, then the generated tokens.
+        """
+        model = self.host(cpu.config, cpu.weights)
+        last = model.logits(cpu.prompt[:1])
+        for n in range(2, len(cpu.prompt) + 1):
+            last = model.logits(cpu.prompt[:n])
+        assert_close(last, cpu.first)
+        got = _greedy(model, cpu.prompt, last, len(cpu.expected))
+        for step, (a, b) in enumerate(zip(got, cpu.expected)):
+            assert_close(a, b, f"step {step}")
+
+    def test_the_prompt_matches_the_forward_and_leaves_decode_its_caches(self, cpu):
+        """The prompt at its own rows: the padding rows are masked and past the
+        prompt in the caches, and decode continues from the caches it wrote.
+        """
+        model = self.host(cpu.config, cpu.weights)
+        first = model.logits(cpu.prompt)
+        assert_close(first, cpu.first)
+        got = _greedy(model, cpu.prompt, first, len(cpu.expected))
+        for step, (a, b) in enumerate(zip(got, cpu.expected)):
+            assert_close(a, b, f"step {step}")
+
+    def test_a_prompt_longer_than_a_chunk_runs_in_chunks(self, cpu):
+        """A prompt of several chunks, each attending over the caches the ones
+        before it wrote, then a decode step, then a turn of several tokens,
+        which reruns only the chunk holding its first token onwards.
+        """
+        C = cpu.config.prefill_chunk
+        config = dataclasses.replace(cpu.config, max_seq_len=4 * C)
+        model, reference = self.host(config, cpu.weights), cpu.golden
+        tokens = np.random.default_rng(3).integers(0, config.vocab_size, 150)
+        first = reference.logits(tokens)
+        assert_close(model.logits(tokens), first)
+        tokens = np.append(tokens, first.argmax())
+        assert_close(model.logits(tokens), reference.logits(tokens))
+        turn = np.random.default_rng(4).integers(0, config.vocab_size, 30)
+        tokens = np.append(tokens, turn)
+        assert_close(model.logits(tokens), reference.logits(tokens))
+
+    def test_the_accuracy_check_scores_the_model_against_the_reference(self, cpu):
+        """What ``--check-accuracy`` runs, the images stood in by the graph's
+        reference: the model against its golden logits, teacher-forced.
+        """
+        model = self.host(cpu.config, cpu.weights)
+        steps = len(cpu.expected) + 1
+        results = accuracy(model, cpu.golden, cpu.prompt, steps)
+        assert all(top1 for _, top1 in results), results
+        # bf16 graphs against a float32 forward: close, not equal. The toys
+        # measure at most 8e-5: a bound ten times that.
+        assert all(0 <= kl < 1e-3 for kl, _ in results), results
+        assert any(kl > 0 for kl, _ in results), results
+
+    def test_the_determinism_check_finds_the_reference_deterministic(self, cpu):
+        """What ``--check-determinism`` runs: two prompts, alternated, each
+        rerun from a prefill; no run differs from the first.
+        """
+        model = self.host(cpu.config, cpu.weights)
+        prompts = [cpu.prompt, cpu.prompt[::-1]]
+        assert determinism(model, prompts, 3, 3) == 0
 
 
-def test_a_prompt_longer_than_a_chunk_runs_in_chunks(cpu):
-    """A prompt of several chunks, each attending over the caches the ones
-    before it wrote, then a decode step, then a turn of several tokens,
-    which reruns only the chunk holding its first token onwards.
-    """
-    config = dataclasses.replace(cpu.config, max_seq_len=4 * cpu.config.prefill_chunk)
-    model, reference = OnHost(config, cpu.weights), cpu.golden
-    tokens = np.random.default_rng(3).integers(0, config.vocab_size, 150)
-    first = reference.logits(tokens)
-    assert_close(model.logits(tokens), first)
-    tokens = np.append(tokens, first.argmax())
-    assert_close(model.logits(tokens), reference.logits(tokens))
-    tokens = np.append(tokens, np.random.default_rng(4).integers(0, 1024, 30))
-    assert_close(model.logits(tokens), reference.logits(tokens))
+class TestLlama(Decoder):
+    model, config, model_type, name, profile = Llama, SMALL, "llama", "small", PROFILE
+
+
+@pytest.fixture(scope="module")
+def cpu(golden):
+    """``TestLlama``'s case, for the tests of the graph Llama alone needs."""
+    return TestLlama.case(golden)
 
 
 def _decoded(model, tokens, steps):
@@ -182,29 +278,6 @@ def test_a_model_runs_only_the_versions_it_loaded(cpu):
     with pytest.raises(RuntimeError, match=r"load\(\) first"):
         model(start=0, rows=1, rope_start=0, token=0, position=0)
     assert not model._versions
-
-
-def test_the_accuracy_check_scores_the_model_against_the_reference(cpu):
-    """What ``--check-accuracy`` runs, the images stood in by the graph's
-    reference: the model against its golden logits, teacher-forced.
-    """
-    model = OnHost(cpu.config, cpu.weights)
-    steps = len(cpu.expected) + 1
-    results = accuracy(model, cpu.golden, cpu.prompt, steps)
-    assert all(top1 for _, top1 in results), results
-    # bf16 graphs against a float32 forward: close, not equal. The toys
-    # measure at most 8e-5: a bound ten times that.
-    assert all(0 <= kl < 1e-3 for kl, _ in results), results
-    assert any(kl > 0 for kl, _ in results), results
-
-
-def test_the_determinism_check_finds_the_reference_deterministic(cpu):
-    """What ``--check-determinism`` runs: two prompts, alternated, each
-    rerun from a prefill; no run differs from the first.
-    """
-    model = OnHost(cpu.config, cpu.weights)
-    prompts = [cpu.prompt, cpu.prompt[::-1]]
-    assert determinism(model, prompts, 3, 3) == 0
 
 
 def test_a_short_prompt_runs_at_its_own_rows(cpu):
@@ -283,8 +356,8 @@ def test_a_decoder_without_rope_places_its_positions_through_the_hook(cpu):
     table = (table / 2).astype(bfloat16)
     model = Placed(config, cpu.weights, table)
     assert model.rope is None
-    for shapes in model.shapes():
-        steps = model.trace(**shapes).steps
+    for version in model.shapes():
+        steps = model.trace(**version).steps
         assert not any(isinstance(s.op, RoPE) for s in steps)
     tokens = np.random.default_rng(10).integers(0, config.vocab_size, 300)
     prompted = model.logits(tokens)

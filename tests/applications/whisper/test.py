@@ -21,6 +21,7 @@ from iron.applications.whisper.hugging_face import HuggingFaceWhisper
 from iron.applications.whisper.model import Whisper, WhisperConfig, WhisperEncoder
 from iron.lm.testing import LOGITS, assert_close
 from iron.tests.common.llama_model import checkpoint
+from iron.tests.common.llama_reference import prompt
 
 #: Whisper's proportions at toy size: 200 source positions, padded to 256,
 #: as many as a prompt chunk's queries, the fewest its cross attention takes.
@@ -169,19 +170,7 @@ def test_the_decoder_attends_over_the_encoded_clip(clip, reference):
     values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
     model.reference(None, buffer, **values, encoder_rows=own["rows"])
     tokens = np.random.default_rng(2).integers(0, TOY.vocab_size, 300)
-    C = TOY.prefill_chunk
-    for begin in range(0, tokens.size, C):
-        chunk = tokens[begin : begin + C]
-        values = dict(
-            token=int(chunk[-1]),
-            position=begin + chunk.size - 1,
-            start=begin,
-            rope_start=begin,
-            rows=chunk.size,
-            source=source,
-            encoder_rows=0,
-        )
-        logits, carry = model.reference(model.prompt_ids(chunk), **values)
+    logits, carry = prompt(model, tokens, source=source, encoder_rows=0)
     assert_close(logits, reference.logits(tokens, features), "the prompt's logits")
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, encoder_rows=0, **carry)
@@ -237,14 +226,5 @@ def test_an_fp16_checkpoint_is_rounded_once_for_the_device(golden):
     values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
     model.reference(None, buffer, **values, encoder_rows=own["rows"])
     tokens = np.random.default_rng(2).integers(0, TOY.vocab_size, 100)
-    logits, _ = model.reference(
-        model.prompt_ids(tokens),
-        token=int(tokens[-1]),
-        position=99,
-        start=0,
-        rows=100,
-        rope_start=0,
-        source=source,
-        encoder_rows=0,
-    )
+    logits, _ = prompt(model, tokens, source=source, encoder_rows=0)
     assert_close(logits, reference.logits(tokens, features), "the prompt's logits")

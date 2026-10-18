@@ -19,6 +19,7 @@ from iron.applications.idefics3.vision.model import VisionConfig, VisionTower
 from iron.lm import Multimodal
 from iron.lm.testing import LOGITS, assert_close
 from iron.tests.common.llama_model import checkpoint, shapes
+from iron.tests.common.llama_reference import prompt
 
 pytestmark = pytest.mark.usefixtures("npu2")
 
@@ -163,28 +164,12 @@ def test_the_image_s_soft_tokens_take_its_placeholders_across_a_chunk(golden, we
     image = rng.uniform(-1, 1, (VISION.image_size, VISION.image_size, 3))
     image = image.astype(bfloat16).astype(np.float32)
     raw = {IMAGE: (image,)}
-    C = TEXT.prefill_chunk
     calls, towers = model.tower_calls(tokens, raw)
     for inputs in calls:
         model.reference(
             *inputs, token=0, position=0, start=0, rows=1, rope_start=0, **towers
         )
-    for begin in range(0, tokens.size, C):
-        chunk = tokens[begin : begin + C]
-        ids = model.text.prompt_ids(chunk)
-        values = dict(
-            token=int(chunk[-1]),
-            position=begin + chunk.size - 1,
-            start=begin,
-            rope_start=begin,
-            rows=chunk.size,
-            **towers,
-        )
-        if (chunk == IMAGE).any():
-            before = np.array([np.count_nonzero(tokens[:begin] == IMAGE)], np.int32)
-            logits, carry = model.reference(None, None, ids, before, **values)
-        else:
-            logits, carry = model.reference(ids, **values)
+    logits, carry = prompt(model, tokens, **towers)
     assert_close(logits, reference.logits(tokens, image))
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, **carry, **towers)

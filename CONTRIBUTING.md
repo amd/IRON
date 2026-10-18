@@ -57,19 +57,15 @@ Hugging Face decoders need a config, a model class and a runner; see
 3. **Runner.** Subclass `iron.lm.Runner`, naming `config`, `model` and
    `bos`, and end the file with `lm.main(Runner, "...")`.
 
-4. **Tests.** A device-free test builds a toy config, draws random weights
+4. **Tests.** A decoder's device-free test subclasses `Decoder`
+   (`iron/tests/common/llama_reference.py`) with the model, a toy config
+   and transformers' model type: it draws random weights
    (`Checkpoint.tree("random", seed)`) and compares the model run on the
-   host (`class Host(OnHost, MyModel)`) with transformers' logits on the
-   same weights. Those logits are recorded once into `goldens/` beside the
-   test by the `golden` fixture:
-
-   ```python
-   reference = golden("toy", lambda: HuggingFace.build("qwen3", config, weights))
-   ```
-
-   Record with `pytest <test> --record-goldens -p no:xdist` (transformers
-   and torch are needed only then) and commit the `.npz`. See
-   `tests/applications/phi3/reference/test.py`. The device test goes in
+   host (`OnHost`) with transformers' logits on the same weights, recorded
+   once into `goldens/` beside the test by the `golden` fixture. See
+   `tests/applications/qwen3/reference/test.py`. Record with
+   `pytest <test> --record-goldens -p no:xdist` (transformers and torch
+   are needed only then) and commit the `.npz`. The device test goes in
    `tests/applications/<name>/test.py` and uses `iron.lm.testing`'s
    checks; `check_accuracy` judges the real checkpoint against the
    `golden.npz` recorded beside it. The host run uses each operator's

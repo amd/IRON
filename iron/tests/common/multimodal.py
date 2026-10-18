@@ -21,6 +21,7 @@ from iron.lm.golden import HuggingFace
 from iron.operators.copy import Copy
 from iron.tests.common.llama_model import PROFILE, SMALL, checkpoint
 from iron.lm.testing import assert_close
+from iron.tests.common.llama_reference import prompt
 from iron.tests.common.encoder import (
     HEAD_DIM,
     HEADS,
@@ -208,25 +209,8 @@ def test_a_run_of_soft_tokens_crossing_a_chunk_is_placed_on_both_sides(causal):
     zero = dict(token=0, position=0, start=0, rows=1, rope_start=0)
     for inputs in calls:
         model.reference(*inputs, **zero, **towers)
-    placed = []
-    for begin in range(0, tokens.size, C):
-        chunk = tokens[begin : begin + C]
-        ids = model.text.prompt_ids(chunk)
-        values = dict(
-            token=int(chunk[-1]),
-            position=begin + chunk.size - 1,
-            start=begin,
-            rope_start=begin,
-            rows=chunk.size,
-            **towers,
-        )
-        if (chunk == IMAGE).any():
-            before = np.array([np.count_nonzero(tokens[:begin] == IMAGE)], np.int32)
-            placed.append(int(before[0]))
-            logits, carry = model.reference(None, None, ids, before, **values)
-        else:
-            logits, carry = model.reference(ids, **values)
-    assert placed == [0, 6]
+    assert (tokens[:C] == IMAGE).any() and (tokens[C:] == IMAGE).any()
+    logits, carry = prompt(model, tokens, **towers)
     assert_close(np.asarray(logits).reshape(-1), reference(tokens, soft))
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, **carry, **towers)

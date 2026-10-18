@@ -29,6 +29,7 @@ from iron.operators.mha import MHA
 from iron.operators.rope import RoPE
 from iron.tests.common.layer import decoder, shapes
 from iron.lm.testing import assert_close
+from iron.tests.common.llama_reference import prompt
 from iron.tests.common.multimodal import Features
 
 pytestmark = pytest.mark.usefixtures("npu2")
@@ -201,46 +202,25 @@ def test_each_version_s_reference_in_turn_is_hugging_face_s(whisper):
     source = model.encoder.soft(own)
     values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
     model.reference(None, buffer, **values, encoder_rows=own["rows"])
-    logits, carry = prompt(model, tokens, source)
+    logits, carry = prompt(model, tokens, source=source, encoder_rows=0)
     assert carry["source"] == source
     got = np.asarray(logits, np.float32).reshape(-1)
     want = reference.logits(tokens, clip)
     assert_close(got, want)
     # Rows past the source move the logits further than the model's own
     # error does.
-    past, _ = prompt(model, tokens, SOURCE)
+    past, _ = prompt(model, tokens, source=SOURCE, encoder_rows=0)
     assert (
         np.abs(np.asarray(past, np.float32).reshape(-1) - got).max()
         > np.abs(got - want).max()
     )
-    logits, carry = prompt(model, tokens, source)
+    logits, carry = prompt(model, tokens, source=source, encoder_rows=0)
     tokens = np.append(tokens, carry["token"])
     logits, _ = model.reference(start=0, rows=1, rope_start=0, encoder_rows=0, **carry)
     got = np.asarray(logits).reshape(-1)
     assert_close(got, reference.logits(tokens, clip))
     with pytest.raises(AssertionError):
         assert_close(got, reference.logits(tokens, clip[:100]))
-
-
-def prompt(model, tokens, source: int):
-    """Each prompt chunk's reference over ``tokens`` in turn, attending over
-    ``source`` rows of the encoder's output: the last chunk's logits and
-    carry.
-    """
-    C = CONFIG.prefill_chunk
-    for begin in range(0, tokens.size, C):
-        chunk = tokens[begin : begin + C]
-        values = dict(
-            token=int(chunk[-1]),
-            position=begin + chunk.size - 1,
-            start=begin,
-            rope_start=begin,
-            rows=chunk.size,
-            source=source,
-            encoder_rows=0,
-        )
-        out = model.reference(model.prompt_ids(chunk), **values)
-    return out
 
 
 def test_a_decoder_call_before_any_encode_is_refused(whisper):
@@ -282,7 +262,7 @@ def run(model, buffer, n: int, source: int, tokens) -> np.ndarray:
     """
     values = dict(token=0, position=0, start=0, rows=1, rope_start=0, source=source)
     model.reference(None, buffer, **values, encoder_rows=n)
-    logits, _ = prompt(model, tokens, source)
+    logits, _ = prompt(model, tokens, source=source, encoder_rows=0)
     return np.asarray(logits, np.float32).reshape(-1)
 
 
