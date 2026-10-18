@@ -11,9 +11,6 @@ Gemma 4 model from open source code. The FastFlowLM infrastructure loads the
 model, tokenizes the prompt and serves the API; this repository provides the
 operators that run on the NPU on the text path of Gemma 4 E2B.
 
-For a smaller example that replaces only GEMM and dequant, see
-[Replace Gemma 4 GEMM and dequant in FastFlowLM](README_gemm_dequant.md).
-
 ## Quick start
 
 You need an NPU2 device (Strix, Krackan) and the IRON environment, see the
@@ -108,7 +105,6 @@ that engine from source in place of FastFlowLM's prebuilt one.
 | `pli_weights.py` | Repacks the per-layer-input weights for IRON's GEMM. |
 | `overrides.hpp` | Redirects the engine's operator dispatches to the IRON operators. |
 | `Makefile` | Builds FastFlowLM's engine with `overrides.hpp` compiled in. |
-| `gemm_dequant_overrides.hpp`, `dequantize.py` | Replace only the GEMM and dequant operators, optionally with offline-dequantized weights: [README_gemm_dequant.md](README_gemm_dequant.md). |
 
 `tests/applications/gemma4_flm/test.py` compares the IRON engine's tokens with the stock engine's.
 

@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Builds the IRON operators of Gemma 4 E2B's text path and stages them for FastFlowLM.
 
-    python build.py --engine-xclbins <FastFlowLM's src/xclbins> --out <out dir> [--only mm,dequant]
+    python build.py --engine-xclbins <FastFlowLM's src/xclbins> --out <out dir>
 
 Reads the model from $FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2. Writes:
 
-    <out>/xclbins/Gemma4-E2B-IT-NPU2/   the engine's xclbins, those --only names (all six by default) replaced by IRON's
+    <out>/xclbins/Gemma4-E2B-IT-NPU2/   the engine's xclbins, six replaced by IRON's
     <out>/xclbins/.../iron/             instruction sequences and repacked weights
     <out>/gen/                          sequence generators the engine compiles in
 """
@@ -35,8 +35,6 @@ from iron.operators.flm.gemm.design import Epilogue
 from iron.operators.flm.layer.design import LayerType
 
 MODEL = "Gemma4-E2B-IT-NPU2"
-# The engine's xclbins IRON replaces, by file stem.
-XCLBINS = ("layer", "attn", "swa", "lm_head", "mm", "dequant")
 
 # The longest prompt chunk, flm's --prefill-chunk-len. The engine starts a
 # chunk up to 127 tokens early and pads it to a multiple of 256 rows. Each row
@@ -126,7 +124,7 @@ def one_xclbin(built):
     return xclbins.pop()
 
 
-def main(engine_xclbins, out, only):
+def main(engine_xclbins, out):
     model_dir = Path(os.environ["FLM_MODEL_PATH"]) / "models" / MODEL
     config = json.loads((model_dir / "config.json").read_text())
     with aie_utils.set_current_device(NPU2()):
@@ -172,7 +170,6 @@ def main(engine_xclbins, out, only):
             "mm": gemms,
             "dequant": dequants,
         }
-        groups = {name: ops for name, ops in groups.items() if name in only}
         built = compile_all([op for ops in groups.values() for op in ops])
 
         # Stage the engine's xclbins with IRON's under the engine's file names. The
@@ -191,27 +188,24 @@ def main(engine_xclbins, out, only):
             )
 
         # Static instruction sequences, named by the shape the header looks them up by.
-        for op in groups.get("lm_head", ()):
-            shutil.copyfile(built[op].insts, iron / "lm_head.bin")
-        for op in groups.get("dequant", ()):
+        shutil.copyfile(built[lm_head].insts, iron / "lm_head.bin")
+        for op in dequants:
             shutil.copyfile(built[op].insts, iron / f"dequant_K{op.K}_N{op.N}.bin")
-        for op in groups.get("mm", ()):
+        for op in gemms:
             gelu = "_gelu" if op.epilogue == Epilogue.GELU else ""
             shutil.copyfile(
                 built[op].insts, iron / f"gemm_M{op.M}_K{op.K}_N{op.N}{gelu}.bin"
             )
-        if "mm" in groups:
-            pli_weights.write(model_dir, config, gemms[0], iron)
+        pli_weights.write(model_dir, config, gemms[0], iron)
 
         # Dynamic instruction sequences.
         gen = out / "gen"
         gen.mkdir(exist_ok=True)
-        for op in groups.get("layer", ()):
+        for op in layers:
             t = op.layer_type
             write_generator(built[op], gen / f"layer_{t}.h", f"layer_{t}")
-        for name in ("attn", "swa"):
-            for op in groups.get(name, ()):
-                write_generator(built[op], gen / f"{name}.h", name)
+        for name, op in (("attn", attn), ("swa", swa)):
+            write_generator(built[op], gen / f"{name}.h", name)
         print(f"staged {stage}")
 
 
@@ -223,13 +217,5 @@ if __name__ == "__main__":
         "--engine-xclbins", type=Path, required=True, help="FastFlowLM's src/xclbins"
     )
     parser.add_argument("--out", type=Path, required=True, help="the staging directory")
-    parser.add_argument(
-        "--only",
-        default=",".join(XCLBINS),
-        help=f"the xclbins to replace, comma-separated, of {','.join(XCLBINS)}",
-    )
     args = parser.parse_args()
-    only = set(args.only.split(","))
-    if only - set(XCLBINS):
-        parser.error(f"--only: no xclbin {sorted(only - set(XCLBINS))}")
-    main(args.engine_xclbins, args.out.resolve(), only)
+    main(args.engine_xclbins, args.out.resolve())
