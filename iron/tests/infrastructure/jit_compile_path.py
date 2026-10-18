@@ -19,6 +19,7 @@ import dataclasses
 import inspect
 
 import aie.utils as aie_utils
+import numpy as np
 import pytest
 from aie.iron.device import from_name
 from aie.utils.compile.jit._hash import _python_identity
@@ -203,7 +204,7 @@ def test_a_field_the_repr_leaves_out_still_keys_the_build():
     back un-GELU'd with nothing reporting it.
     """
     plain = GEMM(M=256, K=256, N=256)
-    other = GEMM(M=256, K=256, N=256, round_conv_even=False)
+    other = GEMM(M=256, K=256, N=256, dtype_out=np.float32)
     assert repr(plain) == repr(other), "the case no longer exercises a hidden field"
     assert (
         OperatorDesign(plain).compilable().recipe_hash

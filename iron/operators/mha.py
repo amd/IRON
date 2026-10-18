@@ -594,17 +594,10 @@ class MHA(Operator):
             num_pipelines = self.num_pipelines
             n_join = num_pipelines // self.q_shims  # the pipelines on one shim
             # With P*V split, the two P*V cores share SPLIT_COLUMNS' own adjacent
-            # tiles, the line between them shared L1, a physical invariant no
-            # placer can infer; aiecc's placer takes every other tile (checked
-            # against mlir-aie #3921's placer fixes, 533e0c121: the full catalog,
-            # Llama and EG2's MHA shapes placed freely are numpy-correct on npu2,
-            # and within noise of the old hand pins on every shape but one, a
-            # 16384-token prefill chunk, where the gap (~0.1%, 338246 vs 338409 us
-            # median over repeats) is small enough next to the pin's own run-to-
-            # run spread not to keep it).
+            # tiles, the line between them shared L1, which no placer can infer;
+            # otherwise aiecc's placer takes every tile.
             pv_cores, pv_width = self.pv_cores, self.pv_width
-            every = pv_cores > 1
-            memtiles = every
+            split = pv_cores > 1
 
             # partial_softmax takes exp2, so the scale is in the log2 domain.
             inv_scale = float(bfloat16(self.scale * np.log2(np.e)))
@@ -700,7 +693,6 @@ class MHA(Operator):
             o_dims = pv.C
 
             # Split, Q is one block deep: the QK core's L1 holds one d=512 block.
-            split = pv_cores > 1
             q_depth = 1 if split else of_depth
             columns = MHA.COLUMNS[self.width]
             layout = MHA.SPLIT_COLUMNS[self.width] if split else None
@@ -716,7 +708,7 @@ class MHA(Operator):
                     depths=[q_depth] * n_join,
                     tile=(
                         Tile(layout.q[shim] if split else columns.qo_mem + shim, 1)
-                        if memtiles
+                        if split
                         else AnyMemTile
                     ),
                 )
@@ -732,7 +724,7 @@ class MHA(Operator):
                             Tile(
                                 layout.o[shim][h] if split else columns.qo_mem + shim, 1
                             )
-                            if memtiles
+                            if split
                             else AnyMemTile
                         ),
                     )
@@ -756,7 +748,7 @@ class MHA(Operator):
                                 ),
                                 1,
                             )
-                            if memtiles
+                            if split
                             else AnyMemTile
                         ),
                         depth=of_depth,
@@ -778,7 +770,7 @@ class MHA(Operator):
                                     ),
                                     1,
                                 )
-                                if memtiles
+                                if split
                                 else AnyMemTile
                             ),
                             depth=of_depth,
@@ -1021,7 +1013,7 @@ class MHA(Operator):
                             idx_buffer_qk,
                         ],
                         stack_size=STACK_SIZE,
-                        tile=Tile(i, 2) if every else AnyComputeTile,
+                        tile=Tile(i, 2) if split else AnyComputeTile,
                     )
                 )
                 idx_buffer_softmax = Buffer(
@@ -1048,7 +1040,7 @@ class MHA(Operator):
                         stack_size=SOFTMAX_STACK_SIZE,
                         tile=(
                             Tile(i, 3 if pv_cores == 1 else 4)
-                            if every
+                            if split
                             else AnyComputeTile
                         ),
                     )
@@ -1075,7 +1067,7 @@ class MHA(Operator):
                                 Buffer(acc_ty),
                             ],
                             stack_size=STACK_SIZE,
-                            tile=Tile(i, row) if every else AnyComputeTile,
+                            tile=Tile(i, row) if split else AnyComputeTile,
                         )
                     )
 
@@ -1083,23 +1075,23 @@ class MHA(Operator):
             qs, outs, ks, vs = [], [], [], []
             for s in range(self.q_shims):
                 q_col = layout.q[s] if split else 0 if two_shims else columns.q
-                qs.append(inQ[s].prod(tile=Tile(q_col, 0) if every else AnyShimTile))
+                qs.append(inQ[s].prod(tile=Tile(q_col, 0) if split else AnyShimTile))
                 for h in range(pv_cores):
                     o_col = layout.o[s][h] if split else 0 if two_shims else columns.o
                     outs.append(
                         memO[s * pv_cores + h].cons(
-                            tile=Tile(o_col, 0) if every else AnyShimTile
+                            tile=Tile(o_col, 0) if split else AnyShimTile
                         )
                     )
             for lane in range(kv_lanes):
                 shared = kv_lanes == 1
                 k_col = layout.k_shim if split else columns.k if shared else lane
-                ks.append(inK[lane].prod(tile=Tile(k_col, 0) if every else AnyShimTile))
+                ks.append(inK[lane].prod(tile=Tile(k_col, 0) if split else AnyShimTile))
                 for h in range(pv_cores):
                     v_col = layout.v[h] if split else columns.v if shared else lane
                     vs.append(
                         inV[lane * pv_cores + h].prod(
-                            tile=Tile(v_col, 0) if every else AnyShimTile
+                            tile=Tile(v_col, 0) if split else AnyShimTile
                         )
                     )
             self.Q.bind(qs)

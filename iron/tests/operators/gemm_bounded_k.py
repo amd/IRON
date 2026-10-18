@@ -29,7 +29,6 @@ MODES = {
     "accurate": ACCURATE,
     "default": dict(),
     "b_col_maj": dict(ACCURATE, b_col_maj=True),
-    "scalar": dict(ACCURATE, use_scalar=True),
 }
 
 pytestmark = [
@@ -43,8 +42,8 @@ pytestmark = [
 def test_the_reduction_stops_at_the_per_call_length(mode, full_elf):
     """A and B are NaN past ``n``: a column or row past the bound that were
     multiplied, in the last K tile or past it, would bring a NaN into every
-    element. Each micro-tile layout the cores zero it in is covered: A's,
-    B's by rows and by columns, and the scalar kernel's plain one.
+    element. Each micro-tile layout the cores zero it in is covered: A's
+    and B's by rows and by columns.
     """
     b_col_maj = MODES[mode].get("b_col_maj", False)
 

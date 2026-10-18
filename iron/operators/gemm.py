@@ -138,15 +138,9 @@ FIFO_DEPTH = 2
 
 
 class GEMMPlacement(StrEnum):
-    """The tiles GEMM's array pins; aiecc's placer takes the rest.
-
-    The shim ends stay pinned in both: unpinned, 2048x8192x2048 b_col_maj
-    still piles too many simultaneously active buffer descriptors onto one
-    shim tile under mlir-aie #3921's placer fixes (533e0c121), the same
-    failure this pin was added for. TILES against the SHIMS default, at
-    M=K=N=2048, 2 columns, b_col_maj: both numpy-correct on npu2, but TILES
-    measurably faster under #3921 too (median 11348 vs 12074 us, MAD 58 vs
-    354 us over 20 runs, non-overlapping) -- not noise, so the tunable stays.
+    """The tiles GEMM's array pins; aiecc's placer takes the rest. The shim
+    ends stay pinned in both: unpinned, a large b_col_maj GEMM piles too many
+    active buffer descriptors onto one shim tile. The tuner tries both.
     """
 
     SHIMS = "shims"
@@ -194,10 +188,8 @@ class GEMM(Operator):
     # MEDIUM multiplies on bfp16 macs; HIGHEST keeps a bf16 C's partial
     # sums f32 across K tiles.
     precision: Precision = Auto(default=Precision.MEDIUM)
-    round_conv_even: bool = Param(default=True, repr=False)
     dtype_in: Any = Param(default=bfloat16, repr=False)
     dtype_out: Any = Param(default=bfloat16, repr=False)
-    use_scalar: bool = Param(default=False, repr=False)
     # Filled by resolve.
     n_aie_rows: int = Auto(repr=False, derived=True)
     n_shim_mem_a: int = Auto(repr=False, derived=True)
@@ -267,7 +259,6 @@ class GEMM(Operator):
             device=dev,
             arch=None if dev is not None else "aie2p",
             emulate_bf16_mmul_with_bfp16=self.precision == Precision.MEDIUM,
-            vectorized=not self.use_scalar,
         )
         aie2 = dev is not None and dev.arch is AIEArch.AIE2
         return (4 if aie2 else 2) * r, s, 2 * t
@@ -413,10 +404,8 @@ class GEMM(Operator):
         b_col_maj: bool
         c_col_maj: bool
         precision: Precision
-        round_conv_even: bool
         dtype_in: Any
         dtype_out: Any
-        use_scalar: bool
         a_l2: int
         b_l2: int
         c_l2: int
@@ -450,11 +439,10 @@ class GEMM(Operator):
                 input_dtype=self.dtype_in,
                 # HIGHEST accumulates in f32 in L1, so the matmul's C is f32.
                 output_dtype=np.float32 if self.wider_accumulator else self.dtype_out,
-                vectorized=not self.use_scalar,
                 b_col_maj=self.b_col_maj,
                 c_col_maj=self.c_col_maj,
                 emulate_bf16_mmul_with_bfp16=self.precision == Precision.MEDIUM,
-                round_conv_even=self.round_conv_even,
+                round_conv_even=True,
             )
 
         def build(self) -> Built:
@@ -463,15 +451,11 @@ class GEMM(Operator):
             n_aie_rows = self.n_aie_rows
             pinned = self.placement is GEMMPlacement.TILES
             a_cols = [2 * i if n_aie_cols == 8 else i for i in range(self.n_shim_mem_a)]
-            n_shim_mem_A = self.n_shim_mem_a
             n_A_tiles_per_shim = (
                 n_aie_rows // n_aie_cols if n_aie_cols < n_aie_rows else 1
             )
-            use_scalar = self.use_scalar
             dtype_in, dtype_out = self.dtype_in, self.dtype_out
-            use_larger_internal_buffer = self.wider_accumulator
-            dtype_out_internal = np.float32
-            fifo_depth = FIFO_DEPTH
+            wider = self.wider_accumulator
 
             A_l2_ty = self.A.obj_type
             B_l2_ty = self.B.obj_type
@@ -481,22 +465,19 @@ class GEMM(Operator):
             # Flat, as the finish's scratch is: a core selects between them.
             C_l1_ty = np.ndarray[(m * n,), np.dtype[dtype_out]]
 
-            dtype_acc = dtype_out_internal if use_larger_internal_buffer else dtype_out
+            dtype_acc = np.float32 if wider else dtype_out
             matmul_kernel = self.matmul()
-            r, s, t = matmul_kernel.mac_dims
-            assert m % r == 0 and k % s == 0 and n % t == 0
             streams = matmul_kernel.stream_dims
-            zero_kernel = kernels.zero(m * n, dtype_acc, vectorized=not use_scalar)
+            zero_kernel = kernels.zero(m * n, dtype_acc)
             convert_copy_kernel = None
-            C_l1_ty_internal = np.ndarray[(m * n,), np.dtype[dtype_out_internal]]
-            if use_larger_internal_buffer:
+            if wider:
                 fifo_depth_out = 1  # the f32 accumulator is the other buffer
                 convert_copy_kernel = kernels.datamovement.convert_copy(m * n)
             else:
-                fifo_depth_out = fifo_depth
+                fifo_depth_out = FIFO_DEPTH
             finish = self.finishing.on(n_aie_rows * n_aie_cols)
 
-            A_l3l2_fifos: list[Any] = [None] * n_shim_mem_A
+            A_l3l2_fifos: list[Any] = [None] * self.n_shim_mem_a
             A_l2l1_fifos: list[Any] = [None] * n_aie_rows
             B_l3l2_fifos: list[Any] = [None] * n_aie_cols
             B_l2l1_fifos: list[Any] = [None] * n_aie_cols
@@ -516,8 +497,8 @@ class GEMM(Operator):
                 Rtp([*read, *finish.values]) for _ in range(n_aie_rows * n_aie_cols)
             ]
 
-            for i in range(n_shim_mem_A):
-                A_l3l2_fifos[i] = ObjectFifo(A_l2_ty, depth=fifo_depth)
+            for i in range(self.n_shim_mem_a):
+                A_l3l2_fifos[i] = ObjectFifo(A_l2_ty, depth=FIFO_DEPTH)
                 # Fewer A shims than rows: a shim's tiles split over several rows.
                 start_row = i * n_A_tiles_per_shim
                 stop_row = start_row + n_A_tiles_per_shim
@@ -536,7 +517,7 @@ class GEMM(Operator):
                     A_l2l1_fifos[j + start_row] = a_tmp_fifos[j]
 
             for col in range(n_aie_cols):
-                B_l3l2_fifos[col] = ObjectFifo(B_l2_ty, depth=fifo_depth)
+                B_l3l2_fifos[col] = ObjectFifo(B_l2_ty, depth=FIFO_DEPTH)
                 B_l2l1_fifos[col] = (
                     B_l3l2_fifos[col]
                     .cons()
@@ -548,7 +529,7 @@ class GEMM(Operator):
                 )
                 C_l2l3_fifos[col] = ObjectFifo(
                     C_l2_ty,
-                    depth=fifo_depth,
+                    depth=FIFO_DEPTH,
                     to_stream=streams.C,
                 )
                 of_offsets = [m * n * i for i in range(n_aie_rows)]
@@ -594,7 +575,7 @@ class GEMM(Operator):
                 mode = finish.mode(words)
 
                 def tile(compute: bool):
-                    if use_larger_internal_buffer:
+                    if wider:
                         acc = elem_out_internal
                     else:
                         c = out_c.acquire(1)
@@ -614,7 +595,7 @@ class GEMM(Operator):
                                 matmul(elem_in_a, elem_in_b, acc)
                             in_a.release(1)
                             in_b.release(1)
-                    if use_larger_internal_buffer:
+                    if wider:
                         c = out_c.acquire(1)
                         if compute:
                             convert_copy(acc, finish.target(rest, mode, c), m * n)
@@ -629,18 +610,17 @@ class GEMM(Operator):
                     for _ in range_(rtp_n_tiles_per_core - row_blocks * col_tiles):
                         tile(compute=False)  # a padding tile: passed through
                     return
-                loop = range(1)  # Workaround for issue #1547
-                if rtp_n_tiles_per_core > 1:
-                    loop = range_(rtp_n_tiles_per_core)
-                for _ in loop:
+                for _ in range_(rtp_n_tiles_per_core):
                     tile(compute=True)
 
             workers = []
             for row in range(n_aie_rows):
                 for col in range(n_aie_cols):
                     acc_buffer = None
-                    if use_larger_internal_buffer:
-                        acc_buffer = Buffer(type=C_l1_ty_internal)
+                    if wider:
+                        acc_buffer = Buffer(
+                            type=np.ndarray[(m * n,), np.dtype[np.float32]]
+                        )
                     workers.append(
                         Worker(
                             core_fn,
@@ -650,11 +630,7 @@ class GEMM(Operator):
                                 C_l1l2_fifos[row][col].prod(),
                                 zero_kernel,
                                 matmul_kernel,
-                                (
-                                    convert_copy_kernel
-                                    if use_larger_internal_buffer
-                                    else None
-                                ),
+                                convert_copy_kernel,
                                 matmul_kernel.k_tail if k_bounded else None,
                                 rtps[row * n_aie_cols + col],
                                 acc_buffer,
@@ -677,7 +653,6 @@ class GEMM(Operator):
         M, K, N = self.M, self.K, self.N
         m, k, n = self.tile_m, self.tile_k, self.tile_n
         n_aie_cols, n_aie_rows = self.num_aie_columns, self.n_aie_rows
-        n_shim_mem_A = self.n_shim_mem_a
         mem_tile_m_A, mem_tile_m_C, mem_tile_n = (
             self.mem_tile_m_a,
             self.mem_tile_m_c,
@@ -707,7 +682,7 @@ class GEMM(Operator):
         b_unrolled = not all(self.B.fits(tap) for tap in B_tiles)
 
         def fill(col, c_row, tg):
-            tile_offset = (c_row * n_shim_mem_A + col) % (M // mem_tile_m_A)
+            tile_offset = (c_row * self.n_shim_mem_a + col) % (M // mem_tile_m_A)
             if col < n_aie_rows:
                 A_tile = A_rows[tile_offset].repeat(n_c_col_tiles_per_core)
                 self.A.fill(A_tile, lane=col, group=tg)
