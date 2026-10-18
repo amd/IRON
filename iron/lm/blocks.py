@@ -281,7 +281,7 @@ class Conv2d(iron.Graph):
 class Conv1d(iron.Graph):
     """A 1-D convolution over rows (time) of ``(rows, channels)``, at
     ``stride``, plus ``bias``: the ``kernel`` consecutive rows gathered whole
-    and projected in one GEMM, the bias folded on with ``RowwiseAdd``. A
+    and projected in one GEMM, plus the bias on every row. A
     call computes the per-call ``rows`` and writes ``(out_rows,
     out_channels)`` where a caller gives it, else returns it; padding in
     rows is rows the input holds.
