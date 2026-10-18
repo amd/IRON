@@ -2,26 +2,43 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
-import functools
 
 import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
-from aie.iron import CompileTime, In, Out
+from aie.helpers.npdtypes import np_ndarray_type_get_shape
+from aie.helpers.taplib import TensorAccessPattern
+from aie.iron import Buffer, CompileTime, In, ObjectFifo, Out, TaskGroup, Worker
+from aie.iron.controlflow import range_
+from aie.iron.device import Tile
 from aie.iron.kernels import flm_gemma4
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import Auto, Operator, Unresolvable, field
+from iron.common import Auto, Built, Operator, Unresolvable, field
 from iron.common.testing import Case, Testing
 from iron.operators.flm.lm_head import reference
-from iron.operators.flm.lm_head.design import lm_head
-from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE, packed_bytes
+from iron.operators.flm.q4nx import BLOCK_BYTES, GROUP, K_TILE, M_TILE, packed_bytes
 
 # Error bounds from README.md's Numerics section.
 PROJECTION_ERROR = 0.025
 TANH_ERROR = 0.04
 
 GEMMA4_SOFTCAP = 30.0
+
+# The sequence finishes each round's TaskGroup DEPTH rounds later. The finish
+# frees the round's BDs for the bd-id allocator. A shim tile holds 16 BDs.
+DEPTH = 2
+
+# Core stack bytes. The kernel's b_group_sums array grows with dim. The array
+# overflows the default stack of 1024 bytes at both Gemma 4 sizes.
+STACK_SIZE = 10 * 1024
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class _Built(Built):
+    """LMHead's build, with each core's softcap word for ``sequence()`` to write."""
+
+    softcaps: list[Buffer]
 
 
 def _draw(op):
@@ -73,7 +90,7 @@ class LMHead(Operator):
         draw=_draw,
     )
 
-    dim: CompileTime[int] = field()
+    dim: CompileTime[int] = field(array=True)
     vocab: CompileTime[int] = field()
     softcap: CompileTime[float] = field()
     w_words: CompileTime[int] = field(
@@ -83,10 +100,12 @@ class LMHead(Operator):
     cols: CompileTime[int] = Auto(repr=False)
     rows: CompileTime[int] = Auto(repr=False)
 
-    # The runtime sequence's argument order.
-    y = Out(vocab, dtype=bfloat16)
-    w = In(w_words, dtype=np.uint32)
-    x = In(x_len, dtype=bfloat16)
+    # The runtime sequence's argument order. A w or y column object holds one
+    # block per core row, which the cores split or join. One broadcast sends
+    # the token and its RMS weight to every core.
+    y = Out(vocab, dtype=bfloat16, obj_shape=(rows, M_TILE), per=(cols,))
+    w = In(w_words, dtype=np.uint32, obj_shape=(rows, BLOCK_BYTES // 4), per=(cols,))
+    x = In(x_len, dtype=bfloat16, obj_shape=(x_len,), broadcast=True)
 
     def validate(self) -> None:
         if self.dim % K_TILE:
@@ -120,18 +139,122 @@ class LMHead(Operator):
     def ops(self) -> int:
         return 2 * self.vocab * self.dim
 
-    def exported_design(self):
-        kernel = flm_gemma4.flm_gemma4_q4nx_lm_head(
-            dim=self.dim, m_tile=M_TILE, k_tile=K_TILE, group=GROUP
-        )
-        return functools.partial(
-            lm_head,
-            self.dev,
-            self.dim,
-            self.vocab,
-            self.softcap,
-            lm_head_kernel=kernel,
-        )
+    class Array(Operator.Array):
+        def build(self) -> Built:
+            """Each core RMS-normalizes the token once. Each round, it
+            accumulates one weight block per K_TILE in-features into M_TILE
+            out-features and applies the tanh softcap to the sums.
+            """
+            cols, rows, dim = self.cols, self.rows, self.dim
+            rounds = self.vocab // (cols * rows * M_TILE)
+            kernel = flm_gemma4.flm_gemma4_q4nx_lm_head(
+                dim=dim, m_tile=M_TILE, k_tile=K_TILE, group=GROUP
+            )
+            # The kernels' argument types are the x and w fifos' element types
+            # and the core-local scratch.
+            w_blk_ty, x_ty, y_acc_ty, sums_ty, _ = kernel.q4nx_lm_head_block.arg_types()
+            y_blk_ty, _, rtp_ty = kernel.q4nx_lm_head_epilogue.arg_types()
+            # The w fifos move the host's words as bf16 elements. The kernel
+            # reinterprets the bytes.
+            (w_blk,) = np_ndarray_type_get_shape(w_blk_ty)
+            w_col_ty = np.ndarray[(rows, w_blk), np.dtype[bfloat16]]
+
+            def core_fn(
+                x_in, w_in, y_out, k_rms, k_zero, k_block, k_epi, y_acc, sums, rtp
+            ):
+                x = x_in.acquire(1)
+                k_rms(x, sums)
+                for _ in range_(rounds):
+                    k_zero(y_acc)
+                    for k in range_(dim // K_TILE):
+                        w = w_in.acquire(1)
+                        k_block(w, x, y_acc, sums, k)
+                        w_in.release(1)
+                    y = y_out.acquire(1)
+                    k_epi(y, y_acc, rtp)
+                    y_out.release(1)
+                x_in.release(1)
+
+            # The host addresses the DMAs by column. The build therefore pins
+            # the shim tiles. The placer places the other tiles.
+            shim = [Tile(j, 0) for j in range(cols)]
+            of_x = ObjectFifo(x_ty)
+            self.x.bind(of_x.prod(tile=shim[0]))
+
+            workers, ws, ys, softcaps = [], [], [], []
+            for j in range(cols):
+                of_w = ObjectFifo(w_col_ty)
+                ws.append(of_w.prod(tile=shim[j]))
+                w_cores = of_w.cons().split(
+                    [w_blk * i for i in range(rows)],
+                    obj_types=[w_blk_ty] * rows,
+                    names=[f"w{j}_{i}" for i in range(rows)],
+                )
+
+                of_y = ObjectFifo(self.y.obj_type)
+                ys.append(of_y.cons(tile=shim[j]))
+                y_cores = of_y.prod().join(
+                    [M_TILE * i for i in range(rows)],
+                    obj_types=[y_blk_ty] * rows,
+                    names=[f"y{j}_{i}" for i in range(rows)],
+                )
+
+                for i in range(rows):
+                    y_acc = Buffer(type=y_acc_ty, name=f"yacc_{i}_{j}")
+                    sums = Buffer(type=sums_ty, name=f"sums_{i}_{j}")
+                    rtp = Buffer(type=rtp_ty, name=f"rtp_{i}_{j}", use_write_rtp=True)
+                    softcaps.append(rtp)
+                    workers.append(
+                        Worker(
+                            core_fn,
+                            [
+                                of_x.cons(),
+                                w_cores[i].cons(),
+                                y_cores[i].prod(),
+                                kernel.q4nx_lm_head_rms,
+                                kernel.q4nx_lm_head_zero,
+                                kernel.q4nx_lm_head_block,
+                                kernel.q4nx_lm_head_epilogue,
+                                y_acc,
+                                sums,
+                                rtp,
+                            ],
+                            stack_size=STACK_SIZE,
+                        )
+                    )
+            self.w.bind(ws)
+            self.y.bind(ys)
+            return _Built(workers, softcaps=softcaps)
+
+    def sequence(self, rt):
+        # npu_write_rtp writes i32 words. The softcap travels as its f32 bit
+        # pattern.
+        for rtp in rt.built.softcaps:
+            rtp[0] = int(np.float32(self.softcap).view(np.int32))
+
+        # The broadcast has no completion token. x.free() frees its BD at the end.
+        x = self.x.fill(managed=False)
+
+        rounds = self.vocab // (self.cols * self.rows * M_TILE)
+        n = rounds * self.cols
+        # Tap i covers round i // cols of column i % cols. A strided
+        # descriptor places weight rows at the wrong on-chip positions, so
+        # each column reads one contiguous slice of w.
+        y_taps = TensorAccessPattern.full((self.vocab,)).partition(n)
+        w_taps = TensorAccessPattern.full((self.w_words,)).partition(n)
+        window = []
+        for rnd in range(rounds):
+            tg = TaskGroup()
+            for col in range(self.cols):
+                i = rnd * self.cols + col
+                self.y.drain(y_taps[i], lane=col, wait=True, group=tg)
+                self.w.fill(w_taps[i], lane=col, group=tg)
+            window.append(tg)
+            if len(window) > DEPTH:
+                window.pop(0).finish()
+        for tg in window:
+            tg.finish()
+        x.free()
 
     def tolerance(self) -> Tolerance:
         return Tolerance.bounded(
