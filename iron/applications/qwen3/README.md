@@ -11,10 +11,10 @@ unread `lm_head.weight` beside its tied head. How to run, test and tune it is th
 
 ## Weights and tokenizer
 
-From Hugging Face ([`Qwen/Qwen3-1.7B`](https://huggingface.co/Qwen/Qwen3-1.7B), Apache-2.0):
-`model-00001-of-00002.safetensors`, `model-00002-of-00002.safetensors`,
-`model.safetensors.index.json` (the checkpoint argument), `tokenizer.json`
-and `config.json`. Qwen3 0.6B is the same model at another shape: its
+From Hugging Face ([`Qwen/Qwen3-1.7B`](https://huggingface.co/Qwen/Qwen3-1.7B), Apache-2.0),
+in one directory: `model-00001-of-00002.safetensors`,
+`model-00002-of-00002.safetensors`, `model.safetensors.index.json`,
+`tokenizer.json` and `config.json`. Qwen3 0.6B is the same model at another shape: its
 `model.safetensors`, `tokenizer.json` and `config.json` from
 [`Qwen/Qwen3-0.6B`](https://huggingface.co/Qwen/Qwen3-0.6B).
 

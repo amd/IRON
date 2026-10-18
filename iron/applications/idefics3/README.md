@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # SmolVLM-256M-Instruct on the NPU
 
 A small vision-language model (Idefics3): its text model and vision tower
-as one `iron.lm.Multimodal`, whose `<image>` placeholders take the tower's
+as one `iron.lm.Multimodal`, `SmolVLM`, whose `<image>` placeholders take the tower's
 soft tokens, as transformers' `masked_scatter` places them; the model does
 not cross-attend. `model.py` and `vision/model.py` say what is its own.
 The shared library is [AGENTS.md](../../../AGENTS.md#language-models).

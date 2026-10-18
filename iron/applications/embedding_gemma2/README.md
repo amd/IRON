@@ -15,9 +15,8 @@ same part in float32. The shared library is [AGENTS.md](../../../AGENTS.md#langu
 
 - `config.py`: each part's shape and the largest call each graph is
   compiled for
-- `model.py`: the text encoder, `Multimodal`, the tokenizer, the command
-  line, and the `Runner` that `python -m iron.lm.tune embedding_gemma2`
-  times
+- `model.py`: the text encoder (which `python -m iron.lm.tune
+  embedding_gemma2` times), `Multimodal`, the tokenizer and the command line
 - `audio.py`, `vision.py`: the towers, each an `iron.lm.Tower`
 - `blocks.py`: Gemma's sandwich-normed layer and the audio tower's clipped
   projections

@@ -31,7 +31,7 @@ We actively welcome community involvement in this project! If you have a questio
 ## Add a model
 
 A model is a package under `iron/applications/<name>/` over `iron.lm`. Most
-Hugging Face decoders need a config, a model class and a runner; see
+Hugging Face decoders need a config and a model class; see
 `iron/applications/qwen3/model.py`, which is the whole of Qwen3.
 
 1. **Config.** Subclass `DecoderConfig`. Its fields are read from the
@@ -44,21 +44,21 @@ Hugging Face decoders need a config, a model class and a runner; see
        return dataclasses.replace(super().attention(i), qk_norm=True)
    ```
 
-2. **Model.** Subclass `CausalLM` (or `Encoder`, `Tower`, `EncoderDecoder`)
-   and point `profile` at a `profiles/` directory. A layer reads the
+2. **Model.** Subclass `CausalLM` (or `Encoder`, `Tower`, `EncoderDecoder`),
+   naming `config` and pointing `profile` at a `profiles/` directory (and
+   naming `bos` where `config.json` has no `bos_token_id`). A layer reads the
    checkpoint's own module names (`input_layernorm`, `self_attn.q_proj`,
    ...). When the checkpoint names them differently, override
    `sanitize(w)` to map one layer's modules to those names at load time
    (`iron/applications/lfm2/model.py`); a fused projection is cut into
    views, not copied (`iron/applications/phi3/model.py`). Write the model
    body with `iron.functional as F` and handle arithmetic (`x + y`), the
-   way you would with `torch.nn.functional`.
+   way you would with `torch.nn.functional`. End the file with
+   `lm.main(Qwen3)` on your class, its command line, and export it from the
+   package's `__init__.py` with `__getattr__ = exports(__name__, __all__)`
+   (`iron.lm.cli`).
 
-3. **Runner.** Subclass `iron.lm.Runner`, naming `config` and `model` (and
-   `bos` where `config.json` has no `bos_token_id`), and end the file with
-   `lm.main(Runner, "...")`.
-
-4. **Tests.** A decoder's device-free test subclasses `Decoder`
+3. **Tests.** A decoder's device-free test subclasses `Decoder`
    (`iron/tests/common/llama_reference.py`) with the model, a toy config
    and transformers' model type: it draws random weights
    (`Checkpoint.tree("random", seed)`) and compares the model run on the

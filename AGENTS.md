@@ -125,7 +125,8 @@ CONTRIBUTING.md walks through the common case. The rules:
      | Read by | Declare |
      |---|---|
      | host Python only | `@property` |
-     | a compile-time field a caller may override | `field(derive=...)` |
+     | a compile-time field held to its formula | `field(derive=lambda op: ...)` |
+     | a compile-time field a caller may override | `field(derive=..., held=False)` |
      | a tunable `resolve(dev)` always fills | `Auto(init=False)` |
      | a core | `Value(derive=...)` |
 
@@ -308,18 +309,22 @@ link here.
   own names.
 - `blocks.py`: the parts a layer is made of (`Norm`, `Attention`, `MLP`,
   `DecoderLayer`, `CrossDecoderLayer`) and the front-end graphs.
-- `model.py`: `Model`, whose `sanitize(w)` maps a checkpoint's module names
-  to the parts', and `OnHost`, which runs the graph's reference in place of
-  the device.
+- `model.py`: `Model`, which loads from a checkpoint's directory or
+  repository id (`Model.load`, its context fitted to the host by
+  `Model.fit`) and generates (`generate(prompt, max_tokens, sampler=None)`,
+  `stream`, timings on `model.stats`); its `sanitize(w)` maps a
+  checkpoint's module names to the parts'. `Model.cpu_reference()` is what
+  a model is judged by: transformers' logits recorded in `golden.npz`
+  beside the checkpoint (`golden.py`), or with drawn weights the graph's
+  own reference on the host (`OnHost`, which runs it in place of the
+  device).
 - `causal.py`: `CausalLM`, a decoder as one graph of a prompt chunk and a
   decode step; `Checkpoints`, recurrent state per chunk boundary.
 - `encoder.py`, `encoder_decoder.py`, `multimodal.py`: `Encoder` and
   `Tower`, `EncoderDecoder`, and `Multimodal`.
-- `runner.py`: `Runner` and `main`, the command line every model shares
-  (`--help` lists its options). `Runner.reference()` is what a model is
-  judged by: transformers' logits recorded in `golden.npz` beside the
-  checkpoint (`golden.py`), or with `--random-weights` the graph's own
-  reference.
+- `cli.py`: `main`, the command line every model shares (`--help` lists
+  its options, `-v` logs iron's INFO lines), and `exports`, a model
+  package's lazy `__getattr__`.
 - `generation.py`, `testing.py`: sampling and the device tests' checks;
   they need only `logits(tokens)`. `tune.py`: `python -m iron.lm.tune`.
 

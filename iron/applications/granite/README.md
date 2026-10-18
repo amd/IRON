@@ -26,9 +26,9 @@ for f in config.json generation_config.json tokenizer_config.json \
 done
 ```
 
-The checkpoint argument is `model.safetensors.index.json`. Its native
-context, 131072 positions, holds 10 GiB of caches beside the weights' 6.8
-GiB, the default where the host has room for both (`Runner.fit`).
+The command line takes `$D`. Its native context, 131072 positions, holds
+10 GiB of caches beside the weights' 6.8 GiB, the default where the host
+has room for both (`Model.fit`).
 
 ## Testing
 

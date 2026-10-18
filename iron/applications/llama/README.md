@@ -9,7 +9,7 @@ Prefill and decode of Llama 3 as one IRON graph, `Llama`, a version
 compiled per input shape, built from a checkpoint's own `config.json` and
 weights: Llama 3.2 1B's or 3B's here. It is judged by Hugging Face
 transformers' float32 logits for the same checkpoint, recorded once to
-`golden.npz` beside it (`Runner.reference`), so running and testing need
+`golden.npz` beside it (`Model.cpu_reference`), so running and testing need
 no torch.
 
 What is Llama's own, its shape (Llama 3's RoPE scaling) and its
@@ -21,7 +21,8 @@ tokenizer, is in [`model.py`](model.py); its tunables are in
 ## Weights and tokenizer
 
 From Hugging Face (meta-llama's repository is gated: accept its license
-and pass a Hugging Face token to download any of these):
+and pass a Hugging Face token to download any of these), in one directory,
+or downloaded by the repository's id, `meta-llama/Llama-3.2-1B`:
 
 - [`model.safetensors`](https://huggingface.co/meta-llama/Llama-3.2-1B/tree/main)
 - [`tokenizer.model`](https://huggingface.co/meta-llama/Llama-3.2-1B/tree/main/original)
@@ -43,10 +44,13 @@ From Python, see the [quick start](../../../README.md#quick-start).
 From the repository root, on the command line:
 
 ```bash
-python -m iron.applications.llama.model \
-    /path/to/model.safetensors /path/to/tokenizer.model \
-    --prompt-len 2048 --num-tokens 40
+python -m iron.applications.llama.model meta-llama/Llama-3.2-1B \
+    --prompt "The capital of France is" --num-tokens 40
 ```
+
+The positional argument is the repository's id or a directory holding
+`config.json`, the checkpoint and `original/tokenizer.model` (or
+`tokenizer.model` at its top).
 
 The NPU draws every token and writes the next decode step's values itself;
 the host only restarts each step and reads the tokens back at the end. The
@@ -57,8 +61,10 @@ top-k must be at most 64.
   header is read) and prompts of random tokens, for the speed, accuracy
   against the graph's own host reference and determinism of the real
   checkpoint's shape
-- `--prompt-len`, `--num-tokens`: characters of `iron/lm/prompt.txt` to use
-  as the prompt (default 2048) and tokens to generate (default 40)
+- `--prompt TEXT`: the text to continue
+- `--prompt-len`, `--num-tokens`: without `--prompt`, characters of
+  `iron/lm/prompt.txt` to use as the prompt (default 2048); tokens to
+  generate (default 40)
 - `--max-seq-len`: the longest context served, prompt and generated tokens
   together, up to the checkpoint's own `max_position_embeddings` (131072,
   4 GiB of caches, the default where it fits the host; a log line says
@@ -75,6 +81,7 @@ top-k must be at most 64.
   text is the same, token for token)
 - `--no-full-elf`: dispatch every step of each version on its own from one
   xclbin, the form NPU1 runs (below); `--full-elf` asks for one full ELF
+- `-v`: log iron's INFO lines, such as each compile's
 
 ## NPU1, and `--no-full-elf`
 
