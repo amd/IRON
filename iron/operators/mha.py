@@ -19,7 +19,10 @@ from aie.dialects.aie import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
+    CompileTime,
+    In,
     ObjectFifo,
+    Out,
     TaskGroup,
     Worker,
     ceildiv,
@@ -36,15 +39,13 @@ from iron.common import (
     Built,
     Divisors,
     Extent,
-    In,
     Operator,
-    Out,
-    Param,
     Rtp,
     Select,
     Unresolvable,
     Value,
     Width,
+    field,
 )
 from iron.common.testing import Case, Testing
 
@@ -218,31 +219,35 @@ class MHA(Operator):
 
     test = Testing(_cases)
 
-    num_heads: int = Param()
-    num_KV_heads: int = Param(derive=lambda op: op.num_heads)
-    seq_len: int = Param(derive=lambda op: op.seq_pad)
-    seq_pad: int = Param(derive=lambda op: op.seq_padding(op.seq_len), repr=False)
+    num_heads: CompileTime[int] = field()
+    num_KV_heads: CompileTime[int] = field(derive=lambda op: op.num_heads)
+    seq_len: CompileTime[int] = field(derive=lambda op: op.seq_pad)
+    seq_pad: CompileTime[int] = field(
+        derive=lambda op: op.seq_padding(op.seq_len), repr=False
+    )
     # A cache longer than the queries, whose last rows the queries are.
-    kv_len: int = Param(derive=lambda op: op.seq_pad)
+    kv_len: CompileTime[int] = field(derive=lambda op: op.seq_pad)
     # ``(seq, heads, d)`` as a projection writes it, so no copy reorders the heads.
-    heads_interleaved: bool = Param(default=False)
-    kv_interleaved: bool = Param(default=False)
-    d: int = Param(default=64)
-    causal: bool = Param(default=True, array=True)
+    heads_interleaved: CompileTime[bool] = field(default=False)
+    kv_interleaved: CompileTime[bool] = field(default=False)
+    d: CompileTime[int] = field(default=64)
+    causal: CompileTime[bool] = field(default=True, array=True)
     # Keys more than this many positions from a query are masked.
-    window: int | None = Param(default=None, array=True)
-    scale: float = Param(derive=lambda op: float(1 / np.sqrt(op.d)), array=True)
-    B_q: int = Auto(domain=BLOCK_SIZES, array=True)
-    B_kv: int = Auto(repr=False, init=False)
-    num_pipelines: int = Auto(default=1, domain=Width(), array=True)
+    window: CompileTime[int | None] = field(default=None, array=True)
+    scale: CompileTime[float] = field(
+        derive=lambda op: float(1 / np.sqrt(op.d)), array=True
+    )
+    B_q: CompileTime[int] = Auto(domain=BLOCK_SIZES, array=True)
+    B_kv: CompileTime[int] = Auto(repr=False, init=False)
+    num_pipelines: CompileTime[int] = Auto(default=1, domain=Width(), array=True)
     # Filled by resolve.
-    q_shims: int = Auto(repr=False, init=False)
-    join_rows: int = Auto(repr=False, init=False)
-    kv_lanes: int = Auto(repr=False, init=False)
-    width: int = Auto(repr=False, init=False, array=True)
+    q_shims: CompileTime[int] = Auto(repr=False, init=False)
+    join_rows: CompileTime[int] = Auto(repr=False, init=False)
+    kv_lanes: CompileTime[int] = Auto(repr=False, init=False)
+    width: CompileTime[int] = Auto(repr=False, init=False, array=True)
     # Two P*V cores, by halves of the head, where one's L1 holds no block.
-    pv_cores: int = Auto(repr=False, domain=(1, 2))
-    pv_width: int = Auto(repr=False, init=False)
+    pv_cores: CompileTime[int] = Auto(repr=False, domain=(1, 2))
+    pv_width: CompileTime[int] = Auto(repr=False, init=False)
 
     # One query packed puts pipeline p's K and V on column p: pipelines stop short of q.
     COLUMNS: ClassVar[dict[int, Columns]] = {

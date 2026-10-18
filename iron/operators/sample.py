@@ -15,24 +15,13 @@ from functools import cache
 import numpy as np
 from aie.dialects.aie import WireBundle, get_target_model
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker
+from aie.iron import Buffer, CompileTime, In, InOut, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import sample
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    Auto,
-    Built,
-    Divisors,
-    In,
-    InOut,
-    Operator,
-    Out,
-    Param,
-    Unresolvable,
-    Value,
-)
+from iron.common import Auto, Built, Divisors, Operator, Unresolvable, Value, field
 from iron.common.testing import Case, Testing
 
 # A select core's logits object: no more than this, and even (4-byte DMA).
@@ -122,13 +111,13 @@ class Sample(Operator):
         draw=_logits,
     )
 
-    vocab: int = Param(array=True)
-    k_max: int = Param(default=64, array=True)
+    vocab: CompileTime[int] = field(array=True)
+    k_max: CompileTime[int] = field(default=64, array=True)
     # Positions the draws and the record hold; the sequence picks one.
-    steps: int = Param(default=1)
-    cores: int = Auto(default=4)
+    steps: CompileTime[int] = field(default=1)
+    cores: CompileTime[int] = Auto(default=4)
     # Logits per select call.
-    chunk: int = Auto(
+    chunk: CompileTime[int] = Auto(
         domain=Divisors(of=lambda op, dev: op.slice_size, step=2, cap=_CHUNK_LIMIT)
     )
 

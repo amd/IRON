@@ -23,7 +23,7 @@ import pytest
 from aie.dialects.aie import DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
-from aie.iron import DmaEndpoint, ObjectFifo, Program, Worker
+from aie.iron import CompileTime, DmaEndpoint, In, ObjectFifo, Out, Program, Worker
 from aie.iron.device import Tile, from_name
 from aie.utils import bfp
 from aie.utils.trace import TraceConfig
@@ -31,18 +31,7 @@ from aie.utils.trace import TraceConfig
 import iron
 import iron.operators.flm.gemm.op as flm_gemm
 from iron import Scratchpad
-from iron.common import (
-    Auto,
-    Built,
-    Extent,
-    In,
-    Operator,
-    Out,
-    Param,
-    Rtp,
-    Value,
-    Xclbin,
-)
+from iron.common import Auto, Built, Extent, Operator, Rtp, Value, Xclbin, field
 from iron.common.design import BuiltArray, OperatorDesign, OperatorRuntime
 from iron.common.design.design import configuration
 from iron.common.graph.compiled import _words
@@ -68,11 +57,11 @@ NPU2_4COL = from_name("npu2", n_cols=4)
 
 
 class MV(Operator):
-    M: int = Param()
-    K: int = Param()
-    num_batches: int | None = Param(default=None)
-    cols: int = Auto(default=2)
-    tile_out: int = Auto(default=64)
+    M: CompileTime[int] = field()
+    K: CompileTime[int] = field()
+    num_batches: CompileTime[int | None] = field(default=None)
+    cols: CompileTime[int] = Auto(default=2)
+    tile_out: CompileTime[int] = Auto(default=64)
     A = In(num_batches, M, K, obj_shape=(tile_out, K), per=(cols,))
     B = In(num_batches, K, obj_shape=(K,), broadcast=True)
     C = Out(num_batches, M, obj_shape=(tile_out,), per=(cols,))
@@ -167,8 +156,8 @@ def test_split_takes_every_batch_and_broadcasts():
 
 def test_a_buffer_without_a_stream_has_no_derived_transfers():
     class NoStream(Operator):
-        M: int = Param()
-        K: int = Param()
+        M: CompileTime[int] = field()
+        K: CompileTime[int] = field()
         A = In(M, K)
         C = Out(M, obj_shape=(64,))
 
@@ -248,8 +237,8 @@ def test_a_bounded_rope_lane_takes_whole_positions_and_their_angles():
 class Words(Operator):
     """A core reading a word, a block of three, a word, and one per call."""
 
-    n: int = Param()
-    tile: int = Auto(default=64)
+    n: CompileTime[int] = field()
+    tile: CompileTime[int] = Auto(default=64)
     A = In(n, obj_shape=(tile,))
     first = Value(derive=lambda op: 7)
     block = Value(derive=lambda op: [11, 12, 13], words=3)
@@ -668,15 +657,15 @@ def test_a_shipped_image_declares_its_pins_and_parameter_block():
     with pytest.raises(TypeError, match="takes no per-call value"):
 
         class Unbuilt(Operator, image=image):
-            n: int = Param()
+            n: CompileTime[int] = field()
             x = In(n, obj_shape=(64,))
             count = Value()
 
 
 def test_a_lane_pins_to_a_channel_moving_its_way():
     class Pinned(Operator):
-        n: int = Param()
-        c: int = Auto(default=2)
+        n: CompileTime[int] = field()
+        c: CompileTime[int] = Auto(default=2)
         x = In(n, obj_shape=(n,))
         y = Out(n, obj_shape=(n,), per=(c,))
 

@@ -9,25 +9,14 @@ import aie.dialects.index as index
 import numpy as np
 from aie.dialects.aie import T
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, ObjectFifo, Worker, ceildiv
+from aie.iron import Buffer, CompileTime, In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import eltwise, linalg
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    Auto,
-    Built,
-    Divisors,
-    Extent,
-    In,
-    Operator,
-    Out,
-    Param,
-    Rtp,
-    Value,
-)
+from iron.common import Auto, Built, Divisors, Extent, Operator, Rtp, Value, field
 from iron.common.testing import Case, Testing
 
 
@@ -100,21 +89,21 @@ class GEMV(Operator):
 
     test = Testing(_cases, draw=lambda op: dict(normal=(op.A, op.B)))
 
-    M: int = Param()
-    K: int = Param()
+    M: CompileTime[int] = field()
+    K: CompileTime[int] = field()
     # None: a single batch, with no batch dimension.
-    num_batches: int | None = Param(default=None)
+    num_batches: CompileTime[int | None] = field(default=None)
     # Batches per matrix of A (grouped-query scores): no repeated copy.
-    repeat: int = Param(default=1)
-    num_matrices: int | None = Param(
+    repeat: CompileTime[int] = field(default=1)
+    num_matrices: CompileTime[int | None] = field(
         derive=lambda op: (
             None if op.num_batches is None else op.num_batches // op.repeat
         )
     )
-    num_aie_columns: int = Auto()
-    num_channels: int = Auto()
+    num_aie_columns: CompileTime[int] = Auto()
+    num_channels: CompileTime[int] = Auto()
     # None: two rows where they fit one L1 programmer bank, else one.
-    tile_size_input: int = Auto(
+    tile_size_input: CompileTime[int] = Auto(
         domain=Divisors(
             of=lambda op, dev: op.M,
             cap=lambda op, dev: dev.core_memory_bytes
@@ -122,12 +111,12 @@ class GEMV(Operator):
         )
     )
     # At least two rows: the shim moves C in 4-byte granules.
-    tile_size_output: int = Auto(
+    tile_size_output: CompileTime[int] = Auto(
         domain=Divisors(
             of=lambda op, dev: op.M, step=lambda op, dev: op.tile_size_input, span=3
         )
     )
-    kernel_vector_size: int = Auto(repr=False, array=True)
+    kernel_vector_size: CompileTime[int] = Auto(repr=False, array=True)
 
     A = In(
         num_matrices,

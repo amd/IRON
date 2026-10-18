@@ -18,7 +18,7 @@ import re
 
 import pytest
 
-from iron.common.declare import Out
+from aie.iron import Out
 from iron.common.design import OperatorDesign
 from iron.common.graph.trace import TracedGraph
 from iron.common.image.coresidence import Packing

@@ -21,10 +21,13 @@ from aie.iron import (
     Acquire,
     Bd,
     Buffer,
+    CompileTime,
     DmaChannel,
     Flow,
+    In,
     Lock,
     ObjectFifo,
+    Out,
     Release,
     TileDma,
     Worker,
@@ -42,15 +45,13 @@ from iron.common import (
     Built,
     Divisors,
     Extent,
-    In,
     Operator,
-    Out,
-    Param,
     Precision,
     Rtp,
     Select,
     Unresolvable,
     Value,
+    field,
 )
 from iron.operators.flm.gemm.design import (
     A_DEPTH,
@@ -147,30 +148,32 @@ class ProjectionGEMM(Operator):
     ``tile_ma`` and ``m_chunk`` are filled from the device's L1.
     """
 
-    M: int = Param()
-    K: int = Param()
-    N: int = Param()
+    M: CompileTime[int] = field()
+    K: CompileTime[int] = field()
+    N: CompileTime[int] = field()
     # The activation, selected at run time from the compiled-in modes; its
     # gelu is x * sigmoid(1.702x), the port's own arithmetic.
-    epilogue: Epilogue | str = Param(default=Epilogue.NONE)
+    epilogue: CompileTime[Epilogue | str] = field(default=Epilogue.NONE)
     # B's packed block count on AIE2P: blocks, not bytes, since B's
     # declaration counts bfp16ebs8 blocks and bfp.itemsize turns that back
     # into the byte count pack_B returns.
-    packed_blocks: int = Param(derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
+    packed_blocks: CompileTime[int] = field(
+        derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False
+    )
     # 64 halves the mmul's accumulator traffic per mac; 128 halves A fetches.
-    tile_n: int = Auto(array=True)
+    tile_n: CompileTime[int] = Auto(array=True)
     # k tile. K must be a multiple of it, and it of the compute tile's k slice.
-    k_tile: int = Auto(
+    k_tile: CompileTime[int] = Auto(
         domain=Divisors(of=K, step=lambda op, dev: op.ct_max_k, cap=K_TILE), array=True
     )
     # A-tile rows, decoupled from the accumulator's M_TILE (asymmetric tile
     # buffering). None resolves to whatever L1 affords.
-    tile_ma: int = Auto(domain=Divisors(of=M_TILE, step=2 * R), array=True)
+    tile_ma: CompileTime[int] = Auto(domain=Divisors(of=M_TILE, step=2 * R), array=True)
     # Row-blocks a core folds into one B fetch, cutting B's DDR reads by
     # m_chunk at the cost of that many L1 accumulators. 1 by default: it must
     # divide m_row_blocks (M % 512 == 0), and a shape that cannot use it would
     # fork config_name. See README.md.
-    m_chunk: int = Auto(
+    m_chunk: CompileTime[int] = Auto(
         default=1,
         domain=Divisors(of=lambda op, dev: op.M // (M_TILE * op.rows)),
         array=True,
@@ -178,28 +181,32 @@ class ProjectionGEMM(Operator):
     # The activations the epilogue can select between at run time. Each one
     # compiled in costs
     # program memory, so a deployment that dispatches two should compile two.
-    epilogue_modes: tuple = Param(default=tuple(Epilogue), array=True)
-    rounding: Rounding | str = Param(default=Rounding.CONV_EVEN, array=True)
-    gelu: Gelu | str = Param(default=Gelu.FP32, array=True)
+    epilogue_modes: CompileTime[tuple] = field(default=tuple(Epilogue), array=True)
+    rounding: CompileTime[Rounding | str] = field(
+        default=Rounding.CONV_EVEN, array=True
+    )
+    gelu: CompileTime[Gelu | str] = field(default=Gelu.FP32, array=True)
     # B as stored (N, K), a checkpoint's layout, read as is: the memtile lays
     # out the k panels the kernel reads as B^T blocks, so no packed copy.
-    b_col_maj: bool = Param(default=False, array=True)
+    b_col_maj: CompileTime[bool] = field(default=False, array=True)
     # MEDIUM multiplies on AIE2P's bfp16 macs, A and B rounded to bfp16ebs8
     # (the port's arithmetic); above it, or on AIE2, on bf16 macs.
-    precision: Precision = Auto(default=Precision.MEDIUM)
+    precision: CompileTime[Precision] = Auto(default=Precision.MEDIUM)
     # Filled by resolve, from the device: the macs, the grid, B's storage,
     # the L2 tiles.
-    emulate_bf16_mmul_with_bfp16: bool = Auto(repr=False, init=False, array=True)
-    rows: int = Auto(repr=False, init=False)
-    cols: int = Auto(repr=False, init=False)
-    bfp16_b: bool = Auto(repr=False, init=False, array=True)
+    emulate_bf16_mmul_with_bfp16: CompileTime[bool] = Auto(
+        repr=False, init=False, array=True
+    )
+    rows: CompileTime[int] = Auto(repr=False, init=False)
+    cols: CompileTime[int] = Auto(repr=False, init=False)
+    bfp16_b: CompileTime[bool] = Auto(repr=False, init=False, array=True)
     # B's element type, on the array and in DDR alike; the host holds a
     # block-float B as bytes (Operand.host_dtype).
-    b_dtype: Any = Auto(repr=False, init=False)
-    l1_b_depth: int = Auto(repr=False, init=False, array=True)
-    a_l2: int = Auto(repr=False, init=False)
-    b_l2: int = Auto(repr=False, init=False)
-    c_l2: int = Auto(repr=False, init=False)
+    b_dtype: CompileTime[Any] = Auto(repr=False, init=False)
+    l1_b_depth: CompileTime[int] = Auto(repr=False, init=False, array=True)
+    a_l2: CompileTime[int] = Auto(repr=False, init=False)
+    b_l2: CompileTime[int] = Auto(repr=False, init=False)
+    c_l2: CompileTime[int] = Auto(repr=False, init=False)
 
     # The sequence writes the cores' parameters itself, behind the first
     # block's fills and once per slab; see sequence().

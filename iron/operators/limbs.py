@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
+from aie.iron import CompileTime, In
 from aie.iron.kernels import datamovement
 
-from iron.common import In, Param, Rowwise
+from iron.common import Rowwise, field
 from iron.common.testing import Case, Testing
 
 # The planes of a stacked weight, as limbs_f32_split's (hi, mid, lo) indices,
@@ -32,8 +33,8 @@ class Limbs(Rowwise):
         draw=lambda op: dict(normal=(op.x,)),
     )
 
-    line: int = Param()
-    tile_size: int = Param(derive=lambda op: 6 * op.line)
+    line: CompileTime[int] = field()
+    tile_size: CompileTime[int] = field(derive=lambda op: 6 * op.line)
 
     x = In(
         Rowwise.rows,

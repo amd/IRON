@@ -11,24 +11,14 @@ re-permuted for the halves (huggingface/transformers#25199).
 import dataclasses
 
 import numpy as np
-from aie.iron import ObjectFifo, Worker, ceildiv
+from aie.iron import CompileTime, In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    Auto,
-    Built,
-    Extent,
-    In,
-    Operator,
-    Out,
-    Param,
-    Rtp,
-    Value,
-)
+from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
 from iron.common.testing import Case, Testing
 
 
@@ -82,11 +72,13 @@ class RoPE(Operator):
 
     test = Testing(_cases, draw=_angles)
 
-    rows: int = Param()
-    cols: int = Param()
-    angle_rows: int = Param(derive=lambda op: op.rows)  # one row per position
-    num_aie_columns: int = Auto()
-    two_halves: bool = Param(default=True, array=True)
+    rows: CompileTime[int] = field()
+    cols: CompileTime[int] = field()
+    angle_rows: CompileTime[int] = field(
+        derive=lambda op: op.rows
+    )  # one row per position
+    num_aie_columns: CompileTime[int] = Auto()
+    two_halves: CompileTime[bool] = field(default=True, array=True)
 
     x = In(rows, cols, obj_shape=(1, cols), per=(num_aie_columns,))
     angles = In(angle_rows, cols, obj_shape=(1, cols), per=(num_aie_columns,))

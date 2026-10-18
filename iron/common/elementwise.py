@@ -29,7 +29,7 @@ from collections.abc import Iterable, Mapping
 from typing import ClassVar, Self
 
 import numpy as np
-from aie.iron import ObjectFifo, Worker, ceildiv
+from aie.iron import CompileTime, In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernel import ExternalFunction
@@ -39,18 +39,16 @@ from aie.utils.verify import Tolerance, Verdict, round_to
 from ml_dtypes import bfloat16
 
 from .declare import (
+    Auto,
     Built,
     Divisors,
     Extent,
-    In,
     Operand,
     Operator,
-    Out,
     Rtp,
     Unresolvable,
     Value,
-    Auto,
-    Param,
+    field,
 )
 from .testing import Case, Testing
 
@@ -254,9 +252,9 @@ class Elementwise(Operator):
     implement ``kernel``. ``tile_cap`` is the largest line the kernel holds.
     """
 
-    num_aie_columns: int = Auto(array=True)
-    num_channels: int = Auto(default=1, array=True)
-    tile_size: int = Auto(
+    num_aie_columns: CompileTime[int] = Auto(array=True)
+    num_channels: CompileTime[int] = Auto(default=1, array=True)
+    tile_size: CompileTime[int] = Auto(
         domain=Divisors(
             of=lambda op, dev: op.outputs[0].elements,
             step=64,
@@ -594,7 +592,7 @@ class UnaryElementwise(Elementwise):
     """A flat buffer in, a flat buffer of the same size out."""
 
     test = Testing(Sweep())
-    size: int = Param()
+    size: CompileTime[int] = field()
     valid = Extent(size)
 
     x = In(
@@ -627,7 +625,7 @@ class BinaryElementwise(Elementwise):
     """Two flat buffers in, one of the same size out."""
 
     test = Testing(Sweep(channels=None))
-    size: int = Param()
+    size: CompileTime[int] = field()
     valid = Extent(size)
 
     a = In(
@@ -656,14 +654,14 @@ class BinaryElementwise(Elementwise):
 class Rowwise(Elementwise):
     """``rows`` rows of ``tile_size`` elements in, the same out, one kernel
     call per row. For a kernel that reduces over its line, so the line is a
-    ``Param()``: another line would compute something else.
+    ``field()``: another line would compute something else.
     """
 
     test = Testing(Sweep(rows=True))
 
-    rows: int = Param()
+    rows: CompileTime[int] = field()
     valid = Extent(rows)
-    tile_size: int = Param(array=True)
+    tile_size: CompileTime[int] = field(array=True)
 
     tile_cap: ClassVar[int] = 8192
 
@@ -714,8 +712,8 @@ class RowBroadcast(Rowwise):
         ]
     )
 
-    segments: int = Auto(init=False, array=True)
-    line: int = Auto(init=False)
+    segments: CompileTime[int] = Auto(init=False, array=True)
+    line: CompileTime[int] = Auto(init=False)
 
     x = In(
         Rowwise.rows,

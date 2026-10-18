@@ -5,11 +5,12 @@ import dataclasses
 import functools
 from typing import ClassVar
 
+import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
-from aie.iron import ExternalFunction
+from aie.iron import CompileTime, DispatchTime, ExternalFunction, In, Out
 from ml_dtypes import bfloat16
 
-from iron.common import DispatchTime, In, Operator, Out, Param, Unresolvable
+from iron.common import Operator, Unresolvable, field
 from iron.operators.flm.prefill_attn import reference
 from iron.operators.flm.prefill_attn.design import (
     CAUSAL,
@@ -35,14 +36,16 @@ class _PrefillAttentionBase(Operator):
     # query.
     window = None
 
-    max_context: int = Param()
-    num_heads: int = Param()
-    num_kv_heads: int = Param()
-    head_dim: int = Param(derive=lambda op: Geometry.of(op.kernel()).dh, repr=False)
-    qo_len: int = Param(
+    max_context: CompileTime[int] = field()
+    num_heads: CompileTime[int] = field()
+    num_kv_heads: CompileTime[int] = field()
+    head_dim: CompileTime[int] = field(
+        derive=lambda op: Geometry.of(op.kernel()).dh, repr=False
+    )
+    qo_len: CompileTime[int] = field(
         derive=lambda op: op.max_context * op.num_heads * op.head_dim, repr=False
     )
-    kv_len: int = Param(
+    kv_len: CompileTime[int] = field(
         derive=lambda op: 2 * op.max_context * op.num_kv_heads * op.head_dim,
         repr=False,
     )
@@ -51,9 +54,9 @@ class _PrefillAttentionBase(Operator):
     o = Out(qo_len, dtype=bfloat16)
     q = In(qo_len, dtype=bfloat16)
     kv = In(kv_len, dtype=bfloat16)
-    L_begin = DispatchTime()
-    L_end = DispatchTime()
-    max_l = DispatchTime()
+    L_begin: DispatchTime[np.int32] = field(init=False)
+    L_end: DispatchTime[np.int32] = field(init=False)
+    max_l: DispatchTime[np.int32] = field(init=False)
 
     def kernel(self) -> ExternalFunction:
         """The variant's kernel, built with the k/v locks the design declares."""
@@ -130,4 +133,4 @@ class PrefillSlidingAttention(_PrefillAttentionBase):
     """Sliding-window causal prefill attention with a head dim of 256, from a KV cache."""
 
     variant = SLIDING
-    window: int = Param(default=512)
+    window: CompileTime[int] = field(default=512)

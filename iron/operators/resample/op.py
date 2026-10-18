@@ -23,8 +23,11 @@ import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
+    CompileTime,
     ExternalFunction,
+    In,
     ObjectFifo,
+    Out,
     TaskGroup,
     Worker,
 )
@@ -32,17 +35,7 @@ from aie.iron.controlflow import range_
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    Auto,
-    Built,
-    Extent,
-    In,
-    Operator,
-    Out,
-    Param,
-    Rtp,
-    Value,
-)
+from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
 from iron.common.testing import Case, Testing
 
 from .reference import resize, taps, window
@@ -241,21 +234,21 @@ class ResampleTaps(Operator):
         ],
     )
 
-    in_size: int = Param()
-    out_size: int = Param()
-    words: int = Param(default=256)
+    in_size: CompileTime[int] = field()
+    out_size: CompileTime[int] = field()
+    words: CompileTime[int] = field(default=256)
     # The slots of a chunk, or None for as many as the window lets fit.
-    slots: int | None = Param(default=None, array=True)
+    slots: CompileTime[int | None] = field(default=None, array=True)
     # A multiple of 16, so every core count up to it divides.
-    chunks: int = Param(
+    chunks: CompileTime[int] = field(
         derive=lambda op: 16
         * -(
             -op.out_size
             // (16 * max(1, per_chunk(op.in_size, op.out_size, op.words, op.slots)))
         )
     )
-    num_aie_columns: int = Auto()
-    num_channels: int = Auto(default=2)
+    num_aie_columns: CompileTime[int] = Auto()
+    num_channels: CompileTime[int] = Auto(default=2)
 
     table = Out(
         chunks,
@@ -843,27 +836,31 @@ class Resample(Operator):
         ),
     )
 
-    height: int = Param()
-    width: int = Param()
-    out_height: int = Param()
-    out_width: int = Param()
+    height: CompileTime[int] = field()
+    width: CompileTime[int] = field()
+    out_height: CompileTime[int] = field()
+    out_width: CompileTime[int] = field()
     # Every chunk is a handshake with every core: few and large ones.
-    chunk: int = Param(default=4096)
+    chunk: CompileTime[int] = field(default=4096)
     # A 39-tap window: a scale of up to 9.5.
-    words: int = Param(default=356)
+    words: CompileTime[int] = field(default=356)
     # A floor of 8, so two resizes of one image that need no more share an array.
-    patch_columns: int = Param(
+    patch_columns: CompileTime[int] = field(
         derive=lambda op: max(8, op.default_patch_columns()), array=True
     )
-    image_chunks: int = Param(
+    image_chunks: CompileTime[int] = field(
         derive=lambda op: op.height * -(-3 * op.width // op.chunk)
     )
     # Multiples of 16, as ResampleTaps's are.
-    width_chunks: int = Param(derive=lambda op: 16 * -(-op.out_width // (16 * SIDE)))
-    height_chunks: int = Param(derive=lambda op: 16 * -(-op.out_height // (16 * SIDE)))
-    patch_rows: int = Param(derive=lambda op: op.padded_rows())
-    num_aie_columns: int = Auto()
-    num_channels: int = Auto(default=2)
+    width_chunks: CompileTime[int] = field(
+        derive=lambda op: 16 * -(-op.out_width // (16 * SIDE))
+    )
+    height_chunks: CompileTime[int] = field(
+        derive=lambda op: 16 * -(-op.out_height // (16 * SIDE))
+    )
+    patch_rows: CompileTime[int] = field(derive=lambda op: op.padded_rows())
+    num_aie_columns: CompileTime[int] = Auto()
+    num_channels: CompileTime[int] = Auto(default=2)
 
     rows = Extent(height)
     columns = Extent(width)
@@ -1250,15 +1247,15 @@ class PatchPositions(Operator):
         ],
     )
 
-    rows: int = Param()
-    out_height: int = Param()
-    out_width: int = Param()
-    pool: int = Param(default=3, array=True)
+    rows: CompileTime[int] = field()
+    out_height: CompileTime[int] = field()
+    out_width: CompileTime[int] = field()
+    pool: CompileTime[int] = field(default=3, array=True)
     # The rows of each axis's position-embedding table.
-    positions: int = Param(default=10240, array=True)
+    positions: CompileTime[int] = field(default=10240, array=True)
     # Resample's cores, which its raster's columns are padded past.
-    cores: int = Param(default=16, array=True)
-    block: int = Param(default=256)
+    cores: CompileTime[int] = field(default=16, array=True)
+    block: CompileTime[int] = field(default=256)
 
     out_rows = Extent(out_height)
     out_columns = Extent(out_width)

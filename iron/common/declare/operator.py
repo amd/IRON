@@ -252,7 +252,7 @@ class Operator:
     def check_derived(self, *names: str) -> None:
         """Raise ``ValueError`` if a given computed-default parameter disagrees with its rule.
 
-        Only a `Param(derive=)` field an operator's own `validate()` names
+        Only a `field(derive=)` field an operator's own `validate()` names
         here is held to its formula: a plain computed default (MHA's
         ``num_KV_heads``, left to default to ``num_heads``) may be
         overridden to something the formula disagrees with on purpose.
@@ -501,7 +501,7 @@ class Operator:
         return (type(self), own)
 
     def _probed(self) -> Self:
-        """This operator with each ``Param(probe=)`` field at its probe: the
+        """This operator with each ``field(probe=)`` field at its probe: the
         one its step time is measured as, for every value of those fields.
         Itself when they are there already, unresolved otherwise.
         """

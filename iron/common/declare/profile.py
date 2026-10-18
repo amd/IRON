@@ -33,7 +33,7 @@ class Profile:
     entries of equal specificity that disagree raise. A subclass matches its
     base's entries.
 
-    Each entry is ``(cls, dims, tunables)``: the ``Param()`` values it
+    Each entry is ``(cls, dims, tunables)``: the ``field()`` values it
     matches (a dimension left out matches any) and the ``Auto()`` values it
     gives, one line of the JSON file ``load`` reads and ``save`` writes.
     """
@@ -55,7 +55,7 @@ class Profile:
         return cls(**given, pinned=pinned)
 
     def add(self, cls: type, **fields: Any) -> None:
-        """Add an entry for ``cls``: ``Param()`` fields to match (one left out
+        """Add an entry for ``cls``: ``field()`` fields to match (one left out
         matches any value) and ``Auto()`` fields to give.
         """
         dims, tunables, unknown, fixed = {}, {}, [], []

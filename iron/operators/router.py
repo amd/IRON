@@ -13,24 +13,13 @@ weights, a pair of cores for each lane of rows.
 import dataclasses
 
 import numpy as np
-from aie.iron import Buffer, ObjectFifo, Worker, ceildiv
+from aie.iron import Buffer, CompileTime, In, ObjectFifo, Out, Worker, ceildiv
 from aie.iron.controlflow import range_
 from aie.iron.kernels import moe, sample
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    Auto,
-    Built,
-    Extent,
-    In,
-    Operator,
-    Out,
-    Param,
-    Rtp,
-    Unresolvable,
-    Value,
-)
+from iron.common import Auto, Built, Extent, Operator, Rtp, Unresolvable, Value, field
 from iron.common.testing import Case, Testing
 
 
@@ -59,11 +48,11 @@ class TopKRouter(Operator):
         draw=_logits,
     )
 
-    experts: int = Param()
-    top_k: int = Param()
-    rows: int = Param(default=1)
-    weights_width: int = Param(derive=lambda op: 2 * op.top_k, repr=False)
-    pairs: int = Auto()
+    experts: CompileTime[int] = field()
+    top_k: CompileTime[int] = field()
+    rows: CompileTime[int] = field(default=1)
+    weights_width: CompileTime[int] = field(derive=lambda op: 2 * op.top_k, repr=False)
+    pairs: CompileTime[int] = Auto()
 
     logits = In(rows, experts, obj_shape=(experts,), per=(pairs,))
     ids = Out(rows, top_k, dtype=np.int32, obj_shape=(top_k,), per=(pairs,))

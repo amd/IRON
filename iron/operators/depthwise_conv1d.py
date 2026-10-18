@@ -5,22 +5,12 @@ import dataclasses
 
 import numpy as np
 from aie.extras.dialects import arith
-from aie.iron import Buffer, ObjectFifo, TaskGroup, Worker
+from aie.iron import Buffer, CompileTime, In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import conv
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    Auto,
-    Built,
-    Extent,
-    In,
-    Operator,
-    Out,
-    Param,
-    Rtp,
-    Value,
-)
+from iron.common import Auto, Built, Extent, Operator, Rtp, Value, field
 from iron.common.testing import Case, Testing
 
 TAPS = 5
@@ -44,9 +34,9 @@ class DepthwiseConv1d(Operator):
         draw=lambda op: dict(centered=(op.x, op.weight)),
     )
 
-    rows: int = Param()
-    channels: int = Param()
-    num_aie_columns: int = Auto()
+    rows: CompileTime[int] = field()
+    channels: CompileTime[int] = field()
+    num_aie_columns: CompileTime[int] = Auto()
 
     x = In(
         rows, channels, obj_shape=(channels,), per=(num_aie_columns,), depth=TAPS + 1

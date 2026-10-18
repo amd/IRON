@@ -12,10 +12,11 @@ from collections.abc import Callable, Hashable, Iterable, Mapping
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
+from aie.iron import In, InOut, Out
 from aie.utils import bfp
 
 from .. import declare
-from ..declare import In, InOut, Operand, Operator, Out
+from ..declare import Operand, Operator
 from ..declare.value import Extent
 from ..declare.operator import graph_tracer
 from ..declare.precision import Precision

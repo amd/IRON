@@ -83,7 +83,7 @@ class Operand(Member["Operand"]):
         depth: The fifo depth.
         replicate: Every `per=` lane gets the whole buffer, not a share.
         broadcast: One fifo every worker consumes.
-        when: A bool `Param()`; the operand and its stream exist only where
+        when: A bool `field()`; the operand and its stream exist only where
             it is true, and a call giving the operand by keyword sets it.
     """
 

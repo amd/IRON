@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from aie.iron import ObjectFifo, Worker
+from aie.iron import CompileTime, In, ObjectFifo, Out, Worker
 from aie.iron.controlflow import range_
 from aie.iron.kernels import eltwise, norm
 from aie.utils.verify import Tolerance
 
-from iron.common import Built, In, KernelCall, Out, Param, Rowwise, Rtp
+from iron.common import Built, KernelCall, Rowwise, Rtp, field
 from iron.common.elementwise import Sweep
 from iron.common.testing import Testing
 
@@ -30,8 +30,8 @@ class RMSNorm(Rowwise):
     )
 
     # The epsilon under the root: 1e-5 by default; a model states its own.
-    epsilon: float = Param(default=1e-5, array=True)
-    weighted: bool = Param(default=False)
+    epsilon: CompileTime[float] = field(default=1e-5, array=True)
+    weighted: CompileTime[bool] = field(default=False)
 
     x = In(
         Rowwise.rows,

@@ -7,11 +7,11 @@ import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
 from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import v8bfp16ebs8
-from aie.iron import ObjectFifo, TaskGroup, Worker
+from aie.iron import CompileTime, In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.kernels import quant
 from aie.utils import bfp
 
-from iron.common import Auto, Built, In, Operator, Out, Param, Unresolvable
+from iron.common import Auto, Built, Operator, Unresolvable, field
 
 # flm.ProjectionGEMM's B tiling, imported rather than restated: this design has to write
 # the buffer in the order that one reads it, and two copies would drift.
@@ -142,25 +142,29 @@ class DequantBFP(Operator):
     See README.md for the layout, the parameters and the constraints.
     """
 
-    K: int = Param()
-    N: int = Param()
+    K: CompileTime[int] = field()
+    N: CompileTime[int] = field()
     # A projection interleaved with another in the same buffer: this one
     # occupies ``run_out_features`` of every ``run_period_out_features``.
-    run_out_features: int | None = Param(default=None)
-    run_period_out_features: int | None = Param(default=None)
+    run_out_features: CompileTime[int | None] = field(default=None)
+    run_period_out_features: CompileTime[int | None] = field(default=None)
     # Each buffer is declared in the unit its transfers count in. The q4nx
     # input is bytes, because a block interleaves three tables at 5 bits per
     # weight and the fill walks it bytewise. The output is bfp16ebs8 blocks,
     # because the drains index blocks; declared in its 9-byte equivalent,
     # every offset and length would address a ninth of what it names.
     # Filled by validate() from K, N and the interleave.
-    quantized_bytes: int = Param(derive=lambda op: op.quantized_size(), repr=False)
-    packed_blocks: int = Param(derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False)
+    quantized_bytes: CompileTime[int] = field(
+        derive=lambda op: op.quantized_size(), repr=False
+    )
+    packed_blocks: CompileTime[int] = field(
+        derive=lambda op: op.K * op.N // bfp.BLOCK, repr=False
+    )
     # cols follows the device. ROWS is baked into the split offsets and the
     # join, so it is not a field; halves is, because a stream's replication
     # count must be declared to be indexed, but the join bakes it too.
-    cols: int = Auto(repr=False)
-    halves: int = Auto(default=HALVES, repr=False, init=False)
+    cols: CompileTime[int] = Auto(repr=False)
+    halves: CompileTime[int] = Auto(default=HALVES, repr=False, init=False)
 
     # One q4nx block per core, delivered as one per-column object the cores
     # split; one packed half-tile out per (column, n-half), joined from the

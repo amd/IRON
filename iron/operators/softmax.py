@@ -12,7 +12,10 @@ from aie.helpers.taplib import TensorAccessPattern
 from aie.helpers.util import np_dtype_to_mlir_type
 from aie.iron import (
     Buffer,
+    CompileTime,
+    In,
     ObjectFifo,
+    Out,
     TaskGroup,
     Worker,
     ceildiv,
@@ -21,18 +24,7 @@ from aie.iron.controlflow import range_
 from aie.iron.kernels import activation, zero
 from aie.utils.verify import Tolerance
 
-from iron.common import (
-    Auto,
-    Built,
-    Divisors,
-    Extent,
-    In,
-    Operator,
-    Out,
-    Param,
-    Rtp,
-    Value,
-)
+from iron.common import Auto, Built, Divisors, Extent, Operator, Rtp, Value, field
 from iron.common.testing import Case, Testing
 
 # softmax_bf16's vector step: its loops cover only whole steps.
@@ -129,25 +121,25 @@ class Softmax(Operator):
         draw=_draw,
     )
 
-    rows: int = Param(array=True)
-    cols: int = Param()
-    num_aie_columns: int = Auto()
-    num_channels: int = Auto(default=1)
-    block: int = Auto(
+    rows: CompileTime[int] = field(array=True)
+    cols: CompileTime[int] = field()
+    num_aie_columns: CompileTime[int] = Auto()
+    num_channels: CompileTime[int] = Auto(default=1)
+    block: CompileTime[int] = Auto(
         domain=Divisors(of=lambda op, dev: op.cols, step=_VECTOR_STEP, cap=_ROW_CAP)
     )
-    streamed: bool = Auto(domain=(False, True), array=True)
-    input_dtype: Any = Param(default=ml_dtypes.bfloat16, repr=False)
+    streamed: CompileTime[bool] = Auto(domain=(False, True), array=True)
+    input_dtype: CompileTime[Any] = field(default=ml_dtypes.bfloat16, repr=False)
     # Float input only, mlir-aie's softmax_f32_bf16: a pre-cap addend and
     # cap * tanh(x / cap).
-    soft_cap: float | None = Param(default=None, array=True)
-    has_addend: bool = Param(default=False)
+    soft_cap: CompileTime[float | None] = field(default=None, array=True)
+    has_addend: CompileTime[bool] = field(default=False)
     # Float input only, softmax_rows_banded_f32_bf16: a band computed from
     # these two in the core (window, and the row's own query position,
     # wrapped every period rows), not a mask operand -- a core has two
     # input DMA channels, and x and addend already take both.
-    window: int | None = Param(default=None, array=True)
-    period: int | None = Param(default=None, array=True)
+    window: CompileTime[int | None] = field(default=None, array=True)
+    period: CompileTime[int | None] = field(default=None, array=True)
 
     length = Extent(cols)  # cols, or fewer per call
 

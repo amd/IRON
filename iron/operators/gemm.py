@@ -12,7 +12,10 @@ from aie.extras.dialects import arith
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
     Buffer,
+    CompileTime,
+    In,
     ObjectFifo,
+    Out,
     TaskGroup,
     Worker,
     ceildiv,
@@ -37,15 +40,13 @@ from iron.common import (
     Built,
     Divisors,
     Extent,
-    In,
     Operator,
-    Out,
-    Param,
     Precision,
     Rtp,
     Select,
     Unresolvable,
     Value,
+    field,
 )
 from iron.common.testing import Case, Testing
 
@@ -128,11 +129,11 @@ class GEMM(Operator):
 
     test = Testing(_cases, draw=lambda op: dict(normal=(op.A,)))
 
-    M: int = Param()
-    K: int = Param()
-    N: int = Param()
+    M: CompileTime[int] = field()
+    K: CompileTime[int] = field()
+    N: CompileTime[int] = field()
     # None: the widest of 64, 32, 16, 8 that splits M and the m block divides.
-    tile_m: int = Auto(
+    tile_m: CompileTime[int] = Auto(
         domain=Divisors(
             of=lambda op, dev: op.M // op.n_aie_rows,
             step=lambda op, dev: op.mac_block(dev)[0],
@@ -140,7 +141,7 @@ class GEMM(Operator):
         array=True,
     )
     # Below HIGHEST C rounds to bf16 per K tile: tile_k changes it.
-    tile_k: int = Auto(
+    tile_k: CompileTime[int] = Auto(
         default=64,
         domain=Divisors(
             of=K,
@@ -149,27 +150,29 @@ class GEMM(Operator):
         ),
         array=True,
     )
-    tile_n: int = Auto(
+    tile_n: CompileTime[int] = Auto(
         default=64,
         domain=Divisors(of=N, step=lambda op, dev: op.mac_block(dev)[2]),
         array=True,
     )
     # None: the most columns the shim budget allows that split N into tiles.
-    num_aie_columns: int = Auto()
-    placement: GEMMPlacement = Auto(default=GEMMPlacement.SHIMS, array=True)
-    b_col_maj: bool = Param(default=False, array=True)
-    c_col_maj: bool = Param(default=False, array=True)
+    num_aie_columns: CompileTime[int] = Auto()
+    placement: CompileTime[GEMMPlacement] = Auto(
+        default=GEMMPlacement.SHIMS, array=True
+    )
+    b_col_maj: CompileTime[bool] = field(default=False, array=True)
+    c_col_maj: CompileTime[bool] = field(default=False, array=True)
     # MEDIUM multiplies on bfp16 macs; HIGHEST keeps a bf16 C's partial
     # sums f32 across K tiles.
-    precision: Precision = Auto(default=Precision.MEDIUM, array=True)
-    input_dtype: Any = Param(default=bfloat16, repr=False)
-    output_dtype: Any = Param(default=bfloat16, repr=False)
+    precision: CompileTime[Precision] = Auto(default=Precision.MEDIUM, array=True)
+    input_dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
+    output_dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
     # Filled by resolve.
-    n_aie_rows: int = Auto(repr=False, init=False, array=True)
-    n_shim_mem_a: int = Auto(repr=False, init=False)
-    a_l2: int = Auto(repr=False, init=False)
-    b_l2: int = Auto(repr=False, init=False)
-    c_l2: int = Auto(repr=False, init=False)
+    n_aie_rows: CompileTime[int] = Auto(repr=False, init=False, array=True)
+    n_shim_mem_a: CompileTime[int] = Auto(repr=False, init=False)
+    a_l2: CompileTime[int] = Auto(repr=False, init=False)
+    b_l2: CompileTime[int] = Auto(repr=False, init=False)
+    c_l2: CompileTime[int] = Auto(repr=False, init=False)
 
     A = In(M, K, dtype=input_dtype, obj_shape=(a_l2,), per=(n_shim_mem_a,))
     B = In(

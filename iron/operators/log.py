@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
+from aie.iron import CompileTime, In
 from aie.iron.kernels import activation
 
-from iron.common import In, Param, UnaryElementwise
+from iron.common import UnaryElementwise, field
 from iron.common.elementwise import Sweep
 from iron.common.testing import Testing
 
@@ -24,7 +25,7 @@ class Log(UnaryElementwise):
         ),
     )
 
-    offset: float = Param(default=0.0, array=True)
+    offset: CompileTime[float] = field(default=0.0, array=True)
 
     x = In(
         UnaryElementwise.size,

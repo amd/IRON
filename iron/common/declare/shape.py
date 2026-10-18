@@ -62,7 +62,7 @@ class Shape:
         return ", ".join(d.name if isinstance(d, Field) else repr(d) for d in self.dims)
 
     def check(self, cls: type, member: Any, what: str, *, allow_tunable: bool) -> None:
-        """Check each dimension is a ``Param()`` field of ``cls`` or an
+        """Check each dimension is a ``field()`` field of ``cls`` or an
         integer, or with ``allow_tunable`` (a stream's tile) also an ``Auto()``.
 
         Raises:

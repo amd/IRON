@@ -21,11 +21,12 @@ import inspect
 import aie.utils as aie_utils
 import numpy as np
 import pytest
+from aie.iron import CompileTime, In, Out
 from aie.iron.device import from_name
 from aie.utils.compile.jit._hash import _python_identity
 from aie.utils.trace import TraceConfig
 
-from iron.common import In, Operator, Out, Param
+from iron.common import Operator, field
 from iron.common.design import OperatorDesign, runtime
 from iron.common.image.sequence import OperatorSequence
 from iron.operators import GEMM, MHA, ElementwiseAdd
@@ -217,8 +218,8 @@ class _Opaque:
 
 
 class _Holding(Operator):
-    n: int = Param()
-    thing: object = Param()
+    n: CompileTime[int] = field()
+    thing: CompileTime[object] = field()
     x = In(n)
     y = Out(n)
 

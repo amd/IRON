@@ -6,24 +6,14 @@ import dataclasses
 
 import numpy as np
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import ObjectFifo, TaskGroup, Worker
+from aie.iron import CompileTime, In, ObjectFifo, Out, TaskGroup, Worker
 from aie.iron.controlflow import range_
 from aie.iron.device import Device
 from aie.iron.kernels import datamovement
 from aie.utils.verify import Tolerance
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    Auto,
-    Built,
-    Divisors,
-    In,
-    Operator,
-    Out,
-    Param,
-    Rtp,
-    Value,
-)
+from iron.common import Auto, Built, Divisors, Operator, Rtp, Value, field
 from iron.common.testing import Case, Testing
 
 
@@ -72,10 +62,10 @@ class Transpose(Operator):
 
     test = Testing(_cases)
 
-    M: int = Param()
-    N: int = Param()
-    num_batches: int | None = Param(default=None)
-    m: int = Auto(
+    M: CompileTime[int] = field()
+    N: CompileTime[int] = field()
+    num_batches: CompileTime[int | None] = field(default=None)
+    m: CompileTime[int] = Auto(
         default=64,
         domain=Divisors(
             of=lambda op, dev: op.M,
@@ -83,7 +73,7 @@ class Transpose(Operator):
             cap=lambda op, dev: 8192 // op.n,
         ),
     )
-    n: int = Auto(
+    n: CompileTime[int] = Auto(
         default=64,
         domain=Divisors(
             of=lambda op, dev: op.N,
@@ -91,9 +81,9 @@ class Transpose(Operator):
             cap=lambda op, dev: 8192 // op.m,
         ),
     )
-    s: int = Auto(default=8, domain=(8, 4), array=True)
-    num_aie_columns: int = Auto()
-    num_channels: int = Auto(default=1)
+    s: CompileTime[int] = Auto(default=8, domain=(8, 4), array=True)
+    num_aie_columns: CompileTime[int] = Auto()
+    num_channels: CompileTime[int] = Auto(default=1)
 
     x = In(num_batches, M, N, obj_shape=(m, n), per=(num_aie_columns, num_channels))
     y = Out(num_batches, N, M, obj_shape=(m, n), per=(num_aie_columns, num_channels))

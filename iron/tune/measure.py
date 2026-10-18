@@ -30,10 +30,11 @@ from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
+from aie.iron import Out
 from aie.utils import bfp
 from aie.utils.compile import NPU_CACHE_HOME
 
-from iron.common.declare import Operand, Operator, Out
+from iron.common.declare import Operand, Operator
 from iron.common.declare.value import Value
 from iron.common.design import OperatorDesign
 from iron.common.graph.trace import TracedGraph

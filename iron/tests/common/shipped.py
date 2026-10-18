@@ -33,16 +33,14 @@ import dataclasses
 import numpy as np
 from aie.dialects.aie import AIEArch, DMAChannelDir
 from aie.helpers.taplib import TensorAccessPattern
-from aie.iron import Buffer, DmaEndpoint, Lock
+from aie.iron import Buffer, CompileTime, DmaEndpoint, In, Lock, Out
 from aie.iron.device import Device, Tile
 from ml_dtypes import bfloat16
 
 from iron.common import (
     Auto,
     Built,
-    In,
     Operator,
-    Out,
     Precision,
     Select,
     Unresolvable,
@@ -123,20 +121,26 @@ class Shipped(
 
     # The port's tunables, fixed by the binary. B is bf16 (no bfp16 on this
     # image), one row-block per B fetch, and the whole of K in one slice.
-    tile_n: int = Auto(default=N_TILE, repr=False, init=False)
-    k_tile: int = Auto(default=K_TILE, repr=False, init=False)
-    tile_ma: int = Auto(default=M_TILE, repr=False, init=False)
-    m_chunk: int = Auto(default=1, repr=False, init=False)
-    rows: int = Auto(default=ROWS, repr=False, init=False)
-    cols: int = Auto(default=COLS, repr=False, init=False)
-    precision: Precision = Auto(default=Precision.MEDIUM, repr=False, init=False)
-    emulate_bf16_mmul_with_bfp16: bool = Auto(default=True, repr=False, init=False)
-    bfp16_b: bool = Auto(default=False, repr=False, init=False)
-    b_dtype: object = Auto(default=bfloat16, repr=False, init=False)
-    l1_b_depth: int = Auto(default=QUEUE_DEPTH, repr=False, init=False)
-    a_l2: int = Auto(default=M_TILE * K_TILE, repr=False, init=False)
-    b_l2: int = Auto(default=K_TILE * N_TILE, repr=False, init=False)
-    c_l2: int = Auto(default=ROWS * M_TILE * N_TILE, repr=False, init=False)
+    tile_n: CompileTime[int] = Auto(default=N_TILE, repr=False, init=False)
+    k_tile: CompileTime[int] = Auto(default=K_TILE, repr=False, init=False)
+    tile_ma: CompileTime[int] = Auto(default=M_TILE, repr=False, init=False)
+    m_chunk: CompileTime[int] = Auto(default=1, repr=False, init=False)
+    rows: CompileTime[int] = Auto(default=ROWS, repr=False, init=False)
+    cols: CompileTime[int] = Auto(default=COLS, repr=False, init=False)
+    precision: CompileTime[Precision] = Auto(
+        default=Precision.MEDIUM, repr=False, init=False
+    )
+    emulate_bf16_mmul_with_bfp16: CompileTime[bool] = Auto(
+        default=True, repr=False, init=False
+    )
+    bfp16_b: CompileTime[bool] = Auto(default=False, repr=False, init=False)
+    b_dtype: CompileTime[object] = Auto(default=bfloat16, repr=False, init=False)
+    l1_b_depth: CompileTime[int] = Auto(default=QUEUE_DEPTH, repr=False, init=False)
+    a_l2: CompileTime[int] = Auto(default=M_TILE * K_TILE, repr=False, init=False)
+    b_l2: CompileTime[int] = Auto(default=K_TILE * N_TILE, repr=False, init=False)
+    c_l2: CompileTime[int] = Auto(
+        default=ROWS * M_TILE * N_TILE, repr=False, init=False
+    )
 
     # One (M_TILE x K_TILE) block per object, broadcast along a compute row.
     A = In(

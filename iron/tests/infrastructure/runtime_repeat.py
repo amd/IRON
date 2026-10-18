@@ -18,13 +18,13 @@ import numpy as np
 import pytest
 from aie.helpers.taplib import TensorAccessPattern
 from aie.passmanager import PassManager
-from aie.iron import ObjectFifo, TaskGroup
+from aie.iron import CompileTime, In, ObjectFifo, Out, TaskGroup
 from aie.utils.npukernel import NPUKernel
 from aie.utils.txn_trace import trace
 
 import iron
 from iron import Scratchpad
-from iron.common import Built, Extent, In, Operator, Out, Param, Value
+from iron.common import Built, Extent, Operator, Value, field
 from iron.common.design import OperatorDesign
 from iron.common.graph.handle import PerCall
 from iron.common.image.packaging import Kind
@@ -38,8 +38,8 @@ IMAGES = {"elf": True, "xclbin": False}
 class RepeatTile(Operator):
     """`y[:valid]` is `valid` copies of `x`; past it, `y` is untouched."""
 
-    width: int = Param()
-    max_k: int = Param()
+    width: CompileTime[int] = field()
+    max_k: CompileTime[int] = field()
 
     valid = Extent(max_k)
     reps = Value(derive=lambda op: op.valid - 1)

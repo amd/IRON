@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (C) 2026 Advanced Micro Devices, Inc. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A ``Param(probe=)`` field reaches its design only as words the cores
+"""A ``field(probe=)`` field reaches its design only as words the cores
 read, so its cost key may leave it out.
 
 Each operator that declares a probe is generated away from it and at it,

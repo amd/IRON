@@ -13,11 +13,14 @@ import numpy as np
 from aie.dialects.aie import DMAChannelDir, WireBundle
 from aie.helpers.taplib import TensorAccessPattern
 from aie.iron import (
+    CompileTime,
     DmaEndpoint,
     ExternalFunction,
     Flow,
     FlowEndpoint,
+    In,
     ObjectFifo,
+    Out,
     PacketFlow,
     TaskGroup,
     Worker,
@@ -32,14 +35,12 @@ from iron.common import (
     Built,
     Divisors,
     Extent,
-    In,
     Operand,
     Operator,
-    Out,
-    Param,
     Rtp,
     Unresolvable,
     Value,
+    field,
 )
 from iron.common.declare.operand import slots
 from iron.common.testing import Case, Testing
@@ -97,18 +98,18 @@ class Gather(Operator):
     aiecc_flags: ClassVar[tuple[str, ...]] = ("--reclaim-runtime-bds",)
     pad_bytes: ClassVar[int] = 16
 
-    rows: int = Param()
-    table_rows: int = Param()
-    row: int = Param()
-    dtype: Any = Param(default=bfloat16, repr=False)
-    words: int = Param(
+    rows: CompileTime[int] = field()
+    table_rows: CompileTime[int] = field()
+    row: CompileTime[int] = field()
+    dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
+    words: CompileTime[int] = field(
         derive=lambda op: 20 * op.chain
         + 6 * op.rows
         + 3 * len(op.batches)
         + (3 if op.rows % op.chain else 0),
         repr=False,
     )
-    feeds: int = Auto()
+    feeds: CompileTime[int] = Auto()
 
     table = In(table_rows, row, dtype=dtype)
     control = In(words, dtype=np.uint32)
@@ -392,14 +393,16 @@ class GatherWords(Operator):
 
     low_bits: ClassVar[int] = 29
 
-    rows: int = Param()
-    table_rows: int = Param(array=True)
-    row_bytes: int = Param(array=True)
-    words: int = Param()
-    pairs: int = Param(derive=lambda op: 2 * op.rows, repr=False, array=True)
-    bounded: bool = Param(default=False, array=True)
+    rows: CompileTime[int] = field()
+    table_rows: CompileTime[int] = field(array=True)
+    row_bytes: CompileTime[int] = field(array=True)
+    words: CompileTime[int] = field()
+    pairs: CompileTime[int] = field(
+        derive=lambda op: 2 * op.rows, repr=False, array=True
+    )
+    bounded: CompileTime[bool] = field(default=False, array=True)
     # The words a call writes: the address pairs, then if bounded the lengths.
-    record: int = Param(
+    record: CompileTime[int] = field(
         derive=lambda op: op.pairs + (op.rows if op.bounded else 0), repr=False
     )
 
@@ -585,12 +588,12 @@ class Copy(Operator):
         ],
     )
 
-    input_buffer_size: int = Param(repr=False)
-    src: TensorAccessPattern | tuple[TensorAccessPattern, ...] = Param(
+    input_buffer_size: CompileTime[int] = field(repr=False)
+    src: CompileTime[TensorAccessPattern | tuple[TensorAccessPattern, ...]] = field(
         derive=lambda op: TensorAccessPattern.full((op.input_buffer_size,))
     )
     # A repeated source's walk is its capacity: the destination's rows are the copy's.
-    output_buffer_size: int = Param(
+    output_buffer_size: CompileTime[int] = field(
         derive=lambda op: sum(
             prod(p.sizes)
             for p in (
@@ -602,7 +605,7 @@ class Copy(Operator):
         repr=False,
     )
     # Rows as wide as the source's innermost axis: the channels split both alike.
-    dst: TensorAccessPattern | tuple[TensorAccessPattern, ...] = Param(
+    dst: CompileTime[TensorAccessPattern | tuple[TensorAccessPattern, ...]] = field(
         derive=lambda op: TensorAccessPattern.full(
             (op.output_buffer_size // op.src.sizes[-1], op.src.sizes[-1])
             if isinstance(op.src, TensorAccessPattern)
@@ -610,11 +613,11 @@ class Copy(Operator):
         )
     )
     # The axis of each pattern a graph bounds per call.
-    src_bound: int | None = Param(default=None)
-    dst_bound: int | None = Param(default=None)
+    src_bound: CompileTime[int | None] = field(default=None)
+    dst_bound: CompileTime[int | None] = field(default=None)
     # The source's first axis runs a per-call count of times (Handle.at's repeat).
-    src_repeat: bool = Param(default=False)
-    tile_size: int = Auto(
+    src_repeat: CompileTime[bool] = field(default=False)
+    tile_size: CompileTime[int] = Auto(
         domain=Divisors(
             of=lambda op, dev: op.channel_share,
             cap=lambda op, dev: op.object_bytes // np.dtype(op.dtype).itemsize,
@@ -625,8 +628,8 @@ class Copy(Operator):
     object_bytes: ClassVar[int] = 64 * 1024
     # The patterns a repeated source walks in turn: a repeat word each.
     max_walks: ClassVar[int] = 8
-    num_channels: int = Auto(default=1)
-    dtype: Any = Param(default=bfloat16, repr=False)
+    num_channels: CompileTime[int] = Auto(default=1)
+    dtype: CompileTime[Any] = field(default=bfloat16, repr=False)
 
     x = In(
         input_buffer_size,

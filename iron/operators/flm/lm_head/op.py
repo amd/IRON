@@ -6,17 +6,11 @@ import functools
 
 import numpy as np
 from aie.dialects._aie_enum_gen import AIEArch
+from aie.iron import CompileTime, In, Out
 from aie.iron.kernels import flm_gemma4
 from ml_dtypes import bfloat16
 
-from iron.common import (
-    Auto,
-    In,
-    Operator,
-    Out,
-    Param,
-    Unresolvable,
-)
+from iron.common import Auto, Operator, Unresolvable, field
 from iron.operators.flm.lm_head import reference
 from iron.operators.flm.lm_head.design import lm_head
 from iron.operators.flm.q4nx import GROUP, K_TILE, M_TILE, packed_bytes
@@ -30,15 +24,15 @@ class LMHead(Operator):
     Y receives the logits. See README.md.
     """
 
-    dim: int = Param()
-    vocab: int = Param()
-    softcap: float = Param()
-    w_words: int = Param(
+    dim: CompileTime[int] = field()
+    vocab: CompileTime[int] = field()
+    softcap: CompileTime[float] = field()
+    w_words: CompileTime[int] = field(
         derive=lambda op: packed_bytes(op.vocab * op.dim) // 4, repr=False
     )
-    x_len: int = Param(derive=lambda op: 2 * op.dim, repr=False)
-    cols: int = Auto(repr=False)
-    rows: int = Auto(repr=False)
+    x_len: CompileTime[int] = field(derive=lambda op: 2 * op.dim, repr=False)
+    cols: CompileTime[int] = Auto(repr=False)
+    rows: CompileTime[int] = Auto(repr=False)
 
     # The runtime sequence's argument order.
     y = Out(vocab, dtype=bfloat16)

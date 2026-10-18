@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import aie.iron
 import aie.utils as aie_utils
-from aie.iron import ScratchpadParameter
+from aie.iron import CompileTime, DispatchTime, In, Out, ScratchpadParameter
 import numpy as np
 import pytest
 from aie.iron.device import from_name
@@ -26,20 +26,17 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Profile, Scratchpad
 from iron.common import (
+    Auto,
+    Built,
     Divisors,
-    DispatchTime,
-    Rtp,
-    Width,
     Extent,
-    In,
     Operator,
-    Out,
+    Rtp,
     Select,
     Unresolvable,
     Value,
-    Auto,
-    Param,
-    Built,
+    Width,
+    field,
 )
 from iron.common.declare.field import AutoSpec, ParamSpec
 from iron.common.declare.operand import active_runtime
@@ -65,13 +62,13 @@ def from_operands(cls, *operand_shapes, **overrides):
 
 
 class MV(Operator):
-    M: int = Param()
-    K: int = Param()
-    num_batches: int | None = Param(default=None)
-    columns: int | None = Auto()
-    tile_out: int = Auto(default=64)
-    vec: int | None = Auto(repr=False)
-    epilogue: str = Param(default="none", array=True)
+    M: CompileTime[int] = field()
+    K: CompileTime[int] = field()
+    num_batches: CompileTime[int | None] = field(default=None)
+    columns: CompileTime[int | None] = Auto()
+    tile_out: CompileTime[int] = Auto(default=64)
+    vec: CompileTime[int | None] = Auto(repr=False)
+    epilogue: CompileTime[str] = field(default="none", array=True)
 
     A = In(num_batches, M, K, obj_shape=(tile_out, K), per=columns)
     B = In(num_batches, K, obj_shape=(K,), broadcast=True)
@@ -153,8 +150,8 @@ def test_a_tunable_may_name_a_tile_but_not_a_buffer_shape():
     with pytest.raises(TypeError, match="host shape may not depend on tuning"):
 
         class Bad(Operator):
-            M: int = Param()
-            t: int = Auto(default=64)
+            M: CompileTime[int] = field()
+            t: CompileTime[int] = Auto(default=64)
             A = In(M, t)
 
 
@@ -186,7 +183,7 @@ def test_expression_in_a_shape_is_rejected():
     with pytest.raises(TypeError, match="Expressions are not allowed"):
 
         class Bad(Operator):
-            n: int = Param()
+            n: CompileTime[int] = field()
             x = In("n // 2")
 
 
@@ -194,7 +191,7 @@ def test_annotated_member_is_rejected():
     with pytest.raises(TypeError, match="without an annotation"):
 
         class Bad(Operator):
-            M: int = Param()
+            M: CompileTime[int] = field()
             A: In = In(M)
 
 
@@ -202,7 +199,7 @@ def test_a_member_hiding_the_operators_own_attribute_is_rejected():
     with pytest.raises(TypeError, match="hides Operator.values"):
 
         class Bad(Operator):
-            n: int = Param()
+            n: CompileTime[int] = field()
             values = In(n)
 
 
@@ -210,12 +207,12 @@ def test_a_field_hiding_the_operators_own_attribute_is_rejected():
     with pytest.raises(TypeError, match="hides Operator.inputs"):
 
         class Bad(Operator):
-            inputs: int = Param()
+            inputs: CompileTime[int] = field()
 
     with pytest.raises(TypeError, match="hides Operator.name"):
 
         class Worse(Operator):
-            name: str = Param()
+            name: CompileTime[str] = field()
 
 
 def test_a_field_may_replace_an_operator_bases_own_attribute():
@@ -223,7 +220,7 @@ def test_a_field_may_replace_an_operator_bases_own_attribute():
         window = None
 
     class Windowed(Base):
-        window: int = Param(default=512)
+        window: CompileTime[int] = field(default=512)
 
     assert Windowed().window == 512
 
@@ -245,8 +242,8 @@ def test_per_and_broadcast_are_exclusive():
     with pytest.raises(TypeError, match="either per"):
 
         class Bad(Operator):
-            n: int = Param()
-            c: int = Auto(default=2)
+            n: CompileTime[int] = field()
+            c: CompileTime[int] = Auto(default=2)
             x = In(n, obj_shape=(4,), per=(c,), broadcast=True)
 
 
@@ -254,15 +251,15 @@ def test_a_probe_may_not_be_on_a_field_the_array_reads():
     with pytest.raises(TypeError, match="probe= on an array field"):
 
         class Baked(Operator):
-            n: int = Param()
-            alpha: float = Param(probe=1.0, array=True)
+            n: CompileTime[int] = field()
+            alpha: CompileTime[float] = field(probe=1.0, array=True)
             x = In(n)
 
     with pytest.raises(TypeError, match="probe= on an array field"):
 
         class Tiled(Operator):
-            n: int = Param()
-            t: int = Param(probe=16)
+            n: CompileTime[int] = field()
+            t: CompileTime[int] = field(probe=16)
             x = In(n, obj_shape=(t,))
 
 
@@ -270,14 +267,14 @@ def test_a_probe_may_not_be_on_a_field_the_transfers_follow():
     with pytest.raises(TypeError, match="probe= on a field an operand's shape"):
 
         class Shaped(Operator):
-            n: int = Param(probe=1024)
+            n: CompileTime[int] = field(probe=1024)
             x = In(n)
 
     with pytest.raises(TypeError, match="probe= on a field an operand's shape"):
 
         class Present(Operator):
-            n: int = Param()
-            gated: bool = Param(default=False, probe=False)
+            n: CompileTime[int] = field()
+            gated: CompileTime[bool] = field(default=False, probe=False)
             x = In(n)
             w = In(n, when=gated)
 
@@ -286,16 +283,16 @@ def test_a_probe_may_not_be_on_a_field_the_constructor_cannot_set():
     with pytest.raises(TypeError, match="probe= on an init=False field"):
 
         class Fixed(Operator):
-            n: int = Param()
-            low: float = Param(default=0.0, init=False, probe=0.0)
+            n: CompileTime[int] = field()
+            low: CompileTime[float] = field(default=0.0, init=False, probe=0.0)
             x = In(n)
 
 
 def test_probed_sets_each_probe_field_and_nothing_else():
     class Bounded(Operator):
-        n: int = Param()
-        low: float = Param(probe=-np.inf)
-        cap: tuple | None = Param(default=None, probe=None)
+        n: CompileTime[int] = field()
+        low: CompileTime[float] = field(probe=-np.inf)
+        cap: CompileTime[tuple | None] = field(default=None, probe=None)
         x = In(n)
 
     assert Bounded.declaration.probes == {"low": -np.inf, "cap": None}
@@ -334,9 +331,9 @@ def test_a_t_or_none_dim_is_omitted_when_none_and_may_sit_anywhere():
     assert MV(M=64, K=256, num_batches=3).C.shape == (3, 64)
 
     class Stack(Operator):
-        rows: int = Param()
-        cols: int = Param()
-        seq: int | None = Param(default=None)
+        rows: CompileTime[int] = field()
+        cols: CompileTime[int] = field()
+        seq: CompileTime[int | None] = field(default=None)
         x = In(rows, seq, cols)
         y = Out(rows, seq, cols)
 
@@ -358,8 +355,8 @@ def test_a_t_or_none_dim_is_omitted_when_none_and_may_sit_anywhere():
 
 def test_an_unresolved_tile_dimension_refuses_to_resolve():
     class Tiled(Operator):
-        n: int = Param()
-        t: int = Auto()
+        n: CompileTime[int] = field()
+        t: CompileTime[int] = Auto()
         x = In(n, obj_shape=(t,))
 
     with pytest.raises(ValueError, match="t is None.*Resolve the operator first"):
@@ -368,7 +365,7 @@ def test_an_unresolved_tile_dimension_refuses_to_resolve():
 
 def test_a_block_float_tile_is_sized_by_its_blocks(npu2):
     class Blocks(Operator):
-        n: int = Param()
+        n: CompileTime[int] = field()
         x = In(n, dtype=bfp.v8bfp16ebs8, obj_shape=(4096,))
 
     # 4096 blocks of 9 bytes: past half a core memory bank, so one deep.
@@ -407,7 +404,7 @@ def test_a_stream_binds_a_handle_per_lane():
         MV(M=1024, K=256, columns=2).A.bind("h")
 
     class NoObjType(Operator):
-        n: int = Param()
+        n: CompileTime[int] = field()
         x = In(n)
 
     with pytest.raises(TypeError, match="without an obj_shape"):
@@ -429,10 +426,10 @@ def test_an_operand_fills_only_inside_its_operators_sequence():
 
 def test_per_call_values_bind_on_the_operator():
     class Copy(Operator):
-        n: int = Param()
+        n: CompileTime[int] = field()
         src = In(n, obj_shape=(n,))
         off = Value()
-        live = DispatchTime()
+        live: DispatchTime[np.int32] = field(init=False)
 
     op = Copy(n=256)
     assert [v.name for v in op.values] == ["off", "live"]
@@ -460,7 +457,7 @@ def test_an_exported_design_replaces_the_derived_one():
     # The design is another tool's text; the operands are declared as any
     # operator's are.
     class Exported(Operator):
-        n: int = Param()
+        n: CompileTime[int] = field()
         x = In(n)
         y = Out(n)
 
@@ -498,8 +495,8 @@ def test_an_operand_with_a_tile_is_its_own_stream():
 class Scaled(Operator):
     """``x`` times a scale row when ``scaled``, else a copy of it."""
 
-    N: int = Param()
-    scaled: bool = Param(default=False)
+    N: CompileTime[int] = field()
+    scaled: CompileTime[bool] = field(default=False)
 
     x = In(N, obj_shape=(N,))
     s = In(N, obj_shape=(N,), when=scaled)
@@ -555,8 +552,8 @@ def test_when_names_a_param():
     with pytest.raises(TypeError, match=r"must be a field\(\)"):
 
         class Bad(Operator):
-            N: int = Param()
-            flag: bool = Auto(default=False)
+            N: CompileTime[int] = field()
+            flag: CompileTime[bool] = Auto(default=False)
             s = In(N, when=flag)
 
 
@@ -683,7 +680,7 @@ def test_resolving_for_a_device_binds_it_while_it_resolves():
 
 def test_a_field_resolve_computes_is_kept_by_copies_and_checked_once_known():
     class Derived(MV):
-        half: int = Auto(init=False)
+        half: CompileTime[int] = Auto(init=False)
 
         def resolve(self, dev):
             new = super().resolve(dev)
@@ -788,7 +785,7 @@ def test_overriding_an_inherited_field_needs_an_annotation():
             tile_out = 32  # dataclass would keep the base's 64 in silence
 
     class Annotated(MV):
-        tile_out: int = Auto(default=32)
+        tile_out: CompileTime[int] = Auto(default=32)
 
     assert Annotated(M=64, K=64).tile_out == 32
 
@@ -826,9 +823,9 @@ def test_a_broadcast_stream_is_paid_once_in_the_shim_budget():
 
 def test_a_computed_default_is_inferred_from_a_shape_or_computed():
     class Rep(Operator):
-        rows: int = Param()
-        repeat: int = Param()
-        out_rows: int = Param(derive=lambda op: op.rows * op.repeat)
+        rows: CompileTime[int] = field()
+        repeat: CompileTime[int] = field()
+        out_rows: CompileTime[int] = field(derive=lambda op: op.rows * op.repeat)
         x = In(rows, 8)
         y = Out(out_rows, 8)
 
@@ -844,11 +841,11 @@ def test_a_computed_default_is_inferred_from_a_shape_or_computed():
 
 def test_a_select_picks_a_layout_within_a_storage():
     class Weights(Operator):
-        K: int = Param()
-        N: int = Param()
-        blocks: int = Param(default=0)
-        packed: bool = Param(default=False)
-        transposed: bool = Param(default=False)
+        K: CompileTime[int] = field()
+        N: CompileTime[int] = field()
+        blocks: CompileTime[int] = field(default=0)
+        packed: CompileTime[bool] = field(default=False)
+        transposed: CompileTime[bool] = field(default=False)
         w = In(Select(packed, (blocks,), (Select(transposed, (N, K), (K, N)),)))
 
     assert Weights.declaration.infer({"w": (64, 32)}, transposed=True) == {
@@ -920,9 +917,9 @@ def test_mha_pads_the_sequence_and_groups_kv():
 class Rows(Operator):
     """Rows of ``cols`` elements over ``lanes`` lanes; ``rows`` may be bounded."""
 
-    rows: int = Param()
-    cols: int = Param()
-    lanes: int = Auto(default=2)
+    rows: CompileTime[int] = field()
+    cols: CompileTime[int] = field()
+    lanes: CompileTime[int] = Auto(default=2)
     valid = Extent(rows)
     count = Value(derive=lambda op: op.valid // op.lanes)  # reads the extent
     width = Value(derive=lambda op: op.cols)  # does not
@@ -951,7 +948,7 @@ def test_an_extent_reads_as_its_field_until_a_graph_bounds_it():
     with pytest.raises(TypeError, match=r"must name a field\(\)"):
 
         class Bad(Operator):
-            n: int = Auto(default=4)
+            n: CompileTime[int] = Auto(default=4)
             valid = Extent(n)
             x = In(n)
 
@@ -1096,9 +1093,9 @@ def test_a_scratchpad_parameter_holds_one_word():
 
 def test_an_axis_is_found_through_the_branch_a_select_takes():
     class Laid(Operator):
-        rows: int = Param()
-        cols: int = Param()
-        flip: bool = Param(default=False)
+        rows: CompileTime[int] = field()
+        cols: CompileTime[int] = field()
+        flip: CompileTime[bool] = field(default=False)
         x = In(Select(flip, (cols, rows), (rows, cols)))
 
     assert Laid.x.dims.axis_of("rows", Laid(rows=4, cols=8)) == 0

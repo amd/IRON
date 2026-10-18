@@ -17,11 +17,20 @@ import aie.iron
 import aie.utils as aie_utils
 import numpy as np
 import pytest
-from aie.iron import ObjectFifo, Program, Runtime, require
+from aie.iron import (
+    CompileTime,
+    DispatchTime,
+    In,
+    ObjectFifo,
+    Out,
+    Program,
+    Runtime,
+    require,
+)
 from aie.iron.controlflow import range_
 from aie.utils.hostruntime.hostruntime import HostRuntimeError
 
-from iron.common import DispatchTime, In, Operator, Out, Param
+from iron.common import Operator, field
 from iron.common.design import OperatorDesign
 
 CHUNK = 1024
@@ -51,12 +60,12 @@ def chunk_copy(dev, max_chunks, *, n: aie.iron.DispatchTime[np.int32]):
 
 
 class ChunkCopy(Operator):
-    max_chunks: int = Param()
-    size: int = Param(derive=lambda op: op.max_chunks * CHUNK, repr=False)
+    max_chunks: CompileTime[int] = field()
+    size: CompileTime[int] = field(derive=lambda op: op.max_chunks * CHUNK, repr=False)
 
     src = In(size, dtype=np.int32)
     dst = Out(size, dtype=np.int32)
-    n = DispatchTime()
+    n: DispatchTime[np.int32] = field(init=False)
 
     def validate(self) -> None:
         self.check_derived("size")
