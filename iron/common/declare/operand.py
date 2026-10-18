@@ -85,6 +85,10 @@ class Operand(Member["Operand"]):
         broadcast: One fifo every worker consumes.
         when: A bool `field()`; the operand and its stream exist only where
             it is true, and a call giving the operand by keyword sets it.
+
+    Attributes:
+        dims: The declared host shape.
+        obj_dims: The declared ``obj_shape=``, or None.
     """
 
     def __init__(
@@ -111,7 +115,7 @@ class Operand(Member["Operand"]):
         self.dims = Shape(tuple(dims))
         self.declared_dtype = dtype
         self.when = when
-        self._obj_shape = (
+        self.obj_dims = (
             None
             if obj_shape is None
             else Shape(
@@ -185,13 +189,13 @@ class Operand(Member["Operand"]):
 
     @property
     def streamed(self) -> bool:
-        return self._obj_shape is not None
+        return self.obj_dims is not None
 
     @property
     def obj_shape(self) -> tuple[int, ...]:
-        if self._obj_shape is None:
+        if self.obj_dims is None:
             raise TypeError(f"{self.name} is declared without an obj_shape=: no stream")
-        return self._resolve(self._obj_shape)
+        return self._resolve(self.obj_dims)
 
     @property
     def obj_type(self):
@@ -213,7 +217,7 @@ class Operand(Member["Operand"]):
     @property
     def lanes(self) -> int:
         """The stream's lanes (fifos)."""
-        if self._obj_shape is None:
+        if self.obj_dims is None:
             raise TypeError(f"{self.name} is declared without an obj_shape=: no stream")
         return 1 if self.per is None else math.prod(self._resolve(self.per))
 

@@ -119,7 +119,7 @@ def test_shapes_captured_bare_names_resolve_to_refs():
     dims = MV.A.dims.dims
     assert dims[0].name == "num_batches"
     assert dims[1] is MV.M and dims[2] is MV.K
-    assert MV.A._obj_shape.dims == (MV.tile_out, MV.K)
+    assert MV.A.obj_dims.dims == (MV.tile_out, MV.K)
     assert MV.A.per.dims == (MV.columns,)
 
 
@@ -145,7 +145,7 @@ def test_dataclass_constructor_is_typed_by_real_fields():
 
 
 def test_a_tunable_may_name_a_tile_but_not_a_buffer_shape():
-    assert MV.A._obj_shape.dims[0] is MV.tile_out
+    assert MV.A.obj_dims.dims[0] is MV.tile_out
     with pytest.raises(TypeError, match="host shape may not depend on tuning"):
 
         class Bad(Operator):
