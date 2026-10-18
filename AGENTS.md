@@ -133,7 +133,7 @@ reuse lint
 1. **Operators** (`iron/operators/`)
    - One operator is one module: `relu.py` for a small one, a directory with
      `op.py` for one that also has a design, a reference, a README or a
-     device test of its own (`swiglu_prefill_stream/`). `flm/` holds the
+     device test of its own (`flm/gemm/`). `flm/` holds the
      FastFlowLM ports (`flm.GEMM`, `flm.DequantBFP`), the binary they are
      measured against and their weight packing, exported from its own
      package (`from iron.operators.flm import GEMM`) as well as
@@ -159,8 +159,8 @@ reuse lint
        operator whose xclbin this one runs (itself by default; flm's GEMM
        returns its shape-free half, so one xclbin serves every shape), and
        `exported_design()`, a callable returning the module (an
-       `ir.Module` or its text) for a design another tool exports
-       (stream-dse's SwiGLU groups) in place of the derived one.
+       `ir.Module` or its text) for a hand-placed design (flm's
+       DecodeLayer, PrefillAttention and LMHead) in place of the derived one.
      - The operator's `reference(*inputs)` is the CPU reference the tests
        and the graph reference run; `vectors(op)` in `iron/common/testing`
        draws random inputs for its declared buffers and takes the outputs
@@ -563,7 +563,7 @@ Data movement pattern: L3 → Shim DMA → L2 → L1 (tile local) → Compute
 | `extent_unit(buffer)` | no (`None`: the stream tile's own rows) | splitting a bounded call's rows across a round-robin stream |
 | `device()` | no (the bound device) | building the array, when it covers only part of the bound device (GEMM's row subset) |
 | `configuration()` | no (itself) | locating the xclbin a shipped subclass runs (flm's GEMM, one image for every shape) |
-| `exported_design()` | no (`None`: the derived module) | compiling, in place of the generated MLIR (stream-dse's SwiGLU groups) |
+| `exported_design()` | no (`None`: the derived module) | compiling, in place of the generated MLIR (flm's hand-placed designs) |
 
 Inside a graph's `body()`, a step is spelled `GEMV.step(w, h, **kw)`: a
 classmethod that records a step on the active tracer and returns a handle,

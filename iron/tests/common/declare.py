@@ -427,8 +427,8 @@ def test_infer_reports_conflicts_naming_both_operands():
 
 
 def test_an_exported_design_replaces_the_derived_one():
-    # swiglu_prefill_stream's escape: the design is another tool's text,
-    # the operands are declared as any operator's are.
+    # The design is another tool's text; the operands are declared as any
+    # operator's are.
     class Exported(Operator):
         n: int = Param()
         x = In(n)
@@ -441,24 +441,6 @@ def test_an_exported_design_replaces_the_derived_one():
     assert [b.shape for b in op.buffers] == [(64,), (64,)]
     assert OperatorDesign(op).build() == "module {}"
     assert op.configuration() is op
-
-
-def test_swiglu_stream_groups_are_chosen_by_their_ports():
-    from iron.operators.swiglu_prefill_stream.op import (
-        Combine,
-        Down,
-        SwiGLUStreamGroup,
-    )
-
-    assert (
-        SwiGLUStreamGroup.for_ports(("left_swished", "right"), ("intermediate",))
-        is Combine
-    )
-    assert SwiGLUStreamGroup.for_ports(("intermediate", "w_down"), ("output",)) is Down
-    op = Down(seq_len=256, embedding_dim=512, hidden_dim=2048, k=2, group_index=1)
-    assert [b.shape for b in op.buffers] == [(256, 2048), (2048, 512), (256, 512)]
-    with pytest.raises(NotImplementedError, match="ports changed"):
-        SwiGLUStreamGroup.for_ports(("w_down", "intermediate"), ("output",))
 
 
 # --------------------------------------------------------------------------
