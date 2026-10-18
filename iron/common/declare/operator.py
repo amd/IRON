@@ -553,6 +553,8 @@ class Operator:
         fields, which it would refuse and reset: what ``resolve`` returns,
         ``self.replace(tile=..., derived=...)``. A held ``field(derive=)`` field
         not in ``changes`` is computed again from the new fields.
+        A ``held=False`` field keeps its value, so pass it again when you
+        change what it reads.
         """
         changes = {n: None for n in self.declaration.held} | changes
         fixed = {

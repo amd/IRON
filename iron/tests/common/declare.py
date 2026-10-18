@@ -817,7 +817,9 @@ def test_resolve_must_return_a_copy():
 
 
 def test_overriding_an_inherited_field_needs_an_annotation():
-    with pytest.raises(TypeError, match=r"tile_out: CompileTime\[int\] = Auto\(32\)"):
+    with pytest.raises(
+        TypeError, match=r"tile_out: CompileTime\[int\] = Auto\(default=32\)"
+    ):
 
         class Pinned(MV):
             tile_out = 32  # dataclass would keep the base's 64 in silence
@@ -890,9 +892,11 @@ def test_a_computed_default_of_none_must_be_given():
     assert Unknown(n=2).n == 2
 
 
-def test_a_field_gives_a_default_or_a_derive_not_both():
+def test_a_field_gives_a_default_or_a_derive_not_both_and_holds_only_a_derive():
     with pytest.raises(TypeError, match="give one, not both"):
         field(default=1, derive=lambda op: 1)
+    with pytest.raises(TypeError, match=r"only a derive= field is held"):
+        field(held=False)
 
 
 def test_a_select_picks_a_layout_within_a_storage():

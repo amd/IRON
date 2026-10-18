@@ -156,7 +156,7 @@ class Declaration:
             ):
                 raise TypeError(
                     f"{cls.__name__}.{name} = {value!r} does not override the inherited "
-                    f"field: annotate it, `{name}: CompileTime[int] = Auto({value!r})` (with "
+                    f"field: annotate it, `{name}: CompileTime[int] = Auto(default={value!r})` (with "
                     f"init=False to pin it), or dataclass keeps the base's default"
                 )
 

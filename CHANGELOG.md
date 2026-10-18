@@ -87,8 +87,8 @@ public API adds its entry under Unreleased.
 - `OnHost.generate`, which draws on the host.
 - `Model.generate(prompt, max_tokens, sampler=None)`: text in gives text
   out, token ids give ids, and a list of `{"role", "content"}` messages is
-  rendered by the checkpoint's `chat_template` (`Tokenizer.chat`, with
-  jinja2 from the `models` extra), each special token it writes its id and
+  rendered by the checkpoint's `chat_template` (`Tokenizer.chat`, which
+  needs jinja2: `pip install 'iron[models]'`), each special token it writes its id and
   the BOS first once; `sampler=None` is greedy.
   `Model.stream` yields the same pieces as they are drawn, and
   `model.stats` holds the last call's `ttft` and `tokens_per_s`.
@@ -97,7 +97,7 @@ public API adds its entry under Unreleased.
   iron's INFO lines, such as each compile's.
 - `repr` of a graph names its traced shapes; of a compiled version, its
   inputs, packaging and build directory; of a `Profile`, its operators; of
-  a model, its config, `max_seq_len` and whether it is loaded.
+  a model, its `max_seq_len` and whether it is loaded.
 
 ### Changed
 
@@ -112,13 +112,6 @@ public API adds its entry under Unreleased.
   (`same_kind`): float ids into an int32 input raise rather than truncate.
 - Compiling, loading or tuning with no NPU found raises a `RuntimeError`
   saying how to compile without one, not an `AttributeError` on `None`.
-- An error inside `iron.functional.linear` starts `linear(x, weight):`.
-- Compiling or loading with no NPU found raises `RuntimeError: no NPU found
-  (NPU_RUNTIME ...); pass dev=NPU2() to compile without one`, not an
-  `AttributeError` on `None`.
-- `repr` of a graph names its traced shapes; of a compiled version, its
-  inputs, packaging and build directory; of a `Profile`, its operators; of
-  a model, its `max_seq_len` and whether it is loaded.
 - `iron.lm.base` is split into `iron.lm.config`, `checkpoint`, `model` and
   `cli`.
 - An operator declares with aie.iron's markers: `In`, `Out` and `InOut`

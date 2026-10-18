@@ -96,6 +96,9 @@ If starting from `Ubuntu 24.04` you may need to update the Linux kernel to 6.11+
    pip install -r requirements.txt
    ```
 
+   A model's chat template renders with jinja2, the `models` extra:
+   `pip install '.[models]'` from this checkout.
+
 1. To test your installation, you can try to build and run the example below:
    ```bash
    pytest iron/tests/operators/catalog.py -k AXPY

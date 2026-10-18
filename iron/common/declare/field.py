@@ -115,10 +115,13 @@ def field(
         The field.
 
     Raises:
-        TypeError: Both `default` and `derive` are given.
+        TypeError: Both `default` and `derive` are given, or `held=False`
+            without `derive`.
     """
     if derive is not None and default is not MISSING:
         raise TypeError("field(default=, derive=): give one, not both")
+    if not held and derive is None:
+        raise TypeError("field(held=False): only a derive= field is held")
     return dataclasses.field(
         default=None if derive is not None else default,
         init=init,
