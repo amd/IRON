@@ -509,6 +509,38 @@ def test_no_sampler_is_greedy(toy):
     assert toy.generate(tokens, 6) == toy.generate(tokens, 6, Sampler(temperature=0))
 
 
+def test_generation_stops_at_an_eos_and_includes_it(cpu, tmp_path):
+    """As Hugging Face's ``generate``: the first of the checkpoint's eos ids
+    drawn is the last token, ``generation_config.json``'s list over
+    ``config.json``'s.
+    """
+    _repository(tmp_path, cpu.weights)
+    model = OnHost.load(tmp_path)
+    tokens = model.tokenizer(QUESTION)
+    drawn = model.generate(tokens, 6)
+    end = drawn.index(drawn[3]) + 1
+    (tmp_path / "generation_config.json").write_text(
+        json.dumps({"eos_token_id": [-1, drawn[3]]})
+    )
+    model = OnHost.load(tmp_path)
+    assert model.generate(tokens, 6) == drawn[:end]
+    assert list(model.stream(tokens, 6)) == drawn[:end]
+
+
+def test_a_run_that_draws_no_eos_draws_max_tokens(cpu, tmp_path):
+    """``config.json``'s eos, with no ``generation_config.json``."""
+    _repository(tmp_path, cpu.weights)
+    config = json.loads((tmp_path / "config.json").read_text())
+    model = OnHost.load(tmp_path)
+    tokens = model.tokenizer(QUESTION)
+    drawn = model.generate(tokens, 6)
+    unseen = next(t for t in range(SMALL.vocab_size) if t not in drawn)
+    config["eos_token_id"] = unseen
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    model = OnHost.load(tmp_path)
+    assert model.eos == {unseen} and model.generate(tokens, 6) == drawn
+
+
 def test_a_generation_s_timings_are_the_model_s_stats(toy):
     toy.generate(QUESTION, 3)
     assert toy.stats.ttft > 0 and toy.stats.tokens_per_s > 0

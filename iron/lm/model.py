@@ -247,6 +247,23 @@ class Model(iron.Graph):
                     return bos
         raise KeyError(f"{directory} names no bos_token_id: name the model's bos")
 
+    @functools.cached_property
+    def eos(self) -> set[int]:
+        """The tokens generation stops at: the checkpoint's ``eos_token_id``,
+        one or a list, from its ``generation_config.json`` or else its
+        ``config.json``; none without a checkpoint or either.
+        """
+        if self.checkpoint is None:
+            return set()
+        directory = Path(self.checkpoint.path).parent
+        for name in ("generation_config.json", "config.json"):
+            path = directory / name
+            if path.exists():
+                eos = json.loads(path.read_text()).get("eos_token_id")
+                if eos is not None:
+                    return set(eos) if isinstance(eos, list) else {eos}
+        return set()
+
     @classmethod
     def default_config(cls, weights_path) -> Config:
         """``cls.config`` itself, if it is already one shape; else that
@@ -357,8 +374,9 @@ class Model(iron.Graph):
     def stream(
         self, prompt, max_tokens: int, sampler: Sampler | None = None, **inputs
     ) -> Iterator:
-        """Draw ``max_tokens`` after ``prompt``, each yielded as it is drawn,
-        and its timings into ``stats`` once the last is.
+        """Draw up to ``max_tokens`` after ``prompt``, each yielded as it is
+        drawn, through the first of ``eos`` drawn, and its timings into
+        ``stats`` once the last is.
 
         Args:
             prompt: Text, tokenized; a list of chat messages, each
@@ -366,7 +384,7 @@ class Model(iron.Graph):
                 checkpoint's chat template (``Tokenizer.chat``); or token ids.
                 Text and messages yield text, each piece once its characters
                 are whole; ids yield ids.
-            max_tokens: How many tokens to draw.
+            max_tokens: The most tokens to draw.
             sampler: How each is drawn; None is greedy.
             inputs: What the model takes beside the tokens
                 (``Multimodal``'s ``raw``).
@@ -402,13 +420,15 @@ class Model(iron.Graph):
             drawn.append(token)
             if not text:
                 yield token
-                continue
-            shown = self.tokenizer.decode(drawn[seen:held])
-            piece = self.tokenizer.decode(drawn[seen:])[len(shown) :]
-            # A token can end partway through a character; the next completes it.
-            if not piece.endswith("\ufffd"):
-                yield piece
-                seen, held = held, len(drawn)
+            else:
+                shown = self.tokenizer.decode(drawn[seen:held])
+                piece = self.tokenizer.decode(drawn[seen:])[len(shown) :]
+                # A token can end partway through a character; the next completes it.
+                if not piece.endswith("\ufffd"):
+                    yield piece
+                    seen, held = held, len(drawn)
+            if token in self.eos:
+                break
         if text and held < len(drawn):
             shown = self.tokenizer.decode(drawn[seen:held])
             yield self.tokenizer.decode(drawn[seen:])[len(shown) :]
