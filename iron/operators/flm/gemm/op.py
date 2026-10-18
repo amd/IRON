@@ -68,11 +68,10 @@ from iron.operators.flm.gemm.design import (
     S,
     T,
     _b_bytes,
-    _b_depth_for,
-    _default_l1,
     _Slab,
     compute_rows,
     l1_budget,
+    l1_tiles,
 )
 from iron.operators.flm.packing import pack_b
 from iron.operators.gemm import GEMM
@@ -340,15 +339,9 @@ class ProjectionGEMM(Operator):
             while self.K % k_tile and (k_tile // 2) % ct_k == 0:
                 k_tile //= 2
         l1 = l1_budget(dev, self.compiled_modes)
-        if self.tile_ma is None:
-            tile_ma, l1_b_depth = _default_l1(
-                tile_n, ct_k, b_elem_bytes, l1, m_chunk, k_tile
-            )
-        else:
-            tile_ma = self.tile_ma
-            l1_b_depth = _b_depth_for(
-                tile_ma, tile_n, ct_k, b_elem_bytes, l1, m_chunk, k_tile
-            )
+        tile_ma, l1_b_depth = l1_tiles(
+            tile_n, ct_k, b_elem_bytes, l1, m_chunk, k_tile, self.tile_ma
+        )
         b_dtype = v8bfp16ebs8 if bfp16_b else bfloat16
         return self.replace(
             tile_n=tile_n,

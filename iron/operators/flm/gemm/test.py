@@ -22,9 +22,8 @@ from iron.operators.flm.gemm.design import (
     Gelu,
     R,
     Rounding,
-    _b_depth_for,
-    _default_l1,
     l1_budget,
+    l1_tiles,
 )
 from iron.operators.flm.gemm.op import ProjectionGEMM
 from iron.tests.common.shipped import Shipped
@@ -319,14 +318,14 @@ def tile_option_params():
 
     params = []
     for tile_n, ct_k in sorted(CT_MAX_K_FOR_N.items()):
-        default_ma = _default_l1(tile_n, ct_k, b_elem, l1)[0]
+        default_ma = l1_tiles(tile_n, ct_k, b_elem, l1)[0]
         # One full sweep of the grid at this tile_n, so every column has work.
         M, K, N = 256, 512, tile_n * dev.cols
         for tile_ma in (16, 32, 64):
             if M_TILE % tile_ma or tile_ma % (2 * R):
                 continue
             try:
-                _b_depth_for(tile_ma, tile_n, ct_k, b_elem, l1)
+                l1_tiles(tile_n, ct_k, b_elem, l1, t_ma=tile_ma)
             except ValueError:
                 continue  # this A height leaves no room for B at this width
             marks = [] if tile_ma == default_ma else [pytest.mark.extensive]

@@ -47,7 +47,7 @@ CT_MAX_K_FOR_N = {16: 16, 32: 32, 64: 128, 128: 32}
 R, S, T = 8, 8, 8
 
 
-def compute_rows(dev):
+def compute_rows(dev) -> int:
     """Compute-tile rows: the array less the shim row and the memtile rows."""
     tm = get_target_model(dev.resolve())
     return tm.rows() - 1 - tm.get_num_mem_tile_rows()
@@ -67,7 +67,7 @@ STACK_SIZE = 2560
 LUT_STATIC_SIZE = 5248
 
 
-def l1_budget(dev, epilogue_modes):
+def l1_budget(dev, epilogue_modes) -> int:
     """Local memory the buffer sizing may spend on this device.
 
     Args:
@@ -170,7 +170,7 @@ class Gelu(StrEnum):
     BF16_STEPS = "bf16_steps"
 
 
-def _b_bytes(elems, bfp16_b):
+def _b_bytes(elems: int, bfp16_b: bool) -> int:
     """Bytes B occupies in L1/L2. bfp16ebs8 packs 8 values as 8 mantissa bytes
     plus one shared exponent; bf16 is a plain 2 bytes each.
     """
@@ -180,56 +180,42 @@ def _b_bytes(elems, bfp16_b):
     return elems // bfp.BLOCK * bfp.BLOCK_BYTES
 
 
-def _default_l1(n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1, k_tile=K_TILE):
-    """Pick the largest working set that fits: (A-tile height, L1 B depth).
+def l1_tiles(
+    n_tile: int,
+    ct_max_k: int,
+    b_elem_bytes: float,
+    budget: int,
+    m_chunk: int = 1,
+    k_tile: int = K_TILE,
+    t_ma: int | None = None,
+) -> tuple[int, int]:
+    """The working set that fits L1: (A-tile height, L1 B depth).
 
     Deeper B first, then the tallest A that still fits, since colA is worth
-    far more than B's L1 prefetch. ``budget`` is the whole local memory; the
-    stack comes off it here so callers can keep passing the raw size. A depth
+    far more than B's L1 prefetch; ``t_ma`` fixes the height instead. A depth
     divides the ``k_tile // ct_max_k`` B chunks a k step consumes, since the
-    core walks the ring that many at a time.
+    core walks the ring that many at a time. ``budget`` is the whole local
+    memory; the stack comes off it here.
     """
     budget -= STACK_SIZE
     # m_chunk accumulators, since the core holds a B chunk across that many
     # row-blocks. The only term that scales with it.
     acc = m_chunk * M_TILE * n_tile * 4
     cout = CT_OUT_LEN * 2 * C_DEPTH
+    heights = (M_TILE, M_TILE // 2, M_TILE // 4) if t_ma is None else (t_ma,)
     for b_depth in (B_DEPTH, 1):
         if (k_tile // ct_max_k) % b_depth:
             continue
         b = int(ct_max_k * n_tile * b_elem_bytes) * b_depth
-        for t_ma in (M_TILE, M_TILE // 2, M_TILE // 4):
-            if t_ma < 2 * R:
-                continue
-            a = (2 * R * ct_max_k) * (t_ma // R // 2) * 2 * A_DEPTH
+        for height in heights:
+            a = (2 * R * ct_max_k) * (height // R // 2) * 2 * A_DEPTH
             if acc + a + b + cout <= budget:
-                return t_ma, b_depth
-    raise ValueError(
-        f"flm.ProjectionGEMM: tile_n ({n_tile}) leaves no A tile fitting L1 at ct_max_k "
-        f"({ct_max_k})"
-    )
-
-
-def _b_depth_for(
-    t_ma, n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1, k_tile=K_TILE
-):
-    """Deepest B fifo depth that fits L1 alongside an explicit A-tile height,
-    and divides the ``k_tile // ct_max_k`` B chunks a k step consumes.
-
-    ``_default_l1``'s depth is chosen with its own t_ma, which need not fit a
-    caller-overridden one. Raise rather than reuse a depth that does not fit.
-    """
-    budget -= STACK_SIZE
-    # Same terms as _default_l1; acc is the only one that scales with m_chunk.
-    acc = m_chunk * M_TILE * n_tile * 4
-    cout = CT_OUT_LEN * 2 * C_DEPTH
-    a = (2 * R * ct_max_k) * (t_ma // R // 2) * 2 * A_DEPTH
-    for b_depth in (B_DEPTH, 1):
-        if (k_tile // ct_max_k) % b_depth:
-            continue
-        b = int(ct_max_k * n_tile * b_elem_bytes) * b_depth
-        if acc + a + b + cout <= budget:
-            return b_depth
+                return height, b_depth
+    if t_ma is None:
+        raise ValueError(
+            f"flm.ProjectionGEMM: tile_n ({n_tile}) leaves no A tile fitting L1 at "
+            f"ct_max_k ({ct_max_k})"
+        )
     raise ValueError(
         f"flm.ProjectionGEMM: tile_ma ({t_ma}) does not fit L1 at tile_n ({n_tile}) and "
         f"ct_max_k ({ct_max_k}); even single-buffered B overflows the budget"
