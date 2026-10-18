@@ -128,7 +128,7 @@ def _stage_kv_causal(rt, MT, v, g, k_in, v_in, kv_out):
     mt, mt_left = MT[v.kv_memtile], MT[v.kv_memtile - 1]
     in_mem_ty = np.ndarray[(LK_MT, g.dh), bf16]
     bufs = {
-        (side, n): Buffer(type=in_mem_ty, name=f"in_{n}_0_{tile.col}", tile=tile)
+        (side, n): Buffer(type=in_mem_ty, name=f"kv_{side}_{n}", tile=tile)
         for side, tile in (("own", mt), ("left", mt_left))
         for n in (0, 1)
     }
@@ -197,8 +197,8 @@ def _stage_kv_sliding(rt, MT, v, g, k_in, v_in, kv_out):
     in_mem_ty = np.ndarray[(LK_MT * 2, g.dh), bf16]
     halves = TensorAccessPattern.full((2, LK_MT // g.lk, g.dh // 8, g.lk, 8))
     mt = MT[v.kv_memtile]
-    in_0 = Buffer(type=in_mem_ty, name=f"in_0_0_{mt.col}", tile=mt)
-    in_1 = Buffer(type=in_mem_ty, name=f"in_1_0_{mt.col}", tile=mt)
+    in_0 = Buffer(type=in_mem_ty, name="kv_0", tile=mt)
+    in_1 = Buffer(type=in_mem_ty, name="kv_1", tile=mt)
     prod = Lock(tile=mt, init=4)
     cons = Lock(tile=mt, init=0)
     rt.add_tile_dma(
