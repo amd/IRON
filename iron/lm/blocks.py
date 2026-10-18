@@ -117,7 +117,7 @@ class LogMel(iron.Graph):
         a = Copy.step(wave, src=windows, dtype=np.float32).reshape(F, self.frame)[
             :frames
         ]
-        exact = dict(tile_m=32, dtype_out=np.float32, precision=Precision.HIGHEST)
+        exact = dict(tile_m=32, output_dtype=np.float32, precision=Precision.HIGHEST)
         spectrum = GEMM.step(Limbs.step(a), self.dft, **exact)
         energy = GEMM.step(
             Limbs.step(Magnitude.step(spectrum)), self.filterbank, **exact

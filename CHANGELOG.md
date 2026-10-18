@@ -71,6 +71,8 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- GEMM's `dtype_in` and `dtype_out` are `input_dtype` and `output_dtype`,
+  the names its kernel factory (`aie.iron.kernels.linalg.mm`) takes.
 - An operator's nested `Array` annotates only the library's views it reads
   (`dev`, `buffers`, `inputs`, `outputs`); an annotation of a field or member
   is refused. A field the array reads that no stream names is declared

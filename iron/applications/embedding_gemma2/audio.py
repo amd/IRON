@@ -278,7 +278,7 @@ class AudioTower(Tower):
                 keys[i],
                 scores[i],
                 b_col_maj=True,
-                dtype_out=np.float32,
+                output_dtype=np.float32,
                 precision=Precision.HIGHEST,
             )
         # Query t's band starts at the even column of t and t - 1, its

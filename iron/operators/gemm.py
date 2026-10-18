@@ -95,7 +95,7 @@ def _cases(cls, dev: Device):
         Case(dict(M=2048, K=2048, N=2048, b_col_maj=True), bench=True, lower=True)
     )
     # An f32 C at the default 64-wide tiles overflows a core's memory.
-    f32 = dict(M=512, K=256, N=512, dtype_out=np.float32, tile_m=32, tile_k=32)
+    f32 = dict(M=512, K=256, N=512, output_dtype=np.float32, tile_m=32, tile_k=32)
     out.append(Case(dict(f32, tile_n=32), id="f32_out", lower=True))
     # The placement the tuner tries beside the default.
     kwargs = dict(M=2048, K=2048, N=2048, num_aie_columns=2, b_col_maj=True)
@@ -162,8 +162,8 @@ class GEMM(Operator):
     # MEDIUM multiplies on bfp16 macs; HIGHEST keeps a bf16 C's partial
     # sums f32 across K tiles.
     precision: Precision = Auto(default=Precision.MEDIUM, array=True)
-    dtype_in: Any = Param(default=bfloat16, repr=False)
-    dtype_out: Any = Param(default=bfloat16, repr=False)
+    input_dtype: Any = Param(default=bfloat16, repr=False)
+    output_dtype: Any = Param(default=bfloat16, repr=False)
     # Filled by resolve.
     n_aie_rows: int = Auto(repr=False, init=False, array=True)
     n_shim_mem_a: int = Auto(repr=False, init=False)
@@ -171,16 +171,16 @@ class GEMM(Operator):
     b_l2: int = Auto(repr=False, init=False)
     c_l2: int = Auto(repr=False, init=False)
 
-    A = In(M, K, dtype=dtype_in, obj_type=(a_l2,), per=(n_shim_mem_a,))
+    A = In(M, K, dtype=input_dtype, obj_type=(a_l2,), per=(n_shim_mem_a,))
     B = In(
         Select(b_col_maj, (N, K), (K, N)),
-        dtype=dtype_in,
+        dtype=input_dtype,
         obj_type=(b_l2,),
         per=(num_aie_columns,),
     )
     C = Out(
         Select(c_col_maj, (N, M), (M, N)),
-        dtype=dtype_out,
+        dtype=output_dtype,
         obj_type=(c_l2,),
         per=(num_aie_columns,),
     )
@@ -227,8 +227,8 @@ class GEMM(Operator):
                 geometry.
         """
         r, s, t = kernels.mm.mac_dims(
-            self.dtype_in,
-            self.dtype_out,
+            self.input_dtype,
+            self.output_dtype,
             device=dev,
             arch=None if dev is not None else "aie2p",
             emulate_bf16_mmul_with_bfp16=self.precision == Precision.MEDIUM,
@@ -254,15 +254,15 @@ class GEMM(Operator):
                 f"GEMM: tile_n ({self.tile_n}) must be a multiple of {min_tile_n} "
                 f"(aie_kernels/linalg/mm_aie2p.h requires n % (2*t) == 0)"
             )
-        din, dout = np.dtype(self.dtype_in), np.dtype(self.dtype_out)
+        din, dout = np.dtype(self.input_dtype), np.dtype(self.output_dtype)
         if np.issubdtype(din, np.integer) != np.issubdtype(dout, np.integer):
             raise ValueError(
-                f"GEMM: dtype_in ({din}) and dtype_out ({dout}) must both be "
+                f"GEMM: input_dtype ({din}) and output_dtype ({dout}) must both be "
                 "integer or both be float"
             )
         if dout.itemsize < din.itemsize:
             raise ValueError(
-                f"GEMM: dtype_out ({dout}) must be at least as wide as dtype_in ({din})"
+                f"GEMM: output_dtype ({dout}) must be at least as wide as input_dtype ({din})"
             )
         # Checked at construction where no tunable is needed; N waits for the columns.
         if self.K % self.tile_k != 0:
@@ -295,8 +295,8 @@ class GEMM(Operator):
     def held(self, dev, tile_m: int) -> int:
         """Core memory a core of ``dev`` holds at ``tile_m``."""
         m, k, n = tile_m, self.tile_k, self.tile_n
-        din = np.dtype(self.dtype_in).itemsize
-        dout = np.dtype(self.dtype_out).itemsize
+        din = np.dtype(self.input_dtype).itemsize
+        dout = np.dtype(self.output_dtype).itemsize
         wider = dataclasses.replace(self, tile_m=m).array_config().wider_accumulator
         c = m * n * (dout + 4 if wider else FIFO_DEPTH * dout)
         return FIFO_DEPTH * (m * k + k * n) * din + c + STACK_BYTES
@@ -367,7 +367,7 @@ class GEMM(Operator):
             buffer for a bf16 C's partial sums, beside C's own.
             """
             return self.precision == Precision.HIGHEST and (
-                np.dtype(self.dtype_out) == np.dtype(bfloat16)
+                np.dtype(self.output_dtype) == np.dtype(bfloat16)
             )
 
         def matmul(self):
@@ -376,9 +376,11 @@ class GEMM(Operator):
                 self.tile_m,
                 self.tile_k,
                 self.tile_n,
-                input_dtype=self.dtype_in,
+                input_dtype=self.input_dtype,
                 # HIGHEST accumulates in f32 in L1, so the matmul's C is f32.
-                output_dtype=np.float32 if self.wider_accumulator else self.dtype_out,
+                output_dtype=(
+                    np.float32 if self.wider_accumulator else self.output_dtype
+                ),
                 b_col_maj=self.b_col_maj,
                 c_col_maj=self.c_col_maj,
                 emulate_bf16_mmul_with_bfp16=self.precision == Precision.MEDIUM,
@@ -394,17 +396,17 @@ class GEMM(Operator):
             n_A_tiles_per_shim = (
                 n_aie_rows // n_aie_cols if n_aie_cols < n_aie_rows else 1
             )
-            dtype_in, dtype_out = self.dtype_in, self.dtype_out
+            input_dtype, output_dtype = self.input_dtype, self.output_dtype
             wider = self.wider_accumulator
 
             A_l2_ty = self.A.obj_type
             B_l2_ty = self.B.obj_type
             C_l2_ty = self.C.obj_type
-            A_l1_ty = np.ndarray[(m, k), np.dtype[dtype_in]]
-            B_l1_ty = np.ndarray[(k, n), np.dtype[dtype_in]]
-            C_l1_ty = np.ndarray[(m * n,), np.dtype[dtype_out]]
+            A_l1_ty = np.ndarray[(m, k), np.dtype[input_dtype]]
+            B_l1_ty = np.ndarray[(k, n), np.dtype[input_dtype]]
+            C_l1_ty = np.ndarray[(m * n,), np.dtype[output_dtype]]
 
-            dtype_acc = np.float32 if wider else dtype_out
+            dtype_acc = np.float32 if wider else output_dtype
             matmul_kernel = self.matmul()
             streams = matmul_kernel.stream_dims
             zero_kernel = kernels.zero(m * n, dtype_acc)
@@ -682,7 +684,7 @@ class GEMM(Operator):
         a = A.astype(np.float32)[:, : self.valid_k]
         b = (B.T if self.b_col_maj else B).astype(np.float32)[: self.valid_k]
         C = np.matmul(b.T, a.T) if self.c_col_maj else np.matmul(a, b)
-        return C.astype(self.dtype_out)
+        return C.astype(self.output_dtype)
 
     def tolerance(self) -> Tolerance:
         """Each element of C within the roundings the design makes, in
@@ -691,11 +693,11 @@ class GEMM(Operator):
         bf16, and 2 more for bfp16 inputs. Measured on npu2 at no more than
         0.83 of it over K = 256 to 8192.
         """
-        if np.issubdtype(np.dtype(self.dtype_in), np.integer):
+        if np.issubdtype(np.dtype(self.input_dtype), np.integer):
             return Tolerance.exact(note="integer matmul")
         units = 4.0 if self.precision == Precision.MEDIUM else 2.0
         per_tile = (
-            np.dtype(self.dtype_out) == np.dtype(bfloat16)
+            np.dtype(self.output_dtype) == np.dtype(bfloat16)
             and self.precision != Precision.HIGHEST
         )
 

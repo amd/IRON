@@ -1318,7 +1318,7 @@ def test_a_column_major_product_is_read_as_stored_by_the_next_reference(npu2):
 def test_a_float32_product_is_not_rounded_to_its_inputs_dtype(npu2):
     class Wide(iron.Graph):
         def body(self, a, b):
-            return GEMM.step(a, b, dtype_out=np.float32, tile_m=32)
+            return GEMM.step(a, b, output_dtype=np.float32, tile_m=32)
 
     rng = np.random.default_rng(0)
     a = rng.standard_normal((256, 256)).astype(bfloat16)
