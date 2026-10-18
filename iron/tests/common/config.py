@@ -124,7 +124,6 @@ PHI4 = Phi4Config(
     rope_theta=10000.0,
     max_seq_len=512,
     original_max_position_embeddings=128,
-    max_position_embeddings=512,
     longrope=LongRope(short_factor=(1.0,) * 16, long_factor=(2.0,) * 16),
 )
 

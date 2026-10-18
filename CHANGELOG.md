@@ -114,6 +114,9 @@ public API adds its entry under Unreleased.
 
 - `F.linear(accurate=)`, `Attention(accurate=)`, `MLP(accurate=)` and
   `iron.functional.ACCURATE`; pass `precision=Precision.HIGHEST`.
+- `Phi4Config.max_position_embeddings`: LongRoPE's amplitude scale is set
+  from `max_seq_len` as the checkpoint gives it, and kept when a caller
+  lowers it.
 - gemma4_flm's GEMM and dequant exploration and `build.py --only`; the
   application is one example.
 - `Layer`, the numpy `Oracle`, `EncoderDecoderOracle` and `widen`. Models are

@@ -92,11 +92,6 @@ class Phi4Config(DecoderConfig):
         kw_only=True,
         metadata={"json": "original_max_position_embeddings"},
     )
-    # The checkpoint's own full LongRoPE context, for the amplitude formula,
-    # whatever context a caller serves.
-    max_position_embeddings: int | None = dataclasses.field(
-        default=None, kw_only=True, metadata={"json": "max_position_embeddings"}
-    )
 
     def __post_init__(self):
         super().__post_init__()
@@ -104,14 +99,10 @@ class Phi4Config(DecoderConfig):
             object.__setattr__(
                 self, "rotary_dim", int(self.head_dim * self.partial_rotary_factor)
             )
-        if (
-            self.rope_attention_scaling == 1.0
-            and self.original_max_position_embeddings
-            and self.max_position_embeddings
-        ):
-            factor = (
-                self.max_position_embeddings / self.original_max_position_embeddings
-            )
+        # Set once, from the checkpoint's own context: a lowered max_seq_len
+        # (dataclasses.replace) keeps it.
+        if self.rope_attention_scaling == 1.0 and self.original_max_position_embeddings:
+            factor = self.max_seq_len / self.original_max_position_embeddings
             scale = math.sqrt(
                 1 + math.log(factor) / math.log(self.original_max_position_embeddings)
             )
