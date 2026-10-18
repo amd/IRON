@@ -396,10 +396,7 @@ class MHA(Operator):
             (False, ("B_q", "d", "B_kv")),
             (True, ("B_q", "B_kv", "pv_width")),
         ):
-            mac = kernels.linalg.mha.mac_dims(
-                pv=pv,
-                device=self.dev,
-            )
+            mac = kernels.linalg.mha.mac_dims(pv=pv, device=self.dev)
             for name, m in zip(dims, mac):
                 if vars(self)[name] % m:
                     raise ValueError(
@@ -661,16 +658,9 @@ class MHA(Operator):
             pv = mm_stream_dims(
                 B_q, B_kv, pv_width, kernels.linalg.mha.mac_dims(pv=True)
             )
-            q_dims = qk.A
-            k_dims = qk.B
-            a_dims = qk.C
-            p_dims = pv.A
-            v_dims = pv.B
-            o_dims = pv.C
 
             # Split, Q is one block deep: the QK core's L1 holds one d=512 block.
             q_depth = 1 if split else of_depth
-            columns = MHA.COLUMNS[self.width]
             layout = MHA.SPLIT_COLUMNS[self.width] if split else None
             inQ, memQ, memO = [], [], []
             outO = [[] for _ in range(pv_cores)]
@@ -680,53 +670,31 @@ class MHA(Operator):
                 memQ += in_q.cons().split(
                     offsets=[B_q * d * i for i in range(n_join)],
                     obj_types=[q_ty] * n_join,
-                    to_stream=None if q_dims is None else [q_dims] * n_join,
+                    to_stream=None if qk.A is None else [qk.A] * n_join,
                     depths=[q_depth] * n_join,
-                    tile=(
-                        Tile(layout.q[shim] if split else columns.qo_mem + shim, 1)
-                        if split
-                        else AnyMemTile
-                    ),
+                    tile=Tile(layout.q[shim], 1) if split else AnyMemTile,
                 )
                 for h in range(pv_cores):
-                    mem_o = ObjectFifo(self.O.obj_type, to_stream=o_dims)
+                    mem_o = ObjectFifo(self.O.obj_type, to_stream=pv.C)
                     memO.append(mem_o)
                     outO[h] += mem_o.prod().join(
                         offsets=[B_q * pv_width * i for i in range(n_join)],
                         obj_types=[o_ty] * n_join,
                         # One O block: the PV core's L1 also holds its float32 O.
                         depths=[1] * n_join,
-                        tile=(
-                            Tile(
-                                layout.o[shim][h] if split else columns.qo_mem + shim, 1
-                            )
-                            if split
-                            else AnyMemTile
-                        ),
+                        tile=Tile(layout.o[shim][h], 1) if split else AnyMemTile,
                     )
 
             kv_lanes = self.kv_lanes
             inK, inV, memK, memV = [], [], [], []
             for lane in range(kv_lanes):
-                shared = kv_lanes == 1
                 inK.append(ObjectFifo(k_ty, depth=of_depth))
                 memK.append(
                     inK[lane]
                     .cons()
                     .forward(
-                        to_stream=k_dims,
-                        tile=(
-                            Tile(
-                                (
-                                    layout.k
-                                    if split
-                                    else columns.k_mem if shared else lane
-                                ),
-                                1,
-                            )
-                            if split
-                            else AnyMemTile
-                        ),
+                        to_stream=qk.B,
+                        tile=Tile(layout.k, 1) if split else AnyMemTile,
                         depth=of_depth,
                     )
                 )
@@ -736,19 +704,8 @@ class MHA(Operator):
                         inV[-1]
                         .cons()
                         .forward(
-                            to_stream=v_dims,
-                            tile=(
-                                Tile(
-                                    (
-                                        layout.v[h]
-                                        if split
-                                        else columns.v_mem if shared else lane
-                                    ),
-                                    1,
-                                )
-                                if split
-                                else AnyMemTile
-                            ),
+                            to_stream=pv.B,
+                            tile=Tile(layout.v[h], 1) if split else AnyMemTile,
                             depth=of_depth,
                         )
                     )
@@ -760,7 +717,7 @@ class MHA(Operator):
                     memA[i]
                     .cons()
                     .forward(
-                        to_stream=a_dims,
+                        to_stream=qk.C,
                         depth=of_depth,
                         tile=Tile(i, 1) if split else AnyMemTile,
                     )
@@ -770,7 +727,7 @@ class MHA(Operator):
                     memP[i]
                     .cons()
                     .forward(
-                        to_stream=p_dims,
+                        to_stream=pv.A,
                         depth=of_depth,
                         tile=Tile(i, 1) if split else AnyMemTile,
                     )
@@ -1047,27 +1004,27 @@ class MHA(Operator):
                         )
                     )
 
-            two_shims = self.q_shims > 1
             qs, outs, ks, vs = [], [], [], []
             for s in range(self.q_shims):
-                q_col = layout.q[s] if split else 0 if two_shims else columns.q
-                qs.append(inQ[s].prod(tile=Tile(q_col, 0) if split else AnyShimTile))
+                qs.append(
+                    inQ[s].prod(tile=Tile(layout.q[s], 0) if split else AnyShimTile)
+                )
                 for h in range(pv_cores):
-                    o_col = layout.o[s][h] if split else 0 if two_shims else columns.o
                     outs.append(
                         memO[s * pv_cores + h].cons(
-                            tile=Tile(o_col, 0) if split else AnyShimTile
+                            tile=Tile(layout.o[s][h], 0) if split else AnyShimTile
                         )
                     )
             for lane in range(kv_lanes):
-                shared = kv_lanes == 1
-                k_col = layout.k_shim if split else columns.k if shared else lane
-                ks.append(inK[lane].prod(tile=Tile(k_col, 0) if split else AnyShimTile))
+                ks.append(
+                    inK[lane].prod(
+                        tile=Tile(layout.k_shim, 0) if split else AnyShimTile
+                    )
+                )
                 for h in range(pv_cores):
-                    v_col = layout.v[h] if split else columns.v if shared else lane
                     vs.append(
                         inV[lane * pv_cores + h].prod(
-                            tile=Tile(v_col, 0) if split else AnyShimTile
+                            tile=Tile(layout.v[h], 0) if split else AnyShimTile
                         )
                     )
             self.Q.bind(qs)
