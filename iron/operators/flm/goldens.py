@@ -10,8 +10,10 @@ fails on any byte that differs:
     python -m iron.operators.flm.goldens record <dir>
     python -m iron.operators.flm.goldens check <dir>
 
-The inputs are saved, not redrawn, so a later change to a test's draw does
-not move a golden.
+Record on the commit before a change that moves the MLIR, then check on the
+change. The inputs are saved, not redrawn, so a later change to a test's
+draw does not move a golden. The .npz files stay on the machine that
+recorded them; they are not committed.
 """
 
 import argparse
@@ -196,7 +198,10 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     dev = aie_utils.get_current_device()
     if dev is None or dev.arch != AIEArch.AIE2p:
-        p.error(f"the goldens are NPU2's; this host's NPU is {dev and dev.name}")
+        p.error(
+            "the goldens are recorded and checked on an NPU2; "
+            + ("this host has no NPU" if dev is None else f"this host's is {dev.name}")
+        )
     if args.action == "check" and not args.dir.is_dir():
         p.error(f"{args.dir} holds no goldens; record them first")
     if args.action == "record":

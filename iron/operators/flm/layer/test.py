@@ -96,7 +96,7 @@ def _record_metrics(record, op, bufs, context_len, max_l):
     keys = min(context_len + 1, SLIDING_WINDOW) if g.swa else context_len + 1
     total_bytes = 2 * (sum(w.size for w in blob) + 2 * keys * g.dk)
     flops = 2 * sum(w.dout * w.din for w in blob)
-    flops += 4 * g.num_attn_heads * g.dh * keys
+    flops += 4 * g.geometry.num_attn_heads * g.dh * keys
     time_call(
         op,
         *bufs,
@@ -135,26 +135,29 @@ def check_outputs(op, context_len, max_l, inputs, x_out, kv_out):
     RTOL_KV, and that the rest of x and of the kv cache equals the input bit for
     bit.
     """
-    ref_x, ref_kv = (
-        r.view(np.uint16) for r in op.reference(*inputs, context_len, max_l)
-    )
+    ref_x, ref_kv = op.reference(*inputs, context_len, max_l)
     g = op.dims
-    D, dk = g.model_dim, g.dk
-    got_x = np.asarray(x_out).view(np.uint16).reshape(-1)
-    got_kv = np.asarray(kv_out).view(np.uint16).reshape(-1)
-    errors = {"x": _rel_l2(got_x[:D].view(bfloat16), ref_x[:D].view(bfloat16))}
+    D, dk = g.geometry.model_dim, g.dk
+    got_x, got_kv = (np.asarray(b).reshape(-1).view(bfloat16) for b in (x_out, kv_out))
+    errors = {"x": _rel_l2(got_x[:D], ref_x[:D])}
     rest = np.ones(ref_kv.size, bool)
     if not g.skip:
         row = g.kv_row(context_len)
         v_off = g.kv_rows(max_l) * dk
         for name, start in (("k", row * dk), ("v", v_off + row * dk)):
             rows = slice(start, start + dk)
-            errors[name] = _rel_l2(
-                got_kv[rows].view(bfloat16), ref_kv[rows].view(bfloat16)
-            )
+            errors[name] = _rel_l2(got_kv[rows], ref_kv[rows])
             rest[rows] = False
-    assert np.array_equal(got_x[D:], ref_x[D:]), "the layer wrote x past its output"
-    assert np.array_equal(got_kv[rest], ref_kv[rest]), "the layer wrote other kv rows"
+
+    def bits(a):
+        return a.view(np.uint16)
+
+    assert np.array_equal(
+        bits(got_x[D:]), bits(ref_x[D:])
+    ), "the layer wrote x past its output"
+    assert np.array_equal(
+        bits(got_kv[rest]), bits(ref_kv[rest])
+    ), "the layer wrote other kv rows"
     limits = {"x": RTOL_X, "k": RTOL_KV, "v": RTOL_KV}
     assert all(
         e <= limits[k] for k, e in errors.items()

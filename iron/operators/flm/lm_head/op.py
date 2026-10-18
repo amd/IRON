@@ -60,7 +60,7 @@ class LMHead(Operator):
             # Gemma 4 E2B's and E4B's hidden sizes.
             Case(dict(dim=1536, vocab=4096, softcap=GEMMA4_SOFTCAP)),
             Case(dict(dim=2560, vocab=4096, softcap=GEMMA4_SOFTCAP)),
-            # A softcap of 5 saturates most logits.
+            # A softcap of 5 bends every logit and saturates the largest.
             Case(dict(dim=1536, vocab=1024, softcap=5.0)),
             # Gemma 4's whole vocabulary.
             Case(

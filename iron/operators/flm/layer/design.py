@@ -372,31 +372,15 @@ class LayerDims:
     """
 
     geometry: FlmGemma4DecodeGeometry
-    type: LayerType
+    layer_type: LayerType
 
     @property
     def swa(self) -> bool:
-        return self.type.swa
+        return self.layer_type.swa
 
     @property
     def skip(self) -> bool:
-        return self.type.skip
-
-    @property
-    def model_dim(self) -> int:
-        return self.geometry.model_dim
-
-    @property
-    def pli_d(self) -> int:
-        return self.geometry.pli_d
-
-    @property
-    def num_attn_heads(self) -> int:
-        return self.geometry.num_attn_heads
-
-    @property
-    def num_kv_heads(self) -> int:
-        return self.geometry.num_kv_heads
+        return self.layer_type.skip
 
     @property
     def dh(self) -> int:
@@ -404,11 +388,11 @@ class LayerDims:
 
     @property
     def dq(self) -> int:
-        return self.num_attn_heads * self.dh
+        return self.geometry.num_attn_heads * self.dh
 
     @property
     def dk(self) -> int:
-        return self.num_kv_heads * self.dh
+        return self.geometry.num_kv_heads * self.dh
 
     @property
     def intermediate_size(self) -> int:
@@ -423,7 +407,7 @@ class LayerDims:
         then the per-layer-input down, gate and up projections in bf16. qkv is
         q alone on a skip layer.
         """
-        D, P, dq, dk = self.model_dim, self.pli_d, self.dq, self.dk
+        D, P, dq, dk = self.geometry.model_dim, self.geometry.pli_d, self.dq, self.dk
         inter = self.intermediate_size
         shapes = {
             "qkv": (dq if self.skip else dq + 2 * dk, D, True),
@@ -1408,40 +1392,38 @@ def _sequence(
     and lengths count bf16 elements. L counts the tokens up to and including
     this one.
     """
-    IS_SWA, IS_SKIP = LayerType(layer_type).swa, LayerType(layer_type).skip
+    d = LayerDims(g, LayerType(layer_type))
     D = g.model_dim
     L = _as_i32(len_arg) + 1
     MAX_L_v = _as_i32(max_l_arg)
     SW = SLIDING_WINDOW
-    DH = g.swa_dh if IS_SWA else g.dh
-    DK = g.num_kv_heads * DH
-    weights = LayerDims(g, LayerType(layer_type)).weights
+    weights = d.weights
 
     require(_as_i32(len_arg) >= 0, "context_len must be >= 0")
     require(MAX_L_v <= MAX_CONTEXT, f"max_l exceeds {MAX_CONTEXT}")
-    if not IS_SWA:
+    if not d.swa:
         require(L <= MAX_L_v, "context_len must be below max_l")
 
     for c in PROJ_COLS:
         for r in (2, 3, 4, 5):
-            npu_write32(rtp["proj_swa"], int(IS_SWA), column=c, row=r)
-            npu_write32(rtp["proj_skip"], int(IS_SKIP), column=c, row=r)
+            npu_write32(rtp["proj_swa"], int(d.swa), column=c, row=r)
+            npu_write32(rtp["proj_skip"], int(d.skip), column=c, row=r)
             npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=c, row=r)
 
     def write(stage, addr, value):
         col, row = PLACEMENT[stage]
         npu_write32(addr, value, column=col, row=row)
 
-    L_local = _min_const(L, SW) if IS_SWA else L
+    L_local = _min_const(L, SW) if d.swa else L
     write("attn_qk", rtp["l_qk"], L_local)
     write("attn_kv", rtp["l_kv"], L_local)
     write("swa_attn_qk", rtp["swa_l_qk"], L_local)
     write("swa_attn_kv", rtp["swa_l_kv"], L_local)
-    write("rms", rtp["rms_swa"], int(IS_SWA))
-    write("rms", rtp["rms_skip"], int(IS_SKIP))
-    write("rope", rtp["rope_skip_kv"], int(IS_SKIP))
-    write("swa_rope", rtp["swa_rope_skip_kv"], int(IS_SKIP))
-    write("glu", rtp["glu_skip"], int(IS_SKIP and g.double_wide_mlp))
+    write("rms", rtp["rms_swa"], int(d.swa))
+    write("rms", rtp["rms_skip"], int(d.skip))
+    write("rope", rtp["rope_skip_kv"], int(d.skip))
+    write("swa_rope", rtp["swa_rope_skip_kv"], int(d.skip))
+    write("glu", rtp["glu_skip"], int(d.skip and g.double_wide_mlp))
     write("rms", RTP_SYNC_LOCK_ADDR, 1)
     write("glu", RTP_SYNC_LOCK_ADDR, 1)
 
@@ -1475,7 +1457,7 @@ def _sequence(
     emit(leg("send_rms", rms_arg, 0, 4 * D))
     # The RoPE weights go out on the channel whose flow reaches this layer
     # type's RoPE tile.
-    emit(leg("send_rms_rope" if IS_SWA else "send_x_rope", rope_rms_arg, 0, 3 * DH))
+    emit(leg("send_rms_rope" if d.swa else "send_x_rope", rope_rms_arg, 0, 3 * d.dh))
     recv_y = shim["recv_y"].drain(x_arg, tap=x_arg[:D], wait=True, managed=False)
 
     def move_weights(w):
@@ -1496,26 +1478,26 @@ def _sequence(
         """One leg over the bf16 weight ``name``, on the shim flow ``name``."""
         return leg(name, proj_arg, weights[name].offset, weights[name].size)
 
-    v_cache_off = DK * SW if IS_SWA else MAX_L_v * DK
+    v_cache_off = d.dk * SW if d.swa else MAX_L_v * d.dk
     move_weights(weights["qkv"])
-    if not IS_SKIP:
+    if not d.skip:
         # recv_k carries the global layers' k and v, recv_v the sliding-window
         # layers'.
-        L_off = (arith.andi(L - 1, _as_i32(SW - 1)) if IS_SWA else (L - 1)) * DK
-        recv = "recv_v" if IS_SWA else "recv_k"
+        L_off = (arith.andi(L - 1, _as_i32(SW - 1)) if d.swa else (L - 1)) * d.dk
+        recv = "recv_v" if d.swa else "recv_k"
         for off in (L_off, L_off + v_cache_off):
             task = shim[recv].drain(
-                kv_arg, tap=kv_arg[off : off + DK], wait=True, managed=False
+                kv_arg, tap=kv_arg[off : off + d.dk], wait=True, managed=False
             )
             emit((task, True))
-    emit(leg("pli_rope_rms", rope_rms_arg, 3 * DH, g.pli_d * 2 + D + MIN_BF16_PAD))
+    emit(leg("pli_rope_rms", rope_rms_arg, 3 * d.dh, g.pli_d * 2 + D + MIN_BF16_PAD))
     # x reuses pli_rope_rms's channel as a second BD.
     emit(leg("pli_rope_rms", x_arg, 2 * D, D, token=False))
     emit(pli_leg("pli_down"))
     # The KV cache into the attention memtile.
-    move_k, move_v = ("move_k_swa", "move_v_swa") if IS_SWA else ("move_k", "move_v")
-    if not IS_SWA:
-        d2m = _ceil_mul(L, LK) * DK
+    move_k, move_v = ("move_k_swa", "move_v_swa") if d.swa else ("move_k", "move_v")
+    if not d.swa:
+        d2m = _ceil_mul(L, LK) * d.dk
         emit(leg(move_k, kv_arg, 0, d2m))
         emit(leg(move_v, kv_arg, v_cache_off, d2m))
     else:
@@ -1534,10 +1516,10 @@ def _sequence(
         start = arith.andi(_m, _lb)
         # All ones if start is 0, else 0.
         _z = arith.xori(_mask_ge(start, 1), _as_i32(-1))
-        p1_off = start * DK
-        p1_len = (rows - start) * DK - arith.andi(_z, _as_i32(DK))
+        p1_off = start * d.dk
+        p1_len = (rows - start) * d.dk - arith.andi(_z, _as_i32(d.dk))
         p2_off = arith.andi(_z, p1_len)
-        p2_len = arith.ori(start * DK, arith.andi(_z, _as_i32(DK)))
+        p2_len = arith.ori(start * d.dk, arith.andi(_z, _as_i32(d.dk)))
         emit(leg(move_k, kv_arg, p1_off, p1_len))
         emit(leg(move_v, kv_arg, p1_off + v_cache_off, p1_len))
         emit(leg(move_k, kv_arg, p2_off, p2_len, token=False))

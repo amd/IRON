@@ -83,7 +83,7 @@ def rope_rms_layout(g: LayerDims) -> dict[str, int]:
     and k norm weights, the per-layer embedding of this token, the per-layer
     norm weight, the post-per-layer-input norm weight and the layer scale.
     """
-    dh, P, D = g.dh, g.pli_d, g.model_dim
+    dh, P, D = g.dh, g.geometry.pli_d, g.geometry.model_dim
     lay = dict(cos=0, sin=dh // 2, q_norm=dh, k_norm=2 * dh, pli_embed=3 * dh)
     lay["pli_norm"] = lay["pli_embed"] + P
     lay["post_pli_norm"] = lay["pli_norm"] + P
@@ -267,11 +267,11 @@ def reference(
     and V rows in kv.
     """
     D, dh, H, n_kv, P, dk = (
-        g.model_dim,
+        g.geometry.model_dim,
         g.dh,
-        g.num_attn_heads,
-        g.num_kv_heads,
-        g.pli_d,
+        g.geometry.num_attn_heads,
+        g.geometry.num_kv_heads,
+        g.geometry.pli_d,
         g.dk,
     )
     x16, rms16, rr16 = (_u8(b).view("<u2") for b in (x, rms, rope_rms))
@@ -375,7 +375,7 @@ def generate_inputs(g: LayerDims, context_len: int, max_l: int, seed: int = 0):
     rows the layer reads.
     """
     rng = np.random.default_rng(seed)
-    D, P, dh, dk = g.model_dim, g.pli_d, g.dh, g.dk
+    D, P, dh, dk = g.geometry.model_dim, g.geometry.pli_d, g.dh, g.dk
     W = proj_layout(g)
     end = max(off + _size(fmt, rows, cols) for off, fmt, rows, cols in W.values())
     proj = np.zeros(end, np.uint8)
@@ -427,13 +427,15 @@ def generate_inputs(g: LayerDims, context_len: int, max_l: int, seed: int = 0):
 
 def _query(g, W, x, proj, rms, rope_rms, lay):
     """The rotated query heads [heads, dh] of the layer."""
-    D, dh = g.model_dim, g.dh
+    D, dh = g.geometry.model_dim, g.dh
     off, _, rows, cols = W["q"]
     xn = rms_norm(
         x[:D].view(bfloat16).astype(np.float32),
         rms[:D].view(bfloat16).astype(np.float32),
     )
-    qp = q4_matvec(xn, *parse_q4nx(proj, off, rows, cols)).reshape(g.num_attn_heads, dh)
+    qp = q4_matvec(xn, *parse_q4nx(proj, off, rows, cols)).reshape(
+        g.geometry.num_attn_heads, dh
+    )
     cos, sin, q_norm = (
         rope_rms[lay[name] : lay[name] + n].view(bfloat16).astype(np.float32)
         for name, n in (("cos", dh // 2), ("sin", dh // 2), ("q_norm", dh))
@@ -464,8 +466,8 @@ def _plant_needles(g, context_len, kv, q, rng):
         rows.add(order[valid - 1])
     if valid < kv.shape[1] and context_len + 1 < kv.shape[1]:
         rows.add(context_len + 1)
-    n_kv, dh = g.num_kv_heads, g.dh
-    group = g.num_attn_heads // n_kv
+    n_kv, dh = g.geometry.num_kv_heads, g.dh
+    group = g.geometry.num_attn_heads // n_kv
     for h in range(n_kv):
         qh = q[h * group : (h + 1) * group]
         u = (qh / np.linalg.norm(qh, axis=1, keepdims=True)).sum(0)
