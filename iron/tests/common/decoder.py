@@ -22,7 +22,8 @@ import pytest
 from ml_dtypes import bfloat16
 
 from iron.common.graph.handle import Affine
-from iron.lm import DecoderConfig, project, rope_angles
+import iron.functional as F
+from iron.lm import DecoderConfig, rope_angles
 from iron.applications.llama.model import Llama
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
@@ -45,7 +46,7 @@ class _PartialRotaryLlama(Llama):
         h = RMSNorm.step(x, weight=w.input_layernorm.weight)
         q = w.self_attn.q_proj.weight
         q_rot_weight = q.reshape(H, D, c.emb_dim)[:, :A, :].reshape(H * A, c.emb_dim)
-        q_rot = project(h, q_rot_weight)
+        q_rot = F.linear(h, q_rot_weight)
         RoPE.step(q_rot.reshape(n * H, A), step.angles)
         return x
 

@@ -452,8 +452,45 @@ class Handle:
             shape, self.dtype, self.name, "view", self, 0, tap, index_by, bounds=bounds
         )
 
+    # A held array on the left of ``+`` or ``*`` defers to the handle.
+    __array_ufunc__ = None
+
+    def __add__(self, other) -> "Handle":
+        """``self + other``, elementwise, or ``other`` a row added to every row."""
+        from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
+
+        return _broadcast(ElementwiseAdd, RowwiseAdd, self, other)
+
+    def __mul__(self, other) -> "Handle":
+        """``self * other``, elementwise, or every row times the row ``other``."""
+        from iron.operators.elementwise_mul import ElementwiseMul, RowwiseMul
+
+        return _broadcast(ElementwiseMul, RowwiseMul, self, other)
+
+    __radd__ = __add__
+    __rmul__ = __mul__
+
     def __repr__(self) -> str:
         return f"Handle({str(self.ref())!r}, {list(self.shape)}, {bfp.dtype_name(self.dtype)})"
+
+
+def _broadcast(whole, rowwise, x: Handle, y) -> Handle:
+    """``whole`` of ``x`` and ``y`` of its shape, or, ``x`` of two axes or
+    more, ``rowwise`` of ``x`` and ``y`` a row as wide as its last axis.
+
+    Raises:
+        TypeError: ``y`` is neither.
+    """
+    shape = tuple(getattr(y, "shape", ()))
+    if len(x.shape) > 1 and shape == x.shape[-1:]:
+        rows = x.elements // shape[0]
+        return rowwise.step(x.reshape(rows, shape[0]), y).reshape(x.shape)
+    if shape == x.shape:
+        return whole.step(x, y)
+    raise TypeError(
+        f"{whole.__name__} of {x!r} takes an operand of its shape or a row of "
+        f"{x.shape[-1] if x.shape else 1}, not {type(y).__name__} {list(shape)}"
+    )
 
 
 class _Viewed:

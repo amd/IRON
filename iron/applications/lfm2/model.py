@@ -32,6 +32,7 @@ import numpy as np
 from tokenizers import Tokenizer
 
 import iron
+import iron.functional as F
 from iron import lm
 from iron.lm import (
     CausalLM,
@@ -40,7 +41,6 @@ from iron.lm import (
     Derived,
     Layer,
     Oracle,
-    project,
     widen,
 )
 from iron.operators.copy import Copy
@@ -167,7 +167,7 @@ class Lfm2(CausalLM):
         # column range of a combined projection is a strided view no single
         # descriptor fits, where three plain projections need none.
         b, cc, x = (
-            project(h, *part).reshape(n, E)
+            F.linear(h, *part).reshape(n, E)
             for part in Layer.cut(w.in_proj, (0, E, 2 * E, 3 * E))
         )
         gated = ElementwiseMul.step(b, x)
@@ -195,7 +195,7 @@ class Lfm2(CausalLM):
                 total = ElementwiseAdd.step(total, prior)
             Copy.step(flat[first + 1 : C + 1], write)
         y = ElementwiseMul.step(cc, total)
-        return project(y, w.out_proj.weight)
+        return F.linear(y, w.out_proj.weight)
 
     def head(self, x):
         return GEMV.step(

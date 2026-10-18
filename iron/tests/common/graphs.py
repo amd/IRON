@@ -7,8 +7,8 @@ import numpy as np
 
 import iron
 from iron import Carried, Scratchpad
+import iron.functional as F
 from iron.operators import GEMM, ElementwiseAdd, ElementwiseMul, RoPE, SiLU
-from iron.lm.blocks import project
 from iron.operators.copy import Copy
 from iron.operators.flm.gemm.op import GEMM as FLMGEMM
 
@@ -23,8 +23,8 @@ class FeedForward(iron.Graph):
         self.w_gate, self.w_up, self.w_down = w_gate, w_up, w_down
 
     def body(self, x):
-        gate, up = project(x, self.w_gate), project(x, self.w_up)
-        return project(ElementwiseMul.step(SiLU.step(gate), up), self.w_down)
+        gate, up = F.linear(x, self.w_gate), F.linear(x, self.w_up)
+        return F.linear(F.silu(gate) * up, self.w_down)
 
 
 class Rotate(iron.Graph):

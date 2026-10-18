@@ -34,7 +34,8 @@ from ml_dtypes import bfloat16
 from numpy.lib.stride_tricks import sliding_window_view
 
 import iron
-from iron.lm import ConcatChannels, Conv2d, Derived, MaxPool2d, project
+import iron.functional as F
+from iron.lm import ConcatChannels, Conv2d, Derived, MaxPool2d
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
 from iron.operators.flm.gemm.design import M_TILE, compute_rows
@@ -239,9 +240,9 @@ class Pointwise(iron.Graph):
         if self.padded is not None:
             Copy.step(pixels, self.padded[:n])
             pixels = self.padded
-        y = project(pixels, self.weight, self.bias, emulate_bf16_mmul_with_bfp16=False)[
-            :n
-        ]
+        y = F.linear(
+            pixels, self.weight, self.bias, emulate_bf16_mmul_with_bfp16=False
+        )[:n]
         if self.act:
             y = SiLU.step(y, tile_size=self.size * out)
         return y.reshape(self.size, self.size * out)

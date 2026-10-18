@@ -19,7 +19,7 @@ from ml_dtypes import bfloat16
 
 import iron
 from iron import Scratchpad
-from iron.lm.blocks import ACCURATE
+from iron.functional import ACCURATE
 from iron.operators.gemm import GEMM
 from iron.operators.softmax import Softmax
 

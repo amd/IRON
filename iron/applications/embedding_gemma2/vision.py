@@ -16,7 +16,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Scratchpad
 from iron.lm import Derived, ImagePatches, Tower, rope_angles
-from iron.lm.blocks import ACCURATE
+from iron.functional import ACCURATE
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd

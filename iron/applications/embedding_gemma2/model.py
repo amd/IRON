@@ -31,7 +31,7 @@ from iron import lm
 from iron.tune.narrowing import CostTable, JointNarrowing
 from iron.tune.probe import Call
 from iron.lm import Checkpoint, Derived, Encoder, rope_angles
-from iron.lm.blocks import ACCURATE
+from iron.functional import ACCURATE
 from iron.lm.testing import weights_dir
 from iron.operators.copy import Copy
 from iron.operators.gemm import GEMM

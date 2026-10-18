@@ -15,7 +15,7 @@ from ml_dtypes import bfloat16
 import iron
 from iron import Scratchpad
 from iron.lm import Derived, Tower, blocks
-from iron.lm.blocks import ACCURATE
+from iron.functional import ACCURATE
 from iron.operators.copy import Copy
 from iron.operators.depthwise_conv1d import DepthwiseConv1d
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd

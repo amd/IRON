@@ -31,7 +31,6 @@ from .blocks import (
     Mamba2,
     MaxPool2d,
     filterbank,
-    project,
 )
 from .causal import CausalLM, Checkpoints, DecodeStep
 from .encoder import EncodeStep, Encoder, Tower
@@ -71,7 +70,6 @@ __all__ = [
     "filterbank",
     "generate_on_host",
     "main",
-    "project",
     "prompt_text",
     "rope_angles",
     "widen",

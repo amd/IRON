@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from iron.lm.blocks import ACCURATE
+from iron.functional import ACCURATE
 from iron.operators.clamp import Clamp
 from iron.operators.gemm import GEMM
 

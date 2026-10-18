@@ -23,7 +23,7 @@ from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 from iron.lm import Config, Conv2d, Layer, Oracle, Tower, widen
-from iron.lm.blocks import ACCURATE, LAYER_NORM_EPS
+from iron.functional import ACCURATE, LAYER_NORM_EPS
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
 from iron.operators.gemm import GEMM

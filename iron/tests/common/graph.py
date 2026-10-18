@@ -36,7 +36,7 @@ from iron.common.image.sequence import OperatorSequence
 from iron.common.image.step import BufferRef, SequenceStep
 from iron.common.image.artifacts import Parameter
 from iron.common.image.packaging import Kind
-from iron.lm.blocks import project
+import iron.functional as F
 from iron.tests.common.graphs import FeedForward
 from iron.operators.clamp import Clamp
 from iron.operators.copy import Copy
@@ -1136,7 +1136,7 @@ class Pointwise(iron.Graph):
         self.emulate = emulate
 
     def body(self, x, w):
-        return project(
+        return F.linear(
             x, w, k_tile=16, tile_n=16, emulate_bf16_mmul_with_bfp16=self.emulate
         )
 
@@ -2702,3 +2702,23 @@ class _UnpairedWalks(iron.Graph):
 def test_walks_in_turn_take_a_repeat_each():
     with pytest.raises(ValueError, match="take a repeat each"):
         _UnpairedWalks().trace()
+
+
+def test_a_handle_adds_and_multiplies_by_elementwise_and_rowwise_steps():
+    w = z(E)
+
+    class Arithmetic(iron.Graph):
+        def __init__(self):
+            self.w = w
+
+        def body(self, x, y):
+            return (x + y) * self.w + x
+
+    t = Arithmetic().trace(x=(2, E), y=(2, E))
+    assert [type(s.op).__name__ for s in t.steps] == [
+        "ElementwiseAdd",
+        "RowwiseMul",
+        "ElementwiseAdd",
+    ]
+    with pytest.raises(TypeError, match="a row of"):
+        Arithmetic().trace(x=(2, E), y=(2, E // 2))

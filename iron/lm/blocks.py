@@ -19,7 +19,9 @@ from aie.helpers.taplib import TensorAccessPattern
 from ml_dtypes import bfloat16
 
 import iron
+import iron.functional as F
 from iron import Scratchpad
+from iron.functional import ACCURATE, LAYER_NORM_EPS
 from iron.operators.axpy import AXPY
 from iron.operators.copy import Copy
 from iron.operators.elementwise_add import ElementwiseAdd, RowwiseAdd
@@ -38,56 +40,6 @@ from iron.operators.resample.op import SIDE, PatchPositions, Resample, ResampleT
 from iron.operators.rms_norm import RMSNorm
 from iron.operators.rope import RoPE
 from iron.operators.silu import SiLU
-
-# Each product's float32 sum rounded once.
-ACCURATE = dict(prio_accuracy=True, emulate_bf16_mmul_with_bfp16=False)
-
-
-def project(
-    x,
-    weight,
-    bias=None,
-    k_tile=None,
-    tile_n=None,
-    emulate_bf16_mmul_with_bfp16=None,
-    accurate: bool = False,
-    **gemv,
-):
-    """``x @ weight.T`` for a checkpoint's ``(out, in)`` weight, plus
-    ``bias`` broadcast over every row if given: a GEMV for one row, else
-    flm.GEMM reading it column-major, or with ``accurate`` the GEMM whose
-    float32 sums round once (``ACCURATE``). ``k_tile`` and ``tile_n`` are
-    flm.GEMM's tunables, where the profile cannot tell it from another of
-    its shape (``tile_n``'s ``ct_max_k`` must divide ``k_tile``);
-    ``emulate_bf16_mmul_with_bfp16=False`` asks for bf16 macs where the
-    device defaults to bfp16's; ``gemv`` are the GEMV's tunables, where the
-    profile cannot tell it from another of its shape.
-
-    Raises:
-        ValueError: ``accurate`` with one of flm.GEMM's keywords.
-    """
-    if len(x.shape) == 2 and x.shape[0] > 1:
-        tiled = {}
-        if k_tile is not None:
-            tiled["k_tile"] = k_tile
-        if tile_n is not None:
-            tiled["tile_n"] = tile_n
-        if emulate_bf16_mmul_with_bfp16 is not None:
-            tiled["emulate_bf16_mmul_with_bfp16"] = emulate_bf16_mmul_with_bfp16
-        if accurate and tiled:
-            raise ValueError(f"project(): accurate takes no flm.GEMM {sorted(tiled)}")
-        if accurate:
-            y = GEMM.step(x, weight, b_col_maj=True, **ACCURATE)
-        else:
-            y = FLMGEMM.step(
-                x, weight, b_col_maj=True, epilogue_modes=(Epilogue.NONE,), **tiled
-            )
-    else:
-        y = GEMV.step(weight, x, **gemv)
-    if bias is None:
-        return y
-    rows = math.prod(y.shape) // bias.shape[0]
-    return RowwiseAdd.step(y.reshape(rows, bias.shape[0]), bias).reshape(y.shape)
 
 
 def filterbank(fft: int, mels: int, sample_rate: int, max_hz: float) -> np.ndarray:
@@ -213,8 +165,6 @@ GATED = (("gate_proj", "up_proj", "down_proj"), ("w1", "w3", "w2"))
 FUSED_GATED = (("gate_up_proj", "down_proj"), ("input_linear", "output_linear"))
 # The modules a layer's feed-forward is held by, if not the layer itself.
 FEED_FORWARDS = ("mlp", "feed_forward", "shared_mlp")
-# The epsilon mlir-aie's layer_norm kernel fixes.
-LAYER_NORM_EPS = 1e-5
 # What every device's GEMM row block divides (aie2's 16 rows, aie2p's 8).
 GEMM_ROWS = 16
 
@@ -820,7 +770,7 @@ class Layer:
         residual: What each block's output is scaled by on its residual
             (``residual_multiplier``).
         accurate: Whether every projection sums in float32 and rounds once
-            (``project(accurate=True)``).
+            (``F.linear(accurate=True)``).
         ssm: The mixer of a module holding ``mamba``.
         experts: How a mixture of experts the module holds routes its rows
             (``Experts``); None where the config routes none.
@@ -1027,7 +977,7 @@ class Layer:
         # Half a head per tile for one row; q's shape is o's when H * D is
         # the width, so it is given here rather than by the profile.
         q, *kv = (
-            project(h, *p, accurate=self.accurate, tile_size_output=D // 2)
+            F.linear(h, *p, accurate=self.accurate, tile_size_output=D // 2)
             for p in ((q_w,) if self.shares_kv else (q_w, k_w, v_w))
         )
         q, k, v = q.reshape(n * H, D), *(kv or (None, None))
@@ -1046,7 +996,7 @@ class Layer:
                 v = RMSNorm.step(v, epsilon=self.eps)
             k, v = k.reshape(n, G, D), v.reshape(n, G, D)
         o = attend(q.reshape(n, H, D), k, v, scale=self.scale, window=self.window)
-        y = project(o, *o_w, accurate=self.accurate)
+        y = F.linear(o, *o_w, accurate=self.accurate)
         if after is not None:
             y = self.norm(y, after)
         x = self.add(x, y)
@@ -1055,17 +1005,21 @@ class Layer:
                 raise TypeError("Layer.step: the module's encoder_attn needs cross=")
             q_w, _, _, o_w = self.projections(w.encoder_attn)
             h = self.norm(x, w.encoder_attn_layer_norm)
-            q = project(h, *q_w, accurate=self.accurate, tile_size_output=D // 2)
+            q = F.linear(h, *q_w, accurate=self.accurate, tile_size_output=D // 2)
             o = cross(q.reshape(n, H, D), scale=self.scale)
-            x = self.add(x, project(o, *o_w, accurate=self.accurate))
+            x = self.add(x, F.linear(o, *o_w, accurate=self.accurate))
         x = self.feed_forward(w, x)
         b = self.per_layer_input(w)
         if b is not None:
             if ple is None:
                 raise TypeError("Layer.step: the module's per-layer input needs ple=")
-            g = project(x, *self.linear(b.per_layer_input_gate), accurate=self.accurate)
+            g = F.linear(
+                x, *self.linear(b.per_layer_input_gate), accurate=self.accurate
+            )
             g = ElementwiseMul.step(act.step(g), ple)
-            g = project(g, *self.linear(b.per_layer_projection), accurate=self.accurate)
+            g = F.linear(
+                g, *self.linear(b.per_layer_projection), accurate=self.accurate
+            )
             # RMSNorm(c * y, eps) is RMSNorm(y, eps / c ** 2): ple_scale, exactly.
             g = RMSNorm.step(
                 g,
@@ -1087,7 +1041,7 @@ class Layer:
         _, k_w, v_w, _ = self.projections(w.encoder_attn)
         G, D = self.groups, self.head_dim
         return tuple(
-            project(memory, *p, accurate=self.accurate).reshape(memory.shape[0], G, D)
+            F.linear(memory, *p, accurate=self.accurate).reshape(memory.shape[0], G, D)
             for p in (k_w, v_w)
         )
 
@@ -1112,13 +1066,13 @@ class Layer:
         mlp = self.mlp(w)
         if len(mlp) == 2:
             fc1, fc2 = mlp
-            f = act.step(project(h, *fc1, accurate=self.accurate))
+            f = act.step(F.linear(h, *fc1, accurate=self.accurate))
         else:
             gate_w, up_w, fc2 = mlp
-            gate = project(h, *gate_w, accurate=self.accurate)
-            up = project(h, *up_w, accurate=self.accurate)
+            gate = F.linear(h, *gate_w, accurate=self.accurate)
+            up = F.linear(h, *up_w, accurate=self.accurate)
             f = ElementwiseMul.step(act.step(gate), up)
-        f = project(f, *fc2, accurate=self.accurate)
+        f = F.linear(f, *fc2, accurate=self.accurate)
         if after is not None:
             f = self.norm(f, after)
         return self.add(x, f)
