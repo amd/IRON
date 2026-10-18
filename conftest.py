@@ -41,8 +41,7 @@ npu1 = _bound_device("npu1")
 def pytest_addoption(parser):
     parser.addoption(
         "--csv-output",
-        default="tests_latest.csv",
-        help="Output CSV file for test metrics",
+        help="Write each test's metrics to this CSV file",
     )
     parser.addoption(
         "--record-goldens",
@@ -210,7 +209,7 @@ def pytest_configure(config):
     if config.getoption("--record-goldens"):
         os.environ[RECORD] = "1"
     csv_path = config.getoption("--csv-output")
-    config._csv_reporter = CSVReporter(csv_path)
+    config._csv_reporter = CSVReporter(csv_path) if csv_path else None
 
 
 def pytest_collection_modifyitems(config, items):
@@ -243,8 +242,8 @@ def pytest_collection_modifyitems(config, items):
 
 
 def pytest_sessionfinish(session, exitstatus):
-    if hasattr(session.config, "_csv_reporter"):
-        reporter = session.config._csv_reporter
+    reporter = getattr(session.config, "_csv_reporter", None)
+    if reporter:
         reporter.finalize_results()
         reporter.write_csv()
         unmeasured = reporter.report_unmeasured()

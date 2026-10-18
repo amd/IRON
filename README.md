@@ -194,7 +194,7 @@ Run benchmarks:
 
 ```bash
 # Run all operators with performance metrics stored in tests_latest.csv
-pytest iron/operators/ iron/tests/ -m "not extensive" -v
+pytest iron/operators/ iron/tests/ -m "not extensive" --csv-output=tests_latest.csv
 ```
 
 ## Community and Support

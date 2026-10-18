@@ -96,3 +96,20 @@ def test_restricted_tests_skip_where_the_device_is_not_listed(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "2 passed, 1 skipped" in result.stdout, result.stdout
     assert "test_elsewhere SKIPPED (Not supported on" in result.stdout, result.stdout
+
+
+def test_importing_the_catalog_tests_resolves_no_device():
+    """catalog.py reads the device as its cases are generated, so a module
+    that imports it opens no NPU.
+    """
+    code = (
+        "import aie.utils\n"
+        "def resolved(**_):\n"
+        "    raise AssertionError('catalog.py resolved a device at import')\n"
+        "aie.utils.get_current_device = resolved\n"
+        "import iron.tests.operators.catalog\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr

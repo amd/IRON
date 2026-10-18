@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """The root conftest.py's results CSV, run as a real pytest session: a test
-whose fixture fails in setup is a failed check, not missing from the CSV.
+whose fixture fails in setup is a failed check, not missing from the CSV, and
+a session not given ``--csv-output`` writes none.
 """
 
 import csv
@@ -35,18 +36,23 @@ def test_skipped():
 """
 
 
-def test_a_test_failing_in_setup_is_a_failed_check(tmp_path):
+def _pytest(tmp_path, *args):
+    """Run pytest over ``_TESTS`` under the root conftest."""
     shutil.copy(_ROOT_CONFTEST, tmp_path / "conftest.py")
     (tmp_path / "pytest.ini").write_text("[pytest]\n")
     (tmp_path / "test_model.py").write_text(_TESTS)
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "test_model.py"]
-        + [f"--csv-output={tmp_path / 'out.csv'}"],
+        + list(args),
         cwd=tmp_path,
         capture_output=True,
         text=True,
     )
     assert result.returncode == 1, result.stdout + result.stderr
+
+
+def test_a_test_failing_in_setup_is_a_failed_check(tmp_path):
+    _pytest(tmp_path, f"--csv-output={tmp_path / 'out.csv'}")
     with open(tmp_path / "out.csv") as f:
         checks = {row["Test"]: row["Checks"] for row in csv.DictReader(f)}
     assert checks == {
@@ -54,3 +60,8 @@ def test_a_test_failing_in_setup_is_a_failed_check(tmp_path):
         "test_latency": "0/1",
         "test_plain": "1/1",
     }
+
+
+def test_a_session_not_asked_for_a_csv_writes_none(tmp_path):
+    _pytest(tmp_path)
+    assert not list(tmp_path.glob("*.csv"))

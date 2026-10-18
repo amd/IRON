@@ -942,7 +942,8 @@ logging.basicConfig(level=logging.DEBUG)
 
 ### Benchmark Results
 
-Each run writes `tests_latest.csv`, which `.github/actions/commit_results`
+Each CI run writes `tests_latest.csv` (`--csv-output`; a run without it
+writes no CSV), which `.github/actions/commit_results`
 merges into `{arch}/{suite}/all.csv` on the `ci` branch. The scripts under
 `ci/scripts/` consume those CSVs:
 
