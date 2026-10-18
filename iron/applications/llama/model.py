@@ -132,7 +132,6 @@ class Runner(lm.Runner):
     config = LlamaConfig
     model = Llama
     open_tokenizer = staticmethod(tokenizer)
-    bos = SPECIAL_TOKENS["<|begin_of_text|>"]
 
 
 if __name__ == "__main__":

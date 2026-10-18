@@ -178,7 +178,6 @@ class Runner(lm.Runner):
 
     config = Lfm2Config
     model = Lfm2
-    bos = 1
 
 
 if __name__ == "__main__":

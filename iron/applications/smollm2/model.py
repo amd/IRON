@@ -28,8 +28,6 @@ class Runner(lm.Runner):
 
     config = LlamaConfig
     model = SmolLM2
-    # "<|im_start|>", the ChatML turn marker every prompt starts with.
-    bos = 1
 
 
 if __name__ == "__main__":

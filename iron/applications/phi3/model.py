@@ -165,10 +165,6 @@ class Phi4(CausalLM):
         )
 
 
-#: ``<|endoftext|>``, the checkpoint's bos_token, eos_token and pad_token alike.
-BOS = 199999
-
-
 class Runner(lm.Runner):
     """Phi-4-mini-instruct, from its checkpoint (one file, or a sharded
     index) and ``tokenizer.json``.
@@ -176,7 +172,6 @@ class Runner(lm.Runner):
 
     config = Phi4Config
     model = Phi4
-    bos = BOS
 
 
 if __name__ == "__main__":

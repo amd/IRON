@@ -34,9 +34,6 @@ class Runner(lm.Runner):
 
     config = DecoderConfig
     model = Qwen2
-    # "<|endoftext|>": every prompt's lead token, as Qwen 2.5's own generation
-    # config gives it; it carries no chat template of its own.
-    bos = 151643
 
 
 if __name__ == "__main__":

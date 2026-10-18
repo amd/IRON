@@ -144,3 +144,14 @@ def test_fit_says_what_it_chose_and_how_to_ask_for_more(caplog):
     assert short.levelno == logging.WARNING
     assert "max_seq_len 512, not the native 1024" in short.message
     assert "--max-seq-len asks for up to 1024" in short.message
+
+
+def test_a_runner_s_bos_is_its_checkpoint_s_unless_it_names_one(tmp_path):
+    class FromCheckpoint(SmallRunner):
+        bos = BaseRunner.bos
+
+    path = tmp_path / "model.safetensors"
+    path.symlink_to(checkpoint(SMALL).path)
+    (tmp_path / "config.json").write_text('{"bos_token_id": 7}')
+    assert FromCheckpoint(path, seed=1).bos == 7
+    assert SmallRunner(path, seed=1).bos == SPECIAL_TOKENS["<|begin_of_text|>"]

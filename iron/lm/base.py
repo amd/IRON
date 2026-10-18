@@ -10,6 +10,7 @@
 
 import argparse
 import dataclasses
+import functools
 import io
 import json
 import logging
@@ -685,8 +686,8 @@ class Runner:
     """A checkpoint, its tokenizer and ``config``, and the models on them.
 
     A subclass names its ``config`` (a ``Config`` class read from the
-    checkpoint's ``config.json``), ``model`` (the ``CausalLM``),
-    ``open_tokenizer`` and ``bos``; ``tune_arguments`` and
+    checkpoint's ``config.json``), ``model`` (the ``CausalLM``) and
+    ``open_tokenizer``; ``tune_arguments`` and
     ``tune_calls`` are what ``iron.lm.tune`` tunes its profile by. Given a ``seed``, the weights are drawn
     in the checkpoint's shapes and a prompt with no tokenizer is random
     tokens, so speed, accuracy and determinism need neither.
@@ -694,9 +695,16 @@ class Runner:
 
     config: Config | type[Config]
     model: "type[CausalLM]"
-    bos: int
     # What loads the checkpoint into transformers to record its goldens.
     hugging_face: type = HuggingFace
+
+    @functools.cached_property
+    def bos(self) -> int:
+        """The token every prompt starts with: the checkpoint's
+        ``config.json``'s ``bos_token_id``, unless a subclass names it.
+        """
+        path = Path(self.checkpoint.path).parent / "config.json"
+        return json.loads(path.read_text())["bos_token_id"]
 
     @staticmethod
     def open_tokenizer(path):
