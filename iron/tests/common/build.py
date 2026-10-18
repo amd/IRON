@@ -329,7 +329,7 @@ def test_mha_infers_the_padded_length_and_the_kv_head_count():
     )
     op = MHA(**MHA.declaration.infer(inputs))
     assert (op.num_heads, op.num_KV_heads, op.seq_len, op.seq_pad) == (8, 2, 128, 128)
-    with pytest.raises(ValueError, match="seq_pad=100"):
+    with pytest.raises(ValueError, match=r"seq_pad \(100\)"):
         MHA(num_heads=1, seq_len=100, seq_pad=100, d=64)
 
 
@@ -561,7 +561,7 @@ def test_flm_gemm_finishes_with_an_activation_then_a_clamp_in_its_epilogue():
         op.fold(finished),
         flm_gemm.GEMM(M=256, K=512, N=512, epilogue="gelu").fold(SiLU(size=size)),
     ):
-        with pytest.raises(ValueError, match="epilogue applies|one activation"):
+        with pytest.raises(ValueError, match="epilogue applies|two activations"):
             refused.resolved()
     with pytest.raises(ValueError, match="as a finish step"):
         flm_gemm.GEMM(M=256, K=512, N=512, epilogue="silu")
@@ -661,14 +661,16 @@ def test_a_bounded_flm_gemm_refuses_a_call_with_no_rows(npu2):
     traced = ProjectAsStored().trace(x=(512, 512), w=(512, 512))
     words, _ = _words(traced)
     assert [w({"n": 1}) for w in words if w.symbol.endswith("units_valid")] == [1]
-    with pytest.raises(ValueError, match="at least one row, got 0"):
+    with pytest.raises(ValueError, match=r"valid \(0\) must be at least 1"):
         [w({"n": 0}) for w in words]
 
 
 def test_a_row_bound_needs_one_row_block_per_unit():
     op = flm_gemm.GEMM(M=512, K=512, N=512, b_col_maj=True, m_chunk=2)
     op.use_value("valid", N)
-    with pytest.raises(ValueError, match="row bound needs m_chunk=1"):
+    with pytest.raises(
+        ValueError, match=r"m_chunk \(2\) must be 1 under a per-call row bound"
+    ):
         op.resolved(from_name("npu2", n_cols=8))
 
 

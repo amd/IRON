@@ -279,7 +279,7 @@ def test_a_placement_is_searched_by_name(tmp_path, npu2):
 
 def test_a_placement_takes_its_own_enum_alone():
     with pytest.raises(
-        TypeError, match="GEMM.placement is a GEMMPlacement, not 'diagonal'"
+        TypeError, match=r"GEMM: placement \('diagonal'\) must be a GEMMPlacement"
     ):
         GEMM(M=512, K=512, N=512, placement="diagonal")
 

@@ -195,7 +195,9 @@ class RoPE(Operator):
         """
         rows, cols, lut_rows = x.shape[0], x.shape[-1], angles.shape[0]
         if rows % lut_rows != 0:
-            raise ValueError(f"{rows} rows cannot share {lut_rows} angle rows evenly")
+            raise ValueError(
+                f"RoPE: angles ({lut_rows} rows) must divide x's {rows} rows"
+            )
         # The table broadcast over the rows each angle row serves: no copy.
         y = datamovement.rope_ref(
             x.reshape(lut_rows, -1, cols, copy=False),

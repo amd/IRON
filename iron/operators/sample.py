@@ -70,7 +70,7 @@ def slices(vocab: int, cores: int, k_max: int) -> tuple[int, int]:
                 break
     if best is None:
         raise ValueError(
-            f"Sample cannot split {vocab} logits over {cores} cores into even "
+            f"Sample: vocab ({vocab}) does not split over {cores} cores into even "
             f"slices (4-byte DMA) of at least k_max ({k_max})"
         )
     return best[1], best[2]

@@ -295,7 +295,10 @@ def prefill_attn(
     v = VARIANTS[variant]
     if v.windowed != (window is not None):
         need = "needs a" if v.windowed else "takes no"
-        raise ValueError(f"the {v.name} variant {need} window")
+        raise ValueError(
+            f"prefill_attn: window ({window}) does not suit the {v.name} variant, "
+            f"which {need} window"
+        )
     g = Geometry.of(kernel)
     group_cols = dev.cols // v.num_cu
     gqa = num_heads // num_kv_heads

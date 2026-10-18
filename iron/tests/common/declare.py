@@ -849,7 +849,7 @@ def test_a_computed_default_is_inferred_from_a_shape_or_computed():
 
     assert Rep(rows=2, repeat=3).out_rows == 6  # computed
     assert Rep(rows=2, repeat=3, out_rows=6).out_rows == 6  # given, agrees
-    with pytest.raises(ValueError, match="out_rows=5 is not what its other fields"):
+    with pytest.raises(ValueError, match=r"out_rows \(5\) must be"):
         Rep(rows=2, repeat=3, out_rows=5)
     assert Rep.declaration.infer({"x": (2, 8)}, [(6, 8)]) == {"rows": 2, "out_rows": 6}
 

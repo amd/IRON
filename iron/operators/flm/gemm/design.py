@@ -205,7 +205,8 @@ def _default_l1(n_tile, ct_max_k, b_elem_bytes, budget, m_chunk=1, k_tile=K_TILE
             if acc + a + b + cout <= budget:
                 return t_ma, b_depth
     raise ValueError(
-        f"flm.GEMM: nothing fits L1 for tile_n={n_tile}, ct_max_k={ct_max_k}"
+        f"flm.GEMM: tile_n ({n_tile}) leaves no A tile fitting L1 at ct_max_k "
+        f"({ct_max_k})"
     )
 
 
@@ -230,6 +231,6 @@ def _b_depth_for(
         if acc + a + b + cout <= budget:
             return b_depth
     raise ValueError(
-        f"flm.GEMM: tile_ma={t_ma} does not fit L1 for tile_n={n_tile} "
-        f"(ct_max_k={ct_max_k}); even single-buffered B overflows the budget"
+        f"flm.GEMM: tile_ma ({t_ma}) does not fit L1 at tile_n ({n_tile}) and "
+        f"ct_max_k ({ct_max_k}); even single-buffered B overflows the budget"
     )

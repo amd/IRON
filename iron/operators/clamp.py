@@ -59,7 +59,7 @@ class Clamp(UnaryElementwise):
 
     def at_line(self, line: int, dtype, dev, ordered: bool = True, at: int = 0):
         # A step's chain is baked into its producer's array; the bounds are not array-tier.
-        raise ValueError("Clamp's cores run an array of their own")
+        raise ValueError("Clamp: its cores run an array of their own")
 
     class Array(UnaryElementwise.Array):
         x: Operand

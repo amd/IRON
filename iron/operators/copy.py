@@ -148,9 +148,7 @@ class Gather(Operator):
 
     def validate(self) -> None:
         if self.rows < 1:
-            raise ValueError(
-                f"Gather: a gather takes one row at least, not {self.rows}"
-            )
+            raise ValueError(f"Gather: rows ({self.rows}) must be at least 1")
         if self.row * np.dtype(self.dtype).itemsize % 4:
             raise ValueError(
                 f"Gather: a row of {self.row} {np.dtype(self.dtype).name} is not whole "
@@ -793,14 +791,14 @@ class Copy(Operator):
                 per_channel = prod(tap.sizes) // channels
                 if per_channel % self.tile_size:
                     raise ValueError(
-                        f"Copy: tile_size {self.tile_size} must divide the per-channel "
+                        f"Copy: tile_size ({self.tile_size}) must divide the per-channel "
                         f"transfer {per_channel} (= {prod(tap.sizes)} / {channels} "
                         f"channels)"
                     )
         for row in self._row_shares():
             if row % self.tile_size:
                 raise ValueError(
-                    f"Copy: tile_size {self.tile_size} must divide the {row} elements "
+                    f"Copy: tile_size ({self.tile_size}) must divide the {row} elements "
                     f"per channel one row of the bounded axis moves: a call "
                     f"moves any number of rows"
                 )

@@ -252,8 +252,8 @@ class Operator:
                 and not isinstance(value, domain)
             ):
                 raise TypeError(
-                    f"{type(self).__name__}.{name} is a {domain.__name__}, "
-                    f"not {value!r}"
+                    f"{type(self).__name__}: {name} ({value!r}) must be a "
+                    f"{domain.__name__}"
                 )
         if self.pinned is None:
             self.pinned = frozenset(
@@ -288,8 +288,8 @@ class Operator:
                 # value, not an unset one.
                 if value is None and name not in self.declaration.nullable:
                     raise ValueError(
-                        f"{type(self).__name__}.{name}: not given, and nothing "
-                        f"to compute it from"
+                        f"{type(self).__name__}: {name} (None) must be given: "
+                        f"nothing computes it"
                     )
                 setattr(self, name, value)
 
@@ -305,8 +305,8 @@ class Operator:
             given, expected = vars(self)[name], self.declaration.derived[name](self)
             if given != expected:
                 raise ValueError(
-                    f"{type(self).__name__}.{name}={given!r} is not what its "
-                    f"other fields make it ({expected!r})"
+                    f"{type(self).__name__}: {name} ({given!r}) must be "
+                    f"{expected!r}, what its other fields make it"
                 )
 
     def validate(self) -> None:

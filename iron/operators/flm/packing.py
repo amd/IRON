@@ -42,7 +42,9 @@ def pack_b(
     """
     K, N = B.shape
     if K % k_tile or N % n_tile:
-        raise ValueError(f"B ({K}, {N}) must tile to ({k_tile}, {n_tile}) to be packed")
+        raise ValueError(
+            f"pack_b: B ({K}, {N}) must tile to ({k_tile}, {n_tile}) to be packed"
+        )
     col_a = ct_k // s
     blocked = B.reshape(
         K // k_tile, k_tile // ct_k, col_a, s, N // n_tile, n_tile // t, t

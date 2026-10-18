@@ -150,7 +150,7 @@ def _units_valid(op) -> Any:
     """
     rows = op.valid
     if isinstance(rows, (int, np.integer)) and rows < 1:
-        raise ValueError(f"flm.GEMM: a call needs at least one row, got {rows}")
+        raise ValueError(f"flm.GEMM: valid ({rows}) must be at least 1 row")
     return ceildiv(rows, M_TILE * op.rows * op.m_chunk)
 
 
@@ -280,7 +280,8 @@ class GEMM(Operator):
         if self.tile_n is not None:
             if self.tile_n not in CT_MAX_K_FOR_N:
                 raise ValueError(
-                    f"flm.GEMM: tile_n must be one of {sorted(CT_MAX_K_FOR_N)}, got {self.tile_n}"
+                    f"flm.GEMM: tile_n ({self.tile_n}) must be one of "
+                    f"{sorted(CT_MAX_K_FOR_N)}"
                 )
         if self.tile_ma is not None and (
             M_TILE % self.tile_ma or self.tile_ma % (2 * R)
@@ -299,8 +300,8 @@ class GEMM(Operator):
         self.epilogue = Epilogue(self.epilogue)
         if self.epilogue in ACTIVATIONS.values():
             raise ValueError(
-                f"flm.GEMM applies {self.epilogue} as a finish step: "
-                f"finish=Chain.of(SiLU(...)), or a graph folding it"
+                f"flm.GEMM: epilogue ({self.epilogue}) is applied as a finish "
+                f"step: finish=Chain.of(SiLU(...)), or a graph folding it"
             )
         if self.k_tile is not None and self.K % self.k_tile:
             raise ValueError(
@@ -314,7 +315,7 @@ class GEMM(Operator):
             and self.epilogue not in self.epilogue_modes
         ):
             raise ValueError(
-                f"flm.GEMM: epilogue {self.epilogue} is not in epilogue_modes "
+                f"flm.GEMM: epilogue ({self.epilogue}) is not in epilogue_modes "
                 f"{tuple(str(m) for m in self.epilogue_modes)}, so it would "
                 "not be compiled in and the kernel would silently apply none"
             )
@@ -398,7 +399,8 @@ class GEMM(Operator):
         # dimension long; a unit of m_chunk blocks has no dimension left.
         if "valid" in self.bound_extents and self.m_chunk != 1:
             raise ValueError(
-                f"flm.GEMM: a per-call row bound needs m_chunk=1, got m_chunk={self.m_chunk}"
+                f"flm.GEMM: m_chunk ({self.m_chunk}) must be 1 under a per-call "
+                f"row bound"
             )
 
     def compatible(self) -> None:
@@ -416,13 +418,13 @@ class GEMM(Operator):
                 *([a, Clamp] for a in ACTIVATIONS),
             ):
                 raise ValueError(
-                    f"flm.GEMM's epilogue applies a SiLU or a Sigmoid, then a "
-                    f"Clamp; not {[k.__name__ for k in kinds]}"
+                    f"flm.GEMM: finish ({[k.__name__ for k in kinds]}) must be "
+                    f"a SiLU or a Sigmoid, then a Clamp, which the epilogue applies"
                 )
         if self.epilogue is not Epilogue.NONE and self.activation is not self.epilogue:
             raise ValueError(
-                f"flm.GEMM applies one activation, its {self.epilogue} or its "
-                f"finish's {self.activation}"
+                f"flm.GEMM: epilogue ({self.epilogue}) and the finish's "
+                f"{self.activation} are two activations; apply one"
             )
 
     def finish_step(self, link: Link, line: int, dtype, dev, ordered: bool) -> Link:
@@ -435,8 +437,8 @@ class GEMM(Operator):
             or link.op.prepare
         ):
             raise ValueError(
-                f"flm.GEMM's epilogue applies a SiLU, a Sigmoid or a Clamp, "
-                f"not {link.op!r}"
+                f"flm.GEMM: finish ({link.op!r}) must be a SiLU, a Sigmoid or a "
+                f"Clamp, which the epilogue applies"
             )
         return link
 
@@ -706,8 +708,9 @@ class GEMM(Operator):
             B_SLOTS = min(B_MAX_SLOTS, mt_free // b_slot_bytes)
             if B_SLOTS < 1:
                 raise ValueError(
-                    f"flm.GEMM: no room for a {b_slot_bytes}-byte B slot in the memtile at "
-                    f"tile_n={N_TILE}; {mt_free} bytes remain after A and C"
+                    f"flm.GEMM: tile_n ({N_TILE}) leaves no room for a "
+                    f"{b_slot_bytes}-byte B slot in the memtile; {mt_free} bytes "
+                    f"remain after A and C"
                 )
             b_mt_ty = np.ndarray[(B_SLOTS * b_slot_elems,), b_elem_ty]
             b_mt_bufs = [Buffer(b_mt_ty, tile=mt_tiles[c]) for c in range(COLS)]
@@ -1039,7 +1042,7 @@ class GEMM(Operator):
                 break
         else:
             raise ValueError(
-                f"flm.GEMM: M={M} K={K} N={N}: even one unit per slab needs more passes "
+                f"flm.GEMM: M, K, N ({M}, {K}, {N}): even one unit per slab needs more passes "
                 f"over a B pool per column-block than the {pool.queue} x "
                 f"{pool.passes} one memtile channel can queue"
             )
@@ -1048,7 +1051,7 @@ class GEMM(Operator):
         bounded = "valid" in self.bound_extents
         if bounded and len(slabs) > 1:
             raise ValueError(
-                f"flm.GEMM: M={M} K={K} N={N}: a per-call row bound needs M in one slab, "
+                f"flm.GEMM: M, K, N ({M}, {K}, {N}): a per-call row bound needs M in one slab, "
                 f"and this shape takes {len(slabs)}"
             )
 
@@ -1266,7 +1269,7 @@ class GEMM(Operator):
         """
         t = self.resolved()
         if t.b_col_maj:
-            raise ValueError("flm.GEMM: b_col_maj=True reads B as stored (N, K)")
+            raise ValueError("flm.GEMM: b_col_maj (True) reads B as stored (N, K)")
         return pack_b(
             B,
             k_tile=t.k_tile,

@@ -57,9 +57,9 @@ class RMSNorm(Rowwise):
     def validate(self) -> None:
         if self.weighted and self.tile_size > WEIGHTED_TILE_CAP:
             raise ValueError(
-                f"RMSNorm: tile_size={self.tile_size}: a weighted row is at most "
-                f"{WEIGHTED_TILE_CAP} elements, since the multiplying core holds "
-                f"the weight row beside each line"
+                f"RMSNorm: tile_size ({self.tile_size}) must be at most "
+                f"{WEIGHTED_TILE_CAP} when weighted, since the multiplying core "
+                f"holds the weight row beside each line"
             )
 
     def chain(self) -> tuple[KernelCall, ...]:

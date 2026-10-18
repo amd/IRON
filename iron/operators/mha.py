@@ -331,7 +331,7 @@ class MHA(Operator):
         start = self.kv_tokens - self.q_tokens
         if start < 0 or start % self.B_q:
             raise ValueError(
-                f"MHA's queries start at key {start}, which is not a whole number "
+                f"MHA: the queries' first key ({start}) must be a whole number "
                 f"of {self.B_q}-row blocks into the keys"
             )
         return start // self.B_q
@@ -341,15 +341,13 @@ class MHA(Operator):
 
     def validate(self) -> None:
         if self.d <= 0 or self.d % 64:
-            raise ValueError(
-                f"MHA: d must be a positive multiple of 64, got d={self.d}"
-            )
+            raise ValueError(f"MHA: d ({self.d}) must be a positive multiple of 64")
         if self.window is not None and self.window <= 0:
-            raise ValueError(f"MHA: window must be positive or None, got {self.window}")
+            raise ValueError(f"MHA: window ({self.window}) must be positive or None")
         # partial_softmax scales a row's maximum in place of every element.
         if not 0 <= self.scale < np.inf:
             raise ValueError(
-                f"MHA: scale must be finite and not negative, got {self.scale}"
+                f"MHA: scale ({self.scale}) must be finite and not negative"
             )
         if self.num_pipelines < 1:
             raise ValueError(
@@ -401,7 +399,7 @@ class MHA(Operator):
             for name, m in zip(dims, mac):
                 if vars(self)[name] % m:
                     raise ValueError(
-                        f"MHA: {name}={vars(self)[name]} must be a multiple of "
+                        f"MHA: {name} ({vars(self)[name]}) must be a multiple of "
                         f"{'P*V' if pv else 'QK^T'}'s micro-tile {mac}"
                     )
         # A row whose window misses a key block another row of its query

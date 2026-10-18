@@ -1006,7 +1006,7 @@ class Resample(Operator):
             ("patch_rows", self.patch_rows, bands * nmax * self.cores),
         ):
             if have < need:
-                raise ValueError(f"Resample: {name} is {have}; the image needs {need}")
+                raise ValueError(f"Resample: {name} ({have}) must be at least {need}")
 
     def ops(self) -> int:
         return 0  # integer filters, not bf16 arithmetic: its figure is latency

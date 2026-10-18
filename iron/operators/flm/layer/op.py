@@ -46,8 +46,8 @@ class DecodeLayer(Operator):
     def validate(self) -> None:
         if self.geometry not in RTP_ADDRESSES:
             raise ValueError(
-                "DecodeLayer: geometry must be aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or "
-                f"FLM_GEMMA4_E4B_DECODE, not {self.geometry!r}"
+                f"DecodeLayer: geometry ({self.geometry!r}) must be "
+                "aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or FLM_GEMMA4_E4B_DECODE"
             )
         if self.layer_type not in LayerType:
             raise ValueError(

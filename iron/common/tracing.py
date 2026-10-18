@@ -72,7 +72,7 @@ def dump_traces(
         if run.op.traced:
             raise TypeError(
                 f"{type(run).__name__} was built with tracing enabled but has no "
-                "trace buffer; only the full-ELF sequence callable allocates one."
+                "trace buffer; only the full-ELF sequence callable allocates one"
             )
         return []
     buffer = run.trace_buffer

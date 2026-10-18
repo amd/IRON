@@ -228,20 +228,22 @@ class GEMV(Operator):
     def validate(self):
         if self.repeat < 1 or (self.num_batches or 1) % self.repeat:
             raise ValueError(
-                f"GEMV: repeat={self.repeat} does not divide num_batches={self.num_batches}"
+                f"GEMV: repeat ({self.repeat}) must divide num_batches "
+                f"({self.num_batches})"
             )
         self.check_derived("num_matrices")
         tso, tsi = self.tile_size_output, self.tile_size_input
         if tso is not None and tsi is not None and not (tso % tsi == 0 and tso >= tsi):
             raise ValueError(
-                "GEMV: tile_size_output must be a multiple of tile_size_input"
+                f"GEMV: tile_size_output ({tso}) must be a multiple of "
+                f"tile_size_input ({tsi})"
             )
         self._legal_kernel_vector_size()
         if self.K % self._COPY_ELEMENTS:
             raise ValueError(
-                f"GEMV: K={self.K}: each core copies B out of its A stream in "
-                f"{self._COPY_ELEMENTS}-element vectors, so K must be a multiple "
-                f"of {self._COPY_ELEMENTS}"
+                f"GEMV: K ({self.K}) must be a multiple of {self._COPY_ELEMENTS}: "
+                f"each core copies B out of its A stream in "
+                f"{self._COPY_ELEMENTS}-element vectors"
             )
 
     def _legal_kernel_vector_size(self) -> int:
@@ -256,21 +258,21 @@ class GEMV(Operator):
         if self.kernel_vector_size is None:
             if not legal:
                 raise ValueError(
-                    f"GEMV: K={self.K} has no legal kernel_vector_size: need a width w "
-                    f"in {self._KERNEL_VECTOR_SIZES} with K % w == 0 and K >= 2*w. "
-                    "K must be an even multiple of at least 16."
+                    f"GEMV: K ({self.K}) has no legal kernel_vector_size: need a "
+                    f"width w in {self._KERNEL_VECTOR_SIZES} with K % w == 0 and "
+                    "K >= 2*w, so K must be an even multiple of at least 16"
                 )
             return legal[0]
         if self.kernel_vector_size not in legal:
             raise ValueError(
-                f"GEMV: kernel_vector_size={self.kernel_vector_size} is not legal for "
-                f"K={self.K}: the matvec kernel needs K % kernel_vector_size == 0 "
-                f"and K >= 2*kernel_vector_size. "
+                f"GEMV: kernel_vector_size ({self.kernel_vector_size}) is not legal "
+                f"for K ({self.K}): the matvec kernel needs K % kernel_vector_size "
+                f"== 0 and K >= 2*kernel_vector_size; "
                 + (
-                    f"Legal here: {legal}."
+                    f"legal here: {legal}"
                     if legal
-                    else "No width works for this K; it must be an even multiple "
-                    "of at least 16."
+                    else "no width works for this K, which must be an even multiple "
+                    "of at least 16"
                 )
             )
         return self.kernel_vector_size
@@ -332,8 +334,8 @@ class GEMV(Operator):
         )
         if held > dev.core_memory_bytes:
             raise ValueError(
-                f"GEMV: K={self.K}, tile_size_input={new.tile_size_input}, "
-                f"tile_size_output={new.tile_size_output}: a core holds {held} "
+                f"GEMV: K ({self.K}), tile_size_input ({new.tile_size_input}), "
+                f"tile_size_output ({new.tile_size_output}): a core holds {held} "
                 f"bytes, past its {dev.core_memory_bytes}"
             )
         return new
@@ -342,17 +344,15 @@ class GEMV(Operator):
         lanes = self.num_aie_columns * self.num_channels
         rows = self.M // lanes
         if self.M % lanes:
-            raise ValueError(f"GEMV: M={self.M} does not divide across {lanes} lanes")
+            raise ValueError(f"GEMV: M ({self.M}) must divide across {lanes} lanes")
         for name, tile in (
             ("tile_size_output", self.tile_size_output),
             ("tile_size_input", self.tile_size_input),
         ):
             if tile > rows:
-                raise ValueError(f"GEMV: {name}={tile} exceeds M/lanes={rows}")
+                raise ValueError(f"GEMV: {name} ({tile}) exceeds M/lanes ({rows})")
             if rows % tile:
-                raise ValueError(
-                    f"GEMV: {name}={tile} does not evenly divide M/lanes={rows}"
-                )
+                raise ValueError(f"GEMV: {name} ({tile}) must divide M/lanes ({rows})")
 
     class Array(Operator.Array):
         finishing: Finish
@@ -450,7 +450,8 @@ class GEMV(Operator):
             for buf in (self.A, self.C):
                 if buf.bounded is not None:
                     raise ValueError(
-                        f"GEMV.{buf.name}: a repeated GEMV takes no per-call bound"
+                        f"GEMV: {buf.name} takes no per-call bound when repeat "
+                        f"({self.repeat}) is above 1"
                     )
         M, K, tsi = self.M, self.K, self.tile_size_input
         drains = [
