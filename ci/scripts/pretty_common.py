@@ -147,7 +147,7 @@ RENAMED_PATHS = {
     "iron/applications/llama_3.2_1b/": "tests/applications/llama/",
     "iron/applications/llama3/": "tests/applications/llama/",
     "iron/applications/llama/": "tests/applications/llama/",
-    "iron/applications/gemma4_flm/": "tests/applications/gemma4_flm/",
+    "iron/operators/flm/gemma4_engine/": "tests/applications/gemma4_flm/",
     "iron/applications/qwen3/": "tests/applications/qwen3/",
     **{
         f"iron/operators/{block}/test.py::": f"iron/tests/lm/{block}.py::"

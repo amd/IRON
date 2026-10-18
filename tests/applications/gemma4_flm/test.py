@@ -20,10 +20,10 @@ from pathlib import Path
 
 import pytest
 
-from iron import applications
+from iron.operators import flm
 from iron.lm.testing import require
 
-APP = Path(applications.__file__).with_name("gemma4_flm")
+APP = Path(flm.__file__).with_name("gemma4_engine")
 FLM = APP / "build" / "FastFlowLM" / "src"
 # CI keeps the model in /srv/fastflowlm/models/Gemma4-E2B-IT-NPU2.
 FLM_MODEL_PATH = Path(

@@ -14,7 +14,7 @@ operators that run on the NPU on the text path of Gemma 4 E2B.
 ## Quick start
 
 You need an NPU2 device (Strix, Krackan) and the IRON environment, see the
-[IRON installation instructions](../../../README.md#installation-linux) (in
+[IRON installation instructions](../../../../README.md#installation-linux) (in
 short, `pip install -r requirements.txt`). The `Makefile` pulls and builds the
 FastFlowLM engine, with its operators replaced by their open-source
 implementations from this repository. The build needs FastFlowLM's
@@ -31,7 +31,7 @@ sudo apt install cmake ninja-build pkg-config uuid-dev libdrm-dev libxrt-dev \
 export PATH=/usr/lib/rust-1.85/bin:$PATH
 ```
 
-Run the steps below from this directory, `iron/applications/gemma4_flm`.
+Run the steps below from this directory, `iron/operators/flm/gemma4_engine`.
 
 1. Choose the model directory. flm reads the model from
    `$FLM_MODEL_PATH/models/Gemma4-E2B-IT-NPU2`.
@@ -113,11 +113,11 @@ This example uses six operator classes from `iron/operators/flm/`:
 
 | Operator | Class | Abstraction level | Sequence | Engine hooks |
 |---|---|---|---|---|
-| [GEMM](../../operators/flm/gemm) | `ProjectionGEMM` | high | static, one per (M, K, N) | `*_proj`, `pli_*_proj` |
-| [Dequantization](../../operators/flm/dequant) | `DequantBFP` | high | static, one per (K, N) | `dequant_*` |
-| [LM head](../../operators/flm/lm_head) | `LMHead` | high | static | `lm_head` |
-| [Prefill attention](../../operators/flm/prefill_attn) | `PrefillAttention`, `PrefillSlidingAttention` | low | dynamic: `L_begin`, `L_end`, `max_l` | `global_attn_core`, `swa_attn_core` |
-| [Decode layer](../../operators/flm/layer) | `DecodeLayer` | low | dynamic: `context_len`, `max_l` | `*_layer_run`, `*_layer`, `*_layer_mv` |
+| [GEMM](../gemm) | `ProjectionGEMM` | high | static, one per (M, K, N) | `*_proj`, `pli_*_proj` |
+| [Dequantization](../dequant) | `DequantBFP` | high | static, one per (K, N) | `dequant_*` |
+| [LM head](../lm_head) | `LMHead` | high | static | `lm_head` |
+| [Prefill attention](../prefill_attn) | `PrefillAttention`, `PrefillSlidingAttention` | low | dynamic: `L_begin`, `L_end`, `max_l` | `global_attn_core`, `swa_attn_core` |
+| [Decode layer](../layer) | `DecodeLayer` | low | dynamic: `context_len`, `max_l` | `*_layer_run`, `*_layer`, `*_layer_mv` |
 
 The high-level operators describe their dataflow with IRON's Workers,
 ObjectFifos and runtime sequence. Alongside the other operators in IRON, these
@@ -141,7 +141,7 @@ buffer descriptors by hand:
   attention over the KV cache and the MLP.
 
 Each is an IRON operator, laid out as
-[Adding an operator](../../../AGENTS.md#adding-an-operator) describes:
+[Adding an operator](../../../../AGENTS.md#adding-an-operator) describes:
 `ProjectionGEMM` and `DequantBFP` build their array in `Array.build()` and
 their runtime sequence in `sequence()`; the others return the design in
 their `design.py` through `exported_design()`.

@@ -6,10 +6,11 @@ SPDX-License-Identifier: Apache-2.0
 # YOLOX-Nano on the NPU
 
 Megvii's YOLOX-Nano object detector as one IRON graph, `YOLOXNano`, from a
-416x416 image to its three scales' predictions, and the float32 numpy
-forward pass it is checked against, `YOLOXNanoOracle`; `model.py`'s
-docstrings describe both. Both read the release's own PyTorch checkpoint by
-its own names (`iron.lm.Checkpoint` reads it without torch).
+416x416 image to its three scales' predictions, described in `model.py`'s
+docstrings. It reads the release's own PyTorch checkpoint by its own names
+(`iron.lm.Checkpoint` reads it without torch). Its test checks it against a
+float32 numpy forward pass, `YOLOXNanoOracle` in
+`tests/applications/yolox/test.py`.
 
 The graph is built from `iron.lm`'s `Conv2d`, `MaxPool2d` and
 `ConcatChannels`, and `F.linear` for each 1x1 conv (`Pointwise`). Its tunables are `profiles/<device>.json`: the narrow

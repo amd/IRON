@@ -22,7 +22,7 @@ import aie.utils as aie_utils
 from aie.iron.device import NPU2
 from aie.iron.kernels import FLM_GEMMA4_E2B_DECODE
 
-from iron.applications.gemma4_flm import pli_weights
+from iron.operators.flm.gemma4_engine import pli_weights
 from iron.operators.flm import (
     ProjectionGEMM,
     DecodeLayer,
