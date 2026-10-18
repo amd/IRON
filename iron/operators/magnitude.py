@@ -38,14 +38,12 @@ class Magnitude(Rowwise):
         width,
         dtype=np.float32,
         obj_shape=(width,),
-        per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
     y = Out(
         Rowwise.rows,
         tile_size,
         dtype=np.float32,
         obj_shape=(tile_size,),
-        per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
 
     def validate(self) -> None:

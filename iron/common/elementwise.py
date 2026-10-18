@@ -50,6 +50,7 @@ from .declare import (
     Value,
     field,
 )
+from .declare.shape import Shape
 from .testing import Case, Testing
 
 # Small enough to divide any extent a model has, at some DMA efficiency.
@@ -249,11 +250,13 @@ class Elementwise(Operator):
     """The array for an elementwise kernel over lines of ``tile_size`` elements.
 
     Subclasses declare the operands with the line as their tile and
-    implement ``kernel``. ``tile_cap`` is the largest line the kernel holds.
+    implement ``kernel``; an operand that gives no ``per=`` is split over
+    every core, ``per=(num_aie_columns, num_channels)``. ``tile_cap`` is the
+    largest line the kernel holds.
     """
 
     num_aie_columns: CompileTime[int] = Auto(array=True)
-    num_channels: CompileTime[int] = Auto(default=1, array=True)
+    num_channels: CompileTime[int] = Auto(1, array=True)
     tile_size: CompileTime[int] = Auto(
         domain=Divisors(
             of=lambda op, dev: op.outputs[0].elements,
@@ -270,6 +273,12 @@ class Elementwise(Operator):
 
     default_tile: ClassVar[int] = DEFAULT_TILE
     tile_cap: ClassVar[int] = 4096
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        for m in vars(cls).values():
+            if isinstance(m, Operand) and m.per is None:
+                m.per = Shape((Elementwise.num_aie_columns, Elementwise.num_channels))
+        super().__init_subclass__(**kwargs)
 
     def resolve(self, dev) -> Self:
         tile_size = self.default_tile if self.tile_size is None else self.tile_size
@@ -598,12 +607,10 @@ class UnaryElementwise(Elementwise):
     x = In(
         size,
         obj_shape=(Elementwise.tile_size,),
-        per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     y = Out(
         size,
         obj_shape=(Elementwise.tile_size,),
-        per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
 
     @property
@@ -631,17 +638,14 @@ class BinaryElementwise(Elementwise):
     a = In(
         size,
         obj_shape=(Elementwise.tile_size,),
-        per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     b = In(
         size,
         obj_shape=(Elementwise.tile_size,),
-        per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     y = Out(
         size,
         obj_shape=(Elementwise.tile_size,),
-        per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
 
     @property
@@ -669,13 +673,11 @@ class Rowwise(Elementwise):
         rows,
         tile_size,
         obj_shape=(tile_size,),
-        per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     y = Out(
         rows,
         tile_size,
         obj_shape=(tile_size,),
-        per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
 
     @property
@@ -719,7 +721,6 @@ class RowBroadcast(Rowwise):
         Rowwise.rows,
         Rowwise.tile_size,
         obj_shape=(line,),
-        per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
     row = In(
         Rowwise.tile_size,
@@ -731,7 +732,6 @@ class RowBroadcast(Rowwise):
         Rowwise.rows,
         Rowwise.tile_size,
         obj_shape=(line,),
-        per=(Elementwise.num_aie_columns, Elementwise.num_channels),
     )
 
     def resolve(self, dev) -> Self:

@@ -41,7 +41,6 @@ class Limbs(Rowwise):
         line,
         dtype=np.float32,
         obj_shape=(line,),
-        per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
 
     def validate(self) -> None:

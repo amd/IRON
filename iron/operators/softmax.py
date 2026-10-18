@@ -124,22 +124,22 @@ class Softmax(Operator):
     rows: CompileTime[int] = field(array=True)
     cols: CompileTime[int] = field()
     num_aie_columns: CompileTime[int] = Auto()
-    num_channels: CompileTime[int] = Auto(default=1)
+    num_channels: CompileTime[int] = Auto(1)
     block: CompileTime[int] = Auto(
         domain=Divisors(of=lambda op, dev: op.cols, step=_VECTOR_STEP, cap=_ROW_CAP)
     )
     streamed: CompileTime[bool] = Auto(domain=(False, True), array=True)
-    input_dtype: CompileTime[Any] = field(default=ml_dtypes.bfloat16, repr=False)
+    input_dtype: CompileTime[Any] = field(ml_dtypes.bfloat16, repr=False)
     # Float input only, mlir-aie's softmax_f32_bf16: a pre-cap addend and
     # cap * tanh(x / cap).
-    soft_cap: CompileTime[float | None] = field(default=None, array=True)
-    has_addend: CompileTime[bool] = field(default=False)
+    soft_cap: CompileTime[float | None] = field(None, array=True)
+    has_addend: CompileTime[bool] = field(False)
     # Float input only, softmax_rows_banded_f32_bf16: a band computed from
     # these two in the core (window, and the row's own query position,
     # wrapped every period rows), not a mask operand -- a core has two
     # input DMA channels, and x and addend already take both.
-    window: CompileTime[int | None] = field(default=None, array=True)
-    period: CompileTime[int | None] = field(default=None, array=True)
+    window: CompileTime[int | None] = field(None, array=True)
+    period: CompileTime[int | None] = field(None, array=True)
 
     length = Extent(cols)  # cols, or fewer per call
 

@@ -15,7 +15,7 @@ class SiLU(UnaryElementwise):
     test = Testing(Sweep(channels=None))
 
     # One channel per column: the LUT-based kernel is sized for it.
-    num_channels: CompileTime[int] = Auto(default=1, repr=False, init=False)
+    num_channels: CompileTime[int] = Auto(1, repr=False, init=False)
 
     class Array(UnaryElementwise.Array):
         def kernel(self):

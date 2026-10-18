@@ -59,7 +59,7 @@ class AutoSpec(ParamSpec):
 
     Attributes:
         default: The starting value a construction or a profile leaves open
-            takes (``Auto(default=...)``), or None when ``resolve`` must
+            takes (``Auto(default)``), or None when ``resolve`` must
             fill the field.
         domain: The values a tuner searches the field over, or None.
     """
@@ -69,8 +69,9 @@ class AutoSpec(ParamSpec):
 
 
 def field(
-    *,
     default: Any = MISSING,
+    /,
+    *,
     derive: Callable[[Any], Any] | None = None,
     repr: bool = True,
     init: bool = True,
@@ -112,7 +113,7 @@ def field(
         TypeError: Both `default` and `derive` are given.
     """
     if derive is not None and default is not MISSING:
-        raise TypeError("field(default=, derive=): give one, not both")
+        raise TypeError("field(default, derive=): give one, not both")
     return dataclasses.field(
         default=None if derive is not None else default,
         init=init,
@@ -123,8 +124,9 @@ def field(
 
 
 def Auto(
-    *,
     default: Any = None,
+    /,
+    *,
     domain: Domain | tuple[Any, ...] | None = None,
     repr: bool = True,
     init: bool = True,
@@ -137,7 +139,7 @@ def Auto(
     stream tile but never a host shape, since inference would cycle through
     resolution.
     ``init=False`` makes it no tunable: a subclass's fixed value of an
-    inherited one (``default=``), or one ``resolve`` computes from the device
+    inherited one (its `default`), or one ``resolve`` computes from the device
     and the other fields, giving it to the copy it returns
     (``self.replace(x=...)``).
 

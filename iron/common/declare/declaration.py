@@ -135,7 +135,7 @@ class Declaration:
             elif spec is None:
                 raise TypeError(
                     f"{cls.__name__}.{name}: declare a CompileTime field with "
-                    f"field() or Auto(), `{name}: ... = field(default=...)`"
+                    f"field() or Auto(), `{name}: ... = field(...)`"
                 )
 
         inherited = {
@@ -155,7 +155,7 @@ class Declaration:
             ):
                 raise TypeError(
                     f"{cls.__name__}.{name} = {value!r} does not override the inherited "
-                    f"field: annotate it, `{name}: CompileTime[int] = Auto(default={value!r})` (with "
+                    f"field: annotate it, `{name}: CompileTime[int] = Auto({value!r})` (with "
                     f"init=False to pin it), or dataclass keeps the base's default"
                 )
 

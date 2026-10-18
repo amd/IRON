@@ -50,7 +50,7 @@ class TopKRouter(Operator):
 
     experts: CompileTime[int] = field()
     top_k: CompileTime[int] = field()
-    rows: CompileTime[int] = field(default=1)
+    rows: CompileTime[int] = field(1)
     weights_width: CompileTime[int] = field(derive=lambda op: 2 * op.top_k, repr=False)
     pairs: CompileTime[int] = Auto()
 

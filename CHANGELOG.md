@@ -80,6 +80,10 @@ public API adds its entry under Unreleased.
 
 ### Changed
 
+- `field()` and `Auto()` take their default positionally: `field(64)`, not
+  `field(default=64)`.
+- An operand of an `Elementwise` or `Rowwise` operator that gives no `per=`
+  is split over every core, `per=(num_aie_columns, num_channels)`.
 - `iron.lm.base` is split into `iron.lm.config`, `checkpoint`, `model` and
   `runner`; `iron.lm`'s own names are unchanged.
 - A `Runner` subclass is its model's `runner`, which `CausalLM.load` builds.

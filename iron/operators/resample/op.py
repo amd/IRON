@@ -236,9 +236,9 @@ class ResampleTaps(Operator):
 
     in_size: CompileTime[int] = field()
     out_size: CompileTime[int] = field()
-    words: CompileTime[int] = field(default=256)
+    words: CompileTime[int] = field(256)
     # The slots of a chunk, or None for as many as the window lets fit.
-    slots: CompileTime[int | None] = field(default=None, array=True)
+    slots: CompileTime[int | None] = field(None, array=True)
     # A multiple of 16, so every core count up to it divides.
     chunks: CompileTime[int] = field(
         derive=lambda op: 16
@@ -248,7 +248,7 @@ class ResampleTaps(Operator):
         )
     )
     num_aie_columns: CompileTime[int] = Auto()
-    num_channels: CompileTime[int] = Auto(default=2)
+    num_channels: CompileTime[int] = Auto(2)
 
     table = Out(
         chunks,
@@ -837,9 +837,9 @@ class Resample(Operator):
     out_height: CompileTime[int] = field()
     out_width: CompileTime[int] = field()
     # Every chunk is a handshake with every core: few and large ones.
-    chunk: CompileTime[int] = field(default=4096)
+    chunk: CompileTime[int] = field(4096)
     # A 39-tap window: a scale of up to 9.5.
-    words: CompileTime[int] = field(default=356)
+    words: CompileTime[int] = field(356)
     # A floor of 8, so two resizes of one image that need no more share an array.
     patch_columns: CompileTime[int] = field(
         derive=lambda op: max(8, op.default_patch_columns()), array=True
@@ -856,7 +856,7 @@ class Resample(Operator):
     )
     patch_rows: CompileTime[int] = field(derive=lambda op: op.padded_rows())
     num_aie_columns: CompileTime[int] = Auto()
-    num_channels: CompileTime[int] = Auto(default=2)
+    num_channels: CompileTime[int] = Auto(2)
 
     rows = Extent(height)
     columns = Extent(width)
@@ -1246,12 +1246,12 @@ class PatchPositions(Operator):
     rows: CompileTime[int] = field()
     out_height: CompileTime[int] = field()
     out_width: CompileTime[int] = field()
-    pool: CompileTime[int] = field(default=3, array=True)
+    pool: CompileTime[int] = field(3, array=True)
     # The rows of each axis's position-embedding table.
-    positions: CompileTime[int] = field(default=10240, array=True)
+    positions: CompileTime[int] = field(10240, array=True)
     # Resample's cores, which its raster's columns are padded past.
-    cores: CompileTime[int] = field(default=16, array=True)
-    block: CompileTime[int] = field(default=256)
+    cores: CompileTime[int] = field(16, array=True)
+    block: CompileTime[int] = field(256)
 
     out_rows = Extent(out_height)
     out_columns = Extent(out_width)

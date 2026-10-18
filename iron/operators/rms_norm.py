@@ -30,14 +30,13 @@ class RMSNorm(Rowwise):
     )
 
     # The epsilon under the root: 1e-5 by default; a model states its own.
-    epsilon: CompileTime[float] = field(default=1e-5, array=True)
-    weighted: CompileTime[bool] = field(default=False)
+    epsilon: CompileTime[float] = field(1e-5, array=True)
+    weighted: CompileTime[bool] = field(False)
 
     x = In(
         Rowwise.rows,
         Rowwise.tile_size,
         obj_shape=(Rowwise.tile_size,),
-        per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
     # Shared by every column of a channel: counted once per channel.
     weight = In(
@@ -51,7 +50,6 @@ class RMSNorm(Rowwise):
         Rowwise.rows,
         Rowwise.tile_size,
         obj_shape=(Rowwise.tile_size,),
-        per=(Rowwise.num_aie_columns, Rowwise.num_channels),
     )
 
     def validate(self) -> None:

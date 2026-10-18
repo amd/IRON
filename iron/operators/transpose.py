@@ -64,9 +64,9 @@ class Transpose(Operator):
 
     M: CompileTime[int] = field()
     N: CompileTime[int] = field()
-    num_batches: CompileTime[int | None] = field(default=None)
+    num_batches: CompileTime[int | None] = field(None)
     m: CompileTime[int] = Auto(
-        default=64,
+        64,
         domain=Divisors(
             of=lambda op, dev: op.M,
             step=lambda op, dev: op.s,
@@ -74,16 +74,16 @@ class Transpose(Operator):
         ),
     )
     n: CompileTime[int] = Auto(
-        default=64,
+        64,
         domain=Divisors(
             of=lambda op, dev: op.N,
             step=lambda op, dev: op.s,
             cap=lambda op, dev: 8192 // op.m,
         ),
     )
-    s: CompileTime[int] = Auto(default=8, domain=(8, 4), array=True)
+    s: CompileTime[int] = Auto(8, domain=(8, 4), array=True)
     num_aie_columns: CompileTime[int] = Auto()
-    num_channels: CompileTime[int] = Auto(default=1)
+    num_channels: CompileTime[int] = Auto(1)
 
     x = In(num_batches, M, N, obj_shape=(m, n), per=(num_aie_columns, num_channels))
     y = Out(num_batches, N, M, obj_shape=(m, n), per=(num_aie_columns, num_channels))

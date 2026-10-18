@@ -63,11 +63,11 @@ def from_operands(cls, *operand_shapes, **overrides):
 class MV(Operator):
     M: CompileTime[int] = field()
     K: CompileTime[int] = field()
-    num_batches: CompileTime[int | None] = field(default=None)
+    num_batches: CompileTime[int | None] = field(None)
     columns: CompileTime[int | None] = Auto()
-    tile_out: CompileTime[int] = Auto(default=64)
+    tile_out: CompileTime[int] = Auto(64)
     vec: CompileTime[int | None] = Auto(repr=False)
-    epilogue: CompileTime[str] = field(default="none", array=True)
+    epilogue: CompileTime[str] = field("none", array=True)
 
     A = In(num_batches, M, K, obj_shape=(tile_out, K), per=columns)
     B = In(num_batches, K, obj_shape=(K,), broadcast=True)
@@ -139,6 +139,21 @@ def test_dataclass_constructor_is_typed_by_real_fields():
     ]
 
 
+def test_a_default_is_given_positionally():
+    op = MV(M=64, K=64)
+    assert (op.num_batches, op.tile_out, op.epilogue) == (None, 64, "none")
+
+
+def test_an_elementwise_operand_is_split_over_every_core_unless_it_says():
+    from iron.operators import RMSNorm
+
+    def per(operand):
+        return [d.name for d in operand.per.dims]
+
+    assert per(Tanh.x) == per(RMSNorm.x) == ["num_aie_columns", "num_channels"]
+    assert per(RMSNorm.weight) == ["num_channels"]
+
+
 # --------------------------------------------------------------------------
 # Rules rejected at class creation
 # --------------------------------------------------------------------------
@@ -150,7 +165,7 @@ def test_a_tunable_may_name_a_tile_but_not_a_buffer_shape():
 
         class Bad(Operator):
             M: CompileTime[int] = field()
-            t: CompileTime[int] = Auto(default=64)
+            t: CompileTime[int] = Auto(64)
             A = In(M, t)
 
 
@@ -183,7 +198,7 @@ def test_a_marker_inside_a_union_is_rejected():
     with pytest.raises(TypeError, match=r"Bad\.n: .*CompileTime\[int \| None\]"):
 
         class Bad(Operator):
-            n: CompileTime[int] | None = field(default=None)
+            n: CompileTime[int] | None = field(None)
 
 
 @pytest.mark.parametrize(
@@ -243,7 +258,7 @@ def test_a_field_may_replace_an_operator_bases_own_attribute():
         window = None
 
     class Windowed(Base):
-        window: CompileTime[int] = field(default=512)
+        window: CompileTime[int] = field(512)
 
     assert Windowed().window == 512
 
@@ -266,7 +281,7 @@ def test_per_and_broadcast_are_exclusive():
 
         class Bad(Operator):
             n: CompileTime[int] = field()
-            c: CompileTime[int] = Auto(default=2)
+            c: CompileTime[int] = Auto(2)
             x = In(n, obj_shape=(4,), per=(c,), broadcast=True)
 
 
@@ -297,7 +312,7 @@ def test_a_probe_may_not_be_on_a_field_the_transfers_follow():
 
         class Present(Operator):
             n: CompileTime[int] = field()
-            gated: CompileTime[bool] = field(default=False, probe=False)
+            gated: CompileTime[bool] = field(False, probe=False)
             x = In(n)
             w = In(n, when=gated)
 
@@ -307,7 +322,7 @@ def test_a_probe_may_not_be_on_a_field_the_constructor_cannot_set():
 
         class Fixed(Operator):
             n: CompileTime[int] = field()
-            low: CompileTime[float] = field(default=0.0, init=False, probe=0.0)
+            low: CompileTime[float] = field(0.0, init=False, probe=0.0)
             x = In(n)
 
 
@@ -315,7 +330,7 @@ def test_probed_sets_each_probe_field_and_nothing_else():
     class Bounded(Operator):
         n: CompileTime[int] = field()
         low: CompileTime[float] = field(probe=-np.inf)
-        cap: CompileTime[tuple | None] = field(default=None, probe=None)
+        cap: CompileTime[tuple | None] = field(None, probe=None)
         x = In(n)
 
     assert Bounded.declaration.probes == {"low": -np.inf, "cap": None}
@@ -356,7 +371,7 @@ def test_a_t_or_none_dim_is_omitted_when_none_and_may_sit_anywhere():
     class Stack(Operator):
         rows: CompileTime[int] = field()
         cols: CompileTime[int] = field()
-        seq: CompileTime[int | None] = field(default=None)
+        seq: CompileTime[int | None] = field(None)
         x = In(rows, seq, cols)
         y = Out(rows, seq, cols)
 
@@ -519,7 +534,7 @@ class Scaled(Operator):
     """``x`` times a scale row when ``scaled``, else a copy of it."""
 
     N: CompileTime[int] = field()
-    scaled: CompileTime[bool] = field(default=False)
+    scaled: CompileTime[bool] = field(False)
 
     x = In(N, obj_shape=(N,))
     s = In(N, obj_shape=(N,), when=scaled)
@@ -576,7 +591,7 @@ def test_when_names_a_param():
 
         class Bad(Operator):
             N: CompileTime[int] = field()
-            flag: CompileTime[bool] = Auto(default=False)
+            flag: CompileTime[bool] = Auto(False)
             s = In(N, when=flag)
 
 
@@ -800,15 +815,13 @@ def test_resolve_must_return_a_copy():
 
 
 def test_overriding_an_inherited_field_needs_an_annotation():
-    with pytest.raises(
-        TypeError, match=r"tile_out: CompileTime\[int\] = Auto\(default=32\)"
-    ):
+    with pytest.raises(TypeError, match=r"tile_out: CompileTime\[int\] = Auto\(32\)"):
 
         class Pinned(MV):
             tile_out = 32  # dataclass would keep the base's 64 in silence
 
     class Annotated(MV):
-        tile_out: CompileTime[int] = Auto(default=32)
+        tile_out: CompileTime[int] = Auto(32)
 
     assert Annotated(M=64, K=64).tile_out == 32
 
@@ -866,9 +879,9 @@ def test_a_select_picks_a_layout_within_a_storage():
     class Weights(Operator):
         K: CompileTime[int] = field()
         N: CompileTime[int] = field()
-        blocks: CompileTime[int] = field(default=0)
-        packed: CompileTime[bool] = field(default=False)
-        transposed: CompileTime[bool] = field(default=False)
+        blocks: CompileTime[int] = field(0)
+        packed: CompileTime[bool] = field(False)
+        transposed: CompileTime[bool] = field(False)
         w = In(Select(packed, (blocks,), (Select(transposed, (N, K), (K, N)),)))
 
     assert Weights.declaration.infer({"w": (64, 32)}, transposed=True) == {
@@ -942,7 +955,7 @@ class Rows(Operator):
 
     rows: CompileTime[int] = field()
     cols: CompileTime[int] = field()
-    lanes: CompileTime[int] = Auto(default=2)
+    lanes: CompileTime[int] = Auto(2)
     valid = Extent(rows)
     count = Value(derive=lambda op: op.valid // op.lanes)  # reads the extent
     width = Value(derive=lambda op: op.cols)  # does not
@@ -971,7 +984,7 @@ def test_an_extent_reads_as_its_field_until_a_graph_bounds_it():
     with pytest.raises(TypeError, match=r"must name a field\(\)"):
 
         class Bad(Operator):
-            n: CompileTime[int] = Auto(default=4)
+            n: CompileTime[int] = Auto(4)
             valid = Extent(n)
             x = In(n)
 
@@ -1118,7 +1131,7 @@ def test_an_axis_is_found_through_the_branch_a_select_takes():
     class Laid(Operator):
         rows: CompileTime[int] = field()
         cols: CompileTime[int] = field()
-        flip: CompileTime[bool] = field(default=False)
+        flip: CompileTime[bool] = field(False)
         x = In(Select(flip, (cols, rows), (rows, cols)))
 
     assert Laid.x.dims.axis_of("rows", Laid(rows=4, cols=8)) == 0

@@ -25,13 +25,12 @@ class Log(UnaryElementwise):
         ),
     )
 
-    offset: CompileTime[float] = field(default=0.0, array=True)
+    offset: CompileTime[float] = field(0.0, array=True)
 
     x = In(
         UnaryElementwise.size,
         dtype=np.float32,
         obj_shape=(UnaryElementwise.tile_size,),
-        per=(UnaryElementwise.num_aie_columns, UnaryElementwise.num_channels),
     )
 
     class Array(UnaryElementwise.Array):
