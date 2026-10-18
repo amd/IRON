@@ -69,9 +69,7 @@ def case(request, golden):
     conv.compile(x=((rows, channels), bfloat16))
     x = rng.standard_normal((rows, channels)).astype(bfloat16)
     weight, bias = weight.astype(np.float32), bias.astype(np.float32)
-    reference = golden(
-        f"conv1d_{request.param}", lambda: Torch(weight, bias, stride), weight, bias
-    )
+    reference = golden(f"conv1d_{request.param}", lambda: Torch(weight, bias, stride))
     yield conv, reference.logits(x.view(np.int16)), x
 
 
