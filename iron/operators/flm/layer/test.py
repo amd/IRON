@@ -12,7 +12,6 @@ Both check the RTP placement of every build they dispatch.
 
 import json
 import os
-import re
 from pathlib import Path
 
 import aie.utils as aie_utils
@@ -25,34 +24,14 @@ from ml_dtypes import bfloat16
 from iron.common.design import OperatorDesign
 from iron.common.testing import time_call
 from iron.operators.flm.layer.design import (
+    GEOMETRIES,
     MAX_CONTEXT,
-    RTP_ADDRESSES,
-    RTP_SYMBOLS,
     SLIDING_WINDOW,
     LayerType,
     arg_sizes,
 )
 from iron.operators.flm.layer.op import DecodeLayer
 from iron.operators.flm.layer.reference import generate_inputs
-
-GEOMETRIES = (FLM_GEMMA4_E2B_DECODE, FLM_GEMMA4_E4B_DECODE)
-
-
-def _check_rtps(artifacts, geometry):
-    """Assert that aiecc placed each RTP buffer of every build in `artifacts`
-    at its RTP_ADDRESSES address.
-    """
-    want = {RTP_SYMBOLS[k]: RTP_ADDRESSES[geometry][k] for k in RTP_SYMBOLS}
-    for entry in {artifacts.designs[0].entry.directory, artifacts.entry.directory}:
-        text = (entry / "input_with_addresses.mlir").read_text()
-        placed = {
-            m[2]: int(m[1])
-            for m in re.finditer(
-                r'\{address = (\d+) : i32[^}]*sym_name = "(RTP_[A-Za-z_0-9]+)"', text
-            )
-        }
-        assert {sym: placed.get(sym) for sym in want} == want
-
 
 # The largest relative L2 errors of x and of the new K and V rows.
 #
@@ -81,7 +60,7 @@ def _layer(geometry, layer_type):
     the engine does: one xclbin serves all four layer types.
     """
     op = DecodeLayer(geometry=geometry, layer_type=layer_type)
-    _check_rtps(op.compile(), geometry)
+    op.compile()
     return op
 
 

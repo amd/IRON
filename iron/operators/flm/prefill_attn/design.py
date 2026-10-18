@@ -84,9 +84,8 @@ class Variant:
     name: str
     factory: Callable[..., ExternalFunction]
     num_cu: int  # column groups, one query head each per pass
-    # The buffer addresses of the FastFlowLM overlay. The stack occupies the
-    # addresses from 0 to in_1, the lowest buffer.
-    l1: dict
+    # Core stack bytes: the FastFlowLM overlay's, which ends at its lowest buffer.
+    stack_size: int
     # The memtile that splits the q fifos of column pair p.
     q_memtile: Callable[[int], int]
     # The memtile that stages k and v.
@@ -101,17 +100,7 @@ CAUSAL = Variant(
     name="causal",
     factory=flm_gemma4.flm_gemma4_attn_prefill,
     num_cu=2,
-    l1={
-        "in_0": 49152,
-        "in_1": 3072,
-        "s": 57344,
-        "m": 11392,
-        "y": 32768,
-        "L_begin": 59520,
-        "L_end": 11520,
-        "window_size": 59552,
-        "n_rounds": 11552,
-    },
+    stack_size=3072,
     q_memtile=lambda p: 2 * p + p % 2,
     kv_memtile=2,
     windowed=False,
@@ -122,18 +111,7 @@ SLIDING = Variant(
     name="sliding",
     factory=flm_gemma4.flm_gemma4_swa_prefill,
     num_cu=4,
-    l1={
-        "L_begin": 61568,
-        "L_end": 11904,
-        "window_size": 61600,
-        "in_0": 49152,
-        "in_1": 3712,
-        "s": 57344,
-        "m": 61760,
-        "y": 32768,
-        "l_bf16": 61440,
-        "n_rounds": 11936,
-    },
+    stack_size=3712,
     q_memtile=lambda p: 2 * p,
     kv_memtile=3,
     windowed=True,
@@ -547,24 +525,24 @@ def prefill_attn(
                 return Buffer(type=ty, name=f"{key}_{name}", tile=tile, **kw)
 
             rtp[(tile.row, tile.col)] = [
-                buf(L_ty, f"{key}_attn_core", use_write_rtp=True, address=v.l1[key])
+                buf(L_ty, f"{key}_attn_core", use_write_rtp=True)
                 for key in ("L_begin", "L_end", "window_size")
             ]
-            in_0 = buf(in_ty, "in_0", address=v.l1["in_0"])
-            in_1 = buf(in_ty, "in_1", address=v.l1["in_1"])
+            in_0 = buf(in_ty, "in_0")
+            in_1 = buf(in_ty, "in_1")
             core_bufs = [
                 in_0,
                 in_1,
-                buf(s_ty, "s", address=v.l1["s"]),
-                buf(m_ty, "m", address=v.l1["m"]),
-                buf(y_ty, "y", address=v.l1["y"]),
-                buf(l_bf16_ty, "l_bf16", address=v.l1.get("l_bf16")),
+                buf(s_ty, "s"),
+                buf(m_ty, "m"),
+                buf(y_ty, "y"),
+                buf(l_bf16_ty, "l_bf16"),
                 buf(mv_ty, "prev_m"),
                 buf(mv_ty, "new_m"),
                 buf(cv_ty, "c"),
                 buf(cv_ty, "l"),
             ]
-            n_rounds = buf(L_ty, "n_rounds", address=v.l1["n_rounds"])
+            n_rounds = buf(L_ty, "n_rounds")
             n_blocks = buf(L_ty, "n_blocks")
             in_prod = Lock(tile=tile, lock_id=IN_PROD_LOCK, init=2)
             in_cons = Lock(tile=tile, lock_id=IN_CONS_LOCK, init=0)
@@ -593,7 +571,7 @@ def prefill_attn(
                     ],
                     tile=tile,
                     while_true=True,
-                    stack_size=v.l1["in_1"],
+                    stack_size=v.stack_size,
                 )
             )
             # k and v share S2MM channel 1; q takes channel 0.

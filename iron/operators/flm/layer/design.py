@@ -21,7 +21,7 @@ from typing import NamedTuple
 import numpy as np
 from aie.dialects import arith
 from aie.dialects.aie import DMAChannelDir
-from aie.dialects.aiex import _as_i32, npu_write32
+from aie.dialects.aiex import _as_i32
 from aie.extras.dialects.arith import constant
 from aie.helpers.npdtypes import np_ndarray_type_get_shape
 from aie.helpers.taplib import TensorAccessPattern
@@ -82,55 +82,8 @@ MAX_CONTEXT = 32768
 # a mask, and the attention memtile takes the cache in buffers of LK rows.
 SLIDING_WINDOW = 512
 
-# The L1 address of each RTP, per geometry, from FastFlowLM's address book. The
-# runtime sequence writes the RTPs at these addresses.
-#
-# The allocator places four unpinned RTP buffers at other addresses. The
-# sequence's writes then land in other buffers.
-#
-# The design pins every RTP buffer at its address.
-RTP_ADDRESSES = {
-    FLM_GEMMA4_E2B_DECODE: {
-        "l_qk": 57344,
-        "l_kv": 14976,
-        "swa_l_qk": 9216,
-        "swa_l_kv": 40960,
-        "proj_swa": 33280,
-        "proj_skip": 49664,
-        "rms_swa": 52224,
-        "rms_skip": 25600,
-        "rope_skip_kv": 33792,
-        "swa_rope_skip_kv": 33280,
-        "glu_skip": 34816,
-    },
-    FLM_GEMMA4_E4B_DECODE: {
-        "l_qk": 57344,
-        "l_kv": 14976,
-        "swa_l_qk": 53248,
-        "swa_l_kv": 57664,
-        "proj_swa": 33280,
-        "proj_skip": 49664,
-        "rms_swa": 55328,
-        "rms_skip": 55392,
-        "rope_skip_kv": 34816,
-        "swa_rope_skip_kv": 33792,
-        "glu_skip": 30720,
-    },
-}
-
-# The symbol of each RTP buffer, by RTP_ADDRESSES key. proj_swa and proj_skip
-# have one symbol per projection core.
-RTP_SYMBOLS = {
-    "rms_swa": "RTP_RMS_IS_SWA_BUFFER",
-    "rms_skip": "RTP_RMS_SKIP_BUFFER",
-    "rope_skip_kv": "RTP_RoPE_SKIP_KV_4_3",
-    "swa_rope_skip_kv": "RTP_SWA_RoPE_SKIP_KV_5_3",
-    "glu_skip": "RTP_GLU_IS_SKIP_3_3",
-    "l_qk": "RTP_L_attn_qk_core_2_2",
-    "l_kv": "RTP_L_attn_kv_core_3_2",
-    "swa_l_qk": "RTP_L_swa_attn_qk_core_4_2",
-    "swa_l_kv": "RTP_L_swa_attn_kv_core_5_2",
-}
+# The geometries the FLM decode kernels are built for.
+GEOMETRIES = (FLM_GEMMA4_E2B_DECODE, FLM_GEMMA4_E4B_DECODE)
 
 # One q4nx block in bf16 elements, the unit the weight buffers are typed in.
 W_BLOCK = q4nx.BLOCK_BYTES // 2
@@ -261,13 +214,6 @@ ATTN_KV_LOCKS = dict(
     l_cons_lock=ATTN_HANDSHAKE_LOCK,
 )
 ATTN_QK_LOCKS = dict(k_prod_lock=(2, 2), k_cons_lock=(3, 0))
-
-# The RMS, GLU and projection cores acquire this lock before they read their
-# RTPs. The sequence sets it after it writes them. The RoPE and attention
-# cores read their RTPs after data from the projection cores arrives.
-RTP_SYNC_LOCK = PROJ_LOCKS["rtp_available_lock"][0]
-assert RTP_SYNC_LOCK == RMS_LOCKS["rtp_available_lock"][0] == GLU_LOCKS["rtp_lock"][0]
-RTP_SYNC_LOCK_ADDR = 0x1F000 + 16 * RTP_SYNC_LOCK
 
 
 class _ShimPkt(IntEnum):
@@ -494,15 +440,20 @@ class _Array:
     cores, locks and DMA channels to ``rt`` and ``workers``.
 
     ``grid`` holds every tile by (column, row), ``t`` the tile of each
-    PLACEMENT stage.
+    PLACEMENT stage. ``rtps`` holds each RTP buffer by (key, column, row).
+    The RMS, GLU and projection cores acquire their ``sync_locks`` entry
+    before they read their RTPs; the sequence sets it after it writes them.
+    The RoPE and attention cores read their RTPs after data from the
+    projection cores arrives.
     """
 
     dev: InitVar[Device]
     rt: Runtime
     g: FlmGemma4DecodeGeometry
-    rtp: dict[str, int]
     kernels: dict[str, ExternalFunction]
     workers: list[Worker] = field(default_factory=list, init=False)
+    rtps: dict[tuple[str, int, int], Buffer] = field(default_factory=dict, init=False)
+    sync_locks: dict[tuple[int, int], Lock] = field(default_factory=dict, init=False)
     grid: dict[tuple[int, int], Tile] = field(init=False)
     t: dict[str, Tile] = field(init=False)
 
@@ -569,15 +520,16 @@ class _Array:
         """The entry point ``symbol`` of the kernel ``name``, typed by its factory."""
         return getattr(self.kernels[name], symbol)
 
-    def rtp_buffer(self, tile: Tile, key: str, name: str | None = None) -> Buffer:
-        """The RTP buffer of RTP_ADDRESSES key ``key``, pinned at its address."""
-        return Buffer(
+    def rtp_buffer(self, tile: Tile, key: str) -> Buffer:
+        """The RTP buffer ``key`` of ``tile``, which the sequence writes."""
+        buf = Buffer(
             type=_RTP_TY,
-            name=name or RTP_SYMBOLS[key],
+            name=f"rtp_{key}_{tile.col}_{tile.row}",
             tile=tile,
             use_write_rtp=True,
-            address=self.rtp[key],
         )
+        self.rtps[key, tile.col, tile.row] = buf
+        return buf
 
     def add_locks(self, tile: Tile, ids_inits) -> list[Lock]:
         """The tile's locks, one per (lock id, init) pair."""
@@ -618,6 +570,7 @@ class _Array:
         rms_is_swa = self.rtp_buffer(rms_tile, "rms_swa")
         rms_skip = self.rtp_buffer(rms_tile, "rms_skip")
         rl = self.locks(rms_tile, RMS_LOCKS)
+        self.sync_locks[rms_tile.col, rms_tile.row] = rl["rtp_available_lock"]
         self.core(
             rms_tile,
             _call_kernel,
@@ -885,6 +838,7 @@ class _Array:
         glu_hid = Buffer(type=glu_hid_ty, name=f"hid_0_{glu_name}", tile=glu_tile)
         glu_is_skip = self.rtp_buffer(glu_tile, "glu_skip")
         ll = self.locks(glu_tile, GLU_LOCKS)
+        self.sync_locks[glu_tile.col, glu_tile.row] = ll["rtp_lock"]
         self.core(
             glu_tile,
             _call_kernel,
@@ -925,8 +879,8 @@ class _Array:
         """
         r, c = pt.row, pt.col
         y_ty, w_ty, x_ty = kern.arg_types()[:3]
-        is_swa = self.rtp_buffer(pt, "proj_swa", f"RTP_PROJ_IS_SWA_BUFFER_{r}_{c}")
-        skip_kv = self.rtp_buffer(pt, "proj_skip", f"RTP_PROJ_SKIP_KV_BUFFER_{r}_{c}")
+        is_swa = self.rtp_buffer(pt, "proj_swa")
+        skip_kv = self.rtp_buffer(pt, "proj_skip")
         x0 = Buffer(type=x_ty, name=f"x_0_{r}_{c}", tile=pt)
         w0 = Buffer(type=w_ty, name=f"w_0_{r}_{c}", tile=pt)
         x1 = Buffer(type=x_ty, name=f"x_1_{r}_{c}", tile=pt)
@@ -937,6 +891,7 @@ class _Array:
         else:
             y0, y1 = main_y0, main_y1
         pk = self.locks(pt, PROJ_LOCKS)
+        self.sync_locks[c, r] = pk["rtp_available_lock"]
 
         def proj_body(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, kern):
             kern(yy0, ww0, xx0, yy1, ww1, xx1, sw, sk, constant(int(send_x_out)))
@@ -1375,7 +1330,8 @@ def _min_const(v, bound):
 
 def _sequence(
     g,
-    rtp,
+    rtps,
+    sync_locks,
     layer_type,
     shim,
     x_arg,
@@ -1407,26 +1363,25 @@ def _sequence(
 
     for c in PROJ_COLS:
         for r in (2, 3, 4, 5):
-            npu_write32(rtp["proj_swa"], int(dims.swa), column=c, row=r)
-            npu_write32(rtp["proj_skip"], int(dims.skip), column=c, row=r)
-            npu_write32(RTP_SYNC_LOCK_ADDR, 1, column=c, row=r)
+            rtps["proj_swa", c, r][0] = int(dims.swa)
+            rtps["proj_skip", c, r][0] = int(dims.skip)
+            sync_locks[c, r].set(1)
 
-    def write(stage, addr, value):
-        col, row = PLACEMENT[stage]
-        npu_write32(addr, value, column=col, row=row)
+    def write(stage, key, value):
+        rtps[(key, *PLACEMENT[stage])][0] = value
 
     L_local = _min_const(L, SW) if dims.swa else L
-    write("attn_qk", rtp["l_qk"], L_local)
-    write("attn_kv", rtp["l_kv"], L_local)
-    write("swa_attn_qk", rtp["swa_l_qk"], L_local)
-    write("swa_attn_kv", rtp["swa_l_kv"], L_local)
-    write("rms", rtp["rms_swa"], int(dims.swa))
-    write("rms", rtp["rms_skip"], int(dims.skip))
-    write("rope", rtp["rope_skip_kv"], int(dims.skip))
-    write("swa_rope", rtp["swa_rope_skip_kv"], int(dims.skip))
-    write("glu", rtp["glu_skip"], int(dims.skip and g.double_wide_mlp))
-    write("rms", RTP_SYNC_LOCK_ADDR, 1)
-    write("glu", RTP_SYNC_LOCK_ADDR, 1)
+    write("attn_qk", "l_qk", L_local)
+    write("attn_kv", "l_kv", L_local)
+    write("swa_attn_qk", "swa_l_qk", L_local)
+    write("swa_attn_kv", "swa_l_kv", L_local)
+    write("rms", "rms_swa", int(dims.swa))
+    write("rms", "rms_skip", int(dims.skip))
+    write("rope", "rope_skip_kv", int(dims.skip))
+    write("swa_rope", "swa_rope_skip_kv", int(dims.skip))
+    write("glu", "glu_skip", int(dims.skip and g.double_wide_mlp))
+    sync_locks[PLACEMENT["rms"]].set(1)
+    sync_locks[PLACEMENT["glu"]].set(1)
 
     # The sequence keeps two rounds of legs in flight, as the engine's
     # bd_offset double buffer does. A shim tile has 16 BDs.
@@ -1591,7 +1546,6 @@ def _proj_weight_buffers(mt):
 def decode_layer(
     dev,
     geometry,
-    rtp,
     layer_type,
     *,
     kernels,
@@ -1600,17 +1554,16 @@ def decode_layer(
 ):
     """The MLIR module of one decode layer of ``layer_type`` for ``geometry``.
 
-    ``rtp`` maps each RTP_ADDRESSES key to the address that the engine writes.
     ``layer_type`` sets the runtime sequence only. ``kernels`` holds
     layer_kernels(geometry). README.md gives the meaning of the dispatch
     parameters ``context_len`` and ``max_l``.
     """
     g = geometry
     sizes = arg_sizes(g)
-    # The array's flows fill this in before the sequence body runs.
-    shim = {}
+    # The array fills these in before the sequence body runs.
+    shim, rtps, sync_locks = {}, {}, {}
     rt = Runtime(
-        partial(_sequence, g, rtp, layer_type, shim),
+        partial(_sequence, g, rtps, sync_locks, layer_type, shim),
         [
             np.ndarray[(sizes["x"],), _BF16],
             np.ndarray[(sizes["proj"],), _BF16],
@@ -1621,6 +1574,8 @@ def decode_layer(
             max_l,
         ],
     )
-    array = _Array(dev, rt, g, rtp, kernels)
+    array = _Array(dev, rt, g, kernels)
     shim.update(array.build())
+    rtps.update(array.rtps)
+    sync_locks.update(array.sync_locks)
     return Program(dev, rt, workers=array.workers).resolve_program()

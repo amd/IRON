@@ -13,7 +13,7 @@ from ml_dtypes import bfloat16
 from iron.common import Operator, Unresolvable, field
 from iron.operators.flm.layer import reference
 from iron.operators.flm.layer.design import (
-    RTP_ADDRESSES,
+    GEOMETRIES,
     LayerDims,
     LayerType,
     arg_sizes,
@@ -56,7 +56,7 @@ class DecodeLayer(Operator):
     max_l: DispatchTime[np.int32] = field(init=False)
 
     def validate(self) -> None:
-        if self.geometry not in RTP_ADDRESSES:
+        if self.geometry not in GEOMETRIES:
             raise ValueError(
                 f"DecodeLayer: geometry ({self.geometry!r}) must be "
                 "aie.iron.kernels.FLM_GEMMA4_E2B_DECODE or FLM_GEMMA4_E4B_DECODE"
@@ -90,7 +90,6 @@ class DecodeLayer(Operator):
             decode_layer,
             self.dev,
             self.geometry,
-            RTP_ADDRESSES[self.geometry],
             self.layer_type,
             kernels=layer_kernels(self.geometry),
         )
